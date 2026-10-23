@@ -3,7 +3,7 @@
  *
  * 兩個來源，都只讀：
  * 1. **上游分診**（`/api/release-triage`，SPEC §18.2c）：帳本早就逐條分析過 claude／codex 每一版，這裡把
- *    `(from, to]` 區間內每一版的提防／採用／值得早升與提案 issue 攤出來。帳本沒有這一版就寫「尚未分析」。
+ *    `(from, to]` 區間內每一版的提防／採用／值得早升與提案 issue 攤出來。帳本沒有這一版就寫「尚未分析」（agy、grok 同 claude／codex，#1928）。
  * 2. **AGM 解析**（`/api/claude-update/review?kind=`）：使用者按「請 AGM 解析」派出去的那一筆，三種狀態：
  *    還沒派、派了還沒結論、有結論（**直接把結論印在框裡**）。
  * 兩邊都沒東西時整塊寫「尚未分析」，指向框底的「請 AGM 解析」。
@@ -13,7 +13,6 @@ import * as api from '../api'
 import type { UpdateReview } from '../api/types'
 import { anyAnalysed, triageForRange, type TriageItem, type TriageVersion } from '../lib/releaseTriage'
 import { scheduleReviewRefresh } from '../lib/reviewRefresh'
-import { hasNoAnalysisNote } from '../lib/upstreamRange'
 import { useStore } from '../store/store'
 import './agmReviewBox.css'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -85,17 +84,6 @@ export function AgmReviewBox({
   }
 
   const cur = loaded?.key === key ? loaded : null
-  if (cur && !cur.review && !cur.triage && hasNoAnalysisNote(kind)) {
-    return (
-      <section className="agm-review" aria-label={`${kind} 新版分析`}>
-        <div className="agm-review-head">
-          <strong>分析</strong>
-          <span className="agm-review-who">{kind}</span>
-        </div>
-        <p className="agm-review-none">這個版本沒有分析。</p>
-      </section>
-    )
-  }
   if (!cur || (!cur.review && !cur.triage)) return null
   const { review, triage } = cur
   const analysed = (triage ? anyAnalysed(triage) : false) || (review !== null && review.state !== 'none')
@@ -109,9 +97,7 @@ export function AgmReviewBox({
         </span>
       </div>
       {!analysed ? (
-        <p className="agm-review-none">
-          {hasNoAnalysisNote(kind) ? '尚未分析。' : '尚未分析——按下方「請 AGM 解析」，結論會回到這裡。'}
-        </p>
+        <p className="agm-review-none">尚未分析——按下方「請 AGM 解析」，結論會回到這裡。</p>
       ) : null}
       {triage && triage.some((v) => v.state !== 'missing') ? (
         <div className="triage">

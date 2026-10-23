@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GrokUpdateChip } from './GrokUpdateChip.tsx'
 import { grokChipLabel } from '../lib/grokUpdate.ts'
+import { useReviewAsk } from '../hooks/useReviewAsk.ts'
 
 test('grok 都追上了（沒有快照）就不畫', () => {
   assert.equal(renderToStaticMarkup(<GrokUpdateChip />), '')
@@ -14,4 +15,13 @@ test('tooltip 寫新版、落後主機與指令；只提示、不說「安裝並
   assert.match(t, /local：1\.0\.46；m4p：讀不到版本/)
   assert.match(t, /`grok update`/)
   assert.doesNotMatch(t, /安裝並重啟/)
+})
+
+test('「請 AGM 解析」：有新版才能按；沒有 plan（to＝null）時停用，不會 POST（#1928）', () => {
+  function Probe({ to }: { to: string | null }) {
+    const { dialog } = useReviewAsk('grok', 'local', null, to)
+    return <button disabled={dialog.secondaryDisabled}>{dialog.secondaryLabel}</button>
+  }
+  assert.equal(renderToStaticMarkup(<Probe to="1.0.67" />), '<button>請 AGM 解析</button>')
+  assert.equal(renderToStaticMarkup(<Probe to={null} />), '<button disabled="">請 AGM 解析</button>')
 })

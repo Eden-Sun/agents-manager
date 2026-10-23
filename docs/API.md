@@ -1283,7 +1283,7 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 codex 走**同一套**派工對象、冪等與結論回填，差別只在：讀 codex 的 releases、任務檔是 `codex-release-task.md`、
 識別碼前綴 `agm-codex-release-…`，以及**沒給 `to` 時的新版**——claude 是磁碟上那一版（自動更新已下載好），
 codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` 帳本裡最新的正式版，帳本空才退回磁碟。
-agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任務檔是 `agy-release-task.md`／`grok-release-task.md`，識別碼 `agm-agy-release-…`／`agm-grok-release-…`，只走 bot（沒有 API 快速解析）。
+agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任務檔是 `agy-release-task.md`／`grok-release-task.md`（「用得上」的標準取自這個檔），識別碼 `agm-agy-release-…`／`agm-grok-release-…`；兩層開關與 key 都在時走 Claude API 快速解析（`changelog_review`，只有 POST 才會打，`GET` 開框只讀；同一個 kind＋版本沿用 `changelog-review/<kind>-<版>.json`，不再打），否則派 bot。
 網頁一律把版本帶上（codex 從 `update_notice` 讀）。更新框另外讀 `GET /api/release-triage?kind=` 顯示該區間已分診的結論（SPEC §18.2c）。
 
 **herdr（`kind=herdr`，2026-10-01 一鍵更新）**：讀 herdr 的 CHANGELOG（`/api/changelog?kind=herdr`）；沒有任務檔，正文開頭是

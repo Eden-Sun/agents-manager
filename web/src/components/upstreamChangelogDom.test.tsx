@@ -1,11 +1,12 @@
 /**
  * agy、grok 更新框的 changelog 與分析（#1930）。真的掛進 happy-dom：upstream 快照走真的 `parseUpstreamItem`，
- * 後端是模擬的 `/api/changelog`（還沒認得 agy／grok 時回 `found:false`＋claude 的連結）與 400 的 review／triage。
- * claude 同樣讀不到分析時整塊不畫，維持原樣。
+ * 後端是模擬的 `/api/changelog`（還沒認得 agy／grok 時回 `found:false`＋claude 的連結）；review／triage 預設 400（舊 daemon）。
+ * 分析區跟 claude／codex／herdr 一樣：兩邊都讀不到整塊不畫；讀得到但沒分析寫「尚未分析——按下方「請 AGM 解析」」，
+ * 確認框底有「請 AGM 解析」，只有按下去才會 POST（開框只讀，#1928）。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { setupDom, teardownDom, unmountAll, mount, until } from '../testing/domHarness'
+import { setupDom, teardownDom, unmountAll, mount, click, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import { parseUpstreamItem } from '../store/upstreamUpdate'
 import { AgyUpdateChip } from './AgyUpdateChip'
@@ -26,19 +27,38 @@ const control = { open: true, close: () => {} }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
-/** 只有 `/changelog` 有東西可回；review／triage 一律 400（後端還不收這個 kind），翻譯沒開。 */
-function backend(changelog: unknown): string[] {
+/** 收到的非 GET 請求（方法與路徑）：開框只讀，按「請 AGM 解析」才會有 POST。 */
+let writes: { method: string; path: string; body: Record<string, unknown> }[] = []
+
+/**
+ * 只有 `/changelog` 有東西可回；翻譯沒開。`reviewable=false`（預設）：review／triage 一律 400（舊 daemon 不收這個 kind）；
+ * `true`：帳本讀得到但是空的（沒分析過），review 讀得到、POST 派得出去。
+ */
+function backend(changelog: unknown, reviewable = false): string[] {
   const seen: string[] = []
-  globalThis.fetch = (async (input: string) => {
+  writes = []
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const path = String(input)
+    const method = init?.method ?? 'GET'
     seen.push(path)
+    if (method !== 'GET') writes.push({ method, path, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     if (path.includes('/changelog/translation')) return json({ enabled: false, status: 'unconfigured', error: null, summary: [], sections: [] })
     if (path.includes('/changelog?')) return json(changelog)
-    if (path.includes('/claude-update/review') || path.includes('/release-triage')) return json({ error: 'kind 不支援' }, 400)
+    if (path.includes('/claude-update/review')) {
+      if (!reviewable) return json({ error: 'kind 不支援' }, 400)
+      return method === 'GET'
+        ? json({ kind: 'agy', version: '1.4.6', review: { state: 'none' } })
+        : json({ kind: 'agy', version: '1.4.6', target_bot_name: 'AGM-responder', duplicate: false, review: { state: 'pending' } })
+    }
+    if (path.includes('/release-triage')) return reviewable ? json({ publish_enabled: false, repo: '', rows: [] }) : json({ error: 'kind 不支援' }, 400)
     return json({})
   }) as unknown as typeof fetch
   return seen
 }
+
+const written = () => writes
+const idle = (ms = 150) => new Promise((r) => setTimeout(r, ms))
+const reviewBtn = () => [...document.body.querySelectorAll('button')].find((b) => b.textContent?.includes('請 AGM 解析'))
 
 const notFound = (kind: string) => ({
   kind,
@@ -64,12 +84,15 @@ function setUpstream(kind: 'agy' | 'grok', target: string, hosts: [string, strin
 
 const changelogQuery = (seen: string[]) => new URL(seen.find((p) => p.includes('/changelog?'))!, 'http://local').searchParams
 
-test('agy：後端回 found:false 時寫「找不到這一版的更新說明」＋官方連結（不是 claude 的），分析區寫沒有分析', async () => {
+test('agy：後端回 found:false 時寫「找不到這一版的更新說明」＋官方連結（不是 claude 的）；分析兩邊都讀不到就不畫、但有「請 AGM 解析」', async () => {
   const seen = backend(notFound('agy'))
   setUpstream('agy', '1.4.6', [['local', '1.4.5']])
   const root = await mount(<AgyUpdateChip control={control} />)
   await until(() => document.body.textContent?.includes('找不到這一版的更新說明') === true, '找不到')
-  await until(() => document.body.textContent?.includes('這個版本沒有分析') === true, '沒有分析')
+  await idle()
+  assert.equal(document.body.querySelector('.agm-review'), null, '同 claude：讀不到分析整塊不畫')
+  assert.ok(reviewBtn(), '確認框有「請 AGM 解析」')
+  assert.deepEqual(written(), [], '開框只讀，不能 POST')
   const hrefs = [...document.body.querySelectorAll('a')].map((a) => a.getAttribute('href'))
   assert.ok(hrefs.includes(AGY_RAW), String(hrefs))
   assert.ok(hrefs.includes(AGY_RELEASES), '備援連結')
@@ -119,7 +142,9 @@ test('grok：連結指到這一版那份 CDN 檔，不是 claude 的', async () 
   setUpstream('grok', '1.0.67', [['local', '1.0.66']])
   await mount(<GrokUpdateChip control={control} />)
   await until(() => document.body.textContent?.includes('找不到這一版的更新說明') === true, '找不到')
-  await until(() => document.body.textContent?.includes('這個版本沒有分析') === true, '沒有分析')
+  await idle()
+  assert.equal(document.body.querySelector('.agm-review'), null)
+  assert.ok(reviewBtn(), 'grok 確認框也有「請 AGM 解析」')
   const hrefs = [...document.body.querySelectorAll('a')].map((a) => a.getAttribute('href'))
   assert.ok(hrefs.includes('https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/1.0.67.external.md'), String(hrefs))
   assert.equal(changelogQuery(seen).get('kind'), 'grok')
@@ -134,17 +159,43 @@ test('claude 兩路都讀不到分析：整塊不畫，維持原樣', async () =
   assert.equal(root.textContent?.includes('這個版本沒有分析'), false)
 })
 
-test('codex、herdr 也維持原樣；只有 agy、grok 寫沒有分析', async () => {
+test('claude、codex、herdr、agy、grok 兩路都讀不到分析：一律整塊不畫（agy、grok 不再有專屬的「沒有分析」）', async () => {
   backend({})
-  for (const kind of ['codex', 'herdr']) {
+  for (const kind of ['claude', 'codex', 'herdr', 'agy', 'grok']) {
     const root = await mount(<AgmReviewBox kind={kind} host="local" from="0.1.0" to="0.2.0" refreshKey={0} />)
-    await new Promise((r) => setTimeout(r, 100))
+    await idle(100)
     assert.equal(root.querySelector('.agm-review'), null, kind)
+    assert.equal(root.textContent?.includes('沒有分析'), false, kind)
     await unmountAll()
   }
-  const root = await mount(<AgmReviewBox kind="agy" host="local" from="1.4.5" to="1.4.6" refreshKey={0} />)
-  await until(() => root.querySelector('.agm-review') !== null, 'agy 有說明')
-  assert.match(root.textContent ?? '', /這個版本沒有分析/)
+})
+
+test('讀得到但沒分析過：五個 kind 同一句「尚未分析——按下方「請 AGM 解析」，結論會回到這裡。」', async () => {
+  backend({}, true)
+  const want = '尚未分析——按下方「請 AGM 解析」，結論會回到這裡。'
+  for (const kind of ['claude', 'codex', 'herdr', 'agy', 'grok']) {
+    const root = await mount(<AgmReviewBox kind={kind} host="local" from="1.4.5" to="1.4.6" refreshKey={0} />)
+    await until(() => root.querySelector('.agm-review-none') !== null, `${kind} 尚未分析`)
+    assert.equal(root.querySelector('.agm-review-none')?.textContent, want, kind)
+    await unmountAll()
+  }
+})
+
+test('agy：只有按「請 AGM 解析」才 POST（kind、from、to 帶對），派出去後分析區重讀；開框不 POST', async () => {
+  const seen = backend({ ...notFound('agy'), found: false }, true)
+  setUpstream('agy', '1.4.6', [['local', '1.4.5']])
+  await mount(<AgyUpdateChip control={control} />)
+  await until(() => document.body.querySelector('.agm-review-none') !== null, '尚未分析')
+  assert.deepEqual(written(), [], '開框只讀')
+  const reviewReads = () => seen.filter((p) => p.includes('/claude-update/review')).length
+  const before = reviewReads()
+  await click(reviewBtn()!)
+  await until(() => written().length === 1, 'POST')
+  assert.equal(written()[0].method, 'POST')
+  assert.match(written()[0].path, /\/claude-update\/review$/)
+  assert.deepEqual({ kind: written()[0].body.kind, from: written()[0].body.from, to: written()[0].body.to }, { kind: 'agy', from: '1.4.5', to: '1.4.6' })
+  await until(() => reviewReads() > before + 1, '派出去後分析區重讀（refreshKey）')
+  assert.equal(written().length, 1, '只 POST 一次')
 })
 
 // 區間起點的判斷（純函式，跟 DOM 測試同一檔，避免多一個測試檔就把 shard 切點挪走）。

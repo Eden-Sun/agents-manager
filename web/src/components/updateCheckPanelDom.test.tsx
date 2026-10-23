@@ -156,7 +156,15 @@ it('agy 落後官方 manifest（#1908）：「更新」先問、確認後才送 
   assert.equal(post().length, 0, '還沒確認，不能送')
   const dialog = document.querySelector('[role="alertdialog"]')!
   assert.match(dialog.textContent ?? '', /sha512.*不跑官方 install\.sh.*agy update/)
-  await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '更新')!)
+  // 「請 AGM 解析」（#1928）：開框不 POST，按下去才 POST 一次（kind、from、to 帶對），不會順手安裝。
+  const reviewPost = () => requests.filter((r) => r.method === 'POST' && /\/claude-update\/review$/.test(r.path))
+  assert.equal(reviewPost().length, 0, '開框只讀')
+  await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '請 AGM 解析')!)
+  await until(() => reviewPost().length === 1, '請 AGM 解析的 POST')
+  assert.deepEqual({ kind: (reviewPost()[0].body as Record<string, unknown>).kind, from: (reviewPost()[0].body as Record<string, unknown>).from, to: (reviewPost()[0].body as Record<string, unknown>).to }, { kind: 'agy', from: '1.4.2', to: '1.4.5' })
+  assert.equal(post().length, 0, '解析不等於安裝')
+  await new Promise((r) => setTimeout(r, 900)) // 確認框的連點保護（800ms）：真人不會在同一瞬間按兩顆
+  await click([...document.querySelector('[role="alertdialog"]')!.querySelectorAll('button')].find((b) => b.textContent === '更新')!)
   await until(() => post().length === 1, '送了 POST')
   assert.match(post()[0].path, /\/hosts\/local\/agy\/install$/)
 })

@@ -4565,7 +4565,7 @@ claude、codex、agy、grok **每出一個新版**，自動把那一版的 chang
 - **去重**：帳本 `(kind, version)` 為主鍵，同一個 stable 只分診一次。stable 檔涵蓋的每一版各一列；錯過一個 stable 時中間缺的版本只記 log（`warn_grok_gap`），不補抓。
 - **規則**（`rules.toml` 的 `agy`／`grok`）只放能明確對應到我們模組的類別：`hook`、畫面判讀（`tui`）、`quota`、resume／fork（`session`）、`subagent`；沒有任何 drop 規則，其餘一律 `unmatched`（照樣送模型），先看 unmatched 比例再補規則。
 - **通知與交辦**：通知 request-id 同其他 kind（`agm-release-triage-<kind>-<新版號>-notice`）；kick 的 `for KIND` 迴圈、`release-issue-<編號>`、`upstream:<kind>` 標籤（`upstream:agy`、`upstream:grok` 要先建好）全部照舊。claude 專屬的 binary diff 不套用。
-  「請 AGM 解析」（§18.5a）也收 `agy`／`grok`：任務檔 `agy-release-task.md`／`grok-release-task.md`，只走 bot。
+  「請 AGM 解析」（§18.5a）也收 `agy`／`grok`：任務檔 `agy-release-task.md`／`grok-release-task.md`；Claude API 快速解析（`changelog_review`）同樣適用，「用得上」的標準取自任務檔、不另寫一份。agy、grok 的更新確認框（header 兩顆 chip、設定頁「更新檢查」的 agy 框）有「請 AGM 解析」鈕，開框只讀、按下去才會 POST 與花 API。
 
 **網頁看得到帳本**（issue #561）：更新確認框（單顆徽章與額度列的批次框）的「分析」區塊讀 `GET /api/release-triage?kind=`，
 把 `(跑著的版本, 新版]` 區間內每一版的結論攤開——提防／採用（已寫成提案的條目只列提案標題與 issue 連結，不逐條重複）、

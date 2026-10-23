@@ -3,6 +3,7 @@ import { useStore } from '../store/store'
 import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { agyChipLabel, agyUpdateTitle } from '../lib/agyUpdate'
 import { changelogRange } from '../lib/upstreamRange'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { AgyUpdateBody } from './AgyUpdateConfirm'
@@ -21,9 +22,10 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const open = control ? control.open : localOpen
   const setOpen = (v: boolean) => (control && !v ? control.close() : setLocalOpen(v))
+  const range = changelogRange(plan?.hosts ?? [])
+  const review = useReviewAsk('agy', range.host, range.from, plan?.target ?? null)
   if (!plan) return null
   const label = busy ? 'agy 更新中…' : agyChipLabel(plan)
-  const range = changelogRange(plan.hosts)
   return (
     <>
       {control ? null : (
@@ -43,10 +45,11 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
         open={open}
         title={agyUpdateTitle(plan.target)}
         confirmLabel="更新"
+        {...review.dialog}
         width={420}
         body={
           <>
-            {open ? <UpstreamChangelogBox kind="agy" host={range.host} from={range.from} to={plan.target} /> : null}
+            {open ? <UpstreamChangelogBox kind="agy" host={range.host} from={range.from} to={plan.target} refreshKey={review.reviewKey} /> : null}
             {plan.hosts.map((h) => (
               <p key={h.host}>
                 <AgyUpdateBody host={h.host} current={h.from} target={plan.target} />
