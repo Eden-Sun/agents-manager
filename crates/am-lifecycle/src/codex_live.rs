@@ -148,17 +148,33 @@ fn effort_follow<'a>(seen: Option<&'a str>, prev: Option<&str>) -> crate::child_
 
 // A failed/cancelled edge is still an attempt: replaying it could erase a newer UI intent.
 const FAST_FOLLOW_LIMIT: usize = 1024;
+/// 共用清理 task 的巡查間隔、每批 `IN (…)` 帶幾個 run id、表滿 WARN 的最短間隔（同一個 process）。
+const SWEEP_EVERY: Duration = Duration::from_secs(30);
+const SWEEP_BATCH: usize = 500;
+const FULL_WARN_EVERY: Duration = Duration::from_secs(3600);
 struct FastFollowEdge {
     attempted: bool,
     /// DB runtime at the last observation/commit, distinct from an uncommitted attempt.
     runtime: bool,
     warned: bool,
 }
-#[derive(Default)]
-struct FastFollowEdges(std::collections::HashMap<String, FastFollowEdge>);
+/// `attempt` 的結果：是否跟隨、是否由這次呼叫負責起共用清理 task、是否因為表滿被擋下。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Outcome { follow: bool, start_sweeper: bool, full: bool }
+struct FastFollowEdges {
+    map: std::collections::HashMap<String, FastFollowEdge>,
+    limit: usize,
+    /// 共用清理 task 是否已經（或正要）在跑。只在這把鎖裡改：插入 edge 時「false → true 並起 task」、
+    /// task 結束時「表是空的 → false」，兩邊在同一把鎖內，所以表非空時一定有 task 在跑。
+    sweeper: bool,
+    last_full_warn: Option<std::time::Instant>,
+}
+impl Default for FastFollowEdges {
+    fn default() -> Self { Self { map: Default::default(), limit: FAST_FOLLOW_LIMIT, sweeper: false, last_full_warn: None } }
+}
 impl FastFollowEdges {
     fn observe_runtime(&mut self, run: &str, runtime: bool, matches_screen: bool) {
-        if let Some(edge) = self.0.get_mut(run) {
+        if let Some(edge) = self.map.get_mut(run) {
             // A live apply can advance runtime without this observer. A matching screen also
             // establishes the current edge; an unchanged DB after a failed attempt does not.
             if matches_screen || edge.runtime != runtime {
@@ -167,38 +183,96 @@ impl FastFollowEdges {
             }
         }
     }
-    fn attempt(&mut self, run: &str, fast: bool, runtime: bool) -> (bool, bool) {
+    fn attempt(&mut self, run: &str, fast: bool, runtime: bool) -> Outcome {
         self.observe_runtime(run, runtime, false);
-        if let Some(edge) = self.0.get_mut(run) {
-            if edge.attempted == fast { return (false, false); }
+        if let Some(edge) = self.map.get_mut(run) {
+            if edge.attempted == fast { return Outcome::default(); }
             edge.attempted = fast;
-            return (true, false);
+            return Outcome { follow: true, ..Outcome::default() };
         }
         // No eviction of active edges: at capacity preserve settings rather than replay them.
-        if self.0.len() >= FAST_FOLLOW_LIMIT { return (false, false); }
-        self.0.insert(run.to_string(), FastFollowEdge { attempted: fast, runtime, warned: false });
-        (true, true)
+        // The caller sweeps ended runs (without holding this lock) and tries once more.
+        if self.map.len() >= self.limit { return Outcome { full: true, ..Outcome::default() }; }
+        self.map.insert(run.to_string(), FastFollowEdge { attempted: fast, runtime, warned: false });
+        Outcome { follow: true, start_sweeper: !std::mem::replace(&mut self.sweeper, true), full: false }
+    }
+    /// 清理 task 巡完一輪後呼叫：表空了就把旗標清掉（回 `true`＝task 該結束）；不空就繼續。
+    fn finish_sweeper_if_empty(&mut self) -> bool {
+        if !self.map.is_empty() { return false; }
+        self.sweeper = false;
+        true
+    }
+    /// 表滿而且清完還是滿：同一個 process 每小時最多 WARN 一次。
+    fn should_warn_full(&mut self, now: std::time::Instant) -> bool {
+        if self.last_full_warn.is_some_and(|at| now.saturating_duration_since(at) < FULL_WARN_EVERY) { return false; }
+        self.last_full_warn = Some(now);
+        true
     }
 }
-fn fast_follow_edges() -> &'static std::sync::Mutex<FastFollowEdges> {
+type SharedEdges = &'static std::sync::Mutex<FastFollowEdges>;
+#[cfg(not(test))]
+fn fast_follow_edges() -> SharedEdges {
     static EDGES: std::sync::OnceLock<std::sync::Mutex<FastFollowEdges>> = std::sync::OnceLock::new();
     EDGES.get_or_init(Default::default)
 }
-async fn clear_finished_fast_edge(pool: &sqlx::SqlitePool, run: &str) -> bool {
-    let active: Result<i64, _> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs WHERE id=? AND state IN ('starting','running','stopping'))")
-        .bind(run).fetch_one(pool).await;
-    if matches!(active, Ok(0)) {
-        fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).0.remove(run);
-        return true;
-    }
-    false
+/// 測試同一個 process 裡每個測試各有自己的 DB（和 current-thread runtime）：共用一張表的話，一個測試的清理會把別的測試
+/// 的 edge 當成「run 不存在」清掉。所以測試時每條執行緒一張表。
+#[cfg(test)]
+fn fast_follow_edges() -> SharedEdges {
+    thread_local! { static EDGES: SharedEdges = Box::leak(Box::default()); }
+    EDGES.with(|edges| *edges)
 }
-struct FastFollowAttempt { run: String, committed: bool }
+fn lock_edges(edges: SharedEdges) -> std::sync::MutexGuard<'static, FastFollowEdges> {
+    edges.lock().unwrap_or_else(|e| e.into_inner())
+}
+/// 把已結束（或不存在）的 run 的 edge 移掉，回傳移掉幾筆。查詢分批（[`SWEEP_BATCH`]），每批 await 前後各拿一次鎖，
+/// 不會拿著 std Mutex 過 await；查詢失敗的那批保留（不確定就不清）。
+async fn sweep_finished_fast_edges(edges: SharedEdges, pool: &sqlx::SqlitePool) -> usize {
+    let ids: Vec<String> = lock_edges(edges).map.keys().cloned().collect();
+    let mut removed = 0;
+    for chunk in ids.chunks(SWEEP_BATCH) {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM runs WHERE state IN ('starting','running','stopping') AND id IN (");
+        {
+            let mut list = query.separated(", ");
+            for id in chunk { list.push_bind(id.as_str()); }
+            list.push_unseparated(")");
+        }
+        let Ok(active) = query.build_query_scalar::<String>().fetch_all(pool).await else { continue };
+        let active: std::collections::HashSet<String> = active.into_iter().collect();
+        let mut guard = lock_edges(edges);
+        for id in chunk {
+            if !active.contains(id) && guard.map.remove(id).is_some() { removed += 1; }
+        }
+    }
+    removed
+}
+/// 共用清理 task 被丟掉（runtime 關閉）而沒有正常結束時，把旗標還回去，下一個 edge 才起得了新的。
+struct SweeperGuard { edges: SharedEdges, done: bool }
+impl Drop for SweeperGuard {
+    fn drop(&mut self) {
+        if !self.done { lock_edges(self.edges).sweeper = false; }
+    }
+}
+/// 整個 process 只有一個：每 [`SWEEP_EVERY`] 清一次已結束的 run，表空了才結束（旗標的清除與「表是空的」同一把鎖）。
+fn spawn_sweeper(edges: SharedEdges, pool: sqlx::SqlitePool) {
+    tokio::spawn(Box::pin(async move {
+        let mut guard = SweeperGuard { edges, done: false };
+        loop {
+            tokio::time::sleep(SWEEP_EVERY).await;
+            sweep_finished_fast_edges(edges, &pool).await;
+            if lock_edges(edges).finish_sweeper_if_empty() {
+                guard.done = true;
+                break;
+            }
+        }
+    }));
+}
+struct FastFollowAttempt { edges: SharedEdges, run: String, committed: bool }
 impl Drop for FastFollowAttempt {
     fn drop(&mut self) {
         if self.committed { return; }
-        let mut edges = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(edge) = edges.0.get_mut(&self.run) {
+        let mut edges = lock_edges(self.edges);
+        if let Some(edge) = edges.map.get_mut(&self.run) {
             if !edge.warned {
                 edge.warned = true;
                 tracing::warn!(run = %self.run, "child fast settings were not synchronized; this edge will not be replayed; check the UI before the next start");
@@ -206,19 +280,26 @@ impl Drop for FastFollowAttempt {
         }
     }
 }
-fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool, runtime: bool) -> Option<FastFollowAttempt> {
-    let (attempt, new) = fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner()).attempt(run, fast, runtime);
-    if new {
-        let (pool, run) = (pool.clone(), run.to_string());
-        // One bounded cleanup task per retained run; ended runs disappear even without another poll.
-        tokio::spawn(Box::pin(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                if clear_finished_fast_edge(&pool, &run).await { break; }
-            }
-        }));
+async fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool, runtime: bool) -> Option<FastFollowAttempt> {
+    attempt_fast_follow_in(fast_follow_edges(), pool, run, fast, runtime).await
+}
+async fn attempt_fast_follow_in(edges: SharedEdges, pool: &sqlx::SqlitePool, run: &str, fast: bool, runtime: bool) -> Option<FastFollowAttempt> {
+    let mut outcome = lock_edges(edges).attempt(run, fast, runtime);
+    if outcome.full {
+        // 表滿：先清掉已結束的 run 再試一次（鎖在 await 之前放掉）；仍然滿才放棄，WARN 節流。
+        sweep_finished_fast_edges(edges, pool).await;
+        let warn;
+        {
+            let mut guard = lock_edges(edges);
+            outcome = guard.attempt(run, fast, runtime);
+            warn = outcome.full && guard.should_warn_full(std::time::Instant::now());
+        }
+        if warn {
+            tracing::warn!(limit = FAST_FOLLOW_LIMIT, run, "fast follow edge table is full of active runs; child fast settings are not synchronized for new runs");
+        }
     }
-    attempt.then(|| FastFollowAttempt { run: run.to_string(), committed: false })
+    if outcome.start_sweeper { spawn_sweeper(edges, pool.clone()); }
+    outcome.follow.then(|| FastFollowAttempt { edges, run: run.to_string(), committed: false })
 }
 
 /// 以畫面上的狀態列校正 `runs.runtime_*`（SPEC §4.4a）。回傳 `true` = 有改動。
@@ -246,7 +327,7 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
         Err(_) => return false,
     };
     let fast_edge = bot.managed_by == "child" && run.runtime_fast.is_some_and(|prev| prev != i64::from(seen.fast));
-    let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast, run.runtime_fast.unwrap_or(0) != 0) } else { None };
+    let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast, run.runtime_fast.unwrap_or(0) != 0).await } else { None };
     // 設定與 runtime 原子提交；失敗或取消一起 rollback，但嘗試記錄保留。
     let Ok(mut tx) = app.db().begin().await else { return false };
     let model = Some(seen.model.as_str()).filter(|_| run.runtime_model.as_deref() != Some(seen.model.as_str()));
@@ -1187,7 +1268,7 @@ mod tests {
         assert_eq!(model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("low"));
         assert_eq!(fast, 1, "沒有 fast edge 就不寫 fast");
-        assert!(super::fast_follow_edges().lock().unwrap().0.get(&run).is_none(), "沒有 edge 就不登記");
+        assert!(super::fast_follow_edges().lock().unwrap().map.get(&run).is_none(), "沒有 edge 就不登記");
     }
 
     /// 第一次嘗試成功的 fast edge：model 與 fast 在同一個交易一起提交。
@@ -1211,20 +1292,161 @@ mod tests {
         assert_eq!(fast_of(&env, &run).await, Some(0));
     }
 
+    fn go(follow: bool, start_sweeper: bool) -> super::Outcome {
+        super::Outcome { follow, start_sweeper, full: false }
+    }
+
     #[test]
     fn fast_follow_edges_keep_only_the_latest_edge_and_do_not_evict_active_runs_at_capacity() {
         let mut edges = super::FastFollowEdges::default();
-        assert_eq!(edges.attempt("one", false, true), (true, true));
-        assert_eq!(edges.attempt("one", false, true), (false, false));
-        assert_eq!(edges.attempt("one", true, true), (true, false));
-        assert_eq!(edges.attempt("one", false, true), (true, false));
-        assert_eq!(edges.0.len(), 1);
+        assert_eq!(edges.attempt("one", false, true), go(true, true));
+        assert_eq!(edges.attempt("one", false, true), super::Outcome::default());
+        assert_eq!(edges.attempt("one", true, true), go(true, false));
+        assert_eq!(edges.attempt("one", false, true), go(true, false));
+        assert_eq!(edges.map.len(), 1);
         for i in 1..super::FAST_FOLLOW_LIMIT {
-            assert_eq!(edges.attempt(&format!("run-{i}"), false, true), (true, true));
+            assert_eq!(edges.attempt(&format!("run-{i}"), false, true), go(true, false), "只有第一個 edge 負責起清理 task");
         }
-        assert_eq!(edges.attempt("overflow", true, false), (false, false));
-        assert_eq!(edges.0.len(), super::FAST_FOLLOW_LIMIT);
-        assert_eq!(edges.attempt("one", false, true), (false, false), "active edge must remain protected");
+        assert_eq!(edges.attempt("overflow", true, false), super::Outcome { full: true, ..Default::default() });
+        assert_eq!(edges.map.len(), super::FAST_FOLLOW_LIMIT);
+        assert_eq!(edges.attempt("one", false, true), super::Outcome::default(), "active edge must remain protected");
+    }
+
+    /// 表非空就一定有清理 task：task 結束（表空、旗標清掉）與插入新 edge 兩種順序都要成立。
+    #[test]
+    fn a_new_edge_never_lands_in_the_gap_after_the_sweeper_decides_to_end() {
+        // 順序一：task 先結束，之後插入 → 新 edge 自己起新的 task。
+        let mut edges = super::FastFollowEdges::default();
+        assert!(edges.attempt("a", true, false).start_sweeper);
+        edges.map.remove("a");
+        assert!(edges.finish_sweeper_if_empty(), "表空了，task 結束");
+        assert!(edges.attempt("b", true, false).start_sweeper, "旗標已清掉，新 edge 要起新的 task");
+        assert!(edges.sweeper);
+        // 順序二：新 edge 先插進來，task 才檢查 → 表不空，task 不結束，也不重複起。
+        let mut edges = super::FastFollowEdges::default();
+        assert!(edges.attempt("a", true, false).start_sweeper);
+        edges.map.remove("a");
+        assert!(!edges.attempt("b", true, false).start_sweeper, "旗標還在，task 還活著");
+        assert!(!edges.finish_sweeper_if_empty(), "表不空，task 不能結束");
+        assert!(edges.sweeper);
+    }
+
+    /// 兩條執行緒搶同一把鎖：一條不斷插新 edge，一條扮演清理 task（移掉全部、檢查、結束）。
+    /// 任何時刻清理 task 數 ≤ 1，結束時表非空就必須有一個還在跑。
+    #[test]
+    fn concurrent_inserts_and_sweeper_exits_never_leave_edges_without_a_sweeper() {
+        use std::sync::atomic::{AtomicIsize, Ordering};
+        for round in 0..200 {
+            let edges = std::sync::Arc::new(std::sync::Mutex::new(super::FastFollowEdges::default()));
+            let running = std::sync::Arc::new(AtomicIsize::new(0));
+            let max_running = std::sync::Arc::new(AtomicIsize::new(0));
+            let inserter = {
+                let (edges, running, max_running) = (edges.clone(), running.clone(), max_running.clone());
+                std::thread::spawn(move || {
+                    for i in 0..50 {
+                        // 計數與鎖內的狀態變化一起做（這個計數只是測試的記帳，不是被測的同步）。
+                        let mut guard = edges.lock().unwrap();
+                        if guard.attempt(&format!("r{round}-{i}"), true, false).start_sweeper {
+                            max_running.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        }
+                        drop(guard);
+                        std::thread::yield_now();
+                    }
+                })
+            };
+            let sweeper = {
+                let (edges, running) = (edges.clone(), running.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..200 {
+                        let mut guard = edges.lock().unwrap();
+                        // 有清理 task 在跑（旗標為 true）才會醒來巡一輪；沒有就沒有人做這件事。
+                        if guard.sweeper {
+                            guard.map.clear();
+                            if guard.finish_sweeper_if_empty() {
+                                running.fetch_sub(1, Ordering::SeqCst);
+                            }
+                        }
+                        drop(guard);
+                        std::thread::yield_now();
+                    }
+                })
+            };
+            inserter.join().unwrap();
+            sweeper.join().unwrap();
+            let guard = edges.lock().unwrap();
+            assert!(max_running.load(Ordering::SeqCst) <= 1, "同時最多一個清理 task");
+            assert_eq!(guard.sweeper, running.load(Ordering::SeqCst) == 1, "旗標與實際在跑的 task 數一致");
+            assert!(guard.map.is_empty() || guard.sweeper, "表非空就必須有清理 task");
+        }
+    }
+
+    #[test]
+    fn the_table_full_warning_is_throttled_to_once_an_hour() {
+        let mut edges = super::FastFollowEdges::default();
+        let t0 = std::time::Instant::now();
+        assert!(edges.should_warn_full(t0));
+        assert!(!edges.should_warn_full(t0 + std::time::Duration::from_secs(3599)));
+        assert!(edges.should_warn_full(t0 + std::time::Duration::from_secs(3600)));
+    }
+
+    /// 本機的一張小表（上限 `limit`），測試不碰全域的那張。
+    fn small_table(limit: usize) -> super::SharedEdges {
+        Box::leak(Box::new(std::sync::Mutex::new(super::FastFollowEdges { limit, ..Default::default() })))
+    }
+
+    async fn active_run(env: &crate::testing::Env, name: &str) -> String {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        crate::testing::fake_run(&env.app, &bot.id).await
+    }
+
+    fn put(edges: super::SharedEdges, run: &str) {
+        assert!(super::lock_edges(edges).attempt(run, true, false).follow);
+    }
+
+    /// 清理一次：已結束／不存在的 run 的 edge 移掉，仍在跑的留著；超過一批（500）的表也要全部巡到。
+    #[tokio::test]
+    async fn one_sweep_drops_ended_runs_in_every_batch_and_keeps_active_ones() {
+        let env = crate::testing::env().await;
+        let edges = small_table(10_000);
+        let (a, b) = (active_run(&env, "a").await, active_run(&env, "b").await);
+        let ended = active_run(&env, "ended").await;
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&ended).execute(&env.app.db).await.unwrap();
+        for run in [&a, &b, &ended] { put(edges, run); }
+        let phantoms: Vec<String> = (0..3 * super::SWEEP_BATCH + 7).map(|i| format!("gone-{i}")).collect();
+        for run in &phantoms { put(edges, run); }
+
+        let removed = super::sweep_finished_fast_edges(edges, &env.app.db).await;
+        assert_eq!(removed, phantoms.len() + 1);
+        let left: std::collections::BTreeSet<String> = super::lock_edges(edges).map.keys().cloned().collect();
+        assert_eq!(left, [a, b].into_iter().collect(), "只剩仍在跑的 run");
+    }
+
+    /// #1898：表滿時先清掉已結束的 run 再試，新的 run 進得來；清完還是滿才擋下。
+    #[tokio::test]
+    async fn a_full_table_makes_room_by_sweeping_ended_runs_but_never_evicts_active_ones() {
+        let env = crate::testing::env().await;
+        let edges = small_table(3);
+        let (a, b) = (active_run(&env, "a").await, active_run(&env, "b").await);
+        put(edges, &a);
+        put(edges, &b);
+        put(edges, "gone-1");
+        assert!(super::lock_edges(edges).sweeper, "第一個 edge 起了清理 task 的旗標");
+
+        let c = active_run(&env, "c").await;
+        let got = super::attempt_fast_follow_in(edges, &env.app.db, &c, true, false).await;
+        assert!(got.is_some(), "表滿但有已結束的 run：清完就進得來");
+        let keys: std::collections::BTreeSet<String> = super::lock_edges(edges).map.keys().cloned().collect();
+        assert_eq!(keys, [a.clone(), b.clone(), c.clone()].into_iter().collect());
+
+        // 三個都還在跑：清完還是滿，第四個被擋下，已有的 edge 一個都不能被擠掉。
+        let d = active_run(&env, "d").await;
+        assert!(super::attempt_fast_follow_in(edges, &env.app.db, &d, true, false).await.is_none());
+        assert_eq!(super::lock_edges(edges).map.len(), 3);
+        assert!(super::lock_edges(edges).last_full_warn.is_some(), "擋下時記了 WARN 的時間");
+        let e = active_run(&env, "e").await;
+        let before = super::lock_edges(edges).last_full_warn;
+        assert!(super::attempt_fast_follow_in(edges, &env.app.db, &e, true, false).await.is_none());
+        assert_eq!(super::lock_edges(edges).last_full_warn, before, "一小時內不再 WARN");
     }
 
     #[tokio::test]
@@ -1244,7 +1466,7 @@ mod tests {
             if matching_poll {
                 let on = ASTRA_HIGH.replace("astra high", "astra high fast");
                 assert!(!correct_runtime_from_screen(&env.app, &run, &on).await, "matching observation emits no change");
-                assert!(super::fast_follow_edges().lock().unwrap().0[&run].attempted);
+                assert!(super::fast_follow_edges().lock().unwrap().map[&run].attempted);
             }
             assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
             assert_eq!(fast_of(&env, &run).await, Some(0));
@@ -1294,8 +1516,8 @@ mod tests {
             assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
             assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
             sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
-            assert!(super::clear_finished_fast_edge(&env.app.db, &run).await);
-            assert!(!super::fast_follow_edges().lock().unwrap().0.contains_key(&run));
+            assert!(super::sweep_finished_fast_edges(super::fast_follow_edges(), &env.app.db).await >= 1);
+            assert!(!super::fast_follow_edges().lock().unwrap().map.contains_key(&run));
         }
     }
 
