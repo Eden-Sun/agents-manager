@@ -12,6 +12,7 @@ import { StatusLamp } from './StatusLamp'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import { KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
 import { CAPACITY_LABEL } from '../lib/modelCapacity'
+import { useT, type TFn } from '../lib/i18n'
 import './chipLegend.css'
 
 /** 晶片列給的這顆 bot 的提示狀態（跟晶片顏色同一份判斷，免得卡片跟顏色講不一樣）。 */
@@ -30,11 +31,11 @@ export interface ChipHints {
 }
 
 /** 先講「該不該去看」，跟晶片的顏色同一個優先序：要你回答 → 模型滿載 → 未讀 → 等子 agent → 在跑。 */
-function headline(h: ChipHints, label: string, blockedReason: string): string {
-  if (h.needsReply) return blockedReason ? `停在等你回答：${blockedReason}` : '停在等你回答'
-  if (h.atCapacity) return `${CAPACITY_LABEL}：這一回合沒跑，換個模型或稍後再送`
-  if (h.unread > 0) return `有 ${h.unread} 個回合做完了還沒看`
-  if (h.waitsKids) return '在等子 agent（或子 agent 回報了還沒人看）'
+function headline(h: ChipHints, label: string, blockedReason: string, t: TFn): string {
+  if (h.needsReply) return blockedReason ? t('停在等你回答：{reason}', { reason: blockedReason }) : t('停在等你回答')
+  if (h.atCapacity) return t('{label}：這一回合沒跑，換個模型或稍後再送', { label: CAPACITY_LABEL })
+  if (h.unread > 0) return t('有 {n} 個回合做完了還沒看', { n: h.unread })
+  if (h.waitsKids) return t('在等子 agent（或子 agent 回報了還沒人看）')
   return label
 }
 
@@ -56,6 +57,7 @@ export function BotStatusCard({
   onClose: () => void
   onLegend: () => void
 }) {
+  const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const run = useStore((s) => s.runs[botId] ?? null)
   const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
@@ -86,47 +88,47 @@ export function BotStatusCard({
   const ctx = contextLabel(status)
 
   const card = (
-    <div ref={cardRef} className="bot-status-card chip-legend" role="dialog" aria-modal={anchor ? undefined : 'true'} aria-label={`${bot.name} 的狀態`} onClick={(e) => e.stopPropagation()}>
+    <div ref={cardRef} className="bot-status-card chip-legend" role="dialog" aria-modal={anchor ? undefined : 'true'} aria-label={t('{name} 的狀態', { name: bot.name })} onClick={(e) => e.stopPropagation()}>
       <div className="chip-legend-head">
         <span className="bot-status-name">
           <StatusLamp lamp={lamp} background={background} kids={kids} />
           <strong>{bot.name}</strong>
         </span>
         {anchor ? null : (
-          <button type="button" className="chip-legend-close" aria-label="關閉" onClick={onClose}>
+          <button type="button" className="chip-legend-close" aria-label={t('關閉')} onClick={onClose}>
             ✕
           </button>
         )}
       </div>
-      <p className="bot-status-headline">{headline(hints, label, blockedReason)}</p>
+      <p className="bot-status-headline">{headline(hints, label, blockedReason, t)}</p>
       <dl className="bot-status-rows">
         {doing ? (
           <>
-            <dt>正在做</dt>
+            <dt>{t('正在做')}</dt>
             <dd>{doing}</dd>
           </>
         ) : null}
         {background > 0 ? (
           <>
-            <dt>背景</dt>
-            <dd>{tasks.length ? tasks.join(' · ') : `${background} 個工作還在跑`}</dd>
+            <dt>{t('背景')}</dt>
+            <dd>{tasks.length ? tasks.join(' · ') : t('{n} 個工作還在跑', { n: background })}</dd>
           </>
         ) : null}
         {hints.kidsRunning > 0 ? (
           <>
-            <dt>子 agent</dt>
-            <dd>{hints.kidsRunning} 個在跑</dd>
+            <dt>{t('子 agent')}</dt>
+            <dd>{t('{n} 個在跑', { n: hints.kidsRunning })}</dd>
           </>
         ) : null}
         {ctx ? (
           <>
             <dt>context</dt>
-            <dd>已用 {ctx}</dd>
+            <dd>{t('已用 {ctx}', { ctx })}</dd>
           </>
         ) : null}
         {model ? (
           <>
-            <dt>模型</dt>
+            <dt>{t('模型')}</dt>
             <dd>
               {model}
               {effort ? ` · ${effortLabel(effort)}` : ''}
@@ -136,13 +138,13 @@ export function BotStatusCard({
         ) : null}
         {hints.cacheTitle ? (
           <>
-            <dt>快取</dt>
+            <dt>{t('快取')}</dt>
             <dd>{hints.cacheTitle}</dd>
           </>
         ) : null}
         {hints.keepWarmReplied ? (
           <>
-            <dt>保溫</dt>
+            <dt>{t('保溫')}</dt>
             <dd>{KEEP_WARM_REPLIED_TEXT}</dd>
           </>
         ) : null}
@@ -150,7 +152,7 @@ export function BotStatusCard({
       {/* 手機的「不用保溫」入口（#1104）：主力才畫，沒有 run 不畫（元件自己判斷）。按了不關卡。 */}
       <KeepWarmSkipButton botId={botId} touch />
       <button type="button" className="bot-status-legend" onClick={onLegend}>
-        顏色代表什麼？
+        {t('顏色代表什麼？')}
       </button>
     </div>
   )

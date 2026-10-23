@@ -6,6 +6,7 @@ import { isImeEnter } from '../lib/ime'
 import { keyBelongsToControl } from '../lib/domEvents'
 import { ApiError, type DirListing } from '../api/types'
 import { newDirNameProblem } from '../lib/newDirName'
+import { useT } from '../lib/i18n'
 import './dirPicker.css'
 
 /**
@@ -31,6 +32,7 @@ export function DirPicker({
   onPick: (path: string) => void
   onCancel: () => void
 }) {
+  const t = useT()
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -103,16 +105,19 @@ export function DirPicker({
   const submitCreate = () => {
     if (!listing || createBusy) return
     // 這一層已經列得到同名的（不分大小寫也提示，macOS／Windows 的檔案系統會撞）：不必等 daemon 回 409。
+    const trimmed = newName.trim()
     const problem =
       newDirNameProblem(newName) ??
-      (listing.entries.some((e) => e.name.toLowerCase() === newName.trim().toLowerCase()) ? `「${newName.trim()}」已經存在，換一個名稱，或直接選那個資料夾` : null)
+      (listing.entries.some((e) => e.name.toLowerCase() === trimmed.toLowerCase())
+        ? t('「{name}」已經存在，換一個名稱，或直接選那個資料夾', { name: trimmed })
+        : null)
     if (problem) {
       setCreateError(problem)
       return
     }
     setCreateBusy(true)
     setCreateError(null)
-    createDir(listing.path, newName.trim(), host)
+    createDir(listing.path, trimmed, host)
       .then((made) => {
         // 建好就是要它：直接當 Project 路徑，不再多走一步。
         onPick(made.path)
@@ -222,23 +227,23 @@ export function DirPicker({
 
   return (
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
-    <div className="dirpicker" role="dialog" aria-label="選擇目錄" onKeyDown={onKeyDown}>
+    <div className="dirpicker" role="dialog" aria-label={t('選擇目錄')} onKeyDown={onKeyDown}>
       {remote ? (
-        <div className="dirpicker-host" title={`透過 ssh 列出 ${remote} 上的目錄（SPEC §11.5）`}>
+        <div className="dirpicker-host" title={t('透過 ssh 列出 {host} 上的目錄（SPEC §11.5）', { host: remote })}>
           <span className="host-badge">@{remote}</span>
-          <span>遠端目錄</span>
+          <span>{t('遠端目錄')}</span>
         </div>
       ) : null}
 
       <div className="dirpicker-top">
-        <button type="button" className="btn icon" aria-label="上一層" title="上一層（←）" disabled={!listing?.parent || busy} onClick={up}>
+        <button type="button" className="btn icon" aria-label={t('上一層')} title={t('上一層（←）')} disabled={!listing?.parent || busy} onClick={up}>
           ↑
         </button>
         <button
           type="button"
           className="btn icon"
-          aria-label="家目錄"
-          title="家目錄"
+          aria-label={t('家目錄')}
+          title={t('家目錄')}
           disabled={busy}
           onClick={() => load(listing?.home || undefined)}
         >
@@ -257,7 +262,7 @@ export function DirPicker({
               type="text"
               value={manual}
               spellCheck={false}
-              placeholder="/path/to/dir 或 ~/dir"
+              placeholder={t('/path/to/dir 或 ~/dir')}
               onChange={(e) => setManual(e.target.value)}
               onBlur={() => {
                 setManual(listing?.path ?? '')
@@ -266,7 +271,7 @@ export function DirPicker({
             />
           </form>
         ) : (
-          <div className="dirpicker-crumbs" role="navigation" aria-label="路徑">
+          <div className="dirpicker-crumbs" role="navigation" aria-label={t('路徑')}>
             {crumbs.map((c, i) => (
               <span key={c.path} className="crumb-wrap">
                 {i > 0 ? <span className="sep">/</span> : null}
@@ -284,8 +289,8 @@ export function DirPicker({
             <button
               type="button"
               className="crumb-edit"
-              aria-label="手動輸入路徑"
-              title="手動輸入路徑"
+              aria-label={t('手動輸入路徑')}
+              title={t('手動輸入路徑')}
               disabled={busy}
               onClick={() => setEditing(true)}
             >
@@ -303,10 +308,10 @@ export function DirPicker({
           value={filter}
           spellCheck={false}
           autoFocus
-          placeholder="篩選這層資料夾…"
+          placeholder={t('篩選這層資料夾…')}
           // 焦點留在這格、↑/↓ 移 highlight，靠 aria-activedescendant 告訴螢幕閱讀器。
           role="combobox"
-          aria-label="篩選這層資料夾"
+          aria-label={t('篩選這層資料夾')}
           aria-expanded={entries.length > 0}
           aria-controls={listId}
           aria-autocomplete="list"
@@ -321,13 +326,13 @@ export function DirPicker({
           type="button"
           className="btn dirpicker-newbtn"
           aria-expanded={creating}
-          title="在這一層建一個新資料夾，建好直接選取"
+          title={t('在這一層建一個新資料夾，建好直接選取')}
           disabled={!listing || busy || creating}
           onClick={() => setCreating(true)}
         >
-          ＋ 新資料夾
+          {t('＋ 新資料夾')}
         </button>
-        <label className="dirpicker-hidden" title="也列出 .開頭 的資料夾">
+        <label className="dirpicker-hidden" title={t('也列出 .開頭 的資料夾')}>
           <input
             type="checkbox"
             checked={hidden}
@@ -337,14 +342,14 @@ export function DirPicker({
               load(listing?.path, { hidden: e.target.checked })
             }}
           />
-          <span>隱藏資料夾</span>
+          <span>{t('隱藏資料夾')}</span>
         </label>
       </div>
 
       {creating ? (
         <form
           className="dirpicker-new"
-          aria-label="新資料夾"
+          aria-label={t('新資料夾')}
           onSubmit={(e) => {
             e.preventDefault()
             submitCreate()
@@ -357,8 +362,8 @@ export function DirPicker({
               value={newName}
               spellCheck={false}
               disabled={createBusy}
-              placeholder="新資料夾名稱"
-              aria-label="新資料夾名稱"
+              placeholder={t('新資料夾名稱')}
+              aria-label={t('新資料夾名稱')}
               aria-invalid={createError ? true : undefined}
               onChange={(e) => {
                 setNewName(e.target.value)
@@ -370,14 +375,14 @@ export function DirPicker({
               }}
             />
             <button type="submit" className="btn primary" disabled={createBusy || !newName.trim()}>
-              {createBusy ? '建立中…' : '建立並選取'}
+              {createBusy ? t('建立中…') : t('建立並選取')}
             </button>
             <button type="button" className="btn" disabled={createBusy} onClick={closeCreate}>
-              取消
+              {t('取消')}
             </button>
           </div>
           <div className="dirpicker-new-hint" title={listing?.path}>
-            建在 {listing?.path}
+            {t('建在 {path}', { path: listing?.path ?? '' })}
           </div>
           {createError ? (
             <div className="dirpicker-empty err" role="alert">
@@ -388,17 +393,17 @@ export function DirPicker({
       ) : null}
 
       {/* option 裡不能有按鈕，› 只是滑鼠捷徑；沒有資料夾時不掛 listbox。 */}
-      <div className="dirpicker-list" ref={listRef} id={listId} role={entries.length > 0 ? 'listbox' : undefined} aria-label="子資料夾">
+      <div className="dirpicker-list" ref={listRef} id={listId} role={entries.length > 0 ? 'listbox' : undefined} aria-label={t('子資料夾')}>
         {error ? <div className="dirpicker-empty err">{error}</div> : null}
-        {!error && busy && !listing ? <div className="dirpicker-empty">載入中…</div> : null}
+        {!error && busy && !listing ? <div className="dirpicker-empty">{t('載入中…')}</div> : null}
         {!error && listing && listing.entries.length === 0 ? (
-          <div className="dirpicker-empty">（沒有子資料夾，可直接選擇這一層）</div>
+          <div className="dirpicker-empty">{t('（沒有子資料夾，可直接選擇這一層）')}</div>
         ) : null}
         {!error && listing?.truncated ? (
-          <div className="dirpicker-empty">這個資料夾的子資料夾太多，只列出前 2000 個；上面的輸入框只過濾這幾個，要找別的請直接貼完整路徑。</div>
+          <div className="dirpicker-empty">{t('這個資料夾的子資料夾太多，只列出前 2000 個；上面的輸入框只過濾這幾個，要找別的請直接貼完整路徑。')}</div>
         ) : null}
         {!error && listing && listing.entries.length > 0 && entries.length === 0 ? (
-          <div className="dirpicker-empty">沒有符合「{filter}」的資料夾</div>
+          <div className="dirpicker-empty">{t('沒有符合「{filter}」的資料夾', { filter })}</div>
         ) : null}
         {entries.map((e, i) => (
           <div
@@ -429,7 +434,7 @@ export function DirPicker({
             </span>
             <span
               className="dirpicker-enter"
-              title={`進入 ${e.name}`}
+              title={t('進入 {name}', { name: e.name })}
               aria-hidden="true"
               onClick={(ev) => {
                 ev.stopPropagation()
@@ -444,15 +449,15 @@ export function DirPicker({
 
       <div className="dirpicker-foot">
         <div className="dirpicker-target">
-          <span className="lbl">選擇</span>
+          <span className="lbl">{t('選擇')}</span>
           <span className="hint dirpicker-cur" title={target}>
             {target}
           </span>
         </div>
-        <div className="dirpicker-keys" id={`${listId}-keys`}>↩ 進入 · ⌘↩ 直接選擇 · ← 上一層 · ↑↓ 移動</div>
+        <div className="dirpicker-keys" id={`${listId}-keys`}>{t('↩ 進入 · ⌘↩ 直接選擇 · ← 上一層 · ↑↓ 移動')}</div>
         <div className="dirpicker-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            取消
+            {t('取消')}
           </button>
           <button
             type="button"
@@ -461,7 +466,7 @@ export function DirPicker({
             title={target}
             onClick={() => onPick(target)}
           >
-            {selected ? `選擇「${short(selected.name)}」` : '選擇這一層'}
+            {selected ? t('選擇「{name}」', { name: short(selected.name) }) : t('選擇這一層')}
           </button>
         </div>
       </div>

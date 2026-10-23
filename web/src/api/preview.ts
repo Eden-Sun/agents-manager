@@ -1,3 +1,4 @@
+import { msg, t, tr } from "../lib/i18n"
 /**
  * 預覽模式的 API（issue #253）：頂層 bot 的專案本機 dev server（vite／Next／…）。
  * 三個端點都回同一個形狀；`GET /api/state` 的 `bot.preview` 只帶 status／port。
@@ -148,7 +149,7 @@ export function previewApiMissing(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 404 || e.status === 405)
 }
 
-export const PREVIEW_API_MISSING = 'daemon 還沒有預覽功能（二進位比前端舊），需要重建＋重啟 daemon。'
+export const PREVIEW_API_MISSING = msg('daemon 還沒有預覽功能（二進位比前端舊），需要重建＋重啟 daemon。')
 
 /** 偵測不到能起的 dev server：v1 叫 `no_vite_config`，v4 擴大後可能改名。 */
 export const NO_DEV_REASONS = new Set(['no_vite_config', 'no_dev_server', 'no_dev_command'])
@@ -165,27 +166,28 @@ export function previewReasonText(reason: string, body: ApiErrorBody = {}): stri
   const num = (k: string) => (typeof body[k] === 'number' ? (body[k] as number) : null)
   const port = num('port')
   const pid = num('pid')
-  const at = port ? `:${port}` : '那個 port'
+  const at = port ? `:${port}` : t('那個 port')
   switch (reason) {
     case 'not_top_level':
-      return '只有頂層 bot 能開預覽。'
+      return t('只有頂層 bot 能開預覽。')
     case 'remote_host': {
-      const host = typeof body.host === 'string' && body.host ? `（這顆 bot 在 ${body.host}）` : ''
-      return `預覽只能開在跑 daemon 的這台機器上${host}。`
+      const host = typeof body.host === 'string' && body.host ? t('（這顆 bot 在 {host}）', { host: body.host }) : ''
+      return t('預覽只能開在跑 daemon 的這台機器上{host}。', { host })
     }
     case 'bot_not_running':
-      return '這顆 bot 沒在跑：dev server 要開在它的 pane 裡，先啟動 bot 再按一次。'
+      return t('這顆 bot 沒在跑：dev server 要開在它的 pane 裡，先啟動 bot 再按一次。')
     case 'stale_selection':
-      return `${at} 已經換成別的行程${pid ? `（pid ${pid}）` : ''}，沒有接上去——清單是稍早抓的。重新整理再挑一次。`
+      const pidStr = pid ? t('（pid {pid}）', { pid }) : ''
+      return t('{at} 已經換成別的行程{pid}，沒有接上去——清單是稍早抓的。重新整理再挑一次。', { at, pid: pidStr })
     case 'not_vite':
-      return `${at} 上已經沒有 dev server 了（多半剛剛關掉）。重新整理清單再挑一次。`
+      return t('{at} 上已經沒有 dev server 了（多半剛剛關掉）。重新整理清單再挑一次。', { at })
     case 'no_free_port':
-      return '預覽保留的那段 port 都被占著，挑不到可用的；關掉幾個 dev server 再試。'
+      return t('預覽保留的那段 port 都被占著，挑不到可用的；關掉幾個 dev server 再試。')
     case 'preview_stop_failed':
-      return '上一顆預覽的 pane 關不掉，所以這次沒有重開。到「終端」看看那個 pane，或稍後再試。'
+      return t('上一顆預覽的 pane 關不掉，所以這次沒有重開。到「終端」看看那個 pane，或稍後再試。')
     default:
       return NO_DEV_REASONS.has(reason)
-        ? '這顆 bot 的目錄裡找不到可以起的 dev server（vite 設定檔或 package.json 的 dev script），AG Man 沒辦法自己起。'
+        ? t('這顆 bot 的目錄裡找不到可以起的 dev server（vite 設定檔或 package.json 的 dev script），AG Man 沒辦法自己起。')
         : null
   }
 }
@@ -255,11 +257,13 @@ const KIND_LABEL: Record<string, string> = {
   rsbuild: 'Rsbuild',
   parcel: 'Parcel',
   angular: 'Angular',
-  unknown: '其他',
+  unknown: msg('其他'),
 }
 
 /** 清單每筆的 kind 標籤；沒見過的名字照原樣首字大寫。 */
 export function kindLabel(kind: string): string {
   const k = kind.trim().toLowerCase()
-  return KIND_LABEL[k] ?? (k ? k[0].toUpperCase() + k.slice(1) : KIND_LABEL.unknown)
+  const raw = KIND_LABEL[k]
+  if (raw) return tr(raw)
+  return k ? k[0].toUpperCase() + k.slice(1) : tr(KIND_LABEL.unknown)
 }

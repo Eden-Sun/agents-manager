@@ -6,6 +6,7 @@ import type { UnownedTag } from '../lib/paneLists'
 import { paneHint, paneLabel } from '../lib/panes'
 import { paneReadOnly } from '../lib/shellAccess'
 import { useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 import './sidebarPanes.css'
 
 /** pane 清單跟專案頁同一份（store），每 30 秒重讀：pane 不是每秒在變的東西，daemon 那邊本來就每輪掃描。 */
@@ -22,10 +23,11 @@ const POLL_MS = 30_000
  * 只列 `project_id` 是這個專案的；對不到專案的在側欄底部（`SidebarUnownedPanes`）。
  */
 export function SidebarPanes({ projectId }: { projectId: string }) {
+  const t = useT()
   const panes = useStore((s) => s.sidePanes[projectId])
   if (!panes || panes.length === 0) return null
   return (
-    <div className="side-panes" role="group" aria-label="這個專案的 shell pane">
+    <div className="side-panes" role="group" aria-label={t('這個專案的 shell pane')}>
       {panes.map((p) => (
         <PaneRow key={`${p.host}:${p.pane_id}`} pane={p} tag={null} />
       ))}
@@ -38,6 +40,7 @@ export function SidebarPanes({ projectId }: { projectId: string }) {
  * 點得進去讓人自己看完決定（SPEC §6.5e）。整個側欄的 pane 輪詢也掛在這裡——它一直都在，不隨專案收合。
  */
 export function SidebarUnownedPanes() {
+  const t = useT()
   const panes = useStore((s) => s.unownedPanes)
   const refresh = useStore((s) => s.refreshPanes)
 
@@ -48,7 +51,7 @@ export function SidebarUnownedPanes() {
 
   if (panes.length === 0) return null
   return (
-    <div className="side-panes unowned" role="group" aria-label="沒有歸屬專案的 pane">
+    <div className="side-panes unowned" role="group" aria-label={t('沒有歸屬專案的 pane')}>
       {unownedRows(panes).map(({ pane, tag }) => (
         <PaneRow key={`${pane.host}:${pane.pane_id}`} pane={pane} tag={tag} />
       ))}
@@ -56,30 +59,33 @@ export function SidebarUnownedPanes() {
   )
 }
 
-const TAG_TEXT: Record<Exclude<UnownedTag, null>, { text: string; title: string }> = {
-  scratch: { text: 'scratch', title: '對不到專案的那顆固定 scratch，不會被自動關' },
-  extra: { text: '多出來的', title: '對不到任何專案、也不是 scratch：閒置太久會被自動關' },
-}
-
 function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
+  const t = useT()
   const viewPane = useStore((s) => s.viewPane)
   const here = useStore((s) => s.shellView?.host === p.host && s.shellView.paneId === p.pane_id)
   const readOnly = paneReadOnly(p)
   const service = p.kind === 'service'
-  const hostNote = p.host !== 'local' ? `（${p.host}）` : ''
+  const hostNote = p.host !== 'local' ? t('（{host}）', { host: p.host }) : ''
+  const tagTitle = tag === 'scratch'
+    ? t('對不到專案的那顆固定 scratch，不會被自動關')
+    : tag === 'extra'
+      ? t('對不到任何專案、也不是 scratch：閒置太久會被自動關')
+      : ''
+  const tagText = tag === 'scratch' ? 'scratch' : tag === 'extra' ? t('多出來的') : ''
+
   return (
     <button
       type="button"
       aria-current={here ? 'true' : undefined}
       className={`side-pane${here ? ' current' : ''}${service ? ' service' : ''}`}
-      title={`${paneHint(p)}${hostNote}${readOnly ? '（開著 port，只能看）' : ''}${tag ? `・${TAG_TEXT[tag].title}` : ''}`}
+      title={`${paneHint(p)}${hostNote}${readOnly ? t('（開著 port，只能看）') : ''}${tagTitle ? ` · ${tagTitle}` : ''}`}
       onClick={() => viewPane(p)}
     >
       <span className="side-pane-icon" aria-hidden="true">
         {service ? '⚙' : '›_'}
       </span>
       <span className="side-pane-label">{paneLabel(p)}</span>
-      {tag ? <span className={`side-pane-tag ${tag}`}>{TAG_TEXT[tag].text}</span> : service ? <span className="side-pane-tag">服務</span> : null}
+      {tag ? <span className={`side-pane-tag ${tag}`}>{tagText}</span> : service ? <span className="side-pane-tag">{t('服務')}</span> : null}
     </button>
   )
 }

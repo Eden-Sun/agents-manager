@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import { humanBytes } from './memFormat'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPaneModal } from './MemPaneModal'
+import { useT, type TFn } from '../lib/i18n'
 import './memPopover.css'
 
 /**
@@ -19,23 +20,24 @@ import './memPopover.css'
 const REFRESH_MS = 15_000
 const LOAD_TIMEOUT_MS = 15_000
 
-function ownerLabel(p: MemProcess): string {
+function ownerLabel(p: MemProcess, t: TFn): string {
   if (p.owner === 'bot') return p.bot_name ?? `bot ${p.bot_id ?? ''}`.trim()
-  if (p.owner === 'pane') return `自己開的 pane ${p.pane_id ?? ''}`.trim()
+  if (p.owner === 'pane') return t('自己開的 pane {id}', { id: p.pane_id ?? '' }).trim()
   if (p.owner === 'herdr') return 'herdr'
   return '?'
 }
 
 /** 一列的動作按鈕：bot 走「停止 bot」，其餘 TERM → 「強制」。 */
 export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: () => void }) {
+  const t = useT()
   const stopBot = useStore((s) => s.stopBot)
   const [busy, setBusy] = useState(false)
   const [armed, setArmed] = useState(false)
   const [stopArmed, setStopArmed] = useState(false)
   useEffect(() => {
     if (!stopArmed) return
-    const t = setTimeout(() => setStopArmed(false), 3000)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => setStopArmed(false), 3000)
+    return () => clearTimeout(timer)
   }, [stopArmed])
   const [err, setErr] = useState<string | null>(null)
 
@@ -48,12 +50,12 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
         onDone()
       } catch (e) {
         // daemon 的訊息照著顯示，不在前端另編一套。
-        setErr(e instanceof Error ? e.message : '失敗')
+        setErr(e instanceof Error ? e.message : t('失敗'))
       } finally {
         setBusy(false)
       }
     },
-    [onDone],
+    [onDone, t],
   )
 
   if (p.owner === 'bot') {
@@ -74,9 +76,9 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
             setStopArmed(false)
             void run(() => stopBot(id))
           }}
-          title={stopArmed ? '再按一次才真的停止（會中斷它正在跑的回合）' : '走正規的停止流程，daemon 會收掉這個 run；要按兩下確認'}
+          title={stopArmed ? t('再按一次才真的停止（會中斷它正在跑的回合）') : t('走正規的停止流程，daemon 會收掉這個 run；要按兩下確認')}
         >
-          {stopArmed ? '再按一次確定停止' : '停止 bot'}
+          {stopArmed ? t('再按一次確定停止') : t('停止 bot')}
         </button>
         {err ? <span className="mem-pop-err" role="alert">{err}</span> : null}
       </div>
@@ -89,7 +91,7 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
         type="button"
         className={armed ? 'danger' : ''}
         disabled={busy}
-        title={armed ? 'SIGKILL：立刻結束，還沒存的東西會一起沒了' : 'SIGTERM：讓它自己收尾'}
+        title={armed ? t('SIGKILL：立刻結束，還沒存的東西會一起沒了') : t('SIGTERM：讓它自己收尾')}
         onClick={() =>
           void run(async () => {
             await killMemProcess(host, p.pid, armed ? 'KILL' : 'TERM')
@@ -98,7 +100,7 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
           })
         }
       >
-        {armed ? '強制' : '結束'}
+        {armed ? t('強制') : t('結束')}
       </button>
       {err ? <span className="mem-pop-err" role="alert">{err}</span> : null}
     </div>
@@ -107,6 +109,7 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
 
 /** 點得開的 RAM 徽章。 */
 export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; children: React.ReactNode }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<MemProcesses | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -125,7 +128,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     const mine = ++gen.current
     inflight.current += 1
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(new DOMException('記憶體行程清單讀取逾時', 'TimeoutError')), LOAD_TIMEOUT_MS)
+    const timeout = setTimeout(() => controller.abort(new DOMException(t('記憶體行程清單讀取逾時'), 'TimeoutError')), LOAD_TIMEOUT_MS)
     setLoading(true)
     try {
       const d = await fetchMemProcesses(host, controller.signal)
@@ -133,13 +136,13 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
       setData(d)
       setErr(null)
     } catch (e) {
-      if (mine === gen.current) setErr(e instanceof Error ? e.message : '讀不到')
+      if (mine === gen.current) setErr(e instanceof Error ? e.message : t('讀不到'))
     } finally {
       clearTimeout(timeout)
       inflight.current -= 1
       if (mine === gen.current) setLoading(false)
     }
-  }, [host])
+  }, [host, t])
 
   // 關著就不抓：每次是一趟 `ps`（遠端還要 ssh）；第一筆由點開的 `onClick` 抓。
   // 上一趟回來才排下一趟（不疊）；分頁在背景不抓，回前景立刻補一次（#1347，同 useTerminalSnapshot）。
@@ -202,10 +205,10 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node
+      const trgt = e.target as Node
       // pane 視窗是 portal 到 body 的，不在 `wrap` 裡；點它不算「點到外面」。
-      if ((t as Element).closest?.('.mem-pane-backdrop')) return
-      if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return
+      if ((trgt as Element).closest?.('.mem-pane-backdrop')) return
+      if (btnRef.current?.contains(trgt) || popRef.current?.contains(trgt)) return
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
@@ -219,7 +222,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     }
   }, [open])
 
-  const title = host === LOCAL_HOST ? '本機' : host
+  const title = host === LOCAL_HOST ? t('本機') : host
   const rows = data?.processes ?? []
   // 點「自己開的 pane」開的那個視窗（`MemPaneModal`）；清單留在後面不關。
   const [peek, setPeek] = useState<MemProcess | null>(null)
@@ -229,42 +232,50 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
           ref={popRef}
           className="mem-pop"
           role="dialog"
-          aria-label={`${title} 的記憶體明細`}
+          aria-label={t('{title} 的記憶體明細', { title })}
           style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden', left: 0, top: 0 }}
         >
           <div className="mem-pop-head">
             <span className="mem-pop-title">
-              {title} RAM {humanBytes(row?.total_bytes ?? 0)} · herdr {humanBytes(row?.herdr_bytes ?? 0)} · {row?.processes ?? 0} 個 process
+              {title} RAM {humanBytes(row?.total_bytes ?? 0)} · herdr {humanBytes(row?.herdr_bytes ?? 0)} · {t('{n} 個 process', { n: row?.processes ?? 0 })}
             </span>
             <button type="button" className="mem-pop-refresh" disabled={loading} onClick={() => void load()}>
-              重新整理
+              {t('重新整理')}
             </button>
           </div>
           {row?.machine ? (
             <p className={`mem-pop-machine${row.machine.available_bytes / row.machine.total_bytes < 0.15 ? ' low' : ''}`}>
-              這台機器 剩 <strong>{humanBytes(row.machine.available_bytes)}</strong> / 共 {humanBytes(row.machine.total_bytes)}
+              {t.x('這台機器 剩 {free} / 共 {total}', {
+                free: <strong>{humanBytes(row.machine.available_bytes)}</strong>,
+                total: humanBytes(row.machine.total_bytes),
+              })}
               <span className="mem-pop-machine-used">
-                （已用 {humanBytes(row.machine.total_bytes - row.machine.available_bytes)}，其中 herdr 樹 {humanBytes(row.total_bytes)}）
+                {t('（已用 {used}，其中 herdr 樹 {tree}）', {
+                  used: humanBytes(row.machine.total_bytes - row.machine.available_bytes),
+                  tree: humanBytes(row.total_bytes),
+                })}
               </span>
             </p>
           ) : null}
           {row?.browsers.length ? (
             <p className={`mem-pop-browsers${tabsTotal(row.browsers) >= TABS_WARN ? ' hot' : ''}`}>
-              瀏覽器 {browsersLine(row.browsers)}
-              {tabsTotal(row.browsers) >= TABS_WARN ? `——超過 ${TABS_WARN} 個分頁，RAM 多半是它們吃的，關一些。` : '（不算在上面的 RAM 裡）'}
+              {t('瀏覽器 {info}', { info: browsersLine(row.browsers) })}
+              {tabsTotal(row.browsers) >= TABS_WARN
+                ? t('——超過 {warn} 個分頁，RAM 多半是它們吃的，關一些。', { warn: TABS_WARN })
+                : t('（不算在上面的 RAM 裡）')}
             </p>
           ) : null}
           {err ? <p className="mem-pop-err" role="alert">{err}</p> : null}
           {!err && rows.length === 0 ? (
-            <p className="mem-pop-empty">{loading ? '取樣中…' : '沒有程序。'}</p>
+            <p className="mem-pop-empty">{loading ? t('取樣中…') : t('沒有程序。')}</p>
           ) : null}
           {rows.length > 0 ? (
             <table className="mem-pop-table">
               <thead>
                 <tr>
-                  <th>大小</th>
-                  <th>程式</th>
-                  <th>誰的</th>
+                  <th>{t('大小')}</th>
+                  <th>{t('程式')}</th>
+                  <th>{t('誰的')}</th>
                   <th />
                 </tr>
               </thead>
@@ -273,7 +284,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
                   const canPeek = p.owner !== 'bot' && !!p.pane_id
                   return (
                     <tr key={p.pid} className={p.owner === 'bot' ? 'is-bot' : ''}>
-                      <td className="mem-pop-size" title={`自己 ${humanBytes(p.rss_bytes)}，連同 ${p.children} 個子程序`}>
+                      <td className="mem-pop-size" title={t('自己 {self}，連同 {children} 個子程序', { self: humanBytes(p.rss_bytes), children: p.children })}>
                         {humanBytes(p.subtree_bytes)}
                       </td>
                       <td className="mem-pop-argv" title={p.argv}>
@@ -281,12 +292,12 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
                       </td>
                       <td className="mem-pop-owner">
                         {canPeek ? (
-                          <button type="button" className="mem-pop-peek" title="開一個視窗看這個 pane 現在的畫面" onClick={() => setPeek(p)}>
-                            {ownerLabel(p)}
+                          <button type="button" className="mem-pop-peek" title={t('開一個視窗看這個 pane 現在的畫面')} onClick={() => setPeek(p)}>
+                            {ownerLabel(p, t)}
                             <span className="mem-pop-caret" aria-hidden="true">↗</span>
                           </button>
                         ) : (
-                          ownerLabel(p)
+                          ownerLabel(p, t)
                         )}
                       </td>
                       <td>
@@ -298,28 +309,30 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               </tbody>
             </table>
           ) : null}
-          <p className="mem-pop-foot">結束的是那個 pane 裡的程序，pane 本身還在。</p>
+          <div className="mem-pop-foot">
+            <span className="hint">{t('結束的是那個 pane 裡的程序，pane 本身還在。')}</span>
+          </div>
         </div>
-  ) : null
+      ) : null
 
   return (
-    <div className="mem-wrap" ref={wrap}>
+    <div ref={wrap} className="mem-wrap">
       <button
         ref={btnRef}
         type="button"
         className="mem-open"
-        aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label={`${title} 的記憶體明細`}
+        aria-expanded={open}
+        aria-label={t('{title} 的記憶體明細', { title })}
         onClick={() => {
-          setOpen((v) => !v)
           if (!open) void load()
+          setOpen(!open)
         }}
       >
         {children}
       </button>
       {pop ? createPortal(pop, document.body) : null}
-      {open && peek ? <MemPaneModal host={host} p={peek} onClose={() => setPeek(null)} /> : null}
+      {peek ? <MemPaneModal host={host} p={peek} onClose={() => setPeek(null)} /> : null}
     </div>
   )
 }

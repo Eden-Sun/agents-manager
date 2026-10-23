@@ -13,10 +13,12 @@ import {
   setMobilePreviewOpen,
   useMobilePreviewOpen,
 } from '../store/mobilePreview'
+import { useT } from '../lib/i18n'
 import './mobilePreview.css'
 
 /** 右欄標題列上的手機預覽開關（圖片暫存那一列，⤢ 收合鍵左邊）。 */
 export function MobilePreviewButton() {
+  const t = useT()
   const open = useMobilePreviewOpen()
   const drawer = useMediaQuery(DRAWER_QUERY)
   // 預覽裡那份 app 不再長出巢狀預覽；視窗已經窄到手機／平板版面時，預覽本來就不會顯示。
@@ -26,8 +28,8 @@ export function MobilePreviewButton() {
       type="button"
       className={`icon-btn mp-button icon-tip${open ? ' on' : ''}`}
       aria-pressed={open}
-      aria-label={open ? '關閉手機預覽' : '開啟手機預覽'}
-      data-tip={open ? '關閉 · 手機預覽' : `手機預覽 · ${MOBILE_PREVIEW_W}×${MOBILE_PREVIEW_H}`}
+      aria-label={open ? t('關閉手機預覽') : t('開啟手機預覽')}
+      data-tip={open ? t('關閉 · 手機預覽') : t('手機預覽 · {size}', { size: `${MOBILE_PREVIEW_W}×${MOBILE_PREVIEW_H}` })}
       onClick={() => setMobilePreviewOpen(!open)}
     >
       <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
@@ -40,6 +42,7 @@ export function MobilePreviewButton() {
 
 /** 右欄第二格；關著或已是手機版面時整個不存在。 */
 export function MobilePreview() {
+  const t = useT()
   const open = useMobilePreviewOpen()
   const drawer = useMediaQuery(DRAWER_QUERY)
   // 換 key 重建 iframe，避免動 contentWindow.location 碰到同源以外的狀況。
@@ -52,21 +55,21 @@ export function MobilePreview() {
   const src = `${window.location.pathname}?mobilePreview=1`
 
   return (
-    <aside className="mobile-preview" aria-label="手機預覽">
+    <aside className="mobile-preview" aria-label={t('手機預覽')}>
       <div className="mp-head">
-        <span className="mp-title">手機預覽</span>
+        <span className="mp-title">{t('手機預覽')}</span>
         {/* 顯示 iframe 真正的視窗尺寸，不是畫面上的大小。 */}
         <span className="mp-size">
           {MOBILE_PREVIEW_W}×{MOBILE_PREVIEW_H} · {Math.round(MOBILE_PREVIEW_SCALE * 100)}%
         </span>
-        <button type="button" className="icon-btn" title="重新載入預覽" aria-label="重新載入預覽" onClick={reload}>
+        <button type="button" className="icon-btn" title={t('重新載入預覽')} aria-label={t('重新載入預覽')} onClick={reload}>
           ↻
         </button>
         <button
           type="button"
           className="icon-btn"
-          title="關閉手機預覽（右欄標題列的手機圖示可以重新開啟）"
-          aria-label="關閉手機預覽"
+          title={t('關閉手機預覽（右欄標題列的手機圖示可以重新開啟）')}
+          aria-label={t('關閉手機預覽')}
           onClick={() => setMobilePreviewOpen(false)}
         >
           ✕
@@ -77,7 +80,7 @@ export function MobilePreview() {
         <iframe
           key={nonce}
           className="mp-frame"
-          title="手機預覽"
+          title={t('手機預覽')}
           src={src}
           // 預覽是同源的自己：不需要額外權限，但也不該讓它彈出視窗或導走上層。
           sandbox="allow-same-origin allow-scripts allow-forms"

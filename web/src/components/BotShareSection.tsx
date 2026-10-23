@@ -4,9 +4,10 @@ import { copyText } from '../lib/copyText'
 import { useShareRequests } from '../hooks/useShareRequests'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
+import { fmtDate, useT } from '../lib/i18n'
 import './botShare.css'
 
-const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('zh-TW', { hour12: false }) : '—')
+const fmt = (iso: string | null) => (iso ? fmtDate(new Date(iso), { dateStyle: 'short', timeStyle: 'short' }) : '—')
 
 /**
  * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用的 bot（受限或信任分享）才畫。
@@ -15,6 +16,7 @@ const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('zh-TW',
  * 所以另外看 `shareRev`（每收到一次加一）——兩者任一變了就重抓（#1099）。
  */
 export function BotShareSection({ botId }: { botId: string }) {
+  const t = useT()
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
   const restricted = profile !== null
   const sharing = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
@@ -69,37 +71,37 @@ export function BotShareSection({ botId }: { botId: string }) {
         setError(shareErrorText(e))
         return
       }
-      if (done) notify('info', res.enabled && !effective.enabled ? '分享已關閉' : done)
+      if (done) notify('info', res.enabled && !effective.enabled ? t('分享已關閉') : done)
     } finally {
       setBusy(false)
     }
   }
 
-  const copy = (url: string) => void copyText(url).then((ok) => notify(ok ? 'info' : 'error', ok ? '已複製分享連結' : '複製失敗，請手動選取連結'))
+  const copy = (url: string) => void copyText(url).then((ok) => notify(ok ? 'info' : 'error', ok ? t('已複製分享連結') : t('複製失敗，請手動選取連結')))
   const enabled = currentShare?.enabled ?? false
 
   return (
-    <section className="bs-share" aria-label="分享">
+    <section className="bs-share" aria-label={t('分享')}>
       <div className="bs-share-head">
-        <strong>{profile === 'trusted' ? '🔓 信任分享給外部使用者' : '🔗 分享給外部使用者'}</strong>
+        <strong>{profile === 'trusted' ? t('🔓 信任分享給外部使用者') : t('🔗 分享給外部使用者')}</strong>
         <label className="bs-share-toggle">
           <input
             type="checkbox"
             role="switch"
             checked={enabled}
             disabled={busy || currentShare === null}
-            onChange={(e) => (e.target.checked ? void run(() => setShareEnabled(botId, true), '已開啟分享') : setConfirm('off'))}
+            onChange={(e) => (e.target.checked ? void run(() => setShareEnabled(botId, true), t('已開啟分享')) : setConfirm('off'))}
           />
-          {enabled ? '分享中' : '未分享'}
+          {enabled ? t('分享中') : t('未分享')}
         </label>
       </div>
       {profile === 'trusted' ? (
         <p className="bs-share-trusted" role="note">
-          拿到連結的人可以透過這顆 bot 操作這台機器上的任何東西（跑指令、改檔、git…）。只分享給絕對信任的人。
+          {t('拿到連結的人可以透過這顆 bot 操作這台機器上的任何東西（跑指令、改檔、git…）。只分享給絕對信任的人。')}
         </p>
       ) : null}
       <p className="hint">
-        拿到連結的人＝網路上任何人：可以跟這顆 bot 對話、上傳檔案、下載它給的檔案，看得到完整對話歷史；看不到 AG Man 的其他東西。
+        {t('拿到連結的人＝網路上任何人：可以跟這顆 bot 對話、上傳檔案、下載它給的檔案，看得到完整對話歷史；看不到 AG Man 的其他東西。')}
       </p>
       {error ? (
         <p className="bs-share-error" role="alert">
@@ -115,44 +117,48 @@ export function BotShareSection({ botId }: { botId: string }) {
                   type="checkbox"
                   checked={currentShare?.allow_embed ?? false}
                   disabled={busy || currentShare === null}
-                  onChange={(e) => void run(() => setShareEnabled(botId, true, e.target.checked), e.target.checked ? '已允許 iframe 嵌入' : '已關閉 iframe 嵌入')}
+                  onChange={(e) => void run(() => setShareEnabled(botId, true, e.target.checked), e.target.checked ? t('已允許 iframe 嵌入') : t('已關閉 iframe 嵌入'))}
                 />{' '}
-                允許 iframe 嵌入
+                {t('允許 iframe 嵌入')}
               </label>
-              <p className="hint">任何網站都能把這個分享頁嵌進去；只在你要嵌到自己的網站時開。</p>
+              <p className="hint">{t('任何網站都能把這個分享頁嵌進去；只在你要嵌到自己的網站時開。')}</p>
             </div>
           ) : null}
           {currentShare?.url ? (
             <>
               <div className="bs-share-url">
-                <input type="text" readOnly value={currentShare.url} aria-label="分享連結" onFocus={(e) => e.currentTarget.select()} />
+                <input type="text" readOnly value={currentShare.url} aria-label={t('分享連結')} onFocus={(e) => e.currentTarget.select()} />
                 <button type="button" className="btn primary" onClick={() => copy(currentShare.url!)}>
-                  複製連結
+                  {t('複製連結')}
                 </button>
               </div>
-              <p className="hint">聊天區頂端的「🔗 複製連結」也能隨時複製。</p>
+              <p className="hint">{t('聊天區頂端的「🔗 複製連結」也能隨時複製。')}</p>
             </>
           ) : currentShare?.needs_rotate ? (
             <p className="bs-share-hint">
-              目前的連結結尾 <code>{currentShare.token_hint ?? '…'}</code>，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。
+              {t.x('目前的連結結尾 {token}，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。', {
+                token: <code>{currentShare.token_hint ?? '…'}</code>,
+              })}
             </p>
           ) : (
             <p className="bs-share-hint">
-              目前的連結結尾 <code>{currentShare?.token_hint ?? '…'}</code>。config.toml 的 [share] base_url 沒設，組不出完整網址。
+              {t.x('目前的連結結尾 {token}。config.toml 的 [share] base_url 沒設，組不出完整網址。', {
+                token: <code>{currentShare?.token_hint ?? '…'}</code>,
+              })}
             </p>
           )}
           <dl className="bs-share-meta">
-            <dt>建立於</dt>
+            <dt>{t('建立於')}</dt>
             <dd>{fmt(currentShare?.created_at ?? null)}</dd>
-            <dt>最後使用</dt>
+            <dt>{t('最後使用')}</dt>
             <dd>{fmt(currentShare?.last_used_at ?? null)}</dd>
           </dl>
           <div className="bs-share-actions">
             <button type="button" className="btn" disabled={busy} onClick={() => setConfirm('rotate')}>
-              重產連結
+              {t('重產連結')}
             </button>
             <button type="button" className="btn danger" disabled={busy} onClick={() => setConfirm('off')}>
-              關閉分享
+              {t('關閉分享')}
             </button>
           </div>
         </div>
@@ -160,26 +166,26 @@ export function BotShareSection({ botId }: { botId: string }) {
       {/* 兩個框分開：同一個框有 800ms 防連點，重產完馬上關閉會被吃掉。 */}
       <ConfirmDialog
         open={confirm === 'rotate'}
-        title="重產分享連結？"
-        body="舊連結立刻失效，拿著舊連結的人會看到「連結已失效」。新連結要重新傳給對方。"
-        confirmLabel="重產"
+        title={t('重產分享連結？')}
+        body={t('舊連結立刻失效，拿著舊連結的人會看到「連結已失效」。新連結要重新傳給對方。')}
+        confirmLabel={t('重產')}
         danger
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           setConfirm(null)
-          void run(() => rotateShare(botId), '已重產連結，舊連結已失效')
+          void run(() => rotateShare(botId), t('已重產連結，舊連結已失效'))
         }}
       />
       <ConfirmDialog
         open={confirm === 'off'}
-        title="關閉分享？"
-        body="連結立刻失效；對話與檔案都還在，之後再開會產生一條新連結。"
-        confirmLabel="關閉分享"
+        title={t('關閉分享？')}
+        body={t('連結立刻失效；對話與檔案都還在，之後再開會產生一條新連結。')}
+        confirmLabel={t('關閉分享')}
         danger
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           setConfirm(null)
-          void run(() => setShareEnabled(botId, false), '已關閉分享')
+          void run(() => setShareEnabled(botId, false), t('已關閉分享'))
         }}
       />
     </section>

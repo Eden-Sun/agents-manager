@@ -4,6 +4,7 @@ import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
 import { keepWarmReplied, keepWarmSkippable } from '../lib/keepWarm'
 import { useCacheTick } from '../hooks/useCacheTick'
+import { useT } from '../lib/i18n'
 import './compactButton.css'
 
 /**
@@ -11,6 +12,7 @@ import './compactButton.css'
  * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓本身）daemon 自動恢復並廣播；再按一次取消。狀態在 `run.keep_warm_skip`。
  */
 export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; touch?: boolean }) {
+  const t = useT()
   const eligible = useStore((s) => keepWarmSkippable(s.bots.find((b) => b.id === botId)))
   const run = useStore((s) => s.runs[botId])
   const skipping = run?.keep_warm_skip === true
@@ -29,10 +31,10 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
         const run = s.runs[botId]
         return run ? { runs: { ...s.runs, [botId]: { ...run, keep_warm_skip } } } : {}
       })
-      notify('info', keep_warm_skip ? '這一輪閒置不保溫、也不熱壓；有新活動就自動恢復' : '已取消，照常保溫')
+      notify('info', keep_warm_skip ? t('這一輪閒置不保溫、也不熱壓；有新活動就自動恢復') : t('已取消，照常保溫'))
     } catch (e) {
       const reason = e instanceof ApiError ? String(e.body.error ?? e.message) : String(e)
-      notify('error', reason === 'not_primary' ? '只有主力的 claude／codex 能設定不用保溫' : `沒有切換：${reason}`)
+      notify('error', reason === 'not_primary' ? t('只有主力的 claude／codex 能設定不用保溫') : t('沒有切換：{reason}', { reason }))
     } finally {
       setBusy(false)
     }
@@ -45,17 +47,17 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
       disabled={busy}
       title={
         skipping
-          ? '已設定不用保溫：這一輪閒置不保溫、也不熱壓；有新活動就自動恢復。點一下取消'
+          ? t('已設定不用保溫：這一輪閒置不保溫、也不熱壓；有新活動就自動恢復。點一下取消')
           : warmed
-            ? '保溫回覆已到、快取仍熱；點一下停止這一輪閒置保溫，有新活動就自動恢復'
-            : '這一輪閒置不要保溫（58 分的 any updates）與熱壓；有新活動就自動恢復'
+            ? t('保溫回覆已到、快取仍熱；點一下停止這一輪閒置保溫，有新活動就自動恢復')
+            : t('這一輪閒置不要保溫（58 分的 any updates）與熱壓；有新活動就自動恢復')
       }
       onClick={(e) => {
         e.stopPropagation()
         void go()
       }}
     >
-      {skipping ? '不保溫中・取消' : warmed ? '保溫中・停止保溫' : '不用保溫'}
+      {skipping ? t('不保溫中・取消') : warmed ? t('保溫中・停止保溫') : t('不用保溫')}
     </button>
   )
 }
