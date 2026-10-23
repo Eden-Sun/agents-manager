@@ -170,6 +170,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'hosts'}
         >
+          <h2 className="page-title">主機</h2>
           <HostsPanel />
         </section>
 
@@ -180,6 +181,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'updates'}
         >
+          <h2 className="page-title">更新檢查</h2>
           <UpdateCheckPanel />
         </section>
 
@@ -190,6 +192,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'identities'}
         >
+          <h2 className="page-title">身分</h2>
           <IdentitiesPanel />
         </section>
 
@@ -200,6 +203,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'deleted'}
         >
+          <h2 className="page-title">最近刪除</h2>
           <DeletedBotsPanel />
         </section>
 
@@ -210,6 +214,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'judge'}
         >
+          <h2 className="page-title">Jev 建議</h2>
           <JudgePanel />
         </section>
 
@@ -220,6 +225,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'claude-api'}
         >
+          <h2 className="page-title">Claude API</h2>
           <ClaudeApiPanel />
         </section>
 
@@ -230,6 +236,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'display'}
         >
+          <h2 className="page-title">顯示</h2>
           <KindDisplayToggle />
           <KeepAwakeToggle />
         </section>

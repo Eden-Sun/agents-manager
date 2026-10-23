@@ -19,7 +19,7 @@ beforeEach(() => {
 
 test('七個分頁都在 DOM 裡，預設選中主機，其餘 6 個面板帶 hidden', async () => {
   const root = await mount(<EnvShell />)
-  const tabs = [...root.querySelectorAll<HTMLButtonElement>('[role="tablist"] button[role="tab"]')]
+  const tabs = [...root.querySelectorAll<HTMLButtonElement>('.env-nav[role="tablist"] button[role="tab"]')]
   assert.equal(tabs.length, 7)
   assert.deepEqual(
     tabs.map((t) => t.querySelector('.env-nav-label')?.textContent),
@@ -30,7 +30,7 @@ test('七個分頁都在 DOM 裡，預設選中主機，其餘 6 個面板帶 hi
   assert.ok(selected)
   assert.equal(selected.querySelector('.env-nav-label')?.textContent, '主機')
 
-  const panels = [...root.querySelectorAll<HTMLElement>('[role="tabpanel"]')]
+  const panels = [...root.querySelectorAll<HTMLElement>('.env-main > [role="tabpanel"]')]
   assert.equal(panels.length, 7)
   const visiblePanels = panels.filter((p) => !p.hidden)
   assert.equal(visiblePanels.length, 1)
