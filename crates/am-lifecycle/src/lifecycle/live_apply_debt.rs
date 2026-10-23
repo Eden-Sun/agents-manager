@@ -160,7 +160,7 @@ fn schedule_retry<A: LiveApplyDebtContext + Clone>(app: &A, run_id: &str) {
     }
     let (app, run_id) = ((*app).clone(), run_id.to_string());
     tokio::spawn(Box::pin(async move {
-        let mut delay = Duration::from_millis(250);
+        let mut delay = super::pane_settle(Duration::from_millis(250));
         loop {
             tokio::time::sleep(delay).await;
             match retry_once(&app, &run_id).await {
