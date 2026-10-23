@@ -2389,10 +2389,16 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
 - 裝完重讀狀態失敗（ssh 逾時等）時仍是 200，但 `state`、`integration` 是 `null`、多一個 `reread_error`（原因）：不拿裝之前的舊資料當結果。
 - 502：指令失敗（訊息尾段含輸出）；快照不動。`state` 不是 `current` 時裝完仍落後，由畫面講清楚。
 
-### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
-`{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、
-grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給 `via_bot_id`。
-回 `200 {"turn_id","message_id","delivery"}`。bot／所屬專案不存在或已刪除 404；bot 不屬於該 host 400；bot 不可送 → §5 的 409；`kind` 不合法 400。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
+### 12.7 安裝 CLI `POST /api/hosts/{name}/tools/install`
+`{ "kind": "claude"|"codex"|"grok", "via_bot_id"?: "01M1…" }`。agy 不走這條（`POST /api/hosts/{name}/agy/install`），`kind` 不是這三家 400。只給使用者（bot 403 `user_only`）。
+
+官方安裝方式（寫死，呼叫端不能傳指令）：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | bash`。
+
+- **帶 `via_bot_id`（借現有 agent）**：daemon 組一則安裝 prompt（上面的指令，接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給該 bot。
+  回 `200 {"turn_id","message_id","delivery"}`。bot／所屬專案不存在或已刪除 404；bot 不屬於該 host 400；bot 不可送 → §5 的 409。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
+- **省略（或空字串）`via_bot_id`（直接安裝，issue #1931）**：全新使用者沒有 bot 可借。daemon 在該主機開臨時 host-shell pane、打進上面的安裝指令（SPEC §16.3a 同一套開 pane 與收尾），
+  回 `200 {"pane_id","mode":"shell"}`；pane 的終端快照是安裝輸出的唯一通道（不進 daemon log／事件）。安裝指令結束（pane 前景只剩 shell；最久 15 分鐘）後 daemon 重新偵測該主機的 tools、推 `host_changed`、關 pane。**不執行登入**，裝好後走一般登入流程（`…/identities/{identity}/login`）。
+  404：不認得的主機。409 `tool_install_in_progress {host, kind}`：同一 `(host, kind)` 已有一個在跑（收尾完成才放掉）。502：開不起 pane／打不進指令。
 
 ### 12.8 bot 人設 `bot.persona`
 `string | null`：附加到 agent system prompt 尾端的文字，不動專案裡共用的 `CLAUDE.md` / `AGENTS.md`。TOML `persona = """…"""`；POST 可省、PATCH 可改（`null`/`""` 清除，有 active Run 列入 `needs_restart`）。

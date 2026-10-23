@@ -4254,6 +4254,9 @@ pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內�
 
 每個 pane 只接受一次送碼；並行或重送回 `409 code_already_sent`，避免重複輸入 OAuth code。RPC 結果不明時先關閉該登入終端再重新登入，不在同 pane 重送。送出後等 CLI 反應最多 8 秒，把 `Login failed` 帶回網頁（pane 會被 watcher 收掉）；成功與否仍由 watcher 的重驗決定（遠端 claude 問不出登入狀態的既有限制不變，UI 會講「請以實際使用為準」）。沒綁身份的 bot 重新登入（網頁自己開 shell 打指令）不經這條路，仍在終端完成。
 
+**沒有 bot 時的 CLI 安裝**（#1931；`tool_install_shell.rs`、API §12.7）：`POST /api/hosts/{name}/tools/install` 省略 `via_bot_id` 時，daemon 開同樣的臨時 host-shell pane、打進官方安裝指令（claude／codex／grok 三條寫死；agy 沿用 `agy/install`），回 `{pane_id, mode:"shell"}`。
+watcher 以 `pane.process_info` 的 `shell_pid` 判斷安裝指令是否還在前景（最多 15 分鐘；指令打進去 12 秒內沒看到前景程序就當它瞬間跑完），結束後重新偵測 tools、推 `host_changed`、關 pane；主機重連或改指就放手（同登入 watcher 的 HostFence 規則）。同一 `(host, kind)` 同時只一個（記憶體集合，收尾完才放），重複 409 `tool_install_in_progress`。不登入——裝好後由 UI 接登入流程。
+
 `POST …/logout` 走同一條路（同一個臨時 pane、同一組 env 前綴），指令換成 `claude auth logout`、`codex logout` 或 `grok logout`。
 環境前綴與登入共用同一段程式：少帶 `CLAUDE_CONFIG_DIR` 就會登出別的帳號。清掉的是那個身份設定目錄裡的憑證——執行中的 bot 不受影響，下次啟動才會停在登入畫面，所以 UI 先問一次並說明有幾顆 bot 綁著它。
 CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前的 HostFence 推標準 `host_changed` 主機快照，讓 UI 立即更新身份狀態（API §8）。**登出**的 pane 在重驗問不出來時（遠端 claude 一律問不出來）直接記未登入並清掉 `account`／`plan`，不然列上會一直顯示「已登入」、登出鈕也還按得下去。
