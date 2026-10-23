@@ -762,7 +762,8 @@ async fn stale_split_keys(app: &(impl crate::quota::HostIdentities + crate::quot
 /// 檢查在 `app.quotas` 鎖裡做：主機換連線時會清掉 `<host>/…`（`hosts::forget_host_observations`），檢查放在鎖外的話，
 /// 通過檢查到寫入之間清掉的那份會被舊讀數種回來。
 pub async fn set_fenced(
-    app: &(impl crate::capabilities::Db
+    app: &(impl crate::capabilities::DataDir
+        + crate::capabilities::Db
         + crate::capabilities::Emit
         + crate::hosts::HostsAccess
         + crate::quota::HostIdentities
@@ -860,7 +861,8 @@ pub fn reading_is_stale(q: &Quota, flagged: bool, now: chrono::DateTime<chrono::
 }
 
 pub async fn set(
-    app: &(impl crate::capabilities::Db
+    app: &(impl crate::capabilities::DataDir
+        + crate::capabilities::Db
         + crate::capabilities::Emit
         + crate::hosts::HostsAccess
         + crate::quota::HostIdentities
@@ -875,7 +877,8 @@ pub async fn set(
 
 /// 回 `false`＝`fence` 已經不是這台主機的權威，什麼都沒寫。
 async fn set_inner(
-    app: &(impl crate::capabilities::Db
+    app: &(impl crate::capabilities::DataDir
+        + crate::capabilities::Db
         + crate::capabilities::Emit
         + crate::hosts::HostsAccess
         + crate::quota::HostIdentities
@@ -979,10 +982,12 @@ async fn set_inner(
         }
     }
     if !brings_its_own_hit {
-        q.limit_hit = q.limit_hit.take().and_then(|h| recalibrate_limit_hit(h, &fresh));
+        // `fresh` 是這次帶進來的讀數，不看 stale 旗標（見 `grok_reading_clears_hit`）。
+        q.limit_hit = q.limit_hit.take().and_then(|h| recalibrate_for_key(app, &key, h, &fresh, true));
     }
     if limit_hit_expired(q.limit_hit.as_ref()) {
         q.limit_hit = None;
+        forget_grok_pct_clear(app, &key);
     }
     // CLI 狀態列沒有重置時間，沿用上一份，否則量表的「N 小時後重置」會消失。
     // **已經過去的不沿用**（issue #489）：對顯示沒有意義（畫面會寫「N 小時前重置」），而且它會被
@@ -1115,9 +1120,19 @@ fn codex_reading_after_hit(hit: &LimitHit, fresh: &Quota) -> bool {
 /// 同 host、同 identity 由 [`set_inner`] 保證：撞限是從同一把 `quota_key` 的上一筆沿用來的。
 ///
 /// 為什麼可以看百分比：`/usage` 的百分比是 grok 帳號端的計數，沒有證據證明它每一刻都即時反映撞限，
-/// 所以這裡**不**宣稱它一定準。看百分比的理由是誤清會自我修正：真的還在擋的話，下一個 turn 再撞限，
-/// 橫幅會再記一次 `limit_hit`。這跟 claude 的 `/usage` 不同（見 [`recalibrate_limit_hit`]：撞限前開始、撞限後
+/// 所以這裡**不**宣稱它一定準。看百分比的理由是誤清只會多跑一回合：真的還在擋的話，下一個 turn 再撞限，
+/// 橫幅會再記一次 `limit_hit`。但百分比跟擋人的計數不是同一個時（#1900 撞週限兩天後讀數才 55%），每 30 秒
+/// 一份讀數就會「清掉 → 放行 → 重撞」一直循環（#1905），所以同一把 key 被百分比清過之後又重撞的，在那一桶
+/// 窗長內不再看百分比（[`grok_pct_clear_allowed`]）；這個函式本身只回答「讀數說不說得出不見底」。
+/// 這跟 claude 的 `/usage` 不同（見 [`recalibrate_limit_hit`]：撞限前開始、撞限後
 /// 才回來的探測，百分比可能還沒到頂，而 claude 沒有橫幅之外的出口）。獨立於 codex 的 [`codex_reading_after_hit`]。
+///
+/// `reading_is_stale(fresh, false, now)` 的 `false`（不看 stale 旗標、只看讀數年齡）是故意的，兩個呼叫端各自負責：
+/// - [`set_inner`]：`fresh` 是這次呼叫**帶進來的**讀數（`q.clone()`，在沿用舊欄位之前），不是表裡那一筆；stale 旗標
+///   標的是表裡開機回填的那筆，跟這份新讀數無關（旗標要等寫入之後才在 `set_inner` 裡拿掉，判斷當下可能還掛著）。
+///   開機回填走 [`load_cache`] 直接 insert 並掛旗標，不經過 `set_inner`。
+/// - [`restore_limit_hit`]：拿來校正的是表裡現有的那筆，可能就是開機回填、旗標還掛著的；那邊先查旗標，掛著就
+///   不准走百分比（[`recalibrate_limit_hit_at`] 的 `grok_pct`），這個函式不會看到那種讀數。
 pub fn grok_reading_clears_hit(hit: &LimitHit, fresh: &Quota, now: chrono::DateTime<chrono::Utc>) -> bool {
     if fresh.source != "grok-usage" || reading_is_stale(fresh, false, now) {
         return false;
@@ -1148,8 +1163,15 @@ pub fn grok_reading_clears_hit(hit: &LimitHit, fresh: &Quota, now: chrono::DateT
 /// 撞限作廢（2026-09-27 使用者：codex 提早重置後額度全滿，還掛著「被擋、下午 02:14 恢復」）。
 /// Codex app-server 的新完整讀數另可解除已消失或不再見底的桶，只有週窗時也適用；沒寫重置時間的（credits 用完）除外。
 /// 上面「用窗的起點而不是百分比」是針對 claude 的 `/usage`；grok 的 `grok-usage` 另有一條看百分比的解除
-/// （[`grok_reading_clears_hit`]，#1900），依據與限制寫在那個函式上：誤清會被下一個 turn 的橫幅自我修正。
-pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+/// （[`grok_reading_clears_hit`]，#1900），依據與限制寫在那個函式上；同一把 key 重撞後的退避（#1905）要知道 key，
+/// 由 [`set_inner`]／[`restore_limit_hit`] 經 [`recalibrate_for_key`] 套上，這個純函式照舊准看百分比。
+pub fn recalibrate_limit_hit(hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+    recalibrate_limit_hit_at(hit, fresh, chrono::Utc::now(), true)
+}
+
+/// [`recalibrate_limit_hit`] 的本體。`grok_pct` 為 `false` 時跳過 grok 看百分比那一條（其他規則照舊）；
+/// codex、claude 的讀數本來就走不到那一條，這個參數對它們沒有作用。
+fn recalibrate_limit_hit_at(mut hit: LimitHit, fresh: &Quota, now: chrono::DateTime<chrono::Utc>, grok_pct: bool) -> Option<LimitHit> {
     // credits 用完（codex 橫幅沒寫重置時間＝`until: None`，沒有桶名）：窗的讀數證明不了 credits 回來了，權威讀數不解除（#1576）。
     // 方案變了另由 `set` 的 plan_changed 分支處理。
     if hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, fresh) {
@@ -1169,7 +1191,7 @@ pub fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHi
         }
     }
     // grok：窗開在撞限之前時下面那條永遠清不掉（#1900），權威讀數說那一桶不見底就解除。
-    if grok_reading_clears_hit(&hit, fresh, chrono::Utc::now()) {
+    if grok_pct && grok_reading_clears_hit(&hit, fresh, now) {
         return None;
     }
     if hit.bucket.is_none() {
@@ -1228,6 +1250,96 @@ pub fn cleared_at_key(app: &impl crate::capabilities::DataDir, key: &str) -> Str
     format!("{}\u{0}{key}", app.data_dir().display())
 }
 
+/// grok 撞限被權威讀數用百分比清掉的紀錄（#1905），每把 key（[`cleared_at_key`]）一筆。只活在記憶體：
+/// daemon 重啟後是空的，最多再「清掉 → 重撞」一輪。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrokPctClear {
+    /// 上一次被百分比清掉的時刻；窗長從這裡起算。
+    pub cleared_at: chrono::DateTime<chrono::Utc>,
+    /// 被清掉的那一筆撞限的桶（`five_hour`／`seven_day`）。
+    pub bucket: String,
+    /// 清掉之後又重撞、被擋下不准再看百分比的次數。
+    pub rehits: u32,
+    /// 已經算過一次重撞的撞限（`hit.at`）：每 30 秒一份讀數，同一筆重撞只算一次、只 warn 一次。
+    pub counted_at: Option<String>,
+}
+
+/// 紀錄的總數上限。滿了時沒有紀錄的 key 一律不准看百分比（保守：多擋，不無限長）。
+pub const GROK_PCT_CLEARS_MAX: usize = 256;
+
+pub fn grok_pct_clears() -> &'static std::sync::Mutex<HashMap<String, GrokPctClear>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<HashMap<String, GrokPctClear>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn grok_bucket_len(bucket: &str) -> Option<chrono::Duration> {
+    match bucket {
+        "five_hour" => Some(FIVE_HOUR_LEN),
+        "seven_day" => Some(SEVEN_DAY_LEN),
+        _ => None,
+    }
+}
+
+/// 這筆撞限能不能用百分比解除（#1905）。表裡那把 key 的紀錄過了它那一桶的窗長（從上次清掉起算）就作廢、刪掉。
+/// - 有紀錄、而且撞限是在上次清掉**之後**才撞的（`hit.at ≥ cleared_at`）＝清掉又重撞：不准，重撞次數加一（同一筆只加一次）；
+/// - 有紀錄但撞限早於上次清掉（重啟後種回的舊撞限）：不是重撞，照舊准；
+/// - 沒有紀錄：准；表已滿就不准（保守）。撞限時間解不開也不准。
+pub fn grok_pct_clear_allowed(marks: &mut HashMap<String, GrokPctClear>, mark: &str, hit: &LimitHit, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if marks.get(mark).is_some_and(|m| grok_bucket_len(&m.bucket).map_or(true, |len| now - m.cleared_at >= len)) {
+        marks.remove(mark);
+    }
+    let Some(at) = parse_utc(&hit.at) else { return false };
+    match marks.get_mut(mark) {
+        Some(m) if at >= m.cleared_at => {
+            if m.counted_at.as_deref() != Some(hit.at.as_str()) {
+                m.rehits += 1;
+                m.counted_at = Some(hit.at.clone());
+                tracing::warn!(key = mark.rsplit('\u{0}').next().unwrap_or(mark), bucket = %m.bucket, rehits = m.rehits,
+                    "grok limit hit again after a /usage percentage cleared it; percentage no longer clears it within the window");
+            }
+            false
+        }
+        Some(_) => true,
+        None => marks.len() < GROK_PCT_CLEARS_MAX,
+    }
+}
+
+/// 記下「這把 key 的撞限剛被百分比清掉」。已有紀錄的沿用重撞次數；表滿時不新增（那種 key 根本不會被准許清）。
+pub fn note_grok_pct_clear(marks: &mut HashMap<String, GrokPctClear>, mark: &str, hit: &LimitHit, now: chrono::DateTime<chrono::Utc>) {
+    let Some(bucket) = hit.bucket.clone() else { return };
+    let len = marks.len();
+    match marks.get_mut(mark) {
+        Some(m) => {
+            m.cleared_at = now;
+            m.bucket = bucket;
+        }
+        None if len < GROK_PCT_CLEARS_MAX => {
+            marks.insert(mark.to_string(), GrokPctClear { cleared_at: now, bucket, rehits: 0, counted_at: None });
+        }
+        None => {}
+    }
+}
+
+fn forget_grok_pct_clear(app: &impl crate::capabilities::DataDir, key: &str) {
+    grok_pct_clears().lock().unwrap().remove(&cleared_at_key(app, key));
+}
+
+/// 帶 key 的撞限校正：grok 看百分比那一條先過 [`grok_pct_clear_allowed`]，清掉了就記一筆；其他規則同
+/// [`recalibrate_limit_hit`]。`grok_pct` 為 `false`（呼叫端知道讀數不夠格）時那一條直接跳過、也不碰表。
+/// codex、claude 的讀數走不到 [`grok_reading_clears_hit`]，所以也不碰表，行為與 [`recalibrate_limit_hit`] 相同。
+fn recalibrate_for_key(app: &impl crate::capabilities::DataDir, key: &str, hit: LimitHit, fresh: &Quota, grok_pct: bool) -> Option<LimitHit> {
+    let now = chrono::Utc::now();
+    if grok_pct && grok_reading_clears_hit(&hit, fresh, now) {
+        let mark = cleared_at_key(app, key);
+        let mut marks = grok_pct_clears().lock().unwrap();
+        if grok_pct_clear_allowed(&mut marks, &mark, &hit, now) {
+            note_grok_pct_clear(&mut marks, &mark, &hit, now);
+            return None;
+        }
+    }
+    recalibrate_limit_hit_at(hit, fresh, now, false)
+}
+
 /// 一回合真的跑完就拿掉「撞上限」，不必等它自己寫的時間。
 ///
 /// 不管這一格當下有沒有撞限都記下時刻：成功回合本身就是「這個帳號收得下工作」的證據，
@@ -1236,6 +1348,7 @@ pub async fn clear_limit_hit(app: &(impl crate::capabilities::DataDir + crate::c
     let key = quota_key(host, base);
     let _cache_write = cache_write_lock(&key).await;
     cleared_at().lock().unwrap().insert(cleared_at_key(app, &key), chrono::Utc::now());
+    forget_grok_pct_clear(app, &key);
     let mut quotas = app.quotas().lock().await;
     let Some(q) = quotas.get_mut(&key) else { return };
     if q.limit_hit.is_none() {
@@ -1275,6 +1388,7 @@ pub async fn clear_limit_hit_if_older_than(
     q.limit_hit = None;
     let out = q.clone();
     drop(quotas);
+    forget_grok_pct_clear(app, &key);
     {
         let mut marks = cleared_at().lock().unwrap();
         let slot = marks.entry(cleared_at_key(app, &key)).or_insert(success_at);
@@ -1355,7 +1469,7 @@ pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabil
 /// `at` 要是原本那一刻，讀數才校正得準（[`recalibrate_limit_hit`] 靠它判斷窗是不是撞限之後才開的）；
 /// 重啟之後、回填之前已經有新讀數進來的話，當場校正一次，不必等下一份。已經過期、被校正作廢、或這一格
 /// 已有更晚（或黏著）的撞限時不寫。回傳有沒有真的寫進去。
-pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str, hit: LimitHit) -> bool {
+pub async fn restore_limit_hit(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str, hit: LimitHit) -> bool {
     if limit_hit_expired(Some(&hit)) {
         return false;
     }
@@ -1366,8 +1480,11 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capa
     if quotas.get(&key).is_some_and(|q| q.limit_hit.is_none() && hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, q)) {
         return false;
     }
+    // 表裡這筆可能是開機回填、還沒被真探測換掉的（stale 旗標還掛著）：那種讀數不准拿來看百分比。
+    // 上鎖順序同 `load_cache`：quotas → quota_stale。
+    let grok_pct = !app.quota_stale().lock().await.contains(&key);
     let hit = match quotas.get(&key) {
-        Some(q) => match recalibrate_limit_hit(hit, q) {
+        Some(q) => match recalibrate_for_key(app, &key, hit, q, grok_pct) {
             Some(h) => h,
             None => return false,
         },
