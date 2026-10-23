@@ -3931,7 +3931,9 @@ fn detect_error(host: &str, e: anyhow::Error) -> LcError {
 #[derive(Deserialize)]
 struct InstallTool {
     kind: String,
-    via_bot_id: String,
+    /// 省略（或空字串）＝不借 bot，daemon 開臨時 host-shell pane 直接裝（issue #1931）。
+    #[serde(default)]
+    via_bot_id: Option<String>,
 }
 
 async fn install_tool(
@@ -3941,7 +3943,11 @@ async fn install_tool(
     Json(b): Json<InstallTool>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
-    let out = crate::app_ports_p3::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
+    let Some(via) = b.via_bot_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        let out = crate::tool_install_shell::start(&app, &name, &b.kind).await?;
+        return Ok((StatusCode::OK, Json(out)).into_response());
+    };
+    let out = crate::app_ports_p3::install_via_bot(&app, &name, &b.kind, via).await?;
     Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
         .into_response())
 }
@@ -4102,6 +4108,48 @@ mod agy_logout_route_tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!((body["reason"].as_str(), body["retryable"].as_bool()), (Some("host_superseded"), Some(true)), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod install_tool_route_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    async fn call(app: &Arc<App>, host: &str, body: &str, principal: RequestPrincipal) -> (StatusCode, Value) {
+        let b: InstallTool = serde_json::from_str(body).unwrap();
+        let resp = match install_tool(State(app.clone()), Path(host.to_string()), Extension(principal), Json(b)).await {
+            Ok(r) => r,
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// issue #1931：`via_bot_id` 可省；省略時不碰 bot 表，直接走 shell 安裝的驗證（agy／亂寫的 kind 400、未知主機 404、
+    /// 同一 (host, kind) 已在裝 409）。帶了 `via_bot_id` 仍是借 bot 的舊行為（bot 不存在 404）。
+    #[tokio::test]
+    async fn via_bot_id_is_optional_and_the_shell_path_validates_before_opening_a_pane() {
+        let e = crate::testing::env().await;
+        let user = || RequestPrincipal::User;
+        let (st, body) = call(&e.app, crate::config::LOCAL_HOST, r#"{"kind":"claude"}"#, RequestPrincipal::Bot("b1".into())).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        for kind in ["agy", "rm -rf /", ""] {
+            let (st, body) = call(&e.app, crate::config::LOCAL_HOST, &json!({"kind": kind}).to_string(), user()).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{kind}: {body}");
+        }
+        let (st, _) = call(&e.app, "no-such-host", r#"{"kind":"codex"}"#, user()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(&e.app, "no-such-host", r#"{"kind":"codex","via_bot_id":""}"#, user()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "空字串等於省略");
+        let (st, _) = call(&e.app, crate::config::LOCAL_HOST, r#"{"kind":"codex","via_bot_id":"no-such-bot"}"#, user()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "帶了 via_bot_id 走借 bot 的舊路徑");
+
+        let _busy = crate::tool_install_shell::Slot::take(crate::config::LOCAL_HOST, "grok").unwrap();
+        let (st, body) = call(&e.app, crate::config::LOCAL_HOST, r#"{"kind":"grok"}"#, user()).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("tool_install_in_progress")), "{body}");
+        assert_eq!((body["host"].as_str(), body["kind"].as_str()), (Some(crate::config::LOCAL_HOST), Some("grok")));
     }
 }
 
@@ -12871,6 +12919,7 @@ mod per_principal_auth_tests {
             ("POST", "/api/hosts/no-such-host/reconnect", ""),
             ("POST", "/api/hosts/no-such-host/tools/refresh", ""),
             ("POST", "/api/hosts/no-such-host/tools/install", r#"{"kind":"claude","via_bot_id":"none"}"#),
+            ("POST", "/api/hosts/no-such-host/tools/install", r#"{"kind":"claude"}"#),
             ("POST", "/api/hosts/no-such-host/identities/cc1/login", ""),
             ("POST", "/api/hosts/no-such-host/identities/cc1/logout", ""),
             ("GET", "/api/hosts/no-such-host/gh", ""),

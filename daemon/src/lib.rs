@@ -276,6 +276,7 @@ mod preview;
 mod primary_order;
 mod pane_probe;
 mod agy_install;
+mod tool_install_shell;
 mod read_marks;
 pub mod remote_cargo;
 mod reconcile;
