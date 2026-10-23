@@ -2,47 +2,77 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-A local manager for coding-agent CLIs. The web UI turns every **claude** / **codex** / **grok** / **agy** session running in a [herdr](https://herdr.dev) pane into a "bot", groups bots by project directory, and lets you chat with them, answer blocked prompts and watch quota from the browser or your phone.
-
-The screenshots below come from the built-in mock backend (`VITE_MOCK=1`), so every account, bot and message is demo data. The UI itself is currently in Traditional Chinese.
+Manage coding agents on your local machine and on SSH hosts from one web UI. agents-manager turns every **Claude Code**, **Codex**, **Grok** and **Antigravity (agy)** CLI session running in a [herdr](https://herdr.dev) pane into a "bot", so you can follow conversations, answer prompts, watch quota and coordinate several bots from your desktop or phone. It is not an IDE and it does not spawn agents itself: herdr owns the terminals, the daemon talks to herdr and to the CLIs' hooks.
 
 ![Desktop dark theme: project tree with a child agent, quota chips for each CLI, chat and scratch tray](docs/screenshots/readme/2026-10-23-desktop-dark.png)
 
-![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/2026-10-23-settings-updates.png)
+Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and messages are demo data. The UI is currently in Traditional Chinese.
+
+## Key features
+
+**Chat with agents instead of watching terminals**
+- One bot per CLI session, grouped by project directory. Send messages from the browser, queue them while a turn runs, interrupt or force-stop.
+- Replies come from the CLIs' own hooks or native transcripts. When the daemon has to fall back to a terminal snapshot, the reply is marked as possibly incomplete.
+- Confirmations and multiple-choice questions become clickable cards. Rewind a conversation, fork a bot to continue its context, resume a bot that was put to sleep.
+
+**Coordinate many bots**
+- `@bot` / `@all` group chat per project.
+- Child agents started through herdr appear under their parent bot. The parent is notified when a child finishes or gets stuck.
+- Group tasks (missions) with plan / execute / review / verify / deliver cards, driven by the optional AGM supervisor.
+
+**Hosts, accounts and quota**
+- Projects on other machines run over SSH against that host's herdr: remote bots, host shells, CLI login, and moving a project to another daemon.
+- Claude identities (`cc0`–`cc6`) are discovered from shell aliases, per host, with one-click login and disable.
+- Quota and reset times per host and identity, with low-quota warnings, using whatever each provider exposes (Claude, Codex, Grok; agy reports its Gemini bucket only).
+- Model, effort and fast mode can be changed live where the CLI supports it.
+
+**Automation**
+- Project schedules: one-off, interval, daily and weekly runs queued into an existing bot, with a run ledger.
+- Update checks for herdr, agent CLIs and hook integrations on every host, with one-click updates.
+- Idle bots are put to sleep after a configurable period, keeping only what is needed to resume them.
+
+**Workspace and guard rails**
+- Preview a bot's local dev server next to the chat.
+- A cross-bot scratch tray and downloadable bot outputs (outbox).
+- A memory view of the herdr process tree, and a hook that blocks broad `pkill`/`kill` commands that would take down other agents.
+
+Details and limits live in [`docs/SPEC.md`](docs/SPEC.md).
 
 ![Mobile light theme: chat with quota chips and bot switcher](docs/screenshots/readme/2026-10-23-mobile-light.png)
 
-## Features
+## Compared with Orca
 
-- **Chat per bot** — send messages, queue them while a turn runs, interrupt or force-stop; replies are collected from CLI hooks, with a terminal-snapshot fallback marked as possibly incomplete. See [SPEC §4](docs/SPEC.md).
-- **Blocked prompts** — confirmations and multiple-choice questions become clickable cards instead of a terminal you have to open. [UI decisions](docs/UI-DECISIONS.md).
-- **Jev suggestions** — an optional judge layer can score the options of a question and flag them as "Jev suggestion"; it only suggests and never answers for you. [SPEC §4.3c](docs/SPEC.md).
-- **Projects and groups** — bots grouped by directory, `@bot` / `@all` group chat, and group tasks with plan / execute / review / verify / deliver cards. [SPEC §13](docs/SPEC.md).
-- **Child agents** — children started through herdr are tracked under their parent bot with status and progress notices. [SPEC §6.5a](docs/SPEC.md).
-- **Project schedules** — one-off, interval, daily and weekly runs queued into an existing bot, with run history and copy-to-new. [SPEC](docs/SPEC.md).
-- **Model, effort and identity** — per-host model lists; apply model / effort live where the CLI allows it; Claude `cc0`–`cc6` identities discovered from shell aliases. [SPEC §4.4a](docs/SPEC.md).
-- **Quota** — per-host, per-identity short and weekly windows for Claude, Codex, grok and agy, with low-quota warnings. [SPEC §14](docs/SPEC.md).
-- **Remote hosts** — projects on other machines run over SSH against that host's herdr, with host shells and CLI login. [SPEC §11](docs/SPEC.md).
-- **Update checks** — one settings tab lists herdr, agent CLIs and hook integrations per host, with one-click updates (including agy). [SPEC §6.9c](docs/SPEC.md).
-- **AGM supervisor** — an optional coordinator bot that patrols the fleet, dispatches work and handles deploys. [SPEC §18](docs/SPEC.md).
-- **Claude API** — an optional API key lets one-off LLM jobs (update triage, changelog translation) skip a full Claude Code session. [SPEC §4.3d](docs/SPEC.md).
-- **Files and sharing** — a cross-bot scratch tray, downloadable bot outputs, and restricted share bots. [SPEC §20](docs/SPEC.md).
+[Orca](https://github.com/stablyai/orca) (stablyai) also manages several coding agents at once. The two tools have different centres: Orca is a desktop agent development environment built around git worktrees, terminals, an editor and diff review; agents-manager is a daemon plus web UI built around bot conversations, multi-host state and agent-to-agent delegation. The table compares shapes, not quality. Orca facts come from its README and docs as read on 2026-10-23; Orca ships daily, so check its changelog.
+
+| | agents-manager | Orca |
+|---|---|---|
+| Shape | Rust daemon + web UI, single binary; herdr runs the CLIs | Electron desktop app with built-in terminals, editor, browser and diff view |
+| Platforms | Daemon on macOS and Linux (no Windows daemon); UI in any browser | Desktop app for macOS, Windows and Linux |
+| Phone | Same web UI, reachable over LAN or Tailscale; no native app | iOS and Android companion apps paired with the desktop app |
+| Agent CLIs | 4 kinds with hook integration: Claude Code, Codex, Grok, Antigravity | Any terminal CLI; 27 preconfigured, including Claude Code, Codex, Grok, Gemini, Cursor, Copilot, OpenCode, Pi |
+| Reply capture | CLI hooks and native transcripts, terminal snapshot as a marked fallback; remote hooks via spool files | Terminal view plus agent status hooks (working / waiting / done), notifications and unread state |
+| Git worktrees | Not managed by the product; agents create their own per repo conventions | Core feature: one isolated worktree per task, fan one prompt out to several agents, compare and merge |
+| Diff / PR review | Not provided (explicit non-goal) | Diff annotations sent back to the agent, GitHub and Linear integration |
+| Remote hosts | Whole projects on SSH hosts via that host's herdr; host shells, CLI login, per-host quota; project hand-off between daemons | SSH worktrees with remote terminals, files, git, auto-reconnect and port forwarding |
+| Accounts and quota | Claude `cc0`–`cc6` identities per host; quota windows for Claude, Codex, Grok and agy (Gemini bucket) | Account switcher and usage tracking for Claude, Codex, Gemini, Antigravity, OpenCode, Kimi, MiniMax and others |
+| Multi-agent work | Child agents tracked under parents with stuck / done notices; `@bot` group chat; mission cards; AGM supervisor | Experimental Orchestration: runs, tasks, dispatches, supervised workers, decision gates, workers on other hosts |
+| Idle agents | Supervisor sleeps idle bots (default 90 min, configurable) and keeps resume info | Experimental hibernation (off by default, 30 min) that relaunches the CLI with resume flags |
+| Scheduling | One-off / interval / daily / weekly schedules into a bot's queue | Not described in its docs |
+| Tooling updates | Version overview and one-click update of herdr, CLIs and hooks per host; upstream changelog triage | Not described in its docs |
+| Editor and preview | No editor; embedded preview of a bot's local dev server | VS Code editor, Design Mode, Markdown / PDF / image previews |
+| Scripting | HTTP / WebSocket API ([`docs/API.md`](docs/API.md)), `bin/agm` | `orca` CLI (worktree create, snapshot, click, fill) |
+| UI language | Traditional Chinese | English, with translated READMEs |
+| License | Not yet declared in this repository | MIT |
+
+Pick Orca when you want an IDE that opens ten worktrees and reviews their diffs. Pick agents-manager when your agents already run in terminals, possibly on other machines, and you want to steer them from a browser, let them delegate to each other, and keep an eye on quota and schedules. They can coexist.
+
+Orca sources: [README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930378941ff470b69d23523d/README.md), [onorca.dev](https://onorca.dev), [worktrees](https://www.onorca.dev/docs/model/worktrees), [SSH](https://www.onorca.dev/docs/ssh), [mobile](https://www.onorca.dev/docs/mobile), [usage tracking](https://www.onorca.dev/docs/agents/usage-tracking), [hooks](https://www.onorca.dev/docs/agents/hooks-memory), [hibernation](https://www.onorca.dev/docs/agents/hibernation), [orchestration](https://www.onorca.dev/docs/cli/orchestration). "Not described" means the public docs did not mention it, not that it is absent.
 
 ## Quick start
 
-Requirements: Rust (`cargo`), [Bun](https://bun.sh), an installed [herdr](https://herdr.dev), and at least one agent CLI (`claude`, `codex`, `grok` or `agy`).
+**Platforms and requirements.** The daemon runs on macOS and Linux. You need Rust (`cargo`), [Bun](https://bun.sh), an installed [herdr](https://herdr.dev) and at least one agent CLI (`claude`, `codex`, `grok` or `agy`). herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
 
-```bash
-git clone git@github.com:Eden-Sun/agents-manager.git
-cd agents-manager
-
-# Start the daemon (0.0.0.0:7788) and the Vite dev server (0.0.0.0:5173)
-cargo dev
-# Stop both
-cargo down
-```
-
-Without herdr, you can explore the UI against an in-memory fake backend:
+**Try the UI without herdr** against an in-memory fake backend:
 
 ```bash
 cd web
@@ -50,7 +80,16 @@ bun install
 VITE_MOCK=1 bun run dev
 ```
 
-The production UI is embedded in the daemon binary, so build the front end first:
+**Run from source** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
+
+```bash
+git clone git@github.com:Eden-Sun/agents-manager.git
+cd agents-manager
+cargo dev     # start both
+cargo down    # stop both
+```
+
+**Production build.** The UI is embedded in the daemon binary, so build the front end first:
 
 ```bash
 cd web && bun install && bun run build && cd ..   # produces web/dist
@@ -58,9 +97,34 @@ cargo build --release -p agents-managerd
 ./target/release/agents-managerd serve            # http://127.0.0.1:7788
 ```
 
-Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. Dev builds bind every interface so a phone on your LAN or Tailscale can connect; packaged macOS apps bind loopback only (`AM_DEV_LAN` overrides either). Before pushing, run `scripts/check.sh changed`; see [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md).
+Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. Dev builds bind every interface so a phone on your LAN or Tailscale can open the same UI; packaged macOS apps bind loopback only (`AM_DEV_LAN` overrides either).
 
-## Architecture
+## Supported agent CLIs
+
+Each CLI gets a hook injected at launch, so replies arrive as structured events rather than scraped text.
+
+| Kind | Reply source | Notes |
+|---|---|---|
+| **claude** | `--settings` hooks (`SessionStart` / `Stop`) | Identities `cc0`–`cc6`; live model / effort apply |
+| **codex** | `notify` hook per launch | Live model / effort / Fast apply |
+| **grok** | hook file in `GROK_HOME` | Model applies live, effort needs a restart; [SPEC §12](docs/SPEC.md) |
+| **agy** | named hooks in the Antigravity CLI settings | Update prompt in the header; [SPEC §12a](docs/SPEC.md) |
+
+Hook details are in [`docs/HOOK.md`](docs/HOOK.md).
+
+## Advanced features
+
+These are optional and off until configured.
+
+- **AGM supervisor** — a coordinator bot that patrols the fleet, dispatches work, sleeps idle bots and handles deploys. [SPEC §18](docs/SPEC.md).
+- **Jev suggestions** — a judge layer that scores the options of a blocked question and marks them as "Jev suggestion"; it never answers for you. [SPEC §4.3c](docs/SPEC.md).
+- **Claude API key** — lets one-off LLM jobs (update triage, changelog translation) skip a full Claude Code session. [SPEC §4.3d](docs/SPEC.md).
+- **Share bots** — restricted or trusted bots exposed through a separate share entry point. [SPEC §20](docs/SPEC.md).
+- **Update checks** — one settings tab lists herdr, agent CLIs and hook integrations per host. [SPEC §6.9c](docs/SPEC.md).
+
+![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/2026-10-23-settings-updates.png)
+
+## How it works
 
 ```mermaid
 flowchart LR
@@ -85,23 +149,12 @@ flowchart LR
 ```
 
 - **web** (`web/`) — React + Zustand, a pure projection of daemon state.
-- **daemon** (`daemon/`, binary `agents-managerd`) — reconciles with herdr, injects hooks, matches turns, projects `config.toml` into SQLite, serves HTTP / WebSocket. It never spawns agent CLIs itself.
+- **daemon** (`daemon/`, binary `agents-managerd`) — reconciles with herdr, injects hooks, matches turns, projects `config.toml` into SQLite, serves HTTP / WebSocket.
 - **herdr** — owns the real pane and agent lifecycle, sends prompts, reads the screen.
 
 `config.toml` is the source of truth for desired projects and bots; SQLite holds runtime state (runs, turns, messages).
 
-## Supported agent kinds
-
-| Kind | Reply source | Notes |
-|---|---|---|
-| **claude** | `--settings` hooks (`SessionStart` / `Stop`) | Identities `cc0`–`cc6`; live model / effort apply |
-| **codex** | `notify` hook per launch | Live model / effort / Fast apply |
-| **grok** | hook file in `GROK_HOME` | Model applies live, effort needs a restart; [SPEC §12](docs/SPEC.md) |
-| **agy** | named hooks in the Antigravity CLI settings | Update prompt in the header; [SPEC §12a](docs/SPEC.md) |
-
-Hook details are in [`docs/HOOK.md`](docs/HOOK.md).
-
-## Documentation
+## Documentation and development
 
 | Document | Contents |
 |---|---|
@@ -117,4 +170,4 @@ Hook details are in [`docs/HOOK.md`](docs/HOOK.md).
 | [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | Optional ChatGPT web consult worker |
 | [`web/README.md`](web/README.md) | Front-end quick commands |
 
-Docs describe the current state only; history lives in git.
+Before pushing, run `scripts/check.sh changed`; see [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md). Docs describe the current state only; history lives in git.
