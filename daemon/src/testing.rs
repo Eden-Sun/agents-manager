@@ -90,6 +90,8 @@ pub struct LivePane {
     pub reads: u32,
     /// Revision returned by fake `pane.read`; race tests can bump it without changing composer text.
     pub revision: u64,
+    /// 像真的 herdr 0.9.5：`pane.read` 的 revision 恆為 0（#1909）。預設 false，其他測試維持 `revision.max(1)`。
+    pub zero_revision: bool,
     /// A TUI that eats the Enter: the text stays in the box.
     pub swallow_enter: bool,
     /// A TUI that throws the typed text away without submitting it (the 2026-09-14 incident).
@@ -647,7 +649,7 @@ impl MockHerdr {
                                 let mut live = st.live.lock().unwrap();
                                 live.get_mut(&pid).map(|p| {
                                     p.reads += 1;
-                                    (p.render(), p.revision.max(1))
+                                    (p.render(), if p.zero_revision { 0 } else { p.revision.max(1) })
                                 })
                             };
                             let (text, revision) = live_read.unwrap_or_else(|| {

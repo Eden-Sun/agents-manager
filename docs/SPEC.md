@@ -1815,8 +1815,13 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    啟動流程在 herdr ready 之後另讀畫面，待空輸入框穩定；警告開著不算 ready，預設只選 `Resume`，保留原 session。
    `SessionStart` 可能先於警告抵達、已把接回 marker 清掉，仍要檢查警告；接回驗證仍以 hook 回報的 session id 為準，按鍵不等於驗證。
    接回過的 claude 派送走有送達證據的 pane 路徑；打字前與送出後遇到此框都先選 Resume，CLI 保留的未送訊息不重貼，
-   需要再送出時只對仍逐字相符的草稿補 Enter，再由原 session transcript 證明送達。每顆鍵前重查 run／pane／host 世代與畫面，
-   不按 Start a new conversation；看不準時保留待重試，不當成錯誤、回答或交給使用者的 blocked choice。
+   需要再送出時只對仍逐字相符的草稿補 Enter，再由原 session transcript 證明送達。
+   **按鍵的授權（#1909）**：畫面仍符合冷快取警告且游標已停在 `Resume` 才按一次 Enter；游標在 `Start a new conversation` 或沒有游標一律不按、
+   也不移焦。按之前連讀兩次，pane id、source、truncated、文字必須完全相同，且 run／host 世代／session／pane 在讀之間與按鍵前各查一次，兩者缺一不可。
+   **不用 `pane.read` 的 revision 當證據**：herdr 0.9.5 實測恆回 0，舊的 `revision == 0` 守門讓這條在真環境從沒按下過鍵、巡檢卡了 35 分鐘。
+   看不準時保留待重試，不當成錯誤、回答或交給使用者的 blocked choice；放棄時每個 run 每種原因只寫一次 WARN
+   （固定原因字串：`cursor_not_on_resume`、`screen_changed_between_reads`、`run_host_session_or_pane_changed`、`read_not_visible_or_truncated`、
+   `menu_still_shown_after_enter`、`no_pane`；去重表上限 256 筆、滿了淘汰最舊的一筆，每筆 24 小時過期；不為清理去查 DB）。
    背景巡邏共用 bot 鎖，補處理晚一幀才出現的框。這只是接回確認，不新增續行提示，`resume_nudge` 的中途工具候選規則不變。
    測試畫面 `claude-2.1.304-cold-resume.txt` 是 Max 5x／Opus 4.6[1m] 的受控實機擷取：只修改拋棄式 transcript 的時間（2h）
    與 usage／iterations（1M tokens），不是自然等待或真的發送 1M tokens。首訊息 `Your unsent message will still be there after you answer`

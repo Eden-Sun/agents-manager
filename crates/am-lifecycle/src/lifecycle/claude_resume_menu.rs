@@ -67,7 +67,7 @@ async fn current_body(
 }
 
 /// `true` 只代表警告已關閉；原訊息仍由 delivery 的 transcript/session fence 證明。
-/// 最多移焦兩次、按一次 Enter；畫面改變或權威失效時不盲按、不重貼訊息。
+/// 只在游標已停在 Resume 時按一次 Enter；不移動游標。畫面改變或權威失效時不盲按、不重貼訊息。
 pub fn accept_if_shown<'a>(
     app: &'a (impl Db + HerdrRoutes + HostsAccess),
     run: &'a db::Run,
@@ -93,6 +93,65 @@ pub fn accept_on<'a>(
     Box::pin(accept_on_body(app, run, client))
 }
 
+/// 放棄的原因（固定字串）。呼叫端把 Err 吞掉，這裡是唯一會留下紀錄的地方。
+const NO_PANE: &str = "no_pane";
+const READ_UNTRUSTED: &str = "read_not_visible_or_truncated";
+const CURSOR_NOT_ON_RESUME: &str = "cursor_not_on_resume";
+const AUTHORITY_CHANGED: &str = "run_host_session_or_pane_changed";
+const SCREEN_CHANGED: &str = "screen_changed_between_reads";
+const STILL_SHOWN: &str = "menu_still_shown_after_enter";
+
+/// 每個 run 最近一次警告的原因與時間：同一原因不重複寫 WARN（排隊的 prompt 每次重試都會走到這裡）。
+/// 上限 [`GIVE_UP_CAP`] 筆，滿了淘汰插入時間最舊的一筆；超過 [`GIVE_UP_TTL`] 的當作不存在並刪掉。
+/// 不為了清理去查 DB：結束的 run 留在表裡無妨，會被 TTL 或上限擠掉。
+const GIVE_UP_CAP: usize = 256;
+const GIVE_UP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Default)]
+struct GiveUps(std::collections::HashMap<String, (&'static str, std::time::Instant)>);
+
+impl GiveUps {
+    /// 這個 run 的這個原因是不是第一次（順手記下來）。`now` 由呼叫端給，測試不必真的等。
+    fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
+        if let Some((seen, at)) = self.0.get(run_id).copied() {
+            if now.saturating_duration_since(at) > GIVE_UP_TTL {
+                self.0.remove(run_id);
+            } else if seen == reason {
+                return false;
+            }
+        }
+        if self.0.len() >= GIVE_UP_CAP && !self.0.contains_key(run_id) {
+            if let Some(oldest) = self.0.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone()) {
+                self.0.remove(&oldest);
+            }
+        }
+        self.0.insert(run_id.to_string(), (reason, now));
+        true
+    }
+}
+
+fn gave_up() -> &'static std::sync::Mutex<GiveUps> {
+    static T: std::sync::OnceLock<std::sync::Mutex<GiveUps>> = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// 放棄自動確認：同一個原因每個 run 只寫一次 WARN，然後回 `PENDING`（呼叫端據此重試）。
+fn give_up(run: &db::Run, reason: &'static str) -> anyhow::Error {
+    if gave_up().lock().unwrap().first_time(&run.id, reason, std::time::Instant::now()) {
+        tracing::warn!(run = %run.id, bot = %run.bot_id, reason, "冷快取的 Resume 選單沒有自動確認，保持 cold_resume_pending");
+    }
+    anyhow::anyhow!(PENDING)
+}
+
+/// 兩次讀要完全相同（pane、來源、截斷、文字）。herdr 的 `pane.read` 不提供可信 revision（實測恆為 0），
+/// 不能用它當證據；文字相同加上 run／host／session／pane 的 fence 才是授權。
+fn same_frame(a: &am_base::herdr::PaneRead, b: &am_base::herdr::PaneRead) -> bool {
+    a.pane_id == b.pane_id
+        && a.source == b.source
+        && a.truncated == b.truncated
+        && a.text == b.text
+}
+
 async fn accept_on_body(
     app: &(impl Db + HerdrRoutes + HostsAccess),
     run: &db::Run,
@@ -104,14 +163,10 @@ async fn accept_on_body(
     if bot.kind != "claude" {
         return Ok(false);
     }
-    let pane = run
-        .pane_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!(PENDING))?;
+    let pane = run.pane_id.as_deref().ok_or_else(|| give_up(run, NO_PANE))?;
     let mut answered = false;
-    let mut moves = 0;
     let mut seen = false;
-    for _ in 0..4 {
+    for _ in 0..2 {
         let read = client.pane_read(pane, "visible", 80).await?;
         let Some(choice) = cold_resume_choice(&read.text) else {
             if seen
@@ -127,48 +182,37 @@ async fn accept_on_body(
             return Ok(seen);
         };
         seen = true;
-        if answered
-            || read.pane_id != pane
-            || read.source != "visible"
-            || read.truncated
-            || read.revision == 0
-        {
-            anyhow::bail!(PENDING);
+        if read.pane_id != pane || read.source != "visible" || read.truncated {
+            return Err(give_up(run, READ_UNTRUSTED));
         }
-        let key = match choice {
-            ResumeChoice::Resume => "enter",
-            _ => "up",
-        };
-        if key == "up" {
-            if moves >= 2 {
-                anyhow::bail!(PENDING)
-            }
-            moves += 1;
+        if answered {
+            return Err(give_up(run, STILL_SHOWN));
+        }
+        // 游標不在 Resume 上（含沒有游標）一律不按、也不移焦：那一鍵可能選到「Start a new conversation」。
+        if choice != ResumeChoice::Resume {
+            return Err(give_up(run, CURSOR_NOT_ON_RESUME));
         }
         #[cfg(all(test, feature = "daemon-test-harness"))]
         super::race_point::hit("cold_resume_before_key", &run.id).await;
         if !current(app, run, client).await? {
-            anyhow::bail!(PENDING)
+            return Err(give_up(run, AUTHORITY_CHANGED));
         }
         let latest = client.pane_read(pane, "visible", 80).await?;
-        if latest.revision != read.revision
-            || latest.text != read.text
-            || latest.pane_id != read.pane_id
-            || latest.source != "visible"
-            || latest.truncated
-            || !current(app, run, client).await?
-        {
-            anyhow::bail!(PENDING);
+        if !same_frame(&read, &latest) {
+            return Err(give_up(run, SCREEN_CHANGED));
         }
-        // Herdr 沒有按 revision 的 conditional send；同 survey 使用最後一讀＋同一連線世代。
+        if !current(app, run, client).await? {
+            return Err(give_up(run, AUTHORITY_CHANGED));
+        }
+        // Herdr 沒有按 revision 的 conditional send；用最後一讀的文字＋同一連線世代縮小窗口。
         app.hosts()
-            .run_if_current(&client.fence, client.pane_send_keys(pane, &[key]))
+            .run_if_current(&client.fence, client.pane_send_keys(pane, &["enter"]))
             .await
-            .ok_or_else(|| anyhow::anyhow!(PENDING))??;
-        answered = key == "enter";
+            .ok_or_else(|| give_up(run, AUTHORITY_CHANGED))??;
+        answered = true;
         tokio::time::sleep(SETTLE).await;
     }
-    anyhow::bail!(PENDING)
+    Err(give_up(run, STILL_SHOWN))
 }
 
 /// herdr 的 idle／blocked 不能把此框當成已 ready 的輸入框。

@@ -10,6 +10,28 @@ const ACTUAL: &str = include_str!("fixtures/claude-2.1.304-cold-resume.txt");
 // 尚未實機重現：依 2.1.304 binary 的固定字串與無編號選項合成；帳號 idle 功能旗標未開。
 const SYNTHETIC: &str = include_str!("fixtures/claude-2.1.304-cold-resume-unsent-synthetic.txt");
 
+// 同一份合成畫面，只把游標放回 Resume（真 2.1.304 的預設位置）。自動確認只在游標已在 Resume 時才按。
+fn synthetic_on_resume() -> String {
+    let moved = SYNTHETIC.replace(
+        "    Resume\n  ❯ Start a new conversation",
+        "  ❯ Resume\n    Start a new conversation",
+    );
+    assert_ne!(moved, SYNTHETIC);
+    assert_eq!(cold_resume_choice(&moved), Some(ResumeChoice::Resume));
+    moved
+}
+
+fn zero_revision(env: &tt::Env, run: &db::Run) {
+    // 真 herdr 0.9.5 的 `pane.read` 恆回 revision 0（#1909）。
+    env.herdr
+        .live
+        .lock()
+        .unwrap()
+        .get_mut(run.pane_id.as_deref().unwrap())
+        .unwrap()
+        .zero_revision = true;
+}
+
 #[test]
 fn cold_resume_actual_is_not_ready_an_error_a_reply_or_a_human_question() {
     assert_eq!(cold_resume_choice(ACTUAL), Some(ResumeChoice::Resume));
@@ -190,7 +212,7 @@ async fn cold_resume_synthetic_delivery_preserves_and_proves_the_unsent_message_
         .unwrap()
         .get_mut(pane)
         .unwrap()
-        .cold_resume_on_submit = Some(SYNTHETIC.to_string());
+        .cold_resume_on_submit = Some(synthetic_on_resume());
     let client = super::super::client_for_run(&env.app, &run).await.unwrap();
     let out = super::super::delivery::deliver_prompt(
         &env.app,
@@ -231,7 +253,6 @@ async fn cold_resume_synthetic_delivery_preserves_and_proves_the_unsent_message_
         keys,
         vec![
             json!(["enter"]),
-            json!(["up"]),
             json!(["enter"]),
             json!(["enter"])
         ]
@@ -314,7 +335,7 @@ async fn cold_resume_synthetic_already_submitted_message_is_never_submitted_agai
     {
         let mut live = env.herdr.live.lock().unwrap();
         let p = live.get_mut(pane).unwrap();
-        p.cold_resume_on_submit = Some(SYNTHETIC.to_string());
+        p.cold_resume_on_submit = Some(synthetic_on_resume());
         p.cold_resume_submit_on_accept = true;
     }
     let client = super::super::client_for_run(&env.app, &run).await.unwrap();
@@ -335,8 +356,8 @@ async fn cold_resume_synthetic_already_submitted_message_is_never_submitted_agai
     assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
     assert_eq!(
         env.herdr.calls_to("pane.send_keys").len(),
-        3,
-        "送出、移焦、Resume；不能補第四顆送出鍵"
+        2,
+        "送出、Resume；不能補第三顆送出鍵"
     );
 }
 
@@ -404,7 +425,7 @@ async fn cold_resume_synthetic_menu_during_paste_preserves_the_draft_without_rep
         .unwrap()
         .get_mut(pane)
         .unwrap()
-        .cold_resume_on_type = Some(SYNTHETIC.to_string());
+        .cold_resume_on_type = Some(synthetic_on_resume());
     let client = super::super::client_for_run(&env.app, &run).await.unwrap();
     assert_eq!(
         super::super::delivery::deliver_prompt(
@@ -424,9 +445,33 @@ async fn cold_resume_synthetic_menu_during_paste_preserves_the_draft_without_rep
     assert_eq!(env.herdr.calls_to("pane.send_text").len(), 1);
     assert_eq!(
         env.herdr.calls_to("pane.send_keys").len(),
-        3,
-        "移焦、Resume、送原訊息"
+        2,
+        "Resume、送原訊息"
     );
+}
+
+#[tokio::test]
+async fn cold_resume_revision_only_redraw_is_not_screen_evidence_either_way() {
+    let (env, bot, run, _) = fixture(Some(ACTUAL)).await;
+    crate::hookrecv::consume_resume_session(&env.app, &bot, &run, Some("sess-1"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=?")
+        .bind(&run.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let live = env.herdr.live.clone();
+    let pane = run.pane_id.clone().unwrap();
+    super::super::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        // herdr 的 revision 不可信（實測恆為 0）：只有 revision 變、文字沒變，不算畫面改變。
+        live.lock().unwrap().get_mut(&pane).unwrap().revision += 2;
+    });
+    let out = super::super::prompt::prompt_with(&env.app, &bot.id, "retry safely", "cold-resume-race", &[])
+        .await
+        .unwrap();
+    assert_eq!(out.delivery, "ok");
+    assert_eq!(env.herdr.calls_to("pane.send_keys").len(), 2, "Resume、送原訊息");
 }
 
 #[tokio::test]
@@ -443,8 +488,9 @@ async fn cold_resume_blocked_menu_race_is_retryable_not_a_question_for_the_user(
     let live = env.herdr.live.clone();
     let pane = run.pane_id.clone().unwrap();
     super::super::race_point::arm("cold_resume_before_key", &run.id, move || async move {
-        // 選項剛重畫；不能依舊的一幀按鍵，也不能回「answer the prompt first」。
-        live.lock().unwrap().get_mut(&pane).unwrap().revision += 2;
+        // 選項剛重畫成別的內容；不能依舊的一幀按鍵，也不能回「answer the prompt first」。
+        live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu =
+            Some(ACTUAL.replace("about 10%", "about 11%"));
     });
     match super::super::prompt::prompt_with(
         &env.app,
@@ -464,4 +510,97 @@ async fn cold_resume_blocked_menu_race_is_retryable_not_a_question_for_the_user(
     }
     assert!(env.herdr.calls_to("pane.send_keys").is_empty());
     assert!(env.herdr.calls_to("pane.send_text").is_empty());
+}
+
+#[tokio::test]
+async fn cold_resume_accepts_when_herdr_reports_revision_zero() {
+    // #1909：真 herdr 的 pane.read 恆回 revision 0，舊守門因此一個鍵都沒按、巡檢卡了 35 分鐘。
+    let (env, _, run, _) = fixture(Some(ACTUAL)).await;
+    zero_revision(&env, &run);
+    let pane = run.pane_id.clone().unwrap();
+    assert!(accept_if_shown(&env.app, &run).await.unwrap());
+    let keys = env.herdr.calls_to("pane.send_keys");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["keys"], json!(["enter"]));
+    assert!(env.herdr.pane(&pane).unwrap().cold_resume_menu.is_none());
+}
+
+#[tokio::test]
+async fn cold_resume_start_accepts_when_herdr_reports_revision_zero() {
+    let (env, _, run, _) = fixture(Some(ACTUAL)).await;
+    zero_revision(&env, &run);
+    assert_eq!(
+        after_start(&env.app, "claude", &run.id, AgentStatus::Idle, None).await,
+        AgentStatus::Idle
+    );
+    assert_eq!(env.herdr.calls_to("pane.send_keys").len(), 1);
+}
+
+#[tokio::test]
+async fn cold_resume_revision_zero_with_changed_text_between_reads_never_sends_a_key() {
+    let (env, _, run, _) = fixture(Some(ACTUAL)).await;
+    zero_revision(&env, &run);
+    let live = env.herdr.live.clone();
+    let pane = run.pane_id.clone().unwrap();
+    super::super::race_point::arm("cold_resume_before_key", &run.id, move || async move {
+        live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu =
+            Some(ACTUAL.replace("2h and is 1m tokens", "3h and is 1m tokens"));
+    });
+    assert!(accept_if_shown(&env.app, &run).await.is_err());
+    assert!(env.herdr.calls_to("pane.send_keys").is_empty());
+}
+
+#[tokio::test]
+async fn cold_resume_cursor_not_on_resume_never_sends_a_key_or_moves_the_cursor() {
+    // 游標停在 Start a new conversation（合成畫面），以及完全沒有游標的畫面：一律不按、不移焦。
+    let unfocused = ACTUAL.replace("  ❯ 1. Resume", "    1. Resume");
+    assert_ne!(unfocused, ACTUAL);
+    for (name, menu) in [("on_new", SYNTHETIC.to_string()), ("unfocused", unfocused)] {
+        let (env, _, run, _) = fixture(Some(&menu)).await;
+        let pane = run.pane_id.clone().unwrap();
+        let err = accept_if_shown(&env.app, &run).await.unwrap_err();
+        assert_eq!(err.to_string(), PENDING, "{name}");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "{name}");
+        assert_eq!(env.herdr.pane(&pane).unwrap().cold_resume_menu.as_deref(), Some(menu.as_str()), "{name}");
+    }
+}
+
+#[test]
+fn cold_resume_warn_table_writes_each_reason_once_per_run() {
+    let t0 = std::time::Instant::now();
+    let mut t = GiveUps::default();
+    assert!(t.first_time("run-a", CURSOR_NOT_ON_RESUME, t0));
+    assert!(!t.first_time("run-a", CURSOR_NOT_ON_RESUME, t0), "同一原因不重複寫");
+    assert!(t.first_time("run-b", CURSOR_NOT_ON_RESUME, t0), "別的 run 各自計");
+    assert!(t.first_time("run-a", SCREEN_CHANGED, t0), "原因變了才再寫");
+    assert!(!t.first_time("run-a", SCREEN_CHANGED, t0));
+}
+
+#[test]
+fn cold_resume_warn_table_evicts_the_oldest_entry_at_the_cap() {
+    let t0 = std::time::Instant::now();
+    let at = |i: usize| t0 + Duration::from_secs(i as u64);
+    let mut t = GiveUps::default();
+    for i in 0..GIVE_UP_CAP {
+        assert!(t.first_time(&format!("run-{i}"), STILL_SHOWN, at(i)));
+    }
+    assert_eq!(t.0.len(), GIVE_UP_CAP);
+    assert!(t.first_time("run-new", STILL_SHOWN, at(GIVE_UP_CAP)));
+    assert_eq!(t.0.len(), GIVE_UP_CAP, "不超過上限");
+    assert!(!t.0.contains_key("run-0"), "插入時間最舊的被淘汰");
+    assert!(t.0.contains_key("run-1") && t.0.contains_key("run-new"));
+    assert!(t.first_time("run-0", STILL_SHOWN, at(GIVE_UP_CAP + 1)), "被淘汰的下次當作第一次");
+}
+
+#[test]
+fn cold_resume_warn_table_entry_expires_after_the_ttl_and_warns_again() {
+    let t0 = std::time::Instant::now();
+    let mut t = GiveUps::default();
+    assert!(t.first_time("run-a", CURSOR_NOT_ON_RESUME, t0));
+    let almost = t0 + GIVE_UP_TTL;
+    assert!(!t.first_time("run-a", CURSOR_NOT_ON_RESUME, almost), "剛好 TTL 還算有效");
+    let later = t0 + GIVE_UP_TTL + Duration::from_secs(1);
+    assert!(t.first_time("run-a", CURSOR_NOT_ON_RESUME, later), "過期後同一原因再印一次");
+    assert_eq!(t.0.len(), 1, "過期那筆被刪掉再重新記");
+    assert!(!t.first_time("run-a", CURSOR_NOT_ON_RESUME, later + Duration::from_secs(1)));
 }
