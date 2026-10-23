@@ -4,6 +4,8 @@
  * 2026-09-23 使用者：「為什麼看不見題目」——pane 只有 14 行，claude 把自己的選單裁掉，題目那行根本沒畫出來，
  * 選項也只剩捲動中的一段（`↓ 3.`、跳到 `5.`），網頁從畫面怎麼 parse 都拿不到。transcript 裡有完整的題目。
  */
+import { JEV_ADVISORY_NOTE, JEV_FULL_NAME } from './jevLabel'
+
 export interface PendingOption {
   label: string
   description: string
@@ -18,6 +20,9 @@ export interface JevPick {
   label: string
   score: number
 }
+
+/** 選單與原題卡共用的一行說明（標籤本身是 `JevLabel`；issue #1912）。 */
+export const JEV_ASK_NOTE = `${JEV_FULL_NAME}的建議，${JEV_ADVISORY_NOTE}，不會替你作答；請自己選。`
 
 export interface PendingQuestion {
   header: string

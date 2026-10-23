@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { PendingQuestion } from '../lib/pendingQuestion'
+import { JEV_ASK_NOTE, type PendingQuestion } from '../lib/pendingQuestion'
+import { JevLabel } from './JevLabel'
 import './pendingQuestionCard.css'
 
 /**
@@ -26,18 +27,25 @@ export function PendingQuestionCard({
   const [open, setOpen] = useState(defaultOpen)
   if (questions.length === 0) return null
   // Jev 的選項建議（issue #1475）：只提示、不代答；沒有建議（沒開、失敗、分數太接近、多選題）就什麼都不顯示。
-  const anyJev = questions.some((q) => q.jev)
+  const jevPicks = questions.filter((q) => q.jev)
+  const anyJev = jevPicks.length > 0
   return (
     <div className={`pending-q${open ? ' pending-q-open' : ''}`} role="note" aria-label="agent 在問的問題（對話紀錄裡的原題）">
       <button type="button" className="pending-q-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
         原題（{questions.length} 題）
         <span className="pending-q-src">終端沒畫出全部題目，從對話紀錄讀出</span>
-        {anyJev ? <span className="pending-q-jev">Jev 有建議</span> : null}
+        {anyJev ? (
+          <span className="pending-q-jev">
+            <JevLabel prob={jevPicks.length === 1 ? jevPicks[0].jev?.score : null} />
+            {jevPicks.length > 1 ? `（${jevPicks.length} 題）` : null}
+          </span>
+        ) : null}
       </button>
       {open ? (
         <>
           <p className="pending-q-note">只供閱讀；作答用{answerWhere === 'above' ? '上面的選項' : '下面的按鍵'}。</p>
+          {anyJev ? <p className="pending-q-jev-note">{JEV_ASK_NOTE}</p> : null}
           {questions.map((q, qi) => (
             <div key={`${qi}-${q.question}`} className={`pending-q-item${qi === current ? ' pending-q-current' : ''}`}>
               <p className="pending-q-meta">
@@ -51,7 +59,7 @@ export function PendingQuestionCard({
                 // 選項在上面的選單裡、這裡不再列：建議改成一行說明，不然選單與這張卡都看不到它。
                 q.jev ? (
                   <p className="pending-q-jev-line">
-                    <span className="pending-q-jev">Jev 建議 {q.jev.score.toFixed(2)}</span>
+                    <JevLabel className="pending-q-jev" prob={q.jev.score} />
                     {q.jev.label}
                   </p>
                 ) : null
@@ -61,7 +69,7 @@ export function PendingQuestionCard({
                     <li key={o.label}>
                       {o.label}
                       {o.description ? <span className="pending-q-desc">：{o.description}</span> : null}
-                      {q.jev && q.jev.option === oi ? <span className="pending-q-jev">Jev 建議 {q.jev.score.toFixed(2)}</span> : null}
+                      {q.jev && q.jev.option === oi ? <JevLabel className="pending-q-jev" prob={q.jev.score} /> : null}
                     </li>
                   ))}
                 </ul>
