@@ -24,7 +24,7 @@ export default defineConfig({
   server: {
     // 使用者是從手機／LAN 上的裝置開這個 dev server，只綁 loopback 他們連不到，
     // 所以 5173 一律對外（SPEC §18.1）。dev 的 daemon 也綁 0.0.0.0（見檔頭），跨裝置來的請求
-    // 靠下面 proxy 的 changeOrigin + Origin 改寫，以本機身分進 daemon。
+    // 靠下面 proxy 的 changeOrigin + Origin 改寫，以本機身份進 daemon。
     host: true,
     // vite 只放行 localhost 與 IP：用 tailnet 名字開（`http://agm:5173`、`agm.tail161aae.ts.net`）會被擋成 403
     // （2026-10-02 使用者）。只放行自己 tailnet 的名字，不整個關掉主機檢查（那是擋 DNS rebinding 的）。
