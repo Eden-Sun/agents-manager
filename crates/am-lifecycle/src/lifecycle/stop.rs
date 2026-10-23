@@ -778,7 +778,7 @@ fn interrupt_arrival_unavailable(bot_id: &str, read: &str, e: impl std::fmt::Dis
 }
 
 /// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
-/// 貼上會黏在後面。只清這筆被中斷回合的 prompt；草稿不同、讀不到或 run/pane/session/revision 改變就不動。只做 claude，失敗不報錯。
+/// 貼上會黏在後面。只清這筆被中斷回合的 prompt；草稿不同、讀不到或 run/pane/session 或畫面改變就不動。只做 claude，失敗不報錯。
 ///
 /// 讀法跟送出前的檢查一樣（#581）：以前讀 `visible` 80 列、放回來的長 prompt 撐高的框找不到框頂，
 /// 判成「框是空的」沒按，框就一直卡著那段字。按完重讀一次，框沒空就留一筆 log（不再按：空框的 `ctrl+c` 是「再按一次離開」）。
@@ -799,7 +799,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
         tracing::warn!(run = %run.id, "interrupt: could not read the pane to look for a restored prompt; nothing cleared");
         return;
     };
-    if candidate.pane_id != pane {
+    if candidate.pane_id != pane || candidate.source != SCAN_SOURCE || candidate.truncated {
         return;
     }
     if !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
@@ -816,7 +816,7 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     // immediately before Ctrl+C; a change after this read remains a narrow non-atomic window.
     let Ok(fresh) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
     if fresh.pane_id != pane
-        || fresh.revision != candidate.revision
+        || !super::composer_draft::same_snapshot(&candidate, &fresh)
         || !restored_prompt_matches(&bot.kind, &fresh.text, expected_prompt)
         || !abort_binding_is_current(app, run).await
     {

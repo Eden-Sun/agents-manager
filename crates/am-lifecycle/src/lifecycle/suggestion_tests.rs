@@ -53,6 +53,9 @@ async fn idle(suggestion: Option<&str>) -> Fx {
     env.herdr.live_pane(
         "pane-s",
         tt::LivePane {
+            // This fixture is idle; a changing working spinner invalidates the pre-key snapshot.
+            no_spinner: true,
+            zero_revision: true,
             suggestion: suggestion.map(Into::into),
             width: Some(120),
             revision: 1,
@@ -241,7 +244,7 @@ async fn a_box_that_holds_something_else_after_tab_is_left_alone() {
     assert_eq!(f.count("turns").await, 0);
 }
 
-/// Tab 收下之後、Enter 之前閘門又擋下（這裡用「框的 revision 變了」代表）：回合撤回、一個字都沒送出；
+/// Tab 收下之後、Enter 之前閘門又擋下（這裡用「同草稿、周邊畫面改變」代表；revision 恆為 0）：回合撤回、一個字都沒送出；
 /// 框裡還是那一句 → 補一個 ctrl+c 清成乾淨的空框，講清楚。
 #[tokio::test]
 async fn when_enter_is_refused_after_tab_the_accepted_text_is_cleared_again() {
@@ -249,7 +252,7 @@ async fn when_enter_is_refused_after_tab_the_accepted_text_is_cleared_again() {
     let live = f.env.herdr.live.clone();
     super::super::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
-        live.get_mut("pane-s").unwrap().revision += 1;
+        live.get_mut("pane-s").unwrap().transcript.push("new output before Enter".into());
     });
     let body = conflict(f.accept(SUGGESTION, "c1").await);
     assert_eq!(body["reason"], "draft_changed", "{body}");

@@ -174,6 +174,7 @@ async fn idle(kind: &str, composer: &[&str], transcript: bool) -> Fx {
     env.herdr.live_pane(
         "pane-d",
         tt::LivePane {
+            no_spinner: true,
             composer: composer.iter().map(|s| s.to_string()).collect(),
             width: Some(120),
             revision: 1,
@@ -276,6 +277,7 @@ async fn an_unseen_long_suffix_change_blocks_clear_even_when_the_prefix_matches(
 async fn submit_rechecks_the_composer_after_commit_and_retracts_before_enter() {
     for (kind, transcript) in [("claude", true), ("grok", false)] {
         let f = idle(kind, &["draft A"], transcript).await;
+        f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
         let old_token = current_draft_token(&f, "observe").await;
         let live = f.env.herdr.live.clone();
         super::super::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
@@ -352,6 +354,14 @@ async fn clearing_the_confirmed_draft_then_sends_the_prompt() {
     for kind in ["claude", "codex", "grok"] {
         let f = idle(kind, &["一段留在框裡的假草稿"], false).await;
         let token = current_draft_token(&f, "observe").await;
+        if kind == "grok" {
+            // Clear is planned on an idle screen. The subsequent normal-delivery fixture
+            // needs its working row to delimit the echo from Grok's boxed composer.
+            let live = f.env.herdr.live.clone();
+            super::super::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
+                live.lock().unwrap().get_mut("pane-d").unwrap().no_spinner = false;
+            });
+        }
         let out = f.send("我自己要送的", "c1", Some(&token)).await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
         assert!(out.delivery == "ok" || out.delivery == "unverified", "{kind}: {}", out.delivery);
         assert_eq!(f.keys().first(), Some(&json!(["ctrl+c"])), "{kind}: 先清框");
@@ -378,6 +388,7 @@ async fn a_draft_that_changed_is_neither_cleared_nor_typed_over() {
 #[tokio::test]
 async fn clear_rechecks_the_composer_after_validation_and_preserves_a_new_draft() {
     let f = idle("claude", &["draft A"], false).await;
+        f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
     let old_token = current_draft_token(&f, "observe").await;
     let live = f.env.herdr.live.clone();
     super::super::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
@@ -729,4 +740,50 @@ async fn a_running_turn_never_gets_the_clear_key() {
     assert_eq!(body["reason"], "draft_clear_while_busy", "{body}");
     assert!(f.keys().is_empty());
     assert_eq!(f.composer(), ["一段留在框裡的假草稿"]);
+}
+
+/// Zero is not a version: unchanged composer text cannot hide a changed surrounding screen.
+#[tokio::test]
+async fn nr1913_zero_revision_clear_rejects_changed_screen_with_same_draft() {
+    let f = idle("claude", &["draft A"], false).await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
+    let token = current_draft_token(&f, "observe").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        live.lock().unwrap().get_mut("pane-d").unwrap().transcript.push("new output".into());
+    });
+    let body = conflict(f.send("my prompt", "screen-change", Some(&token)).await);
+    assert_eq!(body["reason"], "draft_changed");
+    assert!(f.keys().is_empty());
+    assert_eq!(f.composer(), ["draft A"]);
+}
+
+#[test]
+fn nr1913_snapshot_checks_content_and_metadata_even_with_zero_revision() {
+    let before = crate::herdr::PaneRead { pane_id: "pane-a".into(), source: "visible".into(), format: "ansi".into(), text: "draft".into(), revision: 0, truncated: false };
+    assert!(same_snapshot(&before, &before));
+    for field in ["pane", "source", "format", "text", "truncated"] {
+        let mut after = before.clone();
+        match field {
+            "pane" => after.pane_id = "other".into(),
+            "source" => after.source = "recent".into(),
+            "format" => after.format = "text".into(),
+            "text" => after.text = "changed".into(),
+            _ => after.truncated = true,
+        }
+        assert!(!same_snapshot(&before, &after), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn nr1913_zero_revision_stable_clear_succeeds() {
+    let f = idle("claude", &["draft A"], false).await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().zero_revision = true;
+    let token = current_draft_token(&f, "observe").await;
+    let run = db::active_run(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+    let bot = db::bot(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+    let client = crate::herdr::HerdrClient::new(f.env.dir.join("data/herdr.sock"));
+    clear(&f.env.app, &client, &run, &bot, &token, false).await.unwrap();
+    assert_eq!(f.keys(), [json!(["ctrl+c"])]);
+    assert!(f.composer().is_empty());
 }

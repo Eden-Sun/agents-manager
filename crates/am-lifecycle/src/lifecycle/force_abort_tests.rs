@@ -76,7 +76,7 @@ async fn claude_with(composer: Vec<String>) -> Fx {
     .execute(&app.db)
     .await
     .unwrap();
-    env.herdr.live_pane("pane-a", tt::LivePane { composer, width: Some(120), ..Default::default() });
+    env.herdr.live_pane("pane-a", tt::LivePane { no_spinner: true, composer, width: Some(120), ..Default::default() });
     Fx { env, bot_id, run_id, conv }
 }
 
@@ -118,6 +118,7 @@ async fn bind_turn_prompt(f: &Fx, turn_id: &str, prompt: &str) {
 async fn a_force_abort_clears_a_restored_prompt_taller_than_the_default_tail() {
     let draft = tall_draft();
     let f = claude_with(draft.clone()).await;
+        f.env.herdr.live.lock().unwrap().get_mut("pane-a").unwrap().zero_revision = true;
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, &draft.join("\n")).await;
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer.len(), DRAFT_ROWS, "中止前：框裡是放回來的那段");
@@ -168,6 +169,7 @@ async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
 #[tokio::test]
 async fn a_force_abort_rechecks_the_composer_before_clearing_it() {
     let f = claude_with(vec!["aborted prompt A".into()]).await;
+        f.env.herdr.live.lock().unwrap().get_mut("pane-a").unwrap().zero_revision = true;
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
     let live = f.env.herdr.live.clone();
@@ -347,4 +349,20 @@ async fn leftover_unknown_turns_get_one_note() {
     f.unknown_turn(&f.conv).await;
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
     assert_eq!(f.notes(&f.conv).await, ["回合已由使用者強制中止（共 3 筆）", "回合已由使用者強制中止"]);
+}
+
+/// A surrounding-screen change is observable even when the composer and zero revision match.
+#[tokio::test]
+async fn nr1913_zero_revision_abort_rejects_changed_screen_with_same_prompt() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-a").unwrap().zero_revision = true;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+        live.lock().unwrap().get_mut("pane-a").unwrap().transcript.push("new output".into());
+    });
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+    assert!(!f.cleared());
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
 }
