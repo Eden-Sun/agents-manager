@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand'
+import { t } from '../lib/i18n'
 
 /** Must equal daemon `attach::MAX_BYTES`（50 MiB，2026-09-24 使用者）; shared with `Attachments.tsx`. */
 export const MAX_BYTES = 50 * 1024 * 1024
@@ -78,7 +79,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
     let room = SHELF_MAX - get().items.length
     for (const file of files) {
       if (file.size > MAX_BYTES) {
-        result.tooBig.push(file.name || '檔案')
+        result.tooBig.push(file.name || t('檔案'))
         continue
       }
       if (room <= 0) {
@@ -90,7 +91,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
       accepted.push({
         key: `s${TAB}${seq}`,
         file,
-        name: file.name || '檔案',
+        name: file.name || t('檔案'),
         size: file.size,
         isImage: isImage(file),
         // 只有圖片需要 object URL；其他檔案畫的是圖示，開一條 blob 只是白佔記憶體。
@@ -138,7 +139,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
         back.push({
           key: it.key,
           file: it.file,
-          name: it.file.name || '檔案',
+          name: it.file.name || t('檔案'),
           size: it.file.size,
           isImage: isImage(it.file),
           url: isImage(it.file) ? URL.createObjectURL(it.file) : '',

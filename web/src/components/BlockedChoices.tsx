@@ -3,6 +3,7 @@
  * 認不出選單就回 `null` 退回終端快照：按鍵直送別人終端，寧可少捷徑也不在認錯的畫面上替使用者答題。
  */
 import { useLayoutEffect, useRef, useState } from 'react'
+import { useT } from '../lib/i18n'
 import { usePaneKeys } from '../hooks/usePaneKeys'
 import {
   customAnswerChecked,
@@ -17,7 +18,7 @@ import {
 } from '../lib/tuiChoices'
 import { panelShows } from '../lib/codexAsyncQuestion'
 import { runPin, type RunPin } from '../lib/runPin'
-import { JEV_ASK_NOTE, jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
+import { jevAskNote, jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
 import { JevLabel } from './JevLabel'
 import { TypeAnswerField } from './TypeAnswerField'
@@ -57,6 +58,7 @@ export function BlockedChoices({
   /** pane 太矮、題目或分頁列被裁掉時，從原題補：沒畫出來的題目、第幾題與上一題／下一題。 */
   pendingAt?: PendingAt | null
 }) {
+  const t = useT()
   // Jev 對這一題的建議（issue #1475）：只在對得上畫面上的列時標，不影響任何按鍵。
   const jev = pendingAt?.jev ?? null
   const jevRowShown = jev !== null && menu.choices.some((c) => jevMatchesTitle(jev.label, c.title))
@@ -163,7 +165,7 @@ export function BlockedChoices({
       setNote(await fn())
     } catch {
       // store.sendKeys 已經發通知；這裡只收住拒絕並在選單旁提示，不再發第二則通知。
-      setNote('按鍵沒有送出去，請查看終端位置後再試。')
+      setNote(t('按鍵沒有送出去，請查看終端位置後再試。'))
     } finally {
       setBusy(null)
       onAnswered?.()
@@ -176,7 +178,7 @@ export function BlockedChoices({
    * （只有 Other 貼字後第 `i` 列的標題可以是貼的字，而且必須完整等於答案）。
    */
   const newPin = () => runPin(() => readTerminal(botId, 'visible', 200), () => useStore.getState().runs[botId]?.id)
-  const goneMsg = '這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。'
+  const goneMsg = t('這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。')
   const asyncGuard = async (pin: RunPin, i: number, typed?: string): Promise<boolean> => {
     const raw = await pin.read()
     const now = raw === null ? null : parseChoiceMenu(raw)
@@ -200,9 +202,9 @@ export function BlockedChoices({
       const raw = await pin.read()
       if (raw === null) return goneMsg
       const now = parseChoiceMenu(raw)
-      if (!stillHere(now)) return '畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。'
+      if (!stillHere(now)) return t('畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。')
       const move = keysToMove(now, i)
-      if (!move) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+      if (!move) return t('游標走不到這一項（畫面可能換了），什麼都沒送出。')
       if (move.length) await sendKeys(botId, move, pin.id())
       // 先只移動；游標停在目標、仍是同一題、每列標題都沒變，才送 Enter（Enter 前再讀一次）。
       let there = false
@@ -211,7 +213,7 @@ export function BlockedChoices({
         there = await asyncGuard(pin, i)
         if (pin.changed()) return goneMsg
       }
-      if (!there || !(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : '移動後畫面不是同一題、游標不在這一項或有選項變了，沒有按 Enter；請查看終端。'
+      if (!there || !(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : t('移動後畫面不是同一題、游標不在這一項或有選項變了，沒有按 Enter；請查看終端。')
       await sendKeys(botId, ['enter'], pin.id())
       return null
     })
@@ -220,33 +222,33 @@ export function BlockedChoices({
   const typeAsync = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const text = typeText.trim()
-      if (!text) return '請先打字，或改選別項。'
+      if (!text) return t('請先打字，或改選別項。')
       const pin = newPin()
       const raw = await pin.read()
       if (raw === null) return goneMsg
       const first = parseChoiceMenu(raw)
-      if (!stillHere(first)) return '畫面在這中間換過了，什麼都沒送出；請再點一次。'
+      if (!stillHere(first)) return t('畫面在這中間換過了，什麼都沒送出；請再點一次。')
       // 游標走到這一列：只移動，每步重讀。
       let at = first
-      for (let t = 0; t < WALK_TRIES && at.cursor !== i; t++) {
+      for (let attempt = 0; attempt < WALK_TRIES && at.cursor !== i; attempt++) {
         const move = keysToMove(at, i)
-        if (!move?.length) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+        if (!move?.length) return t('游標走不到這一項（畫面可能換了），什麼都沒送出。')
         await sendKeys(botId, move, pin.id())
         await sleep(STEP)
         const next = await pin.read()
         const parsed = next === null ? null : parseChoiceMenu(next)
-        if (!parsed || !stillHere(parsed)) return pin.changed() ? goneMsg : '畫面在這中間換過了，什麼都沒送出。'
+        if (!parsed || !stillHere(parsed)) return pin.changed() ? goneMsg : t('畫面在這中間換過了，什麼都沒送出。')
         at = parsed
       }
-      if (!(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : '畫面已經不是這一題的選單（可能換題或切回主輸入框了），什麼都沒送出。'
-      if (!(await sendText(botId, text, false, false, pin.id()))) return '文字沒有送出去。'
+      if (!(await asyncGuard(pin, i))) return pin.changed() ? goneMsg : t('畫面已經不是這一題的選單（可能換題或切回主輸入框了），什麼都沒送出。')
+      if (!(await sendText(botId, text, false, false, pin.id()))) return t('文字沒有送出去。')
       let shown = false
-      for (let t = 0; t < TRIES && !shown; t++) {
+      for (let attempt = 0; attempt < TRIES && !shown; attempt++) {
         await sleep(STEP)
         shown = await asyncGuard(pin, i, text)
         if (pin.changed()) return goneMsg
       }
-      if (!shown || !(await asyncGuard(pin, i, text))) return pin.changed() ? goneMsg : '那一列的內容不等於要送的答案（或換題、游標不在這一列），沒有按 Enter；請查看終端。'
+      if (!shown || !(await asyncGuard(pin, i, text))) return pin.changed() ? goneMsg : t('那一列的內容不等於要送的答案（或換題、游標不在這一列），沒有按 Enter；請查看終端。')
       await sendKeys(botId, ['enter'], pin.id())
       return null
     })
@@ -255,7 +257,7 @@ export function BlockedChoices({
   const pickOne = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const now = await read()
-      if (!stillHere(now)) return '畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。'
+      if (!stillHere(now)) return t('畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。')
       await sendKeys(botId, keysToSelect(now, i))
       return null
     })
@@ -264,11 +266,11 @@ export function BlockedChoices({
   const sendTyped = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const text = typeText.trim()
-      if (!text) return '請先打字，或改選別項。'
+      if (!text) return t('請先打字，或改選別項。')
       const landed = await walkTo(i)
-      if (!landed) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+      if (!landed) return t('游標走不到這一項（畫面可能換了），什麼都沒送出。')
       const ok = await sendText(botId, text, false)
-      if (!ok) return '文字沒有送出去。'
+      if (!ok) return t('文字沒有送出去。')
       let shown = false
       for (let t = 0; t < TRIES; t++) {
         await sleep(STEP)
@@ -278,11 +280,11 @@ export function BlockedChoices({
           break
         }
       }
-      if (!shown) return '自訂文字沒有出現在畫面上，沒有按 Enter。'
+      if (!shown) return t('自訂文字沒有出現在畫面上，沒有按 Enter。')
       // 複選頁：貼字那列會自己勾起來（2026-09-25 真機），Enter 只會把勾翻掉；勾完按下面的「送出」。
       if (menu.multi) {
         const now = await read()
-        if (!(now?.choices[i] && customAnswerChecked(now.choices[i], text))) return '自訂文字出現了但那列沒勾起來，沒有再按鍵；請看終端。'
+        if (!(now?.choices[i] && customAnswerChecked(now.choices[i], text))) return t('自訂文字出現了但那列沒勾起來，沒有再按鍵；請看終端。')
         setTypeFor(null)
         return null
       }
@@ -294,13 +296,13 @@ export function BlockedChoices({
   const toggle = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const landed = await walkTo(i)
-      if (!landed) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+      if (!landed) return t('游標走不到這一項（畫面可能換了），什麼都沒送出。')
       const before = landed.choices[i].checked
       const flipped = (now: TuiChoiceMenu) => now.choices[i]?.checked !== before
       if (await pressUntil('space', flipped)) return null
       const n = menu.choices[i].number
       if (n <= 9 && (await pressUntil(String(n), flipped))) return null
-      return '這個選單不吃點選（space 與數字鍵都沒反應），請用下面的按鍵。'
+      return t('這個選單不吃點選（space 與數字鍵都沒反應），請用下面的按鍵。')
     })
 
   const activate = (i: number) => {
@@ -318,7 +320,7 @@ export function BlockedChoices({
   const submit = () =>
     run({ kind: 'submit', key: 'submit' }, async () => {
       const landed = await walkTo('submit')
-      if (!landed?.submit?.current) return '游標沒有停在 Submit 上，沒有送出。'
+      if (!landed?.submit?.current) return t('游標沒有停在 Submit 上，沒有送出。')
       await sendKeys(botId, ['enter'])
       return null
     })
@@ -345,13 +347,13 @@ export function BlockedChoices({
 
   const goTab = (to: number) =>
     run({ kind: 'tab', key: String(to) }, async () => {
-      if (atTab === null) return '看不出現在在第幾題，請用左右那兩顆一格一格走。'
+      if (atTab === null) return t('看不出現在在第幾題，請用左右那兩顆一格一格走。')
       if (to === atTab) return null
       if (await moveTabs(to - atTab)) {
         setTabAt(to)
         return null
       }
-      return '分頁沒有換——現在可能不在我猜的那一題上，請用左右那兩顆一格一格走。'
+      return t('分頁沒有換——現在可能不在我猜的那一題上，請用左右那兩顆一格一格走。')
     })
 
   const step = (dir: 1 | -1) =>
@@ -360,7 +362,7 @@ export function BlockedChoices({
         if (atTab !== null) setTabAt(Math.min(Math.max(atTab + dir, 0), menu.tabs.length - 1))
         return null
       }
-      return '分頁沒有換。'
+      return t('分頁沒有換。')
     })
 
   /** 警語（`Dangerous rm …`）起算，它折下來的列與 `⚠` 倒數都跟著標紅。 */
@@ -382,47 +384,47 @@ export function BlockedChoices({
           <pre className="bc-context bc-cmd">{menu.command.join('\n')}</pre>
           {menu.commandCut ? (
             <p className="bc-cmd-cut" role="note">
-              指令很長、pane 太矮，上半段已捲出終端畫面：這裡只有看得到的後半段。完整指令看 agent 的對話紀錄。
+              {t('指令很長、pane 太矮，上半段已捲出終端畫面：這裡只有看得到的後半段。完整指令看 agent 的對話紀錄。')}
             </p>
           ) : null}
         </div>
       ) : null}
       <div className="bc-top">
         {menu.tabs.length ? (
-          <div className="bc-tabs" role="group" aria-label="這份問卷的各題">
+          <div className="bc-tabs" role="group" aria-label={t('這份問卷的各題')}>
             <button
               type="button"
               className="bc-step"
-              aria-label="上一題"
-              title="上一題（送 shift+tab）"
+              aria-label={t('上一題')}
+              title={t('上一題（送 shift+tab）')}
               disabled={Boolean(busy)}
               onClick={() => void step(-1)}
             >
               ←
             </button>
-            {menu.tabs.map((t, i) => (
+            {menu.tabs.map((tab, i) => (
               <button
-                key={t.label}
+                key={tab.label}
                 type="button"
-                className={`bc-tab${i === atTab ? ' bc-tab-at' : ''}${t.done ? ' bc-tab-done' : ''}`}
+                className={`bc-tab${i === atTab ? ' bc-tab-at' : ''}${tab.done ? ' bc-tab-done' : ''}`}
                 aria-current={i === atTab ? 'true' : undefined}
                 disabled={Boolean(busy)}
                 title={
                   i === atTab
-                    ? '應該就是現在這一題（終端只用顏色標，快照讀不出來，這是推測）'
-                    : `切到「${t.label}」${t.done ? '（已經答過）' : ''}`
+                    ? t('應該就是現在這一題（終端只用顏色標，快照讀不出來，這是推測）')
+                    : t('切到「{label}」{done}', { label: tab.label, done: tab.done ? t('（已經答過）') : '' })
                 }
                 onClick={() => void goTab(i)}
               >
-                <span aria-hidden="true">{t.submit ? '✔' : t.done ? '☑' : '☐'}</span>
-                {t.label}
+                <span aria-hidden="true">{tab.submit ? '✔' : tab.done ? '☑' : '☐'}</span>
+                {tab.label}
               </button>
             ))}
             <button
               type="button"
               className="bc-step"
-              aria-label="下一題"
-              title="下一題（送 tab）"
+              aria-label={t('下一題')}
+              title={t('下一題（送 tab）')}
               disabled={Boolean(busy)}
               onClick={() => void step(1)}
             >
@@ -431,25 +433,25 @@ export function BlockedChoices({
           </div>
         ) : pendingAt && pendingAt.total > 1 ? (
           // 分頁列被裁掉（pane 太矮），但原題說有好幾題：照樣給上一題／下一題，第幾題照原題對出來的講。
-          <div className="bc-tabs" role="group" aria-label="這份問卷的各題">
+          <div className="bc-tabs" role="group" aria-label={t('這份問卷的各題')}>
             <button
               type="button"
               className="bc-step"
-              aria-label="上一題"
-              title="上一題（送 shift+tab）"
+              aria-label={t('上一題')}
+              title={t('上一題（送 shift+tab）')}
               disabled={Boolean(busy) || pendingAt.at === 0}
               onClick={() => void step(-1)}
             >
               ←
             </button>
             <span className="bc-tab bc-tab-at bc-tab-count" aria-current="true">
-              第 {pendingAt.at + 1}／{pendingAt.total} 題{pendingAt.header ? `・${pendingAt.header}` : ''}
+              {t('第 {current}／{total} 題', { current: pendingAt.at + 1, total: pendingAt.total })}{pendingAt.header ? ` · ${pendingAt.header}` : ''}
             </span>
             <button
               type="button"
               className="bc-step"
-              aria-label="下一題"
-              title="下一題（送 tab）"
+              aria-label={t('下一題')}
+              title={t('下一題（送 tab）')}
               disabled={Boolean(busy)}
               onClick={() => void step(1)}
             >
@@ -472,7 +474,7 @@ export function BlockedChoices({
         {menu.question ? (
           <p className="bc-question">{menu.question}</p>
         ) : pendingAt ? (
-          <p className="bc-question" title="終端沒畫出題目，這是對話紀錄裡的原題">
+          <p className="bc-question" title={t('終端沒畫出題目，這是對話紀錄裡的原題')}>
             {pendingAt.question}
           </p>
         ) : null}
@@ -489,11 +491,11 @@ export function BlockedChoices({
                 type="button"
                 className="bc-rev"
                 disabled={Boolean(busy) || reviewTab(i) < 0}
-                title={`回到「${menu.tabs[reviewTab(i)]?.label ?? '這一題'}」改答案`}
+                title={t('回到「{question}」改答案', { question: menu.tabs[reviewTab(i)]?.label ?? t('這一題') })}
                 onClick={() => void goTab(reviewTab(i))}
               >
                 <span className="bc-rev-q">{r.question}</span>
-                <span className="bc-rev-a">{r.answer || '（還沒作答）'}</span>
+                <span className="bc-rev-a">{r.answer || t('（還沒作答）')}</span>
               </button>
             </li>
           ))}
@@ -521,10 +523,10 @@ export function BlockedChoices({
               aria-pressed={c.checked === null ? undefined : c.checked}
               title={
                 c.checked === null
-                    ? '選這一項（游標移過去再按 Enter）'
+                    ? t('選這一項（游標移過去再按 Enter）')
                     : c.checked
-                      ? '取消勾選（游標移過去再按 space）'
-                      : '勾選這一項（游標移過去再按 space），勾完按下面的「送出」'
+                      ? t('取消勾選（游標移過去再按 space）')
+                      : t('勾選這一項（游標移過去再按 space），勾完按下面的「送出」')
               }
               onClick={() => void activate(i)}
             >
@@ -548,7 +550,7 @@ export function BlockedChoices({
                 {jev && jevMatchesTitle(jev.label, c.title) ? (
                   <JevLabel className="bc-jev" prob={jev.score} />
                 ) : null}
-                {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : c.current ? '游標在此' : ''}
+                {busy?.kind === 'choice' && busy.key === String(i) ? t('送出中…') : c.current ? t('游標在此') : ''}
               </span>
               {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}
             </button>
@@ -557,8 +559,8 @@ export function BlockedChoices({
                 type="button"
                 className="bc-chev"
                 aria-expanded={shown}
-                aria-label={shown ? `收起第 ${c.number} 項的說明` : `看第 ${c.number} 項的說明`}
-                title={shown ? '收起說明' : '看這一項的說明'}
+                aria-label={shown ? t('收起第 {n} 項的說明', { n: c.number }) : t('看第 {n} 項的說明', { n: c.number })}
+                title={shown ? t('收起說明') : t('看這一項的說明')}
                 onClick={(e) => toggleDetail(i, e.currentTarget.parentElement as HTMLElement)}
               >
                 <span aria-hidden="true">{shown ? '▾' : '▸'}</span>
@@ -572,7 +574,7 @@ export function BlockedChoices({
                     disabled={Boolean(busy) || !typeText.trim()}
                     onClick={() => void (menu.asyncQueue ? typeAsync(i) : sendTyped(i))}
                   >
-                    {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : '用這段作答'}
+                    {busy?.kind === 'choice' && busy.key === String(i) ? t('送出中…') : t('用這段作答')}
                   </button>
                 </>
               ) : null}
@@ -580,13 +582,13 @@ export function BlockedChoices({
           )
         })}
       </ol>
-      {jevRowShown ? <p className="bc-jev-note">{JEV_ASK_NOTE}</p> : null}
+      {jevRowShown ? <p className="bc-jev-note">{jevAskNote()}</p> : null}
 
       {/* 並排預覽版面（issue #1473）：終端只畫游標所在那一項的預覽，所以只有那一項有，不替其他項補。 */}
       {previewAt >= 0 ? (
         <figure className="bc-preview">
           <figcaption>
-            第 {menu.choices[previewAt].number} 項的預覽（終端只畫游標所在那一項；移動游標才看得到別項的）
+            {t('第 {n} 項的預覽（終端只畫游標所在那一項；移動游標才看得到別項的）', { n: menu.choices[previewAt].number })}
           </figcaption>
           <pre className="bc-context bc-notes bc-preview-text">{menu.choices[previewAt].preview}</pre>
         </figure>
@@ -594,7 +596,7 @@ export function BlockedChoices({
 
       {menu.submit ? (
         <button type="button" className="bc-submit" disabled={Boolean(busy)} onClick={() => void submit()}>
-          {busy?.kind === 'submit' ? '送出中…' : '送出（Submit）'}
+          {busy?.kind === 'submit' ? t('送出中…') : t('送出（Submit）')}
         </button>
       ) : null}
 
@@ -620,14 +622,15 @@ export function BlockedExtrasBar({
   onToggle: () => void
   onAnswered?: () => void
 }) {
+  const t = useT()
   const press = usePaneKeys(botId, onAnswered)
   return (
     <div className="bc-bar">
-      <button type="button" className="bc-esc" title="送出 Esc：取消這個問題" onClick={() => press(['esc'])}>
-        Esc 取消
+      <button type="button" className="bc-esc" title={t('送出 Esc：取消這個問題')} onClick={() => press(['esc'])}>
+        {t('Esc 取消')}
       </button>
       <button type="button" className="mini-btn bc-more" aria-expanded={open} onClick={onToggle}>
-        {open ? '收起終端原文' : '終端原文與更多按鍵'}
+        {open ? t('收起終端原文') : t('終端原文與更多按鍵')}
       </button>
     </div>
   )

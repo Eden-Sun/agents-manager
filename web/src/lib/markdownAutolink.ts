@@ -9,7 +9,7 @@
  * 句尾不算網址的：ASCII 句尾標點（`.,;:!?`），以及沒有配對的右括號／右方括號（`(https://…/a)。` 的網址是 `…/a`，
  * 同 termPieces 的 trimPunct）。
  */
-const STOP = new Set('）」』、。，；：！？》〉】〕“”‘’'.split(''))
+const STOP = new Set('）」』、。，；：！？》〉】〕“”‘’'.split('')) // i18n-ignore: punctuation used to detect URL boundaries
 /** 一段文字裡的網址：不含空白、角括號、引號，也不含全形標點（否則一長串 `…，https://…` 會每次掃到行尾，變成平方時間）。 */
 const URL_IN_TEXT = /(?:https?:\/\/|www\.)[^\s<>"'`、。，；：！？》〉】〕“”‘’）」』]+/giu
 /** 網址前面不能緊接字母、數字（`xhttps://` 不是網址）。不用 lookbehind：舊版 iOS Safari 不認。 */

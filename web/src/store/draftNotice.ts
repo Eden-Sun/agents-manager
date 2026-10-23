@@ -6,6 +6,7 @@
  */
 import { create } from 'zustand'
 import { ApiError } from '../api/types'
+import { t } from '../lib/i18n'
 
 interface DraftNoticeState {
   /** 目前被拒收的草稿 key → daemon 給的上限（位元組；沒給就是 null）。 */
@@ -38,6 +39,7 @@ export function draftLimitText(bytes: number): string {
 }
 
 export function draftTooLargeText(maxBytes: number | null): string {
-  const limit = maxBytes === null ? '' : `（上限 ${draftLimitText(maxBytes)}）`
-  return `這份草稿太長${limit}，沒有同步到其他裝置；內容還留在這個輸入框裡。`
+  return maxBytes === null
+    ? t('這份草稿太長，沒有同步到其他裝置；內容還留在這個輸入框裡。')
+    : t('這份草稿太長（上限 {limit}），沒有同步到其他裝置；內容還留在這個輸入框裡。', { limit: draftLimitText(maxBytes) })
 }

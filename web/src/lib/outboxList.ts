@@ -2,6 +2,7 @@
 import type { OutboxFile } from '../api'
 import { ApiError } from '../api/types'
 import type { Turn } from '../api/types'
+import { t } from './i18n'
 
 /** `18 KB` / `1.1 MB` / `1.0 GB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
  *  那邊是一格寬度的 RAM（`1.4G`），這邊是檔案大小，使用者看的是「下載會多大」。 */
@@ -34,8 +35,8 @@ export function remainingNow(file: OutboxFile, fetchedAt: number, now = Date.now
 
 /** `剩 42 分鐘`：無條件進位，剩 30 秒也講「剩 1 分鐘」；到期了講「即將清除」（清理每 10 分鐘才跑一次）。 */
 export function remainingLabel(secs: number): string {
-  if (!Number.isFinite(secs) || secs <= 0) return '即將清除'
-  return `剩 ${Math.ceil(secs / 60)} 分鐘`
+  if (!Number.isFinite(secs) || secs <= 0) return t('即將清除')
+  return t('剩 {n} 分鐘', { n: Math.ceil(secs / 60) })
 }
 
 /**
@@ -48,24 +49,24 @@ export function remainingLabel(secs: number): string {
  */
 export function downloadFailure(name: string, e: unknown, kept = false): { text: string; gone: boolean } {
   const plain = (text: string) => ({ text, gone: false })
-  if (!(e instanceof ApiError)) return plain(`下載「${name}」失敗：${e instanceof Error ? e.message : String(e)}`)
+  if (!(e instanceof ApiError)) return plain(t('下載「{name}」失敗：{reason}', { name, reason: e instanceof Error ? e.message : String(e) }))
   if (e.status === 404) {
     return {
       text: kept
-        ? `「${name}」已經不在了：分享用 bot 的檔案保留 14 天，總量太大時會從最舊的清掉。`
-        : `「${name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。`,
+        ? t('「{name}」已經不在了：分享用 bot 的檔案保留 14 天，總量太大時會從最舊的清掉。', { name })
+        : t('「{name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。', { name }),
       gone: true,
     }
   }
   const reason = String(e.body.reason ?? e.body.error ?? '')
   if (reason === 'file_too_large') {
-    const big = typeof e.body.size === 'number' ? `（${fileSize(e.body.size)}）` : ''
-    const max = typeof e.body.max === 'number' ? fileSize(e.body.max) : '下載上限'
-    return plain(`「${name}」太大${big}，超過 ${max}，這裡下載不了——請 bot 換個小一點的，或到那台機器上拿。`)
+    const big = typeof e.body.size === 'number' ? t('（{size}）', { size: fileSize(e.body.size) }) : ''
+    const max = typeof e.body.max === 'number' ? fileSize(e.body.max) : t('下載上限')
+    return plain(t('「{name}」太大{size}，超過 {max}，這裡下載不了——請 bot 換個小一點的，或到那台機器上拿。', { name, size: big, max }))
   }
-  if (reason === 'outbox_remote') return plain(`「${name}」在遠端主機上，這版 daemon 還下載不了；更新 daemon 後就可以。`)
-  if (reason === 'outbox_remote_unreachable') return plain(`連不上「${name}」所在的遠端主機，稍後再試。`)
-  return plain(`下載「${name}」失敗：${e.message}（HTTP ${e.status}）`)
+  if (reason === 'outbox_remote') return plain(t('「{name}」在遠端主機上，這版 daemon 還下載不了；更新 daemon 後就可以。', { name }))
+  if (reason === 'outbox_remote_unreachable') return plain(t('連不上「{name}」所在的遠端主機，稍後再試。', { name }))
+  return plain(t('下載「{name}」失敗：{reason}（HTTP {status}）', { name, reason: e.message, status: e.status }))
 }
 
 /** 讀不到清單（網路、500、404）：畫面上的 `reason`，不是 daemon 回的（#234）。 */
@@ -92,15 +93,15 @@ export async function readOutbox(fetchList: () => Promise<OutboxList>): Promise<
  * 使用者才不會對著空白區域猜自己是不是按錯了。讀不到清單（[`LOAD_FAILED`]）是唯一的例外，要講得跟「沒有檔案」不一樣。
  */
 export function emptyReason(reason: string | null, botSelected: boolean, kept = false): string {
-  if (!botSelected) return '先選一顆 bot，這裡會列出它交給你的檔案。'
-  if (reason === LOAD_FAILED) return '讀不到這顆 bot 的檔案清單（daemon 沒有回應或出錯），不代表沒有檔案。按上面的 ↻ 重新讀取。'
+  if (!botSelected) return t('先選一顆 bot，這裡會列出它交給你的檔案。')
+  if (reason === LOAD_FAILED) return t('讀不到這顆 bot 的檔案清單（daemon 沒有回應或出錯），不代表沒有檔案。按上面的 ↻ 重新讀取。')
   // 舊 daemon（遠端 outbox 之前）才會回這個。
-  if (reason === 'outbox_remote') return '這顆 bot 在遠端主機上，這版 daemon 還列不出它的檔案；更新 daemon 後就看得到。'
-  if (reason === 'outbox_remote_unreachable') return '連不上這顆 bot 所在的遠端主機，暫時列不出它的檔案。按上面的 ↻ 重試。'
+  if (reason === 'outbox_remote') return t('這顆 bot 在遠端主機上，這版 daemon 還列不出它的檔案；更新 daemon 後就看得到。')
+  if (reason === 'outbox_remote_unreachable') return t('連不上這顆 bot 所在的遠端主機，暫時列不出它的檔案。按上面的 ↻ 重試。')
   // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
-  if (reason === 'outbox_untrusted') return '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。'
-  if (kept) return '還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。'
-  return '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。'
+  if (reason === 'outbox_untrusted') return t('這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。')
+  if (kept) return t('還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。')
+  return t('還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。')
 }
 
 /**

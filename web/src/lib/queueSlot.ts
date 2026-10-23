@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 export type SlotHolderKind = 'user' | 'start' | 'daemon' | 'agm' | 'bot' | 'unknown'
 
 export interface SlotHolder {
@@ -18,17 +20,19 @@ export function slotHolderFrom(body: Record<string, unknown>): SlotHolder | null
 
 /** 唯一的排隊槽被佔著、這一則被退回時的說明（輸入框的字一直還在）。 */
 export function queueSlotNotice(holder: SlotHolder | null, attachmentCount: number): string {
-  const note = attachmentCount > 0 ? `；${attachmentCount} 個附件要重新加` : ''
+  const note = attachmentCount > 0 ? t('；{n} 個附件要重新加', { n: attachmentCount }) : ''
   switch (holder?.kind) {
     case 'agm':
-      return `AGM 的交辦正在排隊，送出後才能排下一則；你這一則留在輸入框${note}`
+      return t('AGM 的交辦正在排隊，送出後才能排下一則；你這一則留在輸入框{note}', { note })
     case 'bot':
-      return `${holder.botName ? `「${holder.botName}」` : '另一顆 bot'} 的訊息正在排隊，送出後才能排下一則；你這一則留在輸入框${note}`
+      return holder.botName
+        ? t('「{name}」的訊息正在排隊，送出後才能排下一則；你這一則留在輸入框{note}', { name: holder.botName, note })
+        : t('另一顆 bot 的訊息正在排隊，送出後才能排下一則；你這一則留在輸入框{note}', { note })
     case 'start':
-      return `上一則訊息還在等這顆 bot 啟動，送出後才能排下一則；你這一則留在輸入框${note}`
+      return t('上一則訊息還在等這顆 bot 啟動，送出後才能排下一則；你這一則留在輸入框{note}', { note })
     case 'daemon':
-      return `daemon 的通知正在排隊，送出後才能排下一則；你這一則留在輸入框${note}`
+      return t('daemon 的通知正在排隊，送出後才能排下一則；你這一則留在輸入框{note}', { note })
     default:
-      return `已有一則訊息排隊中，這一則已退回輸入框${note}`
+      return t('已有一則訊息排隊中，這一則已退回輸入框{note}', { note })
   }
 }

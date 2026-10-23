@@ -1,6 +1,7 @@
 import type { Message } from '../api/types'
+import { t } from './i18n'
 
-export const CHILD_ALERT_MARK = '[daemon 自動通知，不是 bot_request]'
+export const CHILD_ALERT_MARK = '[daemon 自動通知，不是 bot_request]' // i18n-ignore: exact marker emitted by daemon
 export interface ChildNotice { name: string; status: 'done' | 'blocked' }
 
 /** Only daemon relays with the exact leading marker; quoted user text stays visible. */
@@ -59,7 +60,13 @@ export function groupChildNotices(messages: readonly Message[]): ChildNoticeRow[
 export function childNoticeLabel(notices: readonly ChildNotice[]): string {
   const parts = (['done', 'blocked'] as const).flatMap((status) => {
     const names = [...new Set(notices.filter((n) => n.status === status).map((n) => n.name))]
-    return names.length ? [`child ${names.join('、')} ${status === 'done' ? '回報完成' : '在等人回答'}`] : []
+    return names.length
+      ? [status === 'done'
+        ? t('子 agent 已回報完成：{names}', { names: names.join(', ') })
+        : t('子 agent 正在等人回答：{names}', { names: names.join(', ') })]
+      : []
   })
-  return `↳ ${parts.join('；')}${notices.length > 1 ? `（${notices.length}）` : ''}`
+  return notices.length > 1
+    ? t('↳ {parts} ({n})', { parts: parts.join('; '), n: notices.length })
+    : t('↳ {parts}', { parts: parts.join('; ') })
 }

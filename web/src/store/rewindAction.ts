@@ -3,6 +3,7 @@ import { ApiError } from '../api/types'
 import { rewindErrText } from '../lib/rewind'
 import { prependDraft } from './queuedSend'
 import { useStore } from './store'
+import { t } from '../lib/i18n'
 
 /**
  * 倒回（SPEC §6.13，daemon 在終端驅動 claude 的 `/rewind`，不重啟）：成功就把那則的原文接回輸入框最前面（原本打到一半的字不丟），重拉這顆 bot 的訊息
@@ -20,12 +21,16 @@ export async function rewindAndRefill(
     setDraft(key, prependDraft(r.text, drafts[key] ?? ''))
     // daemon 只回文字：附件不會跟著回來，要講清楚（撤回排隊、取消啟動那兩條都這樣講）。
     const attachments = messages[botId]?.find((m) => m.id === messageId)?.attachments.length ?? 0
-    const attachmentNote = attachments > 0 ? `；${attachments} 個附件要重新加` : ''
+    const notice = r.paneCleared
+      ? attachments > 0
+        ? t('已倒回；原文放回輸入框了，可以改寫再送；{n} 個附件要重新加', { n: attachments })
+        : t('已倒回；原文放回輸入框了，可以改寫再送')
+      : attachments > 0
+        ? t('已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉；{n} 個附件要重新加', { n: attachments })
+        : t('已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉')
     notify(
       'info',
-      (r.paneCleared
-        ? '已倒回；原文放回輸入框了，可以改寫再送'
-        : '已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉') + attachmentNote,
+      notice,
     )
     void loadMessages(botId)
     return true
@@ -33,7 +38,7 @@ export async function rewindAndRefill(
     // 終端輸入列有字（2026-10-01 使用者）：不只叫人去終端清，把那段字交給呼叫端，讓人看過再選「清掉再倒回」。
     const draft = e instanceof ApiError && e.status === 409 && e.body.reason === 'composer_busy' ? e.body.draft : undefined
     if (typeof draft === 'string' && draft.trim()) return { composerDraft: draft }
-    useStore.getState().notify('error', `倒回失敗：${rewindErrText(e)}`)
+    useStore.getState().notify('error', t('倒回失敗：{reason}', { reason: rewindErrText(e) }))
     return false
   }
 }

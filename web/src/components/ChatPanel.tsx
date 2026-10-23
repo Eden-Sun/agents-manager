@@ -93,17 +93,18 @@ import { COMPACTING_LABEL } from './lampLabel'
 import { GPT_61_SOL_CONTEXT_WINDOW, effectiveModelOf, sol500kContext, solWindowApplies } from '../lib/codexContextWindow'
 import { ChildNoticeMessages } from './ChildNoticeMessages'
 import { childNotice } from '../lib/childNotice'
+import { msg, t, useT } from '../lib/i18n'
 import './chatPanel.css'
 
 const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
 
 // `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
 const SOURCE_LABEL: Record<string, string> = {
-  hook: '回覆',
-  terminal_fallback: '終端擷取',
-  transcript: '對話紀錄',
-  web: '網頁訊息',
-  system: '系統通知',
+  hook: msg('回覆'),
+  terminal_fallback: msg('終端擷取'),
+  transcript: msg('對話紀錄'),
+  web: msg('網頁訊息'),
+  system: msg('系統通知'),
 }
 
 /** Codex 帳號提示是給 TUI 看的（`Run /usage`）；對話裡只說還有幾次重置。 */
@@ -111,7 +112,7 @@ function systemNoticeText(content: string): string {
   const m = content.match(/^You have (\d+) usage limit resets? available\b/i)
   if (!m) return content
   const n = m[1]
-  return n === '1' ? 'Codex 還有 1 次額度重置可用' : `Codex 還有 ${n} 次額度重置可用`
+  return t('Codex 還有 {n} 次額度重置可用', { n: Number(n) })
 }
 
 /** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。
@@ -129,6 +130,8 @@ const RelayFrom = memo(function RelayFrom({
   savedName?: string | null
   savedDeleted: boolean
 }) {
+  // Subscribe so this memoized source label rerenders when the UI language changes.
+  useT()
   const names = useStore(
     useShallow((s) => ({
       from: s.bots.find((b) => b.id === fromId)?.name ?? '',
@@ -157,6 +160,7 @@ interface BubbleProps {
 
 /** 一則訊息。claude 的提問與使用者的回答（`ask:` 系統訊息）畫成「Claude 問／你答」卡，其餘照一般泡泡。 */
 export const Bubble = memo(function Bubble(props: BubbleProps) {
+  useT()
   const ask = parseAskAnswers(props.msg)
   return ask ? <AskAnswersCard msg={props.msg} ask={ask} /> : <PlainBubble {...props} />
 })
@@ -171,10 +175,11 @@ const PlainBubble = memo(function PlainBubble({
   flash,
   expandRelay,
 }: BubbleProps) {
+  const t = useT()
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'
-  const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]')
+  const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]') // i18n-ignore: exact marker in relayed messages
   // 使用者貼進來的 AGM 裁示（沒有 relay_from）另標（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。
   // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
@@ -190,7 +195,7 @@ const PlainBubble = memo(function PlainBubble({
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
-    useStore.getState().notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
+    useStore.getState().notify(ok ? 'info' : 'error', ok ? t('已複製訊息') : t('複製失敗，請長按選取文字複製'))
   })
 
   return (
@@ -206,28 +211,28 @@ const PlainBubble = memo(function PlainBubble({
           ) : null}
           {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} savedName={msg.relay_from_name} savedDeleted={msg.relay_from_deleted === true} /> : null}
           {quoted ? (
-            <span className="msg-targets relay quoted" title={`這一則的內容來自 ${quoted}，不是使用者自己打的`}>
-              {quoted}（轉述）
+            <span className="msg-targets relay quoted" title={t('這一則的內容來自 {source}，不是使用者自己打的', { source: quoted })}>
+              {quoted}{t('（轉述）')}
             </span>
           ) : null}
-          {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
+          {daemonNotice ? <span className="src-tag daemon" title={t('daemon 自動通知，不是使用者直接輸入')}>{t('daemon 通知')}</span> : null}
           <SentViaTag msg={msg} />
           {notice === 'warn' ? (
-            <span className="src-tag fallback" title={DELIVERY_WARN_TEXT}>
-              未驗證送達
+            <span className="src-tag fallback" title={t.tr(DELIVERY_WARN_TEXT)}>
+              {t('未驗證送達')}
             </span>
           ) : null}
           {/* 來源只在非 `hook` 常態時才標（影響可信度的那幾種）。 */}
           {system || msg.source === 'system' ? (
-            <span className="src-tag mono" title={`訊息來源：${msg.source}`}>
-              {SOURCE_LABEL[msg.source] ?? msg.source}
+            <span className="src-tag mono" title={t('訊息來源：{source}', { source: msg.source })}>
+              {SOURCE_LABEL[msg.source] ? t.tr(SOURCE_LABEL[msg.source]) : msg.source}
             </span>
           ) : msg.role === 'assistant' && msg.source !== 'hook' ? (
-            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`訊息來源：${msg.source}`}>
-              {SOURCE_LABEL[msg.source] ?? msg.source}
+            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={t('訊息來源：{source}', { source: msg.source })}>
+              {SOURCE_LABEL[msg.source] ? t.tr(SOURCE_LABEL[msg.source]) : msg.source}
             </span>
           ) : null}
-          {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
+          {fallback || msg.incomplete ? <span className="meta-warn">{t('可能不完整')}</span> : null}
           {msg.rewound_at ? <RewoundTag at={msg.rewound_at} /> : null}
         </div>
         {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
@@ -236,7 +241,7 @@ const PlainBubble = memo(function PlainBubble({
           <time
             className="msg-time"
             dateTime={msg.created_at}
-            title={notice === 'hint' ? `${msgTimeTitle(msg.created_at)}\n${DELIVERY_HINT_TEXT}` : msgTimeTitle(msg.created_at)}
+            title={notice === 'hint' ? `${msgTimeTitle(msg.created_at)}\n${t.tr(DELIVERY_HINT_TEXT)}` : msgTimeTitle(msg.created_at)}
           >
             {msgTimeLabel(msg.created_at, today)}
           </time>
@@ -248,7 +253,7 @@ const PlainBubble = memo(function PlainBubble({
         {...tapCopy}
       >
         {!msg.content ? (
-          <em style={{ opacity: 0.6 }}>（空白訊息）</em>
+          <em style={{ opacity: 0.6 }}>{t('（空白訊息）')}</em>
         ) : msg.role === 'assistant' && !fallback ? (
           <SafeMarkdown text={msg.content} botId={msg.bot_id} />
         ) : folded && preview ? (
@@ -261,9 +266,9 @@ const PlainBubble = memo(function PlainBubble({
       </div>
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
-          <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? '收合' : '展開全文'}
+          <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? t('收合') : t('展開全文')}
           <span className="disclosure-note">
-            {preview.length} 字{msg.attachments.length ? `・${msg.attachments.length} 個附件` : ''}
+            {t('{n} 字', { n: preview.length })}{msg.attachments.length ? ` · ${t('{n} 個附件', { n: msg.attachments.length })}` : ''}
           </span>
         </button>
       ) : null}
@@ -277,6 +282,7 @@ const PlainBubble = memo(function PlainBubble({
  * (fallback fires 5s after working→idle). 只掛 `terminal_fallback`，系統 pill 不放（框中框）。
  */
 function TerminalSnapshot({ msg }: { msg: Message }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   if (msg.source !== 'terminal_fallback') return null
   const snap = msg.terminal_snapshot?.trim()
@@ -285,8 +291,8 @@ function TerminalSnapshot({ msg }: { msg: Message }) {
   return (
     <div className="msg-snapshot">
       <button type="button" className="disclosure sub" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span className="chev">{open ? '▼' : '▶'}</span> 完整終端畫面
-        <span className="disclosure-note">{snap.length} 字</span>
+        <span className="chev">{open ? '▼' : '▶'}</span> {t('完整終端畫面')}
+        <span className="disclosure-note">{t('{n} 字', { n: snap.length })}</span>
       </button>
       {open ? <pre className="msg-snapshot-body">{snap}</pre> : null}
     </div>
@@ -316,6 +322,7 @@ export function LiveBubble({
   /** 本機圖片經這顆 bot 的 daemon 讀；遠端圖片同樣走 `MarkdownImage`（#764，不能用 react-markdown 預設的 `<img>`）。 */
   botId?: string
 }) {
+  const t = useT()
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
   // 半成品預設收起（2026-09-08）：逐字跳讀了白讀、還會一直推動清單。
@@ -339,11 +346,11 @@ export function LiveBubble({
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
-          <span className="sr-only" role="status">{text ? '正在輸出回覆' : '等待回覆'}</span>
-          <span>{text ? '輸出中…' : (act ?? '等待回覆…')}</span>
+          <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
+          <span>{text ? t('輸出中…') : (act ?? t('等待回覆…'))}</span>
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-              {open ? '收起內容' : `看目前內容（${text.length} 字）`}
+              {open ? t('收起內容') : t('看目前內容（{n} 字）', { n: text.length })}
             </button>
           ) : null}
         </div>
@@ -430,26 +437,28 @@ export function TypingDots() {
 
 /** 「載入更早的訊息」（issue #25）：store 只留最近 `MESSAGE_CAP` 則，走 `before=` 分頁接回。 */
 export function LoadEarlier({ id, onLoad }: { id: string; onLoad: (id: string) => void }) {
+  const t = useT()
   const show = useStore((s) => Boolean(s.moreMessages[id]))
   const loading = useStore((s) => Boolean(s.loadingMore[id]))
   if (!show) return null
   return (
     <div className="load-earlier">
       <button type="button" className="btn" disabled={loading} onClick={() => onLoad(id)}>
-        {loading ? '載入中…' : '載入更早的訊息'}
+        {loading ? t('載入中…') : t('載入更早的訊息')}
       </button>
     </div>
   )
 }
 
 export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => void }) {
+  const t = useT()
   if (!show) return null
   return (
-    <button type="button" className="jump-bottom" title="捲到最新訊息" aria-label="捲到最新訊息" onClick={onClick}>
+    <button type="button" className="jump-bottom" title={t('捲到最新訊息')} aria-label={t('捲到最新訊息')} onClick={onClick}>
       <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
         <path d="M8 2.6v9.2M4.2 8.4L8 12.2l3.8-3.8" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
-      <span>最新</span>
+      <span>{t('最新')}</span>
     </button>
   )
 }
@@ -459,6 +468,7 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
  * 貼 composer 下緣（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。手機只在回合完成後顯示。
  */
 export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
+  const t = useT()
   const today = useLocalDay()
   // 狀態綁 turn：換回合自動重設，不需要 effect。
   const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
@@ -474,23 +484,23 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
 
   if (ui.closed) return null
 
-  const body = msg.content.trim() || (msg.attachments.length ? `（${msg.attachments.length} 個附件）` : '（空白訊息）')
+  const body = msg.content.trim() || (msg.attachments.length ? t('（{n} 個附件）', { n: msg.attachments.length }) : t('（空白訊息）'))
   const jumpable = !clamped || ui.open
 
   return (
     <div className="lastq-slot">
-      <div className={`lastq${ui.open ? ' open' : ''}`} role="region" aria-label="這回合的提問">
+      <div className={`lastq${ui.open ? ' open' : ''}`} role="region" aria-label={t('這回合的提問')}>
         <div className="lastq-head">
-          <span className="lastq-tag">這回合的提問</span>
+          <span className="lastq-tag">{t('這回合的提問')}</span>
           <time className="lastq-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
             {msgTimeLabel(msg.created_at, today)}
           </time>
-          {clamped ? <span className="lastq-hint">{ui.open ? '再點一下 · 捲到這則' : '點一下 · 展開全文'}</span> : null}
+          {clamped ? <span className="lastq-hint">{ui.open ? t('再點一下 · 捲到這則') : t('點一下 · 展開全文')}</span> : null}
           <button
             type="button"
             className="lastq-x"
-            aria-label="關閉這回合的提問浮窗"
-            title="關閉。這一回合不會再出現，下一回合會再顯示"
+            aria-label={t('關閉這回合的提問浮窗')}
+            title={t('關閉。這一回合不會再出現，下一回合會再顯示')}
             onClick={() => setUi((u) => ({ ...u, closed: true }))}
           >
             ×
@@ -502,7 +512,7 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
           className="lastq-body"
           // 沒夾掉時點了是捲到那則、不展開：不宣告折疊狀態（#1596）。
           aria-expanded={clamped ? ui.open : undefined}
-          title={jumpable ? '捲到這則訊息' : '展開全文'}
+          title={jumpable ? t('捲到這則訊息') : t('展開全文')}
           onClick={() => {
             if (!jumpable) {
               setUi((u) => ({ ...u, open: true }))
@@ -523,9 +533,11 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
 const ABANDON_AFTER_S = 60
 
 function elapsedLabel(sec: number): string {
-  if (sec < 90) return `${Math.floor(sec)} 秒`
+  if (sec < 90) return t('{n} 秒', { n: Math.floor(sec) })
   const m = Math.floor(sec / 60)
-  return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 小時 ${m % 60} 分`
+  return m < 60
+    ? t('{n} 分', { n: m })
+    : t('{hours} 小時 {minutes} 分', { hours: Math.floor(m / 60), minutes: m % 60 })
 }
 
 /**
@@ -533,9 +545,10 @@ function elapsedLabel(sec: number): string {
  * 的「中斷」），只推翻 daemon 的 in-flight 認定。
  */
 export function AbandonTurnAction({ botId }: { botId: string }) {
+  const t = useT()
   const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
   const createdAt = useStore((s) => inFlightTurn(s, botId)?.created_at ?? null)
-  const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
+  const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? t('這個 Bot'))
   const abandonTurn = useStore((s) => s.abandonTurn)
   // 記 turn id 而非布林：回合換掉時確認框自動失效，不會套到下一回合。
   const [openFor, setOpenFor] = useState<string | null>(null)
@@ -544,8 +557,8 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
   // 換 turn 時 `now` 可能舊→elapsed 偏小、按鈕晚出現，這方向安全。
   useEffect(() => {
     if (!turnId) return
-    const t = setInterval(() => setNow(Date.now()), 5000)
-    return () => clearInterval(t)
+    const interval = setInterval(() => setNow(Date.now()), 5000)
+    return () => clearInterval(interval)
   }, [turnId])
 
   const startedMs = createdAt ? Date.parse(createdAt) : Number.NaN
@@ -558,30 +571,29 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
       <button
         type="button"
         className="live-abandon"
-        title={`將這個回合標記為失敗並解開輸入框（已進行 ${elapsedLabel(elapsed)}）。Bot 可能仍在執行。`}
+        title={t('將這個回合標記為失敗並解開輸入框（已進行 {duration}）。Bot 可能仍在執行。', { duration: elapsedLabel(elapsed) })}
         onClick={() => setOpenFor(turnId)}
       >
-        強制中止 · 已 {elapsedLabel(elapsed)}
+        {t('強制中止 · 已 {duration}', { duration: elapsedLabel(elapsed) })}
       </button>
       <ConfirmDialog
         open={openFor === turnId}
-        title="強制中止這個回合"
+        title={t('強制中止這個回合')}
         width={420}
         body={
           <>
             <p className="abandon-note">
-              把 <strong>{botName}</strong> 目前這個回合標記為<strong>失敗</strong>，立刻解開輸入框。適用於
-              Bot 已完成回覆，但畫面仍顯示等待的情況。
+              {t.x('把 {bot} 目前這個回合標記為失敗，立刻解開輸入框。適用於 Bot 已完成回覆，但畫面仍顯示等待的情況。', { bot: <strong>{botName}</strong> })}
             </p>
             <p className="abandon-note">
-              這個操作只更新回合紀錄，Bot 可能仍在執行。如需讓 Bot 停下來，請到「終端」分頁送出 Esc。
+              {t('這個操作只更新回合紀錄，Bot 可能仍在執行。如需讓 Bot 停下來，請到「終端」分頁送出 Esc。')}
             </p>
             <p className="abandon-note">
-              <strong>不可逆</strong>：之後 agent 真的回話，daemon 已經配不回這個回合，那則回覆不會出現在對話裡。
+              <strong>{t('不可逆')}</strong>{t('：之後 agent 真的回話，daemon 已經配不回這個回合，那則回覆不會出現在對話裡。')}
             </p>
           </>
         }
-        confirmLabel="強制中止"
+        confirmLabel={t('強制中止')}
         danger
         onConfirm={() => {
           setOpenFor(null)
@@ -632,6 +644,7 @@ function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string |
 }
 
 function MessageList({ botId }: { botId: string }) {
+  const t = useT()
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
   // 第一次載入失敗：給重試，不讓它一直轉圈（#1240）。
@@ -689,24 +702,24 @@ function MessageList({ botId }: { botId: string }) {
       {failed && !loaded && list.length > 0 ? (
         // 失敗之後有新訊息進來：歷史還沒載到，要讓人知道、也能重試。
         <div className="load-earlier">
-          <button type="button" className="btn" onClick={() => void retryLoad(botId)}>先前的訊息沒載到，重試</button>
+          <button type="button" className="btn" onClick={() => void retryLoad(botId)}>{t('先前的訊息沒載到，重試')}</button>
         </div>
       ) : null}
       {list.length === 0 && failed && !loaded ? (
         <EmptyState
-          title="訊息載入失敗"
+          title={t('訊息載入失敗')}
           icon="!"
-          action={<button type="button" className="btn" onClick={() => void retryLoad(botId)}>重試</button>}
+          action={<button type="button" className="btn" onClick={() => void retryLoad(botId)}>{t('重試')}</button>}
         >
-          讀不到這段對話。
+          {t('讀不到這段對話。')}
         </EmptyState>
       ) : list.length === 0 ? (
         <EmptyState
           loading={!loaded}
-          title={loaded ? '開始交代第一個任務' : undefined}
+          title={loaded ? t('開始交代第一個任務') : undefined}
           icon={loaded ? '✦' : undefined}
         >
-          {loaded ? '在下方輸入框寫下第一則訊息。' : '載入訊息中…'}
+          {loaded ? t('在下方輸入框寫下第一則訊息。') : t('載入訊息中…')}
         </EmptyState>
       ) : (
         <ChildNoticeMessages messages={list} renderMessage={(m, expanded) => <Bubble msg={m} flash={m.id === flashId} expandRelay={expanded} />}
@@ -737,6 +750,7 @@ function Composer({
   /** Owned by `ChatPanel` so a drop anywhere in the chat lands here. */
   files: ReturnType<typeof useAttachments>
 }) {
+  const t = useT()
   // Fresh object per call: raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
   const sendPrompt = useStore((s) => s.sendPrompt)
@@ -802,13 +816,13 @@ function Composer({
     if (!body && files.ids.length === 0) return
     // 打字沒鎖，Enter 可能送不出：說一聲，別默默吃掉。
     if (state.disabled) {
-      notify('error', state.reason || '目前無法送出訊息')
+      notify('error', state.reason || t('目前無法送出訊息'))
       return
     }
     if (sending || files.uploading) return
     // 失敗的附件不在 `files.ids` 裡：照送會少一個檔案，送成功後 `clear()` 還把失敗卡片與重試鈕一起丟掉（issue #917）。
     if (files.failed) {
-      notify('error', ATTACHMENT_FAILED_NOTICE)
+      notify('error', t.tr(ATTACHMENT_FAILED_NOTICE))
       return
     }
     setSending(true)
@@ -835,11 +849,11 @@ function Composer({
     if (!body && ids.length === 0) return
     if (sending) return
     if (files.uploading) {
-      notify('error', '附件還在上傳，傳完再送')
+      notify('error', t('附件還在上傳，傳完再送'))
       return
     }
     if (files.failed) {
-      notify('error', ATTACHMENT_FAILED_NOTICE)
+      notify('error', t.tr(ATTACHMENT_FAILED_NOTICE))
       return
     }
     setSending(true)
@@ -899,54 +913,56 @@ function Composer({
         <div className="composer-queued" role="status">
           <span className="composer-queued-label">{startingSendLabel(starting, hasRun)}</span>
           <span className="composer-queued-text" title={starting.text}>
-            {starting.text || `（${starting.attachments} 個附件）`}
+            {starting.text || t('（{n} 個附件）', { n: starting.attachments })}
           </span>
           {starting.startError && !hasRun ? (
-            <button type="button" className="mini-btn" disabled={startingBot} title="再啟動一次，起來後照樣自動送出" onClick={() => void startBot(botId)}>
-              重新啟動
+            <button type="button" className="mini-btn" disabled={startingBot} title={t('再啟動一次，起來後照樣自動送出')} onClick={() => void startBot(botId)}>
+              {t('重新啟動')}
             </button>
           ) : null}
           <button
             type="button"
             className="mini-btn"
-            title="不送了，把訊息放回輸入框"
+            title={t('不送了，把訊息放回輸入框')}
             onClick={() => void cancelStartingSend(botId)}
           >
-            取消
+            {t('取消')}
           </button>
         </div>
       ) : null}
       {queued ? (
         <div className="composer-queued composer-queued-idle" role="status">
-          <span className="composer-queued-label">已排隊，Bot 這回合結束後會自動送出：</span>
+          <span className="composer-queued-label">{t('已排隊，Bot 這回合結束後會自動送出：')}</span>
           <span className="composer-queued-text" title={queued.text}>
             {queued.text
-              ? `${queued.text}${queued.attachmentCount ? `（附 ${queued.attachmentCount} 個檔案）` : ''}`
-              : `（${queued.attachmentCount} 個附件）`}
+              ? queued.attachmentCount
+                ? t('{text}（附 {n} 個檔案）', { text: queued.text, n: queued.attachmentCount })
+                : queued.text
+              : t('（{n} 個附件）', { n: queued.attachmentCount })}
           </span>
           <button
             type="button"
             className="mini-btn"
             disabled={withdrawing}
-            title="撤回這則訊息並放回輸入框"
+            title={t('撤回這則訊息並放回輸入框')}
             onClick={() => void withdrawQueuedIdleSend()}
           >
-            {withdrawing ? '撤回中…' : '撤回並放回'}
+            {withdrawing ? t('撤回中…') : t('撤回並放回')}
           </button>
         </div>
       ) : null}
       {showLock ? (
         <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
-          <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? '執行中 · 送出排隊' : state.reason}</span>
+          <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? t('執行中 · 送出排隊') : state.reason}</span>
           {/* bot 正在跑時 unknown 只是「還沒確認」（issue #1479）：不把「放棄該回合」擺成第一個選項，daemon 背景確認後自己解鎖。 */}
           {state.unknownTurnId && !state.unknownWorking ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
-              放棄該回合
+              {t('放棄該回合')}
             </button>
           ) : null}
           {state.inFlightTurnId ? (
-            <button type="button" className="mini-btn" title="送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動" onClick={() => void interruptBot(botId)}>
-              ESC 中斷
+            <button type="button" className="mini-btn" title={t('送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動')} onClick={() => void interruptBot(botId)}>
+              {t('ESC 中斷')}
             </button>
           ) : null}
           {state.inFlightTurnId && pending.trim() && (isClaude || sendNowSupported) && sendNowButton(botKind, pending) ? (
@@ -958,7 +974,7 @@ function Composer({
                 type="button"
                 className="mini-btn"
                 disabled={aborting || sending || files.uploading}
-                title={files.uploading ? '附件上傳中…' : sendNowButton(botKind, pending)!.title}
+                title={files.uploading ? t('附件上傳中…') : sendNowButton(botKind, pending)!.title}
                 onClick={() => void sendNow()}
               >
                 {sendNowButton(botKind, pending)!.label}
@@ -969,10 +985,10 @@ function Composer({
                   type="button"
                   className="mini-btn"
                   disabled={sending}
-                  title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。"
+                  title={t('補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。')}
                   onClick={() => void sendAlongside()}
                 >
-                  補充
+                  {t('補充')}
                 </button>
               ) : null}
             </>
@@ -983,10 +999,10 @@ function Composer({
               type="button"
               className="mini-btn danger"
               disabled={aborting}
-              title="對話卡住、送不出字時用這顆：不等 agent 回應，直接把這回合標成失敗並解開輸入框。Bot 仍保持啟動——它那頭可能還在跑。"
+              title={t('對話卡住、送不出字時用這顆：不等 agent 回應，直接把這回合標成失敗並解開輸入框。Bot 仍保持啟動——它那頭可能還在跑。')}
               onClick={() => void abortBot(botId)}
             >
-              {aborting ? '解除中…' : '解除卡對話'}
+              {aborting ? t('解除中…') : t('解除卡對話')}
             </button>
           ) : null}
         </div>
@@ -1006,7 +1022,7 @@ function Composer({
           disabled={sending}
           /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
           placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting) })}
-          title="Enter 送出，Shift+Enter 換行；檔案可拖放或貼上"
+          title={t('Enter 送出，Shift+Enter 換行；檔案可拖放或貼上')}
           onChange={(e) => {
             setText(e.target.value)
             setDraftCursor(draftKey, e.target.selectionStart, e.target.selectionEnd)
@@ -1120,6 +1136,7 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
   mobileOpen: boolean
   onClose: () => void
 }) {
+  const t = useT()
   const phone = useMediaQuery(PHONE_QUERY)
   if (!issues && !hasStatus) return null
   if (phone && !mobileOpen) return null
@@ -1130,7 +1147,7 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
     </div>
   )
   return phone ? (
-    <Modal open title="Git / 專案資訊 / 檔案" onClose={onClose}>
+    <Modal open title={t('Git / 專案資訊 / 檔案')} onClose={onClose}>
       {content}
       {phoneFiles}
     </Modal>
@@ -1138,6 +1155,7 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
 }
 
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
+  const t = useT()
   const phone = useMediaQuery(PHONE_QUERY)
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   // gpt-6.1-sol 的 context：有效模型（正在跑的優先，空白不算）＋實際 token，分母固定 500k，不沿用 CLI 的 475k 百分比。
@@ -1175,21 +1193,21 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
     <div className="statusline-bar" title={line || footer?.modelLine || undefined}>
       <CodexTerminalFooterItems footer={footer} />
       {status?.account_warning ? (
-        <SlItem k="帳號" className="sl-account sl-warn" title={status.account_warning}>
-          ⚠ 未登入，用的是預設帳號
+        <SlItem k={t('帳號')} className="sl-account sl-warn" title={status.account_warning}>
+          {t('⚠ 未登入，用的是預設帳號')}
         </SlItem>
       ) : status?.account_email ? (
         // `sl-account`：手機上 CSS 收掉（最長也最不急）。
-        <SlItem k="帳號" className="sl-account">
+        <SlItem k={t('帳號')} className="sl-account">
           {status.account_email}
         </SlItem>
       ) : cwd ? (
-        <SlItem k="目錄" title={status?.cwd ?? cwd}>
+        <SlItem k={t('目錄')} title={status?.cwd ?? cwd}>
           {cwd.replace(/^\/Users\/[^/]+/, '~')}
         </SlItem>
       ) : null}
       {ctxPct !== null ? (
-        <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
+        <SlItem k="context" title={ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined}>
           {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
@@ -1199,7 +1217,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
       {status ? <StatusCache botId={botId} status={status} /> : null}
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
       {status?.version ? (
-        <SlItem k="版本" className="sl-version">
+        <SlItem k={t('版本')} className="sl-version">
           {status.version}
         </SlItem>
       ) : null}
@@ -1212,6 +1230,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
 const AUTO_OPEN_DELAY_MS = 1000
 
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
+  const t = useT()
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
@@ -1325,18 +1344,18 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             type="button"
             className="btn menu-btn icon-tip"
             onClick={onOpenSidebar}
-            aria-label="開啟側邊欄"
-            data-tip="開啟側邊欄"
+            aria-label={t('開啟側邊欄')}
+            data-tip={t('開啟側邊欄')}
           >
             ☰
           </button>
-          <span className="main-status">未選擇 Bot</span>
+          <span className="main-status">{t('未選擇 Bot')}</span>
           <span className="spacer" />
           <QuotaStrip />
         </div>
         <UnreadChip />
-        <EmptyState title="尚未選擇 Bot" icon="◎">
-          從左側選擇一個 Bot，或先新增 Project 與 Bot。
+        <EmptyState title={t('尚未選擇 Bot')} icon="◎">
+          {t('從左側選擇一個 Bot，或先新增 Project 與 Bot。')}
         </EmptyState>
       </>
     )
@@ -1358,8 +1377,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           type="button"
           className="btn menu-btn icon-tip"
           onClick={onOpenSidebar}
-          aria-label="開啟側邊欄"
-          data-tip="開啟側邊欄"
+          aria-label={t('開啟側邊欄')}
+          data-tip={t('開啟側邊欄')}
         >
           ☰
         </button>
@@ -1375,9 +1394,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <button
               type="button"
               className="icon-btn gear icon-tip"
-              aria-label={`${bot.name} 的設定`}
+              aria-label={t('{name} 的設定', { name: bot.name })}
               aria-expanded={settingsOpen}
-              data-tip={`設定 · ${bot.name}`}
+              data-tip={t('設定 · {name}', { name: bot.name })}
               onClick={(e) => (settingsOpen ? closeSettings() : openSettings(botId, anchorOf(e.currentTarget)))}
             >
               <GearIcon />
@@ -1388,15 +1407,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <UpdateBadge botId={botId} />
             <RuntimeDriftBadge botId={botId} />
             {headUnread > 0 ? (
-              <span className="unread-turns" title={`${headUnread} 個回合已完成，還沒看過`}>
+              <span className="unread-turns" title={t('{n} 個回合已完成，還沒看過', { n: headUnread })}>
                 !{headUnread > 99 ? '99+' : headUnread}
               </span>
             ) : null}
           </div>
           {/* `bot.model` null = CLI 預設，退回 statusLine 回報的實際模型。第二行：標題列已被額度條佔滿（2026-09-10 實測）。 */}
           {phone ? (
-            <div className="mobile-bot-version" title={`${bot.kind} · ${statusInfo?.version ?? '版本未回報'}`}>
-              <span className={`mobile-kind-icon ${bot.kind}${codexFast ? ' fast' : ''}`} role="img" aria-label={codexFast ? `${bot.kind}（fast）` : bot.kind}><KindIcon kind={bot.kind} />{codexFast ? <FastBolt /> : null}</span>
+            <div className="mobile-bot-version" title={t('{kind} · {version}', { kind: bot.kind, version: statusInfo?.version ?? t('版本未回報') })}>
+              <span className={`mobile-kind-icon ${bot.kind}${codexFast ? ' fast' : ''}`} role="img" aria-label={codexFast ? t('{kind}（fast）', { kind: bot.kind }) : bot.kind}><KindIcon kind={bot.kind} />{codexFast ? <FastBolt /> : null}</span>
               {bot.model || statusInfo?.model_name ? (
                 <span className="mobile-bot-model">
                   {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
@@ -1422,8 +1441,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 className={`model-tag${bot.model ? '' : ' reported'}`}
                 title={
                   bot.model
-                    ? `點一下改模型（${bot.model}）`
-                    : `CLI 預設，實際載入 ${statusInfo?.model_name}。點一下改模型`
+                    ? t('點一下改模型（{model}）', { model: bot.model })
+                    : t('CLI 預設，實際載入 {model}。點一下改模型', { model: statusInfo?.model_name ?? '' })
                 }
               >
                 {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
@@ -1431,7 +1450,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </ModelQuickPicker>
             ) : null}
             {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
-            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={`${herdrId?.title ?? `pane ${run.pane_id}`}（${stateLabel}）`} /> : null}
+            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={t('{pane}（{status}）', { pane: herdrId?.title ?? `pane ${run.pane_id}`, status: stateLabel })} /> : null}
           </div>}
         </div>
         {phone ? (
@@ -1440,7 +1459,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               type="button"
               className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}`}
               // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
-              aria-label={statusInfo?.account_warning ? 'Git / 專案資訊 / 檔案（帳號警告）' : 'Git / 專案資訊 / 檔案'}
+              aria-label={statusInfo?.account_warning ? t('Git / 專案資訊 / 檔案（帳號警告）') : t('Git / 專案資訊 / 檔案')}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}
@@ -1458,7 +1477,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           host={hostName}
         />
         {/* UI-DECISIONS〈無障礙語意（#11）〉。 */}
-        <div className="tabs" role="tablist" aria-label="主面板" onKeyDown={onTabListKeyDown}>
+        <div className="tabs" role="tablist" aria-label={t('主面板')} onKeyDown={onTabListKeyDown}>
           <button
             type="button"
             className="tab"
@@ -1471,7 +1490,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               setRightTab('chat')
             }}
           >
-            對話
+            {t('對話')}
           </button>
           <button
             type="button"
@@ -1485,7 +1504,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               setRightTab('terminal')
             }}
           >
-            終端
+            {t('終端')}
           </button>
           {canPreview ? (
             <button
@@ -1500,7 +1519,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 setRightTab('preview')
               }}
             >
-              預覽
+              {t('預覽')}
             </button>
           ) : null}
           {shellOpen ? (
@@ -1511,7 +1530,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               id={`${panelId}-tab-shell`}
               aria-controls={`${panelId}-panel`}
               aria-selected
-              title="主機 shell（按「關閉」回到對話）"
+              title={t('主機 shell（按「關閉」回到對話）')}
             >
               shell
             </button>
@@ -1561,7 +1580,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <TerminalTab botId={botId} />
         ) : (
           <EmptyState
-            title="終端尚未就緒"
+            title={t('終端尚未就緒')}
             icon="▭"
             action={
               <button
@@ -1570,11 +1589,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 disabled={Boolean(busy[`start:${botId}`]) || handedOff}
                 onClick={() => void startBot(botId)}
               >
-                啟動 {bot.name}
+                {t('啟動 {name}', { name: bot.name })}
               </button>
             }
           >
-            Bot 未在執行中，沒有可讀取的終端。請先啟動 Bot。
+            {t('Bot 未在執行中，沒有可讀取的終端。請先啟動 Bot。')}
           </EmptyState>
         )
       ) : (
@@ -1591,15 +1610,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <MessageList botId={botId} />
           {!active && !waitingForStart ? (
             <div className="bot-stopped-bar" role="status">
-              <span>{composerReason || 'Bot 未在執行中，無法送出訊息'}</span>
+              <span>{composerReason || t('Bot 未在執行中，無法送出訊息')}</span>
               <button
                 type="button"
                 className="mini-btn primary"
                 disabled={Boolean(busy[`start:${botId}`]) || handedOff}
-                title={`啟動 ${bot.name}`}
+                title={t('啟動 {name}', { name: bot.name })}
                 onClick={() => void startBot(botId)}
               >
-                啟動
+                {t('啟動')}
               </button>
             </div>
           ) : null}
