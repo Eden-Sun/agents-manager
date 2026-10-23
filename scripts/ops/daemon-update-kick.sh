@@ -28,6 +28,7 @@ set -u
 set -o pipefail
 
 SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
+WEB_BUILDER="${SELF%/*}/build-web-bundle.py"
 
 DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
 REPO="${AGM_REPO:-$HOME/project/agents-manager}"      # 正式 daemon 跑的那份（daemon-swap 換它的 target/release）
@@ -367,7 +368,8 @@ else
   "$GIT" -C "$DEPLOY" checkout -q --force --detach "$TARGET" >> "$LOG" 2>&1 || { note_fail "checkout ${SHORT} 失敗"; exit 0; }
   "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true   # 沒有 -x：target／node_modules（被 ignore）留著，增量建置才快
   log "建置 ${SHORT}：web"
-  ( cd "$DEPLOY/web" && "$BUN" install --frozen-lockfile && "$BUN" run build ) >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; now_fail "web 建置失敗"; exit 0; }
+  [ -r "$WEB_BUILDER" ] || { note_fail "找不到配對的 web helper：${WEB_BUILDER}；請同時安裝 kick 與 helper"; now_fail "缺少 web helper"; exit 0; }
+  python3 "$WEB_BUILDER" --web "$DEPLOY/web" --bun "$BUN" >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; now_fail "web 建置失敗"; exit 0; }
   log "建置 ${SHORT}：daemon（cargo build --release）"
   ( cd "$DEPLOY" && AM_REAL_CARGO="$CARGO" PATH="$(dirname "$CARGO"):$PATH" "$NICE" -n 10 "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
     || { note_fail "cargo build 失敗（${SHORT}）"; now_fail "cargo build 失敗"; exit 0; }

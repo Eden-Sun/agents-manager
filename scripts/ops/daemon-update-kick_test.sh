@@ -101,6 +101,12 @@ STUB
 echo "bun $* @ $(pwd)" >> "$AGM_DIR/build.log"
 [ -z "$STUB_BUN_FAIL" ] || exit 1
 [ -z "$STUB_BUN_SLEEP" ] || sleep "$STUB_BUN_SLEEP"
+if [ "${1:-}" = run ]; then
+  [ "${3:-}" = --outDir ] || exit 2
+  mkdir -p "$4/assets"
+  printf '<html>bundle</html>\n' > "$4/index.html"
+  printf 'asset\n' > "$4/assets/app.js"
+fi
 exit 0
 STUB
   cat > "$ROOT/bin/cargo" <<'STUB'
@@ -144,7 +150,8 @@ ci "$C3" success
 rc=$(run)
 check_eq "rc=0" "0" "$rc"
 check "問的是 ubuntu-ci 的 commit status" "repos/Eden-Sun/agents-manager/commits/$C3/status" "$AGM_DIR/gh.log"
-check "web 建置在專用 checkout" "bun run build @ $ROOT/deploy/web" "$AGM_DIR/build.log"
+REAL_WEB=$(cd "$ROOT/deploy/web" && pwd -P)
+check "web 建置在專用 checkout" "bun run build --outDir $REAL_WEB/.dist-stage-" "$AGM_DIR/build.log"
 check "cargo 建置在專用 checkout" "cargo build --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
 check "cargo 帶 AM_REAL_CARGO 與 cargo 的 PATH" "AM_REAL_CARGO=$ROOT/bin/cargo PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
 check_eq "專用 checkout 停在目標 sha" "$C3" "$("$GITBIN" -C "$ROOT/deploy" rev-parse HEAD)"
@@ -682,6 +689,44 @@ echo "$C0" > "$ROOT/cistate/last-sha"
 rc=$(run)
 check_eq "rc=0" "0" "$rc"
 check_no "線上那顆不問 GitHub" "commits/$C0/status" "$AGM_DIR/gh.log"
+teardown
+
+# #1939: the installed kick uses its adjacent helper, not the target checkout.
+setup
+ci "$C3" success
+cp "$HERE/daemon-update-kick.sh" "$AGM_DIR/bin/daemon-update-kick.sh"
+cp "$HERE/build-web-bundle.py" "$AGM_DIR/bin/build-web-bundle.py"
+SOURCE_SCRIPT="$SCRIPT"
+SCRIPT="$AGM_DIR/bin/daemon-update-kick.sh"
+rc=$(run)
+check_eq "installed kick rc=0" "0" "$rc"
+check "installed paired helper published bundle" "web bundle changed: published" "$(LOG)"
+check "cargo follows successful publication" "cargo build --release" "$AGM_DIR/build.log"
+check_eq "target checkout has no helper" "no" "$([ -e "$ROOT/deploy/scripts/ops/build-web-bundle.py" ] && echo yes || echo no)"
+SCRIPT="$SOURCE_SCRIPT"
+teardown
+
+setup
+ci "$C3" success
+cp "$HERE/daemon-update-kick.sh" "$AGM_DIR/bin/daemon-update-kick.sh"
+SCRIPT="$AGM_DIR/bin/daemon-update-kick.sh"
+rc=$(run)
+check_eq "missing helper is handled" "0" "$rc"
+check "missing paired helper is explicit" "找不到配對的 web helper" "$(LOG)"
+check_no "missing helper never falls back to bun" "bun " "$AGM_DIR/build.log"
+check_no "missing helper prevents cargo" "cargo " "$AGM_DIR/build.log"
+check_eq "missing helper prevents swap" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+SCRIPT="$SOURCE_SCRIPT"
+teardown
+
+setup
+ci "$C3" success
+export STUB_BUN_FAIL=1
+rc=$(run)
+check "helper build failure is explicit" "web 建置失敗" "$(LOG)"
+check_no "helper build failure prevents cargo" "cargo " "$AGM_DIR/build.log"
+check_eq "helper build failure prevents swap" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "helper build failure removes staging" "0" "$(find "$ROOT/deploy/web" -name '.dist-stage-*' | wc -l | tr -d ' ')"
 teardown
 
 echo "$PASS passed, $FAIL failed"
