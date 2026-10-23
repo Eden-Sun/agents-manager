@@ -70,16 +70,25 @@ Orca 出處：[README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 ## 快速開始
 
-**平台與需求。** daemon 跑在 macOS 與 Linux。需要已安裝的 [herdr](https://herdr.dev)，以及至少一種 agent CLI（`claude`、`codex`、`grok` 或 `agy`）；從原始碼建置另需 Rust（`cargo`）與 [Bun](https://bun.sh)。herdr 是帶 socket API 的 terminal workspace manager；daemon 靠它開 pane、啟動 agent、送字、讀畫面，自己從不 spawn agent。
+**需求。** macOS（arm64）或 Linux（x86_64／arm64）、[herdr](https://herdr.dev)，以及至少一種已登入的 agent CLI（`claude`、`codex`、`grok` 或 `agy`）。herdr 是帶 socket API 的 terminal workspace manager；daemon 靠它開 pane、啟動 agent、送字、讀畫面，自己從不 spawn agent。
 
-**用 Homebrew 安裝**（macOS arm64、Linux x86_64／arm64；會一併裝好 herdr）：
+**1. 用 Homebrew 安裝**（會一併裝好 herdr）：
 
 ```bash
 brew install eden-sun/tap/agents-manager
-agents-managerd serve                     # 或常駐：brew services start agents-manager
 ```
 
-**安裝預編譯執行檔**（不需要 Rust 或 Bun，網頁 UI 已嵌入）。到 [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) 下載對應平台的壓縮檔：`linux-x86_64`、`linux-arm64` 或 `macos-arm64`。
+**2. 啟動正式版 daemon**，以背景服務常駐，登出、重開機後會自己起來：
+
+```bash
+brew services start agents-manager    # 停止：brew services stop agents-manager
+```
+
+想在前景跑（Ctrl-C 停止）就用 `agents-managerd serve`。log 在 `$(brew --prefix)/var/log/agents-manager.log`。背景服務的 PATH 只有 Homebrew 的 `bin` 和 `~/.local/bin`；agent CLI 裝在別處的話，改從自己的 shell 在前景跑。
+
+**3. 打開 UI**：http://127.0.0.1:7788 。從 `127.0.0.1` 開會自動登入；從其他裝置開，貼上 `~/.config/agents-manager/ui-token` 裡的 token。接著看[快速上手](#快速上手)。
+
+**不用 Homebrew：預編譯執行檔**（網頁 UI 已嵌入）。到 [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) 下載對應平台的壓縮檔：`linux-x86_64`、`linux-arm64` 或 `macos-arm64`。
 
 ```bash
 VERSION=v0.1.0          # 換成 Releases 頁面上最新的 tag
@@ -87,41 +96,16 @@ ASSET=linux-x86_64      # 或 linux-arm64 / macos-arm64
 curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
 tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
 install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
-agents-managerd serve   # 再打開 http://127.0.0.1:7788
+agents-managerd serve   # 正式版 daemon，UI 已嵌入：http://127.0.0.1:7788
 ```
 
-每個壓縮檔旁都有 `.sha256` 可核對。macOS 下載的執行檔第一次可能要先 `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd`。從 `127.0.0.1` 開 UI 會自動登入；從其他裝置開，貼上 `~/.config/agents-manager/ui-token` 裡的 token。要常駐就交給 launchd、systemd 或一個 herdr pane 啟動。壓縮檔不含 `scripts/` 底下的腳本（例如 `agm`），需要時再 clone repo。
+每個壓縮檔旁都有 `.sha256` 可核對。macOS 下載的執行檔第一次可能要先 `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd`。要常駐就交給 launchd、systemd 或一個 herdr pane 啟動。壓縮檔不含 `scripts/` 底下的腳本（例如 `agm`），需要時再 clone repo。
 
-**不裝 herdr 先看 UI**（記憶體內的假後端）：
-
-```bash
-cd web
-bun install
-VITE_MOCK=1 bun run dev
-```
-
-**從原始碼啟動（開發用）**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
-
-```bash
-git clone git@github.com:Eden-Sun/agents-manager.git
-cd agents-manager
-cargo dev     # 兩個一起啟動
-cargo down    # 兩個一起停止
-```
-
-**自己建正式執行檔。** UI 嵌在 daemon 執行檔裡，所以先建前端：
-
-```bash
-cd web && bun install && bun run build && cd ..   # 產出 web/dist
-cargo build --release -p agents-managerd
-./target/release/agents-managerd serve            # http://127.0.0.1:7788
-```
-
-設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）：`config.toml`、SQLite 資料庫與 `ui-token`，不要 commit。dev 版綁所有介面，區網或 Tailscale 上的手機可以開同一套 UI；打包的 macOS app 只綁 loopback（`AM_DEV_LAN` 可覆寫兩者）。
+設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）：`config.toml`、SQLite 資料庫與 `ui-token`，不要 commit。daemon 綁所有介面，區網或 Tailscale 上的手機可以開同一套 UI；打包的 macOS app 只綁 loopback（`AM_DEV_LAN=0`／`1` 可覆寫兩者）。從原始碼建置見[從原始碼建置](#從原始碼建置)。
 
 ## 快速上手
 
-1. **啟動 daemon**：`agents-managerd serve`（從原始碼就 `cargo dev`），再打開 http://127.0.0.1:7788 。沒有在跑的 herdr server 時，daemon 會在背景自己開一個。
+1. **啟動 daemon**：`brew services start agents-manager`（或在前景跑 `agents-managerd serve`），再打開 http://127.0.0.1:7788 。沒有在跑的 herdr server 時，daemon 會在背景自己開一個。
 2. **新增專案**：點側欄底部的「新增 Project」，選這台機器或某台 SSH 主機上的目錄，取個標籤。
 3. **新增 Bot**：打開專案的 `＋` 選單選「新增 Bot」，挑種類（`claude`、`codex`、`grok` 或 `agy`），身份與模型可選填。daemon 會開一個 herdr pane、帶好 hook 啟動 CLI。
 4. **聊天**：在對話框輸入送出。回合進行中送的訊息會排隊；確認框和選擇題會變成可以點的卡片；停止鈕可以中斷回合。需要看畫面時切到終端分頁。
@@ -183,6 +167,35 @@ flowchart LR
 - **herdr** — 擁有真正的 pane 與 agent 生命週期，送 prompt、讀畫面。
 
 `config.toml` 是專案與 Bot 期望狀態的唯一來源；SQLite 放執行期狀態（run、turn、訊息）。
+
+## 從原始碼建置
+
+開發或不支援的平台用。除了 herdr，另需 Rust（`cargo`）與 [Bun](https://bun.sh)。
+
+**開發模式**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
+
+```bash
+git clone git@github.com:Eden-Sun/agents-manager.git
+cd agents-manager
+cargo dev     # 兩個一起啟動
+cargo down    # 兩個一起停止
+```
+
+**自己建正式執行檔。** UI 嵌在 daemon 執行檔裡，所以先建前端：
+
+```bash
+cd web && bun install && bun run build && cd ..   # 產出 web/dist
+cargo build --release -p agents-managerd
+./target/release/agents-managerd serve            # http://127.0.0.1:7788
+```
+
+**只跑前端、不裝 herdr**（記憶體內的假後端）：
+
+```bash
+cd web
+bun install
+VITE_MOCK=1 bun run dev
+```
 
 ## 文件與開發
 
