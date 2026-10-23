@@ -21,6 +21,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/release-triage", get(get_ledger))
         .route("/release-triage/verdicts", post(post_verdicts))
         .route("/release-triage/dispatched", post(post_dispatched))
+        .route("/release-triage/auto", post(post_auto))
         .route("/release-triage/publish", post(post_publish))
 }
 
@@ -123,7 +124,15 @@ async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extens
             None
         }
     };
-    let (verdicts, proposals) = verdict::validate(&sub, &row.entries)
+    let cas = binding.as_ref().map(|(root, gen)| (root.as_str(), *gen));
+    accept_submission(&app, &sub, &version, &row, cas).await.map(Json)
+}
+
+/// 驗過的交件落帳：驗證 → `duplicate_of` 只認帳本裡的 issue → CAS 寫帳本 → publish。
+/// bot 經 `post_verdicts` 交回的，和 daemon 自己打 Claude API 分診的（`release_triage_auto`）走**同一個**函式，驗證規則只有一份。
+/// `cas` 是 bot principal 的綁定（#801）；daemon 自己和 User／AGM 補交傳 `None`。
+pub(crate) async fn accept_submission(app: &Arc<App>, sub: &Submission, version: &str, row: &Row, cas: Option<(&str, i64)>) -> Result<Value, LcError> {
+    let (verdicts, proposals) = verdict::validate(sub, &row.entries)
         .map_err(|problems| LcError::BadValue(json!({"error": "invalid_verdicts", "problems": problems})))?;
     // `duplicate_of` 會被 publish 直接拿去 `gh issue comment <n>`：只收帳本裡真的有的 release-triage issue，
     // 模型填錯或幻覺出別的 issue／PR 編號時整份退回，不能把留言貼到不相干的地方。
@@ -141,30 +150,29 @@ async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extens
     }
     let next = if proposals.is_empty() { Status::Empty } else { Status::Judged };
     let stored = json!({"submitted_at": ledger::now_ts(), "verdicts": verdicts, "issues": proposals});
-    let cas = binding.as_ref().map(|(root, gen)| (root.as_str(), *gen));
-    if !ledger::save_verdicts(&app.db, &sub.kind, &version, &stored, next, cas).await.map_err(up)? {
+    if !ledger::save_verdicts(&app.db, &sub.kind, version, &stored, next, cas).await.map_err(up)? {
         // 說明放 `message`：extra 的 `reason` 會蓋掉機器 key（#228，同 #219）。
         return Err(LcError::conflict("not_awaiting_verdict", json!({"message": "狀態在驗證期間變了"})));
     }
     let cfg = app.cfg.get().await.release_triage;
     let publish = if next == Status::Judged && cfg.publish {
         let before = row.issues.clone();
-        let outcome = issue::publish_version(&app.db, &cfg, &sub.kind, &version).await.map_err(up)?;
+        let outcome = issue::publish_version(&app.db, &cfg, &sub.kind, version).await.map_err(up)?;
         let created = match &outcome {
             Outcome::Published { created, .. } => *created,
             _ => 0,
         };
-        crate::judge::collision::hint_after_publish(&app, &before, &sub.kind, &version, created).await;
+        crate::judge::collision::hint_after_publish(app, &before, &sub.kind, version, created).await;
         Some(outcome)
     } else {
         None
     };
-    let status = ledger::get(&app.db, &sub.kind, &version).await.map_err(up)?.map(|r| r.status.as_str());
-    Ok(Json(json!({
+    let status = ledger::get(&app.db, &sub.kind, version).await.map_err(up)?.map(|r| r.status.as_str());
+    Ok(json!({
         "kind": sub.kind, "version": version, "status": status,
         "verdicts": verdicts.len(), "issues_proposed": proposals.len(),
         "publish_enabled": cfg.publish, "publish": publish,
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -198,6 +206,29 @@ async fn post_dispatched(State(app): State<Arc<App>>, Json(b): Json<DispatchedIn
         None => up(e),
     })?;
     Ok(Json(json!({"kind": b.kind, "dispatched": n, "bot_id": b.bot_id})))
+}
+
+#[derive(Deserialize)]
+struct AutoIn {
+    kind: String,
+    versions: Vec<String>,
+    /// Claude binary diff 的文字結果（舊版→新版的 `--help`／設定欄位／環境變數差集）。有就附進 prompt、併進通知；沒給就不談 binary。
+    #[serde(default)]
+    binary_diff: Option<String>,
+    /// 只問這個用途開了沒有（`{"enabled": bool}`），不分診、不呼叫 API。
+    #[serde(default)]
+    check_only: bool,
+}
+
+/// daemon 自己用 Claude API 分診（#1919）：把這幾個 `pending` 版本丟 API，驗過就落帳並直接通知使用者入口。
+/// 沒開／沒 key／API 失敗／驗證不過的版本留在 `pending`（`results[].outcome = "fallback"`），由 kick 照舊派協調者。
+/// 只給 User 與 AGM 角色（kick 走 service／user principal）；一般 Bot 沒有理由觸發一次花錢的呼叫。
+async fn post_auto(State(app): State<Arc<App>>, Json(b): Json<AutoIn>) -> Result<Json<Value>, LcError> {
+    let model = crate::release_triage_auto::ApiModel(&app);
+    if b.check_only {
+        return Ok(Json(json!({"enabled": crate::release_triage_auto::TriageModel::enabled(&model).await})));
+    }
+    crate::release_triage_auto::run_auto(&app, &model, &b.kind, &b.versions, b.binary_diff.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize, Default)]

@@ -24,7 +24,7 @@ echo "$*" >> "$AGM_DIR/calls.log"
 DEFAULT_QUOTA='{"kinds":{"claude":{"five_hour":{"used_pct":10.0},"limit_hit":null}}}'
 for a in "$@"; do
   case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|--kind|--version|assign|quota|state|ops-alert|release-triage|dispatched|publish|show) ;;
+    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|--kind|--version|--check|--binary-diff-file|assign|quota|state|ops-alert|release-triage|dispatched|publish|show|auto) ;;
     --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
   esac
 done
@@ -32,6 +32,14 @@ case "$*" in
   *"release-triage "*)
     [ -n "${STUB_OLD_AGM:-}" ] && { echo "agm: error: argument cmd: invalid choice: 'release-triage'" >&2; exit 2; }
     case "$*" in
+      *" auto "*)
+        case "$*" in *" --check"*) printf '{"enabled":%s}' "${STUB_AUTO_ENABLED:-false}"; exit 0 ;; esac
+        [ -n "${STUB_AUTO_FAIL:-}" ] && exit 1
+        for i in $(seq 1 $#); do
+          eval "a=\${$i}"
+          case "$a" in --binary-diff-file) eval "f=\${$((i+1))}"; cat "$f" > "$AGM_DIR/auto-diff.txt" ;; esac
+        done
+        printf '%s' "${STUB_AUTO_JSON:-{\"results\":[]\}}" ;;
       *" dispatched "*) [ -n "${STUB_DISPATCHED_FAIL:-}" ] && exit 1; printf '%s' '{"dispatched":1}' ;;
       *" publish "*) [ -z "${STUB_PUBLISH_SLEEP:-}" ] || sleep "$STUB_PUBLISH_SLEEP"
         printf '%s' "${STUB_PUBLISH_JSON:-{\"publish_enabled\":false,\"results\":[]\}}" ;;
@@ -69,13 +77,13 @@ PYEOF
   chmod +x "$ROOT/fake-agents-managerd"
   export AM_BINARY="$ROOT/fake-agents-managerd"
   : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/assign-body.txt"
-  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON="" STUB_DISPATCHED_FAIL="" STUB_PUBLISH_JSON="" STUB_PUBLISH_SLEEP="" STUB_OLD_AGM=""
+  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON="" STUB_DISPATCHED_FAIL="" STUB_PUBLISH_JSON="" STUB_PUBLISH_SLEEP="" STUB_OLD_AGM="" STUB_AUTO_ENABLED="" STUB_AUTO_FAIL="" STUB_AUTO_JSON=""
   unset AGM_RELEASE_BOT
 }
 teardown() {
   rm -rf "$ROOT"
   unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_LOCK_QUIET_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
-  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_PUBLISH_SLEEP STUB_OLD_AGM
+  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_PUBLISH_SLEEP STUB_OLD_AGM STUB_AUTO_ENABLED STUB_AUTO_FAIL STUB_AUTO_JSON
 }
 
 # mk_pending <kind> <to> <version…>：每版 2 條 kept、1 條 unmatched。
@@ -785,6 +793,76 @@ RACE_ROLE=b bash "$SCRIPT" > "$ROOT/race-b.log" 2>&1 & RACE_B=$!
 wait "$RACE_A"; wait "$RACE_B"
 equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "$AGM_DIR/race-b-started" ] && echo 1 || echo 0)"
 equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
+teardown
+
+# 9. daemon 的 Claude API 分診（#1919）：API 全包＝不派協調者、不查額度、不標 dispatched。
+setup
+mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"empty","status":"empty","quiet":false}],"binary_used":false}'
+bash "$SCRIPT"
+equals "API 全包：不派協調者" "$(assigns)" "0"
+check_no "API 全包：不查額度" " quota" "$AGM_DIR/calls.log"
+check_no "API 全包：不標 dispatched" " dispatched " "$AGM_DIR/calls.log"
+check "API 分診有記 log" "API 分診完成 2.1.277" "$AGM_DIR/release-triage.log"
+check "auto 帶兩個版本" "release-triage auto --kind claude --version 2.1.277 --version 2.1.278" "$AGM_DIR/calls.log"
+teardown
+
+# 9b. 沒開（--check 回 false）：不呼叫 auto，照舊派協調者，log 安靜。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+bash "$SCRIPT"
+equals "沒開：照派協調者" "$(assigns)" "1"
+check_no "沒開：不呼叫 auto 本體" "auto --kind claude --version" "$AGM_DIR/calls.log"
+check_no "沒開：log 不吵" "API 分診" "$AGM_DIR/release-triage.log"
+teardown
+
+# 9c. 部分退回：成功的版本不再進交辦，退回的照派，request-id 與 TO 用剩下的最後一版。
+setup
+mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"fallback","reason":"驗證不過：缺 verdict","quiet":false}]}'
+bash "$SCRIPT"
+equals "部分退回：派一則" "$(assigns)" "1"
+check_no "已判完的版本不在交辦" "2.1.277-k0" "$AGM_DIR/assign-body.txt"
+check "退回的版本在交辦" "2.1.278-k0" "$AGM_DIR/assign-body.txt"
+check "dispatched 只標退回的" "dispatched --kind claude --version 2.1.278 --bot bot-resp" "$AGM_DIR/calls.log"
+check "退回原因進 log" "API 分診退回 2.1.278：驗證不過：缺 verdict" "$AGM_DIR/release-triage.log"
+teardown
+
+# 9d. auto 本身失敗（舊 daemon 404／逾時）：照派協調者。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_AUTO_ENABLED=true STUB_AUTO_FAIL=1
+bash "$SCRIPT"
+equals "auto 失敗：照派協調者" "$(assigns)" "1"
+check "auto 失敗有記 log" "release-triage auto --kind claude 失敗" "$AGM_DIR/release-triage.log"
+teardown
+
+# 9e. binary diff：產出報告交給 API；API 併進通知（binary_used）後推進 claude-release.last，不再派 binary-only。
+setup
+mk_pending claude 2.1.279 2.1.279; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"; sleep 1; mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+printf '#!/usr/bin/env python3\nprint("FAKE-BINARY-DIFF-REPORT", __import__("sys").argv[1:3])\n' > "$AGM_DIR/bin/claude_binary_diff.py"
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.279","outcome":"judged","status":"judged","quiet":false}],"binary_used":true}'
+bash "$SCRIPT"
+equals "API 併進 binary：不派協調者" "$(assigns)" "0"
+check "報告檔交給 auto" "FAKE-BINARY-DIFF-REPORT" "$AGM_DIR/auto-diff.txt"
+check "報告用 OLD／NEW 兩個路徑" "2.1.278" "$AGM_DIR/auto-diff.txt"
+equals "binary_used 後推進 binary state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
+teardown
+
+# 9f. binary diff 沒被 API 用到（binary_used=false）：changelog 由 API 判完，binary 留給一則 binary-only 交辦，state 不前進直到派成功。
+setup
+mk_pending claude 2.1.279 2.1.279; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"; sleep 1; mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.279","outcome":"judged","status":"judged","quiet":false}],"binary_used":false}'
+bash "$SCRIPT"
+equals "binary 沒進 API：派一則 binary-only" "$(assigns)" "1"
+check "binary-only 沿用舊通知 id 命名空間" "agm-claude-release-2.1.279-notice" "$AGM_DIR/assign-body.txt"
+check "binary-only 帶 binary diff 任務" "CLAUDE_BINARY_DIFF_MARKER" "$AGM_DIR/assign-body.txt"
 teardown
 
 echo "$PASS passed, $FAIL failed"

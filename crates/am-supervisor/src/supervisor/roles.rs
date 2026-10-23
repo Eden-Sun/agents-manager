@@ -245,6 +245,8 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
             Role::Patrol,
             payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
         ),
+        // `release_triage_notice`：daemon 用 Claude API 分診完一版，結論直接給巡檢（使用者入口），不經協調者（#1919）。
+        "release_triage_notice" => r(Role::Patrol, payload.get("wake").and_then(Value::as_bool).unwrap_or(true)),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。

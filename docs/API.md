@@ -333,6 +333,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/projects/{id}/missions` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `user_only`（#989） |
 | POST | `/api/quota/probe` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/dispatched` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/release-triage/auto` | User-only（會花 API 費用）；一般 Bot → 403 `user_only`；AGM 角色同上 |
 | POST | `/api/release-triage/publish` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/verdicts` | User／AGM 補交不綁；一般 Bot 只能交派給它（或它底下的 child）、這一代的 verdict：要帶 `dispatch_gen`（缺＝403 `dispatch_gen_required`），不是收件方＝403 `not_assigned`，代數過期＝409 `stale_assignment`（#801） |
 | POST | `/api/services/daemon-swap/probe/{id}` | Service `daemon-swap` only |
@@ -2625,6 +2626,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
 
 - `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,assigned_bot_id,dispatch_gen,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。
+- `POST /api/release-triage/auto {kind, versions[], binary_diff?, check_only?}`（#1919）：daemon 自己用 Claude API（`[claude_api.uses.release_triage]`）分診這幾個 `pending` 版本，驗過就落帳（與 `verdicts` 同一個驗證／落帳函式）並寫一則 `release_triage_notice` 給巡檢。回 `{kind, results:[{version, outcome:judged|empty|fallback|skipped, status?, reason?, quiet}], notice:{event_key,to,text}|null, binary_used}`：`judged`／`empty` 已落帳（離開 `pending`）、`fallback` 沒成（沒開／沒 key／逾時／HTTP 錯／JSON 不合 schema／驗證不過，該版仍 `pending`，`quiet` 為真＝只是沒開或沒 key）、`skipped` 不是 `pending` 或帳本沒有；`binary_diff` 是 `claude_binary_diff.py` 的報告文字（附在最後一版的 prompt、結論併進通知，`binary_used` 為真表示最後一版判完且用到了）；`check_only: true` 只回 `{enabled}`（總開關與用途開關都開），不呼叫 API。同一時間只跑一個。CLI：`agm release-triage auto --kind K --version V… [--binary-diff-file F]`／`--check`。
 - `POST /api/release-triage/dispatched {kind, versions[], bot_id}` → `{kind, dispatched, bot_id}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）；記下收件 `bot_id`、`dispatch_gen`＋1（#801）。整批一筆交易（#1267）：有任何一版不是 `pending`（已派出、已判完、帳本沒有）→ `409 {reason:"not_pending", version, message}`，整批都不標、`dispatch_gen` 不動；同一請求裡重複的版本只算一次。`bot_id` 不是現存的 bot 就 400。
 - `POST /api/release-triage/verdicts {kind, version, verdicts:[{entry_id, verdict:guard|adopt|upgrade-arg|none, reason, module}], issues:[{entry_ids[], title, goal, suggestion, acceptance, verdict?, duplicate_of?}]}`。
   只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。 `duplicate_of` 只能是帳本裡（任何版本）已記錄的 release-triage issue 編號（publish 會直接對它 `gh issue comment`）；填了別的編號整份退回。

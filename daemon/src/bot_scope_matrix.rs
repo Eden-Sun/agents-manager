@@ -227,6 +227,7 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/supervisor/assignments/{id}/review", Expect::Forbidden, None),
         rule("GET", "/api/intents", Expect::UserOnly, None),
         rule("POST", "/api/release-triage/dispatched", Expect::UserOnly, None),
+        rule("POST", "/api/release-triage/auto", Expect::UserOnly, None),
         rule("GET", "/api/bots/{id}/preview", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/preview", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/preview", Expect::Forbidden, None),

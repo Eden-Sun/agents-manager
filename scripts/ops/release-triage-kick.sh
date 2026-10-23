@@ -29,6 +29,7 @@ CLAUDE_STATE="$DIR/claude-release.last"
 CLAUDE_DIFF_TASK="$DIR/claude-release-diff-task.md"
 CLAUDE_DIFF_OLD=""
 CLAUDE_DIFF_NEW=""
+BINDIFF="$DIR/bin/claude_binary_diff.py"   # 決定性 binary diff（#1919）；API 分診路徑用它的文字結果
 OWNER="${AM_AGENT_NAME:-release-triage-kick}"
 QUOTA_MAX="${AGM_TRIAGE_QUOTA_MAX:-85}"
 MAX_VERSIONS=5      # 一則交辦最多帶幾版
@@ -371,6 +372,73 @@ except Exception:
   [ "$QUOTA_STATE" = ok ]
 }
 
+# daemon 自己用 Claude API 分診（#1919）：這批 pending 先丟 `agm release-triage auto`，daemon 驗過就直接落帳並通知使用者入口，
+# 不派協調者。沒開／沒 key／API 失敗／驗證不過的版本留在 pending，照舊走下面派協調者的路徑（所以舊 daemon 的 404 也只是退回）。
+# 全域：KIND、PAYLOAD、TO、CLAUDE_DIFF_*。回傳 0＝還有東西要派 bot（PAYLOAD／TO 已改成剩下的）、3＝API 全包了。
+# API 成功分診完的版本離開 pending，下一輪 `release-triage-check` 不會再回它，同一版不會重派 bot。
+api_triage() {
+  _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || return 0
+  [ "$(printf '%s' "$_en" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' 2>/dev/null)" = 1 ] || return 0
+  _vargs=(); _vcount=0
+  while IFS= read -r _v; do
+    [ -n "$_v" ] || continue
+    _vargs+=(--version "$_v"); _vcount=$((_vcount + 1))
+  done <<< "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+for p in json.load(sys.stdin)["pending"]: print(p["version"])' 2>/dev/null)"
+  [ "$_vcount" -gt 0 ] || return 0
+  _dargs=()
+  if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ] && [ -f "$BINDIFF" ]; then
+    _dfile=$(mktemp "${TMPDIR:-/tmp}/agm-binary-diff.XXXXXX"); TMPS+=("$_dfile"); TMPS_COUNT=$((TMPS_COUNT + 1))
+    if python3 "$BINDIFF" "$CLAUDE_VERSIONS/$CLAUDE_DIFF_OLD" "$CLAUDE_VERSIONS/$CLAUDE_DIFF_NEW" --timeout 120 > "$_dfile" 2>>"$LOG" && [ -s "$_dfile" ]; then
+      _dargs=(--binary-diff-file "$_dfile")
+    else
+      log "binary diff 腳本沒產出報告（${CLAUDE_DIFF_OLD} → ${CLAUDE_DIFF_NEW}），binary 留給派協調者的路徑"
+    fi
+  fi
+  _out=$("$AGM" --compact release-triage auto --kind "$KIND" "${_vargs[@]}" ${_dargs[@]+"${_dargs[@]}"} 2>>"$LOG") || {
+    log "release-triage auto --kind ${KIND} 失敗，改走派協調者的路徑"
+    return 0
+  }
+  _rest=$(printf '%s' "$_out" | AUTO_OUT="$_out" PAYLOAD="$PAYLOAD" TO="$TO" python3 -c '
+import json, os, sys
+try:
+    res = json.load(sys.stdin)["results"]
+    payload = json.loads(os.environ["PAYLOAD"])
+except Exception as exc:
+    print("cannot read auto result: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+done = {r["version"] for r in res if r.get("outcome") in ("judged", "empty")}
+for r in res:
+    if r.get("outcome") == "fallback" and not r.get("quiet"):
+        print("API 分診退回 %s：%s" % (r.get("version"), str(r.get("reason"))[:200]), file=sys.stderr)
+    elif r.get("outcome") in ("judged", "empty"):
+        print("API 分診完成 %s（%s）%s" % (r.get("version"), r.get("status"), "：" + str(r["reason"])[:200] if r.get("reason") else ""), file=sys.stderr)
+pend = [p for p in payload["pending"] if p["version"] not in done]
+to = os.environ["TO"]
+if to in done:
+    to = pend[-1]["version"] if pend else ""
+payload["pending"] = pend
+payload["to"] = to or payload.get("to")
+print("%d %d" % (len(pend), 1 if json.loads(os.environ["AUTO_OUT"]).get("binary_used") else 0))
+print(to)
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+' 2>>"$LOG") || return 0
+  _head=$(printf '%s\n' "$_rest" | sed -n 1p)
+  _left=${_head%% *}; _bin=${_head##* }
+  if [ "$_bin" = 1 ]; then
+    if write_claude_state "$CLAUDE_DIFF_NEW"; then
+      log "claude → ${CLAUDE_DIFF_NEW}：binary diff 已併進 API 分診的通知"
+      CLAUDE_DIFF_NEW=""; CLAUDE_DIFF_OLD=""
+    else
+      log "寫不了狀態檔 ${CLAUDE_STATE}（binary diff 已併進 API 通知；下一輪會再比一次）"
+    fi
+  fi
+  if [ "$_left" = 0 ]; then return 3; fi
+  TO=$(printf '%s\n' "$_rest" | sed -n 2p)
+  PAYLOAD=$(printf '%s\n' "$_rest" | sed 1,2d)
+  return 0
+}
+
 for KIND in claude codex; do
   # 抓不到／CLI 壞掉就是這輪不做這個 kind，不當成「沒有新版」；另一個 kind 照跑。
   BINARY_ONLY=0
@@ -433,6 +501,20 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
     TO=$(printf '%s\n' "$PICK" | head -1)
     PAYLOAD=$(printf '%s\n' "$PICK" | sed 1d)
   fi
+  fi
+
+  if [ "$BINARY_ONLY" -eq 0 ]; then
+    api_triage; _api_rc=$?
+    if [ "$_api_rc" -eq 3 ]; then
+      if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
+        # changelog 都由 API 判完了，但 binary diff 沒併進去（腳本沒產出或這版退回）：只剩 binary，照舊派一則 binary-only 交辦。
+        BINARY_ONLY=1
+        TO="$CLAUDE_DIFF_NEW"
+        PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
+      else
+        continue
+      fi
+    fi
   fi
 
   [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
