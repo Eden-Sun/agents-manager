@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { blobFor } from '../lib/outboxPreviewCache'
-import { previewPlacement } from '../lib/outboxList'
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
+import { blobFor } from "../lib/outboxPreviewCache"
+import { previewPlacement } from "../lib/outboxList"
+import { useT } from "../lib/i18n"
 
 /** 「bot 給你的檔案」裡的圖檔滑過去浮出的預覽（使用者 2026-09-18）；抓圖與快取見 `lib/outboxPreviewCache`。 */
 /** 預覽框上限：大圖也看得清楚（直式截圖常很高），但不超出視窗。 */
@@ -20,7 +21,8 @@ export function OutboxImagePreview({
   modified: number
   anchor: DOMRect
 }) {
-  const [src, setSrc] = useState<{ key: string; url: string | null }>({ key: '', url: null })
+  const t = useT()
+  const [src, setSrc] = useState<{ key: string; url: string | null }>({ key: "", url: null })
   const key = `${botId}/${name}/${modified}`
   const boxRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState(() =>
@@ -62,11 +64,11 @@ export function OutboxImagePreview({
       role="tooltip"
     >
       {!ready ? (
-        <span className="outbox-preview-note">載入預覽…</span>
+        <span className="outbox-preview-note">{t("載入預覽…")}</span>
       ) : src.url ? (
         <img src={src.url} alt={name} style={{ maxWidth: box.width - 12, maxHeight: box.height - 12 }} onLoad={() => setSrc((s) => ({ ...s }))} />
       ) : (
-        <span className="outbox-preview-note">預覽載不出來</span>
+        <span className="outbox-preview-note">{t("預覽載不出來")}</span>
       )}
     </div>,
     document.body,

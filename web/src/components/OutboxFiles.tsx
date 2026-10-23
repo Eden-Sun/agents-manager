@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
@@ -8,7 +9,7 @@ import { useStore } from '../store/store'
 import './outboxFiles.css'
 
 /**
- * 檔案暫存區裡的「bot 給你的檔案」：bot 把要交給使用者的東西放進 `$AM_OUTBOX`（SPEC §6.5f），
+ * 檔案暫存區裡的「{t("bot 給你的檔案")}」：bot 把要交給使用者的東西放進 `$AM_OUTBOX`（SPEC §6.5f），
  * 使用者在這裡點一下就下載得到——那些檔案在 daemon 這台機器上，手機上本來拿不到。
  *
  * **只讀 outbox，不讀 scratchpad**（使用者 2026-09-16 裁示：scratchpad 暴露過私鑰與正式 DB 複本）。
@@ -17,6 +18,7 @@ import './outboxFiles.css'
  * 只讀：這一段不刪檔、不改檔。上面那半（拖進來的暫存）是要**送進**對話的東西，這半是**從** bot 拿出來的。
  */
 export function OutboxFiles() {
+  const t = useT()
   const botId = useStore((s) => s.selectedBotId)
   const notify = useStore((s) => s.notify)
   // 回合一結束就重讀：bot 說「放好了」的同時清單就該出現，不必切頁或按 ↻（字串比較，回合沒結束不會重跑）。
@@ -135,7 +137,7 @@ export function OutboxFiles() {
       } else {
         // 已經換到別的 bot：清單不動，訊息寫明是哪顆 bot 的檔。
         const label = useStore.getState().bots.find((b) => b.id === botId)?.name ?? botId
-        notify('error', `${label} 的檔案：${text}`)
+        notify('error', t('{label} 的檔案：{text}', { label, text }))
       }
     } finally {
       // 只清自己設的那一格；別的下載（同一顆或切過去的）設的不碰。
@@ -148,7 +150,7 @@ export function OutboxFiles() {
     // 點擊當下同步開空白頁，保留 transient activation；不帶 noopener 以便取得 Window handle
     const w = window.open('', '_blank')
     if (!w) {
-      notify('error', '瀏覽器擋了彈出視窗')
+      notify('error', t('瀏覽器擋了彈出視窗'))
       return
     }
     // 取得 handle 後立即切斷 opener，防止子頁面存取父頁面
@@ -167,7 +169,7 @@ export function OutboxFiles() {
         w.location.href = url
       } catch {
         w.close()
-        throw new Error('無法導向預覽分頁')
+        throw new Error(t('無法導向預覽分頁'))
       }
       // 不要固定 60 秒 revoke：每 30 秒檢查分頁是否關閉，關閉後才釋放 Blob URL
       const timer = setInterval(() => {
@@ -195,7 +197,7 @@ export function OutboxFiles() {
         notify('error', text)
       } else {
         const label = useStore.getState().bots.find((b) => b.id === botId)?.name ?? botId
-        notify('error', `${label} 的檔案：${text}`)
+        notify('error', t('{label} 的檔案：{text}', { label, text }))
       }
     } finally {
       setBusy((cur) => (cur === mine ? null : cur))
@@ -203,10 +205,10 @@ export function OutboxFiles() {
   }
 
   return (
-    <section className="outbox-files" aria-label="這顆 bot 交給你的檔案">
+    <section className="outbox-files" aria-label={t("這顆 bot 交給你的檔案")}>
       <div className="outbox-head">
         <span className="outbox-title" title={dir || undefined}>
-          bot 給你的檔案
+          {t('bot 給你的檔案')}
         </span>
         {files.length > 0 ? <span className="outbox-count">{files.length}</span> : null}
         <span className="spacer" />
@@ -214,8 +216,8 @@ export function OutboxFiles() {
           type="button"
           className="icon-btn outbox-refresh"
           disabled={!botId || loadedFor !== botId}
-          aria-label="重新讀取 bot 給你的檔案"
-          title="重新讀取（bot 剛放進去的檔案按這裡才會出現）"
+          aria-label={t("重新讀取 bot 給你的檔案")}
+          title={t("重新讀取（bot 剛放進去的檔案按這裡才會出現）")}
           onClick={() => {
             if (!botId) return
             setLoadedFor(null)
@@ -227,7 +229,7 @@ export function OutboxFiles() {
       </div>
       {files.length === 0 ? (
         <p className={`outbox-empty${reason === LOAD_FAILED ? ' failed' : ''}`} role={reason === LOAD_FAILED ? 'alert' : undefined}>
-          {botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId), kept)}
+          {botId && loadedFor !== botId ? t('讀取中…') : emptyReason(reason, Boolean(botId), kept)}
         </p>
       ) : (
         <ul className="outbox-list" role="list">
@@ -243,7 +245,7 @@ export function OutboxFiles() {
                   type="button"
                   className="outbox-file"
                   disabled={isBusy}
-                  title={`下載 ${f.name}`}
+                  title={t("下載 {name}", { name: f.name })}
                   onClick={() => void download(f.name)}
                   onMouseEnter={(e) => showPeek(f, e.currentTarget)}
                   onMouseLeave={hidePeek}
@@ -257,7 +259,7 @@ export function OutboxFiles() {
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                     {fileSize(f.size)}
                     {left === null ? '' : ` · ${remainingLabel(left)}`}
-                    {itemBusy === 'preview' ? ' · 開啟中…' : itemBusy === 'download' ? ' · 下載中…' : ''}
+                    {itemBusy === 'preview' ? t(' · 開啟中…') : itemBusy === 'download' ? t(' · 下載中…') : ''}
                   </span>
                 </button>
                 {canPreview ? (
@@ -265,8 +267,8 @@ export function OutboxFiles() {
                     type="button"
                     className="icon-btn outbox-preview-btn"
                     disabled={isBusy}
-                    aria-label={`開新分頁預覽 ${f.name}`}
-                    title="開新分頁預覽（不下載）"
+                    aria-label={t("開新分頁預覽 {name}", { name: f.name })}
+                    title={t("開新分頁預覽（不下載）")}
                     onClick={(e) => {
                       e.stopPropagation()
                       void openPreview(f.name)

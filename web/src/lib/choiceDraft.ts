@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 /**
  * 多分頁問卷：先讀完、離線作答、最後一次送出（2026-09-12 第六輪，使用者指定：「一開始就先
  * 預載入所有的分頁，而不是每一次連動，最後送出前再確認就好」）。
@@ -158,7 +159,7 @@ export async function preload(
       at += dir
       cur = next
       const had = pages[at]
-      pages[at] = pageOf(cur, at, tabs[at]?.label ?? `第 ${at + 1} 題`)
+      pages[at] = pageOf(cur, at, tabs[at]?.label ?? t('第 {n} 題', { n: at + 1 }))
       if (!had) note()
     }
   }
@@ -327,21 +328,21 @@ export async function commit(
     if (typing >= 0 && isTypeSomething(p.choices[typing] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()) {
       return {
         ok: false,
-        error: `第 ${p.tab + 1} 題選了「Type something.」但沒有打字。請打一段或改選別項。`,
+        error: t('第 {n} 題選了「Type something.」但沒有打字。請打一段或改選別項。', { n: p.tab + 1 }),
         at: i,
       }
     }
   }
 
   let cur = await io.read()
-  if (!cur) return { ok: false, error: '讀不到畫面，什麼都沒送出。' }
+  if (!cur) return { ok: false, error: t('讀不到畫面，什麼都沒送出。') }
   if (cur.tabs.length !== draft.tabs.length) {
-    return { ok: false, error: '畫面已經變了（分頁數不一樣），整批都沒送出，請重新讀取。' }
+    return { ok: false, error: t('畫面已經變了（分頁數不一樣），整批都沒送出，請重新讀取。') }
   }
   // 起點分不出在哪一頁：不是 Review 就不猜，直接停（猜了會先送第一頁的答案、到導覽才停下，送了一部分）。
   const start = locate(draft, cur)
   if (start === null && !isSubmitMenu(cur)) {
-    return { ok: false, error: '分不出終端停在哪一頁，什麼都沒送出，請重新讀取', at: 0 }
+    return { ok: false, error: t('分不出終端停在哪一頁，什麼都沒送出，請重新讀取'), at: 0 }
   }
   let at = start ?? draft.startTab
 
@@ -359,16 +360,16 @@ export async function commit(
     while (at !== p.tab) {
       const dir = p.tab > at ? 1 : -1
       const next = await moveTab(io, dir, cur)
-      if (!next) return { ok: false, error: `走不到第 ${p.tab + 1} 題（${p.label}），後面的都沒送出。`, at: i }
+      if (!next) return { ok: false, error: t('走不到第 {n} 題（{label}），後面的都沒送出。', { n: p.tab + 1, label: p.label }), at: i }
       cur = next
       const found = locate(draft, cur)
       if (found === null) {
-        return { ok: false, error: `導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），後面的都沒送出，請看終端。`, at: i }
+        return { ok: false, error: t('導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），後面的都沒送出，請看終端。'), at: i }
       }
       at = found
     }
     if (!samePage(p, cur)) {
-      return { ok: false, error: `第 ${p.tab + 1} 題（${p.label}）的選項跟讀進來時不一樣，沒有送出。`, at: i }
+      return { ok: false, error: t('第 {n} 題（{label}）的選項跟讀進來時不一樣，沒有送出。', { n: p.tab + 1, label: p.label }), at: i }
     }
 
     // 單選：走到再 Enter，畫面可能自己跳下一題。`Type something.` 先貼字、確認出現再 Enter。
@@ -376,7 +377,7 @@ export async function commit(
       const idx = radioPick(want[i])
       if (idx < 0) continue
       const landed = await walkTo(io, idx, p)
-      if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }
+      if (!landed) return { ok: false, error: t('第 {n} 題的游標走不到第 {item} 項，停在這裡。', { n: p.tab + 1, item: idx + 1 }), at: i }
       if (isTypeSomething(p.choices[idx] ?? { title: '' })) {
         const text = (custom[p.tab] ?? '').trim()
         await io.paste(text)
@@ -390,12 +391,12 @@ export async function commit(
           }
         }
         if (!shown) {
-          return { ok: false, error: `第 ${p.tab + 1} 題的自訂文字沒有出現在畫面上，沒有按 Enter。`, at: i }
+          return { ok: false, error: t('第 {n} 題的自訂文字沒有出現在畫面上，沒有按 Enter。', { n: p.tab + 1 }), at: i }
         }
       }
       await io.send(['enter'])
       const now = await settleAfterEnter(io, cur)
-      if (!now) return { ok: false, error: `第 ${p.tab + 1} 題送出後讀不到畫面，請重新讀取。`, at: i }
+      if (!now) return { ok: false, error: t('第 {n} 題送出後讀不到畫面，請重新讀取。', { n: p.tab + 1 }), at: i }
       cur = now
       at = locate(draft, now) ?? at
       onProgress?.(++done, total)
@@ -409,7 +410,7 @@ export async function commit(
     if (typeIdx >= 0) {
       const text = (custom[p.tab] ?? '').trim()
       const landed = await walkTo(io, typeIdx, p)
-      if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${typeIdx + 1} 項，停在這裡。`, at: i }
+      if (!landed) return { ok: false, error: t('第 {n} 題的游標走不到第 {item} 項，停在這裡。', { n: p.tab + 1, item: typeIdx + 1 }), at: i }
       await io.paste(text)
       let typed: TuiChoiceMenu | null = null
       for (let t = 0; t < SETTLE_TRIES; t++) {
@@ -421,7 +422,7 @@ export async function commit(
         }
       }
       if (!typed) {
-        return { ok: false, error: `第 ${p.tab + 1} 題的自訂文字沒有出現在畫面上（或沒勾起來），停在這裡。`, at: i }
+        return { ok: false, error: t('第 {n} 題的自訂文字沒有出現在畫面上（或沒勾起來），停在這裡。', { n: p.tab + 1 }), at: i }
       }
       cur = typed
       page = { ...p, choices: p.choices.map((c, j) => (j === typeIdx ? { ...c, title: typed.choices[typeIdx].title, checked: true } : c)) }
@@ -429,21 +430,21 @@ export async function commit(
 
     for (const idx of togglesFor(cur.choices, want[i])) {
       const landed = await walkTo(io, idx, page)
-      if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }
+      if (!landed) return { ok: false, error: t('第 {n} 題的游標走不到第 {item} 項，停在這裡。', { n: p.tab + 1, item: idx + 1 }), at: i }
       const before = landed.choices[idx].checked
       const flipped = (now: TuiChoiceMenu | null) => Boolean(now && now.choices[idx]?.checked !== before)
       if (await pressUntil(io, 'space', flipped)) continue
       const n = p.choices[idx].number
       if (n <= 9 && (await pressUntil(io, String(n), flipped))) continue
-      return { ok: false, error: `第 ${p.tab + 1} 題的第 ${n} 項按不動（space 與數字鍵都沒反應），停在這裡。`, at: i }
+      return { ok: false, error: t('第 {tab} 題的第 {item} 項按不動（space 與數字鍵都沒反應），停在這裡。', { tab: p.tab + 1, item: n }), at: i }
     }
 
     const after = await io.read()
     if (!after || !samePage(page, after)) {
-      return { ok: false, error: `第 ${p.tab + 1} 題送完之後畫面對不上，後面的都沒送出。`, at: i }
+      return { ok: false, error: t('第 {n} 題送完之後畫面對不上，後面的都沒送出。', { n: p.tab + 1 }), at: i }
     }
     if (togglesFor(after.choices, want[i]).length) {
-      return { ok: false, error: `第 ${p.tab + 1} 題的勾選沒有全部生效，後面的都沒送出。`, at: i }
+      return { ok: false, error: t('第 {n} 題的勾選沒有全部生效，後面的都沒送出。', { n: p.tab + 1 }), at: i }
     }
     cur = after
     onProgress?.(++done, total)
@@ -452,11 +453,11 @@ export async function commit(
     if (p.hasSubmitRow) {
       const landed = await walkTo(io, 'submit', page)
       if (!landed?.submit?.current) {
-        return { ok: false, error: `第 ${p.tab + 1} 題的游標沒有停在 Submit 上，沒有按下去。`, at: i }
+        return { ok: false, error: t('第 {n} 題的游標沒有停在 Submit 上，沒有按下去。', { n: p.tab + 1 }), at: i }
       }
       await io.send(['enter'])
       const now = await settleAfterEnter(io, cur)
-      if (!now) return { ok: false, error: `第 ${p.tab + 1} 題送出後讀不到畫面，請重新讀取。`, at: i }
+      if (!now) return { ok: false, error: t('第 {n} 題送出後讀不到畫面，請重新讀取。', { n: p.tab + 1 }), at: i }
       cur = now
       at = locate(draft, now) ?? at
     }
@@ -464,23 +465,23 @@ export async function commit(
 
   const submitTab = draft.pages.findIndex((p) => p.isSubmit)
   const target = submitTab >= 0 ? draft.pages[submitTab].tab : draft.tabs.findIndex((t) => t.submit)
-  if (target < 0) return { ok: false, error: '找不到送出頁，勾選已經送出去了，最後一步請自己按。' }
+  if (target < 0) return { ok: false, error: t('找不到送出頁，勾選已經送出去了，最後一步請自己按。') }
   while (at !== target) {
     const dir = target > at ? 1 : -1
     const next = await moveTab(io, dir, cur)
-    if (!next) return { ok: false, error: '走不到送出頁，勾選已經送出去了，最後一步請自己按。' }
+    if (!next) return { ok: false, error: t('走不到送出頁，勾選已經送出去了，最後一步請自己按。') }
     cur = next
     const found = locate(draft, cur)
     if (found === null) {
-      return { ok: false, error: '導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），勾選已經送出去了，最後一步請自己按。' }
+      return { ok: false, error: t('導覽後的畫面對不上草稿，分不出終端停在哪一頁（題目或選項跟讀進來時不一樣），勾選已經送出去了，最後一步請自己按。') }
     }
     at = found
   }
   const idx = cur.choices.findIndex((c) => /^submit answers$/i.test(c.title))
-  if (idx < 0) return { ok: false, error: '送出頁上找不到「Submit answers」，最後一步請自己按。' }
+  if (idx < 0) return { ok: false, error: t('送出頁上找不到「Submit answers」，最後一步請自己按。') }
   const page = pageOf(cur, target, draft.tabs[target]?.label ?? 'Submit')
   const landed = await walkTo(io, idx, page)
-  if (!landed || landed.cursor !== idx) return { ok: false, error: '游標沒有停在「Submit answers」上，沒有按下去。' }
+  if (!landed || landed.cursor !== idx) return { ok: false, error: t('游標沒有停在「Submit answers」上，沒有按下去。') }
   await io.send(['enter'])
   onProgress?.(++done, total)
   // 按完要看到送出頁真的離開才算交卷；鍵沒送到（網路、daemon）或沒被吃掉時，別讓畫面靜靜停在 Review。
@@ -501,12 +502,12 @@ export async function commit(
   if (lastReadFailed) {
     return {
       ok: false,
-      error: '已送出「Submit answers」，但讀取終端失敗，無法確認是否交卷。請回終端檢查；若仍停在送出頁，再按 Enter。',
+      error: t('已送出「Submit answers」，但讀取終端失敗，無法確認是否交卷。請回終端檢查；若仍停在送出頁，再按 Enter。'),
     }
   }
   return {
     ok: false,
-    error: '已經送出「Submit answers」，但終端還停在送出頁（Enter 可能沒送到）。答案都填好了，請再按一次送出，或直接在終端按 Enter。',
+    error: t('已經送出「Submit answers」，但終端還停在送出頁（Enter 可能沒送到）。答案都填好了，請再按一次送出，或直接在終端按 Enter。'),
   }
 }
 

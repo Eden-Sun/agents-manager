@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 import {
   backgroundAge,
   backgroundDetail,
@@ -22,10 +23,6 @@ function useBackground(botId: string): { n: number; kind: string; age: string | 
   return { n, kind, age, stuck }
 }
 
-function ageText(age: string | null): string {
-  return age ? `已持續 ${age}。` : ''
-}
-
 /**
  * #714：側欄上的「背景 N」。`variant="state"` 取代側欄那格「閒置」字；`mini` 給精簡的 child 列
  * （它們沒有狀態字，只有燈號）。標題列不放（2026-09-30 使用者：側欄與輸入框上方那條已經講了）。
@@ -40,9 +37,11 @@ export function BackgroundJobsBadge({
   /** 沒有背景工作時畫這個（側欄那格原本的「閒置」字）。 */
   fallback?: React.ReactNode
 }) {
+  const t = useT()
   const { n, kind, age, stuck } = useBackground(botId)
   if (n === 0) return <>{fallback}</>
-  const title = backgroundDetail(kind, n) + ageText(age)
+  const ageT = age ? t('已持續 {age}。', { age }) : ''
+  const title = backgroundDetail(kind, n) + ageT
   const label = stuck ? backgroundStuckLabel(n) : backgroundLabel(n)
   if (variant === 'mini') {
     return (
@@ -53,7 +52,7 @@ export function BackgroundJobsBadge({
     )
   }
   return (
-    <span className={`bot-state bg-jobs-state${stuck ? ' bg-jobs-stuck' : ''}`} title={`${label}：${title}`}>
+    <span className={`bot-state bg-jobs-state${stuck ? ' bg-jobs-stuck' : ''}`} title={t('{label}：{title}', { label, title })}>
       <span className="bg-jobs-dot" aria-hidden="true" />
       {backgroundShortLabel(n)}
     </span>
@@ -65,12 +64,14 @@ export function BackgroundJobsBadge({
  * 手機只畫一行（燈＋狀態＋跑多久＋第一個工作），說明句與排程收起來、點一下才展開（2026-10-03 使用者：藍色那塊太佔空間）。
  */
 export function BackgroundJobsBar({ botId }: { botId: string }) {
+  const t = useT()
   const { n, kind, age, stuck } = useBackground(botId)
   const lines = useStore((s) => backgroundTaskLines(s.runs[botId]).join('\n'))
   const cron = useStore((s) => cronLabel(s.runs[botId]))
   const [open, setOpen] = useState(false)
   if (n === 0) return null
-  const detail = stuck ? `已持續 ${age ?? '超過 3 小時'}，可能卡住或忘了收；要停就到 pane 裡處理。` : backgroundDetail(kind, n) + ageText(age)
+  const ageT = age ? t('已持續 {age}。', { age }) : ''
+  const detail = stuck ? t('已持續 {age}，可能卡住或忘了收；要停就到 pane 裡處理。', { age: age ?? t('超過 3 小時') }) : backgroundDetail(kind, n) + ageT
   return (
     <div className={`bg-jobs-bar${stuck ? ' bg-jobs-stuck' : ''}${open ? ' open' : ''}`} role="status">
       <button type="button" className="bg-jobs-summary" aria-expanded={open} title={detail} onClick={() => setOpen((v) => !v)}>

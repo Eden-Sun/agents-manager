@@ -5,6 +5,7 @@ import { NOT_ANSWERED, askAnswersText } from '../lib/askAnswers'
 import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
 import { useLocalDay } from '../hooks/useLocalDay'
 import type { AskAnswers } from '../lib/askAnswers'
+import { useT } from '../lib/i18n'
 import './askAnswers.css'
 
 /**
@@ -12,17 +13,18 @@ import './askAnswers.css'
  * 只讀的一張卡：不是使用者打的 prompt，沒有倒回鍵、來源標、送達標，也不碰任何送出或排隊。
  */
 export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) {
+  const t = useT()
   const today = useLocalDay()
   const notify = useStore((s) => s.notify)
   const tapCopy = useTapCopy(askAnswersText(ask), (ok) => {
-    notify(ok ? 'info' : 'error', ok ? '已複製問答' : '複製失敗，請長按選取文字複製')
+    notify(ok ? 'info' : 'error', ok ? t('已複製問答') : t('複製失敗，請長按選取文字複製'))
   })
   return (
-    <article className="msg ask-answers" data-msg-id={msg.id} aria-label="Claude 的提問與你的回答">
+    <article className="msg ask-answers" data-msg-id={msg.id} aria-label={t('Claude 的提問與你的回答')}>
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
-          <span className="src-tag mono" title="Claude 用 AskUserQuestion 問、你回答的紀錄；不是你打的字">
-            {ask.answered ? '提問與回答' : '提問（沒有回答）'}
+          <span className="src-tag mono" title={t('Claude 用 AskUserQuestion 問、你回答的紀錄；不是你打的字')}>
+            {ask.answered ? t('提問與回答') : t('提問（沒有回答）')}
           </span>
         </div>
         <time className="msg-time" dateTime={msg.created_at} title={msgTimeTitle(msg.created_at)}>
@@ -33,15 +35,15 @@ export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) 
         {ask.items.map((i, n) => (
           <section className="ask-item" key={`${n}:${i.question}`}>
             <div className="ask-q">
-              <span className="ask-who">Claude 問</span>
+              <span className="ask-who">{t('Claude 問')}</span>
               {i.header ? <span className="ask-header">{i.header}</span> : null}
               <span className="ask-text">{i.question}</span>
             </div>
             <div className={`ask-a${i.answer === null ? ' none' : ''}`}>
-              <span className="ask-who">你答</span>
+              <span className="ask-who">{t('你答')}</span>
               <span className="ask-text">{i.answer ?? NOT_ANSWERED}</span>
             </div>
-            {i.notes ? <div className="ask-notes">備註：{i.notes}</div> : null}
+            {i.notes ? <div className="ask-notes">{t('備註：{notes}', { notes: i.notes })}</div> : null}
           </section>
         ))}
       </div>

@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
@@ -25,7 +26,7 @@ export function formatSize(bytes: number): string {
 
 /** 卡片上的大小：壓過的連原檔一起寫，看得出省了多少。 */
 export function sizeLabel(size: number, originalSize?: number): string {
-  return originalSize && originalSize !== size ? `${formatSize(size)}（原 ${formatSize(originalSize)}）` : formatSize(size)
+  return originalSize && originalSize !== size ? t('{size}（原 {orig}）', { size: formatSize(size), orig: formatSize(originalSize) }) : formatSize(size)
 }
 
 /** Composer attachment state for one draft. `uploadTo`: any group member works (attachments are project-scoped). */
@@ -91,7 +92,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         onPrepared: (f) => {
           if (!ctl.signal.aborted) sources.current.set(key, { file: f, prepared: true })
         },
-        onError: (name, msg) => notify('error', `「${name}」上傳失敗：${msg}`),
+        onError: (name, msg) => notify('error', t('「{name}」上傳失敗：{msg}', { name, msg })),
         formatSize,
       }
       void runUpload(deps, key, file, compress, ctl.signal).finally(() => {
@@ -104,7 +105,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   const add = useCallback(
     (files: File[]) => {
       if (!uploadTo) {
-        if (files.length) notify('error', '找不到可接收檔案的 bot。')
+        if (files.length) notify('error', t('找不到可接收檔案的 bot。'))
         return
       }
       for (const file of files) {
@@ -114,7 +115,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         const verdict = admitFile(seen.current, fp, file.size, compress)
         if (verdict === 'duplicate') continue
         if (verdict === 'too-large') {
-          notify('error', `「${file.name}」有 ${formatSize(file.size)}，超過 ${formatSize(MAX_BYTES)} 上限。`)
+          notify('error', t('「{name}」有 {size}，超過 {max} 上限。', { name: file.name, size: formatSize(file.size), max: formatSize(MAX_BYTES) }))
           continue
         }
         seq.current += 1
@@ -123,7 +124,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         const previewUrl = isImage ? URL.createObjectURL(file) : ''
         if (previewUrl) urls.current.add(previewUrl)
         const item: Pending = {
-          key, fp, name: file.name || '檔案', size: file.size, isImage, previewUrl,
+          key, fp, name: file.name || t('檔案'), size: file.size, isImage, previewUrl,
           compressing: compress, loaded: 0, id: null, error: null, retryable: true,
         }
         dispatch({ type: 'add', item })

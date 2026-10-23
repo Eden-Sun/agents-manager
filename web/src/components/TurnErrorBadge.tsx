@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
@@ -19,12 +20,13 @@ const opusId = () => canonicalModel('claude', 'opus')
  * 沒有「知道了」：下一回合 daemon 會清掉。彈出層 portal 到 body：標題列疊在對話區底下，absolute 會被壓住。
  */
 export function TurnErrorBadge({ botId }: { botId: string }) {
+  const t = useT()
   const notice = useStore((s) => s.runs[botId]?.turn_error ?? null)
   // 模型滿載有自己的標示（輸入框上方一行、側欄與晶片的專屬色，#1674），這顆「⚠ 回合被中斷」不重複畫。
   const capacity = useStore((s) => modelAtCapacity(s.runs[botId]))
   // 額度用盡跟斷線分開講：重送沒用，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
   const quotaLimit = notice !== null && /^you've reached your .*limit/i.test(notice)
-  const quotaName = notice && /fable/i.test(notice) ? 'Fable' : '5 小時'
+  const quotaName = notice && /fable/i.test(notice) ? 'Fable' : t('5 小時')
   const resetsAt = useStore((s) => {
     if (!quotaLimit) return null
     const bot = s.bots.find((b) => b.id === botId)
@@ -124,7 +126,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
       setSending(false)
       if (ok) {
         closePop()
-        notify('info', '已重送上一則，接著跑同一回合的內容')
+        notify('info', t('已重送上一則，接著跑同一回合的內容'))
       }
     })
   }
@@ -135,19 +137,23 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
       className="turn-error-pop"
       role="dialog"
       tabIndex={-1}
-      aria-label="回合被中斷"
+      aria-label={t("回合被中斷")}
       style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
     >
       {quotaLimit ? (
         <p className="turn-error-why">
-          這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——
-          {resetsAt ? `等 ${new Date(resetsAt).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 重置，` : '等額度重置，'}
-          或先換一個模型繼續。
+          {resetsAt
+            ? t('這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——等 {time} 重置，或先換一個模型繼續。', {
+                quotaName,
+                time: new Date(resetsAt).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+              })
+            : t('這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——等額度重置，或先換一個模型繼續。', { quotaName })}
         </p>
       ) : (
         <p className="turn-error-why">
-          這一回合被 API 連線中斷截斷，回應是不完整的——終端與 hook 都會把它報成 <code>done</code>
-          ，所以側欄的燈號看起來一切正常。
+          {t.x('這一回合被 API 連線中斷截斷，回應是不完整的——終端與 hook 都會把它報成 {done}，所以側欄的燈號看起來一切正常。', {
+            done: <code>done</code>,
+          })}
         </p>
       )}
       {/* 原文照貼：使用者要能拿它去對終端上那一行。 */}
@@ -158,7 +164,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
             type="button"
             className="btn primary"
             disabled={sending || isOpus}
-            title={isOpus ? '已經是 opus' : '把這顆 bot 的模型改成 opus（live 套用，不重啟）'}
+            title={isOpus ? t('已經是 opus') : t('把這顆 bot 的模型改成 opus（live 套用，不重啟）')}
             onClick={() => {
               setSending(true)
               // 送正式 id，不送已停用的 `opus` 別名（#539）：送別名的話 daemon 會換掉再存，
@@ -167,12 +173,12 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
                 setSending(false)
                 if (res) {
                   closePop()
-                  notify('info', '已改用 opus，重送上一則就能繼續')
+                  notify('info', t('已改用 opus，重送上一則就能繼續'))
                 }
               })
             }}
           >
-            {sending ? '切換中…' : '改用 opus'}
+            {sending ? t('切換中…') : t('改用 opus')}
           </button>
         ) : null}
         <button
@@ -181,16 +187,16 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
           disabled={!target || sending || busy || (quotaLimit && !isOpus && !resetPassed(resetsAt))}
           title={
             !target
-              ? '這個對話裡沒有可以重送的訊息'
+              ? t('這個對話裡沒有可以重送的訊息')
               : quotaLimit && !isOpus && !resetPassed(resetsAt)
-                ? '額度還沒重置，重送只會再被拒絕一次；先換模型'
+                ? t('額度還沒重置，重送只會再被拒絕一次；先換模型')
               : busy
-                ? '它正在忙，等這一輪停下來再重送'
-                : `重送：${Array.from(target.text).slice(0, 60).join('') || `（${target.attachments.length} 個附件）`}`
+                ? t('它正在忙，等這一輪停下來再重送')
+                : t('重送：{preview}', { preview: Array.from(target.text).slice(0, 60).join('') || t('（{n} 個附件）', { n: target.attachments.length }) })
           }
           onClick={resend}
         >
-          {sending ? '重送中…' : '重送上一則'}
+          {sending ? t('重送中…') : t('重送上一則')}
         </button>
       </div>
     </div>
@@ -207,7 +213,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
         title={notice}
         onClick={() => setOpen((v) => !v)}
       >
-        {quotaLimit ? `⛔ ${quotaName} 額度用盡` : '⚠ 回合被中斷（API 錯誤）'}
+        {quotaLimit ? t('⛔ {quotaName} 額度用盡', { quotaName }) : t('⚠ 回合被中斷（API 錯誤）')}
       </button>
       {pop && createPortal(pop, document.body)}
     </>

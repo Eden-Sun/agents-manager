@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { trackDraftEdits } from '../store/draftEdits'
 import './composerDraftBar.css'
@@ -25,6 +26,7 @@ export function ComposerDraftBar({
   const block = useStore((s) => s.composerDrafts[botId])
   const sendPrompt = useStore((s) => s.sendPrompt)
   const dismiss = useStore((s) => s.dismissComposerDraft)
+  const t = useT()
   if (!block) return null
   const busy = Boolean(block.busy)
   const mine = text.trim()
@@ -43,17 +45,17 @@ export function ComposerDraftBar({
 
   return (
     <div className="composer-draft" role="status">
-      <span className="composer-draft-label">沒送出：bot 的輸入框裡還有一段沒送出的字</span>
+      <span className="composer-draft-label">{t('沒送出：bot 的輸入框裡還有一段沒送出的字')}</span>
       <pre className="composer-draft-text">
         {block.draft}
         {block.truncated ? '…' : ''}
       </pre>
-      {block.truncated ? <span className="composer-draft-cut">只顯示前 500 字</span> : null}
-      {block.actions.length === 0 ? <span>這顆 bot 不能從網頁處理框裡的字，請到「終端」分頁清掉或送出。</span> : null}
+      {block.truncated ? <span className="composer-draft-cut">{t('只顯示前 500 字')}</span> : null}
+      {block.actions.length === 0 ? <span>{t('這顆 bot 不能從網頁處理框裡的字，請到「終端」分頁清掉或送出。')}</span> : null}
       <div className="composer-draft-actions">
         {block.actions.includes('submit') ? (
-          <button type="button" className="mini-btn primary" disabled={busy} title="在終端按 Enter，把框裡這段當成一則訊息送出" onClick={submitDraft}>
-            {block.busy === 'submit' ? '送出中…' : '送出框裡那段'}
+          <button type="button" className="mini-btn primary" disabled={busy} title={t("在終端按 Enter，把框裡這段當成一則訊息送出")} onClick={submitDraft}>
+            {block.busy === 'submit' ? t('送出中…') : t('送出框裡那段')}
           </button>
         ) : null}
         {block.actions.includes('clear') ? (
@@ -63,20 +65,20 @@ export function ComposerDraftBar({
             disabled={busy || !hasMine || Boolean(attachmentsBlocked)}
             title={
               attachmentsBlocked === 'uploading'
-                ? '附件還在上傳，傳完再送'
+                ? t('附件還在上傳，傳完再送')
                 : attachmentsBlocked === 'failed'
-                  ? '有附件上傳失敗：先重試或移除'
+                  ? t('有附件上傳失敗：先重試或移除')
                   : hasMine
-                    ? '清掉框裡這段（確認框空了才打字），再送出你輸入的這則'
-                    : '輸入框裡還沒有你要送的字'
+                    ? t('清掉框裡這段（確認框空了才打字），再送出你輸入的這則')
+                    : t('輸入框裡還沒有你要送的字')
             }
             onClick={clearAndSend}
           >
-            {block.busy === 'clear' ? '清除中…' : '清掉再送我這則'}
+            {block.busy === 'clear' ? t('清除中…') : t('清掉再送我這則')}
           </button>
         ) : null}
-        <button type="button" className="mini-btn" disabled={busy} title="收起這一條，框裡的字不動" onClick={() => dismiss(botId)}>
-          取消
+        <button type="button" className="mini-btn" disabled={busy} title={t("收起這一條，框裡的字不動")} onClick={() => dismiss(botId)}>
+          {t('取消')}
         </button>
       </div>
     </div>
