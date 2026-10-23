@@ -8,6 +8,24 @@ import common from './common'
 import core from './core'
 import hosts from './hosts'
 import updates from './updates'
+import chatAgy from './chat-agy'
+import botsAgy from './bots-agy'
+import hostsAgy from './hosts-agy'
+import updatesAgy from './updates-agy'
+import coreAgy from './core-agy'
 
-export const EN_PARTS: Readonly<Record<string, Dict>> = { common, chat, bots, hosts, updates, core }
+export const EN_PARTS: Readonly<Record<string, Dict>> = {
+  common,
+  chat,
+  bots,
+  hosts,
+  updates,
+  core,
+  // agy 並行分擔（#1932）：各自一檔，避免與區塊主檔衝突
+  'chat-agy': chatAgy,
+  'bots-agy': botsAgy,
+  'hosts-agy': hostsAgy,
+  'updates-agy': updatesAgy,
+  'core-agy': coreAgy,
+}
 export const { dict: EN, conflicts: EN_CONFLICTS } = mergeDicts(EN_PARTS)
