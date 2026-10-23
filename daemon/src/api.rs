@@ -15704,7 +15704,9 @@ mod relay_from_auth_tests {
     #[tokio::test]
     async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
         let f = fx().await;
-        f.e.herdr.live_pane("pane-relay", crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["假草稿".into()], ..Default::default() });
+        // Keep the default changing spinner: background redraws must not revoke a draft action.
+        // Real herdr returns zero revision; authorization comes from the composer frame.
+        f.e.herdr.live_pane("pane-relay", crate::testing::LivePane { zero_revision: true, width: Some(120), boxed: true, composer: vec!["假草稿".into()], ..Default::default() });
         let call = |clear: bool, submit: bool, expect: Option<&str>, relay: Option<String>| {
             let body = PromptIn {
                 text: if submit { String::new() } else { "我的".into() },
@@ -15740,6 +15742,20 @@ mod relay_from_auth_tests {
             assert!(matches!(err, LcError::Bad(_)), "{err:?}");
         }
         assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
+        // A matching draft token cannot authorize Enter when the composer draft changes,
+        // even though pane.read keeps returning revision 0. The provisional turn is withdrawn.
+        let live = f.e.herdr.live.clone();
+        crate::lifecycle::race_point::arm("draft_before_enter", &f.target, move || async move {
+            live.lock().unwrap().get_mut("pane-relay").unwrap().composer = vec!["未確認的新草稿".into()];
+        });
+        let err = call(false, true, Some(&token), None).await.expect_err("changed snapshot");
+        match err {
+            LcError::Conflict(body) => assert_eq!(body["reason"], "draft_changed", "{body}"),
+            other => panic!("expected draft_changed, got {other:?}"),
+        }
+        assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
+        assert_eq!(counts(&f.e.app).await, (0, 0), "no stale draft turn or message survives");
+        f.e.herdr.live.lock().unwrap().get_mut("pane-relay").unwrap().composer = vec!["假草稿".into()];
         // 帶齊了就真的送出框裡那段（grok：沒有無損證據，unverified）。
         let resp = call(false, true, Some(&token), None).await.unwrap();
         let out: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();

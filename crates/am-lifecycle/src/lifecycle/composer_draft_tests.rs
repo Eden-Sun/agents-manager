@@ -304,9 +304,9 @@ async fn submit_rechecks_the_composer_after_commit_and_retracts_before_enter() {
     }
 }
 
-/// A revision change also fences Enter when the visible composer text happens to be identical.
+/// A moved composer frame fences Enter even when its draft text is identical.
 #[tokio::test]
-async fn submit_rejects_a_revision_change_even_when_the_draft_text_matches() {
+async fn submit_rejects_a_frame_position_change_even_when_the_draft_text_matches() {
     let f = idle("grok", &["draft A"], false).await;
     let token = current_draft_token(&f, "observe").await;
     let live = f.env.herdr.live.clone();
@@ -314,13 +314,14 @@ async fn submit_rejects_a_revision_change_even_when_the_draft_text_matches() {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-d").unwrap();
         pane.revision = pane.revision.max(1) + 1;
+        pane.transcript.push("composer moved one row".into());
     });
 
     let body = conflict(submit(&f.env.app, &f.bot_id, &token, "revision-submit").await);
     assert_eq!(body["reason"], "draft_changed", "{body}");
     assert_eq!(body["draft"], "draft A", "{body}");
     assert_eq!(body["draft_token"], token, "content identity is unchanged");
-    assert!(f.keys().is_empty(), "a changed pane revision must receive no Enter");
+    assert!(f.keys().is_empty(), "a moved composer frame must receive no Enter");
     assert_eq!(f.composer(), ["draft A"]);
     assert_eq!(f.turns().await, 0);
 }
@@ -408,9 +409,9 @@ async fn clear_rechecks_the_composer_after_validation_and_preserves_a_new_draft(
     assert_eq!(f.turns().await, 0);
 }
 
-/// The clear revision fence rejects a changed pane even if the composer text is unchanged.
+/// The clear frame-position fence rejects a moved composer even if its draft is unchanged.
 #[tokio::test]
-async fn clear_rejects_a_revision_change_even_when_the_draft_text_matches() {
+async fn clear_rejects_a_frame_position_change_even_when_the_draft_text_matches() {
     let f = idle("claude", &["draft A"], false).await;
     let token = current_draft_token(&f, "observe").await;
     let live = f.env.herdr.live.clone();
@@ -418,13 +419,14 @@ async fn clear_rejects_a_revision_change_even_when_the_draft_text_matches() {
         let mut live = live.lock().unwrap();
         let pane = live.get_mut("pane-d").unwrap();
         pane.revision = pane.revision.max(1) + 1;
+        pane.transcript.push("composer moved one row".into());
     });
 
     let body = conflict(f.send("my prompt", "revision-clear", Some(&token)).await);
     assert_eq!(body["reason"], "draft_changed", "{body}");
     assert_eq!(body["draft"], "draft A", "{body}");
     assert_eq!(body["draft_token"], token, "content identity is unchanged");
-    assert!(f.keys().is_empty(), "changed pane revision must receive no Ctrl+C");
+    assert!(f.keys().is_empty(), "moved composer frame must receive no Ctrl+C");
     assert_eq!(f.composer(), ["draft A"]);
     assert_eq!(f.typed(), 0);
     assert_eq!(f.turns().await, 0);
@@ -760,8 +762,8 @@ async fn nr1913_zero_revision_clear_rejects_changed_screen_with_same_draft() {
 
 #[test]
 fn nr1913_snapshot_checks_content_and_metadata_even_with_zero_revision() {
-    let before = crate::herdr::PaneRead { pane_id: "pane-a".into(), source: "visible".into(), format: "ansi".into(), text: "draft".into(), revision: 0, truncated: false };
-    assert!(same_snapshot(&before, &before));
+    let before = crate::herdr::PaneRead { pane_id: "pane-a".into(), source: "visible".into(), format: "ansi".into(), text: "────\n❯ draft\n────".into(), revision: 0, truncated: false };
+    assert!(same_snapshot("claude", &before, &before));
     for field in ["pane", "source", "format", "text", "truncated"] {
         let mut after = before.clone();
         match field {
@@ -771,7 +773,7 @@ fn nr1913_snapshot_checks_content_and_metadata_even_with_zero_revision() {
             "text" => after.text = "changed".into(),
             _ => after.truncated = true,
         }
-        assert!(!same_snapshot(&before, &after), "{field}");
+        assert!(!same_snapshot("claude", &before, &after), "{field}");
     }
 }
 
@@ -786,4 +788,80 @@ async fn nr1913_zero_revision_stable_clear_succeeds() {
     clear(&f.env.app, &client, &run, &bot, &token, false).await.unwrap();
     assert_eq!(f.keys(), [json!(["ctrl+c"])]);
     assert!(f.composer().is_empty());
+}
+
+/// Both idle and working-without-owned-turn paths can act while background timers redraw.
+/// Exercise submit/clear, including draft edits after authorization, with revision always zero.
+#[tokio::test]
+async fn nr1936_idle_and_working_timers_allow_stable_submit_clear_but_reject_draft_edits() {
+    for working in [false, true] {
+        for clearing in [false, true] {
+            for changed in [false, true] {
+                let f = idle("grok", &["draft A"], false).await;
+                {
+                    let mut live = f.env.herdr.live.lock().unwrap();
+                    let pane = live.get_mut("pane-d").unwrap();
+                    pane.no_spinner = false;
+                    pane.zero_revision = true;
+                }
+                if working {
+                    sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?").bind(&f.bot_id).execute(&f.env.app.db).await.unwrap();
+                }
+                let token = current_draft_token(&f, "timer-observe").await;
+                if changed {
+                    let live = f.env.herdr.live.clone();
+                    let point = if clearing { "draft_before_clear_key" } else { "draft_before_enter" };
+                    super::super::race_point::arm(point, &f.bot_id, move || async move {
+                        live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec!["draft B".into()];
+                    });
+                }
+                let result = if clearing {
+                    let run = db::active_run(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+                    let bot = db::bot(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+                    let client = crate::herdr::HerdrClient::new(f.env.dir.join("data/herdr.sock"));
+                    clear(&f.env.app, &client, &run, &bot, &token, false).await
+                } else {
+                    submit(&f.env.app, &f.bot_id, &token, "timer-submit").await.map(|out| assert_eq!(out.delivery, "unverified"))
+                };
+                if changed {
+                    match result.unwrap_err() {
+                        LcError::Conflict(body) => assert_eq!(body["reason"], "draft_changed"),
+                        other => panic!("working={working} clearing={clearing}: {other:?}"),
+                    }
+                    assert!(f.keys().is_empty());
+                    assert_eq!(f.turns().await, 0);
+                    let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&f.env.app.db).await.unwrap();
+                    assert_eq!(messages, 0);
+                    assert_eq!(f.composer(), ["draft B"]);
+                } else {
+                    result.unwrap();
+                    assert_eq!(f.keys(), [json!([if clearing { "ctrl+c" } else { "Enter" }])]);
+                    assert!(f.composer().is_empty());
+                    assert!(f.env.herdr.pane("pane-d").unwrap().reads >= 2);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nr1936_composer_frame_ignores_background_but_rejects_draft_geometry_and_metadata_changes() {
+    for (kind, text) in [("claude", CLAUDE_MULTI), ("codex", CODEX_MULTI), ("grok", GROK_MULTI), ("agy", "────\n> draft\n────")] {
+        let real = crate::herdr::PaneRead { pane_id: "pane".into(), source: "visible".into(), format: "ansi".into(), text: text.into(), revision: 0, truncated: false };
+        assert!(same_snapshot(kind, &real, &real), "{kind}: real multiline frame must be recognised");
+    }
+    let before = crate::herdr::PaneRead { pane_id: "pane".into(), source: "visible".into(), format: "ansi".into(),
+        text: "✻ Crunching… (1s · esc to interrupt)\n────\n❯ draft\n────\n u | proj | model | 5h:90%(rst 2h 3m) | 7d:90%".into(), revision: 0, truncated: false };
+    let mut after = before.clone();
+    after.text = after.text.replace('✻', "✽").replace("(1s ·", "(2s ·").replace("2h 3m", "2h 2m");
+    after.revision = 99;
+    assert!(same_snapshot("claude", &before, &after));
+    for text in [after.text.replace("draft", "other draft"), after.text.replace("────", "─────"), format!("new row\n{}", after.text)] {
+        let mut changed = after.clone();
+        changed.text = text;
+        assert!(!same_snapshot("claude", &before, &changed));
+    }
+    let mut clipped = after.clone();
+    clipped.text = "❯ draft".into();
+    assert!(!same_snapshot("claude", &before, &clipped));
 }
