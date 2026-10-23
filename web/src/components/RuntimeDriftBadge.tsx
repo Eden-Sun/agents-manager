@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import * as api from '../api'
+import { isChildBot } from '../lib/updateBatch'
 import { driftLine, isFastOnlyDrift, runtimeDrift } from '../lib/runtimeDrift'
 
 /**
@@ -56,13 +57,31 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
       setApplying(false)
     }
   }
+  // 子 agent 由父 Bot 重開，`/restart` 會回 409（#1911）：不給重啟，fast 當場套用（PATCH）照舊。
+  const child = isChildBot(bot)
   const restart = () => {
+    if (child) {
+      setConfirming(false)
+      notify('info', `${bot.name} 是子 agent，設定要重啟才生效，由父 Bot 安排重啟`)
+      return
+    }
     setConfirming(false)
     setRestarting(true)
     void restartBot(botId).then((ok) => {
       setRestarting(false)
       if (ok) notify('info', `${bot.name} 已用新的設定重新啟動`)
     })
+  }
+
+  if (child && !fastOnly && !deferred) {
+    return (
+      <span
+        className="update-badge drift-badge passive"
+        title={`${driftTitle}\n設定要重啟才生效，由父 Bot 安排重啟`}
+      >
+        {`${driftLabels}待父 Bot 重啟`}
+      </span>
+    )
   }
 
   return (

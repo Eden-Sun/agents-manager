@@ -3,7 +3,7 @@ import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
-import { updateBatchCounts } from '../lib/updateBatch'
+import { isChildBot, passiveUpdateHint, updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
@@ -36,12 +36,41 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   // 忙碌的也算：額度列的 chip 把它列在「在忙」那組，照樣畫著；再畫一顆就是同一個 ⌃⌃ 兩次（2026-09-19 使用者：「logo 重工了」）。
   // 這顆 bot 自己要套用走 context bar 版本號旁的「升級」（`inline`）。
   const coveredByBatch = useStore((s) => {
-    const { ready, busy } = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
-    return ready.some((b) => b.botId === botId) || busy.some((b) => b.botId === botId)
+    const { ready, busy, passive } = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+    return [ready, busy, passive].some((list) => list.some((b) => b.botId === botId))
+  })
+  // 子 agent／default session 不在一鍵重啟裡（header 不算它）：新版資訊留在這一列的 tooltip（#1911）。
+  const passiveHint = useStore((s) => {
+    const bot = s.bots.find((b) => b.id === botId)
+    return bot ? passiveUpdateHint(bot, s.runs[botId]) : null
   })
 
+  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕，只留被動提示（#1911）。
+  const isChild = useStore((s) => {
+    const bot = s.bots.find((b) => b.id === botId)
+    return bot ? isChildBot(bot) : false
+  })
   const notice = run?.update_notice ?? null
   if (!notice) return null
+  if (isChild) {
+    const hint = passiveHint ?? '由父 Bot 安排重啟'
+    if (variant === 'dot') {
+      return (
+        <span className="bot-update-dot passive" role="img" aria-label={`${botName}：${hint}`} title={`${hint}\n${notice}`}>
+          <UpgradeIcon size={8} />
+        </span>
+      )
+    }
+    if (variant === 'inline') {
+      return (
+        <span className="sl-update passive" title={`${hint}\n${notice}`}>
+          <UpgradeIcon size={9} /> 由父 Bot 重啟
+        </span>
+      )
+    }
+    // chip：context bar 的 inline 已畫同一則提示，標題列不再重複（跟批次蓋得到時不畫同一條線）。
+    return null
+  }
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
   // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
@@ -115,7 +144,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           className={`bot-update-dot${restarting ? ' busy' : ''}`}
           disabled={restarting}
           aria-label={`${botName}：有更新，點一下套用`}
-          title={`${notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
           // 疊在 bot 列上：按更新不該順便觸發列的切換。
           onClick={(e) => {
             e.stopPropagation()
@@ -138,7 +167,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           className={`sl-update${restarting ? ' busy' : ''}`}
           disabled={restarting}
           aria-label={`${botName}：${botKind} 有更新，點一下先看新版改了什麼，確認後重啟`}
-          title={`${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
           onClick={() => setConfirming(true)}
         >
           {restarting ? '重啟中…' : <><UpgradeIcon size={9} /> 升級</>}
@@ -158,7 +187,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
         className={`update-badge${restarting ? ' busy' : ''}`}
         disabled={restarting}
         aria-label={`${botName}：${botKind} 有更新，點一下先看新版改了什麼，確認後重啟`}
-        title={`${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+        title={`${passiveHint ? `${passiveHint}\n` : ''}${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
         onClick={() => setConfirming(true)}
       >
         {restarting ? '重啟中…' : <><UpgradeIcon /> <span className="update-badge-text">{botKind} 有更新</span></>}

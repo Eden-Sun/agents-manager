@@ -2854,6 +2854,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 畫面底部還標著 N（> 0）個背景工作（§6.14，#767） | `background_jobs`（label 「背景執行中（N）」） | 跳過 |
   | 以上都不中 | — | 重啟 |
 
+  **前端計數（#1911）**：子 agent（`Skip::Child`）與 default session（`Skip::DefaultSession`）是「永遠不會被一鍵重啟」，不是暫時在忙——`updateBatchCounts` 把它們放進獨立的 `passive`，不進 `ready`、也不進 `busy`，所以 header 灰色 `⇑N`（`RestartChip`／手機 `MergedUpdateChip`）只算符合資格、暫時在忙的；沒有 ready 也沒有 busy 時整顆隱藏。這兩種 bot 的新版資訊留在那一列自己的被動提示（`passiveUpdateHint`，掛在 `UpdateBadge` 的 tooltip）：子 agent 寫「新版已安裝，由父 Bot 安排重啟」。不通知 parent。
+
+  **子 agent 不給重啟入口（#1911）**：daemon 的 `/api/bots/{id}/restart` 對子 agent 一律 409（`refuse_child_restart`，§6.5a）。前端以共用的 `isChildBot`（`managed_by=child` 或有 `parent_bot_id`，跟 `neverRestartedReason` 同一條判斷）關掉所有會打 `/restart` 的入口：`UpdateBadge` 的 dot／inline 改畫不可點的被動提示（chip 版不畫）、`RuntimeDriftBadge` 的 ⟳ 改被動「待父 Bot 重啟」（codex fast 當場套用走 PATCH，照舊）、`BotSettingsPanel` 的橫幅只留文字「設定要重啟才生效，由父 Bot 安排重啟」、不放「立即重啟」。
+
   背景工作那一條（#767，使用者裁示）：agent 閒置不代表沒事在跑——重啟一退 CLI，背景 shell／終端跟著沒了。計畫時判一次、輪到它時 `recheck` 再判一次
   （計畫之後才開始跑背景工作的跳過，不是失敗）；cli-update 的範圍批次走同一條，所以一併跳過。數字是**巡邏看過的**才算（`background_jobs::known`）：
   daemon 剛重啟、新 run、畫面讀不到時沒有證據，**不擋**（`None` 與「看過、是 0」不同；API 的 `run.background_jobs` 沒看過是 `null`），
