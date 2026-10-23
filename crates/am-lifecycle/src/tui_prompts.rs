@@ -904,18 +904,25 @@ async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRea
 }
 
 /// 不在 `active` 裡的 run（結束了）不留問卷去重記錄：每個出現過問卷的 run 一格，只記不清的話只增不減。
-pub async fn retain_survey_runs(app: &impl crate::tui_prompts::SurveyRevisions, active: &[String]) {
-    app.survey_revisions().lock().await.retain(|id, _| active.contains(id));
+pub async fn retain_survey_runs(app: &impl crate::tui_prompts::SurveyFingerprints, active: &[String]) {
+    app.survey_fingerprints().lock().await.retain(|id, _| active.contains(id));
 }
 
-async fn release_survey_revision(app: &impl crate::tui_prompts::SurveyRevisions, run_id: &str, fingerprint: u64) {
-    let mut revisions = app.survey_revisions().lock().await;
-    if revisions.get(run_id) == Some(&fingerprint) {
-        revisions.remove(run_id);
+async fn release_survey_fingerprint(app: &impl crate::tui_prompts::SurveyFingerprints, run_id: &str, fingerprint: u64) {
+    let mut fingerprints = app.survey_fingerprints().lock().await;
+    if fingerprints.get(run_id).is_some_and(|state| state.fingerprint == fingerprint) {
+        fingerprints.remove(run_id);
     }
 }
 
-/// 去重表裡記的畫面指紋（表名沿用舊的 `survey_revisions`）。herdr 的 revision 恆為 0，不能拿來區分畫面。
+/// A survey frame's fingerprint and whether its keyboard attempt has completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurveyFingerprintState {
+    fingerprint: u64,
+    attempt_complete: bool,
+}
+
+/// 去重表記錄畫面指紋。herdr 的 revision 恆為 0，不能拿來區分畫面。
 /// `DefaultHasher` 的結果不保證跨版本穩定：**不持久化、不跨 process**，只放在這個 daemon 的記憶體去重表裡。
 fn survey_fingerprint(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -928,6 +935,7 @@ fn survey_fingerprint(text: &str) -> u64 {
 const SURVEY_SCREEN_CHANGED: &str = "survey_screen_changed_or_unreadable_before_key";
 const SURVEY_AUTHORITY_CHANGED: &str = "survey_run_host_session_or_pane_changed";
 const SURVEY_SEND_FAILED: &str = "survey_send_keys_failed";
+const SURVEY_KEY_NOT_TAKEN: &str = "survey_key_not_taken";
 
 /// 放棄時每個 (run, 原因) 只寫一次 WARN；去重表與冷快取 Resume 共用（上限／TTL 見 `claude_resume_menu::GiveUps`）。
 fn warn_survey_give_up(run: &db::Run, reason: &'static str) {
@@ -941,28 +949,37 @@ fn warn_survey_give_up(run: &db::Run, reason: &'static str) {
 }
 
 /// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
-pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyRevisions), run: &db::Run) -> bool {
+pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyFingerprints), run: &db::Run) -> bool {
     let Some(target) = current_survey_target(app, run).await else { return false };
     let Some(read) = read_actionable_survey(&target, None).await else {
         // 問卷不在畫面上（或這輪讀不到）：忘掉這個 run 的指紋，之後再跳出的問卷才會重新處理。
-        app.survey_revisions().lock().await.remove(&run.id);
+        app.survey_fingerprints().lock().await.remove(&run.id);
         return false;
     };
     let fingerprint = survey_fingerprint(&read.text);
     let pane = target.pane.as_str();
-    let first_for_this_run = {
-        let mut revisions = app.survey_revisions().lock().await;
-        if revisions.get(&run.id) == Some(&fingerprint) {
-            return false;
+    let (first_for_this_run, already_seen, attempt_complete) = {
+        let mut fingerprints = app.survey_fingerprints().lock().await;
+        if let Some(state) = fingerprints.get(&run.id).filter(|state| state.fingerprint == fingerprint) {
+            (false, true, state.attempt_complete)
+        } else {
+            let first = !fingerprints.contains_key(&run.id);
+            fingerprints.insert(run.id.clone(), SurveyFingerprintState { fingerprint, attempt_complete: false });
+            (first, false, false)
         }
-        let first = !revisions.contains_key(&run.id);
-        revisions.insert(run.id.clone(), fingerprint);
-        first
     };
+    if already_seen {
+        if PRESS_KEYS_ON_SURVEY && attempt_complete {
+            // 上一輪已送過 0（以及需要時的 Enter），同一份問卷仍完整可見，表示 TUI 沒吃到按鍵。
+            // 保留指紋避免每輪重送，只透過 GiveUps 警告一次。
+            warn_survey_give_up(run, SURVEY_KEY_NOT_TAKEN);
+        }
+        return false;
+    }
     if !PRESS_KEYS_ON_SURVEY {
         // 畫面內容不進 log（那是對話內容）；要補 fixture 的人用 pane id 自己抓一份原文。
         //
-        // **每個 run 只吵一次**：revision 去重對按鍵版夠用（按下去畫面就變了），但不按鍵時問卷會一直
+        // **每個 run 只吵一次**：指紋去重對按鍵版夠用（按下去畫面就變了），但不按鍵時問卷會一直
         // 留在畫面上，每次重繪 revision 就變一次，每 10 秒一輪的巡邏會把同一件事一直寫進 log
         // （i267 審 #485）。第一次 warn，之後降成 debug；真正該吵的人由 `child_alerts` 負責，
         // 那邊本來就有自己的指紋去重。
@@ -988,23 +1005,28 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     let final_read = if was_current { read_actionable_survey(&target, Some(&read)).await } else { None };
     let still_current = final_read.is_some() && survey_target_is_current(app, &target).await;
     if !still_current {
-        release_survey_revision(app, &run.id, fingerprint).await;
+        release_survey_fingerprint(app, &run.id, fingerprint).await;
         warn_survey_give_up(run, if was_current && final_read.is_none() { SURVEY_SCREEN_CHANGED } else { SURVEY_AUTHORITY_CHANGED });
         return false;
     }
     if let Err(e) = target.client.pane_send_keys(pane, &["0"]).await {
-        release_survey_revision(app, &run.id, fingerprint).await;
+        release_survey_fingerprint(app, &run.id, fingerprint).await;
         tracing::warn!(run = %run.id, error = %e, reason = SURVEY_SEND_FAILED, "問卷送 0 失敗");
         return false;
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::race_point::hit("survey_after_zero", &run.id).await;
     tokio::time::sleep(SETTLE).await;
+    let mut attempted_fingerprint = fingerprint;
     // The post-0 read is a new authorization basis for versions that also need Enter.
     if survey_target_is_current(app, &target).await {
         if let Some(second_stage) = read_actionable_survey(&target, None).await {
             let second_fingerprint = survey_fingerprint(&second_stage.text);
-            app.survey_revisions().lock().await.insert(run.id.clone(), second_fingerprint);
+            app.survey_fingerprints().lock().await.insert(
+                run.id.clone(),
+                SurveyFingerprintState { fingerprint: second_fingerprint, attempt_complete: false },
+            );
+            attempted_fingerprint = second_fingerprint;
             #[cfg(all(test, feature = "daemon-test-harness"))]
             crate::race_point::hit("survey_before_enter", &run.id).await;
             let still_current = survey_target_is_current(app, &target).await;
@@ -1016,10 +1038,14 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
             if final_read.is_some() && survey_target_is_current(app, &target).await {
                 let _ = target.client.pane_send_keys(pane, &["enter"]).await;
             } else {
-                release_survey_revision(app, &run.id, second_fingerprint).await;
+                release_survey_fingerprint(app, &run.id, second_fingerprint).await;
                 warn_survey_give_up(run, SURVEY_SCREEN_CHANGED);
             }
         }
+    }
+    let mut fingerprints = app.survey_fingerprints().lock().await;
+    if let Some(state) = fingerprints.get_mut(&run.id).filter(|state| state.fingerprint == attempted_fingerprint) {
+        state.attempt_complete = true;
     }
     true
 }
@@ -1149,7 +1175,7 @@ pub mod screens {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-mod survey_revision_tests {
+mod survey_fingerprint_tests {
     use super::*;
     use crate::testing as tt;
 
@@ -1157,10 +1183,16 @@ mod survey_revision_tests {
     async fn an_ended_runs_survey_dedupe_record_is_dropped() {
         let env = tt::env().await;
         let app = env.app.clone();
-        app.survey_revisions.lock().await.insert("survey-gone".into(), 3);
-        app.survey_revisions.lock().await.insert("survey-kept".into(), 4);
+        app.survey_fingerprints.lock().await.insert(
+            "survey-gone".into(),
+            SurveyFingerprintState { fingerprint: 3, attempt_complete: false },
+        );
+        app.survey_fingerprints.lock().await.insert(
+            "survey-kept".into(),
+            SurveyFingerprintState { fingerprint: 4, attempt_complete: false },
+        );
         retain_survey_runs(&app, &["survey-kept".to_string()]).await;
-        let m = app.survey_revisions.lock().await;
+        let m = app.survey_fingerprints.lock().await;
         assert!(!m.contains_key("survey-gone") && m.contains_key("survey-kept"));
     }
 }
@@ -1389,7 +1421,7 @@ Grok Build 1.0.46\n\
 
         assert!(!dismiss_if_survey(&env.app, &run).await);
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a permission dialog must receive no stale 0");
-        assert!(!env.app.survey_revisions.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
+        assert!(!env.app.survey_fingerprints.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
     }
 
     fn press_keys(env: &crate::testing::Env) -> Vec<serde_json::Value> {
@@ -1435,9 +1467,18 @@ Grok Build 1.0.46\n\
 
         assert!(dismiss_if_survey(&env.app, &run).await);
         assert_eq!(press_keys(&env), [serde_json::json!(["0"]), serde_json::json!(["enter"])]);
-        // 畫面沒變（這個替身不會收掉問卷）：同一畫面不重複按。
+        // 畫面沒變（這個替身不會收掉問卷）：同一畫面不重複按，下一輪應記一次失敗 WARN。
         assert!(!dismiss_if_survey(&env.app, &run).await);
         assert_eq!(press_keys(&env).len(), 2, "the same frame is pressed once");
+        assert!(
+            !crate::lifecycle::claude_resume_menu::gave_up()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .first_time(&run.id, SURVEY_KEY_NOT_TAKEN, std::time::Instant::now()),
+            "the unchanged survey must register the one-time give-up warning"
+        );
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert_eq!(press_keys(&env).len(), 2, "the same frame is not retried after warning");
     }
 
     #[tokio::test]
@@ -1451,7 +1492,7 @@ Grok Build 1.0.46\n\
 
         assert!(!dismiss_if_survey(&env.app, &run).await);
         assert!(press_keys(&env).is_empty(), "a dialog that replaced the survey receives no stale 0");
-        assert!(!env.app.survey_revisions.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
+        assert!(!env.app.survey_fingerprints.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
     }
 
     #[tokio::test]
@@ -2166,7 +2207,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     }
 }
 
-/// 各 run 的意見調查畫面版本。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
-pub trait SurveyRevisions: Send + Sync {
-    fn survey_revisions(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
+/// 各 run 的意見調查去重指紋。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait SurveyFingerprints: Send + Sync {
+    fn survey_fingerprints(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, SurveyFingerprintState>>;
 }

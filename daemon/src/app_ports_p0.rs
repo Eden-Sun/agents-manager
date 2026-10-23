@@ -127,9 +127,11 @@ impl crate::upstream_update::UpstreamWatch for App {
     }
 }
 
-impl crate::tui_prompts::SurveyRevisions for App {
-    fn survey_revisions(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
-        &self.survey_revisions
+impl crate::tui_prompts::SurveyFingerprints for App {
+    fn survey_fingerprints(
+        &self,
+    ) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tui_prompts::SurveyFingerprintState>> {
+        &self.survey_fingerprints
     }
 }
 

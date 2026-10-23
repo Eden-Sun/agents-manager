@@ -229,8 +229,8 @@ pub struct App {
     /// run_id -> 上次發 `turn_progress` 的時間（API.md：每個 run 每秒最多 4 幀）。放在 `App` 而不是
     /// poller 裡，否則同一個 run 換一回合就重開預算、一次爆量。
     pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
-    /// run_id -> 上次關滿意度問卷時的 pane revision：事件路徑與定期巡邏共用，避免按兩次。
-    pub survey_revisions: Mutex<HashMap<String, u64>>,
+    /// run_id -> 上次處理滿意度問卷時的畫面指紋：事件路徑與定期巡邏共用，避免按兩次。
+    pub survey_fingerprints: Mutex<HashMap<String, crate::tui_prompts::SurveyFingerprintState>>,
     /// #427（#420 後續）：角色 bot（`patrol`／`responder`）當下為什麼不能用，key 是 role 字串。
     ///
     /// 故意**不進 DB**：跟 incident 的門檻計時同一個原則（SPEC §18.9「計時在記憶體，重啟重算」）。
@@ -417,7 +417,7 @@ impl App {
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
             progress_emitted: Mutex::new(HashMap::new()),
-            survey_revisions: Mutex::new(HashMap::new()),
+            survey_fingerprints: Mutex::new(HashMap::new()),
             role_faults: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             codex_resets: Mutex::new(codex_resets),

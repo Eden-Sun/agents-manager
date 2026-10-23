@@ -355,6 +355,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   權限或 pane 讀取有任何錯誤、截斷或不連續都不按，並清掉相符的 survey 去重指紋，讓後續巡檢重新判斷；放棄時每個 (run, 原因) 只寫一次 WARN
   （`survey_screen_changed_or_unreadable_before_key`、`survey_run_host_session_or_pane_changed`，與冷快取 Resume 共用去重表）。
   去重指紋是畫面文字的 `DefaultHasher` 雜湊，只在記憶體、不持久化、不跨 process；問卷離開畫面就忘掉，之後再跳出的問卷重新處理。
+  若送過 `0`（以及需要時的 Enter）後，下一輪仍看到完全相同的問卷指紋，代表畫面沒有因按鍵消失：保留去重避免重複送鍵，並用
+  `survey_key_not_taken` 透過共用 GiveUps 對該 run 記一次 WARN；問卷離開後再出現仍可重新處理。
   Herdr 尚無帶 `expected_revision` 的條件式 `send_keys`，最後一次成功讀取到按鍵 RPC 之間仍有極窄的非原子窗口；#485 接受以按鍵前重讀縮小此窗口，未來有 CAS 時應改用。
   自動送 `0` 由 `PRESS_KEYS_ON_SURVEY` 控制（目前開著）；關掉時問卷自動改算成「該吵父 agent」的畫面
   （§10 的 `alertable_question` 跟著 `daemon_dismisses_survey()` 走），不會變成沒人按也沒人知道的靜默停擺。

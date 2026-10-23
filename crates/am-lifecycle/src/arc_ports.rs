@@ -533,15 +533,15 @@ mod arc_port_34_judgefuse {
     }
 }
 
-mod arc_port_35_surveyrevisions {
+mod arc_port_35_surveyfingerprints {
     use crate::tui_prompts::*;
     use crate::db;
     use crate::herdr::{HerdrClient, PaneRead};
     use am_core::{PaneReadSource, SessionId};
     use am_ports::RunPaneReader;
     use std::time::Duration;
-    impl<T: crate::tui_prompts::SurveyRevisions + ?Sized> crate::tui_prompts::SurveyRevisions for std::sync::Arc<T> {
-        fn survey_revisions(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> { <T as crate::tui_prompts::SurveyRevisions>::survey_revisions(self.as_ref()) }
+    impl<T: crate::tui_prompts::SurveyFingerprints + ?Sized> crate::tui_prompts::SurveyFingerprints for std::sync::Arc<T> {
+        fn survey_fingerprints(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, SurveyFingerprintState>> { <T as crate::tui_prompts::SurveyFingerprints>::survey_fingerprints(self.as_ref()) }
     }
 }
 
