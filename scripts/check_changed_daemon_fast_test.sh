@@ -46,6 +46,7 @@ done
 cp "$ROOT/scripts/check.sh" "$fixture/scripts/check.sh"
 cp "$ROOT/scripts/ci-changed-parts.sh" "$fixture/scripts/ci-changed-parts.sh"
 cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
+cp "$ROOT/scripts/web-test-shards.sh" "$fixture/scripts/web-test-shards.sh"
 # Rust test mount check stand-in: record ordering alongside cargo and support a deterministic failure.
 cat >"$fixture/scripts/rust_test_mount_test.sh" <<'SH'
 #!/usr/bin/env bash
@@ -397,7 +398,9 @@ for f in web/src/lib/shared.ts web/vite.config.ts web/package.json web/bun.lock;
     : >"$AM_TEST_BUN_LOG"
     export AM_TEST_DIFF_HEAD="$f"
     output="$(changed)" || fail "$f 的 changed 失敗：$output"
-    grep -qx 'test' "$AM_TEST_BUN_LOG" || fail "${f}：bun test 要不帶任何過濾字串跑全部：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    # 允許 web-test-shards.sh 的 `--shard=i/N`（只是切分，不是過濾）；其他任何參數都算縮小範圍。
+    grep -qE '^test( --shard=[0-9]+/[0-9]+)?$' "$AM_TEST_BUN_LOG" || fail "${f}：bun test 要不帶任何過濾字串跑全部：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    ! grep -E '^test ' "$AM_TEST_BUN_LOG" | grep -qvE '^test --shard=[0-9]+/[0-9]+$' || fail "${f}：bun test 帶了 shard 以外的參數：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
     grep -qx 'bunx vite build' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 build：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
     grep -q 'tsc -b' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 tsc：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
     grep -q 'install --frozen-lockfile' "$AM_TEST_BUN_LOG" || fail "${f}：沒驗鎖檔：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"

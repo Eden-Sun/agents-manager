@@ -223,11 +223,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }
   }, [])
 
+  // 卸載後 files() 才回來就丟掉：測試收完 DOM 之後 setState 會在 react-dom 裡讀不到 window 而炸（shard 平行跑時撞到）。
+  const alive = useRef(true)
+  useEffect(() => () => {
+    alive.current = false
+  }, [])
   const loadFiles = useCallback(
     () => {
       const gen = ++fileLoadGen.current
       return client.files().then(
         (f) => {
+          if (!alive.current) return
           const decision = decideMessageResponse({
             requestGen: gen,
             latestIssuedGen: fileLoadGen.current,

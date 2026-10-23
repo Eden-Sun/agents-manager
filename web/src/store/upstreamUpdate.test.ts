@@ -3,11 +3,16 @@ import assert from 'node:assert/strict'
 import { applyUpstreamItem, loadUpstreamUpdates, parseUpstreamItem, upstreamNotice } from './upstreamUpdate.ts'
 
 const store = new Map<string, string>()
-;(globalThis as { localStorage?: unknown }).localStorage = {
-  getItem: (k: string) => store.get(k) ?? null,
-  setItem: (k: string, v: string) => void store.set(k, v),
-  removeItem: (k: string) => void store.delete(k),
-}
+// 模組載入時前一個檔的 happy-dom 可能還掛著（它的 teardownDom 在等 async 落地），那時 localStorage 是唯讀 getter，直接賦值會炸：用 defineProperty 蓋。
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  writable: true,
+  value: {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, v),
+    removeItem: (k: string) => void store.delete(k),
+  },
+})
 
 const CLAUDE = {
   kind: 'claude',

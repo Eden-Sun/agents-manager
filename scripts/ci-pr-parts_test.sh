@@ -113,6 +113,7 @@ PY
 fx="$tmp/webfx"
 mkdir -p "$fx/scripts" "$fx/web" "$fx/bin"
 cp "$repo/scripts/check.sh" "$fx/scripts/"
+cp "$repo/scripts/web-test-shards.sh" "$fx/scripts/"
 cat > "$fx/bin/bun" <<'SH'
 #!/bin/bash
 echo "bun $*" >> "$FX_LOG"
