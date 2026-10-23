@@ -50,6 +50,16 @@
   margin-top: 12px;
   min-width: 0;
 }
+details.env-fold {
+  margin: 4px 0 8px;
+}
+details.env-fold summary {
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 650;
+  min-height: 24px;
+}
 .judge-ledger h4,
 .judge-ledger h5 {
   margin: 8px 0 4px;
