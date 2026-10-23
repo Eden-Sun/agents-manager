@@ -12,6 +12,7 @@ check() {
 check "$(printf '%s\nscripts/ops/outbox-gc_test.sh\n' "$guards" | sort)" scripts/ops/outbox-gc.sh
 check "$(printf '%s\nscripts/ops/outbox-gc_test.sh\nscripts/ops/pane-gc_test.sh\n' "$guards" | sort)" scripts/ops/outbox-gc.sh scripts/ops/pane-gc.sh web/src/x.ts
 check "$(printf '%s\nscripts/ops/browser-gc-linux_test.sh\n' "$guards" | sort)" scripts/ops/browser_gc_linux.py
+check "$(printf '%s\nscripts/ops/claude_binary_diff_test.sh\n' "$guards" | sort)" scripts/ops/claude_binary_diff.py
 check "$(printf '%s\nscripts/ops/project-transfer_test.sh\n' "$guards" | sort)" scripts/ops/project-transfer_test.py
 for path in scripts/check.sh scripts/ops/destructive-canary.sh scripts/ops/install-manifest.tsv scripts/ops/cutover-helper.py scripts/ops/daemon-start.py scripts/wait-load.sh scripts/ops/unknown.sh scripts/ci-ops-tests.py AGENTS.md; do
     check __all__ "$path"
