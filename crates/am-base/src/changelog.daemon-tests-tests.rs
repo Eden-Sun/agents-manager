@@ -246,15 +246,27 @@
 
     /// 本機假上游：記下每個收到的請求路徑；沒登記的路徑回 404。
     async fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (base, seen, _) = serve_counting(routes).await;
+        (base, seen)
+    }
+
+    /// 同 [`serve`]，另外回「`endless` 路由到目前為止實際寫給客戶端的位元組數」。
+    /// 送出緩衝縮到最小，所以這個數字只比客戶端真的讀走的多一點點核心緩衝。
+    async fn serve_counting(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>, Arc<std::sync::atomic::AtomicUsize>) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_send_buffer_size(16 * 1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(16).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let log = seen.clone();
+        let counter = written.clone();
         let routes = Arc::new(routes);
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else { return };
-                let (routes, log) = (routes.clone(), log.clone());
+                let (routes, log, counter) = (routes.clone(), log.clone(), counter.clone());
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = Vec::new();
@@ -269,13 +281,15 @@
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     log.lock().unwrap().push(path.clone());
                     if routes.iter().any(|r| r.path == path && r.endless) {
-                        // chunked、沒有 Content-Length、永遠寫不完：客戶端邊讀邊限制才會在寫失敗前收手。
+                        // chunked、沒有 Content-Length、一直寫到客戶端斷線為止（只留 1 GiB 當測試掛住時的保險）：
+                        // 客戶端不邊讀邊限就會一路讀到逾時，寫出去的位元組數會大到離譜。
                         let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
-                        let piece = format!("{:x}\r\n{}\r\n", 64 * 1024, "x".repeat(64 * 1024));
-                        for _ in 0..4096 {
+                        let piece = format!("{:x}\r\n{}\r\n", 16 * 1024, "x".repeat(16 * 1024));
+                        while counter.load(std::sync::atomic::Ordering::SeqCst) < (1 << 30) {
                             if sock.write_all(piece.as_bytes()).await.is_err() {
                                 return;
                             }
+                            counter.fetch_add(piece.len(), std::sync::atomic::Ordering::SeqCst);
                         }
                         return;
                     }
@@ -294,7 +308,7 @@
                 });
             }
         });
-        (base, seen)
+        (base, seen, written)
     }
 
     fn source(base: &str) -> FeedSource {
@@ -391,19 +405,28 @@
         assert!(fetch_pinned_feed("claude", &source(&base)).await.is_err());
     }
 
-    /// 沒有 Content-Length 的 chunked 回應：邊讀邊限制大小，超過上限就停，不是整份讀完才檢查（256 MiB 的流不會被讀完）。
+    /// 沒有 Content-Length 的 chunked 回應：邊讀邊限制大小，超過上限就停，不是整份讀完才檢查。
+    /// 假上游無止盡地寫、記下客戶端斷線前寫了多少：邊讀邊限的客戶端只會讀走約 2 MiB（上限）就斷線，
+    /// 舊的 `resp.text()` 會一路讀到 20 秒逾時（寫出去的量大上幾百倍），所以這個測試在舊寫法上會紅。
     #[tokio::test]
     async fn a_chunked_response_without_content_length_is_capped_while_reading() {
+        use std::sync::atomic::Ordering::SeqCst;
         let endless = |path| Route { path, status: 200, location: None, body: Vec::new(), endless: true };
+        let cap = 4 * 1024 * 1024; // 上限 2 MiB ＋ 核心緩衝的餘裕
         let started = std::time::Instant::now();
-        let (base, _) = serve(vec![endless("/agy/CHANGELOG.md"), endless("/agy/releases")]).await;
+        let (base, _, written) = serve_counting(vec![endless("/agy/CHANGELOG.md"), endless("/agy/releases")]).await;
         let err = fetch_pinned_feed("agy", &source(&base)).await.unwrap_err().to_string();
         assert!(err.contains("超過"), "{err}");
-        let (base, _) = serve(vec![route("/grok/stable", "1.0.67"), endless("/grok/changelogs/1.0.67.external.md")]).await;
+        // 兩個來源（本體與備援）各一條無止盡的流，各自在上限處停手。
+        assert!(written.load(SeqCst) < 2 * cap, "agy：寫了 {} 位元組才被斷線", written.load(SeqCst));
+        let (base, _, written) = serve_counting(vec![route("/grok/stable", "1.0.67"), endless("/grok/changelogs/1.0.67.external.md")]).await;
         let err = fetch_pinned_feed("grok", &source(&base)).await.unwrap_err().to_string();
         assert!(err.contains("超過"), "{err}");
-        let (base, _) = serve(vec![endless("/grok/stable")]).await;
+        assert!(written.load(SeqCst) < cap, "grok：寫了 {} 位元組才被斷線", written.load(SeqCst));
+        assert!(written.load(SeqCst) >= 2 * 1024 * 1024, "至少讀到了上限才會報超過：{}", written.load(SeqCst));
+        let (base, _, written) = serve_counting(vec![endless("/grok/stable")]).await;
         assert!(fetch_pinned_feed("grok", &source(&base)).await.unwrap_err().to_string().contains("超過"));
+        assert!(written.load(SeqCst) < 1024 * 1024, "指標只有 256 位元組的上限，遠小於 2 MiB：{}", written.load(SeqCst));
         assert!(started.elapsed() < Duration::from_secs(15), "沒有邊讀邊限就會一路讀到逾時：{:?}", started.elapsed());
     }
 
