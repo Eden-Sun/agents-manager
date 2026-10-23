@@ -115,6 +115,7 @@ import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { pruneStoredIds } from '../lib/storedIds'
+import { msg, t, tr } from '../lib/i18n'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -689,49 +690,49 @@ let noticeSeq = 0
 function forkErrText(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
-      return 'fork 失敗：正在跑的 daemon 還沒有 fork 功能，要重新 build 並重啟 daemon 後才能用。'
+      return t('fork 失敗：正在跑的 daemon 還沒有 fork 功能，要重新 build 並重啟 daemon 後才能用。')
     }
-    if (typeof e.body.message === 'string' && e.body.message) return `fork 失敗：${e.body.message}`
+    if (typeof e.body.message === 'string' && e.body.message) return t('fork 失敗：{message}', { message: e.body.message })
   }
-  return `fork 失敗：${errText(e)}`
+  return t('fork 失敗：{reason}', { reason: errText(e) })
 }
 
 const PROMOTE_REASON_TEXT: Record<string, string> = {
-  session_not_found: '找不到它的 claude session（pane 裡沒有對得上的行程或對話檔）',
-  session_ambiguous: 'pane 裡有不只一段 claude session，無法確定要接哪一段',
-  transcript_exists: '目標目錄已經有一份不同內容的同名對話檔，不覆寫',
-  has_children: '它自己還有子 agent，先處理掉再升級',
-  stop_failed: '停不掉這顆子 agent，什麼都沒動',
-  remote_not_supported: '遠端主機上的子 agent 還不支援升級',
-  unsupported_kind: '只有 claude 的子 agent 能升級',
-  promote_start_failed: '升級後的新 bot 起不來，已收回',
+  session_not_found: msg('找不到它的 claude session（pane 裡沒有對得上的行程或對話檔）'),
+  session_ambiguous: msg('pane 裡有不只一段 claude session，無法確定要接哪一段'),
+  transcript_exists: msg('目標目錄已經有一份不同內容的同名對話檔，不覆寫'),
+  has_children: msg('它自己還有子 agent，先處理掉再升級'),
+  stop_failed: msg('停不掉這顆子 agent，什麼都沒動'),
+  remote_not_supported: msg('遠端主機上的子 agent 還不支援升級'),
+  unsupported_kind: msg('只有 claude 的子 agent 能升級'),
+  promote_start_failed: msg('升級後的新 bot 起不來，已收回'),
 }
 
 function promoteErrText(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
-      return '升級失敗：正在跑的 daemon 還沒有這個功能，要重新 build 並重啟 daemon 後才能用。'
+      return t('升級失敗：正在跑的 daemon 還沒有這個功能，要重新 build 並重啟 daemon 後才能用。')
     }
     const why = typeof e.body.reason === 'string' ? PROMOTE_REASON_TEXT[e.body.reason] : undefined
-    if (why) return `升級失敗：${why}`
-    if (typeof e.body.message === 'string' && e.body.message) return `升級失敗：${e.body.message}`
+    if (why) return t('升級失敗：{why}', { why: tr(why) })
+    if (typeof e.body.message === 'string' && e.body.message) return t('升級失敗：{message}', { message: e.body.message })
   }
-  return `升級失敗：${errText(e)}`
+  return t('升級失敗：{reason}', { reason: errText(e) })
 }
 
 /** daemon 回的機器 key 換成人話；沒列到的照原樣顯示。 */
 const REASON_TEXT: Record<string, string> = {
-  composer_unreadable: '沒送出：讀不到 bot 的輸入框（可能正在切換畫面或還在啟動），稍後再送一次',
+  composer_unreadable: msg('沒送出：讀不到 bot 的輸入框（可能正在切換畫面或還在啟動），稍後再送一次'),
   // 這幾個是 daemon 打字送出前就擋下的 409（`sent:false`、不留 turn）：字還在輸入框，稍後原樣重送。
-  composer_busy: '沒送出：bot 的輸入框裡有字（可能有人正在終端打字，或上一次插隊沒送出的字還留著），清掉或送出之後再送一次',
-  transcript_not_ready: '沒送出：claude 還沒回報這段對話（session），稍後再送一次',
-  transcript_unreadable: '沒送出：讀不到這段對話的紀錄檔，稍後再送一次',
-  codex_log_not_ready: '沒送出：codex 的紀錄還沒寫出來，稍後再送一次',
-  codex_security_banner: '沒送出：codex 畫面上有帳號安全提醒橫幅（開著時打字，開頭的數字會被當成選項）。請到「終端」選一項或按 Esc 關掉，再送一次',
-  no_pane_to_type_into: '沒送出：找不到這顆 bot 的終端畫面可以打字，重啟它再試',
-  resume_unverified: '沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次',
+  composer_busy: msg('沒送出：bot 的輸入框裡有字（可能有人正在終端打字，或上一次插隊沒送出的字還留著），清掉或送出之後再送一次'),
+  transcript_not_ready: msg('沒送出：claude 還沒回報這段對話（session），稍後再送一次'),
+  transcript_unreadable: msg('沒送出：讀不到這段對話的紀錄檔，稍後再送一次'),
+  codex_log_not_ready: msg('沒送出：codex 的紀錄還沒寫出來，稍後再送一次'),
+  codex_security_banner: msg('沒送出：codex 畫面上有帳號安全提醒橫幅（開著時打字，開頭的數字會被當成選項）。請到「終端」選一項或按 Esc 關掉，再送一次'),
+  no_pane_to_type_into: msg('沒送出：找不到這顆 bot 的終端畫面可以打字，重啟它再試'),
+  resume_unverified: msg('沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次'),
   // API.md 有列、daemon 不附 `message`：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），字沒打進去（#233）。
-  host_unreadable: '沒送出：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），稍後再送一次',
+  host_unreadable: msg('沒送出：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），稍後再送一次'),
   ...DRAFT_REASON_TEXT,
 }
 
@@ -744,14 +745,14 @@ const REASON_TEXT: Record<string, string> = {
 /** daemon 只給 `reason`、不給 `message` 的 422：照代碼翻成人話（不然會印出 API 路徑或代碼）。 */
 const REASON_CODE_TEXT: Record<string, string> = {
   // `MAX_PROVABLE_CHARS`（am-lifecycle delivery.rs）：超過就證明不了送達，daemon 不送。
-  prompt_too_long_to_prove: '這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送',
+  prompt_too_long_to_prove: msg('這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送'),
 }
 
 function reasonText(e: ApiError): string {
   const known = REASON_TEXT[e.message]
-  if (known) return known
+  if (known) return tr(known)
   const byCode = typeof e.body.reason === 'string' ? REASON_CODE_TEXT[e.body.reason] : undefined
-  if (byCode) return byCode
+  if (byCode) return tr(byCode)
   const human = e.body.message
   if (typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
   return e.message
@@ -784,7 +785,7 @@ function errText(e: unknown): string {
     const human = typeof e.body.message === 'string' && e.body.message.trim() !== ''
     const gw = gatewayErrText(e.status, human || typeof e.body.error === 'string')
     if (gw) return gw
-    return `${reasonText(e)}（HTTP ${e.status}）`
+    return t('{reason}（HTTP {status}）', { reason: reasonText(e), status: e.status })
   }
   if (e instanceof Error) return e.message
   return String(e)
@@ -818,18 +819,18 @@ function runStateUncommittedText(e: unknown): string {
 /** daemon 回穩定的機器 key，文案留在前端。 */
 function loginErrText(e: unknown): string {
   if (!(e instanceof ApiError)) return errText(e)
-  const kind = typeof e.body.kind === 'string' ? e.body.kind : '這個 agent'
+  const kind = typeof e.body.kind === 'string' ? e.body.kind : t('這個 agent')
   switch (e.body.error === 'login_unsupported' ? 'login_unsupported' : e.body.reason) {
     case 'login_unsupported':
-      return `${kind} 的 TUI 沒有登入指令，只能到它跑的那台主機上執行 \`${kind} login\`。`
+      return t('{kind} 的 TUI 沒有登入指令，只能到它跑的那台主機上執行 `{kind} login`。', { kind })
     case 'not_running':
-      return '這個 bot 沒在跑。先啟動它，再按登入。'
+      return t('這個 bot 沒在跑。先啟動它，再按登入。')
     case 'agent_busy':
-      return 'agent 正在忙，這時候打字會被吃掉。等它停下來再按。'
+      return t('agent 正在忙，這時候打字會被吃掉。等它停下來再按。')
     case 'turn_in_flight':
-      return '有回合還在進行中，登入指令會被當成那個提問的一部分。等這回合結束再按。'
+      return t('有回合還在進行中，登入指令會被當成那個提問的一部分。等這回合結束再按。')
     case 'no_pane':
-      return '找不到這個 bot 的終端機畫面，可能已經被關掉了。重啟這個 bot 再試。'
+      return t('找不到這個 bot 的終端機畫面，可能已經被關掉了。重啟這個 bot 再試。')
     default:
       return errText(e)
   }
@@ -1031,7 +1032,7 @@ export const useStore = create<StoreState>((set, get) => {
       await migrateLegacyQueuedSends(get)
       await get().refreshState()
       // `refreshState` 永不 throw；首次失敗就 ready 會讓 routeSync 把深連結當成 Bot 不在、改成 `/`。
-      if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
+      if (get().stateStale) throw new Error(lastRefreshError ?? t('無法讀取 daemon 狀態'))
       await get().restoreShellView()
       set({ ready: true, bootError: null })
     } catch (e) {
@@ -1250,7 +1251,7 @@ export const useStore = create<StoreState>((set, get) => {
     } catch (e) {
       // 已經有更新的整頁請求開始（或已經成功）：這一次的失敗不算數，不跳通知（#1802 review）。
       if (generation !== messagePageGeneration('group', projectId)) return
-      get().notify('error', `載入群組訊息失敗：${errText(e)}`)
+      get().notify('error', t('載入群組訊息失敗：{reason}', { reason: errText(e) }))
     }
   },
 
@@ -1282,7 +1283,7 @@ export const useStore = create<StoreState>((set, get) => {
     }
     if (lost === undefined) return
     const recovered = await recoverLostCursor(`group:${projectId}`, lost, () => get().loadGroupMessages(projectId), () => get().loadEarlierGroupMessages(projectId))
-    if (!recovered) get().notify('error', `載入更早的群組訊息失敗：${errText(lost)}`)
+    if (!recovered) get().notify('error', t('載入更早的群組訊息失敗：{reason}', { reason: errText(lost) }))
   },
 
   async sendGroupChat(projectId, text, attachments = [], recipientIds = []) {
@@ -1328,11 +1329,11 @@ export const useStore = create<StoreState>((set, get) => {
       }
       if (!groupSendDelivered(res)) {
         // 一顆都沒送到：回 null，輸入框才會保留草稿與附件（#340）。
-        get().notify('error', `一顆都沒送到，草稿已保留：${res.skipped.map((x) => `@${x.bot_name}（${groupSkipText(x)}）`).join('、')}`)
+        get().notify('error', t('一顆都沒送到，草稿已保留：{list}', { list: res.skipped.map((x) => t('@{name}（{state}）', { name: x.bot_name, state: groupSkipText(x) })).join(t('、')) }))
         return null
       }
       if (res.skipped.length > 0) {
-        get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${groupSkipText(x)}）`).join('、')}`)
+        get().notify('info', t('未送達：{list}', { list: res.skipped.map((x) => t('@{name}（{state}）', { name: x.bot_name, state: groupSkipText(x) })).join(t('、')) }))
       }
       return res
     } catch (e) {
@@ -1382,7 +1383,7 @@ export const useStore = create<StoreState>((set, get) => {
       // 「讓位給權威順序」那條路永遠走不到，樂觀順序反而是最持久的——跟通知說的正好相反。
       saveOrderTracked(`bots:${pid}`, { bots: { [pid]: next } }, () => {
         set((st) => ({ botOrder: prev ? { ...st.botOrder, [pid]: prev } : withoutKey(st.botOrder, pid) }))
-        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
+        get().notify('error', t('排序沒存起來（daemon 沒收到），已回到原本的順序'))
       })
       return { botOrder }
     })
@@ -1398,7 +1399,7 @@ export const useStore = create<StoreState>((set, get) => {
     saveOrderTracked('primary', { primary: order }, (e) => {
       set((st) => ({ bots: st.bots.map((b) => (prev.has(b.id) && pos.has(b.id) ? { ...b, primary_position: prev.get(b.id)! } : b)) }))
       // 把 daemon 的原因帶出來（舊 daemon 沒有 primary 這個欄位會回 400）：只說「沒收到」使用者看不出為什麼，重整後順序又回去。
-      get().notify('error', `主力順序沒存起來，已回到原本的順序：${errText(e)}`)
+      get().notify('error', t('主力順序沒存起來，已回到原本的順序：{reason}', { reason: errText(e) }))
     })
   },
 
@@ -1414,7 +1415,7 @@ export const useStore = create<StoreState>((set, get) => {
       const prev = s.projectOrder
       saveOrderTracked('projects', { projects: next }, () => {
         set({ projectOrder: prev })
-        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
+        get().notify('error', t('排序沒存起來（daemon 沒收到），已回到原本的順序'))
       })
       return { projectOrder: next }
     })
@@ -1467,7 +1468,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (generation !== messagePageGeneration('bot', botId)) return
       // 已經載入過的對話重載失敗不換畫面，照舊只跳通知（#1240）。
       if (!get().loadedBots[botId]) set((s) => ({ messageLoadFailed: { ...s.messageLoadFailed, [botId]: true } }))
-      get().notify('error', `載入訊息失敗：${errText(e)}`)
+      get().notify('error', t('載入訊息失敗：{reason}', { reason: errText(e) }))
     }
   },
 
@@ -1503,7 +1504,7 @@ export const useStore = create<StoreState>((set, get) => {
     if (lost === undefined) return
     // 游標丟了（#766）：`loadingMore` 已放掉，才能重載後再翻一次。
     const recovered = await recoverLostCursor(`bot:${botId}`, lost, () => get().loadMessages(botId), () => get().loadEarlierMessages(botId))
-    if (!recovered) get().notify('error', `載入更早的訊息失敗：${errText(lost)}`)
+    if (!recovered) get().notify('error', t('載入更早的訊息失敗：{reason}', { reason: errText(lost) }))
   },
 
   markBotRead: (botId) => {
@@ -1626,8 +1627,8 @@ export const useStore = create<StoreState>((set, get) => {
       get().notify(
         r.keys_sent ? 'info' : 'error',
         r.keys_sent
-          ? `已中止 ${n} 個回合`
-          : `已中止 ${n} 個回合，但 esc 送不進終端——agent 那邊可能還在跑，必要時停掉 Bot`,
+          ? t('已中止 {n} 個回合', { n })
+          : t('已中止 {n} 個回合，但 esc 送不進終端——agent 那邊可能還在跑，必要時停掉 Bot', { n }),
       )
     })
     return stopped
@@ -1641,7 +1642,7 @@ export const useStore = create<StoreState>((set, get) => {
       await api.loginBot(botId)
       return true
     } catch (e) {
-      get().notify('error', `送不出登入指令：${loginErrText(e)}`)
+      get().notify('error', t('送不出登入指令：{reason}', { reason: loginErrText(e) }))
       return false
     } finally {
       set((s) => {
@@ -1662,7 +1663,7 @@ export const useStore = create<StoreState>((set, get) => {
         withdrawn = await api.withdrawTurn(pending.turnId)
       } catch (e) {
         // 409：已經被佇列送出去了，撤不回來。
-        get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+        get().notify('error', t('撤不回來（可能已經送出）：{reason}', { reason: errText(e) }))
         await get().loadMessages(botId)
         return
       }
@@ -1672,7 +1673,7 @@ export const useStore = create<StoreState>((set, get) => {
       get().setDraft(key, prependDraft(text, get().drafts[key] ?? ''))
       get().setDraftCursor(key, text.length)
       const attachmentCount = withdrawn.attachments.length || pending.attachments
-      if (attachmentCount > 0) get().notify('error', `訊息已放回輸入框，但 ${attachmentCount} 個附件要重新加`)
+      if (attachmentCount > 0) get().notify('error', t('訊息已放回輸入框，但 {attachmentCount} 個附件要重新加', { attachmentCount }))
       await get().loadMessages(botId)
     })
   },
@@ -1685,7 +1686,7 @@ export const useStore = create<StoreState>((set, get) => {
       try {
         withdrawn = await api.withdrawTurn(pending.turnId)
       } catch (e) {
-        get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+        get().notify('error', t('撤不回來（可能已經送出）：{reason}', { reason: errText(e) }))
         await Promise.all([get().refreshState(), get().loadMessages(botId)])
         return
       }
@@ -1730,7 +1731,7 @@ export const useStore = create<StoreState>((set, get) => {
       }
       if (res.delivery === 'failed') {
         // REVIEW B10: turn already failed; seeding a local in_flight turn would lock the composer.
-        get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
+        get().notify('error', t('訊息未送達（delivery=failed），請確認 agent 狀態後重試。'))
         void get().loadMessages(botId)
         return false
       }
@@ -1783,7 +1784,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (draft) set((s) => (draftIsGone(e) ? { composerDrafts: withoutKey(s.composerDrafts, botId) } : markDraftBusy(s, botId, undefined)))
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
-        get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
+        get().notify('error', typeof e.body.message === 'string' ? e.body.message : t('這個 claude 還沒登入，先到「終端」分頁完成登入。'))
         return false
       }
       if (queueIfBusy && e instanceof ApiError && e.status === 409 && e.body.reason === 'queue_slot_taken') {
@@ -1795,7 +1796,7 @@ export const useStore = create<StoreState>((set, get) => {
         // Only a confirmed user-owned slot proves this was the other tab's send. Older daemons
         // omit `holder`; its source is ambiguous, so restoring once is safer than swallowing input.
         if (holder?.kind === 'user' && attachments.length === 0 && queuedNow && queuedNow.text.trim() === text.trim()) {
-          get().notify('info', '這一句已經在排隊中（可能是另一個分頁剛送出的），沒有再送一次')
+          get().notify('info', t('這一句已經在排隊中（可能是另一個分頁剛送出的），沒有再送一次'))
           return true
         }
         const key = `bot:${botId}` as const
@@ -1845,7 +1846,7 @@ export const useStore = create<StoreState>((set, get) => {
           settleCreateRequest(reqKey)
           if (res.delivery === 'unknown') get().notify('info', UNKNOWN_SENT_NOTICE)
           if (res.delivery === 'failed') {
-            get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
+            get().notify('error', t('訊息未送達（delivery=failed），請確認 agent 狀態後重試。'))
             void get().loadMessages(botId)
             return
           }
@@ -1880,7 +1881,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (pinRunId) await api.sendKeys(botId, keys, pinRunId)
       else await sendWithFreshRun(get, botId, (runId) => api.sendKeys(botId, keys, runId))
     } catch (e) {
-      get().notify('error', `送出按鍵失敗：${errText(e)}`)
+      get().notify('error', t('送出按鍵失敗：{reason}', { reason: errText(e) }))
       throw e
     }
   },
@@ -1891,7 +1892,7 @@ export const useStore = create<StoreState>((set, get) => {
       else await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId, record))
       return true
     } catch (e) {
-      get().notify('error', `送出文字失敗：${errText(e)}`)
+      get().notify('error', t('送出文字失敗：{reason}', { reason: errText(e) }))
       return false
     }
   },
@@ -1908,7 +1909,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       await api.createIdentity(input)
       await get().refreshState()
-      get().notify('info', `已新增身份 ${input.name}`)
+      get().notify('info', t('已新增身份 {name}', { name: input.name }))
       return true
     } catch (e) {
       get().notify('error', errText(e))
@@ -1920,7 +1921,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       await api.deleteIdentity(name, host)
       await get().refreshState()
-      get().notify('info', host && host !== 'local' ? `已刪除 ${host} 的身份 ${name}` : `已刪除身份 ${name}`)
+      get().notify('info', host && host !== 'local' ? t('已刪除 {host} 的身份 {name}', { host, name }) : t('已刪除身份 {name}', { name }))
     } catch (e) {
       get().notify('error', errText(e))
     }
@@ -1930,8 +1931,8 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       const res = await api.createHost(input)
       await get().refreshState()
-      if (res.connected) get().notify('info', `主機 ${res.name} 已連線`)
-      else get().notify('error', `主機 ${res.name} 連線失敗：${res.error ?? '未知原因'}`)
+      if (res.connected) get().notify('info', t('主機 {name} 已連線', { name: res.name }))
+      else get().notify('error', t('主機 {name} 連線失敗：{reason}', { name: res.name, reason: res.error ?? t('未知原因') }))
       return res
     } catch (e) {
       get().notify('error', errText(e))
@@ -1943,7 +1944,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       await api.deleteHost(name)
       await get().refreshState()
-      get().notify('info', `已刪除主機 ${name}`)
+      get().notify('info', t('已刪除主機 {name}', { name }))
     } catch (e) {
       get().notify('error', errText(e))
     }
@@ -1955,8 +1956,8 @@ export const useStore = create<StoreState>((set, get) => {
       res = await api.reconnectHost(name)
       await get().refreshState()
       const r = res as HostResult
-      if (r.connected) get().notify('info', `主機 ${r.name} 已重新連線`)
-      else get().notify('error', `主機 ${r.name} 重連失敗：${r.error ?? '未知原因'}`)
+      if (r.connected) get().notify('info', t('主機 {name} 已重新連線', { name: r.name }))
+      else get().notify('error', t('主機 {name} 重連失敗：{reason}', { name: r.name, reason: r.error ?? t('未知原因') }))
     })
     return res
   },
@@ -1968,7 +1969,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       await api.createProject(input)
       await get().refreshState()
-      get().notify('info', `已新增 Project ${input.label || input.path}`)
+      get().notify('info', t('已新增 Project {label}', { label: input.label || input.path }))
       return true
     } catch (e) {
       get().notify('error', errText(e))
@@ -1994,7 +1995,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().refreshState()
       if (id) get().selectBot(id)
       // 建的時候送到停用別名也會被換掉（API.md「停用模型的回應」）：一起講，不要讓人以為選的生效了（#539）。
-      get().notify('info', remapped ? `已新增 Bot ${name}：「${remapped.from}」已停用，改用「${remapped.to}」` : `已新增 Bot ${name}`)
+      get().notify('info', remapped ? t('已新增 Bot {name}：「{from}」已停用，改用「{to}」', { name, from: remapped.from, to: remapped.to }) : t('已新增 Bot {name}', { name }))
       return id || null
     } catch (e) {
       // daemon 說這個鍵已經是另一件事（例如設定變了）：作廢，下一次是新的動作。
@@ -2067,7 +2068,7 @@ export const useStore = create<StoreState>((set, get) => {
       const rest = botsOfProject(get(), bot.project_id).map((b) => b.id).filter((x) => x !== id)
       get().moveBot(id, rest[rest.indexOf(botId) + 1] ?? null)
       get().selectBot(id)
-      get().notify('info', `已新增 Bot ${name}`)
+      get().notify('info', t('已新增 Bot {name}', { name }))
       // 啟動不等：CLI 就緒要好幾秒，交給側欄燈號。
       void get().startBot(id)
       return id
@@ -2098,9 +2099,9 @@ export const useStore = create<StoreState>((set, get) => {
       if (!id) return
       get().selectBot(id)
       if (res.start_error) {
-        get().notify('error', `已從 ${bot.name} fork 出 ${res.name}，但沒有啟動：${res.start_error}`)
+        get().notify('error', t('已從 {name} fork 出 {name2}，但沒有啟動：{reason}', { name: bot.name, name2: res.name, reason: res.start_error }))
       } else {
-        get().notify('info', `已從 ${bot.name} fork 出 ${res.name}，接續它的對話脈絡`)
+        get().notify('info', t('已從 {name} fork 出 {name2}，接續它的對話脈絡', { name: bot.name, name2: res.name }))
       }
     })
     return id
@@ -2118,7 +2119,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().refreshState()
       if (!id) return
       get().selectBot(id)
-      get().notify('info', `已把子 agent ${bot.name} 升級成頂層 bot ${res.name}，接續同一段對話`)
+      get().notify('info', t('已把子 agent {name} 升級成頂層 bot {name2}，接續同一段對話', { name: bot.name, name2: res.name }))
     })
     return id
   },
@@ -2132,7 +2133,7 @@ export const useStore = create<StoreState>((set, get) => {
       // 停用的模型別名會被 daemon 換掉再存（API.md「停用模型的回應」）：不講的話，使用者以為自己選的生效了，
       // 而畫面上那一欄還停在他送出的值（issue #539）。三個送出入口共用這一句。
       if (res.remapped_model) {
-        get().notify('info', `「${res.remapped_model.from}」已停用，這顆 bot 改用「${res.remapped_model.to}」`)
+        get().notify('info', t('「{from}」已停用，這顆 bot 改用「{to}」', { from: res.remapped_model.from, to: res.remapped_model.to }))
       }
       await get().refreshState()
     })
@@ -2175,8 +2176,8 @@ export const useStore = create<StoreState>((set, get) => {
         get().notify(
           'info',
           plan.restart_status === 'deferred'
-            ? '正在跑的那一批只動某台的 CLI，其餘等著套用的會在它跑完後自動接著重啟'
-            : '已經有一批重啟在跑，這次不另開，進度照那一批顯示',
+            ? t('正在跑的那一批只動某台的 CLI，其餘等著套用的會在它跑完後自動接著重啟')
+            : t('已經有一批重啟在跑，這次不另開，進度照那一批顯示'),
         )
         return
       }
@@ -2194,7 +2195,7 @@ export const useStore = create<StoreState>((set, get) => {
         },
       })
       if (plan.total === 0) {
-        get().notify('info', plan.skipped.length > 0 ? '沒有閒置的 Bot 可以重啟（都在忙）' : '沒有等著套用更新的 Bot')
+        get().notify('info', plan.skipped.length > 0 ? t('沒有閒置的 Bot 可以重啟（都在忙）') : t('沒有等著套用更新的 Bot'))
       }
     })
   },
@@ -2233,7 +2234,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().refreshState()
       return true
     } catch (e) {
-      get().notify('error', `復原失敗：${errText(e)}`)
+      get().notify('error', t('復原失敗：{reason}', { reason: errText(e) }))
       return false
     }
   },
@@ -2250,8 +2251,8 @@ export const useStore = create<StoreState>((set, get) => {
       try {
         await api.deleteBot(botId, opts)
         // 軟刪除（只設 `deleted_at`），所以復原是真的復原。
-        get().notify('info', `已刪除 ${name}`, {
-          label: '復原',
+        get().notify('info', t('已刪除 {name}', { name }), {
+          label: t('復原'),
           run: async () => {
             if (await get().restoreBot(botId)) get().selectBot(botId)
           },
@@ -2404,7 +2405,7 @@ export const useStore = create<StoreState>((set, get) => {
       get().dropHostModels(target)
       return true
     } catch (e) {
-      get().notify('error', `重新偵測 ${host || '本機'} 失敗：${errText(e)}`)
+      get().notify('error', t('重新偵測 {host} 失敗：{reason}', { host: host || t('本機'), reason: errText(e) }))
       return false
     } finally {
       set((s) => ({ busy: { ...s.busy, [key]: false } }))
@@ -2417,10 +2418,10 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       const res = await api.installTool(host, kind, viaBotId)
       get().selectBot(viaBotId)
-      get().notify('info', `已請 ${get().bots.find((b) => b.id === viaBotId)?.name ?? viaBotId} 安裝並登入 ${kind}`)
+      get().notify('info', t('已請 {bot} 安裝並登入 {kind}', { bot: get().bots.find((b) => b.id === viaBotId)?.name ?? viaBotId, kind }))
       return res.turn_id
     } catch (e) {
-      get().notify('error', `安裝 ${kind} 失敗：${errText(e)}`)
+      get().notify('error', t('安裝 {kind} 失敗：{reason}', { kind, reason: errText(e) }))
       return null
     } finally {
       set((s) => ({ busy: { ...s.busy, [key]: false } }))
@@ -2516,7 +2517,7 @@ export const useStore = create<StoreState>((set, get) => {
           ? { localTools: loggedOut(s.localTools) }
           : { hosts: s.hosts.map((h) => (h.name === host ? { ...h, tools: loggedOut(h.tools) } : h)) }),
       }))
-      get().notify('info', removed ? 'agy 已登出，憑證已清除' : 'agy 本來就沒有憑證（已是未登入）')
+      get().notify('info', removed ? t('agy 已登出，憑證已清除') : t('agy 本來就沒有憑證（已是未登入）'))
       ok = true
     })
     return ok
@@ -2529,13 +2530,13 @@ export const useStore = create<StoreState>((set, get) => {
       get,
       `agy-install:${host || 'local'}`,
       async () => {
-        const where = !host || host === 'local' ? '本機' : host
-        get().notify('info', `開始在 ${where} 安裝 agy（下載約 50 MB 並驗 sha512）…`)
+        const where = !host || host === 'local' ? t('本機') : host
+        get().notify('info', t('開始在 {where} 安裝 agy（下載約 50 MB 並驗 sha512）…', { where }))
         const r = await api.installAgy(host)
-        get().notify('info', r.already_latest ? `${where} 的 agy 已是官方最新版 ${r.to}` : `${where} 已安裝 agy ${r.to}${r.path ? `（${r.path}）` : ''}；要登入請到額度欄開 shell 登入`)
+        get().notify('info', r.already_latest ? t('{where} 的 agy 已是官方最新版 {to}', { where, to: r.to }) : t('{where} 已安裝 agy {to}{path}；要登入請到額度欄開 shell 登入', { where, to: r.to, path: r.path ? t('（{path}）', { path: r.path }) : '' }))
         ok = true
       },
-      (e) => `安裝 agy 失敗：${errText(e)}`,
+      (e) => t('安裝 agy 失敗：{reason}', { reason: errText(e) }),
     )
     return ok
   },
@@ -2606,7 +2607,7 @@ export const useStore = create<StoreState>((set, get) => {
         get().paneGone(pane.host, pane.pane_id)
         return 'closed'
       }
-      get().notify('error', `關閉失敗：${errText(e)}`)
+      get().notify('error', t('關閉失敗：{reason}', { reason: errText(e) }))
       return null
     }
     dropPane(set, pane.host, pane.pane_id)
@@ -2616,7 +2617,7 @@ export const useStore = create<StoreState>((set, get) => {
 
   paneGone(host, paneId) {
     dropPane(set, host, paneId)
-    get().notify('info', '這顆 pane 已經關掉了')
+    get().notify('info', t('這顆 pane 已經關掉了'))
     void get().refreshPanes()
   },
 
@@ -2723,7 +2724,7 @@ export const useStore = create<StoreState>((set, get) => {
             set({ missionsSupported: false })
             return
           }
-          get().notify('error', `載入任務失敗：${errText(e)}`)
+          get().notify('error', t('載入任務失敗：{reason}', { reason: errText(e) }))
         }
       })
       missionListLoads.set(projectId, run)
@@ -2756,7 +2757,7 @@ export const useStore = create<StoreState>((set, get) => {
         }))
         try {
           const detail = await api.fetchMission(missionId)
-          if (!detail) throw new Error('任務資料不完整')
+          if (!detail) throw new Error(t('任務資料不完整'))
           set((s) => ({
             missionDetail: { ...s.missionDetail, [missionId]: detail },
             missions: mergeMission(s.missions, detail),
@@ -2771,7 +2772,7 @@ export const useStore = create<StoreState>((set, get) => {
             set((s) => ({
               missionDetail: withoutKey(s.missionDetail, missionId),
               missions: dropMission(s.missions, missionId),
-              missionLoadErrors: { ...s.missionLoadErrors, [missionId]: '這筆任務已經不在了' },
+              missionLoadErrors: { ...s.missionLoadErrors, [missionId]: t('這筆任務已經不在了') },
             }))
             return
           }
@@ -2798,18 +2799,18 @@ export const useStore = create<StoreState>((set, get) => {
       if (!mission) return null
       set((s) => ({ missions: mergeMission(s.missions, mission) }))
       // 同 client_request_id 重送回 `created:false`，不再提示。
-      if (created) get().notify('info', '已交給 AGM，任務卡會顯示進度')
+      if (created) get().notify('info', t('已交給 AGM，任務卡會顯示進度'))
       return mission.id
     } catch (e) {
       if (api.isMissionsUnsupported(e)) {
         set({ missionsSupported: false })
-        get().notify('error', '這個 daemon 還沒有群組任務（需要更新）')
+        get().notify('error', t('這個 daemon 還沒有群組任務（需要更新）'))
         return null
       }
       const reason = api.missionRejectReason(e)
       get().notify(
         'error',
-        reason === 'remote_not_supported' ? '群組任務目前只支援本機專案' : `交給 AGM 失敗：${errText(e)}`,
+        reason === 'remote_not_supported' ? t('群組任務目前只支援本機專案') : t('交給 AGM 失敗：{reason}', { reason: errText(e) }),
       )
       return null
     }
@@ -2827,7 +2828,7 @@ export const useStore = create<StoreState>((set, get) => {
         if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
         await get().loadMission(missionId)
       },
-      (e) => `任務操作失敗：${errText(e)}`,
+      (e) => t('任務操作失敗：{reason}', { reason: errText(e) }),
     )
   },
 
@@ -2838,7 +2839,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().loadMission(missionId)
       return true
     } catch (e) {
-      get().notify('error', `回覆任務失敗：${errText(e)}`)
+      get().notify('error', t('回覆任務失敗：{reason}', { reason: errText(e) }))
       return false
     }
   },
@@ -2849,7 +2850,7 @@ export const useStore = create<StoreState>((set, get) => {
       await get().loadMission(missionId)
       return true
     } catch (e) {
-      get().notify('error', `追問失敗：${errText(e)}`)
+      get().notify('error', t('追問失敗：{reason}', { reason: errText(e) }))
       return false
     }
   },
@@ -2862,11 +2863,11 @@ export const useStore = create<StoreState>((set, get) => {
       if (next) {
         await get().loadMission(next.id)
         await get().loadMissions(next.project_id)
-        get().notify('info', '已開一筆續作任務，原本的成果保持不變')
+        get().notify('info', t('已開一筆續作任務，原本的成果保持不變'))
       }
       return next?.id ?? null
     } catch (e) {
-      get().notify('error', `追加修改失敗：${errText(e)}`)
+      get().notify('error', t('追加修改失敗：{reason}', { reason: errText(e) }))
       return null
     }
   },
@@ -2900,7 +2901,7 @@ async function migrateLegacyQueuedSends(get: GetFn): Promise<void> {
       const restored = draftWithText(row.text, current)
       if (restored !== current) get().setDraft(key, restored)
       if (row.attachments.length > 0) {
-        get().notify('error', `舊分頁的訊息已退回輸入框，但 ${row.attachments.length} 個附件要重新加`)
+        get().notify('error', t('舊分頁的訊息已退回輸入框，但 {count} 個附件要重新加', { count: row.attachments.length }))
       }
     }
   }
@@ -2973,7 +2974,7 @@ useStore.subscribe((s) => {
 })
 
 function reportStateRefreshError(set: SetFn, get: GetFn, e: unknown) {
-  const text = `同步狀態失敗：${errText(e)}`
+  const text = t('同步狀態失敗：{reason}', { reason: errText(e) })
   set({ stateStale: true })
   if (lastRefreshError === text) return
   lastRefreshError = text
@@ -3055,7 +3056,7 @@ export function resetStoreForTest(): void {
 
 /** 測試直接送一幀，不必先把 WebSocket 接起來。 */
 export function dispatchFrameForTest(frame: { seq?: number; type: string; data?: unknown }) {
-  if (!boundSet || !boundGet) throw new Error('store 還沒建立')
+  if (!boundSet || !boundGet) throw new Error(t('store 還沒建立'))
   handleFrame(boundSet, boundGet, frame)
 }
 
@@ -3160,7 +3161,7 @@ async function mergeLatestGroupPage(set: SetFn, get: GetFn, projectId: string): 
       }
     })
   } catch (e) {
-    get().notify('error', `載入群組訊息失敗：${errText(e)}`)
+    get().notify('error', t('載入群組訊息失敗：{reason}', { reason: errText(e) }))
   }
 }
 
@@ -3319,11 +3320,11 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!occ || seenScheduleNotices.has(key)) return
       seenScheduleNotices.add(key)
       if (seenScheduleNotices.size > 500) seenScheduleNotices.clear()
-      const name = str(pick(data, 'schedule_name')) || '排程'
+      const name = str(pick(data, 'schedule_name')) || t('排程')
       const error = str(pick(data, 'error'))
-      if (status === 'done') useStore.getState().notify('info', `排程「${name}」已完成`)
-      else if (status === 'unknown') useStore.getState().notify('error', `排程「${name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用`)
-      else if (status === 'failed') useStore.getState().notify('error', `排程「${name}」失敗${error ? `：${error}` : ''}`)
+      if (status === 'done') useStore.getState().notify('info', t('排程「{name}」已完成', { name }))
+      else if (status === 'unknown') useStore.getState().notify('error', t('排程「{name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用', { name }))
+      else if (status === 'failed') useStore.getState().notify('error', error ? t('排程「{name}」失敗：{reason}', { name, reason: error }) : t('排程「{name}」失敗', { name }))
       return
     }
     case 'herdr_recovery_done': {
@@ -3339,14 +3340,14 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       const failedNames = names(failed)
       const childNames = names(children)
       const suffix = bool(pick(data, 'limited'))
-        ? '短時間內重連次數過多，已達自動接回上限。'
-        : str(pick(data, 'skipped')) ? '連線狀態再次改變，部分接回已略過。' : ''
+        ? t('短時間內重連次數過多，已達自動接回上限。')
+        : str(pick(data, 'skipped')) ? t('連線狀態再次改變，部分接回已略過。') : ''
       const detail = [
-        failedNames.length ? `失敗：${failedNames.join('、')}` : '',
-        childNames.length ? `遺失 child：${childNames.join('、')}` : '',
+        failedNames.length ? t('失敗：{names}', { names: failedNames.join(t('、')) }) : '',
+        childNames.length ? t('遺失 child：{names}', { names: childNames.join(t('、')) }) : '',
         suffix,
-      ].filter(Boolean).join('；')
-      const text = `herdr 意外重啟：接回 ${resumed.length} 顆頂層 bot，${failed.length} 顆失敗，${children.length} 個 child pane 遺失。${detail}`
+      ].filter(Boolean).join(t('；'))
+      const text = t('herdr 意外重啟：接回 {resumed} 顆頂層 bot，{failed} 顆失敗，{children} 個 child pane 遺失。{detail}', { resumed: resumed.length, failed: failed.length, children: children.length, detail })
       get().notify(failed.length || bool(pick(data, 'limited')) ? 'error' : 'info', text.slice(0, 500))
       return
     }
@@ -3718,7 +3719,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!b || b.id !== batchId) return
       const okNames = arr(pick(data, 'ok')).flatMap((v) => (isRec(v) ? [str(pick(v, 'name'))] : []))
       const failed = arr(pick(data, 'failed')).flatMap((v) =>
-        isRec(v) ? [{ name: str(pick(v, 'name')), error: str(pick(v, 'error'), '失敗') }] : [],
+        isRec(v) ? [{ name: str(pick(v, 'name')), error: str(pick(v, 'error'), t('失敗')) }] : [],
       )
       // daemon 的最終清單是權威；中途漏掉的 frame 到這裡會被補齊。
       set({
@@ -3734,10 +3735,10 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         },
       })
       if (okNames.length + failed.length > 0) {
-        const parts = [`成功 ${okNames.length} 顆`]
-        if (skipped.length > 0) parts.push(`跳過 ${skipped.length} 顆`)
-        if (failed.length > 0) parts.push(`失敗 ${failed.length} 顆`)
-        get().notify(failed.length > 0 ? 'error' : 'info', `更新重啟完成：${parts.join(' · ')}`)
+        const parts = [t('成功 {count} 顆', { count: okNames.length })]
+        if (skipped.length > 0) parts.push(t('跳過 {count} 顆', { count: skipped.length }))
+        if (failed.length > 0) parts.push(t('失敗 {count} 顆', { count: failed.length }))
+        get().notify(failed.length > 0 ? 'error' : 'info', t('更新重啟完成：{parts}', { parts: parts.join(' · ') }))
       }
       // 重啟過的 bot 換了 run，狀態一次撈回來。
       void get().refreshState()
@@ -3909,7 +3910,7 @@ export function botLamp(state: StoreState, botId: string): Lamp {
 }
 
 /** 哪一個視窗在警告——只用來標文字，不是判斷門檻。 */
-export type QuotaWarningWindow = '5h' | '7d' | '週'
+export type QuotaWarningWindow = '5h' | '7d' | '週' // i18n-ignore
 
 export interface QuotaWarning {
   critical: boolean
@@ -3935,7 +3936,7 @@ export function botQuotaWarning(
   const q = quotaForIdentity(quota, host, kind, identity, identities)
   if (!q) return null
   const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
-  const sevenWindow: QuotaWarningWindow = weeklyOnlyKind(kind) ? '週' : '7d'
+  const sevenWindow: QuotaWarningWindow = weeklyOnlyKind(kind) ? '週' : '7d' // i18n-ignore
   const seven = q.seven_day?.critical
     ? { pct: Math.max(0, Math.round(100 - q.seven_day.used_pct)), window: sevenWindow }
     : null
@@ -3974,7 +3975,7 @@ export function botQuotaLevel(
     w && (w.low || w.critical)
       ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: Math.max(0, Math.round(100 - w.used_pct)), window: name }
       : null
-  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, weeklyOnlyKind(kind) ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter(
+  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, weeklyOnlyKind(kind) ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter( // i18n-ignore
     (x): x is QuotaLevel => x !== null,
   )
   if (hits.length === 0) return null
@@ -4081,13 +4082,13 @@ export function botSearchText(state: StoreState, bot: Bot): string {
   return [
     bot.name,
     bot.kind,
-    bot.identity ?? '預設',
+    bot.identity ?? '預設', // i18n-ignore
     bot.model ?? '',
     bot.persona ?? '',
     run?.agent_title ?? '',
     project?.label ?? '',
     project?.path ?? '',
-    project?.host === LOCAL_HOST ? '本機 local' : (project?.host ?? ''),
+    project?.host === LOCAL_HOST ? '本機 local' : (project?.host ?? ''), // i18n-ignore
   ]
     .join(' ')
     .toLowerCase()
@@ -4131,7 +4132,7 @@ export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | nu
 /** SPEC §3.2 / §6.3: why the composer is locked. */
 export function composerState(state: StoreState, botId: string | null): ComposerState {
   const base: ComposerState = { disabled: true, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
-  if (!botId) return { ...base, reason: '請先在左側選擇一個 Bot' }
+  if (!botId) return { ...base, reason: t('請先在左側選擇一個 Bot') }
   const bot = state.bots.find((b) => b.id === botId)
   const handedOff = bot ? handedOffTo(state.projects, bot.project_id) : null
   if (handedOff) return { ...base, reason: handedOffReason(handedOff) }
@@ -4140,10 +4141,10 @@ export function composerState(state: StoreState, botId: string | null): Composer
     const host = hostOfBot(state, botId)
     if (!host || !host.connected) {
       // 原因（ssh 錯誤字串）在聊天區頂端的離線橫幅；這裡只講結果，輸入框 placeholder 才放得下。
-      return { ...base, reason: `主機 ${hostName} 離線，訊息送不出去` }
+      return { ...base, reason: t('主機 {hostName} 離線，訊息送不出去', { hostName }) }
     }
   } else if (!(bot?.herdr_session === 'default' ? state.defaultConnected : state.connected)) {
-    return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
+    return { ...base, reason: t('daemon 與 herdr 的連線中斷，無法送出訊息') }
   }
   const run = state.runs[botId]
   // issue #122：已經有一則交給 daemon、在等 bot 起來——再送就排在它後面，不再觸發一次啟動。
@@ -4152,11 +4153,11 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, disabled: false, queued: true, reason: startingSendLabel(starting).replace(/：$/, '') }
   }
   if (!run) {
-    return { ...base, disabled: false, queued: true, autoStart: true, reason: 'Bot 沒在跑：送出會先啟動它，起來後自動送出' }
+    return { ...base, disabled: false, queued: true, autoStart: true, reason: t('Bot 沒在跑：送出會先啟動它，起來後自動送出') }
   }
-  if (run.state !== 'running') return { ...base, reason: `Run 狀態為 ${run.state}，尚無法送出訊息` }
+  if (run.state !== 'running') return { ...base, reason: t('Run 狀態為 {state}，尚無法送出訊息', { state: run.state }) }
   if (run.agent_status === 'blocked') {
-    return { ...base, reason: 'agent 正在等待終端回應，請在上方面板按鍵處理' }
+    return { ...base, reason: t('agent 正在等待終端回應，請在上方面板按鍵處理') }
   }
   const unknown = unknownDeliveryTurn(state, botId)
   if (unknown) {
@@ -4166,10 +4167,10 @@ export function composerState(state: StoreState, botId: string | null): Composer
   const inflight = inFlightTurn(state, botId)
   if (inflight) {
     // Not `disabled`: the user keeps typing, and a send is queued rather than refused.
-    return { ...base, disabled: false, queued: true, reason: '這回合還在跑，送出會排到結束後', inFlightTurnId: inflight.id }
+    return { ...base, disabled: false, queued: true, reason: t('這回合還在跑，送出會排到結束後'), inFlightTurnId: inflight.id }
   }
   const queued = Object.values(state.turns[botId] ?? {}).find((t) => t.status === 'queued')
-  if (queued) return { ...base, disabled: false, queued: true, reason: '已有訊息排隊中，等它送出後再試' }
+  if (queued) return { ...base, disabled: false, queued: true, reason: t('已有訊息排隊中，等它送出後再試') }
   return { disabled: false, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
 }
 
@@ -4315,7 +4316,7 @@ export interface GroupComposerState {
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
   if (!projectId) return { disabled: true, reason: '', sendable: [] }
   const members = state.bots.filter((b) => b.project_id === projectId)
-  if (members.length === 0) return { disabled: true, reason: '這個 Project 還沒有 Bot', sendable: [] }
+  if (members.length === 0) return { disabled: true, reason: t('這個 Project 還沒有 Bot'), sendable: [] }
   const sendable = members
     .filter((b) => {
       const cs = composerState(state, b.id)
@@ -4324,7 +4325,7 @@ export function groupComposerState(state: StoreState, projectId: string | null):
     .map((b) => b.id)
   if (sendable.length === 0) {
     const first = composerState(state, members[0].id).reason
-    return { disabled: true, reason: `專案內沒有可送訊息的 Bot（${first}）`, sendable }
+    return { disabled: true, reason: t('專案內沒有可送訊息的 Bot（{first}）', { first }), sendable }
   }
   return { disabled: false, reason: '', sendable }
 }

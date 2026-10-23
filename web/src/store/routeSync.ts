@@ -10,6 +10,7 @@ import { buildRoute, parseRoute, screenKey, type Route } from '../lib/routes'
 import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { useStore, type StoreState } from './store'
 import { userNavCount } from './userNav'
+import { t } from '../lib/i18n'
 
 /** 預覽分頁只給頂層 bot（issue #253）；`ChatPanel` 與網址還原共用這條。 */
 export function isTopLevelBot(b: { parent_bot_id: string | null; managed_by: string } | undefined): boolean {
@@ -36,7 +37,7 @@ export function screenTitle(s: StoreState): string {
     case 'bot': {
       const name = s.bots.find((b) => b.id === r.botId)?.name
       if (!name) return ''
-      return r.settings ? `${name} · 設定` : r.tab === 'terminal' ? `${name} · 終端` : r.tab === 'preview' ? `${name} · 預覽` : name
+      return r.settings ? t('{name} · 設定', { name }) : r.tab === 'terminal' ? t('{name} · 終端', { name }) : r.tab === 'preview' ? t('{name} · 預覽', { name }) : name
     }
     case 'project':
       return s.projects.find((p) => p.id === r.projectId)?.label ?? ''
@@ -108,7 +109,7 @@ function write(fn: () => void) {
 
 function backHome(why: string) {
   const s = useStore.getState()
-  s.notify('info', `${why}，已回到首頁。`)
+  s.notify('info', t('{why}，已回到首頁。', { why }))
   write(() => s.selectBot(null))
 }
 
@@ -124,7 +125,7 @@ async function applyRoute(r: Route, gen: number) {
       write(() => s.selectBot(null))
       return
     case 'bot': {
-      if (!s.bots.some((b) => b.id === r.botId)) return backHome('這個 Bot 已經不在了')
+      if (!s.bots.some((b) => b.id === r.botId)) return backHome(t('這個 Bot 已經不在了'))
       if (r.settings) {
         write(() => s.openSettings(r.botId))
         return
@@ -137,7 +138,7 @@ async function applyRoute(r: Route, gen: number) {
       return
     }
     case 'project':
-      if (!s.projects.some((p) => p.id === r.projectId)) return backHome('這個專案已經不在了')
+      if (!s.projects.some((p) => p.id === r.projectId)) return backHome(t('這個專案已經不在了'))
       write(() => s.selectProject(r.projectId))
       return
     case 'shell': {
@@ -152,10 +153,10 @@ async function applyRoute(r: Route, gen: number) {
         // 選單點進去的 pane（§6.5e）不在「自己開的」那份裡；它記在 daemon 的 pane 表，活得過重啟。
         const traced = (await api.fetchAllPanes()).find((x) => x.host === r.host && x.pane_id === r.paneId)
         if (!current()) return
-        if (!traced) return backHome('這個 shell 已經關掉了')
+        if (!traced) return backHome(t('這個 shell 已經關掉了'))
         write(() => s.viewPane(traced))
       } catch {
-        if (current()) backHome('讀不到這台主機的 shell')
+        if (current()) backHome(t('讀不到這台主機的 shell'))
       }
       return
     }

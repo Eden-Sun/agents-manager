@@ -6,6 +6,7 @@
  */
 import { rawTransport } from './index'
 import { ApiError } from './types'
+import { t } from '../lib/i18n'
 
 export interface ShareState {
   enabled: boolean
@@ -57,10 +58,10 @@ export function shareErrorText(e: unknown): string {
   if (e instanceof ApiError) {
     const b = e.body as Record<string, unknown> | undefined
     const reason = typeof b?.reason === 'string' ? b.reason : typeof b?.error === 'string' ? b.error : ''
-    if (reason === 'share_not_configured') return '還沒設定分享入口：config.toml 的 [share] base_url（Tailscale Funnel 的網址）沒填'
-    if (reason === 'not_shareable') return '只有「分享用（受限）」的 bot 能開分享連結'
-    if (reason === 'share_embed_trusted_only') return '「允許 iframe 嵌入」只給信任分享的 bot'
-    if (reason === 'unsupported_kind') return '分享用的受限 bot 目前只支援 claude'
+    if (reason === 'share_not_configured') return t('還沒設定分享入口：config.toml 的 [share] base_url（Tailscale Funnel 的網址）沒填')
+    if (reason === 'not_shareable') return t('只有「分享用（受限）」的 bot 能開分享連結')
+    if (reason === 'share_embed_trusted_only') return t('「允許 iframe 嵌入」只給信任分享的 bot')
+    if (reason === 'unsupported_kind') return t('分享用的受限 bot 目前只支援 claude')
     const msg = typeof b?.message === 'string' ? b.message : ''
     return msg || reason || e.message
   }

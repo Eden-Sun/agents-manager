@@ -1,6 +1,7 @@
 // 專案排程的 API（daemon `schedules/api.rs`，User-only）。WS `schedules_changed` 只帶 `{project_id, id}`，
 // 網頁收到後自己重抓，prompt 不進全域 state。
 import { rawTransport } from './index'
+import { t } from '../lib/i18n'
 
 export type ScheduleMode = 'once' | 'interval' | 'daily' | 'weekly'
 export type ScheduleNotify = 'failure' | 'all' | 'none'
@@ -94,7 +95,7 @@ const enc = encodeURIComponent
 function asSchedule(raw: unknown): Schedule {
   const r = raw as Partial<Schedule> | null
   if (!r || typeof r !== 'object' || typeof r.id !== 'string' || typeof r.project_id !== 'string') {
-    throw new Error('排程資料格式不對（缺 id 或 project_id）')
+    throw new Error(t('排程資料格式不對（缺 id 或 project_id）'))
   }
   return { ...r, open: r.open ?? null, clear_after: r.clear_after === true } as Schedule
 }
