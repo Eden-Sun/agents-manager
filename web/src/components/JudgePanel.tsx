@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import { fetchJudgeSettings, saveJudgeSettings, type JudgeSettings } from '../api/judge'
+import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JevLabel } from './JevLabel'
@@ -21,19 +22,21 @@ import './judgePanel.css'
 export type JudgeLoad = { kind: 'loading' } | { kind: 'unsupported' } | { kind: 'error'; message: string }
 
 export function JudgeLoadNotice({ state, onRetry }: { state: JudgeLoad; onRetry: () => void }) {
-  if (state.kind === 'loading') return <p className="hint">讀取中…</p>
-  if (state.kind === 'unsupported') return <p className="hint">這顆 daemon 還沒有這個功能（需要更新 daemon）。</p>
+  const t = useT()
+  if (state.kind === 'loading') return <p className="hint">{t('讀取中…')}</p>
+  if (state.kind === 'unsupported') return <p className="hint">{t('這顆 daemon 還沒有這個功能（需要更新 daemon）。')}</p>
   return (
     <p className="hint">
-      讀不到 Jev 設定：{state.message}{' '}
+      {t('讀不到 Jev 設定：{message}', { message: state.message })}{' '}
       <button type="button" className="btn" onClick={onRetry}>
-        重試
+        {t('重試')}
       </button>
     </p>
   )
 }
 
 export function JudgePanel() {
+  const t = useT()
   const allProjects = useStore((s) => s.projects)
   const [subTab, setSubTab] = useState<'form' | 'book'>('form')
   const [settings, setSettings] = useState<JudgeSettings | null | undefined>(undefined)
@@ -105,19 +108,19 @@ export function JudgePanel() {
         if (r.ok) {
           adopt(r.settings)
           setToken('')
-          setNote({ ok: true, text: '已儲存，立即生效。' })
+          setNote({ ok: true, text: t('已儲存，立即生效。') })
         } else {
-          setNote({ ok: false, text: `儲存失敗：${r.message}` })
+          setNote({ ok: false, text: t('儲存失敗：{message}', { message: r.message }) })
         }
       })
-      .catch((e: unknown) => setNote({ ok: false, text: `儲存失敗：${e instanceof Error ? e.message : String(e)}` }))
+      .catch((e: unknown) => setNote({ ok: false, text: t('儲存失敗：{message}', { message: e instanceof Error ? e.message : String(e) }) }))
       .finally(() => setBusy(false))
   }
 
   const subTabItems: EnvSubTabItem<'form' | 'book'>[] = [
     {
       id: 'form',
-      label: '設定',
+      label: t('設定'),
       panelId: 'jev-form',
       content: (
         <form
@@ -130,16 +133,20 @@ export function JudgePanel() {
           <p className="hint">
             <JevLabel note />
             <br />
-            Jev（TypeSafe 型別判斷）給的判斷，畫面上一律標「Jev 建議」與機率。
+            {t('Jev（TypeSafe 型別判斷）給的判斷，畫面上一律標「Jev 建議」與機率。')}
           </p>
           <p className="hint">
-            畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。
+            {t('畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。')}
           </p>
           <label className="field">
             <span>
               TypeSafe API key{' '}
               <em className={settings.key_present ? 'judge-key ok' : 'judge-key'}>
-                {settings.key_present ? '已設定' : `未設定${settings.key_error ? `（${settings.key_error}）` : ''}`}
+                {settings.key_present
+                  ? t('已設定')
+                  : settings.key_error
+                    ? t('未設定（{error}）', { error: settings.key_error })
+                    : t('未設定')}
               </em>
             </span>
             <input
@@ -147,22 +154,22 @@ export function JudgePanel() {
               value={token}
               autoComplete="off"
               spellCheck={false}
-              placeholder={settings.key_present ? '留空＝不更換' : '貼上 key'}
+              placeholder={settings.key_present ? t('留空＝不更換') : t('貼上 key')}
               onChange={(e) => setToken(e.target.value)}
             />
-            <span className="hint">只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。</span>
+            <span className="hint">{t('只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。')}</span>
           </label>
           <label className="judge-switch">
             <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            <span>啟用（會把下面專案的撞限畫面最後 60 行，遮罩 token／密碼後送到 TypeSafe）</span>
+            <span>{t('啟用（會把下面專案的撞限畫面最後 60 行，遮罩 token／密碼後送到 TypeSafe）')}</span>
           </label>
           <fieldset className="judge-projects" disabled={!enabled}>
-            <legend>適用的專案（沒勾＝不送）</legend>
+            <legend>{t('適用的專案（沒勾＝不送）')}</legend>
             <label className="judge-all-projects">
               <input type="checkbox" checked={allProjectsPicked} onChange={toggleAllProjects} />
-              <span>全部專案（含之後新建的；所有專案的對應內容都會送到 TypeSafe）</span>
+              <span>{t('全部專案（含之後新建的；所有專案的對應內容都會送到 TypeSafe）')}</span>
             </label>
-            {allProjects.length === 0 ? <span className="hint">還沒有專案。</span> : null}
+            {allProjects.length === 0 ? <span className="hint">{t('還沒有專案。')}</span> : null}
             {allProjects.map((p) => (
               <label key={p.id}>
                 <input type="checkbox" checked={isPicked(p)} disabled={allProjectsPicked} onChange={() => toggle(p)} />
@@ -173,7 +180,7 @@ export function JudgePanel() {
           <div className="form-actions">
             {note ? <span className={note.ok ? 'judge-note ok' : 'judge-note err'} role="status">{note.text}</span> : null}
             <button type="submit" className="btn primary" disabled={busy || !dirty}>
-              儲存
+              {t('儲存')}
             </button>
           </div>
         </form>
@@ -181,7 +188,7 @@ export function JudgePanel() {
     },
     {
       id: 'book',
-      label: '帳本',
+      label: t('帳本'),
       panelId: 'jev-book',
       content: <JudgeLedger />,
     },
@@ -189,7 +196,7 @@ export function JudgePanel() {
 
   return (
     <EnvSubTabs<'form' | 'book'>
-      ariaLabel="Jev 建議分類"
+      ariaLabel={t('Jev 建議分類')}
       value={subTab}
       onChange={setSubTab}
       items={subTabItems}

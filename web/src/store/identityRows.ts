@@ -5,6 +5,7 @@
  * 兩列都找到本機那筆、m4p 那筆在畫面上看不到，按第二列的 ✕ 刪掉的卻是**本機**的 `cc1`（第二輪 review H3）。
  */
 import type { Bot, Identity, Project } from '../api/types'
+import { t } from '../lib/i18n'
 
 const LOCAL = 'local'
 
@@ -40,5 +41,5 @@ export function shadowedByConfig(configured: readonly Identity[], host: string, 
 
 /** 列表上的主機字樣。 */
 export function hostLabel(host: string): string {
-  return !host || host === LOCAL ? '本機' : host
+  return !host || host === LOCAL ? t('本機') : host
 }

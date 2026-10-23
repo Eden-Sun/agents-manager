@@ -1,5 +1,6 @@
 import { useStore, projectHostName } from '../store/store'
 import { hostLabel } from '../store/identityRows'
+import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
 /**
@@ -8,15 +9,16 @@ import { ConfirmDialog } from './ConfirmDialog'
  * popover 的「點外面就關」會把 popover 內的元件卸掉，框掛在裡面就會跟著消失。
  */
 export function AgyLogoutButton({ host, onOpen, busy }: { host: string; onOpen: () => void; busy: boolean }) {
+  const t = useT()
   return (
     <button
       type="button"
       className="mini-btn quota-agy-logout"
       disabled={busy}
-      title={`清掉${hostLabel(host)}的 agy 登入憑證`}
+      title={t('清掉{host}的 agy 登入憑證', { host: hostLabel(host) })}
       onClick={onOpen}
     >
-      {busy ? '登出中…' : '登出 agy'}
+      {busy ? t('登出中…') : t('登出 agy')}
     </button>
   )
 }
@@ -33,24 +35,26 @@ function useRunningAgyBots(host: string): number {
 }
 
 export function AgyLogoutDialog({ host, open, onClose }: { host: string; open: boolean; onClose: () => void }) {
+  const t = useT()
   const logoutAgy = useStore((s) => s.logoutAgy)
   const running = useRunningAgyBots(host)
   return (
     <ConfirmDialog
       open={open}
-      title="登出 agy"
+      title={t('登出 agy')}
       body={
         <>
-          會刪掉{hostLabel(host)}上 agy 的登入憑證，之後要在 agy 裡重新登入才能用。
+          {t.x('會刪掉{host}上 agy 的登入憑證，之後要在 agy 裡重新登入才能用。', { host: hostLabel(host) })}
           {running > 0 ? (
             <>
               <br />
-              <strong>目前有 {running} 顆 agy bot 在跑</strong>：不會被停掉，但憑證清掉後它們會失去授權。
+              <strong>{t('目前有 {n} 顆 agy bot 在跑', { n: running })}</strong>
+              {t('：不會被停掉，但憑證清掉後它們會失去授權。')}
             </>
           ) : null}
         </>
       }
-      confirmLabel="登出"
+      confirmLabel={t('登出')}
       danger
       onCancel={onClose}
       onConfirm={() => {

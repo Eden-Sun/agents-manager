@@ -5,42 +5,43 @@
  * limit_hit 在 SPEC 裡沒有門檻（只記錄、不推提示），所以超過門檻那欄是 `null`＝不適用。
  */
 import type { JudgeShadowRow } from '../api/judge'
+import { msg, t } from './i18n'
 
 export type JudgeScene = 'limit_hit' | 'stuck_queued' | 'same_work' | 'report_evidence' | 'ask_option'
 
-/** 五個場景：名稱與「什麼時候問」（照 SPEC §4.3c 的觸發條件，給沒有紀錄時的說明用）。 */
+/** 五個場景：名稱與「什麼時候問」（照 SPEC §4.3c 的觸發條件，給沒有紀錄時的說明用）。顯示時 `t.tr(name)`。 */
 export const JUDGE_SCENES: readonly { id: JudgeScene; name: string; when: string }[] = [
   {
     id: 'limit_hit',
-    name: '撞限第二意見',
-    when: 'codex／grok 撞到用量上限，畫面比對判定是新的撞限時，問一題：命中的那一行是介面畫的，還是 bot 印出來的內容。',
+    name: msg('撞限第二意見'),
+    when: msg('codex／grok 撞到用量上限，畫面比對判定是新的撞限時，問一題：命中的那一行是介面畫的，還是 bot 印出來的內容。'),
   },
   {
     id: 'stuck_queued',
-    name: '卡在不認識的畫面',
-    when: '有 prompt 排在 queued 超過 180 秒、bot 的 run 是 running／idle、輸入列空著時，問畫面底部是不是有等人選的框。',
+    name: msg('卡在不認識的畫面'),
+    when: msg('有 prompt 排在 queued 超過 180 秒、bot 的 run 是 running／idle、輸入列空著時，問畫面底部是不是有等人選的框。'),
   },
   {
     id: 'same_work',
-    name: '撞題提示',
-    when: '派工或開票時，同專案在跑的工作裡有沒有同一件事，問一次。只提示，不擋派工、不改認領。',
+    name: msg('撞題提示'),
+    when: msg('派工或開票時，同專案在跑的工作裡有沒有同一件事，問一次。只提示，不擋派工、不改認領。'),
   },
   {
     id: 'report_evidence',
-    name: '完成回報的證據',
-    when: '交辦從在途收成，且回報是 hook 的完成回覆（不含從終端機刮下來的）時，問回報有沒有宣稱已驗證，以及要不要收件者動手。',
+    name: msg('完成回報的證據'),
+    when: msg('交辦從在途收成，且回報是 hook 的完成回覆（不含從終端機刮下來的）時，問回報有沒有宣稱已驗證，以及要不要收件者動手。'),
   },
   {
     id: 'ask_option',
-    name: '選項建議',
-    when: 'claude 用 AskUserQuestion 問單選題時，問使用者最可能選哪一項；最高分 ≥0.7 且比第二名高 ≥0.15 才在選項旁標「Jev 建議」。只提示，不代答。',
+    name: msg('選項建議'),
+    when: msg('claude 用 AskUserQuestion 問單選題時，問使用者最可能選哪一項；最高分 ≥0.7 且比第二名高 ≥0.15 才在選項旁標「Jev 建議」。只提示，不代答。'),
   },
 ]
 
 export const JUDGE_WINDOWS = [
-  { id: 'day', label: '近 24 小時', ms: 24 * 3600_000 },
-  { id: 'week', label: '近 7 天', ms: 7 * 24 * 3600_000 },
-  { id: 'all', label: '全部', ms: Infinity },
+  { id: 'day', label: msg('近 24 小時'), ms: 24 * 3600_000 },
+  { id: 'week', label: msg('近 7 天'), ms: 7 * 24 * 3600_000 },
+  { id: 'all', label: msg('全部'), ms: Infinity },
 ] as const
 
 export type JudgeWindow = (typeof JUDGE_WINDOWS)[number]['id']
@@ -164,14 +165,14 @@ export function probabilityText(row: JudgeShadowRow): string {
     case 'same_work':
       return fmt(row.jev_same_work)
     case 'report_evidence':
-      return `驗 ${fmt(row.claims_verified)}／要 ${fmt(row.asks_parent_action)}`
+      return t('驗 {verified}／要 {ask}', { verified: fmt(row.claims_verified), ask: fmt(row.asks_parent_action) })
     case 'ask_option': {
       const qs = askOptionQuestions(row)
       if (!qs || qs.length === 0) return '—'
       const picked = qs.find((q) => q.suggested !== null)
-      if (picked) return `建議 ${fmt(picked.scores[picked.suggested as number] ?? null)}`
+      if (picked) return t('建議 {score}', { score: fmt(picked.scores[picked.suggested as number] ?? null) })
       const all = qs.flatMap((q) => q.scores)
-      return all.length ? `無建議（最高 ${fmt(Math.max(...all))}）` : '—'
+      return all.length ? t('無建議（最高 {score}）', { score: fmt(Math.max(...all)) }) : '—'
     }
     default:
       return '—'
@@ -183,6 +184,6 @@ export function botLabel(id: string | null, bots: readonly { id: string; name: s
   if (id === null) return '—'
   // 開票那條的候選沒有 bot，bot_id 是 issue:<號碼>（release_triage 開票後的撞題檢查）；取前 6 碼會只剩 issue:。
   const issue = /^issue:(\d+)$/.exec(id)
-  if (issue) return `#${issue[1]}（開票）`
+  if (issue) return t('#{n}（開票）', { n: issue[1] })
   return bots.find((b) => b.id === id)?.name ?? id.slice(0, 6)
 }

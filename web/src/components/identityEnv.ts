@@ -1,3 +1,5 @@
+import { t } from '../lib/i18n'
+
 /** `KEY=VALUE` 每行 → map；忽略空行與 `#` 註解。 */
 export function parseEnvText(text: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -41,26 +43,26 @@ export function checkEnvText(text: string): { env: Record<string, string>; error
     const n = idx + 1
     const i = line.indexOf('=')
     if (i < 0) {
-      errors.push(`第 ${n} 行「${line}」沒有 =（要寫成 KEY=VALUE）`)
+      errors.push(t('第 {n} 行「{line}」沒有 =（要寫成 KEY=VALUE）', { n, line }))
       return
     }
     const key = rustTrim(line.slice(0, i))
     if (!key) {
-      errors.push(`第 ${n} 行的 key 是空的（要寫成 KEY=VALUE）`)
+      errors.push(t('第 {n} 行的 key 是空的（要寫成 KEY=VALUE）', { n }))
       return
     }
     if (!ENV_NAME.test(key)) {
-      errors.push(`第 ${n} 行 key「${key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）`)
+      errors.push(t('第 {n} 行 key「{key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）', { n, key }))
       return
     }
     const value = rustTrim(line.slice(i + 1))
     // 值留空（`CLAUDE_CONFIG_DIR=`，多半是把 `$HOME/.claude-` 的尾巴刪光）：daemon 照存，身份就悄悄用了預設帳號。
     if (!value) {
-      errors.push(`第 ${n} 行 ${key} 的值是空的（空值等於沒設，身份會悄悄用預設帳號；要就寫上值，不要就刪掉這一行）`)
+      errors.push(t('第 {n} 行 {key} 的值是空的（空值等於沒設，身份會悄悄用預設帳號；要就寫上值，不要就刪掉這一行）', { n, key }))
       return
     }
     // `in` 會看到 Object.prototype（constructor、toString…），要用自己的屬性判斷；`__proto__` 要用 defineProperty 才會成為一般的 key。
-    if (Object.hasOwn(env, key)) errors.push(`第 ${n} 行 key「${key}」重複了（前面已經有一行）`)
+    if (Object.hasOwn(env, key)) errors.push(t('第 {n} 行 key「{key}」重複了（前面已經有一行）', { n, key }))
     Object.defineProperty(env, key, { value, enumerable: true, writable: true, configurable: true })
   })
   return { env, errors }

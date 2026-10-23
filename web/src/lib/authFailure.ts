@@ -1,7 +1,7 @@
 import type { Message } from '../api/types'
 
 /** daemon 把 `StopFailure` 分類成 `FailureReason::Auth` 時寫的系統訊息標籤（`hookrecv.rs` 的 `label()`）。 */
-const HOOK_AUTH_LABEL = '（帳號或授權）'
+const HOOK_AUTH_LABEL = '（帳號或授權）' // i18n-ignore：對到 daemon 寫的系統訊息標籤，不翻
 /** claude 沒登入時回合只回這一行；2.1.28x 有 `Please run /login` 與 `Run /login` 兩種寫法。 */
 const NOT_LOGGED_IN = /not logged in\s*·\s*(?:please\s+)?run \/login/i
 const ONLY_NOT_LOGGED_IN = /^[⎿\s]*not logged in\s*·\s*(?:please\s+)?run \/login[.。]?\s*$/i

@@ -3,6 +3,7 @@
  * daemon 從 `claude auth login` 的畫面取網址、確認還在等 code 才把字打進去；這裡只決定畫面上顯示什麼。
  */
 import type { LoginStatus } from '../api'
+import { t } from './i18n'
 
 /** 跟 daemon（`login_assist::valid_code`）同一套：OAuth code 會有的字元，最長 1024。前端先擋，daemon 仍會再驗。 */
 export function validLoginCode(code: string): boolean {
@@ -41,16 +42,18 @@ export function canSubmitCode(phase: LoginPhase, code: string, sending: boolean)
 export function loginHint(phase: LoginPhase, code: string): string {
   switch (phase) {
     case 'starting':
-      return '等 CLI 印出登入網址…'
+      return t('等 CLI 印出登入網址…')
     case 'url':
-      return '去登入網站完成授權，網站會給你一串 code；CLI 準備好收 code 後這裡就能貼。'
+      return t('去登入網站完成授權，網站會給你一串 code；CLI 準備好收 code 後這裡就能貼。')
     case 'waiting_code':
-      return code.trim() && !validLoginCode(code) ? 'code 只會有英數字與 _ . ~ # : / + = % -，看一下有沒有多貼到別的字' : '把網站給的 code 貼在這裡，按送出。'
+      return code.trim() && !validLoginCode(code)
+        ? t('code 只會有英數字與 _ . ~ # : / + = % -，看一下有沒有多貼到別的字')
+        : t('把網站給的 code 貼在這裡，按送出。')
     case 'submitted':
-      return '已送出，等 CLI 回應…'
+      return t('已送出，等 CLI 回應…')
     case 'failed':
-      return '登入失敗：重新按「登入」再來一次。'
+      return t('登入失敗：重新按「登入」再來一次。')
     case 'ended':
-      return '登入程序已結束。'
+      return t('登入程序已結束。')
   }
 }

@@ -4,6 +4,7 @@ import type { Message } from '../api/types'
 import { identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { authActionTargetId } from '../lib/authFailure'
 import { startCliLogin } from '../lib/cliLogin'
+import { useT } from '../lib/i18n'
 import { resendTarget } from '../lib/resendTarget'
 import { hostLabel } from '../store/identityRows'
 import './authLoginAction.css'
@@ -14,6 +15,7 @@ import './authLoginAction.css'
  * 重試＝重新偵測身份，確定不是「沒登入」才重送上一則。只掛在最後一則 auth 失敗上（`authActionTargetId`）。
  */
 export function AuthLoginAction({ msg }: { msg: Message }) {
+  const t = useT()
   const botId = msg.bot_id ?? null
   const isTarget = useStore((s) => (botId ? authActionTargetId(s.messages[botId] ?? []) === msg.id : false))
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? null)
@@ -40,7 +42,7 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
   const [retrying, setRetrying] = useState(false)
 
   if (!botId || !isTarget || !kind) return null
-  const who = identity ?? '預設帳號'
+  const who = identity ?? t('預設帳號')
   const where = hostLabel(host)
 
   async function login() {
@@ -50,7 +52,7 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
     setOpening(false)
     if (!ok) return
     setOpened(true)
-    notify('info', `已在${where}開終端替 ${who} 跑 ${kind} 登入，完成瀏覽器授權後回來按「登入好了，重試」`)
+    notify('info', t('已在{where}開終端替 {who} 跑 {kind} 登入，完成瀏覽器授權後回來按「登入好了，重試」', { where, who, kind: kind ?? '' }))
   }
 
   async function retry() {
@@ -61,15 +63,15 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
       // 只有確定「沒登入」才擋；遠端 claude 問不出來（null）照樣放行，重送失敗會再長出一則。
       const loggedIn = identity ? identityStatusOfHost(useStore.getState(), host)[identity]?.logged_in : undefined
       if (loggedIn === false) {
-        notify('error', `${who} 在${where}還是沒登入：先在登入終端完成授權`)
+        notify('error', t('{who} 在{where}還是沒登入：先在登入終端完成授權', { who, where }))
         return
       }
       if (!target) {
-        notify('info', '已重新偵測；這個對話沒有可以重送的訊息')
+        notify('info', t('已重新偵測；這個對話沒有可以重送的訊息'))
         return
       }
       if (await sendPrompt(botId, target.text, target.attachments)) {
-        notify('info', '已重送上一則；若還是 Not logged in，重啟這個 Bot 讓它重讀憑證')
+        notify('info', t('已重送上一則；若還是 Not logged in，重啟這個 Bot 讓它重讀憑證'))
       }
     } finally {
       setRetrying(false)
@@ -77,16 +79,20 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
   }
 
   return (
-    <div className="auth-login-action" role="group" aria-label="登入後重試">
+    <div className="auth-login-action" role="group" aria-label={t('登入後重試')}>
       <div className="auth-login-row">
         <button
           type="button"
           className="btn primary"
           disabled={opening}
-          title={`在${where}開一個獨立終端，帶 ${who} 的設定跑 ${kind === 'claude' ? 'claude auth login' : `${kind} login`}`}
+          title={t('在{where}開一個獨立終端，帶 {who} 的設定跑 {cmd}', {
+            where,
+            who,
+            cmd: kind === 'claude' ? 'claude auth login' : `${kind} login`,
+          })}
           onClick={() => void login()}
         >
-          {opening ? '開終端中…' : '立即登入'}
+          {opening ? t('開終端中…') : t('立即登入')}
         </button>
         <button
           type="button"
@@ -94,20 +100,23 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
           disabled={retrying || toolsBusy || agentBusy}
           title={
             agentBusy
-              ? '它正在忙，等這一輪停下來再重試'
+              ? t('它正在忙，等這一輪停下來再重試')
               : target
-                ? `重新偵測 ${who}，登入了就重送：${Array.from(target.text).slice(0, 60).join('') || `（${target.attachments.length} 個附件）`}`
-                : `重新偵測 ${who} 的登入狀態`
+                ? t('重新偵測 {who}，登入了就重送：{text}', {
+                    who,
+                    text: Array.from(target.text).slice(0, 60).join('') || t('（{n} 個附件）', { n: target.attachments.length }),
+                  })
+                : t('重新偵測 {who} 的登入狀態', { who })
           }
           onClick={() => void retry()}
         >
-          {retrying || toolsBusy ? '偵測中…' : '登入好了，重試'}
+          {retrying || toolsBusy ? t('偵測中…') : t('登入好了，重試')}
         </button>
       </div>
       <span className="auth-login-hint">
         {opened
-          ? '在新開的終端完成瀏覽器授權（或把 code 貼回去），CLI 結束後終端會自己收掉。'
-          : `用 CLI 在獨立終端登入 ${who}，不佔用這個 Bot 的畫面。`}
+          ? t('在新開的終端完成瀏覽器授權（或把 code 貼回去），CLI 結束後終端會自己收掉。')
+          : t('用 CLI 在獨立終端登入 {who}，不佔用這個 Bot 的畫面。', { who })}
       </span>
     </div>
   )

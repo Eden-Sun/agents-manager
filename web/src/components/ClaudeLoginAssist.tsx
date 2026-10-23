@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { ApiError } from '../api/types'
 import { identityStatusOfHost, useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 import { canSubmitCode, loginHint, loginPhase } from '../lib/loginAssist'
 import './claudeLoginAssist.css'
 
@@ -14,6 +15,7 @@ const POLL_MS = 2000
  * 之後顯示重新偵測後的登入狀態。網址與 code 不存任何地方（不進 store、不進 localStorage）。
  */
 export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: string }) {
+  const t = useT()
   const [status, setStatus] = useState<api.LoginStatus | null>(null)
   /** 這顆 pane 是不是登入 pane（第一次問到才知道；404＝不是）。 */
   const [isLogin, setIsLogin] = useState(false)
@@ -62,7 +64,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
 
   if (!isLogin) return null
   const phase = loginPhase(status, ended)
-  const where = host === 'local' ? '本機' : host
+  const where = host === 'local' ? t('本機') : host
 
   async function submit() {
     if (!canSubmitCode(phase, code, sending)) return
@@ -71,11 +73,11 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
     try {
       const out = await api.submitLoginCode(host, paneId, code.trim())
       setCode('')
-      if (out.outcome === 'failed') setFailure(out.message ?? 'CLI 回報登入失敗')
+      if (out.outcome === 'failed') setFailure(out.message ?? t('CLI 回報登入失敗'))
       else if (out.outcome === 'finished') setEnded(true)
     } catch (e) {
       // 409 not_awaiting_code：daemon 說了人話（畫面不在等 code，一個字都沒送）。
-      const msg = e instanceof ApiError && typeof e.body.message === 'string' ? e.body.message : e instanceof Error ? e.message : '送不出去'
+      const msg = e instanceof ApiError && typeof e.body.message === 'string' ? e.body.message : e instanceof Error ? e.message : t('送不出去')
       setFailure(msg)
       notify('error', msg)
     } finally {
@@ -84,30 +86,32 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
   }
 
   return (
-    <div className="login-assist" role="group" aria-label={`登入 ${identity || 'claude'}`}>
+    <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || 'claude' })}>
       <div className="login-assist-title">
-        登入 claude 身分 <strong>{identity || '…'}</strong>（{where}）
+        {t.x('登入 claude 身分 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
       </div>
       {phase === 'ended' ? (
         <div className="login-assist-done" role="status">
           {identityStatus?.logged_in === true
-            ? `已登入${identityStatus.account ? `（${identityStatus.account}）` : ''}`
+            ? identityStatus.account
+              ? t('已登入（{account}）', { account: identityStatus.account })
+              : t('已登入')
             : identityStatus?.logged_in === false
-              ? '登入程序已結束，但這個身分還是未登入——重新按「登入」再試一次。'
-              : '登入程序已結束；這台主機問不出登入狀態，請以實際使用為準。'}
+              ? t('登入程序已結束，但這個身分還是未登入——重新按「登入」再試一次。')
+              : t('登入程序已結束；這台主機問不出登入狀態，請以實際使用為準。')}
           <button type="button" className="mini-btn" disabled={toolsBusy} onClick={() => void refreshTools(host)}>
-            {toolsBusy ? '偵測中…' : '重新偵測'}
+            {toolsBusy ? t('偵測中…') : t('重新偵測')}
           </button>
         </div>
       ) : (
         <>
           {status?.url ? (
             <a className="btn primary login-assist-open" href={status.url} target="_blank" rel="noopener noreferrer">
-              打開登入網站
+              {t('打開登入網站')}
             </a>
           ) : (
             <button type="button" className="btn primary login-assist-open" disabled>
-              打開登入網站
+              {t('打開登入網站')}
             </button>
           )}
           <form
@@ -125,14 +129,14 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="貼上網站給的 code"
-              aria-label="登入 code"
+              placeholder={t('貼上網站給的 code')}
+              aria-label={t('登入 code')}
               value={code}
               disabled={sending || phase === 'submitted'}
               onChange={(e) => setCode(e.target.value)}
             />
             <button type="submit" className="btn" disabled={!canSubmitCode(phase, code, sending)}>
-              {sending ? '送出中…' : '送出 code'}
+              {sending ? t('送出中…') : t('送出 code')}
             </button>
           </form>
           <div className={`login-assist-hint${failure || phase === 'failed' ? ' is-error' : ''}`} role="status">

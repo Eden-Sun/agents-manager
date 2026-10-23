@@ -8,6 +8,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { isImeEnter } from '../lib/ime'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
+import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { shellDraftKey } from '../store/shellDraft'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -123,6 +124,7 @@ export function HostShellPanel({
   /** 掛在 ChatPanel 標題列底下當分頁：不畫自己的 `main-head`，主機與關閉鍵改放抓法列。 */
   embedded?: boolean
 }) {
+  const t = useT()
   const endHostShell = useStore((s) => s.endHostShell)
   // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；關閉鍵照樣給（叫「關閉 pane」），服務 pane 由 daemon 先 409 再問一次。
   const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
@@ -367,10 +369,10 @@ export function HostShellPanel({
   }
 
   const body = useMemo(() => {
-    if (!snap) return err ? `讀取終端失敗：${err}` : '讀取中…'
+    if (!snap) return err ? t('讀取終端失敗：{error}', { error: err }) : t('讀取中…')
     // herdr 的 `recent_unwrapped` 只給已捲出畫面的部分，剛開的 shell 回空字串（實測 2026-09-07）；明講以免看起來像壞掉。
     if (!snap.text.trim() && source === 'recent_unwrapped') {
-      return '（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）'
+      return t('（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）')
     }
     // 鍵盤直通時在 shell 等輸入的地方畫一個閃爍游標（位置是從畫面推的，見 `splitAtCursor`）。
     if (syncOn && !readOnly && source === 'visible') {
@@ -385,7 +387,7 @@ export function HostShellPanel({
       )
     }
     return linkifyTerm(snap.text, snap.columns)
-  }, [err, snap, source, syncOn, readOnly, typing])
+  }, [err, snap, source, syncOn, readOnly, typing, t])
 
   const headActions = (
     <div className="head-actions">
@@ -396,9 +398,9 @@ export function HostShellPanel({
         className="mini-btn danger"
         disabled={ending}
         onClick={() => setConfirmEnd(true)}
-        title={traced ? '關掉這顆 pane（裡面跑的東西會一起結束）' : '關掉這個 shell 的 pane'}
+        title={traced ? t('關掉這顆 pane（裡面跑的東西會一起結束）') : t('關掉這個 shell 的 pane')}
       >
-        {ending ? '關閉中…' : traced ? '關閉 pane' : '結束 shell'}
+        {ending ? t('關閉中…') : traced ? t('關閉 pane') : t('結束 shell')}
       </button>
     </div>
   )
@@ -411,8 +413,8 @@ export function HostShellPanel({
           type="button"
           className="btn menu-btn icon-tip"
           onClick={onOpenSidebar}
-          aria-label="開啟側邊欄"
-          data-tip="開啟側邊欄"
+          aria-label={t('開啟側邊欄')}
+          data-tip={t('開啟側邊欄')}
         >
           ☰
         </button>
@@ -420,7 +422,7 @@ export function HostShellPanel({
           <span className="shell-icon" aria-hidden="true">
             ❯
           </span>
-          <strong>{host === 'local' ? '本機 shell' : `${host} shell`}</strong>
+          <strong>{host === 'local' ? t('本機 shell') : t('{host} shell', { host })}</strong>
           <HostBadge host={host} connected={hostUp} />
           <span className="shell-cwd mono" title={cwd}>
             {cwdTail(cwd).parent ? <span className="shell-cwd-parent">{cwdTail(cwd).parent}/</span> : null}
@@ -437,21 +439,21 @@ export function HostShellPanel({
         <div className="term-bar shell-bar">
           {embedded ? (
             <span className="hint" title={cwd}>
-              <strong>{host === 'local' ? '本機 shell' : `${host} shell`}</strong>
+              <strong>{host === 'local' ? t('本機 shell') : t('{host} shell', { host })}</strong>
               <HostBadge host={host} connected={hostUp} />
               <span className="shell-cwd mono">{cwdTail(cwd).leaf}</span>
             </span>
           ) : null}
           <label className="conn">
-            檢視
+            {t('檢視')}
             <select value={source} onChange={(e) => setSource(e.target.value as TerminalSource)}>
-              <option value="visible">畫面</option>
-              <option value="recent_unwrapped">含捲動歷史</option>
+              <option value="visible">{t('畫面')}</option>
+              <option value="recent_unwrapped">{t('含捲動歷史')}</option>
             </select>
           </label>
           {source === 'recent_unwrapped' ? (
             <label className="conn">
-              行數
+              {t('行數')}
               <select value={lines} onChange={(e) => setLines(Number(e.target.value))}>
                 {[100, 200, 500, 1000].map((n) => (
                   <option key={n} value={n}>
@@ -461,8 +463,8 @@ export function HostShellPanel({
               </select>
             </label>
           ) : null}
-          <button type="button" className="mini-btn" onClick={refresh} title="立刻重讀一次（平常每秒自己更新）">
-            刷新
+          <button type="button" className="mini-btn" onClick={refresh} title={t('立刻重讀一次（平常每秒自己更新）')}>
+            {t('刷新')}
           </button>
           <button
             type="button"
@@ -472,24 +474,24 @@ export function HostShellPanel({
             onClick={() => setSync(!syncOn)}
             title={
               syncOn
-                ? '關掉鍵盤直通，改用下方輸入框「打一行、Enter 送出」'
-                : '打開鍵盤直通：每一下按鍵直接送進這個 pane（⌘ 系列留給瀏覽器）'
+                ? t('關掉鍵盤直通，改用下方輸入框「打一行、Enter 送出」')
+                : t('打開鍵盤直通：每一下按鍵直接送進這個 pane（⌘ 系列留給瀏覽器）')
             }
           >
-            {syncOn ? '鍵盤直通' : '鍵盤直通（關）'}
+            {syncOn ? t('鍵盤直通') : t('鍵盤直通（關）')}
           </button>
-          <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
+          <label className="conn" title={t('折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。')}>
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
-            換行
+            {t('換行')}
           </label>
           <span className="hint term-pane-chip" title={`herdr pane ${paneId}`}>
             pane <code>{paneId}</code>
-            {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
+            {snap?.columns ? t('・{cols}×{rows}', { cols: snap.columns, rows: snap.rows ?? '?' }) : ''}
           </span>
-          {snap?.truncated ? <span className="hint">已截斷</span> : null}
+          {snap?.truncated ? <span className="hint">{t('已截斷')}</span> : null}
           <span className="spacer" />
           <span className="hint term-bar-note">
-            {syncOn ? '鍵盤直通中，每 0.25 秒更新' : '每秒更新，指令送出後立刻重讀'}
+            {syncOn ? t('鍵盤直通中，每 0.25 秒更新') : t('每秒更新，指令送出後立刻重讀')}
           </span>
           {embedded ? headActions : null}
         </div>
@@ -497,12 +499,12 @@ export function HostShellPanel({
         {err && snap ? (
           <div className="shell-err" role="status">
             {/* 有快照卻讀失敗：畫面是舊的。 */}
-            最後一次讀取失敗（{err}）——上面顯示的是先前的畫面。
+            {t('最後一次讀取失敗（{error}）——上面顯示的是先前的畫面。', { error: err })}
           </div>
         ) : null}
         {sendErr ? (
           <div className="shell-err" role="alert">
-            送出失敗（{sendErr}）——這次的輸入沒有送進 pane。
+            {t('送出失敗（{error}）——這次的輸入沒有送進 pane。', { error: sendErr })}
           </div>
         ) : null}
 
@@ -511,7 +513,7 @@ export function HostShellPanel({
           className={`term shell-term${wrap ? ' term-wrap' : ''}${syncOn ? ' term-sync' : ''}${syncOn && typing ? ' term-sync-live' : ''}`}
           tabIndex={syncOn ? 0 : -1}
           role={syncOn ? 'textbox' : undefined}
-          aria-label={syncOn ? `${host === 'local' ? '本機' : host} shell 的終端，鍵盤直通中` : undefined}
+          aria-label={syncOn ? t('{host} shell 的終端，鍵盤直通中', { host: host === 'local' ? t('本機') : host }) : undefined}
           onKeyDown={onTermKeyDown}
           onPaste={onTermPaste}
           onFocus={() => setTyping(true)}
@@ -522,16 +524,16 @@ export function HostShellPanel({
         {syncOn ? (
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
-              ? '鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。'
+              ? t('鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。')
               : phone
-                ? '手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框。'
-                : '鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。'}
+                ? t('手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框。')
+                : t('鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。')}
           </div>
         ) : null}
 
         {readOnly ? (
           <div className="shell-sync-note" role="status">
-            {readOnlyReason ?? '這顆 pane 開著 port（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。'}
+            {readOnlyReason ?? t('這顆 pane 開著 port（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。')}
           </div>
         ) : null}
 
@@ -555,10 +557,8 @@ export function HostShellPanel({
             spellCheck={false}
             autoComplete="off"
             disabled={syncOn || readOnly}
-            placeholder={
-              readOnly ? '這顆 pane 只能看' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
-            }
-            aria-label={`對 ${host} 的 shell 輸入指令`}
+            placeholder={readOnly ? t('這顆 pane 只能看') : t('輸入指令，Enter 送出（↑↓ 翻歷史）')}
+            aria-label={t('對 {host} 的 shell 輸入指令', { host })}
             onChange={(e) => {
               setText(e.target.value)
               setHistAt(-1)
@@ -566,7 +566,7 @@ export function HostShellPanel({
             onKeyDown={onKeyDown}
           />
           <button type="submit" className="btn primary" disabled={sending || syncOn || readOnly}>
-            {sending ? '送出中…' : '送出'}
+            {sending ? t('送出中…') : t('送出')}
           </button>
         </form>
         )}
@@ -574,14 +574,16 @@ export function HostShellPanel({
 
       <ConfirmDialog
         open={confirmEnd}
-        title={traced ? '關閉 pane' : '結束 shell'}
+        title={traced ? t('關閉 pane') : t('結束 shell')}
         body={
           <>
-            要關掉 <strong>{host === 'local' ? '本機' : host}</strong> 上的 {traced ? <>pane <code>{paneId}</code></> : '這個 shell'} 嗎？
-            它的 pane 會被關掉，裡面正在跑的指令也會跟著結束；畫面上的輸出不會留下來。
+            {t.x('要關掉 {host} 上的 {target} 嗎？它的 pane 會被關掉，裡面正在跑的指令也會跟著結束；畫面上的輸出不會留下來。', {
+              host: <strong>{host === 'local' ? t('本機') : host}</strong>,
+              target: traced ? t.x('pane {id}', { id: <code>{paneId}</code> }) : t('這個 shell'),
+            })}
           </>
         }
-        confirmLabel={traced ? '關閉 pane' : '結束 shell'}
+        confirmLabel={traced ? t('關閉 pane') : t('結束 shell')}
         danger
         onCancel={() => setConfirmEnd(false)}
         onConfirm={() => {
@@ -595,9 +597,9 @@ export function HostShellPanel({
       {/* 第二道：daemon 擋下來了。講清楚是哪一種，看過 port 才能確認（AGM 驗收 9f05b03）。 */}
       <ConfirmDialog
         open={endNeedsConfirm !== null}
-        title="這顆 pane 還在做事"
+        title={t('這顆 pane 還在做事')}
         body={<ServicePaneNote needs={endNeedsConfirm} />}
-        confirmLabel="仍要關掉"
+        confirmLabel={t('仍要關掉')}
         danger
         onCancel={() => setEndNeedsConfirm(null)}
         onConfirm={() => {

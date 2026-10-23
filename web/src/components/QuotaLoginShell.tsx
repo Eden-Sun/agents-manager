@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
 import { openFreshShellAndType } from '../lib/cliLogin'
+import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AgyInstallDialog } from './AgyInstall'
 import { useAgyMissing } from './agyInstallState'
@@ -25,6 +26,7 @@ export function QuotaLoginShell({
   /** 這個 CLI 的登入過程跟「跳出瀏覽器」不一樣時，換掉確認框裡那段說明（agy：TUI 自己引導）。 */
   guide?: ReactNode
 }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [sent, setSent] = useState(false)
   const refreshTools = useStore((s) => s.refreshTools)
@@ -41,7 +43,7 @@ export function QuotaLoginShell({
     const { opened, typed } = await openFreshShellAndType(host, command)
     if (!opened) return
     setSent(true)
-    if (typed) notify('info', `已在 ${hostLabel} 的 shell 送出 ${command}，請在那個終端完成登入`)
+    if (typed) notify('info', t('已在 {host} 的 shell 送出 {command}，請在那個終端完成登入', { host: hostLabel, command }))
   }
 
   return (
@@ -50,28 +52,32 @@ export function QuotaLoginShell({
         type="button"
         className="btn"
         disabled={shellBusy || installBusy}
-        title={agyMissing ? `${hostLabel} 尚未安裝 agy：先自動安裝，再開 shell 登入` : `在 ${hostLabel} 開一個 shell 並輸入 ${command}`}
+        title={
+          agyMissing
+            ? t('{host} 尚未安裝 agy：先自動安裝，再開 shell 登入', { host: hostLabel })
+            : t('在 {host} 開一個 shell 並輸入 {command}', { host: hostLabel, command })
+        }
         onClick={() => setOpen(true)}
       >
-        {installBusy ? '安裝中…' : shellBusy ? '開 shell 中…' : agyMissing ? '安裝 agy 並登入' : '開 shell 登入'}
+        {installBusy ? t('安裝中…') : shellBusy ? t('開 shell 中…') : agyMissing ? t('安裝 agy 並登入') : t('開 shell 登入')}
       </button>
       {sent ? (
         <button
           type="button"
           className="identity-recheck"
           disabled={toolsBusy}
-          title={`重新問 ${hostLabel} 上的 CLI 現在登入了誰`}
+          title={t('重新問 {host} 上的 CLI 現在登入了誰', { host: hostLabel })}
           onClick={() => void refreshTools(host)}
         >
-          {toolsBusy ? '偵測中…' : '登入好了，重新偵測'}
+          {toolsBusy ? t('偵測中…') : t('登入好了，重新偵測')}
         </button>
       ) : null}
 
       <AgyInstallDialog
         host={host}
         open={open && agyMissing}
-        confirmLabel="安裝並登入"
-        extra={<>裝好後會接著在 {hostLabel} 開 shell 並送出 <code>{command}</code> 讓你登入。</>}
+        confirmLabel={t('安裝並登入')}
+        extra={t.x('裝好後會接著在 {host} 開 shell 並送出 {cmd} 讓你登入。', { host: hostLabel, cmd: <code>{command}</code> })}
         onCancel={() => setOpen(false)}
         onConfirm={() => {
           setOpen(false)
@@ -82,18 +88,21 @@ export function QuotaLoginShell({
       />
       <ConfirmDialog
         open={open && !agyMissing}
-        title={`開 shell 登入 ${kind}？`}
+        title={t('開 shell 登入 {kind}？', { kind })}
         body={
           <>
-            會在 <strong>{hostLabel}</strong> 開一個 shell，畫面切過去，並送出 <code>{command}</code>，
-            {guide ?? '通常會跳出瀏覽器要你在那邊完成登入。'}
+            {t.x('會在 {host} 開一個 shell，畫面切過去，並送出 {cmd}，', {
+              host: <strong>{hostLabel}</strong>,
+              cmd: <code>{command}</code>,
+            })}
+            {guide ?? t('通常會跳出瀏覽器要你在那邊完成登入。')}
             <br />
-            <strong>在你完成登入之前，這個身份的 {kind} 還是不能工作。</strong>
+            <strong>{t('在你完成登入之前，這個身份的 {kind} 還是不能工作。', { kind })}</strong>
             <br />
-            登入完成後回到這裡按「登入好了，重新偵測」，身份狀態才會更新。
+            {t('登入完成後回到這裡按「登入好了，重新偵測」，身份狀態才會更新。')}
           </>
         }
-        confirmLabel="開 shell 並送出"
+        confirmLabel={t('開 shell 並送出')}
         width={400}
         onCancel={() => setOpen(false)}
         onConfirm={() => {
