@@ -2,6 +2,7 @@ import { useState } from 'react'
 import * as api from '../api'
 import { reviewErrText } from '../lib/claudeReviewErr'
 import { useStore } from '../store/store'
+import { t } from '../lib/i18n'
 
 /**
  * 更新確認框的「請 AGM 解析」（同 `ClaudeInstallChip`／`HerdrUpdateChip` 的寫法，agy／grok 共用，#1928）。
@@ -23,16 +24,24 @@ export function useReviewAsk(kind: string, host: string, from: string | null, to
         notify(
           'info',
           r.duplicate
-            ? `${kind} ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
-            : `已請 ${r.target_bot_name} 解析 ${kind} ${r.version} 的 changelog，結論會回到這裡`,
+            ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', {
+                kind,
+                version: r.version,
+                bot: r.target_bot_name || 'AGM',
+              })
+            : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', {
+                bot: r.target_bot_name,
+                kind,
+                version: r.version,
+              }),
         )
       })
-      .catch((e: unknown) => notify('error', `派不出去：${reviewErrText(e)}`))
+      .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
       .finally(() => setAsking(false))
   }
   return {
     reviewKey,
     /** 直接展開給 `ConfirmDialog`。 */
-    dialog: { secondaryLabel: asking ? '派工中…' : '請 AGM 解析', secondaryDisabled: asking || !to, onSecondary: ask },
+    dialog: { secondaryLabel: asking ? t('派工中…') : t('請 AGM 解析'), secondaryDisabled: asking || !to, onSecondary: ask },
   }
 }

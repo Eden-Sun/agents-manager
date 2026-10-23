@@ -3,19 +3,20 @@ import * as api from '../api'
 import { KeyQueue } from '../lib/keyQueue'
 import { isImeEnter } from '../lib/ime'
 import { useStore } from '../store/store'
+import { msg } from '../lib/i18n'
 
 /** blocked 小面板與全畫面視窗共用，兩邊答案才一致。鍵名原樣送 herdr，daemon 不翻譯。 */
 export const KEYPAD: { label: string; keys: string[]; title: string }[] = [
-  { label: 'Enter', keys: ['enter'], title: '送出 Enter' },
-  { label: 'Esc', keys: ['esc'], title: '送出 Esc' },
-  { label: 'y', keys: ['y'], title: '回答 y' },
-  { label: 'n', keys: ['n'], title: '回答 n' },
-  { label: '↑', keys: ['up'], title: '游標上移' },
-  { label: '↓', keys: ['down'], title: '游標下移' },
-  { label: 'ctrl+c', keys: ['ctrl+c'], title: '送出 ctrl+c' },
+  { label: 'Enter', keys: ['enter'], title: msg('送出 Enter') },
+  { label: 'Esc', keys: ['esc'], title: msg('送出 Esc') },
+  { label: 'y', keys: ['y'], title: msg('回答 y') },
+  { label: 'n', keys: ['n'], title: msg('回答 n') },
+  { label: '↑', keys: ['up'], title: msg('游標上移') },
+  { label: '↓', keys: ['down'], title: msg('游標下移') },
+  { label: 'ctrl+c', keys: ['ctrl+c'], title: msg('送出 ctrl+c') },
   // codex 非同步提問（issue #1879）：收合的提問要 shift+← 展開才能作答；shift+→ 回到主輸入框。
-  { label: '⇧←', keys: ['shift+left'], title: '送出 shift+←（codex：展開非同步提問）' },
-  { label: '⇧→', keys: ['shift+right'], title: '送出 shift+→（codex：回到主輸入框）' },
+  { label: '⇧←', keys: ['shift+left'], title: msg('送出 shift+←（codex：展開非同步提問）') },
+  { label: '⇧→', keys: ['shift+right'], title: msg('送出 shift+→（codex：回到主輸入框）') },
 ]
 
 /**

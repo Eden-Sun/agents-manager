@@ -1,4 +1,5 @@
 import { Component, Fragment, lazy, Suspense, useState, type ReactNode } from 'react'
+import { useT } from '../lib/i18n'
 import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 
 const CachedMarkdown = lazy(() => import('./SafeMarkdownContent'))
@@ -35,6 +36,7 @@ export function MarkdownSuspense({ text, children }: { text: string; children: R
 /** bot 輸出的 Markdown（不可信）：不跑原始 HTML、危險協定被清掉、連結新分頁、太長或太深都有退路。 */
 /** `cache=false`：串流中的草稿每幀都是新字串，放進快取只會擠掉真正的訊息。手動展開的超長／太深內容也不快取。 */
 export function SafeMarkdown({ text, botId, cache = true }: { text: string; botId?: string | null; cache?: boolean }) {
+  const t = useT()
   const [forced, setForced] = useState(false)
   const plain = (note: ReactNode) => (
     <>
@@ -48,9 +50,10 @@ export function SafeMarkdown({ text, botId, cache = true }: { text: string; botI
   if ((long || deep) && !forced) {
     return plain(
       <p className="md-plain-note">
-        {long ? `這則訊息很長（${text.length.toLocaleString()} 字）` : '這則訊息的巢狀層數很深'}，為了不讓畫面卡住先用純文字顯示。{' '}
+        {long ? t('這則訊息很長（{count} 字）', { count: text.length.toLocaleString() }) : t('這則訊息的巢狀層數很深')}
+        {t('，為了不讓畫面卡住先用純文字顯示。')}{' '}
         <button type="button" className="btn" onClick={() => setForced(true)}>
-          以 Markdown 顯示
+          {t('以 Markdown 顯示')}
         </button>
       </p>,
     )
@@ -59,7 +62,7 @@ export function SafeMarkdown({ text, botId, cache = true }: { text: string; botI
     <Fragment key={botId ?? ''}>
       <MarkdownBoundary
         resetKey={text}
-        plain={plain(<p className="md-plain-note">這則訊息的格式太複雜，無法轉成 Markdown，以純文字顯示。</p>)}
+        plain={plain(<p className="md-plain-note">{t('這則訊息的格式太複雜，無法轉成 Markdown，以純文字顯示。')}</p>)}
         onError={shouldCache ? () => {
           // Keep the fallback shell free of react-markdown. In the render-error case this module
           // is already loaded; the microtask removes the failed tree before the next user event.

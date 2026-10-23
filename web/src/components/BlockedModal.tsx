@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
@@ -34,7 +35,9 @@ const WIDE_COLUMNS = 140
  * 打開之後 Esc 也會送給 agent，所以那時關閉只走 ✕／點視窗外（開關旁邊有寫）。
  * #423 的防誤刪框一律鎖死直通：那一下只有使用者本人能按，而且要按在按鈕上。
  */
-export function BlockedModal({ botId, onClose }: { botId: string; onClose: () => void }) {
+export function BlockedModal({
+ botId, onClose }: { botId: string; onClose: () => void }) {
+  const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const [passthrough, setPassthrough] = useState(false)
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
@@ -118,22 +121,23 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         className={`modal blocked-modal${fit && showRaw && (snap?.columns ?? 0) > WIDE_COLUMNS ? ' is-wide' : ''}${showRaw ? '' : ' is-menu'}`}
         role="dialog"
         aria-modal="true"
-        aria-label={`${bot?.name ?? 'agent'} 需要回應`}
+        aria-label={t('{name} 需要回應', { name: bot?.name ?? 'agent' })}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal-head">
           <strong
             className="blocked-title"
-            title={`終端 visible 全畫面${snap?.pane_id ? `・pane ${snap.pane_id}` : ''}${
+            title={t('終端 visible 全畫面') + `${snap?.pane_id ? `・pane ${snap.pane_id}` : ''}${ // i18n-ignore
+
               snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''
             }${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
           >
-            ● {bot?.name ?? 'agent'} 需要回應
+            ● {t('{name} 需要回應', { name: bot?.name ?? 'agent' })}
           </strong>
           {/* 除錯資訊選單模式下收進標題 tooltip（2026-09-12 第二輪回饋第 3 點）。 */}
           {menu ? null : (
             <span className="modal-sub">
-              終端畫面，每秒更新
+              {t('終端畫面，每秒更新')}
               {snap?.pane_id ? `・pane ${snap.pane_id}` : ''}
               {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
             </span>
@@ -143,28 +147,27 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
               type="button"
               className="btn blocked-modal-layout"
               aria-pressed={rawLayout}
-              title={rawLayout ? '現在是終端原樣；按一下改回手機易讀排版' : '現在是手機易讀排版（去掉外框、對齊用的空白與空列）；按一下看終端原樣'}
+              title={rawLayout ? t('現在是終端原樣；按一下改回手機易讀排版') : t('現在是手機易讀排版（去掉外框、對齊用的空白與空列）；按一下看終端原樣')}
               onClick={() => setRawLayout((v) => !v)}
             >
-              原樣
+              {t("原樣")}
             </button>
           ) : null}
-          <button type="button" className="icon-btn" aria-label="關閉" title="關閉" onClick={onClose}>
+          <button type="button" className="icon-btn" aria-label={t("關閉")} title={t("關閉")} onClick={onClose}>
             ✕
           </button>
         </div>
 
         {narrow && !menu ? (
           <div className="blocked-modal-warn" role="status">
-            這個 pane 只有 {snap?.columns} 欄，agent 的輸出在終端就被折成碎片了。到「終端」分頁可以把它
-            移到自己的分頁，之後的輸出才會是完整寬度。
+            {t('這個 pane 只有 {cols} 欄，agent 的輸出在終端就被折成碎片了。到「終端」分頁可以把它移到自己的分頁，之後的輸出才會是完整寬度。', { cols: snap?.columns ?? 0 })}
           </div>
         ) : null}
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
         <CodexAsyncQuestion botId={botId} text={snap?.text} questions={pending} onAnswered={refresh} />
 
-        {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
+        {pendingStatus === 'unavailable' ? <div role="status">{t("暫時無法確認待答題目，請參考終端畫面。")}</div> : null}
         {/* 認不出選單時原題攤開、排在終端上面（那時它是唯一讀得懂的題目）；認得出時收進下面的主捲軸（#559）。 */}
         {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
 
@@ -193,7 +196,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
             ref={termRef}
             tabIndex={0}
           >
-            {err ? `讀取終端失敗：${err}` : snap?.text ? (reflow ? reflowForPhone(fitRules(terminal.body)) : fitRules(terminal.body)) : '讀取中…'}
+            {err ? t('讀取終端失敗：{err}', { err }) : snap?.text ? (reflow ? reflowForPhone(fitRules(terminal.body)) : fitRules(terminal.body)) : t('讀取中…')}
           </pre>
         ) : null}
 
@@ -206,7 +209,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           {showRaw ? (
             <div className="keypad">
               {KEYPAD.map((k) => (
-                <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>
+                <button key={k.label} type="button" className="key-btn" title={t.tr(k.title)} onClick={() => press(k.keys)}>
                   {k.label}
                 </button>
               ))}
@@ -220,15 +223,15 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
                 disabled={dangerous}
                 onChange={(e) => setPassthrough(e.target.checked)}
               />
-              鍵盤直通
+              {t('鍵盤直通')}
             </label>
             {/* 直通關著時那段在講實體鍵盤：手機上藏起來，把高度留給選項（#559）；開關本身照樣看得見（#545）。 */}
             <span className={`hint${!dangerous && !keysLive ? ' hint-keys-off' : ''}`}>
               {dangerous
-                ? 'claude 的防誤刪框：只有你本人能核准，而且要按上面那兩個選項。這種框上不開放鍵盤直通——打字打到一個 1 就等於按下「1. Yes」。'
+                ? t('claude 的防誤刪框：只有你本人能核准，而且要按上面那兩個選項。這種框上不開放鍵盤直通——打字打到一個 1 就等於按下「1. Yes」。')
                 : keysLive
-                  ? '打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。'
-                  : '鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的選項或按鍵。要把整個鍵盤接進終端再打開這個開關。'}
+                  ? t('打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。')
+                  : t('鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的選項或按鍵。要把整個鍵盤接進終端再打開這個開關。')}
             </span>
           </div>
         </div>

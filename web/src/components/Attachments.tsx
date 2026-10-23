@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 /**
  * Attachments: uploaded first (`POST /bots/:id/attachments`), the send carries ids since agents only read text.
  * **Any file, not just images** (2026-09-14) — the mime only decides the card: image → thumbnail, else icon + name.
@@ -16,12 +17,14 @@ import { formatSize, sizeLabel, type Pending } from './attachmentsHelpers'
 import { progressLabel, uploadPercent } from './attachmentUpload'
 import { useStore } from '../store/store'
 
-export function DropVeil({ label = '放開以附加檔案' }: { label?: string }) {
+export function DropVeil({ label }: { label?: string }) {
+  const t = useT()
+  const finalLabel = label ?? t('放開以附加檔案')
   return (
     <div className="drop-veil" aria-hidden="true">
       <span className="drop-veil-box">
         <FileIcon />
-        {label}
+        {finalLabel}
       </span>
     </div>
   )
@@ -29,6 +32,7 @@ export function DropVeil({ label = '放開以附加檔案' }: { label?: string }
 
 /** Pending thumbnails; 40px 認不出是哪張，hover/focus 浮一張絕對定位的大預覽。 */
 export function AttachTray({
+
   items,
   onRemove,
   onRetry,
@@ -39,12 +43,13 @@ export function AttachTray({
   onRetry?: (key: string) => void
   disabled?: boolean
 }) {
+  const t = useT()
   const [peek, setPeek] = useState<string | null>(null)
   if (items.length === 0) return null
   const peeked = items.find((it) => it.key === peek) ?? null
   const off = (key: string) => setPeek((k) => (k === key ? null : k))
   return (
-    <div className="attach-tray" role="list" aria-label="待送出的檔案">
+    <div className="attach-tray" role="list" aria-label={t("待送出的檔案")}>
       {peeked?.isImage ? (
         <div className="attach-peek" aria-hidden="true">
           <img src={peeked.previewUrl} alt="" />
@@ -79,8 +84,8 @@ export function AttachTray({
           <button
             type="button"
             className="attach-thumb-x"
-            aria-label={`移除 ${it.name}`}
-            title="移除"
+            aria-label={t("移除 {name}", { name: it.name })}
+            title={t("移除")}
             disabled={disabled}
             onClick={() => onRemove(it.key)}
           >
@@ -97,22 +102,23 @@ export function AttachTray({
  * 進度一律有文字，條只是輔助；條用 `role="progressbar"` 帶數值給報讀器。
  */
 function PendingState({ item: it, onRetry, disabled }: { item: Pending; onRetry?: (key: string) => void; disabled?: boolean }) {
+  const t = useT()
   if (it.id) return null
   if (it.error) {
     return (
       <span className="attach-thumb-state err">
         <span className="attach-thumb-err" title={it.error}>
-          失敗：{it.error}
+          {t('失敗：{error}', { error: it.error })}
         </span>
         {onRetry && it.retryable ? (
-          <button type="button" className="mini-btn attach-thumb-retry" disabled={disabled} aria-label={`重試上傳 ${it.name}`} onClick={() => onRetry(it.key)}>
-            重試
+          <button type="button" className="mini-btn attach-thumb-retry" disabled={disabled} aria-label={t("重試上傳 {name}", { name: it.name })} onClick={() => onRetry(it.key)}>
+            {t("重試")}
           </button>
         ) : null}
       </span>
     )
   }
-  if (it.compressing) return <span className="attach-thumb-state">壓縮中…</span>
+  if (it.compressing) return <span className="attach-thumb-state">{t('壓縮中…')}</span>
   const label = progressLabel(it.loaded, it.size)
   return (
     <>
@@ -120,7 +126,7 @@ function PendingState({ item: it, onRetry, disabled }: { item: Pending; onRetry?
       <span
         className="attach-thumb-bar"
         role="progressbar"
-        aria-label={`上傳 ${it.name}`}
+        aria-label={t("上傳 {name}", { name: it.name })}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={uploadPercent(it.loaded, it.size)}
@@ -132,7 +138,9 @@ function PendingState({ item: it, onRetry, disabled }: { item: Pending; onRetry?
   )
 }
 
-export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) => void; disabled?: boolean }) {
+export function AttachPicker({
+ onFiles, disabled }: { onFiles: (files: File[]) => void; disabled?: boolean }) {
+  const t = useT()
   const ref = useRef<HTMLInputElement>(null)
   return (
     <>
@@ -150,8 +158,8 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
         type="button"
         className="icon-btn attach-pick icon-tip"
         disabled={disabled}
-        aria-label="附加檔案"
-        data-tip="附加檔案 · 拖放 / 貼上"
+        aria-label={t("附加檔案")}
+        data-tip={t("附加檔案 · 拖放 / 貼上")}
         onClick={() => ref.current?.click()}
       >
         <FileIcon />
@@ -287,6 +295,7 @@ function useStoredUrl(id: string | null): { url: string | null; failure: Attachm
 }
 
 function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) {
+  const t = useT()
   const isImage = item.mime.startsWith('image/')
   const { url, failure } = useStoredUrl(isImage ? item.id : null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -318,16 +327,16 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
             <img src={url} alt={item.name} />
           ) : failure ? (
             <div className="lightbox-loading" role="status">
-              {failureLabel(failure)}：{failureHint(failure)}
+              {t('{label}：{hint}', { label: failureLabel(failure), hint: failureHint(failure) })}
             </div>
           ) : (
-            <div className="lightbox-loading">載入中…</div>
+            <div className="lightbox-loading">{t('載入中…')}</div>
           )
         ) : (
           <div className="lightbox-file">
             <FileIcon />
             <span className="lightbox-file-name">{item.name}</span>
-            <span className="lightbox-file-hint">agent 讀得到下面這個路徑；這裡只說它放在哪。</span>
+            <span className="lightbox-file-hint">{t('agent 讀得到下面這個路徑；這裡只說它放在哪。')}</span>
           </div>
         )}
         <div className="lightbox-bar">
@@ -336,7 +345,7 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
           </span>
           <code className="lightbox-path mono">{item.path}</code>
           <button type="button" className="mini-btn" ref={closeRef} onClick={onClose}>
-            關閉
+            {t("關閉")}
           </button>
         </div>
       </div>

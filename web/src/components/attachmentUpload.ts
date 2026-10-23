@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 /**
  * 一張附件卡片從「壓縮 → 上傳（帶進度）→ 好了／失敗」的狀態（issue #435）。
  * 跟 React 無關的部分放這裡：reducer、單張的上傳流程、進度文字，測試不必開 DOM。
@@ -127,7 +128,7 @@ export async function runUpload(deps: UploadDeps, key: string, file: File, compr
       out = await deps.compress(file)
       if (signal.aborted) return
       if (out.size > MAX_BYTES) {
-        throw new TooLargeError(`有 ${deps.formatSize(out.size)}，超過 ${deps.formatSize(MAX_BYTES)} 上限`)
+        throw new TooLargeError(t('有 {size}，超過 {max} 上限', { size: deps.formatSize(out.size), max: deps.formatSize(MAX_BYTES) }))
       }
       if (out !== file) deps.dispatch({ type: 'compressed', key, name: out.name, size: out.size })
       deps.onPrepared(out)

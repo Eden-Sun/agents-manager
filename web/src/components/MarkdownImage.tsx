@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { readableImagePath } from '../lib/markdownUrl'
@@ -11,12 +12,12 @@ function isRemote(src: string): boolean {
 
 /** 沒寫替代文字（`![](x.png)`）時的名字：檔名。圖片包在連結裡，alt 是空的，連結就沒有任何可讀名稱（#1637）。 */
 function imageName(src: string): string {
-  if (/^(data:|blob:)/i.test(src)) return '圖片'
+  if (/^(data:|blob:)/i.test(src)) return 'image' // i18n-ignore
   const last = src.split(/[?#]/)[0].split(/[\\/]/).pop() ?? ''
   try {
-    return decodeURIComponent(last) || '圖片'
+    return decodeURIComponent(last) || 'image' // i18n-ignore
   } catch {
-    return last || '圖片'
+    return last || 'image' // i18n-ignore
   }
 }
 
@@ -26,6 +27,7 @@ function imageName(src: string): string {
  * 對方沒開 CORS 或抓不到，就改成「在新分頁開啟」的連結（那是使用者自己點的連結，不是自動請求）。
  */
 function RemoteImage({ src, alt }: { src: string; alt?: string }) {
+  const t = useT()
   const info = remoteImageInfo(src)
   const [state, setState] = useState<'idle' | 'loading' | 'failed'>('idle')
   const [url, setUrl] = useState<string | null>(null)
@@ -47,7 +49,7 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
       </a>
     )
   }
-  const host = info?.host ?? '未知網域'
+  const host = info?.host ?? t('未知網域')
   const load = () => {
     setState('loading')
     fetchRemoteImageBlob(src)
@@ -60,14 +62,14 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
   }
   return (
     <span className="md-image-remote" title={src}>
-      <span aria-hidden="true">🖼</span> 外部圖片（<strong>{host}</strong>）{alt ? `：${alt}` : ''}
-      {info?.suspicious ? <span className="md-image-warn">　網址帶了很長的參數或帳密，可能夾帶資料，確定要載入再點。</span> : null}
-      {info?.internal ? <span className="md-image-warn">　這是本機／內網位址：點下去會由這台機器對它發出請求。</span> : null}
+      <span aria-hidden="true">🖼</span> {alt ? t.x('外部圖片（{host}）：{alt}', { host: <strong>{host}</strong>, alt }) : t.x('外部圖片（{host}）', { host: <strong>{host}</strong> })}
+      {info?.suspicious ? <span className="md-image-warn"> {t('網址帶了很長的參數或帳密，可能夾帶資料，確定要載入再點。')}</span> : null}
+      {info?.internal ? <span className="md-image-warn"> {t('這是本機／內網位址：點下去會由這台機器對它發出請求。')}</span> : null}
       {state === 'failed' ? (
         <>
-          <span className="md-image-warn">　載入失敗（對方不允許跨站讀取、轉址到別的主機、不是支援的點陣圖或太大）。</span>
+          <span className="md-image-warn"> {t('載入失敗（對方不允許跨站讀取、轉址到別的主機、不是支援的點陣圖或太大）。')}</span>
           <a href={src} target="_blank" rel="noreferrer noopener">
-            在新分頁開啟
+            {t('在新分頁開啟')}
           </a>
         </>
       ) : (
@@ -82,7 +84,7 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
             load()
           }}
         >
-          {state === 'loading' ? '載入中…' : '載入圖片'}
+          {state === 'loading' ? t('載入中…') : t('載入圖片')}
         </button>
       )}
     </span>
@@ -93,7 +95,9 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
  * bot 回覆裡的 `![](docs/shot.png)`（2026-09-15 使用者截圖：只剩破圖）。路徑是 bot 工作目錄裡的檔，瀏覽器讀不到，
  * 改由 daemon 從該 bot 的專案目錄帶權杖讀出來（`GET /api/bots/{id}/local-image`）。讀不到就把路徑直接寫出來，不畫破圖。
  */
-export function MarkdownImage({ botId, src, alt }: { botId: string | null | undefined; src?: string; alt?: string }) {
+export function MarkdownImage({
+ botId, src, alt }: { botId: string | null | undefined; src?: string; alt?: string }) {
+  const t = useT()
   const raw = typeof src === 'string' ? src : ''
   const local = raw !== '' && !isRemote(raw)
   // 結果綁定來源（botId＋raw）：換了來源，上一張的 URL 或失敗狀態不沿用，要等新來源自己的結果（#1801）。
@@ -133,8 +137,8 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
   }
   if (failed || !botId) {
     return (
-      <span className="md-image-missing" title="圖片不在這個專案目錄裡、不是圖片檔，或檔案不存在">
-        🖼 {alt ? `${alt}：` : ''}
+      <span className="md-image-missing" title={t("圖片不在這個專案目錄裡、不是圖片檔，或檔案不存在")}>
+        🖼 {alt ? t('{alt}：', { alt }) : ''}
         <code>{readableImagePath(raw)}</code>
       </span>
     )

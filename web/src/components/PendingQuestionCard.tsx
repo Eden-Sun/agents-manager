@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import { useState } from 'react'
 import { JEV_ASK_NOTE, type PendingQuestion } from '../lib/pendingQuestion'
 import { JevLabel } from './JevLabel'
@@ -12,6 +13,7 @@ import './pendingQuestionCard.css'
  * 認得出選單時預設收成一行（`defaultOpen=false`）：2026-09-25 使用者手機上整張攤開把選項擠到只剩半列，點不到。
  */
 export function PendingQuestionCard({
+
   questions,
   current = -1,
   defaultOpen = false,
@@ -25,34 +27,35 @@ export function PendingQuestionCard({
   answerWhere?: 'above' | 'below'
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  const t = useT()
   if (questions.length === 0) return null
   // Jev 的選項建議（issue #1475）：只提示、不代答；沒有建議（沒開、失敗、分數太接近、多選題）就什麼都不顯示。
   const jevPicks = questions.filter((q) => q.jev)
   const anyJev = jevPicks.length > 0
   return (
-    <div className={`pending-q${open ? ' pending-q-open' : ''}`} role="note" aria-label="agent 在問的問題（對話紀錄裡的原題）">
+    <div className={`pending-q${open ? ' pending-q-open' : ''}`} role="note" aria-label={t("agent 在問的問題（對話紀錄裡的原題）")}>
       <button type="button" className="pending-q-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
-        原題（{questions.length} 題）
-        <span className="pending-q-src">終端沒畫出全部題目，從對話紀錄讀出</span>
+        {t('原題（{n} 題）', { n: questions.length })}
+        <span className="pending-q-src">{t("終端沒畫出全部題目，從對話紀錄讀出")}</span>
         {anyJev ? (
           <span className="pending-q-jev">
             <JevLabel prob={jevPicks.length === 1 ? jevPicks[0].jev?.score : null} />
-            {jevPicks.length > 1 ? `（${jevPicks.length} 題）` : null}
+            {jevPicks.length > 1 ? t('（{n} 題）', { n: jevPicks.length }) : null}
           </span>
         ) : null}
       </button>
       {open ? (
         <>
-          <p className="pending-q-note">只供閱讀；作答用{answerWhere === 'above' ? '上面的選項' : '下面的按鍵'}。</p>
-          {anyJev ? <p className="pending-q-jev-note">{JEV_ASK_NOTE}</p> : null}
+          <p className="pending-q-note">{answerWhere === 'above' ? t('只供閱讀；作答用上面的選項。') : t('只供閱讀；作答用下面的按鍵。')}</p>
+          {anyJev ? <p className="pending-q-jev-note">{t.tr(JEV_ASK_NOTE)}</p> : null}
           {questions.map((q, qi) => (
             <div key={`${qi}-${q.question}`} className={`pending-q-item${qi === current ? ' pending-q-current' : ''}`}>
               <p className="pending-q-meta">
-                {questions.length > 1 ? `第 ${qi + 1} 題` : null}
+                {questions.length > 1 ? t('第 {n} 題', { n: qi + 1 }) : null}
                 {q.header ? <span className="pending-q-header">{q.header}</span> : null}
-                {q.multiSelect ? <span>可複選</span> : null}
-                {qi === current ? <span className="pending-q-here">畫面上這一題</span> : null}
+                {q.multiSelect ? <span>{t('可複選')}</span> : null}
+                {qi === current ? <span className="pending-q-here">{t('畫面上這一題')}</span> : null}
               </p>
               <p className="pending-q-text">{q.question}</p>
               {qi === current && answerWhere === 'above' ? (
@@ -68,7 +71,7 @@ export function PendingQuestionCard({
                   {q.options.map((o, oi) => (
                     <li key={o.label}>
                       {o.label}
-                      {o.description ? <span className="pending-q-desc">：{o.description}</span> : null}
+                      {o.description ? <span className="pending-q-desc">{t('：{desc}', { desc: o.description })}</span> : null}
                       {q.jev && q.jev.option === oi ? <JevLabel className="pending-q-jev" prob={q.jev.score} /> : null}
                     </li>
                   ))}

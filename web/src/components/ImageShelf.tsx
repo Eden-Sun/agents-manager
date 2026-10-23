@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 /**
  * Image shelf: conversation-independent staging (lives outside `<main>`, survives bot switches).
  * Nothing uploads here — attachment ids are project-scoped, so the receiving panel uploads on hand-off.
@@ -87,6 +88,7 @@ function useFileDragActive(): boolean {
 }
 
 export function ImageShelf() {
+  const t = useT()
   const items = useShelf((s) => s.items)
   const sink = useShelf((s) => s.sink)
   const addToShelf = useShelf((s) => s.add)
@@ -174,8 +176,8 @@ export function ImageShelf() {
   const take = (files: File[]) => {
     if (files.length === 0) return
     const r = addToShelf(files)
-    for (const name of r.tooBig) notify('error', `「${name}」超過 ${formatSize(MAX_BYTES)} 上限，沒有放進暫存區。`)
-    if (r.overflow > 0) notify('error', `暫存區最多 ${SHELF_MAX} 張，有 ${r.overflow} 張沒放進去。`)
+    for (const name of r.tooBig) notify('error', t('「{name}」超過 {max} 上限，沒有放進暫存區。', { name, max: formatSize(MAX_BYTES) }))
+    if (r.overflow > 0) notify('error', t('暫存區最多 {max} 張，有 {overflow} 張沒放進去。', { max: SHELF_MAX, overflow: r.overflow }))
     // Dropping onto the collapsed rail would otherwise look like nothing happened.
     if (r.added > 0 && !open) setOpenPersisted(true)
   }
@@ -189,7 +191,7 @@ export function ImageShelf() {
     <aside
       ref={shelfRef}
       className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}`}
-      aria-label="檔案暫存區"
+      aria-label={t("檔案暫存區")}
       onPaste={(e) => {
         const imgs = Array.from(e.clipboardData?.files ?? [])
         if (imgs.length === 0) return
@@ -214,8 +216,8 @@ export function ImageShelf() {
           type="button"
           className="shelf-edge-fold"
           aria-expanded={true}
-          aria-label="收合檔案暫存區"
-          title="收合檔案暫存區"
+          aria-label={t("收合檔案暫存區")}
+          title={t('收合檔案暫存區')}
           onClick={() => setOpenPersisted(false)}
         >
           »
@@ -225,23 +227,23 @@ export function ImageShelf() {
         <div className="shelf-body" {...drop.props}>
           <div className="shelf-head">
             <FileIcon />
-            <span className="shelf-title">檔案暫存</span>
+            <span className="shelf-title">{t("檔案暫存")}</span>
             {count > 0 ? (
-              <span className="shelf-count" aria-label={`暫存 ${count} 個`}>
+              <span className="shelf-count" aria-label={t("暫存 {n} 個", { n: count })}>
                 {count}
               </span>
             ) : null}
             <button
               type="button"
               className="icon-btn shelf-add icon-tip"
-              aria-label="加入檔案到暫存區"
-              data-tip="加入檔案 · 暫存"
+              aria-label={t("加入檔案到暫存區")}
+              data-tip={t("加入檔案 · 暫存")}
               onClick={() => picker.current?.click()}
             >
-              ＋
+              ＋{/* i18n-ignore */}
             </button>
             {count > 0 ? (
-              <button type="button" className="icon-btn shelf-clear icon-tip" aria-label="清空暫存區" data-tip="清空 · 暫存" onClick={clear}>
+              <button type="button" className="icon-btn shelf-clear icon-tip" aria-label={t("清空暫存區")} data-tip={t("清空 · 暫存")} onClick={clear}>
                 ✕
               </button>
             ) : null}
@@ -253,8 +255,8 @@ export function ImageShelf() {
                 type="button"
                 className="icon-btn shelf-fold icon-tip"
                 aria-expanded={true}
-                aria-label="收合檔案暫存區"
-                data-tip="收合 · 暫存"
+                aria-label={t("收合檔案暫存區")}
+                data-tip={t("收合 · 暫存")}
                 onClick={() => setOpenPersisted(false)}
               >
                 »
@@ -264,8 +266,7 @@ export function ImageShelf() {
           <div className="shelf-list" role="list">
             {count === 0 ? (
               <p className="shelf-empty">
-                把檔案（圖片、PDF、log 都可以）拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project
-                都在，重新整理也還在，放進來 30 分鐘後自動清掉。
+                {t('把檔案（圖片、PDF、log 都可以）拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理也還在，放進來 30 分鐘後自動清掉。')}
               </p>
             ) : (
               items.map((it) => (
@@ -284,7 +285,7 @@ export function ImageShelf() {
           <OutboxFiles />
           {drop.over ? (
             <div className="shelf-veil" aria-hidden="true">
-              放開以暫存
+              {t("放開以暫存")}
             </div>
           ) : null}
           {peekItem?.isImage && peek ? <ShelfPeek item={peekItem} at={peek} above={atBottom} /> : null}
@@ -295,17 +296,17 @@ export function ImageShelf() {
             type="button"
             className="shelf-handle"
             aria-expanded={false}
-            aria-label={count > 0 ? `展開檔案暫存區，目前 ${count} 個` : '展開檔案暫存區'}
-            title="檔案暫存區：先放著，之後再拖進任何對話"
+            aria-label={count > 0 ? t('展開檔案暫存區，目前 {n} 個', { n: count }) : t('展開檔案暫存區')}
+            title={t('檔案暫存區：先放著，之後再拖進任何對話')}
             onClick={() => setOpenPersisted(true)}
           >
             <FileIcon />
             {count > 0 ? <span className="shelf-count">{count}</span> : null}
-            <span className="shelf-handle-label">檔案暫存</span>
+            <span className="shelf-handle-label">{t("檔案暫存")}</span>
           </button>
           {fileDrag ? (
             <div className={`shelf-pad${drop.over ? ' over' : ''}`} {...drop.props}>
-              放到這裡先暫存
+              {t('放到這裡先暫存')}
             </div>
           ) : null}
         </>
@@ -328,6 +329,7 @@ function ShelfCard({
   onPeekStart: (key: string, el: HTMLElement, delay: number, touch: boolean) => void
   onPeekEnd: () => void
 }) {
+  const t = useT()
   const remove = useShelf((s) => s.remove)
   const handed = useShelf((s) => s.handed.includes(item.key))
   const notify = useStore((s) => s.notify)
@@ -347,7 +349,7 @@ function ShelfCard({
   const hand = () => {
     const { sink, markHanded } = useShelf.getState()
     if (!sink) {
-      notify('error', '先開一個對話（bot 或群組），才能把暫存的檔案放進去。')
+      notify('error', t('先開一個對話（bot 或群組），才能把暫存的檔案放進去。'))
       return
     }
     sink.add([item.file])
@@ -383,8 +385,8 @@ function ShelfCard({
         type="button"
         className="shelf-card-main"
         draggable
-        aria-label={`${item.name}，${formatSize(item.size)}${sinkLabel ? `，放進${sinkLabel}` : ''}`}
-        title={`${item.name} · ${formatSize(item.size)}\n${sinkLabel ? `點一下放進${sinkLabel}` : '先開一個對話才能放進去'}；Delete 移除`}
+        aria-label={sinkLabel ? t('{name}，{size}，放進{sink}', { name: item.name, size: formatSize(item.size), sink: sinkLabel }) : t('{name}，{size}', { name: item.name, size: formatSize(item.size) })}
+        title={sinkLabel ? t('{name} · {size}\n點一下放進{sink}；Delete 移除', { name: item.name, size: formatSize(item.size), sink: sinkLabel }) : t('{name} · {size}\n先開一個對話才能放進去；Delete 移除', { name: item.name, size: formatSize(item.size) })}
         onDragStart={(e) => {
           e.dataTransfer.setData(SHELF_MIME, item.key)
           e.dataTransfer.effectAllowed = 'copy'
@@ -432,13 +434,13 @@ function ShelfCard({
           </span>
         )}
         <span className="shelf-card-name">{item.name}</span>
-        <span className="shelf-card-size">{handed ? '已放入' : formatSize(item.size)}</span>
+        <span className="shelf-card-size">{handed ? t('已放入') : formatSize(item.size)}</span>
       </button>
       <button
         type="button"
         className="shelf-card-x"
-        aria-label={`從暫存區移除 ${item.name}`}
-        title="移除"
+        aria-label={t('從暫存區移除 {name}', { name: item.name })}
+        title={t("移除")}
         onClick={(e) => {
           // detail === 0：鍵盤（Enter／Space）觸發；滑鼠與觸控不搬焦點（免得預覽因 onFocus 彈出來）。
           if (e.detail === 0) removeKeepingFocus(e.currentTarget)

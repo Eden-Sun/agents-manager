@@ -1,3 +1,4 @@
+import { useT } from "../lib/i18n"
 import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
 import { useState } from 'react'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
@@ -29,6 +30,7 @@ export function BlockedPanel({
   paused?: boolean
   onExpand?: () => void
 }) {
+  const t = useT()
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 40, paused })
   const terminal = useCodexTerminalFooter(botId, snap)
   const press = usePaneKeys(botId, refresh)
@@ -43,42 +45,41 @@ export function BlockedPanel({
   const [extras, setExtras] = useState(false)
   // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
-    ? `讀取終端失敗：${err}`
-    : (snap ? terminal.body : (paused ? '（全畫面終端開著，這裡暫停更新）' : '讀取中…'))
+    ? t('讀取終端失敗：{err}', { err })
+    : (snap ? terminal.body : (paused ? t('（全畫面終端開著，這裡暫停更新）') : t('讀取中…')))
   /** 選單模式預設把這兩樣收起來；認不出選單時它們就是這塊面板本身。 */
   const showTerm = !menu || extras
   const showKeys = !menu || extras
 
   return (
-    <section className="blocked" aria-label="終端等待回應">
+    <section className="blocked" aria-label={t("終端等待回應")}>
       <div className="blocked-head">
         <span
           className="blocked-title"
-          title={`終端 visible 快照${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
+          title={snap?.revision != null ? t('終端 visible 快照・revision {rev}', { rev: snap.revision }) : t('終端 visible 快照')}
         >
-          ● agent 需要回應
+          {t('● agent 需要回應')}
         </span>
         {menu ? null : (
           <span className="blocked-sub">
             {paused ? (
-              '全畫面開著，畫面在上面那個視窗'
+              t('全畫面開著，畫面在上面那個視窗')
             ) : (
               <span>
-                終端畫面，每秒更新
-                {snap?.truncated ? '・已截斷' : ''}
+                {snap?.truncated ? t('終端畫面，每秒更新・已截斷') : t('終端畫面，每秒更新')}
               </span>
             )}
           </span>
         )}
         {onExpand ? (
-          <button type="button" className="mini-btn" title="展開整個 herdr 畫面" onClick={onExpand}>
-            展開全畫面
+          <button type="button" className="mini-btn" title={t("展開整個 herdr 畫面")} onClick={onExpand}>
+            {t('展開全畫面')}
           </button>
         ) : null}
       </div>
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       <CodexAsyncQuestion botId={botId} text={snap?.text} questions={pending} onAnswered={refresh} />
-      {pendingStatus === 'unavailable' ? <div role="status">暫時無法確認待答題目，請參考終端畫面。</div> : null}
+      {pendingStatus === 'unavailable' ? <div role="status">{t("暫時無法確認待答題目，請參考終端畫面。")}</div> : null}
       {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
       {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
       {menu ? (
@@ -103,11 +104,11 @@ export function BlockedPanel({
       {showKeys ? (
         <div className="keypad">
           {KEYPAD.map((k) => (
-            <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>
+            <button key={k.label} type="button" className="key-btn" title={t.tr(k.title)} onClick={() => press(k.keys)}>
               {k.label}
             </button>
           ))}
-          <span className="hint">按鍵只會送到目前這個 Run；bot 中途重啟就不會誤送。</span>
+          <span className="hint">{t("按鍵只會送到目前這個 Run；bot 中途重啟就不會誤送。")}</span>
         </div>
       ) : null}
     </section>

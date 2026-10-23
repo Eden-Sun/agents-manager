@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 /**
  * 多分頁問卷「先讀完、離線作答、最後一次送出」（2026-09-12 第六輪，使用者指定）。先 [`preload`] 走過每頁，之後作答只改本地 state；
  * 送出時照差集逐頁驗證，對不上就停手。預載失敗整個退回即時模式（`BlockedChoices`），不留半套草稿。
@@ -14,6 +15,7 @@ import './blockedChoices.css'
 type Phase = 'loading' | 'ready' | 'sending' | 'live'
 
 export function BlockedDraft({
+
   botId,
   menu,
   onAnswered,
@@ -22,6 +24,7 @@ export function BlockedDraft({
   menu: TuiChoiceMenu
   onAnswered?: () => void
 }) {
+  const t = useT()
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
   const sendText = useStore((s) => s.sendText)
@@ -104,10 +107,9 @@ export function BlockedDraft({
   if (phase === 'loading' || !draft) {
     return (
       <div className="blocked-choices">
-        <p className="bc-question">正在讀這份問卷的每一題…</p>
+        <p className="bc-question">{t("正在讀這份問卷的每一題…")}</p>
         <p className="bc-hint">
-          讀取中 {step.done}/{step.total || menu.tabs.length}
-          ——這段只會在分頁之間移動，不會動到任何答案。讀完就可以一次勾完再送出。
+          {t("讀取中 {done}/{total}——這段只會在分頁之間移動，不會動到任何答案。讀完就可以一次勾完再送出。", { done: step.done, total: step.total || menu.tabs.length })}
         </p>
       </div>
     )
@@ -138,7 +140,7 @@ export function BlockedDraft({
       return idx >= 0 && typedAnswerHere(p, p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
     })
     if (typedEmpty) {
-      setErr('選了「Type something.」的題請先打字，或改選別項。')
+      setErr(t('選了「Type something.」的題請先打字，或改選別項。'))
       setPhase('ready')
       return
     }
@@ -148,14 +150,14 @@ export function BlockedDraft({
       res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
     } catch (e) {
       // 沒接住的話畫面會永遠停在「送出中…」，什麼訊息都沒有（2026-10-02）。
-      res = { ok: false, error: `送出途中出錯：${e instanceof Error ? e.message : String(e)}。終端停在哪一步請看終端原文。` }
+      res = { ok: false, error: t('送出途中出錯：{msg}。終端停在哪一步請看終端原文。', { msg: e instanceof Error ? e.message : String(e) }) }
     }
     onAnswered?.()
     // 成功也要放開按鈕：問卷還在畫面上（同一份）時才不會卡在「送出中…」。
     setPhase('ready')
     if (res.ok) return
     // 失敗就停手並重讀終端現況，不要假裝成功。
-    setErr(res.error ?? '送出失敗。')
+    setErr(res.error ?? t('送出失敗。'))
   }
 
   const answerOf = (page: number) => {
@@ -166,7 +168,7 @@ export function BlockedDraft({
     return p.choices
       .filter((_, j) => Boolean(want[page]?.[j]))
       .map((c) => (isTypeSomething(c) && !c.checked ? (custom[p.tab] ?? '').trim() || c.title : c.title))
-      .join('、')
+      .join(t('、'))
   }
 
   const jump = (tab: number) =>
@@ -175,14 +177,14 @@ export function BlockedDraft({
   return (
     <div className="blocked-choices">
       <div className="bc-top">
-        <div className="bc-tabs" role="group" aria-label="這份問卷的各題">
+        <div className="bc-tabs" role="group" aria-label={t("這份問卷的各題")}>
           {draft.pages.map((p) => (
             <button
               key={p.tab}
               type="button"
               className={`bc-tab${!p.isSubmit && (want[p.tab] ?? []).some(Boolean) ? ' bc-tab-done' : ''}`}
               disabled={busy}
-              title={`跳到「${p.label}」`}
+              title={t('跳到「{label}」', { label: p.label })}
               onClick={() => jump(p.tab)}
             >
               <span aria-hidden="true">{p.isSubmit ? '✔' : (want[p.tab] ?? []).some(Boolean) ? '☑' : '☐'}</span>
@@ -191,7 +193,7 @@ export function BlockedDraft({
           ))}
         </div>
         <p className="bc-question">
-          這份問卷有 {draft.pages.filter((p) => !p.isSubmit).length} 題，選好之後一次送出
+          {t('這份問卷有 {n} 題，選好之後一次送出', { n: draft.pages.filter((p) => !p.isSubmit).length })}
         </p>
       </div>
 
@@ -199,7 +201,7 @@ export function BlockedDraft({
         {draft.pages.map((page, i) =>
           page.isSubmit ? (
             <section key={page.tab} className="bc-page" data-tab={page.tab}>
-              <h4 className="bc-page-q">你的答案</h4>
+              <h4 className="bc-page-q">{t("你的答案")}</h4>
               <ul className="bc-review">
                 {draft.pages
                   .filter((p) => !p.isSubmit)
@@ -207,7 +209,7 @@ export function BlockedDraft({
                     <li key={p.tab}>
                       <button type="button" className="bc-rev" disabled={busy} onClick={() => jump(p.tab)}>
                         <span className="bc-rev-q">{p.question ?? p.label}</span>
-                        <span className="bc-rev-a">{answerOf(p.tab) || '（還沒選）'}</span>
+                        <span className="bc-rev-a">{answerOf(p.tab) || t('（還沒選）')}</span>
                       </button>
                     </li>
                   ))}
@@ -239,14 +241,14 @@ export function BlockedDraft({
                         aria-pressed={page.multi && !action ? picked : undefined}
                         title={
                           action
-                            ? '這一列是動作不是勾選，要用它請先關掉這個畫面回終端'
+                            ? t('這一列是動作不是勾選，要用它請先關掉這個畫面回終端')
                             : page.multi
                               ? picked
-                                ? '取消勾選（只改這裡，還沒送出）'
-                                : '勾選（只改這裡，還沒送出）'
+                                ? t('取消勾選（只改這裡，還沒送出）')
+                                : t('勾選（只改這裡，還沒送出）')
                               : picked
-                                ? '已選（再點其他項會改選）'
-                                : '選這一項（只改這裡，還沒送出）'
+                                ? t('已選（再點其他項會改選）')
+                                : t('選這一項（只改這裡，還沒送出）')
                         }
                         onClick={() => pick(i, j)}
                       >
@@ -264,7 +266,7 @@ export function BlockedDraft({
                         type="button"
                         className="bc-chev"
                         aria-expanded={shown}
-                        aria-label={shown ? '收起說明' : '看這一項的說明'}
+                        aria-label={shown ? t('收起說明') : t('看這一項的說明')}
                         onClick={() => setOpen((v) => (v.includes(key) ? v.filter((k) => k !== key) : [...v, key]))}
                       >
                         <span aria-hidden="true">{shown ? '▾' : '▸'}</span>
@@ -293,7 +295,7 @@ export function BlockedDraft({
       </div>
 
       <button type="button" className="bc-submit" disabled={busy} onClick={() => void send()}>
-        {busy ? `送出中… ${step.done}/${step.total}` : dirty ? '送出全部答案' : '直接送出（沒有改動）'}
+        {busy ? t('送出中… {done}/{total}', { done: step.done, total: step.total }) : dirty ? t('送出全部答案') : t('直接送出（沒有改動）')}
       </button>
 
       {err ? (
@@ -307,7 +309,7 @@ export function BlockedDraft({
               setRound((n) => n + 1)
             }}
           >
-            重新讀取
+            {t('重新讀取')}
           </button>
         </p>
       ) : null}
