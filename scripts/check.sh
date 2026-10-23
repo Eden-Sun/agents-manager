@@ -4,7 +4,7 @@
 #   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test（分 shard 平行，CHECK_WEB_SHARDS 控制幾個）、vite build
 #   scripts/check.sh daemon     # daemon、xtask 與 crates/* 的 cargo 測試（要先有 web/dist）
-#   scripts/check.sh ops        # shell 變數寫法的 lint，加上（CHECK_OPS_JOBS 個同時跑，預設 min(8, 核心數)） scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
+#   scripts/check.sh ops        # shell 變數寫法的 lint，加上（CHECK_OPS_JOBS 個同時跑，預設 min(8, 核心數 − 一分鐘負載)，至少 1） scripts/*_test.sh 與 scripts/ops/*_test.sh（隔離測試）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）；開編前等可用記憶體 ≥ CHECK_MIN_FREE_MEM%（預設 30），編譯中壓力 critical 就中止（issue #1783）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
@@ -329,8 +329,7 @@ check_ops() {
     # CHECK_OPS_JOBS=1 退回序列（排查跨測試干擾時用）。
     local jobs="${CHECK_OPS_JOBS:-}"
     if [ -z "$jobs" ]; then
-        jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-        [ "$jobs" -gt 8 ] && jobs=8
+        jobs="$(bash scripts/ops/ops-jobs.sh)"
     fi
     if [ "$jobs" -le 1 ] || [ "${#tests[@]}" -le 1 ]; then
         for t in "${tests[@]}"; do
