@@ -112,6 +112,16 @@ cargo build --release -p agents-managerd
 
 Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. Dev builds bind every interface so a phone on your LAN or Tailscale can open the same UI; packaged macOS apps bind loopback only (`AM_DEV_LAN` overrides either).
 
+## First steps
+
+1. **Start the daemon**: `agents-managerd serve` (or `cargo dev` from source), then open http://127.0.0.1:7788. If no herdr server is running, the daemon starts one in the background.
+2. **Add a project**: click 「新增 Project」 (Add project) at the bottom of the sidebar, choose a directory on this machine or on an SSH host, and give it a label.
+3. **Add a bot**: open the project's `＋` menu and choose 「新增 Bot」 (Add bot). Pick the kind (`claude`, `codex`, `grok` or `agy`) and, optionally, an identity and model. The daemon opens a herdr pane and starts the CLI there with hooks attached.
+4. **Chat**: type in the chat box and send. Messages sent during a running turn are queued; a confirmation or multiple-choice question shows up as a card you can click; the stop button interrupts the turn. The terminal tab shows the live pane when you need it.
+5. **Let bots delegate**: a bot that runs `herdr agent start …` gets its children listed under it, and it is notified when they finish or get stuck.
+6. **Automate**: the same `＋` menu has 「新增排程」 (Add schedule) for one-off, interval, daily or weekly prompts to a bot. Quota, model lists, update checks and hosts live in 環境設定 (Settings).
+7. **Use it from your phone**: open `http://<this machine>:7788` over your LAN or Tailscale and paste the token from `~/.config/agents-manager/ui-token`.
+
 ## Supported agent CLIs
 
 Each CLI gets a hook injected at launch, so replies arrive as structured events rather than scraped text.
