@@ -10,6 +10,7 @@
  */
 import type { ShareClient } from './shareApi'
 import { SHARE_FILE_MAX, ShareHttpError } from './shareModel'
+import { t } from './shareI18n'
 
 /** 照片縮到長邊這麼長。 */
 export const PHOTO_MAX_EDGE = 2048
@@ -176,12 +177,12 @@ export function uploadRetryable(e: unknown): boolean {
 
 /** 給長輩看的上傳錯誤：簡單、沒有技術字。 */
 export function uploadErrorText(e: unknown): string {
-  if (e instanceof PhotoUnreadableError) return '這張照片打不開，請換一張或改用截圖'
+  if (e instanceof PhotoUnreadableError) return t('這張照片打不開，請換一張或改用截圖')
   if (e instanceof ShareHttpError) {
-    if (e.status === 413) return '這個檔案太大了'
-    if (e.status === 415) return '這種檔案沒辦法傳'
-    if (e.status === 507) return '空間滿了，請跟分享給你的人說一聲'
-    if (e.status === 404) return '這個分享連結已失效'
+    if (e.status === 413) return t('這個檔案太大了')
+    if (e.status === 415) return t('這種檔案沒辦法傳')
+    if (e.status === 507) return t('空間滿了，請跟分享給你的人說一聲')
+    if (e.status === 404) return t('這個分享連結已失效')
   }
-  return '這張沒傳上去'
+  return t('這張沒傳上去')
 }

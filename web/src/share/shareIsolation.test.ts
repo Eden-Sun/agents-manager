@@ -23,6 +23,9 @@ test('src/share 只 import 自己資料夾、react、markdown 套件', () => {
         spec === '../lib/createRequestId' ||
         // 分享頁的訊息連結規則（#1556：同終端的網址規則）：純字串處理的 remark 外掛，不 import 任何東西（下面的測試守著這點）。
         spec === '../lib/markdownAutolink' ||
+        // 分享頁的多語系：只經這兩個純模組（不經 lib/i18n/index.ts，不帶主 UI 字典）；下面的測試守著它們的 import。
+        spec === '../lib/i18n/translate' ||
+        spec === '../lib/i18n/lang' ||
         ['react', 'react-dom/client', 'react-markdown', 'remark-gfm'].includes(spec)
       assert.ok(ok, `${f} import 了 ${spec}：分享頁不能帶主 UI 的程式碼`)
     }
@@ -33,6 +36,16 @@ test('分享頁可 import 的 ../lib 檔自己不 import 任何東西（不能�
   for (const name of ['createRequestId.ts', 'markdownAutolink.ts']) {
     const src = readFileSync(join(dir, '..', 'lib', name), 'utf8')
     assert.equal(/(?:from|import)\s*\(?\s*'/.test(src), false, `${name} 不能有 import`)
+  }
+})
+
+test('分享頁的 i18n 純模組只准 import type 自 ./types，不准有其他 import', () => {
+  for (const name of ['translate.ts', 'lang.ts']) {
+    const src = readFileSync(join(dir, '..', 'lib', 'i18n', name), 'utf8')
+    for (const line of src.matchAll(/^\s*import\b[^\n]*$/gm)) {
+      assert.match(line[0].trim(), /^import type \{[^}]*\} from '\.\/types'$/, `${name} 不能有其他 import：${line[0].trim()}`)
+    }
+    assert.equal(/(?:from|import)\s*\(?\s*'/.test(src.replace(/^import type .*$/gm, '')), false, `${name} 只能 import type 自 ./types`)
   }
 })
 

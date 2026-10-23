@@ -4,6 +4,7 @@ import { canShareFile, displayName, isSvgName, pngName, shareOrSave } from './sh
 import { pngRequest, rasterRequest, type PngResult } from './shareImageCache'
 import { ImageWorkSkipped } from './shareImageQueue'
 import type { ShareFile } from './shareModel'
+import { useT } from './shareI18n'
 
 /** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
 const fileVersion = (f: ShareFile) => f.version ?? `${f.modified_at ?? ''}-${f.size}`
@@ -82,6 +83,7 @@ function useRaster(client: ShareClient, file: ShareFile, enabled: boolean): PngR
  * 這一版載不出來（bot 寫壞了，daemon 會提醒它修）說「這張圖還在修，請稍等」，不給按鈕，檔案換版就自動重試。
  */
 export function ShareButton({ file, client }: { file: ShareFile; client: ShareClient }) {
+  const t = useT()
   const vector = isSvgName(file.name)
   const big = tooBigFile(file)
   const png = usePng(client, file, vector && !big)
@@ -92,9 +94,9 @@ export function ShareButton({ file, client }: { file: ShareFile; client: ShareCl
   const ready = res !== 'loading' && res !== 'external' && res !== 'broken'
   const type = ready ? (vector ? 'image/png' : res.blob.type || 'image/png') : 'image/png'
   const share = useMemo(() => (ready ? canShareFile(new File([res.blob], outName, { type })) : false), [ready, res, outName, type])
-  if (big) return <span className="sh-png-note">這張圖太大了，沒辦法分享</span>
-  if (res === 'external') return <span className="sh-png-note">這張圖沒辦法分享</span>
-  if (res === 'broken') return <span className="sh-png-note sh-png-fixing">這張圖還在修，請稍等</span>
+  if (big) return <span className="sh-png-note">{t('這張圖太大了，沒辦法分享')}</span>
+  if (res === 'external') return <span className="sh-png-note">{t('這張圖沒辦法分享')}</span>
+  if (res === 'broken') return <span className="sh-png-note sh-png-fixing">{t('這張圖還在修，請稍等')}</span>
   return (
     <span className="sh-png">
       <button
@@ -104,10 +106,10 @@ export function ShareButton({ file, client }: { file: ShareFile; client: ShareCl
         aria-busy={!ready}
         onClick={() => {
           if (!ready) return
-          void shareOrSave(res.blob, outName, type).then((r) => setNote(r === 'saved' ? '存好了' : null))
+          void shareOrSave(res.blob, outName, type).then((r) => setNote(r === 'saved' ? t('存好了') : null))
         }}
       >
-        {share ? '分享' : '存到手機'}
+        {share ? t('分享') : t('存到手機')}
       </button>
       {note ? (
         <span className="sh-png-note" role="status">
@@ -142,16 +144,17 @@ function useImgRetry(version: string, retryMs = IMG_RETRY_MS) {
 
 /** 縮圖：一律 `<img>`（向量圖當圖片載入不跑 script），點了放大。載不出來顯示佔位，不擋其他東西；檔案換版（bot 修好）就重載。 */
 export function ShareThumb({ file, client, onOpen, big, retryMs }: { file: ShareFile; client: ShareClient; onOpen: (f: ShareFile) => void; big?: boolean; retryMs?: number }) {
+  const t = useT()
   const version = fileVersion(file)
   const r = useImgRetry(version, retryMs)
   return (
-    <button type="button" className={`sh-thumb${big ? ' big' : ''}`} aria-label={`放大 ${displayName(file.name)}`} title={displayName(file.name)} onClick={() => onOpen(file)}>
+    <button type="button" className={`sh-thumb${big ? ' big' : ''}`} aria-label={t('放大 {name}', { name: displayName(file.name) })} title={displayName(file.name)} onClick={() => onOpen(file)}>
       {tooBigFile(file) ? (
-        <span className="sh-thumb-broken" title="這張圖太大了，沒辦法分享">
+        <span className="sh-thumb-broken" title={t('這張圖太大了，沒辦法分享')}>
           🖼
         </span>
       ) : r.broken || r.waiting ? (
-        <span className="sh-thumb-broken" title={r.broken ? '這張圖還在修，請稍等' : undefined}>
+        <span className="sh-thumb-broken" title={r.broken ? t('這張圖還在修，請稍等') : undefined}>
           🖼
         </span>
       ) : (
@@ -163,6 +166,7 @@ export function ShareThumb({ file, client, onOpen, big, retryMs }: { file: Share
 
 /** 放大檢視：大圖＋同一顆「分享／存到手機」。 */
 export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; client: ShareClient; onClose: () => void }) {
+  const t = useT()
   const box = useRef<HTMLDivElement>(null)
   const closeBtn = useRef<HTMLButtonElement>(null)
 
@@ -206,12 +210,12 @@ export function ShareImageViewer({ file, client, onClose }: { file: ShareFile; c
     >
       <div className="sh-viewer-bar">
         <span className="sh-viewer-name">{displayName(file.name)}</span>
-        <button ref={closeBtn} type="button" className="sh-viewer-close" aria-label="關閉" onClick={onClose}>
+        <button ref={closeBtn} type="button" className="sh-viewer-close" aria-label={t('關閉')} onClick={onClose}>
           ✕
         </button>
       </div>
       {tooBigFile(file) ? null : r.broken ? (
-        <span className="sh-png-note sh-png-fixing">這張圖還在修，請稍等</span>
+        <span className="sh-png-note sh-png-fixing">{t('這張圖還在修，請稍等')}</span>
       ) : r.waiting ? (
         <span className="sh-viewer-img" aria-busy="true" />
       ) : (

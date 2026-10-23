@@ -1,3 +1,5 @@
+import { t } from './shareI18n'
+
 /**
  * 分享頁（`web/share.html`，SPEC「分享 bot」）的純邏輯：token 從網址取、契約 C 的回應正規化、訊息合併、錯誤轉人話。
  * 這一包不 import 主 UI 的任何東西（store、api、元件）：分享頁打包出來不能帶著管理介面的程式碼。
@@ -107,7 +109,7 @@ export function toShareFiles(v: unknown): ShareFile[] {
 }
 
 /** daemon 替 end user 訊息加的前綴與附件標記（daemon 輸出時已拿掉；這裡再擋一次，舊版 daemon 或 bot 照抄時也不會出現）。 */
-const SHARE_MARKS = ['〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕', '〔分享使用者〕 ', '〔分享使用者〕']
+const SHARE_MARKS = ['〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕', '〔分享使用者〕 ', '〔分享使用者〕'] // i18n-ignore
 
 export function stripShareMarks(s: string): string {
   let out = s
@@ -121,7 +123,7 @@ function capShareText(s: string): string {
   let end = SHARE_TEXT_STORE_MAX
   const c = s.charCodeAt(end - 1)
   if (c >= 0xd800 && c <= 0xdbff) end -= 1
-  return `${s.slice(0, end)}\n…（內容過長，已截斷）`
+  return `${s.slice(0, end)}\n${t('…（內容過長，已截斷）')}`
 }
 
 /**
@@ -179,20 +181,20 @@ export class ShareHttpError extends Error {
 /** 給 end user 看的錯誤；不帶任何內部細節。404＝連結失效（token 錯或分享已關，契約 C 不分）。 */
 export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load' | 'older'): string {
   if (e instanceof ShareHttpError) {
-    if (e.status === 404) return '這個分享連結已失效。'
-    if (e.status === 429) return e.retryAfter ? `傳得太快了，請 ${e.retryAfter} 秒後再試。` : '傳得太快了，請稍等一下再試。'
-    if (e.status === 413) return what === 'upload' ? '檔案太大了（單檔上限 25 MB）。' : '訊息太長了，請分成幾段送。'
-    if (e.status === 415) return '不支援這種檔案。'
+    if (e.status === 404) return t('這個分享連結已失效。')
+    if (e.status === 429) return e.retryAfter ? t('傳得太快了，請 {sec} 秒後再試。', { sec: e.retryAfter }) : t('傳得太快了，請稍等一下再試。')
+    if (e.status === 413) return what === 'upload' ? t('檔案太大了（單檔上限 25 MB）。') : t('訊息太長了，請分成幾段送。')
+    if (e.status === 415) return t('不支援這種檔案。')
     // 507 share_storage_full（#853）：沙箱滿了，送訊息被擋；打的字還在。
-    if (e.status === 507) return '空間滿了，請跟分享給你的人說一聲；你打的字還在。'
+    if (e.status === 507) return t('空間滿了，請跟分享給你的人說一聲；你打的字還在。')
     // 一段對話同時只排一則（409 not_accepted）：上一則還沒回完。
-    if (e.status === 409) return '上一則還沒回完，等 bot 回完再送；你打的字還在。'
+    if (e.status === 409) return t('上一則還沒回完，等 bot 回完再送；你打的字還在。')
     // 附件在資料夾裡找不到了：再送一次也一樣，要移除後重新選（#1097）。
-    if (e.status === 400 && e.reason === 'unknown_attachment') return '有附件已經不在了，請把附件移除、重新選一次再送；你打的字還在。'
+    if (e.status === 400 && e.reason === 'unknown_attachment') return t('有附件已經不在了，請把附件移除、重新選一次再送；你打的字還在。')
   }
-  if (what === 'upload') return '上傳失敗，請再試一次。'
-  if (what === 'send') return '送出失敗，請再試一次；你打的字還在。'
+  if (what === 'upload') return t('上傳失敗，請再試一次。')
+  if (what === 'send') return t('送出失敗，請再試一次；你打的字還在。')
   // 載入較早訊息是手動的（按重試才再抓），不能寫成「正在重試」。
-  if (what === 'older') return '連不上，請按重試再試一次。'
-  return '連不上，正在重試…'
+  if (what === 'older') return t('連不上，請按重試再試一次。')
+  return t('連不上，正在重試…')
 }
