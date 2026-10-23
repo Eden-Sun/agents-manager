@@ -129,9 +129,9 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 }
 
 /// 不重啟就套用設定（SPEC §4.4a）。grok `model`、claude `model`/`effort` 走一行 slash
-/// 指令；grok `effort` 不送 `/effort`（會寫進 config.toml）。codex 的 `/model` 是不吃參數的選單、`/fast` 是開關，走 [`crate::codex_live`]
-/// 送鍵讀畫面再回讀狀態列（2026-09-09 實測）。副作用：claude（2.1.263 實測）與 codex 都會把
-/// 選擇存成帳號之後新 session 的預設。
+/// 指令；grok `effort` 不送 `/effort`（會寫進 config.toml）。codex >= 0.164.0 一行 `/model <id> --reasoning=… --speed=…`（只作用於這個 session）；更舊的版本 `/model` 是不吃參數的選單、`/fast` 是開關，
+/// 都走 [`crate::codex_live`]，送出後讀畫面再回讀狀態列（2026-09-09、2026-10-23 實測）。副作用：claude（2.1.263 實測）與 codex 的選單路徑會把
+/// 選擇存成帳號之後新 session 的預設；codex 的一行路徑不會。
 /// 回傳 `None` = 已套用；`Some(理由)` = 退回重啟。理由一路帶回 `live_apply` 並寫 log——
 /// 2026-09-13 使用者問 codex 改 effort 為何重啟，當時每個失敗出口都是靜默的。
 pub async fn apply_live_setting(app: &impl LcHost, bot_id: &str, fields: &[&str]) -> Option<String> {
@@ -315,11 +315,13 @@ async fn apply_live_setting_inner(
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
+        // 跑著的 codex 版本（不是磁碟上的）：決定一行套用或走選單（`codex_live::oneshot_supported`）。
+        let running = crate::codex_update::running_version_of(&run.id);
         mark_pane_typed(app, &run.id).await?;
         let applied = if during_turn {
             crate::codex_live::apply_fast_during_turn(&client, &pane_id, &bot, was_fast).await
         } else {
-            crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await
+            crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields, running.as_deref()).await
         };
         let seen = match applied {
             Ok(seen) => seen,
@@ -474,7 +476,8 @@ async fn interrupt_and_apply(
 
     // 從這裡起 Esc 已經停下了回合：不論套用成不成功都要讓它接著跑。
     let was_fast = run.runtime_fast.map(|v| v != 0);
-    let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields).await;
+    let running = crate::codex_update::running_version_of(&run.id);
+    let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields, running.as_deref()).await;
     let resumed = crate::codex_live::send_resume(&client, &pane_id).await;
     tracing::info!(bot_id = %bot.id, ?fields, applied = ?applied.as_ref().err(), resumed = ?resumed.as_ref().err(), "codex live apply interrupted the turn");
 

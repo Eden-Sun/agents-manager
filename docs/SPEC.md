@@ -946,7 +946,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 |---|---|---|
 | claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>`；有對話紀錄時 `/model` 跳「Switch model?」確認框，daemon 回讀畫面按 `1`，關不掉就 Esc 並回 `needs_restart` |
 | grok | model 可以；effort 要重啟 | `/model <id>`。不送 `/effort`：grok 1.0.46 會把該指令寫成 `[models] default_reasoning_effort`，使用者自己開的 grok 也跟著變。等級只在下次啟動的 `--reasoning-effort` |
-| codex | 可以 | `/model` 兩層選單 + `/fast` 開關，見下 |
+| codex | 可以 | 0.164.0 起一行 `/model <id> --reasoning=… --speed=…`；更舊的版本 `/model` 兩層選單 + `/fast` 開關，見下 |
 
 **PATCH／live apply 的提交狀態機（#598、#602、#603、#604）**：
 
@@ -977,7 +977,26 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `-c service_tier=""`（沒勾）。`priority` 是 `model/list` 唯一廣告的 tier，TUI 顯示為 `fast`。model／effort 不這樣做：它們的「不指定」在 UI 上就寫「使用 CLI 預設」。
 
 **codex 即時套用**（`codex_live.rs`）：
-- `/model` **不吃參數**（帶參數會被當 prompt 送出）。空 `/model` + Enter → `Select Model and Effort` 編號選單 → 選模型 → `Select Reasoning Level` → 選強度，
+- **0.164.0 起一行套用**（#1918，2026-10-23 在 0.164.0 的一次性 `CODEX_HOME` 實測）：`/model [<id>] [--reasoning=<level>] [--speed=<tier>]`，不算回合。成功印
+  `• Model changed to <id> <effort> [fast] for this session only`，被拒印 `■ Model '…' is unavailable`／`■ Reasoning level '…' is unavailable for …`／`■ Speed '…' is unavailable for …`／
+  `■ Unexpected argument '…'`（輸入框不留字、設定不變）。`--speed` 收 `standard`／`flex`／`priority`（`fast` 也收；daemon 用 `priority`，跟 `-c service_tier="priority"` 對齊），
+  `standard` 清掉 fast。模型 id 要小寫 id（`GPT-6.1-Sol` 會被拒）；`--reasoning=default` 會被拒。
+  - **版本閘**：只看 `codex_update::running_version_of(run.id)`（跑著的那個 process，不是磁碟上的、不跑 `--version`）。`None`、低於 0.164.0、讀不懂（含 `-alpha` 後綴）一律走下面的選單路徑——
+    舊版會把 `/model x --reasoning=y` 當 prompt 送給模型。`oneshot_supported`。
+  - **指令**（`oneshot_model_command`）：`fields` 含 model 或 effort 才帶模型與強度（沒設模型＝不帶，維持現在的；沒設強度＝不帶 `--reasoning`，等同選單的 `(default)` 那一列，
+    換模型時回到新模型的預設，狀態列顯示的是那個具體等級，不是 `default`，`runs.runtime_effort` 記具體值、`bots.effort` 不動）；速度**一律明確帶**（fast＝`--speed=priority`，否則 `--speed=standard`），
+    因為換模型時 codex 會保留原本的速度。
+  - **回應與回讀**：送出前照舊檢查沒有選單、輸入框沒有草稿。送出後最多等 3 秒看回應行（`model_responses`），再最多等 3 秒讓狀態列回來（max／ultra 的 `M A X`／`U L T R A` 動畫會暫時蓋住它）並走既有的 `verify`；
+    超時回 `oneshot_unverified`，不無限等。不用 `thread_settings_applied` 當回讀（rollout 要到下一個回合才寫它）。
+  - **被拒（`oneshot_rejected`）**：這次 apply 失敗、記 WARN，**不**自動退回選單。只有「送出後完全沒有回應行、狀態列也沒變」才算這個 codex 不認得，**退回選單一次**；
+    畫面變成「回合進行中」（那行被當 prompt 送出）回 `oneshot_became_prompt`，不再往同一個畫面打字。
+  - **只作用於這個 session，不寫 `config.toml`**；選單路徑則會把選擇存成帳號之後新 session 的預設（身分 `config.toml` 的 `model`／`model_reasoning_effort`，`codex_apply_identity_config` 會拿它標 `GET /api/models` 的預設）。
+    兩者不同：一行路徑不再改變使用者自己開的 codex 的預設。
+  - **重啟後**：bot 的 model／effort 有值時，啟動與 resume／fork 都帶 `-m`／`-c model_reasoning_effort`（`setup.rs`、`herdr_shim` 會在子命令後補一份），0.164.0 實測 `-m`／`-c` 優先於 thread 存下的設定（#1917，
+    issue comment 6358720727），所以不會因為一行路徑不寫 `config.toml` 而跑錯設定。bots 的 model／effort 留空時，daemon 不帶 `-m`／`-c`；從 0.164.0 起 resume 會沿用 thread 存的設定，
+    包括 oneshot 或手動 `/model` 的結果；想固定的話，在網頁上設一個明確的值（#1917）。service tier 則每次啟動都明確帶（`-c service_tier="priority"` 或 `""`）。
+  - 回合中改 model／effort 仍是「Esc 打斷 → 套用 → continue」，其中的套用同樣依版本走一行或選單；回合進行中直接送帶參數的 `/model` 沒有實測，不做。回合中只改 fast 仍走 `/fast`（`apply_fast_during_turn`）。
+- **0.164.0 以前（或版本未知）**：`/model` **不吃參數**（帶參數會被當 prompt 送出）。空 `/model` + Enter → `Select Model and Effort` 編號選單 → 選模型 → `Select Reasoning Level` → 選強度，
   印 `• Model changed to …`。`Max`/`Ultra` 在 `More reasoning…` 底下。只改強度也要先選模型（沒指定時選 `(current)`）。
 - `/fast` 是開關，PATCH 的 live 欄位閘門要把 `fast` 算進去。**`/fast on`／`/fast off` 不是 slash 形式**（2026-09-22，0.154.0，隔離的 `CODEX_HOME` 實測）：
   裸 `/fast` 回 `Service tier set to priority`／`… default`（狀態列 `fast` 字樣隨之出現／消失），而 `/fast on` 會被當一般 prompt 送給模型、模型跑去查文件。
