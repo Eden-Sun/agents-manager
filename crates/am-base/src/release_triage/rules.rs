@@ -54,6 +54,8 @@ struct Profile {
 struct RulesFile {
     claude: Profile,
     codex: Profile,
+    agy: Profile,
+    grok: Profile,
 }
 
 fn rules() -> &'static RulesFile {
@@ -65,12 +67,14 @@ fn profile(kind: &str) -> Option<&'static Profile> {
     match kind {
         "claude" => Some(&rules().claude),
         "codex" => Some(&rules().codex),
+        "agy" => Some(&rules().agy),
+        "grok" => Some(&rules().grok),
         _ => None,
     }
 }
 
 /// 目前有規則 profile 的上游（`herdr` 第二階段才補）。`upstream:<kind>` 標籤照這份清單要求。
-pub const KINDS: &[&str] = &["claude", "codex"];
+pub const KINDS: &[&str] = &["claude", "codex", "agy", "grok"];
 
 /// 有沒有這個 kind 的規則 profile（`herdr` 第二階段才補）。
 pub fn supported(kind: &str) -> bool {
@@ -192,7 +196,7 @@ mod tests {
 
     #[test]
     fn rules_toml_parses_and_every_kind_is_known() {
-        for kind in ["claude", "codex"] {
+        for kind in KINDS {
             let p = profile(kind).unwrap();
             for r in p.hard_drop.iter().chain(&p.soft_drop).chain(&p.verbs).chain(&p.kept) {
                 assert!(["prefix", "contains", "word", "exact", "flag", "env", "camel"].contains(&r.kind.as_str()), "{}", r.name);

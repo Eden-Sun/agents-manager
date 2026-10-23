@@ -268,3 +268,72 @@ name = "sandbox"
 category = "sandbox"
 kind = "word"
 patterns = ["approval", "sandbox"]
+
+# ───────────────────────────── agy ─────────────────────────────
+# 第一版刻意保守（#1928）：只放能明確對應到我們模組的類別（hook、畫面判讀、額度、resume、子 agent），
+# 沒有任何 drop 規則；其他一律進 unmatched（照樣送模型，放第二張清單），先看 unmatched 比例再補規則。
+# changelog 是官方 repo 的 CHANGELOG.md（`## x.y.z` ＋ `- ` 單行條目）。
+
+[[agy.kept]]
+name = "hook"
+category = "hook"
+kind = "word"
+patterns = ["hook"]
+
+[[agy.kept]]
+name = "screen-read"
+category = "tui"
+kind = "contains"
+patterns = ["status line", "statusLine", "permission prompt", "approval prompt", "spinner", "prompt box"]
+
+[[agy.kept]]
+name = "quota"
+category = "quota"
+kind = "contains"
+patterns = ["quota", "credit balance", "rate limit", "token usage"]
+
+[[agy.kept]]
+name = "resume"
+category = "session"
+kind = "word"
+patterns = ["resume", "/fork", "--fork-session", "--continue"]
+
+[[agy.kept]]
+name = "subagent"
+category = "subagent"
+kind = "word"
+patterns = ["subagent"]
+
+# ───────────────────────────── grok ─────────────────────────────
+# 同 agy 的保守原則（#1928）。changelog 是 CDN 的 `<版>.external.md`（`# x.y.z — 日期`、`## Features` 等小標題、
+# `- **關鍵詞** 說明` 單行條目），stable 的檔涵蓋上一個 stable 之後的所有版本。
+
+[[grok.kept]]
+name = "hook"
+category = "hook"
+kind = "word"
+patterns = ["hook"]
+
+[[grok.kept]]
+name = "screen-read"
+category = "tui"
+kind = "contains"
+patterns = ["status line", "statusLine", "permission prompt", "approval prompt", "spinner", "prompt box"]
+
+[[grok.kept]]
+name = "quota"
+category = "quota"
+kind = "contains"
+patterns = ["quota", "credit balance", "rate limit", "token usage"]
+
+[[grok.kept]]
+name = "resume"
+category = "session"
+kind = "word"
+patterns = ["resume", "/fork", "--fork-session", "--continue"]
+
+[[grok.kept]]
+name = "subagent"
+category = "subagent"
+kind = "word"
+patterns = ["subagent"]

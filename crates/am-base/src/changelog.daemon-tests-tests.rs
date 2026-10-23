@@ -236,10 +236,12 @@
         status: u16,
         location: Option<String>,
         body: Vec<u8>,
+        /// 不帶 Content-Length、無止盡的 chunked 回應（客戶端不設限就會一直讀到逾時）。
+        endless: bool,
     }
 
     fn route(path: &'static str, body: &str) -> Route {
-        Route { path, status: 200, location: None, body: body.as_bytes().to_vec() }
+        Route { path, status: 200, location: None, body: body.as_bytes().to_vec(), endless: false }
     }
 
     /// 本機假上游：記下每個收到的請求路徑；沒登記的路徑回 404。
@@ -266,6 +268,17 @@
                     let head = String::from_utf8_lossy(&buf).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     log.lock().unwrap().push(path.clone());
+                    if routes.iter().any(|r| r.path == path && r.endless) {
+                        // chunked、沒有 Content-Length、永遠寫不完：客戶端邊讀邊限制才會在寫失敗前收手。
+                        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
+                        let piece = format!("{:x}\r\n{}\r\n", 64 * 1024, "x".repeat(64 * 1024));
+                        for _ in 0..4096 {
+                            if sock.write_all(piece.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        return;
+                    }
                     let (status, location, body) = match routes.iter().find(|r| r.path == path) {
                         Some(r) => (r.status, r.location.clone(), r.body.clone()),
                         None => (404, None, b"not found".to_vec()),
@@ -314,7 +327,7 @@
     async fn agy_redirects_are_not_followed_and_the_releases_fallback_is_used_instead() {
         let releases = r#"[{"tag_name":"1.4.6","draft":false,"prerelease":false,"body":"- Added a thing.\n- Fixed https://evil.example/y"}]"#;
         let (base, log) = serve(vec![
-            Route { path: "/agy/CHANGELOG.md", status: 302, location: Some("/evil".into()), body: Vec::new() },
+            Route { path: "/agy/CHANGELOG.md", status: 302, location: Some("/evil".into()), body: Vec::new(), endless: false },
             route("/agy/releases", releases),
         ])
         .await;
@@ -324,7 +337,7 @@
         assert_eq!((all.len(), all[0].version.as_str()), (1, "1.4.6"));
         assert_eq!(all[0].body.lines().filter(|l| l.starts_with("- ")).count(), 2);
         // 兩個都失敗：明確報錯，不當成「沒有新版」。
-        let (base, log) = serve(vec![Route { path: "/agy/CHANGELOG.md", status: 302, location: Some("/evil".into()), body: Vec::new() }]).await;
+        let (base, log) = serve(vec![Route { path: "/agy/CHANGELOG.md", status: 302, location: Some("/evil".into()), body: Vec::new(), endless: false }]).await;
         let err = fetch_pinned_feed("agy", &source(&base)).await.unwrap_err().to_string();
         assert!(err.contains("備援也失敗"), "{err}");
         assert!(!seen(&log).iter().any(|p| p == "/evil"));
@@ -357,7 +370,7 @@
             assert_eq!(seen(&log), ["/grok/stable"], "{body:?}：指標看不懂就停，不去抓任何別的東西");
         }
         // 指標轉址：不跟。
-        let (base, log) = serve(vec![Route { path: "/grok/stable", status: 301, location: Some("/evil".into()), body: Vec::new() }]).await;
+        let (base, log) = serve(vec![Route { path: "/grok/stable", status: 301, location: Some("/evil".into()), body: Vec::new(), endless: false }]).await;
         assert!(fetch_pinned_feed("grok", &source(&base)).await.is_err());
         assert_eq!(seen(&log), ["/grok/stable"]);
     }
@@ -376,5 +389,34 @@
         assert!(fetch_pinned_feed("agy", &src).await.is_err());
         assert!(seen(&log).is_empty());
         assert!(fetch_pinned_feed("claude", &source(&base)).await.is_err());
+    }
+
+    /// 沒有 Content-Length 的 chunked 回應：邊讀邊限制大小，超過上限就停，不是整份讀完才檢查（256 MiB 的流不會被讀完）。
+    #[tokio::test]
+    async fn a_chunked_response_without_content_length_is_capped_while_reading() {
+        let endless = |path| Route { path, status: 200, location: None, body: Vec::new(), endless: true };
+        let started = std::time::Instant::now();
+        let (base, _) = serve(vec![endless("/agy/CHANGELOG.md"), endless("/agy/releases")]).await;
+        let err = fetch_pinned_feed("agy", &source(&base)).await.unwrap_err().to_string();
+        assert!(err.contains("超過"), "{err}");
+        let (base, _) = serve(vec![route("/grok/stable", "1.0.67"), endless("/grok/changelogs/1.0.67.external.md")]).await;
+        let err = fetch_pinned_feed("grok", &source(&base)).await.unwrap_err().to_string();
+        assert!(err.contains("超過"), "{err}");
+        let (base, _) = serve(vec![endless("/grok/stable")]).await;
+        assert!(fetch_pinned_feed("grok", &source(&base)).await.unwrap_err().to_string().contains("超過"));
+        assert!(started.elapsed() < Duration::from_secs(15), "沒有邊讀邊限就會一路讀到逾時：{:?}", started.elapsed());
+    }
+
+    /// grok 的 `source_url` 指到該版的 `.external.md`，其他 kind 不變。
+    #[tokio::test]
+    async fn grok_source_url_points_at_that_versions_file() {
+        assert_eq!(source_url_for("grok", "1.0.67"), "https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/1.0.67.external.md");
+        assert_eq!(source_url_for("grok", "../x"), source_url("grok"), "版本看不懂就退回指標，不拼網址");
+        assert_eq!(source_url_for("agy", "1.4.6"), source_url("agy"));
+        let e = crate::testing::env().await;
+        e.app.changelog.seed("grok", GROK_MD).await;
+        let r = lookup(&e.app, "local", "grok", Some("1.0.64"), Some("1.0.65")).await;
+        assert!(r.found, "{:?}", r.error);
+        assert!(r.source_url.ends_with("/changelogs/1.0.67.external.md"), "{}", r.source_url);
     }
 

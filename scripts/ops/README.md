@@ -561,8 +561,8 @@ works while `publish = false`:
 `checks` must all be green before an issue can actually be opened: `gh_auth_ok`, `repo_ok`, `can_write`
 (`viewer_permission` is `ADMIN`/`MAINTAIN`/`WRITE`/`TRIAGE`), `issues_enabled`, and `labels_missing` empty.
 `gh issue create --label` **hard-fails on a nonexistent label**, so a single missing one leaves the whole version stuck at
-`judged`; create these five on the repo first: `release-triage`, `upstream:claude`, `upstream:codex`, `triage:guard`,
-`triage:adopt`. Each proposal's `action` is `create` (will open) | `comment` (`duplicate_of`, comment only) | `existing`
+`judged`; create these seven on the repo first: `release-triage`, `upstream:claude`, `upstream:codex`, `upstream:agy`,
+`upstream:grok`, `triage:guard`, `triage:adopt`. Each proposal's `action` is `create` (will open) | `comment` (`duplicate_of`, comment only) | `existing`
 (the remote already has the same marker, closed ones included; will not reopen) | `already_logged` |
 `skipped_version_limit` | `deferred_daily_limit` | `remote_unknown` (the `gh` check failed so dedup cannot be answered).
 Once `publish = true`, the kick's per-round `publish` retry opens every `judged` version (at most 4 issues per version,

@@ -227,7 +227,7 @@ prepare_claude_diff
 # 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled／deferred）時安靜，不寫 log。
 # 舊的 bin/agm 沒有 release-triage 子命令（argparse exit 2）：只講一次，用 state 檔記「已經講過」，不每 30 分鐘洗 log。
 NO_PUBLISH_NOTE="$DIR/release-triage-publish-unsupported"
-for KIND in claude codex; do
+for KIND in claude codex agy grok; do
   OUT=$("$AGM" --compact release-triage publish --kind "$KIND" 2>&1); RC=$?
   if [ "$RC" -eq 2 ]; then
     [ -e "$NO_PUBLISH_NOTE" ] || { log "bin/agm 不認得 release-triage（舊版，exit 2），略過 publish 重試；換新 agm 後才會有效"; : > "$NO_PUBLISH_NOTE"; }
@@ -256,7 +256,7 @@ done
 # 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。派給同一顆分診 bot（協調者／巡檢），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
-for KIND in claude codex; do
+for KIND in claude codex agy grok; do
   if ! SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null); then
     note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
     continue
@@ -439,7 +439,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
   return 0
 }
 
-for KIND in claude codex; do
+for KIND in claude codex agy grok; do
   # 抓不到／CLI 壞掉就是這輪不做這個 kind，不當成「沒有新版」；另一個 kind 照跑。
   BINARY_ONLY=0
   REPORT=$("$BIN" release-triage-check --kind "$KIND" --json 2>>"$LOG") || {
