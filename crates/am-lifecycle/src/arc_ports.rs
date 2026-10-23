@@ -1351,4 +1351,5 @@ impl<T> crate::lifecycle::LcHost for std::sync::Arc<T> where
         + crate::lifecycle::send_now::ports::SendEnvPort
         + crate::lifecycle::send_now::ports::ShareSendRepo
         + crate::login_prompt::LoginNeeded
+        + crate::models::ModelsCache
 {}

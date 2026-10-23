@@ -983,13 +983,19 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `standard` 清掉 fast。模型 id 要小寫 id（`GPT-6.1-Sol` 會被拒）；`--reasoning=default` 會被拒。
   - **版本閘**：只看 `codex_update::running_version_of(run.id)`（跑著的那個 process，不是磁碟上的、不跑 `--version`）。`None`、低於 0.164.0、讀不懂（含 `-alpha` 後綴）一律走下面的選單路徑——
     舊版會把 `/model x --reasoning=y` 當 prompt 送給模型。`oneshot_supported`。
-  - **指令**（`oneshot_model_command`）：`fields` 含 model 或 effort 才帶模型與強度（沒設模型＝不帶，維持現在的；沒設強度＝不帶 `--reasoning`，等同選單的 `(default)` 那一列，
-    換模型時回到新模型的預設，狀態列顯示的是那個具體等級，不是 `default`，`runs.runtime_effort` 記具體值、`bots.effort` 不動）；速度**一律明確帶**（fast＝`--speed=priority`，否則 `--speed=standard`），
-    因為換模型時 codex 會保留原本的速度。
+  - **指令**（`oneshot_model_command`）：`fields` 含 model 或 effort 才帶模型與強度（沒設模型＝不帶，維持現在的）；速度**一律明確帶**（fast＝`--speed=priority`，否則 `--speed=standard`），
+    因為換模型時 codex 會保留原本的速度。**沒設強度（空或 `default`）＝選單的 `(default)` 那一列＝這個模型的預設強度，也要明確帶**：0.164.0 實測
+    `/model gpt-6.1-sol --reasoning=high` → 狀態列 `GPT-6.1-Sol high`；接著 `/model gpt-6.1-sol --speed=standard` → `• Model changed to gpt-6.1-sol low standard for this session only`、狀態列 `GPT-6.1-Sol low`
+    ——**同一個模型不帶 `--reasoning` 會把強度重設成該模型的預設**（不帶模型的 `/model --speed=standard` 才保留，狀態列 `high`；`--reasoning=default` 會被拒）。
+    預設強度取自模型清單快取（`GET /api/models` 的同一份，10 分鐘內，依 bot 的主機與身分；`codex_live::model_default_effort`，沒設模型就用 run 現在的模型）；
+    **查不到（快取過期、模型不在清單、值不是已知等級）就不送一行指令，走選單的 `(default)` 那一列**。回讀除了 `verify`，帶了強度的還要對上我們帶的那個等級，
+    `runs.runtime_effort` 記狀態列的具體值、`bots.effort` 不動。
   - **回應與回讀**：送出前照舊檢查沒有選單、輸入框沒有草稿。送出後最多等 3 秒看回應行（`model_responses`），再最多等 3 秒讓狀態列回來（max／ultra 的 `M A X`／`U L T R A` 動畫會暫時蓋住它）並走既有的 `verify`；
     超時回 `oneshot_unverified`，不無限等。不用 `thread_settings_applied` 當回讀（rollout 要到下一個回合才寫它）。
-  - **被拒（`oneshot_rejected`）**：這次 apply 失敗、記 WARN，**不**自動退回選單。只有「送出後完全沒有回應行、狀態列也沒變」才算這個 codex 不認得，**退回選單一次**；
-    畫面變成「回合進行中」（那行被當 prompt 送出）回 `oneshot_became_prompt`，不再往同一個畫面打字。
+  - **送出之後的失敗出口都看一次輸入框**（逾時、回讀對不上、讀不到畫面、送不出去）：不是空的就回 `oneshot_residue` 並記 WARN，不再往裡面打字；讀不到帶樣式的畫面就照原因回。
+  - **被拒（`oneshot_rejected`）**：這次 apply 失敗、記 WARN，**不**自動退回選單。**退回選單的條件很窄**：送出後畫面上沒有任何新的非空行（連送出的那一行都沒留下）、狀態列沒變、
+    而且送出前不是已經在目標上（回應慢不是不認得）；退回前還要再確認輸入框是空的（`Some(true)`），否則回 `oneshot_residue`（讀不到帶樣式的畫面回 `oneshot_unverified`），免得接成 `/model … /model` 再按 Enter。
+    符合才退回選單**一次**。畫面變成「回合進行中」（那行被當 prompt 送出）回 `oneshot_became_prompt`，不再往同一個畫面打字。
   - **只作用於這個 session，不寫 `config.toml`**；選單路徑則會把選擇存成帳號之後新 session 的預設（身分 `config.toml` 的 `model`／`model_reasoning_effort`，`codex_apply_identity_config` 會拿它標 `GET /api/models` 的預設）。
     兩者不同：一行路徑不再改變使用者自己開的 codex 的預設。
   - **重啟後**：bot 的 model／effort 有值時，啟動與 resume／fork 都帶 `-m`／`-c model_reasoning_effort`（`setup.rs`、`herdr_shim` 會在子命令後補一份），0.164.0 實測 `-m`／`-c` 優先於 thread 存下的設定（#1917，
