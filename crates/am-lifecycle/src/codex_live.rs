@@ -247,7 +247,6 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     };
     let fast_edge = bot.managed_by == "child" && run.runtime_fast.is_some_and(|prev| prev != i64::from(seen.fast));
     let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast, run.runtime_fast.unwrap_or(0) != 0) } else { None };
-    let follow = !fast_edge || attempt.is_some();
     // 設定與 runtime 原子提交；失敗或取消一起 rollback，但嘗試記錄保留。
     let Ok(mut tx) = app.db().begin().await else { return false };
     let model = Some(seen.model.as_str()).filter(|_| run.runtime_model.as_deref() != Some(seen.model.as_str()));
@@ -257,8 +256,10 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
         crate::child_runtime::EffortFollow::Set(value) => (Some(value), false),
         crate::child_runtime::EffortFollow::Clear => (None, true),
     };
-    let fast = fast_edge.then_some(i64::from(seen.fast));
-    let changed = if follow && bot.managed_by == "child" && (model.is_some() || effort_value.is_some() || clear || fast.is_some()) {
+    // 被去重（或表滿）的 fast edge 只是不重播 fast；同一輪的 model／effort 照常跟隨（#1906）。
+    // `attempt` 只在 fast_edge 時才可能是 Some。
+    let fast = attempt.is_some().then_some(i64::from(seen.fast));
+    let changed = if bot.managed_by == "child" && (model.is_some() || effort_value.is_some() || clear || fast.is_some()) {
         match sqlx::query(
             "UPDATE bots SET model=COALESCE(?, model), effort=CASE WHEN ? THEN NULL ELSE COALESCE(?, effort) END, fast=COALESCE(?, fast)
              WHERE id=? AND managed_by='child'
@@ -1139,6 +1140,74 @@ mod tests {
         sqlx::query("DROP TRIGGER reject_fast_follow").execute(&env.app.db).await.unwrap();
         assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
         assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "失敗的 edge 不再回寫設定，只補 runtime");
+        assert_eq!(fast_of(&env, &run).await, Some(0));
+    }
+
+    /// 讓 fast edge 先嘗試一次並失敗（trigger 擋住 bots.fast 寫入），之後同一個 edge 再出現就是被去重。
+    async fn deduped_fast_edge(env: &crate::testing::Env) -> (String, String) {
+        let (bot, run) = child_with_effort(env, "child", Some("high"), Some("high")).await;
+        sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_fast_follow BEFORE UPDATE OF fast ON bots BEGIN SELECT RAISE(FAIL, 'test fast write failure'); END").execute(&env.app.db).await.unwrap();
+        assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
+        sqlx::query("DROP TRIGGER reject_fast_follow").execute(&env.app.db).await.unwrap();
+        (bot, run)
+    }
+
+    async fn bot_model_fast(env: &crate::testing::Env, bot: &str) -> (Option<String>, i64) {
+        let b = db::bot(&env.app.db, bot).await.unwrap().unwrap();
+        (b.model, b.fast)
+    }
+
+    /// #1906：fast edge 被去重時，同一輪畫面上的 model／effort 切換仍要寫進 bots，否則 runtime 已更新、下一輪 same 成立，永遠補不回來。
+    #[tokio::test]
+    async fn a_deduped_fast_edge_still_follows_a_model_and_effort_change() {
+        let env = crate::testing::env().await;
+        let (bot, run) = deduped_fast_edge(&env).await;
+        let switched = ASTRA_HIGH.replace("gpt-6-astra high", "gpt-6-luna low");
+        assert!(correct_runtime_from_screen(&env.app, &run, &switched).await);
+        let (model, fast) = bot_model_fast(&env, &bot).await;
+        assert_eq!(model.as_deref(), Some("gpt-6-luna"), "model 不能因 fast edge 被去重而丟掉");
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("low"));
+        assert_eq!(fast, 1, "被去重的 fast edge 不重播 fast");
+        assert_eq!(fast_of(&env, &run).await, Some(0));
+        assert!(!correct_runtime_from_screen(&env.app, &run, &switched).await);
+    }
+
+    /// 沒有 fast edge（fast 沒變）時 model／effort 照常跟隨，且不碰 bots.fast（UI 尚未套用的 fast 意圖不能被蓋掉）。
+    #[tokio::test]
+    async fn without_a_fast_edge_model_and_effort_follow_and_fast_is_untouched() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        // runtime_fast 維持 0，畫面也沒有 fast：不是 edge。
+        let switched = ASTRA_HIGH.replace("gpt-6-astra high", "gpt-6-luna low");
+        assert!(correct_runtime_from_screen(&env.app, &run, &switched).await);
+        let (model, fast) = bot_model_fast(&env, &bot).await;
+        assert_eq!(model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("low"));
+        assert_eq!(fast, 1, "沒有 fast edge 就不寫 fast");
+        assert!(super::fast_follow_edges().lock().unwrap().0.get(&run).is_none(), "沒有 edge 就不登記");
+    }
+
+    /// 第一次嘗試成功的 fast edge：model 與 fast 在同一個交易一起提交。
+    #[tokio::test]
+    async fn a_first_fast_edge_attempt_writes_model_and_fast_in_one_transaction() {
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        sqlx::query("UPDATE bots SET fast=0 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        let switched = ASTRA_HIGH.replace("gpt-6-astra high", "gpt-6-luna high fast");
+        assert!(correct_runtime_from_screen(&env.app, &run, &switched).await);
+        assert_eq!(bot_model_fast(&env, &bot).await, (Some("gpt-6-luna".to_string()), 1));
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+
+        // 原子性：同一輪 fast 寫入被擋時，model 也一起 rollback、runtime 不前進（下一輪還能重試）。
+        let env = crate::testing::env().await;
+        let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
+        sqlx::query("UPDATE bots SET fast=0 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_fast_follow BEFORE UPDATE OF fast ON bots BEGIN SELECT RAISE(FAIL, 'test fast write failure'); END").execute(&env.app.db).await.unwrap();
+        assert!(!correct_runtime_from_screen(&env.app, &run, &switched).await);
+        assert_eq!(bot_model_fast(&env, &bot).await, (Some("gpt-6-astra".to_string()), 0));
         assert_eq!(fast_of(&env, &run).await, Some(0));
     }
 
