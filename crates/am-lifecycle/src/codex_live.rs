@@ -1,7 +1,14 @@
 //! Changing a **running** codex's model / effort / fast tier (SPEC §4.4a).
 //!
-//! Unlike claude/grok, codex 0.153.4 (verified 2026-09-09) has no one-line form:
-//! * `/model` takes **no arguments** (`/model x high` becomes a prompt); bare `/model` opens two
+//! * codex >= 0.164.0 (measured 2026-10-23 in a scratch `CODEX_HOME`): one line does it all,
+//!   `/model [<id>] [--reasoning=<level>] [--speed=<tier>]` ([`oneshot_model_command`]). The answer is
+//!   `• Model changed to <id> <effort> [fast] for this session only` or a `■ … unavailable` /
+//!   `■ Unexpected argument …` line ([`model_responses`]). It changes this session only: unlike the
+//!   menus below it does NOT write the choice into `config.toml`. Older codex (or a run whose version we
+//!   have not seen) takes the menu path below: there `/model x --reasoning=y` would be sent to the model
+//!   as an ordinary prompt, so the version gate ([`oneshot_supported`]) is strict.
+//! * codex 0.153.4 (verified 2026-09-09) has no one-line form:
+//!   `/model` takes **no arguments** (`/model x high` becomes a prompt); bare `/model` opens two
 //!   numbered pickers (model, then reasoning level), so even an effort-only change picks a model.
 //! * `/fast` is a plain **toggle** (2026-09-22, 0.154.0, measured in a scratch `CODEX_HOME`):
 //!   bare `/fast` answers `Service tier set to priority` / `… default`, but `/fast on` and
@@ -12,8 +19,8 @@
 //!   still proves the result, and nothing is refused for an unknown starting tier.
 //!
 //! Picker contents/order and `(default)`/`(current)` markers vary by account, so every step reads
-//! the pane back and matches on text. codex saves the choice as the account default in
-//! `~/.codex/config.toml` (CLI behaviour, not ours).
+//! the pane back and matches on text. The menus make codex save the choice as the account default in
+//! `~/.codex/config.toml` (CLI behaviour, not ours); the one-line form does not.
 
 use crate::db;
 use crate::herdr::HerdrClient;
@@ -703,13 +710,16 @@ pub fn needs_second_toggle(seen: Option<bool>, want: bool) -> bool {
     matches!(seen, Some(n) if n != want)
 }
 
-/// On `Err` the caller keeps `needs_restart: true`.
+/// On `Err` the caller keeps `needs_restart: true`. `running_version` is `codex_update::running_version_of(run.id)`
+/// (the version of the process in the pane, never the one installed on disk): `None` or older than
+/// [`ONESHOT_MIN_VERSION`] takes the menu path.
 pub async fn apply(
     client: &HerdrClient,
     pane_id: &str,
     bot: &db::Bot,
     was_fast: Option<bool>,
     fields: &[&str],
+    running_version: Option<&str>,
 ) -> Result<CodexRuntime, &'static str> {
     // The startup migration and rate-limit suggestion both require a user choice. Do not type into
     // either screen or dismiss it with Escape while applying a setting.
@@ -725,6 +735,15 @@ pub async fn apply(
             return Err("composer_not_empty");
         }
     }
+    if oneshot_supported(running_version) && fields.iter().any(|f| matches!(*f, "model" | "effort" | "fast")) {
+        match apply_oneshot(client, pane_id, bot, fields).await {
+            Err(ONESHOT_NOT_SUPPORTED) => {
+                // 送出後沒有任何回應、狀態列也沒變：這個 codex 不認得該語法（版本讀錯）。退回選單一次。
+                tracing::warn!(pane_id, bot_id = %bot.id, ?running_version, "codex oneshot /model got no answer; falling back to the menus once");
+            }
+            done => return done,
+        }
+    }
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
         match apply_model_and_effort(client, pane_id, model, configured_effort(bot)).await {
@@ -737,6 +756,165 @@ pub async fn apply(
         reach_fast(client, pane_id, bot.fast != 0, was_fast).await?;
     }
     readback(client, pane_id, bot, fields).await
+}
+
+/// 第一個認得 `/model <id> --reasoning=… --speed=…` 的 codex（2026-10-23 在 0.164.0 實測）。
+pub const ONESHOT_MIN_VERSION: &str = "0.164.0";
+
+/// 一次性指令被拒（`■ … unavailable`／`■ Unexpected argument`）：這次 apply 失敗，**不**退回選單重試。
+pub const ONESHOT_REJECTED: &str = "oneshot_rejected";
+/// 送出後完全沒有回應文字、狀態列也沒變：這個 codex 不認得該語法，呼叫端可退回選單一次。
+const ONESHOT_NOT_SUPPORTED: &str = "oneshot_not_supported";
+/// 送出的那行變成了 prompt（畫面進入「回合進行中」）：絕不再往同一個畫面打字。
+const ONESHOT_BECAME_PROMPT: &str = "oneshot_became_prompt";
+/// 3 秒內讀不到可驗證的狀態列（max／ultra 的動畫會蓋住它）：回讀沒完成，不算套用成功。
+const ONESHOT_UNVERIFIED: &str = "oneshot_unverified";
+
+/// 等回應文字、等狀態列回來各自最多這麼久，不無限等。
+fn oneshot_wait() -> Duration {
+    Duration::from_millis(if cfg!(test) { 200 } else { 3000 })
+}
+
+fn oneshot_poll() -> Duration {
+    Duration::from_millis(if cfg!(test) { 10 } else { 250 })
+}
+
+/// 這個 run 跑的 codex（`codex_update::running_version_of`）能不能吃一次性 `/model`。版本沒看過、讀不懂（含 `-alpha`
+/// 之類的後綴）一律當不能：舊版會把那一行當 prompt 送給模型。
+pub fn oneshot_supported(running_version: Option<&str>) -> bool {
+    let parse = |v: &str| crate::changelog::version_string(v).and_then(|v| crate::changelog::parse_version(&v));
+    match (running_version.and_then(parse), parse(ONESHOT_MIN_VERSION)) {
+        (Some(running), Some(min)) => running >= min,
+        _ => false,
+    }
+}
+
+/// 模型 id 只收 `[A-Za-z0-9._-]`：多出來的空白或 `--` 會變成別的參數。
+fn oneshot_token_ok(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+}
+
+/// 一次性指令那一行。
+/// * `model`／`effort` 在 `fields` 裡才帶模型與強度，跟選單路徑一樣：沒設模型＝不帶（維持現在的）；
+///   沒設強度（空或 `default`）＝不帶 `--reasoning`，等於選單的 `(default)` 那一列（換模型時回到新模型的預設；0.164.0
+///   實測 `--reasoning=default` 會被拒）。
+/// * 速度**一律明確帶**，不靠開關：fast 帶 `--speed=priority`（0.164.0 實測 `fast` 與 `priority` 都接受，用 `priority`
+///   是為了跟 `-c service_tier="priority"` 對齊），非 fast 帶 `--speed=standard`。只換模型時 codex 會保留原本的速度，所以不帶就不確定。
+pub fn oneshot_model_command(bot: &db::Bot, fields: &[&str]) -> Result<String, &'static str> {
+    let mut line = String::from("/model");
+    if fields.iter().any(|f| *f == "model" || *f == "effort") {
+        if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if !oneshot_token_ok(m) {
+                return Err("oneshot_bad_model");
+            }
+            line.push(' ');
+            line.push_str(m);
+        }
+        if let Some(e) = configured_effort(bot) {
+            if effort_menu_label(e).is_empty() {
+                return Err("oneshot_bad_effort");
+            }
+            line.push_str(" --reasoning=");
+            line.push_str(e);
+        }
+    }
+    line.push_str(if bot.fast != 0 { " --speed=priority" } else { " --speed=standard" });
+    Ok(line)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelResponse {
+    Changed,
+    Rejected,
+}
+
+/// 畫面上所有 `/model` 一次性指令的回應行，由舊到新：`• Model changed to … for this session only`（成功）、
+/// `■ … is unavailable`／`■ Unexpected argument …`（被拒）。
+pub fn model_responses(screen: &str) -> Vec<(ModelResponse, String)> {
+    screen
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.starts_with("• Model changed to ") && l.ends_with("for this session only") {
+                Some((ModelResponse::Changed, l.to_string()))
+            } else if l.starts_with('■') && (l.contains("is unavailable") || l.contains("Unexpected argument")) {
+                Some((ModelResponse::Rejected, l.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// 送出之後多出來的那一則回應（同樣的字可能出現不只一次，所以比筆數也比最後一則）。
+fn new_model_response(before: &[(ModelResponse, String)], after: &[(ModelResponse, String)]) -> Option<ModelResponse> {
+    let grew = after.len() != before.len() || after.last() != before.last();
+    grew.then(|| after.last().map(|(kind, _)| *kind)).flatten()
+}
+
+/// codex >= 0.164.0 的一行套用（SPEC §4.4a）。先照 [`apply`] 的前置檢查（沒有選單、輸入框沒草稿）才會進來。
+/// 回讀沿用 [`verify`]，只看狀態列；`thread_settings_applied` 要到下一個回合才寫進 rollout，不當回讀。
+async fn apply_oneshot(client: &HerdrClient, pane_id: &str, bot: &db::Bot, fields: &[&str]) -> Result<CodexRuntime, &'static str> {
+    let line = oneshot_model_command(bot, fields)?;
+    let before = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let before_runtime = parse_status_line(&before);
+    let before_responses = model_responses(&before);
+    if !text(client, pane_id, &line).await {
+        return Err("oneshot_send_failed");
+    }
+    tokio::time::sleep(Duration::from_millis(if cfg!(test) { 20 } else { 600 })).await;
+    if !key(client, pane_id, "Enter").await {
+        return Err("oneshot_send_failed");
+    }
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    crate::race_point::hit("codex_oneshot_after_enter", pane_id).await;
+
+    // 先等回應文字。
+    let deadline = tokio::time::Instant::now() + oneshot_wait();
+    loop {
+        tokio::time::sleep(oneshot_poll()).await;
+        let screen = read(client, pane_id).await;
+        if let Ok(screen) = &screen {
+            match new_model_response(&before_responses, &model_responses(screen)) {
+                Some(ModelResponse::Rejected) => {
+                    tracing::warn!(pane_id, bot_id = %bot.id, command = %line, "codex oneshot /model rejected by the TUI; not retrying through the menus");
+                    return Err(ONESHOT_REJECTED);
+                }
+                Some(ModelResponse::Changed) => break,
+                None => {}
+            }
+            if crate::lifecycle::poller::pane_still_busy(screen) {
+                return Err(ONESHOT_BECAME_PROMPT);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let Ok(screen) = screen else { return Err("pane_read_failed") };
+            return match parse_status_line(&screen) {
+                // 沒有回應文字、狀態列沒動：不認得。讀不到狀態列就不能這樣斷定。
+                Some(now) if Some(&now) == before_runtime.as_ref() => Err(ONESHOT_NOT_SUPPORTED),
+                Some(_) => break,
+                None => Err(ONESHOT_UNVERIFIED),
+            };
+        }
+    }
+
+    // 再等狀態列回來並對上設定（max／ultra 的動畫會暫時蓋住它）。
+    let deadline = tokio::time::Instant::now() + oneshot_wait();
+    let mut last = ONESHOT_UNVERIFIED;
+    loop {
+        if let Ok(screen) = read(client, pane_id).await {
+            if let Some(seen) = parse_status_line(&screen) {
+                match verify(&seen, bot, fields) {
+                    Ok(()) => return Ok(seen),
+                    Err(why) => last = why,
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(last);
+        }
+        tokio::time::sleep(oneshot_poll()).await;
+    }
 }
 
 /// `/fast` until the status line says `want`: read the tier first, toggle only when wrong; an unknown tier is
@@ -1054,7 +1232,7 @@ mod tests {
             env.herdr.set_screen(pane, screen);
             env.herdr.fail_next("pane.read", crate::testing::Fault::Refuse);
 
-            assert!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.is_err(), "{pane}");
+            assert!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"], None).await.is_err(), "{pane}");
             assert!(env.herdr.calls_to("pane.send_text").is_empty(), "an unreadable preflight cannot authorize /model: {pane}");
             assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "an unreadable preflight cannot authorize Enter or Escape: {pane}");
         }
@@ -1079,7 +1257,7 @@ mod tests {
             fail("pane.read", crate::testing::Fault::Refuse);
         });
 
-        assert_eq!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await, Err("pane_read_failed"));
+        assert_eq!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"], None).await, Err("pane_read_failed"));
         assert_eq!(
             env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
             vec![Some("/model")],
@@ -1135,13 +1313,203 @@ mod tests {
             screens.lock().unwrap().insert(pane.into(), COMPOSER.into());
         });
 
-        let seen = apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.unwrap();
+        let seen = apply(&env.app.herdr, pane, &bot, Some(false), &["model"], None).await.unwrap();
         assert_eq!(seen, CodexRuntime { model: "gpt-6-astra".into(), effort: Some("high".into()), fast: false });
         assert_eq!(
             env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
             vec![Some("/model"), Some("1"), Some("3")],
             "a readable composer opens the picker and the verified requested rows are selected"
         );
+    }
+
+    // ---- codex >= 0.164.0 一行 `/model`（2026-10-23 在 0.164.0 的一次性 CODEX_HOME 實測，回應文字照原樣）----
+
+    #[test]
+    fn only_a_seen_codex_at_or_above_0_164_0_takes_the_one_line_form() {
+        for (v, ok) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0.163.9"), false),
+            (Some("0.164"), false),
+            (Some("0.164.0-alpha.1"), false),
+            (Some("0.164.0"), true),
+            (Some("0.164.1"), true),
+            (Some("0.165.0"), true),
+            (Some("1.0.0"), true),
+        ] {
+            assert_eq!(oneshot_supported(v), ok, "{v:?}");
+        }
+    }
+
+    async fn codex_bot(env: &crate::testing::Env, name: &str, model: Option<&str>, effort: Option<&str>, fast: i64) -> db::Bot {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET kind='codex', model=?, effort=?, fast=? WHERE id=?")
+            .bind(model)
+            .bind(effort)
+            .bind(fast)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        db::bot(&env.app.db, &bot.id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_one_line_command_always_names_the_speed_and_leaves_an_unset_effort_to_the_model_default() {
+        let env = crate::testing::env().await;
+        let all = ["model", "effort", "fast"];
+        let fast = codex_bot(&env, "oneshot-fast", Some("gpt-6-astra"), Some("high"), 1).await;
+        assert_eq!(oneshot_model_command(&fast, &all).unwrap(), "/model gpt-6-astra --reasoning=high --speed=priority");
+        let slow = codex_bot(&env, "oneshot-slow", Some("gpt-6-astra"), Some("xhigh"), 0).await;
+        assert_eq!(oneshot_model_command(&slow, &all).unwrap(), "/model gpt-6-astra --reasoning=xhigh --speed=standard");
+        // 沒設強度＝選單的 `(default)` 那一列：不帶 `--reasoning`（0.164.0 的 `--reasoning=default` 會被拒）。空字串與 `default` 一樣。
+        for (i, effort) in [None, Some(""), Some("default")].into_iter().enumerate() {
+            let bot = codex_bot(&env, &format!("oneshot-no-effort-{i}"), Some("gpt-6-luna"), effort, 0).await;
+            assert_eq!(oneshot_model_command(&bot, &["effort"]).unwrap(), "/model gpt-6-luna --speed=standard", "{effort:?}");
+        }
+        // 沒設模型＝選單的 `(current)`：不帶模型，維持現在的。
+        let no_model = codex_bot(&env, "oneshot-no-model", None, Some("max"), 1).await;
+        assert_eq!(oneshot_model_command(&no_model, &["effort"]).unwrap(), "/model --reasoning=max --speed=priority");
+        // 只改 fast：不碰模型與強度（跟選單路徑只按 `/fast` 一樣）。
+        assert_eq!(oneshot_model_command(&fast, &["fast"]).unwrap(), "/model --speed=priority");
+        assert_eq!(oneshot_model_command(&slow, &["fast"]).unwrap(), "/model --speed=standard");
+        // 多出來的空白或旗標會變成別的參數：不送。
+        let bad = codex_bot(&env, "oneshot-bad-model", Some("gpt-6-luna --speed=flex"), None, 0).await;
+        assert_eq!(oneshot_model_command(&bad, &["model"]), Err("oneshot_bad_model"));
+        let bad = codex_bot(&env, "oneshot-bad-effort", Some("gpt-6-luna"), Some("turbo"), 0).await;
+        assert_eq!(oneshot_model_command(&bad, &["effort"]), Err("oneshot_bad_effort"));
+    }
+
+    /// 回應文字照 0.164.0 實測原文。
+    const CHANGED: &str = "• Model changed to gpt-6-astra high fast for this session only";
+    const UNAVAILABLE: &str = "■ Model 'nosuchmodel' is unavailable. Use /model to see available models.";
+    const BAD_LEVEL: &str = "■ Reasoning level 'bogus' is unavailable for gpt-6-astra. Available: low, medium, high, xhigh, max, ultra.";
+    const BAD_SPEED: &str = "■ Speed 'turbo' is unavailable for gpt-6-astra. Available: standard, flex, priority.";
+    const BAD_ARG: &str = "■ Unexpected argument 'high'. Use '--reasoning=<level>' or '--speed=<tier>'.";
+
+    #[test]
+    fn the_answers_of_the_one_line_form_are_told_apart() {
+        for (line, kind) in [
+            (CHANGED, ModelResponse::Changed),
+            ("• Model changed to gpt-6-astra medium flex for this session only", ModelResponse::Changed),
+            (UNAVAILABLE, ModelResponse::Rejected),
+            (BAD_LEVEL, ModelResponse::Rejected),
+            (BAD_SPEED, ModelResponse::Rejected),
+            (BAD_ARG, ModelResponse::Rejected),
+        ] {
+            assert_eq!(model_responses(&format!("  {line}\n\n› Ask Codex to do anything\n")), vec![(kind, line.to_string())], "{line}");
+        }
+        // 舊版選單的結果（沒有 `for this session only`）、一般文字、引用的 `■` 行都不是這個回應。
+        assert!(model_responses("• Model changed to gpt-6-astra high\n■ something else broke\n  > ■ Unexpected argument").is_empty());
+        let before = model_responses(&format!("{CHANGED}\n"));
+        assert_eq!(new_model_response(&before, &before), None, "畫面沒變＝沒有新的回應");
+        let after = model_responses(&format!("{CHANGED}\n{CHANGED}\n"));
+        assert_eq!(new_model_response(&before, &after), Some(ModelResponse::Changed), "同樣的字再出現一次也算新的");
+        let after = model_responses(&format!("{CHANGED}\n{UNAVAILABLE}\n"));
+        assert_eq!(new_model_response(&before, &after), Some(ModelResponse::Rejected));
+    }
+
+    fn idle_with_footer(footer: &str) -> String {
+        let mut lines: Vec<&str> = EMPTY_BOX_ANSI.lines().collect();
+        lines.pop();
+        format!("{}\n{footer}\n", lines.join("\n"))
+    }
+
+    /// 一行套用的 apply：送出前是輸入框空的畫面，Enter 之後畫面換成 `after`。
+    async fn oneshot_apply(
+        name: &str,
+        bot: (Option<&str>, Option<&str>, i64),
+        fields: &[&str],
+        version: Option<&str>,
+        before_footer: &str,
+        after: String,
+    ) -> (Result<CodexRuntime, &'static str>, Vec<String>, Vec<serde_json::Value>) {
+        let env = crate::testing::env().await;
+        let bot = codex_bot(&env, name, bot.0, bot.1, bot.2).await;
+        let pane: &'static str = Box::leak(format!("pane-codex-oneshot-{name}").into_boxed_str());
+        env.herdr.set_screen(pane, &idle_with_footer(before_footer));
+        let screens = env.herdr.screens.clone();
+        crate::race_point::arm("codex_oneshot_after_enter", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), after);
+        });
+        let result = apply(&env.app.herdr, pane, &bot, Some(false), fields, version).await;
+        let typed = env.herdr.calls_to("pane.send_text").iter().filter_map(|v| v["text"].as_str().map(String::from)).collect();
+        let keys = env.herdr.calls_to("pane.send_keys").iter().map(|v| v["keys"].clone()).collect();
+        (result, typed, keys)
+    }
+
+    const BEFORE: &str = "  gpt-5.6-sol low · ~/project/agents-manager · Context 3% used · 5h 10% left";
+
+    #[tokio::test]
+    async fn a_supported_codex_applies_model_effort_and_speed_in_one_line_and_reads_the_status_line_back() {
+        let after = format!("  {CHANGED}\n{}", idle_with_footer("  GPT-6-Astra high fast · ~/project/agents-manager · Context 3% used · 5h 10% left"));
+        let (result, typed, keys) =
+            oneshot_apply("ok", (Some("gpt-6-astra"), Some("high"), 1), &["model", "effort", "fast"], Some("0.164.0"), BEFORE, after).await;
+        assert_eq!(result, Ok(CodexRuntime { model: "gpt-6-astra".into(), effort: Some("high".into()), fast: true }));
+        assert_eq!(typed, vec!["/model gpt-6-astra --reasoning=high --speed=priority"], "一行就完成，沒有第二次打字、沒有選單");
+        assert_eq!(keys, vec![serde_json::json!(["Enter"])]);
+    }
+
+    #[tokio::test]
+    async fn an_unset_effort_is_the_model_default_and_the_concrete_level_on_screen_is_what_gets_recorded() {
+        // 0.164.0 實測：只換模型不帶 `--reasoning`，狀態列顯示新模型的預設等級（具體值，不是 `default`）。
+        let after = format!("  {}\n{}", CHANGED.replace("astra high fast", "luna medium"), idle_with_footer("  GPT-6-Luna medium · ~/project/agents-manager · Context 3% used · 5h 10% left"));
+        let (result, typed, _) = oneshot_apply("noeffort", (Some("gpt-6-luna"), None, 0), &["model", "effort"], Some("0.165.2"), BEFORE, after).await;
+        assert_eq!(result, Ok(CodexRuntime { model: "gpt-6-luna".into(), effort: Some("medium".into()), fast: false }));
+        assert_eq!(typed, vec!["/model gpt-6-luna --speed=standard"]);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_one_line_command_fails_the_apply_and_never_retries_through_the_menus() {
+        for rejection in [UNAVAILABLE, BAD_LEVEL, BAD_SPEED, BAD_ARG] {
+            let after = format!("  {rejection}\n{}", idle_with_footer(BEFORE));
+            let (result, typed, keys) = oneshot_apply("rejected", (Some("gpt-6-astra"), Some("high"), 0), &["model"], Some("0.164.0"), BEFORE, after).await;
+            assert_eq!(result, Err(ONESHOT_REJECTED), "{rejection}");
+            assert_eq!(typed.len(), 1, "被拒就停：不退回 `/model` 選單 ({rejection})");
+            assert_eq!(keys, vec![serde_json::json!(["Enter"])], "{rejection}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_answer_and_an_unchanged_status_line_falls_back_to_the_menus_exactly_once() {
+        let (result, typed, _) =
+            oneshot_apply("silent", (Some("gpt-6-astra"), Some("high"), 0), &["model"], Some("0.164.0"), BEFORE, idle_with_footer(BEFORE)).await;
+        // 退回的選單路徑在這個假畫面上開不出選單，所以失敗；重點是順序：先一行、再恰好一次裸 `/model`。
+        assert_eq!(result, Err("picker_failed"));
+        assert_eq!(typed, vec!["/model gpt-6-astra --reasoning=high --speed=standard".to_string(), "/model".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_line_that_turned_into_a_prompt_is_never_followed_by_more_typing() {
+        let after = format!("› /model gpt-6-astra --reasoning=high --speed=standard\n• Working (1s • esc to interrupt)\n{}", idle_with_footer(BEFORE));
+        let (result, typed, _) = oneshot_apply("prompt", (Some("gpt-6-astra"), Some("high"), 0), &["model"], Some("0.164.0"), BEFORE, after).await;
+        assert_eq!(result, Err(ONESHOT_BECAME_PROMPT));
+        assert_eq!(typed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_status_line_that_stays_hidden_is_unverified_not_applied() {
+        // max／ultra 的動畫蓋住狀態列：最多等 3 秒（測試裡縮短），逾時算沒驗證到，不無限等。
+        let after = format!("  {CHANGED}\n\n  M A X\n");
+        let (result, _, _) = oneshot_apply("hidden", (Some("gpt-6-astra"), Some("max"), 0), &["model", "effort"], Some("0.164.0"), BEFORE, after).await;
+        assert_eq!(result, Err(ONESHOT_UNVERIFIED));
+    }
+
+    #[tokio::test]
+    async fn a_status_line_that_disagrees_with_the_setting_fails_with_the_readback_reason() {
+        let after = format!("  {CHANGED}\n{}", idle_with_footer("  GPT-6-Astra low · ~/project/agents-manager · Context 3% used · 5h 10% left"));
+        let (result, _, _) = oneshot_apply("mismatch", (Some("gpt-6-astra"), Some("high"), 0), &["model", "effort"], Some("0.164.0"), BEFORE, after).await;
+        assert_eq!(result, Err("readback_effort_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn an_older_or_unseen_codex_keeps_the_menu_path_and_never_types_arguments() {
+        for version in [None, Some("0.163.2"), Some("0.162.1")] {
+            let (result, typed, _) =
+                oneshot_apply("old", (Some("gpt-6-astra"), Some("high"), 1), &["model", "effort", "fast"], version, BEFORE, idle_with_footer(BEFORE)).await;
+            assert_eq!(result, Err("picker_failed"), "{version:?}");
+            assert_eq!(typed, vec!["/model"], "舊版 `/model` 帶參數會被當 prompt 送出：{version:?}");
+        }
     }
 
     async fn run_with_runtime(env: &crate::testing::Env, fast: i64) -> String {
