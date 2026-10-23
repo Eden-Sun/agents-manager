@@ -65,12 +65,16 @@ mod tests {
         mask
     }
 
+    // 正向護欄禁止整個家族；反向檢查只要求 adapter 使用其中一個名稱（#1886）。
+    const FEATURE_CALL_ALIASES: &[&[&str]] = &[
+        &["lifecycle::mark_run_exited(", "lifecycle::mark_run_exited_proved("],
+    ];
+
     /// 以「呼叫」的形狀擋：函式名後面接 `(`。
     fn feature_calls() -> Vec<String> {
         let mut v: Vec<String> = [
             "emit_message_added", "emit_turn", "schedule_flush_queued", "schedule_deferred_live", "schedule_codex_notice_capture",
-            // #1884：舊名 `lifecycle::mark_run_exited` 現在只是 `mark_run_exited_proved` 的包裝，adapter 一律呼叫 `_proved`（帶轉移的證據）。
-            "poke_resume_nudge", "cancel_stall", "arm_fallback", "arm_progress", "arm_stall", "begin_external_turn", "mark_run_exited_proved",
+            "poke_resume_nudge", "cancel_stall", "arm_fallback", "arm_progress", "arm_stall", "begin_external_turn",
             "context_lost", "retire_context_lost", "settle_interruption", "settle_owed_deliveries", "settle_interrupt_echo",
             "start_bot", "start_bot_locked_with", "adopt_unbound_send_nows", "rearm_queue_retries", "adopt_turns_of_ended_runs",
             "rearm_queued_prompt_restamps", "adopt_interrupted_on_restart", "spawn_adopted_capture", "sweep_stuck_turns",
@@ -125,6 +129,7 @@ mod tests {
             ]
             .map(String::from),
         );
+        v.extend(FEATURE_CALL_ALIASES.iter().flat_map(|family| family.iter().map(|name| name.to_string())));
         v
     }
 
@@ -180,6 +185,20 @@ mod tests {
         assert!(found.is_empty(), "入口與對帳之間要走 ReconcileCommands／IngressCommands：\n{}", found.join("\n"));
     }
 
+    fn adapter_covers_call(adapters: &[&str], call: &str) -> bool {
+        let has_call = |p: &str| {
+            // adapter 可能省略 crate 路徑，但仍要有模組名與呼叫的左括號。
+            let short = p.rsplit("::").next().unwrap_or(p);
+            let module = p.trim_end_matches('(').rsplit("::").nth(1).unwrap_or("");
+            let probe = format!("{module}::{short}");
+            adapters.iter().any(|src| src.contains(&probe))
+        };
+        match FEATURE_CALL_ALIASES.iter().find(|family| family.contains(&call)) {
+            Some(family) => family.iter().any(|alias| has_call(alias)),
+            None => has_call(call),
+        }
+    }
+
     /// 反向確認：護欄禁的呼叫真的在 adapter 裡（改名或搬走時這條先紅，提醒更新清單）。
     #[test]
     fn the_adapter_still_calls_what_the_guards_forbid_elsewhere() {
@@ -188,13 +207,45 @@ mod tests {
         let mut pats = feature_calls();
         pats.retain(|p| p != "SUPERVISOR_ID" && p != "lifecycle::start_send::resume_after_boot(");
         for p in pats.iter().map(String::as_str).chain(TO_RECONCILE.iter().copied()).chain(TO_INGRESS.iter().copied()) {
-            // adapter 在 `use crate::lifecycle::{self, …}` 之後寫 `lifecycle::foo(`，其餘寫成完整路徑；兩種都以子字串比對。
-            let short = p.rsplit("::").next().unwrap_or(p);
-            let module = p.trim_end_matches('(').rsplit("::").nth(1).unwrap_or("");
-            let probe = format!("{module}::{short}");
-            assert!(adapter.contains(&probe) || lifecycle_adapter.contains(&probe), "P8 adapter 不再含 {probe}");
+            assert!(adapter_covers_call(&[adapter, lifecycle_adapter], p), "P8 adapter 不再含 {p} 或同家族的呼叫");
         }
         assert!(adapter.contains("SUPERVISOR_ID") && adapter.contains("resume_after_boot("));
+    }
+
+    #[test]
+    fn both_exit_aliases_are_forbidden_in_both_production_groups() {
+        let calls = feature_calls();
+        for group in ["ingress.rs", "reconcile.rs"] {
+            let src = "fn production() {\n    lifecycle::mark_run_exited(app, run).await;\n    lifecycle::mark_run_exited_proved(app, run).await;\n}\n";
+            let found = offenders(&[(group, src)], &calls);
+            assert_eq!(found.len(), 2, "{group}: {found:?}");
+            for alias in FEATURE_CALL_ALIASES[0] {
+                assert!(found.iter().any(|line| line.contains(alias)), "漏擋 {alias}: {found:?}");
+            }
+        }
+        assert!(offenders(&[("ports.rs", "fn production() { app.mark_run_exited(run).await; }")], &calls).is_empty());
+    }
+
+    #[test]
+    fn either_exit_alias_in_either_adapter_covers_the_family() {
+        for alias in FEATURE_CALL_ALIASES[0] {
+            let src = format!("crate::{alias}app, run).await;");
+            for adapters in [[src.as_str(), ""], ["", src.as_str()]] {
+                for guarded in FEATURE_CALL_ALIASES[0] {
+                    assert!(adapter_covers_call(&adapters, guarded), "{alias} 應涵蓋 {guarded}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_reverse_guard_rejects_a_missing_family_and_still_checks_singletons() {
+        for alias in FEATURE_CALL_ALIASES[0] {
+            assert!(!adapter_covers_call(&["", ""], alias));
+            assert!(!adapter_covers_call(&["lifecycle::mark_run_exited_proved_extra(app, run);", ""], alias));
+        }
+        assert!(adapter_covers_call(&["", "crate::lifecycle::emit_turn(app, turn);"], "lifecycle::emit_turn("));
+        assert!(!adapter_covers_call(&["lifecycle::mark_run_exited_proved(app, run);", ""], "lifecycle::emit_turn("));
     }
 
     #[test]
