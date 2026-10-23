@@ -1,0 +1,195 @@
+/* 環境設定外殼（#1922）：桌機左側分頁 + 內頁單一捲軸；手機標題下折行分頁 */
+
+/* 桌機視窗 > 640px 時，環境設定專屬尺寸 */
+@media (width > 640px) {
+  .modal:has(.env-shell) {
+    width: min(960px, calc(100vw - 48px));
+    height: min(760px, calc(100vh - 48px));
+    max-height: none;
+  }
+}
+
+.modal:has(.env-shell) .sheet-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.env-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.env-nav {
+  width: 168px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  background: var(--bg-side);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.env-nav-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 7px 8px 7px 11px;
+  min-height: 40px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.env-nav-btn:hover {
+  background: var(--bg-hover);
+}
+
+.env-nav-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.env-nav-btn[aria-selected="true"] {
+  background: var(--bg-active);
+  color: var(--accent-ink);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.env-nav-label {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.env-nav-meta {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.env-nav-meta.bad {
+  color: var(--status-blocked);
+}
+
+.env-nav-meta.warn {
+  color: var(--status-warn);
+}
+
+.env-nav-meta.dim {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.env-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.env-tabpanel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 20px;
+  box-sizing: border-box;
+}
+
+.env-tabpanel[hidden] {
+  display: none !important;
+}
+
+/* 子分頁（Jev 與 Claude API 共用）樣式，維持沉底軌道、選中 --bg-panel 加 --shadow */
+.env-subtabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-sunken);
+  padding: 3px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+
+.env-subtab-btn {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  min-height: 32px;
+}
+
+.env-subtab-btn:hover {
+  color: var(--text);
+}
+
+.env-subtab-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.env-subtab-btn[aria-selected="true"] {
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+/* 手機（≤640px）：標題下折行分頁、觸控目標 ≥44px、不橫向捲動 */
+@media (width <= 640px) {
+  .env-shell {
+    flex-direction: column;
+  }
+
+  .env-nav {
+    width: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+    gap: 6px;
+    padding: 8px 12px;
+  }
+
+  .env-nav-btn {
+    width: auto;
+    flex: 1 1 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    min-height: 44px;
+    padding: 6px 10px;
+  }
+
+  .env-nav-btn[aria-selected="true"] {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  .env-tabpanel {
+    padding: 12px 14px calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .env-subtab-btn {
+    min-height: 44px;
+    font-size: 13px;
+  }
+}

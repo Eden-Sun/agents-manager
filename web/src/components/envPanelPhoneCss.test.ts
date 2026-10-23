@@ -47,7 +47,7 @@ test('envPanelPhone.css 只有 ≤640px 的規則（桌機版面不動）', () =
 })
 
 test('手機：可點的目標 ≥44px', () => {
-  for (const sel of ['.env-panel .mini-btn', '.env-panel .btn', '.env-panel .env-sec-toggle', '.env-panel .identity-login-btn', '.env-panel .disclosure.sub', '.env-panel .deleted-restore']) {
+  for (const sel of ['.env-panel .mini-btn', '.env-panel .btn', '.env-panel .identity-login-btn', '.env-panel .disclosure.sub', '.env-panel .deleted-restore']) {
     assert.match(decl(phone.inside, sel), /min-height:\s*44px/, `${sel} 要 min-height 44px`)
   }
 })
