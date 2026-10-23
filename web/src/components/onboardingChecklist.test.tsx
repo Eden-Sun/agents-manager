@@ -11,6 +11,7 @@ import { dispatchFrameForTest, resetStoreForTest, useStore } from '../store/stor
 import type { ToolMap } from '../api/types'
 import { OnboardingBanner, OnboardingChecklist } from './OnboardingChecklist'
 import { QuickAddBots } from './QuickAddBots'
+import { resetLangForTest, setLangPref } from '../lib/i18n'
 
 virtualMockTime()
 async function closeShells() {
@@ -19,6 +20,8 @@ async function closeShells() {
 }
 afterEach(async () => {
   await unmountAll()
+  localStorage.clear()
+  resetLangForTest()
   await closeShells()
 })
 before(setupDom)
@@ -209,4 +212,19 @@ it('完成事件先於 HTTP 回應到達，不重新打開已失效的安裝 pan
   await act(async () => { await installKindOnHost('local', 'codex') })
   assert.equal(useStore.getState().busy['install:local:codex'], undefined)
   assert.equal(useStore.getState().shellView, null)
+})
+
+it('英文介面：清單文字、插值與複數都換成英文；切回繁中即時換回來（issue #1932）', async () => {
+  await setLocal(fresh({ claude: { installed: true, path: '/bin/claude', version: '2.1.0', logged_in: false } }))
+  await mount(<OnboardingBanner compact={false} />)
+  assert.match(row('claude').textContent ?? '', /已安裝・未登入/)
+  await act(async () => setLangPref('en'))
+  assert.match(row('claude').textContent ?? '', /Installed · signed out/)
+  assert.match(row('codex').textContent ?? '', /Not installed/)
+  assert.ok(btn(row('codex'), 'Install'))
+  assert.equal(btn(row('codex'), 'Install')?.title, 'Open a shell on this machine and run the official codex installer')
+  assert.match(document.body.textContent ?? '', /No usable agent CLI yet/)
+  assert.equal(document.querySelector('.onb-banner')?.getAttribute('aria-label'), 'Setup')
+  await act(async () => setLangPref('system'))
+  assert.match(row('codex').textContent ?? '', /未安裝/)
 })

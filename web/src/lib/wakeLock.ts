@@ -5,6 +5,8 @@
  * `http://<區網 IP>:7788` 開的話 `navigator.wakeLock` 是 undefined，這時要明說原因，不要靜靜失效。
  * 本機走 `https://<機器>.<tailnet>.ts.net:8443`（tailscale serve）就有。
  */
+import { t } from './i18n'
+
 const KEY = 'am-keep-awake'
 
 export type WakeSupport = 'ok' | 'insecure' | 'unsupported'
@@ -19,8 +21,8 @@ export function wakeSupport(
 }
 
 export function whyUnavailable(s: WakeSupport): string {
-  if (s === 'insecure') return '這個網址不是 HTTPS，瀏覽器不給用（改用 https:// 的網址開就會出現）'
-  return '這個瀏覽器沒有 Screen Wake Lock（iOS 要 16.4 以上）'
+  if (s === 'insecure') return t('這個網址不是 HTTPS，瀏覽器不給用（改用 https:// 的網址開就會出現）')
+  return t('這個瀏覽器沒有 Screen Wake Lock（iOS 要 16.4 以上）')
 }
 
 /** 開關存在這台裝置（手機與桌機各自決定）；存不了就只影響這一次。 */

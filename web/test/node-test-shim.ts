@@ -11,6 +11,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, mock, test as bunTest } from 'bun:test'
 import { endCurrentTest, runTestBody } from '../src/testing/testScope'
 
+// 測試環境的「瀏覽器語言」固定繁中（issue #1932）：既有測試斷言繁中字串，不能被執行機器的 navigator.language 影響。
+// 要測英文的測試自己 `setLangPref('en')`（用完還原），要測偵測邏輯的用純函式 `detectSystemLang`。
+;(globalThis as { __AM_SYSTEM_LANG__?: string }).__AM_SYSTEM_LANG__ = 'zh-TW'
+
 // 每條測試的 body 包進自己的 scope（#770）：逾時後 bun 不等它、但它還在跑，`domHarness` 靠這個認出它、不讓它的
 // `act()` 跟後面的測試重疊。帶 `done` 參數的 callback 式測試不包（包了 arity 會變），web 目前也沒有。
 const wrapBody = (args: unknown[]): unknown[] =>

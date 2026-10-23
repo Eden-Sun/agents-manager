@@ -5,12 +5,14 @@ import { installBusyKey, installKindOnHost } from '../lib/onboardingActions'
 import { AGY_LOGIN_GUIDE, cliLoginCommand } from '../lib/quotaLogin'
 import { useStore } from '../store/store'
 import { AgyInstallButton } from './AgyInstall'
+import { useT } from '../lib/i18n'
 import { KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import './onboarding.css'
 
 function KindRowView({ row }: { row: OnbKindRow }) {
+  const t = useT()
   const installBusy = useStore((s) => s.busy[installBusyKey('local', row.kind)] === true)
   const label = KIND_LABEL[row.kind]
   return (
@@ -21,9 +23,9 @@ function KindRowView({ row }: { row: OnbKindRow }) {
       <KindTag kind={row.kind} />
       <span className="onb-name">{label}</span>
       <span className="onb-state">
-        {KIND_STATE_LABEL[row.state]}
+        {t.tr(KIND_STATE_LABEL[row.state])}
         {row.state !== 'missing' && row.version ? ` ${row.version}` : ''}
-        {row.account ? `（${row.account}）` : ''}
+        {row.account ? t('（{account}）', { account: row.account }) : ''}
       </span>
       {row.state === 'missing' ? (
         row.kind === 'agy' ? (
@@ -36,15 +38,15 @@ function KindRowView({ row }: { row: OnbKindRow }) {
             type="button"
             className="btn primary onb-act"
             disabled={installBusy}
-            title={`在本機開 shell 執行 ${label} 的官方安裝指令`}
+            title={t('在本機開 shell 執行 {kind} 的官方安裝指令', { kind: label })}
             onClick={() => void installKindOnHost('local', row.kind)}
           >
-            {installBusy ? '安裝中…' : '安裝'}
+            {installBusy ? t('安裝中…') : t('安裝')}
           </button>
         )
       ) : row.state === 'out' ? (
         <div className="onb-act">
-          <QuotaLoginShell host="local" hostLabel="本機" kind={row.kind} command={cliLoginCommand(row.kind, {})} guide={row.kind === 'agy' ? AGY_LOGIN_GUIDE : undefined} />
+          <QuotaLoginShell host="local" hostLabel={t('本機')} kind={row.kind} command={cliLoginCommand(row.kind, {})} guide={row.kind === 'agy' ? AGY_LOGIN_GUIDE : undefined} />
         </div>
       ) : null}
     </li>
@@ -56,6 +58,7 @@ function KindRowView({ row }: { row: OnbKindRow }) {
  * 主畫面（`OnboardingBanner`）與環境設定的「環境準備」分頁共用這一份。安裝 agy 用既有的確認框（`AgyInstallButton` 那一套），其他 CLI 由 daemon 開臨時 shell 裝。
  */
 export function OnboardingChecklist() {
+  const t = useT()
   const m = useOnboarding()
   const projects = useStore((s) => s.projects)
   const requestOpenBotSheet = useStore((s) => s.requestOpenBotSheet)
@@ -63,17 +66,17 @@ export function OnboardingChecklist() {
   const refreshState = useStore((s) => s.refreshState)
   const toolsBusy = useStore((s) => s.busy['tools:local'] === true)
   return (
-    <div className="onb" role="group" aria-label="環境準備">
+    <div className="onb" role="group" aria-label={t('環境準備')}>
       <ul className="onb-list">
         <li className={`onb-row is-${m.herdrConnected ? 'ok' : 'missing'}`} data-kind="herdr" data-state={m.herdrConnected ? 'ok' : 'missing'}>
           <span className="onb-mark" aria-hidden="true">
             {m.herdrConnected ? '✓' : '✗'}
           </span>
           <span className="onb-name">herdr</span>
-          <span className="onb-state">{m.herdrConnected ? '已連線' : '連不上——請確認 herdr 已安裝並在背景執行'}</span>
+          <span className="onb-state">{m.herdrConnected ? t('已連線') : t('連不上——請確認 herdr 已安裝並在背景執行')}</span>
           {m.herdrConnected ? null : (
             <button type="button" className="btn onb-act" onClick={() => void refreshState()}>
-              重試
+              {t('重試')}
             </button>
           )}
         </li>
@@ -82,24 +85,24 @@ export function OnboardingChecklist() {
         ))}
       </ul>
       <div className="onb-foot">
-        <button type="button" className="btn" disabled={toolsBusy} title="重新問本機的 CLI 現在裝了什麼、登入了誰" onClick={() => void refreshTools('local')}>
-          {toolsBusy ? '偵測中…' : '重新偵測'}
+        <button type="button" className="btn" disabled={toolsBusy} title={t('重新問本機的 CLI 現在裝了什麼、登入了誰')} onClick={() => void refreshTools('local')}>
+          {toolsBusy ? t('偵測中…') : t('重新偵測')}
         </button>
-        <ol className="onb-steps" aria-label="接下來">
-          <li className={m.anyReady ? 'is-done' : 'is-now'}>安裝並登入至少一種 CLI</li>
+        <ol className="onb-steps" aria-label={t('接下來')}>
+          <li className={m.anyReady ? 'is-done' : 'is-now'}>{t('安裝並登入至少一種 CLI')}</li>
           <li className={projects.length > 0 ? 'is-done' : m.anyReady ? 'is-now' : ''}>
             <button type="button" className="btn" disabled={!m.anyReady} onClick={() => window.dispatchEvent(new Event(ADD_PROJECT_EVENT))}>
-              新增 Project
+              {t('新增 Project')}
             </button>
           </li>
           <li className={projects.length > 0 && m.anyReady ? 'is-now' : ''}>
             <button type="button" className="btn primary" disabled={!m.anyReady || projects.length === 0} onClick={() => requestOpenBotSheet(projects[0].id)}>
-              新增 Bot
+              {t('新增 Bot')}
             </button>
           </li>
         </ol>
       </div>
-      {m.needed ? null : <p className="onb-all hint">環境已就緒。</p>}
+      {m.needed ? null : <p className="onb-all hint">{t('環境已就緒。')}</p>}
     </div>
   )
 }
@@ -109,30 +112,31 @@ export function OnboardingChecklist() {
  * 都好了自動收起。選著 Bot／群組／shell 時收成一行（點開才展開），空畫面時整張攤開。
  */
 export function OnboardingBanner({ compact }: { compact: boolean }) {
+  const t = useT()
   const m = useOnboarding()
   const [open, setOpen] = useState(false)
   if (!m.needed) return null
   const expanded = !compact || open
   const done = 4 - m.rows.filter((r) => r.state === 'missing' || r.state === 'out').length
   return (
-    <section className={`onb-banner${compact ? ' is-compact' : ''}`} aria-label="環境準備">
+    <section className={`onb-banner${compact ? ' is-compact' : ''}`} aria-label={t('環境準備')}>
       <header className="onb-head">
         <div className="onb-title">
-          <strong>環境準備</strong>
+          <strong>{t('環境準備')}</strong>
           <span className="onb-sub">
             {m.next === 'herdr'
-              ? 'herdr 還沒連上'
+              ? t('herdr 還沒連上')
               : m.next === 'cli'
-                ? '還沒有可用的 agent CLI：先安裝並登入一種'
+                ? t('還沒有可用的 agent CLI：先安裝並登入一種')
                 : m.next === 'project'
-                  ? '已有可用的 CLI，接著新增 Project'
-                  : '接著在 Project 裡新增 Bot'}
-            {compact ? `（${done}/4 CLI 就緒）` : ''}
+                  ? t('已有可用的 CLI，接著新增 Project')
+                  : t('接著在 Project 裡新增 Bot')}
+            {compact ? t('（{done}/4 CLI 就緒）', { done }) : ''}
           </span>
         </div>
         {compact ? (
           <button type="button" className="btn" aria-expanded={open} onClick={() => setOpen(!open)}>
-            {open ? '收合' : '展開'}
+            {open ? t('收合') : t('展開')}
           </button>
         ) : null}
       </header>
