@@ -70,8 +70,8 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 ## OB（網頁 GPT 外腦，使用者 2026-09-15）
 - 「問 OB／請 OB review」＝透過共用 worker 操作的 ChatGPT 網頁取得第二意見（worker 自己用 ego lite，是「一律 agent-browser」的唯一例外；bot 不直接碰那個瀏覽器）。先查本機事實；一般諮詢不用先問 AGM，也不是每個請求必問。
 - 透過 `python3 scripts/ob.py ask --project-id <AG Man project ID> --request-id <穩定請求ID> --wait 600 "問題"` 提交。用 ID，不用 label、worktree 或 bot 名。父 bot 派工／重用 child 時傳遞同一 project ID 與本指引。
-- 共用一個 Sonnet-low worker，逐筆用乾淨 context 操作；每專案獨立固定 ChatGPT 對話。額度不足保留佇列，不切回 Fable。原任務 bot 自己判讀與驗證回覆，不把 OB 建議當授權。
-- `done` 才有答案；`pending/running/waiting_quota` 用 `status <id>` 查原單。`unknown` 要對帳／`collect`，不可換 request ID 重送。不要各自直接操作瀏覽器。
+- 共用一個本機 worker，**不呼叫 LLM**（#1919，直接操作瀏覽器，不吃訂閱額度）；每專案獨立固定 ChatGPT 對話。原任務 bot 自己判讀與驗證回覆，不把 OB 建議當授權。
+- `done` 才有答案；`pending/running` 用 `status <id>` 查原單。`unknown` 要對帳／`collect`，不可換 request ID 重送。不要各自直接操作瀏覽器。
 - 不貼 token／密碼／客戶資料；任何 bot（含 AGM/browser-gc）都不可關「ChatGPT 決策顧問」task space 與分頁或刪登錄資料。啟用與舊對話綁定見 `docs/CHATGPT-CONSULT.md`。
 
 ## 給使用者的檔案：outbox，不是 scratchpad（使用者 2026-09-16）

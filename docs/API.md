@@ -3110,7 +3110,7 @@ payload `{mission_id, project_id, text, message, action, next, flow, idle_since,
 
 ### OB 本機 CLI（網頁 GPT）
 
-OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一 Sonnet-low worker 操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 留待恢復、不切回 Fable；`unknown` 用 `collect` 對帳，不盲目重送。`recover` 回 `{worker_running,recovered[]}`：僅在 worker lock 可取得時把孤立的 `running` 轉成 `unknown`；不重新送出。`status` 也會執行此恢復，無 id 的回應附 `recovered[]`。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
+OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一本機 worker（不呼叫 LLM，#1919）操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 已不再產生（只剩升級前的舊列）；`unknown` 用 `collect` 對帳，不盲目重送。`recover` 回 `{worker_running,recovered[]}`：僅在 worker lock 可取得時把孤立的 `running` 轉成 `unknown`；不重新送出。`status` 也會執行此恢復，無 id 的回應附 `recovered[]`。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
 
 ### 專案排程（User-only）
 

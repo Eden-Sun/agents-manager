@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OB: project-ID-isolated web GPT consultations, operated by one Sonnet worker."""
+"""OB: project-ID-isolated web GPT consultations, operated by one local worker (no LLM)."""
 import argparse
 import json
 import os
@@ -130,11 +130,9 @@ def main(argv=None):
     status = commands.add_parser("status")
     status.add_argument("id", nargs="?")
     status.add_argument("--project-id")
-    cfg = commands.add_parser("configure", help="只指定一個 Sonnet 訂閱帳號，不設定 fallback")
-    cfg.add_argument("--claude-config-dir", required=True)
-    cfg.add_argument("--claude-binary", default=shutil.which("claude"))
+    cfg = commands.add_parser("configure", help="指定 ego-browser（worker 不呼叫任何 LLM）")
     cfg.add_argument("--ego-binary", default=shutil.which("ego-browser"))
-    work = commands.add_parser("work", help="單一 worker；空佇列不消耗模型 token")
+    work = commands.add_parser("work", help="單一 worker；直接操作瀏覽器，不呼叫 LLM")
     work.add_argument("--once", action="store_true")
     commands.add_parser("recover", help="worker 已不在時把殘留 running 轉 unknown（不重送）；worker 存活則不動")
     commands.add_parser("stop", help="請 worker 做完當前請求後停止；不打斷已送出的網頁問題")
@@ -152,9 +150,6 @@ def main(argv=None):
     which = link.add_mutually_exclusive_group(required=True)
     which.add_argument("--url")
     which.add_argument("--legacy-key", help="沿用舊 chatgpt-consult.json 的指定 entry（保留原檔）")
-    mcp = commands.add_parser("_mcp", help="內部工具入口，請使用 ask")
-    mcp.add_argument("id")
-    mcp.add_argument("token", nargs="?")
     args = parser.parse_args(argv)
     os.umask(0o077)
     store = Store(args.data_dir)
@@ -167,22 +162,12 @@ def main(argv=None):
 
 
 def _run(args, store):
-    if args.command == "_mcp":
-        from ob_operator import mcp_server
-        mcp_server(store.root, args.id, args.token)
-        return 0
     if args.command == "configure":
-        config_dir = Path(args.claude_config_dir).expanduser().resolve()
-        if not config_dir.is_dir():
-            raise OBError("Claude 訂閱設定目錄不存在")
-        for exe in (args.claude_binary, args.ego_binary):
-            if not exe or not Path(exe).is_file() or not os.access(exe, os.X_OK):
-                raise OBError("claude／ego-browser 必須是存在且可執行的絕對路徑")
+        if not args.ego_binary or not Path(args.ego_binary).is_file() or not os.access(args.ego_binary, os.X_OK):
+            raise OBError("ego-browser 必須是存在且可執行的絕對路徑")
         with exclusive(store.root / "worker.lock"):
-            store.set_setting("operator", dict(model="sonnet", effort="low", claude_config_dir=str(config_dir),
-                                              claude_binary=str(Path(args.claude_binary).absolute()),
-                                              ego_binary=str(Path(args.ego_binary).absolute())))
-        result = {"configured": True, "model": "sonnet", "effort": "low", "fallback": None}
+            store.set_setting("operator", dict(ego_binary=str(Path(args.ego_binary).absolute())))
+        result = {"configured": True, "llm": None}
     elif args.command == "ask":
         if bool(args.file) == bool(args.text):
             raise OBError("只提供文字或 --file 其中一個")
