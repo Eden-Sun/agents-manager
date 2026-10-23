@@ -4,6 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
@@ -94,4 +95,10 @@ it('讀不到清單：顯示提示，不是空白也不是「沒有已刪除的 
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+it('樣式：桌機拿掉 .deleted-list 的 max-height: 240px 與 overflow-y（由外層 tabpanel 統一捲）', async () => {
+  const css = readFileSync(new URL('./deletedBotsPanel.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(css, /max-height:\s*240px/, '不該再有 240px 限制')
+  assert.doesNotMatch(css, /overflow-y:\s*auto/, '不該再有自己的 overflow-y 捲軸')
 })

@@ -11,8 +11,6 @@
   padding: 0;
   display: grid;
   gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
 }
 
 .deleted-row {

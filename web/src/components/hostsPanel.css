@@ -228,6 +228,18 @@
   color: var(--warn);
 }
 
+details.env-fold {
+  margin: 4px 0 8px;
+}
+
+details.env-fold summary {
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 650;
+  min-height: 24px;
+}
+
 /* 差異很多時（多個 claude 身分各缺幾項）不要把主機列撐到整頁：清單自己捲動。 */
 .host-baseline-items {
   max-height: 160px;
