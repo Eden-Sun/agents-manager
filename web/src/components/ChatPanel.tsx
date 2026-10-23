@@ -70,7 +70,7 @@ import { relaySource } from '../lib/relaySource'
 import { relayPreview } from '../lib/relayPreview'
 import { relayFromName } from '../lib/relayFromName'
 import { pastedFiles } from '../lib/pasteFiles'
-import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
+import { runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { agyEffort, shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
@@ -1101,11 +1101,11 @@ function derivedStatus(
 }
 
 /** `高 · fast` — the model's settings, shown beside the model badge. */
-function modelExtraOf(status: StatusInfo | null, slugEffort: string | null): string {
+function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast: boolean): string {
   // `slugEffort`：agy 的強度寫在 slug 尾巴（`agyEffort`），statusLine 不報強度。
   const effort = status?.effort ?? slugEffort
   // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
-  return [effort ? effortLabel(effort) : null, status?.fast_mode ? 'fast' : null]
+  return [effort ? effortLabel(effort) : null, fast ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
@@ -1276,9 +1276,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     }),
   )
   const slugEffort = bot ? agyEffort(bot.kind, bot.model ?? statusInfo?.model_name ?? null) : null
-  const modelExtra = modelExtraOf(statusInfo, slugEffort)
+  // 正在跑的 fast：CLI 回報 → `run.runtime_fast` → 設定（`runningFast`）；codex 的狀態列沒有 fast_mode，不能只看它。
+  const fast = bot ? runningFast(bot, run) : false
+  const modelExtra = modelExtraOf(statusInfo, slugEffort, fast)
   // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
-  const codexFast = bot?.kind === 'codex' && Boolean(statusInfo?.fast_mode)
+  const codexFast = bot?.kind === 'codex' && runningFast(bot, run)
   const herdrId = herdrIdentity(run, bot?.agent_name)
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId, botId)
