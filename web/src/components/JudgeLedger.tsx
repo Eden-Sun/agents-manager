@@ -129,39 +129,41 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
           </tbody>
         </table>
       </div>
-      <h5>最近 20 筆</h5>
-      <div className="judge-ledger-scroll">
-        <table className="judge-ledger-table" role="table">
-          <thead role="rowgroup">
-            <tr role="row">
-              <th role="columnheader">時間</th>
-              <th role="columnheader">場景</th>
-              <th role="columnheader">bot</th>
-              <th role="columnheader">Jev 機率</th>
-              <th role="columnheader">耗時 ms</th>
-              <th role="columnheader">錯誤</th>
-            </tr>
-          </thead>
-          <tbody role="rowgroup">
-            {recent.map((r) => (
-              <tr key={r.id} role="row" className={overThreshold(r) === true ? 'over' : undefined}>
-                <td role="cell" data-label="時間" className="num">
-                  {when(r.at)}
-                </td>
-                <td role="cell" data-label="場景">{sceneName(r.regex_verdict)}</td>
-                <td role="cell" data-label="bot">{botLabel(r.bot_id, bots)}</td>
-                <td role="cell" data-label="Jev 機率" className="num">
-                  {probabilityText(r)}
-                </td>
-                <td role="cell" data-label="耗時 ms" className="num">
-                  {r.ms ?? '—'}
-                </td>
-                <td role="cell" data-label="錯誤">{r.error ? r.error : '—'}</td>
+      <details className="env-fold">
+        <summary>最近 20 筆</summary>
+        <div className="judge-ledger-scroll">
+          <table className="judge-ledger-table" role="table">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th role="columnheader">時間</th>
+                <th role="columnheader">場景</th>
+                <th role="columnheader">bot</th>
+                <th role="columnheader">Jev 機率</th>
+                <th role="columnheader">耗時 ms</th>
+                <th role="columnheader">錯誤</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody role="rowgroup">
+              {recent.map((r) => (
+                <tr key={r.id} role="row" className={overThreshold(r) === true ? 'over' : undefined}>
+                  <td role="cell" data-label="時間" className="num">
+                    {when(r.at)}
+                  </td>
+                  <td role="cell" data-label="場景">{sceneName(r.regex_verdict)}</td>
+                  <td role="cell" data-label="bot">{botLabel(r.bot_id, bots)}</td>
+                  <td role="cell" data-label="Jev 機率" className="num">
+                    {probabilityText(r)}
+                  </td>
+                  <td role="cell" data-label="耗時 ms" className="num">
+                    {r.ms ?? '—'}
+                  </td>
+                  <td role="cell" data-label="錯誤">{r.error ? r.error : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
     </>
   )
 }
