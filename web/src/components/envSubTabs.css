@@ -1,0 +1,44 @@
+/* 環境設定子分頁（issue #1922）：
+   Jev 與 Claude API 共用的沉底軌道＋選中卡片分頁樣式。
+   桌面版為行內軌道，手機版（≤640px）為寬度 100% 均分並符合觸控高度 ≥44px。 */
+.env-subtabs.subtabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--bg-sunken);
+  border-radius: 7px;
+  padding: 2px;
+  margin-bottom: 12px;
+}
+
+.env-subtabs.subtabs button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.env-subtabs.subtabs button:hover {
+  background: var(--bg-hover);
+}
+
+.env-subtabs.subtabs button[aria-selected='true'] {
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+@media (width <= 640px) {
+  .env-subtabs.subtabs {
+    display: flex;
+    width: 100%;
+  }
+
+  .env-subtabs.subtabs button {
+    flex: 1;
+    min-height: 44px;
+    font-size: 13px;
+  }
+}
