@@ -25,12 +25,12 @@ export function agyUpdateTitle(target: string): string {
 
 /** chip 的 tooltip／aria-label。 */
 export function agyChipLabel(plan: AgyUpdatePlan): string {
-  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? t('讀不到版本')}`).join('；') // i18n-ignore
+  const hosts = plan.hosts.map((h) => `${h.host}${t('：')}${h.from ?? t('讀不到版本')}`).join(t('；'))
   return t('agy 有新版 {target}（{hosts}）· 點一下更新：從官方下載、驗 sha512 後換掉 ~/.local/bin/agy；跑著的 agy bot 重啟後才換版', { target: plan.target, hosts })
 }
 
 /** 手機合成選單裡 agy 那一項的文案。 */
 export function agyMenuItem(plan: AgyUpdatePlan): string {
-  const hostList = plan.hosts.map((h) => h.host).join('、') // i18n-ignore
+  const hostList = plan.hosts.map((h) => h.host).join(t('、'))
   return t('agy {target}：{hosts} 可更新（點開確認）', { target: plan.target, hosts: hostList })
 }

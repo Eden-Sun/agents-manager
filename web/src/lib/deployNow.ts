@@ -47,7 +47,7 @@ export function deployVisible(s: DeployStatus | null): boolean {
 export function runningText(r: DeployRunning): string {
   switch (r.kind) {
     case 'requested':
-      return t('已按下立即部署{sha}，等自動部署接手、建置或等安全窗口', { sha: r.sha ? `（${r.sha.slice(0, 8)}）` : '' }) // i18n-ignore
+      return t('已按下立即部署{sha}，等自動部署接手、建置或等安全窗口', { sha: r.sha ? t('（{sha}）', { sha: r.sha.slice(0, 8) }) : '' })
     case 'lease':
       return t('{owner}正握著 {resource} 窗口（重建或換版進行中）', { owner: r.owner || t('有人'), resource: r.resource ?? '' })
     default:

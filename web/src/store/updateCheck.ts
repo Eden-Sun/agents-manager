@@ -57,13 +57,14 @@ export function versionLess(a: string | null, b: string | null): boolean | null 
   return false
 }
 
-const CLI_LABEL: Record<string, string> = { claude: 'Claude CLI', codex: 'Codex CLI', grok: 'Grok CLI', agy: 'Antigravity（agy）CLI' } // i18n-ignore
-// integration 名稱是 daemon 的識別字，不翻；前綴的「integration：」照原樣顯示。
-const INTEGRATION_LABEL: Record<string, string> = {
-  claude: 'integration：claude', // i18n-ignore
-  codex: 'integration：codex', // i18n-ignore
-  'antigravity-cli': 'integration：antigravity-cli', // i18n-ignore
-  grok: 'integration：grok', // i18n-ignore
+/** 顯示名：agy 的全形括號與「integration：」前綴在英文介面要半形，所以走 `t()`；integration 名稱是 daemon 的識別字，不翻。 */
+function cliLabel(kind: string): string {
+  if (kind === 'agy') return t('Antigravity（agy）CLI')
+  return ({ claude: 'Claude CLI', codex: 'Codex CLI', grok: 'Grok CLI' } as Record<string, string>)[kind] ?? kind
+}
+
+function integrationLabel(name: string): string {
+  return t('integration：{name}', { name })
 }
 
 function hostEntry(item: UpstreamItem | undefined, host: string) {
@@ -112,7 +113,7 @@ function herdrRows(host: string, herdr: HerdrVersion | undefined, item: Upstream
 }
 
 function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: UpstreamItem | undefined, updatable: boolean): CheckRow {
-  const base = { id: `${host}:cli-${kind}`, group: 'cli' as const, label: CLI_LABEL[kind] ?? kind }
+  const base = { id: `${host}:cli-${kind}`, group: 'cli' as const, label: cliLabel(kind) }
   // 工具清單還沒讀到（undefined）是查不到；讀到了、installed 為假才是未安裝。
   if (tool === undefined) return { ...base, current: null, latest: null, status: 'unknown', note: t('這台還沒讀到工具清單'), action: null }
   if (!tool.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
@@ -162,7 +163,7 @@ function integrationRow(host: string, row: IntegrationRow, tools: ToolMap | unde
   const probe = (tools as Record<string, ToolStatus> | undefined)?.[LOGIN_KIND[row.name] ?? '']
   const loggedIn = probe?.installed === true && probe.logged_in === true
   const v = (n: number | null) => (n === null ? null : `v${n}`)
-  const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: INTEGRATION_LABEL[row.name] ?? `integration：${row.name}` } // i18n-ignore
+  const base = { id: `${host}:integration-${row.name}`, group: 'integration' as const, label: integrationLabel(row.name) }
   switch (row.state) {
     case 'outdated':
       return { ...base, current: v(row.installed_version), latest: v(row.required_version), status: 'update', note: autoInstallFailure(row, t('可按「更新」再試，或重啟 daemon')), action: { kind: 'integration', name: row.name } }

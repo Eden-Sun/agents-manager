@@ -345,7 +345,7 @@ export default {
   '最後一次讀取失敗（{error}）——上面顯示的是先前的畫面。': 'The last read failed ({error}); the screen above is from before.',
   '送出失敗（{error}）——這次的輸入沒有送進 pane。': 'Send failed ({error}); this input did not reach the pane.',
   '{host} shell 的終端，鍵盤直通中': 'Terminal of the {host} shell, keyboard passthrough on',
-  '鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。': 'Keyboard passthrough on: keystrokes go straight to this pane. ⌘C／⌘R／⌘V still belong to the browser; herdr does not accept Delete／Home／End／PgUp.',
+  '鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。': 'Keyboard passthrough on: keystrokes go straight to this pane. ⌘C / ⌘R / ⌘V still belong to the browser; herdr does not accept Delete / Home / End / PgUp.',
   '手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框。': 'Phones have no physical keyboard: turn off keyboard passthrough and use the input box below.',
   '鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。': 'Keyboard passthrough is on, but focus is not on the terminal. Click the screen above to capture your keyboard.',
   '這顆 pane 開著 port（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。': 'This pane has a port open (for example a dev server), so it is view-only. Sending Ctrl-C closes it.',

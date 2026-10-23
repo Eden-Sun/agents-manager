@@ -244,7 +244,7 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
   if (!ident) return null
   const envText = envDisplayText(ident.env)
   const emptyKeys = emptyEnvKeys(ident.env)
-  const keyList = emptyKeys.join('、') // i18n-ignore：清單分隔符
+  const keyList = emptyKeys.join(t('、'))
   return (
     <div className="identity-row">
       <span className="identity-main">

@@ -23,12 +23,12 @@ export function grokUpdatePlan(item: UpstreamItem | null | undefined): GrokUpdat
 
 /** chip 的 tooltip／aria-label。 */
 export function grokChipLabel(plan: GrokUpdatePlan): string {
-  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? t('讀不到版本')}`).join('；') // i18n-ignore
+  const hosts = plan.hosts.map((h) => `${h.host}${t('：')}${h.from ?? t('讀不到版本')}`).join(t('；'))
   return t('grok 有新版 {target}（{hosts}）· 在那台主機執行 `{command}`，已在跑的 bot 重啟後才會換版', { target: plan.target, hosts, command: plan.command })
 }
 
 /** 手機合成選單裡 grok 那一項的文案（只提示，點開看指令）。 */
 export function grokMenuItem(plan: GrokUpdatePlan): string {
-  const hostList = plan.hosts.map((h) => h.host).join('、') // i18n-ignore
+  const hostList = plan.hosts.map((h) => h.host).join(t('、'))
   return t('grok {target}：{hosts} 還沒升（只提示，指令 {command}）', { target: plan.target, hosts: hostList, command: plan.command })
 }

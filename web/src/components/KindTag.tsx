@@ -74,12 +74,12 @@ export function KindTag({
   /** 正在跑的 codex 是 fast：logo 上疊一個閃電。 */
   fast?: boolean
 }) {
-  useT()
+  const t = useT()
   const mode = useStore((s) => s.kindDisplay)
   return (
     <span
       className={`kind-tag ${kind}${mode === 'icon' ? ' icon' : ''}${fast ? ' fast' : ''}${className ? ` ${className}` : ''}`}
-      title={fast ? t('{title}\nfast 開著（priority tier）：回得快，額度也燒得快', { title: title ?? KIND_DESC[kind] }) : (title ?? KIND_DESC[kind])}
+      title={fast ? t('{title}\nfast 開著（priority tier）：回得快，額度也燒得快', { title: title ?? t.tr(KIND_DESC[kind]) }) : (title ?? t.tr(KIND_DESC[kind]))}
       aria-label={fast ? t('{kind}（fast）', { kind: KIND_LABEL[kind] }) : KIND_LABEL[kind]}
       role="img"
     >
