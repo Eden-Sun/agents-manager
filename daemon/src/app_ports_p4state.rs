@@ -219,7 +219,7 @@ pub async fn quota_base_for_host(
 }
 
 pub async fn restore_limit_hit(
-    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables),
+    app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables),
     host: &str,
     base: &str,
     hit: crate::quota::LimitHit,

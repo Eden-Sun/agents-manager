@@ -1661,6 +1661,160 @@
         assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_none(), "同 key、同桶、非 critical：清除");
     }
 
+    /// #1905：grok 擋人的計數跟 `/usage` 的百分比不是同一個時，「記撞限 → 55% 清掉 → 放行 → 重撞」每 30 秒循環。
+    /// 同一把 key 被百分比清過又重撞的，在窗長內不再看百分比；成功回合清掉之後重新准。全程走真的 `quota::set`。
+    #[tokio::test]
+    async fn a_grok_rehit_after_a_percentage_clear_is_not_cleared_by_percentage_again() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "grok");
+        let mark = cleared_at_key(&app, &key);
+        let resets = iso(chrono::Utc::now() + chrono::Duration::days(4));
+        // 跟 `record_grok` 寫進來的一樣：那一桶標 100%、帶著撞限。週窗在撞限之前就開了，只剩百分比這條能清。
+        let record = |at: chrono::DateTime<chrono::Utc>| {
+            let mut q = grok_reading(&iso(at), None, Some(100.0), Some(&resets));
+            q.source = "grok-limit-hit".into();
+            q.limit_hit = Some(LimitHit { message: "You hit your weekly limit.".into(), until: Some(resets.clone()),
+                at: iso(at), bucket: Some("seven_day".into()) });
+            q
+        };
+        let reading = || grok_reading(&iso(chrono::Utc::now()), None, Some(55.0), Some(&resets));
+        macro_rules! hit_of {
+            ($app:expr) => { $app.quotas.lock().await[&key].limit_hit.clone() };
+        }
+        let tick = || tokio::time::sleep(std::time::Duration::from_millis(5));
+        let entry = || grok_pct_clears().lock().unwrap().get(&mark).cloned();
+
+        set(&app, LOCAL_HOST, "grok", record(chrono::Utc::now() - chrono::Duration::hours(2))).await;
+        assert!(hit_of!(app).is_some(), "前提：撞限記下了");
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_none(), "第一次：55% 照 #1900 清掉");
+        assert_eq!(entry().map(|e| (e.bucket, e.rehits)), Some(("seven_day".to_string(), 0)), "清掉時記一筆");
+
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", record(chrono::Utc::now())).await;
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_some(), "清掉後又重撞：55% 不再清");
+        assert_eq!(entry().map(|e| e.rehits), Some(1));
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_some(), "下一份讀數照擋");
+        assert_eq!(entry().map(|e| e.rehits), Some(1), "同一筆重撞只算一次");
+
+        clear_limit_hit(&app, LOCAL_HOST, "grok").await;
+        assert!(entry().is_none(), "成功回合清掉：紀錄刪掉");
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", record(chrono::Utc::now())).await;
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_none(), "成功回合之後再撞：百分比又能清");
+
+        // 過了那一桶的窗長（從上次清掉起算 7 天），紀錄作廢：重撞又能被百分比清掉。
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", record(chrono::Utc::now())).await;
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_some(), "前提：重撞被擋");
+        let at = parse_utc(&hit_of!(app).unwrap().at).unwrap();
+        grok_pct_clears().lock().unwrap().get_mut(&mark).unwrap().cleared_at = at - SEVEN_DAY_LEN - chrono::Duration::seconds(1);
+        // 窗長還沒到的對照：差一秒都不准。
+        let mut probe = grok_pct_clears().lock().unwrap().clone();
+        probe.get_mut(&mark).unwrap().cleared_at = chrono::Utc::now() - SEVEN_DAY_LEN + chrono::Duration::seconds(60);
+        assert!(!grok_pct_clear_allowed(&mut probe, &mark, &hit_of!(app).unwrap(), chrono::Utc::now()), "窗長之內：不准");
+        tick().await;
+        set(&app, LOCAL_HOST, "grok", reading()).await;
+        assert!(hit_of!(app).is_none(), "過了 7 天：紀錄作廢，百分比又能清");
+
+        // until 到期：撞限照 `limit_hit_expired` 掉了，紀錄跟著刪。
+        let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let mut expired = record(past - chrono::Duration::hours(1));
+        expired.limit_hit.as_mut().unwrap().until = Some(iso(past));
+        set(&app, LOCAL_HOST, "grok", expired).await;
+        assert!(hit_of!(app).is_none() && entry().is_none(), "撞限到期：紀錄刪掉");
+    }
+
+    /// #1905：表有界。五小時桶的窗長是 5 小時；表滿 256 筆時沒有紀錄的 key 一律不准（保守），也不再新增。
+    #[test]
+    fn the_grok_percentage_clear_table_is_bounded_and_expires_per_bucket() {
+        let t0 = parse_utc("2026-10-23T00:00:00Z").unwrap();
+        let hit = |at: chrono::DateTime<chrono::Utc>, bucket: &str| LimitHit { message: "You hit your limit.".into(),
+            until: Some(iso(at + chrono::Duration::hours(5))), at: iso(at), bucket: Some(bucket.into()) };
+        let mut marks = HashMap::new();
+        assert!(grok_pct_clear_allowed(&mut marks, "a", &hit(t0, "five_hour"), t0), "沒有紀錄：准");
+        note_grok_pct_clear(&mut marks, "a", &hit(t0, "five_hour"), t0);
+        let rehit = hit(t0 + chrono::Duration::minutes(1), "five_hour");
+        let almost = t0 + FIVE_HOUR_LEN - chrono::Duration::seconds(1);
+        assert!(!grok_pct_clear_allowed(&mut marks, "a", &rehit, almost), "5 小時內重撞：不准");
+        assert_eq!(marks["a"].rehits, 1);
+        assert!(grok_pct_clear_allowed(&mut marks, "a", &rehit, t0 + FIVE_HOUR_LEN), "滿 5 小時：作廢");
+        assert!(!marks.contains_key("a"), "作廢的紀錄刪掉");
+        note_grok_pct_clear(&mut marks, "a", &hit(t0, "five_hour"), t0);
+        assert!(grok_pct_clear_allowed(&mut marks, "a", &hit(t0 - chrono::Duration::minutes(1), "five_hour"), t0),
+            "早於上次清掉的撞限（重啟後種回的舊撞限）不是重撞：准");
+        assert!(!grok_pct_clear_allowed(&mut marks, "a", &LimitHit { at: "not-a-time".into(), ..rehit.clone() }, t0),
+            "撞限時間解不開：不准");
+
+        let mut full: HashMap<String, GrokPctClear> = HashMap::new();
+        for i in 0..GROK_PCT_CLEARS_MAX {
+            note_grok_pct_clear(&mut full, &format!("k{i}"), &hit(t0, "seven_day"), t0);
+        }
+        assert_eq!(full.len(), GROK_PCT_CLEARS_MAX);
+        assert!(!grok_pct_clear_allowed(&mut full, "new", &hit(t0, "seven_day"), t0), "表滿：沒有紀錄的 key 保守不准");
+        note_grok_pct_clear(&mut full, "new", &hit(t0, "seven_day"), t0);
+        assert_eq!(full.len(), GROK_PCT_CLEARS_MAX, "表滿：不新增");
+        let later = t0 + SEVEN_DAY_LEN;
+        assert!(grok_pct_clear_allowed(&mut full, "k0", &hit(later, "seven_day"), later), "已有紀錄的 key 過了窗長照常判斷");
+        assert_eq!(full.len(), GROK_PCT_CLEARS_MAX - 1);
+    }
+
+    /// #1905 的表只管 grok 看百分比那一條：codex 的權威讀數照舊解除，連表裡同一把 key 有「重撞」紀錄也一樣，紀錄不被碰。
+    #[tokio::test]
+    async fn the_grok_percentage_clear_table_does_not_touch_codex_readings() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "codex");
+        let mark = cleared_at_key(&app, &key);
+        let now = chrono::Utc::now();
+        let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some(iso(now + chrono::Duration::days(4))),
+            at: iso(now - chrono::Duration::hours(1)), bucket: Some("seven_day".into()) };
+        let planted = GrokPctClear { cleared_at: now - chrono::Duration::hours(2), bucket: "seven_day".into(), rehits: 0, counted_at: None };
+        grok_pct_clears().lock().unwrap().insert(mark.clone(), planted.clone());
+        let mut probe = grok_pct_clears().lock().unwrap().clone();
+        assert!(!grok_pct_clear_allowed(&mut probe, &mark, &hit, now), "前提：要是 grok，這筆會被擋下不准清");
+
+        set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
+        assert!(app.quotas.lock().await[&key].limit_hit.is_some(), "前提：撞限記下了");
+        set(&app, LOCAL_HOST, "codex", codex_q("codex-app-server", None)).await;
+        assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "codex 的權威讀數照舊解除");
+        assert_eq!(grok_pct_clears().lock().unwrap().remove(&mark), Some(planted), "表沒被碰");
+    }
+
+    /// #1907 第 5 項：`restore_limit_hit` 拿表裡現有那筆校正，開機回填（stale 旗標還掛著）的 grok 讀數不准用百分比清掉種回來的撞限。
+    #[tokio::test]
+    async fn a_restored_grok_hit_is_not_cleared_by_a_boot_backfilled_reading() {
+        // env 要活著：它收掉時資料目錄跟著刪，快取寫不進 DB。
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let key = quota_key(LOCAL_HOST, "grok");
+        let now = chrono::Utc::now();
+        let resets = iso(now + chrono::Duration::days(4));
+        let hit = LimitHit { message: "You hit your weekly limit.".into(), until: Some(resets.clone()),
+            at: iso(now - chrono::Duration::hours(2)), bucket: Some("seven_day".into()) };
+        let cached = grok_reading(&iso(now - chrono::Duration::minutes(1)), None, Some(55.0), Some(&resets));
+        persist_cache(&app, &key, &cached).await;
+        app.quotas.lock().await.clear();
+        load_cache(&app).await.unwrap();
+        assert!(app.quota_stale.lock().await.contains(&key), "前提：開機回填，旗標掛著");
+        assert!(restore_limit_hit(&app, LOCAL_HOST, "grok", hit.clone()).await, "回填的讀數不准拿來清：撞限種回去");
+        assert_eq!(app.quotas.lock().await[&key].limit_hit.as_ref(), Some(&hit));
+
+        // 對照：同一份讀數是真探測寫進來的（旗標拿掉）就照 #1900 清。
+        app.quotas.lock().await.get_mut(&key).unwrap().limit_hit = None;
+        app.quota_stale.lock().await.remove(&key);
+        assert!(!restore_limit_hit(&app, LOCAL_HOST, "grok", hit).await, "新讀數：百分比清得掉，不種回");
+        grok_pct_clears().lock().unwrap().remove(&cleared_at_key(&app, &key));
+    }
+
     #[test]
     fn authoritative_codex_hit_reconciliation_requires_new_evidence_and_the_matching_window() {
         let hit = |bucket: Option<&str>| LimitHit { message: "limit".into(), until: None,
