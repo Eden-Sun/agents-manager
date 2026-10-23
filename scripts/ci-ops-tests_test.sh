@@ -27,6 +27,7 @@ trap '/bin/rm -rf "$tmp"' EXIT
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/bin"
 cp scripts/check.sh scripts/ci-ops-tests.py "$fx/scripts/"
+cp scripts/ops/ops-jobs.sh "$fx/scripts/ops/"
 printf '#!/bin/bash\necho ops\n' > "$fx/scripts/ci-changed-parts.sh"
 printf '#!/bin/bash\ntrue\n' > "$fx/scripts/ops/lint-shell-vars.sh"
 for name in rust_test_mount db_filename test_discovery; do
