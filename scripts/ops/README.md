@@ -1,426 +1,497 @@
-# AGM 運維腳本（scripts/ops/）
+# AGM ops scripts (`scripts/ops/`)
 
-正式環境跑的那幾支腳本原本只存在於 `~/.config/agents-manager/supervisor/AGM/bin/`，沒有進版控：
-沒有 review、沒有歷史、改壞了也沒得比對。這個目錄是它們在 repo 裡的版本。
+The scripts that run in production used to live only in `~/.config/agents-manager/supervisor/AGM/bin/`, outside version
+control: no review, no history, nothing to diff against when one was broken. This directory is their source of truth.
 
-**這裡的檔案不會自動安裝。** daemon 只把 `bin/agm`（`scripts/agm.py`）部署到總管 cwd；
-這些 kick 腳本要不要裝、什麼時候裝，由 AGM 決定並在有窗口的時候執行。
+**Nothing here is installed automatically.** The daemon only deploys `bin/agm` (`scripts/agm.py`) into the supervisor
+(AGM) working directory. Whether and when a kick script is installed is AGM's call, made inside a maintenance window.
+Commands marked "needs AGM approval" below follow that rule.
 
-**裝了哪些、跟 repo 差多少**（issue #418）：要安裝的檔與位置只列在 `install-manifest.tsv`。
-`bin/agm ops-sync --check` 唯讀比對安裝端（AGM 目錄）與本機 repo 的 `origin/main`（要最新先 `git fetch`；
-`--repo` 預設 `AGM_REPO`，再退回 `~/project/agents-manager`），分四種報：
+All paths below are relative to the repo root unless they start with `~`. `AGM_DIR` means
+`~/.config/agents-manager/supervisor/AGM`.
 
-| 種類 | 意思 |
+## What is installed, and how far behind is it (`agm ops-sync`)
+
+`install-manifest.tsv` is the only list of installable files and their destinations. `bin/agm ops-sync --check`
+compares the installed copies (in `AGM_DIR`) read-only against the local repo's `origin/main` (`git fetch` first for the
+latest; `--repo` defaults to `AGM_REPO`, then `~/project/agents-manager`) and reports four kinds of difference:
+
+| Kind | Meaning |
 | --- | --- |
-| `drift` | 安裝檔不是 repo 任何一版——有人直接改了安裝檔，最嚴重 |
-| `behind` | repo 有更新沒裝；附安裝的是哪個 commit、落後的 commit 標題（腳本比位元組、plist／unit 比語意，**兩種都回頭找歷史**：安裝的是 repo 以前某一版就是 `behind`，不是 `drift`） |
-| `missing` | 對照表有、安裝端沒有 |
-| `extra` | `bin/` 裡有、對照表沒有（沒有版控的腳本；`agm` 與 `*.bak*` 不算） |
+| `drift` | The installed file matches no version in the repo — someone edited the installed copy directly. The most serious kind. |
+| `behind` | The repo is newer than what is installed. Reports which commit is installed and the titles of the commits it is missing. Scripts are compared byte for byte, plists/units semantically, and **both search history**: an installed copy equal to an older repo version is `behind`, not `drift`. |
+| `missing` | Listed in the manifest, absent from the install directory. |
+| `extra` | Present in `bin/` but not in the manifest (a script with no version control). `agm` and `*.bak*` are exempt. |
 
-對照表可選的第三欄 `darwin`／`linux` 表示只在那個平台裝（省略＝兩邊都裝）。另一個平台的列放在報告的
-`skipped`、不算落差；`platform` 欄寫這次是用哪一邊判斷的。排程列一定要標對（`LaunchAgents/…` 標 `darwin`、
-`systemd/…` 標 `linux`），標錯是 `bad_manifest`（exit 2），不會變成一堆 `missing`。
+An optional third manifest column, `darwin` or `linux`, restricts a row to that platform (omitted = both). Rows for the
+other platform are listed under `skipped` and do not count as a difference; the `platform` field says which side the
+check used. Schedule rows must be labelled correctly (`LaunchAgents/…` → `darwin`, `systemd/…` → `linux`); a wrong label
+is `bad_manifest` (exit 2), not a pile of `missing`.
 
-一致 exit 0；有落差 exit 1，加 `--alert` 另推一則 `ops_alert`（`source=ops-sync`、`reason=installed_out_of_sync`，同一小時一則）。
-agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，預設 6 小時，不靠新 commit 觸發；`--alert` 會叫醒巡檢，結果留在 `~/.cache/agents-manager/ci/ops-sync.json`）——
-以前只有文件寫「巡檢每天跑一次」、沒有任何東西在排程，`outbox-gc.sh` 停在 9/28 的舊版也沒人發現。它只偵測，不會替你 install。
-`--check` 另外唯讀比對 **`bin/agm`**（issue #532）：`installed` 段是「安裝的不是這顆 binary 內嵌的那份」——加 `--refresh-cli` 就地換掉（`POST /api/supervisor/cli`，不必等 daemon 重啟）；`binary` 段是「binary 內嵌的落後 repo」——那要重建 binary **並重啟 daemon**，這支動不了。daemon 問不到時 `cli.state` 是 `unknown`，不影響 ops 腳本那半邊的結論。
+Exit 0 means in sync; exit 1 means differences, and `--alert` additionally pushes one `ops_alert`
+(`source=ops-sync`, `reason=installed_out_of_sync`, at most one per hour). On agm-host `ubuntu-ci.sh` schedules the
+check (every `AGM_CI_OPS_SYNC_INTERVAL` seconds, default 6 hours, independent of new commits; `--alert` wakes the
+supervisor; the result is kept in `~/.cache/agents-manager/ci/ops-sync.json`). It only detects; it never installs.
 
-## 已安裝 ops 腳本的自動換新（`ops-install.sh`，旗標，預設關）
+`--check` also compares **`bin/agm`** read-only (issue #532). The `installed` section means "the installed copy is not
+the one embedded in this binary" — `--refresh-cli` replaces it in place (`POST /api/supervisor/cli`, no daemon restart
+needed). The `binary` section means "the copy embedded in the binary is behind the repo" — that needs a rebuilt binary
+**and a daemon restart**, which this command cannot do. If the daemon cannot be queried, `cli.state` is `unknown` and the
+ops-script half of the verdict is unaffected.
 
-根因（2026-10-01，`outbox-gc.sh` 停在 9/28 的舊版）：安裝一直是手動的，換版流程只管 daemon binary——而 ops 腳本的改動根本不會
-產生新 binary（`daemon-update-kick.sh` 看到「沒有會進 binary 的差異」就收工），所以沒有任何一步會把它們裝過去。
+## Automatic refresh of installed scripts (`ops-install.sh`, flag, off by default)
 
-`ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run]`：
+Root cause (2026-10-01, `outbox-gc.sh` stuck on a 9/28 version): installation was manual, and the deploy flow only
+handles the daemon binary — a change to ops scripts never produces a new binary (`daemon-update-kick.sh` sees "no
+differences that land in the binary" and stops), so nothing ever copied them over.
 
-- 只看 `install-manifest.tsv`（`--ref` 那版）這個平台的列，來源用 `git show <ref>:<path>` 讀。
-- **只更新「已經裝了、內容跟 repo 不同」的檔**。安裝端沒有的（新檔）報 `not-installed`，第一次要手動裝；
-  排程 unit（`systemd/`、`LaunchAgents/`）報 `skipped`、不碰（換了還要 daemon-reload／launchctl）；清單外的檔不碰。
-- 每支先把新版寫到同目錄暫存檔、**在暫存檔上自檢**（`.sh` → `bash -n`、`.py` → 語法編譯、`.ts` → 有 bun 就 `bun build`）；
-  沒過就丟掉暫存檔、報 `failed`、安裝位置的舊檔一個位元都沒動（不會讓排程撞到沒驗過的新版）、其他支照裝。
-  過了才備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，再 `mv`（原子替換）。
-- 被 SIGKILL 的上一次會把暫存檔 `<安裝位置>.new.<pid>` 留在安裝端：下次執行（非 `--dry-run`、拿到鎖之後）把清單內、`.new.<純數字>`、pid 已不在的清掉並印 `cleaned N`（pid 還活著的不碰）；`ops-sync --check` 也不把這種檔名報成 `extra`。
-- 同時只能有一個在裝：`<AGM>/ops-install.lock.guard` 的 OS advisory lock 串行化鎖目錄建立與殘留回收；`<AGM>/ops-install.lock/` 記 pid，SIGKILL 後可接手。拿不到鎖 exit 3、不動任何檔。同一秒內重複裝，備份目錄也不共用（`<UTC 時間>-2`…）。
-  安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；父目錄是 symlink、或對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）都報 `failed`、不寫，也不會沿父 symlink 清孤兒暫存檔。
-- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條），或自檢／備份期間目的地內容改變，報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
-- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。整輪成功（而且真的換了檔）會把「時間 commit」寫進 `<AGM>/ops-install.last`；有失敗的那輪**不更新**它，改把「時間 commit failed=N」記進 `ops-install.last-failed`（下一次整輪成功就刪）。這兩個檔目前沒有程式讀（kick、ops-sync 都不看），只給人查「裝到哪一版了」。
+```sh
+scripts/ops/ops-install.sh --repo <git dir> --ref <rev> --dir <AGM dir> [--platform linux|darwin] [--dry-run] [--force]
+```
 
-**接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
-用該 sha 自己的 `ops-install.sh` 換新；失敗推 `ops_alert`（`ops_install_failed`），不影響部署結果。**旗標預設關**，要由使用者或 AGM 開：
-`touch ~/.config/agents-manager/supervisor/AGM/ops-auto-install.enabled`（或給 kick 的環境 `AGM_OPS_AUTO_INSTALL=1`），關掉就刪檔。
-注意：kick 本身也是已安裝的檔，這一版 kick 要先手動 `install` 一次，旗標才有東西可開。
+- Reads only the rows of `install-manifest.tsv` (at `--ref`) for this platform; sources come from `git show <ref>:<path>`.
+- **Updates only files that are already installed and differ from the repo.** A file absent from the install directory is
+  reported `not-installed` (the first install is manual); schedule units (`systemd/`, `LaunchAgents/`) are reported
+  `skipped` and left alone (they also need `daemon-reload`/`launchctl`); files outside the manifest are never touched.
+- Each file is first written to a temp file in the same directory and **self-checked there** (`.sh` → `bash -n`,
+  `.py` → byte-compile, `.ts` → `bun build` if bun is present). A failure discards the temp file, reports `failed`, leaves
+  the installed file byte-identical, and carries on with the rest. A pass backs the old file up to
+  `<AGM>/ops-install-backups/<UTC time>/<install path>` and then `mv`s the new one into place (atomic).
+- A previous run killed by SIGKILL leaves `<install path>.new.<pid>` behind. The next non-`--dry-run` run (after taking the
+  lock) removes manifest-listed `.new.<digits>` files whose pid is gone and prints `cleaned N` (live pids are left
+  alone). `ops-sync --check` does not report such names as `extra`.
+- One run at a time: an OS advisory lock on `<AGM>/ops-install.lock.guard` serializes lock-directory creation and stale
+  recovery, and `<AGM>/ops-install.lock/` records the pid (takeover is possible after SIGKILL). If the lock cannot be
+  taken it exits 3 without touching anything. Repeated installs in the same second get distinct backup directories
+  (`<UTC time>-2`, …). An install path that is a symlink is `skipped` (`mv` would replace the link with a copy); a parent
+  directory that is a symlink, or a manifest destination escaping `--dir` (absolute path, `..`), is `failed` and never written.
+- **Hand-edited files are not overwritten.** If the installed file matches no version in `git log <ref> -- <source>`
+  (the same test as `drift` in `ops-sync --check`), or its content changes during the self-check/backup, it is reported
+  `drifted`, left untouched, and is not a failure; the kick also pushes `ops_install_drift` so a person looks. `--force`
+  replaces it anyway (still backed up).
+- `--dry-run` only lists `would-install`. The last line is `changes=N failed=M drifted=K`; any failure exits 1. A fully
+  successful run that really replaced files writes "time commit" to `<AGM>/ops-install.last`; a run with failures does
+  **not** update it and instead records "time commit failed=N" in `ops-install.last-failed` (deleted by the next fully
+  successful run). Nothing reads these two files (neither the kick nor `ops-sync`); they are for humans asking "which
+  version did we get to".
 
-## daemon-update-kick.sh
+**Wiring into deploys.** With the flag on, `daemon-update-kick.sh` runs the target sha's own `ops-install.sh` (1) after a
+successful swap and (2) in the "no differences that land in the binary" round (which requires a green `ubuntu-ci` for
+that sha). A failure pushes `ops_alert` (`ops_install_failed`) and does not affect the deploy result. **The flag is off by
+default**; the user or AGM turns it on:
+`touch ~/.config/agents-manager/supervisor/AGM/ops-auto-install.enabled` (or give the kick `AGM_OPS_AUTO_INSTALL=1`);
+delete the file to turn it off. The kick itself is an installed file, so install this version of the kick manually once
+before the flag has anything to act on.
 
-例行自動部署（使用者 2026-09-29 簡化）：正式 daemon 的 release binary 落後最新一顆 `ubuntu-ci` 綠燈的 `origin/main` 時，
-**腳本自己直接**建置並換版——不經 LLM、不開核准單、不派建置 child。建置已在推 main 前測過、`ubuntu-ci` 也在背景跑整樹，AGM 不再驗一次。
-流程（SPEC §18.2）：`git fetch`（專用 checkout）→ 跟 `daemon-update.built` 比，沒有會進 binary 的差異就結束 →
-沿 first-parent 往回找最新一顆 `ubuntu-ci`＝success 的 sha（`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`）→
-專用 checkout 上 `bun run build`＋`cargo build --release -p agents-managerd` → `daemon-swap.sh` 換版。
+## Schedules: launchd and systemd
 
-### launchd 排程進了版控（issue #487）
+### launchd (macOS; issue #487)
 
-`scripts/ops/launchd/com.agm.*.plist` 是這台機器上 8 個 job 的來源檔，`install-manifest.tsv` 也列了它們
-（安裝位置寫成 `LaunchAgents/…`，`agm ops-sync --check` 解析成 `~/Library/LaunchAgents/`）。
+`scripts/ops/launchd/com.agm.*.plist` are the source files for the 8 jobs on the dev Mac, and `install-manifest.tsv`
+lists them (destination `LaunchAgents/…`, which `ops-sync --check` resolves to `~/Library/LaunchAgents/`).
 
-比對用 `plistlib` parse 過的 dict（**鍵的順序不影響**），**除了 `EnvironmentVariables` 以外全部都比**，
-包括 `StandardOutPath`／`StandardErrorPath`／`WorkingDirectory`。`EnvironmentVariables` 不比——裡面是這台
-機器的 `PATH` 與 bot id 之類的值，每台不同；repo 那一份留著它是為了 install 之後 job 還跑得起來。
+The comparison uses the `plistlib`-parsed dict (**key order is irrelevant**) and compares **everything except
+`EnvironmentVariables`**, including `StandardOutPath`, `StandardErrorPath` and `WorkingDirectory`.
+`EnvironmentVariables` is skipped because it holds per-machine values (`PATH`, bot ids); the repo copy keeps them only so
+the job still runs after an install.
 
-（#487 原本反過來寫成白名單，理由是「launchd 會自己改寫 plist」。**那個理由是錯的**：實機那八份都是純
-XML 文字檔，launchd 只讀不回寫；當時看到的「鍵順序不同」是 `PlistBuddy -c Print` 的輸出順序。白名單的
-代價是沒列到的鍵被靜默忽略——八份全都有的 `StandardOutPath`／`StandardErrorPath` 就這樣不在比對範圍裡，
-而 `browser-gc-kick.sh` 沒有 ops-alert 管道、失敗只留 log，log 路徑漂掉卻報同步就是綠燈假象。issue #499。）
+(#487 first used an allow-list on the theory that "launchd rewrites plists". That was wrong: the real files are plain XML
+that launchd only reads. The "different key order" seen then was `PlistBuddy -c Print` output order. The allow-list
+silently ignored unlisted keys — `StandardOutPath`/`StandardErrorPath` among them — and `browser-gc-kick.sh` has no
+ops-alert channel, so a drifted log path would have shown green. Issue #499.)
 
-`~/Library/LaunchAgents/` 裡有、對照表沒有的 `com.agm.*` job 會報成 `extra`（＝沒有版控的排程）。
-路徑與 `gui/501` 寫死成這台開發機的值，跟 `herdr-full-restart.sh` 同一個處理方式。
+A `com.agm.*` job in `~/Library/LaunchAgents/` that is not in the manifest is reported `extra` (a schedule with no
+version control). Paths and `gui/501` are hard-coded to the dev machine, as in `herdr-full-restart.sh`.
+**This only covers version control and comparison; it does not install or call `launchctl`.**
 
-**這裡只管版控與比對，不負責 install／`launchctl`**（部署另外走）。
+### systemd user units (Linux; issue #677)
 
-### Linux 主機：systemd user unit（issue #677）
-
-搬到 Linux 主機（#675）後，同一批 job 由 systemd user manager 排程：`scripts/ops/systemd/com.agm.<名字>.service`
-（`Type=oneshot`，跑同一支安裝好的 kick）＋`.timer`，對照表以 `systemd/…` 列出（解析成 `~/.config/systemd/user/`，
-有 `XDG_CONFIG_HOME` 就跟著它）。對應規則，`scripts/agm_test.py` 的 `SystemdParityTest` 釘住、改一邊忘了另一邊會紅：
+On the Linux host (#675) the same jobs are scheduled by the systemd user manager: `scripts/ops/systemd/com.agm.<name>.service`
+(`Type=oneshot`, runs the same installed kick) plus `.timer`, listed in the manifest as `systemd/…` (resolved to
+`~/.config/systemd/user/`, or `$XDG_CONFIG_HOME` when set). The mapping below is pinned by `SystemdParityTest` in
+`scripts/agm_test.py` — change one side and forget the other and it goes red:
 
 | launchd | systemd |
 | --- | --- |
-| `ProgramArguments` | `ExecStart=`（直譯器同名，`/Users/<人>/` 寫成 `%h/`；bun 在 Linux 是 `%h/.bun/bin/bun`） |
-| `StartInterval N` | `.timer` 的 `OnUnitActiveSec=Ns`，第一次 `OnActiveSec=Ns`（launchd 也是載入後隔一個間隔才第一次） |
-| `RunAtLoad` | `OnActiveSec=1s`（timer 一啟動就跑一次） |
-| `StandardOutPath`／`StandardErrorPath` | `StandardOutput=`／`StandardError=append:…/<名字>.systemd.log` |
-| `EnvironmentVariables` | `Environment=`（變數名要一樣；值是這台機器的，`ops-sync` 不比） |
-| 同一個 job 不會疊 | 同一個 unit 還在跑時 timer 不會再起一個 |
+| `ProgramArguments` | `ExecStart=` (same interpreter; `/Users/<user>/` becomes `%h/`; bun is `%h/.bun/bin/bun` on Linux) |
+| `StartInterval N` | timer `OnUnitActiveSec=Ns`, first run `OnActiveSec=Ns` (launchd also waits one interval after load) |
+| `RunAtLoad` | `OnActiveSec=1s` (run once as soon as the timer starts) |
+| `StandardOutPath` / `StandardErrorPath` | `StandardOutput=` / `StandardError=append:…/<name>.systemd.log` |
+| `EnvironmentVariables` | `Environment=` (same variable names; values are per-machine and not compared by `ops-sync`) |
+| a job never overlaps itself | the timer does not start a new run while the unit is still running |
 
-systemd 多一件 launchd 不必講的事：**收 unit 時看的是 cgroup，不是程序群**。`dev-server` 的 kick 用 detached 拉起
-vite，launchd 那邊脫離程序群就活著；systemd 預設 `KillMode=control-group` 會在 kick 一結束就把 vite 一起收掉，
-所以那支 unit 要 `KillMode=process`。
+One systemd-only point: **units are reaped by cgroup, not process group.** The `dev-server` kick starts vite detached;
+under launchd leaving the process group is enough to survive, but systemd's default `KillMode=control-group` would kill
+vite the moment the kick ends, so that unit sets `KillMode=process`.
 
-`ops-sync` 比 unit 用 parse 過的「段.鍵 → 值（依出現順序）」：註解、空行、行尾 `\` 接續都不算，**除了
-`Environment=` 的值以外全部都比**（鍵要在，理由同 plist）。Linux 上掃的是 `~/.config/systemd/user/com.agm.*`，
-不掃 `~/Library/LaunchAgents`。
+`ops-sync` compares units as parsed "section.key → values (in order)": comments, blank lines and trailing-`\`
+continuations do not count, and **everything except the values of `Environment=` is compared** (the key must exist;
+same reasoning as the plist). On Linux it scans `~/.config/systemd/user/com.agm.*` and not `~/Library/LaunchAgents`.
 
-Linux 有 `com.agm.browser-gc` systemd timer，但執行 Linux 專用的 `browser_gc_linux.py`：每 30 分鐘回收本使用者
-已孤兒（父程序是 pid 1 或自己的 `systemd --user`）、超過 2 分鐘且沒有 CDP 連線的 headless Chrome，清理安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。
-如果 `ss` 不存在或 CDP 狀態無法查明，會保留程序。unit 帶 `HERDR_SESSION=agents-manager`（跟 daemon-update 一致），尾端 `pane-gc.sh` 才連得到 daemon 用的 herdr server；`herdr pane list` 回的不是 JSON 或是 error JSON 時，pane-gc 只在 `browser-gc.log` 記一行原因就收，不噴 traceback。它不啟動 browser-gc bot，也不派 ego-browser task。
-`browser-gc-kick.sh`／`browser-gc-task.md`／plist 仍只標 `darwin`；ego lite／OB 圖形 worker 依 #718 暫不實作，
-所以 Linux `bin/` 裡出現 macOS 的 `browser-gc-kick.sh` 仍會報成 `extra`。
+The Linux `com.agm.browser-gc` timer runs the Linux-only `browser_gc_linux.py` (see the GC section below).
+`browser-gc-kick.sh`, `browser-gc-task.md` and the plist stay `darwin`-only; the ego lite/OB GUI worker is deliberately not
+implemented on Linux (#718), so a macOS `browser-gc-kick.sh` found in a Linux `bin/` is still reported `extra`.
 
-安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表（`install-manifest.tsv`）裡同時有 `.service` 與 `.timer` 的那幾支，目前九支；`daemon-boot` 沒有 timer，見下面『開機自己起 daemon』，`disk-gc` 的安裝另見它自己那一節）：
+Install (**needs AGM approval**, same as macOS). `<name>` is any unit in the manifest that has both a `.service` and a
+`.timer` (currently ten); `daemon-boot` has no timer (see below) and `disk-gc` is also covered in its own section:
 
 ```sh
-install -m 644 scripts/ops/systemd/com.agm.<名字>.{service,timer} ~/.config/systemd/user/
+install -m 644 scripts/ops/systemd/com.agm.<name>.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now com.agm.<名字>.timer
-loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的話登出後整個 user manager 會停）
+systemctl --user enable --now com.agm.<name>.timer
+loginctl enable-linger "$USER"   # once; without it the whole user manager stops when you log out
 ```
 
-**開機自己起 daemon（issue #858，Linux）**：`com.agm.daemon-boot.service`（oneshot，沒有 timer）＋`bin/daemon-boot.sh`。
-開機時正式 daemon 沒在聽 7788 就用 `systemd-run --user`（`Type=forking`、`KillMode=process`，同 `daemon-swap.sh`）起一顆；已經在跑就什麼都不做。
-`herdr@.service` 現在也有 `[Install]`，只 enable daemon 用的那個 session：
+**Starting the daemon at boot (issue #858, Linux).** `com.agm.daemon-boot.service` (oneshot, no timer) plus
+`bin/daemon-boot.sh`: if nothing listens on 7788 at boot it starts the production daemon through `systemd-run --user`
+(`Type=forking`, `KillMode=process`, same as `daemon-swap.sh`); if the daemon is already up it does nothing.
+`herdr@.service` also has an `[Install]` section; enable it only for the session the daemon uses:
 
 ```sh
 install -m 755 scripts/ops/daemon-boot.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/systemd/com.agm.daemon-boot.service scripts/ops/systemd/herdr@.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable com.agm.daemon-boot.service herdr@agents-manager.service
-loginctl enable-linger "$USER"   # 必須：沒登入也要在開機時跑 user manager
+loginctl enable-linger "$USER"   # required: the user manager must start at boot without a login
 ```
 
-已安裝主機更新 `herdr@.service` 時，需手動重裝來源檔並 reload。`ops-sync` 只會比對並回報落差，不會安裝或 reload。
+To update `herdr@.service` on an installed host, reinstall the source file and reload by hand; `ops-sync` only reports
+the difference and never installs or reloads:
 
 ```sh
 install -m 644 scripts/ops/systemd/herdr@.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 ```
 
-`OOMPolicy=continue` 會在 pane 裡的行程遭 OOM killer 終止時保留 herdr server。設定要等 herdr 下次重啟才生效；不要為此手動重啟 herdr，因為重啟會中斷所有 pane。
+`OOMPolicy=continue` keeps the herdr server alive when the OOM killer terminates a process inside a pane. The setting only
+takes effect at the next herdr restart; do not restart herdr just for this — a restart interrupts every pane.
 
-驗收：`qm shutdown 114 && qm start 114` 後不碰任何東西，`curl 127.0.0.1:7788/api/session` 有回應、bot 被 supervisor 接回。
-隔離測試：`bash scripts/ops/daemon-boot_test.sh`（假 `systemd-run`／`curl`／`agm`，HOME 指到暫存目錄）。
+Acceptance: after `qm shutdown 114 && qm start 114`, with no manual step, `curl 127.0.0.1:7788/api/session` answers and
+the supervisor has re-attached its bots. Isolated test: `bash scripts/ops/daemon-boot_test.sh` (fake `systemd-run`,
+`curl`, `agm`; HOME pointed at a temp dir).
 
-`daemon-update` 的 `Environment=` 有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）
-與 `HERDR_SESSION=agents-manager`；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報（`Environment=` 只看在不在，不比內容；安裝端少了 `HERDR_SESSION` 也一樣不會報，要自己重裝或補 drop-in）。
-macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `daemon-swap.sh` 會呼叫安裝在那裡的 herdr。
-`HERDR_SESSION` 只有 systemd unit 帶：Linux 主機只跑 daemon 用的 session、沒有 default server，排程又沒有 pane 環境，
-不指定的話 `daemon-swap.sh` 的 `herdr pane list` 會回 `server_not_running` 而中止換版。daemon 改用別的 session 名時這裡跟著改。
+The `daemon-update` unit's `Environment=` carries a PATH
+(`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`) and `HERDR_SESSION=agents-manager`.
+If a new host keeps its tools elsewhere, edit the installed copy; `ops-sync` will not flag it (`Environment=` is checked
+for presence only, not content, so a missing `HERDR_SESSION` on the installed side is not reported either — reinstall or
+add a drop-in yourself). The macOS `daemon-update` PATH must also keep `~/.local/bin`, because `daemon-swap.sh` calls the
+herdr installed there. Only the systemd unit sets `HERDR_SESSION`: a Linux host runs just the daemon's session, with no
+default server and no pane environment in a scheduled run, so without it `daemon-swap.sh`'s `herdr pane list` would return
+`server_not_running` and abort the swap. If the daemon moves to another session name, change it here too.
 
-排程每 5 分鐘一輪（`StartInterval 300`／`OnUnitActiveSec=300s`），每輪都往下檢查；沒有新東西時只有一次 `git fetch`，不問 GitHub。
+## daemon-update-kick.sh
 
-環境變數（都可選；unit／plist 的 `Environment` 只放 `PATH`（unit 另加 `HERDR_SESSION`，見上），要有 `git`、`gh`、`bun`、`python3`、`nice`）：
+Routine automatic deploy (simplified 2026-09-29 by the user). When the production daemon's release binary is behind the
+latest `origin/main` commit with a green `ubuntu-ci`, **the script itself** builds and swaps — no LLM, no approval ticket,
+no build child. The build was tested before the push to main and `ubuntu-ci` already runs the whole tree in the
+background, so AGM does not verify again.
 
-| 變數 | 預設 | 意義 |
+Flow (SPEC §18.2): `git fetch` in the dedicated checkout → compare with `daemon-update.built`; if nothing that lands in the
+binary differs, stop → walk back along first-parent to the newest sha whose `ubuntu-ci` is `success`
+(`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`) → `bun run build` plus
+`cargo build --release -p agents-managerd` in the dedicated checkout → swap with `daemon-swap.sh`.
+
+It runs every 5 minutes (`StartInterval 300` / `OnUnitActiveSec=300s`). With nothing new, a round is a single
+`git fetch` and never asks GitHub.
+
+Environment variables (all optional; the unit/plist `Environment` carries only `PATH` — plus `HERDR_SESSION` for the unit,
+see above — which must reach `git`, `gh`, `bun`, `python3` and `nice`):
+
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state 都在這） |
-| `AGM_REPO` | `~/project/agents-manager` | 正式 daemon 跑的那份（`daemon-swap.sh` 換它的 `target/release`）；也是專用 checkout 的 origin URL 來源 |
-| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | 專用、乾淨的 checkout（第一次自動 `git clone`）。只有這支腳本動它，不碰主樹與別人的 worktree；`target/` 與 `node_modules` 留著讓建置增量 |
-| `AGM_GH_REPO` | `Eden-Sun/agents-manager` | 問 commit status 的 repo |
-| `AGM_CI_CONTEXT` | `ubuntu-ci` | 看哪一條 status |
-| `AGM_CI_LOOKBACK` | `30` | 沿 first-parent 往回最多看幾顆（`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha） |
-| `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner／`ops_alert` 的 source |
-| `AGM_FAIL_ALERT_AFTER` | `6` | 連續幾輪「沒能完成」推 `ops_alert check_failing`（每輪 5 分鐘＝約 30 分鐘） |
-| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收；OS advisory lock 仍被持有時不回收 |
-| `AGM_LOCK_HUNG_SECS` | `7200` | 執行者還活著但卡了這麼久：推 `ops_alert runner_hung`（不搶鎖；冷建置要十幾分鐘，所以給寬） |
-| `AM_MAINTENANCE_ESCALATE_MINS`（daemon 端） | `30` | 只對 bot 申請的核准有意義（SPEC §18.10）；自動部署自開的單等待為 0，不會升級 |
+| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | Supervisor working directory (`bin/agm`, logs and state live here) |
+| `AGM_REPO` | `~/project/agents-manager` | The checkout the production daemon runs from (`daemon-swap.sh` swaps its `target/release`); also the source of the dedicated checkout's origin URL |
+| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | Dedicated clean checkout (cloned on first use). Only this script touches it — never the main tree or anyone's worktree; `target/` and `node_modules` stay so builds are incremental |
+| `AGM_GH_REPO` | `Eden-Sun/agents-manager` | Repo to ask for commit status |
+| `AGM_CI_CONTEXT` | `ubuntu-ci` | Which status context to read |
+| `AGM_CI_LOOKBACK` | `30` | How many first-parent commits to look back (`ubuntu-ci` only runs the newest HEAD and skips shas in between) |
+| `AM_AGENT_NAME` | `daemon-update-kick` | Lease owner / `ops_alert` source |
+| `AGM_FAIL_ALERT_AFTER` | `6` | Consecutive rounds that could not finish before `ops_alert check_failing` (5 min each ≈ 30 min) |
+| `AGM_LOCK_STALE_SECS` | `120` | With no discoverable owner, a lock older than this is reclaimed as stale; never reclaimed while the OS advisory lock is still held |
+| `AGM_LOCK_HUNG_SECS` | `7200` | Owner alive but stuck this long: push `ops_alert runner_hung` (the lock is not stolen; a cold build takes over ten minutes, so this is generous) |
+| `AM_MAINTENANCE_ESCALATE_MINS` (daemon side) | `30` | Only meaningful for approvals a bot requested (SPEC §18.10); tickets the auto-deploy opens itself have a wait of 0 and never escalate |
 
-狀態檔（都在 `AGM_DIR`）：`daemon-update.built`（上次換上去的 short sha，`daemon-swap.sh` 寫）、`daemon-update.rejected`（換上去被回滾的完整 sha，之後不再挑）、
-`daemon-update.fails`（連續失敗輪數）、`daemon-update.lock`（owner 與診斷資訊）、`daemon-update.lock.guard`（核心自動釋放的防重疊 advisory lock）、`daemon-update.now.json`（立即部署請求）、`daemon-update.log`。
-`daemon-swap.sh` 每趟會在 `target/release/` 留 `agents-managerd.bak-<舊 sha>`（回滾用）與 `.prev-<舊 sha>-<時間>-<六碼隨機>`（mktemp，同秒連換兩趟也不撞名）（換下來的舊 binary）；**成功**換版最後只保留這趟的那兩個、其餘舊的全刪（DB 備份也是只留最新一份），回滾／中止不清。
-`.built` 不在或指向不在 repo 的 sha 時，腳本推 `ops_alert built_unknown` 並停住——它需要知道線上是哪一版才敢往上換。
+State files (all in `AGM_DIR`): `daemon-update.built` (short sha last swapped in, written by `daemon-swap.sh`),
+`daemon-update.rejected` (full shas that were swapped in and rolled back; never picked again), `daemon-update.fails`
+(consecutive failed rounds), `daemon-update.lock` (owner and diagnostics), `daemon-update.lock.guard` (kernel-released
+advisory lock preventing overlap), `daemon-update.now.json` (a deploy-now request), `daemon-update.log`.
+Each `daemon-swap.sh` run leaves `agents-managerd.bak-<old sha>` (for rollback) and
+`.prev-<old sha>-<time>-<six random chars>` (mktemp, so two swaps in the same second never collide) in `target/release/`
+(the binary that was replaced). A **successful** swap keeps only this run's two and deletes the older ones (DB backups
+likewise keep only the newest); rollback and abort clean nothing.
+If `.built` is missing or points to a sha not in the repo, the script pushes `ops_alert built_unknown` and stops — it must
+know which version is live before it dares to move forward.
 
-同一顆 sha 建好後（`<checkout>/target/release/.built-for`）等安全窗口的那幾輪不會重建；`daemon-swap.sh` 結束碼 4（有人在忙）不算失敗，下一輪再試；service 身分檢查沒過（token 檔不見、能力探不出來）是 3，算失敗（設定錯誤不會自己好，issue #1178）。
-其他結束碼：10（換版**之前**中止：新 binary 的 `--version` 內嵌的 sha 不是要換的那顆、是髒樹建的、或舊 binary 沒內嵌 sha；什麼都沒動）推 `swap_binary_sha_mismatch`，不記進 `.rejected`；6（升過 schema、往前修）補寫 `.built` 並推 `swap_forward_fixed`；7（已回滾）推 `swap_rolled_back` 並記進 `.rejected`；8（換好但窗口沒交還）推 `swap_lease_not_released`；
-9（線上 daemon 太舊，沒有 restart-window 路由）推 `swap_daemon_too_old`；12（回滾後舊 binary 起不來、`/api/session` 30 秒內不通）不算已回滾，kick 走預設的失敗計數，要人工處理（issue #1102）。
+A sha already built (`<checkout>/target/release/.built-for`) and waiting for a safe window is not rebuilt on later rounds.
+`daemon-swap.sh` exit 4 (someone is busy) is not a failure — try again next round; a failed service-identity check (token
+file missing, capability probe fails) is 3 and does count, since a misconfiguration will not fix itself (issue #1178).
+Other exit codes: 10 (aborted **before** the swap: the new binary's embedded `--version` sha is not the target, it was built
+from a dirty tree, or the old binary has no embedded sha; nothing was touched) pushes `swap_binary_sha_mismatch` and is
+not recorded in `.rejected`; 6 (schema was upgraded, fixed forward) back-fills `.built` and pushes `swap_forward_fixed`;
+7 (rolled back) pushes `swap_rolled_back` and records the sha in `.rejected`; 8 (swapped, but the window was not handed
+back) pushes `swap_lease_not_released`; 9 (live daemon too old, no restart-window route) pushes `swap_daemon_too_old`;
+12 (after a rollback the old binary would not start — `/api/session` is unreachable for 30 s) does not count as rolled
+back; the kick applies the default failure count and a human must step in (issue #1102).
 
-**首次上線／舊 daemon**：自動 kick 不帶核准 id；線上 daemon 還沒有 `POST /api/services/daemon-swap/restart-window` 時，照樣以 9 中止並回報。若執行的是已核准的舊部署工作，可在同一份 checkout 呼叫 `daemon-swap.sh --approval <id>`：只有偵測到舊 daemon（`service_old`／`bootstrap`）才會用 User token 和舊式核准租約 bootstrap；`service_old` 還必須有既存的 service token，缺檔會 fail closed。新版路由存在時接受但忽略這個相容參數，改走 service principal。首換成功後新 daemon 建立 service token，之後自動換版使用新路徑。腳本會先確認同一 checkout 的 `daemon-start.py` 可讀，否則在停 daemon 前以 3 中止。
+**First deploy / old daemon.** The automatic kick carries no approval id; if the live daemon lacks
+`POST /api/services/daemon-swap/restart-window`, it aborts with 9 and reports. When running an already-approved legacy
+deployment, call `daemon-swap.sh --approval <id>` from the same checkout: only a detected old daemon (`service_old` /
+`bootstrap`) bootstraps with the User token and the old approval lease, and `service_old` also needs an existing service
+token (a missing file fails closed). When the new route exists the parameter is accepted but ignored, and the service
+principal is used. After the first successful swap the new daemon creates the service token and later automatic swaps use
+the new path. The script first checks that `daemon-start.py` from the same checkout is readable, and otherwise aborts with 3
+before stopping the daemon.
 
-### 立即部署（使用者 2026-09-25，SPEC §18.2）
+### Deploy now (user decision 2026-09-25, SPEC §18.2)
 
-網頁左上角按「立即部署」時，daemon（`POST /api/deploy/now`）驗過目標後寫 `daemon-update.now.json`（`{sha,live_sha,requested_at,requested_by}`；**不開核准單**），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`
-（Linux：`systemctl --user start --no-block com.agm.daemon-update.service`——`--no-block` 是因為 oneshot 的 start 會等 kick 整輪跑完；
-daemon 沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`，issue #677）。kick 讀到這個檔：
+When the user presses "Deploy now" at the top left of the web UI, the daemon (`POST /api/deploy/now`) validates the target,
+writes `daemon-update.now.json` (`{sha,live_sha,requested_at,requested_by}`; **no approval ticket**), and then runs
+`launchctl kickstart gui/<uid>/com.agm.daemon-update` (Linux: `systemctl --user start --no-block com.agm.daemon-update.service`
+— `--no-block` because starting a oneshot would wait for the whole kick round; if the daemon has no `XDG_RUNTIME_DIR` it
+fills in `/run/user/<uid>`, issue #677). The kick then reads the file:
 
-- **部署那顆 sha，不等 `ubuntu-ci`**（使用者按下就是明確要求）；其餘（建置、`daemon-swap.sh` 的安全條件）與例行相同。
-- sha 要是 origin/main 的祖先（否則 `ops_alert now_target_invalid`）、線上版本要是它的祖先（否則 `now_target_older`，拒絕降版）；`.built` 到它之間沒有程式碼差異就收掉請求（已經是最新）。
-- 做完（含往前修、回滾）才刪請求檔；`daemon-swap.sh` 回 4（有人在忙）就留著，下一輪再試。請求檔壞掉 → `ops_alert now_request_corrupt`、刪掉。
+- It deploys **that sha without waiting for `ubuntu-ci`** (pressing the button is an explicit request); everything else
+  (build, `daemon-swap.sh` safety conditions) is the same as the routine path.
+- The sha must be an ancestor of origin/main (otherwise `ops_alert now_target_invalid`) and the live version must be an
+  ancestor of it (otherwise `now_target_older`, which refuses a downgrade). If there is no code difference between `.built`
+  and the target, the request is dropped (already current).
+- The request file is deleted only after the work finishes (including a fix-forward or rollback); `daemon-swap.sh`
+  returning 4 (someone is busy) keeps it for the next round. A corrupt file → `ops_alert now_request_corrupt` and deletion.
 
-daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.json` 這個字」判斷，所以**要先 install 這一版 kick，按鈕才按得下去**。
+The daemon decides `kick_ready` by whether the installed kick contains the string `daemon-update.now.json`, so **install
+this version of the kick before the button works**.
 
-### 隔離測試
+### Isolated test
 
-不要對正式 daemon 測。開一個獨立 daemon 與獨立資料目錄：
+Never test against the production daemon. Start a separate daemon with its own data directory:
 
 ```sh
 AM_DATA_DIR=/tmp/am-ops-test ./target/release/agents-managerd serve --port 7799 &
 mkdir -p /tmp/am-ops-test/supervisor/AGM/bin
-# 把 bin/agm 指到測試 daemon（runtime.json 的 daemon_url 寫 127.0.0.1:7799）
+# Point bin/agm at the test daemon (write 127.0.0.1:7799 as daemon_url in runtime.json)
 AGM_DIR=/tmp/am-ops-test/supervisor/AGM AGM_REPO=$PWD AGM_DEPLOY_CHECKOUT=/tmp/am-ops-test/checkout \
   AGM_SWAP_SCRIPT=/bin/true bash scripts/ops/daemon-update-kick.sh
 cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 ```
 
-#### 破壞性指令的護欄（issue #422，必讀）
+### Guardrails for destructive commands (issue #422 — required reading)
 
-`*_test.sh` 會把被測腳本複製出來真的執行，而那些腳本裡有 `launchctl bootout`、`pkill -f`、`ssh`。
-2026-09-23 17:39Z 一支測試的 PATH 沒擋住，真的把 `gui/501` 的兩個 herdr launchd job bootout 掉，
-全機 pane 當場消失。所以 `scripts/check.sh ops` 會把每一支測試包在
-`scripts/ops/destructive-canary.sh` 底下跑，三層攔截：
+Each `*_test.sh` copies the script under test and really runs it, and those scripts contain `launchctl bootout`,
+`pkill -f` and `ssh`. At 2026-09-23 17:39Z one test's PATH did not block them and really booted out two herdr launchd jobs
+under `gui/501`; every pane on the machine vanished. So `scripts/check.sh ops` runs each test under
+`scripts/ops/destructive-canary.sh`, which intercepts in three layers:
 
-1. **PATH**：把 canary 目錄放在最前面。便宜，但**腳本自己整個覆寫 PATH 就失效**。
-2. **匯出的 bash 函式**：函式優先於 PATH 查找，覆寫 PATH 蓋不掉，而且跟著環境進到子 bash。
-   `export -f` 是 bash 專有的——在 zsh 底下它會變成「印出定義」，看起來成功但根本沒匯出。
-3. **zsh 的 `$ZDOTDIR/.zshenv`**：zsh 對每一個 shell（含 `zsh -c`、含巢狀）都會讀它，
-   跟 PATH 無關。沒有這層的話，子 zsh 在覆寫 PATH 之後完全沒有保護。
+1. **PATH**: the canary directory goes first. Cheap, but **useless once a script overwrites PATH wholesale**.
+2. **Exported bash functions**: functions win over PATH lookup, survive a PATH override, and follow the environment into
+   child bashes. `export -f` is bash-only — in zsh it prints the definition, which looks like success but exports nothing.
+3. **zsh `$ZDOTDIR/.zshenv`**: zsh reads it for every shell (`zsh -c` and nested ones included), independent of PATH.
+   Without this layer a child zsh has no protection once PATH is overridden.
 
-`rm` 不整支攔（測試本來就要清自己的暫存目錄），只擋**絕對路徑且在暫存目錄之外**的目標——
-`rm -rf ~/foo` 展開後正好是那種。要放行別的根目錄就設 `AM_CANARY_ALLOW_RM`。
+`rm` is not blocked wholesale (tests must clean their own temp directories); only targets that are **absolute paths outside
+the temp directory** are refused — which is exactly what `rm -rf ~/foo` expands to. Set `AM_CANARY_ALLOW_RM` to allow
+another root.
 
-**護欄擋不到的（實測過，不要以為有三層就安全）**：
+**What the guardrail cannot catch (measured; having three layers does not make this safe):**
 
-- **絕對路徑呼叫**（`/bin/launchctl`）：不經過 PATH，也不經過 shell 的函式查找，三層都抓不到。
-  所以**不要用絕對路徑叫破壞性指令**；要指定就用 `LAUNCHCTL_BIN=` 這種間接變數指到替身
-  （`daemon-swap_test.sh` 是這樣做的）。
-- **非 shell 的子行程**（python 的 `subprocess`、`Bun.spawn`、任何走 `execvp` 的）：
-  第 2、3 層保護的是**shell 的指令查找**，`execvp` 根本不經過 shell，所以對它們**只剩 PATH 那一層**。
-  實測：PATH 完整時擋得住，PATH 被覆寫時 python／Bun 都直接穿過去（`FileNotFoundError`／
-  `Executable not found in $PATH`，而那只是因為用的是 sentinel；換成真指令就會執行）。
-  ⇒ **測試呼叫 `.py`／`.ts` 時，那一行的 PATH 一定要帶上 `${AM_CANARY_DIR:+$AM_CANARY_DIR:}`**。
-  `lint` 會掃「直譯器＋腳本在同一行」的寫法；用變數叫的（`"${BUN}" "${SCRIPT}"`）掃不出來，靠這條規則自律。
-  更深一層——測試叫一支 `.py`、那支自己再 spawn——`lint` 完全看不到，寫那種測試要自己確認 PATH。
-- **`env -i`**：把匯出的函式與 `ZDOTDIR` 一起清掉，只剩你自己在那一行給的 PATH。
+- **Absolute-path invocations** (`/bin/launchctl`): they bypass PATH and shell function lookup, so all three layers miss
+  them. **Never call a destructive command by absolute path**; if you must choose one, go through an indirection variable
+  such as `LAUNCHCTL_BIN=` pointing at a stand-in (`daemon-swap_test.sh` does this).
+- **Non-shell child processes** (Python `subprocess`, `Bun.spawn`, anything using `execvp`): layers 2 and 3 protect the
+  *shell's* command lookup, and `execvp` never goes through the shell, so only the PATH layer applies. Measured: with a
+  complete PATH it blocks, with an overridden PATH Python and Bun both slip through (`FileNotFoundError` /
+  `Executable not found in $PATH` only because the test used a sentinel; a real command would run).
+  ⇒ **When a test invokes a `.py`/`.ts`, that line's PATH must include `${AM_CANARY_DIR:+$AM_CANARY_DIR:}`.**
+  `lint` scans for an interpreter plus script on one line; invocations through a variable (`"${BUN}" "${SCRIPT}"`) are not
+  detected, so this rule relies on discipline. One level deeper — a test that runs a `.py` which itself spawns — is
+  invisible to `lint`; check the PATH yourself when writing such a test.
+- **`env -i`** clears the exported functions and `ZDOTDIR`, leaving only the PATH you give on that line.
 
-`rm` 護欄的界線：目標會先正規化成絕對路徑、並解開路徑中的 symlink 再比對，所以
-`cd /tmp && rm ../Users/…` 與「`/tmp` 底下指到暫存外的 symlink」都擋得住。
-**但正規化只解開目錄部分**：最後一段本身是 symlink 時比的是連結自己（刪連結不刪目標，這是對的）。
+The `rm` guard's boundary: the target is normalized to an absolute path and symlinks in the path are resolved before
+comparing, so `cd /tmp && rm ../Users/…` and "a symlink under `/tmp` pointing outside the temp directory" are both
+blocked. **Only the directory part is resolved**: if the last component is itself a symlink, the link is what is compared
+(deleting a link does not delete its target, which is correct).
 
-寫新測試時：
+When writing a new test:
 
-- PATH 要帶上 canary：`PATH="$你的fakebin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin"`。
-- 真的需要最小環境（模擬 launchd 之類）就在那一行上面寫
-  `# canary-gap: <理由，以及那段裡的破壞性指令是怎麼另外擋住的>`，`lint` 就會放行。
-  重點是**有人寫下理由**，不是默默漏掉。
-- `scripts/ops/canary-baseline.tsv` 是棘輪：既有的漏洞記在裡面，只能變少。
-  修好之後跑 `scripts/ops/destructive-canary.sh lint --update` 把數字縮小。
+- Include the canary in PATH: `PATH="$your_fakebin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin"`.
+- If you genuinely need a minimal environment (to imitate launchd, say), put
+  `# canary-gap: <reason, and how the destructive commands in that section are blocked another way>` on the line above;
+  `lint` then lets it through. The point is that **someone wrote down a reason**, rather than silently leaving a hole.
+- `scripts/ops/canary-baseline.tsv` is a ratchet: existing gaps are recorded there and can only shrink. After fixing one,
+  run `scripts/ops/destructive-canary.sh lint --update` to lower the count.
 
-**驗證護欄本身時，只准用 `am-canary-probe` 這個無害的 sentinel 指令名**，
-絕對不要拿真的 `launchctl`／`pkill` 當白老鼠：護欄沒生效時，白老鼠就變成真的破壞——
-#422 的事故正是這樣來的。
+**When verifying the guardrail itself, use only the harmless sentinel command name `am-canary-probe`.** Never use a real
+`launchctl`/`pkill` as a guinea pig: if the guardrail fails, the guinea pig becomes real damage — that is exactly how #422
+happened.
 
-### 正式安裝（需要 AGM 核准）
+### Production install (needs AGM approval)
 
 ```sh
 install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
-`daemon-swap.sh` 與 `daemon-start.py` 不裝：kick 從專用 checkout（要換上的那顆 sha）跑它們。
+`daemon-swap.sh` and `daemon-start.py` are not installed: the kick runs them from the dedicated checkout (the sha being
+swapped in).
 
-## daemon-swap.sh（＋ daemon-start.py）
+## daemon-swap.sh (plus daemon-start.py)
 
-自動部署換 binary 用的那一段：拿 restart 窗口 → 備份 DB → 換 binary → 重啟 → 驗證 → 寫 `.built`。
-以前每趟由建置 child 在 scratchpad 臨時寫一份，2026-09-20 就因為把 `user_version` 寫死成 10（那批升到 11）
-誤判成失敗、回滾、舊 binary 被版本閘擋下，daemon 停了 33 秒。所以它進了版控，行為由
-`daemon-swap_test.sh` 釘住：
+The step of the automatic deploy that replaces the binary: take the restart window → back up the DB → swap the binary →
+restart → verify → write `.built`. It used to be a throwaway script written per run by the build child; on 2026-09-20 one
+such script hard-coded `user_version` as 10 (that batch moved to 11), judged the swap failed, rolled back, the old binary
+was blocked by the version gate, and the daemon was down for 33 seconds. So it is under version control and its behaviour
+is pinned by `daemon-swap_test.sh`:
 
-- 預期 schema 版本從 checkout 的 `SCHEMA_HISTORY` 讀，不寫死；讀不到就中止。
-- 回滾還原 DB 前先停 daemon、清掉 `-wal`／`-shm`，還原後自驗 `user_version` 與 `integrity_check`。
-- 所有部署驗證成功後，保留這趟 DB 備份並清除同一 DB 的舊 `.bak-*`；abort／rollback 不清理備份。
-- 停 daemon 一律走 `stop_daemon`：換版前必須找到唯一匹配的舊行程；TERM 最多等 30 秒、再 KILL 並確認 pid 消失。找不到、找到多顆或 KILL 後仍存活都以 rc=11 中止，不覆蓋 binary、不還原 DB。rollback（含往前修那次重啟）停不掉 daemon 也會保留現場。
-- 升過 schema 的失敗**預設往前修**（沿用新 binary，exit 6），只有新 binary 起不來才還原 binary＋DB（exit 7）。
-- 啟動走 `launchctl submit` ＋ `daemon-start.py`（fork + setsid）：daemon 是 ppid=1、nice 0。
-  在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，非 root 降不回去。
-  Linux（issue #677）走 `systemd-run --user --collect --unit=am-daemon-swap-<pid>-<第幾次> -p Type=forking -p KillMode=process`
-  跑同一支 `daemon-start.py`：transient unit 對應 `launchctl submit`，不必另外裝 unit 檔。`Type=forking` 讓 systemd 把 fork 出來的
-  daemon 認成 main PID；`KillMode=process` 是因為 systemd 收 unit 時看 cgroup，setsid 脫離不了，預設會連 daemon 起的子行程一起殺。
-  平台看 `uname -s`（測試用 `AGM_OPS_PLATFORM` 蓋掉），沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
-- 3b 自測 prompt 送給固定的自測對象（`SWAP_PROBE_BOT`，預設 AGM 的 browser-gc child）；對方**沒有在跑**（`no active run`，例如 Linux 主機沒有桌面所以它 offline）就略過並在 log 寫明，不卡住自動部署；其他非 200 仍中止。
-- 換 binary 前必須讀到非空的 `agm state` bot 名單；命令失敗或名單空白會 exit 3 並交還 restart lease。
-- 重啟後比對 bot 名單（看 id）：少了就回滾，**只有**換版窗口內刻意刪掉的不算——deleted_at 在窗口起點之後、
-  而且有刪除 API 留下的 `delete_bot`／`delete_project` intent（subject 是它、它的專案，或 payload 快照裡有它），DB 唯讀查。
-  只有 deleted_at、沒有 intent（重啟後 reconcile 退役、投影軟刪）照樣回滾（issue #553：2026-09-24 父 bot 在窗口內刪 child i263 被誤判回滾）。
-  父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆會寫 `retire_child` 紀錄；只認 subject 是它、窗口內、
-  `cause` 是 `pane_closed`（herdr 報過關閉事件、當下 pane 也不在）或 `promoted` 的。開機 reconcile 的 `unconfirmed` child 另有窄例外：
-  intent 說 pane 已 gone、父 bot 仍有 active run 且留在 after 名單，腳本最多重讀 5 秒等 intent 落地；母 bot 消失、pane 還在的 `agent_missing`、
-  `herdr_restarted` 與其他 `unconfirmed` 仍回滾（issue #834，判準見 SPEC §6.5a）。
-- `agm supervisor` 讀取失敗、status 空白或不屬於 `starting`／`idle`／`busy` 都回滾；新版 bot 名單也必須成功讀回且非空。
-  例外（issue #771）：停 daemon 前先讀一次 status；**換版前就是 `waiting_quota`、換版後仍是**視為額度等待、與新版無關，不回滾（log 會寫明）。換版前健康、換版後才 `waiting_quota`，或換版前讀不到，照樣回滾。
-  以前因這條被回滾而進了 `daemon-update.rejected` 的 sha（2026-10-02 的 09a2438d）不會自動解除：確認它是無辜的後，從該檔刪掉那一行（`grep -vx <完整 sha> daemon-update.rejected`）下一輪就會再挑。
-
-```sh
-scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \
-    --owner <窗口持有者名稱> --checkout <乾淨 checkout> [--approval <舊流程核准 id>]
-```
-
-**不需要核准單**（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開（daemon-swap 服務身分自己開一筆立即核准的 restart 單，再走同一個 acquire——
-沒人 working／送達中、沒有別人的租約才拿得到，拿到時暫停 assignment 派送）。沒有自己的 pane（排程跑）時，3b 改用 `herdr pane list` 確認 socket 通、協定對得上。
-
-離開碼：0 成功、2 參數錯、3 前置核對失敗（含啟動器缺失，保證舊 daemon 尚未停止）、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）、9 daemon 太舊且沒有明確 `--approval`（自動 kick 不傳核准 id）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間；自開的單有效期＝ttl＋5 分鐘），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
-
-`lease_token` **不進 argv**（issue #477）：拿到窗口之後 `mktemp` 在 AGM 私有目錄底下建一個 0600 的檔（不可預測路徑、不落在全域可寫的 /tmp），`agm lease release` 走 `--lease-token-file` 讀，腳本結束時（不管成敗）刪掉。argv 對同一個 uid 的行程是公開的（`ps`），而那顆 token 是「只出現一次、任何 API 都查不到」的一次性憑證，抄走就能收掉別人正在換 binary 的窗口。交還的 rc 也不再被 `>/dev/null 2>&1` 吞掉——以前失敗時 log 照樣寫「窗口已交還」，而窗口其實握到 TTL。
-
-## claude-release-kick.sh
-
-舊的排程入口保留為相容 wrapper，轉呼叫 `release-triage-kick.sh`。Claude binary diff 已併入 changelog 分診同一則交辦及通知；
-獨立腳本不再另派工。狀態檔仍是 `claude-release.last`，由統一 kick 在 binary diff 派成功後更新。隔離測試：
-`bash scripts/ops/claude-release-kick_test.sh` 驗 wrapper；合併內容和狀態由 `release-triage-kick_test.sh` 驗。
-
-既有 launchd／systemd 的 `com.agm.claude-release` 排程可繼續呼叫 wrapper；它與 `com.agm.release-triage` 同時觸發也共用 `release-triage.lock`，不會重疊派工。
-
-## herdr-update-kick.sh
-
-herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 AGM 排程處理（issue #66，SPEC §18.2b）。
-唯讀、只派工，**不升級、不重啟 herdr server**——真的升級一律要 AGM 核准後走 §6.5.2 的維護模式手動做。
-版本比較與 CHANGELOG 段落擷取交給 `agents-managerd herdr-update-check`（`crates/am-base/src/herdr_update.rs`），
-這支腳本只負責問本機版本、問 GitHub 最新穩定版、抓 CHANGELOG 全文，再照 JSON 決定要不要派工。
-
-| 變數 | 預設 | 意義 |
-| --- | --- | --- |
-| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state） |
-| `AGM_REPO` | `~/project/agents-manager` | 找 `target/release/agents-managerd` 的 repo（可被 `AM_BINARY` 整個蓋過） |
-| `AM_BINARY` | `$AGM_REPO/target/release/agents-managerd` | 呼叫 `herdr-update-check` 的二進位路徑 |
-| `HERDR_REPO` | `herdrdev/herdr` | 查最新穩定版與 CHANGELOG 的 GitHub repo |
-| `HERDR_CHANGELOG_URL` | `https://raw.githubusercontent.com/<HERDR_REPO>/master/CHANGELOG.md` | CHANGELOG 全文來源（測試用 `file://` 亦可） |
-| `AGM_HERDR_UPDATE_BOT` | （無） | 派給誰；沒設就退回 `runtime.json` 的 `herdr_update_bot_id` → `release_bot_id` → `responder_bot_id` |
-| `AGM_EXTRA_PATH` | `~/.local/bin:/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄（順序照登入 shell 的 `which herdr`）；空字串＝不補；只給測試蓋掉 |
-| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者（含舊版腳本留下、沒有 owner 檔的鎖）時，超過這麼久就當殘留回收 |
-| `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert`（`runner_hung`），不搶鎖 |
-| `AGM_FAIL_ALERT_AFTER` | `2` | 連續幾輪沒能完成檢查就推 `ops_alert`（`check_failing`） |
-
-狀態檔 `herdr-update.last`＝已經派過工的版本，派工成功才寫；同一版不重派。
-開頭自補 PATH（launchd 預設不含 Homebrew，herdr／gh 多半在那裡）；找不到 `herdr`／`gh`／`python3`／`curl` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
-**鎖**（#66 review 留言）：`herdr-update.lock` 裡寫 pid＋時間（同 `release-triage-kick.sh`）。SIGKILL／斷電讓 EXIT trap 沒跑、鎖留在磁碟上時，
-下一輪發現執行者不在（含 pid 被別的程序重用）就回收接手並記一行 log；舊版純 `mkdir` 鎖（沒有 owner 檔）超過 `AGM_LOCK_STALE_SECS` 一樣回收，
-剛建立的先不動；執行者還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `runner_hung`，回收不掉推 `stale_lock`。
-**連續失敗要被看見**（#66 review 留言）：讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、比較報告看不懂（不是 JSON、沒有布林的 `should_notify`，#226——不當成「沒有新版」）、找不到派給誰、派工失敗、binary 不在，這些「這輪沒能完成檢查」的出口
-除了 log 還會在 `herdr-update.fails` 記連續次數；連續 `AGM_FAIL_ALERT_AFTER` 輪（每天一輪＝隔天還是不行）推 `ops_alert`（`check_failing`），一次網路抖動不吵人。
-檢查完整跑完（含「沒有新版」）或派工成功就清零。
-隔離測試：`bash scripts/ops/herdr-update-kick_test.sh`（假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，`file://` CHANGELOG；含 `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` 模擬 launchd、缺依賴喊人、殘留鎖與活鎖、連續失敗喊人，系統 `/bin/bash` 3.2 也跑）；
-`herdr-update-check` 本身的版本比較與 CHANGELOG 段落擷取正確性由 `cargo test -p agents-managerd` 釘住
-（`crates/am-base/src/changelog.rs`、`crates/am-base/src/herdr_update.rs`），不在這支腳本測試裡重測。
-
-安裝（**需要 AGM 核准**；不要自己 `launchctl bootstrap`）：
+- The expected schema version is read from the checkout's `SCHEMA_HISTORY`, never hard-coded; unreadable means abort.
+- Before restoring the DB in a rollback, stop the daemon and remove `-wal`/`-shm`; after restoring, self-check
+  `user_version` and `integrity_check`.
+- After all deploy verification succeeds, keep this run's DB backup and delete the older `.bak-*` of the same DB; abort and
+  rollback never clean up backups.
+- Stopping the daemon always goes through `stop_daemon`: exactly one matching old process must be found before the swap;
+  TERM waits up to 30 s, then KILL and confirm the pid is gone. Not found, several found, or still alive after KILL aborts
+  with rc=11 without overwriting the binary or restoring the DB. A rollback (including the restart of a fix-forward) that
+  cannot stop the daemon also preserves the scene.
+- A failure after a schema upgrade **fixes forward by default** (keep the new binary, exit 6); only if the new binary
+  cannot start are binary and DB restored (exit 7).
+- The daemon is started with `launchctl submit` + `daemon-start.py` (fork + setsid), so it ends up ppid=1, nice 0.
+  Backgrounding it inside a pane would inherit the pane's busy nice 5, which a non-root user cannot lower.
+  On Linux (issue #677) it runs the same `daemon-start.py` through
+  `systemd-run --user --collect --unit=am-daemon-swap-<pid>-<attempt> -p Type=forking -p KillMode=process`: the transient
+  unit stands in for `launchctl submit`, so no unit file needs installing. `Type=forking` makes systemd treat the forked
+  daemon as the main PID; `KillMode=process` is needed because systemd reaps by cgroup, which setsid cannot escape, and
+  the default would kill the daemon's child processes too. The platform comes from `uname -s` (tests override it with
+  `AGM_OPS_PLATFORM`); without `XDG_RUNTIME_DIR` it fills in `/run/user/<uid>`.
+- Step 3b sends a self-test prompt to a fixed probe bot: `SWAP_PROBE_BOT` > `swap_probe_bot_id` in `AGM_DIR/runtime.json` >
+  `manager_bot_id` in the same file (the AGM supervisor itself: resident, always present; issue #882). If the target has
+  **no active run** (`no active run`) the step is skipped, logged and counted in `daemon-swap.probe-skips` (the kick reads
+  it to raise an alert) without blocking the deploy; any other non-200 aborts. With none of the three available, 3b is
+  skipped through the same path.
+- Before swapping, a non-empty `agm state` bot list must be readable; a failing command or an empty list exits 3 and
+  hands back the restart lease.
+- After the restart the bot list (by id) is compared: a missing bot rolls back, **unless** it was deliberately deleted
+  inside the swap window — `deleted_at` after the window start **and** a `delete_bot`/`delete_project` intent left by the
+  delete API (subject is the bot, its project, or the payload snapshot contains it), checked with a read-only DB query.
+  A `deleted_at` without an intent (retired by reconcile after the restart, projection soft delete) still rolls back
+  (issue #553: on 2026-09-24 a parent bot deleting child i263 inside the window was misjudged as a rollback case).
+  When a parent closes a child with `herdr pane close` (no DELETE call), the daemon's retirement writes a `retire_child`
+  record; only entries whose subject is that bot, inside the window, with `cause` `pane_closed` (herdr reported the close
+  event and the pane is currently absent) or `promoted` count. For boot-reconcile `unconfirmed` children there is a narrow
+  exception: if the intent says the pane is gone, the parent bot still has an active run and remains in the after-list,
+  the script re-reads for up to 5 s waiting for the intent to land. `agent_missing` where the parent vanished but the pane
+  remains, `herdr_restarted`, and any other `unconfirmed` still roll back (issue #834; criteria in SPEC §6.5a).
+- A failed `agm supervisor` read, an empty status, or one not in `starting`/`idle`/`busy` rolls back; the post-swap bot
+  list must also be read successfully and be non-empty. Exception (issue #771): the status is read once before the daemon
+  is stopped, and if it was `waiting_quota` **before** the swap and still is after, it is treated as a quota wait unrelated
+  to the new version and does not roll back (the log says so). Healthy before and `waiting_quota` after, or an unreadable
+  "before", still rolls back. A sha that earlier landed in `daemon-update.rejected` because of this rule (09a2438d on
+  2026-10-02) is not released automatically: once you are sure it was innocent, delete that line from the file
+  (`grep -vx <full sha> daemon-update.rejected`) and the next round will pick it up again.
 
 ```sh
-install -m 755 scripts/ops/herdr-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
-install -m 755 scripts/ops/herdr-lan-check.sh ~/.config/agents-manager/supervisor/AGM/bin/
+scripts/ops/daemon-swap.sh --sha <full sha> --old <short sha> --old-hash <first 16 hex of sha256> \
+    --owner <window owner name> --checkout <clean checkout> [--approval <legacy approval id>]
 ```
 
-升級核准後的完整人工步驟見 [`herdr-upgrade-runbook.md`](herdr-upgrade-runbook.md)。其中
-`herdr-lan-check.sh` 必須從 herdr pane 執行，**第一個參數寫真 binary 的路徑**（`/opt/homebrew/bin/herdr`）：不帶參數時它會跳過 PATH 上的 per-bot shim（`~/.config/agents-manager/bots/*/bin/herdr`，沒簽章）與 shell 腳本、解開 symlink，但 PATH 上只有 shim 時就是明確 FAIL。它用新 binary 的 `codesign -dv` identifier 查
-`/Library/Preferences/com.apple.networkextension.plist`，再用 node 連區網；Apple 內建 nc、python3、curl
-不能代驗。任何失敗或 node 缺少都停下，請使用者授權「本機網路」，不要靠重啟硬試。
+**No approval ticket is needed** (user, 2026-09-29): the window is opened by the daemon's
+`POST /api/services/daemon-swap/restart-window` (the daemon-swap service principal opens an immediately-approved restart
+ticket itself and then goes through the same acquire — only obtainable when nobody is working or has a delivery in flight
+and no one else holds a lease; once granted, assignment dispatch pauses). When there is no pane of its own (a scheduled
+run), step 3b uses `herdr pane list` to confirm the socket answers and the protocol matches.
 
-launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，herdr／gh 在那裡，herdr 也可能在 `~/.local/bin`；腳本開頭另外自補一次）：
+Exit codes: 0 success; 2 bad arguments; 3 preflight failed (including a missing launcher, which guarantees the old daemon
+has not been stopped); 4 no window / re-check unsafe; 5 backup problem; 6 stopped on the new binary after fixing forward;
+7 rolled back; 8 swapped but the restart window was not handed back (issue #477); 9 daemon too old and no explicit
+`--approval` (the automatic kick passes none); 10 the new binary's embedded sha is not `--sha` (aborted before the swap,
+nothing touched); 11 could not prove the old daemon exited (binary and DB untouched). **The window does not go away by
+itself**: it lasts until the lease's `expires_at` — 900 s by default (`maintenance::DEFAULT_TTL_SECS`, at most 3600, and not
+later than the approval's own expiry; a self-opened ticket is valid for ttl + 5 minutes), during which supervisor assignment
+dispatch is paused and nobody else can take the restart window. Seeing 8 means someone must act: wait for the TTL, or ask
+AGM to take over with `lease release restart --force` and a reason; do not treat it as a clean finish.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.agm.herdr-update</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>/Users/USER/.config/agents-manager/supervisor/AGM/bin/herdr-update-kick.sh</string>
-  </array>
-  <key>StartInterval</key><integer>86400</integer>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/Users/USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-</dict>
-</plist>
-```
+The `lease_token` **never appears in argv** (issue #477). After the window is granted, `mktemp` creates a 0600 file under
+AGM's private directory (unpredictable path, not in a world-writable /tmp); `agm lease release` reads it through
+`--lease-token-file`, and the script deletes the file when it ends, success or not. argv is public to every process of the
+same uid (`ps`), and the token is a one-time credential that appears once and cannot be looked up through any API — whoever
+copies it can release the window while someone else is mid-swap. The release rc is also no longer swallowed by
+`>/dev/null 2>&1`: it used to log "window released" on failure while the window was in fact held until the TTL.
 
-**相容性驗證沙箱（issue #66 做法 §3）沒有做**：理由與成本分析寫在 SPEC §18.2b 最後一段——沙箱要嘛只驗協定形狀
-驗不到真正的行為差異，要嘛要重建一份接近正式環境的執行環境、成本不小，留給 AGM 收到交辦、看過那一版實際改了什麼再決定要不要做。
+## release-triage-kick.sh and claude-release-kick.sh
 
-## release-triage-kick.sh
+Upstream release triage (issue #204): whenever claude or codex ships a version, entries in the changelog that "may be worth
+adopting or must be guarded against" go to a dedicated bot for a verdict on each, and the daemon files the actionable ones
+as GitHub issues. Read-only and dispatch-only: it does **not upgrade, change settings or restart** — upgrades still follow
+§6.9. Version comparison, changelog slicing and bucketing (dropped/kept/unmatched) are all done daemon-side by
+`agents-managerd release-triage-check --kind <k> --json`; the script does no comparison or slicing and only follows the
+returned JSON (`{"kind","from","to","pending":[{"version","kept","unmatched","dropped_count"}]}`) to decide whether to
+dispatch. With an empty `pending` and no new Claude binary it exits quietly without a log line. If a new version appears
+in `CLAUDE_VERSIONS_DIR`, the kick appends the binary-diff task and the old/new paths to the same message body, and
+dispatches a binary-only assignment even when the changelog has nothing pending. The task body is in
+`release-triage-task.md`, the Claude binary diff instructions in `claude-release-diff-task.md`, and `release-issue-task.md`
+is the body for working an opened guard/adopt issue; `claude-release-task.md` is kept as the manual parsing entry point
+for the update dialog.
 
-上游新版分診（issue #204）：claude／codex 每出一版，把 changelog 裡「可能該採用、或必須提防」的條目派給專責 bot 逐條下 verdict，
-該處理的由 daemon 開成 GitHub issue。唯讀、只派工，**不升級、不改設定、不重啟**——升級照舊走 §6.9。
-版本比較、切 changelog、分桶（dropped／kept／unmatched）全部交給 `agents-managerd release-triage-check --kind <k> --json`（daemon 端），
-這支腳本不做版本比較也不切段，只照回來的 JSON（`{"kind","from","to","pending":[{"version","kept","unmatched","dropped_count"}]}`）決定要不要派。
-`pending` 是空的且沒有新 Claude binary 時就安靜結束、不寫 log。若 `CLAUDE_VERSIONS_DIR` 出現新版本，kick 會把 binary diff 補充任務及新舊路徑附到同一份正文；即使 changelog 沒有待分診列，也會派一則 binary-only 交辦。任務內容在 `release-triage-task.md`，Claude binary diff 指示在 `claude-release-diff-task.md`；`claude-release-task.md` 保留給更新框的手動解析入口。
-
-| 變數 | 預設 | 意義 |
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state 都在這；task 檔也放這） |
-| `AGM_REPO` | `~/project/agents-manager` | 找 `target/release/agents-managerd` 的 repo（可被 `AM_BINARY` 整個蓋過） |
-| `AM_BINARY` | `$AGM_REPO/target/release/agents-managerd` | 呼叫 `release-triage-check` 的二進位路徑 |
-| `AGM_RELEASE_BOT` | `runtime.json` 的 `release_bot_id`，沒有就 `responder_bot_id` | 派給誰；**不能是巡檢自己**。查不到就跳過，不亂派 |
-| `AGM_TRIAGE_QUOTA_MAX` | `85` | 被派的那顆 bot 的 5h 用量 ≥ 這個百分比就不派 |
-| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收；OS advisory lock 仍被持有時不回收 |
-| `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert` 喊人（不搶鎖） |
-| `AGM_EXTRA_PATH` | `/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄；只給測試蓋掉 |
-| `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | Claude binary 版本目錄；沿用 `claude-release.last` 偵測舊版到新版 |
+| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | Supervisor working directory (`bin/agm`, logs and state; the task files live here too) |
+| `AGM_REPO` | `~/project/agents-manager` | Repo to find `target/release/agents-managerd` in (fully overridden by `AM_BINARY`) |
+| `AM_BINARY` | `$AGM_REPO/target/release/agents-managerd` | Binary used to call `release-triage-check` |
+| `AGM_RELEASE_BOT` | `release_bot_id` in `runtime.json`, else `responder_bot_id` | Whom to dispatch to; **never the supervisor itself**. If none is found it skips rather than guessing |
+| `AGM_TRIAGE_QUOTA_MAX` | `85` | Do not dispatch when the target bot's 5h usage is at least this percentage |
+| `AGM_LOCK_STALE_SECS` | `120` | With no discoverable owner, a lock older than this is reclaimed; not reclaimed while the OS advisory lock is held |
+| `AGM_LOCK_HUNG_SECS` | `3600` | Owner alive but stuck this long: push `ops_alert` (the lock is not stolen) |
+| `AGM_LOCK_QUIET_SECS` | `60` | A lock younger than this makes a second runner skip silently; only older locks log "already has an owner" |
+| `AGM_EXTRA_PATH` | `/opt/homebrew/bin:/usr/local/bin` | Directories prepended to `PATH` at the top of the script; tests only |
+| `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | Claude binary versions directory; `claude-release.last` is used to detect old → new |
 
-行為重點：
+Key behaviours:
 
-- **一則交辦最多 5 版／kept＋unmatched 合計 80 條**，順序照 JSON；超過的留給下一輪（JSON 多帶 `deferred_versions`）。第一版一定帶，單版超量也不會永遠卡住。
-  request-id 是 `release-triage-<kind>-<to>`；被截斷時 `<to>` 用這批最後一版，下一批才不會撞同一個 id 被 daemon 去重吞掉。
-- **額度閘門**：派之前用 `bin/agm state`＋`bin/agm quota` 找被派 bot 的身分那一格（`<kind>:<identity>`，沒有就 `<kind>`），
-  5h ≥ `AGM_TRIAGE_QUOTA_MAX` 或有 `limit_hit` → 不派、記一行 log、列維持 `pending`，下一輪再看。查不到（端點壞、找不到那格）**照派**並記 log，
-  不因為端點壞了就永遠不做。只在真的有 changelog pending 或 binary diff 時才查，一輪只查一次。
-- **鎖**（補 #66 留言的洞）：`release-triage.lock` 裡寫 pid＋時間（同 `daemon-update-kick.sh` 的格式），`release-triage.lock.guard` 用 OS advisory lock 串行化新舊鎖建立與殘留回收，避免重複派工。執行者不在（含 pid 被別的程序重用）且沒有行程仍持 advisory lock 時就回收接手；
-  活 runner 在 `AGM_LOCK_QUIET_SECS` 內安靜跳過，超過 `AGM_LOCK_HUNG_SECS` 推 `ops_alert`（`runner_hung`）；無法驗證的 guard owner 長時間仍持鎖也會告警；回收不掉推 `stale_lock`。
-- **依賴**（補 #66 留言的洞）：開頭自補 `PATH=/opt/homebrew/bin:/usr/local/bin:$PATH`；找不到 `python3` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
-  只依賴 `python3` 與 `bin/agm`（額度走 `agm quota`，不用 `curl`／`gh`；開 issue 是 daemon 的事）。
-- **派成功要寫回帳本**：`assign` 成功後對**這一則實際帶出去的版本**（截斷後那批，不是全部 pending）呼叫
-  `bin/agm release-triage dispatched --kind <k> --version <v>…`，帳本才會離開 `pending`（下一輪不再回同一批、「`dispatched` 超過 6 小時沒 verdict 退回 pending」的計時才會開始）。
-  `assign` 失敗不標；`dispatched` 本身失敗只記一行 log、照舊 `exit 0`，**不重派**（request-id 會擋住重複交辦）。
-- **`publish` 重試**：每輪（不論有沒有 pending、額度擋不擋）對兩個 kind 各呼叫一次 `bin/agm release-triage publish --kind <k>`，
-  給 gh 失敗停在 `judged` 的版本一個重試入口（daemon 端不做定時器）。沒東西要重試（results 空、`disabled`、`deferred`）時安靜；只有 `published`／`failed` 才寫 log。
-  舊的 `bin/agm` 不認得 `release-triage`（argparse exit 2）：log 講一次就略過，用 `release-triage-publish-unsupported` 這個 state 檔記「已經講過」，換新 agm 後自動清掉。
-- 某個 kind 的 `release-triage-check` 失敗（抓不到 feed 等）只跳過該 kind 的 changelog 派工，不當成「沒有新版」，另一個 kind 照跑；若 Claude binary 同時換版，binary-only 交辦仍會送出。
-- Claude binary diff 與 changelog pending 同在時合成一則 assignment；只在派工成功後推進 `claude-release.last`，並使用 `release-triage` 的公告 id。Binary-only 用 `agm-claude-release-<版本>-notice`，避免已先送出的 changelog 通知與不同正文共用 ID。
+- **One assignment carries at most 5 versions / 80 kept+unmatched entries in total**, in JSON order; the rest wait for the
+  next round (the JSON also carries `deferred_versions`). The first version is always sent, so a single oversized version
+  never blocks forever. The request id is `release-triage-<kind>-<to>`; when truncated, `<to>` is the last version of this
+  batch so the next batch does not collide with the same id and get swallowed by the daemon's dedup.
+- **Quota gate**: before dispatching, `bin/agm state` + `bin/agm quota` locate the target bot's identity slot
+  (`<kind>:<identity>`, else `<kind>`). 5h usage ≥ `AGM_TRIAGE_QUOTA_MAX` or a `limit_hit` means no dispatch, one log line,
+  and the rows stay `pending` for the next round. If it cannot be determined (endpoint broken, slot not found) it
+  **dispatches anyway** and logs it, rather than doing nothing forever because an endpoint is down. It only queries when
+  there really is a changelog pending or a binary diff, once per round.
+- **Lock**: `release-triage.lock` holds pid + time (same format as `daemon-update-kick.sh`), and
+  `release-triage.lock.guard` is an OS advisory lock serializing old/new lock creation and stale recovery, which prevents
+  duplicate dispatch. A dead owner (including a pid reused by another process) with no process still holding the advisory
+  lock is reclaimed. A live runner within `AGM_LOCK_QUIET_SECS` is skipped silently, beyond `AGM_LOCK_HUNG_SECS` pushes
+  `ops_alert` (`runner_hung`); a guard owner that cannot be verified yet holds the lock for long also alerts; a lock that
+  cannot be reclaimed pushes `stale_lock`.
+- **Dependencies**: the script prepends `PATH=/opt/homebrew/bin:/usr/local/bin:$PATH` itself; a missing `python3` pushes
+  `ops_alert` (`missing_dependency`) and logs, never a silent `exit 0`. It depends only on `python3` and `bin/agm` (quota
+  goes through `agm quota`, no `curl`/`gh`; opening issues is the daemon's job).
+- **A successful dispatch is written back to the ledger**: after `assign` succeeds, it calls
+  `bin/agm release-triage dispatched --kind <k> --version <v>…` for **the versions actually sent in this message** (the
+  truncated batch, not everything pending). Only then do the rows leave `pending` (the next round stops returning the same
+  batch, and the clock for "`dispatched` for over 6 hours without a verdict goes back to pending" starts). A failed `assign`
+  marks nothing; a failed `dispatched` call logs one line and still `exit 0`s, and does **not** redispatch (the request id
+  blocks a duplicate assignment).
+- **`publish` retry**: every round (whatever is pending, quota gate or not) calls `bin/agm release-triage publish --kind <k>`
+  once for each kind, giving versions stuck at `judged` because `gh` failed a retry path (the daemon has no timer for it).
+  It is silent when there is nothing to retry (empty results, `disabled`, `deferred`); only `published`/`failed` are logged.
+  An old `bin/agm` that does not know `release-triage` (argparse exit 2) is logged once and skipped; the state file
+  `release-triage-publish-unsupported` remembers it was already said, and it clears itself after a new agm is installed.
+- If `release-triage-check` fails for one kind (feed unreachable, …), only that kind's changelog dispatch is skipped — it is
+  not treated as "no new version" — and the other kind still runs; if the Claude binary also changed version, the
+  binary-only assignment is still sent.
+- When a Claude binary diff and changelog pending coexist they go out as one assignment; `claude-release.last` only
+  advances after a successful dispatch, and the `release-triage` announcement id is used. A binary-only message uses
+  `agm-claude-release-<version>-notice`, so a changelog notice sent earlier with different text never shares an id.
 
-**跟其他 kick 的分工**：
+**Division of labour with the other kicks:**
 
-- `claude-release-kick.sh`：既有 launchd 的相容入口，單純呼叫本腳本；binary diff 由本腳本合併進 changelog 分診，不再各派各的。
-- `herdr-update-kick.sh`（#66）：herdr 是另一條管線；#204 說第二階段才把 herdr 併進來，這次不動。#66 留言的兩個洞（殘留鎖、launchd PATH）在這支一次補掉；`herdr-update-kick.sh` 之後也照同一套補上（鎖、PATH、缺依賴與連續失敗喊人）。
-- `daemon-update-kick.sh`：鎖回收與 `ops_alert` 的寫法照抄它，格式一致。
+- `claude-release-kick.sh` is a compatibility wrapper kept for the existing launchd/systemd `com.agm.claude-release`
+  schedule; it just `exec`s `release-triage-kick.sh`. The Claude binary diff is merged into the changelog triage and is no
+  longer dispatched separately. The state file is still `claude-release.last`, updated by the unified kick once the binary
+  diff has been dispatched. If `com.agm.release-triage` and `com.agm.claude-release` fire in the same second, they share
+  `release-triage.lock`: the latecomer skips quietly and never overlaps the dispatch.
+- `herdr-update-kick.sh` (#66): herdr is a separate pipeline; #204 deferred merging it to a second phase.
+- `daemon-update-kick.sh`: lock reclaim and `ops_alert` are written the same way, for consistent formats.
 
-launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`）：
+launchd plist example (`~/Library/LaunchAgents/com.agm.release-triage.plist`; **it must carry `EnvironmentVariables.PATH`**,
+because launchd's default PATH lacks `/opt/homebrew/bin`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -442,63 +513,188 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；*
 </plist>
 ```
 
-重疊：`com.agm.release-triage` 與相容入口 `com.agm.claude-release`（`claude-release-kick.sh` `exec` 進同一支腳本）兩個 timer 會在同一秒到點，後到的撞上鎖就安靜跳過；
-只有鎖已存在超過 `AGM_LOCK_QUIET_SECS`（預設 60）才記「已有執行者」，超過 `AGM_LOCK_HUNG_SECS` 仍照舊推 `runner_hung`。
+**Claude API triage (#1919).** With `[claude_api.uses.release_triage]` enabled, the kick runs `agm release-triage auto`
+before the quota gate: the daemon calls the API, books verified verdicts into the ledger and notifies the supervisor
+directly, and versions the API judged are no longer sent to the coordinator. Versions where the API is off, has no key,
+fails or fails validation are dispatched to the coordinator as before (the log only records real failures; "off" is quiet).
+With a new claude binary, the kick runs `bin/claude_binary_diff.py` only when the API path is on (`auto --binary-diff-file`),
+and `claude-release.last` advances only once the API folded the conclusion into the notice (`binary_used`). Tests are in
+the #9 series of `release-triage-kick_test.sh`.
 
-隔離測試：`bash scripts/ops/release-triage-kick_test.sh`（假的 `bin/agm`／`agents-managerd`，含 `env -i PATH=/usr/bin:/bin` 模擬 launchd、殘留鎖與活鎖、額度閘門）；
-`release-triage-check` 本身的切條與分桶由 daemon 的 `cargo test` 釘住，不在這裡重測。
+The Claude binary diff itself is deterministic and lives in `claude_binary_diff.py OLD NEW [--timeout SECS] [--max-lines N] [--max-bytes N]`
+(#1919). It prints plain text (each block under a `== … ==` header) of: the set difference of `--help` and every
+subcommand's `--help`, the set difference of `.describe("…")` fields, and the set difference of `CLAUDE(_CODE)?_*`
+environment variable names — additions and removals both listed; output past `--max-lines`/`--max-bytes` ends with a
+`[truncated: …]` line. The binary is scanned in 8 MiB chunks and `--help` runs as a child process (empty environment,
+throwaway HOME, timeout, output cap), so a 200 MB file is never read into memory and none of it should run inside the
+daemon. Exit 0 means a report was produced (a block that failed shows up as an `ERROR:` line); 2 means OLD/NEW is not an
+executable. Isolated test: `bash scripts/ops/claude_binary_diff_test.sh`. Install:
+`install -m 755 scripts/ops/claude_binary_diff.py ~/.config/agents-manager/supervisor/AGM/bin/`.
 
-**Claude API 分診（#1919）**：`[claude_api.uses.release_triage]` 開著時，kick 在額度閘門之前先 `agm release-triage auto`：daemon 打 API、驗過就落帳並直接通知巡檢，API 判完的版本不再派協調者；沒開／沒 key／失敗／驗證不過的版本照舊派協調者（log 只記真的失敗，沒開不吵）。有新 claude binary 時 kick 只在 API 路徑開著才跑 `bin/claude_binary_diff.py`（`auto --binary-diff-file`），API 把結論併進通知（`binary_used`）才推進 `claude-release.last`。測試在 `release-triage-kick_test.sh` 的 #9 系列。
+Isolated tests: `bash scripts/ops/release-triage-kick_test.sh` (fake `bin/agm` and `agents-managerd`; covers
+`env -i PATH=/usr/bin:/bin` to imitate launchd, stale and live locks, the quota gate, and the merged binary diff
+assignment), and `bash scripts/ops/claude-release-kick_test.sh` for the wrapper. `release-triage-check`'s slicing and
+bucketing are pinned by the daemon's `cargo test`, not re-tested here.
 
-Claude binary diff 的比較是決定性的，獨立成 `claude_binary_diff.py OLD NEW [--timeout 秒] [--max-lines N] [--max-bytes N]`（#1919）：
-`--help` 與各子命令 `--help` 的差集、`.describe("…")` 欄位差集、`CLAUDE(_CODE)?_*` 環境變數名差集，輸出純文字（每區塊以 `== … ==` 標頭；
-新增與移除都列；超過 `--max-lines`／`--max-bytes` 以 `[截斷：…]` 結尾）。binary 以 8 MiB 區塊串流掃描、`--help` 以子行程跑（空環境、拋棄式 HOME、逾時、輸出上限），
-不會把 200MB 讀進記憶體，也不該在 daemon 行程內做。退出碼 0＝報告產出（個別區塊失敗寫成 `ERROR:` 行）、2＝OLD／NEW 不是可執行檔。
-隔離測試：`bash scripts/ops/claude_binary_diff_test.sh`。安裝：`install -m 755 scripts/ops/claude_binary_diff.py ~/.config/agents-manager/supervisor/AGM/bin/`。
-
-正式安裝（**需要 AGM 核准；而且要等 daemon 端的 `release-triage-check` 上線**，沒有那個子命令這支每輪都只會記「檢查失敗」）：
+Production install (**needs AGM approval, and the daemon-side `release-triage-check` must be live first** — without that
+subcommand the script only logs "check failed" every round):
 
 ```sh
 install -m 755 scripts/ops/release-triage-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/release-triage-task.md ~/.config/agents-manager/supervisor/AGM/
+install -m 644 scripts/ops/release-issue-task.md ~/.config/agents-manager/supervisor/AGM/
 install -m 644 scripts/ops/claude-release-diff-task.md ~/.config/agents-manager/supervisor/AGM/
 install -m 644 scripts/ops/claude-release-task.md ~/.config/agents-manager/supervisor/AGM/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.release-triage.plist
 ```
 
-**打開 `[release_triage] publish = true` 之前**（#204 的 close condition）：先乾跑一次，看它會開哪幾張、
-內文長什麼樣、去重會不會命中、標籤齊不齊。乾跑只讀 gh（`auth status`／`repo view`／`label list`／`issue list`），
-**一張 issue 都不開、帳本一個字都不寫**，所以在 `publish = false` 的現況下就能跑：
+**Before turning on `[release_triage] publish = true`** (the close condition of #204), do a dry run first: see which issues
+it would open, what the bodies look like, whether dedup hits, and whether all labels exist. The dry run only reads `gh`
+(`auth status` / `repo view` / `label list` / `issue list`) and **opens no issue and writes nothing to the ledger**, so it
+works while `publish = false`:
 
 ```sh
-~/.config/agents-manager/supervisor/AGM/bin/agm release-triage publish --dry-run          # 全部 judged 的版本
+~/.config/agents-manager/supervisor/AGM/bin/agm release-triage publish --dry-run          # every judged version
 ~/.config/agents-manager/supervisor/AGM/bin/agm release-triage publish --dry-run --kind codex --version 0.156.0
 ```
 
-`checks` 要全綠才會真的開得出 issue：`gh_auth_ok`、`repo_ok`、`can_write`（`viewer_permission` 是
-`ADMIN`／`MAINTAIN`／`WRITE`／`TRIAGE`）、`issues_enabled`、`labels_missing` 是空的——
-`gh issue create --label` 對**不存在的標籤是硬失敗**，少一個就會整版停在 `judged`，
-所以 `release-triage`／`upstream:claude`／`upstream:codex`／`triage:guard`／`triage:adopt` 這五個要先在 repo 上建好。
-每個提案的 `action` 是 `create`（會開）｜`comment`（`duplicate_of`，只留言）｜`existing`（遠端已有同標記，含已關的，不會重開）｜
-`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到）。
-`publish = true` 之後 kick 每輪的 `publish` 重試會把 `judged` 的版本一次開出來（每版 ≤4 張、24 小時 ≤8 張），
-所以打開前先確認 `would_create` 的數字是預期的。
+`checks` must all be green before an issue can actually be opened: `gh_auth_ok`, `repo_ok`, `can_write`
+(`viewer_permission` is `ADMIN`/`MAINTAIN`/`WRITE`/`TRIAGE`), `issues_enabled`, and `labels_missing` empty.
+`gh issue create --label` **hard-fails on a nonexistent label**, so a single missing one leaves the whole version stuck at
+`judged`; create these five on the repo first: `release-triage`, `upstream:claude`, `upstream:codex`, `triage:guard`,
+`triage:adopt`. Each proposal's `action` is `create` (will open) | `comment` (`duplicate_of`, comment only) | `existing`
+(the remote already has the same marker, closed ones included; will not reopen) | `already_logged` |
+`skipped_version_limit` | `deferred_daily_limit` | `remote_unknown` (the `gh` check failed so dedup cannot be answered).
+Once `publish = true`, the kick's per-round `publish` retry opens every `judged` version (at most 4 issues per version,
+8 per 24 hours), so confirm the `would_create` numbers are what you expect before turning it on.
+
+## herdr-update-kick.sh
+
+When herdr ships a new version, summarize "is it useful to us, could it break us" and hand it to AGM's schedule (issue #66,
+SPEC §18.2b). Read-only and dispatch-only: it **neither upgrades nor restarts the herdr server** — a real upgrade is always
+done by hand in maintenance mode (§6.5.2) after AGM approves. Version comparison and CHANGELOG slicing are delegated to
+`agents-managerd herdr-update-check` (`crates/am-base/src/herdr_update.rs`); the script only asks for the local version,
+asks GitHub for the latest stable version, fetches the full CHANGELOG, and follows the returned JSON to decide whether to
+dispatch.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | Supervisor working directory (`bin/agm`, logs, state) |
+| `AGM_REPO` | `~/project/agents-manager` | Repo to find `target/release/agents-managerd` in (fully overridden by `AM_BINARY`) |
+| `AM_BINARY` | `$AGM_REPO/target/release/agents-managerd` | Binary used to call `herdr-update-check` |
+| `HERDR_REPO` | `herdrdev/herdr` | GitHub repo for the latest stable version and the CHANGELOG |
+| `HERDR_CHANGELOG_URL` | `https://raw.githubusercontent.com/<HERDR_REPO>/master/CHANGELOG.md` | Source of the full CHANGELOG (a `file://` URL works for tests) |
+| `AGM_HERDR_UPDATE_BOT` | (none) | Whom to dispatch to; if unset, falls back to `herdr_update_bot_id` → `release_bot_id` → `responder_bot_id` in `runtime.json` |
+| `AGM_EXTRA_PATH` | `~/.local/bin:/opt/homebrew/bin:/usr/local/bin` | Directories prepended to `PATH` (order follows `which herdr` in a login shell); empty string = prepend nothing; tests only |
+| `AGM_LOCK_STALE_SECS` | `120` | With no discoverable owner (including locks left by older script versions that have no owner file), a lock older than this is reclaimed |
+| `AGM_LOCK_HUNG_SECS` | `3600` | Owner alive but stuck this long: push `ops_alert` (`runner_hung`), do not steal the lock |
+| `AGM_FAIL_ALERT_AFTER` | `2` | Consecutive rounds that could not finish the check before `ops_alert` (`check_failing`) |
+
+State file `herdr-update.last` is the version already dispatched; written only after a successful dispatch, and the same
+version is never dispatched twice. The script prepends PATH itself (launchd's default lacks Homebrew, where herdr and gh
+usually live); a missing `herdr`/`gh`/`python3`/`curl` pushes `ops_alert` (`missing_dependency`) and logs, never a silent
+`exit 0`.
+
+**Lock** (from the #66 review): `herdr-update.lock` holds pid + time (same as `release-triage-kick.sh`). If SIGKILL or a
+power cut skipped the EXIT trap and left the lock on disk, the next round reclaims it when the owner is gone (including a
+reused pid) and logs one line; an old-style plain `mkdir` lock (no owner file) older than `AGM_LOCK_STALE_SECS` is reclaimed
+the same way, a just-created one is left alone; an owner that is alive but stuck past `AGM_LOCK_HUNG_SECS` pushes
+`runner_hung`, and one that cannot be reclaimed pushes `stale_lock`.
+
+**Consecutive failures must be visible** (from the #66 review): every "this round could not finish the check" exit — local
+version unreadable, latest version unreachable, CHANGELOG unreachable, version comparison failed, comparison report
+unintelligible (not JSON or no boolean `should_notify`; #226 — never treated as "no new version"), nobody to dispatch to,
+dispatch failed, binary missing — is counted in `herdr-update.fails` in addition to the log. After `AGM_FAIL_ALERT_AFTER`
+consecutive rounds (one round a day, so "still broken the next day") it pushes `ops_alert` (`check_failing`), so one network
+blip makes no noise. A fully completed check (including "no new version") or a successful dispatch resets the count.
+
+Isolated test: `bash scripts/ops/herdr-update-kick_test.sh` (fake `herdr`, `gh`, `agents-managerd`, `bin/agm`; `file://`
+CHANGELOG; covers `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` imitating launchd, missing dependencies raising an alert,
+stale and live locks, repeated failures raising an alert; also runs under the system `/bin/bash` 3.2). The correctness of
+`herdr-update-check`'s version comparison and CHANGELOG slicing is pinned by `cargo test -p agents-managerd`
+(`crates/am-base/src/changelog.rs`, `crates/am-base/src/herdr_update.rs`) and not re-tested in this script's test.
+
+Install (**needs AGM approval**; do not `launchctl bootstrap` on your own):
+
+```sh
+install -m 755 scripts/ops/herdr-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 755 scripts/ops/herdr-lan-check.sh ~/.config/agents-manager/supervisor/AGM/bin/
+```
+
+The full manual steps after an upgrade is approved are in [`herdr-upgrade-runbook.md`](herdr-upgrade-runbook.md).
+`herdr-lan-check.sh` must run from a herdr pane with **the path of the real binary as its first argument**
+(`/opt/homebrew/bin/herdr`): with no argument it skips the per-bot shims on PATH
+(`~/.config/agents-manager/bots/*/bin/herdr`, unsigned) and shell scripts and resolves symlinks, but if only a shim is on
+PATH it FAILs explicitly. It looks up the new binary's `codesign -dv` identifier in
+`/Library/Preferences/com.apple.networkextension.plist`, then connects over the LAN with node; Apple's built-in `nc`,
+python3 and curl cannot stand in. On any failure or a missing node, stop and ask the user to grant "Local Network"
+permission; do not retry by restarting.
+
+launchd plist example (`~/Library/LaunchAgents/com.agm.herdr-update.plist`; **it must carry `EnvironmentVariables.PATH`**:
+launchd's default PATH lacks `/opt/homebrew/bin`, where herdr and gh live, and herdr may also be in `~/.local/bin`; the
+script prepends it once more itself):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.agm.herdr-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/USER/.config/agents-manager/supervisor/AGM/bin/herdr-update-kick.sh</string>
+  </array>
+  <key>StartInterval</key><integer>86400</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+```
+
+**The compatibility sandbox (issue #66, approach §3) was not built.** The reasoning and cost analysis are in the last
+paragraph of SPEC §18.2b: a sandbox either checks only protocol shape and misses real behavioural differences, or needs a
+near-production environment that is expensive to rebuild; it is left for AGM to decide after it receives the dispatch and
+has seen what the release actually changed.
 
 ## ci-watch-kick.sh
 
-main 的 CI 盯哨（issue #211）。issue #716 起預設看 commit status `ubuntu-ci`（`AGM_CI_SOURCE=ubuntu-ci`，失敗 log 本機 `AGM_CI_LOG_DIR` 有就讀、否則 ssh `AGM_CI_HOST` 取），下面的 `gh run …` 是 `AGM_CI_SOURCE=actions` 的舊行為。2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 `check.sh`，沒人看 GitHub 的結果。
-launchd `com.agm.ci-watch` 每 10 分鐘跑一次；只開 issue、留言、派工，**不改程式、不重啟、不關 issue**。形狀比照 `release-triage-kick.sh`（鎖與殘留回收、開頭自補 PATH、缺依賴走 `ops-alert`、無事不寫 log）。
+Watchdog for main's CI (issue #211). The rule used to require only a local `check.sh` and nobody looked at GitHub's result,
+so from 2026-09-16 main's CI stayed red for days unnoticed. Since issue #716 the default source is the commit status
+`ubuntu-ci` (`AGM_CI_SOURCE=ubuntu-ci`; failure logs are read from the local `AGM_CI_LOG_DIR` if present, otherwise fetched
+over ssh from `AGM_CI_HOST`); the `gh run …` behaviour described below is `AGM_CI_SOURCE=actions`, the old mode. It runs
+every 10 minutes under `com.agm.ci-watch`, only opens issues, comments and dispatches, and **does not change code, restart
+anything or close issues**. It is shaped like `release-triage-kick.sh` (lock with stale recovery, PATH prepended at the top,
+missing dependencies go through `ops-alert`, silent when nothing happens).
 
-- 每輪 `gh run list --branch main --workflow CI -L 20`，只看**已完成**的 run：success 算綠，failure／timed_out／startup_failure 算紅，cancelled／skipped／進行中當沒看到。
-- 狀態檔 `ci-watch.state.json` 記目前這一段紅：`first_red_sha`、`first_red_run`、`issue`、`assigned`、`failures`。
-  - **綠→紅**：從 `gh run view <id> --log-failed` 抽失敗的測試名（cargo 的 `test X ... FAILED`／`failures:` 區塊、python 的 `ERROR:`／`FAIL:`），開一張 issue（標題 `CI 紅了：<第一個紅的 sha 前 8 碼> 起 N 條失敗`，標籤 `ci-red`，不存在就建；內文有第一個紅的 run、失敗清單、上一個綠到第一個紅之間的 `git log`），再 `bin/agm assign … --request-id ci-red-<first_red_sha>` 派工。開 issue 前先看有沒有開著的 `ci-red` issue（狀態檔遺失時接手它，不重開、不重派）。
-  - **還在紅**：不重開、不重派；失敗清單多了新的測試才在同一張 issue 留言一次。上一輪派工失敗會補派（同 request-id，daemon 去重）。
-  - **紅→綠**：在 issue 留言「<sha> 起恢復綠，run <id>」，清狀態；**不自動關 issue**，由修的人關。
-- `gh` 失敗／rate limit：這輪什麼都不做、不改狀態、記一行 log，不誤報紅或綠。
-- 派給誰：`AGM_CI_BOT` ＞ `runtime.json` 的 `ci_bot_id` ＞ `responder_bot_id`；不能是巡檢自己。交辦正文在 `ci-watch-task.md`。
-- 一段紅沒人關 issue 就恢復綠、下一段紅又來時，會接手那張還開著的 issue；所以修的人要記得關。
+- Each round it lists the last 20 main runs (`gh run list --branch main --workflow CI -L 20`) and looks only at **completed**
+  ones: success is green, failure/timed_out/startup_failure is red, cancelled/skipped/in-progress are treated as unseen.
+  In `ubuntu-ci` mode the last 20 main commits' `ubuntu-ci` statuses are normalized into the same shape; a commit with no
+  `ubuntu-ci` status (a sha skipped by merging) counts as unseen and pending is not yet complete. If the latest result is
+  `error` for `AGM_ERROR_ALERT_AFTER` (default 3) consecutive rounds, it is an infrastructure problem (disk full,
+  repeated interruption) rather than a test failure, and it alerts `ci_infra_error` instead of opening a "red" issue.
+- The state file `ci-watch.state.json` records the current red stretch: `first_red_sha`, `first_red_run`, `issue`,
+  `assigned`, `failures`.
+  - **Green → red**: extract the failing test names from the failed log (cargo `test X ... FAILED` / the `failures:` block,
+    Python `ERROR:`/`FAIL:`), open one issue (labelled `ci-red`, created if absent; the body holds the first red run, the
+    failure list and the `git log` between the last green and the first red), then dispatch with
+    `bin/agm assign … --request-id ci-red-<first_red_sha>`. Before opening, it checks for an already-open `ci-red` issue (and
+    adopts it if the state file was lost, rather than reopening or redispatching).
+  - **Still red**: no new issue, no redispatch; it comments once on the same issue only when the failure list gains a new
+    test. A dispatch that failed last round is retried (same request id, deduplicated by the daemon).
+  - **Red → green**: comment "green again since <sha>, run <id>" on the issue and clear the state; it does **not** close the
+    issue — whoever fixed it should.
+- If `gh` fails or is rate-limited, the round does nothing, leaves the state alone and logs one line — it never reports a
+  false red or green.
+- Whom to dispatch to: `AGM_CI_BOT` > `ci_bot_id` in `runtime.json` > `responder_bot_id`; never the supervisor itself. The
+  task body is `ci-watch-task.md`.
+- If a red stretch ends green without anyone closing its issue and the next red stretch arrives, the still-open issue is
+  adopted — so the fixer must remember to close it.
 
-launchd plist 範例（`~/Library/LaunchAgents/com.agm.ci-watch.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，`gh` 在那裡）：
+launchd plist example (`~/Library/LaunchAgents/com.agm.ci-watch.plist`; **it must carry `EnvironmentVariables.PATH`**,
+launchd's default PATH lacks `/opt/homebrew/bin`, where `gh` lives):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -520,9 +716,10 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.ci-watch.plist`；**必�
 </plist>
 ```
 
-隔離測試：`bash scripts/ops/ci-watch-kick_test.sh`（假 `gh`、假 `bin/agm`，含 `env -i` 最小 PATH、殘留鎖與活鎖、gh 失敗、狀態檔遺失）。不會真的呼叫 `gh issue create`。
+Isolated test: `bash scripts/ops/ci-watch-kick_test.sh` (fake `gh` and `bin/agm`; covers `env -i` with a minimal PATH, stale
+and live locks, `gh` failures, and a lost state file). It never calls the real `gh issue create`.
 
-正式安裝（**需要 AGM 核准**）：
+Production install (**needs AGM approval**):
 
 ```sh
 install -m 755 scripts/ops/ci-watch-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
@@ -530,57 +727,90 @@ install -m 644 scripts/ops/ci-watch-task.md ~/.config/agents-manager/supervisor/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 ```
 
-## 租約管得到什麼、管不到什麼
+## What a lease does and does not cover
 
-租約約束的是**走 API 與這些腳本的路徑**：
+A lease constrains **the path through the API and these scripts**:
 
-- 這些腳本、`bin/agm`、`/api/supervisor/*` 的重建與重啟申請。
-- 拿著 `restart` 租約期間，daemon 的 assignment 派送會 hold 住（不丟工作，等窗口結束再送）。
+- These scripts, `bin/agm`, and rebuild/restart requests via `/api/supervisor/*`.
+- While a `restart` lease is held, the daemon holds assignment dispatch (no work is dropped; it is delivered after the
+  window ends).
+- **Only supervisor assignment dispatch is gated**: `POST /api/bots/{id}/prompt` is not. The user typing, or a PM handing
+  off the next task, still gets through during a window.
 
-- **只管 supervisor 的 assignment 派送**：`POST /api/bots/{id}/prompt` 沒有被 gate。
-  使用者自己打字、PM 派下一棒，在窗口期間照樣進得去。
+What it cannot cover:
 
-管不到的：
+- Any shell on the machine directly `kill`ing the daemon, running `cargo build --release` on its own, or replacing the
+  binary some other way. No OS-level lock can be enforced from the daemon; **this is a known boundary — do not pretend
+  otherwise in docs or reports.**
+- So the rule still stands: ask AGM before a restart or release rebuild (see the repo's `AGENTS.md`). The lease makes
+  "I asked" stay true for the duration of the action; it does not replace asking.
 
-- 這台機器上任何一個 shell 直接 `kill` daemon、自己 `cargo build --release`、或用別的方式換掉
-  binary。沒有 OS 層的鎖能從 daemon 這裡強制，**這是已知邊界，不要在文件或回報裡假裝有**。
-- 因此規範仍然有效：要重啟、要 release rebuild，先問 AGM（見 repo 的 `AGENTS.md`）。租約是讓
-  「問過了」這件事在執行期間持續成立，不是替代它。
+The safety API and the embedded CLI update require rebuilding and deploying the daemon, and then AGM deploying the kick.
+Until then, keep the production client-side filter hotfix; this repo version no longer excludes on its own, and an old
+endpoint makes this version skip dispatch.
 
-此 safety API／內嵌 CLI 更新需要重建並部署 daemon，再由 AGM 部署 kick。升級前暫保留正式環境的 client-side 過濾熱修；repo 本版不再自行排除，舊端點會使本版跳過派工。
+## outbox-gc.sh, pane-gc.sh, browser-gc-kick.sh, browser_gc_linux.py (issue #318)
 
-## outbox-gc.sh／pane-gc.sh／browser-gc-kick.sh（issue #318）
+Purely mechanical cleanup scripts that used to exist only in AGM's `bin/`, with no version control and no tests, yet are
+all destructive (delete files, kill processes, close panes). The repo is now the source, and the installed copies are
+byte-identical (`cmp`); `browser-gc-task.md` is the body of the browser-gc bot's assignment.
 
-三支純機械的清理腳本，原本只存在 AGM 的 `bin/`，沒有版本控制也沒有測試，卻都是破壞性的（刪檔、殺行程、關 pane）。
-現在 repo 是來源，內容與已安裝的那份逐位元組相同（`cmp`），另附 `browser-gc-task.md`（browser-gc bot 的交辦正文）。
+- `outbox-gc.sh`: runs every 10 minutes (`com.agm.outbox-gc`). Deletes files under the outbox (bot subdirectories included)
+  whose mtime **and** ctime are both over 60 minutes old (a file that was `mv`d/`cp -p`d in counts from when it arrived),
+  and empty directories. Directories of sharing bots (SPEC §20.5) use the **share retention policy** (#850) instead; which
+  bots are sharing is decided by the share list in the daemon database (`shared_bots`, #1291), not by `.am-share-keep`:
+  keep for 14 days (deleted only when both mtime and ctime exceed it), at most 500 MiB / 1000 files per bot, deleting the
+  oldest by mtime first beyond that; the marker file itself is not deleted (`OUTBOX_SHARE_KEEP_DAYS`,
+  `OUTBOX_SHARE_CAP_BYTES`, `OUTBOX_SHARE_CAP_FILES` are test seams, as is the clock `OUTBOX_GC_NOW`). Guardrails: it refuses
+  an `AM_OUTBOX_ROOT` outside `~/.config/agents-manager/outbox*`, the root and its parents may not be symlinks, and cleanup
+  first enters a directory and then works with relative paths.
+  - Dependency: `sqlite3` (reads the share list read-only). If the list cannot be read (DB missing, `sqlite3` failing or
+    absent, locked for over 5 s) it deletes nothing that round, logs "refusing the whole cleanup: …" to `outbox-gc.log` and
+    exits 1; if outbox cleanup seems to have stopped, look at that log first.
+- `pane-gc.sh`: closes `claude auth login` / `gcloud auth login` / `codex login` panes stuck for over 24 hours; phantom
+  panes are only logged. Called by `browser-gc-kick.sh` (and by `browser_gc_linux.py` on Linux).
+- `browser-gc-kick.sh` (macOS): `com.agm.browser-gc`, **`StartInterval 1800` (30 minutes)**. Reaps orphaned headless Chrome
+  processes with no CDP connection that are over 2 minutes old, deletes unused `/tmp/am-*` Chrome profiles, runs
+  `pane-gc.sh`, then dispatches `browser-gc-task.md`. Has a lock with stale recovery (issue #490). (This once said "every 6
+  hours", but the real machine always ran 1800 s — the **documentation was wrong**, not the schedule; issue #487 pinned the
+  plist to the real value when it entered version control.)
+- `browser_gc_linux.py` (Linux): `com.agm.browser-gc` every 30 minutes. Reclaims this user's headless Chrome that is orphaned
+  (parent is pid 1 or the user's own `systemd --user`), over 2 minutes old and has no CDP connection, cleans old
+  safely-marked `/tmp/am-*` profiles, then runs `pane-gc`. If `ss` is missing or CDP state cannot be determined, it keeps
+  the process. The unit sets `HERDR_SESSION=agents-manager` (consistent with daemon-update) so the trailing `pane-gc.sh` can
+  reach the herdr server the daemon uses; when `herdr pane list` returns non-JSON or an error JSON, pane-gc logs one reason
+  line to `browser-gc.log` and stops, with no traceback. It does not start a browser-gc bot or dispatch an ego-browser task.
 
-- `outbox-gc.sh`：launchd `com.agm.outbox-gc` 每 10 分鐘；刪 outbox 底下（含 bot 子目錄）mtime 與 ctime 都超過 60 分鐘的檔（`mv`／`cp -p` 進來的舊檔從搬入起算）與空目錄；分享用 bot 的目錄（SPEC §20.5）改走**分享保留政策**（#850）；是不是分享用 bot 由 daemon 資料庫的分享名單決定（`shared_bots`，#1291），不看 `.am-share-keep`：保留 14 天（mtime 與 ctime 都超過才刪）、每顆 500 MiB／1000 檔，超過從最舊的 mtime 刪，標記檔不刪（`OUTBOX_SHARE_KEEP_DAYS`／`OUTBOX_SHARE_CAP_BYTES`／`OUTBOX_SHARE_CAP_FILES` 是測試接縫）；`OUTBOX_GC_NOW` 是測試用的時鐘接縫。護欄：`AM_OUTBOX_ROOT` 不在 `~/.config/agents-manager/outbox*` 就拒絕，根目錄與父項不能是 symlink，清理會先進目錄再用相對路徑操作。
-  - 相依：`sqlite3`（唯讀讀分享名單）。名單讀不到（DB 不在、`sqlite3` 失敗或沒裝、被鎖超過 5 秒）就整輪不刪、`outbox-gc.log` 記「拒絕整輪清理：…」並 exit 1；outbox 清理停了先看這個 log。
-- `pane-gc.sh`：關卡住超過 24 小時的 `claude auth login`／`gcloud auth login`／`codex login` pane；幽靈 pane 只記錄。由 `browser-gc-kick.sh` 呼叫。
-- `browser-gc-kick.sh`：launchd `com.agm.browser-gc`，**`StartInterval 1800`（30 分鐘）**；收孤兒、無 CDP 連線、活超過 2 分鐘的 headless Chrome，刪沒人用的 `/tmp/am-*` Chrome profile，跑 `pane-gc.sh`，再派 `browser-gc-task.md`。有鎖與殘留回收（issue #490）。
-  （這裡原本寫「每 6 小時」，但實機一直是 1800 秒——是**文件寫錯**，不是排程跑錯；issue #487 把 plist 收進版控時照實機現值定案。）
+Isolated tests: `bash scripts/ops/outbox-gc_test.sh`, `pane-gc_test.sh`, `browser-gc-kick_test.sh`,
+`browser-gc-linux_test.sh` (fake `ps`/`lsof`/`herdr`/`bin/agm`, `kill` replaced by a function, `/tmp/am-*` replaced by a
+temp directory; they never kill processes, close panes or touch the real outbox or HOME). Install like the other kicks:
+`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/` and
+`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/` on macOS; on Linux install
+`browser_gc_linux.py` and `pane-gc.sh` instead of the kick, and the systemd units go through the supervisor.
 
-隔離測試：`bash scripts/ops/outbox-gc_test.sh`、`pane-gc_test.sh`、`browser-gc-kick_test.sh`（假 `ps`／`lsof`／`herdr`／`bin/agm`，`kill` 用函式替身，`/tmp/am-*` 換成暫存目錄；不會殺行程、關 pane 或碰真的 outbox／HOME）。
-安裝比照其他 kick：`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/`、`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/`；launchd 由巡檢處理。
+## disk-gc.sh (issue #835, Linux)
 
-## disk-gc.sh（issue #835，Linux）
+Reclaims build caches and raises an alert when disk usage is high. Nothing used to reclaim disk on a schedule: the daemon's
+`select_gc` only runs when `[build.remote] enabled`, and each worktree's `target/` kept piling up.
+`com.agm.disk-gc.timer` (`OnActiveSec=600s`, `OnUnitActiveSec=3600s`, hourly) runs `bin/disk-gc.sh`; systemd only, **no
+launchd plist** (macOS is a separate matter).
 
-回收編譯快取，磁碟水位高時喊人。以前沒有任何排程回收磁碟：daemon 的 `select_gc` 只在 `[build.remote] enabled` 時才跑，各 worktree 的 `target/` 越堆越多。
-`com.agm.disk-gc.timer`：`OnActiveSec=600s`、`OnUnitActiveSec=3600s`（每小時）跑 `bin/disk-gc.sh`；只有 systemd 版，**沒有 launchd plist**（macOS 另議）。
-
-| 步驟 | 對象 | 規則（env 可覆寫） |
+| Step | Target | Rule (overridable via env) |
 | --- | --- | --- |
-| (a) | `~/.cache/agents-manager/remote-cargo/*` 頂層目錄 | mtime 超過 `DISK_GC_REMOTE_CARGO_DAYS`（7）天，且沒有行程的 cwd／開檔在底下才刪；不論 `build.remote` 開關 |
-| (b) | 主樹、`git worktree list` 登記的每棵 worktree（含 `~/project/agm-*` 那種不在 `.claude/worktrees` 底下的；另加沒登記的 `.claude/worktrees/*`），以及 ubuntu-ci 的常駐 clone（`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`）的 `target/*/incremental/*` | 子目錄 mtime 超過 `DISK_GC_INCREMENTAL_DAYS`（2）天就刪 |
-| (c) | 各 worktree（**不含主樹、不含 ubuntu-ci 的 clone**）的 `target/` | 最新的 `target/*/.fingerprint`（含它底下第一層）都超過 `DISK_GC_TARGET_DAYS`（7）天 → 整個 `target/` 刪；一個 `.fingerprint` 都沒有就不判斷。ubuntu-ci 的 `target/` 是暖快取，整個不刪 |
-| (d) | `$HOME` 所在磁碟 | 使用率 ≥ `DISK_GC_ALERT_PCT`（85）或剩餘 < `DISK_GC_ALERT_FREE_GB`（20）→ `agm ops-alert --source disk-gc --reason disk_low` |
+| (a) | Top-level directories under `~/.cache/agents-manager/remote-cargo/*` | Deleted when mtime is older than `DISK_GC_REMOTE_CARGO_DAYS` (7) days and no process has its cwd or an open file underneath; regardless of the `build.remote` setting |
+| (b) | `target/*/incremental/*` of the main tree, every worktree registered in `git worktree list` (including ones like `~/project/agm-*` outside `.claude/worktrees`, plus unregistered `.claude/worktrees/*`), and the ubuntu-ci resident clone (`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`) | Subdirectories with mtime older than `DISK_GC_INCREMENTAL_DAYS` (2) days are deleted |
+| (c) | Each worktree's `target/` (**not the main tree, not ubuntu-ci's clone**) | If the newest `target/*/.fingerprint` (and its first level) is older than `DISK_GC_TARGET_DAYS` (7) days → delete the whole `target/`; with no `.fingerprint` at all, make no judgement. ubuntu-ci's `target/` is a warm cache and is never deleted |
+| (d) | The disk holding `$HOME` | Usage ≥ `DISK_GC_ALERT_PCT` (85) or free space < `DISK_GC_ALERT_FREE_GB` (20) → `agm ops-alert --source disk-gc --reason disk_low` |
 
-安全：只刪上面這幾個明確路徑；路徑含 `..`、不在 `$HOME` 底下、任何一層是 symlink、實際位置不符就整步放棄；`cd` 進去後只用相對路徑刪。
-worktree 底下有行程的 cwd，或 `target/` 底下有行程開著檔，整棵不動（主樹只看 `target/` 底下有沒有開檔，因為主樹本來就一直有人在）；讀不到 `/proc` 就不刪任何東西。
-每輪在 `supervisor/AGM/disk-gc.log` 寫一行（釋放多少 MB、跳過哪些與原因）。`/tmp` 外洩由 `ubuntu-ci.sh` 的 `sweep_stale_tmp` 處理，這裡不重做。
+Safety: it deletes only those explicit paths; a path containing `..`, outside `$HOME`, with any symlink along the way, or
+whose real location does not match abandons the whole step; after `cd` it deletes with relative paths only. A worktree with
+a process whose cwd is inside, or a process holding a file open under `target/`, is left entirely alone (for the main tree
+only open files under `target/` count, since someone is always working there); if `/proc` is unreadable, nothing is deleted.
+Each round writes one line to `supervisor/AGM/disk-gc.log` (MB freed, what was skipped and why). `/tmp` leaks are handled by
+`sweep_stale_tmp` in `ubuntu-ci.sh` and are not duplicated here.
 
-隔離測試：`bash scripts/ops/disk-gc_test.sh`（HOME 指到暫存目錄，`touch -d` 造舊檔，假 `df`／`agm`；不碰真的快取）。
-安裝（**需要 AGM 核准**）：
+Isolated test: `bash scripts/ops/disk-gc_test.sh` (HOME pointed at a temp directory, old files made with `touch -d`, fake
+`df` and `agm`; it never touches the real caches). Install (**needs AGM approval**):
 
 ```sh
 install -m 755 scripts/ops/disk-gc.sh ~/.config/agents-manager/supervisor/AGM/bin/
@@ -588,123 +818,204 @@ install -m 644 scripts/ops/systemd/com.agm.disk-gc.{service,timer} ~/.config/sys
 systemctl --user daemon-reload && systemctl --user enable --now com.agm.disk-gc.timer
 ```
 
-## dev-server-kick.ts（issue #418）
+## remote-cargo-prewarm.sh (issue #1855, Linux)
 
-5173 dev server 的看門狗。**2026-09-24 之前只存在於 `AGM/bin/`**：`docs/SPEC.md` §18.1 把行為寫得很細，
-程式碼卻沒有版控、沒有 review、沒有測試，而且它會 `kill` 占用 port 的行程。現在 repo 是來源檔。
+Warms the cargo cache on the external build host (r7) so that when a child starts work it hits a warm cache instead of a
+cold start (measured: a cold whole-tree check on r7 takes 3 min 10 s, a warm one-line change 4.8 s). The systemd timer
+`com.agm.remote-cargo-prewarm.timer` runs it first 10 minutes after the timer starts and then every 600 seconds. Each run:
 
-- launchd `com.agm.dev-server`（Linux：systemd user timer 同名）：`StartInterval 60`、`RunAtLoad`，跑 `bun run …/AGM/bin/dev-server-kick.ts`。
-- 5173 的 worktree＝`${AGM_REPO:-~/project/agents-manager}-main`（`AGM_DEV_REPO` 可整個指定）；誰在聽 port：macOS `lsof`、Linux `ss`（#676）。
-- 行為與判斷順序見 `docs/SPEC.md` §18.1（健康＝綁 `*`／`0.0.0.0` 且本機 curl 有回應；只收孤兒 vite；
-  找不到 node 或 `vite.js` 寧可這輪不起，也不拿 bun 代跑）。
-- **看門狗用 bun、vite 一律用 node**：bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 會 crash。
+1. Exits at once if it cannot take the lock (a previous round is still running — at most one at a time).
+2. Fetches `origin main`; if the sha equals the one in the state file, exits (a successful sha is warmed once).
+3. Uses a dedicated worktree (`AGM_PREWARM_WORKTREE`) that the script must have created itself (a marker in the gitdir,
+   the same git common dir, detached, clean). Otherwise it refuses, logs, and **does not touch it** (an existing worktree
+   of the same name may hold someone's WIP).
+4. Calls the daemon's `remote-cargo` helper step by step, with the same target set as `scripts/check.sh`'s daemon/xtask/crates
+   tests (desktop excluded: its build script needs a sidecar that only the packaging flow supplies); every step is
+   `-p <package>`, with the same feature unification as `check.sh`.
+5. **Runs only on r7 and never falls back to local**: if the helper returns 125 (not enabled / unreachable), 75 (r7 slots
+   full) or 126 (misconfiguration), it skips without counting an attempt and tries again next round.
+6. Success records the sha in `STATE`. A transient failure (124 timeout, or an interruption by a signal ≥128) goes to
+   `RETRY`: at most 3 attempts per sha, with one round of backoff between the 2nd and 3rd; once used up it gives up on this
+   sha and waits for the next main. Any other cargo failure (a compile error, say) is treated as a problem with this sha and
+   abandoned without retry.
 
-- **告警（issue #859）**：worktree 不存在、找不到 node、找不到 `vite.js` 時，除了寫 `dev-server.log`，另跑 `agm --compact ops-alert --source dev-server --reason dev_worktree_missing｜dev_node_missing｜dev_vite_missing`（daemon 端同 source+reason 每小時一則；`AGM_BIN` 可覆寫 agm 路徑）。以前這三種都只寫 log，5173 掛了沒人知道。
-- **主機設定（一次）**：5173 吃的 worktree 要先建好，換手時把臨時 unit 收掉（`am-vite-5173` 這種 transient unit 的 ppid 不是 1，看門狗不會收）：
+Cache key: the remote directory hash is seeded with the git common dir (`remote_cargo.rs` `cache_hash`, #1856), so the
+prewarm worktree and the children's worktrees of the same repo map to the same `shared/` directory, which is why the
+warmed cache is usable by them. See the external-cargo section of `docs/SPEC.md`. Overridable for tests:
+`AGM_PREWARM_REPO`, `AGM_PREWARM_WORKTREE`, `AGM_PREWARM_CONFIG`, `AGM_PREWARM_DAEMON`, `AGM_PREWARM_STATE`,
+`AGM_PREWARM_FETCH_TIMEOUT`. Isolated test: `bash scripts/ops/remote-cargo-prewarm_test.sh`. Install (**needs AGM approval**):
+
+```sh
+install -m 755 scripts/ops/remote-cargo-prewarm.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/systemd/com.agm.remote-cargo-prewarm.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now com.agm.remote-cargo-prewarm.timer
+```
+
+## dev-server-kick.ts (issue #418)
+
+Watchdog for the port-5173 dev server. **Before 2026-09-24 it existed only in `AGM/bin/`**: `docs/SPEC.md` §18.1 describes
+the behaviour in detail, but the code had no version control, no review and no tests, and it `kill`s the process holding the
+port. The repo is now the source.
+
+- launchd `com.agm.dev-server` (Linux: the systemd user timer of the same name): `StartInterval 60`, `RunAtLoad`, running
+  `bun run …/AGM/bin/dev-server-kick.ts`.
+- The 5173 worktree is `${AGM_REPO:-~/project/agents-manager}-main` (`AGM_DEV_REPO` overrides it entirely). The listener
+  is found with `lsof` on macOS and `ss` on Linux (#676).
+- Behaviour and decision order are in `docs/SPEC.md` §18.1 (healthy = bound to `*`/`0.0.0.0` and a local curl answers; only
+  orphaned vite is reaped; if node or `vite.js` cannot be found it prefers to skip this round rather than let bun run vite
+  in its place).
+- **The watchdog runs on bun; vite always runs on node**: bun's upgrade socket has no `destroySoon`, so vite crashes when
+  the daemon restarts and the proxy connection drops.
+- **Alerts (issue #859).** When the worktree is missing, node cannot be found, or `vite.js` cannot be found, besides writing
+  `dev-server.log` it runs `agm --compact ops-alert --source dev-server --reason dev_worktree_missing|dev_node_missing|dev_vite_missing`
+  (the daemon sends one per hour per source+reason; `AGM_BIN` overrides the agm path). These three used to log only, so
+  nobody knew when 5173 was down.
+- **Host setup (once).** The worktree 5173 serves from must exist first, and when handing over you must remove any
+  temporary unit (a transient unit such as `am-vite-5173` has ppid ≠ 1, so the watchdog will not reap it):
 
 ```sh
 git -C ~/project/agents-manager worktree add --detach ~/project/agents-manager-main origin/main \
   && (cd ~/project/agents-manager-main/web && bun install --frozen-lockfile)
-systemctl --user stop am-vite-5173   # 若有臨時 unit；等下一輪看門狗用 node 拉起綁 0.0.0.0 的 vite
+systemctl --user stop am-vite-5173   # if such a transient unit exists; the next watchdog round starts vite on node bound to 0.0.0.0
 ```
 
-隔離測試：`bash scripts/ops/dev-server-kick_test.sh`（假 `lsof`／`ss`／`ps`／`git`／`bun`／`node`，副本的 `PORT` 換成
-測試 port，假 `lsof`／`ss` 只回報測試自己 spawn 的 pid，整套情境 lsof 與 ss 各跑一次；**不會碰真的 5173 或真的 vite**）。沒有 bun／python3 會自己 skip。
+Isolated test: `bash scripts/ops/dev-server-kick_test.sh` (fake `lsof`/`ss`/`ps`/`git`/`bun`/`node`; the copy's `PORT` is
+changed to a test port, the fake `lsof`/`ss` report only pids the test itself spawned, and the whole scenario set runs once
+with `lsof` and once with `ss`; **it never touches the real 5173 or a real vite**). It skips itself without bun/python3.
 
-安裝（**需要 AGM 核准**）：
+Install (**needs AGM approval**):
 
 ```sh
 install -m 755 scripts/ops/dev-server-kick.ts ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
-## herdr-full-restart.sh（issue #418）
+## herdr-full-restart.sh (issue #418)
 
-herdr 全機重啟：bootout 兩個 herdr launchd job → 殺掉所有 herdr server → 清 socket → bootstrap 回來 →
-補起預設 server。2026-09-22 使用者下令全機重啟時寫的，同樣原本只在 `AGM/bin/`。**沒有 launchd 排程**，手動跑。
+Full herdr restart: boot out the two herdr launchd jobs → kill every herdr server → clear the sockets → bootstrap the jobs
+back → bring the default server back. Written on 2026-09-22 when the user ordered a machine-wide restart, and likewise
+originally only in `AGM/bin/`. **No launchd schedule**; run by hand.
 
-- 順序是關鍵：**先 bootout 再殺 server**，反過來 launchd 會立刻把 server 拉回來。
-- **起 default server 這一步是唯一沒有自癒路徑的**：被殺掉的 session 裡，`agents-manager` 與
-  `am-attach-remote` 有 launchd job 會 bootstrap 回來，其他具名 session 由 daemon 的
-  `ensure_session`（`daemon/src/state.rs`）在下次要用時自動重啟；**只有 `default` 不會**——
-  `ensure_session` 明文拒絕代起使用者自己的 session。所以那一步起不來就要讓人知道。
-- 修過的（issue #455，2026-09-24）：以前是 `nohup setsid …`，而 macOS 根本沒有 `setsid`
-  （util-linux 才有），所以 `nohup` 找不到它直接失敗、herdr 一次都沒被執行；更糟的是那行
-  寫成 `cd … && nohup … &`，`&` 綁的是整個 `&&` 清單，`$!` 拿到的是 subshell 的 pid，
-  **起不起得來都有值**，於是失敗被記成「default server started pid=…」。2026-09-22 的 log 裡
-  `session list` 顯示 `default stopped` 就是這個。現在：不用 `setsid`（`nohup` + `&` + `disown`
-  就夠，跟 `ensure_session` 同一款），`$!` 取的是 server 本身，而且要 `herdr session list` 看到
-  `default running` 才記 `default server up`，等不到就寫 FAIL 並以 rc=1 結束。
-- 收 server 不再用 `pkill -f 'herdr.*server'`：那個 pattern 會連 argv 裡剛好提到 herdr／server 的 claude／codex bot（長 persona）、
-  ssh、`herdr pane list server` 一起殺。現在用 `ps -axo pid=,args=` 認：第一個字 basename 是 `herdr`、跳過旗標
-  （`--session`／`--machine` 連值）後第一個位置參數是 `server`，只對這些 pid 送 TERM、5 秒後還在的補 KILL（macOS／Linux 兩段共用）。
-- 路徑與 uid（`gui/501`）寫死成這台開發機的值，是收進 repo 時保留的既有行為。
-- **Linux 主機**（issue #677）走檔案開頭那段：herdr server 由 systemd user unit `herdr@<session>.service`
-  （`scripts/ops/systemd/herdr@.service`，跟 `com.agm.*` 一起由 ops-sync 對照安裝）看管。記下原本 active 的
-  `herdr@*.service` → 先 stop 再殺殘留 server → 清 `$HOME/.config/herdr` 的 socket → start 回同一批、`is-active`
-  沒回來就 rc=1；default 原本在跑才補起。路徑一律從 `$HOME` 推，沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
-- `herdr-upgrade.sh` 只適用 macOS（brew 換 binary、靠 keg 回滾），在 Linux 一開始就 exit 2、什麼都不動。
+- Order is the point: **bootout first, then kill the servers** — the other way round, launchd would pull the servers right
+  back.
+- **Starting the default server is the only step with no self-healing path.** Among the killed sessions, `agents-manager` and
+  `am-attach-remote` have launchd jobs that bootstrap back, and other named sessions are restarted by the daemon's
+  `ensure_session` (`daemon/src/state.rs`) the next time they are needed; **`default` alone is not** — `ensure_session`
+  explicitly refuses to start the user's own session on their behalf. So if that step fails, someone must be told.
+- Fixed in issue #455 (2026-09-24): the script used `nohup setsid …`, but macOS has no `setsid` (it is util-linux), so
+  `nohup` failed to find it and herdr was never executed; worse, the line was written `cd … && nohup … &`, where `&` binds
+  the whole `&&` list, so `$!` was the subshell's pid and had a value **whether or not the server started** — hence a failure
+  was logged as "default server started pid=…". The 2026-09-22 log showing `default stopped` in `session list` was exactly
+  this. Now `setsid` is not used (`nohup` + `&` + `disown` is enough, same style as `ensure_session`), `$!` is the server
+  itself, and `default server up` is logged only after `herdr session list` shows `default running`; if that never
+  happens it writes FAIL and exits rc=1.
+- Servers are no longer killed with `pkill -f 'herdr.*server'`: that pattern also killed claude/codex bots whose argv (a
+  long persona) happened to mention herdr/server, plus ssh and `herdr pane list server`. It now identifies them from
+  `ps -axo pid=,args=`: the first word's basename is `herdr` and the first positional argument after skipping flags
+  (`--session`/`--machine` with their values) is `server`; only those pids get TERM, and any still alive after 5 s get KILL
+  (shared by the macOS and Linux sections).
+- Paths and uid (`gui/501`) are hard-coded to the dev machine — existing behaviour kept when the script entered the repo.
+- **Linux host** (issue #677): follows the section at the top of the file. herdr servers are supervised by the systemd user
+  unit `herdr@<session>.service` (`scripts/ops/systemd/herdr@.service`, installed and compared by `ops-sync` together with
+  the `com.agm.*` units). It records the `herdr@*.service` units that were active → stops them → kills leftover servers →
+  clears the sockets in `$HOME/.config/herdr` → starts the same set again, rc=1 if `is-active` does not come back; the
+  default server is started only if it was running before. Every path is derived from `$HOME`, and without
+  `XDG_RUNTIME_DIR` it fills in `/run/user/<uid>`.
+- `herdr-upgrade.sh` is macOS-only (it swaps the binary through brew and rolls back via the keg); on Linux it exits 2
+  immediately and changes nothing.
 
-隔離測試：`bash scripts/ops/herdr-full-restart_test.sh`（`launchctl`／`systemctl`／`kill`／`ps`／`sleep`／`herdr`／`uname`
-全部用**注入的 shell 函式**攔截，不靠 PATH；socket 與 plist 都在暫存目錄；macOS 與 Linux 兩段各有一組情境）。
+Isolated test: `bash scripts/ops/herdr-full-restart_test.sh` (`launchctl`, `systemctl`, `kill`, `ps`, `sleep`, `herdr` and
+`uname` are all intercepted with **injected shell functions**, not PATH; sockets and plists live in a temp directory; the
+macOS and Linux sections each have their own scenarios).
 
-安裝（**需要 AGM 核准**）：
+Install (**needs AGM approval**):
 
 ```sh
 install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
-## project-transfer（issue #710）
+## project-transfer (issue #710)
 
-單一專案從一顆 daemon 移交到另一顆（例：Mac → agm-host，以遠端主機 `m4p` 接手）。不安裝，從 checkout 跑；
-流程、改寫規則與拒絕條件見 SPEC §11.9。`export` 只讀來源 DB（先做 backup 快照、讀完刪）；`import` 要**目標 daemon 停著**
-（拿同一把 `daemon.lock`），先 `--dry-run` 看摘要。專案改在目標本機跑：`--host local --path-map /來源=/目標`，原生對話先用下面的 transcript-transfer 搬（SPEC §11.9a）。
-協調者（AGM）的資料：export 與 import 都加 `--with-supervisor`（合併規則見 SPEC §11.9b）；群組任務一律跟著專案走。
-隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `crates/am-base/src/db.rs` 抽）。
+Hands a single project over from one daemon to another (e.g. Mac → agm-host, taken over by the remote host `m4p`). Not
+installed; run it from a checkout. The flow, rewrite rules and rejection conditions are in SPEC §11.9. `export` reads the
+source DB read-only (it takes a backup snapshot first and deletes it after reading). `import` needs the **target daemon
+stopped** (it takes the same `daemon.lock`); run `--dry-run` first to see the summary. For a project that will run on the
+target machine locally, use `--host local --path-map /source=/target`, and move the native conversations first with
+transcript-transfer below (SPEC §11.9a). For the coordinator's (AGM's) own data, add `--with-supervisor` to both export and
+import (merge rules in SPEC §11.9b); group tasks always travel with the project. Isolated test:
+`scripts/ops/project-transfer_test.sh` (fake DB; the schema is extracted from `crates/am-base/src/db.rs`).
 
-## transcript-transfer（issue #717）
+## transcript-transfer (issue #717)
 
-專案改在接手那台本機跑時，把 bot 的原生對話檔（claude／codex／grok）搬到那台並改寫路徑，讓 `start?resume=native` 接得回。
-在來源機器跑、接在 `project-transfer export` 之後，輸出改好 `runs.transcript_path` 的新 bundle 給 `import --host local --path-map …`。
-不安裝，從 checkout 跑；實測結果與 runbook 見 SPEC §11.9a。先 `--dry-run`；結束碼 2＝有找不到／拒絕／衝突。
-隔離測試：`scripts/ops/transcript-transfer_test.sh`（假的來源 $HOME 與目標目錄，不 ssh）。
+When a project runs locally on the receiving machine, moves the bots' native conversation files (claude/codex/grok) there and
+rewrites their paths so that `start?resume=native` can pick them up. Run it on the source machine after
+`project-transfer export`; it outputs a new bundle with `runs.transcript_path` rewritten, for
+`import --host local --path-map …`. Not installed; run it from a checkout. Measured results and the runbook are in SPEC
+§11.9a. Use `--dry-run` first; exit 2 means something was not found, refused, or conflicted. Isolated test:
+`scripts/ops/transcript-transfer_test.sh` (a fake source $HOME and target directory; no ssh).
 
-## cutover-to-host.sh（issue #721）
+## cutover-to-host.sh (issue #721)
 
-`Agents Manager` 與 `AGM-DM-GRUP` 整套從 Mac 切到 agm-host 本機跑（#675）。在 Mac 從 checkout 跑，不安裝；步驟、閘門、回滾與演練結果見 SPEC §11.9c。
-`cutover` 預設 dry-run（唯讀檢查＋列出會做的事），`--execute` 才做、並自己脫離成背景（log 在 `~/.config/agents-manager/cutover/<時間>/run.log`）；
-`rollback --state-dir <同一個>` 還原；`drill` 在目標另開目錄用 DB 複本演練、做完當下刪。輔助 `cutover-helper.py`（兩邊都跑）。
-`host-state-transfer.py` 隨 cutover 搬完整非 project config、UI token、outbox 與 identity 設定目錄清單；清單只記路徑／存在狀態，不搬憑證。目標安裝與 rollback 都拿 `daemon.lock`，不動 SQLite。
-隔離測試：`scripts/ops/cutover-to-host_test.sh`（兩顆假 daemon、假 ssh／rsync／launchctl、不碰正式環境，並執行 host-state 的暫存目錄測試）。
+Cuts the whole `Agents Manager` and `AGM-DM-GRUP` setup over from the Mac to running locally on agm-host (#675). Run it from
+a checkout on the Mac; not installed. Steps, gates, rollback and rehearsal results are in SPEC §11.9c. `cutover` is a
+dry-run by default (read-only checks plus a list of what it would do); `--execute` does the work and detaches itself into
+the background (log at `~/.config/agents-manager/cutover/<time>/run.log`); `rollback --state-dir <the same one>` restores;
+`drill` rehearses on the target in a separate directory with a DB copy and deletes it as soon as it finishes. The helper
+`cutover-helper.py` runs on both sides. `host-state-transfer.py` moves the full non-project config, the UI token, the outbox
+and the identity-config directory list along with the cutover; the list records only paths and existence, and credentials
+are not moved. Installation on the target and rollback both take `daemon.lock` and do not touch SQLite. Isolated test:
+`scripts/ops/cutover-to-host_test.sh` (two fake daemons, fake ssh/rsync/launchctl, no production environment touched; it
+also runs the host-state temp-directory test).
 
-## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
+## ubuntu background CI and periodic full verification (issue #716)
 
-這些檔沒有自動同步，所以會漂。2026-09-24 的逐支比對（`git hash-object` 對 `origin/main` 的 blob）結論：
-同名檔沒有任何一支「安裝版比 repo 新」；`browser-gc-kick.sh` 與 `pane-gc.sh` 落後一個純寫法的 commit。
+Pushes to main no longer wait for GitHub Actions: a systemd user timer on agm-host runs `scripts/ops/ubuntu-ci.sh` every
+minute (`OnBootSec=2min`, `OnUnitInactiveSec=60s`). It verifies only the newest main HEAD (one round at a time; shas in
+between are not back-filled), picks ob/ops/web/daemon from each part's success baseline, and writes the result as the
+commit status `ubuntu-ci`, `~/.cache/agents-manager/ci/status.json`, and `logs/<sha>.log`.
 
-- **`herdr-lan-check.sh` 目前沒有裝**，但上面 herdr-update-kick 那節寫著要 `install`。
-  實際用法（`herdr-upgrade-runbook.md`、`herdr-update-kick.sh` 的派工正文）都是從 repo checkout 跑
-  `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`，所以沒裝不影響升級流程；
-  要嘛補裝、要嘛把那行 install 拿掉，兩邊挑一個對齊。
-- `daemon-swap.sh`、`daemon-start.py`、`herdr-upgrade-runbook.md` 本來就不裝（從 checkout 跑），不是缺口。
+- If the script interrupts itself after pending was sent (a checkout failure, say), it posts an `error` status and writes
+  `error` to status.json so pending is never left hanging (last-sha is unchanged, so the next round retries). Each part runs
+  under `timeout -k` (`AGM_CI_KILL_AFTER`, default 60s), so a step that ignores TERM is still reaped and cannot hold the lock.
+- ENOSPC partway through (the log contains `No space left on device` or check.sh's "only N free on failure", or the free
+  space measured after the run is below `AGM_CI_MIN_FREE_GB`) is not this commit's fault: it records `error`
+  (status.json `reason=disk_full`) without moving last-sha, shares the `interrupted-<sha>` counter with signal-killed
+  interruptions, and only counts as a failure after 3 in a row (#945).
+- `git clone` and `git fetch` have time limits (`AGM_CI_CLONE_TIMEOUT` default 600 s, `AGM_CI_FETCH_TIMEOUT` default 300 s;
+  a half-open network will not hold the lock forever). The service sets `TimeoutStartSec=3h15m` (4 parts × 45m + 15m).
+- Time per part (#1448): each part ends its log section with `==> [ubuntu-ci] <part> rc=<n> secs=<s>`, and `status.json`'s
+  success/failure/interrupted records all carry `"parts":{"ob":<s>,"ops":<s>,"web":<s>,"daemon":<s>}` (daemon includes the
+  small herdr-argv step; a part that did not run is `null`). `mode`, `select_reason`, `full_baseline`, `part_state` and
+  `part_base` distinguish what this round ran from what it inherited.
+- On taking the lock it writes `~/.cache/agents-manager/ci/running-since`; if it cannot take the lock and that file is
+  older than `AGM_CI_HUNG_AFTER` seconds (default 11700), it calls `ops-alert --source ubuntu-ci --reason ci_hung` using the
+  CI clone's `agm.py` (one per hour per source+reason; a failed alert is swallowed) (#946).
 
-## ubuntu 背景 CI 與定期完整驗證（issue #716）
+Per-part baselines live in `part-success/<part>` and advance only after that part really succeeded; the cumulative diff from
+its last successful ancestor to HEAD is classified by `ci-changed-parts.sh`, so an intermediate failed or unverified change
+cannot slip through. A missing baseline, a non-ancestor, an unknown path or a classification failure always runs all four
+parts, and the very first update runs everything once to establish baselines. `full-success-sha` only advances when all four
+parts succeeded in one round. A fully successful status description stays `ob+ops+web+daemon 全綠`; a partial one reads
+`scoped <part+part>（沿用完整成功基準 <8hex>）`, a fully inherited one `scoped none（沿用完整成功基準 <8hex>）`, and
+docs-only changes keep the existing `docs-only skip` format. A Rust-only change still builds the real web bundle from the
+current HEAD for embedding, but does not rerun unrelated web unit tests.
 
-main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user timer 每分鐘叫一次 `scripts/ops/ubuntu-ci.sh`，
-只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），依各段成功基準選擇 ob／ops／web／daemon，結果寫成 commit status `ubuntu-ci`、
-`~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。pending 送出後腳本自己中斷（checkout 失敗之類）會補 `error`
-status、status.json 寫 `error`，不讓 pending 掛著（last-sha 不動，下一輪重試）；每段 `timeout -k`（`AGM_CI_KILL_AFTER`，預設 60s），
-step 不理 TERM 也收得掉、不會卡住鎖。跑到一半 ENOSPC（log 有 `No space left on device` 或 check.sh 的「失敗時磁碟只剩」、或跑完再量剩餘空間已低於 `AGM_CI_MIN_FREE_GB`）
-不是這個 commit 的錯：記 `error`（status.json `reason=disk_full`）、不動 last-sha，跟被訊號收掉的中斷共用 `interrupted-<sha>` 計數，連續 3 次才當 failure（#945）。`git clone`／`git fetch` 有時限（`AGM_CI_CLONE_TIMEOUT` 預設 600 秒、`AGM_CI_FETCH_TIMEOUT` 預設 300 秒；網路半開時不會握著鎖不放），
-service 設 `TimeoutStartSec=3h15m`（4 段 × 45m ＋ 15m）。每段花的秒數（#1448）：log 每段結尾 `==> [ubuntu-ci] <段> rc=<n> secs=<s>`；`status.json` 的 success／failure／中斷都有 `"parts":{"ob":<s>,"ops":<s>,"web":<s>,"daemon":<s>}`（daemon 含 herdr argv 那一小段；未執行的段為 `null`）。`mode`、`select_reason`、`full_baseline`、`part_state` 與 `part_base` 區分本輪執行與沿用成功基準。拿到鎖就寫 `~/.cache/agents-manager/ci/running-since`；拿不到鎖而且它超過 `AGM_CI_HUNG_AFTER` 秒（預設 11700）
-就對 CI clone 的 `agm.py` 喊 `ops-alert --source ubuntu-ci --reason ci_hung`（同 source+reason 每小時一則；喊人失敗吞掉）（#946）。
+`AGM_CI_FULL_INTERVAL` (default 86400 s) forces a full four-part run every 24 hours even if main has no new commits; 0
+disables the periodic full run and an invalid value falls back to the default. A full run writes `full-attempt-at` when it
+ends and `full-success-at` on success, so a failure does not cause a rerun every minute; a corrupt or future timestamp is
+handled conservatively and cannot disable the periodic run for good. All these files live in the CI state directory, not in
+the repo.
 
-各段基準存在 `part-success/<段>`，只在該段確實成功後前進；從其成功祖先到 HEAD 的累積差異交給 `ci-changed-parts.sh` 分類，避免漏掉中間失敗或未驗的改動。基準缺失、非祖先、未知路徑或分類失敗一律四段全跑，首次更新也會完整跑一次建立基準。`full-success-sha` 只在本輪四段都成功時前進。完整成功的 status 描述維持 `ob+ops+web+daemon 全綠`；部分驗證為 `scoped <段+段>（沿用完整成功基準 <8hex>）`，全部沿用為 `scoped none（沿用完整成功基準 <8hex>）`；純文件沿用原有 `docs-only skip` 格式。Rust-only 仍以當前 HEAD 建真正的 web bundle 供嵌入，但不重跑無關的 web 單元測試。
+**After changing `ubuntu-ci.service` reinstall it by hand**: `cp` it to `~/.config/systemd/user/` and run
+`systemctl --user daemon-reload` (script changes take effect on the next round after merge by themselves; the unit does not).
+The runner uses the `ubuntu-ci.sh` that is **currently checked out** in the resident clone, so script changes apply
+automatically on the next round.
 
-`AGM_CI_FULL_INTERVAL` 預設 86400 秒，每隔 24 小時補完整四段，即使 main 沒有新提交；設為 0 可停用定期完整驗證，非法值退回預設。完整執行結束時寫 `full-attempt-at`，成功另寫 `full-success-at`，失敗不會造成每分鐘重跑。損壞或未來的時間戳保守處理，不讓定期驗證永久失效。這些檔案都位於 CI 狀態目錄，不進 repo。
-**改了 `ubuntu-ci.service` 要人手重裝**：`cp` 到 `~/.config/systemd/user/` 再 `systemctl --user daemon-reload`（腳本本身 merge 後下一輪自動生效，unit 不會）。
-隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh、`AGM_CI_GIT_BIN` 假 git）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
+Locally, agents wrap up with `scripts/check.sh changed`: a Rust-only change in a clean checkout with no
+`web/dist/index.html` temporarily creates a rust-embed stub and removes it afterwards, so it neither installs dependencies
+nor builds web. Web checks and the background full CI still build the real production bundle.
 
-agent 本機收尾用 `scripts/check.sh changed`：Rust-only 改動在沒有 `web/dist/index.html` 的 clean checkout 會暫時建立 rust-embed stub，跑完即清除，不會因此安裝依賴或 build web。Web 檢查與背景完整 CI 仍 build 真正的 production bundle。
+Isolated test: `bash scripts/ops/ubuntu-ci_test.sh` (a local bare repo, fake `gh`, `AGM_CI_GIT_BIN` as a fake git).
+Install (on agm-host; needs `loginctl enable-linger ubuntu`):
 
 ```sh
 git clone git@github.com:Eden-Sun/agents-manager.git ~/.cache/agents-manager/ci/repo
@@ -712,5 +1023,3 @@ mkdir -p ~/.config/systemd/user
 cp ~/.cache/agents-manager/ci/repo/scripts/ops/ci/ubuntu-ci.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now ubuntu-ci.timer
 ```
-
-runner 用的是常駐 clone 裡**當下 checkout 的** `ubuntu-ci.sh`，所以腳本本身的修改會在下一輪自動生效。
