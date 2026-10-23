@@ -249,7 +249,7 @@ class QueueTests(unittest.TestCase):
         # 派送前 browser_consult 會查行程表有沒有 ego lite；CI 的 runner 沒有，假 dispatch 就永遠沒被呼叫。
         with patch.object(operator, "ego_lite_running", return_value=True), \
                 patch.object(operator, "run_process", side_effect=fake):
-            cfg = dict(claude_config_dir=str(Path.home() / ".claude"), claude_binary="/fake/claude", ego_binary="/fake/ego")
+            cfg = dict(ego_binary="/fake/ego")
             with self.assertRaises(OBError):
                 operator.browser_consult(self.s, b["id"], cfg, token=token)
         self.assertIsNone(seen["url"], "換串時不給舊 url")
@@ -304,7 +304,7 @@ class OperatorTests(unittest.TestCase):
     setUp = QueueTests.setUp
     ask = QueueTests.ask
     def config(self):
-        return dict(claude_config_dir=str(Path.home() / ".claude"), claude_binary="/fake/claude", ego_binary="/fake/ego")
+        return dict(ego_binary="/fake/ego")
 
     def stale_pre_send_retry(self):
         self.ask()
@@ -317,48 +317,70 @@ class OperatorTests(unittest.TestCase):
     def test_environment_does_not_inherit_account_token_bot_model_or_session(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "secret-bot", "AM_HOOK_TOKEN": "secret", "ANTHROPIC_API_KEY": "key",
                                     "CLAUDE_CONFIG_DIR": "/other-account", "CLAUDECODE": "session", "AM_MODEL": "fable"}):
-            env = operator.clean_env(self.config())
-        self.assertNotIn("AM_BOT_ID", env)
-        self.assertNotIn("AM_HOOK_TOKEN", env)
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
-        self.assertNotIn("CLAUDECODE", env)
-        self.assertNotIn("AM_MODEL", env)
+            env = operator.clean_env()
+        for name in ("AM_BOT_ID", "AM_HOOK_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "CLAUDECODE", "AM_MODEL"):
+            self.assertNotIn(name, env)
         self.assertEqual(env.get("USER"), os.environ.get("USER"))
 
-    def test_explicit_secondary_account_is_used_without_fallback(self):
-        cfg = self.config() | {"claude_config_dir": "/account/cc1"}
-        self.assertEqual(operator.clean_env(cfg)["CLAUDE_CONFIG_DIR"], "/account/cc1")
-        argv = operator.operator_argv(cfg, "/tmp/mcp")
-        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
-        self.assertEqual(argv[argv.index("--tools") + 1], "")
-        self.assertNotIn("--fallback-model", argv)
-        self.assertNotIn("--resume", argv)
-        self.assertIn("--no-session-persistence", argv)
+    def test_the_worker_has_no_llm_layer(self):
+        """#1919：操作員 LLM 沒做任何判斷，已拿掉；不留 claude 啟動、MCP 或額度判斷的入口。"""
+        for gone in ("operator_argv", "mcp_server", "quota_error", "SYSTEM"):
+            self.assertFalse(hasattr(operator, gone), gone)
 
-    def test_quota_detection_never_reads_successful_answer_as_an_error(self):
-        self.assertFalse(operator.quota_error(json.dumps({"is_error": False, "result": "rate limit / quota"})))
-        self.assertTrue(operator.quota_error(json.dumps({"is_error": True, "result": "You've hit your limit"})))
-        self.assertFalse(operator.quota_error("invalid json"))
-
-    def test_operator_quota_error_never_calls_browser_or_changes_model(self):
+    def test_operate_calls_browser_consult_directly_and_never_a_model(self):
         self.ask()
         job = self.s.claim()
-        with patch.object(operator, "run_process", return_value=(1, '{"is_error":true,"result":"usage limit reached"}', "")) as proc:
+        def consult(store, ident, config, collect=False, token=None):
+            return store.finish(ident, "web answer", UA, token)
+        with patch.object(operator, "browser_consult", side_effect=consult) as consult_mock, \
+                patch.object(operator.subprocess, "Popen", side_effect=AssertionError("no process besides ego")):
             operator.operate(self.s, job, self.config())
-        self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
-        self.assertEqual(proc.call_count, 1)
+        self.assertEqual(consult_mock.call_count, 1)
+        self.assertEqual(self.s.get(job["id"])["answer"], "web answer")
 
-    def test_a_stale_pre_send_journal_does_not_hide_a_quota_error(self):
-        job = self.stale_pre_send_retry()
-        with patch.object(operator, "run_process", return_value=(1, '{"is_error":true,"error":"rate_limit"}', "")):
+    def test_a_legacy_install_with_claude_settings_and_a_waiting_quota_row_still_works(self):
+        """升級前 configure 過的安裝：operator 設定還帶 claude_binary／claude_config_dir，佇列裡可能留著 waiting_quota。
+        新版忽略多餘欄位，舊列照舊被撿起、走瀏覽器、完成；不需要重新 configure。"""
+        legacy = dict(model="sonnet", effort="low", claude_config_dir=str(Path.home() / ".claude"),
+                      claude_binary="/gone/claude", ego_binary="/fake/ego")
+        self.s.set_setting("operator", legacy)
+        a = self.ask()
+        self.s.fail(a["id"], "waiting_quota", "exhausted", self.s.claim()["claim_token"])
+        self.assertIsNone(self.s.claim(), "舊的 30 分鐘退避仍照舊生效")
+        self.s.set_setting("retry_after", time.time() - 1)
+        job = self.s.claim()
+        self.assertEqual(job["id"], a["id"])
+        def run(*argv, **kw):
+            self.assertEqual(argv[0], ["/fake/ego", "nodejs"], "只用 ego_binary，不碰 claude 路徑")
+            operator.journal_for(self.s, a["id"]).write_text(json.dumps({"phase": "done", "answer": "legacy ok", "url": UA}))
+            return (0, "", "")
+        with patch.object(operator, "ego_lite_running", return_value=True), patch.object(operator, "run_process", side_effect=run):
+            operator.operate(self.s, job, self.s.setting("operator"))
+        self.assertEqual(self.s.get(a["id"])["status"], "done")
+        self.assertEqual(self.s.get(a["id"])["answer"], "legacy ok")
+
+    def test_retry_still_clears_a_legacy_waiting_quota_row(self):
+        a = self.ask()
+        self.s.fail(a["id"], "waiting_quota", "exhausted", self.s.claim()["claim_token"])
+        self.assertEqual(self.s.retry(a["id"])["status"], "pending")
+        self.assertIsNotNone(self.s.claim())
+
+    def test_operate_attempts_a_claim_only_once(self):
+        """保留以前 MCP 層的 `already_attempted`：同一個 claim 在同一行程不會第二次操作瀏覽器。"""
+        self.ask()
+        job = self.s.claim()
+        with patch.object(operator, "browser_consult", side_effect=OBError("browser_failed_or_interrupted")) as consult_mock:
             operator.operate(self.s, job, self.config())
-        self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
-        self.assertGreater(self.s.setting("retry_after", 0), 0)
+            self.assertEqual(self.s.get(job["id"])["status"], "failed")
+            with self.assertRaisesRegex(OBError, operator.ATTEMPT_MARK):
+                operator.attempt(self.s, job["id"], self.config(), job["claim_token"])
+            # 第二次 operate（例如同一個 claim 被重複交進來）也不會再叫瀏覽器。
+            operator.operate(self.s, job, self.config())
+        self.assertEqual(consult_mock.call_count, 1)
 
     def test_a_stale_pre_send_journal_does_not_hide_a_busy_browser(self):
         job = self.stale_pre_send_retry()
-        with patch.object(operator, "run_process", return_value=(1, operator.BUSY_MARK, "")):
+        with patch.object(operator, "browser_consult", side_effect=OBError(f"{operator.BUSY_MARK}：瀏覽器正被另一筆請求佔用")):
             operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "pending")
@@ -366,7 +388,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_a_stale_pre_send_journal_does_not_hide_a_browser_that_is_not_running(self):
         job = self.stale_pre_send_retry()
-        with patch.object(operator, "run_process", return_value=(1, operator.BROWSER_NOT_RUNNING_MARK, "")):
+        with patch.object(operator, "browser_consult", side_effect=OBError(operator.BROWSER_NOT_RUNNING_MARK)):
             operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "failed")
@@ -374,7 +396,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_a_stale_pre_send_journal_still_reports_an_unclassified_failure(self):
         job = self.stale_pre_send_retry()
-        with patch.object(operator, "run_process", return_value=(1, "", "")):
+        with patch.object(operator, "browser_consult", side_effect=OBError("browser_failed_or_interrupted")):
             operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "failed")
@@ -388,9 +410,8 @@ class OperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(OBError, operator.BUSY_MARK):
                 operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
             self.assertEqual(self.s.get(job["id"])["status"], "running", "只是等不到鎖，不動這筆的狀態")
-            # Sonnet 停在工具錯誤上、沒有收據：放回佇列重排，不是 failed。
-            with patch.object(operator, "run_process", return_value=(1, json.dumps({"is_error": True, "result": operator.BUSY_MARK}), "")):
-                operator.operate(self.s, job, self.config())
+            # 沒有收據、也沒送出：放回佇列重排，不是 failed。
+            operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "pending")
         self.assertIn("放回佇列", row["error"])
@@ -492,8 +513,7 @@ except subprocess.TimeoutExpired:
         """未送出的單不能被誤判成 `unknown`（那會擋住同 project 的後續單、還得靠 collect 才能解開）。"""
         self.ask()
         job = self.s.claim()
-        out = json.dumps({"is_error": True, "result": f"consult 失敗：{operator.BROWSER_NOT_RUNNING_MARK}：ego lite 沒有在跑，請先開啟 ego lite 再重試"})
-        with patch.object(operator, "run_process", return_value=(1, out, "")):
+        with patch.object(operator, "ego_lite_running", return_value=False):
             operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "failed", "沒送出的單要能直接 retry，不是走 unknown/collect")
@@ -509,23 +529,25 @@ except subprocess.TimeoutExpired:
             with self.assertRaisesRegex(OBError, "ECONNREFUSED"):
                 operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
 
-    def test_sonnet_fabricated_answer_is_not_accepted(self):
+    def test_ego_stdout_without_a_journal_receipt_is_not_accepted(self):
         self.ask()
         job = self.s.claim()
-        with patch.object(operator, "run_process", return_value=(0, '{"result":"Pretend answer"}', "")):
+        with patch.object(operator, "ego_lite_running", return_value=True), \
+                patch.object(operator, "run_process", return_value=(0, '{"result":"Pretend answer"}', "")):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "failed")
         self.assertIsNone(self.s.get(job["id"])["answer"])
 
-    def test_browser_receipt_wins_if_sonnet_later_hits_quota(self):
+    def test_browser_receipt_wins_if_ego_exits_nonzero_after_finishing(self):
         self.ask()
         job = self.s.claim()
         def run(*a, **kw):
-            self.s.finish(job["id"], "actual web answer", UA, job["claim_token"])
-            return (1, '{"is_error":true,"result":"usage limit"}', "")
-        with patch.object(operator, "run_process", side_effect=run):
+            operator.journal_for(self.s, job["id"]).write_text(json.dumps({"phase": "done", "answer": "actual web answer", "url": UA}))
+            return (1, "", "late error")
+        with patch.object(operator, "ego_lite_running", return_value=True), patch.object(operator, "run_process", side_effect=run):
             operator.operate(self.s, job, self.config())
-        self.assertEqual(self.s.get(job["id"])["status"], "done")
+        row = self.s.get(job["id"])
+        self.assertEqual((row["status"], row["answer"]), ("done", "actual web answer"))
 
     def test_opened_journal_before_send_is_failed_and_does_not_block_the_project(self):
         """首題／換串在 dispatch 前失敗：journal 停在 opened，不能標 unknown 把佇列卡死（#643）。"""
@@ -533,8 +555,8 @@ except subprocess.TimeoutExpired:
         job = self.s.claim()
         def run(*a, **kw):
             operator.journal_for(self.s, job["id"]).write_text('{"phase":"opened","url":null}')
-            raise subprocess.TimeoutExpired("claude", 900)
-        with patch.object(operator, "run_process", side_effect=run):
+            raise subprocess.TimeoutExpired("ego-browser", 720)
+        with patch.object(operator, "ego_lite_running", return_value=True), patch.object(operator, "run_process", side_effect=run):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "failed")
         self.s.submit(A, "AM", "q2", "same project must stay claimable")
@@ -547,20 +569,10 @@ except subprocess.TimeoutExpired:
         job = self.s.claim()
         def run(*a, **kw):
             operator.journal_for(self.s, job["id"]).write_text('{"phase":"dispatching"}')
-            raise subprocess.TimeoutExpired("claude", 900)
-        with patch.object(operator, "run_process", side_effect=run):
+            raise subprocess.TimeoutExpired("ego-browser", 720)
+        with patch.object(operator, "ego_lite_running", return_value=True), patch.object(operator, "run_process", side_effect=run):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "unknown")
-
-    def test_mcp_cannot_change_project_or_question(self):
-        job = self.ask()
-        self.s.claim()
-        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "consult", "arguments": {"project_id": B}}}
-        output = io.StringIO()
-        with patch('sys.stdin', io.StringIO(json.dumps(request) + '\n')), contextlib.redirect_stdout(output), patch.object(operator, 'browser_consult') as browser:
-            operator.mcp_server(self.tmp.name, job["id"])
-        self.assertTrue(json.loads(output.getvalue())["result"]["isError"])
-        browser.assert_not_called()
 
 
 MIGRATE = r"""
@@ -612,11 +624,10 @@ class CLITests(unittest.TestCase):
             link = root / 'stable-cli'
             link.symlink_to(binary)
             with contextlib.redirect_stdout(io.StringIO()):
-                ob.main(['--data-dir', str(root / 'db'), 'configure', '--claude-config-dir', tmp,
-                         '--claude-binary', str(link), '--ego-binary', str(link)])
+                ob.main(['--data-dir', str(root / 'db'), 'configure', '--ego-binary', str(link)])
             store = Store(root / 'db')
             self.addCleanup(store.db.close)
-            self.assertEqual(store.setting('operator')['claude_binary'], str(link))
+            self.assertEqual(set(store.setting('operator')), {'ego_binary'}, '不再存 claude 路徑或帳號目錄')
             self.assertEqual(store.setting('operator')['ego_binary'], str(link))
 
     def test_ask_resolves_project_from_daemon_not_cwd(self):
@@ -703,8 +714,7 @@ class WorkerLossTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.s = Store(self.tmp.name)
         self.addCleanup(self.s.db.close)
-        self.s.set_setting("operator", {"claude_binary": "/fake/claude", "ego_binary": "/fake/ego",
-                                        "claude_config_dir": str(Path.home() / ".claude")})
+        self.s.set_setting("operator", {"ego_binary": "/fake/ego"})
         self.kicks = []
         for p in (patch.object(ob, "daemon_project", return_value={"id": A, "label": "AM"}),
                   patch.object(ob, "kick", side_effect=lambda store: self.kicks.append(1)),

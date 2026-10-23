@@ -4588,7 +4588,7 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 
 - ego lite：`listTaskSpaces()`，`ownership=agent` 且無進行中 assignment、2 小時無活動才 `completeTaskSpace(id, {keep:false})`；**`ownership=user` 或 `agentDelegatedToUser` 一律不動**。
 - **ego lite 的「ChatGPT 決策顧問」task space 與它的分頁一律不動**，不論 `ownership=agent`、閒置多久（使用者 2026-09-15；用途見 `docs/CHATGPT-CONSULT.md`）。
-- OB 以 AG Man project ID 對應獨立固定對話；共用 Sonnet-low worker，每筆乾淨 context，原任務 bot 判讀結果。SQLite 持久佇列與 URL 唯一鍵隔離專案；Sonnet 額度不足留 waiting_quota、不回 Fable，送達未知不重送。完整 CLI／部署／對帳契約見 `docs/CHATGPT-CONSULT.md`。
+- OB 以 AG Man project ID 對應獨立固定對話；共用本機 worker，不呼叫 LLM（#1919：直接 `browser_consult()`，每個 claim 只試一次），原任務 bot 判讀結果。SQLite 持久佇列與 URL 唯一鍵隔離專案；送達未知不重送。完整 CLI／部署／對帳契約見 `docs/CHATGPT-CONSULT.md`。
   worker 崩潰後的 `running` 只在取得 worker lock 時恢復為 `unknown`，不自動重送；每次 claim 的識別值限制孤兒操作員回寫與送出，原回答由 request marker 及完成控制項確認，不依賴歷史 DOM 數量。
   CLI 卡死重開 ego lite 時回報受影響的 OB 請求；正常後續請求按 OB 資料庫回原 URL，`unknown` 先 collect／對帳，不自動重送。舊 JSON 只供明確 link，不能再當寫入索引。
 - Chrome：只動 Claude in Chrome 的 MCP tab group。

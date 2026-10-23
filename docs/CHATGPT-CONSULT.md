@@ -1,6 +1,6 @@
 # OB（網頁 GPT 外腦）
 
-「問 OB」「請 OB review」指透過 ego lite 的 ChatGPT 網頁取得第二意見，原稱 GPT 外腦。操作員固定 **Sonnet、low**，只負責把問題交給網頁並取得回答；原任務 bot 決定如何採納，仍須自己查程式與驗證。設計取捨、review 分歧、根因第二意見適合 OB，查得到的事實與例行進度不必問，也不必先向 AGM 申請一般諮詢。
+「問 OB」「請 OB review」指透過 ego lite 的 ChatGPT 網頁取得第二意見，原稱 GPT 外腦。worker **不呼叫任何 LLM**（#1919：以前的 Sonnet 操作員只被要求呼叫一次 consult、輸出整個丟掉，沒有判斷，只花訂閱額度），只負責把問題交給網頁並取得回答；原任務 bot 決定如何採納，仍須自己查程式與驗證。設計取捨、review 分歧、根因第二意見適合 OB，查得到的事實與例行進度不必問，也不必先向 AGM 申請一般諮詢。
 
 ## 專案隔離
 
@@ -19,8 +19,9 @@
   「別的分頁冒充這個 project」——後者仍然一律 `conversation_changed`。所以 `collect` 一筆換串中的舊單也還原得回去。
 - 手動：`python3 scripts/ob.py rotate --project-id <id>`——標記「下一題換」，不會現在就開一個沒人問過問題的空對話。
 - 分頁不會跟著變多：換串時重用這個 project 原本那個分頁，把它導到新對話。
-- 共用一個 worker（不是每個 project 一顆常駐模型）。每筆呼叫 `claude --print --model sonnet --effort low`，不 resume、不保存模型 session；在新的空目錄中只帶本筆問題，不載入 caller 的 hooks、MCP、CLAUDE.md 或其他專案 context。
-- Sonnet 只有綁定本筆 project/request 的 `consult` MCP tool，不能改收件專案、正文或自行回覆。tool 收據的網頁原文才是 `answer`，不採用 Sonnet 的轉述當原文。
+- 共用一個 worker（不是每個 project 一顆常駐程序）。worker 領到一筆就直接呼叫 `browser_consult()`（`ego-browser nodejs` 跑固定的 `chatgpt-consult.mjs`），不啟動 `claude`、沒有 MCP 層；ego-browser 的環境只帶基本 shell 變數，不繼承 caller 的 bot 憑證、API key 或 Claude session。
+- 專案、request ID 與正文都從 DB 的那一列取，沒有任何東西能改收件專案或正文。瀏覽器 journal 的收據才是 `answer`，ego 的 stdout 不算數。
+- **每個 claim 只試一次**：同一個行程對同一個 claim 再被要求操作瀏覽器時回 `already_attempted` 並停止（以前由 MCP 層擋，現在是 `ob_operator.attempt`）；加上 journal 判斷（已送出就 `unknown`／`delivery_unknown`），不會重送。
 - 請求、結果與 project→URL 對應在 `~/.config/agents-manager/ob/ob.sqlite3`。SQLite 交易、唯一鍵與 OS worker/browser lock 防止重複派送、跨專案 JSON 覆蓋與同時操作網頁。
 - `browser.lock` 會**等**（最多 720 秒，跟瀏覽器逾時同級）：`collect`／`resolve` 正在操作瀏覽器時，worker 的請求排隊等，等不到就**放回佇列**（`pending`）下一輪重排，不標 `failed`（那筆連送都沒送出去）。
 - 結束碼：只有 `work` 撞到「已經有一顆 worker」時回 0（被 kick 出來的重複 worker 安靜退場）；其他子命令撞到忙碌一律非 0，stdout 是空的——用退出碼判斷的呼叫端不會把它當成對帳成功。
@@ -46,8 +47,8 @@ python3 scripts/ob.py status --project-id <project-id>
 - `pending`：已持久化待送（未 configure 也能排隊，回 `operator_configured:false`）。
 - `running`：已由 worker 領取。
 - `done`：瀏覽器回答與 URL 已保存，可由任何原呼叫者查原單。
-- `waiting_quota`：Sonnet 回額度錯誤，保留原單，全佇列退避 30 分鐘後才再嘗試；沒有 fallback 帳號或模型。空佇列只做本機輪詢，不呼叫模型。已確認恢復可 `retry <id>` 提早解除退避。
-- `failed`：沒有送出收據，檢查登入／CLI／瀏覽器後可 `retry <id>`。不能把 Sonnet 自己輸出的文字當答案。
+- `waiting_quota`：**已不再產生**（worker 不吃模型額度）。只為升級前留在 DB 的舊列保留：仍可被撿起，或 `retry <id>`。
+- `failed`：沒有送出收據，檢查登入／ego-browser／瀏覽器後可 `retry <id>`。
   ego lite 根本沒在跑時（GH #65）會標成 `browser_not_running`，訊息直接講「請先開啟 ego lite 再重試」；
   這種一定連送都沒送出，留在 `failed` 讓人直接 retry，不會誤判成要 collect 的 `unknown`。
 - `unknown`：可能送出過（journal phase 已是 `dispatching`／`sent`）或 worker 中斷。journal 停在 `opened`／`preparing`（還沒真正送出）標成可 retry 的 `failed`，不會擋同 project 的佇列。該 project 的後續單在 `unknown` 時暫停，其他 project 可繼續。用 `collect <id>` **只讀取原回答、不再送出**，依 request marker 配對，不拿最後一則不相關回答冒充。尚無 URL 或對話狀態無法確認時，先人工／bot 查看 journal 指向的原分頁；確定根本沒送出才 `resolve <id> --confirmed-not-sent`，並保留原 journal 作為對帳紀錄。不要用新 request ID 繞過。
@@ -58,17 +59,16 @@ worker 意外退出留下的 `running`，在重放 `ask`、`ask --wait`、`statu
 
 ## 安裝與帳號
 
-只需 Python 3、Node、已登入的 Claude Code 與 ego-browser，不需要 Rust rebuild 或 daemon 重啟。worker 不是 AG Man pane，不開 remote control；由 `ask` 啟動的一個本機服務程序承接佇列，模型只在有請求時啟動。
+只需 Python 3、Node 與 ego-browser，不需要 Claude Code 帳號、Rust rebuild 或 daemon 重啟。worker 不是 AG Man pane，不開 remote control；由 `ask` 啟動的一個本機服務程序承接佇列，沒有請求時只做本機輪詢。
 
 將 `ob.py`、`ob_store.py`、`ob_operator.py`、`agm.py`、`chatgpt-consult.mjs`、`chatgpt-consult.sh` 放在同一個穩定目錄（例如 `~/.config/agents-manager/ob/bin/`），不要指向之後會刪掉的 worktree。先 configure，再交給 bots 使用：
 
 ```sh
-python3 scripts/ob.py configure --claude-config-dir ~/.claude
-# 或明確選已登入的另一個帳號目錄；不在任務中自動換帳號
+python3 scripts/ob.py configure            # 只記 ego-browser 路徑（--ego-binary 可指定）
 python3 scripts/ob.py work --once  # 手動處理一筆；work 不帶 --once 持續處理
 ```
 
-configure 只存帳號設定目錄與 CLI 路徑，不保存 token。`~/.claude` 使用預設 keychain 身分；其他目錄明帶 `CLAUDE_CONFIG_DIR`。USER/LOGNAME 保留給 keychain，caller 的 AM_*、session、模型與 API key 不繼承。worker 運行中禁止 configure；先 `stop`，等 `status` 的 `worker_running:false`，再改設定。更新安裝檔前也先等佇列閒置並停止 worker，避免執行半套版本；不須重啟 daemon。
+configure 只存 ego-browser 路徑，不保存 token；升級前設定裡殘留的 `claude_binary`／`claude_config_dir` 不再被讀取（下次 configure 就會被覆寫掉）。worker 運行中禁止 configure；先 `stop`，等 `status` 的 `worker_running:false`，再改設定。更新安裝檔前也先等佇列閒置並停止 worker，避免執行半套版本；不須重啟 daemon。
 
 既有 `chatgpt-consult.json` **不刪、不依相似名稱自動合併**。由維護者明確指定原 entry 與 project ID，保留已有脈絡：
 
@@ -85,6 +85,6 @@ python3 scripts/ob.py link --project-id <project-id> --url https://chatgpt.com/c
 
 沿用唯一 task space **「ChatGPT 決策顧問」**，不因簡稱 OB 改名。任何 bot、AGM、browser-gc 都不能關它或它的分頁、刪除 OB 資料庫／journal／舊登錄檔（SPEC §18.4）。已知對話的分頁消失會回原 URL；新專案不用他人的空白 ChatGPT 草稿頁。使用者接手、登入問題或網頁改版時停止，不另開 space 規避。
 
-`scripts/check.sh ob` 跑隔離的 Python 佇列／operator 測試與 Node 瀏覽器契約測試，不消耗模型／網頁額度。真實驗證另以明確指定專案的短問題測試，確認回傳 `done` 與相同對話 URL。
+`scripts/check.sh ob` 跑隔離的 Python 佇列／operator 測試與 Node 瀏覽器契約測試，不消耗網頁額度。真實驗證另以明確指定專案的短問題測試，確認回傳 `done` 與相同對話 URL。
 
-**入口的資源與權限界線**（對抗式審查）：`ask --file` 只收 UTF-8 的一般檔案、至多 256 KiB（FIFO、`/dev/zero`、目錄、超大檔在讀之前就拒絕，不會卡死或吃光記憶體）；一題至多 10 萬字（`question_too_long`）；資料目錄（預設 `~/.config/agents-manager/ob`）一律收成 `0700`（既有的較寬也會被收緊），檔案另有 umask 077。送去瀏覽器的網址只有固定的 `https://chatgpt.com/` 與 `https://chatgpt.com/c/<id>`（Python `fullmatch` 與 JS 兩邊各驗一次，journal 裡瀏覽器那端寫的網址讀進來也驗），`file://`、`javascript:`、`chrome://`、帶 userinfo 的假網域、換行／fragment 一律拒絕；瀏覽器端的腳本是固定的（只有 JSON 參數進去），不執行呼叫端給的任何程式碼，也不讀 profile 或 cookie。同一時間只有一顆 worker、一把 `browser.lock`，ego 逾時 720 秒、操作員 900 秒，逾時殺整個行程群組。
+**入口的資源與權限界線**（對抗式審查）：`ask --file` 只收 UTF-8 的一般檔案、至多 256 KiB（FIFO、`/dev/zero`、目錄、超大檔在讀之前就拒絕，不會卡死或吃光記憶體）；一題至多 10 萬字（`question_too_long`）；資料目錄（預設 `~/.config/agents-manager/ob`）一律收成 `0700`（既有的較寬也會被收緊），檔案另有 umask 077。送去瀏覽器的網址只有固定的 `https://chatgpt.com/` 與 `https://chatgpt.com/c/<id>`（Python `fullmatch` 與 JS 兩邊各驗一次，journal 裡瀏覽器那端寫的網址讀進來也驗），`file://`、`javascript:`、`chrome://`、帶 userinfo 的假網域、換行／fragment 一律拒絕；瀏覽器端的腳本是固定的（只有 JSON 參數進去），不執行呼叫端給的任何程式碼，也不讀 profile 或 cookie。同一時間只有一顆 worker、一把 `browser.lock`，ego 逾時 720 秒，逾時殺整個行程群組。
