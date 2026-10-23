@@ -15,22 +15,23 @@
 import { useCallback, useEffect, useState } from 'react'
 import { SUPERVISOR_CANDIDATES, fetchIncidents, fetchSupervisor, supervisorAction } from '../api/supervisor'
 import type { SupervisorAction, SupervisorAssignment, SupervisorIncident, SupervisorInfo } from '../api/supervisor'
+import { msg, tr, useT } from '../lib/i18n'
 import { ASSIGN_LABEL, INCIDENT_LABEL } from '../lib/supervisorLabels'
 import { useStore } from '../store/store'
 import './supervisor.css'
 
 /** bot 起沒起來。 */
 const STATUS_LABEL: Record<string, string> = {
-  not_configured: '尚未建立',
-  stopped: '已停止',
-  starting: '啟動中',
-  running: '執行中',
-  busy: '處理中',
-  idle: '待命中',
-  waiting_quota: '等額度恢復',
-  missing: 'bot 不見了',
-  failed: '啟動失敗',
-  unknown: '狀態不明',
+  not_configured: msg('尚未建立'),
+  stopped: msg('已停止'),
+  starting: msg('啟動中'),
+  running: msg('執行中'),
+  busy: msg('處理中'),
+  idle: msg('待命中'),
+  waiting_quota: msg('等額度恢復'),
+  missing: msg('bot 不見了'),
+  failed: msg('啟動失敗'),
+  unknown: msg('狀態不明'),
 }
 
 /** 樂觀色：只有真的在跑才給綠燈，`unknown` 一律當灰的。 */
@@ -62,8 +63,9 @@ type IncidentState =
   /** 這台 daemon 還沒有這個端點：不是沒故障，是量不到。 */
   | { kind: 'unsupported' }
 
+/** 標籤表的值是 `msg()` 標記過的 key，顯示時查翻譯；沒有對到就原樣顯示。 */
 function label(map: Record<string, string>, key: string): string {
-  return map[key] ?? key
+  return map[key] === undefined ? key : tr(map[key])
 }
 
 /**
@@ -71,49 +73,62 @@ function label(map: Record<string, string>, key: string): string {
  * bot。協調者停了或沒額度時事件留在 inbox，不會改由巡檢處理——這一行要讓人看得出「在等」而不是「壞了」。
  */
 function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: string) => void }) {
+  const t = useT()
   const r = live.responder
   const wake = (st: SupervisorInfo['stats']) =>
-    st.wakes > 0 ? `叫醒 ${st.wakes} 次${st.last_wake_reason ? `・最近：${st.last_wake_reason}` : ''}` : '還沒被叫醒過'
+    st.wakes > 0
+      ? st.last_wake_reason
+        ? t('叫醒 {n} 次・最近：{reason}', { n: st.wakes, reason: st.last_wake_reason })
+        : t('叫醒 {n} 次', { n: st.wakes })
+      : t('還沒被叫醒過')
   return (
     <section className="agm-sec">
-      <h4>角色</h4>
+      <h4>{t('角色')}</h4>
       <div className="agm-row">
-        <span className="agm-key">巡檢</span>
+        <span className="agm-key">{t('巡檢')}</span>
         <span className="agm-chip mono">{live.identity} · {live.model} · {live.effort}</span>
-        <span className="agm-note inline">使用者入口・健康與故障</span>
+        <span className="agm-note inline">{t('使用者入口・健康與故障')}</span>
       </div>
-      <p className="agm-note">{wake(live.stats)}{live.stats.merged > 0 ? `・合併重複 ${live.stats.merged} 則` : ''}</p>
+      <p className="agm-note">
+        {wake(live.stats)}
+        {live.stats.merged > 0 ? t('・合併重複 {n} 則', { n: live.stats.merged }) : ''}
+      </p>
       <div className="agm-row">
-        <span className="agm-key">協調</span>
+        <span className="agm-key">{t('協調')}</span>
         {r.configured ? (
           <>
             <span className={`agm-chip ${STATUS_TONE[r.status] ?? ''}`}>{label(STATUS_LABEL, r.status)}</span>
             {/* 設定值；實際在跑的不一樣時兩個都畫出來，不要只給一個會騙人的數字。 */}
             <span className="agm-chip mono">{r.identity} · {r.model} · {r.effort}</span>
             {r.runtime.model && (r.runtime.model !== r.model || (r.runtime.effort && r.runtime.effort !== r.effort)) ? (
-              <span className="agm-chip warn mono">實際 {r.runtime.model}{r.runtime.effort ? ` · ${r.runtime.effort}` : ''}</span>
+              <span className="agm-chip warn mono">
+                {r.runtime.effort
+                  ? t('實際 {model} · {effort}', { model: r.runtime.model, effort: r.runtime.effort })
+                  : t('實際 {model}', { model: r.runtime.model })}
+              </span>
             ) : null}
-            {r.inbox_open > 0 ? <span className="agm-chip warn">{r.inbox_open} 則待處理</span> : null}
+            {r.inbox_open > 0 ? <span className="agm-chip warn">{t('{n} 則待處理', { n: r.inbox_open })}</span> : null}
             {r.bot_id && r.bot_present ? (
               <button type="button" className="btn" onClick={() => onOpen(r.bot_id)}>
-                打開協調者對話
+                {t('打開協調者對話')}
               </button>
             ) : null}
           </>
         ) : (
-          <span className="agm-note inline">尚未建立：bot 的申請仍由巡檢處理（`agm responder setup` 後再 start）</span>
+          <span className="agm-note inline">{t('尚未建立：bot 的申請仍由巡檢處理（`agm responder setup` 後再 start）')}</span>
         )}
       </div>
       {r.configured ? (
         <p className="agm-note">
-          只回應 bot（申請、交辦回報、核准、任務）。{wake(r.stats)}
-          {r.stats.duplicates > 0 ? `・擋下重複申請 ${r.stats.duplicates} 則` : ''}
+          {t('只回應 bot（申請、交辦回報、核准、任務）。')}
+          {wake(r.stats)}
+          {r.stats.duplicates > 0 ? t('・擋下重複申請 {n} 則', { n: r.stats.duplicates }) : ''}
         </p>
       ) : null}
       {r.status === 'waiting_quota' ? (
         <p className="agm-note">
-          {r.status_detail || '協調者額度見底'}。事件留在 inbox 等它恢復，不會轉給巡檢。
-          {r.stats.notify_next_at ? `下次重試 ${r.stats.notify_next_at}` : ''}
+          {t('{detail}。事件留在 inbox 等它恢復，不會轉給巡檢。', { detail: r.status_detail || t('協調者額度見底') })}
+          {r.stats.notify_next_at ? t('下次重試 {time}', { time: r.stats.notify_next_at }) : ''}
         </p>
       ) : r.status_detail && r.configured ? (
         <p className="agm-note">{r.status_detail}</p>
@@ -123,13 +138,14 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
 }
 
 function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName: string }) {
+  const t = useT()
   return (
     <li className="agm-assign">
       <div className="agm-assign-head">
-        <span className="agm-assign-to">{botName || item.target_bot_id || '（未知 bot）'}</span>
+        <span className="agm-assign-to">{botName || item.target_bot_id || t('（未知 bot）')}</span>
         <span className={`agm-chip ${ASSIGN_TONE[item.status] ?? ''}`}>{label(ASSIGN_LABEL, item.status)}</span>
         {/* 舊資料是在有驗收狀態之前就關掉的：關掉了，但沒有人驗收過，不要讓它看起來像有。 */}
-        {item.legacy_closed ? <span className="agm-chip">舊資料·未經驗收</span> : null}
+        {item.legacy_closed ? <span className="agm-chip">{t('舊資料·未經驗收')}</span> : null}
       </div>
       <p className="agm-assign-text">{item.text}</p>
       {/* turn_id 是這筆交辦唯一能拿去對帳的把手，短短一行也要留著。 */}
@@ -137,15 +153,15 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
       {item.result ? <p className="agm-assign-meta">{item.result}</p> : null}
       {item.awaiting_review ? (
         <p className="agm-assign-meta">
-          回合已結束（{item.turn_status || '狀態不明'}）
-          {item.evidence_complete === false ? '，回覆是終端擷取的，可能不完整' : ''}
-          ，等 AGM 驗收才算完成。
+          {t('回合已結束（{status}）', { status: item.turn_status || t('狀態不明') })}
+          {item.evidence_complete === false ? t('，回覆是終端擷取的，可能不完整') : ''}
+          {t('，等 AGM 驗收才算完成。')}
         </p>
       ) : null}
       {item.review.decision ? (
         <p className="agm-assign-meta">
-          {item.review.by || 'AGM'} 判定 {item.review.decision}
-          {item.review.reason ? `：${item.review.reason}` : ''}
+          {t('{by} 判定 {decision}', { by: item.review.by || 'AGM', decision: item.review.decision })}
+          {item.review.reason ? t('：{reason}', { reason: item.review.reason }) : ''}
         </p>
       ) : null}
     </li>
@@ -160,18 +176,19 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
  * 那個毛病本身。
  */
 function IncidentList({ state }: { state: IncidentState }) {
+  const t = useT()
   if (state.kind !== 'ok') {
     const [tone, text] =
       state.kind === 'loading'
-        ? ['', '讀取中…']
+        ? ['', t('讀取中…')]
         : state.kind === 'unsupported'
-          ? ['warn', '這台 daemon 還沒有故障清單端點，所以這裡沒有數字——不是沒有故障。']
-          : ['bad', `讀不到故障清單：${state.message}。這不代表系統沒事，代表現在量不到。`]
+          ? ['warn', t('這台 daemon 還沒有故障清單端點，所以這裡沒有數字——不是沒有故障。')]
+          : ['bad', t('讀不到故障清單：{message}。這不代表系統沒事，代表現在量不到。', { message: state.message })]
     return (
       <section className="agm-sec">
         <h4>
-          系統故障
-          <span className={`agm-chip ${tone}`}>狀態不明</span>
+          {t('系統故障')}
+          <span className={`agm-chip ${tone}`}>{t('狀態不明')}</span>
         </h4>
         <p className="agm-note">{text}</p>
       </section>
@@ -181,11 +198,11 @@ function IncidentList({ state }: { state: IncidentState }) {
   return (
     <section className="agm-sec">
       <h4>
-        系統故障
-        <span className={`agm-chip ${items.length > 0 ? 'bad' : 'ok'}`}>{items.length} 筆未恢復</span>
+        {t('系統故障')}
+        <span className={`agm-chip ${items.length > 0 ? 'bad' : 'ok'}`}>{t('{n} 筆未恢復', { n: items.length })}</span>
       </h4>
       {items.length === 0 ? (
-        <p className="agm-note">目前沒有未恢復的故障。這一格看的是主機、bot 與交辦，不是 AGM 自己。</p>
+        <p className="agm-note">{t('目前沒有未恢復的故障。這一格看的是主機、bot 與交辦，不是 AGM 自己。')}</p>
       ) : (
         <ul className="agm-assign-list">
           {items.map((i) => (
@@ -195,7 +212,7 @@ function IncidentList({ state }: { state: IncidentState }) {
                 <span className={`agm-chip ${i.severity === 'critical' ? 'bad' : 'warn'}`}>{i.severity}</span>
               </div>
               <p className="agm-assign-meta mono">{i.resource}</p>
-              <p className="agm-assign-meta">自 {i.first_seen_at} 起，已確認 {i.occurrences} 次</p>
+              <p className="agm-assign-meta">{t('自 {time} 起，已確認 {n} 次', { time: i.first_seen_at, n: i.occurrences })}</p>
             </li>
           ))}
         </ul>
@@ -205,6 +222,7 @@ function IncidentList({ state }: { state: IncidentState }) {
 }
 
 export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
+  const t = useT()
   const [info, setInfo] = useState<SupervisorInfo | null | undefined>(undefined)
   /** `null` 有兩種意思，要分開存：還沒載完 vs. 這台 daemon 沒有這個 API。 */
   const [unsupported, setUnsupported] = useState(false)
@@ -258,7 +276,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   useEffect(() => {
     if (rev === 0) return
     let alive = true
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       void read().then((r) => {
         // 讀失敗不蓋掉已經在畫面上的狀態（暫時性的錯誤不該把面板換成「讀不到」）。
         if (alive && r.info) apply(r)
@@ -272,7 +290,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
     }, 1000)
     return () => {
       alive = false
-      clearTimeout(t)
+      clearTimeout(timer)
     }
   }, [rev, read, apply])
 
@@ -295,21 +313,23 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
     return (
       <div className="agm-panel">
         <p className="agm-note">
-          這台 daemon 還沒有總管功能。更新 <code>agents-managerd</code> 並重啟之後，這裡才會出現 AGM 的建立與啟動。
+          {t.x('這台 daemon 還沒有總管功能。更新 {bin} 並重啟之後，這裡才會出現 AGM 的建立與啟動。', {
+            bin: <code>agents-managerd</code>,
+          })}
         </p>
       </div>
     )
   }
 
-  if (info === undefined) return <p className="agm-note">載入中…</p>
+  if (info === undefined) return <p className="agm-note">{t('載入中…')}</p>
 
   const live = info
   if (!live) {
     return (
       <div className="agm-panel">
-        <p className="agm-error">讀不到總管狀態：{error || '未知錯誤'}</p>
+        <p className="agm-error">{t('讀不到總管狀態：{error}', { error: error || t('未知錯誤') })}</p>
         <button type="button" className="btn" onClick={() => void read().then(apply)}>
-          重試
+          {t('重試')}
         </button>
       </div>
     )
@@ -336,7 +356,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
           <li key={c.model} className={i === activeIndex ? 'on' : ''}>
             <span className="agm-cand-n">{i + 1}</span>
             <span className="mono">{c.label}</span>
-            {i === activeIndex ? <span className="agm-cand-tag">使用中</span> : null}
+            {i === activeIndex ? <span className="agm-cand-tag">{t('使用中')}</span> : null}
           </li>
         ))}
       </ol>
@@ -349,24 +369,24 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
       <div className="agm-actions">
         {!live.configured ? (
           <button type="button" className="btn primary" disabled={busy !== null} onClick={() => void act('setup')}>
-            {busy === 'setup' ? '建立中…' : '建立 AGM 環境'}
+            {busy === 'setup' ? t('建立中…') : t('建立 AGM 環境')}
           </button>
         ) : (
           <>
             <button type="button" className="btn" disabled={busy !== null || running} onClick={() => void act('start')}>
-              {busy === 'start' ? '啟動中…' : '啟動'}
+              {busy === 'start' ? t('啟動中…') : t('啟動')}
             </button>
             <button type="button" className="btn" disabled={busy !== null || !running} onClick={() => void act('stop')}>
-              {busy === 'stop' ? '停止中…' : '停止'}
+              {busy === 'stop' ? t('停止中…') : t('停止')}
             </button>
             <button
               type="button"
               className="btn"
               disabled={busy !== null}
-              title="改用第二順位 cc0 opus low。帳號額度耗盡時換模型也救不了。"
+              title={t('改用第二順位 cc0 opus low。帳號額度耗盡時換模型也救不了。')}
               onClick={() => void act('fallback')}
             >
-              {busy === 'fallback' ? '切換中…' : '改用候補模型'}
+              {busy === 'fallback' ? t('切換中…') : t('改用候補模型')}
             </button>
             {live.bot_id ? (
               <button
@@ -377,7 +397,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
                   onOpenChat?.()
                 }}
               >
-                打開 AGM 對話
+                {t('打開 AGM 對話')}
               </button>
             ) : null}
           </>
@@ -386,7 +406,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
 
       {!live.configured ? (
         <p className="agm-note">
-          建立只會準備專用工作目錄與 bot 設定，不會自己啟動；重複按也不會建出第二個。
+          {t('建立只會準備專用工作目錄與 bot 設定，不會自己啟動；重複按也不會建出第二個。')}
         </p>
       ) : null}
 
@@ -396,12 +416,12 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
 
       <section className="agm-sec">
         <h4>
-          交辦
-          {live.pending_count > 0 ? <span className="agm-chip warn">{live.pending_count} 筆未結案</span> : null}
-          {awaitingReview > 0 ? <span className="agm-chip warn">{awaitingReview} 筆等驗收</span> : null}
+          {t('交辦')}
+          {live.pending_count > 0 ? <span className="agm-chip warn">{t('{n} 筆未結案', { n: live.pending_count })}</span> : null}
+          {awaitingReview > 0 ? <span className="agm-chip warn">{t('{n} 筆等驗收', { n: awaitingReview })}</span> : null}
         </h4>
         {live.assignments.length === 0 ? (
-          <p className="agm-note">目前沒有交辦。AGM 只有在你明確說「交給它」時才會派工。</p>
+          <p className="agm-note">{t('目前沒有交辦。AGM 只有在你明確說「交給它」時才會派工。')}</p>
         ) : (
           <ul className="agm-assign-list">
             {live.assignments.map((a) => (
@@ -412,7 +432,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
       </section>
 
       {live.configured && !managerBot ? (
-        <p className="agm-note">設定裡有 AGM，但目前的清單找不到這顆 bot（可能還沒同步或已被移除）。</p>
+        <p className="agm-note">{t('設定裡有 AGM，但目前的清單找不到這顆 bot（可能還沒同步或已被移除）。')}</p>
       ) : null}
     </div>
   )

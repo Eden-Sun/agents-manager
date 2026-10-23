@@ -7,6 +7,7 @@
  * ③ 那台主機連得上（連不上時登入也開不了 pane，離線警示條已經在講）。
  */
 import type { Bot, Host, IdentityStatusMap, Project } from '../api/types'
+import { t } from './i18n'
 
 export interface PendingLogin {
   host: string
@@ -81,13 +82,10 @@ export function pendingForPrune(
 }
 
 export function loginPromptText(p: PendingLogin): { title: string; detail: string } {
-  const where = p.host === 'local' ? '本機' : p.host
+  const where = p.host === 'local' ? t('本機') : p.host
   const n = p.bots.length
   return {
-    title: `${p.identity}（${where}）已登出`,
-    detail:
-      p.via === 'turn'
-        ? `${n} 顆 bot 在用它，剛才有回合因為登入失效失敗`
-        : `偵測到已登出，${n} 顆 bot 在用它`,
+    title: t('{identity}（{where}）已登出', { identity: p.identity, where }),
+    detail: p.via === 'turn' ? t('{n} 顆 bot 在用它，剛才有回合因為登入失效失敗', { n }) : t('偵測到已登出，{n} 顆 bot 在用它', { n }),
   }
 }

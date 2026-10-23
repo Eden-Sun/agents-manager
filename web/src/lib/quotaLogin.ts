@@ -1,5 +1,6 @@
 import type { BotKind } from '../api/types'
 import { identityStatusOfHost, projectHostName, useStore } from '../store/store'
+import { msg } from './i18n'
 
 /** store 沒 export state 型別，就地取——不動共用的 `store.ts`。 */
 type StoreState = ReturnType<typeof useStore.getState>
@@ -67,4 +68,4 @@ function shellQuote(v: string): string {
 }
 
 /** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
-export const AGY_LOGIN_GUIDE = 'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。'
+export const AGY_LOGIN_GUIDE = msg('agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。')

@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
+import { t, useLang, useT } from '../lib/i18n'
 import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
 import { AgyInstallButton } from './AgyInstall'
 import { KindTag } from './KindTag'
@@ -19,6 +20,7 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
 
 /** The install button: picks a running bot on that host. */
 function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
+  const t = useT()
   const candidates = useStore(useShallow((s) => runningBotsOnHost(s, host)))
   const busy = useStore((s) => Boolean(s.busy[`install:${host}:${kind}`]))
   const installTool = useStore((s) => s.installTool)
@@ -45,7 +47,7 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
 
   const click = () => {
     if (candidates.length === 0) {
-      notify('error', `${hostLabel(host)} 上沒有執行中的 Bot；請先啟動任一 Bot（任何 kind 都可以）再安裝 ${kind}`)
+      notify('error', t('{host} 上沒有執行中的 Bot；請先啟動任一 Bot（任何 kind 都可以）再安裝 {kind}', { host: hostLabel(host), kind }))
       return
     }
     if (candidates.length === 1) {
@@ -64,14 +66,14 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
         disabled={busy}
         aria-haspopup={candidates.length > 1 ? 'menu' : undefined}
         aria-expanded={open}
-        title={`請 ${hostLabel(host)} 上一個執行中的 Bot 安裝並登入 ${kind}（會在它的 pane 執行，登入 URL 出現在 blocked 面板）`}
+        title={t('請 {host} 上一個執行中的 Bot 安裝並登入 {kind}（會在它的 pane 執行，登入 URL 出現在 blocked 面板）', { host: hostLabel(host), kind })}
         onClick={click}
       >
-        {busy ? '送出中…' : small ? '安裝' : '用現有 agent 安裝'}
+        {busy ? t('送出中…') : small ? t('安裝') : t('用現有 agent 安裝')}
       </button>
       {open ? (
         // 點一下就送出、沒有「選取中」——是選單不是 listbox。
-        <ul ref={menuRef} className="install-pop" role="menu" tabIndex={-1} aria-label={`選擇執行安裝的 Bot（${hostLabel(host)}）`} onKeyDown={menuKeys}>
+        <ul ref={menuRef} className="install-pop" role="menu" tabIndex={-1} aria-label={t('選擇執行安裝的 Bot（{host}）', { host: hostLabel(host) })} onKeyDown={menuKeys}>
           {candidates.map((b) => (
             <li
               key={b.id}
@@ -99,14 +101,20 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
 
 /** Three little badges (✓ installed / ✗ missing / ! not logged in) for a host's tools. */
 export function ToolBadges({ host, tools }: { host: string; tools: ToolMap }) {
+  const t = useT()
   return (
-    <span className="tool-badges" aria-label={`${hostLabel(host)} 的 agent CLI`}>
+    <span className="tool-badges" aria-label={t('{host} 的 agent CLI', { host: hostLabel(host) })}>
       {BOT_KINDS.map((k) => {
-        const t = tools[k]
-        const state = !t.installed ? 'missing' : t.logged_in === false ? 'nologin' : 'ok'
-        const title = !t.installed
-          ? `${k}：未安裝`
-          : `${k}：已安裝${t.version ? ` ${t.version}` : ''}${t.path ? `（${t.path}）` : ''}${t.logged_in === false ? '，未登入' : t.logged_in ? '，已登入' : ''}`
+        const info = tools[k]
+        const state = !info.installed ? 'missing' : info.logged_in === false ? 'nologin' : 'ok'
+        const title = !info.installed
+          ? t('{kind}：未安裝', { kind: k })
+          : t('{kind}：已安裝{version}{path}{login}', {
+              kind: k,
+              version: info.version ? ` ${info.version}` : '',
+              path: info.path ? t('（{path}）', { path: info.path }) : '',
+              login: info.logged_in === false ? t('，未登入') : info.logged_in ? t('，已登入') : '',
+            })
         return (
           <span key={k} className={`tool-badge ${state}`} title={title}>
             <KindTag kind={k} title={title} />
@@ -126,11 +134,11 @@ function summarizeMissing(byHost: Map<string, BotKind[]>): string {
   if (entries.length === 1 && entries[0][1].length === 1) {
     const [host, kinds] = entries[0]
     const kindLabel = kinds[0] === 'claude' ? 'Claude' : kinds[0] === 'codex' ? 'Codex' : kinds[0] === 'grok' ? 'Grok' : KIND_LABEL[kinds[0]]
-    return `${hostLabel(host)} 缺少 ${kindLabel} CLI`
+    return t('{host} 缺少 {kind} CLI', { host: hostLabel(host), kind: kindLabel })
   }
   const hostCount = entries.length
   const cliCount = entries.reduce((n, [, ks]) => n + ks.length, 0)
-  return `${hostCount} 台主機缺少 ${cliCount} 個 CLI`
+  return t('{hosts} 台主機缺少 {clis} 個 CLI', { hosts: hostCount, clis: cliCount })
 }
 
 /** Stable snapshot key — `missingTools()` returns fresh objects each call. */
@@ -150,6 +158,7 @@ function missingFromKey(key: string): { host: string; kind: BotKind }[] {
 
 /** Compact amber icon + count for the main header when the full bar is not shown. */
 export function ToolsHintIcon() {
+  useLang() // 標題文字走模組層的 t()：訂閱語言，切換時重繪
   const missingKey = useStore((s) => missingKeyOf(s))
   const dismissed = useStore((s) => s.toolHintDismissed)
   const selectedBotId = useStore((s) => s.selectedBotId)
@@ -198,6 +207,7 @@ export function ToolsHint({
   focusHost?: string | null
   focusKinds?: BotKind[] | null
 }) {
+  const t = useT()
   const missingKey = useStore((s) => missingKeyOf(s))
   const missingAll = useMemo(() => missingFromKey(missingKey), [missingKey])
   const dismissed = useStore((s) => s.toolHintDismissed)
@@ -215,7 +225,7 @@ export function ToolsHint({
 
   return (
     <div className={`tools-hint${collapsed ? ' collapsed' : ''}`} role="status">
-      <button type="button" className="tools-hint-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)} title={collapsed ? '展開' : '收合'}>
+      <button type="button" className="tools-hint-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)} title={collapsed ? t('展開') : t('收合')}>
         <span className="chev">{collapsed ? '▶' : '▼'}</span>
         <span className="tools-hint-title">{summary}</span>
       </button>
@@ -225,7 +235,11 @@ export function ToolsHint({
             kinds.map((kind) => (
               <li key={`${host}:${kind}`}>
                 <span>
-                  主機 <strong>{hostLabel(host)}</strong> 缺少 <KindTag kind={kind} /> <strong>{kind}</strong>
+                  {t.x('主機 {host} 缺少 {tag} {kind}', {
+                    host: <strong>{hostLabel(host)}</strong>,
+                    tag: <KindTag kind={kind} />,
+                    kind: <strong>{kind}</strong>,
+                  })}
                 </span>
                 <InstallToolButton host={host} kind={kind} />
               </li>
@@ -233,7 +247,7 @@ export function ToolsHint({
           )}
         </ul>
       )}
-      <button type="button" className="icon-btn" onClick={dismiss} aria-label="關閉提示" title="這次不再提示">
+      <button type="button" className="icon-btn" onClick={dismiss} aria-label={t('關閉提示')} title={t('這次不再提示')}>
         ✕
       </button>
     </div>

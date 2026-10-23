@@ -3,6 +3,7 @@
  *
  * key 只往 daemon 送、永遠不回來：讀到的只有 `key_present` 與不能用的原因。
  */
+import { t } from '../lib/i18n'
 import { rawTransport } from './index'
 import { ApiError } from './types'
 
@@ -64,16 +65,16 @@ export type JudgeSaveResult = { ok: true; settings: JudgeSettings } | { ok: fals
 export async function saveJudgeSettings(patch: JudgeSettingsPatch): Promise<JudgeSaveResult> {
   if (rawTransport.mock) {
     const hasKey = mockState.key_present || !!patch.token?.trim()
-    if (patch.enabled && !hasKey) return { ok: false, message: '還沒有可用的 API key，先貼上 key 再開。' }
+    if (patch.enabled && !hasKey) return { ok: false, message: t('還沒有可用的 API key，先貼上 key 再開。') }
     mockState = { ...mockState, ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }), ...(patch.projects ? { projects: patch.projects } : {}), key_present: hasKey, key_error: hasKey ? null : mockState.key_error }
     return { ok: true, settings: mockState }
   }
   try {
     const settings = parse(await rawTransport.request('PUT', '/judge/settings', patch))
-    return settings ? { ok: true, settings } : { ok: false, message: 'daemon 回了看不懂的內容' }
+    return settings ? { ok: true, settings } : { ok: false, message: t('daemon 回了看不懂的內容') }
   } catch (e) {
     if (e instanceof ApiError) {
-      return { ok: false, message: e.status === 409 ? '還沒有可用的 API key，先貼上 key 再開。' : e.message }
+      return { ok: false, message: e.status === 409 ? t('還沒有可用的 API key，先貼上 key 再開。') : e.message }
     }
     throw e
   }

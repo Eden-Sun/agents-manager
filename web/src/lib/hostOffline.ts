@@ -1,4 +1,5 @@
 import type { Bot, Host, Project } from '../api/types'
+import { t } from './i18n'
 
 /** 一台離線的遠端主機，連同它拖下水的 bot（離線警示條、聊天區橫幅共用）。 */
 export interface OfflineHost {
@@ -44,13 +45,13 @@ export function botOfflineHost({ hosts, projects, bots }: Input, botId: string |
 /** 「離線多久」：不到一分鐘「剛剛」，之後 N 分鐘／N 小時 M 分／N 天 M 小時。時間讀不懂回 null。 */
 export function downFor(since: string | null, now: number): string | null {
   if (!since) return null
-  const t = Date.parse(since)
-  if (Number.isNaN(t)) return null
-  const m = Math.max(0, Math.floor((now - t) / 60_000))
-  if (m < 1) return '剛剛'
-  if (m < 60) return `${m} 分鐘`
+  const ms = Date.parse(since)
+  if (Number.isNaN(ms)) return null
+  const m = Math.max(0, Math.floor((now - ms) / 60_000))
+  if (m < 1) return t('剛剛')
+  if (m < 60) return t('{n} 分鐘', { n: m })
   const h = Math.floor(m / 60)
-  if (h < 24) return m % 60 ? `${h} 小時 ${m % 60} 分` : `${h} 小時`
+  if (h < 24) return m % 60 ? t('{n} 小時 {m} 分', { n: h, m: m % 60 }) : t('{n} 小時', { n: h })
   const d = Math.floor(h / 24)
-  return h % 24 ? `${d} 天 ${h % 24} 小時` : `${d} 天`
+  return h % 24 ? t('{n} 天 {h} 小時', { n: d, h: h % 24 }) : t('{n} 天', { n: d })
 }

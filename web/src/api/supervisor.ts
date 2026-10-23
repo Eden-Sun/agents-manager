@@ -266,7 +266,7 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
         target_bot_id: 'bot-1',
         turn_id: 'turn-1',
         status: 'delivered',
-        text: '重現並修正手機登入流程卡在驗證遠端身份的問題',
+        text: '重現並修正手機登入流程卡在驗證遠端身份的問題', // i18n-ignore：假資料
         created_at: new Date().toISOString(),
         result: null,
         turn_status: null,
@@ -282,9 +282,9 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
         target_bot_id: 'bot-2',
         turn_id: 'turn-2',
         status: 'awaiting_review',
-        text: '把 daemon 重建成 release 並回報結果',
+        text: '把 daemon 重建成 release 並回報結果', // i18n-ignore：假資料
         created_at: new Date().toISOString(),
-        result: '還在等編譯，好了再回報',
+        result: '還在等編譯，好了再回報', // i18n-ignore：假資料
         turn_status: 'completed',
         evidence_complete: true,
         open: true,

@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 /**
  * 「這一格已經沒額度了，還要等多久」——用完的視窗改寫倒數（2026-09-14 使用者：先要「重置時刻
  * ＋倒數」，同日再改成「不需要重置時間，只要 xhym 就好」——鐘點要自己換算，倒數直接就是答案）。
@@ -67,7 +69,7 @@ export function resetBadge(
 
 /** `2h13m` / `4d0h` / `12m`——和狀態列同一種寫法。 */
 export function fmtLeft(ms: number): string {
-  if (ms <= 0) return '即將重置'
+  if (ms <= 0) return t('即將重置')
   // 無條件進位（同 resetBadge／soonLabel）：剩 30 秒寫 1m，不寫 0m。
   const m = Math.ceil(ms / 60_000)
   const h = Math.floor(m / 60)
@@ -79,12 +81,12 @@ export function fmtLeft(ms: number): string {
 
 /** popover 用的長寫法（`2 天 3 小時`）；`fmtLeft` 是窄處的緊縮版。 */
 export function fmtLeftLong(ms: number): string {
-  if (ms <= 0) return '即將重置'
+  if (ms <= 0) return t('即將重置')
   // 同 fmtLeft：不到一分鐘寫「1 分」，不寫「0 分」。
   const m = Math.ceil(ms / 60_000)
   const h = Math.floor(m / 60)
   const d = Math.floor(h / 24)
-  if (d > 0) return `${d} 天 ${h % 24} 小時`
-  if (h > 0) return `${h} 小時 ${m % 60} 分`
-  return `${m} 分`
+  if (d > 0) return t('{n} 天 {h} 小時', { n: d, h: h % 24 })
+  if (h > 0) return t('{n} 小時 {m} 分', { n: h, m: m % 60 })
+  return t('{n} 分', { n: m })
 }

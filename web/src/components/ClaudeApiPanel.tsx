@@ -13,6 +13,7 @@ import {
   type ClaudeApiUse,
   type ClaudeApiUsePatch,
 } from '../api/claudeApi'
+import { msg, useT } from '../lib/i18n'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel'
 import './claudeApiPanel.css'
@@ -20,13 +21,13 @@ import './claudeApiPanel.css'
 const nf = new Intl.NumberFormat('en-US')
 
 const ERROR_LABEL: Record<string, string> = {
-  auth: 'key 被拒',
-  rate_limited: '被限流',
-  server: '伺服器錯誤',
-  timeout: '逾時',
-  network: '連不上',
-  rejected: '請求被拒',
-  bad_response: '回應不能用',
+  auth: msg('key 被拒'),
+  rate_limited: msg('被限流'),
+  server: msg('伺服器錯誤'),
+  timeout: msg('逾時'),
+  network: msg('連不上'),
+  rejected: msg('請求被拒'),
+  bad_response: msg('回應不能用'),
 }
 
 /** 這個用途現在表單上的值與已存的值是否不同。 */
@@ -40,6 +41,7 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiUse): boolean {
 }
 
 export function ClaudeApiPanel() {
+  const t = useT()
   const [subTab, setSubTab] = useState<'form' | 'book'>('form')
   const [settings, setSettings] = useState<ClaudeApiSettings | null | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -110,12 +112,12 @@ export function ClaudeApiPanel() {
         if (r.ok) {
           adopt(r.settings)
           setToken('')
-          setNote({ ok: true, text: '已儲存，立即生效。' })
+          setNote({ ok: true, text: t('已儲存，立即生效。') })
         } else {
-          setNote({ ok: false, text: `儲存失敗：${r.message}` })
+          setNote({ ok: false, text: t('儲存失敗：{message}', { message: r.message }) })
         }
       })
-      .catch((e: unknown) => setNote({ ok: false, text: `儲存失敗：${e instanceof Error ? e.message : String(e)}` }))
+      .catch((e: unknown) => setNote({ ok: false, text: t('儲存失敗：{message}', { message: e instanceof Error ? e.message : String(e) }) }))
       .finally(() => setBusy(false))
   }
 
@@ -130,27 +132,32 @@ export function ClaudeApiPanel() {
       }}
     >
       <p className="hint">
-        一次性、不需要工具與 repo 的 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic API key，不開 Claude Code session，
-        不吃訂閱用量；改按 API 計費。每個用途可以各自開關、選模型；失敗或沒 key 時，用途會退回原本的 Claude Code 路徑。
+        {t('一次性、不需要工具與 repo 的 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic API key，不開 Claude Code session，不吃訂閱用量；改按 API 計費。每個用途可以各自開關、選模型；失敗或沒 key 時，用途會退回原本的 Claude Code 路徑。')}
       </p>
       <label className="field">
         <span>
           Anthropic API key{' '}
-          <em className={settings.key_present ? 'claude-api-key ok' : 'claude-api-key'}>{settings.key_present ? '已設定' : `未設定${settings.key_error ? `（${settings.key_error}）` : ''}`}</em>
+          <em className={settings.key_present ? 'claude-api-key ok' : 'claude-api-key'}>
+            {settings.key_present
+              ? t('已設定')
+              : settings.key_error
+                ? t('未設定（{error}）', { error: settings.key_error })
+                : t('未設定')}
+          </em>
         </span>
         <input
           type="password"
           value={token}
           autoComplete="off"
           spellCheck={false}
-          placeholder={settings.key_present ? '留空＝不更換' : '貼上 key（sk-ant-…）'}
+          placeholder={settings.key_present ? t('留空＝不更換') : t('貼上 key（sk-ant-…）')}
           onChange={(e) => setToken(e.target.value)}
         />
-        <span className="hint">只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。</span>
+        <span className="hint">{t('只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。')}</span>
       </label>
       <label className="claude-api-switch">
         <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
-        <span>總開關（關掉時下面各用途都不會呼叫 API；「更新框翻譯」沿用舊設定，不受總開關管）</span>
+        <span>{t('總開關（關掉時下面各用途都不會呼叫 API；「更新框翻譯」沿用舊設定，不受總開關管）')}</span>
       </label>
       <div className="claude-api-uses">
         {settings.uses.map((u) => {
@@ -164,22 +171,22 @@ export function ClaudeApiPanel() {
               <legend>{u.label}</legend>
               <label className="claude-api-switch">
                 <input type="checkbox" checked={on} disabled={!willHaveKey && !on} onChange={(e) => patchUse(u.id, { enabled: e.target.checked })} />
-                <span>啟用</span>
+                <span>{t('啟用')}</span>
               </label>
               <div className="claude-api-use-fields">
                 <label className="field">
-                  <span>模型</span>
+                  <span>{t('模型')}</span>
                   <select value={model} onChange={(e) => patchUse(u.id, { model: e.target.value })}>
                     {modelOptions(model).map((m) => (
                       <option key={m} value={m}>
                         {m}
-                        {m === u.default_model ? '（預設）' : ''}
+                        {m === u.default_model ? t('（預設）') : ''}
                       </option>
                     ))}
                   </select>
                 </label>
                 <label className="field">
-                  <span>思考強度</span>
+                  <span>{t('思考強度')}</span>
                   <select value={effort} onChange={(e) => patchUse(u.id, { effort: e.target.value })}>
                     {settings.efforts.map((x) => (
                       <option key={x} value={x}>
@@ -189,7 +196,7 @@ export function ClaudeApiPanel() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>每小時上限</span>
+                  <span>{t('每小時上限')}</span>
                   <input
                     type="number"
                     min={1}
@@ -202,7 +209,7 @@ export function ClaudeApiPanel() {
                   />
                 </label>
               </div>
-              {u.legacy_section ? <span className="hint">設定存在 [{u.legacy_section}]，不受總開關管。</span> : null}
+              {u.legacy_section ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: u.legacy_section })}</span> : null}
             </fieldset>
           )
         })}
@@ -210,7 +217,7 @@ export function ClaudeApiPanel() {
       <div className="form-actions">
         {note ? <span className={note.ok ? 'claude-api-note ok' : 'claude-api-note err'} role="status">{note.text}</span> : null}
         <button type="submit" className="btn primary" disabled={busy || !dirty}>
-          儲存
+          {t('儲存')}
         </button>
       </div>
     </form>
@@ -219,45 +226,52 @@ export function ClaudeApiPanel() {
   const ledgerContent = (
     <div className="claude-api-ledger">
       <h3 className="page-title">
-        用量帳本{' '}
+        {t('用量帳本')}{' '}
         <button type="button" className="btn" onClick={loadLedger}>
-          重新整理
+          {t('重新整理')}
         </button>
       </h3>
       {ledger === null ? (
-        <p className="hint">讀不到帳本。</p>
+        <p className="hint">{t('讀不到帳本。')}</p>
       ) : (
         <>
           <p className="hint" data-testid="claude-api-totals">
-            自 daemon 啟動起共 {ledger.totals.calls} 次（成功 {ledger.totals.ok}、失敗 {ledger.totals.errors}），輸入 {nf.format(ledger.totals.input_tokens)}、輸出{' '}
-            {nf.format(ledger.totals.output_tokens)} tokens。這些工作沒有走訂閱額度。
+            {t('自 daemon 啟動起共 {calls} 次（成功 {ok}、失敗 {errors}），輸入 {input}、輸出 {output} tokens。這些工作沒有走訂閱額度。', {
+              calls: ledger.totals.calls,
+              ok: ledger.totals.ok,
+              errors: ledger.totals.errors,
+              input: nf.format(ledger.totals.input_tokens),
+              output: nf.format(ledger.totals.output_tokens),
+            })}
           </p>
           {ledger.rows.length === 0 ? (
-            <p className="hint">還沒有呼叫記錄。</p>
+            <p className="hint">{t('還沒有呼叫記錄。')}</p>
           ) : (
             <div className="claude-api-ledger-scroll">
               <table className="as-cards">
                 <thead>
                   <tr>
-                    <th>時間</th>
-                    <th>用途</th>
-                    <th>模型</th>
-                    <th>輸入</th>
-                    <th>輸出</th>
-                    <th>耗時</th>
-                    <th>結果</th>
+                    <th>{t('時間')}</th>
+                    <th>{t('用途')}</th>
+                    <th>{t('模型')}</th>
+                    <th>{t('輸入')}</th>
+                    <th>{t('輸出')}</th>
+                    <th>{t('耗時')}</th>
+                    <th>{t('結果')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {ledger.rows.map((r, i) => (
                     <tr key={`${r.at}-${i}`}>
-                      <td className="num" data-label="時間">{r.at.slice(5, 19).replace('T', ' ')}</td>
-                      <td data-label="用途">{settings.uses.find((u) => u.id === r.use)?.label ?? r.use}</td>
-                      <td data-label="模型">{r.model}</td>
-                      <td className="num" data-label="輸入">{nf.format(r.input_tokens)}</td>
-                      <td className="num" data-label="輸出">{nf.format(r.output_tokens)}</td>
-                      <td className="num" data-label="耗時">{(r.ms / 1000).toFixed(1)}s</td>
-                      <td data-label="結果" className={r.ok ? 'ok' : 'err'}>{r.ok ? '成功' : (ERROR_LABEL[r.error_kind ?? ''] ?? r.error_kind ?? '失敗')}</td>
+                      <td className="num" data-label={t('時間')}>{r.at.slice(5, 19).replace('T', ' ')}</td>
+                      <td data-label={t('用途')}>{settings.uses.find((u) => u.id === r.use)?.label ?? r.use}</td>
+                      <td data-label={t('模型')}>{r.model}</td>
+                      <td className="num" data-label={t('輸入')}>{nf.format(r.input_tokens)}</td>
+                      <td className="num" data-label={t('輸出')}>{nf.format(r.output_tokens)}</td>
+                      <td className="num" data-label={t('耗時')}>{(r.ms / 1000).toFixed(1)}s</td>
+                      <td data-label={t('結果')} className={r.ok ? 'ok' : 'err'}>
+                        {r.ok ? t('成功') : t.tr(ERROR_LABEL[r.error_kind ?? ''] ?? r.error_kind ?? msg('失敗'))}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -270,13 +284,13 @@ export function ClaudeApiPanel() {
   )
 
   const subTabItems: EnvSubTabItem<'form' | 'book'>[] = [
-    { id: 'form', label: '設定', panelId: 'api-form', content: formContent },
-    { id: 'book', label: '帳本', panelId: 'api-book', content: ledgerContent },
+    { id: 'form', label: t('設定'), panelId: 'api-form', content: formContent },
+    { id: 'book', label: t('帳本'), panelId: 'api-book', content: ledgerContent },
   ]
 
   return (
     <EnvSubTabs<'form' | 'book'>
-      ariaLabel="Claude API 分類"
+      ariaLabel={t('Claude API 分類')}
       value={subTab}
       onChange={setSubTab}
       items={subTabItems}

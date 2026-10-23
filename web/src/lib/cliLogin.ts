@@ -1,6 +1,7 @@
 import * as api from '../api'
 import { ApiError } from '../api/types'
 import { projectHostName, useStore } from '../store/store'
+import { t } from './i18n'
 import { cliLoginCommand } from './quotaLogin'
 
 /**
@@ -33,7 +34,7 @@ export async function openFreshShellAndType(host: string, command: string): Prom
       return { opened: true, typed: true }
     } catch {
       // 打字失敗不代表 shell 沒開起來：使用者眼前就是那個終端，告訴他自己敲哪一行最省事。
-      s.notify('info', `shell 已開好，請在裡面輸入 ${command}`)
+      s.notify('info', t('shell 已開好，請在裡面輸入 {command}', { command }))
       return { opened: true, typed: false }
     }
   } finally {
@@ -47,10 +48,10 @@ export async function openFreshShellAndType(host: string, command: string): Prom
 
 function openShellError(host: string, e: unknown): string {
   if (e instanceof ApiError && e.body.reason === 'too_many_shells') {
-    const max = typeof e.body.max === 'number' ? `（上限 ${e.body.max} 個）` : ''
-    return `${host === 'local' || !host ? '本機' : host} 開著的 shell 太多${max}，請先關掉不用的再登入`
+    const max = typeof e.body.max === 'number' ? t('（上限 {n} 個）', { n: e.body.max }) : ''
+    return t('{host} 開著的 shell 太多{max}，請先關掉不用的再登入', { host: host === 'local' || !host ? t('本機') : host, max })
   }
-  return `開 shell 失敗：${e instanceof Error ? e.message : String(e)}`
+  return t('開 shell 失敗：{error}', { error: e instanceof Error ? e.message : String(e) })
 }
 
 /**

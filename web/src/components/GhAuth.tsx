@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import * as api from '../api'
 import type { GhPending, GhStatus } from '../api/types'
+import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { CopyChip } from './CopyChip'
 import { hostLabel } from './toolsHelpers'
@@ -20,22 +21,23 @@ function GhDevicePanel({
   error: string | null
   onCancel?: () => void
 }) {
+  const t = useT()
   if (!pending && !error) return null
   return (
     <div className="gh-device">
       {error ? <p className="gh-device-err" role="alert">{error}</p> : null}
       {pending ? (
         <>
-          <p className="gh-device-lead">在瀏覽器打開 GitHub，輸入這組一次性代碼：</p>
-          <CopyChip label="代碼" value={pending.user_code} title="GitHub 裝置碼" />
+          <p className="gh-device-lead">{t('在瀏覽器打開 GitHub，輸入這組一次性代碼：')}</p>
+          <CopyChip label={t('代碼')} value={pending.user_code} title={t('GitHub 裝置碼')} />
           <a className="gh-device-link" href={pendingUrl(pending)} target="_blank" rel="noreferrer">
-            打開 github.com/login/device
+            {t('打開 github.com/login/device')}
           </a>
         </>
       ) : null}
       {onCancel ? (
         <button type="button" className="mini-btn" onClick={onCancel}>
-          取消
+          {t('取消')}
         </button>
       ) : null}
     </div>
@@ -46,9 +48,9 @@ async function startLogin(host: string, notify: (kind: 'info' | 'error', text: s
   const next = await api.loginGh(host, 'auto')
   if (next.pending) {
     window.open(pendingUrl(next.pending), '_blank', 'noopener')
-    notify('info', `${hostLabel(host)}：請在瀏覽器完成 GitHub 授權（代碼 ${next.pending.user_code}）`)
+    notify('info', t('{host}：請在瀏覽器完成 GitHub 授權（代碼 {code}）', { host: hostLabel(host), code: next.pending.user_code }))
   } else if (next.logged_in) {
-    notify('info', `${hostLabel(host)} 的 gh 已登入${next.account ? `（${next.account}）` : ''}`)
+    notify('info', t('{host} 的 gh 已登入', { host: hostLabel(host) }) + (next.account ? t('（{account}）', { account: next.account }) : ''))
   } else if (next.error) {
     notify('error', next.error)
   }
@@ -57,6 +59,7 @@ async function startLogin(host: string, notify: (kind: 'info' | 'error', text: s
 
 /** HostsPanel row: current gh account + a login button when it cannot talk to GitHub. */
 export function GhHostStatus({ host }: { host: string }) {
+  const t = useT()
   const notify = useStore((s) => s.notify)
   const [st, setSt] = useState<GhStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -89,26 +92,26 @@ export function GhHostStatus({ host }: { host: string }) {
 
   if (!st) return null
   const label = !st.installed
-    ? 'gh 未安裝'
+    ? t('gh 未安裝')
     : st.logged_in === true
-      ? `gh · ${st.account ?? '已登入'}`
+      ? t('gh · {account}', { account: st.account ?? t('已登入') })
       : st.logged_in === null
-        ? 'gh · 狀態未知'
+        ? t('gh · 狀態未知')
         : st.account
-          ? `gh · ${st.account}（未登入）`
-          : 'gh 未登入'
+          ? t('gh · {account}（未登入）', { account: st.account })
+          : t('gh 未登入')
   const authState = !st.installed ? 'missing' : st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'
   return (
     <span className={`gh-auth ${authState}`}>
       <span
         className="gh-auth-label"
-        title={st.logged_in === null ? '登入狀態無法確認；按登入會改用裝置碼，不會複製本機憑證' : st.path ?? 'gh'}
+        title={st.logged_in === null ? t('登入狀態無法確認；按登入會改用裝置碼，不會複製本機憑證') : st.path ?? 'gh'}
       >
         {label}
       </span>
       {st.logged_in || !st.installed ? null : (
         <button type="button" className="mini-btn" disabled={busy || Boolean(st.pending)} onClick={() => void login()}>
-          {busy ? '登入中…' : st.pending ? '等待授權…' : st.logged_in === null ? '裝置碼登入' : '登入'}
+          {busy ? t('登入中…') : st.pending ? t('等待授權…') : st.logged_in === null ? t('裝置碼登入') : t('登入')}
         </button>
       )}
       {st.pending || st.error ? (
@@ -133,6 +136,7 @@ export function GhHostStatus({ host }: { host: string }) {
 
 /** IssuesBar error row: one-click login for the project's host, then refetch. */
 export function GhLoginButton({ host, onLoggedIn }: { host: string; onLoggedIn: () => void }) {
+  const t = useT()
   const notify = useStore((s) => s.notify)
   const [st, setSt] = useState<GhStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -166,7 +170,7 @@ export function GhLoginButton({ host, onLoggedIn }: { host: string; onLoggedIn: 
   return (
     <div className="gh-login-cta">
       <button type="button" className="mini-btn primary" disabled={busy || Boolean(st?.pending)} onClick={() => void login()}>
-        {busy ? '登入中…' : st?.pending ? '等待授權…' : `在 ${hostLabel(host)} 登入 gh`}
+        {busy ? t('登入中…') : st?.pending ? t('等待授權…') : t('在 {host} 登入 gh', { host: hostLabel(host) })}
       </button>
       {st?.pending || st?.error ? (
         <GhDevicePanel

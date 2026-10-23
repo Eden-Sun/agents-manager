@@ -1,4 +1,5 @@
 import type { RemoteCargoInput, RemoteCargoSettings } from '../api/types'
+import { t } from './i18n'
 import { portProblem } from './hostForm'
 
 /** 外部 Cargo 設定表單（`HostsPanel` 的 `RemoteCargoPanel`）；數字欄位是使用者打的字串。 */
@@ -62,19 +63,19 @@ export function remoteCargoProblems(f: RemoteCargoForm): RemoteCargoProblem[] {
   const user = f.user.trim()
   const root = f.root.trim()
   if (host && (!/^[A-Za-z0-9._:-]+$/.test(host) || host.startsWith('-'))) {
-    out.push({ field: 'host', text: '主機只能有英數與 . _ - :，不能以 - 開頭、不能有空白' })
+    out.push({ field: 'host', text: t('主機只能有英數與 . _ - :，不能以 - 開頭、不能有空白') })
   }
   if (user && (!/^[A-Za-z0-9._-]+$/.test(user) || user.startsWith('-'))) {
-    out.push({ field: 'user', text: 'SSH 帳號只能有英數與 . _ -，不能以 - 開頭' })
+    out.push({ field: 'user', text: t('SSH 帳號只能有英數與 . _ -，不能以 - 開頭') })
   }
   const port = portProblem(f.port)
   if (port) out.push({ field: 'port', text: `SSH ${port}` })
   const jobs = f.jobs.trim()
   if (!/^\d{1,3}$/.test(jobs) || Number(jobs) < 1 || Number(jobs) > 64) {
-    out.push({ field: 'jobs', text: '遠端 cargo jobs 要是 1–64 的整數（超過 64 daemon 會截成 64）' })
+    out.push({ field: 'jobs', text: t('遠端 cargo jobs 要是 1–64 的整數（超過 64 daemon 會截成 64）') })
   }
   if (root && (!/^[A-Za-z0-9._/-]+$/.test(root) || root.includes('..'))) {
-    out.push({ field: 'root', text: '遠端工作目錄只能有英數與 . _ - /，不能含 ..' })
+    out.push({ field: 'root', text: t('遠端工作目錄只能有英數與 . _ - /，不能含 ..') })
   }
   return out
 }
