@@ -119,6 +119,8 @@
             }
             // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
             cmd.env("HOME", self.dir.join("fake-home"));
+            // 所有 shim 呼叫都縮短停頓（見 [`SHIM_PAUSE`]）；需要不同值的測試自己在 env 列表裡覆寫。
+            cmd.env("AM_SHIM_PAUSE", SHIM_PAUSE).env("AM_SHIM_SCHEDULER_PAUSE", SHIM_PAUSE);
             // 這支測試本身就在 `cargo test` 底下跑（repo 的 `.cargo/config.toml [env]` 或外層 shim 給的值，issue #813）：
             // 漏進來就變成「呼叫端自己設了」，shim 不會再注入。需要的測試自己設。
             cmd.env_remove("RUST_TEST_THREADS");
@@ -523,7 +525,7 @@ esac"#
             let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check", "-p", "agents-managerd"]);
             let why = format!("{sh}: {err}");
             assert_eq!(rc, 0, "{why}");
-            assert!(err.contains("每 3 秒重試"), "要講在重試：{why}");
+            assert!(err.contains(&format!("每 {SHIM_PAUSE} 秒重試")), "要講在重試：{why}");
             let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(str::to_string).collect();
             let pos = |w: &str| lines.iter().position(|l| l == w).unwrap_or_else(|| panic!("{why}: 順序紀錄裡沒有 {w}：{lines:?}"));
             assert!(pos("acquired") < pos("CARGO_BUILD_JOBS=2"), "拿到名額才起 cargo：{why} {lines:?}");
@@ -1410,7 +1412,8 @@ esac
 
         let s = Sandbox::new();
         s.install_counting_cargo();
-        let extra: Vec<(&str, String)> = vec![("AM_BOT_ID", bot_id.clone()), ("AM_HOOK_TOKEN", "tok-128".into()), ("AM_BUILD_SCHEDULER_WAIT_SECS", "90".into())];
+        // outage 只有 5 秒：重試預算（`wait / 3` 次 × 停頓）要覆蓋它，所以等待上限放大、每次停頓放寬到 0.25 秒（預算約 25 秒）。
+        let extra: Vec<(&str, String)> = vec![("AM_BOT_ID", bot_id.clone()), ("AM_HOOK_TOKEN", "tok-128".into()), ("AM_BUILD_SCHEDULER_WAIT_SECS", "300".into()), ("AM_SHIM_SCHEDULER_PAUSE", "0.25".into())];
         let shims = start_shims(&s, port, 2, &extra);
 
         // outage 期間（兩顆都至少重試過一輪）：沒有任何 cargo 起來。
@@ -1473,6 +1476,10 @@ esac
             });
         }
     }
+
+    /// shim 的短停頓（放名額重試、殺行程樹的寬限、排程器掉線重試）在測試裡縮成 50ms：正式預設是 1 秒／3 秒，
+    /// 測試只要求「順序與次數」，不需要真的等。斷言的次數不變（`AM_SHIM_SCHEDULER_PAUSE` 同時決定重試次數上限，見 shim）。
+    const SHIM_PAUSE: &str = "0.05";
 
     fn lease_env(s: &Sandbox) -> Vec<(&'static str, String)> {
         let tmp = s.dir.join("tmp");
