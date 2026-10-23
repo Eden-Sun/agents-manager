@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useT } from '../lib/i18n'
 import { botLamp, useStore } from '../store/store'
 import { activityStartedAt, fmtElapsed } from '../lib/elapsed'
 import { forgetRunElapsed, rememberRunElapsed, runElapsedAt } from '../lib/runElapsedCache'
@@ -9,6 +10,7 @@ import './runElapsed.css'
 /** 這一頁看到某顆 bot「開始在跑」的時刻；daemon 兩種紀錄都沒有時（升級前的舊列、或別人派的回合還沒
  * 建出 turn）才拿來墊底——issue #93：起點要以 daemon 觀察到的為準，這只是最後一道防線。 */
 export function RunElapsed({ botId }: { botId: string }) {
+  const t = useT()
   const startedAt = useStore((s) => {
     if (botLamp(s, botId) !== 'working') return null
     return activityStartedAt(s.runs[botId]?.agent_status_since, Object.values(s.turns[botId] ?? {}))
@@ -41,7 +43,7 @@ export function RunElapsed({ botId }: { botId: string }) {
   return (
     <span
       className="run-elapsed"
-      title={startedAt ? `從 ${new Date(startedAt).toLocaleTimeString()} 開始一直在跑（daemon 觀察到的時間）` : '從這個網頁看到它開始跑算起（daemon 還沒有這筆紀錄）'}
+      title={startedAt ? t('從 {time} 開始一直在跑（daemon 觀察到的時間）', { time: new Date(startedAt).toLocaleTimeString() }) : t('從這個網頁看到它開始跑算起（daemon 還沒有這筆紀錄）')}
     >
       {fmtElapsed(ms)}
     </span>

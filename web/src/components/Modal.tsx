@@ -2,6 +2,7 @@ import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { focusableIn, useDialogFocus } from '../hooks/useDialogFocus'
 import { isImeEnter } from '../lib/ime'
+import { useT } from '../lib/i18n'
 
 /** Centred popup for the sidebar's big forms. The body keeps `sheet-body` so the existing form styling still applies. */
 export function Modal({
@@ -20,6 +21,7 @@ export function Modal({
   children: ReactNode
   onClose: () => void
 }) {
+  const t = useT()
   const titleId = useId()
   const bodyRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -71,7 +73,7 @@ export function Modal({
         <div className="modal-head">
           <strong id={titleId}>{title}</strong>
           {subtitle ? <span className="modal-sub">{subtitle}</span> : null}
-          <button type="button" className="icon-btn" aria-label="關閉" title="關閉（Esc）" onClick={onClose}>
+          <button type="button" className="icon-btn" aria-label={t('關閉')} title={t('關閉（Esc）')} onClick={onClose}>
             ✕
           </button>
         </div>

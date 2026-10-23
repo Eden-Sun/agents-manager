@@ -5,6 +5,7 @@ import { scheduleStatusLine } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleRowMenu } from './ScheduleRowMenu'
 import './schedules.css'
+import { t, useLang } from '../lib/i18n'
 
 function ScheduleRow({ s, onOpen, onTurnChange }: { s: Schedule; onOpen: (id: string) => void; onTurnChange: () => void }) {
   const live = useLiveTurnStatus(s.open?.bot_id, s.open?.turn_id)
@@ -22,6 +23,8 @@ function ScheduleRow({ s, onOpen, onTurnChange }: { s: Schedule; onOpen: (id: st
 
 /** 專案 menu 裡的排程列表：下次時間（附時區）、本次狀態（含綁定 turn 的即時狀態），點開進編輯／歷史。 */
 export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onOpen: (scheduleId: string) => void }) {
+  // 切語言時重繪；字串在 render 與 callback 裡直接用模組的 t（callback 不會卡在舊語言）。
+  useLang()
   const schedulesRev = useStore((s) => s.schedulesRev)
   const [rows, setRows] = useState<Schedule[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -36,7 +39,7 @@ export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onO
         setError(null)
       })
       .catch((e: unknown) => {
-        if (requestSequence.current === requestId) setError(e instanceof Error ? e.message : '讀取排程失敗')
+        if (requestSequence.current === requestId) setError(e instanceof Error ? e.message : t('讀取排程失敗'))
       })
   }, [projectId])
 
@@ -58,11 +61,11 @@ export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onO
   }, [projectId, refresh])
 
   if (rows === null && error === null) return null
-  if (error) return <p className="hint schedule-error">排程讀取失敗：{error}</p>
+  if (error) return <p className="hint schedule-error">{t('排程讀取失敗：{reason}', { reason: error })}</p>
   if (!rows || rows.length === 0) return null
 
   return (
-    <ul className="project-schedules" aria-label="排程">
+    <ul className="project-schedules" aria-label={t('排程')}>
       {rows.map((s) => (
         <ScheduleRow key={s.id} s={s} onOpen={onOpen} onTurnChange={refresh} />
       ))}

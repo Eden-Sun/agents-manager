@@ -10,6 +10,7 @@
  * 重置時間是空的、「無獨立 reviewer」永遠不出現（review3 c1 L9）。
  */
 import type { Mission, MissionAssignment, MissionEvent, MissionQna, MissionRole } from '../api/types'
+import { msg, t, tr } from './i18n'
 
 /** 進度條上的五段＋終點。`paused` / `cancelled` 不是其中一格，是疊在上面的狀態。 */
 export type MissionPhase = 'planning' | 'executing' | 'reviewing' | 'verifying' | 'delivering' | 'done'
@@ -24,12 +25,12 @@ export const MISSION_PHASES: readonly MissionPhase[] = [
 ]
 
 export const PHASE_LABEL: Record<MissionPhase, string> = {
-  planning: '規劃',
-  executing: '執行',
-  reviewing: '審查',
-  verifying: '驗證',
-  delivering: '交付',
-  done: '完成',
+  planning: msg('規劃'),
+  executing: msg('執行'),
+  reviewing: msg('審查'),
+  verifying: msg('驗證'),
+  delivering: msg('交付'),
+  done: msg('完成'),
 }
 
 /** 卡片上會出現的狀態：五段＋停下來的三種。 */
@@ -37,17 +38,17 @@ export type MissionViewPhase = MissionPhase | 'paused' | 'cancelled' | 'waiting_
 
 /** 狀態 chip 上的字。五段用 `PHASE_LABEL`，停下來的那幾種另外講。 */
 export function phaseLabel(p: MissionViewPhase): string {
-  if (p === 'paused') return '等你回答'
-  if (p === 'cancelled') return '已取消'
-  if (p === 'waiting_quota') return '等額度'
-  if (p === 'awaiting_agm') return '等 AGM'
-  return PHASE_LABEL[p]
+  if (p === 'paused') return t('等你回答')
+  if (p === 'cancelled') return t('已取消')
+  if (p === 'waiting_quota') return t('等額度')
+  if (p === 'awaiting_agm') return t('等 AGM')
+  return tr(PHASE_LABEL[p])
 }
 
 export const ROLE_LABEL: Record<MissionRole, string> = {
-  executor: '執行者',
+  executor: msg('執行者'),
   reviewer: 'reviewer',
-  verifier: '驗證者',
+  verifier: msg('驗證者'),
 }
 
 /** 某個角色現在由誰擔任。欄位讀不到就是 `null`，不要猜。 */
@@ -323,30 +324,30 @@ export function quotaWaitText(
   fmt: (iso: string) => string = (iso) => iso,
 ): string {
   const at = a?.resume_at ? fmt(a.resume_at) : ''
-  const when = at ? `，預計 ${at} 之後自動重送` : '，額度回來會自動重送'
+  const when = at ? t('，預計 {at} 之後自動重送', { at }) : t('，額度回來會自動重送')
   if (m.on_5h_limit === 'switch') {
     return m.executor_kind === 'claude'
-      ? `可以接手的身分額度都用完了，正在等最早回來的那一個${when}。`
-      : `${m.executor_kind} 只有一把額度，沒有別的身分可以換，正在等它重置${when}。`
+      ? t('可以接手的身分額度都用完了，正在等最早回來的那一個{when}。', { when })
+      : t('{kind} 只有一把額度，沒有別的身分可以換，正在等它重置{when}。', { kind: m.executor_kind, when })
   }
-  return `這個身分的額度用完了，照開任務時選的「等重置」原地等${when}。要換身分接手，下一個任務把 5h 撞限改成「換身分」。`
+  return t('這個身分的額度用完了，照開任務時選的「等重置」原地等{when}。要換身分接手，下一個任務把 5h 撞限改成「換身分」。', { when })
 }
 
 /** 停下來問人的原因，講成人話。認不得的機器碼原樣顯示，不要吞掉。 */
 export function pausedLabel(reason: string): string {
   switch (reason) {
     case MISSION_USER_PAUSE:
-      return '你按了暫停'
+      return t('你按了暫停')
     case 'max_rounds':
-      return '來回次數用完了'
+      return t('來回次數用完了')
     case 'no_fable_for_verifier':
-      return '沒有可用的 Fable 額度可以當驗證者'
+      return t('沒有可用的 Fable 額度可以當驗證者')
     case 'push_main_failed':
-      return '推 main 失敗'
+      return t('推 main 失敗')
     case 'pr_failed':
-      return '開 PR 失敗'
+      return t('開 PR 失敗')
     case 'clarify':
-      return '指示不清楚，需要你釐清'
+      return t('指示不清楚，需要你釐清')
     default:
       return reason
   }
@@ -354,7 +355,7 @@ export function pausedLabel(reason: string): string {
 
 /** 交付方式講成人話。 */
 export function deliveryLabel(mode: string): string {
-  return mode === 'push_main' ? '直接推 main' : '開 PR'
+  return mode === 'push_main' ? t('直接推 main') : t('開 PR')
 }
 
 /**
@@ -365,29 +366,29 @@ export function deliveryLabel(mode: string): string {
  */
 export function assignmentLabel(a: MissionAssignment, followedUp = false): string {
   // 接手的那件已經派出去（`followedUp`，子列的 follow_up_of 指回它）：父列不再等 AGM。daemon 只寫 followup 連結、不改父列狀態。
-  if (a.turn_status === 'identity_switch') return followedUp ? '已換身分接手（見下一件）' : '撞限，等 AGM 換身分接手'
-  if (a.turn_status === 'quota_exhausted') return '沒有可用額度'
+  if (a.turn_status === 'identity_switch') return followedUp ? t('已換身分接手（見下一件）') : t('撞限，等 AGM 換身分接手')
+  if (a.turn_status === 'quota_exhausted') return t('沒有可用額度')
   switch (a.status) {
     case 'queued':
-      return '排隊中'
+      return t('排隊中')
     case 'delivered':
-      return '進行中'
+      return t('進行中')
     case 'unknown':
-      return '送出了但不確定收到'
+      return t('送出了但不確定收到')
     case 'awaiting_review':
-      return '等 AGM 驗收'
+      return t('等 AGM 驗收')
     case 'completed':
-      return '完成'
+      return t('完成')
     case 'failed':
-      return '失敗'
+      return t('失敗')
     case 'cancelled':
-      return '取消'
+      return t('已取消')
     case 'superseded':
-      return '被後來的取代'
+      return t('被後來的取代')
     case 'blocked':
-      return '卡住'
+      return t('卡住')
     case 'quota_blocked':
-      return '等額度重置'
+      return t('等額度重置')
     default:
       return a.status || '—'
   }

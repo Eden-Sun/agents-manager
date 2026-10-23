@@ -4,6 +4,7 @@ import type { GitSummary } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
 import './gitBar.css'
+import { t, useT } from '../lib/i18n'
 
 /**
  * 專案 checkout 的 git 一眼看（2026-09-08）：行數差、upstream 差，與 commit / push / pull 快捷鍵。
@@ -14,13 +15,14 @@ const POLL_MS = 15_000
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
     const out = typeof e.body.output === 'string' ? e.body.output.trim() : ''
-    if (e.body.reason === 'nothing_to_commit') return '沒有可以 commit 的變更'
+    if (e.body.reason === 'nothing_to_commit') return t('沒有可以 commit 的變更')
     return out || e.message
   }
   return e instanceof Error ? e.message : String(e)
 }
 
 export function GitBar({ projectId }: { projectId: string }) {
+  const t = useT()
   const notify = useStore((s) => s.notify)
   const [sum, setSum] = useState<GitSummary | null>(null)
   const [busy, setBusy] = useState<'commit' | 'push' | 'pull' | null>(null)
@@ -75,10 +77,10 @@ export function GitBar({ projectId }: { projectId: string }) {
         setMsg('')
         setComposing(false)
       }
-      const label = op === 'commit' ? '已 commit' : op === 'push' ? '已 push' : '已 pull'
-      notify('info', out ? `${label}：${out.split('\n').slice(-1)[0]}` : label)
+      const label = op === 'commit' ? t('已 commit') : op === 'push' ? t('已 push') : t('已 pull')
+      notify('info', out ? t('{label}：{out}', { label, out: out.split('\n').slice(-1)[0] }) : label)
     } catch (e) {
-      notify('error', `git ${op} 失敗：${errText(e)}`)
+      notify('error', t('git {op} 失敗：{reason}', { op, reason: errText(e) }))
     } finally {
       setBusy(null)
       void refresh()
@@ -86,9 +88,9 @@ export function GitBar({ projectId }: { projectId: string }) {
   }
 
   const title = [
-    sum.branch ? `分支 ${sum.branch}` : '分離的 HEAD',
-    sum.upstream ? `upstream ${sum.upstream}` : '沒有 upstream（push 會自動 -u origin）',
-    `${sum.changed} 個檔案有改動、${sum.untracked} 個未追蹤`,
+    sum.branch ? t('分支 {name}', { name: sum.branch }) : t('分離的 HEAD'),
+    sum.upstream ? t('upstream {name}', { name: sum.upstream }) : t('沒有 upstream（push 會自動 -u origin）'),
+    t('{changed} 個檔案有改動、{untracked} 個未追蹤', { changed: sum.changed, untracked: sum.untracked }),
   ].join('\n')
 
   return (
@@ -100,8 +102,8 @@ export function GitBar({ projectId }: { projectId: string }) {
       </span>
       {sum.ahead || sum.behind ? (
         <span className="git-ab">
-          {sum.ahead ? <span title={`比 upstream 多 ${sum.ahead} 個 commit`}>↑{sum.ahead}</span> : null}
-          {sum.behind ? <span title={`比 upstream 少 ${sum.behind} 個 commit`}>↓{sum.behind}</span> : null}
+          {sum.ahead ? <span title={t('比 upstream 多 {n} 個 commit', { n: sum.ahead })}>↑{sum.ahead}</span> : null}
+          {sum.behind ? <span title={t('比 upstream 少 {n} 個 commit', { n: sum.behind })}>↓{sum.behind}</span> : null}
         </span>
       ) : null}
       {/* 桌面 hover 才彈出（2026-09-12 使用者）；打 commit 訊息時 `.open` 常駐。 */}
@@ -118,7 +120,7 @@ export function GitBar({ projectId }: { projectId: string }) {
             ref={inputRef}
             type="text"
             className="git-commit-msg"
-            placeholder="commit 訊息，Enter 送出"
+            placeholder={t('commit 訊息，Enter 送出')}
             value={msg}
             onChange={(e) => setMsg(e.target.value)}
             onKeyDown={(e) => {
@@ -127,10 +129,10 @@ export function GitBar({ projectId }: { projectId: string }) {
             disabled={busy === 'commit'}
           />
           <button type="submit" className="mini-btn" disabled={!msg.trim() || busy === 'commit'}>
-            {busy === 'commit' ? '送出中…' : 'commit'}
+            {busy === 'commit' ? t('送出中…') : 'commit'}
           </button>
           <button type="button" className="mini-btn" onClick={() => setComposing(false)}>
-            取消
+            {t('取消')}
           </button>
         </form>
       ) : (
@@ -139,7 +141,7 @@ export function GitBar({ projectId }: { projectId: string }) {
             type="button"
             className="mini-btn"
             disabled={!dirty || busy !== null}
-            title={dirty ? 'git add -A && git commit' : '工作樹是乾淨的'}
+            title={dirty ? 'git add -A && git commit' : t('工作樹是乾淨的')}
             onClick={() => setComposing(true)}
           >
             commit
