@@ -4256,8 +4256,9 @@ exit "$rc"
         let target_file = Path::new(&dir).join("target/debug/sentinel");
         std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
         std::fs::write(&target_file, "keep target\n").unwrap();
+        // 固定在過去的時間：任何會動到 target 的同步都會把 mtime 改成現在，不必等檔案系統的秒數精度。
+        set_mtime(&target_file, std::time::UNIX_EPOCH + Duration::from_secs(10));
         let target_mtime = std::fs::metadata(&target_file).unwrap().modified().unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
 
         std::fs::remove_dir_all(cwd.join("removed")).unwrap();
         std::fs::remove_dir_all(cwd.join("switched")).unwrap();
@@ -5289,6 +5290,10 @@ fn main() {
         let runs = runs_file();
         assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().collect::<Vec<_>>(), ["false"]);
         let remote_tool = Path::new(&dir).join("tools/probe");
+        // source 與 remote 的 mtime 都固定在過去：沒有真的 touch 時 remote 就還是這個時間（斷言會紅），
+        // 有 touch 才會變成現在。不必等檔案系統的秒數精度，也不會因為 rsync 複製了「現在」的 source mtime 而假綠。
+        set_mtime(&tool, std::time::UNIX_EPOCH + Duration::from_secs(10));
+        set_mtime(&remote_tool, std::time::UNIX_EPOCH + Duration::from_secs(10));
         let before = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
         let source_mtime = std::fs::metadata(&tool).unwrap().modified().unwrap();
         // Cargo compares rerun-if-changed inputs against build/<hash>/output, not just
@@ -5296,7 +5301,6 @@ fn main() {
         let build_output = runs.parent().unwrap().parent().unwrap().join("output");
         assert!(build_output.is_file());
         set_mtime(&build_output, std::time::SystemTime::now() + Duration::from_secs(3600));
-        std::thread::sleep(Duration::from_millis(1100));
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(std::fs::metadata(&tool).unwrap().modified().unwrap(), source_mtime, "chmod must not change the source mtime");
         sync().expect("permission-only source sync should succeed");
@@ -5306,7 +5310,6 @@ fn main() {
 
         // Simulate rsync applying chmod before returning 23/24. The failed attempt must not
         // replace the last successful manifest; the next successful call still touches the file.
-        std::thread::sleep(Duration::from_millis(1100));
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
         let baseline_manifest = with_fake_transport(&base, || {
             read_remote_manifest(&remote, &data, &dir, &Deadline::new(60))
@@ -5331,6 +5334,9 @@ fn main() {
             failed_mtime, after,
             "chmod applied by failed retries must not be treated as invalidated"
         );
+        // 恢復同步的 touch 要能看得出來：兩邊先固定在過去（同上，不靠 sleep 跨秒數精度）。
+        set_mtime(&tool, std::time::UNIX_EPOCH + Duration::from_secs(20));
+        set_mtime(&remote_tool, std::time::UNIX_EPOCH + Duration::from_secs(20));
         sync().expect("the next successful sync must invalidate the earlier failed chmod");
         let recovered_mtime = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
         assert!(
@@ -5369,11 +5375,13 @@ fn main() {
         sync().expect("first source manifest should synchronize");
         let remote_source = Path::new(&dir).join(&name);
         let remote_forged_paths = [Path::new(&dir).join("line"), Path::new(&dir).join("victim")];
+        // 兩邊固定在過去（同 chmod 測試）：只有真的 touch 才會讓 remote 的 mtime 變新，不靠 sleep 跨秒數精度。
+        set_mtime(&source, std::time::UNIX_EPOCH + Duration::from_secs(10));
+        set_mtime(&remote_source, std::time::UNIX_EPOCH + Duration::from_secs(10));
         let before = std::fs::metadata(&remote_source)
             .unwrap()
             .modified()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
         sync().expect("newline path metadata change should synchronize");
 
