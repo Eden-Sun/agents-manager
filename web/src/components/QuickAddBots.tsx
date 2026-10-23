@@ -3,6 +3,7 @@ import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
+import { loginKindOnHost } from '../lib/onboardingActions'
 import { KindTag } from './KindTag'
 import './quickAddBots.css'
 
@@ -44,7 +45,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
       if (!tools[kind]?.installed) continue
       const ids = enabledIdentities(disabledIdentities, host, identitiesOfHost(allIdentities, status, host)).filter((i) => i.kind === kind)
       if (ids.length === 0) {
-        // 沒登入的按下去只會停在登入畫面：留著讓人看得到這個 kind，但點不下去。
+        // 沒登入的列出來，點了開登入流程（不是新增）。
         const loggedOut = tools[kind].logged_in === false
         const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, null))
         out.push({
@@ -55,7 +56,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           title: quotaOff
             ? `${kind} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
             : loggedOut
-              ? `${kind} 在 ${hostLabel} 尚未登入`
+              ? `${kind} 在 ${hostLabel} 尚未登入——點一下開登入終端`
               : `在 ${hostLabel} 開一個 ${kind}`,
           loggedOut,
           quotaOff,
@@ -74,7 +75,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           title: quotaOff
             ? `${i.name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
             : loggedOut
-              ? `${i.name} 在 ${hostLabel} 尚未登入`
+              ? `${i.name} 在 ${hostLabel} 尚未登入——點一下開登入終端`
               : `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
           loggedOut,
           quotaOff,
@@ -87,6 +88,11 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   if (choices.length === 0) return null
 
   const pick = (c: Choice) => {
+    // 未登入的開出來只會停在登入畫面：點下去直接開登入流程（issue #1931），登好後再點一次就是新增。
+    if (c.loggedOut) {
+      void loginKindOnHost(host, c.kind, c.identity)
+      return
+    }
     setBusy(c.key)
     void addBot(projectId, {
       name: nextName(c.identity ?? c.kind, projectId, bots),
@@ -112,8 +118,8 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           key={c.key}
           type="button"
           className={`quick-add-chip${c.quotaOff ? ' quota-off' : ''}`}
-          // 停用中的身分點下去只會多一顆同樣沒額度的 bot——跟「未登入」一樣列出來但不給點。
-          disabled={busy !== null || c.loggedOut || c.quotaOff}
+          // 停用中的身分點下去只會多一顆同樣沒額度的 bot——列出來但不給點；未登入的點了去登入。
+          disabled={busy !== null || c.quotaOff}
           title={c.title}
           onClick={() => pick(c)}
         >
@@ -122,7 +128,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           {c.quotaOff ? (
             <span className="quick-add-out">已停用</span>
           ) : c.loggedOut ? (
-            <span className="quick-add-out">未登入</span>
+            <span className="quick-add-out">未登入・點此登入</span>
           ) : null}
         </button>
       ))}

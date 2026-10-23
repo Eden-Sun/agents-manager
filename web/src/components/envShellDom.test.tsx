@@ -17,13 +17,13 @@ beforeEach(() => {
   clearRememberedTab()
 })
 
-test('七個分頁都在 DOM 裡，預設選中主機，其餘 6 個面板帶 hidden', async () => {
+test('八個分頁都在 DOM 裡，預設選中主機，其餘 7 個面板帶 hidden', async () => {
   const root = await mount(<EnvShell />)
   const tabs = [...root.querySelectorAll<HTMLButtonElement>('.env-nav[role="tablist"] button[role="tab"]')]
-  assert.equal(tabs.length, 7)
+  assert.equal(tabs.length, 8)
   assert.deepEqual(
     tabs.map((t) => t.querySelector('.env-nav-label')?.textContent),
-    ['主機', '更新檢查', '身分', '最近刪除', 'Jev 建議', 'Claude API', '顯示'],
+    ['環境準備', '主機', '更新檢查', '身分', '最近刪除', 'Jev 建議', 'Claude API', '顯示'],
   )
 
   const selected = tabs.find((t) => t.getAttribute('aria-selected') === 'true')
@@ -31,13 +31,13 @@ test('七個分頁都在 DOM 裡，預設選中主機，其餘 6 個面板帶 hi
   assert.equal(selected.querySelector('.env-nav-label')?.textContent, '主機')
 
   const panels = [...root.querySelectorAll<HTMLElement>('.env-main > [role="tabpanel"]')]
-  assert.equal(panels.length, 7)
+  assert.equal(panels.length, 8)
   const visiblePanels = panels.filter((p) => !p.hidden)
   assert.equal(visiblePanels.length, 1)
   assert.equal(visiblePanels[0]!.id, 'env-panel-hosts')
 
   const hiddenPanels = panels.filter((p) => p.hidden)
-  assert.equal(hiddenPanels.length, 6)
+  assert.equal(hiddenPanels.length, 7)
 })
 
 test('點擊切換分頁：更新 aria-selected 與 hidden，記住切換狀態', async () => {

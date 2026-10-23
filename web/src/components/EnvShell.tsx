@@ -13,6 +13,8 @@ import { buildHostCheck, updatableCount } from '../store/updateCheck'
 import { fetchIntegrationUpdates, type IntegrationHost } from '../api/integrationUpdates'
 import { herdrHostBlocked } from '../store/herdrUpdate'
 
+import { OnboardingChecklist } from './OnboardingChecklist'
+import { useOnboarding } from '../lib/useOnboarding'
 import { HostsPanel } from './HostsPanel'
 import { UpdateCheckPanel } from './UpdateCheckPanel'
 import { IdentitiesPanel } from './IdentitiesPanel'
@@ -29,6 +31,8 @@ export function EnvShell() {
   const localHerdr = useStore((s) => s.localHerdr)
   const upstream = useStore((s) => s.upstreamUpdates)
   const bots = useStore((s) => s.bots)
+
+  const onboarding = useOnboarding()
 
   // 狀態字收集
   const [integrationSnap, setIntegrationSnap] = useState<IntegrationHost[] | null>(null)
@@ -95,6 +99,7 @@ export function EnvShell() {
 
   // 整理 badges
   const badges: EnvTabBadges = {
+    setup: onboarding.needed && onboarding.pending > 0 ? { text: `${onboarding.pending} 待處理`, tone: 'warn' } : null,
     hosts: hostsDown > 0 ? { text: `${hostsDown} 未連線`, tone: 'bad' } : null,
     updates: updatesCount > 0 ? { text: `${updatesCount} 可更新`, tone: 'warn' } : null,
     deleted: deletedCount !== null && deletedCount > 0 ? { text: `${deletedCount} 個`, tone: 'dim' } : null,
@@ -163,6 +168,17 @@ export function EnvShell() {
       </div>
 
       <div className="env-main">
+        <section
+          role="tabpanel"
+          id="env-panel-setup"
+          aria-labelledby="env-tab-setup"
+          className="env-tabpanel"
+          hidden={activeTab !== 'setup'}
+        >
+          <h2 className="page-title">環境準備</h2>
+          <OnboardingChecklist />
+        </section>
+
         <section
           role="tabpanel"
           id="env-panel-hosts"

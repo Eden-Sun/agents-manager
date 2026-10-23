@@ -1216,6 +1216,67 @@ export class MockTransport implements Transport {
     return { kind, host: remote?.name ?? 'local', models }
   }
 
+  /** 官方安裝指令（API.md §12.7）；mock 的 shell pane 照這幾行演一遍。 */
+  private static readonly INSTALL_CMD: Record<string, string> = {
+    claude: 'curl -fsSL https://claude.ai/install.sh | bash',
+    codex: 'npm i -g @openai/codex',
+    grok: 'curl -fsSL https://x.ai/cli/install.sh | bash',
+  }
+
+  /** 下一次直接安裝要演的失敗（`__amMock.installFail('claude', 'timeout')`；`null` 恢復成功）。 */
+  private installFail = new Map<string, 'error' | 'timeout'>()
+  setInstallFail(kind: string, mode: 'error' | 'timeout' | null) {
+    if (mode) this.installFail.set(kind, mode)
+    else this.installFail.delete(kind)
+  }
+
+  /** 沒有 Bot 可借的安裝：開 shell、演安裝輸出，CLI 結束後那台的 tool 變已安裝・未登入並推 `host_changed`。 */
+  private installToolInShell(host: string, kind: BotKind) {
+    const shell = this.openShell(host, '')
+    const pane = this.shell(host, shell.pane_id)
+    const cmd = MockTransport.INSTALL_CMD[kind]
+    pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${cmd}`, `Downloading ${kind}…`)
+    const remote = host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    const fail = this.installFail.get(kind)
+    later(() => {
+      if (fail) {
+        // 沒裝成：pane 保留讓使用者看錯誤（逾時＝等滿 15 分鐘），推 `tool_install_done`（API.md §8）。
+        pane.lines.push(fail === 'timeout' ? `curl: (28) Operation timed out` : `curl: (6) Could not resolve host`, '')
+        this.emit('tool_install_done', { host, kind, installed: false, pane_id: shell.pane_id, pane_kept: true, timed_out: fail === 'timeout' })
+        return
+      }
+      pane.lines.push(`✔ ${kind} 1.0.13 installed to /usr/local/bin/${kind}`, '')
+      tools[kind] = { installed: true, path: `/usr/local/bin/${kind}`, version: '1.0.13', logged_in: false }
+      this.emit('host_changed', { name: host, connected: true, error: null, tools })
+      // 裝成功 daemon 關掉 pane。
+      this.shells.delete(`${host}/${shell.pane_id}`)
+      this.emit('tool_install_done', { host, kind, installed: true, pane_id: shell.pane_id, pane_kept: false, timed_out: false })
+    }, 2500)
+    return { pane_id: shell.pane_id, cwd: shell.cwd, mode: 'shell' }
+  }
+
+  /** 預設帳號的 `<cli> login` 在 shell 裡跑完：登入好了，推 `host_changed`（真 daemon 是 CLI 結束後重新偵測）。 */
+  private finishCliLogin(host: string, kind: BotKind) {
+    const remote = host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    tools[kind] = { ...tools[kind], logged_in: true }
+    this.emit('host_changed', { name: host, connected: true, error: null, tools })
+  }
+
+  /** 截圖／手動看首次啟動（issue #1931）：沒有 Project 與 Bot、四種 CLI 都沒裝（`__amMock.freshStart()`）。 */
+  freshStart() {
+    this.runs.length = 0
+    this.turns.length = 0
+    this.messages.length = 0
+    this.bots.length = 0
+    this.projects.length = 0
+    for (const k of BOT_KINDS) this.localTools[k] = { installed: false, path: null, version: null, logged_in: null }
+    for (const k of Object.keys(this.localIdentityStatus)) delete this.localIdentityStatus[k]
+    this.emit('host_changed', { name: 'local', connected: true, error: null, tools: this.localTools, identities: this.localIdentityStatus })
+    this.forceResync()
+  }
+
   /** Instructions go to a running bot on that host as an ordinary prompt. */
   private installTool(hostName: string, b: Rec) {
     const kind = String(b.kind ?? '')
@@ -1223,6 +1284,8 @@ export class MockTransport implements Transport {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
     }
     const remote = hostName && hostName !== 'local' ? this.host(hostName) : null
+    // issue #1931：省略 via_bot_id＝沒有 Bot 可借，daemon 開臨時 host-shell pane 直接跑官方安裝指令。
+    if (b.via_bot_id === undefined || b.via_bot_id === null) return this.installToolInShell(hostName || 'local', kind as BotKind)
     const botId = String(b.via_bot_id ?? '')
     const bot = this.bots.find((x) => x.id === botId)
     const project = bot ? this.projects.find((p) => p.id === bot.project_id) : undefined
@@ -4255,6 +4318,11 @@ export class MockTransport implements Transport {
       s.lines.push(host === 'local' ? 'm1pro.local' : `${host}.local`)
     } else if (cmd.startsWith('ls')) {
       s.lines.push('Cargo.toml  daemon      docs        web')
+    } else if (/^(claude auth|codex|grok) login$/.test(cmd)) {
+      // 預設帳號的登入（issue #1931）：印網址，一下子就當作登好了。
+      const kind = cmd.split(' ')[0] as BotKind
+      s.lines.push('請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', 'Login successful.')
+      later(() => this.finishCliLogin(host, kind), 1500)
     } else if (cmd === 'agy' || cmd === 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy') {
       // agy 的 TUI 自己引導登入：SSH 底下印授權網址，授權碼貼回後登入完成（mock 直接當作下一步 `/quit` 時登好，見下）。
       s.lines.push('Antigravity CLI — please sign in', 'Open this URL to authorize:', MOCK_AGY_LOGIN_URL, 'Paste the authorization code here, then /quit to leave.')
@@ -4453,6 +4521,10 @@ export class MockTransport implements Transport {
 function installDevHelpers(mock: MockTransport) {
   ;(globalThis as unknown as Rec).__amMock = {
     resync: () => mock.forceResync(),
+    /** 首次啟動（issue #1931）：沒有 Project／Bot、四種 CLI 都沒裝；主畫面出現「環境準備」。 */
+    freshStart: () => mock.freshStart(),
+    /** 直接安裝演失敗：`installFail('claude')` 沒裝成、pane 留著；`'timeout'` 演逾時；`installFail('claude', null)` 恢復。 */
+    installFail: (kind: string, mode: 'error' | 'timeout' | null = 'error') => mock.setInstallFail(kind, mode),
     /** 設定頁的空值 env 身份警告（#1883）；加完到環境設定看（要重新整理身份清單）。 */
     emptyEnvIdentity: () => mock.addEmptyEnvIdentity(),
     dropSocket: () => mock.dropSocket(),

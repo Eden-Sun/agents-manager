@@ -1,4 +1,5 @@
 import { receiveCodexReset } from './codexReset'
+import { handleToolInstallDone } from '../lib/toolInstallDone'
 import { autoInstallNotice } from './integrationAutoInstall'
 import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
@@ -3688,6 +3689,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       }
       return
     }
+    case 'tool_install_done':
+      void handleToolInstallDone(data)
+      return
     case 'cli_update_done': {
       if (!isRec(data)) return
       const r = cliUpdateDone(data)
