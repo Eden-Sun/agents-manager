@@ -5,12 +5,19 @@ import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll, until }
 import type { Run, TerminalSnapshot } from '../api/types.ts'
 import { parseChoiceMenu } from '../lib/tuiChoices.ts'
 import { BlockedChoices } from './BlockedChoices.tsx'
+import { skipTimerDelays } from '../testing/skipTimerDelays'
 
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
-before(setupDom)
+// 元件送鍵後固定等 STEP（260ms）讓畫面反應；rig 的畫面是立刻換好的，不必睡過去。
+let fast: ReturnType<typeof skipTimerDelays>
+before(() => {
+  setupDom()
+  fast = skipTimerDelays([260])
+})
 afterEach(unmountAll)
 after(async () => {
+  fast.restore()
   resetStoreForTest()
   await teardownDom()
 })

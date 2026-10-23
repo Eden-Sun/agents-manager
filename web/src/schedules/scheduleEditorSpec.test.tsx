@@ -7,12 +7,21 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { shortTimeZoneList } from '../testing/shortTimeZoneList'
 import { useStore } from '../store/store'
 import { ScheduleEditor } from './ScheduleEditor'
 
 afterEach(unmountAll)
-before(setupDom)
-after(teardownDom)
+// 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；短清單仍含測試用的 Asia/Taipei。
+let tzList: ReturnType<typeof shortTimeZoneList>
+before(() => {
+  setupDom()
+  tzList = shortTimeZoneList()
+})
+after(async () => {
+  tzList.restore()
+  await teardownDom()
+})
 
 const scheduleRow = (over: Record<string, unknown> = {}) => ({
   id: 's1', project_id: 'p1', bot_id: 'b1', name: '每分鐘摘要', prompt: '整理進度', mode: 'interval', tz: 'UTC',

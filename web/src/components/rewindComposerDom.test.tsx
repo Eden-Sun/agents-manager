@@ -5,8 +5,9 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
+import { flush } from '../testing/flush'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
@@ -47,7 +48,7 @@ async function openIdleChatWithAUserMessage(text: string) {
   }, 'bot idle')
   useStore.getState().selectBot(bot.id)
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
-  await settle(200)
+  await flush()
   return { requests, bot }
 }
 
@@ -87,7 +88,7 @@ test('#737 確認框出現後終端那段字只多了一個空白：不清、不
   mock.composerDrafts.set(bot.id, 'please  review this')
   await click(dialogButton('清掉再倒回'))
   await until(() => rewinds(requests).length === 2, '第二次 rewind 請求')
-  await settle(300)
+  await flush()
   assert.equal(mock.composerDrafts.has(bot.id), true, '新改的草稿不能被清掉')
   assert.equal(Boolean(useStore.getState().messages[bot.id]?.find((m) => m.content === 'rewind target two')?.rewound_at), false, '不能倒回')
   mock.composerDrafts.set(bot.id, null)

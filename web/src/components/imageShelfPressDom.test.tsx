@@ -1,6 +1,8 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, act, setupDom, teardownDom, unmountAll, settle } from '../testing/domHarness'
+import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { flush } from '../testing/flush'
+import { installManualTimers } from '../testing/manualTimers'
 import { ImageShelf } from './ImageShelf'
 import { useShelf } from '../store/shelf'
 
@@ -12,6 +14,9 @@ afterEach(async () => {
 })
 after(teardownDom)
 
+/** 讓出一輪 macrotask（act 裡面用；不睡牆鐘）。 */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
+
 const ptr = (type: string, x = 10, y = 10, pointerId = 1) =>
   new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType: 'touch', button: 0, pointerId })
 
@@ -21,28 +26,34 @@ test('長按後沒有 click（pointercancel）：下一次點擊要能收起預�
   useShelf.getState().setSink({ add: (f) => handed.push(f), label: 'x' })
 
   await mount(<ImageShelf />)
-  const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!
-  assert.ok(card, 'card must exist')
+  // 長按是 450ms 的 window.setTimeout：手動時鐘走過去，不睡牆鐘。
+  const timers = installManualTimers()
+  try {
+    const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!
+    assert.ok(card, 'card must exist')
 
-  await act(async () => {
-    card.dispatchEvent(ptr('pointerdown'))
-    await settle(500)
-  })
-  assert.ok(document.querySelector('.shelf-peek'), '長按 450ms 後預覽要打開')
+    await act(async () => {
+      card.dispatchEvent(ptr('pointerdown'))
+      await timers.clock.advance(500)
+    })
+    assert.ok(document.querySelector('.shelf-peek'), '長按 450ms 後預覽要打開')
 
-  await act(async () => {
-    card.dispatchEvent(ptr('pointercancel'))
-  })
+    await act(async () => {
+      card.dispatchEvent(ptr('pointercancel'))
+    })
 
-  // 下一次點擊（pointerdown, pointerup, click）收起預覽
-  await act(async () => {
-    card.dispatchEvent(ptr('pointerdown'))
-    card.dispatchEvent(ptr('pointerup'))
-    card.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle(50)
-  })
-  assert.equal(document.querySelector('.shelf-peek'), null, '預覽被收起')
-  assert.equal(handed.length, 0, '是收預覽，不是放進對話')
+    // 下一次點擊（pointerdown, pointerup, click）收起預覽
+    await act(async () => {
+      card.dispatchEvent(ptr('pointerdown'))
+      card.dispatchEvent(ptr('pointerup'))
+      card.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await tick()
+    })
+    assert.equal(document.querySelector('.shelf-peek'), null, '預覽被收起')
+    assert.equal(handed.length, 0, '是收預覽，不是放進對話')
+  } finally {
+    timers.restore()
+  }
 })
 
 test('長按後有 click 的正常順序：那個 click 被吞、預覽留著', async () => {
@@ -51,22 +62,28 @@ test('長按後有 click 的正常順序：那個 click 被吞、預覽留著', 
   useShelf.getState().setSink({ add: (f) => handed.push(f), label: 'x' })
 
   await mount(<ImageShelf />)
-  const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!
-  assert.ok(card, 'card must exist')
+  // 長按是 450ms 的 window.setTimeout：手動時鐘走過去，不睡牆鐘。
+  const timers = installManualTimers()
+  try {
+    const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!
+    assert.ok(card, 'card must exist')
 
-  await act(async () => {
-    card.dispatchEvent(ptr('pointerdown'))
-    await settle(500)
-  })
-  assert.ok(document.querySelector('.shelf-peek'), '長按後預覽打開')
+    await act(async () => {
+      card.dispatchEvent(ptr('pointerdown'))
+      await timers.clock.advance(500)
+    })
+    assert.ok(document.querySelector('.shelf-peek'), '長按後預覽打開')
 
-  await act(async () => {
-    card.dispatchEvent(ptr('pointerup'))
-    card.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle(50)
-  })
-  assert.ok(document.querySelector('.shelf-peek'), 'click 被吞，預覽留著')
-  assert.equal(handed.length, 0, '沒有放進對話')
+    await act(async () => {
+      card.dispatchEvent(ptr('pointerup'))
+      card.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await tick()
+    })
+    assert.ok(document.querySelector('.shelf-peek'), 'click 被吞，預覽留著')
+    assert.equal(handed.length, 0, '沒有放進對話')
+  } finally {
+    timers.restore()
+  }
 })
 
 test('一般點一下照舊放進對話', async () => {
@@ -82,7 +99,7 @@ test('一般點一下照舊放進對話', async () => {
     card.dispatchEvent(ptr('pointerdown'))
     card.dispatchEvent(ptr('pointerup'))
     card.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await settle(50)
+    await tick()
   })
   assert.equal(handed.length, 1, '一般點擊放進對話')
 })
@@ -94,12 +111,12 @@ test('鍵盤 Delete 移除卡片後，焦點落在下一張（刪到最後一張
   const cards = () => [...document.querySelectorAll<HTMLButtonElement>('.shelf-card-main')]
   cards()[0].focus()
   cards()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }))
-  await settle(50)
+  await flush()
   assert.equal(cards().length, 1)
   assert.equal(document.activeElement, cards()[0], '焦點落在下一張，不掉到 body')
   assert.match(cards()[0].getAttribute('aria-label') ?? '', /^b\.txt/)
   cards()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }))
-  await settle(50)
+  await flush()
   assert.equal(cards().length, 0)
   assert.equal(document.activeElement, document.querySelector('.shelf-add'), '刪到一張不剩：回到「＋ 加入檔案」')
 })
