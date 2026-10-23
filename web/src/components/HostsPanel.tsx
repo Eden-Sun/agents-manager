@@ -161,21 +161,46 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
 }
 
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
-function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
+export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
   const v = hostBaselineView(baseline)
+  if (v.items.length === 0) {
+    return (
+      <span className={`host-baseline ${v.level}`}>
+        <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
+          {v.text}
+        </span>
+      </span>
+    )
+  }
+
+  const criticalItems = v.items.filter((i) => i.severity === 'critical')
+  const warnItems = v.items.filter((i) => i.severity !== 'critical')
+
   return (
     <span className={`host-baseline ${v.level}`}>
       <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
         {v.text}
       </span>
-      {v.items.length > 0 ? (
+      {criticalItems.length > 0 ? (
         <ul className="host-baseline-items">
-          {v.items.map((i) => (
+          {criticalItems.map((i) => (
             <li key={i.id} className={i.severity} title={i.id}>
               {i.message}
             </li>
           ))}
         </ul>
+      ) : null}
+      {warnItems.length > 0 ? (
+        <details className="env-fold">
+          <summary>{criticalItems.length > 0 ? `還有 ${warnItems.length} 項提醒` : `列出 ${warnItems.length} 項`}</summary>
+          <ul className="host-baseline-items">
+            {warnItems.map((i) => (
+              <li key={i.id} className={i.severity} title={i.id}>
+                {i.message}
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
     </span>
   )
