@@ -1135,6 +1135,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/missions/{id}/cancel", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/dispatched", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/release-triage/auto", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/publish", BotRoutePolicy::UserOrAgm),
 ];
 

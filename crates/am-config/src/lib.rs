@@ -641,6 +641,7 @@ pub struct ClaudeApiUseDef {
 /// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
     ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None },
+    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None },
     ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 12, legacy_section: Some("changelog_translate") },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。

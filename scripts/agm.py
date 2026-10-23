@@ -1741,6 +1741,21 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
         if not isinstance(body, dict):
             raise AgmError("bad_args", f"{args.file} 要是一個 JSON 物件（{{kind,version,verdicts,issues}}）", 2)
         return client.post("/api/release-triage/verdicts", body)
+    if args.op == "auto":
+        # daemon 自己用 Claude API 分診（#1919）。--check 只問開了沒有；沒開／失敗的版本留在 pending，由 kick 派協調者。
+        if not args.kind:
+            raise AgmError("bad_args", "auto 要 --kind", 2)
+        if args.check:
+            return client.post("/api/release-triage/auto", {"kind": args.kind, "versions": [], "check_only": True})
+        if not args.version:
+            raise AgmError("bad_args", "auto 要至少一個 --version", 2)
+        body = {"kind": args.kind, "versions": args.version}
+        if args.binary_diff_file:
+            try:
+                body["binary_diff"] = Path(args.binary_diff_file).read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                raise AgmError("bad_args", f"讀不了 {args.binary_diff_file}：{e}", 2)
+        return client.post("/api/release-triage/auto", body)
     if args.op == "dispatched":
         if not args.kind or not args.version or not args.bot:
             raise AgmError("bad_args", "dispatched 要 --kind、至少一個 --version，還有 --bot（收件 bot id）", 2)
@@ -2794,12 +2809,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="安裝的 bin/agm 不是 binary 內嵌的那份時，順手叫 daemon 就地換掉（不必等開機；binary 自己落後仍要重建＋重啟）")
     s.set_defaults(func=cmd_ops_sync)
 
-    s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish（issue #204）")
-    s.add_argument("op", choices=["submit", "show", "dispatched", "publish"])
+    s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish / auto（issue #204、#1919）")
+    s.add_argument("op", choices=["submit", "show", "dispatched", "publish", "auto"])
     s.add_argument("--file", help="submit：verdicts.json（{kind,version,dispatch_gen,verdicts,issues}，一次一版；dispatch_gen 抄 show 那一列）")
     s.add_argument("--kind", choices=["claude", "codex"])
     s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
     s.add_argument("--bot", help="dispatched：這批交辦收件的 bot id（#801）。之後只有它或它底下的 child 能交這些版的 verdict")
+    s.add_argument("--check", action="store_true", help="auto：只問 daemon 的 Claude API 分診（[claude_api.uses.release_triage]）有沒有開，不呼叫 API")
+    s.add_argument("--binary-diff-file", help="auto：claude_binary_diff.py 的報告檔，附進 prompt 並併進通知")
     s.add_argument("--dry-run", action="store_true", help="publish：乾跑。檢查 gh auth／repo 權限／標籤齊不齊，印出會開哪幾張（含標題與內文），一張都不開、帳本不動")
     s.set_defaults(func=cmd_release_triage)
 
@@ -2900,7 +2917,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _is_slow_command(args) -> bool:
     op = getattr(args, "op", None)
-    return (args.cmd == "mission" and op == "deliver") or (args.cmd == "release-triage" and op == "publish")
+    return (args.cmd == "mission" and op == "deliver") or (args.cmd == "release-triage" and op in ("publish", "auto"))
 
 
 def main(argv: list[str] | None = None) -> int:
