@@ -4,7 +4,7 @@
 #   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test（分 shard 平行，CHECK_WEB_SHARDS 控制幾個）、vite build
 #   scripts/check.sh daemon     # daemon、xtask 與 crates/* 的 cargo 測試（要先有 web/dist）
-#   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
+#   scripts/check.sh ops        # shell 變數寫法的 lint，加上（CHECK_OPS_JOBS 個同時跑，預設 min(8, 核心數)） scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）；開編前等可用記憶體 ≥ CHECK_MIN_FREE_MEM%（預設 30），編譯中壓力 critical 就中止（issue #1783）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
@@ -264,6 +264,13 @@ check_ob() {
     bash -n scripts/chatgpt-consult.sh
 }
 
+# 一支 ops 測試：`*_test.sh` 用 bash，`agm_test.py` 用 python3 -B；AM_CANARY_TEST 讓護欄記得是哪一支叫到了破壞性指令。
+run_ops_test() {
+    case "$1" in
+        *.py) AM_CANARY_TEST="$1" python3 -B "$1" ;;
+        *) AM_CANARY_TEST="$1" bash "$1" ;;
+    esac
+}
 check_ops() {
     local t selected=__all__
     if [ -n "${1:-}" ] && [ -f scripts/ci-ops-tests.py ]; then
@@ -305,20 +312,56 @@ check_ops() {
         exit 1
     fi
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
-    for t in scripts/*_test.sh scripts/ops/*_test.sh; do
-        if [ "$selected" != __all__ ] && ! printf '%s\n' "$selected" | grep -qxF -- "$t"; then continue; fi
-        step "ops: $t"
-        AM_CANARY_TEST="$t" bash "$t"
-    done
-    # `bin/agm` 的 CLI 契約測試。以前沒有任何自動化路徑會跑它：上面那個迴圈只撈 `*_test.sh`，
+    # `bin/agm` 的 CLI 契約測試（scripts/agm_test.py）也在這份清單裡。以前沒有任何自動化路徑會跑它：迴圈只撈 `*_test.sh`，
     # `check_ob` 跑的是 OB 那幾支，而 CI 的四個 job 都是呼叫這支 check.sh（issue #538）。
     # `scripts/agm.py` 是 include_str! 編進 daemon 二進位、setup 時寫成 `<cwd>/bin/agm` 的，
     # AGM 的每一條指令都走它——它的測試不該只靠「改到它的人自己記得跑」。
     # 放在護欄裡面跑：它自己起一個 loopback 的假 daemon 與假 gh，不連正式 daemon、不碰正式環境。
     # `-B` 跟 `ob_test.py` 一致：不要在工作樹留 __pycache__（`check_ob` 有一條守衛在擋）。
-    if [ "$selected" = __all__ ] || printf '%s\n' "$selected" | grep -qxF scripts/agm_test.py; then
-        step "ops: scripts/agm_test.py"
-        AM_CANARY_TEST="scripts/agm_test.py" python3 -B scripts/agm_test.py
+    local tests=()
+    for t in scripts/*_test.sh scripts/ops/*_test.sh scripts/agm_test.py; do
+        [ -f "$t" ] || continue
+        if [ "$selected" != __all__ ] && ! printf '%s\n' "$selected" | grep -qxF -- "$t"; then continue; fi
+        tests+=("$t")
+    done
+    # 平行跑（2026-10-23 診斷：68 支序列跑 565 秒，前十名 495 秒，彼此各用 mktemp、沒有共用埠）：
+    # CHECK_OPS_JOBS 個一起跑，每支輸出各寫一個暫存檔、跑完照清單順序印出，紅的最後點名。
+    # CHECK_OPS_JOBS=1 退回序列（排查跨測試干擾時用）。
+    local jobs="${CHECK_OPS_JOBS:-}"
+    if [ -z "$jobs" ]; then
+        jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+        [ "$jobs" -gt 8 ] && jobs=8
+    fi
+    if [ "$jobs" -le 1 ] || [ "${#tests[@]}" -le 1 ]; then
+        for t in "${tests[@]}"; do
+            step "ops: $t"
+            run_ops_test "$t"
+        done
+    else
+        local logdir
+        logdir="$(mktemp -d "${TMPDIR:-/tmp}/am-ops-tests.XXXXXX")"
+        local i=0 failed=() pids=()
+        for t in "${tests[@]}"; do
+            # 跑的那一刻 PATH／函式護欄已經 arm 好，子 shell 原樣繼承。
+            (run_ops_test "$t") > "$logdir/$i.log" 2>&1 &
+            pids+=("$!")
+            i=$((i + 1))
+            # 同時最多 jobs 支：滿了就等最早的那一支。
+            while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do sleep 0.2; done
+        done
+        i=0
+        for t in "${tests[@]}"; do
+            wait "${pids[$i]}" || failed+=("$t")
+            step "ops: $t"
+            cat "$logdir/$i.log"
+            i=$((i + 1))
+        done
+        /bin/rm -rf "$logdir"
+        printf '\n==> ops：%s 支測試、%s 個同時跑\n' "${#tests[@]}" "$jobs"
+        if [ "${#failed[@]}" -gt 0 ]; then
+            printf '!! 紅的 ops 測試：%s（往上找該支的輸出；要序列重跑：CHECK_OPS_JOBS=1 scripts/check.sh ops）\n' "${failed[*]}" >&2
+            exit 1
+        fi
     fi
     if ! scripts/ops/destructive-canary.sh hits "${canary}"; then
         echo "上面這些測試真的叫到了破壞性指令（已被擋下，但那條路要修）：見 scripts/ops/destructive-canary.sh" >&2
