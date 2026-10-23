@@ -887,6 +887,8 @@ function toReview(raw: unknown): UpdateReview {
     asked_at: str(o.asked_at),
     answered_at: str(o.answered_at),
     result: str(o.result),
+    source: o.source === 'api' ? 'api' : '',
+    model: str(o.model),
   }
 }
 
@@ -908,7 +910,7 @@ export async function fetchUpdateReview(input: {
 }
 
 /** 請 AGM 解析這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
-export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null }): Promise<{
+export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null; deep?: boolean }): Promise<{
   version: string
   target_bot_name: string
   duplicate: boolean
@@ -918,6 +920,7 @@ export async function requestUpdateReview(input: { kind: string; host?: string; 
     host: input.host,
     from: input.from ?? undefined,
     to: input.to ?? undefined,
+    deep: input.deep ? true : undefined,
   })
   const o = isRec(raw) ? raw : {}
   return { version: str(o.version), target_bot_name: str(o.target_bot_name), duplicate: o.duplicate === true }
