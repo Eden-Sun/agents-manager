@@ -10,6 +10,7 @@
  */
 import type { MissionOpts } from '../lib/missionOpts'
 import { saveMissionOpts } from '../lib/missionOpts'
+import { useT } from '../lib/i18n'
 
 /** 一組互斥選項。每顆 44px 觸控目標，選到的那顆不只換顏色——文字也會變粗。 */
 function Row<T extends string>({
@@ -60,6 +61,7 @@ export function MissionOptions({
   disabled?: boolean
   onChange: (next: MissionOpts) => void
 }) {
+  const t = useT()
   const set = (patch: Partial<MissionOpts>) => {
     const next = { ...opts, ...patch }
     onChange(next)
@@ -68,35 +70,35 @@ export function MissionOptions({
   return (
     <div className="mission-opts-panel">
       <Row
-        label="交付"
-        hint="做完之後要直接推 main，還是開 PR 讓你看過再合"
+        label={t('交付')}
+        hint={t('做完之後要直接推 main，還是開 PR 讓你看過再合')}
         value={opts.delivery_mode}
         options={[
-          { v: 'pr', label: '開 PR 給我看', title: '推一個 mission/<id> 分支並開 PR' },
-          { v: 'push_main', label: '直接推 main', title: 'rebase origin/main、整樹驗證過才 fast-forward 推上去；失敗會停下來問你' },
+          { v: 'pr', label: t('開 PR 給我看'), title: t('推一個 mission/<id> 分支並開 PR') },
+          { v: 'push_main', label: t('直接推 main'), title: t('rebase origin/main、整樹驗證過才 fast-forward 推上去；失敗會停下來問你') },
         ]}
         disabled={disabled}
         onPick={(v) => set({ delivery_mode: v })}
       />
       <Row
-        label="執行者"
-        hint="用哪一種 CLI 跑這個任務；撞限自動換帳號只有 claude 有"
+        label={t('執行者')}
+        hint={t('用哪一種 CLI 跑這個任務；撞限自動換帳號只有 claude 有')}
         value={opts.executor_kind}
         options={[
-          { v: 'claude', label: 'claude', title: '撞限時自動照 cc2 → cc1 → cc0 換身分' },
-          { v: 'codex', label: 'codex', title: '沒有身分可以輪換，撞限只能等重置或停下來問你' },
-          { v: 'grok', label: 'grok', title: '沒有身分可以輪換，撞限只能等重置或停下來問你' },
+          { v: 'claude', label: 'claude', title: t('撞限時自動照 cc2 → cc1 → cc0 換身分') },
+          { v: 'codex', label: 'codex', title: t('沒有身分可以輪換，撞限只能等重置或停下來問你') },
+          { v: 'grok', label: 'grok', title: t('沒有身分可以輪換，撞限只能等重置或停下來問你') },
         ]}
         disabled={disabled}
         onPick={(v) => set({ executor_kind: v })}
       />
       <Row
-        label="撞到 5h 上限"
-        hint="7d 上限一律換下一個身分，這裡只管 5h 那一桶"
+        label={t('撞到 5h 上限')}
+        hint={t('7d 上限一律換下一個身分，這裡只管 5h 那一桶')}
         value={opts.on_5h_limit}
         options={[
-          { v: 'wait', label: '等重置', title: '原地等這個身分的 5h 桶回來再繼續' },
-          { v: 'switch', label: '不等，換下一個', title: '立刻換下一個身分接手（同一個 worktree、新的 session）' },
+          { v: 'wait', label: t('等重置'), title: t('原地等這個身分的 5h 桶回來再繼續') },
+          { v: 'switch', label: t('不等，換下一個'), title: t('立刻換下一個身分接手（同一個 worktree、新的 session）') },
         ]}
         disabled={disabled}
         onPick={(v) => set({ on_5h_limit: v })}

@@ -3,6 +3,7 @@
  * 一顆 pane 可能什麼都沒有（沒用途、沒前景程式），標題不能因此變成空字串——那樣就點不到了。
  */
 import type { ProjectPane } from '../api'
+import { t } from './i18n'
 
 /** 用途 > 前景程式 > cwd 的最後一段 > pane id。永遠回得出東西。 */
 export function paneLabel(p: ProjectPane): string {
@@ -18,7 +19,7 @@ export function paneLabel(p: ProjectPane): string {
 /** 滑過去才看得到的那一行：在哪、有沒有開 port、是不是使用者自己開的。 */
 export function paneHint(p: ProjectPane): string {
   const bits = [p.cwd || p.pane_id]
-  if (p.listen_ports.length > 0) bits.push(`listen ${p.listen_ports.join('、')}`)
-  if (p.owned_by === 'user') bits.push('你自己開的')
+  if (p.listen_ports.length > 0) bits.push(t('listen {ports}', { ports: p.listen_ports.join(t('、')) }))
+  if (p.owned_by === 'user') bits.push(t('你自己開的'))
   return bits.join(' · ')
 }

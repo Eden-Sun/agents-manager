@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { t } from '../lib/i18n'
 
 export interface CodexResetInfo {
   source: string
@@ -37,7 +38,7 @@ export function receiveCodexReset(raw: unknown, notify: (kind: 'info', text: str
   delivered.add(info.notice.id)
   if (delivered.size > 100) delivered.delete(delivered.values().next().value!)
   try { localStorage.setItem(SEEN, JSON.stringify([...seen.slice(-99), info.notice.id])) } catch { /* In-memory dedupe still applies. */ }
-  notify('info', `Codex 額度新消息：${info.notice.text}（資料：codex-reset.com）`, {
-    label: '查看來源', run: () => { window.open(SOURCE, '_blank', 'noopener,noreferrer') },
+  notify('info', t('Codex 額度新消息：{text}（資料：codex-reset.com）', { text: info.notice.text }), {
+    label: t('查看來源'), run: () => { window.open(SOURCE, '_blank', 'noopener,noreferrer') },
   })
 }

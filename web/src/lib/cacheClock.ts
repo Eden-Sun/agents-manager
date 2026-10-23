@@ -1,3 +1,5 @@
+import { msg, t } from './i18n'
+
 /**
  * 主力晶片的 prompt cache 倒數（SPEC §6.5j）：晶片原本的底色就是倒數，不另加元素、不改尺寸。
  *
@@ -64,8 +66,8 @@ export function cacheState(
   if (!ttlSecs || ttlSecs <= 0) return null
   const at = lastApiAt ? Date.parse(lastApiAt) : NaN
   if (working) {
-    const when = Number.isFinite(at) ? `（上次活動 ${clock(new Date(at), nowMs)}）` : ''
-    return { level: 'fresh', remainingSecs: ttlSecs, frac: 1, title: `回合進行中，快取是熱的${when}` }
+    const when = Number.isFinite(at) ? t('（上次活動 {time}）', { time: clock(new Date(at), nowMs) }) : ''
+    return { level: 'fresh', remainingSecs: ttlSecs, frac: 1, title: t('回合進行中，快取是熱的{when}', { when }) }
   }
   if (!Number.isFinite(at)) return null
   // 保溫過：cache 從保溫那一刻起算熱；數字（上次活動）仍是真實年齡。
@@ -75,16 +77,18 @@ export function cacheState(
   const remainingSecs = Math.max(0, Math.min(ttlSecs, Math.round((hotSince + ttlSecs * 1000 - nowMs) / 1000)))
   const level = cacheLevel(remainingSecs)
   const last = hotSince > at
-    ? `上次活動 ${clock(new Date(at), nowMs)}，已保溫 ${clock(new Date(hotSince), nowMs)}`
-    : `上次活動 ${clock(new Date(at), nowMs)}`
-  const title = level === 'cold' ? `快取已涼（${last}）` : `快取約 ${Math.max(1, Math.ceil(remainingSecs / 60))} 分後到期（${last}）`
+    ? t('上次活動 {time}，已保溫 {warm}', { time: clock(new Date(at), nowMs), warm: clock(new Date(hotSince), nowMs) })
+    : t('上次活動 {time}', { time: clock(new Date(at), nowMs) })
+  const title = level === 'cold'
+    ? t('快取已涼（{last}）', { last })
+    : t('快取約 {n} 分後到期（{last}）', { n: Math.max(1, Math.ceil(remainingSecs / 60)), last })
   // 紅色（≤ 5 分）改以 5 分鐘為滿刻度，見 `CacheState.frac`；綠、黃照舊。
   const frac = remainingSecs <= LOW_SECS ? Math.min(1, remainingSecs / LOW_SECS) : remainingSecs / ttlSecs
   return { level, remainingSecs, frac, title }
 }
 
 /** 「不用保溫」（冰凍）時晶片 tooltip／狀態卡講的一句話（不顯示快取倒數；context 夠大時 cache 到期前會自動壓縮一次，SPEC §6.5k）。 */
-export const NO_WARM_TEXT = '不保溫：cache 到期前會自動壓縮（context 夠大時）'
+export const NO_WARM_TEXT = msg('不保溫：cache 到期前會自動壓縮（context 夠大時）')
 
 /**
  * 主力晶片用的快取狀態：使用者已按「不用保溫」（`run.keep_warm_skip`）就不畫倒數底色（回 `null`、晶片回一般樣式），

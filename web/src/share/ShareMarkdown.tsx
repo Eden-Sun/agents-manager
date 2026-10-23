@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { remarkTrimAutolinkPunct } from '../lib/markdownAutolink'
 import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 import { shareSafeHref } from './shareModel'
+import { useT } from '../lib/i18n'
 
 /**
  * 分享頁的 bot 回覆：GFM，但不吃 HTML、不載圖片，連結一律開新分頁且不帶 referrer。
@@ -46,8 +47,9 @@ function MarkdownBody({ text }: { text: string }) {
 }
 
 export default function ShareMarkdown({ text }: { text: string }) {
+  const t = useT()
   const plain = (
-    <pre className="sh-plain">{text === '__share_md_boom__' ? '這則訊息的格式太複雜，無法轉成 Markdown。' : text}</pre>
+    <pre className="sh-plain">{text === '__share_md_boom__' ? t('這則訊息的格式太複雜，無法轉成 Markdown。') : text}</pre>
   )
   if (markdownTooLong(text) || markdownTooDeep(text)) return <div className="sh-md">{plain}</div>
   return (

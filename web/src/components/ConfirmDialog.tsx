@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { isImeEnter } from '../lib/ime'
 import './confirmDialog.css'
+import { useT } from '../lib/i18n'
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -35,7 +36,7 @@ export function ConfirmDialog({
   title,
   body,
   confirmLabel,
-  cancelLabel = '取消',
+  cancelLabel,
   danger = false,
   requireText,
   requireTextLabel,
@@ -47,6 +48,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const t = useT()
   const titleId = useId()
   const bodyId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -126,14 +128,14 @@ export function ConfirmDialog({
         <div id={bodyId} className="confirm-body">{body}</div>
         {needsMatch ? (
           <label className="confirm-require">
-            <span>{requireTextLabel ?? `請輸入「${requireText}」以確認`}</span>
+            <span>{requireTextLabel ?? t('請輸入「{text}」以確認', { text: requireText ?? '' })}</span>
             <input
               ref={inputRef}
               type="text"
               value={typed}
               spellCheck={false}
               autoComplete="off"
-              aria-label={requireTextLabel ?? `輸入 ${requireText}`}
+              aria-label={requireTextLabel ?? t('輸入 {text}', { text: requireText ?? '' })}
               onChange={(e) => setTyped(e.target.value)}
               onKeyDown={(e) => {
                 // 輸入法選字確認的 Enter（isComposing／keyCode 229）不算：用中文輸入法打完名字，選字那一下就會把東西刪掉。
@@ -147,7 +149,7 @@ export function ConfirmDialog({
         ) : null}
         <div className="confirm-actions">
           <button type="button" className="btn" ref={cancelRef} onClick={onCancel}>
-            {cancelLabel}
+            {cancelLabel ?? t('取消')}
           </button>
           {secondaryLabel && onSecondary ? (
             <button type="button" className="btn" disabled={secondaryDisabled} onClick={once(onSecondary)}>
