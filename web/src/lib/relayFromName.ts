@@ -1,6 +1,7 @@
 import { recallRelayName, rememberRelayName } from './relayNameMemo.ts'
+import { msg, tr } from './i18n'
 
-const RETIRED = '（已收掉）'
+const RETIRED = () => tr(msg('（已收掉）'))
 
 /** 代發來源的顯示名，依序找：
  * 1. 清單找得到的活 bot → 用清單的名字（順手記住）；`deleted` 為真才標已收掉。
@@ -11,9 +12,9 @@ export function relayFromName(input: { fromId: string; liveName: string; savedNa
   const { fromId, liveName, savedName, deleted } = input
   if (liveName) {
     rememberRelayName(fromId, liveName)
-    return deleted ? `${liveName}${RETIRED}` : liveName
+    return deleted ? `${liveName}${RETIRED()}` : liveName
   }
-  if (savedName) return deleted ? `${savedName}${RETIRED}` : savedName
+  if (savedName) return deleted ? `${savedName}${RETIRED()}` : savedName
   const remembered = recallRelayName(fromId)
-  return remembered ? `${remembered}${RETIRED}` : ''
+  return remembered ? `${remembered}${RETIRED()}` : ''
 }

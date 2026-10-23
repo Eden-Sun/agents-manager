@@ -14,6 +14,7 @@
 import { cacheState } from './cacheClock'
 import { solWindowApplies } from './codexContextWindow'
 import type { PromptCacheInfo } from '../api/types'
+import { t } from './i18n'
 
 export interface CostStatus {
   context_used_pct: number | null
@@ -143,13 +144,17 @@ export function cacheView(input: CacheInput): CacheView | null {
 
 /** 狀態列「快取」欄的值：`熱（剩 23 分）`／`熱`（回合中）／`已冷`；rollout 推估加「約」。 */
 export function cacheLabel(v: CacheView): string {
-  if (v.state === 'cold') return v.approx ? '已冷（約）' : '已冷'
-  if (v.mins === null) return '熱'
-  return `熱（${v.approx ? '約' : ''}剩 ${v.mins} 分）`
+  if (v.state === 'cold') return v.approx ? t('已冷（約）') : t('已冷')
+  if (v.mins === null) return t('熱')
+  return v.approx
+    ? t('熱（約剩 {n} 分）', { n: v.mins })
+    : t('熱（剩 {n} 分）', { n: v.mins })
 }
 
 /** 輸入框警示：只有已冷且不在回合中才有；數字是冷了這次要重寫的 token（codex 為近似，同樣寫「約」）。 */
 export function coldWarning(v: CacheView | null): string | null {
   if (!v || v.state !== 'cold' || v.working) return null
-  return `快取已過期，送出這則會重寫${v.rewriteTokens !== null ? `約 ${tokensK(v.rewriteTokens)}` : '整段 context'}`
+  return v.rewriteTokens !== null
+    ? t('快取已過期，送出這則會重寫約 {tokens}', { tokens: tokensK(v.rewriteTokens) })
+    : t('快取已過期，送出這則會重寫整段 context')
 }

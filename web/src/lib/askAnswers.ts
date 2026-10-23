@@ -1,4 +1,5 @@
 import type { Message } from '../api/types'
+import { msg, t, tr } from './i18n'
 
 /**
  * claude 用 `AskUserQuestion` 問使用者、使用者答完之後，daemon 把題目與答案記成一則系統訊息
@@ -46,11 +47,11 @@ export function parseAskAnswers(msg: Pick<Message, 'role' | 'id' | 'content'>): 
   return { toolUseId: str(o.tool_use_id) ?? '', answered: items.some((i) => i.answer !== null), items }
 }
 
-export const NOT_ANSWERED = '沒有回答'
+export const NOT_ANSWERED = msg('沒有回答')
 
 /** 點一下複製用的純文字。 */
 export function askAnswersText(a: AskAnswers): string {
   return a.items
-    .map((i, n) => `${n + 1}. ${i.header ? `[${i.header}] ` : ''}${i.question}\n   → ${i.answer ?? NOT_ANSWERED}${i.notes ? `（備註：${i.notes}）` : ''}`)
+    .map((i, n) => `${n + 1}. ${i.header ? `[${i.header}] ` : ''}${i.question}\n   → ${i.answer ?? tr(NOT_ANSWERED)}${i.notes ? ` (${t('備註：{notes}', { notes: i.notes })})` : ''}`)
     .join('\n')
 }

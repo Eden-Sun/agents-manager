@@ -6,6 +6,7 @@
  * 選了動作或按取消，不會一閃就沒了。
  */
 import { ApiError } from '../api/types.ts'
+import { msg } from '../lib/i18n'
 
 /** daemon 給的動作：`submit`＝對 pane 按 Enter 送出框裡那段；`clear`＝清掉它再送自己這則。 */
 export type DraftAction = 'submit' | 'clear'
@@ -44,11 +45,11 @@ export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
 
 /** 草稿動作失敗時的說明（沒列到的走一般錯誤文字）。 */
 export const DRAFT_REASON_TEXT: Record<string, string> = {
-  draft_changed: '框裡的字變了（可能有人正在終端打字），什麼都沒動；看一下新的內容再選一次',
-  draft_uncleared: '沒清掉：按了清除鍵，框裡還是有字，所以沒有送出你這則；到「終端」分頁看一下',
-  draft_gone: '框裡已經沒有字了，沒有東西可以送出',
-  draft_clear_unsupported: '這種 bot 還沒驗過怎麼清輸入框，請到「終端」分頁處理',
-  draft_clear_while_busy: '它正在跑一個回合，清輸入框會打斷它；等這一回合結束再清',
+  draft_changed: msg('框裡的字變了（可能有人正在終端打字），什麼都沒動；看一下新的內容再選一次'),
+  draft_uncleared: msg('沒清掉：按了清除鍵，框裡還是有字，所以沒有送出你這則；到「終端」分頁看一下'),
+  draft_gone: msg('框裡已經沒有字了，沒有東西可以送出'),
+  draft_clear_unsupported: msg('這種 bot 還沒驗過怎麼清輸入框，請到「終端」分頁處理'),
+  draft_clear_while_busy: msg('它正在跑一個回合，清輸入框會打斷它；等這一回合結束再清'),
 }
 
 /** 按下動作到 daemon 回話之間鎖住那一條的按鈕（`undefined`＝解鎖）。沒有那一條就不動。 */

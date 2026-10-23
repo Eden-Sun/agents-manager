@@ -1,4 +1,5 @@
 import type { Project } from '../api/types'
+import { t } from './i18n'
 
 /**
  * #708：專案已移交給另一台主機的 daemon 管——這顆 daemon 不開、不關、不送 prompt，UI 照實標出來並停用操作。
@@ -10,5 +11,5 @@ export function handedOffTo(projects: readonly Project[], projectId: string | nu
 }
 
 export function handedOffReason(host: string): string {
-  return `由 ${host} 管理：這裡不送訊息，也不啟動或停止這顆 Bot`
+  return t('由 {host} 管理：這裡不送訊息，也不啟動或停止這顆 Bot', { host })
 }

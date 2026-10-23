@@ -1,4 +1,5 @@
 import type { Turn } from '../api/types'
+import { msg } from './i18n'
 
 /**
  * 使用者要看到的送達提示（AGM 2026-09-16 裁示，接 c1ed6e2）。
@@ -16,8 +17,8 @@ export function deliveryNotice(turn: Pick<Turn, 'delivery' | 'unverified' | 'aut
   return turn.autoResend ? 'hint' : 'warn'
 }
 
-export const DELIVERY_WARN_TEXT =
-  '已打字送出，但這個 bot 沒有可以逐字核對的紀錄（grok、遠端主機、codex 尚未回報 session），而且不會自動重送——請到終端分頁確認它真的收到'
+export const DELIVERY_WARN_TEXT = msg(
+  '已打字送出，但這個 bot 沒有可以逐字核對的紀錄（grok、遠端主機、codex 尚未回報 session），而且不會自動重送——請到終端分頁確認它真的收到',
+)
 
-export const DELIVERY_HINT_TEXT =
-  '這一則交給 herdr 轉送，沒有逐字證據；萬一沒進到輸入框，daemon 會自己重送一次。'
+export const DELIVERY_HINT_TEXT = msg('這一則交給 herdr 轉送，沒有逐字證據；萬一沒進到輸入框，daemon 會自己重送一次。')

@@ -7,6 +7,7 @@
  */
 import { ApiError } from '../api/types'
 import type { Turn, TurnDelivery } from '../api/types'
+import { t } from '../lib/i18n'
 
 export interface UncommittedSend {
   /** 字有沒有進去：`false`＝herdr 拒收（一個字都沒進去）；`true`／`null`（不知道）＝已經送出或可能已送出，不能當成沒送。 */
@@ -32,8 +33,8 @@ export function asUncommittedSend(e: unknown): UncommittedSend | null {
 
 export function uncommittedSendText(u: UncommittedSend): string {
   return u.sent === false
-    ? '訊息沒送進去（herdr 拒收），但結果還沒寫進 daemon 的資料庫；daemon 會自己補上，確認 agent 狀態後可以再送。'
-    : '訊息已送出，但送達結果還沒寫進 daemon 的資料庫（daemon 會自己補上）——不要重送。'
+    ? t('訊息沒送進去（herdr 拒收），但結果還沒寫進 daemon 的資料庫；daemon 會自己補上，確認 agent 狀態後可以再送。')
+    : t('訊息已送出，但送達結果還沒寫進 daemon 的資料庫（daemon 會自己補上）——不要重送。')
 }
 
 /**

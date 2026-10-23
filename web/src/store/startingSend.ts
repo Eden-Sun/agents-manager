@@ -5,6 +5,7 @@
  * 這裡只從 store 已有的 turn／訊息推出「現在有一則在等 bot 起來」，純函式，composer 與測試共用。
  */
 import type { Message, Turn } from '../api/types'
+import { t } from '../lib/i18n'
 
 export interface StartingSend {
   turnId: string
@@ -35,7 +36,9 @@ export function startingSend(turns: Record<string, Turn> | undefined, messages: 
 
 /** 輸入框上方那一條的說法。bot 已經有 run（又起來了、或正在起）時，上一次的失敗原因不再算數。 */
 export function startingSendLabel(s: StartingSend, hasRun = false): string {
-  return s.startError && !hasRun ? `沒能啟動（${s.startError}），還沒送出：` : '啟動中，起來後自動送出：'
+  return s.startError && !hasRun
+    ? t('沒能啟動（{reason}），還沒送出：', { reason: s.startError })
+    : t('啟動中，起來後自動送出：')
 }
 
 /**

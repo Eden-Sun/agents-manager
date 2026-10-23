@@ -38,6 +38,7 @@ import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { StatusLamp } from './StatusLamp'
+import { useT } from '../lib/i18n'
 import './groupChatPanel.css'
 
 /** SPEC §13 project group chat: timeline merges every member bot's conversation; `@<bot>` / `@all` picks recipients. */
@@ -73,17 +74,18 @@ function foldRows(list: GroupMessage[]): Row[] {
 
 /** Icons + a count, nothing else: who is in the group is the sidebar's job. */
 function MemberStrip({ projectId }: { projectId: string }) {
+  const t = useT()
   const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
   const selectBot = useStore((s) => s.selectBot)
   return (
-    <div className="members" role="list" aria-label="群組成員">
+    <div className="members" role="list" aria-label={t('群組成員')}>
       {members.map((b) => (
         <MemberChip key={b.id} bot={b} onOpen={() => selectBot(b.id)} />
       ))}
       {members.length === 0 ? (
-        <span className="hint">（尚無 Bot）</span>
+        <span className="hint">{t('（尚無 Bot）')}</span>
       ) : (
-        <span className="members-count">{members.length} 個成員</span>
+        <span className="members-count">{t('{n} 個成員', { n: members.length })}</span>
       )}
     </div>
   )
@@ -91,6 +93,7 @@ function MemberStrip({ projectId }: { projectId: string }) {
 
 /** Icon only: names are the sidebar's job; the name is one hover away. */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
+  const t = useT()
   const { lamp, background, label, kids } = useBotLamp(bot.id)
   // listitem 放外層殼（display: contents），role 蓋在 button 上 AT 會唸成清單項目而非按鈕。
   return (
@@ -98,12 +101,12 @@ function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
       <button
         type="button"
         className={`member member-icon ${bot.kind}`}
-        title={`${bot.name}：${label}（點擊開啟單獨對話）`}
-        aria-label={`${bot.name}：${label}`}
+        title={t('{name}：{status}（點擊開啟單獨對話）', { name: bot.name, status: t.tr(label) })}
+        aria-label={t('{name}：{status}', { name: bot.name, status: t.tr(label) })}
         onClick={onOpen}
       >
         <KindIcon kind={bot.kind} />
-        <StatusLamp lamp={lamp} background={background} kids={kids} title={`${bot.name}：${label}`} />
+        <StatusLamp lamp={lamp} background={background} kids={kids} title={t('{name}：{status}', { name: bot.name, status: t.tr(label) })} />
       </button>
     </span>
   )
@@ -129,6 +132,7 @@ function GroupLiveBubbles({ projectId }: { projectId: string }) {
 }
 
 function GroupMessageList({ projectId }: { projectId: string }) {
+  const t = useT()
   const messages = useStore((s) => s.groupMessages[projectId])
   const loaded = useStore((s) => Boolean(s.loadedProjects[projectId]))
   const kinds = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, b.kind]))))
@@ -143,10 +147,10 @@ function GroupMessageList({ projectId }: { projectId: string }) {
       {rows.length === 0 ? (
         <EmptyState
           loading={!loaded}
-          title={loaded ? '開始交代第一個任務' : undefined}
+          title={loaded ? t('開始交代第一個任務') : undefined}
           icon={loaded ? '✦' : undefined}
         >
-          {loaded ? '在下方以 @bot 或 @all 對成員送出第一則訊息。' : '載入群組訊息中…'}
+          {loaded ? t('在下方以 @bot 或 @all 對成員送出第一則訊息。') : t('載入群組訊息中…')}
         </EmptyState>
       ) : (
         rows.map((r) =>
@@ -160,10 +164,10 @@ function GroupMessageList({ projectId }: { projectId: string }) {
                   ? r.targets.length > 1
                     ? `→ ${r.targets.join(', ')}`
                     : undefined
-                  : `你 → ${r.targets.join(', ')}`
+                  : t('你 → {targets}', { targets: r.targets.join(', ') })
               }
               fromClassName="msg-targets"
-              fromTitle="這則訊息送給了這些 Bot"
+              fromTitle={t('這則訊息送給了這些 Bot')}
             />
           ) : (
             <Bubble
@@ -208,6 +212,7 @@ function GroupComposer({
   /** Owned by `GroupChatPanel` so a drop anywhere in the chat area lands here. */
   files: ReturnType<typeof useAttachments>
 }) {
+  const t = useT()
   // `groupComposerState` returns a fresh object each call; flatten to primitives for stable shallow compare.
   const state = useStore(
     useShallow((s) => {
@@ -266,11 +271,11 @@ function GroupComposer({
     if (!mention) return []
     const q = mention.query.toLowerCase()
     const all: Candidate[] = [
-      { name: 'all', label: `所有 Bot（${members.length}）` },
+      { name: 'all', label: t('所有 Bot（{n}）', { n: members.length }) },
       ...members.map((b) => ({ name: b.name, label: b.kind, kind: b.kind })),
     ]
     return all.filter((c) => c.name.toLowerCase().startsWith(q))
-  }, [mention, members])
+  }, [mention, members, t])
   const showPop = popOpen && candidates.length > 0
   const mentionListId = useId()
   const activeIdx = Math.min(active, Math.max(0, candidates.length - 1))
@@ -356,13 +361,13 @@ function GroupComposer({
     if (targets.length === 0) return
     // 打字沒被鎖，送不出去就講原因，別默默吃掉 Enter。
     if (state.disabled) {
-      notify('error', state.reason || '目前無法送出訊息')
+      notify('error', state.reason || t('目前無法送出訊息'))
       return
     }
     if (sending || files.uploading) return
     // 失敗的附件不在 `files.ids` 裡：照送會少一個檔案，送成功後 `clear()` 還把失敗卡片與重試鈕丟掉（issue #917）。
     if (files.failed) {
-      notify('error', ATTACHMENT_FAILED_NOTICE)
+      notify('error', t.tr(ATTACHMENT_FAILED_NOTICE))
       return
     }
     setSending(true)
@@ -399,25 +404,25 @@ function GroupComposer({
             className={`agm-toggle${toAgm ? ' on' : ''}`}
             aria-pressed={toAgm}
             disabled={sending}
-            title="交給 AGM：由它派執行者、reviewer 與驗證者做完，而不是直接丟給某一顆 bot"
+            title={t('交給 AGM：由它派執行者、reviewer 與驗證者做完，而不是直接丟給某一顆 bot')}
             onClick={() => setToAgm((v) => !v)}
           >
-            <span aria-hidden="true">{toAgm ? '☑' : '☐'}</span> 交給 AGM
+            <span aria-hidden="true">{toAgm ? '☑' : '☐'}</span> {t('交給 AGM')}
           </button>
-          {toAgm ? <span className="agm-note">這一則會變成一個任務，AGM 自己調度</span> : null}
+          {toAgm ? <span className="agm-note">{t('這一則會變成一個任務，AGM 自己調度')}</span> : null}
         </div>
       ) : null}
       {toAgm ? <MissionOptions opts={missionOpts} disabled={sending} onChange={setMissionOpts} /> : null}
-      <div className="recipient-row" role="group" aria-label="收件者" hidden={toAgm}>
+      <div className="recipient-row" role="group" aria-label={t('收件者')} hidden={toAgm}>
         <button
           type="button"
           className={`recipient-chip all${allSelected ? ' on' : ''}`}
           aria-pressed={allSelected}
           disabled={state.disabled || sending || members.length === 0}
-          title={`送給全部 ${members.length} 個 bot`}
+          title={t('送給全部 {n} 個 bot', { n: members.length })}
           onClick={toggleAll}
         >
-          @all · {members.length} 個 bot
+          {t('@all · {n} 個 bot', { n: members.length })}
         </button>
         {members.map((b) => {
           const on = !allSelected && selectedIds.has(b.id)
@@ -428,7 +433,7 @@ function GroupComposer({
               className={`recipient-chip ${b.kind}${on ? ' on' : ''}`}
               aria-pressed={on}
               disabled={state.disabled || sending}
-              title={`送給 @${b.name}`}
+              title={t('送給 @{name}', { name: b.name })}
               onClick={() => toggleBot(b.id)}
             >
               @{b.name}
@@ -441,7 +446,7 @@ function GroupComposer({
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending || toAgm} />
         {showPop ? (
-          <ul id={mentionListId} className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
+          <ul id={mentionListId} className="mention-pop" role="listbox" aria-label={t('選擇收件 Bot')}>
             {candidates.map((c, i) => (
               <li
                 key={c.name}
@@ -470,12 +475,12 @@ function GroupComposer({
           disabled={sending}
           placeholder={
             toAgm
-              ? '要 AGM 做什麼？（它會派執行者、reviewer 與驗證者）'
+            ? t('要 AGM 做什麼？（它會派執行者、reviewer 與驗證者）')
               : state.disabled
-                ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送`
-                : '@bot 或 @all …'
+                ? t('{reason}——可以先打，恢復後再送', { reason: state.reason || t('目前無法送出訊息') })
+                : t('@bot 或 @all …')
           }
-          title="以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行"
+          title={t('以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行')}
           onChange={(e) => {
             setText(e.target.value)
             setDraftCursor(draftKey, e.target.selectionStart ?? e.target.value.length, e.target.selectionEnd ?? e.target.value.length)
@@ -531,18 +536,18 @@ function GroupComposer({
           }
           title={
             toAgm
-              ? (agmAttachmentBlock(toAgm, files.items.length) ?? '建一個任務交給 AGM')
+              ? (agmAttachmentBlock(toAgm, files.items.length) ?? t('建一個任務交給 AGM'))
               : files.uploading
-                ? '附件上傳中…'
+                ? t('附件上傳中…')
                 : files.failed
-                  ? ATTACHMENT_FAILED_NOTICE
+                  ? t.tr(ATTACHMENT_FAILED_NOTICE)
                   : targets.length === 0
-                  ? '請選擇收件者（上方 chip 或 @mention）'
-                  : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
+                  ? t('請選擇收件者（上方 chip 或 @mention）')
+                  : t('送給 {targets}', { targets: targets.map((t) => `@${t.name}`).join(', ') })
           }
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : !toAgm && files.failed ? '有附件上傳失敗' : toAgm ? '交給 AGM' : '送出'}
+          {sending ? t('送出中…') : files.uploading ? t('上傳中…') : !toAgm && files.failed ? t('有附件上傳失敗') : toAgm ? t('交給 AGM') : t('送出')}
         </button>
       </div>
       {toAgm ? (
@@ -553,16 +558,16 @@ function GroupComposer({
         ) : null
       ) : text.trim() && targets.length === 0 ? (
         <div className="composer-hint group-hint">
-          <span className="mention-warn">請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定</span>
+          <span className="mention-warn">{t('請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定')}</span>
         </div>
       ) : targets.length > 0 ? (
         <div className="composer-hint group-hint">
           <span className="group-targets">
-            → {allSelected ? `@all（${members.length} 個 bot）` : targets.map((t) => `@${t.name}`).join(', ')}
+            → {allSelected ? t('@all（{n} 個 bot）', { n: members.length }) : targets.map((t) => `@${t.name}`).join(', ')}
             {skippedNow.length > 0 ? (
               <span className="mention-warn">
                 {' '}
-                ・ {skippedNow.map((t) => `@${t.name}`).join(', ')} 目前無法接收，會被略過（不會自動啟動）
+                ・ {t('{targets} 目前無法接收，會被略過（不會自動啟動）', { targets: skippedNow.map((t) => `@${t.name}`).join(', ') })}
               </span>
             ) : null}
           </span>
@@ -573,6 +578,7 @@ function GroupComposer({
 }
 
 export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string; onOpenSidebar: () => void }) {
+  const t = useT()
   const project = useStore((s) => s.projects.find((p) => p.id === projectId) ?? null)
   const hostName = useStore((s) => projectHostName(s, projectId))
   const phone = useMediaQuery(PHONE_QUERY)
@@ -589,7 +595,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const drop = useDropTarget(files.add, memberCount === 0)
   const [renaming, setRenaming] = useState(false)
   // 同 ChatPanel：讓右側檔案暫存區把「點一下」的檔案交給這個群組草稿。
-  useShelfSink(files.add, memberCount > 0 ? `${project?.label ?? ''} 群組` : null)
+  useShelfSink(files.add, memberCount > 0 ? t('{project} 群組', { project: project?.label ?? '' }) : null)
 
   if (!project) {
     return (
@@ -599,12 +605,12 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
             type="button"
             className="btn menu-btn icon-tip"
             onClick={onOpenSidebar}
-            aria-label="開啟側邊欄"
-            data-tip="開啟側邊欄"
+            aria-label={t('開啟側邊欄')}
+            data-tip={t('開啟側邊欄')}
           >
             ☰
           </button>
-          <span className="main-status">找不到 Project</span>
+          <span className="main-status">{t('找不到 Project')}</span>
         </div>
       </>
     )
@@ -617,8 +623,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           type="button"
           className="btn menu-btn icon-tip"
           onClick={onOpenSidebar}
-          aria-label="開啟側邊欄"
-          data-tip="開啟側邊欄"
+          aria-label={t('開啟側邊欄')}
+          data-tip={t('開啟側邊欄')}
         >
           ☰
         </button>
@@ -627,7 +633,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
             ⌗
           </span>
           <ProjectNameField projectId={projectId} label={project.label} editing={renaming} onEditing={setRenaming} />
-          <span className="group-tag">群組</span>
+          <span className="group-tag">{t('群組')}</span>
           <HostBadge host={hostName} connected={hostUp} />
         </div>
         <MemberStrip projectId={projectId} />
@@ -638,8 +644,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         <QuotaStrip host={hostName} />
         <AttachButton command={attachCommand} compact />
         <div className="head-actions">
-          <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">
-            關閉群組
+          <button type="button" className="mini-btn" onClick={() => selectProject(null)} title={t('回到單一 Bot 的對話')}>
+            {t('關閉群組')}
           </button>
         </div>
       </div>
@@ -647,8 +653,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
       <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
       {memberCount === 0 ? (
         <EmptyState
-          title="此專案尚無 Bot"
-          icon="＋"
+          title={t('此專案尚無 Bot')}
+          icon={'＋' /* i18n-ignore: decorative add icon */}
           action={
             <button
               type="button"
@@ -658,11 +664,11 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
                 requestOpenBotSheet(projectId)
               }}
             >
-              新增 Bot
+              {t('新增 Bot')}
             </button>
           }
         >
-          為此專案建立第一個 Bot 後，即可在群組中交代任務。
+          {t('為此專案建立第一個 Bot 後，即可在群組中交代任務。')}
         </EmptyState>
       ) : (
         <div className={`chat${drop.over ? ' dropping' : ''}`} {...drop.props}>
