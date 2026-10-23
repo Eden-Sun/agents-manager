@@ -608,12 +608,12 @@ fn live_gate(run: &db::Run, turn_in_flight: bool, kind: &str, fields: &[&str]) -
 /// AG Man 選過）；還在 → Esc 並回 `Err`。絕不把框留在畫面上。
 async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> {
     client.pane_send_text(pane_id, line).await.map_err(up)?;
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    tokio::time::sleep(pane_settle(std::time::Duration::from_millis(800))).await;
     client
         .pane_send_keys(pane_id, &["Enter"])
         .await
         .map_err(up)?;
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1200))).await;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::lifecycle::race_point::hit("slash_after_enter_before_read", pane_id).await;
     let screen = client
@@ -640,7 +640,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
         "claude asked to confirm the model switch; answering Yes"
     );
     client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(pane_settle(std::time::Duration::from_millis(1000))).await;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::lifecycle::race_point::hit("slash_after_answer_before_read", pane_id).await;
     let screen = client
@@ -709,7 +709,7 @@ async fn wait_for_composer_settled(
             return Ok(None);
         }
         prev = Some(screen);
-        tokio::time::sleep(std::time::Duration::from_millis(SLASH_SETTLE_POLL_MS)).await;
+        tokio::time::sleep(pane_settle(std::time::Duration::from_millis(SLASH_SETTLE_POLL_MS))).await;
     }
 }
 

@@ -33,6 +33,14 @@ impl std::ops::Deref for RunClient {
     }
 }
 
+/// 等畫面反應的固定間隔（ctrl+c 之後、輪詢 pane 之間）。測試只要求「等過一輪」，縮到 10 毫秒；正式路徑不變。
+pub(crate) fn pane_settle(d: Duration) -> Duration {
+    if cfg!(test) {
+        return d.min(Duration::from_millis(10));
+    }
+    d
+}
+
 pub mod messages;
 pub mod relay_watch;
 pub mod dead_panes;

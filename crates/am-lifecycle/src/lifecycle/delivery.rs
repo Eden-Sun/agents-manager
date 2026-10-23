@@ -845,7 +845,7 @@ pub async fn type_text(
     }
 
     client.pane_send_text(&pane, text).await?;
-    tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+    tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
     let mut seen = read().await?;
     if bot.kind == "claude" && crate::tui_prompts::cold_resume_choice(&seen).is_some() {
         if super::claude_resume_menu::accept_on(app, run, client).await.is_err() {
@@ -858,13 +858,13 @@ pub async fn type_text(
     if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
         client.pane_send_text(&pane, text).await?;
-        tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
     } else if proof == Proof::Unverified && box_empty {
         // 沒有證據的那條路不重貼（見 `should_repaste`），但也不能一格空框就判「沒打進去」：遠端／grok 晚一幀
         // 重畫時字其實已經在框裡，判 `nothing_typed` 會不按 Enter、把字留在框裡，下一則 prompt 因此 409
         // `composer_busy`（review2 deliv 上一輪 #2 的副作用）。多等一個 settle 再看一次。
-        tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
     }
     let state = box_state_within(&bot.kind, &seen, typed_tail(text));
@@ -880,7 +880,7 @@ pub async fn type_text(
         BoxState::NonEmpty if truncated => {
             tracing::warn!(run = %run.id, bot = %bot.name, "the composer lost the head of the paste; clearing it instead of sending half");
             client.pane_send_keys(&pane, &["ctrl+c"]).await?;
-            tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+            tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
             let cleared = box_state_within(&bot.kind, &read().await?, typed_tail(text)) == BoxState::Empty;
             return Ok(Typing::Done(if cleared {
                 Delivered::NotAttempted { reason: "paste_truncated", retry: true }

@@ -2041,7 +2041,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
 
     for _ in 0..2 {
         let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
     }
     let mut empty = false;
     for _ in 0..20 {
@@ -2058,7 +2058,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
             }
             _ => {}
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
     }
     if !empty {
         // agent 還在：run 轉回 running。留在 `stopping` 會讓 prompt 409、start 拒絕、reconcile

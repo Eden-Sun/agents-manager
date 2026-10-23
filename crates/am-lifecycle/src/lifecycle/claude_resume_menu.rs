@@ -210,7 +210,7 @@ async fn accept_on_body(
             .await
             .ok_or_else(|| give_up(run, AUTHORITY_CHANGED))??;
         answered = true;
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(pane_settle(SETTLE)).await;
     }
     Err(give_up(run, STILL_SHOWN))
 }
@@ -265,7 +265,7 @@ async fn after_start_body(
     let mut stable = 0;
     let mut resumed = false;
     for _ in 0..12 {
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(pane_settle(SETTLE)).await;
         let Ok(read) = client.pane_read(pane, "visible", 80).await else {
             return AgentStatus::Unknown;
         };
