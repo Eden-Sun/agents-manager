@@ -115,7 +115,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <div
         ref={rootRef}
-        className={`modal blocked-modal${fit && (snap?.columns ?? 0) > WIDE_COLUMNS ? ' is-wide' : ''}`}
+        className={`modal blocked-modal${fit && showRaw && (snap?.columns ?? 0) > WIDE_COLUMNS ? ' is-wide' : ''}${showRaw ? '' : ' is-menu'}`}
         role="dialog"
         aria-modal="true"
         aria-label={`${bot?.name ?? 'agent'} 需要回應`}

@@ -2110,6 +2110,15 @@ button.pane-toggle:hover:not(:disabled) {
   line-height: 1.5;
 }
 
+/* 桌機：認得出選單時終端收起，框只剩幾行選項，縮成一般確認框的寬度、不留空白高度（#1933）。
+   `is-menu`＝只有選單；展開終端原文（`showRaw`）仍走上面的寬版。 */
+@media (width > 640px) {
+  .modal.blocked-modal.is-menu {
+    width: min(640px, calc(100vw - 48px));
+    min-height: 0;
+  }
+}
+
 /* 手機：跟其他對話框一樣是全螢幕 sheet（issue #559）。上面 `.modal.blocked-modal` 的特異性蓋掉了通用的 sheet 規則，
    iOS 的 `100vh` 又比可視區高，框的標題與底部按鈕一起跑出畫面。 */
 @media (width <= 640px) {
