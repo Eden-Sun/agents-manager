@@ -182,6 +182,45 @@ async fn a_run_that_changed_before_the_key_is_not_pressed() {
     assert_eq!(turn(&f).await.status, "in_flight");
 }
 
+/// 外面讀畫面時字還在，fence 內送鍵前框裡的字被改掉了：不按，額度退回，這一輪不收。
+#[tokio::test]
+async fn a_composer_edited_after_the_first_read_is_not_pressed() {
+    let f = fixture(&[PROMPT], false).await;
+    let app = f.env.app.clone();
+    let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+    let t = turn(&f).await;
+    let sent = vec![PROMPT.to_string()];
+    assert!(db::claim_resend(app.db(), &t.id, crate::lifecycle::poller::MAX_PROMPT_RESENDS).await.unwrap());
+    f.env.herdr.live_pane(&f.pane, tt::LivePane {
+        codex: true,
+        width: Some(120),
+        composer: vec!["請照 #1872 的裁示把 CI 的快取鍵改成別的名字".to_string()],
+        ..Default::default()
+    });
+
+    assert_eq!(press_enter_once(&app, &run, "codex", &t, &sent).await.unwrap(), Recovery::Wait);
+    assert_eq!(enters(&f), 0, "框裡的字已經不是這一則就不按");
+    assert_eq!(resends(&f).await, 0, "沒按就退還額度");
+    assert_eq!(turn(&f).await.status, "in_flight");
+}
+
+/// 讀不到的計數表滿了：新的 turn 先淘汰最舊的一筆，仍然可以等滿 UNREADABLE_ROUNDS 輪。
+#[test]
+fn a_full_unreadable_table_evicts_the_oldest_so_a_new_turn_still_waits() {
+    let mut table = Unreadable::default();
+    for i in 0..4 {
+        assert!(table.again(&format!("stale-{i}"), 4));
+    }
+    assert_eq!(table.rounds.len(), 4);
+    for round in 1..=UNREADABLE_ROUNDS {
+        let wait = table.again("fresh", 4);
+        assert_eq!(wait, round < UNREADABLE_ROUNDS, "第 {round} 輪");
+    }
+    assert!(!table.rounds.contains_key("stale-0"), "最舊的先被淘汰");
+    assert!(table.rounds.contains_key("stale-3"), "其餘不動");
+    assert!(table.rounds.len() <= 4);
+}
+
 /// 讀不到畫面：前兩輪不收；第三輪還讀不到就照原本收尾（記一次 WARN），不按任何鍵。
 #[tokio::test]
 async fn an_unreadable_screen_waits_three_sweeps_then_closes_as_before() {
