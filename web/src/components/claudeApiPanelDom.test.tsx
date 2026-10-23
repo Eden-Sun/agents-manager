@@ -85,3 +85,51 @@ test('貼 key 後可開；存檔只送 token、改過的用途，key 輸入框�
   assert.equal(root.querySelector<HTMLInputElement>('input[type=password]')!.value, '')
   assert.match(root.textContent ?? '', /已儲存/)
 })
+
+test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點帳本切換並渲染用量表格', async () => {
+  stub(settings({}), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+
+  // 驗證 subtabs 結構
+  const subtabs = root.querySelector('.env-subtabs[role="tablist"]')
+  assert.ok(subtabs, 'subtabs tablist should exist')
+  assert.equal(subtabs.getAttribute('aria-label'), 'Claude API 分類')
+
+  const tabs = subtabs.querySelectorAll<HTMLButtonElement>('button[role="tab"]')
+  assert.equal(tabs.length, 2, '應有 2 個子分頁')
+  assert.equal(tabs[0].textContent, '設定')
+  assert.equal(tabs[1].textContent, '帳本')
+  assert.equal(tabs[0].getAttribute('aria-selected'), 'true', '預設選中「設定」')
+  assert.equal(tabs[1].getAttribute('aria-selected'), 'false')
+
+  // 設定 panel 可見，帳本 panel hidden
+  const formPanel = root.querySelector('#api-form')
+  const bookPanel = root.querySelector('#api-book')
+  assert.ok(formPanel, 'api-form panel exists')
+  assert.ok(bookPanel, 'api-book panel exists')
+  assert.equal(formPanel.hasAttribute('hidden'), false, 'formPanel should be visible')
+  assert.equal(bookPanel.hasAttribute('hidden'), true, 'bookPanel should be hidden')
+
+  // 點擊「帳本」分頁
+  tabs[1].click()
+  await settle()
+
+  assert.equal(tabs[0].getAttribute('aria-selected'), 'false')
+  assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
+  assert.equal(formPanel.hasAttribute('hidden'), true, 'formPanel should be hidden')
+  assert.equal(bookPanel.hasAttribute('hidden'), false, 'bookPanel should be visible')
+
+  // 驗證帳本內容
+  assert.match(bookPanel.textContent ?? '', /用量帳本/)
+  assert.match(bookPanel.textContent ?? '', /AGM 解析 changelog/)
+  const rows = bookPanel.querySelectorAll('tbody tr')
+  assert.equal(rows.length, 1)
+
+  // 切回「設定」分頁
+  tabs[0].click()
+  await settle()
+  assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
+  assert.equal(formPanel.hasAttribute('hidden'), false)
+  assert.equal(bookPanel.hasAttribute('hidden'), true)
+})
