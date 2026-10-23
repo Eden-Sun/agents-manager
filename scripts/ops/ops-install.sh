@@ -4,7 +4,7 @@
 #   ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]
 #
 # 為什麼：已安裝的 ops 腳本沒有任何東西在換新（outbox-gc.sh 停在舊版、repo 修了卻沒生效）；`agm ops-sync --check` 只偵測。
-# 這支補上「換新」，由 daemon-update-kick.sh 在 **旗標開著** 時於部署後叫（預設關，見 README「自動安裝」）。
+# 這支補上「換新」，由 daemon-update-kick.sh 在 **旗標開著** 時於部署後叫（預設關，見 README “Automatic refresh of installed scripts”）。
 #
 # 規則（刻意窄）：
 #   - 只看 `scripts/ops/install-manifest.tsv`（在 --ref 那版）列的檔、這個平台的列；來源用 `git show <ref>:<path>` 讀，不需要 checkout。
