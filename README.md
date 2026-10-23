@@ -70,16 +70,25 @@ Orca sources: [README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 ## Quick start
 
-**Platforms and requirements.** The daemon runs on macOS and Linux. You need an installed [herdr](https://herdr.dev) and at least one agent CLI (`claude`, `codex`, `grok` or `agy`); building from source also needs Rust (`cargo`) and [Bun](https://bun.sh). herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
+**Requirements.** macOS (arm64) or Linux (x86_64 / arm64), [herdr](https://herdr.dev), and at least one agent CLI (`claude`, `codex`, `grok` or `agy`) that you have already logged in to. herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
 
-**Install with Homebrew** (macOS arm64, Linux x86_64 / arm64; also installs herdr):
+**1. Install with Homebrew** (also installs herdr):
 
 ```bash
 brew install eden-sun/tap/agents-manager
-agents-managerd serve                     # or keep it running: brew services start agents-manager
 ```
 
-**Install a prebuilt binary** (no Rust or Bun needed; the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
+**2. Run the production daemon** as a background service, so it survives logout and restarts with your machine:
+
+```bash
+brew services start agents-manager    # stop: brew services stop agents-manager
+```
+
+To run it in the foreground instead (Ctrl-C to stop): `agents-managerd serve`. Logs go to `$(brew --prefix)/var/log/agents-manager.log`. The service sees Homebrew's `bin` and `~/.local/bin`; if your agent CLIs live elsewhere, run it in the foreground from your shell.
+
+**3. Open the UI** at http://127.0.0.1:7788. Opening it from `127.0.0.1` signs you in automatically; from another device, paste the token in `~/.config/agents-manager/ui-token`. Then follow [First steps](#first-steps).
+
+**Without Homebrew: prebuilt binary** (the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
 
 ```bash
 VERSION=v0.1.0          # pick the latest tag from the Releases page
@@ -87,41 +96,16 @@ ASSET=linux-x86_64      # or linux-arm64 / macos-arm64
 curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
 tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
 install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
-agents-managerd serve   # then open http://127.0.0.1:7788
+agents-managerd serve   # production daemon with the embedded UI: http://127.0.0.1:7788
 ```
 
-Each archive has a `.sha256` file next to it. On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once. Opening the UI from `127.0.0.1` signs you in automatically; from another device, paste the token in `~/.config/agents-manager/ui-token`. To keep the daemon running, start it from launchd, systemd or a herdr pane. Scripts under `scripts/` (such as `agm`) are not in the archive; clone the repo if you need them.
+Each archive has a `.sha256` file next to it. On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once. To keep the daemon running, start it from launchd, systemd or a herdr pane. Scripts under `scripts/` (such as `agm`) are not in the archive; clone the repo if you need them.
 
-**Try the UI without herdr** against an in-memory fake backend:
-
-```bash
-cd web
-bun install
-VITE_MOCK=1 bun run dev
-```
-
-**Run from source for development** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
-
-```bash
-git clone git@github.com:Eden-Sun/agents-manager.git
-cd agents-manager
-cargo dev     # start both
-cargo down    # stop both
-```
-
-**Build the release binary yourself.** The UI is embedded in the daemon binary, so build the front end first:
-
-```bash
-cd web && bun install && bun run build && cd ..   # produces web/dist
-cargo build --release -p agents-managerd
-./target/release/agents-managerd serve            # http://127.0.0.1:7788
-```
-
-Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. Dev builds bind every interface so a phone on your LAN or Tailscale can open the same UI; packaged macOS apps bind loopback only (`AM_DEV_LAN` overrides either).
+Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. The daemon binds every interface so a phone on your LAN or Tailscale can open the same UI; the packaged macOS app binds loopback only (`AM_DEV_LAN=0` / `1` overrides either). Building from source is covered in [Build from source](#build-from-source).
 
 ## First steps
 
-1. **Start the daemon**: `agents-managerd serve` (or `cargo dev` from source), then open http://127.0.0.1:7788. If no herdr server is running, the daemon starts one in the background.
+1. **Start the daemon**: `brew services start agents-manager` (or `agents-managerd serve` in the foreground), then open http://127.0.0.1:7788. If no herdr server is running, the daemon starts one in the background.
 2. **Add a project**: click 「新增 Project」 (Add project) at the bottom of the sidebar, choose a directory on this machine or on an SSH host, and give it a label.
 3. **Add a bot**: open the project's `＋` menu and choose 「新增 Bot」 (Add bot). Pick the kind (`claude`, `codex`, `grok` or `agy`) and, optionally, an identity and model. The daemon opens a herdr pane and starts the CLI there with hooks attached.
 4. **Chat**: type in the chat box and send. Messages sent during a running turn are queued; a confirmation or multiple-choice question shows up as a card you can click; the stop button interrupts the turn. The terminal tab shows the live pane when you need it.
@@ -183,6 +167,35 @@ flowchart LR
 - **herdr** — owns the real pane and agent lifecycle, sends prompts, reads the screen.
 
 `config.toml` is the source of truth for desired projects and bots; SQLite holds runtime state (runs, turns, messages).
+
+## Build from source
+
+For development or unsupported platforms. Needs Rust (`cargo`) and [Bun](https://bun.sh) in addition to herdr.
+
+**Development mode** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
+
+```bash
+git clone git@github.com:Eden-Sun/agents-manager.git
+cd agents-manager
+cargo dev     # start both
+cargo down    # stop both
+```
+
+**Build the release binary yourself.** The UI is embedded in the daemon binary, so build the front end first:
+
+```bash
+cd web && bun install && bun run build && cd ..   # produces web/dist
+cargo build --release -p agents-managerd
+./target/release/agents-managerd serve            # http://127.0.0.1:7788
+```
+
+**Front end only, without herdr** against an in-memory fake backend:
+
+```bash
+cd web
+bun install
+VITE_MOCK=1 bun run dev
+```
 
 ## Documentation and development
 
