@@ -235,6 +235,18 @@
   }
 }
 
+/* 桌機（滑鼠）：單行選項列不需要 44px 觸控目標（#1933）。橫放平板是觸控，不吃這條，維持 44px。 */
+@media (min-width: 641px) and (pointer: fine) {
+  .bc-list {
+    gap: 3px;
+  }
+
+  .bc-item {
+    min-height: 34px;
+    padding: 5px 10px;
+  }
+}
+
 /* 使用者主動展開的終端原文擺在主捲軸下、保留自己的捲軸，不跟著長高撐爆視窗。 */
 .blocked-modal:has(.blocked-modal-body) .term.blocked-modal-term {
   flex: 0 1 auto;
