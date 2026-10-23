@@ -171,13 +171,15 @@ fn versions_dir(kind: &str) -> Option<String> {
     }))
 }
 
-/// `kind` 只收 claude／codex／herdr（有 changelog 來源的上游）；省略＝claude（舊呼叫端不帶）。
+/// `kind` 只收 claude／codex／herdr／agy／grok（有 changelog 來源的上游）；省略＝claude（舊呼叫端不帶）。
 fn parse_kind(kind: Option<&str>) -> Result<&'static str, LcError> {
     match kind.map(str::trim).filter(|k| !k.is_empty()) {
         None | Some("claude") => Ok("claude"),
         Some("codex") => Ok("codex"),
         Some("herdr") => Ok("herdr"),
-        Some(other) => Err(LcError::Bad(format!("kind 只收 claude、codex 或 herdr，收到 `{other}`"))),
+        Some("agy") => Ok("agy"),
+        Some("grok") => Ok("grok"),
+        Some(other) => Err(LcError::Bad(format!("kind 只收 claude、codex、herdr、agy 或 grok，收到 `{other}`"))),
     }
 }
 
@@ -198,7 +200,8 @@ async fn default_to(app: &(impl crate::capabilities::Db + crate::changelog::Chan
             return Some(v);
         }
     }
-    if kind == "codex" {
+    // agy／grok 同 codex：新版還沒裝，磁碟上是舊的，看分診帳本。
+    if matches!(kind, "codex" | "agy" | "grok") {
         if let Ok(Some(v)) = crate::release_triage::ledger::max_version(app.db(), kind).await {
             return Some(v);
         }
@@ -491,7 +494,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     let to_hint = match b.to.as_deref().and_then(crate::changelog::version_string) {
         Some(v) => Some(v),
         // codex 的新版還沒裝、磁碟是舊的：沒給 `to` 就用帳本的最新版（見 [`default_to`]）。
-        None if kind == "codex" => crate::release_triage::ledger::max_version(&app.db, kind).await.ok().flatten(),
+        None if matches!(kind, "codex" | "agy" | "grok") => crate::release_triage::ledger::max_version(&app.db, kind).await.ok().flatten(),
         None if kind == "herdr" => crate::upstream_update::behind_target_for_host(&app, kind, &host).await,
         None => None,
     };
@@ -1201,7 +1204,12 @@ mod tests {
         assert_eq!(task_file("codex"), "codex-release-task.md");
         assert!(parse_kind(None).is_ok_and(|k| k == "claude"), "舊呼叫端不帶 kind＝claude");
         assert!(parse_kind(Some("codex")).is_ok_and(|k| k == "codex"));
-        assert!(parse_kind(Some("grok")).is_err(), "grok 沒有 changelog 來源也沒有任務檔");
+        assert!(parse_kind(Some("agy")).is_ok_and(|k| k == "agy"));
+        assert!(parse_kind(Some("grok")).is_ok_and(|k| k == "grok"));
+        assert!(parse_kind(Some("nope")).is_err());
+        assert_eq!(request_id("agy", "1.4.6"), "agm-agy-release-1.4.6");
+        assert_eq!(ui_request_id("grok", "1.0.67"), "agm-grok-release-1.0.67-ui");
+        assert_eq!(task_file("grok"), "grok-release-task.md");
     }
 
     /// herdr：按鈕跟 `herdr-update-kick.sh` 共用 kick 一直在用的 `agm-herdr-update-<版>`（同一版只派一次）。
@@ -1276,6 +1284,19 @@ mod tests {
         assert!(t.contains("agm-codex-release-<新版號>-notice"), "公告 id 要帶 codex 與這條管線");
         assert!(t.contains("agm-release-triage-codex-<新版號>-notice"), "要講明跟分診那條管線的 id 分開");
         assert!(t.contains("不要升級"), "解析不能順手把正在用的 codex 換掉");
+    }
+
+    /// agy／grok 的任務檔在 repo 裡，公告 id 與分診的分開（#519），解析唯讀、不升級正在用的 CLI。
+    #[test]
+    fn the_agy_and_grok_task_files_ship_with_their_own_notice_ids() {
+        for kind in ["agy", "grok"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ops").join(task_file(kind));
+            let t = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(t.contains(&format!("agm-{kind}-release-<新版號>-notice")), "{kind}：公告 id 要帶自己與這條管線");
+            assert!(t.contains(&format!("agm-release-triage-{kind}-<新版號>-notice")), "{kind}：要講明跟分診那條管線的 id 分開");
+            assert!(t.contains("不要升級"), "{kind}：解析不能順手把正在用的 CLI 換掉");
+            assert!(t.contains("判斷「用得上」的標準"), "{kind}");
+        }
     }
 
     /// 同一個版本號，claude 的解析與 codex 的解析互不相干；codex 沒給 `to` 時看帳本的最新版

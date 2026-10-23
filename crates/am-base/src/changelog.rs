@@ -207,6 +207,16 @@ pub fn source_url(kind: &str) -> &'static str {
     }
 }
 
+/// 「這一版的 changelog 在哪」的連結：grok 指到該版的 `.external.md`（每一版各有一個檔），其他同 [`source_url`]。
+pub fn source_url_for(kind: &str, version: &str) -> String {
+    if kind == "grok" {
+        if let Ok(u) = grok_feed_url(GROK_CHANGELOG_BASE, version) {
+            return u;
+        }
+    }
+    source_url(kind).to_string()
+}
+
 /// releases JSON → 同 CHANGELOG 格式的 markdown。預覽版與草稿丟掉：使用者被問到的都是正式版。
 pub fn codex_releases_to_md(json: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| anyhow!("讀 releases 失敗：{e}"))?;
@@ -278,18 +288,22 @@ async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize
     if !src.allowed.iter().any(|p| url.starts_with(p.as_str())) {
         return Err(anyhow!("{what}：{url} 不在允許的來源清單裡"));
     }
-    let resp = c.get(url).send().await.map_err(|e| anyhow!("抓 {what} 失敗：{e}"))?;
+    let mut resp = c.get(url).send().await.map_err(|e| anyhow!("抓 {what} 失敗：{e}"))?;
     if !resp.status().is_success() {
         return Err(anyhow!("抓 {what} 失敗：HTTP {}", resp.status()));
     }
     if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
     }
-    let raw = resp.text().await.map_err(|e| anyhow!("讀 {what} 失敗：{e}"))?;
-    if raw.len() > max {
-        return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
+    // 沒有 Content-Length 的 chunked 回應也要擋：邊讀邊算，超過就停（不是整份讀完才檢查）。
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| anyhow!("讀 {what} 失敗：{e}"))? {
+        if raw.len() + chunk.len() > max {
+            return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
+        }
+        raw.extend_from_slice(&chunk);
     }
-    Ok(raw)
+    Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
 /// agy：raw 的 CHANGELOG.md，失敗才退 GitHub releases。grok：stable 指標 → 該版的 `.external.md`。
@@ -388,6 +402,12 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
         }
     };
     let all = if kind == "grok" { grok_sections(&md) } else { crate::release_triage::source_sections(kind, &md) };
+    if kind == "grok" {
+        // 抓到的是 stable 那一版的檔：它的版本就是 feed 裡最大的那一段。
+        if let Some(newest) = all.iter().filter_map(|s| parse_version(&s.version).map(|v| (v, s.version.as_str()))).max() {
+            reply.source_url = source_url_for(kind, newest.1);
+        }
+    }
     let picked = pick_sections(&all, reply.from_version.as_deref(), &installed);
     if picked.is_empty() {
         reply.error = Some(format!("CHANGELOG 裡沒有 {installed} 這一版的段落"));

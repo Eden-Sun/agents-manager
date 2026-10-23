@@ -1,4 +1,4 @@
-//! 上游新版分診（issue #204）：claude／codex 每出一版，把那一版的 changelog 逐條切開、用決定性規則分桶、
+//! 上游新版分診（issue #204、#1928）：claude／codex／agy／grok 每出一版，把那一版的 changelog 逐條切開、用決定性規則分桶、
 //! 記進帳本；語意判斷交給模型，結果再由 daemon 驗過才開 GitHub issue。
 //!
 //! A 這一半只做「抓 → 切條 → 分桶 → 記帳」，不做語意判斷、不碰 gh：
@@ -166,12 +166,12 @@ pub fn codex_sections(md: &str) -> Vec<Section> {
     out
 }
 
-/// 上游 feed 的 markdown → 版本段落（claude 走 `parse_changelog`，codex 走 [`codex_sections`]）。
+/// 上游 feed 的 markdown → 版本段落（claude、agy 走 `parse_changelog`，codex 走 [`codex_sections`]，grok 走 `changelog::grok_sections`）。
 pub fn source_sections(kind: &str, md: &str) -> Vec<Section> {
-    if kind == "codex" {
-        codex_sections(md)
-    } else {
-        changelog::parse_changelog(md)
+    match kind {
+        "codex" => codex_sections(md),
+        "grok" => changelog::grok_sections(md),
+        _ => changelog::parse_changelog(md),
     }
 }
 
@@ -239,7 +239,7 @@ fn pending_out(version: &str, entries: &[Entry]) -> PendingVersion {
 ///   它們濾掉，鎖與額度都正常、log 也不再報錯，帳本卻永遠停在 `pending`）。
 pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> Result<CheckReport> {
     if !rules::supported(kind) {
-        bail!("`{kind}` 沒有分診規則（目前只有 claude、codex）");
+        bail!("`{kind}` 沒有分診規則（目前只有 claude、codex、agy、grok）");
     }
     let to = latest_version(all).ok_or_else(|| anyhow!("{kind} 的 feed 裡沒有任何版本段落"))?;
     let since_v = match since {
@@ -259,7 +259,11 @@ pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Op
         }
     };
     ledger::requeue_stale(pool, kind).await?;
-    for sec in changelog::pick_sections(all, Some(&from), &to) {
+    let picked = changelog::pick_sections(all, Some(&from), &to);
+    if kind == "grok" {
+        warn_grok_gap(&from, &picked);
+    }
+    for sec in picked {
         let entries = build_entries(kind, &sec)?;
         ledger::insert_version(pool, kind, &sec.version, &entries).await?;
     }
@@ -273,6 +277,17 @@ pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Op
     }
     pending.sort_by_key(|p| changelog::parse_version(&p.version));
     Ok(CheckReport { kind: kind.to_string(), from, to, pending })
+}
+
+/// grok 的 stable 檔只涵蓋「上一個 stable 之後」的版本；錯過一個 stable 時中間的版本不在這份 feed 裡。
+/// 只記 log、不補抓（#1928）：同一個 minor 底下，最舊的段落不是 `from` 的下一個 patch 就是有缺。
+fn warn_grok_gap(from: &str, picked: &[Section]) {
+    let (Some(f), Some(oldest)) = (changelog::parse_version(from), picked.iter().filter_map(|s| changelog::parse_version(&s.version)).min()) else {
+        return;
+    };
+    if f.len() == 3 && oldest.len() == 3 && f[..2] == oldest[..2] && oldest[2] > f[2] + 1 {
+        tracing::warn!(from, oldest = %oldest.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."), "grok stable changelog 最舊的段落跟帳本最大版本之間有缺版，中間的版本沒有分診（不補抓）");
+    }
 }
 
 /// 磁碟上的版本（本機）：跟 `changelog::installed_version` 的本機分支同一段 login-shell 探測。
@@ -295,6 +310,9 @@ async fn local_installed_version(kind: &str) -> Result<String> {
 /// 抓上游 feed（沒有 daemon 的記憶體快取：CLI 是獨立行程，30 分鐘才跑一次）。抓不到就回錯——
 /// 這一輪不做，不能當成「沒有新版」。
 async fn fetch_feed(kind: &str) -> Result<String> {
+    if matches!(kind, "agy" | "grok") {
+        return changelog::fetch_pinned_feed(kind, &changelog::FeedSource::official()).await;
+    }
     let (url, is_codex) = changelog::feed_url(kind).ok_or_else(|| anyhow!("{kind} 沒有 changelog 來源"))?;
     let client = reqwest::Client::builder()
         .user_agent("agents-manager")
@@ -338,7 +356,7 @@ pub struct CheckArgs {
     pub since: Option<String>,
     pub installed: Option<String>,
     pub db: Option<std::path::PathBuf>,
-    /// 測試用：不抓網路，直接讀這個檔案當 feed（claude＝CHANGELOG.md、codex＝`codex_releases_to_md` 的輸出）。
+    /// 測試用：不抓網路，直接讀這個檔案當 feed（claude＝CHANGELOG.md、codex＝`codex_releases_to_md` 的輸出、agy＝CHANGELOG.md、grok＝`.external.md`）。
     pub feed_file: Option<std::path::PathBuf>,
 }
 

@@ -111,7 +111,7 @@ async fn bot_verdict_binding(app: &App, caller: &str, row: &Row, gen: Option<i64
 /// Bot principal 只能交派給它的那一版（#801，見 [`bot_verdict_binding`]）；User 與 AGM 補交不綁。
 async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Json(sub): Json<Submission>) -> Result<Json<Value>, LcError> {
     if !crate::release_triage::rules::supported(&sub.kind) {
-        return Err(LcError::Bad(format!("kind `{}` 沒有分診規則（claude｜codex）", sub.kind)));
+        return Err(LcError::Bad(format!("kind `{}` 沒有分診規則（claude｜codex｜agy｜grok）", sub.kind)));
     }
     let version = crate::changelog::version_string(&sub.version).ok_or_else(|| LcError::Bad(format!("version `{}` 看不出版本", sub.version)))?;
     let row = ledger::get(&app.db, &sub.kind, &version).await.map_err(up)?.ok_or_else(|| LcError::NotFound(format!("帳本沒有 {} {version}", sub.kind)))?;
@@ -251,7 +251,7 @@ async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>
     // `publish` 之前的依據。
     if let Some(kind) = b.kind.as_deref() {
         if !crate::release_triage::rules::supported(kind) {
-            return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex）")));
+            return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex｜agy｜grok）")));
         }
     }
     let version = match b.version.as_deref() {

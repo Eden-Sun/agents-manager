@@ -85,7 +85,7 @@ impl TriageModel for ApiModel<'_> {
 
 // ───────────── prompt ─────────────
 
-const SYSTEM: &str = "你是 agents-manager（AG Man）的上游新版分診員。上游（claude／codex）出了新版，你要對使用者訊息裡**每一條** changelog 條目下一個 verdict，\
+const SYSTEM: &str = "你是 agents-manager（AG Man）的上游新版分診員。上游（claude／codex／agy／grok）出了新版，你要對使用者訊息裡**每一條** changelog 條目下一個 verdict，\
 並把該處理的整理成 issue 提案。你只能看到那些條目的文字，沒有程式碼可查、不能執行任何東西：判斷只憑條目文字與下面的模組對照表。\n\n\
 verdict 四類（每個 entry_id 恰好一個，不多不少）：\n\
 - guard：不處理會壞、或行為會變（提防）。例：被移除／改語意的旗標、hook 事件、resume 行為、輸入框或確認框的畫面文字。\n\
@@ -379,7 +379,7 @@ fn problems_of(e: &LcError) -> String {
 /// 分診 `versions`（都應該是帳本裡 `pending` 的版本）。回 `{results, notice}`；只會成功回應，失敗都寫在 `results` 裡讓 kick 退回 bot。
 pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versions: &[String], binary_diff: Option<&str>) -> Result<Value, LcError> {
     if !crate::release_triage::rules::supported(kind) {
-        return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex）")));
+        return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex｜agy｜grok）")));
     }
     let mut norm: Vec<String> = Vec::new();
     for v in versions {

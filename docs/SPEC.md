@@ -4537,14 +4537,14 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    這件事留給 AGM 收到交辦、看過 CHANGELOG 差異之後，依那一版實際改了什麼決定要不要花這個成本，而不是每次偵測到新版
    都先跑一次不確定驗不驗得到問題的固定沙箱。
 
-### 18.2c 上游新版分診：claude／codex 的 changelog → GitHub issue（issue #204）
+### 18.2c 上游新版分診：claude／codex／agy／grok 的 changelog → GitHub issue（issue #204、#1928）
 
-claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條分析，「該採用」或「必須提防」的開成 GitHub issue。
+claude、codex、agy、grok **每出一個新版**，自動把那一版的 changelog 逐條分析，「該採用」或「必須提防」的開成 GitHub issue。
 **只開 issue**：不升級、不改設定、不重啟——升級照舊走 §6.9（批次 exit＋resume，AGM 排）。
 
 **與其他章節的分工**
 - **#66（§18.2b herdr 升級）**：herdr 的「偵測＋交辦」。三個上游是同一條管線的三個 `kind`；herdr 之後併進來（`herdr-update-kick.sh` 變薄殼），
-  #66 留下它獨有的兩件事：隔離相容性驗證與升級窗口。本節目前只有 claude、codex。
+  #66 留下它獨有的兩件事：隔離相容性驗證與升級窗口。本節目前有 claude、codex、agy、grok。
 - **§6.9（一鍵套用 claude 更新）**：分診發生在**升級之前**（`from` 是帳本已分診的最大版本，不是磁碟上的、也不是跑著的），
   `guard` 類的鎖要在升級前補好；`upgrade-arg` 類（值得早點升級的理由）只進通知、當 AGM 排 §6.9 的依據，永遠不開 issue。
 - `claude-release-kick.sh` 保留為既有排程的相容入口，轉呼叫 `release-triage-kick.sh`。統一 kick 偵測
@@ -4557,6 +4557,15 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
   **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 `claude_review.rs`
   共用，那是刻意的冪等，不要跟著改。codex 的網頁按鈕（issue #561）走同一支、同一套規則，
   crid 是 `agm-codex-release-<版本>[-ui]`，任務檔 `codex-release-task.md`，公告 `agm-codex-release-<版本>-notice`（同樣跟分診的公告分開）。
+
+**agy、grok（issue #1928）**：同一條管線、同一套帳本與 verdict，來源不同、規則第一版刻意保守。
+- **來源**（`changelog.rs`，網頁 `/api/changelog` 與 kick 共用；抓回來的一切只當資料）：agy 取官方 repo `google-antigravity/antigravity-cli` 的 `CHANGELOG.md`（`## x.y.z` ＋ `- ` 單行條目；1.1.4 的標題前多一個空白，`parse_changelog` 容許縮排的版本標題），抓不到才退同 repo 的 GitHub releases；
+  grok 取 stable 指標（`GROK_STABLE_URL`，**只追 stable**）那一版的 `…/grok-build-public-artifacts/cli/changelogs/<版>.external.md`（`# x.y.z — 日期` 一段一版，`## Features` 等小標題留在段落內；一個 stable 的檔涵蓋上一個 stable 之後的所有版本，由 `grok_sections` 切）。
+  網址全寫死成常數，只允許 `raw.githubusercontent.com`／`api.github.com` 的 agy repo 與 `storage.googleapis.com` 的 grok bucket；唯一由回應組出來的網址是 grok 的 `<版>.external.md`，版本號先過 `grok_latest`（單一 token）再過嚴格的 `x.y.z` 檢查；不跟隨轉址、連線 10 秒／整體 20 秒、回應 2 MiB 上限（沒有 Content-Length 的 chunked 回應也是邊讀邊限）。
+- **去重**：帳本 `(kind, version)` 為主鍵，同一個 stable 只分診一次。stable 檔涵蓋的每一版各一列；錯過一個 stable 時中間缺的版本只記 log（`warn_grok_gap`），不補抓。
+- **規則**（`rules.toml` 的 `agy`／`grok`）只放能明確對應到我們模組的類別：`hook`、畫面判讀（`tui`）、`quota`、resume／fork（`session`）、`subagent`；沒有任何 drop 規則，其餘一律 `unmatched`（照樣送模型），先看 unmatched 比例再補規則。
+- **通知與交辦**：通知 request-id 同其他 kind（`agm-release-triage-<kind>-<新版號>-notice`）；kick 的 `for KIND` 迴圈、`release-issue-<編號>`、`upstream:<kind>` 標籤（`upstream:agy`、`upstream:grok` 要先建好）全部照舊。claude 專屬的 binary diff 不套用。
+  「請 AGM 解析」（§18.5a）也收 `agy`／`grok`：任務檔 `agy-release-task.md`／`grok-release-task.md`，只走 bot。
 
 **網頁看得到帳本**（issue #561）：更新確認框（單顆徽章與額度列的批次框）的「分析」區塊讀 `GET /api/release-triage?kind=`，
 把 `(跑著的版本, 新版]` 區間內每一版的結論攤開——提防／採用（已寫成提案的條目只列提案標題與 issue 連結，不逐條重複）、
@@ -4596,7 +4605,7 @@ daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 g
 
 gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）：`gh auth status` 之外還查
 `repo view`（設定的 repo 看不看得到、`viewer_permission`／`can_write`、issue 有沒有開）與 `label list`（`labels_missing`）——**auth 綠不等於開得出 issue**，
-`gh issue create --label` 對不存在的標籤是硬失敗，所以 `release-triage`／`upstream:claude`／`upstream:codex`／`triage:guard`／`triage:adopt` 少一個，第一次 publish 就會整版停在 `judged`。
+`gh issue create --label` 對不存在的標籤是硬失敗，所以 `release-triage`／`upstream:claude`／`upstream:codex`／`upstream:agy`／`upstream:grok`／`triage:guard`／`triage:adopt` 少一個，第一次 publish 就會整版停在 `judged`。
 `publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
 
 **開出去的 issue 由 AGM 接手**（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）：kick 每輪在 publish 重試之後讀帳本

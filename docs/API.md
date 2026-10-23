@@ -1277,12 +1277,13 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
-## 請 AGM 解析 claude／codex 新版（使用者 2026-09-19；codex 2026-09-25，issue #561）
+## 請 AGM 解析 claude／codex／agy／grok 新版（使用者 2026-09-19；codex 2026-09-25，issue #561；agy、grok 2026-10-23，issue #1928）
 
-兩支都收 `kind`（`claude`｜`codex`，省略＝`claude`，其他 400）。路徑保留 `claude-update` 是為了舊前端；
+兩支都收 `kind`（`claude`｜`codex`｜`herdr`｜`agy`｜`grok`，省略＝`claude`，其他 400）。路徑保留 `claude-update` 是為了舊前端；
 codex 走**同一套**派工對象、冪等與結論回填，差別只在：讀 codex 的 releases、任務檔是 `codex-release-task.md`、
 識別碼前綴 `agm-codex-release-…`，以及**沒給 `to` 時的新版**——claude 是磁碟上那一版（自動更新已下載好），
 codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` 帳本裡最新的正式版，帳本空才退回磁碟。
+agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任務檔是 `agy-release-task.md`／`grok-release-task.md`，識別碼 `agm-agy-release-…`／`agm-grok-release-…`，只走 bot（沒有 API 快速解析）。
 網頁一律把版本帶上（codex 從 `update_notice` 讀）。更新框另外讀 `GET /api/release-triage?kind=` 顯示該區間已分診的結論（SPEC §18.2c）。
 
 **herdr（`kind=herdr`，2026-10-01 一鍵更新）**：讀 herdr 的 CHANGELOG（`/api/changelog?kind=herdr`）；沒有任務檔，正文開頭是
@@ -2557,11 +2558,11 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 更新徽章／批次重啟 chip 按下去先呼叫這支，把 changelog 放進確認框。
 
-- `kind` 省略 = `claude`，支援 `claude`、`codex`、`herdr`（其他含 grok、未知字串一律 `found:false`）。`host` 省略 = `local`；不認得的 host 也是 200 `found:false` + `error`，不是 404。
+- `kind` 省略 = `claude`，支援 `claude`、`codex`、`herdr`、`agy`、`grok`（未知字串一律 `found:false`）。`host` 省略 = `local`；不認得的 host 也是 200 `found:false` + `error`，不是 404。
 - 沒給 `to` 時 daemon 在該主機再跑 `claude --version` 當 `installed_version`（磁碟已是新版，不快取）。`from` 有給就回 `from`（不含）到目標（含）之間每一版，新的在前。
 - **codex 一定要給 `to`**：它的更新是 TUI 當場問（`✨ Update available! 0.153.4 -> 0.154.0`），新版還沒進磁碟；UI 從畫面那句解出 `from` / `to`。
 - **herdr 也要給 `to`**（新版還沒裝；UI 用 `GET /api/upstream-updates` 的 `target_version`），`from` 給該主機目前版本。
-- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式；每版的 body 保留 release 自己的 `##` 二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
+- 來源：agy 官方 repo 的 `CHANGELOG.md`（`google-antigravity/antigravity-cli`，抓不到退同 repo 的 releases）；grok 取 stable 指標那一版的 `https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/<版>.external.md`（`# x.y.z — 日期` 一段一版、涵蓋上一個 stable 之後的所有版本；`source_url` 指到該版的那個檔）。這兩個一律走固定網址與允許清單（只有這三個主機）、不跟隨轉址、2 MiB 上限，回應內容只當資料；claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式；每版的 body 保留 release 自己的 `##` 二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
 - **永遠 200**；抓不到就 `found:false` + `error`，UI 必須寫「找不到 changelog」。
 - **權限**：只供 User／網頁使用；Bot（含 AGM role）回 403 `user_only`。`kind`／`host` 會決定要在本機或遠端執行哪個 CLI 的 `--version`，因此不把這個命令執行入口開給 Bot。
 
@@ -2622,7 +2623,7 @@ User／AGM 可呼叫，一般 Bot 一律 403（`bot_scope_matrix` 登記為 User
 
 ## 上游新版分診 `/api/release-triage/*`（SPEC §18.2c，issue #204）
 
-CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出
+CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出
 `{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
 
 - `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,assigned_bot_id,dispatch_gen,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。

@@ -1,9 +1,9 @@
-AGM 定期交辦：上游（claude／codex）出新版了，請對訊息末尾那份 JSON 裡**每一條** kept／unmatched 的 changelog 條目下 verdict，該處理的開成 issue（由 daemon 開，你不直接跑 `gh`）。只分診，**不改程式、不升級、不改設定、不重啟**。
+AGM 定期交辦：上游（claude／codex／agy／grok）出新版了，請對訊息末尾那份 JSON 裡**每一條** kept／unmatched 的 changelog 條目下 verdict，該處理的開成 issue（由 daemon 開，你不直接跑 `gh`）。只分診，**不改程式、不升級、不改設定、不重啟**。
 
 **通知怎麼送**：如果你是巡檢 AGM（使用者入口那顆），你這則回覆就是通知。如果你是協調者或其他 child（使用者看不到你的對話），做完要用
 `bin/agm assign --notice --bot <巡檢 bot id> --request-id <通知 request-id> --text '…'` 把結論交給巡檢，由它出現在使用者入口。kick 會在訊息末尾附上 `通知 request-id`，請 child **原樣使用**：一般／合併分診用 `agm-release-triage-<kind>-<新版號>-notice`；binary-only 用 `agm-claude-release-<binary 版本>-notice`，避免 changelog 已先通知同版後 binary 更新時撞到不同正文。Claude binary diff 若附在本次交辦裡，結論併進這則通知，**不要另送第二則公告**。
 
-`<kind>` 是本次 JSON 的 `kind`（`claude` 或 `codex`），`<新版號>` 是本次 JSON 的 `to`——例如 `agm-release-triage-codex-0.156.1-notice`。Claude binary diff 已由同一支 kick 附到同一則交辦；pending changelog 與 binary diff 同時送出時只送這一則合併通知（issue #204／#519）。
+`<kind>` 是本次 JSON 的 `kind`（`claude`、`codex`、`agy` 或 `grok`），`<新版號>` 是本次 JSON 的 `to`——例如 `agm-release-triage-codex-0.156.1-notice`。Claude binary diff 已由同一支 kick 附到同一則交辦；pending changelog 與 binary diff 同時送出時只送這一則合併通知（issue #204／#519）。
 
 ## 輸入
 

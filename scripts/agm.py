@@ -2812,7 +2812,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish / auto（issue #204、#1919）")
     s.add_argument("op", choices=["submit", "show", "dispatched", "publish", "auto"])
     s.add_argument("--file", help="submit：verdicts.json（{kind,version,dispatch_gen,verdicts,issues}，一次一版；dispatch_gen 抄 show 那一列）")
-    s.add_argument("--kind", choices=["claude", "codex"])
+    s.add_argument("--kind", choices=["claude", "codex", "agy", "grok"])
     s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
     s.add_argument("--bot", help="dispatched：這批交辦收件的 bot id（#801）。之後只有它或它底下的 child 能交這些版的 verdict")
     s.add_argument("--check", action="store_true", help="auto：只問 daemon 的 Claude API 分診（[claude_api.uses.release_triage]）有沒有開，不呼叫 API")

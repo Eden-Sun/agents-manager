@@ -71,7 +71,11 @@ STUB
 [ "${1:-}" = "release-triage-check" ] && [ "${2:-}" = "--kind" ] && [ "${4:-}" = "--json" ] || exit 2
 echo "check $3" >> "$AGM_DIR/check.log"
 f="$(dirname "$0")/triage/$3.json"
-[ -f "$f" ] || { echo "boom" >&2; exit 1; }
+if [ ! -f "$f" ]; then
+  # agy／grok（#1928）沒有各自的 fixture 時視為「沒有新版」，不讓舊測試被新 kind 的失敗洗掉。
+  case "$3" in agy|grok) printf '{"kind":"%s","from":"1.0.0","to":"1.0.0","pending":[]}' "$3"; exit 0 ;; esac
+  echo "boom" >&2; exit 1
+fi
 cat "$f"
 PYEOF
   chmod +x "$ROOT/fake-agents-managerd"
@@ -137,14 +141,14 @@ equals() {
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 assignment_ids() { sed -n '/ assign /s/.*--request-id \([^ ]*\).*/\1/p' "$AGM_DIR/calls.log"; }
 
-# 1. 兩個 kind 的 pending 都是空的：不派、不寫 log。
+# 1. 四個 kind 的 pending 都是空的：不派、不寫 log。
 setup
 mk_empty claude; mk_empty codex
 /bin/bash "$SCRIPT" >"$ROOT/empty.out" 2>"$ROOT/empty.err"
 check_no "空 pending 的 exit cleanup 不因 Bash 3.2 空陣列報錯" "unbound variable" "$ROOT/empty.err"
 equals "pending 空：不派" "$(assigns)" "0"
 equals "pending 空：不寫 log" "$(cat "$AGM_DIR/release-triage.log" 2>/dev/null)" ""
-equals "pending 空：兩個 kind 都檢查過" "$(wc -l < "$AGM_DIR/check.log" | tr -d ' ')" "2"
+equals "pending 空：四個 kind 都檢查過" "$(wc -l < "$AGM_DIR/check.log" | tr -d ' ')" "4"
 check_no "pending 空：連額度都不查" "quota" "$AGM_DIR/calls.log"
 teardown
 
@@ -183,6 +187,19 @@ check "claude 的 request-id" "\-\-request-id release-triage-claude-2.1.278-" "$
 check "codex 的 request-id" "\-\-request-id release-triage-codex-0.155.0-" "$AGM_DIR/calls.log"
 equals "額度一輪只查一次" "$(grep -c ' quota' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 teardown
+# 3a. agy／grok（#1928）跟 claude／codex 同一條路：各派一則、request-id 與通知 id 帶自己的 kind 與版本。
+setup
+mk_pending agy 1.4.6 1.4.5 1.4.6; mk_pending grok 1.0.67 1.0.67
+bash "$SCRIPT"
+equals "agy、grok 各派一則" "$(assigns)" "2"
+check "agy 的 request-id" "\-\-request-id release-triage-agy-1.4.6-" "$AGM_DIR/calls.log"
+check "grok 的 request-id" "\-\-request-id release-triage-grok-1.0.67-" "$AGM_DIR/calls.log"
+check "dispatched 帶 agy 兩版" "release-triage dispatched --kind agy --version 1.4.5 --version 1.4.6 --bot bot-resp" "$AGM_DIR/calls.log"
+check "agy 通知 id" "通知 request-id（child 需原樣使用）：agm-release-triage-agy-1.4.6-notice" "$AGM_DIR/assign-body.txt"
+check "grok 通知 id" "通知 request-id（child 需原樣使用）：agm-release-triage-grok-1.0.67-notice" "$AGM_DIR/assign-body.txt"
+check_no "agy／grok 不碰 claude 專屬的 binary diff" "claude-release-diff" "$AGM_DIR/assign-body.txt"
+teardown
+
 setup
 rm -f "$ROOT/triage/claude.json"; mk_pending codex 0.155.0 0.155.0
 bash "$SCRIPT"
@@ -533,14 +550,16 @@ mk_empty claude; mk_empty codex
 bash "$SCRIPT"
 check "publish claude" "release-triage publish --kind claude" "$AGM_DIR/calls.log"
 check "publish codex" "release-triage publish --kind codex" "$AGM_DIR/calls.log"
-equals "publish 共兩次" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+check "publish agy" "release-triage publish --kind agy" "$AGM_DIR/calls.log"
+check "publish grok" "release-triage publish --kind grok" "$AGM_DIR/calls.log"
+equals "publish 共四次" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "4"
 equals "無事：不寫 log" "$(cat "$AGM_DIR/release-triage.log" 2>/dev/null)" ""
 teardown
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":95.0},"limit_hit":null}}}'
 bash "$SCRIPT"
-equals "額度擋下時 publish 仍照跑" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "額度擋下時 publish 仍照跑" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "4"
 teardown
 setup
 mk_empty claude; mk_empty codex

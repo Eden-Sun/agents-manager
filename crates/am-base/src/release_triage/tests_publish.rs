@@ -176,7 +176,7 @@ case "$1 $2" in
   "repo view")
     [ -f "$D/fail_repo" ] && { echo "Could not resolve to a Repository" >&2; exit 1; }
     cat "$D/repo.json" 2>/dev/null || echo '{"nameWithOwner":"o/r","viewerPermission":"ADMIN","hasIssuesEnabled":true}';;
-  "label list") cat "$D/labels.json" 2>/dev/null || echo '[{"name":"release-triage"},{"name":"upstream:claude"},{"name":"upstream:codex"},{"name":"triage:guard"},{"name":"triage:adopt"}]';;
+  "label list") cat "$D/labels.json" 2>/dev/null || echo '[{"name":"release-triage"},{"name":"upstream:claude"},{"name":"upstream:codex"},{"name":"upstream:agy"},{"name":"upstream:grok"},{"name":"triage:guard"},{"name":"triage:adopt"}]';;
   "issue list")
     # --label 走 repo 的 issues 列表（#456：立即一致）；--search 走非同步索引。兩份分開餵，
     # 才測得出「列表看得到、搜尋還搜不到」那個空窗。
@@ -860,7 +860,7 @@ async fn health_probe_reports_gh_auth_failure_and_stays_silent_when_publish_is_o
     std::fs::write(gh.dir.join("labels.json"), r#"[{"name":"release-triage"},{"name":"upstream:claude"}]"#).unwrap();
     let ro = issue::health_probe(&gh.cfg(true)).await.unwrap();
     assert_eq!((&ro["repo_ok"], &ro["can_write"], &ro["issues_enabled"]), (&json!(true), &json!(false), &json!(false)));
-    assert_eq!(ro["labels_missing"], json!(["upstream:codex", "triage:guard", "triage:adopt"]));
+    assert_eq!(ro["labels_missing"], json!(["upstream:codex", "upstream:agy", "upstream:grok", "triage:guard", "triage:adopt"]));
     gh.flag("fail_repo", true);
     let nr = issue::health_probe(&gh.cfg(true)).await.unwrap();
     assert_eq!((&nr["gh_auth_ok"], &nr["repo_ok"]), (&json!(true), &json!(false)));
@@ -934,7 +934,7 @@ async fn a_dry_run_that_cannot_reach_github_says_so_instead_of_guessing() {
     std::fs::write(gh.dir.join("labels.json"), r#"[{"name":"release-triage"}]"#).unwrap();
     let ok = issue::preflight(&p, &gh.cfg(true), None, None).await.unwrap();
     assert_eq!(actions(&ok), ["create"]);
-    assert_eq!(ok["checks"]["labels_missing"], json!(["upstream:claude", "upstream:codex", "triage:guard", "triage:adopt"]));
+    assert_eq!(ok["checks"]["labels_missing"], json!(["upstream:claude", "upstream:codex", "upstream:agy", "upstream:grok", "triage:guard", "triage:adopt"]));
     gh.flag("fail_auth", true);
     let blocked = issue::preflight(&p, &gh.cfg(true), None, None).await.unwrap();
     assert_eq!(actions(&blocked), ["remote_unknown"]);
