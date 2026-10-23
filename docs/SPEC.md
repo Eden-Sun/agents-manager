@@ -894,7 +894,7 @@ model／fast 照常校正。子 agent 的 `bots.effort` 只在**上一輪是已�
 **對帳不拿舊 argv 蓋回去**：收編 child 的對帳（`reconcile::sync_pane_model`）從 argv 補 `bots.effort` 只在兩個條件同時成立時做：
 `bots.effort` 是 `NULL`，而且 codex 的 active run 的 `runtime_effort` 仍是 `NULL`（未知）。畫面一旦記下具體值或 `default`，就以畫面為準；
 清成 `NULL` 後的下一輪對帳不會把啟動時的 `high` 補回來。條件在 SQL 的 UPDATE 裡再判一次（查 run 與寫入之間畫面可能剛記下），不靠先讀再寫。
-其他 kind 與 model／identity 的補值不受影響。
+其他 kind 與 model／identity 的補值不受影響。子 agent 的 `bots.fast` 與 `runtime_fast` 不一致、而且是換版前就留下的落差，不在 reconcile 或換版時一次性補正：標題列的 drift 提示（「fast 實際 關、設定 開」）已經讓使用者看得到，可以自己套用或改回去；自動改寫可能蓋掉使用者刻意存、還沒套用的設定。下一次 runtime 真的切換時，依 #1894 的邏輯自然同步。
 子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、
 grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才寫進 `bots.model`／`effort`——網頁改了 child 設定還沒套用時狀態列沒變，
 不會被畫面蓋回去；codex child 的 fast 也只在上一輪已知、這一輪真的切換時跟隨，未知初次觀察或重複巡邏不覆寫設定（#1894）。codex 的 child 設定與 runtime 在同一交易原子提交，提交成功後才發事件；每個 run 只保留最新 fast edge（總上限 1024；整個 process 只有一個共用清理 task，每 30 秒分批把已結束的 run 的 edge 移掉，表空了才結束；表滿時先清一次再試，仍然滿才放棄，同一個 process 每小時最多 WARN 一次），同 edge 即使失敗或取消也不重放設定、只重試 runtime，寧可留下設定未同步也不蓋掉新的 UI 意圖，被去重（或表滿）的 fast edge 只是不重播 fast 這個欄位，同一輪的 model／effort 照常跟隨寫進設定（#1906），失敗每個 run 只 WARN 一次、下次啟動前以 UI 為準；daemon 重啟後這張表清空，之前失敗、刻意不重播的 edge 會重播一次（重讀當下設定）。其他 kind 保留原本設定寫入失敗下輪重試的流程（#743 同理）。
