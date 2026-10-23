@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { endBefore, moveBefore, pickSlot, type Box } from '../lib/pinnedOrder'
+import { t, useT } from '../lib/i18n'
 
 const MOUSE_SLOP = 5
 const TOUCH_SLOP = 10
@@ -49,6 +50,7 @@ export function usePinnedDrag(
   /** 觸控長按一到＝`id`（開狀態卡）；接著移動變成拖曳＝`null`（收卡）。 */
   onHold?: (id: string | null) => void,
 ): PinnedDnd {
+  useT()
   const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
   // 上一個鎖定的落點（遲滯）。
   const held = useRef<{ before: string | null | undefined }>({ before: undefined })
@@ -181,7 +183,7 @@ export function usePinnedDrag(
       const dir = e.key === 'ArrowLeft' ? -1 : 1
       const to = at + dir
       if (to < 0 || to >= visibleOrder.length) {
-        setAnnounce(`${names[id] ?? ''} 已經在最${dir < 0 ? '前' : '後'}面`)
+        setAnnounce(dir < 0 ? t('{name} 已經在最前面', { name: names[id] ?? '' }) : t('{name} 已經在最後面', { name: names[id] ?? '' }))
         return
       }
       // 往左＝插在左邊那顆前面；往右＝插在右邊那顆的下一顆前面（沒有＝最後）。
@@ -189,7 +191,7 @@ export function usePinnedDrag(
       const next = moveBefore(fullOrder, id, before)
       if (!next) return
       commit(next)
-      setAnnounce(`${names[id] ?? ''} 移到主力第 ${to + 1} 位，共 ${visibleOrder.length} 位`)
+      setAnnounce(t('{name} 移到主力第 {position} 位，共 {total} 位', { name: names[id] ?? '', position: to + 1, total: visibleOrder.length }))
       // 列重排後 DOM 節點換位，焦點可能掉；下一幀補回。
       const chip = e.currentTarget
       requestAnimationFrame(() => {

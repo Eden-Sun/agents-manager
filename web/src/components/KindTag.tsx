@@ -4,6 +4,7 @@ import { useStore } from '../store/store'
 import './kindTag.css'
 
 import { KIND_LABEL, KIND_DESC } from './kindMeta'
+import { t, useT } from '../lib/i18n'
 /** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 
 /** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark, agy = the Antigravity arch. */
@@ -73,12 +74,13 @@ export function KindTag({
   /** 正在跑的 codex 是 fast：logo 上疊一個閃電。 */
   fast?: boolean
 }) {
+  useT()
   const mode = useStore((s) => s.kindDisplay)
   return (
     <span
       className={`kind-tag ${kind}${mode === 'icon' ? ' icon' : ''}${fast ? ' fast' : ''}${className ? ` ${className}` : ''}`}
-      title={fast ? `${title ?? KIND_DESC[kind]}\nfast 開著（priority tier）：回得快，額度也燒得快` : (title ?? KIND_DESC[kind])}
-      aria-label={fast ? `${KIND_LABEL[kind]}（fast）` : KIND_LABEL[kind]}
+      title={fast ? t('{title}\nfast 開著（priority tier）：回得快，額度也燒得快', { title: title ?? KIND_DESC[kind] }) : (title ?? KIND_DESC[kind])}
+      aria-label={fast ? t('{kind}（fast）', { kind: KIND_LABEL[kind] }) : KIND_LABEL[kind]}
       role="img"
     >
       {mode === 'icon' ? <KindIcon kind={kind} /> : KIND_LABEL[kind]}
@@ -89,6 +91,7 @@ export function KindTag({
 
 /** The icon / text switch (sidebar foot). */
 export function KindDisplayToggle() {
+  useT()
   const mode = useStore((s) => s.kindDisplay)
   const setKindDisplay = useStore((s) => s.setKindDisplay)
   // radio 只用 aria-checked（aria-selected 是 tab / option 的）；整組一個 Tab 停點，←/→ 換選項。
@@ -100,14 +103,14 @@ export function KindDisplayToggle() {
     e.currentTarget.querySelector<HTMLElement>(`[data-mode="${next}"]`)?.focus()
   }
   return (
-    <div className="kind-display" role="radiogroup" aria-label="kind 標示方式" onKeyDown={onKeyDown}>
-      <span className="kind-display-label">kind 標示</span>
+    <div className="kind-display" role="radiogroup" aria-label={t('kind 標示方式')} onKeyDown={onKeyDown}>
+      <span className="kind-display-label">{t('kind 標示')}</span>
       <div className="tabs small">
-        <button type="button" className="tab" role="radio" data-mode="icon" aria-checked={mode === 'icon'} tabIndex={mode === 'icon' ? 0 : -1} onClick={() => setKindDisplay('icon')} title="以圖示顯示 claude / codex / grok / agy">
-          圖示
+        <button type="button" className="tab" role="radio" data-mode="icon" aria-checked={mode === 'icon'} tabIndex={mode === 'icon' ? 0 : -1} onClick={() => setKindDisplay('icon')} title={t('以圖示顯示 claude / codex / grok / agy')}>
+          {t('圖示')}
         </button>
-        <button type="button" className="tab" role="radio" data-mode="text" aria-checked={mode === 'text'} tabIndex={mode === 'text' ? 0 : -1} onClick={() => setKindDisplay('text')} title="以文字顯示 claude / codex / grok / agy">
-          文字
+        <button type="button" className="tab" role="radio" data-mode="text" aria-checked={mode === 'text'} tabIndex={mode === 'text' ? 0 : -1} onClick={() => setKindDisplay('text')} title={t('以文字顯示 claude / codex / grok / agy')}>
+          {t('文字')}
         </button>
       </div>
     </div>

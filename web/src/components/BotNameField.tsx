@@ -4,6 +4,7 @@ import { isImeEnter } from '../lib/ime'
 import type { ReactNode } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 
 /**
  * The bot's name, renamed in place (click, type, Enter). `PATCH /bots/:id {name}` is safe while running
@@ -26,6 +27,7 @@ export function BotNameField({
   /** Extra content that rides inside the name (persona mark, agent title …). */
   children?: ReactNode
 }) {
+  const t = useT()
   const patchBot = useStore((s) => s.patchBot)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
@@ -69,8 +71,8 @@ export function BotNameField({
         className={`bot-name-input ${variant}${trimmed && !valid ? ' bad' : ''}`}
         value={draft}
         spellCheck={false}
-        aria-label="Bot 名稱"
-        title={valid ? '' : BOT_NAME_HINT}
+        aria-label={t('Bot 名稱')}
+        title={valid ? '' : t.tr(BOT_NAME_HINT)}
         size={Math.max(6, draft.length + 1)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
@@ -106,7 +108,7 @@ export function BotNameField({
     return (
       <span
         className={`bot-name${armed ? ' renamable' : ''}`}
-        title={armed || hint ? `${name}${armed ? ' · 點一下改名' : ''}${hint ? `\n${hint}` : ''}` : undefined}
+        title={armed || hint ? t('{name}{rename}{hint}', { name, rename: armed ? ` · ${t('點一下改名')}` : '', hint: hint ? `\n${hint}` : '' }) : undefined}
         onClick={
           armed
             ? (e) => {
@@ -123,7 +125,7 @@ export function BotNameField({
   }
 
   return (
-    <button type="button" className="bot-name-btn" title={`${name} · 點一下改名`} onClick={start}>
+    <button type="button" className="bot-name-btn" title={t('{name} · 點一下改名', { name })} onClick={start}>
       <strong>{name}</strong>
       {children}
     </button>

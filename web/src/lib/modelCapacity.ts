@@ -1,4 +1,5 @@
 import type { Run } from '../api/types'
+import { msg } from './i18n'
 
 /**
  * codex「模型滿載」（OpenAI 那頭的容量不夠，#1673／#1674）：daemon 在 `run.turn_error_kind` 帶結構化的種類，
@@ -11,6 +12,6 @@ export function modelAtCapacity(run: Pick<Run, 'turn_error_kind'> | null | undef
 }
 
 /** 側欄／晶片／標題列共用的短字。 */
-export const CAPACITY_LABEL = '模型滿載'
+export const CAPACITY_LABEL = msg('模型滿載')
 /** tooltip：講清楚它不是卡住、也不是額度，也不會自己重試。 */
-export const CAPACITY_TITLE = '模型滿載：OpenAI 目前容量不夠，這一回合沒有跑；不是 bot 卡住、也不是額度用完。換個模型或稍後再送一次（不會自動重送、也不會自動換模型）'
+export const CAPACITY_TITLE = msg('模型滿載：OpenAI 目前容量不夠，這一回合沒有跑；不是 bot 卡住、也不是額度用完。換個模型或稍後再送一次（不會自動重送、也不會自動換模型）')

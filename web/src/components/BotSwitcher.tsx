@@ -9,12 +9,14 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
 import './botSwitcher.css'
+import { t, useT } from '../lib/i18n'
 
 /**
  * 手機標題列的 bot 名：點一下是換 bot 而非改名（2026-09-09 使用者決定）；列出母 bot，依 project 分組。
  * 手機改名走 Bot 設定的名稱欄。
  */
 export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
+  useT()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -79,7 +81,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
         className="bot-name-btn bot-switcher-btn"
         aria-haspopup="menu"
         aria-expanded={open}
-        title="換一顆 bot"
+        title={t('換一顆 bot')}
         onClick={() => setOpen((v) => !v)}
       >
         <strong>{name}</strong>
@@ -129,8 +131,9 @@ export function BotSwitcherMenu({
   onPick: (id: string) => void
   onKeyDown?: (e: ReactKeyboardEvent<HTMLElement>) => void
 }) {
+  useT()
   return (
-    <div ref={popRef} className="bot-switcher-pop" role="menu" aria-label="切換 bot" style={style} onKeyDown={onKeyDown}>
+    <div ref={popRef} className="bot-switcher-pop" role="menu" aria-label={t('切換 bot')} style={style} onKeyDown={onKeyDown}>
       {groups.map((g) => (
         <div key={g.project.id} className="bot-switcher-group" role="group" aria-label={g.project.label}>
           <div className="bot-switcher-project" aria-hidden="true">⌗ {g.project.label}</div>

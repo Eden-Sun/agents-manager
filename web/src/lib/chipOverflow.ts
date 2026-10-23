@@ -78,11 +78,16 @@ export function hiddenChipIndexes(boxes: ChipBox[]): number[] {
   return out.sort((a, b) => a - b)
 }
 
+import { t } from './i18n'
+
 /** `+N` 的提示：藏起來的有要回答／未讀就明說，全是不急的才說不急。 */
 export function moreTitle(hidden: { needsReply: boolean; unread: number }[]): string {
   const ask = hidden.filter((h) => h.needsReply).length
   const unread = hidden.filter((h) => !h.needsReply && h.unread > 0).length
-  const parts = [ask > 0 ? `${ask} 顆要你回答` : '', unread > 0 ? `${unread} 顆有未讀` : ''].filter(Boolean)
-  const what = parts.length > 0 ? `其中 ${parts.join('、')}` : '都是比較不急的'
-  return `還有 ${hidden.length} 顆沒顯示（${what}）。點一下展開`
+  const parts = [
+    ask > 0 ? t('{n} 顆要你回答', { n: ask }) : '',
+    unread > 0 ? t('{n} 顆有未讀', { n: unread }) : '',
+  ].filter(Boolean)
+  const what = parts.length > 0 ? t('其中 {items}', { items: parts.join(t('、')) }) : t('都是比較不急的')
+  return t('還有 {n} 顆沒顯示（{what}）。點一下展開', { n: hidden.length, what })
 }

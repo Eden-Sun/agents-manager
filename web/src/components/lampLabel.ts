@@ -1,21 +1,25 @@
 import type { Lamp, Run } from '../api/types'
 import { backgroundJobs, backgroundLabel } from '../lib/backgroundJobs'
 import { blockedReasonOf } from '../lib/blockedReason'
+import { t, tr } from '../lib/i18n'
+
+// This identity tag stays local so the split initial-ui chunk does not call into lib/i18n while modules initialize.
+const msg = <K extends string>(key: K): K => key
 
 /** SPEC §2.2 colour rules. */
 export const LAMP_LABEL: Record<Lamp, string> = {
-  disconnected: '連線中斷',
-  offline: '離線',
-  starting: '啟動中',
-  stopping: '停止中',
-  idle: '閒置',
-  working: '執行中',
-  blocked: '等待回應',
-  unknown: '狀態未知',
+  disconnected: msg('連線中斷'),
+  offline: msg('離線'),
+  starting: msg('啟動中'),
+  stopping: msg('停止中'),
+  idle: msg('閒置'),
+  working: msg('執行中'),
+  blocked: msg('等待回應'),
+  unknown: msg('狀態未知'),
 }
 
 /** 壓縮中的字（issue #1770）：跟「執行中」分開，讓人知道是在壓縮對話、不是在做事。 */
-export const COMPACTING_LABEL = '壓縮中…'
+export const COMPACTING_LABEL = msg('壓縮中…')
 
 /** 壓縮中（daemon 的 `run.compacting_since`，#1770）：燈號是執行中或閒置時才算；斷線、等待回應不蓋掉。 */
 export function isCompacting(lamp: Lamp, run: Run | null | undefined): boolean {
@@ -29,10 +33,10 @@ export function isCompacting(lamp: Lamp, run: Run | null | undefined): boolean {
  * 壓縮中（#1770）排在最前面：壓縮時背景數字照樣有，但這一刻要說的是「壓縮中」。
  */
 export function botStateLabel(lamp: Lamp, run: Run | null | undefined): string {
-  if (isCompacting(lamp, run)) return COMPACTING_LABEL
+  if (isCompacting(lamp, run)) return tr(COMPACTING_LABEL)
   const n = lamp === 'idle' ? backgroundJobs(run) : 0
   if (n > 0) return backgroundLabel(n)
-  // blocked 帶原因：「等待回應：codex 更新提示等待選擇」（daemon 的 `run.blocked_reason`），沒有原因照舊。
+  // blocked 帶原因（daemon 的 `run.blocked_reason`），原因文字不翻譯。
   const why = lamp === 'blocked' ? blockedReasonOf(run) : ''
-  return why ? `${LAMP_LABEL[lamp]}：${why}` : LAMP_LABEL[lamp]
+  return why ? t('等待回應：{reason}', { reason: why }) : tr(LAMP_LABEL[lamp])
 }
