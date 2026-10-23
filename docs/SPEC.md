@@ -983,6 +983,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `standard` 清掉 fast。模型 id 要小寫 id（`GPT-6.1-Sol` 會被拒）；`--reasoning=default` 會被拒。
   - **版本閘**：只看 `codex_update::running_version_of(run.id)`（跑著的那個 process，不是磁碟上的、不跑 `--version`）。`None`、低於 0.164.0、讀不懂（含 `-alpha` 後綴）一律走下面的選單路徑——
     舊版會把 `/model x --reasoning=y` 當 prompt 送給模型。`oneshot_supported`。
+    版本除了巡邏，也在 run 啟動當下從開機畫面（`>_ OpenAI Codex (vX)`）記一次（#1924，`codex_live::spawn_boot_version_read`，本機與遠端 host 都走；背景讀、最多三次、間隔 1 秒，只對 codex，寫入前確認仍是當前 run），不然頭幾分鐘的 `/model` 會退回選單。
   - **指令**（`oneshot_model_command`）：`fields` 含 model 或 effort 才帶模型與強度（沒設模型＝不帶，維持現在的）；速度**一律明確帶**（fast＝`--speed=priority`，否則 `--speed=standard`），
     因為換模型時 codex 會保留原本的速度。**沒設強度（空或 `default`）＝選單的 `(default)` 那一列＝這個模型的預設強度，也要明確帶**：0.164.0 實測
     `/model gpt-6.1-sol --reasoning=high` → 狀態列 `GPT-6.1-Sol high`；接著 `/model gpt-6.1-sol --speed=standard` → `• Model changed to gpt-6.1-sol low standard for this session only`、狀態列 `GPT-6.1-Sol low`
