@@ -62,7 +62,7 @@ Details and limits live in [`docs/SPEC.md`](docs/SPEC.md).
 | Editor and preview | No editor; embedded preview of a bot's local dev server | VS Code editor, Design Mode, Markdown / PDF / image previews |
 | Scripting | HTTP / WebSocket API ([`docs/API.md`](docs/API.md)), `bin/agm` | `orca` CLI (worktree create, snapshot, click, fill) |
 | UI language | Traditional Chinese | English, with translated READMEs |
-| License | Not yet declared in this repository | MIT |
+| License | MIT | MIT |
 
 Pick Orca when you want an IDE that opens ten worktrees and reviews their diffs. Pick agents-manager when your agents already run in terminals, possibly on other machines, and you want to steer them from a browser, let them delegate to each other, and keep an eye on quota and schedules. They can coexist.
 
@@ -70,7 +70,20 @@ Orca sources: [README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 ## Quick start
 
-**Platforms and requirements.** The daemon runs on macOS and Linux. You need Rust (`cargo`), [Bun](https://bun.sh), an installed [herdr](https://herdr.dev) and at least one agent CLI (`claude`, `codex`, `grok` or `agy`). herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
+**Platforms and requirements.** The daemon runs on macOS and Linux. You need an installed [herdr](https://herdr.dev) and at least one agent CLI (`claude`, `codex`, `grok` or `agy`); building from source also needs Rust (`cargo`) and [Bun](https://bun.sh). herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
+
+**Install a prebuilt binary** (no Rust or Bun needed; the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
+
+```bash
+VERSION=v0.1.0          # pick the latest tag from the Releases page
+ASSET=linux-x86_64      # or linux-arm64 / macos-arm64
+curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
+tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
+install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
+agents-managerd serve   # then open http://127.0.0.1:7788
+```
+
+Each archive has a `.sha256` file next to it. On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once. Opening the UI from `127.0.0.1` signs you in automatically; from another device, paste the token in `~/.config/agents-manager/ui-token`. To keep the daemon running, start it from launchd, systemd or a herdr pane. Scripts under `scripts/` (such as `agm`) are not in the archive; clone the repo if you need them.
 
 **Try the UI without herdr** against an in-memory fake backend:
 
@@ -80,7 +93,7 @@ bun install
 VITE_MOCK=1 bun run dev
 ```
 
-**Run from source** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
+**Run from source for development** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
 
 ```bash
 git clone git@github.com:Eden-Sun/agents-manager.git
@@ -89,7 +102,7 @@ cargo dev     # start both
 cargo down    # stop both
 ```
 
-**Production build.** The UI is embedded in the daemon binary, so build the front end first:
+**Build the release binary yourself.** The UI is embedded in the daemon binary, so build the front end first:
 
 ```bash
 cd web && bun install && bun run build && cd ..   # produces web/dist
@@ -171,3 +184,7 @@ flowchart LR
 | [`web/README.md`](web/README.md) | Front-end quick commands |
 
 Before pushing, run `scripts/check.sh changed`; see [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md). Docs describe the current state only; history lives in git.
+
+## License
+
+[MIT](LICENSE)
