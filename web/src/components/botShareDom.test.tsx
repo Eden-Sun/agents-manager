@@ -14,6 +14,9 @@ import { BotShareSection } from './BotShareSection'
 import { ShareLinkButton, ShareMark } from './ShareLinkButton'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
+import { virtualMockTime } from '../testing/sharedMock'
+
+virtualMockTime()
 
 afterEach(async () => {
   await unmountAll()
@@ -46,6 +49,10 @@ async function setup() {
   return { mock, shared, plain }
 }
 
+/** 讓出 n 輪 macrotask（不進 act：給暫時關掉 act 環境、靠 React 自己排程的那幾段用）。 */
+const turns = async (n: number) => {
+  for (let i = 0; i < n; i++) await new Promise((resolve) => setTimeout(resolve, 0))
+}
 const btn = (label: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)!
 const mainBtn = () => document.querySelector<HTMLButtonElement>('.share-link-main')!
 
@@ -73,14 +80,14 @@ test('分享面板測試的 store stub 不會留給下一條測試', () => {
 test('一般 bot 的設定裡沒有分享區塊', async () => {
   const { plain } = await setup()
   await mount(<BotShareSection botId={plain.id} />)
-  await settle(100)
+  await settle()
   assert.equal(document.querySelector('.bs-share'), null)
 })
 
 test('受限 bot：分享中隨時看得到完整連結；重產（確認後）換成新連結；關閉（確認後）', async () => {
   const { shared } = await setup()
   await mount(<BotShareSection botId={shared.id} />)
-  await settle(150)
+  await settle()
   const sec = document.querySelector('.bs-share')!
   assert.ok(sec, '受限 bot 要有分享區塊')
   const before = sec.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
@@ -89,13 +96,13 @@ test('受限 bot：分享中隨時看得到完整連結；重產（確認後）�
   await click(btn('重產連結'))
   assert.match(document.body.textContent!, /舊連結立刻失效/)
   await click(btn('重產'))
-  await settle(150)
+  await settle()
   const url = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
   assert.match(url, /^https:\/\/.+\/s\/[A-Za-z0-9_-]{43}$/)
   assert.notEqual(url, before)
   await click(btn('關閉分享'))
   await click([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '關閉分享').at(-1)!)
-  await settle(150)
+  await settle()
   assert.equal(document.querySelector('input[aria-label="分享連結"]'), null, '關掉之後不留已失效的連結')
   assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')!.checked, false)
 })
@@ -110,7 +117,7 @@ test('舊資料只有雜湊：設定面板提示重產一次', async () => {
   }) as typeof rawTransport.request
   try {
     await mount(<BotShareSection botId={shared.id} />)
-    await settle(150)
+    await settle()
     assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
     assert.match(document.querySelector('.bs-share-hint')!.textContent!, /舊版開的.*「重產連結」一次/)
   } finally {
@@ -144,19 +151,19 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
     assert.ok(mainBtn().querySelector('svg'), '圖示是 inline SVG，不用 emoji（#1180）')
     assert.equal(mainBtn().getAttribute('aria-haspopup'), null, '沒分享時不是選單鈕')
     await click(mainBtn())
-    await settle(50)
+    await settle()
     const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string }
     assert.equal(g.enabled, true, '按下就開啟')
     assert.deepEqual(copied, [g.url], '開啟後複製完整連結')
     assert.match(msgs.at(-1)!, /已開啟分享並複製連結/)
 
     await setOn(true)
-    await settle(50)
+    await settle()
     assert.equal(document.querySelectorAll('.share-link button').length, 1, '已開啟時標題列仍只有一顆按鈕（#1180）')
     assert.equal(mainBtn().getAttribute('aria-haspopup'), 'menu')
     assert.equal(mainBtn().getAttribute('aria-expanded'), 'false')
     await click(mainBtn())
-    await settle(20)
+    await settle()
     assert.equal(mainBtn().getAttribute('aria-expanded'), 'true')
     assert.equal(document.querySelector<HTMLElement>('.share-link-menu')!.style.position, 'fixed', '選單 fixed，不被名字列剪掉（#1072）')
     assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['複製連結', '重產連結', '關閉分享'], '第一項是複製連結')
@@ -170,7 +177,7 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
     await click(btn('重產連結'))
     assert.match(document.body.textContent!, /舊連結立刻失效/, '重產要確認')
     await click(btn('重產'))
-    await settle(50)
+    await settle()
     const g2 = (await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }
     assert.notEqual(g2.url, g.url)
     assert.equal(copied.at(-1), g2.url, '重產後複製新連結')
@@ -179,7 +186,7 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
     await click(btn('關閉分享'))
     assert.match(document.body.textContent!, /連結立刻失效/, '關閉要確認')
     await click([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '關閉分享').at(-1)!)
-    await settle(50)
+    await settle()
     assert.equal(((await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean }).enabled, false)
   } finally {
     document.execCommand = origExec
@@ -209,7 +216,7 @@ test('手機 http（非 secure context、沒有 clipboard）：開分享後直�
     await act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: false } : b)) })))
     await mount(<ShareLinkButton botId={shared.id} />)
     await click(mainBtn())
-    await settle(50)
+    await settle()
     const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }
     assert.equal(execCalls, 0, '預判做不到，不試著複製')
     assert.match(msgs.at(-1)!, /長按選取後複製/)
@@ -356,7 +363,7 @@ test('信任分享：選了要在確認框勾「只分享給絕對信任的人�
 test('信任分享：「允許 iframe 嵌入」只在信任分享的分享中畫，勾選送出 allow_embed；受限沒有這個選項', async () => {
   const { mock, shared } = await setup()
   await mount(<BotShareSection botId={shared.id} />)
-  await settle(100)
+  await settle()
   assert.equal(document.querySelector('.bs-share-embed'), null, '受限不畫')
   await unmountAll()
 
@@ -373,17 +380,17 @@ test('信任分享：「允許 iframe 嵌入」只在信任分享的分享中畫
   await act(async () => useStore.setState({ bots: bots.map((b) => ({ ...b, project_id: 'p' })) } as never))
   const trusted = bots.find((b) => b.id === made.bot_id)!
   await mount(<BotShareSection botId={trusted.id} />)
-  await settle(150)
+  await settle()
   const box = () => document.querySelector<HTMLInputElement>('.bs-share-embed input')!
   assert.ok(box(), '信任分享畫這個選項')
   assert.match(document.querySelector('.bs-share-embed')!.textContent!, /任何網站都能把這個分享頁嵌進去/)
   assert.equal(box().checked, false, '預設關')
   await click(box())
-  await settle(150)
+  await settle()
   assert.equal(((await mock.request('GET', `/bots/${trusted.id}/share`)) as { allow_embed: boolean }).allow_embed, true, '勾了送出 allow_embed')
   assert.equal(box().checked, true)
   await click(box())
-  await settle(150)
+  await settle()
   assert.equal(((await mock.request('GET', `/bots/${trusted.id}/share`)) as { allow_embed: boolean }).allow_embed, false)
 })
 
@@ -399,7 +406,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     await mock.request('POST', `/bots/${shared.id}/share`, { enabled: true })
     await act(async () => useStore.setState((s) => ({ notify: () => {}, bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: true } : b)) })) as never)
     await mount(<ShareLinkButton botId={shared.id} />)
-    await settle(100)
+    await settle()
     await click(mainBtn())
     await click(btn('複製連結'))
     await until(() => copied.length === 1, '初次複製連結')
@@ -416,7 +423,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     g.IS_REACT_ACT_ENVIRONMENT = false
     try {
       useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } }))
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      await turns(20)
     } finally {
       g.IS_REACT_ACT_ENVIRONMENT = true
     }
@@ -426,7 +433,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     await until(() => copied.length === 2, '重產後複製新連結')
     assert.equal(copied.at(-1), r.url, '複製的是重產後的新連結')
     assert.notEqual(copied.at(-1), before)
-    await settle(100) // 把非 act 的排程收乾淨，不留給下一條測試
+    await settle() // 把非 act 的排程收乾淨，不留給下一條測試
   } finally {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
     document.execCommand = origExec
@@ -436,7 +443,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
 test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關掉的分享打開（#1187）', async () => {
   const { mock, shared } = await setup()
   await mount(<ShareLinkButton botId={shared.id} />)
-  await settle(100)
+  await settle()
   const { rawTransport } = await import('../api/index')
   const orig = rawTransport.request.bind(rawTransport)
   const calls: { method: string; path: string }[] = []
@@ -459,11 +466,11 @@ test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關�
     await until(() => releaseGets.length === 1, '分享版本變更後的讀取開始')
     await click(mainBtn())
     await click(btn('複製連結'))
-    await settle(20)
+    await settle()
     assert.equal(releaseGets.length, 1, '選單複製共用 rev 變更後已在途的 GET')
     assert.equal(calls.filter((c) => c.method === 'GET' && c.path.endsWith('/share')).length, 1)
     releaseGets[0]()
-    await settle(50)
+    await settle()
 
     assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/share')).length, 0, '只複製不能送出開啟分享的 POST')
     assert.equal(((await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean }).enabled, false, '分享仍保持關閉')
@@ -489,7 +496,7 @@ test('聊天分享鈕：舊版只有 hash 時提示重產，不用 POST 換一�
   }) as typeof rawTransport.request
   try {
     await mount(<ShareLinkButton botId={shared.id} />)
-    await settle(50)
+    await settle()
     await click(mainBtn())
     await click(btn('複製連結'))
     await until(() => messages.length > 0, '顯示舊版連結提示')
@@ -504,9 +511,9 @@ test('聊天分享鈕：舊版只有 hash 時提示重產，不用 POST 換一�
 test('分享鈕選單：打開後焦點在第一項，方向鍵移動，Esc 關掉並把焦點還給按鈕（#1198）', async () => {
   const { shared } = await setup()
   await mount(<ShareLinkButton botId={shared.id} />)
-  await settle(100)
+  await settle()
   await click(mainBtn())
-  await settle(50)
+  await settle()
 
   const items = () => [...document.querySelectorAll<HTMLButtonElement>('.share-link-menu [role="menuitem"]')]
   assert.equal(document.activeElement, items()[0], '打開後焦點在第一個選單項目')
@@ -526,7 +533,7 @@ test('分享鈕選單：打開後焦點在第一項，方向鍵移動，Esc 關�
 test('別處重產連結（share_enabled 沒變）：設定面板換成新連結（#1099）', async () => {
   const { mock, shared } = await setup()
   await mount(<BotShareSection botId={shared.id} />)
-  await settle(150)
+  await settle()
   const before = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
   assert.ok(before, '分享中就看得到完整連結')
 
@@ -537,11 +544,11 @@ test('別處重產連結（share_enabled 沒變）：設定面板換成新連結
   g.IS_REACT_ACT_ENVIRONMENT = false
   try {
     useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } }))
-    await new Promise((resolve) => setTimeout(resolve, 150))
+    for (let i = 0; i < 200 && document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value !== r.url; i++) await turns(1)
   } finally {
     g.IS_REACT_ACT_ENVIRONMENT = true
   }
-  await settle(50)
+  await settle()
   const after = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
   assert.equal(after, r.url, '輸入框換成新連結')
   assert.notEqual(after, before)
@@ -566,7 +573,7 @@ test('分享區塊：第一次讀取失敗，連回來自己重抓；讀到之�
   try {
     useStore.setState({ socket: 'closed' } as never)
     await mount(<BotShareSection botId={shared.id} />)
-    await settle(50)
+    await settle()
     assert.ok(document.querySelector('.bs-share-error'), '第一次失敗要顯示錯誤訊息')
     const toggle = document.querySelector<HTMLInputElement>('.bs-share-toggle input')!
     assert.equal(toggle.disabled, true, '讀取失敗開關 disabled')
@@ -576,7 +583,7 @@ test('分享區塊：第一次讀取失敗，連回來自己重抓；讀到之�
       useStore.setState({ socket: 'open' } as never)
     })
     await until(() => getCalls === 2, 'GET 重抓第二次')
-    await settle(150)
+    await settle()
     assert.equal(document.querySelector('.bs-share-error'), null, '讀取成功收掉錯誤訊息')
     assert.equal(toggle.disabled, false, '連線回來重抓成功開關可用')
   } finally {
@@ -601,7 +608,7 @@ test('讀取一直失敗時不會無限重試', async () => {
   try {
     useStore.setState({ socket: 'open' } as never)
     await mount(<BotShareSection botId={shared.id} />)
-    await settle(300)
+    await settle()
     assert.ok(getCalls <= 2, `GET 次數應 <= 2，實際 ${getCalls}`)
   } finally {
     globalThis.fetch = origFetch
@@ -636,7 +643,7 @@ test('分享設定：晚到的 POST 回應不覆蓋較新 WS/GET，且仍執行�
       } as never),
     )
     await mount(<BotShareSection botId="b-1826" />)
-    await settle(50)
+    await settle()
     const value = () => document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value
     assert.equal(value(), current.url)
 
@@ -647,12 +654,12 @@ test('分享設定：晚到的 POST 回應不覆蓋較新 WS/GET，且仍執行�
     // 別處重產觸發 WS/GET 最新狀態
     current = state('https://example.invalid/s/latest-from-other-device')
     await act(async () => useStore.setState({ shareRev: { 'b-1826': 2 } } as never))
-    await settle(50)
+    await settle()
     assert.equal(value(), current.url)
 
     // 晚到的 POST 放行，不覆蓋較新狀態，但通知仍有發出
     await act(async () => resolvePost(state('https://example.invalid/s/obsolete-local-post')))
-    await settle(50)
+    await settle()
     assert.equal(value(), 'https://example.invalid/s/latest-from-other-device')
     assert.ok(notifications.some((m) => m.includes('已重產連結，舊連結已失效')))
   } finally {
@@ -684,7 +691,7 @@ test('分享面板：同 rev 的 share_enabled 變更後重新讀取狀態', asy
       shareRev: { 'b-1826-toggle': 0 },
     } as never))
     await mount(<BotShareSection botId="b-1826-toggle" />)
-    await settle(50)
+    await settle()
     assert.equal(getCalls, 1)
     assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value, state(true).url)
 
@@ -693,7 +700,7 @@ test('分享面板：同 rev 的 share_enabled 變更後重新讀取狀態', asy
       shareRev: { 'b-1826-toggle': 0 },
     } as never))
     await until(() => getCalls === 2, '同 rev 的開關變更觸發新的 GET')
-    await settle(50)
+    await settle()
     assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')?.checked, false)
     assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
   } finally {
@@ -731,7 +738,7 @@ test('分享面板：已有 URL 時，別處重產或關閉先隱藏舊連結', 
     } as never))
     await mount(<BotShareSection botId="b-1826-rev" />)
     await until(() => getCalls === 1, '初始 GET 完成')
-    await settle(50)
+    await settle()
     assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')?.value, 'https://example.invalid/s/old')
 
     await act(async () => useStore.setState({ shareRev: { 'b-1826-rev': 1 } } as never))
@@ -750,7 +757,7 @@ test('分享面板：已有 URL 時，別處重產或關閉先隱藏舊連結', 
     await until(() => getCalls === 3, '別處關閉後發出 GET')
     assert.equal(document.querySelector('input[aria-label="分享連結"]'), null, '關閉狀態確認前不顯示失效 URL')
     await act(async () => resolveClose(state(false, null)))
-    await settle(50)
+    await settle()
     assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')?.checked, false)
   } finally {
     rawTransport.request = orig
@@ -803,7 +810,7 @@ test('分享按鈕與面板：自己 POST 時 WS 事件先到、POST 回應後�
     )
 
     await mount(<ShareLinkButton botId="b-1826-b" />)
-    await settle(50)
+    await settle()
 
     // 分享中點擊主按鈕開選單，點擊重產
     await click(mainBtn())
@@ -820,7 +827,7 @@ test('分享按鈕與面板：自己 POST 時 WS 事件先到、POST 回應後�
 
     // 本頁 POST 的 WS 事件先到，但 POST 回應不能越過仍在途的 GET。
     await act(async () => resolvePost(state(newUrl)))
-    await settle(50)
+    await settle()
     assert.equal(copied.length, 0, '權威 GET 尚未完成時不能複製 POST 回應')
 
     await act(async () => resolveGet(state(newUrl)))
@@ -877,7 +884,7 @@ test('分享按鈕：rev 已更新但 GET 尚未完成時，不複製晚到 POST
       notify: (_k: string, msg: string) => void notifications.push(msg),
     } as never))
     await mount(<ShareLinkButton botId="b-1826-pending" />)
-    await settle(50)
+    await settle()
     await click(mainBtn())
     await click(btn('重產連結'))
     await click(btn('重產'))
@@ -886,7 +893,7 @@ test('分享按鈕：rev 已更新但 GET 尚未完成時，不複製晚到 POST
     await act(async () => useStore.setState({ shareRev: { 'b-1826-pending': 1 } } as never))
     await until(() => getCalls === 2, '較新的 GET 已發出')
     await act(async () => resolvePost(state('https://example.invalid/s/obsolete-post')))
-    await settle(50)
+    await settle()
     assert.deepEqual(copied, [], 'GET pending 時不可複製舊 POST URL')
     assert.equal(notifications.some((m) => m.includes('已重產並複製新連結')), false, 'GET pending 時不可先發成功複製通知')
 
@@ -932,7 +939,7 @@ test('分享面板：別處關閉後，本頁晚到的成功 POST 不會重新�
       notify: (_k: string, msg: string) => void notifications.push(msg),
     } as never))
     await mount(<BotShareSection botId="b-1826-close" />)
-    await settle(50)
+    await settle()
     const toggle = document.querySelector<HTMLInputElement>('.bs-share-toggle input')!
     assert.equal(toggle.disabled, false)
     await click(toggle)
@@ -952,11 +959,11 @@ test('分享面板：別處關閉後，本頁晚到的成功 POST 不會重新�
       created_at: null,
       last_used_at: null,
     }))
-    await settle(50)
+    await settle()
     assert.equal(document.querySelector('.bs-share-body'), null, 'GET pending 時不能重新顯示舊分享連結')
 
     await act(async () => resolveGet(disabled))
-    await settle(50)
+    await settle()
     assert.equal(toggle.checked, false, '權威 GET 回來後分享保持關閉')
     assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
     assert.ok(notifications.includes('分享已關閉'), '成功通知反映最新狀態')

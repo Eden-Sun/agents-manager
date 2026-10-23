@@ -7,7 +7,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { FakeRequest } from '../testing/domHarness'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
-import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import { ChatPanel } from './ChatPanel'
@@ -34,6 +34,7 @@ async function running(name: string): Promise<{ id: string; requests: FakeReques
   assert.ok(bot, `mock 要有 ${name}`)
   if (useStore.getState().runs[bot.id]?.state !== 'running') {
     await mock.request('POST', `/bots/${bot.id}/start`)
+    await advanceMockTime(3000) // mock 的啟動要 2.5 秒虛擬時間
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.state === 'running'
@@ -108,6 +109,7 @@ for (const [name, touch] of [['am-claude', false], ['am-codex', true]] as const)
     await mock.request('POST', `/bots/${id}/prompt`, { text: '新活動', client_request_id: `warm-button-${id}` })
     await act(() => useStore.getState().refreshState())
     assert.equal(btn()!.textContent, '不用保溫', '新 prompt 清除 ♨ 時同步回復')
+    await advanceMockTime(3000) // mock 的回合要 2.4 秒虛擬時間
     await until(async () => {
       await act(() => useStore.getState().refreshState())
       return useStore.getState().runs[id]?.agent_status === 'idle'

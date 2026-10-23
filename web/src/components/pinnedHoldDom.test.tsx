@@ -2,14 +2,22 @@
  * 主力晶片長按（2026-10-04 使用者：「手機版主力長按說明顏色意義」）：長按一到就開狀態卡（onHold(id)），
  * 接著移動＝收卡改拖曳（onHold(null)）；不動放開＝卡片留著（使用者：「長按與 drag 相衝」）。
  */
-import test, { after, afterEach, before } from 'node:test'
+import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { installManualTimers } from '../testing/manualTimers'
 import { usePinnedDrag } from './usePinnedDrag'
 import { ChipLegend } from './ChipLegend'
 
+// 長按計時（~400ms）走手動時鐘：`wait` 只推進虛擬時間。
+let timers: ReturnType<typeof installManualTimers>
+
 before(setupDom)
+beforeEach(() => {
+  timers = installManualTimers()
+})
 afterEach(async () => {
+  timers.restore() // unmountAll 的 settle 要真 timer
   await unmountAll()
 })
 after(teardownDom)
@@ -45,7 +53,7 @@ function StripCommit({ onHold }: { onHold: (id: string | null) => void }) {
 
 const ptr = (type: string, x: number, y: number, pointerId = 1) =>
   new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType: 'touch', button: 0, pointerId })
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const wait = (ms: number) => timers.clock.advance(ms)
 
 test('觸控長按一到就開卡、不動放開卡片留著', async () => {
   holds.length = 0

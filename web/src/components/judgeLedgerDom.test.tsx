@@ -79,7 +79,7 @@ test('有資料：五個場景各一列計數、超過門檻照 SPEC 算、最�
     },
   })
   const root = await mount(<JudgePanel />)
-  await settle(200)
+  await settle()
   const ledger = root.querySelector('.judge-ledger')!
   assert.ok(ledger, '帳本區要出現')
   // issue #1912：帳本明講是 Jev（TypeSafe）的判斷，只是建議。
@@ -110,7 +110,7 @@ test('還沒被觸發過：明講，並列出五個場景的觸發條件', async
     '/judge/shadow': { status: 200, body: { enabled: false, projects: [], model: 'jev-1.13.0', rows: [] } },
   })
   const root = await mount(<JudgePanel />)
-  await settle(200)
+  await settle()
   const ledger = root.querySelector('.judge-ledger')!
   assert.match(ledger.textContent ?? '', /還沒被觸發過/)
   assert.equal(ledger.querySelector('.judge-ledger-table'), null, '沒有紀錄就不畫空表')
@@ -123,7 +123,7 @@ test('舊 daemon（帳本 404）：設定照常，帳本區只說需要更新 da
   setBots()
   stubApi({ '/judge/settings': { status: 200, body: SETTINGS } })
   const root = await mount(<JudgePanel />)
-  await settle(200)
+  await settle()
   assert.ok(root.querySelector('input[type="password"]'), '設定表單還在')
   const ledger = root.querySelector('.judge-ledger')!
   assert.match(ledger.textContent ?? '', /需要更新 daemon/)
@@ -137,13 +137,13 @@ test('讀失敗（500）：顯示真正的錯誤並給重試；按重試會再�
     '/judge/shadow': { status: 500, body: { message: 'ledger unavailable' } },
   })
   const root = await mount(<JudgePanel />)
-  await settle(200)
+  await settle()
   const ledger = root.querySelector('.judge-ledger')!
   assert.match(ledger.textContent ?? '', /讀不到帳本/)
   assert.doesNotMatch(ledger.textContent ?? '', /需要更新 daemon/, '500 不是舊 daemon')
   assert.equal(hits['/judge/shadow'], 1)
   await click(ledger.querySelector('button')!)
-  await settle(200)
+  await settle()
   assert.equal(hits['/judge/shadow'], 2, '重試要重新打一次')
 })
 
@@ -155,7 +155,7 @@ test('帳本只拿到最近 200 筆時要講清楚：「全部」與「近 7 天
     '/judge/shadow': { status: 200, body: { enabled: true, projects: [], model: 'jev-1.13.0', rows } },
   })
   const root = await mount(<JudgePanel />)
-  await settle(200)
+  await settle()
   const ledger = root.querySelector('.judge-ledger')!
   assert.match(ledger.textContent ?? '', /最近 200 筆/, '到上限就要說明，不能讓「全部」看起來是全部')
 })

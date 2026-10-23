@@ -5,7 +5,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
-import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, Project, Run } from '../api/types.ts'
 import { ChatPanel } from './ChatPanel'
@@ -34,12 +34,14 @@ async function openChat(name: string, suggestion: string | null = null) {
   assert.ok(bot, `mock 要有 ${name}`)
   if (useStore.getState().runs[bot.id]?.state !== 'running') {
     await mock.request('POST', `/bots/${bot.id}/start`)
+    await advanceMockTime(3000) // mock 的啟動要 2.5 秒虛擬時間
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.state === 'running'
     }, `${name} running`)
   }
   if (suggestion) {
+    await advanceMockTime(3000) // 前一個測試檔留下的回合（2.4 秒）收尾
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.agent_status === 'idle'
@@ -49,7 +51,7 @@ async function openChat(name: string, suggestion: string | null = null) {
   }
   useStore.getState().selectBot(bot.id)
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
-  await settle(200)
+  await settle()
   return { requests, bot }
 }
 
@@ -70,7 +72,7 @@ test('閒著的 claude 有建議：輸入列上方一行，顯示那句；打字
 test('點一下：送 accept（帶那句與 run id），開回合、那一條消失、對話窗出現那一句', async () => {
   const { requests, bot } = await openChat('am-claude', SUGGESTION)
   await click(button()!)
-  await settle(200)
+  await settle()
   const accepts = requests.filter((r) => r.method === 'POST' && /\/bots\/[^/]+\/suggestion\/accept/.test(r.path))
   assert.equal(accepts.length, 1)
   const body = accepts[0].body as Record<string, unknown>
@@ -81,6 +83,7 @@ test('點一下：送 accept（帶那句與 run id），開回合、那一條消
   const user = (useStore.getState().messages[bot.id] ?? []).filter((m) => m.role === 'user').at(-1)
   assert.equal(user?.content, SUGGESTION)
   // 共用的 mock：讓這一回合收尾、bot 回到閒著，別拖累後面用同一顆 bot 的測試檔。
+  await advanceMockTime(3000)
   await until(async () => {
     await useStore.getState().refreshState()
     return useStore.getState().runs[bot.id]?.agent_status === 'idle'
