@@ -5622,7 +5622,7 @@ mod delete_identity_tests {
         app.cfg.update(|f| { f.identities.push(ident("work", "claude", None)); f.identities.push(ident("other", "claude", None)); Ok(()) }).await.unwrap();
         for key in ["claude:work", "claude:other"] {
             app.quotas.lock().await.insert(key.into(), reading("local"));
-            crate::quota::persist_cache(app, key, &reading("local")).await;
+            crate::quota::persist_cache_for_test(app, key, &reading("local")).await;
         }
         delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
         assert!(!app.quotas.lock().await.contains_key("claude:work"), "已刪帳號的額度格不能留著");

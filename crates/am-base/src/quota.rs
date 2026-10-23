@@ -2,6 +2,15 @@
 //! app-server, claude statusLine + [`crate::quota_claude`] probe, grok [`crate::quota_grok`].
 //! Keys are host-scoped (SPEC §14): bare on local, `<host>/…` remote — a remote bot's statusLine
 //! must never land on the local row.
+//!
+//! Raw snapshot persistence is test support, not a production API. In particular, the old
+//! public entry point must not be reintroduced (#1881):
+//! ```compile_fail,E0432
+//! use am_base::quota::persist_cache;
+//! ```
+
+// Without the dev-dependency feature, even the explicitly named test helper is not exported.
+#![cfg_attr(not(feature = "test-hooks"), doc = "```compile_fail,E0432\nuse am_base::quota::persist_cache_for_test;\n```")]
 
 use crate::config::LOCAL_HOST;
 use anyhow::Result;
@@ -561,7 +570,10 @@ pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::Quot
     Ok(count)
 }
 
-pub async fn persist_cache(app: &impl crate::capabilities::Db, key: &str, q: &Quota) {
+/// 測試 fixture 才能直接落地快照；只在 unit tests 或 daemon 的 test-hooks dev-dependency 啟用。
+/// 正式狀態寫入必須在同一把 writer lock 內取得快照並呼叫私有的 persist_cache_locked。
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn persist_cache_for_test(app: &impl crate::capabilities::Db, key: &str, q: &Quota) {
     let _cache_write = cache_write_lock(key).await;
     persist_cache_locked(app, key, q).await;
 }
@@ -1766,7 +1778,7 @@ mod cache_write_lock_tests {
         let key = quota_key(LOCAL_HOST, base);
         let before_clear = quota_with_hit();
         app.quotas.lock().await.insert(key.clone(), before_clear.clone());
-        persist_cache(&app, &key, &before_clear).await;
+        persist_cache_for_test(&app, &key, &before_clear).await;
 
         // A 已複製舊快照、仍持有 key 的寫入鎖，尚未落地；B 不能先改記憶體並寫清除快照。
         let a_write = cache_write_lock(&key).await;
@@ -1790,7 +1802,7 @@ mod cache_write_lock_tests {
         assert!(app.quotas.lock().await[&key].limit_hit.is_none(), "清除已更新記憶體狀態");
         let mut older_reading = a_snapshot;
         older_reading.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1));
-        persist_cache(&app, &key, &older_reading).await;
+        persist_cache_for_test(&app, &key, &older_reading).await;
         let cached: String = sqlx::query_scalar("SELECT quota_json FROM quota_cache WHERE key = ?")
             .bind(&key)
             .fetch_one(&app.db)
@@ -2047,7 +2059,7 @@ mod clear_if_older_tests {
         let base = "grok:snapshot-under-lock";
         let key = seed(&app, base, with_hit("2026-10-20T00:17:11Z")).await;
         let seeded = app.quotas.lock().await[&key].clone();
-        persist_cache(&*app, &key, &seeded).await;
+        persist_cache_for_test(&*app, &key, &seeded).await;
         let success = t("2026-10-21T00:10:00Z");
 
         let writer_lock = cache_write_lock(&key).await;
@@ -2073,7 +2085,7 @@ mod clear_if_older_tests {
 
         let mut older = snapshot.clone();
         older.updated_at = crate::db::iso_at(t("2026-10-20T00:10:00Z"));
-        persist_cache(&*app, &key, &older).await;
+        persist_cache_for_test(&*app, &key, &older).await;
         assert!(db_limit_hit(&app, &key).await.is_none(), "較舊讀數晚到的持久化要被拒，撞限不能寫回 DB");
 
         app.quotas.lock().await.remove(&key);
