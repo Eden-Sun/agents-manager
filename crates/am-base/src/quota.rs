@@ -1258,13 +1258,16 @@ pub struct GrokPctClear {
     pub cleared_at: chrono::DateTime<chrono::Utc>,
     /// 被清掉的那一筆撞限的桶（`five_hour`／`seven_day`）。
     pub bucket: String,
+    /// 被清掉的那一筆撞限原本寫的 `until`；到期了紀錄跟著作廢（沒寫或解不開就只看窗長）。
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
     /// 清掉之後又重撞、被擋下不准再看百分比的次數。
     pub rehits: u32,
     /// 已經算過一次重撞的撞限（`hit.at`）：每 30 秒一份讀數，同一筆重撞只算一次、只 warn 一次。
     pub counted_at: Option<String>,
 }
 
-/// 紀錄的總數上限。滿了時沒有紀錄的 key 一律不准看百分比（保守：多擋，不無限長）。
+/// 紀錄的總數上限。滿了時先清掉作廢的紀錄（[`grok_pct_clear_expired`]），清完還是滿，沒有紀錄的 key 才一律
+/// 不准看百分比（保守：多擋，不無限長）。
 pub const GROK_PCT_CLEARS_MAX: usize = 256;
 
 pub fn grok_pct_clears() -> &'static std::sync::Mutex<HashMap<String, GrokPctClear>> {
@@ -1280,12 +1283,25 @@ fn grok_bucket_len(bucket: &str) -> Option<chrono::Duration> {
     }
 }
 
-/// 這筆撞限能不能用百分比解除（#1905）。表裡那把 key 的紀錄過了它那一桶的窗長（從上次清掉起算）就作廢、刪掉。
+/// 紀錄作廢：過了那一桶的窗長（從上次清掉起算），或被清掉那筆撞限的 `until` 已經到期。
+fn grok_pct_clear_expired(m: &GrokPctClear, now: chrono::DateTime<chrono::Utc>) -> bool {
+    grok_bucket_len(&m.bucket).map_or(true, |len| now - m.cleared_at >= len) || m.until.is_some_and(|u| now >= u)
+}
+
+/// 表滿時先清掉作廢的紀錄；回傳清完之後還有沒有空位。
+fn grok_pct_clears_room(marks: &mut HashMap<String, GrokPctClear>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if marks.len() >= GROK_PCT_CLEARS_MAX {
+        marks.retain(|_, m| !grok_pct_clear_expired(m, now));
+    }
+    marks.len() < GROK_PCT_CLEARS_MAX
+}
+
+/// 這筆撞限能不能用百分比解除（#1905）。表裡那把 key 的紀錄作廢（[`grok_pct_clear_expired`]）就刪掉。
 /// - 有紀錄、而且撞限是在上次清掉**之後**才撞的（`hit.at ≥ cleared_at`）＝清掉又重撞：不准，重撞次數加一（同一筆只加一次）；
 /// - 有紀錄但撞限早於上次清掉（重啟後種回的舊撞限）：不是重撞，照舊准；
-/// - 沒有紀錄：准；表已滿就不准（保守）。撞限時間解不開也不准。
+/// - 沒有紀錄：准；表滿時先清掉作廢的紀錄，清完還是滿就不准（保守）。撞限時間解不開也不准。
 pub fn grok_pct_clear_allowed(marks: &mut HashMap<String, GrokPctClear>, mark: &str, hit: &LimitHit, now: chrono::DateTime<chrono::Utc>) -> bool {
-    if marks.get(mark).is_some_and(|m| grok_bucket_len(&m.bucket).map_or(true, |len| now - m.cleared_at >= len)) {
+    if marks.get(mark).is_some_and(|m| grok_pct_clear_expired(m, now)) {
         marks.remove(mark);
     }
     let Some(at) = parse_utc(&hit.at) else { return false };
@@ -1300,23 +1316,21 @@ pub fn grok_pct_clear_allowed(marks: &mut HashMap<String, GrokPctClear>, mark: &
             false
         }
         Some(_) => true,
-        None => marks.len() < GROK_PCT_CLEARS_MAX,
+        None => grok_pct_clears_room(marks, now),
     }
 }
 
-/// 記下「這把 key 的撞限剛被百分比清掉」。已有紀錄的沿用重撞次數；表滿時不新增（那種 key 根本不會被准許清）。
+/// 記下「這把 key 的撞限剛被百分比清掉」。已有紀錄的沿用重撞次數；表滿時先清掉作廢的，清完還是滿就不新增
+/// （那種 key 根本不會被准許清）。
 pub fn note_grok_pct_clear(marks: &mut HashMap<String, GrokPctClear>, mark: &str, hit: &LimitHit, now: chrono::DateTime<chrono::Utc>) {
     let Some(bucket) = hit.bucket.clone() else { return };
-    let len = marks.len();
-    match marks.get_mut(mark) {
-        Some(m) => {
-            m.cleared_at = now;
-            m.bucket = bucket;
-        }
-        None if len < GROK_PCT_CLEARS_MAX => {
-            marks.insert(mark.to_string(), GrokPctClear { cleared_at: now, bucket, rehits: 0, counted_at: None });
-        }
-        None => {}
+    let until = hit.until.as_deref().and_then(parse_utc);
+    if let Some(m) = marks.get_mut(mark) {
+        m.cleared_at = now;
+        m.bucket = bucket;
+        m.until = until;
+    } else if grok_pct_clears_room(marks, now) {
+        marks.insert(mark.to_string(), GrokPctClear { cleared_at: now, bucket, until, rehits: 0, counted_at: None });
     }
 }
 
