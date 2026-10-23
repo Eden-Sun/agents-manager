@@ -91,8 +91,12 @@ function remaining(w: QuotaWindow | null | undefined): number | null {
   return left < 10 ? Math.round(left * 10) / 10 : Math.round(left)
 }
 
-function fmtPct(pct: number): string {
-  return String(pct)
+/**
+ * 讀數 0 不是真的 0：CLI 回報的 used_pct 是整數，100 只代表剩不到 1%，bot 還在正常回合（2026-10-23 使用者：codex 7d 寫 0
+ * 但 codex-sol 還在回）。沒有撞限紀錄就寫 `<1`；真的 0 只在 daemon 記到 limit_hit 之後。
+ */
+function fmtPct(pct: number, hit = false): string {
+  return pct === 0 && !hit ? '<1' : String(pct)
 }
 
 /** 顏色吃 daemon 旗標（docs/API.md §12.4），前端不另寫 pct 門檻以免跟側欄警告不一致。 */
@@ -145,11 +149,12 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = 
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
   if (five === null && seven === null && fable === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
-  if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
+  const hit = Boolean(q?.limit_hit)
+  if (five !== null) parts.push(`5 小時剩餘 ${fmtPct(five, hit)}%`)
   if (seven !== null) {
-    parts.push(weeklyOnlyKind(entry.kind) ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
+    parts.push(weeklyOnlyKind(entry.kind) ? `每週剩餘 ${fmtPct(seven, hit)}%` : `7 天剩餘 ${fmtPct(seven, hit)}%`)
   }
-  if (fable !== null) parts.push(`Fable 每週剩餘 ${fable}%`)
+  if (fable !== null) parts.push(`Fable 每週剩餘 ${fmtPct(fable, hit)}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (noFiveHourCap(entry.kind, q)) parts.push('5 小時無上限')
   if (q?.seven_day?.resets_at) {
@@ -308,12 +313,15 @@ function Bar({
   mark,
   markTitle,
   unit,
+  hit = false,
 }: {
   pct: number | null
   low: boolean
   critical: boolean
   mark: number | null
   markTitle?: string
+  /** 這個身分有撞限紀錄：讀數 0 才真的印 0（見 `fmtPct`）。 */
+  hit?: boolean
   /** 百分比帶 `%`：這一列在倒數模式，底下那一行寫的是時間，裸的 `0` 讀不出是百分比（2026-10-02 使用者）。 */
   unit?: boolean
 }) {
@@ -323,7 +331,7 @@ function Bar({
   // 這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
   const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
   const bar = zoom ? (
-    <span className="quota-bar-wrap zoomed" title={`剩 ${fmtPct(pct)}%（條的刻度是 0–10%）`}>
+    <span className="quota-bar-wrap zoomed" title={`剩 ${fmtPct(pct, hit)}%（條的刻度是 0–10%）`}>
       <span className={`quota-bar ${lv}`}>
         <span className="quota-bar-fill" style={{ width: `${Math.min(100, pct * 10)}%` }} />
       </span>
@@ -341,7 +349,7 @@ function Bar({
       {bar}
       {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
       <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}${unit || zoom ? ' has-unit' : ''}`} aria-hidden="true">
-        {pct === null ? '—' : unit || zoom ? `${fmtPct(pct)}%` : fmtPct(pct)}
+        {pct === null ? '—' : unit || zoom ? `${fmtPct(pct, hit)}%` : fmtPct(pct, hit)}
       </span>
     </span>
   )
@@ -454,6 +462,7 @@ function Gauge({
       windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
   }
+  const hit = Boolean(q?.limit_hit)
   const winRow = (w: WindowBar, countdown: boolean) => {
     const span = WINDOW_MS[w.name]
     const mark = resetMark(w.resetsAt, span, now)
@@ -473,6 +482,7 @@ function Gauge({
           mark={mark}
           markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
           unit={countdown}
+          hit={hit}
         />
       </span>
     )
@@ -491,7 +501,7 @@ function Gauge({
   // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
   const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
-    ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!)}%`).join('')}`
+    ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!, hit)}%`).join('')}`
     : withOff
 
   return (
@@ -556,13 +566,13 @@ function Gauge({
               {back ? (
                 // 倒數時百分比也留著（2026-10-02 使用者：「雖然現在 7d 已經倒數，也要出現 %」），倒數在前。
                 <>
-                  <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
+                  <span className="quota-reset-at" title={`${w.pct !== null && (w.pct > 0 || !hit) ? `剩 ${fmtPct(w.pct, hit)}%` : '用完了'}，還有 ${back} 重置`}>
                     {back}
                   </span>
-                  <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+                  <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct, hit)}%`}</span>
                 </>
               ) : (
-                <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+                <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct, hit)}%`}</span>
               )}
             </span>
             )
@@ -698,12 +708,14 @@ function PopWindow({
   win,
   w,
   now,
+  hit,
 }: {
   icon: string
   name: string
   win: WindowName
   w: QuotaWindow | null | undefined
   now: number
+  hit: boolean
 }) {
   const pct = remaining(w)
   if (pct === null) return null
@@ -722,6 +734,7 @@ function PopWindow({
         critical={w?.critical ?? false}
         mark={resetMark(w?.resets_at, WINDOW_MS[win], now)}
         markTitle={left === null ? undefined : `${name} 還有 ${fmtLeft(left)} 重置`}
+        hit={hit}
       />
       {/* 寫「還有多久」不寫時刻（2026-09-09 使用者要求）；絕對時刻留在 tooltip。 */}
       <span className="quota-reset" title={w?.resets_at ? `重置時刻 ${fmtTime(w.resets_at)}` : undefined}>
@@ -805,8 +818,8 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
       ) : (
         entry.kind === 'agy' ? (
           <>
-            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
-            <PopWindow icon="📅" name="7d" win="7d" w={q?.seven_day} now={now} />
+            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} hit={Boolean(q?.limit_hit)} />
+            <PopWindow icon="📅" name="7d" win="7d" w={q?.seven_day} now={now} hit={Boolean(q?.limit_hit)} />
             <PopLimitHit hit={q?.limit_hit} />
           </>
         ) : (
@@ -823,10 +836,10 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
               <span className="quota-reset">{NO_CAP_TITLE}</span>
             </div>
           ) : (
-            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
+            <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} hit={Boolean(q?.limit_hit)} />
           )}
-          <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
-          <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
+          <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} hit={Boolean(q?.limit_hit)} />
+          <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} hit={Boolean(q?.limit_hit)} />
           <PopLimitHit hit={q?.limit_hit} />
           <PopResetCredits credits={q?.reset_credits} now={now} />
         </>

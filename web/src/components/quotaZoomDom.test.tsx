@@ -34,7 +34,7 @@ function win({ remaining, inMs }: Win) {
   }
 }
 
-async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null = null) {
+async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null = null, limitHit = false) {
   resetStoreForTest()
   useStore.setState({
     quota: {
@@ -43,7 +43,7 @@ async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null
         seven_day: win(seven),
         fable: fable ? win(fable) : null,
         reset_credits: null,
-        limit_hit: null,
+        limit_hit: limitHit ? { message: 'hit', until: null, at: new Date().toISOString(), bucket: 'seven_day' } : null,
         plan: null,
         updated_at: new Date().toISOString(),
         stale: false,
@@ -79,10 +79,15 @@ test('剩 3%：填色 30%、外框刻度條，沒有格子、黑針、×10', asy
   assert.equal(cell.querySelector('.quota-bar-pct')!.textContent, '3%')
 })
 
-test('剩 0%：填色 0、外框還在', async () => {
+test('讀數 0 但沒撞限：填色 0、外框還在，百分比寫 <1%（used_pct 是整數，100 只代表剩不到 1%）', async () => {
   const cell = await mountWeek(0, 1.8)
   assert.equal(fillOf(cell), 0)
   assert.equal(zoomed(cell), 1)
+  assert.equal(cell.querySelector('.quota-bar-pct')!.textContent, '<1%')
+})
+
+test('讀數 0 而且 daemon 記到撞限：才真的寫 0%', async () => {
+  const cell = await mountQuota({ remaining: 0, inMs: (WEEK_MS * 1.8) / 100 }, null, null, true)
   assert.equal(cell.querySelector('.quota-bar-pct')!.textContent, '0%')
 })
 
@@ -117,7 +122,7 @@ test('7d 與 F 同一刻重置：底下一行只寫一個時間，不寫「重�
   assert.ok(!/重置|7d|F/.test((lines[0]!.textContent ?? '').replace(/\u00a0/g, ' ')))
   const rows = cell.querySelectorAll('.quota-bar-row')
   assert.equal(rows.length, 2)
-  assert.deepEqual([...rows].map((r) => r.querySelector('.quota-bar-pct')!.textContent), ['3%', '0%'])
+  assert.deepEqual([...rows].map((r) => r.querySelector('.quota-bar-pct')!.textContent), ['3%', '<1%'])
   assert.deepEqual([...rows].map((r) => fillOf(r)), [30, 0])
   for (const r of rows) assert.equal(r.querySelector('.quota-reset-at'), null)
 })
