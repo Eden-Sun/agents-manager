@@ -7,6 +7,7 @@ import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetC
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identityPrefKey } from '../api'
 import { identitiesOfHost, identityStatusOfHost, quotaClaimantsOf, toolsOfHost, useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
@@ -54,12 +55,12 @@ function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
   return out
 }
 
-function hostLabel(host: string): string {
-  return host === LOCAL_HOST ? '本機' : host
+function hostLabel(host: string, t: ReturnType<typeof useT>): string {
+  return host === LOCAL_HOST ? t('本機') : host
 }
 
-function quotaTitle(host: string): string {
-  return host === LOCAL_HOST ? '本機額度' : `${host} 的額度`
+function quotaTitle(host: string, t: ReturnType<typeof useT>): string {
+  return host === LOCAL_HOST ? t('本機額度') : t('{host} 的額度', { host })
 }
 
 function useEntryQuota(entry: QuotaEntry): KindQuota | null {
@@ -68,9 +69,6 @@ function useEntryQuota(entry: QuotaEntry): KindQuota | null {
   // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h 與升級前的撞上限橫幅不畫（見 quotaNoFiveHour）。
   return useMemo(() => projectNoFiveHour(entry.kind, raw), [entry.kind, raw])
 }
-
-/** 「5h 無上限」那一格的字（桌機量表與明細共用）。 */
-const NO_CAP_TITLE = '這個方案沒有 5 小時上限，只看週額度'
 
 /** 看該 host 的 `identity_status`（同名身份在各主機可能是不同帳號）；Gauge 與 PopRow 共用以免判斷漂移。 */
 function useLoggedOut(entry: QuotaEntry, host: string): boolean {
@@ -121,59 +119,59 @@ function fmtTime(iso: string | null | undefined): string {
   return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function staleAge(iso: string, now: number): string {
+function staleAge(iso: string, now: number, t: ReturnType<typeof useT>): string {
   const at = Date.parse(iso)
   if (Number.isNaN(at)) return ''
   const minutes = Math.max(0, Math.floor((now - at) / 60_000))
-  if (minutes < 1) return '不到 1 分鐘'
-  if (minutes < 60) return `${minutes} 分鐘`
+  if (minutes < 1) return t('不到 1 分鐘')
+  if (minutes < 60) return t('{n} 分鐘', { n: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小時${minutes % 60 ? `${minutes % 60} 分鐘` : ''}`
+  if (hours < 24) return minutes % 60 ? t('{hours} 小時{minutes} 分鐘', { hours, minutes: minutes % 60 }) : t('{hours} 小時', { hours })
   const days = Math.floor(hours / 24)
-  return `${days} 天${hours % 24 ? `${hours % 24} 小時` : ''}`
+  return hours % 24 ? t('{days} 天{hours} 小時', { days, hours: hours % 24 }) : t('{days} 天', { days })
 }
 
-function staleSuffix(q: KindQuota | null, now: number): string {
+function staleSuffix(q: KindQuota | null, now: number, t: ReturnType<typeof useT>): string {
   if (!q?.stale) return ''
-  const age = staleAge(q.updated_at, now)
-  return `（上次讀數${age ? `，${age}前` : ''}）`
+  const age = staleAge(q.updated_at, now, t)
+  return age ? t('（上次讀數，{age}前）', { age }) : t('（上次讀數）')
 }
 
 function entryLabel(entry: QuotaEntry): string {
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
 
-function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = Date.now()): string {
+function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: number, t: ReturnType<typeof useT>): string {
   const parts = [entryLabel(entry)]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
-  if (five === null && seven === null && fable === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
+  if (five === null && seven === null && fable === null) parts.push(loggedOut ? t('這台主機偵測不到登入，額度尚未取得') : t('額度尚未取得'))
   const hit = Boolean(q?.limit_hit)
-  if (five !== null) parts.push(`5 小時剩餘 ${fmtPct(five, hit)}%`)
+  if (five !== null) parts.push(t('5 小時剩餘 {pct}%', { pct: fmtPct(five, hit) }))
   if (seven !== null) {
-    parts.push(weeklyOnlyKind(entry.kind) ? `每週剩餘 ${fmtPct(seven, hit)}%` : `7 天剩餘 ${fmtPct(seven, hit)}%`)
+    parts.push(weeklyOnlyKind(entry.kind) ? t('每週剩餘 {pct}%', { pct: fmtPct(seven, hit) }) : t('7 天剩餘 {pct}%', { pct: fmtPct(seven, hit) }))
   }
-  if (fable !== null) parts.push(`Fable 每週剩餘 ${fmtPct(fable, hit)}%`)
-  if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
-  if (noFiveHourCap(entry.kind, q)) parts.push('5 小時無上限')
+  if (fable !== null) parts.push(t('Fable 每週剩餘 {pct}%', { pct: fmtPct(fable, hit) }))
+  if (q?.five_hour?.resets_at) parts.push(t('5 小時 {time} 重置', { time: fmtTime(q.five_hour.resets_at) }))
+  if (noFiveHourCap(entry.kind, q)) parts.push(t('5 小時無上限'))
   if (q?.seven_day?.resets_at) {
     parts.push(
       weeklyOnlyKind(entry.kind)
-        ? `每週 ${fmtTime(q.seven_day.resets_at)} 重置`
-        : `7 天 ${fmtTime(q.seven_day.resets_at)} 重置`,
+        ? t('每週 {time} 重置', { time: fmtTime(q.seven_day.resets_at) })
+        : t('7 天 {time} 重置', { time: fmtTime(q.seven_day.resets_at) }),
     )
   }
-  if (q?.fable?.resets_at) parts.push(`Fable ${fmtTime(q.fable.resets_at)} 重置`)
-  // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale` 講的是另一件事（開機從快取回填）。
-  for (const [name, w] of [['5 小時', q?.five_hour], [weekLabel(entry.kind) === '週' ? '每週' : '7 天', q?.seven_day], ['Fable', q?.fable]] as const) {
+  if (q?.fable?.resets_at) parts.push(t('Fable {time} 重置', { time: fmtTime(q.fable.resets_at) }))
+  // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale`講的是另一件事（開機從快取回填）。
+  for (const [name, w] of [['5 小時', q?.five_hour], [weekLabel(entry.kind) === '週' ? '每週' : '7 天', q?.seven_day], ['Fable', q?.fable]] as const) { // i18n-ignore: 內部窗口名標籤
     const at = carriedOverAt(w, q?.updated_at)
     if (!at) continue
-    const age = staleAge(at, now)
-    parts.push(`${name}是沿用${age ? ` ${age}前` : ''}的讀數`)
+    const age = staleAge(at, now, t)
+    parts.push(age ? t('{name}是沿用 {age}前的讀數', { name, age }) : t('{name}是沿用的讀數', { name }))
   }
-  if (q?.stale) parts.push(staleSuffix(q, now))
-  return parts.join('，')
+  if (q?.stale) parts.push(staleSuffix(q, now, t))
+  return parts.join('，') /* i18n-ignore：分隔符 */
 }
 
 function parseQuotaKey(key: string): QuotaEntry | null {
@@ -251,12 +249,12 @@ function RiskDot({ level }: { level: Level }) {
 }
 
 /** `F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
-type WindowName = '5h' | '7d' | '週' | 'F'
+type WindowName = '5h' | '7d' | '週' | 'F' // i18n-ignore
 
 const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
-  '週': 7 * 86_400_000,
+  '週': 7 * 86_400_000, // i18n-ignore
   F: 7 * 86_400_000,
 }
 
@@ -297,10 +295,18 @@ function useMinuteNow(): number {
  * 只用顏色不行（UI-DECISIONS：狀態一律還有文字、形狀或記號），所以是字不是點。
  */
 function StaleWindowMark({ at, name, now }: { at: string; name: WindowName; now: number }) {
-  const age = staleAge(at, now)
+  const t = useT()
+  const age = staleAge(at, now, t)
   return (
-    <sup className="quota-window-stale" title={`${name} 這一格是沿用${age ? ` ${age}前` : ''}的讀數——這幾次的狀態列沒有帶它，數字不一定是現況`}>
-      舊
+    <sup
+      className="quota-window-stale"
+      title={
+        age
+          ? t('{name} 這一格是沿用 {age}前的讀數——這幾次的狀態列沒有帶它，數字不一定是現況', { name, age })
+          : t('{name} 這一格是沿用的讀數——這幾次的狀態列沒有帶它，數字不一定是現況', { name })
+      }
+    >
+      {t('舊')}
     </sup>
   )
 }
@@ -325,13 +331,14 @@ function Bar({
   /** 百分比帶 `%`：這一列在倒數模式，底下那一行寫的是時間，裸的 `0` 讀不出是百分比（2026-10-02 使用者）。 */
   unit?: boolean
 }) {
+  const t = useT()
   const lv = levelOf({ low, critical })
   // 剩量和重置刻度都在 10% 以下：改畫 0–10% 刻度的連續條（2026-10-16 第三版，方案 B；取代 #1785 的 10 格點陣）。
   // 刻度範圍用整條外框（`.zoomed` 的 CSS）表示，不畫兩端豎線：豎線跟別列的重置黑針分不出來（2026-10-23 使用者）。
   // 這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
   const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
   const bar = zoom ? (
-    <span className="quota-bar-wrap zoomed" title={`剩 ${fmtPct(pct, hit)}%（條的刻度是 0–10%）`}>
+    <span className="quota-bar-wrap zoomed" title={t('剩 {pct}%（條的刻度是 0–10%）', { pct: fmtPct(pct, hit) })}>
       <span className={`quota-bar ${lv}`}>
         <span className="quota-bar-fill" style={{ width: `${Math.min(100, pct * 10)}%` }} />
       </span>
@@ -360,14 +367,14 @@ function Bar({
  *  （2026-10-16 使用者：「不需要 fable 的餘時間因為與 7d 是一樣的」）。全部同一刻就只寫時間（`└ 3h05`），
  *  否則 `└ 5h 1h21 · 7d 0h51`。完整對照在 title。 */
 const SHARED_RESET_MS = 60_000
-function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[]): { text: string; title: string } | null {
+function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[], t: ReturnType<typeof useT>): { text: string; title: string } | null {
   if (rows.length === 0) return null
   const groups: { name: WindowName; back: string; at: number }[] = []
   for (const r of rows) {
     const at = new Date(r.resetsAt).getTime()
     if (!groups.some((g) => Math.abs(g.at - at) <= SHARED_RESET_MS)) groups.push({ name: r.name, back: r.back, at })
   }
-  const title = rows.map((r) => `${r.name} 還有 ${r.back} 重置`).join('；')
+  const title = rows.map((r) => t('{name} 還有 {back} 重置', { name: r.name, back: r.back })).join('；') /* i18n-ignore：分隔符 */
   // 一律一行：格子高度只放得下三列加這一行（2026-10-16 使用者截圖：換成兩行就蓋到底下那排）。兩組時間時省掉空白，`└5h 1h14·7d 0h44`。
   if (groups.length === 1) return { text: `└\u00a0${groups[0]!.back}`, title }
   return { text: `└${groups.map((g) => `${g.name}\u00a0${g.back}`).join('·')}`, title }
@@ -396,8 +403,8 @@ function moreUrgent(w: WindowBar, best: WindowBar): boolean {
 }
 
 /** grok reports a weekly-only window and labels it 週; agy shows its week as 7d like claude. */
-function weekLabel(kind: BotKind): '7d' | '週' {
-  return kind === 'grok' ? '週' : '7d'
+function weekLabel(kind: BotKind): '7d' | '週' { // i18n-ignore
+  return kind === 'grok' ? '週' : '7d' // i18n-ignore
 }
 
 function Gauge({
@@ -416,6 +423,7 @@ function Gauge({
   open: boolean
   onOpen: () => void
 }) {
+  const t = useT()
   const q = useEntryQuota(entry)
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
@@ -449,7 +457,7 @@ function Gauge({
     if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
     windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
   } else if (five === null && seven === null && fable === null) {
-    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
+    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
   } else {
     windows = []
     if (five !== null) {
@@ -471,7 +479,7 @@ function Gauge({
     const soon = countdown ? null : soonLabel(w.name, w.resetsAt, now)
     return (
       <span key={w.name} className="quota-window">
-        <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `${w.name} 還有 ${soon} 重置` : undefined}>
+        <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
           {soon ?? w.name}
           {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
         </span>
@@ -480,7 +488,7 @@ function Gauge({
           low={w.low}
           critical={w.critical}
           mark={mark}
-          markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
+          markTitle={left === null ? undefined : t('{name} 還有 {back} 重置', { name: w.name, back: fmtLeft(left) })}
           unit={countdown}
           hit={hit}
         />
@@ -491,23 +499,23 @@ function Gauge({
     const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
     return back && w.resetsAt ? [{ name: w.name, back, resetsAt: w.resetsAt, win: w }] : []
   })
-  const resetLine = compact ? null : resetLineOf(countdownRows)
+  const resetLine = compact ? null : resetLineOf(countdownRows, t)
   const resetLineLevel = countdownRows.some((r) => r.win.critical) ? 'crit' : countdownRows.some((r) => r.win.low) ? 'warn' : ''
   const uncapped = !compact && noFiveHourCap(entry.kind, q)
-  const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
+  const title = `${hostLabel(host, t)} · ${label(entry, q, loggedOut, now, t)}`
   const level = worst(q)
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
-  const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
+  const withOff = off ? `${title}${t('（已暫時停用，底下的 Bot 收在側欄外）')}` : title
   // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
   const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
-    ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!, hit)}%`).join('')}`
+    ? `${t('目前選取的 {title}', { title: withOff })}${borderWindows.map((w) => t('；{edge}邊框：{label} 剩餘 {pct}%', { edge: w.edge === 'top' ? t('上') : t('下'), label: w.label, pct: fmtPct(w.pct!, hit) })).join('')}`
     : withOff
 
   return (
     <span
       className={`quota-hp ${entry.kind} ${level}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}${q?.stale ? ' stale' : ''}`}
-      title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
+      title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked, t)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // input／button 的點擊放行，否則量表按鈕會一次開一次關。
       onClick={(e) => {
@@ -520,7 +528,7 @@ function Gauge({
           key={w.edge}
           className={`quota-border-meter ${w.edge}${w.window?.critical ? ' critical' : w.window?.low ? ' warn' : ''}`}
           role="progressbar"
-          aria-label={`${w.label} 剩餘額度（${w.edge === 'top' ? '上' : '下'}邊框）`}
+          aria-label={t('{label} 剩餘額度（{edge}邊框）', { label: w.label, edge: w.edge === 'top' ? t('上') : t('下') })}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.min(100, Math.max(0, w.pct!))}
@@ -559,20 +567,20 @@ function Gauge({
             const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
-              <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `${w.name} 還有 ${soon} 重置` : undefined}>
+              <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
                 {soon ?? w.name}
                 {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               {back ? (
                 // 倒數時百分比也留著（2026-10-02 使用者：「雖然現在 7d 已經倒數，也要出現 %」），倒數在前。
                 <>
-                  <span className="quota-reset-at" title={`${w.pct !== null && (w.pct > 0 || !hit) ? `剩 ${fmtPct(w.pct, hit)}%` : '用完了'}，還有 ${back} 重置`}>
+                  <span className="quota-reset-at" title={w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back })}>
                     {back}
                   </span>
-                  <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct, hit)}%`}</span>
+                  <span className="quota-compact-pct">{w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`}</span>
                 </>
               ) : (
-                <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct, hit)}%`}</span>
+                <span className="quota-compact-pct">{w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`}</span>
               )}
             </span>
             )
@@ -584,7 +592,7 @@ function Gauge({
           <span className="quota-window">
             <span className="quota-window-name">5h</span>
             <span className="quota-bar-row">
-              <span className="quota-no-cap" title={NO_CAP_TITLE}>無上限</span>
+              <span className="quota-no-cap" title={t('這個方案沒有 5 小時上限，只看週額度')}>{t('無上限')}</span>
             </span>
           </span>
         ) : null}
@@ -603,16 +611,17 @@ function Gauge({
 
 /** popover 裡的暫時停用勾選格（見 docs/UI-DECISIONS.md）；卡片點擊由 `PopRow` 轉呼叫。 */
 function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
+  const t = useT()
   return (
     <span className="quota-disable">
       <input
         type="checkbox"
-        aria-label={`暫時停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`}
+        aria-label={t('暫時停用 {name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）', { name })}
         checked={on}
         onChange={onToggle}
       />
       <span className="quota-disable-note" aria-hidden="true">
-        {on ? '已停用' : '停用'}
+        {on ? t('已停用') : t('停用')}
       </span>
     </span>
   )
@@ -620,23 +629,24 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
 
 /** 條上的停用開關（主要入口）；條子擠只留方塊，說明走 aria-label 與 `.icon-tip`。 */
 function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
+  const t = useT()
   const q = useEntryQuota(entry)
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
   const short = entryLabel(entry)
-  const name = `${hostLabel(host)} · ${short}`
+  const name = `${hostLabel(host, t)} · ${short}`
   return (
     <label
       className={`quota-cell-toggle icon-tip${off ? ' on' : ''}`}
-      data-tip={off ? `${short} 已停用 · 額度 reset 後自動回來` : `停用 ${short} · 底下的 Bot 先收起來`}
+      data-tip={off ? t('{short} 已停用 · 額度 reset 後自動回來', { short }) : t('停用 {short} · 底下的 Bot 先收起來', { short })}
     >
       <input
         type="checkbox"
         aria-label={
           off
-            ? `解除停用 ${name}（底下的 Bot 回到側欄）`
-            : `停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`
+            ? t('解除停用 {name}（底下的 Bot 回到側欄）', { name })
+            : t('停用 {name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）', { name })
         }
         checked={off}
         onChange={() => setQuotaDisabled(key, !off, off ? null : disableUntil(q, Date.now()))}
@@ -647,22 +657,24 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
 
 /** Codex 預設帳號開 shell 登入；命名身份走 daemon 展開該主機的設定。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
+  const t = useT()
   const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
   if (shouldUseIdentityLogin(identity)) {
-    return <IdentityCliLogin kind="codex" host={host} hostLabel={hostLabel(host)} identity={identity} />
+    return <IdentityCliLogin kind="codex" host={host} hostLabel={hostLabel(host, t)} identity={identity} />
   }
-  return <QuotaLoginShell host={host} hostLabel={hostLabel(host)} kind="codex" command={command} />
+  return <QuotaLoginShell host={host} hostLabel={hostLabel(host, t)} kind="codex" command={command} />
 }
 
-function blockedLine(hit: QuotaLimitHit): string {
+function blockedLine(hit: QuotaLimitHit, t: ReturnType<typeof useT>): string {
   const when = limitHitWhen(hit.until)
   const back = when
-    ? `${when} 才會恢復`
-    : '恢復時間 CLI 沒寫，要等它下一回合跑得動'
-  return `⛔ CLI 說這個帳號現在被擋住：${back}\n${hit.message}`
+    ? t('{when} 才會恢復', { when })
+    : t('恢復時間 CLI 沒寫，要等它下一回合跑得動')
+  return t('⛔ CLI 說這個帳號現在被擋住：{back}\n{message}', { back, message: hit.message })
 }
 
 function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
+  const t = useT()
   if (!hit) return null
   const when = limitHitWhen(hit.until)
   return (
@@ -671,11 +683,11 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
         <span className="quota-ico" aria-hidden="true">
           ⛔
         </span>
-        被擋
+        {t('被擋')}
       </span>
       <span className="quota-limit-hit" title={hit.message}>
-        {when ? `${when} 恢復` : '等下一回合跑得動'}
-        <span className="quota-limit-hit-why">CLI 回報額度上限，量表是速率視窗，看不到這件事</span>
+        {when ? t('{when} 恢復', { when }) : t('等下一回合跑得動')}
+        <span className="quota-limit-hit-why">{t('CLI 回報額度上限，量表是速率視窗，看不到這件事')}</span>
       </span>
     </div>
   )
@@ -683,18 +695,25 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
 
 /** codex 額度重置券（2026-09-10 使用者）；daemon 只讀不用，要用在 codex `/status` → Reset usage。 */
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
+  const t = useT()
   if (!credits || credits.available <= 0) return null
   const left = msUntil(credits.expires_at, now)
+  const titleText = credits.title ?? t('額度重置券')
+  const tip = left === null
+    ? t('{title}・在 codex 裡用 /status → Reset usage', { title: titleText })
+    : t('{title}・{left}後過期・在 codex 裡用 /status → Reset usage', { title: titleText, left: fmtLeft(left) })
   return (
     <div className="quota-pop-line reset-credits">
       <span className="quota-win">
         <span className="quota-ico" aria-hidden="true">
           ⟳
         </span>
-        重置券
+        {t('重置券')}
       </span>
-      <span className="quota-reset-credit" title={`${credits.title ?? '額度重置券'}${left === null ? '' : `・${fmtLeft(left)}後過期`}・在 codex 裡用 /status → Reset usage`}>
-        <strong>{credits.available}</strong> 張可用
+      <span className="quota-reset-credit" title={tip}>
+        {t.x('{n} 張可用', {
+          n: <strong>{credits.available}</strong>,
+        })}
         {credits.title ? <span className="quota-reset-title">{credits.title}</span> : null}
       </span>
     </div>
@@ -717,6 +736,7 @@ function PopWindow({
   now: number
   hit: boolean
 }) {
+  const t = useT()
   const pct = remaining(w)
   if (pct === null) return null
   const left = msUntil(w?.resets_at, now)
@@ -733,11 +753,11 @@ function PopWindow({
         low={w?.low ?? false}
         critical={w?.critical ?? false}
         mark={resetMark(w?.resets_at, WINDOW_MS[win], now)}
-        markTitle={left === null ? undefined : `${name} 還有 ${fmtLeft(left)} 重置`}
+        markTitle={left === null ? undefined : t('{name} 還有 {back} 重置', { name, back: fmtLeft(left) })}
         hit={hit}
       />
       {/* 寫「還有多久」不寫時刻（2026-09-09 使用者要求）；絕對時刻留在 tooltip。 */}
-      <span className="quota-reset" title={w?.resets_at ? `重置時刻 ${fmtTime(w.resets_at)}` : undefined}>
+      <span className="quota-reset" title={w?.resets_at ? t('重置時刻 {time}', { time: fmtTime(w.resets_at) }) : undefined}>
         <span className="quota-ico" aria-hidden="true">
           ↻
         </span>
@@ -748,6 +768,7 @@ function PopWindow({
 }
 
 function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string; onAgyLogout: () => void }) {
+  const t = useT()
   const q = useEntryQuota(entry)
   const now = useMinuteNow()
   const known = useStore((s) => {
@@ -788,30 +809,33 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
         <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />
       </div>
-      {q?.stale ? <p className="quota-stale-note">{staleSuffix(q, now)}，新的探測回來後會更新</p> : null}
+      {q?.stale ? <p className="quota-stale-note">{t('{note}，新的探測回來後會更新', { note: staleSuffix(q, now, t) })}</p> : null}
       {!supported ? (
-        <p className="quota-pop-note">CLI 不支援額度查詢</p>
+        <p className="quota-pop-note">{t('CLI 不支援額度查詢')}</p>
       ) : agyMissing ? (
         <>
-          <p className="quota-pop-note warn">{hostLabel(host)} 尚未安裝 agy，要自動安裝嗎？</p>
-          <QuotaLoginSlash kind="agy" host={host} hostLabel={hostLabel(host)} identity={null} />
+          <p className="quota-pop-note warn">{t('{host} 尚未安裝 agy，要自動安裝嗎？', { host: hostLabel(host, t) })}</p>
+          <QuotaLoginSlash kind="agy" host={host} hostLabel={hostLabel(host, t)} identity={null} />
         </>
       ) : !known || (five === null && seven === null && fable === null) ? (
         <>
           <p className={`quota-pop-note${loggedOut || agyQuotaError ? ' warn' : ''}`}>
             {loggedOut
-              ? `${hostLabel(host)} 上這個帳號未登入。`
+              ? t('{host} 上這個帳號未登入。', { host: hostLabel(host, t) })
               : agyQuotaError
-                ? `已登入，但額度暫時拿不到：${agyQuotaErrorText(agyQuotaError)}（${fmtTime(agyQuotaError.at)} 起；會自動重試）`
+                ? t('已登入，但額度暫時拿不到：{error}（{time} 起；會自動重試）', {
+                    error: agyQuotaErrorText(agyQuotaError),
+                    time: fmtTime(agyQuotaError.at),
+                  })
                 : entry.kind === 'agy' || weeklyOnlyKind(entry.kind)
-                  ? '背景查詢中'
-                  : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
+                  ? t('背景查詢中')
+                  : t('尚未取得（啟動一個 {kind} bot 後回報）', { kind: KIND_LABEL[entry.kind] })}
           </p>
           {loggedOut ? (
             entry.kind === 'codex' ? (
               <CodexShellLogin host={host} identity={entry.identity} />
             ) : (
-              <QuotaLoginSlash kind={entry.kind} host={host} hostLabel={hostLabel(host)} identity={entry.identity} />
+              <QuotaLoginSlash kind={entry.kind} host={host} hostLabel={hostLabel(host, t)} identity={entry.identity} />
             )
           ) : null}
         </>
@@ -832,8 +856,8 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
                 </span>
                 5h
               </span>
-              <span className="quota-no-cap">無上限</span>
-              <span className="quota-reset">{NO_CAP_TITLE}</span>
+              <span className="quota-no-cap">{t('無上限')}</span>
+              <span className="quota-reset">{t('這個方案沒有 5 小時上限，只看週額度')}</span>
             </div>
           ) : (
             <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} hit={Boolean(q?.limit_hit)} />
@@ -868,6 +892,7 @@ export function QuotaStrip({
   /** 顯示哪一台主機的額度（SPEC §14），預設本機。 */
   host?: string
 }) {
+  const t = useT()
   const quota = useStore((s) => s.quota)
   const configured = useStore((s) => s.identities)
   // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
@@ -983,7 +1008,7 @@ export function QuotaStrip({
   // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
   const shown = ordered
   return (
-    <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
+    <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host, t)}>
       {/* 容器而非 button：checkbox 不能塞在 button 裡。 */}
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
         {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
@@ -1033,17 +1058,17 @@ export function QuotaStrip({
         })}
       </div>
       {open ? (
-        <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`} style={popTop !== null ? { top: popTop } : undefined}>
-          <div className="quota-pop-title">{quotaTitle(host)}</div>
+        <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
+          <div className="quota-pop-title">{quotaTitle(host, t)}</div>
           {(only ? popEntries.filter((e) => entryReactKey(e) === only) : popEntries).map((entry) => (
             <PopRow key={entryReactKey(entry)} entry={entry} host={host} onAgyLogout={() => setAgyLogoutOpen(true)} />
           ))}
           {only && popEntries.length > 1 ? (
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
-              看全部（{popEntries.length}）
+              {t('看全部（{count}）', { count: popEntries.length })}
             </button>
           ) : null}
-          {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · ↻ 是距離重置還有多久</p> : null}
+          {freshest ? <p className="quota-pop-foot">{t('更新於 {time} · ↻ 是距離重置還有多久', { time: fmtTime(freshest) })}</p> : null}
         </div>
       ) : null}
       <AgyLogoutDialog host={host} open={agyLogoutOpen} onClose={() => setAgyLogoutOpen(false)} />
