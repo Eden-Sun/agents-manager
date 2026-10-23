@@ -116,7 +116,7 @@ export function ShareProfileField({
           )}
           {folder.mode === 'new' && !trusted ? (
             <div className="share-folder-row">
-              <span className="share-folder-prefix">{remote ? `${remote}：~/shared-bots/` : '~/shared-bots/'}</span> {/* i18n-ignore */}
+              <span className="share-folder-prefix">{remote ? `${remote}${t('：')}~/shared-bots/` : '~/shared-bots/'}</span>
               <input
                 type="text"
                 value={folder.name}

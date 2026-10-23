@@ -98,7 +98,7 @@ export function integrationErrText(e: unknown, host: string): string {
     if (e.status === 404 && !e.body.reason) return t('這顆 daemon 還沒有 integration 更新（HTTP 404），或不認得主機 {host}', { host })
     if (e.status === 405) return t('這顆 daemon 還沒有 integration 更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon')
     if (e.status === 403) return t('integration 更新只給使用者在設定頁按')
-    return `HTTP ${e.status}${typeof e.body.error === 'string' ? `：${e.body.error}` : ''}` // i18n-ignore
+    return `HTTP ${e.status}${typeof e.body.error === 'string' ? `${t('：')}${e.body.error}` : ''}`
   }
   return e instanceof Error ? e.message : String(e)
 }

@@ -60,6 +60,14 @@ test('英文的插值名稱和 key 一致，複數兩邊都有', () => {
   assert.deepEqual(bad, [])
 })
 
+test('英文不含全形標點（括號、冒號、逗號、句號、斜線都用半形）', () => {
+  const fullwidth = /[\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff5e]/u
+  const bad = Object.entries(EN_PARTS).flatMap(([area, dict]) =>
+    Object.entries(dict).flatMap(([key, entry]) => entryStrings(entry).filter((s) => fullwidth.test(s)).map((s) => `${area}: ${key} → ${s}`)),
+  )
+  assert.deepEqual(bad, [])
+})
+
 test('不同區塊對同一句寫了不同的英文（相同沒關係）', () => {
   assert.deepEqual(EN_CONFLICTS, [])
 })

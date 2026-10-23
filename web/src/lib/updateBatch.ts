@@ -2,6 +2,7 @@ import type { AgentStatus, Bot, Run } from '../api/types'
 import { cmpVersion } from './releaseTriage'
 import { updateRange } from './updateRange'
 import { backgroundLabel } from './backgroundJobs'
+import { t } from './i18n'
 import type { UpstreamItem } from '../store/upstreamUpdate'
 
 /**
@@ -46,8 +47,8 @@ export function isChildBot(bot: Pick<Bot, 'managed_by' | 'parent_bot_id'>): bool
  * 前端的計數要跟 daemon 同一條線，不然框裡寫「重啟 N 顆」，實際動的比它少。
  */
 function neverRestartedReason(bot: Bot, run: Run): string | null {
-  if (isChildBot(bot)) return '子 agent，由父 Bot 重開' // i18n-ignore
-  if (bot.herdr_session === 'default' || run.herdr_session === 'default') return '在你自己的 herdr default session 裡，daemon 不動它' // i18n-ignore
+  if (isChildBot(bot)) return t('子 agent，由父 Bot 重開')
+  if (bot.herdr_session === 'default' || run.herdr_session === 'default') return t('在你自己的 herdr default session 裡，daemon 不動它')
   return null
 }
 
@@ -57,26 +58,26 @@ function neverRestartedReason(bot: Bot, run: Run): string | null {
  */
 export function passiveUpdateHint(bot: Bot, run: Run | null | undefined): string | null {
   if (!run?.update_notice?.trim()) return null
-  if (isChildBot(bot)) return needsManualInstall(bot, run) ? '新版還沒安裝，由父 Bot 安排安裝與重啟' : '新版已安裝，由父 Bot 安排重啟' // i18n-ignore
+  if (isChildBot(bot)) return needsManualInstall(bot, run) ? t('新版還沒安裝，由父 Bot 安排安裝與重啟') : t('新版已安裝，由父 Bot 安排重啟')
   if (needsManualInstall(bot, run)) return null
-  if (neverRestartedReason(bot, run)) return '新版已安裝；這顆在你自己的 herdr default session 裡，daemon 不會幫你重啟' // i18n-ignore
+  if (neverRestartedReason(bot, run)) return t('新版已安裝；這顆在你自己的 herdr default session 裡，daemon 不會幫你重啟')
   return null
 }
 
 /** `null` = 可以動。 */
 function busyReason(bot: Bot, run: Run, hasInFlightTurn: boolean): string | null {
-  if (needsManualInstall(bot, run)) return '新版還沒裝，要先手動安裝才能套用' // i18n-ignore
+  if (needsManualInstall(bot, run)) return t('新版還沒裝，要先手動安裝才能套用')
   return runBusyReason(run, hasInFlightTurn)
 }
 
 /** 不管更新有沒有裝，這顆現在能不能重啟。 */
 function runBusyReason(run: Run, hasInFlightTurn: boolean): string | null {
-  if (run.state !== 'running') return '還在啟動或關閉中' // i18n-ignore
+  if (run.state !== 'running') return t('還在啟動或關閉中')
   const st: AgentStatus = run.agent_status
-  if (st === 'working') return '正在跑' // i18n-ignore
-  if (st === 'blocked') return '卡在提問，等人回答' // i18n-ignore
-  if (st !== 'idle') return '狀態不明' // i18n-ignore
-  if (hasInFlightTurn) return '還有一回合沒收掉' // i18n-ignore
+  if (st === 'working') return t('正在跑')
+  if (st === 'blocked') return t('卡在提問，等人回答')
+  if (st !== 'idle') return t('狀態不明')
+  if (hasInFlightTurn) return t('還有一回合沒收掉')
   // 回合結束了、背景還在跑：重啟一退 CLI，背景 shell／終端跟著沒了（daemon `Skip::BackgroundJobs`，#767）。null＝沒看過，不擋。
   const bg = run.background_jobs ?? 0
   if (bg > 0) return backgroundLabel(bg)
@@ -85,7 +86,7 @@ function runBusyReason(run: Run, hasInFlightTurn: boolean): string | null {
 
 /** 確認框裡「會重啟」那一列的字：背景狀態沒看過的標出來（#767）。 */
 export function readyLabel(b: UpdateBatchCounts['ready'][number]): string {
-  return b.backgroundUnknown ? `${b.name}（背景狀態未知）` : b.name // i18n-ignore
+  return b.backgroundUnknown ? t('{name}（背景狀態未知）', { name: b.name }) : b.name
 }
 
 export function updateBatchCounts(
@@ -194,8 +195,8 @@ function codexUpstreamPlan(
   if (!disk) return null
   // 同 daemon `codex_update::pending_text`：`updateRange` 從這句讀 (from, to]。
   const notice = disk.installedVersion
-    ? `codex 有新版 ${disk.installedVersion} → ${upstream.target}，需安裝後重啟` // i18n-ignore
-    : `codex 有新版 ${upstream.target}，需安裝後重啟` // i18n-ignore
+    ? t('codex 有新版 {from} → {to}，需安裝後重啟', { from: disk.installedVersion, to: upstream.target })
+    : t('codex 有新版 {to}，需安裝後重啟', { to: upstream.target })
   const plan: CodexInstallPlan = { host: disk.host, notice, installCount: 0, ready: [], busy: [] }
   for (const bot of bots) {
     const run = runs[bot.id]
