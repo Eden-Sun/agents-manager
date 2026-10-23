@@ -4,6 +4,7 @@ import { setDeployWait, useDeployWait } from '../store/deployWait'
 import { useStore } from '../store/store'
 import './deployWait.css'
 import { limitHitWhen } from '../lib/limitHitWhen'
+import { useT } from '../lib/i18n'
 
 
 /**
@@ -12,6 +13,7 @@ import { limitHitWhen } from '../lib/limitHitWhen'
  * 以及「現在換版」（這次部署直接放寬）與「先等」（收起來）。
  */
 export function DeployWaitChip() {
+  const t = useT()
   const wait = useDeployWait((s) => s.wait)
   const notify = useStore((s) => s.notify)
   const selectBot = useStore((s) => s.selectBot)
@@ -58,7 +60,7 @@ export function DeployWaitChip() {
       notify('info', done)
       setOpen(false)
     } catch (e) {
-      notify('error', `沒能送出：${e instanceof Error ? e.message : String(e)}`)
+      notify('error', t('沒能送出：{reason}', { reason: e instanceof Error ? e.message : String(e) }))
     } finally {
       setBusy(false)
     }
@@ -72,23 +74,26 @@ export function DeployWaitChip() {
         className="deploy-wait-chip"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`部署 ${wait.commit.slice(0, 8)} 等換版窗口 ${mins} 分鐘，點開調度`}
+        aria-label={t('部署 {commit} 等換版窗口 {mins} 分鐘，點開調度', { commit: wait.commit.slice(0, 8), mins })}
         title={wait.summary}
         onClick={() => setOpen((o) => !o)}
       >
-        ⏳ 部署等 {mins} 分
+        {t('⏳ 部署等 {mins} 分', { mins })}
       </button>
       {open ? (
-        <div ref={pop} tabIndex={-1} className="deploy-wait-pop" role="dialog" aria-label="部署等換版窗口">
+        <div ref={pop} tabIndex={-1} className="deploy-wait-pop" role="dialog" aria-label={t('部署等換版窗口')}>
           <p>
-            要上 <code>{wait.commit.slice(0, 8)}</code>，已等 <strong>{mins}</strong> 分鐘。
+            {t.x('要上 {commit}，已等 {mins} 分鐘。', {
+              commit: <code>{wait.commit.slice(0, 8)}</code>,
+              mins: <strong>{mins}</strong>,
+            })}
           </p>
           {wait.blockers.length ? (
             <p>
-              被擋住：
+              {t('被擋住：')}
               {wait.blockers.map((b, i) => (
                 <span key={`${b.why}-${b.bot_id ?? b.name}`}>
-                  {i ? '、' : ''}
+                  {i ? t('、') : ''}
                   {b.bot_id ? (
                     <button
                       type="button"
@@ -103,29 +108,29 @@ export function DeployWaitChip() {
                   ) : (
                     <span>{b.name}</span>
                   )}
-                  （{BLOCKER_WHY[b.why] ?? b.why}）
+                  {t('（{why}）', { why: t.tr(BLOCKER_WHY[b.why] ?? b.why) })}
                 </span>
               ))}
             </p>
           ) : null}
           <p className="deploy-wait-note">
             {wait.user_escalated
-              ? '已按「現在換版」：working 不再擋（它身上等回合結束才送的排隊訊息也不擋），正在送訊息、別人握著窗口、讀不到狀態照樣擋。'
+              ? t('已按「現在換版」：working 不再擋（它身上等回合結束才送的排隊訊息也不擋），正在送訊息、別人握著窗口、讀不到狀態照樣擋。')
               : wait.escalates_at
-                ? `沒動作的話約 ${limitHitWhen(wait.escalates_at, now) ?? ''} 自動放寬（working 不再擋）。`
-                : '已自動放寬，只剩正在送訊息（或閒著的 bot 排隊訊息即將送出）、別人握著窗口或讀不到狀態在擋。'}
+                ? t('沒動作的話約 {when} 自動放寬（working 不再擋）。', { when: limitHitWhen(wait.escalates_at, now) ?? '' })
+                : t('已自動放寬，只剩正在送訊息（或閒著的 bot 排隊訊息即將送出）、別人握著窗口或讀不到狀態在擋。')}
           </p>
           <div className="deploy-wait-actions">
-            <button type="button" className="btn" disabled={busy} onClick={() => void run(() => dismissDeployWait(wait.id), '先等：部署照樣在等，到時候自動放寬')}>
-              先等
+            <button type="button" className="btn" disabled={busy} onClick={() => void run(() => dismissDeployWait(wait.id), t('先等：部署照樣在等，到時候自動放寬'))}>
+              {t('先等')}
             </button>
             <button
               type="button"
               className="btn primary"
               disabled={busy || wait.user_escalated}
-              onClick={() => void run(() => escalateDeployWait(wait.id), '已放寬這次部署：working 不再擋，下一次試窗口就換版')}
+              onClick={() => void run(() => escalateDeployWait(wait.id), t('已放寬這次部署：working 不再擋，下一次試窗口就換版'))}
             >
-              現在換版
+              {t('現在換版')}
             </button>
           </div>
         </div>

@@ -9,6 +9,7 @@ import {
   type ChangelogReply,
   type TranslationView,
 } from '../api/changelog'
+import { msg, t, tr, useT } from '../lib/i18n'
 import './updateChangelog.css'
 
 /**
@@ -29,6 +30,7 @@ export function UpdateChangelog({
   /** 已知的目標版本；codex 的更新是 TUI 當場問的、磁碟上還是舊版，只能從畫面讀。 */
   to?: string | null
 }) {
+  const t = useT()
   // 以「這次請求的 key」配對結果：key 換了就等於重新載入，不必在 effect 裡同步清狀態。
   const key = `${kind}|${host}|${from ?? ''}|${to ?? ''}`
   const [state, setState] = useState<{ key: string; reply: ChangelogReply } | null>(null)
@@ -94,7 +96,7 @@ export function UpdateChangelog({
   if (!reply) {
     return (
       <div className="update-changelog loading" role="status">
-        正在取得新版 changelog…
+        {t('正在取得新版 changelog…')}
       </div>
     )
   }
@@ -103,24 +105,24 @@ export function UpdateChangelog({
     reply.installedVersion && reply.fromVersion && reply.installedVersion !== reply.fromVersion
       ? `${reply.fromVersion} → ${reply.installedVersion}`
       : reply.installedVersion
-        ? `新版 ${reply.installedVersion}`
+        ? t('新版 {version}', { version: reply.installedVersion })
         : null
 
   if (!reply.found) {
     const official = hasOwnSource(kind)
     return (
       <div className="update-changelog missing" role="status">
-        <strong>{official ? '找不到這一版的更新說明' : '找不到 changelog'}</strong>
+        <strong>{official ? t('找不到這一版的更新說明') : t('找不到 changelog')}</strong>
         {head ? <span className="update-changelog-ver">{head}</span> : null}
-        <div className="update-changelog-why">{reply.error ?? '沒有拿到任何段落'}</div>
+        <div className="update-changelog-why">{reply.error ?? t('沒有拿到任何段落')}</div>
         <a href={reply.sourceUrl} target="_blank" rel="noreferrer">
-          {official ? '看官方更新說明 ↗' : '自己到 GitHub 看 CHANGELOG ↗'}
+          {official ? t('看官方更新說明 ↗') : t('自己到 GitHub 看 CHANGELOG ↗')}
         </a>
         {reply.altUrl ? (
           <>
             {' '}
             <a href={reply.altUrl} target="_blank" rel="noreferrer">
-              備援：官方 releases ↗
+              {t('備援：官方 releases ↗')}
             </a>
           </>
         ) : null}
@@ -136,7 +138,7 @@ export function UpdateChangelog({
   return (
     <div className="update-changelog">
       <div className="update-changelog-head">
-        <strong>這次更新改了什麼</strong>
+        <strong>{t('這次更新改了什麼')}</strong>
         {head ? <span className="update-changelog-ver">{head}</span> : null}
       </div>
       {translated && translated.summary.length > 0 ? (
@@ -147,7 +149,7 @@ export function UpdateChangelog({
         </ul>
       ) : null}
       {translated?.coverage === 'partial' ? (
-        <p className="update-changelog-tr-note">只翻了送出的部分，其餘仍看原文。</p>
+        <p className="update-changelog-tr-note">{t('只翻了送出的部分，其餘仍看原文。')}</p>
       ) : null}
       <div className="update-changelog-body">
         {sections.map((s) => (
@@ -158,7 +160,7 @@ export function UpdateChangelog({
         ))}
       </div>
       <a className="update-changelog-src" href={reply.sourceUrl} target="_blank" rel="noreferrer">
-        完整 CHANGELOG ↗
+        {t('完整 CHANGELOG ↗')}
       </a>
       <TranslationBar
         view={view}
@@ -183,18 +185,18 @@ export function UpdateChangelog({
 }
 
 const TRANSLATE_TARGET: Record<string, string> = {
-  'zh-Hant': '繁中',
-  'zh-Hans': '簡中',
-  en: '英文',
-  ja: '日文',
-  ko: '韓文',
+  'zh-Hant': msg('繁中'),
+  'zh-Hans': msg('簡中'),
+  en: msg('英文'),
+  ja: msg('日文'),
+  ko: msg('韓文'),
 }
 
 /** 只採用回應裡的 lang。沒有或不認得就寫「翻譯」，不猜成繁中。 */
 function translateButtonLabel(lang: string | null): string {
-  if (!lang) return '翻譯'
+  if (!lang) return t('翻譯')
   const name = TRANSLATE_TARGET[lang]
-  return name ? `翻譯成${name}` : '翻譯'
+  return name ? t('翻譯成{name}', { name: tr(name) }) : t('翻譯')
 }
 
 function retryReady(retryAfter: string | null, now: number): boolean {
@@ -205,28 +207,28 @@ function retryReady(retryAfter: string | null, now: number): boolean {
 }
 
 const ERROR_LABEL: Record<string, string> = {
-  timeout: '逾時',
-  rate_limited: '被限流',
-  http: '連線失敗',
-  missing_usage: '沒有用量',
-  schema: '格式不符',
-  sections: '段落對不上',
-  summary: '摘要不符',
-  lang: '語言不在允許表',
-  max_tokens: '輸出被截斷',
-  refusal: '被拒絕',
-  stop: '沒有正常結束',
-  ledger: '紀錄讀不到',
-  restart: '翻譯過程中斷',
-  not_sent: '還沒送出',
-  in_flight: '正在翻其他版本',
-  hourly: '這一小時的次數已滿',
-  attempts: '已達重試上限',
+  timeout: msg('逾時'),
+  rate_limited: msg('被限流'),
+  http: msg('連線失敗'),
+  missing_usage: msg('沒有用量'),
+  schema: msg('格式不符'),
+  sections: msg('段落對不上'),
+  summary: msg('摘要不符'),
+  lang: msg('語言不在允許表'),
+  max_tokens: msg('輸出被截斷'),
+  refusal: msg('被拒絕'),
+  stop: msg('沒有正常結束'),
+  ledger: msg('紀錄讀不到'),
+  restart: msg('翻譯過程中斷'),
+  not_sent: msg('還沒送出'),
+  in_flight: msg('正在翻其他版本'),
+  hourly: msg('這一小時的次數已滿'),
+  attempts: msg('已達重試上限'),
 }
 
 function shortReason(code: string | null): string {
-  if (!code || code.length > 32) return '沒有完成'
-  return ERROR_LABEL[code] ?? '沒有完成'
+  if (!code || code.length > 32 || !ERROR_LABEL[code]) return t('沒有完成')
+  return tr(ERROR_LABEL[code])
 }
 
 function TranslationBar({
@@ -248,6 +250,7 @@ function TranslationBar({
   onRetry: () => void
   onRecheck: () => void
 }) {
+  const t = useT()
   if (!view || view.status === 'unconfigured' || view.status === 'skipped') return null
   if (view.status === 'absent') {
     return (
@@ -257,29 +260,29 @@ function TranslationBar({
     )
   }
   if (view.status === 'unavailable') {
-    return <p className="update-changelog-tr-note">翻譯狀態暫時讀不到</p>
+    return <p className="update-changelog-tr-note">{t('翻譯狀態暫時讀不到')}</p>
   }
   if (view.status === 'completed') {
     return (
       <div className="update-changelog-tr">
-        <button type="button" onClick={onToggle}>{showOriginal ? '看翻譯' : '看原文'}</button>
+        <button type="button" onClick={onToggle}>{showOriginal ? t('看翻譯') : t('看原文')}</button>
       </div>
     )
   }
   if (view.status === 'in_flight' || view.status === 'reserved') {
     return (
       <div className="update-changelog-tr">
-        <p className="update-changelog-tr-note">{pollStopped ? '翻譯還在進行' : '正在翻譯…'}</p>
-        {pollStopped ? <button type="button" onClick={onRecheck}>再查一次</button> : null}
+        <p className="update-changelog-tr-note">{pollStopped ? t('翻譯還在進行') : t('正在翻譯…')}</p>
+        {pollStopped ? <button type="button" onClick={onRecheck}>{t('再查一次')}</button> : null}
       </div>
     )
   }
   const ready = retryReady(view.retryAfter, now)
-  const lead = view.status === 'interrupted' ? '翻譯中斷' : '翻譯沒有完成'
+  const lead = view.status === 'interrupted' ? t('翻譯中斷') : t('翻譯沒有完成')
   return (
     <div className="update-changelog-tr">
-      <p className="update-changelog-tr-note">{lead}：{shortReason(view.error)}</p>
-      <button type="button" onClick={onRetry} disabled={!ready}>再試一次</button>
+      <p className="update-changelog-tr-note">{t('{lead}：{reason}', { lead, reason: shortReason(view.error) })}</p>
+      <button type="button" onClick={onRetry} disabled={!ready}>{t('再試一次')}</button>
     </div>
   )
 }
