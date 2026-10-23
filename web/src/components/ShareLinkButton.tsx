@@ -6,13 +6,14 @@ import { shareIcon } from '../lib/shareProfile'
 import { useShareRequests } from '../hooks/useShareRequests'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
+import { useT, type TFn } from '../lib/i18n'
 import './shareLinkButton.css'
 
 /** 分享連結拿不到完整網址時的人話（舊資料只有雜湊，或 base_url 沒設）。 */
-function noUrlText(s: ShareState): string {
+function noUrlText(s: ShareState, t: TFn): string {
   return s.needs_rotate
-    ? `這條連結（結尾 ${s.token_hint ?? '…'}）是舊版開的，拿不回完整網址；從旁邊的選單「重產連結」一次就好`
-    : '拿不到分享連結：config.toml 的 [share] base_url 沒設'
+    ? t('這條連結（結尾 {token}）是舊版開的，拿不回完整網址；從旁邊的選單「重產連結」一次就好', { token: s.token_hint ?? '…' })
+    : t('拿不到分享連結：config.toml 的 [share] base_url 沒設')
 }
 
 /** 鏈結圖示（線條、currentColor，跟 ⚙ 同風格；#1180 不用 emoji）。 */
@@ -37,6 +38,7 @@ function LinkIcon() {
  * 分享中按下＝開選單，第一項「複製連結」，其後是重產／關閉（都要確認）。
  */
 export function ShareLinkButton({ botId }: { botId: string }) {
+  const t = useT()
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
   const restricted = profile !== null
   const enabled = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
@@ -86,8 +88,8 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const selectOnly = !asyncCopyAvailable()
 
   const copy = (s: ShareState, done: string) => {
-    if (!s.url) return notify('error', noUrlText(s))
-    void copyText(s.url).then((ok) => notify(ok ? 'info' : 'error', ok ? done : `複製失敗，請手動複製：${s.url}`))
+    if (!s.url) return notify('error', noUrlText(s, t))
+    void copyText(s.url).then((ok) => notify(ok ? 'info' : 'error', ok ? done : t('複製失敗，請手動複製：{url}', { url: s.url ?? '' })))
   }
 
   const openMenu = () => {
@@ -120,7 +122,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         openMenu()
         notify('info', selectDone)
       } else if (effective.enabled) copy(effective, done)
-      else notify('info', response.enabled ? '分享已關閉' : done)
+      else notify('info', response.enabled ? t('分享已關閉') : done)
     } finally {
       setBusy(false)
     }
@@ -131,7 +133,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const onMain = () => {
     // 未分享：開啟並複製；分享中：開選單（第一項才是複製）。
     if (enabled) return toggleMenu()
-    void run(() => setShareEnabled(botId, true), '已開啟分享並複製連結', '已開啟分享：連結在選單裡，長按選取後複製')
+    void run(() => setShareEnabled(botId, true), t('已開啟分享並複製連結'), t('已開啟分享：連結在選單裡，長按選取後複製'))
   }
 
   const onCopyFromMenu = () => {
@@ -147,14 +149,20 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           useStore.setState((state) => ({
             bots: state.bots.map((b) => (b.id === botId ? { ...b, share_enabled: false } : b)),
           }))
-          notify('info', '分享已關閉')
+          notify('info', t('分享已關閉'))
           return
         }
-        copy(s, '已複製分享連結')
+        copy(s, t('已複製分享連結'))
       },
       (e) => notify('error', shareErrorText(e)),
     )
   }
+
+  const trustedPrefix = profile === 'trusted' ? t('信任分享：拿到連結的人可以透過它操作這台機器。') : ''
+  const sharingTitle = share?.enabled && share.url
+    ? t('分享中：{url}。點一下開選單（第一項複製連結）', { url: share.url })
+    : t('分享中。點一下開選單（第一項複製連結）')
+  const btnTitle = `${trustedPrefix}${enabled ? sharingTitle : t('開啟分享，連結會複製到剪貼簿')}`
 
   return (
     <span className="share-link" ref={wrapRef}>
@@ -164,10 +172,10 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         type="button"
         className={`icon-btn share-link-main${enabled ? ' on' : ''}${profile === 'trusted' ? ' trusted' : ''}`}
         disabled={busy}
-        aria-label={enabled ? '複製分享連結' : '開啟分享並複製連結'}
+        aria-label={enabled ? t('複製分享連結') : t('開啟分享並複製連結')}
         aria-haspopup={enabled ? 'menu' : undefined}
         aria-expanded={enabled ? menu : undefined}
-        title={`${profile === 'trusted' ? '信任分享：拿到連結的人可以透過它操作這台機器。' : ''}${enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下開選單（第一項複製連結）` : '開啟分享，連結會複製到剪貼簿'}`}
+        title={btnTitle}
         onClick={onMain}
       >
         <LinkIcon />
@@ -177,7 +185,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           ref={menuRef}
           className="share-link-menu"
           role="menu"
-          aria-label="分享連結"
+          aria-label={t('分享連結')}
           onKeyDown={menuKeys}
           style={
             menuAt
@@ -194,17 +202,17 @@ export function ShareLinkButton({ botId }: { botId: string }) {
                 className="share-link-url"
                 readOnly
                 value={share.url}
-                aria-label="分享連結：長按選取後複製"
-                title="這個瀏覽器（非 https）不能直接寫剪貼簿：長按選取後複製"
+                aria-label={t('分享連結：長按選取後複製')}
+                title={t('這個瀏覽器（非 https）不能直接寫剪貼簿：長按選取後複製')}
                 onFocus={(e) => e.currentTarget.select()}
                 onClick={(e) => e.currentTarget.select()}
               />
             ) : (
-              <span className="share-link-url-note">{share ? noUrlText(share) : '讀取連結中…'}</span>
+              <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
             )
           ) : (
             <button type="button" role="menuitem" tabIndex={-1} onClick={onCopyFromMenu}>
-              複製連結
+              {t('複製連結')}
             </button>
           )}
           <button
@@ -216,7 +224,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
               setConfirm('rotate')
             }}
           >
-            重產連結
+            {t('重產連結')}
           </button>
           <button
             type="button"
@@ -228,33 +236,33 @@ export function ShareLinkButton({ botId }: { botId: string }) {
               setConfirm('off')
             }}
           >
-            關閉分享
+            {t('關閉分享')}
           </button>
         </span>
       ) : null}
       {/* 兩個框分開：同一個框有 800ms 防連點（同 BotShareSection）。 */}
       <ConfirmDialog
         open={confirm === 'rotate'}
-        title="重產分享連結？"
-        body="舊連結立刻失效，拿著舊連結的人會看到「連結已失效」。新連結會複製到剪貼簿，要重新傳給對方。"
-        confirmLabel="重產"
+        title={t('重產分享連結？')}
+        body={t('舊連結立刻失效，拿著舊連結的人會看到「連結已失效」。新連結會複製到剪貼簿，要重新傳給對方。')}
+        confirmLabel={t('重產')}
         danger
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           setConfirm(null)
-          void run(() => rotateShare(botId), '已重產並複製新連結，舊連結已失效', '已重產連結，舊連結已失效：新連結在選單裡，長按選取後複製')
+          void run(() => rotateShare(botId), t('已重產並複製新連結，舊連結已失效'), t('已重產連結，舊連結已失效：新連結在選單裡，長按選取後複製'))
         }}
       />
       <ConfirmDialog
         open={confirm === 'off'}
-        title="關閉分享？"
-        body="連結立刻失效；對話與檔案都還在，之後再開會產生一條新連結。"
-        confirmLabel="關閉分享"
+        title={t('關閉分享？')}
+        body={t('連結立刻失效；對話與檔案都還在，之後再開會產生一條新連結。')}
+        confirmLabel={t('關閉分享')}
         danger
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           setConfirm(null)
-          void run(() => setShareEnabled(botId, false), '已關閉分享')
+          void run(() => setShareEnabled(botId, false), t('已關閉分享'))
         }}
       />
     </span>
@@ -263,6 +271,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
 /** 側欄 bot 名字旁的標記：受限 🔗、信任分享 🔓（另一個顏色）；分享中亮起。 */
 export function ShareMark({ botId }: { botId: string }) {
+  const t = useT()
   const profile = useStore((s) => s.bots.find((x) => x.id === botId)?.share_profile ?? null)
   const mark = useStore((s) => {
     const b = s.bots.find((x) => x.id === botId)
@@ -270,7 +279,9 @@ export function ShareMark({ botId }: { botId: string }) {
   })
   if (!mark) return null
   const trusted = profile === 'trusted'
-  const label = mark === 'on' ? (trusted ? '信任分享中' : '分享中') : trusted ? '信任分享 bot（未分享）' : '分享用 bot（未分享）'
+  const label = mark === 'on'
+    ? (trusted ? t('信任分享中') : t('分享中'))
+    : (trusted ? t('信任分享 bot（未分享）') : t('分享用 bot（未分享）'))
   return (
     <span className={`share-mark ${mark}${trusted ? ' trusted' : ''}`} role="img" aria-label={label} title={label}>
       {shareIcon(profile)}

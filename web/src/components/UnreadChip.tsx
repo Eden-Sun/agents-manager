@@ -1,3 +1,4 @@
+import { msg, tr, useT, type TFn } from "../lib/i18n"
 /**
  * 標題列下面一列：等你、在跑、或釘選的 bot；一顆 bot 一顆晶片，狀態疊在同一顆上。
  *
@@ -46,7 +47,7 @@ const NARROW_QUERY = '(max-width: 720px)'
 
 /** 主力晶片的操作說明（`aria-describedby` 指到它）；畫面上看不到。 */
 const PIN_HINT_ID = 'unread-pin-hint'
-const PIN_HINT = '主力順序是固定的：可以拖曳晶片重排，鍵盤按 Ctrl 加左右方向鍵移動一格，觸控請長按後拖。'
+const PIN_HINT = msg('主力順序是固定的：可以拖曳晶片重排，鍵盤按 Ctrl 加左右方向鍵移動一格，觸控請長按後拖。')
 
 /** 桌機的兩組：★ 主力一組、其餘（在跑、剛跑完、要回答）一組，各自換行、各自裁切。 */
 type GroupName = 'pinned' | 'others'
@@ -87,12 +88,13 @@ interface ChipItem {
  * 主力撞限的文字（#1899）：`<kind> 已達用量上限，<時間> 恢復`。撞限還沒過 `until` 才有值（沒寫時間的照掛，等 daemon 清掉）。
  * 只比時間；判斷在 daemon（`bot.limit_hit` 由 `/api/state` 與 `bot_status` 帶來）。
  */
-function limitTitleOf(kind: Bot['kind'], hit: BotLimitHit | null | undefined, now: number): string | null {
+function limitTitleOf(kind: Bot['kind'], hit: BotLimitHit | null | undefined, now: number, t: TFn): string | null {
   if (!hit) return null
   const until = hit.until ? Date.parse(hit.until) : NaN
   if (!Number.isNaN(until) && until <= now) return null
   const when = limitHitWhen(hit.until)
-  return `${KIND_LABEL[kind]} 已達用量上限${when ? `，${when} 恢復` : '，恢復時間 CLI 沒寫'}`
+  const detail = when ? t('，{when} 恢復', { when }) : t('，恢復時間 CLI 沒寫')
+  return t('{kind} 已達用量上限{detail}', { kind: KIND_LABEL[kind], detail })
 }
 
 /** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
@@ -174,7 +176,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       {it.limitTitle ? <span className="unread-chip-limit" aria-hidden="true" /> : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
       {/* 撞限文字併進既有的 label（角標本身 aria-hidden），螢幕閱讀器只念一次。 */}
-      <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle].filter(Boolean).join('，')}</span>
+      <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle].filter(Boolean).join(' · ')}</span>
     </button>
   )
 }
@@ -191,6 +193,7 @@ function ScrollRow({ items, label, selectedBotId, dnd }: { items: ChipItem[]; la
 }
 
 function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[]; label: string; selectedBotId: string | null; dnd?: PinnedDnd }) {
+  const t = useT()
   const barRef = useRef<HTMLDivElement | null>(null)
   const scroll = useHorizontalScroll(barRef, true)
   useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
@@ -198,7 +201,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
   return (
     <div className={`unread-bar-wrap row${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
       {scroll.left ? (
-        <button type="button" className="unread-bar-arrow left" aria-label="往左看更多" onClick={() => scroll.by(-1)}>
+        <button type="button" className="unread-bar-arrow left" aria-label={t("往左看更多")} onClick={() => scroll.by(-1)}>
           ◂
         </button>
       ) : null}
@@ -209,7 +212,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
         {dnd ? <span className="sr-only" aria-live="polite">{dnd.announce}</span> : null}
       </div>
       {scroll.right ? (
-        <button type="button" className="unread-bar-arrow right" aria-label="往右看更多" onClick={() => scroll.by(1)}>
+        <button type="button" className="unread-bar-arrow right" aria-label={t("往右看更多")} onClick={() => scroll.by(1)}>
           ▸
         </button>
       ) : null}
@@ -218,6 +221,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
 }
 
 export function UnreadChip() {
+  const t = useT()
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
@@ -276,11 +280,11 @@ export function UnreadChip() {
         waitsKids: kids,
         kidsRunning: nKids,
         working,
-        title: botTitle(b.name, pinned, n, needsReply, kids, current, atCapacity) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
+        title: botTitle(b.name, pinned, n, needsReply, kids, current, t, atCapacity) + (nKids > 0 ? t('（{kids}）', { kids: kidsText(nKids) }) : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
         cache: pinned ? chipCache(runs[b.id], now, working) : null,
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
-        limitTitle: pinned ? limitTitleOf(b.kind, b.limit_hit, now) : null,
+        limitTitle: pinned ? limitTitleOf(b.kind, b.limit_hit, now, t) : null,
       })
     }
     return out
@@ -358,7 +362,7 @@ export function UnreadChip() {
           }}
           resizable={!pinExpanded}
         />
-        <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
+        <ScrollRow items={otherItems} label={t("在跑或剛完成的 bot")} selectedBotId={selectedBotId} />
         {peekCard}
         {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
       </>
@@ -393,14 +397,14 @@ export function UnreadChip() {
           type="button"
           className="unread-bar-more"
           aria-expanded={expanded}
-          title={expanded ? '收合' : moreTitle(hiddenItems)}
+          title={expanded ? t('收合') : moreTitle(hiddenItems)}
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded ? '收合' : `+${hidden}`}
+          {expanded ? t('收合') : `+${hidden}`}
         </button>
       ) : null}
       {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想；2026-10-08 hover 狀態卡拿掉後的唯一入口）。 */}
-      <button type="button" className="unread-bar-help" aria-label="顏色代表什麼？" title="顏色代表什麼？" onClick={() => setLegend(true)}>
+      <button type="button" className="unread-bar-help" aria-label={t("顏色代表什麼？")} title={t("顏色代表什麼？")} onClick={() => setLegend(true)}>
         ?
       </button>
       {peekCard}
@@ -436,6 +440,7 @@ function PinGrid({
   onRows?: (n: number, done: boolean) => void
   resizable?: boolean
 }) {
+  const t = useT()
   const gridRef = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ y: number; rows: number; rowPx: number } | null>(null)
   if (items.length === 0) return null
@@ -450,7 +455,7 @@ function PinGrid({
   const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.atCapacity) ? ' at-capacity' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
   return (
     <div className={`unread-bar-wrap row${canResize ? ' pin-resizable' : ''}`}>
-      <div className="unread-pin-grid" ref={gridRef} role="status" aria-live="polite" aria-label="主力 bot">
+      <div className="unread-pin-grid" ref={gridRef} role="status" aria-live="polite" aria-label={t("主力 bot")}>
         {items.map((it) => (
           <Chip key={it.id} it={it} dnd={dnd} lamp />
         ))}
@@ -459,15 +464,15 @@ function PinGrid({
             type="button"
             className={`unread-chip pin-more${moreState}`}
             title={moreTitle(hidden)}
-            aria-label={`${moreTitle(hidden)}：${hidden.map((h) => h.name).join('、')}`}
+            aria-label={t('{title}：{names}', { title: moreTitle(hidden), names: hidden.map((h) => h.name).join(' · ') })}
             aria-expanded={false}
             onClick={onToggle}
           >
             <span className="unread-chip-name">+{hidden.length}</span>
           </button>
         ) : collapsible ? (
-          <button type="button" className="unread-chip pin-more" aria-expanded title={`收合成 ${rows ?? 3} 排`} onClick={onToggle}>
-            <span className="unread-chip-name">收合</span>
+          <button type="button" className="unread-chip pin-more" aria-expanded title={t('收合成 {n} 排', { n: rows ?? 3 })} onClick={onToggle}>
+            <span className="unread-chip-name">{t("收合")}</span>
           </button>
         ) : null}
         <span className="sr-only" aria-live="polite">
@@ -479,12 +484,12 @@ function PinGrid({
           className="pin-rows-handle"
           role="slider"
           tabIndex={0}
-          aria-label="主力區最多幾排（上下拖）"
+          aria-label={t("主力區最多幾排（上下拖）")}
           aria-valuemin={1}
           aria-valuemax={pinGridRowsNeeded(total)}
           aria-valuenow={Math.min(rows, pinGridRowsNeeded(total))}
-          aria-valuetext={`${Math.min(rows, pinGridRowsNeeded(total))} 排`}
-          title="上下拖，調整主力區最多幾排"
+          aria-valuetext={t('{n} 排', { n: Math.min(rows, pinGridRowsNeeded(total)) })}
+          title={t("上下拖，調整主力區最多幾排")}
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture(e.pointerId)
             drag.current = { y: e.clientY, rows: Math.min(rows, pinGridRowsNeeded(total)), rowPx: rowPx() }
@@ -525,7 +530,7 @@ function PinGrid({
 function PinHint() {
   return (
     <span id={PIN_HINT_ID} className="sr-only">
-      {PIN_HINT}
+      {tr(PIN_HINT)}
     </span>
   )
 }
@@ -536,14 +541,14 @@ function chipClass(it: ChipItem): string {
   return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
 }
 
-function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean, kids: boolean, current: boolean, atCapacity = false): string {
-  const who = pinned ? `${name}（主要執行的 bot）` : name
-  const tail = current ? '你正在看的就是它' : '點一下跳過去'
-  if (needsReply) return `${who} 停在一個要你回答的提示上。${current ? tail : '點一下過去回答'}`
-  if (atCapacity) return `${who}：${CAPACITY_LABEL}，這一回合沒跑（不是卡住）。${tail}`
-  if (n > 0) return `${who} 有 ${n} 個回合已完成、還沒看過。${tail}`
-  if (kids) return `${who} 在等子 agent 完成。${tail}`
-  return `${who}。${tail}`
+function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean, kids: boolean, current: boolean, t: TFn, atCapacity = false): string {
+  const who = pinned ? t('{name}（主要執行的 bot）', { name }) : name
+  const tail = current ? t('你正在看的就是它') : t('點一下跳過去')
+  if (needsReply) return t('{who} 停在一個要你回答的提示上。{action}', { who, action: current ? tail : t('點一下過去回答') })
+  if (atCapacity) return t('{who}：{label}，這一回合沒跑（不是卡住）。{tail}', { who, label: CAPACITY_LABEL, tail })
+  if (n > 0) return t('{who} 有 {n} 個回合已完成、還沒看過。{tail}', { who, n, tail })
+  if (kids) return t('{who} 在等子 agent 完成。{tail}', { who, tail })
+  return t('{who}。{tail}', { who, tail })
 }
 
 /**

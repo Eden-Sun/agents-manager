@@ -3,12 +3,8 @@ import type { BotKind, ShareProfile } from '../api/types'
 import { shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { ConfirmDialog } from './ConfirmDialog'
 import { DirPicker } from './DirPicker'
+import { useT } from '../lib/i18n'
 import './botShare.css'
-
-const RESTRICTED_HINT =
-  '只能讀寫下面這個資料夾（與它自己的 outbox）；不能跑指令（沒有 Bash）、不能抓網頁（沒有 WebFetch，可以用 WebSearch）、不能開子 agent、不帶你的憑證。資料夾裡的 CLAUDE.md／AGENTS.md 與 memory/ 會當成它的指示與記憶。模型沒選＝最新的 Opus。建好後可在設定裡開分享連結，之後不能改回一般 bot。'
-const TRUSTED_HINT =
-  '跟一般 bot 一樣的權限：在下面這個資料夾（通常是專案目錄）裡跑指令、build、測試、git、dev server 都會真的動到東西，權限照 bot 設定。對方只看得到他自己和 bot 的對話。建好後可開分享連結，之後不能改回一般 bot。'
 
 /**
  * 建 bot 表單的「用途」（SPEC §20）：不分享／分享用（受限）／信任分享，三選一；建好之後不能切換，要分享就新建一顆。
@@ -35,6 +31,7 @@ export function ShareProfileField({
   /** 信任分享的預設資料夾。 */
   projectPath?: string
 }) {
+  const t = useT()
   const blocked = shareProfileBlocked(kind)
   // 遠端專案：資料夾、outbox、籠子都在那台（R-S2）；表單照常，只把位置標出來。
   const remote = host && host !== 'local' ? host : null
@@ -56,39 +53,49 @@ export function ShareProfileField({
     }
     onChange(p)
   }
+
+  const restrictedHint = t(
+    '只能讀寫下面這個資料夾（與它自己的 outbox）；不能跑指令（沒有 Bash）、不能抓網頁（沒有 WebFetch，可以用 WebSearch）、不能開子 agent、不帶你的憑證。資料夾裡的 CLAUDE.md／AGENTS.md 與 memory/ 會當成它的指示與記憶。模型沒選＝最新的 Opus。建好後可在設定裡開分享連結，之後不能改回一般 bot。',
+  )
+  const trustedHint = t(
+    '跟一般 bot 一樣的權限：在下面這個資料夾（通常是專案目錄）裡跑指令、build、測試、git、dev server 都會真的動到東西，權限照 bot 設定。對方只看得到他自己和 bot 的對話。建好後可開分享連結，之後不能改回一般 bot。',
+  )
+
   return (
     <div className="field share-profile-field">
-      <span>用途</span>
-      <div className="share-profile-choices" role="radiogroup" aria-label="用途">
+      <span>{t('用途')}</span>
+      <div className="share-profile-choices" role="radiogroup" aria-label={t('用途')}>
         <label>
           <input type="radio" name="share-profile" checked={!on} onChange={() => pick(null)} />
-          不分享
+          {t('不分享')}
         </label>
         <label title={blocked ?? undefined}>
           <input type="radio" name="share-profile" checked={profile === 'restricted'} disabled={Boolean(blocked)} onChange={() => pick('restricted')} />
-          分享用（受限）
+          {t('分享用（受限）')}
         </label>
         <label title={blocked ?? undefined} className="share-profile-trusted">
           <input type="radio" name="share-profile" checked={trusted} disabled={Boolean(blocked)} onChange={() => pick('trusted')} />
-          🔓 信任分享
+          {t('🔓 信任分享')}
         </label>
       </div>
-      <span className="hint">{blocked ?? (profile === 'restricted' ? RESTRICTED_HINT : trusted ? TRUSTED_HINT : '要把這顆 bot 分享給外部使用者時才選。')}</span>
+      <span className="hint">{blocked ?? (profile === 'restricted' ? restrictedHint : trusted ? trustedHint : t('要把這顆 bot 分享給外部使用者時才選。'))}</span>
       <ConfirmDialog
         open={asking}
-        title="建立信任分享的 bot？"
+        title={t('建立信任分享的 bot？')}
         body={
           <>
             <p>
-              <strong>拿到連結的人可以透過它操作這台機器上的任何東西</strong>：跑指令、改檔案、build、git、開 dev server，權限跟你自己的 bot 一樣。只分享給絕對信任的人。
+              {t.x('拿到連結的人可以透過它操作這台機器上的任何東西{desc}', {
+                desc: t('：跑指令、改檔案、build、git、開 dev server，權限跟你自己的 bot 一樣。只分享給絕對信任的人。'),
+              })}
             </p>
             <label className="share-trusted-ack">
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-              我了解，只會分享給絕對信任的人
+              {t('我了解，只會分享給絕對信任的人')}
             </label>
           </>
         }
-        confirmLabel="建立信任分享"
+        confirmLabel={t('建立信任分享')}
         danger
         confirmDisabled={!ack}
         onCancel={() => setAsking(false)}
@@ -100,22 +107,22 @@ export function ShareProfileField({
         }}
       />
       {on ? (
-        <div className="share-folder" role="radiogroup" aria-label="它的資料夾">
+        <div className="share-folder" role="radiogroup" aria-label={t('它的資料夾')}>
           {trusted ? null : (
             <label>
               <input type="radio" name="share-folder" checked={folder.mode === 'new'} onChange={() => onFolder({ ...folder, mode: 'new' })} />
-              開一個新資料夾
+              {t('開一個新資料夾')}
             </label>
           )}
           {folder.mode === 'new' && !trusted ? (
             <div className="share-folder-row">
-              <span className="share-folder-prefix">{remote ? `${remote}：~/shared-bots/` : '~/shared-bots/'}</span>
+              <span className="share-folder-prefix">{remote ? `${remote}：~/shared-bots/` : '~/shared-bots/'}</span> {/* i18n-ignore */}
               <input
                 type="text"
                 value={folder.name}
-                placeholder={botName || '名稱'}
+                placeholder={botName || t('名稱')}
                 spellCheck={false}
-                aria-label="新資料夾名稱"
+                aria-label={t('新資料夾名稱')}
                 aria-invalid={folderErr ? true : undefined}
                 aria-describedby={folderErr ? folderErrId : undefined}
                 onChange={(e) => onFolder({ ...folder, name: e.target.value })}
@@ -124,7 +131,7 @@ export function ShareProfileField({
           ) : null}
           <label>
             <input type="radio" name="share-folder" checked={folder.mode === 'existing' || trusted} onChange={() => onFolder({ ...folder, mode: 'existing' })} />
-            {trusted ? '它工作的資料夾（cwd）' : '用一個既有的資料夾'}
+            {trusted ? t('它工作的資料夾（cwd）') : t('用一個既有的資料夾')}
           </label>
           {folder.mode === 'existing' || trusted ? (
             <>
@@ -134,19 +141,19 @@ export function ShareProfileField({
                   value={folder.path}
                   placeholder="/home/you/project/docs"
                   spellCheck={false}
-                  aria-label="既有資料夾路徑"
+                  aria-label={t('既有資料夾路徑')}
                   aria-invalid={folderErr ? true : undefined}
                   aria-describedby={folderErr ? folderErrId : undefined}
                   onChange={(e) => onFolder({ ...folder, path: e.target.value })}
                 />
                 <button type="button" className="btn" onClick={() => setBrowsing(true)}>
-                  瀏覽…
+                  {t('瀏覽…')}
                 </button>
               </div>
               <p className="share-folder-warn" role="alert">
                 {trusted
-                  ? '⚠ 拿到連結的人可以透過它操作這台機器上的任何東西，不只這個資料夾。只分享給絕對信任的人。'
-                  : '⚠ 這個資料夾裡的所有檔案（含 .env 之類）拿到連結的人都可能透過 bot 讀到。常見的金鑰檔（.env*、*.pem、*.key、id_*）會再擋一層，但不要選放著秘密的資料夾。'}
+                  ? t('⚠ 拿到連結的人可以透過它操作這台機器上的任何東西，不只這個資料夾。只分享給絕對信任的人。')
+                  : t('⚠ 這個資料夾裡的所有檔案（含 .env 之類）拿到連結的人都可能透過 bot 讀到。常見的金鑰檔（.env*、*.pem、*.key、id_*）會再擋一層，但不要選放著秘密的資料夾。')}
               </p>
             </>
           ) : null}

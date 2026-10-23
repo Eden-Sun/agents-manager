@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { fetchMemPane } from '../api'
 import type { MemProcess, TerminalSnapshot } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { useT } from '../lib/i18n'
 
 /**
  * RAM 清單裡點 pane 後看它現在的畫面（唯讀）。用寬 modal 而不是列內攤開：
@@ -12,6 +13,7 @@ const REFRESH_MS = 2000
 const LINES = 200
 
 export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess; onClose: () => void }) {
+  const t = useT()
   const paneId = p.pane_id ?? ''
   const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -41,7 +43,7 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
           setErr(null)
         }
       } catch (e: unknown) {
-        if (alive) setErr(e instanceof Error ? e.message : '讀不到')
+        if (alive) setErr(e instanceof Error ? e.message : t('讀不到'))
       }
       busy = false
       next()
@@ -59,7 +61,7 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
       document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
     }
-  }, [host, paneId, p.socket_path])
+  }, [host, paneId, p.socket_path, t])
 
   // 第一次載入後捲到底：終端的「現在」在最下面。
   const scrolled = useRef(false)
@@ -89,22 +91,22 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
         className="modal blocked-modal mem-pane-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={`pane ${paneId} 的畫面`}
+        aria-label={t('pane {paneId} 的畫面', { paneId })}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal-head">
           <strong className="blocked-title">pane {paneId}</strong>
           <span className="modal-sub" title={p.argv}>
             {p.argv}
-            {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
-            ・只讀，每 2 秒更新
+            {snap?.columns ? ` · ${snap.columns}×${snap.rows ?? '?'}` : ''}
+            {` · ${t('只讀，每 2 秒更新')}`}
           </span>
-          <button ref={closeRef} type="button" className="icon-btn" aria-label="關閉" title="關閉（Esc）" onClick={onClose}>
+          <button ref={closeRef} type="button" className="icon-btn" aria-label={t('關閉')} title={t('關閉（Esc）')} onClick={onClose}>
             ✕
           </button>
         </div>
         <pre className="term blocked-modal-term mem-pane-term" ref={termRef} tabIndex={0}>
-          {err ? `讀取畫面失敗：${err}` : (snap?.text.replace(/\s+$/, '') || (snap ? '（畫面是空的）' : '讀取中…'))}
+          {err ? t('讀取畫面失敗：{err}', { err }) : (snap?.text.replace(/\s+$/, '') || (snap ? t('（畫面是空的）') : t('讀取中…')))}
         </pre>
       </div>
     </div>,

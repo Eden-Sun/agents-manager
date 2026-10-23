@@ -5,6 +5,7 @@ import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostN
 import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
 import { loginKindOnHost } from '../lib/onboardingActions'
 import { KindTag } from './KindTag'
+import { useT } from '../lib/i18n'
 import './quickAddBots.css'
 
 /** 空專案的一鍵新增：只列這台主機上真的能開的 kind／已登入身份，點一下就建好並啟動。 */
@@ -27,6 +28,7 @@ function nextName(base: string, projectId: string, bots: { project_id: string; n
 }
 
 export function QuickAddBots({ projectId }: { projectId: string }) {
+  const t = useT()
   const bots = useStore((s) => s.bots)
   const addBot = useStore((s) => s.addBot)
   const startBot = useStore((s) => s.startBot)
@@ -39,7 +41,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   const refreshTools = useStore((s) => s.refreshTools)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
   const [busy, setBusy] = useState<string | null>(null)
-  const hostLabel = !host || host === 'local' ? '本機' : host
+  const hostLabel = !host || host === 'local' ? t('本機') : host
 
   const disabledIdentities = useStore((s) => s.disabledIdentities)
   const choices = useMemo<Choice[]>(() => {
@@ -57,10 +59,10 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           identity: null,
           label: kind,
           title: quotaOff
-            ? `${kind} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
+            ? t('{name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用', { name: kind })
             : loggedOut
-              ? `${kind} 在 ${hostLabel} 尚未登入——點一下開登入終端`
-              : `在 ${hostLabel} 開一個 ${kind}`,
+              ? t('{name} 在 {host} 尚未登入——點一下開登入終端', { name: kind, host: hostLabel })
+              : t('在 {host} 開一個 {kind}', { host: hostLabel, kind }),
           loggedOut,
           quotaOff,
         })
@@ -70,23 +72,25 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
         const st = status[i.name]
         const loggedOut = st?.logged_in === false
         const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, i.name))
+        const accountStr = st?.account ? ` — ${st.account}` : ''
+        const hostNote = t('（{host}）', { host: hostLabel })
         out.push({
           key: `${kind}:${i.name}`,
           kind,
           identity: i.name,
           label: i.name,
           title: quotaOff
-            ? `${i.name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
+            ? t('{name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用', { name: i.name })
             : loggedOut
-              ? `${i.name} 在 ${hostLabel} 尚未登入——點一下開登入終端`
-              : `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
+              ? t('{name} 在 {host} 尚未登入——點一下開登入終端', { name: i.name, host: hostLabel })
+              : `${kind} · ${i.name}${accountStr}${hostNote}`,
           loggedOut,
           quotaOff,
         })
       }
     }
     return out
-  }, [tools, allIdentities, status, hostLabel, host, disabledQuota, disabledIdentities])
+  }, [tools, allIdentities, status, hostLabel, host, disabledQuota, disabledIdentities, t])
 
   if (choices.length === 0) return null
 
@@ -98,6 +102,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
       })
       return
     }
+
     setBusy(c.key)
     void addBot(projectId, {
       name: nextName(c.identity ?? c.kind, projectId, bots),
@@ -117,10 +122,10 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="quick-add" role="group" aria-label="快速新增 Bot">
+    <div className="quick-add" role="group" aria-label={t('快速新增 Bot')}>
       {loginPending === host ? (
         <button type="button" className="btn identity-recheck" disabled={toolsBusy} onClick={() => void refreshTools(host).then((ok) => { if (ok) setLoginPending(null) })}>
-          {toolsBusy ? '偵測中…' : '登入好了，重新偵測'}
+          {toolsBusy ? t('偵測中…') : t('登入好了，重新偵測')}
         </button>
       ) : null}
       {choices.map((c) => (
@@ -134,11 +139,11 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           onClick={() => pick(c)}
         >
           <KindTag kind={c.kind} />
-          <span className="quick-add-label">{busy === c.key ? '建立中…' : c.label}</span>
+          <span className="quick-add-label">{busy === c.key ? t('建立中…') : c.label}</span>
           {c.quotaOff ? (
-            <span className="quick-add-out">已停用</span>
+            <span className="quick-add-out">{t('已停用')}</span>
           ) : c.loggedOut ? (
-            <span className="quick-add-out">未登入・點此登入</span>
+            <span className="quick-add-out">{t('未登入・點此登入')}</span>
           ) : null}
         </button>
       ))}

@@ -20,11 +20,13 @@ import {
 import { isTopLevelBot } from '../store/routeSync'
 import { useStore } from '../store/store'
 import { PreviewPanel } from './PreviewPanel'
+import { useT } from '../lib/i18n'
 import './previewColumn.css'
 
 const KEY_STEP = 24
 
 export function PreviewColumn() {
+  const t = useT()
   const drawer = useMediaQuery(DRAWER_QUERY)
   const bot = useStore((s) => (s.selectedProjectId ? null : (s.bots.find((b) => b.id === s.selectedBotId) ?? null)))
   const open = usePreviewColOpen(bot?.id ?? null)
@@ -91,7 +93,7 @@ export function PreviewColumn() {
   const merged = running
   const headStart = (
     <>
-      <span className="preview-col-title">預覽</span>
+      <span className="preview-col-title">{t('預覽')}</span>
       <span className="preview-col-bot" title={bot.name}>
         {bot.name}
       </span>
@@ -101,8 +103,8 @@ export function PreviewColumn() {
     <button
       type="button"
       className="icon-btn preview-col-toggle"
-      title="收合預覽"
-      aria-label="收合預覽"
+      title={t('收合預覽')}
+      aria-label={t('收合預覽')}
       aria-expanded
       onClick={() => setPreviewColOpen(bot.id, false)}
     >
@@ -112,33 +114,33 @@ export function PreviewColumn() {
 
   if (!open) {
     return (
-      <aside className="preview-col rail" style={{ width: PREVIEW_RAIL_W }} aria-label="預覽">
+      <aside className="preview-col rail" style={{ width: PREVIEW_RAIL_W }} aria-label={t('預覽')}>
         <button
           type="button"
           className="icon-btn preview-col-toggle"
-          title="展開預覽"
-          aria-label="展開預覽"
+          title={t('展開預覽')}
+          aria-label={t('展開預覽')}
           aria-expanded={false}
           onClick={() => setPreviewColOpen(bot.id, true)}
         >
           ◧
         </button>
-        <span className="preview-col-rail-label">預覽</span>
+        <span className="preview-col-rail-label">{t('預覽')}</span>
       </aside>
     )
   }
 
   return (
-    <aside className={`preview-col${drag !== null ? ' dragging' : ''}`} style={{ width }} aria-label="預覽">
+    <aside className={`preview-col${drag !== null ? ' dragging' : ''}`} style={{ width }} aria-label={t('預覽')}>
       <div
         className="preview-col-grip"
         role="separator"
         aria-orientation="vertical"
-        aria-label="調整預覽寬度"
+        aria-label={t('調整預覽寬度')}
         aria-valuenow={width}
         aria-valuemin={PREVIEW_COL_MIN}
         aria-valuemax={maxWidth}
-        aria-valuetext={`${width} 像素`}
+        aria-valuetext={t('{width} 像素', { width })}
         tabIndex={0}
         onPointerDown={onDown}
         onPointerMove={onMove}
