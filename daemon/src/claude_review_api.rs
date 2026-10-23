@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn the_ledger_round_trips_and_pending_goes_stale() {
-        let dir = std::env::temp_dir().join(format!("am-crapi-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-crapi-{}", crate::db::ulid())));
         let now = chrono::Utc::now();
         let mut rec = Record {
             kind: "claude".into(), version: "2.1.300".into(), from_version: None, status: "pending".into(),
@@ -552,6 +552,5 @@ mod tests {
         assert_eq!(live_state(&rec, now), None);
         // 路徑不收怪字元。
         assert!(ledger_path(&dir, "claude", "../x").file_name().unwrap().to_string_lossy().starts_with("claude-.._x"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
