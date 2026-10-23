@@ -1,5 +1,5 @@
 import type { Message } from '../api/types'
-import { t } from './i18n'
+import { msg, t, tr } from './i18n'
 
 export const CHILD_ALERT_MARK = '[daemon 自動通知，不是 bot_request]' // i18n-ignore: exact marker emitted by daemon
 export interface ChildNotice { name: string; status: 'done' | 'blocked' }
@@ -62,11 +62,10 @@ export function childNoticeLabel(notices: readonly ChildNotice[]): string {
     const names = [...new Set(notices.filter((n) => n.status === status).map((n) => n.name))]
     return names.length
       ? [status === 'done'
-        ? t('子 agent 已回報完成：{names}', { names: names.join(', ') })
-        : t('子 agent 正在等人回答：{names}', { names: names.join(', ') })]
+        ? t('child {names} 回報完成', { names: names.join(tr(msg('、'))) })
+        : t('child {names} 在等人回答', { names: names.join(tr(msg('、'))) })]
       : []
   })
-  return notices.length > 1
-    ? t('↳ {parts} ({n})', { parts: parts.join('; '), n: notices.length })
-    : t('↳ {parts}', { parts: parts.join('; ') })
+  const count = notices.length > 1 ? t('（{n}）', { n: notices.length }) : ''
+  return t('↳ {parts}{count}', { parts: parts.join(tr(msg('；'))), count })
 }
