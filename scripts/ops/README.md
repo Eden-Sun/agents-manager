@@ -188,8 +188,16 @@ background, so AGM does not verify again.
 
 Flow (SPEC §18.2): `git fetch` in the dedicated checkout → compare with `daemon-update.built`; if nothing that lands in the
 binary differs, stop → walk back along first-parent to the newest sha whose `ubuntu-ci` is `success`
-(`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`) → `bun run build` plus
+(`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`) → the kick's adjacent `build-web-bundle.py`
+runs `bun install --frozen-lockfile` and `bun run build --outDir <staging>` →
 `cargo build --release -p agents-managerd` in the dedicated checkout → swap with `daemon-swap.sh`.
+
+The staging directory is beside `dist` on the same filesystem. The helper compares the complete relative file/directory
+lists and every file's bytes. An identical bundle leaves all `dist` file and directory mtimes intact, preserving Cargo's
+#1071 asset watch without triggering needless rebuilds. Changes publish complete files by rename: assets first, HTML
+entrypoints next, stale files last. Publication is atomic per file, not across the entire tree; Cargo starts only after
+all publication succeeds. A failed web build leaves the old bundle untouched and staging is cleaned on exit.
+A missing adjacent helper aborts the deploy with an explicit error; it never falls back to building directly into `dist`.
 
 It runs every 5 minutes (`StartInterval 300` / `OnUnitActiveSec=300s`). With nothing new, a round is a single
 `git fetch` and never asks GitHub.
@@ -327,8 +335,15 @@ happened.
 ### Production install (needs AGM approval)
 
 ```sh
-install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+# Install this matched pair in the same maintenance operation (AGM approval required).
+install -m 755 scripts/ops/build-web-bundle.py scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
+
+The manifest maps `scripts/ops/build-web-bundle.py` to `bin/build-web-bundle.py` and
+`scripts/ops/daemon-update-kick.sh` to `bin/daemon-update-kick.sh`. Run `ops-install.sh --dry-run` first, install both
+files together, then `agm ops-sync --check`. The automatic installer only updates already installed files, so it cannot
+perform the helper's first installation. The helper is loaded from the executing kick's directory, not the selected
+historical target checkout. Never install just one member of the pair.
 
 `daemon-swap.sh` and `daemon-start.py` are not installed: the kick runs them from the dedicated checkout (the sha being
 swapped in).
