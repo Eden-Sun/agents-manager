@@ -4,57 +4,7 @@
    （輸入框的 16px 由 styles.css 的手機規則統一管，這裡不碰）。
    規則：觸控目標 ≥44px；文字 ≥13px；欄位直排；清單不自己再捲（整頁只有 sheet 一條捲軸）；長字串折行、不橫向撐破。 */
 @media (width <= 640px) {
-  /* 每區是一條可點的標題列（`EnvSection`），區與區之間只剩一條分隔線。 */
-  .env-panel {
-    gap: 0;
-  }
-
-  .env-panel .env-sec + .env-sec {
-    margin-top: 0;
-    padding-top: 0;
-  }
-
-  .env-panel .env-sec h3 {
-    margin: 0;
-    font-size: 14px;
-    letter-spacing: 0;
-    color: var(--text);
-  }
-
-  .env-panel .env-sec-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    width: 100%;
-    min-height: 44px;
-    padding: 0 4px;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    font-weight: 650;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .env-panel .env-sec-toggle:focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: -2px;
-  }
-
-  .env-panel .env-sec-toggle .chev {
-    font-size: 13px;
-    color: var(--text-faint);
-  }
-
-  .env-panel .env-sec-body {
-    padding: 2px 4px 16px;
-  }
-
-  .env-panel .env-sec-body[hidden] {
-    display: none;
-  }
+  /* 手機分頁導覽由 envShell.css 負責，手風琴已由分頁取代（#1922）。 */
 
   /* 文字下限 13px：這些在桌機是 10.5–12px 的小字。 */
   .env-panel .hint,

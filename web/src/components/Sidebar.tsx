@@ -40,8 +40,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { projectDeleteBlockers } from './projectDeleteGuard'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
-import { DeletedBotsPanel } from './DeletedBotsPanel'
-import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
+import { IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { ProjectAddMenu } from '../schedules/ProjectAddMenu'
@@ -52,14 +51,12 @@ import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { ShareMark } from './ShareLinkButton'
 import { FrozenBadge } from './FrozenBadge'
 import { NO_WARM_TEXT } from '../lib/cacheClock'
-import { EnvSection } from './EnvSection'
-import { HostBadge, HostsPanel } from './HostsPanel'
-import { UpdateCheckPanel } from './UpdateCheckPanel'
+import { EnvShell } from './EnvSettings'
+import { HostBadge } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
 import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { HostDownState } from './HostOffline'
 import { useBotOfflineHost } from '../hooks/useHostOffline'
-import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { HeadMemBadges } from './HeadMemBadges'
@@ -74,9 +71,7 @@ import { DeployWaitChip } from './DeployWaitChip'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
-import { JudgePanel } from './JudgePanel'
-import { ClaudeApiPanel } from './ClaudeApiPanel'
-import { KindDisplayToggle, KindTag } from './KindTag'
+import { KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuickAddBots } from './QuickAddBots'
 import { UpdateAllBanner } from './UpdateAllBanner'
@@ -1560,31 +1555,8 @@ export function Sidebar() {
         }}
       />
 
-      <Modal open={open === 'env'} title="環境設定" width={720} onClose={() => setOpen(null)}>
-        <div className="env-panel">
-          <EnvSection title="主機">
-            <HostsPanel />
-          </EnvSection>
-          <EnvSection title="更新檢查">
-            <UpdateCheckPanel />
-          </EnvSection>
-          <EnvSection title="身分">
-            <IdentitiesPanel />
-          </EnvSection>
-          <EnvSection title="最近刪除">
-            <DeletedBotsPanel />
-          </EnvSection>
-          <EnvSection title="Jev 建議">
-            <JudgePanel />
-          </EnvSection>
-          <EnvSection title="Claude API">
-            <ClaudeApiPanel />
-          </EnvSection>
-          <EnvSection title="顯示">
-            <KindDisplayToggle />
-            <KeepAwakeToggle />
-          </EnvSection>
-        </div>
+      <Modal open={open === 'env'} title="環境設定" width={960} onClose={() => setOpen(null)}>
+        <EnvShell />
       </Modal>
     </>
   )
