@@ -416,10 +416,11 @@ async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Em
     let parent = cand.parent_bot_id.clone().unwrap_or_else(|| cand.bot_id.clone());
     let existing = other.issue_ref.clone().unwrap_or_else(|| other.key.clone());
     let action = format!(
-        "可能與進行中的工作重疊（same_work {p:.2}：{title}）。這是提示，不是判定：{HINT_NOISE}。不阻擋這次派工、不關票、不改認領、不按鍵。",
+        "{badge}：可能與進行中的工作重疊（same_work {p:.2}：{title}）。這是提示，不是判定：{HINT_NOISE}。不阻擋這次派工、不關票、不改認領、不按鍵。",
+        badge = super::badge(Some(p)),
         title = truncate(&other.title, 80),
     );
-    let payload = json!({
+    let payload = super::mark(json!({
         "assignment_id": cand.assignment_id,
         "parent_bot_id": cand.parent_bot_id,
         "probability": p,
@@ -431,7 +432,7 @@ async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         "existing_title": other.title,
         "shadow": true,
         "action": action,
-    });
+    }), Some(p));
     let event_key = format!("judge_same_work:{pair}");
     let id = if cand.live_bots.is_empty() {
         crate::supervisor_inbox::push_inbox(app.db(), &event_key, "judge_same_work", cand.assignment_id.as_deref(), Some(&parent), None, &payload).await?
@@ -1189,6 +1190,11 @@ mod tests {
         let hints = inbox(&app).await;
         assert!(!hints.is_empty());
         assert!(hints.iter().all(|e| e.payload_json.contains(HINT_NOISE) && e.payload_json.contains("不阻擋")));
+        assert!(hints.iter().all(|e| {
+            let p: Value = serde_json::from_str(&e.payload_json).unwrap();
+            let action = p["action"].as_str().unwrap_or_default();
+            p["suggested_by"] == "jev" && p["suggestion_only"] == true && p["probability_pct"] == 72 && action.starts_with("🤖 Jev 建議") && action.contains("72%")
+        }));
         assert!(hints.iter().any(|e| e.bot_id.as_deref() == Some(parent.id.as_str())), "提示掛在父 bot");
 
         let n = sent.len();

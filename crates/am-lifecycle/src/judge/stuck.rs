@@ -101,12 +101,18 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
     let p = answer?.value;
     if p >= ALERT_THRESHOLD {
         let key = format!("judge_stuck_screen:{}:{digest}", c.run_id);
-        let payload = json!({
-            "bot_id": c.bot_id, "bot_name": bot.name, "kind": bot.kind, "run_id": c.run_id, "turn_id": c.turn_id,
-            "waited_secs": c.waited_secs, "probability": p,
-            "screen_tail": tail,
-            "action": "這顆 bot 有 prompt 排著送不出去，畫面底部看起來有一個 daemon 不認得的選單／確認框在等人選。到「終端」分頁看一眼、替它選完；認得的框請開票讓 daemon 學會。daemon 沒有按任何鍵。",
-        });
+        let payload = super::mark(
+            json!({
+                "bot_id": c.bot_id, "bot_name": bot.name, "kind": bot.kind, "run_id": c.run_id, "turn_id": c.turn_id,
+                "waited_secs": c.waited_secs, "probability": p,
+                "screen_tail": tail,
+                "action": format!(
+                    "{}：這顆 bot 有 prompt 排著送不出去，畫面底部看起來有一個 daemon 不認得的選單／確認框在等人選。到「終端」分頁看一眼、替它選完；認得的框請開票讓 daemon 學會。daemon 沒有按任何鍵。",
+                    super::badge(Some(p))
+                ),
+            }),
+            Some(p),
+        );
         let id = crate::supervisor_inbox::push_inbox(app.db(), &key, "judge_stuck_screen", None, Some(&c.bot_id), Some(&c.turn_id), &payload).await?;
         if id.is_some() {
             tracing::warn!(bot = %bot.name, run = %c.run_id, p, "judge: a queued prompt looks blocked by a dialog the daemon does not recognise");
@@ -265,6 +271,11 @@ mod tests {
         assert!(sent[0]["state"]["screen"].as_str().unwrap().contains("keep bypass permissions"));
         assert!(!sent[0].to_string().contains(&s.bot_id), "不送 bot 識別");
         assert_eq!(inbox_kinds(&app).await, ["judge_stuck_screen"]);
+        let ev = crate::supervisor::store::pending_inbox(&app.db).await.unwrap().remove(0);
+        let p: Value = serde_json::from_str(&ev.payload_json).unwrap();
+        assert_eq!((p["suggested_by"].as_str(), p["source_label"].as_str(), p["suggestion_only"].as_bool(), p["probability_pct"].as_i64()), (Some("jev"), Some("Jev 建議"), Some(true), Some(93)));
+        let action = p["action"].as_str().unwrap();
+        assert!(action.starts_with("🤖 Jev 建議") && action.contains("93%") && action.contains("只是建議，不會自動動作"), "{action}");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "只通知，不按鍵");
         // 同一個畫面再掃一次：不再問、不再推。
         assert_eq!(inspect(&app, &s).await.unwrap(), None);

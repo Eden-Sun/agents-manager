@@ -196,7 +196,10 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
             })
         })
         .collect();
-    Ok(Json(json!({"enabled": cfg.enabled, "projects": cfg.projects, "model": cfg.model, "rows": rows})))
+    Ok(Json(json!({
+        "enabled": cfg.enabled, "projects": cfg.projects, "model": cfg.model, "rows": rows,
+        "suggested_by": crate::judge::SUGGESTED_BY, "source_label": crate::judge::SOURCE_LABEL, "suggestion_only": true,
+    })))
 }
 
 // ───────────── Claim Collision Check（#1330）─────────────

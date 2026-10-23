@@ -182,17 +182,20 @@ async fn settle_pair(
 async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ReportNotifier), s: &Sample, bot: &crate::db::Bot, flag: &Flag, claims: f64, asks: f64) -> Result<()> {
     let action = action_text(flag, claims, asks);
     let key = format!("judge_report_evidence:{}", s.assignment_id);
-    let payload = json!({
-        "assignment_id": s.assignment_id,
-        "bot_id": s.bot_id,
-        "bot_name": bot.name,
-        "parent_bot_id": bot.parent_bot_id,
-        "turn_id": s.turn_id,
-        "claims_verified": claims,
-        "asks_parent_action": asks,
-        "reasons": flag.reasons(),
-        "action": action,
-    });
+    let payload = super::mark(
+        json!({
+            "assignment_id": s.assignment_id,
+            "bot_id": s.bot_id,
+            "bot_name": bot.name,
+            "parent_bot_id": bot.parent_bot_id,
+            "turn_id": s.turn_id,
+            "claims_verified": claims,
+            "asks_parent_action": asks,
+            "reasons": flag.reasons(),
+            "action": action,
+        }),
+        None,
+    );
     let id = crate::supervisor_inbox::push_inbox(
         app.db(),
         &key,
@@ -209,7 +212,7 @@ async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit +
     }
     if let Some(parent) = bot.parent_bot_id.as_deref() {
         if let Ok(conv) = crate::db::conversation_id(app.db(), parent).await {
-            let note = format!("交辦 {}（{}）的{action}", s.assignment_id, bot.name);
+            let note = format!("{action}（交辦 {}，{}）", s.assignment_id, bot.name);
             let _ = app.insert_system_message(&conv, &note).await;
         }
     }
@@ -219,13 +222,14 @@ async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit +
 fn action_text(flag: &Flag, claims: f64, asks: f64) -> String {
     let mut parts = Vec::new();
     if flag.missing_verification {
-        parts.push(format!("沒有把握說這則回報宣稱測試、建置或 CI 通過了（{claims:.2}）"));
+        parts.push(format!("沒有把握說這則回報宣稱測試、建置或 CI 通過了（宣稱通過的機率 {}）", super::pct(claims)));
     }
     if flag.needs_parent {
-        parts.push(format!("這則回報看起來要收件者動手或裁示（{asks:.2}）"));
+        parts.push(format!("這則回報看起來要收件者動手或裁示（機率 {}）", super::pct(asks)));
     }
     format!(
-        "回報證據旗標（只標記、不阻擋，門檻 {FLAG_THRESHOLD:.1}）：{}。交辦狀態沒有改，也不會自動重派。",
+        "{}：回報證據旗標（只標記、不阻擋，門檻 {FLAG_THRESHOLD:.1}）：{}。交辦狀態沒有改，也不會自動重派。",
+        super::badge(None),
         parts.join("；")
     )
 }
@@ -503,6 +507,10 @@ pub mod tests {
         let notes = parent_notes(w.app(), &w.parent_id).await;
         assert_eq!(notes.len(), 1, "父 bot 聊天室要有一則系統旗標");
         assert!(notes[0].contains(&w.assignment_id) && !notes[0].contains("ghp_"));
+        assert!(notes[0].starts_with("🤖 Jev 建議") && notes[0].contains("只是建議，不會自動動作"), "聊天室系統訊息要標明是 Jev 的建議：{}", notes[0]);
+        let p: Value = serde_json::from_str(&inbox[0]).unwrap();
+        assert_eq!((p["suggested_by"].as_str(), p["suggestion_only"].as_bool()), (Some("jev"), Some(true)));
+        assert!(p["action"].as_str().unwrap().starts_with("🤖 Jev 建議") && p["action"].as_str().unwrap().contains("8%"), "{}", p["action"]);
         let sent = w.seen.lock().unwrap()[0].to_string();
         assert!(!sent.contains("ghp_"), "送出去之前要遮罩：{sent}");
         assert!(sent.contains("claims_verified") && sent.contains("asks_parent_action"));
