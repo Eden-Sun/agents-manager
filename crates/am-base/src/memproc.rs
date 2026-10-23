@@ -26,13 +26,28 @@ ps -Awwo pid=,lstart= 2>/dev/null
 echo '---AM-ENV---'
 if [ "$(uname -s)" = Linux ]; then
   printf '%s\n' '---AM-LINUX-ENV---'
-  for f in /proc/[0-9]*/environ; do
-    p=${f%/environ}; p=${p#/proc/}
-    b=$(base64 < "$f" 2>/dev/null) || continue
-    e=$(printf '%s' "$b" | tr -d '\n') || continue
-    [ -n "$e" ] || continue
-    printf '%s NUL:%s\n' "$p" "$e"
-  done
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import glob, base64
+for p in glob.glob("/proc/[0-9]*/environ"):
+    try:
+        with open(p, "rb") as f:
+            b = f.read()
+        if b:
+            print(p[6:-8] + " NUL:" + base64.b64encode(b).decode("ascii"))
+    except Exception:
+        pass
+'
+  else
+    for f in /proc/[0-9]*/environ; do
+      [ -r "$f" ] || continue
+      p=${f%/environ}; p=${p#/proc/}
+      b=$(base64 "$f" 2>/dev/null) || continue
+      e=$(printf '%s' "$b" | tr -d '\n') || continue
+      [ -n "$e" ] || continue
+      printf '%s NUL:%s\n' "$p" "$e"
+    done
+  fi
 else
   ps -Ewwo pid=,args= 2>/dev/null
 fi"#;
@@ -869,6 +884,13 @@ mod tests {
             let err = screen_kill(&dump, 402).unwrap_err().to_string();
             assert!(err.contains("環境"), "{row}: {err}");
         }
+    }
+
+    #[test]
+    fn ps_tree_env_linux_uses_single_python_process_when_available() {
+        assert!(PS_TREE_ENV.contains("command -v python3"));
+        assert!(PS_TREE_ENV.contains("import glob, base64"));
+        assert!(PS_TREE_ENV.contains("---AM-LINUX-ENV---"));
     }
 
     #[test]
