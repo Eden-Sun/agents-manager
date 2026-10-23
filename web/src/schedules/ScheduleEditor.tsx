@@ -23,10 +23,11 @@ import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { copyScheduleName } from './scheduleCopy'
+import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
 import './scheduleEditor.css'
 
-const WEEKDAYS = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+const WEEKDAYS = [msg('週一'), msg('週二'), msg('週三'), msg('週四'), msg('週五'), msg('週六'), msg('週日')]
 
 interface FormState {
   name: string
@@ -78,7 +79,7 @@ function specOf(f: FormState): ScheduleSpecIn {
 }
 
 function errText(e: unknown): string {
-  return e instanceof Error ? e.message : '操作失敗'
+  return e instanceof Error ? e.message : t('操作失敗')
 }
 
 /** 新增或編輯排程。建立後只存排程，不立即執行；要執行請按「立即執行」。 */
@@ -96,6 +97,7 @@ export function ScheduleEditor({
   onClose: () => void
   onSelect: (id: string) => void
 }) {
+  const t = useT()
   const bots = useStore((s) => s.bots)
   const schedulesRev = useStore((s) => s.schedulesRev)
   const selectBot = useStore((s) => s.selectBot)
@@ -213,18 +215,18 @@ export function ScheduleEditor({
 
   const botLabel = (id: string) => {
     const b = bots.find((x) => x.id === id)
-    if (!b) return '（找不到這顆 Bot）'
+    if (!b) return t('（找不到這顆 Bot）')
     return `${b.name} · ${b.kind}${b.model ? ` · ${b.model}` : ''}${b.effort ? ` · ${b.effort}` : ''}`
   }
 
   const save = async () => {
     setError(null)
     setNotice(null)
-    if (!form.name.trim()) return setError('請填排程名稱')
-    if (!form.prompt.trim()) return setError('請填任務內容')
-    if (!effectiveBotId) return setError('請選執行的 Bot（或建立專用 Bot）')
-    if (form.mode === 'once' && !form.at) return setError('單次需要日期與時間')
-    if (form.mode === 'weekly' && form.weekdays.length === 0) return setError('每週至少選一天')
+    if (!form.name.trim()) return setError(t('請填排程名稱'))
+    if (!form.prompt.trim()) return setError(t('請填任務內容'))
+    if (!effectiveBotId) return setError(t('請選執行的 Bot（或建立專用 Bot）'))
+    if (form.mode === 'once' && !form.at) return setError(t('單次需要日期與時間'))
+    if (form.mode === 'weekly' && form.weekdays.length === 0) return setError(t('每週至少選一天'))
     setBusy(true)
     try {
       if (!scheduleId) {
@@ -238,7 +240,7 @@ export function ScheduleEditor({
           notify: form.notify,
           clear_after: form.clearAfter,
         })
-        setNotice('已建立。排程不會立即執行，到時間才會排進 Bot。')
+        setNotice(t('已建立。排程不會立即執行，到時間才會排進 Bot。'))
         onSelect(s.id)
       } else {
         // 只有排程時間真的變了才送 spec：後端每收到一次 spec 就重新錨定間隔、升 generation（#1807）。
@@ -257,7 +259,7 @@ export function ScheduleEditor({
         if (timingChanged) setBaseline({ id: scheduleId, ...timing })
         // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
         setDetail((prev) => (prev ? { ...prev, ...d, recent: prev.recent } : prev))
-        setNotice('已儲存。已排的未送出執行會被撤回，已送出的照跑。')
+        setNotice(t('已儲存。已排的未送出執行會被撤回，已送出的照跑。'))
       }
     } catch (e) {
       setError(errText(e))
@@ -282,7 +284,7 @@ export function ScheduleEditor({
     try {
       const r = await runScheduleNow(scheduleId, createRequestId(runKey))
       accepted = true
-      setNotice(r.occurrence ? `已排進 Bot：${occurrenceLine(r.occurrence)}` : '已有未結束的執行，沿用它')
+      setNotice(r.occurrence ? t('已排進 Bot：{line}', { line: occurrenceLine(r.occurrence) }) : t('已有未結束的執行，沿用它'))
       if (await loadLatestDetail()) settleCreateRequest(runKey)
     } catch (e) {
       if (!accepted && e instanceof ApiError && e.status >= 400 && e.status < 500) settleCreateRequest(runKey)
@@ -319,25 +321,25 @@ export function ScheduleEditor({
 
   const body = (
     <div className="form schedule-editor">
-      {copyOf && !scheduleId ? <p className="hint">已帶入「{copyOf.name}」的設定。儲存後會建立並啟用新排程，與原排程各自執行。</p> : null}
-      {loading ? <p className="hint schedule-loading">載入排程中…</p> : null}
-      {loadError ? <p className="hint schedule-error">讀取失敗：{loadError}</p> : null}
+      {copyOf && !scheduleId ? <p className="hint">{t('已帶入「{name}」的設定。儲存後會建立並啟用新排程，與原排程各自執行。', { name: copyOf.name })}</p> : null}
+      {loading ? <p className="hint schedule-loading">{t('載入排程中…')}</p> : null}
+      {loadError ? <p className="hint schedule-error">{t('讀取失敗：{reason}', { reason: loadError })}</p> : null}
       {detail ? (
-        <section className="schedule-status" aria-label="排程狀態">
-          <p>下次：{formatDue(detail.next_due, detail.tz)}</p>
-          <p>狀態：{detail.enabled ? (detail.open ? occurrenceLine(detail.open, liveStatus) : '啟用中') : '已停用'}</p>
+        <section className="schedule-status" aria-label={t('排程狀態')}>
+          <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz) })}</p>
+          <p>{t('狀態：{status}', { status: detail.enabled ? (detail.open ? occurrenceLine(detail.open, liveStatus) : t('啟用中')) : t('已停用') })}</p>
           {detail.open?.waiting_reason ? <p className="hint">{occurrenceLine(detail.open, liveStatus)}</p> : null}
         </section>
       ) : null}
 
       <label className="field">
-        <span>名稱</span>
+        <span>{t('名稱')}</span>
         <input value={form.name} maxLength={80} disabled={loading} onChange={(e) => set('name', e.target.value)} />
       </label>
 
       <label className="field">
         <span>
-          任務內容<small className="hint schedule-prompt-hint">⌘/Ctrl+Enter 儲存</small>
+          {t('任務內容')}<small className="hint schedule-prompt-hint">{t('⌘/Ctrl+Enter 儲存')}</small>
         </span>
         <textarea
           ref={promptRef}
@@ -356,10 +358,10 @@ export function ScheduleEditor({
       </label>
 
       <label className="field">
-        <span>執行的 Bot</span>
+        <span>{t('執行的 Bot')}</span>
         <select value={effectiveBotId} disabled={loading} onChange={(e) => set('botId', e.target.value)}>
           {effectiveBotId && !eligible.some((b) => b.id === effectiveBotId) ? <option value={effectiveBotId}>{botLabel(effectiveBotId)}</option> : null}
-          {eligible.length === 0 ? <option value="">（這個專案沒有可用的 Bot）</option> : null}
+          {eligible.length === 0 ? <option value="">{t('（這個專案沒有可用的 Bot）')}</option> : null}
           {eligible.map((b) => (
             <option key={b.id} value={b.id}>
               {botLabel(b.id)}
@@ -368,10 +370,10 @@ export function ScheduleEditor({
         </select>
       </label>
       <p className="hint">
-        排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。
+        {t('排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。')}
       </p>
       <button type="button" className="btn" disabled={loading} onClick={() => setBotSheet(true)}>
-        建立專用 Bot…
+        {t('建立專用 Bot…')}
       </button>
       {effectiveBotId ? (
         <button
@@ -384,40 +386,40 @@ export function ScheduleEditor({
             onClose()
           }}
         >
-          開啟 Bot 對話
+          {t('開啟 Bot 對話')}
         </button>
       ) : null}
 
       <label className="field">
-        <span>模式</span>
+        <span>{t('模式')}</span>
         <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as ScheduleMode)}>
-          <option value="once">單次</option>
-          <option value="interval">固定間隔</option>
-          <option value="daily">每天</option>
-          <option value="weekly">每週</option>
+          <option value="once">{t('單次')}</option>
+          <option value="interval">{t('固定間隔')}</option>
+          <option value="daily">{t('每天')}</option>
+          <option value="weekly">{t('每週')}</option>
         </select>
       </label>
       {form.mode === 'once' ? (
         <label className="field">
-          <span>時間（本地）</span>
+          <span>{t('時間（本地）')}</span>
           <input type="datetime-local" value={form.at} disabled={loading} onChange={(e) => set('at', e.target.value)} />
         </label>
       ) : null}
       {form.mode === 'interval' ? (
         <label className="field">
-          <span>每幾分鐘（以建立時為起點，不隨任務耗時漂移）</span>
+          <span>{t('每幾分鐘（以建立時為起點，不隨任務耗時漂移）')}</span>
           <input type="number" min={1} max={525600} value={Math.round(form.everySecs / 60)} disabled={loading} onChange={(e) => set('everySecs', Number(e.target.value) * 60)} />
         </label>
       ) : null}
       {form.mode === 'daily' || form.mode === 'weekly' ? (
         <label className="field">
-          <span>時間（本地）</span>
+          <span>{t('時間（本地）')}</span>
           <input type="time" value={form.time} disabled={loading} onChange={(e) => set('time', e.target.value)} />
         </label>
       ) : null}
       {form.mode === 'weekly' ? (
         <fieldset className="field">
-          <legend>星期</legend>
+          <legend>{t('星期')}</legend>
           {WEEKDAYS.map((label, i) => (
             <label key={label} className="inline-check">
               <input
@@ -426,14 +428,14 @@ export function ScheduleEditor({
                 disabled={loading}
                 onChange={(e) => set('weekdays', e.target.checked ? [...form.weekdays, i] : form.weekdays.filter((d) => d !== i))}
               />
-              {label}
+              {t.tr(label)}
             </label>
           ))}
         </fieldset>
       ) : null}
 
       <label className="field">
-        <span>時區</span>
+        <span>{t('時區')}</span>
         <select value={form.tz} disabled={loading} onChange={(e) => set('tz', e.target.value)}>
           {timeZoneOptions(form.tz).map((z) => (
             <option key={z} value={z}>
@@ -444,37 +446,37 @@ export function ScheduleEditor({
       </label>
 
       <label className="field">
-        <span>通知</span>
+        <span>{t('通知')}</span>
         <select value={form.notify} disabled={loading} onChange={(e) => set('notify', e.target.value as ScheduleNotify)}>
-          <option value="failure">只有失敗時通知</option>
-          <option value="all">每次執行都通知</option>
-          <option value="none">不通知</option>
+          <option value="failure">{t('只有失敗時通知')}</option>
+          <option value="all">{t('每次執行都通知')}</option>
+          <option value="none">{t('不通知')}</option>
         </select>
       </label>
 
       <label className="inline-check schedule-clear-after">
         <input type="checkbox" checked={form.clearAfter} disabled={loading} onChange={(e) => set('clearAfter', e.target.checked)} />
-        跑完就清空對話（不留記憶、不佔 context）
+        {t('跑完就清空對話（不留記憶、不佔 context）')}
       </label>
-      <p className="hint">每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。</p>
+      <p className="hint">{t('每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。')}</p>
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
 
       <div className="form-actions">
         <button type="button" className="btn primary" disabled={busy || (Boolean(scheduleId) && Boolean(loadError))} onClick={() => void save()}>
-          {scheduleId ? '儲存' : '建立排程'}
+          {scheduleId ? t('儲存') : t('建立排程')}
         </button>
         {detail ? (
           <>
             <button type="button" className="btn" disabled={busy || loading || !detail.enabled} onClick={() => void runNow()}>
-              立即執行
+              {t('立即執行')}
             </button>
             <button type="button" className="btn" disabled={busy || loading} onClick={() => void toggle()}>
-              {detail.enabled ? '停用' : '啟用'}
+              {detail.enabled ? t('停用') : t('啟用')}
             </button>
             <button type="button" className="btn danger" disabled={busy || loading} onClick={() => setConfirmDelete(true)}>
-              刪除
+              {t('刪除')}
             </button>
           </>
         ) : null}
@@ -483,19 +485,19 @@ export function ScheduleEditor({
 
       {detail ? (
         <details className="schedule-recent">
-          <summary>最近執行（{(detail.recent ?? []).length}）</summary>
+          <summary>{t('最近執行（{count}）', { count: (detail.recent ?? []).length })}</summary>
           {(detail.recent ?? []).length > 0 ? (
-            <ul className="schedule-history" aria-label="最近執行">
+            <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'manual' ? '手動' : '排程'} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
-                  {o.error ? `（${o.error}）` : ''}
-                  {o.merged_count > 0 ? ` · 合併 ${o.merged_count} 次` : ''}
+                  {o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  {o.error ? t('（{error}）', { error: o.error }) : ''}
+                  {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="hint">還沒有執行紀錄。</p>
+            <p className="hint">{t('還沒有執行紀錄。')}</p>
           )}
         </details>
       ) : null}
@@ -505,10 +507,10 @@ export function ScheduleEditor({
   // 掛到 body：側欄是 transform 容器，裡面的 fixed 遮罩會被它限在側欄寬度內（手機上彈窗被裁）。只這裡處理，不動全站 Modal。
   return createPortal(
     <>
-      <Modal open width={760} title={scheduleId ? '排程' : copyOf ? '複製排程' : '新增排程'} onClose={onClose}>
+      <Modal open width={760} title={scheduleId ? t('排程') : copyOf ? t('複製排程') : t('新增排程')} onClose={onClose}>
         {body}
       </Modal>
-      <Modal open={botSheet} title="新增專用 Bot" onClose={() => setBotSheet(false)}>
+      <Modal open={botSheet} title={t('新增專用 Bot')} onClose={() => setBotSheet(false)}>
         <NewBotForm
           key={projectId}
           initialProjectId={projectId}
@@ -518,9 +520,9 @@ export function ScheduleEditor({
       </Modal>
       <ConfirmDialog
         open={confirmDelete}
-        title="刪除排程"
-        body={<>刪除後不會再排新的執行。已經排進 Bot 還沒送出的會被撤回；已經送出的回合照跑。</>}
-        confirmLabel="刪除"
+        title={t('刪除排程')}
+        body={<>{t('刪除後不會再排新的執行。已經排進 Bot 還沒送出的會被撤回；已經送出的回合照跑。')}</>}
+        confirmLabel={t('刪除')}
         danger
         onConfirm={() => void remove()}
         onCancel={() => setConfirmDelete(false)}

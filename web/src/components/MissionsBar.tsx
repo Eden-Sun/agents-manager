@@ -23,6 +23,7 @@ import {
 } from '../lib/missionView'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
+import { useT } from '../lib/i18n'
 import { KindIcon } from './KindTag'
 import './missions.css'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -32,6 +33,7 @@ import { dateTimeLabel } from '../lib/msgTime'
 const OPEN_SHOWN = 2
 
 export function MissionsBar({ projectId }: { projectId: string }) {
+  const t = useT()
   const supported = useStore((s) => s.missionsSupported)
   const missions = useStore(useShallow((s) => s.missions[projectId] ?? []))
   const capped = useStore((s) => s.missionsCapped[projectId])
@@ -61,7 +63,7 @@ export function MissionsBar({ projectId }: { projectId: string }) {
     const state = useStore.getState()
     const detail = state.missionDetail[id]
     if (!detail) {
-      setNavigationError(state.missionLoadErrors[id] || '無法讀取這筆任務，請再點一次重試')
+      setNavigationError(state.missionLoadErrors[id] || t('無法讀取這筆任務，請再點一次重試'))
       return
     }
     if (detail.status === 'done') setShowDone(true)
@@ -104,19 +106,19 @@ export function MissionsBar({ projectId }: { projectId: string }) {
   const hidden = sorted.length - shown.length
 
   return (
-    <section ref={section} className="missions-bar" aria-label="群組任務">
+    <section ref={section} className="missions-bar" aria-label={t('群組任務')}>
       {navigationError ? <p className="mission-hint" role="alert">{navigationError}</p> : null}
       {shown.map((m) => (
         <MissionCard key={m.id} mission={m} onNavigate={navigate} />
       ))}
       {hidden > 0 ? (
         <button type="button" className="mini-btn mission-more" onClick={() => setShowAll(true)}>
-          還有 {hidden} 個進行中的任務
+          {t('還有 {count} 個進行中的任務', { count: hidden })}
         </button>
       ) : null}
       {showAll && sorted.length > OPEN_SHOWN ? (
         <button type="button" className="mini-btn mission-more" onClick={() => setShowAll(false)}>
-          收起
+          {t('收起')}
         </button>
       ) : null}
 
@@ -129,7 +131,9 @@ export function MissionsBar({ projectId }: { projectId: string }) {
             onClick={() => setShowDone((v) => !v)}
           >
             <span aria-hidden="true">{showDone ? '▾' : '▸'}</span>
-            {capped?.done ? `已完成任務（最近 ${done.length} 筆）` : `已完成任務（${done.length}）`}
+            {capped?.done
+              ? t('已完成任務（最近 {count} 筆）', { count: done.length })
+              : t('已完成任務（{count}）', { count: done.length })}
           </button>
           {showDone ? (
             <ul className="mission-done-list">
@@ -147,11 +151,13 @@ export function MissionsBar({ projectId }: { projectId: string }) {
             type="button"
             className="mission-done-head"
             aria-expanded={showCancelled}
-            title="取消掉的任務不算「已完成」，但做過什麼也是紀錄"
+            title={t('取消掉的任務不算「已完成」，但做過什麼也是紀錄')}
             onClick={() => setShowCancelled((v) => !v)}
           >
             <span aria-hidden="true">{showCancelled ? '▾' : '▸'}</span>
-            {capped?.cancelled ? `已取消（最近 ${cancelled.length} 筆）` : `已取消（${cancelled.length}）`}
+            {capped?.cancelled
+              ? t('已取消（最近 {count} 筆）', { count: cancelled.length })
+              : t('已取消（{count}）', { count: cancelled.length })}
           </button>
           {showCancelled ? (
             <ul className="mission-done-list">
@@ -220,6 +226,7 @@ function MissionDoneRow({ mission, open, onToggle, onNavigate }: {
  * 新任務**。把它們做成同一個輸入框，使用者就沒辦法在按下去之前知道自己要的是哪一種。
  */
 function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: MissionDetail; onNavigate: NavigateMission }) {
+  const t = useT()
   const askMission = useStore((s) => s.askMission)
   const reviseMission = useStore((s) => s.reviseMission)
   const [mode, setMode] = useState<'ask' | 'revise' | null>(null)
@@ -271,7 +278,7 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
               {pair.answer ? (
                 <p className="mission-qna-a">{pair.answer.text}</p>
               ) : (
-                <p className="mission-hint">等 AGM 回覆…</p>
+                <p className="mission-hint">{t('等 AGM 回覆…')}</p>
               )}
             </li>
           ))}
@@ -284,10 +291,14 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
           {detail.revisions.map((r) => (
             <li key={r.id}>
               <span className="mission-tag">
-                {r.status === 'done' ? '續作已完成' : r.status === 'cancelled' ? '續作已取消' : '續作進行中'}
+                {r.status === 'done'
+                  ? t('續作已完成')
+                  : r.status === 'cancelled'
+                    ? t('續作已取消')
+                    : t('續作進行中')}
               </span>
               <button type="button" className="mission-link" onClick={() => onNavigate(r.id)}>
-                查看續作：{r.text}
+                {t('查看續作：{title}', { title: r.text })}
               </button>
             </li>
           ))}
@@ -300,33 +311,33 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
             ref={inputRef}
             className="mission-followup-input"
             value={text}
-            aria-label={mode === 'ask' ? '追問內容' : '追加修改內容'}
+            aria-label={mode === 'ask' ? t('追問內容') : t('追加修改內容')}
             disabled={busy}
             rows={2}
-            placeholder={mode === 'ask' ? '想問什麼？（不會改動任何東西）' : '要再改什麼？會開一筆新任務'}
+            placeholder={mode === 'ask' ? t('想問什麼？（不會改動任何東西）') : t('要再改什麼？會開一筆新任務')}
             onChange={(e) => setText(e.target.value)}
           />
           <div className="mission-followup-actions">
             <button type="button" className="btn" disabled={busy} onClick={() => setMode(null)}>
-              取消
+              {t('取消')}
             </button>
             <button type="button" className="btn primary" disabled={busy || !text.trim()} onClick={() => void send()}>
-              {busy ? '送出中…' : mode === 'ask' ? '送出追問' : '建立續作'}
+              {busy ? t('送出中…') : mode === 'ask' ? t('送出追問') : t('建立續作')}
             </button>
           </div>
         </div>
       ) : (
         <div className="mission-followup-actions">
           <button ref={askBtnRef} type="button" className="btn" onClick={() => setMode('ask')}>
-            追問
+            {t('追問')}
           </button>
           {mission.status === 'done' ? openRevision ? (
             <button type="button" className="mission-link" onClick={() => onNavigate(openRevision.id)}>
-              查看進行中的續作
+              {t('查看進行中的續作')}
             </button>
           ) : (
             <button ref={reviseBtnRef} type="button" className="btn" onClick={() => setMode('revise')}>
-              追加修改
+              {t('追加修改')}
             </button>
           ) : null}
         </div>
@@ -336,14 +347,15 @@ function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: M
 }
 
 function MissionLoadState({ missionId }: { missionId: string }) {
+  const t = useT()
   const error = useStore((s) => s.missionLoadErrors[missionId])
   const loading = useStore((s) => s.missionLoading[missionId])
   const loadMission = useStore((s) => s.loadMission)
   if (error) return <div className="mission-hint" role="alert">
-    載入任務失敗：{error}
-    <button type="button" className="mission-link" onClick={() => void loadMission(missionId)}>重試</button>
+    {t('載入任務失敗：{reason}', { reason: error })}
+    <button type="button" className="mission-link" onClick={() => void loadMission(missionId)}>{t('重試')}</button>
   </div>
-  return loading ? <p className="mission-hint" role="status">讀取中…</p> : null
+  return loading ? <p className="mission-hint" role="status">{t('讀取中…')}</p> : null
 }
 
 function ParentLink({ mission, detail, onNavigate }: {
@@ -351,22 +363,24 @@ function ParentLink({ mission, detail, onNavigate }: {
   detail: MissionDetail | null
   onNavigate: NavigateMission
 }) {
+  const t = useT()
   if (!mission.parent_mission_id) return null
-  if (detail?.parent?.missing) return <p className="mission-hint">原成果已不存在</p>
+  if (detail?.parent?.missing) return <p className="mission-hint">{t('原成果已不存在')}</p>
   return <button type="button" className="mission-link" onClick={() => onNavigate(mission.parent_mission_id!)}>
-    查看原成果{detail?.parent?.text ? `：${detail.parent.text}` : ''}
+    {detail?.parent?.text ? t('查看原成果：{title}', { title: detail.parent.text }) : t('查看原成果')}
   </button>
 }
 
 /** 驗證證據與交付去向（commit / PR），兩邊的卡片共用。 */
 function Evidence({ view, mission }: { view: ReturnType<typeof missionView>; mission: Mission }) {
+  const t = useT()
   if (!view.verified && !view.delivered) return null
   return (
     <ul className="mission-evidence">
       {view.verified ? (
         <li>
-          <span className="mission-tag ok">驗證</span>
-          {view.verified.text || '已驗證'}
+          <span className="mission-tag ok">{t('驗證')}</span>
+          {view.verified.text || t('已驗證')}
         </li>
       ) : null}
       {view.delivered ? (
@@ -377,12 +391,12 @@ function Evidence({ view, mission }: { view: ReturnType<typeof missionView>; mis
               {view.delivered.branch ?? view.delivered.url}
             </a>
           ) : (
-            <code>{view.delivered.sha?.slice(0, 12) ?? view.delivered.branch ?? '已交付'}</code>
+            <code>{view.delivered.sha?.slice(0, 12) ?? view.delivered.branch ?? t('已交付')}</code>
           )}
         </li>
       ) : null}
       {!view.verified && mission.status === 'done' ? (
-        <li className="mission-hint">（這一筆沒有驗證紀錄）</li>
+        <li className="mission-hint">{t('（這一筆沒有驗證紀錄）')}</li>
       ) : null}
     </ul>
   )
@@ -390,6 +404,7 @@ function Evidence({ view, mission }: { view: ReturnType<typeof missionView>; mis
 
 /** 進行中的一張卡。 */
 function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: NavigateMission }) {
+  const t = useT()
   const detail = useStore((s) => s.missionDetail[mission.id] ?? null)
   const loadMission = useStore((s) => s.loadMission)
   const loadError = useStore((s) => s.missionLoadErrors[mission.id])
@@ -419,16 +434,16 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         <span className={`mission-phase ${view.phase}`}>{phaseLabel(view.phase)}</span>
         <span className="mission-text">{mission.text}</span>
         <span className="mission-opts">
-          <span className="mission-tag" title="交付方式">
+          <span className="mission-tag" title={t('交付方式')}>
             {deliveryLabel(mission.delivery_mode)}
           </span>
-          <span className="mission-tag" title="執行者 kind">
+          <span className="mission-tag" title={t('執行者 kind')}>
             <KindIcon kind={mission.executor_kind} />
             {mission.executor_kind}
           </span>
           {view.rounds.max > 0 ? (
-            <span className="mission-tag" title="reviewer 退回／驗證失敗用掉的來回次數">
-              來回 {view.rounds.used}/{view.rounds.max}
+            <span className="mission-tag" title={t('reviewer 退回／驗證失敗用掉的來回次數')}>
+              {t('來回 {used}/{max}', { used: view.rounds.used, max: view.rounds.max })}
             </span>
           ) : null}
         </span>
@@ -436,7 +451,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
 
       <ParentLink mission={mission} detail={detail} onNavigate={onNavigate} />
       <MissionLoadState missionId={mission.id} />
-      <ol className="mission-steps" aria-label="進度">
+      <ol className="mission-steps" aria-label={t('進度')}>
         {MISSION_PHASES.map((p, i) => (
           <li
             key={p}
@@ -462,8 +477,8 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
           ))}
           {view.soloReview ? (
             <li>
-              <span className="mission-tag warn" title="找不到第二個可用身分，改由執行者自審＋驗證者把關">
-                無獨立 reviewer
+              <span className="mission-tag warn" title={t('找不到第二個可用身分，改由執行者自審＋驗證者把關')}>
+                {t('無獨立 reviewer')}
               </span>
             </li>
           ) : null}
@@ -485,7 +500,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
                   {botLabel(a.target_bot_id)}
                 </span>
               ) : null}
-              {a.follow_up_of ? <span className="mission-tag">接手</span> : null}
+              {a.follow_up_of ? <span className="mission-tag">{t('接手')}</span> : null}
               {a.turn_error ? (
                 <span className="mission-asg-err" title={a.turn_error}>
                   {a.turn_error}
@@ -500,10 +515,10 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         <ul className="mission-handoffs">
           {view.handoffs.map((h, i) => (
             <li key={`${h.at}-${i}`}>
-              <span className="mission-tag warn">撞限換手</span>
+              <span className="mission-tag warn">{t('撞限換手')}</span>
               {h.from ?? '?'} → {h.to ?? '?'}
               {h.model ? ` · ${h.model}` : ''}
-              {h.reason && h.reason !== 'limit_hit' ? `（${h.reason}）` : ''}
+              {h.reason && h.reason !== 'limit_hit' ? t('（{reason}）', { reason: h.reason }) : ''}
             </li>
           ))}
         </ul>
@@ -515,7 +530,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         <div className="mission-ask">
           <p className="mission-ask-why">
             <strong>{pausedLabel(view.ask.reason)}</strong>
-            {view.ask.detail ? `：${view.ask.detail}` : ''}
+            {view.ask.detail ? t('：{detail}', { detail: view.ask.detail }) : ''}
           </p>
           {view.ask.question ? (
             <p className="mission-ask-q" id={askId}>
@@ -529,7 +544,9 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
                 const at = shortTime(r.resets_at)
                 return (
                   <li key={r.identity}>
-                    {at ? `${r.identity} Fable 額度 ${at} 回來` : `${r.identity} Fable 額度用完了，重置時間不明`}
+                    {at
+                      ? t('{identity} Fable 額度 {at} 回來', { identity: r.identity, at })
+                      : t('{identity} Fable 額度用完了，重置時間不明', { identity: r.identity })}
                   </li>
                 )
               })}
@@ -540,9 +557,9 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
               className="mission-answer"
               rows={2}
               value={answer}
-              aria-label="回答 AGM"
+              aria-label={t('回答 AGM')}
               aria-describedby={view.ask.question ? askId : undefined}
-              placeholder="回答 AGM，送出後任務就會繼續"
+              placeholder={t('回答 AGM，送出後任務就會繼續')}
               disabled={sending}
               onChange={(e) => setAnswer(e.target.value)}
             />
@@ -558,7 +575,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
                 })
               }}
             >
-              {sending ? '送出中…' : '回答並繼續'}
+              {sending ? t('送出中…') : t('回答並繼續')}
             </button>
           </div>
         </div>
@@ -566,39 +583,39 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
         /* 「等 AGM」「等額度」不用使用者動手，但它自己不會動——要看得出來這是在等，
            不是在跑（AGM 2026-09-13：awaiting_agm／paused 要有明顯提示）。 */
         <div className="mission-wait" role="status">
-          <strong>{view.phase === 'waiting_quota' ? '等額度重置' : '等 AGM 決定下一步'}</strong>
+          <strong>{view.phase === 'waiting_quota' ? t('等額度重置') : t('等 AGM 決定下一步')}</strong>
           <span>
             {view.phase === 'waiting_quota'
               ? quotaWaitText(mission, [...view.assignments].reverse().find((a) => a.status === 'quota_blocked') ?? null, shortTime)
-              : '這一輪的交辦都結案了，AGM 還沒派下一件。它醒來就會接著跑，不需要你動手。'}
+              : t('這一輪的交辦都結案了，AGM 還沒派下一件。它醒來就會接著跑，不需要你動手。')}
           </span>
-          {view.latest?.text ? <span className="mission-wait-last">最後一則：{view.latest.text}</span> : null}
+          {view.latest?.text ? <span className="mission-wait-last">{t('最後一則：{text}', { text: view.latest.text })}</span> : null}
         </div>
       ) : (
-        <p className="mission-latest">{view.latest?.text ?? '等 AGM 接手…'}</p>
+        <p className="mission-latest">{view.latest?.text ?? t('等 AGM 接手…')}</p>
       )}
 
       <div className="mission-actions">
         {paused ? (
           <button type="button" className="mini-btn" onClick={() => void controlMission(mission.id, 'resume')}>
-            不回答，直接繼續
+            {t('不回答，直接繼續')}
           </button>
         ) : (
           <button type="button" className="mini-btn" onClick={() => void controlMission(mission.id, 'pause')}>
-            暫停
+            {t('暫停')}
           </button>
         )}
         {/* 用 ConfirmDialog 而不是原生 confirm()：手機預覽的 iframe 沒有 allow-modals，原生框會直接回 false（#1130）。 */}
         <button type="button" className="mini-btn danger" onClick={() => setConfirmCancel(true)}>
-          取消任務
+          {t('取消任務')}
         </button>
       </div>
       <ConfirmDialog
         open={confirmCancel}
-        title="取消任務"
-        body={<>要取消「{clip(mission.text, 80)}」嗎？已經做的不會回復。</>}
-        confirmLabel="取消任務"
-        cancelLabel="先不要"
+        title={t('取消任務')}
+        body={<>{t('要取消「{text}」嗎？已經做的不會回復。', { text: clip(mission.text, 80) })}</>}
+        confirmLabel={t('取消任務')}
+        cancelLabel={t('先不要')}
         danger
         onCancel={() => setConfirmCancel(false)}
         onConfirm={() => {

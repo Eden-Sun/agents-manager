@@ -14,6 +14,7 @@ import { onTabListKeyDown } from './tabKeys'
 import './issuesBar.css'
 import { safeHttpUrl } from '../lib/safeUrl'
 import { agoLabel } from '../lib/agoLabel'
+import { t, useT } from '../lib/i18n'
 
 /** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
 
@@ -35,8 +36,8 @@ function readState(): IssueState {
 
 function errorText(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 502) return `gh 無法使用：${e.message}`
-    return `${e.message}（HTTP ${e.status}）`
+    if (e.status === 502) return t('gh 無法使用：{message}', { message: e.message })
+    return t('{message}（HTTP {status}）', { message: e.message, status: e.status })
   }
   return e instanceof Error ? e.message : String(e)
 }
@@ -82,6 +83,7 @@ export function IssuesBar({
   const scopeGen = useRef(0)
   const detailSeq = useRef(0)
   const tabsId = useId()
+  const t = useT()
 
   useEffect(() => {
     if (!githubUrl) return
@@ -241,11 +243,11 @@ export function IssuesBar({
     try {
       const d = await api.fetchIssue(source.projectId, i.number, source.repo)
       if (source.generation !== scopeGen.current) return
-      const body = (d?.body ?? '').trim() || '（沒有內容）'
+      const body = (d?.body ?? '').trim() || t('（沒有內容）')
       insert(formatGithubIssuePrompt({ ...i, content_notice: d?.content_notice ?? i.content_notice }, body))
     } catch (e) {
       if (source.generation !== scopeGen.current) return
-      notify('error', `讀取 #${i.number} 失敗：${errorText(e)}`)
+      notify('error', t('讀取 #{number} 失敗：{reason}', { number: i.number, reason: errorText(e) }))
     } finally {
       if (detailId === detailSeq.current) setFetching(null)
     }
@@ -258,7 +260,7 @@ export function IssuesBar({
         className={`issues-btn${open ? ' on' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={`${github.url}/issues — 點開搜尋並插入 issue 到輸入框`}
+        title={t('{url}/issues — 點開搜尋並插入 issue 到輸入框', { url: github.url })}
         onClick={() => setOpen(!open)}
       >
         <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -281,8 +283,8 @@ export function IssuesBar({
               ref={searchRef}
               type="search"
               value={q}
-              placeholder="搜尋 issue（標題 / #號）…"
-              aria-label="搜尋 issue（標題或 #號）"
+              placeholder={t('搜尋 issue（標題 / #號）…')}
+              aria-label={t('搜尋 issue（標題或 #號）')}
               spellCheck={false}
               onChange={(e) => {
                 invalidateScope()
@@ -292,8 +294,8 @@ export function IssuesBar({
             {submodules.length > 0 ? (
               <select
                 className="issues-repo-pick"
-                aria-label="哪個 repo 的 issue"
-                title="這個專案有 submodule：選要看哪個 repo 的 issue"
+                aria-label={t('哪個 repo 的 issue')}
+                title={t('這個專案有 submodule：選要看哪個 repo 的 issue')}
                 value={repo}
                 onChange={(e) => {
                   invalidateScope()
@@ -310,7 +312,7 @@ export function IssuesBar({
                 ))}
               </select>
             ) : null}
-            <div className="tabs small" role="tablist" aria-label="issue 狀態" onKeyDown={onTabListKeyDown}>
+            <div className="tabs small" role="tablist" aria-label={t('issue 狀態')} onKeyDown={onTabListKeyDown}>
               <button type="button" className="tab" role="tab" id={`${tabsId}-open`} aria-selected={state === 'open'} aria-controls={state === 'open' ? `${tabsId}-panel` : undefined} onClick={() => pickState('open')}>
                 open
               </button>
@@ -326,9 +328,13 @@ export function IssuesBar({
               {authError ? <GhLoginButton host={host} onLoggedIn={retryIssues} /> : null}
             </div>
           ) : loading && !shownIssues ? (
-            <div className="issues-status">載入中…</div>
+            <div className="issues-status">{t('載入中…')}</div>
           ) : shownIssues && shownIssues.length === 0 ? (
-            <div className="issues-status">沒有符合的 {state} issue{q ? `（${q}）` : ''}。</div>
+            <div className="issues-status">
+              {q
+                ? t('沒有符合的 {state} issue（{q}）。', { state, q })
+                : t('沒有符合的 {state} issue。', { state })}
+            </div>
           ) : null}
           {shownIssues && shownIssues.length > 0 && issuesScope ? (
             <ul className={`issues-list${loading ? ' stale' : ''}`}>
@@ -351,17 +357,17 @@ export function IssuesBar({
                     </div>
                   </div>
                   <div className="issue-actions">
-                    <button type="button" className="mini-btn" title="插入「#號 標題」與連結到輸入框游標處" onClick={() => insertRef(i, issuesScope)}>
-                      插入
+                    <button type="button" className="mini-btn" title={t('插入「#號 標題」與連結到輸入框游標處')} onClick={() => insertRef(i, issuesScope)}>
+                      {t('插入')}
                     </button>
                     <button
                       type="button"
                       className="mini-btn primary"
                       disabled={fetching === i.number}
-                      title="再讀取完整內容，以引用區塊（> ）插入"
+                      title={t('再讀取完整內容，以引用區塊（> ）插入')}
                       onClick={() => void insertFull(i, issuesScope)}
                     >
-                      {fetching === i.number ? '讀取中…' : '插入完整內容'}
+                      {fetching === i.number ? t('讀取中…') : t('插入完整內容')}
                     </button>
                   </div>
                 </li>

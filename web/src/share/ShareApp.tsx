@@ -3,6 +3,7 @@ import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
 import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
+import { useT } from './shareI18n'
 import { pruneShareImages } from './shareImageCache'
 import { decideMessageResponse } from './messageResponse'
 import { uploadErrorText, uploadPatiently, uploadRetryable } from './shareUpload'
@@ -102,21 +103,22 @@ function FilesPanel({
   onClose?: () => void
   onOpen: (f: ShareFile) => void
 }) {
+  const t = useT()
   return (
-    <section className="sh-files" aria-label="bot 給你的檔案">
+    <section className="sh-files" aria-label={t('bot 給你的檔案')}>
       <div className="sh-files-head">
-        <strong>bot 給你的檔案</strong>
+        <strong>{t('bot 給你的檔案')}</strong>
         <button type="button" className="sh-link" onClick={onRefresh}>
-          重新整理
+          {t('重新整理')}
         </button>
         {onClose ? (
-          <button type="button" className="sh-link" onClick={onClose} aria-label="關閉檔案清單">
+          <button type="button" className="sh-link" onClick={onClose} aria-label={t('關閉檔案清單')}>
             ✕
           </button>
         ) : null}
       </div>
       {files.length === 0 ? (
-        <p className="sh-empty">還沒有檔案。bot 產生檔案給你時會出現在這裡。</p>
+        <p className="sh-empty">{t('還沒有檔案。bot 產生檔案給你時會出現在這裡。')}</p>
       ) : (
         <ul className="sh-file-list">
           {files.map((f) => (
@@ -145,6 +147,7 @@ function FilesPanel({
 }
 
 export function ShareApp({ client }: { client: ShareClient }) {
+  const t = useT()
   const [botName, setBotName] = useState('')
   const [messages, setMessages] = useState<ShareMessage[]>([])
   const [status, setStatus] = useState<ShareStatus>('idle')
@@ -433,11 +436,11 @@ export function ShareApp({ client }: { client: ShareClient }) {
   // 90 秒上限：送出後一直沒等到 working／回覆（SSE 與輪詢都漏掉、或 bot 根本沒收到），不能讓送出鈕永遠灰著。
   useEffect(() => {
     if (!awaiting) return
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       setAwaiting(false)
-      setSendError('沒等到回應，可以再送一次。')
+      setSendError(t('沒等到回應，可以再送一次。'))
     }, AWAIT_LIMIT_MS)
-    return () => clearTimeout(t)
+    return () => clearTimeout(timer)
   }, [awaiting])
 
   const busy = status === 'working' || awaiting
@@ -514,8 +517,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const pendingStatus = (p: Pending): string => {
     if (p.error) return p.error
     if (p.id) return ''
-    if (!p.active) return '等待中'
-    return pending.length > 1 ? `上傳中（第 ${pending.indexOf(p) + 1} 張／共 ${pending.length} 張）` : '上傳中…'
+    if (!p.active) return t('等待中')
+    return pending.length > 1
+      ? t('上傳中（第 {idx} 張／共 {total} 張）', { idx: pending.indexOf(p) + 1, total: pending.length })
+      : t('上傳中…')
   }
   const ready = pending.filter((p) => p.id)
   const textChars = shareTextChars(text)
@@ -580,7 +585,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
         // daemon 收下了、但 bot 沒收到（pane 打不進字、附件綁定失敗…）：不會有任何回覆事件，字與附件都留著讓人再送。
         anchor.current = null
         if (awaitGen.current === gen) setAwaiting(false)
-        setSendError('bot 沒收到這一則，請再送一次；你打的字還在。')
+        setSendError(t('bot 沒收到這一則，請再送一次；你打的字還在。'))
         void load()
         return
       }
@@ -590,7 +595,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       // 只拿掉這一則真的帶走的附件；送出期間才傳好的留著給下一則。
       setPending((p) => p.filter((x) => !(x.id && ids.includes(x.id))))
       stick.current = true
-      if (res?.delivery === 'unknown') setSendError('送出了，但還不確定 bot 有沒有收到，稍等一下。')
+      if (res?.delivery === 'unknown') setSendError(t('送出了，但還不確定 bot 有沒有收到，稍等一下。'))
       // 不在這裡 setAwaiting(true)：SSE 可能已經先把這一世代清掉。
       if (awaitGen.current === gen) void load()
     } catch (e) {
@@ -618,13 +623,13 @@ export function ShareApp({ client }: { client: ShareClient }) {
           </div>
           {goneBlocked ? (
             <>
-              <h1>這個頁面打不開</h1>
-              <p>請用分享給你的人提供的網址重新開啟。</p>
+              <h1>{t('這個頁面打不開')}</h1>
+              <p>{t('請用分享給你的人提供的網址重新開啟。')}</p>
             </>
           ) : (
             <>
-              <h1>這個分享連結已失效</h1>
-              <p>連結可能被關閉或換新了。請向分享給你的人要一條新的連結。</p>
+              <h1>{t('這個分享連結已失效')}</h1>
+              <p>{t('連結可能被關閉或換新了。請向分享給你的人要一條新的連結。')}</p>
             </>
           )}
         </div>
@@ -638,10 +643,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
         <div className="sh-title">
           <span className={`sh-dot ${busy ? 'busy' : 'idle'}`} aria-hidden="true" />
           <h1>{botName || '…'}</h1>
-          <span className="sh-state">{busy ? '思考中…' : '在線'}</span>
+          <span className="sh-state">{busy ? t('思考中…') : t('在線')}</span>
         </div>
         <button type="button" className="sh-files-btn" aria-expanded={filesOpen} onClick={() => setFilesOpen((v) => !v)}>
-          檔案{files.length ? `（${files.length}）` : ''}
+          {files.length ? t('檔案（{count}）', { count: files.length }) : t('檔案')}
         </button>
       </header>
       {netError ? (
@@ -660,19 +665,19 @@ export function ShareApp({ client }: { client: ShareClient }) {
         >
           {hasMore ? (
             <button type="button" className="sh-link sh-older" disabled={loadingOlder} onClick={() => void loadOlder()}>
-              {loadingOlder ? '載入中…' : '載入較早訊息'}
+              {loadingOlder ? t('載入中…') : t('載入較早訊息')}
             </button>
           ) : null}
           {olderError ? (
             <p className="sh-send-err" role="alert">
               {olderError}{' '}
               <button type="button" className="sh-link" onClick={() => void loadOlder()}>
-                重試
+                {t('重試')}
               </button>
             </p>
           ) : null}
-          {state === 'loading' ? <p className="sh-empty">載入中…</p> : null}
-          {state === 'ready' && messages.length === 0 ? <p className="sh-empty">打個招呼開始對話吧。</p> : null}
+          {state === 'loading' ? <p className="sh-empty">{t('載入中…')}</p> : null}
+          {state === 'ready' && messages.length === 0 ? <p className="sh-empty">{t('打個招呼開始對話吧。')}</p> : null}
           {messages.map((m) => (
             <Bubble key={m.id} m={m} images={imagesOf.get(m.id) ?? NO_IMAGES} client={client} onOpen={setViewing} />
           ))}
@@ -684,7 +689,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
                   <i />
                   <i />
                 </span>
-                思考中…
+                {t('思考中…')}
               </div>
             </div>
           ) : null}
@@ -708,10 +713,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
                 <span className="sh-pending-st" role={p.error ? 'alert' : p.id ? undefined : 'status'}>{pendingStatus(p)}</span>
                 {p.error && p.retry ? (
                   <button type="button" className="sh-retry" onClick={() => setPending((x) => x.map((y) => (y.key === p.key ? { ...y, error: null, retry: false } : y)))}>
-                    再試一次
+                    {t('再試一次')}
                   </button>
                 ) : null}
-                <button type="button" aria-label={`移除 ${p.name}`} onClick={() => removePending(p.key)}>
+                <button type="button" aria-label={t('移除 {name}', { name: p.name })} onClick={() => removePending(p.key)}>
                   ✕
                 </button>
               </li>
@@ -721,24 +726,24 @@ export function ShareApp({ client }: { client: ShareClient }) {
         {sendError || tooLong || tooMany || failedAttach ? (
           <p className="sh-send-err" role="alert">
             {tooMany
-              ? `一次最多送 ${ATTACH_MAX} 個檔案，請先移除 ${ready.length - ATTACH_MAX} 個，剩下的下一則再送。`
+              ? t('一次最多送 {max} 個檔案，請先移除 {count} 個，剩下的下一則再送。', { max: ATTACH_MAX, count: ready.length - ATTACH_MAX })
               : tooLong
-                ? `太長了（${textChars}／${SHARE_TEXT_MAX} 字），請分成幾段送。`
+                ? t('太長了（{chars}／{max} 字），請分成幾段送。', { chars: textChars, max: SHARE_TEXT_MAX })
                 : failedAttach
-                  ? '有附件沒傳上去，請移除它或再試一次，再送出。'
+                  ? t('有附件沒傳上去，請移除它或再試一次，再送出。')
                   : sendError}
           </p>
         ) : null}
         <div className="sh-input-row">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => pick(e.target.files)} />
-          <button type="button" className="sh-attach" aria-label="附加檔案" title="附加檔案（單檔 25 MB 以內）" onClick={() => fileInput.current?.click()}>
+          <button type="button" className="sh-attach" aria-label={t('附加檔案')} title={t('附加檔案（單檔 25 MB 以內）')} onClick={() => fileInput.current?.click()}>
             📎
           </button>
           <textarea
             value={text}
             rows={1}
-            placeholder={busy ? 'AI 思考中，可以先打下一則…' : '輸入訊息…'}
-            aria-label="訊息"
+            placeholder={busy ? t('AI 思考中，可以先打下一則…') : t('輸入訊息…')}
+            aria-label={t('訊息')}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               // 手機上 Enter 是換行；桌機 Enter 送出、Shift+Enter 換行。輸入法選字中不送。
@@ -749,13 +754,13 @@ export function ShareApp({ client }: { client: ShareClient }) {
               }
             }}
           />
-          <button type="submit" className="sh-send" disabled={!canSend} title={busy ? '等 bot 回完再送' : undefined}>
-            {sending ? '送出中…' : '送出'}
+          <button type="submit" className="sh-send" disabled={!canSend} title={busy ? t('等 bot 回完再送') : undefined}>
+            {sending ? t('送出中…') : t('送出')}
           </button>
         </div>
         {busy && !sending ? (
           <p className="sh-wait" role="status">
-            等 bot 回完再送（可以先打好）
+            {t('等 bot 回完再送（可以先打好）')}
           </p>
         ) : null}
       </form>
