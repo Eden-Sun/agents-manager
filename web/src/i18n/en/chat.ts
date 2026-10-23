@@ -22,7 +22,7 @@ export default {
   // lib/backgroundJobs.ts
   '背景執行中（{n}）': 'Running in background ({n})',
   '背景 {n}': 'Background {n}',
-  '不到 1 分鐘': 'Less than a minute',
+  '不到 1 分鐘': 'less than 1 minute',
   '{hours} 小時 {minutes} 分': '{hours}h {minutes}m',
   '{n} 小時': { one: '{n} hour', other: '{n} hours' },
   '{n} 分鐘': { one: '{n} minute', other: '{n} minutes' },
@@ -102,6 +102,7 @@ export default {
   '還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。': 'No files yet. This is a shared bot. Files it puts in $AM_OUTBOX are kept for 14 days (the oldest are removed when the total is too large), so external users can return later to get them.',
   '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。': 'No files yet. When the bot puts a file for you in $AM_OUTBOX, refresh to see it. Files are removed one hour after they are added.',
   // lib/pendingQuestion.ts
+  'Jev（TypeSafe 型別判斷）的建議，只是建議，不會自動動作，不會替你作答；請自己選。': 'Jev only suggests an option; it will not act or answer for you. Please choose for yourself.',
   '{name}的建議，{note}，不會替你作答；請自己選。': '{name} suggestion: {note}. Choose an answer yourself.',
   // lib/queueSlot.ts
   '；{n} 個附件要重新加': { one: '; reattach {n} attachment', other: '; reattach {n} attachments' },
