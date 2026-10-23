@@ -72,6 +72,13 @@ Orca sources: [README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 **Platforms and requirements.** The daemon runs on macOS and Linux. You need an installed [herdr](https://herdr.dev) and at least one agent CLI (`claude`, `codex`, `grok` or `agy`); building from source also needs Rust (`cargo`) and [Bun](https://bun.sh). herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
 
+**Install with Homebrew** (macOS arm64, Linux x86_64 / arm64; also installs herdr):
+
+```bash
+brew install eden-sun/tap/agents-manager
+agents-managerd serve                     # or keep it running: brew services start agents-manager
+```
+
 **Install a prebuilt binary** (no Rust or Bun needed; the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
 
 ```bash
