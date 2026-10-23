@@ -10,6 +10,7 @@ import { DEFAULT_REMOTE_ROOT, remoteCargoProblems, remoteCargoUnsaved, toRemoteC
 import { portProblem, sessionProblem, sshTargetProblem } from '../lib/hostForm'
 import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 import { useStore } from '../store/store'
+import { useT } from '../lib/i18n'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
@@ -21,14 +22,15 @@ import './hostsPanel.css'
 
 /** SPEC §11.6: remote projects carry an `@<host>` badge; local ones show nothing. */
 export function HostBadge({ host, connected }: { host: string; connected: boolean }) {
+  const t = useT()
   if (!host || host === 'local') return null
   return (
     <span
       className={`host-badge${connected ? '' : ' down'}`}
-      title={connected ? `遠端主機 ${host}（已連線）` : `遠端主機 ${host}（未連線）`}
+      title={connected ? t('遠端主機 {host}（已連線）', { host }) : t('遠端主機 {host}（未連線）', { host })}
     >
       @{host}
-      {connected ? null : ' 離線'}
+      {connected ? null : t(' 離線')}
     </span>
   )
 }
@@ -44,6 +46,7 @@ function closeEnclosingPopup(from: HTMLElement | null) {
 
 /** 「開 shell」並切到 `HostShellPanel`；主機斷線時停用而非隱藏，讓人看得出為什麼不能按。 */
 function OpenShellButton({ host, connected }: { host: string; connected: boolean }) {
+  const t = useT()
   const busy = useStore((s) => Boolean(s.busy[`shell:${host}`]))
   const openHostShell = useStore((s) => s.openHostShell)
   return (
@@ -51,8 +54,8 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
       type="button"
       className="mini-btn"
       disabled={busy || !connected}
-      aria-label={host === 'local' ? '在本機開 shell' : `在 ${host} 開 shell`}
-      title={connected ? '在這台主機開一個 shell，直接下指令' : '主機未連線，開不了 shell'}
+      aria-label={host === 'local' ? t('在本機開 shell') : t('在 {host} 開 shell', { host })}
+      title={connected ? t('在這台主機開一個 shell，直接下指令') : t('主機未連線，開不了 shell')}
       onClick={(e) => {
         const btn = e.currentTarget
         // 失敗就把彈窗留著：原因（通知）與「重連」都在這一頁上。
@@ -61,13 +64,14 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
         })
       }}
     >
-      {busy ? '開啟中…' : '開 shell'}
+      {busy ? t('開啟中…') : t('開 shell')}
     </button>
   )
 }
 
 /** 這台主機開著的 shell（`GET /api/hosts/:name/shells`）：點一下接回，或直接結束；主機沒連線時不畫。 */
 function HostShellList({ host, connected }: { host: string; connected: boolean }) {
+  const t = useT()
   const current = useStore((s) => s.shellView)
   const viewHostShell = useStore((s) => s.viewHostShell)
   const endHostShell = useStore((s) => s.endHostShell)
@@ -106,7 +110,7 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
             <button
               type="button"
               className="host-shell-open mono"
-              title={`回到這個 shell（pane ${sh.pane_id}）\n${sh.cwd}`}
+              title={t('回到這個 shell（pane {pane}）\n{cwd}', { pane: sh.pane_id, cwd: sh.cwd })}
               onClick={(e) => {
                 const btn = e.currentTarget
                 viewHostShell(sh)
@@ -119,8 +123,8 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
               type="button"
               className="icon-btn"
               disabled={ending}
-              aria-label={`結束 shell ${sh.cwd}（pane ${sh.pane_id}）`}
-              title={`結束 shell ${sh.cwd}（pane ${sh.pane_id}）`}
+              aria-label={t('結束 shell {cwd}（pane {pane}）', { cwd: sh.cwd, pane: sh.pane_id })}
+              title={t('結束 shell {cwd}（pane {pane}）', { cwd: sh.cwd, pane: sh.pane_id })}
               onClick={() =>
                 void endHostShell(host, sh.pane_id).then((why) => {
                   if (why) setNeeds({ paneId: sh.pane_id, why })
@@ -135,9 +139,9 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
       })}
       <ConfirmDialog
         open={needs !== null}
-        title="這顆 pane 還在做事"
+        title={t('這顆 pane 還在做事')}
         body={<ServicePaneNote needs={needs?.why ?? null} />}
-        confirmLabel="仍要關掉"
+        confirmLabel={t('仍要關掉')}
         danger
         onCancel={() => setNeeds(null)}
         onConfirm={() => {
@@ -162,6 +166,7 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
 
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
 export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
+  const t = useT()
   const v = hostBaselineView(baseline)
   if (v.items.length === 0) {
     return (
@@ -192,7 +197,7 @@ export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
       ) : null}
       {warnItems.length > 0 ? (
         <details className="env-fold">
-          <summary>{criticalItems.length > 0 ? `還有 ${warnItems.length} 項提醒` : `列出 ${warnItems.length} 項`}</summary>
+          <summary>{criticalItems.length > 0 ? t('還有 {n} 項提醒', { n: warnItems.length }) : t('列出 {n} 項', { n: warnItems.length })}</summary>
           <ul className="host-baseline-items">
             {warnItems.map((i) => (
               <li key={i.id} className={i.severity} title={i.id}>
@@ -207,6 +212,7 @@ export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
 }
 
 function HostRow({ name }: { name: string }) {
+  const t = useT()
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
   const busy = useStore((s) => Boolean(s.busy[`host:${name}`]))
@@ -220,13 +226,13 @@ function HostRow({ name }: { name: string }) {
       <span
         className={`lamp lamp-${host.connected ? 'idle' : 'disconnected'}`}
         role="img"
-        aria-label={host.connected ? '已連線' : '未連線'}
-        title={host.connected ? '已連線' : (host.error ?? '未連線')}
+        aria-label={host.connected ? t('已連線') : t('未連線')}
+        title={host.connected ? t('已連線') : (host.error ?? t('未連線'))}
       />
       <span className="host-main">
         <span className="host-name">
           {host.name}
-          <span className="host-count">{projectCount > 0 ? `${projectCount} 個 Project` : '未使用'}</span>
+          <span className="host-count">{projectCount > 0 ? t('{n} 個 Project', { n: projectCount }) : t('未使用')}</span>
         </span>
         <span className="host-ssh" title={`ssh ${host.ssh}${host.ssh_port !== 22 ? ` -p ${host.ssh_port}` : ''}`}>
           {host.ssh}
@@ -234,7 +240,7 @@ function HostRow({ name }: { name: string }) {
         </span>
         {host.connected ? null : (
           <span className="host-err" title={host.error ?? ''}>
-            {host.error ?? '未連線'}
+            {host.error ?? t('未連線')}
           </span>
         )}
         <HerdrVersionLine herdr={host.herdr} />
@@ -250,17 +256,17 @@ function HostRow({ name }: { name: string }) {
           type="button"
           className="mini-btn"
           disabled={busy}
-          aria-label={busy ? `${name} 連線中` : `重連 ${name}`}
-          title="重新建立 ssh master 並 ping 遠端 herdr"
+          aria-label={busy ? t('{name} 連線中', { name }) : t('重連 {name}', { name })}
+          title={t('重新建立 ssh master 並 ping 遠端 herdr')}
           onClick={() => void reconnectHost(name)}
         >
-          {busy ? '連線中…' : '重連'}
+          {busy ? t('連線中…') : t('重連')}
         </button>
         <button
           type="button"
           className="icon-btn"
-          aria-label={`刪除主機 ${name}`}
-          title={projectCount > 0 ? '仍有 Project 使用這個主機' : '刪除主機'}
+          aria-label={t('刪除主機 {name}', { name })}
+          title={projectCount > 0 ? t('仍有 Project 使用這個主機') : t('刪除主機')}
           onClick={() => setConfirmDelete(true)}
         >
           ✕
@@ -268,21 +274,22 @@ function HostRow({ name }: { name: string }) {
       </span>
       <ConfirmDialog
         open={confirmDelete}
-        title="刪除主機"
+        title={t('刪除主機')}
         body={
           <>
-            要把 <strong>{name}</strong>（ssh {host.ssh}
-            {host.ssh_port !== 22 ? `:${host.ssh_port}` : ''}）從清單移除嗎？遠端的 herdr 與 agent 都不受影響，
-            只是這台不再出現在 Project 的主機選項裡。
+            {t.x('要把 {name}（ssh {ssh}）從清單移除嗎？遠端的 herdr 與 agent 都不受影響，只是這台不再出現在 Project 的主機選項裡。', {
+              name: <strong>{name}</strong>,
+              ssh: `${host.ssh}${host.ssh_port !== 22 ? `:${host.ssh_port}` : ''}`,
+            })}
             {projectCount > 0 ? (
               <>
                 <br />
-                <strong>仍有 {projectCount} 個 Project 在用這台主機</strong>，需先刪除或搬走那些 Project 才能移除。
+                <strong>{t('仍有 {n} 個 Project 在用這台主機，需先刪除或搬走那些 Project 才能移除。', { n: projectCount })}</strong>
               </>
             ) : null}
           </>
         }
-        confirmLabel="刪除主機"
+        confirmLabel={t('刪除主機')}
         confirmDisabled={projectCount > 0}
         danger
         onCancel={() => setConfirmDelete(false)}
@@ -296,6 +303,7 @@ function HostRow({ name }: { name: string }) {
 }
 
 function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void }) {
+  const t = useT()
   const addHost = useStore((s) => s.addHost)
   const [name, setName] = useState('')
   const [ssh, setSsh] = useState('')
@@ -356,7 +364,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       }}
     >
       <label className="field">
-        <span>名稱（唯一識別，用於 Project 的 host）</span>
+        <span>{t('名稱（唯一識別，用於 Project 的 host）')}</span>
         <input
           type="text"
           value={name}
@@ -365,11 +373,11 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
         {name && !nameOk ? (
-          <span className="hint">小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字；不能叫 local。</span>
+          <span className="hint">{t('小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字；不能叫 local。')}</span>
         ) : null}
       </label>
       <label className="field">
-        <span>ssh 目標（可用 ssh_config 別名）</span>
+        <span>{t('ssh 目標（可用 ssh_config 別名）')}</span>
         <input
           type="text"
           value={ssh}
@@ -381,10 +389,10 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       </label>
 
       <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
-        <span className="chev">{advanced ? '▼' : '▶'}</span> 進階（都有預設值）
+        <span className="chev">{advanced ? '▼' : '▶'}</span> {t('進階（都有預設值）')}
       </button>
       {/* 收起時進階欄位不掛載，但它的錯誤仍會鎖住送出：原因要留在這一列上，不然只剩一顆灰鈕。 */}
-      {!advanced && (portHint || sessionHint) ? <span className="hint">進階欄位：{[portHint, sessionHint].filter(Boolean).join('；')}</span> : null}
+      {!advanced && (portHint || sessionHint) ? <span className="hint">{t('進階欄位：{hints}', { hints: [portHint, sessionHint].filter(Boolean).join('；') /* i18n-ignore：分隔符 */ })}</span> : null}
       {advanced ? (
         <>
             <label className="field">
@@ -393,12 +401,12 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
               {portHint ? <span className="hint">{portHint}</span> : null}
             </label>
             <label className="field">
-              <span>herdr_session（遠端 named session）</span>
+              <span>{t('herdr_session（遠端 named session）')}</span>
               <input type="text" value={session} spellCheck={false} onChange={(e) => setSession(e.target.value)} />
               {sessionHint ? <span className="hint">{sessionHint}</span> : null}
             </label>
             <label className="field">
-              <span>remote_path（非互動 ssh shell 要前置的 PATH）</span>
+              <span>{t('remote_path（非互動 ssh shell 要前置的 PATH）')}</span>
               <input
                 type="text"
                 value={remotePath}
@@ -407,7 +415,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
               />
             </label>
             <label className="field">
-              <span>ssh_opts（額外 ssh 參數，以空白分隔）</span>
+              <span>{t('ssh_opts（額外 ssh 參數，以空白分隔）')}</span>
               <input
                 type="text"
                 value={sshOpts}
@@ -420,9 +428,9 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       ) : null}
 
       <div className="form-actions">
-        <span className="hint host-form-hint">只用現有 ssh key（BatchMode），不會詢問密碼</span>
+        <span className="hint host-form-hint">{t('只用現有 ssh key（BatchMode），不會詢問密碼')}</span>
         <button type="submit" className="btn primary" disabled={!ok || busy}>
-          {busy ? '連線中…' : '新增並連線'}
+          {busy ? t('連線中…') : t('新增並連線')}
         </button>
       </div>
     </form>
@@ -431,6 +439,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
 
 /** The daemon's own machine: connection lamp, attach command, tool badges (v4.0). */
 function LocalHostRow() {
+  const t = useT()
   const connected = useStore((s) => s.connected)
   const tools = useStore((s) => s.localTools)
   const herdr = useStore((s) => s.localHerdr)
@@ -439,11 +448,11 @@ function LocalHostRow() {
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === 'local').length)
   return (
     <div className="host-row local">
-      <span className={`lamp lamp-${connected ? 'idle' : 'disconnected'}`} role="img" aria-label={connected ? 'herdr 已連線' : 'herdr 中斷'} title={connected ? 'herdr 已連線' : 'herdr 中斷'} />
+      <span className={`lamp lamp-${connected ? 'idle' : 'disconnected'}`} role="img" aria-label={connected ? t('herdr 已連線') : t('herdr 中斷')} title={connected ? t('herdr 已連線') : t('herdr 中斷')} />
       <span className="host-main">
         <span className="host-name">
-          本機
-          <span className="host-count">{projectCount > 0 ? `${projectCount} 個 Project` : '未使用'}</span>
+          {t('本機')}
+          <span className="host-count">{projectCount > 0 ? t('{n} 個 Project', { n: projectCount }) : t('未使用')}</span>
         </span>
         <span className="host-ssh">{attach}</span>
         <HerdrVersionLine herdr={herdr} />
@@ -462,14 +471,15 @@ function LocalHostRow() {
 
 
 /** 線上 daemon 比前端舊時這條路徑根本不存在，回的是 404／405 空 body；照原樣顯示只會看到空白理由。 */
-function remoteCargoErr(e: unknown): string {
+function remoteCargoErr(e: unknown, t: ReturnType<typeof useT>): string {
   if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
-    return `這顆 daemon 還沒有 /api/build/remote（HTTP ${e.status}），二進位比前端舊；要 cargo build --release 後重啟 daemon 才會有這個 API。`
+    return t('這顆 daemon 還沒有 /api/build/remote（HTTP {status}），二進位比前端舊；要 cargo build --release 後重啟 daemon 才會有這個 API。', { status: e.status })
   }
   return e instanceof Error ? e.message : String(e)
 }
 
 function RemoteCargoPanel() {
+  const t = useT()
   const [loaded, setLoaded] = useState(false)
   const [enabled, setEnabled] = useState(false)
   const [host, setHost] = useState('')
@@ -512,7 +522,7 @@ function RemoteCargoPanel() {
       (e) => {
         if (alive) {
           setLoadFailed(true)
-          setMessage(`讀取外部 Cargo 設定失敗：${remoteCargoErr(e)}`)
+          setMessage(t('讀取外部 Cargo 設定失敗：{error}', { error: remoteCargoErr(e, t) }))
           setLoaded(true)
         }
       },
@@ -520,7 +530,7 @@ function RemoteCargoPanel() {
     return () => {
       alive = false
     }
-  }, [reload])
+  }, [reload, t])
 
   const form = { enabled, host, user, port, root, jobs, password, clearPassword }
   const problems = remoteCargoProblems(form)
@@ -544,10 +554,10 @@ function RemoteCargoPanel() {
       setClearPassword((current) => (current === submitted.clearPassword ? false : current))
       setPasswordSet(cfg.password_set)
       setSaved(cfg)
-      setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')
+      setMessage(t('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。'))
       return true
     } catch (e) {
-      setMessage(`儲存失敗：${remoteCargoErr(e)}`)
+      setMessage(t('儲存失敗：{error}', { error: remoteCargoErr(e, t) }))
       return false
     }
   }
@@ -570,21 +580,36 @@ function RemoteCargoPanel() {
       const unsaved = !saved || remoteCargoUnsaved(saved, form)
       if (unsaved && !(await persist())) return
       const r = await api.testRemoteCargo()
-      const how = r.password_auth ? '密碼' : 'SSH key/agent'
+      const how = r.password_auth ? t('密碼') : 'SSH key/agent'
       const target = `${user.trim()}@${host.trim()}${(Number(port) || 22) === 22 ? '' : `:${Number(port)}`}`
-      const first = unsaved ? '（已先儲存表單裡的設定）' : ''
+      const first = unsaved ? t('（已先儲存表單裡的設定）') : ''
       // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
       setNeedsToolchain(r.cargo_missing || r.clippy_missing)
       setMessage(
         r.cargo_missing
-          ? `✓ ${target} 連得上（${how}）${first}，但這台還沒有 Rust 工具鏈（${r.os || '?'}/${r.arch || '?'}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。`
+          ? t('✓ {target} 連得上（{how}）{first}，但這台還沒有 Rust 工具鏈（{platform}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。', {
+              target,
+              how,
+              first,
+              platform: `${r.os || '?'}/${r.arch || '?'}`,
+            })
           : r.clippy_missing
-            ? `✓ ${target} 連得上（${how}）${first}，有 cargo 但沒有 clippy——cargo clippy 轉過去會失敗。按下面「安裝 Rust 工具鏈」補上。\n${r.output}`
-            : `✓ ${target} SSH/Cargo 可用（${how}）${first}：\n${r.output}`
+            ? t('✓ {target} 連得上（{how}）{first}，有 cargo 但沒有 clippy——cargo clippy 轉過去會失敗。按下面「安裝 Rust 工具鏈」補上。\n{output}', {
+                target,
+                how,
+                first,
+                output: r.output,
+              })
+            : t('✓ {target} SSH/Cargo 可用（${how}）{first}：\n{output}', {
+                target,
+                how,
+                first,
+                output: r.output,
+              })
       )
     } catch (e) {
       setNeedsToolchain(false)
-      setMessage(`測試失敗：${remoteCargoErr(e)}`)
+      setMessage(t('測試失敗：{error}', { error: remoteCargoErr(e, t) }))
     } finally {
       lock.end()
     }
@@ -592,81 +617,83 @@ function RemoteCargoPanel() {
 
   const installToolchain = async () => {
     setBusy(true)
-    setMessage('安裝中…（rustup minimal，第一次大約要一兩分鐘）')
+    setMessage(t('安裝中…（rustup minimal，第一次大約要一兩分鐘）'))
     try {
       const r = await api.installRemoteCargoToolchain()
       setNeedsToolchain(false)
-      const head = r.already_installed ? `✓ 這台本來就有了：${r.cargo_version}` : `✓ 已安裝：${r.cargo_version}`
+      const head = r.already_installed
+        ? t('✓ 這台本來就有了：{version}', { version: r.cargo_version })
+        : t('✓ 已安裝：{version}', { version: r.cargo_version })
       // rustup 不裝 linker；少了 cc，cargo test 會在連結那一步才爆掉。clippy 補不上（不是 rustup 裝的工具鏈）也當場講。
       const warnings = [
-        r.cc_missing ? '⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。' : '',
-        r.clippy_missing ? '⚠ 這台的 cargo 沒有 clippy、也補不上（不是 rustup 裝的？），cargo clippy 轉過去會失敗。請在遠端裝 clippy。' : '',
+        r.cc_missing ? t('⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。') : '',
+        r.clippy_missing ? t('⚠ 這台的 cargo 沒有 clippy、也補不上（不是 rustup 裝的？），cargo clippy 轉過去會失敗。請在遠端裝 clippy。') : '',
       ].filter(Boolean)
       setMessage([head, ...warnings].join('\n'))
     } catch (e) {
-      setMessage(`安裝失敗：${remoteCargoErr(e)}`)
+      setMessage(t('安裝失敗：{error}', { error: remoteCargoErr(e, t) }))
     } finally {
       setBusy(false)
     }
   }
 
-  if (!loaded) return <p className="hint">讀取外部 Cargo 設定…</p>
+  if (!loaded) return <p className="hint">{t('讀取外部 Cargo 設定…')}</p>
 
   return (
     <section className="remote-cargo-settings">
       <div className="settings-subhead">
-        <strong>外部 Cargo 主機</strong>
-        <span className="hint">開發者功能：把 check/test/clippy 移到另一台 SSH 主機，build 仍留本機。</span>
+        <strong>{t('外部 Cargo 主機')}</strong>
+        <span className="hint">{t('開發者功能：把 check/test/clippy 移到另一台 SSH 主機，build 仍留本機。')}</span>
       </div>
       <label className="field checkbox-field">
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-        <span>啟用外部 Cargo verification</span>
+        <span>{t('啟用外部 Cargo verification')}</span>
       </label>
       {/* 沒勾選就只留標題、說明與勾選框；隱藏不等於清空，欄位 state 與已存值原樣保留。 */}
       {enabled ? (
         <>
           <div className="remote-cargo-grid">
             <label className="field">
-              <span>主機 / IP</span>
+              <span>{t('主機 / IP')}</span>
               <input value={host} placeholder="192.168.1.20" spellCheck={false} onChange={(e) => setHost(e.target.value)} />
             </label>
             <label className="field">
-              <span>SSH 帳號</span>
+              <span>{t('SSH 帳號')}</span>
               <input value={user} placeholder="builder" spellCheck={false} onChange={(e) => setUser(e.target.value)} />
             </label>
             <label className="field">
-              <span>SSH port</span>
+              <span>{t('SSH port')}</span>
               <input value={port} spellCheck={false} onChange={(e) => setPort(e.target.value)} />
             </label>
             <label className="field">
-              <span>遠端 cargo jobs</span>
+              <span>{t('遠端 cargo jobs')}</span>
               <input value={jobs} spellCheck={false} onChange={(e) => setJobs(e.target.value)} />
             </label>
           </div>
           <label className="field">
-            <span>遠端工作目錄</span>
+            <span>{t('遠端工作目錄')}</span>
             <input value={root} spellCheck={false} onChange={(e) => setRoot(e.target.value)} />
           </label>
           <label className="field">
-            <span>SSH 密碼（可留空使用 key / ssh-agent）</span>
+            <span>{t('SSH 密碼（可留空使用 key / ssh-agent）')}</span>
             <input
               type="password"
               value={password}
               autoComplete="new-password"
-              placeholder={passwordSet ? '已安全儲存；留空不變' : '未設定'}
+              placeholder={passwordSet ? t('已安全儲存；留空不變') : t('未設定')}
               onChange={(e) => {
                 setPassword(e.target.value)
                 if (e.target.value) setClearPassword(false)
               }}
             />
             <span className="hint">
-              密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式優先用 sshpass，沒有就走 ssh 自己的 askpass（OpenSSH 8.4+）。
+              {t('密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式優先用 sshpass，沒有就走 ssh 自己的 askpass（OpenSSH 8.4+）。')}
             </span>
           </label>
           {passwordSet ? (
             <label className="field checkbox-field">
               <input type="checkbox" checked={clearPassword} onChange={(e) => setClearPassword(e.target.checked)} />
-              <span>清除已存密碼，改用 SSH key / agent</span>
+              <span>{t('清除已存密碼，改用 SSH key / agent')}</span>
             </label>
           ) : null}
         </>
@@ -674,7 +701,7 @@ function RemoteCargoPanel() {
       <div className="form-actions">
         {enabled ? (
           <button type="button" className="btn" disabled={busy || blocked || loadFailed || !host.trim() || !user.trim()} onClick={() => void test()}>
-            測試連線
+            {t('測試連線')}
           </button>
         ) : null}
         {/* 讀失敗、表單又沒動過：按了只會用初值整份取代 daemon 的設定（#1343）。 */}
@@ -682,14 +709,14 @@ function RemoteCargoPanel() {
           type="button"
           className="btn primary"
           disabled={busy || blocked || (enabled && (!host.trim() || !user.trim())) || (!saved && !unsaved)}
-          title={!saved && !unsaved ? '讀不到目前的設定，先重新讀取' : undefined}
+          title={!saved && !unsaved ? t('讀不到目前的設定，先重新讀取') : undefined}
           onClick={() => void save()}
         >
-          {busy ? '處理中…' : '儲存'}
+          {busy ? t('處理中…') : t('儲存')}
         </button>
         {needsToolchain ? (
           <button type="button" className="btn" disabled={busy} onClick={() => void installToolchain()}>
-            安裝 Rust 工具鏈
+            {t('安裝 Rust 工具鏈')}
           </button>
         ) : null}
       </div>
@@ -710,9 +737,9 @@ function RemoteCargoPanel() {
       </div>
       {loadFailed ? (
         <>
-          <p className="hint">讀不到 daemon 目前存的設定。這時按儲存會用這份表單整份取代（沒填的欄位用預設值）；先按「重新讀取」。</p>
+          <p className="hint">{t('讀不到 daemon 目前存的設定。這時按儲存會用這份表單整份取代（沒填的欄位用預設值）；先按「重新讀取」。')}</p>
           <button type="button" className="btn" disabled={busy} onClick={() => setReload((n) => n + 1)}>
-            重新讀取
+            {t('重新讀取')}
           </button>
         </>
       ) : null}
@@ -721,6 +748,7 @@ function RemoteCargoPanel() {
 }
 
 export function HostsPanel() {
+  const t = useT()
   const hosts = useStore((s) => s.hosts)
   const [result, setResult] = useState<HostResult | null>(null)
 
@@ -730,7 +758,7 @@ export function HostsPanel() {
         <LocalHostRow />
       </div>
       {hosts.length === 0 ? (
-        <p className="hint hosts-empty">尚未設定遠端主機。Project 預設都在本機。</p>
+        <p className="hint hosts-empty">{t('尚未設定遠端主機。Project 預設都在本機。')}</p>
       ) : (
         <div className="host-list">
           {hosts.map((h) => (
@@ -741,8 +769,8 @@ export function HostsPanel() {
       {result ? (
         <div className={`host-result ${result.connected ? 'ok' : 'err'}`} role="status">
           {result.connected
-            ? `✓ ${result.name}：ssh master 與遠端 herdr 都就緒`
-            : `✕ ${result.name}：${result.error ?? '連線失敗'}`}
+            ? t('✓ {name}：ssh master 與遠端 herdr 都就緒', { name: result.name })
+            : t('✕ {name}：{error}', { name: result.name, error: result.error ?? t('連線失敗') })}
         </div>
       ) : null}
       <NewHostForm onResult={setResult} />
