@@ -41,7 +41,7 @@ test('帳本兩張表都在捲動容器裡，每個 td 有 data-label，數字�
   }
   // 最近 20 筆：時間、機率、耗時是數字欄。
   const recent = tables[1]!.querySelector('tbody tr')!
-  for (const label of ['時間', '機率', '耗時 ms']) {
+  for (const label of ['時間', 'Jev 機率', '耗時 ms']) {
     assert.ok(recent.querySelector(`td[data-label="${label}"]`)?.classList.contains('num'), `${label} 要標 num`)
   }
 })

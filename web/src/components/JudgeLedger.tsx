@@ -1,10 +1,11 @@
 /**
- * 環境設定 → Jev 第二意見 底下的「帳本」（SPEC §4.3c，issue #1327）：四個場景各一列的計數，加最近 20 筆。
+ * 環境設定 → Jev 建議 底下的「帳本」（SPEC §4.3c，issue #1327）：四個場景各一列的計數，加最近 20 筆。
  * 只讀；不顯示遮罩後的命中行（那是給 daemon 對帳用的）。舊 daemon 沒有這個端點 → 說明，不報錯。
  */
 import { useEffect, useState } from 'react'
 import { fetchJudgeShadow, type JudgeShadow } from '../api/judge'
 import { useStore } from '../store/store'
+import { JevLabel } from './JevLabel'
 import { botLabel, JUDGE_SCENES, JUDGE_WINDOWS, overThreshold, probabilityText, recentRows, sceneStats, type JudgeWindow } from '../lib/judgeStats'
 
 /** 帳本一次拿的筆數（`fetchJudgeShadow` 預設值）；到了這個數字，統計只算得到這麼多筆。 */
@@ -44,6 +45,11 @@ export function JudgeLedger() {
   return (
     <section className="judge-ledger" aria-label="Jev 帳本">
       <h4>帳本</h4>
+      <p className="hint">
+        <JevLabel note />
+        <br />
+        這裡每一筆都是 Jev（TypeSafe 型別判斷）給的判斷，「Jev 機率」是它給的分數。
+      </p>
       {load.kind === 'loading' ? <p className="hint">讀取中…</p> : null}
       {load.kind === 'unsupported' ? <p className="hint">這顆 daemon 還沒有撞限第二意見帳本（需要更新 daemon）。</p> : null}
       {load.kind === 'error' ? (
@@ -131,7 +137,7 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
               <th role="columnheader">時間</th>
               <th role="columnheader">場景</th>
               <th role="columnheader">bot</th>
-              <th role="columnheader">機率</th>
+              <th role="columnheader">Jev 機率</th>
               <th role="columnheader">耗時 ms</th>
               <th role="columnheader">錯誤</th>
             </tr>
@@ -144,7 +150,7 @@ function LedgerBody({ shadow, bots }: { shadow: JudgeShadow; bots: { id: string;
                 </td>
                 <td role="cell" data-label="場景">{sceneName(r.regex_verdict)}</td>
                 <td role="cell" data-label="bot">{botLabel(r.bot_id, bots)}</td>
-                <td role="cell" data-label="機率" className="num">
+                <td role="cell" data-label="Jev 機率" className="num">
                   {probabilityText(r)}
                 </td>
                 <td role="cell" data-label="耗時 ms" className="num">

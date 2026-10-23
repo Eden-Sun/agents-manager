@@ -74,7 +74,6 @@ import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { agyEffort, shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
-import { JudgeBadge } from './JudgeBadge'
 import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
@@ -83,6 +82,7 @@ import { ModelCapacityNote } from './ModelCapacityNote'
 import { StatusCache } from './StatusCache'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
+import { JevNoticeText } from './JevNoticeText'
 import { SafeMarkdown } from './SafeMarkdown'
 import { TerminalTab } from './TerminalTab'
 import { PreviewPanel } from './PreviewPanel'
@@ -254,7 +254,7 @@ const PlainBubble = memo(function PlainBubble({
         ) : folded && preview ? (
           preview.text
         ) : (
-          system ? systemNoticeText(msg.content) : msg.content
+          system ? <JevNoticeText text={systemNoticeText(msg.content)} /> : msg.content
         )}
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
@@ -1370,7 +1370,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             {phone ? <UpdateQuotaChip /> : null}
             {/* Ahead of the badges: the row clips its tail, and the gear is the only non-duplicated entry. */}
             <PrimaryStar botId={botId} />
-            <JudgeBadge botId={botId} />
             <button
               type="button"
               className="icon-btn gear icon-tip"

@@ -91,7 +91,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     const raf = requestAnimationFrame(() => popRef.current?.focus({ preventScroll: true }))
     return () => cancelAnimationFrame(raf)
   }, [open])
-  // 焦點在浮層裡時收起，焦點回徽章鈕，不掉到 body（同 JudgeBadge）。
+  // 焦點在浮層裡時收起，焦點回徽章鈕，不掉到 body。
   const closePop = () => {
     if (popRef.current?.contains(document.activeElement)) btnRef.current?.focus()
     setOpen(false)

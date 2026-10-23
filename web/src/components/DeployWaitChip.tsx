@@ -33,7 +33,7 @@ export function DeployWaitChip() {
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false)
-    // 焦點在浮層裡時 Esc 收起，焦點回徽章鈕，不掉到 body（同 JudgeBadge）。
+    // 焦點在浮層裡時 Esc 收起，焦點回徽章鈕，不掉到 body。
     const esc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (pop.current?.contains(document.activeElement)) chip.current?.focus()
