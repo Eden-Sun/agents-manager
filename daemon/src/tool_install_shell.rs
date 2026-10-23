@@ -18,15 +18,12 @@ const DEADLINE: Duration = Duration::from_secs(15 * 60);
 /// 指令打進去之後多久內要看到前景程序離開 shell；沒看到就當它瞬間跑完（例如 `command not found`）。
 const STARTUP: Duration = Duration::from_secs(12);
 const POLL: Duration = Duration::from_secs(1);
+/// 連續幾次 `pane.process_info` 都失敗就當 pane 已經不在了（使用者自己關掉），不等滿 [`DEADLINE`]。
+const PANE_GONE_AFTER: u32 = 3;
 
-/// 官方安裝指令（API §12.7，與 [`crate::tools::install_prompt`] 同一份來源的指令）。
+/// 官方安裝指令（API §12.7）；與借 bot 安裝的 [`crate::tools::install_prompt`] 共用 `tools::install_shell_command`。
 pub fn install_command(kind: &str) -> Option<&'static str> {
-    match kind {
-        "claude" => Some("curl -fsSL https://claude.ai/install.sh | bash"),
-        "codex" => Some("npm i -g @openai/codex"),
-        "grok" => Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
-        _ => None,
-    }
+    crate::tools::install_shell_command(kind)
 }
 
 fn running() -> &'static Mutex<HashSet<(String, String)>> {
@@ -94,42 +91,100 @@ pub async fn start(app: &Arc<crate::state::App>, host: &str, kind: &str) -> LcRe
         })
         .await;
     let shell = opened.ok_or_else(|| LcError::Upstream(format!("host `{host}` changed before the install started")))??;
-    spawn_watch(app.clone(), host.to_string(), shell.pane_id.clone(), fence, slot);
+    spawn_watch(app.clone(), host.to_string(), kind.to_string(), shell.pane_id.clone(), fence, slot);
     Ok(json!({"pane_id": shell.pane_id, "mode": "shell"}))
 }
 
-/// 結束後的收尾：重新偵測、推 `host_changed`、關 pane。`slot` 活到這裡才放，收尾期間重複請求仍 409。
-fn spawn_watch(app: Arc<crate::state::App>, host: String, pane_id: String, fence: HostFence, slot: Slot) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observed {
+    Busy,
+    Idle,
+    /// `pane.process_info` 失敗。
+    Unreadable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// 安裝指令跑完（或瞬間就結束）。
+    Finished,
+    /// pane 查不到：使用者關了它，或連線壞了。
+    PaneGone,
+    Timeout,
+}
+
+/// watcher 的判斷狀態：一次觀察一次 [`Tracker::step`]，回 `Some` 才收尾。
+#[derive(Debug, Default)]
+pub struct Tracker {
+    saw_busy: bool,
+    unreadable: u32,
+}
+
+impl Tracker {
+    pub fn step(&mut self, seen: Observed, elapsed: Duration) -> Option<End> {
+        match seen {
+            Observed::Unreadable => {
+                self.unreadable += 1;
+                if self.unreadable >= PANE_GONE_AFTER {
+                    return Some(End::PaneGone);
+                }
+            }
+            Observed::Busy => {
+                self.unreadable = 0;
+                self.saw_busy = true;
+            }
+            Observed::Idle => {
+                self.unreadable = 0;
+                if self.saw_busy || elapsed >= STARTUP {
+                    return Some(End::Finished);
+                }
+            }
+        }
+        (elapsed >= DEADLINE).then_some(End::Timeout)
+    }
+}
+
+/// 結束後的收尾：重新偵測、推 `host_changed`，再推 `tool_install_done`。
+/// 裝好了才關 pane；沒裝成（或偵測失敗）pane 留著，讓使用者在終端看到錯誤（API §12.7）。`slot` 活到這裡才放，收尾期間重複請求仍 409。
+fn spawn_watch(app: Arc<crate::state::App>, host: String, kind: String, pane_id: String, fence: HostFence, slot: Slot) {
     tokio::spawn(async move {
         let _slot = slot;
         let started = tokio::time::Instant::now();
-        let mut saw_busy = false;
-        loop {
+        let mut tracker = Tracker::default();
+        let end = loop {
             tokio::time::sleep(POLL).await;
             if !app.hosts.is_current(&fence).await {
                 tracing::info!(%host, %pane_id, "host was reconnected/reconfigured; install watcher gives up on the old connection");
                 return;
             }
-            let busy = match fence.conn().client.pane_shell(&pane_id).await {
-                Ok(s) => installer_busy(&s),
-                // 查不到：多半是使用者自己把 pane 關了；等到上限再收。
-                Err(_) if started.elapsed() < DEADLINE => continue,
-                Err(_) => break,
+            let seen = match fence.conn().client.pane_shell(&pane_id).await {
+                Ok(s) if installer_busy(&s) => Observed::Busy,
+                Ok(_) => Observed::Idle,
+                Err(_) => Observed::Unreadable,
             };
-            saw_busy |= busy;
-            if (saw_busy && !busy) || (!saw_busy && started.elapsed() >= STARTUP) || started.elapsed() >= DEADLINE {
-                break;
+            if let Some(end) = tracker.step(seen, started.elapsed()) {
+                break end;
             }
-        }
-        match crate::tools::detect_with_fence(&app, &host, &fence).await {
-            Ok(_) => {
+        };
+        let installed = match crate::tools::detect_with_fence(&app, &host, &fence).await {
+            Ok(ht) => {
                 crate::state::emit_host_changed(&app, &fence).await;
+                ht.tools.get(&kind).is_some_and(|t| t.installed)
             }
-            Err(e) => tracing::warn!(%host, error = %format!("{e:#}"), "re-detect after tool install failed"),
-        }
-        if app.hosts.is_current(&fence).await {
+            Err(e) => {
+                tracing::warn!(%host, error = %format!("{e:#}"), "re-detect after tool install failed");
+                false
+            }
+        };
+        let pane_exists = end != End::PaneGone;
+        let kept = pane_exists && !installed;
+        if pane_exists && installed && app.hosts.is_current(&fence).await {
             let _ = crate::api::shell::close(&app, &host, &pane_id).await;
         }
+        app.emit(
+            "tool_install_done",
+            json!({"host": host, "kind": kind, "installed": installed, "pane_id": pane_id, "pane_kept": kept, "timed_out": end == End::Timeout}),
+        )
+        .await;
     });
 }
 
@@ -145,7 +200,10 @@ mod tests {
     #[test]
     fn only_the_three_official_installers_exist() {
         assert_eq!(install_command("claude"), Some("curl -fsSL https://claude.ai/install.sh | bash"));
-        assert_eq!(install_command("codex"), Some("npm i -g @openai/codex"));
+        let codex = install_command("codex").unwrap();
+        assert!(codex.starts_with("sh -c '") && codex.ends_with('\''), "分支包在 sh -c 裡，使用者的 shell 是 fish／zsh 也能跑：{codex}");
+        assert!(codex.find("npm i -g @openai/codex") < codex.find("brew install codex"), "npm 優先，其次 brew");
+        assert!(codex.contains("exit 1"), "兩者都沒有要失敗");
         assert_eq!(install_command("grok"), Some("curl -fsSL https://x.ai/cli/install.sh | bash"));
         assert_eq!(install_command("agy"), None);
         assert_eq!(install_command("rm -rf /"), None);
@@ -178,5 +236,31 @@ mod tests {
         assert!(Slot::take("slot-host-b", "claude").is_some(), "other host is independent");
         drop(a);
         assert!(Slot::take("slot-host-a", "claude").is_some(), "released after the install ends");
+    }
+
+    #[test]
+    fn a_pane_that_stays_unreadable_ends_the_watch_instead_of_waiting_for_the_deadline() {
+        let mut t = Tracker::default();
+        let sec = Duration::from_secs;
+        assert_eq!(t.step(Observed::Busy, sec(5)), None);
+        assert_eq!(t.step(Observed::Unreadable, sec(6)), None);
+        assert_eq!(t.step(Observed::Unreadable, sec(7)), None);
+        assert_eq!(t.step(Observed::Busy, sec(8)), None, "暫時錯誤不累積：讀到一次就歸零");
+        assert_eq!(t.step(Observed::Unreadable, sec(9)), None);
+        assert_eq!(t.step(Observed::Unreadable, sec(10)), None);
+        assert_eq!(t.step(Observed::Unreadable, sec(11)), Some(End::PaneGone));
+    }
+
+    #[test]
+    fn the_watch_ends_when_the_installer_leaves_the_foreground_or_never_shows_up() {
+        let sec = Duration::from_secs;
+        let mut t = Tracker::default();
+        assert_eq!(t.step(Observed::Idle, sec(2)), None, "還在等指令起來");
+        assert_eq!(t.step(Observed::Idle, STARTUP), Some(End::Finished), "指令瞬間就結束了");
+        let mut t = Tracker::default();
+        assert_eq!(t.step(Observed::Busy, sec(1)), None);
+        assert_eq!(t.step(Observed::Idle, sec(60)), Some(End::Finished));
+        let mut t = Tracker::default();
+        assert_eq!(t.step(Observed::Busy, DEADLINE), Some(End::Timeout));
     }
 }

@@ -1112,20 +1112,37 @@ pub async fn cached_path<H: ToolsEnv>(app: &Arc<H>, host: &str, kind: &str) -> O
     app.tools_cache().lock().await.get(host).and_then(|h| h.tools.get(kind)).and_then(|t| t.path.clone())
 }
 
-pub fn install_prompt(kind: &str) -> Option<String> {
-    let (name, install, login) = match kind {
-        "claude" => (
-            "Claude Code",
-            "curl -fsSL https://claude.ai/install.sh | bash   （官方安裝腳本；若失敗可改用 npm i -g @anthropic-ai/claude-code）",
-            "claude   （首次啟動會進入登入流程）",
+/// 官方安裝指令（直接安裝的 pane 與借 bot 安裝的 prompt 共用同一份，issue #1931）。
+/// 打進使用者的登入 shell（可能是 fish／zsh），所以需要分支的 codex 包成 `sh -c`。
+/// 全新機器多半沒有 npm：codex 有 npm 用 npm、否則有 brew 用 brew，都沒有就印說明並 exit 1。
+pub fn install_shell_command(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" => Some("curl -fsSL https://claude.ai/install.sh | bash"),
+        "codex" => Some(
+            "sh -c 'if command -v npm >/dev/null 2>&1; then npm i -g @openai/codex; \
+elif command -v brew >/dev/null 2>&1; then brew install codex; \
+else echo \"codex needs npm or Homebrew: install Node.js (https://nodejs.org) or Homebrew (https://brew.sh) first\" >&2; exit 1; fi'",
         ),
-        "codex" => ("OpenAI Codex CLI", "npm i -g @openai/codex   （官方安裝方式）", "codex login"),
-        "grok" => ("xAI Grok CLI", "curl -fsSL https://x.ai/cli/install.sh | bash   （官方安裝腳本）", "grok login"),
+        "grok" => Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
+        _ => None,
+    }
+}
+
+pub fn install_prompt(kind: &str) -> Option<String> {
+    let command = install_shell_command(kind)?;
+    let (name, note, login) = match kind {
+        "claude" => ("Claude Code", "官方安裝腳本；若失敗可改用 npm i -g @anthropic-ai/claude-code", "claude   （首次啟動會進入登入流程）"),
+        "codex" => (
+            "OpenAI Codex CLI",
+            "有 npm 用 `npm i -g @openai/codex`，否則有 brew 用 `brew install codex`，兩者都沒有就回報需要先安裝 Node.js 或 Homebrew，不要自行改裝別的東西",
+            "codex login",
+        ),
+        "grok" => ("xAI Grok CLI", "官方安裝腳本", "grok login"),
         _ => return None,
     };
     Some(format!(
         "請在這台機器上安裝並登入 {name}，步驟如下，逐步執行並回報每一步的輸出：\n\
-         1. 安裝：`{install}`。\n\
+         1. 安裝：執行 `{command}`（{note}）。\n\
          2. 確認安裝成功：執行 `{kind} --version` 並印出結果（若找不到指令，檢查安裝腳本輸出的安裝路徑並加入 PATH，例如 ~/.local/bin 或 ~/.{kind}/bin）。\n\
          3. 登入：執行 `{login}`。這是互動式流程，會顯示一個登入 URL（或裝置代碼）；請把該 URL 原封不動、完整地印出來給我，然後停在那裡等待我在瀏覽器完成登入，不要自行中斷或略過。\n\
          4. 登入完成後再執行一次 `{kind} --version` 確認，並回報「{kind} 已安裝並登入」。",

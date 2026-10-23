@@ -988,6 +988,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
 | `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
+| `tool_install_done` | `{"host","kind","installed","pane_id","pane_kept","timed_out"}`：§12.7 直接安裝（省略 `via_bot_id`）收尾。`installed` 是安裝後重新偵測的結果；`false` 且 `pane_kept:true` 時 pane 沒關，錯誤輸出在 `pane_id` 的終端快照裡（使用者自己關了 pane 則 `pane_kept:false`）；`timed_out` ＝等滿 15 分鐘。借 bot 安裝不推這個事件 |
 | `quota_updated` | 見 §12.5 |
 | `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
@@ -2397,8 +2398,10 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
 - **帶 `via_bot_id`（借現有 agent）**：daemon 組一則安裝 prompt（上面的指令，接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給該 bot。
   回 `200 {"turn_id","message_id","delivery"}`。bot／所屬專案不存在或已刪除 404；bot 不屬於該 host 400；bot 不可送 → §5 的 409。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
 - **省略（或空字串）`via_bot_id`（直接安裝，issue #1931）**：全新使用者沒有 bot 可借。daemon 在該主機開臨時 host-shell pane、打進上面的安裝指令（SPEC §16.3a 同一套開 pane 與收尾），
-  回 `200 {"pane_id","mode":"shell"}`；pane 的終端快照是安裝輸出的唯一通道（不進 daemon log／事件）。安裝指令結束（pane 前景只剩 shell；最久 15 分鐘）後 daemon 重新偵測該主機的 tools、推 `host_changed`、關 pane。**不執行登入**，裝好後走一般登入流程（`…/identities/{identity}/login`）。
-  404：不認得的主機。409 `tool_install_in_progress {host, kind}`：同一 `(host, kind)` 已有一個在跑（收尾完成才放掉）。502：開不起 pane／打不進指令。
+  回 `200 {"pane_id","mode":"shell"}`；pane 的終端快照是安裝輸出的唯一通道（不進 daemon log／事件）。安裝指令結束（pane 前景只剩 shell；最久 15 分鐘；`pane.process_info` 連續 3 次失敗視為 pane 已被關掉，立刻收尾）後 daemon 重新偵測該主機的 tools、推 `host_changed`，再推 WS `tool_install_done`（§8）。
+  **裝成功**（偵測到 `tools.<kind>.installed`）才關 pane；**沒裝成**（含偵測失敗、逾時）pane 保留，UI 收到 `installed:false, pane_kept:true` 就開 `pane_id` 的終端讓使用者看錯誤，看完自己關。
+  codex 的指令是 `sh -c`：有 npm 用 `npm i -g @openai/codex`，否則有 brew 用 `brew install codex`，兩者都沒有就印說明、`exit 1`（也走「沒裝成」）。**不執行登入**，裝好後走一般登入流程（`…/identities/{identity}/login`）。
+  404：不認得的主機。409 `tool_install_in_progress {host, kind}`：同一 `(host, kind)` 已有一個在跑（收尾完成才放掉；pane 被關掉後最多數秒就放）。502：開不起 pane／打不進指令。
 
 ### 12.8 bot 人設 `bot.persona`
 `string | null`：附加到 agent system prompt 尾端的文字，不動專案裡共用的 `CLAUDE.md` / `AGENTS.md`。TOML `persona = """…"""`；POST 可省、PATCH 可改（`null`/`""` 清除，有 active Run 列入 `needs_restart`）。

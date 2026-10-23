@@ -342,7 +342,10 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     fn install_prompts_use_official_installers() {
         assert!(install_prompt("grok").unwrap().contains("https://x.ai/cli/install.sh"));
         assert!(install_prompt("claude").unwrap().contains("https://claude.ai/install.sh"));
-        assert!(install_prompt("codex").unwrap().contains("npm i -g @openai/codex"));
+        let codex = install_prompt("codex").unwrap();
+        assert!(codex.contains("npm i -g @openai/codex") && codex.contains("brew install codex"));
+        assert_eq!(install_shell_command("codex").map(|c| c.contains("npm i -g @openai/codex") && c.contains("brew install codex")), Some(true));
+        assert!(codex.contains(install_shell_command("codex").unwrap()), "prompt 與直接安裝同一份指令");
         assert!(install_prompt("codex").unwrap().contains("codex login"));
         assert!(install_prompt("nope").is_none());
     }
