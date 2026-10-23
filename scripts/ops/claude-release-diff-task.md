@@ -9,7 +9,13 @@ OLD=<舊版路徑>
 NEW=<新版路徑>
 ```
 
-唯讀比較，不要 build、不要重啟、不要改設定：
+唯讀比較，不要 build、不要重啟、不要改設定。**先跑決定性工具**（一次產出下面第 1、2 步的結果，純文字，另有逾時與輸出上限）：
+
+```sh
+python3 ~/.config/agents-manager/supervisor/AGM/bin/claude_binary_diff.py "$OLD" "$NEW"
+```
+
+報告含 `HELP DIFF`（頂層與子命令 `--help` 差集）、`NEW/REMOVED FIELDS (describe)`、`NEW/REMOVED ENV`，只列宣告的差異、**未實測**。工具不存在或某區塊印 `ERROR:` 時，才用下面的手動指令補那一塊：
 
 1. CLI 介面差異：`diff <($OLD --help 2>&1) <($NEW --help 2>&1)`；有新子命令就再跑一次 `--help`。
 2. 設定與環境變數：比較兩個 binary 的 `describe("…")` 欄位及 `CLAUDE_CODE_*`／`CLAUDE_*` 變數名。例如：

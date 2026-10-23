@@ -448,6 +448,12 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；*
 隔離測試：`bash scripts/ops/release-triage-kick_test.sh`（假的 `bin/agm`／`agents-managerd`，含 `env -i PATH=/usr/bin:/bin` 模擬 launchd、殘留鎖與活鎖、額度閘門）；
 `release-triage-check` 本身的切條與分桶由 daemon 的 `cargo test` 釘住，不在這裡重測。
 
+Claude binary diff 的比較是決定性的，獨立成 `claude_binary_diff.py OLD NEW [--timeout 秒] [--max-lines N] [--max-bytes N]`（#1919）：
+`--help` 與各子命令 `--help` 的差集、`.describe("…")` 欄位差集、`CLAUDE(_CODE)?_*` 環境變數名差集，輸出純文字（每區塊以 `== … ==` 標頭；
+新增與移除都列；超過 `--max-lines`／`--max-bytes` 以 `[截斷：…]` 結尾）。binary 以 8 MiB 區塊串流掃描、`--help` 以子行程跑（空環境、拋棄式 HOME、逾時、輸出上限），
+不會把 200MB 讀進記憶體，也不該在 daemon 行程內做。退出碼 0＝報告產出（個別區塊失敗寫成 `ERROR:` 行）、2＝OLD／NEW 不是可執行檔。
+隔離測試：`bash scripts/ops/claude_binary_diff_test.sh`。安裝：`install -m 755 scripts/ops/claude_binary_diff.py ~/.config/agents-manager/supervisor/AGM/bin/`。
+
 正式安裝（**需要 AGM 核准；而且要等 daemon 端的 `release-triage-check` 上線**，沒有那個子命令這支每輪都只會記「檢查失敗」）：
 
 ```sh

@@ -4498,7 +4498,9 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
 - `claude-release-kick.sh` 保留為既有排程的相容入口，轉呼叫 `release-triage-kick.sh`。統一 kick 偵測
   `CLAUDE_VERSIONS_DIR` 的 binary 版本變化，把 `claude-release-diff-task.md` 的唯讀比較指示與新舊路徑附進 changelog
   分診的同一份 assignment；沒有 changelog pending 時仍可派 binary-only 交辦。只在派工成功後更新
-  `claude-release.last`。合併通知只送一則，使用 `agm-release-triage-claude-<版本>-notice`；binary-only
+  `claude-release.last`。binary diff 的固定比較（`--help`／`describe()` 欄位／`CLAUDE_*` 環境變數差集）由獨立、
+  決定性的 `scripts/ops/claude_binary_diff.py OLD NEW` 產出純文字報告（外部行程、串流掃描、逾時與輸出上限，不進 daemon 行程；#1919），
+  任務檔先叫 bot 跑它、失敗才手動補；API 路徑可直接把它的輸出當輸入。合併通知只送一則，使用 `agm-release-triage-claude-<版本>-notice`；binary-only
   使用 `agm-claude-release-<版本>-notice`，避免 changelog 已先通知同版後又以不同正文重用其 notice id（#519）。
   **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 `claude_review.rs`
   共用，那是刻意的冪等，不要跟著改。codex 的網頁按鈕（issue #561）走同一支、同一套規則，

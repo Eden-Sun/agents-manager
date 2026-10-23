@@ -6,6 +6,7 @@ scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh      darwin
 scripts/ops/browser_gc_linux.py     bin/browser_gc_linux.py     linux
 scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
 scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
+scripts/ops/claude_binary_diff.py  bin/claude_binary_diff.py
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
 scripts/ops/daemon-boot.sh          bin/daemon-boot.sh          linux
 scripts/ops/disk-gc.sh              bin/disk-gc.sh              linux

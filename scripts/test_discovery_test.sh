@@ -24,6 +24,7 @@ runs_directly() {
 wrapper_for() {
     case "$1" in
         scripts/ops/browser_gc_linux_test.py) echo scripts/ops/browser-gc-linux_test.sh ;;
+        scripts/ops/claude_binary_diff_test.py) echo scripts/ops/claude_binary_diff_test.sh ;;
         scripts/ops/cutover-helper_test.py) echo scripts/ops/cutover-helper_test.sh ;;
         scripts/ops/daemon-swap-network_test.py) echo scripts/ops/daemon-swap-network_test.sh ;;
         scripts/ops/host-state-transfer_test.py) echo scripts/ops/cutover-to-host_test.sh ;;

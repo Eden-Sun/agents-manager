@@ -15,6 +15,7 @@ ENTRYPOINTS = {
         ("release-triage-kick", "sh"), ("ubuntu-ci", "sh"),
     ]},
     "scripts/ops/browser_gc_linux.py": "scripts/ops/browser-gc-linux_test.sh",
+    "scripts/ops/claude_binary_diff.py": "scripts/ops/claude_binary_diff_test.sh",
 }
 CROSS_INPUTS = {
     "crates/am-base/src/db.rs", "crates/am-supervisor/src/supervisor/store.rs",
