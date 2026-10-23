@@ -19,6 +19,8 @@ export function UpdateCheckPanel() {
   const upstream = useStore((s) => s.upstreamUpdates)
   const cliUpdates = useStore((s) => s.cliUpdates)
   const startCliUpdate = useStore((s) => s.startCliUpdate)
+  const installAgy = useStore((s) => s.installAgy)
+  const agyBusy = useStore((s) => s.busy)
   const notify = useStore((s) => s.notify)
   const herdrPlan = useHerdrPlan()
   const herdrActive = useHerdrUpdate((s) => s.active)
@@ -61,6 +63,7 @@ export function UpdateCheckPanel() {
   const running = (host: string, a: CheckAction): boolean => {
     if (a.kind === 'cli') return cliUpdates.some((u) => u.host === host && u.kind === a.cliKind)
     if (a.kind === 'herdr') return herdrActive !== null
+    if (a.kind === 'agy') return agyBusy[`agy-install:${host || 'local'}`] === true
     return busy.has(`${host}:${a.name}`)
   }
 
@@ -76,6 +79,8 @@ export function UpdateCheckPanel() {
       }
     } else if (action.kind === 'herdr') {
       await startHerdr(host, action.target, notify)
+    } else if (action.kind === 'agy') {
+      await installAgy(host)
     } else {
       const key = `${host}:${action.name}`
       setBusy((b) => new Set(b).add(key))
@@ -145,6 +150,14 @@ function ConfirmBody({ host, row, action, willResume }: { host: string; row: Che
       <>
         在 <strong>{host}</strong> 跑 <code>herdr integration install {action.name}</code>，把 hook 腳本從 {row.current ?? '?'} 換成 {row.latest ?? '?'}
         。會改那台 agent 的設定檔（例如 <code>~/.claude</code>、<code>~/.codex</code>）。
+      </>
+    )
+  }
+  if (action.kind === 'agy') {
+    return (
+      <>
+        在 <strong>{host}</strong> 把 agy 從 {row.current ?? '?'} 更新到官方最新版（約 {action.target}）：從官方下載（約 50 MB）、驗 sha512 後換掉 <code>~/.local/bin/agy</code>；
+        不跑官方 install.sh、<code>agy install</code> 或 <code>agy update</code>。跑著的 agy bot 不會被打斷，重啟後才換版。
       </>
     )
   }

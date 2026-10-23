@@ -13,6 +13,8 @@ export type CheckGroup = 'herdr' | 'cli' | 'integration'
 export type CheckAction =
   | { kind: 'cli'; cliKind: 'claude' | 'codex'; target: string }
   | { kind: 'herdr'; target: string }
+  /** agy 沒有 `cli-update`：走 `POST /api/hosts/{name}/agy/install`（官方 manifest＋sha512，不跑 install.sh，#1908）。 */
+  | { kind: 'agy'; target: string }
   /** `fresh`：這家 integration 還沒裝，按下去是第一次安裝（grok／antigravity-cli 已登入時才有，#1871）。 */
   | { kind: 'integration'; name: string; fresh?: true }
 
@@ -113,10 +115,8 @@ function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: 
   if (tool === undefined) return { ...base, current: null, latest: null, status: 'unknown', note: '這台還沒讀到工具清單', action: null }
   if (!tool.installed) return { ...base, current: null, latest: item?.latest ?? null, status: 'missing', note: null, action: null }
   const current = cleanVersion(tool.version) ?? tool.version
-  // agy 沒有公開的版本來源：只列目前版本，狀態是「查不到」。
-  if (kind === 'agy') return { ...base, current, latest: null, status: 'unknown', note: '沒有公開的版本來源，無法比對最新版', action: null }
   const entry = hostEntry(item, host)
-  if (!item || item.latest === null) return { ...base, current, latest: null, status: 'unknown', note: '查不到上游版本', action: null }
+  if (!item || item.latest === null) return { ...base, current, latest: null, status: 'unknown', note: kind === 'agy' ? '查不到官方 manifest 的版本' : '查不到上游版本', action: null }
   if (entry?.error) return { ...base, current, latest: item.latest, status: 'unknown', note: `讀不到這台的版本：${entry.error}`, action: null }
   const behind = entry ? entry.behind : versionLess(cleanVersion(current), item.target ?? item.latest)
   if (behind === null) return { ...base, current, latest: item.latest, status: 'unknown', note: null, action: null }
@@ -124,6 +124,9 @@ function cliRow(host: string, kind: string, tool: ToolStatus | undefined, item: 
   const target = item.target ?? item.latest
   if (updatable && (kind === 'claude' || kind === 'codex')) {
     return { ...base, current, latest: target, status: 'update', note: null, action: { kind: 'cli', cliKind: kind, target } }
+  }
+  if (updatable && kind === 'agy') {
+    return { ...base, current, latest: target, status: 'update', note: '跑著的 agy bot 不會被打斷，重啟才換版', action: { kind: 'agy', target } }
   }
   return {
     ...base,

@@ -176,7 +176,7 @@
     impl Fake {
         fn new(claude: Result<&str, &str>, codex: Result<&str, &str>, claude_disk: &str, codex_disk: &str) -> Self {
             // herdr 預設跟上游同版（沒有更新），要測 herdr 的用 set_upstream／set_disk 改。
-            let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3")), ("grok", Ok("1.0.46"))]
+            let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3")), ("grok", Ok("1.0.46")), ("agy", Ok("1.4.5"))]
                 .into_iter()
                 .map(|(k, r)| (k.to_string(), r.map(str::to_string).map_err(str::to_string)))
                 .collect();
@@ -185,6 +185,7 @@
                 ("codex".to_string(), codex_disk.to_string()),
                 ("herdr".to_string(), "herdr 0.9.3".to_string()),
                 ("grok".to_string(), "grok 1.0.46 (2765805b9442)".to_string()),
+                ("agy".to_string(), "1.4.5".to_string()),
             ]
             .into_iter()
             .collect();
@@ -246,7 +247,7 @@
         let c = of(&evs, "claude").unwrap();
         assert_eq!(c["has_update"], false);
         assert!(c["notify"].is_null());
-        assert_eq!(w2.snapshot().await.len(), 4);
+        assert_eq!(w2.snapshot().await.len(), 5);
     }
 
     // ── grok（issue #761）：正式版是 x.ai 放在 storage.googleapis.com 的 `cli/stable` 純文字，磁碟版本是 `grok --version` ──
@@ -296,6 +297,59 @@
         assert!(g["notify"].is_null(), "裝好了只收掉提示，不再通知");
     }
 
+    // ── agy（issue #1908）：官方 manifest 的版本；升級走 `POST /api/hosts/{name}/agy/install`，這裡只比對與通知 ──
+
+    #[test]
+    fn an_agy_host_behind_the_manifest_is_an_update_and_an_equal_one_is_latest() {
+        let s = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("m4p", "1.4.2")], None);
+        assert!(s.has_update && !s.hosts[0].behind && s.hosts[1].behind);
+        assert_eq!(s.target_version.as_deref(), Some("1.4.5"));
+        let t = notice_text(&s);
+        assert!(t.contains("agy 上游有新版 1.4.5") && t.contains("m4p 磁碟上是 1.4.2") && !t.contains("local"), "{t}");
+        assert!(t.contains("更新檢查") && !t.contains("agy update") && !t.contains("agy install"), "只指向設定頁的更新，不叫人跑官方指令：{t}");
+        let latest = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("m4p", "1.4.5")], None);
+        assert!(!latest.has_update && !should_notify(&latest, None), "2026-10-23 兩台都在 1.4.5：已是最新");
+        // 磁碟比 manifest 新（別的平台還沒發）：不叫人降版。
+        let newer = build_status("agy", &ok("1.4.4"), &[disk("local", "1.4.5")], None);
+        assert!(!newer.has_update);
+        let err = build_status("agy", &Err("官方 manifest 回 503".into()), &[disk("local", "1.4.2")], None);
+        assert!(!err.has_update && error_text(&err).contains("agy 官方 manifest") && !error_text(&err).contains("GitHub"));
+    }
+
+    #[tokio::test]
+    async fn agy_notifies_each_new_manifest_version_once_and_clears_when_the_host_catches_up() {
+        let e = crate::testing::env().await;
+        let w = Watch::default();
+        let last = e.dir.join(LAST_FILE);
+        let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
+        src.set_disk("agy", "1.4.2");
+
+        let evs = tick(&e.app, &w, &src, &last).await;
+        let a = of(&evs, "agy").expect("agy 落後要推");
+        assert_eq!((a["notify"].as_str(), a["has_update"].as_bool()), (Some("update"), Some(true)));
+        assert_eq!(a["hosts"][0]["installed_version"], "1.4.2");
+        assert!(tick(&e.app, &w, &src, &last).await.is_empty(), "同一版不重複通知");
+        src.set_disk("agy", "1.4.5");
+        let a = of(&tick(&e.app, &w, &src, &last).await, "agy").cloned().unwrap();
+        assert_eq!(a["has_update"], false);
+        assert!(a["notify"].is_null(), "升好了只收掉提示，不再通知");
+    }
+
+    /// agy 安裝成功後立刻修正快照（不等 10 分鐘巡邏）。
+    #[tokio::test]
+    async fn note_installed_clears_an_agy_host_that_just_caught_up() {
+        let e = crate::testing::env().await;
+        let w = &e.app.upstream_watch;
+        let last = e.dir.join(LAST_FILE);
+        let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
+        src.set_disk("agy", "1.4.2");
+        tick(&e.app, w, &src, &last).await;
+        assert!(w.snapshot().await.iter().any(|s| s.kind == "agy" && s.has_update));
+        note_installed(e.app.as_ref(), "agy", "local", "1.4.5").await;
+        let agy = w.snapshot().await.into_iter().find(|s| s.kind == "agy").unwrap();
+        assert!(!agy.has_update && agy.hosts[0].installed_version.as_deref() == Some("1.4.5") && !agy.hosts[0].behind);
+    }
+
     #[tokio::test]
     async fn codex_via_releases_notifies_a_newer_release_and_each_later_one() {
         let e = crate::testing::env().await;
@@ -340,9 +394,9 @@
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Err("GitHub HTTP 403 rate limit"), "2.1.283", "codex-cli 0.157.0");
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 4, "claude、codex、herdr、grok 各問一次");
+        assert_eq!(*src.calls.lock().unwrap(), 5, "claude、codex、herdr、grok、agy 各問一次");
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 5, "claude、herdr、grok 用快取，只有失敗的 codex 重問");
+        assert_eq!(*src.calls.lock().unwrap(), 6, "claude、herdr、grok、agy 用快取，只有失敗的 codex 重問");
     }
 
     /// 抓不到要講：從正常變成抓不到推一次 `error`，一直抓不到不刷屏，恢復後沒事。

@@ -3985,7 +3985,11 @@ async fn install_agy(
 ) -> Result<Json<Value>, LcError> {
     require_user(&principal)?;
     match crate::agy_install::install(&app, &name).await {
-        Ok(done) => Ok(Json(serde_json::to_value(done).unwrap_or(Value::Null))),
+        Ok(done) => {
+            // 升好了：上游更新快照立刻跟上，header／設定頁不用等下一輪 10 分鐘巡邏才收起「可更新」。
+            crate::upstream_update::note_installed(app.as_ref(), "agy", &name, &done.to).await;
+            Ok(Json(serde_json::to_value(done).unwrap_or(Value::Null)))
+        }
         Err(crate::agy_install::InstallError::UnknownHost) => Err(LcError::NotFound("host".into())),
         Err(crate::agy_install::InstallError::Busy(m)) => {
             Err(LcError::conflict("agy_install_in_progress", json!({"host": name, "message": m})))

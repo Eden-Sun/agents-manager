@@ -140,3 +140,23 @@ it('裝完重讀失敗（200＋state:null＋reread_error）：toast 寫「裝完
     globalThis.fetch = real
   }
 })
+
+it('agy 落後官方 manifest（#1908）：「更新」先問、確認後才送 POST /hosts/local/agy/install；確認框寫明不跑 install.sh／agy update；已是最新沒有鈕', async () => {
+  const requests = await open()
+  const t = (version: string) => ({ installed: true, path: '/bin/agy', version, logged_in: true })
+  const agy = (installed: string, behind: boolean) => ({ kind: 'agy', latest: '1.4.5', target: '1.4.5', hasUpdate: behind, hosts: [{ host: 'local', installedVersion: installed, error: null, behind }], notify: null, text: null })
+  await act(() => useStore.setState({ localTools: { claude: t('2.1.300'), codex: t('0.157.0'), grok: t('1.0'), agy: t('1.4.5') } as unknown as ToolMap, upstreamUpdates: { ...useStore.getState().upstreamUpdates, agy: agy('1.4.5', false) } }))
+  assert.match(text('local:cli-agy'), /1\.4\.5.*最新/)
+  assert.equal(row('local:cli-agy')!.querySelector('button'), null, '已是最新沒有鈕')
+
+  await act(() => useStore.setState({ localTools: { claude: t('2.1.300'), codex: t('0.157.0'), grok: t('1.0'), agy: t('1.4.2') } as unknown as ToolMap, upstreamUpdates: { ...useStore.getState().upstreamUpdates, agy: agy('1.4.2', true) } }))
+  assert.match(text('local:cli-agy'), /1\.4\.2.*1\.4\.5.*可更新/)
+  const post = () => requests.filter((r) => r.method === 'POST' && /\/agy\/install$/.test(r.path))
+  await click(row('local:cli-agy')!.querySelector('button')!)
+  assert.equal(post().length, 0, '還沒確認，不能送')
+  const dialog = document.querySelector('[role="alertdialog"]')!
+  assert.match(dialog.textContent ?? '', /sha512.*不跑官方 install\.sh.*agy update/)
+  await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '更新')!)
+  await until(() => post().length === 1, '送了 POST')
+  assert.match(post()[0].path, /\/hosts\/local\/agy\/install$/)
+})

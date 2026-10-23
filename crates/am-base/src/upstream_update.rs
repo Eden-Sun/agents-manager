@@ -1,4 +1,4 @@
-//! claude／codex／herdr／grok「上游有新版可裝」（issue #707）：仿 [`crate::herdr_update`] 的「最新版 vs 本機版本＋`last_notified`
+//! claude／codex／herdr／grok／agy「上游有新版可裝」（issue #707）：仿 [`crate::herdr_update`] 的「最新版 vs 本機版本＋`last_notified`
 //! 去重」，但這裡真的去問上游——claude 問 npm registry 的 `latest`，codex 沿用 [`crate::changelog`] 抓的 GitHub releases。
 //!
 //! 跟 [`crate::update_watch`] 的「重啟套用」是**兩件事、並存**：
@@ -40,7 +40,10 @@ pub const HERDR_RELEASES_API: &str = "https://api.github.com/repos/herdrdev/herd
 pub const GROK_STABLE_URL: &str = "https://storage.googleapis.com/grok-build-public-artifacts/cli/stable";
 /// grok 官方的升級指令（`--check` 只查不裝）；要在**那台主機**上跑，這裡只提示、不代跑。
 pub const GROK_UPDATE_COMMAND: &str = "grok update";
-pub const KINDS: [&str; 4] = ["claude", "codex", "herdr", "grok"];
+/// agy（issue #1908）：官方 manifest `<AGY_MANIFEST_BASE>/<platform>.json` 給 `{version, url, sha512}`，沒有 npm／GitHub releases。
+/// 升級走 `POST /api/hosts/{name}/agy/install`（manifest＋sha512＋`mv`，絕不跑 `install.sh`／`agy install`／`agy update`）。
+pub const AGY_MANIFEST_BASE: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
+pub const KINDS: [&str; 5] = ["claude", "codex", "herdr", "grok", "agy"];
 /// 巡邏間隔：重比磁碟版本（claude 自己下載完之後通知要消失）。
 pub const SWEEP: Duration = Duration::from_secs(600);
 /// 上游結果的有效期；抓失敗的不快取，下一輪（10 分鐘後）再試。
@@ -96,6 +99,7 @@ pub fn source_url(kind: &str) -> &'static str {
         "codex" => CODEX_RELEASES_PAGE,
         "herdr" => HERDR_RELEASES_PAGE,
         "grok" => GROK_STABLE_URL,
+        "agy" => AGY_MANIFEST_BASE,
         _ => NPM_CLAUDE_PAGE,
     }
 }
@@ -245,6 +249,12 @@ pub fn notice_text(status: &UpstreamStatus) -> String {
             .collect();
         return format!("grok 上游有新版 {latest}（{}）：到那台主機執行 `{GROK_UPDATE_COMMAND}`（官方升級指令，這裡不代裝）；跑著的 grok bot 要重啟才會換版", behind.join("、"));
     }
+    if status.kind == "agy" {
+        let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
+            .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
+            .collect();
+        return format!("agy 上游有新版 {latest}（{}）：到設定頁「更新檢查」按更新（官方 manifest＋sha512 驗證，不跑 install.sh）；跑著的 agy bot 不會被打斷，重啟才會換版", behind.join("、"));
+    }
     if status.kind != "claude" {
         let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
             .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
@@ -276,6 +286,7 @@ pub fn error_text(status: &UpstreamStatus) -> String {
     let from = match status.kind.as_str() {
         "claude" => "npm registry",
         "grok" => "x.ai 的 grok 發佈位置",
+        "agy" => "agy 官方 manifest",
         _ => "GitHub releases",
     };
     format!("查 {} 上游最新版失敗（{from}）：{}", status.kind, status.error.as_deref().unwrap_or("未知原因"))
