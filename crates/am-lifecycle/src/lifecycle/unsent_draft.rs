@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 
 /// 讀不到畫面時最多等幾輪 sweep（含第一次）；第這麼多輪還讀不到就照原本的收尾。
 pub const UNREADABLE_ROUNDS: u32 = 3;
-/// 讀不到的輪數記在記憶體，以 turn 為鍵；上限之外不再新增（那種 turn 直接照原本的收尾）。
+/// 讀不到的輪數記在記憶體；超過上限時淘汰最舊的一筆。
 const UNREADABLE_MAX: usize = 256;
 
 /// 收尾前這一步的結論。
@@ -35,28 +35,46 @@ pub enum Recovery {
     Failed,
 }
 
-fn unreadable_rounds() -> &'static Mutex<HashMap<String, u32>> {
-    static ROUNDS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+/// 讀不到的輪數（以 turn 為鍵）。表滿時新增前先淘汰最舊的一筆：回合若是被別的路收掉（例如 Stop hook），
+/// 它那一筆不會再被 `forget`，不淘汰的話會永遠占著位子、把之後的 turn 擋在等待之外。
+#[derive(Default)]
+struct Unreadable {
+    seq: u64,
+    /// turn → (讀不到的輪數, 插入序號)。
+    rounds: HashMap<String, (u32, u64)>,
+}
+
+impl Unreadable {
+    /// 這一則又讀不到一次：回是否還要再等。
+    fn again(&mut self, turn_id: &str, max: usize) -> bool {
+        if !self.rounds.contains_key(turn_id) && self.rounds.len() >= max {
+            if let Some(oldest) = self.rounds.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone()) {
+                self.rounds.remove(&oldest);
+            }
+        }
+        self.seq += 1;
+        let at = self.seq;
+        let entry = self.rounds.entry(turn_id.to_string()).or_insert((0, at));
+        entry.0 += 1;
+        if entry.0 < UNREADABLE_ROUNDS {
+            return true;
+        }
+        self.rounds.remove(turn_id);
+        false
+    }
+}
+
+fn unreadable_rounds() -> &'static Mutex<Unreadable> {
+    static ROUNDS: OnceLock<Mutex<Unreadable>> = OnceLock::new();
     ROUNDS.get_or_init(Default::default)
 }
 
-/// 這一則又讀不到一次：回是否還要再等。
 fn unreadable_again(turn_id: &str) -> bool {
-    let mut rounds = unreadable_rounds().lock().unwrap_or_else(|e| e.into_inner());
-    if !rounds.contains_key(turn_id) && rounds.len() >= UNREADABLE_MAX {
-        return false;
-    }
-    let n = rounds.entry(turn_id.to_string()).or_insert(0);
-    *n += 1;
-    if *n < UNREADABLE_ROUNDS {
-        return true;
-    }
-    rounds.remove(turn_id);
-    false
+    unreadable_rounds().lock().unwrap_or_else(|e| e.into_inner()).again(turn_id, UNREADABLE_MAX)
 }
 
 fn forget_unreadable(turn_id: &str) {
-    unreadable_rounds().lock().unwrap_or_else(|e| e.into_inner()).remove(turn_id);
+    unreadable_rounds().lock().unwrap_or_else(|e| e.into_inner()).rounds.remove(turn_id);
 }
 
 /// 呼叫端（`stuck_turns::close_stuck`）持 bot 鎖，`run` 是鎖內重讀的、`turn` 是它的 in-flight。
@@ -83,7 +101,7 @@ pub async fn before_idle_close(app: &impl StuckTurnContext, run: &db::Run, turn:
     };
     forget_unreadable(&turn.id);
     if sent.iter().any(|p| super::poller::composer_holds_prompt(&bot.kind, &screen, p)) {
-        return still_in_box(app, run, &bot, turn).await;
+        return still_in_box(app, run, &bot, turn, &sent).await;
     }
     if crate::composer_parse::box_state(&bot.kind, &screen) == crate::composer_parse::BoxState::NonEmpty {
         alert(app, &bot, turn, "undelivered_draft_suspect",
@@ -100,20 +118,25 @@ async fn read_screen(app: &impl StuckTurnContext, run: &db::Run) -> anyhow::Resu
 }
 
 /// 字還在框裡：額度還在就補按一次 Enter；用掉了就收成 failed。
-async fn still_in_box(app: &impl StuckTurnContext, run: &db::Run, bot: &db::Bot, turn: &db::Turn) -> anyhow::Result<Recovery> {
+async fn still_in_box(app: &impl StuckTurnContext, run: &db::Run, bot: &db::Bot, turn: &db::Turn, sent: &[String]) -> anyhow::Result<Recovery> {
     if db::claim_resend(app.db(), &turn.id, super::poller::MAX_PROMPT_RESENDS).await? {
-        return press_enter_once(app, run, turn).await;
+        return press_enter_once(app, run, &bot.kind, turn, sent).await;
     }
     fail_undelivered(app, run, bot, turn).await
 }
 
-/// 補按一次 Enter：host 世代沒換、run 與 in-flight turn 還是同一筆才按。沒按就退還額度，這一輪不收。
-async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<Recovery> {
+/// 補按一次 Enter：host 世代沒換、run 與 in-flight turn 還是同一筆、框裡的字仍然是這一則才按
+/// （畫面在 fence 外讀過一次，fence 內送鍵前再讀一次）。沒按就退還額度，這一輪不收。
+async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str, turn: &db::Turn, sent: &[String]) -> anyhow::Result<Recovery> {
     let pressed = match client_for_run(app, run).await {
         Ok(client) => {
             let pane = run.pane_id.clone().unwrap_or_default();
             let fenced = app.hosts().run_if_current(&client.fence, async {
                 if !still_the_same(app, run, turn).await? {
+                    return anyhow::Ok(false);
+                }
+                let screen = super::delivery::read_styled(&client, &pane, "visible", 80).await?;
+                if !sent.iter().any(|p| super::poller::composer_holds_prompt(kind, &screen, p)) {
                     return anyhow::Ok(false);
                 }
                 client.pane_send_keys(&pane, &["Enter"]).await?;
