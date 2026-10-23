@@ -2276,7 +2276,8 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   名字會被改、會被撞）。候選只有「沒歸屬、不是孤兒」的 pane——上一輪選中的優先（`panes.scratch`；裡面暫時跑 htop 變成 service、被使用者改名都還是它）；
   原本那顆還活著卻不是候選（例如 scratch 裡正在跑 claude，變成 agent pane、列被刪，旗標靠記憶體記的 pane_id 保留）那一輪不選、不扶正別人，
   它回來（或名單裡又出現）仍是它；原本那顆關掉了才在 **`kind='shell'`** 裡取 `first_seen` 最早的。名字只在選好之後拿來顯示（rename 成 `scratch_name`）。跑著 `tail -f` 的 service pane、刪掉專案留下的孤兒都搶不走。
-  第二顆以後一律視為「該歸屬而沒歸屬」：UI 標示、推一則 inbox `pane_unowned`（去重規則同 `pane_orphaned`），
+  第二顆以後一律視為「該歸屬而沒歸屬」：UI 標示，`first_seen` 滿 60 秒仍無歸屬才推一則 inbox `pane_unowned`
+  （去重規則同 `pane_orphaned`）；這段緩衝讓 child 開 pane 後有時間等 daemon adopt。`pane_orphaned` 不套用此緩衝。
   並套用與有歸屬 shell pane **相同**的 GC 規則（同一個閒置門檻與三條守門）。理由是使用者的裁示是「只准一顆」，
   不是「都不要動」——但關掉的門檻一點都不放寬：行程樹只有 shell、關前留 20 行 log、取值失敗不關。
 - **開與關都要走記錄過的路**：bot 開 pane 一定經過 shim（寫進 `panes`，帶 project／owner／purpose），關 pane 一定留原因

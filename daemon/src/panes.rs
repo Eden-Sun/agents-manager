@@ -954,17 +954,23 @@ async fn close_if_still_idle_with_dump(
 ///   shell 照 GC）。
 ///
 /// inbox 的 key 帶 `first_seen`：herdr 重開後 pane id 會重用，不能讓舊 pane 用掉的 key 擋住新 pane 的通知。
+const UNOWNED_PANE_NOTIFICATION_GRACE_SECS: i64 = 60;
+
 pub async fn notify_unowned_and_orphans(app: &(impl crate::capabilities::Db + PaneRuntime), host: &str) -> Result<usize> {
     type NotifyRow = (String, String, Option<String>, Option<String>, Option<String>, String, String, Option<String>, Option<String>, bool);
+    let unowned_cutoff = (chrono::Utc::now() - chrono::Duration::seconds(UNOWNED_PANE_NOTIFICATION_GRACE_SECS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let rows = sqlx::query_as::<_, NotifyRow>(
         "SELECT pane_id, kind, workspace_id, foreground, listen_ports, last_output_at, first_seen,
                 owner_bot_id, bound_project_id, orphaned
            FROM panes
           WHERE host=? AND scratch=0
             AND ((orphaned=1 AND orphan_notified_at IS NULL)
-              OR (orphaned=0 AND owned_by='none' AND unowned_notified_at IS NULL))",
+              OR (orphaned=0 AND owned_by='none' AND unowned_notified_at IS NULL
+                  AND julianday(first_seen) <= julianday(?)))",
     )
     .bind(host)
+    .bind(unowned_cutoff)
     .fetch_all(app.db())
     .await?;
     let mut sent = 0;
@@ -1524,6 +1530,89 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
+    #[tokio::test]
+    async fn fresh_unowned_panes_wait_sixty_seconds_before_notification() {
+        let app = app().await;
+        let now = chrono::Utc::now();
+        let fresh = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let aged = (now - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        for (id, first_seen) in [("w1:pFresh", fresh.as_str()), ("w1:pAged", aged.as_str())] {
+            sqlx::query(
+                "INSERT INTO panes (pane_id, host, kind, owned_by, scratch, orphaned, last_output_at, first_seen, last_seen)
+                 VALUES (?,'local','shell','none',0,0,?,?,?)",
+            )
+            .bind(id)
+            .bind(first_seen)
+            .bind(first_seen)
+            .bind(first_seen)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 1, "only a pane older than the grace period is notified");
+        let notified: Vec<String> =
+            sqlx::query_scalar("SELECT pane_id FROM panes WHERE unowned_notified_at IS NOT NULL ORDER BY pane_id")
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(notified, vec!["w1:pAged".to_string()]);
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 0, "an aged unowned pane is notified only once");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn adopting_a_fresh_unowned_pane_prevents_its_delayed_notification() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let fresh = crate::db::now();
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, kind, owned_by, scratch, orphaned, last_output_at, first_seen, last_seen)
+             VALUES ('w1:pU','local','shell','none',0,0,?,?,?)",
+        )
+        .bind(&fresh)
+        .bind(&fresh)
+        .bind(&fresh)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 0, "a newly seen pane remains inside the adoption window");
+        let _ = adopt(
+            State(app.clone()),
+            Path("w1:pU".into()),
+            Query(HashMap::new()),
+            Some(Json(AdoptIn { owner_bot_id: Some("b1".into()), purpose: None, allow_gc: false })),
+        )
+        .await
+        .unwrap();
+        let pane = json!({"pane_id": "w1:pU", "workspace_id": "w1", "tab_id": "t1", "cwd": "/Users/me", "revision": 1});
+        let no_env = HashMap::from([("w1:pU".to_string(), observed(None, None, None, &[]))]);
+        record_scan(&app, "local", &[pane], &no_env, &crate::db::now()).await.unwrap();
+
+        // Simulate elapsed time without sleeping: after the grace period, an adopted pane still is not unowned.
+        let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE panes SET first_seen=? WHERE host='local' AND pane_id='w1:pU'")
+            .bind(aged)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 0);
+        let (owned_by, notified): (String, Option<String>) =
+            sqlx::query_as("SELECT owned_by, unowned_notified_at FROM panes WHERE host='local' AND pane_id='w1:pU'")
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(owned_by, "bot");
+        assert!(notified.is_none(), "the adoption window should not leave a stale notification marker");
+        let inbox_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='pane_unowned'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(inbox_count, 0);
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
     /// cwd 回退歸屬：子目錄也算，巢狀時取最長的那個；對不到就是 none（§6.5e 第 1 點）。
     #[test]
     fn a_pane_without_a_bot_marker_falls_back_to_its_cwd() {
@@ -2075,6 +2164,13 @@ mod tests {
         assert_eq!(scan.panes, 1, "只收使用者那顆");
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, vec!["w1:pB".to_string()], "探測 pane 不進表；叫 am-quota-* 的使用者 workspace 照收");
+        let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE panes SET first_seen=? WHERE host=? AND pane_id='w1:pB'")
+            .bind(aged)
+            .bind(crate::config::LOCAL_HOST)
+            .execute(&app.db)
+            .await
+            .unwrap();
         assert_eq!(notify_unowned_and_orphans(&app, crate::config::LOCAL_HOST).await.unwrap(), 1, "只有使用者那顆推 pane_unowned");
         drop(probe);
         crate::probe_ws::closed(app.herdr.socket_path(), "wQ1795");
