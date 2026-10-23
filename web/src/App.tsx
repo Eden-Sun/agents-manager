@@ -24,6 +24,7 @@ import { useStore } from './store/store'
 import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
+import { useT } from './lib/i18n'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
 const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title)
@@ -63,6 +64,7 @@ function useUnread() {
 // live region 要先在 DOM 裡、之後內容變動才會被唸；所以容器一律 render，空的時候不佔位也不擋點擊（.notices 是 fixed，沒有 padding）（#1135）。
 // 錯誤用 alert（會打斷），一般的仍是 polite。
 export function Notices() {
+  const t = useT()
   const notices = useStore((s) => s.notices)
   const dismiss = useStore((s) => s.dismiss)
   return (
@@ -82,7 +84,7 @@ export function Notices() {
               {n.action.label}
             </button>
           ) : null}
-          <button type="button" onClick={() => dismiss(n.id)} aria-label="關閉">
+          <button type="button" onClick={() => dismiss(n.id)} aria-label={t('關閉')}>
             ✕
           </button>
         </div>
@@ -92,6 +94,7 @@ export function Notices() {
 }
 
 function ConnBanner() {
+  const t = useT()
   const connected = useStore((s) => s.connected)
   const socket = useStore((s) => s.socket)
   const stateStale = useStore((s) => s.stateStale)
@@ -113,23 +116,24 @@ function ConnBanner() {
   const label =
     socket !== 'open'
       ? socket === 'connecting'
-        ? '正在重新連線 daemon…'
-        : '與 daemon 的連線中斷，正在重試…'
+        ? t('正在重新連線 daemon…')
+        : t('與 daemon 的連線中斷，正在重試…')
       : stateStale
-        ? '狀態同步失敗，正在重試…'
-      : 'daemon 與 herdr 連線中斷，暫時無法送出訊息'
+        ? t('狀態同步失敗，正在重試…')
+      : t('daemon 與 herdr 連線中斷，暫時無法送出訊息')
   return (
     <div className="conn-banner" role="status">
       <span className={`conn-dot ${socket === 'open' && !connected ? 'closed' : socket}`} />
       <span>{label}</span>
       <button type="button" className="btn conn-retry" onClick={() => void refreshState()}>
-        立即重試
+        {t('立即重試')}
       </button>
     </div>
   )
 }
 
 export default function App() {
+  const t = useT()
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
   const bootstrap = useStore((s) => s.bootstrap)
@@ -189,22 +193,25 @@ export default function App() {
     return (
       <div className="boot">
         <div className="boot-card">
-          <h1>{bootError ? '無法連上 daemon' : '連線中…'}</h1>
+          <h1>{bootError ? t('無法連上 daemon') : t('連線中…')}</h1>
           {bootError ? (
             <>
               <p style={{ color: 'var(--danger)' }}>{bootError}</p>
               <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
-                請確認 <code>agents-managerd serve</code> 正在 <code>127.0.0.1:7788</code> 執行，
-                或改用 <code>VITE_MOCK=1 npm run dev</code> 以假資料開發。
+                {t.x('請確認 {serve} 正在 {addr} 執行，或改用 {mock} 以假資料開發。', {
+                  serve: <code>agents-managerd serve</code>,
+                  addr: <code>127.0.0.1:7788</code>,
+                  mock: <code>VITE_MOCK=1 npm run dev</code>,
+                })}
               </p>
               <button type="button" className="btn primary" onClick={() => void bootstrap()}>
-                重試
+                {t('重試')}
               </button>
             </>
           ) : (
             <p style={{ color: 'var(--text-dim)' }}>
-              正在取得 <code>GET /api/session</code> 的 token…
-              {MOCK_MODE ? '（MOCK 模式）' : ''}
+              {t.x('正在取得 {code} 的 token…', { code: <code>GET /api/session</code> })}
+              {MOCK_MODE ? t('（MOCK 模式）') : ''}
             </p>
           )}
         </div>
@@ -219,7 +226,7 @@ export default function App() {
         className={`sidebar${drawer ? ' open' : ''}`}
         // Only at the drawer breakpoint while closed: offscreen, Tab and screen readers would still walk it.
         inert={isMobile && !drawer}
-        {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': '側邊欄' } : {})}
+        {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': t('側邊欄') } : {})}
         onClickCapture={(e) => {
           if (!drawerOpen || !(e.target instanceof Element)) return
           if (!e.target.closest(DRAWER_NAV) || e.target.closest(DRAWER_STAY)) return
@@ -229,7 +236,7 @@ export default function App() {
         <Sidebar />
       </aside>
       {drawerOpen ? (
-        <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} />
+        <button type="button" className="scrim" aria-label={t('關閉側邊欄')} onClick={() => setDrawer(false)} />
       ) : null}
       <main className="main">
         <ConnBanner />

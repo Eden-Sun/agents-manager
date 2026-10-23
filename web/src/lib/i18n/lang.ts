@@ -60,7 +60,8 @@ function resolve(pref: LangPref, override: Lang | null): Lang {
 }
 
 function paintHtmlLang(lang: Lang): void {
-  if (typeof document !== 'undefined') document.documentElement.lang = lang === 'en' ? 'en' : 'zh-Hant'
+  // 測試或分享頁的假 document 可能沒有 documentElement：有才寫。
+  if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = lang === 'en' ? 'en' : 'zh-Hant'
 }
 
 function ensure(): State {

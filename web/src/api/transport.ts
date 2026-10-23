@@ -2,6 +2,7 @@ import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
 import { CHECK_MS, CONNECT_TIMEOUT_MS, RESUME_STALE_MS, SILENCE_MS, STABLE_MS, TOKEN_REFRESH_AFTER_FAILS, TOKEN_REFRESH_MIN_GAP_MS, isForeground, realLivenessDeps } from './socketLiveness'
 import type { LivenessDeps } from './socketLiveness'
+import { t } from '../lib/i18n'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -42,7 +43,7 @@ function plainReason(parsed: unknown): string {
 }
 
 export function abortError(): DOMException {
-  return new DOMException('上傳已取消', 'AbortError')
+  return new DOMException(t('上傳已取消'), 'AbortError')
 }
 
 export function isAbortError(e: unknown): boolean {
@@ -105,7 +106,7 @@ export function xhrUpload(
     }
     xhr.onerror = () => {
       settle()
-      reject(new Error('連線中斷，上傳沒有完成'))
+      reject(new Error(t('連線中斷，上傳沒有完成')))
     }
     xhr.onabort = () => {
       settle()
@@ -211,7 +212,7 @@ export class HttpTransport implements Transport {
     }
     // 代理或前端的退回頁會對任何路徑回 200 的 HTML：那不是 token，不能拿去帶給所有請求。
     if ((res.headers?.get?.('content-type') ?? '').includes('text/html')) {
-      throw new Error('GET /api/session 回的是網頁，不是 token（代理或前端服務擋住了 /api）')
+      throw new Error(t('GET /api/session 回的是網頁，不是 token（代理或前端服務擋住了 /api）'))
     }
     const token =
       typeof body === 'string'
@@ -266,7 +267,7 @@ export class HttpTransport implements Transport {
       }
       return parsed
     } catch (e) {
-      if (timedOut) throw new Error(`${method} ${path} 逾時：${(this.opts.getTimeoutMs ?? GET_TIMEOUT_MS) / 1000} 秒沒有回應`)
+      if (timedOut) throw new Error(t('{method} {path} 逾時：{sec} 秒沒有回應', { method, path, sec: (this.opts.getTimeoutMs ?? GET_TIMEOUT_MS) / 1000 }))
       throw e
     } finally {
       if (timeoutId !== null) timers.clearTimeout(timeoutId)
@@ -309,7 +310,7 @@ export class HttpTransport implements Transport {
       }
       return URL.createObjectURL(await untilAborted(res.blob(), ctl.signal))
     } catch (e) {
-      if (timedOut) throw new Error(`GET ${path} 逾時：${limitMs / 1000} 秒沒有回應`)
+      if (timedOut) throw new Error(t('GET {path} 逾時：{sec} 秒沒有回應', { path, sec: limitMs / 1000 }))
       throw e
     } finally {
       timers.clearTimeout(timeoutId)

@@ -1,3 +1,5 @@
+import { msg, t, tr } from '../lib/i18n'
+
 /** Wire types for the daemon API. Source of truth: SPEC §7, appendix C, `daemon/src/api.rs`, docs/API.md; shape drift is absorbed in `normalize.ts`. */
 
 export type BotKind = 'claude' | 'codex' | 'grok' | 'agy'
@@ -578,18 +580,18 @@ export type GroupSkipReason =
   | 'uncommitted'
 
 export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
-  not_running: '未啟動',
-  blocked: '等待終端回應',
-  in_flight: '上一回合進行中',
-  unknown_delivery: '上一回合送達狀態未知',
-  conflict: '狀態衝突',
-  not_found: '找不到 bot',
-  bad_request: '請求不合法',
-  upstream: 'herdr / DB 錯誤',
-  unprocessable: '這則訊息對方無法確認送達',
-  forbidden: '沒有權限替這顆 bot 轉述',
-  unavailable: '暫時讀不到維護窗口狀態',
-  uncommitted: '送出結果還不確定',
+  not_running: msg('未啟動'),
+  blocked: msg('等待終端回應'),
+  in_flight: msg('上一回合進行中'),
+  unknown_delivery: msg('上一回合送達狀態未知'),
+  conflict: msg('狀態衝突'),
+  not_found: msg('找不到 bot'),
+  bad_request: msg('請求不合法'),
+  upstream: msg('herdr / DB 錯誤'),
+  unprocessable: msg('這則訊息對方無法確認送達'),
+  forbidden: msg('沒有權限替這顆 bot 轉述'),
+  unavailable: msg('暫時讀不到維護窗口狀態'),
+  uncommitted: msg('送出結果還不確定'),
 }
 
 export interface AppState {
@@ -827,14 +829,15 @@ export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high',
 /** 不翻譯，用原廠的字（只首字母大寫），才對得上 CLI 畫面與文件。 */
 export function effortLabel(level: string): string {
   // `default`＝TUI 明確寫的 CLI 預設（SPEC §4.4a），不是一個等級名稱，不能首字大寫成 `Default`。
-  if (level === 'default') return '（CLI 預設）'
+  if (level === 'default') return t('（CLI 預設）')
   return level ? level.charAt(0).toUpperCase() + level.slice(1) : level
 }
 
 /** 精簡列用的強度縮寫（2026-10-04 使用者：子 agent 列「改用緊湊的方式表示」）：Medium→M、High→H、Xhigh→XH；`max` 本來就短。 */
 export function effortShort(level: string): string {
-  const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-', default: '預設' }
-  return short[level.toLowerCase()] ?? effortLabel(level)
+  const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-', default: msg('預設') }
+  const label = short[level.toLowerCase()]
+  return label ? tr(label) : effortLabel(level)
 }
 
 /** agy 的預設模型；daemon `AGY_DEFAULT_MODEL` 同一份。 */

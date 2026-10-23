@@ -1,6 +1,5 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { t } from '../lib/i18n'
 import { httpShareClient, type ShareClient } from './shareApi'
 import { ShareApp } from './ShareApp'
 import { tokenFromLocation } from './shareModel'
@@ -24,8 +23,8 @@ async function boot() {
       ) : (
         <main className="sh-gone">
           <div className="sh-gone-card">
-            <h1>{t('連結不完整')}</h1>
-            <p>{t('請確認你打開的是完整的分享連結。')}</p>
+            <h1>連結不完整</h1>
+            <p>請確認你打開的是完整的分享連結。</p>
           </div>
         </main>
       )}

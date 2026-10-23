@@ -52,6 +52,7 @@ import type {
   TurnDelivery,
 ProjectSubmodule,
 } from './types'
+import { t } from '../lib/i18n'
 
 export const MOCK_MODE = import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
 
@@ -813,7 +814,7 @@ export async function refreshTools(host: string): Promise<{ tools: ToolMap; iden
 
 function toRemoteCargoSettings(raw: unknown): RemoteCargoSettings {
   // 舊 daemon 沒有這條路徑時 GET 會落到 SPA、回 200 + index.html；當成空物件會靜靜顯示一組假預設值。
-  if (!isRec(raw)) throw new ApiError(404, {}, '這顆 daemon 還沒有 /api/build/remote（回的是網頁不是 JSON），二進位比前端舊；要 cargo build --release 後重啟 daemon。')
+  if (!isRec(raw)) throw new ApiError(404, {}, t('這顆 daemon 還沒有 /api/build/remote（回的是網頁不是 JSON），二進位比前端舊；要 cargo build --release 後重啟 daemon。'))
   const o = raw
   return {
     enabled: o.enabled === true,
