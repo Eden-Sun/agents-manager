@@ -10,7 +10,7 @@
 #
 # 前提（呼叫端負責）：checkout 已經建好 release binary，而且那顆 commit 已經過 ubuntu-ci（或使用者按了立即部署）。
 # 不需要核准單（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開——
-# daemon-swap 服務身分自己開一筆立即核准的 restart 單，再走同一個 acquire：沒有人 working／送達中、沒有別人的
+# daemon-swap 服務身份自己開一筆立即核准的 restart 單，再走同一個 acquire：沒有人 working／送達中、沒有別人的
 # 租約才拿得到，拿到時 assignment 派送暫停。這支只做「拿窗口 → 備份 → 換 binary → 重啟 → 驗證」，任何一步
 # 不對就照 §18.13 的方向處理（升過 schema 預設往前修，不把舊 binary 放回去）。
 #
@@ -335,7 +335,7 @@ if mode == "service":
     url = base + f"/api/services/daemon-swap/probe/{urllib.parse.quote(bot, safe='')}"
     data = b""
 else:
-    # 舊 daemon 不認 service token：只在明確 --approval 的 bootstrap 使用 User 身分自測。
+    # 舊 daemon 不認 service token：只在明確 --approval 的 bootstrap 使用 User 身份自測。
     with opener.open(base + "/api/session") as response:
         tok = json.load(response)["token"]
     headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
@@ -352,7 +352,7 @@ except Exception as e:
 PY
 }
 
-# 開 restart 窗口：daemon-swap 服務身分打 restart-window，daemon 自己開一筆立即核准的單再走 acquire
+# 開 restart 窗口：daemon-swap 服務身份打 restart-window，daemon 自己開一筆立即核准的單再走 acquire
 # （安全檢查、暫停派送、fence／lease_token 都照舊）。印出回應本文（成功與被拒都是 JSON，下面同一份解析）。
 restart_window() {
     if [ "$WINDOW_MODE" = legacy ]; then

@@ -538,7 +538,7 @@ mod tests {
         assert!(open_turn(&app, &run, &sender.id, None, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
         assert_eq!(resolve(&app, &sender.id, &f.run_id).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "run id 對得到");
-        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "pane 地址本身不是 run 身分");
+        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "pane 地址本身不是 run 身份");
         assert!(resolve(&app, &sender.id, "沒有這個人").await.unwrap().is_none());
     }
 

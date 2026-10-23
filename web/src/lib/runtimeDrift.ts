@@ -44,8 +44,8 @@ export function runtimeIdentity(run: Run | null): string | null | undefined {
 }
 
 /**
- * 查額度要用哪個身分（issue #541）：額度記在 run **實際起來**的那個身分上（API.md 的 `runtime_identity`：
- * 「改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上」）。所以 daemon 記得的話以它為準，
+ * 查額度要用哪個身份（issue #541）：額度記在 run **實際起來**的那個身份上（API.md 的 `runtime_identity`：
+ * 「改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身份上」）。所以 daemon 記得的話以它為準，
  * `undefined`（收編的 pane、沒記、沒有 active run）才退回設定值——不然改帳號還沒重啟那段期間，
  * 側欄查的是新帳號的格子，燒的卻是舊帳號的額度。
  */

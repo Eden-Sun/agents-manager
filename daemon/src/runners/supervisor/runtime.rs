@@ -80,7 +80,7 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
         let mut turns = app.subscribe_turns();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // 「還在等額度」那幾格不在這裡回填：這裡每次換 generation 都會跑，而且身分還沒偵測完、key 算不準。
+        // 「還在等額度」那幾格不在這裡回填：這裡每次換 generation 都會跑，而且身份還沒偵測完、key 算不準。
         // 回填掛在 `tools::detect` 之後（`backfill_quota_limits_once`）；回填之前 `resume_quota_blocked`
         // 照樣不會把 `resume_at` 還沒到的交辦放出去。
         // Startup reconciliation: results that arrived while the daemon was down.

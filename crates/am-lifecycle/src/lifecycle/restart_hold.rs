@@ -1,8 +1,8 @@
 //! 重啟中的 bot（issue #106）：stop 與 start 之間那一段「沒有 active run」不是「bot 不在了」。
 //!
 //! `revoke_orphaned_queued_turns` 的判準是「這顆 bot 沒有 active run ＝ 排著的 prompt 沒有人會送」。
-//! 重啟（`restart_bot_with`：換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，中間那一段
-//! 剛好符合這個判準，於是 AGM 排著的派工被當成孤兒撤掉——換身分之後什麼都不會送，`resume_gate`
+//! 重啟（`restart_bot_with`：換身份、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，中間那一段
+//! 剛好符合這個判準，於是 AGM 排著的派工被當成孤兒撤掉——換身份之後什麼都不會送，`resume_gate`
 //! 再完美也沒有東西可以放行。會在那一段撤掉它的不只 stop 自己：`restart_start` 收掉擋路 run 的
 //! `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件（`events::end_runs_for_pane`）、定時的
 //! `revoke_all_orphaned_queued_turns` 都會。所以不在各處補判斷，而是讓重啟**宣告**自己在進行中，
@@ -154,7 +154,7 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, "left-down").await;
         start_bot(&app, &bot.id).await.unwrap();
         let queued = queued_turn(&app, &bot.id).await;
-        // 換成這台沒有的身分：stop 做完之後 start 會拒絕（不會退回預設帳號，GH #83）。
+        // 換成這台沒有的身份：stop 做完之後 start 會拒絕（不會退回預設帳號，GH #83）。
         sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         assert!(restart_bot_with(&app, &bot.id, StartOpts::default()).await.is_err());
         assert!(db::active_run(&app.db, &bot.id).await.unwrap().is_none(), "bot 沒回來");

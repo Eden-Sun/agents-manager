@@ -93,7 +93,7 @@ test('手機：帳號警告不被藏——彈窗狀態列有「未登入」、Gi
     await act(() =>
       useStore.setState({
         selectedBotId: id,
-        runs: { ...useStore.getState().runs, [id]: { ...run, status: statusWith('身分 cc9 在這台沒登入，用的是預設帳號') } },
+        runs: { ...useStore.getState().runs, [id]: { ...run, status: statusWith('身份 cc9 在這台沒登入，用的是預設帳號') } },
       }),
     )
     await mount(<ChatPanel onOpenSidebar={() => {}} />)

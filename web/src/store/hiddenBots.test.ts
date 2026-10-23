@@ -25,7 +25,7 @@ const state = (selectedBotId: string | null): StoreState =>
 
 const disabledCc1 = { [quotaDisableKey('local', 'claude', 'cc1')]: null }
 
-test('停用的身分整批收起來', () => {
+test('停用的身份整批收起來', () => {
   assert.deepEqual(quotaHiddenBotIds(state(null), disabledCc1), ['b1', 'b2'])
   assert.deepEqual(quotaHiddenBotIds(state(null), {}), [])
 })

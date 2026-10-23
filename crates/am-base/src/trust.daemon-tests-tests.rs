@@ -34,7 +34,7 @@
         assert!(store_path("shell", &env(&[]), "/home/u").is_none());
     }
 
-    /// agy 的設定目錄只認 `$HOME`：身分／bot env 的任何變數都改不了它。
+    /// agy 的設定目錄只認 `$HOME`：身份／bot env 的任何變數都改不了它。
     #[test]
     fn agy_store_is_the_settings_json_under_home_and_ignores_env() {
         let want = PathBuf::from("/home/u/.gemini/antigravity-cli/settings.json");

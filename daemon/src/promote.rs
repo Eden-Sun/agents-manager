@@ -301,7 +301,7 @@ pub(crate) fn finalize_staged_transcript(
     let mut source = crate::transcript_read::open_regular(src).map_err(bad)?;
     let before = file_version(&source).map_err(bad)?;
     if source_identity.is_some_and(|identity| identity != before.identity) {
-        return Err(refuse("transcript_copy_failed", json!({"message": "來源 transcript 身分在 staging 後改變"})));
+        return Err(refuse("transcript_copy_failed", json!({"message": "來源 transcript 身份在 staging 後改變"})));
     }
     let Some(dest_dir) = dest.parent() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 transcript 沒有目錄"}))) };
     let Some(projects_dir) = dest_dir.parent().filter(|p| p.file_name() == Some(std::ffi::OsStr::new("projects"))) else {
@@ -332,7 +332,7 @@ pub(crate) fn finalize_staged_transcript(
         return Err(refuse("transcript_copy_failed", json!({"message": "目的 transcript 不屬於這次 promote，且尚未包含最後來源"})));
     };
     if current_identity != expected_dest {
-        return Err(refuse("transcript_copy_failed", json!({"message": "staged transcript 身分在 promote 後改變"})));
+        return Err(refuse("transcript_copy_failed", json!({"message": "staged transcript 身份在 promote 後改變"})));
     }
     if !ts::is_prefix_of(&existing, &source).map_err(bad)? {
         return Err(refuse("transcript_copy_failed", json!({"message": "staged transcript 與來源內容分岔，拒絕覆寫"})));
@@ -411,7 +411,7 @@ async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> boo
     stopped && removed.is_ok()
 }
 
-/// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身分；args 不帶——那是收編時看到的舊 argv）。
+/// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身份；args 不帶——那是收編時看到的舊 argv）。
 /// handler 與開機補完（`promote_intents`）共用同一份，補完出來的跟 handler 做的一模一樣。
 pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Option<String>, effort: &Option<String>) -> BotCfg {
     BotCfg {
@@ -714,7 +714,7 @@ mod tests {
     struct Rig {
         e: Env,
         child: String,
-        /// 身分 cc-a 的 CLAUDE_CONFIG_DIR。
+        /// 身份 cc-a 的 CLAUDE_CONFIG_DIR。
         dir: PathBuf,
     }
 

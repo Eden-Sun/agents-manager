@@ -7,7 +7,7 @@
 //! 本模組只處理來源標記，不能讓 body claim 改變 principal。User 沒帶 Bot proof 就自稱 Bot 來源一律 403；
 //! `daemon` 不接受 HTTP 冒名，因為那會繞過 AGM 協調者的收件匣（`bot_requests::intercept` 不攔 daemon）。
 //!
-//! Bot 身分由 auth 中介層用那顆 bot 現行的 hook token 驗證（`X-AM-Bot-Token`；pane 一律注入 `AM_BOT_TOKEN`，
+//! Bot 身份由 auth 中介層用那顆 bot 現行的 hook token 驗證（`X-AM-Bot-Token`；pane 一律注入 `AM_BOT_TOKEN`，
 //! hooks 開啟時另有 `AM_HOOK_TOKEN`）。這裡再確認 `relay_from` claim 是否和自己的 proof 一致。規則：
 //!
 //! | relay_from | `X-AM-Bot-Token` | 結果 |
@@ -41,7 +41,7 @@ pub trait RelayTokenVerify: Send + Sync {
     fn ct_eq(&self, a: &str, b: &str) -> bool;
 }
 
-/// 驗證 mission 端點 relay 身分需要的 AGM 角色檢查能力。
+/// 驗證 mission 端點 relay 身份需要的 AGM 角色檢查能力。
 pub trait RelayAuthOps: RelayTokenVerify {
     async fn is_agm_role(&self, headers: &HeaderMap) -> Result<bool, LcError>;
 }
@@ -131,7 +131,7 @@ fn mismatch() -> LcError {
     LcError::Forbidden(json!({
         "error": "forbidden",
         "reason": "relay_from_mismatch",
-        "message": "X-AM-Bot-Id／X-AM-Bot-Token 不是 relay_from 那顆 bot 的；只能以自己的身分轉述",
+        "message": "X-AM-Bot-Id／X-AM-Bot-Token 不是 relay_from 那顆 bot 的；只能以自己的身份轉述",
     }))
 }
 

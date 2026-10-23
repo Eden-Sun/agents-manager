@@ -123,7 +123,7 @@ struct Fx {
     pane: String,
 }
 
-/// 開一顆 shell、當成 claude 身分 `cc9` 的登入 pane 登記，畫面是 `screen`，前景程序 `claude`。
+/// 開一顆 shell、當成 claude 身份 `cc9` 的登入 pane 登記，畫面是 `screen`，前景程序 `claude`。
 async fn login_pane(screen: &str) -> Fx {
     let env = tt::env().await;
     let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
@@ -178,7 +178,7 @@ async fn only_registered_login_panes_are_served() {
     assert!(matches!(submit_code(&env.app, "local", &plain.pane_id, "abc").await, Err(LcError::NotFound(_))));
     assert!(env.herdr.calls_to("pane.send_text").is_empty());
 
-    // 登記過，但帳上那顆 shell 的身分（created_at）對不上＝pane id 被別的 shell 重用。
+    // 登記過，但帳上那顆 shell 的身份（created_at）對不上＝pane id 被別的 shell 重用。
     reserve(&env.app, "local", "cc9").unwrap().register(&plain.pane_id, "some-other-shell");
     assert!(matches!(status(&env.app, "local", &plain.pane_id).await, Err(LcError::NotFound(_))));
     assert!(!is_registered(&env.app, "local", &plain.pane_id), "對不上就順手清掉");
@@ -353,7 +353,7 @@ async fn a_malformed_code_is_a_400_before_anything_is_read() {
 async fn a_finished_login_clears_the_login_prompt_but_a_failed_one_keeps_it() {
     for (screen_after, cleared) in [("user@host:~$ \n", true), (FAILED, false)] {
         let f = login_pane(UNWRAPPED).await;
-        // 這台主機的身分表要有 cc9，快照才帶得出記號。
+        // 這台主機的身份表要有 cc9，快照才帶得出記號。
         f.env.app.tools.lock().await.insert(
             "local".into(),
             crate::tools::HostTools {

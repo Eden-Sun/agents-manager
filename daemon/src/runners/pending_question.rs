@@ -619,7 +619,7 @@ mod remote_tests {
         assert_eq!(rig.reads(), 1);
     }
 
-    /// 記的路徑不在這顆 bot 的 config root 底下、而且檔名就是 live session（別的身分、`..`、不是 jsonl、不在 `projects/` 下）→ null，而且不發遠端讀取。
+    /// 記的路徑不在這顆 bot 的 config root 底下、而且檔名就是 live session（別的身份、`..`、不是 jsonl、不在 `projects/` 下）→ null，而且不發遠端讀取。
     #[tokio::test]
     async fn a_recorded_path_outside_the_roots_that_names_the_live_session_is_null_and_never_read() {
         for forged in [

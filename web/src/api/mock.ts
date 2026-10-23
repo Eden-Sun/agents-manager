@@ -1653,7 +1653,7 @@ export class MockTransport implements Transport {
     return shell
   }
 
-  /** 登入 pane（claude 身分登入開的臨時 shell）：`GET …/shells/:pane/login`，不是登入 pane 一律 404（跟 daemon 一樣）。 */
+  /** 登入 pane（claude 身份登入開的臨時 shell）：`GET …/shells/:pane/login`，不是登入 pane 一律 404（跟 daemon 一樣）。 */
   private loginStatus(host: string, pane: string) {
     const lp = this.loginPanes.get(`${host}/${pane}`)
     if (!lp || !this.shells.has(`${host}/${pane}`)) throw new ApiError(404, { error: 'not_found', what: 'login pane' }, 'login pane not found')
@@ -2345,7 +2345,7 @@ export class MockTransport implements Transport {
       from_identity: 'cc2',
       to_identity: 'cc1',
       model: null,
-      reason: 'cc2 的週額度用完，換下一個身分',
+      reason: 'cc2 的週額度用完，換下一個身份',
       message: "You've hit your usage limit",
       needs_review: true,
     }, 'daemon')
@@ -2363,7 +2363,7 @@ export class MockTransport implements Transport {
     const asking = mk({
       text: '把 blocked 選單那幾個元件的測試補起來',
       paused_reason: 'no_fable_for_verifier',
-      paused_detail: '三個身分的 Fable 週桶都見底了',
+      paused_detail: '三個身份的 Fable 週桶都見底了',
     })
     this.missions.push(asking)
     this.missionEvent(asking.id, 'instruction', asking.text)
@@ -2371,12 +2371,12 @@ export class MockTransport implements Transport {
     this.missionEvent(
       asking.id,
       'paused',
-      '暫停：三個身分的 Fable 週桶都見底了，等使用者決定',
+      '暫停：三個身份的 Fable 週桶都見底了，等使用者決定',
       {
         reason: 'no_fable_for_verifier',
         decision: {
           decision: 'ask_user',
-          reason: '三個身分的 Fable 週桶都見底了',
+          reason: '三個身份的 Fable 週桶都見底了',
           resets: [{ identity: 'cc2', resets_at: inHours(9) }, { identity: 'cc1', resets_at: inHours(31) }],
         },
       },
@@ -2393,7 +2393,7 @@ export class MockTransport implements Transport {
     this.missionEvent(
       idle.id,
       'note',
-      '找不到跟執行者不同的身分當 reviewer：改走執行者自審＋驗證者把關',
+      '找不到跟執行者不同的身份當 reviewer：改走執行者自審＋驗證者把關',
       { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 還有額度' } },
       'daemon',
     )
@@ -4202,7 +4202,7 @@ export class MockTransport implements Transport {
   // 主機 shell
 
   /** 有真的行緩衝，`shellText` 依指令追加輸出，mock 下才試得出輸入框與按鍵列。 */
-  /** claude 身分的登入 pane（key＝`host/pane_id`）。 */
+  /** claude 身份的登入 pane（key＝`host/pane_id`）。 */
   private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean }>()
 
   private openShell(host: string, cwd: string) {

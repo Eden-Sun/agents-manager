@@ -119,7 +119,7 @@ pub mod native_transport_prototype;
 /// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod actor_runtime_eval_prototype;
-/// issue #92 的端到端情境：撞額度 → 換身分 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
+/// issue #92 的端到端情境：撞額度 → 換身份 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod identity_switch_tests;
 /// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。

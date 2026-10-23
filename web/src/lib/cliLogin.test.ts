@@ -1,6 +1,6 @@
 /**
- * #915：沒綁身分的 CLI 登入要在**新開**的 host shell 打指令，不能接回最近一個還活著的 shell
- * （那顆的前景可能是 vim／sudo／手動開的 claude）。綁了身分的走 daemon 的 identity login。後端是 mock。
+ * #915：沒綁身份的 CLI 登入要在**新開**的 host shell 打指令，不能接回最近一個還活著的 shell
+ * （那顆的前景可能是 vim／sudo／手動開的 claude）。綁了身份的走 daemon 的 identity login。後端是 mock。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -34,7 +34,7 @@ function seedBot(identity: string | null) {
   })
 }
 
-it('沒綁身分：新開一顆 shell 打登入指令，不查也不接回既有的 shell', async () => {
+it('沒綁身份：新開一顆 shell 打登入指令，不查也不接回既有的 shell', async () => {
   const requests = mockApi(sharedMock)
   await closeLocalShells() // 前面的測試可能已把共用 mock 的 shell 開到上限
   seedBot(null)
@@ -55,7 +55,7 @@ it('沒綁身分：新開一顆 shell 打登入指令，不查也不接回既有
   assert.ok(text.path.includes(`/shells/${encodeURIComponent(view.paneId)}/text`), `字打進畫面上的那顆：${text.path} vs ${view.paneId}`)
 })
 
-it('綁了身分：走 daemon 的 identity login，不開 host shell', async () => {
+it('綁了身份：走 daemon 的 identity login，不開 host shell', async () => {
   const requests = mockApi(sharedMock)
   seedBot('work')
   requests.length = 0

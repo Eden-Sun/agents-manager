@@ -613,7 +613,7 @@ pub fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
 }
 
 /// 鍵生效了、回合狀態沒寫成（#147）：503，跟 start／stop 的 `*_state_uncommitted` 同一種——外面的副作用已經做了、
-/// DB 那一半還欠著（[`LcError::Uncommitted`]）。帶著那一筆的身分：重試時帶 `turn_id`，那一筆已經不在飛就不會誤按到下一回合。
+/// DB 那一半還欠著（[`LcError::Uncommitted`]）。帶著那一筆的身份：重試時帶 `turn_id`，那一筆已經不在飛就不會誤按到下一回合。
 pub fn uncommitted(run_id: &str, turn_id: &str, cause: Option<&anyhow::Error>) -> LcError {
     LcError::Uncommitted(json!({
         "error": "interrupt_state_uncommitted",
@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(escs(&b.env), 1, "從頭到尾只按了一次");
     }
 
-    /// #147 驗收三之二：重試綁著那一筆的身分。它已經收掉、下一回合已經開始時，帶著它的 `turn_id` 重試
+    /// #147 驗收三之二：重試綁著那一筆的身份。它已經收掉、下一回合已經開始時，帶著它的 `turn_id` 重試
     /// **不按 Esc**，回 409——不會誤傷下一回合。定時重試同樣只認記下的那一筆、從不按鍵。
     #[tokio::test]
     async fn a_retry_bound_to_the_old_turn_never_escapes_the_next_one() {

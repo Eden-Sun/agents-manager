@@ -190,13 +190,13 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Err(e.context("續行提示該撤卻撤不掉：留在佇列，稍後再撤"));
         }
     }
-    // 目標身分還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
-    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身分重啟（#106）會叫醒這裡。撞限記在這一列上，重啟後照樣擋。
+    // 目標身份還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
+    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身份重啟（#106）會叫醒這裡。撞限記在這一列上，重啟後照樣擋。
     if let Some(hit) = super::quota_hold::blocking_hit(app, &bot, &turn.id).await {
         let wait = super::quota_hold::recheck_in(hit.until.as_deref(), chrono::Utc::now());
         super::quota_hold::note_held(bot_id);
         tracing::info!(bot = %bot_id, turn = %turn.id, until = ?hit.until, wait_s = wait.as_secs(),
-                       "目標身分還沒有額度：排隊的 prompt 等額度回來或換身分再送");
+                       "目標身份還沒有額度：排隊的 prompt 等額度回來或換身份再送");
         schedule_flush_retry(app, bot_id, wait);
         return Ok(());
     }
@@ -1152,7 +1152,7 @@ mod flush_queue_tests {
     use super::*;
     use crate::testing as tt;
 
-    /// 上限橫幅寫進這顆 bot 身分的 key，且不把 5h `resets_at` 蓋成橫幅時間（2026-09-13）。
+    /// 上限橫幅寫進這顆 bot 身份的 key，且不把 5h `resets_at` 蓋成橫幅時間（2026-09-13）。
     #[tokio::test]
     async fn a_limit_hit_banner_lands_on_the_bots_own_quota_key() {
         let env = tt::env().await;
@@ -1161,12 +1161,12 @@ mod flush_queue_tests {
         apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex:astra", codex_limit_hit(notice, db::now())).await;
 
         let q = app.quotas.lock().await;
-        let mine = q.get("codex:astra").expect("寫進帶身分的那把");
+        let mine = q.get("codex:astra").expect("寫進帶身份的那把");
         assert!(mine.limit_hit.is_some());
         assert_eq!(mine.five_hour.as_ref().unwrap().used_pct, 100.0, "量表標成用完");
         assert!(mine.five_hour.as_ref().unwrap().resets_at.is_none(), "橫幅的時間只進 limit_hit.until");
         assert!(mine.limit_hit.as_ref().unwrap().until.is_some());
-        assert!(q.get("codex").is_none(), "沒有身分的那把不該被動到");
+        assert!(q.get("codex").is_none(), "沒有身份的那把不該被動到");
     }
 
     /// 同一張橫幅重掃不是新證據，不可把 `at` 蓋成現在（2026-09-13：22:21 掃到 22:15 的舊橫幅）。

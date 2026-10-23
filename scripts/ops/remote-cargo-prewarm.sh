@@ -77,7 +77,7 @@ if [ ! -x "$DAEMON" ]; then
     exit 0
 fi
 
-# 專用 worktree 的身分檢查：只接受這支腳本建的那棵（marker 放在 gitdir，不進工作樹，所以不會弄髒它）。
+# 專用 worktree 的身份檢查：只接受這支腳本建的那棵（marker 放在 gitdir，不進工作樹，所以不會弄髒它）。
 prepare_worktree() {
     local repo_common wt_common gitdir
     repo_common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1

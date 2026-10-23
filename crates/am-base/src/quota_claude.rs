@@ -386,7 +386,7 @@ pub fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool
     // 這支只問登入狀態跟 `/usage`，從不用到工具，MCP 起得慢或掛掉不該拖慢額度探測、甚至把探測
     // 拖到 timeout（issue #80）。只在這支 throwaway probe 命令裡加；一般 managed bot 的啟動指令
     // 是完全分開的路徑（`lifecycle/start.rs`），不會被這裡影響到，工具可用性維持原樣。放在
-    // identity 自己的 env 之後：就算某個身分自己也設了同名變數，probe 要的 `0` 一律蓋過去。
+    // identity 自己的 env 之後：就算某個身份自己也設了同名變數，probe 要的 `0` 一律蓋過去。
     // 舊版 CLI（2.1.274 之前）不認得這個變數，當成一般環境變數忽略，行為跟現在一樣，安全。
     pfx.push_str("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0 ");
     let b = crate::hosts::sh_quote(bin);
@@ -756,7 +756,7 @@ pub fn forget_host(host: &str) {
 }
 
 /// After a login recheck, so the popover isn't wrong for the 30-minute logged-out park.
-/// `shares_default`：這個身分用的是預設帳號（[`crate::quota::identity_shares_default`]），它的探測退避記在裸 `claude` 那把 key。
+/// `shares_default`：這個身份用的是預設帳號（[`crate::quota::identity_shares_default`]），它的探測退避記在裸 `claude` 那把 key。
 pub fn unpark_identity(host: &str, name: &str, shares_default: bool) {
     unpark(&crate::quota::quota_key(host, &format!("claude:{name}")));
     if shares_default {
@@ -773,7 +773,7 @@ pub struct Target {
     pub names: Vec<String>,
     /// 裸的預設帳號也有：以前它「永不 park」，`/usage` 一壞就每 60 秒開一個 pane（review 2026-09-16 M4）。
     pub evidence: ProbeEvidence,
-    /// 只問登入答案、不寫額度：env 不是空的、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身分（`ANTHROPIC_API_KEY`、
+    /// 只問登入答案、不寫額度：env 不是空的、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身份（`ANTHROPIC_API_KEY`、
     /// `ANTHROPIC_BASE_URL`…）。額度照規則記在裸 `claude`，但登入答案要帶**它自己的 env** 問——以前併進裸 target
     /// 用空 env 探，預設帳號的 email／方案被記到它名下（review 2026-09-16 L2）。`key` 是 `claude:<name>`，只給退避用。
     pub login_only: bool,
@@ -785,8 +785,8 @@ pub fn skip_disabled(disabled: &[String], live: &std::collections::BTreeSet<Stri
     disabled.iter().any(|d| d == name) && !live.contains(name)
 }
 
-/// 裸的預設帳號要不要跳過：它代表的每一個共用預設帳號的身分（`cc0`…）都停用了、都沒有 run，而且沒有任何
-/// 不帶身分的 claude bot 在跑（那些也吃預設帳號）。沒有任何身分指到它時照探——那就是「沒命名的預設帳號」，
+/// 裸的預設帳號要不要跳過：它代表的每一個共用預設帳號的身份（`cc0`…）都停用了、都沒有 run，而且沒有任何
+/// 不帶身份的 claude bot 在跑（那些也吃預設帳號）。沒有任何身份指到它時照探——那就是「沒命名的預設帳號」，
 /// 沒有東西可以停用（SPEC §16.3b，review 2026-09-16 L4）。
 pub fn skip_disabled_default(
     disabled: &[String],
@@ -797,10 +797,10 @@ pub fn skip_disabled_default(
     !names.is_empty() && !unnamed_bot_running && names.iter().all(|n| skip_disabled(disabled, live, n))
 }
 
-/// 這台主機上有沒有不帶身分、正在跑的 claude bot（它們用的就是預設帳號）。
+/// 這台主機上有沒有不帶身份、正在跑的 claude bot（它們用的就是預設帳號）。
 pub async fn unnamed_claude_running(app: &impl crate::capabilities::Db, host: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
-        // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
+        // run 實際的身份（issue #238）：記了就用它，沒記才用 bot 設定的。
         "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE r.state IN ('starting','running','stopping') AND p.host = ? AND b.deleted_at IS NULL
             AND b.kind = 'claude'
@@ -822,7 +822,7 @@ pub struct PlanInput<'a> {
     pub logins: &'a BTreeMap<String, crate::tools::IdentityInfo>,
     pub live: &'a std::collections::BTreeSet<String>,
     pub off: &'a [String],
-    /// 這台有沒有不帶身分、正在跑的 claude bot。
+    /// 這台有沒有不帶身份、正在跑的 claude bot。
     pub unnamed_running: bool,
     /// 完整 key：最近一次寫進來的是 statusLine。
     pub statusline_keys: &'a std::collections::BTreeSet<String>,
@@ -838,8 +838,8 @@ pub fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -
         for (k, v) in &id.env {
             env.insert(k.clone(), expand_home(v, i.home));
         }
-        // 「這個身分就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
-        // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身分算成獨立帳號，跟 statusline 那邊
+        // 「這個身份就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
+        // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身份算成獨立帳號，跟 statusline 那邊
         // 的落點不一致，同一個帳號的數字會分裂在兩格（review 2026-09-16）。
         let shares_default = crate::quota::identity_shares_default("claude", &id.env);
         if shares_default && id.env.is_empty() {
@@ -888,7 +888,7 @@ pub fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -
     targets
 }
 
-/// [`force_probe`] 失敗的種類：API 要分得出「沒這個身分」「沒裝 claude」「探了但沒讀到」。
+/// [`force_probe`] 失敗的種類：API 要分得出「沒這個身份」「沒裝 claude」「探了但沒讀到」。
 #[derive(Debug)]
 pub enum ForceProbeError {
     UnknownAccount,
@@ -896,7 +896,7 @@ pub enum ForceProbeError {
     Failed(String),
 }
 
-/// 強制探哪一個 target：`account` 省略＝裸的預設帳號；共用預設帳號的身分（含只問登入的那種）額度都記在裸 `claude`，
+/// 強制探哪一個 target：`account` 省略＝裸的預設帳號；共用預設帳號的身份（含只問登入的那種）額度都記在裸 `claude`，
 /// 所以也探裸的那一趟。
 pub fn forced_target(targets: Vec<Target>, account: Option<&str>) -> Option<Target> {
     let bare = |t: &Target| t.key == "claude";

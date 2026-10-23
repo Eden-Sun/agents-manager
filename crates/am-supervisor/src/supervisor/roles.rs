@@ -236,7 +236,7 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         | "supervisor_restart_retry" | "agm_cli_stale" | "bot_shim_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
         // `judge_same_work`：派工／開票時疑似撞上同專案在跑的工作（#557）。只提示，不阻擋。
         | "judge_same_work"
-        // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身分的呼叫端也改得動
+        // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身份的呼叫端也改得動
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
         // `bot_lost`：herdr 掉了一顆 autostart bot 的 agent（重啟／斷線），對帳收成 exited 後 daemon 已照退避再起一次或放棄（`autostart_revive`）。
         | "child_retire_refused" | "persona_changed" | "bot_lost" => r(Role::Patrol, true),

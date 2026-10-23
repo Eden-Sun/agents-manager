@@ -206,7 +206,7 @@ pub(super) fn selected_grok_home(env: &Value, home: Option<&Path>) -> Option<Str
     home.map(|h| grok_home(&Value::Null, &h.to_string_lossy()))
 }
 
-/// grok bot 啟動（本機）：裝／修這顆 bot 的 `GROK_HOME`（身分可以指到別的目錄）底下的 hook 檔。
+/// grok bot 啟動（本機）：裝／修這顆 bot 的 `GROK_HOME`（身份可以指到別的目錄）底下的 hook 檔。
 pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance), env: &Value) -> anyhow::Result<bool> {
     let root = selected_grok_home(env, crate::home::dir().as_deref()).ok_or_else(|| anyhow::anyhow!("no home dir or GROK_HOME"))?;
     let path = hooks_path(app, &root);

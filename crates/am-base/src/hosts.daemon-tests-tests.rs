@@ -533,7 +533,7 @@
     }
 
     /// #347：同名主機改設定（可能已經指到另一台）時，以主機名為鍵的觀測快取要當場作廢，
-    /// 不然新連線的偵測／探測回來之前，舊機器的身分、撞限、模型清單會被當成新機器的事實。
+    /// 不然新連線的偵測／探測回來之前，舊機器的身份、撞限、模型清單會被當成新機器的事實。
     #[tokio::test]
     async fn replacing_a_host_forgets_what_was_observed_through_the_old_connection() {
         let env = crate::testing::env().await;
@@ -569,7 +569,7 @@
 
         app.hosts.replace_remote_for_test(app, mk("inv-347", "target-b")).await;
 
-        assert!(!app.tools.lock().await.contains_key("inv-347"), "舊機器的偵測結果（身分、登入）要丟");
+        assert!(!app.tools.lock().await.contains_key("inv-347"), "舊機器的偵測結果（身份、登入）要丟");
         assert!(!app.quotas.lock().await.contains_key("inv-347/codex"), "舊機器的額度不能擋新機器");
         assert_eq!(cached_rows("inv-347/codex").await, 0, "重啟快取列也要清，不然下次開機又種回來");
         assert!(!app.models_cache.lock().await.contains_key("inv-347/codex/"), "舊機器的模型清單要丟");

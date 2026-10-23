@@ -476,8 +476,8 @@ pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabili
     // 讀不到 liveness ＝ 不知道，不是「已停止」：這個 tick 不動看門狗狀態（#249）。
     let Ok(liveness) = super::manager_liveness(app.db(), &bot.id).await else { return };
     // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
-    // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身分
-    // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身分被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
+    // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身份
+    // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身份被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
     // `notify` 因為它沒在跑不送、`answered_since` 要它答完一個回合——三個條件互相等，永遠卡住（review3 c3 M3）。
     // 有可信證據說被擋（撞限或見底讀數）時照舊不啟動。
     let retry_due = row.notify_next_at.as_deref().is_none_or(watchdog::past);
@@ -634,7 +634,7 @@ pub fn backoff_secs(attempts: i64, cap: u64) -> u64 {
 /// 成功才算恢復（見 `notify`）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuotaState {
-    /// 這個身分沒有任何讀數（還沒探到、或探不到）。
+    /// 這個身份沒有任何讀數（還沒探到、或探不到）。
     Unknown,
     /// 有讀數，而且還能用。
     Available,
@@ -644,11 +644,11 @@ pub enum QuotaState {
 
 /// 這顆 bot 的額度要查哪一把 key。
 ///
-/// `quota_base_for_host`：身分的 env 是空的（`cc0` 這種「就是預設帳號」的 alias）時，讀數其實寫在
+/// `quota_base_for_host`：身份的 env 是空的（`cc0` 這種「就是預設帳號」的 alias）時，讀數其實寫在
 /// **裸 `claude`** 那一把——所以固定拼 `claude:<identity>` 的協調者永遠讀不到自己的額度，也就永遠
-/// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
+/// 不知道自己撞限了。反過來，有自己 env 的身份（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
 async fn quota_key_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> Option<String> {
-    // pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 當 Unknown。
+    // pane 裡實際的帳號（run 起來時的身份，issue #238）；讀不到 run 當 Unknown。
     let identity = app.billing_identity(bot).await.ok().flatten()?;
     // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
     // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
@@ -849,7 +849,7 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
             // 其餘種類才是真的留著等——UI 讀的就是這段字，寫錯會讓人以為核准還在協調者手上。
             let detail = format!(
                 "{} 的額度見底；{next} 再試。bot 申請與 mission 事件留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
-                bot.identity.as_deref().unwrap_or("(身分不明)")
+                bot.identity.as_deref().unwrap_or("(身份不明)")
             );
             let _ = roles::set_status(app.db(), Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
             let _ = roles::set_notify_next(app.db(), Role::Responder, Some(&next)).await;
@@ -947,7 +947,7 @@ async fn note_login_problem(app: &(impl crate::capabilities::Db + crate::capabil
     if status == "needs_login" || login_problem_on_screen(app, bot).await != Some(true) {
         return;
     }
-    let who = bot.identity.as_deref().unwrap_or("(身分不明)");
+    let who = bot.identity.as_deref().unwrap_or("(身份不明)");
     let detail = format!(
         "{who} 的 CLI 沒登入（畫面要求 /login）：協調事件送不出去、留在 inbox。請在協調者的 pane 跑 /login（Keychain 鎖住時先在另一個終端 security unlock-keychain）"
     );
@@ -1404,7 +1404,7 @@ mod flow_tests {
         assert_eq!(row.quota_reset_at.as_deref(), Some(legacy), "同一個時刻，不重寫");
     }
 
-    /// `cc0` 這種「就是預設帳號」的身分，env 是空的，讀數寫在**裸 `claude`** 那一把。固定拼
+    /// `cc0` 這種「就是預設帳號」的身份，env 是空的，讀數寫在**裸 `claude`** 那一把。固定拼
     /// `claude:<identity>` 的話協調者永遠讀不到自己的額度，也就永遠不知道自己撞限了；反過來，
     /// 有自己 env 的 cc2 只讀自己那把，不借用 cc0 的數字。
     #[tokio::test]
@@ -1496,7 +1496,7 @@ mod flow_tests {
         notify(&app).await;
         assert_ne!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota", "別人的額度不是自己的");
 
-        // 自己這個身分撞限才算。
+        // 自己這個身份撞限才算。
         app.quotas.lock().await.insert("claude:cc1".into(), blocked());
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota");

@@ -603,7 +603,7 @@ async fn verified_commit(app: &impl crate::capabilities::Db, m: &store::Mission,
     }
 }
 
-/// `verified` 與 `deliver` 是把東西推上主幹的兩道關卡，不是任何一顆 bot 都能按的：被證明身分的一般 bot
+/// `verified` 與 `deliver` 是把東西推上主幹的兩道關卡，不是任何一顆 bot 都能按的：被證明身份的一般 bot
 /// 不能記 `verified` 也不能 `deliver`。只有目前流程最後一件交辦就是它的 verifier、且它沒有擔任過 executor，
 /// 才能記驗證；判定會在事件寫入交易裡重查，避免舊一輪或失敗的 verifier 把新成果標成已驗證。使用者與 AGM 角色可以兩者皆做。
 fn is_current_mission_verifier(
@@ -749,7 +749,7 @@ pub struct PauseIn {
 /// 自己叫醒自己只是多一個空回合（同 `resume` 的防線）。有協調者時收件人是協調者；只有巡檢時是巡檢。
 /// 使用者（web）、巡檢代使用者操作時都要叫醒協調者。
 async fn called_by_mission_manager(app: &impl crate::mission::ports::CallerOps, headers: &HeaderMap) -> Result<bool, LcError> {
-    // 宣告了身分卻驗不過就是 403（issue #415）：不能默默當成「不是管理者」照常往下做。
+    // 宣告了身份卻驗不過就是 403（issue #415）：不能默默當成「不是管理者」照常往下做。
     Ok(match app.actor_role(headers).await? {
         Some(AgmRole::Responder) => true,
         Some(AgmRole::Patrol) => !app.responder_configured().await.unwrap_or(true),
@@ -938,7 +938,7 @@ pub async fn post_revise(
     });
 
     // 選項要跟開新任務走同一套驗證：沒驗就直接進 DB 的話，delivery_mode 可以是任何字串，
-    // 而挑身分／交付那邊只認得幾個固定值，壞掉會在很後面才爆出來。
+    // 而挑身份／交付那邊只認得幾個固定值，壞掉會在很後面才爆出來。
     let delivery_mode = b.delivery_mode.clone().unwrap_or_else(|| parent.delivery_mode.clone());
     let executor_kind = b.executor_kind.clone().unwrap_or_else(|| parent.executor_kind.clone());
     let on_5h_limit = b.on_5h_limit.clone().unwrap_or_else(|| parent.on_5h_limit.clone());
@@ -1403,7 +1403,7 @@ pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>, bod
     }
 }
 
-/// 照任務的設定挑身分（D3–D7）。`role=verifier` 找不到 Fable 額度時回 `ask_user`，並把任務停下來（D6）。
+/// 照任務的設定挑身份（D3–D7）。`role=verifier` 找不到 Fable 額度時回 `ask_user`，並把任務停下來（D6）。
 pub async fn get_pick(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -1418,7 +1418,7 @@ pub async fn get_pick(
     let raw = super::candidates(&app, &project.host, kind).await.map_err(|e| {
         LcError::Unavailable(json!({
             "error": "policy_unavailable", "reason": "identity_preferences_unreadable", "retryable": true, "retry_after_secs": 10,
-            "message": "讀不到身分的停用設定，沒有挑身分（不能把停用的身分當成可用）；稍後再問一次。",
+            "message": "讀不到身份的停用設定，沒有挑身份（不能把停用的身份當成可用）；稍後再問一次。",
             "detail": format!("{e:#}"),
         }))
     })?;
@@ -1640,7 +1640,7 @@ pub struct DisableIn {
     host: Option<String>,
 }
 
-/// 身分停用搬進 daemon（原本只在瀏覽器 localStorage），挑身分時才看得到。
+/// 身份停用搬進 daemon（原本只在瀏覽器 localStorage），挑身份時才看得到。
 pub async fn put_identity_disabled(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
@@ -1650,7 +1650,7 @@ pub async fn put_identity_disabled(
     if name.trim().is_empty() {
         return Err(LcError::Bad("identity is empty".into()));
     }
-    // 留白＝沒給（API.md `host?`）：存成空字串的停用列挑身分時永遠查不到（#1528）。
+    // 留白＝沒給（API.md `host?`）：存成空字串的停用列挑身份時永遠查不到（#1528）。
     let host = b.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     store::set_identity_disabled(&app.db, &host, &b.kind, name.trim(), b.disabled).await.map_err(up)?;
     app.emit_event("identity_prefs_changed", json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})).await;
@@ -1679,7 +1679,7 @@ mod tests {
         assert_eq!(effective_relay_claim(&headers, Some(" \t ")), Some("authenticated-bot"));
     }
 
-    /// `host` 留白（空字串或只有空白）＝沒給，照預設 `local` 存。以前存成空字串 host：挑身分讀的是 `local`，
+    /// `host` 留白（空字串或只有空白）＝沒給，照預設 `local` 存。以前存成空字串 host：挑身份讀的是 `local`，
     /// 那筆停用永遠查不到，回 200 卻沒有任何效果。
     #[tokio::test]
     async fn a_blank_identity_disable_host_falls_back_to_local() {
@@ -1792,7 +1792,7 @@ mod tests {
         }
     }
 
-    /// 一顆帶 hook token 的 bot，回 `(bot id, 證明它身分的 headers)`。`agm` 為真就登記成巡檢角色
+    /// 一顆帶 hook token 的 bot，回 `(bot id, 證明它身份的 headers)`。`agm` 為真就登記成巡檢角色
     /// （`bin/agm` 在 AGM pane 裡送的就是這組）。
     async fn bot_with_token(app: &Arc<App>, pid: &str, agm: bool) -> (String, HeaderMap) {
         let id = crate::db::ulid();
@@ -2738,7 +2738,7 @@ mod tests {
         let err = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("那就這樣", "a0"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "already_closed");
 
-        // AGM 回覆追問：帶自己的身分（bot id＋自己的 token）、指回那一則 question，而且**不會**放行或改狀態。
+        // AGM 回覆追問：帶自己的身份（bot id＋自己的 token）、指回那一則 question，而且**不會**放行或改狀態。
         let (agm_id, agm) = bot_with_token(&app, &pid, true).await;
         let qid = out["event"]["id"].as_str().unwrap().to_string();
         let reply = AnswerIn {
@@ -2805,7 +2805,7 @@ mod tests {
             let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note(&victim))).await.unwrap_err();
             assert_eq!(reason(err), want);
         }
-        // daemon：只有驗證過的 AGM 角色能代記。沒宣告身分、或宣告了而且證明得了卻不是角色
+        // daemon：只有驗證過的 AGM 角色能代記。沒宣告身份、或宣告了而且證明得了卻不是角色
         // bot，都是「不是 AGM」→ relay_from_reserved。
         for h in [HeaderMap::new(), other_h.clone(), victim_h.clone()] {
             let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note("daemon"))).await.unwrap_err();
@@ -3319,7 +3319,7 @@ mod tests {
         assert_eq!(git(&origin, &["rev-parse", "main"]), b);
     }
 
-    /// 上一輪的驗證者身分不能沿用到新的執行成果。
+    /// 上一輪的驗證者身份不能沿用到新的執行成果。
     #[tokio::test]
     async fn a_verifier_from_an_old_executor_generation_cannot_verify_new_work() {
         let env = crate::testing::env().await;
@@ -3462,7 +3462,7 @@ mod tests {
         assert_eq!(verified_count, 0, "a failed verifier must not write a verification event");
     }
 
-    /// 推上主幹的兩道關卡（`verified`、`deliver`）：被證明身分的一般 bot（例如執行者）不能自己驗證、自己交付；
+    /// 推上主幹的兩道關卡（`verified`、`deliver`）：被證明身份的一般 bot（例如執行者）不能自己驗證、自己交付；
     /// 使用者與 AGM 角色可以；這個任務的驗證者可以記 `verified`（但同一顆如果也是執行者就不行）。
     #[tokio::test]
     async fn a_plain_bot_cannot_verify_or_deliver_its_own_work() {
@@ -3505,7 +3505,7 @@ mod tests {
         // AGM 角色與使用者：照常交付。
         let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), agm_h, Json(deliver_from(&wt))).await.expect("AGM 可以 deliver");
         assert!(out["sha"].is_string());
-        // 使用者（沒宣告 bot 身分）：已交付過，回原本那一筆。
+        // 使用者（沒宣告 bot 身份）：已交付過，回原本那一筆。
         let Json(again) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(again["replayed"], true);
     }

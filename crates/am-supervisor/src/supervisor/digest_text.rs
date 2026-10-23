@@ -46,7 +46,7 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             format!(" from={from}（{from_id}）{verified}{reply}\n  內容：{}\n", snippet(s("text").unwrap_or(""), 1500))
         }
         "approval_requested" => {
-            // 申請理由（沒附時印「（空）」）與未驗證身分一起印：裁示的人才看得到理由，也看得出是不是冒名。
+            // 申請理由（沒附時印「（空）」）與未驗證身份一起印：裁示的人才看得到理由，也看得出是不是冒名。
             let unverified = if p.get("requester_unverified").and_then(Value::as_bool) == Some(true) { "（申請者未以 bot token 驗證）" } else { "" };
             format!(
                 " approval={} requester={}{unverified} purpose={} commit={}\n  範圍：{}\n  理由：{}\n",

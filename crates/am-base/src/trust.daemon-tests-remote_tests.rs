@@ -21,7 +21,7 @@
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// 遠端主機＋兩個只在那台的 claude 身分（各自的 `CLAUDE_CONFIG_DIR`）。ssh 假貨以主機名為鍵、是全域的：
+    /// 遠端主機＋兩個只在那台的 claude 身份（各自的 `CLAUDE_CONFIG_DIR`）。ssh 假貨以主機名為鍵、是全域的：
     /// 每個測試用自己的主機名，平行跑才不會互蓋。
     async fn remote_env(host: &'static str) -> (tt::Env, PathBuf) {
         let env = tt::env().await;
@@ -73,7 +73,7 @@
         v["projects"][CWD][CLAUDE_KEY].clone()
     }
 
-    /// 換身分＝換到一個從沒用過（目錄都還沒有）的設定目錄：照樣寫進**那個**目錄的 `.claude.json`。
+    /// 換身份＝換到一個從沒用過（目錄都還沒有）的設定目錄：照樣寫進**那個**目錄的 `.claude.json`。
     #[tokio::test]
     async fn switching_a_remote_bot_to_a_never_used_identity_pre_trusts_its_config_dir() {
         const HOST: &str = "trustbox-switch";
@@ -88,7 +88,7 @@
         assert!(!home.join(".claude-rb").exists(), "前提：B 的目錄還不存在");
         let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
         assert!(errs.is_empty(), "{errs:?}");
-        assert_eq!(trusted(&home.join(".claude-rb/.claude.json")), json!(true), "換過去的身分也信任了");
+        assert_eq!(trusted(&home.join(".claude-rb/.claude.json")), json!(true), "換過去的身份也信任了");
         assert!(!home.join(".claude.json").exists(), "沒寫到預設帳號的檔");
     }
 

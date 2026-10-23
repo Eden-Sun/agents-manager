@@ -1,4 +1,4 @@
-//! 手機版重新登入失效的 claude 身分（issue #838，使用者 2026-10-04）：`POST /hosts/{host}/identities/{identity}/login`
+//! 手機版重新登入失效的 claude 身份（issue #838，使用者 2026-10-04）：`POST /hosts/{host}/identities/{identity}/login`
 //! 開的臨時登入 pane 裡，`claude auth login` 把 OAuth 網址與「Paste code here if prompted >」只畫在終端；手機上要選取一長串
 //! 網址、再把 code 貼回終端幾乎做不到。這裡讓網頁直接拿到網址（「打開登入網站」）、把 code 打進**那個登入 pane**。
 //!
@@ -14,7 +14,7 @@
 //! * 畫面用 `recent_unwrapped` 讀（herdr 把折行還原成一整行）；舊式折行讀法（網址被終端寬度硬折成幾列、中間沒有空白）也接得起來。
 //!
 //! 送出之後等 CLI 的反應最多 [`OUTCOME_WAIT`]：看到 `Login failed: …` 就把那一句回給網頁（pane 隨後會被 watcher 收掉，網頁來不及讀）。
-//! 成功與否仍以 watcher 的重驗為準（身分列的登入狀態），這裡不猜。
+//! 成功與否仍以 watcher 的重驗為準（身份列的登入狀態），這裡不猜。
 
 use crate::lc_error::{LcError, LcResult};
 use serde_json::json;

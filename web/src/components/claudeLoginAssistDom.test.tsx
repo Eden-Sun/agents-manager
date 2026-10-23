@@ -1,5 +1,5 @@
 /**
- * 手機版重新登入 claude 身分（#838）：登入 pane 上方的「打開登入網站」與 code 輸入框（真的掛 `HostShellPanel` 進 happy-dom，
+ * 手機版重新登入 claude 身份（#838）：登入 pane 上方的「打開登入網站」與 code 輸入框（真的掛 `HostShellPanel` 進 happy-dom，
  * 後端是 `MockTransport`，它照 daemon 的樣子只認登入 pane、畫面不在等 code 就 409）。
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'

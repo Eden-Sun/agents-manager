@@ -772,7 +772,7 @@ fn fnv1a64(s: &str) -> u64 {
 }
 
 /// 同一個 repository 的 linked worktree 會回到同一個 git common dir；非 Git 目錄仍以自身隔離。
-/// canonicalize 讓從 symlink 進入的同一份 repo 也使用相同身分。
+/// canonicalize 讓從 symlink 進入的同一份 repo 也使用相同身份。
 fn cache_identity_path(cwd: &Path) -> PathBuf {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let common = Command::new("git")
@@ -823,7 +823,7 @@ pub fn sh_quote(s: &str) -> String {
 // 沒有 pty 的 ssh 斷線後遠端 cargo 不會收到訊號、會繼續跑（同日實測），所以 run 的那條 ssh 先把自己的
 // process group 寫下來（`<dir>.pgid-<token>`），守門清理時整組收掉再刪目錄。
 //
-// 租約身分（issue #148）是本機每次呼叫新產生的 [`LeaseToken`]（128 位元隨機），不是遠端 shell 的 `$$`：
+// 租約身份（issue #148）是本機每次呼叫新產生的 [`LeaseToken`]（128 位元隨機），不是遠端 shell 的 `$$`：
 // PID 會被回收重用，「值一樣」不等於「同一次租約」。守門只把 `$$` 拿來做行程簿記（自己的 process group、
 // `/proc/$$/fd`），`.owner`、`.pgid-<token>` 與交給 run 的 token 全都用這個。
 
@@ -881,7 +881,7 @@ impl Admission {
     }
 }
 
-/// 一次租約的身分（fencing token）：本機產生的 128 位元隨機數，固定 32 個小寫 hex。
+/// 一次租約的身份（fencing token）：本機產生的 128 位元隨機數，固定 32 個小寫 hex。
 ///
 /// 只能由 [`LeaseToken::new`]（隨機）得到（測試另有驗過格式的 `parse`），所以直接嵌進遠端 shell 與
 /// 檔名（`<dir>.owner` 的內容、`<dir>.pgid-<token>`）都不會變成 command injection 或路徑穿越。
@@ -941,7 +941,7 @@ if [ "$max" -eq 0 ]; then
   [ "$b" -lt "$max" ] && max=$b
   [ "$max" -ge 1 ] || max=1
 fi
-# `$$` 只做行程簿記（自己的 process group 不能被收、`/proc/$$/fd`）；租約身分是本機給的 $token，PID 會被回收重用。
+# `$$` 只做行程簿記（自己的 process group 不能被收、`/proc/$$/fd`）；租約身份是本機給的 $token，PID 會被回收重用。
 me=$(ps -o pgid= -p $$ | tr -d ' ')
 # 只碰自己命名規則的目錄：remote_root 設錯（例如設成家目錄）也不會去刪別人的東西。
 ours() {
@@ -1246,7 +1246,7 @@ struct Lease {
     /// 留著不關：守門寫 stdout 時讀端要還在，免得它被 SIGPIPE 打斷。
     stdout: Option<BufReader<ChildStdout>>,
     hs: Handshake,
-    /// 這次租約的身分（本機產生、守門原樣回；[`run_script`] 用它核對 `.owner`）。
+    /// 這次租約的身份（本機產生、守門原樣回；[`run_script`] 用它核對 `.owner`）。
     token: LeaseToken,
 }
 
@@ -3475,7 +3475,7 @@ exec /bin/sh -c "$inner"
         assert_eq!(pick_test_threads(None, 0), 0, "設定成 0＝不設");
     }
 
-    /// #148：租約身分固定格式（32 個小寫 hex），嵌進遠端 shell 與檔名都不會變成 injection；
+    /// #148：租約身份固定格式（32 個小寫 hex），嵌進遠端 shell 與檔名都不會變成 injection；
     /// 每次都是新的——不是 PID、不是時間，撞不到。
     #[test]
     fn a_lease_token_is_fixed_format_random_and_never_repeats() {
@@ -3504,7 +3504,7 @@ exec /bin/sh -c "$inner"
         assert!(!script.contains("@TOKEN@"), "沒替換乾淨");
     }
 
-    /// 守門交回來的 token 不是我們給的那個＝出事了，不能當成拿到目錄（不然後面 run 會拿錯身分去核 owner）。
+    /// 守門交回來的 token 不是我們給的那個＝出事了，不能當成拿到目錄（不然後面 run 會拿錯身份去核 owner）。
     #[test]
     fn a_guard_that_answers_with_another_token_is_not_a_lease() {
         let mut cmd = Command::new("sh");
@@ -3904,7 +3904,7 @@ mod guard_tests {
         }
     }
 
-    /// #148：租約身分不能是遠端 PID。上一代結束、下一代租到同一個 shared 之後，姍姍來遲的舊 run
+    /// #148：租約身份不能是遠端 PID。上一代結束、下一代租到同一個 shared 之後，姍姍來遲的舊 run
     /// （帶的是上一代的 token）不能通過 owner 檢查；下一代自己的 run 照常跑。
     /// 修正前 token 是守門的 `$$`，兩代剛好同一個 remote PID 時 `.owner` 又變回舊值、舊 run 誤通過
     /// （當時用把 `$$` 釘成同一個數字模擬，紅在「the stale run went on to start cargo」）。
@@ -3941,7 +3941,7 @@ mod guard_tests {
         let (dir, stale) = (a.hs.dir.clone(), a.token.clone());
         assert_eq!(a.hs.token, stale.as_str(), "守門要把 token 原樣交回來");
         assert_eq!(std::fs::read_to_string(format!("{dir}.owner")).unwrap().trim(), stale.as_str());
-        assert_ne!(stale.as_str(), a.child.id().to_string(), "身分不能是守門 shell 的 PID");
+        assert_ne!(stale.as_str(), a.child.id().to_string(), "身份不能是守門 shell 的 PID");
         a.finish();
 
         let mut b = guard(&base, HASH, "job-2-2");

@@ -4,7 +4,7 @@
 //! 把該主機 run 的「需安裝」通知改成「已安裝，重啟套用」。Codex 延續既有 scoped restart；Claude 留給使用者再確認一般重啟。
 //!
 //! 刻意的邊界：
-//! - 只給使用者在 UI 上按：帶 bot 身分的請求一律 403（同 `deploy_now::refuse_bot_caller`）。
+//! - 只給使用者在 UI 上按：帶 bot 身份的請求一律 403（同 `deploy_now::refuse_bot_caller`）。
 //! - 指令不接受呼叫端傳入；同一台同時只跑一個（409）；有逾時；輸出寫 `<data_dir>/cli-update.log`。
 //! - 安裝失敗、讀不到版本、或裝完版本沒變：**一顆 bot 都不重啟**，`cli_update_done` 帶 `reason` 講清楚。
 //! - 綁定使用者核准的版本（#569）：請求帶確認框寫的 `target_version`，要等於 daemon 眼中那台「需安裝」通知的目標（不然 409
@@ -467,7 +467,7 @@ async fn finish_row(app: &(impl crate::capabilities::DataDir + crate::capabiliti
     }
 }
 
-/// 帶 bot 身分的請求一律拒絕：這一下會換掉所有 codex bot 共用的 binary、接著重啟它們，只給使用者按。
+/// 帶 bot 身份的請求一律拒絕：這一下會換掉所有 codex bot 共用的 binary、接著重啟它們，只給使用者按。
 fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
     if headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token") {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "ui_only",
@@ -2555,7 +2555,7 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("X-AM-Bot-Id", "b1".parse().unwrap());
         let r = start(&env.app, &h, "local", Some("codex"), Some("0.157.0"), fake.clone()).await;
-        assert!(matches!(r, Err(LcError::Forbidden(ref v)) if v["reason"] == "ui_only"), "帶 bot 身分一律 403");
+        assert!(matches!(r, Err(LcError::Forbidden(ref v)) if v["reason"] == "ui_only"), "帶 bot 身份一律 403");
         let mut h = HeaderMap::new();
         h.insert("X-AM-Bot-Token", "tok".parse().unwrap());
         assert!(matches!(start(&env.app, &h, "local", Some("codex"), Some("0.157.0"), fake.clone()).await, Err(LcError::Forbidden(_))));
@@ -3896,7 +3896,7 @@ mod tests {
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (cx, _) = codex_bot_with_notice(&env, "cx", &pending).await;
         seed_running(&app, "u-566", "local", "0.157.0").await;
-        // 這台不認得的身分：重啟在 start 那一步被擋，不真的開 pane。
+        // 這台不認得的身份：重啟在 start 那一步被擋，不真的開 pane。
         sqlx::query("UPDATE bots SET identity='nope' WHERE id IN (?, ?)").bind(&cl.id).bind(&cx).execute(&app.db).await.unwrap();
         let seen = Arc::new(Mutex::new(Vec::<crate::state::WsEvent>::new()));
         let (mut rx, out) = (app.subscribe(), seen.clone());

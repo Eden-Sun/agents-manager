@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS missions (
   delivery_mode TEXT NOT NULL,
   -- D7：claude | codex | grok
   executor_kind TEXT NOT NULL,
-  -- D5：wait | switch（5h 撞限時原地等，還是直接換下一個身分）
+  -- D5：wait | switch（5h 撞限時原地等，還是直接換下一個身份）
   on_5h_limit TEXT NOT NULL,
   -- review 退回＋驗證失敗合計的輪數上限；用完就停下來問人。
   max_rounds INTEGER NOT NULL DEFAULT 2,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS mission_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_events_mission ON mission_events(mission_id, created_at);
--- 身分停用原本只存在瀏覽器 localStorage（web/src/store/quotaHide.ts），daemon 挑身分時看不到。
+-- 身份停用原本只存在瀏覽器 localStorage（web/src/store/quotaHide.ts），daemon 挑身份時看不到。
 CREATE TABLE IF NOT EXISTS identity_prefs (
   host TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -998,7 +998,7 @@ pub async fn deleted_projects_with_open_missions(pool: &SqlitePool) -> Result<Ve
 /// supervisor 的逐件取消」，`mission cancel` 有做、這條當初漏了。不收的話那些交辦還開著，額度回來時
 /// `controller::resume_quota_blocked` 會把它們 dispatch 到已經軟刪的 bot，收成 `awaiting_review` 再推一則
 /// `assignment_failed`——等於把噪音從任務層搬到交辦層。走 `supervisor::store::review`（不是 HTTP 那支）：
-/// 這是 daemon 自己的收尾，沒有角色身分可帶，`post_review` 會要求驗過的角色。
+/// 這是 daemon 自己的收尾，沒有角色身份可帶，`post_review` 會要求驗過的角色。
 pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason: &str) -> Result<usize> {
     let open: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM missions WHERE project_id = ? AND completed_at IS NULL AND cancelled_at IS NULL ORDER BY created_at, rowid",

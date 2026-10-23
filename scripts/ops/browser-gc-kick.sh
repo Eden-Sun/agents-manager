@@ -73,7 +73,7 @@ cdp_state() {
   fi
 }
 
-# 行程身分指紋（#1305）：啟動時間＋命令列。PID 會被回收，光靠 kill -0 分不出是原來那個還是新的行程。
+# 行程身份指紋（#1305）：啟動時間＋命令列。PID 會被回收，光靠 kill -0 分不出是原來那個還是新的行程。
 proc_fingerprint() { ps -o lstart=,command= -p "$1" 2>/dev/null; }
 
 # 路徑是不是有歧義（#1310）：ps 給的命令列是拍平的字串，路徑含空白時 sed 只能拿到前半段。
@@ -114,11 +114,11 @@ reap_headless() {
     if [ -z "${secs:-}" ] || [ "$secs" -lt 120 ]; then
       echo "  keep headless pid ${pid}（剛起 ${secs}s，client 可能還沒連上）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
-    # 身分（#1305）：送 TERM 之前，指紋要對得上剛才列舉到的那個行程；送 KILL 之前，要還是同一個。
+    # 身份（#1305）：送 TERM 之前，指紋要對得上剛才列舉到的那個行程；送 KILL 之前，要還是同一個。
     fp=$(proc_fingerprint "$pid")
     case "$fp" in
       *--headless*) ;;
-      *) echo "  keep headless pid ${pid}（讀不到行程身分，保守保留）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue ;;
+      *) echo "  keep headless pid ${pid}（讀不到行程身份，保守保留）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue ;;
     esac
     kill -TERM "$pid" 2>/dev/null
     sleep 3
@@ -129,7 +129,7 @@ reap_headless() {
     elif [ "$after" = "$fp" ]; then
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
     else
-      echo "  pid ${pid} 已不是原來的行程（TERM 後身分改變，PID 可能被回收），不送 KILL" >> "$LOG"
+      echo "  pid ${pid} 已不是原來的行程（TERM 後身份改變，PID 可能被回收），不送 KILL" >> "$LOG"
     fi
     echo "  reap headless pid ${pid}（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
     # 帶 .. 的不刪：/tmp/am-x/../../foo 前綴上像 /tmp/am-*，實際指到別處（#373）。

@@ -1,4 +1,4 @@
-//! 換身分時把 claude 的 session 檔（transcript）複製到新身分的 `projects/` 底下（本機那一半；遠端是 `start.rs` 的 shell script）。
+//! 換身份時把 claude 的 session 檔（transcript）複製到新身份的 `projects/` 底下（本機那一半；遠端是 `start.rs` 的 shell script）。
 //!
 //! 對話檔是整段對話內容，這裡的規則都是資料安全：
 //! * 來源只收 `…/projects/<cwd 目錄>/<name>.jsonl` 形狀的**一般檔**（`transcript_path` 是 hook payload 記下來的字串，

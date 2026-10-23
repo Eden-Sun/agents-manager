@@ -26,22 +26,22 @@ impl Default for ToolInfo {
 }
 
 
-/// 偵測（`detect*`）、身分登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
-/// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身分表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
+/// 偵測（`detect*`）、身份登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
+/// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身份表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
 pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks + crate::capabilities::BgTasks + crate::capabilities::Shutdown {
     /// 每台主機的偵測結果（`app.tools`）。
     fn tools_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, HostTools>>;
     /// config 的 `[[identities]]`（讀當下的設定）。
     fn config_identities(&self) -> impl std::future::Future<Output = Vec<crate::config::IdentityCfg>> + Send;
-    /// 這個身分登入成功了：清掉「請登入」提示。
+    /// 這個身份登入成功了：清掉「請登入」提示。
     fn clear_login_prompt(&self, host: &str, name: &str);
     /// 同上，並把清掉之後的狀態推出去（`login_prompt::clear_and_push`）。
     fn clear_login_prompt_and_push(app: &Arc<Self>, host: &str, name: &str) -> impl std::future::Future<Output = ()> + Send;
-    /// 驗證完登入的 claude 身分重新可用：解除它因為撞限／未登入而被停放的狀態。
+    /// 驗證完登入的 claude 身份重新可用：解除它因為撞限／未登入而被停放的狀態。
     fn unpark_claude_identity(&self, host: &str, name: &str, env: &std::collections::BTreeMap<String, String>);
     /// 關掉為了登入／登出開的 shell pane。
     fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl std::future::Future<Output = ()> + Send;
-    /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身分、回補 quota 限制、排著的 prompt 撞限。
+    /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身份、回補 quota 限制、排著的 prompt 撞限。
     fn host_tools_installed(app: &Arc<Self>, host: &str) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -314,16 +314,16 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
     SHELL_IDENTITY_NAMES.iter().filter_map(|n| found.remove(*n)).collect()
 }
 
-/// 一台主機看得到哪些身分，照優先序合併（SPEC §16.2）。**只有這一份規則**：啟動 bot 的
+/// 一台主機看得到哪些身份，照優先序合併（SPEC §16.2）。**只有這一份規則**：啟動 bot 的
 /// [`identities_for_host`] 與偵測登入狀態的 `detect_identities` 都走它。`shell` 是那台讀到的 `ccN`，`None`＝還沒偵測過。
 ///
 /// 1. config 裡**明寫這一台**的。
-/// 2. 本機：沒寫 host 的 config 身分——現行 config.toml 在本機的行為一個字都沒變。
+/// 2. 本機：沒寫 host 的 config 身份——現行 config.toml 在本機的行為一個字都沒變。
 /// 3. 那台自己的 shell `ccN`。
-/// 4. 遠端：沒寫 host 的 config 身分，**讓位給**那台同名的身分。名字是 `ccN` 時還要等那台的 alias 讀過才給：
+/// 4. 遠端：沒寫 host 的 config 身份，**讓位給**那台同名的身份。名字是 `ccN` 時還要等那台的 alias 讀過才給：
 ///    偵測前不知道那台有沒有自己的 `cc1`，先給就是注入一個那台不存在的設定目錄（26a14c2 要擋的遮蔽）。
 ///
-/// 以前第 4 條不存在（沒寫 host＝只適用本機）：codex／grok 身分只可能寫在 config 裡，升級後遠端 bot 一啟動就 409
+/// 以前第 4 條不存在（沒寫 host＝只適用本機）：codex／grok 身份只可能寫在 config 裡，升級後遠端 bot 一啟動就 409
 /// `identity is not known on this host`（review 2026-09-16 M6）。
 pub fn merge_identities(
     config: &[crate::config::IdentityCfg],
@@ -502,7 +502,7 @@ pub fn logout_result(recheck: Option<bool>) -> Option<bool> {
     }
 }
 
-/// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
+/// 記下「這個身份已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
 async fn record_identity_logged_out<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
     let mut all = app.tools_cache().lock().await;
     if !app.hosts().is_current(fence).await {
@@ -582,7 +582,7 @@ pub async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str
 /// 不然列上會一直顯示「已登入」、登出鈕也還按得下去（review3 c5 L3）。
 ///
 /// `fence` 是開 pane 之前記下的主機權威（#347）：watcher 最多活 15 分鐘、每一輪都用主機**名字**重新解析，
-/// 途中同名主機重連或改指到另一台，就不能再看新機器上同 id 的 pane、把答案記到新機器的身分、或關掉新機器的 pane——
+/// 途中同名主機重連或改指到另一台，就不能再看新機器上同 id 的 pane、把答案記到新機器的身份、或關掉新機器的 pane——
 /// 一發現權威換了就整個放手（舊機器上的 pane 留著，連線已經不是它的了）。
 pub fn spawn_identity_login_watch<H: ToolsEnv>(
     app: Arc<H>,
@@ -836,7 +836,7 @@ pub async fn detect_identities<H: ToolsEnv>(
 ) -> BTreeMap<String, IdentityInfo> {
     let identities = app.config_identities().await;
     // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
-    // **每一台**的身分都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
+    // **每一台**的身份都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
     let all = merge_identities(&identities, host, Some(shell));
     if all.is_empty() {
         return BTreeMap::new();
@@ -904,7 +904,7 @@ pub async fn detect_identities<H: ToolsEnv>(
         // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
         fence.conn().ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await
     };
-    // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身分
+    // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身份
     // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
     let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     match res {
@@ -1028,7 +1028,7 @@ impl std::fmt::Display for Superseded {
 impl std::error::Error for Superseded {}
 
 /// [`install_host_tools`]，但只在 `fence` 仍是這台主機的權威、且沒有更新的偵測已經寫過時才寫；
-/// 檢查與寫入在同一把 `app.tools` 鎖裡，後續的身分清理／額度回填也只跟著成功的那次。回傳有沒有寫。
+/// 檢查與寫入在同一把 `app.tools` 鎖裡，後續的身份清理／額度回填也只跟著成功的那次。回傳有沒有寫。
 pub async fn install_host_tools_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, ht: HostTools, fence: &crate::hosts::HostFence) -> bool {
     {
         let mut tools = app.tools_cache().lock().await;
@@ -1153,7 +1153,7 @@ pub fn install_prompt(kind: &str) -> Option<String> {
 /// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
 
 
-/// 每台主機的 CLI／身分偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+/// 每台主機的 CLI／身份偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ToolsTable: Send + Sync {
     fn tools(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tools::HostTools>>;
 }

@@ -51,7 +51,7 @@
         assert!(!w(100.0, Some("2026-09-13T10:00:00Z")).exhausted_at(now), "見底但窗兩小時前就重置了 → 不算用盡");
         assert!(!w(10.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "沒見底就不是用盡");
         // 解不開＝已重置（不永久擋）；沒有時間＝不知道（繼續擋）。
-        assert!(!w(100.0, Some("not-a-timestamp")).exhausted_at(now), "壞掉的時間戳不該把身分永久排除");
+        assert!(!w(100.0, Some("not-a-timestamp")).exhausted_at(now), "壞掉的時間戳不該把身份永久排除");
         assert!(w(100.0, None).exhausted_at(now), "沒有重置時間就無從判斷，保守繼續擋");
         assert!(w(100.0, Some("not-a-timestamp")).reset_passed(now));
         assert!(!w(100.0, None).reset_passed(now));
@@ -61,7 +61,7 @@
     ///
     /// app-server 探測成功一次寫下未來的 `resets_at` → 時間跨過它、探測不再成功 → 之後只有 codex 狀態列
     /// 進來（建構時 `resets_at: None`、`used_pct` 見底）。只看「重置時刻在過去」的話，那筆繼承來的舊時刻
-    /// 會把新鮮的見底讀數判成「已重置」→ 身分被當成有額度。
+    /// 會把新鮮的見底讀數判成「已重置」→ 身份被當成有額度。
     #[tokio::test]
     async fn a_fresh_critical_statusline_is_not_excused_by_an_inherited_past_reset() {
         let app = crate::testing::env().await.app.clone();
@@ -96,7 +96,7 @@
 
     /// i204 review（#489）：**解不開**的 `resets_at` 走的是票上那條原路，而且會一直黏著——
     /// `already_past` 第一版說它「沒過去」所以照樣沿用，`reset_passed` 又說它「已經跨過重置」，
-    /// 於是那個身分從此永遠看起來有額度。用票上那個兩輪 `set()` 的重現釘住。
+    /// 於是那個身份從此永遠看起來有額度。用票上那個兩輪 `set()` 的重現釘住。
     #[tokio::test]
     async fn an_unparseable_reset_time_is_not_carried_forward_and_does_not_excuse_a_critical_reading() {
         let app = crate::testing::env().await.app.clone();
@@ -121,7 +121,7 @@
         assert!(got.exhausted(Bucket::SevenDay, chrono::Utc::now()), "97% 用掉不能因為一個解不開的時間戳就被放行");
     }
 
-    /// i267 review（#518）：`resets_at` **與** `observed_at` 都解不開時，身分不可以被永久擋住。
+    /// i267 review（#518）：`resets_at` **與** `observed_at` 都解不開時，身份不可以被永久擋住。
     ///
     /// 這是前一顆的鏡像洞：`resets_at` 被丟成 `None` 之後就交給窗長規則收尾，但那條規則的輸入
     /// （`observed_at`，沒有就退回 `updated_at`）第一版對解不開的回 `false`＝「還很新」，
@@ -148,7 +148,7 @@
         let five = got.five_hour.as_ref().expect("窗留著");
         assert_eq!(five.resets_at, None, "壞的重置時間丟掉");
         assert_eq!(five.observed_at, None, "壞的觀測時間也丟掉");
-        // 三個時間戳全壞 → 這筆讀數說不出年齡，不能拿它永久擋住一個身分。
+        // 三個時間戳全壞 → 這筆讀數說不出年齡，不能拿它永久擋住一個身份。
         assert!(!got.exhausted(Bucket::FiveHour, chrono::Utc::now()), "全壞的讀數不可以永久算用盡");
         assert!(got.usable_window(Bucket::FiveHour, chrono::Utc::now()).is_none(), "當成沒有讀數");
     }
@@ -180,7 +180,7 @@
     }
 
     /// i264 review（#489）：`load_cache` 是裸的 `serde_json::from_str`，所以快取裡解不開的 `resets_at`
-    /// 原樣載回來，`reset_passed` 讀成「已重置」→ 那個身分載回來就看起來有額度。載入時要驗一次。
+    /// 原樣載回來，`reset_passed` 讀成「已重置」→ 那個身份載回來就看起來有額度。載入時要驗一次。
     #[tokio::test]
     async fn boot_drops_an_unparseable_reset_time_from_the_cache() {
         let env = crate::testing::env().await;
@@ -403,7 +403,7 @@
 
     /// **#518 刻意翻掉這條的方向。** 原本（#475）寫的是「`updated_at` 解不開就不拿年齡當理由」，
     /// 所以一筆「見底、沒有 `resets_at`、年齡又說不出來」的讀數會**永遠**算用盡——那正是 #475 標題
-    /// 要修的「永久擋住一個身分」，只是換成走時間戳損毀那條路（i267 review）。
+    /// 要修的「永久擋住一個身份」，只是換成走時間戳損毀那條路（i267 review）。
     /// 現在兩個時間戳都解不開就當成已過期＝這筆讀數不算數，跟其他四處「解不開＝已過去」同向。
     #[test]
     fn a_reading_with_no_usable_timestamp_stops_counting_as_exhausted() {
@@ -670,13 +670,13 @@
         assert!(!identity_shares_default("codex", &cc2), "cc2 有自己的 CODEX_HOME 才分開");
         assert!(identity_shares_default("claude", &cc0));
         assert!(!identity_shares_default("claude", &cc1), "對 claude，cc1 有自己的 config dir");
-        assert!(identity_shares_default("grok", &cc2), "沒有 GROK_HOME 的身分對 grok 是預設帳號");
+        assert!(identity_shares_default("grok", &cc2), "沒有 GROK_HOME 的身份對 grok 是預設帳號");
     }
 
-    /// 寫入端與查詢端走同一支：帶 claude 身分（cc1）的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸
-    /// `codex` 讀到；只有 codex 自己的身分（cx2）才寫 `codex:cx2`，而且**不借**裸 `codex` 的數字。
-    /// 回歸（2026-09-16）：重啟那一秒身分還沒偵測完，cc0 的讀數先落在 `claude:cc0`；偵測完之後寫裸 `claude` 時，
-    /// 那一格要清掉。有自己帳號目錄的 cc1、查不到的身分都照舊保留，遠端主機的同名 key 不受本機影響。
+    /// 寫入端與查詢端走同一支：帶 claude 身份（cc1）的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸
+    /// `codex` 讀到；只有 codex 自己的身份（cx2）才寫 `codex:cx2`，而且**不借**裸 `codex` 的數字。
+    /// 回歸（2026-09-16）：重啟那一秒身份還沒偵測完，cc0 的讀數先落在 `claude:cc0`；偵測完之後寫裸 `claude` 時，
+    /// 那一格要清掉。有自己帳號目錄的 cc1、查不到的身份都照舊保留，遠端主機的同名 key 不受本機影響。
     #[tokio::test]
     async fn a_split_key_left_from_before_identities_were_known_is_dropped_once_they_are() {
         let env_ = crate::testing::env().await;
@@ -686,7 +686,7 @@
             q.five_hour = Some(Window { observed_at: None, used_pct: pct, resets_at: None });
             q
         };
-        // 身分還沒偵測到：cc0 寧可分開。
+        // 身份還沒偵測到：cc0 寧可分開。
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc0")).await, "claude:cc0");
         set(&app, LOCAL_HOST, "claude:cc0", reading(1.0)).await;
         set(&app, LOCAL_HOST, "claude:cc1", reading(40.0)).await;
@@ -716,7 +716,7 @@
         assert!(q.get("claude:cc0").is_none(), "殘留的分開那格清掉");
         assert_eq!(q.get("claude").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(25.0));
         assert!(q.get("claude:cc1").is_some(), "有自己帳號目錄的照舊分開");
-        assert!(q.get("claude:nobody").is_some(), "查不到的身分寧可保留");
+        assert!(q.get("claude:nobody").is_some(), "查不到的身份寧可保留");
         assert!(q.get(&quota_key("m4p", "claude:cc0")).is_some(), "別台主機的不受影響");
     }
 
@@ -740,7 +740,7 @@
                     ident("cc0", &[]),
                     ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]),
                     ident("cc2", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc2"), ("CODEX_HOME", "$HOME/.codex-cc2")]),
-                    // codex 自己的身分（kind = codex）才可能分開成 `codex:<name>`。
+                    // codex 自己的身份（kind = codex）才可能分開成 `codex:<name>`。
                     crate::config::IdentityCfg {
                         name: "cx2".into(),
                         kind: "codex".into(),
@@ -757,9 +757,9 @@
         // 2026-09-14 使用者指正：ccN 是 Claude Code 的帳號代號，就算 cc2 設了 CODEX_HOME，它仍是 claude 的身分，
         // codex 不該有 `codex:cc2`。
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc2")).await, "codex");
-        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cx2")).await, "codex:cx2", "codex 自己的身分才分開");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cx2")).await, "codex:cx2", "codex 自己的身份才分開");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc1")).await, "claude:cc1");
-        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身分寧可分開");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身份寧可分開");
 
         // 裸 codex 撞限：cc1 的 codex bot 讀得到，cc2 的讀不到（它有自己的帳號）。
         let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now(), bucket: None };
@@ -802,12 +802,12 @@
         let base = quota_base("codex", Some("astra"));
         assert_eq!(base, "codex:astra");
         assert_eq!(quota_base("codex", None), "codex");
-        // 2026-09-14 使用者：額度列冒出第二個 codex。對 codex 共用預設帳號的身分寫裸 key。
+        // 2026-09-14 使用者：額度列冒出第二個 codex。對 codex 共用預設帳號的身份寫裸 key。
         assert_eq!(quota_base_default_aware("codex", Some("cc0"), true), "codex");
         assert_eq!(quota_base_default_aware("codex", Some("cc2"), false), "codex:cc2");
         assert_eq!(quota_base_default_aware("codex", None, true), "codex");
         assert_eq!(quota_base_default_aware("claude", Some("cc1"), false), "claude:cc1");
-        assert_eq!(quota_base("codex", Some("  ")), "codex", "空白身分就是沒指定");
+        assert_eq!(quota_base("codex", Some("  ")), "codex", "空白身份就是沒指定");
 
         // 清掉的話 assignment 會立刻又派工過去（718d025 的 quota_blocked 靠這一格）。
         let hit = LimitHit {
@@ -1086,9 +1086,9 @@
         assert_eq!(got, Some(hit), "經過 set 也還擋著");
     }
 
-    /// #238：run 在跑的時候改身分（PATCH 回 `needs_restart`）：按「重啟」之前 pane 裡還是**起來時的帳號**。額度讀數、撞限、
-    /// 閘門、成功回合清撞限都要記在那個身分上；以前一律看 `bots.identity`（已經是新的）——舊帳號用盡記到新帳號名下，
-    /// 新帳號被誤擋、舊帳號的其他 bot 照樣被派工。重啟之後才換成新身分。
+    /// #238：run 在跑的時候改身份（PATCH 回 `needs_restart`）：按「重啟」之前 pane 裡還是**起來時的帳號**。額度讀數、撞限、
+    /// 閘門、成功回合清撞限都要記在那個身份上；以前一律看 `bots.identity`（已經是新的）——舊帳號用盡記到新帳號名下，
+    /// 新帳號被誤擋、舊帳號的其他 bot 照樣被派工。重啟之後才換成新身份。
     #[tokio::test]
     async fn a_run_bills_the_identity_it_started_with_until_it_is_restarted() {
         let env = crate::testing::env().await;
@@ -1113,9 +1113,9 @@
         sqlx::query("UPDATE bots SET identity='cc1' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         crate::lifecycle::start_bot(&app, &bot.id).await.unwrap();
         let run = crate::db::active_run(&app.db, &bot.id).await.unwrap().unwrap();
-        assert_eq!(run.started_identity(), Some(Some("cc1".to_string())), "起來時的身分蓋在 run 上");
+        assert_eq!(run.started_identity(), Some(Some("cc1".to_string())), "起來時的身份蓋在 run 上");
 
-        // 使用者把身分改成 cc2、還沒重啟：pane 還是 cc1 的帳號。
+        // 使用者把身份改成 cc2、還沒重啟：pane 還是 cc1 的帳號。
         sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
         let status = crate::hookrecv::HookBody {
@@ -1131,7 +1131,7 @@
             let q = app.quotas.lock().await;
             let keys: Vec<String> = q.keys().cloned().collect();
             assert_eq!(q.get("claude:cc1").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(42.0), "讀數記在 cc1：{keys:?}");
-            assert!(q.get("claude:cc2").is_none(), "新身分那一格沒被寫：{keys:?}");
+            assert!(q.get("claude:cc2").is_none(), "新身份那一格沒被寫：{keys:?}");
         }
 
         crate::turn_error::mark_claude_limit_hit(&app, &bot, "You've hit your session limit · resets 5pm").await.unwrap();
@@ -1151,7 +1151,7 @@
         assert_eq!(billing_identity(&app, &bot).await.unwrap().as_deref(), Some("cc2"));
     }
 
-    /// run 沒記身分（不是 daemon 起的、升級前的舊列）照 bot 設定的；記了空字串＝起來時沒有身分（預設帳號），就算之後設了身分也一樣。
+    /// run 沒記身份（不是 daemon 起的、升級前的舊列）照 bot 設定的；記了空字串＝起來時沒有身份（預設帳號），就算之後設了身份也一樣。
     #[tokio::test]
     async fn a_run_without_a_recorded_identity_falls_back_to_the_bots() {
         let env = crate::testing::env().await;
@@ -1169,7 +1169,7 @@
         };
         assert_eq!(case(Some("cc2"), None).await.as_deref(), Some("cc2"), "run 沒記：照 bot 設定的");
         assert_eq!(case(Some("cc2"), Some("cc1")).await.as_deref(), Some("cc1"), "run 記了就用它");
-        assert_eq!(case(Some("cc2"), Some("")).await, None, "起來時沒有身分（預設帳號）");
+        assert_eq!(case(Some("cc2"), Some("")).await, None, "起來時沒有身份（預設帳號）");
         assert_eq!(case(None, Some(" cc1 ")).await.as_deref(), Some("cc1"));
         assert_eq!(case(Some("  "), None).await, None);
         crate::lifecycle::stop_bot(&app, &bot.id).await.ok();
@@ -1422,13 +1422,13 @@
 
 
 
-    /// 寫撞限要落在查詢端之後讀的那把 key：身分表還沒偵測完、又不是手寫的身分時算不準，回錯（不猜 `claude:cc0`）。
+    /// 寫撞限要落在查詢端之後讀的那把 key：身份表還沒偵測完、又不是手寫的身份時算不準，回錯（不猜 `claude:cc0`）。
     #[tokio::test]
     async fn the_limit_key_is_not_guessed_before_the_identities_are_known() {
         let env_ = crate::testing::env().await;
         let app = env_.app.clone();
         assert!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("cc0")).await.is_err(), "偵測之前：cc0 是不是預設帳號還不知道");
-        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", None).await.unwrap(), "claude", "沒有身分就是裸 kind");
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", None).await.unwrap(), "claude", "沒有身份就是裸 kind");
         app.cfg
             .update(|c| {
                 c.identities.push(crate::config::IdentityCfg { name: "hand".into(), kind: "claude".into(), host: None, env: env(&[("CLAUDE_CONFIG_DIR", "/x")]), args: vec![] });
@@ -1436,7 +1436,7 @@
             })
             .await
             .unwrap();
-        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("hand")).await.unwrap(), "claude:hand", "手寫的身分不必等偵測");
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("hand")).await.unwrap(), "claude:hand", "手寫的身份不必等偵測");
         let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             LOCAL_HOST.to_string(),
@@ -1472,7 +1472,7 @@
     }
 
     /// 對抗式審查：沒有任何一個入口驗過百分比（claude statusLine、codex app-server、`/usage` 文字、grok 的長條都是裸 `f64`）。
-    /// 超過 100、負數都照單全收，`NaN`／`inf` 更糟——`(100 - NaN).max(0)` 是 0，身分會被判成「見底」。
+    /// 超過 100、負數都照單全收，`NaN`／`inf` 更糟——`(100 - NaN).max(0)` 是 0，身份會被判成「見底」。
     /// 唯一的共同出口是 `set`：在那裡夾進 0–100，不是有限數的整格丟掉（沿用上一份）。
     #[tokio::test]
     async fn a_percentage_outside_zero_to_one_hundred_never_reaches_the_cache_as_is() {

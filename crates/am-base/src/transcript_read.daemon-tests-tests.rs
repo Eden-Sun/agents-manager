@@ -62,7 +62,7 @@
         let hardlink = dir.join("hardlink.jsonl");
         std::fs::hard_link(&source, &hardlink).unwrap();
         assert!(open_regular(&symlink).is_err(), "一般檔讀取不能跟最終 symlink");
-        assert!(open_regular(&hardlink).is_err(), "transcript 不能以 hard link 跨身分別名進來");
+        assert!(open_regular(&hardlink).is_err(), "transcript 不能以 hard link 跨身份別名進來");
     }
 
     /// 裝置檔（`/dev/zero`）的長度是 0、讀不完：不是一般檔就不讀。尾端讀取半行、壞 JSON 照舊由解析端跳過。

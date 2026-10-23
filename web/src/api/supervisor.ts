@@ -211,7 +211,7 @@ function toInfo(v: unknown): SupervisorInfo {
     configured: o.configured === true,
     bot_id: s(o.bot_id),
     project_id: s(o.project_id),
-    // 身分／強度是寫死的，daemon 沒給就用固定值填，別讓畫面空一格。
+    // 身份／強度是寫死的，daemon 沒給就用固定值填，別讓畫面空一格。
     identity: s(o.identity, 'cc0'),
     model: s(o.model, SUPERVISOR_CANDIDATES[0].model),
     effort: s(o.effort, 'low'),

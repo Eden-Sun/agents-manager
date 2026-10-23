@@ -373,13 +373,13 @@ mod tests {
         assert_eq!(env.app.cfg.get().await.judge.projects, vec!["*"]);
     }
 
-    /// 只有驗過的 bot 能問：沒帶身分、或帶了對不上的 token，都在看 body 之前就擋下（#1330）。
+    /// 只有驗過的 bot 能問：沒帶身份、或帶了對不上的 token，都在看 body 之前就擋下（#1330）。
     #[tokio::test]
     async fn the_collision_check_is_only_for_a_proven_bot() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "newbie").await;
         let none = post_collision_check(State(env.app.clone()), HeaderMap::new(), Json(body("修卡住的畫面判斷"))).await;
-        assert!(matches!(none, Err(LcError::Forbidden(_))), "沒帶身分要 403");
+        assert!(matches!(none, Err(LcError::Forbidden(_))), "沒帶身份要 403");
         let forged = post_collision_check(State(env.app.clone()), bot_headers(&bot.id, "not-the-token"), Json(body("修卡住的畫面判斷"))).await;
         assert!(forged.is_err(), "token 對不上不能靠 bot id 冒用");
     }

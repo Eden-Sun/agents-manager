@@ -1670,7 +1670,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             screen: read.text.clone(),
         })
         .await;
-        // 記在這顆 bot 的主機與身分那一格。讀不到主機不退回 `local`；記不進去就欠著，派送前與 flush 照欠著的那一筆擋、
+        // 記在這顆 bot 的主機與身份那一格。讀不到主機不退回 `local`；記不進去就欠著，派送前與 flush 照欠著的那一筆擋、
         // 之後每次查詢先補寫（#198）。回合已經收掉了，照樣回 `true`。
         if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await {
             tracing::warn!(turn = %turn.id, error = %e, "codex limit hit owed; it holds this bot until it is recorded");
@@ -4577,7 +4577,7 @@ mod codex_limit_fallback_tests {
 
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap(), "回合照樣收");
         assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed");
-        assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "身分表還沒偵測完：沒有猜一格 `codex:cx0` 寫下去");
+        assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "身份表還沒偵測完：沒有猜一格 `codex:cx0` 寫下去");
         assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
     }
 }
@@ -5287,7 +5287,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         assert!(quotas.get("codex").is_none());
     }
 
-    /// 算不準落在哪把 key（身分表還沒偵測完）：不猜 `grok:<身分>` 寫下去，欠著、照擋——跟 claude／codex 同一條規則（#198）。
+    /// 算不準落在哪把 key（身份表還沒偵測完）：不猜 `grok:<身份>` 寫下去，欠著、照擋——跟 claude／codex 同一條規則（#198）。
     #[tokio::test]
     async fn a_grok_limit_whose_key_is_unknown_is_owed() {
         let (env, bot, run, turn) = grok_turn(TICKET_SCREEN).await;

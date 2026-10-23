@@ -528,7 +528,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
             let conv = either("conversationId", "conversation_id");
             let path = either("transcriptPath", "transcript_path");
             match s("hookEventName").unwrap_or_default().to_ascii_lowercase().as_str() {
-                // 對話是第一則 prompt 才建立：`SessionStart` 沒文件、不一定來，第一個 `PreInvocation` 補身分。
+                // 對話是第一則 prompt 才建立：`SessionStart` 沒文件、不一定來，第一個 `PreInvocation` 補身份。
                 "sessionstart" | "preinvocation" => HookKind::Identity { session_id: conv, transcript_path: path },
                 // statusLine：每次 agent 狀態改變一則，單槽、最新的贏（不進收件匣）。
                 "state" => HookKind::StatusLine,
@@ -1503,7 +1503,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     }
 
     // 登入失效的主動提示（#838，`login_prompt.rs`）：沒登入時回合只回 `Not logged in · Please run /login`（走 `Stop`，不是 `StopFailure`）
-    // ＝授權失敗；綁著身分的 bot 正常答完一回合＝那個身分是通的。
+    // ＝授權失敗；綁著身份的 bot 正常答完一回合＝那個身份是通的。
     if provider == "claude" && admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
             if crate::login_prompt::is_not_logged_in_line(a) {
@@ -1526,7 +1526,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     }
 
     // 撞限的 Grok 回合不以 `end_turn` 收尾，所以一則通過世代圍籬的 end_turn Stop 代表這個帳號答得了話。但只有「撞限之後才送出」的那一回合才能當證據，
-    // 週限誤清會影響同身分的所有 bot：`grok_success_at` 取 daemon 記的 `turns.delivered_at` 當 `success_at`，不用 Stop 的時間（#1872）。
+    // 週限誤清會影響同身份的所有 bot：`grok_success_at` 取 daemon 記的 `turns.delivered_at` 當 `success_at`，不用 Stop 的時間（#1872）。
     if provider == "grok" && admitted.is_some() {
         if let (HookKind::TurnComplete { assistant: Some(a), .. }, Some(r)) = (&kind, run.as_ref()) {
             if let Some(success_at) = grok_success_at(app, &bot, r, a, body.received_at.as_deref()).await {
@@ -1561,18 +1561,18 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
             }
-            // 登入失效：記下這個身分要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
-            // agy 沒有身分：改把那台主機的 `tools.agy.logged_in` 翻成未登入（`agy_auth.rs`，issue #870）。
+            // 登入失效：記下這個身份要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
+            // agy 沒有身份：改把那台主機的 `tools.agy.logged_in` 翻成未登入（`agy_auth.rs`，issue #870）。
             if reason == FailureReason::Auth && (provider == "claude" || provider == "agy") && admitted.is_some() {
                 app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = seen_turn(app, &bot, session_id.as_deref(), turn_id.as_deref()).await?;
             // 撞的是帳號額度（#108、#150）：先記撞限，**再**推回合結束——那個事件會叫醒 queue flush，排著的派工要看得到
-            // 這個身分沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
-            // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身分。只記這一代 run 送來的（`admitted`：
-            // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身分）；已經收過的同一則不再記，免得把撞限時刻往後推。
-            // 記不進去（讀不到主機、身分表還沒進來、憑據寫不進去）就讓這一則失敗、由收件匣重試（#108 重開）：回合先不收、
+            // 這個身份沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
+            // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身份。只記這一代 run 送來的（`admitted`：
+            // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身份）；已經收過的同一則不再記，免得把撞限時刻往後推。
+            // 記不進去（讀不到主機、身份表還沒進來、憑據寫不進去）就讓這一則失敗、由收件匣重試（#108 重開）：回合先不收、
             // 不推回合結束，排著的派工照欠著的那一筆擋（`turn_error::owed_limit_hit`），不能當作沒撞。
             if admitted.is_some() && seen.is_none() {
                 if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
@@ -1648,7 +1648,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
         }
-        // agy 的 statusLine 只用來補身分（對話一建立就有 `conversation_id`／`transcript_path`）。它的 `agent_state`／
+        // agy 的 statusLine 只用來補身份（對話一建立就有 `conversation_id`／`transcript_path`）。它的 `agent_state`／
         // `tool_confirmation_pending`／`quota` 之後（第二階段）才接；下面那段是 claude 的 rate_limits 與帳號，不能套在它身上。
         HookKind::StatusLine if provider == "agy" => {
             let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
@@ -1670,9 +1670,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         HookKind::StatusLine => {
             // 讀不到主機就丟掉這一份，下一次重繪會再來（#108 重開）：退回 local 會把遠端的讀數寫進本機那一格，
-            // 還會拿它去校正、作廢本機身分真的撞限（`quota::set`）。
+            // 還會拿它去校正、作廢本機身份真的撞限（`quota::set`）。
             let host = db::bot_host(app.db(), &bot.id).await?;
-            // 讀數是這個 run 的 pane 送來的：帳號是它起來時的身分（issue #238），不是剛改、還沒重啟生效的設定。
+            // 讀數是這個 run 的 pane 送來的：帳號是它起來時的身份（issue #238），不是剛改、還沒重啟生效的設定。
             let identity = crate::quota::identity_for_run(&bot, run.as_ref());
             let identity = identity.as_deref();
             // Written only when changed — claude refreshes often and every write wakes every client.
@@ -1720,7 +1720,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    // 對 claude 共用預設帳號的身分（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉
+                    // 對 claude 共用預設帳號的身份（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉
                     // `/usage` 探測的 Fable 週窗。規則跟 codex 同一支（`quota::quota_base_for_host`）。
                     let key = app.quota_base_for_host(&host, "claude", Some(idn)).await;
                     app.set_quota(&host, &key, q).await;
@@ -1748,7 +1748,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         // issue #82：純可見性快照，整筆覆蓋 `runs.subagent_json`，不建立、不動任何 Turn，不查重複
         // （跟 `StatusLine` 一樣，最新的贏），也不碰 `bots`／`parent_bot_id`——那是 §6.5a 血緣認領的事，
-        // 這裡的 `agent_id` 是同一行程內 Task 工具呼叫的 id，不是哪個 pane 的身分。沒有活著的 run
+        // 這裡的 `agent_id` 是同一行程內 Task 工具呼叫的 id，不是哪個 pane 的身份。沒有活著的 run
         // 就沒地方寫，直接丟（跟 `HookKind::Identity` 一樣）。
         HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
             if let Some(r) = &run {
@@ -1847,7 +1847,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         body.payload.get("source").and_then(Value::as_str) == Some("compact")).await?;
                 }
                 app.emit_bot_status(&bot.id).await;
-                // #1759：壓縮做完的 SessionStart。說明寫不進去不擋身分更新。
+                // #1759：壓縮做完的 SessionStart。說明寫不進去不擋身份更新。
                 if provider == "claude" && body.payload.get("source").and_then(Value::as_str) == Some("compact") {
                     if let Err(e) = crate::compaction::record(app, &bot, r, &body.payload, transcript_path.as_deref()).await {
                         tracing::warn!(bot = %bot.name, error = ?e, "could not record a claude compaction");
@@ -3563,7 +3563,7 @@ mod external_claim_tests {
         assert_eq!(hook_message_count(&app, &conv).await, messages_before, "也不多一則訊息");
     }
 
-    /// 沒有收件匣 id（直接 `process`）時行為跟以前一樣：兩次獨立的、沒有身分的事件各是一個回合。
+    /// 沒有收件匣 id（直接 `process`）時行為跟以前一樣：兩次獨立的、沒有身份的事件各是一個回合。
     #[tokio::test]
     async fn without_an_inbox_event_id_nothing_is_deduplicated_by_the_new_key() {
         let env = tt::env().await;
@@ -4170,16 +4170,16 @@ mod external_claim_tests {
         assert_eq!(replies, vec!["hook reply".to_string()]);
     }
 
-    /// issue #92：撞額度 → 換身分 → `--resume` 接回**同一個** session。換身分前那個行程的 `StopFailure`
+    /// issue #92：撞額度 → 換身份 → `--resume` 接回**同一個** session。換身份前那個行程的 `StopFailure`
     /// （撞額度那一則）這時候才到：它帶的 session 跟新 run 一模一樣，只看 session 會被認成這一代的，
-    /// 把換身分之後剛送出去的那一回合收成失敗。它自己帶的 run id 才分得開。
+    /// 把換身份之後剛送出去的那一回合收成失敗。它自己帶的 run id 才分得開。
     #[tokio::test]
     async fn a_late_hook_from_the_process_before_a_resume_cannot_touch_the_resumed_runs_turn() {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "resumed").await;
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        // 身分 A 的那一代：session `s-same`，撞額度之後被換身分重啟收掉。
+        // 身份 A 的那一代：session `s-same`，撞額度之後被換身份重啟收掉。
         let old_run = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
@@ -4192,7 +4192,7 @@ mod external_claim_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        // 身分 B 的這一代：`--resume s-same` 起來、SessionStart 已經對上（`native_session_id` 同一個），
+        // 身份 B 的這一代：`--resume s-same` 起來、SessionStart 已經對上（`native_session_id` 同一個），
         // 並且已經送出一則新的回合。
         let new_run = db::ulid();
         sqlx::query(
@@ -4208,7 +4208,7 @@ mod external_claim_tests {
         let new_turn = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
-             VALUES (?,?,?,'web','in_flight','ok','換身分之後問的',?)",
+             VALUES (?,?,?,'web','in_flight','ok','換身份之後問的',?)",
         )
         .bind(&new_turn)
         .bind(&conv)
@@ -4234,12 +4234,12 @@ mod external_claim_tests {
         let limit = json!({"hook_event_name": "StopFailure", "session_id": "s-same", "prompt_id": "p-a",
                            "reason": "You've hit your usage limit · resets 5pm"});
         process(&app, &from(&old_run, limit)).await.unwrap();
-        assert_eq!(turn_now(new_turn.clone()).await.status, "in_flight", "身分 A 遲到的撞額度不准收掉身分 B 的回合");
+        assert_eq!(turn_now(new_turn.clone()).await.status, "in_flight", "身份 A 遲到的撞額度不准收掉身份 B 的回合");
         let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
         assert_eq!((ev.kind.as_str(), ev.data["prior_run_id"].as_str()), ("hook_fenced", Some(old_run.as_str())));
 
         let reply = json!({"hook_event_name": "Stop", "session_id": "s-same", "prompt_id": "p-a",
-                           "last_assistant_message": "身分 A 那一回合的半截回覆"});
+                           "last_assistant_message": "身份 A 那一回合的半截回覆"});
         process(&app, &from(&old_run, reply)).await.unwrap();
         let t = turn_now(new_turn.clone()).await;
         assert_eq!((t.status.as_str(), t.native_turn_id.as_deref()), ("in_flight", None), "也不准拿舊行程的 Stop 收尾");
@@ -4767,7 +4767,7 @@ mod external_claim_tests {
     }
 
     /// issue #108：撞額度的 StopFailure 在推回合結束**之前**就把撞限記下來——那個事件會叫醒 queue flush，
-    /// flush 要看得到這個身分沒額度。一下就好的限流（overloaded）不記：記了會把派工壓上好幾個小時。
+    /// flush 要看得到這個身份沒額度。一下就好的限流（overloaded）不記：記了會把派工壓上好幾個小時。
     #[tokio::test]
     async fn a_quota_stop_failure_records_the_limit_before_the_turn_ends() {
         let env = tt::env().await;
@@ -4794,7 +4794,7 @@ mod external_claim_tests {
     }
 
     /// #108 重開：撞額度的 `StopFailure` 到的時候讀不到這顆（遠端）bot 在哪台主機。以前退回 `local`：撞限寫進本機帳號
-    /// 那一格，回合照收、推回合結束，flush 查遠端那把 key 看不到撞限，排著的派工當場送進用盡的身分。現在這一則失敗、
+    /// 那一格，回合照收、推回合結束，flush 查遠端那把 key 看不到撞限，排著的派工當場送進用盡的身份。現在這一則失敗、
     /// 由收件匣重試：哪一格都不寫、回合不收（在飛的回合本身擋著 flush），撞限記成欠著——就算回合被別的路收掉，排著的
     /// 照欠著的那一筆擋。讀得到之後重試：撞限進 `remote1/claude`，回合照常收成失敗。讀不到 bot 本身也一樣是這一則失敗。
     #[tokio::test]
@@ -4843,7 +4843,7 @@ mod external_claim_tests {
         lifecycle::forget_queue_retry_timer(&bot_id);
         lifecycle::flush_queued_locked(&app, &bot_id).await.unwrap();
         let q = turn_row(&app, &queued).await;
-        assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進用盡的身分");
+        assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進用盡的身份");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
         // 收件匣重試：讀得到了。
@@ -4901,9 +4901,9 @@ mod external_claim_tests {
         assert!(q["claude"].limit_hit.is_some());
     }
 
-    /// issue #150：撞額度是帳號的事實，跟這一則還有沒有回合可收無關。Esc 把回合收掉之後，同一個身分晚到的真撞額度
-    /// （對不上中斷的那一則、或就是被中斷那一則的回聲）都要記下撞限，下一件派工才不會送進沒額度的身分；
-    /// 回合本身一個欄位都不改。沒有 run（說不準是哪個身分）與已經收過的同一則（重播）不記。
+    /// issue #150：撞額度是帳號的事實，跟這一則還有沒有回合可收無關。Esc 把回合收掉之後，同一個身份晚到的真撞額度
+    /// （對不上中斷的那一則、或就是被中斷那一則的回聲）都要記下撞限，下一件派工才不會送進沒額度的身份；
+    /// 回合本身一個欄位都不改。沒有 run（說不準是哪個身份）與已經收過的同一則（重播）不記。
     #[tokio::test]
     async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
         let env = tt::env().await;
@@ -4956,7 +4956,7 @@ mod external_claim_tests {
         let bot = db::bot(&app.db, &bot_b).await.unwrap().unwrap();
         assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回聲裡的撞額度也是真的");
 
-        // (c) 沒有 run：說不準是哪個身分送的（停機後可能換過身分），不記。
+        // (c) 沒有 run：說不準是哪個身份送的（停機後可能換過身份），不記。
         let (bot_c, _c, turn_c) = delivered_turn(&app, &env.project_id).await;
         let run_c = turn_row(&app, &turn_c).await.run_id.unwrap();
         sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run_c).execute(&app.db).await.unwrap();
@@ -4965,7 +4965,7 @@ mod external_claim_tests {
             .await
             .unwrap();
         let bot = db::bot(&app.db, &bot_c).await.unwrap().unwrap();
-        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身分上");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身份上");
 
         // (d) 已經收過的同一則重播：不再記一次（不把撞限時刻往後推）。
         let (bot_d, _c, turn_d) = delivered_turn(&app, &env.project_id).await;
@@ -5225,7 +5225,7 @@ mod external_claim_tests {
     #[test]
     fn nr_relay_legacy_name_only_spool_is_unknown() {
         assert!(matches!(classify("claude", &json!({"hook_event_name": RELAY_ANNOUNCE_EVENT,
-            "to_agent": "old-name", "text": "不能以舊名猜測這句話的收件身分"})), HookKind::Ignore(_)));
+            "to_agent": "old-name", "text": "不能以舊名猜測這句話的收件身份"})), HookKind::Ignore(_)));
     }
 
     #[tokio::test]
@@ -5608,7 +5608,7 @@ mod external_claim_tests {
         assert_eq!(user_texts_on(&app, &external).await, vec!["現在部 demo".to_string()]);
     }
 
-    /// hook 送來的 transcript 路徑要在 bot 自己身分的 `projects/` 底下才算數（`transcript_read`）：把這顆 bot 的 `CLAUDE_CONFIG_DIR` 指到 `root`，
+    /// hook 送來的 transcript 路徑要在 bot 自己身份的 `projects/` 底下才算數（`transcript_read`）：把這顆 bot 的 `CLAUDE_CONFIG_DIR` 指到 `root`，
     /// 回傳 `root/projects/-t/<name>`（目錄已建好）。
     async fn own_projects_file(app: &Arc<App>, bot_id: &str, root: &std::path::Path, name: &str) -> std::path::PathBuf {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
@@ -6751,7 +6751,7 @@ mod durable_handoff_tests {
         }
         assert_eq!(inbox_rows(&e).await, 1, "三次重送只有一列");
 
-        // 處理過一輪之後再重送，也不會多出一列（去重看的是事件身分，不是有沒有處理過）。
+        // 處理過一輪之後再重送，也不會多出一列（去重看的是事件身份，不是有沒有處理過）。
         crate::runners::hook_inbox::drain_once(&e.app).await.unwrap();
         let (code, _) =
             receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
@@ -6824,7 +6824,7 @@ mod durable_handoff_tests {
         assert_eq!(inbox_rows(&e).await, 0, "重繪訊號不佔佇列");
     }
 
-    /// 壞 token / 已刪除的 bot 在收下之前就被擋掉：收件匣不會被沒有身分的事件灌爆。
+    /// 壞 token / 已刪除的 bot 在收下之前就被擋掉：收件匣不會被沒有身份的事件灌爆。
     #[tokio::test]
     async fn a_rejected_hook_never_reaches_the_inbox() {
         let e = env().await;

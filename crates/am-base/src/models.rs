@@ -283,7 +283,7 @@ pub fn grok_default_effort_from_config(text: &str) -> Option<String> {
     pick(&doc).or_else(|| doc.get("models").and_then(pick))
 }
 
-/// codex 身分 `config.toml` 頂層的 `model`／`model_reasoning_effort`＝這個身分實際會跑的模型與強度（`-c` 或 `/model` 寫進去的也是這兩行）。
+/// codex 身份 `config.toml` 頂層的 `model`／`model_reasoning_effort`＝這個身份實際會跑的模型與強度（`-c` 或 `/model` 寫進去的也是這兩行）。
 /// 模型有設就以它為 `is_default`（不在清單裡的就一顆都不標，不猜）；強度有設就覆寫那顆預設模型的 `default_effort`。
 /// 兩個都沒設＝照 app-server 回的。讀不懂的 TOML 原樣回傳。只看頂層，`[profiles.*]` 裡的不算。
 pub fn codex_apply_identity_config(mut models: Vec<Value>, cfg_text: &str) -> Vec<Value> {
@@ -320,8 +320,8 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
     (global, per_model)
 }
 
-/// 身分 `env` 裡的家目錄變數（`CLAUDE_CONFIG_DIR`／`CODEX_HOME`／`GROK_HOME`）展開成這台的絕對路徑。
-/// `None` = 沒有身分、身分不是這個 kind、或沒設這個變數：照 CLI 預設家目錄。
+/// 身份 `env` 裡的家目錄變數（`CLAUDE_CONFIG_DIR`／`CODEX_HOME`／`GROK_HOME`）展開成這台的絕對路徑。
+/// `None` = 沒有身份、身份不是這個 kind、或沒設這個變數：照 CLI 預設家目錄。
 pub async fn identity_home_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, kind: &str, var: &str) -> Result<Option<String>> {
     let Some(name) = identity else { return Ok(None) };
     let Some(idn) = crate::tools::identity_for_host(app, host, name).await else { return Ok(None) };

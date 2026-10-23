@@ -305,12 +305,12 @@ pub struct NowIn {
 /// 同一時間只受理一次（連點兩下、兩個分頁同時按）：檢查「有沒有在跑」到寫出請求檔之間不能插隊。
 static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 只給 UI：帶任一 bot 身分標頭的一律 403，包括缺值、錯 token 或只帶一半，不得降級成使用者（#339）。
+/// 只給 UI：帶任一 bot 身份標頭的一律 403，包括缺值、錯 token 或只帶一半，不得降級成使用者（#339）。
 /// #556 裁示接受共用 UI token 持有者視為使用者；兩個 bot 標頭都沒帶時照此政策放行，不代表 daemon 證明了真人。
 pub fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
     if headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token") {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "ui_only",
-            "message": "立即部署只給使用者；帶 bot 身分標頭的呼叫端不接受，bot 要重建請照 SPEC §18.10 申請核准"})));
+            "message": "立即部署只給使用者；帶 bot 身份標頭的呼叫端不接受，bot 要重建請照 SPEC §18.10 申請核准"})));
     }
     Ok(())
 }
@@ -698,7 +698,7 @@ mod tests {
         // #556 裁示：目前持有共用 UI token 就視為使用者，接受 LAN／本機行程風險。
         assert!(refuse_bot_caller(&HeaderMap::new()).is_ok());
 
-        // 只帶半套、帶錯 token 或完整宣告 bot 身分，都不能降級成使用者。
+        // 只帶半套、帶錯 token 或完整宣告 bot 身份，都不能降級成使用者。
         let cases: &[&[(&str, &[u8])]] = &[
             &[("X-AM-Bot-Id", b"b1")],
             &[("X-AM-Bot-Token", b"not-the-token")],

@@ -4,7 +4,7 @@
  * `Bubble` 的 `memo` 只擋得住「同一次掛載裡」的重 render，擋不住重掛。
  *
  * 快取的是 `react-markdown` 的輸出（React 元素樹，不可變，可以安心掛在不同地方）。`Markdown` 是沒有 hook 的同步函式，
- * 直接呼叫它拿樹。鍵是文字本身（跟 store 裡的字串同一份，不另外複製）＋ bot id（圖片元件綁 bot）＋ renderer 身分。
+ * 直接呼叫它拿樹。鍵是文字本身（跟 store 裡的字串同一份，不另外複製）＋ bot id（圖片元件綁 bot）＋ renderer 身份。
  * 有上限（則數與總字數），超過就丟最久沒用的——這是記憶體上的取捨：長時間開著的分頁不能因此無限長。
  */
 import Markdown, { type UrlTransform } from 'react-markdown'

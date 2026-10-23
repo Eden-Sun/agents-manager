@@ -166,7 +166,7 @@ def runtime_role(cfg: dict) -> str:
 
 
 def bot_auth_headers(cfg: dict) -> dict:
-    """角色身分的證明：pane 環境裡的 `AM_BOT_ID` + `AM_BOT_TOKEN`（既有 per-bot token）。
+    """角色身份的證明：pane 環境裡的 `AM_BOT_ID` + `AM_BOT_TOKEN`（既有 per-bot token）。
     已運行的舊 pane 暫用相同值的 `AM_HOOK_TOKEN`；新 daemon 只認 id 與自己那顆 token 對得上。
 
     pane 宣告了 bot id 就帶上該 id；沒有 token 或 token 對不上時，daemon 拒絕該 Bot 請求，
@@ -206,7 +206,7 @@ class Client:
         self.base = check_loopback(base).rstrip("/")
         self.timeout = timeout
         self._token: str | None = None
-        # 角色身分（見 bot_auth_headers）。只跟著需要驗證的 API 請求走，不送去 /api/session。
+        # 角色身份（見 bot_auth_headers）。只跟著需要驗證的 API 請求走，不送去 /api/session。
         self._extra = dict(extra_headers or {})
         # ProxyHandler({}) 是關鍵：urllib 預設吃 HTTP_PROXY/ALL_PROXY，那會把帶著
         # token 的請求整包送去代理伺服器。本機 daemon 不需要任何 proxy。
@@ -254,7 +254,7 @@ class Client:
                 if not service_id or not service_file:
                     raise AgmError("bad_service_auth", "AM_SERVICE_ID 與 AM_SERVICE_TOKEN_FILE 必須一起設定", 2)
                 if "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
-                    raise AgmError("bad_service_auth", "service 與 bot 身分不能同時使用", 2)
+                    raise AgmError("bad_service_auth", "service 與 bot 身份不能同時使用", 2)
                 headers["X-AM-Service-Id"] = service_id
                 headers["X-AM-Service-Token"] = self._read_private_token(service_file)
             elif "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
@@ -1110,7 +1110,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
             query["exclude"] = ",".join(args.exclude_bot)
         if args.approval:
             query["approval"] = args.approval
-        # --owner：以這個人的身分問，他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
+        # --owner：以這個人的身份問，他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
         # 只有明確帶了才送：不帶就是舊行為，每一把租約都算擋。
         if args.owner:
             query["owner"] = args.owner
@@ -1258,7 +1258,7 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
     """結案一則 inbox 通知。**只有 AGM 角色結得掉**（issue #432）。
 
     daemon 認的是 `X-AM-Bot-Id` ＋那顆 bot 自己的 API token；任何 pane 有 Bot id 就只能以那顆
-    Bot 的身分請求，沒有 token 時不會退回共用 User token。角色權限由 daemon 再依驗過的 id 判斷。
+    Bot 的身份請求，沒有 token 時不會退回共用 User token。角色權限由 daemon 再依驗過的 id 判斷。
     """
     try:
         return client.post(f"/api/supervisor/inbox/{path_segment(args.event_id)}/ack", {})
@@ -1904,7 +1904,7 @@ def _with_relay(body: dict, cfg: dict, args) -> None:
     body["relay_from"] = manager
 
 
-# 強制 `/usage` 探測：daemon 要先等同一台的 probe_lock（背景輪詢一個一個探身分時會佔著），再自己探最久 40 秒。
+# 強制 `/usage` 探測：daemon 要先等同一台的 probe_lock（背景輪詢一個一個探身份時會佔著），再自己探最久 40 秒。
 QUOTA_PROBE_TIMEOUT = 300.0
 
 
@@ -2577,7 +2577,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm lease safety / agm lease acquire rebuild --approval <id> --commit <sha>\n"
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
-            "  agm mission list --project <id> --status open  群組任務；pick --role verifier 照規則挑身分\n"
+            "  agm mission list --project <id> --status open  群組任務；pick --role verifier 照規則挑身份\n"
             "  agm issue claim 425 --child i425 --worktree … --branch …   派工前先認領（exit 3＝別人在做）\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
@@ -2695,7 +2695,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["request", "decide", "list"])
     s.add_argument("approval_id", nargs="?", help="decide 的目標")
     s.add_argument("--id", help="list：只查這一筆（清單只回最新 100 筆，舊的要用這個查）")
-    s.add_argument("--requester", help="request：申請者（已驗證的 bot id；User principal 使用 principal:user；名稱不是身分）")
+    s.add_argument("--requester", help="request：申請者（已驗證的 bot id；User principal 使用 principal:user；名稱不是身份）")
     s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
     s.add_argument("--scope", help="request：會動到什麼")
     s.add_argument("--commit", help="request：針對哪個 commit（之後 acquire 要對得上）")
@@ -2724,7 +2724,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("resource", nargs="?", choices=["rebuild", "restart"], help="acquire/renew/release 的目標")
     s.add_argument(
         "--owner",
-        help="acquire/renew/release：誰持有（預設 $AM_BOT_ID，外部人類為 principal:user）；safety：以這個人的身分問，他自己握的租約不算擋（不帶＝每一把都算擋）",
+        help="acquire/renew/release：誰持有（預設 $AM_BOT_ID，外部人類為 principal:user）；safety：以這個人的身份問，他自己握的租約不算擋（不帶＝每一把都算擋）",
     )
     s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
@@ -2825,17 +2825,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
 
-    s = sub.add_parser("models", help="查可用模型；--refresh 由 AGM／User 更新指定主機與身分快取")
+    s = sub.add_parser("models", help="查可用模型；--refresh 由 AGM／User 更新指定主機與身份快取")
     s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"])
     s.add_argument("--host", default="local", help="執行 CLI 的主機名；不是 daemon 的位址")
-    s.add_argument("--identity", help="身分名；省略＝該主機預設身分")
+    s.add_argument("--identity", help="身份名；省略＝該主機預設身份")
     s.add_argument("--refresh", action="store_true", help="強制更新快取；一般 Bot 無此權限，403 不改用其他憑證")
     s.set_defaults(func=cmd_models)
 
-    s = sub.add_parser("quota", help="各身分的額度狀態；--probe 強制重跑 /usage 並覆寫 cache")
+    s = sub.add_parser("quota", help="各身份的額度狀態；--probe 強制重跑 /usage 並覆寫 cache")
     s.add_argument("--probe", action="store_true", help="強制重跑該帳號的 /usage，結果蓋掉 statusLine 的值")
     s.add_argument("--kind", default="claude", choices=["claude"], help="目前只有 claude 有強制探測")
-    s.add_argument("--account", help="身分名（cc0、cc1…）；省略＝預設帳號")
+    s.add_argument("--account", help="身份名（cc0、cc1…）；省略＝預設帳號")
     s.add_argument("--host", help="主機名；省略＝本機")
     s.set_defaults(func=cmd_quota)
 
@@ -2861,8 +2861,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--text-file", dest="text_file", help="從檔案讀 --text")
     s.add_argument("--reason", help="pause：暫停原因（機器碼，例如 waiting_user）")
     s.add_argument("--detail", help="pause：補充說明")
-    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身分")
-    s.add_argument("--exclude", help="pick：排除的身分（reviewer 排除執行者的身分）")
+    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身份")
+    s.add_argument("--exclude", help="pick：排除的身份（reviewer 排除執行者的身份）")
     s.add_argument("--worktree", help="deliver：要交付的 worktree；event --kind verified：驗過的 worktree（daemon 記下它的 HEAD）；complete --no-delivery no_changes：執行者的 worktree（daemon 查它沒有改動）")
     s.add_argument(
         "--no-delivery",

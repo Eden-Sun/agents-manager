@@ -19,7 +19,7 @@
 
 use crate::db;
 
-/// 一則事件自己說得出來的身分。
+/// 一則事件自己說得出來的身份。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EventIdentity<'a> {
     /// 送出這則事件的 CLI 行程是替哪個 run 起的（hook body 的 `run_id`＝那個行程 pane env 的
@@ -98,7 +98,7 @@ pub fn decide(now: &Generation, ev: &EventIdentity, prior: Option<&PriorRun>) ->
     }
     // 事件自己指名 run 時最直接：不是這一代就是別代，不必再看 session。
     // 這是 `--resume` 唯一分得開的證據（issue #92）：接回同一段對話時新舊行程回報**同一個** session id，
-    // 換身分前那個行程遲到的 `StopFailure`（撞額度）只看 session 會被認成這一代的，收掉新行程的回合。
+    // 換身份前那個行程遲到的 `StopFailure`（撞額度）只看 session 會被認成這一代的，收掉新行程的回合。
     // 收編來的 run 例外：它的行程帶的是起它的那個 run 的 id，對不上是正常的，交給下面的 session 規則。
     if let Some(rid) = trimmed(ev.run_id) {
         if rid == now.run_id {
@@ -195,7 +195,7 @@ mod tests {
         assert!(!named.may_mutate(), "{named:?}");
     }
 
-    /// issue #92：`--resume` 接回同一段對話，新舊兩個行程回報**同一個** session。換身分前那個行程
+    /// issue #92：`--resume` 接回同一段對話，新舊兩個行程回報**同一個** session。換身份前那個行程
     /// 遲到的事件只看 session 是「這一代的」——它自己帶的 run id 才分得開。
     #[test]
     fn a_resumed_session_is_told_apart_by_the_run_its_process_was_started_for() {
@@ -246,7 +246,7 @@ mod tests {
         assert!(matches!(&out, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-Z"), "{out:?}");
     }
 
-    /// 空字串不是身分：`Some("")` 要跟沒帶一樣。
+    /// 空字串不是身份：`Some("")` 要跟沒帶一樣。
     #[test]
     fn blank_identities_count_as_missing() {
         let now = gen("01RUN-B", Some("s-new"));

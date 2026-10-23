@@ -567,7 +567,7 @@ gemini-4-argon\n";
         assert_eq!(parse_claude_default_model(""), None);
     }
 
-    /// #941：codex 身分 `config.toml` 頂層的 model／effort 才是它實際會跑的；只有 app-server 的 isDefault 不夠。
+    /// #941：codex 身份 `config.toml` 頂層的 model／effort 才是它實際會跑的；只有 app-server 的 isDefault 不夠。
     #[test]
     fn codex_identity_config_sets_default_model_and_effort() {
         let models = || {
@@ -595,12 +595,12 @@ gemini-4-argon\n";
         assert_eq!(codex_apply_identity_config(models(), "[profiles.x]\nmodel = \"gpt-6-luna\"\n"), models());
     }
 
-    /// #941：身分的家目錄要真的帶進 `codex app-server`／`grok models` 的環境，讀檔也讀同一個目錄。
+    /// #941：身份的家目錄要真的帶進 `codex app-server`／`grok models` 的環境，讀檔也讀同一個目錄。
     #[test]
     fn identity_home_reaches_the_cli_env_and_its_files() {
         assert_eq!(home_env_prefix("CODEX_HOME", "/home/u/.codex-cx2"), "CODEX_HOME='/home/u/.codex-cx2'; export CODEX_HOME; ");
         assert_eq!(home_file_expr(Some("/home/u/.grok-g2"), ".grok", "config.toml"), "'/home/u/.grok-g2'/config.toml");
-        // 沒有身分：照 CLI 預設讀 `$HOME/<預設目錄>`。
+        // 沒有身份：照 CLI 預設讀 `$HOME/<預設目錄>`。
         assert_eq!(home_file_expr(None, ".grok", "models_cache.json"), "\"$HOME/.grok/models_cache.json\"");
     }
 

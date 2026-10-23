@@ -730,7 +730,7 @@ pub async fn wake_locked(app: &(impl crate::capabilities::Db + crate::capabiliti
             app.emit("bot_changed", json!({"bot_id": bot_id, "asleep": false})).await;
             Ok(true)
         }
-        // 409 `cannot_resume`：session 或 transcript 在這段睡眠裡不見了（使用者清掉、CLI 換身分）。
+        // 409 `cannot_resume`：session 或 transcript 在這段睡眠裡不見了（使用者清掉、CLI 換身份）。
         // 這顆還是要回得來，所以改開新對話，但把「原本那段接不回來」寫進對話裡，不裝作沒事。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("cannot_resume") => {
             let reason = v.get("resume_reason").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();

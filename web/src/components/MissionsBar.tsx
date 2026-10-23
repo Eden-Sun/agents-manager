@@ -477,7 +477,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
           ))}
           {view.soloReview ? (
             <li>
-              <span className="mission-tag warn" title={t('找不到第二個可用身分，改由執行者自審＋驗證者把關')}>
+              <span className="mission-tag warn" title={t('找不到第二個可用身份，改由執行者自審＋驗證者把關')}>
                 {t('無獨立 reviewer')}
               </span>
             </li>

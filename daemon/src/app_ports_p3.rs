@@ -86,7 +86,7 @@ impl HostHooks for App {
     }
 }
 
-/// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身分與 herdr CLI 版本）、
+/// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身份與 herdr CLI 版本）、
 /// 額度（`<host>/…`，連重啟快取列）、模型清單（`<host>/<kind>/<identity>`）、這個 daemon 在那台開的 shell 清單。
 /// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
 async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::host_baseline::HostBaselineTable + crate::login_assist::LoginPanes + crate::login_assist::LoginReservations + crate::login_prompt::LoginNeeded + crate::models::ModelsCache + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::shim_refresh::RemoteShimStale + crate::tools::ToolsTable), name: &str) {
@@ -253,9 +253,9 @@ impl crate::tools::ToolsEnv for App {
         let host = host.to_string();
         async move {
             let (app, host) = (&app, host.as_str());
-    // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
+    // 身份表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
     crate::identity_kind::cleanup_host(app, host).await;
-    // 身分表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
+    // 身份表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
     crate::runners::supervisor::runtime::backfill_quota_limits_once(app, host).await;
     // 排著的 prompt 自己記下的撞限（issue #108）：同一個時機、同一個理由。
     crate::lifecycle::quota_hold::backfill_once(app, host).await;
@@ -497,7 +497,7 @@ mod port_tests {
         crate::quota_claude::unpark(&other_claude);
     }
 
-    /// #1142：同名改指之後，舊機器的「需要重新登入」不能掛到新機器的同名身分上（別台的記號不動）。
+    /// #1142：同名改指之後，舊機器的「需要重新登入」不能掛到新機器的同名身份上（別台的記號不動）。
     #[tokio::test]
     async fn repointing_a_host_forgets_its_login_needed_markers() {
         let e = env().await;

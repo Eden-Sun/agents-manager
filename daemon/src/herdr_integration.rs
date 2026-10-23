@@ -5,7 +5,7 @@
 //! 只留我們用得到的四家，快照給設定頁「更新檢查」。
 //!
 //! 刻意的邊界：
-//! - 巡邏只讀。`herdr integration install <name>` 手動只在使用者按設定頁的按鈕時跑（帶 bot 身分的請求一律 403），
+//! - 巡邏只讀。`herdr integration install <name>` 手動只在使用者按設定頁的按鈕時跑（帶 bot 身份的請求一律 403），
 //!   而且只准 [`TRACKED`] 裡的名字、`not installed` 的手動不裝（只顯示）。它會改那台的 `~/.claude`／`~/.codex` 設定。
 //! - 唯一的自動安裝（#1871）：該主機 grok／agy CLI 已登入、那一家 integration 是 `not_installed` 時，[`auto_install`] 在巡檢那一輪裝一次
 //!   （每主機每家每個 daemon 行程最多一次，失敗不重試）。claude／codex 的 outdated 照舊只顯示。

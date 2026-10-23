@@ -751,7 +751,7 @@
     }
 
     /// schema 變更（additive）`runs.runtime_identity`（issue #238）：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL
-    /// （＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣），`SELECT *` 照樣讀得進 `Run`。
+    /// （＝沒記，額度照 bot 設定的身份算，跟加這一欄之前一樣），`SELECT *` 照樣讀得進 `Run`。
     #[tokio::test]
     async fn an_old_database_gains_runs_runtime_identity_on_open() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-runtime-identity-{}", ulid())));
@@ -770,13 +770,13 @@
         let pool = open(&path).await.expect("舊 DB 照常開起來");
         assert!(has_column(&pool, "runs", "runtime_identity").await.unwrap(), "開的時候補上");
         let r = active_run(&pool, "b").await.unwrap().expect("舊列還在");
-        assert_eq!((r.runtime_identity.clone(), r.started_identity()), (None, None), "舊列沒記：照 bot 設定的身分算");
+        assert_eq!((r.runtime_identity.clone(), r.started_identity()), (None, None), "舊列沒記：照 bot 設定的身份算");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 「這台有哪些身分在跑」（claude 探測拿它當登入證據）看的是 run 實際的身分（#238）：改了設定還沒重啟的是舊的那個；
-    /// run 沒記的照 bot 設定的；起來時沒有身分的不算。
+    /// 「這台有哪些身份在跑」（claude 探測拿它當登入證據）看的是 run 實際的身份（#238）：改了設定還沒重啟的是舊的那個；
+    /// run 沒記的照 bot 設定的；起來時沒有身份的不算。
     #[tokio::test]
     async fn live_identities_are_the_ones_the_runs_started_with() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-live-identities-{}", ulid())));

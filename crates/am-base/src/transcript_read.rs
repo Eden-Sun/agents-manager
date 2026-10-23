@@ -114,15 +114,15 @@ pub trait TranscriptRoots: Send + Sync {
     fn kind(&self) -> &str;
     /// 這顆 bot 跑在本機嗎。`None`＝主機查不到：沒有依據判斷 daemon 讀不讀得了這個路徑，一律不收。
     fn is_local(&self) -> impl Future<Output = Option<bool>> + Send + '_;
-    /// claude 實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身分 → `~/.claude`）；查不到＝`None`。
+    /// claude 實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身份 → `~/.claude`）；查不到＝`None`。
     fn claude_config_dir(&self) -> impl Future<Output = Option<String>> + Send + '_;
-    /// codex 的 `CODEX_HOME`（身分 → bot env → `~/.codex`）；沒有家目錄＝`None`。
+    /// codex 的 `CODEX_HOME`（身份 → bot env → `~/.codex`）；沒有家目錄＝`None`。
     fn codex_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_;
-    /// 使用者的家目錄（agy 的設定目錄只認 `$HOME`，沒有身分切換）。
+    /// 使用者的家目錄（agy 的設定目錄只認 `$HOME`，沒有身份切換）。
     fn user_home(&self) -> Option<PathBuf>;
 }
 
-/// 這顆本機 bot 的 transcript／rollout 該在哪些目錄底下：claude＝它實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身分 → `~/.claude`）的
+/// 這顆本機 bot 的 transcript／rollout 該在哪些目錄底下：claude＝它實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身份 → `~/.claude`）的
 /// `projects/`；codex＝`CODEX_HOME/sessions/`；grok 沒有。子 agent 的身份如果尚未從 pane env 記錄進 DB，就先不收 transcript_path；
 /// 放行所有 `~/.claude-*` 會讓一顆 bot 用自己的 hook token 指定另一個身份的對話檔，之後 UI 的輪詢就會替它讀出來。
 pub async fn trusted_roots_for(src: &impl TranscriptRoots) -> Vec<PathBuf> {
@@ -130,7 +130,7 @@ pub async fn trusted_roots_for(src: &impl TranscriptRoots) -> Vec<PathBuf> {
     match src.kind() {
         "claude" => roots.extend(src.claude_config_dir().await.map(|d| PathBuf::from(d).join("projects"))),
         "codex" => roots.extend(src.codex_home().await.map(|h| h.join("sessions"))),
-        // agy：設定目錄只認 `$HOME`（沒有身分切換），對話在 `brain/<id>/.system_generated/logs/`。
+        // agy：設定目錄只認 `$HOME`（沒有身份切換），對話在 `brain/<id>/.system_generated/logs/`。
         "agy" => roots.extend(src.user_home().map(|h| h.join(".gemini").join("antigravity-cli").join("brain"))),
         _ => {}
     }
@@ -138,7 +138,7 @@ pub async fn trusted_roots_for(src: &impl TranscriptRoots) -> Vec<PathBuf> {
 }
 
 /// hook 送來的 `transcript_path` 能不能寫進 `runs`。本機 bot：要在 [`trusted_roots_for`] 底下。遠端 bot 的檔案在那台、daemon 不在本機讀它
-/// （只在換身分時經 `sh_quote` 過的 ssh script 搬），所以只擋形狀（絕對路徑、無 `..`、無控制字元、`.jsonl`）。
+/// （只在換身份時經 `sh_quote` 過的 ssh script 搬），所以只擋形狀（絕對路徑、無 `..`、無控制字元、`.jsonl`）。
 pub async fn transcript_allowed_for(src: &impl TranscriptRoots, path: &str) -> bool {
     match src.is_local().await {
         Some(false) => {

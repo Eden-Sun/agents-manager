@@ -30,7 +30,7 @@ test('logged_in === null 是問不到，不是未登入：已安裝就算可用�
   assert.equal(m.needed, false)
 })
 
-test('預設帳號未登入但有已登入的命名身分：這個 kind 算已登入', () => {
+test('預設帳號未登入但有已登入的命名身份：這個 kind 算已登入', () => {
   const identities = { cc1: { name: 'cc1', kind: 'claude', logged_in: true, reason: null, account: 'me@x.com' } } as unknown as IdentityStatusMap
   const m = onboardingModel({ ...base, tools: tools({ claude: tool(false) }), identities })
   assert.equal(m.rows[0].state, 'ok')

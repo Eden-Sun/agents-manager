@@ -140,7 +140,7 @@ export function httpShareClient(token: string, opts: ShareClientOptions = {}): S
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const timers = opts.timers ?? { setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms), clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>) }
   const base = `/s/${encodeURIComponent(token)}/api`
-  // 不帶 cookie、不帶 referrer：分享頁跟主 UI 沒有任何共用的身分。
+  // 不帶 cookie、不帶 referrer：分享頁跟主 UI 沒有任何共用的身份。
   const init: RequestInit = { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }
   const json = async (path: string, extra: RequestInit = {}) => (await check(await fetch(`${base}${path}`, { ...init, ...extra }))).json() as Promise<unknown>
   const getJson = (path: string) =>

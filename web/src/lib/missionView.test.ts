@@ -95,7 +95,7 @@ function switchNote(assignmentId: string, from: string, to: string, model: strin
     from_identity: from,
     to_identity: to,
     model,
-    reason: '週額度用完，換下一個身分',
+    reason: '週額度用完，換下一個身份',
     message: "You've hit your usage limit",
     needs_review: true,
   })
@@ -107,14 +107,14 @@ test('撞限換手讀 daemon 的 from_identity／to_identity，而且 note 不�
   const v = missionView(mission({ phase: 'executing' }), [switchNote('a-first', 'cc2', 'cc1', 'opus')], [parent, child])
   assert.deepEqual(
     v.handoffs.map((h) => [h.from, h.to, h.model, h.reason]),
-    [['cc2', 'cc1', 'opus', '週額度用完，換下一個身分']],
+    [['cc2', 'cc1', 'opus', '週額度用完，換下一個身份']],
     '同一次換手只算一行（交辦那邊推得出來的不再多一行「? → ?」）',
   )
   assert.equal(v.actors[0].bot, 'exec-b', '角色指向接手的那一顆，不是 daemon')
 })
 
-test('撞限換手後角色的身分指向接手的那一個，不沿用撞限那顆的身分', () => {
-  // 接手的新 bot 還沒送出任何事件時，身分不能還是剛撞限的 cc2（daemon 的 note 寫的是 to_identity=cc1）。
+test('撞限換手後角色的身份指向接手的那一個，不沿用撞限那顆的身份', () => {
+  // 接手的新 bot 還沒送出任何事件時，身份不能還是剛撞限的 cc2（daemon 的 note 寫的是 to_identity=cc1）。
   const parent = asg({ id: 'a-first', target_bot_id: 'exec-a', status: 'awaiting_review', turn_status: 'identity_switch', turn_error: 'usage limit' })
   const child = asg({ follow_up_of: 'a-first', target_bot_id: 'exec-b' })
   const v = missionView(
@@ -126,17 +126,17 @@ test('撞限換手後角色的身分指向接手的那一個，不沿用撞限�
   assert.equal(v.actors[0].identity, 'cc1', '撞限的是 cc2，現在跑的是 cc1')
 })
 
-test('沒有第二個身分當 reviewer：讀 daemon 記的 decision，之後真的派出 reviewer 就撤掉標記', () => {
+test('沒有第二個身份當 reviewer：讀 daemon 記的 decision，之後真的派出 reviewer 就撤掉標記', () => {
   const note = ev('note', '改走執行者自審＋驗證者把關', { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 有額度' } })
   assert.equal(missionView(mission(), [note], [asg({ role: 'executor' })]).soloReview, true)
   const later = asg({ role: 'reviewer', created_at: '2026-09-13T09:00:00Z' })
   assert.equal(missionView(mission(), [note], [asg({ role: 'executor' }), later]).soloReview, false)
 })
 
-test('停下來問人：原因、細節、問句、各身分的 Fable 重置時間都在卡片上', () => {
+test('停下來問人：原因、細節、問句、各身份的 Fable 重置時間都在卡片上', () => {
   const m = mission({
     paused_reason: 'no_fable_for_verifier',
-    paused_detail: '三個身分的 Fable 週桶都見底了',
+    paused_detail: '三個身份的 Fable 週桶都見底了',
     status: 'paused',
   })
   const v = missionView(m, [
@@ -146,7 +146,7 @@ test('停下來問人：原因、細節、問句、各身分的 Fable 重置時�
       reason: 'no_fable_for_verifier',
       decision: {
         decision: 'ask_user',
-        reason: '三個身分的 Fable 週桶都見底了',
+        reason: '三個身份的 Fable 週桶都見底了',
         resets: [
           { identity: 'cc2', resets_at: '2026-09-14T00:00:00Z' },
           { identity: 'cc1', resets_at: '2026-09-15T00:00:00Z' },
@@ -218,7 +218,7 @@ function asg(over: Partial<import('../api/types.ts').MissionAssignment> = {}) {
   }
 }
 
-test('角色以交辦為準：bot 用 target_bot_id，身分／模型補事件裡的', () => {
+test('角色以交辦為準：bot 用 target_bot_id，身份／模型補事件裡的', () => {
   const v = missionView(
     mission({ phase: 'reviewing' }),
     [ev('report', '開工', { role: 'executor', bot: '舊的名字', identity: 'cc2', model: 'opus' })],
@@ -263,7 +263,7 @@ test('已結案的欄位仍然壓過 daemon 的 phase（cancelled / done / pause
 })
 
 test('交辦的狀態講成人話：turn_status 比 status 精確，認不得的原樣顯示', () => {
-  assert.equal(assignmentLabel(asg({ status: 'awaiting_review', turn_status: 'identity_switch' })), '撞限，等 AGM 換身分接手')
+  assert.equal(assignmentLabel(asg({ status: 'awaiting_review', turn_status: 'identity_switch' })), '撞限，等 AGM 換身份接手')
   assert.equal(assignmentLabel(asg({ status: 'awaiting_review', turn_status: 'quota_exhausted' })), '沒有可用額度')
   assert.equal(assignmentLabel(asg({ status: 'awaiting_review' })), '等 AGM 驗收')
   assert.equal(assignmentLabel(asg({ status: 'quota_blocked' })), '等額度重置')
@@ -345,16 +345,16 @@ test('等額度說明照任務的 5h 撞限選項講，看得到預計重送時�
   assert.match(wait, /等重置/)
   assert.match(wait, /<2026-09-13T08:00:00Z>/)
   const sw = quotaWaitText({ on_5h_limit: 'switch', executor_kind: 'claude' }, blocked, fmt)
-  assert.doesNotMatch(sw, /選的「等重置」/, '選了換身分的任務不能說是自己選了等')
-  assert.match(sw, /身分額度都用完/)
+  assert.doesNotMatch(sw, /選的「等重置」/, '選了換身份的任務不能說是自己選了等')
+  assert.match(sw, /身份額度都用完/)
   assert.match(quotaWaitText({ on_5h_limit: 'switch', executor_kind: 'codex' }, null), /codex 只有一把額度/)
 })
 
-test('撞限的交辦已經由接手的那件續做：父列不再說「等 AGM 換身分接手」（接手的交辦已經在跑）', () => {
+test('撞限的交辦已經由接手的那件續做：父列不再說「等 AGM 換身份接手」（接手的交辦已經在跑）', () => {
   const parent = asg({ id: 'a-parent', status: 'awaiting_review', turn_status: 'identity_switch' })
   const child = asg({ id: 'a-child', follow_up_of: 'a-parent', status: 'delivered', target_bot_id: 'mission-exec-2' })
   // 父列 daemon 不改狀態（只寫 followup_assignment_id），網頁要靠子列指回它判斷。
-  assert.equal(assignmentLabel(parent), '撞限，等 AGM 換身分接手', '沒有接手的那件時照舊')
-  assert.equal(assignmentLabel(parent, true), '已換身分接手（見下一件）')
+  assert.equal(assignmentLabel(parent), '撞限，等 AGM 換身份接手', '沒有接手的那件時照舊')
+  assert.equal(assignmentLabel(parent, true), '已換身份接手（見下一件）')
   assert.equal(assignmentLabel(child), '進行中')
 })

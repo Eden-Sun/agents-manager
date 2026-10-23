@@ -6,8 +6,8 @@ import { useStore } from '../store/store'
 import './loginPromptBanner.css'
 
 /**
- * 主動提示：某個 claude 身分被登出（探測說未登入，或綁著它的 bot 回合因授權失敗收尾），而且有 bot 綁著它——
- * 主畫面最上面一條「cc1（m4p）已登出 → 立即登入」，手機也看得到，不必自己去環境設定的身分列找（#838 補充，使用者 2026-10-04）。
+ * 主動提示：某個 claude 身份被登出（探測說未登入，或綁著它的 bot 回合因授權失敗收尾），而且有 bot 綁著它——
+ * 主畫面最上面一條「cc1（m4p）已登出 → 立即登入」，手機也看得到，不必自己去環境設定的身份列找（#838 補充，使用者 2026-10-04）。
  * 「立即登入」走 `loginIdentity`＝打開 #838 的登入協助面板（打開登入網站＋貼 code）；登入成功（探測回已登入／daemon 清掉記號）提示自己消失。
  * 「先關掉」只對這一次登出有效、只存這一頁（`loginPromptDismissed`）。判斷都在 `lib/loginPrompt.ts`。
  */
@@ -57,7 +57,7 @@ export function LoginPromptBanner() {
             <button
               type="button"
               className="btn lpb-dismiss"
-              title={t('這一次先不提示（這個畫面；身分又被登出時會再提示）')}
+              title={t('這一次先不提示（這個畫面；身份又被登出時會再提示）')}
               onClick={() => dismiss(p.host, p.identity, p.episode)}
             >
               {t('先關掉')}

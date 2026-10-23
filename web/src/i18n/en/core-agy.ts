@@ -87,7 +87,7 @@ const dict: Dict = {
   'reviewer 退回／驗證失敗用掉的來回次數': 'Rounds used for reviewer rejections or verification failures',
   '來回 {used}/{max}': 'Rounds {used}/{max}',
   '進度': 'Progress',
-  '找不到第二個可用身分，改由執行者自審＋驗證者把關': 'No second identity available; runner self-reviews and verifier guards',
+  '找不到第二個可用身份，改由執行者自審＋驗證者把關': 'No second identity available; runner self-reviews and verifier guards',
   '無獨立 reviewer': 'No independent reviewer',
   '接手': 'Take over',
   '撞限換手': 'Rate limit handoff',

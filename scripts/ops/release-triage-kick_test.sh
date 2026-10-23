@@ -267,7 +267,7 @@ export STUB_QUOTA_JSON='{"kinds":{"codex":{"five_hour":{"used_pct":99.0},"limit_
 bash "$SCRIPT"
 equals "看別的 kind 的額度不影響 claude bot（找不到格＝照派）" "$(assigns)" "1"
 teardown
-# 5b. 額度認的是「被派的那顆 bot 的身分」：release_bot_id 的 identity 是 cc1 → 看 claude:cc1 這一格。
+# 5b. 額度認的是「被派的那顆 bot 的身份」：release_bot_id 的 identity 是 cc1 → 看 claude:cc1 這一格。
 setup
 cp "$HERE/fixtures/herdr-update-runtime.json" "$AGM_DIR/runtime.json"
 mk_pending claude 2.1.278 2.1.278; mk_empty codex

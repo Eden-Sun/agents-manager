@@ -1,5 +1,5 @@
 /**
- * `useMediaQuery` 每次 render 都會重新訂閱：subscribe 是行內箭頭函式，React 看到身分變了就 unsubscribe＋subscribe。
+ * `useMediaQuery` 每次 render 都會重新訂閱：subscribe 是行內箭頭函式，React 看到身份變了就 unsubscribe＋subscribe。
  * 一個頁面有十幾顆元件用它，每次 render 都在 matchMedia 上加一次、拿掉一次監聽。這裡數 addEventListener 的次數。
  */
 import test, { after, afterEach, before } from 'node:test'

@@ -418,8 +418,8 @@ class FakeRadioTui {
   submitted = false
 
   private readonly pages = [
-    { label: '換身分門檻', q: 'cc2 撞到哪一種才換下一個身分？', opts: ['7d 或 limit_hit 才換', '任一桶撞限就換', '只看 7d'] },
-    { label: 'Fable 用完', q: 'Fable 用完怎麼辦？', opts: ['切 opus', '換身分', '停住等'] },
+    { label: '換身份門檻', q: 'cc2 撞到哪一種才換下一個身份？', opts: ['7d 或 limit_hit 才換', '任一桶撞限就換', '只看 7d'] },
+    { label: 'Fable 用完', q: 'Fable 用完怎麼辦？', opts: ['切 opus', '換身份', '停住等'] },
     { label: '執行者 kind', q: '執行者用哪一種？', opts: ['跟 PM 同一 kind', '固定 grok', '隨便'] },
     { label: '推 main 失敗', q: 'push 被拒怎麼辦？', opts: ['rebase 再推', '開 PR', '停住'] },
   ]

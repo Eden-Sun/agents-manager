@@ -49,7 +49,7 @@ pub fn remote_hook_sh(root: &str) -> String {
 }
 
 const REMOTE_HOOK_SH_TEMPLATE: &str = r#"#!/bin/sh
-# 子 agent 的 pane（帶 AM_CHILD_OF）繼承的是母 bot 的身分：不送、也不 spool（#1004 本機、#1031 遠端）。
+# 子 agent 的 pane（帶 AM_CHILD_OF）繼承的是母 bot 的身份：不送、也不 spool（#1004 本機、#1031 遠端）。
 [ -z "${AM_CHILD_OF:-}" ] || exit 0
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
 LIMIT=1048576
@@ -675,10 +675,10 @@ fn instance_gate(instance: Option<&str>) -> String {
 ///
 /// 第三個參數是 [`REMOTE_TOKEN_SLOT`]，跟 claude／codex 一樣（issue #43、#495）：`hook.sh` 根本不讀它
 /// （`: "$TOKEN"`），而真的 token 上了 argv 就等於印在那台機器的 `ps` 上。pane env 的 `AM_HOOK_TOKEN`
-/// 仍然是身分的來源，上面那個 `-n` 檢查也還在——只是不再把它的值傳下去。
+/// 仍然是身份的來源，上面那個 `-n` 檢查也還在——只是不再把它的值傳下去。
 pub fn remote_grok_dispatch_sh(root: &str, instance: Option<&str>) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n# 子 agent 的 pane 繼承母 bot 的身分，這裡就不送（#1031，同 hook.sh）。\n[ -z \"${{AM_CHILD_OF:-}}\" ] || exit 0\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" {slot}\n",
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n# 子 agent 的 pane 繼承母 bot 的身份，這裡就不送（#1031，同 hook.sh）。\n[ -z \"${{AM_CHILD_OF:-}}\" ] || exit 0\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" {slot}\n",
         gate = instance_gate(instance),
         slot = REMOTE_TOKEN_SLOT,
     )
@@ -1256,7 +1256,7 @@ pub async fn pane_env_for_fence(
             }
         }
     }
-    // issue #1775：這台看得到的身分清單，母 pane 的 herdr shim 查 `agent start --identity <名>` 用（只給母 pane，子 pane 不往下傳）。
+    // issue #1775：這台看得到的身份清單，母 pane 的 herdr shim 查 `agent start --identity <名>` 用（只給母 pane，子 pane 不往下傳）。
     let identities = crate::tools::identities_for_host(app, host).await;
     env.insert("AM_IDENTITIES".into(), json!(crate::lifecycle::pane_identities::identities_env(&identities, &home)));
     for (k, v) in bot.env() {
@@ -1363,12 +1363,12 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 要指定模型才加 `--model <模型>`，codex 的旗標一律放在 `--` 之後、子命令（`fork`／`resume`）之前，例：`-- --model <模型> fork --last`。\
 **啟動不帶派工 prompt**：先用 `herdr agent get <名稱>` 確認登錄的 pane 等於新 pane，並等到 idle／ready，再 `herdr agent prompt <名稱> \"<派工 prompt>\"`。\
 start 逾時或名稱查不到時，child 可能已在執行；先用 `herdr agent list`／`get` 核對，**禁止直接重開或對未確認的名稱派工**。\
-換身分就在 `--` 之前加 `--identity <身分>`（可用的身分看 `$AM_IDENTITIES`）。\
+換身份就在 `--` 之前加 `--identity <身份>`（可用的身份看 `$AM_IDENTITIES`）。\
 **agy 子 agent 的模型**：除非使用者指定，**禁止**帶 `--model`，PATH 上的 herdr 會補最低強度 `gemini-3.8-flash-low`；使用者點名模型或強度才帶 `-- --model <slug>`（例 `gemini-3.8-flash-high`）。\
 PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
-- **環境變數與身分**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止**自己 export／`env -u`／`unset` 這些變數。\
-要讓子 agent 用別的身分：`herdr agent start <名稱> --kind <kind> --pane <新 pane> --identity <身分> -- …`（`--identity` 寫在 `--` 之前）；\
-這台可用的身分看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
+- **環境變數與身份**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止**自己 export／`env -u`／`unset` 這些變數。\
+要讓子 agent 用別的身份：`herdr agent start <名稱> --kind <kind> --pane <新 pane> --identity <身份> -- …`（`--identity` 寫在 `--` 之前）；\
+這台可用的身份看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
 - **派工 prompt 必須寫明**：「你是 `{agent_name}` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\
@@ -1438,7 +1438,7 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 /// Only the description line inside the front matter is touched; the rest of herdr's document
 /// is the CLI's own authority on its commands and is passed through untouched, so a herdr
 /// upgrade brings its new text along.
-/// skill 檔一個身分一份，同身分的每顆 bot 與子 agent 都讀同一份：不能寫死某一顆的名字（#1121）。
+/// skill 檔一個身份一份，同身份的每顆 bot 與子 agent 都讀同一份：不能寫死某一顆的名字（#1121）。
 const SKILL_AGENT_NAME: &str = "$AM_AGENT_NAME";
 
 fn herdr_skill_doc(raw: &str) -> String {
@@ -1481,7 +1481,7 @@ fn herdr_skill_doc(raw: &str) -> String {
     out
 }
 
-/// 遠端寫 skill：`mktemp` 給每次的暫存檔獨一個名字（同身分兩顆 bot 同時啟動不互踩，#1121），trap 收尾；
+/// 遠端寫 skill：`mktemp` 給每次的暫存檔獨一個名字（同身份兩顆 bot 同時啟動不互踩，#1121），trap 收尾；
 /// 內容相同就不換（保留 mtime），不同才 `mv`。
 fn remote_skill_script(dir: &str, doc: &str) -> String {
     format!(
@@ -1544,7 +1544,7 @@ async fn install_herdr_skill_local(cfg_dir: Option<String>) -> anyhow::Result<()
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
-    // 同目錄暫存檔再 rename：同身分的 claude 可能正在讀這份檔，不能就地截斷重寫（#1121）。
+    // 同目錄暫存檔再 rename：同身份的 claude 可能正在讀這份檔，不能就地截斷重寫（#1121）。
     let tmp = dir.join(format!(".SKILL.md.{}.tmp", db::ulid()));
     std::fs::write(&tmp, &doc)?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
@@ -1735,7 +1735,7 @@ mod hook_cmd_parts_tests {
     }
 
     /// 遠端 Stop 會把 transcript 最後一句人話帶進 spool。路徑必須是這顆 bot 的
-    /// `CLAUDE_CONFIG_DIR/projects` 底下的一般檔：別的身分、或 FIFO，都不能讀。
+    /// `CLAUDE_CONFIG_DIR/projects` 底下的一般檔：別的身份、或 FIFO，都不能讀。
     #[test]
     fn macos_local_remote_hook_reads_only_this_bots_transcript_and_does_not_block_on_a_fifo() {
         let home = crate::testing::track(std::env::temp_dir().join(format!("am-hooksh-{}", crate::db::ulid())));
@@ -2039,7 +2039,7 @@ mod model_args_tests {
         assert!(doc.find("AG Man 規則").unwrap() < doc.find("herdr organizes").unwrap());
     }
 
-    /// 一個身分一份檔、多顆 bot 共用：規則裡不能寫死任何一顆的名字（#1121）。
+    /// 一個身份一份檔、多顆 bot 共用：規則裡不能寫死任何一顆的名字（#1121）。
     #[test]
     fn the_herdr_skill_names_no_particular_bot() {
         let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n");
@@ -2048,7 +2048,7 @@ mod model_args_tests {
         assert!(!doc.contains("proj-abc123"), "{doc}");
     }
 
-    /// 遠端寫檔用獨一的暫存檔名，不再是固定的 `.SKILL.md.new`（兩顆同身分的 bot 同時啟動會互相截斷）。
+    /// 遠端寫檔用獨一的暫存檔名，不再是固定的 `.SKILL.md.new`（兩顆同身份的 bot 同時啟動會互相截斷）。
     #[test]
     fn the_remote_skill_script_uses_a_private_temp_file() {
         let script = super::remote_skill_script("/home/u/.claude/skills/herdr", "x");
@@ -2712,7 +2712,7 @@ mod remote_hook_tests {
         }
     }
 
-    /// #1031：子 agent 的 pane 帶 `AM_CHILD_OF`，它繼承的是母 bot 的身分：遠端 hook 不 spool、也不叫 herdr；沒帶就照舊。
+    /// #1031：子 agent 的 pane 帶 `AM_CHILD_OF`，它繼承的是母 bot 的身份：遠端 hook 不 spool、也不叫 herdr；沒帶就照舊。
     #[test]
     fn a_child_pane_never_spools_a_remote_hook_as_its_parent() {
         let sb = Sandbox::new(true);
@@ -2763,7 +2763,7 @@ mod remote_hook_tests {
             let remote = super::remote_grok_dispatch_sh(&root, slug);
             let local = super::local_grok_dispatch_sh("/x/agents-managerd", "/x/data", slug);
             for s in [&remote, &local] {
-                assert!(s.contains("[ -n \"$AM_HOOK_TOKEN\" ]"), "身分判斷要留著：{s}");
+                assert!(s.contains("[ -n \"$AM_HOOK_TOKEN\" ]"), "身份判斷要留著：{s}");
                 let after_exec = s.split_once("exec").expect("dispatcher 以 exec 收尾").1;
                 assert!(!after_exec.contains("$AM_HOOK_TOKEN"), "exec 之後不准再出現 token：{s}");
             }
@@ -3339,7 +3339,7 @@ mod pane_env_tests {
     }
 
     /// #92 live-SSH：CLI 只裝在遠端的 `~/.local/bin`（`remote_path` 就是為這個設的），pane 的 PATH 卻寫死成
-    /// issue #1775：母 pane 的 shim 用 `AM_IDENTITIES` 查 `agent start --identity <名>`。只列那台看得到的身分
+    /// issue #1775：母 pane 的 shim 用 `AM_IDENTITIES` 查 `agent start --identity <名>`。只列那台看得到的身份
     /// （別台的 cc9 不列），帳號目錄展開成那台的家目錄，其他 key（這裡的 API key）不進清單。
     #[tokio::test]
     async fn a_pane_lists_the_identities_its_host_can_use_for_the_shim() {
@@ -3489,7 +3489,7 @@ mod pane_env_tests {
         env.app
             .cfg
             .update(|cfg| {
-                // 這個測試測的是 pane_env 的合併順序，不是身分的 host 範圍：兩台各放一份同名的，
+                // 這個測試測的是 pane_env 的合併順序，不是身份的 host 範圍：兩台各放一份同名的，
                 // 本機那份不寫 host（＝現行 config.toml 的形狀），遠端那份明寫 host（SPEC §16.2）。
                 let forged = || -> std::collections::BTreeMap<String, String> {
                     [("ID_ONLY", "kept")]

@@ -1,4 +1,4 @@
-//! 身分（`cc0`／`cc1`／`cc2`…）是**有 kind 的**（SPEC §16）。
+//! 身份（`cc0`／`cc1`／`cc2`…）是**有 kind 的**（SPEC §16）。
 //!
 //! 2026-09-14 使用者指正：cc0／cc1／cc2 是 Claude Code 的帳號代號，跟 codex 無關，codex 不該有任何
 //! `codex:ccN` 的 quota key。實際根因是 codex 子 agent 從 claude 母 bot **原封不動抄了母 bot 的
@@ -10,13 +10,13 @@
 //!
 //! 1. [`child_identity`]：收編時只繼承**同 kind** 母 bot 的 identity。
 //! 2. `quota::quota_base_for_host` 在 identity 的 kind 跟 bot 不同時寫裸 kind（見那邊）。
-//! 3. [`cleanup_host`]：每次偵測完一台主機的身分，清掉既有 bot 身上 kind 不符的 identity，以及
+//! 3. [`cleanup_host`]：每次偵測完一台主機的身份，清掉既有 bot 身上 kind 不符的 identity，以及
 //!    quota 表裡因此留下的殘留 key。
 
 use std::sync::Arc;
 
 /// 子 agent 從母 bot 繼承的 identity：同 kind 才繼承，不同 kind 一律不帶（由 CLI 自己的預設帳號跑，
-/// 之後 `pane_identity::sync_child_identity` 會照它 pane 真正的帳號目錄補回同 kind 的身分）。
+/// 之後 `pane_identity::sync_child_identity` 會照它 pane 真正的帳號目錄補回同 kind 的身份）。
 pub fn child_identity(parent_identity: Option<&str>, parent_kind: &str, child_kind: &str) -> Option<String> {
     if parent_kind != child_kind {
         return None;
@@ -24,10 +24,10 @@ pub fn child_identity(parent_identity: Option<&str>, parent_kind: &str, child_ki
     parent_identity.map(str::trim).filter(|s| !s.is_empty()).map(String::from)
 }
 
-/// 清理一台主機：kind 不符的 identity 設回 NULL、quota 表裡 `<kind>:<ccN>`（ccN 是別的 kind 的身分）
+/// 清理一台主機：kind 不符的 identity 設回 NULL、quota 表裡 `<kind>:<ccN>`（ccN 是別的 kind 的身份）
 /// 那種殘留 key 刪掉。回傳（清掉幾顆 bot, 刪掉幾把 key）。
 ///
-/// 只在這台主機的身分**已經偵測到**時才動手：偵測前 `identities_for_host` 可能只有 config 那幾筆，
+/// 只在這台主機的身份**已經偵測到**時才動手：偵測前 `identities_for_host` 可能只有 config 那幾筆，
 /// 拿不完整的表去判「不符」會誤殺。使用者自己建的 bot（`managed_by = 'user'`）的 identity 是
 /// `config.toml` 的設定、會被投影寫回，daemon 不從這裡改它，只記 warn——那種組合本來就過不了
 /// API 的檢查，出現了代表有人手改設定檔。
@@ -70,7 +70,7 @@ pub async fn cleanup_host(app: &Arc<impl crate::capabilities::Db + crate::capabi
         }
     }
 
-    // quota 表：`<host>/<kind>:<name>`（或本機的 `<kind>:<name>`），name 是別的 kind 的身分 → 殘留。
+    // quota 表：`<host>/<kind>:<name>`（或本機的 `<kind>:<name>`），name 是別的 kind 的身份 → 殘留。
     let mut removed = Vec::new();
     {
         let mut quotas = app.quotas().lock().await;
@@ -175,7 +175,7 @@ mod tests {
             let b = b.to_string();
             async move { crate::db::bot(&app.db, &b).await.unwrap().unwrap().identity }
         };
-        assert_eq!(id_of(&rtsp).await, None, "codex 子 agent 身上的 claude 身分清掉");
+        assert_eq!(id_of(&rtsp).await, None, "codex 子 agent 身上的 claude 身份清掉");
         assert_eq!(id_of(&keep).await.as_deref(), Some("cc1"), "同 kind 的留著");
         assert_eq!(id_of(&user).await.as_deref(), Some("cc0"), "使用者的設定不從這裡改，只記 warn");
         let q = app.quotas.lock().await;

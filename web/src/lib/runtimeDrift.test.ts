@@ -113,7 +113,7 @@ test('#712：codex 0.157 狀態列印顯示名 GPT-6-Luna，跟設定 gpt-6-luna
   assert.deepEqual(runtimeDrift(bot({ model: 'gpt-6-luna' }), run({ runtime_model: 'GPT-6-Sol' })).map((x) => x.field), ['model'])
 })
 
-test('#541：查額度用 run 實際起來的身分，沒有 active run 才退回設定值', () => {
+test('#541：查額度用 run 實際起來的身份，沒有 active run 才退回設定值', () => {
   // 改成 cc2、還沒重啟：燒的仍是 cc1 的額度。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: 'cc1' })), 'cc1')
   // daemon 記的空字串＝本機預設帳號（不是「不知道」）：要查裸 kind，不能用設定值 cc2。

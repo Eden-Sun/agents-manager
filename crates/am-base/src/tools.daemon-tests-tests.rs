@@ -3,7 +3,7 @@
     use crate::state::App;
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
     /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
-    /// 也不能因此讓遠端用不到它：codex／grok 身分只可能寫在 config 裡（review 2026-09-16 M6）。
+    /// 也不能因此讓遠端用不到它：codex／grok 身份只可能寫在 config 裡（review 2026-09-16 M6）。
     #[tokio::test]
     async fn a_config_identity_without_a_host_applies_everywhere_but_yields_to_that_hosts_own() {
         let env = crate::testing::env().await;
@@ -31,8 +31,8 @@
         let local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await;
         assert_eq!(dir_of(local, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
-        // 遠端還沒偵測：codex 身分馬上能用（那台不可能有同名 shell 身分）；`ccN` 要等那台的 alias 讀過。
-        assert_eq!(dir_of(identity_for_host(app, "m4p", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身分只能寫在 config 裡，遠端要用得到");
+        // 遠端還沒偵測：codex 身份馬上能用（那台不可能有同名 shell 身份）；`ccN` 要等那台的 alias 讀過。
+        assert_eq!(dir_of(identity_for_host(app, "m4p", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身份只能寫在 config 裡，遠端要用得到");
         assert!(identity_for_host(app, "m4p", "cc1").await.is_none(), "還不知道 m4p 有沒有自己的 cc1");
 
         // m4p 偵測到自己的 cc1：那台的說了算，不被本機那筆遮蔽。
@@ -63,7 +63,7 @@
         assert!(identity_for_host(app, crate::config::LOCAL_HOST, "solo").await.is_some());
     }
 
-    /// 本機：沒寫 host 的 config 身分仍然蓋過同名的 shell alias（現行行為），偵測登入狀態用的清單跟啟動用的是同一份。
+    /// 本機：沒寫 host 的 config 身份仍然蓋過同名的 shell alias（現行行為），偵測登入狀態用的清單跟啟動用的是同一份。
     #[test]
     fn detection_and_start_share_one_precedence() {
         let c = |name: &str, host: Option<&str>| crate::config::IdentityCfg { name: name.into(), kind: "claude".into(), host: host.map(String::from), env: Default::default(), args: vec![] };
@@ -657,8 +657,8 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(marker(&app).await, None);
     }
 
-    /// #347：登入／登出 watcher 開在 A 機的 pane 上，主機名改指到 B，B 上剛好也有同 id 的 pane、同名身分。
-    /// 舊 watcher 放行後不能看 B 的 pane 做判斷、不能把 B 的身分記成登出、也不能關掉 B 的 pane。
+    /// #347：登入／登出 watcher 開在 A 機的 pane 上，主機名改指到 B，B 上剛好也有同 id 的 pane、同名身份。
+    /// 舊 watcher 放行後不能看 B 的 pane 做判斷、不能把 B 的身份記成登出、也不能關掉 B 的 pane。
     #[tokio::test]
     async fn a_login_watcher_from_the_old_connection_leaves_the_new_host_alone() {
         let env = crate::testing::env().await;
@@ -700,7 +700,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         tokio::time::sleep(Duration::from_millis(2000)).await;
 
         let logged_in = app.tools.lock().await.get(host).and_then(|t| t.identities.get("cc1").and_then(|i| i.logged_in));
-        assert_eq!(logged_in, Some(true), "B 的身分不能被 A 的登出記成未登入");
+        assert_eq!(logged_in, Some(true), "B 的身份不能被 A 的登出記成未登入");
         assert!(herdr_b.calls_to("pane.close").is_empty(), "B 上同 id 的 pane 不能被關：{:?}", herdr_b.methods());
         assert!(herdr_b.calls_to("pane.process_info").is_empty(), "連看都不該去看 B 的 pane：{:?}", herdr_b.methods());
         let _ = std::fs::remove_dir_all(&dir);

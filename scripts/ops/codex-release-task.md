@@ -28,7 +28,7 @@ AGM 交辦：Codex CLI 出新版了，請解析這一版有什麼**這個專案�
 - 啟動參數：`lifecycle/start.rs` 固定帶的旗標（`--no-alt-screen`、`--no-daemon` 等）有沒有改名、預設有沒有翻面。
 - 送達與畫面判讀：`lifecycle/delivery.rs`、`lifecycle/screen.rs`、`codex_live.rs`（狀態列、composer、回覆擷取、更新提示 `codex_update.rs`）。
 - 額度：`quota.rs` 讀 codex 狀態列與撞限橫幅。
-- hook 與 session：`hookrecv.rs`、`codex resume`／`codex fork`、`CODEX_HOME` 隔離身分。
+- hook 與 session：`hookrecv.rs`、`codex resume`／`codex fork`、`CODEX_HOME` 隔離身份。
 
 回報（就是給使用者的通知，三到五行；同一段也會顯示在 header codex 安裝確認框的右欄）：**先一句結論：適不適合現在升級**（header 按下去就會換掉所有 codex bot 共用的那顆 binary），
 再列該提防的（會弄壞畫面判讀、按鍵、啟動參數、額度讀取的改動，每項一句＋對應檔案）、新版版本號、值得用的項目（每項一句：是什麼、對應我們哪個痛點、要改哪個檔）、明確沒用的略過不列、以及你建議的下一步（要不要派人改、要不要升級）。沒有值得用的就一句「本次無」。**不要**在這則交辦裡直接改程式、升級或部署；要改另外走既有的派工與核准流程。

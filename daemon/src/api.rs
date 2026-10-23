@@ -205,7 +205,7 @@ async fn json_rejections(req: axum::extract::Request, next: Next) -> Response {
     (status, Json(json!({"error": "bad_request", "message": String::from_utf8_lossy(&bytes)}))).into_response()
 }
 
-/// AGM 的管理面 route layer：被證明身分的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
+/// AGM 的管理面 route layer：被證明身份的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
 macro_rules! agm_gate {
     ($app:expr) => {
         axum::middleware::from_fn_with_state($app.clone(), crate::runners::supervisor::gate_plain_bots)
@@ -358,7 +358,7 @@ pub fn router(app: Arc<App>) -> Router {
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
         .route("/supervisor", get(crate::runners::supervisor::api::get_supervisor).layer(agm_gate!(app)))
         .route("/supervisor/health", get(crate::runners::supervisor::api::get_health).layer(agm_gate!(app)))
-        // AGM 的管理面：被證明身分的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
+        // AGM 的管理面：被證明身份的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
         .route("/supervisor/setup", post(crate::runners::supervisor::api::post_setup).layer(agm_gate!(app)))
         .route("/supervisor/start", post(crate::runners::supervisor::api::post_start).layer(agm_gate!(app)))
         .route("/supervisor/stop", post(crate::runners::supervisor::api::post_stop).layer(agm_gate!(app)))
@@ -743,7 +743,7 @@ mod relay_announce_tests {
         flow_tests::configure_responder(&app).await;
         sqlx::query("UPDATE bots SET name='renamed-role' WHERE id='resp'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE bots SET name='AGM-responder' WHERE id='w2'").execute(&app.db).await.unwrap();
-        let (code, body) = announce(&app, "resp", "交辦給穩定的角色身分").await;
+        let (code, body) = announce(&app, "resp", "交辦給穩定的角色身份").await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["routed"], "responder");
         assert_eq!(bot_requests(&app).await, 1);
@@ -1875,8 +1875,8 @@ fn expand_dir_path(raw: Option<&str>, home: &std::path::Path) -> Result<String, 
     }
 }
 
-/// 目錄瀏覽不該列的地方（憑證、金鑰、daemon 自己的資料與各 CLI 的設定／身分目錄）。純判斷，可測。
-/// 用 component 比（`.sshx` 不是 `.ssh`，`.claudeish` 不是 `.claude`）；身分目錄 `~/.claude-<名>` 整族都擋。
+/// 目錄瀏覽不該列的地方（憑證、金鑰、daemon 自己的資料與各 CLI 的設定／身份目錄）。純判斷，可測。
+/// 用 component 比（`.sshx` 不是 `.ssh`，`.claudeish` 不是 `.claude`）；身份目錄 `~/.claude-<名>` 整族都擋。
 fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std::path::Path) -> bool {
     if path.starts_with(data_dir) {
         return true;
@@ -1951,7 +1951,7 @@ fn local_dir_entries(path: &std::path::Path, hidden: bool) -> std::io::Result<(V
 }
 
 async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
-    // SPEC §11.5。DirPicker 專用：pane 裡的 bot（拿得到自己的 token）不能借 daemon 的身分去列本機、更不能經 daemon 的 ssh 列別台主機。
+    // SPEC §11.5。DirPicker 專用：pane 裡的 bot（拿得到自己的 token）不能借 daemon 的身份去列本機、更不能經 daemon 的 ssh 列別台主機。
     if principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
@@ -2506,8 +2506,8 @@ fn remap_model(kind: &str, model: Option<&str>) -> (Option<String>, Option<Value
     }
 }
 
-/// 寫 config 時 `projection::validate` 在 config 鎖裡擋下的「bot 指到不存在的身分」。檢查與寫入是同一個原子步驟，
-/// 所以 `create_bot` 驗過身分之後、寫入之前被刪掉，或 `delete_identity` 查完之後、刪除之前有 bot 開始用，都不會留下孤兒身分；
+/// 寫 config 時 `projection::validate` 在 config 鎖裡擋下的「bot 指到不存在的身份」。檢查與寫入是同一個原子步驟，
+/// 所以 `create_bot` 驗過身份之後、寫入之前被刪掉，或 `delete_identity` 查完之後、刪除之前有 bot 開始用，都不會留下孤兒身份；
 /// 只是兩邊本來都回籠統的 400 `config_invalid`，這裡翻成呼叫端分得出的碼（404 identity／409 identity still used by bots）。
 fn is_unknown_identity(e: &anyhow::Error) -> bool {
     e.downcast_ref::<crate::projection::ConfigInvalid>().is_some_and(|c| c.0.contains("references unknown identity"))
@@ -3552,7 +3552,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         abandon_pending_restart(&mut *tx, &id).await.map_err(any_err)?;
         tx.commit().await.map_err(any_err)?;
     } else {
-        // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
+        // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身份起。
         let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let env = serde_json::from_str(&bot.env_json).map_err(|e| LcError::conflict("bot env_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let entry = crate::config::BotCfg {
@@ -3657,7 +3657,7 @@ struct NewHost {
 // delete so a concurrent same-name request cannot remove or install a stale connection afterward.
 static HOST_CONFIG_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 這次更新會不會改變「這個名字指到哪台機器或 SSH 身分」。`ssh_opts` 可以改 `User`、`IdentityFile` 等登入身分，
+/// 這次更新會不會改變「這個名字指到哪台機器或 SSH 身份」。`ssh_opts` 可以改 `User`、`IdentityFile` 等登入身份，
 /// 因此有 live project 時任何 `ssh_opts` 變更都要明確確認；`remote_path` 只影響同一台上的工具路徑。
 fn repoints_host(old: &HostCfg, new: &HostCfg) -> bool {
     old.ssh != new.ssh || old.ssh_port != new.ssh_port || old.herdr_session != new.herdr_session || old.ssh_opts != new.ssh_opts
@@ -3975,7 +3975,7 @@ async fn logout_identity(
     identity_auth(app, name, identity, true).await
 }
 
-/// agy 沒有 `logout` 子命令也沒有身分：直接刪那台主機的憑證檔、清額度快照（`quota_agy::logout`）。
+/// agy 沒有 `logout` 子命令也沒有身份：直接刪那台主機的憑證檔、清額度快照（`quota_agy::logout`）。
 async fn logout_agy(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
@@ -4015,7 +4015,7 @@ async fn install_agy(
 }
 
 async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
-    // 沒寫 host 的身分在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
+    // 沒寫 host 的身份在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
     // 開 pane 之前記下主機權威，watcher 只對這一條連線收尾（#347）。
     let Some(fence) = app.hosts.fence(&name).await else {
         return Err(LcError::NotFound("host".into()));
@@ -4269,7 +4269,7 @@ mod identity_auth_error_tests {
 
     /// issue #544：`POST /api/hosts` 同時是新增與更新。把 `ssh` 改成指到**另一台機器**時，
     /// 要跟 `delete_host` 一樣先確認主機上沒有活著的專案——`apply_config` 換掉連線但不動 `runs`，
-    /// 那些 run 還帶著舊機器的 pane id。只改 `remote_path` 不會換機器，照樣放行；`ssh_opts` 可能切換登入身分。
+    /// 那些 run 還帶著舊機器的 pane id。只改 `remote_path` 不會換機器，照樣放行；`ssh_opts` 可能切換登入身份。
     #[tokio::test]
     async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_not() {
         let e = crate::testing::env().await;
@@ -4695,7 +4695,7 @@ mod identity_auth_error_tests {
         }
     }
 
-    /// API.md：host 不存在是 404。沒寫 host 的身分在遠端也生效，所以找不到主機時不能先走到
+    /// API.md：host 不存在是 404。沒寫 host 的身份在遠端也生效，所以找不到主機時不能先走到
     /// 「CLI 不在 PATH」那條 409——呼叫端會去裝 CLI，其實主機根本沒這台。
     #[tokio::test]
     async fn unknown_host_is_404_host_not_cli_missing() {
@@ -4805,7 +4805,7 @@ async fn host_shell_text(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為 claude 身分登入開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
+/// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為 claude 身份登入開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
 /// 網址不進 log／事件，所以不快取。不是登入 pane 一律 404。
 async fn host_shell_login_status(
     State(app): State<Arc<App>>,
@@ -5216,7 +5216,7 @@ mod project_tests {
         match err {
             LcError::Conflict(body) => {
                 assert_eq!(body["reason"], "projection_refused");
-                assert_eq!(body["config_written"], false, "落盤前就被擋，跟身分 API 的 config_written:true 相反：{body}");
+                assert_eq!(body["config_written"], false, "落盤前就被擋，跟身份 API 的 config_written:true 相反：{body}");
             }
             other => panic!("expected 409 projection_refused, got {other:?}"),
         }
@@ -5541,7 +5541,7 @@ mod delete_identity_tests {
         crate::config::IdentityCfg { name: name.into(), kind: kind.into(), host: host.map(String::from), env: Default::default(), args: vec![] }
     }
 
-    /// 沒寫 host 的身分在遠端也生效（quota 那顆 `dca3c4c`），除非那台有自己同名的（config 明寫、或 shell 的 `ccN`）。
+    /// 沒寫 host 的身份在遠端也生效（quota 那顆 `dca3c4c`），除非那台有自己同名的（config 明寫、或 shell 的 `ccN`）。
     #[test]
     fn a_hostless_identity_is_in_effect_on_a_remote_host_unless_that_host_has_its_own() {
         let hostless = vec![ident("work", "codex", None)];
@@ -5576,7 +5576,7 @@ mod delete_identity_tests {
         app.models_cache.lock().await.contains_key(key)
     }
 
-    /// #1349：刪掉再重建同名身分（家目錄變了）之後，那個名字的模型清單快取要作廢；別的身分的不動。
+    /// #1349：刪掉再重建同名身份（家目錄變了）之後，那個名字的模型清單快取要作廢；別的身份的不動。
     #[tokio::test]
     async fn deleting_or_recreating_an_identity_drops_its_cached_model_list() {
         let env = crate::testing::env().await;
@@ -5587,9 +5587,9 @@ mod delete_identity_tests {
         cache_put(app, "local/codex/other").await;
         let new = NewIdentity { name: "work".into(), kind: "codex".into(), env: Default::default(), args: vec![], host: None };
         create_identity(State(app.clone()), Json(new)).await.unwrap();
-        assert!(!cache_has(app, "local/codex/work").await, "重建同名身分：舊家目錄的清單不能留著");
+        assert!(!cache_has(app, "local/codex/work").await, "重建同名身份：舊家目錄的清單不能留著");
         assert!(!cache_has(app, "m4p/codex/work").await, "同名的別台那格一起作廢（不逐台判斷）");
-        assert!(cache_has(app, "local/codex/other").await, "別的身分不動");
+        assert!(cache_has(app, "local/codex/other").await, "別的身份不動");
 
         cache_put(app, "local/codex/work").await;
         delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
@@ -5613,7 +5613,7 @@ mod delete_identity_tests {
         }
     }
 
-    /// #1350：刪掉身分之後，它的額度讀數（記憶體與 quota_cache）一起清掉；別的身分不動。
+    /// #1350：刪掉身份之後，它的額度讀數（記憶體與 quota_cache）一起清掉；別的身份不動。
     #[tokio::test]
     async fn deleting_an_identity_forgets_its_quota_reading() {
         let env = crate::testing::env().await;
@@ -5626,7 +5626,7 @@ mod delete_identity_tests {
         }
         delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None })).await.unwrap();
         assert!(!app.quotas.lock().await.contains_key("claude:work"), "已刪帳號的額度格不能留著");
-        assert!(app.quotas.lock().await.contains_key("claude:other"), "別的身分不動");
+        assert!(app.quotas.lock().await.contains_key("claude:other"), "別的身份不動");
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key = 'claude:work'").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows, 0, "重啟後也不能再載回來");
         let snap = crate::quota::snapshot(app.as_ref()).await;
@@ -5681,8 +5681,8 @@ mod delete_identity_tests {
         assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("m4p")));
     }
 
-    /// 並行：`create_bot` 驗過身分存在之後、寫進 config 之前，那個身分被刪掉。`projection::validate` 在 config 鎖裡重驗，
-    /// 所以不會建出帶孤兒身分的 bot（config 與 DB 都沒有它）；錯誤碼是 404 identity（以前是籠統的 400 `config_invalid`）。
+    /// 並行：`create_bot` 驗過身份存在之後、寫進 config 之前，那個身份被刪掉。`projection::validate` 在 config 鎖裡重驗，
+    /// 所以不會建出帶孤兒身份的 bot（config 與 DB 都沒有它）；錯誤碼是 404 identity（以前是籠統的 400 `config_invalid`）。
     #[tokio::test]
     async fn a_bot_created_while_its_identity_is_deleted_is_refused() {
         let env = crate::testing::env().await;
@@ -5705,14 +5705,14 @@ mod delete_identity_tests {
         });
         let body = json!({"name": "late", "kind": "codex", "identity": "racer"});
         let res = create_bot(State(app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await;
-        assert!(matches!(res, Err(LcError::NotFound(_))), "身分已被刪：不能建出帶孤兒身分的 bot：{:?}", res.map(|r| r.status()));
+        assert!(matches!(res, Err(LcError::NotFound(_))), "身份已被刪：不能建出帶孤兒身份的 bot：{:?}", res.map(|r| r.status()));
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE name = 'late'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 0);
         assert!(app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).all(|b| b.name != "late"), "config 也不能留下它");
     }
 
     /// 並行：`delete_identity` 查完「沒有 bot 在用」之後、真的刪除之前，有 bot 開始用它。刪除在 config 鎖裡被 `projection::validate`
-    /// 擋下（身分還在、bot 也在）；錯誤碼是 409 identity still used by bots（以前是籠統的 400 `config_invalid`）。
+    /// 擋下（身份還在、bot 也在）；錯誤碼是 409 identity still used by bots（以前是籠統的 400 `config_invalid`）。
     #[tokio::test]
     async fn an_identity_taken_by_a_bot_while_it_is_being_deleted_survives() {
         let env = crate::testing::env().await;
@@ -5729,11 +5729,11 @@ mod delete_identity_tests {
         let (a2, pid) = (app.clone(), env.project_id.clone());
         crate::lifecycle::race_point::arm("delete_identity_after_check", "racer2", move || async move {
             let body = json!({"name": "early", "kind": "codex", "identity": "racer2"});
-            create_bot(State(a2.clone()), Path(pid), Json(serde_json::from_value(body).unwrap())).await.expect("身分還在：建得起來");
+            create_bot(State(a2.clone()), Path(pid), Json(serde_json::from_value(body).unwrap())).await.expect("身份還在：建得起來");
         });
         let res = delete_identity(State(app.clone()), Path("racer2".into()), Query(IdentityHostQuery { host: None })).await;
         assert!(matches!(res, Err(LcError::Conflict(_))), "有 bot 剛開始用它：不能刪：{:?}", res.map(|r| r.status()));
-        assert!(app.cfg.get().await.identities.iter().any(|i| i.name == "racer2"), "身分還在");
+        assert!(app.cfg.get().await.identities.iter().any(|i| i.name == "racer2"), "身份還在");
     }
 
     /// 刪 m4p 那一台的 `work`：本機另有一筆自己的 `work`，它的快取列不能跟著消失（快取只在下次偵測才會補回來）。
@@ -5808,7 +5808,7 @@ struct NewIdentity {
     env: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
-    /// 哪一台主機的身分（SPEC §16.2）。省略＝本機。
+    /// 哪一台主機的身份（SPEC §16.2）。省略＝本機。
     #[serde(default)]
     host: Option<String>,
 }
@@ -5824,8 +5824,8 @@ fn check_env_names(env: &BTreeMap<String, String>) -> Result<(), LcError> {
     }
 }
 
-/// 身分的家目錄變了（新增／刪除）：那個名字的模型清單快取作廢（#1349）。key＝`<host>/<kind>/<identity>`，host 與 kind 都不含 `/`。
-/// 不分主機一律清：沒寫 host 的身分在遠端也生效；清掉只是下一次重抓。
+/// 身份的家目錄變了（新增／刪除）：那個名字的模型清單快取作廢（#1349）。key＝`<host>/<kind>/<identity>`，host 與 kind 都不含 `/`。
+/// 不分主機一律清：沒寫 host 的身份在遠端也生效；清掉只是下一次重抓。
 async fn forget_identity_models(app: &Arc<App>, name: &str) {
     app.models_cache.lock().await.retain(|k, _| k.splitn(3, '/').nth(2) != Some(name));
 }
@@ -5890,9 +5890,9 @@ struct IdentityHostQuery {
     host: Option<String>,
 }
 
-/// `host` 上名叫 `name` 的身分，實際生效的是不是那筆**沒寫 host** 的 config（`tools::merge_identities` 的規則）。
+/// `host` 上名叫 `name` 的身份，實際生效的是不是那筆**沒寫 host** 的 config（`tools::merge_identities` 的規則）。
 /// 那台還沒偵測過 shell 的 `ccN`（`shell` 是 `None`）時照「偵測完、那台沒有」算：寧可擋下一次刪除，
-/// 也不要刪掉之後那台 bot 下次啟動才發現身分沒了（quota 修正 2026-09-16 轉來）。
+/// 也不要刪掉之後那台 bot 下次啟動才發現身份沒了（quota 修正 2026-09-16 轉來）。
 fn hostless_identity_in_effect(
     config: &[crate::config::IdentityCfg],
     host: &str,
@@ -5950,7 +5950,7 @@ async fn delete_identity(
     // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
     // 只動受影響的那幾台的快取：被刪的那一台；刪的是沒寫 host 的那筆時，還靠它的每一台（自己沒有明寫同名的）。
     let cfg_after = app.cfg.get().await;
-    // 要忘掉的額度 key（#1350）：`<kind>:<name>`，只在這個身分真的不再生效的那幾台。鎖放掉之後才清（清它會推事件）。
+    // 要忘掉的額度 key（#1350）：`<kind>:<name>`，只在這個身份真的不再生效的那幾台。鎖放掉之後才清（清它會推事件）。
     let mut forget: Vec<(String, String)> = Vec::new();
     let forget_key = |h: &str| removed_kind.as_ref().map(|kind| crate::quota::quota_key(h, &crate::quota::quota_base(kind, Some(&name))));
     {
@@ -6404,7 +6404,7 @@ struct SwapWindowIn {
 }
 
 /// 例行自動部署換版的窗口（使用者 2026-09-29：建置已在推 main 前測過、ubuntu-ci 也跑過，不再要核准單）。
-/// daemon-swap 服務身分自己開一筆立即核准的 restart 單再走**同一個** `maintenance::acquire`：
+/// daemon-swap 服務身份自己開一筆立即核准的 restart 單再走**同一個** `maintenance::acquire`：
 /// 沒有人 working／送達中／別人握租約才拿得到、拿到時暫停 assignment 派送、fence 與 lease_token 都照舊。
 /// 拿不到就把剛開的單撤掉，不留 pending／approved 的殘單。不接受 `exclude_bot_ids`：沒有「自己那顆 bot」可排除。
 async fn service_daemon_swap_restart_window(
@@ -10689,7 +10689,7 @@ mod bot_config_tests {
         Query(DirsQuery { path: Some(path.to_string_lossy().into_owned()), host: None, hidden: None })
     }
 
-    /// 列目錄是 UI 的 DirPicker 在用；bot（pane 裡的 agent 拿得到自己的 token）不該能用 daemon 的身分去列本機、
+    /// 列目錄是 UI 的 DirPicker 在用；bot（pane 裡的 agent 拿得到自己的 token）不該能用 daemon 的身份去列本機、
     /// 更不該能經 daemon 的 ssh 去列別台主機。
     #[tokio::test]
     async fn dirs_only_the_user_may_browse_directories() {
@@ -12872,7 +12872,7 @@ mod per_principal_auth_tests {
         assert!(user.starts_with("HTTP/1.1 101"), "browser User-token WebSocket remains available: {user}");
     }
 
-    /// 原始按鍵／文字／開關 shell 是給人用的（網頁的鍵盤同步、shell 面板）：bot 的 hook token 驗得過身分，
+    /// 原始按鍵／文字／開關 shell 是給人用的（網頁的鍵盤同步、shell 面板）：bot 的 hook token 驗得過身份，
     /// 但不該拿它直接對任何 pane 打字或按鍵（受 prompt injection 的 bot 可以替自己開一顆 shell 再打指令進去，
     /// 或對別顆 bot 按鍵繞過回合那條線）。只有 UI token 的使用者可以。
     #[tokio::test]
@@ -13525,7 +13525,7 @@ mod per_principal_auth_tests {
         let e = crate::testing::env().await;
         let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: Some(600) };
         let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
-        // 只有 daemon-swap 服務身分；使用者與 bot 都不行。
+        // 只有 daemon-swap 服務身份；使用者與 bot 都不行。
         for other in [RequestPrincipal::User, RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service(crate::service_auth::HERDR_UPGRADE.into())] {
             let r = service_daemon_swap_restart_window(State(e.app.clone()), Extension(other), Json(body())).await;
             assert!(matches!(r, Err(LcError::Forbidden(_))));
@@ -13743,7 +13743,7 @@ mod per_principal_auth_tests {
         assert!(unknown.starts_with("HTTP/1.1 401"), "{unknown}");
     }
 
-    /// 被證明身分的一般 bot 打 AGM 的管理面：setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新、
+    /// 被證明身份的一般 bot 打 AGM 的管理面：setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新、
     /// 協調者的 setup／start／stop——一律 403 `role_required`，而且什麼都不動。使用者（沒帶 bot 標頭）與角色 bot 不受影響；
     /// 角色換人之後舊 bot 立刻失效。
     #[tokio::test]
@@ -14062,7 +14062,7 @@ mod per_principal_auth_tests {
         };
         let denied = |r: &str| r.starts_with("HTTP/1.1 403") && r.contains("role_required");
         // 放行：notice → 巡檢。
-        // 寄件者要是這顆一般 bot 本人（不是巡檢），而且是證明過身分的：#991 以前被記成巡檢寄的。
+        // 寄件者要是這顆一般 bot 本人（不是巡檢），而且是證明過身份的：#991 以前被記成巡檢寄的。
         async fn latest_bot_request(db: &sqlx::SqlitePool) -> Value {
             let s: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='bot_request' ORDER BY rowid DESC LIMIT 1")
                 .fetch_one(db)
@@ -14976,7 +14976,7 @@ mod file_api_auth_tests {
 #[cfg(test)]
 mod caller_audit_tests {
     //! review d77434c0 #3：`X-AM-Caller` 是自由文字，任何拿得到 UI token 的人都能寫 `caller=agm`。
-    //! 身分只認 `X-AM-Bot-Id` ＋ 對得上的 `X-AM-Bot-Token`；自稱記在另一格，而且要看得出是自稱。
+    //! 身份只認 `X-AM-Bot-Id` ＋ 對得上的 `X-AM-Bot-Token`；自稱記在另一格，而且要看得出是自稱。
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -15059,7 +15059,7 @@ mod caller_audit_tests {
         let (status, by) = delete_over_http(&app, &liar.id, &[("X-AM-Caller", "agm"), ("User-Agent", "curl/8")], false).await;
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");
         assert!(by.contains("caller_self_reported=agm"), "{by}");
-        assert!(by.contains(" bot=-"), "沒有 hook token 就不能有身分：{by}");
+        assert!(by.contains(" bot=-"), "沒有 hook token 就不能有身份：{by}");
         assert!(by.contains("peer=127.0.0.1:") && by.contains("ua=curl/8"), "{by}");
 
         // (2) 自稱是某顆 bot 但 token 對不上：#556 起中介層直接 401，不降級成 User，也就刪不掉、不留 intent。
@@ -15524,7 +15524,7 @@ mod child_restore_tests {
     }
 }
 
-/// #339：`relay_from` 要跟呼叫者自己的身分綁在一起（`relay_auth`）。走真的 `prompt_bot` handler。
+/// #339：`relay_from` 要跟呼叫者自己的身份綁在一起（`relay_auth`）。走真的 `prompt_bot` handler。
 #[cfg(test)]
 mod relay_from_auth_tests {
     use super::*;
@@ -15813,7 +15813,7 @@ mod relay_from_auth_tests {
     #[tokio::test]
     async fn a_bot_cannot_relay_a_message_to_itself() {
         let f = fx().await;
-        // 連帶對自己那顆的正確 token 也不行：驗得出身分不代表這個來源標示講得通。
+        // 連帶對自己那顆的正確 token 也不行：驗得出身份不代表這個來源標示講得通。
         sqlx::query("UPDATE bots SET hook_token='tok-target' WHERE id=?").bind(&f.target).execute(&f.e.app.db).await.unwrap();
         for (token, crid) in [(None, "self-none"), (Some("tok-target"), "self-signed")] {
             let (status, body) = send(&f.e.app, &f.target, &f.target, token, crid).await;
@@ -16035,7 +16035,7 @@ mod lan_exposure_tests {
             let allowed_listed = path.starts_with("/api/capabilities");
             assert!(allowed_listed || resp.starts_with("HTTP/1.1 403") || resp.starts_with("HTTP/1.1 404") || resp.starts_with("HTTP/1.1 405"), "{method} {path}: {}", resp.lines().next().unwrap_or(""));
         }
-        // 同時帶 UI token 與 service 身分：拒絕，不降級。
+        // 同時帶 UI token 與 service 身份：拒絕，不降級。
         let mixed = raw(app, "GET /api/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: svc-token\r\nX-AM-Token: test-token\r\nConnection: close\r\n\r\n").await;
         assert!(mixed.starts_with("HTTP/1.1 401"), "{mixed}");
     }

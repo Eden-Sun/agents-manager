@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS hook_events (
   provider TEXT NOT NULL,
   -- http | spool | remote
   source TEXT NOT NULL,
-  -- 同一則事件重送要得到同一把鑰匙（見 `dedupe_key`）。NULL＝認不出身分，一律收下。
+  -- 同一則事件重送要得到同一把鑰匙（見 `dedupe_key`）。NULL＝認不出身份，一律收下。
   dedupe_key TEXT,
   -- 整個 HookBody，worker 直接反序列化回來走 §6.7。
   body_json TEXT NOT NULL,
@@ -92,7 +92,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// 這則 hook 的身分：**同一則重送要得到同一把鑰匙，兩則不同的事件不可以撞在一起。**
+/// 這則 hook 的身份：**同一則重送要得到同一把鑰匙，兩則不同的事件不可以撞在一起。**
 ///
 /// 主體不把整個 payload 放進索引（可到 1 MiB）；只有缺少事件 ID 的幾種 hook 會附固定長度的 payload 指紋。
 ///

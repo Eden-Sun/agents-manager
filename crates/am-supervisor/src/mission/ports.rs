@@ -36,8 +36,8 @@ pub enum AgmRole {
     Responder,
 }
 
-/// 這台主機已知的 claude 身分，給 [`crate::mission::candidates`] 挑候選用。
-/// `shares_default`＝這個身分沒有自己的 home 變數、就是 CLI 預設帳號（`quota::identity_shares_default`，
+/// 這台主機已知的 claude 身份，給 [`crate::mission::candidates`] 挑候選用。
+/// `shares_default`＝這個身份沒有自己的 home 變數、就是 CLI 預設帳號（`quota::identity_shares_default`，
 /// 跟額度 key 的收斂規則同一份）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownIdentity {
@@ -46,22 +46,22 @@ pub struct KnownIdentity {
     pub shares_default: bool,
 }
 
-/// 挑身分用的額度與帳號查詢（原 `quota::*`、`tools::identities_for_host`、`app.quotas`）。
+/// 挑身份用的額度與帳號查詢（原 `quota::*`、`tools::identities_for_host`、`app.quotas`）。
 pub trait IdentityOps {
-    /// `quota::billing_identity`：這顆 bot 現在在用哪個帳號；沒設身分的預設帳號回 `None`。
+    /// `quota::billing_identity`：這顆 bot 現在在用哪個帳號；沒設身份的預設帳號回 `None`。
     async fn billing_identity(&self, bot: &db::Bot) -> anyhow::Result<Option<String>>;
-    /// `tools::identities_for_host`，每個身分附上 `quota::identity_shares_default` 的結果。
+    /// `tools::identities_for_host`，每個身份附上 `quota::identity_shares_default` 的結果。
     async fn known_identities(&self, host: &str) -> Vec<KnownIdentity>;
-    /// `quota::quota_base_for_host`：這個身分的額度讀數在哪一把 key（寫入端同一條規則）。
+    /// `quota::quota_base_for_host`：這個身份的額度讀數在哪一把 key（寫入端同一條規則）。
     async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String;
     /// 一次上鎖讀出每個 `base` 在 `quota::quota_key(host, base)` 底下的讀數（順序同 `bases`）。
     /// 一次上鎖＝同一批候選看到的是同一個時間點的額度表。
     async fn quota_readings(&self, host: &str, bases: &[String]) -> Vec<Option<Quota>>;
 }
 
-/// 呼叫端是誰（原 `supervisor::bot_requests`／`supervisor::roles` 的身分驗證）。
+/// 呼叫端是誰（原 `supervisor::bot_requests`／`supervisor::roles` 的身份驗證）。
 pub trait CallerOps {
-    /// `bot_requests::verified_bot_id`：標頭宣告的 bot 身分驗過才回；宣告了驗不過是 `Err`。
+    /// `bot_requests::verified_bot_id`：標頭宣告的 bot 身份驗過才回；宣告了驗不過是 `Err`。
     async fn verified_bot_id(&self, headers: &HeaderMap) -> Result<Option<String>, LcError>;
     /// `bot_requests::actor_role`：驗過的呼叫端是不是某個 AGM 角色。
     async fn actor_role(&self, headers: &HeaderMap) -> Result<Option<AgmRole>, LcError>;

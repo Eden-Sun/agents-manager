@@ -48,7 +48,7 @@ fn spoken() -> &'static Mutex<Spoken> {
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 這一次 blocked 的身分（`bot_id -> episode id`，issue #134）。第一次需要時產生，`forget`（離開 blocked）時清掉：
+/// 這一次 blocked 的身份（`bot_id -> episode id`，issue #134）。第一次需要時產生，`forget`（離開 blocked）時清掉：
 /// 同一次 blocked 裡的重試、8 秒任務重跑拿到同一個 id（通知的冪等鍵不變，不會多送），解除之後再卡住就是新的 id
 /// （同一個問題也會再講一次）。以前冪等鍵只有「child＋問題指紋」，第二次卡在同一個問題時 `prompt` 的冪等把第一次那筆
 /// 還回來，parent 再也收不到。存在記憶體，理由同 [`Spoken`]：daemon 重啟後最多重講一次。

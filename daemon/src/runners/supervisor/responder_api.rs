@@ -19,7 +19,7 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-/// 掛在 `/api` 底下、auth layer 之內。setup／start／stop 是 AGM 的管理面：被證明身分的一般 bot 403（`forbid_plain_bot`）。
+/// 掛在 `/api` 底下、auth layer 之內。setup／start／stop 是 AGM 的管理面：被證明身份的一般 bot 403（`forbid_plain_bot`）。
 pub fn routes(app: Arc<App>) -> Router<Arc<App>> {
     Router::new()
         .route(

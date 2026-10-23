@@ -86,7 +86,7 @@ export interface MissionAsk {
   detail: string | null
   /** AGM 在群組問的那句話（最後一則 `paused` 事件的文字）。 */
   question: string | null
-  /** `no_fable_for_verifier` 時各身分的 Fable 重置時間。 */
+  /** `no_fable_for_verifier` 時各身份的 Fable 重置時間。 */
   resets: { identity: string; resets_at: string }[]
 }
 
@@ -96,7 +96,7 @@ export interface MissionView {
   step: number
   actors: MissionActor[]
   handoffs: MissionHandoff[]
-  /** §10：找不到第二個身分當 reviewer，改走「執行者自審＋驗證者把關」。 */
+  /** §10：找不到第二個身份當 reviewer，改走「執行者自審＋驗證者把關」。 */
   soloReview: boolean
   rounds: { used: number; max: number }
   ask: MissionAsk | null
@@ -127,7 +127,7 @@ function roleOf(e: MissionEvent): MissionRole | null {
 }
 
 /**
- * 驗證者找不到 Fable 額度時各身分的重置時間。daemon 的 `GET /missions/{id}/pick` 停下任務時記的 `paused`
+ * 驗證者找不到 Fable 額度時各身份的重置時間。daemon 的 `GET /missions/{id}/pick` 停下任務時記的 `paused`
  * 事件是 `{reason:"no_fable_for_verifier", decision:{decision:"ask_user", reason, resets:[{identity, resets_at}]}}`
  * （`mission/api.rs::get_pick`）——`resets` 包在 `decision` 裡。
  */
@@ -182,7 +182,7 @@ function handoffOf(p: Record<string, unknown>): { from: string | null; to: strin
   return { from, to, model: text(p.model), reason: text(p.reason) ?? 'limit_hit', assignment: text(p.assignment_id) }
 }
 
-/** daemon 在 `pick --role reviewer` 找不到第二個身分時記的 note：`{decision:{decision:"no_independent_reviewer", reason}}`。 */
+/** daemon 在 `pick --role reviewer` 找不到第二個身份時記的 note：`{decision:{decision:"no_independent_reviewer", reason}}`。 */
 function noIndependentReviewer(p: Record<string, unknown>): boolean {
   return text(rec(p.decision).decision) === 'no_independent_reviewer'
 }
@@ -191,14 +191,14 @@ function noIndependentReviewer(p: Record<string, unknown>): boolean {
  * 把任務欄位、事件串與交辦串算成任務卡要的東西。
  *
  * 有 P1b 的 `assignments[]` 就以它為準——`role` 與 `turn_error` 是 daemon 寫的，比從事件
- * payload 猜可靠；身分與模型還是只有事件帶得出來，兩邊併起來用。
+ * payload 猜可靠；身份與模型還是只有事件帶得出來，兩邊併起來用。
  */
 export function missionView(m: Mission, events: MissionEvent[], assignments: MissionAssignment[] = []): MissionView {
   const byRole = new Map<MissionRole, MissionActor>()
   const handoffs: MissionHandoff[] = []
   /** 事件已經記過的換手，對應到撞限的那件交辦——交辦那邊推出來的就不要再算一次。 */
   const handedOff = new Set<string>()
-  /** 同一份換手 note 的接手身分與模型（以撞限的那件交辦為鍵）：接手那顆的身分只有它講得準。 */
+  /** 同一份換手 note 的接手身份與模型（以撞限的那件交辦為鍵）：接手那顆的身份只有它講得準。 */
   const handoffTo = new Map<string, { to: string | null; model: string | null }>()
   let soloSince: string | null = null
   let verified: MissionEvent | null = null
@@ -243,11 +243,11 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
     if (e.text && e.kind !== 'instruction' && e.text !== m.text) latest = e
   }
 
-  // 交辦是 daemon 寫的：角色一定對，bot 也一定是現在那一顆。身分／模型補事件裡的。
+  // 交辦是 daemon 寫的：角色一定對，bot 也一定是現在那一顆。身份／模型補事件裡的。
   for (const a of assignments) {
     if (!a.role) continue
     const from = byRole.get(a.role)
-    // 接手的那一件（follow_up_of 指回撞限那件）：身分以換手 note 的 to_identity 為準，事件串裡的是撞限那顆的。
+    // 接手的那一件（follow_up_of 指回撞限那件）：身份以換手 note 的 to_identity 為準，事件串裡的是撞限那顆的。
     const hand = a.follow_up_of ? handoffTo.get(a.follow_up_of) : undefined
     byRole.set(a.role, {
       role: a.role,
@@ -257,7 +257,7 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
       at: a.created_at || (from?.at ?? ''),
     })
     // 撞限換手在交辦上是「follow-up ＋ 上一件停在 identity_switch」。事件串讀不到（舊資料）才用它，
-    // 讀得到的那一次已經有身分，不要再多一行「? → ?」。
+    // 讀得到的那一次已經有身份，不要再多一行「? → ?」。
     if (a.follow_up_of && !handedOff.has(a.follow_up_of)) {
       const parent = assignments.find((x) => x.id === a.follow_up_of)
       if (parent?.turn_status === 'identity_switch') {
@@ -265,7 +265,7 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
       }
     }
   }
-  // 之後又真的派出 reviewer（下一輪挑到了第二個身分）就不再是「無獨立 reviewer」。
+  // 之後又真的派出 reviewer（下一輪挑到了第二個身份）就不再是「無獨立 reviewer」。
   const soloReview = soloSince !== null && !assignments.some((a) => a.role === 'reviewer' && a.created_at > (soloSince ?? ''))
 
   const progress = progressOf(m, events, assignments)
@@ -315,7 +315,7 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
 export const MISSION_USER_PAUSE = 'user_pause'
 
 /**
- * 「等額度」說明框的字。要照任務的 `on_5h_limit` 講：選了「換身分」的任務也會等（所有身分都見底、
+ * 「等額度」說明框的字。要照任務的 `on_5h_limit` 講：選了「換身份」的任務也會等（所有身份都見底、
  * 或 codex／grok 只有一把額度），那時候說「這是你選了等重置的結果」就是錯的（review3 c1 L9）。
  */
 export function quotaWaitText(
@@ -327,10 +327,10 @@ export function quotaWaitText(
   const when = at ? t('，預計 {at} 之後自動重送', { at }) : t('，額度回來會自動重送')
   if (m.on_5h_limit === 'switch') {
     return m.executor_kind === 'claude'
-      ? t('可以接手的身分額度都用完了，正在等最早回來的那一個{when}。', { when })
-      : t('{kind} 只有一把額度，沒有別的身分可以換，正在等它重置{when}。', { kind: m.executor_kind, when })
+      ? t('可以接手的身份額度都用完了，正在等最早回來的那一個{when}。', { when })
+      : t('{kind} 只有一把額度，沒有別的身份可以換，正在等它重置{when}。', { kind: m.executor_kind, when })
   }
-  return t('這個身分的額度用完了，照開任務時選的「等重置」原地等{when}。要換身分接手，下一個任務把 5h 撞限改成「換身分」。', { when })
+  return t('這個身份的額度用完了，照開任務時選的「等重置」原地等{when}。要換身份接手，下一個任務把 5h 撞限改成「換身份」。', { when })
 }
 
 /** 停下來問人的原因，講成人話。認不得的機器碼原樣顯示，不要吞掉。 */
@@ -366,7 +366,7 @@ export function deliveryLabel(mode: string): string {
  */
 export function assignmentLabel(a: MissionAssignment, followedUp = false): string {
   // 接手的那件已經派出去（`followedUp`，子列的 follow_up_of 指回它）：父列不再等 AGM。daemon 只寫 followup 連結、不改父列狀態。
-  if (a.turn_status === 'identity_switch') return followedUp ? t('已換身分接手（見下一件）') : t('撞限，等 AGM 換身分接手')
+  if (a.turn_status === 'identity_switch') return followedUp ? t('已換身份接手（見下一件）') : t('撞限，等 AGM 換身份接手')
   if (a.turn_status === 'quota_exhausted') return t('沒有可用額度')
   switch (a.status) {
     case 'queued':

@@ -219,10 +219,10 @@ pub struct IdentityCfg {
     pub name: String,
     /// Must match the bot it is applied to.
     pub kind: String,
-    /// 這個身分屬於哪一台主機（SPEC §16.2：同名的 `cc1` 在不同機器上是不同帳號）。
+    /// 這個身份屬於哪一台主機（SPEC §16.2：同名的 `cc1` 在不同機器上是不同帳號）。
     /// 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份。
-    /// 省略＝本機照舊優先；**遠端也適用，但讓位給那台自己同名的身分**（合併規則在 `tools::merge_identities`）。
-    /// 以前省略＝只適用本機，codex／grok 身分只能寫在 config 裡，升級後遠端 bot 一啟動就 409（review 2026-09-16 M6）；
+    /// 省略＝本機照舊優先；**遠端也適用，但讓位給那台自己同名的身份**（合併規則在 `tools::merge_identities`）。
+    /// 以前省略＝只適用本機，codex／grok 身份只能寫在 config 裡，升級後遠端 bot 一啟動就 409（review 2026-09-16 M6）；
     /// 再更早是省略＝每台都鋪上而且蓋掉那台的 `ccN`。只要本機的話寫 `host = "local"`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,

@@ -31,7 +31,7 @@ pub fn hook_name(instance: Option<&str>) -> String {
     }
 }
 
-/// agy 會在第一則 prompt 才建立對話，所以只訂這三個（`SessionStart` 沒有文件但 1.2.16 會觸發，`PreInvocation` 補身分）。
+/// agy 會在第一則 prompt 才建立對話，所以只訂這三個（`SessionStart` 沒有文件但 1.2.16 會觸發，`PreInvocation` 補身份）。
 /// **形狀**：這三個事件是**扁平**的 handler 陣列；`PreToolUse`／`PostToolUse` 才要包 `{matcher, hooks}`——形狀錯了整個檔會被 agy 丟掉。
 pub const HOOK_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
 

@@ -120,7 +120,7 @@ test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短�
   assert.ok(row('b1').querySelector('.lamp'), '狀態燈照常保留')
 })
 
-test('額度晶片的提示點名實際在跑的身分', async () => {
+test('額度晶片的提示點名實際在跑的身份', async () => {
   const critical = { used_pct: 98, low: true, critical: true, resets_at: null }
   useStore.setState({
     bots: [{ ...bot('b1', 'p1'), identity: 'cc1' }],

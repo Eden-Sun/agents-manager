@@ -176,8 +176,8 @@ class CliCase(unittest.TestCase):
         for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
             os.environ[var] = "http://127.0.0.1:9"
             self.addCleanup(lambda v=var: os.environ.pop(v, None))
-        # 在 bot 的 pane 裡跑測試時這些都有值：agm 一看到 AM_BOT_ID 就改用 Bot 身分（#556），
-        # 期望「一般 shell＝User token」的測試會紅。每個測試從乾淨的身分環境開始，要的自己設。
+        # 在 bot 的 pane 裡跑測試時這些都有值：agm 一看到 AM_BOT_ID 就改用 Bot 身份（#556），
+        # 期望「一般 shell＝User token」的測試會紅。每個測試從乾淨的身份環境開始，要的自己設。
         for var in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
             old = os.environ.pop(var, None)
             if old is not None:
@@ -1737,7 +1737,7 @@ class MiscCommandTest(CliCase):
 
 
 class DualRoleTest(CliCase):
-    """AGM 雙角色（SPEC §18.15）：CLI 知道自己是哪個角色，身分靠 pane 的 bot token，不靠字串。"""
+    """AGM 雙角色（SPEC §18.15）：CLI 知道自己是哪個角色，身份靠 pane 的 bot token，不靠字串。"""
 
     def setUp(self):
         super().setUp()
@@ -1759,7 +1759,7 @@ class DualRoleTest(CliCase):
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
         self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-resp", "hook-secret"))
         self.assertIsNone(seen["token"], "a bot request must not also carry the shared User token")
-        # 同一支 CLI 在別顆 bot 的 pane 裡跑：改用那顆 bot 自己的 proof，不能借 AGM 的身分。
+        # 同一支 CLI 在別顆 bot 的 pane 裡跑：改用那顆 bot 自己的 proof，不能借 AGM 的身份。
         os.environ["AM_BOT_ID"], os.environ["AM_BOT_TOKEN"] = "bot-worker", "worker-secret"
         self.ok("ack", "e1")
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
@@ -1897,7 +1897,7 @@ class MissionCommandTest(CliCase):
         self.assertEqual(self.posts("/api/missions/m1/answer")[0]["body"]["relay_from"], "bot-agm")
 
     def test_answer_carries_the_manager_identity_when_replying(self):
-        """AGM 回覆追問要指回那一則，並用自己的身分；不帶 --reply-to 就是使用者回答暫停那條路。"""
+        """AGM 回覆追問要指回那一則，並用自己的身份；不帶 --reply-to 就是使用者回答暫停那條路。"""
         FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
         self.ok("mission", "answer", "m1", "--text", "不會", "--request-id", "a1", "--reply-to", "e9")
         body = self.posts("/api/missions/m1/answer")[0]["body"]

@@ -8,7 +8,7 @@
 //!   SessionStart 綁的，不必掃行程，遠端也一樣。先用 agent 名字查，名字被 herdr 拿掉（`agent start` 逾時）時改用 pane id 查；
 //!   還沒綁（claude 剛起來）就用 run 記過的，兩者都沒有＝照舊看畫面。找到的記在 `runs.native_session_id`／`transcript_path`。
 //! * **讀檔**：`<root>/projects/*/<session id>.jsonl` 的尾巴（一般檔、非 symlink），本機與遠端都用 `sh` 呼叫 Python 的 fd-relative reader。root 依序是：bot 的 `CLAUDE_CONFIG_DIR`、
-//!   這個身分在該主機的 config 目錄、`~/.claude`。session id 只收英數與 `-`／`_`。
+//!   這個身份在該主機的 config 目錄、`~/.claude`。session id 只收英數與 `-`／`_`。
 //! * **實際的 model／effort**（#880）：每則 `assistant` 行都帶 `effort`（頂層）與 `message.model`，是這顆 claude 當下真正在用的值；
 //!   最新一則寫進 `runs.runtime_model`／`runtime_effort`（網頁優先顯示 runtime，`bots.effort` 只是設定值，不回寫）。
 //! * **一問一答**：`type: user` 且是人打的字（不是 tool_result、`isMeta`、sidechain、slash 指令的回音）算一問；`stop_reason` 不是 `tool_use` 的
@@ -287,7 +287,7 @@ fn split_output(out: &str) -> Option<(String, String)> {
 }
 
 /// `Some((session id, 對話檔尾巴))`；找不到 session、讀不到檔＝`None`（照舊看畫面）。
-/// herdr 與身分目錄的事實由 `GrokTranscriptServices` 提供（`runners/claude_child_log.rs` 接 `App`）。
+/// herdr 與身份目錄的事實由 `GrokTranscriptServices` 提供（`runners/claude_child_log.rs` 接 `App`）。
 pub async fn load(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
     // herdr 綁的優先（claude `/clear`、`--resume` 會換 session），沒有就用記過的。
     let known = run.native_session_id.clone().filter(|s| super::grok_transcript::valid_session_id(s));
@@ -334,9 +334,9 @@ fn within_projects(path: &str, roots: &[String]) -> bool {
 ///
 /// 路徑防護（遠端沒有本機那種 `local_transcript_allowed`）：檔案**不是**拿 hook 回報的 `transcript_path` 直接讀，
 /// 而是 `<bot 的 config root>/projects/*/<session id>.jsonl` 組出來的——root 只有這顆 bot 自己的 `CLAUDE_CONFIG_DIR`、
-/// 它身分在該主機的 config 目錄、`~/.claude`（同 §12.5b）；session id 取自 run 記的 `native_session_id`（沒有就取
+/// 它身份在該主機的 config 目錄、`~/.claude`（同 §12.5b）；session id 取自 run 記的 `native_session_id`（沒有就取
 /// `transcript_path` 的檔名），只收英數與 `-`／`_`。run 記了 `transcript_path` 的話，它必須就在這些 root 的 `projects/` 底下、
-/// 檔名等於 session id，否則回 `None` **而且不讀**——偽造的 hook 不能因此讓 daemon 去讀別的身分或任意路徑。
+/// 檔名等於 session id，否則回 `None` **而且不讀**——偽造的 hook 不能因此讓 daemon 去讀別的身份或任意路徑。
 /// session 沒記、檔案找不到都是 `None`。
 pub async fn pending_tail(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, max: u64) -> anyhow::Result<Option<String>> {
     let Some(sid) = app.claude_herdr_session(run).await.filter(|s| super::grok_transcript::valid_session_id(s)) else { return Ok(None) };

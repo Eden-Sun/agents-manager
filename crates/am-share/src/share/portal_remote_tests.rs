@@ -469,9 +469,9 @@ fn the_photo_cache_does_not_mix_two_hosts() {
     };
     let a = on("host-a", jpeg(200, 100));
     let b = on("host-b", jpeg(100, 200));
-    assert_ne!(a, b, "同一條路徑、同樣的身分，兩台主機各自的照片");
+    assert_ne!(a, b, "同一條路徑、同樣的身份，兩台主機各自的照片");
     assert!(a.contains("data:image/jpeg;base64,") && b.contains("data:image/jpeg;base64,"));
-    // 同一台再來一次走快取（身分一樣就不重解，即使這次給的位元組是壞的）。
+    // 同一台再來一次走快取（身份一樣就不重解，即使這次給的位元組是壞的）。
     let again = on("host-a", b"not an image at all".to_vec());
     assert_eq!(again, a);
 }

@@ -9,7 +9,7 @@ import './claudeLoginAssist.css'
 const POLL_MS = 2000
 
 /**
- * claude 身分的登入 pane 上方的協助條（#838）：「打開登入網站」（daemon 從登入畫面取出的 OAuth 網址，新分頁打開）＋
+ * claude 身份的登入 pane 上方的協助條（#838）：「打開登入網站」（daemon 從登入畫面取出的 OAuth 網址，新分頁打開）＋
  * code 輸入框（daemon 確認畫面還在等 code 才打進 pane 並按 Enter）。手機上不必選取終端裡的長網址、也不必把 code 貼回終端。
  * 這顆 pane 不是 daemon 開的登入 pane（一般 shell、別種 CLI 的登入）就什麼都不畫。CLI 結束後 pane 會被 daemon 收掉，
  * 之後顯示重新偵測後的登入狀態。網址與 code 不存任何地方（不進 store、不進 localStorage）。
@@ -43,7 +43,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
           setIsLogin(true)
           setStatus(s)
         } else if (seen.current) {
-          // 看過、現在 404：CLI 結束、daemon 收掉了 pane。重驗登入狀態讓身分列更新。
+          // 看過、現在 404：CLI 結束、daemon 收掉了 pane。重驗登入狀態讓身份列更新。
           setEnded(true)
           void refreshTools(host)
           return
@@ -88,7 +88,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
   return (
     <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || 'claude' })}>
       <div className="login-assist-title">
-        {t.x('登入 claude 身分 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
+        {t.x('登入 claude 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
       </div>
       {phase === 'ended' ? (
         <div className="login-assist-done" role="status">
@@ -97,7 +97,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
               ? t('已登入（{account}）', { account: identityStatus.account })
               : t('已登入')
             : identityStatus?.logged_in === false
-              ? t('登入程序已結束，但這個身分還是未登入——重新按「登入」再試一次。')
+              ? t('登入程序已結束，但這個身份還是未登入——重新按「登入」再試一次。')
               : t('登入程序已結束；這台主機問不出登入狀態，請以實際使用為準。')}
           <button type="button" className="mini-btn" disabled={toolsBusy} onClick={() => void refreshTools(host)}>
             {toolsBusy ? t('偵測中…') : t('重新偵測')}

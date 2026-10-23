@@ -219,7 +219,7 @@ fn bad_proof() -> LcError {
 /// |---|---|
 /// | 沒帶 | `Ok(None)`＝使用者／UI，照舊什麼都能做 |
 /// | 帶了、token 對得上、那顆是角色 bot | `Ok(Some(role))` |
-/// | 帶了、token 對得上、那顆不是角色 bot | `Ok(None)`＝跟沒宣告身分一樣，不多不少 |
+/// | 帶了、token 對得上、那顆不是角色 bot | `Ok(None)`＝跟沒宣告身份一樣，不多不少 |
 /// | 帶了、token 空／非 UTF-8／對不上 | **`Err` 403** |
 ///
 /// 最後一列以前也是 `None`。而 `None` 在下游不是「沒有權限」而是「使用者本人」
@@ -236,9 +236,9 @@ pub async fn actor_role(app: &impl crate::capabilities::Db, headers: &axum::http
 
 /// 呼叫端是**哪一顆 bot**（issue #436）。三態跟 [`actor_role`] 一模一樣（這一支就是它的前半段），
 /// 只是回 bot id 而不是角色：申請重建／重啟窗口的是一般的修正 bot，沒有角色，`actor_role` 對它回的
-/// `None` 跟「沒宣告身分」分不出來——而「這筆申請是誰送的」正是要分出來的東西。
+/// `None` 跟「沒宣告身份」分不出來——而「這筆申請是誰送的」正是要分出來的東西。
 pub async fn verified_bot_id(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
-    // 「有這個標頭但讀不出值」也算宣告了身分：空字串與非 UTF-8 都要驗，不能當沒帶。
+    // 「有這個標頭但讀不出值」也算宣告了身份：空字串與非 UTF-8 都要驗，不能當沒帶。
     if !headers.contains_key("X-AM-Bot-Id") {
         return Ok(None);
     }
@@ -259,19 +259,19 @@ pub const ROLE_SETUP_MARK_PREFIX: &str = "agm-role-setup:";
 pub const ROLE_SETUP_MARK_PREFIX_PATROL: &str = "agm-role-setup:patrol";
 pub const ROLE_SETUP_MARK_PREFIX_RESPONDER: &str = "agm-role-setup:responder";
 
-/// AGM 自己的管理面（setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新）：被證明身分的**一般 bot**
+/// AGM 自己的管理面（setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新）：被證明身份的**一般 bot**
 /// （不是巡檢也不是協調者）不能碰——它們不是總管，也不該替總管下指令、改總管的記憶、對自己的交辦下裁示。
-/// 沒帶身分的（使用者的網頁、一般 shell）照舊放行（共用 UI token 的既有取捨）；證明不了身分的由 [`verified_bot_id`] 回 403。
+/// 沒帶身份的（使用者的網頁、一般 shell）照舊放行（共用 UI token 的既有取捨）；證明不了身份的由 [`verified_bot_id`] 回 403。
 /// 跟 `persona_actor`（人設）、`require_role`（approve／ack／herdr 維護窗口）同一個角色判斷（`roles::role_of_bot`，每次讀 DB，
 /// 角色換人之後舊 bot 立刻失效）。
 pub async fn forbid_plain_bot(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<(), LcError> {
     match declared_plain_bot(app, headers).await? {
         None => Ok(()),
-        Some(id) => Err(plain_bot_forbidden(&id, "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身分的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者")),
+        Some(id) => Err(plain_bot_forbidden(&id, "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身份的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者")),
     }
 }
 
-/// 呼叫端是被證明身分、但不是任何 AGM 角色的一般 bot 就回它的 id；使用者（沒帶 bot 標頭）與角色 bot 回 `None`。
+/// 呼叫端是被證明身份、但不是任何 AGM 角色的一般 bot 就回它的 id；使用者（沒帶 bot 標頭）與角色 bot 回 `None`。
 pub async fn declared_plain_bot(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
     let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
     match roles::role_of_bot(app.db(), &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
@@ -284,9 +284,9 @@ pub fn plain_bot_forbidden(bot_id: &str, message: &str) -> LcError {
     LcError::Forbidden(json!({"error": "forbidden", "reason": "role_required", "message": message, "bot_id": bot_id}))
 }
 
-/// 角色端點專用：一定要證明得了身分，而且那顆要是角色 bot。
+/// 角色端點專用：一定要證明得了身份，而且那顆要是角色 bot。
 ///
-/// `actor_role` 的 `Ok(None)`（＝完全沒宣告身分）在這裡**不是**「使用者，什麼都能做」而是 403。
+/// `actor_role` 的 `Ok(None)`（＝完全沒宣告身份）在這裡**不是**「使用者，什麼都能做」而是 403。
 /// 理由見 issue #432：`roles::ack` 以前對 `None` 用 `1=1`，於是角色 bot 只要不送標頭就結得掉
 /// 另一個角色的事件——帶對 token 反而被 409 擋下。把「不宣告」和「宣告了但證明不了」拉成同一種結果。
 ///

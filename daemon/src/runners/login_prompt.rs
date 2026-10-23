@@ -18,7 +18,7 @@ pub async fn clear_and_push(app: &Arc<App>, host: &str, identity: &str) {
     }
 }
 
-/// 這個回合實際用的身分（#238）：改了設定還沒重啟時，pane 裡跑的是啟動時那個帳號，不是 `bot.identity`。
+/// 這個回合實際用的身份（#238）：改了設定還沒重啟時，pane 裡跑的是啟動時那個帳號，不是 `bot.identity`。
 /// 讀不到 run 才退回設定值（跟額度一樣，`quota::billing_identity`）。
 async fn turn_identity(app: &Arc<App>, bot: &db::Bot) -> Option<String> {
     match crate::quota::billing_identity(app, bot).await {
@@ -28,8 +28,8 @@ async fn turn_identity(app: &Arc<App>, bot: &db::Bot) -> Option<String> {
     .filter(|i| !i.trim().is_empty())
 }
 
-/// 綁著身分的 claude bot 的回合因為授權失敗收尾：記下、推快照，並立刻重探該身分（不等探測週期）。
-/// 沒綁身分（用主機預設帳號）的 bot 不處理：沒有「哪個身分」可以提示。
+/// 綁著身份的 claude bot 的回合因為授權失敗收尾：記下、推快照，並立刻重探該身份（不等探測週期）。
+/// 沒綁身份（用主機預設帳號）的 bot 不處理：沒有「哪個身份」可以提示。
 /// `admitted`：這一則放行時捕獲的主機世代（#1024）。agy 沒有它就什麼都不改（寧可漏記，不改錯主機）。
 pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
     if bot.kind == "agy" {
@@ -71,13 +71,13 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
     });
 }
 
-/// 綁著身分的 claude bot 又正常答完一回合：那個身分是通的。
+/// 綁著身份的 claude bot 又正常答完一回合：那個身份是通的。
 pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
     if bot.kind != "claude" {
         return;
     }
     let Some(fence) = admitted else { return };
-    // 先看有沒有帳：絕大多數回合都沒有，不必每次都查 DB（只有整張空的才早退，有帳就去查這個回合的身分）。
+    // 先看有沒有帳：絕大多數回合都沒有，不必每次都查 DB（只有整張空的才早退，有帳就去查這個回合的身份）。
     if app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
         return;
     }

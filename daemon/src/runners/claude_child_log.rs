@@ -1,4 +1,4 @@
-//! 沒有 hook 的 claude 子 agent 讀對話檔（`lifecycle::claude_child_log`）需要的 `App` 端事實：herdr 綁的 session、身分的 config 目錄（issue #878）。
+//! 沒有 hook 的 claude 子 agent 讀對話檔（`lifecycle::claude_child_log`）需要的 `App` 端事實：herdr 綁的 session、身份的 config 目錄（issue #878）。
 
 use crate::config::LOCAL_HOST;
 use crate::db;

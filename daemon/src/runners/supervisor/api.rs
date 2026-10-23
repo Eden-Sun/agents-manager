@@ -217,7 +217,7 @@ pub async fn post_assignment(
         return Err(LcError::Bad("kind must be task | notice".into()));
     }
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
-    // 一般 bot（被證明身分、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收、不掛任務）——
+    // 一般 bot（被證明身份、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收、不掛任務）——
     // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦、掛任務的交辦
     // 是 AGM 的事（它們會直接叫那顆 bot 做事）。
     if let Some(bot) = super::bot_requests::declared_plain_bot(&app, &headers).await? {
@@ -875,7 +875,7 @@ pub struct PersonaIn {
 
 /// 改寫總管人設的呼叫端是誰（issue #462）。
 ///
-/// 共用 UI token 的前提下「沒帶身分＝使用者」這個預設不動（網頁就是這樣改 persona 的），所以：
+/// 共用 UI token 的前提下「沒帶身份＝使用者」這個預設不動（網頁就是這樣改 persona 的），所以：
 ///
 /// | `X-AM-Bot-Id` | 結果 |
 /// |---|---|
@@ -886,7 +886,7 @@ pub struct PersonaIn {
 ///
 /// 第三列是這張票的重點：人設就是總管跑的那份角色前導詞（`persona.rs`、`setup.rs`），
 /// 一顆普通 bot 沒有理由改寫它；而它本來連 `HeaderMap` 都不收。
-/// 界線（沒帶身分仍然過得去）留在 #447 等 per-bot token。
+/// 界線（沒帶身份仍然過得去）留在 #447 等 per-bot token。
 pub(super) async fn persona_actor(app: &impl crate::capabilities::Db, headers: &HeaderMap) -> Result<String, LcError> {
     let Some(id) = super::bot_requests::verified_bot_id(app, headers).await? else {
         return Ok("user".to_string());
@@ -896,7 +896,7 @@ pub(super) async fn persona_actor(app: &impl crate::capabilities::Db, headers: &
         None => Err(LcError::Forbidden(json!({
             "error": "forbidden",
             "reason": "role_required",
-            "message": "改寫總管人設只有 AGM 角色或沒有 bot 身分的使用者做得到：這顆 bot 證明得了自己，但它不是巡檢也不是協調者",
+            "message": "改寫總管人設只有 AGM 角色或沒有 bot 身份的使用者做得到：這顆 bot 證明得了自己，但它不是巡檢也不是協調者",
             "bot_id": id,
         }))),
     }
@@ -904,7 +904,7 @@ pub(super) async fn persona_actor(app: &impl crate::capabilities::Db, headers: &
 
 /// 人設換了就讓它看得見：log 一行＋推一則 `persona_changed` 給巡檢（issue #462）。
 ///
-/// 沒帶身分的呼叫端照收，但「照收」不等於「沒發生過」——改的是總管之後照著做事的那份字，
+/// 沒帶身份的呼叫端照收，但「照收」不等於「沒發生過」——改的是總管之後照著做事的那份字，
 /// 而 `persona.rs` 自己說線上載入的那份不可觀測，不留痕跡的話改完不會有人發現。
 pub(super) async fn note_persona_change(db: &SqlitePool, actor: &str, old: Option<&str>, new: &str, version: i64, how: &str) {
     let lines = |t: &str| t.lines().count();
@@ -970,7 +970,7 @@ pub async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b
 
 #[derive(Deserialize)]
 pub struct AdoptIn {
-    /// 收下但不採信：誰採用內嵌版以驗證過的身分為準（見 `post_persona_adopt`），這個欄位只為相容既有呼叫端。
+    /// 收下但不採信：誰採用內嵌版以驗證過的身份為準（見 `post_persona_adopt`），這個欄位只為相容既有呼叫端。
     #[serde(default)]
     #[allow(dead_code)]
     pub actor: Option<String>,
@@ -999,7 +999,7 @@ pub async fn post_persona_adopt(
     note_persona_change(&app.db, &actor, previous.as_deref(), &embedded, version, "adopt_embedded").await;
     sync_persona(&app, &embedded, version).await?;
     drop(_g);
-    // `actor` 從驗過的身分來，不是 body 自稱的（issue #463）：以前這裡是
+    // `actor` 從驗過的身份來，不是 body 自稱的（issue #463）：以前這裡是
     // `b.actor.as_deref().unwrap_or("AGM")`，任何呼叫端都能把這行 log 掛成 AGM。
     tracing::info!(version, actor, reason = b.reason.as_deref().unwrap_or(""), "AGM persona migrated to the embedded version");
     app.emit("supervisor_changed", json!({"persona_version": version})).await;
@@ -1203,7 +1203,7 @@ pub async fn post_approval_decision(
     bounded("reason", b.reason.as_deref().unwrap_or_default(), MAX_NOTE_CHARS)?;
     bounded("actor", b.actor.as_deref().unwrap_or_default(), MAX_LABEL_CHARS)?;
     // 核准只給驗過的 AGM 角色（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
-    // 而 UI token 本機任何行程都拿得到——不要求角色的話，一顆 bot 不帶身分就能核准自己要的窗口。
+    // 而 UI token 本機任何行程都拿得到——不要求角色的話，一顆 bot 不帶身份就能核准自己要的窗口。
     // deny／revoke 照舊不要求：那只會叫停，人在一般 shell 裡還得叫得停。
     let verified = if b.decision == "approve" {
         Some(super::bot_requests::require_role(&app, &headers).await?)
@@ -1218,7 +1218,7 @@ pub async fn post_approval_decision(
         _ => return Err(LcError::Bad("decision must be approve | deny | revoke".into())),
     };
     let current = store::approval(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("approval".into()))?;
-    // 只讀申請當下持久化的 principal；舊名字或舊 unverified 旗標都不足以回推身分。
+    // 只讀申請當下持久化的 principal；舊名字或舊 unverified 旗標都不足以回推身份。
     if status == "approved" {
         let principal = store::approval_principal(&app.db, &current.id).await.map_err(|e| {
             LcError::Unavailable(json!({"error":"unavailable", "reason":"requester_lookup_failed", "retryable":true, "sent":false,
@@ -1345,7 +1345,7 @@ pub struct SafetyQuery {
     /// 不帶＝純查詢，退回看最早那筆還活著的核准。
     #[serde(default)]
     pub approval: Option<String>,
-    /// 以這個 owner 的身分問：他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
+    /// 以這個 owner 的身份問：他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
     /// 不帶＝舊行為，每一把租約都算擋。
     #[serde(default)]
     pub owner: Option<String>,
@@ -1404,7 +1404,7 @@ pub async fn post_lease_acquire(
     headers: HeaderMap,
     Json(b): Json<AcquireIn>,
 ) -> Result<Json<Value>, LcError> {
-    // Body 的 owner 與 approval requester 相等仍不夠：被證明身分的一般 bot 只能替自己開窗口，
+    // Body 的 owner 與 approval requester 相等仍不夠：被證明身份的一般 bot 只能替自己開窗口，
     // 否則任何 bot 都能借另一顆 bot 已獲核准的 approval 拿走 lease token。
     // #923：冪等鍵進租約表的唯一索引，先驗長度與字元。
     let request_id = match b.request_id.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
@@ -1791,7 +1791,7 @@ mod approval_decision_tests {
         assert_eq!(denied["status"], "denied");
     }
 
-    /// issue #462：改寫總管人設以前連 `HeaderMap` 都不收。共用 UI token 的前提下「沒帶身分＝
+    /// issue #462：改寫總管人設以前連 `HeaderMap` 都不收。共用 UI token 的前提下「沒帶身份＝
     /// 使用者」的預設不動（網頁就是這樣改的），但**證明得了自己卻不是角色 bot** 的呼叫端要 403——
     /// 一顆普通 bot 沒有理由改寫總管跑的那份角色前導詞。而且不管誰改，都要留下痕跡。
     #[tokio::test]
@@ -1839,7 +1839,7 @@ mod approval_decision_tests {
         assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none(), "被擋下就不該寫進去");
         assert!(inbox(&app).await.is_empty(), "被擋下就不該推通知");
 
-        // 2) 宣告了身分卻證明不了：403（`verified_bot_id` 丟的），也不寫。
+        // 2) 宣告了身份卻證明不了：403（`verified_bot_id` 丟的），也不寫。
         let mut forged = HeaderMap::new();
         forged.insert("X-AM-Bot-Id", plain.parse().unwrap());
         forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
@@ -1847,7 +1847,7 @@ mod approval_decision_tests {
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
         assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none());
 
-        // 3) 沒宣告身分＝使用者／UI：照收（界線留在 #447），但要留痕，記成 user、歸巡檢。
+        // 3) 沒宣告身份＝使用者／UI：照收（界線留在 #447），但要留痕，記成 user、歸巡檢。
         put(&app, HeaderMap::new(), "使用者從網頁改的").await.unwrap();
         let rows = inbox(&app).await;
         assert_eq!(rows.len(), 1, "每次真的改動都要推一則");
@@ -2004,11 +2004,11 @@ mod approval_decision_tests {
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
         assert_eq!(state(&app, e3).await, "pending");
 
-        // 4) 什麼身分都沒宣告：以前是「使用者／UI，什麼都結得掉」，issue #432 之後也是 403
+        // 4) 什麼身份都沒宣告：以前是「使用者／UI，什麼都結得掉」，issue #432 之後也是 403
         //    ——不宣告曾經比宣告了卻證明不了更有權限，那個反差正是要消掉的東西。
         let e4 = ev(&app).await;
         let err = post_inbox_ack(State(app.clone()), Path(e4.clone()), HeaderMap::new()).await.unwrap_err();
-        let LcError::Forbidden(v) = &err else { panic!("沒宣告身分應該 403，卻是 {err:?}") };
+        let LcError::Forbidden(v) = &err else { panic!("沒宣告身份應該 403，卻是 {err:?}") };
         assert_eq!(v["reason"], "role_required");
         assert_eq!(state(&app, e4).await, "pending", "擋下來就不該動到事件");
 
@@ -2047,7 +2047,7 @@ mod approval_decision_tests {
         let _ = decide(&app, &a1, "deny", "AGM:responder").await.unwrap();
         let who = decided_by(&app, a1).await;
         assert_eq!(who, "user(AGM:responder)");
-        assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
+        assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身份，卻拿到 {who:?}");
 
         // 沒驗過、也沒自稱：user，而不是以前的 AGM。
         let a2 = pending(&app).await;
@@ -2088,7 +2088,7 @@ mod approval_decision_tests {
             async move { store::approval(&app.db, &id).await.unwrap().unwrap() }
         };
 
-        // 1) 沒宣告身分：照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），
+        // 1) 沒宣告身份：照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），
         //    `requester` 一個字都不動，但記成沒驗過。
         let Json(a1) = ask(&app, HeaderMap::new(), "daemon-update-kick", "r-1").await.unwrap();
         let a1 = row(&app, a1["id"].as_str().unwrap().to_string()).await;
@@ -2108,7 +2108,7 @@ mod approval_decision_tests {
         assert_eq!(v["reason"], "requester_not_the_caller");
         assert!(store::approval_by_request(&app.db, "r-3").await.unwrap().is_none(), "擋下來就不該留下半筆申請");
 
-        // 4) 宣告了身分卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者申請」。
+        // 4) 宣告了身份卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者申請」。
         let mut bad = HeaderMap::new();
         bad.insert("X-AM-Bot-Id", h.get("X-AM-Bot-Id").unwrap().clone());
         bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
@@ -2163,7 +2163,7 @@ mod approval_decision_tests {
         let _ = decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
         assert_eq!(status(&app, theirs).await, "approved");
 
-        // 申請時不帶身分、裁示時才帶自己的——守衛不能因此變成選配的（i406 的審核，2026-09-24 裁示）：
+        // 申請時不帶身份、裁示時才帶自己的——守衛不能因此變成選配的（i406 的審核，2026-09-24 裁示）：
         // 缺少申請當下的 principal 證據就保持未知，一樣不能核准。
         let side_door = ask(&app, HeaderMap::new(), h["X-AM-Bot-Id"].to_str().unwrap(), "s-3").await;
         let err = decide_as(&app, side_door.clone(), h, "approve").await.unwrap_err();
@@ -2174,7 +2174,7 @@ mod approval_decision_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
-    /// issue #447：核准只給驗過的 AGM 角色。以前沒帶身分＝使用者，什麼都能核准，於是一顆 bot 不帶
+    /// issue #447：核准只給驗過的 AGM 角色。以前沒帶身份＝使用者，什麼都能核准，於是一顆 bot 不帶
     /// 標頭申請、再不帶標頭核准，#436 的自我核准守衛整段跳過。deny／revoke 照舊不要求角色。
     #[tokio::test]
     async fn only_a_verified_role_can_approve_but_anyone_can_stop() {
@@ -2195,12 +2195,12 @@ mod approval_decision_tests {
             other => panic!("expected 403 role_required, got {other:?}"),
         };
 
-        // 1) 沒宣告身分（共用 UI token 的任何呼叫端）：核准 403，那筆還是 pending。
+        // 1) 沒宣告身份（共用 UI token 的任何呼叫端）：核准 403，那筆還是 pending。
         let a1 = pending(&app).await;
         role_required(decide_as(&app, a1.clone(), HeaderMap::new(), "approve").await);
         assert_eq!(status(&app, a1.clone()).await, "pending", "擋下來就不該動到那筆");
 
-        // 2) 證明得了自己、卻不是角色 bot（一般修正 bot）：一樣 403，不因為驗過身分就能核准。
+        // 2) 證明得了自己、卻不是角色 bot（一般修正 bot）：一樣 403，不因為驗過身份就能核准。
         let fixer = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-fix','/tmp/p-fix','fix',?)")
             .bind(crate::db::now())
@@ -2219,7 +2219,7 @@ mod approval_decision_tests {
         role_required(decide_as(&app, a1.clone(), fix_h.clone(), "approve").await);
         assert_eq!(status(&app, a1.clone()).await, "pending");
 
-        // 3) 宣告了身分卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者核准」。
+        // 3) 宣告了身份卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者核准」。
         let mut bad = fix_h.clone();
         bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
         let err = decide_as(&app, a1.clone(), bad, "approve").await.unwrap_err();
@@ -3336,7 +3336,7 @@ mod verified_actor_role_read_failure_tests {
 
         fail_role_lookup_once(&app, &responder_id);
         let result = post_assignment(State(app.clone()), headers.clone(), Json(body)).await;
-        assert!(matches!(result, Err(LcError::Upstream(_))), "讀取錯誤必須回 5xx，不能降成 UI 身分：{result:?}");
+        assert!(matches!(result, Err(LcError::Upstream(_))), "讀取錯誤必須回 5xx，不能降成 UI 身份：{result:?}");
         assert!(store::assignment_by_crid(&app.db, "actor-role-615").await.unwrap().is_none(), "actor 不可讀時不能建立 durable assignment");
 
         let body: AssignIn = serde_json::from_value(json!({

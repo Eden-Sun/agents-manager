@@ -1,5 +1,5 @@
 /**
- * 身分停用名單的請求可能重疊（重連、resync、按鈕各自觸發）。回來的順序不保證：較舊的那份晚到，
+ * 身份停用名單的請求可能重疊（重連、resync、按鈕各自觸發）。回來的順序不保證：較舊的那份晚到，
  * 不能把較新的蓋掉（同 #1489 的 pending-question 那類問題）。
  */
 import test from 'node:test'
@@ -11,7 +11,7 @@ const { identityPrefKey } = await import('../api/index.ts')
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 })
 
-test('兩次身分停用請求回來的順序顛倒：較舊的那份晚到，不能蓋掉較新的', async () => {
+test('兩次身份停用請求回來的順序顛倒：較舊的那份晚到，不能蓋掉較新的', async () => {
   reset()
   const release: Array<() => void> = []
   routeDaemon((r) => {

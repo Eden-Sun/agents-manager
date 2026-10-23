@@ -445,7 +445,7 @@ const STOP_WHY: &str = "bot 已被停止：這一則是 bot 沒在跑時送的�
 /// 使用者自己按停止：還在等它起來的那幾則一併撤回，不留到下次啟動又送出去。呼叫端是 `stop` 記 `stopping` 的**同一個交易**
 /// （#199）：要嘛「正在停」與撤回都成立，要嘛都不成立（stop 一步都不做）。以前兩步分開、撤不掉只記在記憶體（#159 的欠帳），
 /// 補上之前 daemon 重啟，開機就照舊替它啟動、把使用者已經不要的那一則送出去。
-/// 重啟（換身分、`?resume=native`）的停不撤——那段沒有 run 是暫時的（`restart_hold`），由呼叫端判斷。
+/// 重啟（換身份、`?resume=native`）的停不撤——那段沒有 run 是暫時的（`restart_hold`），由呼叫端判斷。
 /// 回傳撤掉的那幾則，commit 之後逐一 [`announce_revoked`]。
 pub async fn withdraw_waiting_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -691,7 +691,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "no-identity").await;
-        // 這台沒有這個身分：`start_bot` 在碰任何 pane 之前就 409。
+        // 這台沒有這個身份：`start_bot` 在碰任何 pane 之前就 409。
         sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         prompt_starting(&app, &bot.id, TEXT, "crid-fail", &[], RelaySrc::default()).await.unwrap();
         {

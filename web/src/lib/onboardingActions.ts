@@ -57,7 +57,7 @@ export async function installKindOnHost(host: string, kind: BotKind): Promise<bo
 }
 
 /**
- * 登入一個 kind／身分（沿用既有流程，不另開一套）：命名身分走 daemon 的 `identities/{id}/login`（claude 有登入協助面板）；
+ * 登入一個 kind／身份（沿用既有流程，不另開一套）：命名身份走 daemon 的 `identities/{id}/login`（claude 有登入協助面板）；
  * 預設帳號開新 shell 打 `<cli> login`（agy 是打 `agy` 由 TUI 引導）。回「登入終端開起來了」。
  */
 export async function loginKindOnHost(host: string, kind: BotKind, identity: string | null): Promise<boolean> {

@@ -64,7 +64,7 @@ function quotaTitle(host: string, t: ReturnType<typeof useT>): string {
 }
 
 function useEntryQuota(entry: QuotaEntry): KindQuota | null {
-  // 落點已經由 `collectEntries`（`quotaBaseKey`）定好：不能先看「自己那一格有沒有數字」，共用預設帳號的身分殘留的舊 `claude:<id>` 會蓋過裸 key。
+  // 落點已經由 `collectEntries`（`quotaBaseKey`）定好：不能先看「自己那一格有沒有數字」，共用預設帳號的身份殘留的舊 `claude:<id>` 會蓋過裸 key。
   const raw = useStore((s) => s.quota[entry.fullKey] ?? null)
   // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h 與升級前的撞上限橫幅不畫（見 quotaNoFiveHour）。
   return useMemo(() => projectNoFiveHour(entry.kind, raw), [entry.kind, raw])
@@ -326,7 +326,7 @@ function Bar({
   critical: boolean
   mark: number | null
   markTitle?: string
-  /** 這個身分有撞限紀錄：讀數 0 才真的印 0（見 `fmtPct`）。 */
+  /** 這個身份有撞限紀錄：讀數 0 才真的印 0（見 `fmtPct`）。 */
   hit?: boolean
   /** 百分比帶 `%`：這一列在倒數模式，底下那一行寫的是時間，裸的 `0` 讀不出是百分比（2026-10-02 使用者）。 */
   unit?: boolean

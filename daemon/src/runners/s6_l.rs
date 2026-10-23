@@ -125,7 +125,7 @@ impl s6_ports::StartServices for App {
             crate::share::cage::cage_env(env, &identity_env, &crate::share::cage::local_home());
             return;
         }
-        // 遠端：身分與家目錄都是那台的，PATH 換成那台的（不含 shim 目錄）。位置解析不到就留空，那顆 bot 啟動前已經被 prepare 擋下。
+        // 遠端：身份與家目錄都是那台的，PATH 換成那台的（不含 shim 目錄）。位置解析不到就留空，那顆 bot 啟動前已經被 prepare 擋下。
         let (home, remote_path) = match crate::share::cage::remote_site(&shared, &bot.id).await {
             Ok(site) => (site.home.clone(), site.conn.remote_path()),
             Err(_) => (String::new(), String::new()),

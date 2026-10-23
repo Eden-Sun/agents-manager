@@ -36,4 +36,4 @@ python3 ~/.config/agents-manager/supervisor/AGM/bin/claude_binary_diff.py "$OLD"
    ```
 3. 疑似有用的功能先實測再下結論（例如新旗標用 `-p` 跑一次、新輸出格式檢查實際 JSON），不要只讀字串猜。測試用拋棄式目錄與 `-p`，不要動正式 daemon、不要在同機起第二顆 daemon。
 
-判斷標準：額度（`quota_claude.rs` 的 `/usage`／`usage_report`、codex 狀態列、撞上限橫幅）；送達與回合（SessionStart／Stop、statusLine、打字送達證據、`--resume`／`--fork-session`／`codex fork`）；隔離與身分（`--settings`、`CLAUDE_CONFIG_DIR`、權限與 bypass、背景 session、`claude agents --json`）；子 agent（herdr shim 的 env、subagent 旗標與設定）。只把對這些實際路徑有影響的 binary 差異併入同一則通知。
+判斷標準：額度（`quota_claude.rs` 的 `/usage`／`usage_report`、codex 狀態列、撞上限橫幅）；送達與回合（SessionStart／Stop、statusLine、打字送達證據、`--resume`／`--fork-session`／`codex fork`）；隔離與身份（`--settings`、`CLAUDE_CONFIG_DIR`、權限與 bypass、背景 session、`claude agents --json`）；子 agent（herdr shim 的 env、subagent 旗標與設定）。只把對這些實際路徑有影響的 binary 差異併入同一則通知。

@@ -478,7 +478,7 @@ for (const [label, body, route] of [
   })
 }
 
-/** GH #83：明確 identity 確認沒登入時啟動失敗，toast 要顯示 daemon 給的 `hint`（身分／主機／怎麼登入），不是原始 reason 代碼。 */
+/** GH #83：明確 identity 確認沒登入時啟動失敗，toast 要顯示 daemon 給的 `hint`（身份／主機／怎麼登入），不是原始 reason 代碼。 */
 test('啟動撞到明確 identity 沒登入：toast 顯示 hint，不是 identity_not_logged_in 代碼', async () => {
   seed()
   routeDaemon(() =>
@@ -558,7 +558,7 @@ test('重啟 503 restart_state_uncommitted：要刷新狀態', async () => {
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
 })
 
-/** 2026-10-02 console-rpa：換身分後按 ⟳ 重啟起了新 session、失憶。重啟一律先要求接回原對話，接不回才開新的。 */
+/** 2026-10-02 console-rpa：換身份後按 ⟳ 重啟起了新 session、失憶。重啟一律先要求接回原對話，接不回才開新的。 */
 test('重啟預設帶 resume=native；接不回（cannot_resume）才不帶重送', async () => {
   seed()
   routeDaemon((r) => (r.path.includes('/restart') ? json({ run_id: 'r2' }, 200) : json({}, 200)))
@@ -861,7 +861,7 @@ test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出
  * #233：daemon 的 409 帶了人話 `message`、但**沒有** `retryable`（登入指令找不到 CLI、default session 的 bot 不給開／關）時，
  * `reasonText` 只在 `retryable:true` 才用 `message`，通知就成了 `identity_login_unavailable（HTTP 409）` 這種機器代碼。
  */
-test('身分登入 409 identity_login_unavailable：顯示 daemon 的人話 message，不是機器代碼', async () => {
+test('身份登入 409 identity_login_unavailable：顯示 daemon 的人話 message，不是機器代碼', async () => {
   seed()
   routeDaemon(() =>
     json({ error: 'conflict', reason: 'identity_login_unavailable', host: 'm4p', identity: 'cc1', kind: 'claude', message: 'CLI 不在 PATH，無法登入' }, 409),

@@ -324,7 +324,7 @@
         assert!(!probe_due(&host, &bot.id, &pane_id));
     }
 
-    /// Linux procps 的 `ps eww -p`（BSD 的 `e` 混 SysV 的 `-p`）也要吐出環境：child 的身分就靠它認
+    /// Linux procps 的 `ps eww -p`（BSD 的 `e` 混 SysV 的 `-p`）也要吐出環境：child 的身份就靠它認
     /// （SPEC「Linux 主機」）。真的起一個行程，外部編譯主機會跑到。
     #[cfg(target_os = "linux")]
     #[test]

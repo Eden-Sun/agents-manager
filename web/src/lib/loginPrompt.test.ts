@@ -68,7 +68,7 @@ test('沒有 bot 綁著它（或綁在別台主機）：不提示', () => {
   assert.deepEqual(pendingLogins(wrongKind), [])
 })
 
-test('只提示 claude 身分；主機連不上就不提示（登入也開不了 pane，離線條已經在講）', () => {
+test('只提示 claude 身份；主機連不上就不提示（登入也開不了 pane，離線條已經在講）', () => {
   assert.deepEqual(pendingLogins(down({ logged_in: false, kind: 'codex' })), [])
   assert.deepEqual(pendingLogins({ ...down({ logged_in: false }), hosts: [{ name: 'm4p', connected: false, identity_status: { cc1: st({ logged_in: false }) } }] }), [])
   const local = base({ bots: [{ id: 'b', name: 'l', project_id: 'p-local', identity: 'cc1', kind: 'claude' }], hosts: [], localIdentityStatus: { cc1: st({ logged_in: false }) } })
@@ -111,7 +111,7 @@ test('來源連著、但已不需要登入：關掉的紀錄照樣清掉（登�
   assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(ok, pendingLogins(ok), dismissed)), {})
 })
 
-test('提示文字：說清楚哪個身分、哪台主機、幾顆 bot、怎麼發現的', () => {
+test('提示文字：說清楚哪個身份、哪台主機、幾顆 bot、怎麼發現的', () => {
   const [turn] = pendingLogins(down({ logged_in: null, login_needed: { since: 'T', via: 'turn_auth_failure' } }))
   assert.equal(loginPromptText(turn).title, 'cc1（m4p）已登出')
   assert.match(loginPromptText(turn).detail, /1 顆 bot.*回合.*失敗/)

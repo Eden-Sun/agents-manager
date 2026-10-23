@@ -1,5 +1,5 @@
 /**
- * 手機版重新登入 claude 身分（#838，使用者 2026-10-04）：登入 pane 上的「打開登入網站」與 code 輸入框的判斷。
+ * 手機版重新登入 claude 身份（#838，使用者 2026-10-04）：登入 pane 上的「打開登入網站」與 code 輸入框的判斷。
  * daemon 從 `claude auth login` 的畫面取網址、確認還在等 code 才把字打進去；這裡只決定畫面上顯示什麼。
  */
 import type { LoginStatus } from '../api'

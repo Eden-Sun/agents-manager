@@ -1,5 +1,5 @@
 /**
- * 驗證者找不到 Fable 額度時的重置清單：重置時間讀不到的身分不能印成「額度  回來」（中間空白、意思還相反）（#1133）。
+ * 驗證者找不到 Fable 額度時的重置清單：重置時間讀不到的身份不能印成「額度  回來」（中間空白、意思還相反）（#1133）。
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -43,7 +43,7 @@ beforeEach(() => {
   useStore.setState({ missionsSupported: true, missions: { p1: [mission] }, missionDetail: { m1: detail } } as never)
 })
 
-test('重置時間讀不到的身分不印成空白，有時間的照舊', async () => {
+test('重置時間讀不到的身份不印成空白，有時間的照舊', async () => {
   await mount(<MissionsBar projectId="p1" />)
   await settle(200)
   const rows = [...document.querySelectorAll<HTMLElement>('.mission-resets li')].map((li) => li.textContent!)

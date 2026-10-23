@@ -1293,13 +1293,13 @@ mod tests {
         assert!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none());
         assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id));
 
-        // 一般 bot：stop + start（這裡身分不存在，start 一定失敗，證明走的是 restart_bot_with 那一條）。
+        // 一般 bot：stop + start（這裡身份不存在，start 一定失敗，證明走的是 restart_bot_with 那一條）。
         let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
         sqlx::query("UPDATE bots SET identity='nope-not-on-this-host' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         crate::testing::fake_run(&app, &bot.id).await;
         match restart_resuming(&app, &bot.id).await {
             Restarted::Failed(e) => assert!(format!("{e:#}").contains("identity is not known"), "{e:#}"),
-            _ => panic!("一般 bot 走 stop + start，身分不存在時 start 失敗"),
+            _ => panic!("一般 bot 走 stop + start，身份不存在時 start 失敗"),
         }
         // 不存在的 bot：排到它時已經不用重啟，是跳過。
         assert!(matches!(restart_resuming(&app, "no-such-bot").await, Restarted::Busy(Skip::NoLongerPending)));
@@ -1372,7 +1372,7 @@ mod tests {
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
         mark_update_pending(&app, &kid.run_id).await;
-        // 後面那顆：身分不存在，start 一定失敗（跟上面 a_failed_restart… 同一個做法）。
+        // 後面那顆：身份不存在，start 一定失敗（跟上面 a_failed_restart… 同一個做法）。
         let other = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, identity, created_at)
@@ -1513,7 +1513,7 @@ mod tests {
         assert_eq!(starts(&env), 1, "意圖沒變、沒回來：補啟動一次");
     }
 
-    /// #566 夾具：一顆帶著更新通知、閒置的 bot（身分是這台不認得的，重啟在 start 那一步就被擋下、不真的開 pane）。
+    /// #566 夾具：一顆帶著更新通知、閒置的 bot（身份是這台不認得的，重啟在 start 那一步就被擋下、不真的開 pane）。
     async fn pending_bot(env: &crate::testing::Env, name: &str, kind: &str, notice: &str) -> (String, String) {
         let b = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
         sqlx::query("UPDATE bots SET kind=?, identity='nope' WHERE id=?").bind(kind).bind(&b.id).execute(&env.app.db).await.unwrap();

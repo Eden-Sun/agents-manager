@@ -62,7 +62,7 @@ fn is_quota_limit_lower(lower: &str) -> bool {
 /// 橫幅說的是哪一桶。CLI 2.1.273 的字串表就是這幾種 rate limit：
 /// `five_hour`→`session limit`、`seven_day`→`weekly limit`、`seven_day_opus`→`Opus limit`、
 /// `seven_day_sonnet`→`Sonnet limit`、`seven_day_overage_included`→`Fable limit`。
-/// Opus／Sonnet 跟 Fable 一樣是**模型自己的**週桶，不是整個身分的 7d（review3 c4 M1）。
+/// Opus／Sonnet 跟 Fable 一樣是**模型自己的**週桶，不是整個身份的 7d（review3 c4 M1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LimitBucket {
     Session,
@@ -163,7 +163,7 @@ fn agy_reset_until(line: &str, at: &str) -> Option<String> {
 
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
 ///
-/// Opus／Sonnet 的週桶 daemon 沒有量表可放：**一格都不標**（標 7d 會讓同身分所有 bot 看起來週額度用光），
+/// Opus／Sonnet 的週桶 daemon 沒有量表可放：**一格都不標**（標 7d 會讓同身份所有 bot 看起來週額度用光），
 /// 重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 列跟 `weekly_all` 同一個重置週期（review3 c4 M1）。
 ///
 /// 重置時間不晚於撞的那一刻（`at`）的讀數是**上一個窗**的：閒置的 5h 窗，`/usage` 照樣回上一個重置時間
@@ -353,7 +353,7 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
     }
     // 上面那個「只記一次」的標記（`turn_error`）、釘在那一回合上的訊息、收掉在飛的回合，**同一個交易**寫；要讀的全部先讀
     // （#198 同類）。以前標記先寫、後面讀寫一失敗就回錯：下一次擷取被「只記一次」擋掉，訊息沒釘、回合不收（輸入框鎖著），
-    // 再也不重來。撞限要記在哪個身分也在這裡讀。
+    // 再也不重來。撞限要記在哪個身份也在這裡讀。
     let Some(bot) = db::bot(db.pool(), bot_id).await? else { return Ok(()) };
     let conversation_id = db::conversation_id(db.pool(), bot_id).await?;
     let turn = last_turn(&db, &run.id).await?;
@@ -731,8 +731,8 @@ mod tests {
 /// 跟 codex 不同，**不**在下一回合成功時清掉：Fable 用盡後換 opus 照樣能跑，不代表 Fable 恢復；
 /// 只靠 `until`（該桶子的 `resets_at`）到期解除。
 ///
-/// 記不進去就回錯（#108 重開），不當作沒撞：讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的
-/// key）、那台的身分表還沒偵測完（key 算不準，[`crate::quota::resolve_quota_base`]）、排著的 prompt 身上的憑據寫不進去
+/// 記不進去就回錯（#108 重開），不當作沒撞：讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身份的
+/// key）、那台的身份表還沒偵測完（key 算不準，[`crate::quota::resolve_quota_base`]）、排著的 prompt 身上的憑據寫不進去
 /// （[`crate::lifecycle::quota_hold::stamp_queued`]）。撞限是外面已經發生的事，所以同時記成**欠著**（[`owed_limit_hit`]）：
 /// 補上之前，這顆 bot 的 flush 與派送前都照欠著的那一筆擋；之後每一次問都先補一次。
 pub async fn mark_claude_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line: &str) -> Result<()> {
@@ -751,7 +751,7 @@ pub async fn mark_agy_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line
 }
 
 /// codex 的撞限橫幅（#198），規則同 [`mark_claude_limit_hit`]：讀不到這顆 bot 在哪台主機（以前退回 `local`——撞限寫進
-/// 本機 `codex` 那一格，本機帳號被當成用盡、派工停擺，真正用盡的遠端身分反而沒擋）、那台的身分表還沒偵測完、排著的
+/// 本機 `codex` 那一格，本機帳號被當成用盡、派工停擺，真正用盡的遠端身份反而沒擋）、那台的身份表還沒偵測完、排著的
 /// prompt 蓋不上憑據，都回錯並記成欠著；補上之前 flush 與派送前照欠著的那一筆擋。
 pub async fn mark_codex_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, notice: &str) -> Result<()> {
     // grok 撞週限時畫的是自己的字（`screen::grok_limit_hit_line`），走同一條畫面擷取（2026-09-19 w168:pB7：以前 grok 根本不走這條，
@@ -795,7 +795,7 @@ async fn codex_banner_until(app: &impl TurnErrorContext, bot: &db::Bot, notice: 
 }
 
 async fn mark_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line: &str, banner: Banner) -> Result<()> {
-    // 撞的是 pane 裡實際的帳號＝run 起來時的身分（issue #238），不是剛改、還沒重啟生效的設定。讀不到 run 回錯（不猜）：
+    // 撞的是 pane 裡實際的帳號＝run 起來時的身份（issue #238），不是剛改、還沒重啟生效的設定。讀不到 run 回錯（不猜）：
     // `StopFailure` 由收件匣重試；這段時間閘門同樣讀不到 run，照擋。
     let identity = crate::quota::billing_identity(app, bot).await?;
     // 同一筆撞限重來（收件匣重試 `StopFailure`、下一次讀到同一張橫幅）：撞的那一刻、橫幅上的時間都還是當初的，不往後推。
@@ -817,7 +817,7 @@ async fn mark_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line: &str, 
     }
 }
 
-/// 一筆撞限：撞的那一刻、那時的身分、橫幅。欠著的時候原樣留著，補上時 `at` 不會變成補上的時間。
+/// 一筆撞限：撞的那一刻、那時的身份、橫幅。欠著的時候原樣留著，補上時 `at` 不會變成補上的時間。
 #[derive(Debug, Clone)]
 struct Mark {
     banner: Banner,
@@ -875,7 +875,7 @@ impl Mark {
     }
 }
 
-/// 寫進那台主機、那個身分的 key，再蓋到這顆 bot 排著的每一則上。
+/// 寫進那台主機、那個身份的 key，再蓋到這顆 bot 排著的每一則上。
 async fn record(app: &impl TurnErrorContext, bot_id: &str, m: &Mark) -> Result<()> {
     let db = DbContext::new(app.db().clone());
     let host = db::bot_host(db.pool(), bot_id).await?;
@@ -932,7 +932,7 @@ async fn record_claude<A: TurnErrorQuotaAccess>(access: &A, host: &str, m: &Mark
     Ok(hit)
 }
 
-/// grok 的一格（`grok`／`grok:<身分>`）：那個窗標成用完，撞限掛上去。窗沒有讀數時補一個 100% 的（重置時間留給
+/// grok 的一格（`grok`／`grok:<身份>`）：那個窗標成用完，撞限掛上去。窗沒有讀數時補一個 100% 的（重置時間留給
 /// `/usage` 探測），額度面板才看得到「用完了」。
 async fn record_codex<A: TurnErrorQuotaAccess>(access: &A, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
     let key = access.resolve_key(host, "codex", m.identity.as_deref()).await?;
@@ -1031,7 +1031,7 @@ fn owed(app: &impl crate::capabilities::BootId, bot_id: &str) -> Option<Mark> {
 /// 批次路徑補寫失敗後，同一筆欠帳隔多久才再試（`/api/state` 每次都會問，補不上就不該每次都重跑一整串查詢）。
 const OWED_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// 補寫失敗：只在欠帳表裡還是同一筆（同身分、同撞限時刻）時記下 `next_try`；補的過程中被換成新的一筆就不動它。
+/// 補寫失敗：只在欠帳表裡還是同一筆（同身份、同撞限時刻）時記下 `next_try`；補的過程中被換成新的一筆就不動它。
 fn back_off(app: &impl crate::capabilities::BootId, bot_id: &str, failed: &Mark) {
     let mut m = owed_marks().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(x) = m.get_mut(&owed_key(app, bot_id)).filter(|x| x.identity == failed.identity && x.at == failed.at) {
@@ -1043,8 +1043,8 @@ fn owe(app: &impl crate::capabilities::BootId, bot_id: &str, m: Mark) {
     owed_marks().lock().unwrap_or_else(|e| e.into_inner()).insert(owed_key(app, bot_id), m);
 }
 
-/// `recorded` 寫進去了：同一個身分、不比它新的那一筆欠帳一併結清（寫進的是同一把 key、同一刻或更晚的撞限）。
-/// 補的過程中又欠了一筆更新的、或欠的是換身分之前那個身分的，留著。
+/// `recorded` 寫進去了：同一個身份、不比它新的那一筆欠帳一併結清（寫進的是同一把 key、同一刻或更晚的撞限）。
+/// 補的過程中又欠了一筆更新的、或欠的是換身份之前那個身份的，留著。
 fn settled(app: &impl crate::capabilities::BootId, bot_id: &str, recorded: &Mark) {
     let key = owed_key(app, bot_id);
     let mut m = owed_marks().lock().unwrap_or_else(|e| e.into_inner());
@@ -1054,14 +1054,14 @@ fn settled(app: &impl crate::capabilities::BootId, bot_id: &str, recorded: &Mark
 }
 
 /// 這顆 bot 欠著、還擋著它的撞限：先補一次，補上就回 `None`（記憶體裡已經有了，照一般的查法）；補不上、而且那一筆
-/// 是這顆 bot **現在**的身分撞的、沒到期、管得到它在跑的模型，就照那一筆擋。身分已經換掉的留著等補（寫回舊身分的
-/// key），不擋新身分；到期的直接丟掉。`identity` 是呼叫端算好的 [`crate::quota::billing_identity`]（issue #238）。
+/// 是這顆 bot **現在**的身份撞的、沒到期、管得到它在跑的模型，就照那一筆擋。身份已經換掉的留著等補（寫回舊身份的
+/// key），不擋新身份；到期的直接丟掉。`identity` 是呼叫端算好的 [`crate::quota::billing_identity`]（issue #238）。
 pub async fn owed_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
     owed_limit_hit_inner(app, bot, identity, false).await
 }
 
 /// [`owed_limit_hit`] 的批次版（只給 `GET /api/state` 的 `limit_hits_for_bots`）：補寫失敗後 [`OWED_RETRY_BACKOFF`] 內不再補
-/// （跳過 `bot_host`／`resolve_key`／快照讀寫），其餘判斷照舊——照欠著的那一筆擋、身分與模型的檢查不變，回傳的值與
+/// （跳過 `bot_host`／`resolve_key`／快照讀寫），其餘判斷照舊——照欠著的那一筆擋、身份與模型的檢查不變，回傳的值與
 /// 不節流時一樣。補得上就照原本的路徑結清。
 pub async fn owed_limit_hit_throttled(app: &impl TurnErrorContext, bot: &db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
     owed_limit_hit_inner(app, bot, identity, true).await
@@ -1204,7 +1204,7 @@ mod quota_limit_tests {
     }
 
     /// review3 c4 M1：`Opus limit`／`Sonnet limit`（CLI 的 `seven_day_opus`／`seven_day_sonnet`）是模型自己的週桶。
-    /// 以前記成 `seven_day` 並把 7d 量表釘成 100%：同帳號所有 claude bot 停派到週重置，群組任務換掉整個身分。
+    /// 以前記成 `seven_day` 並把 7d 量表釘成 100%：同帳號所有 claude bot 停派到週重置，群組任務換掉整個身份。
     #[test]
     fn a_model_limit_is_its_own_bucket_and_saturates_no_bar() {
         for (line, bucket) in [
@@ -1226,7 +1226,7 @@ mod quota_limit_tests {
             let until = saturate_bucket(&mut empty, &lower, at).or_else(|| fallback_until(&lower, at));
             assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00.000Z"), "{line}");
         }
-        // 「weekly limit」仍然是整個身分的 7d。
+        // 「weekly limit」仍然是整個身份的 7d。
         assert_eq!(bucket_name("you've hit your weekly limit").as_deref(), Some("seven_day"));
     }
 
@@ -1305,7 +1305,7 @@ mod quota_limit_tests {
     }
 
     /// #108 重開：遠端 bot 撞限，那一刻讀不到它在哪台主機。以前退回 `local`——撞限寫進本機帳號那一格，遠端那個用盡的
-    /// 身分照樣被派工。現在回錯、哪一格都不寫、記成欠著：派送前與 flush 照欠著的那一筆擋；讀得到之後補進 `remote1/claude`，
+    /// 身份照樣被派工。現在回錯、哪一格都不寫、記成欠著：派送前與 flush 照欠著的那一筆擋；讀得到之後補進 `remote1/claude`，
     /// 撞限時刻是當初那一刻，排著的那一則也蓋上憑據。
     #[tokio::test]
     async fn a_limit_hit_whose_host_cannot_be_read_is_owed_and_never_lands_on_the_local_key() {
@@ -1331,7 +1331,7 @@ mod quota_limit_tests {
         assert_eq!((held["at"].as_str(), held["bucket"].as_str()), (Some(owed.at.as_str()), Some("five_hour")));
     }
 
-    /// 欠著一筆（5 小時窗）的時候，同一個身分又撞了一筆更新的（週窗）而且記進去了：舊的那筆一併結清，不會在之後被補寫、
+    /// 欠著一筆（5 小時窗）的時候，同一個身份又撞了一筆更新的（週窗）而且記進去了：舊的那筆一併結清，不會在之後被補寫、
     /// 把記憶體裡較新的那筆蓋回去。
     #[tokio::test]
     async fn a_newer_hit_recorded_for_the_same_identity_settles_the_older_owed_one() {
@@ -1392,7 +1392,7 @@ mod quota_limit_tests {
         assert!(later_than(&hit.until, 4), "5h 窗的讀數過期了：保底 5 小時，不是過去的時間：{hit:?}");
     }
 
-    /// 身分表還沒偵測完（重啟後、`tools::detect` 之前）：共用預設帳號的 cc0 會被猜成 `claude:cc0`，偵測完之後查詢端讀裸
+    /// 身份表還沒偵測完（重啟後、`tools::detect` 之前）：共用預設帳號的 cc0 會被猜成 `claude:cc0`，偵測完之後查詢端讀裸
     /// `claude`，那一格沒人看。現在不猜：欠著，偵測完的第一次查詢補進裸 `claude`。
     #[tokio::test]
     async fn a_limit_hit_before_the_identities_are_known_is_owed_until_its_key_is() {
@@ -1447,7 +1447,7 @@ mod quota_limit_tests {
     }
 
     /// #198：遠端 codex bot 撞限，那一刻讀不到它在哪台主機。以前退回 `local`——撞限寫進本機 `codex` 那一格，本機帳號被當成
-    /// 用盡、派工停擺，遠端那個真的用盡的身分反而照樣被派工；記不進去也沒有欠帳。現在哪一格都不寫、欠著：派送前與 flush
+    /// 用盡、派工停擺，遠端那個真的用盡的身份反而照樣被派工；記不進去也沒有欠帳。現在哪一格都不寫、欠著：派送前與 flush
     /// 照欠著的那一筆擋；讀得到之後補進 `remote1/codex`，撞限時刻與橫幅上的時間不變，排著的那一則也蓋上憑據。
     #[tokio::test]
     async fn a_codex_limit_hit_whose_host_cannot_be_read_is_owed_and_never_lands_on_the_local_key() {
@@ -1474,7 +1474,7 @@ mod quota_limit_tests {
         assert_eq!(held["at"].as_str(), Some(owed.at.as_str()));
     }
 
-    /// codex 也不猜 key：身分表還沒偵測完時，共用預設帳號的 `cx0` 會被算成 `codex:cx0`，偵測完之後查詢端讀裸 `codex`。
+    /// codex 也不猜 key：身份表還沒偵測完時，共用預設帳號的 `cx0` 會被算成 `codex:cx0`，偵測完之後查詢端讀裸 `codex`。
     #[tokio::test]
     async fn a_codex_limit_hit_before_the_identities_are_known_is_owed_until_its_key_is() {
         let env = crate::testing::env().await;

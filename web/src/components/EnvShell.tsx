@@ -211,7 +211,7 @@ export function EnvShell() {
           className="env-tabpanel"
           hidden={activeTab !== 'identities'}
         >
-          <h2 className="page-title">{t('身分')}</h2>
+          <h2 className="page-title">{t('身份')}</h2>
           <IdentitiesPanel />
         </section>
 

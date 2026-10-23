@@ -210,7 +210,7 @@ pub async fn revoke_project_shares<S: crate::outbox::ShareStorage + site::SiteEn
     Ok(())
 }
 
-/// 拿 bot 身分打 API 的（實際上只有 AGM 角色過得了 `UserOrAgm` 那道）不能刪、不能停分享用 bot，也不能刪裝著它的專案
+/// 拿 bot 身份打 API 的（實際上只有 AGM 角色過得了 `UserOrAgm` 那道）不能刪、不能停分享用 bot，也不能刪裝著它的專案
 /// （2026-10-04 使用者：「let AGM 不清除這類 bot」——它是給外部 end user 隨時來用的）。使用者自己（UI token）照常。
 /// 回 `Some(bot_id)`＝擋下；讀不到也擋（fail closed，跟 [`refuses_bot_principal`] 同一個規矩）。重啟不擋：停了會自己起回來。
 pub async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &str, path: &str) -> Option<String> {

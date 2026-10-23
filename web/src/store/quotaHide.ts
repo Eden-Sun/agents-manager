@@ -1,5 +1,5 @@
 /**
- * 額度卡片上停用某身分／kind：其 bot 從側欄收起，到 reset 時間自動解除（見 docs/UI-DECISIONS.md）。
+ * 額度卡片上停用某身份／kind：其 bot 從側欄收起，到 reset 時間自動解除（見 docs/UI-DECISIONS.md）。
  * 純前端偏好、不進 zustand（免得被 WS 覆寫），用 `useSyncExternalStore` 共用。
  */
 import { useSyncExternalStore } from 'react'
@@ -14,7 +14,7 @@ export type DisabledMap = Readonly<Record<string, number | null>>
 
 /**
  * 以 host+kind+identity 記，刻意不用額度 map 的 key：落點會變（`quotaLookup.quotaBaseKey`——
- * 共用預設帳號的身分會退回裸 `claude`），拿會變的東西當偏好的鍵，數字一落位偏好就對不回來。
+ * 共用預設帳號的身份會退回裸 `claude`），拿會變的東西當偏好的鍵，數字一落位偏好就對不回來。
  */
 export function quotaDisableKey(host: string, kind: BotKind, identity: string | null): string {
   return `${host || LOCAL_HOST}|${kind}|${identity ?? ''}`

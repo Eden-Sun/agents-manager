@@ -1,5 +1,5 @@
 /* components/QuickAddBots.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* 已停用的身分列出但不可點——再開一顆也是同一組沒額度的帳號。 */
+/* 已停用的身份列出但不可點——再開一顆也是同一組沒額度的帳號。 */
 
 .quick-add-chip.quota-off .quick-add-label {
   text-decoration: line-through;

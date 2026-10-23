@@ -15,7 +15,7 @@ export interface OnbKindRow {
   kind: BotKind
   state: OnbKindState
   version: string | null
-  /** 已登入時顯示的帳號（身分狀態有 account 才有）。 */
+  /** 已登入時顯示的帳號（身份狀態有 account 才有）。 */
   account: string | null
 }
 

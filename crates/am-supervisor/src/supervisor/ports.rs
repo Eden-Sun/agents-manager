@@ -78,7 +78,7 @@ pub trait QuotaOps {
     async fn quota_reading(&self, key: &str) -> Option<Quota>;
 }
 
-/// mission：派工身分候選、暫停、事件、背景掃描。語意＝同名的 `crate::mission` 函式。
+/// mission：派工身份候選、暫停、事件、背景掃描。語意＝同名的 `crate::mission` 函式。
 pub trait MissionOps {
     async fn mission(&self, mission_id: &str) -> anyhow::Result<Option<crate::mission::store::Mission>>;
     async fn mission_candidates(&self, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<Quota>)>>;

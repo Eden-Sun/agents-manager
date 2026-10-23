@@ -475,7 +475,7 @@ fn matches_run(run: &db::Run, agent: &crate::herdr::AgentInfo, child: bool) -> b
     if !matches!(run.state.as_str(), "starting" | "running" | "stopping") && run.native_session_id.is_none() { return false; }
     match (run.native_session_id.as_deref(), crate::lifecycle::dead_panes::herdr_session_id(agent)) {
         (Some(expected), Some(observed)) => !expected.is_empty() && expected == observed,
-        // herdr 沒把 CLI session 綁上（grok 一律如此）：沒有反證，就以同 host／session 的 pane_id 當身分。
+        // herdr 沒把 CLI session 綁上（grok 一律如此）：沒有反證，就以同 host／session 的 pane_id 當身份。
         // 以前子 agent 走這裡一律 false，daemon 重啟後 grok 子 agent 再也接不回、狀態不再追蹤（2026-10-19 m4p）。
         (Some(_), None) => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         (None, _) if !child => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
@@ -1119,8 +1119,8 @@ async fn adopt_child(
             if let Some(r) = db::active_run(app.db(), &id).await? {
                 anyhow::bail!("child `{child_name}` still has active run `{}` under agent `{:?}`", r.id, r.agent_name);
             }
-            // kind 換了就把舊 identity 丟掉（SQLite 的 SET 右邊讀的是舊列值）：身分有 kind，
-            // 換成別的 CLI 之後那個身分就不適用了（`identity_kind`）。
+            // kind 換了就把舊 identity 丟掉（SQLite 的 SET 右邊讀的是舊列值）：身份有 kind，
+            // 換成別的 CLI 之後那個身份就不適用了（`identity_kind`）。
             sqlx::query(
                 "UPDATE bots SET cwd = COALESCE(?, cwd),
                    identity = CASE WHEN kind = ? THEN identity ELSE NULL END,
@@ -1173,7 +1173,7 @@ async fn adopt_child(
             .bind(&parent.project_id)
             .bind(&use_name)
             .bind(kind)
-            // 只繼承同 kind 母 bot 的身分：codex 子 agent 抄到 claude 的 cc1，quota 就長出 `codex:cc1`。
+            // 只繼承同 kind 母 bot 的身份：codex 子 agent 抄到 claude 的 cc1，quota 就長出 `codex:cc1`。
             .bind(crate::identity_kind::child_identity(parent.identity.as_deref(), &parent.kind, kind))
             .bind(agent.cwd.clone())
             .bind(session)
@@ -3512,7 +3512,7 @@ mod compat_tests {
     }
 
     /// 2026-09-14 使用者指正：codex 子 agent 從 claude 母 bot 抄了 `cc1`，quota 就長出 `codex:cc1`。
-    /// 身分有 kind，只有同 kind 的子 agent 才繼承（`identity_kind::child_identity`）。
+    /// 身份有 kind，只有同 kind 的子 agent 才繼承（`identity_kind::child_identity`）。
     #[tokio::test]
     async fn a_codex_child_of_a_claude_parent_does_not_inherit_its_identity() {
         let env = tt::env().await;

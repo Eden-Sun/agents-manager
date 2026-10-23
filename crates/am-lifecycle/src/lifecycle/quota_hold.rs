@@ -1,28 +1,28 @@
-//! 排著的 prompt 送出之前，目標身分要有額度（issue #108）。
+//! 排著的 prompt 送出之前，目標身份要有額度（issue #108）。
 //!
 //! 撞額度的那一回合被 `StopFailure` 收成失敗之後，回合結束的事件照例叫醒 queue flush——排在後面的派工
-//! 就被立刻送進**同一個還沒額度的身分**，再撞一次，派工白白燒掉。派送前（`supervisor::controller::dispatch`）
+//! 就被立刻送進**同一個還沒額度的身份**，再撞一次，派工白白燒掉。派送前（`supervisor::controller::dispatch`）
 //! 本來就用 [`crate::quota::limit_hit_for_bot`] 擋，已經排進佇列的這一則卻沒人問。
 //!
 //! 規則只住在這裡：
-//! - **判準**跟派送前同一支 `limit_hit_for_bot`：看這顆 bot **現在**的身分那把 key、撞的那一桶管不管得到
-//!   它正在跑的模型。所以換身分（`bots.identity` 已經是 B）、換模型（撞的是 Fable 桶、改跑 opus）、撞限
+//! - **判準**跟派送前同一支 `limit_hit_for_bot`：看這顆 bot **現在**的身份那把 key、撞的那一桶管不管得到
+//!   它正在跑的模型。所以換身份（`bots.identity` 已經是 B）、換模型（撞的是 Fable 桶、改跑 opus）、撞限
 //!   到期或被新讀數校正掉，都會讓它放行。
 //! - **擋的時候**（`queue::flush_queued_locked`）：留在佇列、不 claim、不花重試額度，掛 timer 到撞限到期，
-//!   最多 [`RECHECK_MAX`] 就再看一次（新讀數可能提早解除）。換身分重啟會叫醒 flush（#106）。
+//!   最多 [`RECHECK_MAX`] 就再看一次（新讀數可能提早解除）。換身份重啟會叫醒 flush（#106）。
 //! - **只送一次**：始終只有排著的那一則，放行之後走 flush 原本的 CAS claim。
 //! - **不會永遠卡住**：supervisor 的排隊保險絲（`block_stale_queues`）對「正在被擋、而且撞限在它自己的
 //!   等待上限內會到期」的不撤（[`bounded`]）；flush 剛放掉擋、下一次重看還沒到的那一小段也不撤
 //!   （[`recently_held`]）。撞限沒寫時間（codex credits 用完）或遠超過上限，保險絲照舊撤，理由寫額度。
 //!
-//! **活過重啟**（issue #108 重開）：`app.quotas` 只在記憶體（SPEC §12.4），而開機的 `rearm_queue_retries` 在身分偵測
-//! 之前就把排著的叫醒——只憑記憶體，重啟後第一個 flush 就把它送進同一個還沒額度的身分。所以跟交辦的 `resume_at`
+//! **活過重啟**（issue #108 重開）：`app.quotas` 只在記憶體（SPEC §12.4），而開機的 `rearm_queue_retries` 在身份偵測
+//! 之前就把排著的叫醒——只憑記憶體，重啟後第一個 flush 就把它送進同一個還沒額度的身份。所以跟交辦的 `resume_at`
 //! 同一個做法：**等著的那一列自己帶著憑據**。
-//! - 擋下的當下把那筆撞限（身分、桶、撞限時刻、到期、原因）寫進排著的這一則 `turns.quota_hold`；閘門放行就清掉。
+//! - 擋下的當下把那筆撞限（身份、桶、撞限時刻、到期、原因）寫進排著的這一則 `turns.quota_hold`；閘門放行就清掉。
 //! - 那台主機的開機回填（[`backfill_once`]，掛在 `tools::install_host_tools`、跟 `controller::backfill_quota_limits_once`
-//!   同一個點）把它原樣種回記憶體（`quota::restore_limit_hit`）。回填之後記憶體是唯一的判準，新讀數、換身分、換模型、
+//!   同一個點）把它原樣種回記憶體（`quota::restore_limit_hit`）。回填之後記憶體是唯一的判準，新讀數、換身份、換模型、
 //!   成功回合照舊校正或清掉它。
-//! - **上一輪開機**寫下的憑據，在這台主機回填之前（身分表還沒進來，key 算不準）flush 直接看它：身分還是同一個、
+//! - **上一輪開機**寫下的憑據，在這台主機回填之前（身份表還沒進來，key 算不準）flush 直接看它：身份還是同一個、
 //!   撞的桶管得到現在的模型、還沒到期、之後沒有成功回合清過那把 key，就擋。這一輪自己寫的憑據記憶體本來就有，照舊只看記憶體。
 //! - 撞限記下的當下（`turn_error::mark_claude_limit_hit` → [`stamp_queued`]）就蓋到這顆 bot 排著的每一則上，不等 flush。
 //!
@@ -40,7 +40,7 @@ use std::sync::{Mutex, OnceLock};
 /// 擋著的時候最多隔多久再看一次撞限。
 pub const RECHECK_MAX: Duration = Duration::from_secs(300);
 
-/// `turns.quota_hold` 的內容：擋下那一刻看到的撞限，加上當時的身分與寫下的時間。
+/// `turns.quota_hold` 的內容：擋下那一刻看到的撞限，加上當時的身份與寫下的時間。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 struct Held {
     identity: Option<String>,
@@ -135,7 +135,7 @@ pub async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &
     None
 }
 
-/// 這一列上一輪開機的憑據對這顆 bot **現在**還擋不擋：身分沒換、還沒到期、之後沒有成功回合清過那把 key、
+/// 這一列上一輪開機的憑據對這顆 bot **現在**還擋不擋：身份沒換、還沒到期、之後沒有成功回合清過那把 key、
 /// 撞的桶管得到它在跑的模型。讀不到那一列、或憑據解不開，回錯（呼叫端照擋）。
 async fn held_on_turn(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &str) -> anyhow::Result<Option<crate::quota::LimitHit>> {
     let raw: Option<Option<String>> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn_id).fetch_optional(app.db()).await?;
@@ -149,14 +149,14 @@ async fn held_on_turn(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &str)
     Ok(crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit))
 }
 
-/// 憑據還算數：身分沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。身分是這顆 bot 現在實際跑的那個
+/// 憑據還算數：身份沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。身份是這顆 bot 現在實際跑的那個
 /// （[`crate::quota::billing_identity`]，issue #238）；讀不到回錯（呼叫端照擋）。
 async fn still_holds(app: &impl QuotaHoldContext, bot: &db::Bot, held: &Held) -> anyhow::Result<bool> {
     if held.identity != app.billing_identity(bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
         return Ok(false);
     }
     // 寫下之後這個主機名改指到另一台（#347）：那是另一台機器上的帳號，撞限不跟過去。主機不在設定裡不算「換了」——
-    // 讀不到不放行，跟上面讀不到身分一樣。單純重連不改設定，照樣算數。
+    // 讀不到不放行，跟上面讀不到身份一樣。單純重連不改設定，照樣算數。
     if let Some(then) = held.target.as_deref() {
         let host = db::bot_host(app.db(), &bot.id).await?;
         if host_target(app, &host).await.is_some_and(|now| now != then) {
@@ -240,8 +240,8 @@ fn backfilled(app: &impl crate::capabilities::BootId, host: &str) -> bool {
     backfill_state().lock().ok().and_then(|m| m.get(&backfill_key(app, host)).copied()).unwrap_or(false)
 }
 
-/// 開機回填（排著的 prompt 那一半）：`host` 的身分表剛寫好，把那台 bot 排著的 prompt 身上**上一輪開機**記下的
-/// 撞限種回記憶體。**每台主機每一輪開機只跑一次**，跑完之後 flush 只看記憶體。身分已經換掉、到期、或擋下之後
+/// 開機回填（排著的 prompt 那一半）：`host` 的身份表剛寫好，把那台 bot 排著的 prompt 身上**上一輪開機**記下的
+/// 撞限種回記憶體。**每台主機每一輪開機只跑一次**，跑完之後 flush 只看記憶體。身份已經換掉、到期、或擋下之後
 /// 同一把 key 被成功回合清過的不種（[`still_holds`]）。種完叫醒那幾顆的 flush：已經不擋的馬上送，不必等重看的 timer。
 ///
 /// 讀不到就**不算回填過**（#108 重開）：以前讀不到那幾列當作沒有、照樣標成跑完，flush 從此只看空的記憶體，重啟前記下的
@@ -305,7 +305,7 @@ async fn backfill(app: &impl QuotaHoldContext, host: &str) -> anyhow::Result<Vec
         }
         // 解不開的憑據（不是讀不到，是內容壞了）重來也一樣：跳過它，不讓它擋住整台主機的回填。
         // 但**這顆 bot 不算回填過**（issue #522）：撞限沒被種回記憶體，之後 `blocking_hit` 若照「回填完了、
-        // 只看記憶體」走，就會讀到一個空的記憶體、把唯一的證據 `forget` 掉，然後把那一則送進還沒額度的身分——
+        // 只看記憶體」走，就會讀到一個空的記憶體、把唯一的證據 `forget` 掉，然後把那一則送進還沒額度的身份——
         // 正是這個模組要擋的事。記下來，讓它繼續走 `held_on_turn`（那裡對解不開是回錯、呼叫端照擋，方向一致）。
         // 也不叫醒它的 flush：叫醒只是提早去踩那條路。
         let held = match serde_json::from_str::<Held>(&raw) {
@@ -320,7 +320,7 @@ async fn backfill(app: &impl QuotaHoldContext, host: &str) -> anyhow::Result<Vec
         if held.boot == app.boot_id() || !still_holds(app, &bot, &held).await? {
             continue;
         }
-        // 種回撞到的那個帳號（憑據上記的身分；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
+        // 種回撞到的那個帳號（憑據上記的身份；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
         let base = app.quota_base_for_host(host, &bot.kind, held.identity.as_deref()).await;
         if app.restore_limit_hit(host, &base, held.hit()).await {
             tracing::info!(host, bot = %bot.id, until = ?held.until, "重啟回填：排著的 prompt 記下的撞限補回記憶體");
@@ -409,7 +409,7 @@ mod tests {
         assert!(!bounded(&hit(None), now, six), "沒寫時間（codex credits）");
     }
 
-    /// 真的走 flush：目標身分撞限還在 → 不 claim、不花重試、一個字都不打、掛 timer；撞限解除 → 照常送。
+    /// 真的走 flush：目標身份撞限還在 → 不 claim、不花重試、一個字都不打、掛 timer；撞限解除 → 照常送。
     #[tokio::test]
     async fn a_queued_prompt_waits_while_its_identity_has_no_quota() {
         let env = tt::env().await;
@@ -447,7 +447,7 @@ mod tests {
         forget_held(&bot.id);
     }
 
-    /// shell 的 cc0（沒有自己的 `CLAUDE_CONFIG_DIR`＝預設帳號）：撞限的 key 是裸 `claude`，身分偵測之前卻算成 `claude:cc0`。
+    /// shell 的 cc0（沒有自己的 `CLAUDE_CONFIG_DIR`＝預設帳號）：撞限的 key 是裸 `claude`，身份偵測之前卻算成 `claude:cc0`。
     fn shell_cc0() -> crate::tools::HostTools {
         crate::tools::HostTools {
             tools: Default::default(),
@@ -463,7 +463,7 @@ mod tests {
         turn: String,
     }
 
-    /// 一顆 claude bot（身分 `identity`）、一個 run、一則排著的 prompt。
+    /// 一顆 claude bot（身份 `identity`）、一個 run、一則排著的 prompt。
     async fn queued_on(identity: Option<&str>, name: &str) -> Queued {
         let env = tt::env().await;
         let app = env.app.clone();
@@ -530,7 +530,7 @@ mod tests {
             let (was_held, hold) = state(&app, &q.turn).await;
             assert_eq!(was_held, held, "{hit_on} 撞限：擋不擋");
             if held {
-                assert_eq!(hold.and_then(|h| h.identity).as_deref(), Some("cc1"), "憑據記的是 run 的身分");
+                assert_eq!(hold.and_then(|h| h.identity).as_deref(), Some("cc1"), "憑據記的是 run 的身份");
             }
         }
     }
@@ -556,7 +556,7 @@ mod tests {
         let app = tt::restart_app(&q.env).await;
         assert!(crate::runners::quota::limit_hit_for_bot(&app, &q.bot).await.is_none(), "新行程：記憶體是空的");
         flush(&app, &q.bot.id).await;
-        assert!(state(&app, &q.turn).await.0, "身分偵測之前：看那一列的憑據，照樣擋");
+        assert!(state(&app, &q.turn).await.0, "身份偵測之前：看那一列的憑據，照樣擋");
         assert!(recently_held(&q.bot.id), "保險絲看得到正在擋");
         assert!(!q.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");
 
@@ -596,16 +596,16 @@ mod tests {
         }
     }
 
-    /// 上一輪的憑據在回填之前也照「現在」判：換了身分、換了模型、到期、之後同一把 key 有成功回合，都放行。
+    /// 上一輪的憑據在回填之前也照「現在」判：換了身份、換了模型、到期、之後同一把 key 有成功回合，都放行。
     /// 這一輪自己寫的憑據記憶體本來就有，記憶體說不擋就不擋。沒寫時間的（codex credits）照樣擋。
     #[tokio::test]
     async fn a_previous_boot_hold_does_not_outlive_a_switch_an_expiry_or_a_successful_turn() {
         let q = queued_on(Some("cc-a"), "old-hold").await;
         let app = q.env.app.clone();
         let cases: Vec<(&str, Held, Option<&str>, bool)> = vec![
-            ("同一個身分、還沒到期", old_hold(Some("cc-a"), Some(later(2)), Some("five_hour")), None, true),
+            ("同一個身份、還沒到期", old_hold(Some("cc-a"), Some(later(2)), Some("five_hour")), None, true),
             ("沒寫時間（codex credits）", old_hold(Some("cc-a"), None, None), None, true),
-            ("身分換掉了", old_hold(Some("cc-b"), Some(later(2)), None), None, false),
+            ("身份換掉了", old_hold(Some("cc-b"), Some(later(2)), None), None, false),
             ("到期了", old_hold(Some("cc-a"), Some(db::iso_at(chrono::Utc::now() - chrono::Duration::seconds(1))), None), None, false),
             ("撞的是 Fable 桶、現在跑 opus", old_hold(Some("cc-a"), Some(later(2)), Some("fable")), Some("opus"), false),
             ("撞的是 Fable 桶、還在跑 fable", old_hold(Some("cc-a"), Some(later(2)), Some("fable")), Some("fable"), true),
@@ -635,7 +635,7 @@ mod tests {
         forget_held(&q.bot.id);
     }
 
-    /// 回填每台主機每一輪開機只跑一次，跑完之後記憶體說了算；換了身分、之後有成功回合清過的不種；
+    /// 回填每台主機每一輪開機只跑一次，跑完之後記憶體說了算；換了身份、之後有成功回合清過的不種；
     /// 沒寫時間的原樣黏著種回去。
     #[tokio::test]
     async fn the_backfill_runs_once_per_boot_and_skips_what_no_longer_holds() {
@@ -664,7 +664,7 @@ mod tests {
         backfill_once(&app, LOCAL_HOST).await;
         let hit = crate::runners::quota::limit_hit_for_bot(&app, &a.bot).await.expect("種回來了");
         assert_eq!(hit.until, None, "沒寫時間的照樣黏著");
-        assert!(crate::runners::quota::limit_hit_for_bot(&app, &switched).await.is_none(), "身分換掉了：不種");
+        assert!(crate::runners::quota::limit_hit_for_bot(&app, &switched).await.is_none(), "身份換掉了：不種");
         assert!(crate::runners::quota::limit_hit_for_bot(&app, &cleared).await.is_none(), "之後有成功回合清過：不種");
 
         crate::runners::quota::clear_limit_hit_for_bot(&app, &a.bot).await;
@@ -774,7 +774,7 @@ mod tests {
 
         // 憑據壞了（解不開）：回填之前照擋，**回填之後也照擋**（issue #522）。這裡以前斷言的是
         // 「回填跳過它之後只看記憶體」——而那正是放行：解不開的憑據沒被種回記憶體，空的記憶體不是
-        // 「沒撞限」的證據，照那條走會把唯一的證據 `forget` 掉、再把那一則送進還沒額度的身分。
+        // 「沒撞限」的證據，照那條走會把唯一的證據 `forget` 掉、再把那一則送進還沒額度的身份。
         // 跟上面一格（那一列讀不到 → 照擋）也自相矛盾：同樣是「證明不了」，不該一個擋一個放。
         sqlx::query("UPDATE turns SET quota_hold='not json' WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之前照擋");
@@ -788,7 +788,7 @@ mod tests {
     }
 
     /// 查撞限那一下讀不到主機、下一步又讀得到了（DB 剛恢復）：前一步的判斷根本沒做成，不能因為那一列上沒有憑據就放行——
-    /// 記憶體裡明明有這個身分的撞限。
+    /// 記憶體裡明明有這個身份的撞限。
     #[tokio::test]
     async fn a_lookup_that_failed_is_not_mistaken_for_no_limit_when_the_db_recovers_mid_way() {
         let q = queued_on(Some("cc-a"), "recovered").await;

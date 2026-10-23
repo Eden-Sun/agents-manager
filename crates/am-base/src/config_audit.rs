@@ -23,7 +23,7 @@ pub fn http_caller() -> String {
 
 /// `method path peer=… ua=… origin=… referer=… bot=… caller_self_reported=…`：只記辨識呼叫端用得到的標頭，不碰 token。
 ///
-/// 兩種身分要分得開（review d77434c0 #3）：`bot=` 是**驗過的**（`X-AM-Bot-Id` ＋ 對得上那顆 bot 的
+/// 兩種身份要分得開（review d77434c0 #3）：`bot=` 是**驗過的**（`X-AM-Bot-Id` ＋ 對得上那顆 bot 的
 /// `X-AM-Bot-Token`，呼叫端算出來傳進來）；`caller_self_reported=` 是 `X-AM-Caller`，自由文字——
 /// 整個 API 都在同一把 UI token 後面，任何拿得到 token 的人都能寫 `X-AM-Caller: agm`。欄位名直接說它是自稱的，
 /// 事後查帳才不會把自稱當成證據。
@@ -257,7 +257,7 @@ mod tests {
     fn a_self_reported_caller_never_fills_the_verified_bot_slot() {
         let line = describe_request(&req(&[("x-am-caller", "agm"), ("user-agent", "curl/8")]), None, None);
         assert!(line.contains("caller_self_reported=agm"), "{line}");
-        assert!(line.contains(" bot=-"), "沒驗過就不能有身分：{line}");
+        assert!(line.contains(" bot=-"), "沒驗過就不能有身份：{line}");
         assert!(!line.contains("caller=agm"), "舊的 caller= 會被讀成驗過的：{line}");
 
         // 驗過的 bot 在 `bot=`；同一個請求就算自稱別人，自稱那一格也只是自稱。

@@ -21,7 +21,7 @@
     border-left-color: transparent;
   }
 
-  /* 手機身分名與停用方塊都讓位，標籤欄寬收回自動。 */
+  /* 手機身份名與停用方塊都讓位，標籤欄寬收回自動。 */
 
   .main-head .quota-head {
     flex-direction: row;
@@ -172,7 +172,7 @@
   color: var(--danger);
 }
 
-/* 身分名欄**固定寬度**（2026-09-11 使用者）：寬度跟內容跑時 bar 起點不同，五個帳號的 5h 無法橫比。3.2em = `codex` 寬。 */
+/* 身份名欄**固定寬度**（2026-09-11 使用者）：寬度跟內容跑時 bar 起點不同，五個帳號的 5h 無法橫比。3.2em = `codex` 寬。 */
 
 .quota-head {
   flex: none;
@@ -646,7 +646,7 @@
 /* 手機名字被截成五個字，旁邊卻是 190px 額度 chip（其他欄位 popover 已有），讓出寬度給名字。 */
 
 @media (width <= 640px) {
-  /* 身分名與停用方塊讓位（側欄與 popover 都有，10px 方塊也不是觸控目標）；視窗名留下——沒 hover 分不出 5h／7d／Fable。 */
+  /* 身份名與停用方塊讓位（側欄與 popover 都有，10px 方塊也不是觸控目標）；視窗名留下——沒 hover 分不出 5h／7d／Fable。 */
 
   .main-head .quota-hp .quota-identity,
   .main-head .quota-hp .quota-cell-toggle {
@@ -793,7 +793,7 @@
     min-width: max-content;
   }
 
-  /* 同列三個 claude 身分時，沒有 cc0／cc1／cc2 會一模一樣。 */
+  /* 同列三個 claude 身份時，沒有 cc0／cc1／cc2 會一模一樣。 */
 
   .main-head .quota-hp .quota-identity {
     display: inline;
