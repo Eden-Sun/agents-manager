@@ -317,11 +317,12 @@ async fn apply_live_setting_inner(
         let was_fast = run.runtime_fast.map(|v| v != 0);
         // 跑著的 codex 版本（不是磁碟上的）：決定一行套用或走選單（`codex_live::oneshot_supported`）。
         let running = crate::codex_update::running_version_of(&run.id);
+        let default_effort = crate::codex_live::model_default_effort(app, &bot, run.runtime_model.as_deref()).await;
         mark_pane_typed(app, &run.id).await?;
         let applied = if during_turn {
             crate::codex_live::apply_fast_during_turn(&client, &pane_id, &bot, was_fast).await
         } else {
-            crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields, running.as_deref()).await
+            crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields, running.as_deref(), default_effort.as_deref()).await
         };
         let seen = match applied {
             Ok(seen) => seen,
@@ -477,7 +478,8 @@ async fn interrupt_and_apply(
     // 從這裡起 Esc 已經停下了回合：不論套用成不成功都要讓它接著跑。
     let was_fast = run.runtime_fast.map(|v| v != 0);
     let running = crate::codex_update::running_version_of(&run.id);
-    let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields, running.as_deref()).await;
+    let default_effort = crate::codex_live::model_default_effort(app, bot, run.runtime_model.as_deref()).await;
+    let applied = crate::codex_live::apply(&client, &pane_id, bot, was_fast, fields, running.as_deref(), default_effort.as_deref()).await;
     let resumed = crate::codex_live::send_resume(&client, &pane_id).await;
     tracing::info!(bot_id = %bot.id, ?fields, applied = ?applied.as_ref().err(), resumed = ?resumed.as_ref().err(), "codex live apply interrupted the turn");
 
