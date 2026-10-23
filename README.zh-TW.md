@@ -4,9 +4,9 @@
 
 從瀏覽器統一管理本機與 SSH 主機上的 coding agent。agents-manager 把每個跑在 [herdr](https://herdr.dev) pane 裡的 **Claude Code**、**Codex**、**Grok**、**Antigravity（agy）** CLI session 變成一顆「Bot」，讓你在桌面或手機上追蹤對話、回應確認、查看額度，並協調多顆 Bot 的工作。它不是 IDE，也不自己 spawn agent：終端由 herdr 擁有，daemon 透過 herdr 與各 CLI 的 hook 工作。
 
-![桌面深色：含子 agent 的專案樹、各 CLI 額度晶片、對話與檔案暫存](docs/screenshots/readme/2026-10-23-desktop-dark.png)
+![桌面深色：含子 agent 的專案樹、各 CLI 額度晶片、對話與檔案暫存](docs/screenshots/readme/zh-TW/desktop-dark.png)
 
-截圖來自內建的 mock 後端（`VITE_MOCK=1`），帳號、Bot 與訊息都是示範資料。UI 目前是繁體中文。
+截圖來自內建的 mock 後端（`VITE_MOCK=1`），帳號、Bot 與訊息都是示範資料。UI 支援繁體中文與英文：預設跟瀏覽器語言，環境設定→顯示可切換。英文版截圖在 [`docs/screenshots/readme/en/`](docs/screenshots/readme/en/)。
 
 ## 主要功能
 
@@ -38,7 +38,7 @@
 
 細節與限制見 [`docs/SPEC.md`](docs/SPEC.md)。
 
-![手機淺色：對話、額度晶片與 Bot 切換列](docs/screenshots/readme/2026-10-23-mobile-light.png)
+![手機淺色：對話、額度晶片與 Bot 切換列](docs/screenshots/readme/zh-TW/mobile-light.png)
 
 ## 與 Orca 的比較
 
@@ -61,7 +61,7 @@
 | 工具更新 | 各主機 herdr、CLI 與 hook 的版本總覽與一鍵更新；上游 changelog 分診 | 其文件未提及 |
 | 編輯器與預覽 | 無編輯器；內嵌 Bot 的本機 dev server 預覽 | VS Code 編輯器、Design Mode、Markdown／PDF／圖片預覽 |
 | 腳本化 | HTTP／WebSocket API（[`docs/API.md`](docs/API.md)）、`bin/agm` | `orca` CLI（worktree create、snapshot、click、fill） |
-| UI 語言 | 繁體中文 | 英文，README 有多語翻譯 |
+| UI 語言 | 繁體中文與英文（跟瀏覽器，可在環境設定切換） | 英文，README 有多語翻譯 |
 | 授權 | MIT | MIT |
 
 想要一個能同時開十個 worktree、在裡面審 diff 的 IDE，選 Orca。agent 已經在終端裡跑（也許在別台機器上）、想從瀏覽器接手、讓 agent 互相派工、順便看額度與排程，選 agents-manager。兩者可以並存。
@@ -136,7 +136,7 @@ hook 細節見 [`docs/HOOK.md`](docs/HOOK.md)。
 - **分享 Bot** — 受限或信任的 Bot，透過獨立的分享入口提供。[SPEC §20](docs/SPEC.md)。
 - **更新檢查** — 設定的一個分頁列出每台主機的 herdr、agent CLI 與 hook integration。[SPEC §6.9c](docs/SPEC.md)。
 
-![設定的更新檢查：各主機的 CLI 與 herdr integration 版本](docs/screenshots/readme/2026-10-23-settings-updates.png)
+![設定的更新檢查：各主機的 CLI 與 herdr integration 版本](docs/screenshots/readme/zh-TW/settings-updates.png)
 
 ## 運作方式
 

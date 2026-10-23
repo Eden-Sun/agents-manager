@@ -1,4 +1,5 @@
 import type { RestartBatch } from '../api/types'
+import { t, tr } from './i18n'
 import { CLI_UPDATE_PHASE_LABEL, type CliUpdate } from '../store/cliUpdate'
 
 /** 合成那顆的兩項選單文案與按鈕的 aria-label（純函式，好測）。 */
@@ -28,17 +29,20 @@ export function mergedUpdateLabels(x: {
   const claudeCli = updates.filter((item) => item.kind === 'claude')
   const restartItem = batch
     ? batch.finished
-      ? `重啟完成 · 成功 ${batch.ok.length} 顆${batch.failed.length ? ` · 失敗 ${batch.failed.length} 顆` : ''}（收起）` // i18n-ignore
-      : `重啟中 ${batch.done}/${batch.total}（收起，不會中斷）` // i18n-ignore
+      ? t('重啟完成 · 成功 {ok} 顆{failed}（收起）', {
+          ok: batch.ok.length,
+          failed: batch.failed.length ? t(' · 失敗 {n} 顆', { n: batch.failed.length }) : '',
+        })
+      : t('重啟中 {done}/{total}（收起，不會中斷）', { done: batch.done, total: batch.total })
     : readyCount > 0
-      ? `重啟 ${readyCount} 顆閒置的 Bot 套用更新` // i18n-ignore
-      : `${busyCount} 顆有更新但在忙，閒下來再按` // i18n-ignore
+      ? t('重啟 {n} 顆閒置的 Bot 套用更新', { n: readyCount })
+      : t('{n} 顆有更新但在忙，閒下來再按', { n: busyCount })
   const codexItem = codexCli
-    ? `${codexCli.host} 的 codex ${CLI_UPDATE_PHASE_LABEL[codexCli.phase]}…` // i18n-ignore
-    : `安裝 codex${to ? ` ${to}` : ''} 並重啟（${installCount} 顆還沒裝）` // i18n-ignore
+    ? t('{host} 的 codex {phase}…', { host: codexCli.host, phase: tr(CLI_UPDATE_PHASE_LABEL[codexCli.phase]) })
+    : t('安裝 codex{to} 並重啟（{n} 顆還沒裝）', { to: to ? ` ${to}` : '', n: installCount })
   const claudeItem = claudeCli.length
-    ? `claude 安裝中 ${claudeCli.map((item) => `${item.host} ${CLI_UPDATE_PHASE_LABEL[item.phase]}`).join('、')}…` // i18n-ignore
-    : `安裝 claude${x.claudeTarget ? ` ${x.claudeTarget}` : ''} 到 ${x.claudeInstallCount ?? 0} 台` // i18n-ignore
+    ? t('claude 安裝中 {hosts}…', { hosts: claudeCli.map((item) => `${item.host} ${tr(CLI_UPDATE_PHASE_LABEL[item.phase])}`).join(t('、')) })
+    : t('安裝 claude{target} 到 {n} 台', { target: x.claudeTarget ? ` ${x.claudeTarget}` : '', n: x.claudeInstallCount ?? 0 })
   const pieces: string[] = []
   if (x.restartShown !== false) pieces.push(restartItem)
   if (x.codexShown !== false) pieces.push(codexItem)
@@ -47,5 +51,5 @@ export function mergedUpdateLabels(x: {
   if (x.herdrItem) pieces.push(x.herdrItem)
   if (x.grokItem) pieces.push(x.grokItem)
   if (x.agyItem) pieces.push(x.agyItem)
-  return { restartItem, codexItem, claudeItem, label: `有更新：${pieces.join('；')}。點開選要做哪一個` } // i18n-ignore
+  return { restartItem, codexItem, claudeItem, label: t('有更新：{items}。點開選要做哪一個', { items: pieces.join(t('；')) }) }
 }

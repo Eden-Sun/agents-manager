@@ -1,4 +1,5 @@
 import type { Lamp } from '../api/types'
+import { useT } from '../lib/i18n'
 import { COMPACTING_LABEL, LAMP_LABEL } from './lampLabel'
 
 /**
@@ -6,10 +7,11 @@ import { COMPACTING_LABEL, LAMP_LABEL } from './lampLabel'
  * （例如「codex 更新提示等待選擇」），hover 也有——使用者一眼知道要去 pane 處理什麼。沒有原因或不是 blocked 跟以前一樣。
  */
 export function BotStateText({ lamp, reason, compacting = false }: { lamp: Lamp; reason: string; compacting?: boolean }) {
+  const t = useT()
   const why = lamp === 'blocked' ? reason : ''
   return (
     <span className={`bot-state ${lamp}`} title={why || undefined}>
-      {compacting ? COMPACTING_LABEL : LAMP_LABEL[lamp]}
+      {t.tr(compacting ? COMPACTING_LABEL : LAMP_LABEL[lamp])}
       {why ? <span className="bot-state-reason" title={why}>{why}</span> : null}
     </span>
   )
