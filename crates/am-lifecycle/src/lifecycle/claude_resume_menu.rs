@@ -101,31 +101,31 @@ const AUTHORITY_CHANGED: &str = "run_host_session_or_pane_changed";
 const SCREEN_CHANGED: &str = "screen_changed_between_reads";
 const STILL_SHOWN: &str = "menu_still_shown_after_enter";
 
-/// 每個 run 最近一次警告的原因與時間：同一原因不重複寫 WARN（排隊的 prompt 每次重試都會走到這裡）。
-/// 上限 [`GIVE_UP_CAP`] 筆，滿了淘汰插入時間最舊的一筆；超過 [`GIVE_UP_TTL`] 的當作不存在並刪掉。
+/// 每組 (run, 原因) 第一次警告的時間：同一組不重複寫 WARN（排隊的 prompt 每次重試都會走到這裡；原因交替 A→B→A 也只各寫一次）。
+/// 上限 [`GIVE_UP_CAP`] 組，滿了淘汰插入時間最舊的一組；超過 [`GIVE_UP_TTL`] 的當作不存在並刪掉。
 /// 不為了清理去查 DB：結束的 run 留在表裡無妨，會被 TTL 或上限擠掉。
 const GIVE_UP_CAP: usize = 256;
 const GIVE_UP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Default)]
-struct GiveUps(std::collections::HashMap<String, (&'static str, std::time::Instant)>);
+struct GiveUps(std::collections::HashMap<(String, &'static str), std::time::Instant>);
 
 impl GiveUps {
     /// 這個 run 的這個原因是不是第一次（順手記下來）。`now` 由呼叫端給，測試不必真的等。
     fn first_time(&mut self, run_id: &str, reason: &'static str, now: std::time::Instant) -> bool {
-        if let Some((seen, at)) = self.0.get(run_id).copied() {
-            if now.saturating_duration_since(at) > GIVE_UP_TTL {
-                self.0.remove(run_id);
-            } else if seen == reason {
+        let key = (run_id.to_string(), reason);
+        if let Some(at) = self.0.get(&key).copied() {
+            if now.saturating_duration_since(at) <= GIVE_UP_TTL {
                 return false;
             }
+            self.0.remove(&key);
         }
-        if self.0.len() >= GIVE_UP_CAP && !self.0.contains_key(run_id) {
-            if let Some(oldest) = self.0.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone()) {
+        if self.0.len() >= GIVE_UP_CAP {
+            if let Some(oldest) = self.0.iter().min_by_key(|(_, at)| **at).map(|(k, _)| k.clone()) {
                 self.0.remove(&oldest);
             }
         }
-        self.0.insert(run_id.to_string(), (reason, now));
+        self.0.insert(key, now);
         true
     }
 }

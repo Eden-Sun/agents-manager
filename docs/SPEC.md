@@ -1821,7 +1821,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    **不用 `pane.read` 的 revision 當證據**：herdr 0.9.5 實測恆回 0，舊的 `revision == 0` 守門讓這條在真環境從沒按下過鍵、巡檢卡了 35 分鐘。
    看不準時保留待重試，不當成錯誤、回答或交給使用者的 blocked choice；放棄時每個 run 每種原因只寫一次 WARN
    （固定原因字串：`cursor_not_on_resume`、`screen_changed_between_reads`、`run_host_session_or_pane_changed`、`read_not_visible_or_truncated`、
-   `menu_still_shown_after_enter`、`no_pane`；去重表上限 256 筆、滿了淘汰最舊的一筆，每筆 24 小時過期；不為清理去查 DB）。
+   `menu_still_shown_after_enter`、`no_pane`；去重表以 (run, 原因) 為單位，原因交替也只各寫一次；上限 256 組、滿了淘汰插入最舊的一組，每組 24 小時過期；不為清理去查 DB）。
    背景巡邏共用 bot 鎖，補處理晚一幀才出現的框。這只是接回確認，不新增續行提示，`resume_nudge` 的中途工具候選規則不變。
    測試畫面 `claude-2.1.304-cold-resume.txt` 是 Max 5x／Opus 4.6[1m] 的受控實機擷取：只修改拋棄式 transcript 的時間（2h）
    與 usage／iterations（1M tokens），不是自然等待或真的發送 1M tokens。首訊息 `Your unsent message will still be there after you answer`

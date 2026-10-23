@@ -574,6 +574,8 @@ fn cold_resume_warn_table_writes_each_reason_once_per_run() {
     assert!(t.first_time("run-b", CURSOR_NOT_ON_RESUME, t0), "別的 run 各自計");
     assert!(t.first_time("run-a", SCREEN_CHANGED, t0), "原因變了才再寫");
     assert!(!t.first_time("run-a", SCREEN_CHANGED, t0));
+    assert!(!t.first_time("run-a", CURSOR_NOT_ON_RESUME, t0), "A→B→A：第二次 A 不再寫");
+    assert!(!t.first_time("run-a", SCREEN_CHANGED, t0), "A→B→A→B 也不寫");
 }
 
 #[test]
@@ -587,8 +589,9 @@ fn cold_resume_warn_table_evicts_the_oldest_entry_at_the_cap() {
     assert_eq!(t.0.len(), GIVE_UP_CAP);
     assert!(t.first_time("run-new", STILL_SHOWN, at(GIVE_UP_CAP)));
     assert_eq!(t.0.len(), GIVE_UP_CAP, "不超過上限");
-    assert!(!t.0.contains_key("run-0"), "插入時間最舊的被淘汰");
-    assert!(t.0.contains_key("run-1") && t.0.contains_key("run-new"));
+    let has = |t: &GiveUps, id: &str| t.0.contains_key(&(id.to_string(), STILL_SHOWN));
+    assert!(!has(&t, "run-0"), "插入時間最舊的被淘汰");
+    assert!(has(&t, "run-1") && has(&t, "run-new"));
     assert!(t.first_time("run-0", STILL_SHOWN, at(GIVE_UP_CAP + 1)), "被淘汰的下次當作第一次");
 }
 
