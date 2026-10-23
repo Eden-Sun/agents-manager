@@ -1,7 +1,9 @@
-import test, { after, afterEach, before } from 'node:test'
+import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
+import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { installManualTimers } from '../testing/manualTimers'
+import { untilVirtual } from '../testing/untilVirtual'
 import type { Bot, Run, TerminalSnapshot } from '../api/types.ts'
 import { CodexAsyncQuestion } from './CodexAsyncQuestion.tsx'
 import { BlockedChoices } from './BlockedChoices.tsx'
@@ -9,8 +11,25 @@ import { parseChoiceMenu } from '../lib/tuiChoices.ts'
 
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
+// 元件的 `sleep(STEP)`（等 codex 畫面反應）走手動時鐘：`until` 推進虛擬時間，不睡牆鐘。
+let timers: ReturnType<typeof installManualTimers>
+const until = (cond: () => boolean | Promise<boolean>, what: string, maxVirtualMs?: number) => untilVirtual(timers.clock, cond, what, { maxVirtualMs })
+
+/** 測試中途換掉整棵樹：`unmountAll` 的 settle 要真 timer，卸完再換回手動時鐘。 */
+async function unmountMid() {
+  timers.restore()
+  await unmountAll()
+  timers = installManualTimers()
+}
+
 before(setupDom)
-afterEach(unmountAll)
+beforeEach(() => {
+  timers = installManualTimers()
+})
+afterEach(async () => {
+  timers.restore() // unmountAll 的 settle 要真 timer
+  await unmountAll()
+})
 after(async () => {
   resetStoreForTest()
   await teardownDom()
@@ -94,7 +113,7 @@ test('macOS glyphs: expand uses shift+left, then directions and Enter are separa
   await click(buttonByText('展開作答')!)
   await until(() => rig.keys.length === 1 && !root.querySelector('[role="status"]'), 'macOS expand')
   assert.deepEqual(rig.keys, [['shift+left']])
-  await unmountAll()
+  await unmountMid()
   const menu = parseChoiceMenu(expanded)
   assert.ok(menu?.asyncQueue)
   const choices = await mount(<BlockedChoices botId="b1" menu={menu} />)
@@ -126,7 +145,7 @@ test('按了 shift+← 但畫面沒展開：照實說，不再補任何鍵', asy
 test('編號選單展開後不畫任何東西（交給 BlockedChoices）；不是 codex 也不畫', async () => {
   await setup('codex', EXPANDED)
   assert.equal((await mount(<CodexAsyncQuestion botId="b1" text={EXPANDED} />)).innerHTML, '')
-  await unmountAll()
+  await unmountMid()
   await setup('claude', COLLAPSED)
   assert.equal((await mount(<CodexAsyncQuestion botId="b1" text={COLLAPSED} />)).innerHTML, '')
 })
@@ -277,7 +296,7 @@ test('反例：讀不到這題的原文（或有好幾題）：不給打字框�
   const none = await mount(<CodexAsyncQuestion botId="b1" text={FREE_TEXT} />)
   assert.equal(none.querySelector('textarea'), null)
   assert.match(none.textContent ?? '', /請直接在終端作答/)
-  await unmountAll()
+  await unmountMid()
   const two = await mount(<CodexAsyncQuestion botId="b1" text={FREE_TEXT} questions={[...NAME_Q, ...NAME_Q]} />)
   assert.equal(two.querySelector('textarea'), null)
 })

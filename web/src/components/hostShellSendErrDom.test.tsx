@@ -4,15 +4,25 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
-import { sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { act, mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
+import { installManualTimers } from '../testing/manualTimers'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
 
 virtualMockTime()
 // 共用的 mock 一個主機最多 8 個 shell，而且跨測試檔累積：自己開的自己關。
 const opened: string[] = []
+// HostShellPanel 的輪詢（250ms／1s 一次）走手動時鐘，等待只推進虛擬時間；mock 的 timer 在 `virtualMockTime` 的時鐘上，一起推。
+let timers: ReturnType<typeof installManualTimers>
+/** 讓輪詢與 mock 一起走 `ms` 虛擬毫秒。 */
+const elapse = (ms: number) =>
+  act(async () => {
+    await timers.clock.advance(ms)
+    await advanceMockTime(ms)
+  })
 afterEach(async () => {
+  timers.restore() // unmountAll 的 settle 要真 timer
   await unmountAll()
   for (const pane of opened.splice(0)) await mock.request('DELETE', `/hosts/local/shells/${encodeURIComponent(pane)}?confirm=true`).catch(() => {})
 })
@@ -22,6 +32,7 @@ after(() => {
   teardownDom()
 })
 beforeEach(() => {
+  timers = installManualTimers()
   localStorage.removeItem('am.shellKeySyncOff')
   localStorage.removeItem('am.shellKeySyncOn')
 })
@@ -41,7 +52,7 @@ async function openShell() {
   const shell = (await mock.request('POST', '/hosts/local/shells', {})) as { pane_id: string; cwd: string }
   opened.push(shell.pane_id)
   await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
-  await settle(300)
+  await elapse(300)
   return shell
 }
 
@@ -75,7 +86,7 @@ test('送指令失敗：錯誤留在畫面上，不被下一次輪詢清掉，�
     await type('ls')
     await act(async () => enter())
     // 至少兩輪 1 秒輪詢：成功的快照不能把送出錯誤清掉。
-    await settle(2500)
+    await elapse(2500)
     const banner = sendErrBanner()
     assert.ok(banner, '送出失敗要有 role=alert 的 .shell-err')
     assert.match(banner.textContent ?? '', /送出失敗/)
@@ -104,12 +115,12 @@ test('之後送成功就收掉送出失敗的說明', async () => {
 
     await type('ls')
     await act(async () => enter())
-    await settle(300)
+    await elapse(300)
     assert.ok(sendErrBanner(), '先失敗一次')
 
     fail = false
     await act(async () => enter())
-    await settle(300)
+    await elapse(300)
     assert.equal(sendErrBanner(), null, '送成功後說明收掉')
   } finally {
     globalThis.fetch = fetchBefore
