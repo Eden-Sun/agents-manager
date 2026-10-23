@@ -2,7 +2,7 @@
 # 收尾前一鍵跑跟 CI（.github/workflows/ci.yml）同一組檢查。
 #
 #   scripts/check.sh            # OB + ops + web + daemon
-#   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
+#   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test（分 shard 平行，CHECK_WEB_SHARDS 控制幾個）、vite build
 #   scripts/check.sh daemon     # daemon、xtask 與 crates/* 的 cargo 測試（要先有 web/dist）
 #   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
@@ -89,8 +89,8 @@ web_verify() {
     (cd web && bunx tsc -b)
     step "web: oxlint src"
     (cd web && bunx oxlint src)
-    step "web: bun test"
-    (cd web && bun test)
+    step "web: bun test（scripts/web-test-shards.sh：N 個 shard 平行，CHECK_WEB_SHARDS=1 退回單程序）"
+    bash scripts/web-test-shards.sh
 }
 check_web() { web_install; web_verify; web_build; }
 # CI 的 web job 拆兩段：先出 bundle 並上傳（daemon 只依賴它），再跑 tsc／oxlint／bun test。

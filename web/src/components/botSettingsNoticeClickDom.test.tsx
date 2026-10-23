@@ -8,7 +8,10 @@ import { mount, act, typeInto, setupDom, teardownDom, unmountAll, until } from '
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot } from '../api/types'
 import { BotSettingsPanel } from './BotSettingsPanel'
-import { Notices } from '../App'
+
+// App.tsx 載入時就讀 document.title：前一個測試檔 teardownDom 之後沒有 DOM，所以先 setupDom 再動態載入（shard 平行跑會輪到）。
+setupDom()
+const { Notices } = await import('../App')
 
 before(setupDom)
 afterEach(async () => {

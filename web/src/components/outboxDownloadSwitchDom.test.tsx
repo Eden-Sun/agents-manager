@@ -37,11 +37,13 @@ let openCalledWith: { url: string; target?: string }[] = []
 let shouldBlockPopup = false
 const revokedUrls: string[] = []
 const activeIntervals: (() => void)[] = []
-const realOpen = window.open
+// 模組載入時不能碰 window：前一個測試檔 teardownDom 之後全域沒有 DOM，要等 before 裡 setupDom 再抓（shard 平行跑時會輪到）。
+let realOpen: typeof window.open
 const realSetInterval = globalThis.setInterval
 
 before(() => {
   setupDom()
+  realOpen = window.open
   globalThis.setInterval = (((fn: () => void, ms?: number) => {
     activeIntervals.push(fn)
     return realSetInterval(fn, ms)
