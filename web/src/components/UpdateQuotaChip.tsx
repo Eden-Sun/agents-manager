@@ -13,8 +13,10 @@ import { CodexInstallChip } from './CodexInstallChip'
 import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
 import { GrokUpdateChip } from './GrokUpdateChip'
+import { AgyUpdateChip } from './AgyUpdateChip'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
 import { useGrokPlan } from '../hooks/useGrokPlan'
+import { useAgyPlan } from '../hooks/useAgyPlan'
 import { useHerdrUpdate } from '../store/herdrUpdate'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -43,8 +45,9 @@ export function UpdateQuotaChip() {
   const herdrPlan = useHerdrPlan() !== null
   const herdrShown = useHerdrUpdate((s) => s.active !== null || s.result !== null) || herdrPlan
   const grokShown = useGrokPlan() !== null
+  const agyShown = useAgyPlan() !== null
   // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟、兩種 CLI 安裝與 herdr。
-  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown, grokShown)) return <MergedUpdateChip />
+  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown, grokShown, agyShown)) return <MergedUpdateChip />
   return (
     <>
       <RestartChip />
@@ -53,6 +56,8 @@ export function UpdateQuotaChip() {
       <HerdrUpdateChip />
       {/* grok 只提示、不一鍵安裝；手機單獨出現照舊一顆，跟別種並存時併進上面的合成選單。 */}
       <GrokUpdateChip />
+      {/* agy 有一鍵安裝（issue #1921）；同樣的手機合併規則。 */}
+      <AgyUpdateChip />
     </>
   )
 }

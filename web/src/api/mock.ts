@@ -4425,7 +4425,9 @@ export class MockTransport implements Transport {
         ? `claude 需安裝 ${target}（local：${disk} → ${target}）：需安裝到共同版本。指令：\`claude install ${target}\``
         : kind === 'grok'
           ? `grok 上游有新版 ${latest}（local 磁碟上是 ${disk}）：到那台主機執行 \`grok update\`（官方升級指令，這裡不代裝）；跑著的 grok bot 要重啟才會換版`
-          : `${kind} 上游有新版 ${latest}（local：${disk} → ${target}）：需先安裝，裝好才會出現「重啟套用」`,
+          : kind === 'agy'
+            ? `agy 上游有新版 ${latest}（local：${disk} → ${target}）：到額度列 agy 徽章一鍵更新（從官方下載、驗 sha512），跑著的 agy bot 重啟後才換版`
+            : `${kind} 上游有新版 ${latest}（local：${disk} → ${target}）：需先安裝，裝好才會出現「重啟套用」`,
     }
     this.upstreamItems = [...this.upstreamItems.filter((old) => old.kind !== kind), { ...item, notify: null }]
     this.emit('upstream_update', item)

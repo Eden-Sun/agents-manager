@@ -39,3 +39,9 @@ test('合成選單有 grok 那一項時，aria-label 也寫出來（手機漏項
   assert.match(l.label, /grok 1\.0\.47/)
   assert.doesNotMatch(mergedUpdateLabels(base).label, /grok/)
 })
+
+test('合成選單有 agy 那一項時，aria-label 也寫出來（#1921）', () => {
+  const l = mergedUpdateLabels({ ...base, agyItem: 'agy 1.4.6：local 可更新（點開確認）' })
+  assert.match(l.label, /agy 1\.4\.6：local 可更新/)
+  assert.doesNotMatch(mergedUpdateLabels(base).label, /agy/)
+})

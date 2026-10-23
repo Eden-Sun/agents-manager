@@ -5,6 +5,8 @@ import { herdrHostBlocked, startHerdr, useHerdrUpdate } from '../store/herdrUpda
 import { useStore } from '../store/store'
 import { STATUS_LABEL, buildHostCheck, summaryText, updatableCount, type CheckAction, type CheckRow, type HostCheck } from '../store/updateCheck'
 import { ConfirmDialog } from './ConfirmDialog'
+import { AgyUpdateBody } from './AgyUpdateConfirm'
+import { agyUpdateTitle } from '../lib/agyUpdate'
 import './updateCheck.css'
 
 /**
@@ -133,6 +135,7 @@ export function UpdateCheckPanel() {
 
 function confirmTitle(row: CheckRow, action: CheckAction): string {
   if (action.kind === 'integration') return `${action.fresh ? '安裝' : '更新'} ${row.label}？`
+  if (action.kind === 'agy') return agyUpdateTitle(action.target)
   return `更新 ${row.label} 到 ${action.target}？`
 }
 
@@ -153,14 +156,7 @@ function ConfirmBody({ host, row, action, willResume }: { host: string; row: Che
       </>
     )
   }
-  if (action.kind === 'agy') {
-    return (
-      <>
-        在 <strong>{host}</strong> 把 agy 從 {row.current ?? '?'} 更新到官方最新版（約 {action.target}）：從官方下載（約 50 MB）、驗 sha512 後換掉 <code>~/.local/bin/agy</code>；
-        不跑官方 install.sh、<code>agy install</code> 或 <code>agy update</code>。跑著的 agy bot 不會被打斷，重啟後才換版。
-      </>
-    )
-  }
+  if (action.kind === 'agy') return <AgyUpdateBody host={host} current={row.current} target={action.target} />
   if (action.kind === 'herdr') {
     return (
       <>

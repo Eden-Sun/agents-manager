@@ -19,6 +19,8 @@ export function mergedUpdateLabels(x: {
   herdrItem?: string | null
   /** grok 那一項（只提示）；沒有就不列。 */
   grokItem?: string | null
+  /** agy 那一項（有一鍵安裝，issue #1921）；沒有就不列。 */
+  agyItem?: string | null
 }): { restartItem: string; codexItem: string; claudeItem: string; label: string } {
   const { batch, readyCount, busyCount, installCount, to } = x
   const updates = Array.isArray(x.cli) ? x.cli : x.cli ? [x.cli] : []
@@ -44,5 +46,6 @@ export function mergedUpdateLabels(x: {
   if (x.claudeSummary && x.claudeShown) pieces.push(x.claudeSummary)
   if (x.herdrItem) pieces.push(x.herdrItem)
   if (x.grokItem) pieces.push(x.grokItem)
+  if (x.agyItem) pieces.push(x.agyItem)
   return { restartItem, codexItem, claudeItem, label: `有更新：${pieces.join('；')}。點開選要做哪一個` }
 }
