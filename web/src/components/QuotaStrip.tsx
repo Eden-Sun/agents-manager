@@ -318,16 +318,15 @@ function Bar({
   unit?: boolean
 }) {
   const lv = levelOf({ low, critical })
-  // 剩量和重置刻度都在 10% 以下：改畫 0–10% 刻度的連續條，兩端各一根豎線標出 0 和 10%（2026-10-16 第三版，方案 B；
-  // 取代 #1785 的 10 格點陣）。這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
+  // 剩量和重置刻度都在 10% 以下：改畫 0–10% 刻度的連續條（2026-10-16 第三版，方案 B；取代 #1785 的 10 格點陣）。
+  // 刻度範圍用整條外框（`.zoomed` 的 CSS）表示，不畫兩端豎線：豎線跟別列的重置黑針分不出來（2026-10-23 使用者）。
+  // 這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
   const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
   const bar = zoom ? (
     <span className="quota-bar-wrap zoomed" title={`剩 ${fmtPct(pct)}%（條的刻度是 0–10%）`}>
       <span className={`quota-bar ${lv}`}>
         <span className="quota-bar-fill" style={{ width: `${Math.min(100, pct * 10)}%` }} />
       </span>
-      <span className="quota-bar-end start" aria-hidden="true" />
-      <span className="quota-bar-end finish" aria-hidden="true" />
     </span>
   ) : (
     <span className="quota-bar-wrap">
