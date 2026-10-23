@@ -16,6 +16,7 @@ import { scheduleReviewRefresh } from '../lib/reviewRefresh'
 import { useStore } from '../store/store'
 import './agmReviewBox.css'
 import { safeHttpUrl } from '../lib/safeUrl'
+import { msg, useT } from '../lib/i18n'
 
 type Loaded = { key: string; version: string; review: UpdateReview | null; triage: TriageVersion[] | null }
 
@@ -73,6 +74,7 @@ export function AgmReviewBox({
   )
 
   // 深入驗證（#1919）：API 快速解析只讀 changelog；codex 要實測就再派一次 bot（`deep`）。
+  const t = useT()
   const [deepKey, setDeepKey] = useState<string | null>(null)
   const [deepErr, setDeepErr] = useState('')
   const askDeep = () => {
@@ -89,15 +91,15 @@ export function AgmReviewBox({
   const analysed = (triage ? anyAnalysed(triage) : false) || (review !== null && review.state !== 'none')
 
   return (
-    <section className="agm-review" aria-label={`${kind} 新版分析`}>
+    <section className="agm-review" aria-label={t('{kind} 新版分析', { kind })}>
       <div className="agm-review-head">
-        <strong>分析</strong>
+        <strong>{t('分析')}</strong>
         <span className="agm-review-who">
           {kind} {from && cur.version && from !== cur.version ? `${from} → ${cur.version}` : cur.version}
         </span>
       </div>
       {!analysed ? (
-        <p className="agm-review-none">尚未分析——按下方「請 AGM 解析」，結論會回到這裡。</p>
+        <p className="agm-review-none">{t('尚未分析——按下方「請 AGM 解析」，結論會回到這裡。')}</p>
       ) : null}
       {triage && triage.some((v) => v.state !== 'missing') ? (
         <div className="triage">
@@ -109,31 +111,35 @@ export function AgmReviewBox({
       {review && review.state !== 'none' ? (
         <div className="agm-review-agm">
           <div className="agm-review-head">
-            <strong>AGM 解析</strong>
+            <strong>{t('AGM 解析')}</strong>
             <span className="agm-review-who">
               {review.source === 'api'
                 ? review.state === 'done'
-                  ? `Claude API 快速解析${review.model ? `（${review.model}）` : ''} · 未實測`
-                  : 'Claude API 解析中…'
+                  ? (review.model
+                    ? t('Claude API 快速解析（{model}） · 未實測', { model: review.model })
+                    : t('Claude API 快速解析 · 未實測'))
+                  : t('Claude API 解析中…')
                 : review.state === 'done'
                   ? `${review.target_bot_name || 'AGM'} · ${review.answered_at ? new Date(review.answered_at).toLocaleString() : ''}`
-                  : `${review.target_bot_name || 'AGM'} 解析中…`}
+                  : t('{name} 解析中…', { name: review.target_bot_name || 'AGM' })}
             </span>
           </div>
           {review.state === 'done' ? (
             <pre className="agm-review-body">{review.result}</pre>
           ) : (
-            <p className="hint">派出去了，結論回來就會出現在這裡。</p>
+            <p className="hint">{t('派出去了，結論回來就會出現在這裡。')}</p>
           )}
           {review.source === 'api' && review.state === 'done' && kind === 'codex' ? (
             deepKey === key ? (
-              <p className="hint">已請 AGM 深入驗證（裝新版實測），做完會換成它的結論。</p>
+              <p className="hint">{t('已請 AGM 深入驗證（裝新版實測），做完會換成它的結論。')}</p>
             ) : (
               <p className="hint">
                 <button type="button" onClick={askDeep}>
-                  深入驗證
+                  {t('深入驗證')}
                 </button>{' '}
-                請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。{deepErr ? ` 失敗：${deepErr}` : ''}
+                {deepErr
+                  ? t('請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。 失敗：{reason}', { reason: deepErr })
+                  : t('請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。')}
               </p>
             )
           ) : null}
@@ -145,29 +151,30 @@ export function AgmReviewBox({
 
 const STATE_TEXT: Record<TriageVersion['state'], string> = {
   judged: '',
-  empty: '看過了，沒有要處理的',
-  pending: '分診中…',
-  failed: '分診失敗（逾時三次）',
-  missing: '尚未分析',
+  empty: msg('看過了，沒有要處理的'),
+  pending: msg('分診中…'),
+  failed: msg('分診失敗（逾時三次）'),
+  missing: msg('尚未分析'),
 }
 
 function TriageBlock({ v }: { v: TriageVersion }) {
+  const t = useT()
   const nothing = !v.guard.length && !v.adopt.length && !v.upgrade.length && !v.issues.length
   return (
     <div className={`triage-ver ${v.state}`}>
       <div className="triage-ver-head">
         <span className="triage-ver-no">{v.version}</span>
-        {STATE_TEXT[v.state] ? <span className="triage-ver-state">{STATE_TEXT[v.state]}</span> : null}
-        {v.state === 'judged' && nothing ? <span className="triage-ver-state">沒有要處理的</span> : null}
+        {STATE_TEXT[v.state] ? <span className="triage-ver-state">{t.tr(STATE_TEXT[v.state])}</span> : null}
+        {v.state === 'judged' && nothing ? <span className="triage-ver-state">{t('沒有要處理的')}</span> : null}
       </div>
-      <Items label="提防" tone="guard" items={v.guard} />
-      <Items label="採用" tone="adopt" items={v.adopt} />
-      <Items label="值得早升" tone="upgrade" items={v.upgrade} />
+      <Items label={t('提防')} tone="guard" items={v.guard} />
+      <Items label={t('採用')} tone="adopt" items={v.adopt} />
+      <Items label={t('值得早升')} tone="upgrade" items={v.upgrade} />
       {v.issues.length ? (
         <ul className="triage-issues">
           {v.issues.map((i) => (
             <li key={i.title}>
-              <span className={`triage-tag ${i.verdict}`}>{i.verdict === 'guard' ? '提防' : '採用'}</span>{' '}
+              <span className={`triage-tag ${i.verdict}`}>{i.verdict === 'guard' ? t('提防') : t('採用')}</span>{' '}
               {i.title}
               {i.number !== null ? (
                 <>
@@ -177,12 +184,12 @@ function TriageBlock({ v }: { v: TriageVersion }) {
                       #{i.number}
                     </a>
                   ) : (
-                    <span title="帳本沒設 [release_triage] repo，連不出去">#{i.number}</span>
+                    <span title={t('帳本沒設 [release_triage] repo，連不出去')}>#{i.number}</span>
                   )}
-                  {i.duplicate ? <span className="triage-dup">（併入既有）</span> : null}
+                  {i.duplicate ? <span className="triage-dup">{t('（併入既有）')}</span> : null}
                 </>
               ) : (
-                <span className="triage-dup">（尚未開票）</span>
+                <span className="triage-dup">{t('（尚未開票）')}</span>
               )}
             </li>
           ))}
