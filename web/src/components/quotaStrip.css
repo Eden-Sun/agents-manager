@@ -952,12 +952,15 @@
 
 /* 剩不到 10%：條改成 0–10% 的刻度（2026-10-16 第三版，方案 B；取代 #1785 的 10 格點陣）。條寬與一般列相同、上下對齊，
    兩端各一根 2px 的豎線（文字色）標出 0 和 10%，0% 時也看得到兩根豎線之間是空的。豎線畫在條的兩端內側，不佔條長。 */
+/* 兩端豎線是「刻度範圍」不是黑針：淡色、比黑針矮、沒有外框，免得跟 5h／F 列的重置黑針長得一樣
+   （2026-10-23 使用者截圖：7d 的兩端線跟 Fable 剛好落在 0% 的黑針分不出來）。 */
 .quota-bar-end {
   position: absolute;
-  top: -3px;
-  height: 10px;
+  top: -2px;
+  height: 8px;
   width: 2px;
-  background: var(--text);
+  border-radius: 1px;
+  background: var(--text-faint);
   pointer-events: none;
 }
 
@@ -970,8 +973,8 @@
 }
 
 .quota-pop-line .quota-bar-end {
-  top: -3px;
-  height: 12px;
+  top: -2px;
+  height: 10px;
 }
 
 /* 倒數模式的列不在列內寫倒數：所有窗口下方另起一行，開頭是 └，靠窗口名欄寬縮排到條的左緣。 */
