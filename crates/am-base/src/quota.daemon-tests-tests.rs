@@ -1768,6 +1768,47 @@
         assert_eq!(full.len(), GROK_PCT_CLEARS_MAX - 1);
     }
 
+    /// #1905 後續：表滿時先在記憶體清掉作廢的紀錄（過了窗長、或 `until` 到期），清完還是滿才保守不准。
+    #[test]
+    fn a_full_grok_percentage_clear_table_evicts_expired_entries_before_refusing() {
+        let t0 = parse_utc("2026-10-23T00:00:00Z").unwrap();
+        let hit = |at: chrono::DateTime<chrono::Utc>, until: chrono::DateTime<chrono::Utc>| LimitHit {
+            message: "You hit your weekly limit.".into(), until: Some(iso(until)), at: iso(at), bucket: Some("seven_day".into()) };
+        let fill = |until: chrono::DateTime<chrono::Utc>| {
+            let mut marks = HashMap::new();
+            for i in 0..GROK_PCT_CLEARS_MAX {
+                note_grok_pct_clear(&mut marks, &format!("k{i}"), &hit(t0 - chrono::Duration::hours(1), until), t0);
+            }
+            assert_eq!(marks.len(), GROK_PCT_CLEARS_MAX, "前提：表滿");
+            marks
+        };
+        let now = t0 + chrono::Duration::days(1);
+        let fresh = hit(now - chrono::Duration::minutes(10), now + chrono::Duration::days(3));
+
+        // 全部還有效（窗長 7 天沒過、until 也還沒到）：照樣保守不准、不新增。
+        let mut valid = fill(t0 + chrono::Duration::days(5));
+        assert!(!grok_pct_clear_allowed(&mut valid, "new", &fresh, now), "全部有效：保守不清");
+        note_grok_pct_clear(&mut valid, "new", &fresh, now);
+        assert_eq!(valid.len(), GROK_PCT_CLEARS_MAX, "全部有效：不新增");
+        assert!(!valid.contains_key("new"));
+
+        // 全部都是 until 已到期的（窗長還沒過）：先清掉，新的 key 可以用百分比清、可以登記。
+        let mut until_passed = fill(t0 + chrono::Duration::hours(12));
+        assert!(grok_pct_clear_allowed(&mut until_passed, "new", &fresh, now), "until 都到期：清掉後准");
+        assert!(until_passed.is_empty(), "作廢的紀錄都清掉了");
+        note_grok_pct_clear(&mut until_passed, "new", &fresh, now);
+        assert_eq!(until_passed.get("new").map(|m| (m.cleared_at, m.rehits)), Some((now, 0)), "新的 key 登記進去");
+
+        // 全部都是過了窗長的：同上。登記走 `note` 自己的清理，不靠前面那次判斷。
+        let mut window_passed = fill(t0 + chrono::Duration::days(30));
+        let later = t0 + SEVEN_DAY_LEN;
+        note_grok_pct_clear(&mut window_passed, "new", &fresh, later);
+        assert_eq!(window_passed.len(), 1, "過了窗長的都清掉，新的 key 登記進去");
+        assert!(window_passed.contains_key("new"));
+        let mut window_passed = fill(t0 + chrono::Duration::days(30));
+        assert!(grok_pct_clear_allowed(&mut window_passed, "new", &fresh, later), "過了窗長：清掉後准");
+    }
+
     /// #1905 的表只管 grok 看百分比那一條：codex 的權威讀數照舊解除，連表裡同一把 key 有「重撞」紀錄也一樣，紀錄不被碰。
     #[tokio::test]
     async fn the_grok_percentage_clear_table_does_not_touch_codex_readings() {
@@ -1777,7 +1818,8 @@
         let now = chrono::Utc::now();
         let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some(iso(now + chrono::Duration::days(4))),
             at: iso(now - chrono::Duration::hours(1)), bucket: Some("seven_day".into()) };
-        let planted = GrokPctClear { cleared_at: now - chrono::Duration::hours(2), bucket: "seven_day".into(), rehits: 0, counted_at: None };
+        let planted = GrokPctClear { cleared_at: now - chrono::Duration::hours(2), bucket: "seven_day".into(),
+            until: None, rehits: 0, counted_at: None };
         grok_pct_clears().lock().unwrap().insert(mark.clone(), planted.clone());
         let mut probe = grok_pct_clears().lock().unwrap().clone();
         assert!(!grok_pct_clear_allowed(&mut probe, &mark, &hit, now), "前提：要是 grok，這筆會被擋下不准清");
