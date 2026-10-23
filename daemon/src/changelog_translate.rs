@@ -17,96 +17,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::claude_api::{AnthropicHttpClient, ClientError, ClientOutcome, MessagesClient, Usage};
 use crate::config::ChangelogTranslateCfg;
+
+/// 翻譯用的請求就是共用的 Messages 請求（結構化輸出的 schema 由這裡帶）。
+pub(crate) type TranslateRequest = crate::claude_api::MessagesRequest;
 use crate::state::App;
 
 const PROMPT_VERSION: &str = "1";
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+/// 翻譯實際用的設定：key 檔跟 `[claude_api]` 同一把（`[changelog_translate] key_file` 被明確改過才用舊的）。
+fn translate_cfg(full: &crate::config::ConfigFile) -> ChangelogTranslateCfg {
+    let mut cfg = full.changelog_translate.clone();
+    cfg.key_file = full.changelog_translate_key_file();
+    cfg
+}
+
 const LEDGER_DIR: &str = "changelog-translate";
-
-/// 正式 client 與測試假貨的接縫。測試先 `set_client`，生產路徑才會打到網路。
-pub trait MessagesClient: Send + Sync {
-    fn complete<'a>(
-        &'a self,
-        req: &'a TranslateRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>>;
-}
-
-pub struct TranslateRequest {
-    pub endpoint: String,
-    pub key: String,
-    pub model: String,
-    pub effort: String,
-    pub max_tokens: u32,
-    pub timeout_ms: u64,
-    pub prompt: String,
-}
-
-impl TranslateRequest {
-    fn request_json(&self) -> Value {
-        json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": [{ "role": "user", "content": self.prompt }],
-            "output_config": {
-                "effort": self.effort,
-                "format": { "type": "json_schema", "schema": output_schema() }
-            }
-        })
-    }
-}
-
-impl std::fmt::Debug for TranslateRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TranslateRequest")
-            .field("endpoint", &self.endpoint)
-            .field("model", &self.model)
-            .field("effort", &self.effort)
-            .field("key", &"<redacted>")
-            .finish()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Usage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ClientOutcome {
-    pub text: String,
-    pub model: Option<String>,
-    pub stop_reason: Option<String>,
-    pub usage: Option<Usage>,
-}
-
-#[derive(Clone, Debug)]
-pub enum ClientError {
-    Timeout,
-    RateLimited {
-        retry_after: Option<String>,
-        usage: Option<Usage>,
-    },
-    Http {
-        status: u16,
-        usage: Option<Usage>,
-    },
-}
-
-pub struct AnthropicHttpClient;
-
-impl MessagesClient for AnthropicHttpClient {
-    fn complete<'a>(
-        &'a self,
-        req: &'a TranslateRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
-        Box::pin(complete_http(req))
-    }
-}
 
 pub struct Hub {
     gate: tokio::sync::Mutex<()>,
@@ -273,7 +201,7 @@ pub async fn post_translation(
 
 fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = Value> + Send>> {
     Box::pin(async move {
-        let cfg = app.cfg.get().await.changelog_translate;
+        let cfg = translate_cfg(&app.cfg.get().await);
         let limits = limits_of(&cfg);
         let norm = norm_query(&q);
         if !cfg.enabled {
@@ -300,7 +228,7 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
         under_gate(&app, || match load(&job_path(&app.data_dir, &fp)) {
             Ok(job) => job_view(true, &job, None),
             Err(LoadErr::Corrupt) => ledger_view(),
-            Err(LoadErr::Missing) => match crate::judge::read_key(&cfg.key_file) {
+            Err(LoadErr::Missing) => match crate::key_file::read_key(&cfg.key_file) {
                 Ok(_) => absent_view(&plan, &fp),
                 Err(_) => bare(true, "unconfigured"),
             },
@@ -311,7 +239,7 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
 
 fn post_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = Value> + Send>> {
     Box::pin(async move {
-        let cfg = app.cfg.get().await.changelog_translate;
+        let cfg = translate_cfg(&app.cfg.get().await);
         let limits = limits_of(&cfg);
         let norm = norm_query(&q);
         if !cfg.enabled {
@@ -458,7 +386,7 @@ fn decide(
     if busy >= limits.max_in_flight as usize {
         return Action::View(budget_only("in_flight", crate::db::iso_in(2)));
     }
-    let key = match crate::judge::read_key(&cfg.key_file) {
+    let key = match crate::key_file::read_key(&cfg.key_file) {
         Ok(key) => key,
         Err(_) => return Action::View(bare(true, "unconfigured")),
     };
@@ -504,6 +432,8 @@ fn decide(
         effort: limits.effort.clone(),
         max_tokens: limits.max_tokens,
         timeout_ms: limits.timeout_ms,
+        system: None,
+        format: Some(output_schema()),
         prompt: prompt_for(plan).expect("lang was verified before reserve"),
     };
     Action::Send {
@@ -1214,128 +1144,6 @@ fn output_schema() -> Value {
     })
 }
 
-fn complete_http(
-    req: &TranslateRequest,
-) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + '_>> {
-    Box::pin(async move {
-        #[cfg(test)]
-        if !test_endpoint_is_loopback(&req.endpoint) {
-            return Err(ClientError::Http {
-                status: 0,
-                usage: None,
-            });
-        }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(req.timeout_ms))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| ClientError::Http {
-                status: 0,
-                usage: None,
-            })?;
-        let response = client
-            .post(&req.endpoint)
-            .header("x-api-key", &req.key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&req.request_json())
-            .send()
-            .await;
-        let response = match response {
-            Ok(r) => r,
-            Err(e) if e.is_timeout() => return Err(ClientError::Timeout),
-            Err(_) => {
-                return Err(ClientError::Http {
-                    status: 0,
-                    usage: None,
-                })
-            }
-        };
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let bytes = response.bytes().await.map_err(|_| ClientError::Http {
-            status: status.as_u16(),
-            usage: None,
-        })?;
-        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let usage = parse_usage(&value);
-        if status.as_u16() == 429 {
-            return Err(ClientError::RateLimited { retry_after, usage });
-        }
-        if !status.is_success() {
-            return Err(ClientError::Http {
-                status: status.as_u16(),
-                usage,
-            });
-        }
-        Ok(ClientOutcome {
-            text: message_text(&value),
-            model: value
-                .get("model")
-                .and_then(|m| m.as_str())
-                .map(str::to_string),
-            stop_reason: value
-                .get("stop_reason")
-                .and_then(|m| m.as_str())
-                .map(str::to_string),
-            usage,
-        })
-    })
-}
-
-fn parse_usage(value: &Value) -> Option<Usage> {
-    let usage = value.get("usage")?;
-    if !usage.is_object() {
-        return None;
-    }
-    Some(Usage {
-        input_tokens: json_i64(usage, "input_tokens"),
-        output_tokens: json_i64(usage, "output_tokens"),
-        cache_creation_input_tokens: json_i64(usage, "cache_creation_input_tokens"),
-        cache_read_input_tokens: json_i64(usage, "cache_read_input_tokens"),
-    })
-}
-
-fn json_i64(value: &Value, key: &str) -> Option<i64> {
-    value.get(key).and_then(Value::as_i64)
-}
-
-fn message_text(value: &Value) -> String {
-    value
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|block| {
-                block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| block.as_str().map(str::to_string))
-            })
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(test)]
-fn test_endpoint_is_loopback(endpoint: &str) -> bool {
-    let Some(rest) = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-    else {
-        return false;
-    };
-    let hostport = rest.split('/').next().unwrap_or("");
-    let host = hostport
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(hostport);
-    let host = host.trim_matches(|c: char| c == '[' || c == ']');
-    host == "127.0.0.1" || host == "::1"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1717,6 +1525,8 @@ mod tests {
             effort: "low".into(),
             max_tokens: 200,
             timeout_ms: 8000,
+            system: None,
+            format: Some(output_schema()),
             prompt: "hello".into(),
         };
         let body = req.request_json();
@@ -2444,6 +2254,8 @@ mod tests {
             effort: "low".into(),
             max_tokens: 200,
             timeout_ms: 2000,
+            system: None,
+            format: Some(output_schema()),
             prompt: "Requested versions:\n- 2.1.5\n\nCHANGELOG DATA\n## 2.1.5\nwidgets\n".into(),
         };
         let out = AnthropicHttpClient.complete(&req).await.unwrap();

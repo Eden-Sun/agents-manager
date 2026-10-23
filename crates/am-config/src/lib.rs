@@ -314,6 +314,9 @@ pub struct ConfigFile {
     /// issue #1870：更新框翻譯。預設關、預設語言 zh-Hant；沒寫這段，既有設定檔的長相不變。
     #[serde(default, skip_serializing_if = "ChangelogTranslateCfg::is_default")]
     pub changelog_translate: ChangelogTranslateCfg,
+    /// issue #1919：一次性 LLM 工作改走 Claude API key。預設關；沒寫這段，既有設定檔的長相不變。
+    #[serde(default, skip_serializing_if = "ClaudeApiCfg::is_default")]
+    pub claude_api: ClaudeApiCfg,
     /// 使用者 2026-10-01：bot 的指示檔（agent md）由這裡指定，CLI 自己的 CLAUDE.md／AGENTS.md 一律不讀（SPEC §6.5i）。
     #[serde(default, skip_serializing_if = "AgentsCfg::is_default")]
     pub agents: AgentsCfg,
@@ -585,6 +588,143 @@ impl ChangelogTranslateCfg {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// `[claude_api]`（SPEC §4.3d，issue #1919）：把一次性、不需要工具與 repo 的 LLM 工作改走 Claude API key，
+/// 不開 Claude Code session、不吃訂閱用量。`enabled` 是總開關，`uses.<用途>` 各自再有開關與模型；兩層都開才會呼叫。
+/// `key_file` 只是路徑，key 本身不進設定檔；預設路徑跟 `[changelog_translate]` 共用同一把。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeApiCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_claude_api_key_file")]
+    pub key_file: String,
+    #[serde(default = "default_claude_api_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_claude_api_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub uses: std::collections::BTreeMap<String, ClaudeApiUseCfg>,
+}
+
+/// 一個用途的設定。沒寫的欄位用 [`CLAUDE_API_USES`] 上的預設；`enabled` 預設關。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeApiUseCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// 一小時內最多送幾次（保險絲）；0＝用預設。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_per_hour: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// 一個用途的預設值（不含開關）。
+pub struct ClaudeApiUseDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub model: &'static str,
+    pub effort: &'static str,
+    pub max_per_hour: u32,
+    /// 這個用途的設定本來就在別的段（`[changelog_translate]`，#1870）：設定頁讀寫那一段，
+    /// 不受 `[claude_api] enabled` 總開關管，舊設定檔照舊有效。
+    pub legacy_section: Option<&'static str>,
+}
+
+/// 已知用途。要加用途就加一行，設定頁、PUT 驗證、保險絲與帳本都從這張表走。
+/// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
+pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
+    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None },
+    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 12, legacy_section: Some("changelog_translate") },
+];
+/// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
+pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5"];
+pub const CLAUDE_API_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn default_claude_api_key_file() -> String {
+    default_changelog_key_file()
+}
+fn default_claude_api_endpoint() -> String {
+    "https://api.anthropic.com/v1/messages".into()
+}
+fn default_claude_api_timeout_ms() -> u64 {
+    60_000
+}
+
+impl Default for ClaudeApiCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key_file: default_claude_api_key_file(),
+            endpoint: default_claude_api_endpoint(),
+            timeout_ms: default_claude_api_timeout_ms(),
+            uses: Default::default(),
+        }
+    }
+}
+
+/// 一個用途現在實際生效的值（缺的欄位已用預設補上）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaudeApiUseState {
+    pub enabled: bool,
+    pub model: String,
+    pub effort: String,
+    pub max_per_hour: u32,
+}
+
+impl ClaudeApiCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 這個用途在 `[claude_api.uses.<id>]` 的生效值；不認得的用途回 `None`。
+    /// 有 `legacy_section` 的用途請用 [`ConfigFile::claude_use_state`]（它會讀舊的那一段）。
+    pub fn use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
+        let def = CLAUDE_API_USES.iter().find(|d| d.id == id)?;
+        let cfg = self.uses.get(id).cloned().unwrap_or_default();
+        let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
+        Some(ClaudeApiUseState {
+            enabled: cfg.enabled,
+            model: pick(&cfg.model, def.model),
+            effort: pick(&cfg.effort, def.effort),
+            max_per_hour: if cfg.max_per_hour == 0 { def.max_per_hour } else { cfg.max_per_hour },
+        })
+    }
+}
+
+impl ConfigFile {
+    /// 用途的生效值：`changelog_translate` 讀 `[changelog_translate]`，其餘讀 `[claude_api.uses.*]`。
+    pub fn claude_use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
+        match id {
+            "changelog_translate" => {
+                let t = &self.changelog_translate;
+                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour })
+            }
+            _ => self.claude_api.use_state(id),
+        }
+    }
+
+    /// 這個用途實際用哪個 key 檔：`[changelog_translate] key_file` 被明確改過就用它（舊設定檔），否則是 `[claude_api] key_file`。
+    pub fn changelog_translate_key_file(&self) -> String {
+        if self.changelog_translate.key_file != default_changelog_key_file() {
+            self.changelog_translate.key_file.clone()
+        } else {
+            self.claude_api.key_file.clone()
+        }
+    }
+}
+
+/// 模型 id 的形狀檢查：`claude-` 開頭，只含小寫英數、`.`、`-`，不超過 64 字。
+pub fn claude_model_id_ok(model: &str) -> bool {
+    model.len() <= 64
+        && model.starts_with("claude-")
+        && model.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
 }
 
 /// `[release_triage]`：`publish = false`（預設）時只寫帳本、完全不呼叫 `gh issue create`——先乾跑幾版，
@@ -2338,6 +2478,31 @@ mod supervisor_cfg_tests {
         assert_eq!(on, back, "明寫開著要留得住");
         let off: ConfigFile = toml::from_str("[codex_history]\nenabled = false\n").unwrap();
         assert!(!off.codex_history.enabled);
+    }
+
+    #[test]
+    fn claude_api_is_off_by_default_and_uses_resolve_to_the_latest_models() {
+        let none: ConfigFile = toml::from_str("").unwrap();
+        assert!(!none.claude_api.enabled);
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("claude_api"));
+        let d = none.claude_api.use_state("changelog_review").unwrap();
+        assert_eq!((d.enabled, d.model.as_str(), d.effort.as_str(), d.max_per_hour), (false, "claude-sonnet-5-5", "medium", 30));
+        assert_eq!(none.claude_use_state("changelog_translate").unwrap().model, "claude-haiku-5-5");
+        assert_eq!(none.claude_api.use_state("nope"), None);
+        let on: ConfigFile = toml::from_str("[claude_api]\nenabled = true\n[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
+        let s = on.claude_api.use_state("changelog_review").unwrap();
+        assert_eq!((s.enabled, s.model.as_str()), (true, "claude-sonnet-5-5"));
+        let h: ConfigFile = toml::from_str("[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-haiku-5-5\"\nmax_per_hour = 5\n").unwrap();
+        let hs = h.claude_api.use_state("changelog_review").unwrap();
+        assert_eq!((hs.model.as_str(), hs.effort.as_str(), hs.max_per_hour), ("claude-haiku-5-5", "medium", 5));
+        // 舊設定檔：翻譯仍讀 [changelog_translate]；key 檔沿用被改過的那個。
+        let legacy: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nkey_file = \"/k/old\"\n").unwrap();
+        assert!(legacy.claude_use_state("changelog_translate").unwrap().enabled);
+        assert_eq!(legacy.changelog_translate_key_file(), "/k/old");
+        assert_eq!(none.changelog_translate_key_file(), none.claude_api.key_file);
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert_eq!(on, back);
+        assert!(claude_model_id_ok("claude-haiku-5-5") && !claude_model_id_ok("gpt-4") && !claude_model_id_ok("claude-x y"));
     }
 
     #[test]

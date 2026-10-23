@@ -75,6 +75,7 @@ import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
 import { JudgePanel } from './JudgePanel'
+import { ClaudeApiPanel } from './ClaudeApiPanel'
 import { KindDisplayToggle, KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuickAddBots } from './QuickAddBots'
@@ -1575,6 +1576,9 @@ export function Sidebar() {
           </EnvSection>
           <EnvSection title="Jev 建議">
             <JudgePanel />
+          </EnvSection>
+          <EnvSection title="Claude API">
+            <ClaudeApiPanel />
           </EnvSection>
           <EnvSection title="顯示">
             <KindDisplayToggle />

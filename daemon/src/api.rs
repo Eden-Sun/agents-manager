@@ -425,6 +425,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::runners::upstream_update::routes())
         .merge(crate::herdr_integration::routes())
         .merge(crate::runners::judge::routes())
+        .merge(crate::claude_api::routes())
         .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
@@ -1076,6 +1077,9 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/judge/shadow", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/claude-api/settings", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/claude-api/settings", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/claude-api/ledger", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/credential/rotate", BotRoutePolicy::UserOrAgm),
