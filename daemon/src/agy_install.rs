@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// 官方 manifest 的位置（SPEC 附錄 G.1）。
-pub const MANIFEST_BASE: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
+pub const MANIFEST_BASE: &str = am_base::upstream_update::AGY_MANIFEST_BASE;
+/// 「官方最新版」只問這兩個平台（本機與 m4p 常見的 Linux x64、macOS arm64）：升級時每台仍讀自己平台的 manifest，這裡只決定要不要提示。
+const REFERENCE_PLATFORMS: [&str; 2] = ["linux_amd64", "darwin_arm64"];
 /// tarball 只收官方的儲存桶：manifest 被換掉也不能叫主機去抓別處。
 const DOWNLOAD_PREFIX: &str = "https://storage.googleapis.com/antigravity-public/antigravity-cli/";
 /// 主機端安裝鎖（見 [`crate::cli_update`] 的 `locked_script`）。
@@ -93,6 +95,24 @@ pub fn platform_of(probe_out: &str) -> Option<&'static str> {
         ("Linux", "aarch64" | "arm64", true) => Some("linux_arm64_musl"),
         _ => None,
     }
+}
+
+/// 上游巡邏用的「官方最新版」（issue #1908）：讀參考平台的 manifest，取**最小**的那個版本。
+/// 某個平台的 manifest 還沒跟上時，取較大者會讓那個平台永遠「落後」；取最小則升上去之後必定不再落後。
+/// 讀得到的平台只要有一個就算數；全部失敗才回錯誤。
+pub async fn latest_version(env: &dyn Env) -> Result<String, String> {
+    let mut versions: Vec<String> = Vec::new();
+    let mut errors = Vec::new();
+    for platform in REFERENCE_PLATFORMS {
+        match env.manifest(platform).await.and_then(|raw| parse_manifest(&raw)) {
+            Ok(m) => versions.push(m.version),
+            Err(e) => errors.push(format!("{platform}：{e}")),
+        }
+    }
+    versions
+        .into_iter()
+        .min_by(|a, b| crate::changelog::parse_version(a).cmp(&crate::changelog::parse_version(b)))
+        .ok_or_else(|| errors.join("；"))
 }
 
 /// 主機端安裝本體（POSIX sh，由 [`crate::cli_update::locked_script`] 包進安裝鎖後執行）。

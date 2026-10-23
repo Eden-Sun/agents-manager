@@ -29,6 +29,9 @@ impl Sources for Live {
                 .timeout(Duration::from_secs(20))
                 .build()
                 .map_err(|e| anyhow!("http client: {e}"))?;
+            if kind == "agy" {
+                return crate::agy_install::latest_version(&crate::agy_install::Real).await.map_err(|e| anyhow!("讀不到官方 manifest：{e}"));
+            }
             if kind == "herdr" {
                 let resp = client.get(HERDR_RELEASES_API).send().await.map_err(|e| anyhow!("連不上 GitHub releases：{e}"))?;
                 if !resp.status().is_success() {

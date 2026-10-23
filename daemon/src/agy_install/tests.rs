@@ -503,3 +503,41 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
     assert!(probe.contains("AGY_CLI_DISABLE_AUTO_UPDATE=true") && probe.contains("/Users/m4p/.local/bin/agy") && probe.contains("-p /usage"), "{probe}");
     assert!(e.app.quotas.lock().await.contains_key(&format!("{host}/agy")), "遠端的讀數記在 <host>/agy");
 }
+
+// ── 上游巡邏用的「官方最新版」（issue #1908）────────────────────────────────────────────────
+
+/// 每個平台各自的 manifest 回覆；`run` 不該被碰到（只讀版本，不動任何主機）。
+struct PerPlatform(std::collections::HashMap<&'static str, Result<String, String>>);
+
+impl Env for PerPlatform {
+    fn run<'a>(&'a self, _fence: &'a HostFence, _script: &'a str, _timeout: Duration) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { panic!("查官方最新版不該在任何主機跑指令") })
+    }
+    fn manifest<'a>(&'a self, platform: &'a str) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move { self.0.get(platform).cloned().unwrap_or_else(|| Err("no such platform".into())) })
+    }
+}
+
+fn manifest_at(version: &str) -> Result<String, String> {
+    Ok(manifest_json(version, URL_OK, SHA_OK))
+}
+
+#[tokio::test]
+async fn the_latest_version_is_the_lowest_published_on_the_reference_platforms() {
+    let both = PerPlatform([("linux_amd64", manifest_at("1.4.5")), ("darwin_arm64", manifest_at("1.4.5"))].into());
+    assert_eq!(latest_version(&both).await.unwrap(), "1.4.5");
+    // 一個平台還沒跟上：取較小的，另一個平台升到較大的版本之後也不會永遠「落後」。數值比較，不是字串（1.4.10 > 1.4.9）。
+    let lagging = PerPlatform([("linux_amd64", manifest_at("1.4.10")), ("darwin_arm64", manifest_at("1.4.9"))].into());
+    assert_eq!(latest_version(&lagging).await.unwrap(), "1.4.9");
+}
+
+#[tokio::test]
+async fn one_unreachable_or_invalid_platform_manifest_does_not_hide_the_other() {
+    let one_down = PerPlatform([("linux_amd64", Err("官方 manifest 回 503".into())), ("darwin_arm64", manifest_at("1.4.5"))].into());
+    assert_eq!(latest_version(&one_down).await.unwrap(), "1.4.5");
+    let bad_shape = PerPlatform([("linux_amd64", Ok(manifest_json("1.4.5", "https://evil.example/a.tgz", SHA_OK))), ("darwin_arm64", manifest_at("1.4.5"))].into());
+    assert_eq!(latest_version(&bad_shape).await.unwrap(), "1.4.5", "形狀不合格的 manifest 不算數，也不能把版本帶進來");
+    let all_down = PerPlatform([("linux_amd64", Err("timeout".into())), ("darwin_arm64", Err("官方 manifest 回 503".into()))].into());
+    let e = latest_version(&all_down).await.unwrap_err();
+    assert!(e.contains("linux_amd64") && e.contains("timeout") && e.contains("darwin_arm64") && e.contains("503"), "兩個平台都要在錯誤裡：{e}");
+}

@@ -1803,7 +1803,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 
 ### `POST /api/hosts/{name}/agy/install`
 裝／更新那台主機（本機或遠端）的 agy 到官方最新版（SPEC §12a.11）。agy 沒有套件管理器那條路、官方 `install.sh` 又會跑 `agy install`（改 shell profile），所以 daemon **不執行官方安裝腳本**：先經 ssh（本機直接跑）讀 `uname -s -m` 與 libc 決定平台（`darwin_arm64`／`darwin_amd64`／`linux_amd64`／`linux_amd64_musl`／`linux_arm64`／`linux_arm64_musl`），再讀官方 manifest（`…/manifests/<platform>.json`，`{version,url,sha512}`；url 必須在官方儲存桶、sha512 必須是 128 位十六進位，否則 `manifest_invalid`），把它們當資料交給主機端一段寫死的 sh：下載 tarball → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（`AGY_CLI_DISABLE_AUTO_UPDATE=true`，版本要吻合 manifest）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。任何一步失敗都不碰既有的 agy。裝完重新偵測那台的 CLI，偵測到的版本要等於 manifest 版本。主機端有安裝鎖（`~/.agents-manager-agy-install.lock`，同 CLI 升級那套 process-group 鎖）；沒有 body。
-同步回覆，要等下載與驗證（通常幾十秒，逾時 5 分鐘）：`200 {"host","platform","from":<舊版|null>,"to":<版本>,"path":<那台看到的 agy 路徑>,"already_latest":bool}`——`already_latest:true`＝那台已經是官方最新版，沒有下載、沒有動檔案。
+同步回覆，要等下載與驗證（通常幾十秒，逾時 5 分鐘）：`200 {"host","platform","from":<舊版|null>,"to":<版本>,"path":<那台看到的 agy 路徑>,"already_latest":bool}`——`already_latest:true`＝那台已經是官方最新版，沒有下載、沒有動檔案。成功後 `GET /api/upstream-updates` 的 `agy` 快照立刻補上這台的新版（#1908）；跑著的 agy pane 不會被打斷（`mv` 換掉檔案，執行中的行程繼續用舊 inode，重啟才換版）。
 錯誤：主機不存在 `404 {"what":"host"}`；同一台已經在裝（本行程或主機端的鎖）`409 {"reason":"agy_install_in_progress"}`；其餘 `502`，訊息開頭是原因碼——`host_disconnected`、`probe_failed`、`unsupported_platform`、`manifest_unavailable`、`manifest_invalid`、`install_failed`（含腳本的 `AM_AGY_*` 標記與 stderr 尾巴，例如 `AM_AGY_SHA512_MISMATCH`）、`not_on_path`（寫進去了但那台的登入 shell PATH 看不到，多半是 `~/.local/bin` 不在 PATH）、`verify_failed`、`superseded`（途中那台重連或改指到別台，這次作廢）。User-only。
 登入不在這條路：agy 沒有 `login` 子命令，使用者在額度欄「開 shell 登入」（那台的 host shell 跑 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`），憑證檔出現後 daemon 的 login watcher 先探測 `/usage`，成功才翻成已登入（明確 auth 失敗維持未登入，其他失敗保持現值並記 `quota_error`）。
 
@@ -2573,8 +2573,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 跟 `update_notice`（磁碟已是新版、重啟套用）不同：這是**上游有、磁碟上還沒有**（claude 還沒自己下載、codex 還沒裝），重啟換不到任何東西。
 
 - 唯讀、不觸發抓取，回最近一輪巡邏（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）的快照；第一輪還沒跑完是 `{"items":[]}`。
-- `kind`：`claude`、`codex`、`herdr`（herdr 2026-10-01 加入，給 header 的 herdr 一鍵更新徽章用）、`grok`（#761，只提示、沒有安裝端點；`POST /hosts/{name}/cli-update` 仍只收 claude／codex）。
+- `kind`：`claude`、`codex`、`herdr`（herdr 2026-10-01 加入，給 header 的 herdr 一鍵更新徽章用）、`grok`（#761，只提示、沒有安裝端點；`POST /hosts/{name}/cli-update` 仍只收 claude／codex）、`agy`（#1908，通知＋使用者確認後升級，升級端點是 `POST /hosts/{name}/agy/install`，不是 `cli-update`）。
 - grok：上游是 `https://storage.googleapis.com/grok-build-public-artifacts/cli/stable`（純文字版本號；`source_url` 同它），取不到或內容不是乾淨的 `x.y.z`（HTML 錯誤頁、預發布、build metadata）一律是 `error`、`latest_version:null`；磁碟版本是 `grok --version` 的版本（`(commit)` 後綴不算）；`target_version` 等於上游版，`text` 列落後的主機並寫 `grok update`。
+- agy：上游是官方 manifest（`…/manifests/<platform>.json` 的 `version`，與 `POST /hosts/{name}/agy/install` 同一個來源、同一套 url／sha512 形狀驗證；`source_url` 是 manifest 位置）。只問 `linux_amd64`、`darwin_arm64` 兩個參考平台，取**較小**的版本（某平台 manifest 還沒跟上時，不讓另一個已升上去的平台永遠算落後）；一個平台失敗就用另一個，兩個都失敗才是 `error`、`latest_version:null`。磁碟版本是那台 `agy --version`；`target_version` 等於上游版，`text` 列落後的主機並指向設定頁「更新檢查」的更新。落後的主機照 codex 的規則通知一次、有確認框，daemon 不會背景自動升級。`agy/install` 成功後快照立刻改成該主機的新版（推一則 `notify:null` 的 `upstream_update`），不等下一輪巡邏。
 - 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）；herdr 問 `https://api.github.com/repos/herdrdev/herdr/releases`，同樣取數值最大的正式版（`source_url` 是 `https://github.com/herdrdev/herdr/releases`）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
 - herdr 的磁碟版本不另跑指令：讀工具探測快取的 `herdr --version`（`hosts[].herdr.cli_version` 同一份，每 60 秒重探）；探不到 herdr 的主機不列。`target_version` 等於上游版，`text` 列出落後的主機並講明更新會重啟 herdr server。
 - 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`latest_version` 是上游版；`target_version` 是共同安裝目標。Codex 的目標等於上游版；Claude 取上游版與已安裝版本的最大值，避免把較新的主機降版。Claude `behind` 表示低於共同目標或目標已知但讀不到版本；`has_update` 在任一主機落後／讀取失敗或版本不一致時為 `true`。

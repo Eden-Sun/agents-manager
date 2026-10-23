@@ -396,6 +396,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
   仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
   **grok**（issue #761）：xAI 自己的 installer（`~/.grok/bin/grok` 指到 `~/.grok/downloads/grok-<版本>-<平台>`，config `installer = "internal"`），沒有 npm／GitHub releases；上游是 `https://storage.googleapis.com/grok-build-public-artifacts/cli/stable`（純文字、內容只有版本號，`grok update --check` 查的同一個指標；HTML 錯誤頁、預發布、build metadata 一律當看不懂＝抓不到），磁碟版本是各主機的 `grok --version`（`grok 1.0.46 (2765805b9442)`，commit 後綴不是版本）。**只提示、不一鍵安裝**：官方升級指令是在那台主機跑 `grok update`，換版後跑著的 bot 要重啟，沒有我們能代跑的固定流程；`text` 寫出落後的主機與這條指令，header 有一顆只提示的 `grok` 徽章（桌機；手機靠 toast）。
+  **agy**（issue #1908）：上游是官方 manifest（附錄 G.1，`POST /api/hosts/{name}/agy/install` 同一個來源與形狀驗證；`linux_amd64`、`darwin_arm64` 兩個參考平台取較小版本，一個失敗用另一個，兩個都失敗才算抓不到），磁碟版本是各主機的 `agy --version`。通知一次＋設定頁「更新檢查」的確認後更新（走 `agy/install`，細節見 §12a.11「版本管理」），無 header 徽章、無 `runs.update_notice`；不跑 `install.sh`／`agy install`／`agy update`。
   抓不到上游不是「沒有新版」：快照帶 `error`，從正常變成抓不到那一輪推 `notify:"error"` 跳錯誤通知。跟 #204 分診（§18.2c）的分工：分診回答
   「新版改了什麼、要不要處理」、這裡只回答「有沒有比磁碟新的版本可裝」；codex 兩邊讀同一份 releases 快取。
   herdr 也在這份快照裡（2026-10-01，一鍵更新的徽章）：上游是 `herdrdev/herdr` GitHub releases 最大的正式版，磁碟版本讀工具探測快取的
@@ -2983,7 +2984,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 - **設定頁（環境設定 →「更新檢查」）每台主機一張表**，列：herdr CLI、herdr server、Claude／Codex／Grok／Antigravity（agy）CLI、四家 integration；
   欄位：目前版本、最新或需要的版本、狀態（最新／可更新／未安裝／查不到）、動作。資料全是既有的：`hosts[].herdr`／`tools`（工具探測）、`GET /api/upstream-updates`
   （上游版）與上面的 integration 快照；表是**總覽**，既有入口（header 徽章、`cli-update`、`herdr-update`）一個都沒拆，按鈕送的是同一批 API，只有 integration 是新的。
-  agy 沒有公開的版本來源，只列目前版本、狀態「查不到」；Grok 沒有一鍵更新入口，只提示 `grok update`；herdr 的更新維持 §6.9b 的限制（只做本機、非 shared session），
+  agy 的最新版取自官方 manifest（附錄 G.1，與 `agy/install` 同一來源，見上游新版一節），與每台主機的 `agy --version` 比對：落後標「可更新」，按下去先確認、再走 `POST /api/hosts/{name}/agy/install`（#1908；不是 `cli-update`）；兩邊一樣是「最新」，manifest 讀不到才是「查不到」。Grok 沒有一鍵更新入口，只提示 `grok update`；herdr 的更新維持 §6.9b 的限制（只做本機、非 shared session），
   遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
 - 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔（手動「安裝」鈕的確認框寫明改 `~/.grok`／`~/.gemini` 的 hook；只有 grok／agy 且工具探測已登入時才顯示鈕；自動安裝沒有確認框，改以通知與 log 讓使用者看得到）。
 
@@ -3877,7 +3878,7 @@ Grok 撞限的回合不以 `end_turn` 收尾。`hookrecv` 對通過世代圍籬�
 ## 12a. agy 支援（Google Antigravity CLI，使用者 2026-10-04）
 
 `kind = "agy"`：Antigravity CLI（`~/.local/bin/agy`，Go 單一執行檔；Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，改用它）。herdr 內建 `agy` agent manifest，`agent.start {kind: "agy"}` 可用，但那份偵測規則是舊版（附錄 G.6），所以 daemon 自己認會停下來等人的畫面（§12a.4）。
-**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume 已做（§12a.10）；fork／自動更新／persona 屬第二階段（額度已做，§12a.7；子 agent 已做，§12a.9）（設計：`docs/design/agy-cli-support.md` §3.2），fork 在 agy 上回 `unsupported_kind`（不 panic）。
+**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume 已做（§12a.10）；fork／persona 屬第二階段（自動更新已做，見 §12a.11 與 §3.1「上游有新版」）（額度已做，§12a.7；子 agent 已做，§12a.9）（設計：`docs/design/agy-cli-support.md` §3.2），fork 在 agy 上回 `unsupported_kind`（不 panic）。
 
 ### 12a.1 啟動
 | 項目 | 注入 |
@@ -3952,7 +3953,8 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 
 ### 12a.11 遠端主機：安裝、登入、額度（`agy_install.rs`，2026-10-06）
 遠端主機（第一個目標 m4p：macOS arm64）的 agy 分四件事，**安裝、登入偵測、額度探測、啟動 bot 都做了**（啟動見 §12a.12）：
-- **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒有新版通知，沒裝也要能裝，所以獨立一個小模組。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
+- **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒裝也要能裝，所以獨立一個小模組（新版通知走上游巡邏，見下「版本管理」）。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
+- **版本管理（#1908，與 claude／codex 同一套政策：通知＋使用者確認，daemon 不背景自動升級）**：agy pane 仍設 `AGY_CLI_DISABLE_AUTO_UPDATE=true`，版本由 AG Man 管——上游巡邏（§3.1「上游有新版」，`upstream_update` 的 `agy` 一列）每 10 分鐘讀官方 manifest（`linux_amd64`、`darwin_arm64` 取較小版本，一個失敗用另一個）對每台有裝 agy 的主機（本機＋遠端）的 `agy --version`；落後的主機同一個上游版本通知一次（toast），設定頁「更新檢查」的 agy 列標「可更新」並給更新鈕（確認框寫明從官方下載、驗 sha512、不跑 `install.sh`／`agy install`／`agy update`），按下去走上面的 `agy/install`（manifest＋sha512＋`mv`）。沒有 `cli_update` 的 per-run 通知與「重啟套用」：換版是 `mv` 蓋過檔案，正在跑的 agy pane 繼續用舊行程、**不被打斷**，bot 下次重啟才換版。成功後上游快照立刻跟上。
 - **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證出現後（Linux 是檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`；**macOS 是 login Keychain 項目 `security find-generic-password -s gemini -a antigravity`，沒有那個檔**——只看檔案會讓 m4p 登入完仍顯示未登入，2026-10-06），`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）**先探測 `/usage`，成功才翻成已登入**（憑證檔只證明有一份 credential，過期或被撤銷時檔案還在，#870）：明確 auth 失敗維持未登入並記 5 分鐘冷卻；網路、逾時、pane 這類其他失敗旗標保持現值、只記 `quota_error`，進 15 分鐘失敗冷卻（不會每 20 秒起一次探測）。
 - **額度**：`refresh_agy` 對遠端在那台 herdr 的 pane 裡跑同一段 `agy -p /usage`（不走 ssh，見 §12a.7），讀數記在 `<host>/agy`；探測失敗的原因在 `hosts[].tools.agy.quota_error`。
 - **網頁**：沒裝 agy 的主機（tools 探測已知 `installed:false`），額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，入口是「安裝 agy 並登入」：使用者在確認框按確認才安裝，成功後才開 shell 登入（不再開 shell 打 `agy` 得到 `command not found`）；新 bot 的 kind 選單、缺少 CLI 提示與主機徽章的 agy 安裝鈕同樣先問再裝（細節見 UI-DECISIONS）。
@@ -3966,7 +3968,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **不做**：遠端的 `lastAssistantMessage` 以外的 transcript 讀取（daemon 端不開遠端檔）。
 
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
-`/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身分要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身分＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+`/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身分要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身分＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
 
 ## 13. 專案群組聊天
 

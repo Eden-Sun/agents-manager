@@ -76,7 +76,7 @@ test('每台主機的列：herdr CLI／server、四家 CLI、四家 integration�
   assert.equal(by['local:cli-claude'].current, '2.1.300')
   assert.deepEqual(by['local:cli-codex'].action, { kind: 'cli', cliKind: 'codex', target: '0.158.0' })
   assert.equal(by['local:cli-grok'].status, 'missing')
-  assert.equal(by['local:cli-agy'].status, 'unknown', 'agy 沒有上游版本來源')
+  assert.equal(by['local:cli-agy'].status, 'unknown', '快照裡還沒有 agy（daemon 第一輪沒跑完、或舊 daemon）：查不到，不是最新')
   assert.equal(by['local:cli-agy'].action, null)
   assert.deepEqual([by['local:integration-claude'].current, by['local:integration-claude'].latest, by['local:integration-claude'].status], ['v8', 'v11', 'update'])
   assert.deepEqual(by['local:integration-claude'].action, { kind: 'integration', name: 'claude' })
@@ -86,6 +86,29 @@ test('每台主機的列：herdr CLI／server、四家 CLI、四家 integration�
   assert.equal(by['local:integration-grok'].status, 'unknown')
   assert.equal(by['local:integration-grok'].note, 'wedged')
   assert.equal(updatableCount(c.rows), 4, 'herdr CLI、herdr server、codex CLI、claude integration')
+})
+
+test('agy（#1908）：官方 manifest 版本比對——落後給「更新」（走 agy/install）、一樣是最新、查不到官方版本才是「查不到」', () => {
+  const row = (agyVersion: string, agyItem: UpstreamItem) =>
+    buildHostCheck({
+      host: 'local',
+      tools: tools({ agy: tool(true, agyVersion) }),
+      herdr: herdr('herdr 0.9.4', '0.9.4'),
+      upstream: { agy: agyItem },
+      integration: null,
+      herdrBlocked: null,
+    }).rows.find((r) => r.id === 'local:cli-agy')!
+  const behind = row('1.4.2', item('agy', '1.4.5', [up('1.4.2', true)]))
+  assert.deepEqual([behind.status, behind.current, behind.latest], ['update', '1.4.2', '1.4.5'])
+  assert.deepEqual(behind.action, { kind: 'agy', target: '1.4.5' })
+  const latest = row('1.4.5', item('agy', '1.4.5', [up('1.4.5', false)]))
+  assert.deepEqual([latest.status, latest.latest, latest.action], ['latest', '1.4.5', null], '2026-10-23 兩台都在 1.4.5：已是最新')
+  const noSource = row('1.4.2', item('agy', null, []))
+  assert.equal(noSource.status, 'unknown')
+  assert.match(noSource.note ?? '', /官方 manifest/)
+  const unreadable = row('1.4.2', item('agy', '1.4.5', [up(null, false, 'ssh timeout')]))
+  assert.equal(unreadable.status, 'unknown')
+  assert.equal(unreadable.action, null)
 })
 
 test('遠端 herdr 不給按鈕、講原因；查不到上游、讀不到版本都是「查不到」而不是「最新」', () => {
