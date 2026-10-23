@@ -72,6 +72,13 @@ Orca 出處：[README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 **平台與需求。** daemon 跑在 macOS 與 Linux。需要已安裝的 [herdr](https://herdr.dev)，以及至少一種 agent CLI（`claude`、`codex`、`grok` 或 `agy`）；從原始碼建置另需 Rust（`cargo`）與 [Bun](https://bun.sh)。herdr 是帶 socket API 的 terminal workspace manager；daemon 靠它開 pane、啟動 agent、送字、讀畫面，自己從不 spawn agent。
 
+**用 Homebrew 安裝**（macOS arm64、Linux x86_64／arm64；會一併裝好 herdr）：
+
+```bash
+brew install eden-sun/tap/agents-manager
+agents-managerd serve                     # 或常駐：brew services start agents-manager
+```
+
 **安裝預編譯執行檔**（不需要 Rust 或 Bun，網頁 UI 已嵌入）。到 [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) 下載對應平台的壓縮檔：`linux-x86_64`、`linux-arm64` 或 `macos-arm64`。
 
 ```bash
