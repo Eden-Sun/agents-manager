@@ -81,6 +81,39 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// 呈現給人的 Jev 內容（inbox 通知、父 bot 聊天室系統訊息、API 欄位）一律帶這組來源標記（issue #1912）：
+/// 使用者要一眼看出「這是 Jev 的判斷、有多大機率、只是建議」。前綴三塊（daemon／inbox／選項）同一個字樣。
+pub const SUGGESTED_BY: &str = "jev";
+pub const SOURCE_LABEL: &str = "Jev 建議";
+pub const SUGGESTION_ONLY: &str = "只是建議，不會自動動作";
+
+/// `🤖 Jev 建議（TypeSafe 型別判斷，機率 87%，只是建議，不會自動動作）`。`probability` 空＝不寫機率（例如一則通知帶兩個機率時，數字放正文）。
+pub fn badge(probability: Option<f64>) -> String {
+    match probability {
+        Some(p) => format!("🤖 {SOURCE_LABEL}（TypeSafe 型別判斷，機率 {}，{SUGGESTION_ONLY}）", pct(p)),
+        None => format!("🤖 {SOURCE_LABEL}（TypeSafe 型別判斷，{SUGGESTION_ONLY}）"),
+    }
+}
+
+/// 機率寫成整數百分比；0–1 以外夾回去。
+pub fn pct(p: f64) -> String {
+    format!("{}%", (p.clamp(0.0, 1.0) * 100.0).round() as i64)
+}
+
+/// 在 inbox payload 上蓋來源標記：`suggested_by`／`source_label`／`suggestion_only`（＋有單一機率時 `probability_pct`）。
+/// 原有欄位不動；`action` 的文案由各場景用 [`badge`] 當前綴。
+pub fn mark(mut payload: Value, probability: Option<f64>) -> Value {
+    if let Some(o) = payload.as_object_mut() {
+        o.insert("suggested_by".into(), json!(SUGGESTED_BY));
+        o.insert("source_label".into(), json!(SOURCE_LABEL));
+        o.insert("suggestion_only".into(), json!(true));
+        if let Some(p) = probability {
+            o.insert("probability_pct".into(), json!((p.clamp(0.0, 1.0) * 100.0).round() as i64));
+        }
+    }
+    payload
+}
+
 /// 為什麼這一筆不問。都不寫帳本：關著的東西不該留痕跡。
 #[derive(Debug, PartialEq)]
 pub enum Skip {
@@ -687,6 +720,27 @@ fn looks_random(s: &str) -> bool {
     let digits = s.chars().filter(char::is_ascii_digit).count();
     let letters = s.chars().filter(char::is_ascii_alphabetic).count();
     digits >= 4 && letters >= 4 && !s.contains("__") && s.matches('_').count() + s.matches('-').count() < 4
+}
+
+#[cfg(test)]
+mod source_mark_tests {
+    use super::*;
+
+    #[test]
+    fn the_badge_names_jev_the_probability_and_that_it_only_suggests() {
+        assert_eq!(badge(Some(0.874)), "🤖 Jev 建議（TypeSafe 型別判斷，機率 87%，只是建議，不會自動動作）");
+        assert_eq!(badge(None), "🤖 Jev 建議（TypeSafe 型別判斷，只是建議，不會自動動作）");
+        assert_eq!(pct(1.7), "100%");
+        assert_eq!(pct(-0.2), "0%");
+    }
+
+    #[test]
+    fn mark_adds_the_source_fields_and_keeps_the_rest() {
+        let p = mark(json!({"action": "x", "probability": 0.93}), Some(0.93));
+        assert_eq!((p["suggested_by"].as_str(), p["source_label"].as_str(), p["suggestion_only"].as_bool(), p["probability_pct"].as_i64()), (Some("jev"), Some("Jev 建議"), Some(true), Some(93)));
+        assert_eq!(p["action"], "x");
+        assert!(mark(json!({}), None).get("probability_pct").is_none());
+    }
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]

@@ -234,6 +234,10 @@ pub async fn lookup(app: &impl crate::capabilities::Db, run_id: &str, tool_use_i
         }
         return Ok(Lookup::Hint(json!({
             "ledger_id": id,
+            "suggested_by": crate::judge::SUGGESTED_BY,
+            "source_label": crate::judge::SOURCE_LABEL,
+            "suggestion_only": true,
+            "note": crate::judge::badge(None),
             "model": model,
             "threshold": SUGGEST_THRESHOLD,
             "margin": SUGGEST_MARGIN,
@@ -869,6 +873,8 @@ mod tests {
         let second = get(&rig).await;
         assert_eq!(second["questions"], first["questions"]);
         let hint = &second["jev_options"];
+        assert_eq!((hint["suggested_by"].as_str(), hint["source_label"].as_str(), hint["suggestion_only"].as_bool()), (Some("jev"), Some("Jev 建議"), Some(true)));
+        assert!(hint["note"].as_str().unwrap().contains("只是建議，不會自動動作"));
         assert_eq!(hint["threshold"], 0.7);
         assert_eq!(hint["margin"], 0.15);
         assert_eq!(hint["model"], "jev-1.13.0");
