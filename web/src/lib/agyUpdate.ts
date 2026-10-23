@@ -1,4 +1,5 @@
 import type { UpstreamItem } from '../store/upstreamUpdate'
+import { t } from './i18n'
 
 /**
  * header 的「agy 有新版」（issue #1921）：agy 的上游版來自官方 manifest（daemon `upstream_update.rs`，#1908）。
@@ -19,16 +20,17 @@ export function agyUpdatePlan(item: UpstreamItem | null | undefined): AgyUpdateP
 
 /** 確認框標題（設定頁與 header 共用）。 */
 export function agyUpdateTitle(target: string): string {
-  return `更新 Antigravity（agy）CLI 到 ${target}？`
+  return t('更新 Antigravity（agy）CLI 到 {target}？', { target })
 }
 
 /** chip 的 tooltip／aria-label。 */
 export function agyChipLabel(plan: AgyUpdatePlan): string {
-  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? '讀不到版本'}`).join('；')
-  return `agy 有新版 ${plan.target}（${hosts}）· 點一下更新：從官方下載、驗 sha512 後換掉 ~/.local/bin/agy；跑著的 agy bot 重啟後才換版`
+  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? t('讀不到版本')}`).join('；') // i18n-ignore
+  return t('agy 有新版 {target}（{hosts}）· 點一下更新：從官方下載、驗 sha512 後換掉 ~/.local/bin/agy；跑著的 agy bot 重啟後才換版', { target: plan.target, hosts })
 }
 
 /** 手機合成選單裡 agy 那一項的文案。 */
 export function agyMenuItem(plan: AgyUpdatePlan): string {
-  return `agy ${plan.target}：${plan.hosts.map((h) => h.host).join('、')} 可更新（點開確認）`
+  const hostList = plan.hosts.map((h) => h.host).join('、') // i18n-ignore
+  return t('agy {target}：{hosts} 可更新（點開確認）', { target: plan.target, hosts: hostList })
 }

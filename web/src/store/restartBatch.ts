@@ -27,7 +27,7 @@ export function restartProgress(b: RestartBatch, data: Rec): RestartBatch {
         ...base,
         done: base.done + 1,
         current: null,
-        failed: [...base.failed, { name, error: str(pick(data, 'error'), '失敗') }],
+        failed: [...base.failed, { name, error: str(pick(data, 'error'), '失敗') }], // i18n-ignore
       }
     case 'skipped':
       return {
@@ -40,7 +40,7 @@ export function restartProgress(b: RestartBatch, data: Rec): RestartBatch {
             bot_id: str(pick(data, 'bot_id')),
             name,
             reason: str(pick(data, 'reason')),
-            reason_label: str(pick(data, 'reason_label'), '狀態變了，這次不重啟'),
+            reason_label: str(pick(data, 'reason_label'), '狀態變了，這次不重啟'), // i18n-ignore
           },
         ],
       }

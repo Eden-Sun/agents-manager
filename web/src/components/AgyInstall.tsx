@@ -3,6 +3,7 @@ import { useStore } from '../store/store'
 import { useAgyMissing } from './agyInstallState'
 import { ConfirmDialog } from './ConfirmDialog'
 import { hostLabel } from './toolsHelpers'
+import { useT } from '../lib/i18n'
 
 /**
  * 「<主機> 尚未安裝 agy，要自動安裝嗎？」的確認框（使用者 2026-10-06）。agy 不能跑官方 `install.sh`，由 daemon 讀官方 manifest、
@@ -24,15 +25,18 @@ export function AgyInstallDialog({
   onCancel: () => void
   onConfirm: () => void
 }) {
+  const t = useT()
   return (
     <ConfirmDialog
       open={open}
-      title="安裝 agy？"
+      title={t('安裝 agy？')}
       body={
         <>
-          <strong>{hostLabel(host)}</strong> 尚未安裝 agy，要自動安裝嗎？
+          {t.x('{host} 尚未安裝 agy，要自動安裝嗎？', { host: <strong>{hostLabel(host)}</strong> })}
           <br />
-          會從官方下載（約 50 MB）、驗 sha512 後放到 <code>~/.local/bin/agy</code>；不跑官方 install.sh、不改 shell 設定。
+          {t.x('會從官方下載（約 50 MB）、驗 sha512 後放到 {path}；不跑官方 install.sh、不改 shell 設定。', {
+            path: <code>~/.local/bin/agy</code>,
+          })}
           {extra ? (
             <>
               <br />
@@ -54,6 +58,7 @@ export function AgyInstallDialog({
  * 跟其他 CLI 的「用現有 agent 安裝」不同。按下去先跳確認，確認才裝；已經裝了就不顯示（登入在額度欄「開 shell 登入」）。
  */
 export function AgyInstallButton({ host, small }: { host: string; small?: boolean }) {
+  const t = useT()
   const missing = useAgyMissing(host)
   const busy = useStore((s) => s.busy[`agy-install:${host || 'local'}`] === true)
   const installAgy = useStore((s) => s.installAgy)
@@ -65,18 +70,18 @@ export function AgyInstallButton({ host, small }: { host: string; small?: boolea
         type="button"
         className={`${small ? 'mini-btn' : 'btn'} install-btn`}
         disabled={busy}
-        title={`在${hostLabel(host)}從官方下載 agy（約 50 MB、驗 sha512）並放到 ~/.local/bin/agy；不跑官方 install.sh、不改 shell 設定`}
+        title={t('在{host}從官方下載 agy（約 50 MB、驗 sha512）並放到 ~/.local/bin/agy；不跑官方 install.sh、不改 shell 設定', { host: hostLabel(host) })}
         onClick={(e) => {
           e.stopPropagation()
           setOpen(true)
         }}
       >
-        {busy ? '安裝中…' : small ? '安裝' : '安裝 agy'}
+        {busy ? t('安裝中…') : small ? t('安裝') : t('安裝 agy')}
       </button>
       <AgyInstallDialog
         host={host}
         open={open}
-        confirmLabel="安裝 agy"
+        confirmLabel={t('安裝 agy')}
         onCancel={() => setOpen(false)}
         onConfirm={() => {
           setOpen(false)

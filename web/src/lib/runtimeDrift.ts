@@ -24,7 +24,7 @@ function comparesFast(kind: string): boolean {
   return kind === 'codex'
 }
 
-const NONE = '（CLI 預設）'
+const NONE = '（CLI 預設）' // i18n-ignore
 const DEFAULT_IDENTITY = 'cc0'
 
 function normalizedIdentity(value: string | null | undefined): string | null {
@@ -33,7 +33,7 @@ function normalizedIdentity(value: string | null | undefined): string | null {
 }
 
 function identityLabel(value: string | null | undefined, kind: string): string {
-  return normalizedIdentity(value) ?? (kind === 'claude' ? DEFAULT_IDENTITY : '（預設）')
+  return normalizedIdentity(value) ?? (kind === 'claude' ? DEFAULT_IDENTITY : '（預設）') // i18n-ignore
 }
 
 /** 已知的 runtime 身份；`undefined`＝沒記／沒有 active run，`null`＝已知但使用本機預設帳號。 */
@@ -104,7 +104,7 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
   if (run.runtime_model !== null && !defaultsStay(bot.model) && !sameModel(run.runtime_model, bot.model)) {
     out.push({
       field: 'model',
-      label: '模型',
+      label: '模型', // i18n-ignore
       running: run.runtime_model ?? NONE,
       configured: bot.model ?? NONE,
     })
@@ -113,13 +113,13 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
   if (run.runtime_effort !== null && !defaultsStay(bot.effort) && effort !== (bot.effort ?? null)) {
     out.push({
       field: 'effort',
-      label: '強度',
+      label: '強度', // i18n-ignore
       running: effort ? effortLabel(effort) : NONE,
       configured: bot.effort ? effortLabel(bot.effort) : NONE,
     })
   }
   if (comparesFast(bot.kind) && run.runtime_fast !== null && run.runtime_fast !== bot.fast) {
-    out.push({ field: 'fast', label: 'fast', running: run.runtime_fast ? '開' : '關', configured: bot.fast ? '開' : '關' })
+    out.push({ field: 'fast', label: 'fast', running: run.runtime_fast ? '開' : '關', configured: bot.fast ? '開' : '關' }) // i18n-ignore
   }
   if (typeof run.runtime_identity === 'string') {
     const running = normalizedIdentity(run.runtime_identity)
@@ -127,7 +127,7 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
     if (running !== configured) {
       out.push({
         field: 'identity',
-        label: '帳號',
+        label: '帳號', // i18n-ignore
         running: identityLabel(running, bot.kind),
         configured: identityLabel(configured, bot.kind),
       })
@@ -138,14 +138,14 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
 
 /** badge 與 tooltip 共用。 */
 export function driftLine(d: RuntimeDriftField): string {
-  return `${d.label} 實際 ${d.running}、設定 ${d.configured}`
+  return `${d.label} 實際 ${d.running}、設定 ${d.configured}` // i18n-ignore
 }
 
 /**
  * chip 上 ⟳ 後面的欄位字（#1903）：只有 ⟳ 看不出是哪一欄，強度 drift 曾被當成 fast。
  * `short`（側欄精簡列）每欄只剩一個字（fast 維持原字），多欄用 `/` 連接；順序同 `runtimeDrift`。
  */
-const SHORT_LABEL: Record<RuntimeDriftField['field'], string> = { model: '模', effort: '強', fast: 'fast', identity: '帳' }
+const SHORT_LABEL: Record<RuntimeDriftField['field'], string> = { model: '模', effort: '強', fast: 'fast', identity: '帳' } // i18n-ignore
 
 export function driftFieldsLabel(drift: RuntimeDriftField[], short = false): string {
   return drift.map((d) => (short ? SHORT_LABEL[d.field] : d.label)).join('/')
@@ -153,7 +153,7 @@ export function driftFieldsLabel(drift: RuntimeDriftField[], short = false): str
 
 export function driftTitle(drift: RuntimeDriftField[]): string {
   if (!drift.length) return ''
-  return `${drift.map(driftLine).join('\n')}\n重啟這顆 bot 才會換成設定的值。`
+  return `${drift.map(driftLine).join('\n')}\n重啟這顆 bot 才會換成設定的值。` // i18n-ignore
 }
 
 /**

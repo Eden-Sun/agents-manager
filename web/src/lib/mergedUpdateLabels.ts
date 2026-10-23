@@ -28,17 +28,17 @@ export function mergedUpdateLabels(x: {
   const claudeCli = updates.filter((item) => item.kind === 'claude')
   const restartItem = batch
     ? batch.finished
-      ? `重啟完成 · 成功 ${batch.ok.length} 顆${batch.failed.length ? ` · 失敗 ${batch.failed.length} 顆` : ''}（收起）`
-      : `重啟中 ${batch.done}/${batch.total}（收起，不會中斷）`
+      ? `重啟完成 · 成功 ${batch.ok.length} 顆${batch.failed.length ? ` · 失敗 ${batch.failed.length} 顆` : ''}（收起）` // i18n-ignore
+      : `重啟中 ${batch.done}/${batch.total}（收起，不會中斷）` // i18n-ignore
     : readyCount > 0
-      ? `重啟 ${readyCount} 顆閒置的 Bot 套用更新`
-      : `${busyCount} 顆有更新但在忙，閒下來再按`
+      ? `重啟 ${readyCount} 顆閒置的 Bot 套用更新` // i18n-ignore
+      : `${busyCount} 顆有更新但在忙，閒下來再按` // i18n-ignore
   const codexItem = codexCli
-    ? `${codexCli.host} 的 codex ${CLI_UPDATE_PHASE_LABEL[codexCli.phase]}…`
-    : `安裝 codex${to ? ` ${to}` : ''} 並重啟（${installCount} 顆還沒裝）`
+    ? `${codexCli.host} 的 codex ${CLI_UPDATE_PHASE_LABEL[codexCli.phase]}…` // i18n-ignore
+    : `安裝 codex${to ? ` ${to}` : ''} 並重啟（${installCount} 顆還沒裝）` // i18n-ignore
   const claudeItem = claudeCli.length
-    ? `claude 安裝中 ${claudeCli.map((item) => `${item.host} ${CLI_UPDATE_PHASE_LABEL[item.phase]}`).join('、')}…`
-    : `安裝 claude${x.claudeTarget ? ` ${x.claudeTarget}` : ''} 到 ${x.claudeInstallCount ?? 0} 台`
+    ? `claude 安裝中 ${claudeCli.map((item) => `${item.host} ${CLI_UPDATE_PHASE_LABEL[item.phase]}`).join('、')}…` // i18n-ignore
+    : `安裝 claude${x.claudeTarget ? ` ${x.claudeTarget}` : ''} 到 ${x.claudeInstallCount ?? 0} 台` // i18n-ignore
   const pieces: string[] = []
   if (x.restartShown !== false) pieces.push(restartItem)
   if (x.codexShown !== false) pieces.push(codexItem)
@@ -47,5 +47,5 @@ export function mergedUpdateLabels(x: {
   if (x.herdrItem) pieces.push(x.herdrItem)
   if (x.grokItem) pieces.push(x.grokItem)
   if (x.agyItem) pieces.push(x.agyItem)
-  return { restartItem, codexItem, claudeItem, label: `有更新：${pieces.join('；')}。點開選要做哪一個` }
+  return { restartItem, codexItem, claudeItem, label: `有更新：${pieces.join('；')}。點開選要做哪一個` } // i18n-ignore
 }

@@ -4,6 +4,7 @@ import { useAgyBusy, useAgyPlan } from '../hooks/useAgyPlan'
 import { agyChipLabel, agyUpdateTitle } from '../lib/agyUpdate'
 import { changelogRange } from '../lib/upstreamRange'
 import { useReviewAsk } from '../hooks/useReviewAsk'
+import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { AgyUpdateBody } from './AgyUpdateConfirm'
@@ -16,6 +17,7 @@ import type { DialogControl } from './MergedUpdateChip'
  * 有主機正在裝時鈕停用、字改成「agy 更新中…」。
  */
 export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
+  const t = useT()
   const plan = useAgyPlan()
   const busy = useAgyBusy()
   const installAgy = useStore((s) => s.installAgy)
@@ -25,7 +27,7 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
   const range = changelogRange(plan?.hosts ?? [])
   const review = useReviewAsk('agy', range.host, range.from, plan?.target ?? null)
   if (!plan) return null
-  const label = busy ? 'agy 更新中…' : agyChipLabel(plan)
+  const label = busy ? t('agy 更新中…') : agyChipLabel(plan)
   return (
     <>
       {control ? null : (
@@ -44,7 +46,7 @@ export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
       <ConfirmDialog
         open={open}
         title={agyUpdateTitle(plan.target)}
-        confirmLabel="更新"
+        confirmLabel={t('更新')}
         {...review.dialog}
         width={420}
         body={

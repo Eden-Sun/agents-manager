@@ -4,6 +4,8 @@ import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
 import { openFreshShellAndType } from './cliLogin'
 import { cliLoginCommand } from './quotaLogin'
+import { hostLabel } from '../components/toolsHelpers'
+import { t } from './i18n'
 
 function errText(e: unknown): string {
   if (e instanceof ApiError && typeof e.body.message === 'string') return e.body.message
@@ -42,12 +44,13 @@ export async function installKindOnHost(host: string, kind: BotKind): Promise<bo
     // A completion can arrive before the HTTP response; do not reopen its pane.
     if (!ownsInstall(key, installId)) return true
     useStore.getState().viewHostShell({ host: host || 'local', pane_id: r.pane_id, tab_id: '', workspace_id: '', cwd: r.cwd, created_at: '' })
-    useStore.getState().notify('info', `已在 ${!host || host === 'local' ? '本機' : host} 開 shell 安裝 ${kind}，裝完會自動重新偵測`)
+    const targetHost = hostLabel(!host || host === 'local' ? 'local' : host)
+    useStore.getState().notify('info', t('已在 {host} 開 shell 安裝 {kind}，裝完會自動重新偵測', { host: targetHost, kind }))
     // 鈕維持「安裝中…」到 WS `tool_install_done`（`handleToolInstallDone` 放開）；事件漏了的保險：daemon 最久等 15 分鐘。
     setTimeout(() => releaseInstall(key, installId), 16 * 60_000)
     return true
   } catch (e) {
-    useStore.getState().notify('error', `安裝 ${kind} 失敗：${errText(e)}`)
+    useStore.getState().notify('error', t('安裝 {kind} 失敗：{reason}', { kind, reason: errText(e) }))
     releaseInstall(key, installId)
     return false
   }

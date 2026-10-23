@@ -1,4 +1,5 @@
 import type { UpstreamItem } from '../store/upstreamUpdate'
+import { t } from './i18n'
 
 /**
  * header 的「grok 有新版」（issue #761，daemon `upstream_update.rs`）。grok 官方的升級指令只有 `grok update`
@@ -22,11 +23,12 @@ export function grokUpdatePlan(item: UpstreamItem | null | undefined): GrokUpdat
 
 /** chip 的 tooltip／aria-label。 */
 export function grokChipLabel(plan: GrokUpdatePlan): string {
-  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? '讀不到版本'}`).join('；')
-  return `grok 有新版 ${plan.target}（${hosts}）· 在那台主機執行 \`${plan.command}\`，已在跑的 bot 重啟後才會換版`
+  const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? t('讀不到版本')}`).join('；') // i18n-ignore
+  return t('grok 有新版 {target}（{hosts}）· 在那台主機執行 `{command}`，已在跑的 bot 重啟後才會換版', { target: plan.target, hosts, command: plan.command })
 }
 
 /** 手機合成選單裡 grok 那一項的文案（只提示，點開看指令）。 */
 export function grokMenuItem(plan: GrokUpdatePlan): string {
-  return `grok ${plan.target}：${plan.hosts.map((h) => h.host).join('、')} 還沒升（只提示，指令 ${plan.command}）`
+  const hostList = plan.hosts.map((h) => h.host).join('、') // i18n-ignore
+  return t('grok {target}：{hosts} 還沒升（只提示，指令 {command}）', { target: plan.target, hosts: hostList, command: plan.command })
 }

@@ -14,7 +14,7 @@ export function updateRange(
   if (kind !== 'codex' || !notice) return { from, to: null }
   const [a = null, b = null] = notice.match(/\d+(?:\.\d+)+/g) ?? []
   // 「codex 有新版 B（這個 run 跑的是 A），已安裝，重啟套用」：新版在前。
-  if (notice.includes('這個 run 跑的是') && a && b) return { from: b, to: a }
+  if (notice.includes('這個 run 跑的是') && a && b) return { from: b, to: a } // i18n-ignore
   // 「codex 有新版 A → B，需安裝後重啟」
   if (a && b) return { from: a, to: b }
   // 「codex 有新版 B，需安裝後重啟」／「…，已安裝，重啟套用」／沒有版本

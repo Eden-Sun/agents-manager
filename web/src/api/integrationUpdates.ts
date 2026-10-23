@@ -6,6 +6,7 @@
 import { arr, isRec, pick, str } from './normalize'
 import { ApiError } from './types'
 import { rawTransport } from './index'
+import { t } from '../lib/i18n'
 
 export type IntegrationState = 'current' | 'outdated' | 'not_installed' | 'unknown'
 
@@ -94,10 +95,10 @@ export function integrationErrText(e: unknown, host: string): string {
   if (e instanceof ApiError) {
     const human = e.body.message
     if (typeof human === 'string' && human.trim()) return human.trim()
-    if (e.status === 404 && !e.body.reason) return `這顆 daemon 還沒有 integration 更新（HTTP 404），或不認得主機 ${host}`
-    if (e.status === 405) return '這顆 daemon 還沒有 integration 更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon'
-    if (e.status === 403) return 'integration 更新只給使用者在設定頁按'
-    return `HTTP ${e.status}${typeof e.body.error === 'string' ? `：${e.body.error}` : ''}`
+    if (e.status === 404 && !e.body.reason) return t('這顆 daemon 還沒有 integration 更新（HTTP 404），或不認得主機 {host}', { host })
+    if (e.status === 405) return t('這顆 daemon 還沒有 integration 更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon')
+    if (e.status === 403) return t('integration 更新只給使用者在設定頁按')
+    return `HTTP ${e.status}${typeof e.body.error === 'string' ? `：${e.body.error}` : ''}` // i18n-ignore
   }
   return e instanceof Error ? e.message : String(e)
 }

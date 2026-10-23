@@ -1,7 +1,8 @@
 import type { BotKind } from '../api/types'
+import { t } from '../lib/i18n'
 
 export function hostLabel(host: string): string {
-  return host === 'local' ? '本機' : host
+  return host === 'local' ? t('本機') : host
 }
 
 /** Missing tools that affect the current bot or group members. */

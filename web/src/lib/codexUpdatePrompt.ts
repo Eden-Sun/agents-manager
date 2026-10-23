@@ -47,6 +47,8 @@ export function parseCodexUpdatePrompt(text: string | null | undefined): CodexUp
   return null
 }
 
+import { msg } from './i18n'
+
 /** 確認目前焦點是 Codex 更新選單，且指定編號仍是該選單的選項。 */
 export function isCodexUpdateMenu(text: string | null | undefined, key?: '1' | '2' | '3'): boolean {
   if (!parseCodexUpdatePrompt(text)?.interactive) return false
@@ -63,7 +65,7 @@ export interface CodexUpdateIo {
   press: (keys: string[]) => void
 }
 
-export const CODEX_UPDATE_MOVED_ON = '畫面在這中間換過了，這一下沒有送出去——上面是重讀後的畫面，請再點一次。'
+export const CODEX_UPDATE_MOVED_ON = msg('畫面在這中間換過了，這一下沒有送出去——上面是重讀後的畫面，請再點一次。')
 
 /**
  * 按 `1`／`2`／`3` 之前先重讀畫面，確認還停在**同一個**升級提示才送（issue #546）。
