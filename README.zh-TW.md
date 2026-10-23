@@ -112,6 +112,16 @@ cargo build --release -p agents-managerd
 
 設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）：`config.toml`、SQLite 資料庫與 `ui-token`，不要 commit。dev 版綁所有介面，區網或 Tailscale 上的手機可以開同一套 UI；打包的 macOS app 只綁 loopback（`AM_DEV_LAN` 可覆寫兩者）。
 
+## 快速上手
+
+1. **啟動 daemon**：`agents-managerd serve`（從原始碼就 `cargo dev`），再打開 http://127.0.0.1:7788 。沒有在跑的 herdr server 時，daemon 會在背景自己開一個。
+2. **新增專案**：點側欄底部的「新增 Project」，選這台機器或某台 SSH 主機上的目錄，取個標籤。
+3. **新增 Bot**：打開專案的 `＋` 選單選「新增 Bot」，挑種類（`claude`、`codex`、`grok` 或 `agy`），身份與模型可選填。daemon 會開一個 herdr pane、帶好 hook 啟動 CLI。
+4. **聊天**：在對話框輸入送出。回合進行中送的訊息會排隊；確認框和選擇題會變成可以點的卡片；停止鈕可以中斷回合。需要看畫面時切到終端分頁。
+5. **讓 Bot 分派工作**：Bot 用 `herdr agent start …` 開的子 agent 會列在它底下，子 agent 完成或卡住時會通知它。
+6. **自動化**：同一個 `＋` 選單有「新增排程」，可以設單次、間隔、每日或每週送給某顆 Bot 的訊息。額度、模型清單、更新檢查與主機在「環境設定」。
+7. **用手機開**：在區網或 Tailscale 上打開 `http://<這台機器>:7788`，貼上 `~/.config/agents-manager/ui-token` 裡的 token。
+
 ## 支援的 agent CLI
 
 每種 CLI 啟動時都注入 hook，回覆以結構化事件進來，不是刮畫面。
