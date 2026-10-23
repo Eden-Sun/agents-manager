@@ -8,6 +8,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
+import { flush } from '../testing/flush'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { manualMockClock } from '../api/mockClock'
 import { resetStoreForTest, useStore } from '../store/store'
@@ -56,7 +57,7 @@ async function openChat(name: string) {
   }
   useStore.getState().selectBot(bot.id)
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
-  await settle(200)
+  await flush()
   return { requests, bot }
 }
 
@@ -65,7 +66,7 @@ async function makeBusy(botId: string) {
   // 上一個測試留下的回合還在跑就不再送（mock 對回合中的 bot 會 409）。
   await mock.request('POST', `/bots/${botId}/prompt`, { text: 'slow job', client_request_id: `busy-${botId}-${Date.now()}` }).catch(() => {})
   await useStore.getState().loadMessages(botId)
-  await settle(100)
+  await flush()
 }
 
 test('IME 組字中的 Enter 不送出；組字結束後的 Enter 才送', { timeout: 30_000 }, async () => {
@@ -75,13 +76,13 @@ test('IME 組字中的 Enter 不送出；組字結束後的 Enter 才送', { tim
   assert.equal(composing.defaultPrevented, false, '組字中的 Enter 要留給輸入法')
   const webkit = await imeEnter(textarea(), 'keycode229')
   assert.equal(webkit.defaultPrevented, false, 'WebKit 在 compositionend 之後才送的 keyCode 229 也一樣')
-  await settle(100)
+  await flush()
   assert.equal(prompts(requests).length, 0, '沒送出任何 prompt')
   assert.equal(textarea().value, 'こんにちは', '字還在輸入框')
 
   const plain = await keydown(textarea(), 'Enter')
   assert.equal(plain.defaultPrevented, true)
-  await settle(200)
+  await flush()
   assert.equal(prompts(requests).length, 1)
   assert.equal((prompts(requests)[0].body as { text: string }).text, 'こんにちは')
 })
@@ -184,7 +185,7 @@ test('#917 附件上傳失敗後 Enter／送出鈕不送出、出現通知、失
     assert.match(sendBtn.textContent ?? '', /附件上傳失敗/)
 
     await keydown(textarea(), 'Enter')
-    await settle(200)
+    await flush()
     assert.equal(prompts(requests).length, 0, 'Enter 沒有送出 prompt')
     assert.equal(textarea().value, 'with a file', '字還在輸入框')
     assert.equal(document.querySelectorAll('.attach-thumb.failed').length, 1, '失敗卡片還在')

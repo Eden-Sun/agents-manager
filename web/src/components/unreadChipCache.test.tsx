@@ -4,6 +4,7 @@
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { installManualTimers } from '../testing/manualTimers'
 import { useStore } from '../store/store'
 import { UnreadChip } from './UnreadChip'
 
@@ -42,11 +43,17 @@ const chip = (id: string) => document.querySelector<HTMLElement>(`.unread-chip[d
 /** 電腦不再 hover 開狀態卡（2026-10-08）：快取倒數只在原生 tooltip（`title`）裡；hover 之後也不該冒出狀態卡。 */
 async function hoverText(id: string): Promise<string> {
   const el = chip(id)
-  await act(async () => {
-    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
-    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
-    await new Promise((r) => setTimeout(r, 450))
-  })
+  // 以前 hover 開卡有一段延遲：換成手動時鐘走 450ms（hover 排的任何 timer 都會到期），不睡牆鐘。
+  const timers = installManualTimers()
+  try {
+    await act(async () => {
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
+      await timers.clock.advance(450)
+    })
+  } finally {
+    timers.restore()
+  }
   assert.equal(document.querySelector('.bot-status-card'), null, 'hover 不該開狀態卡')
   const text = el.title
   await act(async () => {

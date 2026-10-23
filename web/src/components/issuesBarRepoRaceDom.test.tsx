@@ -2,7 +2,8 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useRef } from 'react'
-import { act, click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { installManualTimers } from '../testing/manualTimers'
 import { resetStoreForTest, useStore } from '../store/store'
 import { IssuesBar } from './IssuesBar'
 
@@ -87,17 +88,28 @@ function installApi({ deferDetails = false }: { deferDetails?: boolean } = {}) {
   return { requests, mainSearches, details, restore: () => { globalThis.fetch = originalFetch } }
 }
 
-async function startMainSearch() {
+/** 讓 fetch／React 的後續工作跑完（只讓出 macrotask，不睡牆鐘；手動時鐘下 `settle()` 的 setTimeout 不會到期）。 */
+async function pump(rounds = 5) {
+  for (let i = 0; i < rounds; i++) await act(async () => new Promise<void>((resolve) => setImmediate(resolve)))
+}
+
+/** 把手動時鐘推進 `ms`（debounce 300ms 到期）再讓後續工作跑完。 */
+async function advance(timers: { clock: { advance(ms: number): Promise<void> } }, ms: number) {
+  await act(async () => timers.clock.advance(ms))
+  await pump()
+}
+
+async function startMainSearch(timers: { clock: { advance(ms: number): Promise<void> } }) {
   await mount(<Harness />)
   await click(document.querySelector('.issues-btn')!)
-  await settle(10)
+  await pump()
   const search = document.querySelector<HTMLInputElement>('input[type="search"]')!
   await act(async () => {
     const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(search), 'value')!.set!
     set.call(search, 'needle')
     search.dispatchEvent(new Event('input', { bubbles: true }))
   })
-  await settle(350)
+  await advance(timers, 350)
   assert.equal(document.querySelector('.issue-title'), null, '主 repo 的搜尋尚未回應')
 }
 
@@ -112,25 +124,27 @@ async function switchRepo(repo: string) {
 test('切 repo 後 debounce 期間丟棄舊結果，完整插入使用新 repo 的標題、URL 與內文', async () => {
   setupProject()
   const api = installApi()
+  const timers = installManualTimers() // 搜尋有 300ms debounce：用手動時鐘走，不睡牆鐘
   try {
-    await startMainSearch()
+    await startMainSearch(timers)
     assert.equal(api.mainSearches.length, 1, '主 repo 的 needle 請求仍在飛')
 
     await switchRepo(SUB_PATH)
     await act(async () => api.mainSearches[0].resolve(respond({ issues: [MAIN_ISSUE] })))
-    await settle(0)
+    await pump()
     assert.equal(document.querySelector('.issue-title'), null, '舊 repo 回應不能填回新 repo 的列表')
 
-    await settle(350)
+    await advance(timers, 350)
     assert.equal(document.querySelector('.issue-title')?.textContent?.trim(), '#7 SUB issue seven')
     await click(document.querySelector('.issues-list .mini-btn.primary')!)
-    await settle(20)
+    await pump()
     const draft = useStore.getState().drafts['bot:b1'] ?? ''
     assert.match(draft, /#7 \(https:\/\/github\.com\/example\/sub\/issues\/7\)/)
     assert.match(draft, /> SUB issue seven\n> SUB repository body/)
     assert.doesNotMatch(draft, /MAIN issue seven|MAIN repository body/)
     assert.ok(api.requests.some((path) => path.includes('/issues/7?repo=packages%2Fwidget')), 'detail 使用 submodule repo')
   } finally {
+    timers.restore()
     api.restore()
   }
 })
@@ -138,18 +152,20 @@ test('切 repo 後 debounce 期間丟棄舊結果，完整插入使用新 repo �
 test('切 repo 後舊搜尋失敗不覆蓋新 repo 狀態', async () => {
   setupProject()
   const api = installApi()
+  const timers = installManualTimers() // 搜尋有 300ms debounce：用手動時鐘走，不睡牆鐘
   try {
-    await startMainSearch()
+    await startMainSearch(timers)
     assert.equal(api.mainSearches.length, 1)
 
     await switchRepo(SUB_PATH)
     await act(async () => api.mainSearches[0].reject(new TypeError('stale main search failed')))
-    await settle(0)
+    await pump()
     assert.equal(document.querySelector('.issues-status.err'), null, '舊 repo 錯誤不能顯示在新 repo 下')
 
-    await settle(350)
+    await advance(timers, 350)
     assert.equal(document.querySelector('.issue-title')?.textContent?.trim(), '#7 SUB issue seven')
   } finally {
+    timers.restore()
     api.restore()
   }
 })
@@ -157,10 +173,11 @@ test('切 repo 後舊搜尋失敗不覆蓋新 repo 狀態', async () => {
 test('切 repo 後，已在讀取的舊 issue 內容不再插入草稿', async () => {
   setupProject()
   const api = installApi({ deferDetails: true })
+  const timers = installManualTimers()
   try {
-    await startMainSearch()
+    await startMainSearch(timers)
     await switchRepo(SUB_PATH)
-    await settle(350)
+    await advance(timers, 350)
     assert.equal(document.querySelector('.issue-title')?.textContent?.trim(), '#7 SUB issue seven')
     await click(document.querySelector('.issues-list .mini-btn.primary')!)
     assert.equal(api.details.length, 1)
@@ -168,9 +185,10 @@ test('切 repo 後，已在讀取的舊 issue 內容不再插入草稿', async (
 
     await switchRepo('')
     await act(async () => api.details[0].resolve(respond({ issue: { ...SUB_ISSUE, body: 'SUB repository body' } })))
-    await settle(0)
+    await pump()
     assert.equal(useStore.getState().drafts['bot:b1'] ?? '', '', '已過期的詳情請求不能插入任何 repo 的內容')
   } finally {
+    timers.restore()
     api.restore()
   }
 })

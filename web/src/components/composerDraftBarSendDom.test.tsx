@@ -5,8 +5,9 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
+import { flush } from '../testing/flush'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
@@ -55,7 +56,7 @@ async function openStuck(name: string, draft: string) {
   }
   useStore.getState().selectBot(bot.id)
   await mount(<ChatPanel onOpenSidebar={() => {}} />)
-  await settle(200)
+  await flush()
   await useStore.getState().setDraft(`bot:${bot.id}`, draft)
   const input = document.querySelector<HTMLInputElement>('input[type=file]')!
   const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' })
@@ -76,11 +77,11 @@ test('清掉再送：送出途中本機打字 → 成功後文字保留、附件
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
   // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
-  await settle(50)
+  await flush()
   await act(async () => clearButton().click())
   await act(async () => useStore.getState().setDraft(`bot:${bot.id}`, 'typed locally'))
   await act(async () => sent.resolve(true))
-  await settle(50)
+  await flush()
   assert.equal(useStore.getState().drafts[`bot:${bot.id}`], 'typed locally', '本機打字還在')
   assert.equal(document.querySelectorAll('.attach-thumb').length, 0, '附件照清')
   assert.deepEqual(emptyPuts(requests), [])
@@ -91,11 +92,11 @@ test('清掉再送：送出途中另一裝置同步來新草稿 → 文字保留
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
   // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
-  await settle(50)
+  await flush()
   await act(async () => clearButton().click())
   await remoteDraft(`bot:${bot.id}`, 'new text from another device')
   await act(async () => sent.resolve(true))
-  await settle(50)
+  await flush()
   assert.equal(useStore.getState().drafts[`bot:${bot.id}`], 'new text from another device', '新草稿還在')
   assert.equal(document.querySelectorAll('.attach-thumb').length, 0, '附件照清')
   assert.deepEqual(emptyPuts(requests), [])
@@ -106,10 +107,10 @@ test('清掉再送：草稿沒被改過 → 照常清空文字與附件', { time
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
   // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
-  await settle(50)
+  await flush()
   await act(async () => clearButton().click())
   await act(async () => sent.resolve(true))
-  await settle(50)
+  await flush()
   assert.equal(useStore.getState().drafts[`bot:${bot.id}`] ?? '', '')
   assert.equal(document.querySelectorAll('.attach-thumb').length, 0)
   assert.equal(emptyPuts(requests).length, 1, '清空要同步回 daemon')
@@ -120,10 +121,10 @@ test('清掉再送：送出失敗（resolve(false)）不清文字與附件，訂
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
   // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
-  await settle(50)
+  await flush()
   await act(async () => clearButton().click())
   await act(async () => sent.resolve(false))
-  await settle(50)
+  await flush()
   assert.equal(useStore.getState().drafts[`bot:${bot.id}`], 'mine text', '失敗後文字照舊')
   assert.equal(document.querySelectorAll('.attach-thumb').length, 1, '失敗後附件還在')
 })
@@ -137,7 +138,7 @@ test('清掉再送：送出連線失敗（傳輸層 reject）不清文字與附�
   }) as typeof fetch
   try {
     await act(async () => clearButton().click())
-    await settle(300)
+    await flush()
     assert.equal(useStore.getState().drafts[`bot:${bot.id}`], 'mine text', '連線失敗後文字照舊')
     assert.equal(document.querySelectorAll('.attach-thumb').length, 1, '連線失敗後附件還在')
   } finally {

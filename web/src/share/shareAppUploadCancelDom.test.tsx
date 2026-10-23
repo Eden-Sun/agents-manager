@@ -5,14 +5,24 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { flush } from '../testing/flush'
+import { skipTimerDelays } from '../testing/skipTimerDelays'
 import { ShareApp } from './ShareApp'
 import type { ShareClient } from './shareApi'
 import { mockShareClient } from './shareMock'
 
 afterEach(unmountAll)
-before(setupDom)
-after(teardownDom)
+// share mock 每個請求固定睡 120ms（`guard()`）：那是假的網路延遲，不是要測的行為，略過它。
+let fast: ReturnType<typeof skipTimerDelays>
+before(() => {
+  setupDom()
+  fast = skipTimerDelays([120])
+})
+after(async () => {
+  fast.restore()
+  await teardownDom()
+})
 
 const TOKEN = 'demo_share_token_0123456789'
 
@@ -34,6 +44,12 @@ function gatedUploads(): { client: ShareClient; calls: Call[] } {
   return { client, calls }
 }
 
+/** 掛上 ShareApp 並等到載入完（不再是「載入中…」）。 */
+async function mountReady(client: ShareClient): Promise<void> {
+  await mount(<ShareApp client={client} />)
+  await until(() => !document.body.textContent?.includes('載入中…'), 'ShareApp 載入完')
+}
+
 async function pick(...names: string[]): Promise<void> {
   const input = document.querySelector('input[type=file]') as HTMLInputElement
   await act(async () => {
@@ -47,8 +63,7 @@ const removeBtn = (name: string) => document.querySelector(`button[aria-label="�
 
 test('移除正在上傳的附件：中止它的上傳，下一張馬上開始', async () => {
   const { client, calls } = gatedUploads()
-  await mount(<ShareApp client={client} />)
-  await settle(300)
+  await mountReady(client)
   await pick('A.txt', 'B.txt')
   await until(() => calls.length === 1, 'A 開始上傳')
   assert.match(row('B.txt')!.textContent!, /等待中/)
@@ -67,15 +82,14 @@ test('移除正在上傳的附件：中止它的上傳，下一張馬上開始',
 
 test('移除的舊上傳晚回（失敗）不清掉下一張的名額：B 還在傳時 C 不能插進來', async () => {
   const { client, calls } = gatedUploads()
-  await mount(<ShareApp client={client} />)
-  await settle(300)
+  await mountReady(client)
   await pick('A.txt', 'B.txt', 'C.txt')
   await until(() => calls.length === 1, 'A 開始上傳')
 
   await click(removeBtn('A.txt'))
   await until(() => calls.length === 2, 'B 開始上傳')
   await act(async () => calls[0].reject(new Error('late')))
-  await settle(50)
+  await flush()
   assert.equal(calls.length, 2, 'B 還在傳，C 不能開始')
   assert.match(row('B.txt')!.textContent!, /上傳中/)
   assert.equal(row('A.txt'), null, '晚回的失敗不回到已移除的項目')
@@ -87,8 +101,7 @@ test('移除的舊上傳晚回（失敗）不清掉下一張的名額：B 還在
 
 test('移除等待中的附件不發請求；移除已傳好的附件不影響正在傳的', async () => {
   const { client, calls } = gatedUploads()
-  await mount(<ShareApp client={client} />)
-  await settle(300)
+  await mountReady(client)
   await pick('A.txt', 'B.txt', 'C.txt')
   await until(() => calls.length === 1, 'A 開始上傳')
 
@@ -99,7 +112,7 @@ test('移除等待中的附件不發請求；移除已傳好的附件不影響�
   assert.equal(row('B.txt'), null)
 
   await click(removeBtn('A.txt'))
-  await settle(50)
+  await flush()
   assert.equal(calls[1].signal?.aborted, false, '移除已傳好的 A 不中止正在傳的 C')
   assert.equal(calls.length, 2)
   await act(async () => calls[1].resolve())
@@ -108,8 +121,7 @@ test('移除等待中的附件不發請求；移除已傳好的附件不影響�
 
 test('卸載時中止還在傳的附件', async () => {
   const { client, calls } = gatedUploads()
-  await mount(<ShareApp client={client} />)
-  await settle(300)
+  await mountReady(client)
   await pick('A.txt')
   await until(() => calls.length === 1, 'A 開始上傳')
   await unmountAll()

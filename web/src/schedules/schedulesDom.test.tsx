@@ -7,13 +7,22 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { shortTimeZoneList } from '../testing/shortTimeZoneList'
 import { useStore } from '../store/store'
 import { Sidebar } from '../components/Sidebar'
 import { ProjectSchedules } from './ProjectSchedules'
 
 afterEach(unmountAll)
-before(setupDom)
-after(teardownDom)
+// 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；這個檔案不測時區選項本身。
+let tzList: ReturnType<typeof shortTimeZoneList>
+before(() => {
+  setupDom()
+  tzList = shortTimeZoneList()
+})
+after(async () => {
+  tzList.restore()
+  await teardownDom()
+})
 
 const project = (id: string) => ({ id, label: `proj-${id}`, path: `/${id}`, host: 'local' })
 const bot = (id: string, projectId: string, managedBy = 'user') => ({
