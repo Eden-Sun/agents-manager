@@ -62,7 +62,7 @@
 | 編輯器與預覽 | 無編輯器；內嵌 Bot 的本機 dev server 預覽 | VS Code 編輯器、Design Mode、Markdown／PDF／圖片預覽 |
 | 腳本化 | HTTP／WebSocket API（[`docs/API.md`](docs/API.md)）、`bin/agm` | `orca` CLI（worktree create、snapshot、click、fill） |
 | UI 語言 | 繁體中文 | 英文，README 有多語翻譯 |
-| 授權 | 本 repo 尚未宣告 | MIT |
+| 授權 | MIT | MIT |
 
 想要一個能同時開十個 worktree、在裡面審 diff 的 IDE，選 Orca。agent 已經在終端裡跑（也許在別台機器上）、想從瀏覽器接手、讓 agent 互相派工、順便看額度與排程，選 agents-manager。兩者可以並存。
 
@@ -70,7 +70,20 @@ Orca 出處：[README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930
 
 ## 快速開始
 
-**平台與需求。** daemon 跑在 macOS 與 Linux。需要 Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)，以及至少一種 agent CLI（`claude`、`codex`、`grok` 或 `agy`）。herdr 是帶 socket API 的 terminal workspace manager；daemon 靠它開 pane、啟動 agent、送字、讀畫面，自己從不 spawn agent。
+**平台與需求。** daemon 跑在 macOS 與 Linux。需要已安裝的 [herdr](https://herdr.dev)，以及至少一種 agent CLI（`claude`、`codex`、`grok` 或 `agy`）；從原始碼建置另需 Rust（`cargo`）與 [Bun](https://bun.sh)。herdr 是帶 socket API 的 terminal workspace manager；daemon 靠它開 pane、啟動 agent、送字、讀畫面，自己從不 spawn agent。
+
+**安裝預編譯執行檔**（不需要 Rust 或 Bun，網頁 UI 已嵌入）。到 [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest) 下載對應平台的壓縮檔：`linux-x86_64`、`linux-arm64` 或 `macos-arm64`。
+
+```bash
+VERSION=v0.1.0          # 換成 Releases 頁面上最新的 tag
+ASSET=linux-x86_64      # 或 linux-arm64 / macos-arm64
+curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
+tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
+install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
+agents-managerd serve   # 再打開 http://127.0.0.1:7788
+```
+
+每個壓縮檔旁都有 `.sha256` 可核對。macOS 下載的執行檔第一次可能要先 `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd`。從 `127.0.0.1` 開 UI 會自動登入；從其他裝置開，貼上 `~/.config/agents-manager/ui-token` 裡的 token。要常駐就交給 launchd、systemd 或一個 herdr pane 啟動。壓縮檔不含 `scripts/` 底下的腳本（例如 `agm`），需要時再 clone repo。
 
 **不裝 herdr 先看 UI**（記憶體內的假後端）：
 
@@ -80,7 +93,7 @@ bun install
 VITE_MOCK=1 bun run dev
 ```
 
-**從原始碼啟動**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
+**從原始碼啟動（開發用）**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
 
 ```bash
 git clone git@github.com:Eden-Sun/agents-manager.git
@@ -89,7 +102,7 @@ cargo dev     # 兩個一起啟動
 cargo down    # 兩個一起停止
 ```
 
-**正式建置。** UI 嵌在 daemon 執行檔裡，所以先建前端：
+**自己建正式執行檔。** UI 嵌在 daemon 執行檔裡，所以先建前端：
 
 ```bash
 cd web && bun install && bun run build && cd ..   # 產出 web/dist
@@ -171,3 +184,7 @@ flowchart LR
 | [`web/README.md`](web/README.md) | 前端快速指令 |
 
 推之前跑 `scripts/check.sh changed`，見 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)。文件只寫現況，歷史在 git。
+
+## 授權
+
+[MIT](LICENSE)
