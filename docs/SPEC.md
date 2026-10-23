@@ -1383,7 +1383,7 @@ hold 是行程記憶體，但被打斷的重啟由持久的 `restart` intent（#
   那台的身分表還沒偵測完又不是手寫的身分（`quota::resolve_quota_base`，不猜 `claude:cc0`）、排著的 prompt 身上的憑據寫不進去，都回錯。
   撞限是外面已經發生的事，所以同時記成**欠著**（`turn_error::owed_limit_hit`，行程記憶體）：補上之前，這顆 bot 的 flush 與派送前都照欠著的
   那一筆擋（身分已經換掉的不擋新身分，留著寫回舊身分的 key）；之後每一次問都先補一次，補上時撞限時刻不變（codex 橫幅上的到期時間也是撞的
-  當下解析的那個）。`StopFailure` 記不進去就讓這一則
+  當下解析的那個）；`GET /api/state` 的批次查詢走 `owed_limit_hit_throttled`，補寫失敗後 5 秒內不再補（照欠著的那一筆擋、顯示，判斷不變），免得補不上時每次輪詢都重跑一串查詢。`StopFailure` 記不進去就讓這一則
   失敗、由 hook 收件匣重試（耐久）：回合先不收、不推回合結束，在飛的回合本身擋著 flush。
 - 撞限記下的當下就把憑據蓋到這顆 bot 排著的每一則上（`quota_hold::stamp_queued`），不等 flush 擋下才寫：記下到擋下之間 daemon 死掉、
   或 flush 那一下寫不進去，重啟之後都還有憑據。

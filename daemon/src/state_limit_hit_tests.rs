@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::config::LOCAL_HOST;
-use crate::quota::seed_limit_hit;
+use crate::quota::{seed_limit_hit, LimitHit};
 
 fn future() -> String {
     crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2))
@@ -166,4 +166,91 @@ async fn codex_bot(app: &Arc<App>, project_id: &str, name: &str) -> crate::db::B
     let bot = crate::testing::claude_bot(app, project_id, name).await;
     sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap()
+}
+
+/// #1907：欠著的撞限。`remote1` 的身分表還沒偵測完、bot 又用手寫身分 `ghost`，`resolve_key` 回錯，撞限記不進去而欠著；
+/// 把專案改到 `local`、並讓 `local` 的偵測快照存在（`repair`）就補得上（`bot_host` 每次重讀）。回傳 (bot, 欠著的那一筆)。
+async fn owed_bot(app: &Arc<App>) -> (crate::db::Bot, LimitHit) {
+    let pid = crate::db::ulid();
+    sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
+        .bind(&pid)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let bot = crate::testing::claude_bot(app, &pid, "owed").await;
+    sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+    let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+    assert!(crate::turn_error::mark_claude_limit_hit(app, &bot, "You've hit your session limit · resets 5pm").await.is_err());
+    assert!(crate::turn_error::owes_limit_hit(app, &bot.id), "記不進去就是欠著");
+    assert!(app.quotas.lock().await.is_empty(), "哪一格都沒寫");
+    let owed = crate::runners::quota::try_limit_hit_for_bot(app, &bot).await.unwrap().expect("欠著的照擋");
+    (bot, owed)
+}
+
+async fn repair(app: &Arc<App>, bot: &crate::db::Bot) {
+    sqlx::query("UPDATE projects SET host='local' WHERE id=?").bind(&bot.project_id).execute(&app.db).await.unwrap();
+    app.tools.lock().await.insert(
+        LOCAL_HOST.into(),
+        crate::tools::HostTools {
+            tools: Default::default(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        },
+    );
+}
+
+/// 補不上的時候，`/api/state` 與 `bot_status` 給同一個欠著的值。
+#[tokio::test]
+async fn an_owed_hit_that_cannot_be_recorded_is_the_same_in_state_and_in_bot_status() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let (bot, owed) = owed_bot(&app).await;
+
+    let from_state = state_bot(&app, &bot.id).await["limit_hit"].clone();
+    let from_status = status_limit_hit(&app, &bot.id).await;
+    assert_eq!(from_state, limit_hit_value(&bot, Some(&owed)), "欠著的那一筆");
+    assert_eq!(from_state, from_status);
+    assert!(crate::turn_error::owes_limit_hit(&app, &bot.id), "還是欠著");
+}
+
+/// `/api/state` 順手把欠著的補進 `quotas` 之後，`bot_status` 與 `/api/state` 仍是同一個值（撞限時刻不變）。
+#[tokio::test]
+async fn an_owed_hit_recorded_by_api_state_is_the_same_in_state_and_in_bot_status() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let (bot, owed) = owed_bot(&app).await;
+    repair(&app, &bot).await;
+
+    let from_state = state_bot(&app, &bot.id).await["limit_hit"].clone();
+    assert!(!crate::turn_error::owes_limit_hit(&app, &bot.id), "/api/state 補上了");
+    assert_eq!(app.quotas.lock().await.len(), 1, "寫進 quotas");
+    let from_status = status_limit_hit(&app, &bot.id).await;
+    assert_eq!(from_state, limit_hit_value(&bot, Some(&owed)), "補上之後撞限內容不變");
+    assert_eq!(from_state, from_status);
+    assert!(!from_state.is_null());
+}
+
+/// 節流：補寫失敗之後的 5 秒內，`/api/state` 不重補，仍然回傳那筆欠帳；派送閘（不節流）照樣補。
+#[tokio::test]
+async fn api_state_does_not_retry_an_owed_hit_during_the_backoff_but_still_shows_it() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let (bot, owed) = owed_bot(&app).await;
+
+    let first = state_bot(&app, &bot.id).await["limit_hit"].clone();
+    assert_eq!(first, limit_hit_value(&bot, Some(&owed)), "第一次補不上，照欠著的擋");
+    repair(&app, &bot).await;
+
+    let during = state_bot(&app, &bot.id).await["limit_hit"].clone();
+    assert_eq!(during, first, "節流期間仍然回傳那筆欠帳");
+    assert!(crate::turn_error::owes_limit_hit(&app, &bot.id), "節流期間不重補（沒有節流的話這裡已經補上了）");
+    assert!(app.quotas.lock().await.is_empty());
+
+    let gate = crate::runners::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
+    assert!(!crate::turn_error::owes_limit_hit(&app, &bot.id), "派送閘不節流，補上了");
+    assert_eq!(gate.at, owed.at);
 }

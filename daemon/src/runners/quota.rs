@@ -52,7 +52,7 @@ pub fn pick_limit_hit(owed: Option<LimitHit>, keys: &[String], model: Option<&st
 /// 結果逐顆與單筆版相同（見 `state_limit_hit_tests`）；讀不到的 bot 給 `None` 並記 debug。
 /// 身分表按主機各讀一次（同 [`keys_for_bot`] 的規則，見 [`base_from_identities`]），`quotas` 只拿一次鎖。
 /// **副作用**：欠著的撞限（[`owed_limit_hit`]）會在這裡順手記進 `quotas`（寫入；冪等，跟派工閘同一件事）。
-/// 所以 `GET /api/state` 不是純讀取——讀的人要知道這一點。
+/// 所以 `GET /api/state` 不是純讀取——讀的人要知道這一點。補寫失敗後 5 秒內不再補（`owed_limit_hit_throttled`），照欠著的那一筆擋，判斷結果不變。
 pub async fn limit_hits_for_bots(app: &Arc<App>, bots: &[crate::db::Bot]) -> Vec<Option<LimitHit>> {
     let runs = match crate::db::active_runs_by_bot(&app.db).await {
         Ok(runs) => runs,
@@ -80,7 +80,7 @@ pub async fn limit_hits_for_bots(app: &Arc<App>, bots: &[crate::db::Bot]) -> Vec
     let mut identity_of = Vec::with_capacity(bots.len());
     for bot in bots {
         let identity = identity_for_run(bot, runs.get(&bot.id));
-        owed.push(app.owed_limit_hit(bot, identity.as_deref()).await);
+        owed.push(app.owed_limit_hit_throttled(bot, identity.as_deref()).await);
         identity_of.push(identity);
     }
     let quotas = app.quotas.lock().await;

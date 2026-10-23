@@ -803,7 +803,7 @@ async fn mark_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line: &str, 
         Some(m) => (m.banner, m.at),
         None => (banner, db::now()),
     };
-    let mark = Mark { banner, identity, line: line.to_string(), at };
+    let mark = Mark { banner, identity, line: line.to_string(), at, next_try: None };
     match record(app, &bot.id, &mark).await {
         Ok(()) => {
             settled(app, &bot.id, &mark);
@@ -824,6 +824,8 @@ struct Mark {
     identity: Option<String>,
     line: String,
     at: String,
+    /// 批次路徑（[`owed_limit_hit_throttled`]）補寫失敗之後，到這一刻之前不再補；`None`＝不節流。派送閘與 flush 不看這個欄位。
+    next_try: Option<std::time::Instant>,
 }
 
 /// 撞限從哪一種 CLI 來：落在 `claude` 還是 `codex` 那一格，到期時間怎麼算。
@@ -1026,6 +1028,17 @@ fn owed(app: &impl crate::capabilities::BootId, bot_id: &str) -> Option<Mark> {
     owed_marks().lock().unwrap_or_else(|e| e.into_inner()).get(&owed_key(app, bot_id)).cloned()
 }
 
+/// 批次路徑補寫失敗後，同一筆欠帳隔多久才再試（`/api/state` 每次都會問，補不上就不該每次都重跑一整串查詢）。
+const OWED_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 補寫失敗：只在欠帳表裡還是同一筆（同身分、同撞限時刻）時記下 `next_try`；補的過程中被換成新的一筆就不動它。
+fn back_off(app: &impl crate::capabilities::BootId, bot_id: &str, failed: &Mark) {
+    let mut m = owed_marks().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(x) = m.get_mut(&owed_key(app, bot_id)).filter(|x| x.identity == failed.identity && x.at == failed.at) {
+        x.next_try = Some(std::time::Instant::now() + OWED_RETRY_BACKOFF);
+    }
+}
+
 fn owe(app: &impl crate::capabilities::BootId, bot_id: &str, m: Mark) {
     owed_marks().lock().unwrap_or_else(|e| e.into_inner()).insert(owed_key(app, bot_id), m);
 }
@@ -1044,19 +1057,37 @@ fn settled(app: &impl crate::capabilities::BootId, bot_id: &str, recorded: &Mark
 /// 是這顆 bot **現在**的身分撞的、沒到期、管得到它在跑的模型，就照那一筆擋。身分已經換掉的留著等補（寫回舊身分的
 /// key），不擋新身分；到期的直接丟掉。`identity` 是呼叫端算好的 [`crate::quota::billing_identity`]（issue #238）。
 pub async fn owed_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
+    owed_limit_hit_inner(app, bot, identity, false).await
+}
+
+/// [`owed_limit_hit`] 的批次版（只給 `GET /api/state` 的 `limit_hits_for_bots`）：補寫失敗後 [`OWED_RETRY_BACKOFF`] 內不再補
+/// （跳過 `bot_host`／`resolve_key`／快照讀寫），其餘判斷照舊——照欠著的那一筆擋、身分與模型的檢查不變，回傳的值與
+/// 不節流時一樣。補得上就照原本的路徑結清。
+pub async fn owed_limit_hit_throttled(app: &impl TurnErrorContext, bot: &db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
+    owed_limit_hit_inner(app, bot, identity, true).await
+}
+
+async fn owed_limit_hit_inner(app: &impl TurnErrorContext, bot: &db::Bot, identity: Option<&str>, throttle: bool) -> Option<crate::quota::LimitHit> {
     let m = owed(app, &bot.id)?;
     let hit = m.hit();
     if crate::quota::limit_hit_expired(Some(&hit)) {
         settled(app, &bot.id, &m);
         return None;
     }
-    match record(app, &bot.id, &m).await {
-        Ok(()) => {
-            tracing::info!(bot = %bot.id, "an owed quota limit hit is now recorded");
-            settled(app, &bot.id, &m);
-            return None;
+    if !(throttle && m.next_try.is_some_and(|t| std::time::Instant::now() < t)) {
+        match record(app, &bot.id, &m).await {
+            Ok(()) => {
+                tracing::info!(bot = %bot.id, "an owed quota limit hit is now recorded");
+                settled(app, &bot.id, &m);
+                return None;
+            }
+            Err(e) => {
+                tracing::debug!(bot = %bot.id, error = %e, "an owed quota limit hit still cannot be recorded");
+                if throttle {
+                    back_off(app, &bot.id, &m);
+                }
+            }
         }
-        Err(e) => tracing::debug!(bot = %bot.id, error = %e, "an owed quota limit hit still cannot be recorded"),
     }
     if m.identity.as_deref() != identity {
         return None;

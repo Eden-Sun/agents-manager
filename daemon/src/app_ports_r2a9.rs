@@ -13,11 +13,21 @@ pub trait OwedLimitHitProbe {
         bot: &'a crate::db::Bot,
         identity: Option<&'a str>,
     ) -> impl std::future::Future<Output = Option<crate::quota::LimitHit>> + Send + 'a;
+
+    /// [`Self::owed_limit_hit`] 的批次版（`/api/state`）：補寫失敗後短時間內不重補，判斷結果不變。
+    fn owed_limit_hit_throttled<'a>(
+        &'a self,
+        bot: &'a crate::db::Bot,
+        identity: Option<&'a str>,
+    ) -> impl std::future::Future<Output = Option<crate::quota::LimitHit>> + Send + 'a;
 }
 
 impl OwedLimitHitProbe for Arc<App> {
     async fn owed_limit_hit(&self, bot: &crate::db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
         crate::turn_error::owed_limit_hit(self, bot, identity).await
+    }
+    async fn owed_limit_hit_throttled(&self, bot: &crate::db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
+        crate::turn_error::owed_limit_hit_throttled(self, bot, identity).await
     }
 }
 
