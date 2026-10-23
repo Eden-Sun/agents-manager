@@ -61,13 +61,15 @@ async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null
 const mountWeek = (remaining: number, markPct: number) => mountQuota({ remaining, inMs: (WEEK_MS * markPct) / 100 })
 
 const fillOf = (el: Element) => parseFloat(el.querySelector<HTMLElement>('.quota-bar-fill')!.style.width)
-const ends = (el: Element) => el.querySelectorAll('.quota-bar-end').length
+/* 刻度範圍是 `.zoomed` 的外框（CSS），DOM 只看 wrap 有沒有這個 class；兩端豎線已拿掉（2026-10-23）。 */
+const zoomed = (el: Element) => el.querySelectorAll('.quota-bar-wrap.zoomed').length
 const line = (el: Element) => el.querySelector('.quota-reset-line')
 
-test('剩 3%：填色 30%、兩端各一根豎線，沒有格子、黑針、×10', async () => {
+test('剩 3%：填色 30%、外框刻度條，沒有格子、黑針、×10', async () => {
   const cell = await mountWeek(3, 1.8)
   assert.equal(fillOf(cell), 30)
-  assert.equal(ends(cell), 2)
+  assert.equal(zoomed(cell), 1)
+  assert.equal(cell.querySelector('.quota-bar-end'), null)
   assert.equal(cell.querySelector('.quota-cells'), null)
   assert.equal(cell.querySelector('.quota-cell'), null)
   assert.equal(cell.querySelector('.quota-bar-mark'), null)
@@ -77,23 +79,23 @@ test('剩 3%：填色 30%、兩端各一根豎線，沒有格子、黑針、×10
   assert.equal(cell.querySelector('.quota-bar-pct')!.textContent, '3%')
 })
 
-test('剩 0%：填色 0、兩端豎線還在', async () => {
+test('剩 0%：填色 0、外框還在', async () => {
   const cell = await mountWeek(0, 1.8)
   assert.equal(fillOf(cell), 0)
-  assert.equal(ends(cell), 2)
+  assert.equal(zoomed(cell), 1)
   assert.equal(cell.querySelector('.quota-bar-pct')!.textContent, '0%')
 })
 
-test('剩 50%：普通條，沒有豎線，有黑針', async () => {
+test('剩 50%：普通條，沒有外框，有黑針', async () => {
   const cell = await mountWeek(50, 40)
-  assert.equal(ends(cell), 0)
+  assert.equal(zoomed(cell), 0)
   assert.equal(fillOf(cell), 50)
   assert.ok(Math.abs(parseFloat(cell.querySelector<HTMLElement>('.quota-bar-mark')!.style.left) - 40) < 0.1)
 })
 
 test('剩 8% 但刻度 40%：不畫刻度條（刻度要靠一比一的條看）', async () => {
   const cell = await mountWeek(8, 40)
-  assert.equal(ends(cell), 0)
+  assert.equal(zoomed(cell), 0)
   assert.equal(fillOf(cell), 8)
 })
 
@@ -143,7 +145,7 @@ test('popover 的低額度列用同一種條，不加底下那一行', async () 
   await click(cell.querySelector('.quota-bars-open')!)
   const pop = document.querySelector<HTMLElement>('.quota-pop')!
   assert.equal(fillOf(pop), 30)
-  assert.equal(ends(pop), 2)
+  assert.equal(zoomed(pop), 1)
   assert.equal(pop.querySelector('.quota-reset-line'), null)
   assert.ok(pop.querySelector('.quota-bar-pct')!.classList.contains('has-unit'), 'popover 的 CSS 會補 %，已帶 % 的不能再補一次')
   assert.equal(pop.querySelector('.quota-bar-zoom'), null)
