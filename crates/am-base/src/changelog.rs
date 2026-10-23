@@ -16,6 +16,13 @@ const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/rele
 const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
 /// herdr 有真正的 CHANGELOG.md（Keep a Changelog 的 `## [x.y.z] - date`，[`parse_version`] 認得）。
 pub const HERDR_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md";
+/// agy（issue #1928）：官方 repo 的 CHANGELOG.md（`## x.y.z` ＋ `- ` 單行條目）；抓不到才退同 repo 的 GitHub releases。
+pub const AGY_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md";
+pub const AGY_RELEASES_API: &str = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases?per_page=100";
+const AGY_CHANGELOG_PAGE: &str = "https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md";
+/// grok：CDN 的 `<版>.external.md`（`# x.y.z — 日期` 一段一版，stable 的檔涵蓋上一個 stable 之後的所有版本）。
+/// 版本只能取自 stable 指標（[`crate::upstream_update::GROK_STABLE_URL`]），見 [`grok_feed_url`]。
+pub const GROK_CHANGELOG_BASE: &str = "https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs";
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -79,7 +86,10 @@ pub fn parse_changelog(md: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     let mut cur: Option<(String, Vec<&str>)> = None;
     for line in md.lines() {
-        if let Some(rest) = line.strip_prefix("## ") {
+        // agy 的 1.1.4 標題前面真的多一個空白（` ## 1.1.4`）：縮排的 `## ` 只有後面是版本號才算標題，
+        // 否則（例如 body 裡縮排的 `## foo`）照舊當內文，不截斷段落。
+        let heading = line.strip_prefix("## ").or_else(|| line.trim_start().strip_prefix("## ").filter(|r| version_string(r.trim()).is_some()));
+        if let Some(rest) = heading {
             if let Some((v, body)) = cur.take() {
                 out.push(Section { version: v, body: body.join("\n").trim().to_string() });
             }
@@ -87,6 +97,29 @@ pub fn parse_changelog(md: &str) -> Vec<Section> {
                 Some(v) => cur = Some((v, Vec::new())),
                 None => cur = None,
             }
+            continue;
+        }
+        if let Some((_, body)) = cur.as_mut() {
+            body.push(line);
+        }
+    }
+    if let Some((v, body)) = cur.take() {
+        out.push(Section { version: v, body: body.join("\n").trim().to_string() });
+    }
+    out
+}
+
+/// grok 的 `.external.md`（`# x.y.z — 日期` 一段一版）→ 版本段落。`## Features`／`## Bug Fixes` 等小標題留在 body 裡
+/// （[`parse_changelog`] 遇到任何 `## ` 就結束段落，會把 body 砍掉），只有一級標題且後面是版本號才開新段落。
+pub fn grok_sections(md: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    let mut cur: Option<(String, Vec<&str>)> = None;
+    for line in md.lines() {
+        if let Some(rest) = line.strip_prefix("# ") {
+            if let Some((v, body)) = cur.take() {
+                out.push(Section { version: v, body: body.join("\n").trim().to_string() });
+            }
+            cur = version_string(rest.trim()).map(|v| (v, Vec::new()));
             continue;
         }
         if let Some((_, body)) = cur.as_mut() {
@@ -143,19 +176,33 @@ pub async fn installed_version(app: &impl crate::hosts::HostsAccess, host: &str,
 }
 
 /// 抓 feed 的網址與「是不是 codex releases JSON」。`release_triage` 的 CLI 是獨立行程，沒有 `App` 的快取可用。
-pub(crate) fn feed_url(kind: &str) -> Option<(&'static str, bool)> {
+pub fn feed_url(kind: &str) -> Option<(&'static str, bool)> {
     match kind {
         "claude" => Some((CHANGELOG_URL, false)),
         "codex" => Some((CODEX_RELEASES_API, true)),
         "herdr" => Some((HERDR_CHANGELOG_URL, false)),
+        "agy" => Some((AGY_CHANGELOG_URL, false)),
+        // grok 的網址要帶版本：這裡回的是 stable 指標，實際的 changelog 網址由 [`grok_feed_url`] 組。
+        "grok" => Some((crate::upstream_update::GROK_STABLE_URL, false)),
         _ => None,
     }
+}
+
+/// grok 某一版的 changelog 網址。版本號只收 `x.y.z` 純數字加點（stable 指標的內容不可信，不能帶出 `/`、`:`、`?`、`#`）。
+pub fn grok_feed_url(base: &str, version: &str) -> Result<String> {
+    let strict = !version.is_empty() && version.split('.').count() == 3 && version.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !strict {
+        return Err(anyhow!("grok 版本看不懂：「{}」", version.chars().take(60).collect::<String>()));
+    }
+    Ok(format!("{base}/{version}.external.md"))
 }
 
 pub fn source_url(kind: &str) -> &'static str {
     match kind {
         "codex" => CODEX_RELEASES_URL,
         "herdr" => HERDR_CHANGELOG_URL,
+        "agy" => AGY_CHANGELOG_PAGE,
+        "grok" => crate::upstream_update::GROK_STABLE_URL,
         _ => CHANGELOG_URL,
     }
 }
@@ -185,6 +232,96 @@ pub fn codex_releases_to_md(json: &str) -> Result<String> {
     Ok(out)
 }
 
+/// agy／grok 的抓取來源。正式環境用 [`FeedSource::official`]；測試換成本機伺服器（`allowed` 也跟著換）。
+///
+/// 抓回來的一切都是**資料**：網址全寫死成常數，只允許三個主機（`raw.githubusercontent.com`／`api.github.com` 的
+/// `google-antigravity/antigravity-cli`、`storage.googleapis.com` 的 `grok-build-public-artifacts`）；唯一由回應組出來的網址是
+/// grok 的 `<stable 版本>.external.md`，版本號先過 [`grok_feed_url`] 的嚴格檢查；不跟隨轉址；每個請求出門前再比一次允許清單。
+#[derive(Debug, Clone)]
+pub struct FeedSource {
+    pub agy_changelog: String,
+    pub agy_releases: String,
+    pub grok_stable: String,
+    pub grok_base: String,
+    pub allowed: Vec<String>,
+}
+
+/// 允許請求的網址前綴（含路徑，不只是主機）。
+const ALLOWED_FEED_PREFIXES: [&str; 4] = [
+    "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/",
+    "https://api.github.com/repos/google-antigravity/antigravity-cli/",
+    "https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/",
+    crate::upstream_update::GROK_STABLE_URL,
+];
+/// 一份 changelog 的大小上限：最大的 agy CHANGELOG.md 約 174 KB，給一個數量級的餘裕；stable 指標只有一個版本號。
+const MAX_FEED_BYTES: usize = 2 * 1024 * 1024;
+const MAX_POINTER_BYTES: usize = 256;
+
+impl FeedSource {
+    pub fn official() -> Self {
+        Self {
+            agy_changelog: AGY_CHANGELOG_URL.into(),
+            agy_releases: AGY_RELEASES_API.into(),
+            grok_stable: crate::upstream_update::GROK_STABLE_URL.into(),
+            grok_base: GROK_CHANGELOG_BASE.into(),
+            allowed: ALLOWED_FEED_PREFIXES.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// 這個網址在不在正式允許清單裡。
+pub fn is_official_feed_url(url: &str) -> bool {
+    ALLOWED_FEED_PREFIXES.iter().any(|p| url.starts_with(p))
+}
+
+async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize, what: &str) -> Result<String> {
+    if !src.allowed.iter().any(|p| url.starts_with(p.as_str())) {
+        return Err(anyhow!("{what}：{url} 不在允許的來源清單裡"));
+    }
+    let resp = c.get(url).send().await.map_err(|e| anyhow!("抓 {what} 失敗：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("抓 {what} 失敗：HTTP {}", resp.status()));
+    }
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
+    }
+    let raw = resp.text().await.map_err(|e| anyhow!("讀 {what} 失敗：{e}"))?;
+    if raw.len() > max {
+        return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
+    }
+    Ok(raw)
+}
+
+/// agy：raw 的 CHANGELOG.md，失敗才退 GitHub releases。grok：stable 指標 → 該版的 `.external.md`。
+/// 逾時同 claude／codex（連線 10 秒、整體 20 秒）；轉址一律當失敗。
+pub async fn fetch_pinned_feed(kind: &str, src: &FeedSource) -> Result<String> {
+    let c = reqwest::Client::builder()
+        .user_agent("agents-manager")
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow!("http client: {e}"))?;
+    match kind {
+        "agy" => match get_pinned(&c, src, &src.agy_changelog, MAX_FEED_BYTES, "agy CHANGELOG.md").await {
+            Ok(md) => Ok(md),
+            Err(first) => {
+                let json = get_pinned(&c, src, &src.agy_releases, MAX_FEED_BYTES, "agy releases")
+                    .await
+                    .map_err(|second| anyhow!("{first}；備援也失敗：{second}"))?;
+                codex_releases_to_md(&json)
+            }
+        },
+        "grok" => {
+            let pointer = get_pinned(&c, src, &src.grok_stable, MAX_POINTER_BYTES, "grok stable 指標").await?;
+            let version = crate::upstream_update::grok_latest(&pointer)?;
+            let url = grok_feed_url(&src.grok_base, &version)?;
+            get_pinned(&c, src, &url, MAX_FEED_BYTES, "grok changelog").await
+        }
+        other => Err(anyhow!("{other} 不走這個抓取路徑")),
+    }
+}
+
 pub async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: &str) -> Result<String> {
     {
         let g = app.changelog().inner.lock().await;
@@ -193,6 +330,11 @@ pub async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: 
                 return Ok(text.clone());
             }
         }
+    }
+    if matches!(kind, "agy" | "grok") {
+        let text = fetch_pinned_feed(kind, &FeedSource::official()).await?;
+        app.changelog().inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
+        return Ok(text);
     }
     let client = reqwest::Client::builder()
         .user_agent("agents-manager")
@@ -245,7 +387,7 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
             return reply;
         }
     };
-    let all = crate::release_triage::source_sections(kind, &md);
+    let all = if kind == "grok" { grok_sections(&md) } else { crate::release_triage::source_sections(kind, &md) };
     let picked = pick_sections(&all, reply.from_version.as_deref(), &installed);
     if picked.is_empty() {
         reply.error = Some(format!("CHANGELOG 裡沒有 {installed} 這一版的段落"));
