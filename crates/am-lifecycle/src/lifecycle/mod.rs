@@ -83,6 +83,7 @@ pub mod transcript_stage;
 pub mod claude_linux_screens;
 pub mod limit_banner;
 pub mod stuck_turns;
+pub mod unsent_draft;
 pub mod fence;
 pub mod turn_controller;
 pub mod interrupt_grace;
