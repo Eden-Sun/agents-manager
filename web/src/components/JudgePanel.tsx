@@ -1,13 +1,13 @@
 /**
- * 環境設定 →「Jev 第二意見」（SPEC §4.3c，issue #240）：貼 API key、開關、選哪些專案。
+ * 環境設定 →「Jev 建議」（SPEC §4.3c，issue #240）：貼 API key、開關、選哪些專案。
  *
  * 開了之後，這些專案的撞限畫面尾段（遮罩後）會送到 TypeSafe——所以開關旁邊直接寫清楚，不藏在說明裡。
  * key 貼上存檔後就清空輸入框；daemon 不會把它回給前端，這裡只看得到「已設定」。
  */
 import { useEffect, useState } from 'react'
 import { fetchJudgeSettings, saveJudgeSettings, type JudgeSettings } from '../api/judge'
-import { useJudgeLedger } from '../store/judgeLedger'
 import { useStore } from '../store/store'
+import { JevLabel } from './JevLabel'
 import { JudgeLedger } from './JudgeLedger'
 import './judgePanel.css'
 
@@ -104,8 +104,6 @@ export function JudgePanel() {
           adopt(r.settings)
           setToken('')
           setNote({ ok: true, text: '已儲存，立即生效。' })
-          // bot 上的徽章用的是另一份帳本，它的 enabled 要跟著這次儲存；daemon 不會推事件，這裡直接重抓（不吃 60 秒節流）。
-          void useJudgeLedger.getState().refresh({ force: true })
         } else {
           setNote({ ok: false, text: `儲存失敗：${r.message}` })
         }
@@ -123,6 +121,11 @@ export function JudgePanel() {
           if (!busy && dirty) save()
         }}
       >
+        <p className="hint">
+          <JevLabel note />
+          <br />
+          Jev（TypeSafe 型別判斷）給的判斷，畫面上一律標「Jev 建議」與機率。
+        </p>
         <p className="hint">
           畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。
         </p>

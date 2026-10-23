@@ -82,6 +82,9 @@ test('有資料：五個場景各一列計數、超過門檻照 SPEC 算、最�
   await settle(200)
   const ledger = root.querySelector('.judge-ledger')!
   assert.ok(ledger, '帳本區要出現')
+  // issue #1912：帳本明講是 Jev（TypeSafe）的判斷，只是建議。
+  assert.equal(ledger.querySelector('.jev-label-tag')?.textContent, 'Jev 建議', '帳本標「Jev 建議」')
+  assert.match(ledger.querySelector('.hint')?.textContent ?? '', /只是建議|不會自動動作/)
   const scenes = ledger.querySelectorAll('.judge-ledger-table')[0]!.querySelectorAll('tbody tr')
   assert.equal(scenes.length, 5, '五個場景各一列')
   const ask = [...scenes].find((tr) => tr.textContent?.includes('選項建議'))!

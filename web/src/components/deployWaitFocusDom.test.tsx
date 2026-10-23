@@ -1,5 +1,5 @@
 /**
- * 「⏳ 部署等 N 分」的浮層（role="dialog"）：打開時焦點進浮層，Esc 收起時焦點回到徽章鈕（同 JudgeBadge），不掉到 body。
+ * 「⏳ 部署等 N 分」的浮層（role="dialog"）：打開時焦點進浮層，Esc 收起時焦點回到徽章鈕，不掉到 body。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
