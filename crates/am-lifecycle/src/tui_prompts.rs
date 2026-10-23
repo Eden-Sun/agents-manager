@@ -888,14 +888,15 @@ fn survey_composer_is_idle(screen: &str) -> bool {
 
 async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRead>) -> Option<PaneRead> {
     let read = target.client.pane_read(&target.pane, "visible", 80).await.ok()?;
-    if read.pane_id != target.pane || read.source != "visible" || read.revision == 0 || read.truncated {
+    // 不看 `read.revision`：herdr 0.9.5 的 `pane.read` 恆回 0（#1909、#1910）。授權靠文字相同加 fence。
+    if read.pane_id != target.pane || read.source != "visible" || read.truncated {
         return None;
     }
     if !is_feedback_survey(&read.text) || !survey_composer_is_idle(&read.text) {
         return None;
     }
     if let Some(expected) = expected {
-        if read.revision != expected.revision || read.text != expected.text {
+        if read.text != expected.text {
             return None;
         }
     }
@@ -907,25 +908,55 @@ pub async fn retain_survey_runs(app: &impl crate::tui_prompts::SurveyRevisions, 
     app.survey_revisions().lock().await.retain(|id, _| active.contains(id));
 }
 
-async fn release_survey_revision(app: &impl crate::tui_prompts::SurveyRevisions, run_id: &str, revision: u64) {
+async fn release_survey_revision(app: &impl crate::tui_prompts::SurveyRevisions, run_id: &str, fingerprint: u64) {
     let mut revisions = app.survey_revisions().lock().await;
-    if revisions.get(run_id) == Some(&revision) {
+    if revisions.get(run_id) == Some(&fingerprint) {
         revisions.remove(run_id);
+    }
+}
+
+/// 去重表裡記的畫面指紋（表名沿用舊的 `survey_revisions`）。herdr 的 revision 恆為 0，不能拿來區分畫面。
+/// `DefaultHasher` 的結果不保證跨版本穩定：**不持久化、不跨 process**，只放在這個 daemon 的記憶體去重表裡。
+fn survey_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// 放棄自動按鍵的原因（固定字串，與 `claude_resume_menu` 的原因分開）。
+const SURVEY_SCREEN_CHANGED: &str = "survey_screen_changed_or_unreadable_before_key";
+const SURVEY_AUTHORITY_CHANGED: &str = "survey_run_host_session_or_pane_changed";
+const SURVEY_SEND_FAILED: &str = "survey_send_keys_failed";
+
+/// 放棄時每個 (run, 原因) 只寫一次 WARN；去重表與冷快取 Resume 共用（上限／TTL 見 `claude_resume_menu::GiveUps`）。
+fn warn_survey_give_up(run: &db::Run, reason: &'static str) {
+    let first = crate::lifecycle::claude_resume_menu::gave_up()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .first_time(&run.id, reason, std::time::Instant::now());
+    if first {
+        tracing::warn!(run = %run.id, bot = %run.bot_id, reason, "claude 滿意度問卷沒有自動關閉，下一輪巡檢重新判斷");
     }
 }
 
 /// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
 pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyRevisions), run: &db::Run) -> bool {
     let Some(target) = current_survey_target(app, run).await else { return false };
-    let Some(read) = read_actionable_survey(&target, None).await else { return false };
+    let Some(read) = read_actionable_survey(&target, None).await else {
+        // 問卷不在畫面上（或這輪讀不到）：忘掉這個 run 的指紋，之後再跳出的問卷才會重新處理。
+        app.survey_revisions().lock().await.remove(&run.id);
+        return false;
+    };
+    let fingerprint = survey_fingerprint(&read.text);
     let pane = target.pane.as_str();
     let first_for_this_run = {
         let mut revisions = app.survey_revisions().lock().await;
-        if revisions.get(&run.id) == Some(&read.revision) {
+        if revisions.get(&run.id) == Some(&fingerprint) {
             return false;
         }
         let first = !revisions.contains_key(&run.id);
-        revisions.insert(run.id.clone(), read.revision);
+        revisions.insert(run.id.clone(), fingerprint);
         first
     };
     if !PRESS_KEYS_ON_SURVEY {
@@ -950,18 +981,20 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::race_point::hit("survey_before_first_key", &run.id).await;
-    // The classification read only authorizes this exact pane revision and content, under the
-    // same run/session authority. There is no conditional send_keys CAS in Herdr yet.
-    let still_current = survey_target_is_current(app, &target).await;
-    let final_read = if still_current { read_actionable_survey(&target, Some(&read)).await } else { None };
+    // The classification read only authorizes this exact pane content, under the same
+    // run/session authority (herdr's revision is always 0, so it is no evidence). There is no
+    // conditional send_keys CAS in Herdr yet.
+    let was_current = survey_target_is_current(app, &target).await;
+    let final_read = if was_current { read_actionable_survey(&target, Some(&read)).await } else { None };
     let still_current = final_read.is_some() && survey_target_is_current(app, &target).await;
     if !still_current {
-        release_survey_revision(app, &run.id, read.revision).await;
+        release_survey_revision(app, &run.id, fingerprint).await;
+        warn_survey_give_up(run, if was_current && final_read.is_none() { SURVEY_SCREEN_CHANGED } else { SURVEY_AUTHORITY_CHANGED });
         return false;
     }
     if let Err(e) = target.client.pane_send_keys(pane, &["0"]).await {
-        release_survey_revision(app, &run.id, read.revision).await;
-        tracing::warn!(run = %run.id, error = %e, "問卷送 0 失敗");
+        release_survey_revision(app, &run.id, fingerprint).await;
+        tracing::warn!(run = %run.id, error = %e, reason = SURVEY_SEND_FAILED, "問卷送 0 失敗");
         return false;
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -970,7 +1003,8 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     // The post-0 read is a new authorization basis for versions that also need Enter.
     if survey_target_is_current(app, &target).await {
         if let Some(second_stage) = read_actionable_survey(&target, None).await {
-            app.survey_revisions().lock().await.insert(run.id.clone(), second_stage.revision);
+            let second_fingerprint = survey_fingerprint(&second_stage.text);
+            app.survey_revisions().lock().await.insert(run.id.clone(), second_fingerprint);
             #[cfg(all(test, feature = "daemon-test-harness"))]
             crate::race_point::hit("survey_before_enter", &run.id).await;
             let still_current = survey_target_is_current(app, &target).await;
@@ -982,7 +1016,8 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
             if final_read.is_some() && survey_target_is_current(app, &target).await {
                 let _ = target.client.pane_send_keys(pane, &["enter"]).await;
             } else {
-                release_survey_revision(app, &run.id, second_stage.revision).await;
+                release_survey_revision(app, &run.id, second_fingerprint).await;
+                warn_survey_give_up(run, SURVEY_SCREEN_CHANGED);
             }
         }
     }
@@ -1357,8 +1392,31 @@ Grok Build 1.0.46\n\
         assert!(!env.app.survey_revisions.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
     }
 
+    fn press_keys(env: &crate::testing::Env) -> Vec<serde_json::Value> {
+        env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect()
+    }
+
+    /// 像真 herdr 0.9.5：`pane.read` 的 revision 恆為 0（#1910）。畫面放在 `LivePane` 的原樣畫面欄位裡。
+    fn zero_revision_survey(env: &crate::testing::Env, run: &crate::db::Run) -> String {
+        let pane = run.pane_id.clone().unwrap();
+        env.herdr.live_pane(
+            &pane,
+            crate::testing::LivePane {
+                cold_resume_menu: Some(screens::FEEDBACK_SURVEY.to_string()),
+                zero_revision: true,
+                no_spinner: true,
+                ..Default::default()
+            },
+        );
+        pane
+    }
+
+    fn set_live_screen(env: &crate::testing::Env, pane: &str, text: &str) {
+        env.herdr.live.lock().unwrap().get_mut(pane).unwrap().cold_resume_menu = Some(text.to_string());
+    }
+
     #[tokio::test]
-    async fn a_revision_change_with_identical_survey_text_receives_no_zero() {
+    async fn a_revision_change_with_identical_survey_text_still_receives_zero() {
         let (env, run) = survey_test_env().await;
         let pane = run.pane_id.clone().unwrap();
         let bump = env.herdr.bump_screen_revision_later();
@@ -1366,8 +1424,63 @@ Grok Build 1.0.46\n\
             bump(&pane);
         });
 
+        assert!(dismiss_if_survey(&env.app, &run).await);
+        assert_eq!(press_keys(&env)[0], serde_json::json!(["0"]), "revision is no evidence; the identical text and the fence are");
+    }
+
+    #[tokio::test]
+    async fn a_survey_is_dismissed_when_herdr_reports_revision_zero() {
+        let (env, run) = survey_test_env().await;
+        zero_revision_survey(&env, &run);
+
+        assert!(dismiss_if_survey(&env.app, &run).await);
+        assert_eq!(press_keys(&env), [serde_json::json!(["0"]), serde_json::json!(["enter"])]);
+        // 畫面沒變（這個替身不會收掉問卷）：同一畫面不重複按。
         assert!(!dismiss_if_survey(&env.app, &run).await);
-        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "same text at another revision is not the authorized read");
+        assert_eq!(press_keys(&env).len(), 2, "the same frame is pressed once");
+    }
+
+    #[tokio::test]
+    async fn a_zero_revision_survey_whose_text_changes_between_reads_receives_no_key() {
+        let (env, run) = survey_test_env().await;
+        let pane = zero_revision_survey(&env, &run);
+        let live = env.herdr.live.clone();
+        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+            live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu = Some(PERMISSION.to_string());
+        });
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(press_keys(&env).is_empty(), "a dialog that replaced the survey receives no stale 0");
+        assert!(!env.app.survey_revisions.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
+    }
+
+    #[tokio::test]
+    async fn a_zero_revision_screen_that_is_not_a_survey_receives_no_key() {
+        let (env, run) = survey_test_env().await;
+        let pane = zero_revision_survey(&env, &run);
+        set_live_screen(&env, &pane, PERMISSION);
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(press_keys(&env).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_second_survey_in_the_same_run_is_dismissed_again_with_zero_revision() {
+        let (env, run) = survey_test_env().await;
+        let pane = zero_revision_survey(&env, &run);
+        let live = env.herdr.live.clone();
+        let gone = pane.clone();
+        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
+            live.lock().unwrap().get_mut(&gone).unwrap().cold_resume_menu = Some(screens::IDLE_CLAUDE.to_string());
+        });
+        assert!(dismiss_if_survey(&env.app, &run).await);
+        assert_eq!(press_keys(&env), [serde_json::json!(["0"])]);
+
+        // 問卷收掉後掃一輪，再跳出一張一模一樣的問卷：要重新處理，不能被第一張的去重記錄擋住。
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        set_live_screen(&env, &pane, screens::FEEDBACK_SURVEY);
+        assert!(dismiss_if_survey(&env.app, &run).await);
+        assert_eq!(press_keys(&env)[..2], [serde_json::json!(["0"]), serde_json::json!(["0"])]);
     }
 
     #[tokio::test]
