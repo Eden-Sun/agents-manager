@@ -3934,6 +3934,8 @@ struct InstallTool {
     /// 省略（或空字串）＝不借 bot，daemon 開臨時 host-shell pane 直接裝（issue #1931）。
     #[serde(default)]
     via_bot_id: Option<String>,
+    #[serde(default)]
+    install_id: Option<String>,
 }
 
 async fn install_tool(
@@ -3944,7 +3946,7 @@ async fn install_tool(
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
     let Some(via) = b.via_bot_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
-        let out = crate::tool_install_shell::start(&app, &name, &b.kind).await?;
+        let out = crate::tool_install_shell::start(&app, &name, &b.kind, b.install_id.as_deref()).await?;
         return Ok((StatusCode::OK, Json(out)).into_response());
     };
     let out = crate::app_ports_p3::install_via_bot(&app, &name, &b.kind, via).await?;
@@ -4138,6 +4140,10 @@ mod install_tool_route_tests {
         for kind in ["agy", "rm -rf /", ""] {
             let (st, body) = call(&e.app, crate::config::LOCAL_HOST, &json!({"kind": kind}).to_string(), user()).await;
             assert_eq!(st, StatusCode::BAD_REQUEST, "{kind}: {body}");
+        }
+        for install_id in ["", "bad id", "$(touch x)"] {
+            let (st, _) = call(&e.app, crate::config::LOCAL_HOST, &json!({"kind": "codex", "install_id": install_id}).to_string(), user()).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
         }
         let (st, _) = call(&e.app, "no-such-host", r#"{"kind":"codex"}"#, user()).await;
         assert_eq!(st, StatusCode::NOT_FOUND);

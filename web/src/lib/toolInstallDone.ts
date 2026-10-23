@@ -1,15 +1,16 @@
-import * as api from '../api'
 import { isRec, pick, str } from '../api/normalize'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useStore } from '../store/store'
-import { installBusyKey } from './onboardingActions'
+import { installBusyKey, releaseInstall } from './onboardingActions'
 
 /** WS `tool_install_done`（API.md §8／§12.7）：不帶 `via_bot_id` 的直接安裝收尾。借 bot 安裝不推這個事件。 */
 export interface ToolInstallDone {
   host: string
+  install_id: string
+  outcome: string
   kind: BotKind
-  /** 安裝後重新偵測的結果。 */
+  /** 指令已結束且重偵測成功；逾時／換代一律 false。 */
   installed: boolean
   pane_id: string
   /** `false` ＝使用者自己關了 pane；`installed` 為 `false` 且為 `true` 時錯誤輸出還在那顆 pane。 */
@@ -21,10 +22,12 @@ export interface ToolInstallDone {
 export function toToolInstallDone(data: unknown): ToolInstallDone | null {
   if (!isRec(data)) return null
   const kind = str(pick(data, 'kind')) as BotKind
-  if (!BOT_KINDS.includes(kind)) return null
+  if (!BOT_KINDS.includes(kind) || !str(data.install_id)) return null
   return {
     host: str(pick(data, 'host'), 'local') || 'local',
     kind,
+    install_id: str(data.install_id),
+    outcome: str(data.outcome),
     installed: data.installed === true,
     pane_id: str(pick(data, 'pane_id')),
     pane_kept: data.pane_kept === true,
@@ -35,25 +38,24 @@ export function toToolInstallDone(data: unknown): ToolInstallDone | null {
 /** 給使用者看的結果（純函式，方便測）。 */
 export function toolInstallDoneText(ev: ToolInstallDone): { level: 'info' | 'error'; text: string; openPane: boolean } {
   const where = ev.host === 'local' ? '本機' : ev.host
+  if (ev.outcome === 'superseded') return { level: 'error', text: `${where} 的安裝追蹤已失聯（主機連線或偵測已換代），請重新偵測並確認原安裝程序`, openPane: false }
+  if (ev.timed_out) return { level: 'error', text: `${where} 安裝 ${ev.kind} 等了 15 分鐘仍未確認結束（逾時）；請檢查保留的安裝終端`, openPane: true }
   if (ev.installed) return { level: 'info', text: `${where} 已安裝 ${ev.kind}`, openPane: false }
-  const why = ev.timed_out ? `等了 15 分鐘安裝還沒結束（逾時）` : '安裝結束後仍偵測不到'
+  const why = '安裝結束後仍偵測不到'
   if (ev.pane_kept && ev.pane_id) return { level: 'error', text: `${where} 沒裝成 ${ev.kind}：${why}；安裝終端留著，錯誤輸出在裡面`, openPane: true }
   return { level: 'error', text: `${where} 沒裝成 ${ev.kind}：${why}；安裝終端已關閉，請再按一次「安裝」`, openPane: false }
 }
 
-/** 收尾：放開那一列的「安裝中…」、講結果；沒裝成且 pane 還在就切到它讓使用者看錯誤。 */
+/** 收尾：放開那一列的「安裝中…」、講結果；保留原安裝終端，不重新按舊 pane ID 開啟主機終端。 */
 export async function handleToolInstallDone(data: unknown): Promise<void> {
   const ev = toToolInstallDone(data)
   if (!ev) return
   const key = installBusyKey(ev.host, ev.kind)
-  useStore.setState((st) => {
-    if (!st.busy[key]) return st
-    const busy = { ...st.busy }
-    delete busy[key]
-    return { busy }
-  })
+  // Old events cannot clear a retry or navigate another client's view.
+  if (!releaseInstall(key, ev.install_id)) return
   const r = toolInstallDoneText(ev)
   useStore.getState().notify(r.level, r.text)
+  if (ev.outcome === 'superseded' || ev.timed_out) return
   if (ev.installed) {
     // host_changed 通常已經帶了新 tools；再問一次，事件順序顛倒時那一列也會翻。
     void useStore.getState().refreshTools(ev.host)
@@ -62,12 +64,6 @@ export async function handleToolInstallDone(data: unknown): Promise<void> {
     if (view && view.host === ev.host && view.paneId === ev.pane_id) useStore.getState().closeShellView()
     return
   }
-  if (!r.openPane) return
-  let cwd = ''
-  try {
-    cwd = (await api.fetchHostShells(ev.host)).find((s) => s.pane_id === ev.pane_id)?.cwd ?? ''
-  } catch {
-    /* 讀不到 cwd 只是標題少一段，pane 還是要開 */
-  }
-  useStore.getState().viewHostShell({ host: ev.host, pane_id: ev.pane_id, tab_id: '', workspace_id: '', cwd, created_at: '' })
+  // Retain the view opened by the initiating request. Never resolve an old pane ID
+  // against a host that might have reconnected since this event was published.
 }

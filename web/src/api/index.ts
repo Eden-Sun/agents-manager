@@ -997,9 +997,9 @@ export async function installTool(host: string, kind: BotKind, viaBotId: string)
  * 沒有任何 Bot 可借時的安裝（issue #1931）：不帶 `via_bot_id`，daemon 在該主機開臨時 host-shell pane 直接跑官方安裝指令
  * （claude／codex／grok），回 `{pane_id, mode:"shell"}`；CLI 結束後 daemon 重新偵測 tools 並推 `host_changed`。agy 不走這條（`installAgy`）。
  */
-export async function installToolInShell(host: string, kind: BotKind): Promise<{ pane_id: string; cwd: string }> {
+export async function installToolInShell(host: string, kind: BotKind, install_id: string): Promise<{ pane_id: string; cwd: string }> {
   const name = host || 'local'
-  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/tools/install`, { kind })
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/tools/install`, { kind, install_id })
   const o = isRec(raw) ? raw : {}
   return { pane_id: str(pick(o, 'pane_id')), cwd: str(pick(o, 'cwd')) }
 }

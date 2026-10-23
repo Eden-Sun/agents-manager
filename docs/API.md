@@ -988,7 +988,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
 | `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
-| `tool_install_done` | `{"host","kind","installed","pane_id","pane_kept","timed_out"}`：§12.7 直接安裝（省略 `via_bot_id`）收尾。`installed` 是安裝後重新偵測的結果；`false` 且 `pane_kept:true` 時 pane 沒關，錯誤輸出在 `pane_id` 的終端快照裡（使用者自己關了 pane 則 `pane_kept:false`）；`timed_out` ＝等滿 15 分鐘。借 bot 安裝不推這個事件 |
+| `tool_install_done` | `{"host","kind","install_id","outcome","installed","pane_id","pane_kept","timed_out"}`：§12.7 直接安裝（省略 `via_bot_id`）收尾。`installed:true` 只表示指令已結束且重偵測成功；逾時或換代即使 binary 可用也為 `false`；`false` 且 `pane_kept:true` 時 pane 沒關，錯誤輸出在 `pane_id` 的終端快照裡（使用者自己關了 pane 則 `pane_kept:false`）；`timed_out` ＝等滿 15 分鐘（此時 `installed:false`、保留 pane）。`outcome` 為 `installed\|failed\|timeout\|superseded`；換代／失聯的 `superseded` 只結束原 `install_id`，`pane_id:""`、`pane_kept:false`，不可操作新主機的 pane。借 bot 安裝不推這個事件 |
 | `quota_updated` | 見 §12.5 |
 | `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
@@ -2391,15 +2391,15 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
 - 502：指令失敗（訊息尾段含輸出）；快照不動。`state` 不是 `current` 時裝完仍落後，由畫面講清楚。
 
 ### 12.7 安裝 CLI `POST /api/hosts/{name}/tools/install`
-`{ "kind": "claude"|"codex"|"grok", "via_bot_id"?: "01M1…" }`。agy 不走這條（`POST /api/hosts/{name}/agy/install`），`kind` 不是這三家 400。只給使用者（bot 403 `user_only`）。
+`{ "kind": "claude"|"codex"|"grok", "via_bot_id"?: "01M1…", "install_id"?: "<每次請求唯一 ID>" }`。agy 不走這條（`POST /api/hosts/{name}/agy/install`），`kind` 不是這三家 400。只給使用者（bot 403 `user_only`）。
 
 官方安裝方式（寫死，呼叫端不能傳指令）：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | bash`。
 
 - **帶 `via_bot_id`（借現有 agent）**：daemon 組一則安裝 prompt（上面的指令，接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給該 bot。
   回 `200 {"turn_id","message_id","delivery"}`。bot／所屬專案不存在或已刪除 404；bot 不屬於該 host 400；bot 不可送 → §5 的 409。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
 - **省略（或空字串）`via_bot_id`（直接安裝，issue #1931）**：全新使用者沒有 bot 可借。daemon 在該主機開臨時 host-shell pane、打進上面的安裝指令（SPEC §16.3a 同一套開 pane 與收尾），
-  回 `200 {"pane_id","mode":"shell"}`；pane 的終端快照是安裝輸出的唯一通道（不進 daemon log／事件）。安裝指令結束（pane 前景只剩 shell；最久 15 分鐘；`pane.process_info` 連續 3 次失敗視為 pane 已被關掉，立刻收尾）後 daemon 重新偵測該主機的 tools、推 `host_changed`，再推 WS `tool_install_done`（§8）。
-  **裝成功**（偵測到 `tools.<kind>.installed`）才關 pane；**沒裝成**（含偵測失敗、逾時）pane 保留，UI 收到 `installed:false, pane_kept:true` 就開 `pane_id` 的終端讓使用者看錯誤，看完自己關。
+  可選 `install_id`（1–128 個 ASCII 英數字或 `-_.`，無效 400），用來關聯這一次請求，非冪等鍵；省略由 daemon 產生。回 `200 {"pane_id","mode":"shell","install_id"}`；pane 的終端快照是安裝輸出的唯一通道（不進 daemon log／事件）。安裝指令結束（pane 前景只剩 shell；最久 15 分鐘；`pane.process_info` 連續 3 次失敗視為 pane 已被關掉，立刻收尾）後 daemon 重新偵測該主機的 tools、推 `host_changed`，再推 WS `tool_install_done`（§8）。
+  **裝成功**（安裝已結束且偵測到 `tools.<kind>.installed`）才關 pane；**沒裝成**（含偵測失敗、逾時）pane 保留。逾時即使 binary 已存在也回 `installed:false`。正常清理與完成事件受原 host fence 保護，換代回 `outcome:"superseded"` 且不提供舊 pane ID。UI 只處理符合目前 `install_id` 的事件；保留發起時開啟的終端，不因完成事件重新按 pane ID 開啟主機終端。
   codex 的指令是 `sh -c`：有 npm 用 `npm i -g @openai/codex`，否則有 brew 用 `brew install codex`，兩者都沒有就印說明、`exit 1`（也走「沒裝成」）。**不執行登入**，裝好後走一般登入流程（`…/identities/{identity}/login`）。
   404：不認得的主機。409 `tool_install_in_progress {host, kind}`：同一 `(host, kind)` 已有一個在跑（收尾完成才放掉；pane 被關掉後最多數秒就放）。502：開不起 pane／打不進指令。
 

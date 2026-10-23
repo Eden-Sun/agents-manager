@@ -1224,14 +1224,14 @@ export class MockTransport implements Transport {
   }
 
   /** 下一次直接安裝要演的失敗（`__amMock.installFail('claude', 'timeout')`；`null` 恢復成功）。 */
-  private installFail = new Map<string, 'error' | 'timeout'>()
-  setInstallFail(kind: string, mode: 'error' | 'timeout' | null) {
+  private installFail = new Map<string, 'error' | 'timeout' | 'superseded'>()
+  setInstallFail(kind: string, mode: 'error' | 'timeout' | 'superseded' | null) {
     if (mode) this.installFail.set(kind, mode)
     else this.installFail.delete(kind)
   }
 
   /** 沒有 Bot 可借的安裝：開 shell、演安裝輸出，CLI 結束後那台的 tool 變已安裝・未登入並推 `host_changed`。 */
-  private installToolInShell(host: string, kind: BotKind) {
+  private installToolInShell(host: string, kind: BotKind, install_id: string) {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
     const cmd = MockTransport.INSTALL_CMD[kind]
@@ -1243,7 +1243,7 @@ export class MockTransport implements Transport {
       if (fail) {
         // 沒裝成：pane 保留讓使用者看錯誤（逾時＝等滿 15 分鐘），推 `tool_install_done`（API.md §8）。
         pane.lines.push(fail === 'timeout' ? `curl: (28) Operation timed out` : `curl: (6) Could not resolve host`, '')
-        this.emit('tool_install_done', { host, kind, installed: false, pane_id: shell.pane_id, pane_kept: true, timed_out: fail === 'timeout' })
+        this.emit('tool_install_done', { host, kind, install_id, outcome: fail === 'timeout' ? 'timeout' : fail === 'superseded' ? 'superseded' : 'failed', installed: false, pane_id: fail === 'superseded' ? '' : shell.pane_id, pane_kept: fail !== 'superseded', timed_out: fail === 'timeout' })
         return
       }
       pane.lines.push(`✔ ${kind} 1.0.13 installed to /usr/local/bin/${kind}`, '')
@@ -1251,9 +1251,9 @@ export class MockTransport implements Transport {
       this.emit('host_changed', { name: host, connected: true, error: null, tools })
       // 裝成功 daemon 關掉 pane。
       this.shells.delete(`${host}/${shell.pane_id}`)
-      this.emit('tool_install_done', { host, kind, installed: true, pane_id: shell.pane_id, pane_kept: false, timed_out: false })
+      this.emit('tool_install_done', { host, kind, install_id, outcome: 'installed', installed: true, pane_id: shell.pane_id, pane_kept: false, timed_out: false })
     }, 2500)
-    return { pane_id: shell.pane_id, cwd: shell.cwd, mode: 'shell' }
+    return { pane_id: shell.pane_id, cwd: shell.cwd, mode: 'shell', install_id }
   }
 
   /** 預設帳號的 `<cli> login` 在 shell 裡跑完：登入好了，推 `host_changed`（真 daemon 是 CLI 結束後重新偵測）。 */
@@ -1285,7 +1285,7 @@ export class MockTransport implements Transport {
     }
     const remote = hostName && hostName !== 'local' ? this.host(hostName) : null
     // issue #1931：省略 via_bot_id＝沒有 Bot 可借，daemon 開臨時 host-shell pane 直接跑官方安裝指令。
-    if (b.via_bot_id === undefined || b.via_bot_id === null) return this.installToolInShell(hostName || 'local', kind as BotKind)
+    if (b.via_bot_id === undefined || b.via_bot_id === null) return this.installToolInShell(hostName || 'local', kind as BotKind, typeof b.install_id === 'string' ? b.install_id : crypto.randomUUID())
     const botId = String(b.via_bot_id ?? '')
     const bot = this.bots.find((x) => x.id === botId)
     const project = bot ? this.projects.find((p) => p.id === bot.project_id) : undefined
@@ -4524,7 +4524,7 @@ function installDevHelpers(mock: MockTransport) {
     /** 首次啟動（issue #1931）：沒有 Project／Bot、四種 CLI 都沒裝；主畫面出現「環境準備」。 */
     freshStart: () => mock.freshStart(),
     /** 直接安裝演失敗：`installFail('claude')` 沒裝成、pane 留著；`'timeout'` 演逾時；`installFail('claude', null)` 恢復。 */
-    installFail: (kind: string, mode: 'error' | 'timeout' | null = 'error') => mock.setInstallFail(kind, mode),
+    installFail: (kind: string, mode: 'error' | 'timeout' | 'superseded' | null = 'error') => mock.setInstallFail(kind, mode),
     /** 設定頁的空值 env 身份警告（#1883）；加完到環境設定看（要重新整理身份清單）。 */
     emptyEnvIdentity: () => mock.addEmptyEnvIdentity(),
     dropSocket: () => mock.dropSocket(),

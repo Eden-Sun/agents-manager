@@ -10,6 +10,19 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+const installs = new Map<string, string>()
+export function ownsInstall(key: string, id: string): boolean { return installs.get(key) === id }
+export function releaseInstall(key: string, id: string): boolean {
+  if (!ownsInstall(key, id)) return false
+  installs.delete(key)
+  useStore.setState((st) => {
+    const busy = { ...st.busy }
+    delete busy[key]
+    return { busy }
+  })
+  return true
+}
+
 const busyKey = (host: string, kind: BotKind) => `install:${host || 'local'}:${kind}`
 
 /**
@@ -21,28 +34,23 @@ export async function installKindOnHost(host: string, kind: BotKind): Promise<bo
   if (kind === 'agy') return s.installAgy(host)
   const key = busyKey(host, kind)
   if (s.busy[key]) return false
+  const installId = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  installs.set(key, installId)
   useStore.setState((st) => ({ busy: { ...st.busy, [key]: true } }))
   try {
-    const r = await api.installToolInShell(host, kind)
+    const r = await api.installToolInShell(host, kind, installId)
+    // A completion can arrive before the HTTP response; do not reopen its pane.
+    if (!ownsInstall(key, installId)) return true
     useStore.getState().viewHostShell({ host: host || 'local', pane_id: r.pane_id, tab_id: '', workspace_id: '', cwd: r.cwd, created_at: '' })
     useStore.getState().notify('info', `已在 ${!host || host === 'local' ? '本機' : host} 開 shell 安裝 ${kind}，裝完會自動重新偵測`)
     // 鈕維持「安裝中…」到 WS `tool_install_done`（`handleToolInstallDone` 放開）；事件漏了的保險：daemon 最久等 15 分鐘。
-    setTimeout(() => releaseBusy(key), 16 * 60_000)
+    setTimeout(() => releaseInstall(key, installId), 16 * 60_000)
     return true
   } catch (e) {
     useStore.getState().notify('error', `安裝 ${kind} 失敗：${errText(e)}`)
-    releaseBusy(key)
+    releaseInstall(key, installId)
     return false
   }
-}
-
-function releaseBusy(key: string) {
-  useStore.setState((st) => {
-    if (!st.busy[key]) return st
-    const busy = { ...st.busy }
-    delete busy[key]
-    return { busy }
-  })
 }
 
 /**
