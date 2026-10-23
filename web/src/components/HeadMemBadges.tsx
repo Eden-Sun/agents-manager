@@ -1,4 +1,5 @@
 import { useShallow } from 'zustand/react/shallow'
+import { t, useT } from '../lib/i18n'
 import { projectHostName, useStore } from '../store/store'
 import { LOCAL_HOST } from '../api/types'
 import { MemBadge } from './MemBadge'
@@ -9,6 +10,7 @@ import { MemBadge } from './MemBadge'
  * 手機 menu 另在每顆前面放那台的 pane 數（2026-09-28 使用者）；桌機的 pane 總數在左邊，這格不重複。
  */
 export function HeadMemBadges() {
+  useT()
   const remotes = useStore((s) => (s.mem?.hosts ?? []).filter((h) => h.host !== LOCAL_HOST).map((h) => h.host).join('\n'))
   // 同 Sidebar 的 PaneBadge：跑著的 bot 各算一個 pane，依專案所在主機分。回字串陣列給 useShallow。
   const paneHosts = useStore(
@@ -35,7 +37,7 @@ export function HeadMemBadges() {
         const panes = paneHosts.filter((h) => h === host).length
         return (
           <div key={host} className="head-mem-row">
-            <span className="pane-badge head-host-panes" title={`${host === LOCAL_HOST ? '本機' : host}：${panes} 個 herdr pane`}>
+            <span className="pane-badge head-host-panes" title={t('{host}：{n} 個 herdr pane', { host: host === LOCAL_HOST ? t('本機') : host, n: panes })}>
               <span className="pane-v">{panes}</span>
             </span>
             <MemBadge host={host} />

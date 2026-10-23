@@ -1,4 +1,5 @@
 import { tokensLower } from './composerCost'
+import { t } from './i18n'
 
 /**
  * context 一行字。有百分比：`40%（12k / 200k）`；只有 token 數（agy：視窗大小沒有可靠來源，daemon 不填百分比）：`約 12k tokens`——
@@ -11,9 +12,9 @@ export function contextLabel(
   if (status.context_used_pct != null) {
     return `${Math.round(status.context_used_pct)}%${
       status.context_used_tokens != null && status.context_size != null
-        ? `（${tokensLower(status.context_used_tokens)} / ${tokensLower(status.context_size)}）`
+        ? t('（{used} / {size}）', { used: tokensLower(status.context_used_tokens), size: tokensLower(status.context_size) })
         : ''
     }`
   }
-  return status.context_used_tokens != null && status.context_used_tokens > 0 ? `約 ${tokensLower(status.context_used_tokens)} tokens` : null
+  return status.context_used_tokens != null && status.context_used_tokens > 0 ? t('約 {n} tokens', { n: tokensLower(status.context_used_tokens) }) : null
 }

@@ -3,6 +3,7 @@ import { persistSetDiff } from '../store/sharedSet'
 import { renderProbe } from '../lib/renderProbe'
 import { useStableCallback } from '../hooks/useStableCallback'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
+import { t, useT } from '../lib/i18n'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { MOCK_MODE } from '../api'
@@ -90,8 +91,9 @@ import { useBotScrollTop } from '../hooks/useBotScrollTop'
 import './sidebar.css'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
+  useT()
   const label =
-    socket === 'open' ? (connected ? '已連線' : 'herdr 中斷') : socket === 'connecting' ? '連線中' : '重連中'
+    socket === 'open' ? (connected ? t('已連線') : t('herdr 中斷')) : socket === 'connecting' ? t('連線中') : t('重連中')
   return (
     <span className="conn" title={`WebSocket: ${socket} / herdr: ${connected ? 'connected' : 'disconnected'}`}>
       <span className={`conn-dot ${socket === 'open' && !connected ? 'closed' : socket}`} />
@@ -102,6 +104,7 @@ function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boo
 
 /** 開著幾個 herdr pane，和 RAM 並排；0 個就不出現（狀態燈已說明沒在跑）。 */
 function PaneBadge() {
+  useT()
   // 回字串不回物件：useShallow 逐一 Object.is，新物件永不相等 → 無限重繪。
   const panes = useStore(
     useShallow((s) =>
@@ -122,9 +125,9 @@ function PaneBadge() {
     byHost.set(host, [...(byHost.get(host) ?? []), name])
   }
   const tip = [
-    `現在開著 ${panes.length} 個 herdr pane`,
+    t('現在開著 {n} 個 herdr pane', { n: panes.length }),
     '',
-    ...[...byHost.entries()].map(([host, names]) => `${host === 'local' ? '本機' : host}：${names.join('、')}`),
+    ...[...byHost.entries()].map(([host, names]) => t('{host}：{names}', { host: host === 'local' ? t('本機') : host, names: names.join(t('、')) })),
   ]
   return (
     <span className="pane-badge" title={tip.join('\n')}>
@@ -182,6 +185,7 @@ function BotRowImpl({
   onNudge: (botId: string, dir: -1 | 1) => void
   onStep: (botId: string, dir: -1 | 1) => void
 }) {
+  const t = useT()
   renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
@@ -236,7 +240,7 @@ function BotRowImpl({
       const kids = s.bots.filter((x) => x.parent_bot_id === botId && x.kind === 'claude' && (x.identity ?? 'cc0') !== mine)
       if (kids.length === 0) return null
       const identities = [...new Set(kids.map((x) => x.identity ?? 'cc0'))].sort()
-      return { identities: identities.join('/'), names: kids.map((x) => x.name).join('、') }
+      return { identities: identities.join('/'), names: kids.map((x) => x.name).join(t('、')) }
     }),
   )
   // 回合被 API 斷線截斷：燈號仍是綠的，只有這個說「其實沒做完」。
@@ -268,14 +272,14 @@ function BotRowImpl({
   if (bot.pending) {
     return (
       <div className="bot-row pending" role="listitem" aria-busy="true" data-bot-id={botId}>
-        <StatusLamp lamp="starting" title={`${bot.name}：建立中`} />
+        <StatusLamp lamp="starting" title={t('{name}：建立中', { name: bot.name })} />
         <span className="bot-main">
           <span className="bot-ident">
             <KindTag kind={bot.kind} className="bot-kind" />
             <span className="bot-name">{bot.name}</span>
           </span>
           <span className="bot-sub">
-            <span className="bot-pending-note">建立中…</span>
+            <span className="bot-pending-note">{t('建立中…')}</span>
           </span>
         </span>
       </div>
@@ -358,22 +362,22 @@ function BotRowImpl({
       {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
-          <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} capacity={capacity} title={`${bot.name}：${capacity && lamp === 'idle' ? CAPACITY_LABEL : stateLabel}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+          <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} capacity={capacity} title={t('{name}：{status}{title}', { name: bot.name, status: capacity && lamp === 'idle' ? t.tr(CAPACITY_LABEL) : stateLabel, title: agentTitle && !showTitle ? t(' · {title}', { title: agentTitle }) : '' })} />
           {/* 黃點：紅色留給「要你本人回答」。 */}
           {kidsWait ? (
             <span
               className={`bot-kids-wait ${kidsWait}`}
               title={
                 kidsWait === 'busy'
-                  ? `${bot.name} 在等底下的子 agent 做完`
-                  : `${bot.name} 的子 agent 回報了，還沒有人看`
+                  ? t('{name} 在等底下的子 agent 做完', { name: bot.name })
+                  : t('{name} 的子 agent 回報了，還沒有人看', { name: bot.name })
               }
-              aria-label={kidsWait === 'busy' ? '等子 agent 完成' : '子 agent 已回報'}
+              aria-label={kidsWait === 'busy' ? t('等子 agent 完成') : t('子 agent 已回報')}
             />
           ) : null}
           {/* 未讀回合數，與燈號是兩件事；`!` 前綴免得截斷後被讀成模型參數。 */}
           {unread > 0 ? (
-            <span className="unread-turns" title={`${unread} 個回合已完成，還沒看過`}>
+            <span className="unread-turns" title={t('{n} 個回合已完成，還沒看過', { n: unread })}>
               !{unread > 99 ? '99+' : unread}
             </span>
           ) : null}
@@ -387,8 +391,8 @@ function BotRowImpl({
           aria-expanded={!collapsed}
           title={
             collapsed
-              ? `展開 ${childCount} 個子 agent${kidsLamp ? `（有子 agent ${LAMP_LABEL[kidsLamp]}）` : ''}`
-              : `收合 ${childCount} 個子 agent`
+              ? t('展開 {n} 個子 agent{lamp}', { n: childCount, lamp: kidsLamp ? t('（有子 agent {status}）', { status: t.tr(LAMP_LABEL[kidsLamp]) }) : '' })
+              : t('收合 {n} 個子 agent', { n: childCount })
           }
           onClick={(e) => {
             e.stopPropagation()
@@ -427,12 +431,12 @@ function BotRowImpl({
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
             {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
             {capacity ? (
-              <span className="bot-capacity" title={`${turnError ?? ''}｜${CAPACITY_TITLE}`}>
-                {CAPACITY_LABEL}
+              <span className="bot-capacity" title={t('{error}｜{title}', { error: turnError ?? '', title: t.tr(CAPACITY_TITLE) })}>
+                {t.tr(CAPACITY_LABEL)}
               </span>
             ) : turnError ? (
-              <span className="bot-turn-error" title={`${turnError}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則`}>
-                ⚠ 中斷
+              <span className="bot-turn-error" title={t('{error}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則', { error: turnError })}>
+                {t('⚠ 中斷')}
               </span>
             ) : null}
             {/* #714：回合結束但背景工作還在跑，「閒置」換成「背景執行中（N）」；精簡的 child 列沒有狀態字，給個小記號。 */}
@@ -444,7 +448,7 @@ function BotRowImpl({
           </BotNameField>
         </span>
         {hit ? (
-          <span className="bot-hit" title={`對話中有 ${hit.hits} 則提到`}>
+          <span className="bot-hit" title={t('對話中有 {n} 則提到', { n: hit.hits })}>
             <span className="bot-hit-n">{hit.hits}</span>
             <span className="bot-hit-text">{hit.snippet}</span>
           </span>
@@ -454,7 +458,7 @@ function BotRowImpl({
           {!showIdentity || compact ? null : divergedChildren ? (
             <span
               className="identity-diverged"
-              title={`底下有子 bot 用別的帳號（母 ${bot.identity ?? 'cc0'}、子 ${divergedChildren.identities}：${divergedChildren.names}）——額度分開算，注意別把那個帳號用光`}
+              title={t('底下有子 bot 用別的帳號（母 {parent}、子 {count}：{names}）——額度分開算，注意別把那個帳號用光', { parent: bot.identity ?? 'cc0', count: divergedChildren.identities, names: divergedChildren.names })}
             >
               <IdentityBadge
                 name={runningIdentity === undefined ? bot.identity : runningIdentity}
@@ -476,7 +480,7 @@ function BotRowImpl({
           {quotaWarning ? (
             <span
               className="bot-quota-chip crit"
-              title={`${KIND_LABEL[bot.kind]}${quotaWho ? ` · ${quotaWho}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
+              title={t('{kind}{who} {window} 額度剩 {pct}%，快用完了', { kind: KIND_LABEL[bot.kind], who: quotaWho ? t(' · {who}', { who: quotaWho }) : '', window: quotaWarning.window, pct: quotaWarning.pct })}
             >
               ⚠ {quotaWarning.pct}%
             </span>
@@ -484,7 +488,7 @@ function BotRowImpl({
             /* 黃燈：與頂端 QuotaStrip 一致；critical 優先用上面的短紅晶片。 */
             <span
               className={`bot-quota-chip ${quotaLevel.level}`}
-              title={`${KIND_LABEL[bot.kind]}${quotaWho ? ` · ${quotaWho}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
+              title={t('{kind}{who} {window} 額度剩 {pct}%', { kind: KIND_LABEL[bot.kind], who: quotaWho ? t(' · {who}', { who: quotaWho }) : '', window: quotaLevel.window, pct: quotaLevel.pct })}
             >
               {quotaLevel.window} {quotaLevel.pct}%
             </span>
@@ -492,7 +496,7 @@ function BotRowImpl({
         </span>
         {/* agent 標題獨佔一行：第二行擠進去會把模型截成 `op…`。 */}
         {showTitle ? (
-          <span className="bot-agent-title" title={`agent 目前的標題：${agentTitle}`}>
+          <span className="bot-agent-title" title={t('agent 目前的標題：{title}', { title: agentTitle })}>
             {agentTitle}
           </span>
         ) : null}
@@ -511,6 +515,7 @@ function BotRowImpl({
 const BotRow = memo(BotRowImpl)
 
 function NewProjectForm({ onDone }: { onDone: () => void }) {
+  useT()
   const addProject = useStore((s) => s.addProject)
   const hosts = useStore((s) => s.hosts)
   const [path, setPath] = useState('')
@@ -560,7 +565,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
       }}
     >
       <label className="field">
-        <span>主機</span>
+        <span>{t('主機')}</span>
         <select
           value={effectiveHost}
           onChange={(e) => {
@@ -573,16 +578,16 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
             }
           }}
         >
-          <option value="local">本機</option>
+          <option value="local">{t('本機')}</option>
           {hosts.map((h) => (
             <option key={h.name} value={h.name} disabled={!h.connected}>
-              {h.name}（{h.ssh}）{h.connected ? '' : ' — 未連線'}
+              {h.name}{t('（{ssh}）', { ssh: h.ssh })}{h.connected ? '' : t(' — 未連線')}
             </option>
           ))}
         </select>
       </label>
       <label className="field">
-        <span>目錄路徑{effectiveHost === 'local' ? '' : `（${effectiveHost} 上的絕對路徑）`}</span>
+        <span>{t('目錄路徑')}{effectiveHost === 'local' ? '' : t('（{host} 上的絕對路徑）', { host: effectiveHost })}</span>
         <div className="field-with-btn">
           <input
             type="text"
@@ -591,21 +596,21 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
             spellCheck={false}
             onChange={(e) => setPath(e.target.value)}
           />
-          <button type="button" className="btn" onClick={() => setBrowsing(true)} title="瀏覽目錄">
-            瀏覽…
+          <button type="button" className="btn" onClick={() => setBrowsing(true)} title={t('瀏覽目錄')}>
+            {t('瀏覽…')}
           </button>
         </div>
       </label>
       <label className="field">
-        <span>標籤（留白則取目錄名）</span>
+        <span>{t('標籤（留白則取目錄名）')}</span>
         <input type="text" value={label} placeholder="foo" onChange={(e) => setLabel(e.target.value)} />
       </label>
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
-          取消
+          {t('取消')}
         </button>
         <button type="submit" className="btn primary" disabled={!path.trim() || busy}>
-          新增
+          {t('新增')}
         </button>
       </div>
     </form>
@@ -639,6 +644,7 @@ function defaultKindForProject(projectId: string, tools: ReturnType<typeof tools
 }
 
 export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: () => void; initialProjectId?: string; onCreated?: (botId: string) => void }) {
+  const t = useT()
   const projects = useStore((s) => s.projects)
   const hosts = useStore((s) => s.hosts)
   const bots = useStore((s) => s.bots)
@@ -704,7 +710,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   }
 
   if (projects.length === 0) {
-    return <p className="hint">請先新增一個 Project。</p>
+    return <p className="hint">{t('請先新增一個 Project。')}</p>
   }
 
   return (
@@ -746,14 +752,14 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
     >
       {initialProjectId ? null : (
         <div className="field">
-          <span>Project</span>
+          <span>{t('Project')}</span>
           {projects.length > 6 ? (
             <input
               type="text"
               className="opt-filter"
               value={projectFilter}
-              placeholder="過濾 Project…"
-              aria-label="過濾 Project"
+              placeholder={t('過濾 Project…')}
+              aria-label={t('過濾 Project')}
               spellCheck={false}
               onChange={(e) => setProjectFilter(e.target.value)}
             />
@@ -769,7 +775,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
                   aria-checked={pid === p.id}
                   className={`opt${pid === p.id ? ' on' : ''}`}
                   disabled={!up}
-                  title={up ? p.path : `${p.label}（主機未連線）`}
+                  title={up ? p.path : t('{name}（主機未連線）', { name: p.label })}
                   onClick={() => {
                     setProjectId(p.id)
                     nameTouched.current = false
@@ -781,7 +787,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
               )
             })}
           </div>
-          {visibleProjects.length === 0 ? <span className="hint">沒有符合的 Project。</span> : null}
+          {visibleProjects.length === 0 ? <span className="hint">{t('沒有符合的 Project。')}</span> : null}
         </div>
       )}
       <div className="field">
@@ -789,7 +795,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {BOT_KINDS.map((k) => {
             const missing = !tools[k].installed
-            const reason = missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k
+            const reason = missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -806,7 +812,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
                 </button>
                 {missing ? (
                   <>
-                    <span className="kind-missing-reason">未安裝</span>
+                    <span className="kind-missing-reason">{t('未安裝')}</span>
                     <InstallToolButton host={host} kind={k} small />
                   </>
                 ) : null}
@@ -829,14 +835,14 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
       <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
       {defaultLoggedOut ? (
         <span className="hint identity-selection-warning" role="status">
-          {host === 'local' ? '本機' : host} 上的 {kind} 預設帳號還沒登入：bot 起來會停在登入畫面。先登入，或在上面選一個已登入的身份。
+          {t('{host} 上的 {kind} 預設帳號還沒登入：bot 起來會停在登入畫面。先登入，或在上面選一個已登入的身份。', { host: host === 'local' ? t('本機') : host, kind })}
           <button type="button" className="btn" onClick={() => void loginKindOnHost(host, kind, null)}>
-            登入 {kind}
+            {t('登入 {kind}', { kind })}
           </button>
         </span>
       ) : null}
       <label className="field">
-        <span id={nameLabelId}>名稱</span>
+        <span id={nameLabelId}>{t('名稱')}</span>
         <input
           ref={nameRef}
           type="text"
@@ -851,17 +857,17 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
             setName(e.target.value)
           }}
         />
-        {name && !nameOk ? <span id={nameHintId} className="hint">{BOT_NAME_HINT}</span> : null}
-        {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
+        {name && !nameOk ? <span id={nameHintId} className="hint">{t.tr(BOT_NAME_HINT)}</span> : null}
+        {!cliOk ? <span className="hint">{t('此 kind 的 CLI 尚未安裝，無法建立')}</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
       <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
-          取消
+          {t('取消')}
         </button>
         <button type="submit" className="btn primary" disabled={!canSubmit}>
-          {busy ? '建立中…' : '新增並啟動'}
+          {busy ? t('建立中…') : t('新增並啟動')}
         </button>
       </div>
     </form>
@@ -888,6 +894,7 @@ function ProjectTitle({
   /** 收合時把底下 bot 的未讀加總掛回標題。 */
   folded?: boolean
 }) {
+  useT()
   const selected = useStore((s) => s.selectedProjectId === projectId)
   const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
   // 排除規則跟分頁標題 `(N)` 同一份（`store/unread.ts`）：總管專案的不算，額度停用而被側欄
@@ -903,12 +910,12 @@ function ProjectTitle({
       </span>
       <ProjectNameField projectId={projectId} label={label} variant="row" armed={selected} editing={editing} onEditing={setEditing} />
       {unread > 0 ? (
-        <span className="unread-badge" title={`${unread} 則未讀的群組回覆`}>
+        <span className="unread-badge" title={t('{n} 則未讀的群組回覆', { n: unread })}>
           {unread > 99 ? '99+' : unread}
         </span>
       ) : null}
       {foldedUnread > 0 ? (
-        <span className="unread-turns" title={`收合的 Bot 裡有 ${foldedUnread} 個回合已完成，還沒看過`}>
+        <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
           !{foldedUnread > 99 ? '99+' : foldedUnread}
         </span>
       ) : null}
@@ -927,7 +934,7 @@ function ProjectTitle({
     <button
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
-      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}${draggable ? '\n拖曳可調整專案順序' : ''}`}
+      title={t('開啟「{name}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n{path}{drag}', { name: label, path, drag: draggable ? t('\n拖曳可調整專案順序') : '' })}
       // 不是開關，用 aria-current（同 bot 列）。
       aria-current={selected ? 'true' : undefined}
       onClick={(e) => {
@@ -979,6 +986,7 @@ function kidsWheel(e: WheelEvent) {
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
 export function Sidebar() {
+  const t = useT()
   // 手機搜尋框 16px（iOS 聚焦不放大），placeholder 括號說明放不下。
   const phone = useMediaQuery(PHONE_QUERY)
   const rawProjects = useStore((s) => s.projects)
@@ -1203,12 +1211,12 @@ export function Sidebar() {
   }, [])
 
   const botSheetProject = botFormFor ? projects.find((p) => p.id === botFormFor) : null
-  const botSheetLabel = botSheetProject?.label ?? '選擇 Project'
+  const botSheetLabel = botSheetProject?.label ?? t('選擇 Project')
 
   return (
     <>
       <span id={BOT_ROW_HINT_ID} className="sr-only">
-        Bot 順序可以拖曳調整，鍵盤按 Alt 加上下方向鍵移動一格。
+        {t('Bot 順序可以拖曳調整，鍵盤按 Alt 加上下方向鍵移動一格。')}
       </span>
       <div className="sidebar-head">
         <div className="head-brand">
@@ -1247,8 +1255,8 @@ export function Sidebar() {
           className="bot-search-input"
           value={query}
           spellCheck={false}
-          placeholder={phone ? '搜尋 bot…' : '搜尋 bot…（名稱、專案、模型、人設）'}
-          aria-label="搜尋 bot"
+          placeholder={phone ? t('搜尋 bot…') : t('搜尋 bot…（名稱、專案、模型、人設）')}
+          aria-label={t('搜尋 bot')}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             // 只擋 Escape；其他鍵放行給 window 的 ⌥↑/⌥↓（FRONTEND.md）。
@@ -1260,10 +1268,10 @@ export function Sidebar() {
           }}
         />
         {query ? (
-          <span className="bot-search-count" title={hitCount ? `其中 ${hitCount} 個是對話內容命中` : undefined}>
-            {matchCount} 個符合
-            {hitCount ? <span className="bot-search-hits">（{hitCount} 個含對話）</span> : null}
-            <button type="button" className="bot-search-clear" title="清除搜尋（Esc）" onClick={() => setQuery('')}>
+          <span className="bot-search-count" title={hitCount ? t('其中 {n} 個是對話內容命中', { n: hitCount }) : undefined}>
+            {t('{n} 個符合', { n: matchCount })}
+            {hitCount ? <span className="bot-search-hits">{t('（{n} 個含對話）', { n: hitCount })}</span> : null}
+            <button type="button" className="bot-search-clear" title={t('清除搜尋（Esc）')} onClick={() => setQuery('')}>
               ✕
             </button>
           </span>
@@ -1271,20 +1279,20 @@ export function Sidebar() {
       </div>
 
       {/* 不是 listbox：內含按鈕；各專案的 bot 各自是 list。 */}
-      <nav className="sidebar-scroll" aria-label="Bot 清單">
+      <nav className="sidebar-scroll" aria-label={t('Bot 清單')}>
         {query && matchCount === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
-            沒有符合「{query}」的 Bot。
+            {t('沒有符合「{query}」的 Bot。', { query })}
           </p>
         ) : null}
         {/* 未連線時空清單是「還不知道」，不是「沒有專案」。 */}
         {projects.length === 0 && socket !== 'open' ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
-            正在連線 daemon，稍等一下就會列出 Project…
+            {t('正在連線 daemon，稍等一下就會列出 Project…')}
           </p>
         ) : projects.length === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
-            尚未設定任何 Project。請用下方的「新增 Project」開始。
+            {t('尚未設定任何 Project。請用下方的「新增 Project」開始。')}
           </p>
         ) : null}
         {projects.map((p) => {
@@ -1354,7 +1362,7 @@ export function Sidebar() {
                   type="button"
                   className={`project-fold${projectShut ? ' shut' : ''}`}
                   aria-expanded={!projectShut}
-                  title={projectShut ? `展開 ${p.label}（${all.length} 個 Bot）` : `收合 ${p.label}`}
+                  title={projectShut ? t('展開 {name}（{n} 個 Bot）', { name: p.label, n: all.length }) : t('收合 {name}', { name: p.label })}
                   onClick={(e) => {
                     e.stopPropagation()
                     toggleProject(p.id)
@@ -1367,7 +1375,7 @@ export function Sidebar() {
                 <span className="project-head-actions" onClick={(e) => e.stopPropagation()}>
                   <ProjectAddMenu label={p.label} onBot={() => openBotSheet(p.id)} onSchedule={() => setScheduleEditor({ projectId: p.id, scheduleId: null })} />
                   {/* 刪除這種破壞性動作收進 ⋯，不跟 ＋ 並排。 */}
-                  <HeadMoreMenu label={`更多動作 · ${p.label}`}>
+                  <HeadMoreMenu label={t('更多動作 · {name}', { name: p.label })}>
                     <button
                       type="button"
                       className="head-menu-item"
@@ -1375,15 +1383,15 @@ export function Sidebar() {
                       disabled={!hostUp(p.host)}
                       title={
                         hostUp(p.host)
-                          ? `在 ${p.host === 'local' ? '本機' : p.host} 的 ${p.path} 開一個 shell`
-                          : '主機未連線，開不了 shell'
+                          ? t('在 {host} 的 {path} 開一個 shell', { host: p.host === 'local' ? t('本機') : p.host, path: p.path })
+                          : t('主機未連線，開不了 shell')
                       }
                       onClick={(e) => {
                         e.stopPropagation()
                         void openHostShell(p.host, p.path)
                       }}
                     >
-                      在這裡開 shell
+                      {t('在這裡開 shell')}
                     </button>
                     <button
                       type="button"
@@ -1394,29 +1402,29 @@ export function Sidebar() {
                         setDeleteProject({ id: p.id, label: p.label })
                       }}
                     >
-                      刪除專案…
+                      {t('刪除專案…')}
                     </button>
                   </HeadMoreMenu>
                 </span>
               </header>
               {projectShut ? (
                 <button type="button" className="project-folded" onClick={() => toggleProject(p.id)}>
-                  {all.length} 個 Bot·點一下展開
+                  {t('{n} 個 Bot·點一下展開', { n: all.length })}
                 </button>
               ) : list.length === 0 && hiddenCount > 0 ? (
                 // 全被隱藏：同空專案版面，但標「已隱藏」讓人知道 bot 沒不見。
                 <div className="project-empty">
-                  <span className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</span>
+                  <span className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（額度不足）', { n: hiddenCount })}</span>
                   <QuickAddBots projectId={p.id} />
                 </div>
               ) : list.length === 0 ? (
                 <div className="project-empty">
-                  <span className="project-empty-title">此專案尚無 Bot</span>
+                  <span className="project-empty-title">{t('此專案尚無 Bot')}</span>
                   <QuickAddBots projectId={p.id} />
                 </div>
               ) : (
                 // 子清單是父列的兄弟，靠 aria-owns 掛回，巢狀 list 才合法。
-                <div className="bot-list" role="list" aria-label={`${p.label} 的 Bot`}>
+                <div className="bot-list" role="list" aria-label={t('{name} 的 Bot', { name: p.label })}>
                 {list.map((b) => {
                   const kids = descendantsOf(b.id)
                   // 搜尋中一律展開。
@@ -1441,7 +1449,7 @@ export function Sidebar() {
                         onStep={step}
                       />
                       {shut || kids.length === 0 ? null : (
-                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} ref={kidsWheelRef}>
+                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
                           {kids.map((c, i) => (
                             <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
                               <BotRow
@@ -1468,7 +1476,7 @@ export function Sidebar() {
               {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
-                <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
+                <p className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（額度不足）', { n: hiddenCount })}</p>
               ) : null}
             </section>
           )
@@ -1478,21 +1486,21 @@ export function Sidebar() {
       <div className="sidebar-foot">
         <div className="sidebar-foot-actions">
           <button type="button" className="btn" onClick={() => setOpen('project')}>
-            新增 Project
+            {t('新增 Project')}
           </button>
           <button type="button" className="btn" onClick={() => openBotSheet(selectedProjectId ?? selectedBotProject ?? projects[0]?.id)} disabled={projects.length === 0}>
-            新增 Bot
+            {t('新增 Bot')}
           </button>
         </div>
 
         <button
           type="button"
           className="disclosure"
-          title="在本機開一個 shell，直接下指令"
+          title={t('在本機開一個 shell，直接下指令')}
           onClick={() => void openHostShell(LOCAL_HOST)}
         >
-          <TerminalIcon /> 開 shell
-          <span className="disclosure-note">本機</span>
+          <TerminalIcon /> {t('開 shell')}
+          <span className="disclosure-note">{t('本機')}</span>
         </button>
         {/* 對不到專案的 pane（含 scratch）放這裡，不掛在任何專案底下（SPEC §6.5e）。 */}
         <SidebarUnownedPanes />
@@ -1504,22 +1512,22 @@ export function Sidebar() {
           aria-expanded={open === 'env'}
           onClick={() => setOpen('env')}
         >
-          <GearIcon /> 環境設定
+          <GearIcon /> {t('環境設定')}
           <span className="disclosure-note">
-            {hosts.length === 0 ? '本機' : `本機 + ${hosts.length}`}
-            {hostsDown > 0 ? ` ・ ${hostsDown} 未連線` : ''}
-            {` ・ 身分 ${identityCount}`}
+            {hosts.length === 0 ? t('本機') : t('本機 + {n}', { n: hosts.length })}
+            {hostsDown > 0 ? t('・ {n} 未連線', { n: hostsDown }) : ''}
+            {t('・ 身分 {n}', { n: identityCount })}
           </span>
         </button>
       </div>
 
-      <Modal open={open === 'project'} title="新增 Project" onClose={() => setOpen(null)}>
+      <Modal open={open === 'project'} title={t('新增 Project')} onClose={() => setOpen(null)}>
         <NewProjectForm onDone={() => setOpen(null)} />
       </Modal>
 
       <Modal
         open={botSheetOpen}
-        title="新增 Bot"
+        title={t('新增 Bot')}
         subtitle={<span title={botSheetProject?.path}>{botSheetLabel}</span>}
         onClose={closeBotSheet}
       >
@@ -1537,26 +1545,19 @@ export function Sidebar() {
 
       <ConfirmDialog
         open={deleteProject !== null}
-        title="刪除 Project"
+        title={t('刪除 Project')}
         body={
           <>
-            要把 <strong>{deleteProject?.label}</strong>
-            {deleteTarget ? (
-              <>
-                （{deleteTarget.host === LOCAL_HOST ? '本機' : deleteTarget.host} <code>{deleteTarget.path}</code>）
-              </>
-            ) : null}{' '}
-            從清單移除嗎？磁碟上的目錄與其中的檔案都不會動
-            {deleteBlockers.total > 0 ? `，底下 ${deleteBlockers.total} 個 Bot 的設定會一起移除` : ''}。
+            {t.x('要把 {name}{target} 從清單移除嗎？磁碟上的目錄與其中的檔案都不會動{children}。', { name: <strong>{deleteProject?.label}</strong>, target: deleteTarget ? t.x('（{host} {path}）', { host: deleteTarget.host === LOCAL_HOST ? t('本機') : deleteTarget.host, path: <code>{deleteTarget.path}</code> }) : '', children: deleteBlockers.total > 0 ? t('，底下 {n} 個 Bot 的設定會一起移除', { n: deleteBlockers.total }) : '' })}
             {deleteBlockers.active > 0 ? (
               <>
                 <br />
-                <strong>仍有 {deleteBlockers.active} 個 Bot 在跑</strong>，需先停止才能刪除。
+                <strong>{t('仍有 {n} 個 Bot 在跑', { n: deleteBlockers.active })}</strong>{t('，需先停止才能刪除。')}
               </>
             ) : null}
           </>
         }
-        confirmLabel="刪除 Project"
+        confirmLabel={t('刪除 Project')}
         confirmDisabled={deleteBlockers.active > 0}
         danger
         onCancel={() => setDeleteProject(null)}
@@ -1567,7 +1568,7 @@ export function Sidebar() {
         }}
       />
 
-      <Modal open={open === 'env'} title="環境設定" width={960} onClose={() => setOpen(null)}>
+      <Modal open={open === 'env'} title={t('環境設定')} width={960} onClose={() => setOpen(null)}>
         <EnvShell />
       </Modal>
     </>

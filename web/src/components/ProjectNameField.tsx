@@ -3,6 +3,7 @@ import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 import { isImeEnter } from '../lib/ime'
 import { useStore } from '../store/store'
+import { t, useT } from '../lib/i18n'
 import './projectNameField.css'
 
 /**
@@ -25,6 +26,7 @@ export function ProjectNameField({
   editing: boolean
   onEditing: (v: boolean) => void
 }) {
+  useT()
   const patchProject = useStore((s) => s.patchProject)
   const [draft, setDraft] = useState(label)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -64,7 +66,7 @@ export function ProjectNameField({
         className={`project-label-input ${variant}${trimmed ? '' : ' bad'}`}
         value={draft}
         spellCheck={false}
-        aria-label="Project 名稱"
+        aria-label={t('Project 名稱')}
         size={Math.max(8, draft.length + 1)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
@@ -99,7 +101,7 @@ export function ProjectNameField({
     return (
       <span
         className={`project-label${armed ? ' renamable' : ''}`}
-        title={armed ? `${label} · 點一下改名` : undefined}
+        title={armed ? t('{name} · 點一下改名', { name: label }) : undefined}
         onClick={
           armed
             ? (e) => {
@@ -115,7 +117,7 @@ export function ProjectNameField({
   }
 
   return (
-    <button type="button" className="project-label-head-btn" title={`${label} · 點一下改名`} onClick={start}>
+    <button type="button" className="project-label-head-btn" title={t('{name} · 點一下改名', { name: label })} onClick={start}>
       <strong>{label}</strong>
     </button>
   )

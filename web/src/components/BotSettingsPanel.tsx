@@ -17,6 +17,7 @@ import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { computeBotPatch, effectiveForm, pruneSaved, settledKeys, type BotFormKey, type BotFormValues } from './botSettingsForm'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
+import { msg, t, useT } from '../lib/i18n'
 import './botSettings.css'
 
 /**
@@ -26,6 +27,7 @@ import './botSettings.css'
 
 /** v4.0 人設：auto-growing textarea; empty = null. */
 export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
+  useT()
   const [open, setOpen] = useState(!collapsible || Boolean(value))
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -37,21 +39,21 @@ export function PersonaField({ value, onChange, collapsible }: { value: string; 
   if (collapsible && !open) {
     return (
       <button type="button" className="disclosure sub persona-toggle" aria-expanded={false} onClick={() => setOpen(true)}>
-        <span className="chev">▶</span> 人設（選填）
+        <span className="chev">▶</span> {t('人設（選填）')}
       </button>
     )
   }
   return (
     <label className="field persona-field">
       <span>
-        人設{collapsible ? '（選填）' : ''}
-        <span className="field-note">啟動時作為 system prompt 前置文字</span>
+        {t('人設')}{collapsible ? t('（選填）') : ''}
+        <span className="field-note">{t('啟動時作為 system prompt 前置文字')}</span>
       </span>
       <textarea
         ref={ref}
         value={value}
         rows={2}
-        placeholder="你是這個專案的 PM，回覆用繁體中文、先給結論"
+        placeholder={t('你是這個專案的 PM，回覆用繁體中文、先給結論')}
         onChange={(e) => onChange(e.target.value)}
       />
     </label>
@@ -60,12 +62,13 @@ export function PersonaField({ value, onChange, collapsible }: { value: string; 
 
 /** Small marker shown next to a bot that has a persona; hover = the first 80 chars. */
 export function PersonaMark({ persona }: { persona: string | null }) {
+  useT()
   if (!persona) return null
   // 以 code point 計：`slice` 會把 emoji 的代理對切成兩半（#1702）。
   const chars = Array.from(persona)
   const short = chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : persona
   return (
-    <span className="persona-mark" role="img" aria-label="有人設" title={`人設：${short}`}>
+    <span className="persona-mark" role="img" aria-label={t('有人設')} title={t('人設：{short}', { short })}>
       <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
         <path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
         <path d="M5 6.5h6M5 8.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -78,20 +81,20 @@ export function PersonaMark({ persona }: { persona: string | null }) {
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
   if (!st) {
     return {
-      mark: '未知',
-      title: `還沒有 ${hostLabel} 上這個身份的 auth status 結果。不要把它當成已登入，先按「重新偵測」或「登入」。`,
+      mark: msg('未知'),
+      title: t('還沒有 {host} 上這個身份的 auth status 結果。不要把它當成已登入，先按「重新偵測」或「登入」。', { host: hostLabel }),
     }
   }
   if (st.logged_in === false) {
     return {
-      mark: '未登入',
-      title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+      mark: msg('未登入'),
+      title: t('這個身份在 {host} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 {host} 用這個身份的設定登入，再回來按「重新偵測」。', { host: hostLabel }),
     }
   }
   if (st.logged_in === null) {
     return {
-      mark: '未知',
-      title: `無法確認這個身份在 ${hostLabel} 的登入狀態：${st.reason ?? 'auth status 沒有可解析的結果'}。不要把它當成已登入，先修正原因或重新偵測。`,
+      mark: msg('未知'),
+      title: t('無法確認這個身份在 {host} 的登入狀態：{reason}。不要把它當成已登入，先修正原因或重新偵測。', { host: hostLabel, reason: st.reason ?? t('auth status 沒有可解析的結果') }),
     }
   }
   return null
@@ -102,15 +105,15 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
   const envText = envDisplayText(env).split('\n').join(' ')
   const parts = [envText]
   if (st?.logged_in === true) {
-    parts.push(`${hostLabel}：已登入${st.account ? ` — ${st.account}` : ''}${st.plan ? `（${st.plan}）` : ''}`)
+    parts.push(t('{host}：已登入{account}{plan}', { host: hostLabel, account: st.account ? t(' — {account}', { account: st.account }) : '', plan: st.plan ? t('（{plan}）', { plan: st.plan }) : '' }))
   } else if (st?.logged_in === false) {
-    parts.push(`${hostLabel}：未登入`)
+    parts.push(t('{host}：未登入', { host: hostLabel }))
   } else {
-    parts.push(`${hostLabel}：登入狀態未知${st?.reason ? ` — ${st.reason}` : ''}`)
+    parts.push(t('{host}：登入狀態未知{reason}', { host: hostLabel, reason: st?.reason ? ` — ${st.reason}` : '' }))
   }
   // shell alias 身份不在 config.toml，改不了也刪不掉——講清楚來源。
   if (st?.source === 'shell') {
-    parts.push(`來自 ${hostLabel} 的 shell alias（ccN），不是 config.toml`)
+    parts.push(t('來自 {host} 的 shell alias（ccN），不是 config.toml', { host: hostLabel }))
   }
   return parts.filter(Boolean).join('\n')
 }
@@ -151,6 +154,7 @@ export function IdentityOptions({
   value: string
   onChange: (v: string) => void
 }) {
+  const t = useT()
   // Filter outside the selector: a fresh array re-renders forever (React #185).
   const all = useStore((s) => s.identities)
   const status = useStore((s) => identityStatusOfHost(s, host))
@@ -166,26 +170,26 @@ export function IdentityOptions({
     return ofKind.filter((i) => i.name === value || live.some((l) => l.name === i.name))
   }, [all, status, kind, disabledList, host, value])
   if (identities.length === 0) return null
-  const hostLabel = !host || host === 'local' ? '本機' : host
+  const hostLabel = !host || host === 'local' ? t('本機') : host
   const selectedStatus = value ? status[value] : undefined
   const selectedWarning = value ? identityWarning(selectedStatus, hostLabel) : null
   return (
     <div className="field identity-field">
       <span>
-        身份
+        {t('身份')}
         <button
           type="button"
           className="identity-recheck"
           disabled={busy}
-          title={`重新問 ${hostLabel} 上的 CLI 每個身份是否已登入`}
+          title={t('重新問 {host} 上的 CLI 每個身份是否已登入', { host: hostLabel })}
           onClick={() => void refreshTools(host)}
         >
-          {busy ? '偵測中…' : '重新偵測'}
+          {busy ? t('偵測中…') : t('重新偵測')}
         </button>
       </span>
-      <div className="opt-group" role="radiogroup" aria-label="身份">
+      <div className="opt-group" role="radiogroup" aria-label={t('身份')}>
         <button type="button" role="radio" aria-checked={value === ''} className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
-          不指定身分（{!host || host === 'local' ? '本機預設' : `${host} 的預設帳號`}）
+          {t('不指定身分（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })}
         </button>
         {identities.map((i) => {
           const st = status[i.name]
@@ -197,7 +201,7 @@ export function IdentityOptions({
                 role="radio"
                 aria-checked={value === i.name}
                 // 警示併進名稱：讀屏走到這顆就知道它沒登入（下面那個標記是給眼睛看的）。
-                aria-label={warn ? `${i.name}（${warn.mark}）` : undefined}
+                aria-label={warn ? t('{name}（{status}）', { name: i.name, status: t.tr(warn.mark) }) : undefined}
                 className={`opt${value === i.name ? ' on' : ''}`}
                 title={identityTitle(i.env, st, hostLabel)}
                 onClick={() => onChange(i.name)}
@@ -205,8 +209,8 @@ export function IdentityOptions({
                 {i.name}
               </button>
               {warn ? (
-                <span aria-hidden="true" className={`identity-logged-out${warn.mark === '未知' ? ' is-unknown' : ''}`} title={warn.title}>
-                  {warn.mark}
+                <span aria-hidden="true" className={`identity-logged-out${warn.mark === msg('未知') ? ' is-unknown' : ''}`} title={warn.title}>
+                  {t.tr(warn.mark)}
                 </span>
               ) : null}
             </span>
@@ -215,12 +219,12 @@ export function IdentityOptions({
       </div>
       {identities.some((i) => status[i.name]?.logged_in !== true) ? (
         <span className="hint">
-          標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面；標「未知」的身份則尚未確認，請先看提示原因。
+          {t('標「未登入」的身份在 {host} 上沒有帳號，選了它 bot 會停在登入畫面；標「未知」的身份則尚未確認，請先看提示原因。', { host: hostLabel })}
         </span>
       ) : null}
       {selectedWarning ? (
-        <span className={`hint identity-selection-warning${selectedWarning.mark === '未知' ? ' is-unknown' : ''}`}>
-          已選「{value}」：{selectedWarning.mark === '未登入' ? '未登入，bot 會停在登入畫面。' : `登入狀態未知（${selectedStatus?.reason ?? '尚未取得 auth status 結果'}）。`}
+        <span className={`hint identity-selection-warning${selectedWarning.mark === msg('未知') ? ' is-unknown' : ''}`}>
+          {t('已選「{identity}」：{status}', { identity: value, status: selectedWarning.mark === msg('未登入') ? t('未登入，bot 會停在登入畫面。') : t('登入狀態未知（{reason}）。', { reason: selectedStatus?.reason ?? t('尚未取得 auth status 結果') }) })}
         </span>
       ) : null}
     </div>
@@ -228,6 +232,7 @@ export function IdentityOptions({
 }
 
 export function BotSettingsPanel({ botId }: { botId: string }) {
+  const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === botId)?.project_id))
   const host = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null))
@@ -380,15 +385,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation">
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal={phone ? 'true' : undefined} aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal={phone ? 'true' : undefined} aria-label={t('Bot 設定')}>
         <div className="bs-head">
-          <strong>Bot 設定</strong>
+          <strong>{t('Bot 設定')}</strong>
           <span className="spacer" />
-          <button type="button" className="icon-btn bs-close" onClick={closeSettings} aria-label="關閉設定">
+          <button type="button" className="icon-btn bs-close" onClick={closeSettings} aria-label={t('關閉設定')}>
             ✕
           </button>
         </div>
-        <p className="msg-empty">這個 Bot 已不存在。</p>
+        <p className="msg-empty">{t('這個 Bot 已不存在。')}</p>
       </div>
       </div>
     )
@@ -398,7 +403,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   // 同 daemon `valid_bot_name`（送出去不前後裁空白）：不符就停用儲存，原因寫在欄位下面。
   const nameOk = isValidBotName(name)
   const nameBad = touched.has('name') && name !== '' && !nameOk
-  const hostLabel = !host || host === 'local' ? '本機' : host
+  const hostLabel = !host || host === 'local' ? t('本機') : host
   /** claude 用獨立終端跑 `claude auth login`（`startCliLogin`）；grok 仍把 `/login` 送進 Bot 的畫面。 */
   const cliLogin = bot.kind === 'claude'
 
@@ -441,7 +446,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       })
       setBanner(res.needsRestart ? 'restart' : res.deferred ? null : 'saved')
       // 被換掉時 `store.patchBot` 已經講了一句，不要再疊一則「已儲存」。
-      if (!res.needsRestart && !res.remappedModel) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
+      if (!res.needsRestart && !res.remappedModel) notify('info', t('已儲存 {name} 的設定', { name: patch.name ?? bot.name }))
     })
   }
 
@@ -465,12 +470,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       style={pos ? { left: pos.left, top: pos.top, maxHeight: pos.maxHeight } : undefined}
       role="dialog"
       aria-modal={phone ? 'true' : undefined}
-      aria-label={`${bot.name} 的設定`}
+      aria-label={t('{name} 的設定', { name: bot.name })}
     >
       <UnsavedGuard dirty={dirty} />
       <LeaveGuard dirty={dirty} onBlocked={() => setCloseConfirmOpen(true)} />
       <div className="bs-head">
-        <strong>Bot 設定</strong>
+        <strong>{t('Bot 設定')}</strong>
         <KindTag kind={bot.kind} />
         <span className="bs-sub" title={project?.path}>
           {bot.name}
@@ -478,7 +483,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         {/* 識別放標題列（2026-09-13 使用者）。 */}
         <RunIdents botId={botId} />
         <span className="spacer" />
-        <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
+        <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label={t('關閉設定')} title={t('關閉，回到對話')}>
           ✕
         </button>
       </div>
@@ -487,15 +492,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       {/* 儲存中：daemon 先寫 config 推 `bot_changed`、再當場套用（claude `/effort` 之類），這段時間 state 的
           `needs_restart` 暫時是真的；套用成功就清掉。等 PATCH 回應（daemon 的判斷）再決定要不要出重啟橫幅。 */}
       {saving ? (
-        <div className="bs-banner ok" role="status">套用中…</div>
+        <div className="bs-banner ok" role="status">{t('套用中…')}</div>
       ) : null}
       {/* 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。 */}
       {!saving && (banner === 'restart' || (banner === null && bot.needs_restart)) ? (
         <div className="bs-banner warn" role="status">
           {child ? (
-            <span>已儲存，設定要重啟才生效，由父 Bot 安排重啟（目前的 Run 仍跑在舊參數上）。</span>
+            <span>{t('已儲存，設定要重啟才生效，由父 Bot 安排重啟（目前的 Run 仍跑在舊參數上）。')}</span>
           ) : (
-            <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
+            <span>{t('已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。')}</span>
           )}
           {child ? null : <button
             type="button"
@@ -509,12 +514,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 setRestarting(false)
                 if (ok) {
                   setBanner(null)
-                  notify('info', `${bot.name} 已重新啟動`)
+                  notify('info', t('{name} 已重新啟動', { name: bot.name }))
                 }
               })
             }}
           >
-            {restarting ? '重啟中…' : '立即重啟'}
+            {restarting ? t('重啟中…') : t('立即重啟')}
           </button>}
         </div>
       ) : null}
@@ -522,13 +527,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-banner ok" role="status">
           <span>
             {running
-              ? '✓ 已套用，不用重啟。'
-              : '✓ 已儲存（Bot 未在執行中，下次啟動就會套用）。'}
+              ? t('✓ 已套用，不用重啟。')
+              : t('✓ 已儲存（Bot 未在執行中，下次啟動就會套用）。')}
           </span>
         </div>
       ) : null}
       {!saving && banner === null && bot.live_apply_deferred ? (
-        <div className="bs-banner ok" role="status">已儲存，回合結束後自動套用。</div>
+        <div className="bs-banner ok" role="status">{t('已儲存，回合結束後自動套用。')}</div>
       ) : null}
 
       <div className="bs-body">
@@ -541,7 +546,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           }}
         >
           <label className="field">
-            <span id={nameLabelId}>名稱</span>
+            <span id={nameLabelId}>{t('名稱')}</span>
             <input
               ref={nameRef}
               type="text"
@@ -556,7 +561,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 setName(e.target.value)
               }}
             />
-            {nameBad ? <span id={nameHintId} className="hint">{BOT_NAME_HINT}</span> : null}
+            {nameBad ? <span id={nameHintId} className="hint">{t.tr(BOT_NAME_HINT)}</span> : null}
           </label>
 
           <ApiModelFields
@@ -590,7 +595,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           />
           {canLoginInSession(bot.kind) ? (
             <div className="field account-field">
-              <span>帳號</span>
+              <span>{t('帳號')}</span>
               <div className="bs-login-row">
                 <button
                   type="button"
@@ -598,60 +603,59 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                   disabled={cliLogin ? cliOpening : !running || loginBusy}
                   title={
                     cliLogin
-                      ? `在 ${hostLabel} 開獨立終端跑 claude auth login（${bot.identity ?? '預設帳號'}）`
+                      ? t('在 {host} 開獨立終端跑 claude auth login（{identity}）', { host: hostLabel, identity: bot.identity ?? t('預設帳號') })
                       : running
-                      ? `對 ${bot.name} 的 ${bot.kind} 送 /login`
-                      : '這個 Bot 沒在跑，沒有畫面可以送指令'
+                      ? t('對 {name} 的 {kind} 送 /login', { name: bot.name, kind: bot.kind })
+                      : t('這個 Bot 沒在跑，沒有畫面可以送指令')
                   }
                   onClick={() => setLoginOpen(true)}
                 >
-                  {loginBusy || cliOpening ? '送出中…' : '登入 / 切換帳號'}
+                  {loginBusy || cliOpening ? t('送出中…') : t('登入 / 切換帳號')}
                 </button>
                 {loginSent ? (
                   <button
                     type="button"
                     className="identity-recheck"
                     disabled={toolsBusy}
-                    title={`重新問 ${hostLabel} 上的 CLI 現在登入了誰`}
+                    title={t('重新問 {host} 上的 CLI 現在登入了誰', { host: hostLabel })}
                     onClick={() => void refreshTools(host)}
                   >
-                    {toolsBusy ? '偵測中…' : '登入好了，重新偵測'}
+                    {toolsBusy ? t('偵測中…') : t('登入好了，重新偵測')}
                   </button>
                 ) : null}
               </div>
               <span className="hint">
                 {cliLogin ? (
                   <>
-                    會在 {hostLabel} 開一個獨立終端跑 <code>claude auth login</code>，這個 Bot 的畫面不受影響。
+                    {t.x('會在 {host} 開一個獨立終端跑 {command}，這個 Bot 的畫面不受影響。', { host: hostLabel, command: <code>claude auth login</code> })}
                   </>
                 ) : running ? (
                   <>
-                    會對這個 Bot 的 {bot.kind} 送 <code>/login</code>：畫面切到登入流程，通常會跳出瀏覽器要你在那邊完成。
-                    <strong>完成之前這個 Bot 不能工作。</strong>
+                    {t.x('會對這個 Bot 的 {kind} 送 {command}：畫面切到登入流程，通常會跳出瀏覽器要你在那邊完成。', { kind: bot.kind, command: <code>/login</code> })}
+                    <strong>{t('完成之前這個 Bot 不能工作。')}</strong>
                   </>
                 ) : (
-                  '這個 Bot 沒在跑，沒有畫面可以送指令。先啟動它再回來按。'
+                  t('這個 Bot 沒在跑，沒有畫面可以送指令。先啟動它再回來按。')
                 )}
               </span>
             </div>
           ) : (
             // codex TUI 只有 `/logout`：不給必定失敗的按鈕，改說去哪登入。
             <div className="field account-field">
-              <span>帳號</span>
+              <span>{t('帳號')}</span>
               <div className="bs-login-row">
                 <button
                   type="button"
                   className="identity-recheck"
                   disabled={toolsBusy}
-                  title={`重新問 ${hostLabel} 上的 CLI 現在登入了誰`}
+                  title={t('重新問 {host} 上的 CLI 現在登入了誰', { host: hostLabel })}
                   onClick={() => void refreshTools(host)}
                 >
-                  {toolsBusy ? '偵測中…' : '重新偵測'}
+                  {toolsBusy ? t('偵測中…') : t('重新偵測')}
                 </button>
               </div>
               <span className="hint">
-                {bot.kind} 的 TUI 沒有登入指令（只有 <code>/logout</code>），沒辦法從這裡登入。
-                請在 {hostLabel} 上執行 <code>{bot.kind} login</code>，再回來按「重新偵測」。
+                {t.x('{kind} 的 TUI 沒有登入指令（只有 {logout}），沒辦法從這裡登入。請在 {host} 上執行 {login}，再回來按「重新偵測」。', { kind: bot.kind, logout: <code>/logout</code>, host: hostLabel, login: <code>{bot.kind} login</code> })}
               </span>
             </div>
           )}
@@ -668,7 +672,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 }
               }}
             />
-            人設
+            {t('人設')}
           </label>
           {personaOn ? (
             <PersonaField
@@ -686,7 +690,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}
         <div className="bs-danger bare">
           <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
-            刪除 Bot
+            {t('刪除 Bot')}
           </button>
         </div>
       </div>
@@ -694,44 +698,43 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       {interruptsTurn ? (
         <div className="bs-banner warn" role="note">
           <span>
-            這顆正在跑回合：儲存會先按 Esc 停下目前回合，套用新設定後自動送出 <code>continue</code> 接著跑（立即生效，不用等回合結束）。
+            {t.x('這顆正在跑回合：儲存會先按 Esc 停下目前回合，套用新設定後自動送出 {command} 接著跑（立即生效，不用等回合結束）。', { command: <code>continue</code> })}
           </span>
         </div>
       ) : null}
       <div className="bs-actions">
-        <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>
+        <span className="hint">{dirty ? t('已變更：{keys}', { keys: changedKeys.join(', ') }) : t('沒有變更')}</span>
         <span className="spacer" />
         <button type="button" className="btn" onClick={requestClose}>
-          關閉
+          {t('關閉')}
         </button>
         <button type="submit" form={`bot-settings-form-${botId}`} className="btn primary" disabled={!canSave}>
-          {saving ? '儲存中…' : '儲存'}
+          {saving ? t('儲存中…') : t('儲存')}
         </button>
       </div>
 
       {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚；claude 改用獨立終端跑 CLI，不佔 Bot 的畫面。 */}
       <ConfirmDialog
         open={loginOpen}
-        title={cliLogin ? '開終端用 CLI 登入？' : '送出登入指令？'}
+        title={cliLogin ? t('開終端用 CLI 登入？') : t('送出登入指令？')}
         body={
           cliLogin ? (
             <>
-              會在 <strong>{hostLabel}</strong> 開一個獨立終端，帶 <strong>{bot.identity ?? '預設帳號'}</strong> 的設定跑 <code>claude auth login</code>，
-              通常會跳出瀏覽器要你完成授權（沒跳就照終端上的網址開、把 code 貼回去）。
+              {t.x('會在 {host} 開一個獨立終端，帶 {identity} 的設定跑 {command}，通常會跳出瀏覽器要你完成授權（沒跳就照終端上的網址開、把 code 貼回去）。', { host: <strong>{hostLabel}</strong>, identity: <strong>{bot.identity ?? t('預設帳號')}</strong>, command: <code>claude auth login</code> })}
               <br />
-              <strong>{bot.name} 的畫面不會被登入流程佔住</strong>；登完 CLI 自己結束{bot.identity ? '，終端會收掉、身份會重新偵測' : ''}。
+              <strong>{t('{name} 的畫面不會被登入流程佔住', { name: bot.name })}</strong>{t('；登完 CLI 自己結束{extra}。', { extra: bot.identity ? t('，終端會收掉、身份會重新偵測') : '' })}
             </>
           ) : (
           <>
-            會對 <strong>{bot.name}</strong> 的 agent 送 <code>/login</code>。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。
+            {t.x('會對 {name} 的 agent 送 {command}。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。', { name: <strong>{bot.name}</strong>, command: <code>/login</code> })}
             <br />
-            <strong>在你完成登入之前，這個 Bot 不能工作</strong>——這期間送給它的訊息會卡住。
+            <strong>{t('在你完成登入之前，這個 Bot 不能工作')}</strong>{t('——這期間送給它的訊息會卡住。')}
             <br />
-            登入完成後回到這裡按「重新偵測」，身份狀態才會更新。
+            {t('登入完成後回到這裡按「重新偵測」，身份狀態才會更新。')}
           </>
           )
         }
-        confirmLabel={cliLogin ? '開終端登入' : '送出 /login'}
+        confirmLabel={cliLogin ? t('開終端登入') : t('送出 /login')}
         width={400}
         onCancel={() => setLoginOpen(false)}
         onConfirm={() => {
@@ -744,20 +747,20 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           void loginBot(botId).then((ok) => {
             if (!ok) return
             setLoginSent(true)
-            notify('info', `已送出 /login 給 ${bot.name}，請到它的畫面完成登入`)
+            notify('info', t('已送出 /login 給 {name}，請到它的畫面完成登入', { name: bot.name }))
           })
         }}
       />
 
       <ConfirmDialog
         open={closeConfirmOpen}
-        title="放棄未儲存的變更？"
+        title={t('放棄未儲存的變更？')}
         body={
           <>
-            <strong>{bot.name}</strong> 的設定尚未儲存（{changedKeys.join(', ')}）。關閉將遺失這些變更。
+            {t.x('{name} 的設定尚未儲存（{keys}）。關閉將遺失這些變更。', { name: <strong>{bot.name}</strong>, keys: changedKeys.join(', ') })}
           </>
         }
-        confirmLabel="放棄並關閉"
+        confirmLabel={t('放棄並關閉')}
         danger
         width={360}
         onCancel={() => setCloseConfirmOpen(false)}
@@ -769,19 +772,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
       <ConfirmDialog
         open={deleteOpen}
-        title="刪除 Bot"
+        title={t('刪除 Bot')}
         body={
           <>
-            確定刪除 <strong>{bot.name}</strong>
-            {project ? (
-              <>
-                （專案 <strong>{project.label}</strong>）
-              </>
-            ) : null}
-            ？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。
+            {t.x('確定刪除 {bot}{project}？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。', { bot: <strong>{bot.name}</strong>, project: project ? t.x('（專案 {name}）', { name: <strong>{project.label}</strong> }) : '' })}
           </>
         }
-        confirmLabel="刪除"
+        confirmLabel={t('刪除')}
         danger
         width={360}
         onCancel={() => setDeleteOpen(false)}
@@ -797,12 +794,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
 /** 識別列只留 pane id（2026-09-09 使用者決定）：其餘在 `herdr pane list` 查得到，四顆並排會撐成兩行。 */
 function RunIdents({ botId }: { botId: string }) {
+  useT()
   const run = useStore((s) => s.runs[botId] ?? null)
   if (!run) return null
   return (
-    <div className="bs-idents" role="group" aria-label="Run 識別資訊">
-      <span className="bs-idents-k">識別</span>
-      <CopyChip label="pane" value={run.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
+    <div className="bs-idents" role="group" aria-label={t('Run 識別資訊')}>
+      <span className="bs-idents-k">{t('識別')}</span>
+      <CopyChip label="pane" value={run.pane_id ?? ''} title={t('herdr pane id：herdr pane send / capture 用的就是它')} />
     </div>
   )
 }

@@ -10,7 +10,10 @@ import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import type { ReactNode } from 'react'
 import { useStore } from '../store/store'
+import { msg, t, useT } from '../lib/i18n'
 import './previewPanel.css'
+
+type PreviewTranslate = ReturnType<typeof useT>
 
 /** 錯誤訊息＋試過的路徑（路徑可能很長，收進可展開的細節）。 */
 interface PreviewErr {
@@ -37,19 +40,20 @@ function startError(e: unknown): PreviewErr {
       return { text: text ?? e.message, tried, noConfig: true }
     }
     if (text) return plain(text)
-    return plain(reason && reason !== 'conflict' ? `${reason}（HTTP ${e.status}）` : e.message)
+    return plain(reason && reason !== 'conflict' ? t('{reason}（HTTP {status}）', { reason, status: e.status }) : e.message)
   }
   return plain(e instanceof Error ? e.message : String(e))
 }
 
 /** 次要說明：降一級的小字，試過的路徑收進 <details>。 */
 function ErrNote({ err }: { err: PreviewErr }) {
+  const t = useT()
   return (
     <div className={`preview-note${err.noConfig ? ' soft' : ' error'}`} role="alert">
       <span>{err.text}</span>
       {err.tried.length > 0 ? (
         <details className="preview-tried">
-          <summary>試過的路徑（{err.tried.length}）</summary>
+          <summary>{t('試過的路徑（{n}）', { n: err.tried.length })}</summary>
           <ul>
             {err.tried.map((t) => (
               <li key={t}>
@@ -67,46 +71,58 @@ function ErrNote({ err }: { err: PreviewErr }) {
  * 從手機或別台機器開的頁面連不到釘在 loopback 的 dev server（issue #527）：`running` 照舊，但 iframe
  * 換成這段說明——不然畫面就只是一片空白，而工具列還寫著網址。
  */
-export function OutOfReachNote({ hostname, https }: { hostname: string; https: boolean }) {
+export function OutOfReachNote({ hostname, https, t }: { hostname: string; https: boolean; t?: PreviewTranslate }) {
   return (
     <div className="preview-empty" role="status">
-      <h2 className="preview-title">這台裝置看不到這個預覽</h2>
+      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      <h2 className="preview-title">{t ? t('這台裝置看不到這個預覽') : '這台裝置看不到這個預覽'}</h2>
       <p className="preview-body">
-        dev server 只綁在跑 daemon 的那台機器上（<code>127.0.0.1</code>），而這一頁是從 <code>{hostname}</code> 開的，連不過去。
-        要從手機或別台機器看，daemon 要開 <code>allow_lan</code>（它才會讓 dev server 綁對外介面）。
-        {https ? ' 這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。' : ''}
+        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {t ? t.x('dev server 只綁在跑 daemon 的那台機器上（{loopback}），而這一頁是從 {hostname} 開的，連不過去。', {
+          loopback: <code>127.0.0.1</code>, hostname: <code>{hostname}</code>,
+        }) : <>dev server 只綁在跑 daemon 的那台機器上（<code>127.0.0.1</code>），而這一頁是從 <code>{hostname}</code> 開的，連不過去。</> /* i18n-ignore */}{' '}
+        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {t ? t.x('要從手機或別台機器看，daemon 要開 {allowLan}（它才會讓 dev server 綁對外介面）。', {
+          allowLan: <code>allow_lan</code>,
+        }) : <>要從手機或別台機器看，daemon 要開 <code>allow_lan</code>（它才會讓 dev server 綁對外介面）。</> /* i18n-ignore */}
+        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {https ? ` ${t ? t('這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。') : '這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。'}` : ''}
       </p>
-      <p className="preview-body">預覽還在跑，在那台機器上開一樣的網址就看得到。</p>
+      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      <p className="preview-body">{t ? t('預覽還在跑，在那台機器上開一樣的網址就看得到。') : '預覽還在跑，在那台機器上開一樣的網址就看得到。'}</p>
     </div>
   )
 }
 
 /** https 頁面嵌 http 的 iframe 會被瀏覽器當混合內容擋掉：一片空白沒有說明（#1212）。講清楚，「在新分頁開」照常可按。 */
-export function MixedContentNote({ url }: { url: string }) {
+export function MixedContentNote({ url, t }: { url: string; t?: PreviewTranslate }) {
   return (
     <div className="preview-empty" role="status">
-      <h2 className="preview-title">這一頁沒辦法內嵌這個預覽</h2>
+      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      <h2 className="preview-title">{t ? t('這一頁沒辦法內嵌這個預覽') : '這一頁沒辦法內嵌這個預覽'}</h2>
       <p className="preview-body">
-        這一頁是 https，而 dev server 是 http（<code>{url}</code>）：瀏覽器會把 http 的 iframe 當混合內容擋掉。
+        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {t ? t.x('這一頁是 https，而 dev server 是 http（{url}）：瀏覽器會把 http 的 iframe 當混合內容擋掉。', { url: <code>{url}</code> }) : <>這一頁是 https，而 dev server 是 http（<code>{url}</code>）：瀏覽器會把 http 的 iframe 當混合內容擋掉。</>}
       </p>
-      <p className="preview-body">預覽還在跑，按上面的「在新分頁開」直接看。</p>
+      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      <p className="preview-body">{t ? t('預覽還在跑，按上面的「在新分頁開」直接看。') : '預覽還在跑，按上面的「在新分頁開」直接看。'}</p>
     </div>
   )
 }
 
 /** mock 模式沒有真的 dev server：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
-const MOCK_DOC = `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Dev server</h2><p style="margin:0;color:#5e6a78">（mock 預覽畫面）</p></div>`
+const mockDoc = () => `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Dev server</h2><p style="margin:0;color:#5e6a78">${t('（mock 預覽畫面）')}</p></div>`
 
 const RELATION_TITLE: Record<PreviewRelation, string> = {
-  same_dir: '這顆 bot 自己的目錄',
-  same_repo: '同一個 repo 的其他 checkout',
-  other: '其他專案',
+  same_dir: msg('這顆 bot 自己的目錄'),
+  same_repo: msg('同一個 repo 的其他 checkout'),
+  other: msg('其他專案'),
 }
 
 const RELATION_NOTE: Record<PreviewRelation, string> = {
   same_dir: '',
-  same_repo: '另一份 checkout，看到的不是這顆 bot 工作樹裡的程式碼',
-  other: '不是這顆 bot 的程式碼',
+  same_repo: msg('另一份 checkout，看到的不是這顆 bot 工作樹裡的程式碼'),
+  other: msg('不是這顆 bot 的程式碼'),
 }
 
 /** 本機所有在跑的 dev server，依 relation 分組；一筆一行、整列可點＝接上（斷開時不會關掉對方）。unknown（多半是後端）預設收起。 */
@@ -121,21 +137,22 @@ function OthersList({
   busy: boolean
   onAttach: (o: PreviewOther) => void
 }) {
+  const t = useT()
   const [showAll, setShowAll] = useState(false)
   if (others.length === 0) return null
   const groups = groupOthers(others).map((g) => ({ relation: g.relation, ...orderRows(g.items, root) }))
   const hidden = groups.reduce((n, g) => n + g.unknown.length, 0)
   return (
     <div className="preview-others">
-      <p className="preview-body">本機已開的 dev server，點一列直接接上：</p>
+      <p className="preview-body">{t('本機已開的 dev server，點一列直接接上：')}</p>
       {groups.map((g) => {
         const rows = showAll ? [...g.known, ...g.unknown] : g.known
         if (rows.length === 0) return null
         return (
           <section key={g.relation} className={`preview-group ${g.relation}`}>
             <h3 className="preview-group-title">
-              {RELATION_TITLE[g.relation]}
-              {RELATION_NOTE[g.relation] ? <span className="preview-group-note">{RELATION_NOTE[g.relation]}</span> : null}
+              {t.tr(RELATION_TITLE[g.relation])}
+              {RELATION_NOTE[g.relation] ? <span className="preview-group-note">{t.tr(RELATION_NOTE[g.relation])}</span> : null}
             </h3>
             <ul>
               {rows.map(({ o, short, sharedDir }) => (
@@ -145,7 +162,7 @@ function OthersList({
                     className="preview-row"
                     disabled={busy}
                     title={`${o.dir}${o.pid ? ` · pid ${o.pid}` : ''}`}
-                    aria-label={`接上 ${kindLabel(o.kind)} :${o.port} ${short}`}
+                    aria-label={t('接上 {kind} :{port} {path}', { kind: kindLabel(o.kind), port: o.port, path: short })}
                     onClick={() => onAttach(o)}
                   >
                     <span className="preview-kind">{kindLabel(o.kind)}</span>
@@ -154,8 +171,8 @@ function OthersList({
                       {short}
                       {showRepo(o.repo, short) ? <span className="preview-other-repo"> ({o.repo})</span> : null}
                     </span>
-                    {sharedDir ? <span className="preview-samedir">同目錄</span> : null}
-                    <span className="preview-row-act">{g.relation === 'same_dir' ? '接這個' : '還是接這個'}</span>
+                    {sharedDir ? <span className="preview-samedir">{t('同目錄')}</span> : null}
+                    <span className="preview-row-act">{g.relation === 'same_dir' ? t('接這個') : t('還是接這個')}</span>
                   </button>
                 </li>
               ))}
@@ -165,7 +182,7 @@ function OthersList({
       })}
       {hidden > 0 ? (
         <button type="button" className="preview-more" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
-          {showAll ? '收起其他服務' : `顯示其他 ${hidden} 個服務`}
+          {showAll ? t('收起其他服務') : t('顯示其他 {n} 個服務', { n: hidden })}
         </button>
       ) : null}
     </div>
@@ -173,6 +190,7 @@ function OthersList({
 }
 
 export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; headStart?: ReactNode; headEnd?: ReactNode }) {
+  const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const stored = useStore((s) => s.previews[botId])
   const setPreview = useStore((s) => s.setPreview)
@@ -236,13 +254,13 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
     setErr(null)
     try {
       setPreview(botId, await stopPreview(botId))
-      notify('info', '預覽已停止')
+      notify('info', t('預覽已停止'))
     } catch (e) {
       setErr(startError(e))
     } finally {
       setPending(null)
     }
-  }, [botId, notify, setPreview])
+  }, [botId, notify, setPreview, t])
 
   // 多個候選目錄時讓使用者挑；沒挑＝不帶 dir，由 daemon 用第一個。
   const [pickDir, setPickDir] = useState('')
@@ -257,7 +275,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
     <>
       {p.candidates.length > 1 ? (
         <label className="preview-pick">
-          目錄
+          {t('目錄')}
           <select value={chosen?.dir ?? ''} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
             {p.candidates.map((c) => (
               <option key={c.dir} value={c.dir}>
@@ -274,12 +292,14 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
           disabled={busy || !connected}
           onClick={() => void start(p.candidates.length > 1 && chosen ? { dir: chosen.dir } : undefined)}
         >
-          {pending === 'start' ? '啟動中…' : '啟動預覽'}
+          {pending === 'start' ? t('啟動中…') : t('啟動預覽')}
         </button>
       </div>
       {willRun ? (
         <p className="preview-willrun">
-          會在 <code>{willRun.dir}</code> 跑{willRun.command ? <> <code>{willRun.command}</code></> : ' dev server（指令由 daemon 依專案決定）'}
+          {willRun.command
+            ? t.x('會在 {directory} 跑 {command}', { command: <code>{willRun.command}</code>, directory: <code>{willRun.dir}</code> })
+            : t.x('會在 {directory} 跑 dev server（指令由 daemon 依專案決定）', { directory: <code>{willRun.dir}</code> })}
         </p>
       ) : null}
     </>
@@ -299,43 +319,43 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
             {url}
           </span>
           <span className="preview-src" title={p.dir ?? undefined}>
-            {attached ? `已接上既有的 dev server（port ${p.port}）` : p.source === 'spawned' ? '由 AG Man 啟動' : ''}
+            {attached ? t('已接上既有的 dev server（port {port}）', { port: p.port ?? '' }) : p.source === 'spawned' ? t('由 AG Man 啟動') : ''}
           </span>
           <span className="spacer" />
           <button type="button" className="btn preview-btn" disabled={mixed} onClick={() => setNonce((n) => n + 1)}>
-            重新整理
+            {t('重新整理')}
           </button>
           {outOfReach ? (
-            <button type="button" className="btn preview-btn" disabled title="這台裝置連不到那個 port，開新分頁也一樣">
-              在新分頁開
+            <button type="button" className="btn preview-btn" disabled title={t('這台裝置連不到那個 port，開新分頁也一樣')}>
+              {t('在新分頁開')}
             </button>
           ) : (
             <a className="btn preview-btn" href={url} target="_blank" rel="noreferrer">
-              在新分頁開
+              {t('在新分頁開')}
             </a>
           )}
           <button
             type="button"
             className="btn preview-btn"
             disabled={busy}
-            title={attached ? '只斷開連結，不會關掉對方的 dev server' : undefined}
+            title={attached ? t('只斷開連結，不會關掉對方的 dev server') : undefined}
             onClick={() => void stop()}
           >
-            {pending === 'stop' ? (attached ? '中斷中…' : '停止中…') : attached ? '中斷連接' : '停止'}
+            {pending === 'stop' ? (attached ? t('中斷中…') : t('停止中…')) : attached ? t('中斷連接') : t('停止')}
           </button>
           {headEnd}
         </div>
         {err ? <ErrNote err={err} /> : null}
         {outOfReach ? (
-          <OutOfReachNote hostname={location.hostname} https={location.protocol === 'https:'} />
+          <OutOfReachNote hostname={location.hostname} https={location.protocol === 'https:'} t={t} />
         ) : mixed ? (
-          <MixedContentNote url={url} />
+          <MixedContentNote url={url} t={t} />
         ) : (
           <iframe
             key={nonce}
             className="preview-frame"
-            title={`${bot?.name ?? ''} 預覽`}
-            {...(isMock ? { srcDoc: MOCK_DOC } : { src: url })}
+            title={t('{name} 預覽', { name: bot?.name ?? '' })}
+            {...(isMock ? { srcDoc: mockDoc() } : { src: url })}
           />
         )}
       </div>
@@ -347,46 +367,46 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
       <div className="preview-empty" role="status">
         {p.status === 'starting' ? (
           <>
-            <h2 className="preview-title">正在啟動預覽…</h2>
+            <h2 className="preview-title">{t('正在啟動預覽…')}</h2>
             <p className="preview-body">
               {p.dir ? (
                 <>
-                  在 <code>{p.dir}</code> 跑 {p.command ? <code>{p.command}</code> : 'dev server'}（最多 60 秒）。
+                  {t.x('在 {directory} 跑 {command}（最多 60 秒）。', { command: p.command ? <code>{p.command}</code> : 'dev server', directory: <code>{p.dir}</code> })}
                 </>
               ) : (
-                '起 dev server 中（最多 60 秒）。'
+                t('起 dev server 中（最多 60 秒）。')
               )}
             </p>
-            <progress className="preview-progress" aria-label="啟動中" />
+            <progress className="preview-progress" aria-label={t('啟動中')} />
             <div className="preview-actions">
               <button type="button" className="btn" disabled={busy} onClick={() => void stop()}>
-                取消
+                {t('取消')}
               </button>
             </div>
           </>
         ) : p.status === 'failed' ? (
           <>
-            <h2 className="preview-title">預覽啟動失敗</h2>
+            <h2 className="preview-title">{t('預覽啟動失敗')}</h2>
             {p.dir ? (
               <p className="preview-body">
-                目錄：<code>{p.dir}</code>
+                {t('目錄：')} <code>{p.dir}</code>
               </p>
             ) : null}
             {p.error ? <pre className="preview-log">{p.error}</pre> : null}
             <div className="preview-actions">
               {/* 重試就是重試失敗的那個目錄（#1103）；不是候選就不帶，免得 daemon 以 400 拒絕。 */}
               <button type="button" className="btn primary" disabled={busy} onClick={() => void start(p.dir && p.candidates.some((c) => c.dir === p.dir) ? { dir: p.dir } : undefined)}>
-                {pending === 'start' ? '重試中…' : '重試'}
+                {pending === 'start' ? t('重試中…') : t('重試')}
               </button>
               <button type="button" className="btn" disabled={busy} onClick={() => void stop()}>
-                關閉
+                {t('關閉')}
               </button>
             </div>
             <OthersList others={p.others} root={root} busy={busy || !connected} onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })} />
           </>
         ) : (
           <>
-            <h2 className="preview-title">預覽</h2>
+            <h2 className="preview-title">{t('預覽')}</h2>
             {p.others.length > 0 ? (
               // 本機已有 dev server 在跑：直接接上是主角，自己起放次要（偵測不到設定檔時只有這條路）。
               <>
@@ -398,16 +418,18 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
                 />
                 {err ? <ErrNote err={err} /> : null}
                 <details className="preview-spawn">
-                  <summary>或由 AG Man 替 {bot ? bot.name : '這顆 bot'} 另起一顆</summary>
+                  <summary>{t('或由 AG Man 替 {bot} 另起一顆', { bot: bot?.name ?? t('這顆 bot') })}</summary>
                   {startBlock}
                 </details>
               </>
             ) : (
               <>
                 <p className="preview-body">
-                  替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在{' '}
-                  <code>{bot?.cwd ?? '專案目錄'}</code> 底下找 <code>vite.config.*</code> 或帶 <code>dev</code> script 的 <code>package.json</code>。
-                  本機目前沒有偵測到在跑的 dev server。
+                  {t.x('替 {bot} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在 {directory} 底下找 {viteConfig} 或帶 {dev} script 的 {packageJson}。本機目前沒有偵測到在跑的 dev server。', {
+                    bot: bot ? <b>{bot.name}</b> : t('這顆 bot'),
+                    directory: <code>{bot?.cwd ?? t('專案目錄')}</code>,
+                    viteConfig: <code>vite.config.*</code>, packageJson: <code>package.json</code>, dev: <code>dev</code>,
+                  })}
                 </p>
                 {startBlock}
               </>

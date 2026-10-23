@@ -7,6 +7,7 @@ import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
 import { runningFast } from '../lib/runtimeDrift'
+import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import './modelPicker.css'
@@ -82,6 +83,7 @@ export function ApiModelFields({
   fast: boolean
   onFast: (v: boolean) => void
 }) {
+  const t = useT()
   const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
   const loadModels = useStore((s) => s.loadModels)
@@ -125,12 +127,12 @@ export function ApiModelFields({
     <>
       <div className="field">
         <span>
-          模型
-          {loading ? <span className="field-note">載入中…</span> : fromApi ? null : <span className="field-note warn">API 不可用，使用內建清單</span>}
+          {t('模型')}
+          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi ? null : <span className="field-note warn">{t('API 不可用，使用內建清單')}</span>}
           {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
-        <div className="opt-group models" role="radiogroup" aria-label="模型">
+        <div className="opt-group models" role="radiogroup" aria-label={t('模型')}>
           {shownModels.map((m) => (
             <button
               key={m.id}
@@ -138,7 +140,7 @@ export function ApiModelFields({
               role="radio"
               aria-checked={modelMatches(m.id, selectedModel)}
               className={`opt${modelMatches(m.id, selectedModel) ? ' on' : ''}`}
-              title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
+              title={[m.id, m.description, m.is_default ? t('模型預設') : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
             >
               {modelLabel(m)}
@@ -150,14 +152,14 @@ export function ApiModelFields({
       {efforts.length > 0 ? (
         <div className="field">
           <span>
-            強度
+            {t('強度')}
             {/* claude 的強度與模型無關，標「依 <模型>」是假資訊。 */}
             {current && current.id !== model && kind !== 'claude' ? (
-              <span className="field-note">依 {current.display_name}</span>
+              <span className="field-note">{t('依 {model}', { model: current.display_name })}</span>
             ) : null}
             {/* claude／codex 切強度會存成帳號預設（SPEC §17、§4.4a）。 */}
           </span>
-          <div className="opt-group" role="radiogroup" aria-label="強度">
+          <div className="opt-group" role="radiogroup" aria-label={t('強度')}>
             {efforts.map((e) => (
               <button
                 key={e}
@@ -178,25 +180,25 @@ export function ApiModelFields({
 
       {retiredModel ? (
         <span className="hint field-note warn">
-          存著的模型「{retiredModel.from}」agy 已不提供，啟動時改用 {retiredModel.to}。
+          {t('已儲存的模型「{model}」已不提供，啟動時改用 {replacement}。', { model: retiredModel.from, replacement: retiredModel.to })}
           <button type="button" className="mini-btn" onClick={() => pickModel(retiredModel.to)}>
-            改用 {retiredModel.to}
+            {t('改用 {model}', { model: retiredModel.to })}
           </button>
         </span>
       ) : null}
       {effortUnsupported ? (
         <span className="hint field-note warn">
-          存著的強度「{effortLabel(effort)}」{current ? `${current.display_name} ` : ''}沒有這一級，啟動時會被拒。
+          {t('已儲存的強度「{effort}」{model}沒有這一級，啟動時會被拒。', { effort: effortLabel(effort), model: current ? `${current.display_name} ` : '' })}
           <button type="button" className="mini-btn" onClick={() => onEffort(null)}>
-            改用預設
+            {t('改用預設')}
           </button>
         </span>
       ) : null}
       {fastUnsupported ? (
         <span className="hint field-note warn">
-          存著的 Fast 在{current ? ` ${current.display_name}` : '這個模型'}上沒有優先佇列，會被忽略。
+          {t('已儲存的 Fast 在 {model} 上沒有優先佇列，會被忽略。', { model: current ? current.display_name : t('這個模型') })}
           <button type="button" className="mini-btn" onClick={() => onFast(false)}>
-            關掉 Fast
+            {t('關掉 Fast')}
           </button>
         </span>
       ) : null}
@@ -206,16 +208,16 @@ export function ApiModelFields({
           <span>
             Fast
             <span className="field-note">
-              {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
+              {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || t('優先佇列（service_tier=priority）')}
             </span>
             {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
-            {liveFast(kind) ? <span className="field-note live-note">執行中改會即時套用，不用重啟</span> : null}
+            {liveFast(kind) ? <span className="field-note live-note">{t('執行中改會即時套用，不用重啟')}</span> : null}
           </span>
         </label>
       ) : null}
       {kind === 'grok' && !fromApi && !loading ? (
         <span className="hint">
-          <KindTag kind="grok" /> `grok models` 清單無法取得，顯示內建的 grok-4.7 / grok-4.7-build-fast / grok-4.6 / grok-4.5
+          <KindTag kind="grok" /> {t('`grok models` 清單無法取得，顯示內建的 grok-4.7 / grok-4.7-build-fast / grok-4.6 / grok-4.5')}
         </span>
       ) : null}
     </>
@@ -233,12 +235,12 @@ function effortBadges(m: ModelInfo | undefined, e: string): ReactNode {
     <>
       {m?.default_effort === e ? (
         <span className="effort-recommended" aria-hidden="true">
-          廠推薦
+          {t('廠推薦')}
         </span>
       ) : null}
       {m?.account_default_effort === e ? (
         <span className="effort-recommended effort-account" aria-hidden="true">
-          此帳號預設
+          {t('此帳號預設')}
         </span>
       ) : null}
     </>
@@ -246,8 +248,8 @@ function effortBadges(m: ModelInfo | undefined, e: string): ReactNode {
 }
 
 function effortTitle(kind: BotKind, m: ModelInfo | undefined, e: string): string | undefined {
-  if (m?.account_default_effort === e) return `此帳號預設（不帶 --effort 會跑這一級）：${effortLabel(e)}`
-  if (m?.default_effort === e) return `${kind === 'claude' ? '廠推薦' : '模型預設'}：${effortLabel(e)}`
+  if (m?.account_default_effort === e) return t('此帳號預設（不帶 --effort 會跑這一級）：{effort}', { effort: effortLabel(e) })
+  if (m?.default_effort === e) return t('{source}：{effort}', { source: kind === 'claude' ? t('廠推薦') : t('模型預設'), effort: effortLabel(e) })
   return undefined
 }
 
@@ -271,6 +273,7 @@ export function ModelQuickPicker({
   title?: string
   children: ReactNode
 }) {
+  const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const run = useStore((s) => s.runs[botId] ?? null)
   const fast = bot ? runningFast(bot, run) : false
@@ -356,7 +359,7 @@ export function ModelQuickPicker({
     const res = await patchBot(botId, input)
     if (!res) return
     if (res.needsRestart) {
-      notify('info', '已儲存，重啟 Bot 後才會套用')
+      notify('info', t('已儲存，重啟 Bot 後才會套用'))
     }
   }
 
@@ -398,7 +401,7 @@ export function ModelQuickPicker({
         ref={popRef}
         className="model-quick-pop"
         role="menu"
-        aria-label="選擇模型"
+        aria-label={t('選擇模型')}
         aria-busy={loading || undefined}
         aria-describedby={hintId}
         tabIndex={-1}
@@ -407,10 +410,10 @@ export function ModelQuickPicker({
       >
         {loading ? (
           <span className="hint" aria-hidden="true">
-            載入模型清單…
+            {t('載入模型清單…')}
           </span>
         ) : null}
-        <div className="opt-group models" role="group" aria-label="模型">
+        <div className="opt-group models" role="group" aria-label={t('模型')}>
           {shownModels.map((m) => (
             <button
               key={m.id}
@@ -419,7 +422,7 @@ export function ModelQuickPicker({
               aria-checked={selectedModel === m.id || modelMatches(m.id, selectedModel)}
               tabIndex={-1}
               className={`opt${selectedModel === m.id || modelMatches(m.id, selectedModel) ? ' on' : ''}`}
-              title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
+              title={[m.id, m.description, m.is_default ? t('模型預設') : ''].filter(Boolean).join(' — ')}
               disabled={patching}
               onClick={() => pickModel(m.id)}
             >
@@ -429,8 +432,8 @@ export function ModelQuickPicker({
         </div>
         {efforts.length > 0 ? (
           <div className="field">
-            <span aria-hidden="true">強度</span>
-            <div className="opt-group" role="group" aria-label="強度">
+            <span aria-hidden="true">{t('強度')}</span>
+            <div className="opt-group" role="group" aria-label={t('強度')}>
               {efforts.map((e) => (
                 <button
                   key={e}
@@ -461,7 +464,7 @@ export function ModelQuickPicker({
                 tabIndex={-1}
                 className={`opt${fast ? ' on' : ''}`}
                 disabled={patching}
-                title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
+                title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || t('優先佇列（service_tier=priority）')}
                 onClick={toggleFast}
               >
                 Fast
@@ -473,7 +476,7 @@ export function ModelQuickPicker({
           </div>
         ) : null}
         <span className="hint" id={hintId} aria-hidden="true">
-          {liveFast(kind) ? '執行中改模型、強度或 fast 都會即時套用' : '執行中改模型或強度會即時套用'}
+          {liveFast(kind) ? t('執行中改模型、強度或 fast 都會即時套用') : t('執行中改模型或強度會即時套用')}
         </span>
       </div>
     ) : null
@@ -484,10 +487,10 @@ export function ModelQuickPicker({
         ref={btnRef}
         type="button"
         className={className}
-        title={title ?? '點一下改模型'}
+        title={title ?? t('點一下改模型')}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label="改模型"
+        aria-label={t('改模型')}
         onClick={() => setOpen((v) => !v)}
       >
         {children}
