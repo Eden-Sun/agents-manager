@@ -90,6 +90,7 @@
   （`status.fast_mode` → `run.runtime_fast` → 設定值）。不做在 model tag 上——窄列的 tag 會被截斷，fast 擠在強度後面第一個被切；logo 在最左邊不受影響。fast 關著不畫、不佔位；
   列高固定，閃電比標題列小一點（11px）、少凸出去一些，免得被精簡列的 `overflow-y: hidden` 切掉。這些列以前就沒有 fast 標示（只在 tooltip），不是回歸。
 - 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。
+- **header 灰色 ⇑N 不算「永遠不會一鍵重啟」的**（#1911，2026-10-23 使用者＋codex-sol 意見）：子 agent、herdr default session 不由一鍵重啟動（daemon `Skip::Child`／`DefaultSession`），以前仍算進「在忙」，鈕永遠 disabled 卻等不到。現在只算符合資格、暫時在忙的；沒有就整顆隱藏（手機合成選單同）。子 agent 那一列保留被動提示（側欄 ⌃⌃ 與 context bar「升級」的 tooltip 第一行「新版已安裝，由父 Bot 安排重啟」，沿用 `UpdateBadge`，不另造樣式）；不通知 parent。**子 agent 一律不畫會打 `/restart` 的按鈕**（會回 409）：更新徽章 dot／inline 變不可點的同樣式提示、⟳ 設定落差變被動文字、設定面板橫幅無「立即重啟」。
 - **忙的時候改 fast 不問重啟**（#712，2026-09-28 使用者：「codex 的 fast 切換根本不用重啟」）：codex 回合中照樣吃 `/fast`，所以只差 fast 時徽章是「⟳ fast 當場套用」，
   忙也直接切、不跳重啟確認框；輸入框有字（打 `/fast` 會接在草稿後面一起送出）或改到 model／effort 才排到回合結束，徽章變 `⏳ fast待套用`（按不動，tooltip 寫「回合結束後自動套用」），
   設定卡片寫「已儲存，回合結束後自動套用。」。回合結束仍套不上才出現重啟。

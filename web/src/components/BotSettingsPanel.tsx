@@ -5,6 +5,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { startCliLogin } from '../lib/cliLogin'
+import { isChildBot } from '../lib/updateBatch'
 import { registerSettingsLeaveGuard } from '../lib/settingsLeaveGuard'
 import { isImeEnter } from '../lib/ime'
 import { envDisplayText } from './identityEnv'
@@ -265,6 +266,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [restartingLocal, setRestarting] = useState(false)
   // 這顆 bot 在別處（⟳ 徽章、更新徽章）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
   const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
+  const child = bot ? isChildBot(bot) : false
   const restarting = restartingLocal || restartingShared
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
@@ -487,10 +489,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       {saving ? (
         <div className="bs-banner ok" role="status">套用中…</div>
       ) : null}
+      {/* 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。 */}
       {!saving && (banner === 'restart' || (banner === null && bot.needs_restart)) ? (
         <div className="bs-banner warn" role="status">
-          <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
-          <button
+          {child ? (
+            <span>已儲存，設定要重啟才生效，由父 Bot 安排重啟（目前的 Run 仍跑在舊參數上）。</span>
+          ) : (
+            <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
+          )}
+          {child ? null : <button
             type="button"
             className="btn primary"
             disabled={restarting}
@@ -508,7 +515,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             }}
           >
             {restarting ? '重啟中…' : '立即重啟'}
-          </button>
+          </button>}
         </div>
       ) : null}
       {banner === 'saved' ? (

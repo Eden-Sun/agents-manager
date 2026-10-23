@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips, readyLabel, updateBatchCounts } from './updateBatch.ts'
+import { claudeInstallPlan, codexInstallPlan, isChildBot, mergeUpdateChips, passiveUpdateHint, readyLabel, updateBatchCounts } from './updateBatch.ts'
 
 const NOTICE = 'Update installed · Restart to update'
 
@@ -81,9 +81,9 @@ test('2026-09-22：codex 磁碟已裝好新版跟 claude 一樣可以重啟；�
   )
 })
 
-test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：進「在忙」名單、不算「可以重啟」', () => {
-  // 2026-09-22 起 daemon 一律跳過子 agent；框裡若還把它算進「重啟 N 顆」，數字跟實際重啟的對不上，
-  // 只剩子 agent 時按鈕還亮著、按下去卻是 total 0。
+test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：進 passive，不算 ready 也不算「在忙」（#1911）', () => {
+  // 2026-09-22 起 daemon 一律跳過子 agent；框裡若還把它算進「重啟 N 顆」，數字跟實際重啟的對不上。
+  // 它也不是「暫時在忙」：算進灰色 ⇑N 會讓鈕永遠 disabled、卻永遠等不到（#1911）。
   const bots = [bot('kid', { managed_by: 'child' }), bot('kid2', { parent_bot_id: 'mine' }), bot('mine')]
   const runs = { kid: run('kid'), kid2: run('kid2'), mine: run('mine') }
   const c = updateBatchCounts(bots, runs, none)
@@ -91,8 +91,9 @@ test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：�
     c.ready.map((x) => x.name),
     ['mine'],
   )
+  assert.deepEqual(c.busy, [])
   assert.deepEqual(
-    c.busy.map((x) => [x.name, x.why]),
+    c.passive.map((x) => [x.name, x.why]),
     [
       ['kid', '子 agent，由父 Bot 重開'],
       ['kid2', '子 agent，由父 Bot 重開'],
@@ -100,7 +101,42 @@ test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：�
   )
 })
 
-test('使用者自己的 herdr default session 裡的 bot 不由一鍵重啟動（daemon Skip::DefaultSession，SPEC §6.5.1）', () => {
+test('只剩子 agent／default session 帶更新時：ready、busy 都空（header 灰色計數整顆隱藏，#1911）', () => {
+  const bots = [bot('kid', { managed_by: 'child' }), bot('dflt', { herdr_session: 'default' })]
+  const runs = { kid: run('kid'), dflt: run('dflt') }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(c.ready, [])
+  assert.deepEqual(c.busy, [])
+  assert.equal(c.passive.length, 2)
+})
+
+test('子 agent 在忙時不影響一般 bot 的「在忙」計數，只有符合資格而暫時在忙的才算（#1911）', () => {
+  const bots = [bot('kid', { managed_by: 'child' }), bot('working')]
+  const runs = { kid: run('kid', { agent_status: 'working' }), working: run('working', { agent_status: 'working' }) }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(c.busy.map((x) => x.name), ['working'])
+  assert.deepEqual(c.passive.map((x) => x.name), ['kid'])
+})
+
+test('passiveUpdateHint：子 agent 寫「由父 Bot 安排重啟」，一般 bot 沒有；新版還沒裝時不說已安裝（#1911）', () => {
+  assert.equal(passiveUpdateHint(bot('kid', { managed_by: 'child' }), run('kid')), '新版已安裝，由父 Bot 安排重啟')
+  assert.match(passiveUpdateHint(bot('d', { herdr_session: 'default' }), run('d')) ?? '', /default session/)
+  assert.equal(passiveUpdateHint(bot('mine'), run('mine')), null)
+  assert.equal(passiveUpdateHint(bot('kid', { managed_by: 'child' }), run('kid', { update_notice: null })), null)
+  assert.equal(
+    passiveUpdateHint(bot('kid', { managed_by: 'child' }), run('kid', { update_notice: 'claude 需安裝 2.1.284，需安裝後重啟' })),
+    '新版還沒安裝，由父 Bot 安排安裝與重啟',
+  )
+})
+
+test('isChildBot：managed_by=child 或有 parent_bot_id 都算（跟 daemon refuse_child_restart、neverRestartedReason 同一條線，#1911）', () => {
+  assert.equal(isChildBot(bot('a', { managed_by: 'child' })), true)
+  assert.equal(isChildBot(bot('b', { parent_bot_id: 'p' })), true)
+  assert.equal(isChildBot(bot('c')), false)
+  assert.equal(isChildBot(bot('d', { parent_bot_id: '' })), false)
+})
+
+test('使用者自己的 herdr default session 裡的 bot 不由一鍵重啟動（daemon Skip::DefaultSession，SPEC §6.5.1）：進 passive', () => {
   const bots = [bot('mine-default', { herdr_session: 'default' }), bot('run-default'), bot('mine')]
   const runs = { 'mine-default': run('mine-default'), 'run-default': run('run-default', { herdr_session: 'default' }), mine: run('mine') }
   const c = updateBatchCounts(bots, runs, none)
@@ -108,11 +144,12 @@ test('使用者自己的 herdr default session 裡的 bot 不由一鍵重啟動�
     c.ready.map((x) => x.name),
     ['mine'],
   )
+  assert.deepEqual(c.busy, [])
   assert.deepEqual(
-    c.busy.map((x) => x.name),
+    c.passive.map((x) => x.name),
     ['mine-default', 'run-default'],
   )
-  assert.match(c.busy[0].why, /default session/)
+  assert.match(c.passive[0].why, /default session/)
 })
 
 test('背景工作還在跑的 bot 不由一鍵重啟動（daemon Skip::BackgroundJobs，#767）：進「在忙」名單、寫「背景執行中（N）」', () => {
@@ -246,6 +283,7 @@ test('Claude 尚未安裝的 run 不會被一般重啟納入', () => {
   assert.deepEqual(updateBatchCounts(bots, runs, none), {
     ready: [],
     busy: [{ botId: 'claude-pending', name: 'claude-pending', why: '新版還沒裝，要先手動安裝才能套用', install: true }],
+    passive: [],
   })
 })
 

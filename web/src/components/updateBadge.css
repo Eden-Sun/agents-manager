@@ -59,6 +59,30 @@
   filter: brightness(1.25) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
 }
 
+.bot-update-dot.passive,
+.sl-update.passive,
+.update-badge.passive {
+  /* 子 agent 的被動提示：不是按鈕（#1911），同樣式、不可點。 */
+  cursor: default;
+  opacity: 0.75;
+}
+
+.update-badge.passive:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.update-badge.drift-badge.passive:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border-strong));
+}
+
+.sl-update.passive:hover {
+  border-color: color-mix(in srgb, var(--lamp-green) 45%, transparent);
+}
+
+.bot-update-dot.passive:hover {
+  filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
+}
+
 .bot-update-dot:disabled {
   cursor: progress;
   opacity: 0.6;

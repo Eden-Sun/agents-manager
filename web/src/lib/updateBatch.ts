@@ -20,6 +20,11 @@ export interface UpdateBatchCounts {
   ready: { botId: string; name: string; backgroundUnknown?: true }[]
   /** 正在忙、或需要先手動處理才會被跳過的。`install`＝codex 新版還沒裝（header 另一顆 chip 負責，見 `codexInstallPlan`）。 */
   busy: { botId: string; name: string; why: string; install?: true }[]
+  /**
+   * 一鍵重啟永遠不動的（子 agent、default session；`neverRestartedReason`）：不是「暫時在忙」，所以不進 `ready`／`busy`、
+   * 不算 header 灰色 ⇑N（#1911）；資訊留在那一列的被動提示（`passiveUpdateHint`）。
+   */
+  passive: { botId: string; name: string; why: string }[]
 }
 
 /** codex 的新版還沒裝：重啟換不到，只能先手動安裝（daemon 的 `Skip::NeedsManualInstall`）。 */
@@ -28,20 +33,40 @@ export function needsManualInstall(bot: Bot, run: Run | null | undefined): boole
 }
 
 /**
+ * 子 agent：由父 bot 用 herdr 重開，daemon 的 `/api/bots/{id}/restart` 一律回 409（`refuse_child_restart`，SPEC §6.5a）。
+ * 前端所有「重啟」入口（更新徽章、⟳ 設定落差、設定面板橫幅）與一鍵重啟計數共用這一條判斷（#1911）。
+ */
+export function isChildBot(bot: Pick<Bot, 'managed_by' | 'parent_bot_id'>): boolean {
+  return bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
+}
+
+/**
  * 不是「等一下就好」、而是一鍵重啟**永遠不動**的（daemon `bulk_restart::skip_reason` 的 `Child`／`DefaultSession`）：
  * 子 agent 由父 bot 用 herdr 重開（SPEC §6.5a，2026-09-22）；使用者自己 herdr default session 裡的 pane daemon 只觀察（SPEC §6.5.1）。
  * 前端的計數要跟 daemon 同一條線，不然框裡寫「重啟 N 顆」，實際動的比它少。
  */
 function neverRestartedReason(bot: Bot, run: Run): string | null {
-  if (bot.managed_by === 'child' || Boolean(bot.parent_bot_id)) return '子 agent，由父 Bot 重開'
+  if (isChildBot(bot)) return '子 agent，由父 Bot 重開'
   if (bot.herdr_session === 'default' || run.herdr_session === 'default') return '在你自己的 herdr default session 裡，daemon 不動它'
+  return null
+}
+
+/**
+ * 那一列自己的被動提示（側欄 ⌃⌃ 與 context bar「升級」的 tooltip）：這顆不在一鍵重啟的範圍裡，資訊不隨 header 計數消失（#1911）。
+ * 子 agent 一律沒有重啟按鈕（`isChildBot`）；新版還沒裝（通知寫「需安裝」）時不說「已安裝」。`null`＝這顆是一般 bot，沒有額外要說的。
+ */
+export function passiveUpdateHint(bot: Bot, run: Run | null | undefined): string | null {
+  if (!run?.update_notice?.trim()) return null
+  if (isChildBot(bot)) return needsManualInstall(bot, run) ? '新版還沒安裝，由父 Bot 安排安裝與重啟' : '新版已安裝，由父 Bot 安排重啟'
+  if (needsManualInstall(bot, run)) return null
+  if (neverRestartedReason(bot, run)) return '新版已安裝；這顆在你自己的 herdr default session 裡，daemon 不會幫你重啟'
   return null
 }
 
 /** `null` = 可以動。 */
 function busyReason(bot: Bot, run: Run, hasInFlightTurn: boolean): string | null {
   if (needsManualInstall(bot, run)) return '新版還沒裝，要先手動安裝才能套用'
-  return neverRestartedReason(bot, run) ?? runBusyReason(run, hasInFlightTurn)
+  return runBusyReason(run, hasInFlightTurn)
 }
 
 /** 不管更新有沒有裝，這顆現在能不能重啟。 */
@@ -70,17 +95,23 @@ export function updateBatchCounts(
 ): UpdateBatchCounts {
   const ready: UpdateBatchCounts['ready'] = []
   const busy: UpdateBatchCounts['busy'] = []
+  const passive: UpdateBatchCounts['passive'] = []
   for (const bot of bots) {
     // update_notice 只有 claude／codex 會被 update_watch 寫（grok 沒有這條巡邏），跟寫入端假設對齊。
     if (bot.kind !== 'claude' && bot.kind !== 'codex') continue
     const run = runs[bot.id]
     if (!run || !run.update_notice?.trim()) continue
+    const never = needsManualInstall(bot, run) ? null : neverRestartedReason(bot, run)
+    if (never) {
+      passive.push({ botId: bot.id, name: bot.name, why: never })
+      continue
+    }
     const why = busyReason(bot, run, hasInFlightTurn(bot.id))
     if (why && needsManualInstall(bot, run)) busy.push({ botId: bot.id, name: bot.name, why, install: true })
     else if (why) busy.push({ botId: bot.id, name: bot.name, why })
     else ready.push({ botId: bot.id, name: bot.name, ...(run.background_jobs === null ? { backgroundUnknown: true as const } : {}) })
   }
-  return { ready, busy }
+  return { ready, busy, passive }
 }
 
 export interface CodexInstallPlan {
