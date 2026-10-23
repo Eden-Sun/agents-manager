@@ -230,6 +230,7 @@ mod drafts;
 mod promote_intents;
 mod autostart_revive;
 mod claude_review;
+mod claude_review_api;
 pub mod changelog_translate;
 pub mod claude_api;
 mod cli_update;

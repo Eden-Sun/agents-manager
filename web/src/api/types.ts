@@ -1233,6 +1233,9 @@ export interface UpdateReview {
   answered_at: string
   /** `done` 才有：AGM 的結論原文。 */
   result: string
+  /** `api`＝Claude API 快速解析（沒實測，#1919）；空字串＝派 bot 做的。 */
+  source: '' | 'api'
+  model: string
 }
 
 export interface BackgroundTask {

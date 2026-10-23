@@ -72,6 +72,17 @@ export function AgmReviewBox({
     [rev, reviewState, kind, host, to, key],
   )
 
+  // 深入驗證（#1919）：API 快速解析只讀 changelog；codex 要實測就再派一次 bot（`deep`）。
+  const [deepKey, setDeepKey] = useState<string | null>(null)
+  const [deepErr, setDeepErr] = useState('')
+  const askDeep = () => {
+    setDeepErr('')
+    api
+      .requestUpdateReview({ kind, host, from, to: to ?? loaded?.version ?? null, deep: true })
+      .then(() => setDeepKey(key))
+      .catch((e) => setDeepErr(e instanceof Error ? e.message : String(e)))
+  }
+
   const cur = loaded?.key === key ? loaded : null
   if (!cur || (!cur.review && !cur.triage)) return null
   const { review, triage } = cur
@@ -100,9 +111,13 @@ export function AgmReviewBox({
           <div className="agm-review-head">
             <strong>AGM 解析</strong>
             <span className="agm-review-who">
-              {review.state === 'done'
-                ? `${review.target_bot_name || 'AGM'} · ${review.answered_at ? new Date(review.answered_at).toLocaleString() : ''}`
-                : `${review.target_bot_name || 'AGM'} 解析中…`}
+              {review.source === 'api'
+                ? review.state === 'done'
+                  ? `Claude API 快速解析${review.model ? `（${review.model}）` : ''} · 未實測`
+                  : 'Claude API 解析中…'
+                : review.state === 'done'
+                  ? `${review.target_bot_name || 'AGM'} · ${review.answered_at ? new Date(review.answered_at).toLocaleString() : ''}`
+                  : `${review.target_bot_name || 'AGM'} 解析中…`}
             </span>
           </div>
           {review.state === 'done' ? (
@@ -110,6 +125,18 @@ export function AgmReviewBox({
           ) : (
             <p className="hint">派出去了，結論回來就會出現在這裡。</p>
           )}
+          {review.source === 'api' && review.state === 'done' && kind === 'codex' ? (
+            deepKey === key ? (
+              <p className="hint">已請 AGM 深入驗證（裝新版實測），做完會換成它的結論。</p>
+            ) : (
+              <p className="hint">
+                <button type="button" onClick={askDeep}>
+                  深入驗證
+                </button>{' '}
+                請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。{deepErr ? ` 失敗：${deepErr}` : ''}
+              </p>
+            )
+          ) : null}
         </div>
       ) : null}
     </section>
