@@ -39,10 +39,12 @@ test('卡片：有建議時該選項旁標「Jev 建議」＋分數，其他選�
   const root = await mount(<PendingQuestionCard questions={toPendingQuestions(RAW, CLEAR)} defaultOpen answerWhere="below" />)
   const items = [...root.querySelectorAll('.pending-q-opts li')]
   assert.equal(items.length, 2)
-  assert.match(items[0].textContent ?? '', /內網 http.*Jev 建議 0\.91/)
+  assert.match(items[0].textContent ?? '', /內網 http.*Jev 建議 91%/)
   assert.doesNotMatch(items[1].textContent ?? '', /Jev/)
-  // 收合列也提一聲，不然預設收起時看不到。
-  assert.ok(root.querySelector('.pending-q-toggle .pending-q-jev'))
+  // 收合列也提一聲（含百分比），不然預設收起時看不到。
+  assert.match(root.querySelector('.pending-q-toggle .pending-q-jev')?.textContent ?? '', /^Jev 建議 91%$/)
+  // 展開後有「只是建議、不會代答」的說明。
+  assert.match(root.querySelector('.pending-q-jev-note')?.textContent ?? '', /Jev.*只是建議，不會自動動作/)
 })
 
 test('卡片：沒有建議（沒開、分數太接近、多選題）什麼都不顯示', async () => {
@@ -53,6 +55,7 @@ test('卡片：沒有建議（沒開、分數太接近、多選題）什麼都�
   ] as const) {
     const root = await mount(<PendingQuestionCard questions={questions} defaultOpen answerWhere="below" />)
     assert.deepEqual(tags(root), [], name)
+    assert.equal(root.querySelectorAll('.pending-q-jev-note').length, 0, name)
     assert.doesNotMatch(root.textContent ?? '', /Jev/, name)
     await unmountAll()
   }
@@ -61,7 +64,7 @@ test('卡片：沒有建議（沒開、分數太接近、多選題）什麼都�
 test('卡片：選項在上面的選單裡時，建議改成一行說明（卡片不再列選項）', async () => {
   const root = await mount(<PendingQuestionCard questions={toPendingQuestions(RAW, CLEAR)} current={0} defaultOpen />)
   assert.equal(root.querySelectorAll('.pending-q-opts li').length, 0)
-  assert.match(tags(root).join('|'), /Jev 建議 0\.91/)
+  assert.match(tags(root).join('|'), /Jev 建議 91%/)
   assert.match(root.querySelector('.pending-q-jev-line')?.textContent ?? '', /內網 http/)
 })
 
@@ -107,13 +110,14 @@ test('選單：有建議時對得上的那一列標「Jev 建議」＋分數，�
   const marked = rows.filter((r) => r.querySelector('.bc-jev'))
   assert.equal(marked.length, 1)
   assert.match(marked[0].querySelector('.bc-title')?.textContent ?? '', /接 console 的回饋 API/)
-  assert.equal(marked[0].querySelector('.bc-jev')?.textContent?.trim(), 'Jev 建議 0.88')
+  assert.equal(marked[0].querySelector('.bc-jev')?.textContent?.trim(), 'Jev 建議 88%')
+  assert.match(root.querySelector('.bc-jev-note')?.textContent ?? '', /Jev.*只是建議，不會自動動作/)
 })
 
 test('選單：沒有建議、分數太接近時一列都不標', async () => {
   for (const q of [undefined, jev([{ index: 0, scores: [0.5, 0.45, 0.05], suggested: null }])]) {
     const root = await choices(q)
-    assert.equal(root.querySelectorAll('.bc-jev').length, 0)
+    assert.equal(root.querySelectorAll('.bc-jev, .bc-jev-note').length, 0)
     assert.doesNotMatch(root.textContent ?? '', /Jev/)
     await unmountAll()
   }

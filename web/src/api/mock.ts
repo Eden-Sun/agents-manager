@@ -68,6 +68,17 @@ const MOCK_TINY_ASK_QUESTIONS = [
   },
 ]
 
+/** 同一題 Jev 的選項建議（`jev_options`，只提示不代答）。 */
+const MOCK_TINY_ASK_JEV = {
+  ledger_id: 'mock-ask-1',
+  model: 'jev-1.13.0',
+  threshold: 0.7,
+  margin: 0.15,
+  questions: [{ index: 0, scores: [0.84, 0.12, 0.05], suggested: 0 }],
+}
+
+const MOCK_TWO_ASK_JEV = { ...MOCK_TINY_ASK_JEV, questions: [{ index: 0, scores: [0.91, 0.08], suggested: 0 }] }
+
 function toKind(v: unknown): BotKind {
   return BOT_KINDS.includes(v as BotKind) ? (v as BotKind) : 'claude'
 }
@@ -3742,11 +3753,11 @@ export class MockTransport implements Transport {
 
   private pendingQuestion(botId: string) {
     const run = this.activeRun(botId)
-    if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: TWO_ASK_QUESTIONS }
+    if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: TWO_ASK_QUESTIONS, jev_options: MOCK_TWO_ASK_JEV }
     const asyncAsk = this.codexAsync.get(botId)
     if (run?.agent_status === 'blocked' && asyncAsk) return { questions: CODEX_ASYNC_QUESTIONS, jev_options: null, async_screen: { expanded: asyncAsk.expanded, count: 1 } }
     if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
-    return { questions: MOCK_TINY_ASK_QUESTIONS }
+    return { questions: MOCK_TINY_ASK_QUESTIONS, jev_options: MOCK_TINY_ASK_JEV }
   }
 
   /** 沒指定、或指定的那顆沒在跑：挑第一顆在跑的 claude。回實際用的 bot id（沒有就 null）。 */
