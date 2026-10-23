@@ -37,8 +37,8 @@ pub struct Watch {
     /// 宣告的字第一次被看到留在輸入列（agent idle）的時刻；看不到就清掉。
     held_since: Option<Instant>,
     nudges: u32,
-    /// 補 Enter 前那一刻 pane 的 revision：補完之後畫面沒重繪＝鍵根本沒送到那個行程（#380 實測），不再重試。
-    rev_at_nudge: Option<u64>,
+    /// 上次補 Enter 的完整畫面；沒有可觀察的變化就停止重試，不推論按鍵是否送達。
+    snapshot_at_nudge: Option<crate::herdr::PaneRead>,
     /// 這筆回合的盯梢登記（#1366）；`Watch` 被 drop＝盯梢結束，登記跟著放掉。
     _registered: Option<Registered>,
 }
@@ -241,11 +241,13 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
     };
     let read = match (run.pane_id.as_deref(), client_for_run(app, &run).await) {
         (Some(pane), Ok(client)) => {
-            super::delivery::read_styled(&client, pane, "visible", 80).await.ok().map(|text| (client, pane.to_string(), text))
+            super::delivery::read_styled_snapshot(&client, pane, "visible", 80).await.ok()
+                .filter(|read| read.pane_id == pane && read.source == "visible" && !read.truncated)
+                .map(|read| (client, pane.to_string(), read))
         }
         _ => None,
     };
-    let held = read.as_ref().is_some_and(|(_, _, screen)| composer_holds_prompt(&bot.kind, screen, &w.text));
+    let held = read.as_ref().is_some_and(|(_, _, screen)| composer_holds_prompt(&bot.kind, &screen.text, &w.text));
     if !held {
         w.held_since = None;
         if now.duration_since(w.started) >= GIVE_UP_AFTER {
@@ -254,22 +256,49 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
         return Step::Waiting;
     }
     let since = *w.held_since.get_or_insert(now);
-    if let (Some(before), Some((client, pane, _))) = (w.rev_at_nudge, read.as_ref()) {
-        // 按過 Enter 了，字還在、畫面一次都沒重繪：鍵沒送進去，再按也一樣；停手，等期限到了回報。
-        if matches!(client.pane_get(pane).await, Ok(Some(p)) if p.revision == before) {
-            tracing::warn!(run = %w.run_id, "Enter did not reach the pane (revision unchanged); not retrying");
+    if let (Some(before), Some((_, _, current))) = (&w.snapshot_at_nudge, read.as_ref()) {
+        // An unchanged pane.get/read revision is not evidence that Enter failed. With no
+        // visible change, conservatively stop retries; eventual completion still wins.
+        if before.text == current.text {
+            tracing::warn!(run = %w.run_id, "relayed composer unchanged after Enter; not retrying");
             w.nudges = MAX_NUDGES;
         }
     }
     if now.duration_since(since) < NUDGE_AFTER || w.nudges >= MAX_NUDGES {
         return if w.nudges >= MAX_NUDGES && now.duration_since(w.started) >= GIVE_UP_AFTER { give_up(app, w).await } else { Step::Waiting };
     }
-    let Some((client, pane, _)) = read else { return Step::Waiting };
-    w.rev_at_nudge = client.pane_get(&pane).await.ok().flatten().map(|p| p.revision);
+    let Some((client, pane, candidate)) = read else { return Step::Waiting };
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    super::race_point::hit("relay_before_nudge", &bot.id).await;
+    let Ok(fresh) = super::delivery::read_styled_snapshot(&client, &pane, "visible", 80).await else { return Step::Waiting };
+    if !super::composer_draft::same_snapshot(&candidate, &fresh) {
+        w.held_since = None;
+        return Step::Waiting;
+    }
+    // The run/turn may have been replaced or started working during the read RPCs.
+    let current = match db::active_run(app.db(), &w.bot_id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => return Step::Done,
+        Err(_) => return Step::Waiting,
+    };
+    if current.id != run.id || current.state != "running" || current.pane_id != run.pane_id
+        || current.herdr_session != run.herdr_session || current.native_session_id != run.native_session_id
+        || current.agent_status != run.agent_status
+    {
+        return Step::Done;
+    }
+    if let Some(turn_id) = &w.turn_id {
+        match db::in_flight_turn(app.db(), &w.run_id).await {
+            Ok(Some(turn)) if &turn.id == turn_id => {}
+            Ok(_) => return Step::Done,
+            Err(_) => return Step::Waiting,
+        }
+    }
     if let Err(e) = client.pane_send_keys(&pane, &["Enter"]).await {
         tracing::warn!(error = ?e, run = %w.run_id, "could not re-send Enter for a relayed prompt");
         return Step::Waiting;
     }
+    w.snapshot_at_nudge = Some(fresh);
     w.nudges += 1;
     w.held_since = Some(now);
     tracing::warn!(run = %w.run_id, bot = %w.bot_id, "relayed prompt was still in the composer; re-sent Enter");
@@ -334,7 +363,7 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
             may_fail: true,
             held_since: None,
             nudges: 0,
-            rev_at_nudge: None,
+            snapshot_at_nudge: None,
             _registered: None,
         },
     );
@@ -406,7 +435,7 @@ async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) ->
                 may_fail,
                 held_since: None,
                 nudges: 0,
-                rev_at_nudge: None,
+                snapshot_at_nudge: None,
                 _registered: None,
             }
         })
@@ -447,7 +476,7 @@ mod tests {
     }
 
     fn watch(f: &F, turn_id: Option<String>, at: Instant) -> Watch {
-        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, may_fail: true, held_since: None, nudges: 0, rev_at_nudge: None, _registered: None }
+        Watch { run_id: f.run_id.clone(), bot_id: f.bot_id.clone(), text: TEXT.into(), turn_id, started: at, may_fail: true, held_since: None, nudges: 0, snapshot_at_nudge: None, _registered: None }
     }
 
     fn keys_sent(f: &F) -> usize {
@@ -569,7 +598,7 @@ mod tests {
         let sender = tt::claude_bot(&app, &f.env.project_id, "rearmed-relay-sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let turn_id = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("persist the external turn before shutdown");
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
 
         let mut restored = restore_open_watches(&app, "local").await.unwrap();
         assert_eq!(restored.len(), 1, "startup must reconstruct the open external turn from SQLite");
@@ -591,7 +620,7 @@ mod tests {
         let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
         sqlx::query("UPDATE turns SET created_at = ? WHERE id = ?").bind(db::iso_in(-600)).bind(&tid).execute(app.db()).await.unwrap();
         // agent 閒著、輸入列是空的：字早就送出去了。
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, width: Some(120), ..Default::default() });
 
         let mut w = restore_open_watches(&app, "local").await.unwrap().pop().expect("還是接回來（字若還在輸入列要補 Enter）");
         let t0 = Instant::now();
@@ -610,7 +639,7 @@ mod tests {
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
         sqlx::query("UPDATE turns SET created_at = ? WHERE id = ?").bind(db::iso_in(-60)).bind(&tid).execute(app.db()).await.unwrap();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, width: Some(120), ..Default::default() });
 
         let mut w = restore_open_watches(&app, "local").await.unwrap().pop().unwrap();
         let t0 = Instant::now();
@@ -737,7 +766,7 @@ mod tests {
     async fn a_prompt_left_in_the_composer_gets_its_enter_after_the_delay() {
         let f = fixture("stuck-enter").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
 
@@ -749,12 +778,38 @@ mod tests {
         assert_eq!(f.env.herdr.pane(&f.pane).unwrap().transcript.len(), 1, "字送出去了");
     }
 
+    #[tokio::test]
+    async fn nr1913_zero_revision_nudge_rechecks_screen_and_run_before_enter() {
+        for replace_run in [false, true] {
+            let f = fixture("zero-race").await;
+            let app = f.env.app.clone();
+            f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+            let t0 = Instant::now();
+            let mut w = watch(&f, None, t0);
+            assert_eq!(step(&app, &mut w, t0).await, Step::Waiting);
+            let live = f.env.herdr.live.clone();
+            let pane = f.pane.clone();
+            let pool = app.db().clone();
+            let run = f.run_id.clone();
+            super::super::race_point::arm("relay_before_nudge", &f.bot_id, move || async move {
+                if replace_run {
+                    sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(run).execute(&pool).await.unwrap();
+                } else {
+                    live.lock().unwrap().get_mut(&pane).unwrap().composer = vec!["user draft".into()];
+                }
+            });
+            let result = step(&app, &mut w, t0 + NUDGE_AFTER).await;
+            assert_eq!(result, if replace_run { Step::Done } else { Step::Waiting });
+            assert_eq!(keys_sent(&f), 0);
+        }
+    }
+
     /// 使用者自己在 child 輸入列打的字不是宣告的那句：一個鍵都不按。
     #[tokio::test]
     async fn what_the_user_typed_is_never_submitted() {
         let f = fixture("user-typing").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec!["我自己正在打的另一段草稿文字".into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, composer: vec!["我自己正在打的另一段草稿文字".into()], width: Some(120), ..Default::default() });
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
         for s in [0, 5, 30] {
@@ -763,13 +818,13 @@ mod tests {
         assert_eq!(keys_sent(&f), 0);
     }
 
-    /// Enter 被吃掉、畫面一次都沒重繪（revision 沒變＝鍵沒送到，#380 實測）：只按一次就停手，不重試到天荒地老；
+    /// Enter 後完整畫面未變：保守地只按一次，不把 revision 相等當成送達證據；
     /// agent 開始 working 就收工。
     #[tokio::test]
     async fn an_enter_that_never_redraws_the_pane_is_not_retried_and_the_watch_ends_when_the_agent_works() {
         let f = fixture("swallowed").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], swallow_enter: true, width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], swallow_enter: true, width: Some(120), ..Default::default() });
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
         let mut at = t0;
@@ -778,7 +833,7 @@ mod tests {
         assert_eq!(step(&app, &mut w, at).await, Step::Nudged);
         for _ in 0..3 {
             at += NUDGE_AFTER;
-            assert_eq!(step(&app, &mut w, at).await, Step::Waiting, "revision 沒變：不再按");
+            assert_eq!(step(&app, &mut w, at).await, Step::Waiting, "畫面沒變：不再按");
         }
         assert_eq!(keys_sent(&f), 1);
 
@@ -793,7 +848,7 @@ mod tests {
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, width: Some(120), ..Default::default() });
         let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.unwrap();
         let t0 = Instant::now();
         let mut w = watch(&f, Some(tid.clone()), t0);
@@ -820,7 +875,7 @@ mod tests {
     async fn a_watch_never_retries_against_a_pane_that_no_longer_exists() {
         let f = fixture("dead-child").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         close_pane(&f);
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
@@ -834,7 +889,7 @@ mod tests {
     async fn a_transient_run_read_error_keeps_the_watch_alive() {
         let f = fixture("run-read-retry").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
 
@@ -853,7 +908,7 @@ mod tests {
     async fn a_transient_in_flight_turn_read_error_keeps_the_watch_alive() {
         let f = fixture("turn-read-retry").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let sender = tt::claude_bot(&app, &f.env.project_id, "turn-read-sender").await;
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let turn_id = open_turn(&app, &run, &sender.id, None, TEXT).await.unwrap();
@@ -875,7 +930,7 @@ mod tests {
     async fn a_transient_bot_read_error_keeps_the_watch_alive() {
         let f = fixture("bot-read-retry").await;
         let app = f.env.app.clone();
-        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, zero_revision: true, composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
         let t0 = Instant::now();
         let mut w = watch(&f, None, t0);
 

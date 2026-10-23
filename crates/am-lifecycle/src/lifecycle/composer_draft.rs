@@ -6,7 +6,7 @@
 //!
 //! 兩件事都先確認框裡**還是使用者看到的那一段**（`expect_draft_token`＝409 回的 `draft_token`）：token 綁完整草稿、run
 //! 與 pane；畫面用的 `draft` 仍可截短。框在這之間換了字（有人在終端打字、CLI 自己放回一段），就回 409 `draft_changed`
-//! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查 pane revision、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
+//! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查完整畫面、草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
 //! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -89,14 +89,25 @@ pub(super) fn pane_of(run: &db::Run) -> Option<String> {
 }
 
 /// 框的狀態＋框裡的字（跟送 prompt 前的檢查同一種讀法：帶樣式，TUI 自己畫的提示不算字）。
-pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, u64)> {
+pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, crate::herdr::PaneRead)> {
     let read = super::delivery::read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
-    if read.pane_id != pane {
+    if read.pane_id != pane || read.source != SCAN_SOURCE || read.truncated {
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
     }
     let state = box_state(kind, &read.text);
     let text = (state == BoxState::NonEmpty).then(|| composer_text_whole(kind, &read.text)).flatten();
-    Ok((state, text, read.revision))
+    Ok((state, text, read))
+}
+
+/// A zero revision carries no freshness evidence. Compare complete read content and metadata;
+/// nonzero revision changes remain an additional veto, never the authorization itself.
+pub(super) fn same_snapshot(before: &crate::herdr::PaneRead, after: &crate::herdr::PaneRead) -> bool {
+    before.pane_id == after.pane_id
+        && before.source == after.source
+        && before.format == after.format
+        && !before.truncated && !after.truncated
+        && before.text == after.text
+        && before.revision == after.revision
 }
 
 /// Recheck that the action still targets the active run, pane and native session it planned against.
@@ -165,7 +176,7 @@ pub async fn clear(
     let Some(pane) = pane_of(run) else {
         return Err(refusal("draft_gone", run, true, &bot.kind, None));
     };
-    let (state, now, revision) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let (state, now, authorized_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     match state {
         BoxState::Empty => return Err(refusal("draft_gone", run, true, &bot.kind, None)),
         BoxState::Unready => return Err(unreadable(run)),
@@ -176,15 +187,15 @@ pub async fn clear(
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_clear_key", &bot.id).await;
-    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized revision,
+    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
     // reread immediately before Ctrl+C, and fail closed on any visible change. A change after this
     // last read but before Herdr applies the key remains a narrow, non-atomic window.
-    let (fresh_state, fresh, fresh_revision) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let (fresh_state, fresh, fresh_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     if fresh_state == BoxState::Unready {
         return Err(unreadable(run));
     }
     let unchanged = fresh_state == BoxState::NonEmpty
-        && fresh_revision == revision
+        && same_snapshot(&authorized_snapshot, &fresh_snapshot)
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_run = planned_authority_matches(app, run, None).await;
     if !unchanged || !same_run {
@@ -549,7 +560,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     let Some(pane) = pane_of(&run) else {
         return Err(SubmitDraftError::NoKeySent(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true })));
     };
-    let (state, now, authorized_revision) = read_draft(&client, &pane, &bot.kind)
+    let (state, now, authorized_snapshot) = read_draft(&client, &pane, &bot.kind)
         .await
         .map_err(|_| SubmitDraftError::NoKeySent(unreadable(&run)))?;
     match state {
@@ -623,10 +634,10 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_enter", bot_id).await;
-    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized revision,
+    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
     // reread immediately before Enter, and fail closed on any visible change. A change after this
     // last read but before Herdr applies the key remains a narrow, non-atomic window.
-    let (final_state, fresh, final_revision) = match read_draft(&client, &pane, &bot.kind).await {
+    let (final_state, fresh, final_snapshot) = match read_draft(&client, &pane, &bot.kind).await {
         Ok(snapshot) => snapshot,
         Err(_) => return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await,
     };
@@ -637,7 +648,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         let gone = refusal("draft_gone", &run, false, &bot.kind, None);
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, gone).await;
     }
-    let same_composer = final_revision == authorized_revision
+    let same_composer = same_snapshot(&authorized_snapshot, &final_snapshot)
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_authority = planned_authority_matches(app, &run, Some(&proof)).await;
     if !same_composer || !same_authority {
