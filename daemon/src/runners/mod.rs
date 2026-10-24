@@ -36,6 +36,7 @@ pub mod judge;
 pub mod login_assist;
 pub mod login_prompt;
 pub mod models;
+pub mod models_refresh;
 pub mod pane_identity;
 pub mod panes;
 pub mod pending_question;

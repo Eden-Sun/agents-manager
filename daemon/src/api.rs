@@ -4964,13 +4964,16 @@ async fn get_models(
             if let Some(cached) = crate::models::cached(&app, &host, &q.kind, identity).await {
                 return Ok(Json(cached));
             }
+            // #1890：未命中就由 daemon 在背景排一趟刷新（single-flight、每格每分鐘一次、失敗退避）；這次請求仍只回 503。
+            let refresh = crate::runners::models_refresh::on_cache_miss(&app, &host, &q.kind, identity).await;
             return Err(LcError::Unavailable(json!({
                 "error": "model_cache_miss",
-                "message": "一般 Bot 只能讀取 10 分鐘內的模型快取；請由 User 或已登記 AGM 角色更新",
+                "message": "一般 Bot 只能讀取 10 分鐘內的模型快取；daemon 已排程背景刷新，請稍後重試（見 refresh）",
                 "host": host,
                 "kind": q.kind,
                 "identity": identity,
                 "retry_after_secs": 30,
+                "refresh": refresh,
             })));
         }
     }
@@ -13110,8 +13113,9 @@ mod per_principal_auth_tests {
         }
     }
 
-    /// Cached Bot model reads must not turn a cache miss into an implicit CLI probe.
-    /// `refresh=1` is fenced in middleware, so omitting it must not bypass the same policy.
+    /// A Bot cache miss never probes on the request path: the 503 returns at once and the daemon schedules
+    /// a background refresh (#1890, `runners::models_refresh`). `refresh=1` is fenced in middleware, so
+    /// omitting it must not bypass the same policy.
     #[tokio::test]
     async fn a_plain_bot_model_cache_miss_does_not_spawn_the_cli() {
         let e = crate::testing::env().await;
@@ -13141,9 +13145,10 @@ mod per_principal_auth_tests {
             ),
         )
         .await;
-        assert!(response.starts_with("HTTP/1.1 503"), "a Bot cache miss must not launch codex: {response}");
-        assert!(response.contains("model_cache_miss"), "the response should explain that an authorized refresh is needed: {response}");
-        assert!(e.app.models_cache.lock().await.is_empty(), "a denied implicit probe must not populate the cache");
+        assert!(response.starts_with("HTTP/1.1 503"), "a Bot cache miss must return 503 at once: {response}");
+        assert!(response.contains("model_cache_miss"), "the response should explain that the daemon is refreshing: {response}");
+        assert!(response.contains("\"refresh\"") && !response.contains("\"state\":\"none\""), "a miss must schedule a background refresh: {response}");
+        assert!(e.app.models_cache.lock().await.is_empty(), "the request path must not populate the cache");
 
         let cached = json!({"kind":"codex","host":"local","source":"codex-app-server","models":[{"id":"cached-model"}]});
         e.app.models_cache.lock().await.insert(
