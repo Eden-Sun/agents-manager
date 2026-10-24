@@ -73,19 +73,20 @@ def delta(home, session, limit, offset):
         start = int(offset)
         if start > size or size - start > cap:
             start = max(0, size - cap)
-        body_start = 0
+        # One read of the window; a mid-line start is detected from the byte before it, not by re-reading.
+        previous = b"\n"
         if start > 0:
-            # Mid-line starts (a rotated file, or the cap cut into a line) skip to the next line break.
             stream.seek(start - 1)
-            if stream.read(1) != b"\n":
-                stream.seek(start)
-                head = stream.read(size - start)
-                newline = head.find(b"\n")
-                if newline < 0:
-                    return b"AM_ROLLOUT %d\n" % start
-                body_start = newline + 1
+            previous = stream.read(1)
         stream.seek(start)
         buf = stream.read(size - start)
+    body_start = 0
+    if previous != b"\n":
+        # Mid-line starts (a rotated file, or the cap cut into a line) skip to the next line break.
+        newline = buf.find(b"\n")
+        if newline < 0:
+            return b"AM_ROLLOUT %d\n" % start
+        body_start = newline + 1
     end = max(buf.rfind(b"\n") + 1, body_start)
     text = buf[body_start:end] if end > body_start else b""
     return b"AM_ROLLOUT %d\n" % (start + end) + text

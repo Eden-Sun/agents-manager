@@ -2754,9 +2754,11 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   取最後一筆 `event_msg`／`token_count` 的 `info`：`last_token_usage.input_tokens`＝這次請求讀進去的整段 context（也是 `recache_tokens_if_cold` 的近似）、
   `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %（網頁對 codex 的 gpt-6.1-sol 例外：分母固定 500k，只用實際 token，見 UI-DECISIONS「gpt-6.1-sol 的 context 分母固定 500k」）；codex 沒有 TTL，`warm` 一直是 `true`、`expires_at`／`ttl_secs` 為 `null`（推算，
   `source:"rollout_estimate"`，網頁字面加「約」）。讀數變了才推 `bot_status`；換 session 作廢舊位移與讀數，run 結束由巡邏清掉。
-  **遠端 codex**（bot 的 host 不是本機，#1954）：同一份 rollout，經 host 既有的 SSH 讀檔通道增量讀（`codex_async_question_remote::rollout_read`，`codex_async_question_tail.py` 的選用 `offset` 參數；不帶 offset 的讀取行為不變）。
-  每 run 最多 20 秒打一次 host（`prompt_cache::REMOTE_EVERY`），讀失敗也等到下一個間隔；**不與 async 提問共用快取**（key 空間分開，各自限流）。位移只放記憶體、不在本機留檔；
-  第一次讀檔尾（最多 8 MiB），之後只讀新增的整行；位移超過檔案大小（rotate／截斷）從頭讀，同樣只取最後 8 MiB。canonical 路徑限於 `CODEX_HOME/sessions` 內，SSH 逾時 5 秒。
+  **遠端 codex**（bot 的 host 不是本機，#1954）：同一份 rollout，經 host 既有的 SSH 讀檔通道增量讀（`codex_async_question_remote::rollout_read`，`codex_async_question_tail.py` 的選用 `offset`、`cap` 參數；不帶 offset 的讀取行為不變）。
+  巡邏**不等**遠端讀取：遠端 run 另外 spawn（`prompt_cache::spawn_remote_once`），同一 run 同時最多一個在飛，在飛就不另起；整段讀取（身分、herdr 核對、SSH）共用 5 秒上限，慢或卡住只是這一次讀失敗。
+  每 run 最多每 20 秒打一次 host（`prompt_cache::REMOTE_EVERY`），讀失敗也等到下一個間隔；**不與 async 提問共用快取**（key 空間分開，各自限流）。位移只放記憶體、不在本機留檔。
+  第一次只讀檔尾 256 KiB（同本機 `TAIL_BYTES`）；檔尾找不到 `token_count` 且還沒有任何讀數，往前補一次到 8 MiB（`REMOTE_BACKWARD_BYTES`），每個 session 只試一次，失敗也不逐輪重傳。之後只讀新增的整行，單次最多 256 KiB。
+  逾時不會變成每 20 秒重傳 8 MiB。位移超過檔案大小（rotate／截斷）從頭讀。**限制**：遠端沒有記路徑或 inode，同一 session 換成新檔、而新檔大小 ≥ 舊位移時偵測不到，會從新檔中間開始讀，新檔在位移之前的讀數要等有新行才會更新（行對齊保護，不會顯示錯的數字）。
   讀不到就保留上一次讀數，不猜、不顯示錯的數字。
   網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
   沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。

@@ -45,14 +45,16 @@ pub trait CodexRolloutAccess: Send + Sync {
     ) -> impl Future<Output = Option<PathBuf>> + Send + 'a;
 
     /// Incremental read of a remote bot's rollout over its host's existing SSH channel. `offset` `None`
-    /// reads the bounded tail; the adapter resolves rotation (offset past the file end) by reading from
-    /// the start again. `None` = the read failed or the host is not reachable; callers keep their last value.
+    /// reads the tail, at most `cap` bytes; the adapter resolves rotation (offset past the file end) by
+    /// reading from the start again. `None` = the read failed or the host is not reachable; callers keep
+    /// their last value.
     fn remote_rollout_read<'a>(
         &'a self,
         run: &'a RunId,
         bot: &'a BotId,
         session: &'a SessionId,
         offset: Option<u64>,
+        cap: u64,
     ) -> impl Future<Output = Option<RemoteRollout>> + Send + 'a;
 }
 
