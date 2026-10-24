@@ -1,0 +1,40 @@
+
+   main ~/project/agents-manager
+
+
+
+
+                                 ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄
+                                 ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀
+                                 ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀
+                                 ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀
+                                 ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀
+                                 ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀
+                                 ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+
+               Resume session                               ctrl+r
+               New worktree                                 ctrl+w
+               Changelog
+               Quit                                         ctrl+q
+
+               New /learn skill!
+               Ask Grok to /learn from your past traces and tune
+               Grok Build to how you work.
+
+
+
+
+
+
+
+
+
+
+  Coming from Codex? Resume your session from moments ago using ctrl+u
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰─────────────────────────────────────── Grok 4.7 (high) · always-approve ─╯
+
+                                                   Grok Build  1.0.70 [stable]
+

@@ -161,11 +161,11 @@ pub fn prompt_matches(seen: &str, prompt: &str) -> bool {
 
 /// grok 啟動畫面的選單（`New worktree ctrl+w`／`Resume session ctrl+r`／`Quit ctrl+q`）不是回覆。
 pub fn is_startup_screen(text: &str) -> bool {
+    // 寬 pane 的選單外面有 `│` 框，label 前面還有吉祥物的字（1.0.70 實測）：每行先去掉框與空白，label 在行內任何位置都算，
+    // 但 label 到 key 之間只能是空白，而且 key 要在行尾。
+    let rows: Vec<&str> = text.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
     let has = |label: &str, key: &str| {
-        text.lines().any(|l| {
-            let l = l.trim();
-            l.starts_with(label) && l.ends_with(key)
-        })
+        rows.iter().any(|row| row.match_indices(label).any(|(i, _)| row[i + label.len()..].trim_start() == key))
     };
     has("New worktree", "ctrl+w") && has("Resume session", "ctrl+r") && has("Quit", "ctrl+q")
 }

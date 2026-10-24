@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 const FRESH: &str = include_str!("fixtures/grok-1.0.46-chat_history.jsonl");
 const COMPACTED: &str = include_str!("fixtures/grok-1.0.46-chat_history-compacted.jsonl");
 const WELCOME: &str = include_str!("fixtures/grok-1.0.46-welcome.txt");
+/// grok 1.0.70 真畫面：1.0.69 起 Resume session 排在 New worktree 上面。取法（2026-10-24，grok 1.0.70 (f50904eaee6c) [stable]）：
+/// `tmux new-session -d -s <名> -x 80 -y 40 -c /home/ubuntu/project/agents-manager "grok; sleep 600"`，等 8 秒，
+/// `tmux capture-pane -p -t <名>`，再去掉每行尾端空白。80 欄＝選單是裸的兩欄。
+const WELCOME_80: &str = include_str!("fixtures/grok-1.0.70-welcome-80col.txt");
+/// 同上，`-x 120 -y 45`：寬 pane 把選單框在 `│` 裡，label 前面還有吉祥物的點陣字。
+const WELCOME_120: &str = include_str!("fixtures/grok-1.0.70-welcome-120col.txt");
 const SID: &str = "01a10136-1726-7ec2-9cd8-d321b39fda2e";
 
 #[test]
@@ -66,6 +72,18 @@ fn the_startup_menu_is_not_a_reply() {
     assert!(is_startup_screen(WELCOME));
     assert!(is_startup_screen("main ~/x\n\nNew worktree   ctrl+w\nResume session   ctrl+r\nChangelog\nQuit   ctrl+q\n"));
     assert!(!is_startup_screen("回覆裡提到 Resume session ctrl+r 這個快捷鍵"));
+}
+
+#[test]
+fn the_startup_menu_is_not_a_reply_in_grok_1_0_70() {
+    assert!(is_startup_screen(WELCOME_80), "窄 pane：選單是裸的兩欄");
+    assert!(is_startup_screen(WELCOME_120), "寬 pane：選單外面有 `│` 框");
+}
+
+#[test]
+fn a_bordered_table_with_one_menu_pair_is_not_the_startup_screen() {
+    let table = "│ 快捷鍵 │ 用途 │\n│ Quit   ctrl+q │ 離開 │\n│ 其他列 │ 說明 │\n";
+    assert!(!is_startup_screen(table), "只有一組 label＋key，三個要到齊");
 }
 
 #[test]
