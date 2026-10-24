@@ -836,9 +836,10 @@ const LOW_DISK_FREE_PCT: u64 = 25;
 
 /// `shared/` 被佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104、#1937）。
 /// 持有者佔的是整段 cargo（編譯＋測試），不是只有增量的十幾秒；#1856 之後同一個 repo 的所有 worktree 共用這一份 `shared/`，
-/// 排在前面的好幾顆 child 都可能要跑好幾分鐘。舊的 5 分鐘一到就全部改冷編譯：冷編譯要 8 分多（#1886：496 秒），
-/// 用完即刪、暖快取也沒留下，等於排隊 300 秒又白付一次冷編譯（#1886 實測 300＋496 秒）。
-/// 所以上限改成一次冷編譯加餘裕：持有者本身是冷編譯時也等得到，只有真的卡住才退回冷編譯。整體上限 `timeout_secs` 照舊是硬界線。
+/// 排在前面的好幾顆 child 都可能要跑好幾分鐘。r7 只有 1 個遠端名額（`max_concurrent = 1`）：持有者還在跑時，改用 `job-*` 也拿不到
+/// 遠端名額，所以舊的 5 分鐘一到只能改在本機冷編譯（#1886 的 log：等滿 300 秒 → 改用獨立目錄 → 遠端名額全滿 → 本機排隊，本機跑了 8 分多）。
+/// 所以上限改成一次冷編譯加餘裕：持有者本身是冷編譯時也等得到，只有真的卡住才退回。整體上限 `timeout_secs` 照舊是硬界線。
+/// 拿到 `shared/` 時守門會印「等了 N 秒拿到共用遠端 target」（N > 0 才印），給 #1937 統計實際等待分布。
 const SHARED_WAIT_SECS: u64 = 15 * 60;
 /// 遠端是額外名額：短暫等候仍全滿就退回本機名額（issue #1853）。
 /// 守門仍回 75 表示尚未開工；helper 將這個交握結果轉成 125。
@@ -1027,7 +1028,10 @@ lock_dir() {
   h0=$(date +%s)
   while :; do
     alive || return 73
-    flock -n 8 && return 0
+    if flock -n 8; then
+      hw=$(($(date +%s) - h0)); [ "$hw" -eq 0 ] || echo "agents-manager: 等了 $hw 秒拿到共用遠端 target" >&2
+      return 0
+    fi
     [ $(($(date +%s) - h0)) -lt "$1" ] || return 75
   done
 }
@@ -3542,6 +3546,16 @@ exec /bin/sh -c "$inner"
             assert!(script.contains(want), "{want}");
         }
         assert!(!script.contains('@'), "沒替換乾淨");
+        // #1937：24 小時統計要 grep 的四種字樣（拿到 shared 並等了幾秒、shared 逾時、改用獨立目錄、轉本機）都在守門裡，彼此分得開。
+        for want in [
+            "等了 $hw 秒拿到共用遠端 target",
+            "秒共用遠端 target 還沒空出來",
+            "這次改用獨立目錄（冷編譯，結束就刪）",
+            "這次改在本機排隊",
+        ] {
+            assert!(script.contains(want), "{want}");
+        }
+        assert!(!script.contains("拿到遠端名額"), "shared 鎖的字樣不能跟名額那層（「排到遠端名額」）混在一起");
     }
 
     /// issue #104：排隊時守門可能很久才交出目錄，這段時間收到終止訊號（Ctrl-C／TERM）也要馬上停，不能卡到排到名額為止。
