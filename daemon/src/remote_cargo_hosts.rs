@@ -196,8 +196,11 @@ pub(super) fn acquire(hosts: &[BuildRemoteCfg], data_dir: &Path, root: &Path, ct
 }
 
 /// 排名額排到逾時（[`QueueFull`]）＝守門有回話，那台連得上、只是滿了：記在**排的那台**名下（不是第一台，#1956 review）。
-fn queue_full_noted(h: &BuildRemoteCfg, data_dir: &Path, e: anyhow::Error) -> anyhow::Error {
-    if e.downcast_ref::<QueueFull>().is_some() {
+fn queue_full_noted(h: &BuildRemoteCfg, data_dir: &Path, mut e: anyhow::Error) -> anyhow::Error {
+    if let Some(qf) = e.downcast_mut::<QueueFull>() {
+        if qf.host.is_empty() {
+            qf.host = h.host.clone();
+        }
         note_health(h, data_dir, true, None);
     }
     e

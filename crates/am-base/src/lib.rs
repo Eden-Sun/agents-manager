@@ -85,6 +85,7 @@ pub mod quota_agy;
 pub mod quota_claude;
 pub mod quota_grok;
 pub mod release_triage;
+pub mod remote_event;
 pub mod remote_health;
 pub mod remote_purge;
 pub mod remote_trash;
