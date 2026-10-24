@@ -28,9 +28,16 @@ const PROMPT_VERSION: &str = "1";
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 /// 翻譯實際用的設定：key 檔跟 `[claude_api]` 同一把（`[changelog_translate] key_file` 被明確改過才用舊的）。
+/// timeout 不在這裡：一律跟 `[claude_api] timeout_ms`（#1942）。舊鍵讀到就 WARN 一次，不生效。
 fn translate_cfg(full: &crate::config::ConfigFile) -> ChangelogTranslateCfg {
+    static LEGACY_TIMEOUT_WARNED: std::sync::Once = std::sync::Once::new();
     let mut cfg = full.changelog_translate.clone();
     cfg.key_file = full.changelog_translate_key_file();
+    if cfg.timeout_ms.is_some() {
+        LEGACY_TIMEOUT_WARNED.call_once(|| {
+            tracing::warn!("[changelog_translate] timeout_ms is deprecated and ignored; set [claude_api] timeout_ms instead");
+        });
+    }
     cfg
 }
 
@@ -201,8 +208,9 @@ pub async fn post_translation(
 
 fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = Value> + Send>> {
     Box::pin(async move {
-        let cfg = translate_cfg(&app.cfg.get().await);
-        let limits = limits_of(&cfg);
+        let full = app.cfg.get().await;
+        let cfg = translate_cfg(&full);
+        let limits = limits_of(&cfg, full.claude_api.timeout_ms);
         let norm = norm_query(&q);
         if !cfg.enabled {
             return disabled_view(&app, &norm, &limits).await;
@@ -239,8 +247,9 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
 
 fn post_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = Value> + Send>> {
     Box::pin(async move {
-        let cfg = translate_cfg(&app.cfg.get().await);
-        let limits = limits_of(&cfg);
+        let full = app.cfg.get().await;
+        let cfg = translate_cfg(&full);
+        let limits = limits_of(&cfg, full.claude_api.timeout_ms);
         let norm = norm_query(&q);
         if !cfg.enabled {
             return disabled_view(&app, &norm, &limits).await;
@@ -322,7 +331,13 @@ fn run_attempt(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         let client = app.changelog_translate.client();
-        let result = client.complete(&request).await;
+        let result = crate::claude_api::complete_recorded(
+            &app.claude_api,
+            client.as_ref(),
+            &request,
+            "changelog_translate",
+        )
+        .await;
         let _gate = app.changelog_translate.gate.lock().await;
         finish(&app.data_dir, &fp, &attempt_id, result);
     })
@@ -366,11 +381,14 @@ fn decide(
             return Action::View(job_view(true, job, None));
         }
         if sent_count(job) >= limits.max_attempts as usize {
-            return Action::View(job_view(
-                true,
-                job,
-                Some(Overlay::budget("attempts", crate::db::iso_in(3600))),
-            ));
+            let retry_at = attempts_retry_at(job);
+            if retry_at > chrono::Utc::now() {
+                return Action::View(job_view(
+                    true,
+                    job,
+                    Some(Overlay::budget("attempts", crate::db::iso_at(retry_at))),
+                ));
+            }
         }
     }
     let jobs = ledger_jobs(&ledger_dir(data_dir));
@@ -596,7 +614,25 @@ fn settle_dir(dir: &Path) {
     }
 }
 
-fn limits_of(cfg: &ChangelogTranslateCfg) -> Limits {
+/// 次數上限用盡後，最後一次送出的嘗試結束（沒有 `finished_at` 就用開始時間）起 1 小時才可再送。
+/// 固定從這個時間算，不隨查詢往後延；過窗後允許再送一次，之後同樣每次隔 1 小時（#1942）。
+/// 時間讀不出來時回傳現在，不讓它永遠卡住。
+fn attempts_retry_at(job: &Job) -> chrono::DateTime<chrono::Utc> {
+    job.attempts
+        .iter()
+        .rev()
+        .find(|a| a.sent)
+        .and_then(|a| {
+            a.finished_at
+                .as_deref()
+                .or(Some(a.started_at.as_str()))
+                .and_then(crate::db::parse_ts)
+        })
+        .map(|t| t + chrono::Duration::hours(1))
+        .unwrap_or_else(chrono::Utc::now)
+}
+
+fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits {
     let effort = match cfg.effort.trim() {
         "low" | "medium" | "high" | "max" => cfg.effort.trim().to_string(),
         _ => "low".into(),
@@ -622,7 +658,7 @@ fn limits_of(cfg: &ChangelogTranslateCfg) -> Limits {
         lang,
         effort,
         endpoint: endpoint_of(cfg),
-        timeout_ms: cfg.timeout_ms.clamp(100, 20_000),
+        timeout_ms: claude_api_timeout_ms.max(1),
         max_input_chars: cfg.max_input_chars.clamp(1, 12_000),
         max_tokens: cfg.max_tokens.clamp(1, 4096),
         max_in_flight: cfg.max_in_flight.max(1),
@@ -1426,6 +1462,17 @@ mod tests {
         save(&path, &job).unwrap();
     }
 
+    /// 把最後一次送出的嘗試往前推 `secs` 秒（開始與結束都推），模擬時間過去。
+    fn age_last_sent(app: &App, fp: &str, secs: i64) {
+        let path = job_path(&app.data_dir, fp);
+        let mut job = load(&path).unwrap();
+        let last = job.attempts.iter_mut().rev().find(|a| a.sent).unwrap();
+        last.started_at = crate::db::iso_in(-secs);
+        last.finished_at = Some(crate::db::iso_in(-secs));
+        save(&path, &job).unwrap();
+        patch_retry_past(app, fp);
+    }
+
     fn ok_step() -> Step {
         Step::AutoOk {
             model: None,
@@ -1435,7 +1482,7 @@ mod tests {
 
     #[test]
     fn fingerprint_ignores_host_and_changes_with_content_or_settings() {
-        let limits = limits_of(&ChangelogTranslateCfg::default());
+        let limits = limits_of(&ChangelogTranslateCfg::default(), 8000);
         let sections = crate::changelog::parse_changelog(CHANGELOG);
         let picked = crate::changelog::pick_sections(&sections, Some("2.1.3"), "2.1.5");
         let plan = plan_input("claude", &limits, &picked);
@@ -1465,7 +1512,7 @@ mod tests {
 
     #[test]
     fn plan_keeps_the_newest_section_and_marks_truncation() {
-        let mut limits = limits_of(&ChangelogTranslateCfg::default());
+        let mut limits = limits_of(&ChangelogTranslateCfg::default(), 8000);
         limits.max_input_chars = 20;
         let sections = crate::changelog::parse_changelog(CHANGELOG);
         let picked = crate::changelog::pick_sections(&sections, Some("2.1.3"), "2.1.5");
@@ -1486,7 +1533,6 @@ mod tests {
     #[test]
     fn clamps_and_retry_after_are_bounded() {
         let mut cfg = ChangelogTranslateCfg::default();
-        cfg.timeout_ms = 1;
         cfg.max_tokens = 99_999;
         cfg.max_input_chars = 0;
         cfg.max_attempts = 0;
@@ -1494,8 +1540,8 @@ mod tests {
         cfg.max_per_hour = 0;
         cfg.effort = "ultra".into();
         cfg.model = "  ".into();
-        let limits = limits_of(&cfg);
-        assert_eq!(limits.timeout_ms, 100);
+        let limits = limits_of(&cfg, 0);
+        assert_eq!(limits.timeout_ms, 1);
         assert_eq!(limits.max_tokens, 4096);
         assert_eq!(limits.max_input_chars, 1);
         assert_eq!(limits.max_attempts, 1);
@@ -1786,8 +1832,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attempt_cap_does_not_call_again() {
-        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+    async fn attempt_cap_waits_an_hour_from_the_last_send_and_retry_is_fixed() {
+        let (env, fake) = boot(vec![
+            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout),
+        ])
+        .await;
         enable(&env).await;
         env.app
             .cfg
@@ -1799,12 +1849,63 @@ mod tests {
             .unwrap();
         let _ = post(&env.app, q_to("2.1.5")).await;
         let failed = until_status(&env.app, "2.1.5", "failed").await;
-        patch_retry_past(&env.app, failed["fingerprint"].as_str().unwrap());
+        let fp = failed["fingerprint"].as_str().unwrap().to_string();
+        patch_retry_past(&env.app, &fp);
+
+        // 剛送完：1 小時內不送，retry_after 落在最後一次結束起 1 小時。
         let blocked = post(&env.app, q_to("2.1.5")).await;
         assert_eq!(blocked["error_kind"], "budget");
         assert_eq!(blocked["error"], "attempts");
         assert_eq!(blocked["attempts"].as_array().unwrap().len(), 1);
+        let retry_at = blocked["retry_after"].as_str().unwrap().to_string();
+        let left = crate::db::parse_ts(&retry_at).unwrap() - chrono::Utc::now();
+        assert!(left > chrono::Duration::seconds(3500) && left <= chrono::Duration::seconds(3600), "left {left}");
         assert_eq!(fake.calls(), 1);
+
+        // 連續查詢不往後延（GET 只回帳本狀態、不套上限覆寫，所以只比 POST）。
+        let again = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(again["retry_after"], blocked["retry_after"]);
+        assert_eq!(fake.calls(), 1);
+
+        // 過了 1 小時：允許再送一次；那次失敗後又要等下一個 1 小時。
+        age_last_sent(&env.app, &fp, 3601);
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        until_calls(&fake, 2).await;
+        let _ = until_status(&env.app, "2.1.5", "failed").await;
+        patch_retry_past(&env.app, &fp);
+        let blocked_again = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(blocked_again["error"], "attempts");
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn translate_sends_with_claude_api_timeout_and_is_recorded_in_the_ledger() {
+        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.claude_api.timeout_ms = 12_345;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let failed = until_status(&env.app, "2.1.5", "failed").await;
+        patch_retry_past(&env.app, failed["fingerprint"].as_str().unwrap());
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let _ = until_status(&env.app, "2.1.5", "completed").await;
+
+        assert_eq!(fake.calls(), 2);
+        assert!(fake.seen().iter().all(|s| s.timeout_ms == 12_345));
+        let snap = env.app.claude_api.ledger.snapshot(10);
+        assert_eq!(snap["by_use"]["changelog_translate"]["calls"], 2);
+        assert_eq!(snap["by_use"]["changelog_translate"]["ok"], 1);
+        assert_eq!(snap["by_use"]["changelog_translate"]["errors"], 1);
+        let rows = snap["rows"].as_array().unwrap();
+        assert_eq!(rows[0]["use"], "changelog_translate");
+        assert_eq!(rows[0]["ok"], true);
+        assert_eq!(rows[1]["error_kind"], "timeout");
     }
 
     #[tokio::test]
@@ -1909,7 +2010,7 @@ mod tests {
             &fp,
             &plan_input(
                 "claude",
-                &limits_of(&env.app.cfg.get().await.changelog_translate),
+                &limits_of(&env.app.cfg.get().await.changelog_translate, 8000),
                 &crate::changelog::pick_sections(
                     &crate::changelog::parse_changelog(CHANGELOG),
                     Some("2.1.3"),
@@ -1964,7 +2065,7 @@ mod tests {
         enable(&env).await;
         let absent = get(&env.app, q_to("2.1.5")).await;
         let fp = absent["fingerprint"].as_str().unwrap().to_string();
-        let limits = limits_of(&env.app.cfg.get().await.changelog_translate);
+        let limits = limits_of(&env.app.cfg.get().await.changelog_translate, 8000);
         let mut job = blank_job(
             &fp,
             &plan_input(
@@ -2048,7 +2149,8 @@ mod tests {
             .update(|c| {
                 c.changelog_translate.model = "claude-sonnet-5-5".into();
                 c.changelog_translate.effort = "ultra".into();
-                c.changelog_translate.timeout_ms = 1;
+                c.changelog_translate.timeout_ms = Some(1);
+                c.claude_api.timeout_ms = 4321;
                 c.changelog_translate.max_tokens = 9_999;
                 Ok(())
             })
@@ -2060,7 +2162,8 @@ mod tests {
         let seen = &fake.seen()[0];
         assert_eq!(seen.model, "claude-sonnet-5-5");
         assert_eq!(seen.effort, "low");
-        assert_eq!(seen.timeout_ms, 100);
+        // 舊的 [changelog_translate] timeout_ms 不生效，跟 [claude_api] timeout_ms 走。
+        assert_eq!(seen.timeout_ms, 4321);
         assert_eq!(seen.max_tokens, 4096);
         assert_eq!(done["requested_model"], "claude-sonnet-5-5");
         assert_eq!(done["model"], "claude-haiku-5-5");
