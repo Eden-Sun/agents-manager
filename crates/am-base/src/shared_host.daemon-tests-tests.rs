@@ -7,21 +7,28 @@
     use serde_json::{json, Value};
     use std::sync::Arc;
 
-    pub(crate) const HOST: &str = "sh1";
+    /// 每個測試各自一個 host 名：`RESERVED_SCRATCH`、`ANNOUNCED`、`SSH_FAKES`、`ssh_delay` 這些行程級的狀態都以 host 名為 key，
+    /// 同一個測試程序裡的測試共用 `"sh1"` 就會互相看到對方留下的 scratch／fake（#1958 偶發紅）。
+    fn unique_host() -> String {
+        // host 名必須符合 `[a-z][a-z0-9_-]{0,31}`，ULID 是大寫，取尾端 16 個隨機字元轉小寫。
+        format!("sh1-{}", crate::db::ulid()[10..].to_lowercase())
+    }
 
     /// 另一顆 daemon 也在用的遠端主機：自己的一個 mock herdr，設定裡 `shared_session = true`。
     pub(crate) struct Shared {
         pub herdr: tt::MockHerdr,
         pub client: HerdrClient,
         pub project_id: String,
+        pub host: String,
     }
 
     pub(crate) async fn shared_host(env: &tt::Env, shared: bool) -> Shared {
         let app = &env.app;
-        let sock = env.dir.join("sh1.sock");
+        let host = unique_host();
+        let sock = env.dir.join(format!("{host}.sock"));
         let herdr = tt::MockHerdr::start(sock.clone());
         let cfg = crate::config::HostCfg {
-            name: HOST.into(),
+            name: host.clone(),
             ssh: "sh1.invalid".into(),
             ssh_port: 22,
             ssh_opts: vec![],
@@ -31,9 +38,10 @@
         };
         let conn = app.hosts.insert_remote_with_client_for_test(cfg.clone(), HerdrClient::new(sock.clone())).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let name = host.clone();
         app.cfg
             .update(move |c| {
-                c.hosts.retain(|h| h.name != HOST);
+                c.hosts.retain(|h| h.name != name);
                 c.hosts.push(cfg);
                 Ok(())
             })
@@ -42,18 +50,19 @@
         let project_id = db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/tmp/sh', 'sh', ?, ?)")
             .bind(&project_id)
-            .bind(HOST)
+            .bind(&host)
             .bind(db::now())
             .execute(&app.db)
             .await
             .unwrap();
-        Shared { herdr, client: HerdrClient::new(sock), project_id }
+        Shared { herdr, client: HerdrClient::new(sock), project_id, host }
     }
 
-    pub(crate) async fn set_shared(app: &Arc<App>, shared: bool) {
+    pub(crate) async fn set_shared(app: &Arc<App>, host: &str, shared: bool) {
+        let host = host.to_string();
         app.cfg
             .update(move |c| {
-                for h in c.hosts.iter_mut().filter(|h| h.name == HOST) {
+                for h in c.hosts.iter_mut().filter(|h| h.name == host) {
                     h.shared_session = shared;
                 }
                 Ok(())
@@ -101,6 +110,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         let (mine, root) = sh.client.workspace_create("/tmp/sh", "sh", json!({})).await.unwrap();
         let kid = sh.client.tab_create(&mine.workspace_id, "/tmp/sh", "kid", json!({})).await.unwrap();
         let (theirs, their_root) = sh.client.workspace_create("/tmp/x", "x", json!({})).await.unwrap();
@@ -114,11 +124,11 @@
         ];
 
         crate::spawn_hints::claim(&app, &bot.id, &kid.pane_id).await.unwrap();
-        crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
+        crate::reconcile::reconcile_host(&app, &host).await.unwrap();
         assert_eq!(children(&app).await, ["ui"], "只認領自己 workspace 裡的");
 
-        set_shared(&app, false).await;
-        crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
+        set_shared(&app, &host, false).await;
+        crate::reconcile::reconcile_host(&app, &host).await.unwrap();
         assert_eq!(children(&app).await, ["ui"], "不共用時也不憑前綴認領別人的 agent");
     }
 
@@ -128,16 +138,17 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         let (theirs, their_root) = sh.client.workspace_create("/tmp/x", "x", json!({})).await.unwrap();
         let bot = tt::claude_bot(&app, &sh.project_id, "alfa").await;
         run_row(&app, &bot.id, "exited", "w-old", "t-old", &their_root.pane_id, "gone").await;
         sh.herdr.agents.lock().unwrap().clear();
 
-        crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
+        crate::reconcile::reconcile_host(&app, &host).await.unwrap();
         assert!(sh.client.pane_get(&their_root.pane_id).await.unwrap().is_some(), "別人的 pane 不關");
 
-        set_shared(&app, false).await;
-        crate::reconcile::reconcile_host(&app, HOST).await.unwrap();
+        set_shared(&app, &host, false).await;
+        crate::reconcile::reconcile_host(&app, &host).await.unwrap();
         assert!(sh.client.pane_get(&their_root.pane_id).await.unwrap().is_none(), "不共用時照舊當孤兒關");
         let _ = theirs;
     }
@@ -148,30 +159,31 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         sqlx::query("UPDATE projects SET workspace_id = 'wM' WHERE id = ?").bind(&sh.project_id).execute(&app.db).await.unwrap();
         let pane = |id: &str, ws: &str| json!({"pane_id": id, "workspace_id": ws, "tab_id": format!("{ws}:t1"), "cwd": "/home/u", "agent": null, "revision": 1});
         let snapshot = json!({
             "workspaces": [{"workspace_id": "wM", "label": "sh"}, {"workspace_id": "wX", "label": "x"}],
             "panes": [pane("wM:p1", "wM"), pane("wX:p1", "wX")],
         });
-        crate::panes::scan_snapshot(&app, HOST, &snapshot).await.unwrap();
+        crate::panes::scan_snapshot(&app, &host, &snapshot).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, ["wM:p1"]);
         // The pane must outlive the new notification grace period before this test checks it is reported.
         let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE panes SET first_seen=? WHERE host=? AND pane_id='wM:p1'")
             .bind(aged)
-            .bind(HOST)
+            .bind(&host)
             .execute(&app.db)
             .await
             .unwrap();
-        crate::panes::notify_unowned_and_orphans(&app, HOST).await.unwrap();
+        crate::panes::notify_unowned_and_orphans(&app, &host).await.unwrap();
         let notified: Vec<String> =
             sqlx::query_scalar("SELECT pane_id FROM panes WHERE unowned_notified_at IS NOT NULL").fetch_all(&app.db).await.unwrap();
         assert_eq!(notified, ["wM:p1"], "別人的 pane 不推 pane_unowned");
 
-        set_shared(&app, false).await;
-        crate::panes::scan_snapshot(&app, HOST, &snapshot).await.unwrap();
+        set_shared(&app, &host, false).await;
+        crate::panes::scan_snapshot(&app, &host, &snapshot).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, ["wM:p1", "wX:p1"]);
     }
@@ -182,11 +194,12 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         let bot = tt::claude_bot(&app, &sh.project_id, "alfa").await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
 
-        assert_eq!(crate::runners::remote_purge::sweep(&app, HOST).await, (0, 0));
-        assert!(!crate::lifecycle::purge_bot_dir(&app, &bot.id, HOST).await);
+        assert_eq!(crate::runners::remote_purge::sweep(&app, &host).await, (0, 0));
+        assert!(!crate::lifecycle::purge_bot_dir(&app, &bot.id, &host).await);
         let marks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_bot_dir_purges").fetch_one(&app.db).await.unwrap();
         assert_eq!(marks, 0, "沒去碰，也不記成欠著");
     }
@@ -217,13 +230,13 @@
     async fn the_probe_tag_is_only_for_shared_hosts_and_survives_a_restart() {
         let env = tt::env().await;
         let app = env.app.clone();
-        shared_host(&env, true).await;
-        let tag = super::probe_tag(&app, HOST).await.expect("共用主機有標記");
-        assert_eq!(super::probe_tag(&app, HOST).await.as_deref(), Some(tag.as_str()));
+        let host = shared_host(&env, true).await.host;
+        let tag = super::probe_tag(&app, &host).await.expect("共用主機有標記");
+        assert_eq!(super::probe_tag(&app, &host).await.as_deref(), Some(tag.as_str()));
         assert_eq!(super::daemon_tag(&app.data_dir), tag, "存在資料目錄，重啟後同一個");
         assert_eq!(super::probe_tag(&app, crate::config::LOCAL_HOST).await, None);
-        set_shared(&app, false).await;
-        assert_eq!(super::probe_tag(&app, HOST).await, None);
+        set_shared(&app, &host, false).await;
+        assert_eq!(super::probe_tag(&app, &host).await, None);
     }
 
     /// 「自己的」除了 run 與專案 workspace，還有剛開的 child（spawn hint）、預覽 pane、自己開的 host shell；
@@ -233,9 +246,10 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         let bot = tt::claude_bot(&app, &sh.project_id, "alfa").await;
         sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES ('wK:p1', ?, ?, ?)")
-            .bind(HOST)
+            .bind(&host)
             .bind(&bot.id)
             .bind(db::now())
             .execute(&app.db)
@@ -243,13 +257,13 @@
             .unwrap();
         sqlx::query("INSERT INTO bot_previews (bot_id, host, pane_id, status, updated_at) VALUES (?, ?, 'wP:p1', 'running', ?)")
             .bind(&bot.id)
-            .bind(HOST)
+            .bind(&host)
             .bind(db::now())
             .execute(&app.db)
             .await
             .unwrap();
         app.host_shells.lock().await.push(crate::api::shell::HostShell {
-            host: HOST.into(),
+            host: host.clone(),
             herdr_session: "test".into(),
             workspace_id: "wS".into(),
             tab_id: "wS:t1".into(),
@@ -260,12 +274,12 @@
         let theirs = db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, workspace_id, handed_off_to, created_at) VALUES (?, '/tmp/t', 't', ?, 'wT', 'agm-host', ?)")
             .bind(&theirs)
-            .bind(HOST)
+            .bind(&host)
             .bind(db::now())
             .execute(&app.db)
             .await
             .unwrap();
-        let o = super::owned(&app, HOST).await.unwrap();
+        let o = super::owned(&app, &host).await.unwrap();
         for pane in ["wK:p1", "wP:p1", "wS:p1"] {
             assert!(o.panes.contains(pane), "{pane}");
         }
@@ -280,13 +294,14 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let sh = shared_host(&env, true).await;
+        let host = sh.host.clone();
         let mine = tt::claude_bot(&app, &sh.project_id, "mine").await;
         let handed_off = db::ulid();
         sqlx::query(
             "INSERT INTO projects (id, path, label, host, handed_off_to, created_at) VALUES (?, '/tmp/handed-off', 'old', ?, 'other-daemon', ?)",
         )
         .bind(&handed_off)
-        .bind(HOST)
+        .bind(&host)
         .bind(db::now())
         .execute(&app.db)
         .await
@@ -295,7 +310,7 @@
         for (bot, pane) in [(&mine, "wM:p1"), (&theirs, "wT:p1")] {
             sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?, ?, ?, ?)")
                 .bind(pane)
-                .bind(HOST)
+                .bind(&host)
                 .bind(&bot.id)
                 .bind(db::now())
                 .execute(&app.db)
@@ -303,7 +318,7 @@
                 .unwrap();
             sqlx::query("INSERT INTO bot_previews (bot_id, host, pane_id, status, updated_at) VALUES (?, ?, ?, 'running', ?)")
                 .bind(&bot.id)
-                .bind(HOST)
+                .bind(&host)
                 .bind(pane.replace(":p", ":preview"))
                 .bind(db::now())
                 .execute(&app.db)
@@ -311,7 +326,7 @@
                 .unwrap();
         }
 
-        let owned = super::owned(&app, HOST).await.unwrap();
+        let owned = super::owned(&app, &host).await.unwrap();
         assert!(owned.panes.contains("wM:p1"), "own spawn hint stays owned");
         assert!(owned.panes.contains("wM:preview1"), "own preview stays owned");
         assert!(!owned.panes.contains("wT:p1"), "handed-off spawn hint belongs to the other daemon");

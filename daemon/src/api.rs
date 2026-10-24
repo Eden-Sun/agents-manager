@@ -5034,14 +5034,16 @@ mod project_tests {
     async fn the_shared_session_flag_is_listed_live_and_kept_when_a_host_update_omits_it() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
-        crate::runners::am_base_tests::shared_host::tests::shared_host(&e, true).await;
-        let flag = |app: Arc<App>| async move {
-            hosts_list(&app, &app.cfg.get().await).await.into_iter().find(|h| h["name"] == "sh1").unwrap()["shared_session"].clone()
+        // 每個測試各自的 host 名（見 shared_host 的 unique_host）：行程級狀態以 host 名為 key，不能寫死 "sh1"。
+        let host = crate::runners::am_base_tests::shared_host::tests::shared_host(&e, true).await.host;
+        let flag = |app: Arc<App>| {
+            let host = host.clone();
+            async move { hosts_list(&app, &app.cfg.get().await).await.into_iter().find(|h| h["name"] == host.as_str()).unwrap()["shared_session"].clone() }
         };
         assert_eq!(flag(app.clone()).await, json!(true));
 
         let update = |shared: Option<bool>| NewHost {
-            name: "sh1".into(),
+            name: host.clone(),
             ssh: "sh1.invalid".into(),
             ssh_port: None,
             ssh_opts: None,
@@ -5050,7 +5052,7 @@ mod project_tests {
             shared_session: shared,
         };
         create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(update(None))).await.unwrap();
-        assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == "sh1" && h.shared_session), "沒帶就沿用");
+        assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == host && h.shared_session), "沒帶就沿用");
         create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(update(Some(false)))).await.unwrap();
         assert_eq!(flag(app.clone()).await, json!(false));
     }
