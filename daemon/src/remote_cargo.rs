@@ -2981,8 +2981,7 @@ mod tests {
     fn a_subdirectory_call_syncs_the_workspace_root_and_runs_in_the_same_subdirectory() {
         // macOS 的 TMPDIR 在 /var/folders/…（/var → /private/var）。source_root 回的是 canonical 路徑，
         // 所以測試的基底也要先 canonicalize，兩邊才是同一種寫法；否則就只有 macOS 紅。
-        let base = std::env::temp_dir().canonicalize().unwrap();
-        let t = crate::testing::track(base.join(format!("am-r177-{}", crate::db::ulid())));
+        let t = crate::testing::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-r177-{}", crate::db::ulid())));
         let mk = |rel: &str, manifest: Option<&str>| {
             let d = t.join(rel);
             std::fs::create_dir_all(&d).unwrap();
