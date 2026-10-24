@@ -148,6 +148,7 @@ const dict: Dict = {
   '單次': 'Once',
   '固定間隔': 'Fixed interval',
   '每天': 'Daily',
+  '週一至週五': 'Monday to Friday',
   '每週': 'Weekly',
   '時間（本地）': 'Time (local)',
   '每幾分鐘（以建立時為起點，不隨任務耗時漂移）': 'Every N minutes (anchored to creation time, not drifting with run duration)',

@@ -35,7 +35,7 @@ interface FormState {
   botId: string
   tz: string
   notify: ScheduleNotify
-  mode: ScheduleMode
+  mode: ScheduleMode | 'weekdays'
   at: string
   /** 間隔的秒數：保留 API 收的精度（例如 61 秒）；分鐘欄只是顯示與改分鐘用，沒動就沿用原值。 */
   everySecs: number
@@ -56,7 +56,7 @@ function fromDetail(d: Schedule): FormState {
     botId: d.bot_id,
     tz: d.tz,
     notify: d.notify,
-    mode: d.mode,
+    mode: d.mode === 'weekly' && spec.weekdays?.length === 5 && [0, 1, 2, 3, 4].every((day) => spec.weekdays!.includes(day)) ? 'weekdays' : d.mode,
     at: spec.at ?? '',
     everySecs: spec.every_secs || 3600,
     time: spec.time ?? '09:00',
@@ -73,6 +73,8 @@ function specOf(f: FormState): ScheduleSpecIn {
       return { mode: 'interval', every_secs: f.everySecs }
     case 'daily':
       return { mode: 'daily', time: f.time }
+    case 'weekdays':
+      return { mode: 'weekly', time: f.time, weekdays: [0, 1, 2, 3, 4] }
     case 'weekly':
       return { mode: 'weekly', time: f.time, weekdays: [...f.weekdays].sort((a, b) => a - b) }
   }
@@ -392,10 +394,11 @@ export function ScheduleEditor({
 
       <label className="field">
         <span>{t('模式')}</span>
-        <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as ScheduleMode)}>
+        <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as FormState['mode'])}>
           <option value="once">{t('單次')}</option>
           <option value="interval">{t('固定間隔')}</option>
           <option value="daily">{t('每天')}</option>
+          <option value="weekdays">{t('週一至週五')}</option>
           <option value="weekly">{t('每週')}</option>
         </select>
       </label>
@@ -411,7 +414,7 @@ export function ScheduleEditor({
           <input type="number" min={1} max={525600} value={Math.round(form.everySecs / 60)} disabled={loading} onChange={(e) => set('everySecs', Number(e.target.value) * 60)} />
         </label>
       ) : null}
-      {form.mode === 'daily' || form.mode === 'weekly' ? (
+      {form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays' ? (
         <label className="field">
           <span>{t('時間（本地）')}</span>
           <input type="time" value={form.time} disabled={loading} onChange={(e) => set('time', e.target.value)} />
