@@ -777,7 +777,7 @@ fn rows_within(shown: &str, sent: &str) -> bool {
 ///
 /// 框裡**只有**這一個摺起來的貼上，而且數字正好是我們送的長度，才算是我們的：使用者接著打的字、別段貼上、
 /// 長度對不上的都不按 Enter。摺起來的字看不到，片段無從比對，只能比長度。
-fn is_our_folded_paste(kind: &str, box_text: &str, sent: &str) -> bool {
+pub(crate) fn is_our_folded_paste(kind: &str, box_text: &str, sent: &str) -> bool {
     let ours = match kind {
         "claude" => folded_claude_lines(box_text).filter(|&lines| lines == sent.trim_end().matches('\n').count()),
         "codex" => folded_codex_chars(box_text).filter(|&chars| chars == sent.chars().count()),
@@ -806,7 +806,7 @@ fn folded_codex_chars(box_text: &str) -> Option<usize> {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-mod folded_paste_tests {
+pub(crate) mod folded_paste_tests {
     use super::{composer_holds_prompt, is_our_folded_paste};
 
     /// codex-cli 0.164.0（`codex --version`）實機畫面。派工單寫的是 0.163，本機實際是 0.164.0，以這個為準。
@@ -816,7 +816,7 @@ mod folded_paste_tests {
     /// 沒有 bracketed paste 時 codex 不摺、整段當成打字輸入，所以這個畫面只在真的貼上時出現。
     /// 用 `herdr pane read` 讀整個 pane（純文字），欄寬約 209（footer 那列填滿）。沒有按 Enter，擷取完 pane 已關、codex 行程已結束。
 
-    const CODEX_FOLDED_PASTE_SCREEN: &str = r#"  /init - create an AGENTS.md file with instructions for Codex
+    pub(crate) const CODEX_FOLDED_PASTE_SCREEN: &str = r#"  /init - create an AGENTS.md file with instructions for Codex
   /status - show current session configuration
   /permissions - choose what Codex is allowed to do
   /model - choose what model and reasoning effort to use
@@ -828,7 +828,7 @@ mod folded_paste_tests {
   GPT-6.1-Sol default · /tmp/tmp.7VTjHKz1x1
                                                                                                                                                                                          ⚠ 1 warning · f2 to view"#;
     /// [`CODEX_FOLDED_PASTE_SCREEN`] 摺起來的那段：`fixture line N: …\n`，N = 1..=30。
-    fn codex_paste_text() -> String {
+    pub(crate) fn codex_paste_text() -> String {
         (1..=30).map(|i| format!("fixture line {i}: 這是摺疊貼上的測試第 {i} 行，用來確認 codex 會把長段貼上摺起來，不要送出\n")).collect()
     }
 
@@ -858,6 +858,24 @@ mod folded_paste_tests {
         assert!(!composer_holds_prompt("codex", &typed, &codex_paste_text()));
         let two = CODEX_FOLDED_PASTE_SCREEN.replace("› [Pasted Content 1752 chars]", "› [Pasted Content 1752 chars]\n  [Pasted Content 1752 chars]");
         assert!(!composer_holds_prompt("codex", &two, &codex_paste_text()), "框裡有兩個摺疊貼上");
+    }
+
+    /// 多位元組的 prompt：`codex_paste_text()` 含中文，1752 是字元數（`chars().count()`），位元組是 3552。
+    /// 標籤是字元數，所以 1752 算我們的；寫成位元組數 3552 就對不上，不算。
+    #[test]
+    fn a_multibyte_codex_fold_counts_characters_not_bytes() {
+        let sent = codex_paste_text();
+        assert_eq!((sent.chars().count(), sent.len()), (1752, 3552), "fixture 的字元數與位元組數");
+        assert!(composer_holds_prompt("codex", CODEX_FOLDED_PASTE_SCREEN, &sent), "標籤 1752 chars = 字元數");
+        let as_bytes = CODEX_FOLDED_PASTE_SCREEN.replace("1752 chars", "3552 chars");
+        assert!(!composer_holds_prompt("codex", &as_bytes, &sent), "3552 是位元組數，不是 codex 的數字");
+    }
+
+    /// claude 的 `[Pasted text #N +M lines]` 照舊：M 是換行數（回歸）。
+    #[test]
+    fn claude_fold_line_count_still_decides_as_before() {
+        assert!(is_our_folded_paste("claude", "[Pasted text #7 +2 lines]", "a\nb\nc"));
+        assert!(!is_our_folded_paste("claude", "[Pasted text #7 +3 lines]", "a\nb\nc"));
     }
 
     #[test]
