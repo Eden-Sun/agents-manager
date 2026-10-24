@@ -48,11 +48,6 @@ struct ActiveSlot {
     outcome_rx: watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,
 }
 
-/// Private registry managing the lifecycle of inert Claude API bot runner tasks.
-pub(crate) struct ApiBotRegistry {
-    slots: Mutex<HashMap<String, ActiveSlot>>,
-}
-
 /// Helper function to await outcome from a watch receiver, used by both production and tests.
 pub(crate) async fn wait_outcome(
     rx: &mut watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,
@@ -188,7 +183,7 @@ mod tests {
     use tokio::sync::{oneshot, Notify};
 
     // Helper to poll once without sleeping or busy spinning
-    fn poll_once<F: Future>(fut: &mut Pin<&mut F>) -> Poll<F::Output> {
+    fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         fut.as_mut().poll(&mut cx)
@@ -292,8 +287,8 @@ mod tests {
         let mut fut2 = Box::pin(reg2.cancel_and_join("r_conc"));
 
         // Verify both futures have been polled to Pending and subscribed
-        assert!(poll_once(&mut fut1).is_pending());
-        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(fut1.as_mut()).is_pending());
+        assert!(poll_once(fut2.as_mut()).is_pending());
 
         // Now release task
         notify.notify_one();
@@ -326,7 +321,7 @@ mod tests {
         // Start first waiter and verify it polls to Pending, then drop it
         {
             let mut fut1 = Box::pin(registry.cancel_and_join("r_two_waiters"));
-            assert!(poll_once(&mut fut1).is_pending());
+            assert!(poll_once(fut1.as_mut()).is_pending());
             // Drops fut1
         }
 
@@ -335,7 +330,7 @@ mod tests {
 
         // Second waiter starts and polls to Pending
         let mut fut2 = Box::pin(registry.cancel_and_join("r_two_waiters"));
-        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(fut2.as_mut()).is_pending());
 
         // Release the runner task
         let _ = tx_done.send(());
@@ -389,7 +384,7 @@ mod tests {
                 assert_eq!(outcome, TurnOutcome::Cancelled);
             } else {
                 let mut fut = Box::pin(registry.cancel_and_join(&key.run_id));
-                assert!(poll_once(&mut fut).is_pending());
+                assert!(poll_once(fut.as_mut()).is_pending());
 
                 // Signal completion to runner
                 let _ = tx_start_signal.send(());
