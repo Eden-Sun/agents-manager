@@ -38,7 +38,7 @@ for i in $(seq 1 "$n"); do
 done
 # 紅的 shard 單獨再跑一次（機器空著、沒有別的 shard 搶 CPU）：平行跑時的逾時或「前一檔 async 落在 teardown 之後」
 # 這類跨檔 timing 紅，單跑一次就綠；真的紅會再紅一次。重跑過的 shard 一定點名，不當成沒事。
-for i in "${failed[@]}"; do
+for i in ${failed[@]+"${failed[@]}"}; do
     printf '\n--- shard %s/%s 第一次紅，單獨重跑 ---\n' "$i" "$n"
     if bun test --shard="$i/$n" "$@" > "$tmp/$i.retry.log" 2>&1; then
         tail -4 "$tmp/$i.retry.log"
