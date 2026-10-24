@@ -22,7 +22,8 @@ check __all__ scripts/ops/outbox-gc.sh crates/am-base/src/db.rs
 # A deleted entrypoint or missing suite must never silently skip the suite.
 tmp=$(mktemp -d)
 trap '/bin/rm -rf "$tmp"' EXIT
-(cd "$tmp" && printf 'scripts/ops/outbox-gc.sh\n' | python3 -B "$selector") | grep -qx __all__
+deleted_entry=$(cd "$tmp" && printf 'scripts/ops/outbox-gc.sh\n' | python3 -B "$selector")
+grep -qx __all__ <<<"$deleted_entry"
 # Run check.sh's real dispatch against harmless suites, not just the selector in isolation.
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/bin"
@@ -55,12 +56,12 @@ printf '#!/bin/bash\nexit 0\n' > "$fx/bin/bun"
 chmod +x "$fx/bin/"* "$fx/scripts/ops/"*.sh
 run_changed() { (cd "$fx" && PATH="$fx/bin:$PATH" AM_OPS_TEST_PATH="$1" bash scripts/check.sh changed); }
 selected=$(run_changed scripts/ops/outbox-gc.sh)
-printf '%s\n' "$selected" | grep -q selected-outbox
-printf '%s\n' "$selected" | grep -q guard-test_discovery
-if printf '%s\n' "$selected" | grep -Eq 'unrelated-suite|agm-suite'; then echo 'FAIL: unrelated suite ran'; exit 1; fi
+grep -q selected-outbox <<<"$selected"
+grep -q guard-test_discovery <<<"$selected"
+if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: unrelated suite ran'; exit 1; fi
 full=$(run_changed scripts/check.sh)
-printf '%s\n' "$full" | grep -q unrelated-suite
-printf '%s\n' "$full" | grep -q agm-suite
+grep -q unrelated-suite <<<"$full"
+grep -q agm-suite <<<"$full"
 # PR range dispatch must use the full-success baseline, keep guards, and fail open to all
 # tests when git cannot compare. No args (Ubuntu/daily/manual) must remain full.
 cat > "$fx/bin/git" <<'SH'
@@ -75,18 +76,18 @@ esac
 SH
 run_ops() { (cd "$fx" && PATH="$fx/bin:$PATH" bash scripts/check.sh ops "$@"); }
 selected=$(run_ops full-success pr-head)
-printf '%s\n' "$selected" | grep -q selected-outbox
+grep -q selected-outbox <<<"$selected"
 for guard in rust_test_mount db_filename test_discovery; do
-    printf '%s\n' "$selected" | grep -q "guard-$guard"
+    grep -q "guard-$guard" <<<"$selected"
 done
-if printf '%s\n' "$selected" | grep -Eq 'unrelated-suite|agm-suite'; then echo 'FAIL: PR ran unrelated suite'; exit 1; fi
+if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: PR ran unrelated suite'; exit 1; fi
 # main-tip side joins the selection: docs-only main keeps the subset, unverified shared-script changes widen it.
 selected=$(run_ops full-success docs-main pr-head)
-printf '%s\n' "$selected" | grep -q selected-outbox
-if printf '%s\n' "$selected" | grep -Eq 'unrelated-suite|agm-suite'; then echo 'FAIL: docs-only main widened selection'; exit 1; fi
+grep -q selected-outbox <<<"$selected"
+if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: docs-only main widened selection'; exit 1; fi
 for args in 'full-success missing-head' 'full-success mixed-head' 'full-success shared-main pr-head' 'full-success docs-main missing-head' ''; do
     full=$(run_ops $args)
-    printf '%s\n' "$full" | grep -q unrelated-suite
-    printf '%s\n' "$full" | grep -q agm-suite
+    grep -q unrelated-suite <<<"$full"
+    grep -q agm-suite <<<"$full"
 done
 echo 'ci-ops-tests: selection, aliases, fallbacks and real check.sh dispatch passed'
