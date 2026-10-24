@@ -511,8 +511,9 @@ pub struct ChangelogTranslateCfg {
     pub lang: String,
     #[serde(default = "default_changelog_effort")]
     pub effort: String,
-    #[serde(default = "default_changelog_timeout_ms")]
-    pub timeout_ms: u64,
+    /// 已廢棄（#1942）：翻譯改用 `[claude_api] timeout_ms`。讀到這個鍵時 daemon 記一次 WARN、不生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     #[serde(default = "default_changelog_max_input_chars")]
     pub max_input_chars: u32,
     #[serde(default = "default_changelog_max_tokens")]
@@ -542,9 +543,6 @@ fn default_changelog_lang() -> String {
 fn default_changelog_effort() -> String {
     "low".into()
 }
-fn default_changelog_timeout_ms() -> u64 {
-    8000
-}
 fn default_changelog_max_input_chars() -> u32 {
     6000
 }
@@ -573,7 +571,7 @@ impl Default for ChangelogTranslateCfg {
             model: default_changelog_model(),
             lang: default_changelog_lang(),
             effort: default_changelog_effort(),
-            timeout_ms: default_changelog_timeout_ms(),
+            timeout_ms: None,
             max_input_chars: default_changelog_max_input_chars(),
             max_tokens: default_changelog_max_tokens(),
             max_in_flight: default_changelog_max_in_flight(),

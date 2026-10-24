@@ -400,6 +400,28 @@ pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest
     }
 }
 
+/// 自己管預算的呼叫者用（changelog 翻譯，#1942）：只送出一次、把結果記進帳本，**不**占 `complete_with` 的每小時名額，
+/// 也不讀 key、不看開關（呼叫端已經做過）。回傳原始結果，讓呼叫端保留自己的失敗分類與 usage。
+pub async fn complete_recorded(
+    api: &ClaudeApi,
+    client: &dyn MessagesClient,
+    req: &MessagesRequest,
+    use_case: &str,
+) -> Result<ClientOutcome, ClientError> {
+    let started = Instant::now();
+    let result = client.complete(req).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let (model, stop_reason, usage, error_kind) = match &result {
+        Ok(o) => (o.model.clone(), o.stop_reason.clone(), o.usage.clone(), None),
+        Err(e) => {
+            let (err, usage) = ClaudeError::from_client(e.clone());
+            (None, None, usage, Some(err.kind()))
+        }
+    };
+    api.ledger.record(Row::new(use_case, model.as_deref().unwrap_or(&req.model), elapsed_ms, error_kind, usage.as_ref(), stop_reason));
+    result
+}
+
 /// App 上的一份：可注入的 client、用量帳本、每個用途的保險絲。
 pub struct ClaudeApi {
     client: Mutex<Arc<dyn MessagesClient>>,
