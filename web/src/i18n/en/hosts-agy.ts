@@ -18,6 +18,8 @@ const dict: Dict = {
   '仍要關掉': 'Close anyway',
   '還有 {n} 項提醒': { one: '{n} more reminder', other: '{n} more reminders' },
   '列出 {n} 項': { one: 'List {n} item', other: 'List {n} items' },
+  '（可自動補）': ' (auto-fixable)',
+  '（需手動）': ' (manual)',
   '已連線': 'Connected',
   '未連線': 'Not connected',
   '{n} 個 Project': { one: '{n} project', other: '{n} projects' },

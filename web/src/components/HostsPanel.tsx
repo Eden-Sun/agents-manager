@@ -164,6 +164,13 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
   )
 }
 
+/** 每項差異尾端的 dry-run 標記（#719 階段 2）：只是顯示，沒有按鈕。舊 daemon 沒給 `fixable` 就不標。 */
+function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
+  const t = useT()
+  if (fix === null) return null
+  return <span className={`host-baseline-fix ${fix}`}>{fix === 'auto' ? t('（可自動補）') : t('（需手動）')}</span>
+}
+
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
 export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
   const t = useT()
@@ -191,6 +198,7 @@ export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
           {criticalItems.map((i) => (
             <li key={i.id} className={i.severity} title={i.id}>
               {i.message}
+              <BaselineFix fix={i.fix} />
             </li>
           ))}
         </ul>
@@ -202,6 +210,7 @@ export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
             {warnItems.map((i) => (
               <li key={i.id} className={i.severity} title={i.id}>
                 {i.message}
+                <BaselineFix fix={i.fix} />
               </li>
             ))}
           </ul>

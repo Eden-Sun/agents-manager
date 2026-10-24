@@ -81,6 +81,8 @@ export interface HostBaseline {
   stale: boolean
   /** 最後一次失敗的原因（第一行）；沒失敗＝null。 */
   error: string | null
+  /** dry-run 計畫裡可以自動補的差異 id（#719 階段 2）。`toHostBaseline` 一律給陣列（沒有／型別不對＝空）；手造的物件可省略＝不標。 */
+  fixable?: string[]
 }
 
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
