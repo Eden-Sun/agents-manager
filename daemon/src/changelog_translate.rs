@@ -1242,7 +1242,8 @@ fn attempt_ts_older_than(
         let Some(retry) = crate::db::parse_ts(retry_str) else {
             return false;
         };
-        if retry >= now {
+        // Both operands are parsed UTC instants, never raw ledger strings (#1982).
+        if retry.cmp(&now) != std::cmp::Ordering::Less {
             return false;
         }
     }
@@ -3677,6 +3678,39 @@ mod tests {
         const EXPIRED: i64 = 35 * 86400;
         const OLD: i64 = 7200;
         const VERSIONS: &[(&str, &str)] = &[("2.1.5", "body")];
+
+        #[test]
+        fn retention_compares_mixed_precision_timestamps_as_instants() {
+            let now = crate::db::parse_ts("2026-10-24T12:00:00.500Z").unwrap();
+            let cutoff = now - chrono::Duration::hours(1);
+            let mut attempt = job("mixed-precision", OLD, VERSIONS).attempts.remove(0);
+            attempt.started_at = "2026-10-24T10:59:00Z".into();
+            attempt.finished_at = Some("2026-10-24T10:59:01.000Z".into());
+            for (retry_after, eligible) in [
+                ("2026-10-24T12:00:00Z", true),
+                ("2026-10-24T12:00:00.000Z", true),
+                ("2026-10-24T12:00:00.500Z", false),
+                ("2026-10-24T12:00:00.750Z", false),
+                ("2026-10-24T12:00:01Z", false),
+                ("invalid", false),
+            ] {
+                attempt.retry_after = Some(retry_after.into());
+                assert_eq!(attempt_ts_older_than(&attempt, cutoff, now), eligible, "retry_after={retry_after}");
+            }
+            attempt.retry_after = None;
+            for (at, eligible) in [
+                ("2026-10-24T11:00:00Z", true),
+                ("2026-10-24T11:00:00.000Z", true),
+                ("2026-10-24T11:00:00.500Z", false),
+                ("2026-10-24T11:00:00.750Z", false),
+            ] {
+                attempt.started_at = at.into();
+                attempt.finished_at = Some(at.into());
+                assert_eq!(attempt_ts_older_than(&attempt, cutoff, now), eligible, "started_at={at}");
+                attempt.started_at = "2026-10-24T10:59:00Z".into();
+                assert_eq!(attempt_ts_older_than(&attempt, cutoff, now), eligible, "finished_at={at}");
+            }
+        }
 
         #[tokio::test]
         async fn invalid_disk_fingerprints_are_skipped_before_path_construction() {
