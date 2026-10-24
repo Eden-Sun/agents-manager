@@ -40,8 +40,25 @@
         assert!(calls.get() > 1, "到期之前有重試過");
     }
 
+    /// 控制組（不依賴 kernel 的 ETXTBSY）：腳本寫好、fd 已關，`output` 一次就成功。
+    #[test]
+    fn output_runs_a_script_whose_write_is_already_closed() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::scratch_dir("am-exec-plain");
+        let path = dir.join("stub.sh");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"#!/bin/sh\necho ok\n").unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = output(&mut std::process::Command::new(&path)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 真的 `exec`：腳本剛寫好、寫入 fd 還開著（模擬別的執行緒 fork 時繼承的那個）時 exec 會回 ETXTBSY，
-    /// 放掉之後同一個 `output` 呼叫就成功了。
+    /// 放掉之後同一個 `output` 呼叫就成功了。只在 Linux 跑：macOS 寫入 fd 還開著時 exec 不回 ETXTBSY，前提不成立；控制組見上面。
+    #[cfg(target_os = "linux")]
     #[test]
     fn output_waits_for_a_script_whose_write_fd_is_still_open() {
         use std::io::Write as _;

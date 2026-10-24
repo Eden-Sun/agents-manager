@@ -597,7 +597,8 @@ async fn pending_tail_uses_live_herdr_session() {
     );
 
     let e = tt::env().await;
-    let sock = tt::track(std::env::temp_dir().join(format!("am-claude-live-pending-{}", db::ulid())));
+    // socket 目錄用短的固定基底：macOS 的 `TMPDIR` 連同 ULID 會超過 `sun_path` 的 104 上限（bind 失敗）。
+    let sock = tt::track(std::path::PathBuf::from("/tmp").join(format!("am-claude-live-pending-{}", db::ulid())));
     std::fs::create_dir_all(&sock).unwrap();
     let herdr = tt::MockHerdr::start(sock.join("herdr.sock"));
     let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
