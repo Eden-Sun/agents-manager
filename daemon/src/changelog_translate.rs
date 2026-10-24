@@ -50,6 +50,10 @@ pub struct Hub {
     gate: tokio::sync::Mutex<()>,
     client: std::sync::Mutex<Arc<dyn MessagesClient>>,
     settled: AtomicBool,
+    /// 背景被 in_flight／hourly 擋下後、已排好的那一次延後重送（key＝kind|from|to）。只存在記憶體，重啟不補（#1948）。
+    retry_pending: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// 延後重送的最短等待（預設 60 秒）。測試可以縮短。
+    retry_floor: std::sync::Mutex<std::time::Duration>,
 }
 
 impl Hub {
@@ -58,7 +62,13 @@ impl Hub {
             gate: tokio::sync::Mutex::new(()),
             client: std::sync::Mutex::new(Arc::new(AnthropicHttpClient)),
             settled: AtomicBool::new(false),
+            retry_pending: std::sync::Mutex::new(std::collections::HashSet::new()),
+            retry_floor: std::sync::Mutex::new(std::time::Duration::from_secs(60)),
         }
+    }
+
+    fn retry_floor(&self) -> std::time::Duration {
+        *self.retry_floor.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn set_client(&self, client: Arc<dyn MessagesClient>) {
@@ -239,25 +249,78 @@ pub fn kick_detected(app: &Arc<App>, ev: &Value) {
 /// `from`／`to` 是偵測到的那一段（跟前端開框時送的 from／to 同一組，指紋才會對得上）。
 /// 預算擋下時靜默放棄；之後使用者開框時前端會再補一次（同一套帳本）。
 pub async fn auto_kick(app: Arc<App>, kind: String, from: Option<String>, to: String) {
-    if !AUTO_KINDS.contains(&kind.as_str()) {
-        return;
+    if let Some(wait) = auto_send(&app, &kind, from.as_deref(), &to).await {
+        schedule_retry(app, kind, from, to, wait);
+    }
+}
+
+/// 送一次（或被擋）。被 in_flight／hourly 擋下時回傳建議的等待，讓呼叫端排一次延後重送。
+async fn auto_send(app: &Arc<App>, kind: &str, from: Option<&str>, to: &str) -> Option<std::time::Duration> {
+    if !AUTO_KINDS.contains(&kind) {
+        return None;
     }
     let full = app.cfg.get().await;
     let cfg = translate_cfg(&full);
     if !cfg.enabled || !cfg.auto {
-        return;
+        return None;
     }
     let limits = limits_of(&cfg, full.claude_api.timeout_ms);
-    let reply = crate::changelog::lookup(&app, crate::config::LOCAL_HOST, &kind, from.as_deref(), Some(&to)).await;
+    let reply = crate::changelog::lookup(app, crate::config::LOCAL_HOST, kind, from, Some(to)).await;
     if !reply.found || verified_language(&limits.lang).is_none() {
+        return None;
+    }
+    let plan = plan_input(kind, &limits, &reply.sections);
+    let fp = fingerprint(&plan);
+    match under_gate(app, || decide(&app.data_dir, &limits, &plan, &fp, &cfg)).await {
+        Action::Send { fp, attempt_id, request, .. } => {
+            enqueue(Arc::clone(app), fp, attempt_id, request);
+            None
+        }
+        Action::View(v) => blocked_wait(&v, app.changelog_translate.retry_floor()),
+    }
+}
+
+/// 背景被預算擋下：in_flight 等 floor 再試（那筆在翻，retry_after 沒有意義）；hourly 等到 retry_after，但不短於 floor。
+/// 使用者自設上限（attempts）與其他錯誤不排。
+fn blocked_wait(view: &Value, floor: std::time::Duration) -> Option<std::time::Duration> {
+    if view["error_kind"] != "budget" {
+        return None;
+    }
+    match view["error"].as_str()? {
+        "in_flight" => Some(floor),
+        "hourly" => {
+            let at = crate::db::parse_ts(view["retry_after"].as_str()?)?;
+            let left = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+            Some(left.max(floor))
+        }
+        _ => None,
+    }
+}
+
+/// 同一組 kind|from|to 只排一次（不疊）；排好的那次跑完就清掉 key，這一次又被擋就不再排。
+fn schedule_retry(app: Arc<App>, kind: String, from: Option<String>, to: String, wait: std::time::Duration) {
+    let key = format!("{kind}|{}|{to}", from.as_deref().unwrap_or(""));
+    let fresh = app
+        .changelog_translate
+        .retry_pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone());
+    if !fresh {
         return;
     }
-    let plan = plan_input(&kind, &limits, &reply.sections);
-    let fp = fingerprint(&plan);
-    let action = under_gate(&app, || decide(&app.data_dir, &limits, &plan, &fp, &cfg)).await;
-    if let Action::Send { fp, attempt_id, request, .. } = action {
-        enqueue(app, fp, attempt_id, request);
-    }
+    let worker = Arc::clone(&app);
+    let job = Box::pin(async move {
+        tokio::time::sleep(wait).await;
+        worker
+            .changelog_translate
+            .retry_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        let _ = auto_send(&worker, &kind, from.as_deref(), &to).await;
+    });
+    app.background_tasks.spawn(job);
 }
 
 pub async fn post_translation(
@@ -301,9 +364,15 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
         let plan = plan_input(&norm.kind, &limits, &reply.sections);
         let fp = fingerprint(&plan);
         under_gate(&app, || match load(&job_path(&app.data_dir, &fp)) {
-            Ok(job) => job_view(true, &job, attempts_block(&job, &limits)),
+            Ok(job) => match (last_state(&job) != "completed")
+                .then(|| covered_view(&app.data_dir, &plan, &fp).or_else(|| covering_busy_view(&app.data_dir, &plan, &fp)))
+                .flatten()
+            {
+                Some(v) => v,
+                None => job_view(true, &job, attempts_block(&job, &limits)),
+            },
             Err(LoadErr::Corrupt) => ledger_view(),
-            Err(LoadErr::Missing) => match covered_view(&app.data_dir, &plan, &fp) {
+            Err(LoadErr::Missing) => match covered_view(&app.data_dir, &plan, &fp).or_else(|| covering_busy_view(&app.data_dir, &plan, &fp)) {
                 Some(v) => v,
                 None => match crate::key_file::read_key(&cfg.key_file) {
                     Ok(_) => absent_view(&plan, &fp),
@@ -445,9 +514,10 @@ fn decide(
         Err(LoadErr::Corrupt) => return Action::View(ledger_view()),
         Err(LoadErr::Missing) => None,
     };
-    if existing.is_none() {
-        // 同一段內容已由別的範圍（背景、別的 host 或 range）翻完：直接用，不算預算、不送（#1948）。
-        if let Some(v) = covered_view(data_dir, plan, fp) {
+    let own_busy_or_done = existing.as_ref().is_some_and(|j| matches!(last_state(j), "completed" | "reserved" | "in_flight"));
+    if !own_busy_or_done {
+        // 同一段內容已由別的範圍翻完（覆蓋重用）、或正在翻（背景或別的 range）：直接用／等，不算預算、不送（#1948）。
+        if let Some(v) = covered_view(data_dir, plan, fp).or_else(|| covering_busy_view(data_dir, plan, fp)) {
             return Action::View(v);
         }
     }
@@ -958,25 +1028,45 @@ fn body_hash(body: &str) -> String {
     hex_encode(&Sha256::digest(body.as_bytes()))
 }
 
-/// 覆蓋重用（#1948）：同 scope、已完成、而且請求的**每一個**版本原文相同、譯文都在，就直接組出來，不送 API。
-/// 部分涵蓋不算。只讀帳本，不寫。摘要留空（`reused:true`），因為那筆的摘要可能講到別的版本。
-fn covered_view(data_dir: &Path, plan: &Plan, fp: &str) -> Option<Value> {
+/// 這段請求的 scope 與每一版的 (版本, 原文 hash)。沒有版本就沒有東西可比。
+fn wanted_versions(plan: &Plan) -> Option<(String, Vec<(String, String)>)> {
     if plan.included.is_empty() {
         return None;
     }
-    let scope = scope_of(plan);
-    let want: Vec<(&str, String)> = plan
-        .included
+    let want = plan.included.iter().map(|s| (s.version.clone(), body_hash(&s.body))).collect();
+    Some((scope_of(plan), want))
+}
+
+/// 帳本的 scope 相同、而且請求的**每一個**版本原文 hash 都在帳本裡。
+fn same_sources(job: &Job, scope: &str, want: &[(String, String)]) -> bool {
+    job.scope == scope && want.iter().all(|(v, h)| job.source.iter().any(|s| s.version == *v && s.hash == *h))
+}
+
+/// 別的帳本正在翻、而且涵蓋這段請求：回 in_flight，不送、不記 attempt、不扣預算（#1948 review）。
+fn covering_busy_view(data_dir: &Path, plan: &Plan, fp: &str) -> Option<Value> {
+    let (scope, want) = wanted_versions(plan)?;
+    let busy = ledger_jobs(&ledger_dir(data_dir))
         .iter()
-        .map(|s| (s.version.as_str(), body_hash(&s.body)))
-        .collect();
+        .any(|job| job.fingerprint != fp && busy_job(job) && same_sources(job, &scope, &want));
+    busy.then(|| {
+        let mut v = bare(true, "in_flight");
+        v["fingerprint"] = json!(fp);
+        v["lang"] = json!(plan.lang);
+        v["included_versions"] = json!(plan.included.iter().map(|s| &s.version).collect::<Vec<_>>());
+        v["omitted_versions"] = json!(plan.omitted);
+        v["truncated_input"] = json!(plan.truncated_input);
+        v
+    })
+}
+
+/// 覆蓋重用（#1948）：同 scope、已完成、而且請求的**每一個**版本原文相同、譯文都在，就直接組出來，不送 API。
+/// 部分涵蓋不算。只讀帳本，不寫。摘要留空（`reused:true`），因為那筆的摘要可能講到別的版本。
+fn covered_view(data_dir: &Path, plan: &Plan, fp: &str) -> Option<Value> {
+    let (scope, want) = wanted_versions(plan)?;
     let job = ledger_jobs(&ledger_dir(data_dir)).into_iter().find(|job| {
-        job.scope == scope
-            && last_state(job) == "completed"
-            && want.iter().all(|(v, h)| {
-                job.source.iter().any(|s| s.version == *v && s.hash == *h)
-                    && job.sections.iter().any(|s| s.version == *v)
-            })
+        last_state(job) == "completed"
+            && same_sources(job, &scope, &want)
+            && want.iter().all(|(v, _)| job.sections.iter().any(|s| s.version == *v))
     })?;
     let sections: Vec<OutSection> = want
         .iter()
@@ -1691,6 +1781,86 @@ mod tests {
         assert_eq!(fake.calls(), 3, "0 means unlimited: none of these were blocked");
     }
 
+    #[tokio::test]
+    async fn an_in_flight_background_translation_covers_a_frontend_open_without_a_second_call() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let _release = Release(gate.clone());
+        let (env, fake) = boot(vec![Step::Hang(gate.clone()), ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.max_in_flight = 2;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_calls(&fake, 1).await;
+        // 背景還在翻 (2.1.3,2.1.5]；使用者開框要 (2.1.4,2.1.5]：不付第二次，回 in_flight 讓前端輪詢。
+        let open = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(open["status"], "in_flight");
+        assert_eq!(fake.calls(), 1, "a covered in-flight request must not spend again");
+        gate.notify_one();
+        until_status(&env.app, "2.1.5", "completed").await;
+        let done = get(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(done["status"], "completed");
+        assert_eq!(done["reused"], true);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_budget_blocked_background_kick_retries_once_after_the_running_one_finishes() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let _release = Release(gate.clone());
+        let (env, fake) = boot(vec![Step::Hang(gate.clone()), ok_step()]).await;
+        env.app.changelog.seed("agy", "## 2.1.5\n- agy change\n## 2.1.4\n- old agy\n").await;
+        *env.app.changelog_translate.retry_floor.lock().unwrap() = std::time::Duration::from_millis(200);
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_calls(&fake, 1).await;
+        // max_in_flight=1：另一個 kind 被擋下，排一次延後重送。
+        auto_kick(env.app.clone(), "agy".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "blocked while the first is in flight");
+        gate.notify_one();
+        until_status(&env.app, "2.1.5", "completed").await;
+        for _ in 0..200 {
+            if fake.calls() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(fake.calls(), 2, "the blocked kick is sent once after the first finishes");
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 2, "one retry only, nothing stacks");
+    }
+
+    #[tokio::test]
+    async fn a_failed_own_ledger_is_covered_by_a_finished_wider_translation() {
+        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+        enable(&env).await;
+        let _ = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        let mut failed = Value::Null;
+        for _ in 0..100 {
+            failed = get(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+            if failed["status"] == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(failed["status"], "failed");
+        until_calls(&fake, 1).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(fake.calls(), 2);
+        // 自己那筆是 failed（退避中）：先找涵蓋，直接用，不再送。
+        let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(covered["status"], "completed");
+        assert_eq!(covered["reused"], true);
+        assert_eq!(fake.calls(), 2, "a failed own ledger must not resend when covered");
+    }
+
     async fn settle_background(app: &Arc<App>) {
         // 背景送出只是 spawn，沒有可等的句柄：讓它有機會跑完（或靜默放棄）。
         for _ in 0..20 {
@@ -2258,7 +2428,13 @@ mod tests {
         enable(&env).await;
         let _ = post(&env.app, q_to("2.1.5")).await;
         until_calls(&fake, 1).await;
-        let other = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        // (2.1.4,2.1.5] 已被在飛的 (2.1.3,2.1.5] 涵蓋：回 in_flight（不是預算錯誤），不送、不記。
+        let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(covered["status"], "in_flight");
+        assert!(covered["error_kind"].is_null());
+        // 2.1.6 沒有任何在飛的帳本涵蓋：照舊被 in_flight 預算擋下。
+        env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n").await;
+        let other = post(&env.app, q_host("local", "2.1.5", "2.1.6")).await;
         assert_eq!(other["error"], "in_flight");
         assert_eq!(other["error_kind"], "budget");
         assert!(other["attempts"].as_array().unwrap().is_empty());
