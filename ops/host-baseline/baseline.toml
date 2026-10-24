@@ -94,6 +94,8 @@ path = "hooks.json"
 severity = "warn"
 
 # `check`：`present`＝`config.toml` 裡有這個鍵（任何值）；`true`＝點號鍵（或 `[表]` 裡的鍵）的值是 true。
+# `value`（選填）：dry-run 計畫可以把缺的這個鍵列成「自動補」並寫成這個值；沒寫＝只能手動補。
+# 只收 bool／整數／字串或一層小表；`true` 檢查的鍵只能寫 true。
 [[codex.keys]]
 key = "approval_policy"
 check = "present"
@@ -103,6 +105,7 @@ severity = "warn"
 key = "features.hooks"
 check = "true"
 severity = "warn"
+value = true
 
 # grok（`$GROK_HOME`，預設 `~/.grok`）。
 [[grok.files]]

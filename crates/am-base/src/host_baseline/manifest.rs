@@ -109,6 +109,8 @@ struct RawClaudeKey {
     name: String,
     key: String,
     severity: String,
+    #[serde(default)]
+    value: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -133,6 +135,8 @@ struct RawCodexKey {
     key: String,
     check: String,
     severity: String,
+    #[serde(default)]
+    value: Option<toml::Value>,
 }
 
 fn severity(s: &str, at: &str) -> Result<&'static str, String> {
@@ -173,7 +177,8 @@ fn dotted(s: &str, at: &str) -> Result<Vec<String>, String> {
 }
 
 /// 使用者規定不動的 codex 設定（model、各種 model_*、reasoning effort、service_tier）：連檢查都不列。
-fn codex_forbidden(seg: &str) -> bool {
+/// dry-run 計畫（[`super::plan`]）也拿這個再擋一次。
+pub(crate) fn codex_forbidden(seg: &str) -> bool {
     seg.starts_with("model") || seg.contains("effort") || seg == "service_tier"
 }
 
@@ -189,8 +194,55 @@ fn files(raw: Vec<RawFile>, at: &str) -> Result<Vec<Item>, String> {
     Ok(out)
 }
 
+/// 宣告檔替設定鍵寫的值（有值＝dry-run 計畫可以列成「自動補」）。key＝claude 鍵的 `name`／codex 的 `key`。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Values {
+    pub claude: std::collections::BTreeMap<String, serde_json::Value>,
+    pub codex: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// 一個值最多這麼大（序列化成 JSON 的 byte 數）。
+const VALUE_MAX_BYTES: usize = 1024;
+const VALUE_MAX_STR: usize = 256;
+
+/// 值只收 bool／整數／字串（≤ 256 字元）或一層小表（葉子是前面那幾種）；不收陣列、日期、浮點、巢狀表。
+fn value(v: toml::Value, at: &str) -> Result<serde_json::Value, String> {
+    fn scalar(v: toml::Value, at: &str) -> Result<serde_json::Value, String> {
+        match v {
+            toml::Value::Boolean(b) => Ok(b.into()),
+            toml::Value::Integer(i) => Ok(i.into()),
+            toml::Value::String(s) if s.chars().count() <= VALUE_MAX_STR => Ok(s.into()),
+            toml::Value::String(_) => Err(format!("{at}: string value longer than {VALUE_MAX_STR} chars")),
+            other => Err(format!("{at}: value must be a bool, integer, string or one-level table of those, got {}", other.type_str())),
+        }
+    }
+    let out = match v {
+        toml::Value::Table(t) => {
+            let mut m = serde_json::Map::new();
+            for (k, v) in t {
+                if matches!(v, toml::Value::Table(_)) {
+                    return Err(format!("{at}: nested tables are not allowed in a value"));
+                }
+                m.insert(k, scalar(v, at)?);
+            }
+            serde_json::Value::Object(m)
+        }
+        other => scalar(other, at)?,
+    };
+    if serde_json::to_vec(&out).map_or(usize::MAX, |b| b.len()) > VALUE_MAX_BYTES {
+        return Err(format!("{at}: value larger than {VALUE_MAX_BYTES} bytes"));
+    }
+    Ok(out)
+}
+
 impl Manifest {
     pub fn parse(src: &str) -> Result<Manifest, String> {
+        Self::parse_with_values(src).map(|(m, _)| m)
+    }
+
+    /// 連同 [`Values`] 一起解析（同一份守門）。
+    pub fn parse_with_values(src: &str) -> Result<(Manifest, Values), String> {
+        let mut values = Values::default();
         let raw: Raw = toml::from_str(src).map_err(|e| format!("baseline.toml: {e}"))?;
         if raw.version != 1 {
             return Err(format!("baseline.toml: unsupported version {}", raw.version));
@@ -210,6 +262,9 @@ impl Manifest {
             dotted(&k.key, "claude.keys")?;
             if claude_keys.iter().any(|c| c.name == n) {
                 return Err(format!("claude.keys: `{n}` is listed twice"));
+            }
+            if let Some(v) = k.value {
+                values.claude.insert(n.clone(), value(v, "claude.keys")?);
             }
             claude_keys.push(ClaudeKey { name: n, key: k.key, severity: severity(&k.severity, "claude.keys")? });
         }
@@ -241,6 +296,14 @@ impl Manifest {
             if codex_keys.iter().any(|c| c.key == k.key) {
                 return Err(format!("codex.keys: `{}` is listed twice", k.key));
             }
+            if let Some(v) = k.value {
+                let v = value(v, "codex.keys")?;
+                // `true` 檢查的鍵只能補成 true，補別的值下一次偵測照樣算缺。
+                if check == CodexCheck::True && v != serde_json::Value::Bool(true) {
+                    return Err(format!("codex.keys: `{}` is checked for `true`, so its value must be true", k.key));
+                }
+                values.codex.insert(k.key.clone(), v);
+            }
             codex_keys.push(CodexKey { key: k.key, check, severity: severity(&k.severity, "codex.keys")? });
         }
         let grok_files = files(raw.grok.files, "grok.files")?;
@@ -257,14 +320,23 @@ impl Manifest {
         if !codex_keys.is_empty() && !codex_files.iter().any(|f| f.name == "config.toml") {
             return Err("codex.keys needs `config.toml` in codex.files".into());
         }
-        Ok(Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, grok_files, herdr_files })
+        Ok((Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, grok_files, herdr_files }, values))
     }
+}
+
+fn shipped_full() -> Result<&'static (Manifest, Values), &'static str> {
+    static M: std::sync::OnceLock<Result<(Manifest, Values), String>> = std::sync::OnceLock::new();
+    M.get_or_init(|| Manifest::parse_with_values(SOURCE)).as_ref().map_err(String::as_str)
 }
 
 /// 嵌進 binary 的那一份（解析一次）。
 pub fn shipped() -> Result<&'static Manifest, &'static str> {
-    static M: std::sync::OnceLock<Result<Manifest, String>> = std::sync::OnceLock::new();
-    M.get_or_init(|| Manifest::parse(SOURCE)).as_ref().map_err(String::as_str)
+    shipped_full().map(|(m, _)| m)
+}
+
+/// 嵌進 binary 的那一份宣告檔裡寫的值。
+pub fn shipped_values() -> Result<&'static Values, &'static str> {
+    shipped_full().map(|(_, v)| v)
 }
 
 /// 在 `table` 裡用 `name` 找嚴重度；不在表上＝`None`（不是基準項）。
@@ -376,6 +448,37 @@ mod tests {
     #[test]
     fn only_darwin_plugins_are_understood() {
         assert!(err("[[claude.plugins]]\nname = \"x\"\nos = \"linux\"\n").contains("darwin"));
+    }
+
+    /// 階段 2：出貨的宣告檔只替 codex `features.hooks` 寫了值（協調者裁示），其他鍵都沒值＝dry-run 列手動。
+    #[test]
+    fn the_shipped_values_are_only_codex_features_hooks() {
+        let v = shipped_values().unwrap();
+        assert!(v.claude.is_empty(), "{v:?}");
+        assert_eq!(v.codex.len(), 1, "{v:?}");
+        assert_eq!(v.codex.get("features.hooks"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn values_are_small_scalars_or_one_level_tables() {
+        let key = |v: &str| {
+            format!("[[claude.files]]\npath = \"settings.json\"\nseverity = \"warn\"\n[[claude.keys]]\nname = \"k\"\nkey = \"k\"\nseverity = \"warn\"\nvalue = {v}\n")
+        };
+        for ok in ["true", "3", "\"auto\"", "{ type = \"command\", command = \"x\" }"] {
+            Manifest::parse_with_values(&format!("{MIN}{}", key(ok))).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        let long = format!("\"{}\"", "a".repeat(257));
+        let big = format!("{{ {} }}", (0..10).map(|i| format!("k{i} = \"{}\"", "b".repeat(200))).collect::<Vec<_>>().join(", "));
+        for bad in ["[1, 2]", "1.5", "1979-05-27T07:32:00Z", "{ a = { b = 1 } }", "{ a = [1] }", long.as_str(), big.as_str()] {
+            assert!(Manifest::parse_with_values(&format!("{MIN}{}", key(bad))).is_err(), "{bad} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_true_checked_codex_key_can_only_be_filled_with_true() {
+        let f = "[[codex.files]]\npath = \"config.toml\"\nseverity = \"warn\"\n";
+        let e = err(&format!("{f}[[codex.keys]]\nkey = \"features.hooks\"\ncheck = \"true\"\nseverity = \"warn\"\nvalue = false\n"));
+        assert!(e.contains("must be true"), "{e}");
     }
 
     /// 白名單之外再一道：值代入腳本時整個 quote。直接造一份不經 `parse` 的宣告（繞過白名單），危險字元也不能被執行。

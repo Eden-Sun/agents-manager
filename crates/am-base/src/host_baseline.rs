@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 pub mod manifest;
+pub mod plan;
 
 /// 基準檢查（偵測結果的一部分）需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、最近一次結果快取、本機 herdr 連線狀態、
 /// 把差異推進 AGM inbox。
@@ -62,6 +63,25 @@ impl BaselineReport {
             .unwrap_or(true);
         BaselineReport { stale: self.failed_at.is_some() || old, ..self.clone() }
     }
+
+    /// 對外投影（`hosts[].baseline`、`host_changed`、`tools/refresh`）：[`Self::snapshot`] 再加 `fixable`——
+    /// dry-run 計畫（[`plan`]）裡可以自動補的差異 id。未知（`issues: None`）或宣告檔壞了＝空。
+    pub fn view(&self, now: chrono::DateTime<chrono::Utc>) -> BaselineView {
+        let report = self.snapshot(now);
+        let fixable = match (report.issues.as_deref(), manifest::shipped(), manifest::shipped_values()) {
+            (Some(issues), Ok(m), Ok(v)) => plan::build(m, v, issues).fixable(),
+            _ => Vec::new(),
+        };
+        BaselineView { report, fixable }
+    }
+}
+
+/// [`BaselineReport::view`] 的結果：報告本身攤平，加上 `fixable`。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BaselineView {
+    #[serde(flatten)]
+    pub report: BaselineReport,
+    pub fixable: Vec<String>,
 }
 
 /// 偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）：已經有舊結果就標上失敗時間與原因，結果本身與 `checked_at` 原封不動；
