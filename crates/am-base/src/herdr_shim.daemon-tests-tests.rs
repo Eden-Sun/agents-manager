@@ -399,6 +399,58 @@
         assert_eq!(out, ["agent", "start", "hub-kytpg9-hub-dgs9j9-dev", "--kind", "claude"]);
     }
 
+    /// #1952：子 agent pane 的 `$AM_AGENT_NAME` 是它自己的全名（herdr 登錄的那個），不是母 bot 的名字；
+    /// `$AM_CHILD_OF` 照舊是母 bot 的 id。
+    #[test]
+    fn a_child_pane_gets_its_own_full_name_as_agent_name() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, _, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{out:?}");
+        let (_, sent) = s.sourced_env();
+        assert!(sent.contains("export AM_AGENT_NAME='p-1-kid'\n"), "{sent}");
+        assert!(!sent.contains("export AM_AGENT_NAME='p-1'\n"), "母 bot 的名字不能再當子 pane 的名字：{sent}");
+        assert!(sent.contains("export AM_CHILD_OF='b1'\n"), "{sent}");
+    }
+
+    /// #1952：名字含怪字元（引號、`$`、`;`、空白）就整個拒絕：不 herdr agent start、不送 env 到 pane。
+    #[test]
+    fn a_child_name_with_shell_metacharacters_is_refused_before_anything_is_sent() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "ki'd;$x y", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_ne!(rc, 0, "{out:?}");
+        assert!(err.contains("不允許的字元"), "{err}");
+        assert!(out.is_empty(), "herdr 不該被呼叫：{out:?}");
+        assert!(!log.exists(), "pane 不該收到任何東西");
+    }
+
+    /// #1952：頂層 bot 開 pane 沒有帶名字（`agent start` 沒有位置參數）時，`$AM_AGENT_NAME` 還是母 pane 自己的值。
+    #[test]
+    fn a_start_without_a_name_keeps_the_parent_agent_name() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        s.run(&env, &["agent", "start", "--kind", "claude", "--pane", "w1:p9"]);
+        let (_, sent) = s.sourced_env();
+        assert!(sent.contains("export AM_AGENT_NAME='p-1'\n"), "{sent}");
+    }
+
     /// #1789：fork 出來的 bot 繼承了原 bot 的對話，會把子 agent 改名回原 bot 的前綴，daemon 就把它掛到原 bot 底下。
     /// A display rename cannot change the parent recorded by stable ID.
     #[test]
@@ -1383,7 +1435,7 @@
         let (_, body) = s.sourced_env();
         let want = format!("{base}:/opt/vercel/0.49.1:/opt/ts:/opt/vercel/0.49.2");
         assert!(body.contains(&format!("export PATH='{want}'\n")), "{body}");
-        for kv in ["AM_BOT_ID='b1'", "CODEX_HOME='/home/u/.codex'", "CLAUDE_CONFIG_DIR='/home/u/.claude-cc2'", "AM_AGENT_NAME='p-1'"] {
+        for kv in ["AM_BOT_ID='b1'", "CODEX_HOME='/home/u/.codex'", "CLAUDE_CONFIG_DIR='/home/u/.claude-cc2'", "AM_AGENT_NAME='p-1-kid'"] {
             assert!(body.contains(&format!("export {kv}\n")), "{kv} 要完整帶到：{body}");
         }
         let (_, on_screen) = s.sent_text();

@@ -649,9 +649,17 @@ am_agent_start() {
         printf 'agents-manager: --pane %s 裡已經在跑 %s，不是空的 shell；先 herdr pane split 開新 pane，再把新 pane id 給 --pane。沒有送任何東西\n' "$_pane" "$_tagent" >&2
         exit 2
     fi
+    # 子 agent 的全名要寫進它 pane 的 `$AM_AGENT_NAME`（am_reexport_env_before_start）。名稱只准 [A-Za-z0-9._-]，
+    # 其他字元在送進 pane 之前就拒絕，不靠後面的 quote 去救。
+    case "$_child_name" in
+        *[!A-Za-z0-9._-]*)
+            printf 'agents-manager: 子 agent 名稱 `%s` 含有不允許的字元（只准 A-Z a-z 0-9 . _ -），沒有開 agent，也沒有送任何東西\n' "$_child_name" >&2
+            exit 2
+            ;;
+    esac
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
-    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct"
+    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name"
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
     fi
@@ -692,12 +700,16 @@ am_reexport_env_before_start() {
     # 帳號目錄照身份走，母 pane 自己的值不帶過去（見下面）。沒有身份時兩個都是空字串，行為照舊。
     _acct_kv=$2
     _acct_key=$3
+    # $4 是這次開的子 agent 全名（herdr 登錄的那個名字，am_child_name 算出來的）：有的話 `$AM_AGENT_NAME`
+    # 換成它，不再是母 bot 的名字（#1952）。沒有（不是 `agent start` 帶名字的呼叫）就照母 pane 的值。
+    _child_name=$4
     [ -n "$_pane" ] || return 0
     _body=""
     _line=""
     for _k in $AM_RESERVED_ENV_KEYS AM_INSTANCE AM_DATA_DIR; do
         [ -z "$_acct_key" ] || [ "$_k" != "$_acct_key" ] || continue
         eval "_v=\${$_k:-}"
+        [ "$_k" != AM_AGENT_NAME ] || [ -z "$_child_name" ] || _v=$_child_name
         [ -n "$_v" ] || continue
         [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
         _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")

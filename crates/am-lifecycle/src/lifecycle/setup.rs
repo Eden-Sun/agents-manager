@@ -1579,10 +1579,17 @@ pub fn agent_name_note(agent_name: &str) -> String {
     format!("你在 AG Man 裡的 agent 名稱是 `{agent_name}`（上文的 `$AM_AGENT_NAME` 就是這個值；只有這一段寫的是實際名稱）。")
 }
 
+/// The name note for a sub-agent (#1952). The file it sits in belongs to the parent bot, so it must not
+/// name the parent: a child's `$AM_AGENT_NAME` is its own full name, set by the herdr shim when it
+/// starts the pane. Static text, no per-bot value, like #1941.
+pub fn child_agent_name_note() -> &'static str {
+    "你是子 agent：你在 AG Man 裡的 agent 名稱存在環境變數 `$AM_AGENT_NAME`（`echo \"$AM_AGENT_NAME\"`），那是 herdr 登錄你的全名，不是派你出來的母 bot 的名字。上文的 `$AM_AGENT_NAME` 一律指它，用到時代入實際的值。"
+}
+
 /// What a sub-agent reads (`instructions.md`, §6.5i): the AG Man rules, then the `[agents]` agent md,
-/// then the name note.
-pub fn child_instructions(agent_name: &str, agent_md: &str) -> String {
-    format!("{}\n\n{}", super::agent_md::compose(child_agent_rules(), agent_md), agent_name_note(agent_name))
+/// then the child name note.
+pub fn child_instructions(agent_md: &str) -> String {
+    format!("{}\n\n{}", super::agent_md::compose(child_agent_rules(), agent_md), child_agent_name_note())
 }
 
 /// `bot.persona` appended to the system prompt per kind. Order: `child_agent_rules`, then the
@@ -2190,10 +2197,10 @@ mod model_args_tests {
     }
 
     /// #1941：每顆 bot 的注入文字共用同一段前綴（provider 的 prompt cache 才能共用）。
-    /// 除了最後一段（這顆 bot 的名字）以外，兩顆不同名字的 bot 注入的文字逐字相同，子 agent 的指示檔也一樣。
+    /// 除了最後一段（這顆 bot 的名字）以外，兩顆不同名字的 bot 注入的文字逐字相同。
     #[test]
     fn bots_with_different_names_share_every_injected_byte_but_the_last_paragraph() {
-        use super::{child_agent_rules, child_instructions, persona_text};
+        use super::{child_agent_rules, persona_text};
         let a = bot("claude", None, None, false);
         let b = bot("claude", None, None, false);
         let (ta, tb) = (persona_text(&a, "proj-abc123", Some("AGENT-MD")), persona_text(&b, "hub-kytpg9", Some("AGENT-MD")));
@@ -2203,9 +2210,28 @@ mod model_args_tests {
         assert_ne!(note_a, note_b);
         assert!(note_a.contains("`proj-abc123`") && note_b.contains("`hub-kytpg9`"), "{note_a} / {note_b}");
         assert!(!head_a.contains("proj-abc123") && !head_a.contains("hub-kytpg9"), "前段不寫任何一顆的名字");
-        let (ca, cb) = (child_instructions("proj-abc123", "AGENT-MD"), child_instructions("hub-kytpg9", "AGENT-MD"));
-        assert_eq!(ca.rsplit_once("\n\n").map(|(h, _)| h), cb.rsplit_once("\n\n").map(|(h, _)| h), "子 agent 的指示檔同一段前綴");
         assert!(!child_agent_rules().contains("proj-abc123"));
+    }
+
+    /// #1952：子 agent 的指示檔寫在母 bot 的目錄裡，最後一段只能是靜態文字、不寫母 bot 的名字。
+    /// 子 agent 的名字是 shim 開 pane 時設好的 `$AM_AGENT_NAME`（全名），不是這裡拿到的任何值。
+    #[test]
+    fn the_child_name_note_is_static_and_never_names_the_parent() {
+        use super::{child_agent_name_note, child_instructions};
+        let md = child_instructions("AGENT-MD");
+        assert!(md.ends_with(child_agent_name_note()), "{md}");
+        assert!(md.contains("AGENT-MD") && !md.contains("proj-abc123"), "{md}");
+        assert!(child_agent_name_note().contains("`$AM_AGENT_NAME`"), "{}", child_agent_name_note());
+        assert!(!child_agent_name_note().contains('{') && !child_agent_name_note().contains('}'), "沒有格式化的插值");
+    }
+
+    /// #1952：頂層 bot 的 pane 環境不動，`$AM_AGENT_NAME` 還是 bot 自己的名字（子 agent 全名只在 shim 開 child 時換）。
+    /// 解析原始碼（同 `every_env_key_the_daemon_injects…`）：pattern 用 concat 拆開，免得比到測試自己。
+    #[test]
+    fn the_top_level_pane_keeps_its_own_agent_name() {
+        let src = include_str!("setup.rs");
+        let needle = concat!("env.insert(\"AM_AGENT_NAME\"", ".into(), json!(agent_name));");
+        assert_eq!(src.matches(needle).count(), 1, "pane_env_for_fence 應該仍只注入一次 bot 自己的名字");
     }
 
     /// 使用者 2026-09-30：派工只走 herdr pane（內建子代理追不到），子 agent 不再開子 agent、要人手找 parent。
