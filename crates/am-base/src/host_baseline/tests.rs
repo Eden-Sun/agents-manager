@@ -216,7 +216,22 @@ fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
     }
 
     let out = run_probe_env(h, bin.to_str().unwrap(), &[("SHELL", std::ffi::OsStr::new("/bin/sh"))]);
-    assert!(out.contains("AM_BL tool jq \n"), "jq unexpectedly found:\n{out}");
+    if !out.contains("AM_BL tool jq \n") {
+        // probe 用 `${SHELL} -lic` 查 jq：登入 shell 會重讀 profile，PATH 限縮不等於找不到。只在失敗時印出同一條查詢的結果。
+        let login = Command::new("/bin/sh")
+            .arg("-lic")
+            .arg("command -v jq")
+            .stdin(std::process::Stdio::null())
+            .env_clear()
+            .env("HOME", h)
+            .env("HISTFILE", "/dev/null")
+            .env("PATH", &bin)
+            .env("SHELL", "/bin/sh")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        panic!("jq unexpectedly found:\n{out}\nPATH={}\nlogin `command -v jq` = {login:?}", bin.display());
+    }
     let key_lines: Vec<_> = out.lines().filter(|line| line.starts_with("AM_BL claude-key default ")).collect();
     assert_eq!(key_lines.len(), 4, "{out}");
     assert!(key_lines.iter().all(|line| line.ends_with(" ?")), "{key_lines:?}");

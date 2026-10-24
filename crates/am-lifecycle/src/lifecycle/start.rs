@@ -3652,6 +3652,14 @@ mod resume_args_tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         }
 
+        /// 只在失敗路徑呼叫：`sh -x` 逐行印出暫存搬運腳本，看每個 `stat` 比對的實際值。只帶指定的 `PATH`，不繼承環境。
+        fn trace_stage_script(script: &str, path: &str) -> String {
+            match std::process::Command::new("/bin/sh").arg("-x").arg("-c").arg(script).env_clear().env("PATH", path).output() {
+                Ok(o) => format!("exit={:?}\n{}", o.status.code(), String::from_utf8_lossy(&o.stderr)),
+                Err(e) => format!("sh spawn failed: {e}"),
+            }
+        }
+
         fn tmp() -> std::path::PathBuf {
             let dir = crate::testing::track(std::env::temp_dir().join(format!("am-remote-stage-{}", db::ulid())));
             std::fs::create_dir_all(&dir).unwrap();
@@ -3808,9 +3816,9 @@ esac
             let new = base.join("new-projects");
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
             let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).env("PATH", path).output().unwrap();
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).env("PATH", &path).output().unwrap();
             let out = String::from_utf8_lossy(&out.stdout).into_owned();
-            assert!(out.contains("AM_STAGED"), "BSD stat 的 /dev/fd 裝置編號不同也要搬得過去：{out}");
+            assert!(out.contains("AM_STAGED"), "BSD stat 的 /dev/fd 裝置編號不同也要搬得過去：{out}\n{}", trace_stage_script(&script, &path));
             assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n");
             // 同一個 projects（console-rpa 的情形：身份沒換）回 AM_SAME。
             let same = remote_stage_script(&old.to_string_lossy(), &old.to_string_lossy(), "k", "sid.jsonl", None);

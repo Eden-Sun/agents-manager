@@ -159,7 +159,10 @@
             "an unreadable outbox must not be reported as a verified empty list: {stdout:?}"
         );
         let missing = base.join("not-created");
-        assert_eq!(parse_list(&run_list_raw(&missing), 1_000).unwrap().len(), 0, "a verifiably missing path remains an empty list");
+        let missing_raw = run_list_raw(&missing);
+        let missing_list = parse_list(&missing_raw, 1_000)
+            .unwrap_or_else(|| panic!("missing path must parse: stdout={missing_raw:?} exists={}", missing.exists()));
+        assert_eq!(missing_list.len(), 0, "a verifiably missing path remains an empty list");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

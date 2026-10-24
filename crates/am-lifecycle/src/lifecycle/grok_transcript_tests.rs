@@ -264,7 +264,13 @@ async fn several_grok_sessions_in_one_cwd_each_pane_reads_its_own() {
     let synced = sync_locked(&app, &c.run_id).await;
     let _ = proc.kill();
     let _ = proc.wait();
-    assert_eq!(synced.unwrap(), Synced::Read { imported: 2, pending: None });
+    let got = synced.unwrap();
+    if got != (Synced::Read { imported: 2, pending: None }) {
+        // `Unavailable` 有五個回傳點（run／bot 不在、不是 transcript run、session 或對話檔找不到），這裡把 run／bot 狀態印出來分辨。
+        let run = db::run(&app.db, &c.run_id).await.unwrap().map(|r| (r.state, r.adopted, r.native_session_id));
+        let bot = db::bot(&app.db, &c.bot.id).await.unwrap().map(|b| (b.kind, b.inject_hooks));
+        panic!("sync_locked = {got:?}; run(state, adopted, native_session_id) = {run:?}; bot(kind, inject_hooks) = {bot:?}");
+    }
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
     assert_eq!(run.native_session_id.as_deref(), Some(SID));
 }

@@ -3843,15 +3843,22 @@ mod remote_install_permission_tests {
             remote_path: String::new(),
         }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
-        crate::hosts::set_ssh_fake(&host, |script| {
+        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = diag.clone();
+        let (dir, file) = (hooks_dir.clone(), hooks_path.clone());
+        crate::hosts::set_ssh_fake(&host, move |script| {
             let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
             if !out.status.success() {
                 anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
             }
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            if script.starts_with("G=") && text.starts_with("AM_GROK_UNTRUSTED") {
+                *sink.lock().unwrap() = super::remote_grok_merge_tests::read_script_diag(script, &[dir.as_path(), file.as_path()]);
+            }
+            Ok(text)
         });
 
-        install_remote_grok_hook(&conn, &json!({}), None).await.unwrap();
+        install_remote_grok_hook(&conn, &json!({}), None).await.unwrap_or_else(|e| panic!("{e:#}\n{}", diag.lock().unwrap()));
 
         let installed: Value = serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
         assert_eq!(mode_of(&hooks_dir), 0o700, "remote hooks directory must not let other users replace commands");
@@ -3913,6 +3920,43 @@ mod remote_grok_merge_tests {
     use crate::testing as tt;
     use serde_json::{json, Value};
 
+    /// 只在失敗路徑呼叫：`sh -x` 逐行印出讀端腳本，看是哪一道 `am_bad` 閘擋下；再附上相關路徑的 mode／uid。
+    /// 子行程只帶 `PATH`、不繼承環境，所以 token 之類的值不會進訊息；腳本本身只含路徑。
+    pub(super) fn read_script_diag(script: &str, paths: &[&std::path::Path]) -> String {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let trace = match std::process::Command::new("/bin/sh")
+            .arg("-x")
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+        {
+            Ok(o) => format!(
+                "exit={:?} first_stdout_line={:?}\n{}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout).lines().next(),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("sh spawn failed: {e}"),
+        };
+        let states: Vec<String> = paths
+            .iter()
+            .map(|p| match std::fs::symlink_metadata(p) {
+                Ok(m) => format!(
+                    "{} mode={:o} uid={} dir={} symlink={}",
+                    p.display(),
+                    m.permissions().mode() & 0o7777,
+                    m.uid(),
+                    m.is_dir(),
+                    m.file_type().is_symlink()
+                ),
+                Err(e) => format!("{} {e}", p.display()),
+            })
+            .collect();
+        format!("{trace}\n{}", states.join("\n"))
+    }
+
     #[tokio::test]
     async fn remote_grok_install_preserves_user_hooks_in_its_shared_file() {
         let env = tt::env().await;
@@ -3941,6 +3985,9 @@ mod remote_grok_merge_tests {
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let remote_home = home.to_string_lossy().into_owned();
         let fake_home = remote_home.clone();
+        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = diag.clone();
+        let (dir, file) = (hooks.parent().unwrap().to_path_buf(), hooks.clone());
         crate::hosts::set_ssh_fake(&host, move |script| {
             let out = std::process::Command::new("/bin/sh")
                 .arg("-c")
@@ -3950,10 +3997,16 @@ mod remote_grok_merge_tests {
             if !out.status.success() {
                 anyhow::bail!("remote script failed: {}", String::from_utf8_lossy(&out.stderr));
             }
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            if script.starts_with("G=") && text.starts_with("AM_GROK_UNTRUSTED") {
+                *sink.lock().unwrap() = read_script_diag(script, &[dir.as_path(), file.as_path()]);
+            }
+            Ok(text)
         });
 
-        super::install_remote_grok_hook(&conn, &json!({"GROK_HOME": grok_home.to_string_lossy()}), None).await.unwrap();
+        super::install_remote_grok_hook(&conn, &json!({"GROK_HOME": grok_home.to_string_lossy()}), None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:#}\n{}", diag.lock().unwrap()));
         let actual: Value = serde_json::from_slice(&std::fs::read(&hooks).unwrap()).unwrap();
         assert_eq!(actual["note"], "keep this");
         let commands = |event: &str| -> Vec<String> {
@@ -3979,11 +4032,11 @@ mod remote_grok_merge_tests {
             "stat() {{ command stat \"$@\"; rc=$?; case \"$*\" in *\"%d %i %h %s /dev/fd/3\"*) dd if=/dev/zero bs=300000 count=1 >> {append} 2>/dev/null;; esac; return \"$rc\"; }}\n{}",
             super::remote_grok_read_script(&hooks_dir.to_string_lossy(), &super::grok_hooks_file(None)),
         );
-        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let stdout = String::from_utf8(out.stdout).unwrap();
         let (marker, encoded) = stdout.split_once('\n').unwrap();
-        assert_eq!(marker, "AM_GROK_FILE");
+        assert_eq!(marker, "AM_GROK_FILE", "{}", read_script_diag(&script, &[hooks_dir.as_path(), hooks.as_path()]));
         let encoded: String = encoded.chars().filter(|c| !c.is_ascii_whitespace()).collect();
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
         assert!(bytes.len() <= 262_145, "remote hook file grew past the read cap: {} bytes", bytes.len());
