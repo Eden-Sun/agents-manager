@@ -1015,8 +1015,11 @@ fi
 # 換版前就已經死掉的 child（2026-10-16 13:52 66378ada：run 13:27 就 pane gone 結束，pane 後來被別顆 agent 佔用，
 # 新 daemon 的 reconcile 以 reconcile_run_already_ended／agent_missing 退役）也不算：換版沒弄丟它，它早就不在了。
 # 只認 retire_child 的 last_run 在 SWAP_T0 之前就已結束、而且它現在沒有任何 active run；run 換版前還活著的 agent_missing 照樣回滾。
-# 父 bot 在窗口內收掉 child、沒有新 child 時（2026-10-17 16:10Z 回滾 978cf980，#1820）：cause=parent_replaced_child 也放過，
-# 但要 herdr 事件寫的 last_run.exit_reason='pane exited'、state=exited、pane=gone，且父 bot 未刪、仍有 active run。
+# 父 bot 在窗口內替換 child、沒有新 child 時：cause=parent_replaced_child 也放過，但要 last_run.state=exited、pane=gone，
+# exit_reason 是 herdr 事件寫的 'pane exited'（2026-10-17 16:10Z 回滾 978cf980，#1820），或對帳才發現的 'agent not found during reconcile'
+# （2026-10-24 07:31Z 回滾 4f1703df，wait1937，#1962：替換當下新 child 還沒 adopt）；且父 bot 未刪、仍有 active run。
+# reconcile.rs 的 parent_replaced_child 只在 herdr 確認舊 pane 不在、父 bot active、herdr 帶 ownership hint 的 successor 時才寫這個 cause，
+# 所以這裡的 exit_reason 放寬不會放過一般的 child 消失。
 # 換版只重啟 daemon、herdr 不動，關不掉 pane；空的 herdr 也不會替沒有的 pane 發事件（child_retire.rs OBSERVED_CLOSE）。
 # 判準見 SPEC §6.5a。
 # 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
@@ -1045,7 +1048,7 @@ deleted_on_purpose() { # $1=bot id → 印 1 才算
         AND json_extract(i.payload_json, '\$.cause') = 'parent_replaced_child'
         AND json_extract(i.payload_json, '\$.pane') = 'gone'
         AND json_extract(i.payload_json, '\$.last_run.state') = 'exited'
-        AND json_extract(i.payload_json, '\$.last_run.exit_reason') = 'pane exited'
+        AND json_extract(i.payload_json, '\$.last_run.exit_reason') IN ('pane exited', 'agent not found during reconcile')
         AND EXISTS (SELECT 1 FROM bots p
           WHERE p.id = json_extract(i.payload_json, '\$.parent_bot_id') AND p.deleted_at IS NULL
             AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = p.id AND r.state IN ('starting', 'running', 'stopping'))))
