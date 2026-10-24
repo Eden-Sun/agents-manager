@@ -53,6 +53,7 @@ pub(crate) struct ApiBotAdapter {
     limits: AdapterLimits,
     quote_provider: Arc<dyn QuoteProvider>,
     http_cfg: AdapterHttpConfig,
+    tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
 }
 
@@ -70,6 +71,7 @@ struct ActiveAttempt {
 }
 
 impl ApiBotAdapter {
+    /// Create adapter for the first turn (generation 1, fresh session at revision 0).
     pub(crate) async fn new(
         pool: SqlitePool,
         identity: AdapterIdentity,
@@ -78,6 +80,7 @@ impl ApiBotAdapter {
         limits: AdapterLimits,
         quote_provider: Arc<dyn QuoteProvider>,
         http_cfg: AdapterHttpConfig,
+        tools: Option<Arc<dyn Tools>>,
     ) -> Result<Self, http::Error> {
         let fence = Fence {
             session: &identity.session_id,
@@ -106,6 +109,7 @@ impl ApiBotAdapter {
             limits,
             quote_provider,
             http_cfg,
+            tools,
             cursor: Mutex::new(CursorState {
                 revision: 0,
                 last_api_pending: false,
@@ -115,6 +119,74 @@ impl ApiBotAdapter {
         })
     }
 
+    /// Rebind an existing settled session to a new run / turn, loading durable state.
+    pub(crate) async fn rebind(
+        pool: SqlitePool,
+        old_fence: &AdapterIdentity,
+        old_revision: i64,
+        new_identity: AdapterIdentity,
+        options: Options,
+        system: Value,
+        limits: AdapterLimits,
+        quote_provider: Arc<dyn QuoteProvider>,
+        http_cfg: AdapterHttpConfig,
+        tools: Option<Arc<dyn Tools>>,
+    ) -> Result<(Self, State), http::Error> {
+        let fence_old = Fence {
+            session: &old_fence.session_id,
+            bot: &old_fence.bot_id,
+            run: &old_fence.run_id,
+            turn: &old_fence.turn_id,
+            generation: old_fence.generation,
+            revision: old_revision,
+        };
+
+        let new_rev = db_api::rebind(
+            &pool,
+            &fence_old,
+            &new_identity.run_id,
+            &new_identity.turn_id,
+            new_identity.generation,
+        )
+        .await
+        .map_err(|_| http::Error::InvalidRequest)?;
+
+        let current_fence = Fence {
+            session: &new_identity.session_id,
+            bot: &new_identity.bot_id,
+            run: &new_identity.run_id,
+            turn: &new_identity.turn_id,
+            generation: new_identity.generation,
+            revision: new_rev,
+        };
+
+        let loaded_chk = db_api::load(&pool, &current_fence)
+            .await
+            .map_err(|_| http::Error::InvalidRequest)?;
+        let loaded_state: State = serde_json::from_value(loaded_chk.value())
+            .map_err(|_| http::Error::InvalidRequest)?;
+
+        let adapter = Self {
+            pool,
+            identity: new_identity,
+            options,
+            system,
+            limits,
+            quote_provider,
+            http_cfg,
+            tools,
+            cursor: Mutex::new(CursorState {
+                revision: new_rev,
+                last_api_pending: false,
+                active_attempt: None,
+                cached_response: None,
+            }),
+        };
+
+        Ok((adapter, loaded_state))
+    }
+
+    /// Exposes read-only inspection of current durable revision for testing assertions.
     #[cfg(test)]
     pub(crate) async fn current_revision(&self) -> i64 {
         let guard = self.cursor.lock().await;
@@ -311,7 +383,13 @@ impl Tools for ApiBotAdapter {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            super::tools::default_tools().execute(call, cancel).await
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            match &self.tools {
+                Some(tools) => tools.execute(call, cancel).await,
+                None => Err("tools unsupported in C1 inert adapter".into()),
+            }
         })
     }
 }
