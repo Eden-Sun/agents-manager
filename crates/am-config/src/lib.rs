@@ -331,6 +331,158 @@ pub struct ConfigFile {
     /// 分享 bot 的對外入口（SPEC「分享 bot」）。沒寫＝不開那個 listener、也不能開分享連結。
     #[serde(default, skip_serializing_if = "ShareCfg::is_default")]
     pub share: ShareCfg,
+    /// issue #719 階段 3a：逐台開啟主機一致性補齊（`[host_baseline.sync]`）。沒寫＝每台都 off，既有設定檔的長相不變。
+    #[serde(default, skip_serializing_if = "HostBaselineCfg::is_default")]
+    pub host_baseline: HostBaselineCfg,
+}
+
+/// `[host_baseline.sync]` 一台主機的值。`auto` 在階段 3a 一律當 `ask`；讀不懂的值當 `off`（都只記一次 WARN，不讓設定檔載入失敗）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBaselineSyncMode {
+    Off,
+    Ask,
+    Auto,
+    /// 寫錯的值（例如 `"yes"`）：當 `off`。存回去寫成 `off`。
+    #[serde(rename = "off")]
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for HostBaselineSyncMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "off" => Self::Off,
+            "ask" => Self::Ask,
+            "auto" => Self::Auto,
+            _ => Self::Invalid,
+        })
+    }
+}
+
+/// `[host_baseline]`（issue #719 階段 3a，SPEC §16.7）：`sync` 的鍵是主機名（`local` 或 `[[hosts]]` 的 `name`），值是 `off`／`ask`／`auto`。
+/// 獨立一張表、不掛在 `[[hosts]]` 上：主機改名或刪掉時舊鍵會留著（孤兒鍵），一律當 off，網頁從 `host_baseline_orphan_sync_keys` 看得到。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostBaselineCfg {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sync: std::collections::BTreeMap<String, HostBaselineSyncMode>,
+}
+
+impl HostBaselineCfg {
+    pub fn is_default(&self) -> bool {
+        self.sync.is_empty()
+    }
+}
+
+impl ConfigFile {
+    fn host_baseline_known(&self, name: &str) -> bool {
+        name == LOCAL_HOST || self.hosts.iter().any(|h| h.name == name)
+    }
+
+    /// 這台主機實際生效的模式：只會是 `Off` 或 `Ask`。沒列、鍵對不上主機、值讀不懂＝`Off`；`auto` 在 3a 當 `Ask`。
+    pub fn host_baseline_sync(&self, host: &str) -> HostBaselineSyncMode {
+        if !self.host_baseline_known(host) {
+            return HostBaselineSyncMode::Off;
+        }
+        match self.host_baseline.sync.get(host) {
+            Some(HostBaselineSyncMode::Ask | HostBaselineSyncMode::Auto) => HostBaselineSyncMode::Ask,
+            _ => HostBaselineSyncMode::Off,
+        }
+    }
+
+    /// `[host_baseline.sync]` 裡對不上 `local`／`[[hosts]]` 的鍵（主機改名或刪掉後留下的），排好序。
+    pub fn host_baseline_orphan_sync_keys(&self) -> Vec<String> {
+        self.host_baseline.sync.keys().filter(|k| !self.host_baseline_known(k)).cloned().collect()
+    }
+
+    /// 載入時要記的 WARN（每則一行）：孤兒鍵、`auto` 降級、讀不懂的值。純函式，記 log 由 [`warn_host_baseline_once`] 負責。
+    pub fn host_baseline_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (host, mode) in &self.host_baseline.sync {
+            if !self.host_baseline_known(host) {
+                out.push(format!("[host_baseline.sync] `{host}` 不是 local 或 [[hosts]] 的主機名：忽略（當 off）"));
+            } else if *mode == HostBaselineSyncMode::Auto {
+                out.push(format!("[host_baseline.sync] `{host}` = \"auto\"：階段 3a 只開放手動確認，當 \"ask\""));
+            } else if *mode == HostBaselineSyncMode::Invalid {
+                out.push(format!("[host_baseline.sync] `{host}` 的值不是 off／ask／auto：當 off"));
+            }
+        }
+        out
+    }
+}
+
+/// 同一則 `[host_baseline]` WARN 在這個行程裡只記一次（設定檔每次重讀都會再算一遍）。回傳這次真的記了幾則。
+pub fn warn_host_baseline_once(cfg: &ConfigFile) -> usize {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen.get_or_insert_with(Default::default);
+    let mut logged = 0;
+    for w in cfg.host_baseline_warnings() {
+        if seen.insert(w.clone()) {
+            tracing::warn!("{w}");
+            logged += 1;
+        }
+    }
+    logged
+}
+
+#[cfg(test)]
+mod host_baseline_cfg_tests {
+    use super::*;
+
+    fn host(name: &str) -> HostCfg {
+        HostCfg {
+            name: name.into(),
+            ssh: "box".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+            shared_session: false,
+        }
+    }
+
+    /// 沒寫這段＝每台 off，存回去也不會多出 `[host_baseline]`；寫了照讀、照存。
+    #[test]
+    fn an_absent_table_is_off_everywhere_and_is_never_written_out() {
+        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n").unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert!(cfg.host_baseline.is_default());
+        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("host_baseline"), "{text}");
+
+        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n\n[host_baseline.sync]\nm4p = 'ask'\n").unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Ask);
+        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off, "a host that is not listed is off");
+        let again: ConfigFile = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(again.host_baseline, cfg.host_baseline);
+    }
+
+    /// 鍵對不上主機、`auto`、寫錯的值：設定檔照樣載入，各自只當 off／ask，並且各記一則 WARN（同一則只記一次）。
+    #[test]
+    fn unknown_keys_auto_and_bad_values_load_with_one_warning_each() {
+        let text = "[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n\n[[hosts]]\nname = 'box2'\nssh = 'b'\n\n[host_baseline.sync]\nlocal = 'auto'\nm4p = 'yes'\ngone-host = 'ask'\nbox2 = 'off'\n";
+        let (cfg, unknown) = parse_config(text).expect("a bad [host_baseline.sync] must not fail the config load");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Ask, "auto is ask in 3a");
+        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Off, "an unreadable value is off");
+        assert_eq!(cfg.host_baseline_sync("gone-host"), HostBaselineSyncMode::Off, "a key that names no host is ignored");
+        assert_eq!(cfg.host_baseline_sync("box2"), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_orphan_sync_keys(), vec!["gone-host".to_string()]);
+        let warnings = cfg.host_baseline_warnings();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("`gone-host`")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("`local`") && w.contains("auto")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("`m4p`")), "{warnings:?}");
+        assert_eq!(warn_host_baseline_once(&cfg), 3);
+        assert_eq!(warn_host_baseline_once(&cfg), 0, "the same warning is logged once per process");
+        let mut more = cfg.clone();
+        more.hosts.push(host("gone-host"));
+        assert!(more.host_baseline_orphan_sync_keys().is_empty(), "a key whose host came back is no longer an orphan");
+        assert_eq!(more.host_baseline_sync("gone-host"), HostBaselineSyncMode::Ask);
+    }
 }
 
 /// `[share]`：`listen` 是分享入口的獨立 listener（Tailscale Funnel 指過來的那個 port），`base_url` 是對外網址。
@@ -1833,6 +1985,7 @@ fn parse_file_text(path: &Path, text: &str) -> Result<(ConfigFile, [u8; 32])> {
     for key in unknown.into_iter().filter(|k| !is_retired_key(k)) {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
+    warn_host_baseline_once(&cfg);
     Ok((cfg, config_fingerprint(text)))
 }
 

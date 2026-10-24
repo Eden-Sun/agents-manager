@@ -608,6 +608,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
 - 只報告，面板上沒有「修復」按鈕：自動安裝／同步要使用者另行同意。Mac 專用項在 Linux 主機根本不會出現（daemon 端就不列）。
 - 文字組合在 `lib/hostBaseline.ts`（有單元測試）。
 - **可自動補／需手動**（2026-10-24，#719 階段 2）：每項差異文字尾端接一個括號標記——在 `baseline.fixable` 裡的寫「（可自動補）」，其餘「（需手動）」，跟著那一項的顏色、不另上色。只是 dry-run 的說明，仍然沒有按鈕。daemon 沒給 `fixable`（或型別不對）時正規化成空陣列＝全部「需手動」（協調者裁示；網頁嵌在 daemon 同一個 binary，正式環境不會遇到舊 daemon）。截圖：`docs/screenshots/host-baseline-plan/`。
+- **補齊先只有 API、預設關**（2026-10-24，#719 階段 3a，協調者核准）：apply／restore 兩條 API 先上，面板上**還沒有**按鈕。開關放 `config.toml` 頂層 `[host_baseline.sync]` 獨立表，不加在 `[[hosts]]` 上——`HostCfg` 全樹有上百處 struct literal，加欄位會牽動其他工作樹；代價是主機改名或刪掉後會留下孤兒鍵（一律當 off，`GET /api/state` 的 `host_baseline_orphan_sync_keys` 列給之後的 UI 提示清理）。沒列＝off；`auto` 在 3a 當 `ask`（只開放使用者手動觸發）。還原刻意不看開關：關掉之後也要能把上一次的修改換回來。備份只留在那台主機、API 不回內容，所以之後的 UI 只能顯示備份 id 與「還原了哪個檔」，不能預覽備份內容。
 
 ## 預覽分頁：頂層 bot 的 vite dev server 內嵌在右半面板（2026-09-19，issue #253）
 
