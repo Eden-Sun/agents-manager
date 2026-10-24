@@ -1351,8 +1351,8 @@ codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane �
 這樣在新 pane 直接起 CLI（就算加了 `--name`）：那樣 agent 在 herdr 沒有名稱，AG Man 認領不到。\n\
 - **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
 有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\
-**先挑 prompt cache 還熱的**：`herdr agent list` 的 stderr 會附上每顆子 agent 的 cache 還剩幾分（claude／codex 約 60 分）。\
-有好幾顆閒置的，先交給 cache 還熱、剩最久的那顆（接著用省掉重讀整段 context 的 token）；cache 已冷的跟新開差不多貴，\
+**先挑 prompt cache 還熱的**：`herdr agent list` 的 stderr 會附上每顆子 agent 的 cache 還剩幾分（claude 約 60 分；codex 不會因閒置冷掉）。\
+有好幾顆閒置的，先交給 cache 還熱、剩最久的那顆（接著用省掉重讀整段 context 的 token；閒置的 codex 一律算熱）；cache 已冷的跟新開差不多貴，\
 只有跟手上工作脈絡相關時才值得重用。\n\
 - **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
 PATH 上的 herdr 會幫你補，但你自己要寫對。\n\

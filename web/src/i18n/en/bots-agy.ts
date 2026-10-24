@@ -141,7 +141,7 @@ export default {
   '選擇這一層': 'Select this folder',
   '這一輪閒置不保溫、也不熱壓；有新活動就自動恢復': 'No keep warm or auto-compress for this idle cycle; resumes on new activity',
   '已取消，照常保溫': 'Cancelled, keep warm resumed',
-  '只有主力的 claude／codex 能設定不用保溫': 'Only primary Claude/Codex Bots can be configured with Frozen',
+  '只有主力的 claude 能設定不用保溫': 'Only primary Claude Bots can be configured with Frozen',
   '沒有切換：{reason}': 'Not toggled: {reason}',
   '已設定不用保溫：這一輪閒置不保溫、也不熱壓；有新活動就自動恢復。點一下取消': 'Set to Frozen: no keep warm or auto-compress this cycle; resumes on new activity. Click to cancel',
   '保溫回覆已到、快取仍熱；點一下停止這一輪閒置保溫，有新活動就自動恢復': 'Keep warm response arrived and cache is warm; click to stop keep warm for this idle cycle, resumes on new activity',

@@ -3,7 +3,7 @@
 //!
 //! herdr 的清單只有 `idle`／`done`，看不出誰的 cache 還在；daemon 有 [`cache_clock`] 的 `last_api_at`。
 //! shim 在 `agent list` 之後打 `POST /relay/kids`，這裡回一段純文字（shim 原樣印到 stderr，不動 herdr 的 JSON）：
-//! 閒置且 cache 熱的排最前、剩最久的先，接著跑著的，最後冷掉或不明的。
+//! 閒置且 cache 熱的排最前、剩最久的先（codex 不會因閒置冷掉，視同剩最久），接著跑著的，最後冷掉或不明的。
 
 use crate::cache_clock::{self, LastTurn};
 use crate::db;
@@ -18,10 +18,13 @@ pub struct Kid {
     pub warm_secs: Option<i64>,
     /// 閒置多久（秒）；只在冷掉時用來顯示。
     pub idle_secs: Option<i64>,
+    /// 這種 kind 的 cache 不會因閒置冷掉（codex，[`cache_clock::never_cools`]）。
+    pub never_cools: bool,
 }
 
 fn rank(k: &Kid) -> (u8, i64) {
     match (k.status.as_str(), k.warm_secs) {
+        ("idle", _) if k.never_cools => (0, i64::MIN),
         ("idle", Some(s)) if s > 0 => (0, -s),
         ("working" | "blocked", _) => (1, 0),
         ("idle", _) => (2, 0),
@@ -39,12 +42,13 @@ pub fn render(mut kids: Vec<Kid>) -> String {
         return String::new();
     }
     kids.sort_by_key(rank);
-    let mut out = String::from("agents-manager: 你底下的子 agent 的 prompt cache（claude／codex 約 60 分）——派工先用 cache 還熱的閒置 child：\n");
+    let mut out = String::from("agents-manager: 你底下的子 agent 的 prompt cache（claude 約 60 分；codex 不會冷）——派工先用 cache 還熱的閒置 child：\n");
     for k in &kids {
         let state = match (k.status.as_str(), k.warm_secs) {
             ("working", _) => "跑著（cache 熱）".to_string(),
             ("blocked", _) => "停在提示上".to_string(),
             ("stopped", _) => "沒在跑".to_string(),
+            _ if k.never_cools => "cache 熱（codex 不會冷）".to_string(),
             (_, Some(s)) if s > 0 => format!("cache 熱，還剩約 {} 分", mins(s)),
             (_, Some(_)) => match k.idle_secs {
                 Some(i) => format!("cache 已冷（閒置 {} 分）", i / 60),
@@ -73,7 +77,7 @@ pub fn kid(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Kid {
     let Some(run) = run else {
-        return Kid { name, status: "stopped".into(), warm_secs: None, idle_secs: None };
+        return Kid { name, status: "stopped".into(), warm_secs: None, idle_secs: None, never_cools: false };
     };
     let line = cache_clock::statusline_at(run.id);
     let at = cache_clock::derive(kind, Some(run.agent_status), run.status_since, last_turn, line.as_deref(), &db::iso_at(now));
@@ -82,7 +86,7 @@ pub fn kid(
         (Some(ttl), Some(i)) => Some(ttl - i),
         _ => None,
     };
-    Kid { name, status: run.agent_status.to_string(), warm_secs: warm, idle_secs: idle }
+    Kid { name, status: run.agent_status.to_string(), warm_secs: warm, idle_secs: idle, never_cools: cache_clock::never_cools(kind) }
 }
 
 /// `bot_id` 底下（`parent_bot_id`）每顆活著的子 agent。
@@ -113,7 +117,7 @@ mod tests {
     use super::*;
 
     fn k(name: &str, status: &str, warm: Option<i64>, idle: Option<i64>) -> Kid {
-        Kid { name: name.into(), status: status.into(), warm_secs: warm, idle_secs: idle }
+        Kid { name: name.into(), status: status.into(), warm_secs: warm, idle_secs: idle, never_cools: false }
     }
 
     #[test]
@@ -132,6 +136,15 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_codex_child_never_cools_and_comes_first() {
+        let codex = Kid { never_cools: true, ..k("p-codex", "idle", None, Some(9000)) };
+        let text = render(vec![k("p-warm50", "idle", Some(3000), Some(600)), codex]);
+        let order: Vec<&str> = text.lines().skip(1).map(|l| l.split_whitespace().next().unwrap()).collect();
+        assert_eq!(order, ["p-codex", "p-warm50"]);
+        assert!(text.contains("p-codex  idle  cache 熱（codex 不會冷）"), "{text}");
+    }
+
+    #[test]
     fn no_children_prints_nothing() {
         assert_eq!(render(vec![]), "");
     }
@@ -144,7 +157,9 @@ mod tests {
         let kid = kid("c".into(), "claude", run(), Some(&turn), now);
         assert_eq!(kid.warm_secs, Some(2400));
         assert_eq!(kid.idle_secs, Some(1200));
-        // grok 不知道 TTL。
+        // grok 不知道 TTL；codex 沒有 TTL 但不會冷。
         assert_eq!(super::kid("g".into(), "grok", run(), Some(&turn), now).warm_secs, None);
+        let codex = super::kid("x".into(), "codex", run(), Some(&turn), now);
+        assert_eq!((codex.warm_secs, codex.idle_secs, codex.never_cools), (None, Some(1200), true));
     }
 }

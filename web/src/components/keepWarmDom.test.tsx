@@ -1,6 +1,6 @@
 /**
  * 主力的「保溫」在畫面上的兩個東西（真的掛元件進 happy-dom，後端是 `MockTransport`，走正式的 fetch 路徑）：
- * - 「壓縮」鈕旁的「不用保溫」開關：只主力的 claude／codex 有、顯示目前狀態、再按一次取消。
+ * - 「壓縮」鈕旁的「不用保溫」開關：只主力的 claude 有（codex 的 cache 不會冷）、顯示目前狀態、再按一次取消。
  * - 保溫回覆到了：主力晶片帶 ♨ 標記（`keep-warm-replied`），不畫紫色外框；使用者送出新 prompt 才恢復；保溫回覆不亮未讀。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -76,7 +76,15 @@ test('「不用保溫」：沒釘成主力就不畫；daemon 對非主力回 400
   await mock.request('PATCH', `/bots/${id}`, { primary: true })
 })
 
-for (const [name, touch] of [['am-claude', false], ['am-codex', true]] as const) {
+test('「不用保溫」：主力的 codex 不畫（cache 不會冷、不保溫），daemon 回 400 not_primary', async () => {
+  const { id } = await running('am-codex')
+  assert.equal(useStore.getState().bots.find((b) => b.id === id)?.primary, true, 'mock 的 am-codex 是主力')
+  await mount(<KeepWarmSkipButton botId={id} />)
+  assert.equal(btn(), null)
+  await assert.rejects(mock.request('POST', `/bots/${id}/keep-warm/skip`, { skip: true }), (e: { status?: number; body?: { error?: string } }) => e.status === 400 && e.body?.error === 'not_primary')
+})
+
+for (const [name, touch] of [['am-claude', false], ['am-claude', true]] as const) {
   test(`保溫按鈕（${name}、touch=${touch}）：跟隨 ♨，停止與取消仍切換 skip`, async () => {
     const { id, requests } = await running(name)
     await mount(<KeepWarmSkipButton botId={id} touch={touch} />)
@@ -106,7 +114,7 @@ for (const [name, touch] of [['am-claude', false], ['am-codex', true]] as const)
     mock.simulateKeepWarmReply(id)
     await act(() => useStore.getState().refreshState())
     assert.equal(btn()!.textContent, '保溫中・停止保溫')
-    await mock.request('POST', `/bots/${id}/prompt`, { text: '新活動', client_request_id: `warm-button-${id}` })
+    await mock.request('POST', `/bots/${id}/prompt`, { text: '新活動', client_request_id: `warm-button-${id}-${touch}` })
     await act(() => useStore.getState().refreshState())
     assert.equal(btn()!.textContent, '不用保溫', '新 prompt 清除 ♨ 時同步回復')
     await advanceMockTime(3000) // mock 的回合要 2.4 秒虛擬時間

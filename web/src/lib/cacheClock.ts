@@ -3,7 +3,7 @@ import { msg, t } from './i18n'
 /**
  * 主力晶片的 prompt cache 倒數（SPEC §6.5j）：晶片原本的底色就是倒數，不另加元素、不改尺寸。
  *
- * daemon 在 run 上帶 `last_api_at`（最後一次 API 活動）與 `cache_ttl_secs`（claude／codex 3600，grok 不帶）；
+ * daemon 在 run 上帶 `last_api_at`（最後一次 API 活動）與 `cache_ttl_secs`（claude 3600；codex 不因閒置冷掉、grok 不明，都不帶）；
  * 這裡只做算術：剩餘＝`last_api_at + ttl - now`，回合進行中＝滿。網頁每 15 秒重算一次（`CACHE_TICK_MS`）；
  * 紅色時每 5 秒（`CACHE_RED_TICK_MS`）：紅色那級的底色改以 5 分鐘為滿刻度重算，見 `frac`。
  * 主力的 prompt cache「保溫」（`primary_keepalive`，SPEC §6.5k）：`cache_kept_warm_at` 是保溫／熱壓讓 cache 實際變熱的時間，

@@ -44,27 +44,15 @@
         assert_eq!(decide(m(300), m(52), ttl, true, true, ctx, 30.0), Step::Wait, "同一個錨點只壓縮一次");
     }
 
-    /// 2026-10-05：熱壓只在 context 用量超過門檻時才做（claude 30%、codex 50%）；不到或讀不到用量就讓它涼掉（也不再保溫）。
+    /// 2026-10-05：熱壓只在 context 用量超過門檻時才做（claude 30%；codex 不會涼掉、沒有熱壓）；不到或讀不到用量就讓它涼掉（也不再保溫）。
     #[test]
     fn warm_compact_needs_more_than_the_kinds_context_threshold() {
         let m = |min: i64| min * 60;
         let ttl = 3600;
-        assert_eq!((WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE, WARM_COMPACT_MIN_CONTEXT_PCT_CODEX), (30.0, 50.0));
+        assert_eq!(WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE, 30.0);
         assert_eq!(warm_compact_min_context_pct("claude"), Some(30.0));
-        assert_eq!(warm_compact_min_context_pct("codex"), Some(50.0));
+        assert_eq!(warm_compact_min_context_pct("codex"), None, "codex 的 cache 不會涼掉，沒有熱壓");
         assert_eq!(warm_compact_min_context_pct("grok"), None);
-
-        // codex：> 50% 才壓；40%（claude 會壓）codex 不壓，剛好 50% 不壓，讀不到不壓。
-        let codex = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct, WARM_COMPACT_MIN_CONTEXT_PCT_CODEX);
-        assert_eq!(codex(Some(50.1)), Step::WarmCompact, "codex > 50% 照壓");
-        assert_eq!(codex(Some(90.0)), Step::WarmCompact);
-        assert_eq!(codex(Some(50.0)), Step::Wait, "剛好 50% 不壓（要超過）");
-        assert_eq!(codex(Some(40.0)), Step::Wait, "codex 40% 不壓縮（同樣的用量 claude 會壓）");
-        assert_eq!(codex(Some(30.1)), Step::Wait);
-        assert_eq!(codex(None), Step::Wait, "codex 拿不到 context 保守不壓縮");
-        assert_eq!(decide(m(110), m(52), ttl, true, false, Some(40.0), WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE), Step::WarmCompact, "claude 40% 照壓");
-        // codex 到 110 分以後也不再保溫。
-        assert_eq!(decide(m(115), m(57), ttl, false, false, Some(20.0), WARM_COMPACT_MIN_CONTEXT_PCT_CODEX), Step::Wait);
 
         let at = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct, WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE);
         assert_eq!(at(Some(30.1)), Step::WarmCompact, "> 30% 照壓");
@@ -107,9 +95,9 @@
     }
 
     #[test]
-    fn only_an_idle_primary_claude_or_codex_with_nothing_pending_is_touched() {
+    fn only_an_idle_primary_claude_with_nothing_pending_is_touched() {
         assert!(eligible("claude", true, "running", "idle", false, false));
-        assert!(eligible("codex", true, "running", "idle", false, false));
+        assert!(!eligible("codex", true, "running", "idle", false, false), "codex 的 cache 不會涼掉，不保溫");
         assert!(!eligible("grok", true, "running", "idle", false, false));
         assert!(!eligible("agy", true, "running", "idle", false, false));
         assert!(!eligible("claude", false, "running", "idle", false, false), "不是主力");
@@ -625,7 +613,7 @@
     }
 
     #[tokio::test]
-    async fn skip_route_only_accepts_a_primary_claude_or_codex() {
+    async fn skip_route_only_accepts_a_primary_claude() {
         let env = tt::env().await;
         let (bot, _run) = primary(&env, "kw-route", "idle").await;
         assert!(skip_route(&env.app, &bot.id, true).await.unwrap());

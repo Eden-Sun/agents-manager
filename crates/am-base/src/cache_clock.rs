@@ -9,7 +9,8 @@
 //! 回合進行中（`agent_status == "working"` 或有 in-flight 回合）＝熱，`last_api_at` 給現在。
 //! 主力的保溫回合（[`crate::primary_keep_warm`]，`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`）**不算活動**：回合時間、statusLine 指紋、
 //! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色；熱壓之後視為涼掉，`cache_kept_warm_at` 不含熱壓、也不含熱壓之前的保溫。
-//! TTL 依 kind：claude／codex 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷），grok 未知不帶。
+//! TTL 依 kind：claude 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷）；codex 的 cache 不會因閒置冷掉（使用者 2026-10-24），
+//! 不帶 TTL（`last_api_at` 照帶、不畫倒數、不保溫）；grok 未知不帶。
 //! 兩個欄位都掛在 run JSON（`/api/state` 的 `bot.run` 與 `bot_status` 事件的 `run`）；daemon 重啟後記憶體帳歸零，
 //! 退回回合時間。
 
@@ -19,12 +20,22 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
-/// 這種 kind 的 prompt cache 存活秒數；`None`＝不知道，網頁不畫倒數。
+/// 這種 kind 的 prompt cache 存活秒數；`None`＝沒有閒置到期（codex）或不知道，網頁不畫倒數、也不保溫。
 pub fn ttl_secs(kind: &str) -> Option<i64> {
     match kind {
-        "claude" | "codex" => Some(3600),
+        "claude" => Some(3600),
         _ => None,
     }
+}
+
+/// codex 的 prompt cache 不會因閒置冷掉（使用者 2026-10-24）：派工挑 child 時視同一直是熱的。
+pub fn never_cools(kind: &str) -> bool {
+    kind == "codex"
+}
+
+/// 有「最後一次 API 活動」可推的 kind（`last_api_at`）。
+fn tracks_activity(kind: &str) -> bool {
+    ttl_secs(kind).is_some() || never_cools(kind)
 }
 
 /// 最近一筆真的送出去的回合（不含 queued）。
@@ -98,7 +109,9 @@ pub fn derive(
     statusline: Option<&str>,
     now: &str,
 ) -> Option<String> {
-    ttl_secs(kind)?;
+    if !tracks_activity(kind) {
+        return None;
+    }
     if agent_status == Some("working") || last_turn.is_some_and(|t| t.status == "in_flight") {
         return Some(now.to_string());
     }
@@ -201,9 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn ttl_is_an_hour_for_claude_and_codex_and_unknown_for_grok() {
+    fn ttl_is_an_hour_for_claude_and_none_for_codex_and_grok() {
         assert_eq!(ttl_secs("claude"), Some(3600));
-        assert_eq!(ttl_secs("codex"), Some(3600));
+        assert_eq!(ttl_secs("codex"), None, "codex 的 cache 不會因閒置冷掉");
+        assert!(never_cools("codex") && !never_cools("claude") && !never_cools("grok"));
         assert_eq!(ttl_secs("grok"), None);
         assert_eq!(ttl_secs("agy"), None, "agy 的 TUI 路徑沒有 cache 讀數（設計 #19），網頁不畫倒數");
     }

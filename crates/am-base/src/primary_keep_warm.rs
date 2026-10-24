@@ -12,7 +12,7 @@
 //!   [`KEEP_WARM_TEXT`]，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。保溫錯過 TTL 就不補送。
 //! * 年齡 ≥ [`WARM_COMPACT_AFTER_SECS`]、cache 最近一次變熱未滿 TTL 並保留 2 分鐘餘裕、這個錨點之後還沒壓縮過：透過
 //!   `TurnControl` 呼叫 `/compact`，並以 `SystemMessageWriter` 記下聊天室說明。cache 冷了就不壓縮，等真的活動重新計時。
-//! * 對象只有主力（`bots.is_primary`）的 claude／codex，run 在跑、`agent_status == idle`、沒有在飛或排隊的回合。`blocked`（停在問題／
+//! * 對象只有主力（`bots.is_primary`）的 claude（codex 的 cache 不因閒置冷掉，不保溫也不熱壓，使用者 2026-10-24），run 在跑、`agent_status == idle`、沒有在飛或排隊的回合。`blocked`（停在問題／
 //!   權限提示）絕不送——打進去的字會變成回答那個問題。
 //! * **不用保溫**（`keep_warm_skip` 表，使用者按鈕；網頁畫冰凍圖示）：這顆主力「這一輪閒置」不保溫；context 超過熱壓門檻時，在 cache
 //!   到期前 [`FROZEN_COMPACT_LEAD_SECS`] 壓一次（[`decide_frozen`]），省下次回來重寫整段 context。錨點（真的活動）晚於按下的時間就自動恢復，
@@ -36,16 +36,13 @@ pub const KEEP_WARM_AFTER_SECS: i64 = 58 * 60;
 /// 年齡到這麼久才考慮壓縮；仍須確認 cache 熱度足夠。
 pub const WARM_COMPACT_AFTER_SECS: i64 = 110 * 60;
 /// 熱壓只在 context 用量**超過**這個百分比時才做（使用者 2026-10-05）：用量小的 context 重新建 cache 很便宜，不值得壓縮；
-/// ≤ 這個值（或讀不到用量）到 110 分就什麼都不做，讓它涼掉。claude 的門檻。
+/// ≤ 這個值（或讀不到用量）到 110 分就什麼都不做，讓它涼掉。只有 claude 有熱壓。
 pub const WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE: f64 = 30.0;
-/// codex 的門檻（使用者同意）：視窗 258K、涼掉後重讀沒有寫入加價，損益點約 35%，所以比 claude 高。
-pub const WARM_COMPACT_MIN_CONTEXT_PCT_CODEX: f64 = 50.0;
 
-/// 這個 kind 熱壓要超過的 context 用量百分比；沒有熱壓的 kind 回 `None`。
+/// 這個 kind 熱壓要超過的 context 用量百分比；沒有熱壓的 kind（codex 不會涼掉、grok／agy 沒有 TTL）回 `None`。
 pub fn warm_compact_min_context_pct(kind: &str) -> Option<f64> {
     match kind {
         "claude" => Some(WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE),
-        "codex" => Some(WARM_COMPACT_MIN_CONTEXT_PCT_CODEX),
         _ => None,
     }
 }
@@ -311,7 +308,7 @@ pub fn decide_frozen(cache_age_secs: i64, ttl_secs: i64, compacted_since_anchor:
 
 /// 純規則：這顆 run 現在能不能被碰。`blocked`／`working`／`unknown` 一律不送。
 pub fn eligible(kind: &str, is_primary: bool, run_state: &str, agent_status: &str, in_flight: bool, queued: bool) -> bool {
-    is_primary && matches!(kind, "claude" | "codex") && run_state == "running" && agent_status == "idle" && !in_flight && !queued
+    is_primary && kind == "claude" && run_state == "running" && agent_status == "idle" && !in_flight && !queued
 }
 
 /// 保溫回合的 `client_request_id`：同一個錨點只有一個。
@@ -418,7 +415,7 @@ pub async fn note_prompt(app: &(impl crate::capabilities::Db + crate::capabiliti
 }
 
 /// `POST /api/bots/{id}/keep-warm/skip`（使用者專用）body `{"skip": bool}` → `{"keep_warm_skip": bool}`。
-/// 只有主力的 claude／codex 有保溫；其他回 400 `not_primary`。
+/// 只有主力的 claude 有保溫；其他回 400 `not_primary`。
 pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, skip: bool) -> Result<bool, crate::lc_error::LcError> {
     use crate::lc_error::LcError;
     let db = DbContext::new(app.db().clone());
@@ -430,7 +427,7 @@ pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilitie
     if bot.is_primary == 0 || cache_clock::ttl_secs(&bot.kind).is_none() {
         return Err(LcError::BadValue(serde_json::json!({
             "error": "not_primary",
-            "message": "keep-warm only applies to a primary claude or codex bot",
+            "message": "keep-warm only applies to a primary claude bot",
         })));
     }
     if set_skip(db.pool(), bot_id, skip).await.map_err(|e| LcError::Upstream(e.to_string()))? {

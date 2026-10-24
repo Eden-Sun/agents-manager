@@ -383,7 +383,7 @@ export interface Run {
   agent_status_since: string | null
   /** 最後一次 API 活動（回合收尾、statusLine 用量變了、停在提示上；回合進行中＝現在），推算 prompt cache 還熱不熱；`null`＝沒紀錄。SPEC §6.5j。 */
   last_api_at?: string | null
-  /** 這種 kind 的 prompt cache 存活秒數（claude／codex 3600）；`null`＝不知道（grok），不畫倒數。 */
+  /** 這種 kind 的 prompt cache 存活秒數（claude 3600）；`null`＝不會因閒置冷掉（codex）或不知道（grok），不畫倒數。 */
   cache_ttl_secs?: number | null
   /** 主力的「保溫」／「熱壓」讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
   cache_kept_warm_at?: string | null
