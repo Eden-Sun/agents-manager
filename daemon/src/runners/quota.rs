@@ -331,9 +331,45 @@ pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
     match quota_from_codex(&r) {
         Some(q) => {
             set_fenced(app, host, "codex", q, &fence).await?;
+            refresh_codex_identities(app, host, &fence).await;
             Ok(true)
         }
         None => anyhow::bail!("unexpected rateLimits shape: {r}"),
+    }
+}
+
+/// 有自己 `CODEX_HOME` 的 codex 身份（例：`co1`）各問一次自己的 app-server，寫進 `codex:<身份>`。以前只問預設帳號，
+/// 這類身份要等有 bot 在跑、讀到狀態列才有額度（使用者 2026-10-24：新增 co1 後額度那邊讀不到）。
+/// 沒有 `CODEX_HOME` 的身份（`co0`）與預設帳號同一份，不另問。單一身份失敗只記 warn，不影響其他身份與預設帳號。
+async fn refresh_codex_identities(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) {
+    for idn in crate::tools::identities_for_host_ref(&**app, host).await {
+        if idn.kind != "codex" || identity_shares_default("codex", &idn.env) {
+            continue;
+        }
+        let home = match crate::models::identity_home_dir(app, host, Some(&idn.name), "codex", "CODEX_HOME").await {
+            Ok(Some(home)) => home,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(host, identity = %idn.name, error = %e, "codex identity quota: CODEX_HOME not resolved");
+                continue;
+            }
+        };
+        let r = match crate::runners::models::codex_rpc_in(app, host, Some(&home), "account/rateLimits/read", json!({})).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(host, identity = %idn.name, error = %e, "codex identity quota refresh failed");
+                continue;
+            }
+        };
+        let Some(q) = quota_from_codex(&r) else {
+            tracing::warn!(host, identity = %idn.name, "codex identity quota: unexpected rateLimits shape");
+            continue;
+        };
+        let base = quota_base_for_host(&**app, host, "codex", Some(&idn.name)).await;
+        if let Err(e) = set_fenced(app, host, &base, q, fence).await {
+            tracing::warn!(host, identity = %idn.name, error = %e, "codex identity quota: dropped");
+            return;
+        }
     }
 }
 

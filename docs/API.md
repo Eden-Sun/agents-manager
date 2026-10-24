@@ -2211,7 +2211,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
   `account` 省略＝預設帳號，共用預設帳號的身份（cc0、只帶 `ANTHROPIC_API_KEY` 的）都探裸 `claude` 那一格；`host` 省略＝本機。要先等那台的 `probe_lock`（背景輪詢正在一個一個探身份時得排隊），再加上探測本身最久 40 秒。
   成功 `200 {"key":"claude","quota":{…同上一格的形狀…}}`；沒這台主機 `404 {"what":"host"}`、沒這個 claude 身份 `404 {"what":"identity"}`、那台沒裝 claude `409 {"reason":"claude_not_installed"}`、探測失敗或沒讀到額度列 502。
 - `source`：
-  - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）。
+  - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）；有自己 `CODEX_HOME` 的 codex 身份各問一次，寫 `codex:<身份>`。
   - `codex-statusline`：同一輪讀每個 running codex pane 底下 `… · 5h 90% left · weekly 48% left`，寫同一把 key（畫面比 app-server 目前這個窗還舊就不採用，同一個窗只增不減，見 SPEC §14.2）；只有剩餘 %，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
   - `statusline`：claude bot 對話中，daemon 注入的 `statusLine` 把 `rate_limits.five_hour/seven_day` POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`，不建 Turn）。多個 session 共用帳號時以 5h 窗判斷誰比較新，舊快照整筆丟掉（SPEC §14.2）。
   - `claude-usage`：背景 pane 探測 `claude auth status --json` + `claude -p "/usage"`（SPEC §14.2），純文字一行一個桶，依序對應 `five_hour` / `seven_day` / `fable`
