@@ -6,12 +6,17 @@
 
 use std::path::PathBuf;
 
+/// 測試建置（`cfg(test)`，或 am-lifecycle 等 dev-dependency 開的 `test-hooks`）。這個 cfg 只在測試建置成立，release 不會帶到。
+pub const TEST_BUILD: bool = cfg!(any(test, feature = "test-hooks"));
+
 pub fn dir() -> Option<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     {
-        Some(std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id())))
+        // HOME 已經被 daemon 的 `test_home` 切到暫存目錄就沿用它；否則（am-lifecycle 的測試行程 HOME 仍是真的）用暫存的假目錄，絕不回真的 HOME。
+        let home = dirs::home_dir().filter(|h| h.starts_with(std::env::temp_dir()));
+        Some(home.unwrap_or_else(|| std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id()))))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     {
         // As a daemon test dependency, `test_home` has already redirected HOME before test threads start.
         dirs::home_dir()

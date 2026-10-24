@@ -53,7 +53,17 @@ fn dispatcher_text(app: &(impl crate::capabilities::DataDir + crate::capabilitie
 /// bot 啟動（本機）：裝／修 dispatcher 與兩個設定檔。回「有沒有改到東西」。
 pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance)) -> anyhow::Result<bool> {
     let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home dir; cannot install the agy hooks"))?;
+    refuse_real_home(&home)?;
     install_at(app, &home)
+}
+
+/// 測試建置只准寫暫存目錄（比照 `daemon/src/testing.rs` 的 `scratch_leak_guard`）：所有 agy bot 共用的真的 `~/.gemini` 不能被測試蓋寫。
+/// 正式建置（`TEST_BUILD` 為假）不擋。
+pub(super) fn refuse_real_home(home: &Path) -> anyhow::Result<()> {
+    if crate::home::TEST_BUILD && !home.starts_with(std::env::temp_dir()) {
+        anyhow::bail!("test build refuses to write the real home {}", home.display());
+    }
+    Ok(())
 }
 
 pub fn install_at(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance), home: &Path) -> anyhow::Result<bool> {
