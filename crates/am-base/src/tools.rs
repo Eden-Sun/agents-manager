@@ -971,7 +971,7 @@ pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &cr
         anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
     }
     // 一趟探測帶著 #719 的一致性檢查（只讀），不多一次 ssh。
-    let script = format!("{PROBE_SH}\n{}", crate::host_baseline::BASELINE_SH);
+    let script = format!("{PROBE_SH}\n{}", crate::host_baseline::baseline_sh());
     let probed = if host == LOCAL_HOST { run_local(&script, PROBE_TIMEOUT).await } else { fence.conn().ssh_exec_path(&script).await };
     let out = match probed {
         Ok(out) => out,

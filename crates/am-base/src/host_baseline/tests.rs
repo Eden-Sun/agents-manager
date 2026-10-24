@@ -185,7 +185,7 @@ fn run_probe(home: &std::path::Path, path: &str) -> String {
 
 fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::OsStr)]) -> String {
     // `am_abs` 是 PROBE_SH 的函式；BASELINE_SH 不依賴它（自己一次問完六個工具），這裡仍給一個替身，確保沒偷用。
-    let script = format!("am_abs() {{ echo am_abs-called >&2; return 1; }}\n{BASELINE_SH}");
+    let script = format!("am_abs() {{ echo am_abs-called >&2; return 1; }}\n{}", baseline_sh());
     let out = Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
@@ -594,7 +594,9 @@ async fn a_handled_baseline_alert_keeps_its_permanent_dedupe_key_after_retention
 
 #[test]
 fn mac_only_plugins_match_the_script() {
-    assert!(BASELINE_SH.contains(&format!("MAC_ONLY_PLUGINS=\"{}\"", MAC_ONLY_PLUGINS.join(" "))));
+    let m = manifest::shipped().unwrap();
+    let quoted = m.mac_only_plugins.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(" ");
+    assert!(baseline_sh().contains(&format!("for pl in {quoted}; do")));
 }
 
 // ───────── 過期標記：偵測失敗或太久沒量，不能讓舊結果看起來像現在的 ─────────

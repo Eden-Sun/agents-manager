@@ -1,11 +1,12 @@
 //! 主機 CLI 工作環境一致性檢查（issue #719，SPEC §16.7）：**只讀、只報告，不修、不裝、不寫任何檔**。
 //!
-//! 跟 [`crate::tools::PROBE_SH`] 同一趟探測（同一次 ssh）：[`BASELINE_SH`] 接在它後面，印 `AM_BL …` 行；
-//! [`evaluate`] 把這些行對照 [`REQUIRED_TOOLS`] 等基準，產生 `hosts[].baseline`。
+//! 跟 [`crate::tools::PROBE_SH`] 同一趟探測（同一次 ssh）：[`baseline_sh`] 接在它後面，印 `AM_BL …` 行；
+//! [`evaluate`] 把這些行對照基準宣告檔 `ops/host-baseline/baseline.toml`（[`manifest`]），產生 `hosts[].baseline`。
 //! 探測沒跑完（沒有結尾標記）就是 `None`（未知），不是「全部缺」——否則一次 ssh 逾時就會在每台主機上喊一排缺漏。
 
 use serde::Serialize;
 
+pub mod manifest;
 
 /// 基準檢查（偵測結果的一部分）需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、最近一次結果快取、本機 herdr 連線狀態、
 /// 把差異推進 AGM inbox。
@@ -21,16 +22,6 @@ pub trait BaselineEnv: crate::hosts::HostsAccess + 'static {
 /// 缺了就不能好好用的：嚴重項。其餘是提醒。
 pub const CRITICAL: &str = "critical";
 pub const WARN: &str = "warn";
-
-/// 每台主機都該有的工具（claude／codex／grok 是各主機自己決定要不要裝，由 `tools` 回報，不在這裡）。
-pub const REQUIRED_TOOLS: [&str; 6] = ["herdr", "rtk", "zsh", "bun", "jq", "gh"];
-
-/// 每個 claude 身份的設定目錄裡該有的檔案：`(檔名, 嚴重度)`。
-const CLAUDE_FILES: [(&str, &str); 4] =
-    [("settings.json", CRITICAL), ("statusline-command.sh", CRITICAL), ("CLAUDE.md", WARN), ("RTK.md", WARN)];
-/// `settings.json` 該有的鍵（只看有沒有，不比內容：內容是各主機自己的）。
-const CLAUDE_KEYS: [(&str, &str); 4] =
-    [("statusLine", CRITICAL), ("hooks", CRITICAL), ("permissions", WARN), ("defaultMode", WARN)];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BaselineIssue {
@@ -83,22 +74,61 @@ pub async fn note_failure(app: &impl BaselineEnv, host: &str, err: &anyhow::Erro
     report.error = Some(first_line);
 }
 
-/// Mac 專用的 claude plugin（使用者 2026-09-28：imessage／discord）：只在 Darwin 主機上才算「該有」，Linux 不列為缺。
-/// 腳本裡的 `MAC_ONLY_PLUGINS` 與這裡同步（`mac_only_plugins_match_the_script` 測試守著）。
-pub const MAC_ONLY_PLUGINS: [&str; 2] = ["imessage", "discord"];
+/// 只讀的探測腳本。接在 `PROBE_SH` 後面（不依賴它的函式）。身份＝`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`。
+/// 清單由宣告檔代入（[`render_baseline_sh`]）；宣告檔壞掉（只會是沒跑過 `cargo test` 的 build）就回空字串：
+/// 探測沒有 `AM_BL end`，[`evaluate`] 回 `None`（未知），不會變成空清單、悄悄跳過檢查，也不 panic。
+pub fn baseline_sh() -> &'static str {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| match manifest::shipped() {
+        Ok(m) => render_baseline_sh(m),
+        Err(e) => {
+            tracing::error!(error = %e, "host baseline manifest is invalid; baseline reported as unknown");
+            String::new()
+        }
+    })
+}
 
-/// 只讀。接在 `PROBE_SH` 後面（用它定義的 `am_abs`）。身份＝`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`。
-pub const BASELINE_SH: &str = r#"
+/// 單引號包起來的清單（值已過 [`manifest`] 的白名單，這裡再整個 quote 一次）。
+fn sh_words(items: impl IntoIterator<Item = String>) -> String {
+    items.into_iter().map(|w| crate::hosts::sh_quote(&w)).collect::<Vec<_>>().join(" ")
+}
+
+/// 用宣告檔填 [`BASELINE_SH_TEMPLATE`] 的佔位字。
+pub fn render_baseline_sh(m: &manifest::Manifest) -> String {
+    let names = |v: &[manifest::Item]| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+    // 工具清單另有一份放在 `$SHELL -lic '…'` 的單引號裡：先 quote 成內層 shell 的字，再把 `'` 寫成 `'\''` 嵌進外層單引號。
+    let tools_inner = sh_words(names(&m.tools)).replace('\'', "'\\''");
+    BASELINE_SH_TEMPLATE
+        .replace("__AM_TOOLS_INNER__", &tools_inner)
+        .replace("__AM_TOOLS__", &sh_words(names(&m.tools)))
+        .replace("__AM_CLAUDE_FILES__", &sh_words(names(&m.claude_files)))
+        .replace("__AM_CLAUDE_KEYS__", &sh_words(m.claude_keys.iter().map(|k| format!("{}={}", k.name, k.key))))
+        .replace("__AM_MAC_ONLY_PLUGINS__", &sh_words(m.mac_only_plugins.iter().cloned()))
+        .replace("__AM_CODEX_FILES__", &sh_words(names(&m.codex_files)))
+        .replace(
+            "__AM_CODEX_KEYS__",
+            &sh_words(m.codex_keys.iter().map(|k| {
+                let check = match k.check {
+                    manifest::CodexCheck::Present => "present",
+                    manifest::CodexCheck::True => "true",
+                };
+                format!("{check}:{}", k.key)
+            })),
+        )
+        .replace("__AM_GROK_FILES__", &sh_words(names(&m.grok_files)))
+        .replace("__AM_HERDR_FILES__", &sh_words(names(&m.herdr_files)))
+}
+
+const BASELINE_SH_TEMPLATE: &str = r#"
 printf 'AM_BL begin\n'
-MAC_ONLY_PLUGINS="imessage discord"
 printf 'AM_BL os %s\n' "$(uname -s 2>/dev/null)"
-# 六個工具一次問完：每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒），PROBE_SH 自己已經開了好幾次，
-# 再各開六次會把整趟探測推過 ssh 的 30 秒上限，連原本的 tools 偵測都跟著失敗。只認絕對路徑（alias 的字串不算，#666）。
+# 工具一次問完：每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒），PROBE_SH 自己已經開了好幾次，
+# 再各開一次會把整趟探測推過 ssh 的 30 秒上限，連原本的 tools 偵測都跟著失敗。只認絕對路徑（alias 的字串不算，#666）。
 # HISTFILE=/dev/null：macOS /bin/sh 是 bash 3.2，-i 會把 history 寫進 $HOME。這支腳本必須只讀。
-bl_paths=$( HISTFILE=/dev/null "${SHELL:-/bin/sh}" -lic 'for t in herdr rtk zsh bun jq gh; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
+bl_paths=$( HISTFILE=/dev/null "${SHELL:-/bin/sh}" -lic 'for t in __AM_TOOLS_INNER__; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
 bl_jq_path=$(printf '%s\n' "$bl_paths" | sed -n 's/^AM_BLP jq //p' | tail -1)
 case "$bl_jq_path" in /*) [ -x "$bl_jq_path" ] || bl_jq_path="" ;; *) bl_jq_path=$(command -v jq 2>/dev/null || true) ;; esac
-for t in herdr rtk zsh bun jq gh; do
+for t in __AM_TOOLS__; do
   p=$(printf '%s\n' "$bl_paths" | sed -n "s/^AM_BLP $t //p" | tail -1)
   case "$p" in /*) ;; *) p="" ;; esac
   [ -n "$p" ] || p=$(command -v "$t" 2>/dev/null)
@@ -107,21 +137,22 @@ for t in herdr rtk zsh bun jq gh; do
 done
 bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
 bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
+# 點號路徑（`permissions.defaultMode`）的每一段都要是物件裡的鍵。
 bl_key() {
   [ -f "$1" ] || { printf 0; return; }
   [ -n "$bl_jq_path" ] && [ -x "$bl_jq_path" ] || { printf '?'; return; }
   # jq 退出碼：0＝有、1＝沒有，其他（5＝不是合法 JSON）＝x。讀不懂不能算成沒有那個鍵。
-  if [ "$2" = defaultMode ]; then
-    "$bl_jq_path" -e 'type == "object" and (.permissions | type == "object" and has("defaultMode"))' "$1" >/dev/null 2>&1
-  else
-    "$bl_jq_path" -e --arg key "$2" 'type == "object" and has($key)' "$1" >/dev/null 2>&1
-  fi
+  "$bl_jq_path" -e --arg p "$2" 'def bl_h($ks): if ($ks | length) == 0 then true elif type == "object" and has($ks[0]) then (.[$ks[0]] | bl_h($ks[1:])) else false end; bl_h($p | split("."))' "$1" >/dev/null 2>&1
   case $? in 0) printf 1 ;; 1) printf 0 ;; *) printf x ;; esac
 }
-# `features.hooks = true`，或 `[features]` 表裡的 `hooks = true`。false／沒寫＝0。不開 login shell。
-bl_features_hooks() {
+# TOML 裡有 `<鍵> =`（任何值、任何表）。不開 login shell。
+bl_toml_has() {
+  [ -f "$1" ] && grep -Eq "^[[:space:]]*$2[[:space:]]*=" "$1" 2>/dev/null && printf 1 || printf 0
+}
+# `<表>.<鍵> = true`，或 `[<表>]` 表裡的 `<鍵> = true`。false／沒寫＝0。不開 login shell。
+bl_toml_true() {
   [ -f "$1" ] || { printf 0; return; }
-  /usr/bin/awk '
+  /usr/bin/awk -v t="$2" -v k="$3" '
     BEGIN { root = 1 }
     {
       line = $0
@@ -129,13 +160,13 @@ bl_features_hooks() {
       sub(/^[[:blank:]]*/, "", line)
       if (line == "" || line ~ /^#/) next
       if (line ~ /^\[/) {
-        in_features = (line ~ /^\[features\][[:blank:]]*(#.*)?$/)
+        in_table = (line ~ ("^\\[" t "\\][[:blank:]]*(#.*)?$"))
         root = 0
         next
       }
       sub(/[[:blank:]]+#.*/, "", line)
-      if ((root && line ~ /^features\.hooks[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$/) ||
-          (in_features && line ~ /^hooks[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$/)) found = 1
+      if ((root && line ~ ("^" t "\\." k "[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$")) ||
+          (in_table && line ~ ("^" k "[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$"))) found = 1
     }
     END { exit !found }
   ' "$1" && printf 1 || printf 0
@@ -150,13 +181,13 @@ bl_claude() {
   case "$bl_seen" in *"|$d|"*) return ;; esac
   bl_seen="${bl_seen}${d}|"
   printf 'AM_BL claude-dir %s\n' "$n"
-  for f in settings.json statusline-command.sh CLAUDE.md RTK.md; do
+  for f in __AM_CLAUDE_FILES__; do
     printf 'AM_BL claude-file %s %s %s\n' "$n" "$f" "$(bl_has "$d/$f")"
   done
-  for k in statusLine hooks permissions defaultMode; do
-    printf 'AM_BL claude-key %s %s %s\n' "$n" "$k" "$(bl_key "$d/settings.json" "$k")"
+  for k in __AM_CLAUDE_KEYS__; do
+    printf 'AM_BL claude-key %s %s %s\n' "$n" "${k%%=*}" "$(bl_key "$d/settings.json" "${k#*=}")"
   done
-  for pl in $MAC_ONLY_PLUGINS; do
+  for pl in __AM_MAC_ONLY_PLUGINS__; do
     printf 'AM_BL claude-plugin %s %s %s\n' "$n" "$pl" "$(bl_plugin "$d/settings.json" "$pl")"
   done
 }
@@ -181,16 +212,23 @@ printf '%s\n' "$al" | grep -E '(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=' | wh
   bl_claude "$dir" "$name"
 done
 CX="${CODEX_HOME:-$HOME/.codex}"
-printf 'AM_BL codex-file config.toml %s\n' "$(bl_has "$CX/config.toml")"
-printf 'AM_BL codex-file hooks.json %s\n' "$(bl_has "$CX/hooks.json")"
-if [ -f "$CX/config.toml" ] && grep -Eq '^[[:space:]]*approval_policy[[:space:]]*=' "$CX/config.toml" 2>/dev/null; then
-  printf 'AM_BL codex-key approval_policy 1\n'
-else
-  printf 'AM_BL codex-key approval_policy 0\n'
-fi
-printf 'AM_BL codex-key features.hooks %s\n' "$(bl_features_hooks "$CX/config.toml")"
-printf 'AM_BL grok-file config.toml %s\n' "$(bl_has "${GROK_HOME:-$HOME/.grok}/config.toml")"
-printf 'AM_BL herdr-file config.toml %s\n' "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml")"
+for f in __AM_CODEX_FILES__; do
+  printf 'AM_BL codex-file %s %s\n' "$f" "$(bl_has "$CX/$f")"
+done
+for bl_k in __AM_CODEX_KEYS__; do
+  case "$bl_k" in
+    present:*) bl_v=$(bl_toml_has "$CX/config.toml" "${bl_k#present:}") ;;
+    true:*) bl_n=${bl_k#true:}; bl_v=$(bl_toml_true "$CX/config.toml" "${bl_n%%.*}" "${bl_n#*.}") ;;
+    *) continue ;;
+  esac
+  printf 'AM_BL codex-key %s %s\n' "${bl_k#*:}" "$bl_v"
+done
+for f in __AM_GROK_FILES__; do
+  printf 'AM_BL grok-file %s %s\n' "$f" "$(bl_has "${GROK_HOME:-$HOME/.grok}/$f")"
+done
+for f in __AM_HERDR_FILES__; do
+  printf 'AM_BL herdr-file %s %s\n' "$f" "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/$f")"
+done
 if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://([^/@[:space:]]+:[^/@[:space:]]+|(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]+)@' "$HOME/.gitconfig" 2>/dev/null; then
   printf 'AM_BL gitconfig-token 1\n'
 else
@@ -198,6 +236,7 @@ else
 fi
 printf 'AM_BL end\n'
 "#;
+
 
 /// 探測輸出裡的 `AM_BL os <uname -s>`。
 pub fn os_of(out: &str) -> Option<String> {
@@ -270,8 +309,9 @@ fn issue(id: String, severity: &'static str, message: String) -> BaselineIssue {
     BaselineIssue { id, severity, message }
 }
 
-fn severity_of(table: &[(&str, &'static str)], name: &str) -> &'static str {
-    table.iter().find(|(n, _)| *n == name).map_or(WARN, |(_, s)| s)
+/// 宣告檔裡的嚴重度；探測印出宣告檔沒列的名稱（舊腳本）時當提醒。
+fn severity_of(table: &[manifest::Item], name: &str) -> &'static str {
+    manifest::severity_of(table, name).unwrap_or(WARN)
 }
 
 /// 解 [`BASELINE_SH`] 的輸出，照探測印出的順序列出缺漏。沒有 `AM_BL end`（探測被截斷、沒跑到）＝`None`。
@@ -281,6 +321,8 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
     if !out.lines().any(|l| l.trim_end() == "AM_BL end") {
         return None;
     }
+    // 宣告檔壞掉：不知道基準是什麼，就是未知（不是一致）。
+    let m = manifest::shipped().ok()?;
     let mac = os_of(out).as_deref() == Some("Darwin");
     let mut issues = Vec::new();
     // 目前這個 claude 身份的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
@@ -294,8 +336,10 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
         let present = |v: Option<&&str>| v.copied() == Some("1");
         match f[1] {
             "tool" if f.len() >= 3 => {
-                if f.get(3).map_or(true, |p| p.is_empty()) && REQUIRED_TOOLS.contains(&f[2]) {
-                    issues.push(issue(format!("tool.{}", f[2]), CRITICAL, format!("缺工具 {}（登入 shell 的 PATH 找不到）", f[2])));
+                if f.get(3).map_or(true, |p| p.is_empty()) {
+                    if let Some(sev) = manifest::severity_of(&m.tools, f[2]) {
+                        issues.push(issue(format!("tool.{}", f[2]), sev, format!("缺工具 {}（登入 shell 的 PATH 找不到）", f[2])));
+                    }
                 }
             }
             "claude-file" if f.len() >= 5 => {
@@ -306,7 +350,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 if !present {
                     issues.push(issue(
                         format!("claude.{}.{}", f[2], f[3]),
-                        severity_of(&CLAUDE_FILES, f[3]),
+                        severity_of(&m.claude_files, f[3]),
                         format!("claude 身份 {}：缺 {}", f[2], f[3]),
                     ));
                 }
@@ -322,14 +366,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 } else if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.settings.json:{}", f[2], f[3]),
-                        severity_of(&CLAUDE_KEYS, f[3]),
+                        m.claude_keys.iter().find(|k| k.name == f[3]).map_or(WARN, |k| k.severity),
                         format!("claude 身份 {}：settings.json 沒有 {}", f[2], f[3]),
                     ));
                 }
             }
             "claude-plugin" if f.len() >= 5 => {
                 // Mac 專用：Linux（或不知道是什麼系統）一律不算缺；settings.json 本身不在也不再追問。
-                if mac && claude_settings && MAC_ONLY_PLUGINS.contains(&f[3]) && !present(f.get(4)) {
+                if mac && claude_settings && m.mac_only_plugins.iter().any(|p| p == f[3]) && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.plugin:{}", f[2], f[3]),
                         WARN,
@@ -343,18 +387,23 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     codex_config = present;
                 }
                 if !present {
-                    issues.push(issue(format!("codex.{}", f[2]), WARN, format!("codex：缺 {}", f[2])));
+                    issues.push(issue(format!("codex.{}", f[2]), severity_of(&m.codex_files, f[2]), format!("codex：缺 {}", f[2])));
                 }
             }
             "codex-key" if f.len() >= 4 => {
                 if codex_config && !present(f.get(3)) {
-                    issues.push(issue(format!("codex.config.toml:{}", f[2]), WARN, format!("codex：config.toml 沒有 {}", f[2])));
+                    issues.push(issue(
+                        format!("codex.config.toml:{}", f[2]),
+                        m.codex_keys.iter().find(|k| k.key == f[2]).map_or(WARN, |k| k.severity),
+                        format!("codex：config.toml 沒有 {}", f[2]),
+                    ));
                 }
             }
             "grok-file" | "herdr-file" if f.len() >= 4 => {
                 if !present(f.get(3)) {
                     let who = f[1].trim_end_matches("-file");
-                    issues.push(issue(format!("{who}.{}", f[2]), WARN, format!("{who}：缺 {}", f[2])));
+                    let table = if who == "grok" { &m.grok_files } else { &m.herdr_files };
+                    issues.push(issue(format!("{who}.{}", f[2]), severity_of(table, f[2]), format!("{who}：缺 {}", f[2])));
                 }
             }
             "gitconfig-token" if f.len() >= 3 => {
