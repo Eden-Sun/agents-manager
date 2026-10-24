@@ -30,7 +30,7 @@ mod tests {
 
     const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
-    fn poll_once<F: Future>(fut: &mut Pin<&mut F>) -> Poll<F::Output> {
+    fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         fut.as_mut().poll(&mut cx)
@@ -860,15 +860,19 @@ mod tests {
         use runner::Journal;
         // Save tool pending checkpoint
         adapter.save(&state).await.expect("save tool pending");
+        assert_eq!(adapter.current_revision().await, 1);
 
         // Attempting to reserve while tool_pending is active MUST fail closed
         state.api_pending = true;
         assert!(adapter.save(&state).await.is_err());
+        assert_eq!(adapter.current_revision().await, 1);
 
         // Resolve tool pending
         state.api_pending = false;
         state.tool_pending = None;
         adapter.save(&state).await.expect("settle tool pending");
+        let settled_rev = adapter.current_revision().await;
+        assert_eq!(settled_rev, 2);
 
         // Now setup second turn for rebind
         let now = am_base::db::now();
@@ -887,17 +891,17 @@ mod tests {
 
         let new_identity = AdapterIdentity {
             session_id: session,
-            bot_id,
-            run_id,
+            bot_id: bot.clone(),
+            run_id: run.clone(),
             turn_id: "t2".into(),
-            generation: 2,
+            generation: 2, // generation advances to old + 1
         };
 
         // Rebind constructor for turn 2 succeeds cleanly
         let rebind_res = ApiBotAdapter::rebind(
             pool.clone(),
             &old_identity,
-            1, // old revision after tool pending settled
+            settled_rev, // dynamically retrieved settled revision (2)
             new_identity,
             test_options(),
             serde_json::json!("System"),
@@ -1010,14 +1014,8 @@ mod tests {
                     )
                     .await;
 
-                    let typed_outcome = match outcome {
-                        Ok(Halt::EndTurn) => Ok(TurnOutcome::Completed),
-                        Err(runner::Error::Cancelled) => Ok(TurnOutcome::Cancelled),
-                        Err(e) => Ok(TurnOutcome::Failed(format!("{:?}", e))),
-                        _ => Ok(TurnOutcome::Completed),
-                    };
-
-                    let _ = tx_result.send(typed_outcome);
+                    // Send the concrete runner::Result to coordinator BEFORE exiting
+                    let _ = tx_result.send(outcome);
                     release_gate_child.notified().await;
                     Ok(TurnOutcome::Completed)
                 })
@@ -1039,23 +1037,35 @@ mod tests {
 
                 // 2. Poll cancel_and_join to Pending to guarantee cancel token is fired
                 let mut join_fut = Box::pin(registry.cancel_and_join(&run));
-                assert!(poll_once(&mut join_fut).is_pending());
+                assert!(poll_once(join_fut.as_mut()).is_pending());
 
                 // 3. Unpause server so HTTP completes, but adapter discovers owner is stopping
                 unpause_notify.notify_one();
 
-                // 4. Await runner result proof
-                let runner_outcome = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
+                // 4. Await runner result proof: must match Cancelled or Journal error
+                let runner_res = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
                     .await
                     .expect("rx_result within timeout")
                     .expect("channel valid");
-                assert!(runner_outcome.is_err() || runner_outcome == Ok(TurnOutcome::Cancelled));
+
+                assert!(
+                    matches!(
+                        runner_res,
+                        Err(runner::Error::Cancelled)
+                            | Err(runner::Error::Model(super::http::Error::Cancelled))
+                            | Err(runner::Error::Journal)
+                    ),
+                    "runner must fail due to cancellation or journal owner CAS failure, got {:?}",
+                    runner_res
+                );
 
                 // 5. Release task and await join completion
                 release_gate.notify_one();
-                let _ = tokio::time::timeout(DEADLOCK_TIMEOUT, join_fut)
+                let join_outcome = tokio::time::timeout(DEADLOCK_TIMEOUT, join_fut)
                     .await
-                    .expect("join within timeout");
+                    .expect("join within timeout")
+                    .expect("join outcome valid");
+                assert_eq!(join_outcome, TurnOutcome::Completed);
                 assert!(!registry.is_active(&run));
 
                 // 6. Call recover_unknown and verify DB
@@ -1079,16 +1089,16 @@ mod tests {
                 // 1. Unpause server immediately to let HTTP complete and record commit
                 unpause_notify.notify_one();
 
-                // 2. Await runner result proof: must be EndTurn/Completed and already recorded in DB
-                let runner_outcome = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
+                // 2. Await runner result proof: must be EndTurn and recorded in DB
+                let runner_res = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
                     .await
                     .expect("rx_result within timeout")
                     .expect("channel valid");
-                assert_eq!(runner_outcome, Ok(TurnOutcome::Completed));
+                assert_eq!(runner_res, Ok(Halt::EndTurn));
 
                 // 3. Poll cancel_and_join to Pending to ensure subscription
                 let mut join_fut = Box::pin(registry.cancel_and_join(&run));
-                assert!(poll_once(&mut join_fut).is_pending());
+                assert!(poll_once(join_fut.as_mut()).is_pending());
 
                 // 4. Release task to allow it to exit cleanly
                 release_gate.notify_one();
