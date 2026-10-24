@@ -2505,6 +2505,20 @@ mod supervisor_cfg_tests {
     }
 
     #[test]
+    fn legacy_changelog_timeout_survives_a_save_of_other_fields() {
+        // #1942：舊的 [changelog_translate] timeout_ms 已廢棄、不生效，但存檔時不能被悄悄刪掉。
+        let old = "# mine\n[changelog_translate]\nenabled = true\ntimeout_ms = 8000\n";
+        let (mut cfg, _) = parse_config(old).unwrap();
+        assert_eq!(cfg.changelog_translate.timeout_ms, Some(8000));
+        cfg.changelog_translate.max_per_hour = 7;
+        let out = render_preserving(old, &cfg).unwrap();
+        assert!(out.contains("timeout_ms = 8000"), "{out}");
+        assert!(out.contains("max_per_hour = 7"), "{out}");
+        assert!(out.contains("# mine"), "{out}");
+        assert_eq!(parse_config(&out).unwrap().0, cfg);
+    }
+
+    #[test]
     fn changelog_translate_is_off_unless_the_config_turns_it_on() {
         let none: ConfigFile = toml::from_str("").unwrap();
         assert!(!none.changelog_translate.enabled);
