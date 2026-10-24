@@ -2079,6 +2079,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴。herdr 名稱上限 32 字。放得下就用 `<parent>-<suffix>`；放不下就把母名前綴截到 25 字再接字尾的 6 位數字雜湊（#665），**不會**截成母 bot 自己的名字，不同字尾也不會變成同一個前綴。算不出尾碼或結果仍是母名就 exit 75、不呼叫 herdr。頂層 `agent_name` 上限 24 字，留 8 字給 `-` 與子 agent 字尾。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
 - `herdr agent rename <目標> <新名字>`：名稱只作顯示，不再依 `$AM_AGENT_NAME-` 前綴拒絕改名或推斷 parent；歸屬由 scoped spawn claim 的 bot ID 決定。
+- **子 pane 的 `$AM_AGENT_NAME` 是它自己的全名（#1952）**：`agent start <name>` 開出來的 child pane，shim 在 send-text 補 env 時把 `AM_AGENT_NAME` 換成 `am_child_name` 算出、herdr 登錄的那個名字（母 bot 的名字不再帶過去）；`AM_CHILD_OF` 照舊是母 bot 的 ID。名字只准 `[A-Za-z0-9._-]`，含其他字元就 exit 2、不呼叫 herdr、不送任何 env。頂層 bot 的 pane env 不變（`pane_env_for_fence` 照舊注入母 bot 自己的名字）；沒有帶名字的 `agent start` 也照母 pane 的值。影響：cargo 鎖的持有者標籤（`cargo_shim` 的 `AM_AGENT_NAME:$$`）與 `agm issue claim` 的預設認領人（取 `AM_AGENT_NAME`）會變成子 agent 的名字；**只對新開的子 agent 生效**，已經在跑的 child 不追溯、要重開才會換。遠端 host 走同一份 shim，行為一致。子 agent 的指示檔（`child_instructions`）最後一段改成靜態文字，只說 `$AM_AGENT_NAME` 是 herdr 登錄的全名、不寫母 bot 的名字。
 - `AM_CHILD_OF` 的新值是 parent **bot ID**，非空就禁止再開子 agent（舊 pane 的標記也有效）。`AM_RUN_ID` 可隨 claim 傳送作為稽核紀錄，不限制 child 歸屬的存續。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
