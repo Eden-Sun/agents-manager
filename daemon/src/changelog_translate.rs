@@ -471,15 +471,20 @@ fn run_attempt(
     Box::pin(async move {
         let client = app.changelog_translate.client();
         // 帳本的分類要跟 finish 用同一套內容驗證（#1945），送出的版本清單從 reserve 時寫進的 job 讀。
-        let included = load(&job_path(&app.data_dir, &fp))
-            .map(|job| job.included_versions)
-            .unwrap_or_default();
+        // 讀不到 job 就不做內容驗證（只看 stop_reason／usage）：拿空清單去驗，會把正確的回覆誤記成錯誤。
+        let included = match load(&job_path(&app.data_dir, &fp)) {
+            Ok(job) => Some(job.included_versions),
+            Err(e) => {
+                tracing::warn!(fingerprint = %fp, error = ?e, "changelog translation job unreadable; ledger classifies this reply without the content check");
+                None
+            }
+        };
         let result = crate::claude_api::complete_recorded(
             &app.claude_api,
             client.as_ref(),
             &request,
             "changelog_translate",
-            |o| send_error_kind(o, &included),
+            |o| send_error_kind(o, included.as_deref()),
         )
         .await;
         let _gate = app.changelog_translate.gate.lock().await;
@@ -790,9 +795,11 @@ fn attempts_block(job: &Job, limits: &Limits) -> Option<Overlay> {
 
 /// 帳本的分類跟翻譯自己的判斷一致：沒到 `end_turn`（max_tokens、refusal…）或缺 usage，都記成錯誤。
 /// 帳本的錯誤分類：與 `fill_attempt` 同一組判斷（stop_reason、usage、內容驗證），任一不過就記成失敗（#1945）。
-fn send_error_kind(o: &ClientOutcome, included: &[String]) -> Option<&'static str> {
+/// `included` 是 `None`（讀不到 job）時不做內容驗證，退回只看 stop_reason 與 usage。
+fn send_error_kind(o: &ClientOutcome, included: Option<&[String]>) -> Option<&'static str> {
     let usage_ok = o.usage.as_ref().is_some_and(|u| u.input_tokens.is_some() && u.output_tokens.is_some());
-    let reply_ok = o.stop_reason.as_deref() == Some("end_turn") && usage_ok && validate_model(&o.text, included).is_ok();
+    let content_ok = included.is_none_or(|v| validate_model(&o.text, v).is_ok());
+    let reply_ok = o.stop_reason.as_deref() == Some("end_turn") && usage_ok && content_ok;
     (!reply_ok).then_some("bad_response")
 }
 
@@ -2544,6 +2551,22 @@ mod tests {
         assert_eq!(rows[0]["error_kind"], "bad_response");
         assert_eq!(rows[1]["error_kind"], "bad_response");
         assert_eq!(rows[1]["input_tokens"], sample_usage().input_tokens.unwrap());
+    }
+
+    /// #1945：讀不到 job（`included` 是 `None`）時不做內容驗證，只看 stop_reason 與 usage；
+    /// 拿空清單去驗會把正確的回覆誤記成錯誤，所以缺 job 不能退成空清單。
+    #[test]
+    fn a_missing_job_falls_back_to_stop_reason_and_usage() {
+        let ok = ClientOutcome {
+            text: r#"{"summary":["一","二","三"],"sections":[{"version":"2.1.5","body":"x"}]}"#.into(),
+            model: None,
+            stop_reason: Some("end_turn".into()),
+            usage: Some(sample_usage()),
+        };
+        assert_eq!(send_error_kind(&ok, None), None, "沒有 job：不做內容驗證");
+        assert_eq!(send_error_kind(&ok, Some(&[])), Some("bad_response"), "空清單去驗會誤判");
+        let cut = ClientOutcome { stop_reason: Some("max_tokens".into()), ..ok };
+        assert_eq!(send_error_kind(&cut, None), Some("bad_response"), "沒有 job 也照樣看 stop_reason");
     }
 
     /// #1945：stop_reason 與 usage 都正常、但內容驗證失敗（摘要點數不對、版本對不上）時，更新框是失敗，帳本也要記成失敗。
