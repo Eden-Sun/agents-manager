@@ -13149,6 +13149,13 @@ mod per_principal_auth_tests {
         assert!(response.contains("model_cache_miss"), "the response should explain that the daemon is refreshing: {response}");
         assert!(response.contains("\"refresh\"") && !response.contains("\"state\":\"none\""), "a miss must schedule a background refresh: {response}");
         assert!(e.app.models_cache.lock().await.is_empty(), "the request path must not populate the cache");
+        // The background refresh uses the stubbed tool path (a file that does not exist), so it fails at once
+        // instead of starting a real codex, and leaves nothing in the cache.
+        let failed = crate::testing::eventually!(
+            crate::runners::models_refresh::on_cache_miss(&e.app, LOCAL_HOST, "codex", None).await["state"] == "failed"
+        );
+        assert!(failed, "the background refresh must fail fast against the missing stub binary");
+        assert!(e.app.models_cache.lock().await.is_empty(), "a failed background refresh must not populate the cache");
 
         let cached = json!({"kind":"codex","host":"local","source":"codex-app-server","models":[{"id":"cached-model"}]});
         e.app.models_cache.lock().await.insert(
