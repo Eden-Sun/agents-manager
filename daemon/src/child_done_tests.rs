@@ -550,7 +550,7 @@
     #[test]
     fn long_reply_within_notice_limit_is_fully_forwarded() {
         let reply = "x".repeat(1200);
-        let m = message_for_child("bot-123", "kid", &reply);
+        let m = message_for_child("bot-123", "kid", &reply, MAX_NOTICE_REPLY_CHARS);
         assert!(m.contains(&reply));
         assert!(!m.contains("已截斷"));
         assert_eq!(quoted_reply(&m), Some(reply.as_str()));
@@ -562,7 +562,7 @@
         let head = "a".repeat(1600);
         let tail = "b".repeat(400);
         let reply = format!("{head}{tail}");
-        let m = message_for_child("child-bot-456", "my-kid", &reply);
+        let m = message_for_child("child-bot-456", "my-kid", &reply, MAX_NOTICE_REPLY_CHARS);
         assert!(m.contains(&format!("{head}…")));
         assert!(!m.contains(&tail));
         assert!(m.contains("（daemon 附註）已截斷，原文共 2000 字"));
@@ -782,4 +782,103 @@
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(crid_count(&f, &format!("{base}:r4")).await, 0);
         assert_eq!(all_child_notice_count(&f).await, 4);
+    }
+
+    // ---- #1984：codex parent 的通知短上限、composer_unreadable 記成一次失敗 attempt ----
+
+    /// parent 是 codex 用 500 字，其他 kind 維持 1,600 字；去重上限 500 不變。
+    #[test]
+    fn a_codex_parent_gets_a_shorter_notice_and_others_keep_the_limit() {
+        assert_eq!(notice_reply_limit("codex"), 500);
+        assert_eq!(notice_reply_limit("claude"), MAX_NOTICE_REPLY_CHARS);
+        assert_eq!(notice_reply_limit("grok"), MAX_NOTICE_REPLY_CHARS);
+        assert_eq!(NEAR_DUPLICATE_MAX_CHARS, 500);
+        let reply = "甲".repeat(900);
+        let codex = message_for_child("c", "kid", &reply, notice_reply_limit("codex"));
+        assert_eq!(codex.matches('甲').count(), 500, "摘錄只留前 500 字");
+        assert!(codex.contains("（daemon 附註）已截斷，原文共 900 字"));
+        assert!(codex.contains("python3 scripts/agm.py messages c --limit 5"), "仍附讀取指令");
+        let claude = message_for_child("c", "kid", &reply, notice_reply_limit("claude"));
+        assert!(!claude.contains("已截斷"));
+        assert_eq!(claude.matches('甲').count(), 900);
+    }
+
+    /// 只有「沒送出、框讀不到」的 Conflict 才算 unsent；`sent` 不是 false 就不碰（不然會把已送出的記成失敗）。
+    #[test]
+    fn only_an_unsent_composer_unreadable_conflict_counts_as_unsent() {
+        let unsent = serde_json::json!({"reason": "composer_unreadable", "retryable": true, "sent": false});
+        assert!(unsent_composer_conflict(&unsent));
+        assert!(!unsent_composer_conflict(&serde_json::json!({"reason": "composer_unreadable", "retryable": true, "sent": true})));
+        assert!(!unsent_composer_conflict(&serde_json::json!({"reason": "composer_unreadable", "retryable": true})), "沒有 sent 欄位就不確定");
+        assert!(!unsent_composer_conflict(&serde_json::json!({"reason": "composer_busy", "sent": false})));
+    }
+
+    /// 送不出去那一次記成一筆 failed／failed（不帶內文、不進佇列），attempt 讀得回來；重複記同一筆不會多一列。
+    #[tokio::test]
+    async fn an_unsent_attempt_is_recorded_once_and_never_queued() {
+        let f = fixture("hook", "completed").await;
+        let parent = parent_bot_id(&f).await;
+        let base = base_crid(&f);
+        assert_eq!(record_unsent_attempt(&f.env.app.db, &parent, &f.parent_conversation, "kid", &base, &base, RETRY_LIMIT).await.unwrap(), 0);
+        assert_eq!(record_unsent_attempt(&f.env.app.db, &parent, &f.parent_conversation, "kid", &base, &base, RETRY_LIMIT).await.unwrap(), 0);
+        assert_eq!(crid_count(&f, &base).await, 1, "同一個 crid 只一列");
+        let (status, delivery, content): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT t.status, t.delivery, t.prompt_text FROM turns t WHERE t.conversation_id=? AND t.client_request_id=?",
+        )
+        .bind(&f.parent_conversation)
+        .bind(&base)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+        assert_eq!((status.as_str(), delivery.as_str()), ("failed", "failed"));
+        assert!(content.is_none(), "不存內文");
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
+            .bind(&f.parent_conversation)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0, "沒有任何東西進佇列，flush 撿不到，也不會重送");
+        assert_eq!(attempt_of(&base, &format!("{base}:r2")), 2);
+    }
+
+    /// 端到端：parent 是 codex、框裡 30 列、`›` 掉出判讀範圍（Unready）→ Conflict(composer_unreadable, sent=false)。
+    /// 結果：記一次失敗 attempt、沒有送任何鍵或文字到 parent 的 pane、冷卻內 sweep 不再補送。
+    #[tokio::test]
+    async fn an_unreadable_codex_parent_records_an_attempt_and_sends_nothing() {
+        let f = fixture("hook", "completed").await;
+        let parent = parent_bot_id(&f).await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&parent).execute(&f.env.app.db).await.unwrap();
+        f.env.herdr.live_pane(
+            &format!("pane-{parent}"),
+            crate::testing::LivePane { codex: true, composer: (1..=30).map(|i| format!("filler {i}")).collect(), ..Default::default() },
+        );
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(crid_count(&f, &base_crid(&f)).await, 1, "記成一次失敗 attempt");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty(), "沒有任何文字打進 parent 的 pane");
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "沒有任何按鍵");
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 1, "冷卻還沒過：不補送");
+    }
+
+    /// 上限：r0..r3 都送不出去之後不再補送，`child_done_undeliverable` 只發一次。
+    #[tokio::test]
+    async fn unsent_attempts_stop_at_the_limit_with_one_alert() {
+        let f = fixture("hook", "completed").await;
+        let parent = parent_bot_id(&f).await;
+        let base = base_crid(&f);
+        for n in 0..=RETRY_LIMIT {
+            let crid = if n == 0 { base.clone() } else { format!("{base}:r{n}") };
+            assert_eq!(record_unsent_attempt(&f.env.app.db, &parent, &f.parent_conversation, "kid", &base, &crid, RETRY_LIMIT).await.unwrap(), n);
+        }
+        record_unsent_attempt(&f.env.app.db, &parent, &f.parent_conversation, "kid", &base, &format!("{base}:r{RETRY_LIMIT}"), RETRY_LIMIT).await.unwrap();
+        let alerts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key=? AND kind='ops_alert'")
+            .bind(format!("child_done_undeliverable:{base}"))
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(alerts, 1, "上限的告警只一次");
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 1 + RETRY_LIMIT as i64, "r0..r3 之後不再多一則");
+        assert_eq!(crid_count(&f, &format!("{base}:r{}", RETRY_LIMIT + 1)).await, 0);
     }

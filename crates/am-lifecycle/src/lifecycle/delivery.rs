@@ -922,8 +922,7 @@ fn may_press_retry_submit(
 /// 原文的「沒有字元」（中文或長字被硬折）、「一段空白」（在空白處折行）、「換行」（原文本來就換行）。
 /// 以前整個把空白拿掉再比（#1598），`send to ann a` 與 `send to anna` 也算同一則，補按的 Enter 把使用者剛改的字送出去（#1666）。
 fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
-    // 摺起來的貼上（框裡只剩 `[Pasted text …]`／`[Pasted Content N chars]`）看不到原文，只能比長度（#1915）。
-    crate::composer_parse::composer_text(kind, screen).is_some_and(|box_text| super::poller::is_our_folded_paste(kind, &box_text, text))
+    super::poller::box_shows_our_folded_paste(kind, screen, text)
         || crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| rows_spell_text(&shown, text))
 }
 
@@ -959,6 +958,10 @@ fn bare(s: &str) -> String {
 
 /// 框裡（去掉空白後）還找得到本則原文，只是後面可能接了別的字。claude 送出前會清掉隱形字元，所以比的是清過的樣子。
 fn text_still_in_box(kind: &str, screen: &str, text: &str) -> bool {
+    // 摺起來的貼上看不到原文：同一個 helper 判斷（#1984），不然 late proof 會把還在框裡的字記成送出去的路上（Pending）。
+    if super::poller::box_shows_our_folded_paste(kind, screen, text) {
+        return true;
+    }
     let needle = bare(&super::pane_text::for_pane(kind, text));
     crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| bare(&shown).contains(&needle))
 }
@@ -1034,7 +1037,10 @@ pub async fn confirm_submitted(
             }
             // 框裡不是本則（空了、換成別人的字、讀不準）：不按 Enter，也不提早 return，後面的證據查詢照跑，
             // 最後一定記下 Pending 讓背景升級（#1577）。精確比對不能再擋在這裡：折行的同一則要能補按（#1571）。
-            BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {}
+            BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {
+                // 框裡有字、對不上這一則：不按。記一次框的形狀，之後看摺疊標籤的字數是不是跟我們送的對不上（#1984 D）。
+                super::unsent_draft::diagnose_box_once(&run.id, &bot.kind, &now, text, BoxState::NonEmpty);
+            }
             BoxState::Unready => {}
             BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, false, pressed_again) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
@@ -1275,6 +1281,15 @@ mod tests {
         assert!(!composer_still_holds("codex", &as_bytes, &codex_paste_text()), "3552 是位元組數，不是 codex 的數字");
         let other = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "999");
         assert!(!composer_still_holds("codex", &other, &codex_paste_text()), "別人的摺疊、字數不同");
+    }
+
+    /// #1984 A：late proof 的「字還在框裡」也認得摺起來的我們那一則（與補按共用同一個 helper）。
+    #[test]
+    fn a_codex_fold_of_our_text_counts_as_still_in_the_box_for_the_late_proof_too() {
+        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        assert!(text_still_in_box("codex", CODEX_FOLDED_PASTE_SCREEN, &codex_paste_text()));
+        let other = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "999");
+        assert!(!text_still_in_box("codex", &other, &codex_paste_text()), "別人的摺疊、字數不同");
     }
 
     /// claude 的摺疊貼上照舊：行數對得上才算還在框裡（回歸）。

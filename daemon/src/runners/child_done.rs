@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use futures::{stream, StreamExt};
-use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for_child, truncate, CRID_PREFIX, NEAR_DUPLICATE_MAX_CHARS};
+use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for_child, notice_reply_limit, record_unsent_attempt, truncate, unsent_composer_conflict, CRID_PREFIX, NEAR_DUPLICATE_MAX_CHARS, RETRY_LIMIT};
 use crate::events::ports::TurnCommands;
 use crate::state::App;
 
@@ -50,8 +50,6 @@ const FALLBACK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 /// 通知被佇列收成 failed（字沒打進去）之後，隔多久才補送下一次（#874）。
 const CHILD_DONE_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// 同一個來源回合最多補送幾次（第 0 次之外）。
-const CHILD_DONE_RETRY_LIMIT: u32 = 3;
 
 /// Start a best-effort immediate notification after a completed turn has been committed.
 pub fn on_completed_turn(app: &Arc<App>, turn_id: &str) {
@@ -238,7 +236,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
                 .signed_duration_since(at)
                 .to_std()
                 .is_ok_and(|d| d >= CHILD_DONE_RETRY_COOLDOWN);
-            if !cooled || attempt >= CHILD_DONE_RETRY_LIMIT {
+            if !cooled || attempt >= RETRY_LIMIT {
                 return Ok(());
             }
             format!("{base_crid}:r{}", attempt + 1)
@@ -310,7 +308,12 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         return Ok(());
     }
 
-    let message = message_for_child(&turn.child_id, &turn.child_name, &turn.reply);
+    // parent 是 codex 用短上限（#1984）：摘錄越長，框越容易被摺起來、`›` 掉出判讀範圍。
+    let parent_kind: String = sqlx::query_scalar("SELECT kind FROM bots WHERE id = ?")
+        .bind(&turn.parent_id)
+        .fetch_one(&app.db)
+        .await?;
+    let message = message_for_child(&turn.child_id, &turn.child_name, &turn.reply, notice_reply_limit(&parent_kind));
     match app
         .prompt_relayed_queueable(
             &turn.parent_id,
@@ -323,6 +326,12 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     {
         Ok(out) => {
             tracing::info!(child = %turn.child_name, parent = %turn.parent_id, turn = %turn.id, delivery = %out.delivery, "notified parent about completed child turn");
+            Ok(())
+        }
+        // 框讀不到、沒有送出（#1984）：記成一次失敗 attempt，讓冷卻與上限生效；不算錯誤，sweep 不必再重試。
+        Err(crate::lifecycle::LcError::Conflict(body)) if unsent_composer_conflict(&body) => {
+            let attempt = record_unsent_attempt(&app.db, &turn.parent_id, &parent_conversation, &turn.child_name, &base_crid, &client_request_id, RETRY_LIMIT).await?;
+            tracing::warn!(child = %turn.child_name, parent = %turn.parent_id, turn = %turn.id, attempt, limit = RETRY_LIMIT, "parent composer unreadable; notice not sent, attempt recorded");
             Ok(())
         }
         Err(e) => Err(anyhow::anyhow!("queueable parent prompt failed: {e:?}")),

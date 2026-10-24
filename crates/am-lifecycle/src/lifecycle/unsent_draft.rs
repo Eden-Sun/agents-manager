@@ -16,13 +16,16 @@
 
 use super::s6_ports::StuckTurnContext;
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 /// 讀不到畫面時最多等幾輪 sweep（含第一次）；第這麼多輪還讀不到就照原本的收尾。
 pub const UNREADABLE_ROUNDS: u32 = 3;
 /// 讀不到的輪數記在記憶體；超過上限時淘汰最舊的一筆。
 const UNREADABLE_MAX: usize = 256;
+/// 框形狀日誌的長度上限與記錄過的 episode 數上限。
+const DIAGNOSE_MAX_CHARS: usize = 200;
+const DIAGNOSED_MAX: usize = 256;
 
 /// 收尾前這一步的結論。
 #[derive(Debug, PartialEq, Eq)]
@@ -99,16 +102,110 @@ pub async fn before_idle_close(app: &impl StuckTurnContext, run: &db::Run, turn:
             return Ok(Recovery::Proceed);
         }
     };
-    forget_unreadable(&turn.id);
     if sent.iter().any(|p| super::poller::composer_holds_prompt(&bot.kind, &screen, p)) {
+        forget_unreadable(&turn.id);
         return still_in_box(app, run, &bot, turn, &sent).await;
     }
-    if crate::composer_parse::box_state(&bot.kind, &screen) == crate::composer_parse::BoxState::NonEmpty {
-        alert(app, &bot, turn, "undelivered_draft_suspect",
-              "送達證不出來的回合要收尾時，輸入框裡還有字，但比對不出是不是這一則（可能是 TUI 把長段貼上摺起來了，或是別人打的）。daemon 沒有按任何鍵。",
-              "到終端看這顆 bot 的輸入框：是這一則就按 Enter，不是就自己決定要不要清掉。框裡有字的期間，之後的送達都會被擋。").await;
+    let state = crate::composer_parse::box_state(&bot.kind, &screen);
+    match state {
+        crate::composer_parse::BoxState::NonEmpty => {
+            forget_unreadable(&turn.id);
+            diagnose_box_once(&turn.id, &bot.kind, &screen, &sent[0], state);
+            alert(app, &bot, turn, "undelivered_draft_suspect",
+                  "送達證不出來的回合要收尾時，輸入框裡還有字，但比對不出是不是這一則（可能是 TUI 把長段貼上摺起來了，或是別人打的）。daemon 沒有按任何鍵。",
+                  "到終端看這顆 bot 的輸入框：是這一則就按 Enter，不是就自己決定要不要清掉。框裡有字的期間，之後的送達都會被擋。").await;
+            Ok(Recovery::Proceed)
+        }
+        crate::composer_parse::BoxState::Empty => {
+            forget_unreadable(&turn.id);
+            Ok(Recovery::Proceed)
+        }
+        // 框讀不到（`›` 不在下緣的判讀範圍內）：跟讀不到畫面一樣等幾輪；之後照原本收尾，但不再沉默——告警一次（#1984）。
+        crate::composer_parse::BoxState::Unready => {
+            diagnose_box_once(&turn.id, &bot.kind, &screen, &sent[0], state);
+            if unreadable_again(&turn.id) {
+                return Ok(Recovery::Wait);
+            }
+            alert_unreadable(app, turn, &bot, run).await;
+            Ok(Recovery::Proceed)
+        }
     }
-    Ok(Recovery::Proceed)
+}
+
+/// 框讀不到、輪數用完才收尾：告警只放 bot、pane、輪數、時間（不放畫面內容）。同一個回合只寫一次（key 去重）。
+async fn alert_unreadable(app: &impl StuckTurnContext, turn: &db::Turn, bot: &db::Bot, run: &db::Run) {
+    let key = format!("undelivered_draft_unreadable:{}", turn.id);
+    let pane = run.pane_id.as_deref().unwrap_or("-");
+    let payload = serde_json::json!({
+        "source": "daemon",
+        "reason": "undelivered_draft_unreadable",
+        "subject": bot.name,
+        "bot_id": bot.id,
+        "bot_name": bot.name,
+        "pane": pane,
+        "rounds": UNREADABLE_ROUNDS,
+        "at": db::now(),
+        "detail": format!("bot `{}`（{}）pane `{pane}`：送達證不出來的回合要收尾時，輸入框連續 {UNREADABLE_ROUNDS} 輪讀不到；已照原本收尾，daemon 沒有按任何鍵。", bot.name, bot.id),
+        "action": "到終端看這顆 bot 的輸入框：字還在就自己決定要不要送；框讀得到之後的送達才會恢復。",
+    });
+    match crate::supervisor_inbox::push_inbox(app.db(), &key, "ops_alert", None, Some(&bot.id), None, &payload).await {
+        Ok(Some(_)) => app.emit("supervisor_changed", serde_json::json!({ "ops_alert": key })).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not queue the unreadable composer ops_alert"),
+    }
+}
+
+/// 日誌用的框形狀（#1984 D）：只有行數、位置、字元數與固定字樣，**不含畫面文字**。
+fn box_shape(kind: &str, screen: &str, sent: &str, state: crate::composer_parse::BoxState) -> String {
+    let lines: Vec<&str> = screen.lines().collect();
+    let from = lines.len().saturating_sub(super::poller::COMPOSER_TAIL);
+    let glyph = match kind {
+        "codex" => '›',
+        "agy" => '>',
+        _ => '❯',
+    };
+    let glyph_row = lines.iter().rposition(|l| l.trim_start().starts_with(glyph));
+    let num = |n: Option<usize>| n.map_or_else(|| "none".to_string(), |n| n.to_string());
+    let edge_col = glyph_row.and_then(|i| lines[i].chars().position(is_box_char));
+    let edge_rows = lines[from..].iter().filter(|l| l.chars().any(is_box_char)).count();
+    let folded = lines[from..].iter().find_map(|l| folded_chars(l));
+    let shape = format!(
+        "state={state:?} rows={} glyph_row={} from_bottom={} glyph_in_tail={} edge_col={} edge_rows_in_tail={edge_rows} folded_chars={} sent_chars={}",
+        lines.len(),
+        num(glyph_row),
+        num(glyph_row.map(|i| lines.len() - i)),
+        glyph_row.is_some_and(|i| i >= from),
+        num(edge_col),
+        num(folded),
+        sent.chars().count(),
+    );
+    shape.chars().take(DIAGNOSE_MAX_CHARS).collect()
+}
+
+fn is_box_char(c: char) -> bool {
+    "│╭╮╰╯─━".contains(c)
+}
+
+/// `[Pasted Content N chars]` 的 N（只取數字）。
+fn folded_chars(line: &str) -> Option<usize> {
+    let rest = line.split_once("[Pasted Content ")?.1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty() && rest[digits.len()..].starts_with(" chars]")).then(|| digits.parse().ok()).flatten()
+}
+
+/// 每個 episode（回合或 run）只記一次框的形狀；表滿就整個清掉重來。
+pub(super) fn diagnose_box_once(episode: &str, kind: &str, screen: &str, sent: &str, state: crate::composer_parse::BoxState) {
+    static LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let fresh = {
+        let mut set = LOGGED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        if set.len() >= DIAGNOSED_MAX {
+            set.clear();
+        }
+        set.insert(episode.to_string())
+    };
+    if fresh {
+        tracing::warn!(episode, kind, shape = %box_shape(kind, screen, sent, state), "composer shape at the stuck-turn check");
+    }
 }
 
 async fn read_screen(app: &impl StuckTurnContext, run: &db::Run) -> anyhow::Result<String> {
