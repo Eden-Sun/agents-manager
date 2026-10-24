@@ -353,3 +353,63 @@ ubuntu@ubuntu:~/project/x$ agy --dangerously-skip-permissions --model gemini-3.8
         assert_eq!(screen_reply("agy", &idle, &[]), None);
     }
 }
+
+/// 開機修復（`heal_at_startup`）：一律用 scratch 的假 home 與 data_dir，不碰真路徑。
+fn installed_files(home: &Path, data_dir: &Path) -> [std::path::PathBuf; 3] {
+    [data_dir.join(cfg::DISPATCH_SH), cfg::hooks_path(home), cfg::settings_path(home)]
+}
+
+fn mtimes(files: &[std::path::PathBuf]) -> Vec<std::time::SystemTime> {
+    files.iter().map(|p| std::fs::metadata(p).unwrap().modified().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn heal_rewrites_an_old_dispatcher_to_this_binarys_version() {
+    let e = tt::env().await;
+    let home = tt::scratch_dir("am-agy-heal-old");
+    install_at(&e.app, &home).unwrap();
+    let dispatcher = e.app.data_dir.join(cfg::DISPATCH_SH);
+    std::fs::write(&dispatcher, "#!/bin/sh\necho old\n").unwrap();
+    assert!(super::agy_hook::heal_at(&e.app, &home).unwrap(), "舊版 dispatcher 要改寫");
+    let text = std::fs::read_to_string(&dispatcher).unwrap();
+    assert!(!text.contains("echo old") && text.contains("agy dispatcher"), "{text}");
+    assert!(!super::agy_hook::heal_at(&e.app, &home).unwrap(), "改完再修就沒事了");
+}
+
+#[tokio::test]
+async fn heal_on_an_up_to_date_install_changes_no_file_and_keeps_the_users_entries() {
+    let e = tt::env().await;
+    let home = tt::scratch_dir("am-agy-heal-same");
+    install_at(&e.app, &home).unwrap();
+    // 使用者自己的具名項（例如 herdr 的）要原樣保留。
+    let hooks = cfg::hooks_path(&home);
+    let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    root["herdr"] = json!({"enabled": true, "PreInvocation": [{"type": "command", "command": "bash herdr.sh", "timeout": 10}]});
+    std::fs::write(&hooks, format!("{}\n", serde_json::to_string_pretty(&root).unwrap())).unwrap();
+    let files = installed_files(&home, &e.app.data_dir);
+    let before = mtimes(&files);
+    assert!(!super::agy_hook::heal_at(&e.app, &home).unwrap(), "內容已經正確：不改");
+    assert_eq!(mtimes(&files), before, "三個檔的 mtime 都不能變（merge 沒有多寫）");
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert_eq!(after["herdr"], root["herdr"], "使用者的 entry 原樣保留");
+}
+
+#[tokio::test]
+async fn heal_without_any_install_record_creates_nothing() {
+    let e = tt::env().await;
+    let home = tt::scratch_dir("am-agy-heal-none");
+    assert!(!super::agy_hook::heal_at(&e.app, &home).unwrap(), "沒裝過：不建任何檔");
+    for p in installed_files(&home, &e.app.data_dir) {
+        assert!(!p.exists(), "{}", p.display());
+    }
+}
+
+#[tokio::test]
+async fn heal_refuses_a_broken_hooks_file_instead_of_overwriting_it() {
+    let e = tt::env().await;
+    let home = tt::scratch_dir("am-agy-heal-broken");
+    std::fs::create_dir_all(cfg::hooks_path(&home).parent().unwrap()).unwrap();
+    std::fs::write(cfg::hooks_path(&home), "{ not json").unwrap();
+    assert!(super::agy_hook::heal_at(&e.app, &home).is_err(), "壞掉就回錯");
+    assert_eq!(std::fs::read_to_string(cfg::hooks_path(&home)).unwrap(), "{ not json", "而且不覆寫");
+}

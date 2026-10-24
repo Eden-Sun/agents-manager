@@ -247,6 +247,12 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         Ok(false) => {}
         Err(e) => tracing::warn!(error = ?e, "could not check the grok hooks file at startup"),
     }
+    // agy 的 dispatcher 與全域 hooks.json：裝過的機器開機就換成這顆 binary 的版本（換版後不必等 agy bot 重啟）；沒裝過不建。
+    match lifecycle::agy_hook::heal_at_startup(&app) {
+        Ok(true) => tracing::info!("repaired the agy hooks at startup"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = ?e, "could not check the agy hooks at startup"),
+    }
     // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
     // 上傳了卻從沒送出的附件（`ready`、沒有訊息引用）依保留期清掉；開機一次、之後每 6 小時。

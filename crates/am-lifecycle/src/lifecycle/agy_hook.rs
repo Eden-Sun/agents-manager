@@ -12,6 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
+
 use crate::hosts::sh_quote;
 use crate::agy_support as cfg;
 
@@ -55,6 +57,31 @@ pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilit
     let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home dir; cannot install the agy hooks"))?;
     refuse_real_home(&home)?;
     install_at(app, &home)
+}
+
+/// daemon 開機：已經裝過（dispatcher 檔在，或 hooks.json 有我們的具名項）才換成這顆 binary 的版本；沒裝過的機器不建任何檔。
+/// 換版後 dispatcher 還是舊的，就不必等頂層 agy bot 重新啟動才修（同 grok 的 `heal_at_startup`）。
+pub fn heal_at_startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance)) -> anyhow::Result<bool> {
+    let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home dir; cannot check the agy hooks"))?;
+    refuse_real_home(&home)?;
+    heal_at(app, &home)
+}
+
+/// [`heal_at_startup`] 的本體，家目錄由呼叫端給（測試用假 home）。hooks.json 壞掉就回錯，不覆寫。
+pub(super) fn heal_at(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance), home: &Path) -> anyhow::Result<bool> {
+    let name = cfg::hook_name(app.instance().as_deref());
+    let ours = match std::fs::read_to_string(cfg::hooks_path(home)) {
+        Ok(text) if !text.trim().is_empty() => {
+            let root: serde_json::Value = serde_json::from_str(&text).context("agy `hooks.json` is not valid JSON")?;
+            root.get(&name).is_some()
+        }
+        _ => false,
+    };
+    let dispatcher_present = app.data_dir().join(cfg::DISPATCH_SH).is_file();
+    if !ours && !dispatcher_present {
+        return Ok(false);
+    }
+    install_at(app, home)
 }
 
 /// 測試建置只准寫暫存目錄（比照 `daemon/src/testing.rs` 的 `scratch_leak_guard`）：所有 agy bot 共用的真的 `~/.gemini` 不能被測試蓋寫。
