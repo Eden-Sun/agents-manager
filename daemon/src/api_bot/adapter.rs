@@ -7,10 +7,10 @@
 //! 2. External stop operations CAS `runs.state` to `stopping` and trigger cancellation.
 //!    They NEVER acquire the cursor lock.
 
-use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ use am_base::db::api_bot::{self as db_api, Checkpoint, Fence};
 
 use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
-use super::quote::{QuoteError, QuoteProvider, RequestEnvelope};
+use super::quote::{QuoteProvider, RequestEnvelope};
 use super::runner::{self, Journal, Model, State, Tools};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,7 +101,9 @@ impl ApiBotAdapter {
         http_cfg: AdapterHttpConfig,
         tools: Option<Arc<dyn Tools>>,
     ) -> Result<Self, http::Error> {
-        options.validate().map_err(|_| http::Error::InvalidRequest)?;
+        options
+            .validate()
+            .map_err(|_| http::Error::InvalidRequest)?;
         limits.validate()?;
         if identity.generation != 1
             || identity.session_id.is_empty()
@@ -122,7 +124,8 @@ impl ApiBotAdapter {
         };
 
         let initial_state = State::default();
-        let state_val = serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
+        let state_val =
+            serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
         let checkpoint = Checkpoint::new(&state_val).map_err(|_| http::Error::InvalidRequest)?;
 
         db_api::create(&pool, &fence, &checkpoint)
@@ -161,13 +164,16 @@ impl ApiBotAdapter {
         http_cfg: AdapterHttpConfig,
         tools: Option<Arc<dyn Tools>>,
     ) -> Result<(Self, State), http::Error> {
-        options.validate().map_err(|_| http::Error::InvalidRequest)?;
+        options
+            .validate()
+            .map_err(|_| http::Error::InvalidRequest)?;
         limits.validate()?;
 
         if new_identity.session_id != old_fence.session_id
             || new_identity.bot_id != old_fence.bot_id
             || new_identity.generation < old_fence.generation
-            || (new_identity.run_id != old_fence.run_id && new_identity.generation <= old_fence.generation)
+            || (new_identity.run_id != old_fence.run_id
+                && new_identity.generation <= old_fence.generation)
             || old_revision < 0
             || new_identity.run_id.is_empty()
             || new_identity.turn_id.is_empty()
@@ -206,8 +212,8 @@ impl ApiBotAdapter {
         let loaded_chk = db_api::load(&pool, &current_fence)
             .await
             .map_err(|_| http::Error::InvalidRequest)?;
-        let loaded_state: State = serde_json::from_value(loaded_chk.value())
-            .map_err(|_| http::Error::InvalidRequest)?;
+        let loaded_state: State =
+            serde_json::from_value(loaded_chk.value()).map_err(|_| http::Error::InvalidRequest)?;
 
         let adapter = Self {
             pool,
@@ -247,14 +253,21 @@ impl Model for ApiBotAdapter {
         Box::pin(async move {
             let (envelope, attempt_id) = {
                 let mut cursor = self.cursor.lock().await;
-                let active = cursor.active_attempt.as_mut().ok_or(http::Error::InvalidRequest)?;
+                let active = cursor
+                    .active_attempt
+                    .as_mut()
+                    .ok_or(http::Error::InvalidRequest)?;
                 if !active.permit_available {
                     return Err(http::Error::InvalidRequest);
                 }
                 active.permit_available = false;
 
-                let reconstructed = RequestEnvelope::new(self.options.clone(), self.system.clone(), messages.to_vec())
-                    .map_err(|_| http::Error::InvalidRequest)?;
+                let reconstructed = RequestEnvelope::new(
+                    self.options.clone(),
+                    self.system.clone(),
+                    messages.to_vec(),
+                )
+                .map_err(|_| http::Error::InvalidRequest)?;
 
                 if reconstructed.hash() != active.envelope.hash() {
                     return Err(http::Error::InvalidRequest);
@@ -280,8 +293,11 @@ impl Model for ApiBotAdapter {
                 Ok(resp) => {
                     let quote_res = self.quote_provider.settle(&envelope, &resp);
                     let valid_quote = match quote_res {
-                        Ok(uq) if uq.estimated_microusd >= 0
-                            && uq.actual_speed.is_none_or(|s| matches!(s, "fast" | "standard")) =>
+                        Ok(uq)
+                            if uq.estimated_microusd >= 0
+                                && uq
+                                    .actual_speed
+                                    .is_none_or(|s| matches!(s, "fast" | "standard")) =>
                         {
                             Some(uq)
                         }
@@ -308,8 +324,10 @@ impl Model for ApiBotAdapter {
                         let mut unknown_state = cursor.last_durable_state.clone();
                         unknown_state.api_pending = true;
 
-                        let val = serde_json::to_value(&unknown_state).map_err(|_| http::Error::InvalidResponse)?;
-                        let chk = Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponse)?;
+                        let val = serde_json::to_value(&unknown_state)
+                            .map_err(|_| http::Error::InvalidResponse)?;
+                        let chk =
+                            Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponse)?;
 
                         let receipt = db_api::Receipt {
                             state: "unknown",
@@ -318,9 +336,10 @@ impl Model for ApiBotAdapter {
                             estimated_microusd: None,
                         };
 
-                        let next_rev = db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
-                            .await
-                            .map_err(|_| http::Error::InvalidResponse)?;
+                        let next_rev =
+                            db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
+                                .await
+                                .map_err(|_| http::Error::InvalidResponse)?;
 
                         cursor.revision = next_rev;
                         cursor.last_api_pending = true;
@@ -349,7 +368,10 @@ impl Model for ApiBotAdapter {
                                 usage: None,
                                 estimated_microusd: None,
                             };
-                            if let Ok(next_rev) = db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk).await {
+                            if let Ok(next_rev) =
+                                db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
+                                    .await
+                            {
                                 cursor.revision = next_rev;
                                 cursor.last_api_pending = true;
                                 cursor.last_durable_state = unknown_state;
@@ -390,15 +412,20 @@ impl Journal for ApiBotAdapter {
                 (true, true) => {
                     // While HTTP is active/pending, disallow arbitrary mutation of messages/responses.
                     // Only allow exactly matching the last durable state (idempotent checkpoint), without granting permits.
-                    let durable_val = serde_json::to_value(&cursor.last_durable_state).map_err(|_| ())?;
+                    let durable_val =
+                        serde_json::to_value(&cursor.last_durable_state).map_err(|_| ())?;
                     if val != durable_val {
                         return Err(());
                     }
                     Ok(())
                 }
                 (false, true) => {
-                    let envelope = RequestEnvelope::new(self.options.clone(), self.system.clone(), state.messages.clone())
-                        .map_err(|_| ())?;
+                    let envelope = RequestEnvelope::new(
+                        self.options.clone(),
+                        self.system.clone(),
+                        state.messages.clone(),
+                    )
+                    .map_err(|_| ())?;
                     let quote = self.quote_provider.reserve(&envelope).map_err(|_| ())?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
@@ -452,14 +479,19 @@ impl Journal for ApiBotAdapter {
                         }
 
                         // Response has no PartialEq; compare prefix via JSON values
-                        let durable_resp_val = serde_json::to_value(&durable.responses).map_err(|_| ())?;
-                        let state_prefix_resp_val = serde_json::to_value(&state.responses[..durable.responses.len()]).map_err(|_| ())?;
+                        let durable_resp_val =
+                            serde_json::to_value(&durable.responses).map_err(|_| ())?;
+                        let state_prefix_resp_val =
+                            serde_json::to_value(&state.responses[..durable.responses.len()])
+                                .map_err(|_| ())?;
                         if durable_resp_val != state_prefix_resp_val {
                             return Err(());
                         }
 
-                        let last_resp_val = serde_json::to_value(state.responses.last().unwrap()).map_err(|_| ())?;
-                        let settled_resp_val = serde_json::to_value(&settled.response).map_err(|_| ())?;
+                        let last_resp_val = serde_json::to_value(state.responses.last().unwrap())
+                            .map_err(|_| ())?;
+                        let settled_resp_val =
+                            serde_json::to_value(&settled.response).map_err(|_| ())?;
                         if last_resp_val != settled_resp_val {
                             return Err(());
                         }
@@ -471,7 +503,9 @@ impl Journal for ApiBotAdapter {
                             return Err(());
                         }
                         let last_msg = state.messages.last().unwrap();
-                        if last_msg.role != "assistant" || last_msg.content != Value::from(settled.response.content.clone()) {
+                        if last_msg.role != "assistant"
+                            || last_msg.content != Value::from(settled.response.content.clone())
+                        {
                             return Err(());
                         }
 
@@ -511,7 +545,9 @@ impl Journal for ApiBotAdapter {
                     Ok(())
                 }
                 _ => {
-                    let next_rev = db_api::save(&self.pool, &fence, &chk).await.map_err(|_| ())?;
+                    let next_rev = db_api::save(&self.pool, &fence, &chk)
+                        .await
+                        .map_err(|_| ())?;
                     cursor.revision = next_rev;
                     cursor.last_api_pending = after_pending;
                     cursor.last_durable_state = state.clone();
