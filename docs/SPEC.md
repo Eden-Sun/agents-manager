@@ -2553,6 +2553,11 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   有 bot 身份（`AM_BOT_ID`／`AM_BOT_TOKEN`）卻沒有 `AM_PORT` 的 pane——**遠端主機**上的 bot 就是（遠端沒有 daemon、不開反向埠，§11.4，
   daemon 也不注入 `AM_PORT`）——一通 curl 都不打（127.0.0.1 在遠端是那台機器自己，可能是別顆 daemon），stderr 講明缺 `AM_PORT`，cargo 照跑：
   遠端那台的編譯本來就不受這台 daemon 的名額管。不把位址寫進遠端 shim：daemon 只聽本機 127.0.0.1，遠端連不到，寫了也是假的。
+- **外部編譯等待與終態逐事件記錄（#1960）**：每次 `remote-cargo` helper 的最終決策（`phase = "final"`），將其終態與量測到的等待時間 append 至 `<data_dir>/remote-cargo-events.jsonl`（包含 `.1` 輪替檔與獨立鎖檔 `remote-cargo-events.lock`，全數權限固定 `0600`）。
+  每行連同換行最多 512 bytes；單檔容量上限 5 MiB，寫入前行長度加目前大小超過時原子輪替（兩檔合計上限 10 MiB）。選定最終 lease 後立即記錄，不因後續同步或編譯失敗而漏掉已量到的等待。
+  獲鎖採非阻塞 `LOCK_NB`（一般檔案系統同步 I/O 不宣稱零阻塞），鎖忙或 I/O 錯誤時僅警告並略過，不阻斷 build 流程（規格承認高並行鎖忙或 I/O 異常時允許偶發漏事件，不保證全量 24 小時覆蓋）。
+  資料採嚴格白名單 8 欄位：`ts`、`call_id`（由 `am-base` 的 `db::ulid()` 生成）、`bot_id`（`AM_BOT_ID`）、`host`（配置主機名稱）、`phase`（`"final"`）、`outcome`（`"shared"`／`"isolated"`／`"local_fallback"`）、`shared_wait_secs`（Option）、`slot_wait_secs`（Option）。多主機試用（`probe`）的 `BUSY` 由調度層吸收，不重複計為本機 fallback。
+  遠端守門於成功交付目錄前輸出 `OUTCOME	<shared|isolated>	<swait>	<qwait>`；名額滿排隊逾時（Exit 75）前輸出 `OUTCOME	queue_full	<swait>	<qwait>`。Rust 端握手解析器在保留向後相容的同時提取觀測數據，未及輸出時時間欄位為 null，不以本機總經過時間冒充分段等待。
 - **多台建置主機與本機執行器（#1956）**：`[build.remote]` 是第一台，`[[build.remote.hosts]]` 照順序接在後面（沒寫的欄位沿用第一台；只支援金鑰／agent；`enabled` 與 `timeout_secs` 整組共用）；只有一台時行為不變。
   `host = "local"` 是本機執行器：同一套守門／共用 target 池／名額／manifest 直接在本機 `sh -c` 跑，不經 ssh 與 rsync-over-ssh，環境跟 ssh 進去一樣乾淨（pane 的 `AM_*` 不帶過去），只在 Linux。
   多台時照順序逐台「試用」：池裡有空的份、名額有空（本機另看 1 分鐘負載 ≤ `max_load`，預設呼叫端的 `CHECK_MAX_LOAD` 或核心數 × 1.25）就直接在那台開工；都忙就排排隊人數最少的那台、同分照設定順序；

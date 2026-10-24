@@ -1096,6 +1096,8 @@ take_slot() {
       exec 7>>"$root/.slots/$i"
       if flock -n 7; then
         slot=$i
+        qw=${q0:+$(($(date +%s) - q0))}
+        qw=${qw:-0}
         [ -z "$said" ] || echo "agents-manager: 排到遠端名額 $i/$max（等了 $(($(date +%s) - q0)) 秒）" >&2
         return 0
       fi
@@ -1121,6 +1123,8 @@ hold() {
   mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$token" > "$1.owner" || return 2
   printf 'ROOT\t%s\nDIR\t%s\t%s\nSLOT\t%s\t%s\n' "$root" "$1" "$token" "$slot" "$max"
   inventory "$1"
+  case "${1##*/}" in shared|shared-*) out=shared ;; *) out=isolated ;; esac
+  printf 'OUTCOME\t%s\t%s\t%s\n' "$out" "${hw:-}" "${qw:-}"
   echo END
   # 本機隨時可能已經斷線：之後再寫 stdout/stderr 會 EPIPE，清理不能因此半途而廢。
   exec >/dev/null 2>&1
@@ -1138,6 +1142,7 @@ queue_full() {
   # 印**量到的**秒數，不是設定值（issue #486）：log 自報「等了 2 秒」而外面量到 1.04 秒，
   # 比慢一秒難查得多。`q0` 還沒設過（沒排隊就走到這裡）時退回設定值。
   waited=${q0:+$(($(date +%s) - q0))}
+  printf 'OUTCOME\tqueue_full\t%s\t%s\n' "${hw:-}" "${waited:-}"
   echo "agents-manager: 等遠端名額等了 ${waited:-$qwait} 秒還是全滿（$max 個），這次改在本機排隊" >&2
   exit 75
 }
@@ -1157,17 +1162,23 @@ try_pool() {
 }
 # 拿池裡一份的鎖（fd 8，拿到的那份在 $d）：都忙就每秒輪詢**每一份**，任何一份空出來就拿；最多等 $1 秒，還是沒有回 75。
 lock_pool() {
-  try_pool && return 0
+  if try_pool; then hw=${hw:-0}; return 0; fi
   [ "$1" -gt 0 ] || return 75
   echo "agents-manager: 這個 repo 的共用遠端 target（$pool 份）都在用，等任何一份空出來（最多 $1 秒；增量編譯比冷編譯划算）…" >&2
   h0=$(date +%s)
   while :; do
     alive || return 73
     if try_pool; then
-      hw=$(($(date +%s) - h0)); [ "$hw" -eq 0 ] || echo "agents-manager: 等了 $hw 秒拿到共用遠端 target（${d##*/}）" >&2
+      this_hw=$(($(date +%s) - h0))
+      hw=$((${hw:-0} + this_hw))
+      [ "$this_hw" -eq 0 ] || echo "agents-manager: 等了 $this_hw 秒拿到共用遠端 target（${d##*/}）" >&2
       return 0
     fi
-    [ $(($(date +%s) - h0)) -lt "$1" ] || return 75
+    if [ $(($(date +%s) - h0)) -ge "$1" ]; then
+      this_hw=$(($(date +%s) - h0))
+      hw=$((${hw:-0} + this_hw))
+      return 75
+    fi
   done
 }
 # 第一次用到池裡的某一份（目錄還不存在）：從另一份複製，不冷編。先挑沒人持鎖的（一致的快照，拷的時候拿著它的鎖），
@@ -1296,18 +1307,34 @@ pub struct Handshake {
     pub slot: Option<(usize, usize)>,
 }
 
-/// 讀到 `END` 為止。登入 shell 的雜訊行略過；還沒拿到 `DIR` 就 EOF＝守門失敗（原因在它的 stderr）。
-pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
+/// 守門過程收集到的終態等待觀測（issue #1960）。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct WaitObservation {
+    pub outcome: Option<String>,
+    pub shared_wait_secs: Option<u64>,
+    pub slot_wait_secs: Option<u64>,
+}
+
+/// 內部觀察版：在解析 Handshake 時額外記錄 OUTCOME 結構化行，即使後續 EOF 失敗也能保留觀測數據。
+fn read_handshake_observed(r: &mut impl BufRead) -> (anyhow::Result<Handshake>, WaitObservation) {
     let mut hs = Handshake::default();
+    let mut obs = WaitObservation::default();
     let mut line = String::new();
     loop {
         line.clear();
-        if r.read_line(&mut line)? == 0 {
-            anyhow::bail!("remote workdir guard exited before handing out a directory");
+        match r.read_line(&mut line) {
+            Ok(0) => {
+                return (
+                    Err(anyhow::anyhow!("remote workdir guard exited before handing out a directory")),
+                    obs,
+                );
+            }
+            Err(e) => return (Err(e.into()), obs),
+            Ok(_) => {}
         }
         let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
         match f.as_slice() {
-            ["END"] if !hs.dir.is_empty() => return Ok(hs),
+            ["END"] if !hs.dir.is_empty() => return (Ok(hs), obs),
             ["ROOT", root] => hs.root = root.to_string(),
             ["DIR", dir, token] => {
                 hs.dir = dir.to_string();
@@ -1321,10 +1348,20 @@ pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
             }),
             ["F", free, total] => hs.disk = free.parse().ok().zip(total.parse().ok()),
             ["SLOT", i, max] => hs.slot = i.parse().ok().zip(max.parse().ok()),
-            ["BUSY", n] => return Err(anyhow::Error::new(Busy { waiters: n.parse().unwrap_or(0) })),
+            ["OUTCOME", out, sw, qw] => {
+                obs.outcome = Some((*out).to_string());
+                obs.shared_wait_secs = sw.parse().ok();
+                obs.slot_wait_secs = qw.parse().ok();
+            }
+            ["BUSY", n] => return (Err(anyhow::Error::new(Busy { waiters: n.parse().unwrap_or(0) })), obs),
             _ => {}
         }
     }
+}
+
+/// 讀到 `END` 為止。登入 shell 的雜訊行略過；還沒拿到 `DIR` 就 EOF＝守門失敗（原因在它的 stderr）。
+pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
+    read_handshake_observed(r).0
 }
 
 /// 共用 target 池的一份（#1956）：`shared` 或 `shared-<N>`（同守門的 `ours`）。
@@ -1422,11 +1459,16 @@ struct Lease {
     hs: Handshake,
     /// 這次租約的身份（本機產生、守門原樣回；[`run_script`] 用它核對 `.owner`）。
     token: LeaseToken,
+    obs: WaitObservation,
 }
 
-/// 排遠端名額排超過上限，守門沒交目錄就結束了（exit 75）。
-#[derive(Debug)]
-struct QueueFull;
+/// 排遠端名額排超過上限，守門沒交目錄就結束了（exit 75）。攜帶結構化觀測數據與主機標籤（issue #1960）。
+#[derive(Debug, Clone, PartialEq)]
+struct QueueFull {
+    pub host: String,
+    pub shared_wait_secs: Option<u64>,
+    pub slot_wait_secs: Option<u64>,
+}
 
 impl std::fmt::Display for QueueFull {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1490,10 +1532,10 @@ impl Lease {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let hs = read_handshake(&mut reader);
-            let _ = tx.send((reader, hs));
+            let (hs, obs) = read_handshake_observed(&mut reader);
+            let _ = tx.send((reader, hs, obs));
         });
-        let (reader, hs) = loop {
+        let (reader, hs, obs) = loop {
             match rx.recv_timeout(std::time::Duration::from_millis(20)) {
                 Ok(got) => break got,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1506,7 +1548,7 @@ impl Lease {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("remote workdir guard: handshake reader died"),
             }
         };
-        let mut lease = Lease { child, stdin, stdout: Some(reader), hs: Handshake::default(), token };
+        let mut lease = Lease { child, stdin, stdout: Some(reader), hs: Handshake::default(), token, obs: obs.clone() };
         lease.hs = match hs {
             Ok(hs) => hs,
             Err(e) if e.downcast_ref::<Busy>().is_some() => {
@@ -1517,7 +1559,11 @@ impl Lease {
                 // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），
                 // 255＝ssh 自己沒進去（連不上／認證被拒／host key 不合，issue #428），其他是守門出事。
                 match lease.finish().and_then(|st| st.code()) {
-                    Some(EXIT_QUEUE_FULL) => return Err(anyhow::Error::new(QueueFull)),
+                    Some(EXIT_QUEUE_FULL) => return Err(anyhow::Error::new(QueueFull {
+                        host: String::new(), // 由 open_lease 或 caller 補充
+                        shared_wait_secs: obs.shared_wait_secs,
+                        slot_wait_secs: obs.slot_wait_secs,
+                    })),
                     Some(SSH_FAILED) => {
                         // 等轉發那條讀完再看（issue #467）：`finish()` 只保證 ssh 這個行程收掉了，**不保證**
                         // 轉發執行緒已經把最後一行寫進 `said`。macOS 上剛好都來得及，Linux 上量到的是空字串，
@@ -1800,7 +1846,17 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, adm: Admissi
     let job = format!("job-{}-{millis}", std::process::id());
     let token = LeaseToken::new();
     let cmd = host_shell(remote, data_dir, &guard_script(&root, &hash, &job, &token, adm))?;
-    Lease::start(cmd, token, ctl)
+    match Lease::start(cmd, token, ctl) {
+        Ok(lease) => Ok(lease),
+        Err(mut e) => {
+            if let Some(qf) = e.downcast_mut::<QueueFull>() {
+                if qf.host.is_empty() {
+                    qf.host = remote.host.clone();
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// rsync 的 `-e`：跟 [`ssh_cmd`] 同一組連線選項（`ssh` 那條與這條的行為不能各走各的）。
@@ -2851,8 +2907,9 @@ pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[
         args.first().map(String::as_str).unwrap_or("")
     );
     install_signal_handlers();
+    let call_id = crate::db::ulid();
     // 整體上限是整組共用的（`hosts` 裡的主機不能各自設 timeout_secs）。
-    run_offload_on(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals())
+    run_offload_on_with_id(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals(), &call_id)
 }
 
 /// 這次 ssh 拿什麼登入（issue #428）。連不上的時候最想知道的就是這個——「沒設金鑰也沒有密碼檔」跟
@@ -2905,6 +2962,11 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 
 /// [`run_offload`] 的多台版（#1956）：先挑一台拿到租約（[`acquire`]），之後同步、編譯都在那一台。
 fn run_offload_on(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
+    let call_id = crate::db::ulid();
+    run_offload_on_with_id(hosts, data_dir, cwd, args, ctl, &call_id)
+}
+
+fn run_offload_on_with_id(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline, call_id: &str) -> i32 {
     let mut used = 0;
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
@@ -2912,6 +2974,24 @@ fn run_offload_on(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &
         let (i, mut lease) = acquire(hosts, data_dir, &root, ctl)?;
         used = i;
         let remote = &hosts[i];
+        let outcome = match lease.obs.outcome.as_deref() {
+            Some("shared") => "shared",
+            Some("isolated") => "isolated",
+            _ => {
+                let leaf = lease.hs.dir.rsplit_once('/').map(|(_, l)| l).unwrap_or(&lease.hs.dir);
+                if is_shared_leaf(leaf) { "shared" } else { "isolated" }
+            }
+        };
+        am_base::remote_event::record(data_dir, &am_base::remote_event::RemoteCargoEvent {
+            ts: crate::db::now(),
+            call_id: call_id.to_string(),
+            bot_id: std::env::var("AM_BOT_ID").ok(),
+            host: remote.host.clone(),
+            phase: "final",
+            outcome,
+            shared_wait_secs: lease.obs.shared_wait_secs,
+            slot_wait_secs: lease.obs.slot_wait_secs,
+        });
         // 整體上限從拿到名額與目錄才開始算（issue #104）。
         ctl.arm();
         lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
@@ -2938,23 +3018,120 @@ fn run_offload_on(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &
         Err(e) if e.downcast_ref::<Unreachable>().is_some() => EXIT_RUN_LOCALLY,
         // 守門尚未交目錄、遠端還沒開工：改排本機名額（issue #1853）。
         // 守門有回話＝連得上，只是滿了（健康檔在 [`acquire`] 記在排的那台名下）。
-        Err(e) if e.downcast_ref::<QueueFull>().is_some() => EXIT_RUN_LOCALLY,
-        Err(e) if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) => {
-            eprintln!(
-                "agents-manager: 遠端編譯超過 {} 上限，已中止（遠端那一整組行程已收掉、目錄與鎖已還回；可調 [build.remote] timeout_secs，0＝不設上限）。這次不會退回本機重跑",
-                limit_text(remote.timeout_secs)
-            );
-            EXIT_TIMEOUT
-        }
         Err(e) => {
-            eprintln!("agents-manager: remote Cargo failed: {e:#}");
-            126
+            if let Some(qf) = e.downcast_ref::<QueueFull>() {
+                let ev = am_base::remote_event::RemoteCargoEvent {
+                    ts: crate::db::now(),
+                    call_id: call_id.to_string(),
+                    bot_id: std::env::var("AM_BOT_ID").ok(),
+                    host: qf.host.clone(),
+                    phase: "final",
+                    outcome: "local_fallback",
+                    shared_wait_secs: qf.shared_wait_secs,
+                    slot_wait_secs: qf.slot_wait_secs,
+                };
+                am_base::remote_event::record(data_dir, &ev);
+                EXIT_RUN_LOCALLY
+            } else if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) {
+                eprintln!(
+                    "agents-manager: 遠端編譯超過 {} 上限，已中止（遠端那一整組行程已收掉、目錄與鎖已還回；可調 [build.remote] timeout_secs，0＝不設上限）。這次不會退回本機重跑",
+                    limit_text(remote.timeout_secs)
+                );
+                EXIT_TIMEOUT
+            } else {
+                eprintln!("agents-manager: remote Cargo failed: {e:#}");
+                126
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// pre-1960 的歷史原樣 read_handshake 邏輯，專用於回歸對照測試。
+    fn pre_1960_read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
+        let mut hs = Handshake::default();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if r.read_line(&mut line)? == 0 {
+                anyhow::bail!("remote workdir guard exited before handing out a directory");
+            }
+            let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+            match f.as_slice() {
+                ["END"] if !hs.dir.is_empty() => return Ok(hs),
+                ["ROOT", root] => hs.root = root.to_string(),
+                ["DIR", dir, token] => {
+                    hs.dir = dir.to_string();
+                    hs.token = token.to_string();
+                }
+                ["D", path, k, b, idle] => hs.dirs.push(RemoteDir {
+                    path: path.to_string(),
+                    locked: *k == "1",
+                    busy: *b == "1",
+                    idle_secs: idle.parse::<i64>().unwrap_or(0).max(0) as u64,
+                }),
+                ["F", free, total] => hs.disk = free.parse().ok().zip(total.parse().ok()),
+                ["SLOT", i, max] => hs.slot = i.parse().ok().zip(max.parse().ok()),
+                ["BUSY", n] => return Err(anyhow::Error::new(Busy { waiters: n.parse().unwrap_or(0) })),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn pre_1960_parser_equivalence_on_new_outcome_fixtures() {
+        // 包含新 OUTCOME 結構化行的 fixture 輸入
+        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t2\t3\nD\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\nF\t500\t1000\nOUTCOME\tshared\t153\t0\nEND\n";
+
+        let old_res = pre_1960_read_handshake(&mut std::io::Cursor::new(out)).unwrap();
+        let new_res = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
+
+        // 逐欄驗證舊 parser 與新 parser 回傳完全一致（新 OUTCOME 控制行被舊 parser 依 _ => {} 乾淨略過）
+        assert_eq!(old_res.root, new_res.root);
+        assert_eq!(old_res.dir, new_res.dir);
+        assert_eq!(old_res.token, new_res.token);
+        assert_eq!(old_res.dirs, new_res.dirs);
+        assert_eq!(old_res.disk, new_res.disk);
+        assert_eq!(old_res.slot, new_res.slot);
+    }
+
+    #[test]
+    fn read_handshake_backward_compatibility_without_outcome() {
+        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t1\t3\nEND\n";
+        let (hs, obs) = read_handshake_observed(&mut std::io::Cursor::new(out));
+        let h = hs.unwrap();
+        assert_eq!(h.dir, "/r/0123456789abcdef/shared");
+        assert_eq!(obs.outcome, None);
+        assert_eq!(obs.shared_wait_secs, None);
+        assert_eq!(obs.slot_wait_secs, None);
+
+        // 舊 wrapper 原樣成功
+        let h_old = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
+        assert_eq!(h_old.dir, "/r/0123456789abcdef/shared");
+    }
+
+    #[test]
+    fn read_handshake_with_outcome_control_line() {
+        let out = "ROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t2\t3\nOUTCOME\tshared\t153\t0\nEND\n";
+        let (hs, obs) = read_handshake_observed(&mut std::io::Cursor::new(out));
+        let h = hs.unwrap();
+        assert_eq!(h.dir, "/r/0123456789abcdef/shared");
+        assert_eq!(obs.outcome.as_deref(), Some("shared"));
+        assert_eq!(obs.shared_wait_secs, Some(153));
+        assert_eq!(obs.slot_wait_secs, Some(0));
+    }
+
+    #[test]
+    fn read_handshake_observed_captures_queue_full_outcome_before_eof() {
+        let out = "OUTCOME\tqueue_full\t900\t4\n";
+        let (hs, obs) = read_handshake_observed(&mut std::io::Cursor::new(out));
+        assert!(hs.is_err(), "must fail due to EOF before DIR/END");
+        assert_eq!(obs.outcome.as_deref(), Some("queue_full"));
+        assert_eq!(obs.shared_wait_secs, Some(900));
+        assert_eq!(obs.slot_wait_secs, Some(4));
+    }
+
     #[test]
     fn rsync_destination_brackets_ipv6_hosts() {
         let mut r = remote();
@@ -5888,6 +6065,12 @@ fn main() {
         assert_eq!(rc, EXIT_RUN_LOCALLY, "滿額不能回 75 或執行遠端 cargo");
         assert!(t0.elapsed() < Duration::from_secs(30), "應短暫等候後退回本機");
         assert!(crate::remote_health::read(&data, "me@fake:22").unwrap().reachable);
+        let events = std::fs::read_to_string(data.join(am_base::remote_event::EVENT_FILE)).unwrap();
+        let events: Vec<serde_json::Value> = events.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["outcome"], "local_fallback");
+        assert_eq!(events[0]["host"], remote.host);
+        assert!(events[0]["slot_wait_secs"].as_u64().is_some());
         holder.finish();
         let _ = std::fs::remove_dir_all(base);
     }
@@ -5902,7 +6085,36 @@ fn main() {
         assert_eq!(rc, 101, "cargo 自己的退出碼原樣帶回，不是 125");
         let h = crate::remote_health::read(&data, "me@fake:22").expect("結論要記下來");
         assert!(h.reachable && h.reason.is_none(), "連得上：{h:?}");
+        let events = std::fs::read_to_string(data.join(am_base::remote_event::EVENT_FILE)).unwrap();
+        let events: Vec<serde_json::Value> = events.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(events.len(), 1, "record the selected lease even when cargo fails");
+        assert_eq!(events[0]["outcome"], "shared");
+        assert_eq!(events[0]["host"], remote.host);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn event_write_failure_or_lock_contention_does_not_change_build_result() {
+        use std::os::unix::io::AsRawFd;
+        for busy in [false, true] {
+            let base = base();
+            let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+            let lock = data.join(am_base::remote_event::LOCK_FILE);
+            std::fs::create_dir_all(&data).unwrap();
+            let holder = if busy {
+                let file = std::fs::File::create(&lock).unwrap();
+                assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+                Some(file)
+            } else {
+                std::fs::create_dir(&lock).unwrap();
+                None
+            };
+            let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".into()], &Deadline::new(remote.timeout_secs)));
+            assert_eq!(rc, 0, "event writer must not change a successful build");
+            assert!(!data.join(am_base::remote_event::EVENT_FILE).exists());
+            drop(holder);
+            let _ = std::fs::remove_dir_all(base);
+        }
     }
 
     /// 假 rsync：每跑一次在 `<base>/rsync-calls` 記一筆；第 N 次（1 起算）照 `fails` 第 N 個字元決定：`v`＝印 rsync 真的會印的
@@ -6194,6 +6406,9 @@ fn main() {
         // guard 腳本用 `date +%s`（整秒）算已等多久：上限 2 秒實際會在 1～2 秒之間放棄（負載高時更明顯），
         // 要擋的是「馬上改用冷編譯」，所以門檻是至少等過 1 秒，不是剛好 2 秒。
         assert!(t0.elapsed() >= Duration::from_secs(1), "{:?}", t0.elapsed());
+        assert_eq!(c.obs.outcome.as_deref(), Some("isolated"));
+        assert!(c.obs.shared_wait_secs.is_some_and(|seconds| seconds >= 1));
+        assert!(c.obs.slot_wait_secs.is_some());
         c.finish();
         b.finish();
         let _ = std::fs::remove_dir_all(base);
