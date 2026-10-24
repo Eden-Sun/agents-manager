@@ -812,7 +812,9 @@ pub fn sh_quote(s: &str) -> String {
 //
 // 版面：`<remote_root>/<repo common dir 路徑的 fnv1a64>/`
 //   - `shared/`＋`shared.lock`：同一個 repo 的 worktree 共用原始碼＋`target/`，跨呼叫保留（增量編譯）。
-//   - `job-<pid>-<ms>/`＋`.lock`：`shared` 被另一次呼叫佔著、等了 [`SHARED_WAIT_SECS`] 還沒空出來時的退路，冷編譯，結束就刪。
+//   - `shared-<N>/`＋`.lock`（#1956）：同一個池的其他份，池的大小＝這台的名額數。守門拿第一份沒人持鎖的；
+//     第一次用到某一份時從池裡另一份複製出來（守門的 `seed`），之後各自增量。好幾個 worktree 同時編，各拿一份熱的，不再串成一列。
+//   - `job-<pid>-<ms>/`＋`.lock`：池裡每一份都被佔著、等了 [`SHARED_WAIT_SECS`] 還沒有任何一份空出來時的退路，冷編譯，結束就刪。
 //   - 純數字的 `<pid>/`：#141 之前的版本留下的，沒有鎖，只能靠「沒行程在用＋放很久」回收。
 // 另有 `<remote_root>/.slots/<n>`：遠端名額（issue #104）。守門拿到目錄之後再搶一個 `flock`，拿著直到結束——同一個 remote_root
 // 不分 worktree 同時最多 `max_concurrent` 個遠端編譯，其餘排隊。鎖跟著守門 shell 的 fd 走，守門怎麼死都會放。
@@ -834,7 +836,9 @@ const SHARED_IDLE_SECS: u64 = 3 * 3600;
 /// 遠端磁碟剩不到這個比例時，閒置的 `shared/` 也照孤兒的門檻收（#141：一小時塞滿 97G）。
 const LOW_DISK_FREE_PCT: u64 = 25;
 
-/// `shared/` 被佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104、#1937）。
+/// 共用 target 池（`shared`、`shared-<N>`）每一份都被佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104、#1937、#1956）。
+/// 池的份數＝名額數，所以池全忙＝名額全滿：這時改走 `job-*` 也拿不到名額、只會退回本機冷編，上限縮短只會更慢（#1956 的取捨）；
+/// 等待結束條件是「任何一份空出來」，實際等待約是單份時的 1/N。
 /// 持有者佔的是整段 cargo（編譯＋測試），不是只有增量的十幾秒；#1856 之後同一個 repo 的所有 worktree 共用這一份 `shared/`，
 /// 排在前面的好幾顆 child 都可能要跑好幾分鐘。r7 只有 1 個遠端名額（`max_concurrent = 1`）：持有者還在跑時，改用 `job-*` 也拿不到
 /// 遠端名額，所以舊的 5 分鐘一到只能改在本機冷編譯（#1886 的 log：等滿 300 秒 → 改用獨立目錄 → 遠端名額全滿 → 本機排隊，本機跑了 8 分多）。
@@ -848,19 +852,23 @@ const QUEUE_WAIT_SECS: u64 = 3;
 /// 2026-09-19 在 32 vCPU／64 GiB 的遠端量：一次冷的 `cargo test -p agents-managerd` 光主 crate 那顆 rustc 就多吃約 4.6 GiB，
 /// 兩次同時跑時全機用到 8.2 GiB；再加上測試本身（8 個執行緒、各自起子行程）與 lib／測試 harness 兩顆大 rustc 重疊，一次抓 8 GiB。
 const AUTO_RESERVE_KB: u64 = 8 * 1024 * 1024;
-const AUTO_PER_JOB_KB: u64 = 8 * 1024 * 1024;
+/// 2026-10-24 本機實測（#1956）：`agents_managerd` 那顆 rustc 一次約 13.5 GB RSS，抓 14 GiB。62 GB 的本機 → 3 份；15 GB 的 r7 → 1 份。
+const AUTO_PER_JOB_KB: u64 = 14 * 1024 * 1024;
 
 /// 守門的排隊參數（issue #104）。正式呼叫由設定與上面的常數組成（[`Admission::from_cfg`]）；測試用短的等待時間。
 #[derive(Debug, Clone, Copy)]
 struct Admission {
-    /// 同時最多幾個遠端編譯；`0`＝守門依遠端的核數與 RAM 算：
-    /// `min(核數 × 1.5 ÷ cargo_jobs, (RAM − 8 GiB) ÷ 8 GiB)`，至少 1。CPU 容許 1.5 倍超賣（一次編譯大多時間只有一顆 rustc 在跑，
-    /// `cargo_jobs` 是尖峰），記憶體不超賣——2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮。32 核／64 GiB、`cargo_jobs = 8` → 6。
+    /// 同時最多幾個遠端編譯，也是每個 repo 共用 target 池的份數（#1956）；`0`＝守門依遠端的核數與 RAM 算：
+    /// `min(核數 × 3 ÷ cargo_jobs, (RAM − 8 GiB) ÷ 14 GiB)`，至少 1。CPU 容許 3 倍超賣（一次編譯大多時間只有一顆 rustc 在跑，
+    /// `cargo_jobs` 是尖峰；#1956 實測瓶頸是單顆 `agents_managerd` 串行，不是核數），記憶體不超賣——2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮。
+    /// 16 核／62 GiB、`cargo_jobs = 12` → 3；32 核／64 GiB → 4；15 GiB 的 r7 → 1。
     max: usize,
     /// 自動算時每個編譯算幾個核（`cargo_jobs`）。
     jobs: usize,
     shared_wait_secs: u64,
     queue_wait_secs: u64,
+    /// 共用 target 池的份數（#1956）；`0`＝跟 `max`（算出來的名額數）一樣。正式設定一律 0，測試用 1 走舊的「單份＋`job-*`」路徑。
+    pool: usize,
 }
 
 impl Admission {
@@ -870,6 +878,7 @@ impl Admission {
             jobs: remote.cargo_jobs.max(1),
             shared_wait_secs: SHARED_WAIT_SECS,
             queue_wait_secs: Self::queue_wait_secs(),
+            pool: 0,
         }
     }
 
@@ -923,6 +932,7 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
         .replace("@JOBS@", &adm.jobs.max(1).to_string())
         .replace("@SWAIT@", &adm.shared_wait_secs.to_string())
         .replace("@QWAIT@", &adm.queue_wait_secs.to_string())
+        .replace("@POOL@", &adm.pool.to_string())
         .replace("@RESERVE_KB@", &AUTO_RESERVE_KB.to_string())
         .replace("@PER_JOB_KB@", &AUTO_PER_JOB_KB.to_string())
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
@@ -931,7 +941,7 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
 const GUARD_SH: &str = r#"set -u
 trap '' HUP PIPE
 root=@ROOT@; hash=@HASH@; job=@JOB@; token=@TOKEN@
-max=@MAX@; jobs=@JOBS@; swait=@SWAIT@; qwait=@QWAIT@
+max=@MAX@; jobs=@JOBS@; swait=@SWAIT@; qwait=@QWAIT@; pool=@POOL@
 if ! command -v flock >/dev/null 2>&1 || [ ! -r /proc/self/stat ]; then
   echo 'agents-manager: remote Cargo 的遠端要有 flock（util-linux）與 /proc（Linux）' >&2; exit 2
 fi
@@ -940,10 +950,12 @@ mkdir -p "$root" && cd "$root" && root=$(pwd -P) || exit 2
 if [ "$max" -eq 0 ]; then
   cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null); case "$cpu" in ''|*[!0-9]*) cpu=1 ;; esac
   mem=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null); case "$mem" in ''|*[!0-9]*) mem=0 ;; esac
-  max=$((cpu * 3 / (2 * jobs))); b=$(((mem - @RESERVE_KB@) / @PER_JOB_KB@))
+  max=$((cpu * 3 / jobs)); b=$(((mem - @RESERVE_KB@) / @PER_JOB_KB@))
   [ "$b" -lt "$max" ] && max=$b
   [ "$max" -ge 1 ] || max=1
 fi
+# 共用 target 池的份數（#1956）：0＝跟名額數一樣。
+[ "$pool" -ge 1 ] || pool=$max
 # `$$` 只做行程簿記（自己的 process group 不能被收、`/proc/$$/fd`）；租約身份是本機給的 $token，PID 會被回收重用。
 me=$(ps -o pgid= -p $$ | tr -d ' ')
 # 只碰自己命名規則的目錄：remote_root 設錯（例如設成家目錄）也不會去刪別人的東西。
@@ -955,6 +967,7 @@ ours() {
   x=${r#*/}
   case "$x" in
     shared) return 0 ;;
+    shared-*) x=${x#shared-}; case "$x" in ''|*[!0-9]*) return 1 ;; esac; return 0 ;;
     job-*) x=${x#job-}; case "$x" in ''|*[!0-9-]*) return 1 ;; esac; return 0 ;;
   esac
   case "$x" in ''|*[!0-9]*) return 1 ;; esac
@@ -1078,7 +1091,8 @@ hold() {
   reap "$1"
   sweep "$1"
   rm -f "$1".pgid-*
-  if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock" "$1.source-manifest" "$1".source-manifest.tmp-*; fi
+  case "${1##*/}" in shared|shared-*) keep=1 ;; *) keep= ;; esac
+  if [ -n "$keep" ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock" "$1.source-manifest" "$1".source-manifest.tmp-*; fi
   return 0
 }
 queue_full() {
@@ -1088,20 +1102,94 @@ queue_full() {
   echo "agents-manager: 等遠端名額等了 ${waited:-$qwait} 秒還是全滿（$max 個），這次改在本機排隊" >&2
   exit 75
 }
+# 共用 target 池（#1956）：`shared`、`shared-2` … `shared-$max`，一份一把鎖、各自增量；池的大小＝名額數，
+# 所以「池全忙」就是「名額全滿」，在那之前不會有人等。
+member() { if [ "$1" -le 1 ]; then printf '%s/%s/shared' "$root" "$hash"; else printf '%s/%s/shared-%s' "$root" "$hash" "$1"; fi; }
+try_pool() {
+  i=1
+  while [ "$i" -le "$pool" ]; do
+    d=$(member "$i")
+    exec 8>>"$d.lock"
+    flock -n 8 && return 0
+    exec 8>&-
+    i=$((i + 1))
+  done
+  return 1
+}
+# 拿池裡一份的鎖（fd 8，拿到的那份在 $d）：都忙就每秒輪詢**每一份**，任何一份空出來就拿；最多等 $1 秒，還是沒有回 75。
+lock_pool() {
+  try_pool && return 0
+  [ "$1" -gt 0 ] || return 75
+  echo "agents-manager: 這個 repo 的共用遠端 target（$pool 份）都在用，等任何一份空出來（最多 $1 秒；增量編譯比冷編譯划算）…" >&2
+  h0=$(date +%s)
+  while :; do
+    alive || return 73
+    if try_pool; then
+      hw=$(($(date +%s) - h0)); [ "$hw" -eq 0 ] || echo "agents-manager: 等了 $hw 秒拿到共用遠端 target（${d##*/}）" >&2
+      return 0
+    fi
+    [ $(($(date +%s) - h0)) -lt "$1" ] || return 75
+  done
+}
+# 第一次用到池裡的某一份（目錄還不存在）：從另一份複製，不冷編。先挑沒人持鎖的（一致的快照，拷的時候拿著它的鎖），
+# 都在用才從最近用過的那份拷。各 profile 的 `.fingerprint/` 先拷、其餘後拷且不覆蓋：拷到的指紋不會比產物新
+# （舊指紋＝多重編一次，不會把舊產物誤判成新鮮）。拷進 `<份>.seed` 再 rename，半途死掉不會留下一份殘缺的。
+seed() {
+  [ -e "$1" ] && return 0
+  src=; busy_src=; best=-1; i=1
+  while [ "$i" -le "$pool" ]; do
+    c=$(member "$i"); i=$((i + 1))
+    [ "$c" != "$1" ] && [ -d "$c/target" ] && [ ! -L "$c" ] || continue
+    exec 5>>"$c.lock"
+    if flock -n 5; then src=$c; break; fi
+    exec 5>&-
+    m=$(stat -c %Y "$c.lock" 2>/dev/null) || m=0
+    [ "$m" -gt "$best" ] && { best=$m; busy_src=$c; }
+  done
+  [ -n "$src" ] || src=$busy_src
+  [ -n "$src" ] || return 0
+  echo "agents-manager: 第一次用 ${1##*/}：從 ${src##*/} 複製共用 target 再增量編（不冷編）…" >&2
+  t0=$(date +%s); tmp="$1.seed"
+  rm -rf "$tmp"
+  ok=1
+  mkdir -p "$tmp/target" || ok=
+  for fp in "$src"/target/*/.fingerprint "$src"/target/*/*/.fingerprint; do
+    [ -n "$ok" ] && [ -d "$fp" ] || continue
+    rel=${fp#"$src"/}; mkdir -p "$tmp/${rel%/*}" && cp -a --reflink=auto "$fp" "$tmp/${rel%/*}/" || ok=
+  done
+  # 不覆蓋已經拷好的指紋；舊版 coreutils（< 9.3）沒有 `--update=none` 就改用 rsync 補完。
+  if [ -n "$ok" ] && { cp -a --reflink=auto --update=none "$src/." "$tmp/" 2>/dev/null || rsync -a --ignore-existing "$src/" "$tmp/"; } && mv "$tmp" "$1"; then
+    [ -f "$src.source-manifest" ] && cp -p "$src.source-manifest" "$1.source-manifest"
+    echo "agents-manager: 複製完成（$(($(date +%s) - t0)) 秒）" >&2
+  else
+    rm -rf "$tmp"
+    echo "agents-manager: 從 ${src##*/} 複製失敗，${1##*/} 這次冷編" >&2
+  fi
+  exec 5>&-
+  return 0
+}
 # 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
 n=0; s0=$(date +%s)
 while :; do
   mkdir -p "$root/$hash" || exit 2
   w=$((swait - ($(date +%s) - s0))); [ "$w" -gt 0 ] || w=0
-  hold "$root/$hash/shared" "$w" 8>>"$root/$hash/shared.lock"; rc=$?
+  lock_pool "$w"; rc=$?
+  case $rc in
+    0) ;;
+    73) exit 0 ;;
+    75) break ;;
+    *) exit $rc ;;
+  esac
+  seed "$d"
+  hold "$d" 0; rc=$?
+  exec 8>&-
   case $rc in
     0|73) exit 0 ;;
     74) queue_full ;;
-    75) break ;;
   esac
   n=$((n + 1)); [ $n -lt 5 ] || exit $rc
 done
-[ "$swait" -eq 0 ] || echo "agents-manager: 等了 $swait 秒共用遠端 target 還沒空出來" >&2
+[ "$swait" -eq 0 ] || echo "agents-manager: 等了 $swait 秒共用遠端 target 還沒空出來（$pool 份都在用）" >&2
 echo 'agents-manager: 這棵 worktree 的共用遠端 target 正被另一次呼叫使用，這次改用獨立目錄（冷編譯，結束就刪）' >&2
 hold "$root/$hash/$job" 0 8>>"$root/$hash/$job.lock"; rc=$?
 # 重導向先把 $job.lock 建出來，只有 hold 成功的尾端會刪它；73／74／75 路徑不刪就永遠留著、沒人 GC（#326）。
@@ -1165,6 +1253,11 @@ pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
     }
 }
 
+/// 共用 target 池的一份（#1956）：`shared` 或 `shared-<N>`（同守門的 `ours`）。
+fn is_shared_leaf(leaf: &str) -> bool {
+    leaf == "shared" || leaf.strip_prefix("shared-").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LeafKind {
     Shared,
@@ -1178,7 +1271,7 @@ fn leaf_kind(root: &str, path: &str) -> Option<LeafKind> {
     if hash.len() != 16 || !hash.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
-    if leaf == "shared" {
+    if is_shared_leaf(leaf) {
         return Some(LeafKind::Shared);
     }
     let digits = leaf.strip_prefix("job-").unwrap_or(leaf);
@@ -1228,7 +1321,8 @@ pub fn select_gc(hs: &Handshake, policy: &GcPolicy) -> Vec<String> {
         .collect();
     if policy.max_shared > 0 {
         // 盤點不含這次自己的目錄，所以自己的那份另外算。
-        let total = hs.dirs.iter().filter(is_shared).count() + usize::from(hs.dir.ends_with("/shared"));
+        let own = hs.dir.rsplit_once('/').is_some_and(|(_, leaf)| is_shared_leaf(leaf));
+        let total = hs.dirs.iter().filter(is_shared).count() + usize::from(own);
         let gone = hs.dirs.iter().filter(is_shared).filter(|d| picked.contains(&d.path)).count();
         let kept = total.saturating_sub(gone);
         if kept > policy.max_shared {
@@ -3523,23 +3617,23 @@ exec /bin/sh -c "$inner"
 
     /// 守門腳本裡那條自動上限算式的 Rust 版（測試用的對照；遠端才知道自己的核數與 RAM，正式的只有腳本那份）。
     pub(super) fn auto_max_concurrent(ncpu: u64, mem_kb: u64, jobs: usize) -> usize {
-        let by_cpu = ncpu * 3 / (2 * jobs.max(1) as u64);
+        let by_cpu = ncpu * 3 / jobs.max(1) as u64;
         let by_mem = mem_kb.saturating_sub(AUTO_RESERVE_KB) / AUTO_PER_JOB_KB;
         by_cpu.min(by_mem).max(1) as usize
     }
 
-    /// issue #104：`max_concurrent = 0`（預設）依遠端核數與 RAM 算——CPU 容許 1.5 倍超賣，記憶體每個編譯 8 GiB、留 8 GiB 給系統。
-    /// 現在那台（32 核、MemTotal 65837352 kB）配 `cargo_jobs = 8` 是 6；小機器至少 1；設定寫了數字就用設定、最多 64。
+    /// issue #104／#1956：`max_concurrent = 0`（預設）依遠端核數與 RAM 算——CPU 容許 3 倍超賣，記憶體每個編譯 14 GiB（`agents_managerd`
+    /// 那顆 rustc 實測 13.5 GB）、留 8 GiB 給系統。本機（16 核／62 GiB）配 `cargo_jobs = 12` 是 3；小機器至少 1；設定寫了數字就用設定、最多 64。
     #[test]
     fn the_remote_cap_defaults_to_what_the_hosts_cores_and_ram_can_take() {
         assert_eq!(BuildRemoteCfg::default().max_concurrent, 0, "預設＝自動");
         let old: BuildRemoteCfg = toml::from_str("host = \"h\"\n").unwrap();
         assert_eq!(old.max_concurrent, 0, "舊設定沒有這個 key：自動");
-        assert_eq!(auto_max_concurrent(32, 65_837_352, 8), 6, "現在那台：min(32×1.5÷8, (62.8−8)÷8) = min(6, 6)");
-        assert_eq!(auto_max_concurrent(32, 65_837_352, 4), 6, "cargo_jobs 小一點時換記憶體卡住");
-        assert_eq!(auto_max_concurrent(8, 16 * 1024 * 1024, 4), 1, "16 GiB 的機器：一次一個");
+        assert_eq!(auto_max_concurrent(16, 65_000_000, 12), 3, "本機：min(16×3÷12, (62−8)÷14) = min(4, 3)");
+        assert_eq!(auto_max_concurrent(16, 65_000_000, 24), 2, "cargo_jobs 很大時換 CPU 卡住");
+        assert_eq!(auto_max_concurrent(8, 15 * 1024 * 1024, 8), 1, "r7（15 GiB）：一次一個");
         assert_eq!(auto_max_concurrent(2, 4 * 1024 * 1024, 8), 1, "再小也至少 1");
-        assert_eq!(auto_max_concurrent(64, 256 * 1024 * 1024, 4), 24);
+        assert_eq!(auto_max_concurrent(64, 256 * 1024 * 1024, 4), 17);
         let set = BuildRemoteCfg { max_concurrent: 3, cargo_jobs: 5, ..Default::default() };
         let adm = Admission::from_cfg(&set);
         assert_eq!((adm.max, adm.jobs, adm.shared_wait_secs, adm.queue_wait_secs), (3, 5, SHARED_WAIT_SECS, QUEUE_WAIT_SECS));
@@ -3746,7 +3840,7 @@ mod guard_tests {
     }
 
     /// 既有測試用的：名額夠多、shared 被佔著就馬上改用 job 目錄（等待另有測試）。
-    const QUICK: Admission = Admission { max: 64, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 30 };
+    const QUICK: Admission = Admission { max: 64, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 30, pool: 1 };
 
     fn guard(base: &Path, hash: &str, job: &str) -> Lease {
         guard_with(base, hash, job, QUICK)
@@ -5889,7 +5983,7 @@ fn main() {
     #[test]
     fn different_worktrees_share_one_remote_cap() {
         let base = base();
-        let adm = Admission { max: 2, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 60 };
+        let adm = Admission { max: 2, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 60, pool: 1 };
         let mut a = guard_with(&base, "00000000000000a1", "job-1-1", adm);
         let mut b = guard_with(&base, "00000000000000b2", "job-2-2", adm);
         let mut got = vec![a.hs.slot, b.hs.slot];
@@ -6103,5 +6197,89 @@ fn main() {
             g.finish();
         }
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// #1956：共用 target 是一個池（份數＝名額數）。第一份被佔著時下一個呼叫拿第二份——第一次用到時從第一份複製出來
+    /// （連同 `.fingerprint` 與 source manifest），不是冷編譯；之後那份留著各自增量，不再重新複製。
+    #[test]
+    fn a_busy_shared_target_hands_the_next_call_a_seeded_copy_instead_of_a_cold_dir() {
+        let base = base();
+        let pool = Admission { max: 3, pool: 0, ..QUICK };
+        let mut a = guard_with(&base, HASH, "job-1-1", pool);
+        let adir = PathBuf::from(&a.hs.dir);
+        assert!(a.hs.dir.ends_with("/shared"), "{:?}", a.hs);
+        std::fs::create_dir_all(adir.join("target/debug/.fingerprint/p-1")).unwrap();
+        std::fs::create_dir_all(adir.join("target/debug/deps")).unwrap();
+        std::fs::write(adir.join("target/debug/.fingerprint/p-1/lib-p"), "fp").unwrap();
+        std::fs::write(adir.join("target/debug/deps/libp.rlib"), "old").unwrap();
+        std::fs::write(adir.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(format!("{}.source-manifest", a.hs.dir), "m").unwrap();
+
+        let mut b = guard_with(&base, HASH, "job-2-2", pool);
+        let bdir = PathBuf::from(&b.hs.dir);
+        assert!(b.hs.dir.ends_with(&format!("/{HASH}/shared-2")), "第一份在用：拿池裡的第二份，不是 job 目錄：{:?}", b.hs);
+        assert_eq!(std::fs::read_to_string(bdir.join("target/debug/deps/libp.rlib")).unwrap(), "old", "從第一份複製了產物");
+        assert_eq!(std::fs::read_to_string(bdir.join("target/debug/.fingerprint/p-1/lib-p")).unwrap(), "fp", "指紋也一起複製");
+        assert!(bdir.join("Cargo.toml").is_file(), "來源也一起");
+        assert_eq!(std::fs::read_to_string(format!("{}.source-manifest", b.hs.dir)).unwrap(), "m", "manifest 跟著複製，失效 touch 只碰差異");
+        assert!(!Path::new(&format!("{}.seed", b.hs.dir)).exists(), "暫存的 .seed 改名成正式的了");
+        std::fs::write(bdir.join("target/own"), "b").unwrap();
+        assert!(b.finish().unwrap().success());
+        assert!(bdir.join("target/own").is_file(), "池裡的每一份都留著給下一次（不是用完就刪的 job 目錄）");
+        assert!(a.finish().unwrap().success());
+
+        // 都空著：照順序先拿第一份；第一份再被佔著時拿到的是已經在的第二份，不會重新複製蓋掉它。
+        std::fs::write(adir.join("target/debug/deps/libp.rlib"), "new").unwrap();
+        let mut c = guard_with(&base, HASH, "job-3-3", pool);
+        assert_eq!(c.hs.dir, adir.display().to_string());
+        let mut d = guard_with(&base, HASH, "job-4-4", pool);
+        assert_eq!(d.hs.dir, bdir.display().to_string());
+        assert!(bdir.join("target/own").is_file(), "已經在的那份不重新複製");
+        assert_eq!(std::fs::read_to_string(bdir.join("target/debug/deps/libp.rlib")).unwrap(), "old");
+        d.finish();
+        c.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// #1956：池全忙時每秒輪詢**每一份**，任何一份空出來就拿——不是只等第一份。
+    #[test]
+    fn a_full_pool_hands_out_whichever_copy_frees_up_first() {
+        let base = base();
+        let pool = Admission { max: 2, pool: 0, ..QUICK };
+        let mut a = guard_with(&base, HASH, "job-1-1", pool);
+        let mut b = guard_with(&base, HASH, "job-2-2", pool);
+        assert!(b.hs.dir.ends_with("/shared-2"), "{:?}", b.hs);
+        let bdir = b.hs.dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b2 = base.clone();
+        let waiter = std::thread::spawn(move || {
+            tx.send(guard_with(&b2, HASH, "job-3-3", Admission { shared_wait_secs: 30, max: 3, pool: 2, ..QUICK })).unwrap()
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_err(), "兩份都在用：要等");
+        b.finish();
+        let mut c = rx.recv_timeout(Duration::from_secs(15)).expect("第二份空出來就要拿到");
+        waiter.join().unwrap();
+        assert_eq!(c.hs.dir, bdir, "拿到先空出來的那份（第二份），不是死等第一份");
+        c.finish();
+        a.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 池的其他份（`shared-<N>`）跟 `shared` 一樣算共用 target：回收照共用的門檻、計進 `max_shared_dirs`；長得像但不是的不碰。
+    #[test]
+    fn pool_copies_are_shared_targets_for_gc() {
+        assert_eq!(leaf_kind("/r", "/r/0123456789abcdef/shared-2"), Some(LeafKind::Shared));
+        assert_eq!(leaf_kind("/r", "/r/0123456789abcdef/shared-12"), Some(LeafKind::Shared));
+        assert_eq!(leaf_kind("/r", "/r/0123456789abcdef/shared-"), None);
+        assert_eq!(leaf_kind("/r", "/r/0123456789abcdef/shared-2.seed"), None);
+        let dir = |leaf: &str, idle_secs| RemoteDir { path: format!("/r/0123456789abcdef/{leaf}"), locked: false, busy: false, idle_secs };
+        let hs = Handshake {
+            root: "/r".into(),
+            dir: "/r/0123456789abcdef/shared-3".into(),
+            dirs: vec![dir("shared", ORPHAN_IDLE_SECS + 5), dir("shared-2", ORPHAN_IDLE_SECS + 10)],
+            ..Default::default()
+        };
+        let policy = GcPolicy { shared_idle_secs: 24 * 3600, max_shared: 2 };
+        assert_eq!(select_gc(&hs, &policy), vec!["/r/0123456789abcdef/shared-2".to_string()], "連自己這份共 3 份、上限 2：收最久沒用的");
     }
 }

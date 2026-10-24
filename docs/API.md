@@ -1361,9 +1361,14 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
 
 遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<git common dir 路徑的 fnv1a64>/` 底下（同一個 repo 的 worktree 同一份，#1856），
 - `shared/`：同一個 repo 的 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
-  `shared.lock` 是 flock，同一時間只給一次呼叫（同一個 repo 的所有 worktree 共用這一份，#1856）；被佔著時**先等它用完**（每秒再試，最多 15 分鐘，
-  issue #104、#1937：持有者是整段 cargo，等完再增量編譯比自己冷編譯划算，上限取一次冷編譯加餘裕），等超過 15 分鐘才改用
-  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。整體上限 `timeout_secs` 仍包住這段等待。拿到 `shared/` 前有等過時，stderr 印「等了 N 秒拿到共用遠端 target」（沒等就不印；跟名額那層的「排到遠端名額…等了 N 秒」是兩件事）。
+  `shared.lock` 是 flock，同一時間只給一次呼叫（同一個 repo 的所有 worktree 共用，#1856）。
+- **共用 target 池（#1956）**：每個 repo 有 `shared/`、`shared-2/` … `shared-<N>/`，N＝那台的名額數（`max_concurrent`，`0`＝自動），一份一把鎖、各自保留各自增量。
+  守門照順序拿第一份沒人持鎖的；都在用就每秒輪詢**每一份**，任何一份空出來就拿（最多 15 分鐘，#1937；池全忙＝名額全滿，這時改冷目錄也拿不到名額，所以不縮短）。
+  第一次用到某一份（目錄還不存在）時先從池裡另一份複製：優先挑沒人持鎖的那份（拷的時候拿著它的鎖，一致的快照），都在用才從最近用過的那份拷；
+  `cp -a --reflink=auto`，各 profile 的 `.fingerprint/` 先拷、其餘後拷且不覆蓋（拷到的指紋不比產物新，最多多重編一次），連 source manifest 一起，
+  拷進 `<份>.seed/` 再改名。從正在編的那份拷時，正被覆寫的單一產物仍可能拷到半截——最壞是那一次編譯報錯，不會假綠，只發生在播種那一次。
+  stderr 講「第一次用 shared-N：從 shared 複製共用 target 再增量編」與花了幾秒。池裡每一份都等了超過 15 分鐘還沒空出來才改用
+  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。整體上限 `timeout_secs` 仍包住這段等待。拿到池裡某份前有等過時，stderr 印「等了 N 秒拿到共用遠端 target（shared-N）」（沒等就不印；跟名額那層的「排到遠端名額…等了 N 秒」是兩件事）。
 - 同步、算 hash 的是**工作區根**（issue #177），不是呼叫時的 cwd：像 cargo 一樣往上找最近一層宣告 `[workspace]` 的
   `Cargo.toml`（沒有工作區就用最近的套件根；完全不在 cargo 專案裡才是 cwd 本身），遠端 cargo 再 `cd` 到同一個相對子目錄。
   所以 `cd daemon && cargo check` 與在根目錄呼叫共用同一份 `shared/`，遠端有根的 `Cargo.lock`／`[profile]`／`.cargo/config.toml`，
@@ -1379,14 +1384,14 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   （對不上＝晚到的舊 run，exit 126 不跑 cargo）；`<dir>.pgid-<token>` 也以它命名，守門只收自己那一代的 process group。
   token 只有固定格式，不可能夾帶 shell 字元或路徑。
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
-  `[build.remote] shared_idle_hours`（預設 3）小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
+  `[build.remote] shared_idle_hours`（預設 3）小時的 `shared/`、`shared-<N>/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜shared-<N>｜job-*｜數字>` 這種名字；池的每一份都算進 `max_shared_dirs`。
   **`shared/` 另有數量上限（issue #196）**：`[build.remote] max_shared_dirs`（預設 12，`0`＝不限；設定檔寫死了就以設定檔為準，改線上的值走 `PUT /api/build/remote`）——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、
   各 2～3G（實測 36 個 hash、29G），只靠時間擋不住。超過就從最久沒用的開始收（LRU；至少閒置 10 分鐘，剛用完的不動；鎖被持有、有行程在用、這次自己的永遠不收），
   時機是每次 remote-cargo 呼叫開始時（跟 #141 的孤兒回收同一處），不靠 crontab。
 - **遠端名額（issue #104）**：同一個 `remote_root` 不分 worktree 同時最多 `[build.remote] max_concurrent` 個遠端編譯（`<remote_root>/.slots/<n>`
   的 flock，守門拿到目錄之後再搶、拿著直到結束，怎麼死都會放）。#155 讓遠端編譯不佔本機名額之後遠端沒有自己的上限，2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮。
-  `0`（預設）＝守門依那台的核數與 RAM 算：`min(核數 × 1.5 ÷ cargo_jobs, (MemTotal − 8 GiB) ÷ 8 GiB)`，至少 1——CPU 容許 1.5 倍超賣（一次編譯大多時間只有
-  一顆 rustc 在跑），記憶體不超賣（實測一次冷的 `cargo test -p agents-managerd` 光主 crate 那顆 rustc 就多吃約 4.6 GiB）；32 核／64 GiB、`cargo_jobs = 8` 是 6。
+  `0`（預設）＝守門依那台的核數與 RAM 算：`min(核數 × 3 ÷ cargo_jobs, (MemTotal − 8 GiB) ÷ 14 GiB)`，至少 1——CPU 容許 3 倍超賣（一次編譯大多時間只有
+  一顆 rustc 在跑），記憶體不超賣（#1956 實測 `agents_managerd` 那顆 rustc 一次約 13.5 GB RSS）；16 核／62 GiB、`cargo_jobs = 12` 是 3，15 GiB 的 r7 是 1。這個數字也是共用 target 池的份數。
   全滿就排隊：每秒再試，stderr 講「遠端同時編譯已滿（N 個），排隊等名額」，排到了講等了幾秒。順序是**先目錄、後名額**：等 shared 的人不佔名額，拿著名額的人不再等任何鎖。
   排隊期間守門每秒看一次 helper 還在不在：helper 那條 ssh 斷了（被砍、Ctrl-C、網路斷）時遠端 sshd 會關掉守門的 **stdin**（stdout 反而照樣寫得進去，
   2026-09-19 用真的 sshd 量過），所以用 `timeout 1 dd` 讀 stdin——讀到 EOF 就自己結束、放掉手上的鎖（實測砍掉本機 ssh 後 1 秒內）；helper 交握前不寫 stdin，不會吃掉資料。
