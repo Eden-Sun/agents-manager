@@ -184,6 +184,7 @@ fn rules() -> Vec<Rule> {
         allow_rule("GET", "/api/models", "Ordinary Bots can read a fresh cached model snapshot only; a miss/stale cache cannot start a CLI probe (#809)."),
         rule("POST", "/api/build/remote/test", Expect::UserOnly, None),
         rule("POST", "/api/hosts/{name}/tools/refresh", Expect::Forbidden, None),
+        rule("GET", "/api/hosts/{name}/baseline/plan", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/rewind", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/rewind", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/rewind", Expect::Forbidden, None),

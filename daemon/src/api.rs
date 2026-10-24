@@ -314,6 +314,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/reconnect", post(reconnect_host))
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
+        .route("/hosts/{name}/baseline/plan", get(baseline_plan))
         // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
         // header 一鍵升級 herdr：下載驗版本 → 等閒置 → 維護窗口裡重啟 server → bot 接回（SPEC §6.9b）。只給 UI。
@@ -1120,6 +1121,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/reconnect", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/tools/refresh", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/hosts/{name}/baseline/plan", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
@@ -1599,7 +1601,7 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
             // 工作環境一致性（只讀檢查，#719）：`{issues: null|[{id,severity,message}], checked_at}`；沒量過＝null。
-            "baseline": baselines.get(&c.name).map(|b| json!(b.snapshot(chrono::Utc::now()))),
+            "baseline": baselines.get(&c.name).map(|b| json!(b.view(chrono::Utc::now()))),
             // herdr 版本（server／protocol 來自 ping，只在連著時報；CLI 來自探測），SPEC §11.6。
             "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
@@ -3914,10 +3916,108 @@ async fn refresh_tools(
             "identities": crate::login_prompt::identities_json(&app, &name, &ht.identities),
             "shell_identities": ht.shell_identities,
             "tools_checked_at": ht.checked_at,
-            "baseline": app.host_baseline.lock().await.get(&name).map(|b| b.snapshot(chrono::Utc::now())),
+            "baseline": app.host_baseline.lock().await.get(&name).map(|b| b.view(chrono::Utc::now())),
         })),
     )
         .into_response())
+}
+
+/// 一致性差異的 dry-run 計畫（#719 階段 2，API §12.6a）：只由快取的差異與宣告檔推算，不連主機、不寫任何東西。
+async fn baseline_plan(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    if app.hosts.get(&name).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let Some(report) = app.host_baseline.lock().await.get(&name).map(|b| b.snapshot(chrono::Utc::now())) else {
+        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "這台主機還沒量過一致性"})));
+    };
+    let Some(issues) = report.issues.as_deref() else {
+        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "上一次探測沒跑完，差異未知"})));
+    };
+    let (Ok(m), Ok(v)) = (crate::host_baseline::manifest::shipped(), crate::host_baseline::manifest::shipped_values()) else {
+        return Err(LcError::Unavailable(json!({"error": "unavailable", "reason": "baseline_manifest_invalid", "host": name})));
+    };
+    let plan = crate::host_baseline::plan::build(m, v, issues);
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "host": name,
+            "checked_at": report.checked_at,
+            "stale": report.stale,
+            "plan_rev": plan.plan_rev,
+            "actions": plan.actions,
+        })),
+    )
+        .into_response())
+}
+
+#[cfg(test)]
+mod baseline_plan_route_tests {
+    use super::*;
+    use crate::host_baseline::{BaselineIssue, BaselineReport};
+    use axum::response::IntoResponse;
+
+    async fn call(app: &Arc<App>, host: &str, principal: RequestPrincipal) -> (StatusCode, Value) {
+        let resp = match baseline_plan(State(app.clone()), Path(host.to_string()), Extension(principal)).await {
+            Ok(r) => r,
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    fn report(issues: Option<Vec<BaselineIssue>>, checked_at: String, failed: bool) -> BaselineReport {
+        BaselineReport {
+            os: Some("Linux".into()),
+            issues,
+            checked_at,
+            failed_at: failed.then(crate::db::now),
+            error: failed.then(|| "ssh: timed out".to_string()),
+            stale: false,
+        }
+    }
+
+    /// #719 階段 2：只給使用者；未知主機 404；沒量過／探測沒跑完 409；過期照回並標 `stale`；hosts 列表的 `fixable` 跟計畫一致。
+    #[tokio::test]
+    async fn the_plan_is_user_only_and_reads_only_the_cached_baseline() {
+        let e = crate::testing::env().await;
+        let local = crate::config::LOCAL_HOST;
+        let (st, body) = call(&e.app, local, RequestPrincipal::Bot("b1".into())).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        let (st, _) = call(&e.app, "no-such-host", RequestPrincipal::User).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("baseline_unknown")), "never measured: {body}");
+        e.app.host_baseline.lock().await.insert(local.into(), report(None, crate::db::now(), false));
+        let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("baseline_unknown")), "probe cut short: {body}");
+
+        let issues = vec![
+            BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into() },
+            BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into() },
+        ];
+        e.app.host_baseline.lock().await.insert(local.into(), report(Some(issues.clone()), crate::db::now(), false));
+        let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!((body["host"].as_str(), body["stale"].as_bool()), (Some(local), Some(false)));
+        assert_eq!(body["actions"][0]["action"], "merge_key");
+        assert_eq!(body["actions"][0]["value"], true);
+        assert_eq!((body["actions"][1]["action"].as_str(), body["actions"][1]["reason"].as_str()), (Some("manual"), Some("no_installer")));
+        assert!(body["plan_rev"].as_str().is_some_and(|r| !r.is_empty()));
+        let view = e.app.host_baseline.lock().await.get(local).unwrap().view(chrono::Utc::now());
+        assert_eq!(view.fixable, vec!["codex.config.toml:features.hooks".to_string()]);
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!((v["fixable"][0].as_str(), v["issues"][1]["id"].as_str()), (Some("codex.config.toml:features.hooks"), Some("tool.rtk")), "flattened: {v}");
+
+        e.app.host_baseline.lock().await.insert(local.into(), report(Some(issues), "2026-01-01T00:00:00.000Z".into(), true));
+        let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
+        assert_eq!((st, body["stale"].as_bool()), (StatusCode::OK, Some(true)), "a stale plan is still served, marked stale: {body}");
+    }
 }
 
 /// 偵測結果被作廢不是上游錯誤：409 `host_superseded`、可重試；其餘錯誤照舊 502。

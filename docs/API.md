@@ -29,7 +29,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
 |---|---|---|---|---|---|
 | A | `/hosts/{name}/shells`、`…/shells/{pane_id}/terminal|text|keys`、`…/{pane_id}` | 只有網頁 | User principal；Bot／service principal 403 `user_only`；text／keys／close 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | shell metadata／畫面可能含使用者資料；寫入可操作主機 pane | 維持 |
-| A | `GET /hosts/{name}/gh`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
+| A | `GET /hosts/{name}/gh`、`GET /hosts/{name}/baseline/plan`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的（grok／antigravity-cli 且已登入除外）與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
@@ -133,6 +133,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。一致性差異的 dry-run 計畫（§12.6a） |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/identity-prefs` | User 或 Bot principal；只回 disabled host/kind/identity 名稱，不含 credential；Service 僅可走其明列 method/path scope |
@@ -204,6 +205,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -2300,6 +2302,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
   最後一次偵測失敗，**或** `checked_at` 比 6 小時 15 分（一個重量週期＋15 分寬限）還舊（讀不懂也算）。
   失敗只在這次偵測開始時的連線仍是現行連線時才標：偵測開始後主機已重連或改指，舊連線的逾時不改寫新連線剛量好的結果（#1371）。`stale` 在讀取時計算（不存），
   從沒量過的主機維持 `baseline: null`，失敗不會憑空造一份。
+  `fixable`（#719 階段 2）：dry-run 計畫（§12.6a）裡 `action: "merge_key"` 的差異 id 陣列；未知或沒有可自動補的＝`[]`。舊 daemon 沒這欄（或型別不對）時前端當成 `[]`。
   `issues: []` = 跟基準一致；`null` = 這趟探測沒跑完（逾時、被截斷），未知，不是「全缺」；整個 `baseline` 為 `null` = 還沒量過。
   `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`claude.<身份>.settings.json:defaultMode`、`codex.config.toml:approval_policy`、`codex.config.toml:features.hooks`、`gitconfig.token`…）。
   claude 身份含 `~/.claude`、`~/.claude-cc<N>`，以及 alias `cc0`–`cc6` 指到的 `CLAUDE_CONFIG_DIR`（目錄可以不在那個 glob）；`defaultMode` 檢查的是 `permissions.defaultMode`。`features.hooks` 要是 root `features.hooks = true` 或 `[features]` 表裡 `hooks = true`，其他 table 內的同名鍵不算。
@@ -2308,6 +2311,25 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
   event_key 是 `ops_alert:daemon:host_baseline:<host>:<差異 id 集合的雜湊>`——同一份差異（與順序無關）只推一次，差異變了才再推；一致或未知（`issues: null`）不推。
   跟 `tools` 同一趟探測、同時更新（連上、alias 變了、手動重新偵測，另外**每 6 小時**對連著的主機重跑一次）；`host_changed` 在有結果時帶 `baseline`（沒量過就不帶）；`POST /api/hosts/{name}/tools/refresh` 回應也帶。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502；偵測期間主機重連／改指或被更新的偵測取代時回 `409 host_superseded`，可重試），並推 `host_changed`。
+
+### 12.6a 一致性差異的 dry-run 計畫 `GET /api/hosts/{name}/baseline/plan`
+issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[].baseline` 差異與嵌進 binary 的基準宣告檔（`ops/host-baseline/baseline.toml`）推算，不連主機、不讀主機上的檔、不寫任何東西。只給使用者（Bot、AGM role → 403 `user_only`）。
+
+```json
+{ "host": "m4p", "checked_at": "2026-10-24T08:00:00.000Z", "stale": false, "plan_rev": "9f3c…",
+  "actions": [
+    { "id": "codex.config.toml:features.hooks", "action": "merge_key", "severity": "warn",
+      "target": "codex/config.toml", "key": "features.hooks", "value": true },
+    { "id": "tool.rtk", "action": "manual", "severity": "critical", "target": "tool/rtk", "reason": "no_installer" } ] }
+```
+
+- 每筆動作只有這些欄位：`id`（差異 id）、`action`、`severity`、`target`（顯示用位置 `<CLI>[:<身份>]/<檔>`，**不是**主機上的路徑）、`key`（設定鍵的點號路徑）、`value`（宣告檔寫的新值，只有 `merge_key` 有）、`reason`（只有 `manual` 有）。**不回傳主機上現有檔的內容**。
+- `action`：`merge_key`＝缺的設定鍵、宣告檔替它寫了 `value`；`manual`＝其他一律手動。`write_file`／`install_tool` 保留給之後的自動補齊，這一版不會出現。
+- `reason`：`no_value`（鍵沒有宣告值；含 Mac 專用 plugin）、`no_template`（缺檔，沒有模板）、`no_installer`（缺工具）、`invalid_json`（`settings.json` 不是合法 JSON）、`secret`（`gitconfig.token`，永遠手動）、`parent_missing`（鍵所在的檔本身不在）、`unknown`（宣告檔不認得的 id）。
+- codex 的 model／effort／service_tier 相關鍵**永遠不會出現**在計畫裡（連 `manual` 都不列）。
+- 順序照 `issues`，同一個 id 只列一次。`plan_rev` 是動作內容的雜湊：同一份計畫恆同、任何動作變了就變。
+- 結果過期（`stale: true`，見 §12.6）照樣回，前端自己決定怎麼標。
+- 404：不認得的主機。409 `{"error":"conflict","reason":"baseline_unknown","host"}`：還沒量過，或上一趟探測沒跑完（`issues: null`）。503 `{"reason":"baseline_manifest_invalid"}`：宣告檔讀不懂（只會是沒跑過測試的 build）。
 
 ### 12.6b herdr 版本 `hosts[].herdr`
 
