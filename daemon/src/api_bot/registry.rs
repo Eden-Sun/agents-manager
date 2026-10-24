@@ -98,9 +98,7 @@ impl ApiBotRegistry {
 
         let cancel_child = cancel_token.clone();
         // Box::pin prevents debug stack frame overflow (AGENTS.md #1465)
-        let runner_handle = tokio::spawn(Box::pin(async move {
-            task_fn(cancel_child).await
-        }));
+        let runner_handle = tokio::spawn(Box::pin(async move { task_fn(cancel_child).await }));
 
         // Dedicated supervisor task ensures the runner JoinHandle is never lost/detached,
         // even if cancel_and_join callers drop their futures.

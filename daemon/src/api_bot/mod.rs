@@ -11,3 +11,7 @@ pub(crate) mod runner;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;
+
+#[cfg(test)]
+mod adapter_tests;
+pub(crate) mod registry;

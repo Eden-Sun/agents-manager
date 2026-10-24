@@ -98,7 +98,13 @@ mod tests {
             .await
             .unwrap();
 
-        (pool, bot_id.into(), run_id.into(), turn_id.into(), session_id.into())
+        (
+            pool,
+            bot_id.into(),
+            run_id.into(),
+            turn_id.into(),
+            session_id.into(),
+        )
     }
 
     struct MockServerState {
@@ -230,7 +236,10 @@ mod tests {
         ) -> Result<UsageQuote, QuoteError> {
             let u = resp.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
             let input = u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let output = u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let output = u
+                .get("output_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
             if input < 0 || output < 0 {
                 return Err(QuoteError::UntrustedUsage);
             }
@@ -425,7 +434,10 @@ mod tests {
             content: serde_json::json!("Altered content"),
         }];
         use runner::Model;
-        assert!(adapter.complete(&mismatched_messages, &cancel).await.is_err());
+        assert!(adapter
+            .complete(&mismatched_messages, &cancel)
+            .await
+            .is_err());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
 
         // 2. Dispatch with original messages -> 1 wire call, body exactly matches expected
@@ -444,14 +456,8 @@ mod tests {
     #[tokio::test]
     async fn test_fail_closed_quote_provider_proves_zero_http_calls() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(
-            wire_calls.clone(),
-            serde_json::json!({}),
-            None,
-            None,
-            None,
-        )
-        .await;
+        let server =
+            spawn_mock_server(wire_calls.clone(), serde_json::json!({}), None, None, None).await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
         let adapter = ApiBotAdapter::new(
@@ -495,14 +501,8 @@ mod tests {
     #[tokio::test]
     async fn test_db_failure_leaves_zero_http_side_effects() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(
-            wire_calls.clone(),
-            serde_json::json!({}),
-            None,
-            None,
-            None,
-        )
-        .await;
+        let server =
+            spawn_mock_server(wire_calls.clone(), serde_json::json!({}), None, None, None).await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
 
@@ -737,7 +737,10 @@ mod tests {
 
         // Dispatch genuine wire complete
         use runner::Model;
-        let _resp = adapter.complete(&state.messages, &cancel).await.expect("complete ok");
+        let _resp = adapter
+            .complete(&state.messages, &cancel)
+            .await
+            .expect("complete ok");
 
         // Now maliciously forge a different assistant response in state.responses
         let mut forged_state = state.clone();
@@ -778,7 +781,9 @@ mod tests {
             .await
             .unwrap();
 
-        am_base::db::api_bot::recover_unknown(&pool, &run).await.unwrap();
+        am_base::db::api_bot::recover_unknown(&pool, &run)
+            .await
+            .unwrap();
 
         let row_recovered: (String, Option<i64>, i64) = sqlx::query_as(
             "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
