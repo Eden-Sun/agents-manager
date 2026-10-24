@@ -1249,12 +1249,19 @@ seed() {
 # 數人頭時鎖沒被持有的殘檔順手刪。只是挑主機用的估計，不影響誰拿到鎖。
 mkdir -p "$root/.queue" || exit 2
 qf="$root/.queue/$token"
-trap 'rm -f "$qf"' EXIT
+qftmp="$qf.tmp.$$"
+trap 'rm -f "$qf" "$qftmp"' EXIT
 # 試用（多台挑主機的第一輪）：池裡沒有空的份、或名額全滿就不等、不改走冷目錄；拿不到就回 `BUSY\t<排隊人數>`、exit 77。
 busy() {
   q=0
   for f in "$root"/.queue/*; do
     [ -f "$f" ] || continue
+    case "$f" in
+      *.tmp.*)
+        find "$f" -mmin +1 -exec flock -n {} rm -f {} \; 2>/dev/null
+        continue
+        ;;
+    esac
     if flock -n "$f" true 2>/dev/null; then rm -f "$f"; else q=$((q + 1)); fi
   done
   printf 'BUSY\t%s\n' "$q"
@@ -1278,7 +1285,11 @@ if [ "$try" = 1 ]; then
   esac
   exit $rc
 fi
-exec 6>>"$qf" && flock -n 6
+if exec 6>>"$qftmp" && flock -n 6; then
+  mv -f "$qftmp" "$qf"
+else
+  rm -f "$qftmp"
+fi
 # 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
 n=0; s0=$(date +%s)
 while :; do
@@ -3932,8 +3943,8 @@ exec /bin/sh -c "$inner"
         let trial = Admission { max: 3, jobs: 5, shared_wait_secs: 900, queue_wait_secs: 3, pool: 0, try_only: true, max_load: Some(12.5) };
         let queued = Admission { max: 0, jobs: 12, shared_wait_secs: 900, queue_wait_secs: 3, pool: 0, try_only: false, max_load: None };
         for (adm, want) in [
-            (trial, "06a8fec910633d9586672591a0c6394a863238ee308c54902db6308cba16f436"),
-            (queued, "9d162e08a7680da36ed6bef9c35771ffeca974ada034cbee13feaece8012f71e"),
+            (trial, "0788dfca10036aa8ceb1c9ecda4ad4083b957887517ffc848ad71c11564ae69b"),
+            (queued, "618a3cac3c3cae40f5a55e096c5e41de99304fe23d83b74e5d5ec98ef8238f93"),
         ] {
             let s = guard_script("/r", "0123456789abcdef", "job-1-1", &tok, adm);
             let got: String = sha2::Sha256::digest(s.as_bytes()).iter().map(|x| format!("{x:02x}")).collect();
