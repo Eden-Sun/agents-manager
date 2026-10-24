@@ -199,6 +199,15 @@ fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::O
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// 測試用的假 login shell，放在 `bin`（FakeHome 底下，已登記清理）：吃掉 `-lic` 改成非登入、非互動的 `/bin/sh -c`，PATH 只剩呼叫端給的。
+fn fake_login_shell(bin: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let shell = bin.join("test-login-sh");
+    fs::write(&shell, "#!/bin/sh\n[ \"$1\" = -lic ] && shift\nexec /bin/sh -c \"$1\"\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+    shell
+}
+
 #[test]
 fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
     let home = FakeHome::new();
@@ -215,7 +224,11 @@ fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
         std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), bin.join(tool)).unwrap();
     }
 
-    let out = run_probe_env(h, bin.to_str().unwrap(), &[("SHELL", std::ffi::OsStr::new("/bin/sh"))]);
+    // 假的 login shell：BASELINE_SH 用 `$SHELL -lic` 查工具，而 macOS 的登入 shell 會跑 /etc/profile 的 path_helper 把 /usr/bin
+    // 加回 PATH——系統內建的 /usr/bin/jq 一定找得到，真主機上「jq 缺席」這條分支在 macOS 根本走不到（#1964 K 組、#719）。
+    // 這條測試只驗「腳本在 jq 缺席時的輸出」這段邏輯，不代表正式環境的 PATH：吃掉 `-lic`、改用不讀任何 profile 的 `/bin/sh -c`。
+    let shell = fake_login_shell(&bin);
+    let out = run_probe_env(h, bin.to_str().unwrap(), &[("SHELL", shell.as_os_str())]);
     if !out.contains("AM_BL tool jq \n") {
         // probe 用 `${SHELL} -lic` 查 jq：登入 shell 會重讀 profile，PATH 限縮不等於找不到。只在失敗時印出同一條查詢的結果。
         let login = Command::new("/bin/sh")
