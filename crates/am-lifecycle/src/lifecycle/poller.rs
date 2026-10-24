@@ -731,7 +731,7 @@ pub use crate::composer_parse::{
 /// 以前只比前 12 個字、用 `contains`，使用者改過尾段也會被當成我們那則、照樣按 Enter。
 pub fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     let Some(box_text) = composer_text(kind, screen) else { return false };
-    if kind == "claude" && is_our_folded_paste(&box_text, sent) {
+    if is_our_folded_paste(kind, &box_text, sent) {
         return true;
     }
     composer_text_whole(kind, screen).is_some_and(|shown| rows_within(&shown, sent))
@@ -770,21 +770,111 @@ fn rows_within(shown: &str, sent: &str) -> bool {
     })
 }
 
-/// claude 把長段貼上摺成 `[Pasted text #3 +10 lines]`，框裡看不到原文，上面的比對永遠落空：
-/// 補 Enter 不會發生、重送又因為框不空被擋，12 秒後直接判失敗。2026-09-19 AM-1-XH：子 agent v4
-/// 卡在 blocked 的通知就這樣停在父 bot 的輸入框，父 bot 一直沒回應。
+/// 長段貼上摺起來以後，框裡看不到原文，上面的逐列比對永遠落空：補 Enter 不會發生、重送又因為框不空被擋，
+/// 12 秒後直接判失敗。2026-09-19 AM-1-XH：子 agent v4 卡在 blocked 的通知就這樣停在父 bot 的輸入框。
+/// claude 摺成 `[Pasted text #3 +10 lines]`（2026-09-19，`+N lines` 是換行數）；codex 0.164.0 摺成
+/// `[Pasted Content 1752 chars]`（字數，含結尾換行；實機畫面見 `folded_paste_tests::CODEX_FOLDED_PASTE_SCREEN`）。
 ///
-/// 框裡**只有**一個摺起來的貼上，而且 `+N lines` 的 N 正好是我們送的字的換行數，才算是我們的：
-/// 使用者自己貼的東西行數對不上就不按 Enter。
-fn is_our_folded_paste(box_text: &str, sent: &str) -> bool {
-    let Some(rest) = box_text.trim().strip_prefix("[Pasted text #") else { return false };
-    let Some(rest) = rest.strip_suffix(" lines]") else { return false };
-    let Some((id, lines)) = rest.split_once(" +") else { return false };
+/// 框裡**只有**這一個摺起來的貼上，而且數字正好是我們送的長度，才算是我們的：使用者接著打的字、別段貼上、
+/// 長度對不上的都不按 Enter。摺起來的字看不到，片段無從比對，只能比長度。
+fn is_our_folded_paste(kind: &str, box_text: &str, sent: &str) -> bool {
+    let ours = match kind {
+        "claude" => folded_claude_lines(box_text).filter(|&lines| lines == sent.trim_end().matches('\n').count()),
+        "codex" => folded_codex_chars(box_text).filter(|&chars| chars == sent.chars().count()),
+        _ => None,
+    };
+    ours.is_some_and(|n| n > 0)
+}
+
+/// claude 摺起來的標籤 `[Pasted text #N +M lines]` 的 M（換行數）；框裡不是只有這一個標籤就 `None`。
+fn folded_claude_lines(box_text: &str) -> Option<usize> {
+    let rest = box_text.trim().strip_prefix("[Pasted text #")?.strip_suffix(" lines]")?;
+    let (id, lines) = rest.split_once(" +")?;
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    let Ok(lines) = lines.parse::<usize>() else { return false };
-    lines > 0 && lines == sent.trim_end().matches('\n').count()
+    lines.parse().ok()
+}
+
+/// codex 摺起來的標籤 `[Pasted Content N chars]` 的 N（字數）；框裡不是只有這一個標籤就 `None`。
+fn folded_codex_chars(box_text: &str) -> Option<usize> {
+    let digits = box_text.trim().strip_prefix("[Pasted Content ")?.strip_suffix(" chars]")?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod folded_paste_tests {
+    use super::{composer_holds_prompt, is_our_folded_paste};
+
+    /// codex-cli 0.164.0（`codex --version`）實機畫面。派工單寫的是 0.163，本機實際是 0.164.0，以這個為準。
+    /// 擷取（2026-10-24）：拋棄式 pane（`herdr pane split --direction down`）裡，`mktemp -d` 的目錄下跑 `codex`，
+    /// 把 [`codex_paste_text`] 那 30 行（1752 字，含結尾換行）用 `herdr pane send-text` 包進 bracketed paste
+    /// （`ESC[200~` … `ESC[201~`，中間每段 ≤1000 位元組，同 daemon 的 `pane_send_text` 分段）。
+    /// 沒有 bracketed paste 時 codex 不摺、整段當成打字輸入，所以這個畫面只在真的貼上時出現。
+    /// 用 `herdr pane read` 讀整個 pane（純文字），欄寬約 209（footer 那列填滿）。沒有按 Enter，擷取完 pane 已關、codex 行程已結束。
+
+    const CODEX_FOLDED_PASTE_SCREEN: &str = r#"  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+
+› [Pasted Content 1752 chars]
+
+  GPT-6.1-Sol default · /tmp/tmp.7VTjHKz1x1
+                                                                                                                                                                                         ⚠ 1 warning · f2 to view"#;
+    /// [`CODEX_FOLDED_PASTE_SCREEN`] 摺起來的那段：`fixture line N: …\n`，N = 1..=30。
+    fn codex_paste_text() -> String {
+        (1..=30).map(|i| format!("fixture line {i}: 這是摺疊貼上的測試第 {i} 行，用來確認 codex 會把長段貼上摺起來，不要送出\n")).collect()
+    }
+
+    #[test]
+    fn the_fixture_folds_to_the_length_we_sent() {
+        assert_eq!(codex_paste_text().chars().count(), 1752);
+        assert!(CODEX_FOLDED_PASTE_SCREEN.contains("[Pasted Content 1752 chars]"));
+    }
+
+    #[test]
+    fn a_codex_fold_of_our_text_is_ours() {
+        assert!(composer_holds_prompt("codex", CODEX_FOLDED_PASTE_SCREEN, &codex_paste_text()));
+    }
+
+    #[test]
+    fn a_codex_fold_of_a_different_length_is_not_ours() {
+        let sent = codex_paste_text();
+        assert!(!composer_holds_prompt("codex", CODEX_FOLDED_PASTE_SCREEN, sent.trim_end()), "少了結尾換行，標籤的 1752 對不上");
+        assert!(!composer_holds_prompt("codex", CODEX_FOLDED_PASTE_SCREEN, &format!("{sent}x")), "多一個字");
+        let other = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "999");
+        assert!(!composer_holds_prompt("codex", &other, &codex_paste_text()), "別人的摺疊、字數不同");
+    }
+
+    #[test]
+    fn text_typed_after_or_beside_the_fold_is_not_ours() {
+        let typed = CODEX_FOLDED_PASTE_SCREEN.replace("[Pasted Content 1752 chars]", "[Pasted Content 1752 chars] 還要加一句");
+        assert!(!composer_holds_prompt("codex", &typed, &codex_paste_text()));
+        let two = CODEX_FOLDED_PASTE_SCREEN.replace("› [Pasted Content 1752 chars]", "› [Pasted Content 1752 chars]\n  [Pasted Content 1752 chars]");
+        assert!(!composer_holds_prompt("codex", &two, &codex_paste_text()), "框裡有兩個摺疊貼上");
+    }
+
+    #[test]
+    fn a_zero_length_fold_is_never_ours() {
+        assert!(!is_our_folded_paste("codex", "[Pasted Content 0 chars]", ""));
+    }
+
+    #[test]
+    fn each_cli_only_recognises_its_own_fold_format() {
+        let claude = "[Pasted text #1 +2 lines]";
+        let sent = "a\nb\nc";
+        assert!(is_our_folded_paste("claude", claude, sent));
+        assert!(!is_our_folded_paste("codex", claude, sent), "claude 的標籤在 codex 的框裡不算");
+        assert!(!is_our_folded_paste("claude", "[Pasted Content 5 chars]", "abcde"), "codex 的標籤在 claude 的框裡不算");
+        assert!(!is_our_folded_paste("claude", "[Pasted text #1 +3 lines]", sent), "行數不符");
+        assert!(!is_our_folded_paste("claude", "[Pasted text #1 +2 lines] 補一句", sent));
+    }
 }
 
 /// Early check after delivery: enough for the box to draw, short of the full stall deadline.
