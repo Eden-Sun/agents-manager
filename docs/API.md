@@ -2111,9 +2111,18 @@ AGM CLI：`bin/agm models --kind codex --host m4p --refresh`，指定身份加 `
 
 Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 的主機，兩者不可混用。本機 Bot 以注入的 `AM_PORT` 連 loopback；遠端 Bot 沒有 `AM_PORT`（§11.4 的設計），使用部署共用指引提供的 daemon 入口，不能猜目前主機的 localhost 或自行補設 `AM_PORT`。使用 `X-AM-Bot-Id` 與 `X-AM-Bot-Token`，不是 Bearer，也不取共用 UI token；不跟隨 HTTP redirect。
 
-例如 child 在 m4p，查 `?kind=codex&host=m4p`，指定身份再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身份；503 `model_cache_miss` 請 AGM 刷新指定 host／kind／identity 的快取，不改用歷史模型、也不要求使用者重答已指定的模型。
+例如 child 在 m4p，查 `?kind=codex&host=m4p`，指定身份再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身份；503 `model_cache_miss` 不需要找 AGM：daemon 已排程背景刷新，依 body 的 `refresh` 等待後重試；`refresh.state` 為 `failed` 時才回報 AGM，不改用歷史模型、也不要求使用者重答已指定的模型。
 
-某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。身份新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
+某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，請求本身不執行本機或遠端 CLI，但 daemon 會在背景排一趟刷新（#1890，見下段）。身份新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
+
+**背景刷新（#1890）**：一般 Bot 的 `GET /api/models` 未命中或過期時，daemon 依同一格（host+kind+identity）排一趟刷新，跑的是 `refresh=1` 的同一條管線。請求本身仍回 503，不等刷新結果，Bot 不取得 `refresh` 權限。
+- 範圍：host 必須存在；`identity` 必須是這台 host 設定過、且 kind 相符的身份；不符合的格子不排程（回 `state:"none"`）。
+- single-flight：同一格排隊或執行中，重複的 miss 不另排。全域同時最多 2 趟，其餘排隊。
+- 限流：同一格每 60 秒最多開始一趟，成功或失敗都算；成功後快取新鮮 10 分鐘，期間不會再有 miss。
+- 逾時：單趟上限 90 秒，遠端 ssh 逾時也在這裡收掉，記為失敗。
+- 退避：失敗後 60 秒起算、每失敗一次加倍，上限 15 分鐘；退避內的 miss 不打 ssh、不跑 CLI，錯誤保留在 `refresh.error`。
+- 503 body 的 `refresh`：`{"host","kind","identity","state":"none"|"queued"|"running"|"waiting"|"failed","retry_after_secs","error"}`。`none` 是沒有進行中或限流中的刷新（身份不合法、或刷新已完成但快取仍不新鮮）。
+- 狀態只在記憶體，daemon 重啟後歸零；不進 DB。
 `identity` 決定這份清單是哪個身份的：claude 讀 `CLAUDE_CONFIG_DIR/settings.json`，算 `default_effort` 與 `is_default`（SPEC §17.1）；codex 以 `CODEX_HOME` 跑 `app-server` 並讀它的 `config.toml`（頂層 `model`／`model_reasoning_effort`）；grok 以 `GROK_HOME` 跑 `grok models` 並讀它的 `config.toml`／`models_cache.json`。省略或該身份沒設這個家目錄 → 預設家目錄（不是錯誤）。
 
 ```json
