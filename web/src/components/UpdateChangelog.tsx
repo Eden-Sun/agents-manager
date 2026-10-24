@@ -6,6 +6,8 @@ import {
   postTranslation,
   TRANSLATION_POLL_MS,
   translationPollAction,
+  autoRetryDelay,
+  shouldAutoTranslate,
   type ChangelogReply,
   type TranslationView,
 } from '../api/changelog'
@@ -91,6 +93,29 @@ export function UpdateChangelog({
     const id = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(id)
   }, [retryAfter])
+
+  // 自動翻（#1948）：每個 key 在這個框裡最多自動送一次 absent；之後的失敗靠下面的退避計時再試。
+  // 帳本在 daemon，同一份內容就算重開框也只會送一次（指紋去重）。
+  const [autoSentKey, setAutoSentKey] = useState<string | null>(null)
+  const shouldAuto = shouldAutoTranslate(view, autoSentKey === key)
+  useEffect(() => {
+    if (!shouldAuto) return
+    setAutoSentKey(key)
+    void postTranslation(kind, host, from, to).then((next) => setTr({ key, view: next }))
+  }, [shouldAuto, key, kind, host, from, to])
+
+  // 失敗後退避到期自動再試一次（沒有使用者上限時）。計時器隨框卸載清掉；每次回應都會換一個新的 retryAfter。
+  const autoRetryMs = autoRetryDelay(view, Date.now())
+  const autoRetryAt = view?.status === 'failed' ? view.retryAfter : null
+  useEffect(() => {
+    if (autoRetryMs === null) return
+    const id = setTimeout(() => {
+      void postTranslation(kind, host, from, to).then((next) => setTr({ key, view: next }))
+    }, autoRetryMs)
+    return () => clearTimeout(id)
+    // autoRetryMs 每次 render 都會變，只跟「哪個 retryAfter」對齊才重排。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRetryAt, key, kind, host, from, to])
 
   const reply = state?.key === key ? state.reply : null
   if (!reply) {

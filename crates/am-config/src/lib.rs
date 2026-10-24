@@ -501,6 +501,9 @@ impl JudgeCfg {
 pub struct ChangelogTranslateCfg {
     #[serde(default)]
     pub enabled: bool,
+    /// 新版偵測時背景自動翻一次（#1948）。`false` 回到只有按鈕才送。預設開；`enabled` 仍是總開關。
+    #[serde(default = "default_changelog_auto")]
+    pub auto: bool,
     #[serde(default = "default_changelog_key_file")]
     pub key_file: String,
     #[serde(default = "default_changelog_endpoint")]
@@ -522,12 +525,17 @@ pub struct ChangelogTranslateCfg {
     pub max_in_flight: u32,
     #[serde(default = "default_changelog_max_queued")]
     pub max_queued: u32,
+    /// 一小時最多送幾次。`0`＝不上限（預設，#1948）；使用者寫正數才生效。
     #[serde(default = "default_changelog_max_per_hour")]
     pub max_per_hour: u32,
+    /// 同一份內容連續失敗最多送幾次，用盡後等一小時窗口。`0`＝不上限（預設，#1948）；退避（1 分→5 分→30 分→封頂 1 小時）照常。
     #[serde(default = "default_changelog_max_attempts")]
     pub max_attempts: u32,
 }
 
+fn default_changelog_auto() -> bool {
+    true
+}
 fn default_changelog_key_file() -> String {
     "~/.config/agents-manager/anthropic-api-key".into()
 }
@@ -555,17 +563,20 @@ fn default_changelog_max_in_flight() -> u32 {
 fn default_changelog_max_queued() -> u32 {
     1
 }
+/// 0＝不上限（#1948 使用者裁示 2026-10-24）；使用者明寫正數才生效。
 fn default_changelog_max_per_hour() -> u32 {
-    12
+    0
 }
+/// 0＝不上限（同上）；退避（retry_after）仍照常，連續失敗不會緊密迴圈。
 fn default_changelog_max_attempts() -> u32 {
-    3
+    0
 }
 
 impl Default for ChangelogTranslateCfg {
     fn default() -> Self {
         Self {
             enabled: false,
+            auto: default_changelog_auto(),
             key_file: default_changelog_key_file(),
             endpoint: default_changelog_endpoint(),
             model: default_changelog_model(),
@@ -640,7 +651,7 @@ pub struct ClaudeApiUseDef {
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
     ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None },
     ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None },
-    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 12, legacy_section: Some("changelog_translate") },
+    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate") },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5"];
@@ -2526,6 +2537,12 @@ mod supervisor_cfg_tests {
         assert!(!toml::to_string_pretty(&none).unwrap().contains("changelog_translate"));
         let on: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
         assert!(on.changelog_translate.enabled);
+        assert!(on.changelog_translate.auto, "auto defaults on");
+        assert_eq!((on.changelog_translate.max_per_hour, on.changelog_translate.max_attempts), (0, 0), "0 = unlimited by default");
+        let capped: ConfigFile = toml::from_str("[changelog_translate]\nmax_per_hour = 12\nmax_attempts = 3\nauto = false\n").unwrap();
+        assert_eq!((capped.changelog_translate.max_per_hour, capped.changelog_translate.max_attempts, capped.changelog_translate.auto), (12, 3, false));
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&capped).unwrap()).unwrap();
+        assert_eq!((back.changelog_translate.max_per_hour, back.changelog_translate.max_attempts), (12, 3), "explicit caps survive a save");
         assert_eq!(on.changelog_translate.model, "claude-sonnet-5-5");
         assert_eq!(on.changelog_translate.effort, "low");
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();

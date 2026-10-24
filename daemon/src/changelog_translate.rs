@@ -43,6 +43,9 @@ fn translate_cfg(full: &crate::config::ConfigFile) -> ChangelogTranslateCfg {
 
 const LEDGER_DIR: &str = "changelog-translate";
 
+/// 新版偵測時會背景自動翻的 kind（#1948）。五種都有 changelog 來源；抓不到 changelog 的那一種安靜不送。
+const AUTO_KINDS: [&str; 5] = ["claude", "codex", "herdr", "agy", "grok"];
+
 pub struct Hub {
     gate: tokio::sync::Mutex<()>,
     client: std::sync::Mutex<Arc<dyn MessagesClient>>,
@@ -196,14 +199,66 @@ pub async fn get_translation(
     State(app): State<Arc<App>>,
     Query(q): Query<TranslationQuery>,
 ) -> Result<Json<Value>, crate::lifecycle::LcError> {
-    Ok(Json(get_body(app, q).await))
+    Ok(Json(with_auto_flag(&app, get_body(app.clone(), q).await).await))
+}
+
+/// `upstream_update::tick` 推出的 `notify:"update"` 事件 → 背景自動翻一次（#1948）。
+/// from＝磁碟上最舊的已安裝版（抓不到就 None），to＝目標版（沒有就上游最新版）。不 await，不擋偵測迴圈。
+pub fn kick_detected(app: &Arc<App>, ev: &Value) {
+    if ev["notify"] != "update" {
+        return;
+    }
+    let Some(kind) = ev["kind"].as_str() else { return };
+    let Some(to) = ev["target_version"].as_str().or(ev["latest_version"].as_str()) else { return };
+    let from = ev["hosts"]
+        .as_array()
+        .and_then(|hs| {
+            hs.iter()
+                .filter_map(|h| h["installed_version"].as_str())
+                .min_by_key(|v| crate::changelog::parse_version(v))
+        })
+        .map(str::to_string);
+    let job = Box::pin(auto_kick(Arc::clone(app), kind.to_string(), from, to.to_string()));
+    app.background_tasks.spawn(job);
+}
+
+/// 新版偵測後的背景送出（#1948）：不經 HTTP，跟 POST 走同一個 `decide()`，指紋去重、退避、
+/// `max_attempts`、`max_per_hour`、`max_in_flight` 都照舊。`enabled` 或 `auto` 關著就什麼都不做。
+/// `from`／`to` 是偵測到的那一段（跟前端開框時送的 from／to 同一組，指紋才會對得上）。
+/// 預算擋下時靜默放棄；之後使用者開框時前端會再補一次（同一套帳本）。
+pub async fn auto_kick(app: Arc<App>, kind: String, from: Option<String>, to: String) {
+    if !AUTO_KINDS.contains(&kind.as_str()) {
+        return;
+    }
+    let full = app.cfg.get().await;
+    let cfg = translate_cfg(&full);
+    if !cfg.enabled || !cfg.auto {
+        return;
+    }
+    let limits = limits_of(&cfg, full.claude_api.timeout_ms);
+    let reply = crate::changelog::lookup(&app, crate::config::LOCAL_HOST, &kind, from.as_deref(), Some(&to)).await;
+    if !reply.found || verified_language(&limits.lang).is_none() {
+        return;
+    }
+    let plan = plan_input(&kind, &limits, &reply.sections);
+    let fp = fingerprint(&plan);
+    let action = under_gate(&app, || decide(&app.data_dir, &limits, &plan, &fp, &cfg)).await;
+    if let Action::Send { fp, attempt_id, request, .. } = action {
+        enqueue(app, fp, attempt_id, request);
+    }
 }
 
 pub async fn post_translation(
     State(app): State<Arc<App>>,
     Query(q): Query<TranslationQuery>,
 ) -> Result<Json<Value>, crate::lifecycle::LcError> {
-    Ok(Json(post_body(app, q).await))
+    Ok(Json(with_auto_flag(&app, post_body(app.clone(), q).await).await))
+}
+
+/// `auto` 讓前端判斷 absent 時要不要自己補翻、退避到期要不要再試（#1948）。GET 與 POST 都回。
+async fn with_auto_flag(app: &Arc<App>, mut body: Value) -> Value {
+    body["auto"] = json!(app.cfg.get().await.changelog_translate.auto);
+    body
 }
 
 fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = Value> + Send>> {
@@ -388,7 +443,7 @@ fn decide(
     let jobs = ledger_jobs(&ledger_dir(data_dir));
     let now = chrono::Utc::now();
     let recent = jobs.iter().map(|j| spent_recent(j, now)).sum::<usize>();
-    if recent >= limits.max_per_hour as usize {
+    if limits.max_per_hour > 0 && recent >= limits.max_per_hour as usize {
         return Action::View(budget_only("hourly", hourly_retry(&jobs, now)));
     }
     let busy = jobs
@@ -631,7 +686,7 @@ fn attempts_block(job: &Job, limits: &Limits) -> Option<Overlay> {
     if matches!(last_state(job), "completed" | "reserved" | "in_flight") || retry_blocked(job) {
         return None;
     }
-    if sent_count(job) < limits.max_attempts as usize {
+    if limits.max_attempts == 0 || sent_count(job) < limits.max_attempts as usize {
         return None;
     }
     let retry_at = attempts_retry_at(job);
@@ -674,8 +729,8 @@ fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits 
         max_input_chars: cfg.max_input_chars.clamp(1, 12_000),
         max_tokens: cfg.max_tokens.clamp(1, 4096),
         max_in_flight: cfg.max_in_flight.max(1),
-        max_per_hour: cfg.max_per_hour.max(1),
-        max_attempts: cfg.max_attempts.clamp(1, 8),
+        max_per_hour: cfg.max_per_hour.min(1000),
+        max_attempts: cfg.max_attempts.min(8),
     }
 }
 
@@ -996,8 +1051,15 @@ fn retry_blocked(job: &Job) -> bool {
     }
 }
 
-fn backoff_secs(sent_including_this: usize) -> i64 {
-    (15 * sent_including_this.max(1) as i64).min(60)
+/// 連續失敗的退避（#1948）：1 分、5 分、30 分，之後封頂 1 小時。`n` 是這份 job 已送出的次數（含這次），
+/// 送出成功就不會再進來，所以等於連續失敗次數。不上限時靠這個擋緊密迴圈。
+fn backoff_secs(n: usize) -> i64 {
+    match n {
+        0 | 1 => 60,
+        2 => 300,
+        3 => 1800,
+        _ => 3600,
+    }
 }
 
 fn parse_retry_after_secs(raw: Option<&str>) -> i64 {
@@ -1445,6 +1507,176 @@ mod tests {
             .0
     }
 
+    async fn settle_background(app: &Arc<App>) {
+        // 背景送出只是 spawn，沒有可等的句柄：讓它有機會跑完（或靜默放棄）。
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let _ = app;
+    }
+
+    #[tokio::test]
+    async fn auto_kick_sends_once_and_repeat_detection_is_cache() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        let done = until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(done["auto"], true);
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "same content must not be sent again");
+        let again = get(&env.app, q_to("2.1.5")).await;
+        assert_eq!(again["attempts"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn detection_event_kicks_once_and_repeats_and_non_updates_stay_quiet() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        enable(&env).await;
+        let ev = json!({
+            "kind": "claude",
+            "notify": "update",
+            "latest_version": "2.1.5",
+            "target_version": "2.1.5",
+            "hosts": [{"host": "local", "installed_version": "2.1.3"}, {"host": "m4p", "installed_version": "2.1.4"}],
+        });
+        kick_detected(&env.app, &ev);
+        until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(fake.calls(), 1, "a detected new version is translated once in the background");
+        kick_detected(&env.app, &ev);
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "the same detection again must not resend");
+        let mut quiet = ev.clone();
+        quiet["notify"] = json!("error");
+        kick_detected(&env.app, &quiet);
+        kick_detected(&env.app, &json!({"kind": "claude", "notify": null, "latest_version": "2.1.5"}));
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "non-update events never send");
+    }
+
+    #[tokio::test]
+    async fn herdr_is_auto_and_a_kind_without_changelog_stays_quiet() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        env.app.changelog.seed("herdr", CHANGELOG).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "herdr".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "herdr is in the auto list");
+        auto_kick(env.app.clone(), "nope".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "no changelog source: quiet, not a failure");
+    }
+
+    #[tokio::test]
+    async fn auto_off_sends_nothing_and_the_button_still_works() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.auto = false;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 0, "auto=false must not send on detection");
+        let absent = get(&env.app, q_to("2.1.5")).await;
+        assert_eq!(absent["status"], "absent");
+        assert_eq!(absent["auto"], false);
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(fake.calls(), 1, "the manual button sends as before");
+    }
+
+    #[tokio::test]
+    async fn auto_kick_is_quiet_when_disabled_or_without_key() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 0, "disabled: nothing sent");
+        enable(&env).await;
+        std::fs::remove_file(env.dir.join("data").join("anthropic-api-key")).unwrap();
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 0, "no key: nothing sent");
+    }
+
+    #[tokio::test]
+    async fn auto_kick_respects_an_explicit_hourly_cap() {
+        let (env, fake) = boot(vec![ok_step(), ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.max_per_hour = 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n").await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.5".into()), "2.1.6".into()).await;
+        settle_background(&env.app).await;
+        assert_eq!(fake.calls(), 1, "a new version over the explicit hourly cap must not send");
+    }
+
+    #[tokio::test]
+    async fn unlimited_defaults_keep_retrying_after_backoff_but_explicit_cap_stops() {
+        // 預設（0＝不上限）：連續失敗、每次退避過後都還能再送。
+        let (env, fake) = boot(vec![
+            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout),
+            ok_step(),
+        ])
+        .await;
+        enable(&env).await;
+        let mut fp = String::new();
+        for _ in 0..3 {
+            let _ = post(&env.app, q_to("2.1.5")).await;
+            let failed = until_status(&env.app, "2.1.5", "failed").await;
+            fp = failed["fingerprint"].as_str().unwrap().to_string();
+            patch_retry_past(&env.app, &fp);
+        }
+        let done = post(&env.app, q_to("2.1.5")).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(done["error_kind"], Value::Null);
+        assert_eq!(fake.calls(), 4, "default has no attempt cap");
+
+        // 使用者自己設 max_attempts＝2：兩次送出後就擋在一小時窗口。
+        let (env, fake) = boot(vec![
+            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout),
+            ok_step(),
+        ])
+        .await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.max_attempts = 2;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let _ = post(&env.app, q_to("2.1.5")).await;
+            let failed = until_status(&env.app, "2.1.5", "failed").await;
+            fp = failed["fingerprint"].as_str().unwrap().to_string();
+            patch_retry_past(&env.app, &fp);
+        }
+        let capped = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(capped["error_kind"], "budget");
+        assert_eq!(capped["error"], "attempts");
+        assert_eq!(fake.calls(), 2);
+    }
+
     async fn until_status(app: &Arc<App>, to: &str, want: &str) -> Value {
         let mut last = Value::Null;
         for _ in 0..100 {
@@ -1568,9 +1800,9 @@ mod tests {
         assert_eq!(limits.timeout_ms, 1);
         assert_eq!(limits.max_tokens, 4096);
         assert_eq!(limits.max_input_chars, 1);
-        assert_eq!(limits.max_attempts, 1);
+        assert_eq!(limits.max_attempts, 0, "0 means unlimited");
         assert_eq!(limits.max_in_flight, 1);
-        assert_eq!(limits.max_per_hour, 1);
+        assert_eq!(limits.max_per_hour, 0, "0 means unlimited");
         assert_eq!(limits.effort, "low");
         assert_eq!(limits.model, DEFAULT_MODEL);
         assert_eq!(parse_retry_after_secs(None), 15);
@@ -1581,9 +1813,11 @@ mod tests {
             parse_retry_after_secs(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
             15
         );
-        assert_eq!(backoff_secs(1), 15);
-        assert_eq!(backoff_secs(2), 30);
-        assert_eq!(backoff_secs(5), 60);
+        assert_eq!(backoff_secs(1), 60);
+        assert_eq!(backoff_secs(2), 300);
+        assert_eq!(backoff_secs(3), 1800);
+        assert_eq!(backoff_secs(4), 3600);
+        assert_eq!(backoff_secs(9), 3600, "capped at one hour");
     }
 
     #[test]

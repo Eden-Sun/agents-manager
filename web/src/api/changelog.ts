@@ -142,6 +142,8 @@ export interface TranslationView {
   model: string | null
   requestedModel: string | null
   lang: string | null
+  /** `[changelog_translate] auto`：新版偵測時背景會翻，開框時 absent 也會自動補翻一次（#1948）。 */
+  auto: boolean
   attempts: TranslationAttempt[]
 }
 
@@ -202,6 +204,7 @@ function toTranslation(raw: unknown): TranslationView {
     model: typeof r.model === 'string' ? r.model : null,
     requestedModel: typeof r.requested_model === 'string' ? r.requested_model : null,
     lang: typeof r.lang === 'string' ? r.lang : null,
+    auto: r.auto === true,
     attempts,
   }
 }
@@ -220,9 +223,26 @@ function unavailableTranslation(): TranslationView {
     model: null,
     requestedModel: null,
     lang: null,
+    auto: false,
     attempts: [],
   }
 }
+
+/** 開框時該不該自動送出一次：只有 absent（沒有任何帳本）、auto 開著、這個 key 還沒送過（#1948）。 */
+export function shouldAutoTranslate(view: TranslationView | null, alreadySent: boolean): boolean {
+  return !!view && view.enabled && view.auto && view.status === 'absent' && !alreadySent
+}
+
+/** 退避到期後自動再試的等待毫秒數；不該自動再試時回傳 null。次數用盡（`attempts`）只給使用者按「再試一次」。 */
+export function autoRetryDelay(view: TranslationView | null, now: number): number | null {
+  if (!view || !view.enabled || !view.auto || view.status !== 'failed' || view.error === 'attempts' || !view.retryAfter) return null
+  const at = Date.parse(view.retryAfter)
+  if (!Number.isFinite(at)) return null
+  return Math.max(AUTO_RETRY_MIN_MS, at - now)
+}
+
+/** 地板值：就算daemon回了過去的時間，也不會連續緊密重打。 */
+export const AUTO_RETRY_MIN_MS = 5000
 
 /** 只讀。開視窗、輪詢、再查一次都走這支，不會開始翻譯。 */
 export async function fetchTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
