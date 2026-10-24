@@ -48,6 +48,11 @@ struct ActiveSlot {
     outcome_rx: watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,
 }
 
+/// Private registry managing the lifecycle of inert Claude API bot runner tasks.
+pub(crate) struct ApiBotRegistry {
+    slots: Mutex<HashMap<String, ActiveSlot>>,
+}
+
 /// Helper function to await outcome from a watch receiver, used by both production and tests.
 pub(crate) async fn wait_outcome(
     rx: &mut watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,

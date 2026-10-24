@@ -49,7 +49,7 @@ mod tests {
             .await
             .expect("foreign keys pragma");
 
-        am_base::db::migrate_with(&pool, &[])
+        crate::runners::am_base_tests::migrate(&pool)
             .await
             .expect("schema migrations");
 
@@ -1057,7 +1057,7 @@ mod tests {
                     matches!(
                         runner_res,
                         Err(runner::Error::Cancelled)
-                            | Err(runner::Error::Model(super::http::Error::Cancelled))
+                            | Err(runner::Error::Model(crate::api_bot::http::Error::Cancelled))
                             | Err(runner::Error::Journal)
                     ),
                     "runner must fail due to cancellation or journal owner CAS failure, got {:?}",
