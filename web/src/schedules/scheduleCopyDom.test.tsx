@@ -53,6 +53,7 @@ test('排程操作選單沿用編輯入口，開選單不建立副本', async ()
 const modes: ScheduleSpecIn[] = [
   { mode: 'daily', time: '23:17' },
   { mode: 'weekly', time: '05:31', weekdays: [1, 4, 6] },
+  { mode: 'weekly', time: '08:26', weekdays: [4, 2, 0, 3, 1] },
   { mode: 'interval', every_secs: 61 },
   { mode: 'once', at: '2035-07-08T14:25' },
 ]
@@ -77,6 +78,12 @@ for (const spec of modes) {
     assert.equal(dialog().querySelector<HTMLTextAreaElement>('textarea')!.value, '最新任務正文')
     assert.equal(requests.filter((r) => r.method !== 'GET').length, 0, '按複製只預填，不能先寫入或執行')
     assert.doesNotMatch(dialog().textContent ?? '', /最近執行|立即執行/)
+    if (spec.mode === 'weekly' && spec.weekdays?.length === 5) {
+      const mode = [...dialog().querySelectorAll<HTMLSelectElement>('select')].find((el) => el.querySelector('option[value=weekdays]'))!
+      assert.equal(mode.value, 'weekdays')
+      assert.equal(mode.selectedOptions[0].textContent, '週一至週五')
+      assert.equal(dialog().querySelector('fieldset'), null)
+    }
     await typeInto(dialog().querySelector<HTMLInputElement>('input')!, '自行改的副本名')
     await click(submit())
     await settle()
@@ -87,7 +94,7 @@ for (const spec of modes) {
     assert.match(String(client_request_id), /^[0-9a-f-]{36}$/)
     assert.deepEqual(body, {
       name: '自行改的副本名', prompt: '最新任務正文', bot_id: 'b1', tz: 'Asia/Taipei',
-      spec, notify: 'all', clear_after: true,
+      spec: spec.mode === 'weekly' ? { ...spec, weekdays: [...spec.weekdays!].sort((a, b) => a - b) } : spec, notify: 'all', clear_after: true,
     }, '建立模式必須送出完整 spec，不能因 baseline 判成未改而省略；interval 另起新 anchor')
     assert.deepEqual(selected, ['copy'])
     assert.equal(document.querySelector('[role="dialog"]'), null)
