@@ -1,10 +1,12 @@
-//! #1944 A: inert building blocks only. No kind, route, lifecycle entry, or paid call site.
+//! #1944 A/C1: inert building blocks only. No kind, route, lifecycle entry, or paid call site.
 //! The future host must persist checkpoints before acknowledging them and recover pending
 //! attempts/tools as unknown, never by replaying their side effects.
 #![allow(dead_code)]
 
+pub(crate) mod adapter;
 pub(crate) mod http;
 pub(crate) mod protocol;
+pub(crate) mod quote;
 pub(crate) mod runner;
 #[cfg(test)]
 mod tests;
