@@ -4,10 +4,13 @@ import re
 from pathlib import Path
 import sys
 
+CAP = 8 * 1024 * 1024
 
-def tail(home, session, limit):
+
+def locate(home, session):
+    """The canonical rollout file for `session` under `home`, or None. Never leaves `home/sessions`."""
     if not session or not all(c.isascii() and (c.isalnum() or c == "-") for c in session):
-        return b""
+        return None
     # Expand against this host, never the daemon's home. Require an absolute home.
     home = home.strip() or "~/.codex"
     remote_home = os.path.expanduser("~")
@@ -17,11 +20,11 @@ def tail(home, session, limit):
     home = re.sub(r"\$HOME(?![A-Za-z0-9_])", lambda _: remote_home, home)
     base = Path(home)
     if not base.is_absolute():
-        return b""
+        return None
     base = base.resolve(strict=True)
     root = (base / "sessions").resolve(strict=True)
     if not root.is_relative_to(base) or not root.is_dir():
-        return b""
+        return None
     suffix = "-" + session + ".jsonl"
 
     def directories(path):
@@ -37,16 +40,62 @@ def tail(home, session, limit):
                 found = max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.name))
                 real = found.resolve(strict=True)
                 if not real.is_relative_to(root) or not real.is_file():
-                    return b""
-                with real.open("rb") as stream:
-                    stream.seek(0, os.SEEK_END)
-                    stream.seek(max(0, stream.tell() - min(int(limit), 8 * 1024 * 1024)))
-                    return stream.read(min(int(limit), 8 * 1024 * 1024))
-    return b""
+                    return None
+                return real
+    return None
+
+
+def tail(home, session, limit):
+    real = locate(home, session)
+    if real is None:
+        return b""
+    with real.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - min(int(limit), CAP)))
+        return stream.read(min(int(limit), CAP))
+
+
+def delta(home, session, limit, offset):
+    """Whole lines after `offset`, prefixed by one `AM_ROLLOUT <next>` line; `next` is where the reader resumes.
+
+    An `offset` past the end (the file was truncated or replaced) or more than the cap behind reads the
+    last `min(limit, CAP)` bytes instead. Only complete lines are returned: an unterminated line stays unread.
+    """
+    if not offset.isascii() or not offset.isdigit():
+        return b""
+    real = locate(home, session)
+    if real is None:
+        return b""
+    cap = min(int(limit), CAP)
+    with real.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        start = int(offset)
+        if start > size or size - start > cap:
+            start = max(0, size - cap)
+        body_start = 0
+        if start > 0:
+            # Mid-line starts (a rotated file, or the cap cut into a line) skip to the next line break.
+            stream.seek(start - 1)
+            if stream.read(1) != b"\n":
+                stream.seek(start)
+                head = stream.read(size - start)
+                newline = head.find(b"\n")
+                if newline < 0:
+                    return b"AM_ROLLOUT %d\n" % start
+                body_start = newline + 1
+        stream.seek(start)
+        buf = stream.read(size - start)
+    end = max(buf.rfind(b"\n") + 1, body_start)
+    text = buf[body_start:end] if end > body_start else b""
+    return b"AM_ROLLOUT %d\n" % (start + end) + text
 
 
 if __name__ == "__main__":
     try:
-        sys.stdout.buffer.write(tail(*sys.argv[1:]).decode("utf-8", errors="ignore").encode("utf-8"))
+        if len(sys.argv) == 5:
+            sys.stdout.buffer.write(delta(*sys.argv[1:5]))
+        else:
+            sys.stdout.buffer.write(tail(*sys.argv[1:]).decode("utf-8", errors="ignore").encode("utf-8"))
     except (OSError, ValueError):
         pass  # Missing/unreadable paths degrade to the screen's question count.

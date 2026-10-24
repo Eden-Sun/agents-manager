@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// context 讀數的 SSH 上限：第一次可能讀到 8 MiB 檔尾，2 秒不夠；async 提問仍是 [`READ_TIMEOUT`]，不放寬。
+const CONTEXT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const FRESH_FOR: Duration = Duration::from_secs(20);
 const MAX_SLOTS: usize = 256;
 type Value = Option<Vec<AsyncQuestion>>;
@@ -43,7 +45,40 @@ fn script(home: &str, session: &str) -> String {
     format!("python3 -c {} {} {} {}", sh_quote(include_str!("codex_async_question_tail.py")), sh_quote(home), sh_quote(session), sh_quote(&TAIL_BYTES.to_string()))
 }
 
-async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
+/// 增量版：tail.py 的 `offset` 參數（選用，不帶就是上面的 `script`）。
+fn delta_script(home: &str, session: &str, offset: u64) -> String {
+    use crate::hosts::sh_quote;
+    format!("{} {}", script(home, session), sh_quote(&offset.to_string()))
+}
+
+/// tail.py 增量輸出：`AM_ROLLOUT <next>\n` 後接整行；缺表頭、位移不是數字、文字超過上限＝`None`。
+fn parse_delta(out: &str) -> Option<am_ports::RemoteRollout> {
+    let (header, text) = out.strip_prefix("AM_ROLLOUT ")?.split_once('\n')?;
+    let next = header.parse::<u64>().ok()?;
+    (text.len() <= TAIL_BYTES as usize).then(|| am_ports::RemoteRollout { text: text.to_string(), next })
+}
+
+/// Codex context 讀數（prompt_cache）的遠端增量讀取。**不經**上面的 20 秒快取與 single-flight：
+/// 那是 async 提問的 key 空間；context 的節流在 prompt_cache 自己做（[`crate::prompt_cache::REMOTE_EVERY`]）。
+/// `offset` `None` 從 0 讀，檔案比上限大時就是檔尾（同 tail.py）。失敗、逾時、身分不符都回 `None`。
+pub async fn rollout_read(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str, offset: Option<u64>) -> Option<am_ports::RemoteRollout> {
+    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + CONTEXT_READ_TIMEOUT;
+    let fence = tokio::time::timeout_at(deadline, app.hosts.fence(host)).await.ok()??;
+    if !fence.conn().is_connected() || !current(app, bot, run, host, session).await {
+        return None;
+    }
+    let home = home_setting(app, bot, run, host).await?;
+    let out = tokio::time::timeout_at(deadline, fence.conn().ssh_exec_path_timeout(&delta_script(&home, session, offset.unwrap_or(0)), CONTEXT_READ_TIMEOUT)).await.ok()?.ok()?;
+    if !app.hosts.is_current(&fence).await || !current(app, bot, run, host, session).await {
+        return None;
+    }
+    parse_delta(&out)
+}
+
+pub async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
     // Identity changes apply at restart. Reconstruct the launch identity before comparing the
     // launch revision; there is no persisted launch env, so an unprovable env must degrade.
     let mut launched = bot.clone();
@@ -62,7 +97,7 @@ async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) 
     Some(home.unwrap_or_else(|| "~/.codex".into()))
 }
 
-async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> bool {
+pub async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> bool {
     let Ok(Some(now)) = db::run(&app.db, &run.id).await else { return false };
     if !matches!(now.state.as_str(), "starting" | "running") || now.started_at != run.started_at || now.pane_id != run.pane_id || now.bot_id != bot.id {
         return false;
@@ -281,5 +316,92 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
         run.launch_rev = Some(crate::launch_rev::of(&bot));
         assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("~/bot override's home"));
         assert!(script("~/bot override's home", "safe-session").contains("'\\''"));
+    }
+}
+
+/// tail.py 的增量路徑（`offset`）：用假 ssh（把 script 交給本機 `sh -c` 執行）實跑同一支 python，不連真主機。
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+    use crate::hosts::sh_quote;
+
+    const LINES: &str = "one\ntwo\nthr";
+
+    /// `home/sessions/2026/10/24/rollout-x-abc.jsonl`，回傳 home 路徑。
+    fn rollout(body: &[u8]) -> std::path::PathBuf {
+        let home = crate::testing::scratch_dir("am-delta-home").join("home");
+        let day = home.join("sessions/2026/10/24");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-x-abc.jsonl"), body).unwrap();
+        home
+    }
+
+    /// 假 ssh：執行遠端會收到的 script，回傳 stdout。
+    fn fake_ssh(script: &str) -> String {
+        let out = std::process::Command::new("sh").arg("-c").arg(script).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn read(home: &std::path::Path, offset: u64) -> Option<am_ports::RemoteRollout> {
+        parse_delta(&fake_ssh(&delta_script(&home.to_string_lossy(), "abc", offset)))
+    }
+
+    #[test]
+    fn the_delta_reads_whole_lines_from_the_offset_and_resumes_at_next() {
+        let home = rollout(LINES.as_bytes());
+        // 0：整檔的整行；未結束的 "thr" 不讀、位移停在它前面。
+        assert_eq!(read(&home, 0), Some(am_ports::RemoteRollout { text: "one\ntwo\n".into(), next: 8 }));
+        // 位移正好在行首：只讀之後的新增（這裡沒有）。
+        assert_eq!(read(&home, 8), Some(am_ports::RemoteRollout { text: String::new(), next: 8 }));
+        // 位移落在行中：跳到下一個換行之後，不吃半行。
+        assert_eq!(read(&home, 2), Some(am_ports::RemoteRollout { text: "two\n".into(), next: 8 }));
+        // 新增完整行之後，從上次位移讀到新的 next。
+        std::fs::write(home.join("sessions/2026/10/24/rollout-x-abc.jsonl"), "one\ntwo\nthree\n").unwrap();
+        assert_eq!(read(&home, 8), Some(am_ports::RemoteRollout { text: "three\n".into(), next: 14 }));
+    }
+
+    #[test]
+    fn a_shrunk_or_replaced_file_is_read_from_the_start() {
+        let home = rollout(b"new-a\nnew-b\n");
+        // 位移超過檔案大小（rotate／截斷）：從頭讀，next 會比舊位移小。
+        assert_eq!(read(&home, 500), Some(am_ports::RemoteRollout { text: "new-a\nnew-b\n".into(), next: 12 }));
+    }
+
+    #[test]
+    fn a_delta_never_reads_more_than_the_cap_and_keeps_line_alignment() {
+        // 9 MiB 的整行：只取最後 8 MiB（上限），第一個（可能是半行的）片段丟掉。
+        let line = format!("{}\n", "x".repeat(99));
+        let body = line.repeat(9 * 1024 * 1024 / line.len());
+        let home = rollout(body.as_bytes());
+        let got = read(&home, 0).unwrap();
+        assert!(got.text.len() <= TAIL_BYTES as usize);
+        assert!(got.text.starts_with("xxxx") && got.text.ends_with("x\n"));
+        assert_eq!(got.next, body.len() as u64, "整檔讀到最後一個換行");
+        assert_eq!(got.text.len() % line.len(), 0, "每一段都是完整行");
+    }
+
+    #[test]
+    fn a_bad_offset_or_a_bad_channel_is_none_not_a_guess() {
+        let home = rollout(LINES.as_bytes());
+        let home_str = home.to_string_lossy().into_owned();
+        // 負數、非數字：python 不輸出；解析不到表頭＝None。
+        for bad in ["-1", "1x", "+3", " 3"] {
+            let script = format!("{} {}", script(&home_str, "abc"), sh_quote(bad));
+            assert_eq!(parse_delta(&fake_ssh(&script)), None, "{bad}");
+        }
+        // session 不在、路徑逃出 sessions：空輸出＝None（通道失敗，呼叫端保留上一次讀數）。
+        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "nope", 0))), None);
+        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "../abc", 0))), None);
+        assert_eq!(parse_delta(""), None);
+        assert_eq!(parse_delta("AM_ROLLOUT 8"), None, "沒有換行的表頭不算");
+        assert_eq!(parse_delta("AM_ROLLOUT x\none\n"), None, "位移不是數字");
+    }
+
+    #[test]
+    fn the_legacy_tail_without_offset_is_unchanged() {
+        // 不帶 offset：仍是原來的檔尾原文，沒有 AM_ROLLOUT 表頭（async 提問的行為不准變）。
+        let home = rollout(LINES.as_bytes());
+        let out = fake_ssh(&script(&home.to_string_lossy(), "abc"));
+        assert_eq!(out, LINES);
     }
 }

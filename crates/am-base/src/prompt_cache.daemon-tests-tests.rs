@@ -183,7 +183,114 @@ fn a_token_count_older_than_the_tail_is_still_found() {
 
     #[test]
     fn retain_runs_forgets_finished_runs() {
+        let _serial = store_serial();
         store().lock().unwrap().insert("r-retain-pc".into(), Entry::default());
         retain_runs(&["other".to_string()]);
         assert!(!store().lock().unwrap().contains_key("r-retain-pc"));
     }
+
+/// `retain_runs` 會清掉整個 store：跟遠端節流測試並行會互相吃掉 entry，所以動全域 store 的測試排隊跑。
+static STORE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn store_serial() -> tokio::sync::MutexGuard<'static, ()> {
+    STORE_SERIAL.blocking_lock()
+}
+
+async fn store_serial_async() -> tokio::sync::MutexGuard<'static, ()> {
+    STORE_SERIAL.lock().await
+}
+
+fn remote_chunk(text: &str, next: u64) -> Option<am_ports::RemoteRollout> {
+    Some(am_ports::RemoteRollout { text: text.into(), next })
+}
+
+/// 遠端 codex：每 [`REMOTE_EVERY`] 最多一次、只從上次位移起讀、通道失敗保留讀數並退避；假通道（不連真主機）。
+#[tokio::test]
+async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
+    let _serial = store_serial_async().await;
+    let run = "r-remote-timer";
+    store().lock().unwrap().remove(run);
+    let lines: Vec<&str> = ROLLOUT.lines().collect();
+    let two = format!("{}\n", lines[2]); // input 13547
+    let three = format!("{}\n", lines[3]); // input 17667
+    let calls = std::cell::RefCell::new(Vec::<Option<u64>>::new());
+
+    // 第一次：沒有位移，讀到第一筆讀數就變動。
+    let first = refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(remote_chunk(&two, two.len() as u64))
+    })
+    .await;
+    assert!(first);
+    assert_eq!(remote_state_for_test(run), Some((two.len() as u64, Some(13547))));
+
+    // 間隔內再來：不打 host。
+    assert!(!refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(remote_chunk("", 0))
+    })
+    .await);
+    assert_eq!(calls.borrow().len(), 1, "節流間隔內不讀");
+
+    // 間隔過了、沒有新行：從上次位移讀，讀數不變。
+    age_remote_for_test(run);
+    let n = two.len() as u64;
+    assert!(!refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(remote_chunk("", n))
+    })
+    .await);
+    assert_eq!(calls.borrow()[1], Some(n), "只從上次位移起讀");
+    assert_eq!(remote_state_for_test(run), Some((n, Some(13547))));
+
+    // 通道失敗：讀數與位移都不動，且退避到下一個間隔（不立刻再打）。
+    age_remote_for_test(run);
+    assert!(!refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(None)
+    })
+    .await);
+    assert_eq!(remote_state_for_test(run), Some((n, Some(13547))));
+    assert!(!refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(None)
+    })
+    .await);
+    assert_eq!(calls.borrow().len(), 3, "失敗後退避中不再讀");
+
+    // 有新行：讀數變成新的一筆，位移前進。
+    age_remote_for_test(run);
+    let total = n + three.len() as u64;
+    assert!(refresh_remote(run, "s1", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(remote_chunk(&three, total))
+    })
+    .await);
+    assert_eq!(remote_state_for_test(run), Some((total, Some(17667))));
+
+    // 換 session：位移與讀數作廢，從頭（None）讀。
+    assert!(!refresh_remote(run, "s2", |off| {
+        calls.borrow_mut().push(off);
+        std::future::ready(remote_chunk("", 0))
+    })
+    .await);
+    assert_eq!(calls.borrow().last(), Some(&None));
+    assert_eq!(remote_state_for_test(run), Some((0, None)));
+    store().lock().unwrap().remove(run);
+}
+
+/// 檔案被換掉（rotate）：位移由讀取端決定，新位移比舊的小也照接。
+#[tokio::test]
+async fn remote_codex_follows_the_offset_the_reader_returns_after_a_rotation() {
+    let _serial = store_serial_async().await;
+    let run = "r-remote-rotate";
+    store().lock().unwrap().remove(run);
+    let lines: Vec<&str> = ROLLOUT.lines().collect();
+    let big = format!("{}\n{}\n", lines[2], lines[3]);
+    assert!(refresh_remote(run, "s1", |_| std::future::ready(remote_chunk(&big, big.len() as u64))).await);
+    age_remote_for_test(run);
+    let short = format!("{}\n", lines[2]);
+    assert!(refresh_remote(run, "s1", |_| std::future::ready(remote_chunk(&short, short.len() as u64))).await);
+    assert_eq!(remote_state_for_test(run), Some((short.len() as u64, Some(13547))));
+    store().lock().unwrap().remove(run);
+}
