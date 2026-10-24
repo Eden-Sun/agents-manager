@@ -3070,6 +3070,8 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   - **kind 範圍**：五種都自動翻：`claude`、`codex`、`herdr`、`agy`、`grok`（都有 changelog 來源，見 `changelog::feed_url`）。某 kind 抓不到 changelog 就安靜不送，不算失敗。
   - **去重**：同一 `(kind, from→to)` 同一份內容只翻一次（指紋去重，完成不重送）。背景翻與開框補翻共用同一份帳本，不會各打一次。
   - **開框補翻**：只有 install／upstream 類的框自動送（`ClaudeInstallChip`、`HerdrUpdateChip`、`UpstreamChangelogBox`，帶 `autoTranslate`）。`absent` 且 `auto` 開著、這個 key 還沒送過，前端自動 `POST` 一次，不必按。per-bot 的 badge（`UpdateBadge`、`UpdateQuotaChip`、`CodexInstallChip`、`CodexUpdateHint`，區間是 bot 正在跑的版本→磁碟上的版本）**不自動送**，只留手動按鈕，免得幾顆 bot 各付一次。`GET` 仍只讀。`GET`／`POST` 回應都帶 `auto`。
+  - **背景被預算擋下（#1948 review）**：`in_flight`（同時只能翻一筆）或 `hourly` 擋下時，排**一次**延後重送，同一組 kind|from|to 只排一個、不疊；`in_flight` 等 60 秒（`retry_floor`），`hourly` 等到 `retry_after` 但不短於 60 秒。那一次又被擋就不再排。只存在記憶體，重啟不補。使用者自設上限（`attempts`）不排。
+  - **在飛涵蓋（#1948 review）**：別的帳本正在翻（`reserved`／`in_flight`）且涵蓋本次每一版原文時，回 `in_flight`（不送、不記 attempt、不扣預算），前端照常輪詢；完成後 `GET` 變 `completed`（`reused:true`）。自己那筆是 `failed` 時也先找涵蓋（完成的較寬範圍），涵蓋就直接用，不再送。
   - **覆蓋重用（#1948 review）**：算出 plan 後若本指紋 `absent`，先找 scope 相同（prompt 版、kind、lang、model、effort、輸入上限）、已完成、而且請求的**每一個**版本原文 sha256 都相同、譯文都在的帳本，直接組出那些版本的 `sections` 回 `completed`（`reused:true`、`summary` 留空），不送 API、不記新 attempt、不扣 hourly／attempts／in_flight。部分涵蓋不算，任一段缺或正文改了就走原流程。背景翻 (A,C] 之後，前端 (B,C]、(A,B] 都直接用；多一個未翻的新版 (A,D] 照常送。舊帳本沒有 scope，不被重用。
   - **費用**：每次送出都記共用帳本（用途 `changelog_translate`），仍受 `max_in_flight` 與（若有設）`max_per_hour` 約束。預算擋下就靜默放棄，之後開框或退避到期再試。
   - 按鈕（`POST`）不因 `auto` 而改變，`auto = false` 時只剩按鈕。
