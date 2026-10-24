@@ -155,7 +155,7 @@ pub async fn remember_pane_cursor_tx(
     Ok(())
 }
 
-fn tail_hash(text: &str) -> String {
+pub fn tail_hash(text: &str) -> String {
     let tail: String = text.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
     format!("{:x}", md5ish(&tail))
 }
@@ -180,6 +180,27 @@ pub fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
         }
     }
     text.to_string()
+}
+
+/// 這一回合的畫面＝這次送出的 prompt 的回音之後的全部（#1977）。游標可能停在回覆中途，切片會掉前面的字；回音比游標可靠。
+///
+/// 回音必須是 `sent` 其中一句的第一行，而且是畫面上**最後一則**行首的使用者輸入（縮排的是回覆或引用，不算），
+/// 同一句在畫面上只能出現一次。不符合就回 `None`，呼叫端退回游標切片（行為照舊）。
+pub fn slice_after_sent_echo(kind: &str, text: &str, sent: &[String]) -> Option<String> {
+    let echo = prompt_echo_prefix(kind)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let heads: Vec<&str> = sent.iter().filter_map(|p| p.trim().lines().next()).map(str::trim).filter(|h| !h.is_empty()).collect();
+    let user_rows: Vec<(usize, &str)> = lines.iter().enumerate().filter_map(|(i, l)| l.strip_prefix(echo).map(str::trim).filter(|b| !b.is_empty()).map(|b| (i, b))).collect();
+    let &(last, body) = user_rows.last()?;
+    if !heads.contains(&body) || user_rows.iter().filter(|(_, b)| *b == body).count() != 1 {
+        return None;
+    }
+    Some(lines[last + 1..].join("\n"))
+}
+
+/// 記 debug log 用的指紋（前 8 位十六進位）。log 只放指紋、不放內容（#1977）。
+pub fn fingerprint(text: &str) -> String {
+    format!("{:x}", md5ish(text)).chars().take(8).collect()
 }
 
 /// Prompt-echo prefix per CLI; single source for `after_last_prompt_echo` / `last_prompt_echo_text`.
@@ -3120,5 +3141,61 @@ mod synthetic_codex_compaction_tests {
         assert!(is_codex_completion_line("Worked for 1m 14s • 11:57 AM"));
         assert!(!is_codex_completion_line("Worked for three days • on the fix"));
         assert!(!is_codex_completion_line("Worked for 21s • not a clock"));
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod sent_echo_window_tests {
+    use super::*;
+
+    fn sent(p: &str) -> Vec<String> {
+        vec![p.to_string()]
+    }
+
+    /// 回音就是最後一則行首使用者輸入、且這句只出現一次：回覆從回音之後開始（#1977）。
+    #[test]
+    fn the_window_starts_after_the_sent_echo() {
+        let got = slice_after_sent_echo("claude", "舊回合\n❯ 第一句\n⏺ 舊回覆\n\n❯ 做個調查\n⏺ 新回覆\n", &sent("做個調查")).unwrap();
+        assert_eq!(got, "⏺ 新回覆");
+    }
+
+    /// 回覆正文裡縮排的引用不是回音：切點不能跑到引用那行。
+    #[test]
+    fn an_indented_quote_in_the_reply_is_not_the_echo() {
+        let text = "❯ 做個調查\n⏺ 結論\n  ❯ 做個調查 是你那句\n後續";
+        assert_eq!(slice_after_sent_echo("claude", text, &sent("做個調查")).unwrap(), "⏺ 結論\n  ❯ 做個調查 是你那句\n後續");
+    }
+
+    /// 行首的 `❯ ` 若是正文裡的引用（不是我們送的字），最後一則使用者輸入對不上，就不切。
+    #[test]
+    fn a_column_zero_look_alike_after_the_echo_refuses_the_cut() {
+        assert_eq!(slice_after_sent_echo("claude", "❯ 做個調查\n⏺ 結論\n❯ 別的話\n後續", &sent("做個調查")), None);
+    }
+
+    /// 同一句在畫面上出現兩次＝分不清是哪一回合：不切，退回游標。
+    #[test]
+    fn the_same_sent_line_twice_on_screen_is_ambiguous() {
+        assert_eq!(slice_after_sent_echo("claude", "❯ 做個調查\n⏺ 第一次\n❯ 做個調查\n⏺ 第二次", &sent("做個調查")), None);
+    }
+
+    /// 送出的是多行 prompt：回音比第一行，第一行對得上就算。
+    #[test]
+    fn a_multi_line_prompt_matches_on_its_first_line() {
+        let got = slice_after_sent_echo("claude", "❯ 第一行\n  第二行\n⏺ 回覆", &sent("第一行\n第二行")).unwrap();
+        assert_eq!(got, "  第二行\n⏺ 回覆");
+    }
+
+    #[test]
+    fn no_echo_or_no_sent_match_is_none() {
+        assert_eq!(slice_after_sent_echo("claude", "⏺ 只有回覆", &sent("做個調查")), None);
+        assert_eq!(slice_after_sent_echo("claude", "❯ 別句\n⏺ 回覆", &sent("做個調查")), None);
+        assert_eq!(slice_after_sent_echo("claude", "❯ \n⏺ 回覆", &sent("做個調查")), None);
+    }
+
+    #[test]
+    fn the_fingerprint_is_short_and_not_the_text() {
+        let fp = fingerprint("機密內容 secret reply");
+        assert_eq!(fp.len(), 8);
+        assert!(!fp.contains("機密"));
     }
 }
