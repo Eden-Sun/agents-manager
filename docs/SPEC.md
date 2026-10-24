@@ -798,6 +798,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - `api_bot_attempts` 只保存結構化用量／速度、估算費用／保守 reservation、費率版本和歸屬，不存 prompt 或完整 response；清除 session 或硬刪 bot 時將相關 FK 設 NULL，保留費用紀錄直到使用者刪除整個資料目錄（B 不自動刪除帳目）。無法確認的 request 保留 reservation 與 NULL 估算費用，不冒稱零費用或帳單金額。
 - **匯出／分享**：上述兩表不是 messages、state 或分享投影的來源。完整 checkpoint（包含 thinking/signature）不得經聊天匯出、分享、狀態 API 或一般 log 帶出；正常可見聊天訊息仍沿用 messages 的既有規則。儲存 DTO 不提供公開 JSON serializer，checkpoint Debug 只顯示 `<private>`。
 - schema 變更只 append SCHEMA_HISTORY 的下一號與真實指紋；舊 binary 受版本圍籬拒絕新 DB。回滾須還原升級前完整 `.bak`，不得把新 DB 的 user_version 調低偽裝相容。migration／回滾驗證只用新造 v67 fixture，不讀寫正式 DB，複本驗完當下刪除。
+- **C1 內部組裝現況（#1944 C1，尚未接線）**：以 `daemon/src/api_bot/` 的 `quote.rs`、`adapter.rs`、`registry.rs` 完成 inert 組裝。報價採完整不可變 `RequestEnvelope`（由 `protocol::request` 生成並計算 canonical full-body SHA256 雜湊綁定 reservation 與 dispatch），生產環境採 `FailClosed`（無核准定價與上界則拒絕送出，不猜價、不打付費端點）。`ApiBotAdapter` 銜接 A 的 Model/Tools/Journal 與 B 的 Storage API：首個 in_flight turn 後以 fence 建立或續接；`false->true` 只允許 reservation，Fresh 授予一次性 dispatch permit，Existing 拒絕重發；`true->false` 結算可信 usage 為 recorded，缺乏可信 usage（malformed/5xx/timeout/未 record 停止）記為 unknown 並保留 reserved 預留額度不計 0。鎖定階層嚴格遵守單 runner 模式：短 DB await 允許持 cursor 鎖，但在發起 Model HTTP 與 Tools child process 等長 IO 前必須放鎖；外部 stop 先 CAS `runs.state = 'stopping'` 並觸發取消，不取 cursor 鎖，放鎖等待 task 結束。C1 仍無 kind、路由或 lifecycle 接線，建立 API 維持 400。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
