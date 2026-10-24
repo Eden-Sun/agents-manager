@@ -14,7 +14,7 @@ pub fn dir() -> Option<PathBuf> {
     {
         // HOME 已經被 daemon 的 `test_home` 切到暫存目錄就沿用它；否則（am-lifecycle 的測試行程 HOME 仍是真的）用暫存的假目錄，絕不回真的 HOME。
         let home = dirs::home_dir().filter(|h| under_temp(h));
-        Some(home.unwrap_or_else(|| std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id()))))
+        Some(home.unwrap_or_else(|| std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id())))) // scratch-guard: allow 測試建置的假 HOME，不能在這裡建或登記
     }
     #[cfg(not(any(test, feature = "test-hooks")))]
     {
@@ -23,10 +23,10 @@ pub fn dir() -> Option<PathBuf> {
     }
 }
 
-/// `p` 在暫存目錄底下嗎。macOS 的 `temp_dir()` 是 `/var/folders/…`，而 `/var` 是 `/private/var` 的符號連結，
+/// `p` 在暫存目錄底下嗎。macOS 的暫存路徑是 `/var/folders/…`，而 `/var` 是 `/private/var` 的符號連結，
 /// test_home／scratch_dir 給的可能是 canonical 的那一邊：兩邊都先 canonicalize 再比（#1959，同 #1925／#1964）。
 pub fn under_temp(p: &Path) -> bool {
-    under(p, &std::env::temp_dir())
+    under(p, &std::env::temp_dir()) // scratch-guard: allow under_temp 的比對基準，不建路徑
 }
 
 /// `p` 在 `root` 底下嗎；兩邊都換成最長的已存在祖先的 canonical 路徑再接回尾段，路徑還不存在也比得對。
@@ -117,7 +117,7 @@ mod under_temp_tests {
     /// macOS 的 `/var` → `/private/var`：root 是符號連結、路徑是 canonical 的（或反過來）也要判在底下；路徑還不存在也一樣。
     #[test]
     fn a_symlinked_temp_root_still_contains_its_canonical_children() {
-        let base = std::env::temp_dir().join(format!("am-under-{}", std::process::id()));
+        let base = crate::test_dirs::scratch_dir("am-under");
         let real = base.join("private-var");
         std::fs::create_dir_all(real.join("folders")).unwrap();
         let link = base.join("var");

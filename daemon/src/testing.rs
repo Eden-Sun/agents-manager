@@ -1449,6 +1449,7 @@ mod scratch_dir_canonical_tests {
 mod scratch_leak_guard {
     /// issue #763：測試裡直接 `std::env::temp_dir().join(…)` 的目錄沒有人保證會刪，整樹跑一輪 `/tmp` 多出上萬個。
     /// 每一處都要過 `testing::track` / `testing::scratch_dir`（行程結束時一定掃掉）。
+    /// 規則要跟 crates/am-base/src/test_dirs.rs 的 scratch_leak_guard 一起改（#1967）。
     #[test]
     fn no_test_builds_an_unregistered_path_under_temp_dir() {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
@@ -1463,9 +1464,16 @@ mod scratch_leak_guard {
                         for segment in l.split_inclusive(';') {
                             statement.push_str(segment);
                             if segment.contains("temp_dir()")
-                                && !["testing::track(", "testing::scratch_dir(", "tt::track(", "tt::scratch_dir("]
-                                    .iter()
-                                    .any(|w| statement.contains(w))
+                                && ![
+                                    "testing::track(",
+                                    "testing::scratch_dir(",
+                                    "tt::track(",
+                                    "tt::scratch_dir(",
+                                    "test_dirs::track(",
+                                    "test_dirs::scratch_dir(",
+                                ]
+                                .iter()
+                                .any(|w| statement.contains(w))
                             {
                                 out.push(format!("{}:{}: {}", p.display(), i + 1, segment.trim()));
                             }

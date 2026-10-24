@@ -183,7 +183,7 @@ pub(crate) mod remote_script_support {
     impl Scratch {
         pub(crate) fn new() -> Self {
             static N: AtomicUsize = AtomicUsize::new(0);
-            let dir = std::env::temp_dir().join(format!("am-remote-script-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+            let dir = std::env::temp_dir().join(format!("am-remote-script-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))); // scratch-guard: allow 正式程式碼，Scratch 有 RAII Drop 會刪
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)

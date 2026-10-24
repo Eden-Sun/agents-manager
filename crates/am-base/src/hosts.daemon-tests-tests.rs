@@ -623,8 +623,7 @@
     #[test]
     fn ensure_private_dir_creates_0700_and_rejects_loose_or_symlinked_dirs() {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        let base = std::env::temp_dir().join(format!("am-test-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::testing::scratch_dir("am-test");
         let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
 
         // 不存在 → 建立，0700。
@@ -712,8 +711,7 @@
 
     #[tokio::test]
     async fn a_hung_post_connect_does_not_stop_the_supervisor_from_noticing_a_dead_host() {
-        let dir = std::env::temp_dir().join(format!("am-test-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("am-test");
         let herdr = crate::testing::MockHerdr::start(dir.join("remote.sock"));
         let hooks = Arc::new(TestHooks {
             hosts: HostManager::new(HerdrClient::new(dir.join("local.sock"))),

@@ -83,7 +83,7 @@ fn a_test_build_never_resolves_or_writes_the_real_home() {
     if let Some(real) = std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|h| !crate::home::under_temp(h)) {
         assert!(super::agy_hook::refuse_real_home(&real).is_err(), "真的家目錄 {} 必須被拒寫", real.display());
     }
-    assert!(super::agy_hook::refuse_real_home(&std::env::temp_dir().join("am-x")).is_ok());
+    assert!(super::agy_hook::refuse_real_home(&std::env::temp_dir().join("am-x")).is_ok()); // scratch-guard: allow 純字串斷言，不建檔
 }
 
 fn run_dispatcher(script: &str, args: &[&str], env: &[(&str, &str)]) -> (String, i32) {

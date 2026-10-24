@@ -175,8 +175,7 @@ mod tests {
     /// 重啟後還收得到：登記寫檔、載回來；壞檔當空的。
     #[test]
     fn the_unclosed_set_survives_a_restart_through_the_file() {
-        let dir = std::env::temp_dir().join(format!("am-probe-ws-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dirs::scratch_dir("am-probe-ws");
         let path = dir.join(FILE);
         let set: HashSet<Key> = [(PathBuf::from("/tmp/s.sock"), "w3".to_string()), (PathBuf::from("/tmp/t.sock"), "w3".to_string())].into_iter().collect();
         save_to(&path, &set);

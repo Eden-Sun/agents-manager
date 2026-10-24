@@ -65,10 +65,7 @@ mod tests {
     use std::sync::Arc;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let d = std::env::temp_dir().join(format!("am-atomic-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_dirs::scratch_dir(&format!("am-atomic-{tag}"))
     }
 
     fn mode_of(p: &Path) -> u32 {

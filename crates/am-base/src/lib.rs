@@ -110,3 +110,6 @@ pub mod ws_event;
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod race_point;
+
+#[cfg(test)]
+pub mod test_dirs;
