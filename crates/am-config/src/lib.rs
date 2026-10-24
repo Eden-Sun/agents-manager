@@ -1069,7 +1069,7 @@ mod build_cfg_tests {
 
     #[tokio::test]
     async fn loading_out_of_range_build_lease_ttl_is_rejected_with_the_valid_range() {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-build-lease-ttl-load-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-build-lease-ttl-load");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let mut failures = Vec::new();
@@ -1110,7 +1110,7 @@ mod build_cfg_tests {
     /// 稽核：`[build]` 的三個門檻只有手改 `config.toml` 一條路，而 `get()` 是記憶體快照——改了不生效。
     #[tokio::test]
     async fn a_hand_edited_build_section_is_picked_up_without_a_restart() {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-build-fresh-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-build-fresh");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "[server]\nherdr_session = 'one'\n\n[build]\nmax_concurrent = 2\n").unwrap();
@@ -2241,7 +2241,7 @@ auto_start = true   # typo for autostart
 
     #[tokio::test]
     async fn noop_update_leaves_the_file_byte_identical() {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-config-issue38-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-config-issue38");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, SAMPLE).unwrap();
@@ -2274,7 +2274,7 @@ mod issue28_tests {
     use std::time::Duration;
 
     fn temp_config() -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-config-issue28-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-config-issue28");
         std::fs::create_dir_all(&dir).unwrap();
         (dir.clone(), dir.join("config.toml"))
     }
@@ -2397,7 +2397,7 @@ mod issue507_tests {
     /// 但寫回是 `rename` 蓋過連結本身：第一次寫入連結就變成一般檔，dotfiles 那份停在舊內容。
     #[tokio::test]
     async fn writing_through_a_symlinked_config_updates_the_target_and_keeps_the_link() {
-        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-symlink-{}", super::test_support::ulid())));
+        let root = super::test_support::scratch_dir("am-config-symlink");
         let home = root.join("home");
         let dotfiles = root.join("dotfiles");
         std::fs::create_dir_all(&home).unwrap();
@@ -2438,7 +2438,7 @@ mod issue507_tests {
     #[tokio::test]
     async fn a_relative_symlink_resolves_beside_the_link_and_keeps_the_targets_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-relsym-{}", super::test_support::ulid())));
+        let root = super::test_support::scratch_dir("am-config-relsym");
         let home = root.join("home");
         let dotfiles = root.join("dotfiles");
         std::fs::create_dir_all(&home).unwrap();
@@ -2465,7 +2465,7 @@ mod issue507_tests {
 
     #[tokio::test]
     async fn a_dangling_symlinked_config_is_refused_instead_of_replaced_by_defaults() {
-        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-dangling-{}", super::test_support::ulid())));
+        let root = super::test_support::scratch_dir("am-config-dangling");
         std::fs::create_dir_all(&root).unwrap();
         let link = root.join("config.toml");
         let target = root.join("missing-target.toml");
@@ -2482,7 +2482,7 @@ mod issue507_tests {
 
     #[tokio::test]
     async fn a_write_through_a_link_whose_target_vanished_fails_and_keeps_the_link() {
-        let root = super::test_support::track(std::env::temp_dir().join(format!("am-config-vanished-{}", super::test_support::ulid())));
+        let root = super::test_support::scratch_dir("am-config-vanished");
         std::fs::create_dir_all(&root).unwrap();
         let link = root.join("config.toml");
         let target = root.join("target.toml");
@@ -2504,7 +2504,7 @@ mod issue507_tests {
     /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
     #[tokio::test]
     async fn a_missing_config_is_still_created_in_place() {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-config-missing-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-config-missing");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let store = ConfigStore::load(path.clone()).await.unwrap();
@@ -2680,7 +2680,7 @@ model = "gpt-6"
 "#;
 
     async fn store_with(text: &str) -> (ConfigStore, PathBuf) {
-        let dir = super::test_support::track(std::env::temp_dir().join(format!("am-config-write-review-{}", super::test_support::ulid())));
+        let dir = super::test_support::scratch_dir("am-config-write-review");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, text).unwrap();
@@ -2900,42 +2900,7 @@ model = "gpt-6"
 /// 本 crate 測試共用：暫存路徑登記（行程結束時刪）、不掛任何 hook 的 `ConfigStore::load`。
 /// （daemon 的 `crate::testing`／`projection`／`config_audit` 不在這一層，帶 hook 的行為在 daemon 的 `app_ports_p2` 測試裡驗。）
 #[cfg(test)]
-mod test_support {
-    use super::*;
-    use std::sync::{Mutex, Once};
-
-    pub fn ulid() -> String {
-        ulid::Ulid::new().to_string()
-    }
-
-    pub fn track(path: PathBuf) -> PathBuf {
-        static LIST: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-        static HOOK: Once = Once::new();
-        extern "C" fn sweep() {
-            for p in LIST.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
-                if std::fs::remove_dir_all(&p).is_err() {
-                    let _ = std::fs::remove_file(&p);
-                }
-            }
-        }
-        LIST.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
-        HOOK.call_once(|| {
-            // SAFETY: `sweep` 是沒有參數的 `extern "C"` 函式，整個行程生命週期內都有效。
-            unsafe { libc::atexit(sweep) };
-        });
-        path
-    }
-
-    pub struct NoHooks;
-    impl ConfigChangeHooks for NoHooks {
-        fn validate_projection(&self, _next: &ConfigFile) -> Result<()> {
-            Ok(())
-        }
-        fn audit_external_change(&self, _at: &'static std::panic::Location<'static>, _path: &Path, _old: &ConfigFile, _new: &ConfigFile) {}
-        fn audit_reload_unchanged(&self, _at: &'static std::panic::Location<'static>, _path: &Path) {}
-        fn audit_write(&self, _at: &'static std::panic::Location<'static>, _path: &Path, _old: &ConfigFile, _new: &ConfigFile) {}
-    }
-}
+mod test_support;
 
 #[cfg(test)]
 impl ConfigStore {

@@ -1034,8 +1034,7 @@ mod probe_cache_tests {
         repo: &str,
         probe: impl Fn(&ReleaseTriageCfg) -> Option<Value> + Send + Sync + 'static,
     ) -> (PathBuf, MockApp) {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir().join(format!("am-test-{}-{}-{}", name, std::process::id(), nanos));
+        let base = crate::test_dirs::scratch_dir(&format!("am-test-{name}"));
         std::fs::create_dir_all(&base).unwrap();
         let cfg_path = base.join("config.toml");
         let mut file = ConfigFile::default();

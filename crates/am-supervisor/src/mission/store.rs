@@ -1287,7 +1287,7 @@ mod tests {
     // Exercise the production-style WAL writer contention, rather than shared-cache
     // in-memory locking (which uses a different SQLite lock protocol).
     async fn shared_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("am-mission-{name}-{}", crate::db::ulid()));
+        let dir = crate::test_dirs::scratch_dir(&format!("am-mission-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(dir.join("test.db"))

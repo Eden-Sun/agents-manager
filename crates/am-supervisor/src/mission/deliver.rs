@@ -463,7 +463,7 @@ mod tests {
     }
 
     fn tracked_temp(prefix: &str) -> Tmp {
-        Tmp(std::env::temp_dir().join(format!("{prefix}-{}", crate::db::ulid())))
+        Tmp(std::env::temp_dir().join(format!("{prefix}-{}", crate::db::ulid()))) // scratch-guard: allow 自訂 Tmp 以 Drop 刪除
     }
 
     fn write_exec(path: &Path, body: impl AsRef<[u8]>) {

@@ -648,8 +648,7 @@ mod tests {
     #[test]
     fn deploy_files_leaves_no_temp_files_behind() {
         use std::os::unix::fs::PermissionsExt;
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let app = TestApp { dir: std::env::temp_dir().join(format!("am-deploy-{}-{nanos}", std::process::id())) };
+        let app = TestApp { dir: crate::test_dirs::scratch_dir("am-deploy") };
         for _ in 0..3 {
             deploy_files(&app, "botULID", Some("respULID"), "persona text").unwrap();
         }

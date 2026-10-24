@@ -113,3 +113,6 @@ pub mod race_point;
 
 #[cfg(test)]
 pub mod test_dirs;
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod scratch_guard;
