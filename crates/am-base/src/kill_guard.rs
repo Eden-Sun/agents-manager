@@ -1340,7 +1340,7 @@ pub enum Guard {
     NotPreToolUse,
     /// 是 PreToolUse，放行（不是 shell 指令、解析不了、指令是窄的）：stdout 保持空。
     Pass,
-    /// 是 PreToolUse，要擋：stdout 印這段決策 JSON（claude／codex／grok 的 `hookSpecificOutput` 形狀；agy 另加 `decision`／`reason`）。
+    /// 是 PreToolUse，要擋：stdout 印這段決策 JSON（claude／codex／grok 的 `hookSpecificOutput` 形狀；agy 只印 `decision`／`reason`）。
     Deny(String),
 }
 
@@ -1378,16 +1378,16 @@ pub fn guard_logged(provider: &str, event: &str, stdin_text: &str, log: &mut dyn
         log(n);
     }
     let Verdict::Deny(reason) = verdict else { return Guard::Pass };
-    let mut out = json!({
+    // agy 1.4.7 只認 `decision`／`reason`；`hookSpecificOutput` 是未知欄位，protojson 會拒絕整個結果、理由也被蓋掉（SPEC agy）。
+    if provider == "agy" {
+        return Guard::Deny(json!({"decision": "deny", "reason": reason}).to_string());
+    }
+    let out = json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         }
     });
-    if provider == "agy" {
-        out["decision"] = json!("deny");
-        out["reason"] = json!(reason);
-    }
     Guard::Deny(out.to_string())
 }
