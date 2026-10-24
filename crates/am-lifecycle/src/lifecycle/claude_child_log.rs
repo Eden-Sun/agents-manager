@@ -92,6 +92,11 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
     // `tail -c` 會從一行中間切開。切剩的半行解析失敗後，後面的 assistant 仍是那一問的，
     // 不能接到上一問把回覆蓋掉。下一個完整的 user 才重新接上。
     let mut gap = false;
+    // 同一則 assistant 訊息的每個 text 區塊各一行（同一個 message.id）：依序接起來、中間一個換行（#1977）。
+    let mut block_msg: Option<String> = None;
+    let mut blocks: Vec<String> = Vec::new();
+    // 同一行重送（同一個 uuid）只接一次。
+    let mut seen_rows: std::collections::HashSet<String> = Default::default();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -150,8 +155,23 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
                     continue;
                 }
                 let reply = msg.get("content").and_then(parts_text_lossy).unwrap_or_default();
-                if !reply.trim().is_empty() {
-                    cur.reply = Some(reply.trim().to_string());
+                let reply = reply.trim();
+                if !reply.is_empty() {
+                    if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
+                        if !seen_rows.insert(uuid.to_string()) {
+                            continue;
+                        }
+                    }
+                    let id = msg.get("id").and_then(Value::as_str).map(str::to_string);
+                    if id.is_none() || id != block_msg {
+                        blocks.clear();
+                        block_msg = id;
+                    }
+                    // 同一則裡一模一樣的區塊只接一次。
+                    if !blocks.iter().any(|b| b == reply) {
+                        blocks.push(reply.to_string());
+                    }
+                    cur.reply = Some(blocks.join("\n"));
                     cur.closed = true;
                 }
             }

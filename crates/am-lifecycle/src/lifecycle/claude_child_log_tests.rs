@@ -23,6 +23,11 @@ fn assistant(text: &str, stop: Option<&str>, tool: bool) -> String {
     json!({"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": content, "stop_reason": stop}}).to_string()
 }
 
+/// 同一則 assistant 訊息的一個 content 區塊＝一行（同 `message.id`，各自的 `uuid`）。終止的那則每一行都帶 `end_turn`（實測）。
+fn block_row(uuid: &str, msg_id: &str, text: &str, stop: Option<&str>) -> String {
+    json!({"type": "assistant", "uuid": uuid, "isSidechain": false, "message": {"id": msg_id, "role": "assistant", "content": [{"type": "text", "text": text}], "stop_reason": stop}}).to_string()
+}
+
 fn tool_result() -> String {
     json!({"type": "user", "uuid": "tr", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}).to_string()
 }
@@ -974,4 +979,40 @@ async fn an_idle_edge_leaves_an_in_flight_turn_to_the_fallback() {
 
     assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     assert_eq!(turn_count(&app, &c.conv).await, 1, "只有原本那筆在飛的");
+}
+
+/// #1977：同一則 assistant 的多個 text 區塊各一行，依序接起來、中間一個換行，不只留最後一行。
+#[test]
+fn the_text_blocks_of_one_message_are_joined_in_order() {
+    let ex = parse_exchanges(&log(&[
+        user("u1", "做個調查"),
+        block_row("a1", "msg_1", "## 結論", Some("end_turn")),
+        block_row("a2", "msg_1", "**細節**：第二段", Some("end_turn")),
+    ]));
+    assert_eq!(ex[0].reply.as_deref(), Some("## 結論\n**細節**：第二段"));
+    assert!(ex[0].closed);
+}
+
+/// 同一行重送（同一個 uuid）不重接；同一則裡一模一樣的區塊也只接一次。
+#[test]
+fn a_resent_block_row_and_an_identical_block_are_not_appended_twice() {
+    let ex = parse_exchanges(&log(&[
+        user("u1", "做個調查"),
+        block_row("a1", "msg_1", "第一段", Some("end_turn")),
+        block_row("a1", "msg_1", "第一段", Some("end_turn")),
+        block_row("a2", "msg_1", "第二段", Some("end_turn")),
+        block_row("a3", "msg_1", "第二段", Some("end_turn")),
+    ]));
+    assert_eq!(ex[0].reply.as_deref(), Some("第一段\n第二段"));
+}
+
+/// 新的一則訊息（不同 message.id）從頭開始，不接上一則的區塊。
+#[test]
+fn a_new_message_id_starts_a_new_reply() {
+    let ex = parse_exchanges(&log(&[
+        user("u1", "做個調查"),
+        block_row("a1", "msg_1", "舊的一則", Some("end_turn")),
+        block_row("a2", "msg_2", "新的一則", Some("end_turn")),
+    ]));
+    assert_eq!(ex[0].reply.as_deref(), Some("新的一則"));
 }
