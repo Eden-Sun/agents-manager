@@ -3187,7 +3187,8 @@ export class MockTransport implements Transport {
       setAgentStatus(run, 'idle')
       run.native_session_id = ulid('sess')
       if (this.bot(botId).kind !== 'grok') {
-        run.cache_ttl_secs = 3600
+        // codex 的 cache 不因閒置冷掉：同 daemon，帶 last_api_at 不帶 TTL。
+        run.cache_ttl_secs = this.bot(botId).kind === 'claude' ? 3600 : null
         const age = MOCK_CACHE_AGE_MIN[this.runs.indexOf(run) % MOCK_CACHE_AGE_MIN.length]
         run.last_api_at = new Date(Date.now() - age * 60_000).toISOString()
       }
@@ -3938,11 +3939,11 @@ export class MockTransport implements Transport {
 
   /** Enter 是分開的一顆鍵。 */
   /** 一鍵送出建議下一句（`POST /bots/:id/suggestion/accept`）：對不上就 409、不送；對上了照一般 prompt 開回合。 */
-  /** `POST /bots/:id/keep-warm/skip`（User-only）：只有主力的 claude／codex；沒有 run 時沒有地方記，照回請求值。 */
+  /** `POST /bots/:id/keep-warm/skip`（User-only）：只有主力的 claude（codex 的 cache 不會冷，不保溫）；沒有 run 時沒有地方記，照回請求值。 */
   private setKeepWarmSkip(botId: string, b: Rec) {
     const bot = this.bots.find((x) => x.id === botId)
     if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
-    if (bot.is_primary !== 1 || (bot.kind !== 'claude' && bot.kind !== 'codex')) {
+    if (bot.is_primary !== 1 || bot.kind !== 'claude') {
       throw new ApiError(400, { error: 'not_primary' }, 'bad request')
     }
     const skip = b.skip === true

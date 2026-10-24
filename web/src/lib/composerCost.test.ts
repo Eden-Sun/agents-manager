@@ -109,6 +109,12 @@ test('codex 熱：「熱（約剩 20 分）」；冷：「已冷（約）」，�
   assert.equal(coldWarning(cold), '快取已過期，送出這則會重寫約 18K')
 })
 
+test('codex 沒有 TTL（cache 不會冷）：閒置再久都是「熱」，不寫剩幾分、不警示', () => {
+  const v = cacheView(codex({ warm: true, expires_at: null, ttl_secs: null }, { ttlSecs: null, lastApiAt: ago(600) }))!
+  assert.equal(cacheLabel(v), '熱')
+  assert.equal(coldWarning(v), null)
+})
+
 test('codex 的 context 補進狀態列同一段格式；claude 已有 context 就不重複', () => {
   assert.deepEqual(contextFallback(codex()), { pct: '6.8%', detail: '18k/258k' })
   assert.equal(contextFallback({ ...codex(), status }), null)

@@ -8,7 +8,7 @@ import { useT } from '../lib/i18n'
 import './compactButton.css'
 
 /**
- * 「壓縮」鈕旁的「不用保溫」開關（主力的 claude／codex 才有）：開著＝這顆 bot「這一輪閒置」跳過保溫與熱壓，
+ * 「壓縮」鈕旁的「不用保溫」開關（主力的 claude 才有；codex 的 cache 不會冷，不保溫）：開著＝這顆 bot「這一輪閒置」跳過保溫與熱壓，
  * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓本身）daemon 自動恢復並廣播；再按一次取消。狀態在 `run.keep_warm_skip`。
  */
 export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; touch?: boolean }) {
@@ -34,7 +34,7 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
       notify('info', keep_warm_skip ? t('這一輪閒置不保溫、也不熱壓；有新活動就自動恢復') : t('已取消，照常保溫'))
     } catch (e) {
       const reason = e instanceof ApiError ? String(e.body.error ?? e.message) : String(e)
-      notify('error', reason === 'not_primary' ? t('只有主力的 claude／codex 能設定不用保溫') : t('沒有切換：{reason}', { reason }))
+      notify('error', reason === 'not_primary' ? t('只有主力的 claude 能設定不用保溫') : t('沒有切換：{reason}', { reason }))
     } finally {
       setBusy(false)
     }

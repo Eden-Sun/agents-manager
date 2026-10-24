@@ -2727,11 +2727,13 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 
 閒置太久回來，claude／codex 的 prompt cache 已經冷了，下一回合要整份重寫（量過：claude 1 小時 TTL、每次 API 呼叫重設，閒置 < 60 分 0–1% 冷、
 > 1 小時 81–91% 冷、回來時重寫 30–40 萬 token；codex（luna）< 1 小時命中 91–98%、> 2 小時多半冷）。主力（★）晶片的底色就是倒數，提示快取什麼時候到期。
+**codex 不倒數（使用者 2026-10-24：「codex 快取不用冷卻」）**：codex 的 cache 視為不會因閒置冷掉，`cache_ttl_secs` 為 `null`（`last_api_at` 照帶），晶片不畫倒數、
+狀態列一律「快取 熱」、不保溫也不熱壓（§6.5k），`herdr agent list` 的子 agent 清單把閒置的 codex child 當成 cache 熱、排最前。
 
 - **daemon**（`cache_clock.rs`）：run JSON 帶 `last_api_at` 與 `cache_ttl_secs`（API.md「run 的附加欄位」）。不加欄位，用現有資料推算、取最晚：
   最近一筆非 queued 回合的 `completed_at`；claude statusLine 的 API 指紋（`cost.total_api_duration_ms`、`context_window` 的用量）真的變了的那一刻
   （閒置重繪不算，記憶體帳，daemon 重啟後退回回合時間）；`blocked` 的 `agent_status_since`。回合進行中＝熱，給投影當下的時間。
-  TTL：claude、codex 3600 秒；grok 不知道，不帶。回合收尾時（`emit_turn` 收成終態）多推一次 `bot_status`，倒數從真正的收尾時間開始。
+  TTL：claude 3600 秒；codex 不會因閒置冷掉、grok 不知道，都不帶（`cache_clock::ttl_secs` 為 `None`，`never_cools` 標出 codex）。回合收尾時（`emit_turn` 收成終態）多推一次 `bot_status`，倒數從真正的收尾時間開始。
 - **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算（有主力在紅色時每 5 秒，紅色那段以 5 分為刻度，見 UI-DECISIONS）。整顆晶片一層淡的等級色調，剩餘那段（由左往右）再疊深一層，
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
@@ -2740,7 +2742,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   `source:"statusline"`）；沒有這塊（舊版 claude）為 `null`。codex 沒有 statusLine，巡邏（`update_watch::sweep_runs`，30 秒）對每顆本機 codex run 讀它的
   rollout（`$CODEX_HOME/sessions/…/rollout-*-<native_session_id>.jsonl`，沿用 `codex_session_log`）**新增的整行**——記路徑與位移，不整檔重讀；第一次只讀檔尾 256 KB——
   取最後一筆 `event_msg`／`token_count` 的 `info`：`last_token_usage.input_tokens`＝這次請求讀進去的整段 context（也是 `recache_tokens_if_cold` 的近似）、
-  `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %（網頁對 codex 的 gpt-6.1-sol 例外：分母固定 500k，只用實際 token，見 UI-DECISIONS「gpt-6.1-sol 的 context 分母固定 500k」）；到期＝該事件 `timestamp`＋`cache_ttl_secs`（推算，
+  `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %（網頁對 codex 的 gpt-6.1-sol 例外：分母固定 500k，只用實際 token，見 UI-DECISIONS「gpt-6.1-sol 的 context 分母固定 500k」）；codex 沒有 TTL，`warm` 一直是 `true`、`expires_at`／`ttl_secs` 為 `null`（推算，
   `source:"rollout_estimate"`，網頁字面加「約」）。讀數變了才推 `bot_status`；換 session 作廢舊位移與讀數，run 結束由巡邏清掉。
   網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
   沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。
@@ -2751,7 +2753,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 
 使用者原話：「主力的規則如下：當 cache 至 58 分鐘時，下一個 prompt "any updates"，來讓 cache 延長，且 cache 時間照樣上數，達 110 分鐘時，強制做壓縮」。
 
-- **對象**：`bots.is_primary = 1`、kind 是 claude 或 codex（grok、agy 不做）、有 `running` 的 run、`agent_status == "idle"`、沒有在飛或排隊的回合。`blocked`（停在問題／權限提示）、`working`、`unknown` 絕不送——
+- **對象**：`bots.is_primary = 1`、kind 是 claude（codex 的 cache 不因閒置冷掉，使用者 2026-10-24 起不保溫也不熱壓；grok、agy 不做）、有 `running` 的 run、`agent_status == "idle"`、沒有在飛或排隊的回合。`blocked`（停在問題／權限提示）、`working`、`unknown` 絕不送——
   送字進去會變成回答那個問題。主力本來就不被 idle_sleep 收起來。
 - **cache 年齡**＝距離 §6.5j `last_api_at` 的推算（最後一次**真的**活動）。**保溫回合本身不算活動**：保溫回合的 `turns.client_request_id` 是 `keep-warm:<錨點>`（舊資料是改名前的 `keepalive:<錨點>`，兩個前綴一律認得；不加欄位，前綴本身就持久、跨 daemon 重啟認得出來），
   `cache_clock` 的最近回合 SQL 排除它；保溫期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keep_warm::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
@@ -2769,24 +2771,23 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   可接受的理由：①這類呼叫正是 #1885 的來源，把它們算活動會讓主力每小時被背景呼叫續命、永遠保溫；②保溫本身極便宜，多一次遠小於重寫整段 context；③熱壓本來就只在 110 分之後、cache 離到期不到 58 分的窄窗內才做，且 context 用量要過門檻，漏掉的是少數情形，後果是「回到沒有熱壓的狀態」（與熱壓上線前相同），不會多花錢；
   ④真的活動（web 送 prompt、pane 打字的外部回合、bot 自己開的回合）一定有回合紀錄，回音期內照樣前移錨點、之後照常保溫（`a_real_turn_inside_the_echo_period_still_moves_the_anchor`）；
   ⑤回音期只有 15 分鐘，過了之後 statusLine 指紋變化又照常算。
-- **58 分（`KEEP_WARM_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude／codex 為 60 分）、這個錨點之後還沒保溫過（有沒有比錨點晚的保溫回合）：
+- **58 分（`KEEP_WARM_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude 為 60 分）、這個錨點之後還沒保溫過（有沒有比錨點晚的保溫回合）：
   走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。以 §6.5j 的
   `last_api_at` 與 `cache_kept_warm_at` 判斷 cache 是否仍熱；若 60 分內沒保溫到，cache 涼掉了就不補送。
 - **110 分（`WARM_COMPACT_AFTER_SECS`）**：年齡 ≥ 110 分、這個錨點之後還沒熱壓過、距離 §6.5j 的 `max(last_api_at, cache_kept_warm_at)` 未滿 58 分鐘
-  （cache TTL 到期前留 2 分鐘餘裕），**而且 context 用量超過門檻**（依 kind：claude `WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE` ＝ 30%、codex `WARM_COMPACT_MIN_CONTEXT_PCT_CODEX` ＝ 50%，`warm_compact_min_context_pct`；使用者 2026-10-05：用量小的 context 重建 cache 很便宜，不值得壓。
-  codex 視窗 258K、涼掉重讀沒有寫入加價，損益點約 35%，所以門檻比 claude 高），才呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）。
+  （cache TTL 到期前留 2 分鐘餘裕），**而且 context 用量超過門檻**（claude `WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE` ＝ 30%，`warm_compact_min_context_pct`；使用者 2026-10-05：用量小的 context 重建 cache 很便宜，不值得壓），才呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）。
   **保溫與熱壓都綁計畫當時的 run**（#872）：送出時帶 `expected_run_id`，在 bot 鎖內比對 active run id 與 `idle` 狀態（保溫另看有無排隊回合），不同就不送（409 `superseded_run`，一個鍵都不打），下一輪依新 run 重判。
   **「這個錨點熱壓過了」以 `primary_cache_actions` 的收據為準**（#864，bot_id＋錨點＋kind 為主鍵）：先 claim（`claimed`）再送，送出後定案（`done`）；鎖內前置檢查擋下、確定沒打字（Busy／BotNotFound／InvalidRequest／QuotaBlocked，含 `superseded_run`）就撤回 claim，結果不明（Unavailable／Failed，可能已打出 `/compact`）保留 claim、不重壓這個錨點。
   對話裡的系統訊息（「主力熱壓：…」）只是聊天室說明：寫失敗會在之後的巡邏補寫（`note_written`），不會因此重壓；舊資料沒有收據，仍認系統訊息（含改名前的「主力 cache 到點壓縮：…」），兩者取較晚的時間。cache 已涼就不熱壓；等真的活動更新 `last_api_at` 後重新計時。
-  **context 用量**（`primary_keep_warm::context_used_pct`）：claude 讀 statusLine 的 `context_window.used_percentage`（`runs.status_json`），codex 讀 rollout 最近一筆 `token_count`（input ÷ 視窗，`prompt_cache::codex_context_pct`）；
-  **讀不到（剛開的 session 是 null、codex 還沒讀到 rollout、視窗大小不明）保守不熱壓**。用量不超過門檻（claude ≤ 30%、codex ≤ 50%，剛好等於也不壓）到 110 分時不熱壓，**也不再保溫**（110 分已超過 TTL，保溫只在 58 分到 TTL 之間送），就讓它涼掉，直到真的活動重新計時。
+  **context 用量**（`primary_keep_warm::context_used_pct`）：claude 讀 statusLine 的 `context_window.used_percentage`（`runs.status_json`）；
+  **讀不到（剛開的 session 是 null、視窗大小不明）保守不熱壓**。用量不超過門檻（≤ 30%，剛好等於也不壓）到 110 分時不熱壓，**也不再保溫**（110 分已超過 TTL，保溫只在 58 分到 TTL 之間送），就讓它涼掉，直到真的活動重新計時。
   **熱壓之後視為涼掉**：熱壓後不再保溫、不再熱壓，直到真的活動（使用者或 bot 新回合，不含保溫／熱壓本身）才重新計時；`cache_kept_warm_at` 不含熱壓，也不含熱壓之前的保溫（見「顯示」），晶片從熱壓那刻起顯示涼。被拒（agent_busy 等）下一輪再試，但仍須符合熱度條件。
   熱壓本身會讓 statusLine 變、hook 報 working：熱壓後 10 分鐘內（`WARM_COMPACT_ECHO_SECS`）冒出的錨點算熱壓的回音，不重新計時；否則閒置的主力每兩小時就保溫＋熱壓一輪、停不下來。之後要有真的活動才重新開始計時。
-- **不用保溫**（使用者按鈕，`POST /api/bots/{id}/keep-warm/skip`，API.md）：只對主力的 claude／codex；按下後這顆 bot「這一輪閒置」跳過保溫與熱壓，再按一次取消。
+- **不用保溫**（使用者按鈕，`POST /api/bots/{id}/keep-warm/skip`，API.md）：只對主力的 claude；按下後這顆 bot「這一輪閒置」跳過保溫與熱壓，再按一次取消。
   狀態存在 `keep_warm_skip` 表（bot_id、按下的時間；daemon 重啟不忘）。**真的活動**＝使用者或 bot 的新回合（錨點晚於按下的時間；保溫／熱壓自己造成的不算）：
   送 prompt 的入口（`primary_keep_warm::note_prompt`，非保溫的 `client_request_id`）立刻清掉，巡邏（`settle_skip`）再補抓 bot 自己的新回合與 statusLine 活動，清掉時推 `bot_status`。
   `plan` 另外判斷「錨點不晚於按下的時間就不動」，所以即使清除晚一拍也不會在活動前誤送。
-  **冰凍熱壓（使用者 2026-10-14）**：按了「不用保溫」的主力（冰凍）不保溫、不送 `any updates`，但 context 超過熱壓門檻（同上：claude 30%、codex 50%）時，
+  **冰凍熱壓（使用者 2026-10-14）**：按了「不用保溫」的主力（冰凍）不保溫、不送 `any updates`，但 context 超過熱壓門檻（同上：30%）時，
   在 cache 到期前 6 分鐘（`FROZEN_COMPACT_LEAD_SECS`）內壓一次 `/compact`（`primary_keep_warm::decide_frozen`）：cache 年齡落在 [TTL − 6 分，TTL − 2 分）、這個錨點之後還沒熱壓過、用量超過門檻才壓，
   走同一條熱壓路徑（綁 run、收據 `primary_cache_actions`、系統訊息）。過了 TTL − 2 分就不壓（讓它涼掉），用量不夠同樣讓它涼；TTL 短於 12 分的 kind 不做。
   壓縮自己造成的活動（`is_warm_compact_echo`）不清掉「不用保溫」，所以壓完仍然冰凍，直到真的活動重新計時。

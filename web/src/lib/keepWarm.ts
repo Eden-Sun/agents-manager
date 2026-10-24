@@ -14,9 +14,9 @@ export function isKeepWarmRequestId(clientRequestId: string | null | undefined):
   return Boolean(clientRequestId) && KEEP_WARM_REQUEST_PREFIXES.some((p) => clientRequestId!.startsWith(p))
 }
 
-/** 「不用保溫」鈕只給主力的 claude／codex（grok 沒有 cache 倒數、也不保溫）。 */
+/** 「不用保溫」鈕只給主力的 claude（codex 的 cache 不因閒置冷掉、grok 沒有 cache 倒數，都不保溫）。 */
 export function keepWarmSkippable(bot: Pick<Bot, 'primary' | 'kind'> | undefined): boolean {
-  return Boolean(bot?.primary) && (bot?.kind === 'claude' || bot?.kind === 'codex')
+  return Boolean(bot?.primary) && bot?.kind === 'claude'
 }
 
 /**

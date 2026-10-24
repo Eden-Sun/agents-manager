@@ -5,8 +5,8 @@
 //!   `source:"statusline"`。沒有這塊（舊版 claude）＝`null`，網頁退回 `last_api_at`＋`cache_ttl_secs` 推算。
 //! * codex：沒有 statusLine，改讀它的 rollout（`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl`）最近一筆
 //!   `event_msg`／`token_count` 的 `info`：`last_token_usage.input_tokens`（＝這次請求讀進去的整段 context）、
-//!   `cached_input_tokens`、`model_context_window`。到期時間＝那筆事件的 `timestamp` ＋ [`cache_clock::ttl_secs`]（推算，
-//!   `source:"rollout_estimate"`）。`recache_tokens_if_cold` 用 `input_tokens` 近似。
+//!   `cached_input_tokens`、`model_context_window`（推算，`source:"rollout_estimate"`）。codex 的 cache 不因閒置冷掉
+//!   （[`cache_clock::ttl_secs`] 為 `None`）：`warm` 一直是 `true`、`expires_at` 為 `null`。`recache_tokens_if_cold` 用 `input_tokens` 近似。
 //!
 //! 檔案只讀新增的部分：記住每個 run 的路徑與位移，下一輪只讀位移之後的整行；第一次（沒位移）只讀檔尾
 //! [`TAIL_BYTES`]，檔尾裡沒有 `token_count` 才往前多找 [`BACKWARD_BYTES`]。herdr 開的 codex child 沒有 `native_session_id`，
@@ -244,13 +244,14 @@ pub fn from_statusline(status_json: &str) -> Value {
     })
 }
 
-/// codex：由 rollout 最後一筆 `token_count` 推算；到期＝事件時間＋TTL，`warm` 以 `now_ms` 為準。
-pub fn from_codex_usage(u: &CodexUsage, ttl_secs: i64, now_ms: i64) -> Value {
-    let expires_ms = u.at_ms + ttl_secs * 1000;
+/// codex：由 rollout 最後一筆 `token_count` 推算。有 TTL 時到期＝事件時間＋TTL、`warm` 以 `now_ms` 為準；
+/// 沒有 TTL（[`crate::cache_clock::ttl_secs`]，codex 不因閒置冷掉）＝一直熱、`expires_at`／`ttl_secs` 為 `null`。
+pub fn from_codex_usage(u: &CodexUsage, ttl_secs: Option<i64>, now_ms: i64) -> Value {
+    let expires_ms = ttl_secs.map(|ttl| u.at_ms + ttl * 1000);
     json!({
         "source": "rollout_estimate",
-        "warm": now_ms < expires_ms,
-        "expires_at": expires_ms / 1000,
+        "warm": expires_ms.is_none_or(|exp| now_ms < exp),
+        "expires_at": expires_ms.map(|exp| exp / 1000),
         "ttl_secs": ttl_secs,
         "recache_tokens_if_cold": u.input,
         "hit_ratio": (u.input > 0).then(|| (u.cached as f64 / u.input as f64 * 1000.0).round() / 1000.0),
@@ -276,7 +277,7 @@ pub fn annotate(run_json: &mut Value, kind: &str, now_ms: i64) {
         "claude" => o.get("status_json").and_then(Value::as_str).map_or(Value::Null, from_statusline),
         "codex" => {
             let usage = o.get("id").and_then(Value::as_str).and_then(|id| store().lock().unwrap_or_else(|e| e.into_inner()).get(id).and_then(|e| e.usage));
-            usage.zip(crate::cache_clock::ttl_secs("codex")).map_or(Value::Null, |(u, ttl)| from_codex_usage(&u, ttl, now_ms))
+            usage.map_or(Value::Null, |u| from_codex_usage(&u, crate::cache_clock::ttl_secs("codex"), now_ms))
         }
         _ => Value::Null,
     };

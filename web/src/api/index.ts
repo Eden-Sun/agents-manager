@@ -599,8 +599,8 @@ export async function compactBot(botId: string): Promise<{ command: string; kind
 }
 
 /**
- * 「不用保溫」鈕（主力、claude／codex；`POST /api/bots/:id/keep-warm/skip`）：`skip=true` 讓這顆 bot「這一輪閒置」跳過保溫與熱壓，
- * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 就自動清掉；`false` 取消。非主力或非 claude／codex 回 400 `not_primary`。
+ * 「不用保溫」鈕（主力、claude；`POST /api/bots/:id/keep-warm/skip`）：`skip=true` 讓這顆 bot「這一輪閒置」跳過保溫與熱壓，
+ * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 就自動清掉；`false` 取消。非主力或非 claude 回 400 `not_primary`。
  */
 export async function setKeepWarmSkip(botId: string, skip: boolean): Promise<{ keep_warm_skip: boolean }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/keep-warm/skip`, { skip })

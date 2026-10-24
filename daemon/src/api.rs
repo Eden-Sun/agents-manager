@@ -6542,7 +6542,7 @@ struct KeepWarmSkipIn {
     skip: bool,
 }
 
-/// `POST /api/bots/{id}/keep-warm/skip`：「不用保溫」鈕（主力的 claude／codex；SPEC §6.5k）。body `{"skip": bool}`，回 `{"keep_warm_skip": bool}`。
+/// `POST /api/bots/{id}/keep-warm/skip`：「不用保溫」鈕（主力的 claude；SPEC §6.5k）。body `{"skip": bool}`，回 `{"keep_warm_skip": bool}`。
 async fn keep_warm_skip_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<KeepWarmSkipIn>) -> Result<Response, LcError> {
     let skip = crate::primary_keep_warm::skip_route(&app, &id, body.skip).await?;
     Ok(Json(json!({"keep_warm_skip": skip})).into_response())

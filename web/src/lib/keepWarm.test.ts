@@ -13,9 +13,9 @@ test('保溫回合的 client_request_id：新前綴與 DB 舊前綴都認', () =
   assert.equal(isKeepWarmRequestId(''), false)
 })
 
-test('「不用保溫」只給主力的 claude／codex', () => {
+test('「不用保溫」只給主力的 claude（codex 的 cache 不會冷）', () => {
   assert.equal(keepWarmSkippable({ primary: true, kind: 'claude' }), true)
-  assert.equal(keepWarmSkippable({ primary: true, kind: 'codex' }), true)
+  assert.equal(keepWarmSkippable({ primary: true, kind: 'codex' }), false)
   assert.equal(keepWarmSkippable({ primary: true, kind: 'grok' }), false)
   assert.equal(keepWarmSkippable({ primary: false, kind: 'claude' }), false)
   assert.equal(keepWarmSkippable(undefined), false)

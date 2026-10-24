@@ -57,7 +57,7 @@ fn a_token_count_older_than_the_tail_is_still_found() {
     #[test]
     fn codex_usage_becomes_an_estimate_with_context_and_hit_ratio() {
         let u = last_token_count(ROLLOUT).unwrap();
-        let hot = from_codex_usage(&u, 3600, u.at_ms + 10 * 60_000);
+        let hot = from_codex_usage(&u, Some(3600), u.at_ms + 10 * 60_000);
         assert_eq!(hot["source"], "rollout_estimate");
         assert_eq!(hot["warm"], true);
         assert_eq!(hot["expires_at"], u.at_ms / 1000 + 3600);
@@ -66,7 +66,12 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         assert_eq!(hot["context_used_pct"], 6.8);
         assert_eq!(hot["context_used_tokens"], 17667);
         assert_eq!(hot["context_size"], 258400);
-        assert_eq!(from_codex_usage(&u, 3600, u.at_ms + 61 * 60_000)["warm"], false);
+        assert_eq!(from_codex_usage(&u, Some(3600), u.at_ms + 61 * 60_000)["warm"], false);
+        // 沒有 TTL（codex 現況）：閒置再久都熱，不給到期時間。
+        let never = from_codex_usage(&u, None, u.at_ms + 24 * 3600_000);
+        assert_eq!(never["warm"], true);
+        assert!(never["expires_at"].is_null() && never["ttl_secs"].is_null());
+        assert_eq!(never["hit_ratio"], 0.739);
     }
 
     /// claude 2.1.289 statusLine 實例（取用欄位以外的原文不外送）。
@@ -128,9 +133,10 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         let u = last_token_count(ROLLOUT).unwrap();
         store().lock().unwrap().insert("r-codex-annotate".into(), entry_for_test(Some("s"), Some(u)));
         let mut run = json!({"id": "r-codex-annotate"});
-        annotate(&mut run, "codex", u.at_ms + 60_000);
+        annotate(&mut run, "codex", u.at_ms + 3 * 3600_000);
         assert_eq!(run["prompt_cache"]["source"], "rollout_estimate");
-        assert_eq!(run["prompt_cache"]["warm"], true);
+        assert_eq!(run["prompt_cache"]["warm"], true, "codex 閒置 3 小時仍熱");
+        assert!(run["prompt_cache"]["expires_at"].is_null());
         // 還沒讀到任何 token_count：null。
         let mut fresh = json!({"id": "r-codex-unseen"});
         annotate(&mut fresh, "codex", 0);
