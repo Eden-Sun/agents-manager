@@ -481,15 +481,43 @@ class OperatorTests(unittest.TestCase):
             scripts = str(Path(__file__).resolve().parent)
             child = (
                 "import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(60)"
+                "f=open(sys.argv[1],'w'); f.write(str(os.getpid())); f.close(); print('READY', flush=True); time.sleep(60)"
             )
             parent = (
                 "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
                 "time.sleep(60)"
             )
-            runner = r'''import os,sys,subprocess
+            runner = r'''import os,select,sys,subprocess,time
 sys.path.insert(0, sys.argv[1])
 from ob_operator import run_process
+
+class ReadyPopen(subprocess.Popen):
+    # ready seam（只在這個測試 runner 行程內）：fake child 寫完 marker、設好 SIG_IGN 之後印一行 READY。
+    # 第一次 communicate 前，用 select 有界等這一行（不 sleep、不輪詢）；只讀到換行為止，其餘輸出仍留給 communicate。
+    # 等不到就拋一般例外，走 run_process 既有的 except BaseException 清理（不強制結束行程）。
+    # ready 先標記：清理裡的 communicate 不會再等 READY 而卡住。
+    def communicate(self, *args, **kwargs):
+        if not getattr(self, "ready", False):
+            self.ready = True
+            self.wait_ready()
+        return super().communicate(*args, **kwargs)
+
+    def wait_ready(self):
+        fd = self.stdout.fileno()
+        deadline = time.monotonic() + 5
+        line = b""
+        while not line.endswith(b"\n"):
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                raise RuntimeError("fake child never printed READY")
+            chunk = os.read(fd, 1)
+            if not chunk:
+                raise RuntimeError("fake child closed stdout before READY")
+            line += chunk
+        if line != b"READY\n":
+            raise RuntimeError(f"unexpected line before READY: {line!r}")
+
+subprocess.Popen = ReadyPopen
 try:
     run_process([sys.executable, "-c", sys.argv[2], sys.argv[3], sys.argv[4]],
                 cwd=sys.argv[5], env=os.environ.copy(), timeout=0.15)
