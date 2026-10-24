@@ -174,6 +174,24 @@ async fn planned_authority_matches(app: &impl crate::capabilities::Db, run: &db:
     }
 }
 
+/// 測試專用的診斷（#1957）：submit 回 `draft_changed` 時把是哪一道檢查失敗、畫面快照（revision、框的 frame）與 DB 綁定欄位的前後值印到 stderr。
+/// libtest 只在測試失敗時才把 stderr 秀出來，所以正式行為與通過的測試都不受影響。
+#[cfg(all(test, feature = "daemon-test-harness"))]
+async fn draft_changed_diag(app: &impl LcHost, site: &str, kind: &str, run: &db::Run, pane: &str, expect_token: &str, before: &crate::herdr::PaneRead, after: Option<&crate::herdr::PaneRead>, fresh: Option<&str>, checks: (bool, bool)) {
+    let now_run = db::active_run(app.db(), &run.bot_id).await.ok().flatten();
+    let draft_matches = fresh.is_some_and(|d| same_draft(expect_token, &run.id, pane, d));
+    let snapshot_same = after.is_some_and(|a| same_snapshot(kind, before, a));
+    let fields = |r: &db::Run| format!("id={} state={} pane={:?} herdr_session={:?} native_session_id={:?} transcript_path={:?}", r.id, r.state, r.pane_id, r.herdr_session, r.native_session_id, r.transcript_path);
+    eprintln!(
+        "[#1957 draft_changed] site={site} pane={pane} revision(authorized,after)={:?} snapshot_same={snapshot_same} draft_matches_token={draft_matches} composer_ok={} authority_ok={}\n  planned run : {}\n  active  run : {}",
+        (before.revision, after.map(|a| a.revision)),
+        checks.0,
+        checks.1,
+        fields(run),
+        now_run.as_ref().map(fields).unwrap_or_else(|| "<none>".into()),
+    );
+}
+
 pub(super) fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Option<&str>) -> LcError {
     let mut extra = json!({"run_id": run.id, "retryable": retryable, "sent": false});
     if let (Some(o), Some(f)) = (extra.as_object_mut(), draft_fields(kind, run, draft).as_object()) {
@@ -615,7 +633,10 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         BoxState::NonEmpty => {}
     }
     let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
-        let fresh = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
+        let fresh_read = read_draft(&client, &pane, &bot.kind).await.ok();
+        let fresh = fresh_read.as_ref().and_then(|(_, d, _)| d.clone());
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        draft_changed_diag(app, "pre-key-read", &bot.kind, &run, &pane, expect_token, &authorized_snapshot, fresh_read.as_ref().map(|(_, _, s)| s), fresh.as_deref(), (false, true)).await;
         return Err(SubmitDraftError::NoKeySent(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref())));
     };
     let proof = draft_proof(app, &client, &run, &bot, &pane, &draft)
@@ -698,6 +719,8 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
     let same_authority = planned_authority_matches(app, &run, Some(&proof)).await;
     if !same_composer || !same_authority {
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        draft_changed_diag(app, "final-check", &bot.kind, &run, &pane, expect_token, &authorized_snapshot, Some(&final_snapshot), fresh.as_deref(), (same_composer, same_authority)).await;
         let changed = refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref());
         return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, changed).await;
     }
