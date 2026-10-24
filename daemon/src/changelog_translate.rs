@@ -470,12 +470,16 @@ fn run_attempt(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         let client = app.changelog_translate.client();
+        // 帳本的分類要跟 finish 用同一套內容驗證（#1945），送出的版本清單從 reserve 時寫進的 job 讀。
+        let included = load(&job_path(&app.data_dir, &fp))
+            .map(|job| job.included_versions)
+            .unwrap_or_default();
         let result = crate::claude_api::complete_recorded(
             &app.claude_api,
             client.as_ref(),
             &request,
             "changelog_translate",
-            send_error_kind,
+            |o| send_error_kind(o, &included),
         )
         .await;
         let _gate = app.changelog_translate.gate.lock().await;
@@ -785,9 +789,11 @@ fn attempts_block(job: &Job, limits: &Limits) -> Option<Overlay> {
 }
 
 /// 帳本的分類跟翻譯自己的判斷一致：沒到 `end_turn`（max_tokens、refusal…）或缺 usage，都記成錯誤。
-fn send_error_kind(o: &ClientOutcome) -> Option<&'static str> {
+/// 帳本的錯誤分類：與 `fill_attempt` 同一組判斷（stop_reason、usage、內容驗證），任一不過就記成失敗（#1945）。
+fn send_error_kind(o: &ClientOutcome, included: &[String]) -> Option<&'static str> {
     let usage_ok = o.usage.as_ref().is_some_and(|u| u.input_tokens.is_some() && u.output_tokens.is_some());
-    (o.stop_reason.as_deref() != Some("end_turn") || !usage_ok).then_some("bad_response")
+    let reply_ok = o.stop_reason.as_deref() == Some("end_turn") && usage_ok && validate_model(&o.text, included).is_ok();
+    (!reply_ok).then_some("bad_response")
 }
 
 fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits {
@@ -2538,6 +2544,36 @@ mod tests {
         assert_eq!(rows[0]["error_kind"], "bad_response");
         assert_eq!(rows[1]["error_kind"], "bad_response");
         assert_eq!(rows[1]["input_tokens"], sample_usage().input_tokens.unwrap());
+    }
+
+    /// #1945：stop_reason 與 usage 都正常、但內容驗證失敗（摘要點數不對、版本對不上）時，更新框是失敗，帳本也要記成失敗。
+    #[tokio::test]
+    async fn ledger_marks_a_reply_that_fails_the_content_check_as_an_error() {
+        let reply = |text: &str| Step::Raw {
+            text: text.into(),
+            usage: Some(sample_usage()),
+            model: None,
+            stop_reason: Some("end_turn".into()),
+        };
+        let (env, fake) = boot(vec![
+            reply(r#"{"summary":["只有一點"],"sections":[]}"#),
+            reply(r#"{"summary":["一","二","三"],"sections":[{"version":"9.9.9","body":"x"}]}"#),
+        ])
+        .await;
+        enable(&env).await;
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let failed = until_status(&env.app, "2.1.5", "failed").await;
+        patch_retry_past(&env.app, failed["fingerprint"].as_str().unwrap());
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        until_calls(&fake, 2).await;
+        let _ = until_status(&env.app, "2.1.5", "failed").await;
+
+        let snap = env.app.claude_api.ledger.snapshot(10);
+        assert_eq!(snap["by_use"]["changelog_translate"]["errors"], 2, "{snap}");
+        for row in snap["rows"].as_array().unwrap() {
+            assert_eq!(row["error_kind"], "bad_response", "{row}");
+            assert!(row["input_tokens"].is_number(), "錯誤的回覆照樣算 token：{row}");
+        }
     }
 
     #[tokio::test]
