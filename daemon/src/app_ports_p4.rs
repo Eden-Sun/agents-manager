@@ -423,12 +423,13 @@ impl CodexRolloutAccess for AppCodexRolloutAccess<'_> {
         bot: &'a BotId,
         session: &'a SessionId,
         offset: Option<u64>,
+        cap: u64,
     ) -> impl Future<Output = Option<am_ports::RemoteRollout>> + Send + 'a {
         async move {
             let run = crate::db::run(&self.app.db, run).await.ok().flatten()?;
             let bot = crate::db::bot(&self.app.db, bot).await.ok().flatten()?;
             let host = crate::db::bot_host(&self.app.db, &bot.id).await.ok()?;
-            crate::runners::codex_async_question_remote::rollout_read(self.app, &bot, &run, &host, session, offset).await
+            crate::runners::codex_async_question_remote::rollout_read(self.app, &bot, &run, &host, session, offset, cap).await
         }
     }
 }

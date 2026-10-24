@@ -1,5 +1,7 @@
 
     use super::*;
+    use std::future::Future;
+    use std::time::Duration;
 
     /// 真實格式（codex 0.15x rollout，2026-09-28 取樣）：第一筆 `info:null`、其後每筆 `last_token_usage` 是這一次請求。
     const ROLLOUT: &str = concat!(
@@ -43,6 +45,7 @@ fn a_token_count_older_than_the_tail_is_still_found() {
 /// 保溫的熱壓門檻讀它：codex 的 context 用量＝最近一筆 `token_count` 的 input ÷ 視窗。
     #[test]
     fn codex_context_pct_is_the_last_request_over_the_window() {
+        let _serial = store_serial();
         let run = "r-codex-ctx-pct";
         assert_eq!(codex_context_pct(run), None, "還沒讀到 rollout");
         let u = last_token_count(ROLLOUT).unwrap();
@@ -130,6 +133,7 @@ fn a_token_count_older_than_the_tail_is_still_found() {
 
     #[test]
     fn codex_annotate_uses_the_remembered_rollout_reading() {
+        let _serial = store_serial();
         let u = last_token_count(ROLLOUT).unwrap();
         store().lock().unwrap().insert("r-codex-annotate".into(), entry_for_test(Some("s"), Some(u)));
         let mut run = json!({"id": "r-codex-annotate"});
@@ -216,7 +220,7 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     let calls = std::cell::RefCell::new(Vec::<Option<u64>>::new());
 
     // 第一次：沒有位移，讀到第一筆讀數就變動。
-    let first = refresh_remote(run, "s1", |off| {
+    let first = refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk(&two, two.len() as u64))
     })
@@ -225,7 +229,7 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     assert_eq!(remote_state_for_test(run), Some((two.len() as u64, Some(13547))));
 
     // 間隔內再來：不打 host。
-    assert!(!refresh_remote(run, "s1", |off| {
+    assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk("", 0))
     })
@@ -235,7 +239,7 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     // 間隔過了、沒有新行：從上次位移讀，讀數不變。
     age_remote_for_test(run);
     let n = two.len() as u64;
-    assert!(!refresh_remote(run, "s1", |off| {
+    assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk("", n))
     })
@@ -245,13 +249,13 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
 
     // 通道失敗：讀數與位移都不動，且退避到下一個間隔（不立刻再打）。
     age_remote_for_test(run);
-    assert!(!refresh_remote(run, "s1", |off| {
+    assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(None)
     })
     .await);
     assert_eq!(remote_state_for_test(run), Some((n, Some(13547))));
-    assert!(!refresh_remote(run, "s1", |off| {
+    assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(None)
     })
@@ -261,7 +265,7 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     // 有新行：讀數變成新的一筆，位移前進。
     age_remote_for_test(run);
     let total = n + three.len() as u64;
-    assert!(refresh_remote(run, "s1", |off| {
+    assert!(refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk(&three, total))
     })
@@ -269,7 +273,7 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     assert_eq!(remote_state_for_test(run), Some((total, Some(17667))));
 
     // 換 session：位移與讀數作廢，從頭（None）讀。
-    assert!(!refresh_remote(run, "s2", |off| {
+    assert!(!refresh_remote(run, "s2", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk("", 0))
     })
@@ -287,10 +291,135 @@ async fn remote_codex_follows_the_offset_the_reader_returns_after_a_rotation() {
     store().lock().unwrap().remove(run);
     let lines: Vec<&str> = ROLLOUT.lines().collect();
     let big = format!("{}\n{}\n", lines[2], lines[3]);
-    assert!(refresh_remote(run, "s1", |_| std::future::ready(remote_chunk(&big, big.len() as u64))).await);
+    assert!(refresh_remote(run, "s1", |_, _| std::future::ready(remote_chunk(&big, big.len() as u64))).await);
     age_remote_for_test(run);
     let short = format!("{}\n", lines[2]);
-    assert!(refresh_remote(run, "s1", |_| std::future::ready(remote_chunk(&short, short.len() as u64))).await);
+    assert!(refresh_remote(run, "s1", |_, _| std::future::ready(remote_chunk(&short, short.len() as u64))).await);
     assert_eq!(remote_state_for_test(run), Some((short.len() as u64, Some(13547))));
     store().lock().unwrap().remove(run);
+}
+
+/// 遠端讀取很慢（或卡住）時巡邏立刻返回，同一 run 同時只會有一個在飛（#1954 review）。
+#[tokio::test]
+async fn a_slow_remote_read_never_holds_the_patrol_and_is_never_doubled() {
+    let run = "r-remote-inflight";
+    let (done, gate) = tokio::sync::oneshot::channel::<()>();
+    let started = std::time::Instant::now();
+    assert!(spawn_remote_once(run, async move {
+        let _ = gate.await;
+    }));
+    assert!(started.elapsed() < Duration::from_millis(100), "巡邏不等遠端讀取");
+    assert!(!spawn_remote_once(run, async {}), "同一 run 還在飛就不另起");
+    done.send(()).unwrap();
+    for _ in 0..200 {
+        if spawn_remote_once(run, async {}) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("在飛標記沒有清掉");
+}
+
+/// 第一次只讀 256 KiB（同本機 TAIL_BYTES）；檔尾沒有 `token_count`、又沒有讀數，往前補一次到 8 MiB，之後不再補。
+#[tokio::test]
+async fn the_first_remote_read_is_the_context_cap_and_a_missing_token_count_looks_back_once() {
+    let run = "r-remote-wide";
+    let _serial = store_serial_async().await;
+    store().lock().unwrap().remove(run);
+    let lines: Vec<&str> = ROLLOUT.lines().collect();
+    let two = format!("{}\n", lines[2]); // input 13547
+    let filler = "x\n".to_string(); // 檔尾全是工具輸出
+    let calls = std::cell::RefCell::new(Vec::<(Option<u64>, u64)>::new());
+    let read = |off: Option<u64>, cap: u64| {
+        calls.borrow_mut().push((off, cap));
+        let text = if cap == TAIL_BYTES { filler.clone() } else { two.clone() };
+        let next = text.len() as u64;
+        std::future::ready(remote_chunk(&text, next))
+    };
+    assert!(refresh_remote(run, "s1", read).await, "往前補到的讀數算變動");
+    assert_eq!(calls.borrow().as_slice(), &[(None, TAIL_BYTES), (None, REMOTE_BACKWARD_BYTES)]);
+    assert_eq!(remote_state_for_test(run), Some((two.len() as u64, Some(13547))));
+    age_remote_for_test(run);
+    let read = |off: Option<u64>, cap: u64| {
+        calls.borrow_mut().push((off, cap));
+        std::future::ready(remote_chunk(&filler, (two.len() + filler.len()) as u64))
+    };
+    assert!(!refresh_remote(run, "s1", read).await);
+    assert_eq!(calls.borrow().len(), 3, "只往前補一次");
+    assert_eq!(calls.borrow()[2], (Some(two.len() as u64), TAIL_BYTES), "之後只讀新增、仍是 256 KiB 上限");
+    store().lock().unwrap().remove(run);
+}
+
+/// 超時（讀不到）不會變成每 20 秒重傳 8 MiB：只有成功讀到檔尾、又找不到讀數才會往前補。
+#[tokio::test]
+async fn a_timed_out_remote_read_never_escalates_to_the_wide_read() {
+    let run = "r-remote-timeout";
+    let _serial = store_serial_async().await;
+    store().lock().unwrap().remove(run);
+    let calls = std::cell::RefCell::new(Vec::<(Option<u64>, u64)>::new());
+    for _ in 0..3 {
+        assert!(!refresh_remote(run, "s1", |off, cap| {
+            calls.borrow_mut().push((off, cap));
+            std::future::ready(None)
+        })
+        .await);
+        age_remote_for_test(run);
+    }
+    assert_eq!(calls.borrow().as_slice(), &[(None, TAIL_BYTES), (None, TAIL_BYTES), (None, TAIL_BYTES)]);
+    store().lock().unwrap().remove(run);
+}
+
+/// 本機 codex 照舊讀本機 rollout（位移與讀數），不走遠端通道。
+struct LocalRollout {
+    path: PathBuf,
+    remote_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl am_ports::CodexRolloutAccess for LocalRollout {
+    fn local_rollout_path<'a>(&'a self, _bot: &'a am_core::BotId, _session: &'a am_core::SessionId) -> impl Future<Output = Option<PathBuf>> + Send + 'a {
+        std::future::ready(Some(self.path.clone()))
+    }
+
+    fn remote_rollout_read<'a>(
+        &'a self,
+        _run: &'a am_core::RunId,
+        _bot: &'a am_core::BotId,
+        _session: &'a am_core::SessionId,
+        _offset: Option<u64>,
+        _cap: u64,
+    ) -> impl Future<Output = Option<am_ports::RemoteRollout>> + Send + 'a {
+        self.remote_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(None)
+    }
+}
+
+struct NoEvents;
+
+impl am_ports::EventSink for NoEvents {
+    fn emit<'a>(&'a self, _event: am_core::EventEnvelope) -> impl Future<Output = Result<am_core::EventSeq, am_core::PortError>> + Send + 'a {
+        std::future::ready(Ok(0))
+    }
+
+    fn bot_status_changed<'a>(&'a self, _bot: &'a str) -> impl Future<Output = Result<(), am_core::PortError>> + Send + 'a {
+        std::future::ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn a_local_codex_run_still_reads_its_own_rollout_and_never_the_remote_channel() {
+    let env = crate::testing::env().await;
+    let bot = crate::testing::claude_bot(&env.app, &env.project_id, "local-codex-lock").await;
+    let id = crate::testing::fake_run(&env.app, &bot.id).await;
+    let mut run = db::run(&env.app.db, &id).await.unwrap().unwrap();
+    run.native_session_id = Some("local-sess".into());
+    let _serial = store_serial_async().await;
+    store().lock().unwrap().remove(&run.id);
+    let dir = crate::testing::scratch_dir("am-local-rollout");
+    let path = dir.join("rollout-local-sess.jsonl");
+    std::fs::write(&path, ROLLOUT).unwrap();
+    let rollout = LocalRollout { path, remote_calls: std::sync::atomic::AtomicUsize::new(0) };
+    refresh_codex_with_ports(&am_ports::DbContext::new(env.app.db.clone()), &rollout, &NoEvents, &run).await;
+    assert_eq!(rollout.remote_calls.load(std::sync::atomic::Ordering::SeqCst), 0, "本機 run 不走遠端通道");
+    assert_eq!(remote_state_for_test(&run.id), Some((ROLLOUT.len() as u64, Some(17667))));
+    store().lock().unwrap().remove(&run.id);
 }

@@ -17,7 +17,7 @@ use crate::db;
 use am_ports::{CodexRolloutAccess, DbContext, EventSink, RemoteRollout};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 
 /// 遠端 codex 的 rollout 最多每這麼久讀一次（每 run）；讀失敗也等到下一個間隔，不在每輪巡邏打 host。
 pub const REMOTE_EVERY: Duration = Duration::from_secs(20);
+
+/// 遠端檔尾找不到 `token_count` 時往前補到這麼多（每個 session 只試一次）：同本機 [`BACKWARD_BYTES`] 的精神，但遠端傳輸量有上限。
+pub const REMOTE_BACKWARD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 第一次（或一輪新增太多）時只讀檔尾這麼多；rollout 一輪 token_count 約幾 KB，256 KB 足夠找到最後一筆。
 pub const TAIL_BYTES: u64 = 256 * 1024;
@@ -48,6 +51,8 @@ pub struct Entry {
     usage: Option<CodexUsage>,
     /// 遠端 run 上次打 host 的時間（[`REMOTE_EVERY`] 節流）。位移與本機共用 `offset`，只放記憶體。
     remote_at: Option<Instant>,
+    /// 這個 session 是否已經試過往前補（[`REMOTE_BACKWARD_BYTES`]）。試過就不再試，失敗也不逐輪重傳。
+    remote_wide_tried: bool,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -158,7 +163,7 @@ pub async fn refresh_codex_with_ports<R, E>(
         Ok(host) if host == crate::config::LOCAL_HOST => {}
         // 遠端 codex：rollout 在那台主機，經 host 通道增量讀；讀數有變才投影。
         Ok(_) => {
-            let changed = refresh_remote(&run.id, &session_id, |offset| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset)).await;
+            let changed = refresh_remote(&run.id, &session_id, |offset, cap| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset, cap)).await;
             if changed {
                 emit_bot_status(events, &run.bot_id).await;
             }
@@ -215,15 +220,16 @@ pub async fn refresh_codex_with_ports<R, E>(
     }
 }
 
-/// 遠端 codex 的一輪：距上次打 host 不到 [`REMOTE_EVERY`] 就不讀。位移與本機一樣只在記憶體（`Entry::offset`），
-/// 第一次（位移為 0）傳 `None` 讓實作讀檔尾。讀失敗保留上一次讀數、不前進位移，仍記下這次時間（退避到下一個間隔）。
-/// 回傳讀數是否變動（呼叫端據此投影）。
+/// 遠端 codex 的一輪：距上次打 host 不到 [`REMOTE_EVERY`] 就不讀。位移與本機一樣只在記憶體（`Entry::offset`）。
+/// 第一次（位移為 0）傳 `None` 讓實作讀檔尾（最多 [`TAIL_BYTES`]）；檔尾找不到 `token_count`、又還沒有任何讀數，
+/// 往前補一次到 [`REMOTE_BACKWARD_BYTES`]（每個 session 只試一次）。讀失敗保留上一次讀數、不前進位移，仍記下這次時間（退避到下一個間隔）。
+/// 回傳讀數是否變動（呼叫端據此投影）。呼叫端應以 [`spawn_remote_once`] 另外跑，巡邏不等它。
 pub async fn refresh_remote<F, Fut>(run_id: &str, session: &str, read: F) -> bool
 where
-    F: FnOnce(Option<u64>) -> Fut,
+    F: Fn(Option<u64>, u64) -> Fut,
     Fut: Future<Output = Option<RemoteRollout>>,
 {
-    let offset = {
+    let (offset, known) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(run_id.to_owned()).or_default();
         if e.session_id != session {
@@ -234,18 +240,67 @@ where
             return false;
         }
         e.remote_at = Some(Instant::now());
-        (e.offset > 0).then_some(e.offset)
+        ((e.offset > 0).then_some(e.offset), e.usage.is_some())
     };
-    let Some(read) = read(offset).await else { return false };
-    let latest = last_token_count(&read.text);
+    let Some(mut now) = read(offset, TAIL_BYTES).await else { return false };
+    let mut latest = last_token_count(&now.text);
+    if latest.is_none() && !known && claim_wide(run_id, session) {
+        if let Some(wide) = read(None, REMOTE_BACKWARD_BYTES).await {
+            latest = last_token_count(&wide.text);
+            now = wide;
+        }
+    }
     let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
     let Some(e) = s.get_mut(run_id).filter(|e| e.session_id == session) else { return false };
-    e.offset = read.next;
+    e.offset = now.next;
     let changed = latest.is_some() && latest != e.usage;
     if latest.is_some() {
         e.usage = latest;
     }
     changed
+}
+
+/// 這個 session 的往前補還沒試過：是就標成試過並回 `true`。
+fn claim_wide(run_id: &str, session: &str) -> bool {
+    let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
+    match s.get_mut(run_id).filter(|e| e.session_id == session) {
+        Some(e) if !e.remote_wide_tried => {
+            e.remote_wide_tried = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn inflight() -> &'static Mutex<HashSet<String>> {
+    static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// 在飛的 run 離開時清掉（含 future 被取消）。
+struct Inflight(String);
+
+impl Drop for Inflight {
+    fn drop(&mut self) {
+        inflight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// 遠端讀取不能拖住巡邏（SSH 慢或卡住都只影響這一顆）：另外 spawn，同一 run 同時最多一個在飛，在飛就不另起。
+/// 回傳是否真的起了一個。
+pub fn spawn_remote_once<Fut>(run_id: &str, work: Fut) -> bool
+where
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    if !inflight().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_owned()) {
+        return false;
+    }
+    let guard = Inflight(run_id.to_owned());
+    tokio::spawn(Box::pin(async move {
+        let _guard = guard;
+        work.await
+    }));
+    true
 }
 
 async fn emit_bot_status<E: EventSink>(events: &E, bot_id: &str) {

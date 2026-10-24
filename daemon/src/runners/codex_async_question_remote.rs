@@ -45,10 +45,17 @@ fn script(home: &str, session: &str) -> String {
     format!("python3 -c {} {} {} {}", sh_quote(include_str!("codex_async_question_tail.py")), sh_quote(home), sh_quote(session), sh_quote(&TAIL_BYTES.to_string()))
 }
 
-/// 增量版：tail.py 的 `offset` 參數（選用，不帶就是上面的 `script`）。
-fn delta_script(home: &str, session: &str, offset: u64) -> String {
+/// 增量版：tail.py 的 `offset` 參數（選用，不帶就是上面的 `script`）。`cap` 是這一次最多讀的位元組數（tail.py 再夾到 8 MiB）。
+fn delta_script(home: &str, session: &str, offset: u64, cap: u64) -> String {
     use crate::hosts::sh_quote;
-    format!("{} {}", script(home, session), sh_quote(&offset.to_string()))
+    format!(
+        "python3 -c {} {} {} {} {}",
+        sh_quote(include_str!("codex_async_question_tail.py")),
+        sh_quote(home),
+        sh_quote(session),
+        sh_quote(&cap.to_string()),
+        sh_quote(&offset.to_string())
+    )
 }
 
 /// tail.py 增量輸出：`AM_ROLLOUT <next>\n` 後接整行；缺表頭、位移不是數字、文字超過上限＝`None`。
@@ -60,25 +67,30 @@ fn parse_delta(out: &str) -> Option<am_ports::RemoteRollout> {
 
 /// Codex context 讀數（prompt_cache）的遠端增量讀取。**不經**上面的 20 秒快取與 single-flight：
 /// 那是 async 提問的 key 空間；context 的節流在 prompt_cache 自己做（[`crate::prompt_cache::REMOTE_EVERY`]）。
-/// `offset` `None` 從 0 讀，檔案比上限大時就是檔尾（同 tail.py）。失敗、逾時、身分不符都回 `None`。
-pub async fn rollout_read(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str, offset: Option<u64>) -> Option<am_ports::RemoteRollout> {
+/// `offset` `None` 從 0 讀，檔案比 `cap` 大時就是檔尾（同 tail.py）。整段（含身分、herdr 核對、SSH）共用一個
+/// [`CONTEXT_READ_TIMEOUT`]：慢的時候只是這一次讀失敗，巡邏不等它（呼叫端另外 spawn）。失敗、逾時、身分不符都回 `None`。
+pub async fn rollout_read(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str, offset: Option<u64>, cap: u64) -> Option<am_ports::RemoteRollout> {
     if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let deadline = tokio::time::Instant::now() + CONTEXT_READ_TIMEOUT;
-    let fence = tokio::time::timeout_at(deadline, app.hosts.fence(host)).await.ok()??;
-    if !fence.conn().is_connected() || !current(app, bot, run, host, session).await {
-        return None;
-    }
-    let home = home_setting(app, bot, run, host).await?;
-    let out = tokio::time::timeout_at(deadline, fence.conn().ssh_exec_path_timeout(&delta_script(&home, session, offset.unwrap_or(0)), CONTEXT_READ_TIMEOUT)).await.ok()?.ok()?;
-    if !app.hosts.is_current(&fence).await || !current(app, bot, run, host, session).await {
-        return None;
-    }
-    parse_delta(&out)
+    tokio::time::timeout(CONTEXT_READ_TIMEOUT, async {
+        let fence = app.hosts.fence(host).await?;
+        if !fence.conn().is_connected() || !current(app, bot, run, host, session).await {
+            return None;
+        }
+        let home = home_setting(app, bot, run, host).await?;
+        let out = fence.conn().ssh_exec_path_timeout(&delta_script(&home, session, offset.unwrap_or(0), cap), CONTEXT_READ_TIMEOUT).await.ok()?;
+        if !app.hosts.is_current(&fence).await || !current(app, bot, run, host, session).await {
+            return None;
+        }
+        parse_delta(&out)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-pub async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
+async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
     // Identity changes apply at restart. Reconstruct the launch identity before comparing the
     // launch revision; there is no persisted launch env, so an unprovable env must degrade.
     let mut launched = bot.clone();
@@ -97,7 +109,7 @@ pub async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &s
     Some(home.unwrap_or_else(|| "~/.codex".into()))
 }
 
-pub async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> bool {
+async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, session: &str) -> bool {
     let Ok(Some(now)) = db::run(&app.db, &run.id).await else { return false };
     if !matches!(now.state.as_str(), "starting" | "running") || now.started_at != run.started_at || now.pane_id != run.pane_id || now.bot_id != bot.id {
         return false;
@@ -343,7 +355,7 @@ mod delta_tests {
     }
 
     fn read(home: &std::path::Path, offset: u64) -> Option<am_ports::RemoteRollout> {
-        parse_delta(&fake_ssh(&delta_script(&home.to_string_lossy(), "abc", offset)))
+        parse_delta(&fake_ssh(&delta_script(&home.to_string_lossy(), "abc", offset, TAIL_BYTES)))
     }
 
     #[test]
@@ -390,11 +402,25 @@ mod delta_tests {
             assert_eq!(parse_delta(&fake_ssh(&script)), None, "{bad}");
         }
         // session 不在、路徑逃出 sessions：空輸出＝None（通道失敗，呼叫端保留上一次讀數）。
-        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "nope", 0))), None);
-        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "../abc", 0))), None);
+        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "nope", 0, TAIL_BYTES))), None);
+        assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "../abc", 0, TAIL_BYTES))), None);
         assert_eq!(parse_delta(""), None);
         assert_eq!(parse_delta("AM_ROLLOUT 8"), None, "沒有換行的表頭不算");
         assert_eq!(parse_delta("AM_ROLLOUT x\none\n"), None, "位移不是數字");
+    }
+
+    /// 第一次讀（offset 0、cap＝prompt_cache 的 256 KiB）：大檔只傳檔尾 256 KiB 左右，不是 8 MiB。
+    #[test]
+    fn a_first_context_read_transfers_at_most_the_context_cap() {
+        let line = format!("{}\n", "x".repeat(99));
+        let body = line.repeat(9 * 1024 * 1024 / line.len());
+        let home = rollout(body.as_bytes());
+        let cap = crate::prompt_cache::TAIL_BYTES;
+        let out = fake_ssh(&delta_script(&home.to_string_lossy(), "abc", 0, cap));
+        assert!(out.len() as u64 <= cap + 64, "傳輸量 {} 超過上限 {cap}", out.len());
+        let got = parse_delta(&out).unwrap();
+        assert_eq!(got.next, body.len() as u64, "整檔讀到最後一個換行");
+        assert_eq!(got.text.len() % line.len(), 0, "每一段都是完整行");
     }
 
     #[test]
