@@ -2588,7 +2588,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - 設定 `[changelog_translate]` 預設 `enabled = false`。關掉，或 key 檔不存在／權限不對：`status:"unconfigured"`、`error:null`。不回 key、不回路徑。畫面不畫翻譯鈕、也不畫錯誤。之後若曾翻完，帶了 `to` 的 `GET` 仍可回那筆 `completed`。
 - `absent`：有開、key 讀得到、這份內容還沒翻。`skipped`：changelog 本身抓不到。`reserved`／`in_flight`：這一筆正在進行，輪詢 `GET` 不會再開一筆。
 - `completed` 帶 `summary`（3–5 點）、`sections`（只含實際送出的版本）與 `lang`（這次 prompt 的目標語言）。有省略或正文被截斷時 `coverage:"partial"`、`truncated_input:true` 只在正文被切斷時。失敗與中斷是 `failed`／`interrupted`，`error` 是短代碼（`timeout`、`rate_limited`、`http`、`missing_usage`、`schema`、`sections`、`summary`、`max_tokens`、`refusal`、`stop`、`ledger`、`restart`、`not_sent`、`in_flight`、`hourly`、`attempts`、`lang`），`error_kind` 是 `timeout`／`rate_limited`／`bad_format`／`budget`／`http`。不回上游內文。`lang` 這個錯誤是設定的語言不在允許表，沒有扣費。
-- `attempts[]` 每筆保留自己的 `usage`（`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`）。缺用量是 `null`，不是 0。`retry_after` 沒過之前，再 `POST` 只回原狀態、不再打。次數用盡（`error:"attempts"`，`error_kind:"budget"`）時，`retry_after` 是最後一次送出結束起 1 小時，固定不往後延；過了才會再送。逾時用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 已廢棄（#1942）。
+- `attempts[]` 每筆保留自己的 `usage`（`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`）。缺用量是 `null`，不是 0。`retry_after` 沒過之前，再 `POST` 只回原狀態、不再打。次數用盡（`error:"attempts"`，`error_kind:"budget"`）時，`GET` 與 `POST` 都回同一個 `retry_after`：最後一次送出結束起 1 小時，固定不往後延；過了才會再送。逾時用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 已廢棄（#1942）。
 - **權限**：User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。翻譯會打付費 API，只供使用者按鈕，輪詢 GET 不送出。
 
 ## 上游有新版可裝 `GET /api/upstream-updates`（SPEC §3.1「上游有新版」，issue #707）

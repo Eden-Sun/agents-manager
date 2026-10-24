@@ -234,7 +234,7 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
         let plan = plan_input(&norm.kind, &limits, &reply.sections);
         let fp = fingerprint(&plan);
         under_gate(&app, || match load(&job_path(&app.data_dir, &fp)) {
-            Ok(job) => job_view(true, &job, None),
+            Ok(job) => job_view(true, &job, attempts_block(&job, &limits)),
             Err(LoadErr::Corrupt) => ledger_view(),
             Err(LoadErr::Missing) => match crate::key_file::read_key(&cfg.key_file) {
                 Ok(_) => absent_view(&plan, &fp),
@@ -336,6 +336,7 @@ fn run_attempt(
             client.as_ref(),
             &request,
             "changelog_translate",
+            send_error_kind,
         )
         .await;
         let _gate = app.changelog_translate.gate.lock().await;
@@ -380,15 +381,8 @@ fn decide(
         {
             return Action::View(job_view(true, job, None));
         }
-        if sent_count(job) >= limits.max_attempts as usize {
-            let retry_at = attempts_retry_at(job);
-            if retry_at > chrono::Utc::now() {
-                return Action::View(job_view(
-                    true,
-                    job,
-                    Some(Overlay::budget("attempts", crate::db::iso_at(retry_at))),
-                ));
-            }
+        if let Some(over) = attempts_block(job, limits) {
+            return Action::View(job_view(true, job, Some(over)));
         }
     }
     let jobs = ledger_jobs(&ledger_dir(data_dir));
@@ -630,6 +624,24 @@ fn attempts_retry_at(job: &Job) -> chrono::DateTime<chrono::Utc> {
         })
         .map(|t| t + chrono::Duration::hours(1))
         .unwrap_or_else(chrono::Utc::now)
+}
+
+/// 次數上限擋住時的 overlay（`GET` 與 `POST` 共用，#1942）。已完成、還在進行、或還在退避中的交給各自的分支，這裡不蓋。
+fn attempts_block(job: &Job, limits: &Limits) -> Option<Overlay> {
+    if matches!(last_state(job), "completed" | "reserved" | "in_flight") || retry_blocked(job) {
+        return None;
+    }
+    if sent_count(job) < limits.max_attempts as usize {
+        return None;
+    }
+    let retry_at = attempts_retry_at(job);
+    (retry_at > chrono::Utc::now()).then(|| Overlay::budget("attempts", crate::db::iso_at(retry_at)))
+}
+
+/// 帳本的分類跟翻譯自己的判斷一致：沒到 `end_turn`（max_tokens、refusal…）或缺 usage，都記成錯誤。
+fn send_error_kind(o: &ClientOutcome) -> Option<&'static str> {
+    let usage_ok = o.usage.as_ref().is_some_and(|u| u.input_tokens.is_some() && u.output_tokens.is_some());
+    (o.stop_reason.as_deref() != Some("end_turn") || !usage_ok).then_some("bad_response")
 }
 
 fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits {
@@ -1462,6 +1474,18 @@ mod tests {
         save(&path, &job).unwrap();
     }
 
+    /// 窗口終點直接從帳本裡最後一次送出的 `finished_at` 算（不經過被測的函式）。
+    fn window_end(app: &App, fp: &str) -> String {
+        let job = load(&job_path(&app.data_dir, fp)).unwrap();
+        let last = job.attempts.iter().rev().find(|a| a.sent).unwrap();
+        let finished = crate::db::parse_ts(last.finished_at.as_deref().unwrap()).unwrap();
+        crate::db::iso_at(finished + chrono::Duration::hours(1))
+    }
+
+    fn remaining_secs(at: &str) -> i64 {
+        (crate::db::parse_ts(at).unwrap() - chrono::Utc::now()).num_seconds()
+    }
+
     /// 把最後一次送出的嘗試往前推 `secs` 秒（開始與結束都推），模擬時間過去。
     fn age_last_sent(app: &App, fp: &str, secs: i64) {
         let path = job_path(&app.data_dir, fp);
@@ -1852,19 +1876,32 @@ mod tests {
         let fp = failed["fingerprint"].as_str().unwrap().to_string();
         patch_retry_past(&env.app, &fp);
 
-        // 剛送完：1 小時內不送，retry_after 落在最後一次結束起 1 小時。
+        // 剛送完：1 小時內不送，retry_after 就是最後一次結束起 1 小時。
         let blocked = post(&env.app, q_to("2.1.5")).await;
         assert_eq!(blocked["error_kind"], "budget");
         assert_eq!(blocked["error"], "attempts");
         assert_eq!(blocked["attempts"].as_array().unwrap().len(), 1);
         let retry_at = blocked["retry_after"].as_str().unwrap().to_string();
-        let left = crate::db::parse_ts(&retry_at).unwrap() - chrono::Utc::now();
-        assert!(left > chrono::Duration::seconds(3500) && left <= chrono::Duration::seconds(3600), "left {left}");
+        assert_eq!(retry_at, window_end(&env.app, &fp));
+        assert!((3500..=3600).contains(&remaining_secs(&retry_at)));
         assert_eq!(fake.calls(), 1);
 
-        // 連續查詢不往後延（GET 只回帳本狀態、不套上限覆寫，所以只比 POST）。
+        // GET 與 POST 一致：同一個 retry_after；連續查詢不往後延。
+        let got = get(&env.app, q_to("2.1.5")).await;
+        assert_eq!(got["error"], "attempts");
+        assert_eq!(got["retry_after"], retry_at);
         let again = post(&env.app, q_to("2.1.5")).await;
-        assert_eq!(again["retry_after"], blocked["retry_after"]);
+        assert_eq!(again["retry_after"], retry_at);
+        assert_eq!(fake.calls(), 1);
+
+        // 過了 1800 秒、還沒滿 1 小時：仍不送，剩餘時間約 1800 秒，窗口終點不動。
+        age_last_sent(&env.app, &fp, 1800);
+        let mid = window_end(&env.app, &fp);
+        assert!((1790..=1800).contains(&remaining_secs(&mid)));
+        let got = get(&env.app, q_to("2.1.5")).await;
+        assert_eq!(got["retry_after"], mid);
+        let mid_post = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(mid_post["retry_after"], mid);
         assert_eq!(fake.calls(), 1);
 
         // 過了 1 小時：允許再送一次；那次失敗後又要等下一個 1 小時。
@@ -1876,6 +1913,35 @@ mod tests {
         let blocked_again = post(&env.app, q_to("2.1.5")).await;
         assert_eq!(blocked_again["error"], "attempts");
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn ledger_marks_truncated_or_unmeasured_replies_as_errors() {
+        let raw = |usage: Option<Usage>, stop: &str| Step::Raw {
+            text: "{}".into(),
+            usage,
+            model: None,
+            stop_reason: Some(stop.into()),
+        };
+        let (env, fake) = boot(vec![
+            raw(Some(sample_usage()), "max_tokens"),
+            raw(None, "end_turn"),
+        ])
+        .await;
+        enable(&env).await;
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let failed = until_status(&env.app, "2.1.5", "failed").await;
+        patch_retry_past(&env.app, failed["fingerprint"].as_str().unwrap());
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        until_calls(&fake, 2).await;
+        let _ = until_status(&env.app, "2.1.5", "failed").await;
+
+        let snap = env.app.claude_api.ledger.snapshot(10);
+        assert_eq!(snap["by_use"]["changelog_translate"]["errors"], 2);
+        let rows = snap["rows"].as_array().unwrap();
+        assert_eq!(rows[0]["error_kind"], "bad_response");
+        assert_eq!(rows[1]["error_kind"], "bad_response");
+        assert_eq!(rows[1]["input_tokens"], sample_usage().input_tokens.unwrap());
     }
 
     #[tokio::test]
