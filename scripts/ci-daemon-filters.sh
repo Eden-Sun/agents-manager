@@ -70,7 +70,8 @@ while IFS= read -r f; do
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
         daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
-            | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs)
+            | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs \
+            | crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs | crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs)
             mod="${f#crates/am-lifecycle/src/}"
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
