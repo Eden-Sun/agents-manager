@@ -834,10 +834,12 @@ const SHARED_IDLE_SECS: u64 = 3 * 3600;
 /// 遠端磁碟剩不到這個比例時，閒置的 `shared/` 也照孤兒的門檻收（#141：一小時塞滿 97G）。
 const LOW_DISK_FREE_PCT: u64 = 25;
 
-/// `shared/` 被同一棵 worktree 的另一次呼叫佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104）。
-/// 等它用完再增量編譯只要十幾秒；搶不到就冷編譯，不但自己要重編幾分鐘，還多佔一份遠端的 RAM 與 2～3G 磁碟——
-/// 等得比一次冷編譯還久就不划算了，所以抓一次冷編譯的時間。
-const SHARED_WAIT_SECS: u64 = 5 * 60;
+/// `shared/` 被佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104、#1937）。
+/// 持有者佔的是整段 cargo（編譯＋測試），不是只有增量的十幾秒；#1856 之後同一個 repo 的所有 worktree 共用這一份 `shared/`，
+/// 排在前面的好幾顆 child 都可能要跑好幾分鐘。舊的 5 分鐘一到就全部改冷編譯：冷編譯要 8 分多（#1886：496 秒），
+/// 用完即刪、暖快取也沒留下，等於排隊 300 秒又白付一次冷編譯（#1886 實測 300＋496 秒）。
+/// 所以上限改成一次冷編譯加餘裕：持有者本身是冷編譯時也等得到，只有真的卡住才退回冷編譯。整體上限 `timeout_secs` 照舊是硬界線。
+const SHARED_WAIT_SECS: u64 = 15 * 60;
 /// 遠端是額外名額：短暫等候仍全滿就退回本機名額（issue #1853）。
 /// 守門仍回 75 表示尚未開工；helper 將這個交握結果轉成 125。
 const QUEUE_WAIT_SECS: u64 = 3;
@@ -3536,7 +3538,7 @@ exec /bin/sh -c "$inner"
         let adm = Admission::from_cfg(&set);
         assert_eq!((adm.max, adm.jobs, adm.shared_wait_secs, adm.queue_wait_secs), (3, 5, SHARED_WAIT_SECS, QUEUE_WAIT_SECS));
         let script = guard_script("/r", "0123456789abcdef", "job-1-1", &LeaseToken::new(), adm);
-        for want in ["max=3; jobs=5; swait=300; qwait=3", &format!("(mem - {AUTO_RESERVE_KB}) / {AUTO_PER_JOB_KB}")] {
+        for want in [&format!("max=3; jobs=5; swait={SHARED_WAIT_SECS}; qwait=3"), &format!("(mem - {AUTO_RESERVE_KB}) / {AUTO_PER_JOB_KB}")] {
             assert!(script.contains(want), "{want}");
         }
         assert!(!script.contains('@'), "沒替換乾淨");
