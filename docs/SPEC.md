@@ -4009,6 +4009,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 - `~/.gemini/config/hooks.json` 的具名 hook **`agents-manager`**（隔離實例 `agents-manager-<slug>`）：`SessionStart`／`PreInvocation`／`Stop` 三個事件，**扁平** handler 陣列（`{"type":"command","command":"'<dispatcher>' <事件>","timeout":5}`；`PreToolUse`／`PostToolUse` 才要包 `{matcher,hooks}`，形狀錯了 agy 會整個丟掉這個檔——單元測試釘住形狀）。整個具名鍵是我們的，別的具名 hook、別的頂層鍵原樣保留。
 - `~/.gemini/antigravity-cli/settings.json` 的 `statusLine`＝`{"type":"command","command":"'<dispatcher>' state","stack_with_default":true}`（疊在 agy 內建狀態列下面，dispatcher 對 `state` 什麼都不印）。**只在沒設或本來就是我們的時候寫**；使用者自己的 `statusLine` 不碰（那顆 bot 就沒有狀態信標，hook 與畫面判讀照常）。
 - 兩個檔都：只 merge 自己那一項、其他一個字不改、**讀不懂就不覆寫**（agy 自己遇到解析失敗也拒絕覆寫；安裝失敗只記 warn，bot 照常啟動）、原子寫入（同目錄暫存檔 `rename`）、與信任清單共用同一把鎖（`trust::update_file`，settings.json 兩邊都寫）。
+- **daemon 開機修復（`agy_hook::heal_at_startup`，#1959）**：只要機器已經裝過（dispatcher 檔在，或 hooks.json 有我們的具名項），開機就把 dispatcher 換成這顆 binary 的版本，不必等頂層 agy bot 重啟；沒裝過的機器**不建任何檔**。內容已經正確就不寫（mtime 不變）；hooks.json 壞掉回錯、不覆寫；失敗只記 warn，daemon 照常起來。
 - **dispatcher 永遠 exit 0；hook 事件印 `{}`，PreToolUse 放行印空**——hook 是同步的、會卡住 agent loop，stdout 會被 agy 當成決策（`{"decision":"continue"}` 會擋住停止），所以 daemon 子行程的 stdout 也導去 `/dev/null`。
 - **1.4.7 的 hook 語意（2026-10-24 實測，#1959）**：
   - PreToolUse 的 stdout 是決策：`{}` **等於拒絕**（`tool call denied by pre-tool hook:`，理由空白）；所以放行一律**空 stdout**（含沒有 `AM_BOT_ID`、`AM_INSTANCE` 不符兩條早退，拋棄式 HOME 裡的 agy 也不能被擋）。
