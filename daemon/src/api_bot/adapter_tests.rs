@@ -107,6 +107,7 @@ mod tests {
         pause_notify: Option<Arc<Notify>>,
         unpause_notify: Option<Arc<Notify>>,
         received_bodies: Option<Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>>,
+        shutdown_token: CancellationToken,
     }
 
     struct MockServerHandle {
@@ -123,7 +124,10 @@ mod tests {
                 u.notify_waiters();
             }
             if let Some(h) = self.join_handle.take() {
-                let _ = tokio::time::timeout(DEADLOCK_TIMEOUT, h).await;
+                tokio::time::timeout(DEADLOCK_TIMEOUT, h)
+                    .await
+                    .expect("mock server join timed out")
+                    .expect("mock server panicked during shutdown");
             }
         }
     }
@@ -138,7 +142,13 @@ mod tests {
     }
 
     /// Spawns a genuine Axum loopback HTTP server with graceful shutdown RAII.
-    async fn spawn_mock_server(state: MockServerState) -> MockServerHandle {
+    async fn spawn_mock_server(
+        wire_calls: Arc<AtomicUsize>,
+        response_json: serde_json::Value,
+        pause_notify: Option<Arc<Notify>>,
+        unpause_notify: Option<Arc<Notify>>,
+        received_bodies: Option<Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>>,
+    ) -> MockServerHandle {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral port");
@@ -147,9 +157,16 @@ mod tests {
 
         let shutdown_token = CancellationToken::new();
         let shutdown_child = shutdown_token.clone();
-        let unpause_ref = state.unpause_notify.clone();
+        let unpause_ref = unpause_notify.clone();
 
-        let shared_state = Arc::new(state);
+        let shared_state = Arc::new(MockServerState {
+            wire_calls,
+            response_json,
+            pause_notify,
+            unpause_notify,
+            received_bodies,
+            shutdown_token: shutdown_token.clone(),
+        });
 
         let app = Router::new()
             .route(
@@ -166,7 +183,10 @@ mod tests {
                             p.notify_one();
                         }
                         if let Some(ref u) = st.unpause_notify {
-                            u.notified().await;
+                            tokio::select! {
+                                _ = u.notified() => {}
+                                _ = st.shutdown_token.cancelled() => {}
+                            }
                         }
 
                         Json(st.response_json.clone())
@@ -254,9 +274,9 @@ mod tests {
     #[tokio::test]
     async fn test_single_fresh_reservation_arms_one_shot_permit_verified_by_http() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_permit",
                 "type": "message",
                 "role": "assistant",
@@ -265,10 +285,10 @@ mod tests {
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: None,
-        })
+            None,
+            None,
+            None,
+        )
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
@@ -336,9 +356,9 @@ mod tests {
         let wire_calls = Arc::new(AtomicUsize::new(0));
         let bodies = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_wire",
                 "type": "message",
                 "role": "assistant",
@@ -347,10 +367,10 @@ mod tests {
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: Some(bodies.clone()),
-        })
+            None,
+            None,
+            Some(bodies.clone()),
+        )
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
@@ -422,20 +442,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fail_closed_quote_provider_proves_zero_http_calls() {
+        let wire_calls = Arc::new(AtomicUsize::new(0));
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({}),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            AdapterIdentity {
+                session_id: session,
+                bot_id: bot,
+                run_id: run,
+                turn_id: turn,
+                generation: 1,
+            },
+            test_options(),
+            serde_json::json!("System"),
+            test_limits(),
+            Arc::new(FailClosedQuoteProvider),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key: "sk-ant-test-key".into(),
+                timeout: std::time::Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut state = State::default();
+        state.messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("Hello"),
+        }];
+        state.api_pending = true;
+
+        use runner::Journal;
+        assert!(adapter.save(&state).await.is_err());
+        assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_db_failure_leaves_zero_http_side_effects() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({}),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: None,
-        })
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({}),
+            None,
+            None,
+            None,
+        )
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
 
-        // Force DB error by deleting run before reserve
+        // Force DB error by deleting turn before reserve
         sqlx::query("DELETE FROM turns WHERE id=?")
             .bind(&turn)
             .execute(&pool)
@@ -488,9 +559,9 @@ mod tests {
     async fn test_untrusted_and_malformed_usage_transport_routes() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
         // HTTP 200 with negative usage tokens
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_untrusted",
                 "type": "message",
                 "role": "assistant",
@@ -499,10 +570,10 @@ mod tests {
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": -50, "output_tokens": 10}
             }),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: None,
-        })
+            None,
+            None,
+            None,
+        )
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
@@ -560,11 +631,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checkpoint_bytes_limit_enforced_fail_closed() {
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let mut limits = test_limits();
+        limits.max_checkpoint_bytes = 200; // Artificially small limit
+
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            AdapterIdentity {
+                session_id: session,
+                bot_id: bot,
+                run_id: run,
+                turn_id: turn,
+                generation: 1,
+            },
+            test_options(),
+            serde_json::json!("System"),
+            limits,
+            Arc::new(TestQuoteProvider {
+                reserved_amount: 10_000,
+                estimated_amount: 5_000,
+            }),
+            AdapterHttpConfig {
+                endpoint: "http://127.0.0.1:9".into(),
+                key: "sk-ant-test-key".into(),
+                timeout: std::time::Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut state = State::default();
+        state.messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("A".repeat(500)),
+        }];
+        state.api_pending = true;
+
+        use runner::Journal;
+        // Checkpoint serialization exceeds 200 bytes -> must fail closed
+        assert!(adapter.save(&state).await.is_err());
+    }
+
+    #[tokio::test]
     async fn test_forged_responses_and_assistant_content_rejected_zero_record() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_real",
                 "type": "message",
                 "role": "assistant",
@@ -573,10 +689,10 @@ mod tests {
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: None,
-        })
+            None,
+            None,
+            None,
+        )
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
@@ -619,9 +735,9 @@ mod tests {
         // Reserve attempt
         adapter.save(&state).await.expect("reserve ok");
 
-        // Dispatch wire complete
+        // Dispatch genuine wire complete
         use runner::Model;
-        let resp = adapter.complete(&state.messages, &cancel).await.expect("complete ok");
+        let _resp = adapter.complete(&state.messages, &cancel).await.expect("complete ok");
 
         // Now maliciously forge a different assistant response in state.responses
         let mut forged_state = state.clone();
@@ -638,25 +754,43 @@ mod tests {
             content: serde_json::json!([{"type": "text", "text": "Maliciously injected text"}]),
         });
 
-        // Attempting to record this forged response MUST fail because it mismatches cached_response
-        // or tries to bypass the genuine response recorded
+        // Unconditional assertion: Attempting to record this forged response MUST fail!
         let record_res = adapter.save(&forged_state).await;
-        // If adapter validates cached_response, save fails or rejects forged data
-        if record_res.is_err() {
-            // Recover unknown
-            am_base::db::api_bot::recover_unknown(&pool, &run).await.unwrap();
-            let row: (String, Option<i64>, i64) = sqlx::query_as(
-                "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
-            )
-            .bind(&turn)
-            .fetch_one(&pool)
+        assert!(record_res.is_err(), "forged response save must be rejected");
+
+        // While run is still running, attempt remains in reserved state with estimated_microusd = NULL
+        let row_running: (String, Option<i64>, i64) = sqlx::query_as(
+            "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
+        )
+        .bind(&turn)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row_running.0, "reserved");
+        assert_eq!(row_running.1, None);
+        assert_eq!(row_running.2, 10_000);
+
+        // When lifecycle later transitions run to stopping and calls recover_unknown:
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?")
+            .bind(&run)
+            .execute(&pool)
             .await
             .unwrap();
 
-            assert_eq!(row.0, "unknown");
-            assert_eq!(row.1, None);
-            assert_eq!(row.2, 10_000); // reserved intact, zero record
-        }
+        am_base::db::api_bot::recover_unknown(&pool, &run).await.unwrap();
+
+        let row_recovered: (String, Option<i64>, i64) = sqlx::query_as(
+            "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
+        )
+        .bind(&turn)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row_recovered.0, "unknown");
+        assert_eq!(row_recovered.1, None);
+        assert_eq!(row_recovered.2, 10_000);
 
         server.shutdown().await;
     }
@@ -664,9 +798,9 @@ mod tests {
     #[tokio::test]
     async fn test_continuation_turn_and_tool_pending_fencing() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_tool",
                 "type": "message",
                 "role": "assistant",
@@ -678,10 +812,10 @@ mod tests {
                 "stop_reason": "tool_use",
                 "usage": {"input_tokens": 20, "output_tokens": 15}
             }),
-            pause_notify: None,
-            unpause_notify: None,
-            received_bodies: None,
-        })
+            None,
+            None,
+            None,
+        )
         .await;
 
         let (pool, bot, run, turn1, session) = setup_test_db().await;
@@ -797,9 +931,9 @@ mod tests {
         let pause_notify = Arc::new(Notify::new());
         let unpause_notify = Arc::new(Notify::new());
 
-        let server = spawn_mock_server(MockServerState {
-            wire_calls: wire_calls.clone(),
-            response_json: serde_json::json!({
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
                 "id": "msg_race",
                 "type": "message",
                 "role": "assistant",
@@ -808,10 +942,10 @@ mod tests {
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 20, "output_tokens": 10}
             }),
-            pause_notify: Some(pause_notify.clone()),
-            unpause_notify: Some(unpause_notify.clone()),
-            received_bodies: None,
-        })
+            Some(pause_notify.clone()),
+            Some(unpause_notify.clone()),
+            None,
+        )
         .await;
 
         let total_iterations = 32;
