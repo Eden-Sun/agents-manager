@@ -66,7 +66,7 @@ async fn install_local_writes_under_the_fake_home_only() {
     let e = tt::env().await;
     install_local(&e.app).unwrap();
     let home = crate::home::dir().unwrap();
-    assert!(home.starts_with(std::env::temp_dir()), "測試建置的家目錄必須是暫存目錄：{}", home.display());
+    assert!(crate::home::under_temp(&home), "測試建置的家目錄必須是暫存目錄：{}", home.display());
     assert!(cfg::hooks_path(&home).is_file() && cfg::settings_path(&home).is_file());
     if let Some(real) = std::env::var_os("AM_TEST_REAL_HOME").map(std::path::PathBuf::from) {
         assert!(!cfg::hooks_path(&real).exists());
@@ -79,8 +79,8 @@ async fn install_local_writes_under_the_fake_home_only() {
 fn a_test_build_never_resolves_or_writes_the_real_home() {
     assert!(crate::home::TEST_BUILD, "這個守門只在測試建置有意義");
     let home = crate::home::dir().unwrap();
-    assert!(home.starts_with(std::env::temp_dir()), "{}", home.display());
-    if let Some(real) = std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|h| !h.starts_with(std::env::temp_dir())) {
+    assert!(crate::home::under_temp(&home), "{}", home.display());
+    if let Some(real) = std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|h| !crate::home::under_temp(h)) {
         assert!(super::agy_hook::refuse_real_home(&real).is_err(), "真的家目錄 {} 必須被拒寫", real.display());
     }
     assert!(super::agy_hook::refuse_real_home(&std::env::temp_dir().join("am-x")).is_ok());

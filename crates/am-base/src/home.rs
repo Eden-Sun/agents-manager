@@ -4,7 +4,7 @@
 //! 真的 `~/.grok/hooks/agents-manager.json`（指到已經刪掉的 `/tmp/am-test-…/data/grok-hook.sh`）與 `~/.grok/trusted_folders.toml`
 //! （累積 150 KB 的測試目錄）。會寫使用者家目錄的程式碼一律走這裡。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 測試建置（`cfg(test)`，或 am-lifecycle 等 dev-dependency 開的 `test-hooks`）。這個 cfg 只在測試建置成立，release 不會帶到。
 pub const TEST_BUILD: bool = cfg!(any(test, feature = "test-hooks"));
@@ -13,13 +13,41 @@ pub fn dir() -> Option<PathBuf> {
     #[cfg(any(test, feature = "test-hooks"))]
     {
         // HOME 已經被 daemon 的 `test_home` 切到暫存目錄就沿用它；否則（am-lifecycle 的測試行程 HOME 仍是真的）用暫存的假目錄，絕不回真的 HOME。
-        let home = dirs::home_dir().filter(|h| h.starts_with(std::env::temp_dir()));
+        let home = dirs::home_dir().filter(|h| under_temp(h));
         Some(home.unwrap_or_else(|| std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id()))))
     }
     #[cfg(not(any(test, feature = "test-hooks")))]
     {
         // As a daemon test dependency, `test_home` has already redirected HOME before test threads start.
         dirs::home_dir()
+    }
+}
+
+/// `p` 在暫存目錄底下嗎。macOS 的 `temp_dir()` 是 `/var/folders/…`，而 `/var` 是 `/private/var` 的符號連結，
+/// test_home／scratch_dir 給的可能是 canonical 的那一邊：兩邊都先 canonicalize 再比（#1959，同 #1925／#1964）。
+pub fn under_temp(p: &Path) -> bool {
+    under(p, &std::env::temp_dir())
+}
+
+/// `p` 在 `root` 底下嗎；兩邊都換成最長的已存在祖先的 canonical 路徑再接回尾段，路徑還不存在也比得對。
+pub fn under(p: &Path, root: &Path) -> bool {
+    canonical_prefix(p).starts_with(canonical_prefix(root))
+}
+
+fn canonical_prefix(p: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut cur = p;
+    loop {
+        if let Ok(c) = std::fs::canonicalize(cur) {
+            return tail.iter().rev().fold(c, |acc: PathBuf, part| acc.join(part));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
     }
 }
 
@@ -76,4 +104,24 @@ fn normalize(p: &std::path::Path) -> anyhow::Result<PathBuf> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod under_temp_tests {
+    use super::under;
+
+    /// macOS 的 `/var` → `/private/var`：root 是符號連結、路徑是 canonical 的（或反過來）也要判在底下；路徑還不存在也一樣。
+    #[test]
+    fn a_symlinked_temp_root_still_contains_its_canonical_children() {
+        let base = std::env::temp_dir().join(format!("am-under-{}", std::process::id()));
+        let real = base.join("private-var");
+        std::fs::create_dir_all(real.join("folders")).unwrap();
+        let link = base.join("var");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(under(&real.join("folders/x"), &link), "canonical 的路徑在 symlink 的 root 底下");
+        assert!(under(&link.join("folders/not-yet/y"), &real), "symlink 的路徑（還不存在）在 canonical root 底下");
+        assert!(!under(&base.join("elsewhere"), &link), "root 外的不算");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

@@ -60,7 +60,7 @@ pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilit
 /// 測試建置只准寫暫存目錄（比照 `daemon/src/testing.rs` 的 `scratch_leak_guard`）：所有 agy bot 共用的真的 `~/.gemini` 不能被測試蓋寫。
 /// 正式建置（`TEST_BUILD` 為假）不擋。
 pub(super) fn refuse_real_home(home: &Path) -> anyhow::Result<()> {
-    if crate::home::TEST_BUILD && !home.starts_with(std::env::temp_dir()) {
+    if crate::home::TEST_BUILD && !crate::home::under_temp(home) {
         anyhow::bail!("test build refuses to write the real home {}", home.display());
     }
     Ok(())
