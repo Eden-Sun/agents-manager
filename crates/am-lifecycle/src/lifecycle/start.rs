@@ -1152,6 +1152,8 @@ enum StagedPersona {
     KeptInline(String),
     /// 寫不進去：呼叫端 fail closed。
     Failed,
+    /// Codex profile 的固定安全診斷，讓使用者修復原檔而不洩漏內容。
+    FailedWithReason(String),
 }
 
 impl StagedPersona {
@@ -1215,7 +1217,10 @@ async fn stage_persona(
             }
             let Some(home) = codex_home_dir(app, project, env).await else { return StagedPersona::Failed };
             let full = super::setup::persona_text(bot, agent, agent_md);
-            staged(super::agent_md::install_codex_profile(app, bot, project, &home, &full).await)
+            match super::agent_md::install_codex_profile(app, bot, project, &home, &full).await {
+                Ok(name) => StagedPersona::Staged(name),
+                Err(error) => StagedPersona::FailedWithReason(error.to_string()),
+            }
         }
         _ => StagedPersona::NotNeeded,
     }
@@ -1343,6 +1348,7 @@ async fn start_inner_body(
             .await
     };
     let refuse = match (&staged_persona, bot.kind.as_str()) {
+        (StagedPersona::FailedWithReason(reason), _) => Some(reason.clone()),
         (StagedPersona::Failed, kind) => Some(format!("無法把 {kind} 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的系統提示啟動")),
         (_, "grok") if !child_instructions_ready => Some("無法把 Grok 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的 --rules 啟動".to_string()),
         _ => None,
@@ -2686,6 +2692,65 @@ mod resume_args_tests {
             .await
             .unwrap();
         assert!(notes.iter().any(|n| n.contains("-p／--profile")), "the truncation is explained: {notes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_codex_profile_refuses_start_with_a_safe_actionable_system_message() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex-corrupt-profile").await;
+        let home = e.dir.join("codex-corrupt-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join(format!("am-bot-{}.config.toml", bot.id));
+        let original = "developer_instructions = \"PROFILE_SOURCE_SENTINEL\"\n[hooks.state.\"broken\"\ntrusted_hash = \"TRUST_SOURCE_SENTINEL\"\n";
+        std::fs::write(&path, original).unwrap();
+        let env_json = serde_json::json!({"CODEX_HOME": home.to_string_lossy()}).to_string();
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL, env_json=? WHERE id=?")
+            .bind(env_json)
+            .bind(&bot.id)
+            .execute(e.app.db())
+            .await
+            .unwrap();
+        let error = start_bot(&e.app, &bot.id).await.unwrap_err();
+        assert!(
+            started_args(&e).is_empty(),
+            "a rejected profile must not launch an agent"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
+        let messages: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id=? AND role='system'",
+        )
+        .bind(conv)
+        .fetch_all(e.app.db())
+        .await
+        .unwrap();
+        let message = messages
+            .iter()
+            .find(|s| s.contains("Codex profile"))
+            .expect("actionable diagnostic must reach the user");
+        let reason = match &error {
+            LcError::Upstream(reason) => reason,
+            _ => panic!("expected a safe profile Upstream failure"),
+        };
+        assert_eq!(message, reason);
+        assert!(message.contains(path.to_str().unwrap()));
+        assert!(message.contains("第 2 行"));
+        assert!(message.contains("修好這個檔或刪掉它，就會重新產生"));
+        for forbidden in original.lines().chain([
+            "trusted_hash",
+            "hooks.state",
+            "PROFILE_SOURCE_SENTINEL",
+            "TRUST_SOURCE_SENTINEL",
+        ]) {
+            assert!(
+                !message.contains(forbidden),
+                "source fragment leaked into the system diagnostic"
+            );
+            assert!(
+                !reason.contains(forbidden),
+                "source fragment leaked into the returned error"
+            );
+        }
     }
 
     #[test]
