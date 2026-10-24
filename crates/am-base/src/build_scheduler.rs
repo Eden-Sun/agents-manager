@@ -373,15 +373,31 @@ pub async fn status(app: &(impl crate::build_scheduler::BuildSlotLock + crate::c
 /// `remote_reachable` 是**上一次真的嘗試**的結論（`remote_health`），`null`＝沒開或還沒有人試過——
 /// 「不知道」跟「連不上」不能混成同一個值，否則剛開機就會亮一個假的紅燈。
 fn remote_json(remote: &crate::config::BuildRemoteCfg, data_dir: &std::path::Path) -> Value {
-    let target = format!("{}@{}:{}", remote.user, remote.host, remote.ssh_port);
-    // 上一次嘗試連的不是現在設定的這台＝對這台還一無所知，不能拿別台的結論來講（remote_health::Health::target，#1373）。
-    let last = remote.enabled.then(|| crate::remote_health::read(data_dir)).flatten().filter(|h| h.target == target);
+    // 每台一格（#1956）：`hosts` 照設定順序；頂層欄位維持第一台，舊的讀法不用改。
+    // 上一次嘗試連的不是這台＝對這台還一無所知，不能拿別台的結論來講（remote_health::Health::target，#1373）。
+    let hosts: Vec<Value> = if remote.enabled { remote.targets() } else { Vec::new() }
+        .iter()
+        .map(|h| {
+            let target = h.target_label();
+            let last = crate::remote_health::read(data_dir, &target);
+            json!({
+                "target": target,
+                "local": h.is_local(),
+                "remote_reachable": last.as_ref().map(|h| h.reachable),
+                "checked_at": last.as_ref().map(|h| h.checked_at.clone()),
+                "reason": last.as_ref().and_then(|h| h.reason.clone()),
+            })
+        })
+        .collect();
+    let first = hosts.first();
+    let field = |k: &str| first.map(|h| h[k].clone()).unwrap_or(Value::Null);
     json!({
         "enabled": remote.enabled,
-        "target": remote.enabled.then(|| target.clone()),
-        "remote_reachable": last.as_ref().map(|h| h.reachable),
-        "checked_at": last.as_ref().map(|h| h.checked_at.clone()),
-        "reason": last.as_ref().and_then(|h| h.reason.clone()),
+        "target": field("target"),
+        "remote_reachable": field("remote_reachable"),
+        "checked_at": field("checked_at"),
+        "reason": field("reason"),
+        "hosts": hosts,
     })
 }
 

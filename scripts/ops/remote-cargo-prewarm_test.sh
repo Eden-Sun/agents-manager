@@ -25,6 +25,11 @@ RC_FILE="$ROOT/rc-seq"
 mkdir -p "$ROOT/bin" "$ROOT/fakebin"
 cat > "$ROOT/bin/agents-managerd" <<'STUB'
 #!/bin/bash
+# --list-hosts（#1956）：印 FAKE_HOSTS（空白分隔），不記進呼叫記錄。
+if [ "${4:-}" = "--list-hosts" ]; then
+    for h in ${FAKE_HOSTS:-}; do echo "$h"; done
+    exit 0
+fi
 echo "daemon $*" >> "$LOG"
 if [ -n "${FAKE_RC_FILE:-}" ] && [ -s "$FAKE_RC_FILE" ]; then
     rc=$(head -n 1 "$FAKE_RC_FILE")
@@ -122,7 +127,7 @@ equals "專用 worktree 停在 origin/main" "$(git -C "$WT" rev-parse HEAD)" "$(
 equals "專用 worktree 有 marker" "$(exists "$(marker_of)")" "yes"
 equals "專用 worktree 的 web/dist 是 stub（gitignore，不弄髒工作樹）" "$(exists "$WT/web/dist/index.html")" "yes"
 equals "首次預熱沒有跑到本機 cargo" "$(count LOCAL-CARGO)" "0"
-contains "首次預熱有說明" "$out" "已在 r7 預熱完成"
+contains "首次預熱有說明" "$out" "已在 外部編譯主機 預熱完成"
 
 # 2. 同一個 sha 再來一輪 → 不再叫 helper。
 out=$(run); rc=$?
@@ -274,7 +279,23 @@ equals "fetch 失敗 exit 0" "$rc" "0"
 equals "fetch 失敗不叫 helper" "$(count daemon)" "0"
 contains "fetch 失敗有說明" "$out" "fetch origin main 失敗"
 
-# 18. 單元檔與對照表：timer 每 600 秒、service 叫的是安裝後的 bin 名稱，對照表的來源檔都存在。
+# 18. 多台（#1956）：逐台各帶 --host 跑三步，狀態各記一份；一台 125 不擋另一台，下一輪只重跑沒成功的那台。
+reset_state
+printf '0\n0\n0\n125\n' > "$RC_FILE"
+out=$(FAKE_HOSTS="local r7@r7:22" run); rc=$?
+equals "多台 exit 0" "$rc" "0"
+equals "多台第一台帶 --host" "$(sed -n 1p "$LOG")" "daemon remote-cargo --config $CFG --cwd $WT --host local -- check -p agents-managerd --all-targets --locked"
+equals "多台第二台帶 --host" "$(sed -n 4p "$LOG")" "daemon remote-cargo --config $CFG --cwd $WT --host r7@r7:22 -- check -p agents-managerd --all-targets --locked"
+equals "多台：成功的那台記 sha" "$(cat "${STATE}.local")" "$(origin_sha)"
+equals "多台：125 的那台不記" "$(exists "${STATE}.r7_r7_22")" "no"
+contains "多台：說得出是哪一台" "$out" "r7@r7:22 不可用"
+out=$(FAKE_HOSTS="local r7@r7:22" run)
+equals "下一輪只重跑沒成功的那台" "$(grep -c -- '--host r7@r7:22' "$LOG")" "4"
+equals "成功過的那台不再跑" "$(grep -c -- '--host local' "$LOG")" "3"
+equals "第二台這次成功記 sha" "$(cat "${STATE}.r7_r7_22")" "$(origin_sha)"
+contains "成功過的那台有說明" "$out" "已經預熱過（local）"
+
+# 19. 單元檔與對照表：timer 每 600 秒、service 叫的是安裝後的 bin 名稱，對照表的來源檔都存在。
 equals "timer 每 600 秒" "$(grep -c '^OnUnitActiveSec=600s$' "$UNIT_DIR/com.agm.remote-cargo-prewarm.timer")" "1"
 equals "service 叫安裝後的腳本" "$(grep -c '^ExecStart=.*/bin/remote-cargo-prewarm.sh$' "$UNIT_DIR/com.agm.remote-cargo-prewarm.service")" "1"
 MANIFEST="$HERE/install-manifest.tsv"

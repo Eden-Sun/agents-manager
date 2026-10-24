@@ -19,6 +19,11 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "remote_cargo_hosts.rs"]
+mod hosts;
+use hosts::{acquire, check_target, local_max_load, local_shell, Busy};
+pub use hosts::list_hosts_cli;
+
 const PASSWORD_FILE: &str = "remote-cargo-password";
 
 /// 整體上限最多設到一天（0＝不設上限）。
@@ -47,6 +52,8 @@ thread_local! {
     static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
     // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的排隊等待秒數；一樣是執行緒本地，要在呼叫 `run_offload` 的那條執行緒上設。
     static TEST_QUEUE_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    // 測試用：本機執行器（`host = "local"`）的 `$HOME`——假 cargo 放在它的 `.cargo/bin`。
+    static TEST_LOCAL_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 fn ssh_program() -> String {
@@ -303,6 +310,15 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "max_shared_dirs": cfg.max_shared_dirs,
         "max_concurrent": cfg.max_concurrent,
         "password_set": password_is_set(data_dir, cfg),
+        // 之後的建置主機（#1956）：唯讀，只在 config.toml 的 `[[build.remote.hosts]]` 改。
+        "hosts": cfg.targets().iter().skip(usize::from(!cfg.host.trim().is_empty())).map(|h| json!({
+            "target": h.target_label(),
+            "host": h.host,
+            "user": h.user,
+            "ssh_port": h.ssh_port,
+            "cargo_jobs": h.cargo_jobs,
+            "max_concurrent": h.max_concurrent,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -337,8 +353,9 @@ pub async fn put_settings(
     let host = input.host.trim().to_string();
     let user = input.user.trim().to_string();
     let remote_root = input.remote_root.trim().to_string();
-    if input.enabled && (host.is_empty() || user.is_empty()) {
-        return Err(LcError::Bad("remote Cargo 啟用時 host 與 user 都必填".into()));
+    // `host = "local"`＝本機執行器（#1956），不用 user。
+    if input.enabled && (host.is_empty() || (user.is_empty() && host != crate::config::LOCAL_BUILD_HOST)) {
+        return Err(LcError::Bad("remote Cargo 啟用時 host 與 user 都必填（本機執行器 host = \"local\" 不用 user）".into()));
     }
     validate_target(&host, &user, &remote_root).map_err(|e| LcError::Bad(e.into()))?;
     if input.ssh_port == 0 {
@@ -383,7 +400,7 @@ pub async fn put_settings(
 pub async fn test_settings(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let cfg = app.cfg.get().await;
     let remote = cfg.build.remote.clone();
-    if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
+    if remote.host.trim().is_empty() || (remote.user.trim().is_empty() && !remote.is_local()) {
         return Err(LcError::Bad("remote Cargo host 尚未設定".into()));
     }
     let data_dir = app.data_dir.clone();
@@ -535,6 +552,18 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
     cmd
 }
 
+/// 在建置主機上跑一段 POSIX sh（#1956）：ssh 主機照舊是 ssh＋登入 shell 包一層 `sh -c`；
+/// 本機執行器（`host = "local"`）直接 `sh -c`，其餘（守門腳本、目錄配置、manifest、失效 touch）全部同一套。
+fn host_shell(remote: &BuildRemoteCfg, data_dir: &Path, script: &str) -> anyhow::Result<Command> {
+    if remote.is_local() {
+        return local_shell(script);
+    }
+    let pw = secret(data_dir, remote)?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
+    cmd.arg(login_shell_arg(script));
+    Ok(cmd)
+}
+
 /// probe 在遠端跑的那一行。`~/.cargo/bin` 一併看：rustup 裝好之後**只**改 shell profile，
 /// 而 ssh 的非互動 shell 不讀 profile，`command -v cargo` 會說沒有（2026-09-18）。
 /// clippy 也看：它是轉過去的三個指令之一，rustup 的 minimal profile 不含它（issue #104）。
@@ -619,9 +648,8 @@ fn output_with_deadline(
 }
 
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
-    let pw = secret(data_dir, remote)?;
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(PROBE_SH));
+    let pw = if remote.is_local() { None } else { secret(data_dir, remote)? };
+    let cmd = host_shell(remote, data_dir, PROBE_SH)?;
     let out = output_with_timeout(cmd, PROBE_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!("ssh probe failed (exit {:?}): {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim());
@@ -664,9 +692,7 @@ cargo clippy --version >/dev/null 2>&1 || echo 'CLIPPY_MISSING=1'\n\
 command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || echo 'CC_MISSING=1'\n";
 
 fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
-    let pw = secret(data_dir, remote)?;
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(INSTALL_SH));
+    let cmd = host_shell(remote, data_dir, INSTALL_SH)?;
     let out = output_with_timeout(cmd, INSTALL_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -696,7 +722,7 @@ fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result
 pub async fn install_settings(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let cfg = app.cfg.get().await;
     let remote = cfg.build.remote.clone();
-    if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
+    if remote.host.trim().is_empty() || (remote.user.trim().is_empty() && !remote.is_local()) {
         return Err(LcError::Bad("remote Cargo host 尚未設定".into()));
     }
     let data_dir = app.data_dir.clone();
@@ -869,6 +895,10 @@ struct Admission {
     queue_wait_secs: u64,
     /// 共用 target 池的份數（#1956）；`0`＝跟 `max`（算出來的名額數）一樣。正式設定一律 0，測試用 1 走舊的「單份＋`job-*`」路徑。
     pool: usize,
+    /// 多台挑主機的第一輪（#1956）：不等任何鎖、不改走冷目錄，拿不到就回 `BUSY`（[`Busy`]）。
+    try_only: bool,
+    /// 試用時 1 分鐘負載超過這個值就當沒有空槽（只有本機執行器設，見 [`local_max_load`]）。
+    max_load: Option<f64>,
 }
 
 impl Admission {
@@ -879,6 +909,19 @@ impl Admission {
             shared_wait_secs: SHARED_WAIT_SECS,
             queue_wait_secs: Self::queue_wait_secs(),
             pool: 0,
+            try_only: false,
+            max_load: None,
+        }
+    }
+
+    /// 第一輪試用：同一台、同一組名額，只是一秒都不等。
+    fn try_from_cfg(remote: &BuildRemoteCfg) -> Self {
+        Admission {
+            shared_wait_secs: 0,
+            queue_wait_secs: 0,
+            try_only: true,
+            max_load: remote.is_local().then(|| local_max_load(remote, std::env::var("CHECK_MAX_LOAD").ok().as_deref())),
+            ..Self::from_cfg(remote)
         }
     }
 
@@ -933,6 +976,8 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
         .replace("@SWAIT@", &adm.shared_wait_secs.to_string())
         .replace("@QWAIT@", &adm.queue_wait_secs.to_string())
         .replace("@POOL@", &adm.pool.to_string())
+        .replace("@TRY@", if adm.try_only { "1" } else { "0" })
+        .replace("@MAXLOAD@", &adm.max_load.filter(|m| *m > 0.0).map(|m| format!("{m:.2}")).unwrap_or_else(|| "0".into()))
         .replace("@RESERVE_KB@", &AUTO_RESERVE_KB.to_string())
         .replace("@PER_JOB_KB@", &AUTO_PER_JOB_KB.to_string())
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
@@ -941,7 +986,7 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
 const GUARD_SH: &str = r#"set -u
 trap '' HUP PIPE
 root=@ROOT@; hash=@HASH@; job=@JOB@; token=@TOKEN@
-max=@MAX@; jobs=@JOBS@; swait=@SWAIT@; qwait=@QWAIT@; pool=@POOL@
+max=@MAX@; jobs=@JOBS@; swait=@SWAIT@; qwait=@QWAIT@; pool=@POOL@; try=@TRY@; maxload=@MAXLOAD@
 if ! command -v flock >/dev/null 2>&1 || [ ! -r /proc/self/stat ]; then
   echo 'agents-manager: remote Cargo 的遠端要有 flock（util-linux）與 /proc（Linux）' >&2; exit 2
 fi
@@ -1069,6 +1114,7 @@ take_slot() {
     # `-le` 不是 `-lt`（issue #486）：`date +%s` truncate 到整秒，`now - q0` 會比真實經過的時間**多算最多 1 秒**
     # （`q0` 落在某一秒的最後 10ms 時，真的過了 1.01 秒就已經算成 2）。用 `-lt` 的話 `qwait=2` 實際只等了約 1 秒。
     # 改成等到「算出來的秒數**超過** qwait」才放棄：truncate 的誤差只會讓它多等，不會少等（最多多等 1 秒）。
+    [ "$try" = 0 ] || return 74
     [ $(($(date +%s) - q0)) -le "$qwait" ] || return 74
     [ -n "$said" ] || { echo "agents-manager: 遠端同時編譯已滿（$max 個，[build.remote] max_concurrent），排隊等名額（最多 $qwait 秒）…" >&2; said=1; }
     alive || return 73
@@ -1079,6 +1125,8 @@ hold() {
   lock_dir "$2" || return $?
   same "$1.lock" 8 || return 76
   take_slot || return $?
+  # 不再排隊了：撤掉排隊號碼牌（`.queue/<token>`，挑主機時數人頭用）。
+  exec 6>&-; rm -f "$qf"
   mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$token" > "$1.owner" || return 2
   printf 'ROOT\t%s\nDIR\t%s\t%s\nSLOT\t%s\t%s\n' "$root" "$1" "$token" "$slot" "$max"
   inventory "$1"
@@ -1168,6 +1216,36 @@ seed() {
   exec 5>&-
   return 0
 }
+# 排隊號碼牌（#1956）：等鎖期間 flock 住 `.queue/<token>`（fd 6），拿到名額就撤；守門怎麼死鎖都會放，
+# 數人頭時鎖沒被持有的殘檔順手刪。只是挑主機用的估計，不影響誰拿到鎖。
+mkdir -p "$root/.queue" || exit 2
+qf="$root/.queue/$token"
+trap 'rm -f "$qf"' EXIT
+# 試用（多台挑主機的第一輪）：池裡沒有空的份、或名額全滿就不等、不改走冷目錄；拿不到就回 `BUSY\t<排隊人數>`、exit 77。
+busy() {
+  q=0
+  for f in "$root"/.queue/*; do
+    [ -f "$f" ] || continue
+    if flock -n "$f" true 2>/dev/null; then rm -f "$f"; else q=$((q + 1)); fi
+  done
+  printf 'BUSY\t%s\n' "$q"
+  exit 77
+}
+if [ "$try" = 1 ]; then
+  if [ "$maxload" != 0 ] && awk -v m="$maxload" '{ exit !($1 > m) }' /proc/loadavg 2>/dev/null; then
+    echo "agents-manager: 這台 1 分鐘負載超過 $maxload，當作沒有空槽" >&2; busy
+  fi
+  mkdir -p "$root/$hash" || exit 2
+  lock_pool 0 || busy
+  seed "$d"
+  hold "$d" 0; rc=$?
+  case $rc in
+    0|73) exit 0 ;;
+    74|75) busy ;;
+  esac
+  exit $rc
+fi
+exec 6>>"$qf" && flock -n 6
 # 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
 n=0; s0=$(date +%s)
 while :; do
@@ -1248,6 +1326,7 @@ pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
             }),
             ["F", free, total] => hs.disk = free.parse().ok().zip(total.parse().ok()),
             ["SLOT", i, max] => hs.slot = i.parse().ok().zip(max.parse().ok()),
+            ["BUSY", n] => return Err(anyhow::Error::new(Busy { waiters: n.parse().unwrap_or(0) })),
             _ => {}
         }
     }
@@ -1435,6 +1514,10 @@ impl Lease {
         let mut lease = Lease { child, stdin, stdout: Some(reader), hs: Handshake::default(), token };
         lease.hs = match hs {
             Ok(hs) => hs,
+            Err(e) if e.downcast_ref::<Busy>().is_some() => {
+                lease.finish();
+                return Err(e);
+            }
             Err(e) => {
                 // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），
                 // 255＝ssh 自己沒進去（連不上／認證被拒／host key 不合，issue #428），其他是守門出事。
@@ -1709,7 +1792,7 @@ fn source_root(cwd: &Path) -> (PathBuf, String) {
     (root.to_path_buf(), sub)
 }
 
-fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, ctl: &Deadline) -> anyhow::Result<Lease> {
+fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, adm: Admission, ctl: &Deadline) -> anyhow::Result<Lease> {
     let root = match remote.remote_root.trim().trim_end_matches('/') {
         "" => crate::config::default_remote_build_root(),
         r => r.to_string(),
@@ -1720,10 +1803,8 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, ctl: &Deadli
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let job = format!("job-{}-{millis}", std::process::id());
-    let pw = secret(data_dir, remote)?;
     let token = LeaseToken::new();
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job, &token, Admission::from_cfg(remote)))));
+    let cmd = host_shell(remote, data_dir, &guard_script(&root, &hash, &job, &token, adm))?;
     Lease::start(cmd, token, ctl)
 }
 
@@ -1994,8 +2075,6 @@ fn touch_remote_workspace(
     dir: &str,
     deadline: &Deadline,
 ) -> anyhow::Result<()> {
-    let pw = secret(data_dir, remote)?;
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let mut script = format!(
         "set -eu\nlease_dir={}\n[ -d \"$lease_dir\" ] && [ ! -L \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\n",
         sh_quote(dir)
@@ -2004,7 +2083,7 @@ fn touch_remote_workspace(
     script.push_str(
         "if prepare_touch_stamp && find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o \\( -type f -o -type l \\) -exec touch -h -m -d \"@$touch_stamp\" -- '{}' + && verify_touch_mtimes && wait_for_touch_stamp; then\n  :\nelse\n  invalidate_target_fingerprints\n  find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type f -exec touch -m -- '{}' +\n  find -P . \\( -path './target' -o -path './.git' -o -path './.claude' \\) -prune -o -type l -exec touch -h -m -- '{}' +\nfi\n",
     );
-    cmd.arg(login_shell_arg(&script));
+    let cmd = host_shell(remote, data_dir, &script)?;
     let status = run_status(cmd, "invalidate remote Cargo workspace sources", deadline)?;
     if !status.success() {
         anyhow::bail!("remote workspace source invalidation failed with exit {:?}", status.code());
@@ -2392,9 +2471,7 @@ fn touch_remote_files(
         script.push_str(&format!("  touch -m -- {}\n", sh_quote(relative)));
     }
     script.push_str("fi\n");
-    let pw = secret(data_dir, remote)?;
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(&script));
+    let cmd = host_shell(remote, data_dir, &script)?;
     let status = run_status(
         cmd,
         "invalidate changed remote Cargo source files",
@@ -2420,7 +2497,6 @@ fn read_remote_manifest(
     deadline: &Deadline,
 ) -> anyhow::Result<Option<SourceManifest>> {
     let path = remote_manifest_path(dir);
-    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
     // Validate before rsync, including unchanged hot runs: neither the lease nor Cargo's
     // cache may redirect writes through symlinks. Reuse this mandatory SSH round trip.
     let mut script = format!(
@@ -2430,7 +2506,7 @@ fn read_remote_manifest(
     script.push_str(REMOTE_TOUCH_MTIME_SETUP);
     script.push_str("if ! validate_target_cache_paths; then invalidate_target_fingerprints; fi\n");
     script.push_str(&format!("if [ -f {0} ]; then cat {0}; else exit 44; fi", sh_quote(&path)));
-    cmd.arg(login_shell_arg(&script));
+    let cmd = host_shell(remote, data_dir, &script)?;
     let out = output_with_deadline(cmd, "read remote Cargo source manifest", deadline)?;
     if out.status.code() == Some(44) {
         return Ok(None);
@@ -2459,8 +2535,8 @@ fn write_remote_manifest(
         sh_quote(&tmp),
         sh_quote(&path)
     );
-    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(&script)).stdin(Stdio::piped());
+    let mut cmd = host_shell(remote, data_dir, &script)?;
+    cmd.stdin(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("write remote Cargo source manifest: {e}"))?;
@@ -2503,8 +2579,7 @@ fn prune_remote_exclusions(
         let depth = path.split('/').count();
         script.push_str(&format!("safe_remove {} {depth}\n", sh_quote(path)));
     }
-    let mut cmd = ssh_base(remote, secret(data_dir, remote)?.as_deref(), data_dir)?;
-    cmd.arg(login_shell_arg(&script));
+    let cmd = host_shell(remote, data_dir, &script)?;
     let status = run_status(
         cmd,
         "remove explicitly excluded remote Cargo inputs",
@@ -2534,6 +2609,10 @@ const SYNC_ATTEMPTS: u32 = 3;
 const SYNC_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn rsync_destination(remote: &BuildRemoteCfg, dir: &str) -> String {
+    // 本機執行器：直接寫本機路徑（守門交回來的是絕對路徑）。
+    if remote.is_local() {
+        return format!("{}/", dir.trim_end_matches('/'));
+    }
     let host = if remote.host.contains(':') { format!("[{}]", remote.host) } else { remote.host.clone() };
     format!("{}@{}:{}/", remote.user, host, dir.trim_end_matches('/'))
 }
@@ -2542,9 +2621,12 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
-    check_identity(remote)?;
+    let local = remote.is_local();
+    if !local {
+        check_identity(remote)?;
+    }
     let root = std::fs::canonicalize(cwd)?;
-    let pw = secret(data_dir, remote)?;
+    let pw = if local { None } else { secret(data_dir, remote)? };
     let mode = match pw {
         Some(_) => Some(password_mode(data_dir)?),
         None => None,
@@ -2578,13 +2660,17 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
                 }
             }
         }
-        cmd.args(["-az", "--delete"])
+        // 本機複製不壓縮（`-z` 只會白燒 CPU）。
+        cmd.args([if local { "-a" } else { "-az" }, "--delete"])
             .args(RSYNC_CACHE_FLAGS)
             .arg("--quiet");
         for exclude in exclusions {
             cmd.arg("--exclude").arg(exclude);
         }
-        cmd.args(["-e", &ssh]).arg(&source).arg(&dest);
+        if !local {
+            cmd.args(["-e", &ssh]);
+        }
+        cmd.arg(&source).arg(&dest);
         cmd
     };
     // 共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉；rsync 列完清單後舊檔消失就回 23/24。
@@ -2672,10 +2758,8 @@ fn pick_test_threads(caller: Option<&str>, configured: usize) -> usize {
 }
 
 fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String], deadline: &Deadline) -> anyhow::Result<i32> {
-    let pw = secret(data_dir, remote)?;
-    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
-    cmd.arg(login_shell_arg(&run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args)));
+    let cmd = host_shell(remote, data_dir, &run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args))?;
     let status = run_status(cmd, "remote cargo", deadline)?;
     Ok(status.code().unwrap_or(1))
 }
@@ -2685,7 +2769,8 @@ fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str
 /// failures are errors (not silent local fallback) because callers must know what was actually verified.
 /// `run_cli` 的決定：轉遠端（帶設定），或退回本機（帶要對使用者講的原因；`None`＝本來就沒啟用，不必講）。
 pub enum Offload {
-    Go(BuildRemoteCfg),
+    /// 照設定順序的每台建置主機（[`BuildRemoteCfg::targets`]，#1956），至少一台。
+    Go(Vec<BuildRemoteCfg>),
     Local(Option<String>),
 }
 
@@ -2707,19 +2792,19 @@ pub fn decide_offload(config_path: &Path, args: &[String], env: impl IntoIterato
     if !remote.enabled {
         return Offload::Local(None);
     }
-    if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
+    let hosts = remote.targets();
+    if hosts.is_empty() {
         return Offload::Local(Some("外部編譯啟用了但 host／user 是空的".into()));
     }
-    if let Err(why) = validate_target(remote.host.trim(), remote.user.trim(), remote.remote_root.trim()) {
-        return Offload::Local(Some(format!("設定檔 [build.remote] 不合法（{why}）")));
-    }
-    if remote.ssh_port == 0 {
-        return Offload::Local(Some("設定檔 [build.remote] 不合法（ssh_port 不能是 0）".into()));
+    for h in &hosts {
+        if let Err(why) = check_target(h) {
+            return Offload::Local(Some(format!("設定檔 [build.remote] 的 {} 不合法（{why}）", h.host)));
+        }
     }
     if let Some(var) = env_blocking_offload(env) {
         return Offload::Local(Some(format!("本機設了 {var}，遠端看不到它，結果會跟本機不一致")));
     }
-    Offload::Go(remote)
+    Offload::Go(hosts)
 }
 
 /// `--data-dir` 沒給時的資料目錄（issue #417）：跟 daemon 帶 `--config` 啟動時同一套規則
@@ -2732,9 +2817,19 @@ pub fn resolve_data_dir(config_path: &Path, given: Option<&Path>) -> anyhow::Res
     }
 }
 
-pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[String]) -> i32 {
-    let remote = match decide_offload(config_path, args, std::env::vars()) {
-        Offload::Go(r) => r,
+/// `only`＝`--host <名字>`：只用這一台、不分流（預熱逐台跑）；設定裡沒有這台就退回本機（125）。
+pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[String], only: Option<&str>) -> i32 {
+    let hosts = match decide_offload(config_path, args, std::env::vars()) {
+        Offload::Go(hosts) => match only {
+            None => hosts,
+            Some(name) => match hosts.into_iter().find(|h| h.target_label() == name) {
+                Some(h) => vec![h],
+                None => {
+                    eprintln!("agents-manager: 這次 cargo 不轉外部編譯：設定裡沒有建置主機 {name}");
+                    return EXIT_RUN_LOCALLY;
+                }
+            },
+        },
         Offload::Local(why) => {
             if let Some(why) = why {
                 eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：{why}");
@@ -2751,16 +2846,21 @@ pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[
     };
     let data_dir = data_dir.as_path();
     eprintln!(
-        "agents-manager: remote Cargo → {}@{}:{} ({})",
-        remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
+        "agents-manager: remote Cargo → {} ({})",
+        hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>().join(" / "),
+        args.first().map(String::as_str).unwrap_or("")
     );
     install_signal_handlers();
-    run_offload(&remote, data_dir, cwd, args, &Deadline::new(remote.timeout_secs).watching_signals())
+    // 整體上限是整組共用的（`hosts` 裡的主機不能各自設 timeout_secs）。
+    run_offload_on(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals())
 }
 
 /// 這次 ssh 拿什麼登入（issue #428）。連不上的時候最想知道的就是這個——「沒設金鑰也沒有密碼檔」跟
 /// 「金鑰設了但被拒」要修的地方完全不同。密碼檔只看在不在，不讀內容。
 fn auth_desc(remote: &BuildRemoteCfg, data_dir: &Path) -> String {
+    if remote.is_local() {
+        return "本機執行器（不經 ssh）".into();
+    }
     match (password_is_set(data_dir, remote), remote.identity_file.as_str()) {
         (true, "") => format!("{} 裡的密碼檔", data_dir.display()),
         (true, key) => format!("{} 裡的密碼檔，加上 identity_file {key}", data_dir.display()),
@@ -2775,22 +2875,22 @@ fn auth_desc(remote: &BuildRemoteCfg, data_dir: &Path) -> String {
 /// 細節接在第二行——不然「這次沒有轉到外部編譯」會被埋在一堆 ssh 訊息裡，整批 child 靜靜擠回本機那兩個名額。
 /// 純組字串，好測；真正的決定（回 [`EXIT_RUN_LOCALLY`]）在 [`run_offload`]。
 fn unreachable_note(remote: &BuildRemoteCfg, auth: &str, why: &str) -> String {
+    unreachable_note_then(remote, auth, why, "這次 cargo 改在本機跑（要排本機名額）")
+}
+
+/// 多台時連不上的那台不是最後一台：講「改試下一台」，不是「改在本機跑」（#1956）。
+fn unreachable_note_then(remote: &BuildRemoteCfg, auth: &str, why: &str, then: &str) -> String {
     format!(
-        "agents-manager: ⚠️ 連不上外部編譯主機 {}@{}:{}，這次 cargo 改在本機跑（要排本機名額）\n\
+        "agents-manager: ⚠️ 連不上外部編譯主機 {}，{then}\n\
          agents-manager:    {why}；這次的登入方式是{auth}",
-        remote.user, remote.host, remote.ssh_port
+        remote.target_label()
     )
 }
 
 /// 把這一次的連線結論記在 data-dir（issue #428），`/api/build-slots` 的 `remote_reachable` 讀它。
 /// 記不下來只講一聲：說明用的東西不能擋住這次編譯。
 fn note_health(remote: &BuildRemoteCfg, data_dir: &Path, reachable: bool, reason: Option<String>) {
-    let h = crate::remote_health::Health {
-        reachable,
-        checked_at: crate::db::now(),
-        target: format!("{}@{}:{}", remote.user, remote.host, remote.ssh_port),
-        reason,
-    };
+    let h = crate::remote_health::Health { reachable, checked_at: crate::db::now(), target: remote.target_label(), reason };
     if let Err(e) = crate::remote_health::record(data_dir, &h) {
         eprintln!("agents-manager: 記不下外部編譯主機的連線結論（{e}）");
     }
@@ -2798,10 +2898,18 @@ fn note_health(remote: &BuildRemoteCfg, data_dir: &Path, reachable: bool, reason
 
 /// 真的把這次呼叫丟到遠端（已經確定要轉、設定也讀好了）。整體時間受 `remote.timeout_secs` 限制（issue #194）；收到終止訊號也會好好收尾（issue #201）。
 fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
+    run_offload_on(std::slice::from_ref(remote), data_dir, cwd, args, ctl)
+}
+
+/// [`run_offload`] 的多台版（#1956）：先挑一台拿到租約（[`acquire`]），之後同步、編譯都在那一台。
+fn run_offload_on(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
+    let mut used = 0;
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
         let (root, sub) = source_root(cwd);
-        let mut lease = open_lease(remote, data_dir, &root, ctl)?;
+        let (i, mut lease) = acquire(hosts, data_dir, &root, ctl)?;
+        used = i;
+        let remote = &hosts[i];
         // 整體上限從拿到名額與目錄才開始算（issue #104）。
         ctl.arm();
         lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
@@ -2810,6 +2918,7 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
         lease.finish();
         Ok(code)
     })();
+    let remote = &hosts[used];
     // `lease` 已經在上面那個閉包結束時放掉：守門的清理（收 process group、還目錄與鎖）做完才走到這裡。
     // 收到終止訊號：Ctrl-C 會同時打到本機的 rsync／ssh，它們的結束碼不代表這次的結果——一律照訊號回 128+sig。
     if let Some(Stopped::Interrupted(sig)) = ctl.stop() {
@@ -2823,12 +2932,8 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
         }
         // 連不上／認證被拒（issue #428）：遠端什麼都還沒跑，所以跟 125 那條一樣退回本機——但要講清楚原因，
         // 不然整批 child 會靜靜擠回本機那兩個名額，而沒有人知道外部編譯根本沒生效（同 issue #138 的教訓）。
-        Err(e) if e.downcast_ref::<Unreachable>().is_some() => {
-            let why = e.to_string();
-            eprintln!("{}", unreachable_note(remote, &auth_desc(remote, data_dir), &why));
-            note_health(remote, data_dir, false, Some(why));
-            EXIT_RUN_LOCALLY
-        }
+        // 原因與健康檔在 [`acquire`] 裡逐台記過了。
+        Err(e) if e.downcast_ref::<Unreachable>().is_some() => EXIT_RUN_LOCALLY,
         // 守門尚未交目錄、遠端還沒開工：改排本機名額（issue #1853）。
         // 守門有回話＝連得上，只是滿了。
         Err(e) if e.downcast_ref::<QueueFull>().is_some() => {
@@ -3840,7 +3945,7 @@ mod guard_tests {
     }
 
     /// 既有測試用的：名額夠多、shared 被佔著就馬上改用 job 目錄（等待另有測試）。
-    const QUICK: Admission = Admission { max: 64, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 30, pool: 1 };
+    const QUICK: Admission = Admission { max: 64, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 30, pool: 1, try_only: false, max_load: None };
 
     fn guard(base: &Path, hash: &str, job: &str) -> Lease {
         guard_with(base, hash, job, QUICK)
@@ -5758,7 +5863,7 @@ fn main() {
         let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
         assert_eq!(rc, EXIT_RUN_LOCALLY, "連不進去＝遠端沒動手，退回本機（不是 126＝驗證失敗）");
 
-        let h = crate::remote_health::read(&data).expect("結論要記下來");
+        let h = crate::remote_health::read(&data, "me@fake:22").expect("結論要記下來");
         assert!(!h.reachable, "{h:?}");
         assert_eq!(h.target, "me@fake:22", "記的是連哪一台（設定換主機之後看得出來是舊的）");
         let why = h.reason.as_deref().unwrap_or_default();
@@ -5783,7 +5888,7 @@ fn main() {
         let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
         assert_eq!(rc, EXIT_RUN_LOCALLY, "滿額不能回 75 或執行遠端 cargo");
         assert!(t0.elapsed() < Duration::from_secs(30), "應短暫等候後退回本機");
-        assert!(crate::remote_health::read(&data).unwrap().reachable);
+        assert!(crate::remote_health::read(&data, "me@fake:22").unwrap().reachable);
         holder.finish();
         let _ = std::fs::remove_dir_all(base);
     }
@@ -5796,7 +5901,7 @@ fn main() {
         let (remote, cwd, data) = fake_remote(&base, 60, "exit 101\n");
         let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
         assert_eq!(rc, 101, "cargo 自己的退出碼原樣帶回，不是 125");
-        let h = crate::remote_health::read(&data).expect("結論要記下來");
+        let h = crate::remote_health::read(&data, "me@fake:22").expect("結論要記下來");
         assert!(h.reachable && h.reason.is_none(), "連得上：{h:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -5983,7 +6088,7 @@ fn main() {
     #[test]
     fn different_worktrees_share_one_remote_cap() {
         let base = base();
-        let adm = Admission { max: 2, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 60, pool: 1 };
+        let adm = Admission { max: 2, queue_wait_secs: 60, ..QUICK };
         let mut a = guard_with(&base, "00000000000000a1", "job-1-1", adm);
         let mut b = guard_with(&base, "00000000000000b2", "job-2-2", adm);
         let mut got = vec![a.hs.slot, b.hs.slot];
@@ -6281,5 +6386,159 @@ fn main() {
         };
         let policy = GcPolicy { shared_idle_secs: 24 * 3600, max_shared: 2 };
         assert_eq!(select_gc(&hs, &policy), vec!["/r/0123456789abcdef/shared-2".to_string()], "連自己這份共 3 份、上限 2：收最久沒用的");
+    }
+
+    // ── #1956 第二階段：本機執行器（`host = "local"`）與多台挑主機 ──
+
+    /// 本機執行器的一台：`$HOME`（假 cargo 在 `.cargo/bin`）在沙盒，`remote_root` 是沙盒裡的絕對路徑。回傳 (設定, cwd, data_dir)。
+    fn local_host(base: &Path, root: &str, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        write_exec(&home.join(".cargo/bin/cargo"), cargo_body);
+        let cwd = base.join("work");
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let remote = BuildRemoteCfg {
+            enabled: true,
+            host: crate::config::LOCAL_BUILD_HOST.into(),
+            remote_root: base.join(root).display().to_string(),
+            cargo_jobs: 1,
+            test_threads: 0,
+            max_concurrent: 1,
+            timeout_secs: 60,
+            ..Default::default()
+        };
+        (remote, cwd, data)
+    }
+
+    fn with_local_home<T>(base: &Path, f: impl FnOnce() -> T) -> T {
+        TEST_LOCAL_HOME.with(|h| *h.borrow_mut() = Some(base.join("home")));
+        let out = f();
+        TEST_LOCAL_HOME.with(|h| *h.borrow_mut() = None);
+        out
+    }
+
+    /// 本機執行器：不經 ssh，同一套守門／共用 target／rsync 在本機跑；cargo 在租到的 `shared/` 裡跑、環境是乾淨的（pane 的 `AM_*` 不漏進去），
+    /// 健康檔記在 `local` 這台名下。
+    #[test]
+    fn the_local_executor_runs_cargo_in_the_shared_target_without_ssh() {
+        let base = base();
+        let (remote, cwd, data) = local_host(&base, "rc", "pwd > \"$HOME/ran\"; env > \"$HOME/env\"; exit 0\n");
+        std::fs::write(cwd.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+        // ssh／rsync-over-ssh 一律不准碰：換成會失敗的假程式，被叫到就紅。
+        let bin = base.join("fakebin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec(&bin.join("ssh"), "echo 'ssh must not run' >&2; exit 255\n");
+        TEST_PROGRAMS.with(|p| *p.borrow_mut() = Some((bin.join("ssh").display().to_string(), "rsync".into())));
+        let rc = with_local_home(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(60)));
+        TEST_PROGRAMS.with(|p| *p.borrow_mut() = None);
+        assert_eq!(rc, 0);
+        let ran = std::fs::read_to_string(base.join("home/ran")).unwrap();
+        assert!(ran.trim().starts_with(&base.join("rc").display().to_string()) && ran.trim().ends_with("/shared"), "{ran}");
+        assert!(Path::new(ran.trim()).join("src/lib.rs").is_file(), "來源同步到本機的共用目錄");
+        let env = std::fs::read_to_string(base.join("home/env")).unwrap();
+        assert!(!env.lines().any(|l| l.starts_with("AM_") || l.starts_with("HERDR_")), "pane 的環境不漏進去：{env}");
+        assert!(env.lines().any(|l| l == format!("HOME={}", base.join("home").display())), "{env}");
+        let h = crate::remote_health::read(&data, "local").expect("健康檔記在 local 名下");
+        assert!(h.reachable);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 試用守門：池與名額都被佔著就不等、不改走冷目錄，回 `BUSY\t<排隊人數>`；排隊人數＝正在等鎖的守門數。
+    #[test]
+    fn a_trial_guard_reports_busy_with_the_number_of_waiters() {
+        let base = base();
+        let one = Admission { max: 1, pool: 0, ..QUICK };
+        let mut holder = guard_with(&base, HASH, "job-1-1", one);
+        let trial = Admission { try_only: true, shared_wait_secs: 0, queue_wait_secs: 0, ..one };
+        let token = LeaseToken::new();
+        let err = Lease::start(guard_cmd(&base, HASH, "job-2-2", &token, trial), token, &Deadline::new(0)).err().expect("busy");
+        assert_eq!(err.downcast_ref::<Busy>().map(|b| b.waiters), Some(0), "{err:#}");
+        assert!(!base.join(format!("rc/{HASH}/job-2-2")).exists(), "試用不改走冷目錄");
+
+        // 一個正常守門在排隊：試用數得到它。
+        let b2 = base.clone();
+        let waiter = std::thread::spawn(move || guard_with(&b2, HASH, "job-3-3", Admission { shared_wait_secs: 30, ..one }));
+        let t0 = Instant::now();
+        let waiters = loop {
+            let token = LeaseToken::new();
+            let err = Lease::start(guard_cmd(&base, HASH, "job-4-4", &token, trial), token, &Deadline::new(0)).err().expect("busy");
+            let n = err.downcast_ref::<Busy>().map(|b| b.waiters).unwrap();
+            if n > 0 || t0.elapsed() > Duration::from_secs(10) {
+                break n;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(waiters, 1);
+        holder.finish();
+        waiter.join().unwrap().finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 多台：第一台（照設定順序）的池全被佔著就用第二台，不排第一台的隊。
+    #[test]
+    fn with_several_hosts_a_busy_first_host_hands_the_call_to_a_free_second() {
+        let base = base();
+        let (a, cwd, data) = local_host(&base, "rc", "pwd > \"$HOME/ran\"; exit 0\n");
+        let b = BuildRemoteCfg { remote_root: base.join("rc-b").display().to_string(), ..a.clone() };
+        let hash = cache_hash(&source_root(&cwd).0);
+        let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, pool: 0, ..QUICK });
+        let rc = with_local_home(&base, || run_offload_on(&[a, b], &data, &cwd, &["check".to_string()], &Deadline::new(60)));
+        assert_eq!(rc, 0);
+        let ran = std::fs::read_to_string(base.join("home/ran")).unwrap();
+        assert!(ran.trim().starts_with(&base.join("rc-b").display().to_string()), "第一台忙，用第二台：{ran}");
+        holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 都忙時排排隊人數最少的那台，同分照設定順序。
+    #[test]
+    fn when_every_host_is_busy_the_shortest_queue_wins_and_ties_keep_config_order() {
+        assert_eq!(hosts::queue_order(&[(0, 2), (1, 0), (2, 0)]), vec![1, 2, 0]);
+        assert_eq!(hosts::queue_order(&[(0, 1), (1, 1)]), vec![0, 1]);
+        assert!(hosts::queue_order(&[]).is_empty());
+    }
+
+    /// 本機執行器的負載門檻：設定 > 呼叫端的 CHECK_MAX_LOAD > 核心數 × 1.25（同 wait-load.sh）。
+    #[test]
+    fn the_local_load_cap_prefers_config_then_check_max_load_then_cores() {
+        let cfg = BuildRemoteCfg { host: "local".into(), max_load: 7.5, ..Default::default() };
+        assert_eq!(local_max_load(&cfg, Some("40")), 7.5);
+        let auto = BuildRemoteCfg { max_load: 0.0, ..cfg };
+        assert_eq!(local_max_load(&auto, Some("40")), 40.0);
+        assert_eq!(local_max_load(&auto, Some("junk")), std::thread::available_parallelism().unwrap().get() as f64 * 1.25);
+        assert!(Admission::try_from_cfg(&auto).max_load.is_some(), "本機試用看負載");
+        assert_eq!(Admission::try_from_cfg(&BuildRemoteCfg { host: "r7".into(), ..auto }).max_load, None, "ssh 主機不看");
+    }
+
+    /// 設定：舊的單一 `[build.remote]` 展開成一台；`[[build.remote.hosts]]` 照順序接在後面、沒寫的沿用第一台、
+    /// `enabled = false` 的略過、只支援金鑰；`host = "local"` 不用 user。壞掉的那台讓整份設定退回本機並講是哪台。
+    #[test]
+    fn several_build_hosts_are_read_in_order_and_an_old_single_host_config_is_unchanged() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-cfg-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = vec!["test".to_string()];
+        let decide = |body: &str| {
+            let p = dir.join("c.toml");
+            std::fs::write(&p, body).unwrap();
+            decide_offload(&p, &args, Vec::<(String, String)>::new())
+        };
+        let Offload::Go(old) = decide("[build.remote]\nenabled = true\nhost = \"r7\"\nuser = \"r7\"\ncargo_jobs = 8\n") else { panic!("舊設定照轉") };
+        assert_eq!(old.len(), 1);
+        assert_eq!((old[0].target_label(), old[0].password_id.clone()), ("r7@r7:22".to_string(), None), "舊設定的密碼檔規則不變");
+        let multi = "[build.remote]\nenabled = true\nhost = \"local\"\ncargo_jobs = 12\ntest_threads = 6\n\
+                     [[build.remote.hosts]]\nhost = \"r7\"\nuser = \"r7\"\nmax_concurrent = 1\n\
+                     [[build.remote.hosts]]\nhost = \"off\"\nuser = \"x\"\nenabled = false\n";
+        let Offload::Go(hosts) = decide(multi) else { panic!("多台照轉") };
+        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local", "r7@r7:22"]);
+        assert_eq!((hosts[1].cargo_jobs, hosts[1].test_threads, hosts[1].max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
+        assert_eq!(hosts[1].password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
+        match decide("[build.remote]\nenabled = true\nhost = \"local\"\n[[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n") {
+            Offload::Local(Some(why)) => assert!(why.contains("h;id"), "{why}"),
+            _ => panic!("壞掉的那台要講"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

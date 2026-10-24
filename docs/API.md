@@ -1360,6 +1360,33 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
 `AM_DATA_DIR` **不是**前提（issue #417）：有就帶 `--data-dir`，沒有（`scripts/check.sh` 為了測試隔離會清掉它）就不帶，
 `agents-managerd remote-cargo` 照 daemon 帶 `--config` 時的規則（`[server] data_dir` > 設定檔所在目錄）推出來找密碼檔；推不出來回 125 退回本機並講原因。
 
+**多台建置主機與本機執行器（#1956）**：
+```toml
+[build.remote]                 # 第一台＝舊欄位；enabled（總開關）與 timeout_secs 整組共用
+enabled = true
+host = "local"                 # 保留字：本機執行器，不經 ssh；user／ssh_port／密碼不用
+cargo_jobs = 12
+max_concurrent = 0             # 0＝自動
+max_load = 0                   # 只對 local：0＝呼叫端的 CHECK_MAX_LOAD，沒有就核心數 × 1.25
+
+[[build.remote.hosts]]         # 之後的主機，照寫的順序；沒寫的欄位沿用第一台（timeout_secs 除外）
+host = "r7"
+user = "r7"
+max_concurrent = 1
+# enabled = false 單獨停掉這一台
+```
+- 只有一個 `[build.remote]`（沒有 `hosts`）時行為跟以前完全一樣。`hosts` 裡的主機只支援金鑰／agent（密碼檔只屬於第一台），可覆寫 `user`、`ssh_port`、`remote_root`、`cargo_jobs`、`test_threads`、`shared_idle_hours`、`max_shared_dirs`、`max_concurrent`、`identity_file`、`max_load`。
+  任何一台不合法（同下面的字元檢查、ssh 主機缺 user、`ssh_port = 0`）整份設定退回本機並講是哪一台。
+- **本機執行器**（`host = "local"`，只在 Linux：守門要 flock 與 /proc；macOS 上退回本機並講原因）：守門、共用 target 池、名額、manifest、失效 touch、回收全部同一套，
+  只是每段腳本直接 `sh -c`（cwd＝`$HOME`，`remote_root` 相對於它；自成 process group），環境只留 `HOME`／`USER`／`LOGNAME`／`SHELL`／`LANG`／`LC_ALL`／`LC_CTYPE`／`TZ`／`CARGO_HOME`／`RUSTUP_HOME`，
+  `PATH` 是系統路徑加 `~/.cargo/bin`——跟 ssh 進去一樣乾淨，pane 的 `AM_*`、shim 的 PATH 不漏進 cargo 與測試；rsync 直接寫本機路徑（不帶 `-e`、不壓縮）。
+  一樣不佔 shim 的本機名額，上限是這台自己的 `max_concurrent`。
+- **挑主機**（兩台以上才有）：照設定順序逐台開「試用」守門——池裡有空的份、名額有空（本機執行器另要 1 分鐘負載 ≤ `max_load`）就直接用這份租約開工（試用就是真的拿，不多一趟）；
+  拿不到時守門回 `BUSY\t<排隊人數>` 就結束，不改走 `job-*`。都忙就排排隊人數最少的那台（同分照設定順序），用正常守門排隊；那台這時連不上就換下一名。
+  排隊人數＝那台正在等鎖的守門數（等待期間各自 flock 住 `<remote_root>/.queue/<token>`，殘檔順手刪），只是挑選用的估計。連不上的每一台都各講一次原因、各記健康檔；全部連不上回 125。
+  stderr 講「建置主機 X 有空槽，這次在那裡編」或「建置主機都滿了，排 X（前面約 N 個在等）」。
+- `agents-managerd remote-cargo --config <c> --list-hosts`：照順序印每台的名字（`local` 或 `user@host:port`），沒啟用印空；`--host <名字>`：只用這台、不分流（預熱逐台跑用），設定裡沒有就回 125。
+
 遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<git common dir 路徑的 fnv1a64>/` 底下（同一個 repo 的 worktree 同一份，#1856），
 - `shared/`：同一個 repo 的 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
   `shared.lock` 是 flock，同一時間只給一次呼叫（同一個 repo 的所有 worktree 共用，#1856）。
@@ -1405,7 +1432,7 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   「⚠️ 連不上外部編譯主機 `user@host:port`，這次 cargo 改在本機跑（要排本機名額）」，第二行是 ssh 的原話
   （`Permission denied (publickey,password).` 之類）加上這次的登入方式（密碼檔／`identity_file`／ssh 預設金鑰）——
   不講的話整批 child 會靜靜擠回本機那兩個名額，而沒有人知道外部編譯根本沒生效（issue #138 的教訓）。
-  同一次的結論寫進 data-dir 的 `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它。
+  同一次的結論寫進 data-dir 那台自己的 `remote-cargo-health.<fnv1a64(target) 16 hex>.json`（多台時各一份、互不蓋掉，#1956；找不到時讀 #1956 之前的單一檔 `remote-cargo-health.json`，target 吻合才用），`GET /api/build-slots` 的 `remote.remote_reachable`／`remote.hosts[].remote_reachable` 就是它。
   設定錯（`[build.remote] identity_file` 指的檔案不存在）維持 **126** 明確失敗：那是要去修設定，不是換台機器跑。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
 - **整體上限（issue #194）**：一次遠端編譯（同步＋編譯＋測試）最多 `[build.remote] timeout_secs`（預設 **720 秒＝12 分鐘**；實測 112 次遠端編譯最長 8.9 分鐘、
@@ -1421,7 +1448,8 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   不會卡到 TCP keepalive 的 2 小時。
 
 ### `GET /api/build/remote` / `PUT /api/build/remote`
-`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, max_concurrent, password_set}`。PUT 另收 `password`
+`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, max_concurrent, password_set, hosts}`，只編第一台；
+`hosts` 是唯讀的之後幾台（`[{target, host, user, ssh_port, cargo_jobs, max_concurrent}]`，只在 config.toml 的 `[[build.remote.hosts]]` 改，PUT 會原樣保留）。`host = "local"`（本機執行器）時 `user` 可空。PUT 另收 `password`
 （省略＝沿用現在的密碼，換主機也一樣；`""`＝清掉改用 SSH key/agent；其他＝新密碼）——不進 config、不回前端。`host`／`user` 空字串又要 `enabled` → 400。
 `host` 可填 IPv6 literal；SSH 使用原 host，rsync 目的地會自動把含 `:` 的 host 包成方括號，以符合 `user@[addr]:path` 語法。
 **設定與密碼一起提交（issue #104）**：新密碼先寫成一份還沒人指到的 `<data-dir>/remote-cargo-password.<16 hex>`（open(2) 時就是 0600，不是事後 chmod；寫完 fsync 才從
@@ -1499,9 +1527,14 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
      "host": "local", "since": "2026-09-18T03:00:30.000Z", "last_seen": "2026-09-18T03:00:55.000Z", "expires_at": null}
   ],
   "remote": {"enabled": true, "target": "ubuntu@192.168.1.46:22", "remote_reachable": false,
-             "checked_at": "2026-09-24T09:12:00.000Z", "reason": "ssh 回 255（連不上、認證被拒，或 host key 不合；ssh 自己的訊息在上面）"}
+             "checked_at": "2026-09-24T09:12:00.000Z", "reason": "ssh 回 255（連不上、認證被拒，或 host key 不合；ssh 自己的訊息在上面）",
+             "hosts": [{"target": "ubuntu@192.168.1.46:22", "local": false, "remote_reachable": false,
+                        "checked_at": "2026-09-24T09:12:00.000Z", "reason": "ssh 回 255（連不上、認證被拒，或 host key 不合；ssh 自己的訊息在上面）"}]}
 }
 ```
+
+`remote.hosts`（#1956）是每台一格、照設定順序：`[{target, local, remote_reachable, checked_at, reason}]`（`target`＝`local` 或 `user@host:port`，`local`＝是不是本機執行器），
+沒開時是空陣列；頂層的 `target`／`remote_reachable`／`checked_at`／`reason` 維持是第一台的那格，舊的讀法不用改。
 
 `remote` 是外部編譯主機這一格（issue #428）：本機的隊伍排得再長，也要看得出來是不是因為遠端連不上、整批
 `check`／`test`／`clippy` 都退回本機在搶那兩個名額。`remote_reachable` 是**上一次真的嘗試**的結論

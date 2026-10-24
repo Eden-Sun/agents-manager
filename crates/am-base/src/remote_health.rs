@@ -30,13 +30,23 @@ fn path(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE)
 }
 
-/// 記下這一次的結論。先寫暫存檔再 rename：同時有好幾顆 cargo 在跑時，讀的人不會讀到寫到一半的 JSON。
+/// 多台建置主機時每台一份（#1956）：`remote-cargo-health.<target 的 fnv1a64>.json`。分檔是為了好幾顆 cargo 同時連不同台時不互蓋。
+pub fn target_path(data_dir: &Path, target: &str) -> PathBuf {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in target.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    data_dir.join(format!("remote-cargo-health.{h:016x}.json"))
+}
+
+/// 記下這一次的結論（寫進那台自己的那份）。先寫暫存檔再 rename：同時有好幾顆 cargo 在跑時，讀的人不會讀到寫到一半的 JSON。
 /// 寫不進去就算了（回報 `Err` 給想 log 的呼叫端，但呼叫端不該因此失敗）。
 pub fn record(data_dir: &Path, h: &Health) -> std::io::Result<()> {
     let body = serde_json::to_vec(h).map_err(std::io::Error::other)?;
     let tmp = data_dir.join(format!("{FILE}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &body)?;
-    match std::fs::rename(&tmp, path(data_dir)) {
+    match std::fs::rename(&tmp, target_path(data_dir, &h.target)) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -45,8 +55,9 @@ pub fn record(data_dir: &Path, h: &Health) -> std::io::Result<()> {
     }
 }
 
-/// 上一次的結論；沒有檔、讀不到、或內容看不懂都是 `None`（＝還沒有人試過，不是「連不上」）。
-pub fn read(data_dir: &Path) -> Option<Health> {
-    let body = std::fs::read(path(data_dir)).ok()?;
-    serde_json::from_slice(&body).ok()
+/// 對 `target` 這台上一次的結論；沒有檔、讀不到、內容看不懂、或記的是別台都是 `None`（＝還沒有人試過，不是「連不上」）。
+/// 這台自己的那份沒有時退回 #1956 之前的單一檔（`remote-cargo-health.json`）。
+pub fn read(data_dir: &Path, target: &str) -> Option<Health> {
+    let parse = |p: PathBuf| -> Option<Health> { serde_json::from_slice(&std::fs::read(p).ok()?).ok() };
+    parse(target_path(data_dir, target)).or_else(|| parse(path(data_dir))).filter(|h| h.target == target)
 }

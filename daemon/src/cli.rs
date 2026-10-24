@@ -107,8 +107,14 @@ pub enum Cmd {
         /// 沒給就從 `--config` 推（issue #417：`scripts/check.sh` 會清掉 `AM_DATA_DIR`）。
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, default_value = ".")]
         cwd: PathBuf,
+        /// 只用這一台建置主機（`local` 或 `user@host:port`），不分流（#1956，預熱逐台跑）。
+        #[arg(long)]
+        host: Option<String>,
+        /// 照設定順序印每台建置主機的名字就結束（#1956）。
+        #[arg(long)]
+        list_hosts: bool,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         cargo_args: Vec<String>,
     },
