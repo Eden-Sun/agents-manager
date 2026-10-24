@@ -4189,6 +4189,34 @@ mod guard_tests {
         Command::new("flock").arg("-n").arg(path).arg("true").status().map(|s| s.success()).unwrap_or(false)
     }
 
+    /// 等待排隊中的守門送出第一聲心跳 `Q`，證明已經拿到號碼牌進入佇列。
+    /// 讀到 `Q` 之前不准 probe 或放鎖，避免撞上號碼牌計數競態或假綠。
+    fn wait_for_guard_queued(out: &mut BufReader<ChildStdout>, wait_secs: u64) {
+        let until = Instant::now() + Duration::from_secs(wait_secs);
+        let mut line = String::new();
+        while line.trim_end() != "Q" {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "守門還沒排隊就結束了");
+            assert!(!line.starts_with("ROOT"), "應該要排隊，不該拿到目錄");
+            assert!(Instant::now() < until, "排隊的守門 {wait_secs} 秒內沒有心跳");
+        }
+    }
+
+    /// 正常收尾 waiter：先關閉 stdin 讓守門走正常放鎖路徑（同 Lease::finish），再等待其結束；
+    /// 若超過等待上限才 kill / wait 保底，避免一開始就 kill 導致跳過釋放鎖的路徑而干擾後續測試。
+    fn finish_waiter(mut waiter: Child, wait_secs: u64) {
+        drop(waiter.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(wait_secs.max(10));
+        while waiter.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+                panic!("waiter 關閉 stdin 後在 {wait_secs} 秒內未正常結束");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn wait_until(what: &str, f: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(15);
         while !f() {
@@ -4330,6 +4358,7 @@ mod guard_tests {
     }
 
     fn wait_run(run: &mut Child) -> ExitStatus {
+        // 等待 run 結束；若 stale run 違規啟動 cargo 則不會主動退出，故需以牆鐘 deadline 防護避免無窮卡死
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             if let Some(st) = run.try_wait().unwrap() {
@@ -4420,10 +4449,18 @@ mod guard_tests {
         std::fs::create_dir_all(base.join("outside")).unwrap();
         let mut busy = Command::new("sleep").arg("60").current_dir(rc.join(h).join("222")).spawn().unwrap();
         let lock = rc.join(h).join("333.lock");
-        let mut locker = Command::new("flock").arg(&lock).arg("sleep").arg("60").spawn().unwrap();
-        wait_until("the lock to be held", || {
-            !Command::new("flock").arg("-n").arg(&lock).arg("true").status().unwrap().success()
-        });
+        let mut locker = Command::new("flock")
+            .arg(&lock)
+            .arg("sh")
+            .arg("-c")
+            .arg("echo LOCKED; exec sleep 60")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut locker_out = BufReader::new(locker.stdout.take().unwrap());
+        let mut locked_line = String::new();
+        assert!(locker_out.read_line(&mut locked_line).unwrap() > 0, "locker 未取得鎖就結束了");
+        assert_eq!(locked_line.trim(), "LOCKED");
 
         let mut g = guard(&base, HASH, "job-9-9");
         let root = g.hs.root.clone();
@@ -6078,6 +6115,7 @@ fn main() {
         assert!(took < Duration::from_secs(60), "超過上限之後要很快收乾淨：{took:?}");
         let pids = started_cargo_pids(&base);
         assert_eq!(pids.len(), 1, "假 cargo 真的起來過：{pids:?}");
+        // 非當前行程之直系 child 無法接收 SIGCHLD/waitpid，觀察外部行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
         wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
         // 守門收尾做完才回來：這次的 owner 撤掉了（＝目錄已還回去，晚到的 run 不會再跑）。
         let owners: Vec<_> = std::fs::read_dir(base.join("rc")).unwrap().flatten().flat_map(|h| std::fs::read_dir(h.path()).unwrap().flatten()).filter(|e| e.file_name().to_string_lossy().ends_with(".owner")).collect();
@@ -6299,8 +6337,9 @@ fn main() {
         drop(lease.stdin.take()); // helper 死了：只剩連線中斷
         let status = wait_run(&mut run);
         assert!(status.signal().is_some() || !status.success(), "遠端的 cargo 要被收掉：{status:?}");
-        wait_until("the shared lock to be released", lock_free);
+        // 守門結束時作業系統會自動釋放所有 flock，等 lease.child 結束即可確認鎖已放掉
         let _ = lease.child.wait();
+        assert!(lock_free(), "守門結束後 shared 鎖必須已釋放");
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6324,6 +6363,7 @@ fn main() {
 
         drop(lease.stdin.take());
         assert!(lease.finish().unwrap().success());
+        // 非直系 child 無法接收 SIGCHLD，觀察 setsid 逃逸行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
         wait_until("the escaped helper to be reaped", || unsafe { libc::kill(pid, 0) } != 0);
         let _ = run.wait();
         holder.finish();
@@ -6352,6 +6392,7 @@ fn main() {
         assert!(t0.elapsed() < Duration::from_secs(60), "{:?}", t0.elapsed());
         let pids = started_cargo_pids(&base);
         assert_eq!(pids.len(), 1, "{pids:?}");
+        // 非直系 child 無法接收 SIGCHLD，觀察假 cargo 行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
         wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -6368,17 +6409,28 @@ fn main() {
         let mut got = vec![a.hs.slot, b.hs.slot];
         got.sort();
         assert_eq!(got, vec![Some((1, 2)), Some((2, 2))]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let b2 = base.clone();
-        let waiter = std::thread::spawn(move || tx.send(guard_with(&b2, "00000000000000c3", "job-3-3", adm)).unwrap());
-        assert!(rx.recv_timeout(Duration::from_millis(2500)).is_err(), "名額滿了，第三棵 worktree 要排隊");
+
+        // 同步點是排隊中的心跳 `Q`：`Q` 只在號碼牌已經 flock 之後才印，讀到它才算「進了佇列」
+        let queue_wait = adm.queue_wait_secs;
+        let c_token = LeaseToken::new();
+        let mut waiter = guard_cmd(&base, "00000000000000c3", "job-3-3", &c_token, adm)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(waiter.stdout.take().unwrap());
+        wait_for_guard_queued(&mut out, queue_wait);
+
         let freed = a.hs.slot;
         a.finish();
-        let mut c = rx.recv_timeout(Duration::from_secs(15)).expect("a 還回名額之後 c 要排到");
-        waiter.join().unwrap();
-        assert_eq!(c.hs.slot, freed);
+
+        let (hs, _) = read_handshake_observed(&mut out);
+        let c_hs = hs.expect("a 還回名額之後 waiter 要拿到目錄");
+        assert_eq!(c_hs.slot, freed);
+
         b.finish();
-        c.finish();
+        finish_waiter(waiter, queue_wait);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6470,16 +6522,24 @@ fn main() {
         let mut a = guard(&base, HASH, "job-1-1");
         let adir = a.hs.dir.clone();
         assert!(adir.ends_with("/shared"), "{adir}");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let b2 = base.clone();
-        let waiter = std::thread::spawn(move || {
-            tx.send(guard_with(&b2, HASH, "job-2-2", Admission { shared_wait_secs: 30, ..QUICK })).unwrap()
-        });
-        assert!(rx.recv_timeout(Duration::from_secs(2)).is_err(), "shared 被佔著：要等，不是馬上冷編譯");
+
+        // 一個正常守門在等 shared：同步點是排隊中的心跳 `Q`
+        let shared_wait = 30;
+        let adm_b = Admission { shared_wait_secs: shared_wait, ..QUICK };
+        let b_token = LeaseToken::new();
+        let mut waiter = guard_cmd(&base, HASH, "job-2-2", &b_token, adm_b)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(waiter.stdout.take().unwrap());
+        wait_for_guard_queued(&mut out, shared_wait);
+
         a.finish();
-        let mut b = rx.recv_timeout(Duration::from_secs(15)).expect("a 用完之後 b 要拿到");
-        waiter.join().unwrap();
-        assert_eq!(b.hs.dir, adir, "b 拿到同一個 shared，不是 job-2-2");
+        let (hs, _) = read_handshake_observed(&mut out);
+        let b_hs = hs.expect("a 用完之後 waiter 要拿到 shared 目錄");
+        assert_eq!(b_hs.dir, adir, "waiter 拿到同一個 shared，不是 job-2-2");
 
         // 佔著不放：等 2 秒還沒空出來就改用 job 目錄。
         let t0 = Instant::now();
@@ -6492,7 +6552,7 @@ fn main() {
         assert!(c.obs.shared_wait_secs.is_some_and(|seconds| seconds >= 1));
         assert!(c.obs.slot_wait_secs.is_some());
         c.finish();
-        b.finish();
+        finish_waiter(waiter, shared_wait);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6540,6 +6600,7 @@ fn main() {
         }
         drop(child.stdin.take());
         let drain = std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+        // 斷線後守門應在數秒內主動結束並放鎖；若發生 bug 未退出則以 10 秒牆鐘超時 kill 防止卡死
         let deadline = Instant::now() + Duration::from_secs(10);
         while child.try_wait().unwrap().is_none() {
             if Instant::now() > deadline {
@@ -6651,17 +6712,26 @@ fn main() {
         let mut b = guard_with(&base, HASH, "job-2-2", pool);
         assert!(b.hs.dir.ends_with("/shared-2"), "{:?}", b.hs);
         let bdir = b.hs.dir.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let b2 = base.clone();
-        let waiter = std::thread::spawn(move || {
-            tx.send(guard_with(&b2, HASH, "job-3-3", Admission { shared_wait_secs: 30, max: 3, pool: 2, ..QUICK })).unwrap()
-        });
-        assert!(rx.recv_timeout(Duration::from_secs(2)).is_err(), "兩份都在用：要等");
+
+        // 兩份都在用：同步點是排隊中的心跳 `Q`
+        let shared_wait = 30;
+        let adm_c = Admission { shared_wait_secs: shared_wait, max: 3, pool: 2, ..QUICK };
+        let c_token = LeaseToken::new();
+        let mut waiter = guard_cmd(&base, HASH, "job-3-3", &c_token, adm_c)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(waiter.stdout.take().unwrap());
+        wait_for_guard_queued(&mut out, shared_wait);
+
         b.finish();
-        let mut c = rx.recv_timeout(Duration::from_secs(15)).expect("第二份空出來就要拿到");
-        waiter.join().unwrap();
-        assert_eq!(c.hs.dir, bdir, "拿到先空出來的那份（第二份），不是死等第一份");
-        c.finish();
+        let (hs, _) = read_handshake_observed(&mut out);
+        let c_hs = hs.expect("第二份空出來 waiter 要拿到");
+        assert_eq!(c_hs.dir, bdir, "拿到先空出來的那份（第二份），不是死等第一份");
+
+        finish_waiter(waiter, shared_wait);
         a.finish();
         let _ = std::fs::remove_dir_all(base);
     }
