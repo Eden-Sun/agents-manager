@@ -13281,6 +13281,10 @@ mod per_principal_auth_tests {
         let as_bot = [("X-AM-Bot-Id", worker.id.clone()), ("X-AM-Bot-Token", worker.hook_token.clone())];
         let as_user = [("X-AM-Token", e.app.ui_token.clone())];
         let status = |r: &str| r.split_whitespace().nth(1).unwrap_or("").to_string();
+        // 失敗訊息附回應：先把 token 換掉再截 300 字，不讓憑證進測試輸出。
+        let redact = |r: &str| {
+            r.replace(&e.app.ui_token, "<ui_token>").replace(&worker.hook_token, "<hook_token>").chars().take(300).collect::<String>()
+        };
         for path in [
             "/api/mem/processes?host=local",
             "/api/mem/processes?host=remote-nope",
@@ -13301,7 +13305,7 @@ mod per_principal_auth_tests {
             if path.contains("remote-nope") {
                 assert_eq!(status(&user), "404", "未知主機仍由 handler 回 404");
             } else {
-                assert_eq!(status(&user), "200", "使用者仍讀得到 {path}");
+                assert_eq!(status(&user), "200", "使用者仍讀得到 {path}：{}", redact(&user));
             }
         }
         let user_intents = raw(e.app.clone(), call("/api/intents", &as_user)).await;
