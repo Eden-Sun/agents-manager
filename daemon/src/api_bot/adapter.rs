@@ -18,7 +18,7 @@ use am_base::db::api_bot::{self as db_api, Checkpoint, Fence};
 
 use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
-use super::quote::{QuoteError, QuoteProvider, RequestEnvelope};
+use super::quote::{QuoteError, QuoteProvider, RequestEnvelope, UsageQuote};
 use super::runner::{self, Journal, Model, State, Tools};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +35,18 @@ pub(crate) struct AdapterLimits {
     pub(crate) max_checkpoint_bytes: usize,
     pub(crate) max_turn_microusd: i64,
     pub(crate) max_requests_per_hour: i64,
+}
+
+impl AdapterLimits {
+    pub(crate) fn validate(&self) -> Result<(), http::Error> {
+        if self.max_checkpoint_bytes == 0 || self.max_checkpoint_bytes > 8 * 1024 * 1024 {
+            return Err(http::Error::InvalidRequest);
+        }
+        if self.max_turn_microusd <= 0 || self.max_requests_per_hour <= 0 {
+            return Err(http::Error::InvalidRequest);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -62,7 +74,7 @@ struct CursorState {
     last_api_pending: bool,
     last_durable_state: State,
     active_attempt: Option<ActiveAttempt>,
-    cached_response: Option<Response>,
+    settled_response: Option<(Response, UsageQuote)>,
 }
 
 struct ActiveAttempt {
@@ -83,6 +95,17 @@ impl ApiBotAdapter {
         http_cfg: AdapterHttpConfig,
         tools: Option<Arc<dyn Tools>>,
     ) -> Result<Self, http::Error> {
+        options.validate().map_err(|_| http::Error::InvalidRequest)?;
+        limits.validate()?;
+        if identity.generation != 1
+            || identity.session_id.is_empty()
+            || identity.bot_id.is_empty()
+            || identity.run_id.is_empty()
+            || identity.turn_id.is_empty()
+        {
+            return Err(http::Error::InvalidRequest);
+        }
+
         let fence = Fence {
             session: &identity.session_id,
             bot: &identity.bot_id,
@@ -91,11 +114,6 @@ impl ApiBotAdapter {
             generation: identity.generation,
             revision: 0,
         };
-
-        if identity.generation != 1 {
-            // generation > 1 requires rebind to inherit prior generation's durable state
-            return Err(http::Error::InvalidRequest);
-        }
 
         let initial_state = State::default();
         let state_val = serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
@@ -119,7 +137,7 @@ impl ApiBotAdapter {
                 last_api_pending: false,
                 last_durable_state: initial_state,
                 active_attempt: None,
-                cached_response: None,
+                settled_response: None,
             }),
         })
     }
@@ -137,6 +155,20 @@ impl ApiBotAdapter {
         http_cfg: AdapterHttpConfig,
         tools: Option<Arc<dyn Tools>>,
     ) -> Result<(Self, State), http::Error> {
+        options.validate().map_err(|_| http::Error::InvalidRequest)?;
+        limits.validate()?;
+
+        if new_identity.session_id != old_fence.session_id
+            || new_identity.bot_id != old_fence.bot_id
+            || new_identity.generation < old_fence.generation
+            || (new_identity.run_id != old_fence.run_id && new_identity.generation <= old_fence.generation)
+            || old_revision < 0
+            || new_identity.run_id.is_empty()
+            || new_identity.turn_id.is_empty()
+        {
+            return Err(http::Error::InvalidRequest);
+        }
+
         let fence_old = Fence {
             session: &old_fence.session_id,
             bot: &old_fence.bot_id,
@@ -185,7 +217,7 @@ impl ApiBotAdapter {
                 last_api_pending: false,
                 last_durable_state: loaded_state.clone(),
                 active_attempt: None,
-                cached_response: None,
+                settled_response: None,
             }),
         };
 
@@ -242,8 +274,13 @@ impl Model for ApiBotAdapter {
                 Ok(resp) => {
                     // Check if usage is trustworthy according to quote_provider
                     match self.quote_provider.settle(&envelope, &resp) {
-                        Ok(_) => {
-                            cursor.cached_response = Some(resp.clone());
+                        Ok(usage_quote) => {
+                            if usage_quote.estimated_microusd < 0
+                                || !usage_quote.actual_speed.is_none_or(|s| matches!(s, "fast" | "standard"))
+                            {
+                                return Err(http::Error::InvalidResponse);
+                            }
+                            cursor.settled_response = Some((resp.clone(), usage_quote));
                             Ok(resp)
                         }
                         Err(QuoteError::UntrustedUsage) | Err(QuoteError::Unapproved) | Err(QuoteError::InvalidRequest) => {
@@ -343,6 +380,10 @@ impl Journal for ApiBotAdapter {
                     let envelope = RequestEnvelope::new(self.options.clone(), self.system.clone(), state.messages.clone())
                         .map_err(|_| ())?;
                     let quote = self.quote_provider.reserve(&envelope).map_err(|_| ())?;
+                    if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
+                        return Err(());
+                    }
+
                     let attempt_id = am_base::db::ulid();
                     let attempt = db_api::Attempt {
                         id: &attempt_id,
@@ -380,30 +421,60 @@ impl Journal for ApiBotAdapter {
                     }
                 }
                 (true, false) => {
-                    let active = cursor.active_attempt.take().ok_or(())?;
-                    let resp = cursor.cached_response.take().ok_or(())?;
+                    let (active_id, resp, usage_quote) = {
+                        let active = cursor.active_attempt.as_ref().ok_or(())?;
+                        let (settled_resp, usage_quote) = cursor.settled_response.as_ref().ok_or(())?;
 
-                    let receipt = match self.quote_provider.settle(&active.envelope, &resp) {
-                        Ok(usage_quote) => db_api::Receipt {
-                            state: "recorded",
-                            actual_speed: usage_quote.actual_speed,
-                            usage: Some(&resp.usage),
-                            estimated_microusd: Some(usage_quote.estimated_microusd),
-                        },
-                        Err(QuoteError::UntrustedUsage) | Err(QuoteError::Unapproved) | Err(QuoteError::InvalidRequest) => {
-                            db_api::Receipt {
-                                state: "unknown",
-                                actual_speed: None,
-                                usage: None,
-                                estimated_microusd: None,
-                            }
+                        // Verify legal increment from last durable state to state with assistant response
+                        let durable = &cursor.last_durable_state;
+                        if state.responses.len() != durable.responses.len() + 1 {
+                            return Err(());
                         }
+                        if durable.responses != state.responses[..durable.responses.len()] {
+                            return Err(());
+                        }
+                        let last_resp_val = serde_json::to_value(state.responses.last().unwrap()).map_err(|_| ())?;
+                        let settled_resp_val = serde_json::to_value(settled_resp).map_err(|_| ())?;
+                        if last_resp_val != settled_resp_val {
+                            return Err(());
+                        }
+
+                        if state.messages.len() != durable.messages.len() + 1 {
+                            return Err(());
+                        }
+                        if durable.messages != state.messages[..durable.messages.len()] {
+                            return Err(());
+                        }
+                        let last_msg = state.messages.last().unwrap();
+                        if last_msg.role != "assistant" || last_msg.content != Value::from(settled_resp.content.clone()) {
+                            return Err(());
+                        }
+
+                        let expected_tools = settled_resp.tools().map_err(|_| ())?;
+                        let expected_tool_pending = expected_tools.first().map(|c| c.id.clone());
+                        if state.tool_pending != expected_tool_pending {
+                            return Err(());
+                        }
+                        if state.completed_tool_ids != durable.completed_tool_ids {
+                            return Err(());
+                        }
+
+                        (active.id.clone(), settled_resp.clone(), usage_quote.clone())
                     };
 
-                    let next_rev = db_api::record(&self.pool, &fence, &active.id, &receipt, &chk)
+                    let receipt = db_api::Receipt {
+                        state: "recorded",
+                        actual_speed: usage_quote.actual_speed,
+                        usage: Some(&resp.usage),
+                        estimated_microusd: Some(usage_quote.estimated_microusd),
+                    };
+
+                    let next_rev = db_api::record(&self.pool, &fence, &active_id, &receipt, &chk)
                         .await
                         .map_err(|_| ())?;
 
+                    cursor.active_attempt = None;
+                    cursor.settled_response = None;
                     cursor.revision = next_rev;
                     cursor.last_api_pending = false;
                     cursor.last_durable_state = state.clone();
