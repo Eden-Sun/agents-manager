@@ -194,8 +194,8 @@
             .unwrap()
     }
 
-    /// agy：v41 以前的庫，`bots.kind` 的 CHECK 只收三種。開機時就地放寬成四種：既有的 bot 與指著它的列原樣在、外鍵沒壞、
-    /// 之後收得下 `agy`，而且放寬後的定義跟全新 DB 一字不差（`schema_guard`）；再開一次不動。
+    /// A three-kind pre-agy DB widens in place to the current CHECK without cascading rows.
+    /// Both agy and claude-api become storable; integrity/FKs and the schema pin stay valid on reopen.
     #[tokio::test]
     async fn opening_a_pre_agy_db_widens_the_bots_kind_check_in_place() {
         let dir = tmp_dir();
@@ -206,7 +206,7 @@
             .foreign_keys(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let old = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
-        for stmt in SCHEMA.replace("'claude','codex','grok','agy'", "'claude','codex','grok'").split(";\n") {
+        for stmt in SCHEMA.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api'))", "CHECK (kind IN ('claude','codex','grok'))").split(";\n") {
             let s = stmt.trim();
             if !s.is_empty() {
                 sqlx::query(s).execute(&old).await.unwrap();
@@ -235,6 +235,9 @@
         assert_eq!(kept, [("b1".into(), "grok".into()), ("b2".into(), "agy".into())]);
         let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = 'b1'").fetch_one(&current).await.unwrap();
         assert_eq!(runs, 1, "the child table still points at bots");
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b-api','p1','api','claude-api','tok','2026-10-01T00:00:00Z')")
+            .execute(&current).await.expect("the three-kind DB widens through the current API kind");
+        assert_eq!(sqlx::query_scalar::<_, String>("PRAGMA integrity_check").fetch_one(&current).await.unwrap(), "ok");
         let violations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check").fetch_one(&current).await.unwrap();
         assert_eq!(violations, 0);
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&current).await.unwrap();
@@ -1375,4 +1378,169 @@
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 造一個全新的歷史 schema fixture（67 或 68）；從來不碰正式 DB 或複本，由呼叫端在測完後刪掉整個目錄。
+    /// - 67：移除 #748 的 `runs.codex_instant_interrupt`（67 還沒有這一欄）。
+    /// - 68：保留它，舊 run 記 1，驗證升到 69 不會丟掉、也不會改寫它。
+    /// 兩者都移除 #1944 B 的 api_bot 表，並把 `bots.kind` CHECK 還原成四種（agy 之前不含 claude-api）。
+    /// 最後以該版本的歷史 pin 核對，確定真的是那個版本的 schema，而不只是版本號。
+    async fn nr1944_fixture(path: &Path, version: i64) {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(version == 67 || version == 68, "fixture 只造 67 或 68");
+        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pool = open(path).await.unwrap();
+        let mut tx = begin_write(&pool).await.unwrap();
+        sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
+        if version == 67 {
+            sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&mut *tx).await.unwrap();
+        }
+        let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='bots'").fetch_one(&mut *tx).await.unwrap();
+        let old = sql.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api'))", "CHECK (kind IN ('claude','codex','grok','agy'))");
+        assert_ne!(sql, old);
+        sqlx::query("PRAGMA writable_schema=ON").execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE sqlite_master SET sql=?WHERE name='bots'").bind(old).execute(&mut *tx).await.unwrap();
+        let schema_version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *tx).await.unwrap();
+        sqlx::query(&format!("PRAGMA schema_version={}", schema_version + 1)).execute(&mut *tx).await.unwrap();
+        sqlx::query("PRAGMA writable_schema=OFF").execute(&mut *tx).await.unwrap();
+        sqlx::query(&format!("PRAGMA user_version={version}")).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        pool.close().await;
+        let raw = SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(path).foreign_keys(true)).await.unwrap();
+        assert_eq!(
+            schema_guard::fingerprint(&schema_guard::read_objects(&raw).await.unwrap()),
+            pinned(version),
+            "fixture must genuinely have the v{version} schema, not just its version number"
+        );
+        sqlx::query("INSERT INTO projects(id,path,label,created_at)VALUES('old-p','/fixture','old',?)").bind(now()).execute(&raw).await.unwrap();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('old-b','old-p','old','agy','fixture',?)").bind(now()).execute(&raw).await.unwrap();
+        if version == 68 {
+            sqlx::query("INSERT INTO runs(id,bot_id,state,started_at,codex_instant_interrupt)VALUES('old-r','old-b','stopped',?,1)").bind(now()).execute(&raw).await.unwrap();
+        } else {
+            sqlx::query("INSERT INTO runs(id,bot_id,state,started_at)VALUES('old-r','old-b','stopped',?)").bind(now()).execute(&raw).await.unwrap();
+        }
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at)VALUES('old-c','old-b',?)").bind(now()).execute(&raw).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at)VALUES('old-t','old-c','old-r','web','completed',?)").bind(now()).execute(&raw).await.unwrap();
+        raw.close().await;
+    }
+
+    /// 歷史 pin（`SCHEMA_HISTORY`）的指紋，依版本號取。
+    fn pinned(version: i64) -> &'static str {
+        SCHEMA_HISTORY.iter().find(|(v, _)| *v == version).unwrap().1
+    }
+
+    /// 真 `.bak` 還原：升版前把已關閉的整個 DB 檔複製成 `.bak`，升到目前版本後，核對 integrity／FK／pin，
+    /// 再把 `.bak` 整檔覆蓋回去，必須逐位元組相同，且以原版本開得起來、pin 仍是原來的。
+    /// 所有檔案都在 `tmp_dir()`（測完刪除）；`.bak` 由 RAII 在結束或 panic 時刪除，永遠不碰正式 DB 或複本。
+    async fn assert_upgrade_and_backup_roundtrip(version: i64) {
+        let dir = tmp_dir();
+        let path = dir.join("fixture.sqlite3");
+        let backup = dir.join("fixture.bak");
+        nr1944_fixture(&path, version).await;
+        struct Backup(std::path::PathBuf);
+        impl Drop for Backup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _backup_cleanup = Backup(backup.clone());
+        std::fs::copy(&path, &backup).unwrap();
+        let original = std::fs::read(&backup).unwrap();
+
+        let pool = open(&path).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("PRAGMA user_version").fetch_one(&pool).await.unwrap(), SCHEMA_VERSION);
+        for (table, id) in [("bots", "old-b"), ("runs", "old-r"), ("turns", "old-t")] {
+            assert_eq!(sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table} WHERE id=?")).bind(id).fetch_one(&pool).await.unwrap(), 1);
+        }
+        // #748 的欄位：68 的舊列記的是 1，升版不改寫；67 沒有這欄，升上來是 NULL（＝沒記）。
+        let codex: Option<i64> = sqlx::query_scalar("SELECT codex_instant_interrupt FROM runs WHERE id='old-r'").fetch_one(&pool).await.unwrap();
+        assert_eq!(codex, if version == 68 { Some(1) } else { None }, "舊列的 codex_instant_interrupt 升版後保留");
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('api-fixture','old-p','api','claude-api','fixture',?)").bind(now()).execute(&pool).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, String>("PRAGMA integrity_check").fetch_one(&pool).await.unwrap(), "ok");
+        assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&pool).await.unwrap().is_empty());
+        crate::runners::am_base_tests::check_drift(&pool).await.unwrap();
+        pool.close().await;
+        let again = open(&path).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots").fetch_one(&again).await.unwrap(), 2);
+        again.close().await;
+
+        // 真 `.bak` 還原：兩個連線都已關閉、WAL 已收回，整檔覆蓋回去。
+        assert!(!dir.join("fixture.sqlite3-wal").exists(), "還原前不能有殘留的 WAL");
+        std::fs::copy(&backup, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original, "還原的必須是升版前的完整映像");
+        std::fs::remove_file(&backup).unwrap();
+        let restored = SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).foreign_keys(true)).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("PRAGMA user_version").fetch_one(&restored).await.unwrap(), version);
+        assert_eq!(sqlx::query_scalar::<_, String>("PRAGMA integrity_check").fetch_one(&restored).await.unwrap(), "ok");
+        assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&restored).await.unwrap().is_empty());
+        assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&restored).await.unwrap()), pinned(version));
+        assert!(sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('bad','old-p','bad','claude-api','fixture',?)").bind(now()).execute(&restored).await.is_err());
+        restored.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nr1944_v67_upgrade_keeps_data_and_fk_and_backup_restores_the_complete_old_image() {
+        assert_upgrade_and_backup_roundtrip(67).await;
+    }
+
+    #[tokio::test]
+    async fn nr1944_v68_upgrade_keeps_codex_interrupt_flag_and_backup_restores_the_complete_old_image() {
+        assert_upgrade_and_backup_roundtrip(68).await;
+    }
+
+    #[tokio::test]
+    async fn nr1944_unknown_kind_check_rolls_back_the_new_tables_and_preserves_old_rows() {
+        let dir=tmp_dir();let path=dir.join("fixture.sqlite3");nr1944_fixture(&path, 67).await;
+        let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
+        let mut tx=begin_write(&raw).await.unwrap();
+        let sql:String=sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='bots'").fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("PRAGMA writable_schema=ON").execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE sqlite_master SET sql=?WHERE name='bots'").bind(sql.replace("'agy'))","'agy','unexpected'))")).execute(&mut *tx).await.unwrap();
+        let version:i64=sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *tx).await.unwrap();
+        sqlx::query(&format!("PRAGMA schema_version={}",version+1)).execute(&mut *tx).await.unwrap();
+        sqlx::query("PRAGMA writable_schema=OFF").execute(&mut *tx).await.unwrap();tx.commit().await.unwrap();raw.close().await;
+        assert!(open(&path).await.is_err());
+        let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap(),67);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM sqlite_master WHERE name IN('api_bot_sessions','api_bot_attempts')").fetch_one(&raw).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM bots WHERE id='old-b'").fetch_one(&raw).await.unwrap(),1);
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA writable_schema").fetch_one(&raw).await.unwrap(),0);
+        raw.close().await;std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    async fn nr1944_http(router:axum::Router,method:&str,path:&str,body:String)->(axum::http::StatusCode,String) {
+        use tower::ServiceExt;
+        let request=axum::http::Request::builder().method(method).uri(path).header("host","127.0.0.1:7799").header("x-am-token","test-token").header("content-type","application/json")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127,0,0,1],12345))))
+            .body(axum::body::Body::from(body)).unwrap();
+        let response=router.oneshot(request).await.unwrap();let status=response.status();
+        let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+        (status,String::from_utf8(bytes.to_vec()).unwrap())
+    }
+    #[tokio::test]
+    async fn nr1944_real_create_api_still_rejects_claude_api_with_no_side_effects() {
+        let e=crate::testing::env().await;let cfg=std::fs::read(e.dir.join("data/config.toml")).unwrap();let before=e.herdr.methods();
+        let (status,body)=nr1944_http(crate::api::router(e.app.clone()),"POST",&format!("/api/projects/{}/bots",e.project_id),serde_json::json!({"name":"not-enabled-yet","kind":"claude-api"}).to_string()).await;
+        assert_eq!(status,axum::http::StatusCode::BAD_REQUEST,"{body}");assert!(body.contains("kind must"));
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM bots").fetch_one(&e.app.db).await.unwrap(),0);
+        assert_eq!(std::fs::read(e.dir.join("data/config.toml")).unwrap(),cfg);assert_eq!(e.herdr.methods(),before);
+        assert!(!crate::config::valid_kind("claude-api"));
+    }
+    #[tokio::test]
+    async fn nr1944_private_checkpoints_are_absent_from_state_message_export_and_shared_messages() {
+        let e=crate::testing::env().await;let bot=crate::testing::claude_bot(&e.app,&e.project_id,"privacy-fixture").await;
+        let cid=conversation_id(&e.app.db,&bot.id).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,role,content,source,created_at)VALUES('public-visible',?,'assistant','PUBLIC-MESSAGE','hook',?)").bind(&cid).bind(now()).execute(&e.app.db).await.unwrap();
+        let private="PRIVATE-STATE-THINKING-SIGNATURE-NEVER-EXPORT";
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,checkpoint_json,created_at,updated_at,expires_at)VALUES('private-session',?,1,?,?,?,?)")
+            .bind(&bot.id).bind(serde_json::json!({"messages":[{"role":"user","content":private}],"responses":[],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]}).to_string()).bind(now()).bind(now()).bind(iso_in(86400)).execute(&e.app.db).await.unwrap();
+        let state=crate::api::state_json(&e.app).await.unwrap().to_string();assert!(!state.contains(private));assert!(!state.contains("checkpoint_json"));
+        let (status,body)=nr1944_http(crate::api::router(e.app.clone()),"GET",&format!("/api/bots/{}/messages",bot.id),String::new()).await;
+        assert_eq!(status,axum::http::StatusCode::OK);assert!(body.contains("PUBLIC-MESSAGE"));assert!(!body.contains(private));
+        crate::share::store::insert_share_bot(&e.app.db,&bot.id,crate::share::store::PROFILE_TRUSTED,"fixture-workspace").await.unwrap();
+        let token=crate::share::store::set_share_enabled(&e.app.db,&bot.id,None).await.unwrap().token.unwrap();
+        let (status,body)=nr1944_http(crate::share::portal::router(e.app.clone()),"GET",&format!("/s/{token}/api/messages"),String::new()).await;
+        assert_eq!(status,axum::http::StatusCode::OK);assert!(body.contains("PUBLIC-MESSAGE"));assert!(!body.contains(private));
     }

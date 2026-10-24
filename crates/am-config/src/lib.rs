@@ -1,6 +1,8 @@
 //! config.toml is the authority for the *desired* Project / Bot set; SQLite holds runtime state
 //! and is projected from TOML (see `projection.rs`).
 
+pub mod api_bot;
+
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -612,6 +614,8 @@ pub struct ClaudeApiCfg {
     pub endpoint: String,
     #[serde(default = "default_claude_api_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "api_bot::ApiBotCfg::is_default")]
+    pub api_bot: api_bot::ApiBotCfg,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub uses: std::collections::BTreeMap<String, ClaudeApiUseCfg>,
 }
@@ -674,6 +678,7 @@ impl Default for ClaudeApiCfg {
             key_file: default_claude_api_key_file(),
             endpoint: default_claude_api_endpoint(),
             timeout_ms: default_claude_api_timeout_ms(),
+            api_bot: api_bot::ApiBotCfg::default(),
             uses: Default::default(),
         }
     }

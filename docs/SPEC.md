@@ -789,6 +789,16 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - **帳本**：記憶體（daemon 重啟歸零），最近 200 筆＋累計與每個用途的累計：用途、模型、input／output tokens、耗時、成功或錯誤分類、`stop_reason`；**不存 prompt 與回覆**。設定頁顯示累計 tokens 與最近幾筆，讓人看得到這些工作沒走訂閱額度。
 - **設定入口**：網頁「環境設定 → Claude API」（或 `PUT /api/claude-api/settings`）：貼 key、總開關、每個用途的開關／模型／思考強度／每小時上限。存檔當下生效，不用重啟。User／AGM 可讀寫；一般 Bot 一律 403。
 
+#### API bot 儲存準備（#1944 B，尚未啟用）
+
+`[claude_api.api_bot]` 提供獨立、預設關閉的工具型 bot 限制；不加入原本一次性 `uses.*` 的清單。總開關與專用開關都開時，仍必須有正整數 `max_turn_cost_microusd`，缺省 `None` 不能使用；費用使用整數微美元、未知為 NULL，不當作 0。限制有 API 輪數／每小時請求、回合與命令逾時、output tokens、checkpoint／工具輸出大小上限。現階段只有設定與儲存元件，`claude-api` 尚未加入 KINDS，建立 bot 仍回 400，沒有啟動入口或付費 API 呼叫。
+
+- `api_bot_sessions` 是私有、可續接的完整 checkpoint（messages、content、thinking/signature、response 與 pending/完成工具紀錄），以 bot/run/turn/generation/revision fence 做 CAS；不含 API key 或 key_file。相同 attempt id 重試不再取得送出權，pending／unknown 不自動重播。
+- **retention**：完整 checkpoint 自最後成功寫入起 7 日有效；到期立即不可讀，`prune` 實體移除過期或已軟刪 bot 的 session。軟刪 bot 立即失去儲存層讀取權，實體清理由下一次 prune 完成；硬刪 bot 以 FK CASCADE 移除 session。明確 retire/fresh-chat 立即清掉完整內容。B 不建立清理排程，也沒有生產 checkpoint 產生；C 接入時必須在啟動、每小時及刪 bot 流程呼叫 prune，離線期間不承諾牆鐘期限的實體刪除，恢復後先清理再續接。
+- `api_bot_attempts` 只保存結構化用量／速度、估算費用／保守 reservation、費率版本和歸屬，不存 prompt 或完整 response；清除 session 或硬刪 bot 時將相關 FK 設 NULL，保留費用紀錄直到使用者刪除整個資料目錄（B 不自動刪除帳目）。無法確認的 request 保留 reservation 與 NULL 估算費用，不冒稱零費用或帳單金額。
+- **匯出／分享**：上述兩表不是 messages、state 或分享投影的來源。完整 checkpoint（包含 thinking/signature）不得經聊天匯出、分享、狀態 API 或一般 log 帶出；正常可見聊天訊息仍沿用 messages 的既有規則。儲存 DTO 不提供公開 JSON serializer，checkpoint Debug 只顯示 `<private>`。
+- schema 變更只 append SCHEMA_HISTORY 的下一號與真實指紋；舊 binary 受版本圍籬拒絕新 DB。回滾須還原升級前完整 `.bak`，不得把新 DB 的 user_version 調低偽裝相容。migration／回滾驗證只用新造 v67 fixture，不讀寫正式 DB，複本驗完當下刪除。
+
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
 1. wall-clock ≤ 3 秒；**永遠 exit 0、stdout 空**——唯一的例外是 §4.4c 的 PreToolUse 守門「要擋」時印的那一行決策 JSON。
