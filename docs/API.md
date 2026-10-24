@@ -1376,7 +1376,7 @@ max_concurrent = 1
 # enabled = false 單獨停掉這一台
 ```
 - 只有一個 `[build.remote]`（沒有 `hosts`）時行為跟以前完全一樣。`hosts` 裡的主機只支援金鑰／agent（密碼檔只屬於第一台），可覆寫 `user`、`ssh_port`、`remote_root`、`cargo_jobs`、`test_threads`、`shared_idle_hours`、`max_shared_dirs`、`max_concurrent`、`identity_file`、`max_load`。
-  任何一台不合法（同下面的字元檢查、ssh 主機缺 user、`ssh_port = 0`）整份設定退回本機並講是哪一台。
+  不合法的那台（同下面的字元檢查、ssh 主機缺 user、`ssh_port = 0`、macOS 上的 `host = "local"`）只略過並在 stderr 講一聲（⚠️），其他台照用；全部都不合法才整份退回本機並講是哪一台。
 - **本機執行器**（`host = "local"`，只在 Linux：守門要 flock 與 /proc；macOS 上退回本機並講原因）：守門、共用 target 池、名額、manifest、失效 touch、回收全部同一套，
   只是每段腳本直接 `sh -c`（cwd＝`$HOME`，`remote_root` 相對於它；自成 process group），環境只留 `HOME`／`USER`／`LOGNAME`／`SHELL`／`LANG`／`LC_ALL`／`LC_CTYPE`／`TZ`／`CARGO_HOME`／`RUSTUP_HOME`，
   `PATH` 是系統路徑加 `~/.cargo/bin`——跟 ssh 進去一樣乾淨，pane 的 `AM_*`、shim 的 PATH 不漏進 cargo 與測試；rsync 直接寫本機路徑（不帶 `-e`、不壓縮）。
