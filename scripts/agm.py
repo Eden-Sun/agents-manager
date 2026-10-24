@@ -56,6 +56,7 @@ DEFAULT_RUNTIME_DIR = "~/.config/agents-manager/supervisor/AGM"
 CLAIM_LABEL = "wip"
 CLAIM_MARK = "agm:issue-claim"
 RELEASE_MARK = "agm:issue-release"
+PROGRESS_MARK = "agm:issue-progress"
 #: 只清 label、沒有認領可交回時的 claim_id：不會對上任何一筆認領（見 cmd_issue 的 release）。
 LABEL_ONLY_RELEASE = "label-only"
 # 認領多久沒有任何動靜就算放掉了（票上的裁示）。
@@ -1970,11 +1971,11 @@ def parse_iso(t: str | None) -> datetime.datetime | None:
 
 
 def mark_of(body: str) -> tuple[str, dict] | None:
-    """一則留言裡的認領／交回標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。
+    """一則留言裡的認領／交回／進度標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。
 
     標記必須**自己一行**（行首只能有空白）：GitHub 的「引用回覆」會把原留言的原始 markdown 逐行加上 `> ` 貼進新留言，
     句子中間夾著的也不是 agm 寫的。這兩種都不算——否則有人引用別顆 bot 的交回標記，就把那顆還按著的認領清掉了。"""
-    m = re.search(r"^[ \t]*<!--\s*(agm:issue-(?:claim|release))\s+(\{.*?\})\s*-->[ \t]*$", body or "", re.S | re.M)
+    m = re.search(r"^[ \t]*<!--\s*(agm:issue-(?:claim|release|progress))\s+(\{.*?\})\s*-->[ \t]*$", body or "", re.S | re.M)
     if not m:
         return None
     try:
@@ -2063,21 +2064,38 @@ def current_claim(issue: dict) -> dict | None:
         if parsed and parsed[0] == CLAIM_MARK:
             _kind, payload = parsed
             if active is not None:
-                observed = parse_iso(payload.get("observed_updated_at"))
-                prior_activity = max(active["last_activity"], observed) if observed and observed < at else active["last_activity"]
                 # A later claim can start a new epoch only after the previous claim had already gone
                 # stale at the time it was attempted. Near-simultaneous claims remain ordered by REST ID.
+                holder = active["payload"].get("bot")
+                holder_child = active["payload"].get("child")
+                if payload.get("bot") in (holder, holder_child):
+                    activity_time = parse_iso(payload.get("at")) or at
+                    active["last_activity"] = max(active["last_activity"], activity_time)
+                    continue
+                prior_activity = active["last_activity"]
                 if (at - prior_activity).total_seconds() <= CLAIM_STALE_SECS:
                     active["last_activity"] = max(active["last_activity"], at)
                     continue
             raw_id = comment.get("id")
             claim_id = payload.get("claim_id") or (str(raw_id) if raw_id is not None else str(index))
+            claim_time = parse_iso(payload.get("at")) or at
             active = {
                 "payload": payload,
                 "claim_id": str(claim_id),
-                "at": at,
-                "last_activity": at,
+                "at": claim_time,
+                "last_activity": claim_time,
             }
+            continue
+
+        if parsed and parsed[0] == PROGRESS_MARK:
+            _kind, payload = parsed
+            if active is not None:
+                holder = active["payload"].get("bot")
+                holder_child = active["payload"].get("child")
+                target = payload.get("claim_id")
+                if payload.get("bot") in (holder, holder_child) and (target is None or str(target) == active["claim_id"]):
+                    progress_time = parse_iso(payload.get("at")) or at
+                    active["last_activity"] = max(active["last_activity"], progress_time)
             continue
 
         if parsed and parsed[0] == RELEASE_MARK:
@@ -2086,16 +2104,17 @@ def current_claim(issue: dict) -> dict | None:
             if target is None or (active is not None and str(target) == active["claim_id"]):
                 active = None
             elif active is not None:
-                active["last_activity"] = max(active["last_activity"], at)
+                holder = active["payload"].get("bot")
+                holder_child = active["payload"].get("child")
+                if payload.get("bot") in (holder, holder_child):
+                    rel_time = parse_iso(payload.get("at")) or at
+                    active["last_activity"] = max(active["last_activity"], rel_time)
             continue
-        if active is not None:
-            active["last_activity"] = max(active["last_activity"], at)
 
     if active is None:
         return None
-    updated = parse_iso(issue.get("updatedAt"))
     at = active["at"]
-    last = max([t for t in (active["last_activity"], updated) if t is not None])
+    last = active["last_activity"]
     payload = active["payload"]
     now = datetime.datetime.now(datetime.timezone.utc)
     return {
@@ -2173,9 +2192,15 @@ def held_by_other(claim: dict | None, me: str, args) -> dict | None:
 def claim_conflict(number: int, claim: dict) -> AgmError:
     who = claim.get("bot") or "(沒寫名字的 bot)"
     where = "，".join(f"{k} {claim[k]}" for k in ("child", "worktree", "branch") if claim.get(k))
+    hours_untouched = 0
+    last_act = parse_iso(claim.get("last_activity"))
+    if last_act is not None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        hours_untouched = int((now - last_act).total_seconds() // 3600)
+    touch_hint = f"；對方已 {hours_untouched} 小時沒 touch；超過 24 小時才能接手"
     return AgmError(
         "issue_claimed",
-        f"#{number} 已經由 {who} 認領（{where or '沒寫 worktree／分支'}），最後動靜 {claim['last_activity']}；不要再派第二顆",
+        f"#{number} 已經由 {who} 認領（{where or '沒寫 worktree／分支'}），最後動靜 {claim['last_activity']}{touch_hint}；不要再派第二顆",
         3,
         issue=number,
         claimed_by=who,
@@ -2343,6 +2368,57 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     if blocker is not None:
         raise claim_conflict(number, blocker)
     now =datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    if args.op == "touch":
+        if claim is None or claim.get("stale"):
+            raise AgmError("issue_not_claimed", f"#{number} 目前沒有有效認領，不能 touch；請先 claim", 2, issue=number)
+        holder = claim.get("bot")
+        holder_child = claim.get("child")
+        if me not in (holder, holder_child):
+            raise claim_conflict(number, claim)
+
+        repo = getattr(args, "repo", None)
+        touch_payload = {
+            "bot": me,
+            "claim_id": claim.get("claim_id"),
+            "at": now,
+        }
+        body = f"{me} 仍在處理 #{number}。\n\n<!-- {PROGRESS_MARK} {json.dumps(touch_payload, ensure_ascii=False, sort_keys=True)} -->"
+
+        # 優先尋找持有人自己留過的 progress marker 留言進行 PATCH
+        existing_progress_comment = None
+        for c in reversed(issue.get("comments") or []):
+            if not isinstance(c, dict):
+                continue
+            assoc = c.get("author_association") or c.get("authorAssociation")
+            if assoc is not None and str(assoc).upper() not in TRUSTED_ASSOCIATIONS:
+                continue
+            parsed = mark_of(c.get("body") or "")
+            if parsed and parsed[0] == PROGRESS_MARK:
+                p_kind, p_payload = parsed
+                p_bot = p_payload.get("bot")
+                p_target = p_payload.get("claim_id")
+                if p_bot in (holder, holder_child) and (p_target is None or str(p_target) == claim.get("claim_id")):
+                    existing_progress_comment = c
+                    break
+
+        if existing_progress_comment and existing_progress_comment.get("id"):
+            comment_id = str(existing_progress_comment["id"])
+            c_path = f"repos/{repo}/issues/comments/{comment_id}" if repo else f"repos/{{owner}}/{{repo}}/issues/comments/{comment_id}"
+            gh(["api", "-X", "PATCH", c_path, "-f", f"body={body}"])
+            patched = True
+        else:
+            gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
+            patched = False
+
+        return {
+            "issue": number,
+            "title": issue.get("title"),
+            "touched": True,
+            "patched": patched,
+            "bot": me,
+            "last_activity": now,
+        }
 
     if args.op == "release":
         out = {"issue": number, "title": issue.get("title"), "bot": me, "released": True, "was_claimed": claim is not None}
@@ -2881,13 +2957,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "issue",
-        help="issue 認領：claim / release（#425；只用 gh，不連 daemon）",
+        help="issue 認領：claim / touch / release（#425、#1980；只用 gh，不連 daemon）",
         description=(
             "派任何 issue 給 child 之前先 claim，claim 失敗（exit 3）就不要派——"
-            "同一張票被兩顆父 bot 各派一顆 child 是 2026-09-23 發生三次的重工來源。收尾時 release。"
+            "同一張票被兩顆父 bot 各派一顆 child 是 2026-09-23 發生三次的重工來源。"
+            "進行中每 24 小時 touch 一次維持活躍（#1980），收尾時 release。"
         ),
     )
-    s.add_argument("op", choices=["claim", "release"])
+    s.add_argument("op", choices=["claim", "touch", "release"])
     s.add_argument("number", type=_positive_int_arg, help="issue 編號")
     s.add_argument("--repo", help="owner/name；省略就讓 gh 從 cwd 的 remote 自己推")
     s.add_argument("--bot", help="認領人；省略取 AM_AGENT_NAME、再退 AM_BOT_ID")

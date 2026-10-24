@@ -2884,13 +2884,39 @@ if sub == "issue view":
         sys.stderr.write("gh: no issue %s\n" % n)
         sys.exit(1)
 elif argv[0] == "api":
-    path = next((a for a in argv if "/issues/" in a and "/comments" in a), "")
-    match = re.search(r"/issues/(\d+)/comments", path)
-    if not match:
-        sys.stderr.write("gh: unsupported api path\n")
-        sys.exit(2)
-    raw = json.load(open(os.path.join(state, "issue-%s.json" % match.group(1))))
-    sys.stdout.write(json.dumps(raw.get("comments", [])))
+    if "-X" in argv and "PATCH" in argv:
+        # gh api -X PATCH repos/{owner}/{repo}/issues/comments/{comment_id} -f body=...
+        path = next((a for a in argv if "/issues/comments/" in a), "")
+        m = re.search(r"/issues/comments/(\d+)", path)
+        if not m:
+            sys.stderr.write("gh: unsupported patch comment path\n")
+            sys.exit(2)
+        cid = int(m.group(1))
+        f_arg = next((a for a in argv if a.startswith("body=")), "")
+        new_body = f_arg[len("body="):]
+        # find comment across all issue-*.json in state
+        found = False
+        for fname in os.listdir(state):
+            if fname.startswith("issue-") and fname.endswith(".json"):
+                fpath = os.path.join(state, fname)
+                raw = json.load(open(fpath))
+                for c in raw.get("comments", []):
+                    if int(c.get("id", -1)) == cid:
+                        c["body"] = new_body
+                        found = True
+                        break
+                if found:
+                    json.dump(raw, open(fpath, "w"))
+                    break
+        sys.stdout.write("ok\n")
+    else:
+        path = next((a for a in argv if "/issues/" in a and "/comments" in a), "")
+        match = re.search(r"/issues/(\d+)/comments", path)
+        if not match:
+            sys.stderr.write("gh: unsupported api path\n")
+            sys.exit(2)
+        raw = json.load(open(os.path.join(state, "issue-%s.json" % match.group(1))))
+        sys.stdout.write(json.dumps(raw.get("comments", [])))
 elif sub in ("issue comment", "issue edit", "label create"):
     # GH_MISSING_LABEL=1：repo 裡還沒有 wip label（被人刪了）。真的 gh 這時 `issue edit --add-label` 硬失敗，
     # 要先 `label create` 才行；建立後留一個標記檔，之後就會成功。
@@ -3023,13 +3049,22 @@ class IssueClaimTest(unittest.TestCase):
         }
         (self.state / f"issue-{number}.json").write_text(json.dumps(body), encoding="utf-8")
 
-    def claim_comment(self, bot: str, *, age_secs: float, child=None, worktree=None, branch=None):
+    def claim_comment(self, bot: str, *, age_secs: float, child=None, worktree=None, branch=None, claim_id=None):
         payload = {"bot": bot, "at": _iso(-age_secs)}
+        if claim_id:
+            payload["claim_id"] = claim_id
         for k, v in (("child", child), ("worktree", worktree), ("branch", branch)):
             if v:
                 payload[k] = v
         return {"createdAt": _iso(-age_secs),
                 "body": f"派給 {bot}。\n\n<!-- agm:issue-claim {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"}
+
+    def progress_comment(self, bot: str, *, age_secs: float, claim_id=None):
+        payload = {"bot": bot, "at": _iso(-age_secs)}
+        if claim_id:
+            payload["claim_id"] = claim_id
+        return {"createdAt": _iso(-age_secs),
+                "body": f"{bot} 仍在處理。\n\n<!-- agm:issue-progress {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"}
 
     def release_comment(self, bot: str, *, age_secs: float):
         return {"createdAt": _iso(-age_secs),
@@ -3383,11 +3418,54 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(agm.current_claim(json.loads((self.state / "issue-413.json").read_text()))["bot"], "vvyyg1")
 
     def test_a_stale_claim_with_recent_activity_is_still_held(self):
-        # 認領留言是三天前，但這張票一小時前還被動過：那顆 bot 還在做。
-        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=72 * 3600)], updated=_iso(-3600))
+        # 認領留言是三天前，但當事人在一小時前有 touch/progress：那顆 bot 還在做。
+        self.issue(413, labels=["wip"], comments=[
+            self.claim_comment("kd61te", age_secs=72 * 3600),
+            self.progress_comment("kd61te", age_secs=3600),
+        ], updated=_iso(-3600))
         code, _out, err = self.run_cli("issue", "claim", "413")
         self.assertEqual(code, 3, err)
         self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
+        self.assertIn("對方已 1 小時沒 touch；超過 24 小時才能接手", json.loads(err)["message"])
+
+    def test_issue_updated_at_or_other_comments_do_not_refresh_stale(self):
+        # 認領留言是三天前，issue.updatedAt 是剛剛，他人留了一般留言或甚至偽造 progress：舊認領依然過期可接手
+        self.issue(413, labels=["wip"], comments=[
+            self.claim_comment("kd61te", age_secs=72 * 3600),
+            {"createdAt": _iso(-600), "body": "接手說明：我來做這張票"},
+            self.progress_comment("other-bot", age_secs=300),
+        ], updated=_iso(-10))
+        code, out, err = self.run_cli("issue", "claim", "413")
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        self.assertEqual(got["took_over_stale_claim_from"], "kd61te")
+
+    def test_touch_updates_progress_comment_via_patch_or_creates_new(self):
+        # 先認領
+        self.issue(500, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=3600, claim_id="c-500")])
+        code, out, err = self.run_cli("issue", "touch", "500")
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        self.assertTrue(got["touched"])
+        self.assertFalse(got["patched"])
+
+        # 第二次 touch 應找到前一次 progress 留言並 PATCH
+        code2, out2, err2 = self.run_cli("issue", "touch", "500")
+        self.assertEqual(code2, 0, err2)
+        got2 = json.loads(out2)
+        self.assertTrue(got2["touched"])
+        self.assertTrue(got2["patched"])
+
+    def test_touch_by_other_bot_or_on_unclaimed_issue_is_rejected(self):
+        self.issue(501, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=3600)])
+        code, _out, err = self.run_cli("issue", "touch", "501")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
+
+        self.issue(502)
+        code2, _out2, err2 = self.run_cli("issue", "touch", "502")
+        self.assertEqual(code2, 2, err2)
+        self.assertEqual(json.loads(err2)["error"], "issue_not_claimed")
 
     def test_reclaiming_my_own_issue_does_not_comment_twice(self):
         self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
