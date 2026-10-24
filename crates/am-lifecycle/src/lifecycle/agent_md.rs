@@ -172,34 +172,194 @@ pub fn codex_profile_name(bot_id: &str) -> String {
     format!("am-bot-{id}")
 }
 
-/// codex 沒有「從檔案讀 developer_instructions」的參數：寫成 `<codex_home>/<profile>.config.toml`（0600，內容是 AG Man 的規則），
-/// argv 只帶 `-p <profile>`。跟 shim 的 `am_codex_instructions_profile` 是同一種檔，只是名字前綴不同。
-/// 本機或遠端依 `project.host`；回傳 profile 名，寫不進去回 None。
+/// Only this safe diagnostic crosses the startup boundary; parser/SSH output may contain trust values.
+#[derive(Debug)]
+pub struct ProfileError(String);
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ProfileError {}
+
+fn profile_error(path: &str, detail: &str) -> ProfileError {
+    ProfileError(format!(
+        "Codex profile {path}：{detail}；拒絕以過期指示啟動"
+    ))
+}
+
+fn patch_codex_profile(
+    path: &str,
+    previous: &str,
+    instructions: &str,
+) -> Result<String, ProfileError> {
+    let parsed = toml_edit::ImDocument::parse(previous).map_err(|error| {
+        let byte = error
+            .span()
+            .map(|span| span.start)
+            .unwrap_or(0)
+            .min(previous.len());
+        let line = previous.as_bytes()[..byte]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
+        // TomlError's Display/Debug includes the source; only expose a safe location.
+        profile_error(
+            path,
+            &format!("第 {line} 行無法解析；請修好這個檔或刪掉它，就會重新產生"),
+        )
+    })?;
+    let original_span = parsed
+        .get("developer_instructions")
+        .and_then(toml_edit::Item::as_value)
+        .and_then(toml_edit::Value::span);
+    let mut doc = parsed.into_mut();
+    match doc.get_mut("developer_instructions") {
+        Some(toml_edit::Item::Value(value)) if value.as_str().is_some() => {
+            if value.as_str() == Some(instructions) {
+                return Ok(previous.to_owned());
+            }
+            let decor = value.decor().clone();
+            let mut replacement = toml_edit::Value::from(instructions);
+            *replacement.decor_mut() = decor;
+            *value = replacement;
+        }
+        Some(_) => {
+            return Err(profile_error(
+                path,
+                "developer_instructions 必須是字串；請修好這個檔或刪掉它，就會重新產生",
+            ))
+        }
+        None => {
+            doc.insert("developer_instructions", toml_edit::value(instructions));
+        }
+    }
+    // DocumentMut's whole-document formatter normalizes CRLF. Render only the edited value;
+    // the original byte slices retain all other nodes, comments, decor, ordering and line endings.
+    let mut edited = doc["developer_instructions"].as_value().unwrap().clone();
+    edited.decor_mut().clear();
+    let token = edited.to_string();
+    if let Some(span) = original_span {
+        let prefix = previous
+            .get(..span.start)
+            .ok_or_else(|| profile_error(path, "無法安全定位指示欄位，請檢查檔案後重試"))?;
+        let suffix = previous
+            .get(span.end..)
+            .ok_or_else(|| profile_error(path, "無法安全定位指示欄位，請檢查檔案後重試"))?;
+        Ok(format!("{prefix}{token}{suffix}"))
+    } else {
+        // A new root key must precede existing tables. Keep every pre-existing byte in order.
+        let newline = if previous.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let (bom, body) = previous
+            .strip_prefix('\u{feff}')
+            .map_or(("", previous), |s| ("\u{feff}", s));
+        Ok(format!(
+            "{bom}developer_instructions = {token}{newline}{body}"
+        ))
+    }
+}
+
+fn local_profile_snapshot(path: &std::path::Path) -> Result<String, ProfileError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(_) => Err(profile_error(
+            &path.display().to_string(),
+            "無法讀取，請確認檔案權限與編碼後重試",
+        )),
+    }
+}
+
+fn remote_profile_read_script(path: &str) -> String {
+    format!(
+        "set -eu\nF={}\nif [ -e \"$F\" ]; then\n  if [ ! -f \"$F\" ] || [ ! -r \"$F\" ]; then printf 'AM_PROFILE_READ_ERROR\\n'; exit 0; fi\n  printf 'AM_PROFILE_PRESENT\\n'\n  base64 < \"$F\"\n  printf '\\nAM_PROFILE_END\\n'\nelif [ -L \"$F\" ]; then\n  printf 'AM_PROFILE_READ_ERROR\\n'\nelse\n  printf 'AM_PROFILE_MISSING\\n'\nfi\n",
+        sh_quote(path),
+    )
+}
+
+fn decode_remote_profile(path: &str, reply: &str) -> Result<String, ProfileError> {
+    use base64::Engine as _;
+    if reply == "AM_PROFILE_MISSING\n" {
+        return Ok(String::new());
+    }
+    let decode_error =
+        || profile_error(path, "遠端讀取或傳輸失敗，請確認連線、檔案權限與編碼後重試");
+    let encoded = reply
+        .strip_prefix("AM_PROFILE_PRESENT\n")
+        .and_then(|body| body.strip_suffix("\nAM_PROFILE_END\n"))
+        .ok_or_else(decode_error)?;
+    // The ASCII envelope avoids lossy UTF-8 conversion in the SSH transport.
+    let compact: String = encoded.split_whitespace().collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .map_err(|_| decode_error())?;
+    String::from_utf8(bytes).map_err(|_| decode_error())
+}
+
+fn remote_profile_write_script(path: &str, content: &str) -> String {
+    let temporary = format!("{path}.tmp-{}", db::ulid());
+    format!(
+        "set -eu\numask 077\nF={}\nT={}\nmkdir -p \"$(dirname \"$F\")\"\ntrap 'rm -f \"$T\"' 0\n(set -C; : > \"$T\")\nprintf '%s' {} > \"$T\"\nif cmp -s \"$T\" \"$F\" 2>/dev/null; then rm -f \"$T\"; else mv \"$T\" \"$F\"; fi\nchmod 600 \"$F\"\nprintf 'AM_PROFILE_WRITTEN\\n'\n",
+        sh_quote(path), sh_quote(&temporary), sh_quote(content),
+    )
+}
+
 pub async fn install_codex_profile(
     app: &impl crate::hosts::HostsAccess,
     bot: &db::Bot,
     project: &db::Project,
     codex_home: &str,
     text: &str,
-) -> Option<String> {
+) -> Result<String, ProfileError> {
     let name = codex_profile_name(&bot.id);
     let path = format!("{}/{name}.config.toml", codex_home.trim_end_matches('/'));
-    let body = format!("developer_instructions = {}\n", super::setup::toml_basic_string(text));
-    let result = if project.host == LOCAL_HOST {
-        write_private_atomic(std::path::Path::new(&path), &body).map_err(anyhow::Error::from)
+    let shown_path = if project.host == LOCAL_HOST {
+        path.clone()
     } else {
-        match app.hosts().get(&project.host).await {
-            Some(conn) => install_remote_mode(&conn, &path, &body, Some("600")).await,
-            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
-        }
+        format!("{}:./{name}.config.toml（相對 CODEX_HOME）", project.host)
     };
-    match result {
-        Ok(()) => Some(name),
-        Err(e) => {
-            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not write the codex persona profile");
-            None
+    if project.host == LOCAL_HOST {
+        let previous = local_profile_snapshot(std::path::Path::new(&path))?;
+        let updated = patch_codex_profile(&shown_path, &previous, text)?;
+        if previous != updated {
+            write_private_atomic(std::path::Path::new(&path), &updated).map_err(|_| {
+                profile_error(&shown_path, "無法原子寫入，請確認目錄權限與可用空間後重試")
+            })?;
+        }
+    } else {
+        let conn = app
+            .hosts()
+            .get(&project.host)
+            .await
+            .ok_or_else(|| profile_error(&shown_path, "遠端主機不可用，請確認連線後重試"))?;
+        let reply = conn
+            .ssh_exec(&remote_profile_read_script(&path))
+            .await
+            .map_err(|_| profile_error(&shown_path, "遠端讀取或傳輸失敗，請確認連線後重試"))?;
+        let previous = decode_remote_profile(&shown_path, &reply)?;
+        let updated = patch_codex_profile(&shown_path, &previous, text)?;
+        if previous != updated {
+            let reply = conn
+                .ssh_exec(&remote_profile_write_script(&path, &updated))
+                .await
+                .map_err(|_| {
+                    profile_error(&shown_path, "遠端原子寫入失敗，請確認連線與目錄權限後重試")
+                })?;
+            if reply != "AM_PROFILE_WRITTEN\n" {
+                return Err(profile_error(
+                    &shown_path,
+                    "遠端寫入未確認，請檢查連線後重試",
+                ));
+            }
         }
     }
+    Ok(name)
 }
 
 /// 同目錄暫存檔（0600 建立）＋ rename：不會有人讀到寫一半的檔，也不會有先 0644 再 chmod 的空窗。
@@ -391,5 +551,349 @@ mod tests {
         assert!(s.contains("F='/home/u/bots/b 1/instructions.md'"), "{s}");
         assert!(s.contains("<<'AM_AGENT_MD_EOF'\nline 'one'\nAM_AGENT_MD_EOF\n"), "{s}");
         assert!(s.contains("mv \"$F.new\" \"$F\""));
+    }
+
+    mod profile_tests {
+        use super::*;
+        use crate::capabilities::Db as _;
+        use base64::Engine as _;
+        use std::sync::{Arc, Mutex};
+
+        const INITIAL: &str = "# retain header\ndeveloper_instructions = \"old\" # retain inline\nmodel = \"fixture-model\"\n\n# retain table\n[hooks.state.\"file:fixture:session_start:0:0\"]\ntrusted_hash = \"fixture-trust-no-secret\"\nenabled = true\n# retain trailer\n\n";
+        const PLACEHOLDER: &str = "/__AM_PROFILE_FIXTURE__/profile.toml";
+
+        fn framed(text: &[u8]) -> String {
+            format!(
+                "AM_PROFILE_PRESENT\n{}\nAM_PROFILE_END\n",
+                base64::engine::general_purpose::STANDARD.encode(text)
+            )
+        }
+        fn shell(script: &str) -> String {
+            let out = std::process::Command::new("sh")
+                .args(["-c", script])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "profile script failed with {:?}",
+                out.status.code()
+            );
+            String::from_utf8(out.stdout).unwrap()
+        }
+
+        #[test]
+        fn profile_patch_changes_only_the_instruction_value_preserving_all_other_bytes() {
+            let updated = patch_codex_profile("fixture.toml", INITIAL, "new").unwrap();
+            assert_eq!(
+                updated,
+                INITIAL.replace(
+                    "developer_instructions = \"old\"",
+                    "developer_instructions = \"new\""
+                )
+            );
+            assert_eq!(
+                patch_codex_profile("fixture.toml", INITIAL, "old").unwrap(),
+                INITIAL
+            );
+            for original in [INITIAL.replace('\n', "\r\n"), INITIAL.trim_end().to_owned()] {
+                let expected = original.replace(
+                    "developer_instructions = \"old\"",
+                    "developer_instructions = \"new\"",
+                );
+                assert_eq!(
+                    patch_codex_profile("fixture.toml", &original, "new").unwrap(),
+                    expected
+                );
+            }
+
+            let new = patch_codex_profile(
+                "fixture.toml",
+                "# header\nmodel = \"fixture\"\n",
+                "line 'one'\nline \\\"two\"",
+            )
+            .unwrap();
+            let doc: toml_edit::DocumentMut = new.parse().unwrap();
+            assert_eq!(
+                doc["developer_instructions"].as_str(),
+                Some("line 'one'\nline \\\"two\"")
+            );
+            assert!(new.contains("# header\nmodel = \"fixture\"\n"));
+            assert!(
+                doc.get("hooks").is_none(),
+                "daemon must not generate hooks.state"
+            );
+            assert!(!new.contains("trusted_hash"));
+        }
+
+        #[test]
+        fn profile_parse_errors_name_the_path_and_line_but_never_echo_source() {
+            let bad = "developer_instructions = \"old\"\n# trusted_hash = \"FIXTURE_DO_NOT_ECHO\"\n[broken =\n";
+            let error = patch_codex_profile("/fixture/profile.toml", bad, "new").unwrap_err();
+            let display = error.to_string();
+            assert!(display.contains("/fixture/profile.toml"));
+            assert!(display.contains("第 3 行"), "{display}");
+            assert!(display.contains("修好這個檔或刪掉它，就會重新產生"));
+            assert!(!format!("{error:?} {error}").contains("FIXTURE_DO_NOT_ECHO"));
+            for bad in [
+                "developer_instructions = 7\n",
+                "[developer_instructions]\nold = true\n",
+            ] {
+                assert!(patch_codex_profile("fixture.toml", bad, "new").is_err());
+            }
+        }
+
+        #[tokio::test]
+        async fn profile_local_install_preserves_trust_and_keeps_invalid_files_unchanged() {
+            let env = crate::testing::env().await;
+            let mut bot = crate::testing::claude_bot(&env.app, &env.project_id, "profile-local").await;
+            bot.kind = "codex".into();
+            let project = db::project(env.app.db(), &env.project_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let home = env.dir.join("codex-profile");
+            std::fs::create_dir_all(&home).unwrap();
+            let path = home.join(format!("{}.config.toml", codex_profile_name(&bot.id)));
+            std::fs::write(&path, INITIAL).unwrap();
+            let name = install_codex_profile(&*env.app, &bot, &project, home.to_str().unwrap(), "new")
+                .await
+                .unwrap();
+            assert_eq!(name, codex_profile_name(&bot.id));
+            let expected = patch_codex_profile(path.to_str().unwrap(), INITIAL, "new").unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            install_codex_profile(&*env.app, &bot, &project, home.to_str().unwrap(), "new")
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                modified
+            );
+            let broken = "# FIXTURE_DO_NOT_ECHO\n[broken =\n";
+            std::fs::write(&path, broken).unwrap();
+            let error = install_codex_profile(&*env.app, &bot, &project, home.to_str().unwrap(), "new")
+                .await
+                .unwrap_err();
+            assert!(!error.to_string().contains("FIXTURE_DO_NOT_ECHO"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+            std::fs::write(&path, [0xff, 0xfe]).unwrap();
+            assert!(
+                install_codex_profile(&*env.app, &bot, &project, home.to_str().unwrap(), "new")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe]);
+        }
+
+        #[tokio::test]
+        async fn profile_local_missing_is_created_but_other_read_errors_are_not_missing() {
+            let env = crate::testing::env().await;
+            let bot = crate::testing::claude_bot(&env.app, &env.project_id, "profile-missing").await;
+            let project = db::project(env.app.db(), &env.project_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let home = env.dir.join("new-codex");
+            install_codex_profile(&*env.app, &bot, &project, home.to_str().unwrap(), "new")
+                .await
+                .unwrap();
+            let path = home.join(format!("{}.config.toml", codex_profile_name(&bot.id)));
+            let contents = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(contents, patch_codex_profile("fresh", "", "new").unwrap());
+            assert!(!contents.contains("hooks") && !contents.contains("trusted_hash"));
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(
+                local_profile_snapshot(&home).is_err(),
+                "directory read error is not NotFound"
+            );
+        }
+
+        #[test]
+        fn profile_remote_envelope_requires_explicit_missing_or_complete_valid_utf8() {
+            assert_eq!(
+                decode_remote_profile("fixture", "AM_PROFILE_MISSING\n").unwrap(),
+                ""
+            );
+            assert_eq!(
+                decode_remote_profile("fixture", &framed(INITIAL.as_bytes())).unwrap(),
+                INITIAL
+            );
+            for reply in [
+                "",
+                "AM_PROFILE_MISSING",
+                "AM_PROFILE_MISSING\nextra",
+                "AM_PROFILE_READ_ERROR\n",
+                "AM_PROFILE_PRESENT\n",
+                "AM_PROFILE_PRESENT\nnot-base64\nAM_PROFILE_END\n",
+            ] {
+                assert!(decode_remote_profile("fixture", reply).is_err());
+            }
+            assert!(decode_remote_profile("fixture", &framed(&[0xff, 0xfe])).is_err());
+        }
+
+        #[tokio::test]
+        async fn profile_remote_failures_never_publish_or_become_missing() {
+            let env = crate::testing::env().await;
+            let bot =
+                crate::testing::claude_bot(&env.app, &env.project_id, "profile-remote-failure").await;
+            let mut project = db::project(env.app.db(), &env.project_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let host = "profile-remote-failure";
+            project.host = host.into();
+            let cfg = crate::config::HostCfg {
+                name: host.into(),
+                ssh: host.into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+                shared_session: false,
+            };
+            env.app.hosts.insert_remote_for_test(cfg).await;
+            for failure in [
+                None,
+                Some("AM_PROFILE_READ_ERROR\n".into()),
+                Some("AM_PROFILE_PRESENT\nYWJj".into()),
+                Some(framed(b"# FIXTURE_DO_NOT_ECHO\n[broken =\n")),
+            ] {
+                let writes = Arc::new(Mutex::new(0));
+                let observed = writes.clone();
+                crate::hosts::set_ssh_fake(host, move |script| {
+                    if script.contains("AM_PROFILE_WRITTEN") {
+                        *observed.lock().unwrap() += 1;
+                        return Ok("AM_PROFILE_WRITTEN\n".into());
+                    }
+                    match &failure {
+                        Some(reply) => Ok(reply.clone()),
+                        None => Err(anyhow::anyhow!("FIXTURE_DO_NOT_ECHO transport")),
+                    }
+                });
+                let error = install_codex_profile(&*env.app, &bot, &project, "/fixture/codex", "new")
+                    .await
+                    .unwrap_err();
+                assert!(!format!("{error:?} {error}").contains("FIXTURE_DO_NOT_ECHO"));
+                assert!(error
+                    .to_string()
+                    .contains("profile-remote-failure:./am-bot-"));
+                assert!(!error.to_string().contains("/fixture/codex"));
+                assert!(!error.to_string().contains("trusted_hash"));
+                assert!(!error.to_string().contains("hooks.state"));
+                assert_eq!(*writes.lock().unwrap(), 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn profile_remote_existing_and_explicit_missing_take_distinct_safe_paths() {
+            let env = crate::testing::env().await;
+            let bot =
+                crate::testing::claude_bot(&env.app, &env.project_id, "profile-remote-success").await;
+            let mut project = db::project(env.app.db(), &env.project_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let host = "profile-remote-success";
+            project.host = host.into();
+            let cfg = crate::config::HostCfg {
+                name: host.into(),
+                ssh: host.into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+                shared_session: false,
+            };
+            env.app.hosts.insert_remote_for_test(cfg).await;
+            for previous in [None, Some(INITIAL)] {
+                let scripts = Arc::new(Mutex::new(Vec::new()));
+                let observed = scripts.clone();
+                crate::hosts::set_ssh_fake(host, move |script| {
+                    observed.lock().unwrap().push(script.to_owned());
+                    if script.contains("AM_PROFILE_WRITTEN") {
+                        Ok("AM_PROFILE_WRITTEN\n".into())
+                    } else {
+                        Ok(previous
+                            .map(|s| framed(s.as_bytes()))
+                            .unwrap_or_else(|| "AM_PROFILE_MISSING\n".into()))
+                    }
+                });
+                install_codex_profile(&*env.app, &bot, &project, "/fixture/codex", "new")
+                    .await
+                    .unwrap();
+                let calls = scripts.lock().unwrap();
+                assert_eq!(calls.len(), 2);
+                assert!(calls[0].contains("AM_PROFILE_PRESENT"));
+                assert!(calls[1].contains("AM_PROFILE_WRITTEN"));
+                assert_eq!(
+                    calls[1].contains("fixture-trust-no-secret"),
+                    previous.is_some()
+                );
+                if previous.is_none() {
+                    assert!(!calls[1].contains("hooks.state") && !calls[1].contains("trusted_hash"));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn macos_local_profile_scripts_preserve_exact_bytes_and_use_portable_tools() {
+            let env = crate::testing::env().await;
+            let path = env.dir.join("profile ' spaced.toml");
+            let path = path.to_str().unwrap();
+            assert_eq!(
+                shell(&remote_profile_read_script(path)),
+                "AM_PROFILE_MISSING\n"
+            );
+            let updated = patch_codex_profile(path, INITIAL, "new\nAM_AGENT_MD_EOF\nend").unwrap();
+            assert_eq!(
+                shell(&remote_profile_write_script(path, &updated)),
+                "AM_PROFILE_WRITTEN\n"
+            );
+            assert_eq!(std::fs::read_to_string(path).unwrap(), updated);
+            assert_eq!(
+                decode_remote_profile(path, &shell(&remote_profile_read_script(path))).unwrap(),
+                updated
+            );
+            let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+            shell(&remote_profile_write_script(path, &updated));
+            assert_eq!(
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+                modified
+            );
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let blocked = env.dir.join("directory.toml");
+            std::fs::create_dir(&blocked).unwrap();
+            assert_eq!(
+                shell(&remote_profile_read_script(blocked.to_str().unwrap())),
+                "AM_PROFILE_READ_ERROR\n"
+            );
+            assert!(std::fs::read_dir(&env.dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")));
+        }
+
+        #[test]
+        fn profile_portable_verification_fixture_is_from_the_production_helpers() {
+            let updated = patch_codex_profile(PLACEHOLDER, INITIAL, "new").unwrap();
+            let fresh = patch_codex_profile(PLACEHOLDER, "", "new").unwrap();
+            let fixture = serde_json::json!({
+                "placeholder": PLACEHOLDER, "initial": INITIAL, "updated": updated, "fresh": fresh,
+                "read_script": remote_profile_read_script(PLACEHOLDER),
+                "write_script": remote_profile_write_script(PLACEHOLDER, &updated),
+                "fresh_script": remote_profile_write_script(PLACEHOLDER, &fresh),
+            });
+            println!("PROFILE_VERIFY_FIXTURE={fixture}");
+            assert!(!fixture["fresh"].as_str().unwrap().contains("trusted_hash"));
+        }
     }
 }

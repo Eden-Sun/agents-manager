@@ -1061,6 +1061,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `restart-idle` 只吃帶更新的 claude）。繞路是把 `bots.args` 暫時設成 `["resume","<上一個 native session>"]`、
   `/restart`、確認接上後再還原 `args`：codex 的 resume 是**子命令**，start 時 args 排最前面，形狀剛好是
   `codex resume <id>`（2026-09-13 對 GPT-astra 實作過）。
+- **Codex 母 bot profile 更新契約（#1975）**：更新 per-bot profile（`am-bot-<id>.config.toml`）時只改 `developer_instructions`，保留所有其他設定、註解、排序與既有 hook trust，daemon 不生成或更動 `hooks.state` 或 `trusted_hash`。壞 TOML 等解析錯誤包含 path 與 line 資訊並指引修好或刪除即可由 daemon 重生，不印出檔案內容或 token，拒絕啟動以防吃進過期指示。本機與遠端讀取只有明確 NotFound 才新建，其餘讀取、傳輸與 parse 錯誤採 fail-closed 可重試策略，遠端採先讀再原子寫入。外部 CLI 同時修改同一份 profile 時無跨程序 CAS 保證。
 
 ## 5. 設定檔
 
