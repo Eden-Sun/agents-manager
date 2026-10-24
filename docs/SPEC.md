@@ -3973,6 +3973,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 - **dispatcher 永遠 exit 0；hook 事件永遠只印 `{}`**——hook 是同步的、會卡住 agent loop，stdout 會被 agy 當成決策（`{"decision":"continue"}` 會擋住停止），所以 daemon 子行程的 stdout 也導去 `/dev/null`。
 - `agents-managerd hook agy --bot … --event <事件>`：agy 的 payload 沒有事件名，子行程把 `--event` 放進 `hookEventName`；`Stop` 另外讀 `transcriptPath`（只讀最後 2 MiB、只收 `.jsonl`）把最近一回合的 `lastUserMessage`／`lastAssistantMessage` 放進 payload（`agy_support::last_exchange`）。讀不到就不放，事件照送。
 - 測試一律走 `crate::home::dir()`（測試行程的假 HOME），寫 `~/.gemini` 的程式碼都有「寫到假 HOME」的測試，絕不碰真的。
+- **ADC 登入環境限制與相容性（issue #1949）**：agy 1.4.7 修正以 Application Default Credentials（`AGY_ADC_AUTH`）登入時 hooks、rules 等未載入的問題。AG Man 的 hooks 注入（`setup.rs`、`agy_hook.rs`）與接收（`hookrecv.rs`）本就是透過全域 `~/.gemini/config/hooks.json` 指向 dispatcher，從未針對 ADC 登入做過繞過 hook 走畫面判讀的特殊分支或退路；通用之終端備援（`poller::try_fallback`）本就具備 CAS 狀態切換與遲到 hook 原文取代去重機制（`replace_fallback_reply`），不會因 hook 恢復觸發而產生重複回覆或事件衝突。本機環境未配置 GCP ADC（無 `gcloud` ADC 憑證），無法進行真機 ADC 登入實測，記錄此架構判斷與環境限制。
 
 ### 12a.3 事件分類（`hookrecv::classify("agy")`）
 | 事件 | 結果 |
