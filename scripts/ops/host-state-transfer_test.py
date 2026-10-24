@@ -20,7 +20,7 @@ class HostStateTransferTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="agm-host-state-test-")
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.home = self.root / "source-home"
         self.source = self.home / ".config" / "agents-manager"
         self.target = self.root / "target-data"

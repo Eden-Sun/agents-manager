@@ -1139,8 +1139,10 @@ pub fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
 
 /// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。除了 `App` 掉了就刪（見上），測試行程結束時也一定會掃掉（[`remove_at_exit`]）：
 /// 只回一個 `PathBuf` 的輔助函式（沒有地方放 guard）靠這一條不留殘骸，測試 panic 也一樣。
+/// 基底先 canonicalize（macOS 的 TMPDIR 在 `/var/…` → `/private/var/…`）：生產端回的路徑是 canonical 的，
+/// 測試拿原始路徑比對會只在 macOS 紅（#1964）。Linux 的 /tmp 不是符號連結，canonicalize 是 no-op。
 pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}", db::ulid()));
+    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("{prefix}-{}", db::ulid()));
     std::fs::create_dir_all(&dir).unwrap();
     scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.clone());
     remove_at_exit(&dir);
@@ -1424,6 +1426,22 @@ mod write_exec_tests {
         super::write_exec(&py, "#!/usr/bin/env python3\nprint('hi')\n");
         assert!(!std::fs::read_to_string(&py).unwrap().contains("AM_TEST_EXEC_PROBE"), "非 shell 不插守衛");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scratch_dir_canonical_tests {
+    use super::*;
+
+    /// #1964：`scratch_dir` 回的路徑就是登記與清理用的那個形式（canonical），`release_scratch` 認得它，
+    /// 不會因為基底換成 canonical 而清不掉或重複登記。
+    #[test]
+    fn scratch_dir_is_canonical_and_registered_under_the_same_path() {
+        let dir = scratch_dir("canon-check");
+        assert_eq!(dir, dir.canonicalize().unwrap(), "scratch_dir 必須回 canonical 路徑");
+        assert!(release_scratch(&dir), "回傳的路徑要跟登記時是同一個 key");
+        assert!(!release_scratch(&dir), "交還一次之後就不再登記");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
