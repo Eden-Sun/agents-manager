@@ -939,3 +939,14 @@ mod tests {
         assert!(!format!("{r:?}").contains("sk-ant-secret"));
     }
 }
+
+// #1944: additive full-content boundary; the existing one-shot clients above are unchanged.
+pub(crate) use crate::api_bot::http::{FullMessagesRequest, Error as FullMessagesError};
+
+#[allow(dead_code)]
+pub(crate) async fn complete_full_messages(
+    request: &FullMessagesRequest<'_>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crate::api_bot::protocol::Response, FullMessagesError> {
+    crate::api_bot::http::complete(request, cancel).await
+}
