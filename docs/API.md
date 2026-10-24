@@ -1363,7 +1363,7 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
 - `shared/`：同一個 repo 的 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
   `shared.lock` 是 flock，同一時間只給一次呼叫（同一個 repo 的所有 worktree 共用這一份，#1856）；被佔著時**先等它用完**（每秒再試，最多 15 分鐘，
   issue #104、#1937：持有者是整段 cargo，等完再增量編譯比自己冷編譯划算，上限取一次冷編譯加餘裕），等超過 15 分鐘才改用
-  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。整體上限 `timeout_secs` 仍包住這段等待。
+  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。整體上限 `timeout_secs` 仍包住這段等待。拿到 `shared/` 前有等過時，stderr 印「等了 N 秒拿到共用遠端 target」（沒等就不印；跟名額那層的「排到遠端名額…等了 N 秒」是兩件事）。
 - 同步、算 hash 的是**工作區根**（issue #177），不是呼叫時的 cwd：像 cargo 一樣往上找最近一層宣告 `[workspace]` 的
   `Cargo.toml`（沒有工作區就用最近的套件根；完全不在 cargo 專案裡才是 cwd 本身），遠端 cargo 再 `cd` 到同一個相對子目錄。
   所以 `cd daemon && cargo check` 與在根目錄呼叫共用同一份 `shared/`，遠端有根的 `Cargo.lock`／`[profile]`／`.cargo/config.toml`，
