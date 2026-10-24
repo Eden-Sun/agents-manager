@@ -497,6 +497,8 @@ export function fakeApi(route: (req: FakeRequest) => unknown = () => undefined):
   return requests
 }
 
+export const POLL_TICK_MS = 250
+
 let pollTick: (() => Promise<void>) | null = null
 
 /** 設定 `until` 每輪輪詢要做的事（例如推進 mock 的虛擬時鐘）；`null` 取消。 */
@@ -509,11 +511,32 @@ export function setPollTick(fn: (() => Promise<void>) | null): void {
  * 「等 mock 的 8 秒回合結束」變成「輪詢幾次」，不再取決於這台機器現在多忙。
  */
 export async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
-  const end = Date.now() + ms
-  while (Date.now() < end) {
-    if (await cond()) return
-    if (pollTick) await pollTick()
-    await settle(pollTick ? 10 : 50)
+  const tick = pollTick
+  if (!tick) {
+    // 協調者要求：沒有 pollTick 時行為與原實作一個 byte 都不差（包含先判 Date.now() < end）。
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      if (await cond()) return
+      await settle(50)
+    }
+    throw new Error(`等不到：${what}`)
   }
-  throw new Error(`等不到：${what}`)
+
+  // 進函式時固定使用讀到的 tick（維持進函式時讀一次），有 pollTick 時保證慢機器上步數推進到 maxSteps。
+  const start = Date.now()
+  const end = start + ms
+  let steps = 0
+  const maxSteps = Math.ceil(ms / POLL_TICK_MS)
+
+  for (;;) {
+    if (await cond()) return
+    const now = Date.now()
+    if (steps >= maxSteps && now >= end) {
+      const elapsed = now - start
+      throw new Error(`等不到：${what}（輪詢 ${steps} 步、虛擬 ${steps * POLL_TICK_MS}ms、實時 ${elapsed}ms）`)
+    }
+    steps++
+    await tick()
+    await settle(10)
+  }
 }
