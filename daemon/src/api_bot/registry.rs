@@ -53,6 +53,23 @@ pub(crate) struct ApiBotRegistry {
     slots: Mutex<HashMap<String, ActiveSlot>>,
 }
 
+/// Helper function to await outcome from a watch receiver, used by both production and tests.
+pub(crate) async fn wait_outcome(
+    rx: &mut watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,
+) -> Result<TurnOutcome, RegistryError> {
+    if let Some(ref res) = *rx.borrow() {
+        return res.clone();
+    }
+    loop {
+        if rx.changed().await.is_err() {
+            return Err(RegistryError::ChannelClosedEarly);
+        }
+        if let Some(ref res) = *rx.borrow() {
+            return res.clone();
+        }
+    }
+}
+
 impl ApiBotRegistry {
     pub(crate) fn new() -> Self {
         Self {
@@ -145,6 +162,7 @@ impl ApiBotRegistry {
     /// Signals cancellation and waits for the actual runner task to genuinely finish.
     ///
     /// Conservative semantics: If `run_id` is not found, returns `Err(RegistryError::NotFound)`.
+    /// Once a task has finished and its slot is cleaned up, subsequent calls return `NotFound`.
     /// Callers (e.g. C2 lifecycle) MUST NOT treat NotFound as success.
     pub(crate) async fn cancel_and_join(&self, run_id: &str) -> Result<TurnOutcome, RegistryError> {
         let (token, mut rx) = {
@@ -156,29 +174,25 @@ impl ApiBotRegistry {
         // Fire cancellation token without holding registry lock
         token.cancel();
 
-        // If the task already finished before we awaited, return immediately
-        if let Some(ref res) = *rx.borrow() {
-            return res.clone();
-        }
-
-        // Wait for supervisor to broadcast final completion
-        loop {
-            if rx.changed().await.is_err() {
-                // If sender dropped without sending Some, task aborted unexpectedly
-                return Err(RegistryError::ChannelClosedEarly);
-            }
-            if let Some(ref res) = *rx.borrow() {
-                return res.clone();
-            }
-        }
+        wait_outcome(&mut rx).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
     use tokio::sync::{oneshot, Notify};
+
+    // Helper to poll once without sleeping or busy spinning
+    fn poll_once<F: Future>(fut: &mut Pin<&mut F>) -> Poll<F::Output> {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        fut.as_mut().poll(&mut cx)
+    }
 
     #[tokio::test]
     async fn test_slot_remains_occupied_until_real_join() {
@@ -219,6 +233,10 @@ mod tests {
         assert_eq!(res.unwrap(), TurnOutcome::Completed);
         // Guaranteed false immediately on return due to removal before broadcast
         assert!(!registry.is_active("r1"));
+
+        // Once completed and removed, subsequent join returns conservative NotFound
+        let after_res = registry.cancel_and_join("r1").await;
+        assert_eq!(after_res, Err(RegistryError::NotFound));
     }
 
     #[tokio::test]
@@ -270,18 +288,18 @@ mod tests {
         let reg1 = registry.clone();
         let reg2 = registry.clone();
 
-        let join1 = tokio::spawn(async move {
-            reg1.cancel_and_join("r_conc").await
-        });
-        let join2 = tokio::spawn(async move {
-            reg2.cancel_and_join("r_conc").await
-        });
+        let mut fut1 = Box::pin(reg1.cancel_and_join("r_conc"));
+        let mut fut2 = Box::pin(reg2.cancel_and_join("r_conc"));
 
-        // Trigger finish
+        // Verify both futures have been polled to Pending and subscribed
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        // Now release task
         notify.notify_one();
 
-        let res1 = join1.await.unwrap();
-        let res2 = join2.await.unwrap();
+        let res1 = fut1.await;
+        let res2 = fut2.await;
 
         assert_eq!(res1, Ok(TurnOutcome::Completed));
         assert_eq!(res2, Ok(TurnOutcome::Completed));
@@ -305,45 +323,34 @@ mod tests {
             })
             .unwrap();
 
-        let reg1 = registry.clone();
-        let reg2 = registry.clone();
+        // Start first waiter and verify it polls to Pending, then drop it
+        {
+            let mut fut1 = Box::pin(registry.cancel_and_join("r_two_waiters"));
+            assert!(poll_once(&mut fut1).is_pending());
+            // Drops fut1
+        }
 
-        // Start first waiter and immediately drop it
-        let waiter1 = tokio::spawn(async move {
-            let fut = reg1.cancel_and_join("r_two_waiters");
-            tokio::pin!(fut);
-            // Drop immediately without awaiting completion
-        });
-        waiter1.await.unwrap();
+        // Slot must still be active and protected
+        assert!(registry.is_active("r_two_waiters"));
 
-        // Second waiter starts and stays alive
-        let waiter2 = tokio::spawn(async move {
-            reg2.cancel_and_join("r_two_waiters").await
-        });
+        // Second waiter starts and polls to Pending
+        let mut fut2 = Box::pin(registry.cancel_and_join("r_two_waiters"));
+        assert!(poll_once(&mut fut2).is_pending());
 
         // Release the runner task
         let _ = tx_done.send(());
 
-        let res2 = waiter2.await.unwrap();
+        let res2 = fut2.await;
         assert_eq!(res2, Ok(TurnOutcome::Completed));
         assert!(!registry.is_active("r_two_waiters"));
     }
 
     #[tokio::test]
     async fn test_channel_closed_early_when_supervisor_drops_prematurely() {
-        // Direct test of ChannelClosedEarly detection
-        let (_tx, mut rx) = watch::channel::<Option<Result<TurnOutcome, RegistryError>>>(None);
-        drop(_tx);
+        let (tx, mut rx) = watch::channel::<Option<Result<TurnOutcome, RegistryError>>>(None);
+        drop(tx);
 
-        let res = loop {
-            if rx.changed().await.is_err() {
-                break Err(RegistryError::ChannelClosedEarly);
-            }
-            if let Some(ref res) = *rx.borrow() {
-                break res.clone();
-            }
-        };
-
+        let res = wait_outcome(&mut rx).await;
         assert_eq!(res, Err(RegistryError::ChannelClosedEarly));
     }
 
@@ -360,7 +367,6 @@ mod tests {
             };
 
             let witness = complete_witness.clone();
-            let (tx_task_done, rx_task_done) = oneshot::channel();
             let (tx_start_signal, rx_start_signal) = oneshot::channel();
 
             let _token = registry
@@ -373,7 +379,6 @@ mod tests {
                         // Complete-first branch
                         let _ = rx_start_signal.await;
                         witness.fetch_add(1, Ordering::SeqCst);
-                        let _ = tx_task_done.send(());
                         Ok(TurnOutcome::Completed)
                     }
                 })
@@ -383,9 +388,13 @@ mod tests {
                 let outcome = registry.cancel_and_join(&key.run_id).await.unwrap();
                 assert_eq!(outcome, TurnOutcome::Cancelled);
             } else {
+                let mut fut = Box::pin(registry.cancel_and_join(&key.run_id));
+                assert!(poll_once(&mut fut).is_pending());
+
+                // Signal completion to runner
                 let _ = tx_start_signal.send(());
-                let _ = rx_task_done.await.expect("task finished before join");
-                let outcome = registry.cancel_and_join(&key.run_id).await.unwrap();
+
+                let outcome = fut.await.unwrap();
                 assert_eq!(outcome, TurnOutcome::Completed);
             }
 
