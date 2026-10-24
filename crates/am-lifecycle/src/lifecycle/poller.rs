@@ -1679,7 +1679,11 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         let sent = turn_echo_texts(app, &turn.id).await?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         super::race_point::hit("fallback_after_echo", &turn.id).await;
-        match screen_reply(&bot.kind, reply_screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
+        // 回音看得到就以它為準（#1977）：游標可能停在回覆中途，切掉前面的字。compact 尾段照舊。
+        let anchored = if compact_tail.is_none() { slice_after_sent_echo(&bot.kind, &read.text, &sent) } else { None };
+        let screen = anchored.as_deref().unwrap_or(reply_screen);
+        tracing::debug!(turn = %turn.id, branch = if anchored.is_some() { "echo" } else { "cursor" }, screen_len = screen.len(), fingerprint = %fingerprint(screen), "terminal fallback: reply window");
+        match screen_reply(&bot.kind, screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
                 // Shredded = too narrow to read; name the pane and width so it's actionable.
@@ -5702,4 +5706,103 @@ pub trait ProgressEmitted: Send + Sync {
 /// Fallback timers for hookless completion capture.
 pub trait FallbackTimers: Send + Sync {
     fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod reply_window_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 多節 markdown 的長回覆（#1977）：標題、粗體、列表、空行都有，總長遠超過游標切得開的範圍。
+    fn long_reply() -> String {
+        "⏺ ## 1977 調查報告\n\n**結論**\n- 游標切頭\n- 備援截尾\n\n## 修法\n\n".to_string() + &"**細節** 說明文字很長很長很長。\n".repeat(120) + "\n## 驗證\n- 全綠"
+    }
+
+    /// 回合結束時的 claude 畫面：使用者那句在最上面，回覆，狀態列，輸入框。
+    fn screen_with(reply: &str) -> String {
+        format!("❯ 做個調查\n\n{reply}\n\n✻ Worked for 3s · done 5:08 PM\n\n───────────\n❯ \n───────────\n")
+    }
+
+    /// 沒有 hook 的 claude run：送出 `prompt`，畫面是 `screen`，游標是 `cursor`。
+    async fn claude_fallback(screen: &str, prompt: &str, cursor: Option<String>) -> (tt::Env, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cl-window").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text=? WHERE id=?").bind(prompt).bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET last_read_tail_hash=? WHERE id=?").bind(cursor).bind(&run).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
+        (env, run, turn)
+    }
+
+    async fn stored_replies(app: &Arc<App>, turn: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'").bind(turn).fetch_all(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_long_multi_section_reply_is_stored_whole_when_the_cursor_sits_mid_reply() {
+        let screen = screen_with(&long_reply());
+        // 游標＝讀到「## 修法」之前為止的畫面（回覆寫到一半時記下的）。
+        let cursor = tail_hash(&screen[..screen.find("## 修法").unwrap()]);
+        let (env, run, turn) = claude_fallback(&screen, "做個調查", Some(cursor)).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let got = stored_replies(&app, &turn).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].starts_with("## 1977 調查報告"), "頭被切掉了：{}", &got[0][..40.min(got[0].len())]);
+        assert!(got[0].contains("**結論**") && got[0].ends_with("- 全綠"));
+    }
+
+    /// ② chrome：狀態列、輸入框、模式列不因為多取了內容就被存進去。
+    #[tokio::test]
+    async fn chrome_below_the_reply_is_not_stored_with_it() {
+        let screen = "❯ 做個調查\n\n⏺ ## 結論\n\n內容一行。\n\n✻ Worked for 3s · done 5:08 PM\n\n───────────\n❯ \n───────────\n  ⏵⏵ accept edits on\n";
+        let (env, run, turn) = claude_fallback(screen, "做個調查", None).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let got = stored_replies(&app, &turn).await;
+        assert_eq!(got, vec!["## 結論\n\n內容一行。".to_string()]);
+    }
+
+    /// ① 回覆正文引用了使用者那句話（縮排的引用）：切點仍在真正的回音，引用行留在正文裡。
+    #[tokio::test]
+    async fn an_indented_quote_of_the_prompt_in_the_reply_does_not_move_the_cut() {
+        let screen = format!("❯ 做個調查\n\n⏺ 結論如下。\n  ❯ 做個調查 是你那句\n\n後續說明。\n\n───────────\n❯ \n───────────\n");
+        let (env, run, turn) = claude_fallback(&screen, "做個調查", None).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let got = stored_replies(&app, &turn).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].starts_with("結論如下。"), "{}", got[0]);
+        assert!(got[0].contains("  ❯ 做個調查 是你那句") && got[0].ends_with("後續說明。"), "{}", got[0]);
+    }
+
+    /// ① 送出的句子對不上畫面上的回音：退回游標切片（行為照舊，沒有游標就是整個畫面）。
+    #[tokio::test]
+    async fn an_echo_that_does_not_match_what_was_sent_falls_back_to_the_cursor() {
+        let screen = screen_with(&long_reply());
+        let (env, run, turn) = claude_fallback(&screen, "別句話", None).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let got = stored_replies(&app, &turn).await;
+        assert!(got[0].starts_with("## 1977 調查報告"), "{}", &got[0][..40.min(got[0].len())]);
+    }
+
+    /// ④ 上限照舊：超過 6000 字從頭保留，結尾標示截斷。
+    #[test]
+    fn a_reply_over_the_cap_keeps_its_head_and_says_so() {
+        let out = truncate_hookless_reply("甲".repeat(HOOKLESS_REPLY_MAX + 500));
+        assert!(out.starts_with("甲"));
+        assert_eq!(out.matches('甲').count(), HOOKLESS_REPLY_MAX);
+        assert!(out.ends_with("（終端擷取到此截斷）"));
+    }
+
+    /// ② 同樣的 chrome 規則：多取了內容，reply 抽取仍然不收狀態列與輸入框。
+    #[test]
+    fn screen_reply_keeps_status_rows_out_of_a_wider_window() {
+        let text = "❯ 做個調查\n⏺ ## 結論\n\n內容。\n\n✻ Worked for 3s · done 5:08 PM\n\n───────────\n❯ \n───────────\n  ⏵⏵ accept edits on\n";
+        let window = slice_after_sent_echo("claude", text, &["做個調查".to_string()]).unwrap();
+        assert_eq!(screen_reply("claude", &window, &["做個調查".to_string()]).as_deref(), Some("## 結論\n\n內容。"));
+    }
 }
