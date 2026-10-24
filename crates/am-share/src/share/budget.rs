@@ -278,9 +278,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("am-share-budget-{tag}-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        super::super::test_dirs::scratch_dir(&format!("am-share-budget-{tag}"))
     }
 
     #[test]
