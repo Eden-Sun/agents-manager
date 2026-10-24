@@ -445,7 +445,7 @@ impl ClaudeApi {
         self.client.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// 先占名額再送（跟 Jev 的 `reserve_slot` 同一個想法）：一小時內已占滿就不送。
+    /// 先占名額再送（跟 Jev 的 `reserve_slot` 同一個想法）：一小時內已占滿就不送。`max_per_hour == 0` 是不上限（#1948）。
     fn reserve(&self, use_case: &str, max_per_hour: u32) -> bool {
         let mut g = self.sent.lock().unwrap_or_else(|e| e.into_inner());
         let q = g.entry(use_case.to_string()).or_default();
@@ -453,7 +453,7 @@ impl ClaudeApi {
         while q.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(3600)) {
             q.pop_front();
         }
-        if q.len() >= max_per_hour as usize {
+        if max_per_hour > 0 && q.len() >= max_per_hour as usize {
             return false;
         }
         q.push_back(now);
@@ -626,8 +626,10 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
                 return Err(LcError::Bad(format!("bad effort: {e}")));
             }
         }
-        if u.max_per_hour.is_some_and(|n| !(1..=1000).contains(&n)) {
-            return Err(LcError::Bad("max_per_hour must be 1..=1000".into()));
+        // changelog_translate 的 0＝不上限（#1948）；其他用途仍要求 1..=1000。
+        let floor = if id == "changelog_translate" { 0 } else { 1 };
+        if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
+            return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
         }
     }
     Ok(())

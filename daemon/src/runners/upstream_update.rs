@@ -124,7 +124,10 @@ pub fn spawn(app: Arc<App>) {
     crate::background_loop::spawn_periodic(&app, "upstream update watcher", SWEEP, Duration::from_secs(60), |app| async move {
         let src = Live(app.clone());
         let path = last_path(&app);
-        tick(&app, &app.upstream_watch, &src, &path).await;
+        // 新版偵測到的那一筆，背景送一次翻譯（#1948）；不 await，不擋偵測迴圈。
+        for ev in tick(&app, &app.upstream_watch, &src, &path).await {
+            crate::changelog_translate::kick_detected(&app, &ev);
+        }
     });
 }
 
