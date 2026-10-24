@@ -112,3 +112,28 @@ it('與基準一致：無 details 也無 items', async () => {
   assert.equal(root.querySelector('details'), null)
   assert.equal(root.querySelectorAll('li').length, 0)
 })
+
+it('#719 階段 2：每項尾端標「可自動補／需手動」；沒有 fixable 不標', async () => {
+  const baseline: HostBaseline = {
+    issues: [
+      { id: 'tool.rtk', severity: 'critical', message: '缺工具 rtk' },
+      { id: 'codex.config.toml:features.hooks', severity: 'warn', message: 'codex：config.toml 沒有 features.hooks' },
+    ],
+    checked_at: new Date().toISOString(),
+    os: 'Linux',
+    stale: false,
+    error: null,
+    fixable: ['codex.config.toml:features.hooks'],
+  }
+  await mount(<BaselineLine baseline={baseline} />)
+  const crit = document.querySelector('ul.host-baseline-items li')!
+  assert.equal(crit.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix manual')
+  assert.equal(crit.textContent, '缺工具 rtk（需手動）')
+  const warn = document.querySelector('details.env-fold li')!
+  assert.equal(warn.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix auto')
+  assert.equal(warn.textContent, 'codex：config.toml 沒有 features.hooks（可自動補）')
+  await unmountAll()
+
+  await mount(<BaselineLine baseline={{ ...baseline, fixable: undefined }} />)
+  assert.equal(document.querySelectorAll('.host-baseline-fix').length, 0)
+})

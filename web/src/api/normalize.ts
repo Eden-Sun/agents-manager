@@ -183,7 +183,10 @@ export function toHostBaseline(v: unknown): HostBaseline | null {
         return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')) }]
       })
     : null
-  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')) }
+  // `fixable`（#719 階段 2）：沒有（舊 daemon）或型別不對＝空陣列，不讓整份主機資料解析失敗。
+  const rawFixable = pick(v, 'fixable')
+  const fixable = Array.isArray(rawFixable) && rawFixable.every((x) => typeof x === 'string') ? (rawFixable as string[]) : []
+  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')), fixable }
 }
 
 /** SPEC §11.6 */

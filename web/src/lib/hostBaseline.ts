@@ -8,8 +8,11 @@ export interface HostBaselineView {
   level: HostBaselineLevel
   /** tooltip／說明；沒有就不顯示 */
   hint: string
-  /** 嚴重的排前面；沒有就是空陣列 */
-  items: { id: string; severity: 'critical' | 'warn'; message: string }[]
+  /**
+   * 嚴重的排前面；沒有就是空陣列。`fix`：dry-run 計畫說可以自動補（在 `fixable` 裡）＝auto，其餘 manual；
+   * daemon 沒給 `fixable`（舊版）＝null，不標——不知道就不說需手動。
+   */
+  items: { id: string; severity: 'critical' | 'warn'; message: string; fix: 'auto' | 'manual' | null }[]
 }
 
 /** 跟 daemon 的 `RECHECK_EVERY + STALE_GRACE`（6 小時 + 15 分）同一條線：超過就算太久沒量。 */
@@ -35,7 +38,11 @@ export function hostBaselineView(b: HostBaseline | null, now: number = Date.now(
   if (!b) return { text: t('一致性：尚未檢查'), level: 'unknown', hint: t('還沒量過這台主機（剛連上、或 daemon 是舊版）'), items: [] }
   const checked = Date.parse(b.checked_at)
   const old = !Number.isNaN(checked) && now - checked > STALE_AFTER_MS
-  const sorted = b.issues === null ? [] : [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))
+  const fixable = b.fixable === undefined ? null : new Set(b.fixable)
+  const sorted = (b.issues === null ? [] : [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))).map((i) => ({
+    ...i,
+    fix: fixable === null ? null : fixable.has(i.id) ? ('auto' as const) : ('manual' as const),
+  }))
   if (b.stale || old) {
     return {
       text: t('一致性：上次檢查於 {time}，目前無法連線', { time: formatCheckedAt(b.checked_at, now) }),

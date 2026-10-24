@@ -92,3 +92,25 @@ test('上次檢查的時間：跨年要帶年份（1 月看到去年 12 月底�
   assert.equal(formatCheckedAt(new Date(2026, 11, 31, 22, 0).toISOString(), now), '2026-12-31 22:00')
   assert.equal(formatCheckedAt(new Date(2027, 0, 1, 0, 30).toISOString(), now), '01-01 00:30')
 })
+
+test('#719 階段 2：在 fixable 裡的差異標可自動補，其餘需手動；舊 daemon 沒給 fixable 就不標', () => {
+  const base = { issues: [issue('tool.rtk', 'critical'), issue('codex.config.toml:features.hooks', 'warn')], checked_at: 'x', os: 'Linux', stale: false, error: null }
+  const v = hostBaselineView({ ...base, fixable: ['codex.config.toml:features.hooks'] })
+  assert.deepEqual(v.items.map((i) => [i.id, i.fix]), [['tool.rtk', 'manual'], ['codex.config.toml:features.hooks', 'auto']])
+  assert.deepEqual(hostBaselineView({ ...base, fixable: [] }).items.map((i) => i.fix), ['manual', 'manual'])
+  assert.deepEqual(hostBaselineView(base).items.map((i) => i.fix), [null, null])
+})
+
+test('#719 階段 2：toHostBaseline 帶過 fixable；缺席或型別不對一律空陣列，整份照常解析', () => {
+  const issues = [issue('tool.rtk', 'critical'), issue('codex.config.toml:features.hooks', 'warn')]
+  const ok = toHostBaseline({ issues, checked_at: 'x', os: 'Linux', fixable: ['codex.config.toml:features.hooks'] })
+  assert.deepEqual(ok?.fixable, ['codex.config.toml:features.hooks'])
+  assert.deepEqual(hostBaselineView(ok).items.map((i) => i.fix), ['manual', 'auto'])
+  for (const bad of [undefined, null, 'codex.config.toml:features.hooks', { a: 1 }, [1, 2], ['ok', 3], [null]]) {
+    const b = toHostBaseline({ issues, checked_at: 'x', os: 'Linux', fixable: bad })
+    assert.ok(b, `解析不能失敗：${JSON.stringify(bad)}`)
+    assert.deepEqual(b.fixable, [], JSON.stringify(bad))
+    assert.equal(b.issues?.length, 2)
+    assert.deepEqual(hostBaselineView(b).items.map((i) => i.fix), ['manual', 'manual'])
+  }
+})
