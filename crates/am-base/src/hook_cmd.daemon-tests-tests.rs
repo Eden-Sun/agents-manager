@@ -129,6 +129,23 @@
         // 非物件 payload（`{"raw": …}` 以外的怪東西）不會 panic。
         let mut p = serde_json::json!([1, 2]);
         enrich_agy_payload(&mut p, "Stop");
+
+        // issue #1950: agy 1.4.7 hook stdin JSON 帶 lastUserInput（實機 stdin 原文 fixture：有欄位／缺欄位／型別錯）
+        let raw_pre_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/c-1","conversationId":"d721abb5-bb6b-48ad-a655-24bc51e375a4","initialNumSteps":1,"invocationNum":0,"lastUserInput":"test_last_user_input_ping","modelName":"gemini-3.8-flash-low","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
+        let mut from_fixture = parse_payload(raw_pre_fixture);
+        enrich_agy_payload(&mut from_fixture, "PreInvocation");
+        assert_eq!(from_fixture["hookEventName"], "PreInvocation");
+        assert_eq!(from_fixture["lastUserInput"], "test_last_user_input_ping");
+
+        let mut without_input = serde_json::json!({"conversationId": "c-1"});
+        enrich_agy_payload(&mut without_input, "PreInvocation");
+        assert_eq!(without_input["hookEventName"], "PreInvocation");
+        assert!(without_input.get("lastUserInput").is_none());
+
+        let mut wrong_type = serde_json::json!({"conversationId": "c-1", "lastUserInput": 12345});
+        enrich_agy_payload(&mut wrong_type, "PreInvocation");
+        assert_eq!(wrong_type["hookEventName"], "PreInvocation");
+        assert_eq!(wrong_type["lastUserInput"], 12345);
     }
 
     const MIB: u64 = 1024 * 1024;
