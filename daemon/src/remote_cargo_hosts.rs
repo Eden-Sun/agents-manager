@@ -380,6 +380,67 @@ mod guard_backed_tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// #1978：busy() 清理孤兒暫名檔只刪「超過 60 秒（find -mmin +1）且沒人持鎖」的：
+    /// 持鎖中的舊暫名不被刪；沒鎖的舊暫名會被刪。
+    #[test]
+    fn a_trial_guard_cleans_stale_unlocked_tmp_tickets_but_preserves_locked_ones() {
+        let base = base();
+        let qdir = base.join("rc/.queue");
+        std::fs::create_dir_all(&qdir).unwrap();
+
+        let set_mtime_2m_ago = |p: &Path| {
+            let t = chrono::Utc::now() - chrono::Duration::seconds(120);
+            let ts = t.format("%Y%m%d%H%M.%S").to_string();
+            let st = Command::new("touch").args(["-t", &ts]).arg(p).status().unwrap();
+            assert!(st.success());
+        };
+
+        // 1. 沒鎖的舊暫名檔（超過 60 秒）
+        let stale_unlocked = qdir.join("stale.tmp.111");
+        std::fs::write(&stale_unlocked, "").unwrap();
+        set_mtime_2m_ago(&stale_unlocked);
+
+        // 2. 持鎖中的舊暫名檔（超過 60 秒）：背景行程 flock 持鎖
+        let stale_locked = qdir.join("stale.tmp.222");
+        std::fs::write(&stale_locked, "").unwrap();
+        set_mtime_2m_ago(&stale_locked);
+        let mut locker = Command::new("flock")
+            .arg("-x")
+            .arg(&stale_locked)
+            .arg("sh")
+            .arg("-c")
+            .arg("echo LOCKED; exec sleep 60")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut locker_out = BufReader::new(locker.stdout.take().unwrap());
+        let mut locked_line = String::new();
+        assert!(locker_out.read_line(&mut locked_line).unwrap() > 0, "locker 未取得鎖就結束了");
+        assert_eq!(locked_line.trim(), "LOCKED");
+
+        // 3. 剛建立的新暫名檔（< 60 秒，沒鎖）
+        let fresh_tmp = qdir.join("fresh.tmp.333");
+        std::fs::write(&fresh_tmp, "").unwrap();
+
+        // 佔住 target，讓 trial 守門走進 busy()
+        let one = Admission { max: 1, pool: 0, ..QUICK };
+        let mut holder = guard_with(&base, HASH, "job-1-1", one);
+
+        let trial = Admission { try_only: true, shared_wait_secs: 0, queue_wait_secs: 0, ..one };
+        let token = LeaseToken::new();
+        let err = Lease::start(guard_cmd(&base, HASH, "job-2-2", &token, trial), token, &Deadline::new(0)).err().expect("busy");
+        assert_eq!(err.downcast_ref::<Busy>().map(|b| b.waiters), Some(0), "{err:#}");
+
+        assert!(!stale_unlocked.exists(), "沒鎖的舊暫名檔要被清理");
+        assert!(stale_locked.exists(), "持鎖中的舊暫名檔不能被刪除");
+        assert!(fresh_tmp.exists(), "剛建立的暫名檔不能被刪除");
+
+        holder.finish();
+        let _ = locker.kill();
+        let _ = locker.wait();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// 多台：第一台（照設定順序）的池全被佔著就用第二台，不排第一台的隊。
     #[test]
     fn with_several_hosts_a_busy_first_host_hands_the_call_to_a_free_second() {
