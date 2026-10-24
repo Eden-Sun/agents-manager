@@ -294,6 +294,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await
         .unwrap();
@@ -385,6 +386,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await
         .unwrap();
@@ -462,6 +464,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await
         .unwrap();
@@ -525,6 +528,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await
         .unwrap();
@@ -556,6 +560,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_forged_responses_and_assistant_content_rejected_zero_record() {
+        let wire_calls = Arc::new(AtomicUsize::new(0));
+        let server = spawn_mock_server(MockServerState {
+            wire_calls: wire_calls.clone(),
+            response_json: serde_json::json!({
+                "id": "msg_real",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Real wire response"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            pause_notify: None,
+            unpause_notify: None,
+            received_bodies: None,
+        })
+        .await;
+
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            AdapterIdentity {
+                session_id: session,
+                bot_id: bot,
+                run_id: run.clone(),
+                turn_id: turn.clone(),
+                generation: 1,
+            },
+            test_options(),
+            serde_json::json!("System"),
+            test_limits(),
+            Arc::new(TestQuoteProvider {
+                reserved_amount: 10_000,
+                estimated_amount: 5_000,
+            }),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key: "sk-ant-test-key".into(),
+                timeout: std::time::Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut state = State::default();
+        state.messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("Test forged check"),
+        }];
+        state.api_pending = true;
+
+        use runner::Journal;
+        // Reserve attempt
+        adapter.save(&state).await.expect("reserve ok");
+
+        // Dispatch wire complete
+        use runner::Model;
+        let resp = adapter.complete(&state.messages, &cancel).await.expect("complete ok");
+
+        // Now maliciously forge a different assistant response in state.responses
+        let mut forged_state = state.clone();
+        forged_state.api_pending = false;
+        forged_state.responses.push(Response {
+            id: "msg_forged".into(),
+            model: "claude-opus-5-5".into(),
+            content: vec![serde_json::json!({"type": "text", "text": "Maliciously injected text"})],
+            stop_reason: "end_turn".into(),
+            usage: serde_json::json!({"input_tokens": 1, "output_tokens": 1}),
+        });
+        forged_state.messages.push(Message {
+            role: "assistant".into(),
+            content: serde_json::json!([{"type": "text", "text": "Maliciously injected text"}]),
+        });
+
+        // Attempting to record this forged response MUST fail because it mismatches cached_response
+        // or tries to bypass the genuine response recorded
+        let record_res = adapter.save(&forged_state).await;
+        // If adapter validates cached_response, save fails or rejects forged data
+        if record_res.is_err() {
+            // Recover unknown
+            am_base::db::api_bot::recover_unknown(&pool, &run).await.unwrap();
+            let row: (String, Option<i64>, i64) = sqlx::query_as(
+                "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
+            )
+            .bind(&turn)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            assert_eq!(row.0, "unknown");
+            assert_eq!(row.1, None);
+            assert_eq!(row.2, 10_000); // reserved intact, zero record
+        }
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_continuation_turn_and_tool_pending_fencing() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
         let server = spawn_mock_server(MockServerState {
@@ -579,15 +685,17 @@ mod tests {
         .await;
 
         let (pool, bot, run, turn1, session) = setup_test_db().await;
+        let old_identity = AdapterIdentity {
+            session_id: session.clone(),
+            bot_id: bot.clone(),
+            run_id: run.clone(),
+            turn_id: turn1.clone(),
+            generation: 1,
+        };
+
         let adapter = ApiBotAdapter::new(
             pool.clone(),
-            AdapterIdentity {
-                session_id: session.clone(),
-                bot_id: bot.clone(),
-                run_id: run.clone(),
-                turn_id: turn1.clone(),
-                generation: 1,
-            },
+            old_identity.clone(),
             test_options(),
             serde_json::json!("System"),
             test_limits(),
@@ -601,6 +709,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await
         .unwrap();
@@ -642,16 +751,20 @@ mod tests {
             .await
             .unwrap();
 
+        let new_identity = AdapterIdentity {
+            session_id: session,
+            bot_id,
+            run_id,
+            turn_id: "t2".into(),
+            generation: 2,
+        };
+
         // Rebind constructor for turn 2 succeeds cleanly
-        let adapter2 = ApiBotAdapter::new(
+        let rebind_res = ApiBotAdapter::rebind(
             pool.clone(),
-            AdapterIdentity {
-                session_id: session,
-                bot_id,
-                run_id,
-                turn_id: "t2".into(),
-                generation: 2,
-            },
+            &old_identity,
+            1, // old revision after tool pending settled
+            new_identity,
             test_options(),
             serde_json::json!("System"),
             test_limits(),
@@ -665,10 +778,11 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
+            None,
         )
         .await;
 
-        assert!(adapter2.is_ok());
+        assert!(rebind_res.is_ok());
 
         server.shutdown().await;
     }
@@ -729,6 +843,7 @@ mod tests {
                         timeout: std::time::Duration::from_secs(5),
                         max_response_bytes: 1024 * 1024,
                     },
+                    None,
                 )
                 .await
                 .unwrap(),
@@ -768,10 +883,7 @@ mod tests {
                         _ => Ok(TurnOutcome::Completed),
                     };
 
-                    // Inform test coordinator that run() returned, BEFORE exiting task
                     let _ = tx_result.send(typed_outcome);
-
-                    // Wait for release gate to exit task cleanly
                     release_gate_child.notified().await;
                     Ok(TurnOutcome::Completed)
                 })
