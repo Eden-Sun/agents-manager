@@ -12,7 +12,8 @@ export function StatusCache({ botId, status }: { botId: string; status: CostStat
   // 狀態列的 status（codex 是推導出來的）才有沒有 context 的資訊；run.status 只有 claude 才有。
   const ctx = contextFallback({ ...input, status })
   const view = cacheView(input)
-  if (!ctx && !view) return null
+  const isCodex = input.kind === 'codex'
+  if (!ctx && !view && !isCodex) return null
   return (
     <>
       {ctx ? (
@@ -24,10 +25,10 @@ export function StatusCache({ botId, status }: { botId: string; status: CostStat
           </span>
         </span>
       ) : null}
-      {view ? (
-        <span className="sl-item" data-k={t('快取')} title={view.approx ? t('依 codex 的 rollout 推估，實際以 API 為準') : undefined}>
-          <span className="sl-k">{t('快取')}</span>
-          <span className="sl-v">{cacheLabel(view)}</span>
+      {isCodex || view ? (
+        <span className="sl-item" data-k={t('快取')} title={view?.approx ? t('依 codex 的 rollout 推估，實際以 API 為準') : undefined}>
+          <span className="sl-k">{isCodex ? 'codex' : t('快取')}</span>
+          <span className="sl-v">{isCodex ? t('必快取') : cacheLabel(view!)}</span>
         </span>
       ) : null}
     </>

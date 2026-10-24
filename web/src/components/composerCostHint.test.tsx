@@ -79,14 +79,14 @@ test('狀態列：claude 有 context 時只接「快取」欄（熱／已冷）'
   assert.equal(cacheItem()!.textContent, '快取已冷')
 })
 
-test('狀態列：codex 補 context 並標「約」', async () => {
+test('狀態列：codex 補 context 並固定提示必快取', async () => {
   seed({
     kind: 'codex', last: null,
     pc: { source: 'rollout_estimate', warm: true, expires_at: nowS() + 1200, recache_tokens_if_cold: 17_667, context_used_pct: 6.8, context_used_tokens: 17_667, context_size: 258_400 },
   })
   await mount(<StatusCache botId="b1" status={toStatusInfo({})} />)
   assert.equal(document.querySelector('.sl-item[data-k="context"]')!.textContent, 'context6.8% · 18k/258k')
-  assert.equal(cacheItem()!.textContent, '快取熱（約剩 20 分）')
+  assert.equal(cacheItem()!.textContent, 'codex必快取')
 })
 
 test('狀態列：grok 什麼都不加', async () => {
@@ -94,3 +94,16 @@ test('狀態列：grok 什麼都不加', async () => {
   await mount(<StatusCache botId="b1" status={toStatusInfo({})} />)
   assert.equal(document.querySelector('.sl-item'), null)
 })
+
+for (const agent of ['idle', 'working']) {
+  test(`Codex ${agent}：即使過期舊讀數或沒有讀數仍固定提示、不警示`, async () => {
+    for (const pc of [null, { source: 'rollout_estimate', warm: false, expires_at: nowS() - 7200 }]) {
+      seed({ kind: 'codex', last: minAgo(180), ttl: 3600, agent, pc })
+      await mount(<><StatusCache botId="b1" status={null} /><ComposerCostHint botId="b1" /></>)
+      assert.equal(cacheItem()!.textContent, 'codex必快取')
+      assert.equal(cacheItem()!.title, '')
+      assert.equal(warn(), null)
+      await unmountAll()
+    }
+  })
+}

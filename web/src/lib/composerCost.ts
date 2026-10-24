@@ -1,15 +1,6 @@
 /**
- * 送出代價的兩個顯示（UI-DECISIONS「快取狀態：狀態列常駐、輸入框只在冷時警示」）：純函式，不碰 DOM。
- *
- * 只做 claude 與 codex（grok 一律不顯示）：
- * - 狀態列（context 那段後面）：`快取 熱（剩 23 分）`／`快取 已冷`；codex 是 rollout 推估，字面加「約」；
- *   codex 沒有 statusLine，context 也由 `prompt_cache` 補進同一段格式。
- * - 輸入框：平常不顯示；**只有快取已冷、而且不在回合中**才出一行警示：`快取已過期，送出這則會重寫約 811K`。
- *
- * 資料：daemon 的 `run.prompt_cache` 有就一律用它（claude＝statusLine，codex＝rollout 推算）——`warm`／`expires_at`
- * 判熱冷與剩餘，冷了寫 `recache_tokens_if_cold`。舊 daemon 的 claude 退用 statusLine 原 JSON 裡的 `prompt_cache`；
- * 都沒有（舊版 claude、codex 還沒讀到 rollout）才退回 `cacheState`（`last_api_at`＋`cache_ttl_secs`）推算。
- * 回合進行中快取一直被刷新：一律熱，不顯示過期。
+ * 快取代價提示：Claude 依讀數／TTL 顯示熱冷；Codex 固定提示由 StatusCache 顯示，
+ * 不再用 rollout 的舊 TTL 推算過期或重寫警示。context 仍可使用 rollout token 讀數。
  */
 import { cacheState } from './cacheClock'
 import { solWindowApplies } from './codexContextWindow'
@@ -130,7 +121,7 @@ function fromPromptCache(pc: PromptCacheInfo, input: CacheInput, fallbackTokens:
 /** 這顆 bot 現在的快取狀態；grok、沒有任何資料回 null。 */
 export function cacheView(input: CacheInput): CacheView | null {
   const { kind, status, lastApiAt, ttlSecs, nowMs, working } = input
-  if (kind !== 'claude' && kind !== 'codex') return null
+  if (kind !== 'claude') return null
   const pc = input.promptCache ?? status?.prompt_cache ?? null
   const tokens = contextTokens(status, pc)
   const viaPc = pc ? fromPromptCache(pc, input, tokens) : undefined

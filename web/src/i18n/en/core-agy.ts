@@ -147,6 +147,7 @@ const dict: Dict = {
   '模式': 'Mode',
   '單次': 'Once',
   '固定間隔': 'Fixed interval',
+  '必快取': 'Always cached',
   '每天': 'Daily',
   '週一至週五': 'Monday to Friday',
   '每週': 'Weekly',

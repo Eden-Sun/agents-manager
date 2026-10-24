@@ -101,18 +101,12 @@ test('沒有 prompt_cache（舊版 claude）才退回 last_api_at＋ttl 推算',
   assert.equal(cacheView({ ...base, status: s, lastApiAt: null }), null)
 })
 
-// ---- codex：rollout 推估，標「約」；context 補進同一段 ----
-test('codex 熱：「熱（約剩 20 分）」；冷：「已冷（約）」，警示寫近似的重寫量', () => {
-  assert.equal(cacheLabel(cacheView(codex())!), '熱（約剩 20 分）')
-  const cold = cacheView(codex({ warm: false, expires_at: nowS - 30 * 60 }))!
-  assert.equal(cacheLabel(cold), '已冷（約）')
-  assert.equal(coldWarning(cold), '快取已過期，送出這則會重寫約 18K')
-})
-
-test('codex 沒有 TTL（cache 不會冷）：閒置再久都是「熱」，不寫剩幾分、不警示', () => {
-  const v = cacheView(codex({ warm: true, expires_at: null, ttl_secs: null }, { ttlSecs: null, lastApiAt: ago(600) }))!
-  assert.equal(cacheLabel(v), '熱')
-  assert.equal(coldWarning(v), null)
+// Codex 不再從 rollout 或時間推算熱冷，也不顯示過期警示。
+test('codex 不採用舊 TTL 與冷讀數發出過期警示', () => {
+  for (const input of [codex(), codex({ warm: false, expires_at: nowS - 30 * 60 }), codex({}, { working: true })]) {
+    assert.equal(cacheView(input), null)
+    assert.equal(coldWarning(cacheView(input)), null)
+  }
 })
 
 test('codex 的 context 補進狀態列同一段格式；claude 已有 context 就不重複', () => {
@@ -132,8 +126,8 @@ test('gpt-6.1-sol：context 整段由 StatusLineBar 畫，contextFallback 不重
   assert.deepEqual(contextFallback(codex({ context_used_pct: 16, context_used_tokens: 73_000, context_size: 475_000 }, { kind: 'claude', model: 'gpt-6.1-sol' })), { pct: '16%', detail: '73k/475k' })
 })
 
-test('codex 還沒讀到 rollout：沒有 prompt_cache 就退回推算；都沒有就不畫', () => {
-  assert.equal(cacheView({ ...codex(), promptCache: null, lastApiAt: ago(125) })!.state, 'cold')
+test('codex 沒有 rollout 或只有舊 TTL 都不推算熱冷', () => {
+  assert.equal(cacheView({ ...codex(), promptCache: null, lastApiAt: ago(125) }), null)
   assert.equal(cacheView({ ...codex(), promptCache: null }), null)
 })
 
