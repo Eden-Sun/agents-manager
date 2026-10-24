@@ -25,12 +25,16 @@ export function UpdateChangelog({
   host,
   from,
   to = null,
+  autoTranslate = false,
 }: {
   kind: string
   host: string
   from: string | null
   /** 已知的目標版本；codex 的更新是 TUI 當場問的、磁碟上還是舊版，只能從畫面讀。 */
   to?: string | null
+  /** 只有 install／upstream 類的框開這個（#1948）：開框 absent 自動補翻、退避到期自動再試。
+   *  per-bot 的 badge（running→installed）不開，只留按鈕，避免幾顆 bot 各付一次。 */
+  autoTranslate?: boolean
 }) {
   const t = useT()
   // 以「這次請求的 key」配對結果：key 換了就等於重新載入，不必在 effect 裡同步清狀態。
@@ -97,25 +101,24 @@ export function UpdateChangelog({
   // 自動翻（#1948）：每個 key 在這個框裡最多自動送一次 absent；之後的失敗靠下面的退避計時再試。
   // 帳本在 daemon，同一份內容就算重開框也只會送一次（指紋去重）。
   const [autoSentKey, setAutoSentKey] = useState<string | null>(null)
-  const shouldAuto = shouldAutoTranslate(view, autoSentKey === key)
+  const shouldAuto = autoTranslate && shouldAutoTranslate(view, autoSentKey === key)
   useEffect(() => {
     if (!shouldAuto) return
     setAutoSentKey(key)
     void postTranslation(kind, host, from, to).then((next) => setTr({ key, view: next }))
   }, [shouldAuto, key, kind, host, from, to])
 
-  // 失敗後退避到期自動再試一次（沒有使用者上限時）。計時器隨框卸載清掉；每次回應都會換一個新的 retryAfter。
-  const autoRetryMs = autoRetryDelay(view, Date.now())
-  const autoRetryAt = view?.status === 'failed' ? view.retryAfter : null
+  // 退避到期自動再試（沒有使用者上限時）。每收到一次回應就依 retry_after 重算剩餘時間：
+  // 瀏覽器時鐘快、daemon 還在退避時，回來的還是同一個未來時間，這裡照樣重排，不會停住；地板值擋住緊密迴圈。
   useEffect(() => {
-    if (autoRetryMs === null) return
+    if (!autoTranslate) return
+    const ms = autoRetryDelay(view, Date.now())
+    if (ms === null) return
     const id = setTimeout(() => {
       void postTranslation(kind, host, from, to).then((next) => setTr({ key, view: next }))
-    }, autoRetryMs)
+    }, ms)
     return () => clearTimeout(id)
-    // autoRetryMs 每次 render 都會變，只跟「哪個 retryAfter」對齊才重排。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRetryAt, key, kind, host, from, to])
+  }, [view, autoTranslate, key, kind, host, from, to])
 
   const reply = state?.key === key ? state.reply : null
   if (!reply) {

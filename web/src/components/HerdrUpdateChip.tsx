@@ -91,7 +91,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
           <>
             {open ? (
               <div className="update-split">
-                <UpdateChangelog kind="herdr" host={host ?? 'local'} from={from} to={target} />
+                <UpdateChangelog kind="herdr" host={host ?? 'local'} from={from} to={target} autoTranslate />
                 <AgmReviewBox kind="herdr" host={host ?? 'local'} from={from} to={target} refreshKey={reviewKey} />
               </div>
             ) : null}

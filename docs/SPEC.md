@@ -3069,10 +3069,11 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   - **觸發**：`runners/upstream_update.rs` 的偵測迴圈（`upstream_update::tick`）推出 `notify:"update"` 的那一筆時，`changelog_translate::kick_detected` 在背景對 installed→target 那一段送一次（`auto_kick`，不經 HTTP，跟 `POST` 走同一個 `decide()`）。from＝磁碟上最舊的已安裝版，to＝`target_version`（沒有就上游最新版）。
   - **kind 範圍**：五種都自動翻：`claude`、`codex`、`herdr`、`agy`、`grok`（都有 changelog 來源，見 `changelog::feed_url`）。某 kind 抓不到 changelog 就安靜不送，不算失敗。
   - **去重**：同一 `(kind, from→to)` 同一份內容只翻一次（指紋去重，完成不重送）。背景翻與開框補翻共用同一份帳本，不會各打一次。
-  - **開框補翻**：`absent` 且 `auto` 開著、這個 key 還沒送過，前端自動 `POST` 一次，不必按。`GET` 仍只讀。`GET`／`POST` 回應都帶 `auto`。
+  - **開框補翻**：只有 install／upstream 類的框自動送（`ClaudeInstallChip`、`HerdrUpdateChip`、`UpstreamChangelogBox`，帶 `autoTranslate`）。`absent` 且 `auto` 開著、這個 key 還沒送過，前端自動 `POST` 一次，不必按。per-bot 的 badge（`UpdateBadge`、`UpdateQuotaChip`、`CodexInstallChip`、`CodexUpdateHint`，區間是 bot 正在跑的版本→磁碟上的版本）**不自動送**，只留手動按鈕，免得幾顆 bot 各付一次。`GET` 仍只讀。`GET`／`POST` 回應都帶 `auto`。
+  - **覆蓋重用（#1948 review）**：算出 plan 後若本指紋 `absent`，先找 scope 相同（prompt 版、kind、lang、model、effort、輸入上限）、已完成、而且請求的**每一個**版本原文 sha256 都相同、譯文都在的帳本，直接組出那些版本的 `sections` 回 `completed`（`reused:true`、`summary` 留空），不送 API、不記新 attempt、不扣 hourly／attempts／in_flight。部分涵蓋不算，任一段缺或正文改了就走原流程。背景翻 (A,C] 之後，前端 (B,C]、(A,B] 都直接用；多一個未翻的新版 (A,D] 照常送。舊帳本沒有 scope，不被重用。
   - **費用**：每次送出都記共用帳本（用途 `changelog_translate`），仍受 `max_in_flight` 與（若有設）`max_per_hour` 約束。預算擋下就靜默放棄，之後開框或退避到期再試。
   - 按鈕（`POST`）不因 `auto` 而改變，`auto = false` 時只剩按鈕。
-- **不上限時的煞車（#1948）**：`max_per_hour`、`max_attempts` 預設 `0`＝不上限（使用者 2026-10-24「預設不上限」）；只有使用者明寫正數才會到上限。不上限時只靠三道擋緊密迴圈：(1) 指紋去重；(2) `max_in_flight` 維持原設定；(3) 失敗退避：連續失敗 1 分、5 分、30 分，之後封頂 1 小時（`backoff_secs`），429 仍用 `Retry-After`。`GET`、前端輪詢與 `POST` 在退避沒到期前都不送。退避到期時前端自動再 `POST` 一次（需 `auto` 開著）；使用者自設上限用盡（`error:"attempts"`）才停下來只給「再試一次」。
+- **不上限時的煞車（#1948）**：`max_per_hour`、`max_attempts` 預設 `0`＝不限（0 是不限，不是一次都不准；hourly 與 attempts 各有測試）（使用者 2026-10-24「預設不上限」）；只有使用者明寫正數才會到上限。不上限時只靠三道擋緊密迴圈：(1) 指紋去重；(2) `max_in_flight` 維持原設定；(3) 失敗退避：連續失敗 1 分、5 分、30 分，之後封頂 1 小時（`backoff_secs`），429 仍用 `Retry-After`。`GET`、前端輪詢與 `POST` 在退避沒到期前都不送。退避到期時前端自動再 `POST` 一次（需 `auto` 開著，且只在 install／upstream 框）；使用者自設上限用盡（`error:"attempts"`）與預算擋下（`error_kind:"budget"`：`in_flight`、`hourly`）都**不自動重 POST**，停下來等人按「再試一次」或預算恢復，原因用 `ERROR_LABEL` 顯示。時鐘偏差：每收到一次回應就依 `retry_after` 重算剩餘時間，仍在未來就重排，地板 5 秒擋緊密迴圈。
 - **只有按鈕或 auto 才送**。`GET` 只讀狀態（開視窗、輪詢、再查一次都不送出）。`POST` 開始或重試。兩條都是 User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。自動送出是 daemon 內部呼叫，不經 HTTP。
 - **同一份內容只翻一次**。帳本是 `{data_dir}/changelog-translate/{fingerprint}.json`（0600），不進 SQLite，所以不升 `SCHEMA_VERSION`。fingerprint 是下面這段 canonical 字串的 sha256 hex。host 不在裡面。kind、語言、模型、effort、輸入上限、prompt 版或正文變了就是另一個鍵。多台 host 同一 kind、同一段原文共用一筆。
 

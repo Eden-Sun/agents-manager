@@ -311,7 +311,7 @@ test('auto 開著、absent：開框自動 POST 一次，不必按；之後 rende
     if (pathname === '/api/changelog/translation') return { enabled: true, auto: true, status: 'absent', error: null, summary: [], sections: [] }
     return {}
   })
-  await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
   await until(() => posts.length === 1, '自動送出一次')
   await settle(50)
   assert.equal(posts.length, 1, '同一個 key 只自動送一次')
@@ -329,7 +329,7 @@ test('auto 關著、absent：開框不送，還是要按', async () => {
     if (pathname === '/api/changelog/translation') return { enabled: true, auto: false, status: 'absent', error: null, summary: [], sections: [] }
     return {}
   })
-  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
   await until(() => root.querySelector('button')?.textContent === '翻譯', '翻譯鈕')
   await settle(50)
   assert.equal(posts.length, 0)
@@ -352,7 +352,7 @@ test('auto 開著、失敗：退避到期自動再 POST 一次，不必按', asy
       }
       return {}
     })
-    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
     await vt.waitFor(() => root.textContent?.includes('自動完成') === true, '退避後自動完成', 8000)
     assert.equal(posts.length, 1, '退避到期只再送一次，不靠按鈕')
   } finally {
@@ -374,7 +374,7 @@ test('auto 開著但次數用盡（attempts）：不自動再送，只剩「再�
       }
       return {}
     })
-    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
     await vt.waitFor(() => root.textContent?.includes('再試一次') === true, '再試', 3000)
     await vt.tick(4_000_000)
     assert.equal(posts.length, 0, '使用者自設上限用盡就不自動再送')
@@ -403,4 +403,68 @@ test('退避計時：到期才再試，地板 5 秒，次數用盡與關 auto �
   assert.equal(autoRetryDelay({ ...failed, auto: false }, now), null)
   assert.equal(autoRetryDelay({ ...failed, status: 'completed' }, now), null)
   assert.equal(autoRetryDelay({ ...failed, retryAfter: null }, now), null)
+})
+
+test('badge（沒開 autoTranslate）即使 auto 開著、absent 也不自動送，只留按鈕', async () => {
+  const posts: string[] = []
+  fakeApi((req) => {
+    const { pathname } = pathOf(req.path)
+    if (pathname === '/api/changelog') return CHANGELOG
+    if (pathname === '/api/changelog/translation' && req.method === 'POST') posts.push('POST')
+    if (pathname === '/api/changelog/translation') return { enabled: true, auto: true, status: 'absent', error: null, summary: [], sections: [] }
+    return {}
+  })
+  const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />)
+  await until(() => root.querySelector('button')?.textContent === '翻譯', '翻譯鈕')
+  await settle(50)
+  assert.equal(posts.length, 0, 'per-bot 的框不自動付費')
+})
+
+test('自動再試時 retry_after 沒變（時鐘偏差）仍會重排，不會停住', async () => {
+  const vt = virtualTime()
+  try {
+    const posts: string[] = []
+    const soon = new Date(vt.base + 400).toISOString()
+    fakeApi((req) => {
+      const { pathname } = pathOf(req.path)
+      if (pathname === '/api/changelog') return CHANGELOG
+      if (pathname === '/api/changelog/translation' && req.method === 'POST') {
+        posts.push('POST')
+        if (posts.length === 1) return { enabled: true, auto: true, status: 'failed', error: 'timeout', retry_after: soon, summary: [], sections: [] }
+        return { enabled: true, auto: true, status: 'completed', summary: ['第二次完成', '第二點', '第三點'], sections: [{ version: '2.1.5', body: '繁中 2.1.5' }], coverage: 'full', error: null }
+      }
+      if (pathname === '/api/changelog/translation') {
+        return { enabled: true, auto: true, status: 'failed', error: 'timeout', retry_after: soon, summary: [], sections: [] }
+      }
+      return {}
+    })
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
+    await vt.waitFor(() => root.textContent?.includes('第二次完成') === true, '重排後再送', 12_000)
+    assert.equal(posts.length, 2, '第一次回應的 retry_after 相同，仍靠地板值重排一次')
+  } finally {
+    vt.restore()
+  }
+})
+
+test('預算擋下（in_flight）不排計時重打，只留按鈕', async () => {
+  const vt = virtualTime()
+  try {
+    const posts: string[] = []
+    const soon = new Date(vt.base + 2000).toISOString()
+    fakeApi((req) => {
+      const { pathname } = pathOf(req.path)
+      if (pathname === '/api/changelog') return CHANGELOG
+      if (pathname === '/api/changelog/translation' && req.method === 'POST') posts.push('POST')
+      if (pathname === '/api/changelog/translation') {
+        return { enabled: true, auto: true, status: 'failed', error_kind: 'budget', error: 'in_flight', retry_after: soon, summary: [], sections: [] }
+      }
+      return {}
+    })
+    const root = await mount(<UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" autoTranslate />)
+    await vt.waitFor(() => root.textContent?.includes('再試一次') === true, '再試鈕', 3000)
+    await vt.tick(60_000)
+    assert.equal(posts.length, 0, '預算擋下不由計時器重打')
+  } finally {
+    vt.restore()
+  }
 })

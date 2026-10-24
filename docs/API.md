@@ -2595,6 +2595,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 跟上一節的 changelog 分開。`GET` 只回狀態，不排隊、不打翻譯 API。`POST` 才是使用者按翻譯、「再試一次」，或前端的 `auto` 補翻／退避到期再試；同一條路徑，沒有第二條。業務狀態一律 200 JSON。PUT／PATCH／DELETE 沒有登記。目標語言來自 `[changelog_translate].lang`（預設 `zh-Hant`），不是寫死在 prompt。允許 `zh-Hant`、`zh-Hans`、`en`、`ja`、`ko`；空字串當 `zh-Hant`。prompt 只用這張表的固定語言名。不在表上：`failed`、`error:"lang"`、`error_kind:"bad_format"`，不打 API、不寫 attempt。快取鍵含這個 `lang`，不同語言不共用一筆，同一語言仍去重。回應的 `lang` 就是寫進 prompt 的那個標籤。
 
 - 設定 `[changelog_translate]` 預設 `enabled = false`。關掉，或 key 檔不存在／權限不對：`status:"unconfigured"`、`error:null`。不回 key、不回路徑。畫面不畫翻譯鈕、也不畫錯誤。之後若曾翻完，帶了 `to` 的 `GET` 仍可回那筆 `completed`。
+- `reused`（bool，只有覆蓋重用時為 `true`）：這次直接用同 scope、各版原文相同的既有譯文，沒送 API、沒記 attempt、沒扣預算；`summary` 留空。
 - `auto`（bool，`GET` 與 `POST` 都回）：`[changelog_translate] auto`，預設 `true`。前端只在 `absent`、`auto` 開著、這個 key 還沒送過時自動 `POST` 一次；`failed` 且 `error` 不是 `attempts` 時，退避到期（`retry_after`）自動再 `POST` 一次。
 - `absent`：有開、key 讀得到、這份內容還沒翻。`skipped`：changelog 本身抓不到。`reserved`／`in_flight`：這一筆正在進行，輪詢 `GET` 不會再開一筆。
 - `completed` 帶 `summary`（3–5 點）、`sections`（只含實際送出的版本）與 `lang`（這次 prompt 的目標語言）。有省略或正文被截斷時 `coverage:"partial"`、`truncated_input:true` 只在正文被切斷時。失敗與中斷是 `failed`／`interrupted`，`error` 是短代碼（`timeout`、`rate_limited`、`http`、`missing_usage`、`schema`、`sections`、`summary`、`max_tokens`、`refusal`、`stop`、`ledger`、`restart`、`not_sent`、`in_flight`、`hourly`、`attempts`、`lang`），`error_kind` 是 `timeout`／`rate_limited`／`bad_format`／`budget`／`http`。不回上游內文。`lang` 這個錯誤是設定的語言不在允許表，沒有扣費。

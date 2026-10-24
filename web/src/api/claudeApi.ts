@@ -76,7 +76,7 @@ const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const mockUses = (): ClaudeApiUse[] => [
   { id: 'changelog_review', label: L('AGM 解析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null }, // i18n-ignore：假資料
-  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, legacy_section: 'changelog_translate' }, // i18n-ignore：假資料
+  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 0, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 0, legacy_section: 'changelog_translate' }, // i18n-ignore：假資料
 ]
 /** 延後建立：示範文字依語言，要等 `?lang=` 套用後才取。 */
 let mockStateValue: ClaudeApiSettings | null = null
