@@ -1097,7 +1097,7 @@ async fn prompt_inner(
     let codex_on = want_send_now && bot.kind == "codex" && app.cfg().get().await.codex.instant_interrupt;
     let gate = want_send_now.then(|| {
         let codex_running = app.codex_running_version(&run.id);
-        send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on)
+        send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on, run.codex_instant_interrupt == Some(1))
     });
     let (refused, send_now_mode) = match gate {
         Some(Err(r)) => (Some(r), None),
@@ -3242,10 +3242,14 @@ mod send_now_tests {
         sqlx::query_scalar("SELECT sent_via FROM messages WHERE id=? AND role='user'").bind(message_id).fetch_one(&f.env.app.db).await.unwrap()
     }
 
-    /// issue #748：一顆 codex 的 run。`version` 是巡邏從畫面讀到的跑著的版本，`flag` 是 `[codex] instant_interrupt`。
+    /// issue #748：一顆 codex 的 run。`version` 是巡邏從畫面讀到的跑著的版本，`flag` 是 `[codex] instant_interrupt`；
+    /// 旗標開時當成這個 run 是旗標開著之後才起的（`runs.codex_instant_interrupt = 1`）。
     /// 沒有 native session：送達證據走一列回音，不去翻真的 ~/.codex。
     async fn codex_fixture(version: Option<&str>, flag: bool) -> Fixture {
         let f = fixture("codex", None).await;
+        if flag {
+            sqlx::query("UPDATE runs SET codex_instant_interrupt = 1 WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        }
         sqlx::query("UPDATE runs SET native_session_id = NULL, transcript_path = NULL WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
         f.env.herdr.live_pane("pane-sn", tt::LivePane { width: Some(120), codex: true, ..Default::default() });
         if let Some(v) = version {
@@ -3273,6 +3277,35 @@ mod send_now_tests {
         assert_eq!(body["send_now_refused"], "send_now_unsupported_kind", "{body}");
         assert_eq!(typed(&f), 0, "沒插隊就一個字都不打");
         assert_eq!(status_of(&f, &running).await, "in_flight");
+    }
+
+    /// 旗標開，但 run 啟動時沒帶 instant_interrupt 參數（NULL＝旗標打開前就起的／adopt 來的、0＝起的時候旗標關著）：
+    /// 409 `send_now_codex_restart_needed`、訊息講「重啟這顆 bot」，一個字都不打、回合照跑。
+    #[tokio::test]
+    async fn a_codex_run_launched_without_the_flag_is_refused_with_restart_needed() {
+        for (stamp, crid) in [(None, "cx-null"), (Some(0), "cx-zero")] {
+            let f = codex_fixture(Some("0.164.0"), true).await;
+            sqlx::query("UPDATE runs SET codex_instant_interrupt = ? WHERE id = ?").bind(stamp).bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+            let running = busy(&f).await;
+            let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", crid, &[], None).await.unwrap_err();
+            let LcError::Conflict(body) = err else { panic!("{err:?}") };
+            assert_eq!(body["send_now_refused"], "send_now_codex_restart_needed", "{stamp:?}: {body}");
+            assert!(body.to_string().contains("重啟這顆 bot"), "{body}");
+            assert_eq!(typed(&f), 0, "沒插隊就一個字都不打");
+            assert_eq!(status_of(&f, &running).await, "in_flight");
+        }
+    }
+
+    /// 旗標關（預設）時 run 記了什麼都不影響：就算啟動時帶了參數（1），send_now 仍是以前的 `send_now_unsupported_kind`。
+    #[tokio::test]
+    async fn the_launch_stamp_changes_nothing_while_the_canary_is_off() {
+        let f = codex_fixture(Some("0.164.0"), false).await;
+        sqlx::query("UPDATE runs SET codex_instant_interrupt = 1 WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        busy(&f).await;
+        let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-off-1", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["send_now_refused"], "send_now_unsupported_kind", "{body}");
+        assert_eq!(typed(&f), 0);
     }
 
     /// 旗標開、版本夠：字打進忙碌的 pane，併進同一個回合——舊回合不收、不建新回合，泡泡掛在被 steer 的回合上，

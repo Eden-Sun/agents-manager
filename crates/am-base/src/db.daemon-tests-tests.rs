@@ -775,6 +775,44 @@
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// issue #748：v67 的 DB（還沒有 `runs.codex_instant_interrupt`）開起來補上這一欄，舊列是 NULL（＝沒記），其他資料不丟。
+    /// fixture 是這裡新造的 DB（不是正式 DB 的複本），測完整個目錄刪掉。
+    #[tokio::test]
+    async fn a_v67_database_gains_runs_codex_instant_interrupt_as_null() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-codex-ii-{}", ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v67.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','codex','t',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,native_session_id,launch_rev,started_at) VALUES ('r','b','running','working','sid-1','rev-1',?)")
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+            // 做成 v67 的形狀：這一欄還不存在、版本號停在 67。
+            sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&pool).await.unwrap();
+            sqlx::query("PRAGMA user_version = 67").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "runs", "codex_instant_interrupt").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("v67 的 DB 照常開起來");
+        assert!(has_column(&pool, "runs", "codex_instant_interrupt").await.unwrap(), "開的時候補上");
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let r = active_run(&pool, "b").await.unwrap().expect("舊列還在");
+        assert_eq!(r.codex_instant_interrupt, None, "舊列沒記＝NULL");
+        assert_eq!(
+            (r.state.as_str(), r.agent_status.as_str(), r.native_session_id.as_deref(), r.launch_rev.as_deref()),
+            ("running", "working", Some("sid-1"), Some("rev-1")),
+            "舊資料不丟"
+        );
+        assert_eq!(bot(&pool, "b").await.unwrap().expect("bot 還在").kind, "codex");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// 「這台有哪些身份在跑」（claude 探測拿它當登入證據）看的是 run 實際的身份（#238）：改了設定還沒重啟的是舊的那個；
     /// run 沒記的照 bot 設定的；起來時沒有身份的不算。
     #[tokio::test]

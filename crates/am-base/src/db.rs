@@ -460,6 +460,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (66, "47e922c6f2ab97d9"),
     // #1892: persist the terminal instance used to reconnect adopted child runs.
     (67, "14ee6138116e5ba4"),
+    // issue #748: `runs.codex_instant_interrupt`（codex 啟動時帶了 instant_interrupt 參數沒有）。
+    (68, "26359d939fbd1275"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -711,6 +713,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // issue #1035：run 啟動時所在的遠端主機與它的主機世代；NULL＝本機或舊列（不檢查）。
         ("runs", "host", "ALTER TABLE runs ADD COLUMN host TEXT"),
         ("runs", "host_generation", "ALTER TABLE runs ADD COLUMN host_generation INTEGER"),
+        // issue #748：啟動 codex 時有沒有帶 `-c features.instant_interrupt=true`（1／0）；NULL＝沒記（舊列、adopt 來的）。
+        ("runs", "codex_instant_interrupt", "ALTER TABLE runs ADD COLUMN codex_instant_interrupt INTEGER"),
         // 保溫回合（`client_request_id` 以 `keep-warm:`／舊的 `keepalive:` 開頭）留下的訊息＝1：網頁淡化、未讀不計。
         // 新訊息由下面的 trigger 蓋，舊列由下面的回填補。
         ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
@@ -1365,6 +1369,10 @@ pub struct Run {
     /// 已落庫的 live runtime revision；等同 revision 的 `launch_rev` stamp 完成後清除。
     #[sqlx(default)]
     pub live_rev: Option<String>,
+    /// issue #748：啟動 codex 時帶了 `-c features.instant_interrupt=true`＝1、沒帶＝0；NULL＝沒記（升版前的舊列、adopt 來的）。
+    /// `[codex] instant_interrupt` 開著時，不是 1 的 run 不放行 codex steer（`send_now_codex_restart_needed`）。
+    #[sqlx(default)]
+    pub codex_instant_interrupt: Option<i64>,
 }
 
 impl Run {

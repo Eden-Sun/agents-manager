@@ -1221,6 +1221,16 @@ async fn stage_persona(
     }
 }
 
+/// issue #748：codex 啟動時要不要帶 `-c features.instant_interrupt=true`。`[codex] instant_interrupt` 開著才帶；
+/// 受限的分享 bot 不帶（它的參數由籠子決定）。回傳空＝沒帶，`runs.codex_instant_interrupt` 照這個結果記 0／1。
+pub(crate) fn codex_instant_interrupt_args(flag_on: bool, restricted: bool) -> Vec<String> {
+    if flag_on && !restricted {
+        vec!["-c".into(), "features.instant_interrupt=true".into()]
+    } else {
+        Vec::new()
+    }
+}
+
 fn start_inner<'a>(
     app: &'a impl StartContext,
     bot: &'a db::Bot,
@@ -1368,6 +1378,16 @@ async fn start_inner_body(
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
         args.extend(identity_args_v);
         args.extend(bot.args());
+    }
+    // issue #748：`[codex] instant_interrupt` 開著才替 codex 打開它那一側的 instant_interrupt；進了 argv 才記 1，
+    // 記錄跟 argv 出自同一個判斷（send_now 的閘門靠它分辨「這個 run 起的時候有沒有帶」）。寫不進去只記 log：
+    // 欄位留 NULL，閘門會回 restart_needed（不賭），不擋啟動。
+    if bot.kind == "codex" {
+        let ii = codex_instant_interrupt_args(app.cfg().get().await.codex.instant_interrupt, restricted.is_some());
+        if let Err(e) = sqlx::query("UPDATE runs SET codex_instant_interrupt = ? WHERE id = ?").bind(i64::from(!ii.is_empty())).bind(run_id).execute(app.db()).await {
+            tracing::warn!(bot = %bot.name, error = %e, "could not record whether codex was launched with instant_interrupt");
+        }
+        args.extend(ii);
     }
 
     // Reopen only: resolve the previous native session after preflight. The requested id is
@@ -2477,6 +2497,40 @@ mod resume_args_tests {
             assert_eq!(status["_agm_context_invalidated"], "context-A");
             stop_bot(&e.app, &bot.id).await.unwrap();
         }
+    }
+
+    /// issue #748：`[codex] instant_interrupt` 開著才在 argv 帶 `-c features.instant_interrupt=true`，`runs.codex_instant_interrupt`
+    /// 照「argv 有沒有帶」記 1／0（同一個判斷）；預設關＝不帶、記 0。claude 不帶也不記（NULL）。
+    #[tokio::test]
+    async fn codex_start_carries_instant_interrupt_only_with_the_canary_on_and_records_it() {
+        use crate::capabilities::Cfg;
+        let flag = |a: &Vec<String>| a.windows(2).any(|w| w == ["-c", "features.instant_interrupt=true"]);
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex-ii").await;
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL WHERE id=?").bind(&bot.id).execute(e.app.db()).await.unwrap();
+        for on in [false, true] {
+            e.app.cfg().update(move |c| { c.codex.instant_interrupt = on; Ok(()) }).await.unwrap();
+            start_bot(&e.app, &bot.id).await.unwrap();
+            let args = started_args(&e).pop().unwrap();
+            let run = db::active_run(e.app.db(), &bot.id).await.unwrap().unwrap();
+            assert_eq!(flag(&args), on, "旗標 {on}：{args:?}");
+            assert_eq!(run.codex_instant_interrupt, Some(i64::from(on)), "DB 跟 argv 同一個判斷");
+            stop_bot(&e.app, &bot.id).await.unwrap();
+        }
+        let claude = claude_bot(&e.app, &e.project_id, "claude-ii").await;
+        start_bot(&e.app, &claude.id).await.unwrap();
+        assert!(!flag(&started_args(&e).pop().unwrap()), "只有 codex 帶");
+        assert_eq!(db::active_run(e.app.db(), &claude.id).await.unwrap().unwrap().codex_instant_interrupt, None);
+        stop_bot(&e.app, &claude.id).await.unwrap();
+    }
+
+    /// 受限的分享 bot 不帶這個參數（參數由籠子決定），記 0；旗標關也是空。
+    #[test]
+    fn the_instant_interrupt_args_follow_the_flag_and_skip_restricted_bots() {
+        assert_eq!(super::codex_instant_interrupt_args(true, false), vec!["-c", "features.instant_interrupt=true"]);
+        assert!(super::codex_instant_interrupt_args(true, true).is_empty());
+        assert!(super::codex_instant_interrupt_args(false, false).is_empty());
+        assert!(super::codex_instant_interrupt_args(false, true).is_empty());
     }
 
     #[tokio::test]

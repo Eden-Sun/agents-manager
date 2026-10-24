@@ -1724,12 +1724,18 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
    - **泡泡標「插隊」**：真的要打斷一個回合（`send_now: "interrupted"` 那條路）時，新那一則的 user Message 寫 `sent_via = 'send_now'`；
      閒著時按插隊就是一般送出，不標。
-   - **codex steer**（issue #748，**預設關的 canary**）：`[codex] instant_interrupt = true` ＋ 這個 run 跑著的 codex ≥ `0.159.0`
+   - **codex steer**（issue #748，**預設關的 canary**）：`[codex] instant_interrupt = true` ＋ 這個 run 啟動時帶了
+     `-c features.instant_interrupt=true`（`runs.codex_instant_interrupt = 1`）＋ 跑著的 codex ≥ `0.159.0`
      （`codex_update::running_version_of`，巡邏從畫面版本行讀到的；沒讀到＝不賭）才放行（`send_now::gate` → `Mode::CodexSteer`）。
-     旗標關＝跟以前一樣 `send_now_unsupported_kind`；版本不夠／不明＝`send_now_codex_too_old`／`send_now_codex_version_unknown`。
+     旗標關＝跟以前一樣 `send_now_unsupported_kind`（不看 run 記了什麼）；版本不夠／不明＝`send_now_codex_too_old`／`send_now_codex_version_unknown`；
+     旗標開但 run 不是帶參數起的（0、NULL＝旗標打開前就起的、adopt 來的、升版前的舊列）＝`send_now_codex_restart_needed`，訊息請使用者重啟這顆 bot。
+     **啟動參數**：旗標開著時 daemon 啟動 codex 一律加 `-c features.instant_interrupt=true`（受限的分享 bot 除外），同一個判斷決定
+     `runs.codex_instant_interrupt` 記 1 或 0（argv 有帶才是 1）；非 codex 的 run 不記（NULL）。旗標關＝不加參數，codex 用它自己的預設。
      **採用的是 TUI `instant_interrupt`，不是 app-server `turn/steer`**：daemon 不開第二條 app-server 連線去碰 TUI 的 thread（沒有證據另一個
      app-server process 能控制目前 TUI 的 active turn，也不該硬橋）；daemon 只做一般的「打字＋Enter」，由 codex 自己把字 steer 進進行中的回合
-     （codex 那一側要另外開 `instant_interrupt`，沒開就只是排進它的輸入佇列）。語意跟 claude 不同、不套「舊回合 failed＋新回合」：
+     （codex **0.163.0** 起 `instant_interrupt` 預設開〔openai/codex#51812〕，`codex features list` 仍標 under development；
+     mid-turn 送出併進進行中回合的 `steer` 已是常駐行為〔feature 標 removed、值 true〕。0.159–0.162 要另外開，所以旗標開時 daemon 一律帶上面的參數）。
+     語意跟 claude 不同、不套「舊回合 failed＋新回合」：
      **不按任何特殊鍵、不收舊回合、不建新回合**，字走一般送出的圍籬（框裡有草稿就 `composer_busy`）與證據（rollout 計數，證不出來誠實回 `unknown`），
      成功後記成**被 steer 回合的補充訊息**（`sent_via='supplement'`，第 10 點），回 `send_now: "steered"`、`turn_id` 是被 steer 的那一回合。
      沒有回合在飛＝照一般送出（`idle`）。沒帶 `send_now` 的 prompt、`queue_if_busy` 完全不變。
@@ -1737,8 +1743,9 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      文字的 SHA-256、`delivery`、`message_id`；#916）認出字已在 pane、**不再打**，跨 daemon 重啟；同一個 request id 帶不同文字回 409。打字**之前**先寫一列
      `delivery='pending'`（寫不進去就不打），打完改成送達結果；一個字都沒進 pane 的（`NotAttempted`）撤掉那一列、可原樣重送；`pending` 的列重送時當 `unknown`、不重打。
      記憶體只是快取（滿了淘汰一筆）。列留 7 天，下一次 steer 時順手清。訊息寫不進 DB
-     回 `503 send_now_state_uncommitted`（`sent:true`），重送只補記。**已知限制**：canary 的真機驗證
-     （working 中的 steer 是否被立即讀取、rollout 只出現一次、舊 turn 不被誤收）還沒做，所以旗標預設關。
+     回 `503 send_now_state_uncommitted`（`sent:true`），重送只補記。**已知限制**：直接操作 TUI 的 canary（0.164.0）證實串流中插話會截斷原輸出、
+     落在同一個 turn、rollout 只出現一次；但經過 AGM 的端到端、回合交界（插話到時回合剛收尾，codex 會開新 turn）與工具執行中的時機
+     還沒驗（issue #748 Phase A′），所以旗標預設關。
 10. **補充**（使用者 2026-09-28：「插隊或補充都要寫在右邊的對話窗，因為也是一種發出的訊息」）：`POST /bots/:id/text` 帶 `record: true`
     （網頁鎖條上的「補充」）。不建新回合，字直接打進 pane；打字（含 Enter）成功後**同一把 bot 鎖裡**把它記成這個 run 進行中回合的
     user Message（`source=web`、`sent_via='supplement'`、掛那一筆的 `turn_id`）並推 `message_added`。沒有進行中的回合不記（CLI 會開新的一輪，

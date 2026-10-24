@@ -703,6 +703,7 @@ daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則�
 | `send_now_version_unknown` | statusLine 還沒回報版本，不賭那顆鍵 |
 | `send_now_codex_too_old` | 旗標開著，但這個 run 跑的 codex 比 0.159.0 舊 |
 | `send_now_codex_version_unknown` | 旗標開著，但還沒讀到這個 run 的 codex 版本，不賭 |
+| `send_now_codex_restart_needed` | 旗標開著，但這個 run 啟動時沒帶 `-c features.instant_interrupt=true`（`runs.codex_instant_interrupt` 不是 1：旗標打開前就起的、adopt 來的、升版前的舊 run），不知道 codex 那一側開了沒有，不賭。**解法：重啟這顆 bot**（`send_now_message` 也這樣講），重啟後就會帶上參數。旗標關著時不會出現這個代碼 |
 
 `send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。
 
@@ -2538,7 +2539,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 |---|---|
 | `agent_title` | herdr `agent.list` 的 `terminal_title_stripped`（agent 自己替工作取的名字）。herdr 沒有標題事件，daemon 每 4 秒輪詢，變了才寫並推；run 用 host＋herdr session＋`pane_id` 對應（不看 agent 名，改名不影響、跨 host 同 pane id 不會寫錯，#1797）。前後的 `-` 去掉；只是 CLI 名字（`Claude Code`、`codex`）當 `null`。run 結束不清，UI 只在 run 活著時讀 |
 | `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。claude 是這份輸出，沒設 `statusLine.command` 為 `null`；**codex** 是 daemon 每 60 秒讀 pane 底部的模型列（`<model> <effort> · <cwd> · Context N% used · …`，去掉右側 `⚠ N warning` 段，#1671）；變了才寫 |
-| `send_now_supported` | run 的即時計算布林值（#1672），GET `/api/state` 與 WS `bot_status` 都帶；沿用 prompt 的 send-now 閘門：claude 執行版本 ≥ 2.1.275，或 `[codex] instant_interrupt` 開且執行版本 ≥ 0.159.0。版本未知／不支援的 kind 為 false；舊 daemon 未帶時前端當 false。僅表示功能支援，送出時仍重新檢查回合與送達狀態 |
+| `send_now_supported` | run 的即時計算布林值（#1672），GET `/api/state` 與 WS `bot_status` 都帶；沿用 prompt 的 send-now 閘門：claude 執行版本 ≥ 2.1.275，或 `[codex] instant_interrupt` 開、這個 run 啟動時帶了 instant_interrupt 參數（`runs.codex_instant_interrupt = 1`）且執行版本 ≥ 0.159.0。版本未知／不支援的 kind 為 false；舊 daemon 未帶時前端當 false。僅表示功能支援，送出時仍重新檢查回合與送達狀態 |
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫。Claude resume 尚無有效新用量時，可帶同 bot／session 最近 64 筆候選內通過 session／模型驗證的 `context_window` 測量；缺少 payload session 身份的舊資料、未知／不同模型不還原。`_agm_resumed_context` 為原 session id，`_agm_context_model` 記錄來源模型供相容性比對。新視窗／模型不相容、SessionStart 換 session、壓縮或 resume 驗證不符時，改留 `_agm_context_invalidated`（session id）界線；空重繪與再次 resume 不可越過界線找舊值。有效新用量取代私有標記。上述標記不影響快取熱度，也不供自動／冰凍壓縮門檻採用；舊帳號、額度、成本不沿用（#1869）。**codex** 只有 `{"context_window":{"used_percentage":N}}`（讀自模型列的 `Context N% used`，沒有該段為 `null`）。**agy** 沒有 statusLine 數字，是精簡版 `{"model":{"id","display_name"},"context_window":{"total_input_tokens":N}}`（N＝最後一筆回覆的 `input_tokens`；視窗大小不知道，沒有 `used_percentage`；SPEC §12a.9） |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
 | `terminal_id` | 認領 child 時保存的 herdr terminal 實例 ID；舊列為 `null`，不可用目前 pane 身份回填未知舊列（#1892） |
