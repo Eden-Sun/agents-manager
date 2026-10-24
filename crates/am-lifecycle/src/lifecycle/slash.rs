@@ -1304,6 +1304,7 @@ mod login_slash_tests {
             subagent_json: None,
             launch_rev: None,
             live_rev: None,
+            codex_instant_interrupt: None,
         }
     }
 
