@@ -288,21 +288,32 @@ mod tests {
         assert!(!base.join(format!("rc/{HASH}/job-2-2")).exists(), "試用不改走冷目錄");
 
         // 一個正常守門在排隊：試用數得到它。
-        let b2 = base.clone();
-        let waiter = std::thread::spawn(move || guard_with(&b2, HASH, "job-3-3", Admission { shared_wait_secs: 30, ..one }));
-        let t0 = Instant::now();
-        let waiters = loop {
-            let token = LeaseToken::new();
-            let err = Lease::start(guard_cmd(&base, HASH, "job-4-4", &token, trial), token, &Deadline::new(0)).err().expect("busy");
-            let n = err.downcast_ref::<Busy>().map(|b| b.waiters).unwrap();
-            if n > 0 || t0.elapsed() > Duration::from_secs(10) {
-                break n;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        assert_eq!(waiters, 1);
+        // 同步點是排隊中的心跳 `Q`（同 `hang_up_while_queued`）：`Q` 只在號碼牌已經 flock 之後才印，讀到它才算「進了佇列」。
+        // 讀到 `Q` 之前不准 probe，避免撞上 #1978 的號碼牌計數競態（試用的 `busy()` 會刪掉還沒鎖住的號碼牌）。
+        let shared_wait = 30;
+        let wtoken = LeaseToken::new();
+        let mut waiter = guard_cmd(&base, HASH, "job-3-3", &wtoken, Admission { shared_wait_secs: shared_wait, ..one })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(waiter.stdout.take().unwrap());
+        let until = Instant::now() + Duration::from_secs(shared_wait);
+        let mut line = String::new();
+        while line.trim_end() != "Q" {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "守門還沒排隊就結束了");
+            assert!(!line.starts_with("ROOT"), "應該要排隊，不該拿到目錄");
+            assert!(Instant::now() < until, "排隊的守門 {shared_wait} 秒內沒有心跳");
+        }
+        let token = LeaseToken::new();
+        let err = Lease::start(guard_cmd(&base, HASH, "job-4-4", &token, trial), token, &Deadline::new(0)).err().expect("busy");
+        assert_eq!(err.downcast_ref::<Busy>().map(|b| b.waiters), Some(1), "{err:#}");
         holder.finish();
-        waiter.join().unwrap().finish();
+        // 收尾：關 stdin 讓守門照協定放掉（同 `Lease::finish`），再等它結束；不 kill，免得跳過釋放鎖的路徑。
+        drop(waiter.stdin.take());
+        waiter.wait().unwrap();
         let _ = std::fs::remove_dir_all(base);
     }
 
