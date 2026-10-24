@@ -737,6 +737,12 @@ pub fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     composer_text_whole(kind, screen).is_some_and(|shown| rows_within(&shown, sent))
 }
 
+/// 框裡是不是摺起來的「我們送的那一則」（#1915）。送出後的補按判斷（`delivery::composer_still_holds`）與
+/// 「字還在不在框裡」（`delivery::text_still_in_box`）共用這一個 helper，兩邊對摺疊的判斷不會分岔（#1984）。
+pub(crate) fn box_shows_our_folded_paste(kind: &str, screen: &str, sent: &str) -> bool {
+    composer_text(kind, screen).is_some_and(|box_text| is_our_folded_paste(kind, &box_text, sent))
+}
+
 /// 框的第一列前面可能掛著 claude 的 `[Image #N]`，那一段不是草稿的字。
 fn strip_image_chip(row: &str) -> &str {
     row.strip_prefix("[Image #")

@@ -10,6 +10,10 @@ pub const NEAR_DUPLICATE_MAX_CHARS: usize = 500;
 pub const MAX_REPLY_CHARS: usize = NEAR_DUPLICATE_MAX_CHARS;
 /// daemon 轉發給 parent 的 child 回合回覆摘錄上限（約 1,600 字，容納一般 commit hash、測試數字與變更清單）。
 pub const MAX_NOTICE_REPLY_CHARS: usize = 1600;
+/// parent 是 codex 時的摘錄上限（#1984）：codex 的長貼上會被摺起來、框變高，`›` 掉出判讀範圍就讀不到框，長通知最容易中。
+pub const CODEX_PARENT_NOTICE_REPLY_CHARS: usize = 500;
+/// 同一個來源回合的完成通知最多補送幾次（第 0 次之外），到上限就不再補、發 `child_done_undeliverable` 一次。
+pub const RETRY_LIMIT: u32 = 3;
 const NEAR_DUPLICATE_MINUTES: i64 = 5;
 const NEAR_DUPLICATE_MAX_DISTANCE_PERCENT: usize = 20;
 pub const CRID_PREFIX: &str = "child-done:";
@@ -133,16 +137,22 @@ pub fn nearly_same_reply(a: &str, b: &str) -> bool {
 }
 
 pub fn message_for(child_name: &str, reply: &str) -> String {
-    message_for_child(child_name, child_name, reply)
+    message_for_child(child_name, child_name, reply, MAX_NOTICE_REPLY_CHARS)
 }
 
-pub fn message_for_child(child_id: &str, child_name: &str, reply: &str) -> String {
+/// 通知摘錄的字數上限：parent 是 codex 用短上限（#1984），其他 kind 維持 [`MAX_NOTICE_REPLY_CHARS`]。
+pub fn notice_reply_limit(parent_kind: &str) -> usize {
+    if parent_kind == "codex" { CODEX_PARENT_NOTICE_REPLY_CHARS } else { MAX_NOTICE_REPLY_CHARS }
+}
+
+/// `limit` 是摘錄字數上限，由 [`notice_reply_limit`] 依 parent 的 kind 決定。
+pub fn message_for_child(child_id: &str, child_name: &str, reply: &str, limit: usize) -> String {
     let trimmed = reply.trim();
     let total_chars = trimmed.chars().count();
-    let quote = if total_chars <= MAX_NOTICE_REPLY_CHARS {
+    let quote = if total_chars <= limit {
         trimmed.to_string()
     } else {
-        let head: String = trimmed.chars().take(MAX_NOTICE_REPLY_CHARS).collect();
+        let head: String = trimmed.chars().take(limit).collect();
         format!(
             "{head}…\n\n[（daemon 附註）已截斷，原文共 {total_chars} 字。完整回覆請執行：python3 scripts/agm.py messages {child_id} --limit 5 或 herdr agent read {child_name} --lines 200]"
         )
@@ -153,6 +163,58 @@ pub fn message_for_child(child_id: &str, child_name: &str, reply: &str) -> Strin
         crate::child_alerts::ALERT_MARK,
         crate::child_alerts::NOTICE_END,
     )
+}
+
+/// `prompt_relayed_queueable` 回的 Conflict 是不是「還沒送出、框讀不到」（#1984）。`sent: false` 一起看，才能確定沒有送出去。
+pub fn unsent_composer_conflict(body: &serde_json::Value) -> bool {
+    body.get("reason").and_then(serde_json::Value::as_str) == Some("composer_unreadable")
+        && body.get("sent").and_then(serde_json::Value::as_bool) == Some(false)
+}
+
+/// 這一次的嘗試序號：`<base>:r<n>` 是第 n 次補送，`base` 本身是第 0 次。
+pub fn attempt_of(base_crid: &str, crid: &str) -> u32 {
+    crid.strip_prefix(&format!("{base_crid}:r")).and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+/// 送不出去（`composer_unreadable`，沒有送出）的那一次記成一筆 `failed`／`failed` 的 turn：不帶內文、不進佇列。
+/// `child_alerts::last_sent` 讀的就是 turn 列，所以 attempt 與冷卻才會前進；先前這個 Conflict 不建任何列，
+/// 計數停在 0、冷卻永遠過，sweep 每分鐘重試、上限形同虛設（2026-10-24 19:07–19:49 約 43 次）。
+/// failed 的列不在佇列裡、flush 不會撿，`notify` 的去重也排除 failed／failed，所以不會多送一則。
+/// 到上限（`attempt >= limit`）發 `child_done_undeliverable:<base>` 告警一次（event_key 去重）。回傳這次的 attempt 序號。
+pub async fn record_unsent_attempt(
+    db: &sqlx::SqlitePool,
+    parent_bot_id: &str,
+    parent_conversation: &str,
+    child_name: &str,
+    base_crid: &str,
+    crid: &str,
+    limit: u32,
+) -> anyhow::Result<u32> {
+    let attempt = attempt_of(base_crid, crid);
+    let now = crate::db::now();
+    sqlx::query(
+        "INSERT OR IGNORE INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, queue_class, created_at, completed_at)
+         VALUES (?,?,NULL,'web','failed','failed',?,'daemon',?,?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(parent_conversation)
+    .bind(crid)
+    .bind(&now)
+    .bind(&now)
+    .execute(db)
+    .await?;
+    if attempt >= limit {
+        let payload = serde_json::json!({
+            "source": "daemon",
+            "reason": "child_done_undeliverable",
+            "subject": child_name,
+            "bot_id": parent_bot_id,
+            "detail": format!("子 agent {child_name} 的完成通知連續 {} 次送不進 parent 的輸入框（composer_unreadable），已停止補送。", attempt + 1),
+            "action": "到 parent 的終端看輸入框：要送就按 Enter，不要就清掉；之後的通知才會再送。",
+        });
+        crate::supervisor_inbox::push_inbox(db, &format!("child_done_undeliverable:{base_crid}"), "ops_alert", None, Some(parent_bot_id), None, &payload).await?;
+    }
+    Ok(attempt)
 }
 
 pub fn truncate(s: &str, limit: usize) -> String {

@@ -279,3 +279,50 @@ async fn a_verified_turn_is_closed_as_before_without_reading_the_screen() {
     assert_eq!(enters(&f), 0);
     let _ = &f.bot_id;
 }
+
+/// #1984 B：框讀不到（`›` 掉出判讀範圍）跟讀不到畫面一樣等 `UNREADABLE_ROUNDS` 輪，之後照原本收尾並告警一次。
+/// 告警只有 bot、pane、輪數、時間，不含畫面文字。
+#[tokio::test]
+async fn an_unreadable_composer_waits_for_its_rounds_then_alerts_once() {
+    let filler: Vec<String> = (1..=30).map(|i| format!("filler {i}")).collect();
+    let refs: Vec<&str> = filler.iter().map(String::as_str).collect();
+    let f = fixture(&refs, false).await;
+    let app = f.env.app.clone();
+    let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+    let t = turn(&f).await;
+
+    assert_eq!(before_idle_close(&app, &run, &t).await.unwrap(), Recovery::Wait);
+    assert_eq!(before_idle_close(&app, &run, &t).await.unwrap(), Recovery::Wait);
+    assert!(alerts(&f).await.is_empty(), "還在等輪數");
+    assert_eq!(before_idle_close(&app, &run, &t).await.unwrap(), Recovery::Proceed);
+    let key = format!("undelivered_draft_unreadable:{}", f.turn_id);
+    assert_eq!(alerts(&f).await, vec![key.clone()]);
+    assert_eq!(enters(&f), 0, "讀不到就不按任何鍵");
+
+    let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE event_key=?")
+        .bind(&key)
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert!(payload.contains(&f.pane), "告警帶 pane");
+    assert!(!payload.contains("filler"), "告警不含畫面內容");
+
+    // 同一個回合再遇到讀不到：不重複告警。
+    for _ in 0..UNREADABLE_ROUNDS {
+        let _ = before_idle_close(&app, &run, &t).await.unwrap();
+    }
+    assert_eq!(alerts(&f).await, vec![key], "同一個 episode 只發一次");
+}
+
+/// #1984 D：日誌的框形狀只有結構特徵與固定字樣，不含畫面文字，長度有上限。
+#[test]
+fn the_shape_log_carries_structure_and_never_the_screen_text() {
+    let screen = "› [Pasted Content 1913 chars]\n\ngpt-6-astra secret-model\n";
+    let shape = box_shape("codex", screen, &"字".repeat(7), crate::composer_parse::BoxState::NonEmpty);
+    assert!(shape.contains("folded_chars=1913"), "{shape}");
+    assert!(shape.contains("sent_chars=7"), "{shape}");
+    assert!(shape.contains("glyph_row=0") && shape.contains("from_bottom=3") && shape.contains("glyph_in_tail=true"), "{shape}");
+    assert!(!shape.contains("Pasted") && !shape.contains("secret"), "不得含畫面文字：{shape}");
+    let long = "x\n".repeat(5000);
+    assert!(box_shape("codex", &long, "", crate::composer_parse::BoxState::Unready).chars().count() <= DIAGNOSE_MAX_CHARS);
+}
