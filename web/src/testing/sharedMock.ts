@@ -1,7 +1,7 @@
 import { after, before } from 'node:test'
 import { MockTransport } from '../api/mock'
 import { manualMockClock, useManualMockClock } from '../api/mockClock'
-import { setPollTick } from './domHarness'
+import { POLL_TICK_MS, setPollTick } from './domHarness'
 
 /**
  * 整個行程共用的一個 `MockTransport`：store 會丟掉 `daemon_seq` 比較小的快照，每個測試檔各建一個等於「daemon 重啟」，
@@ -36,7 +36,7 @@ export function advanceMockTime(ms: number): Promise<void> {
 export function virtualMockTime(): void {
   before(() => {
     useManualMockClock(true)
-    setPollTick(() => manualMockClock.advance(250))
+    setPollTick(() => manualMockClock.advance(POLL_TICK_MS))
   })
   after(() => {
     setPollTick(null)
