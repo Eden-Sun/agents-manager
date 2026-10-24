@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use futures::{stream, StreamExt};
-use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for, truncate, CRID_PREFIX, MAX_REPLY_CHARS};
+use crate::child_done::{child_already_reported, has_recent_near_duplicate, message_for_child, truncate, CRID_PREFIX, NEAR_DUPLICATE_MAX_CHARS};
 use crate::events::ports::TurnCommands;
 use crate::state::App;
 
@@ -296,7 +296,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         return Ok(());
     }
 
-    let quoted_reply = truncate(turn.reply.trim(), MAX_REPLY_CHARS);
+    let quoted_reply = truncate(turn.reply.trim(), NEAR_DUPLICATE_MAX_CHARS);
     if has_recent_near_duplicate(
         &app.db,
         &parent_conversation,
@@ -310,7 +310,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         return Ok(());
     }
 
-    let message = message_for(&turn.child_name, &quoted_reply);
+    let message = message_for_child(&turn.child_id, &turn.child_name, &turn.reply);
     match app
         .prompt_relayed_queueable(
             &turn.parent_id,
