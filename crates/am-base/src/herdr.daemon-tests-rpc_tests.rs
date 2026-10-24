@@ -1,9 +1,15 @@
 
     use super::*;
 
+    /// socket 目錄用短的固定基底：macOS 的 `TMPDIR` 是 `/var/folders/…`，連同 ULID 會超過 `sun_path` 的 104 上限，bind 直接失敗。
+    /// 只換基底、ULID 保留（並行不碰撞）；仍經 `testing::track` 登記，行程結束時清掉。
+    fn short_sock_dir(prefix: &str) -> PathBuf {
+        crate::testing::track(PathBuf::from("/tmp").join(format!("{prefix}-{}", crate::db::ulid())))
+    }
+
     /// accept 了但一個字都不回的假 herdr：socket 半開時最像的那種。
     fn wedged_socket(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid())));
+        let dir = short_sock_dir(&format!("am-herdr-{tag}"));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -48,7 +54,7 @@
     /// 每個 RPC 都是獨立 socket；仍須核對 response id，否則過期／錯誤回應會被當成本次成功結果。
     #[tokio::test]
     async fn an_rpc_response_with_a_missing_or_different_id_is_rejected_as_ambiguous() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-wrong-id-{}", crate::db::ulid())));
+        let dir = short_sock_dir("am-herdr-wrong-id");
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -80,7 +86,7 @@
     /// subscribe 的握手 ack 同樣必須對上本次 request id，否則會接上一條錯誤串流。
     #[tokio::test]
     async fn a_subscribe_ack_with_a_different_id_is_rejected() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-subscribe-wrong-id-{}", crate::db::ulid())));
+        let dir = short_sock_dir("am-herdr-subscribe-wrong-id");
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -102,7 +108,7 @@
     /// JSON-RPC 回應封套必須且只能有 result/error 其中之一；畸形封套不能被當成安全可重試的 herdr 錯誤。
     #[tokio::test]
     async fn an_rpc_response_with_both_result_and_error_is_ambiguous() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-invalid-envelope-{}", crate::db::ulid())));
+        let dir = short_sock_dir("am-herdr-invalid-envelope");
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -130,7 +136,7 @@
     /// subscribe ack 缺少 result/error 時不是成功握手，必須觸發呼叫端重訂閱。
     #[tokio::test]
     async fn a_subscribe_ack_without_result_or_error_is_rejected() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-subscribe-empty-ack-{}", crate::db::ulid())));
+        let dir = short_sock_dir("am-herdr-subscribe-empty-ack");
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -151,7 +157,7 @@
 
     /// 照腳本回話的假 herdr：每條連線讀一行請求，`reply` 決定回什麼；`events.subscribe` 回 ack 之後把 `events` 一行行吐出去。
     fn scripted_socket(tag: &str, reply: impl Fn(&Value) -> Value + Send + Sync + 'static, events: Vec<Value>) -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid())));
+        let dir = short_sock_dir(&format!("am-herdr-{tag}"));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -182,7 +188,7 @@
     /// 還多吐一則事件，所以結束是因為認得錯誤行，不是剛好讀到 EOF。
     #[tokio::test]
     async fn an_events_lost_error_line_ends_the_stream_instead_of_being_skipped() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-lost-{}", crate::db::ulid())));
+        let dir = short_sock_dir("am-herdr-lost");
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();

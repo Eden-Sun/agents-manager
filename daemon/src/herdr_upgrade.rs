@@ -871,8 +871,25 @@ async fn command_output(mut cmd: tokio::process::Command, timeout: Duration) -> 
 
 #[cfg(test)]
 mod tests {
+    /// 控制組（不依賴 kernel 的 ETXTBSY）：binary 寫完、fd 已關，版本檢查一次就讀到版本。
+    #[tokio::test]
+    async fn the_version_check_reads_a_binary_that_is_already_written() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::scratch_dir("am-herdr-plain");
+        let bin = dir.join("herdr");
+        let mut f = std::fs::File::create(&bin).unwrap();
+        f.write_all(b"#!/bin/sh\necho 'herdr 0.9.3'\n").unwrap();
+        drop(f);
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = Real::local().binary_version(&bin).await;
+        assert_eq!(got.as_deref(), Ok("0.9.3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 驗版本用的 `--version` 撞上 `ETXTBSY`（binary 剛複製進來、寫入 fd 還被別的 fork 出來的子行程握著）不能算「binary 壞了」：
-    /// 重試到 exec 得動為止。
+    /// 重試到 exec 得動為止。只在 Linux 跑：macOS 寫入 fd 還開著時 exec 不回 ETXTBSY，前提不成立；控制組見上面。
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_version_check_waits_out_a_binary_that_is_still_busy_being_written() {
         use std::io::Write as _;
