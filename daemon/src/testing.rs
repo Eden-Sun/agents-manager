@@ -1447,47 +1447,23 @@ mod scratch_dir_canonical_tests {
 
 #[cfg(test)]
 mod scratch_leak_guard {
+    use am_base::scratch_guard::{find_violations, scan_tree};
+
     /// issue #763：測試裡直接 `std::env::temp_dir().join(…)` 的目錄沒有人保證會刪，整樹跑一輪 `/tmp` 多出上萬個。
     /// 每一處都要過 `testing::track` / `testing::scratch_dir`（行程結束時一定掃掉）。
-    /// 規則要跟 crates/am-base/src/test_dirs.rs 的 scratch_leak_guard 一起改（#1967）。
+    /// 判斷邏輯只在 `am_base::scratch_guard::find_violations`（#1968），這裡只負責掃 daemon/src；`testing.rs` 自己免掃。
     #[test]
     fn no_test_builds_an_unregistered_path_under_temp_dir() {
-        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
-            for e in std::fs::read_dir(dir).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("testing.rs") {
-                    let mut statement = String::new();
-                    for (i, l) in std::fs::read_to_string(&p).unwrap().lines().enumerate() {
-                        // `tt::` 是各測試模組 `use crate::testing as tt;` 的慣用別名。
-                        for segment in l.split_inclusive(';') {
-                            statement.push_str(segment);
-                            if segment.contains("temp_dir()")
-                                && ![
-                                    "testing::track(",
-                                    "testing::scratch_dir(",
-                                    "tt::track(",
-                                    "tt::scratch_dir(",
-                                    "test_dirs::track(",
-                                    "test_dirs::scratch_dir(",
-                                ]
-                                .iter()
-                                .any(|w| statement.contains(w))
-                            {
-                                out.push(format!("{}:{}: {}", p.display(), i + 1, segment.trim()));
-                            }
-                            if segment.ends_with(';') {
-                                statement.clear();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let mut bad = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
+        let bad = scan_tree(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &|p| p.ends_with("testing.rs"));
         assert!(bad.is_empty(), "wrap with crate::testing::track(…) or use testing::scratch_dir:\n{}", bad.join("\n"));
+    }
+
+    /// 與 am-base 的 `scratch_guard` 測試用同一份輸入（逐字相同），預期行號一致。
+    #[test]
+    fn same_input_gives_the_same_answer_as_am_base() {
+        let sample = "let a = std::env::temp_dir().join(\"bad\");\nlet b = std::env::temp_dir().join(\"x\"); // scratch-guard: allow\nlet c = crate::test_dirs::scratch_dir(\"ok\");\nlet d = std::env::temp_dir().join(\"y\"); // scratch-guard: allow 正式程式碼有 Drop\n";
+        let lines: Vec<usize> = find_violations(sample).iter().map(|(n, _)| *n).collect();
+        assert_eq!(lines, vec![1, 2]);
     }
 }
 

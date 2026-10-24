@@ -11,3 +11,6 @@ pub mod build_info;
 pub mod mission;
 pub mod relay_auth;
 pub mod supervisor;
+
+#[cfg(test)]
+mod test_dirs;
