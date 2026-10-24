@@ -522,7 +522,8 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
             }
         }
         // agy（設計 A.6／§2 #6）：payload 沒有事件名，hook 子行程把 dispatcher 的參數放在 `hookEventName`（`hook_cmd::enrich_agy_payload`）；
-        // `Stop` 另帶 `lastAssistantMessage`／`lastUserMessage`（從 transcript 讀的）。camelCase 是 hook、snake_case 是 statusLine。
+        // `Stop` 另帶 `lastAssistantMessage`／`lastUserMessage`（從 transcript 讀的）；agy 1.4.7 起 stdin 自帶 `lastUserInput`（issue #1950）。
+        // camelCase 是 hook、snake_case 是 statusLine。
         "agy" => {
             let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
             let conv = either("conversationId", "conversation_id");
@@ -552,7 +553,11 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     if p.get("fullyIdle").and_then(Value::as_bool) == Some(false) {
                         return HookKind::Ignore("agy stop with background work still running".into());
                     }
-                    HookKind::TurnComplete { session_id: conv, turn_id: None, transcript_path: path, assistant: s("lastAssistantMessage"), user: s("lastUserMessage") }
+                    // issue #1950: agy 1.4.7 hook stdin 新增 lastUserInput 當額外證據；
+                    // lastUserMessage 優先，缺席或空白才退回 lastUserInput
+                    let user = either("lastUserMessage", "last_user_message")
+                        .or_else(|| either("lastUserInput", "last_user_input"));
+                    HookKind::TurnComplete { session_id: conv, turn_id: None, transcript_path: path, assistant: s("lastAssistantMessage"), user }
                 }
                 other => HookKind::Ignore(format!("agy event `{other}`")),
             }
@@ -7831,6 +7836,37 @@ mod agy_tests {
                 assert!(transcript_path.unwrap().ends_with("transcript_full.jsonl"));
                 assert_eq!((assistant.as_deref(), user.as_deref()), (Some("OK"), Some("say OK")));
             }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        // issue #1950: 實機 stdin 原文 fixture（agy 1.4.7 Stop hook）：
+        // 兩者皆有時 lastUserMessage 優先；缺席或空白時退回 lastUserInput；型別錯（非字串）時忽略
+        let stop_raw_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e","conversationId":"29ce4fac-aba5-4325-a11c-b5d664ff7a5e","error":"","executionNum":0,"fullyIdle":true,"lastUserInput":"test_stop_input","modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
+        let mut from_stop_fixture: Value = serde_json::from_str(stop_raw_fixture).unwrap();
+        from_stop_fixture["hookEventName"] = json!("Stop");
+        from_stop_fixture["lastAssistantMessage"] = json!("OK");
+        from_stop_fixture["lastUserMessage"] = json!("from transcript");
+        match classify("agy", &from_stop_fixture) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript"), "兩者皆有時 lastUserMessage 優先"),
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "from transcript", "lastUserInput": "from stdin"}))) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from transcript")),
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "", "lastUserInput": "from stdin"}))) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("from stdin"), "lastUserMessage 空白退回 lastUserInput"),
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": "only input"}))) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("only input")),
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "last_user_input": "snake case input"}))) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user.as_deref(), Some("snake case input")),
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserInput": 12345}))) {
+            HookKind::TurnComplete { user, .. } => assert_eq!(user, None, "只有 lastUserInput 但型別錯時忽略"),
             other => panic!("expected TurnComplete, got {other:?}"),
         }
         // terminationReason 的值域不可假設：不認得的值照樣是正常結束。

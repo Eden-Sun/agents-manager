@@ -5846,7 +5846,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 `~/.gemini/antigravity-cli/`（`settings.json`、`brain/<conversation-id>/`、`conversations/<id>.db`、`cache/onboarding.json`、`log/`、`updater/`）與 `~/.gemini/config/`（`hooks.json`、`mcp_config.json`、`rules/`、`AGENTS.md`）。`XDG_*`、`ANTIGRAVITY_EXECUTABLE_DATA_DIR` 都無效；與 Gemini CLI 共用 `~/.gemini`。`settings.json` 被 agy 隨時重排版回寫；解析失敗它拒絕覆寫。
 
 ### G.3 hooks（`~/.gemini/config/hooks.json`）
-頂層 key＝hook 名稱；`PreInvocation`／`PostInvocation`／`Stop` 是扁平 handler 陣列，`PreToolUse`／`PostToolUse` 要包 `{matcher,hooks}`。`SessionStart` 沒有文件但 1.2.16 會觸發。共通 stdin（camelCase）：`conversationId`、`modelName`、`transcriptPath`、`artifactDirectoryPath`、`workspacePaths[]`；`Stop` 另有 `executionNum`、`terminationReason`、`error`、`fullyIdle`。**payload 沒有事件名、沒有 prompt 文字、沒有助理回覆文字。** hook 同步執行、逾時預設 30 秒；工作目錄是 hooks.json 所在資料夾；子行程繼承整份 pane env；stdout `{}` 被接受。`ANTIGRAVITY_CONVERSATION_ID` 會設給 hook 子行程。
+頂層 key＝hook 名稱；`PreInvocation`／`PostInvocation`／`Stop` 是扁平 handler 陣列，`PreToolUse`／`PostToolUse` 要包 `{matcher,hooks}`。`SessionStart` 沒有文件但 1.2.16 會觸發。共通 stdin（camelCase）：`conversationId`、`modelName`、`transcriptPath`、`artifactDirectoryPath`、`workspacePaths[]`（agy 1.4.7 起新增 `lastUserInput`）；`Stop` 另有 `executionNum`、`terminationReason`、`error`、`fullyIdle`。**payload 沒有事件名、沒有 prompt 文字（1.4.7 前）、沒有助理回覆文字。** hook 同步執行、逾時預設 30 秒；工作目錄是 hooks.json 所在資料夾；子行程繼承整份 pane env；stdout `{}` 被接受。`ANTIGRAVITY_CONVERSATION_ID` 會設給 hook 子行程。
 
 ### G.4 statusLine／title
 `settings.json` 的 `statusLine`／`title`＝`{"type":"command","command":…}`（可選 `stack_with_default`、`enabled`、`padding`）：agent 狀態改變時 TUI 執行該指令、stdin 給 JSON（`agent_state`、`tool_confirmation_pending`、`pending_input_count`、`conversation_id`、`transcript_path`、model、context 用量，登入後有 `quota`、`plan_tier`、`email`）。

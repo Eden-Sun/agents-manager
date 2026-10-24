@@ -180,6 +180,7 @@ pub fn hook_body(
 /// agy 的 payload 沒有事件名（`hooks.json` 的指令參數才有），`Stop` 也沒有助理回覆文字——回覆在 `transcriptPath`（`transcript_full.jsonl`）。
 /// hook 子行程跟 transcript 在同一台機器上，所以這裡讀（只讀尾端、同步、很小），把事件名與最近一回合的問答放進 payload；
 /// 讀不到就不放，daemon 照樣收得到事件（回合照收，只是沒有回覆文字）。其他事件只補事件名。
+/// agy 1.4.7 起 stdin JSON 可能自帶 `lastUserInput`（字串）；enrich 不動它，原樣傳給 daemon。
 pub fn enrich_agy_payload(payload: &mut serde_json::Value, event: &str) {
     const TAIL_BYTES: u64 = 2 * 1024 * 1024;
     let Some(obj) = payload.as_object_mut() else { return };
