@@ -10,17 +10,22 @@
 //!
 //! 檔案只讀新增的部分：記住每個 run 的路徑與位移，下一輪只讀位移之後的整行；第一次（沒位移）只讀檔尾
 //! [`TAIL_BYTES`]，檔尾裡沒有 `token_count` 才往前多找 [`BACKWARD_BYTES`]。herdr 開的 codex child 沒有 `native_session_id`，
-//! 由巡邏改用 herdr 綁在 agent 上的 session 找 rollout。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
+//! 由巡邏改用 herdr 綁在 agent 上的 session 找 rollout。遠端 codex（host 不是本機）改經 host 通道增量讀，每 run [`REMOTE_EVERY`] 一次（[`refresh_remote`]）。
+//! 記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
 
 use crate::db;
-use am_ports::{CodexRolloutAccess, DbContext, EventSink};
+use am_ports::{CodexRolloutAccess, DbContext, EventSink, RemoteRollout};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+/// 遠端 codex 的 rollout 最多每這麼久讀一次（每 run）；讀失敗也等到下一個間隔，不在每輪巡邏打 host。
+pub const REMOTE_EVERY: Duration = Duration::from_secs(20);
 
 /// 第一次（或一輪新增太多）時只讀檔尾這麼多；rollout 一輪 token_count 約幾 KB，256 KB 足夠找到最後一筆。
 pub const TAIL_BYTES: u64 = 256 * 1024;
@@ -41,12 +46,30 @@ pub struct Entry {
     path: Option<PathBuf>,
     offset: u64,
     usage: Option<CodexUsage>,
+    /// 遠端 run 上次打 host 的時間（[`REMOTE_EVERY`] 節流）。位移與本機共用 `offset`，只放記憶體。
+    remote_at: Option<Instant>,
 }
 
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub fn entry_for_test(session_id: Option<&str>, usage: Option<CodexUsage>) -> Entry {
     Entry { session_id: session_id.unwrap_or_default().to_string(), usage, ..Entry::default() }
+}
+
+/// 測試用：把遠端 run 上次讀取的時間往回撥 [`REMOTE_EVERY`]（等同過了節流間隔）。
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn age_remote_for_test(run: &str) {
+    if let Some(e) = store().lock().unwrap_or_else(|e| e.into_inner()).get_mut(run) {
+        e.remote_at = e.remote_at.map(|at| at - REMOTE_EVERY);
+    }
+}
+
+/// 測試用：這個 run 目前的位移與 context 讀數（input tokens）。
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn remote_state_for_test(run: &str) -> Option<(u64, Option<i64>)> {
+    store().lock().unwrap_or_else(|e| e.into_inner()).get(run).map(|e| (e.offset, e.usage.map(|u| u.input)))
 }
 
 pub fn store() -> &'static Mutex<HashMap<String, Entry>> {
@@ -131,8 +154,17 @@ pub async fn refresh_codex_with_ports<R, E>(
 {
     let Some(session) = run.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return };
     let session_id = session.to_owned();
-    if !matches!(db::bot_host(database.pool(), &run.bot_id).await.as_deref(), Ok(host) if host == crate::config::LOCAL_HOST) {
-        return;
+    match db::bot_host(database.pool(), &run.bot_id).await.as_deref() {
+        Ok(host) if host == crate::config::LOCAL_HOST => {}
+        // 遠端 codex：rollout 在那台主機，經 host 通道增量讀；讀數有變才投影。
+        Ok(_) => {
+            let changed = refresh_remote(&run.id, &session_id, |offset| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset)).await;
+            if changed {
+                emit_bot_status(events, &run.bot_id).await;
+            }
+            return;
+        }
+        Err(_) => return,
     }
     let (known_path, offset) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
@@ -181,6 +213,39 @@ pub async fn refresh_codex_with_ports<R, E>(
     if changed {
         emit_bot_status(events, &run.bot_id).await;
     }
+}
+
+/// 遠端 codex 的一輪：距上次打 host 不到 [`REMOTE_EVERY`] 就不讀。位移與本機一樣只在記憶體（`Entry::offset`），
+/// 第一次（位移為 0）傳 `None` 讓實作讀檔尾。讀失敗保留上一次讀數、不前進位移，仍記下這次時間（退避到下一個間隔）。
+/// 回傳讀數是否變動（呼叫端據此投影）。
+pub async fn refresh_remote<F, Fut>(run_id: &str, session: &str, read: F) -> bool
+where
+    F: FnOnce(Option<u64>) -> Fut,
+    Fut: Future<Output = Option<RemoteRollout>>,
+{
+    let offset = {
+        let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
+        let e = s.entry(run_id.to_owned()).or_default();
+        if e.session_id != session {
+            // 換了 session：位移與舊讀數都作廢，同本機。
+            *e = Entry { session_id: session.to_owned(), ..Default::default() };
+        }
+        if e.remote_at.is_some_and(|at| at.elapsed() < REMOTE_EVERY) {
+            return false;
+        }
+        e.remote_at = Some(Instant::now());
+        (e.offset > 0).then_some(e.offset)
+    };
+    let Some(read) = read(offset).await else { return false };
+    let latest = last_token_count(&read.text);
+    let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(e) = s.get_mut(run_id).filter(|e| e.session_id == session) else { return false };
+    e.offset = read.next;
+    let changed = latest.is_some() && latest != e.usage;
+    if latest.is_some() {
+        e.usage = latest;
+    }
+    changed
 }
 
 async fn emit_bot_status<E: EventSink>(events: &E, bot_id: &str) {
