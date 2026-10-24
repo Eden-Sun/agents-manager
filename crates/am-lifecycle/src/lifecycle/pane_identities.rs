@@ -97,7 +97,7 @@ mod tests {
     /// 規則文字：換身份要用 `--identity`、清單看 `$AM_IDENTITIES`，禁止自己 export／unset，也禁止用 pane run 換帳號。
     #[test]
     fn the_rules_switch_identity_with_the_flag_not_by_hand() {
-        let rule = super::super::setup::child_agent_rules("proj-abc123");
+        let rule = super::super::setup::child_agent_rules();
         assert!(rule.contains("--identity <身份>"), "要說明換身份的旗標：{rule}");
         assert!(rule.contains("$AM_IDENTITIES"), "要說明這台可用的身份看哪裡");
         assert!(rule.contains("**禁止**自己 export／`env -u`／`unset`"), "禁止自己動帳號變數");

@@ -1335,9 +1335,13 @@ pub fn toml_basic_string(s: &str) -> String {
 /// The one text about opening sub-agents, used by the persona (all kinds) and the claude herdr
 /// skill so they never drift. Naming isn't load-bearing (§6.5a descent, §6.5b shim) but keeps
 /// the agent's mental model matching the sidebar.
-pub fn child_agent_rules(agent_name: &str) -> String {
-    format!(
-        "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。對話歷史裡若出現別的 agent 名稱（例如你是從別的 bot fork 出來的），那是原 bot、不是你；原 bot 的子 agent 不歸你，開子 agent、改名一律用 `{agent_name}-` 前綴，派工 prompt 也寫你自己的名稱。\
+///
+/// Every bot gets this exact text, so it must not contain anything that differs per bot (name, id,
+/// date, pane): the bots share one prompt prefix in the provider's cache (#1941). The name is read
+/// from `$AM_AGENT_NAME`, and the one concrete value goes at the end of the injected text in
+/// [`agent_name_note`].
+pub fn child_agent_rules() -> &'static str {
+    "你在 agents-manager（AG Man）裡的 agent 名稱存在環境變數 `$AM_AGENT_NAME`（`echo \"$AM_AGENT_NAME\"`），下文的 `$AM_AGENT_NAME` 一律指它，用到時代入實際的值。對話歷史裡若出現別的 agent 名稱（例如你是從別的 bot fork 出來的），那是原 bot、不是你；原 bot 的子 agent 不歸你，開子 agent、改名一律用 `$AM_AGENT_NAME-` 前綴，派工 prompt 也寫你自己的名稱。\
 以下是**硬規則，不是建議**：一律照做，不要自行判斷要不要遵守，也不要事後才補。違反就是錯誤。\n\
 \n\
 需要開子任務或平行工作時，一律用 herdr 開子 agent：\n\
@@ -1354,7 +1358,7 @@ codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane �
 **先挑 prompt cache 還熱的**：`herdr agent list` 的 stderr 會附上每顆子 agent 的 cache 還剩幾分（claude 約 60 分；codex 不會因閒置冷掉）。\
 有好幾顆閒置的，先交給 cache 還熱、剩最久的那顆（接著用省掉重讀整段 context 的 token；閒置的 codex 一律算熱）；cache 已冷的跟新開差不多貴，\
 只有跟手上工作脈絡相關時才值得重用。\n\
-- **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
+- **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `$AM_AGENT_NAME-` 為前綴（例：`$AM_AGENT_NAME-review`、`$AM_AGENT_NAME-ui`）。\
 PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **開 pane**：一律 `herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。\
 **禁止省略目標**——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
@@ -1371,8 +1375,8 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 這台可用的身份看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
-- **派工 prompt 必須寫明**：「你是 `{agent_name}` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\
-工作太大或要平行時，停下來在回報裡寫清楚要另派什麼，由 `{agent_name}` 決定」。子 agent 回報要人手時，由你決定重用閒置 child 或另開兄弟，\
+- **派工 prompt 必須寫明**（寫進 prompt 時 `$AM_AGENT_NAME` 代入實際的值，不照抄變數名）：「你是 `$AM_AGENT_NAME` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\
+工作太大或要平行時，停下來在回報裡寫清楚要另派什麼，由 `$AM_AGENT_NAME` 決定」。子 agent 回報要人手時，由你決定重用閒置 child 或另開兄弟，\
 **禁止**叫子 agent 自己開。\n\
 \n\
 **你是子 agent 時**（環境變數 `$AM_CHILD_OF` 有值＝派你的 parent；或派工 prompt 說你是子 agent），以下取代上面「開子 agent」那幾條：\n\
@@ -1394,9 +1398,9 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 \n\
 - **一律用 agent-browser**（CLI，使用者 2026-10-13 裁示；用法先看 `agent-browser skills get core`）。\
 **禁止**用 ego lite、**禁止**自己另起 Chrome、**禁止**用其他 headless 或內建的瀏覽器工具。\n\
-- **一個 bot 最多一個 session**（你和你的子 agent 各自算一個）：每個指令都帶 `--session {agent_name}`，\
+- **一個 bot 最多一個 session**（你和你的子 agent 各自算一個）：每個指令都帶 `--session $AM_AGENT_NAME`，\
 在同一個 session 裡用 `open` 換頁，**禁止**另開 session、**禁止**一個網址開一個新分頁。\n\
-- **結束就關**：工作做完、或收掉子 agent 之前，**必須先** `agent-browser --session {agent_name} close`。\
+- **結束就關**：工作做完、或收掉子 agent 之前，**必須先** `agent-browser --session $AM_AGENT_NAME close`。\
 瀏覽器留著不關，RAM 就是這樣被吃光的。\n\
 - **登入態**（使用者 2026-10-15）：使用者要你登入時可以照做；使用者也可以在自己的環境用 agent-browser 登入，\
 再把登入態（`--state` 檔、cookie、session）交給你的 session 接著執行。登入態檔算憑證：**禁止**放 scratchpad、`$AM_OUTBOX` 或 repo，用完就刪。\n\
@@ -1424,7 +1428,6 @@ CLI 登入／OAuth（同樣是硬規則，使用者 2026-10-03 裁示）：\n\
 - **收尾**：使用者貼回結果後，用 `herdr pane send-text <pane> \"<結果>\"` 再 `herdr pane send-keys <pane> Enter` 送進去，確認登入成功（例如 `gcloud auth list`），\
 **必須**關掉那個 pane。\n\
 - 只會導回 `localhost`、沒有上述模式的 CLI：停下來在回覆裡說明，由使用者決定（例如在有瀏覽器的電腦跑 `ssh -L <埠>:localhost:<埠> <這台主機>` 再開網址）。"
-    )
 }
 
 /// Replaces `herdr --skill`'s description, which says 「只有使用者明確提到 Herdr 才用」 —
@@ -1439,13 +1442,8 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 /// is the CLI's own authority on its commands and is passed through untouched, so a herdr
 /// upgrade brings its new text along.
 /// skill 檔一個身份一份，同身份的每顆 bot 與子 agent 都讀同一份：不能寫死某一顆的名字（#1121）。
-const SKILL_AGENT_NAME: &str = "$AM_AGENT_NAME";
-
 fn herdr_skill_doc(raw: &str) -> String {
-    let rules = format!(
-        "## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n下文的 `$AM_AGENT_NAME` 是這個 pane 的環境變數（`echo \"$AM_AGENT_NAME\"`），也就是你在 AG Man 裡的 agent 名稱；這份 skill 由同一個帳號目錄下的所有 bot 共用，所以不寫死名字，用到的地方代入實際的值。\n\n{}\n",
-        child_agent_rules(SKILL_AGENT_NAME)
-    );
+    let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n", child_agent_rules());
     let lines: Vec<&str> = raw.lines().collect();
     // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
     let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
@@ -1575,16 +1573,30 @@ async fn install_herdr_skill_remote(conn: &HostConn, cfg_dir: Option<String>) ->
     Ok(())
 }
 
-/// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first, then the
-/// `[agents]` agent md (§6.5i). Grok receives a short `--rules` path pointer to a staged full-text file.
+/// The one line that carries this bot's concrete name. It goes last in every injected text, so all
+/// the text above it is the same for every bot and the providers' prompt cache shares one prefix.
+pub fn agent_name_note(agent_name: &str) -> String {
+    format!("你在 AG Man 裡的 agent 名稱是 `{agent_name}`（上文的 `$AM_AGENT_NAME` 就是這個值；只有這一段寫的是實際名稱）。")
+}
+
+/// What a sub-agent reads (`instructions.md`, §6.5i): the AG Man rules, then the `[agents]` agent md,
+/// then the name note.
+pub fn child_instructions(agent_name: &str, agent_md: &str) -> String {
+    format!("{}\n\n{}", super::agent_md::compose(child_agent_rules(), agent_md), agent_name_note(agent_name))
+}
+
+/// `bot.persona` appended to the system prompt per kind. Order: `child_agent_rules`, then the
+/// `[agents]` agent md (§6.5i), then the bot's own persona, then [`agent_name_note`] last.
+/// Grok receives a short `--rules` path pointer to a staged full-text file.
 /// `agent_md` None＝`[agents]` 沒設定：CLI 照舊讀自己的指示檔。
 pub fn persona_text(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> String {
-    let base = super::agent_md::compose(&child_agent_rules(agent_name), agent_md.unwrap_or(""));
+    let base = super::agent_md::compose(child_agent_rules(), agent_md.unwrap_or(""));
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    match user {
+    let text = match user {
         Some(u) => format!("{base}\n\n{u}"),
         None => base,
-    }
+    };
+    format!("{text}\n\n{}", agent_name_note(agent_name))
 }
 
 fn grok_rules_reference(path: &str) -> String {
@@ -2066,17 +2078,18 @@ mod model_args_tests {
 
     #[test]
     fn persona_per_kind() {
-        use super::{child_agent_rules, persona_args, toml_basic_string};
+        use super::{agent_name_note, child_agent_rules, persona_args, toml_basic_string};
         let mut b = bot("claude", None, None, false);
-        let rule = child_agent_rules("proj-abc123");
+        let rule = child_agent_rules();
+        let note = agent_name_note("proj-abc123");
         b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
-        let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]");
+        let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]\n\n{note}");
         assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), want.clone()]);
         b.kind = "grok".into();
         assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--rules".to_string(), want.clone()]);
         b.kind = "codex".into();
         b.persona = Some("line1\nsay \"hi\" \\ done".into());
-        let want = format!("{rule}\n\nline1\nsay \"hi\" \\ done");
+        let want = format!("{rule}\n\nline1\nsay \"hi\" \\ done\n\n{note}");
         assert_eq!(
             persona_args(&b, "proj-abc123", None, None),
             vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))],
@@ -2085,17 +2098,17 @@ mod model_args_tests {
         // §6.5i：agent md 夾在 AG Man 規則與 bot 自己的 persona 中間。
         let args = persona_args(&b, "proj-abc123", Some("AGENT-MD"), None);
         assert_eq!(&args[2..], ["-c", "project_doc_max_bytes=0"], "§6.5i：設了 [agents] 就不讀 AGENTS.md");
-        assert_eq!(args[1], format!("developer_instructions={}", toml_basic_string(&format!("{rule}\n\nAGENT-MD\n\nline1\nsay \"hi\" \\ done"))));
+        assert_eq!(args[1], format!("developer_instructions={}", toml_basic_string(&format!("{rule}\n\nAGENT-MD\n\nline1\nsay \"hi\" \\ done\n\n{note}"))));
         // No user persona: the daemon's rule alone, never nothing.
         b.kind = "claude".into();
         b.persona = None;
-        assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), rule.clone()]);
-        assert!(rule.contains("`proj-abc123-`"));
+        assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), format!("{rule}\n\n{note}")]);
+        assert!(!rule.contains("proj-abc123"), "共用的規則本文不寫任何一顆的名字");
         // 瀏覽器規則：只用 agent-browser、一個 bot 一個 session（用自己的名字）、結束就關。
         assert!(rule.contains("**一律用 agent-browser**"));
         assert!(rule.contains("**禁止**用 ego lite"));
-        assert!(rule.contains("`--session proj-abc123`"));
-        assert!(rule.contains("`agent-browser --session proj-abc123 close`"));
+        assert!(rule.contains("`--session $AM_AGENT_NAME`"));
+        assert!(rule.contains("`agent-browser --session $AM_AGENT_NAME close`"));
     }
 
     #[test]
@@ -2159,7 +2172,7 @@ mod model_args_tests {
     /// agent 會當成建議，實際上不照做；硬規則要寫成命令才會被執行。
     #[test]
     fn every_bot_is_told_to_kill_only_its_own_pid_or_port_and_to_put_pkill_options_first() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         assert!(rule.contains("只准殺自己記下的 PID 或 port"), "{rule}");
         assert!(rule.contains("lsof -ti :PORT | xargs kill"));
         assert!(rule.contains("`pkill -f next-server -P 1`") && rule.contains("`pkill -P 1 -f next-server`"), "附對／錯寫法");
@@ -2169,17 +2182,36 @@ mod model_args_tests {
 
     #[test]
     fn the_rules_read_as_orders_not_suggestions() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         assert!(rule.contains("硬規則，不是建議"), "the register is stated up front");
         assert!(rule.contains("必須"));
         assert!(rule.contains("禁止"));
         assert!(!rule.contains("請"), "no polite softeners in an injected rule");
     }
 
+    /// #1941：每顆 bot 的注入文字共用同一段前綴（provider 的 prompt cache 才能共用）。
+    /// 除了最後一段（這顆 bot 的名字）以外，兩顆不同名字的 bot 注入的文字逐字相同，子 agent 的指示檔也一樣。
+    #[test]
+    fn bots_with_different_names_share_every_injected_byte_but_the_last_paragraph() {
+        use super::{child_agent_rules, child_instructions, persona_text};
+        let a = bot("claude", None, None, false);
+        let b = bot("claude", None, None, false);
+        let (ta, tb) = (persona_text(&a, "proj-abc123", Some("AGENT-MD")), persona_text(&b, "hub-kytpg9", Some("AGENT-MD")));
+        let (head_a, note_a) = ta.rsplit_once("\n\n").expect("名字在最後一段");
+        let (head_b, note_b) = tb.rsplit_once("\n\n").expect("名字在最後一段");
+        assert_eq!(head_a, head_b, "除最後一段外逐字相同");
+        assert_ne!(note_a, note_b);
+        assert!(note_a.contains("`proj-abc123`") && note_b.contains("`hub-kytpg9`"), "{note_a} / {note_b}");
+        assert!(!head_a.contains("proj-abc123") && !head_a.contains("hub-kytpg9"), "前段不寫任何一顆的名字");
+        let (ca, cb) = (child_instructions("proj-abc123", "AGENT-MD"), child_instructions("hub-kytpg9", "AGENT-MD"));
+        assert_eq!(ca.rsplit_once("\n\n").map(|(h, _)| h), cb.rsplit_once("\n\n").map(|(h, _)| h), "子 agent 的指示檔同一段前綴");
+        assert!(!child_agent_rules().contains("proj-abc123"));
+    }
+
     /// 使用者 2026-09-30：派工只走 herdr pane（內建子代理追不到），子 agent 不再開子 agent、要人手找 parent。
     #[test]
     fn children_go_through_herdr_panes_and_never_spawn_grandchildren() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         for want in ["`Agent`／`Task`", "`Workflow`", "`codex-rescue`", "codex 的子代理", "只准用 herdr pane 派工", "`--kind codex`"] {
             assert!(rule.contains(want), "要點名禁止內建子代理：{want}");
         }
@@ -2190,14 +2222,14 @@ mod model_args_tests {
         assert!(rule.contains("$AM_CHILD_OF"), "子 agent 要知道怎麼認出自己");
         assert!(rule.contains("禁止再開子 agent"));
         assert!(rule.contains("由 parent 決定"));
-        assert!(rule.contains("你是 `proj-abc123` 的子 agent"), "派工 prompt 要帶上的那句話用自己的名字");
+        assert!(rule.contains("你是 `$AM_AGENT_NAME` 的子 agent"), "派工 prompt 要帶上的那句話，名字用環境變數");
     }
 
     /// issue #1789：fork 出來的 bot 會把原 bot 的名字當成自己的（對話歷史裡有），規則要說清楚那不是自己，改名也一律用自己的前綴。
     #[test]
     fn a_name_in_forked_history_is_not_ours() {
-        let rule = super::child_agent_rules("proj-abc123");
-        for want in ["對話歷史裡若出現別的 agent 名稱", "那是原 bot、不是你", "原 bot 的子 agent 不歸你", "改名一律用 `proj-abc123-` 前綴"] {
+        let rule = super::child_agent_rules();
+        for want in ["對話歷史裡若出現別的 agent 名稱", "那是原 bot、不是你", "原 bot 的子 agent 不歸你", "改名一律用 `$AM_AGENT_NAME-` 前綴"] {
             assert!(rule.contains(want), "要說清楚 fork 來的名字不是自己：{want}\n{rule}");
         }
     }
@@ -2206,7 +2238,7 @@ mod model_args_tests {
     /// 規則要直接給可照抄的指令：全新題目、`fork --last`、旗標位置，以及不准自己補 shim 會補的參數。
     #[test]
     fn the_rules_give_a_copy_paste_way_to_start_a_codex_child() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         for want in [
             "herdr agent start <名稱> --kind codex --pane <新 pane>",
             "herdr agent start <名稱> --kind codex --pane <新 pane> -- fork --last",
@@ -2226,7 +2258,7 @@ mod model_args_tests {
     /// 使用者 2026-10-03：CLI 要 OAuth 時一律走不開瀏覽器的模式，互動式指令放進 shell pane，網址／碼交給使用者後結束回合。
     #[test]
     fn oauth_logins_never_open_a_browser_and_wait_in_a_shell_pane() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         for want in ["gcloud auth login --no-browser", "--use-device-code", "firebase login --no-localhost", "GH_BROWSER=echo", "--no-launch-browser"] {
             assert!(rule.contains(want), "要點名旗標：{want}");
         }
@@ -2244,7 +2276,7 @@ mod model_args_tests {
     /// 都用這份文字，所以不在 agents-manager 專案裡的 bot 也拿得到。
     #[test]
     fn every_bot_is_told_where_user_files_go_and_what_never_goes_there() {
-        let rule = super::child_agent_rules("proj-abc123");
+        let rule = super::child_agent_rules();
         assert!(rule.contains("scratchpad 只放中間產物"), "{rule}");
         assert!(rule.contains("$AM_OUTBOX"));
         assert!(rule.contains("mkdir -p \"$AM_OUTBOX\""), "空目錄會被清掉，寫之前要自己建");

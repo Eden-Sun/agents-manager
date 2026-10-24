@@ -1312,10 +1312,7 @@ async fn start_inner_body(
     // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
     // below the PTY shell limit. Stage the full startup persona in a file and pass its short path.
     // Grok also needs the child-rules file when no custom [agents] document is configured.
-    let child_md = super::agent_md::compose(
-        &super::setup::child_agent_rules(&agent),
-        agent_md.configured.then_some(agent_md.text.as_str()).unwrap_or(""),
-    );
+    let child_md = super::setup::child_instructions(&agent, agent_md.configured.then_some(agent_md.text.as_str()).unwrap_or(""));
     let child_instructions_path = if agent_md.configured || bot.kind == "grok" {
         super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await
     } else {
