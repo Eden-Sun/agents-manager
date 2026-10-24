@@ -1744,7 +1744,7 @@ mod cache_write_lock_tests {
             .unwrap();
         TestApp {
             db,
-            data_dir: std::env::temp_dir().join("quota-cache-write-lock-test"),
+            data_dir: std::env::temp_dir().join("quota-cache-write-lock-test"), // scratch-guard: allow lock-key only, no fs
             quotas: tokio::sync::Mutex::new(Default::default()),
             stale: tokio::sync::Mutex::new(Default::default()),
         }
@@ -1878,7 +1878,7 @@ mod clear_if_older_tests {
             .unwrap();
         CleanApp {
             db,
-            data_dir: std::env::temp_dir().join("quota-clear-if-older-test"),
+            data_dir: std::env::temp_dir().join("quota-clear-if-older-test"), // scratch-guard: allow lock-key only, no fs
             quotas: tokio::sync::Mutex::new(Default::default()),
             stale: tokio::sync::Mutex::new(Default::default()),
             emits: std::sync::atomic::AtomicUsize::new(0),

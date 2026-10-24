@@ -4,9 +4,7 @@
     use std::process::Command;
 
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("am-kill-shim-{}", ulid::Ulid::new()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testing::scratch_dir("am-kill-shim")
     }
 
     fn write_exec(p: &Path, content: &str) {

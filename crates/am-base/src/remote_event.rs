@@ -130,9 +130,7 @@ mod tests {
     }
 
     fn scratch_dir(tag: &str) -> ScratchDir {
-        let d = std::env::temp_dir().join(format!("am-remote-event-{tag}-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&d).unwrap();
-        ScratchDir(d)
+        ScratchDir(crate::test_dirs::scratch_dir(&format!("am-remote-event-{tag}")))
     }
 
     #[test]

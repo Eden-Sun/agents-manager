@@ -531,7 +531,7 @@
 
     /// 寫一個本機副本，並插一筆指向它的遠端附件列（`message_id` 空、`created_at` 指定）。回本機副本的路徑。
     async fn remote_attachment_row(app: &Arc<App>, bot_id: &str, id: &str, host: &str, state: &str, created_at: &str) -> std::path::PathBuf {
-        let local = std::env::temp_dir().join(format!("attach-remote-{}-{}.png", id, crate::db::ulid().to_ascii_lowercase()));
+        let local = crate::testing::track(std::env::temp_dir().join(format!("attach-remote-{}-{}.png", id, crate::db::ulid().to_ascii_lowercase())));
         std::fs::write(&local, b"remote bytes").unwrap();
         sqlx::query(
             "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, state, created_at)
