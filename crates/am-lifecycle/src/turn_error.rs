@@ -42,16 +42,44 @@ pub fn is_quota_exhaustion(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     lower.contains("usage limit")
         || lower.contains("usage_limit")
-        || (lower.starts_with("individual quota reached") && lower.contains("resets in"))
+        || agy_line(&lower)
         || ["you've hit your", "you've reached your"]
             .iter()
             .any(|p| lower.find(p).is_some_and(|i| is_quota_limit_lower(&lower[i..])))
 }
 
+/// agy 額度列的判定（輸入須已轉小寫）：只剝前導的 ⚠ 與空白，不剝 `■`／`❯` 之類——那是助理回覆與使用者
+/// 輸入的記號，橫幅前面不會有。
+fn agy_line(lower: &str) -> bool {
+    let s = strip_warning(lower);
+    s.starts_with("individual quota reached") && s.contains("resets in")
+}
+
+/// 橫幅前導的 ⚠ 與空白。
+fn strip_warning(s: &str) -> &str {
+    s.trim_start_matches(|c: char| c.is_whitespace() || c == '⚠')
+}
+
+/// 第 `i` 行是不是 agy 額度橫幅的結尾（[`api_error_line`] 由下往上呼叫）。兩種情況：本行自己就是完整的
+/// `Individual quota reached … Resets in …`；或本行是上一行 `… Resets in` 折下來的重置時間（`13m11s.`）。
+/// 只接這兩種相鄰行，不把整個畫面接起來比。
+fn agy_banner_at(lines: &[&str], i: usize) -> Option<String> {
+    let text = strip_warning(undecorated(lines[i]));
+    if agy_line(&text.to_ascii_lowercase()) {
+        return Some(text.to_string());
+    }
+    let head = strip_warning(undecorated(lines[i.checked_sub(1)?]));
+    let head_lower = head.to_ascii_lowercase();
+    let waiting = agy_line(&head_lower) && head_lower.trim_end().ends_with("resets in");
+    let duration_only = text.trim_end_matches('.');
+    let pure = !duration_only.is_empty() && duration_only.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace());
+    (waiting && pure && reset_seconds(duration_only).is_some()).then(|| format!("{head} {text}"))
+}
+
 fn is_quota_limit_lower(lower: &str) -> bool {
     let reached = lower.starts_with("you've reached your") && lower.contains("limit");
-    // agy TUI 的個人額度列：`Individual quota reached … Resets in 3h 12m`。
-    let agy = lower.starts_with("individual quota reached") && lower.contains("resets in");
+    // agy TUI 的個人額度列：`⚠ Individual quota reached … Resets in 3h 12m`（前導 ⚠ 與折行見 [`agy_line`]）。
+    let agy = agy_line(lower);
     // 2.1.271 起速率上限也會寫成「You've hit your session／weekly／Opus limit」（CLI 的橫幅前綴清單同時有
     // hit 與 reached）。只認速率桶：`hit your monthly spend limit`、`fast limit`、團隊預算不是 5h／7d 用完，
     // 記成撞限會把量表釘成 100%（2026-09-15）。
@@ -123,42 +151,40 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
 /// agy 的撞限列提供相對重置時間（例如 `Resets in 3h 12m`）；可讀時採用，否則由 5h 窗長保底。
 fn agy_reset_until(line: &str, at: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
-    let tail = lower.split_once("resets in")?.1;
-    let tokens = tail.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
-    let mut seconds = 0i64;
-    let mut i = 0;
-    while i < tokens.len() {
-        let token = tokens[i];
-        let digits = token.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
-        if digits.is_empty() {
-            i += 1;
-            continue;
-        }
-        let value = digits.parse::<i64>().ok()?;
-        let mut unit = &token[digits.len()..];
-        if unit.is_empty() && i + 1 < tokens.len() {
-            unit = tokens[i + 1];
-            i += 1;
-        }
-        let multiplier = if unit.starts_with('d') || unit.starts_with("day") {
-            86_400
-        } else if unit.starts_with('h') || unit.starts_with("hour") {
-            3_600
-        } else if unit.starts_with('m') || unit.starts_with("minute") || unit.starts_with("min") {
-            60
-        } else if unit.starts_with('s') || unit.starts_with("second") || unit.starts_with("sec") {
-            1
-        } else {
-            0
-        };
-        seconds = seconds.saturating_add(value.saturating_mul(multiplier));
-        i += 1;
-    }
-    if seconds <= 0 {
-        return None;
-    }
+    let seconds = reset_seconds(lower.split_once("resets in")?.1)?;
     let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
     Some(crate::db::iso_at(base + chrono::Duration::seconds(seconds)))
+}
+
+/// `Resets in` 後面的時長：`3h 12m`、`13m11s`、`45s`、`2h`（可以相連或隔空白，尾端的句號不管）。
+/// 任何一段數字沒有單位、單位認不出、或總和不是正數都回 `None`——寧可不設到期，也不要猜成 0 或現在。
+fn reset_seconds(tail: &str) -> Option<i64> {
+    let mut chars = tail.trim_start().chars().peekable();
+    let mut total = 0i64;
+    loop {
+        let mut digits = String::new();
+        while let Some(c) = chars.next_if(|c| c.is_ascii_digit()) {
+            digits.push(c);
+        }
+        let value: i64 = digits.parse().ok()?;
+        let mut unit = String::new();
+        while let Some(c) = chars.next_if(|c| c.is_ascii_alphabetic()) {
+            unit.push(c.to_ascii_lowercase());
+        }
+        let each = match unit.as_str() {
+            "d" | "day" | "days" => 86_400,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            _ => return None,
+        };
+        total = total.checked_add(value.checked_mul(each)?)?;
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if !chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            break;
+        }
+    }
+    (total > 0).then_some(total)
 }
 
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
@@ -328,6 +354,9 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         }
         if is_content_blocked(line) || is_content_blocked_detail(&lines, i) {
             return Some(CONTENT_BLOCKED.to_string());
+        }
+        if let Some(banner) = agy_banner_at(&lines, i) {
+            return Some(banner);
         }
         // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
@@ -725,6 +754,66 @@ mod tests {
         assert!(is_quota_limit(line));
         assert!(is_quota_exhaustion(line));
         assert_eq!(agy_reset_until(line, "2026-10-05T10:00:00Z").as_deref(), Some("2026-10-05T11:30:00.000Z"));
+    }
+
+    /// 2026-10-24 實際畫面原文：`⚠` 前綴，`Resets in` 折到下一行。
+    const AGY_WRAPPED_HEAD: &str = "⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in";
+    const AGY_WRAPPED_TAIL: &str = "13m11s.";
+    const AGY_JOINED: &str = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 13m11s.";
+
+    #[test]
+    fn a_wrapped_agy_banner_with_a_warning_glyph_is_detected_from_the_screen() {
+        let screen = format!("❯ prompt\n{AGY_WRAPPED_HEAD}\n{AGY_WRAPPED_TAIL}\n─────\n❯\n");
+        assert_eq!(api_error_line(&screen).as_deref(), Some(AGY_JOINED));
+        assert!(is_quota_limit(AGY_JOINED));
+        assert!(is_quota_exhaustion(AGY_JOINED));
+        assert_eq!(kind_of(AGY_JOINED), "quota_limit");
+        // 13 分 11 秒，不能只剩分鐘（舊的切法會丟掉 `11s`）。
+        assert_eq!(agy_reset_until(AGY_JOINED, "2026-10-24T10:00:00Z").as_deref(), Some("2026-10-24T10:13:11.000Z"));
+    }
+
+    #[test]
+    fn agy_reset_durations_in_every_shape_are_read() {
+        let at = "2026-10-24T10:00:00Z";
+        for (tail, want) in [
+            ("Resets in 3h 12m", "2026-10-24T13:12:00.000Z"),
+            ("Resets in 3h12m.", "2026-10-24T13:12:00.000Z"),
+            ("Resets in 4m 5s", "2026-10-24T10:04:05.000Z"),
+            ("Resets in 13m11s.", "2026-10-24T10:13:11.000Z"),
+            ("Resets in 45s", "2026-10-24T10:00:45.000Z"),
+            ("Resets in 2h", "2026-10-24T12:00:00.000Z"),
+            ("⚠ Individual quota reached. Resets in 1d 2h", "2026-10-25T12:00:00.000Z"),
+        ] {
+            assert_eq!(agy_reset_until(tail, at).as_deref(), Some(want), "{tail}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_agy_reset_is_none_not_zero_or_now() {
+        let at = "2026-10-24T10:00:00Z";
+        for tail in ["Resets in", "Resets in soon", "Resets in 3", "Resets in 3x", "Resets in 0m", "Resets in 3h 12"] {
+            assert_eq!(agy_reset_until(tail, at), None, "{tail}");
+        }
+    }
+
+    #[test]
+    fn an_agy_quota_line_that_is_not_a_hit_is_not_a_banner() {
+        // 助理回覆（`■` 開頭）引用橫幅：不是現在撞限。
+        let quoted = format!("❯ 幫我查一下\n■ 你看到的是 Individual quota reached. Resets in 1h 30m\n─────\n❯\n");
+        assert_eq!(api_error_line(&quoted), None);
+        // 沒有重置時間、或重置時間不成形：不是撞限橫幅。
+        assert!(!is_quota_limit("Individual quota reached. Upgrade your plan."));
+        let no_reset = "❯ x\nIndividual quota reached. Upgrade your plan.\n─────\n❯\n";
+        assert_eq!(api_error_line(no_reset), None);
+        let tail_only = "❯ x\n13m11s.\n─────\n❯\n";
+        assert_eq!(api_error_line(tail_only), None);
+        let not_a_duration = "❯ x\n⚠ Individual quota reached. Resets in\nPlease wait a while.\n─────\n❯\n";
+        assert_eq!(api_error_line(not_a_duration), None);
+        // 不是 agy 的句子，只是碰巧有 quota、resets in 幾個字。
+        let prose = "The quota reached its limit; resets in spring.";
+        assert!(!is_quota_limit(prose));
+        assert!(!is_quota_exhaustion(prose));
+        assert_eq!(api_error_line(&format!("❯ x\n{prose}\n─────\n❯\n")), None);
     }
 }
 
@@ -1261,6 +1350,25 @@ mod quota_limit_tests {
         let at = chrono::DateTime::parse_from_rfc3339(&hit.at).unwrap();
         let until = chrono::DateTime::parse_from_rfc3339(hit.until.as_deref().expect("relative reset captured")).unwrap();
         assert_eq!((until - at).num_seconds(), 90 * 60);
+    }
+
+    /// 真畫面（折行）→ 擷取到的那一行 → 寫進 limit_hit：到期要用折行後的 `13m11s`，不是保底的 5h。
+    #[tokio::test]
+    async fn a_wrapped_agy_banner_on_screen_writes_its_real_reset_into_the_limit_hit() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (mut bot, _) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        bot.kind = "agy".into();
+        let screen = "❯ prompt\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in\n13m11s.\n─────\n❯\n";
+        let line = api_error_line(screen).expect("折行的橫幅要認得出來");
+        assert!(is_quota_limit(&line));
+        mark_agy_limit_hit(&app, &bot, &line).await.unwrap();
+        let q = app.quotas.lock().await.get("agy").cloned().expect("agy quota row");
+        assert_eq!(q.five_hour.as_ref().map(|w| w.used_pct), Some(100.0));
+        let hit = q.limit_hit.expect("saved limit hit");
+        let at = chrono::DateTime::parse_from_rfc3339(&hit.at).unwrap();
+        let until = chrono::DateTime::parse_from_rfc3339(hit.until.as_deref().expect("relative reset captured")).unwrap();
+        assert_eq!((until - at).num_seconds(), 13 * 60 + 11);
     }
 
     /// 一顆 bot，對話裡排著一則。`host` 不是本機時建一個那台主機的專案。
