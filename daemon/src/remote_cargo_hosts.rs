@@ -215,6 +215,69 @@ pub(super) fn queue_order(busy: &[(usize, usize)]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// 都忙時排排隊人數最少的那台，同分照設定順序。
+    #[test]
+    fn when_every_host_is_busy_the_shortest_queue_wins_and_ties_keep_config_order() {
+        assert_eq!(queue_order(&[(0, 2), (1, 0), (2, 0)]), vec![1, 2, 0]);
+        assert_eq!(queue_order(&[(0, 1), (1, 1)]), vec![0, 1]);
+        assert!(queue_order(&[]).is_empty());
+    }
+
+    /// 本機執行器的負載門檻：設定 > 呼叫端的 CHECK_MAX_LOAD > 核心數 × 1.25（同 wait-load.sh）。
+    #[test]
+    fn the_local_load_cap_prefers_config_then_check_max_load_then_cores() {
+        let cfg = BuildRemoteCfg { host: "local".into(), max_load: 7.5, ..Default::default() };
+        assert_eq!(local_max_load(&cfg, Some("40")), 7.5);
+        let auto = BuildRemoteCfg { max_load: 0.0, ..cfg };
+        assert_eq!(local_max_load(&auto, Some("40")), 40.0);
+        assert_eq!(local_max_load(&auto, Some("junk")), std::thread::available_parallelism().unwrap().get() as f64 * 1.25);
+        assert!(Admission::try_from_cfg(&auto).max_load.is_some(), "本機試用看負載");
+        assert_eq!(Admission::try_from_cfg(&BuildRemoteCfg { host: "r7".into(), ..auto }).max_load, None, "ssh 主機不看");
+    }
+
+    /// 設定：舊的單一 `[build.remote]` 展開成一台；`[[build.remote.hosts]]` 照順序接在後面、沒寫的沿用第一台、
+    /// `enabled = false` 的略過、只支援金鑰；`host = "local"` 不用 user。設錯的那台只略過（其他台照用），全部都錯才退回本機並講是哪台。
+    #[test]
+    fn several_build_hosts_are_read_in_order_and_an_old_single_host_config_is_unchanged() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-cfg-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = vec!["test".to_string()];
+        let decide = |body: &str| {
+            let p = dir.join("c.toml");
+            std::fs::write(&p, body).unwrap();
+            decide_offload(&p, &args, Vec::<(String, String)>::new())
+        };
+        let Offload::Go(old) = decide("[build.remote]\nenabled = true\nhost = \"r7\"\nuser = \"r7\"\ncargo_jobs = 8\n") else { panic!("舊設定照轉") };
+        assert_eq!(old.len(), 1);
+        assert_eq!((old[0].target_label(), old[0].password_id.clone()), ("r7@r7:22".to_string(), None), "舊設定的密碼檔規則不變");
+        let multi = "[build.remote]\nenabled = true\nhost = \"local\"\ncargo_jobs = 12\ntest_threads = 6\n\
+                     [[build.remote.hosts]]\nhost = \"r7\"\nuser = \"r7\"\nmax_concurrent = 1\n\
+                     [[build.remote.hosts]]\nhost = \"off\"\nuser = \"x\"\nenabled = false\n";
+        let Offload::Go(hosts) = decide(multi) else { panic!("多台照轉") };
+        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local", "r7@r7:22"]);
+        assert_eq!((hosts[1].cargo_jobs, hosts[1].test_threads, hosts[1].max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
+        assert_eq!(hosts[1].password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
+        // 額外主機設錯（主機名不合法、沒寫 user 又沿用到本機執行器的空 user）：只略過那台。
+        let bad_extra = "[build.remote]\nenabled = true\nhost = \"local\"\n\
+                         [[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n[[build.remote.hosts]]\nhost = \"r9\"\n";
+        let Offload::Go(hosts) = decide(bad_extra) else { panic!("一台設錯不拖累整組") };
+        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]);
+        let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..hosts[0].clone() }.targets());
+        assert!(ok.is_empty() && skipped.len() == 1 && skipped[0].contains("r7"), "{skipped:?}");
+        // 全部都錯：退回本機並講是哪台。
+        match decide("[build.remote]\nenabled = true\nhost = \"h;id\"\nuser = \"u\"\n") {
+            Offload::Local(Some(why)) => assert!(why.contains("h;id"), "{why}"),
+            _ => panic!("壞掉的那台要講"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// 用到 `guard_tests` 的測試：那些 helper 只在 Linux 編（`remote_cargo.rs` 的 `guard_tests`），所以這一組跟著 linux-only（#1964）。
+#[cfg(all(test, target_os = "linux"))]
+mod guard_backed_tests {
     use super::super::guard_tests::{base, fake_remote, guard_cmd, guard_with, with_fake_transport, with_sealed_waits, write_exec, HASH, QUICK};
     use super::*;
     use std::time::{Duration, Instant};
@@ -333,26 +396,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    /// 都忙時排排隊人數最少的那台，同分照設定順序。
-    #[test]
-    fn when_every_host_is_busy_the_shortest_queue_wins_and_ties_keep_config_order() {
-        assert_eq!(queue_order(&[(0, 2), (1, 0), (2, 0)]), vec![1, 2, 0]);
-        assert_eq!(queue_order(&[(0, 1), (1, 1)]), vec![0, 1]);
-        assert!(queue_order(&[]).is_empty());
-    }
-
-    /// 本機執行器的負載門檻：設定 > 呼叫端的 CHECK_MAX_LOAD > 核心數 × 1.25（同 wait-load.sh）。
-    #[test]
-    fn the_local_load_cap_prefers_config_then_check_max_load_then_cores() {
-        let cfg = BuildRemoteCfg { host: "local".into(), max_load: 7.5, ..Default::default() };
-        assert_eq!(local_max_load(&cfg, Some("40")), 7.5);
-        let auto = BuildRemoteCfg { max_load: 0.0, ..cfg };
-        assert_eq!(local_max_load(&auto, Some("40")), 40.0);
-        assert_eq!(local_max_load(&auto, Some("junk")), std::thread::available_parallelism().unwrap().get() as f64 * 1.25);
-        assert!(Admission::try_from_cfg(&auto).max_load.is_some(), "本機試用看負載");
-        assert_eq!(Admission::try_from_cfg(&BuildRemoteCfg { host: "r7".into(), ..auto }).max_load, None, "ssh 主機不看");
-    }
-
     /// #1971：本機試用時負載超過上限就是沒有空槽（回 `Busy`，不排隊、不編）；負載低就拿得到。
     /// 注入的是守門讀的負載檔（[`TEST_LOADAVG`]），不是真機器的 loadavg——CI 機負載 >20 時，這條不能跟著紅。
     #[test]
@@ -373,43 +416,6 @@ mod tests {
         lease.finish();
         TEST_LOADAVG.with(|p| *p.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(base);
-    }
-
-    /// 設定：舊的單一 `[build.remote]` 展開成一台；`[[build.remote.hosts]]` 照順序接在後面、沒寫的沿用第一台、
-    /// `enabled = false` 的略過、只支援金鑰；`host = "local"` 不用 user。設錯的那台只略過（其他台照用），全部都錯才退回本機並講是哪台。
-    #[test]
-    fn several_build_hosts_are_read_in_order_and_an_old_single_host_config_is_unchanged() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-cfg-{}", crate::db::ulid())));
-        std::fs::create_dir_all(&dir).unwrap();
-        let args = vec!["test".to_string()];
-        let decide = |body: &str| {
-            let p = dir.join("c.toml");
-            std::fs::write(&p, body).unwrap();
-            decide_offload(&p, &args, Vec::<(String, String)>::new())
-        };
-        let Offload::Go(old) = decide("[build.remote]\nenabled = true\nhost = \"r7\"\nuser = \"r7\"\ncargo_jobs = 8\n") else { panic!("舊設定照轉") };
-        assert_eq!(old.len(), 1);
-        assert_eq!((old[0].target_label(), old[0].password_id.clone()), ("r7@r7:22".to_string(), None), "舊設定的密碼檔規則不變");
-        let multi = "[build.remote]\nenabled = true\nhost = \"local\"\ncargo_jobs = 12\ntest_threads = 6\n\
-                     [[build.remote.hosts]]\nhost = \"r7\"\nuser = \"r7\"\nmax_concurrent = 1\n\
-                     [[build.remote.hosts]]\nhost = \"off\"\nuser = \"x\"\nenabled = false\n";
-        let Offload::Go(hosts) = decide(multi) else { panic!("多台照轉") };
-        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local", "r7@r7:22"]);
-        assert_eq!((hosts[1].cargo_jobs, hosts[1].test_threads, hosts[1].max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
-        assert_eq!(hosts[1].password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
-        // 額外主機設錯（主機名不合法、沒寫 user 又沿用到本機執行器的空 user）：只略過那台。
-        let bad_extra = "[build.remote]\nenabled = true\nhost = \"local\"\n\
-                         [[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n[[build.remote.hosts]]\nhost = \"r9\"\n";
-        let Offload::Go(hosts) = decide(bad_extra) else { panic!("一台設錯不拖累整組") };
-        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]);
-        let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..hosts[0].clone() }.targets());
-        assert!(ok.is_empty() && skipped.len() == 1 && skipped[0].contains("r7"), "{skipped:?}");
-        // 全部都錯：退回本機並講是哪台。
-        match decide("[build.remote]\nenabled = true\nhost = \"h;id\"\nuser = \"u\"\n") {
-            Offload::Local(Some(why)) => assert!(why.contains("h;id"), "{why}"),
-            _ => panic!("壞掉的那台要講"),
-        }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 一台連不上的 ssh 主機：假 ssh 一律回 255（沒進去）；rsync 用真的（本機執行器同步到本機路徑）。

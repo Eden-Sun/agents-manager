@@ -143,4 +143,4 @@ while IFS= read -r f; do
         # docs/API.md：路由對照（daemon/tests/api_doc_parity.rs，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests，#907）。#1170。
         docs/API.md) echo 'api_route_methods_match_documented_inventory'; echo 'ws_event_docs_tests::' ;;
     esac
-done | sort -u
+done | LC_ALL=C sort -u
