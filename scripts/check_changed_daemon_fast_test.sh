@@ -286,7 +286,7 @@ export AM_TEST_CARGO_ZERO_TESTS=1
 if output="$(CHECK_TESTS=definitely_not_a_test changed 2>&1)"; then
     fail "CHECK_TESTS 選到零個測試卻放行：$output"
 fi
-printf '%s' "$output" | grep -q '沒有選到任何測試' || fail "零測試失敗沒有說明原因：$output"
+grep -q '沒有選到任何測試' <<<"$output" || fail "零測試失敗沒有說明原因：$output"
 unset AM_TEST_CARGO_ZERO_TESTS
 
 # Build scripts, manifests, common test helpers, and embedded fixture/data edits need the whole suite.
@@ -343,7 +343,7 @@ export AM_TEST_DIFF_HEAD=''
 export AM_TEST_GIT_FAIL='diff --name-only origin/main...HEAD'
 if out="$(changed)"; then fail "base 比不出來卻放行了：$out"; else rc=$?; fi
 [ "$rc" = 2 ] || fail "base git diff 失敗應回 2，實際 ${rc}：${out}"
-printf '%s' "$out" | grep -q 'origin/main' || fail "沒有說是 base 的問題：$out"
+grep -q 'origin/main' <<<"$out" || fail "沒有說是 base 的問題：$out"
 unset AM_TEST_GIT_FAIL
 export AM_TEST_GIT_FAIL='diff --name-only HEAD'
 if out="$(changed)"; then fail "工作樹 git diff 失敗卻放行了：$out"; else rc=$?; fi
@@ -362,17 +362,17 @@ changed >/dev/null || fail "只改 API.md 的 changed 失敗"
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=crates/am-base/src/cargo_shim.rs
 output="$(changed)" || fail "改 crates/am-base 的 cargo_shim.rs 的 changed 失敗：$output"
-printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' || fail "改 crates/am-base 的 cargo_shim.rs 沒提醒跑 macos-local：$output"
+grep -q 'scripts/check.sh macos-local' <<<"$output" || fail "改 crates/am-base 的 cargo_shim.rs 沒提醒跑 macos-local：$output"
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 output="$(changed)" || fail "改 queue.rs 的 changed 失敗"
-printf '%s' "$output" | grep -q 'macos-local' && fail "改 queue.rs 不該提醒 macos-local：$output"
+grep -q 'macos-local' <<<"$output" && fail "改 queue.rs 不該提醒 macos-local：$output"
 
 # The hint selector also covers module source below the first nested directory.
 mkdir -p "$fixture/daemon/src/supervisor/deep"
 printf 'fn macos_local_nested_probe() {}\n' >"$fixture/daemon/src/supervisor/deep/roles.rs"
 export AM_TEST_DIFF_HEAD=daemon/src/supervisor/deep/roles.rs
 output="$(changed)" || fail "改巢狀平台敏感模組的 changed 失敗：$output"
-printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' \
+grep -q 'scripts/check.sh macos-local' <<<"$output" \
     || fail "巢狀模組有 macos_local_ 測試卻沒提醒：$output"
 
 # crate 拆分後 macos_local_ 測試大多在 crates/ 底下（issue #1172），也要提醒；沒有 macos_local_ 的 crates 檔不提醒。
@@ -380,12 +380,12 @@ mkdir -p "$fixture/crates/am-base/src"
 printf 'fn macos_local_probe() {}\n' >"$fixture/crates/am-base/src/outbox_remote.daemon-tests-tests.rs"
 export AM_TEST_DIFF_HEAD=crates/am-base/src/outbox_remote.daemon-tests-tests.rs
 output="$(changed)" || fail "改 crates 底下平台敏感測試檔的 changed 失敗：$output"
-printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' \
+grep -q 'scripts/check.sh macos-local' <<<"$output" \
     || fail "crates/ 底下有 macos_local_ 測試卻沒提醒：$output"
 printf 'pub fn plain() {}\n' >"$fixture/crates/am-base/src/plain.rs"
 export AM_TEST_DIFF_HEAD=crates/am-base/src/plain.rs
 output="$(changed)" || fail "改 crates 一般檔的 changed 失敗：$output"
-printf '%s' "$output" | grep -q 'macos-local' && fail "crates 底下沒有 macos_local_ 的檔不該提醒：$output"
+grep -q 'macos-local' <<<"$output" && fail "crates 底下沒有 macos_local_ 的檔不該提醒：$output"
 
 # changed 的 git diff 要關掉改名偵測（issue #1173）：改名只列新路徑的話，把會進 binary 的檔搬到 docs/ 會被當成「只有文件」。
 export AM_TEST_REQUIRE_NO_RENAMES=1 AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs

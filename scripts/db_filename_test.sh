@@ -97,7 +97,7 @@ selfcheck() {
     printf '#!/bin/bash\n# 註解裡提 db.sqlite3 不算\nDB="$D/db.sqlite3"\n' > "${tmp}/scripts/ops/x.sh"
     git -C "${tmp}" add -A
     out=$(check_tree "${tmp}" 2>&1) && rc=0 || rc=$?
-    if [ "${rc}" = 1 ] && printf '%s' "${out}" | grep -qF 'scripts/ops/x.sh:3: db.sqlite3'; then
+    if [ "${rc}" = 1 ] && grep -qF 'scripts/ops/x.sh:3: db.sqlite3' <<<"${out}"; then
         echo "ok   - 自我檢查：寫 db.sqlite3 的腳本會 FAIL 並點名那一行"
     else
         echo "FAIL - 自我檢查：寫 db.sqlite3 的腳本沒有被抓到（rc=${rc}）"; echo "${out}" | sed 's/^/      /'; fails=$((fails + 1))
@@ -115,7 +115,7 @@ selfcheck() {
     printf 'let db = prepared.dir.join("ledger.sqlite3");\n' > "${tmp}/daemon/src/startup.rs"
     git -C "${tmp}" add -A
     out=$(check_tree "${tmp}" 2>&1) && rc=0 || rc=$?
-    if [ "${rc}" = 1 ] && printf '%s' "${out}" | grep -qF 'daemon/src/startup.rs 找不到'; then
+    if [ "${rc}" = 1 ] && grep -qF 'daemon/src/startup.rs 找不到' <<<"${out}"; then
         echo "ok   - 自我檢查：daemon 的檔名改了，檢查 1 會 FAIL"
     else
         echo "FAIL - 自我檢查：daemon 的檔名改了沒有被抓到（rc=${rc}）"; echo "${out}" | sed 's/^/      /'; fails=$((fails + 1))
@@ -136,7 +136,7 @@ selfcheck() {
     printf '#!/bin/bash\nDB="$D/db.sqlite3"\n' > "${tmp}/scripts/ops/y.sh"
     git -C "${tmp}" add -A
     out=$(check_tree "${tmp}" 2>&1) && rc=0 || rc=$?
-    if [ "${rc}" = 1 ] && printf '%s' "${out}" | grep -qF 'scripts/ops/y.sh:2:'; then
+    if [ "${rc}" = 1 ] && grep -qF 'scripts/ops/y.sh:2:' <<<"${out}"; then
         echo "ok   - 自我檢查：非測試腳本的 db.sqlite3 會 FAIL"
     else
         echo "FAIL - 自我檢查：非測試腳本的 db.sqlite3 沒被抓到（rc=${rc}）"; echo "${out}" | sed 's/^/      /'; fails=$((fails + 1))
