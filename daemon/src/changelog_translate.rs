@@ -42,6 +42,7 @@ fn translate_cfg(full: &crate::config::ConfigFile) -> ChangelogTranslateCfg {
 }
 
 const LEDGER_DIR: &str = "changelog-translate";
+const ARCHIVE_DIR: &str = "changelog-translate-usage";
 
 /// 新版偵測時會背景自動翻的 kind（#1948）。五種都有 changelog 來源；抓不到 changelog 的那一種安靜不送。
 const AUTO_KINDS: [&str; 5] = ["claude", "codex", "herdr", "agy", "grok"];
@@ -50,6 +51,8 @@ pub struct Hub {
     gate: tokio::sync::Mutex<()>,
     client: std::sync::Mutex<Arc<dyn MessagesClient>>,
     settled: AtomicBool,
+    /// 確保同一時間只有一個背景 prune 任務在執行（#1973）。
+    prune_pending: AtomicBool,
     /// 背景被 in_flight／hourly 擋下後、已排好的那一次延後重送（key＝kind|from|to）。只存在記憶體，重啟不補（#1948）。
     retry_pending: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 延後重送的最短等待（預設 60 秒）。測試可以縮短。
@@ -62,6 +65,7 @@ impl Hub {
             gate: tokio::sync::Mutex::new(()),
             client: std::sync::Mutex::new(Arc::new(AnthropicHttpClient)),
             settled: AtomicBool::new(false),
+            prune_pending: AtomicBool::new(false),
             retry_pending: std::sync::Mutex::new(std::collections::HashSet::new()),
             retry_floor: std::sync::Mutex::new(std::time::Duration::from_secs(60)),
         }
@@ -489,6 +493,8 @@ fn run_attempt(
         .await;
         let _gate = app.changelog_translate.gate.lock().await;
         finish(&app.data_dir, &fp, &attempt_id, result);
+        drop(_gate);
+        schedule_prune(&app);
     })
 }
 
@@ -497,14 +503,22 @@ async fn settle_only(app: &Arc<App>) {
 }
 
 async fn under_gate<T>(app: &Arc<App>, f: impl FnOnce() -> T) -> T {
-    let _gate = app.changelog_translate.gate.lock().await;
-    if !app.changelog_translate.settled.load(Ordering::Acquire) {
-        settle_dir(&ledger_dir(&app.data_dir));
-        app.changelog_translate
-            .settled
-            .store(true, Ordering::Release);
+    let mut triggered_settle = false;
+    let res = {
+        let _gate = app.changelog_translate.gate.lock().await;
+        if !app.changelog_translate.settled.load(Ordering::Acquire) {
+            settle_dir(&ledger_dir(&app.data_dir));
+            app.changelog_translate
+                .settled
+                .store(true, Ordering::Release);
+            triggered_settle = true;
+        }
+        f()
+    };
+    if triggered_settle {
+        schedule_prune(app);
     }
-    f()
+    res
 }
 
 fn decide(
@@ -1105,8 +1119,27 @@ fn ledger_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(LEDGER_DIR)
 }
 
+fn archive_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(ARCHIVE_DIR)
+}
+
+fn valid_fingerprint(fp: &str) -> bool {
+    fp.len() == 64
+        && fp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn job_path(data_dir: &Path, fp: &str) -> PathBuf {
     ledger_dir(data_dir).join(format!("{fp}.json"))
+}
+
+fn archive_path(data_dir: &Path, fp: &str) -> PathBuf {
+    archive_dir(data_dir).join(format!("{fp}.json"))
+}
+
+fn conflict_archive_path(data_dir: &Path, fp: &str, suffix: &str) -> PathBuf {
+    archive_dir(data_dir).join(format!("{fp}.{suffix}.conflict.json"))
 }
 
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
@@ -1166,6 +1199,469 @@ fn ledger_jobs(dir: &Path) -> Vec<Job> {
         .iter()
         .filter_map(|p| load(p).ok())
         .collect()
+}
+
+/// 保留政策（#1973）：
+/// 1. 只有 completed 狀態且所有 attempt 的 state 皆為已知終態（completed／interrupted／failed）、時間欄位均可解析且距今 > 1 小時、無未到期 retry_after 者才合格（eligible）。
+/// 2. 壞 JSON／未知 attempt 狀態／缺少時間戳記（任何 attempt 的 started_at 或 finished_at 缺失或無法解析）／未來時間／有 attempt 在 1h 內／retry_after 未到期／非 completed 狀態，條件存續期間受保護，絕不刪除。
+/// 3. 合格中已過期（所有 attempt 的開始與結束時間皆超過 30 天前）可刪除。
+/// 4. 其餘合格者，若被同 scope、包含其唯一 (version, hash) 集合為嚴格超集、且具備譯文之 completed 保留檔（witness）涵蓋，且候選數超過 100 筆時，依最舊 attempt 刪除。
+/// 5. witness 必須在保留名單內，且不可被排入同批刪除（避免 A/B 互蓋同時刪除）；刪除前持 gate 再次重讀 candidate 與 witness，驗證保護條件。
+const MAX_ELIGIBLE_COVERED_LEDGERS: usize = 100;
+const SCAN_BATCH_LIMIT: usize = 200;
+const DELETE_BATCH_LIMIT: usize = 40; // 5 * 40 <= 200 個 IO 操作
+
+fn is_known_final_attempt_state(state: &str) -> bool {
+    matches!(state, "completed" | "interrupted" | "failed")
+}
+
+fn attempt_ts_older_than(
+    a: &Attempt,
+    one_hour_ago: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !is_known_final_attempt_state(&a.state) {
+        return false;
+    }
+    let Some(start) = crate::db::parse_ts(&a.started_at) else {
+        return false;
+    };
+    if start >= one_hour_ago || start > now {
+        return false;
+    }
+    let Some(ref fin_str) = a.finished_at else {
+        return false;
+    };
+    let Some(fin) = crate::db::parse_ts(fin_str) else {
+        return false;
+    };
+    if fin >= one_hour_ago || fin > now || fin < start {
+        return false;
+    }
+    if let Some(ref retry_str) = a.retry_after {
+        let Some(retry) = crate::db::parse_ts(retry_str) else {
+            return false;
+        };
+        if retry >= now {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_eligible_completed(job: &Job, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if job.status != "completed" || last_state(job) != "completed" {
+        return false;
+    }
+    if job.attempts.is_empty() {
+        return false;
+    }
+    let one_hour_ago = now - chrono::Duration::hours(1);
+    for a in &job.attempts {
+        if !attempt_ts_older_than(a, one_hour_ago, now) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_expired_job(job: &Job, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let thirty_days_ago = now - chrono::Duration::days(30);
+    for a in &job.attempts {
+        let Some(start) = crate::db::parse_ts(&a.started_at) else {
+            return false;
+        };
+        if start >= thirty_days_ago {
+            return false;
+        }
+        let Some(ref fin_str) = a.finished_at else {
+            return false;
+        };
+        let Some(fin) = crate::db::parse_ts(fin_str) else {
+            return false;
+        };
+        if fin >= thirty_days_ago {
+            return false;
+        }
+    }
+    true
+}
+
+fn source_set(job: &Job) -> std::collections::HashSet<(&str, &str)> {
+    job.source
+        .iter()
+        .map(|s| (s.version.as_str(), s.hash.as_str()))
+        .collect()
+}
+
+fn is_strictly_covered_by(candidate: &Job, witness: &Job) -> bool {
+    if candidate.fingerprint == witness.fingerprint {
+        return false;
+    }
+    if candidate.scope.is_empty()
+        || candidate.scope != witness.scope
+        || witness.status != "completed"
+        || last_state(witness) != "completed"
+    {
+        return false;
+    }
+    let cand_set = source_set(candidate);
+    let wit_set = source_set(witness);
+    if cand_set.is_empty() || !cand_set.is_subset(&wit_set) || cand_set.len() >= wit_set.len() {
+        return false;
+    }
+    // candidate 的每個 version 在 witness 的 sections 裡都有對應譯文，且 body.trim() 非空
+    candidate.source.iter().all(|cs| {
+        witness
+            .sections
+            .iter()
+            .any(|s| s.version == cs.version && !s.body.trim().is_empty())
+    })
+}
+
+fn schedule_prune(app: &Arc<App>) {
+    if app
+        .changelog_translate
+        .prune_pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let worker = Arc::clone(app);
+        app.background_tasks.spawn(Box::pin(async move {
+            run_prune(worker).await;
+        }));
+    }
+}
+
+struct PrunePlan {
+    expired: Vec<String>,
+    covered: Vec<(String, String)>, // (candidate_fp, witness_fp)
+}
+
+fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePlan {
+    let mut eligible_expired = Vec::new();
+    let mut eligible_covered_candidates = Vec::new();
+    let mut completed_witness_pool = Vec::new();
+
+    for job in snapshots {
+        if job.status == "completed" && last_state(job) == "completed" {
+            completed_witness_pool.push(job);
+        }
+        if is_eligible_completed(job, now) {
+            if is_expired_job(job, now) {
+                eligible_expired.push(job.fingerprint.clone());
+            } else {
+                eligible_covered_candidates.push(job);
+            }
+        }
+    }
+
+    let expired_set: std::collections::HashSet<&str> =
+        eligible_expired.iter().map(|s| s.as_str()).collect();
+
+    // witness 必須是 completed 且不在過期刪除清單內
+    let valid_witness_pool: Vec<&Job> = completed_witness_pool
+        .into_iter()
+        .filter(|j| !expired_set.contains(j.fingerprint.as_str()))
+        .collect();
+
+    // 尋找 witness：選取包含 candidate 且 source 集合最大的 witness（maximal coverer）
+    let mut covered_pairs: Vec<(&Job, &Job)> = Vec::new();
+    for cand in eligible_covered_candidates {
+        let best_witness = valid_witness_pool
+            .iter()
+            .filter(|w| is_strictly_covered_by(cand, w))
+            .max_by_key(|w| source_set(w).len());
+        if let Some(wit) = best_witness {
+            covered_pairs.push((cand, *wit));
+        }
+    }
+
+    let mut covered_plan = Vec::new();
+    if covered_pairs.len() > MAX_ELIGIBLE_COVERED_LEDGERS {
+        // 按每筆 job 最近一次完成時間，由舊到新淘汰。
+        covered_pairs.sort_by_key(|(cand, _)| {
+            cand.attempts
+                .iter()
+                .filter_map(|a| a.finished_at.as_deref().and_then(crate::db::parse_ts))
+                .max()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        });
+        let excess = covered_pairs.len() - MAX_ELIGIBLE_COVERED_LEDGERS;
+        // 挑選出 candidate，但必須確保被選中的 candidate 絕對不能在保留的 witness 清單中
+        let mut chosen_candidates = Vec::new();
+        let witness_set: std::collections::HashSet<String> = covered_pairs
+            .iter()
+            .map(|(_, w)| w.fingerprint.clone())
+            .collect();
+
+        for (cand, wit) in covered_pairs {
+            if chosen_candidates.len() >= excess {
+                break;
+            }
+            // 不能刪除當前被其他候選當作見證者的 job（避免 A->B->C 刪掉 B）
+            if witness_set.contains(cand.fingerprint.as_str()) {
+                continue;
+            }
+            chosen_candidates.push((cand.fingerprint.clone(), wit.fingerprint.clone()));
+        }
+        covered_plan = chosen_candidates;
+    }
+
+    PrunePlan {
+        expired: eligible_expired,
+        covered: covered_plan,
+    }
+}
+
+/// A future ledger format must remain untouched by an older daemon's cleanup.
+fn load_for_prune(path: &Path) -> Result<Job, LoadErr> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LoadErr::Missing),
+        Err(_) => return Err(LoadErr::Corrupt),
+    };
+    let mut de = serde_json::Deserializer::from_slice(&bytes);
+    let mut unknown = false;
+    let job: Job =
+        serde_ignored::deserialize(&mut de, |_| unknown = true).map_err(|_| LoadErr::Corrupt)?;
+    de.end().map_err(|_| LoadErr::Corrupt)?;
+    if unknown
+        || !valid_fingerprint(&job.fingerprint)
+        || path.file_stem().and_then(|s| s.to_str()) != Some(job.fingerprint.as_str())
+    {
+        return Err(LoadErr::Corrupt);
+    }
+    Ok(job)
+}
+
+/// One lock acquisition processes at most 200 directory entries, including errors/non-JSON.
+async fn scan_prune_batch(
+    app: &Arc<App>,
+    entries: &mut std::fs::ReadDir,
+) -> (Vec<Job>, bool, usize) {
+    let _gate = app.changelog_translate.gate.lock().await;
+    let mut jobs = Vec::new();
+    let mut visited = 0;
+    for _ in 0..SCAN_BATCH_LIMIT {
+        let Some(entry) = entries.next() else {
+            return (jobs, true, visited);
+        };
+        visited += 1;
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(job) = load_for_prune(&path) {
+                        jobs.push(job);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(?error, "could not scan changelog translation ledger"),
+        }
+    }
+    (jobs, false, visited)
+}
+
+#[derive(Default, Debug)]
+struct PruneBatchStats {
+    visited: usize,
+    operations: usize,
+    removed: usize,
+}
+
+/// 把即將被清理的 completed job 轉為 usage 歷史存檔（去掉 summary/sections/source 大 payload）。
+/// 若既有存檔存在，以 attempt.id 嚴格核對與合併：
+/// - 若同 id 內容完全一致則去重保留。
+/// - 若同 id 內容不一致則回報 Err（fail-closed，拒絕刪除熱 job），並嘗試將新 job 瘦身寫至 conflict 檔（命名包含 deterministic content hash）。
+/// - 新 id 則追加至末尾。
+/// 實際執行的檔案讀取與儲存次數透過 `ops` 累加，供批次上限統計。
+fn archive_pruned_job_with_saver<F>(
+    data_dir: &Path,
+    job: &Job,
+    ops: &mut usize,
+    mut saver: F,
+) -> Result<(), ()>
+where
+    F: FnMut(&Path, &Job) -> std::io::Result<()>,
+{
+    // Disk metadata is untrusted. Reject before constructing any archive path.
+    if !valid_fingerprint(&job.fingerprint) {
+        tracing::warn!("invalid changelog translation fingerprint; preserving hot job");
+        return Err(());
+    }
+    let a_path = archive_path(data_dir, &job.fingerprint);
+    *ops += 1; // 嘗試讀取既有 archive
+    let mut base_job = match load_for_prune(&a_path) {
+        Ok(existing) => existing,
+        Err(LoadErr::Missing) => {
+            let mut fresh = job.clone();
+            fresh.summary.clear();
+            fresh.sections.clear();
+            fresh.source.clear();
+            fresh
+        }
+        Err(LoadErr::Corrupt) => {
+            tracing::warn!(path = %a_path.display(), "corrupted changelog usage archive; aborting archive to avoid data loss");
+            return Err(());
+        }
+    };
+
+    let mut has_conflict = false;
+    for new_att in &job.attempts {
+        if let Some(existing_att) = base_job.attempts.iter().find(|a| a.id == new_att.id) {
+            let existing_json = serde_json::to_value(existing_att).map_err(|_| ())?;
+            let new_json = serde_json::to_value(new_att).map_err(|_| ())?;
+            if existing_json != new_json {
+                has_conflict = true;
+                break;
+            }
+        } else {
+            base_job.attempts.push(new_att.clone());
+        }
+    }
+
+    if has_conflict {
+        tracing::warn!(fingerprint = %job.fingerprint, "conflicting attempt payload in changelog usage archive; fail-closed");
+        let mut conflict_job = job.clone();
+        conflict_job.summary.clear();
+        conflict_job.sections.clear();
+        conflict_job.source.clear();
+        let payload_bytes = serde_json::to_vec_pretty(&conflict_job).map_err(|e| {
+            tracing::warn!(fingerprint = %job.fingerprint, ?e, "failed to serialize conflict changelog usage archive");
+        })?;
+        let suffix = hex_encode(&Sha256::digest(&payload_bytes));
+        let c_path = conflict_archive_path(data_dir, &job.fingerprint, &suffix);
+        *ops += 1; // 嘗試讀取既有 conflict 檔
+        let should_save = match std::fs::read(&c_path) {
+            Ok(existing_bytes) => {
+                if existing_bytes != payload_bytes {
+                    tracing::warn!(path = %c_path.display(), "existing conflict archive file has different content; preserving both and refusing to overwrite");
+                    false
+                } else {
+                    false
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!(path = %c_path.display(), ?e, "failed to inspect existing conflict archive file; fail-closed");
+                false
+            }
+        };
+        if should_save {
+            *ops += 1; // 嘗試寫入 conflict 檔
+            if let Err(e) = saver(&c_path, &conflict_job) {
+                tracing::warn!(path = %c_path.display(), ?e, "failed to save conflict changelog usage archive");
+            }
+        }
+        return Err(());
+    }
+
+    base_job.status = job.status.clone();
+    base_job.summary.clear();
+    base_job.sections.clear();
+    base_job.source.clear();
+
+    *ops += 1; // 嘗試儲存 archive
+    saver(&a_path, &base_job).map_err(|e| {
+        tracing::warn!(path = %a_path.display(), ?e, "failed to save changelog usage archive");
+    })
+}
+
+fn archive_pruned_job(data_dir: &Path, job: &Job, ops: &mut usize) -> Result<(), ()> {
+    archive_pruned_job_with_saver(data_dir, job, ops, save)
+}
+
+/// The snapshot is only a plan: each candidate and its retained witness are read again under gate.
+async fn apply_prune_batch(
+    app: &Arc<App>,
+    items: &[(String, Option<String>)],
+    now: chrono::DateTime<chrono::Utc>,
+) -> PruneBatchStats {
+    let _gate = app.changelog_translate.gate.lock().await;
+    let mut stats = PruneBatchStats::default();
+    for (fp, witness) in items.iter().take(DELETE_BATCH_LIMIT) {
+        stats.visited += 1;
+        if !valid_fingerprint(fp) || witness.as_ref().is_some_and(|fp| !valid_fingerprint(fp)) {
+            continue;
+        }
+        stats.operations += 1;
+        let path = job_path(&app.data_dir, fp);
+        let Ok(job) = load_for_prune(&path) else {
+            continue;
+        };
+        if !is_eligible_completed(&job, now) {
+            continue;
+        }
+        if let Some(witness) = witness {
+            stats.operations += 1;
+            let Ok(retained) = load_for_prune(&job_path(&app.data_dir, witness)) else {
+                continue;
+            };
+            if !is_strictly_covered_by(&job, &retained) {
+                continue;
+            }
+        } else if !is_expired_job(&job, now) {
+            continue;
+        }
+        // archive 讀取 + 儲存（透過 ops 實際計數已執行的 IO 步數）
+        if archive_pruned_job(&app.data_dir, &job, &mut stats.operations).is_err() {
+            continue;
+        }
+
+        stats.operations += 1; // unlink
+        match std::fs::remove_file(&path) {
+            Ok(()) => stats.removed += 1,
+            Err(error) => {
+                tracing::warn!(fingerprint = %fp, ?error, "failed to remove changelog translation ledger")
+            }
+        }
+    }
+    debug_assert!(stats.operations <= SCAN_BATCH_LIMIT);
+    stats
+}
+
+async fn run_prune(app: Arc<App>) {
+    struct Pending<'a>(&'a AtomicBool);
+    impl Drop for Pending<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _pending = Pending(&app.changelog_translate.prune_pending);
+    let mut entries = match std::fs::read_dir(ledger_dir(&app.data_dir)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "failed to open changelog translation ledger for cleanup"
+            );
+            return;
+        }
+    };
+    let mut snapshots = Vec::new();
+    loop {
+        let (jobs, done, visited) = scan_prune_batch(&app, &mut entries).await;
+        debug_assert!(visited <= SCAN_BATCH_LIMIT);
+        snapshots.extend(jobs);
+        if done {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let plan = plan_prune(&snapshots, chrono::Utc::now());
+    let mut items: Vec<_> = plan.expired.into_iter().map(|fp| (fp, None)).collect();
+    items.extend(
+        plan.covered
+            .into_iter()
+            .map(|(fp, witness)| (fp, Some(witness))),
+    );
+    for batch in items.chunks(DELETE_BATCH_LIMIT) {
+        let stats = apply_prune_batch(&app, batch, chrono::Utc::now()).await;
+        debug_assert_eq!(stats.visited, batch.len());
+        tokio::task::yield_now().await;
+    }
 }
 
 fn last_state(job: &Job) -> &str {
@@ -3102,5 +3598,596 @@ mod tests {
         assert_eq!(parsed["output_config"]["effort"], "low");
         assert_eq!(parsed["model"], "claude-haiku-5-5");
         server.abort();
+    }
+
+    mod retention_tests {
+        use super::*;
+
+        // Fixture labels stay readable while persisted identifiers follow the production format.
+        fn fixture_fp(label: &str) -> String {
+            if valid_fingerprint(label) {
+                label.to_owned()
+            } else {
+                body_hash(label)
+            }
+        }
+        fn job_path(data_dir: &Path, label: &str) -> PathBuf {
+            super::job_path(data_dir, &fixture_fp(label))
+        }
+        fn archive_path(data_dir: &Path, label: &str) -> PathBuf {
+            super::archive_path(data_dir, &fixture_fp(label))
+        }
+        fn conflict_archive_path(data_dir: &Path, label: &str, suffix: &str) -> PathBuf {
+            super::conflict_archive_path(data_dir, &fixture_fp(label), suffix)
+        }
+
+        fn job(fp: &str, age: i64, versions: &[(&str, &str)]) -> Job {
+            let at = crate::db::iso_in(-age);
+            Job {
+                fingerprint: fixture_fp(fp),
+                status: "completed".into(),
+                attempts: vec![Attempt {
+                    id: crate::db::ulid(),
+                    started_at: at.clone(),
+                    finished_at: Some(at),
+                    state: "completed".into(),
+                    error_kind: None,
+                    error: None,
+                    requested_model: "fixture-model".into(),
+                    model: Some("fixture-model".into()),
+                    usage: None,
+                    retry_after: None,
+                    stop_reason: Some("end_turn".into()),
+                    sent: true,
+                }],
+                summary: vec![],
+                sections: versions
+                    .iter()
+                    .map(|(v, _)| OutSection {
+                        version: (*v).into(),
+                        body: format!("translation {v}"),
+                    })
+                    .collect(),
+                coverage: "full".into(),
+                truncated_input: false,
+                lang: "zh-Hant".into(),
+                included_versions: versions.iter().map(|(v, _)| (*v).into()).collect(),
+                omitted_versions: vec![],
+                scope: "fixture-scope".into(),
+                source: versions
+                    .iter()
+                    .map(|(v, body)| SourceSec {
+                        version: (*v).into(),
+                        hash: body_hash(body),
+                    })
+                    .collect(),
+            }
+        }
+
+        fn put(app: &App, job: &Job) {
+            save(&job_path(&app.data_dir, &job.fingerprint), job).unwrap();
+        }
+        fn items(plan: PrunePlan) -> Vec<(String, Option<String>)> {
+            plan.expired
+                .into_iter()
+                .map(|fp| (fp, None))
+                .chain(plan.covered.into_iter().map(|(fp, w)| (fp, Some(w))))
+                .collect()
+        }
+        const EXPIRED: i64 = 35 * 86400;
+        const OLD: i64 = 7200;
+        const VERSIONS: &[(&str, &str)] = &[("2.1.5", "body")];
+
+        #[tokio::test]
+        async fn invalid_disk_fingerprints_are_skipped_before_path_construction() {
+            let env = crate::testing::env().await;
+            let path = job_path(&env.app.data_dir, "invalid-fingerprint");
+            ensure_dir(&ledger_dir(&env.app.data_dir)).unwrap();
+            for fp in [
+                "../x".to_owned(),
+                "a".repeat(63),
+                "a".repeat(65),
+                "A".repeat(64),
+                "g".repeat(64),
+            ] {
+                let mut bad = job("invalid-fingerprint", EXPIRED, VERSIONS);
+                bad.fingerprint = fp.clone();
+                let bytes = serde_json::to_vec_pretty(&bad).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(matches!(load_for_prune(&path), Err(LoadErr::Corrupt)));
+                let mut operations = 0;
+                assert!(archive_pruned_job_with_saver(
+                    &env.app.data_dir,
+                    &bad,
+                    &mut operations,
+                    |_, _| panic!("invalid fingerprint reached persistence"),
+                )
+                .is_err());
+                assert_eq!(operations, 0, "reject before any archive IO");
+                let batch = [(fp, None)];
+                let stats = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+                assert_eq!(
+                    stats.operations, 0,
+                    "reject before constructing the hot path"
+                );
+                run_prune(env.app.clone()).await;
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert!(!archive_dir(&env.app.data_dir).exists());
+            }
+            assert!(valid_fingerprint(&"0123456789abcdef".repeat(4)));
+        }
+
+        #[tokio::test]
+        async fn removing_the_real_translation_job_preserves_shared_api_usage() {
+            let (env, fake) = boot(vec![ok_step()]).await;
+            enable(&env).await;
+            post(&env.app, q_to("2.1.5")).await;
+            let done = until_status(&env.app, "2.1.5", "completed").await;
+            assert_eq!(fake.calls(), 1);
+            let fp = done["fingerprint"].as_str().unwrap();
+            let before = env.app.claude_api.ledger.snapshot(20);
+            assert_eq!(before["totals"]["calls"], 1);
+            assert!(before["totals"]["input_tokens"].as_u64().unwrap() > 0);
+            let expected_job = {
+                let _gate = env.app.changelog_translate.gate.lock().await;
+                age_last_sent(&env.app, fp, EXPIRED);
+                load(&job_path(&env.app.data_dir, fp)).unwrap()
+            };
+            run_prune(env.app.clone()).await;
+            assert!(!job_path(&env.app.data_dir, fp).exists());
+            assert_eq!(before, env.app.claude_api.ledger.snapshot(20));
+
+            // archive 存在且 attempt 與原熱 job 完全相等（payload summary/sections/source 已清空）
+            let archived = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(archived.attempts.len(), expected_job.attempts.len());
+            assert_eq!(
+                serde_json::to_value(&archived.attempts).unwrap(),
+                serde_json::to_value(&expected_job.attempts).unwrap()
+            );
+            assert!(archived.summary.is_empty());
+            assert!(archived.sections.is_empty());
+            assert!(archived.source.is_empty());
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(archive_path(&env.app.data_dir, fp))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(archive_dir(&env.app.data_dir))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+
+            // 驗證即使 instantiate 新的 ClaudeApi（記憶體帳本歸零），archive 仍可讀出完整歷史
+            let fresh_claude_api = crate::claude_api::ClaudeApi::new();
+            assert_eq!(fresh_claude_api.ledger.snapshot(20)["totals"]["calls"], 0);
+            let persistent_archive = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(persistent_archive.attempts.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn oldest_covered_jobs_are_removed_and_maximal_witnesses_are_kept() {
+            let env = crate::testing::env().await;
+            let mut snapshots = Vec::new();
+            let top = job("top", 30, &[("v1", "a"), ("v2", "b"), ("v3", "c")]);
+            let middle = job("middle", OLD + 5000, &[("v1", "a"), ("v2", "b")]);
+            for i in 0..102 {
+                snapshots.push(job(&format!("small-{i:03}"), OLD + i, &[("v1", "a")]));
+            }
+            snapshots.extend([top, middle]);
+            for j in &snapshots {
+                put(&env.app, j);
+            }
+            let plan = plan_prune(&snapshots, chrono::Utc::now());
+            assert_eq!(plan.covered.len(), 3);
+            assert!(plan.covered.iter().all(|(_, w)| w == &fixture_fp("top")));
+            assert_eq!(plan.covered[0].0, fixture_fp("middle"));
+            run_prune(env.app.clone()).await;
+            assert!(job_path(&env.app.data_dir, "top").exists());
+            assert!(!job_path(&env.app.data_dir, "middle").exists());
+            assert!(!job_path(&env.app.data_dir, "small-101").exists());
+            assert!(job_path(&env.app.data_dir, "small-000").exists());
+        }
+
+        #[tokio::test]
+        async fn protected_states_times_and_future_fields_remain_untouched() {
+            let env = crate::testing::env().await;
+            let now = chrono::Utc::now();
+            let mut protected = Vec::new();
+            for state in [
+                "reserved",
+                "in_flight",
+                "failed",
+                "interrupted",
+                "future_state",
+            ] {
+                let mut j = job(state, EXPIRED, VERSIONS);
+                j.status = state.into();
+                j.attempts[0].state = state.into();
+                protected.push(j);
+            }
+            let mut missing = job("missing", EXPIRED, VERSIONS);
+            missing.attempts[0].finished_at = None;
+            protected.push(missing);
+            let mut invalid = job("invalid", EXPIRED, VERSIONS);
+            invalid.attempts[0].started_at = "invalid".into();
+            protected.push(invalid);
+            let mut previous_unknown = job("previous-unknown", EXPIRED, VERSIONS);
+            let mut a = previous_unknown.attempts[0].clone();
+            a.state = "future_state".into();
+            previous_unknown.attempts.insert(0, a);
+            protected.push(previous_unknown);
+            let mut previous_recent = job("previous-recent", EXPIRED, VERSIONS);
+            let a = job("unused", 300, VERSIONS).attempts.remove(0);
+            previous_recent.attempts.insert(0, a);
+            protected.push(previous_recent);
+            let mut future = job("future", -3600, VERSIONS);
+            future.attempts[0].finished_at = Some(crate::db::iso_in(3601));
+            protected.push(future);
+            let mut retry = job("retry", EXPIRED, VERSIONS);
+            retry.attempts[0].retry_after = Some(crate::db::iso_in(60));
+            protected.push(retry);
+            let mut bad_retry = job("bad-retry", EXPIRED, VERSIONS);
+            bad_retry.attempts[0].retry_after = Some("invalid".into());
+            protected.push(bad_retry);
+            for j in &protected {
+                assert!(!is_eligible_completed(j, now), "{}", j.fingerprint);
+                put(&env.app, j);
+            }
+            let mut expired = job("expired", EXPIRED, VERSIONS);
+            expired.attempts[0].retry_after = Some(crate::db::iso_in(-1800));
+            put(&env.app, &expired);
+            let path = job_path(&env.app.data_dir, "future-fields");
+            let mut value = serde_json::to_value(job("future-fields", EXPIRED, VERSIONS)).unwrap();
+            value["future_field"] = json!(true);
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let corrupt = job_path(&env.app.data_dir, "corrupt");
+            std::fs::write(&corrupt, b"not json").unwrap();
+            run_prune(env.app.clone()).await;
+            for j in protected {
+                assert!(job_path(&env.app.data_dir, &j.fingerprint).exists());
+            }
+            assert!(path.exists());
+            assert!(corrupt.exists());
+            assert!(!job_path(&env.app.data_dir, "expired").exists());
+        }
+
+        #[test]
+        fn witnesses_require_real_strict_coverage_and_cannot_be_expired_deletions() {
+            let now = chrono::Utc::now();
+            let narrow = job("narrow", OLD, &[("v1", "a")]);
+            let mut same = narrow.clone();
+            same.fingerprint = fixture_fp("same");
+            same.source.push(same.source[0].clone());
+            assert!(!is_strictly_covered_by(&narrow, &same));
+            let wide = job("wide", OLD, &[("v1", "a"), ("v2", "b")]);
+            assert!(is_strictly_covered_by(&narrow, &wide));
+            let mut wrong = wide.clone();
+            wrong.scope = "different".into();
+            assert!(!is_strictly_covered_by(&narrow, &wrong));
+            let mut changed = wide.clone();
+            changed.source[0].hash = body_hash("changed");
+            assert!(!is_strictly_covered_by(&narrow, &changed));
+            let mut empty = wide.clone();
+            empty.sections[0].body.clear();
+            assert!(!is_strictly_covered_by(&narrow, &empty));
+            let expired_wide = job("expired-wide", EXPIRED, &[("v1", "a"), ("v2", "b")]);
+            let plan = plan_prune(&[narrow, expired_wide], now);
+            assert_eq!(plan.expired, vec![fixture_fp("expired-wide")]);
+            assert!(plan.covered.is_empty());
+        }
+
+        #[tokio::test]
+        async fn an_old_plan_cannot_remove_a_new_reservation_or_a_job_with_a_lost_witness() {
+            let env = crate::testing::env().await;
+            let old = job("old", EXPIRED, VERSIONS);
+            put(&env.app, &old);
+            let stale = items(plan_prune(&[old.clone()], chrono::Utc::now()));
+            assert_eq!(stale.len(), 1);
+            // A writer enters between planning and applying the original plan.
+            {
+                let _gate = env.app.changelog_translate.gate.lock().await;
+                let mut active = old;
+                let mut next = active.attempts[0].clone();
+                next.state = "reserved".into();
+                next.started_at = crate::db::now();
+                next.finished_at = None;
+                active.attempts.push(next);
+                put(&env.app, &active);
+            }
+            let stats = apply_prune_batch(&env.app, &stale, chrono::Utc::now()).await;
+            assert_eq!(stats.removed, 0);
+            assert!(job_path(&env.app.data_dir, "old").exists());
+            let narrow = job("narrow", OLD, &[("v1", "a")]);
+            put(&env.app, &narrow);
+            let wide = job("wide", OLD, &[("v1", "a"), ("v2", "b")]);
+            put(&env.app, &wide);
+            // A completed witness changes before the deletion batch.
+            {
+                let _gate = env.app.changelog_translate.gate.lock().await;
+                let mut busy = wide;
+                busy.attempts[0].state = "in_flight".into();
+                put(&env.app, &busy);
+            }
+            let stats = apply_prune_batch(
+                &env.app,
+                &[(fixture_fp("narrow"), Some(fixture_fp("wide")))],
+                chrono::Utc::now(),
+            )
+            .await;
+            assert_eq!(stats.removed, 0);
+            assert!(job_path(&env.app.data_dir, "narrow").exists());
+        }
+
+        #[tokio::test]
+        async fn scan_and_delete_batches_are_bounded_and_the_gate_is_available_between_them() {
+            let env = crate::testing::env().await;
+            let dir = ledger_dir(&env.app.data_dir);
+            ensure_dir(&dir).unwrap();
+            for i in 0..205 {
+                put(&env.app, &job(&format!("batch-{i}"), EXPIRED, VERSIONS));
+            }
+            let mut entries = std::fs::read_dir(&dir).unwrap();
+            let (first, done, count) = scan_prune_batch(&env.app, &mut entries).await;
+            assert_eq!(count, 200);
+            assert_eq!(first.len(), 200);
+            assert!(!done);
+            // This is the same gate awaited by GET/POST; the actual batch has returned it.
+            let gate = env
+                .app
+                .changelog_translate
+                .gate
+                .try_lock()
+                .expect("scan batch retained gate");
+            drop(gate);
+            let (rest, done, count) = scan_prune_batch(&env.app, &mut entries).await;
+            assert!(done);
+            assert_eq!(count, 5);
+            assert_eq!(rest.len(), 5);
+            let all: Vec<_> = first.into_iter().chain(rest).collect();
+            let pending = items(plan_prune(&all, chrono::Utc::now()));
+            assert_eq!(pending.len(), 205);
+            let first = apply_prune_batch(&env.app, &pending, chrono::Utc::now()).await;
+            assert_eq!(first.visited, 40);
+            assert_eq!(first.removed, 40);
+            assert!(first.operations <= 200);
+            let gate = env
+                .app
+                .changelog_translate
+                .gate
+                .try_lock()
+                .expect("delete batch retained gate");
+            drop(gate);
+            let mut offset = first.visited;
+            while offset < pending.len() {
+                let batch =
+                    apply_prune_batch(&env.app, &pending[offset..], chrono::Utc::now()).await;
+                assert!(batch.operations <= 200);
+                assert!(batch.visited <= 40);
+                assert!(batch.visited > 0);
+                offset += batch.visited;
+            }
+            assert!(json_paths(&dir).is_empty());
+        }
+
+        #[tokio::test]
+        async fn removing_a_narrow_job_keeps_covered_view_and_failed_unlink_keeps_the_reply() {
+            let env = crate::testing::env().await;
+            let plan = Plan {
+                kind: "claude".into(),
+                lang: "zh-Hant".into(),
+                model: "fixture-model".into(),
+                effort: "low".into(),
+                max_input_chars: 6000,
+                included: vec![OutSection {
+                    version: "v1".into(),
+                    body: "a".into(),
+                }],
+                omitted: vec![],
+                truncated_input: false,
+            };
+            let mut narrow = job("narrow", OLD, &[("v1", "a")]);
+            narrow.scope = scope_of(&plan);
+            put(&env.app, &narrow);
+            let mut wide = job("wide", OLD, &[("v1", "a"), ("v2", "b")]);
+            wide.scope = scope_of(&plan);
+            put(&env.app, &wide);
+            let before = covered_view(&env.app.data_dir, &plan, "requested").unwrap();
+            let batch = [(fixture_fp("narrow"), Some(fixture_fp("wide")))];
+            let result = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(result.removed, 1);
+            assert!(!job_path(&env.app.data_dir, "narrow").exists());
+            let after = covered_view(&env.app.data_dir, &plan, "requested").unwrap();
+            assert_eq!(before, after);
+            // Permission failure in the actual unlink branch leaves the completed reply intact.
+            put(&env.app, &narrow);
+            use std::os::unix::fs::PermissionsExt;
+            let dir = ledger_dir(&env.app.data_dir);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let result = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(result.removed, 0);
+            assert!(job_path(&env.app.data_dir, "narrow").exists());
+            assert_eq!(
+                covered_view(&env.app.data_dir, &plan, "requested").unwrap(),
+                after
+            );
+        }
+
+        #[tokio::test]
+        async fn cold_usage_metadata_is_not_a_covered_translation() {
+            let env = crate::testing::env().await;
+            let plan = Plan {
+                kind: "claude".into(),
+                lang: "zh-Hant".into(),
+                model: "fixture-model".into(),
+                effort: "low".into(),
+                max_input_chars: 6000,
+                included: vec![OutSection {
+                    version: "v1".into(),
+                    body: "a".into(),
+                }],
+                omitted: vec![],
+                truncated_input: false,
+            };
+            let mut archived = job("cold-only", EXPIRED, &[("v1", "a")]);
+            archived.scope = scope_of(&plan);
+            let mut operations = 0;
+            archive_pruned_job(&env.app.data_dir, &archived, &mut operations).unwrap();
+            assert!(archive_path(&env.app.data_dir, "cold-only").exists());
+            assert!(!job_path(&env.app.data_dir, "cold-only").exists());
+            assert!(covered_view(&env.app.data_dir, &plan, "requested").is_none());
+        }
+
+        #[tokio::test]
+        async fn archive_pruned_job_merges_appends_and_handles_failures() {
+            let env = crate::testing::env().await;
+            let fp = "archive-test";
+            let mut j1 = job(fp, EXPIRED, VERSIONS);
+            j1.attempts[0].usage = None; // None usage 維持 None
+            put(&env.app, &j1);
+
+            // 1. 同次寫兩次：模擬 archive 已寫但熱 job 尚未 unlink，apply 重跑 attempt 不重複且真正 unlink 熱 job
+            let mut ops = 0;
+            assert!(archive_pruned_job(&env.app.data_dir, &j1, &mut ops).is_ok());
+            assert_eq!(ops, 2); // 1 load (NotFound) + 1 save
+            let first_arc = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(first_arc.attempts.len(), 1);
+            assert!(first_arc.attempts[0].usage.is_none());
+
+            // 模擬已寫好 archive，熱 job 仍存在，由正式 apply_prune_batch 重跑
+            let batch = [(fixture_fp(fp), None)];
+            let res_reapply = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_reapply.removed, 1);
+            assert!(
+                !job_path(&env.app.data_dir, fp).exists(),
+                "apply 重跑應真正 unlink 熱 job"
+            );
+            let second_arc = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(second_arc.attempts.len(), 1, "attempt 不重複增加");
+
+            // 2. 同 fp 另輪產生新 attempt（只有新 attempt，未帶舊 attempt），archive union 仍保留 old
+            let mut j2 = j1.clone();
+            let mut next_att = j1.attempts[0].clone();
+            next_att.id = crate::db::ulid();
+            next_att.started_at = crate::db::iso_in(-EXPIRED);
+            next_att.finished_at = Some(crate::db::iso_in(-EXPIRED));
+            j2.attempts = vec![next_att.clone()]; // 只有新 attempt
+            put(&env.app, &j2);
+            let res_j2 = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_j2.removed, 1);
+            let merged = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(
+                merged.attempts.len(),
+                2,
+                "archive union 應保留 old 且追加 new"
+            );
+            assert_eq!(merged.attempts[0].id, j1.attempts[0].id);
+            assert_eq!(merged.attempts[1].id, next_att.id);
+
+            // 3. 同 id 衝突（metadata 不一致）：寫 conflict 檔，舊 archive 與熱 job 皆保留
+            let mut j_conflict = j1.clone();
+            j_conflict.attempts[0].sent = !j_conflict.attempts[0].sent;
+            put(&env.app, &j_conflict);
+
+            let old_arc_bytes = std::fs::read(archive_path(&env.app.data_dir, fp)).unwrap();
+            let res_conflict = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_conflict.removed, 0);
+            assert!(
+                job_path(&env.app.data_dir, fp).exists(),
+                "同 id 衝突時熱 job 必須保留"
+            );
+
+            // 舊 archive 位元組完全不變
+            let after_conflict_arc_bytes =
+                std::fs::read(archive_path(&env.app.data_dir, fp)).unwrap();
+            assert_eq!(old_arc_bytes, after_conflict_arc_bytes);
+
+            // 驗證 conflict 檔存在，且內容與新衝突 job 的 attempts JSON 相等
+            let mut c_job = j_conflict.clone();
+            c_job.summary.clear();
+            c_job.sections.clear();
+            c_job.source.clear();
+            let c_bytes = serde_json::to_vec_pretty(&c_job).unwrap();
+            let suffix = hex_encode(&Sha256::digest(&c_bytes));
+            let c_path = conflict_archive_path(&env.app.data_dir, fp, &suffix);
+            assert!(c_path.exists(), "conflict 檔案必須產生");
+            let c_saved: Job = serde_json::from_slice(&std::fs::read(&c_path).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&c_saved.attempts).unwrap(),
+                serde_json::to_value(&j_conflict.attempts).unwrap()
+            );
+
+            // 再次重跑相同 conflict：不重複寫入，比對完全相同視為已保留
+            let res_conflict_repeat = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_conflict_repeat.removed, 0);
+            assert_eq!(
+                std::fs::read(&c_path).unwrap(),
+                c_bytes,
+                "相同 conflict 不盲目覆寫"
+            );
+
+            // 若 conflict 檔存在但內容不同（損壞或他者殘留）：不覆寫，warn 保留原檔與熱 job
+            std::fs::write(&c_path, b"unrelated bytes").unwrap();
+            let res_conflict_corrupt =
+                apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_conflict_corrupt.removed, 0);
+            assert_eq!(
+                std::fs::read(&c_path).unwrap(),
+                b"unrelated bytes",
+                "不同內容 conflict 絕不被覆寫"
+            );
+            assert!(
+                job_path(&env.app.data_dir, fp).exists(),
+                "熱 job 依舊完整保留"
+            );
+
+            // 4. 有效 archive 加未知 field：fail-closed
+            let a_file = archive_path(&env.app.data_dir, fp);
+            let mut valid_val = serde_json::to_value(&merged).unwrap();
+            valid_val
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown_future_field".into(), json!("future"));
+            let valid_unknown_bytes = serde_json::to_vec_pretty(&valid_val).unwrap();
+            std::fs::write(&a_file, &valid_unknown_bytes).unwrap();
+
+            let res_unknown = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
+            assert_eq!(res_unknown.removed, 0);
+            assert!(
+                job_path(&env.app.data_dir, fp).exists(),
+                "有未知欄位時熱 job 必須保留"
+            );
+            assert_eq!(
+                std::fs::read(&a_file).unwrap(),
+                valid_unknown_bytes,
+                "未知欄位檔案位元組不動"
+            );
+
+            // 5. archive save 失敗（透過注入 persist 失敗函數驗證）：fail-closed，熱 job 保留
+            std::fs::write(&a_file, &old_arc_bytes).unwrap();
+            let mut ops_err = 0;
+            let mut save_called = false;
+            let save_err =
+                archive_pruned_job_with_saver(&env.app.data_dir, &j1, &mut ops_err, |_p, _j| {
+                    save_called = true;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected save error",
+                    ))
+                });
+            assert!(save_err.is_err());
+            assert!(save_called, "must reach the injected persistence failure");
+            assert_eq!(std::fs::read(&a_file).unwrap(), old_arc_bytes);
+            assert!(job_path(&env.app.data_dir, fp).exists());
+            assert_eq!(ops_err, 2); // 1 read + 1 failed save attempt
+        }
     }
 }
