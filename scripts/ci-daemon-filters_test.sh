@@ -29,6 +29,12 @@ check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/
 check "lifecycle::suggestion::tests::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
 check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
+check "lifecycle::claude_resume_menu::tests::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
+check "lifecycle::unsent_draft::tests::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
+# 混合：兩支新路徑＋既有有效路徑（judge_tests.rs）同進來，各自的真實過濾字串都要在，且排序去重（#1961）。
+check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests::" \
+    "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
+    "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
 check "share::portal::upload_tests::" "crates/am-share/src/share/portal_upload_tests.rs"
 # 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
