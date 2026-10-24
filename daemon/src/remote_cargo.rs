@@ -4252,7 +4252,7 @@ mod guard_tests {
     /// 假遠端：`ssh` 把最後一個參數（要在遠端跑的指令字串）在**本機**用 `sh -c` 跑，跟 sshd 一樣每條連線自成一個 session
     /// （`setsid`；收 process group 才不會打到測試本身）；`rsync` 把來源目錄複製到 `user@host:` 後面那個路徑。
     /// `$HOME` 指到沙盒，裡面的假 cargo 就是「遠端的 cargo」。回傳 (設定, cwd, data_dir)。
-    fn fake_remote(base: &Path, timeout_secs: u64, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
+    pub(super) fn fake_remote(base: &Path, timeout_secs: u64, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
         let bin = base.join("fakebin");
         let home = base.join("home");
         std::fs::create_dir_all(&bin).unwrap();
@@ -4283,7 +4283,7 @@ mod guard_tests {
     }
 
     /// 在這條執行緒上把 `ssh`／`rsync` 換成 `fake_remote` 寫的假腳本再跑 `f`。
-    fn with_fake_transport<T>(base: &Path, f: impl FnOnce() -> T) -> T {
+    pub(super) fn with_fake_transport<T>(base: &Path, f: impl FnOnce() -> T) -> T {
         let bin = base.join("fakebin");
         TEST_PROGRAMS.with(|p| *p.borrow_mut() = Some((bin.join("ssh").display().to_string(), bin.join("rsync").display().to_string())));
         let out = f();

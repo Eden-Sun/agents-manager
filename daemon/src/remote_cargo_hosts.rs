@@ -212,7 +212,7 @@ pub(super) fn queue_order(busy: &[(usize, usize)]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::guard_tests::{base, guard_cmd, guard_with, write_exec, HASH, QUICK};
+    use super::super::guard_tests::{base, fake_remote, guard_cmd, guard_with, with_fake_transport, write_exec, HASH, QUICK};
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -468,6 +468,50 @@ mod tests {
         cmd.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
         let err = Lease::start(cmd, token, &Deadline::new(0)).err().expect("busy");
         assert!(err.downcast_ref::<Busy>().is_some(), "回 76 要當成忙碌：{err:#}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 合流條件（#1956）：舊的單一 `[build.remote]`（沒有 `hosts`）走的跟改動前完全一樣——
+    /// 一台、沒有略過的設錯主機（不印新的 ⚠️）、一個正常守門（`try=0`，沒有試用輪、不看負載），
+    /// ssh 次數跟 main（2026-10-24，改動前）實測相同：冷的 5 次（守門、讀 manifest ×2、寫 manifest、跑 cargo）、熱的 4 次。
+    #[test]
+    fn an_old_single_host_config_takes_exactly_the_old_path() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(cwd.join("src/lib.rs"), "").unwrap();
+        let cfg = base.join("c.toml");
+        std::fs::write(
+            &cfg,
+            format!("[build.remote]\nenabled = true\nhost = \"fake\"\nuser = \"me\"\nremote_root = \"{}\"\ncargo_jobs = 1\ntimeout_secs = 60\n", remote.remote_root),
+        )
+        .unwrap();
+        let Offload::Go(hosts) = decide_offload(&cfg, &["test".to_string()], Vec::<(String, String)>::new()) else { panic!("舊設定照轉") };
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].target_label(), remote.target_label());
+        assert!(usable_targets(hosts.clone()).1.is_empty(), "沒有略過的主機＝沒有新的警告");
+        // 記下每次 ssh 跑的腳本。
+        let bin = base.join("fakebin");
+        std::fs::rename(bin.join("ssh"), bin.join("ssh-real")).unwrap();
+        let log = base.join("ssh.log");
+        write_exec(
+            &bin.join("ssh"),
+            &format!(
+                "for a; do last=$a; done\nprintf '%s\\n=====\\n' \"$last\" >> '{}'\nexec '{}' \"$@\"\n",
+                log.display(),
+                bin.join("ssh-real").display()
+            ),
+        );
+        for (round, want) in [(0, 5), (1, 4)] {
+            let rc = with_fake_transport(&base, || run_offload_on(&hosts, &data, &cwd, &["test".to_string()], &Deadline::new(60)));
+            assert_eq!(rc, 0);
+            let l = std::fs::read_to_string(&log).unwrap();
+            let calls: Vec<&str> = l.split("\n=====\n").filter(|c| !c.trim().is_empty()).collect();
+            assert_eq!(calls.len(), want, "第 {round} 次的 ssh 次數跟改動前不同：{calls:#?}");
+            let guards: Vec<&&str> = calls.iter().filter(|c| c.contains("HUP PIPE")).collect();
+            assert_eq!(guards.len(), 1, "只開一次守門");
+            assert!(guards[0].contains("try=0;") && guards[0].contains("maxload=0"), "正常守門，不是試用、不看負載");
+            std::fs::remove_file(&log).unwrap();
+        }
         let _ = std::fs::remove_dir_all(base);
     }
 }
