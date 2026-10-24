@@ -9,6 +9,7 @@ use std::path::Path;
 pub mod schema_guard;
 pub(crate) mod predicates;
 pub mod turn_guard;
+pub mod api_bot;
 
 /// 各 feature 自己那幾張表的 migration（`supervisor::store`、`read_marks`、`panes`…）：db 只建共用的 schema，這些由 composition 層
 /// 以明確的順序提供（[`open_with`]）。失敗語意不變：任何一步回錯，整個 `open_with` 就回錯，版本戳記不蓋（見 [`migrate_with`]）。
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok','agy')),
+  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok','agy','claude-api')),
   model TEXT,
   effort TEXT,
   fast INTEGER NOT NULL DEFAULT 0,
@@ -312,6 +313,42 @@ CREATE TABLE IF NOT EXISTS context_lost_notices (
   retired_at TEXT
 );
 CREATE INDEX IF NOT EXISTS context_lost_notices_bot_session ON context_lost_notices(bot_id, native_session_id);
+-- #1944 B: private backend state; never part of state/message/share projections.
+CREATE TABLE IF NOT EXISTS api_bot_sessions (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  owner_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  owner_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+  format_version INTEGER NOT NULL DEFAULT 1 CHECK(format_version = 1),
+  checkpoint_json TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  retired_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS api_bot_one_live_session ON api_bot_sessions(bot_id) WHERE retired_at IS NULL;
+CREATE TABLE IF NOT EXISTS api_bot_attempts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES api_bot_sessions(id) ON DELETE SET NULL,
+  bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+  request_hash TEXT NOT NULL,
+  requested_speed TEXT NOT NULL CHECK(requested_speed IN ('standard','fast')),
+  actual_speed TEXT CHECK(actual_speed IN ('standard','fast')),
+  state TEXT NOT NULL CHECK(state IN ('reserved','recorded','failed','unknown')),
+  usage_json TEXT,
+  reserved_microusd INTEGER NOT NULL CHECK(typeof(reserved_microusd) = 'integer' AND reserved_microusd >= 0),
+  estimated_microusd INTEGER CHECK(estimated_microusd IS NULL OR (typeof(estimated_microusd) = 'integer' AND estimated_microusd >= 0)),
+  pricing_version TEXT NOT NULL,
+  created_at TEXT NOT NULL, finished_at TEXT,
+  UNIQUE(session_id, turn_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS api_bot_attempts_created ON api_bot_attempts(created_at);
+CREATE INDEX IF NOT EXISTS api_bot_attempts_turn ON api_bot_attempts(turn_id);
+
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -462,6 +499,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (67, "14ee6138116e5ba4"),
     // issue #748: `runs.codex_instant_interrupt`（codex 啟動時帶了 instant_interrupt 參數沒有）。
     (68, "26359d939fbd1275"),
+    // #1944 B: private API bot checkpoints and attempt accounting, expanded bot kind CHECK.
+    (69, "5c5a67ab8a3b16d2"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -874,7 +913,7 @@ pub async fn apply_migrations_failing_after_spawn_hints_drop_for_test(pool: &Sql
     apply_migrations_inner(pool, true, features).await
 }
 
-/// `bots.kind` 的 CHECK 加上 'agy'。舊庫的 `bots` 表是 `CREATE TABLE IF NOT EXISTS` 留下來的舊定義，收不下新的 kind。
+/// `bots.kind` 的 CHECK 從已知三種／四種擴為含 `claude-api` 的五種。舊庫的 `bots` 表是 `CREATE TABLE IF NOT EXISTS` 留下來的舊定義，收不下新的 kind。
 ///
 /// 不重建 `bots`：十七張表 `REFERENCES bots(id)`，`foreign_keys` 開著時 `ALTER TABLE … RENAME` 會把子表的外鍵一起改名、`DROP TABLE`
 /// 又會觸發 `ON DELETE` 檢查。SQLite 文件對「只放寬 CHECK」給的做法就是在交易裡改 `sqlite_master.sql` 並遞增 `schema_version`
@@ -882,7 +921,8 @@ pub async fn apply_migrations_failing_after_spawn_hints_drop_for_test(pool: &Sql
 /// `schema_guard` 對得起來。
 async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> {
     const OLD: &str = "CHECK (kind IN ('claude','codex','grok'))";
-    const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy'))";
+    const FOUR: &str = "CHECK (kind IN ('claude','codex','grok','agy'))";
+    const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api'))";
     let sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'").fetch_optional(&mut *conn).await?;
     let Some(sql) = sql else { return Ok(()) };
     if sql.contains(NEW) {
@@ -892,8 +932,9 @@ async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> 
     if !sql.contains("CHECK (kind IN") && !sql.contains("CHECK(kind IN") {
         return Ok(());
     }
-    anyhow::ensure!(sql.contains(OLD), "bots 表的 kind CHECK 長得不認得，不敢就地放寬：{sql}");
-    let widened = sql.replacen(OLD, NEW, 1);
+    let previous = if sql.contains(FOUR) { FOUR } else { OLD };
+    anyhow::ensure!(sql.contains(previous), "bots 表的 kind CHECK 長得不認得，不敢就地放寬：{sql}");
+    let widened = sql.replacen(previous, NEW, 1);
     let version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await?;
     sqlx::query("PRAGMA writable_schema = ON").execute(&mut *conn).await?;
     let updated = sqlx::query("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'bots'").bind(&widened).execute(&mut *conn).await;
