@@ -29,7 +29,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
 |---|---|---|---|---|---|
 | A | `/hosts/{name}/shells`、`…/shells/{pane_id}/terminal|text|keys`、`…/{pane_id}` | 只有網頁 | User principal；Bot／service principal 403 `user_only`；text／keys／close 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | shell metadata／畫面可能含使用者資料；寫入可操作主機 pane | 維持 |
-| A | `GET /hosts/{name}/gh`、`GET /hosts/{name}/baseline/plan`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
+| A | `GET /hosts/{name}/gh`、`GET /hosts/{name}/baseline/plan`、`POST /hosts/{name}/baseline/{apply,restore}`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的（grok／antigravity-cli 且已登入除外）與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
@@ -134,6 +134,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。一致性差異的 dry-run 計畫（§12.6a） |
+| POST | `/api/hosts/{name}/baseline/apply` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。一致性差異補齊，只補不蓋（§12.6c） |
+| POST | `/api/hosts/{name}/baseline/restore` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。照主機上的備份還原（§12.6c） |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/identity-prefs` | User 或 Bot principal；只回 disabled host/kind/identity 名稱，不含 credential；Service 僅可走其明列 method/path scope |
@@ -428,6 +430,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 ## 2. `GET /api/state`
 
 User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只收到自己與後代 child 所在的專案及 bot；不含其他專案、主機清單或全域 identities。Bot view 會移除每顆可見 bot 的 `persona`、`args`、`identity`、`env`、`herdr_session`、`unread`、`read_mark`，以及專案的 `group_unread`／`group_read_mark`；若 parent 不在可見 tree 中，也移除 `parent_bot_id`。頂層不回傳 `restart_batch`、`cli_updates`、`herdr_updates`、`default_connected`、`herdr_session`、`hosts`、`identities`。Service principal 依明列 path scope 不可讀 `/api/state`。前端收到 resync 或變更事件後仍以 User token 重拉完整快照。
+
+`host_baseline_orphan_sync_keys`（issue #719 階段 3a，只在 User 視圖；Bot 視圖沒有這欄）：`config.toml` 的 `[host_baseline.sync]` 裡對不上 `local` 或任何 `[[hosts]]` 名稱的鍵（主機改名或刪掉後留下的），排好序的字串陣列，沒有就是 `[]`。這些鍵一律當 off、不會自動清，留給使用者手動刪（SPEC §16.7）。只在 `GET /api/state` 回應裡，沒有對應的 WS 事件：改了 config 之後下一次重拉才看得到。
 
 `restart_batch`（issue #492）：現在正在跑的那一批一鍵重啟（§6.9）的 `batch_id`，沒有就是 `null`。
 唯讀，只為了對帳——進度本身走 WS（`bots_restart_progress` / `bots_restart_done`），而 `done` 有兩條收不到的路
@@ -2330,6 +2334,33 @@ issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[
 - 順序照 `issues`，同一個 id 只列一次。`plan_rev` 是動作內容的雜湊：同一份計畫恆同、任何動作變了就變。
 - 結果過期（`stale: true`，見 §12.6）照樣回，前端自己決定怎麼標。
 - 404：不認得的主機。409 `{"error":"conflict","reason":"baseline_unknown","host"}`：還沒量過，或上一趟探測沒跑完（`issues: null`）。503 `{"reason":"baseline_manifest_invalid"}`：宣告檔讀不懂（只會是沒跑過測試的 build）。
+
+### 12.6c 一致性差異補齊與還原 `POST /api/hosts/{name}/baseline/apply`、`POST /api/hosts/{name}/baseline/restore`
+issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 計畫（§12.6a）裡的 `merge_key`、只補不蓋，寫之前在**那台主機上**備份。兩條都只給使用者（Bot、AGM role → 403 `user_only`；`bot_scope_matrix` 為 Forbidden），網頁還沒有按鈕。
+
+**apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部 `merge_key`）：
+
+```json
+{ "host": "m4p", "plan_rev": "9f3c…", "backup_id": "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", "error": null,
+  "results": [ { "id": "codex.config.toml:features.hooks", "result": "applied" } ] }
+```
+
+- 先擋：404 不認得的主機；409 `sync_disabled`＝這台在 `config.toml` 的 `[host_baseline.sync]` 不是 `ask`／`auto`（沒列＝off；鍵對不上主機也是 off；`auto` 在 3a 當 `ask`）；409 `baseline_unknown`（同 §12.6a）；409 `plan_outdated`＝`plan_rev` 跟 daemon 現在算出來的不同（回應帶目前的 `plan_rev`）；400 `not_fixable`（帶 `id`）＝`ids` 裡有不是 `merge_key` 的項目（手動項、不存在的 id）。以上都不連主機。
+- 執行包在那台主機的 HostFence 裡（`run_if_current`）：主機在這之間重連／改指／被移除 → 409 `host_superseded`，腳本一次都沒送。ssh 失敗 502；腳本輸出被截斷（沒有結尾標記）也是 502，主機上可能已寫一部分（備份照樣在）。
+- `results[]`：每項 `{id, result, reason?}`。`result`：`applied`（補上了）、`present`（鍵已經在，不論值，沒動）、`skipped`（`reason`：`file_missing` 檔不在——3a 不建檔、`symlink` 目標或它的目錄是 symlink、`invalid_json`、`conflict` 中間的鍵不是物件、`write_failed`、`backup_failed`、`aborted` 前面備份失敗後面不做）、`manual`（`reason`：`no_jq` 主機沒有 jq、`unsupported_identity` 自訂的 claude 設定目錄、`unsupported_key`、`unsupported_value`、`secret`）。
+- 只會寫 codex `config.toml`（`$CODEX_HOME`，預設 `~/.codex`）與 claude `~/.claude`／`~/.claude-cc<N>` 的 `settings.json`。codex 的 model／effort／service_tier 鍵、`.gitconfig` 憑證在計畫與 apply 兩層各擋一次；缺檔（`write_file`）與工具安裝維持 `manual`、不會寫。
+- `backup_id`：這次有寫就是備份 id（`YYYYMMDDTHHMMSSZ-<UUID v4>`），什麼都沒寫＝`null`。`error`：`backup_failed`（備份目錄是 symlink 或建不起來：之後的項目都不做）、`no_home`，平常 `null`。回應不含主機上的路徑或檔案內容。
+- 寫完觸發一次重新偵測（結果走 `host_changed`）。
+
+**restore** `POST /api/hosts/{name}/baseline/restore`，body `{"backup_id": "20261024T120000Z-…"}`：
+
+```json
+{ "host": "m4p", "backup_id": "20261024T120000Z-…", "files": [ { "file": "codex/config.toml", "result": "restored" } ] }
+```
+
+- sync 是 off 也能用。`backup_id` 不是固定格式 → 400 `invalid_backup_id`（不連主機）；404 不認得的主機，或 `{"reason":"backup_not_found"}`；同一個 HostFence，換代 409 `host_superseded`。
+- 主機上的 manifest 當不可信輸入：只認固定目標名、數字編號、三位權限；目標或備份檔是 symlink、目錄不在、有任何一行不認得 → 409 `{"reason":"restore_refused","refused":"manifest_invalid"|"symlink"|"target_dir_missing"|"not_a_file"}`，**整個拒絕、一個檔都不寫**。
+- `files[]` 只有目標名（`codex/config.toml`、`claude-default/settings.json`、`claude-cc<N>/settings.json`）與 `result`：`restored`（逐 byte 換回備份、權限也換回）、`deleted`（原本不在的檔，刪掉）、`absent`、`failed`。不回傳備份內容或路徑。成功後觸發一次重新偵測。
 
 ### 12.6b herdr 版本 `hosts[].herdr`
 

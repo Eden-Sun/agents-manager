@@ -315,6 +315,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
         .route("/hosts/{name}/baseline/plan", get(baseline_plan))
+        .route("/hosts/{name}/baseline/apply", post(baseline_apply))
+        .route("/hosts/{name}/baseline/restore", post(baseline_restore))
         // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
         // header 一鍵升級 herdr：下載驗版本 → 等閒置 → 維護窗口裡重啟 server → bot 接回（SPEC §6.9b）。只給 UI。
@@ -1122,6 +1124,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/tools/refresh", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/hosts/{name}/baseline/plan", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/baseline/apply", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/baseline/restore", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
@@ -1737,7 +1741,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
 
 async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     match principal {
-        RequestPrincipal::User => Ok(Json(state_json(&app).await?)),
+        RequestPrincipal::User => {
+            let mut state = state_json(&app).await?;
+            // #719 階段 3a：`[host_baseline.sync]` 對不上主機的鍵，只給使用者看（bot 的視圖從 `state_json` 出，不帶這欄）。
+            state["host_baseline_orphan_sync_keys"] = json!(app.cfg.get().await.host_baseline_orphan_sync_keys());
+            Ok(Json(state))
+        }
         RequestPrincipal::Bot(bot_id) => Ok(Json(crate::bot_state::view_for_bot(&app, &bot_id).await?)),
         RequestPrincipal::Service(_) => Err(bot_user_only()),
     }
@@ -3932,16 +3941,7 @@ async fn baseline_plan(
     if app.hosts.get(&name).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
-    let Some(report) = app.host_baseline.lock().await.get(&name).map(|b| b.snapshot(chrono::Utc::now())) else {
-        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "這台主機還沒量過一致性"})));
-    };
-    let Some(issues) = report.issues.as_deref() else {
-        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "上一次探測沒跑完，差異未知"})));
-    };
-    let (Ok(m), Ok(v)) = (crate::host_baseline::manifest::shipped(), crate::host_baseline::manifest::shipped_values()) else {
-        return Err(LcError::Unavailable(json!({"error": "unavailable", "reason": "baseline_manifest_invalid", "host": name})));
-    };
-    let plan = crate::host_baseline::plan::build(m, v, issues);
+    let (report, plan) = cached_baseline_plan(&app, &name).await?;
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -3953,6 +3953,138 @@ async fn baseline_plan(
         })),
     )
         .into_response())
+}
+
+/// 快取的差異＋宣告檔推出的計畫（plan 與 apply 共用同一份推算，`plan_rev` 才對得上）。
+async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(crate::host_baseline::BaselineReport, crate::host_baseline::plan::Plan), LcError> {
+    let Some(report) = app.host_baseline.lock().await.get(name).map(|b| b.snapshot(chrono::Utc::now())) else {
+        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "這台主機還沒量過一致性"})));
+    };
+    let Some(issues) = report.issues.as_deref() else {
+        return Err(LcError::conflict("baseline_unknown", json!({"host": name, "message": "上一次探測沒跑完，差異未知"})));
+    };
+    let (Ok(m), Ok(v)) = (crate::host_baseline::manifest::shipped(), crate::host_baseline::manifest::shipped_values()) else {
+        return Err(LcError::Unavailable(json!({"error": "unavailable", "reason": "baseline_manifest_invalid", "host": name})));
+    };
+    let plan = crate::host_baseline::plan::build(m, v, issues);
+    Ok((report, plan))
+}
+
+/// #719 階段 3a：apply／restore 在主機上跑腳本的上限。
+const BASELINE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 在 fence 綁的那條連線上跑（本機 `/bin/sh`、遠端 ssh）。呼叫端包在 `run_if_current` 裡。
+async fn baseline_run_script(fence: &crate::hosts::HostFence, script: &str) -> anyhow::Result<String> {
+    if fence.conn().is_local() {
+        let out = crate::hosts::sh_local(script, BASELINE_WRITE_TIMEOUT).await?.ok_or_else(|| anyhow::anyhow!("local baseline script timed out"))?;
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    fence.conn().ssh_exec_path_timeout(script, BASELINE_WRITE_TIMEOUT).await
+}
+
+fn baseline_superseded(name: &str) -> LcError {
+    LcError::conflict("host_superseded", json!({"host": name, "retryable": true}))
+}
+
+#[derive(Deserialize)]
+struct BaselineApply {
+    plan_rev: String,
+    /// 省略＝計畫裡全部 `merge_key`。
+    #[serde(default)]
+    ids: Option<Vec<String>>,
+}
+
+/// 一致性差異補齊（#719 階段 3a，API §12.6b）：只補計畫裡的 `merge_key`、只補不蓋，寫前在主機上備份。
+async fn baseline_apply(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<BaselineApply>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    baseline_apply_with_fence(&app, &name, &fence, b).await
+}
+
+async fn baseline_apply_with_fence(app: &Arc<App>, name: &str, fence: &crate::hosts::HostFence, b: BaselineApply) -> Result<Response, LcError> {
+    use crate::host_baseline::apply;
+    if app.cfg.get().await.host_baseline_sync(name) == crate::config::HostBaselineSyncMode::Off {
+        return Err(LcError::conflict(
+            "sync_disabled",
+            json!({"host": name, "message": "這台主機沒有開一致性補齊（config.toml 的 [host_baseline.sync]）"}),
+        ));
+    }
+    let (_, plan) = cached_baseline_plan(app, name).await?;
+    if plan.plan_rev != b.plan_rev {
+        return Err(LcError::conflict("plan_outdated", json!({"host": name, "plan_rev": plan.plan_rev})));
+    }
+    let prepared = apply::prepare(&plan, b.ids.as_deref())
+        .map_err(|id| LcError::BadValue(json!({"error": "bad_request", "reason": "not_fixable", "id": id})))?;
+    let mut results = Vec::new();
+    let mut backup_id = None;
+    let mut error = None;
+    if !prepared.writes.is_empty() {
+        let id = apply::new_backup_id();
+        let script = apply::render_apply_sh(&id, &plan.plan_rev, &prepared.writes).map_err(|e| LcError::Upstream(e.into()))?;
+        let out = app
+            .hosts
+            .run_if_current(fence, baseline_run_script(fence, &script))
+            .await
+            .ok_or_else(|| baseline_superseded(name))?
+            .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+        let run = apply::parse_apply(&out, &prepared.writes)
+            .ok_or_else(|| LcError::Upstream("baseline apply output was cut short; the host may be partly written".into()))?;
+        backup_id = run.backup_written.then_some(id);
+        error = run.error;
+        results = run.outcomes;
+        crate::tools::spawn_detect(app.clone(), name.to_string());
+    }
+    results.extend(prepared.manual);
+    Ok((
+        StatusCode::OK,
+        Json(json!({"host": name, "plan_rev": plan.plan_rev, "backup_id": backup_id, "error": error, "results": results})),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct BaselineRestore {
+    backup_id: String,
+}
+
+/// 照主機上的備份還原（#719 階段 3a，API §12.6c）。sync 是 off 也能用；回應只有目標名與結果。
+async fn baseline_restore(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<BaselineRestore>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    if !crate::host_baseline::apply::valid_backup_id(&b.backup_id) {
+        return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_backup_id"})));
+    }
+    let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    baseline_restore_with_fence(&app, &name, &fence, &b.backup_id).await
+}
+
+async fn baseline_restore_with_fence(app: &Arc<App>, name: &str, fence: &crate::hosts::HostFence, backup_id: &str) -> Result<Response, LcError> {
+    use crate::host_baseline::apply;
+    let script = apply::render_restore_sh(backup_id)
+        .map_err(|_| LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_backup_id"})))?;
+    let out = app
+        .hosts
+        .run_if_current(fence, baseline_run_script(fence, &script))
+        .await
+        .ok_or_else(|| baseline_superseded(name))?
+        .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let run = apply::parse_restore(&out).ok_or_else(|| LcError::Upstream("baseline restore output was cut short".into()))?;
+    match run.error {
+        Some("not_found") => return Err(LcError::NotFoundValue(json!({"error": "not_found", "reason": "backup_not_found"}))),
+        Some(refused) => return Err(LcError::conflict("restore_refused", json!({"host": name, "refused": refused}))),
+        None => {}
+    }
+    crate::tools::spawn_detect(app.clone(), name.to_string());
+    Ok((StatusCode::OK, Json(json!({"host": name, "backup_id": backup_id, "files": run.files}))).into_response())
 }
 
 #[cfg(test)]
@@ -4017,6 +4149,210 @@ mod baseline_plan_route_tests {
         e.app.host_baseline.lock().await.insert(local.into(), report(Some(issues), "2026-01-01T00:00:00.000Z".into(), true));
         let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
         assert_eq!((st, body["stale"].as_bool()), (StatusCode::OK, Some(true)), "a stale plan is still served, marked stale: {body}");
+    }
+}
+
+#[cfg(test)]
+mod baseline_apply_route_tests {
+    use super::*;
+    use crate::host_baseline::{BaselineIssue, BaselineReport};
+    use axum::response::IntoResponse;
+
+    async fn body_of(r: Result<Response, LcError>) -> (StatusCode, Value) {
+        let resp = r.unwrap_or_else(|e| e.into_response());
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn apply(app: &Arc<App>, host: &str, principal: RequestPrincipal, plan_rev: &str) -> (StatusCode, Value) {
+        let b = BaselineApply { plan_rev: plan_rev.into(), ids: None };
+        body_of(baseline_apply(State(app.clone()), Path(host.to_string()), Extension(principal), Json(b)).await).await
+    }
+
+    async fn restore(app: &Arc<App>, host: &str, principal: RequestPrincipal, id: &str) -> (StatusCode, Value) {
+        let b = BaselineRestore { backup_id: id.into() };
+        body_of(baseline_restore(State(app.clone()), Path(host.to_string()), Extension(principal), Json(b)).await).await
+    }
+
+    fn hooks_report() -> BaselineReport {
+        BaselineReport {
+            os: Some("Linux".into()),
+            issues: Some(vec![
+                BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into() },
+                BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into() },
+            ]),
+            checked_at: crate::db::now(),
+            failed_at: None,
+            error: None,
+            stale: false,
+        }
+    }
+
+    async fn plan_rev(app: &Arc<App>, host: &str) -> String {
+        cached_baseline_plan(app, host).await.unwrap().1.plan_rev
+    }
+
+    async fn set_sync(app: &Arc<App>, host: &str, mode: &str) {
+        let (host, mode) = (host.to_string(), mode.to_string());
+        app.cfg
+            .update(move |f| {
+                let m: crate::config::HostBaselineSyncMode = serde_json::from_value(json!(mode)).unwrap();
+                f.host_baseline.sync.insert(host, m);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 遠端主機（假 ssh）：apply／restore 腳本在假 HOME 裡用真的 `/bin/sh` 跑，其他（偵測）一律失敗。回傳 HOME 與被叫了幾次。
+    async fn remote_host(app: &Arc<App>, host: &str) -> (std::path::PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
+        let cfg = HostCfg {
+            shared_session: false,
+            name: host.into(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let c2 = cfg.clone();
+        app.cfg.update(move |f| {
+            f.hosts.push(c2);
+            Ok(())
+        }).await.unwrap();
+        app.hosts.insert_remote_for_test(cfg).await;
+        let home = crate::testing::scratch_dir("baseline-apply-home");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (h, n) = (home.clone(), calls.clone());
+        crate::hosts::set_ssh_fake(host, move |script| {
+            if !script.contains("AM_BA begin") && !script.contains("AM_BR begin") {
+                anyhow::bail!("test fake: only baseline scripts run here");
+            }
+            n.fetch_add(1, Ordering::SeqCst);
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env_clear().env("HOME", &h).env("PATH", "/usr/bin:/bin").output()?;
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        app.host_baseline.lock().await.insert(host.into(), hooks_report());
+        (home, calls)
+    }
+
+    /// 只給使用者；沒開（沒列＝off、明寫 off、鍵對不上）409 `sync_disabled`；plan_rev 不符 409；指名手動項 400。主機一個字都沒碰。
+    #[tokio::test]
+    async fn apply_is_user_only_off_by_default_and_checks_the_plan_rev() {
+        let e = crate::testing::env().await;
+        let host = "bl3a-guard";
+        let (home, calls) = remote_host(&e.app, host).await;
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "a = 1\n").unwrap();
+        let rev = plan_rev(&e.app, host).await;
+        for p in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("svc".into())] {
+            let (st, body) = apply(&e.app, host, p, &rev).await;
+            assert_eq!((st, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        }
+        let (st, _) = apply(&e.app, "no-such-host", RequestPrincipal::User, &rev).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("sync_disabled")), "unlisted = off: {body}");
+        set_sync(&e.app, host, "off").await;
+        let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("sync_disabled")), "{body}");
+        set_sync(&e.app, "renamed-away", "ask").await;
+        let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("sync_disabled")), "an orphan key turns nothing on: {body}");
+
+        set_sync(&e.app, host, "auto").await;
+        let (st, body) = apply(&e.app, host, RequestPrincipal::User, "not-the-rev").await;
+        assert_eq!((st, body["reason"].as_str(), body["plan_rev"].as_str()), (StatusCode::CONFLICT, Some("plan_outdated"), Some(rev.as_str())), "{body}");
+        let b = BaselineApply { plan_rev: rev.clone(), ids: Some(vec!["tool.rtk".into()]) };
+        let (st, body) = body_of(baseline_apply(State(e.app.clone()), Path(host.into()), Extension(RequestPrincipal::User), Json(b)).await).await;
+        assert_eq!((st, body["reason"].as_str(), body["id"].as_str()), (StatusCode::BAD_REQUEST, Some("not_fixable"), Some("tool.rtk")), "{body}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no guard path may reach the host");
+        assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), b"a = 1\n");
+    }
+
+    /// 開了（`auto` 當 `ask`）：補上缺的鍵、回備份 id 與每項結果（手動項照列），回應不帶路徑或內容；
+    /// 之後 sync 改回 off，restore 照樣能用，還原後逐 byte 相同，回應只有目標名與結果。
+    #[tokio::test]
+    async fn apply_then_restore_round_trips_and_restore_works_while_off() {
+        let e = crate::testing::env().await;
+        let host = "bl3a-run";
+        let (home, calls) = remote_host(&e.app, host).await;
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let orig = "approval_policy = \"AM-SECRET\"\n[features]\nx = 1\n";
+        std::fs::write(home.join(".codex/config.toml"), orig).unwrap();
+        set_sync(&e.app, host, "auto").await;
+        let rev = plan_rev(&e.app, host).await;
+        let (st, body) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["results"], json!([
+            {"id": "codex.config.toml:features.hooks", "result": "applied"},
+        ]), "tool.rtk is manual in the plan and never offered: {body}");
+        let backup_id = body["backup_id"].as_str().unwrap().to_string();
+        assert!(crate::host_baseline::apply::valid_backup_id(&backup_id), "{body}");
+        assert!(body["error"].is_null(), "{body}");
+        let text = body.to_string();
+        assert!(!text.contains("AM-SECRET") && !text.contains(home.to_str().unwrap()) && !text.contains("baseline-backup"), "{text}");
+        let now = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(now.contains("[features]\nhooks = true\n"), "{now}");
+        assert!(home.join(crate::host_baseline::apply::BACKUP_ROOT_REL).join(&backup_id).join("manifest").is_file());
+
+        set_sync(&e.app, host, "off").await;
+        for (id, want) in [("../x", StatusCode::BAD_REQUEST), ("20261024T120000Z-01JABC", StatusCode::BAD_REQUEST)] {
+            let (st, body) = restore(&e.app, host, RequestPrincipal::User, id).await;
+            assert_eq!((st, body["reason"].as_str()), (want, Some("invalid_backup_id")), "{body}");
+        }
+        let (st, body) = restore(&e.app, host, RequestPrincipal::Bot("b1".into()), &backup_id).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        let (st, body) = restore(&e.app, host, RequestPrincipal::User, "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4").await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::NOT_FOUND, Some("backup_not_found")), "{body}");
+        let (st, body) = restore(&e.app, host, RequestPrincipal::User, &backup_id).await;
+        assert_eq!(st, StatusCode::OK, "restore works while sync is off: {body}");
+        assert_eq!(body, json!({"host": host, "backup_id": backup_id, "files": [{"file": "codex/config.toml", "result": "restored"}]}));
+        assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), orig.as_bytes());
+
+        // 主機上的 manifest 被改壞：整個拒絕。
+        let m = home.join(crate::host_baseline::apply::BACKUP_ROOT_REL).join(&backup_id).join("manifest");
+        let bad = std::fs::read_to_string(&m).unwrap().replace("codex/config.toml", "../../.ssh/config");
+        std::fs::write(&m, bad).unwrap();
+        let (st, body) = restore(&e.app, host, RequestPrincipal::User, &backup_id).await;
+        assert_eq!((st, body["reason"].as_str(), body["refused"].as_str()), (StatusCode::CONFLICT, Some("restore_refused"), Some("manifest_invalid")), "{body}");
+        assert!(calls.load(Ordering::SeqCst) >= 4);
+    }
+
+    /// 開始之後主機換代（重連／改指）：`run_if_current` 擋下，409 `host_superseded`，腳本一次都沒送。
+    #[tokio::test]
+    async fn a_superseded_host_gets_no_apply_or_restore() {
+        let e = crate::testing::env().await;
+        let host = "bl3a-fence";
+        let (home, calls) = remote_host(&e.app, host).await;
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "a = 1\n").unwrap();
+        set_sync(&e.app, host, "ask").await;
+        let rev = plan_rev(&e.app, host).await;
+        let fence = e.app.hosts.fence(host).await.unwrap();
+        e.app.hosts.bump_generation_for_test(host).await;
+        let b = BaselineApply { plan_rev: rev, ids: None };
+        let (st, body) = body_of(baseline_apply_with_fence(&e.app, host, &fence, b).await).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("host_superseded")), "{body}");
+        let (st, body) = body_of(baseline_restore_with_fence(&e.app, host, &fence, "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4").await).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("host_superseded")), "{body}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), b"a = 1\n");
+    }
+
+    /// 孤兒鍵只在使用者的 `/api/state`；bot 的視圖沒有這一欄。
+    #[tokio::test]
+    async fn orphan_sync_keys_are_in_the_user_state_only() {
+        let e = crate::testing::env().await;
+        set_sync(&e.app, "gone-host", "ask").await;
+        set_sync(&e.app, crate::config::LOCAL_HOST, "ask").await;
+        let Json(user) = get_state(State(e.app.clone()), Extension(RequestPrincipal::User)).await.unwrap();
+        assert_eq!(user["host_baseline_orphan_sync_keys"], json!(["gone-host"]));
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bl3a-bot").await;
+        let Json(view) = get_state(State(e.app.clone()), Extension(RequestPrincipal::Bot(bot.id))).await.unwrap();
+        assert!(view.as_object().unwrap().get("host_baseline_orphan_sync_keys").is_none(), "{view}");
+        assert!(!view.to_string().contains("gone-host"), "{view}");
     }
 }
 

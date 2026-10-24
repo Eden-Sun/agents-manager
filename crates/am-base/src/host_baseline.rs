@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 pub mod manifest;
+pub mod apply;
 pub mod plan;
 
 /// 基準檢查（偵測結果的一部分）需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、最近一次結果快取、本機 herdr 連線狀態、
