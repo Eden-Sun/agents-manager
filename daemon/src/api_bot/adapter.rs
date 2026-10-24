@@ -60,6 +60,7 @@ pub(crate) struct ApiBotAdapter {
 struct CursorState {
     revision: i64,
     last_api_pending: bool,
+    last_durable_state: State,
     active_attempt: Option<ActiveAttempt>,
     cached_response: Option<Response>,
 }
@@ -91,15 +92,18 @@ impl ApiBotAdapter {
             revision: 0,
         };
 
+        if identity.generation != 1 {
+            // generation > 1 requires rebind to inherit prior generation's durable state
+            return Err(http::Error::InvalidRequest);
+        }
+
         let initial_state = State::default();
         let state_val = serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
         let checkpoint = Checkpoint::new(&state_val).map_err(|_| http::Error::InvalidRequest)?;
 
-        if identity.generation == 1 {
-            db_api::create(&pool, &fence, &checkpoint)
-                .await
-                .map_err(|_| http::Error::InvalidRequest)?;
-        }
+        db_api::create(&pool, &fence, &checkpoint)
+            .await
+            .map_err(|_| http::Error::InvalidRequest)?;
 
         Ok(Self {
             pool,
@@ -113,6 +117,7 @@ impl ApiBotAdapter {
             cursor: Mutex::new(CursorState {
                 revision: 0,
                 last_api_pending: false,
+                last_durable_state: initial_state,
                 active_attempt: None,
                 cached_response: None,
             }),
@@ -178,6 +183,7 @@ impl ApiBotAdapter {
             cursor: Mutex::new(CursorState {
                 revision: new_rev,
                 last_api_pending: false,
+                last_durable_state: loaded_state.clone(),
                 active_attempt: None,
                 cached_response: None,
             }),
@@ -201,7 +207,7 @@ impl Model for ApiBotAdapter {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Response, http::Error>> {
         Box::pin(async move {
-            let (req, attempt_id) = {
+            let (envelope, attempt_id) = {
                 let mut cursor = self.cursor.lock().await;
                 let active = cursor.active_attempt.as_mut().ok_or(http::Error::InvalidRequest)?;
                 if !active.permit_available {
@@ -209,23 +215,24 @@ impl Model for ApiBotAdapter {
                 }
                 active.permit_available = false;
 
-                let envelope = RequestEnvelope::new(self.options.clone(), self.system.clone(), messages.to_vec())
+                let reconstructed = RequestEnvelope::new(self.options.clone(), self.system.clone(), messages.to_vec())
                     .map_err(|_| http::Error::InvalidRequest)?;
 
-                if envelope.hash() != active.envelope.hash() {
+                if reconstructed.hash() != active.envelope.hash() {
                     return Err(http::Error::InvalidRequest);
                 }
 
-                let req = http::FullMessagesRequest {
-                    endpoint: &self.http_cfg.endpoint,
-                    key: &self.http_cfg.key,
-                    options: active.envelope.options(),
-                    system: active.envelope.system(),
-                    messages: active.envelope.messages(),
-                    timeout: self.http_cfg.timeout,
-                    max_response_bytes: self.http_cfg.max_response_bytes,
-                };
-                (req, active.id.clone())
+                (reconstructed, active.id.clone())
+            };
+
+            let req = http::FullMessagesRequest {
+                endpoint: &self.http_cfg.endpoint,
+                key: &self.http_cfg.key,
+                options: envelope.options(),
+                system: envelope.system(),
+                messages: envelope.messages(),
+                timeout: self.http_cfg.timeout,
+                max_response_bytes: self.http_cfg.max_response_bytes,
             };
 
             let res = http::complete(&req, cancel).await;
@@ -233,8 +240,46 @@ impl Model for ApiBotAdapter {
             let mut cursor = self.cursor.lock().await;
             match res {
                 Ok(resp) => {
-                    cursor.cached_response = Some(resp.clone());
-                    Ok(resp)
+                    // Check if usage is trustworthy according to quote_provider
+                    match self.quote_provider.settle(&envelope, &resp) {
+                        Ok(_) => {
+                            cursor.cached_response = Some(resp.clone());
+                            Ok(resp)
+                        }
+                        Err(QuoteError::UntrustedUsage) | Err(QuoteError::Unapproved) | Err(QuoteError::InvalidRequest) => {
+                            // HTTP 200 returned but usage is untrusted or unapproved: record as unknown, failclosed
+                            let fence = Fence {
+                                session: &self.identity.session_id,
+                                bot: &self.identity.bot_id,
+                                run: &self.identity.run_id,
+                                turn: &self.identity.turn_id,
+                                generation: self.identity.generation,
+                                revision: cursor.revision,
+                            };
+                            let mut unknown_state = cursor.last_durable_state.clone();
+                            unknown_state.api_pending = true;
+
+                            let val = serde_json::to_value(&unknown_state).map_err(|_| http::Error::InvalidResponse)?;
+                            let chk = Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponse)?;
+
+                            let receipt = db_api::Receipt {
+                                state: "unknown",
+                                actual_speed: None,
+                                usage: None,
+                                estimated_microusd: None,
+                            };
+
+                            let next_rev = db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
+                                .await
+                                .map_err(|_| http::Error::InvalidResponse)?;
+
+                            cursor.revision = next_rev;
+                            cursor.last_api_pending = true;
+                            cursor.last_durable_state = unknown_state;
+
+                            Err(http::Error::InvalidResponse)
+                        }
+                    }
                 }
                 Err(err) => {
                     let fence = Fence {
@@ -245,13 +290,9 @@ impl Model for ApiBotAdapter {
                         generation: self.identity.generation,
                         revision: cursor.revision,
                     };
-                    let unknown_state = State {
-                        messages: messages.to_vec(),
-                        responses: Vec::new(),
-                        api_pending: true,
-                        tool_pending: None,
-                        completed_tool_ids: std::collections::HashSet::new(),
-                    };
+                    let mut unknown_state = cursor.last_durable_state.clone();
+                    unknown_state.api_pending = true;
+
                     if let Ok(val) = serde_json::to_value(&unknown_state) {
                         if let Ok(chk) = Checkpoint::new(&val) {
                             let receipt = db_api::Receipt {
@@ -263,6 +304,7 @@ impl Model for ApiBotAdapter {
                             if let Ok(next_rev) = db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk).await {
                                 cursor.revision = next_rev;
                                 cursor.last_api_pending = true;
+                                cursor.last_durable_state = unknown_state;
                             }
                         }
                     }
@@ -326,6 +368,7 @@ impl Journal for ApiBotAdapter {
                         db_api::Reservation::Fresh(next_rev) => {
                             cursor.revision = next_rev;
                             cursor.last_api_pending = true;
+                            cursor.last_durable_state = state.clone();
                             cursor.active_attempt = Some(ActiveAttempt {
                                 id: attempt_id,
                                 envelope,
@@ -363,12 +406,14 @@ impl Journal for ApiBotAdapter {
 
                     cursor.revision = next_rev;
                     cursor.last_api_pending = false;
+                    cursor.last_durable_state = state.clone();
                     Ok(())
                 }
                 _ => {
                     let next_rev = db_api::save(&self.pool, &fence, &chk).await.map_err(|_| ())?;
                     cursor.revision = next_rev;
                     cursor.last_api_pending = after_pending;
+                    cursor.last_durable_state = state.clone();
                     Ok(())
                 }
             }
