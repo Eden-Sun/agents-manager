@@ -233,9 +233,10 @@ export function shouldAutoTranslate(view: TranslationView | null, alreadySent: b
   return !!view && view.enabled && view.auto && view.status === 'absent' && !alreadySent
 }
 
-/** 退避到期後自動再試的等待毫秒數；不該自動再試時回傳 null。次數用盡（`attempts`）只給使用者按「再試一次」。 */
+/** 退避到期後自動再試的等待毫秒數；不該自動再試時回傳 null。次數用盡（`attempts`）只給使用者按「再試一次」。
+ *  預算擋下（`budget`：in_flight、hourly）也不排計時：GET 看不到預算，會變成每隔一段就重打，改由使用者再按。 */
 export function autoRetryDelay(view: TranslationView | null, now: number): number | null {
-  if (!view || !view.enabled || !view.auto || view.status !== 'failed' || view.error === 'attempts' || !view.retryAfter) return null
+  if (!view || !view.enabled || !view.auto || view.status !== 'failed' || view.error === 'attempts' || view.errorKind === 'budget' || !view.retryAfter) return null
   const at = Date.parse(view.retryAfter)
   if (!Number.isFinite(at)) return null
   return Math.max(AUTO_RETRY_MIN_MS, at - now)

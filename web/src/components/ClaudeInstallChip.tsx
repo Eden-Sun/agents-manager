@@ -82,7 +82,7 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
           <>
             {confirming ? (
               <div className="update-split">
-                <UpdateChangelog kind="claude" host={hostForDetails} from={from} to={plan.target} />
+                <UpdateChangelog kind="claude" host={hostForDetails} from={from} to={plan.target} autoTranslate />
                 <AgmReviewBox kind="claude" host={hostForDetails} from={from} to={plan.target} refreshKey={reviewKey} />
               </div>
             ) : null}

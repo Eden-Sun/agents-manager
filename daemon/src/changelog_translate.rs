@@ -163,6 +163,18 @@ struct Job {
     lang: String,
     included_versions: Vec<String>,
     omitted_versions: Vec<String>,
+    /// prompt 版、kind、lang、model、effort、輸入上限。覆蓋重用只跟同一組比（#1948）。舊帳本沒有，不被重用。
+    #[serde(default)]
+    scope: String,
+    /// 每段原文的 sha256（版本→正文）。覆蓋重用比正文用；正文改了就不重用（#1948）。
+    #[serde(default)]
+    source: Vec<SourceSec>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SourceSec {
+    version: String,
+    hash: String,
 }
 
 #[derive(Deserialize)]
@@ -291,9 +303,12 @@ fn get_body(app: Arc<App>, q: TranslationQuery) -> Pin<Box<dyn Future<Output = V
         under_gate(&app, || match load(&job_path(&app.data_dir, &fp)) {
             Ok(job) => job_view(true, &job, attempts_block(&job, &limits)),
             Err(LoadErr::Corrupt) => ledger_view(),
-            Err(LoadErr::Missing) => match crate::key_file::read_key(&cfg.key_file) {
-                Ok(_) => absent_view(&plan, &fp),
-                Err(_) => bare(true, "unconfigured"),
+            Err(LoadErr::Missing) => match covered_view(&app.data_dir, &plan, &fp) {
+                Some(v) => v,
+                None => match crate::key_file::read_key(&cfg.key_file) {
+                    Ok(_) => absent_view(&plan, &fp),
+                    Err(_) => bare(true, "unconfigured"),
+                },
             },
         })
         .await
@@ -430,6 +445,12 @@ fn decide(
         Err(LoadErr::Corrupt) => return Action::View(ledger_view()),
         Err(LoadErr::Missing) => None,
     };
+    if existing.is_none() {
+        // 同一段內容已由別的範圍（背景、別的 host 或 range）翻完：直接用，不算預算、不送（#1948）。
+        if let Some(v) = covered_view(data_dir, plan, fp) {
+            return Action::View(v);
+        }
+    }
     if let Some(job) = existing.as_ref() {
         let state = last_state(job);
         if state == "completed" || state == "reserved" || state == "in_flight" || retry_blocked(job)
@@ -914,7 +935,67 @@ fn blank_job(fp: &str, plan: &Plan) -> Job {
         lang: plan.lang.clone(),
         included_versions: plan.included.iter().map(|s| s.version.clone()).collect(),
         omitted_versions: plan.omitted.clone(),
+        scope: scope_of(plan),
+        source: plan
+            .included
+            .iter()
+            .map(|s| SourceSec {
+                version: s.version.clone(),
+                hash: body_hash(&s.body),
+            })
+            .collect(),
     }
+}
+
+fn scope_of(plan: &Plan) -> String {
+    format!(
+        "prompt={PROMPT_VERSION}|kind={}|lang={}|model={}|effort={}|max_input_chars={}",
+        plan.kind, plan.lang, plan.model, plan.effort, plan.max_input_chars
+    )
+}
+
+fn body_hash(body: &str) -> String {
+    hex_encode(&Sha256::digest(body.as_bytes()))
+}
+
+/// 覆蓋重用（#1948）：同 scope、已完成、而且請求的**每一個**版本原文相同、譯文都在，就直接組出來，不送 API。
+/// 部分涵蓋不算。只讀帳本，不寫。摘要留空（`reused:true`），因為那筆的摘要可能講到別的版本。
+fn covered_view(data_dir: &Path, plan: &Plan, fp: &str) -> Option<Value> {
+    if plan.included.is_empty() {
+        return None;
+    }
+    let scope = scope_of(plan);
+    let want: Vec<(&str, String)> = plan
+        .included
+        .iter()
+        .map(|s| (s.version.as_str(), body_hash(&s.body)))
+        .collect();
+    let job = ledger_jobs(&ledger_dir(data_dir)).into_iter().find(|job| {
+        job.scope == scope
+            && last_state(job) == "completed"
+            && want.iter().all(|(v, h)| {
+                job.source.iter().any(|s| s.version == *v && s.hash == *h)
+                    && job.sections.iter().any(|s| s.version == *v)
+            })
+    })?;
+    let sections: Vec<OutSection> = want
+        .iter()
+        .filter_map(|(v, _)| job.sections.iter().find(|s| s.version == *v).cloned())
+        .collect();
+    let mut v = bare(true, "completed");
+    v["fingerprint"] = json!(fp);
+    v["sections"] = json!(sections);
+    v["coverage"] = json!(if plan.truncated_input || !plan.omitted.is_empty() {
+        "partial"
+    } else {
+        "full"
+    });
+    v["truncated_input"] = json!(plan.truncated_input);
+    v["included_versions"] = json!(plan.included.iter().map(|s| &s.version).collect::<Vec<_>>());
+    v["omitted_versions"] = json!(plan.omitted);
+    v["lang"] = json!(plan.lang);
+    v["reused"] = json!(true);
+    Some(v)
 }
 
 fn ledger_dir(data_dir: &Path) -> PathBuf {
@@ -1507,6 +1588,109 @@ mod tests {
             .0
     }
 
+    #[tokio::test]
+    async fn a_background_translation_covers_a_narrower_frontend_range_without_a_call() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(fake.calls(), 1);
+        // 前端 range 是 (2.1.4, 2.1.5]：只有 2.1.5 一段，每一段原文都翻過，直接組出來。
+        let narrow = get(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(narrow["status"], "completed");
+        assert_eq!(narrow["reused"], true);
+        assert_eq!(narrow["sections"].as_array().unwrap().len(), 1);
+        assert_eq!(narrow["sections"][0]["version"], "2.1.5");
+        assert_eq!(narrow["sections"][0]["body"], "繁中 2.1.5");
+        let posted = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(posted["status"], "completed");
+        assert_eq!(fake.calls(), 1, "a covered range must not spend again");
+    }
+
+    #[tokio::test]
+    async fn a_request_with_an_untranslated_version_still_sends() {
+        let (env, fake) = boot(vec![ok_step(), ok_step()]).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n## 2.1.4\n- Fixed the status line\n").await;
+        let posted = post(&env.app, q_host("local", "2.1.4", "2.1.6")).await;
+        assert_ne!(posted["reused"], true, "2.1.6 was never translated: no partial reuse");
+        until_calls(&fake, 2).await;
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_changed_source_body_is_not_reused() {
+        let (env, fake) = boot(vec![ok_step(), ok_step()]).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        env.app.changelog.seed("claude", "## 2.1.5\n- Rewritten body for the same version\n## 2.1.4\n- Fixed the status line\n").await;
+        let posted = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_ne!(posted["reused"], true, "same version, different text: must not reuse");
+        until_calls(&fake, 2).await;
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn every_narrower_range_inside_the_background_one_reuses_without_a_call() {
+        let (env, fake) = boot(vec![ok_step()]).await;
+        enable(&env).await;
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        // (2.1.4, 2.1.5] 與 (2.1.3, 2.1.4] 都是背景那一輪的子集，各版正文相同，一律不送。
+        let b_to_c = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(b_to_c["status"], "completed");
+        let a_to_b = post(&env.app, q_host("local", "2.1.3", "2.1.4")).await;
+        assert_eq!(a_to_b["status"], "completed");
+        assert_eq!(a_to_b["sections"][0]["version"], "2.1.4");
+        assert_eq!(fake.calls(), 1, "two narrower frontend ranges reuse the background translation");
+        let spent = get(&env.app, q_to("2.1.5")).await;
+        assert_eq!(spent["attempts"].as_array().unwrap().len(), 1, "reuse writes no attempt");
+    }
+
+    #[tokio::test]
+    async fn reuse_does_not_spend_the_hourly_budget() {
+        let (env, fake) = boot(vec![ok_step(), ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.max_per_hour = 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
+        until_status(&env.app, "2.1.5", "completed").await;
+        // 用掉唯一一次之後，覆蓋的範圍照樣拿得到，不會被 hourly 擋。
+        let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
+        assert_eq!(covered["status"], "completed", "covered reuse is not budget-blocked");
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_hourly_cap_means_no_limit_not_no_sends() {
+        let (env, fake) = boot(vec![ok_step(), ok_step(), ok_step()]).await;
+        enable(&env).await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.changelog_translate.max_per_hour = 0;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // 三個不同的新版（不同內容＝不同指紋），一小時內都要送得出去。
+        for (i, (from, to, body)) in [("2.1.3", "2.1.5", "widgets"), ("2.1.5", "2.1.6", "more"), ("2.1.6", "2.1.7", "last")].into_iter().enumerate() {
+            env.app.changelog.seed("claude", &format!("## {to}\n- {body} in {to}\n## {from}\n- old {from}\n")).await;
+            let _ = post(&env.app, q_host("local", from, to)).await;
+            until_calls(&fake, i + 1).await;
+        }
+        assert_eq!(fake.calls(), 3, "0 means unlimited: none of these were blocked");
+    }
+
     async fn settle_background(app: &Arc<App>) {
         // 背景送出只是 spawn，沒有可等的句柄：讓它有機會跑完（或靜默放棄）。
         for _ in 0..20 {
@@ -2057,7 +2241,9 @@ mod tests {
             .unwrap();
         let _ = post(&env.app, q_to("2.1.5")).await;
         let _ = until_status(&env.app, "2.1.5", "completed").await;
-        let blocked = post(&env.app, q_to("2.1.4")).await;
+        // 2.1.4 已被覆蓋重用（不耗預算），要測 hourly 就得是沒翻過的新版。
+        env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n").await;
+        let blocked = post(&env.app, q_host("local", "2.1.5", "2.1.6")).await;
         assert_eq!(blocked["status"], "failed");
         assert_eq!(blocked["error_kind"], "budget");
         assert_eq!(blocked["error"], "hourly");

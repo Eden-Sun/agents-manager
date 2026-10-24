@@ -199,7 +199,7 @@ export function ClaudeApiPanel() {
                   <span>{t('每小時上限')}</span>
                   <input
                     type="number"
-                    min={1}
+                    min={u.id === 'changelog_translate' ? 0 : 1}
                     max={1000}
                     value={perHour}
                     onChange={(e) => {
@@ -207,6 +207,7 @@ export function ClaudeApiPanel() {
                       if (Number.isFinite(n)) patchUse(u.id, { max_per_hour: n })
                     }}
                   />
+                  {u.id === 'changelog_translate' ? <small>{t('0＝不限')}</small> : null}
                 </label>
               </div>
               {u.legacy_section ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: u.legacy_section })}</span> : null}

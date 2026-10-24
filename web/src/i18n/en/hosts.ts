@@ -307,6 +307,7 @@ export default {
   '模型': 'Model',
   '思考強度': 'Thinking effort',
   '每小時上限': 'Hourly limit',
+  '0＝不限': '0 = no limit',
   '總開關（關掉時下面各用途都不會呼叫 API；「更新框翻譯」沿用舊設定，不受總開關管）': 'Master switch (when off, none of the uses below call the API; “Update dialog translation” keeps its old setting and is not controlled by the master switch)',
   '一次性、不需要工具與 repo 的 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic API key，不開 Claude Code session，不吃訂閱用量；改按 API 計費。每個用途可以各自開關、選模型；失敗或沒 key 時，用途會退回原本的 Claude Code 路徑。': 'One-off LLM tasks that need no tools or repo (for example, asking AGM to analyze the changelog) run on an Anthropic API key instead of a Claude Code session, so they do not use subscription quota and are billed per API use. Each use can be switched on or off and given its own model. When it fails or there is no key, the use falls back to the original Claude Code path.',
   '貼上 key（sk-ant-…）': 'Paste key (sk-ant-…)',
