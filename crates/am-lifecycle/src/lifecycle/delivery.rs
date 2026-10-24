@@ -922,7 +922,9 @@ fn may_press_retry_submit(
 /// 原文的「沒有字元」（中文或長字被硬折）、「一段空白」（在空白處折行）、「換行」（原文本來就換行）。
 /// 以前整個把空白拿掉再比（#1598），`send to ann a` 與 `send to anna` 也算同一則，補按的 Enter 把使用者剛改的字送出去（#1666）。
 fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
-    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| rows_spell_text(&shown, text))
+    // 摺起來的貼上（框裡只剩 `[Pasted text …]`／`[Pasted Content N chars]`）看不到原文，只能比長度（#1915）。
+    crate::composer_parse::composer_text(kind, screen).is_some_and(|box_text| super::poller::is_our_folded_paste(kind, &box_text, text))
+        || crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| rows_spell_text(&shown, text))
 }
 
 /// `shown` 是 `composer_text_whole` 以 `\n` 接起來的列。空列要對上原文的空行（一個空列＝多一個換行），
@@ -1261,6 +1263,42 @@ mod tests {
             enter_count += 1;
         }
         assert_eq!(enter_count, 1, "B was not part of this delivery and must not be submitted");
+    }
+
+    /// #1915：codex 把長段貼上摺成 `[Pasted Content N chars]`，框裡看不到原文。字還在框裡，要算「還在」，補按才會發生。
+    /// 標籤是字元數：`codex_paste_text()` 含中文，1752 字、3552 位元組，寫成位元組數就對不上。
+    #[test]
+    fn a_codex_fold_of_our_text_still_counts_as_in_the_composer() {
+        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        assert!(composer_still_holds("codex", CODEX_FOLDED_PASTE_SCREEN, &codex_paste_text()), "多位元組，字元數");
+        let as_bytes = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "3552");
+        assert!(!composer_still_holds("codex", &as_bytes, &codex_paste_text()), "3552 是位元組數，不是 codex 的數字");
+        let other = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "999");
+        assert!(!composer_still_holds("codex", &other, &codex_paste_text()), "別人的摺疊、字數不同");
+    }
+
+    /// claude 的摺疊貼上照舊：行數對得上才算還在框裡（回歸）。
+    #[test]
+    fn a_claude_fold_still_counts_by_its_line_count() {
+        let folded = screen(&[], &["[Pasted text #1 +2 lines]"]);
+        assert!(composer_still_holds("claude", &folded, "a\nb\nc"));
+        assert!(!composer_still_holds("claude", &folded, "a\nb\nc\nd"), "行數不符");
+    }
+
+    /// #1915 ①：補按的上限照舊（`pressed_again` 只有一次）。補按之後標籤還在也不會再按，之後交給 unsent_draft。
+    #[test]
+    fn a_codex_fold_that_stays_after_the_enter_gets_exactly_one_more() {
+        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        let text = codex_paste_text();
+        let mut pressed_again = false;
+        let mut presses = 0;
+        for _ in 0..SUBMIT_CHECKS {
+            if may_press_retry_submit("codex", CODEX_FOLDED_PASTE_SCREEN, &text, false, pressed_again) {
+                presses += 1;
+                pressed_again = true;
+            }
+        }
+        assert_eq!(presses, 1, "標籤一直在，也只補按一次");
     }
 
     #[test]
