@@ -538,6 +538,18 @@ fn drop_codex_completion_tail(out: &mut Vec<String>) {
 /// grok 1.0.13 TUI chrome (appendix F): `◆` rows, "Worked for" footer, telemetry banner, shortcut
 /// footer, `<cwd>   15K / 500K` header, `[stable]`.
 fn is_grok_noise(s: &str) -> bool {
+    // 1.0.70 welcome chrome: keep the branch glyph and cwd shape as evidence;
+    // plain "main ..." or prose mentioning ctrl+u is still assistant content.
+    let branch_cwd = s
+        .strip_prefix('\u{e0a0}')
+        .and_then(|rest| rest.trim_start().split_once(char::is_whitespace))
+        .is_some_and(|(branch, cwd)| {
+            let cwd = cwd.trim_start();
+            !branch.is_empty() && (cwd.starts_with("~/") || cwd.starts_with('/'))
+        });
+    if branch_cwd || s == "Coming from Claude Code? Resume your session from moments ago using ctrl+u" {
+        return true;
+    }
     if s.starts_with('◆') || is_grok_worked_footer(s) || s.contains("[hooks:") {
         return true;
     }
@@ -1549,6 +1561,44 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         assert!(cleaned.contains("Worked for three days on this feature."), "{cleaned}");
         assert!(!cleaned.contains("Worked for 3.6s"), "真的頁尾要剝：{cleaned}");
         assert!(is_grok_noise("Grok Build  1.0.13"), "真的橫幅照舊是 chrome");
+    }
+
+    const GROK_WELCOME_120COL: &str = include_str!("fixtures/grok-1.0.70-welcome-120col.txt");
+
+    #[test]
+    fn grok_welcome_120col_is_not_a_reply() {
+        assert_eq!(super::super::poller::screen_reply("grok", GROK_WELCOME_120COL, &[]), None);
+    }
+
+    #[test]
+    fn grok_welcome_chrome_does_not_swallow_a_following_answer() {
+        let answer = "切到 main 分支。\n按 ctrl+u 清除。";
+        let screen = format!("{GROK_WELCOME_120COL}\n{answer}\n");
+        assert_eq!(super::super::poller::screen_reply("grok", &screen, &[]).as_deref(), Some(answer));
+    }
+
+    #[test]
+    fn grok_welcome_words_in_normal_answers_are_kept() {
+        let answer = "切到 main 分支。\n按 ctrl+u 清除。\nmain ~/project/agents-manager\nmain starts the server.\nComing from Claude Code? 這是使用說明。\nUse ctrl+u to clear input.";
+        assert_eq!(super::super::poller::screen_reply("grok", answer, &[]).as_deref(), Some(answer));
+    }
+
+    #[test]
+    fn grok_welcome_branch_row_requires_its_glyph_and_a_cwd() {
+        for row in [" main ~/project/agents-manager", " feature/cache /tmp/project with spaces", " HEAD /"] {
+            assert!(is_grok_noise(row), "header not recognized: {row}");
+        }
+        for row in ["main ~/project/agents-manager", " main is the default branch", " main", "按 ctrl+u 清除"] {
+            assert!(!is_grok_noise(row), "normal content hidden: {row}");
+        }
+    }
+
+    #[test]
+    fn grok_welcome_noise_rules_do_not_apply_to_other_providers() {
+        let text = " main ~/project/agents-manager\nComing from Claude Code? Resume your session from moments ago using ctrl+u";
+        for kind in ["claude", "codex"] {
+            assert_eq!(clean_screen(kind, text).as_deref(), Some(text), "provider: {kind}");
+        }
     }
 
     #[test]

@@ -3849,7 +3849,7 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
   - `stop` 且 `reason = "end_turn"` 且 `stopHookActive = false` → TurnComplete（`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`）；`reason = "shutdown"` 忽略。
   - 其他忽略。
 - 終端備援：grok 回覆是無標記的縮排純文字，右側帶 `h:mm AM|PM` 時戳與捲軸 `█`。`extract_reply` 回 `None`；`clean_screen` 另外去掉行尾 `█` 與時戳、`◆ …` 事件行、
-  `Worked for …  stop [hooks: N]`、`<cwd>  15K / 500K` 標頭、`[stable]`、頁尾快捷鍵，以及整塊「Help improve Grok … Privacy Policy.」。回音字元與 Claude 同為 `❯ `。
+  `Worked for …  stop [hooks: N]`、`<cwd>  15K / 500K` 標頭、帶分支圖示的 `<branch> <cwd>` 列（cwd 為 `~/` 或絕對路徑）、完整的 `Coming from Claude Code? Resume your session from moments ago using ctrl+u` 啟動提示（一般提到 main／ctrl+u 的回覆保留）、`[stable]`、頁尾快捷鍵，以及整塊「Help improve Grok … Privacy Policy.」。回音字元與 Claude 同為 `❯ `。
 
 ### 12.4 身份隔離
 `GROK_HOME`（預設 `~/.grok`）等同 Claude 的 `CLAUDE_CONFIG_DIR`：config、`auth.json`、`sessions/`、`hooks/` 都跟著走；hooks 檔寫到該 `GROK_HOME/hooks/`。
