@@ -824,6 +824,94 @@ pub struct BuildRemoteCfg {
     /// 只放路徑，私鑰本身不進設定；檔案不存在會明確報錯，不退回本機。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub identity_file: String,
+    /// 本機執行器（`host = "local"`，#1956）的 1 分鐘負載上限：挑主機時負載超過就當這台沒有空槽。
+    /// `0`＝呼叫端有 `CHECK_MAX_LOAD` 就用它，沒有就核心數 × 1.25（同 `scripts/wait-load.sh` 的預設）。ssh 主機不看。
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub max_load: f64,
+    /// 第一台（上面這些欄位）之後的建置主機，照寫的順序（#1956）。沒寫的欄位沿用第一台的值；
+    /// 只支援金鑰／agent 登入（密碼檔只屬於第一台）。`enabled` 與 `timeout_secs` 是整組共用的。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<BuildRemoteHostCfg>,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+/// 保留的主機名：本機執行器，不走 ssh／rsync-over-ssh（#1956）。
+pub const LOCAL_BUILD_HOST: &str = "local";
+
+/// `[[build.remote.hosts]]` 的一台（#1956）：`None`＝沿用 `[build.remote]` 的值。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildRemoteHostCfg {
+    /// 單獨停掉這一台；預設開（總開關是 `[build.remote] enabled`）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub host: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_jobs: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_threads: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_idle_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_shared_dirs: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_load: Option<f64>,
+}
+
+impl BuildRemoteCfg {
+    pub fn is_local(&self) -> bool {
+        self.host == LOCAL_BUILD_HOST
+    }
+
+    /// 健康檔與 `/api/build-slots` 用的那台的名字：`local` 或 `user@host:port`。
+    pub fn target_label(&self) -> String {
+        if self.is_local() {
+            LOCAL_BUILD_HOST.to_string()
+        } else {
+            format!("{}@{}:{}", self.user, self.host, self.ssh_port)
+        }
+    }
+
+    /// 照設定順序展開成每台一份完整設定（#1956）：第一台是 `[build.remote]` 本身（host 空就不算），
+    /// 之後是 `hosts` 裡開著的那幾台，沒寫的欄位沿用第一台。展開後的每一份 `hosts` 都是空的。
+    pub fn targets(&self) -> Vec<BuildRemoteCfg> {
+        let mut base = self.clone();
+        base.hosts.clear();
+        let mut out = Vec::new();
+        if !base.host.trim().is_empty() {
+            out.push(base.clone());
+        }
+        for h in self.hosts.iter().filter(|h| h.enabled && !h.host.trim().is_empty()) {
+            out.push(BuildRemoteCfg {
+                host: h.host.clone(),
+                user: h.user.clone(),
+                ssh_port: h.ssh_port.unwrap_or(base.ssh_port),
+                remote_root: h.remote_root.clone().unwrap_or_else(|| base.remote_root.clone()),
+                cargo_jobs: h.cargo_jobs.unwrap_or(base.cargo_jobs),
+                test_threads: h.test_threads.unwrap_or(base.test_threads),
+                shared_idle_hours: h.shared_idle_hours.unwrap_or(base.shared_idle_hours),
+                max_shared_dirs: h.max_shared_dirs.unwrap_or(base.max_shared_dirs),
+                max_concurrent: h.max_concurrent.unwrap_or(base.max_concurrent),
+                password_id: Some(String::new()),
+                identity_file: h.identity_file.clone().unwrap_or_else(|| base.identity_file.clone()),
+                max_load: h.max_load.unwrap_or(base.max_load),
+                ..base.clone()
+            });
+        }
+        out
+    }
 }
 
 impl Default for BuildRemoteCfg {
@@ -842,6 +930,8 @@ impl Default for BuildRemoteCfg {
             max_concurrent: 0,
             password_id: None,
             identity_file: String::new(),
+            max_load: 0.0,
+            hosts: Vec::new(),
         }
     }
 }

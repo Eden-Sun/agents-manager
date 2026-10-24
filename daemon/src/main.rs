@@ -21,8 +21,11 @@ fn main() {
             statusline_cmd::run(statusline_cmd::StatuslineArgs { bot, token, port });
             std::process::exit(0);
         }
-        Cmd::RemoteCargo { config, data_dir, cwd, cargo_args } => {
-            std::process::exit(remote_cargo::run_cli(&config, data_dir.as_deref(), &cwd, &cargo_args));
+        Cmd::RemoteCargo { config, data_dir, cwd, host, list_hosts, cargo_args } => {
+            if list_hosts {
+                std::process::exit(remote_cargo::list_hosts_cli(&config));
+            }
+            std::process::exit(remote_cargo::run_cli(&config, data_dir.as_deref(), &cwd, &cargo_args, host.as_deref()));
         }
         Cmd::HerdrUpdateCheck { installed, latest, changelog_file, last_notified } => {
             let md = std::fs::read_to_string(&changelog_file).unwrap_or_else(|e| {
