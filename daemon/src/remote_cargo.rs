@@ -52,6 +52,10 @@ thread_local! {
     static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
     // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的排隊等待秒數；一樣是執行緒本地，要在呼叫 `run_offload` 的那條執行緒上設。
     static TEST_QUEUE_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的 shared 等待秒數（[`shared_wait_secs`]）；同上，要在呼叫 `run_offload` 的那條執行緒上設。
+    static TEST_SHARED_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    // 測試用：守門腳本讀的負載檔（[`loadavg_path`]）；沒設就是 `/proc/loadavg`。
+    static TEST_LOADAVG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     // 測試用：本機執行器（`host = "local"`）的 `$HOME`——假 cargo 放在它的 `.cargo/bin`。
     static TEST_LOCAL_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -901,12 +905,34 @@ struct Admission {
     max_load: Option<f64>,
 }
 
+/// 排遠端 shared 目錄的等待秒數：正式是 [`SHARED_WAIT_SECS`]；測試覆寫見 [`TEST_SHARED_WAIT_SECS`]。
+fn shared_wait_secs() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(secs) = TEST_SHARED_WAIT_SECS.with(|w| w.get()) {
+            return secs;
+        }
+    }
+    SHARED_WAIT_SECS
+}
+
+/// 守門讀的負載檔（腳本的 `@LOADAVG@`）：正式一律 `/proc/loadavg`；測試覆寫見 [`TEST_LOADAVG`]。
+fn loadavg_path() -> String {
+    #[cfg(test)]
+    {
+        if let Some(p) = TEST_LOADAVG.with(|p| p.borrow().clone()) {
+            return p.display().to_string();
+        }
+    }
+    "/proc/loadavg".to_string()
+}
+
 impl Admission {
     fn from_cfg(remote: &BuildRemoteCfg) -> Self {
         Admission {
             max: remote.max_concurrent,
             jobs: remote.cargo_jobs.max(1),
-            shared_wait_secs: SHARED_WAIT_SECS,
+            shared_wait_secs: shared_wait_secs(),
             queue_wait_secs: Self::queue_wait_secs(),
             pool: 0,
             try_only: false,
@@ -967,6 +993,7 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
         .replace("@POOL@", &adm.pool.to_string())
         .replace("@TRY@", if adm.try_only { "1" } else { "0" })
         .replace("@MAXLOAD@", &adm.max_load.filter(|m| *m > 0.0).map(|m| format!("{m:.2}")).unwrap_or_else(|| "0".into()))
+        .replace("@LOADAVG@", &sh_quote(&loadavg_path()))
         .replace("@RESERVE_KB@", &AUTO_RESERVE_KB.to_string())
         .replace("@PER_JOB_KB@", &AUTO_PER_JOB_KB.to_string())
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
@@ -1234,7 +1261,7 @@ busy() {
   exit 77
 }
 if [ "$try" = 1 ]; then
-  if [ "$maxload" != 0 ] && awk -v m="$maxload" '{ exit !($1 > m) }' /proc/loadavg 2>/dev/null; then
+  if [ "$maxload" != 0 ] && awk -v m="$maxload" '{ exit !($1 > m) }' @LOADAVG@ 2>/dev/null; then
     echo "agents-manager: 這台 1 分鐘負載超過 $maxload，當作沒有空槽" >&2; busy
   fi
   mkdir -p "$root/$hash" || exit 2
@@ -3896,6 +3923,26 @@ exec /bin/sh -c "$inner"
         assert!(err.contains("lease token"), "{err}");
     }
 
+    /// #1971：`@LOADAVG@` 代入正式路徑（`/proc/loadavg`，經 `sh_quote` 不加引號）後，守門腳本跟改動前逐 byte 相同。
+    /// 基準是改動前用同一組輸入組出的 sha256（試用與排隊各一份）；腳本變了就要先確認是不是這裡的預期。
+    #[test]
+    fn the_production_guard_script_is_byte_identical_to_before_the_loadavg_placeholder() {
+        use sha2::Digest as _;
+        let tok = LeaseToken::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let trial = Admission { max: 3, jobs: 5, shared_wait_secs: 900, queue_wait_secs: 3, pool: 0, try_only: true, max_load: Some(12.5) };
+        let queued = Admission { max: 0, jobs: 12, shared_wait_secs: 900, queue_wait_secs: 3, pool: 0, try_only: false, max_load: None };
+        for (adm, want) in [
+            (trial, "06a8fec910633d9586672591a0c6394a863238ee308c54902db6308cba16f436"),
+            (queued, "9d162e08a7680da36ed6bef9c35771ffeca974ada034cbee13feaece8012f71e"),
+        ] {
+            let s = guard_script("/r", "0123456789abcdef", "job-1-1", &tok, adm);
+            let got: String = sha2::Sha256::digest(s.as_bytes()).iter().map(|x| format!("{x:02x}")).collect();
+            assert_eq!(got, want, "守門腳本的 byte 變了");
+            assert!(s.contains("awk -v m=\"$maxload\" '{ exit !($1 > m) }' /proc/loadavg 2>/dev/null"), "正式路徑要讀 /proc/loadavg");
+            assert!(!s.contains("@LOADAVG@"), "沒替換乾淨");
+        }
+    }
+
     /// 守門腳本裡那條自動上限算式的 Rust 版（測試用的對照；遠端才知道自己的核數與 RAM，正式的只有腳本那份）。
     pub(super) fn auto_max_concurrent(ncpu: u64, mem_kb: u64, jobs: usize) -> usize {
         let by_cpu = ncpu * 3 / jobs.max(1) as u64;
@@ -4459,11 +4506,27 @@ mod guard_tests {
         (remote, cwd, data)
     }
 
-    /// 在這條執行緒上把 `ssh`／`rsync` 換成 `fake_remote` 寫的假腳本再跑 `f`。
+    /// 這條執行緒上的等待與負載都密封住再跑 `f`：shared 等待只等 [`SEALED_SHARED_WAIT_SECS`] 秒，負載檔是低負載（`base/loadavg`）。
+    /// 巢狀安全：結束時還原外層設的值。要測長等待的測試在 `f` 裡自己覆寫 [`TEST_SHARED_WAIT_SECS`]。
+    pub(super) fn with_sealed_waits<T>(base: &Path, f: impl FnOnce() -> T) -> T {
+        let file = base.join("loadavg");
+        std::fs::write(&file, "0.10 0.10 0.10 1/1 1\n").unwrap();
+        let prev_wait = TEST_SHARED_WAIT_SECS.with(|w| w.replace(Some(SEALED_SHARED_WAIT_SECS)));
+        let prev_load = TEST_LOADAVG.with(|p| p.replace(Some(file)));
+        let out = f();
+        TEST_SHARED_WAIT_SECS.with(|w| w.set(prev_wait));
+        TEST_LOADAVG.with(|p| *p.borrow_mut() = prev_load);
+        out
+    }
+
+    /// 測試預設的 shared 等待上限（秒）：正式是 [`SHARED_WAIT_SECS`] 的 900 秒，測試只給 10 秒。
+    pub(super) const SEALED_SHARED_WAIT_SECS: u64 = 10;
+
+    /// 在這條執行緒上把 `ssh`／`rsync` 換成 `fake_remote` 寫的假腳本、等待與負載密封住，再跑 `f`。
     pub(super) fn with_fake_transport<T>(base: &Path, f: impl FnOnce() -> T) -> T {
         let bin = base.join("fakebin");
         TEST_PROGRAMS.with(|p| *p.borrow_mut() = Some((bin.join("ssh").display().to_string(), bin.join("rsync").display().to_string())));
-        let out = f();
+        let out = with_sealed_waits(base, f);
         TEST_PROGRAMS.with(|p| *p.borrow_mut() = None);
         out
     }
@@ -6360,6 +6423,25 @@ fn main() {
     }
 
     /// 排隊的時間不算進整體上限：上限 3 秒、前面的人佔名額 4 秒、自己的 cargo 跑 1 秒 → 照常成功（不是 124）。
+    /// #1971：shared 被佔著的時候，正式會等 900 秒；測試密封後只等 [`SEALED_SHARED_WAIT_SECS`] 秒就改用獨立目錄（名額滿則退回本機）。
+    /// 這條能在 30 秒內結束＝覆寫確實生效（沒生效就會等滿 900 秒）。
+    #[test]
+    fn a_shared_wait_is_capped_under_test() {
+        let base = base();
+        let (mut remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        remote.max_concurrent = 1;
+        let hash = cache_hash(&cwd);
+        let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, pool: 1, ..QUICK });
+        let t0 = Instant::now();
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        let took = t0.elapsed();
+        holder.finish();
+        assert_eq!(rc, EXIT_RUN_LOCALLY, "shared 等完改獨立目錄，但唯一的名額還被佔著＝排隊逾時退回本機");
+        assert!(took >= Duration::from_secs(SEALED_SHARED_WAIT_SECS - 1), "確實等了上限那麼久：{took:?}");
+        assert!(took < Duration::from_secs(30), "shared 等待沒被密封：{took:?}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn time_spent_queueing_does_not_count_toward_the_overall_limit() {
         let base = base();

@@ -215,7 +215,7 @@ pub(super) fn queue_order(busy: &[(usize, usize)]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::guard_tests::{base, fake_remote, guard_cmd, guard_with, with_fake_transport, write_exec, HASH, QUICK};
+    use super::super::guard_tests::{base, fake_remote, guard_cmd, guard_with, with_fake_transport, with_sealed_waits, write_exec, HASH, QUICK};
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -244,7 +244,7 @@ mod tests {
 
     fn with_local_home<T>(base: &Path, f: impl FnOnce() -> T) -> T {
         TEST_LOCAL_HOME.with(|h| *h.borrow_mut() = Some(base.join("home")));
-        let out = f();
+        let out = with_sealed_waits(base, f);
         TEST_LOCAL_HOME.with(|h| *h.borrow_mut() = None);
         out
     }
@@ -340,6 +340,28 @@ mod tests {
         assert_eq!(local_max_load(&auto, Some("junk")), std::thread::available_parallelism().unwrap().get() as f64 * 1.25);
         assert!(Admission::try_from_cfg(&auto).max_load.is_some(), "本機試用看負載");
         assert_eq!(Admission::try_from_cfg(&BuildRemoteCfg { host: "r7".into(), ..auto }).max_load, None, "ssh 主機不看");
+    }
+
+    /// #1971：本機試用時負載超過上限就是沒有空槽（回 `Busy`，不排隊、不編）；負載低就拿得到。
+    /// 注入的是守門讀的負載檔（[`TEST_LOADAVG`]），不是真機器的 loadavg——CI 機負載 >20 時，這條不能跟著紅。
+    #[test]
+    fn an_overloaded_local_host_has_no_free_slot_on_trial() {
+        let base = base();
+        let (local, cwd, _data) = local_host(&base, "rc", "exit 0\n");
+        let hash = cache_hash(&source_root(&cwd).0);
+        let trial = Admission::try_from_cfg(&local);
+        let file = base.join("loadavg");
+        TEST_LOADAVG.with(|p| *p.borrow_mut() = Some(file.clone()));
+        std::fs::write(&file, "999.00 999.00 999.00 1/1 1\n").unwrap();
+        let token = LeaseToken::new();
+        let err = Lease::start(guard_cmd(&base, &hash, "job-1-1", &token, trial), token, &Deadline::new(0)).err().expect("負載超標就不給");
+        assert!(err.downcast_ref::<Busy>().is_some(), "回 Busy：{err:#}");
+        std::fs::write(&file, "0.10 0.10 0.10 1/1 1\n").unwrap();
+        let token = LeaseToken::new();
+        let mut lease = Lease::start(guard_cmd(&base, &hash, "job-2-2", &token, trial), token, &Deadline::new(0)).expect("低負載拿得到空槽");
+        lease.finish();
+        TEST_LOADAVG.with(|p| *p.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// 設定：舊的單一 `[build.remote]` 展開成一台；`[[build.remote.hosts]]` 照順序接在後面、沒寫的沿用第一台、
