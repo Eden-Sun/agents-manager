@@ -32,6 +32,7 @@
 - 改了 API 要同步 `docs/API.md`；改了行為要同步 `docs/SPEC.md`。
 - **新增 API 路由＝在 `daemon/src/bot_scope_matrix.rs` 的允許表登記**（bot principal 是 Allow 還是 Forbidden），推之前跑 `cargo test -p agents-managerd -- bot_scope_matrix`。漏登記 `bot_a_against_bot_b_matches_the_allow_table` 會報 UNLISTED、main CI 變紅（2026-10-04 #839）。
 - 不要加新功能、不要順手重構任務以外的東西。
+- **改注入規則檔會讓全部 bot 的共用 prompt prefix 失效一次**（#1941）：`lifecycle::child_agent_rules`（注入給所有 bot 的規則本文，`crates/am-lifecycle/src/lifecycle/setup.rs`）每顆 bot 逐字相同，改動後所有 bot 的快取都要重算一次。少改、合併改，不為了一句措辭單獨發；規則本文不寫任何一顆 bot 的名字、id、日期或 pane（具體名字只放最後一段）。
 - **debug 建置的堆疊**（#1465）：`tokio::spawn`／`TaskTracker::spawn` 一個大的 async 區塊（幾 KB 以上）寫成 `spawn(Box::pin(async move { … }))`——debug 下 tokio 的 spawn 會把 future 以值一層層傳下去，一個 25 KB 的 future 就吃掉 1 MiB 以上；一個 async fn 裡不要排二十幾段各自 await 大 future 的程式（poll 框是每個 await 暫存的總和），按段拆成函式、各自裝箱（見 `runners/supervisor/runtime.rs` 的 `tick_once`）；呼叫端放的是被呼叫 future 的整個值，所以大框的 async fn 要在**被呼叫端**裝箱（`fn x<'a>(…) -> impl Future<Output = T> + 'a { Box::pin(x_body(…)) }`，見 `start.rs` 的 `start_inner`），在呼叫端 `Box::pin(x())` 沒用。守門是 1 MiB 執行緒上的 `the_plain_bot_gate_path_fits_in_a_one_mib_stack`、`a_controller_tick_fits_in_a_one_mib_stack`、`a_restart_fits_in_a_one_mib_stack`（`per_principal_auth_tests`）。
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `crates/am-base/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 

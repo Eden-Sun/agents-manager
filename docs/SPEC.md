@@ -2127,6 +2127,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 `child_agent_rules` 提供 codex 全新題目與 `fork --last` 的兩段式啟動寫法：先 `agent start`（不帶任務），確認名稱登錄到指定 pane 且 idle／ready 後，再 `agent prompt` 派工。shim 對 Bot 的 `agent start` 成功回覆補查名稱到 pane 的對應，查不到、查詢失敗或指到別顆 pane 都回非零；啟動失敗則保留原失敗碼。兩種失敗都保留 spawn claim，提示 child 可能已在執行，先 list/get 核對，禁止直接重開或對未確認名稱派工；不自動送任務、改名或重啟。規則文字只在下次載入時注入，既有 session 不會熱替換。旗標放 `--` 之後且在子命令前，shim 補的參數禁止自己補，禁止用真 herdr 絕對路徑繞過。
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它；後面接 `[agents]` 的 agent md（§6.5i）。
+**共用 prompt prefix（#1941）**：`child_agent_rules()` 是無參數的固定文字，不嵌任何 bot 的名字、id、日期或 pane；名稱一律寫成 `$AM_AGENT_NAME`（bot 與子 pane 的環境變數，pane env 由 `lifecycle::setup::pane_env_for_fence` 注入），需要寫死的具體名字只放在注入文字的最後一段（`agent_name_note`）。所以所有 bot 注入的文字除最後一段外逐字相同，provider 的 prompt cache 可以共用同一段前綴。改這份文字會讓全部 bot 的共用前綴失效一次，少改、合併改。
 
 **語氣是規格的一部分（2026-09-13）**：注入給 bot 與 child 的人設／提示一律寫成**命令**——「必須」「一律」「禁止」，
 開頭先講明「硬規則，不是建議」。客氣的寫法（「請…」「…比較清楚」）agent 會當成建議而不執行，實測就是這樣漏掉找閒置 child、
@@ -2689,7 +2690,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 
 - **角色共用文件**：巡檢與協調者共用同一專案時，部署的 `CLAUDE.md` 使用同一份角色中立 bootstrap，不含任一角色的 bot id、cwd 或「你是巡檢／協調者」宣告。身份由該 bot 的 persona、`AM_BOT_ID` 與自己 cwd 下的 `runtime.json` 決定；daemon 位址取同一份 `runtime.json` 的 `daemon_url`，不在共用文件寫死 port；子 agent 不因繼承共用文件取得 AGM 角色。兩份角色 persona 的 worker 模型選擇遵守全域政策，不把角色自身固定模型當作 worker 預設。
 - **載入來源**：每份非空 agent md 注入時附上來源主機、設定路徑與完整內容 SHA256，標明為啟動快照。來源內容不變時標頭穩定，不放每次重啟都改變的時間戳；讀不到／空檔仍沿用既有告警與 CLI 指示檔回退。檔案更新、main push 或衍生檔更新都不代表存活的 CLI 已重新載入，需由 AGM 排安全窗口重啟對應 bot。repo 常駐 `AGENTS.md` 保留收尾入口，驗證細則改按需讀 `docs/AGENT-VERIFY.md`，不降低驗證要求。
-- **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、
+- **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona → 最後一段 bot 名字（`agent_name_note`，#1941）。三種 kind 同一份文字（claude `--append-system-prompt`、
   codex `developer_instructions`、grok `--rules`）。全域那份在 daemon 這台機器上讀；專案那份跟 repo 放在一起，在**專案所在的主機**上讀（遠端走 ssh，`~` 用那台的 HOME 展開）。每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
 - **母 bot 的完整指示走檔案或 profile，不放 argv（#769）**：herdr 把整條指令壓在 900 bytes 內（`MAX_COMMAND_BYTES`），最長的參數會被砍成「…（後略）」，
   整份 persona 放進 argv 時母 bot 只拿到 AG Man 規則的前約 600 bytes，agent md 與 persona 一個字都沒帶到。所以：claude 寫成 bot 目錄的 `persona.md`、argv 帶
