@@ -858,7 +858,7 @@ pattern 是 agent 隨手寫的字串，所以 **regex 只在「可判斷語法�
 比對是 Thompson NFA 模擬（時間 O(pattern × 文字)，沒有回溯），不需要步數預算，`(.*)*Z`、`(.|.)(.|.)…Z` 這類災難性回溯寫法照常在毫秒內判完（命中的照擋）。一條指令最多對 `MAX_REGEX_PATTERNS = 16` 個 pattern 做 regex 比對，多出來的判不出來→放行並記 log（shim 同一個數字，短 pattern 與選項順序的判斷不受影響）。
 
 **被擋時**：hook 在 stdout 印一行決策 JSON，exit 0，agent 看到的原因（zh-TW）說明為什麼擋、並叫它改用自己記下的 PID 或 port（`lsof -ti :PORT | xargs kill`、`kill <PID>`）。
-形狀：claude／codex／grok 用 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`；agy 另加 `"decision":"deny","reason":"…"`（agy 的 deny 形狀文件沒寫清楚，兩種都給）。
+形狀：claude／codex／grok 用 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`；agy **只印** `{"decision":"deny","reason":"…"}`（1.4.7 認不得 `hookSpecificOutput`，見 §12a.2）。
 PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的 `hook_event_name`（agy 依 `--event PreToolUse`）分辨，所以放在「子 agent 的 pane 不送事件」的判斷**之前**（事故就是子 bot 跑的）。
 
 **各 CLI 現況**（誠實列出，沒有的就是沒有）：
@@ -3995,7 +3995,13 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 - `~/.gemini/config/hooks.json` 的具名 hook **`agents-manager`**（隔離實例 `agents-manager-<slug>`）：`SessionStart`／`PreInvocation`／`Stop` 三個事件，**扁平** handler 陣列（`{"type":"command","command":"'<dispatcher>' <事件>","timeout":5}`；`PreToolUse`／`PostToolUse` 才要包 `{matcher,hooks}`，形狀錯了 agy 會整個丟掉這個檔——單元測試釘住形狀）。整個具名鍵是我們的，別的具名 hook、別的頂層鍵原樣保留。
 - `~/.gemini/antigravity-cli/settings.json` 的 `statusLine`＝`{"type":"command","command":"'<dispatcher>' state","stack_with_default":true}`（疊在 agy 內建狀態列下面，dispatcher 對 `state` 什麼都不印）。**只在沒設或本來就是我們的時候寫**；使用者自己的 `statusLine` 不碰（那顆 bot 就沒有狀態信標，hook 與畫面判讀照常）。
 - 兩個檔都：只 merge 自己那一項、其他一個字不改、**讀不懂就不覆寫**（agy 自己遇到解析失敗也拒絕覆寫；安裝失敗只記 warn，bot 照常啟動）、原子寫入（同目錄暫存檔 `rename`）、與信任清單共用同一把鎖（`trust::update_file`，settings.json 兩邊都寫）。
-- **dispatcher 永遠 exit 0；hook 事件永遠只印 `{}`**——hook 是同步的、會卡住 agent loop，stdout 會被 agy 當成決策（`{"decision":"continue"}` 會擋住停止），所以 daemon 子行程的 stdout 也導去 `/dev/null`。
+- **dispatcher 永遠 exit 0；hook 事件印 `{}`，PreToolUse 放行印空**——hook 是同步的、會卡住 agent loop，stdout 會被 agy 當成決策（`{"decision":"continue"}` 會擋住停止），所以 daemon 子行程的 stdout 也導去 `/dev/null`。
+- **1.4.7 的 hook 語意（2026-10-24 實測，#1959）**：
+  - PreToolUse 的 stdout 是決策：`{}` **等於拒絕**（`tool call denied by pre-tool hook:`，理由空白）；所以放行一律**空 stdout**（含沒有 `AM_BOT_ID`、`AM_INSTANCE` 不符兩條早退，拋棄式 HOME 裡的 agy 也不能被擋）。
+  - 空 stdout 的放行**不會**繞過權限詢問：沒帶 `--dangerously-skip-permissions` 的 headless 跑，空與 `{"decision":"allow"}` 都還是被 `command` 權限閘門自動拒絕（stderr：`… cannot prompt for, so it was auto-denied`）。所以不用 `allow` 明確放行，免得受限 bot 因此擴大權限。
+  - 決策欄位是 **`decision`（`allow`／`deny`）＋ `reason`**。`hookSpecificOutput` 是未知欄位：protojson 會拒絕整個結果，`reason` 被蓋成 `failed to unmarshal result from hook … unknown field "hookSpecificOutput"`（模型看不到理由）。
+  - hooks.json 的 PreToolUse 必須包 `{matcher, hooks:[…]}`；扁平寫法 `agy plugin validate` 會警告「runs nothing」。
+  - 1.4.x 的 changelog 沒有列出這些語意；以上是實測結果，agy 版本升級後要重跑。
 - `agents-managerd hook agy --bot … --event <事件>`：agy 的 payload 沒有事件名，子行程把 `--event` 放進 `hookEventName`；`Stop` 另外讀 `transcriptPath`（只讀最後 2 MiB、只收 `.jsonl`）把最近一回合的 `lastUserMessage`／`lastAssistantMessage` 放進 payload（`agy_support::last_exchange`）。讀不到就不放，事件照送。
 - 測試一律走 `crate::home::dir()`（測試行程的假 HOME），寫 `~/.gemini` 的程式碼都有「寫到假 HOME」的測試，絕不碰真的。
 - **ADC 登入環境限制與相容性（issue #1949）**：agy 1.4.7 修正以 Application Default Credentials（`AGY_ADC_AUTH`）登入時 hooks、rules 等未載入的問題。AG Man 的 hooks 注入（`setup.rs`、`agy_hook.rs`）與接收（`hookrecv.rs`）本就是透過全域 `~/.gemini/config/hooks.json` 指向 dispatcher，從未針對 ADC 登入做過繞過 hook 走畫面判讀的特殊分支或退路；通用之終端備援（`poller::try_fallback`）本就具備 CAS 狀態切換與遲到 hook 原文取代去重機制（`replace_fallback_reply`），不會因 hook 恢復觸發而產生重複回覆或事件衝突。本機環境未配置 GCP ADC（無 `gcloud` ADC 憑證），無法進行真機 ADC 登入實測，記錄此架構判斷與環境限制。

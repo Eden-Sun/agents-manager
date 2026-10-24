@@ -183,6 +183,24 @@
         assert_eq!(guard("claude", "", ok), Guard::Pass);
     }
 
+    /// agy 1.4.7：`hookSpecificOutput` 是未知欄位，protojson 會拒絕整個結果、理由也被蓋掉（實測）。agy 的決策只能是 `decision`／`reason`。
+    #[test]
+    fn agy_deny_is_only_decision_and_reason_so_the_reason_reaches_the_model() {
+        let agy = r#"{"conversationId":"c","toolCall":{"name":"run_command","args":{"CommandLine":"pkill -f claude -P 1"}}}"#;
+        let Guard::Deny(out) = guard("agy", "PreToolUse", agy) else { panic!("要擋") };
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("hookSpecificOutput").is_none(), "agy 不能有 hookSpecificOutput：{out}");
+        assert_eq!(v.as_object().unwrap().len(), 2, "只有 decision 與 reason：{out}");
+        assert_eq!(v["decision"], "deny");
+        assert!(v["reason"].as_str().unwrap().contains("lsof -ti :PORT"), "{out}");
+
+        // 其他 provider 照舊：hookSpecificOutput 形狀。
+        let claude = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"killall node"}}"#;
+        let Guard::Deny(out) = guard("claude", "PreToolUse", claude) else { panic!("要擋") };
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("hookSpecificOutput").is_some() && v.get("decision").is_none(), "{out}");
+    }
+
     #[test]
     fn anything_unreadable_or_not_a_shell_call_is_let_through() {
         assert_eq!(guard("claude", "", ""), Guard::NotPreToolUse);

@@ -5,8 +5,9 @@
 //! * **只動我們那一項**：hooks.json 的 `agents-manager[-<實例>]` 鍵、settings.json 的 `statusLine`（使用者自己設的不碰）；其他全部原樣保留，
 //!   讀不懂就不覆寫（回錯，由呼叫端記 warn、bot 照常啟動——hook 沒裝只是少了回報，畫面判讀與 transcript 還在）。
 //! * **原子寫入、同一把鎖**：和信任清單共用 `trust::update_file`（settings.json 兩邊都寫）。
-//! * **dispatcher 在非 AG Man 的 pane 裡什麼都不做**（沒有 `AM_BOT_ID`／`AM_HOOK_TOKEN`），使用者自己開的 agy 不受影響；而且**永遠印 `{}` 並 exit 0**：
-//!   hook 是同步的、會卡住 agent loop，stdout 會被當成決策（`{"decision":"continue"}` 會擋住停止，所以絕不能印別的）。
+//! * **dispatcher 在非 AG Man 的 pane 裡什麼都不做**（沒有 `AM_BOT_ID`／`AM_HOOK_TOKEN`），使用者自己開的 agy 不受影響；而且**永遠 exit 0**，
+//!   stdout 只給決策：hook 事件印 `{}`，PreToolUse 放行印空（1.4.7 的 `{}` 是拒絕，見 SPEC agy）。hook 是同步的、會卡住 agent loop，
+//!   stdout 會被當成決策（`{"decision":"continue"}` 會擋住停止，所以絕不能印別的）。
 //! * 一律走 [`crate::home::dir`]：測試的家目錄是假的，不會碰到真的 `~/.gemini`。
 
 use std::path::{Path, PathBuf};
@@ -25,9 +26,10 @@ pub(super) fn dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> 
     format!(
         "#!/bin/sh\n\
          # agents-manager agy dispatcher (SPEC agy). Rewritten by the daemon on every agy bot start; no-op outside daemon panes.\n\
-         # agy runs this synchronously and reads stdout as a decision: hook events always answer `{{}}`, the status line prints nothing.\n\
+         # agy runs this synchronously and reads stdout as a decision: hook events answer `{{}}`, the status line prints nothing.\n\
+         # PreToolUse 放行也是空的：1.4.7 把 `{{}}` 判成拒絕（tool call denied by pre-tool hook），空 stdout 才是「沒有決定」。\n\
          AM_EVENT=${{1:-}}\n\
-         am_reply() {{ [ \"$AM_EVENT\" = state ] || printf '{{}}\\n'; }}\n\
+         am_reply() {{ case $AM_EVENT in state|PreToolUse) ;; *) printf '{{}}\\n' ;; esac; }}\n\
          [ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || {{ am_reply; exit 0; }}\n\
          {gate}\
          if [ \"$AM_EVENT\" = PreToolUse ]; then\n\

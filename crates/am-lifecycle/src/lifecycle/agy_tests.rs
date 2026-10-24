@@ -105,7 +105,8 @@ fn the_dispatcher_always_answers_empty_json_for_hooks_nothing_for_the_status_lin
     assert!(!log.exists(), "沒有 AM_BOT_ID／AM_HOOK_TOKEN：不呼叫 daemon");
 }
 
-/// #1884：PreToolUse 是 agy 唯一會讀 hook stdout 當決策的事件之一——hook 要擋時印的決策 JSON 原樣交出去，其餘（沒印、印了別的、失敗）一律 `{}`。
+/// #1884：PreToolUse 是 agy 唯一會讀 hook stdout 當決策的事件之一——hook 要擋時印的決策 JSON 原樣交出去，其餘（沒印、印了別的、失敗）一律**空**。
+/// 1.4.7 的 `{}` 是拒絕（實測），所以放行不能印 `{}`。
 #[test]
 fn a_pre_tool_use_denial_reaches_agy_but_nothing_else_does() {
     let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny"},"decision":"deny"}"#;
@@ -120,16 +121,42 @@ fn a_pre_tool_use_denial_reaches_agy_but_nothing_else_does() {
     // 同一支 stub 在別的事件印的東西不能漏給 agy。
     let (out, code) = run_dispatcher(&script, &["Stop"], &env);
     assert_eq!((out.as_str(), code), ("{}\n", 0));
-    // hook 沒印決策（放行）、或掛掉：`{}`、exit 0。
+    // hook 沒印決策（放行）、或掛掉：空、exit 0。
     let quiet = stub.with_file_name("quiet");
     tt::write_exec(&quiet, "#!/bin/sh\nexit 7\n");
     let (out, code) = run_dispatcher(&dispatch_sh(quiet.to_str().unwrap(), "/d", None), &["PreToolUse"], &env);
-    assert_eq!((out.as_str(), code), ("{}\n", 0));
-    // 不是 AG Man 的 pane：不呼叫、`{}`。
+    assert_eq!((out.as_str(), code), ("", 0), "放行是空 stdout，不是 `{{}}`（1.4.7 把 `{{}}` 判成拒絕）");
+    // 不是 AG Man 的 pane：不呼叫、空。
     std::fs::remove_file(&log).unwrap();
-    let (out, _) = run_dispatcher(&script, &["PreToolUse"], &[("AM_TEST_LOG", log.to_str().unwrap())]);
-    assert_eq!(out, "{}\n");
+    let (out, code) = run_dispatcher(&script, &["PreToolUse"], &[("AM_TEST_LOG", log.to_str().unwrap())]);
+    assert_eq!((out.as_str(), code), ("", 0), "沒有 AM_BOT_ID：拋棄式目錄裡的 agy 不能被擋");
     assert!(!log.exists());
+}
+
+/// 放行的 PreToolUse 在三條路徑（正常、沒有 bot env、AM_INSTANCE 不符）stdout 都是空的；hook 事件照舊印 `{}`。
+#[test]
+fn a_pre_tool_use_allow_prints_nothing_on_every_early_exit() {
+    let stub = tt::scratch_dir("am-agy-allow").join("daemon");
+    tt::write_exec(&stub, "#!/bin/sh\ncat > /dev/null\necho \"$@\" >> \"$AM_TEST_LOG\"\nexit 0\n");
+    let log = stub.with_file_name("calls.log");
+    let env = [("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t"), ("AM_TEST_LOG", log.to_str().unwrap())];
+
+    // 正常路徑：daemon 不擋 → 空。
+    let (out, code) = run_dispatcher(&dispatch_sh(stub.to_str().unwrap(), "/d", None), &["PreToolUse"], &env);
+    assert_eq!((out.as_str(), code), ("", 0));
+    // 沒有 AM_BOT_ID／AM_HOOK_TOKEN（使用者自己的 agy、拋棄式 HOME）→ 空，且不呼叫 daemon。
+    std::fs::remove_file(&log).unwrap();
+    let (out, code) = run_dispatcher(&dispatch_sh(stub.to_str().unwrap(), "/d", None), &["PreToolUse"], &[]);
+    assert_eq!((out.as_str(), code), ("", 0));
+    assert!(!log.exists(), "沒有 bot env：不呼叫 daemon");
+    // AM_INSTANCE 不符（別顆 daemon 的 pane）→ 空，且不呼叫 daemon。
+    let inst = dispatch_sh(stub.to_str().unwrap(), "/d", Some("alpha"));
+    let (out, code) = run_dispatcher(&inst, &["PreToolUse"], &[("AM_INSTANCE", "beta"), ("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t"), ("AM_TEST_LOG", log.to_str().unwrap())]);
+    assert_eq!((out.as_str(), code), ("", 0));
+    assert!(!log.exists(), "AM_INSTANCE 不符：不呼叫 daemon");
+    // 同樣是 AM_INSTANCE 不符，但事件是 Stop → 仍是 `{}`（只有 PreToolUse 改成空）。
+    let (out, _) = run_dispatcher(&inst, &["Stop"], &[("AM_INSTANCE", "beta"), ("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t")]);
+    assert_eq!(out, "{}\n");
 }
 
 #[test]
