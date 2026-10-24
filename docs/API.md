@@ -1359,11 +1359,11 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
 `AM_DATA_DIR` **不是**前提（issue #417）：有就帶 `--data-dir`，沒有（`scripts/check.sh` 為了測試隔離會清掉它）就不帶，
 `agents-managerd remote-cargo` 照 daemon 帶 `--config` 時的規則（`[server] data_dir` > 設定檔所在目錄）推出來找密碼檔；推不出來回 125 退回本機並講原因。
 
-遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<worktree 路徑的 fnv1a64>/` 底下，
-- `shared/`：同一棵 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
-  `shared.lock` 是 flock，同一時間只給一次呼叫；被佔著（同一棵 worktree 同時兩個 `cargo test`）時**先等它用完**（每秒再試，最多 5 分鐘，
-  issue #104：等完再增量編譯只要十幾秒，冷編譯要重編幾分鐘、還多佔一份遠端 RAM 與 2～3G 磁碟），等超過 5 分鐘才改用
-  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。
+遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<git common dir 路徑的 fnv1a64>/` 底下（同一個 repo 的 worktree 同一份，#1856），
+- `shared/`：同一個 repo 的 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
+  `shared.lock` 是 flock，同一時間只給一次呼叫（同一個 repo 的所有 worktree 共用這一份，#1856）；被佔著時**先等它用完**（每秒再試，最多 15 分鐘，
+  issue #104、#1937：持有者是整段 cargo，等完再增量編譯比自己冷編譯划算，上限取一次冷編譯加餘裕），等超過 15 分鐘才改用
+  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。整體上限 `timeout_secs` 仍包住這段等待。
 - 同步、算 hash 的是**工作區根**（issue #177），不是呼叫時的 cwd：像 cargo 一樣往上找最近一層宣告 `[workspace]` 的
   `Cargo.toml`（沒有工作區就用最近的套件根；完全不在 cargo 專案裡才是 cwd 本身），遠端 cargo 再 `cd` 到同一個相對子目錄。
   所以 `cd daemon && cargo check` 與在根目錄呼叫共用同一份 `shared/`，遠端有根的 `Cargo.lock`／`[profile]`／`.cargo/config.toml`，
@@ -1393,7 +1393,7 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   helper 這端交握改在另一條執行緒讀，收到終止訊號照樣馬上停。遠端是額外的一組名額（#1853）：全滿時預設最多等 3 秒
   （整秒計時可能多 1 秒），仍全滿就放掉目錄鎖，stderr 明講「遠端名額全滿（N 個），這次改在本機排隊」。
   守門的交握退出碼仍是 75；helper 確認尚未交目錄後轉成 **125**，shim 再 acquire 本機名額。遠端 cargo 已開始後的退出碼原樣帶回。
-  等 `shared/` 目錄鎖的 5 分鐘上限照舊；有空名額仍優先遠端。預設啟用此退回行為，避免遠端名額少時壓縮本機吞吐量。
+  等 `shared/` 目錄鎖的上限是 15 分鐘（#1937）；有空名額仍優先遠端。預設啟用此退回行為，避免遠端名額少時壓縮本機吞吐量。
 - **連不進去就退回本機（issue #428）**：ssh 回 `255`（認證被拒、連不上、host key 不合）或這台叫不起 `ssh` 時，遠端**什麼都還沒跑**，
   helper 回 **125**（＝退回本機，shim 才會去拿本機名額），不是 126。stderr 兩行，**第一行自己講完**
   「⚠️ 連不上外部編譯主機 `user@host:port`，這次 cargo 改在本機跑（要排本機名額）」，第二行是 ssh 的原話
