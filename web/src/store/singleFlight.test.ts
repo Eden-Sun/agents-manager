@@ -74,3 +74,48 @@ test('singleFlight: a call made after the last loop check but before the flight 
   await new Promise((r) => setImmediate(r))
   assert.equal(runs, 2)
 })
+
+test('singleFlight: resetForTest 後舊 inflight 才 resolve，新呼叫只跑一次且 again 仍具 trailing 語意', async () => {
+  const gateOld = deferred()
+  const gateNew1 = deferred()
+  const gateNew2 = deferred()
+  let runs = 0
+
+  const refresh = singleFlight(async () => {
+    runs++
+    if (runs === 1) await gateOld.promise
+    else if (runs === 2) await gateNew1.promise
+    else if (runs === 3) await gateNew2.promise
+  })
+
+  // 1. 啟動舊 flight (runs = 1)
+  const pOld = refresh()
+  assert.equal(runs, 1)
+
+  // 2. 測試環境重置：呼叫 resetForTest()
+  refresh.resetForTest?.()
+
+  // 3. 測試發起新的呼叫 (runs 應變成 2)
+  const pNew1 = refresh()
+  assert.equal(runs, 2, 'reset 後新呼叫應獨立啟動新的 flight，不被舊 inflight 阻塞')
+
+  // 4. 在新 flight 執行期間再呼叫一次 refresh()：應該合併為 trailing 請求
+  const pNewTrailing = refresh()
+  assert.equal(runs, 2, '新 flight 執行期間進來的呼叫應等 trailing run，此時不開第三次')
+
+  // 5. 舊 flight 此時才 resolve（晚到）
+  gateOld.resolve()
+  await pOld
+  // 驗證：舊 flight 收尾不應該干擾新 flight 的 looping 或提前清掉新 inflight
+  assert.equal(runs, 2, '舊 flight 收尾不得把新 flight 提早中斷或多觸發')
+
+  // 6. 新 flight 的第一趟 resolve，應自動觸發 trailing run (runs 變 3)
+  gateNew1.resolve()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(runs, 3, '新 flight 中途進來的請求在第一趟完成後只多跑一趟 trailing')
+
+  // 7. trailing run 完成
+  gateNew2.resolve()
+  await Promise.all([pNew1, pNewTrailing])
+  assert.equal(runs, 3)
+})

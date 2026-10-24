@@ -3065,6 +3065,7 @@ export function resetStoreForTest(): void {
   appliedStateSeq = 0
   legacyQueueMigrationAttempted = false
   draftSync.dispose()
+  ;(useStore.getState().refreshState as { resetForTest?: () => void }).resetForTest?.()
   useStore.setState(useStore.getInitialState(), true)
 }
 
