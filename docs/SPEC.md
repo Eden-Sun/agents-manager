@@ -1190,6 +1190,7 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   欠著的送達結果晚一步補寫時（`mark_delivery`），已 `completed` 且綁了 native turn id 的回合不會被寫回 0。
   備援收尾、沒有 hook 證據（沒有 native turn id）的回合維持原判；重送閘門看 `auto_resend`，不受影響。
   (3) 回合還在飛時（#1760）：claude 送出（`delivered_at`）之後，同一 run 收到 hook 時間不早於送出的 PostToolUse＝agent 已經在跑工具，就寫成 1；遠端 claude 不送 UserPromptSubmit，不必等 Stop 才拿掉「未驗證送達」。
+  (4) agy PreInvocation 事後補證據（#1969）：agy 1.4.7 起 PreInvocation hook 帶 `lastUserInput`。本機（LOCAL_HOST）、同一 run 通過世代圍籬、非截斷的 PreInvocation 事件，若 `lastUserInput` 與當前唯一 in_flight、delivery='ok'、delivery_verified=0、非 external 的 turn 之 `prompt_text` 在 CRLF/LF 正規化與 trim 後嚴格全等，且事件時間滿足 `delivered_at <= fired <= now + 5s` 時，將該回合 `delivery_verified` 寫成 1 並推播事件；僅補事後 verified 證據，不作為同步送達的唯一 proof，重送閘門（auto_resend、resend_count）完全不動。若存在多筆同文候選則一筆都不補（唯一性守衛）。
   既有列：開 DB 時補一次（`status='completed'`、`native_turn_id` 與 `source_event_id` 都有、`delivery_verified=0`），資料回填、不動 schema、不升 `SCHEMA_VERSION`，
   可重入；只靠晚到 hook 綁上 native id（沒有 `source_event_id`）的舊列不回填，讀出時維持原值。
 - 欄位 additive、migrate 可重入；既有列 `auto_resend` 預設 1，行為與拆開前相同（舊的 unverified 列當時已把
