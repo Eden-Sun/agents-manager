@@ -1,0 +1,115 @@
+# 主機 CLI 工作環境基準（issue #719，SPEC §16.7）。
+#
+# daemon 編譯時把這份檔嵌進 binary（`crates/am-base/src/host_baseline/manifest.rs`），探測腳本的清單由它產生；
+# 執行期不讀 repo（遠端主機根本沒有 repo）。改這份檔要重編 daemon 才生效。
+#
+# 目前**只檢查、不修**：每一項只看「在不在」，不比內容。
+# - 路徑一律相對於各自的根目錄（claude 身份目錄、`$CODEX_HOME`、`$GROK_HOME`、`$XDG_CONFIG_HOME/herdr`），
+#   不寫絕對路徑、不寫 `..`、不寫 `$HOME`／`~`。
+# - codex 的 model／model_reasoning_effort／service_tier 一律不列（使用者規定不動），解析時直接拒絕。
+# - severity：`critical`（缺了就不能好好用）或 `warn`（提醒）。
+
+version = 1
+
+# 每台主機都該有的工具（登入 shell 的 PATH 找得到絕對路徑才算有）。
+# claude／codex／grok 本身要不要裝由各主機決定，看 `hosts[].tools`，不在這裡。
+[[tools]]
+name = "herdr"
+severity = "critical"
+
+[[tools]]
+name = "rtk"
+severity = "critical"
+
+[[tools]]
+name = "zsh"
+severity = "critical"
+
+[[tools]]
+name = "bun"
+severity = "critical"
+
+[[tools]]
+name = "jq"
+severity = "critical"
+
+[[tools]]
+name = "gh"
+severity = "critical"
+
+# 每個 claude 身份的設定目錄（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`、alias cc0–cc6）。
+[[claude.files]]
+path = "settings.json"
+severity = "critical"
+
+[[claude.files]]
+path = "statusline-command.sh"
+severity = "critical"
+
+[[claude.files]]
+path = "CLAUDE.md"
+severity = "warn"
+
+[[claude.files]]
+path = "RTK.md"
+severity = "warn"
+
+# `settings.json` 該有的鍵。`name` 是 issue id 的尾巴，`key` 是點號路徑（每一段都要是物件裡的鍵）。
+[[claude.keys]]
+name = "statusLine"
+key = "statusLine"
+severity = "critical"
+
+[[claude.keys]]
+name = "hooks"
+key = "hooks"
+severity = "critical"
+
+[[claude.keys]]
+name = "permissions"
+key = "permissions"
+severity = "warn"
+
+[[claude.keys]]
+name = "defaultMode"
+key = "permissions.defaultMode"
+severity = "warn"
+
+# 只在 Darwin 主機上才算「該有」的 plugin（`enabledPlugins` 裡 `<name>@…` 為 true）。
+[[claude.plugins]]
+name = "imessage"
+os = "darwin"
+
+[[claude.plugins]]
+name = "discord"
+os = "darwin"
+
+# codex（`$CODEX_HOME`，預設 `~/.codex`）。
+[[codex.files]]
+path = "config.toml"
+severity = "warn"
+
+[[codex.files]]
+path = "hooks.json"
+severity = "warn"
+
+# `check`：`present`＝`config.toml` 裡有這個鍵（任何值）；`true`＝點號鍵（或 `[表]` 裡的鍵）的值是 true。
+[[codex.keys]]
+key = "approval_policy"
+check = "present"
+severity = "warn"
+
+[[codex.keys]]
+key = "features.hooks"
+check = "true"
+severity = "warn"
+
+# grok（`$GROK_HOME`，預設 `~/.grok`）。
+[[grok.files]]
+path = "config.toml"
+severity = "warn"
+
+# herdr（`$XDG_CONFIG_HOME/herdr`，預設 `~/.config/herdr`）。
+[[herdr.files]]
+path = "config.toml"
+severity = "warn"

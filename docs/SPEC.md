@@ -4340,14 +4340,14 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 每次工具偵測（daemon 啟動、重連、手動重新偵測）在**同一趟 ssh** 後面接一段只讀的 `BASELINE_SH`（`crates/am-base/src/host_baseline.rs`），逐項對照基準，結果放 `hosts[].baseline`（API §12.6）。
 
 - **只報、不修**：不寫任何檔、不裝任何東西；新增身份也不自動套設定。這張票維持唯讀，因為目前基準只判斷檔案／設定鍵是否存在，沒有能安全套用的宣告式檔案內容；自動安裝還會依作業系統執行外部安裝步驟。發現差異後由使用者自行修正，再由下次偵測確認。測試用假 `$HOME` 驗證跑完後目錄快照不變。
-- **基準**（寫在 `host_baseline.rs` 的常數與腳本裡，路徑一律 `$HOME`）：
+- **基準**（宣告在 `ops/host-baseline/baseline.toml`，編譯時嵌進 daemon，執行期不讀 repo；`host_baseline/manifest.rs` 解析，探測腳本的清單由它代入，值過 `[A-Za-z0-9_.-]` 白名單後再整個加 quote。宣告檔只收相對路徑（不准絕對路徑、`..`、`$`、`~`）、拒絕 codex 的 model／effort／service_tier；解析失敗在 `cargo test` 就紅，萬一編進去了也只回「未知」，不 panic、不變成空清單。路徑一律相對 `$HOME` 底下的各 CLI 根目錄）：
   - 工具（嚴重）：`herdr rtk zsh bun jq gh`，用登入 shell 找（只認絕對路徑，跟 §16.1 的 `am_abs` 同一規則，但六個一次問完）。claude／codex／grok 本身要不要裝由各主機決定，看 `tools`，不在這裡。
   - 每個 claude 身份（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，以及登入 shell alias `cc0`–`cc6` 的 `CLAUDE_CONFIG_DIR`——路徑可以不在那個 glob 裡，例如 `~/.claude-work`；PROBE_SH 留在 `$al`，沒有就讀 `~/.zshrc`，不多開一次 login shell）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有頂層 `statusLine`、`hooks`（嚴重）、`permissions`，以及 `permissions.defaultMode`（提醒）——只看鍵在不在，不比內容。那台沒有 `jq` 時這些鍵無法查，略過不列（`jq` 本身已列為缺工具）。`settings.json` 不是合法 JSON（jq 讀不懂整份檔）時，鍵的有無看不出來，只報一條 `claude.<身份>.settings.json:json`（嚴重），不逐鍵喊缺。
   - codex：`config.toml`、`hooks.json`、`approval_policy` 鍵，以及 `features.hooks = true`（點號鍵或 `[features]` 表裡的 `hooks = true`；沒寫或 false 都算缺）；grok `config.toml`；herdr `config.toml`（都是提醒）。**不檢查** model／effort／service_tier（使用者規定不動）。工具只查有沒有，不鎖版本（沒有宣告的基準版）。
   - `~/.gitconfig` 內嵌帶密碼的網址（`user:pass@`，或 `ghp_…`／`github_pat_…`／`glpat-…` 當 user 的 `token@`；提醒）：只回報有沒有，**不回傳內容**。
 - 探測腳本是 POSIX sh（遠端以 `/bin/sh -s` 跑，macOS 是 bash 3.2 的 sh 模式）；六個工具只開**一次** login shell 問完（不是各開一次，避免慢 rc 把整趟推過 ssh 30 秒上限）；`~/.claude-cc<N>*` glob 收到的目錄名只認 `[A-Za-z0-9_.-]`，其餘整個跳過（空白錯位欄位、換行偽造 `AM_BL` 行）；路徑不輸出；同一個 id 只報一次（`CLAUDE_CONFIG_DIR` 指到 `~/.claude*` 時同一目錄會走兩次）。
 - 檔案本身不在就不再列裡面的鍵（一個根因一行）。探測沒跑完（沒有結尾標記）＝`issues: null`（未知），一次 ssh 逾時不會在每台主機喊一排缺漏。
-- **darwin-only**：探測也印 `AM_BL os <uname -s>`。Mac 專用項（claude `settings.json` 的 `enabledPlugins` 裡 `imessage@…`／`discord@…` 沒有啟用，`MAC_ONLY_PLUGINS`）只在 `os=Darwin` 時才列；Linux 或不知道系統（舊探測沒帶 `os`）一律不算缺。Vercel autoMode 不在這一版（沒有可靠的鍵可查）。
+- **darwin-only**：探測也印 `AM_BL os <uname -s>`。Mac 專用項（claude `settings.json` 的 `enabledPlugins` 裡 `imessage@…`／`discord@…` 沒有啟用，宣告檔的 `claude.plugins`）只在 `os=Darwin` 時才列；Linux 或不知道系統（舊探測沒帶 `os`）一律不算缺。Vercel autoMode 不在這一版（沒有可靠的鍵可查）。
 - **inbox 通知**：每次偵測結果寫進快取後，`issues` 非空就推一則 `ops_alert`（`source=daemon`、`reason=host_baseline`）給 AGM；key 帶差異 id 集合的雜湊，同一份差異只推一次、差異變了才再推，一致或未知不推。沿用 `push_inbox` 的 `INSERT OR IGNORE` 去重（跟其他 `ops_alert` 同一套）。去重存在 DB（daemon 重啟、主機離線再回來都不會重推）；`event_key` 永久，所以**曾經推過的差異集合日後（修好又壞回同一組）不會再推**——這種回歸只在主機面板看得到，是刻意的（避免偵測偶發抖動讓 AGM 一直收到同一則）。
 - **定期重量**：偵測本來只在連上／alias 變了／手動時跑；另有 `host_baseline::spawn_poller` 每 6 小時對連著的主機重跑一次完整偵測（啟動那一輪由開機偵測負責）。
 - **UI**：網頁「主機」面板每台（含本機）一行「一致性：…」，有差異逐項列出（嚴重的在前、紅；提醒黃）；沒量過顯示「尚未檢查」、`issues: null` 顯示「未知」，**不當成全缺**（`web/src/lib/hostBaseline.ts`）。
