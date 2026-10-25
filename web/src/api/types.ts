@@ -661,6 +661,8 @@ export interface AppState {
   tools: ToolMap
   /** 本機 `hosts[0].baseline` */
   baseline: HostBaseline | null
+  /** 每台主機 `[host_baseline.sync]` 實際生效的模式（#719 階段 3b，只在 User 視圖）。缺這欄＝全部當 off。 */
+  host_baseline_sync: Record<string, 'off' | 'ask'>
   identity_status: IdentityStatusMap
   hosts: Host[]
   identities: Identity[]

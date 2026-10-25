@@ -415,6 +415,8 @@ export interface StoreState {
   localHerdr: HerdrVersion
   /** Local machine's `hosts[0].baseline`（SPEC §16.7）；null＝還沒量過。 */
   localBaseline: HostBaseline | null
+  /** 每台主機 `[host_baseline.sync]` 生效的模式（#719 階段 3b）；查不到＝off，不畫「補齊」鈕。只隨整份快照更新。 */
+  hostBaselineSync: Record<string, 'off' | 'ask'>
   /** Local machine's `hosts[0].identities`. */
   localIdentityStatus: IdentityStatusMap
   /** 被標為停用的身份，鍵是 `api.identityPrefKey(host, kind, name)`（daemon 端的設定，不是瀏覽器記的）。 */
@@ -953,6 +955,7 @@ export const useStore = create<StoreState>((set, get) => {
   localTools: toToolMap(undefined),
   localHerdr: toHerdrVersion(undefined),
   localBaseline: null,
+  hostBaselineSync: {},
   localIdentityStatus: {},
   disabledIdentities: [],
   quota: {},
@@ -1141,6 +1144,7 @@ export const useStore = create<StoreState>((set, get) => {
         localTools: st.tools,
         localHerdr: st.herdr,
         localBaseline: st.baseline,
+        hostBaselineSync: st.host_baseline_sync ?? {},
         localIdentityStatus: st.identity_status,
         identities: st.identities,
         projects: st.projects,

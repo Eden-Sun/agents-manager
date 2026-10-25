@@ -254,3 +254,66 @@ details.env-fold summary {
 .host-baseline.stale .host-baseline-items {
   opacity: 0.55;
 }
+
+/* 一鍵補齊（#719 階段 3b）：確認框掛在 body 上，這幾條不能依賴 .host-baseline 祖先。id 很長（`claude.<身份>.settings.json:<鍵>`），
+   各自一行、可在任意處折行；目標檔在下一行。 */
+.host-baseline-apply-items {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.host-baseline-apply-item {
+  margin: 2px 0;
+}
+
+.host-baseline-apply-item .apply-item-id {
+  display: block;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.host-baseline-apply-item .apply-item-target {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.host-baseline-apply-notice {
+  font-weight: 600;
+}
+
+.host-baseline-apply-summary .apply-result-list {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
+.host-baseline-apply-btn {
+  margin-left: 8px;
+}
+
+/* 結果與錯誤各自一塊，不跟摘要那行擠在一起。 */
+.host-baseline-apply-summary,
+.host-baseline-apply-wrap > .host-baseline-apply-err {
+  display: block;
+  margin: 4px 0;
+}
+
+.host-baseline-apply-summary .apply-backup-id {
+  display: block;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.host-baseline-apply-summary .apply-restore-hint {
+  display: block;
+  font-family: inherit;
+  color: var(--muted);
+}
+
+.host-baseline-apply-wrap > .host-baseline-apply-err {
+  color: var(--danger);
+}

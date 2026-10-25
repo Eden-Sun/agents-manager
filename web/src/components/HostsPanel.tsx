@@ -173,7 +173,7 @@ function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
 }
 
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
-export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: string }) {
+export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: 'off' | 'ask' }) {
   const t = useT()
   const v = hostBaselineView(baseline)
   if (v.items.length === 0) {
@@ -225,6 +225,7 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
 function HostRow({ name }: { name: string }) {
   const t = useT()
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
+  const syncMode = useStore((s) => s.hostBaselineSync[name])
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
   const busy = useStore((s) => Boolean(s.busy[`host:${name}`]))
   const reconnectHost = useStore((s) => s.reconnectHost)
@@ -256,7 +257,7 @@ function HostRow({ name }: { name: string }) {
         )}
         <HerdrVersionLine herdr={host.herdr} />
         <ToolBadges host={host.name} tools={host.tools} />
-        <BaselineLine host={host.name} baseline={host.baseline} />
+        <BaselineLine host={host.name} baseline={host.baseline} syncMode={syncMode} />
         <GhHostStatus host={host.name} />
         <HostShellList host={host.name} connected={host.connected} />
       </span>
@@ -455,6 +456,7 @@ function LocalHostRow() {
   const tools = useStore((s) => s.localTools)
   const herdr = useStore((s) => s.localHerdr)
   const baseline = useStore((s) => s.localBaseline)
+  const syncMode = useStore((s) => s.hostBaselineSync.local)
   const attach = useStore((s) => s.attachCommand)
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === 'local').length)
   return (
@@ -468,7 +470,7 @@ function LocalHostRow() {
         <span className="host-ssh">{attach}</span>
         <HerdrVersionLine herdr={herdr} />
         <ToolBadges host="local" tools={tools} />
-        <BaselineLine host="local" baseline={baseline} />
+        <BaselineLine host="local" baseline={baseline} syncMode={syncMode} />
         <GhHostStatus host="local" />
         <HostShellList host="local" connected={connected} />
       </span>
