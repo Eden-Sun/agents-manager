@@ -1676,9 +1676,19 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
     let reply_screen = compact_tail.unwrap_or(&fresh);
 
+    let codex_rollout_reply = if bot.kind == "codex" && codex_hit.is_none() && !compact_turn {
+        let sent = turn_echo_texts(app, &turn.id).await?;
+        let since_iso = turn.delivered_at.as_deref().unwrap_or(turn.created_at.as_str());
+        super::codex_rollout::codex_rollout_reply_for_in_flight(app, &bot, &run, &sent, since_iso).await
+    } else {
+        None
+    };
+
     // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
     let reply = if codex_hit.is_some() || compact_turn {
         None
+    } else if let Some(r) = codex_rollout_reply.clone() {
+        Some(r)
     } else {
     // Only the `❯` row counts as echo; lines 2..n would be stored as the answer. 讀不到送了什麼就不收（#193），
     // 回合留在飛、下一次再來：當成什麼都沒送，我們自己的 prompt 就被當成 agent 的回覆存下來。
@@ -1748,12 +1758,15 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
 
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
+    let is_codex_rollout_reply = codex_rollout_reply.is_some();
     let mut tx = app.db().begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
     let res = if codex_hit.is_some() {
         super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
     } else if compact_turn {
         super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed", "Codex 壓縮完成，沒有 assistant 回覆").await?
+    } else if is_codex_rollout_reply {
+        super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed", "§4.3 Codex rollout 回覆").await?
     } else {
         super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "§4.3 終端快照備援").await?
     };
@@ -1814,14 +1827,33 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(true);
     };
 
+    let is_codex_rollout_reply = codex_rollout_reply.is_some();
+    let message_source = if is_codex_rollout_reply {
+        "transcript"
+    } else {
+        "terminal_fallback"
+    };
+    let message_incomplete = !is_codex_rollout_reply;
+
+    if is_codex_rollout_reply {
+        tracing::info!(
+            bot = %bot.name,
+            turn = %turn.id,
+            via = "rollout_fallback",
+            len = reply.len(),
+            hook_missing = true,
+            "codex reply recovered from rollout"
+        );
+    }
+
     let message = insert_message_tx(
         &mut tx,
         &turn.conversation_id,
         Some(&turn.id),
         "assistant",
         &reply,
-        "terminal_fallback",
-        true,
+        message_source,
+        message_incomplete,
         Some(&read.text),
     )
     .await?;
@@ -1969,11 +2001,30 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
-    let scraped = extract_reply(&bot.kind, &fresh).or_else(|| clean_screen(&bot.kind, &fresh));
-    let reply = match (&echo, scraped) {
-        (Some(p), Some(r)) => strip_echoed_prompt(&r, p),
-        (None, Some(r)) => r,
-        (_, None) => String::new(),
+    // 尋找此回合開始的時間下限（以此對話最新一筆 message 的時間或 run 的 started_at 為準）
+    let since_iso = sqlx::query_scalar::<_, String>(
+        "SELECT created_at FROM messages WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(&conv)
+    .fetch_optional(app.db())
+    .await?
+    .unwrap_or_else(|| run.started_at.clone());
+
+    let codex_rollout_reply = if bot.kind == "codex" {
+        super::codex_rollout::codex_rollout_reply_for_hookless(app, &bot, &run, &since_iso).await
+    } else {
+        None
+    };
+
+    let reply = if let Some(r) = codex_rollout_reply.as_ref() {
+        r.clone()
+    } else {
+        let scraped = extract_reply(&bot.kind, &fresh).or_else(|| clean_screen(&bot.kind, &fresh));
+        match (&echo, scraped) {
+            (Some(p), Some(r)) => strip_echoed_prompt(&r, p),
+            (None, Some(r)) => r,
+            (_, None) => String::new(),
+        }
     };
     // Unlike `try_fallback`, no turn waits to be closed, so no 「（終端沒有可辨識的回覆）」 bubble.
     // grok 的啟動選單不是回覆（§12.5）。
@@ -1988,15 +2039,32 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
     }
     let reply = truncate_hookless_reply(reply);
 
+    let is_codex_rollout = codex_rollout_reply.is_some();
+    let turn_status = if is_codex_rollout { "completed" } else { "completed_fallback" };
+    let message_source = if is_codex_rollout { "transcript" } else { "terminal_fallback" };
+    let message_incomplete = !is_codex_rollout;
+
     let tid = db::ulid();
     let now = db::now();
+
+    if is_codex_rollout {
+        tracing::info!(
+            bot = %bot.name,
+            turn = %tid,
+            via = "rollout_fallback",
+            len = reply.len(),
+            hook_missing = true,
+            "codex reply recovered from rollout"
+        );
+    }
     sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
-         VALUES (?,?,?,'external','completed_fallback','ok',?,?)",
+         VALUES (?,?,?,'external',?,'ok',?,?)",
     )
     .bind(&tid)
     .bind(&conv)
     .bind(run_id)
+    .bind(turn_status)
     .bind(&now)
     .bind(&now)
     .execute(app.db())
@@ -2006,7 +2074,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         // ULIDs only order by millisecond; wait so the reply doesn't sort above its prompt.
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    insert_message(app, &conv, Some(&tid), "assistant", &reply, "terminal_fallback", true, Some(&read.text)).await?;
+    insert_message(app, &conv, Some(&tid), "assistant", &reply, message_source, message_incomplete, Some(&read.text)).await?;
     remember_pane_cursor(app, run_id, &read).await?;
     emit_turn(app, &tid).await;
     tracing::info!(run = %run_id, turn = %tid, bot = %bot.name, seed, "hookless turn captured from the pane");
@@ -5810,5 +5878,134 @@ mod reply_window_tests {
         let text = "❯ 做個調查\n⏺ ## 結論\n\n內容。\n\n✻ Worked for 3s · done 5:08 PM\n\n───────────\n❯ \n───────────\n  ⏵⏵ accept edits on\n";
         let window = slice_after_sent_echo("claude", text, &["做個調查".to_string()]).unwrap();
         assert_eq!(screen_reply("claude", &window, &["做個調查".to_string()]).as_deref(), Some("## 結論\n\n內容。"));
+    }
+
+    /// #1988: Codex fallback 優先自 rollout 取得精確回覆（source="transcript", incomplete=false）
+    #[tokio::test]
+    async fn codex_fallback_uses_rollout_reply_when_available() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx-rollout").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let sess_id = "01a18888-0000-7000-8000-000000000001";
+        sqlx::query("UPDATE runs SET native_session_id=? WHERE id=?").bind(sess_id).bind(&run).execute(&app.db).await.unwrap();
+
+        // 建立假 rollout 檔案
+        let home = app.data_dir.join("codex_home");
+        let sess_dir = home.join("sessions/2026/10/25");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let rollout_file = sess_dir.join(format!("rollout-2026-10-25T01-00-00-{sess_id}.jsonl"));
+        let log = format!(
+            "{}\n{}",
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": "2026-10-25T01:00:00Z",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "跑測試"}]}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-10-25T01:00:05Z",
+                "payload": {"type": "task_complete", "last_agent_message": "測試全過"}
+            })
+        );
+        std::fs::write(&rollout_file, log).unwrap();
+
+        let env_json = serde_json::json!({"CODEX_HOME": home.to_string_lossy()}).to_string();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(env_json).bind(&bot.id).execute(&app.db).await.unwrap();
+
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text='跑測試', delivered_at='2026-10-25T00:59:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), "› 跑測試\n› 混雜畫面舊內容\n• idle");
+
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let msgs: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "測試全過");
+        assert_eq!(msgs[0].1, "transcript");
+        assert_eq!(msgs[0].2, 0); // incomplete = false
+    }
+
+    /// #1988: 只有上一 turn 的 task_complete、本 turn 尚未完成時不得誤用上一 turn 的回覆，應退回終端快照
+    #[tokio::test]
+    async fn codex_fallback_rejects_previous_turn_reply_when_current_turn_incomplete() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx-prev").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let sess_id = "01a18888-0000-7000-8000-000000000002";
+        sqlx::query("UPDATE runs SET native_session_id=? WHERE id=?").bind(sess_id).bind(&run).execute(&app.db).await.unwrap();
+
+        let home = app.data_dir.join("codex_home_prev");
+        let sess_dir = home.join("sessions/2026/10/25");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let rollout_file = sess_dir.join(format!("rollout-2026-10-25T01-00-00-{sess_id}.jsonl"));
+        // 只有上一回合的 task_complete，接著是本回合 user prompt，但本回合沒有 task_complete
+        let log = format!(
+            "{}\n{}\n{}",
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": "2026-10-25T01:00:00Z",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "上一回合"}]}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-10-25T01:00:05Z",
+                "payload": {"type": "task_complete", "last_agent_message": "上一回合回覆"}
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": "2026-10-25T01:05:00Z",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "本回合"}]}
+            })
+        );
+        std::fs::write(&rollout_file, log).unwrap();
+
+        let env_json = serde_json::json!({"CODEX_HOME": home.to_string_lossy()}).to_string();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(env_json).bind(&bot.id).execute(&app.db).await.unwrap();
+
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text='本回合', delivered_at='2026-10-25T01:04:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), "› 本回合\n終端快照內容\n");
+
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let msgs: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        // 不得誤拿上一回合回覆，退回終端快照
+        assert_eq!(msgs[0].1, "terminal_fallback");
+        assert_eq!(msgs[0].2, 1); // incomplete = true
+    }
+
+    /// #1988: rollout 缺失時退回終端快照
+    #[tokio::test]
+    async fn codex_fallback_falls_back_to_screen_when_rollout_missing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx-missing").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text='查狀態', delivered_at='2026-10-25T01:00:00Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), "› 查狀態\n終端快照回覆\n");
+
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let msgs: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].1, "terminal_fallback");
+        assert_eq!(msgs[0].2, 1);
     }
 }
