@@ -17,6 +17,7 @@ use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "remote_cargo_hosts.rs"]
@@ -56,6 +57,9 @@ thread_local! {
     static TEST_SHARED_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     // 測試用：守門腳本讀的負載檔（[`loadavg_path`]）；沒設就是 `/proc/loadavg`。
     static TEST_LOADAVG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    // Linux 守門測試用：把 `alive()` 的 Q 心跳複製到 FIFO，供端到端測試同步。
+    #[cfg(target_os = "linux")]
+    static TEST_Q_FIFO: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     // 測試用：本機執行器（`host = "local"`）的 `$HOME`——假 cargo 放在它的 `.cargo/bin`。
     static TEST_LOCAL_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -981,6 +985,11 @@ impl LeaseToken {
 /// 之後 stdin 每行 `rm <路徑>` 是要它回收的孤兒（它自己拿鎖、重看一次有沒有人在用才刪），EOF＝這次結束。
 /// 排遠端名額排超過 `queue_wait_secs` 就不交目錄、exit 75（[`EXIT_QUEUE_FULL`]）。
 fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admission) -> String {
+    #[cfg(all(test, target_os = "linux"))]
+    let q_observer = guard_tests::q_side_channel();
+    #[cfg(not(all(test, target_os = "linux")))]
+    let q_observer = "";
+
     GUARD_SH
         .replace("@ROOT@", &sh_quote(root))
         .replace("@HASH@", &sh_quote(hash))
@@ -994,6 +1003,7 @@ fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admi
         .replace("@TRY@", if adm.try_only { "1" } else { "0" })
         .replace("@MAXLOAD@", &adm.max_load.filter(|m| *m > 0.0).map(|m| format!("{m:.2}")).unwrap_or_else(|| "0".into()))
         .replace("@LOADAVG@", &sh_quote(&loadavg_path()))
+        .replace("@QOBS@", &q_observer)
         .replace("@RESERVE_KB@", &AUTO_RESERVE_KB.to_string())
         .replace("@PER_JOB_KB@", &AUTO_PER_JOB_KB.to_string())
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
@@ -1086,7 +1096,7 @@ sweep() {
 # 另外對 stdout 打一行心跳（`Q`），寫不出去也算斷了。沒有 `timeout` 的機器只剩心跳這條，等待改用 sleep。
 has_timeout=$(command -v timeout)
 alive() {
-  printf 'Q\n' 2>/dev/null || return 1
+  printf 'Q\n' 2>/dev/null || return 1@QOBS@
   if [ -n "$has_timeout" ]; then
     timeout 1 dd bs=1 count=1 >/dev/null 2>&1
     [ $? -eq 124 ]
@@ -1713,6 +1723,11 @@ struct Deadline {
     limit: Option<std::time::Duration>,
     /// [`Deadline::arm`] 之後才有：排隊等遠端名額的時間不算（issue #104）。
     at: std::cell::Cell<Option<std::time::Instant>>,
+    /// 測試用的單調秒數時鐘；正式建置沒有此欄位，也不走虛擬時鐘分支。
+    #[cfg(test)]
+    test_now: Option<Arc<AtomicU64>>,
+    #[cfg(test)]
+    test_at: std::cell::Cell<Option<u64>>,
     /// 測試用：模擬「收到終止訊號」。
     abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 只有正式的 helper 看真的訊號；測試在同一個行程裡並行跑，不能共用那個全域。
@@ -1749,6 +1764,10 @@ impl Deadline {
             // 手改 config 的 u64::MAX 不能讓 `arm()` 的 Instant 加法溢位 panic（#329）；API 端本來就擋在 MAX_TIMEOUT_SECS。
             limit: (limit_secs > 0).then(|| std::time::Duration::from_secs(limit_secs.min(MAX_TIMEOUT_SECS))),
             at: std::cell::Cell::new(None),
+            #[cfg(test)]
+            test_now: None,
+            #[cfg(test)]
+            test_at: std::cell::Cell::new(None),
             abort: Default::default(),
             watch_signals: false,
             parent: None,
@@ -1757,6 +1776,11 @@ impl Deadline {
 
     /// 從現在開始算整體上限：拿到遠端名額與目錄的那一刻。滿載時排了幾分鐘隊的編譯，不能一開始跑就被砍。
     fn arm(&self) {
+        #[cfg(test)]
+        if let Some(now) = self.test_now.as_ref() {
+            self.test_at.set(self.limit.map(|limit| now.load(Ordering::SeqCst).saturating_add(limit.as_secs())));
+            return;
+        }
         self.at.set(self.limit.map(|l| std::time::Instant::now() + l));
     }
 
@@ -1781,6 +1805,10 @@ impl Deadline {
             if sig != 0 {
                 return Some(Stopped::Interrupted(sig));
             }
+        }
+        #[cfg(test)]
+        if let Some(now) = self.test_now.as_ref() {
+            return self.test_at.get().filter(|at| now.load(Ordering::SeqCst) >= *at).map(|_| Stopped::TimedOut);
         }
         self.at.get().filter(|at| std::time::Instant::now() >= *at).map(|_| Stopped::TimedOut)
     }
@@ -4172,6 +4200,20 @@ mod guard_tests {
 
     pub(super) const HASH: &str = "0123456789abcdef";
 
+    pub(super) fn q_side_channel() -> String {
+        TEST_Q_FIFO.with(|p| {
+            p.borrow().as_ref().map_or_else(String::new, |fifo| {
+                format!("; printf 'Q\\n' > {} || return 1", sh_quote(&fifo.display().to_string()))
+            })
+        })
+    }
+
+    fn deadline_with_test_clock(limit_secs: u64, clock: Arc<AtomicU64>) -> Deadline {
+        let mut deadline = Deadline::new(limit_secs);
+        deadline.test_now = Some(clock);
+        deadline
+    }
+
     pub(super) fn base() -> PathBuf {
         let d = crate::testing::track(std::env::temp_dir().join(format!("am-r141-{}", crate::db::ulid())));
         std::fs::create_dir_all(&d).unwrap();
@@ -4211,6 +4253,77 @@ mod guard_tests {
             assert!(!line.starts_with("ROOT"), "應該要排隊，不該拿到目錄");
             assert!(Instant::now() < until, "排隊的守門 {wait_secs} 秒內沒有心跳");
         }
+    }
+
+    struct QFifoScope(Option<PathBuf>);
+
+    impl QFifoScope {
+        fn install(path: &Path) -> Self {
+            Self(TEST_Q_FIFO.with(|p| p.replace(Some(path.to_path_buf()))))
+        }
+    }
+
+    impl Drop for QFifoScope {
+        fn drop(&mut self) {
+            TEST_Q_FIFO.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+
+    fn create_q_fifo(base: &Path) -> PathBuf {
+        let fifo = base.join("guard-q.fifo");
+        let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo must run");
+        assert!(status.success(), "could not create Q FIFO: {fifo:?}");
+        fifo
+    }
+
+    fn spawn_q_reader(fifo: PathBuf) -> (std::sync::mpsc::Receiver<std::io::Result<()>>, std::thread::JoinHandle<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || loop {
+            let file = match std::fs::OpenOptions::new().read(true).open(&fifo) {
+                Ok(file) => file,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            let mut out = BufReader::new(file);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match out.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line.trim_end() == "Q" => {
+                        if tx.send(Ok(())).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) if line.trim_end() == "STOP" => return,
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+        });
+        (rx, reader)
+    }
+
+    fn wait_for_q(rx: &std::sync::mpsc::Receiver<std::io::Result<()>>) -> Result<(), String> {
+        rx.recv_timeout(Duration::from_secs(SEALED_SHARED_WAIT_SECS))
+            .map_err(|e| format!("timed out waiting for Q heartbeat: {e}"))?
+            .map_err(|e| format!("Q FIFO reader failed: {e}"))
+    }
+
+    fn stop_q_reader(fifo: &Path, reader: std::thread::JoinHandle<()>) {
+        use std::io::Write as _;
+
+        if !reader.is_finished() {
+            if let Ok(mut out) = std::fs::OpenOptions::new().write(true).open(fifo) {
+                let _ = writeln!(out, "STOP");
+            }
+        }
+        let _ = reader.join();
     }
 
     /// 正常收尾 waiter：先關閉 stdin 讓守門走正常放鎖路徑（同 Lease::finish），再等待其結束；
@@ -6505,24 +6618,42 @@ fn main() {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// 用 Q 確認 run_offload 已排在 shared 鎖上，再將測試時鐘推進 4 秒（上限 3 秒）；租約仍被 holder 卡住時不得逾時。
     #[test]
     fn time_spent_queueing_does_not_count_toward_the_overall_limit() {
         let base = base();
-        let (mut remote, cwd, data) = fake_remote(&base, 3, "sleep 1\nexit 0\n");
+        let (mut remote, cwd, data) = fake_remote(&base, 3, "exit 0\n");
         remote.max_concurrent = 1;
-        // #1853：名額只等 3 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
         let hash = cache_hash(&cwd);
         let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, ..QUICK });
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(4));
-            holder.finish();
+        let fifo = create_q_fifo(&base);
+        let (q_rx, q_reader) = spawn_q_reader(fifo.clone());
+        let clock = Arc::new(AtomicU64::new(0));
+        let (remote2, cwd2, data2, base2, fifo2, clock2) = (
+            remote.clone(), cwd.clone(), data.clone(), base.clone(), fifo.clone(), clock.clone(),
+        );
+        let run = std::thread::spawn(move || {
+            let _q_scope = QFifoScope::install(&fifo2);
+            with_fake_transport(&base2, || {
+                let deadline = deadline_with_test_clock(remote2.timeout_secs, clock2);
+                run_offload(&remote2, &data2, &cwd2, &["test".to_string()], &deadline)
+            })
         });
-        let t0 = Instant::now();
-        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
-        let took = t0.elapsed();
-        release.join().unwrap();
-        assert!(took >= Duration::from_secs(4), "真的有排隊：{took:?}");
-        assert_eq!(rc, 0, "排隊 4 秒＋跑 1 秒，上限 3 秒只算後面那段");
+
+        let first_q = wait_for_q(&q_rx);
+        if first_q.is_ok() {
+            // Q 已證明守門在排隊中；把受控時鐘前進到超過 3 秒，仍由 holder 持鎖。
+            clock.store(4, Ordering::SeqCst);
+        }
+        let second_q = if first_q.is_ok() { wait_for_q(&q_rx) } else { Err("first Q was not observed".to_string()) };
+        holder.finish();
+        let run_result = run.join();
+        stop_q_reader(&fifo, q_reader);
+
+        assert!(first_q.is_ok(), "run_offload 沒進入 shared 排隊：{first_q:?}");
+        assert!(second_q.is_ok(), "測試時鐘前進到 4 秒後仍須收到下一個 Q：{second_q:?}");
+        let rc = run_result.expect("run_offload thread must not panic");
+        assert_eq!(rc, 0, "排隊時鐘已超過 3 秒上限；上限應從取得租約後起算");
         let _ = std::fs::remove_dir_all(base);
     }
 
