@@ -2,7 +2,7 @@
  * issue #760：WS 沒有存活偵測，半開連線（睡眠、NAT／tailscale 逾時）下畫面凍住卻顯示已連線。
  * 這裡用假 WebSocket 與假時鐘驅動 `openSocket`：靜默太久、或切回前景時靜默超過心跳間隔，都要主動丟掉舊 socket 重連。
  */
-import { test } from 'node:test'
+import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { HttpTransport } from './transport'
 
@@ -33,6 +33,18 @@ class FakeWS {
     this.readyState = 3
   }
 }
+
+// rig() 換掉的瀏覽器全域要還原：留著假的 `document`，同一個行程裡之後的 DOM 測試檔拆掉 happy-dom 時會還原成這個假物件，
+// 再 import `App`（讀 `document.title`）就炸（#1985，同 wsReconnect.test.ts 在 #719 階段 3b 的修法）。
+const BROWSER_GLOBALS = ['WebSocket', 'location', 'window', 'document'] as const
+const realBrowserG = Object.fromEntries(BROWSER_GLOBALS.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
+afterEach(() => {
+  for (const k of BROWSER_GLOBALS) {
+    const d = realBrowserG[k]
+    if (d) Object.defineProperty(globalThis, k, d)
+    else delete (globalThis as Record<string, unknown>)[k]
+  }
+})
 
 function rig() {
   FakeWS.instances = []
