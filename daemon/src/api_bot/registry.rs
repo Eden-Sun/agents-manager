@@ -71,6 +71,11 @@ impl RunTicket {
         &self.key
     }
 
+    /// Clones the cancellation signal without cloning the single-use join ticket.
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
     /// Signals cancellation via the turn's cancellation token and waits for genuine task completion.
     /// Consumes the ticket.
     pub(crate) async fn cancel_and_join(self) -> Result<TurnOutcome, RegistryError> {

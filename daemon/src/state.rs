@@ -178,6 +178,7 @@ pub struct App {
     /// Cancellable background work and its join barrier for daemon shutdown.
     pub shutdown: tokio_util::sync::CancellationToken,
     pub background_tasks: tokio_util::task::TaskTracker,
+    pub(crate) api_bot_runtime: crate::api_bot::runtime::ApiBotRuntime,
     /// External relay turns whose composer delivery watcher is active, keyed by turn id.
     pub(crate) relay_watchers: std::sync::Mutex<HashSet<String>>,
     /// 狀態寫不進 DB、重放也用完的 pane，等修復（#1184）。放在 App 上，不放 process-global：平行的測試各有各的 DB，
@@ -392,6 +393,7 @@ impl App {
             default_connected: std::sync::atomic::AtomicBool::new(false),
             shutdown: tokio_util::sync::CancellationToken::new(),
             background_tasks: tokio_util::task::TaskTracker::new(),
+            api_bot_runtime: crate::api_bot::runtime::ApiBotRuntime::new(),
             relay_watchers: std::sync::Mutex::new(HashSet::new()),
             status_repairs: std::sync::Mutex::new(HashMap::new()),
             watchdog_deadlines: std::sync::Mutex::new(Default::default()),
