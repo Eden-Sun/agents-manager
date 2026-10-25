@@ -499,10 +499,30 @@ check_changed() {
                     env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
                 done
             else
+                has_am_base=0
                 for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+                    if [ "$f" = "am-base" ]; then
+                        has_am_base=1
+                    fi
                     step "crate: cargo test -p ${f}"
                     env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
                 done
+                if [ "$has_am_base" = 0 ]; then
+                    if printf '%s\n' "$files" | grep -Eq '^crates/[^/]+/src/.+\.rs$'; then
+                        step "crate: cargo test -p am-base --locked -- scratch_guard::"
+                        log="$(mktemp "${TMPDIR:-/tmp}/am-check-crate.XXXXXX")"
+                        rc=0
+                        env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p am-base --locked -- scratch_guard:: 2>&1 | tee "$log" || rc=$?
+                        if [ "$rc" = 0 ] && ! grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$log"; then
+                            echo "crate: cargo test -p am-base 沒有選到任何測試（檢查 scratch_guard:: 過濾字串），拒絕放行" >&2
+                            rc=2
+                        fi
+                        /bin/rm -f "$log"
+                        if [ "$rc" != 0 ]; then
+                            return "$rc"
+                        fi
+                    fi
+                fi
             fi
         fi
         # 發行契約（#1185）不歸 CHECK_TESTS 管（#1258）：指定 daemon 過濾字串只換掉 daemon 那一段，契約照跑；

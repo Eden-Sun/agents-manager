@@ -45,8 +45,48 @@ emit_mod() { # emit_mod <repo 相對路徑> <用 / 分隔的模組路徑>
     printf '%s::\n' "${mod//\//::}"
 }
 
+# 跨檔原始碼掃描型契約測試對應表（#1983）。
+# 格式：<過濾字串>|<包含路徑前綴（以空格分隔）>|<排除規則（以空格分隔）>
+# 每當改動檔案落在包含前綴且不符合排除規則時，一律加選該守門測試。
+# timestamp_compat_tests 條件與其 production_sources() 完全一致：
+#   daemon/src/ 底下 *.rs，排除 timestamp_compat_tests.rs 本身與 *_tests.rs 結尾的檔（tests.rs 不排除）。
+GUARD_RULES=(
+    "timestamp_compat_tests::|daemon/src/|timestamp_compat_tests.rs *_tests.rs"
+    "testing::scratch_leak_guard::|daemon/src/|testing.rs"
+)
+
+emit_guard_rules() { # emit_guard_rules <repo 相對路徑>
+    local f="$1" rule guard_test prefix_pats exc_pats prefix exc matched
+    case "$f" in
+        *.rs) ;;
+        *) return 0 ;;
+    esac
+    for rule in "${GUARD_RULES[@]}"; do
+        IFS="|" read -r guard_test prefix_pats exc_pats <<<"$rule"
+        matched=0
+        for prefix in $prefix_pats; do
+            case "$f" in
+                "$prefix"*) matched=1; break ;;
+            esac
+        done
+        [ "$matched" = 1 ] || continue
+        for exc in $exc_pats; do
+            case "${f##*/}" in
+                $exc) matched=0; break ;;
+            esac
+            case "$f" in
+                $exc) matched=0; break ;;
+            esac
+        done
+        if [ "$matched" = 1 ]; then
+            printf '%s\n' "$guard_test"
+        fi
+    done
+}
+
 while IFS= read -r f; do
     [ -n "$f" ] || continue
+    emit_guard_rules "$f"
     case "$f" in
         # Build inputs, crate wiring, and shared test setup can invalidate tests across modules.
         # Return an all-suite sentinel: cargo check alone does not exercise those behaviors.
@@ -65,10 +105,12 @@ while IFS= read -r f; do
         # 其他用 #[path] 掛成別的模組名的測試檔（同上；掛載點見各 crate 的 #[path] 行，#1169）。照檔名推會選到零個，要明列。
         daemon/src/child_alerts_tests.rs) printf 'child_alerts::tests::\n' ;;
         daemon/src/judge_tests.rs) printf 'judge::tests::\n' ;;
-        # 用 #[path] 掛在別的模組底下的檔（掛載點：daemon/src/api.rs、daemon/src/runners/s6_l.rs）；照檔名推會選到零個（#1338）。
+        # 用 #[path] 掛在別的模組底下的檔（掛載點：daemon/src/api.rs、daemon/src/runners/s6_l.rs、daemon/src/remote_cargo.rs、daemon/src/state.rs）；照檔名推會選到零個（#1338、#1983）。
         daemon/src/shell.rs) printf 'api::shell::\n' ;;
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
         daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
+        daemon/src/remote_cargo_hosts.rs) printf 'remote_cargo::hosts::\n' ;;
+        daemon/src/state_limit_hit_tests.rs) printf 'state::limit_hit_tests::\n' ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
             | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs \
             | crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs | crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs)
