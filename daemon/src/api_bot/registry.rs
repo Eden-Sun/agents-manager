@@ -250,7 +250,9 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+    use std::time::Duration;
     use tokio::sync::{oneshot, Notify};
+    use tokio::time::timeout;
 
     // Helper to poll once without sleeping or busy spinning
     fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
@@ -472,244 +474,327 @@ mod tests {
 
     #[tokio::test]
     async fn test_late_join_after_actual_slot_removal() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_late".into(),
-            turn_id: "t_late".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key = RunTurnKey {
+                run_id: "r_late".into(),
+                turn_id: "t_late".into(),
+            };
 
-        let (tx_done, rx_done) = oneshot::channel();
-        let ticket = registry
-            .spawn_tracked(key.clone(), move |_cancel| async move {
-                let _ = rx_done.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
+            let (tx_done, rx_done) = oneshot::channel();
+            let ticket = registry
+                .spawn_tracked(key.clone(), move |_cancel| async move {
+                    let _ = rx_done.await;
+                    Ok(TurnOutcome::Completed)
+                })
+                .unwrap();
 
-        assert_eq!(ticket.key(), &key);
-        assert!(registry.is_active("r_late"));
+            assert_eq!(ticket.key(), &key);
+            assert!(registry.is_active("r_late"));
 
-        // Poll legacy join to Pending before releasing runner
-        let mut legacy_fut = Box::pin(registry.cancel_and_join("r_late"));
-        assert!(poll_once(legacy_fut.as_mut()).is_pending());
+            // Poll legacy join to Pending before releasing runner
+            let mut legacy_fut = Box::pin(registry.cancel_and_join("r_late"));
+            assert!(poll_once(legacy_fut.as_mut()).is_pending());
 
-        // Release runner task
-        let _ = tx_done.send(());
+            // Release runner task
+            let _ = tx_done.send(());
 
-        // Await legacy join to completion
-        let outcome_reg = legacy_fut.await.unwrap();
-        assert_eq!(outcome_reg, TurnOutcome::Completed);
+            // Await legacy join to completion
+            let outcome_reg = legacy_fut.await.unwrap();
+            assert_eq!(outcome_reg, TurnOutcome::Completed);
 
-        // Verify slot is definitely removed
-        assert!(!registry.is_active("r_late"));
-        assert_eq!(registry.cancel_and_join("r_late").await, Err(RegistryError::NotFound));
+            // Verify slot is definitely removed
+            assert!(!registry.is_active("r_late"));
+            assert_eq!(registry.cancel_and_join("r_late").await, Err(RegistryError::NotFound));
 
-        // Even though slot is completely removed and registry cancel_and_join gives NotFound,
-        // the owned ticket still yields the genuine JoinHandle TurnOutcome!
-        let outcome_ticket = ticket.join().await.unwrap();
-        assert_eq!(outcome_ticket, TurnOutcome::Completed);
+            // Even though slot is completely removed and registry cancel_and_join gives NotFound,
+            // the owned ticket still yields the genuine JoinHandle TurnOutcome!
+            let outcome_ticket = ticket.join().await.unwrap();
+            assert_eq!(outcome_ticket, TurnOutcome::Completed);
+        })
+        .await
+        .expect("test_late_join_after_actual_slot_removal hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_old_turn_ticket_cannot_affect_new_turn_same_run() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key1 = RunTurnKey {
-            run_id: "r_turns".into(),
-            turn_id: "t1".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key1 = RunTurnKey {
+                run_id: "r_turns".into(),
+                turn_id: "t1".into(),
+            };
 
-        let (tx1_done, rx1_done) = oneshot::channel();
-        let ticket1 = registry
-            .spawn_tracked(key1.clone(), move |_cancel| async move {
-                let _ = rx1_done.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
-
-        // Get an independent observer for turn 1 before finishing
-        let mut obs1 = registry
-            .subscribe_observer("r_turns")
-            .expect("slot exists");
-
-        // Finish turn 1 runner
-        let _ = tx1_done.send(());
-        let res1 = wait_outcome(&mut obs1).await.unwrap();
-        assert_eq!(res1, TurnOutcome::Completed);
-
-        // Verify slot is removed (slot count 0)
-        assert_eq!(registry.slot_count(), 0);
-        assert!(!registry.is_active("r_turns"));
-
-        // Now start turn 2 on same run, holding gate so it stays running
-        let key2 = RunTurnKey {
-            run_id: "r_turns".into(),
-            turn_id: "t2".into(),
-        };
-        let (tx2_done, rx2_done) = oneshot::channel();
-        let (tx2_started, rx2_started) = oneshot::channel();
-        let cancel_token_clone = Arc::new(Mutex::new(None));
-        let cancel_token_capture = cancel_token_clone.clone();
-
-        let ticket2 = registry
-            .spawn_tracked(key2.clone(), move |cancel| {
-                *cancel_token_capture.lock().unwrap() = Some(cancel.clone());
-                let _ = tx2_started.send(());
-                async move {
-                    let _ = rx2_done.await;
+            let (tx1_done, rx1_done) = oneshot::channel();
+            let ticket1 = registry
+                .spawn_tracked(key1.clone(), move |_cancel| async move {
+                    let _ = rx1_done.await;
                     Ok(TurnOutcome::Completed)
-                }
-            })
-            .unwrap();
+                })
+                .unwrap();
 
-        let _ = rx2_started.await;
-        assert!(registry.is_active("r_turns"));
+            // Get an independent observer for turn 1 before finishing
+            let mut obs1 = registry
+                .subscribe_observer("r_turns")
+                .expect("slot exists");
 
-        // Old ticket 1 executes cancel_and_join
-        // Because turn 1 already finished, it consumes ticket1 and returns turn 1 outcome
-        let old_outcome = ticket1.cancel_and_join().await.unwrap();
-        assert_eq!(old_outcome, TurnOutcome::Completed);
+            // Finish turn 1 runner
+            let _ = tx1_done.send(());
+            let res1 = wait_outcome(&mut obs1).await.unwrap();
+            assert_eq!(res1, TurnOutcome::Completed);
 
-        // Verify turn 2 token was NOT cancelled and slot remains active
-        let t2_cancel = cancel_token_clone.lock().unwrap().as_ref().unwrap().clone();
-        assert!(!t2_cancel.is_cancelled());
-        assert!(registry.is_active("r_turns"));
+            // Verify slot is removed (slot count 0)
+            assert_eq!(registry.slot_count(), 0);
+            assert!(!registry.is_active("r_turns"));
 
-        // Now release turn 2 and join cleanly
-        let _ = tx2_done.send(());
-        let outcome2 = ticket2.join().await.unwrap();
-        assert_eq!(outcome2, TurnOutcome::Completed);
-        assert!(!registry.is_active("r_turns"));
-        assert_eq!(registry.slot_count(), 0);
+            // Now start turn 2 on same run, holding gate so it stays running
+            let key2 = RunTurnKey {
+                run_id: "r_turns".into(),
+                turn_id: "t2".into(),
+            };
+            let (tx2_done, rx2_done) = oneshot::channel();
+            let (tx2_started, rx2_started) = oneshot::channel();
+            let cancel_token_clone = Arc::new(Mutex::new(None));
+            let cancel_token_capture = cancel_token_clone.clone();
+
+            let ticket2 = registry
+                .spawn_tracked(key2.clone(), move |cancel| {
+                    *cancel_token_capture.lock().unwrap() = Some(cancel.clone());
+                    let _ = tx2_started.send(());
+                    async move {
+                        let _ = rx2_done.await;
+                        Ok(TurnOutcome::Completed)
+                    }
+                })
+                .unwrap();
+
+            let _ = rx2_started.await;
+            assert!(registry.is_active("r_turns"));
+
+            // Old ticket 1 executes cancel_and_join
+            // Because turn 1 already finished, it consumes ticket1 and returns turn 1 outcome
+            let old_outcome = ticket1.cancel_and_join().await.unwrap();
+            assert_eq!(old_outcome, TurnOutcome::Completed);
+
+            // Verify turn 2 token was NOT cancelled and slot remains active
+            let t2_cancel = cancel_token_clone.lock().unwrap().as_ref().unwrap().clone();
+            assert!(!t2_cancel.is_cancelled());
+            assert!(registry.is_active("r_turns"));
+
+            // Now release turn 2 and join cleanly
+            let _ = tx2_done.send(());
+            let outcome2 = ticket2.join().await.unwrap();
+            assert_eq!(outcome2, TurnOutcome::Completed);
+            assert!(!registry.is_active("r_turns"));
+            assert_eq!(registry.slot_count(), 0);
+        })
+        .await
+        .expect("test_old_turn_ticket_cannot_affect_new_turn_same_run hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_ticket_cancel_and_join_stops_runner() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_cancel_t".into(),
-            turn_id: "t_cancel_t".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key = RunTurnKey {
+                run_id: "r_cancel_t".into(),
+                turn_id: "t_cancel_t".into(),
+            };
 
-        let ticket = registry
-            .spawn_tracked(key.clone(), move |cancel| async move {
-                cancel.cancelled().await;
-                Ok(TurnOutcome::Cancelled)
-            })
-            .unwrap();
+            let ticket = registry
+                .spawn_tracked(key.clone(), move |cancel| async move {
+                    cancel.cancelled().await;
+                    Ok(TurnOutcome::Cancelled)
+                })
+                .unwrap();
 
-        let outcome = ticket.cancel_and_join().await.unwrap();
-        assert_eq!(outcome, TurnOutcome::Cancelled);
-        assert!(!registry.is_active("r_cancel_t"));
+            let outcome = ticket.cancel_and_join().await.unwrap();
+            assert_eq!(outcome, TurnOutcome::Cancelled);
+            assert!(!registry.is_active("r_cancel_t"));
+        })
+        .await
+        .expect("test_ticket_cancel_and_join_stops_runner hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_ticket_dropped_does_not_cancel_or_abort_runner_and_supervision_intact() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_drop_t".into(),
-            turn_id: "t_drop_t".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key = RunTurnKey {
+                run_id: "r_drop_t".into(),
+                turn_id: "t_drop_t".into(),
+            };
 
-        let (tx_started, rx_started) = oneshot::channel();
-        let (tx_done, rx_done) = oneshot::channel();
-        let (tx_checked_not_cancelled, rx_checked_not_cancelled) = oneshot::channel();
+            let (tx_started, rx_started) = oneshot::channel();
+            let (tx_done, rx_done) = oneshot::channel();
+            let (tx_checked_not_cancelled, rx_checked_not_cancelled) = oneshot::channel();
 
-        let ticket = registry
-            .spawn_tracked(key.clone(), move |cancel| async move {
-                let _ = tx_started.send(());
-                let _ = rx_checked_not_cancelled.await;
-                assert!(!cancel.is_cancelled());
-                let _ = rx_done.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
+            let ticket = registry
+                .spawn_tracked(key.clone(), move |cancel| async move {
+                    let _ = tx_started.send(());
+                    let _ = rx_checked_not_cancelled.await;
+                    assert!(!cancel.is_cancelled());
+                    let _ = rx_done.await;
+                    Ok(TurnOutcome::Completed)
+                })
+                .unwrap();
 
-        // Wait until task starts
-        let _ = rx_started.await;
+            // Wait until task starts
+            let _ = rx_started.await;
 
-        // Subscribe an observer receiver to monitor supervisor outcome without calling cancel_and_join
-        let mut obs_rx = registry
-            .subscribe_observer("r_drop_t")
-            .expect("slot exists");
+            // Subscribe an observer receiver to monitor supervisor outcome without calling cancel_and_join
+            let mut obs_rx = registry
+                .subscribe_observer("r_drop_t")
+                .expect("slot exists");
 
-        // Dropping ticket must NOT cancel runner
-        drop(ticket);
+            // Dropping ticket must NOT cancel runner
+            drop(ticket);
 
-        // Slot must still be active and cancel token not cancelled
-        assert!(registry.is_active("r_drop_t"));
-        let _ = tx_checked_not_cancelled.send(());
+            // Slot must still be active and cancel token not cancelled
+            assert!(registry.is_active("r_drop_t"));
+            let _ = tx_checked_not_cancelled.send(());
 
-        // Release runner task (do NOT call cancel_and_join, which would signal cancel)
-        let _ = tx_done.send(());
+            // Release runner task (do NOT call cancel_and_join, which would signal cancel)
+            let _ = tx_done.send(());
 
-        // Await genuine completion via observer
-        let outcome = wait_outcome(&mut obs_rx).await.unwrap();
-        assert_eq!(outcome, TurnOutcome::Completed);
-        assert!(!registry.is_active("r_drop_t"));
-        assert_eq!(registry.slot_count(), 0);
+            // Await genuine completion via observer
+            let outcome = wait_outcome(&mut obs_rx).await.unwrap();
+            assert_eq!(outcome, TurnOutcome::Completed);
+            assert!(!registry.is_active("r_drop_t"));
+            assert_eq!(registry.slot_count(), 0);
+        })
+        .await
+        .expect("test_ticket_dropped_does_not_cancel_or_abort_runner_and_supervision_intact hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_waiter_drop_does_not_break_subsequent_ticket_join() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_wait_drop".into(),
-            turn_id: "t_wait_drop".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key = RunTurnKey {
+                run_id: "r_wait_drop".into(),
+                turn_id: "t_wait_drop".into(),
+            };
 
-        let (tx_done, rx_done) = oneshot::channel();
-        let ticket = registry
-            .spawn_tracked(key.clone(), move |_cancel| async move {
-                let _ = rx_done.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
+            let (tx_done, rx_done) = oneshot::channel();
+            let ticket = registry
+                .spawn_tracked(key.clone(), move |_cancel| async move {
+                    let _ = rx_done.await;
+                    Ok(TurnOutcome::Completed)
+                })
+                .unwrap();
 
-        // Start a cancel_and_join waiter from registry, poll it, then drop it
-        {
-            let mut fut = Box::pin(registry.cancel_and_join("r_wait_drop"));
-            assert!(poll_once(fut.as_mut()).is_pending());
-        }
+            // Start a cancel_and_join waiter from registry, poll it, then drop it
+            {
+                let mut fut = Box::pin(registry.cancel_and_join("r_wait_drop"));
+                assert!(poll_once(fut.as_mut()).is_pending());
+            }
 
-        // Runner is released
-        let _ = tx_done.send(());
+            // Runner is released
+            let _ = tx_done.send(());
 
-        // Ticket can still join cleanly and witness the genuine completion
-        let res = ticket.join().await.unwrap();
-        assert_eq!(res, TurnOutcome::Completed);
-        assert!(!registry.is_active("r_wait_drop"));
+            // Ticket can still join cleanly and witness the genuine completion
+            let res = ticket.join().await.unwrap();
+            assert_eq!(res, TurnOutcome::Completed);
+            assert!(!registry.is_active("r_wait_drop"));
+        })
+        .await
+        .expect("test_waiter_drop_does_not_break_subsequent_ticket_join hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_ticket_panic_is_typed_as_task_panicked() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_ticket_panic".into(),
-            turn_id: "t_ticket_panic".into(),
-        };
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let key = RunTurnKey {
+                run_id: "r_ticket_panic".into(),
+                turn_id: "t_ticket_panic".into(),
+            };
 
-        let ticket = registry
-            .spawn_tracked(key.clone(), |_| async move {
-                panic!("controlled panic for ticket join");
-                #[allow(unreachable_code)]
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
+            let ticket = registry
+                .spawn_tracked(key.clone(), |_| async move {
+                    panic!("controlled panic for ticket join");
+                    #[allow(unreachable_code)]
+                    Ok(TurnOutcome::Completed)
+                })
+                .unwrap();
 
-        let res = ticket.join().await;
-        assert_eq!(res, Err(RegistryError::TaskPanicked));
-        assert!(!registry.is_active("r_ticket_panic"));
+            let res = ticket.join().await;
+            assert_eq!(res, Err(RegistryError::TaskPanicked));
+            assert!(!registry.is_active("r_ticket_panic"));
+        })
+        .await
+        .expect("test_ticket_panic_is_typed_as_task_panicked hit deadlock timeout");
     }
 
     #[tokio::test]
     async fn test_repeat_duplicate_spawn_rejection_and_drop_slots_remain_zero_n64() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let n = 64;
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
+            let n = 64;
 
-        for i in 0..n {
+            for i in 0..n {
+                let key = RunTurnKey {
+                    run_id: format!("run_cycle_{}", i),
+                    turn_id: format!("turn_init_{}", i),
+                };
+
+                let (tx_release, rx_release) = oneshot::channel();
+                let ticket = registry
+                    .spawn_tracked(key.clone(), move |_cancel| async move {
+                        let _ = rx_release.await;
+                        Ok(TurnOutcome::Completed)
+                    })
+                    .unwrap();
+
+                // Duplicate spawn with another turn_id on same run MUST be rejected
+                let dup_key = RunTurnKey {
+                    run_id: format!("run_cycle_{}", i),
+                    turn_id: format!("turn_dup_{}", i),
+                };
+                let dup_res = registry.spawn_tracked(dup_key, |_| async { Ok(TurnOutcome::Completed) });
+                match dup_res {
+                    Err(RegistryError::AlreadyRunning { ref existing_turn_id }) => {
+                        assert_eq!(existing_turn_id, &key.turn_id);
+                    }
+                    Err(_) => panic!("expected AlreadyRunning"),
+                    Ok(_) => panic!("expected AlreadyRunning, got Ok"),
+                }
+
+                // Set up test observer before dropping ticket
+                let mut obs = registry
+                    .subscribe_observer(&key.run_id)
+                    .expect("slot exists");
+
+                // Drop ticket (must not cancel or abort runner or supervisor)
+                drop(ticket);
+
+                // Release task and wait for supervisor result via observer
+                let _ = tx_release.send(());
+                let outcome = wait_outcome(&mut obs).await.unwrap();
+                assert_eq!(outcome, TurnOutcome::Completed);
+
+                // Drop observer
+                drop(obs);
+
+                // Stable barrier: slot count must be 0 after join and supervisor cleanup
+                assert_eq!(registry.slot_count(), 0);
+            }
+
+            // Verify after 64 cycles slots map has not grown
+            assert_eq!(registry.slot_count(), 0);
+        })
+        .await
+        .expect("test_repeat_duplicate_spawn_rejection_and_drop_slots_remain_zero_n64 hit deadlock timeout");
+    }
+
+    #[tokio::test]
+    async fn test_watch_receiver_reclaimed_after_ticket_and_slot_drop() {
+        timeout(Duration::from_secs(10), async {
+            let registry = Arc::new(ApiBotRegistry::new());
             let key = RunTurnKey {
-                run_id: format!("run_cycle_{}", i),
-                turn_id: format!("turn_init_{}", i),
+                run_id: "r_watch_recycle".into(),
+                turn_id: "t_watch_recycle".into(),
             };
 
             let (tx_release, rx_release) = oneshot::channel();
@@ -720,113 +805,71 @@ mod tests {
                 })
                 .unwrap();
 
-            // Duplicate spawn with another turn_id on same run MUST be rejected
-            let dup_key = RunTurnKey {
-                run_id: format!("run_cycle_{}", i),
-                turn_id: format!("turn_dup_{}", i),
-            };
-            let dup_res = registry.spawn_tracked(dup_key, |_| async { Ok(TurnOutcome::Completed) });
-            match dup_res {
-                Err(RegistryError::AlreadyRunning { ref existing_turn_id }) => {
-                    assert_eq!(existing_turn_id, &key.turn_id);
-                }
-                Err(_) => panic!("expected AlreadyRunning"),
-                Ok(_) => panic!("expected AlreadyRunning, got Ok"),
-            }
-
-            // Set up test observer before dropping ticket
+            // Subscribe observer to monitor when sender is dropped/closed
             let mut obs = registry
                 .subscribe_observer(&key.run_id)
                 .expect("slot exists");
 
-            // Drop ticket (must not cancel or abort runner or supervisor)
-            drop(ticket);
-
-            // Release task and wait for supervisor result via observer
+            // Release task and join via ticket
             let _ = tx_release.send(());
-            let outcome = wait_outcome(&mut obs).await.unwrap();
+            let outcome = ticket.join().await.unwrap();
             assert_eq!(outcome, TurnOutcome::Completed);
 
-            // Drop observer
+            // Slot is dropped from registry
+            assert_eq!(registry.slot_count(), 0);
+
+            // Observer receives terminal outcome
+            let res = wait_outcome(&mut obs).await.unwrap();
+            assert_eq!(res, TurnOutcome::Completed);
+
+            // Explicitly mark terminal update as seen so next changed() observes sender closure
+            obs.borrow_and_update();
+
+            // Verify supervisor dropped sender and channel is closed
+            assert!(obs.changed().await.is_err());
             drop(obs);
 
-            // Stable barrier: slot count must be 0 after join and supervisor cleanup
+            // Now test dropping ticket before task completion:
+            let key2 = RunTurnKey {
+                run_id: "r_watch_recycle2".into(),
+                turn_id: "t_watch_recycle2".into(),
+            };
+            let (tx_release2, rx_release2) = oneshot::channel();
+            let ticket2 = registry
+                .spawn_tracked(key2.clone(), move |_cancel| async move {
+                    let _ = rx_release2.await;
+                    Ok(TurnOutcome::Completed)
+                })
+                .unwrap();
+
+            let mut obs2 = registry
+                .subscribe_observer(&key2.run_id)
+                .expect("slot exists");
+
+            // Drop ticket
+            drop(ticket2);
+
+            // Release runner task
+            let _ = tx_release2.send(());
+
+            // Observer receives terminal outcome
+            let res2 = wait_outcome(&mut obs2).await.unwrap();
+            assert_eq!(res2, TurnOutcome::Completed);
+
+            // Slot is removed
             assert_eq!(registry.slot_count(), 0);
-        }
 
-        // Verify after 64 cycles slots map has not grown
-        assert_eq!(registry.slot_count(), 0);
-    }
+            // Explicitly mark terminal update as seen so next changed() observes sender closure
+            obs2.borrow_and_update();
 
-    #[tokio::test]
-    async fn test_watch_receiver_reclaimed_after_ticket_and_slot_drop() {
-        let registry = Arc::new(ApiBotRegistry::new());
-        let key = RunTurnKey {
-            run_id: "r_watch_recycle".into(),
-            turn_id: "t_watch_recycle".into(),
-        };
+            // Sender was dropped by supervisor, so changed() returns Err
+            assert!(obs2.changed().await.is_err());
+            drop(obs2);
 
-        let (tx_release, rx_release) = oneshot::channel();
-        let ticket = registry
-            .spawn_tracked(key.clone(), move |_cancel| async move {
-                let _ = rx_release.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
-
-        // Subscribe observer to monitor when sender is dropped/closed
-        let mut obs = registry
-            .subscribe_observer(&key.run_id)
-            .expect("slot exists");
-
-        // Release task and join via ticket
-        let _ = tx_release.send(());
-        let outcome = ticket.join().await.unwrap();
-        assert_eq!(outcome, TurnOutcome::Completed);
-
-        // Slot is dropped from registry
-        assert_eq!(registry.slot_count(), 0);
-
-        // When supervisor task completes, it drops outcome_tx.
-        // Once outcome_tx is dropped, changed() on observer will return Err (sender closed).
-        // Since observer already read None initially, wait_outcome will observe terminal outcome
-        let res = wait_outcome(&mut obs).await.unwrap();
-        assert_eq!(res, TurnOutcome::Completed);
-
-        // After supervisor drops outcome_tx, calling changed() on obs detects sender closed:
-        assert!(obs.changed().await.is_err());
-
-        // Now test dropping ticket before task completion:
-        let key2 = RunTurnKey {
-            run_id: "r_watch_recycle2".into(),
-            turn_id: "t_watch_recycle2".into(),
-        };
-        let (tx_release2, rx_release2) = oneshot::channel();
-        let ticket2 = registry
-            .spawn_tracked(key2.clone(), move |_cancel| async move {
-                let _ = rx_release2.await;
-                Ok(TurnOutcome::Completed)
-            })
-            .unwrap();
-
-        let mut obs2 = registry
-            .subscribe_observer(&key2.run_id)
-            .expect("slot exists");
-
-        // Drop ticket
-        drop(ticket2);
-
-        // Release runner task
-        let _ = tx_release2.send(());
-
-        // Observer receives terminal outcome
-        let res2 = wait_outcome(&mut obs2).await.unwrap();
-        assert_eq!(res2, TurnOutcome::Completed);
-
-        // Slot is removed
-        assert_eq!(registry.slot_count(), 0);
-
-        // Sender was dropped by supervisor, so changed() returns Err
-        assert!(obs2.changed().await.is_err());
+            // Both observers and slots dropped, resources fully reclaimed
+            assert_eq!(registry.slot_count(), 0);
+        })
+        .await
+        .expect("test_watch_receiver_reclaimed_after_ticket_and_slot_drop hit deadlock timeout");
     }
 }
