@@ -15,3 +15,4 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod adapter_tests;
 pub(crate) mod registry;
+pub(crate) mod runtime;
