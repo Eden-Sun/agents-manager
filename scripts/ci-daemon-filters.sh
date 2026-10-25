@@ -118,6 +118,7 @@ while IFS= read -r f; do
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
             ;;
+        crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs) printf 'lifecycle::codex_rollout::turn_boundary::\n' ;;
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;

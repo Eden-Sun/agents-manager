@@ -3,6 +3,9 @@
 //! 當 Codex 的 legacy notify 因 payload 過大（>128 KiB E2BIG）送不出 hook 時，
 //! 終端備援與 hookless 捕獲可優先自 rollout 提取結構化回覆，避免存成終端整面快照。
 
+#[path = "codex_rollout_turn.rs"]
+mod turn_boundary;
+
 use serde_json::Value;
 
 /// 自 rollout 取出嚴格屬於該 turn（turn 開始時間 `since_iso` 之後、且以 `sent` 為 prompt）的完整回覆。
@@ -11,9 +14,9 @@ use serde_json::Value;
 /// 1. `since_iso` 必須為合法 RFC3339 時間戳，解析失敗一律回傳 None；
 /// 2. 該 prompt 必須在 `since_iso` 之後出現（若 prompt 時間早於 since 或沒有時間戳則排除）；
 /// 3. 在該 prompt 之後，存在 `event_msg` / `task_complete`，且帶有非空的 `last_agent_message`；
-/// 4. 在該 prompt 與 `task_complete` 之間沒有出現別的 user input；
+/// 4. 有一致的 native task_started/task_complete 時，同 turn 追加 input 不改回覆歸屬；否則沿用無追加 input 的保守規則；
 /// 5. 該 `task_complete` 的完成時間必須晚於 `since_iso`；
-/// 6. 該 `task_complete` 之後若已有新的 user input，表示該回合已過期。
+/// 6. 已以 native ID 證明的完成不因之後另一 native turn 開始而失效；沒有這項證據時仍拒絕後續 user。
 pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option<String> {
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
     let since_ts = since.timestamp();
@@ -32,6 +35,11 @@ pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Opti
         let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) else { return false };
         at >= since
     })?;
+
+    match turn_boundary::for_prompt(&lines, start, sent, &since) {
+        turn_boundary::Proof::Native(reply) => return reply,
+        turn_boundary::Proof::Legacy => {}
+    }
 
     // 從該 prompt 往後尋找 task_complete，期間不能有新的 user input
     let mut reply = None;
@@ -128,6 +136,11 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
         }
         false
     })?;
+
+    match turn_boundary::for_latest(&lines, pos, &since) {
+        turn_boundary::Proof::Native(reply) => return reply,
+        turn_boundary::Proof::Legacy => {}
+    }
 
     // 檢查在該 task_complete 之後是否又有了新的 user message
     for line in &lines[pos + 1..] {
