@@ -508,7 +508,8 @@ check_changed() {
                     env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
                 done
                 if [ "$has_am_base" = 0 ]; then
-                    if printf '%s\n' "$files" | grep -Eq '^crates/[^/]+/src/.+\.rs$'; then
+                    # 不用 grep -q：它一命中就退出，pipefail 下 printf 會 EPIPE、整條判成沒命中（#1986）。
+                    if printf '%s\n' "$files" | grep -E '^crates/[^/]+/src/.+\.rs$' >/dev/null; then
                         step "crate: cargo test -p am-base --locked -- scratch_guard::"
                         log="$(mktemp "${TMPDIR:-/tmp}/am-check-crate.XXXXXX")"
                         rc=0

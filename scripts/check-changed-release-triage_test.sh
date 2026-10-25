@@ -8,8 +8,10 @@ trap '/bin/rm -rf "$tmp"' EXIT
 repo="$tmp/repo"
 mkdir -p "$repo/scripts" "$repo/web" "$tmp/bin"
 cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
-printf '#!/bin/bash\necho daemon\n' > "$repo/scripts/ci-changed-parts.sh"
-printf '#!/bin/bash\necho __daemon_release_triage_submission__\n' > "$repo/scripts/ci-daemon-filters.sh"
+# 假的選測腳本要讀完 stdin：check.sh 用 `printf … | bash <腳本>` 餵它，set -o pipefail 下讀者先退出，
+# printf 會 EPIPE、整條 pipeline 失敗、check.sh 中途退出（並行負載下約 3% 發生，#1986）。
+printf '#!/bin/bash\ncat >/dev/null\necho daemon\n' > "$repo/scripts/ci-changed-parts.sh"
+printf '#!/bin/bash\ncat >/dev/null\necho __daemon_release_triage_submission__\n' > "$repo/scripts/ci-daemon-filters.sh"
 cat > "$tmp/bin/git" <<'SH'
 #!/bin/bash
 case "$*" in
