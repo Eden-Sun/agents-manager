@@ -468,6 +468,7 @@ pub trait StopContext:
     + InterruptionContext
     + OwedDeliveryContext
     + StopServices
+    + crate::lifecycle::api_bot_port::ApiBotPort
     + Clone
     + Send
     + Sync
@@ -490,6 +491,7 @@ impl<T> StopContext for T where
         + InterruptionContext
         + OwedDeliveryContext
         + StopServices
+        + crate::lifecycle::api_bot_port::ApiBotPort
         + Clone
         + Send
         + Sync
