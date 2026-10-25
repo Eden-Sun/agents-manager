@@ -13,7 +13,7 @@ agent CLI 每個事件 fork 一次，位在 agent 的關鍵路徑上（Claude �
 | **永遠空 stdout** | 全檔沒有 `print!`；Claude／grok 會把 Stop hook 的 stdout JSON 當決策 |
 | stderr | 失敗時一行，例如 `agents-managerd hook: http 500; spooled` |
 
-- payload：claude／grok 讀 stdin，codex 取 argv 最後一個；上限 1 MiB（多讀 1 byte 判斷，在 char boundary 截斷並標 `truncated`）。解析成 JSON object 就原樣用，否則包成 `{"raw":"<字串>"}`。
+- payload：claude／grok／agy／codex Stop 讀 stdin，codex legacy notify 保留 argv 最後一個相容；上限 1 MiB（多讀 1 byte 判斷，在 char boundary 截斷並標 `truncated`）。解析成 JSON object 就原樣用，否則包成 `{"raw":"<字串>"}`。
 - POST `http://127.0.0.1:<port>/hook/<provider>`，header `X-AM-Bot-Token`，body `{bot_id, provider, payload, received_at, truncated}`。寫死 IPv4 loopback、reqwest `.no_proxy()`；
   crate 的 reqwest 沒開 `blocking`，用 tokio current-thread runtime `block_on`。`--port` 為 0 時退回 `AM_PORT`，再退回 7788。
 - 任何失敗（拒絕、逾時、非 2xx）→ 同一份 body `O_APPEND` 到 `<data dir>/bots/<bot_id>/hook-spool.jsonl`；寫不進去追加 `hook.log`；再失敗靜默。重放在 `hookrecv.rs::replay_spool`。

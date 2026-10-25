@@ -427,33 +427,74 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
         }
         "codex" => {
             let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if ty != "agent-turn-complete" {
-                return HookKind::Ignore(ty.to_string());
+            let hook_event = p
+                .get("hook_event_name")
+                .or_else(|| p.get("hookEventName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let is_stop = hook_event.eq_ignore_ascii_case("stop");
+            let is_legacy = ty == "agent-turn-complete";
+
+            if !is_stop && !is_legacy {
+                let unk = if !hook_event.is_empty() { hook_event } else { ty };
+                return HookKind::Ignore(unk.to_string());
             }
-            let user = p
-                .get("input-messages")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
-                .filter(|s| !s.is_empty());
-            // Codex runs a hidden title-generation turn after each reply; not user-visible.
-            let assistant = s("last-assistant-message");
-            // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
-            // 取不到 input 時，回覆長相才是唯一線索。
-            let is_title_turn = match user.as_deref() {
-                Some(u) => u.contains("single-line task title"),
-                None => assistant
-                    .as_deref()
-                    .and_then(|a| serde_json::from_str::<Value>(a).ok())
-                    .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
-                    .unwrap_or(false),
-            };
-            if is_title_turn {
-                return HookKind::Ignore("codex title-generation turn".into());
+
+            if is_legacy {
+                let user = p
+                    .get("input-messages")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
+                    .filter(|s| !s.is_empty());
+                // Codex runs a hidden title-generation turn after each reply; not user-visible.
+                let assistant = s("last-assistant-message");
+                // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
+                // 取不到 input 時，回覆長相才是唯一線索。
+                let is_title_turn = match user.as_deref() {
+                    Some(u) => u.contains("single-line task title"),
+                    None => assistant
+                        .as_deref()
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
+                        .unwrap_or(false),
+                };
+                if is_title_turn {
+                    return HookKind::Ignore("codex title-generation turn".into());
+                }
+                return HookKind::TurnComplete {
+                    session_id: s("thread-id"),
+                    turn_id: s("turn-id"),
+                    transcript_path: None,
+                    assistant,
+                    user,
+                };
             }
+
+            // Stop
+            let stop_active = p
+                .get("stop_hook_active")
+                .or_else(|| p.get("stopHookActive"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if stop_active {
+                return HookKind::Ignore("stop_hook_active".into());
+            }
+
+            let session_id = s("session_id").or_else(|| s("thread-id"));
+            let turn_id = s("turn_id").or_else(|| s("turn-id"));
+            let transcript_path = s("transcript_path");
+            let assistant = s("last_assistant_message").or_else(|| s("last-assistant-message"));
+
+            // Stop 管道不帶使用者原文：不能合成整段 input-messages 或猜測 prompt，嚴格給 None
+            let user = None;
+
+            // Stop has no input-messages to prove a hidden title request. A normal
+            // reply may itself be {"title": ...}; do not discard it by guessing.
             HookKind::TurnComplete {
-                session_id: s("thread-id"),
-                turn_id: s("turn-id"),
-                transcript_path: None,
+                session_id,
+                turn_id,
+                transcript_path,
                 assistant,
                 user,
             }
@@ -2751,3 +2792,7 @@ mod handoff_lookup_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "hookrecv_tests/agy_pre_invocation_delivery_tests.rs"]
 mod agy_pre_invocation_delivery_tests;
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+#[path = "hookrecv_tests/codex_stop_delivery_tests.rs"]
+mod codex_stop_delivery_tests;

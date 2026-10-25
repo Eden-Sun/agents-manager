@@ -119,3 +119,70 @@ fn grok_session_start_is_identity() {
         other => panic!("expected Identity, got {other:?}"),
     }
 }
+
+#[test]
+fn codex_classify_stop_and_legacy_turn_complete() {
+    let stop_payload = json!({
+        "hook_event_name": "Stop",
+        "session_id": "sess-codex-123",
+        "turn_id": "turn-codex-456",
+        "transcript_path": "/path/to/transcript.jsonl",
+        "last_assistant_message": "Hello from codex stop",
+        "stop_hook_active": false
+    });
+    match classify("codex", &stop_payload) {
+        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+            assert_eq!(session_id.as_deref(), Some("sess-codex-123"));
+            assert_eq!(turn_id.as_deref(), Some("turn-codex-456"));
+            assert_eq!(transcript_path.as_deref(), Some("/path/to/transcript.jsonl"));
+            assert_eq!(assistant.as_deref(), Some("Hello from codex stop"));
+            assert!(user.is_none(), "Stop 不帶使用者原文，必須為 None");
+        }
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+
+    // stop_hook_active = true 必須 Ignore
+    let active_payload = json!({
+        "hook_event_name": "Stop",
+        "session_id": "sess-codex-123",
+        "turn_id": "turn-codex-456",
+        "stop_hook_active": true
+    });
+    assert!(matches!(classify("codex", &active_payload), HookKind::Ignore(_)));
+
+    // 未知 event 不猜
+    let unk_payload = json!({
+        "hook_event_name": "UnknownFutureEvent",
+        "session_id": "sess-codex-123"
+    });
+    assert!(matches!(classify("codex", &unk_payload), HookKind::Ignore(_)));
+
+    // 舊 agent-turn-complete 仍相容
+    let legacy_payload = json!({
+        "type": "agent-turn-complete",
+        "thread-id": "sess-codex-123",
+        "turn-id": "turn-codex-456",
+        "input-messages": ["user prompt 1"],
+        "last-assistant-message": "Done legacy"
+    });
+    match classify("codex", &legacy_payload) {
+        HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+            assert_eq!(session_id.as_deref(), Some("sess-codex-123"));
+            assert_eq!(turn_id.as_deref(), Some("turn-codex-456"));
+            assert!(transcript_path.is_none());
+            assert_eq!(assistant.as_deref(), Some("Done legacy"));
+            assert_eq!(user.as_deref(), Some("user prompt 1"));
+        }
+        other => panic!("expected TurnComplete, got {other:?}"),
+    }
+
+    // A normal JSON reply must not be guessed to be a hidden title turn.
+    let title_payload = json!({
+        "hook_event_name": "Stop",
+        "session_id": "sess-codex-123",
+        "turn_id": "turn-codex-title",
+        "last_assistant_message": "{\"title\":\"Some title\"}",
+        "stop_hook_active": false
+    });
+    assert!(matches!(classify("codex", &title_payload), HookKind::TurnComplete { assistant: Some(ref text), .. } if text == r#"{"title":"Some title"}"#));
+}
