@@ -2276,7 +2276,7 @@ mod resume_args_tests {
     use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts, CONTEXT_LOST_PREFIX};
     use crate::capabilities::Db;
     use crate::db;
-    use crate::testing::{claude_bot, env, Env};
+    use crate::testing::{claude_bot, env, scratch_dir, Env};
     use serde_json::Value;
 
     fn started_args(e: &Env) -> Vec<Vec<String>> {
@@ -2584,8 +2584,16 @@ mod resume_args_tests {
     async fn grok_start_passes_a_short_rules_file_pointer_without_truncating_the_rules() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "grok-rules").await;
+        let grok_home = scratch_dir("am-grok-rules-home");
+        let env_json = serde_json::json!({ "GROK_HOME": grok_home.to_string_lossy() }).to_string();
         let persona = "Keep this configured persona intact: $(echo GROK-PERSONA)";
-        sqlx::query("UPDATE bots SET kind='grok', persona=? WHERE id=?").bind(persona).bind(&bot.id).execute(e.app.db()).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='grok', persona=?, env_json=? WHERE id=?")
+            .bind(persona)
+            .bind(&env_json)
+            .bind(&bot.id)
+            .execute(e.app.db())
+            .await
+            .unwrap();
 
         start_bot(&e.app, &bot.id).await.unwrap();
 
@@ -5218,14 +5226,17 @@ mod grok_startup_effort_tests {
 
     async fn grok_bot(app: &std::sync::Arc<crate::state::App>, project_id: &str, effort: Option<&str>) -> db::Bot {
         let id = db::ulid();
+        let grok_home = tt::scratch_dir("am-grok-startup-effort-home");
+        let env_json = serde_json::json!({ "GROK_HOME": grok_home.to_string_lossy() }).to_string();
         sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
-             VALUES (?,?,?,'grok','grok-4.6',?,'[]',0,1,'tok','user',?)",
+            "INSERT INTO bots (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, hook_token, managed_by, env_json, created_at)
+             VALUES (?,?,?,'grok','grok-4.6',?,'[]',0,1,'tok','user',?,?)",
         )
         .bind(&id)
         .bind(project_id)
         .bind("g-effort")
         .bind(effort)
+        .bind(&env_json)
         .bind(db::now())
         .execute(app.db())
         .await
