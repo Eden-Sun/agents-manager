@@ -140,6 +140,28 @@ async fn fixture(menu: Option<&str>) -> (tt::Env, db::Bot, db::Run, std::path::P
     (env, bot, run, log)
 }
 
+async fn pending_at(env: &tt::Env, run: &db::Run, at: std::time::Instant) -> anyhow::Result<bool> {
+    let client = super::super::client_for_run(&env.app, run).await.unwrap();
+    accept_on_body_at(&env.app, run, &client, Some(at)).await
+}
+
+async fn keep_observing_pending(env: &tt::Env, run: &db::Run, from: std::time::Instant, through_secs: u64) {
+    let mut elapsed = 10;
+    while elapsed < through_secs {
+        assert_eq!(pending_at(env, run, from + Duration::from_secs(elapsed)).await.unwrap_err().to_string(), PENDING);
+        elapsed += 10;
+    }
+    assert_eq!(pending_at(env, run, from + Duration::from_secs(through_secs)).await.unwrap_err().to_string(), PENDING);
+}
+
+async fn alert_count(env: &tt::Env, run: &db::Run) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key=? AND kind='ops_alert'")
+        .bind(format!("ops_alert:daemon:claude_cold_resume_stuck:{}", run.id))
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn cold_resume_start_handles_actual_menu_before_ready_and_keeps_sessionstart_identity() {
     let (env, bot, run, _) = fixture(Some(ACTUAL)).await;
@@ -563,6 +585,136 @@ async fn cold_resume_cursor_not_on_resume_never_sends_a_key_or_moves_the_cursor(
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "{name}");
         assert_eq!(env.herdr.pane(&pane).unwrap().cold_resume_menu.as_deref(), Some(menu.as_str()), "{name}");
     }
+}
+
+#[tokio::test]
+async fn cold_resume_alert_waits_sixty_seconds_dedupes_and_omits_screen_and_session() {
+    let (env, _, run, _) = fixture(Some(SYNTHETIC)).await;
+    let t0 = std::time::Instant::now();
+    assert_eq!(pending_at(&env, &run, t0).await.unwrap_err().to_string(), PENDING);
+    keep_observing_pending(&env, &run, t0, 59).await;
+    assert_eq!(alert_count(&env, &run).await, 0, "短暫 pending 不通知");
+
+    assert_eq!(pending_at(&env, &run, t0 + PENDING_ALERT_AFTER).await.unwrap_err().to_string(), PENDING);
+    assert_eq!(pending_at(&env, &run, t0 + PENDING_ALERT_AFTER + Duration::from_secs(1)).await.unwrap_err().to_string(), PENDING);
+    assert_eq!(alert_count(&env, &run).await, 1, "同一 run 重試只入列一次");
+    crate::supervisor::roles::classify(&env.app.db).await.unwrap();
+    let (role, wake, payload): (String, i64, String) = sqlx::query_as(
+        "SELECT role, wake, payload_json FROM supervisor_inbox WHERE event_key=?",
+    )
+    .bind(format!("ops_alert:daemon:claude_cold_resume_stuck:{}", run.id))
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!((role.as_str(), wake), ("patrol", 1), "一般 bot 的 alert 預設給巡檢");
+    assert!(!payload.contains("sess-1"));
+    assert!(!payload.contains("Resume this conversation?"));
+    assert!(!payload.contains(SYNTHETIC));
+    assert!(env.herdr.calls_to("pane.send_keys").is_empty());
+}
+
+#[tokio::test]
+async fn cold_resume_alert_timer_resets_when_menu_disappears() {
+    let (env, _, run, _) = fixture(Some(SYNTHETIC)).await;
+    let t0 = std::time::Instant::now();
+    assert!(pending_at(&env, &run, t0).await.is_err());
+    {
+        let mut live = env.herdr.live.lock().unwrap();
+        live.get_mut(run.pane_id.as_deref().unwrap()).unwrap().cold_resume_menu = None;
+    }
+    assert!(!pending_at(&env, &run, t0 + Duration::from_secs(30)).await.unwrap());
+    {
+        let mut live = env.herdr.live.lock().unwrap();
+        live.get_mut(run.pane_id.as_deref().unwrap()).unwrap().cold_resume_menu = Some(SYNTHETIC.to_string());
+    }
+    assert!(pending_at(&env, &run, t0 + Duration::from_secs(60)).await.is_err());
+    keep_observing_pending(&env, &run, t0 + Duration::from_secs(60), 59).await;
+    assert_eq!(alert_count(&env, &run).await, 0, "消失後重新出現要重新累積 60 秒");
+    assert!(pending_at(&env, &run, t0 + Duration::from_secs(120)).await.is_err());
+    assert_eq!(alert_count(&env, &run).await, 1);
+}
+
+#[tokio::test]
+async fn cold_resume_alert_timer_resets_after_a_second_pane_read_error() {
+    let (env, _, run, _) = fixture(Some(SYNTHETIC)).await;
+    let t0 = std::time::Instant::now();
+    assert!(pending_at(&env, &run, t0).await.is_err());
+
+    let pane = run.pane_id.as_deref().unwrap();
+    env.herdr.live.lock().unwrap().get_mut(pane).unwrap().cold_resume_menu = Some(synthetic_on_resume());
+    env.herdr.fail_after("pane.read", 1, tt::Fault::Refuse);
+    assert!(pending_at(&env, &run, t0 + Duration::from_secs(20)).await.is_err());
+    assert_eq!(alert_count(&env, &run).await, 0);
+    assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "第二次讀取失敗前不可按鍵");
+    env.herdr.live.lock().unwrap().get_mut(pane).unwrap().cold_resume_menu = Some(SYNTHETIC.to_string());
+
+    let restarted_at = t0 + Duration::from_secs(60);
+    assert!(pending_at(&env, &run, restarted_at).await.is_err());
+    keep_observing_pending(&env, &run, restarted_at, PENDING_ALERT_AFTER.as_secs() - 1).await;
+    assert_eq!(alert_count(&env, &run).await, 0, "讀取錯誤後不可沿用中斷前的時間");
+    assert!(pending_at(&env, &run, restarted_at + PENDING_ALERT_AFTER).await.is_err());
+    assert_eq!(alert_count(&env, &run).await, 1);
+}
+
+#[tokio::test]
+async fn cold_resume_alert_restarts_after_an_observation_gap() {
+    let (env, _, run, _) = fixture(Some(SYNTHETIC)).await;
+    let t0 = std::time::Instant::now();
+    assert!(pending_at(&env, &run, t0).await.is_err());
+
+    let restarted_at = t0 + PENDING_OBSERVATION_GAP + Duration::from_secs(1);
+    assert!(pending_at(&env, &run, restarted_at).await.is_err());
+    keep_observing_pending(&env, &run, restarted_at, PENDING_ALERT_AFTER.as_secs() - 1).await;
+    assert_eq!(alert_count(&env, &run).await, 0, "超過觀測間隔後從這次重新累積");
+    assert!(pending_at(&env, &run, restarted_at + PENDING_ALERT_AFTER).await.is_err());
+    assert_eq!(alert_count(&env, &run).await, 1);
+}
+
+#[tokio::test]
+async fn cold_resume_alert_for_patrol_routes_to_responder() {
+    let (env, bot, run, _) = fixture(Some(SYNTHETIC)).await;
+    crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
+    crate::supervisor::store::set_env(&env.app.db, &bot.id, &env.project_id, "/tmp").await.unwrap();
+    let t0 = std::time::Instant::now();
+    assert!(pending_at(&env, &run, t0).await.is_err());
+    keep_observing_pending(&env, &run, t0, PENDING_ALERT_AFTER.as_secs()).await;
+    crate::supervisor::roles::classify(&env.app.db).await.unwrap();
+    let (role, wake, payload): (String, i64, String) = sqlx::query_as(
+        "SELECT role, wake, payload_json FROM supervisor_inbox WHERE event_key=?",
+    )
+    .bind(format!("ops_alert:daemon:claude_cold_resume_stuck:{}", run.id))
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!((role.as_str(), wake), ("responder", 1));
+    assert!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["to_role"] == "responder");
+}
+
+#[tokio::test]
+async fn cold_resume_alert_for_responder_defaults_to_patrol() {
+    let (env, bot, run, _) = fixture(Some(SYNTHETIC)).await;
+    crate::supervisor::roles::set_env(
+        &env.app.db,
+        crate::supervisor::roles::Role::Responder,
+        &bot.id,
+        &env.project_id,
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    let t0 = std::time::Instant::now();
+    assert!(pending_at(&env, &run, t0).await.is_err());
+    keep_observing_pending(&env, &run, t0, PENDING_ALERT_AFTER.as_secs()).await;
+    crate::supervisor::roles::classify(&env.app.db).await.unwrap();
+    let (role, wake, payload): (String, i64, String) = sqlx::query_as(
+        "SELECT role, wake, payload_json FROM supervisor_inbox WHERE event_key=?",
+    )
+    .bind(format!("ops_alert:daemon:claude_cold_resume_stuck:{}", run.id))
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!((role.as_str(), wake), ("patrol", 1));
+    assert!(serde_json::from_str::<serde_json::Value>(&payload).unwrap().get("to_role").is_none());
 }
 
 #[tokio::test]

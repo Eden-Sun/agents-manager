@@ -231,7 +231,7 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // 系統層的故障：巡檢收、叫醒。`ops_alert` 是排程腳本自己喊的（例行更新卡住），也是巡檢的事。
         // `judge_stuck_screen`：prompt 排著送不出去、畫面底部疑似有 daemon 不認得的框（SPEC §4.3c），要人去終端看一眼。
         // `child_retire_refused`：對帳／維護收尾要隱式退役 AGM 的 child，daemon 擋下來了（#413），要人決定刪不刪。
-        "ops_alert" | "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
+        "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
         // `bot_shim_stale`：某顆 bot 的 herdr／cargo shim 換不動（issue #533），跟 `agm_cli_stale` 同一種事。
         | "supervisor_restart_retry" | "agm_cli_stale" | "bot_shim_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
         // `judge_same_work`：派工／開票時疑似撞上同專案在跑的工作（#557）。只提示，不阻擋。
@@ -240,6 +240,12 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
         // `bot_lost`：herdr 掉了一顆 autostart bot 的 agent（重啟／斷線），對帳收成 exited 後 daemon 已照退避再起一次或放棄（`autostart_revive`）。
         | "child_retire_refused" | "persona_changed" | "bot_lost" => r(Role::Patrol, true),
+        // Most operational alerts go to Patrol. A component that is itself Patrol may explicitly
+        // route its alert to the healthy responder instead.
+        "ops_alert" => r(
+            payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Patrol),
+            true,
+        ),
         // `deploy_waiting`：部署等換版窗口超過 3 分鐘要立刻告訴使用者、請使用者調度（SPEC §18.10）。只記錄類的更新不設 wake（issue #856）。
         "deploy_waiting" => r(
             Role::Patrol,
@@ -996,6 +1002,16 @@ mod tests {
         assert_eq!(route("deploy_waiting", &json!({"wake": true}), None), Route { role: Role::Patrol, wake: true });
         assert_eq!(route("deploy_waiting", &json!({"wake": false}), None), Route { role: Role::Patrol, wake: false });
         assert_eq!(route("deploy_waiting", &json!({}), None), Route { role: Role::Patrol, wake: true });
+    }
+
+    #[test]
+    fn ops_alert_only_changes_recipient_when_to_role_is_explicit() {
+        assert_eq!(route("ops_alert", &json!({}), None), Route { role: Role::Patrol, wake: true });
+        assert_eq!(
+            route("ops_alert", &json!({"to_role": "responder"}), None),
+            Route { role: Role::Responder, wake: true },
+        );
+        assert_eq!(route("ops_alert", &json!({"to_role": "unknown"}), None), Route { role: Role::Patrol, wake: true });
     }
 
     /// 從原始碼撈出「寫進 supervisor_inbox 的 kind」：`push_inbox(…)`／`push_inbox_tx(…)` 的第三個參數、
