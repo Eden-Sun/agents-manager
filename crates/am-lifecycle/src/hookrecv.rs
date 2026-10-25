@@ -456,33 +456,81 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
         }
         "codex" => {
             let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if ty != "agent-turn-complete" {
-                return HookKind::Ignore(ty.to_string());
+            let hook_event = p
+                .get("hook_event_name")
+                .or_else(|| p.get("hookEventName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let is_stop = hook_event.eq_ignore_ascii_case("stop");
+            let is_legacy = ty == "agent-turn-complete";
+
+            if !is_stop && !is_legacy {
+                let unk = if !hook_event.is_empty() { hook_event } else { ty };
+                return HookKind::Ignore(unk.to_string());
             }
-            let user = p
-                .get("input-messages")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
-                .filter(|s| !s.is_empty());
-            // Codex runs a hidden title-generation turn after each reply; not user-visible.
-            let assistant = s("last-assistant-message");
-            // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
-            // 取不到 input 時，回覆長相才是唯一線索。
-            let is_title_turn = match user.as_deref() {
-                Some(u) => u.contains("single-line task title"),
-                None => assistant
-                    .as_deref()
-                    .and_then(|a| serde_json::from_str::<Value>(a).ok())
-                    .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
-                    .unwrap_or(false),
-            };
+
+            if is_legacy {
+                let user = p
+                    .get("input-messages")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
+                    .filter(|s| !s.is_empty());
+                // Codex runs a hidden title-generation turn after each reply; not user-visible.
+                let assistant = s("last-assistant-message");
+                // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
+                // 取不到 input 時，回覆長相才是唯一線索。
+                let is_title_turn = match user.as_deref() {
+                    Some(u) => u.contains("single-line task title"),
+                    None => assistant
+                        .as_deref()
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
+                        .unwrap_or(false),
+                };
+                if is_title_turn {
+                    return HookKind::Ignore("codex title-generation turn".into());
+                }
+                return HookKind::TurnComplete {
+                    session_id: s("thread-id"),
+                    turn_id: s("turn-id"),
+                    transcript_path: None,
+                    assistant,
+                    user,
+                };
+            }
+
+            // Stop
+            let stop_active = p
+                .get("stop_hook_active")
+                .or_else(|| p.get("stopHookActive"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if stop_active {
+                return HookKind::Ignore("stop_hook_active".into());
+            }
+
+            let session_id = s("session_id").or_else(|| s("thread-id"));
+            let turn_id = s("turn_id").or_else(|| s("turn-id"));
+            let transcript_path = s("transcript_path");
+            let assistant = s("last_assistant_message").or_else(|| s("last-assistant-message"));
+
+            // Stop 管道不帶使用者原文：不能合成整段 input-messages 或猜測 prompt，嚴格給 None
+            let user = None;
+
+            let is_title_turn = assistant
+                .as_deref()
+                .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
+                .unwrap_or(false);
             if is_title_turn {
                 return HookKind::Ignore("codex title-generation turn".into());
             }
+
             HookKind::TurnComplete {
-                session_id: s("thread-id"),
-                turn_id: s("turn-id"),
-                transcript_path: None,
+                session_id,
+                turn_id,
+                transcript_path,
                 assistant,
                 user,
             }
@@ -688,6 +736,73 @@ mod classify_tests {
             }
             other => panic!("expected Identity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codex_classify_stop_and_legacy_turn_complete() {
+        let stop_payload = json!({
+            "hook_event_name": "Stop",
+            "session_id": "sess-codex-123",
+            "turn_id": "turn-codex-456",
+            "transcript_path": "/path/to/transcript.jsonl",
+            "last_assistant_message": "Hello from codex stop",
+            "stop_hook_active": false
+        });
+        match classify("codex", &stop_payload) {
+            HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+                assert_eq!(session_id.as_deref(), Some("sess-codex-123"));
+                assert_eq!(turn_id.as_deref(), Some("turn-codex-456"));
+                assert_eq!(transcript_path.as_deref(), Some("/path/to/transcript.jsonl"));
+                assert_eq!(assistant.as_deref(), Some("Hello from codex stop"));
+                assert!(user.is_none(), "Stop 不帶使用者原文，必須為 None");
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+
+        // stop_hook_active = true 必須 Ignore
+        let active_payload = json!({
+            "hook_event_name": "Stop",
+            "session_id": "sess-codex-123",
+            "turn_id": "turn-codex-456",
+            "stop_hook_active": true
+        });
+        assert!(matches!(classify("codex", &active_payload), HookKind::Ignore(_)));
+
+        // 未知 event 不猜
+        let unk_payload = json!({
+            "hook_event_name": "UnknownFutureEvent",
+            "session_id": "sess-codex-123"
+        });
+        assert!(matches!(classify("codex", &unk_payload), HookKind::Ignore(_)));
+
+        // 舊 agent-turn-complete 仍相容
+        let legacy_payload = json!({
+            "type": "agent-turn-complete",
+            "thread-id": "sess-codex-123",
+            "turn-id": "turn-codex-456",
+            "input-messages": ["user prompt 1"],
+            "last-assistant-message": "Done legacy"
+        });
+        match classify("codex", &legacy_payload) {
+            HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+                assert_eq!(session_id.as_deref(), Some("sess-codex-123"));
+                assert_eq!(turn_id.as_deref(), Some("turn-codex-456"));
+                assert!(transcript_path.is_none());
+                assert_eq!(assistant.as_deref(), Some("Done legacy"));
+                assert_eq!(user.as_deref(), Some("user prompt 1"));
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+
+        // 隱藏 title-generation turn 仍維持 Ignore
+        let title_payload = json!({
+            "hook_event_name": "Stop",
+            "session_id": "sess-codex-123",
+            "turn_id": "turn-codex-title",
+            "last_assistant_message": "{\"title\":\"Some title\"}",
+            "stop_hook_active": false
+        });
+        assert!(matches!(classify("codex", &title_payload), HookKind::Ignore(_)));
     }
 }
 
@@ -8814,5 +8929,198 @@ mod agy_pre_invocation_delivery_tests {
         process(&f.env.app, &body_blank).await.unwrap();
         let v_blank: i64 = sqlx::query_scalar("SELECT delivery_verified FROM turns WHERE id = ?").bind(&f.turn_id).fetch_one(&f.env.app.db).await.unwrap();
         assert_eq!(v_blank, 0, "lastUserInput 為純空白時忽略");
+    }
+
+    #[tokio::test]
+    async fn codex_process_single_completion_regression_across_notify_and_stop_orders() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(format!("codex-{}", &bot_id[bot_id.len() - 8..]))
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let conv_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        let session = "sess-codex-prod-1";
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, native_session_id, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(session)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 建立一個 in_flight 的 turn
+        let turn_id = db::ulid();
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, prompt, status, delivered_at, created_at, updated_at)
+             VALUES (?,?,?,'hello codex','in_flight',?,?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv_id)
+        .bind(&run_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let native_turn = "turn-native-001";
+        let legacy_notify = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "codex".into(),
+            payload: json!({
+                "type": "agent-turn-complete",
+                "thread-id": session,
+                "turn-id": native_turn,
+                "input-messages": ["hello codex"],
+                "last-assistant-message": "First completion result"
+            }),
+            received_at: Some("2026-10-25T14:00:00.000Z".into()),
+            truncated: false,
+            run_id: Some(run_id.clone()),
+        };
+
+        let new_stop = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "turn_id": native_turn,
+                "last_assistant_message": "Second completion duplicate",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T14:00:01.000Z".into()),
+            truncated: false,
+            run_id: Some(run_id.clone()),
+        };
+
+        // 順序 1: 舊 notify 先 process，新 Stop 後 process
+        process(&app, &legacy_notify).await.unwrap();
+
+        let (status1, assistant1): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_assistant_message FROM turns WHERE id = ?",
+        )
+        .bind(&turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(status1, "completed", "notify 應使回合轉為 completed");
+        assert_eq!(assistant1.as_deref(), Some("First completion result"));
+
+        // 新 Stop 到達：真 process 執行
+        process(&app, &new_stop).await.unwrap();
+
+        let (status2, assistant2): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_assistant_message FROM turns WHERE id = ?",
+        )
+        .bind(&turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(status2, "completed", "已 completed 的 turn 狀態維持 completed");
+        assert_eq!(assistant2.as_deref(), Some("First completion result"), "重複完成不可覆蓋原 assistant 回覆");
+
+        // 順序 2: 反向順序（新 Stop 先 process，舊 notify 後 process）
+        let run_id2 = db::ulid();
+        let turn_id2 = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, native_session_id, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-2','agent','test',?,?)",
+        )
+        .bind(&run_id2)
+        .bind(&bot_id)
+        .bind(session)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, prompt, status, delivered_at, created_at, updated_at)
+             VALUES (?,?,?,'hello codex 2','in_flight',?,?,?)",
+        )
+        .bind(&turn_id2)
+        .bind(&conv_id)
+        .bind(&run_id2)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let native_turn2 = "turn-native-002";
+        let new_stop2 = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "turn_id": native_turn2,
+                "last_assistant_message": "Stop completion result",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T14:10:00.000Z".into()),
+            truncated: false,
+            run_id: Some(run_id2.clone()),
+        };
+
+        let legacy_notify2 = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "codex".into(),
+            payload: json!({
+                "type": "agent-turn-complete",
+                "thread-id": session,
+                "turn-id": native_turn2,
+                "input-messages": ["hello codex 2"],
+                "last-assistant-message": "Late notify duplicate"
+            }),
+            received_at: Some("2026-10-25T14:10:01.000Z".into()),
+            truncated: false,
+            run_id: Some(run_id2.clone()),
+        };
+
+        process(&app, &new_stop2).await.unwrap();
+
+        let (status_rev1, assistant_rev1): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_assistant_message FROM turns WHERE id = ?",
+        )
+        .bind(&turn_id2)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(status_rev1, "completed");
+        assert_eq!(assistant_rev1.as_deref(), Some("Stop completion result"));
+
+        process(&app, &legacy_notify2).await.unwrap();
+
+        let (status_rev2, assistant_rev2): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_assistant_message FROM turns WHERE id = ?",
+        )
+        .bind(&turn_id2)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(status_rev2, "completed");
+        assert_eq!(assistant_rev2.as_deref(), Some("Stop completion result"), "舊 notify 不得覆蓋 Stop 完成之回覆");
     }
 }
