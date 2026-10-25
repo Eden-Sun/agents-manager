@@ -151,8 +151,48 @@ async fn stop_locked_body(
         }
         app.notify_bot_status(bot_id).await;
         let Some(turn) = db::in_flight_turn(app.db(), &run.id).await.map_err(up)? else {
-            tracing::warn!(bot = bot_id, run = %run.id, error_code = "missing_turn_owner", "API bot stop has no exact in-flight runner owner");
-            return Err(LcError::Upstream("api_bot_stop_unconfirmed:missing_turn_owner".into()));
+            let key = crate::lifecycle::api_bot_port::ApiRunKey {
+                bot_id: bot_id.to_string(),
+                run_id: run.id.clone(),
+            };
+            let proof = crate::lifecycle::api_bot_port::ApiBotPort::api_run_stop_proof(app, &key)
+                .await;
+            match proof {
+                Ok(proof) if proof.key == key => {}
+                Ok(_) => {
+                    tracing::warn!(bot = bot_id, run = %run.id, error_code = "identity_mismatch", "API bot stop received proof for another run");
+                    return Err(LcError::Upstream("api_bot_stop_unconfirmed:identity_mismatch".into()));
+                }
+                Err(error) => {
+                    let code = match error {
+                        crate::lifecycle::api_bot_port::ApiBotError::Busy => "busy",
+                        crate::lifecycle::api_bot_port::ApiBotError::IdentityMismatch => "identity_mismatch",
+                        crate::lifecycle::api_bot_port::ApiBotError::Unconfirmed => "unconfirmed",
+                        crate::lifecycle::api_bot_port::ApiBotError::Upstream => "upstream",
+                    };
+                    tracing::warn!(bot = bot_id, run = %run.id, error_code = code, "API bot stop did not confirm the idle runner proof");
+                    return Err(LcError::Upstream(format!("api_bot_stop_unconfirmed:{code}")));
+                }
+            }
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            super::race_point::hit("api_stop_proof_before_recover", &run.id).await;
+            if db::api_bot::recover_unknown(app.db(), &run.id).await.is_err() {
+                tracing::warn!(bot = bot_id, run = %run.id, error_code = "recover_unknown", "API bot stop could not recover unknown attempts");
+                return Err(LcError::Upstream("api_bot_stop_unconfirmed:recover_unknown".into()));
+            }
+            match commit_stopped(app, &run.id, false).await {
+                Ok(StopCommit::Applied) => {
+                    app.revoke_orphaned_queued_turns(bot_id, "bot 已被停止").await;
+                }
+                Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
+                Err(_) => {
+                    tracing::warn!(bot = bot_id, run = %run.id, error_code = "stop_commit", "API bot stop could not record the stopped run");
+                    super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::FinishStop);
+                    return Err(LcError::Upstream("api_bot_stop_unconfirmed:stop_commit".into()));
+                }
+            }
+            app.notify_bot_status(bot_id).await;
+            return Ok(true);
         };
         let key = crate::lifecycle::api_bot_port::ApiTurnKey {
             bot_id: bot_id.to_string(),
