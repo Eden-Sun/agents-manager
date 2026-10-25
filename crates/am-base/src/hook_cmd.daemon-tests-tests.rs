@@ -249,3 +249,48 @@
         assert!(!data.join("bots/b1/hook-spool.jsonl").exists(), "守門不 spool");
         let _ = std::fs::remove_dir_all(&data);
     }
+
+    #[test]
+    fn codex_stop_stdin_process_helper() {
+        let Some(dir) = std::env::var_os("CODEX_STOP_TEST_DATA") else { return };
+        let port: u16 = std::env::var("CODEX_STOP_TEST_PORT").unwrap().parse().unwrap();
+        run(HookArgs {
+            provider: "codex".into(), bot: "b-stdin".into(), token: "fixture-only".into(),
+            port, data_dir: PathBuf::from(dir).to_string_lossy().into_owned(),
+            event: String::new(), payload_arg: None,
+        });
+    }
+
+    #[test]
+    fn macos_local_codex_stop_stdin_over_the_single_argument_limit_is_spooled_intact() {
+        let data = fresh_data_dir("codex-stdin");
+        // Reserve a non-listening port: connection is refused without racing another listener.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let reply = "x".repeat(256 * 1024);
+        let payload = serde_json::json!({
+            "hook_event_name": "Stop", "session_id": "stdin-session", "turn_id": "stdin-turn",
+            "stop_hook_active": false, "last_assistant_message": reply,
+        });
+        let encoded = serde_json::to_vec(&payload).unwrap();
+        assert!(encoded.len() > 128 * 1024);
+        assert!(encoded.len() < 1024 * 1024);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{}::codex_stop_stdin_process_helper", module_path!().split_once("::").unwrap().1), "--nocapture"])
+            .env("CODEX_STOP_TEST_DATA", &data).env("CODEX_STOP_TEST_PORT", port.to_string())
+            // Only this fixture child; it must exercise the parent-hook stdin transport.
+            .env_remove("AM_CHILD_OF")
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(&encoded).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "helper failed: {}", String::from_utf8_lossy(&output.stderr));
+        let text = std::fs::read_to_string(data.join("bots/b-stdin/hook-spool.jsonl")).unwrap();
+        let bodies: Vec<serde_json::Value> = text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["payload"], payload);
+        assert_eq!(bodies[0]["truncated"], false);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("stdin-session"));
+        std::fs::remove_dir_all(data).unwrap();
+    }

@@ -437,7 +437,7 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 
 ## 4. 回覆擷取
 
-### 4.1 主要來源：hooks / notify（每次啟動注入，不改使用者全域設定）
+### 4.1 主要來源：hooks / notify（每次啟動注入）
 - **provider 要等於 bot 的 kind**（2026-09-22）：hook 的路由只靠 `bot_id`＋`hook_token`，而這兩個是 pane 環境變數、任何子行程都繼承得到；claude bot 的 pane 裡跑 `codex exec` 帶 notify，codex 的 thread-id 就會被記成這顆 claude bot 的 `native_session_id` 還標 `verified`，之後 `--resume` 一個不存在的 id 立刻退出。所以 `/hook/{provider}` 與 spool 重播都先比 provider 與 `bots.kind`，不一致就丟掉（HTTP 409 `provider_mismatch`）。救援路徑：`?resume=native&session=<id>` 指名接回真正那段。
 
 **Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop`、`StopFailure`、
@@ -516,8 +516,11 @@ daemon 本來把它釘成 `claude-md`、再由 `bots.instruction_files` 逐顆�
 `capture::claude::is_noise` 仍把這個 plugin 的提示（`⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: <path>`）當雜訊，因為預設值現在就會畫出這一行，不會被 §4.3 備援收進回覆（#212）。
 `runs.runtime_identity`（issue #238，見 §12.4 的「額度記在 run 的身份」）是 ALTER 加的欄位（舊列 NULL＝沒記）、`SCHEMA_VERSION` 6 → 7；回滾到 ≤ 6 的 binary 會被 §3.1 的版本閘擋下，要連 DB 一起還原成升級前的備份。
 
-**Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
-`{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。
+**Codex**（#1989）：`[codex] stop_hook` 預設 `false`。關閉時不安裝 dispatcher、不寫 `hooks.json`，啟動 argv 沿用原本的 `-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--port",…]`；legacy notify 將 `agent-turn-complete` JSON 作為最後一個 argv，含 `thread-id`、`turn-id`、`input-messages`、`last-assistant-message`，token 從 pane env 讀取。
+- 開啟時，只在有效 `CODEX_HOME/hooks.json` 的 `hooks.Stop` 尾端追加自己的穩定 dispatcher group，保留使用者與 herdr 的事件、group index。壞 JSON、讀取或傳輸失敗不覆寫；新設定檔 `0600`、dispatcher `0700`。dispatcher 對非 AGM、子 pane（`AM_CHILD_OF`）或其他 instance 不送事件、不印 stdout。
+- 開啟時只安裝 Stop dispatcher，不讀寫 `hooks.state` 或 `trusted_hash`，不加 bypass；使用者自行對每個有效 CODEX_HOME 以 `/hooks` review 信任。第一階段不論信任狀態，argv 都保留原本 legacy notify，不設定 `notify=[]`。停用 legacy 的第二階段另行處理。
+- Stop 的 JSON 走 stdin，欄位為 `session_id`、`turn_id`、`transcript_path`、`last_assistant_message`、`stop_hook_active`；不攜帶整段累積 `input-messages`，`stop_hook_active=true` 不作完成事件；Stop 沒有使用者原文，不因回覆剛好是 `{"title":…}` 就猜成隱藏標題回合。stdin 仍有 §4.4 的 1 MiB 上限。
+- 同一 bot、同一 native session/turn 的 legacy notify 與 Stop 共用完成事件去重鍵，不依送達時間或事件拼字區分，避免遷移期雙發。缺少 native IDs 時維持既有保守去重；既有 run 的 argv 不會因 daemon 換版而被修改，需要使用者正常重啟才重新選傳輸。
 
 **grok**：沒有每次啟動的注入旗標，改用全域 hooks 檔 + env 分派，見 §12.2。
 
@@ -808,7 +811,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
 1. wall-clock ≤ 3 秒；**永遠 exit 0、stdout 空**——唯一的例外是 §4.4c 的 PreToolUse 守門「要擋」時印的那一行決策 JSON。
-2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
+2. stdin（claude、grok、agy、codex Stop）上限 1 MiB，超過截斷標 `truncated`；codex legacy notify 相容接收 argv 最後一個。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback、`NO_PROXY=127.0.0.1`、連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，
    body `{bot_id, provider, payload, received_at, run_id?}`（`run_id`＝行程 env 的 `AM_RUN_ID`，只給 §4.1 的世代圍籬用）。
 4. 失敗（連不上、逾時，或非 2xx，含 daemon 寫不進收件匣時的 503；409 `provider_mismatch` 與 410 `bot deleted` 是永久拒絕，不 spool）→ `O_APPEND` 追加一行到
@@ -1081,6 +1084,9 @@ herdr_session = "agents-manager"
 
 [supervisor]
 notify_interval_secs = 600
+
+[codex]
+stop_hook = false                  # opt-in 安裝 Stop；legacy notify 照舊保留
 
 [[projects]]
 id = "01JABC1234567890XYZ1234567"   # 缺省時首次載入自動補寫
@@ -3572,7 +3578,7 @@ label = "foo@m4p"
 | provider | payload 來源 | 上報狀態 | 寫 spool |
 |---|---|---|---|
 | `claude` | stdin（≤1 MiB，超過截斷標 `truncated`） | `SessionStart` → 只 `report-agent-session`；`Stop` 且 `stop_hook_active=false` → `--state idle` | 兩者都寫 |
-| `codex` | argv 最後一個（JSON） | `agent-turn-complete` → `--state idle` | 寫 |
+| `codex` | Stop 走 stdin；legacy notify 保留 argv 最後一個相容 | `agent-turn-complete` 或非 active 的 `Stop` → `--state idle` | 寫 |
 | `grok` | stdin | `session_start` → 只 `report-agent-session`；`stop` 且 `end_turn` 且 `stopHookActive=false` → idle；`shutdown` 不報 | 寫 |
 | `statusline` | stdin | 不報 | 不進 spool（§11.4.5） |
 
@@ -5858,7 +5864,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ## 附錄 B：agent hook 事實
 
 - Claude Code：`--settings <abs>` 注入 hooks；Stop stdin 見 §4.1。**Stop hook 的 stdout 若是 JSON 會被當決策**，子命令必須空 stdout。
-- codex：`-c 'notify=[…]'` 覆寫 notify，argv 最後一項是 JSON（§4.1）。
+- codex：預設 legacy notify；明確啟用 stop_hook 時另安裝 stdin Stop，兩路可並存且按 native turn 去重。信任由使用者 review，legacy 仍保留，見 §4.1。
 - 資料表 schema 以 `crates/am-base/src/db.rs` 的 migration 為準。
 
 ## 附錄 E：遠端環境事實
