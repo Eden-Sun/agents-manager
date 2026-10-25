@@ -16239,7 +16239,10 @@ mod relay_from_auth_tests {
         });
         let err = call(false, true, Some(&token), None).await.expect_err("changed snapshot");
         match err {
-            LcError::Conflict(body) => assert_eq!(body["reason"], "draft_changed", "{body}"),
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "draft_changed", "{body}");
+                assert_eq!(body["draft"], "未確認的新草稿", "{body}");
+            }
             other => panic!("expected draft_changed, got {other:?}"),
         }
         assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
