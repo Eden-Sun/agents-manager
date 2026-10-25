@@ -4385,19 +4385,21 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 - **inbox 通知**：每次偵測結果寫進快取後，`issues` 非空就推一則 `ops_alert`（`source=daemon`、`reason=host_baseline`）給 AGM；key 帶差異 id 集合的雜湊，同一份差異只推一次、差異變了才再推，一致或未知不推。沿用 `push_inbox` 的 `INSERT OR IGNORE` 去重（跟其他 `ops_alert` 同一套）。去重存在 DB（daemon 重啟、主機離線再回來都不會重推）；`event_key` 永久，所以**曾經推過的差異集合日後（修好又壞回同一組）不會再推**——這種回歸只在主機面板看得到，是刻意的（避免偵測偶發抖動讓 AGM 一直收到同一則）。
 - **定期重量**：偵測本來只在連上／alias 變了／手動時跑；另有 `host_baseline::spawn_poller` 每 6 小時對連著的主機重跑一次完整偵測（啟動那一輪由開機偵測負責）。
 - **dry-run 計畫**（階段 2）：`GET /api/hosts/{name}/baseline/plan`（API §12.6a，只給使用者）由快取的差異與宣告檔推算每項該怎麼補（`host_baseline/plan.rs`，純函式），不連主機、不寫任何東西。宣告檔的鍵可選填 `value`（只收 bool／整數／字串或一層小表，≤ 1 KiB；`true` 檢查的鍵只能寫 true）：缺的鍵有值＝`merge_key`，其餘（沒值的鍵、缺檔、缺工具、壞 JSON、`.gitconfig` 憑證、檔本身不在、不認得的 id）一律 `manual` 並附原因。出貨的宣告檔只替 codex `features.hooks` 寫了 `true`（協調者裁示），其他鍵都是手動。預覽只有顯示用位置、鍵路徑與宣告檔的值，**不含主機上現有檔的內容或路徑**（輸入裡根本沒有）。codex 的 model／effort／service_tier：宣告檔解析時拒絕，算計畫時再擋一次，連 `manual` 都不列。`hosts[].baseline.fixable` 帶可自動補的 id。
-- **補齊與還原**（階段 3a，只有 API、網頁還沒有按鈕）：`POST /api/hosts/{name}/baseline/apply`／`…/restore`（API §12.6c，只給使用者）。實作 `host_baseline/apply.rs`：daemon 產生 POSIX sh 腳本、包在那台主機的 HostFence（`run_if_current`）裡跑，主機換代就不送。
+- **補齊與還原**（階段 3a／3b）：`GET /api/hosts/{name}/baseline/backups`、`POST /api/hosts/{name}/baseline/apply`／`…/restore`（API §12.6c，只給使用者）。實作 `host_baseline/apply.rs`：daemon 產生 POSIX sh 腳本、包在那台主機的 HostFence（`run_if_current`）裡跑，主機換代就不送。
   - **逐台開啟**：`config.toml` 頂層 `[host_baseline.sync]`，鍵是主機名（`local` 或 `[[hosts]]` 的 `name`），值 `off`／`ask`／`auto`。沒列＝off，空表不寫出。獨立一張表、不掛在 `[[hosts]]`（不動 `HostCfg`）：主機改名或刪掉時舊鍵留著＝孤兒鍵，一律當 off、不自動清，使用者的 `GET /api/state` 頂層 `host_baseline_orphan_sync_keys` 列出來（Bot 視圖沒有）。對不上主機的鍵、`auto`（3a 只開放手動確認，當 `ask`）、讀不懂的值（當 off）各記一次 WARN，**不讓設定檔載入失敗**。off 時 apply 409 `sync_disabled`；restore 不看這個開關（出問題隨時能還原）。
   - **只做 `merge_key`、只補不蓋**：`plan_rev` 必須等於 daemon 現在算出的計畫（不符 409）。只寫 codex `config.toml`（`$CODEX_HOME`，預設 `~/.codex`）與 claude `~/.claude`／`~/.claude-cc<N>` 的 `settings.json`；自訂的 `CLAUDE_CONFIG_DIR`／alias 目錄找不回同一處，降級 manual。鍵已存在（不論值；TOML 認 `[表]` 裡的 `鍵 =`、根層 `表.鍵 =`、`表 =` 行內表）不改；檔不在不建；目標或它的目錄是 symlink 拒絕。TOML 用 awk：有 `[表]` 補在表頭下一行，沒有就以點號鍵補在根層第一個表頭前。JSON 用 jq（`setpath`），主機沒 jq 降級 manual。codex 的 model／effort／service_tier 與 `.gitconfig` 憑證在計畫與 apply 兩層各擋一次；缺檔（`write_file`）與工具安裝（3b）維持 manual。
   - **原子寫入**：同目錄 `mktemp`（0600）、`sync`、換回原本的權限、`mv -f`。
   - **備份**：第一個真的要寫的檔之前，在**那台主機**建 `~/.config/agents-manager/baseline-backup/<YYYYMMDDTHHMMSSZ>-<UUID v4>/`（目錄 0700；`files/<編號>` 與 `manifest` 0600），`manifest` 一行一檔：`file <編號> <原本在不在> <權限> <目標名>`。備份根目錄（含上兩層）是 symlink 就整趟停。保留最新 10 份（只算／只刪備份 id 形狀的真目錄，剛建的不刪）。備份**不拉回 daemon**，腳本只印標記行，API 不回路徑或內容；探測腳本不讀這個目錄（測試在有備份的假 HOME 跑真探測驗證）。
-  - **還原**：backup id 不是固定格式 400（不連主機）。主機上的 `manifest` 是不可信輸入：先整份驗過——只認固定目標名（不收絕對路徑、`..`）、數字編號、三位權限、目標與備份檔不能是 symlink、目標目錄要在——任一行不對整個拒絕、一個檔都不寫，驗完才還原（逐 byte 換回、權限換回；原本不在的檔刪掉）。回應只有目標名與結果。apply／restore 成功後觸發一次重新偵測。
-  - Mac 原生驗證：`scripts/ops/host-baseline-sync-mac-verify.sh`（內嵌 apply／restore 腳本，`cargo test` 比對與目前產生的一致）。
+  - **列舉備份**：`GET …/baseline/backups` 只讀備份目錄與 manifest，不讀備份內容、不寫、不刪、不 touch；固定格式的 ID 先驗再拼路徑。回應只有 backup ID、UTC 時間、allowlist 檔名與 `overwrite`／`delete` 動作及 `skipped` 數；壞 manifest、symlink 或無法安全還原的備份略過。列舉與還原都不看 sync 開關。
+  - **還原**：backup ID 不是固定格式 400（不連主機）；送到主機前再驗格式，主機端再確認備份目錄、manifest 與必要檔案存在。主機上的 `manifest` 是不可信輸入：先整份驗過——只認固定目標名（不收絕對路徑、`..`）、數字編號、三位權限、目標與備份檔不能是 symlink、目標目錄要在——任一行不對整個拒絕、一個檔都不寫，驗完才還原（逐 byte 換回、權限換回；原本不在的檔刪掉）。**還原前不會另外備份目前狀態**，直接覆寫或刪除 manifest 列出的檔案。回應只有目標名與結果。apply／restore 成功後觸發一次重新偵測。
+  - Mac 原生驗證：`scripts/ops/host-baseline-sync-mac-verify.sh`（內嵌 apply／restore／列舉腳本，`cargo test` 比對與目前產生的一致；列舉驗只讀、壞備份略過、symlink 拒絕）。
 - **UI**：網頁「主機」面板每台（含本機）一行「一致性：…」，有差異逐項列出（嚴重的在前、紅；提醒黃）；沒量過顯示「尚未檢查」、`issues: null` 顯示「未知」，**不當成全缺**（`web/src/lib/hostBaseline.ts`）。
+  - 3b 一鍵補齊鈕只在 sync 模式為 `ask` 時出現；「查看備份／還原」不受 sync 模式限制。使用者載入備份清單後可選一份還原，二次確認列主機名、備份時間、覆寫檔、刪除檔與「不會先備份目前狀態」；確認鈕預設不聚焦，Enter 不送出，執行中停用。清單若有壞備份，顯示「有 N 份備份無法讀取」；錯誤只顯示固定碼與固定文案，不顯示主機內容。
 - **過期（stale）**：偵測失敗時，已經有的舊結果**不能繼續裝成現況**。失敗只標這次偵測開始時仍是現行連線的那一次（主機已重連或改指時，舊偵測的失敗不改寫新連線的結果，#1371）。`BaselineReport` 帶 `checked_at`（最後一次成功）、`failed_at`／`error`（最後一次失敗；成功後清掉）；
   對外 `stale = 最後一次失敗 || checked_at 超過 RECHECK_EVERY + STALE_GRACE（6h15m）`，讀取時算（`BaselineReport::snapshot`）。失敗當下推 `host_changed`。
   網頁：`stale` 或本機算出超過同一條線（主機一直離線時沒有事件，所以前端自己也算）→ 「一致性：上次檢查於 MM-DD HH:mm，目前無法連線」，舊的差異淡色照列、
   tooltip 寫最後一次失敗的原因；過期時連「與基準一致」也不說。
-- 還沒做：缺檔模板（`write_file`）、工具安裝（3b，永不 auto）、`auto` 的自動套用、新增身份時自動套設定、網頁按鈕。
+- 還沒做：缺檔模板（`write_file`）、工具安裝（永不因 `auto` 安裝）、`auto` 的自動套用、新增身份時自動套設定。
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 

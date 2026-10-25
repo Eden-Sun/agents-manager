@@ -3,10 +3,10 @@
 #
 # 用法：sh scripts/ops/host-baseline-sync-mac-verify.sh
 #
-# 下面兩段 heredoc 是 daemon 產生、送到主機上跑的同一份腳本（`crates/am-base/src/host_baseline/apply.rs`；
+# 下面三段 heredoc 是 daemon 產生、送到主機上跑的同一份腳本（`crates/am-base/src/host_baseline/apply.rs`；
 # `cargo test -p am-base the_mac_verify_script_embeds_the_current_scripts` 守著它跟目前產生的一致）。
 # 全部在 mktemp -d 的假 HOME 裡跑、env -i 清掉環境，結束（含中斷）就整個刪掉；不碰真的 HOME。
-# 驗：symlink 拒絕、只補不蓋、寫前備份與 manifest、權限、還原後逐 byte 相同、不可信 manifest 整個拒絕、10 份輪替、輸出不帶路徑。
+# 驗：列舉唯讀與壞備份／symlink 略過、只補不蓋、寫前備份與 manifest、權限、還原後逐 byte 相同、不可信 manifest 整個拒絕、10 份輪替、輸出不帶路徑。
 set -u
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/am-bl-verify.XXXXXX") || exit 1
 trap 'rm -rf "$WORK"' EXIT
@@ -298,6 +298,143 @@ done < "$br_dir/manifest"
 br_end
 AM_RESTORE_SH
 
+cat > "$WORK/list.sh" <<'AM_LIST_SH'
+umask 077
+ba_root="$HOME/.config/agents-manager/baseline-backup"
+# 只認這幾個目標（宣告檔的 codex config.toml、claude settings.json）；不收絕對路徑、`..`、空白。
+ba_token_ok() {
+  case "$1" in ''|/*|*..*|*//*|*' '*) return 1 ;; esac
+  case "$1" in
+    codex/config.toml|claude-default/settings.json) return 0 ;;
+    claude-cc*/settings.json)
+      ba_t=${1#claude-cc}; ba_t=${ba_t%/settings.json}
+      case "$ba_t" in ''|*[!0-9]*) return 1 ;; esac
+      return 0 ;;
+  esac
+  return 1
+}
+ba_path() {
+  ba_token_ok "$1" || return 1
+  case "$1" in
+    codex/config.toml) printf '%s/config.toml' "${CODEX_HOME:-$HOME/.codex}" ;;
+    claude-default/settings.json) printf '%s/.claude/settings.json' "$HOME" ;;
+    *) ba_t=${1%/settings.json}; printf '%s/.%s/settings.json' "$HOME" "$ba_t" ;;
+  esac
+}
+# 權限（八進位三位）；讀不懂＝`-`（不 chmod）。
+ba_mode() {
+  ba_p=$(ls -ld "$1" 2>/dev/null | cut -c2-10)
+  case "$ba_p" in [r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]) ;; *) printf -; return ;; esac
+  ba_o=""
+  for ba_i in 1 4 7; do
+    ba_d=0
+    [ "$(printf %s "$ba_p" | cut -c$ba_i)" = r ] && ba_d=$((ba_d + 4))
+    [ "$(printf %s "$ba_p" | cut -c$((ba_i + 1)))" = w ] && ba_d=$((ba_d + 2))
+    case "$(printf %s "$ba_p" | cut -c$((ba_i + 2)))" in x|s|t) ba_d=$((ba_d + 1)) ;; esac
+    ba_o="$ba_o$ba_d"
+  done
+  printf %s "$ba_o"
+}
+ba_sync() { sync "$1" 2>/dev/null || sync; }
+# 備份根目錄與它上面兩層不能是 symlink。
+ba_root_ok() {
+  for ba_q in "$HOME/.config" "$HOME/.config/agents-manager" "$ba_root"; do
+    [ -L "$ba_q" ] && return 1
+  done
+  return 0
+}
+
+printf 'AM_BK begin\n'
+bk_end() { printf 'AM_BK skipped %s\n' "$bk_skipped"; printf 'AM_BK end\n'; exit 0; }
+bk_skipped=0
+bk_id_ok() {
+  case "$1" in ????????T??????Z-????????-????-????-????-????????????) ;; *) return 1 ;; esac
+  bk_stamp=${1%%-*}
+  case "$bk_stamp" in *[!0123456789TZ]*) return 1 ;; esac
+  bk_uuid=${1#????????T??????Z-}
+  case "$bk_uuid" in *[!0123456789abcdef-]*) return 1 ;; esac
+  return 0
+}
+case "$HOME" in /*) ;; *) bk_skipped=1; bk_end ;; esac
+if ! ba_root_ok; then bk_skipped=1; bk_end; fi
+if [ -L "$ba_root" ]; then bk_skipped=1; bk_end; fi
+if [ ! -e "$ba_root" ]; then bk_end; fi
+if [ ! -d "$ba_root" ]; then bk_skipped=1; bk_end; fi
+for bk_dir in "$ba_root"/*; do
+  [ -e "$bk_dir" ] || [ -L "$bk_dir" ] || continue
+  bk_id=${bk_dir##*/}
+  bk_id_ok "$bk_id" || continue
+  bk_bad=0
+  if [ -L "$bk_dir" ] || [ ! -d "$bk_dir" ]; then bk_bad=1; fi
+  bk_files_dir="$bk_dir/files"
+  bk_manifest="$bk_dir/manifest"
+  if [ "$bk_bad" = 0 ] && { [ -L "$bk_files_dir" ] || [ ! -d "$bk_files_dir" ] || [ -L "$bk_manifest" ] || [ ! -f "$bk_manifest" ]; }; then bk_bad=1; fi
+  bk_header=0
+  bk_id_seen=0
+  bk_plan_seen=0
+  bk_count=0
+  bk_seen="|"
+  bk_file_ids="|"
+  bk_meta=""
+  if [ "$bk_bad" = 0 ]; then
+    set -f
+    while IFS= read -r bk_line || [ -n "$bk_line" ]; do
+      if [ "$bk_header" = 0 ]; then
+        [ "$bk_line" = "am-baseline-backup 1" ] || { bk_bad=1; break; }
+        bk_header=1
+        continue
+      fi
+      set -- $bk_line
+      [ $# -gt 0 ] || { bk_bad=1; break; }
+      case "$1" in
+        id)
+          [ $# -eq 2 ] && [ "$bk_id_seen" = 0 ] && [ "$2" = "$bk_id" ] || { bk_bad=1; break; }
+          bk_id_seen=1
+          ;;
+        plan_rev)
+          [ $# -eq 2 ] && [ "$bk_plan_seen" = 0 ] || { bk_bad=1; break; }
+          bk_plan_seen=1
+          ;;
+        file)
+          [ $# -eq 5 ] || { bk_bad=1; break; }
+          case "$2" in ''|*[!0-9]*) bk_bad=1 ;; esac
+          case "$3" in 0|1) ;; *) bk_bad=1 ;; esac
+          case "$4" in -|[0-7][0-7][0-7]) ;; *) bk_bad=1 ;; esac
+          ba_token_ok "$5" || bk_bad=1
+          case "$bk_file_ids" in *"|$2|"*) bk_bad=1 ;; esac
+          case "$bk_seen" in *"|$5|"*) bk_bad=1 ;; esac
+          [ "$bk_bad" = 0 ] || break
+          bk_file_ids="$bk_file_ids$2|"
+          bk_seen="$bk_seen$5|"
+          if [ "$3" = 1 ]; then
+            [ -L "$bk_files_dir/$2" ] && bk_bad=1
+            [ -f "$bk_files_dir/$2" ] || bk_bad=1
+          fi
+          bk_target=$(ba_path "$5") || bk_bad=1
+          bk_target_dir=${bk_target%/*}
+          if [ -L "$bk_target" ] || [ -L "$bk_target_dir" ] || [ ! -d "$bk_target_dir" ]; then bk_bad=1; fi
+          if [ -e "$bk_target" ] && [ ! -f "$bk_target" ]; then bk_bad=1; fi
+          [ "$bk_bad" = 0 ] || break
+          if [ "$3" = 1 ]; then bk_action=overwrite; else bk_action=delete; fi
+          bk_meta="$bk_meta"'AM_BK file '"$5"' '"$bk_action"'
+'
+          bk_count=$((bk_count + 1))
+          ;;
+        *) bk_bad=1; break ;;
+      esac
+    done < "$bk_manifest"
+    set +f
+  fi
+  if [ "$bk_bad" = 0 ] && [ "$bk_header" = 1 ] && [ "$bk_id_seen" = 1 ] && [ "$bk_plan_seen" = 1 ] && [ "$bk_count" -gt 0 ]; then
+    printf 'AM_BK backup %s\n' "$bk_id"
+    printf '%s' "$bk_meta"
+  else
+    bk_skipped=$((bk_skipped + 1))
+  fi
+done
+bk_end
+AM_LIST_SH
+
 PASS=0
 FAIL=0
 ok() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
@@ -319,6 +456,20 @@ run_apply() {
 run_restore() {
   sed "s/^br_id=.*/br_id='$2'/" "$WORK/restore.sh" > "$WORK/r.sh"
   env -i HOME="$1" PATH=/usr/bin:/bin /bin/sh "$WORK/r.sh"
+}
+run_list() { env -i HOME="$1" PATH=/usr/bin:/bin /bin/sh "$WORK/list.sh"; }
+snapshot() {
+  find "$1" -print | LC_ALL=C sort | while IFS= read -r path; do
+    rel=${path#"$1"}
+    if [ -L "$path" ]; then kind=link; elif [ -d "$path" ]; then kind=dir; elif [ -f "$path" ]; then kind=file; else kind=other; fi
+    case "$(uname -s)" in
+      Darwin) meta=$(stat -f '%p:%m:%c' "$path") ;;
+      *) meta=$(stat -c '%a:%Y:%Z' "$path") ;;
+    esac
+    data=
+    [ ! -f "$path" ] || data=$(cksum < "$path" | awk '{print $1 ":" $2}')
+    printf '%s|%s|%s|%s\n' "$rel" "$kind" "$meta" "$data"
+  done
 }
 id_n() { printf '20261024T12%04dZ-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4' "$1"; }
 ID1=$(id_n 0)
@@ -399,6 +550,27 @@ check "restored mode 0644" test "$(perm "$H/.codex/config.toml")" = '-rw-r--r--'
 check "restore output carries no path" lacks "$out" "$H"
 out=$(run_restore "$H" "$(id_n 9)")
 check "unknown backup is not_found" has "$out" 'AM_BR error not_found'
+
+# 4a. 唯讀列舉：好備份列出 allowlist metadata；壞 manifest 與 symlink 略過，目錄快照不變。
+H=$(newhome)
+mkdir -p "$H/.codex" "$H/.claude" "$H/$BK/$(id_n 0)/files" "$H/$BK/$(id_n 1)/files"
+printf 'current config\n' > "$H/.codex/config.toml"
+printf 'backup config AM-SECRET\n' > "$H/$BK/$(id_n 0)/files/1"
+printf 'am-baseline-backup 1\nid %s\nplan_rev macverify\nfile 1 1 644 codex/config.toml\nfile 2 0 - claude-default/settings.json\n' "$(id_n 0)" > "$H/$BK/$(id_n 0)/manifest"
+printf 'am-baseline-backup 1\nid %s\nplan_rev macverify\nfile 1 1 600 /etc/passwd\n' "$(id_n 1)" > "$H/$BK/$(id_n 1)/manifest"
+ln -s "$H/$BK/$(id_n 0)" "$H/$BK/$(id_n 2)"
+before=$(snapshot "$H")
+out=$(run_list "$H")
+after=$(snapshot "$H")
+check "backup listing has begin and end markers" has "$out" 'AM_BK end'
+check "good backup and overwrite metadata listed" has "$out" "AM_BK backup $(id_n 0)"
+check "backup file marked overwrite" has "$out" 'AM_BK file codex/config.toml overwrite'
+check "absent backup file marked delete" has "$out" 'AM_BK file claude-default/settings.json delete'
+check "bad manifest and symlink counted as skipped" has "$out" 'AM_BK skipped 2'
+check "symlink backup refused from the restorable list" lacks "$out" "AM_BK backup $(id_n 2)"
+check "listing output excludes file content and paths" lacks "$out" 'AM-SECRET'
+check "listing output excludes HOME path" lacks "$out" "$H"
+check "listing leaves directory, content, modes, and timestamps unchanged" test "$after" = "$before"
 
 # 5. 不可信 manifest：任一行不對整個拒絕，一個檔都不寫。
 for evil in 'file 2 1 600 /etc/passwd' 'file 2 1 600 claude-cc1/../../.ssh/settings.json' 'file 2 1 600 .ssh/id_rsa' 'exec rm -rf /' 'file 2 1 7777 claude-cc1/settings.json'; do

@@ -317,3 +317,77 @@ details.env-fold summary {
 .host-baseline-apply-wrap > .host-baseline-apply-err {
   color: var(--danger);
 }
+
+/* 一致性備份還原：清單固定顯示安全的備份時間、ID 與宣告檔名。 */
+.host-baseline-header {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  vertical-align: middle;
+}
+
+.host-baseline-restore-wrap {
+  display: inline-flex;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.host-baseline-restore-list,
+.host-baseline-restore-summary {
+  display: block;
+  margin: 4px 0;
+}
+
+.host-baseline-restore-open {
+  margin-left: 8px;
+}
+
+.host-baseline-restore-list > ul,
+.host-baseline-restore-summary ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.host-baseline-restore-entry {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.host-baseline-restore-entry > time,
+.host-baseline-restore-id {
+  display: block;
+  font-family: var(--font-mono);
+}
+
+.host-baseline-restore-entry > ul {
+  margin: 2px 0 4px;
+  padding-left: 18px;
+}
+
+.host-baseline-restore-warning,
+.host-baseline-restore-error {
+  display: block;
+  margin: 4px 0;
+}
+
+.host-baseline-restore-warning {
+  color: var(--warn);
+}
+
+.host-baseline-restore-error {
+  color: var(--danger);
+}
+
+.host-baseline-restore-dialog ul {
+  margin: 2px 0 8px;
+  padding-left: 20px;
+}
+
+.host-baseline-restore-section-head,
+.host-baseline-restore-notice {
+  font-weight: 650;
+}
+
+.host-baseline-restore-notice {
+  color: var(--danger);
+}

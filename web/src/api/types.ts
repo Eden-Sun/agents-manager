@@ -121,6 +121,31 @@ export interface HostBaselineApplyResult {
   results: BaselineApplyItemResult[]
 }
 
+/** 可還原的一份主機一致性備份（GET /api/hosts/{name}/baseline/backups，#719）。 */
+export interface HostBaselineBackupFile {
+  file: string
+  /** `overwrite`＝還原會寫回備份；`delete`＝備份時不存在，還原會刪掉現有檔。 */
+  restore: 'overwrite' | 'delete'
+}
+
+export interface HostBaselineBackup {
+  backup_id: string
+  created_at: string
+  files: HostBaselineBackupFile[]
+}
+
+export interface HostBaselineBackups {
+  backups: HostBaselineBackup[]
+  /** 無法列出的壞備份數。 */
+  skipped: number
+}
+
+/** 還原 API 成功時的白名單結果。 */
+export interface HostBaselineRestoreResult {
+  backup_id: string
+  files: Array<{ file: string; result: 'restored' | 'deleted' | 'absent' | 'failed' }>
+}
+
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
   /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
