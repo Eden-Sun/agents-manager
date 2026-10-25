@@ -141,7 +141,7 @@ export function HostBaselineRestore({ host }: HostBaselineRestoreProps) {
                 <span className="host-baseline-restore-id">{backup.backup_id}</span>
                 <ul>
                   {backup.files.map((file) => (
-                    <li key={file.file}>{file.file}：{file.restore === 'overwrite' ? t('還原會覆寫') : t('還原會刪除')}</li>
+                    <li key={file.file}>{t('{file}：{action}', { file: file.file, action: file.restore === 'overwrite' ? t('還原會覆寫') : t('還原會刪除') })}</li>
                   ))}
                 </ul>
                 <button type="button" className="mini-btn" disabled={loading || restoring} onClick={() => startRestore(backup)}>
@@ -158,7 +158,7 @@ export function HostBaselineRestore({ host }: HostBaselineRestoreProps) {
           <span>{t('還原結果：{id}', { id: restoreResult.backup_id })}</span>
           <ul>
             {restoreResult.files.map((file, index) => (
-              <li key={`${file.file}-${index}`}>{file.file}：{resultText(t, file.result)}</li>
+              <li key={`${file.file}-${index}`}>{t('{file}：{action}', { file: file.file, action: resultText(t, file.result) })}</li>
             ))}
           </ul>
         </span>

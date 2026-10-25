@@ -329,7 +329,15 @@ details.env-fold summary {
 .host-baseline-restore-wrap {
   display: inline-flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   margin: 4px 0;
+}
+
+/* 清單、結果、錯誤各佔一整行，排在「查看備份」鈕下面，不跟鈕並排把鈕撐高。 */
+.host-baseline-restore-wrap > .host-baseline-restore-list,
+.host-baseline-restore-wrap > .host-baseline-restore-summary,
+.host-baseline-restore-wrap > .host-baseline-restore-error {
+  flex-basis: 100%;
 }
 
 .host-baseline-restore-list,

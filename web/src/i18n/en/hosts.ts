@@ -494,6 +494,8 @@ export default {
   '備份 ID：{id}': 'Backup ID: {id}',
   '可用這個備份 ID 還原（還原按鈕另案）': 'You can restore from this backup ID (restore button coming separately)',
   '未知結果': 'Unknown result',
+  '還原': 'Restore',
+  '{file}：{action}': '{file}: {action}',
   '身份：未知（這個 Run 沒有記錄啟動身份）': 'Identity: unknown (this run did not record its starting identity)',
   '未知': 'Unknown',
   '身份：不指定（本機預設）': 'Identity: unset (local default)',
