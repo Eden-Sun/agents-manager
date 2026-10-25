@@ -123,8 +123,43 @@ fn legacy_dedupe_key(body: &HookBody) -> Option<String> {
     }
     let event = string_field(p, &["hook_event_name", "hookEventName", "type"]);
     let session = string_field(p, &["session_id", "sessionId", "thread-id"]);
-    let turn = string_field(p, &["prompt_id", "promptId", "turn-id", "turnId"]);
+    let turn = string_field(p, &["prompt_id", "promptId", "turn-id", "turnId", "turn_id"]);
     Some(format!("{}|{}|{}|{}|{}", body.provider, received, event, session, turn))
+}
+
+/// 判斷是否為 codex 的回合完成事件（legacy notify 或新 Stop）。
+fn is_codex_completion(body: &HookBody) -> Option<(String, String)> {
+    if body.provider != "codex" {
+        return None;
+    }
+    let p = &body.payload;
+    let is_active_stop = p
+        .get("stop_hook_active")
+        .or_else(|| p.get("stopHookActive"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_active_stop {
+        return None;
+    }
+
+    let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let ev = p
+        .get("hook_event_name")
+        .or_else(|| p.get("hookEventName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let is_complete = (ty == "agent-turn-complete") || ev.eq_ignore_ascii_case("stop");
+    if !is_complete {
+        return None;
+    }
+
+    let session = string_field(p, &["session_id", "sessionId", "thread-id"]);
+    let turn = string_field(p, &["turn_id", "turnId", "turn-id", "prompt_id", "promptId"]);
+    if session.is_empty() || turn.is_empty() {
+        return None;
+    }
+    Some((session, turn))
 }
 
 fn event_discriminator(body: &HookBody) -> Option<String> {
@@ -146,6 +181,9 @@ fn event_discriminator(body: &HookBody) -> Option<String> {
 }
 
 pub fn dedupe_key(body: &HookBody) -> Option<String> {
+    if let Some((session, turn)) = is_codex_completion(body) {
+        return Some(format!("codex|completed|{}:{}", session.len(), session) + &format!(":{}:{}", turn.len(), turn));
+    }
     let base = legacy_dedupe_key(body)?;
     Some(match event_discriminator(body) {
         Some(discriminator) => format!("{base}|{discriminator}"),
@@ -674,5 +712,147 @@ mod tests {
         assert_eq!(backoff(2), Duration::from_secs(2));
         assert_eq!(backoff(3), Duration::from_secs(4));
         assert_eq!(backoff(99), Duration::from_secs(256), "8 次之後就到頂");
+    }
+
+    #[tokio::test]
+    async fn codex_same_turn_notify_and_stop_share_key_and_dedupe() {
+        let p = pool().await;
+        let session = "s-codex-1";
+        let turn = "turn-42";
+
+        let legacy_notify = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "type": "agent-turn-complete",
+                "thread-id": session,
+                "turn-id": turn,
+                "last-assistant-message": "Done via notify"
+            }),
+            received_at: Some("2026-10-25T12:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+
+        let new_stop = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "turn_id": turn,
+                "last_assistant_message": "Done via stop",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T12:00:01.500Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+
+        // 兩者產生的 dedupe_key 必須完全相同
+        let key1 = dedupe_key(&legacy_notify);
+        let key2 = dedupe_key(&new_stop);
+        assert!(key1.is_some());
+        assert_eq!(key1, key2, "notify 與 Stop 應產生相同 canonical dedupe_key");
+        assert_eq!(key1.unwrap(), format!("codex|completed|{}:{session}:{}:{turn}", session.len(), turn.len()));
+
+        // 順序 1: 舊 notify 先到，新 Stop 後到
+        assert_eq!(accept(&p, &legacy_notify, Source::Http).await.unwrap(), Accepted::Stored);
+        assert_eq!(accept(&p, &new_stop, Source::Http).await.unwrap(), Accepted::Duplicate, "同 turn 的 Stop 應被去重");
+
+        // 異 native turn 必須正常獨立入列
+        let next_turn_stop = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "turn_id": "turn-43",
+                "last_assistant_message": "Next turn",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T12:00:02.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+        assert_eq!(accept(&p, &next_turn_stop, Source::Http).await.unwrap(), Accepted::Stored, "不同 turn 應獨立收下");
+
+        // 順序 2: 在新 pool 中驗證新 Stop 先到，舊 notify 後到
+        let p2 = pool().await;
+        assert_eq!(accept(&p2, &new_stop, Source::Http).await.unwrap(), Accepted::Stored);
+        assert_eq!(accept(&p2, &legacy_notify, Source::Http).await.unwrap(), Accepted::Duplicate, "notify 後到應被去重");
+
+        // active stop 不佔用完成 key
+        let active_stop = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "turn_id": "turn-44",
+                "stop_hook_active": true
+            }),
+            received_at: Some("2026-10-25T12:00:03.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+        let active_key = dedupe_key(&active_stop).unwrap();
+        assert_ne!(active_key, format!("codex|completed|{}:{session}:7:turn-44", session.len()), "active stop 不應使用 canonical completed key");
+
+        // 缺 ID 時退回 legacy
+        let missing_turn = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+            }),
+            received_at: Some("2026-10-25T12:00:04.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+        let legacy_key = dedupe_key(&missing_turn).unwrap();
+        assert!(legacy_key.starts_with("codex|2026-10-25T12:00:04.000Z|Stop|"), "缺 turn_id 應維持 legacy dedupe key");
+    }
+
+    #[tokio::test]
+    async fn codex_canonical_key_does_not_collide_with_delimiter_in_ids() {
+        let p = pool().await;
+        // 兩個故意交錯包含 '|' 與不同長度的 session/turn ID
+        let b1 = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "sess|a",
+                "turn_id": "b|c",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T12:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+
+        let b2 = HookBody {
+            bot_id: "b1".into(),
+            provider: "codex".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "sess",
+                "turn_id": "a|b|c",
+                "stop_hook_active": false
+            }),
+            received_at: Some("2026-10-25T12:00:00.000Z".into()),
+            truncated: false,
+            run_id: None,
+        };
+
+        let key1 = dedupe_key(&b1).unwrap();
+        let key2 = dedupe_key(&b2).unwrap();
+        assert_ne!(key1, key2, "含 '|' 分隔符的 native ID 絕不能碰撞");
+
+        // 兩者都能成功存入，不被視為 Duplicate
+        assert_eq!(accept(&p, &b1, Source::Http).await.unwrap(), Accepted::Stored);
+        assert_eq!(accept(&p, &b2, Source::Http).await.unwrap(), Accepted::Stored);
     }
 }
