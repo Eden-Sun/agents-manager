@@ -8,6 +8,35 @@ mod turn_boundary;
 
 use serde_json::Value;
 
+pub(super) fn is_turn_prompt_candidate(line: &str, sent: &[String], since: &chrono::DateTime<chrono::FixedOffset>) -> bool {
+    let is_match = crate::lifecycle::delivery::codex_user_text(line)
+        .is_some_and(|t| sent.iter().any(|s| s == &t));
+    if !is_match {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+    let Some(ts_str) = v.get("timestamp").and_then(Value::as_str) else { return false };
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) else { return false };
+    at >= *since
+}
+
+pub(super) fn is_task_complete_candidate(line: &str, since: &chrono::DateTime<chrono::FixedOffset>) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+    let is_tc = v.get("type").and_then(Value::as_str) == Some("event_msg")
+        && v.pointer("/payload/type").and_then(Value::as_str) == Some("task_complete");
+    if !is_tc {
+        return false;
+    }
+    if let Some(ts_str) = v.get("timestamp").and_then(Value::as_str) {
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+            return at > *since;
+        }
+    }
+    v.pointer("/payload/completed_at")
+        .and_then(Value::as_i64)
+        .is_some_and(|completed_at| completed_at > since.timestamp())
+}
+
 /// 自 rollout 取出嚴格屬於該 turn（turn 開始時間 `since_iso` 之後、且以 `sent` 為 prompt）的完整回覆。
 ///
 /// 嚴格條件：
@@ -19,22 +48,10 @@ use serde_json::Value;
 /// 6. 已以 native ID 證明的完成不因之後另一 native turn 開始而失效；沒有這項證據時仍拒絕後續 user。
 pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option<String> {
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
-    let since_ts = since.timestamp();
-
     let lines: Vec<&str> = log.lines().collect();
 
     // 尋找最後一次出現 sent 其中一句的 user prompt 行
-    let start = lines.iter().rposition(|l| {
-        let is_match = crate::lifecycle::delivery::codex_user_text(l)
-            .is_some_and(|t| sent.iter().any(|s| s == &t));
-        if !is_match {
-            return false;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(l) else { return false };
-        let Some(ts_str) = v.get("timestamp").and_then(Value::as_str) else { return false };
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) else { return false };
-        at >= since
-    })?;
+    let start = lines.iter().rposition(|l| is_turn_prompt_candidate(l, sent, &since))?;
 
     match turn_boundary::for_prompt(&lines, start, sent, &since) {
         turn_boundary::Proof::Native(reply) => return reply,
@@ -66,7 +83,7 @@ pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Opti
             }
         }
         if let Some(completed_at) = p.and_then(|p| p.get("completed_at")).and_then(Value::as_i64) {
-            if completed_at < since_ts {
+            if completed_at < since.timestamp() {
                 return None;
             }
         }
@@ -114,28 +131,10 @@ pub fn turn_since(created_at: &str, delivered_at: Option<&str>) -> String {
 /// - 找不到或時間比對失敗一律回傳 `None`，退回終端畫面備援。
 pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
-    let since_ts = since.timestamp();
     let lines: Vec<&str> = log.lines().collect();
 
     // 尋找最後一筆 task_complete
-    let pos = lines.iter().rposition(|l| {
-        let Ok(v) = serde_json::from_str::<Value>(l) else { return false };
-        let is_tc = v.get("type").and_then(Value::as_str) == Some("event_msg")
-            && v.pointer("/payload/type").and_then(Value::as_str) == Some("task_complete");
-        if !is_tc {
-            return false;
-        }
-        // 驗證時間戳
-        if let Some(ts_str) = v.get("timestamp").and_then(Value::as_str) {
-            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                return at > since;
-            }
-        }
-        if let Some(completed_at) = v.pointer("/payload/completed_at").and_then(Value::as_i64) {
-            return completed_at > since_ts;
-        }
-        false
-    })?;
+    let pos = lines.iter().rposition(|l| is_task_complete_candidate(l, &since))?;
 
     match turn_boundary::for_latest(&lines, pos, &since) {
         turn_boundary::Proof::Native(reply) => return reply,
@@ -169,11 +168,13 @@ pub async fn codex_rollout_reply_for_in_flight(
     }
     let home = super::s6_ports::StuckTurnServices::codex_home(app, bot).await?;
     let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
+    let bot_id = bot.id.clone();
+    let run_id = run.id.clone();
     let sent = sent.to_vec();
     let since = since_iso.to_string();
     tokio::task::spawn_blocking(move || {
         let path = super::delivery::codex_session_log(&home, &session)?;
-        let log = crate::transcript_read::read_tail(&path, 4 * 1024 * 1024)?;
+        let log = super::codex_rollout_scan::read_in_flight_suffix(&path, &bot_id, &run_id, &sent, &since)?;
         codex_reply_for_turn(&log, &sent, &since)
     })
     .await
@@ -192,10 +193,12 @@ pub async fn codex_rollout_reply_for_hookless(
     }
     let home = super::s6_ports::StuckTurnServices::codex_home(app, bot).await?;
     let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
+    let bot_id = bot.id.clone();
+    let run_id = run.id.clone();
     let since = since_iso.to_string();
     tokio::task::spawn_blocking(move || {
         let path = super::delivery::codex_session_log(&home, &session)?;
-        let log = crate::transcript_read::read_tail(&path, 4 * 1024 * 1024)?;
+        let log = super::codex_rollout_scan::read_hookless_suffix(&path, &bot_id, &run_id, &since)?;
         codex_latest_reply_since(&log, &since)
     })
     .await

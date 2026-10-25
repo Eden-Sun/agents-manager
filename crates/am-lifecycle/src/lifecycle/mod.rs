@@ -85,6 +85,7 @@ pub async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + 
 pub mod pane_text;
 pub mod poller;
 pub mod codex_rollout;
+pub mod codex_rollout_scan;
 pub mod transcript_origin;
 pub use transcript_origin::starter_origin_kind_at;
 pub mod screen;

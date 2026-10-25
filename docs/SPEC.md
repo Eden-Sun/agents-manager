@@ -648,6 +648,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 - **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
   我們自己的 prompt 就被當成 agent 的回覆存下來。
 - **Codex hookless 回合回覆優先自 rollout 救援（#1988）**：
+  rollout 讀取從檔尾以不重疊 4 MiB 區段往前掃，最多 128 MiB；單行上限 8 MiB。跨區段的行先接合再判斷。負向快取按 bot、run、回合邊界與檔案長度記錄完整掃描未找到候選的結果（最多 256 筆、24 小時）；檔案增長時只掃新增位元組與 8 MiB 行長重疊，run 改變時清掉該 bot 的舊項目。觸及掃描或行長上限、檔案掃描中改變時一律不採用；未完整掃描不記成無候選。失敗只記 bytes、offset、上限與耗時等 metadata，不記 rollout 文字。
   Codex legacy notify 超過 Linux 單一 argv 上限（`MAX_ARG_STRLEN` 128 KiB）時會 exec 失敗（`os error 7: Argument list too long`），使 hook 送不到 daemon 而退回終端備援。
   在 `try_fallback`（有 prompt）與 `capture_hookless_turn_locked`（無 prompt）中，若 `kind == "codex"`，優先自本地 rollout 提取該回合的結構化回覆（先比對 app-server thread 歷史，再驗證 rollout 在本回合開始之後由 `task_complete` 結算且後續未有新 prompt 的 `last_agent_message`）。
   原生 `task_started`／`task_complete` 的非空 turn_id 一致且期間未被新 started 或 abort 取代時，允許同原生回合的追加 user；以唯一精確 prompt 及時間窗歸屬，完成後另一原生回合開始不會讓前一份已證明的回覆失效。缺失或矛盾證據不放寬；跨回合同文無法唯一歸屬時不取。Codex steer 沿用既有規則，把追加訊息記為同一 AGM turn 的 supplement，不建立另一筆 turn；若走取代回合的流程，舊 turn 先收掉，fallback 必須命中當下唯一 in_flight 與排定的 expected_turn，CAS 使同份回覆只存一次。hookless 沒有 prompt 歸屬，後續新回合仍使舊完成失效（#1994）。
