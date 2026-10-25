@@ -506,20 +506,13 @@ mod tests {
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
 
-        // Force DB error by deleting turn before reserve
-        sqlx::query("DELETE FROM turns WHERE id=?")
-            .bind(&turn)
-            .execute(&pool)
-            .await
-            .unwrap();
-
         let adapter = ApiBotAdapter::new(
             pool.clone(),
             AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run,
-                turn_id: turn,
+                turn_id: turn.clone(),
                 generation: 1,
             },
             test_options(),
@@ -539,6 +532,13 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // Force DB error by deleting turn before reserve
+        sqlx::query("DELETE FROM turns WHERE id=?")
+            .bind(&turn)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let mut state = State::default();
         state.messages = vec![Message {

@@ -260,7 +260,6 @@ impl Model for ApiBotAdapter {
                 if !active.permit_available {
                     return Err(http::Error::InvalidRequest);
                 }
-                active.permit_available = false;
 
                 let reconstructed = RequestEnvelope::new(
                     self.options.clone(),
@@ -272,6 +271,9 @@ impl Model for ApiBotAdapter {
                 if reconstructed.hash() != active.envelope.hash() {
                     return Err(http::Error::InvalidRequest);
                 }
+                // Invalid input does not spend the matching reservation's permit.
+                // Consume atomically only after identity validation, still before any HTTP.
+                active.permit_available = false;
 
                 (reconstructed, active.id.clone())
             };
