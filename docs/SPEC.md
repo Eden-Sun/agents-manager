@@ -1905,6 +1905,9 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    看不準時保留待重試，不當成錯誤、回答或交給使用者的 blocked choice；放棄時每個 run 每種原因只寫一次 WARN
    （固定原因字串：`cursor_not_on_resume`、`screen_changed_between_reads`、`run_host_session_or_pane_changed`、`read_not_visible_or_truncated`、
    `menu_still_shown_after_enter`、`no_pane`；去重表以 (run, 原因) 為單位，原因交替也只各寫一次；上限 256 組、滿了淘汰插入最舊的一組，每組 24 小時過期；不為清理去查 DB）。
+   同一個 active run 的可信冷選單必須在每次巡檢都持續看到，且累計 60 秒（watcher 約每 10 秒一次）才推一筆 `ops_alert`；觀測間隔超過 30 秒、選單消失或讀取／權限錯誤都重置計時，排除短暫重繪與換 run 的 pending。
+   key 為 `ops_alert:daemon:claude_cold_resume_stuck:<run_id>`，只含固定原因、bot 名／ID、run ID 與靜態處理建議，不含畫面文字、prompt、native／resume session id、token 或 key。
+   一般 bot 與協調者本身卡住時不帶 `to_role`，沿用巡檢預設；若角色紀錄確認卡住的是巡檢本人，才帶 `to_role:"responder"` 交給協調者。此告警只通知，不更動任何 Resume 按鍵守門。
    背景巡邏共用 bot 鎖，補處理晚一幀才出現的框。這只是接回確認，不新增續行提示，`resume_nudge` 的中途工具候選規則不變。
    測試畫面 `claude-2.1.304-cold-resume.txt` 是 Max 5x／Opus 4.6[1m] 的受控實機擷取：只修改拋棄式 transcript 的時間（2h）
    與 usage／iterations（1M tokens），不是自然等待或真的發送 1M tokens。首訊息 `Your unsent message will still be there after you answer`
@@ -5397,6 +5400,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   新的 `reason`／`source`、別顆 bot 的同一個 `reason`、`pane_unowned`、`bot_request`、核准、incident 不在這條裡，各自照常叫醒。
 - **叫醒／只記錄的清單**（近 7 天 172 回合只有 2 回合是使用者交辦，其餘是 ack 通知，issue #1478）：
   - **需要 AGM 判斷（`wake=1`）**：`ops_alert` 的新類型與退避窗外的再提醒、`incident_opened`（含 `role_unavailable`／`notify_exhausted` 給對方角色）、`bot_restart_failed`／`supervisor_restart_retry`／`bot_lost`、`responder_watchdog_gave_up`／`responder_bot_missing`／`watchdog_gave_up`、`pane_unowned`／`pane_orphaned`、`child_retire_refused`、`persona_changed`、`judge_stuck_screen`／`judge_same_work`、核准單（`approval_requested`，含 failover 改派給巡檢的）、未標回覆的 `bot_request`、交辦回報（`assignment_completed`／`failed`／`undeliverable`）、mission 事件、`health_changed` 任一半非 `healthy`、`deploy_waiting` 首次通知且放寬放不行（`deploy_wait::clears_itself` 為否）、`release_triage_notice`（payload 的 `text` 是要轉述給使用者的結論，`wake` 預設 true）。
+  `ops_alert` 預設由巡檢收；只有冷 resume 告警在 supervisor 角色紀錄確認事件 bot 就是巡檢本人時，payload 才帶 `to_role:"responder"`，由協調者收。
   - **只留紀錄（`wake=0`）**：`health_changed` 兩半都 `healthy`（恢復）、`deploy_waiting` 的後續更新（自動放寬、拿到窗口、完成、放棄、使用者操作）與「只有 working 擋著、放寬已排定」的首次通知、`incident_resolved`、退避窗內重複的 `ops_alert`、`assignment_noticed`／`queued`／`quota_*`、`judge_report_evidence`、`--ack`／`--reply-to` 的 `bot_request` 回覆。
   - 不認得的新事件種類仍預設叫醒巡檢（寧可被看見一次）；要降噪就在 `roles::known_route` 明寫分支。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
