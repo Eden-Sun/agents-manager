@@ -433,6 +433,8 @@ User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只�
 
 `host_baseline_orphan_sync_keys`（issue #719 階段 3a，只在 User 視圖；Bot 視圖沒有這欄）：`config.toml` 的 `[host_baseline.sync]` 裡對不上 `local` 或任何 `[[hosts]]` 名稱的鍵（主機改名或刪掉後留下的），排好序的字串陣列，沒有就是 `[]`。這些鍵一律當 off、不會自動清，留給使用者手動刪（SPEC §16.7）。只在 `GET /api/state` 回應裡，沒有對應的 WS 事件：改了 config 之後下一次重拉才看得到。
 
+`host_baseline_sync`（issue #719 階段 3b，只在 User 視圖；Bot 視圖沒有這欄）：`{ "<主機名>": "off" | "ask" }`，key 只有 `local` 與 `[[hosts]]` 的 `name`（孤兒鍵不列），值是那台實際生效的模式——跟 apply 先擋的 `sync_disabled` 同一個來源：沒列、值讀不懂＝`"off"`，`auto` 在 3a 當 `"ask"` 輸出。網頁只在 `"ask"` 時畫「補齊」鈕；缺這欄（舊 daemon）一律當 off。同樣只在 `GET /api/state`，沒有 WS 事件。
+
 `restart_batch`（issue #492）：現在正在跑的那一批一鍵重啟（§6.9）的 `batch_id`，沒有就是 `null`。
 唯讀，只為了對帳——進度本身走 WS（`bots_restart_progress` / `bots_restart_done`），而 `done` 有兩條收不到的路
 （批次跑到一半 daemon 重啟；客戶端落到全量 `resync`，那條走 `refreshState`、backlog 整段不重播），
@@ -2336,7 +2338,7 @@ issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[
 - 404：不認得的主機。409 `{"error":"conflict","reason":"baseline_unknown","host"}`：還沒量過，或上一趟探測沒跑完（`issues: null`）。503 `{"reason":"baseline_manifest_invalid"}`：宣告檔讀不懂（只會是沒跑過測試的 build）。
 
 ### 12.6c 一致性差異補齊與還原 `POST /api/hosts/{name}/baseline/apply`、`POST /api/hosts/{name}/baseline/restore`
-issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 計畫（§12.6a）裡的 `merge_key`、只補不蓋，寫之前在**那台主機上**備份。兩條都只給使用者（Bot、AGM role → 403 `user_only`；`bot_scope_matrix` 為 Forbidden），網頁還沒有按鈕。
+issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 計畫（§12.6a）裡的 `merge_key`、只補不蓋，寫之前在**那台主機上**備份。兩條都只給使用者（Bot、AGM role → 403 `user_only`；`bot_scope_matrix` 為 Forbidden）。網頁在主機面板有「補齊 N 項」鈕（階段 3b，只在 `host_baseline_sync` 為 `"ask"` 時出現，先二次確認）；還原沒有按鈕。
 
 **apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部 `merge_key`）：
 

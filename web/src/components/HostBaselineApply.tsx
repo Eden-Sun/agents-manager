@@ -8,7 +8,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 export interface HostBaselineApplyProps {
   host: string
   baseline: HostBaseline | null
-  syncMode?: 'off' | 'ask' | 'auto' | string
+  /** 那台實際生效的模式（`/api/state` 的 `host_baseline_sync`）；缺值＝off，不畫鈕。 */
+  syncMode?: 'off' | 'ask'
 }
 
 /** 錯誤碼到固定文案的對照，不顯示主機上的任何檔案內容或任意回傳字串。 */
@@ -57,10 +58,10 @@ function itemResultText(t: ReturnType<typeof useT>, res: string, reason?: string
     if (reason === 'secret') return t('需手動（機密資料）')
     return t('需手動')
   }
-  return res
+  return t('未知結果')
 }
 
-export function HostBaselineApply({ host, baseline, syncMode = 'ask' }: HostBaselineApplyProps) {
+export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineApplyProps) {
   const t = useT()
   const [loading, setLoading] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -69,9 +70,8 @@ export function HostBaselineApply({ host, baseline, syncMode = 'ask' }: HostBase
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<HostBaselineApplyResult | null>(null)
 
-  // sync=off 時不畫鈕
-  const effectiveMode = syncMode === 'auto' ? 'ask' : syncMode
-  if (effectiveMode !== 'ask') {
+  // 只有明確是 ask 才畫；off 或缺值（舊 daemon、bot 視圖）都不畫。daemon 已把 auto 輸出成 ask。
+  if (syncMode !== 'ask') {
     return null
   }
 
@@ -178,6 +178,7 @@ export function HostBaselineApply({ host, baseline, syncMode = 'ask' }: HostBase
       <ConfirmDialog
         open={confirmOpen}
         title={t('確認補齊主機設定')}
+        width={480}
         body={confirmBody}
         confirmLabel={applying ? t('套用中…') : t('確認補齊')}
         cancelLabel={t('取消')}
@@ -201,7 +202,7 @@ export function HostBaselineApply({ host, baseline, syncMode = 'ask' }: HostBase
             <span className="apply-backup-id">
               {t('備份 ID：{id}', { id: applyResult.backup_id })}
               <span className="apply-restore-hint">
-                {t('（如需還原請使用命令列）')}
+                {t('可用這個備份 ID 還原（還原按鈕另案）')}
               </span>
             </span>
           ) : null}

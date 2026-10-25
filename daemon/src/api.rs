@@ -1744,7 +1744,20 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
         RequestPrincipal::User => {
             let mut state = state_json(&app).await?;
             // #719 階段 3a：`[host_baseline.sync]` 對不上主機的鍵，只給使用者看（bot 的視圖從 `state_json` 出，不帶這欄）。
-            state["host_baseline_orphan_sync_keys"] = json!(app.cfg.get().await.host_baseline_orphan_sync_keys());
+            let cfg = app.cfg.get().await;
+            state["host_baseline_orphan_sync_keys"] = json!(cfg.host_baseline_orphan_sync_keys());
+            // #719 階段 3b：每台主機實際生效的模式（只會是 "off"／"ask"，`auto` 當 "ask"），網頁據此決定畫不畫「補齊」鈕。同樣只給使用者。
+            let sync: serde_json::Map<String, Value> = std::iter::once(crate::config::LOCAL_HOST)
+                .chain(cfg.hosts.iter().map(|h| h.name.as_str()))
+                .map(|name| {
+                    let mode = match cfg.host_baseline_sync(name) {
+                        crate::config::HostBaselineSyncMode::Ask => "ask",
+                        _ => "off",
+                    };
+                    (name.to_string(), json!(mode))
+                })
+                .collect();
+            state["host_baseline_sync"] = Value::Object(sync);
             Ok(Json(state))
         }
         RequestPrincipal::Bot(bot_id) => Ok(Json(crate::bot_state::view_for_bot(&app, &bot_id).await?)),
@@ -4353,6 +4366,28 @@ mod baseline_apply_route_tests {
         let Json(view) = get_state(State(e.app.clone()), Extension(RequestPrincipal::Bot(bot.id))).await.unwrap();
         assert!(view.as_object().unwrap().get("host_baseline_orphan_sync_keys").is_none(), "{view}");
         assert!(!view.to_string().contains("gone-host"), "{view}");
+    }
+
+    /// #719 階段 3b：每台主機生效的模式只在使用者的 `/api/state`——local 與 `[[hosts]]` 都列、`auto` 輸出成 "ask"、沒列是 "off"、
+    /// 孤兒鍵不列；bot 的視圖沒有這一欄。
+    #[tokio::test]
+    async fn the_effective_sync_mode_is_in_the_user_state_only() {
+        let e = crate::testing::env().await;
+        let (_home, _calls) = remote_host(&e.app, "bl3b-auto").await;
+        let (_home2, _calls2) = remote_host(&e.app, "bl3b-unset").await;
+        set_sync(&e.app, crate::config::LOCAL_HOST, "ask").await;
+        set_sync(&e.app, "bl3b-auto", "auto").await;
+        set_sync(&e.app, "gone-host", "ask").await;
+        let Json(user) = get_state(State(e.app.clone()), Extension(RequestPrincipal::User)).await.unwrap();
+        let sync = user["host_baseline_sync"].as_object().expect("使用者有這欄");
+        assert_eq!(sync.get(crate::config::LOCAL_HOST), Some(&json!("ask")), "{sync:?}");
+        assert_eq!(sync.get("bl3b-auto"), Some(&json!("ask")), "auto 當 ask：{sync:?}");
+        assert_eq!(sync.get("bl3b-unset"), Some(&json!("off")), "沒列＝off：{sync:?}");
+        assert!(sync.get("gone-host").is_none(), "孤兒鍵不列：{sync:?}");
+        assert!(sync.values().all(|v| v == "off" || v == "ask"), "{sync:?}");
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bl3b-bot").await;
+        let Json(view) = get_state(State(e.app.clone()), Extension(RequestPrincipal::Bot(bot.id))).await.unwrap();
+        assert!(view.as_object().unwrap().get("host_baseline_sync").is_none(), "{view}");
     }
 }
 

@@ -1,7 +1,7 @@
 /**
  * 主機一致性計畫一鍵補齊（HostBaselineApply，#719 階段 3b）：
  * - sync=off：不畫鈕
- * - ask/auto 且有 fixable 項：畫「補齊 N 項」鈕
+ * - ask 且有 fixable 項：畫「補齊 N 項」鈕；缺 host_baseline_sync（舊 daemon、bot 視圖）＝off
  * - 確認框：明列主機名、要補的 id、目標檔、「會先備份、只補不蓋」
  * - 預設 focus 在取消鈕，不在確認鈕上；Enter 不能直接送出
  * - 確認後打 API 帶 plan_rev 與 ids
@@ -13,6 +13,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, keydown, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { HostBaselineApply } from './HostBaselineApply'
+import { toHostBaselineSync, toState } from '../api/normalize'
 import type { HostBaseline, HostBaselinePlan } from '../api/types'
 
 before(setupDom)
@@ -76,18 +77,32 @@ it('無 fixable 項目：不畫按鈕', async () => {
   assert.equal(btn, null)
 })
 
-it('sync=ask 或 sync=auto 且有 fixable 項：畫「補齊 N 項」鈕', async () => {
+it('sync=ask 且有 fixable 項：畫「補齊 N 項」鈕', async () => {
   await mount(<HostBaselineApply host="worker-1" baseline={sampleBaseline} syncMode="ask" />)
-  let btn = document.querySelector('.host-baseline-apply-btn')
+  const btn = document.querySelector('.host-baseline-apply-btn')
   assert.ok(btn)
   assert.match(btn.textContent ?? '', /補齊 2 項/)
+})
 
-  await unmountAll()
+it('沒有 host_baseline_sync 這欄（舊 daemon、bot 視圖）：一律當 off，不畫按鈕', async () => {
+  // 快照缺欄 → 正規化成空表 → 那台查不到＝undefined → 不畫。
+  const sync = toState({}).host_baseline_sync
+  assert.deepEqual(sync, {})
+  await mount(<HostBaselineApply host="worker-1" baseline={sampleBaseline} syncMode={sync['worker-1']} />)
+  assert.equal(document.querySelector('.host-baseline-apply-btn'), null)
+})
 
-  await mount(<HostBaselineApply host="worker-1" baseline={sampleBaseline} syncMode="auto" />)
-  btn = document.querySelector('.host-baseline-apply-btn')
-  assert.ok(btn)
-  assert.match(btn.textContent ?? '', /補齊 2 項/)
+it('host_baseline_sync 正規化：只認 "ask"，其他值都是 off', () => {
+  assert.deepEqual(toHostBaselineSync({ local: 'ask', a: 'off', b: 'auto', c: 1, d: null }), {
+    local: 'ask',
+    a: 'off',
+    b: 'off',
+    c: 'off',
+    d: 'off',
+  })
+  assert.deepEqual(toHostBaselineSync(['ask']), {})
+  assert.deepEqual(toHostBaselineSync(undefined), {})
+  return Promise.resolve()
 })
 
 it('二次確認：明列主機名、要補的 id、目標檔、「會先備份、只補不蓋」；預設 focus 不在確認鈕，Enter 不直接送出', async () => {
@@ -199,7 +214,7 @@ it('確認後呼叫 applyHostBaseline 帶 plan_rev 與 ids', async () => {
     // 成功結果顯示 backup_id 與各項結果
     const root = document.querySelector('.host-baseline-apply-wrap')!
     assert.match(root.textContent ?? '', /備份 ID：20261025T010203Z-bk01/)
-    assert.match(root.textContent ?? '', /（如需還原請使用命令列）/)
+    assert.match(root.textContent ?? '', /可用這個備份 ID 還原（還原按鈕另案）/)
     assert.match(root.textContent ?? '', /claude\.hooks: 已補齊/)
     assert.match(root.textContent ?? '', /claude\.perm: 已補齊/)
   } finally {

@@ -669,6 +669,14 @@ export function sortByTimeStable<T extends { created_at: string }>(items: T[]): 
   return [...items].sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
+/** `host_baseline_sync`（#719 階段 3b）：只收 "ask"；其他值、缺欄（舊 daemon、bot 視圖）一律 off——缺值時不准預設可以寫。 */
+export function toHostBaselineSync(raw: unknown): Record<string, 'off' | 'ask'> {
+  const out: Record<string, 'off' | 'ask'> = {}
+  if (!isRec(raw)) return out
+  for (const [host, mode] of Object.entries(raw)) out[host] = mode === 'ask' ? 'ask' : 'off'
+  return out
+}
+
 export function toState(raw: unknown): AppState {
   const root = isRec(raw) ? raw : {}
   const hosts: Host[] = []
@@ -763,6 +771,7 @@ export function toState(raw: unknown): AppState {
     herdr: localHerdr,
     tools: localTools,
     baseline: localBaseline,
+    host_baseline_sync: toHostBaselineSync(pick(root, 'host_baseline_sync')),
     identity_status: localIdentityStatus,
     hosts,
     identities,
