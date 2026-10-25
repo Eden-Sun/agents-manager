@@ -1,8 +1,9 @@
 //! App host for the inert Claude API bot runtime.
 //!
-//! Production remains deliberately fail-closed: constructing this value is memory-only and every
-//! `ApiBotPort` method refuses before reading the database or creating an HTTP client. The real
-//! runner is reachable only through the test-only fixture seam below.
+//! Production remains deliberately fail-closed: constructing this value is memory-only, and no
+//! production path can install provider, HTTP, or key dependencies. All `ApiBotPort` methods
+//! refuse before database/config access when dependencies are absent. Tests inject fakes through
+//! the test-only seam and exercise the same runtime core compiled into production.
 
 use crate::lifecycle::api_bot_port::{ApiBotError, ApiRunCompletion, ApiTurnKey};
 use std::collections::HashMap;
@@ -10,14 +11,11 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
-#[cfg(test)]
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::registry::{ApiBotRegistry, RegistryError, TurnOutcome};
-#[cfg(test)]
-use super::registry::{RunTicket, RunTurnKey};
+use super::registry::{ApiBotRegistry, RegistryError, RunTicket, RunTurnKey, TurnOutcome};
 
 const API_BOT_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -86,8 +84,7 @@ struct RuntimeInner {
 /// Runtime storage is initialized without tasks, sockets, or database work.
 pub(crate) struct ApiBotRuntime {
     inner: Arc<RuntimeInner>,
-    #[cfg(test)]
-    test_harness: Mutex<Option<TestHarness>>,
+    dependencies: Mutex<Option<ApiBotDependencies>>,
 }
 
 impl ApiBotRuntime {
@@ -99,34 +96,38 @@ impl ApiBotRuntime {
                 sessions: Mutex::new(HashMap::new()),
                 admission: AsyncMutex::new(HashMap::new()),
             }),
-            #[cfg(test)]
-            test_harness: Mutex::new(None),
+            dependencies: Mutex::new(None),
         }
     }
 
     #[cfg(test)]
-    fn set_test_harness(&self, harness: TestHarness) {
+    fn set_test_dependencies(&self, dependencies: ApiBotDependencies) {
         *self
-            .test_harness
+            .dependencies
             .lock()
-            .expect("test harness mutex poisoned") = Some(harness);
+            .expect("API bot dependencies mutex poisoned") = Some(dependencies);
     }
 
     #[cfg(test)]
-    fn test_harness(&self) -> Option<TestHarness> {
-        self.test_harness
+    fn test_dependencies(&self) -> Option<ApiBotDependencies> {
+        self.dependencies
             .lock()
-            .expect("test harness mutex poisoned")
+            .expect("API bot dependencies mutex poisoned")
+            .clone()
+    }
+
+    fn dependencies_snapshot(&self) -> Option<ApiBotDependencies> {
+        self.dependencies
+            .lock()
+            .expect("API bot dependencies mutex poisoned")
             .clone()
     }
 
     async fn spawn(&self, app: &crate::state::App, key: &ApiTurnKey) -> Result<(), ApiBotError> {
-        #[cfg(test)]
-        if let Some(harness) = self.test_harness() {
-            return self.spawn_test(app, key, harness).await;
-        }
-        let _ = (app, key);
-        Err(ApiBotError::Upstream)
+        let Some(dependencies) = self.dependencies_snapshot() else {
+            return Err(ApiBotError::Upstream);
+        };
+        self.spawn_with_dependencies(app, key, dependencies).await
     }
 
     async fn cancel_and_join(
@@ -134,32 +135,27 @@ impl ApiBotRuntime {
         app: &crate::state::App,
         key: &ApiTurnKey,
     ) -> Result<ApiRunCompletion, ApiBotError> {
-        #[cfg(test)]
-        if self.test_harness().is_some() {
-            return self.cancel_and_join_test(app, key).await;
+        if self.dependencies_snapshot().is_none() {
+            return Err(ApiBotError::Upstream);
         }
-        let _ = (app, key);
-        Err(ApiBotError::Upstream)
+        self.cancel_and_join_core(app, key).await
     }
 
     async fn live(&self, app: &crate::state::App, key: &ApiTurnKey) -> bool {
-        #[cfg(test)]
-        if self.test_harness().is_some() {
-            cleanup_terminal_controls(&app.db, &self.inner).await;
-            let full = FullKey::from(key);
-            let controls = self.inner.controls.lock().expect("control mutex poisoned");
-            return controls.get(&full).is_some_and(|record| {
-                matches!(
-                    *record.joined.borrow(),
-                    JoinState::Pending | JoinState::TimedOut
-                )
-            });
+        if self.dependencies_snapshot().is_none() {
+            return false;
         }
-        let _ = (app, key);
-        false
+        cleanup_terminal_controls(&app.db, &self.inner).await;
+        let full = FullKey::from(key);
+        let controls = self.inner.controls.lock().expect("control mutex poisoned");
+        controls.get(&full).is_some_and(|record| {
+            matches!(
+                *record.joined.borrow(),
+                JoinState::Pending | JoinState::TimedOut
+            )
+        })
     }
 
-    #[cfg(test)]
     async fn spawn_gate(&self, key: &ApiTurnKey) -> OwnedMutexGuard<()> {
         let gate_key = AdmissionKey {
             bot_id: key.bot_id.clone(),
@@ -179,12 +175,11 @@ impl ApiBotRuntime {
         gate.lock_owned().await
     }
 
-    #[cfg(test)]
-    async fn spawn_test(
+    async fn spawn_with_dependencies(
         &self,
         app: &crate::state::App,
         key: &ApiTurnKey,
-        harness: TestHarness,
+        dependencies: ApiBotDependencies,
     ) -> Result<(), ApiBotError> {
         let _admission = self.spawn_gate(key).await;
         cleanup_terminal_controls(&app.db, &self.inner).await;
@@ -247,9 +242,9 @@ impl ApiBotRuntime {
                 options.clone(),
                 system.clone(),
                 adapter_limits.clone(),
-                harness.quote.clone(),
-                test_http_config(&harness, &limits),
-                Some(harness.tools.clone()),
+                dependencies.quote.clone(),
+                api_http_config(&dependencies, &limits),
+                Some(dependencies.tools.clone()),
             )
             .await
             .map_err(|_| ApiBotError::Unconfirmed)?;
@@ -261,9 +256,9 @@ impl ApiBotRuntime {
                 options.clone(),
                 system,
                 adapter_limits,
-                harness.quote.clone(),
-                test_http_config(&harness, &limits),
-                Some(harness.tools.clone()),
+                dependencies.quote.clone(),
+                api_http_config(&dependencies, &limits),
+                Some(dependencies.tools.clone()),
             )
             .await
             .map_err(|_| ApiBotError::Upstream)?;
@@ -293,7 +288,7 @@ impl ApiBotRuntime {
         let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
         let identity_tag = Arc::new(());
         let adapter = Arc::clone(&adapter);
-        let tools = SharedTools(Arc::clone(&harness.tools));
+        let tools = SharedTools(Arc::clone(&dependencies.tools));
         let max_calls = limits.max_api_calls_per_turn as usize;
         let turn_timeout = Duration::from_secs(limits.turn_timeout_secs);
         let run_ticket = self
@@ -338,9 +333,10 @@ impl ApiBotRuntime {
             inner: self.inner.clone(),
             bot_id: key.bot_id.clone(),
             identity,
+            #[cfg(test)]
             before_revision: None,
         };
-        let shutdown_timeout = harness
+        let shutdown_timeout = dependencies
             .shutdown_join_timeout
             .unwrap_or(API_BOT_SHUTDOWN_JOIN_TIMEOUT);
         app.background_tasks.spawn(Box::pin(async move {
@@ -357,7 +353,6 @@ impl ApiBotRuntime {
         Ok(())
     }
 
-    #[cfg(test)]
     async fn identity_for_turn(
         &self,
         pool: &sqlx::SqlitePool,
@@ -408,8 +403,7 @@ impl ApiBotRuntime {
         })
     }
 
-    #[cfg(test)]
-    async fn cancel_and_join_test(
+    async fn cancel_and_join_core(
         &self,
         app: &crate::state::App,
         key: &ApiTurnKey,
@@ -480,7 +474,6 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     }
 }
 
-#[cfg(test)]
 struct SessionCommit {
     pool: sqlx::SqlitePool,
     inner: Arc<RuntimeInner>,
@@ -490,7 +483,6 @@ struct SessionCommit {
     before_revision: Option<Arc<tokio::sync::Notify>>,
 }
 
-#[cfg(test)]
 async fn own_ticket(
     ticket: RunTicket,
     cancel: CancellationToken,
@@ -574,10 +566,8 @@ async fn wait_join(
     }
 }
 
-#[cfg(test)]
 struct SharedTools(Arc<dyn super::runner::Tools>);
 
-#[cfg(test)]
 impl super::runner::Tools for SharedTools {
     fn execute<'a>(
         &'a self,
@@ -588,9 +578,8 @@ impl super::runner::Tools for SharedTools {
     }
 }
 
-#[cfg(test)]
 #[derive(Clone)]
-struct TestHarness {
+struct ApiBotDependencies {
     endpoint: String,
     key: String,
     quote: Arc<dyn super::quote::QuoteProvider>,
@@ -598,20 +587,18 @@ struct TestHarness {
     shutdown_join_timeout: Option<Duration>,
 }
 
-#[cfg(test)]
-fn test_http_config(
-    harness: &TestHarness,
+fn api_http_config(
+    dependencies: &ApiBotDependencies,
     limits: &am_config::api_bot::ValidatedLimits,
 ) -> super::adapter::AdapterHttpConfig {
     super::adapter::AdapterHttpConfig {
-        endpoint: harness.endpoint.clone(),
-        key: harness.key.clone(),
+        endpoint: dependencies.endpoint.clone(),
+        key: dependencies.key.clone(),
         timeout: Duration::from_secs(limits.turn_timeout_secs),
         max_response_bytes: limits.max_checkpoint_bytes.min(8 * 1024 * 1024),
     }
 }
 
-#[cfg(test)]
 async fn validated_turn(
     app: &crate::state::App,
     key: &ApiTurnKey,
@@ -654,7 +641,6 @@ async fn validated_turn(
     Ok((bot, project, run, prompt))
 }
 
-#[cfg(test)]
 fn map_runner_result(
     result: Result<super::runner::Halt, super::runner::Error>,
     cancel: &CancellationToken,
@@ -679,7 +665,6 @@ fn map_runner_result(
     }
 }
 
-#[cfg(test)]
 async fn await_runner_deadline<F: Future>(
     future: F,
     cancel: &CancellationToken,
@@ -698,7 +683,6 @@ async fn await_runner_deadline<F: Future>(
     }
 }
 
-#[cfg(test)]
 async fn stored_revision(
     pool: &sqlx::SqlitePool,
     identity: &super::adapter::AdapterIdentity,
@@ -717,7 +701,6 @@ async fn stored_revision(
     .flatten()
 }
 
-#[cfg(test)]
 async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner) {
     let candidates: Vec<(FullKey, Arc<()>)> = {
         let controls = inner.controls.lock().expect("control mutex poisoned");
@@ -975,7 +958,7 @@ mod tests {
             })
             .await
             .unwrap();
-        app.api_bot_runtime.set_test_harness(TestHarness {
+        app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
             endpoint,
             key: "sk-ant-test-only".into(),
             quote: Arc::new(Quote),
@@ -1100,6 +1083,64 @@ mod tests {
             0,
             "App::new starts no API bot background tasks"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn app_new_has_no_api_bot_dependencies_or_preflight_db_and_config_reads() {
+        let dir = crate::testing::track(
+            std::env::temp_dir().join(format!("api-bot-no-deps-{}", crate::db::ulid())),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml"))
+            .await
+            .unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        am_config::GET_CALLS.with(|calls| calls.set(0));
+        let app = crate::state::App::new(
+            pool.clone(),
+            client.clone(),
+            client,
+            cfg,
+            dir.clone(),
+            dir.join("daemon"),
+            7799,
+            "test".into(),
+            "test".into(),
+            false,
+        );
+        assert!(app
+            .api_bot_runtime
+            .dependencies
+            .lock()
+            .expect("API bot dependencies mutex poisoned")
+            .is_none());
+        assert_eq!(
+            am_config::GET_CALLS.with(|calls| calls.get()),
+            0,
+            "App::new does not read ConfigStore"
+        );
+
+        let key = ApiTurnKey {
+            bot_id: "missing".into(),
+            run_id: "missing".into(),
+            turn_id: "missing".into(),
+        };
+        assert_eq!(app.api_turn_spawn(&key).await, Err(ApiBotError::Upstream));
+        assert_eq!(
+            app.api_run_cancel_and_join(&key).await,
+            Err(ApiBotError::Upstream)
+        );
+        assert!(!app.api_run_live(&key).await);
+        assert_eq!(pool.size(), 0, "all three port calls reject before SQLite");
+        assert_eq!(
+            am_config::GET_CALLS.with(|calls| calls.get()),
+            0,
+            "all three port calls reject before ConfigStore::get"
+        );
+        assert_eq!(app.background_tasks.len(), 0);
     }
 
     #[tokio::test]
@@ -1569,12 +1610,14 @@ mod tests {
         let tools_entered = Arc::new(Notify::new());
         let release_tools = Arc::new(Notify::new());
         enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
-        let mut harness = env.app.api_bot_runtime.test_harness().unwrap();
-        harness.tools = Arc::new(BlockingTools {
+        let mut dependencies = env.app.api_bot_runtime.test_dependencies().unwrap();
+        dependencies.tools = Arc::new(BlockingTools {
             entered: tools_entered.clone(),
             release: release_tools.clone(),
         });
-        env.app.api_bot_runtime.set_test_harness(harness);
+        env.app
+            .api_bot_runtime
+            .set_test_dependencies(dependencies);
 
         let bot_id = crate::db::ulid();
         let run_id = crate::db::ulid();
