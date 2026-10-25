@@ -47,10 +47,19 @@ class FakeWS {
 const realSetTimeoutG = globalThis.setTimeout
 const realClearTimeoutG = globalThis.clearTimeout
 const realFetchG = globalThis.fetch
+// rig() 換掉的瀏覽器全域也要還原：留著假的 `document`，同一個行程裡之後的 DOM 測試檔拆掉 happy-dom 時會還原成這個假物件，
+// 再 import `App`（讀 `document.title`）就炸（#719 階段 3b 加測試檔、分片重排後在 shard 4 現形）。
+const BROWSER_GLOBALS = ['WebSocket', 'location', 'window', 'document'] as const
+const realBrowserG = Object.fromEntries(BROWSER_GLOBALS.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
 afterEach(() => {
   globalThis.setTimeout = realSetTimeoutG
   globalThis.clearTimeout = realClearTimeoutG
   globalThis.fetch = realFetchG
+  for (const k of BROWSER_GLOBALS) {
+    const d = realBrowserG[k]
+    if (d) Object.defineProperty(globalThis, k, d)
+    else delete (globalThis as Record<string, unknown>)[k]
+  }
 })
 
 function rig(token: string, sessionToken = 'new') {
