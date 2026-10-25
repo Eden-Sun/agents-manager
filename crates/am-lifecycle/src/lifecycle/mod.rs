@@ -47,6 +47,7 @@ pub mod dead_panes;
 pub mod s6_ports;
 pub mod lc_host;
 pub use lc_host::LcHost;
+pub mod api_bot_port;
 pub mod queue;
 pub mod setup;
 pub mod pane_identities;
