@@ -1372,7 +1372,10 @@ async fn start_inner_body(
     }
 
     // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
-    let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
+    let injected = super::setup::injected_args_with_codex_profile(
+        app, bot, project, &env,
+        if bot.kind == "codex" { staged_persona.reference() } else { None },
+    ).await.map_err(up)?;
     let mut args = injected;
     if let Some(ws) = &restricted {
         // 受限 bot 不吃 bot／身份自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
