@@ -110,6 +110,87 @@ async fn stop_locked_body(
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
     app.refuse_handed_off(bot_id).await?;
+    if bot.kind == "claude-api" {
+        if for_restart {
+            return Err(LcError::conflict(
+                "api_bot_restart_unsupported",
+                json!({"bot_id": bot_id}),
+            ));
+        }
+        let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
+            return Ok(false);
+        };
+        if only_if_idle && refuse_background_jobs {
+            app.refresh_background_jobs(&run, &bot.kind).await;
+            if let Some(n) = app.background_jobs_count(&run.id).filter(|n| *n > 0) {
+                return Err(LcError::conflict(
+                    "not_idle",
+                    json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
+                ));
+            }
+        }
+        let (moved, withdrawn) = if only_if_idle {
+            (admit_idle_stop(app.db(), &run.id, bot_id, false).await.map_err(up)?, Vec::new())
+        } else {
+            let withdraw = !super::restart_hold::in_progress(bot_id);
+            begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
+        };
+        for (turn_id, revoked) in withdrawn {
+            app.announce_revoked(&turn_id, revoked).await;
+        }
+        match moved {
+            super::run_state::Moved::Applied => {}
+            super::run_state::Moved::Lost if only_if_idle => {
+                app.notify_bot_status(bot_id).await;
+                return Err(LcError::conflict("no_longer_idle", json!({"bot_id": bot_id, "run_id": run.id})));
+            }
+            super::run_state::Moved::Lost => {
+                app.notify_bot_status(bot_id).await;
+                return Ok(false);
+            }
+        }
+        app.notify_bot_status(bot_id).await;
+        let Some(turn) = db::in_flight_turn(app.db(), &run.id).await.map_err(up)? else {
+            tracing::warn!(bot = bot_id, run = %run.id, error_code = "missing_turn_owner", "API bot stop has no exact in-flight runner owner");
+            return Err(LcError::Upstream("api_bot_stop_unconfirmed:missing_turn_owner".into()));
+        };
+        let key = crate::lifecycle::api_bot_port::ApiTurnKey {
+            bot_id: bot_id.to_string(),
+            run_id: run.id.clone(),
+            turn_id: turn.id.clone(),
+        };
+        if let Err(error) = crate::lifecycle::api_bot_port::ApiBotPort::api_run_cancel_and_join(app, &key).await {
+            let code = match error {
+                crate::lifecycle::api_bot_port::ApiBotError::Busy => "busy",
+                crate::lifecycle::api_bot_port::ApiBotError::IdentityMismatch => "identity_mismatch",
+                crate::lifecycle::api_bot_port::ApiBotError::Unconfirmed => "unconfirmed",
+                crate::lifecycle::api_bot_port::ApiBotError::Upstream => "upstream",
+            };
+            tracing::warn!(bot = bot_id, run = %run.id, turn = %turn.id, error_code = code, "API bot stop did not confirm the runner join");
+            return Err(LcError::Upstream(format!("api_bot_stop_unconfirmed:{code}")));
+        }
+        if db::api_bot::recover_unknown(app.db(), &run.id).await.is_err() {
+            tracing::warn!(bot = bot_id, run = %run.id, error_code = "recover_unknown", "API bot stop could not recover unknown attempts");
+            return Err(LcError::Upstream("api_bot_stop_unconfirmed:recover_unknown".into()));
+        }
+        if app.fail_in_flight(&run.id, "run stopped by user").await.is_err() {
+            tracing::warn!(bot = bot_id, run = %run.id, error_code = "turn_settle", "API bot stop could not settle the in-flight turn");
+            return Err(LcError::Upstream("api_bot_stop_unconfirmed:turn_settle".into()));
+        }
+        match commit_stopped(app, &run.id, false).await {
+            Ok(StopCommit::Applied) => {
+                app.revoke_orphaned_queued_turns(bot_id, "bot 已被停止").await;
+            }
+            Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
+            Err(_) => {
+                tracing::warn!(bot = bot_id, run = %run.id, error_code = "stop_commit", "API bot stop could not record the stopped run");
+                super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::FinishStop);
+                return Err(LcError::Upstream("api_bot_stop_unconfirmed:stop_commit".into()));
+            }
+        }
+        app.notify_bot_status(bot_id).await;
+        return Ok(true);
+    }
     let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
         // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
         match host_fence {

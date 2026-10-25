@@ -977,9 +977,10 @@ mod tests {
         prompt: &str,
     ) {
         let now = crate::db::now();
-        sqlx::query("INSERT OR IGNORE INTO bots(id,project_id,name,kind,effort,fast,hook_token,created_at) VALUES(?,?,'api-test','claude-api','high',0,'fixture',?)")
+        sqlx::query("INSERT OR IGNORE INTO bots(id,project_id,name,kind,effort,fast,hook_token,created_at) VALUES(?,?,?,'claude-api','high',0,'fixture',?)")
             .bind(bot_id)
             .bind(project_id)
+            .bind(format!("api-test-{bot_id}"))
             .bind(&now)
             .execute(&app.db)
             .await
@@ -1722,5 +1723,604 @@ mod tests {
         let (tx, mut rx) = watch::channel(JoinState::Pending);
         drop(tx);
         assert_eq!(wait_join(&mut rx).await, Err(ApiBotError::Unconfirmed));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_stop_waits_for_the_real_tool_join_before_settling() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, server_shutdown, server_task) =
+            tool_response_server(calls, hit.clone()).await;
+        let tools_entered = Arc::new(Notify::new());
+        let release_tools = Arc::new(Notify::new());
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let mut dependencies = env.app.api_bot_runtime.test_dependencies().unwrap();
+        dependencies.tools = Arc::new(BlockingTools {
+            entered: tools_entered.clone(),
+            release: release_tools.clone(),
+        });
+        env.app.api_bot_runtime.set_test_dependencies(dependencies);
+
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot_id,
+            &run_id,
+            &turn_id,
+            &conv,
+            &env.project_id,
+            "stop while a tool is held",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot_id.clone(),
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+        };
+        let spawn_result = env.app.api_turn_spawn(&key).await;
+        let hit_result = tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await;
+        let tools_entered_result =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, tools_entered.notified()).await;
+        let owner = env
+            .app
+            .api_bot_runtime
+            .inner
+            .controls
+            .lock()
+            .ok()
+            .and_then(|controls| {
+                controls
+                    .get(&FullKey::from(&key))
+                    .map(|record| (record.cancel.clone(), record.joined.clone()))
+            });
+        let cancel = owner
+            .as_ref()
+            .map(|(cancel, _)| cancel.clone())
+            .unwrap_or_else(CancellationToken::new);
+        let stop_app = env.app.clone();
+        let stop_bot_id = bot_id.clone();
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let stop_task = tokio::spawn(async move {
+            let result = crate::lifecycle::stop_bot(&stop_app, &stop_bot_id).await;
+            let _ = stop_tx.send(result);
+        });
+        let stop_progress = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => None,
+                result = &mut stop_rx => Some(result),
+            }
+        })
+        .await;
+        let observed_cancel_before_stop_return = matches!(&stop_progress, Ok(None));
+
+        let state_before_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE id=?")
+                .bind(&run_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let turn_status_before_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let live_before_cleanup = env.app.api_run_live(&key).await;
+        let stop_finished_before_cleanup = stop_task.is_finished();
+
+        // Restore the fixture owner, then cancel and release the actual runner before asserting.
+        let restore_run = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=?")
+            .bind(&run_id)
+            .bind(&bot_id)
+            .execute(&env.app.db)
+            .await;
+        let restore_turn = sqlx::query(
+            "UPDATE turns SET status='in_flight',completed_at=NULL WHERE id=? AND run_id=?",
+        )
+        .bind(&turn_id)
+        .bind(&run_id)
+        .execute(&env.app.db)
+        .await;
+        cancel.cancel();
+        release_tools.notify_one();
+        let registry = env.app.api_bot_runtime.inner.registry.clone();
+        let _registry_join =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, registry.cancel_and_join(&run_id)).await;
+        let owner_join = if let Some((_, mut joined)) = owner {
+            Some(tokio::time::timeout(DEADLOCK_TIMEOUT, wait_join(&mut joined)).await)
+        } else {
+            None
+        };
+        let stop_result = match stop_progress {
+            Ok(Some(result)) => Some(result),
+            Ok(None) | Err(_) => tokio::time::timeout(DEADLOCK_TIMEOUT, &mut stop_rx)
+                .await
+                .ok(),
+        };
+        let stop_task_result = stop_task.await;
+        let cleanup_stop_result =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::stop_bot(&env.app, &bot_id))
+                .await;
+        let state_after_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE id=?")
+                .bind(&run_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let turn_status_after_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let live_after_cleanup = env.app.api_run_live(&key).await;
+        server_shutdown.cancel();
+        let server_result = server_task.await;
+
+        assert!(spawn_result.is_ok(), "API turn spawn failed: {spawn_result:?}");
+        assert!(hit_result.is_ok(), "fake provider was not reached: {hit_result:?}");
+        assert!(
+            tools_entered_result.is_ok(),
+            "fake tool did not enter its gate: {tools_entered_result:?}"
+        );
+        assert!(
+            observed_cancel_before_stop_return,
+            "stop returned or timed out before requesting cancellation"
+        );
+        assert!(
+            matches!(&state_before_cleanup, Ok(state) if state == "stopping"),
+            "run was not stopping while the tool was held: {state_before_cleanup:?}"
+        );
+        assert!(
+            matches!(&turn_status_before_cleanup, Ok(status) if status == "in_flight"),
+            "turn settled before the tool joined: {turn_status_before_cleanup:?}"
+        );
+        assert!(live_before_cleanup, "the blocked task had not joined");
+        assert!(!stop_finished_before_cleanup, "lifecycle stop returned before the tool runner joined");
+        assert!(matches!(&restore_run, Ok(result) if result.rows_affected() == 1));
+        assert!(matches!(&restore_turn, Ok(result) if result.rows_affected() == 1));
+        assert!(
+            matches!(&owner_join, Some(Ok(Ok(_)))),
+            "cleanup did not receive the exact owner join receipt: {owner_join:?}"
+        );
+        assert!(
+            matches!(&stop_result, Some(Ok(Ok(true)))),
+            "lifecycle stop did not finish after joining: {stop_result:?}"
+        );
+        assert!(
+            matches!(&stop_task_result, Ok(())),
+            "stop task did not finish: {stop_task_result:?}"
+        );
+        assert!(
+            matches!(&cleanup_stop_result, Ok(Ok(_))),
+            "cleanup stop retry failed: {cleanup_stop_result:?}"
+        );
+        assert!(
+            matches!(&state_after_cleanup, Ok(state) if state == "stopped"),
+            "run was not stopped after true join cleanup: {state_after_cleanup:?}"
+        );
+        assert!(
+            matches!(&turn_status_after_cleanup, Ok(status) if status == "failed"),
+            "turn was not settled after true join cleanup: {turn_status_after_cleanup:?}"
+        );
+        assert!(!live_after_cleanup, "the test runner remained live after true join cleanup");
+        assert!(
+            matches!(&server_result, Ok(())),
+            "fake provider task did not stop: {server_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_stop_recovers_held_http_attempt_as_unknown_without_releasing_its_reservation() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, server_shutdown, server_task, late_response) =
+            held_response_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot_id,
+            &run_id,
+            &turn_id,
+            &conv,
+            &env.project_id,
+            "stop while HTTP is held",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot_id.clone(),
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+        };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert!(tokio::time::timeout(
+            DEADLOCK_TIMEOUT,
+            crate::lifecycle::stop_bot(&env.app, &bot_id),
+        )
+        .await
+        .unwrap()
+        .unwrap());
+        let attempt: (String, Option<i64>, i64) = sqlx::query_as(
+            "SELECT state,estimated_microusd,reserved_microusd FROM api_bot_attempts WHERE bot_id=? AND run_id=?",
+        )
+        .bind(&bot_id)
+        .bind(&run_id)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+        assert_eq!(attempt, ("unknown".into(), None, 100));
+
+        let _ = late_response.send(json!({
+            "id":"late-fixture-message",
+            "type":"message",
+            "role":"assistant",
+            "model":"claude-opus-5-5",
+            "content":[{"type":"text","text":"late response"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }));
+        server_shutdown.cancel();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_owner_and_completed_turn_do_not_forge_a_join_receipt() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, server_shutdown, server_task) = fake_server(calls, hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+        let missing_bot = crate::db::ulid();
+        let missing_run = crate::db::ulid();
+        let missing_turn = crate::db::ulid();
+        let missing_conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &missing_bot,
+            &missing_run,
+            &missing_turn,
+            &missing_conv,
+            &env.project_id,
+            "no runner owner",
+        )
+        .await;
+        let missing_key = ApiTurnKey {
+            bot_id: missing_bot.clone(),
+            run_id: missing_run.clone(),
+            turn_id: missing_turn.clone(),
+        };
+        let stop_error = crate::lifecycle::stop_bot(&env.app, &missing_bot)
+            .await
+            .expect_err("missing runner owner cannot make lifecycle stop succeed");
+        assert!(matches!(stop_error, crate::lifecycle::LcError::Upstream(message) if message.starts_with("api_bot_stop_unconfirmed:unconfirmed")));
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?")
+            .bind(&missing_run)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        let turn_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&missing_turn)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "stopping");
+        assert_eq!(turn_status, "in_flight");
+        assert_eq!(
+            env.app.api_run_cancel_and_join(&missing_key).await,
+            Err(ApiBotError::Unconfirmed),
+        );
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&missing_turn)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.app.api_run_cancel_and_join(&missing_key).await,
+            Err(ApiBotError::Unconfirmed),
+            "a completed DB turn cannot replace the missing join owner",
+        );
+
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot_id,
+            &run_id,
+            &turn_id,
+            &conv,
+            &env.project_id,
+            "terminal DB row is not an in-flight owner",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot_id.clone(),
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+        };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+            .await
+            .unwrap();
+        wait_until_joined(&env.app, &key).await;
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?")
+            .bind(&run_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&turn_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.app.api_run_cancel_and_join(&key).await,
+            Err(ApiBotError::IdentityMismatch),
+            "a DB completed row cannot impersonate the lifecycle join receipt",
+        );
+        server_shutdown.cancel();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_stop_refuses_a_completed_turn_while_its_runner_is_still_live() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, server_shutdown, server_task) =
+            tool_response_server(calls, hit.clone()).await;
+        let tools_entered = Arc::new(Notify::new());
+        let release_tools = Arc::new(Notify::new());
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let mut dependencies = env.app.api_bot_runtime.test_dependencies().unwrap();
+        dependencies.tools = Arc::new(BlockingTools {
+            entered: tools_entered.clone(),
+            release: release_tools.clone(),
+        });
+        env.app.api_bot_runtime.set_test_dependencies(dependencies);
+
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot_id,
+            &run_id,
+            &turn_id,
+            &conv,
+            &env.project_id,
+            "terminal turn row must not skip a live runner join",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot_id.clone(),
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+        };
+        let spawn_result = env.app.api_turn_spawn(&key).await;
+        let hit_result = tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await;
+        let tools_entered_result =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, tools_entered.notified()).await;
+        let owner = env
+            .app
+            .api_bot_runtime
+            .inner
+            .controls
+            .lock()
+            .ok()
+            .and_then(|controls| {
+                controls
+                    .get(&FullKey::from(&key))
+                    .map(|record| (record.cancel.clone(), record.joined.clone()))
+            });
+        let live_before_mutation = env.app.api_run_live(&key).await;
+
+        let complete_turn =
+            sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&turn_id)
+            .execute(&env.app.db)
+            .await;
+        let turn_fixture = sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT conversation_id,prompt_text,created_at FROM turns WHERE id=? AND run_id=?",
+        )
+        .bind(&turn_id)
+        .bind(&run_id)
+        .fetch_optional(&env.app.db)
+        .await;
+        let stop_result = tokio::time::timeout(
+            DEADLOCK_TIMEOUT,
+            crate::lifecycle::stop_bot(&env.app, &bot_id),
+        )
+        .await;
+        let state_before_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE id=?")
+                .bind(&run_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let turn_status_before_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let live_after_stop = env.app.api_run_live(&key).await;
+
+        // Restore the exact owner key before releasing the gate, then obtain the real runner join.
+        let restore_run = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=?")
+            .bind(&run_id)
+            .bind(&bot_id)
+            .execute(&env.app.db)
+            .await;
+        // The DB guard correctly forbids completed -> in_flight. Replace this test-only row with
+        // a fresh in-flight fixture under the same key so cleanup can exercise the real lifecycle.
+        let delete_terminal_turn = sqlx::query(
+            "DELETE FROM turns WHERE id=? AND run_id=? AND status='completed'",
+        )
+        .bind(&turn_id)
+        .bind(&run_id)
+        .execute(&env.app.db)
+        .await;
+        let restore_turn = if let Ok(Some((conversation_id, prompt_text, created_at))) = &turn_fixture
+        {
+            Some(
+                sqlx::query(
+                    "INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok',?,?)",
+                )
+                .bind(&turn_id)
+                .bind(conversation_id)
+                .bind(&run_id)
+                .bind(prompt_text)
+                .bind(created_at)
+                .execute(&env.app.db)
+                .await,
+            )
+        } else {
+            None
+        };
+        let restored_owner = sqlx::query_as::<_, (Option<String>, String)>(
+            "SELECT run_id,status FROM turns WHERE id=?",
+        )
+        .bind(&turn_id)
+        .fetch_optional(&env.app.db)
+        .await;
+        if let Some((cancel, _)) = &owner {
+            cancel.cancel();
+        }
+        release_tools.notify_one();
+        let registry = env.app.api_bot_runtime.inner.registry.clone();
+        let _registry_join =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, registry.cancel_and_join(&run_id)).await;
+        let owner_join = if let Some((_, mut joined)) = owner {
+            Some(tokio::time::timeout(DEADLOCK_TIMEOUT, wait_join(&mut joined)).await)
+        } else {
+            None
+        };
+        let cleanup_stop_result =
+            tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::stop_bot(&env.app, &bot_id))
+                .await;
+        let state_after_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE id=?")
+                .bind(&run_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let turn_status_after_cleanup =
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&env.app.db)
+                .await;
+        let live_after_cleanup = env.app.api_run_live(&key).await;
+        server_shutdown.cancel();
+        let server_result = server_task.await;
+
+        assert!(spawn_result.is_ok(), "API turn spawn failed: {spawn_result:?}");
+        assert!(hit_result.is_ok(), "fake provider was not reached: {hit_result:?}");
+        assert!(
+            tools_entered_result.is_ok(),
+            "fake tool did not enter its gate: {tools_entered_result:?}"
+        );
+        assert!(live_before_mutation, "the test requires a live gated runner");
+        assert!(matches!(&complete_turn, Ok(result) if result.rows_affected() == 1));
+        assert!(
+            matches!(
+                &stop_result,
+                Ok(Err(crate::lifecycle::LcError::Upstream(message)))
+                    if message.starts_with("api_bot_stop_unconfirmed:missing_turn_owner")
+            ),
+            "a completed turn row must not stand in for a runner owner: {stop_result:?}"
+        );
+        assert!(
+            matches!(&state_before_cleanup, Ok(state) if state == "stopping"),
+            "run was not left stopping after the rejected stop: {state_before_cleanup:?}"
+        );
+        assert!(
+            matches!(&turn_status_before_cleanup, Ok(status) if status == "completed"),
+            "the completed fixture turn changed before cleanup: {turn_status_before_cleanup:?}"
+        );
+        assert!(live_after_stop, "the rejected stop cancelled or joined the live runner");
+        assert!(matches!(&restore_run, Ok(result) if result.rows_affected() == 1));
+        assert!(
+            matches!(&delete_terminal_turn, Ok(result) if result.rows_affected() == 1),
+            "removing the completed fixture row failed: {delete_terminal_turn:?}"
+        );
+        assert!(
+            matches!(&restore_turn, Some(Ok(result)) if result.rows_affected() == 1),
+            "restoring the in-flight fixture row failed: {restore_turn:?}"
+        );
+        assert!(
+            matches!(&restored_owner, Ok(Some((Some(owner_run), status))) if owner_run == &run_id && status == "in_flight"),
+            "cleanup did not restore the exact in-flight owner: {restored_owner:?}"
+        );
+        assert!(
+            matches!(&owner_join, Some(Ok(Ok(_)))),
+            "cleanup did not receive the exact owner join receipt: {owner_join:?}"
+        );
+        assert!(
+            matches!(&cleanup_stop_result, Ok(Ok(true))),
+            "cleanup lifecycle stop did not settle the restored owner: {cleanup_stop_result:?}"
+        );
+        assert!(
+            matches!(&state_after_cleanup, Ok(state) if state == "stopped"),
+            "run was not stopped after true join cleanup: {state_after_cleanup:?}"
+        );
+        assert!(
+            matches!(&turn_status_after_cleanup, Ok(status) if status == "failed"),
+            "turn was not settled after true join cleanup: {turn_status_after_cleanup:?}"
+        );
+        assert!(!live_after_cleanup, "the test runner remained live after true join cleanup");
+        assert!(
+            matches!(&server_result, Ok(())),
+            "fake provider task did not stop: {server_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_bot_restart_is_rejected_with_a_stable_reason() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot_id,
+            &run_id,
+            &turn_id,
+            &conv,
+            &env.project_id,
+            "API bot restart must not enter the CLI start path",
+        )
+        .await;
+
+        let error = crate::lifecycle::restart_bot(&env.app, &bot_id)
+            .await
+            .expect_err("API bots cannot restart through the CLI lifecycle");
+        match error {
+            crate::lifecycle::LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "api_bot_restart_unsupported");
+            }
+            other => panic!("expected named restart conflict, received {other:?}"),
+        }
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?")
+            .bind(&run_id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "running", "restart refusal leaves the run untouched");
     }
 }
