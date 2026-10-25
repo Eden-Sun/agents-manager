@@ -63,6 +63,14 @@ pub fn valid_backup_id(id: &str) -> bool {
     })
 }
 
+fn backup_created_at(id: &str) -> Option<String> {
+    if !valid_backup_id(id) {
+        return None;
+    }
+    let created = chrono::NaiveDateTime::parse_from_str(&id[..16], "%Y%m%dT%H%M%SZ").ok()?;
+    Some(created.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 /// 一項的結果（API 回應的 `results[]`）。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Outcome {
@@ -503,6 +511,184 @@ done < "$br_dir/manifest"
 br_end
 "#;
 
+/// 唯讀列出可還原備份。逐一驗完整 manifest 和 restore 所需的路徑／symlink 條件；不讀備份檔內容、不寫任何檔案。
+const LIST_BACKUPS_SH: &str = r#"
+printf 'AM_BK begin\n'
+bk_end() { printf 'AM_BK skipped %s\n' "$bk_skipped"; printf 'AM_BK end\n'; exit 0; }
+bk_skipped=0
+bk_id_ok() {
+  case "$1" in ????????T??????Z-????????-????-????-????-????????????) ;; *) return 1 ;; esac
+  bk_stamp=${1%%-*}
+  case "$bk_stamp" in *[!0123456789TZ]*) return 1 ;; esac
+  bk_uuid=${1#????????T??????Z-}
+  case "$bk_uuid" in *[!0123456789abcdef-]*) return 1 ;; esac
+  return 0
+}
+case "$HOME" in /*) ;; *) bk_skipped=1; bk_end ;; esac
+if ! ba_root_ok; then bk_skipped=1; bk_end; fi
+if [ -L "$ba_root" ]; then bk_skipped=1; bk_end; fi
+if [ ! -e "$ba_root" ]; then bk_end; fi
+if [ ! -d "$ba_root" ]; then bk_skipped=1; bk_end; fi
+for bk_dir in "$ba_root"/*; do
+  [ -e "$bk_dir" ] || [ -L "$bk_dir" ] || continue
+  bk_id=${bk_dir##*/}
+  bk_id_ok "$bk_id" || continue
+  bk_bad=0
+  if [ -L "$bk_dir" ] || [ ! -d "$bk_dir" ]; then bk_bad=1; fi
+  bk_files_dir="$bk_dir/files"
+  bk_manifest="$bk_dir/manifest"
+  if [ "$bk_bad" = 0 ] && { [ -L "$bk_files_dir" ] || [ ! -d "$bk_files_dir" ] || [ -L "$bk_manifest" ] || [ ! -f "$bk_manifest" ]; }; then bk_bad=1; fi
+  bk_header=0
+  bk_id_seen=0
+  bk_plan_seen=0
+  bk_count=0
+  bk_seen="|"
+  bk_file_ids="|"
+  bk_meta=""
+  if [ "$bk_bad" = 0 ]; then
+    set -f
+    while IFS= read -r bk_line || [ -n "$bk_line" ]; do
+      if [ "$bk_header" = 0 ]; then
+        [ "$bk_line" = "am-baseline-backup 1" ] || { bk_bad=1; break; }
+        bk_header=1
+        continue
+      fi
+      set -- $bk_line
+      [ $# -gt 0 ] || { bk_bad=1; break; }
+      case "$1" in
+        id)
+          [ $# -eq 2 ] && [ "$bk_id_seen" = 0 ] && [ "$2" = "$bk_id" ] || { bk_bad=1; break; }
+          bk_id_seen=1
+          ;;
+        plan_rev)
+          [ $# -eq 2 ] && [ "$bk_plan_seen" = 0 ] || { bk_bad=1; break; }
+          bk_plan_seen=1
+          ;;
+        file)
+          [ $# -eq 5 ] || { bk_bad=1; break; }
+          case "$2" in ''|*[!0-9]*) bk_bad=1 ;; esac
+          case "$3" in 0|1) ;; *) bk_bad=1 ;; esac
+          case "$4" in -|[0-7][0-7][0-7]) ;; *) bk_bad=1 ;; esac
+          ba_token_ok "$5" || bk_bad=1
+          case "$bk_file_ids" in *"|$2|"*) bk_bad=1 ;; esac
+          case "$bk_seen" in *"|$5|"*) bk_bad=1 ;; esac
+          [ "$bk_bad" = 0 ] || break
+          bk_file_ids="$bk_file_ids$2|"
+          bk_seen="$bk_seen$5|"
+          if [ "$3" = 1 ]; then
+            [ -L "$bk_files_dir/$2" ] && bk_bad=1
+            [ -f "$bk_files_dir/$2" ] || bk_bad=1
+          fi
+          bk_target=$(ba_path "$5") || bk_bad=1
+          bk_target_dir=${bk_target%/*}
+          if [ -L "$bk_target" ] || [ -L "$bk_target_dir" ] || [ ! -d "$bk_target_dir" ]; then bk_bad=1; fi
+          if [ -e "$bk_target" ] && [ ! -f "$bk_target" ]; then bk_bad=1; fi
+          [ "$bk_bad" = 0 ] || break
+          if [ "$3" = 1 ]; then bk_action=overwrite; else bk_action=delete; fi
+          bk_meta="$bk_meta"'AM_BK file '"$5"' '"$bk_action"'
+'
+          bk_count=$((bk_count + 1))
+          ;;
+        *) bk_bad=1; break ;;
+      esac
+    done < "$bk_manifest"
+    set +f
+  fi
+  if [ "$bk_bad" = 0 ] && [ "$bk_header" = 1 ] && [ "$bk_id_seen" = 1 ] && [ "$bk_plan_seen" = 1 ] && [ "$bk_count" -gt 0 ]; then
+    printf 'AM_BK backup %s\n' "$bk_id"
+    printf '%s' "$bk_meta"
+  else
+    bk_skipped=$((bk_skipped + 1))
+  fi
+done
+bk_end
+"#;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BackupFile {
+    /// 固定 allowlist 內的 manifest 目標名，不是主機路徑。
+    pub file: String,
+    /// `overwrite`＝備份時原檔存在；`delete`＝備份時原檔不存在，還原時會刪除。
+    pub restore: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BackupSummary {
+    pub backup_id: String,
+    pub created_at: String,
+    pub files: Vec<BackupFile>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BackupList {
+    pub backups: Vec<BackupSummary>,
+    pub skipped: usize,
+}
+
+/// 列舉腳本只讀備份目錄與 manifest；backup_id 在腳本拼路徑前先驗固定格式。
+pub fn render_backup_list_sh() -> String {
+    format!("{COMMON_SH}{LIST_BACKUPS_SH}")
+}
+
+/// 解列舉腳本標記；忽略 shell 的任何非協定輸出，目標名與結果再用 allowlist 驗一次。
+pub fn parse_backup_list(out: &str) -> Option<BackupList> {
+    if !out.lines().any(|l| l.trim_end() == "AM_BK end") {
+        return None;
+    }
+    let mut backups: Vec<BackupSummary> = Vec::new();
+    let mut current: Option<BackupSummary> = None;
+    let mut protocol_skipped = None;
+    let mut parser_skipped = 0usize;
+    for line in out.lines() {
+        let fields: Vec<_> = line.trim_end().split(' ').collect();
+        match fields.as_slice() {
+            ["AM_BK", "begin"] => {}
+            ["AM_BK", "backup", id] => {
+                if let Some(b) = current.take() {
+                    if b.files.is_empty() {
+                        parser_skipped = parser_skipped.saturating_add(1);
+                    } else {
+                        backups.push(b);
+                    }
+                }
+                if !valid_backup_id(id) {
+                    parser_skipped = parser_skipped.saturating_add(1);
+                    continue;
+                }
+                let Some(created_at) = backup_created_at(id) else {
+                    parser_skipped = parser_skipped.saturating_add(1);
+                    continue;
+                };
+                current = Some(BackupSummary { backup_id: (*id).to_string(), created_at, files: Vec::new() });
+            }
+            ["AM_BK", "file", file, restore] => {
+                let Some(b) = current.as_mut() else { continue };
+                if !token_ok(file) || !matches!(*restore, "overwrite" | "delete") || b.files.iter().any(|f| f.file == *file) {
+                    return None;
+                }
+                b.files.push(BackupFile { file: (*file).to_string(), restore: if *restore == "overwrite" { "overwrite" } else { "delete" } });
+            }
+            ["AM_BK", "skipped", n] => {
+                protocol_skipped = Some(n.parse::<usize>().ok()?);
+            }
+            ["AM_BK", "end"] => {}
+            ["AM_BK", ..] => return None,
+            _ => {}
+        }
+    }
+    if let Some(b) = current {
+        if b.files.is_empty() {
+            parser_skipped = parser_skipped.saturating_add(1);
+        } else {
+            backups.push(b);
+        }
+    }
+    backups.sort_by(|a, b| b.backup_id.cmp(&a.backup_id));
+    backups.dedup_by(|a, b| a.backup_id == b.backup_id);
+    backups.truncate(KEEP_BACKUPS);
+    Some(BackupList { backups, skipped: protocol_skipped?.saturating_add(parser_skipped) })
+}
+
 /// 還原腳本。`backup_id` 不符固定格式就不產生（API 回 400）。
 pub fn render_restore_sh(backup_id: &str) -> Result<String, &'static str> {
     if !valid_backup_id(backup_id) {
@@ -649,8 +835,102 @@ mod tests {
         std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
     }
 
+    /// Same content/mode/mtime/ctime tree snapshot as host_baseline/tests.rs::snapshot.
+    fn directory_snapshot(root: &Path) -> Vec<(String, Vec<u8>, u32, i64, i64)> {
+        use std::os::unix::fs::MetadataExt;
+        fn walk(p: &Path, root: &Path, acc: &mut Vec<(String, Vec<u8>, u32, i64, i64)>) {
+            for entry in std::fs::read_dir(p).unwrap().flatten() {
+                let path = entry.path();
+                let metadata = entry.metadata().unwrap();
+                let data = if metadata.is_file() { std::fs::read(&path).unwrap() } else { vec![] };
+                acc.push((
+                    path.strip_prefix(root).unwrap().display().to_string(),
+                    data,
+                    metadata.mode(),
+                    metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec(),
+                    metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec(),
+                ));
+                if metadata.is_dir() {
+                    walk(&path, root, acc);
+                }
+            }
+        }
+        let mut acc = Vec::new();
+        walk(root, root, &mut acc);
+        acc.sort();
+        acc
+    }
+
     fn id_n(n: usize) -> String {
         format!("20261024T12{n:04}Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4")
+    }
+
+    #[test]
+    fn backup_list_is_read_only_skips_bad_manifests_and_symlinks() {
+        let home = Home::new();
+        let root = home.h.join(BACKUP_ROOT_REL);
+        let good = root.join(ID1);
+        std::fs::create_dir_all(good.join("files")).unwrap();
+        std::fs::create_dir_all(home.h.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.h.join(".claude")).unwrap();
+        std::fs::write(home.h.join(".codex/config.toml"), "current\n").unwrap();
+        std::fs::write(good.join("files/1"), "AM-SECRET-backup-content\n").unwrap();
+        std::fs::write(
+            good.join("manifest"),
+            format!("am-baseline-backup 1\nid {ID1}\nplan_rev rev1\nfile 1 1 644 codex/config.toml\nfile 2 0 - claude-default/settings.json\n"),
+        )
+        .unwrap();
+
+        let bad_id = "20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c5";
+        let bad = root.join(bad_id);
+        std::fs::create_dir_all(bad.join("files")).unwrap();
+        std::fs::write(bad.join("manifest"), format!("am-baseline-backup 1\nid {bad_id}\nfile 1 1 600 /etc/passwd\n")).unwrap();
+        let symlink_id = "20261024T120002Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c6";
+        std::os::unix::fs::symlink(&good, root.join(symlink_id)).unwrap();
+
+        let before = directory_snapshot(&home.h);
+        let out = home.run(&render_backup_list_sh());
+        let after = directory_snapshot(&home.h);
+        assert_eq!(after, before, "listing must not write, delete, touch, or change file metadata");
+        assert!(out.contains("AM_BK skipped 2\n"), "bad manifest and symlink must be counted: {out}");
+        assert!(!out.contains("AM-SECRET") && !out.contains(home.h.to_str().unwrap()) && !out.contains(BACKUP_ROOT_REL), "{out}");
+        assert!(out.lines().all(|line| line.starts_with("AM_BK ")), "unexpected output: {out}");
+        assert_eq!(
+            parse_backup_list(&out),
+            Some(BackupList {
+                backups: vec![BackupSummary {
+                    backup_id: ID1.into(),
+                    created_at: "2026-10-24T12:00:00Z".into(),
+                    files: vec![
+                        BackupFile { file: "codex/config.toml".into(), restore: "overwrite" },
+                        BackupFile { file: "claude-default/settings.json".into(), restore: "delete" },
+                    ],
+                }],
+                skipped: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn backup_list_refuses_a_symlinked_backup_root_without_following_it() {
+        let home = Home::new();
+        let outside = home.h.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(home.h.join(".config/agents-manager")).unwrap();
+        std::os::unix::fs::symlink(&outside, home.h.join(BACKUP_ROOT_REL)).unwrap();
+        let before = directory_snapshot(&home.h);
+        let out = home.run(&render_backup_list_sh());
+        assert_eq!(directory_snapshot(&home.h), before);
+        assert!(!out.contains(outside.to_str().unwrap()));
+        assert_eq!(parse_backup_list(&out).unwrap().skipped, 1);
+    }
+
+    #[test]
+    fn backup_list_parser_rejects_unallowlisted_names_and_unknown_actions() {
+        let header = format!("AM_BK begin\nAM_BK backup {ID1}\n");
+        assert!(parse_backup_list(&format!("{header}AM_BK file /etc/passwd overwrite\nAM_BK skipped 0\nAM_BK end\n")).is_none());
+        assert!(parse_backup_list(&format!("{header}AM_BK file codex/config.toml execute\nAM_BK skipped 0\nAM_BK end\n")).is_none());
+        assert!(parse_backup_list(&format!("{header}AM_BK file codex/config.toml overwrite\nAM_BK end\n")).is_none());
     }
 
     #[test]
@@ -1009,7 +1289,7 @@ mod tests {
         }
     }
 
-    /// `scripts/ops/host-baseline-sync-mac-verify.sh` 內嵌的 apply／restore 腳本必須是現在產生的這一份（改了腳本就要更新它，再到 Mac 上跑一次）。
+    /// `scripts/ops/host-baseline-sync-mac-verify.sh` 內嵌腳本必須與目前產生的版本一致（改了腳本就要更新它，再到 Mac 上跑一次）。
     #[test]
     fn the_mac_verify_script_embeds_the_current_scripts() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ops/host-baseline-sync-mac-verify.sh");
@@ -1023,8 +1303,10 @@ mod tests {
         let writes = prepare(&hooks_plan(), None).unwrap().writes;
         let apply = render_apply_sh(MAC_VERIFY_ID, "macverify", &writes).unwrap();
         let restore = render_restore_sh(MAC_VERIFY_ID).unwrap();
+        let backups = render_backup_list_sh();
         assert!(embedded("AM_APPLY_SH") == apply, "apply script drifted: paste the current render_apply_sh output into the heredoc and re-verify on a Mac");
         assert!(embedded("AM_RESTORE_SH") == restore, "restore script drifted: paste the current render_restore_sh output into the heredoc and re-verify on a Mac");
+        assert!(embedded("AM_LIST_SH") == backups, "backup list script drifted: paste the current render_backup_list_sh output into the heredoc and re-verify on a Mac");
         assert!(apply.lines().filter(|l| l.starts_with("ba_id=")).count() == 1 && restore.lines().filter(|l| l.starts_with("br_id=")).count() == 1);
     }
 

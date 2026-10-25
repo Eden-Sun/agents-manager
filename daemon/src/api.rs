@@ -275,6 +275,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
         .route("/hosts/{name}/baseline/plan", get(baseline_plan))
+        .route("/hosts/{name}/baseline/backups", get(baseline_backups))
         .route("/hosts/{name}/baseline/apply", post(baseline_apply))
         .route("/hosts/{name}/baseline/restore", post(baseline_restore))
         // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
@@ -958,6 +959,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/tools/refresh", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/hosts/{name}/baseline/plan", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/baseline/backups", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/baseline/apply", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/baseline/restore", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
@@ -4333,6 +4335,26 @@ async fn baseline_plan(
         })),
     )
         .into_response())
+}
+
+/// 唯讀列出主機上可還原的備份（#719 A，API §12.6c）。不受 `[host_baseline.sync]` 開關限制。
+async fn baseline_backups(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    let script = crate::host_baseline::apply::render_backup_list_sh();
+    let out = app
+        .hosts
+        .run_if_current(&fence, baseline_run_script(&fence, &script))
+        .await
+        .ok_or_else(|| LcError::conflict("host_superseded", json!({"error": "conflict", "reason": "host_superseded"})))?
+        .map_err(|_| LcError::Unavailable(json!({"error": "unavailable", "reason": "backup_list_failed"})))?;
+    let list = crate::host_baseline::apply::parse_backup_list(&out)
+        .ok_or_else(|| LcError::Unavailable(json!({"error": "unavailable", "reason": "backup_list_failed"})))?;
+    Ok((StatusCode::OK, Json(json!({"backups": list.backups, "skipped": list.skipped}))).into_response())
 }
 
 /// 快取的差異＋宣告檔推出的計畫（plan 與 apply 共用同一份推算，`plan_rev` 才對得上）。

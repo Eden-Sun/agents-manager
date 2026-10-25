@@ -19,6 +19,10 @@ async fn restore(app: &Arc<App>, host: &str, principal: RequestPrincipal, id: &s
     body_of(baseline_restore(State(app.clone()), Path(host.to_string()), Extension(principal), Json(b)).await).await
 }
 
+async fn backups(app: &Arc<App>, host: &str, principal: RequestPrincipal) -> (StatusCode, Value) {
+    body_of(baseline_backups(State(app.clone()), Path(host.to_string()), Extension(principal)).await).await
+}
+
 fn hooks_report() -> BaselineReport {
     BaselineReport {
         os: Some("Linux".into()),
@@ -49,7 +53,7 @@ async fn set_sync(app: &Arc<App>, host: &str, mode: &str) {
         .unwrap();
 }
 
-/// 遠端主機（假 ssh）：apply／restore 腳本在假 HOME 裡用真的 `/bin/sh` 跑，其他（偵測）一律失敗。回傳 HOME 與被叫了幾次。
+/// 遠端主機（假 ssh）：apply／restore／列舉備份腳本在假 HOME 裡用真的 `/bin/sh` 跑，其他（偵測）一律失敗。回傳 HOME 與被叫了幾次。
 async fn remote_host(app: &Arc<App>, host: &str) -> (std::path::PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
     let cfg = HostCfg { daemon_url: None,
         shared_session: false,
@@ -70,7 +74,7 @@ async fn remote_host(app: &Arc<App>, host: &str) -> (std::path::PathBuf, Arc<std
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (h, n) = (home.clone(), calls.clone());
     crate::hosts::set_ssh_fake(host, move |script| {
-        if !script.contains("AM_BA begin") && !script.contains("AM_BR begin") {
+        if !script.contains("AM_BA begin") && !script.contains("AM_BR begin") && !script.contains("AM_BK begin") {
             anyhow::bail!("test fake: only baseline scripts run here");
         }
         n.fetch_add(1, Ordering::SeqCst);
@@ -219,4 +223,46 @@ async fn the_effective_sync_mode_is_in_the_user_state_only() {
     let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bl3b-bot").await;
     let Json(view) = get_state(State(e.app.clone()), Extension(RequestPrincipal::Bot(bot.id))).await.unwrap();
     assert!(view.as_object().unwrap().get("host_baseline_sync").is_none(), "{view}");
+}
+
+#[tokio::test]
+async fn backup_list_is_user_only_read_only_and_available_while_off() {
+    let e = crate::testing::env().await;
+    let host = "bl3a-backup-list";
+    let (home, calls) = remote_host(&e.app, host).await;
+    let root = home.join(crate::host_baseline::apply::BACKUP_ROOT_REL);
+    let good_id = "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4";
+    let good = root.join(good_id);
+    std::fs::create_dir_all(good.join("files")).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), "current AM-SECRET\n").unwrap();
+    std::fs::write(good.join("files/1"), "backup AM-SECRET\n").unwrap();
+    std::fs::write(
+        good.join("manifest"),
+        format!("am-baseline-backup 1\nid {good_id}\nplan_rev rev1\nfile 1 1 644 codex/config.toml\n"),
+    )
+    .unwrap();
+    let bad_id = "20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c5";
+    let bad = root.join(bad_id);
+    std::fs::create_dir_all(bad.join("files")).unwrap();
+    std::fs::write(bad.join("manifest"), format!("am-baseline-backup 1\nid {bad_id}\nfile 1 1 600 /etc/passwd\n")).unwrap();
+    let link_id = "20261024T120002Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c6";
+    std::os::unix::fs::symlink(&good, root.join(link_id)).unwrap();
+
+    for principal in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("svc".into())] {
+        let (status, body) = backups(&e.app, host, principal).await;
+        assert_eq!((status, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "unauthorized requests do not query the host");
+
+    let (status, body) = backups(&e.app, host, RequestPrincipal::User).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["skipped"], 2, "invalid manifest and symlink are counted");
+    assert_eq!(body.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(), ["backups", "skipped"].into_iter().map(str::to_string).collect());
+    assert_eq!(body["backups"][0]["backup_id"], good_id);
+    assert_eq!(body["backups"][0]["created_at"], "2026-10-24T12:00:00Z");
+    assert_eq!(body["backups"][0]["files"], json!([{"file":"codex/config.toml","restore":"overwrite"}]));
+    let text = body.to_string();
+    assert!(!text.contains("AM-SECRET") && !text.contains(home.to_str().unwrap()) && !text.contains("baseline-backup") && !text.contains("/etc/passwd"), "{text}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
