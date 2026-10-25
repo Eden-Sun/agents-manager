@@ -240,7 +240,7 @@ macos_local_cohorts() {
             cat "$log" >&2
             return 1
         fi
-        if ! printf '%s\n' "$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed;'; then
+        if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed;' <<<"$output"; then
             printf 'macos-local required cohort %s selected zero tests\n' "$filter" >&2
             return 1
         fi
@@ -321,7 +321,7 @@ check_ops() {
     local tests=()
     for t in scripts/*_test.sh scripts/ops/*_test.sh scripts/agm_test.py; do
         [ -f "$t" ] || continue
-        if [ "$selected" != __all__ ] && ! printf '%s\n' "$selected" | grep -qxF -- "$t"; then continue; fi
+        if [ "$selected" != __all__ ] && ! grep -qxF -- "$t" <<<"$selected"; then continue; fi
         tests+=("$t")
     done
     # 平行跑（2026-10-23 診斷：68 支序列跑 565 秒，前十名 495 秒，彼此各用 mktemp、沒有共用埠）：
@@ -440,32 +440,32 @@ check_changed() {
     echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
     load_gate
     macos_local_hint "$files"
-    if [ -n "${CHECK_TESTS:-}" ] && [ "${CHECK_TESTS}" != none ] && ! echo "$parts" | grep -qx -e daemon -e full; then
+    if [ -n "${CHECK_TESTS:-}" ] && [ "${CHECK_TESTS}" != none ] && ! grep -qx -e daemon -e full <<<"$parts"; then
         echo "!! CHECK_TESTS=${CHECK_TESTS} 沒有用到：這次改動沒有 daemon 部分，不會跑任何 daemon 測試" >&2
     fi
-    if echo "$parts" | grep -qx full; then
+    if grep -qx full <<<"$parts"; then
         check_ob; check_ops; check_web; check_daemon
         return
     fi
-    if echo "$parts" | grep -qx ob; then check_ob; fi
-    if echo "$parts" | grep -qx ops; then check_ops "$files"; fi
-    if echo "$parts" | grep -qx web; then check_web; fi
-    if echo "$parts" | grep -qx daemon; then
+    if grep -qx ob <<<"$parts"; then check_ob; fi
+    if grep -qx ops <<<"$parts"; then check_ops "$files"; fi
+    if grep -qx web <<<"$parts"; then check_web; fi
+    if grep -qx daemon <<<"$parts"; then
         local release_triage_submission_test=0 daemon_tests_will_run=0
         filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
-        if printf '%s\n' "$filters" | grep -Eq '^(__am_base|__daemon)_release_triage_submission__$'; then
+        if grep -Eq '^(__am_base|__daemon)_release_triage_submission__$' <<<"$filters"; then
             release_triage_submission_test=1
             filters="$(printf '%s\n' "$filters" | grep -Ev '^(__am_base|__daemon)_release_triage_submission__$' || true)"
         fi
         if [ -n "${CHECK_TESTS:-}" ]; then
             [ "${CHECK_TESTS}" = none ] || daemon_tests_will_run=1
-        elif printf '%s\n' "$filters" | grep -qx '__all__' || [ -n "$filters" ]; then
+        elif grep -qx '__all__' <<<"$filters" || [ -n "$filters" ]; then
             daemon_tests_will_run=1
         fi
         # Rust 測試檔有沒有被掛進去（#1336）是純文字檢查，不編譯：改到 daemon／crates 就先跑，不等 ubuntu-ci 的 ops 才紅。
         # CHECK_TESTS=none＝不跑測試，一併略過；ops 部分已經會跑它時不重跑。
         # 假 repo（其他 *_test.sh 只複製 check.sh 幾支腳本進去）沒有這支就不跑；真的 repo 一定有。
-        if [ "${CHECK_TESTS:-}" != none ] && [ -f scripts/rust_test_mount_test.sh ] && ! echo "$parts" | grep -qx ops; then
+        if [ "${CHECK_TESTS:-}" != none ] && [ -f scripts/rust_test_mount_test.sh ] && ! grep -qx ops <<<"$parts"; then
             step "daemon: Rust 測試檔掛載（scripts/rust_test_mount_test.sh）"
             bash scripts/rust_test_mount_test.sh
         fi
@@ -544,7 +544,7 @@ check_changed() {
                 run_daemon_tests "${CHECK_TESTS}"
             fi
         else
-            if printf '%s\n' "$filters" | grep -qx '__all__'; then
+            if grep -qx '__all__' <<<"$filters"; then
                 step "daemon: cargo test（build／crate-wide test input）"
                 run_daemon_tests
             else
@@ -555,7 +555,7 @@ check_changed() {
                 # libtest 收多個位置過濾字串（[FILTERS...]），任一個符合就跑；一次跑完，只有全部加起來選到 0 條才拒絕（#1332）。
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
                 run_daemon_tests -- $filters || return $?
-            elif ! printf '%s\n' "$filters" | grep -qx '__all__' && [ "$release_triage_submission_test" = 0 ]; then
+            elif ! grep -qx '__all__' <<<"$filters" && [ "$release_triage_submission_test" = 0 ]; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
         fi
