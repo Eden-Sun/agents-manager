@@ -8,6 +8,8 @@ import type {
   HostBaseline,
   HostBaselinePlan,
   HostBaselineApplyResult,
+  HostBaselineBackups,
+  HostBaselineRestoreResult,
   BaselineAction,
   BaselineApplyItemResult,
   MemOwner,
@@ -1333,5 +1335,81 @@ export function toHostBaselineApplyResult(v: unknown): HostBaselineApplyResult |
     error: optStr(pick(v, 'error')),
     results,
   }
+}
+
+const HOST_BASELINE_BACKUP_ID = /^\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function baselineBackupCreatedAt(id: string): string | null {
+  if (!HOST_BASELINE_BACKUP_ID.test(id)) return null
+  const expected = `${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)}T${id.slice(9, 11)}:${id.slice(11, 13)}:${id.slice(13, 15)}Z`
+  const date = new Date(expected)
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== expected.replace('Z', '.000Z')) return null
+  return expected
+}
+
+function hostBaselineBackupFile(v: unknown): { file: string; restore: 'overwrite' | 'delete' } | null {
+  if (!isRec(v)) return null
+  const file = pick(v, 'file')
+  const restore = pick(v, 'restore')
+  const allowed =
+    file === 'codex/config.toml' ||
+    file === 'claude-default/settings.json' ||
+    (typeof file === 'string' && /^claude-cc\d+\/settings\.json$/.test(file))
+  if (!allowed || (restore !== 'overwrite' && restore !== 'delete')) return null
+  return { file: file as string, restore }
+}
+
+/** 備份列舉：驗固定 ID、UTC 時間、檔名與還原動作，拒絕部分損壞的備份項目。 */
+export function toHostBaselineBackups(v: unknown): HostBaselineBackups | null {
+  if (!isRec(v) || !Array.isArray(pick(v, 'backups'))) return null
+  let invalid = 0
+  const backups = (pick(v, 'backups') as unknown[]).flatMap((raw) => {
+    if (!isRec(raw)) {
+      invalid++
+      return []
+    }
+    const backup_id = pick(raw, 'backup_id')
+    if (typeof backup_id !== 'string') {
+      invalid++
+      return []
+    }
+    const created_at = baselineBackupCreatedAt(backup_id)
+    const rawFiles = pick(raw, 'files')
+    if (!created_at || pick(raw, 'created_at') !== created_at || !Array.isArray(rawFiles)) {
+      invalid++
+      return []
+    }
+    const files = rawFiles.map(hostBaselineBackupFile)
+    if (files.length === 0 || files.some((file) => file === null)) {
+      invalid++
+      return []
+    }
+    const safeFiles = files as Array<{ file: string; restore: 'overwrite' | 'delete' }>
+    if (new Set(safeFiles.map((file) => file.file)).size !== safeFiles.length) {
+      invalid++
+      return []
+    }
+    return [{ backup_id, created_at, files: safeFiles }]
+  })
+  const skipped = pick(v, 'skipped')
+  return {
+    backups,
+    skipped: (typeof skipped === 'number' && Number.isSafeInteger(skipped) && skipped >= 0 ? skipped : 0) + invalid,
+  }
+}
+
+/** 還原結果只接收固定檔名與固定狀態，不讓主機任意字串進入 UI。 */
+export function toHostBaselineRestoreResult(v: unknown): HostBaselineRestoreResult | null {
+  if (!isRec(v) || typeof pick(v, 'backup_id') !== 'string' || !HOST_BASELINE_BACKUP_ID.test(pick(v, 'backup_id') as string)) return null
+  const rawFiles = pick(v, 'files')
+  if (!Array.isArray(rawFiles)) return null
+  const files = rawFiles.flatMap((raw) => {
+    if (!isRec(raw)) return []
+    const file = hostBaselineBackupFile({ file: pick(raw, 'file'), restore: 'overwrite' })?.file
+    const result = pick(raw, 'result')
+    if (!file || !['restored', 'deleted', 'absent', 'failed'].includes(String(result))) return []
+    return [{ file, result: result as 'restored' | 'deleted' | 'absent' | 'failed' }]
+  })
+  return { backup_id: pick(v, 'backup_id') as string, files }
 }
 

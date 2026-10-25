@@ -1,5 +1,5 @@
 import { MockTransport } from './mock'
-import { toHostBaselinePlan, toHostBaselineApplyResult, toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toHostBaselinePlan, toHostBaselineApplyResult, toHostBaselineBackups, toHostBaselineRestoreResult, toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
@@ -17,6 +17,8 @@ import type {
   GhStatus,
   HostBaselinePlan,
   HostBaselineApplyResult,
+  HostBaselineBackups,
+  HostBaselineRestoreResult,
   GroupChatResult,
   Mission,
   MissionDetail,
@@ -1079,6 +1081,20 @@ export async function applyHostBaseline(
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/baseline/apply`, input)
   return toHostBaselineApplyResult(raw)
+}
+
+/** 列出主機上可還原的一致性備份（GET /api/hosts/{name}/baseline/backups，#719）。 */
+export async function fetchHostBaselineBackups(host: string): Promise<HostBaselineBackups | null> {
+  const name = host || 'local'
+  const raw = await transport.request('GET', `/hosts/${encodeURIComponent(name)}/baseline/backups`)
+  return toHostBaselineBackups(raw)
+}
+
+/** 還原指定的一致性備份（POST /api/hosts/{name}/baseline/restore，#719）。 */
+export async function restoreHostBaseline(host: string, backup_id: string): Promise<HostBaselineRestoreResult | null> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/baseline/restore`, { backup_id })
+  return toHostBaselineRestoreResult(raw)
 }
 
 /** 純 shell pane。`pane_id` 是白名單 key，只在這輪 daemon 有效，重啟後舊 pane 不認。 */

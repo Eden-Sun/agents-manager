@@ -185,6 +185,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/build/remote/test", Expect::UserOnly, None),
         rule("POST", "/api/hosts/{name}/tools/refresh", Expect::Forbidden, None),
         rule("GET", "/api/hosts/{name}/baseline/plan", Expect::Forbidden, None),
+        rule("GET", "/api/hosts/{name}/baseline/backups", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/baseline/apply", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/baseline/restore", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/rewind", Expect::Forbidden, None),

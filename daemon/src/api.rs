@@ -315,6 +315,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
         .route("/hosts/{name}/baseline/plan", get(baseline_plan))
+        .route("/hosts/{name}/baseline/backups", get(baseline_backups))
         .route("/hosts/{name}/baseline/apply", post(baseline_apply))
         .route("/hosts/{name}/baseline/restore", post(baseline_restore))
         // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
@@ -1124,6 +1125,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/tools/refresh", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/hosts/{name}/baseline/plan", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/baseline/backups", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/baseline/apply", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/baseline/restore", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
@@ -3968,6 +3970,26 @@ async fn baseline_plan(
         .into_response())
 }
 
+/// 唯讀列出主機上可還原的備份（#719 A，API §12.6c）。不受 `[host_baseline.sync]` 開關限制。
+async fn baseline_backups(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    let script = crate::host_baseline::apply::render_backup_list_sh();
+    let out = app
+        .hosts
+        .run_if_current(&fence, baseline_run_script(&fence, &script))
+        .await
+        .ok_or_else(|| LcError::conflict("host_superseded", json!({"error": "conflict", "reason": "host_superseded"})))?
+        .map_err(|_| LcError::Unavailable(json!({"error": "unavailable", "reason": "backup_list_failed"})))?;
+    let list = crate::host_baseline::apply::parse_backup_list(&out)
+        .ok_or_else(|| LcError::Unavailable(json!({"error": "unavailable", "reason": "backup_list_failed"})))?;
+    Ok((StatusCode::OK, Json(json!({"backups": list.backups, "skipped": list.skipped}))).into_response())
+}
+
 /// 快取的差異＋宣告檔推出的計畫（plan 與 apply 共用同一份推算，`plan_rev` 才對得上）。
 async fn cached_baseline_plan(app: &Arc<App>, name: &str) -> Result<(crate::host_baseline::BaselineReport, crate::host_baseline::plan::Plan), LcError> {
     let Some(report) = app.host_baseline.lock().await.get(name).map(|b| b.snapshot(chrono::Utc::now())) else {
@@ -4188,6 +4210,10 @@ mod baseline_apply_route_tests {
         body_of(baseline_restore(State(app.clone()), Path(host.to_string()), Extension(principal), Json(b)).await).await
     }
 
+    async fn backups(app: &Arc<App>, host: &str, principal: RequestPrincipal) -> (StatusCode, Value) {
+        body_of(baseline_backups(State(app.clone()), Path(host.to_string()), Extension(principal)).await).await
+    }
+
     fn hooks_report() -> BaselineReport {
         BaselineReport {
             os: Some("Linux".into()),
@@ -4239,7 +4265,7 @@ mod baseline_apply_route_tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (h, n) = (home.clone(), calls.clone());
         crate::hosts::set_ssh_fake(host, move |script| {
-            if !script.contains("AM_BA begin") && !script.contains("AM_BR begin") {
+            if !script.contains("AM_BA begin") && !script.contains("AM_BR begin") && !script.contains("AM_BK begin") {
                 anyhow::bail!("test fake: only baseline scripts run here");
             }
             n.fetch_add(1, Ordering::SeqCst);
@@ -4331,6 +4357,49 @@ mod baseline_apply_route_tests {
         let (st, body) = restore(&e.app, host, RequestPrincipal::User, &backup_id).await;
         assert_eq!((st, body["reason"].as_str(), body["refused"].as_str()), (StatusCode::CONFLICT, Some("restore_refused"), Some("manifest_invalid")), "{body}");
         assert!(calls.load(Ordering::SeqCst) >= 4);
+    }
+
+    /// 列舉只讀 manifest、拒絕壞備份與 symlink；off 時仍可用，只回傳白名單 metadata。
+    #[tokio::test]
+    async fn backup_list_is_user_only_read_only_and_available_while_off() {
+        let e = crate::testing::env().await;
+        let host = "bl3a-backup-list";
+        let (home, calls) = remote_host(&e.app, host).await;
+        let root = home.join(crate::host_baseline::apply::BACKUP_ROOT_REL);
+        let good_id = "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4";
+        let good = root.join(good_id);
+        std::fs::create_dir_all(good.join("files")).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "current AM-SECRET\n").unwrap();
+        std::fs::write(good.join("files/1"), "backup AM-SECRET\n").unwrap();
+        std::fs::write(
+            good.join("manifest"),
+            format!("am-baseline-backup 1\nid {good_id}\nplan_rev rev1\nfile 1 1 644 codex/config.toml\n"),
+        )
+        .unwrap();
+        let bad_id = "20261024T120001Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c5";
+        let bad = root.join(bad_id);
+        std::fs::create_dir_all(bad.join("files")).unwrap();
+        std::fs::write(bad.join("manifest"), format!("am-baseline-backup 1\nid {bad_id}\nfile 1 1 600 /etc/passwd\n")).unwrap();
+        let link_id = "20261024T120002Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c6";
+        std::os::unix::fs::symlink(&good, root.join(link_id)).unwrap();
+
+        for principal in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("svc".into())] {
+            let (status, body) = backups(&e.app, host, principal).await;
+            assert_eq!((status, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "unauthorized requests do not query the host");
+
+        let (status, body) = backups(&e.app, host, RequestPrincipal::User).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["skipped"], 2, "invalid manifest and symlink are counted");
+        assert_eq!(body.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(), ["backups", "skipped"].into_iter().map(str::to_string).collect());
+        assert_eq!(body["backups"][0]["backup_id"], good_id);
+        assert_eq!(body["backups"][0]["created_at"], "2026-10-24T12:00:00Z");
+        assert_eq!(body["backups"][0]["files"], json!([{"file":"codex/config.toml","restore":"overwrite"}]));
+        let text = body.to_string();
+        assert!(!text.contains("AM-SECRET") && !text.contains(home.to_str().unwrap()) && !text.contains("baseline-backup") && !text.contains("/etc/passwd"), "{text}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// 開始之後主機換代（重連／改指）：`run_if_current` 擋下，409 `host_superseded`，腳本一次都沒送。

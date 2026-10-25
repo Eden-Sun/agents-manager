@@ -29,7 +29,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
 |---|---|---|---|---|---|
 | A | `/hosts/{name}/shells`、`…/shells/{pane_id}/terminal|text|keys`、`…/{pane_id}` | 只有網頁 | User principal；Bot／service principal 403 `user_only`；text／keys／close 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | shell metadata／畫面可能含使用者資料；寫入可操作主機 pane | 維持 |
-| A | `GET /hosts/{name}/gh`、`GET /hosts/{name}/baseline/plan`、`POST /hosts/{name}/baseline/{apply,restore}`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
+| A | `GET /hosts/{name}/gh`、`GET /hosts/{name}/baseline/{plan,backups}`、`POST /hosts/{name}/baseline/{apply,restore}`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身份 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-integration` | 只有網頁（設定頁「更新檢查」確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；`name` 只收 claude／codex／antigravity-cli／grok、沒裝的（grok／antigravity-cli 且已登入除外）與已最新的 409、同一台同時只跑一個 | 在該主機跑 `herdr integration install <name>`，改那台的 agent hook 設定（`~/.claude`、`~/.codex` 等） | 維持 User-only |
@@ -134,6 +134,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。一致性差異的 dry-run 計畫（§12.6a） |
+| GET | `/api/hosts/{name}/baseline/backups` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只讀列舉可還原備份（§12.6c） |
 | POST | `/api/hosts/{name}/baseline/apply` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。一致性差異補齊，只補不蓋（§12.6c） |
 | POST | `/api/hosts/{name}/baseline/restore` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。照主機上的備份還原（§12.6c） |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -208,6 +209,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/hosts/{name}/gh` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/hosts/{name}/baseline/backups` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -2337,8 +2339,27 @@ issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[
 - 結果過期（`stale: true`，見 §12.6）照樣回，前端自己決定怎麼標。
 - 404：不認得的主機。409 `{"error":"conflict","reason":"baseline_unknown","host"}`：還沒量過，或上一趟探測沒跑完（`issues: null`）。503 `{"reason":"baseline_manifest_invalid"}`：宣告檔讀不懂（只會是沒跑過測試的 build）。
 
-### 12.6c 一致性差異補齊與還原 `POST /api/hosts/{name}/baseline/apply`、`POST /api/hosts/{name}/baseline/restore`
-issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 計畫（§12.6a）裡的 `merge_key`、只補不蓋，寫之前在**那台主機上**備份。兩條都只給使用者（Bot、AGM role → 403 `user_only`；`bot_scope_matrix` 為 Forbidden）。網頁在主機面板有「補齊 N 項」鈕（階段 3b，只在 `host_baseline_sync` 為 `"ask"` 時出現，先二次確認）；還原沒有按鈕。
+### 12.6c 一致性備份、補齊與還原 `GET /api/hosts/{name}/baseline/backups`、`POST /api/hosts/{name}/baseline/apply`、`POST /api/hosts/{name}/baseline/restore`
+issue #719 階段 3a／3b，SPEC §16.7。三條都只給使用者（Bot、AGM role → 403 `user_only`；`bot_scope_matrix` 為 Forbidden）。`GET backups` 唯讀列出可還原備份；`apply` 只做 dry-run 計畫（§12.6a）裡的 `merge_key`、只補不蓋，寫之前在**那台主機上**備份；`restore` 會寫回或刪除檔案。網頁主機面板有「補齊 N 項」與「查看備份／還原」按鈕，兩者各自二次確認；列舉與還原不受 `[host_baseline.sync]` 限制。
+
+**列舉備份** `GET /api/hosts/{name}/baseline/backups`：主機端只讀備份目錄與 manifest，不讀備份內容、不寫入／刪除／touch。回應僅含固定格式 `backup_id`、由 ID 轉出的 UTC `created_at`、allowlist 內檔名與還原動作，以及略過數；不含主機路徑、檔案內容或主機端錯誤字串。壞 manifest、symlink、無法安全還原的備份會略過並計入 `skipped`。
+- Bot／AGM role → 403 `user_only`；404 不認得的主機；409 `host_superseded`；503 `backup_list_failed`（固定錯誤碼，不包含主機端輸出）。
+
+```json
+{
+  "backups": [{
+    "backup_id": "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4",
+    "created_at": "2026-10-24T12:00:00Z",
+    "files": [
+      { "file": "codex/config.toml", "restore": "overwrite" },
+      { "file": "claude-default/settings.json", "restore": "delete" }
+    ]
+  }],
+  "skipped": 1
+}
+```
+
+`restore: "overwrite"` 表示備份含原檔，還原會直接覆寫；`restore: "delete"` 表示備份時檔案不存在，還原會刪除現在存在的檔。
 
 **apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部 `merge_key`）：
 
@@ -2361,8 +2382,10 @@ issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 
 ```
 
 - sync 是 off 也能用。`backup_id` 不是固定格式 → 400 `invalid_backup_id`（不連主機）；404 不認得的主機，或 `{"reason":"backup_not_found"}`；同一個 HostFence，換代 409 `host_superseded`。
+- 後端在送腳本前重新驗 `backup_id` 固定格式；主機端確認該備份目錄、manifest 與必要檔案存在，並重新驗 manifest。還原**不會先替目前狀態再建一份備份**，直接覆寫或刪除 manifest 列出的檔案。
 - 主機上的 manifest 當不可信輸入：只認固定目標名、數字編號、三位權限；目標或備份檔是 symlink、目錄不在、有任何一行不認得 → 409 `{"reason":"restore_refused","refused":"manifest_invalid"|"symlink"|"target_dir_missing"|"not_a_file"}`，**整個拒絕、一個檔都不寫**。
 - `files[]` 只有目標名（`codex/config.toml`、`claude-default/settings.json`、`claude-cc<N>/settings.json`）與 `result`：`restored`（逐 byte 換回備份、權限也換回）、`deleted`（原本不在的檔，刪掉）、`absent`、`failed`。不回傳備份內容或路徑。成功後觸發一次重新偵測。
+- 網頁還原確認框列主機名、備份時間、將覆寫與將刪除的 allowlist 檔名，並明說還原前不會另外備份。目前確認框預設 focus 在取消；執行期間停用確認。錯誤只顯示固定錯誤碼與固定文案。
 
 ### 12.6b herdr 版本 `hosts[].herdr`
 

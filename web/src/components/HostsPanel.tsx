@@ -15,6 +15,7 @@ import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
 import { HostBaselineApply } from './HostBaselineApply'
+import { HostBaselineRestore } from './HostBaselineRestore'
 import { ServicePaneNote } from './ServicePaneNote'
 import { ToolBadges } from './Tools'
 import './hostsPanel.css'
@@ -179,8 +180,11 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
   if (v.items.length === 0) {
     return (
       <span className={`host-baseline ${v.level}`}>
-        <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
-          {v.text}
+        <span className="host-baseline-header">
+          <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
+            {v.text}
+          </span>
+          <HostBaselineRestore host={host} />
         </span>
       </span>
     )
@@ -191,8 +195,11 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
 
   return (
     <span className={`host-baseline ${v.level}`}>
-      <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
-        {v.text}
+      <span className="host-baseline-header">
+        <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
+          {v.text}
+        </span>
+        <HostBaselineRestore host={host} />
       </span>
       <HostBaselineApply host={host} baseline={baseline} syncMode={syncMode} />
       {criticalItems.length > 0 ? (
