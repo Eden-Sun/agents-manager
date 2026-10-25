@@ -207,9 +207,14 @@ export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 changed >/dev/null || fail "module changed failed: $(cat "$AM_TEST_CARGO_LOG")"
 ! grep -qx 'check -p agents-managerd --all-targets --locked' "$AM_TEST_CARGO_LOG" \
     || fail "module test redundantly ran cargo check: $(cat "$AM_TEST_CARGO_LOG")"
-[ "$(grep -c '^test -p agents-managerd --locked -- lifecycle::queue::$' "$AM_TEST_CARGO_LOG")" = 1 ] \
+[ "$(grep -c '^test -p agents-managerd ' "$AM_TEST_CARGO_LOG")" = 1 ] \
     || fail "module change did not run exactly one daemon test: $(cat "$AM_TEST_CARGO_LOG")"
-[ "$(sed -n '1,2p' "$AM_TEST_CARGO_LOG")" = $'test -p agents-managerd --locked -- lifecycle::queue::\nweb-dist-stub-present' ] \
+daemon_test_cmd="$(grep '^test -p agents-managerd ' "$AM_TEST_CARGO_LOG" || true)"
+sorted_filters="$(printf '%s\n' "${daemon_test_cmd#test -p agents-managerd --locked -- }" | tr ' ' '\n' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+[ "$daemon_test_cmd" = "test -p agents-managerd --locked -- lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" ] \
+    && [ "$sorted_filters" = "lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" ] \
+    || fail "module change filters did not match exact expected set: $(cat "$AM_TEST_CARGO_LOG")"
+[ "$(sed -n '1,2p' "$AM_TEST_CARGO_LOG")" = $'test -p agents-managerd --locked -- lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::\nweb-dist-stub-present' ] \
     || fail "the first cargo test did not see the temporary web/dist stub: $(cat "$AM_TEST_CARGO_LOG")"
 
 # Explicit filters, all-suite sentinels, and cases with no daemon tests choose the matching path.
@@ -246,7 +251,7 @@ changed >/dev/null || fail 'build.rs changed failed'
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 output="$(changed)" || fail "改 queue.rs 的 changed 失敗：$output"
-grep -qx 'test -p agents-managerd --locked -- lifecycle::queue::' "$AM_TEST_CARGO_LOG" \
+grep -qx 'test -p agents-managerd --locked -- lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::' "$AM_TEST_CARGO_LOG" \
     || fail "改 queue.rs 沒有跑 lifecycle::queue:: 的測試：$(cat "$AM_TEST_CARGO_LOG")"
 [ -e "$fixture/web/dist/index.html" ] && fail 'stub 沒清掉'
 
@@ -255,7 +260,7 @@ grep -qx 'test -p agents-managerd --locked -- lifecycle::queue::' "$AM_TEST_CARG
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=$'daemon/src/lifecycle/queue.rs\ndaemon/src/hookrecv.rs'
 changed >/dev/null || fail "兩個模組的 changed 失敗：$(cat "$AM_TEST_CARGO_LOG")"
-grep -qx 'test -p agents-managerd --locked -- hookrecv:: lifecycle::queue::' "$AM_TEST_CARGO_LOG" \
+grep -qx 'test -p agents-managerd --locked -- hookrecv:: lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::' "$AM_TEST_CARGO_LOG" \
     || fail "兩個模組沒有一起交給同一條 cargo test：$(cat "$AM_TEST_CARGO_LOG")"
 [ "$(grep -c '^test -p agents-managerd --locked -- ' "$AM_TEST_CARGO_LOG")" = 1 ] || fail "兩個模組起了不只一次 cargo test：$(cat "$AM_TEST_CARGO_LOG")"
 # 兩個都紅：整輪要紅，而且那一條 cargo test 跑完（紅了不能提前收手，也不能只跑其中一個）。
@@ -274,10 +279,12 @@ export AM_TEST_DIFF_HEAD=crates/am-core/src/lib.rs
 CHECK_TESTS=none changed >/dev/null || fail "crates 改動的 CHECK_TESTS=none 失敗"
 [ -z "$(cargo_tests)" ] || fail "CHECK_TESTS=none 還是跑了 crate 測試：$(cargo_tests)"
 # 沒設 CHECK_TESTS 時 crate 測試照跑（不能把預設行為一起關掉）。
+# 改 crates/*/src 的 .rs 且非 am-base 時，會跑該 crate 測試並加選 am-base 的 scratch_guard::。
 : >"$AM_TEST_CARGO_LOG"
 changed >/dev/null || fail "crates 改動的 changed 失敗"
 grep -qx 'test -p am-core --locked' "$AM_TEST_CARGO_LOG" || fail "沒設 CHECK_TESTS 時 crate 測試沒跑：$(cat "$AM_TEST_CARGO_LOG")"
-[ "$(cargo_tests | wc -l | tr -d ' ')" = 1 ] || fail "單一 crate 改動不該跑其他 crate 測試：$(cargo_tests)"
+grep -qx 'test -p am-base --locked -- scratch_guard::' "$AM_TEST_CARGO_LOG" || fail "沒設 CHECK_TESTS 時沒加選 scratch_guard::：$(cat "$AM_TEST_CARGO_LOG")"
+[ "$(cargo_tests | wc -l | tr -d ' ')" = 2 ] || fail "crate src 改動應恰好跑該 crate 加上 am-base scratch_guard::：$(cargo_tests)"
 CHECK_TESTS=prompt:: changed >/dev/null || fail "CHECK_TESTS=prompt:: 失敗"
 grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fail "CHECK_TESTS 沒照給的跑：$(cat "$AM_TEST_CARGO_LOG")"
 
@@ -386,6 +393,38 @@ printf 'pub fn plain() {}\n' >"$fixture/crates/am-base/src/plain.rs"
 export AM_TEST_DIFF_HEAD=crates/am-base/src/plain.rs
 output="$(changed)" || fail "改 crates 一般檔的 changed 失敗：$output"
 grep -q 'macos-local' <<<"$output" && fail "crates 底下沒有 macos_local_ 的檔不該提醒：$output"
+
+# 回歸驗證（#1983 條件 4）：
+# 1. 改 crates/am-config/src/... 時，因 am-base 不在本次 crate 清單，會加跑 'test -p am-base --locked -- scratch_guard::'
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=crates/am-config/src/config.rs
+changed >/dev/null || fail "改 am-config 的 changed 失敗：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p am-config --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "改 am-config 沒有跑 am-config 測試：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p am-base --locked -- scratch_guard::' "$AM_TEST_CARGO_LOG" \
+    || fail "改 am-config 沒有加跑 am-base scratch_guard::：$(cat "$AM_TEST_CARGO_LOG")"
+[ "$(cargo_tests | wc -l | tr -d ' ')" = 2 ] \
+    || fail "改 am-config 跑的測試行數不符預期：$(cargo_tests)"
+
+# 2. 改 crates/am-base/src/... 時，不重複加跑 scratch_guard::（只有原本的 -p am-base）
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=crates/am-base/src/plain.rs
+changed >/dev/null || fail "改 am-base 的 changed 失敗：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p am-base --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "改 am-base 沒有跑 am-base 測試：$(cat "$AM_TEST_CARGO_LOG")"
+! grep -qx 'test -p am-base --locked -- scratch_guard::' "$AM_TEST_CARGO_LOG" \
+    || fail "改 am-base 重複加跑了 scratch_guard::：$(cat "$AM_TEST_CARGO_LOG")"
+[ "$(grep -c '^test -p am-base' "$AM_TEST_CARGO_LOG")" = 1 ] \
+    || fail "改 am-base 應只有原本的 -p am-base：$(cargo_tests)"
+
+# 3. 只改 crates/am-config/Cargo.toml＋daemon/src/lifecycle/queue.rs 時不跨行誤判，不加跑 scratch_guard::
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=$'crates/am-config/Cargo.toml\ndaemon/src/lifecycle/queue.rs'
+changed >/dev/null || fail "改 am-config/Cargo.toml 與 queue.rs 的 changed 失敗：$(cat "$AM_TEST_CARGO_LOG")"
+grep -qx 'test -p am-config --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "改 am-config/Cargo.toml 沒有跑 am-config 測試：$(cat "$AM_TEST_CARGO_LOG")"
+! grep -qx 'test -p am-base --locked -- scratch_guard::' "$AM_TEST_CARGO_LOG" \
+    || fail "非 crate src 改動跨行誤判加跑了 scratch_guard::：$(cat "$AM_TEST_CARGO_LOG")"
 
 # changed 的 git diff 要關掉改名偵測（issue #1173）：改名只列新路徑的話，把會進 binary 的檔搬到 docs/ 會被當成「只有文件」。
 export AM_TEST_REQUIRE_NO_RENAMES=1 AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
