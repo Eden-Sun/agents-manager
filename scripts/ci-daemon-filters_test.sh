@@ -35,6 +35,7 @@ check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/co
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
 check "lifecycle::claude_resume_menu::tests::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
+check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
 # 混合：兩支新路徑＋既有有效路徑（judge_tests.rs）同進來，各自的真實過濾字串都要在，且排序去重（#1961）。
 check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: testing::scratch_leak_guard::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
