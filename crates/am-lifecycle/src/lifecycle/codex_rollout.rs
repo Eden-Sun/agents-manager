@@ -84,6 +84,20 @@ pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Opti
     None
 }
 
+/// codex 寫入 rollout 與 daemon 確認送達（標 `delivered_at`）之間的時間差容許量。codex 先寫 prompt、
+/// daemon 之後才確認：#1988 上線驗收實測 turn 01M5RYFAAFHSSBGGRGEPF577SB 的 prompt 在 07:12:50.788Z
+/// 寫進 rollout、delivered_at 是 07:12:51.920Z（早 1.13 秒）。下限取 `max(created_at, delivered_at − 這個值)`：
+/// 仍不早於 turn 建立，撿不到本 turn 建立前的舊 prompt；沒有 delivered_at 就只用 created_at。
+pub const DELIVERY_SLACK_SECS: i64 = 5;
+
+pub fn turn_since(created_at: &str, delivered_at: Option<&str>) -> String {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&chrono::Utc));
+    let (Some(created), Some(delivered)) = (parse(created_at), delivered_at.and_then(parse)) else {
+        return created_at.to_string();
+    };
+    crate::db::iso_at(created.max(delivered - chrono::Duration::seconds(DELIVERY_SLACK_SECS)))
+}
+
 /// 自 rollout 取出在 `since_iso`（ISO 8601 時刻）之後最新一筆 `task_complete` 的回覆（供無 prompt 的 hookless turn 使用）。
 ///
 /// 嚴格邊界：
@@ -255,6 +269,38 @@ mod tests {
             codex_reply_for_turn(&log, &["any updates".into()], "invalid-time"),
             None
         );
+    }
+
+    /// #1988 上線驗收：prompt 比 delivered_at 早 1 秒寫進 rollout，仍屬本回合
+    #[test]
+    fn turn_since_accepts_a_prompt_logged_just_before_delivery() {
+        let since = turn_since("2026-10-25T07:12:50.000Z", Some("2026-10-25T07:12:51.920Z"));
+        let log = format!(
+            "{}\n{}",
+            user_msg("2026-10-25T07:12:50.788Z", "notice"),
+            task_complete("2026-10-25T07:13:19.336Z", "done")
+        );
+        assert_eq!(codex_reply_for_turn(&log, &["notice".into()], &since), Some("done".into()));
+    }
+
+    /// 上一 turn 的同句 prompt 落在 delivered_at − 5 秒之內、但早於本 turn 的 created_at：不採用
+    #[test]
+    fn turn_since_rejects_a_previous_same_prompt_inside_the_slack_but_before_creation() {
+        let since = turn_since("2026-10-25T01:05:00.000Z", Some("2026-10-25T01:05:01.000Z"));
+        assert_eq!(since, "2026-10-25T01:05:00.000Z");
+        let log = format!(
+            "{}\n{}",
+            user_msg("2026-10-25T01:04:58Z", "any updates"),
+            task_complete("2026-10-25T01:04:59Z", "old reply")
+        );
+        assert_eq!(codex_reply_for_turn(&log, &["any updates".into()], &since), None);
+    }
+
+    /// delivered_at 是空值（或解析不了）時只用 created_at
+    #[test]
+    fn turn_since_falls_back_to_created_at_without_delivery() {
+        assert_eq!(turn_since("2026-10-25T01:05:00.000Z", None), "2026-10-25T01:05:00.000Z");
+        assert_eq!(turn_since("2026-10-25T01:05:00.000Z", Some("not-a-time")), "2026-10-25T01:05:00.000Z");
     }
 
     /// ① 本 turn 寫到一半（有 user prompt，但無 task_complete）：回傳 None 退回終端快照

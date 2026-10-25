@@ -1678,8 +1678,8 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
 
     let codex_rollout_reply = if bot.kind == "codex" && codex_hit.is_none() && !compact_turn {
         let sent = turn_echo_texts(app, &turn.id).await?;
-        let since_iso = turn.delivered_at.as_deref().unwrap_or(turn.created_at.as_str());
-        super::codex_rollout::codex_rollout_reply_for_in_flight(app, &bot, &run, &sent, since_iso).await
+        let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
+        super::codex_rollout::codex_rollout_reply_for_in_flight(app, &bot, &run, &sent, &since_iso).await
     } else {
         None
     };
@@ -5915,7 +5915,7 @@ mod reply_window_tests {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(env_json).bind(&bot.id).execute(&app.db).await.unwrap();
 
         let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
-        sqlx::query("UPDATE turns SET prompt_text='跑測試', delivered_at='2026-10-25T00:59:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text='跑測試', created_at='2026-10-25T00:59:50Z', delivered_at='2026-10-25T00:59:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), "› 跑測試\n› 混雜畫面舊內容\n• idle");
 
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
@@ -5970,7 +5970,7 @@ mod reply_window_tests {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(env_json).bind(&bot.id).execute(&app.db).await.unwrap();
 
         let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
-        sqlx::query("UPDATE turns SET prompt_text='本回合', delivered_at='2026-10-25T01:04:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text='本回合', created_at='2026-10-25T01:04:50Z', delivered_at='2026-10-25T01:04:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), "› 本回合\n終端快照內容\n");
 
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
@@ -5995,7 +5995,7 @@ mod reply_window_tests {
         let run = tt::fake_run(&app, &bot.id).await;
 
         let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
-        sqlx::query("UPDATE turns SET prompt_text='查狀態', delivered_at='2026-10-25T01:00:00Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text='查狀態', created_at='2026-10-25T01:00:00Z', delivered_at='2026-10-25T01:00:00Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), "› 查狀態\n終端快照回覆\n");
 
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
