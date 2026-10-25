@@ -31,6 +31,17 @@ pub(crate) enum TurnOutcome {
     Failed(String),
 }
 
+/// Run-scoped stop result. `NoLiveRunner` is valid only while the runtime's shared admission
+/// gate is held, so no pre-CAS spawn can still be installing a registry slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunStopJoin {
+    NoLiveRunner,
+    Joined {
+        turn_id: String,
+        outcome: TurnOutcome,
+    },
+}
+
 /// Explicit errors for registry operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RegistryError {
@@ -232,6 +243,29 @@ impl ApiBotRegistry {
         wait_outcome(&mut rx).await
     }
 
+    /// Cancels and joins the current runner for a run, or reports an empty registry slot.
+    /// The caller must hold the shared run admission gate for the whole call.
+    pub(crate) async fn stop_and_join_run(
+        &self,
+        run_id: &str,
+    ) -> Result<RunStopJoin, RegistryError> {
+        let (turn_id, token, mut rx) = {
+            let guard = self.slots.lock().expect("registry mutex not poisoned");
+            let Some(slot) = guard.get(run_id) else {
+                return Ok(RunStopJoin::NoLiveRunner);
+            };
+            (
+                slot.turn_id.clone(),
+                slot.cancel_token.clone(),
+                slot.outcome_rx.clone(),
+            )
+        };
+
+        token.cancel();
+        let outcome = wait_outcome(&mut rx).await?;
+        Ok(RunStopJoin::Joined { turn_id, outcome })
+    }
+
     #[cfg(test)]
     pub(crate) fn slot_count(&self) -> usize {
         let guard = self.slots.lock().expect("registry mutex not poisoned");
@@ -316,6 +350,45 @@ mod tests {
         let registry = Arc::new(ApiBotRegistry::new());
         let res = registry.cancel_and_join("nonexistent_run").await;
         assert_eq!(res, Err(RegistryError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn run_stop_join_distinguishes_empty_from_a_real_join() {
+        let registry = Arc::new(ApiBotRegistry::new());
+        assert_eq!(
+            registry.stop_and_join_run("idle").await,
+            Ok(RunStopJoin::NoLiveRunner),
+        );
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let entered_task = entered.clone();
+        let release_task = release.clone();
+        registry
+            .spawn_tracked(
+                RunTurnKey {
+                    run_id: "live".into(),
+                    turn_id: "turn-live".into(),
+                },
+                move |cancel| async move {
+                    entered_task.notify_one();
+                    tokio::select! {
+                        _ = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
+                        _ = release_task.notified() => Ok(TurnOutcome::Completed),
+                    }
+                },
+            )
+            .unwrap();
+        entered.notified().await;
+
+        assert_eq!(
+            registry.stop_and_join_run("live").await,
+            Ok(RunStopJoin::Joined {
+                turn_id: "turn-live".into(),
+                outcome: TurnOutcome::Cancelled,
+            }),
+        );
+        assert!(!registry.is_active("live"));
     }
 
     #[tokio::test]

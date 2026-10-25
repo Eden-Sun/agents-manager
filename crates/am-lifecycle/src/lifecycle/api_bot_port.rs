@@ -10,12 +10,36 @@ pub struct ApiTurnKey {
     pub turn_id: String,
 }
 
+/// Identifies a run whose stop has already won the lifecycle CAS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiRunKey {
+    pub bot_id: String,
+    pub run_id: String,
+}
+
 /// Business outcome after confirmed task completion. A panic is an error, not Failed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApiRunCompletion {
     Completed,
     Cancelled,
     Failed,
+}
+
+/// Evidence that no runner remains after the run's spawn admission has been drained.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApiRunStopEvidence {
+    NoLiveRunner,
+    Joined {
+        turn_id: String,
+        completion: ApiRunCompletion,
+    },
+}
+
+/// Run-scoped stop evidence. The key binds the evidence to the lifecycle CAS target.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ApiRunStopProof {
+    pub key: ApiRunKey,
+    pub evidence: ApiRunStopEvidence,
 }
 
 /// Static diagnostics: no provider response, prompt, key, or arbitrary upstream text.
@@ -36,5 +60,9 @@ pub trait ApiBotPort: Send + Sync {
         &self,
         key: &ApiTurnKey,
     ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send;
+    fn api_run_stop_proof(
+        &self,
+        key: &ApiRunKey,
+    ) -> impl Future<Output = Result<ApiRunStopProof, ApiBotError>> + Send;
     fn api_run_live(&self, key: &ApiTurnKey) -> impl Future<Output = bool> + Send;
 }

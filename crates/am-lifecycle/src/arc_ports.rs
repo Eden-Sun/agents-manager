@@ -1355,7 +1355,9 @@ impl<T> crate::lifecycle::LcHost for std::sync::Arc<T> where
 {}
 
 mod arc_port_api_bot {
-    use crate::lifecycle::api_bot_port::{ApiBotError, ApiBotPort, ApiRunCompletion, ApiTurnKey};
+    use crate::lifecycle::api_bot_port::{
+        ApiBotError, ApiBotPort, ApiRunCompletion, ApiRunKey, ApiRunStopProof, ApiTurnKey,
+    };
     use std::future::Future;
 
     impl<T: ApiBotPort + ?Sized> ApiBotPort for std::sync::Arc<T> {
@@ -1371,6 +1373,13 @@ mod arc_port_api_bot {
             key: &ApiTurnKey,
         ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send {
             <T as ApiBotPort>::api_run_cancel_and_join(self.as_ref(), key)
+        }
+
+        fn api_run_stop_proof(
+            &self,
+            key: &ApiRunKey,
+        ) -> impl Future<Output = Result<ApiRunStopProof, ApiBotError>> + Send {
+            <T as ApiBotPort>::api_run_stop_proof(self.as_ref(), key)
         }
 
         fn api_run_live(&self, key: &ApiTurnKey) -> impl Future<Output = bool> + Send {
