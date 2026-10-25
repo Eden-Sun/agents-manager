@@ -522,6 +522,9 @@ impl ShareCfg {
 pub struct CodexCfg {
     #[serde(default)]
     pub instant_interrupt: bool,
+    /// Opt in to installing stdin Stop hooks; legacy notify remains enabled (#1989).
+    #[serde(default)]
+    pub stop_hook: bool,
 }
 
 impl CodexCfg {
@@ -2719,6 +2722,20 @@ mod supervisor_cfg_tests {
         assert!(on.codex.instant_interrupt);
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
         assert_eq!(on, back);
+    }
+
+    #[test]
+    fn codex_stop_hook_is_off_unless_explicitly_enabled() {
+        let default: ConfigFile = toml::from_str("").unwrap();
+        assert!(!default.codex.stop_hook);
+        assert!(!toml::to_string_pretty(&default).unwrap().contains("[codex]"));
+        let enabled: ConfigFile = toml::from_str("[codex]\nstop_hook = true\n").unwrap();
+        assert!(enabled.codex.stop_hook);
+        assert!(!enabled.codex.instant_interrupt);
+        let roundtrip: ConfigFile = toml::from_str(&toml::to_string_pretty(&enabled).unwrap()).unwrap();
+        assert_eq!(roundtrip, enabled);
+        let disabled: ConfigFile = toml::from_str("[codex]\nstop_hook = false\n").unwrap();
+        assert_eq!(disabled.codex, default.codex);
     }
 
     /// issue #749 審查：`[codex_history]` 預設關。裝著的 codex 0.159.3 的 app-server 對 `thread/items/list` 回
