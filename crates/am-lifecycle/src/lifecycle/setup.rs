@@ -90,9 +90,9 @@ print(s.get("command","") if s.get("type","command")=="command" else "")' "$CFG"
   if [ -n "$CMD" ]; then umask "$AM_UMASK"; printf '%s' "$INPUT" | sh -c "$CMD" 2>/dev/null; fi
   exit 0
 fi
-if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c $LIMIT); fi
+if [ "$PROVIDER" = "codex" ] && [ "$#" -gt 0 ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c $LIMIT); fi
 LEN=$(printf '%s' "$PAYLOAD" | wc -c | tr -d ' ')
-if [ "$PROVIDER" != "codex" ] && [ "$LEN" -ge "$LIMIT" ]; then TRUNC=true; else TRUNC=false; fi
+if { [ "$PROVIDER" != "codex" ] || [ "$#" -eq 0 ]; } && [ "$LEN" -ge "$LIMIT" ]; then TRUNC=true; else TRUNC=false; fi
 # The payload is spliced into JSON verbatim, so it must BE valid JSON: empty stdin becomes
 # null and anything that is not an object is wrapped as a string, otherwise the daemon would
 # reject the body and the line would sit in the spool forever.
@@ -595,8 +595,9 @@ try:
             print("session")
         elif event in ("Stop","StopFailure") and p.get("stop_hook_active") is not True:
             print("idle")
-    elif provider=="codex" and p.get("type")=="agent-turn-complete":
-        print("idle")
+    elif provider=="codex":
+        if p.get("type")=="agent-turn-complete" or (p.get("hook_event_name")=="Stop" and p.get("stop_hook_active") is not True):
+            print("idle")
     elif provider=="grok":
         event=p.get("hookEventName",p.get("hook_event_name"))
         if isinstance(event,str):
@@ -930,7 +931,12 @@ pub fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
 }
 
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
-pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + ShareSessionRepo + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
+pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + ShareSessionRepo + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
+    injected_args_with_codex_profile(app, bot, project, env, None).await
+}
+
+/// An unknown active profile must retain legacy notify even when base trust exists.
+pub async fn injected_args_with_codex_profile(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + ShareSessionRepo + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value, codex_profile: Option<&str>) -> anyhow::Result<Vec<String>> {
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
@@ -944,6 +950,8 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
     if restricted.is_some() && bot.kind != "claude" {
         anyhow::bail!("restricted share bot must be a claude bot");
     }
+
+    let stop_hook_enabled = bot.kind == "codex" && app.cfg().get().await.codex.stop_hook;
 
     // remote project: POSIX sh hook via that host's own herdr (§11.4)
     if project.host != LOCAL_HOST {
@@ -968,7 +976,17 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
             // The notify argv is visible in `ps` for the whole run: placeholder token slot (#8, issue #43).
             "codex" => {
                 let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
-                vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
+                let legacy = vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)];
+                if stop_hook_enabled && codex_profile.is_some() {
+                    let ready = async {
+                        if !am_base::codex_hook::remote_version_verified(&conn, env.get("PATH").and_then(Value::as_str)).await { return Ok(false); }
+                        let home = codex_hook_home(env, conn.home().await?)?;
+                        am_base::codex_hook::install_remote(&conn, &home, &crate::hosts::remote_root_for(app.instance().as_deref()), app.instance().as_deref(), codex_profile).await
+                    }.await;
+                    codex_notification_args(legacy, codex_profile.is_some(), ready)
+                } else {
+                    legacy
+                }
             }
             // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
             "grok" => {
@@ -1014,7 +1032,19 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
         "codex" => {
             let parts = hook_cmd_parts(app, bot, "codex");
             let arr = serde_json::to_string(&parts)?;
-            vec!["-c".into(), format!("notify={arr}")]
+            let legacy = vec!["-c".into(), format!("notify={arr}")];
+            if stop_hook_enabled && codex_profile.is_some() {
+                let version_verified = am_base::codex_hook::local_version_verified(env.get("PATH").and_then(Value::as_str)).await;
+                let ready = (|| {
+                    if !version_verified { return Ok(false); }
+                    let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("Codex home unavailable"))?;
+                    let home = codex_hook_home(env, home.to_string_lossy().into_owned())?;
+                    am_base::codex_hook::install_local(std::path::Path::new(&home), app.data_dir(), app.instance().as_deref(), codex_profile)
+                })();
+                codex_notification_args(legacy, codex_profile.is_some(), ready)
+            } else {
+                legacy
+            }
         }
         // SPEC §12: the hook is global (dispatched through the pane env), not an argv flag.
         "grok" => {
@@ -1035,6 +1065,28 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
     out.extend(hook_args);
     Ok(out)
 }
+fn codex_hook_home(env: &Value, home: String) -> anyhow::Result<String> {
+    let path = env.get("CODEX_HOME").and_then(Value::as_str).map(str::trim)
+        .filter(|value| !value.is_empty()).map(str::to_owned)
+        .unwrap_or_else(|| format!("{}/.codex", home.trim_end_matches('/')));
+    if !std::path::Path::new(&path).is_absolute() {
+        anyhow::bail!("relative CODEX_HOME cannot prove the Stop hook trust source");
+    }
+    Ok(path)
+}
+
+fn codex_notification_args(legacy: Vec<String>, profile_known: bool, ready: anyhow::Result<bool>) -> Vec<String> {
+    match ready {
+        Ok(true) if profile_known => vec!["-c".into(), "features.hooks=true".into(), "-c".into(), "notify=[]".into()],
+        Ok(_) => legacy,
+        Err(_) => {
+            // Installer errors may contain user configuration; do not log their raw contents.
+            tracing::warn!("Codex Stop hook setup unavailable; retaining legacy notify");
+            legacy
+        }
+    }
+}
+
 /// issue #1884：Bash 工具跑之前先過廣域 kill 守門。同一支 `agents-managerd hook claude`——它看到 PreToolUse 只判斷、不送 daemon、
 /// 只有要擋時才印決策 JSON（`kill_guard`）。只給本機 bot：遠端的 `hook.sh` 是 POSIX sh、沒有這段邏輯，把 PreToolUse 交給它只會每個
 /// Bash 呼叫多 spool 一筆（SPEC「廣域 kill 守門」寫明遠端目前沒有守門）。
@@ -2482,6 +2534,51 @@ mod remote_hook_tests {
     }
 
     const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
+
+    #[test]
+    fn native_shell_fixture_uses_the_production_remote_hook() {
+        println!("C89_SETUP_FIXTURE={}", serde_json::json!({"hook_sh": super::remote_hook_sh(crate::hosts::REMOTE_ROOT)}));
+    }
+
+
+    #[test]
+    fn macos_local_codex_stop_reads_large_stdin_and_reports_the_native_session() {
+        let sb = Sandbox::new(true);
+        let payload = serde_json::json!({
+            "hook_event_name": "Stop", "session_id": "codex-stdin", "turn_id": "native-turn",
+            "stop_hook_active": false, "last_assistant_message": "x".repeat(256 * 1024),
+        });
+        let text = payload.to_string();
+        assert!(text.len() > 128 * 1024);
+        let (stdout, ok) = sb.run(&["codex", &sb.bot, "-"], &text);
+        assert!(ok);
+        assert!(stdout.is_empty());
+        let spool = sb.read("hook-spool.jsonl");
+        let events: Vec<serde_json::Value> = spool.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"], payload);
+        assert_eq!(events[0]["truncated"], false);
+        let calls = sb.wait_calls(1);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains("--state idle "));
+        assert!(calls[0].contains("--agent-session-id codex-stdin"));
+    }
+
+    #[test]
+    fn macos_local_codex_legacy_argv_and_active_stop_stdin_keep_their_semantics() {
+        let sb = Sandbox::new(false);
+        let legacy = r#"{"type":"agent-turn-complete","thread-id":"legacy","turn-id":"one","last-assistant-message":"reply"}"#;
+        assert!(sb.run(&["codex", &sb.bot, "-", legacy], "").1);
+        let body: serde_json::Value = serde_json::from_str(sb.read("hook-spool.jsonl").trim()).unwrap();
+        assert_eq!(body["payload"], serde_json::from_str::<serde_json::Value>(legacy).unwrap());
+        let active = serde_json::json!({
+            "hook_event_name": "Stop", "session_id": "active", "turn_id": "two",
+            "stop_hook_active": true, "last_assistant_message": "intermediate",
+        });
+        assert!(sb.run(&["codex", &sb.bot, "-"], &active.to_string()).1);
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 2);
+        assert!(sb.calls().is_empty());
+    }
 
     /// issue #753：Stop 的 payload 不帶使用者訊息，agm-host 又讀不到遠端的 transcript，遲到的 Stop 就證明不了「是同一回合」。
     /// `hook.sh` 在 spool 前從**本機** transcript 讀出最後一則使用者訊息，放進 payload 的 `agm_user_text`：
@@ -4040,5 +4137,92 @@ mod remote_grok_merge_tests {
         let encoded: String = encoded.chars().filter(|c| !c.is_ascii_whitespace()).collect();
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
         assert!(bytes.len() <= 262_145, "remote hook file grew past the read cap: {} bytes", bytes.len());
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod codex_stop_args_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    #[test]
+    fn only_trusted_known_profile_starts_disable_legacy_notify() {
+        let legacy = vec!["-c".into(), "notify=[\"legacy-hook\"]".into()];
+        assert_eq!(codex_notification_args(legacy.clone(), true, Ok(true)),
+            vec!["-c", "features.hooks=true", "-c", "notify=[]"]);
+        for (profile, trusted) in [(true, false), (false, true), (false, false)] {
+            let args = codex_notification_args(legacy.clone(), profile, Ok(trusted));
+            assert_eq!(&args[..2], legacy.as_slice());
+            assert!(!args.contains(&"notify=[]".into()));
+        }
+        assert_eq!(codex_notification_args(legacy.clone(), true, Err(anyhow::anyhow!("unavailable"))), legacy);
+    }
+
+    #[test]
+    fn codex_home_uses_the_effective_identity_and_rejects_ambiguous_relative_paths() {
+        assert_eq!(codex_hook_home(&json!({"CODEX_HOME":"/identity/codex"}), "/home/default".into()).unwrap(), "/identity/codex");
+        assert_eq!(codex_hook_home(&json!({}), "/home/default".into()).unwrap(), "/home/default/.codex");
+        assert!(codex_hook_home(&json!({"CODEX_HOME":"relative"}), "/home/default".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_default_and_untrusted_starts_retain_legacy_without_creating_trust() {
+        let env = tt::env().await;
+        let mut bot = tt::claude_bot(&env.app, &env.project_id, "stop-hook-canary").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(env.app.db()).await.unwrap();
+        bot.kind = "codex".into();
+        let project = db::project(env.app.db(), &env.project_id).await.unwrap().unwrap();
+        let home = env.dir.join("codex-identity");
+        let bin = env.dir.join("codex-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        tt::write_exec(&bin.join("codex"), "#!/bin/sh\nprintf 'codex-cli 0.164.0\\n'\n");
+        let pane_env = json!({"CODEX_HOME":home, "PATH":bin});
+        let profile = format!("am-bot-{}", bot.id);
+        let before = injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap();
+        let expected = hook_cmd_parts(&env.app, &bot, "codex");
+        let mut legacy = permission_args("codex", bot.auto_approve != 0);
+        legacy.extend(["-c".into(), format!("notify={}", serde_json::to_string(&expected).unwrap())]);
+        assert_eq!(before, legacy, "default argv must be byte-for-byte legacy");
+        assert!(!home.exists(), "default must not write hooks.json");
+        assert!(!env.app.data_dir.join("codex-hook.sh").exists(), "default must not install dispatcher");
+
+        env.app.cfg.update(|cfg| { cfg.codex.stop_hook = true; Ok(()) }).await.unwrap();
+        let untrusted = injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap();
+        assert_eq!(untrusted, legacy);
+        assert!(!untrusted.contains(&"notify=[]".into()));
+        assert!(!home.join("config.toml").exists(), "installer never creates trust state");
+        let hooks_path = home.join("hooks.json");
+        let hooks = std::fs::read(&hooks_path).unwrap();
+        let root: Value = serde_json::from_slice(&hooks).unwrap();
+        let groups = root["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        let key = format!("{}:stop:0:0", hooks_path.display());
+        // A fake user-reviewed record built independently in this scratch fixture.
+        use sha2::{Digest as _, Sha256};
+        let mut handler = groups[0]["hooks"][0].clone();
+        handler["async"] = json!(false);
+        let mut normalized = json!({"event_name":"stop", "hooks":[handler]});
+        normalized.sort_all_objects();
+        let fixture_hash = format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&normalized).unwrap()));
+        let reviewed = format!("[hooks.state.{key:?}]\ntrusted_hash={fixture_hash:?}\n");
+        // Simulate a user review only in this scratch fixture, never in production config.
+        std::fs::write(home.join("config.toml"), &reviewed).unwrap();
+        let trusted = injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap();
+        assert!(trusted.contains(&"notify=[]".into()));
+        assert!(!trusted.iter().any(|arg| arg.starts_with("notify=[") && arg != "notify=[]"));
+        assert_eq!(std::fs::read(&hooks_path).unwrap(), hooks);
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), reviewed);
+
+        // A stale record and unsupported/unknown versions must never disable legacy notify.
+        std::fs::write(home.join("config.toml"), format!("[hooks.state.{key:?}]\ntrusted_hash=\"sha256:stale\"\n")).unwrap();
+        assert_eq!(injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap(), legacy);
+        std::fs::write(home.join("config.toml"), &reviewed).unwrap();
+        assert_eq!(injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, None).await.unwrap(), legacy);
+        tt::write_exec(&bin.join("codex"), "#!/bin/sh\nprintf 'codex-cli 0.165.0\\n'\n");
+        assert_eq!(injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap(), legacy);
+        let unknown_env = json!({"CODEX_HOME":home});
+        assert_eq!(injected_args_with_codex_profile(&env.app, &bot, &project, &unknown_env, Some(&profile)).await.unwrap(), legacy);
+        bot.inject_hooks = 0;
+        assert_eq!(injected_args_with_codex_profile(&env.app, &bot, &project, &pane_env, Some(&profile)).await.unwrap(), permission_args("codex", bot.auto_approve != 0));
     }
 }

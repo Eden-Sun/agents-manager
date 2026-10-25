@@ -30,7 +30,7 @@ pub struct HookArgs {
     pub data_dir: String,
     /// agy：事件名（`SessionStart`／`PreInvocation`／`Stop`／`state`），payload 自己不帶。其他 provider 忽略。
     pub event: String,
-    /// codex: the last argv JSON string; claude / grok: None (payload comes from stdin)
+    /// None reads hook JSON from stdin; Some retains legacy Codex notify argv compatibility.
     pub payload_arg: Option<String>,
 }
 

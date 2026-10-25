@@ -4,10 +4,10 @@
 //! into Codex's `hooks.json`, and read-only evaluation of trust state from
 //! base config and active profile config.
 
+use crate::hosts::{sh_quote, HostConn};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use anyhow::{anyhow, bail, Context, Result};
-use crate::hosts::{sh_quote, HostConn};
 
 pub const CODEX_HOOK_SH: &str = "codex-hook.sh";
 
@@ -39,7 +39,10 @@ fn config_error(path: &str, detail: &str) -> CodexConfigError {
 /// On match, passes stdin straight to `exec "$AM_DAEMON_EXE" hook codex --bot "$AM_BOT_ID" --port "$AM_PORT" --data-dir <sh_quote(data_dir)>` without 二次截斷 or no-op cat.
 pub fn local_dispatch_sh(data_dir: &Path, instance: Option<&str>) -> String {
     let gate = match instance {
-        Some(slug) => format!("[ \"${{AM_INSTANCE:-}}\" = {} ] || exit 0\n", sh_quote(slug)),
+        Some(slug) => format!(
+            "[ \"${{AM_INSTANCE:-}}\" = {} ] || exit 0\n",
+            sh_quote(slug)
+        ),
         None => "[ -z \"${AM_INSTANCE:-}\" ] || exit 0\n".to_string(),
     };
     let data_dir_quoted = sh_quote(&data_dir.to_string_lossy());
@@ -62,7 +65,10 @@ pub fn local_dispatch_sh(data_dir: &Path, instance: Option<&str>) -> String {
 pub fn remote_dispatch_sh(remote_root: &str, instance: Option<&str>) -> String {
     let root = remote_root.trim_end_matches('/');
     let gate = match instance {
-        Some(slug) => format!("[ \"${{AM_INSTANCE:-}}\" = {} ] || exit 0\n", sh_quote(slug)),
+        Some(slug) => format!(
+            "[ \"${{AM_INSTANCE:-}}\" = {} ] || exit 0\n",
+            sh_quote(slug)
+        ),
         None => "[ -z \"${AM_INSTANCE:-}\" ] || exit 0\n".to_string(),
     };
     format!(
@@ -84,8 +90,12 @@ fn write_local_dispatcher(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         crate::private_files::create_private_dir(parent)?;
     }
-    crate::atomic_file::write(path, content.as_bytes(), crate::atomic_file::Mode::Executable)
-        .with_context(|| format!("writing local codex dispatcher {}", path.display()))
+    crate::atomic_file::write(
+        path,
+        content.as_bytes(),
+        crate::atomic_file::Mode::Exact(0o700),
+    )
+    .with_context(|| format!("writing local codex dispatcher {}", path.display()))
 }
 
 /// Shell script snippet to write the remote dispatcher script atomically (0700).
@@ -153,16 +163,20 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
         });
     }
 
-    let mut doc: serde_json::Value = serde_json::from_str(existing)
-        .map_err(|_| anyhow!("invalid JSON in hooks.json"))?;
+    let mut doc: serde_json::Value =
+        serde_json::from_str(existing).map_err(|_| anyhow!("invalid JSON in hooks.json"))?;
 
-    let root_obj = doc.as_object_mut()
+    let root_obj = doc
+        .as_object_mut()
         .ok_or_else(|| anyhow!("hooks.json root must be a JSON object"))?;
 
     if !root_obj.contains_key("hooks") {
-        root_obj.insert("hooks".to_string(), serde_json::json!({
-            "Stop": [ expected_group ]
-        }));
+        root_obj.insert(
+            "hooks".to_string(),
+            serde_json::json!({
+                "Stop": [ expected_group ]
+            }),
+        );
         return Ok(HooksMergeOutcome {
             merged_json: Some(serde_json::to_string_pretty(&doc)?),
             group_index: 0,
@@ -170,11 +184,12 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
     }
 
     let hooks_val = root_obj.get_mut("hooks").unwrap();
-    let hooks_obj = hooks_val.as_object_mut()
+    let hooks_obj = hooks_val
+        .as_object_mut()
         .ok_or_else(|| anyhow!("hooks.json 'hooks' property must be an object"))?;
 
     if !hooks_obj.contains_key("Stop") {
-        hooks_obj.insert("Stop".to_string(), serde_json::json!([ expected_group ]));
+        hooks_obj.insert("Stop".to_string(), serde_json::json!([expected_group]));
         return Ok(HooksMergeOutcome {
             merged_json: Some(serde_json::to_string_pretty(&doc)?),
             group_index: 0,
@@ -182,14 +197,19 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
     }
 
     let stop_val = hooks_obj.get_mut("Stop").unwrap();
-    let stop_arr = stop_val.as_array_mut()
+    let stop_arr = stop_val
+        .as_array_mut()
         .ok_or_else(|| anyhow!("hooks.json hooks.Stop must be an array"))?;
 
     let mut matched_group: Option<usize> = None;
     for (idx, group) in stop_arr.iter().enumerate() {
-        let has_command = group.get("hooks")
+        let has_command = group
+            .get("hooks")
             .and_then(|h| h.as_array())
-            .map(|arr| arr.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(canonical_command)))
+            .map(|arr| {
+                arr.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(canonical_command))
+            })
             .unwrap_or(false);
 
         if has_command {
@@ -218,6 +238,115 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
     }
 }
 
+/// Hash the normalized command identity used by Codex rust-v0.164.0.
+/// None TOML fields are omitted; hooks/discovery.rs:874-890 hashes this shape
+/// through config/fingerprint.rs:54-65 (sorted JSON and SHA-256).
+/// The value stays private and is only compared, never exported to any writer.
+fn command_identity_hash(
+    event: &str,
+    matcher: Option<&str>,
+    handler: &serde_json::Value,
+) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+    if handler.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+        bail!("unsupported hook identity");
+    }
+    let command = handler
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("invalid command identity"))?;
+    let timeout = match handler.get("timeout") {
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| anyhow!("invalid command timeout"))?,
+        None => 600,
+    }
+    .max(1);
+    let asynchronous = match handler.get("async") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow!("invalid command async setting"))?,
+        None => false,
+    };
+    let mut normalized = serde_json::json!({"type":"command", "command":command, "timeout":timeout, "async":asynchronous});
+    if let Some(status) = handler
+        .get("statusMessage")
+        .filter(|value| !value.is_null())
+    {
+        if !status.is_string() {
+            bail!("invalid command status message");
+        }
+        normalized["statusMessage"] = status.clone();
+    }
+    if event == "session_start" {
+        if let Some(limit) = handler
+            .get("additionalContextLimit")
+            .filter(|value| !value.is_null())
+        {
+            let limit = limit
+                .as_u64()
+                .ok_or_else(|| anyhow!("invalid context limit"))?;
+            if limit != 2500 {
+                normalized["additionalContextLimit"] = limit.into();
+            }
+        }
+    }
+    let mut identity = serde_json::json!({"event_name":event,"hooks":[normalized]});
+    if event != "stop" {
+        if let Some(matcher) = matcher {
+            identity["matcher"] = matcher.into();
+        }
+    }
+    identity.sort_all_objects();
+    let bytes =
+        serde_json::to_vec(&identity).map_err(|_| anyhow!("invalid normalized hook identity"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn stop_identity_hash(command: &str) -> Result<String> {
+    command_identity_hash("stop", None, &canonical_stop_group(command)["hooks"][0])
+}
+
+/// Only the exact version whose schema and trust algorithm were verified is accepted.
+pub fn verified_version(version: &str) -> bool {
+    version.trim() == "codex-cli 0.164.0"
+}
+
+fn version_probe_script(path: &str) -> String {
+    format!("PATH={} codex --version </dev/null", sh_quote(path))
+}
+
+pub async fn local_version_verified(path: Option<&str>) -> bool {
+    let Some(path) = path.filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    match crate::hosts::sh_local_stdout(
+        &version_probe_script(path),
+        std::time::Duration::from_secs(5),
+        "Codex version probe",
+    )
+    .await
+    {
+        Ok(version) => verified_version(&version),
+        Err(_) => false,
+    }
+}
+
+pub async fn remote_version_verified(conn: &HostConn, path: Option<&str>) -> bool {
+    let Some(path) = path.filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        conn.ssh_exec(&version_probe_script(path)),
+    )
+    .await
+    {
+        Ok(Ok(version)) => verified_version(&version),
+        _ => false,
+    }
+}
+
 /// Evaluates trust state for the given key by merging base config and active profile config.
 ///
 /// Follows Codex config_rules semantics:
@@ -238,15 +367,27 @@ pub fn evaluate_trust_state(
     trust_key: &str,
     base_path_display: &str,
     profile_path_display: &str,
+    expected_hash: &str,
 ) -> Result<bool> {
-    let parse_entry = |content: &str, path_display: &str| -> Result<Option<(Option<String>, Option<bool>)>> {
+    let parse_entry = |content: &str,
+                       path_display: &str|
+     -> Result<Option<(Option<String>, Option<bool>)>> {
         let doc = toml_edit::ImDocument::parse(content).map_err(|error| {
-            let byte = error.span().map(|s| s.start).unwrap_or(0).min(content.len());
-            let line = content.as_bytes()[..byte].iter().filter(|&&b| b == b'\n').count() + 1;
+            let byte = error
+                .span()
+                .map(|s| s.start)
+                .unwrap_or(0)
+                .min(content.len());
+            let line = content.as_bytes()[..byte]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1;
             config_error(path_display, &format!("第 {line} 行無法解析"))
         })?;
 
-        let entry = doc.get("hooks")
+        let entry = doc
+            .get("hooks")
             .and_then(|h| h.get("state"))
             .and_then(|s| s.get(trust_key));
 
@@ -254,13 +395,18 @@ pub fn evaluate_trust_state(
             return Ok(None);
         };
 
-        let table = item.as_table_like()
+        let table = item
+            .as_table_like()
             .ok_or_else(|| config_error(path_display, "hooks.state entry 必須是 table"))?;
 
         let trusted_hash = match table.get("trusted_hash") {
             Some(v) => match v.as_str() {
                 Some(s) => Some(s.to_string()),
-                None => return Err(config_error(path_display, "trusted_hash 型別錯誤（必須是字串）").into()),
+                None => {
+                    return Err(
+                        config_error(path_display, "trusted_hash 型別錯誤（必須是字串）").into(),
+                    )
+                }
             },
             None => None,
         };
@@ -268,7 +414,9 @@ pub fn evaluate_trust_state(
         let enabled = match table.get("enabled") {
             Some(v) => match v.as_bool() {
                 Some(b) => Some(b),
-                None => return Err(config_error(path_display, "enabled 型別錯誤（必須是布林）").into()),
+                None => {
+                    return Err(config_error(path_display, "enabled 型別錯誤（必須是布林）").into())
+                }
             },
             None => None,
         };
@@ -304,7 +452,7 @@ pub fn evaluate_trust_state(
     }
 
     let is_trusted = match (merged_hash, merged_enabled) {
-        (Some(hash), enabled) => !hash.trim().is_empty() && enabled != Some(false),
+        (Some(hash), enabled) => hash == expected_hash && enabled != Some(false),
         (None, _) => false,
     };
 
@@ -317,7 +465,10 @@ pub fn validate_profile_name(profile: &str) -> Result<&str> {
     if clean.is_empty() {
         bail!("profile name cannot be empty");
     }
-    if !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !clean
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("unsafe profile name: contains characters outside [-a-zA-Z0-9_]");
     }
     Ok(clean)
@@ -353,13 +504,26 @@ pub fn install_local(
         Ok(p) => p,
         Err(_) => hooks_json_path.clone(),
     };
-    let trust_key = format!("{}:stop:{}:0", abs_hooks_json.to_string_lossy(), final_group_index);
+    let trust_key = format!(
+        "{}:stop:{}:0",
+        abs_hooks_json.to_string_lossy(),
+        final_group_index
+    );
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hooks_json_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     let base_config_path = codex_home.join("config.toml");
     let base_toml = match std::fs::read_to_string(&base_config_path) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(config_error(&base_config_path.to_string_lossy(), "讀取基礎設定失敗").into()),
+        Err(_) => {
+            return Err(
+                config_error(&base_config_path.to_string_lossy(), "讀取基礎設定失敗").into(),
+            )
+        }
     };
 
     let profile_toml = if let Some(prof) = profile {
@@ -368,20 +532,27 @@ pub fn install_local(
         match std::fs::read_to_string(&prof_path) {
             Ok(s) => Some(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err(config_error(&prof_path.to_string_lossy(), "讀取 profile 設定失敗").into()),
+            Err(_) => {
+                return Err(
+                    config_error(&prof_path.to_string_lossy(), "讀取 profile 設定失敗").into(),
+                )
+            }
         }
     } else {
         None
     };
 
     let base_disp = base_config_path.to_string_lossy();
-    let prof_disp = profile.map(|p| format!("{p}.config.toml")).unwrap_or_default();
+    let prof_disp = profile
+        .map(|p| format!("{p}.config.toml"))
+        .unwrap_or_default();
     evaluate_trust_state(
         base_toml.as_deref(),
         profile_toml.as_deref(),
         &trust_key,
         &base_disp,
         &prof_disp,
+        &stop_identity_hash(&canonical_command)?,
     )
 }
 
@@ -396,7 +567,13 @@ pub fn install_remote<'a>(
     instance: Option<&'a str>,
     profile: Option<&'a str>,
 ) -> impl std::future::Future<Output = Result<bool>> + Send + 'a {
-    Box::pin(install_remote_body(conn, codex_home, remote_root, instance, profile))
+    Box::pin(install_remote_body(
+        conn,
+        codex_home,
+        remote_root,
+        instance,
+        profile,
+    ))
 }
 
 async fn install_remote_body(
@@ -412,7 +589,12 @@ async fn install_remote_body(
     let dispatcher_path = format!("{home}/{clean_root}/{CODEX_HOOK_SH}");
     let dispatcher_script = remote_dispatch_sh(clean_root, instance);
 
-    let out = conn.ssh_exec(&write_remote_dispatcher_script(&dispatcher_path, &dispatcher_script)).await?;
+    let out = conn
+        .ssh_exec(&write_remote_dispatcher_script(
+            &dispatcher_path,
+            &dispatcher_script,
+        ))
+        .await?;
     if !out.contains("AM_CODEX_DISPATCH_OK") {
         bail!("遠端安裝 codex dispatcher 腳本失敗");
     }
@@ -425,9 +607,12 @@ async fn install_remote_body(
         let outcome = merge_hooks_json(existing, &canonical_command)?;
         target_group_index.store(outcome.group_index, Ordering::SeqCst);
         Ok(outcome.merged_json)
-    }).await?;
+    })
+    .await?;
 
     let final_group_index = target_group_index.load(Ordering::SeqCst);
+    conn.ssh_exec(&format!("chmod 600 {}", sh_quote(&hooks_json_path)))
+        .await?;
     let trust_key = format!("{hooks_json_path}:stop:{final_group_index}:0");
 
     let base_path = format!("{clean_home}/config.toml");
@@ -447,6 +632,7 @@ async fn install_remote_body(
         &trust_key,
         &base_path,
         profile.unwrap_or(""),
+        &stop_identity_hash(&canonical_command)?,
     )
 }
 
@@ -454,8 +640,16 @@ async fn install_remote_body(
 /// Any transmission failure, permission issue, directory error, or base64 decoding failure returns Err
 /// with a safe diagnostic that never leaks remote contents or tokens.
 async fn read_remote_optional_file(conn: &HostConn, remote_path: &str) -> Result<Option<String>> {
+    let out = conn
+        .ssh_exec(&remote_optional_read_script(remote_path))
+        .await
+        .map_err(|_| anyhow!("遠端讀取檔案連線或執行失敗"))?;
+    decode_remote_optional_file(&out)
+}
+
+fn remote_optional_read_script(remote_path: &str) -> String {
     let f = sh_quote(remote_path);
-    let script = format!(
+    format!(
         "if [ ! -e {f} ] && [ ! -L {f} ]; then\n\
            printf 'AM_FILE_MISSING\\n'\n\
          elif [ -f {f} ]; then\n\
@@ -465,25 +659,25 @@ async fn read_remote_optional_file(conn: &HostConn, remote_path: &str) -> Result
          else\n\
            exit 2\n\
          fi\n"
-    );
-    let out = conn.ssh_exec(&script).await.map_err(|_| anyhow!("遠端讀取檔案連線或執行失敗"))?;
-    let trimmed = out.trim();
-    if trimmed == "AM_FILE_MISSING" {
+    )
+}
+
+fn decode_remote_optional_file(out: &str) -> Result<Option<String>> {
+    if out == "AM_FILE_MISSING\n" {
         return Ok(None);
     }
-    let Some(start_pos) = out.find("AM_FILE_B64_START\n") else {
+    let Some(payload) = out.strip_prefix("AM_FILE_B64_START\n") else {
         bail!("遠端檔案讀取框架無效或無法存取");
     };
-    let payload_start = start_pos + "AM_FILE_B64_START\n".len();
-    let Some(end_pos) = out[payload_start..].find("AM_FILE_B64_END\n") else {
+    let Some(payload) = payload.strip_suffix("AM_FILE_B64_END\n") else {
         bail!("遠端檔案讀取框架未正常結束或傳輸截斷");
     };
-    let b64_str = out[payload_start..payload_start + end_pos].replace(['\n', '\r', ' '], "");
+    let b64_str = payload.replace(['\n', '\r'], "");
     use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64_str)
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_str)
         .map_err(|_| anyhow!("遠端檔案內容 base64 解碼失敗"))?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| anyhow!("遠端檔案內容不是有效 UTF-8"))?;
+    let text = String::from_utf8(bytes).map_err(|_| anyhow!("遠端檔案內容不是有效 UTF-8"))?;
     Ok(Some(text))
 }
 
@@ -545,8 +739,14 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(v["description"], "User custom config");
         assert_eq!(v["herdr"]["version"], 1);
-        assert_eq!(v["hooks"]["SessionStart"][0]["hooks"][0]["command"], "bash '/home/ubuntu/.codex/herdr-agent-state.sh' session");
-        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "/bin/other-stop.sh");
+        assert_eq!(
+            v["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "bash '/home/ubuntu/.codex/herdr-agent-state.sh' session"
+        );
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "/bin/other-stop.sh"
+        );
         assert_eq!(v["hooks"]["Stop"][1]["hooks"][0]["command"], dispatcher);
     }
 
@@ -567,7 +767,8 @@ mod tests {
                     }
                 ]
             }
-        }).to_string();
+        })
+        .to_string();
         assert!(merge_hooks_json(&non_canonical, &cmd).is_err());
 
         let extra_fields = serde_json::json!({
@@ -585,7 +786,8 @@ mod tests {
                     }
                 ]
             }
-        }).to_string();
+        })
+        .to_string();
         assert!(merge_hooks_json(&extra_fields, &cmd).is_err());
     }
 
@@ -599,29 +801,73 @@ mod tests {
         let key = "/home/user/.codex/hooks.json:stop:0:0";
 
         // 1. Base has trusted_hash and enabled=true -> true
-        let base_ok = format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"hash123\"\nenabled = true\n");
-        assert!(evaluate_trust_state(Some(&base_ok), None, key, "config.toml", "").unwrap());
+        let base_ok =
+            format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"hash123\"\nenabled = true\n");
+        assert!(
+            evaluate_trust_state(Some(&base_ok), None, key, "config.toml", "", "hash123").unwrap()
+        );
 
         // 2. Profile overrides enabled=false -> false
         let prof_disabled = format!("[hooks.state.\"{key}\"]\nenabled = false\n");
-        assert!(!evaluate_trust_state(Some(&base_ok), Some(&prof_disabled), key, "config.toml", "profile.config.toml").unwrap());
+        assert!(!evaluate_trust_state(
+            Some(&base_ok),
+            Some(&prof_disabled),
+            key,
+            "config.toml",
+            "profile.config.toml",
+            "hash123"
+        )
+        .unwrap());
 
         // 3. Base has trusted_hash (enabled omitted), Profile has enabled=true -> retains base hash -> true!
         let base_only_hash = format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"hash123\"\n");
         let prof_enabled_only = format!("[hooks.state.\"{key}\"]\nenabled = true\n");
-        assert!(evaluate_trust_state(Some(&base_only_hash), Some(&prof_enabled_only), key, "config.toml", "profile.config.toml").unwrap());
+        assert!(evaluate_trust_state(
+            Some(&base_only_hash),
+            Some(&prof_enabled_only),
+            key,
+            "config.toml",
+            "profile.config.toml",
+            "hash123"
+        )
+        .unwrap());
 
         // 4. Profile explicitly sets trusted_hash = "" -> overrides base hash to empty -> false
-        let prof_empty_hash = format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"\"\nenabled = true\n");
-        assert!(!evaluate_trust_state(Some(&base_ok), Some(&prof_empty_hash), key, "config.toml", "profile.config.toml").unwrap());
+        let prof_empty_hash =
+            format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"\"\nenabled = true\n");
+        assert!(!evaluate_trust_state(
+            Some(&base_ok),
+            Some(&prof_empty_hash),
+            key,
+            "config.toml",
+            "profile.config.toml",
+            "hash123"
+        )
+        .unwrap());
 
         // 5. Wrong type in profile (e.g. enabled is a string) -> Err, not silent fallback
         let prof_wrong_type = format!("[hooks.state.\"{key}\"]\nenabled = \"true\"\n");
-        assert!(evaluate_trust_state(Some(&base_ok), Some(&prof_wrong_type), key, "config.toml", "profile.config.toml").is_err());
+        assert!(evaluate_trust_state(
+            Some(&base_ok),
+            Some(&prof_wrong_type),
+            key,
+            "config.toml",
+            "profile.config.toml",
+            "hash123"
+        )
+        .is_err());
 
         // 6. Wrong type in hash (e.g. integer) -> Err
         let prof_wrong_hash = format!("[hooks.state.\"{key}\"]\ntrusted_hash = 12345\n");
-        assert!(evaluate_trust_state(Some(&base_ok), Some(&prof_wrong_hash), key, "config.toml", "profile.config.toml").is_err());
+        assert!(evaluate_trust_state(
+            Some(&base_ok),
+            Some(&prof_wrong_hash),
+            key,
+            "config.toml",
+            "profile.config.toml",
+            "hash123"
+        )
+        .is_err());
     }
 
     #[test]
@@ -632,10 +878,24 @@ mod tests {
             "invalid_table_header [\nsecret = \"{sentinel_token}\"\n[hooks.state.\"key\"]\ntrusted_hash = \"{sentinel_hash}\"\n"
         );
 
-        let err = evaluate_trust_state(Some(&corrupt_toml), None, "key", "config.toml", "").unwrap_err();
+        let err = evaluate_trust_state(
+            Some(&corrupt_toml),
+            None,
+            "key",
+            "config.toml",
+            "",
+            "hash123",
+        )
+        .unwrap_err();
         let err_msg = err.to_string();
-        assert!(!err_msg.contains(sentinel_token), "error message leaked secret token");
-        assert!(!err_msg.contains(sentinel_hash), "error message leaked trusted hash");
+        assert!(
+            !err_msg.contains(sentinel_token),
+            "error message leaked secret token"
+        );
+        assert!(
+            !err_msg.contains(sentinel_hash),
+            "error message leaked trusted hash"
+        );
         assert!(err_msg.contains("無法解析"));
     }
 
@@ -678,15 +938,19 @@ mod tests {
 
     #[test]
     fn test_local_dispatcher_execution_and_gates() {
-        use std::process::{Command, Stdio};
         use std::io::Write as _;
+        use std::process::{Command, Stdio};
 
         let dir = crate::test_dirs::scratch_dir("am-codex-disp-test");
         let disp = dir.join("codex-hook.sh");
         let fake_exe = dir.join("fake-daemon.sh");
 
         // Write fake daemon exe that dumps its argv and stdin
-        std::fs::write(&fake_exe, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$1.argv\"\ncat > \"$1.stdin\"\n").unwrap();
+        std::fs::write(
+            &fake_exe,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$1.argv\"\ncat > \"$1.stdin\"\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -698,6 +962,7 @@ mod tests {
 
         // Case 1: Missing AM_BOT_ID -> exit 0 without executing fake daemon
         let out = Command::new("/bin/sh")
+            .current_dir(&dir)
             .arg(&disp)
             .env_clear()
             .env("AM_HOOK_TOKEN", "token")
@@ -709,6 +974,7 @@ mod tests {
 
         // Case 2: AM_CHILD_OF is set -> exit 0 without executing
         let out = Command::new("/bin/sh")
+            .current_dir(&dir)
             .arg(&disp)
             .env_clear()
             .env("AM_BOT_ID", "bot-1")
@@ -721,6 +987,7 @@ mod tests {
 
         // Case 3: Instance mismatch -> exit 0 without executing
         let out = Command::new("/bin/sh")
+            .current_dir(&dir)
             .arg(&disp)
             .env_clear()
             .env("AM_BOT_ID", "bot-1")
@@ -734,6 +1001,7 @@ mod tests {
         // Case 4: Matches guards -> execs fake daemon with full stdin and argv
         let large_payload = "X".repeat(200 * 1024); // 200 KiB stdin (>128 KiB limit)
         let mut child = Command::new("/bin/sh")
+            .current_dir(&dir)
             .arg(&disp)
             .env_clear()
             .env("AM_BOT_ID", "bot-1")
@@ -747,7 +1015,12 @@ mod tests {
             .spawn()
             .unwrap();
 
-        child.stdin.as_mut().unwrap().write_all(large_payload.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(large_payload.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         assert!(out.stdout.is_empty());
@@ -776,22 +1049,137 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::metadata(&disp).unwrap().permissions();
-            assert_eq!(perms.mode() & 0777, 0700);
+            assert_eq!(perms.mode() & 0o777, 0o700);
 
             // Verify directories are 0700
-            assert_eq!(std::fs::metadata(&data_dir).unwrap().permissions().mode() & 0777, 0700);
-            assert_eq!(std::fs::metadata(&codex_home).unwrap().permissions().mode() & 0777, 0700);
+            assert_eq!(
+                std::fs::metadata(&data_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&codex_home).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
 
         // Add trust entry in config.toml
         let abs_hooks = std::fs::canonicalize(codex_home.join("hooks.json")).unwrap();
         let trust_key = format!("{}:stop:0:0", abs_hooks.to_string_lossy());
+        let expected = stop_identity_hash(&sh_quote(&disp.to_string_lossy())).unwrap();
         let config_toml = format!(
-            "[hooks.state.\"{trust_key}\"]\ntrusted_hash = \"abc123hash\"\nenabled = true\n"
+            "[hooks.state.\"{trust_key}\"]\ntrusted_hash = \"{expected}\"\nenabled = true\n"
         );
         std::fs::write(codex_home.join("config.toml"), config_toml).unwrap();
 
         let trusted2 = install_local(&codex_home, &data_dir, None, None).unwrap();
         assert!(trusted2);
+    }
+    #[test]
+    fn read_only_herdr_hash_comparison_helper() {
+        if std::env::var_os("C89_COMPARE_HERDR").is_none() {
+            return;
+        }
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(65536)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        let request: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("invalid comparison request");
+        let actual = command_identity_hash(
+            "session_start",
+            request["matcher"].as_str(),
+            &request["handler"],
+        )
+        .expect("unsupported comparison identity");
+        let matches = request["trusted_hash"]
+            .as_str()
+            .is_some_and(|stored| stored == actual);
+        println!("C89_HERDR_COMPARE={matches}");
+        assert!(matches, "herdr hook identity mismatch");
+    }
+
+    #[test]
+    fn normalized_hash_matches_the_v0164_upstream_command_fixture() {
+        // Input copied from openai/codex rust-v0.164.0:
+        // hooks/src/engine/discovery.rs:1075-1087 command_group(None).
+        // Stop defaults timeout to 600 at :843-863; the hash is :874-890.
+        // config/src/fingerprint.rs:54-65 sorts JSON then hashes compact bytes.
+        let handler = serde_json::json!({"type":"command", "command":"echo hello"});
+        let result = command_identity_hash("stop", None, &handler).unwrap();
+        assert!(
+            result == "sha256:b17846e5b9fcf932448a537996b5e9e212cf40709442d6d0d9d562ed19e040be",
+            "upstream vector mismatch"
+        );
+    }
+
+    #[test]
+    fn a_stale_or_changed_hash_never_authorizes_a_stop_hook() {
+        let key = "/fixture/hooks.json:stop:0:0";
+        let expected = stop_identity_hash("'/fixture/codex-hook.sh'").unwrap();
+        let stale = format!("[hooks.state.{key:?}]\ntrusted_hash=\"sha256:old-definition\"\n");
+        assert!(
+            !evaluate_trust_state(Some(&stale), None, key, "config.toml", "", &expected).unwrap()
+        );
+        let changed = stop_identity_hash("'/different/codex-hook.sh'").unwrap();
+        let wrong = format!("[hooks.state.{key:?}]\ntrusted_hash={changed:?}\n");
+        assert!(
+            !evaluate_trust_state(Some(&wrong), None, key, "config.toml", "", &expected).unwrap()
+        );
+        let valid = format!("[hooks.state.{key:?}]\ntrusted_hash={expected:?}\n");
+        assert!(
+            evaluate_trust_state(Some(&valid), None, key, "config.toml", "", &expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn unverified_versions_cannot_select_the_stop_transport() {
+        assert!(verified_version("codex-cli 0.164.0\n"));
+        for value in [
+            "",
+            "0.164.0",
+            "codex-cli 0.163.0",
+            "codex-cli 0.165.0",
+            "codex-cli 0.164.0-alpha.1",
+            "codex-cli 0.164.1",
+        ] {
+            assert!(!verified_version(value));
+        }
+    }
+
+    #[test]
+    fn remote_optional_reads_reject_missing_end_invalid_utf8_and_extra_output() {
+        assert!(decode_remote_optional_file("AM_FILE_MISSING\n")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            decode_remote_optional_file("AM_FILE_B64_START\nAM_FILE_B64_END\n").unwrap(),
+            Some(String::new())
+        );
+        for invalid in [
+            "AM_FILE_B64_START\neA==\n",
+            "AM_FILE_B64_START\n/w==\nAM_FILE_B64_END\n",
+            "AM_FILE_B64_START\neA==\nAM_FILE_B64_END\nextra",
+            "noise\nAM_FILE_MISSING\n",
+        ] {
+            assert!(decode_remote_optional_file(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn native_shell_fixture_uses_the_production_builders() {
+        let fixture = serde_json::json!({
+            "local_dispatch": local_dispatch_sh(Path::new("/__AM_DATA__"), None),
+            "remote_dispatch": remote_dispatch_sh(".config/agents-manager", None),
+            "remote_read": remote_optional_read_script("/__AM_ROOT__/profile.toml"),
+            "remote_write": write_remote_dispatcher_script("/__AM_ROOT__/installed/codex-hook.sh", "#!/bin/sh\nexit 0\n"),
+        });
+        println!("C89_BASE_FIXTURE={fixture}");
+        println!(
+            "C89_BASE_EXE={}",
+            std::env::current_exe().unwrap().display()
+        );
     }
 }
