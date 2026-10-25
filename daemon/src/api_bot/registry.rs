@@ -505,7 +505,10 @@ mod tests {
 
             // Verify slot is definitely removed
             assert!(!registry.is_active("r_late"));
-            assert_eq!(registry.cancel_and_join("r_late").await, Err(RegistryError::NotFound));
+            assert_eq!(
+                registry.cancel_and_join("r_late").await,
+                Err(RegistryError::NotFound)
+            );
 
             // Even though slot is completely removed and registry cancel_and_join gives NotFound,
             // the owned ticket still yields the genuine JoinHandle TurnOutcome!
@@ -534,9 +537,7 @@ mod tests {
                 .unwrap();
 
             // Get an independent observer for turn 1 before finishing
-            let mut obs1 = registry
-                .subscribe_observer("r_turns")
-                .expect("slot exists");
+            let mut obs1 = registry.subscribe_observer("r_turns").expect("slot exists");
 
             // Finish turn 1 runner
             let _ = tx1_done.send(());
