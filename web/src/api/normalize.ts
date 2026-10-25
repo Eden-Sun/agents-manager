@@ -6,6 +6,10 @@ import type {
   BlockedReason,
   SessionCron,
   HostBaseline,
+  HostBaselinePlan,
+  HostBaselineApplyResult,
+  BaselineAction,
+  BaselineApplyItemResult,
   MemOwner,
   MemProcess,
   MemProcesses,
@@ -1263,3 +1267,62 @@ export function toMissionDetail(raw: unknown): MissionDetail | null {
   }
   return { ...base, events: sortByTimeStable(events), assignments, revisions, parent }
 }
+
+/** 一致性 dry-run 計畫（#719 階段 2 / 3b）。 */
+export function toHostBaselinePlan(v: unknown): HostBaselinePlan | null {
+  if (!isRec(v)) return null
+  const rawActions = pick(v, 'actions')
+  const actions: BaselineAction[] = Array.isArray(rawActions)
+    ? rawActions.flatMap((a) => {
+        if (!isRec(a)) return []
+        const id = str(pick(a, 'id'))
+        if (!id) return []
+        return [
+          {
+            id,
+            action: str(pick(a, 'action')),
+            severity: pick(a, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const),
+            target: str(pick(a, 'target')),
+            key: optStr(pick(a, 'key')) ?? undefined,
+            value: pick(a, 'value'),
+            reason: optStr(pick(a, 'reason')) ?? undefined,
+          },
+        ]
+      })
+    : []
+  return {
+    host: str(pick(v, 'host')),
+    checked_at: str(pick(v, 'checked_at')),
+    stale: pick(v, 'stale') === true,
+    plan_rev: str(pick(v, 'plan_rev')),
+    actions,
+  }
+}
+
+/** 一致性差異補齊結果（#719 階段 3a / 3b）。 */
+export function toHostBaselineApplyResult(v: unknown): HostBaselineApplyResult | null {
+  if (!isRec(v)) return null
+  const rawResults = pick(v, 'results')
+  const results: BaselineApplyItemResult[] = Array.isArray(rawResults)
+    ? rawResults.flatMap((r) => {
+        if (!isRec(r)) return []
+        const id = str(pick(r, 'id'))
+        if (!id) return []
+        return [
+          {
+            id,
+            result: str(pick(r, 'result')),
+            reason: optStr(pick(r, 'reason')) ?? undefined,
+          },
+        ]
+      })
+    : []
+  return {
+    host: str(pick(v, 'host')),
+    plan_rev: str(pick(v, 'plan_rev')),
+    backup_id: optStr(pick(v, 'backup_id')),
+    error: optStr(pick(v, 'error')),
+    results,
+  }
+}
+

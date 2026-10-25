@@ -1,5 +1,5 @@
 import { MockTransport } from './mock'
-import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toHostBaselinePlan, toHostBaselineApplyResult, toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
@@ -15,6 +15,8 @@ import type {
   DirListing,
   GhLoginMode,
   GhStatus,
+  HostBaselinePlan,
+  HostBaselineApplyResult,
   GroupChatResult,
   Mission,
   MissionDetail,
@@ -1060,6 +1062,23 @@ export async function loginGh(host: string, mode: GhLoginMode = 'auto', user?: s
 export async function cancelGhLogin(host: string): Promise<GhStatus> {
   const name = host || 'local'
   return toGhStatus(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/cancel`), name)
+}
+
+/** 取得一致性 dry-run 計畫（GET /api/hosts/{name}/baseline/plan，#719 階段 2 / 3b）。 */
+export async function fetchHostBaselinePlan(host: string): Promise<HostBaselinePlan | null> {
+  const name = host || 'local'
+  const raw = await transport.request('GET', `/hosts/${encodeURIComponent(name)}/baseline/plan`)
+  return toHostBaselinePlan(raw)
+}
+
+/** 一致性差異補齊（POST /api/hosts/{name}/baseline/apply，#719 階段 3a / 3b）。 */
+export async function applyHostBaseline(
+  host: string,
+  input: { plan_rev: string; ids?: string[] },
+): Promise<HostBaselineApplyResult | null> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/baseline/apply`, input)
+  return toHostBaselineApplyResult(raw)
 }
 
 /** 純 shell pane。`pane_id` 是白名單 key，只在這輪 daemon 有效，重啟後舊 pane 不認。 */

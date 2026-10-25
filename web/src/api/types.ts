@@ -85,6 +85,42 @@ export interface HostBaseline {
   fixable?: string[]
 }
 
+/** 一致性 dry-run 計畫動作（#719 階段 2 / 3b，SPEC §16.7）。 */
+export interface BaselineAction {
+  id: string
+  action: 'merge_key' | 'manual' | string
+  severity: 'critical' | 'warn'
+  target: string
+  key?: string
+  value?: unknown
+  reason?: string
+}
+
+/** 一致性 dry-run 計畫（GET /api/hosts/{name}/baseline/plan，#719 階段 2 / 3b）。 */
+export interface HostBaselinePlan {
+  host: string
+  checked_at: string
+  stale: boolean
+  plan_rev: string
+  actions: BaselineAction[]
+}
+
+/** 一致性差異補齊單項結果（#719 階段 3a / 3b）。 */
+export interface BaselineApplyItemResult {
+  id: string
+  result: 'applied' | 'present' | 'skipped' | 'manual' | string
+  reason?: string
+}
+
+/** 一致性差異補齊結果（POST /api/hosts/{name}/baseline/apply，#719 階段 3a / 3b）。 */
+export interface HostBaselineApplyResult {
+  host: string
+  plan_rev: string
+  backup_id: string | null
+  error: string | null
+  results: BaselineApplyItemResult[]
+}
+
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
   /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */

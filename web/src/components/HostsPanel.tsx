@@ -14,6 +14,7 @@ import { useT } from '../lib/i18n'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
+import { HostBaselineApply } from './HostBaselineApply'
 import { ServicePaneNote } from './ServicePaneNote'
 import { ToolBadges } from './Tools'
 import './hostsPanel.css'
@@ -172,7 +173,7 @@ function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
 }
 
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
-export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
+export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: string }) {
   const t = useT()
   const v = hostBaselineView(baseline)
   if (v.items.length === 0) {
@@ -193,6 +194,7 @@ export function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
       <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
         {v.text}
       </span>
+      <HostBaselineApply host={host} baseline={baseline} syncMode={syncMode} />
       {criticalItems.length > 0 ? (
         <ul className="host-baseline-items">
           {criticalItems.map((i) => (
@@ -254,7 +256,7 @@ function HostRow({ name }: { name: string }) {
         )}
         <HerdrVersionLine herdr={host.herdr} />
         <ToolBadges host={host.name} tools={host.tools} />
-        <BaselineLine baseline={host.baseline} />
+        <BaselineLine host={host.name} baseline={host.baseline} />
         <GhHostStatus host={host.name} />
         <HostShellList host={host.name} connected={host.connected} />
       </span>
@@ -466,7 +468,7 @@ function LocalHostRow() {
         <span className="host-ssh">{attach}</span>
         <HerdrVersionLine herdr={herdr} />
         <ToolBadges host="local" tools={tools} />
-        <BaselineLine baseline={baseline} />
+        <BaselineLine host="local" baseline={baseline} />
         <GhHostStatus host="local" />
         <HostShellList host="local" connected={connected} />
       </span>
