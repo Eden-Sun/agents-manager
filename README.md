@@ -173,15 +173,15 @@ flowchart LR
 For development or unsupported platforms. Needs Rust (`cargo`) and [Bun](https://bun.sh) in addition to herdr.
 
 
-Rust development builds use [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per Linux host (the current nightly lacks memory-budget support, so use the pinned source build):
+Rust development builds can opt into [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per Linux host (the current nightly lacks memory-budget support, so use the pinned source build):
 
 ```bash
 scripts/install-blaze.sh --source
-scripts/project-cargo.sh build -p agents-managerd
+AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```
 
-Managed agent panes also route ordinary `cargo build/run` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing Blaze falls back to Cargo with a message. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Tests always retain native Cargo and the configured remote worker route (r7); even `AGM_RUST_ENGINE=blaze` does not change this. macOS defaults to native Cargo; `AGM_RUST_ENGINE=blaze` explicitly opts build/run in. The shared project daemon defaults to an 8 GiB soft worker budget and a 600-second idle timeout. Set `AGM_RUST_ENGINE=cargo` to opt out. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
+All hosts default to native Cargo. On Linux, explicitly set `AGM_RUST_ENGINE=auto` or `blaze` to enable acceleration; managed panes then route ordinary `cargo build/run` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing Blaze falls back to Cargo with a message. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Tests always retain native Cargo and the configured remote worker route (r7); even `AGM_RUST_ENGINE=blaze` does not change this. macOS defaults to native Cargo; `AGM_RUST_ENGINE=blaze` explicitly opts build/run in. The shared project daemon uses an 8 GiB soft worker budget and a 600-second idle timeout. A three-worktree daemon build measured 23.33 GiB peak and 20.76 GiB steady background RSS, so acceleration requires explicit opt-in. Set `AGM_RUST_ENGINE=cargo` to opt out. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
 
 **Development mode** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
 
