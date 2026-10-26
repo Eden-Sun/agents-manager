@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod adapter;
+pub(crate) mod completion;
 pub(crate) mod http;
 pub(crate) mod protocol;
 pub(crate) mod quote;
@@ -14,5 +15,7 @@ pub(crate) mod tools;
 
 #[cfg(test)]
 mod adapter_tests;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod completion_tests;
 pub(crate) mod registry;
 pub(crate) mod runtime;

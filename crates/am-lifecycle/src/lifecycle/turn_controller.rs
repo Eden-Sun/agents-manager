@@ -160,6 +160,53 @@ fn edge(from: &str, to: &str, shape: &str) -> Result<()> {
 /// hook 回報並完成就是事後證據，「可能沒送到、也沒人會再試」的前提已經不成立。重送閘門看 `auto_resend`，不看這一欄。
 ///
 /// 呼叫端要跟回覆訊息綁在同一個交易裡（#115），所以只有交易內版本。
+/// Complete one API-bot turn only while the exact bot, run, and turn still have live ownership.
+///
+/// This shape is deliberately separate from complete_with_native_evidence: that helper fences
+/// the admitted run id but does not require a live API-bot owner and a running run.
+pub async fn complete_api_bot_on(
+    conn: &mut sqlx::SqliteConnection,
+    bot_id: &str,
+    run_id: &str,
+    turn_id: &str,
+) -> Result<Outcome> {
+    edge("in_flight", "completed", "API-bot joined completion")?;
+    let done = sqlx::query(
+        "UPDATE turns
+            SET status='completed', completed_at=COALESCE(completed_at, ?)
+          WHERE id=? AND run_id=? AND status='in_flight'
+            AND EXISTS (
+                SELECT 1
+                  FROM runs r
+                  JOIN bots b ON b.id=r.bot_id
+                  JOIN conversations c ON c.id=turns.conversation_id
+                 WHERE r.id=turns.run_id AND r.id=? AND r.state='running'
+                   AND b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL
+                   AND c.bot_id=b.id
+            )",
+    )
+    .bind(crate::db::now())
+    .bind(turn_id)
+    .bind(run_id)
+    .bind(run_id)
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?;
+    match done.rows_affected() {
+        1 => Ok(Outcome::Applied),
+        0 => settled_or_fenced(
+            &mut *conn,
+            turn_id,
+            "in_flight",
+            "completed",
+            "API-bot joined completion",
+            "exact API-bot owner is no longer live",
+        )
+        .await,
+        _ => anyhow::bail!("API-bot completion changed more than one turn"),
+    }
+}
+
 pub async fn complete_with_native_evidence(
     conn: &mut sqlx::SqliteConnection,
     turn_id: &str,

@@ -362,6 +362,43 @@ pub async fn recover_unknown(pool: &SqlitePool, run_id: &str) -> Result<u64> {
     Ok(sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE state='reserved' AND run_id=? AND NOT EXISTS(SELECT 1 FROM runs WHERE id=? AND state IN ('running','starting'))")
         .bind(super::now()).bind(run_id).bind(run_id).execute(pool).await?.rows_affected())
 }
+/// Close every still-reserved attempt for one exact live API-bot turn inside its caller's
+/// transaction. A zero-row result means only that there was no matching reservation; callers
+/// must independently prove the exact live owner and must not treat this count as that proof.
+pub async fn close_reserved_unknown_on(
+    conn: &mut SqliteConnection,
+    bot_id: &str,
+    run_id: &str,
+    turn_id: &str,
+    finished_at: &str,
+) -> Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE api_bot_attempts
+            SET state='unknown', estimated_microusd=NULL, finished_at=?
+          WHERE bot_id=? AND run_id=? AND turn_id=? AND state='reserved'
+            AND EXISTS (
+                SELECT 1
+                  FROM bots b
+                  JOIN runs r ON r.bot_id=b.id
+                  JOIN turns t ON t.run_id=r.id
+                  JOIN conversations c ON c.id=t.conversation_id
+                 WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL
+                   AND r.id=? AND r.state='running'
+                   AND t.id=? AND t.run_id=r.id AND t.status='in_flight'
+                   AND c.bot_id=b.id
+            )",
+    )
+    .bind(finished_at)
+    .bind(bot_id)
+    .bind(run_id)
+    .bind(turn_id)
+    .bind(bot_id)
+    .bind(run_id)
+    .bind(turn_id)
+    .execute(conn)
+    .await?
+    .rows_affected())
+}
 async fn prune_in(conn: &mut SqliteConnection, at: &str) -> Result<u64> {
     sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE state='reserved' AND (session_id IS NULL OR session_id IN(SELECT s.id FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.expires_at<=? OR b.deleted_at IS NOT NULL))")
         .bind(at).bind(at).execute(&mut *conn).await?;
@@ -702,6 +739,104 @@ mod tests {
                 .unwrap(),
             "unknown"
         );
+    }
+    #[tokio::test]
+    async fn joined_turn_closeout_changes_all_exact_live_reservations_only() {
+        let pool = pool().await;
+        let f = fence();
+        create(&pool, &f, &checkpoint(false)).await.unwrap();
+        reserve(&pool, &f, &attempt_data(), &checkpoint(true), 1000, 10)
+            .await
+            .unwrap();
+        let at = "2026-10-26T12:00:00.000Z";
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('reserved-b','s','a','ra','ta1',1,1,'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard','reserved',250,'fixture-v1',?)")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,actual_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at,finished_at) VALUES('recorded','s','a','ra','ta1',1,2,'1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','fast','standard','recorded','{\"input_tokens\":7,\"output_tokens\":2}',300,43,'fixture-v1',?,'2026-10-25T12:00:00.000Z')")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,actual_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at,finished_at) VALUES('failed','s','a','ra','ta1',1,3,'3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard','standard','failed','{\"input_tokens\":3}',320,18,'fixture-v1',?,'2026-10-24T12:00:00.000Z')")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,actual_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at,finished_at) VALUES('unknown','s','a','ra','ta1',1,4,'4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','fast','fast','unknown','{\"input_tokens\":4}',340,NULL,'fixture-v1',?,'2026-10-23T12:00:00.000Z')")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('detached',NULL,NULL,NULL,NULL,1,3,'2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','fast','reserved',90,'fixture-v1',?)")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let recorded_before: (String, Option<String>, String, Option<String>, i64, Option<i64>, Option<String>) =
+            sqlx::query_as("SELECT state,actual_speed,usage_json,finished_at,reserved_microusd,estimated_microusd,pricing_version FROM api_bot_attempts WHERE id='recorded'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let terminal_before: Vec<(String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>)> =
+            sqlx::query_as("SELECT id,state,actual_speed,usage_json,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id IN ('recorded','failed','unknown') ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for (bot, run, turn) in [
+            ("b", "ra", "ta1"),
+            ("a", "rb", "ta1"),
+            ("a", "ra", "ta2"),
+        ] {
+            let mut tx = super::super::begin_write(&pool).await.unwrap();
+            assert_eq!(
+                close_reserved_unknown_on(&mut tx, bot, run, turn, at)
+                    .await
+                    .unwrap(),
+                0
+            );
+            tx.rollback().await.unwrap();
+        }
+
+        let mut tx = super::super::begin_write(&pool).await.unwrap();
+        assert_eq!(
+            close_reserved_unknown_on(&mut tx, "a", "ra", "ta1", at)
+                .await
+                .unwrap(),
+            2,
+            "all exact reserved attempts close; count is not an owner proof"
+        );
+        tx.commit().await.unwrap();
+
+        let reserved_rows: Vec<(String, String, Option<i64>, i64, Option<String>)> =
+            sqlx::query_as("SELECT id,state,estimated_microusd,reserved_microusd,finished_at FROM api_bot_attempts WHERE id IN ('attempt-a','reserved-b') ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reserved_rows.len(), 2);
+        for (id, state, estimated, reserved, finished) in reserved_rows {
+            assert_eq!((state.as_str(), estimated, reserved, finished.as_deref()), ("unknown", None, if id == "attempt-a" { 100 } else { 250 }, Some(at)));
+        }
+        let recorded_after: (String, Option<String>, String, Option<String>, i64, Option<i64>, Option<String>) =
+            sqlx::query_as("SELECT state,actual_speed,usage_json,finished_at,reserved_microusd,estimated_microusd,pricing_version FROM api_bot_attempts WHERE id='recorded'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded_after, recorded_before, "recorded usage and cost stay byte-for-byte unchanged");
+        let terminal_after: Vec<(String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>)> =
+            sqlx::query_as("SELECT id,state,actual_speed,usage_json,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id IN ('recorded','failed','unknown') ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(terminal_after, terminal_before, "recorded/failed/unknown rows are not rewritten");
+        let detached: (Option<String>, Option<String>, Option<String>, String, i64, Option<i64>, Option<String>) =
+            sqlx::query_as("SELECT bot_id,run_id,turn_id,state,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id='detached'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(detached, (None, None, None, "reserved".into(), 90, None, None));
     }
     #[tokio::test]
     async fn successful_handover_fences_old_turn_and_explicit_retirement_erases_content() {
