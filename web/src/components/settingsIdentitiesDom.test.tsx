@@ -4,6 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { MockTransport } from '../api/mock'
 import { act, click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
@@ -33,10 +34,15 @@ const row = (name: string) =>
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent === text)
 const chip = (name: string) => row(name).querySelector('.identity-login')?.textContent ?? ''
 const calls = (requests: FakeRequest[], re: RegExp) => requests.filter((r) => r.method === 'POST' && re.test(r.path))
+const shellRow = (host: string, identity: string) =>
+  document.querySelector<HTMLElement>(`.identity-row.is-shell[data-shell-host="${host}"][data-shell-identity="${identity}"]`)
+const shellDeleteButton = (host: string, identity: string) =>
+  shellRow(host, identity)?.querySelector<HTMLButtonElement>('button[aria-label*="shell alias"]')
+const shellDeleteCalls = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'DELETE' && r.path.includes('/shell-identities/'))
 
-async function open() {
-  const requests = mockApi(mock)
-  stopEvents = mock.openSocket({ since: () => 0, onStatus: () => {}, onFrame: (f) => dispatchFrameForTest(f) })
+async function open(backend: MockTransport = mock) {
+  const requests = mockApi(backend)
+  stopEvents = backend.openSocket({ since: () => 0, onStatus: () => {}, onFrame: (f) => dispatchFrameForTest(f) })
   await advanceMockTime(200) // openSocket 要等 120ms 才算連上，之前的事件不會送
   await useStore.getState().refreshState()
   await useStore.getState().loadIdentityPrefs()
@@ -208,3 +214,148 @@ async function mount_with_identities() {
   const { identities } = useStore.getState()
   await act(() => useStore.setState({ identities: [...identities, { name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] }] }))
 }
+
+it('shell alias 移除：取消確認不送請求；確認框點名主機與 alias 並說明保留資料和外部編輯器窗口', async () => {
+  const requests = await open()
+  const remove = shellDeleteButton('local', 'cc2')
+  assert.ok(remove, 'Claude ccN shell alias 有移除按鈕')
+  await click(remove!)
+  const dialog = document.querySelector('[role=alertdialog]')!
+  assert.match(dialog.textContent ?? '', /本機.*cc2/)
+  assert.match(dialog.textContent ?? '', /登入憑證、設定目錄與對話歷史.*保留/)
+  assert.match(dialog.textContent ?? '', /外部編輯器可能.*檔案替換之間修改設定/)
+  assert.match(dialog.textContent ?? '', /備份.*不會自動刪除/)
+  await click(btn(dialog, '取消')!)
+  assert.equal(shellDeleteCalls(requests).length, 0, '取消不能送 DELETE')
+  assert.ok(shellRow('local', 'cc2'), '取消後 alias row 保留')
+})
+
+it('shell alias 移除被新 ref 擋下：row 保留、refs 與已建立的備份路徑可見', async () => {
+  const requests = await open()
+  const backupPath = '/mock/local/.agents-manager/shell-identity-backups/cc2.bak'
+  mock.failNext('DELETE', '^/hosts/local/shell-identities/cc2\\?kind=claude$', 409, {
+    error: 'conflict', reason: 'alias_new_reference', message: 'a new reference appeared',
+    host: 'local', kind: 'claude', identity: 'cc2', backup_path: backupPath,
+    refs: [{ type: 'bot', id: 'bot-new' }], restored: true,
+  })
+  await click(shellDeleteButton('local', 'cc2')!)
+  const dialog = document.querySelector('[role=alertdialog]')!
+  await click(btn(dialog, '移除 alias')!)
+  await until(() => Boolean(document.querySelector('[role=alert]')?.textContent?.includes(backupPath)), '顯示備份路徑')
+  const result = document.querySelector('[role=alert]')!
+  assert.match(result.textContent ?? '', /刪除期間有參照開始使用/)
+  assert.match(result.textContent ?? '', /Bot bot-new/)
+  assert.ok(result.textContent?.includes(backupPath))
+  assert.ok(shellRow('local', 'cc2'), '被 ref 擋下後 row 仍在')
+  assert.equal(shellDeleteCalls(requests).length, 1)
+})
+
+it('shell alias 移除使用 host/kind/name 專用 URL；只移除 m4p alias，保留另一台同名 alias 與 config identity', async () => {
+  resetStoreForTest()
+  const backend = new MockTransport()
+  await backend.request('POST', '/identities', {
+    name: 'cc2', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-config-cc2' },
+  })
+  await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
+  await backend.request('POST', '/hosts', { name: 'lab', ssh: 'lab' })
+  const requests = await open(backend)
+  assert.ok(shellRow('m4p', 'cc2'))
+  assert.ok(shellRow('lab', 'cc2'))
+  assert.ok(row('cc2'), '同名 config identity row 存在')
+
+  await click(shellDeleteButton('m4p', 'cc2')!)
+  const dialog = document.querySelector('[role=alertdialog]')!
+  await click(btn(dialog, '移除 alias')!)
+  const backupPath = '/mock/m4p/.agents-manager/shell-identity-backups/cc2.bak'
+  await until(() => Boolean(document.querySelector('[role=status]')?.textContent?.includes(backupPath)), '顯示成功備份路徑')
+
+  const [request] = shellDeleteCalls(requests)
+  assert.equal(shellDeleteCalls(requests).length, 1)
+  assert.equal(request.path, '/api/hosts/m4p/shell-identities/cc2?kind=claude')
+  assert.equal(request.body, undefined, 'DELETE 不帶 body')
+  assert.equal(shellRow('m4p', 'cc2'), null, '只移除指定 host 的 alias')
+  assert.ok(shellRow('lab', 'cc2'), '另一台同名 shell alias 保留')
+  assert.ok(row('cc2'), '同名 config identity 的舊 DELETE 資料不受影響')
+  assert.equal(shellDeleteCalls(requests).length, 1, '不呼叫 config identity DELETE')
+  assert.match(document.querySelector('[role=status]')?.textContent ?? '', /外部編輯器可能.*檔案替換之間修改設定/)
+})
+
+for (const [label, reply] of [
+  ['未確認成功', { ok: false, host: 'local', kind: 'claude', identity: 'cc2', backup_path: '/mock/retained/cc2.bak', warning: 'external_editor_window' }],
+  ['缺少備份路徑', { ok: true, host: 'local', kind: 'claude', identity: 'cc2', warning: 'external_editor_window' }],
+  ['主機不符', { ok: true, host: 'other', kind: 'claude', identity: 'cc2', backup_path: '/mock/other/cc2.bak', warning: 'external_editor_window' }],
+  ['備份路徑非絕對', { ok: true, host: 'local', kind: 'claude', identity: 'cc2', backup_path: 'relative/cc2.bak', warning: 'external_editor_window' }],
+] as const) {
+  it(`shell alias 移除回應${label}：不得顯示成功，保留已回傳備份路徑`, async () => {
+    resetStoreForTest()
+    const backend = new MockTransport()
+    const original = backend.request.bind(backend)
+    backend.request = async (method, path, body) =>
+      method === 'DELETE' && path.includes('/shell-identities/') ? reply : original(method, path, body)
+    await open(backend)
+    await click(shellDeleteButton('local', 'cc2')!)
+    await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+    await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '回應已呈現')
+    const result = document.querySelector('.identity-shell-delete-result')!
+    assert.equal(result.getAttribute('role'), 'alert', '未知或不符契約的回應不能宣稱成功')
+    assert.match(result.textContent ?? '', /無法確認.*移除結果/)
+    if ('backup_path' in reply) {
+      assert.ok(result.textContent?.includes(reply.backup_path), '已回傳的備份路徑仍可見')
+      assert.match(result.textContent ?? '', /備份路徑（未確認）/)
+    } else {
+      assert.match(result.textContent ?? '', /未收到備份路徑/)
+    }
+    assert.ok(shellRow('local', 'cc2'), '不能依不確定回應清掉原列')
+  })
+}
+
+for (const [type, expected] of [
+  ['bot', 'Bot ref-id'], ['runtime', '執行中的 Run ref-id'],
+  ['supervisor', '巡檢 ref-id'], ['supervisor_role', 'Supervisor role ref-id'],
+] as const) {
+  it(`shell alias ref ${type}：失敗標示精確參照與目標主機`, async () => {
+    resetStoreForTest()
+    const backend = new MockTransport()
+    await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
+    await open(backend)
+    backend.failNext('DELETE', '^/hosts/m4p/shell-identities/cc2\\?kind=claude$', 409, {
+      error: 'conflict', reason: 'identity_in_use', refs: [{ type, id: 'ref-id' }],
+    })
+    await click(shellDeleteButton('m4p', 'cc2')!)
+    await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+    await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '顯示失敗目標')
+    const text = document.querySelector('.identity-shell-delete-result')!.textContent ?? ''
+    assert.ok(text.includes('主機：m4p；Claude shell alias：cc2'))
+    assert.ok(text.includes(expected))
+    assert.ok(shellRow('local', 'cc2'))
+    assert.ok(shellRow('m4p', 'cc2'))
+  })
+}
+
+it('同主機 config/shell 同名：保留既有 config 入口，不以 shell DELETE 代替', async () => {
+  resetStoreForTest()
+  const backend = new MockTransport()
+  await backend.request('POST', '/identities', { name: 'cc2', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-cc2' } })
+  const requests = await open(backend)
+  assert.ok(row('cc2'))
+  assert.equal(shellRow('local', 'cc2'), null)
+  assert.equal(shellDeleteButton('local', 'cc2'), undefined)
+  assert.equal(shellDeleteCalls(requests).length, 0)
+})
+
+it('備份建立未確認：回傳預定位置但不能宣稱備份已保留', async () => {
+  await open()
+  const backup = '/mock/local/intended-backup.bak'
+  mock.failNext('DELETE', '^/hosts/local/shell-identities/cc2\\?kind=claude$', 409, {
+    error: 'conflict', reason: 'alias_backup_unconfirmed', backup_path: backup,
+  })
+  await click(shellDeleteButton('local', 'cc2')!)
+  await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+  await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '顯示備份未確認')
+  const text = document.querySelector('.identity-shell-delete-result')!.textContent ?? ''
+  assert.match(text, /無法確認備份是否建立/)
+  assert.match(text, /備份路徑（未確認）/)
+  assert.ok(text.includes(backup))
+  assert.ok(!text.includes('保留的備份路徑：'))
+  assert.ok(shellRow('local', 'cc2'))
+})

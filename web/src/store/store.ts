@@ -388,6 +388,19 @@ export interface ComposerState {
   autoStart?: boolean
 }
 
+export interface ShellIdentityDeleteRef {
+  type: string
+  id?: string
+}
+
+export interface ShellIdentityDeleteOutcome {
+  ok: boolean
+  backup_path?: string
+  reason?: string
+  message?: string
+  refs?: ShellIdentityDeleteRef[]
+}
+
 export interface StoreState {
   ready: boolean
   bootError: string | null
@@ -593,6 +606,7 @@ export interface StoreState {
   addHost: (input: NewHostInput) => Promise<HostResult | null>
   addIdentity: (input: NewIdentityInput) => Promise<boolean>
   removeIdentity: (name: string, host?: string) => Promise<void>
+  removeShellIdentity: (host: string, identity: string) => Promise<ShellIdentityDeleteOutcome>
   removeHost: (name: string) => Promise<void>
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
@@ -1940,6 +1954,30 @@ export const useStore = create<StoreState>((set, get) => {
       get().notify('info', host && host !== 'local' ? t('已刪除 {host} 的身份 {name}', { host, name }) : t('已刪除身份 {name}', { name }))
     } catch (e) {
       get().notify('error', errText(e))
+    }
+  },
+
+  async removeShellIdentity(host, identity) {
+    try {
+      const result = await api.deleteShellIdentity(host, identity)
+      await get().refreshTools(host)
+      return { ok: true, backup_path: result.backup_path }
+    } catch (e) {
+      const body = e instanceof ApiError ? e.body : null
+      const refs = Array.isArray(body?.refs)
+        ? body.refs.flatMap((ref) =>
+            isRec(ref) && typeof ref.type === 'string'
+              ? [{ type: ref.type, id: typeof ref.id === 'string' ? ref.id : undefined }]
+              : [],
+          )
+        : undefined
+      return {
+        ok: false,
+        reason: typeof body?.reason === 'string' ? body.reason : undefined,
+        message: typeof body?.message === 'string' ? body.message : e instanceof Error ? e.message : String(e),
+        backup_path: typeof body?.backup_path === 'string' ? body.backup_path : undefined,
+        refs: refs?.length ? refs : undefined,
+      }
     }
   },
 

@@ -301,6 +301,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/agy/install` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/identities/{identity}/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/identities/{identity}/logout` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| DELETE | `/api/hosts/{name}/shell-identities/{identity}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service → 403 `user_only` |
 | POST | `/api/hosts/{name}/reconnect` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1820,6 +1821,15 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
   刪的是**沒寫 host** 的那筆時，遠端的 bot 也算：那台沒有自己同名的身份（config 明寫、或 shell 偵測到的 `ccN`；還沒偵測過照「沒有」算）就是在用這一筆，同樣 409。
   刪除成功時同時清掉該身份的額度讀數（記憶體與 `quota_cache`，key＝`<kind>:<name>`，遠端加 `<host>/` 前綴），並推 `quota_updated {kind, host, quota:null}`；同名的 shell alias（`ccN`）仍在用的那把 key 不清（#1350）。
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
+
+### `DELETE /api/hosts/{name}/shell-identities/{identity}?kind=claude`
+只供 User principal；Bot（包含已登記 AGM role）與 Service → 403 `user_only`。`kind=claude` 必填，identity 僅收 `cc0`…`cc6`；沒有 request body。這是**刪該 host shell startup file 裡的 alias**，與上面的 `DELETE /api/identities/{name}?host=` 刪 config.toml 項目不同；config 同名項優先時回 409 `identity_source_mismatch`，不會改 config。
+
+成功 `200 {"ok":true,"host":"local","kind":"claude","identity":"cc2","backup_path":"<該 host 的絕對路徑>","warning":"external_editor_window"}`。刪除只移除明確定位的 alias 行；Claude 登入憑證、profile、對話與歷史保留。每次寫入前在該 host 的 `~/.config/agents-manager/shell-alias-backups/` 建立並永久保留原 startup file 備份，檔案權限 `0600`；回傳路徑供使用者自行保存或恢復。若操作途中建立了備份，即使拒絕或回復失敗也會在錯誤回應的頂層 `backup_path` 回傳，不會自動刪除。
+
+只支援唯一、直接、單行且通過嚴格語法的 alias 候選：本機 bash 的 `.bashrc`（login profile 可直接 source `.bashrc`，或只用明確的 `if [ -f …/.bashrc ]; then source …/.bashrc; fi` 條件區塊），以及 zsh 的 `.zshrc`；zsh 的 `ZDOTDIR` 必須未設定或等於 `HOME`。檔案可含註解、受限的靜態 `PATH`／`PS1`／`LANG`／`TERM`／`LC_*` 設定，以及其他直接單行靜態 alias；這些行原樣保留。目標 alias 仍須符合 Claude `ccN` 命令語法。所有其他非註解行（例如 `eval`、函式、複合命令、未知 `source`／generated chain）都具名拒絕，所以這是支援常見設定行的窄子集，不是一般 `.bashrc` 解譯器。重複／動態／複合目標定義、來源不明、symlink、多重 hard link、非本人擁有、group/world 可寫或有 extended ACL/xattr 的檔案也拒絕。替換前在同目錄的暫存候選檔執行 `bash -n`／`zsh -n`；shell stderr 不回傳。替換時保留 owner/group/mode。讀到的 login-shell alias 輸出沒有來源資訊；daemon 會核對唯一候選行與當下有效值，這能證明比對時內容一致，不能證明 alias 的 shell 來源 provenance。
+
+刪除前後各查同一 host、kind `claude`、identity 完全相同的 Bot、active runtime、`supervisors`（巡檢 patrol）與 `supervisor_roles` 引用；後兩者以各自 `project_id`（沒有時才看關聯 Bot 的 project）限定 host。有既存引用回 409 `identity_in_use` 並帶 `refs`；ref type 為 `bot`、`runtime`、`supervisor` 或 `supervisor_role`，runtime 的 `id` 是 run id。沒綁 identity 的 Bot 使用同一預設帳號不算引用，不會只因共用憑證阻擋 cc0 alias 刪除。備份位置由 daemon 在 prepare 前產生；prepare 回應遺失時只重讀該路徑核對，不重寫。仍無法確認則回 `alias_backup_unconfirmed` 與預定 `backup_path`（不宣稱檔案存在），原 rc 不改。備份目錄與檔案同樣檢查 ACL/xattr；失敗回復不成功時明確回 `alias_restore_conflict`。流程先建立並重新讀驗永久 `0600` 備份，確認路徑與候選 hash 後才進入 commit；commit 再驗原檔、備份與候選，語法檢查通過後才替換。成功回應與備份確認後的 commit／probe／reference 錯誤都回傳已確認的 `backup_path`。commit transport 回覆遺失時，daemon 會用該備份嘗試條件式恢復，回 `alias_commit_outcome_unknown` 或 `alias_restore_conflict`。刪除期間出現新引用回 `alias_new_reference` 並帶 `refs`；daemon 只在目前檔案內容仍符合候選 digest 時嘗試條件式恢復，回應帶 `restored`，若無法安全恢復則 reason 為 `alias_restore_conflict`。成功後推 `host_changed` 讓主機身份快照更新。同 host 的 alias 刪除會序列化，但其他 config identity writer 與外部 shell 編輯器不在同一把鎖內；檔案 hash 比對與 atomic rename 中間仍有外部修改窗口，**不是 compare-and-swap，也不保證線性化**。錯誤 reason 包括 `alias_source_unknown`、`alias_definition_unsupported`、`alias_definition_duplicate`、`alias_file_changed`、`alias_syntax_check_failed`、`alias_probe_failed`、`alias_still_defined`、`identity_in_use`、`alias_new_reference`、`alias_commit_outcome_unknown`、`alias_restore_conflict`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
 在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude auth login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。

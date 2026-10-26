@@ -426,6 +426,40 @@ export async function deleteIdentity(name: string, host = 'local'): Promise<void
   await transport.request('DELETE', `/identities/${encodeURIComponent(name)}${q}`)
 }
 
+export interface ShellIdentityDeleteResponse {
+  ok: true
+  host: string
+  kind: 'claude'
+  identity: string
+  backup_path: string
+  warning: 'external_editor_window'
+}
+
+/** 移除主機 shell 中的 Claude ccN alias；config identity 的 DELETE 是另一條 API。 */
+export async function deleteShellIdentity(host: string, identity: string): Promise<ShellIdentityDeleteResponse> {
+  const name = host || 'local'
+  const raw = await transport.request(
+    'DELETE',
+    `/hosts/${encodeURIComponent(name)}/shell-identities/${encodeURIComponent(identity)}?kind=claude`,
+  )
+  const o = isRec(raw) ? raw : {}
+  const backupPath = typeof o.backup_path === 'string' ? o.backup_path : undefined
+  if (o.ok !== true || o.host !== name || o.kind !== 'claude' || o.identity !== identity
+    || !backupPath?.trim() || !backupPath.startsWith('/') || o.warning !== 'external_editor_window') {
+    throw new ApiError(502, {
+      error: 'upstream', reason: 'alias_delete_unconfirmed', backup_path: backupPath,
+    }, 'alias_delete_unconfirmed')
+  }
+  return {
+    ok: true,
+    host: name,
+    kind: 'claude',
+    identity,
+    backup_path: backupPath,
+    warning: 'external_editor_window',
+  }
+}
+
 /** API.md「停用模型的回應」（#400）：`{"remapped":{"model":{"from","to"}}}`；沒換就沒有這一段。 */
 function toModelRemap(v: unknown): ModelRemap | null {
   if (!isRec(v)) return null

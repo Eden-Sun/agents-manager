@@ -1047,6 +1047,9 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
+    if (method === 'DELETE' && seg[0] === 'hosts' && seg[2] === 'shell-identities' && seg.length === 4) {
+      return this.deleteShellIdentity(decodeURIComponent(seg[1]), decodeURIComponent(seg[3]), q.get('kind') ?? '')
+    }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'logout' && seg.length === 4) return this.logoutAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'install' && seg.length === 4) return this.installAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
@@ -1634,6 +1637,32 @@ export class MockTransport implements Transport {
     for (const h of this.hosts) delete h.identities[name]
     this.emit('identities_changed', {})
     return {}
+  }
+
+  private deleteShellIdentity(host: string, identity: string, kind: string) {
+    if (kind !== 'claude' || !/^cc[0-6]$/.test(identity)) {
+      throw new ApiError(400, { error: 'bad_request', reason: 'invalid_shell_identity', host, kind, identity }, 'invalid shell identity')
+    }
+    const identities = !host || host === 'local' ? this.localIdentityStatus : this.host(host).identities
+    const status = identities[identity]
+    if (!status || status.source !== 'shell' || status.kind !== 'claude') {
+      throw new ApiError(
+        409,
+        { error: 'conflict', reason: 'identity_source_mismatch', host: host || 'local', kind, identity },
+        'identity source mismatch',
+      )
+    }
+    delete identities[identity]
+    const name = host || 'local'
+    this.emit('host_changed', { name, connected: true, identities })
+    return {
+      ok: true,
+      host: name,
+      kind: 'claude',
+      identity,
+      backup_path: `/mock/${name}/.agents-manager/shell-identity-backups/${identity}.bak`,
+      warning: 'external_editor_window',
+    }
   }
 
   /** 答案與上次相同；重點是端點形狀與 busy 狀態。 */
