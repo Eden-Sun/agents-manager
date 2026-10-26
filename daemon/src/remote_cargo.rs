@@ -43,9 +43,9 @@ pub const EXIT_QUEUE_FULL: i32 = 75;
 /// 「這次不轉外部編譯，改在本機跑」的結束碼：shim 只認這一個，看到就往下去拿本機名額（`cargo_shim.rs`）。
 pub const EXIT_RUN_LOCALLY: i32 = 125;
 
-/// The engine option is protocol-ready, but Blaze remains disabled until its caller is approved.
+/// The selector is explicit; Blaze is accepted only for safe test/check invocations.
 const EXIT_ENGINE_NOT_ENABLED: i32 = 2;
-const ENGINE_NOT_ENABLED_MESSAGE: &str = "remote Blaze engine is not enabled";
+const BLAZE_ARGS_UNSUPPORTED_MESSAGE: &str = "remote Blaze supports only safe cargo check/test commands";
 
 /// ssh 自己沒進去時的結束碼（連不上、認證被拒、host key 不合）。遠端的指令真的跑起來之後，回的是那個指令的結束碼，
 /// 所以在交握階段看到 255 就是「我們根本沒進去」（issue #428）。
@@ -751,11 +751,113 @@ pub fn eligible(args: &[String]) -> bool {
     eligible_with_engine(args, RemoteCargoEngine::Cargo).unwrap_or(false)
 }
 
-/// Engine-aware eligibility. Blaze is parsed by the CLI but deliberately has no production route yet.
+/// Engine-aware eligibility. Cargo keeps the existing verification route; Blaze accepts only
+/// test/check invocations whose options cannot redirect or weaken the remote verification.
 pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Result<bool, &'static str> {
     match engine {
         RemoteCargoEngine::Cargo => Ok(eligible_cargo(args)),
-        RemoteCargoEngine::Blaze => Err(ENGINE_NOT_ENABLED_MESSAGE),
+        RemoteCargoEngine::Blaze => {
+            if !eligible_cargo(args) {
+                return Ok(false);
+            }
+
+            // Keep Cargo's global options ahead of its subcommand. `--color` consumes a value,
+            // so that value must not be mistaken for the subcommand.
+            let mut i = 0;
+            while let Some(arg) = args.get(i).map(String::as_str) {
+                match arg {
+                    "-v" | "-vv" | "--verbose" | "-q" | "--quiet" | "--locked" => i += 1,
+                    "--color" => i += 2,
+                    _ if arg.starts_with("--color=") => i += 1,
+                    _ => break,
+                }
+            }
+            let sub = match args.get(i).map(String::as_str) {
+                Some("c" | "check") => "check",
+                Some("t" | "test") => "test",
+                _ => return Ok(false),
+            };
+
+            let mut after_separator = false;
+            let mut separator_args = false;
+            let mut needs_value = false;
+            for arg in args.iter().skip(i + 1).map(String::as_str) {
+                if after_separator {
+                    separator_args = true;
+                    continue;
+                }
+                if arg == "--" {
+                    after_separator = true;
+                    continue;
+                }
+                if needs_value {
+                    if arg.starts_with('-') {
+                        return Ok(false);
+                    }
+                    needs_value = false;
+                    continue;
+                }
+
+                // Never use a different toolchain, cache, target, profile, or offline view of
+                // the source tree for an explicit Blaze verification.
+                if arg.starts_with('+')
+                    || matches!(
+                        arg,
+                        "-C"
+                            | "--config"
+                            | "--target-dir"
+                            | "--target"
+                            | "--release"
+                            | "-r"
+                            | "--profile"
+                            | "--manifest-path"
+                            | "--offline"
+                            | "--frozen"
+                            | "-Z"
+                            | "-j"
+                            | "--jobs"
+                    )
+                    || arg.starts_with("-Z")
+                    || arg.starts_with("--target-dir=")
+                    || arg.starts_with("--target=")
+                    || arg.starts_with("--profile=")
+                    || arg.starts_with("--manifest-path=")
+                    || arg.starts_with("--config=")
+                    || arg.starts_with("--jobs=")
+                {
+                    return Ok(false);
+                }
+
+                // Unknown options fail closed. The value-taking options below are the common
+                // package/feature/target selectors; target redirection was rejected above.
+                if arg.starts_with('-') {
+                    match arg {
+                        "-p" | "--package" | "--exclude" | "--features" | "--bin" | "--example" | "--test"
+                        | "--bench" | "--message-format" | "--color" => needs_value = true,
+                        "--workspace" | "--all" | "--all-targets" | "--all-features" | "--no-default-features"
+                        | "--lib" | "--bins" | "--examples" | "--tests" | "--benches" | "--no-deps"
+                        | "--keep-going" | "--no-run" | "--no-fail-fast" | "--doc" | "--show-output"
+                        | "--ignored" | "--include-ignored" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
+                        | "--locked" => {}
+                        _ if arg.starts_with("-p") && arg.len() > 2 => {}
+                        _ if arg.starts_with("--package=")
+                            || arg.starts_with("--exclude=")
+                            || arg.starts_with("--features=")
+                            || arg.starts_with("--bin=")
+                            || arg.starts_with("--example=")
+                            || arg.starts_with("--test=")
+                            || arg.starts_with("--bench=")
+                            || arg.starts_with("--message-format=")
+                            || arg.starts_with("--color=") => {}
+                        _ => return Ok(false),
+                    }
+                }
+            }
+            if needs_value || (sub == "check" && separator_args) {
+                return Ok(false);
+            }
+            Ok(true)
+        }
     }
 }
 
@@ -1697,27 +1799,73 @@ fn run_script_with_engine(
     engine: RemoteCargoEngine,
     args: &[String],
 ) -> anyhow::Result<String> {
-    if engine != RemoteCargoEngine::Cargo {
-        anyhow::bail!("{}", ENGINE_NOT_ENABLED_MESSAGE);
-    }
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let tok = token.as_str();
     let cache_path = format!("{dir}/target");
-    // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
-    // Keep Cargo's cache under the inspected target without exporting cache overrides into
-    // tests/build scripts that spawn another Cargo for an unrelated temporary project.
-    Ok(format!(
-        "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
-         && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
-         || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
-         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs}{threads} env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config {target_config} --config {build_config} {argv}",
-        dir = sh_quote(dir),
-        target_config = sh_quote(&format!("build.target-dir={cache_path:?}")),
-        build_config = sh_quote(&format!("build.build-dir={cache_path:?}")),
-        sub = sh_quote(sub),
-        jobs = jobs.max(1),
-        threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
-    ))
+    let target_config = sh_quote(&format!("build.target-dir={cache_path:?}"));
+    let build_config = sh_quote(&format!("build.build-dir={cache_path:?}"));
+    match engine {
+        RemoteCargoEngine::Cargo => {
+            // Keep Cargo's cache under the inspected target without exporting cache overrides into
+            // tests/build scripts that spawn another Cargo for an unrelated temporary project.
+            // This is intentionally byte-for-byte the legacy Cargo script.
+            Ok(format!(
+                "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
+                 && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
+                 || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
+                 cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs}{threads} env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config {target_config} --config {build_config} {argv}",
+                dir = sh_quote(dir),
+                target_config = target_config,
+                build_config = build_config,
+                sub = sh_quote(sub),
+                jobs = jobs.max(1),
+                threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
+            ))
+        }
+        RemoteCargoEngine::Blaze => {
+            if !eligible_with_engine(args, RemoteCargoEngine::Blaze).unwrap_or(false) {
+                anyhow::bail!("{BLAZE_ARGS_UNSUPPORTED_MESSAGE}");
+            }
+            // Resolve tools only on the executor. The script stays inside the existing host
+            // lease, verifies the installed capability marker, and invokes the Cargo subcommand
+            // so it cannot start an unleased bare cargo-blaze process.
+            Ok(format!(
+                "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
+                 && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
+                 || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
+                 cd \"$d\"/{sub} && {{ \
+                   blaze_bin=\"${{AGM_BLAZE_BIN:-$HOME/.local/share/agents-manager/blaze/bin}}\"; \
+                   PATH=\"$HOME/.cargo/bin:$PATH\"; export PATH; \
+                   host_cargo=$(command -v cargo) && host_rustup=$(command -v rustup) || {{ echo 'agents-manager: host-local Cargo and rustup are required' >&2; exit 127; }}; \
+                   PATH=\"$blaze_bin:$PATH\"; export PATH; \
+                   if [ ! -x \"$host_rustup\" ]; then echo 'agents-manager: Blaze needs host-local rustup and Rust 1.99.0' >&2; exit 127; fi; \
+                   if ! blaze_rustc=$(\"$host_rustup\" which --toolchain 1.99.0 rustc 2>/dev/null) || [ ! -f \"$blaze_rustc\" ] || [ ! -x \"$blaze_rustc\" ]; then echo 'agents-manager: Blaze requires host-local Rust 1.99.0' >&2; exit 127; fi; \
+                   if [ -x \"$blaze_bin/cargo-blaze\" ]; then plugin=blaze; elif [ -x \"$blaze_bin/cargo-ra-jit\" ]; then plugin=ra-jit; else echo 'agents-manager: host-local Blaze plugin is not installed' >&2; exit 127; fi; \
+                   case \"$plugin\" in blaze) engine_alias=\"${{CARGO_ALIAS_BLAZE:-}}\" ;; ra-jit) engine_alias=\"${{CARGO_ALIAS_RA_JIT:-}}\" ;; esac; \
+                   if [ -n \"$engine_alias\" ]; then echo 'agents-manager: Cargo alias would override the verified Blaze plugin' >&2; exit 127; fi; \
+                   RUSTUP_TOOLCHAIN=1.99.0; export RUSTUP_TOOLCHAIN; \
+                   selected_plugin=$(\"$host_cargo\" --list --verbose 2>/dev/null | awk -v plugin=\"$plugin\" '$1 == plugin {{ sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, \"\"); print }}'); \
+                   if [ ! \"$selected_plugin\" -ef \"$blaze_bin/cargo-$plugin\" ]; then echo 'agents-manager: Cargo would select an unverified Blaze plugin or alias' >&2; exit 127; fi; \
+                   capability=\"$blaze_bin/.agm-blaze-memory-v1\"; engine_path=\"$blaze_bin/ra-jit\"; \
+                   if [ ! -f \"$capability\" ] || [ ! -x \"$engine_path\" ] || [ \"$engine_path\" -nt \"$capability\" ]; then echo 'agents-manager: a capability-verified host-local Blaze is required' >&2; exit 127; fi; \
+                   RUSTUP_TOOLCHAIN=1.99.0; export RUSTUP_TOOLCHAIN; \
+                   blaze_runtime_base=\"${{AGM_BLAZE_RUNTIME_HOME:-$HOME/.cache/agents-manager/blaze}}\"; \
+                   RA_JIT_HOME=\"$blaze_runtime_base/native-base-v1\"; BLAZE_HOME=\"$RA_JIT_HOME\"; \
+                   RA_JIT_RUSTC_BASE=0; BLAZE_RUSTC_BASE=0; \
+                   export RA_JIT_HOME BLAZE_HOME RA_JIT_RUSTC_BASE BLAZE_RUSTC_BASE; \
+                   RUSTC=\"$blaze_rustc\"; CARGO_BUILD_RUSTC=\"$blaze_rustc\"; RUSTC_WRAPPER=; RUSTC_WORKSPACE_WRAPPER=; CARGO_BUILD_RUSTC_WRAPPER=; CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=; \
+                   export RUSTC CARGO_BUILD_RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; \
+                   CARGO_BUILD_JOBS={jobs}{threads} env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR \"$host_cargo\" --config \"build.rustc=\\\"$blaze_rustc\\\"\" --config 'build.rustc-wrapper=\"\"' --config 'build.rustc-workspace-wrapper=\"\"' --config {target_config} --config {build_config} \"$plugin\" {argv}; \
+                 }}",
+                dir = sh_quote(dir),
+                target_config = target_config,
+                build_config = build_config,
+                sub = sh_quote(sub),
+                jobs = jobs.max(1),
+                threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
+            ))
+        }
+    }
 }
 
 /// 收到的第一個終止訊號（0＝沒有）；[`install_signal_handlers`] 的 handler 寫它，[`Deadline`] 讀它。
@@ -3055,7 +3203,7 @@ pub fn run_command_cli(
     list_hosts: bool,
     engine: RemoteCargoEngine,
 ) -> i32 {
-    if let Err(why) = ensure_engine_enabled(engine) {
+    if let Err(why) = ensure_engine_enabled(engine, if list_hosts { &[] } else { args }) {
         eprintln!("agents-manager: {why}");
         return EXIT_ENGINE_NOT_ENABLED;
     }
@@ -3065,7 +3213,7 @@ pub fn run_command_cli(
     run_cli_with_engine(config_path, data_dir, cwd, args, only, engine)
 }
 
-/// Engine-aware entry point. Blaze has no production route and is rejected before host selection.
+/// Engine-aware entry point. Reject invalid explicit Blaze argv before configuration or host selection.
 pub fn run_cli_with_engine(
     config_path: &Path,
     data_dir: Option<&Path>,
@@ -3074,6 +3222,10 @@ pub fn run_cli_with_engine(
     only: Option<&str>,
     engine: RemoteCargoEngine,
 ) -> i32 {
+    if engine == RemoteCargoEngine::Blaze && !eligible_with_engine(args, engine).unwrap_or(false) {
+        eprintln!("agents-manager: {BLAZE_ARGS_UNSUPPORTED_MESSAGE}");
+        return EXIT_ENGINE_NOT_ENABLED;
+    }
     let hosts = match decide_offload_with_engine(config_path, args, std::env::vars(), engine) {
         Err(why) => {
             eprintln!("agents-manager: {why}");
@@ -3112,10 +3264,11 @@ pub fn run_cli_with_engine(
     run_offload_on_with_id_and_engine(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals(), &call_id, engine)
 }
 
-fn ensure_engine_enabled(engine: RemoteCargoEngine) -> Result<(), &'static str> {
+fn ensure_engine_enabled(engine: RemoteCargoEngine, args: &[String]) -> Result<(), &'static str> {
     match engine {
         RemoteCargoEngine::Cargo => Ok(()),
-        RemoteCargoEngine::Blaze => Err(ENGINE_NOT_ENABLED_MESSAGE),
+        RemoteCargoEngine::Blaze if eligible_with_engine(args, engine).unwrap_or(false) => Ok(()),
+        RemoteCargoEngine::Blaze => Err(BLAZE_ARGS_UNSUPPORTED_MESSAGE),
     }
 }
 
@@ -3182,7 +3335,7 @@ fn run_offload_on_with_id_and_engine(
     call_id: &str,
     engine: RemoteCargoEngine,
 ) -> i32 {
-    if let Err(why) = ensure_engine_enabled(engine) {
+    if let Err(why) = ensure_engine_enabled(engine, args) {
         eprintln!("agents-manager: {why}");
         return EXIT_ENGINE_NOT_ENABLED;
     }
@@ -3885,40 +4038,87 @@ exec /bin/sh -c "$inner"
     }
 
     #[test]
-    fn blaze_engine_is_parsed_but_rejected_before_config_host_or_lease_work() {
-        let args = vec!["test".to_string()];
-        assert_eq!(eligible_with_engine(&args, RemoteCargoEngine::Cargo).unwrap(), eligible(&args));
-        assert_eq!(eligible_with_engine(&args, RemoteCargoEngine::Blaze), Err(ENGINE_NOT_ENABLED_MESSAGE));
-        assert_eq!(
-            decide_offload_with_engine(Path::new("/missing/config.toml"), &args, Vec::<(String, String)>::new(), RemoteCargoEngine::Blaze).err(),
-            Some(ENGINE_NOT_ENABLED_MESSAGE)
-        );
+    fn blaze_accepts_only_safe_test_check_and_fails_closed_before_remote_work() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for ok in [
+            &["test"][..],
+            &["check"],
+            &["t"],
+            &["c"],
+            &["--color", "always", "test", "-p", "crate", "a filter"],
+            &["-q", "check", "--workspace", "--all-targets"],
+            &["test", "--", "--test-threads=2", "filter with spaces"],
+        ] {
+            assert_eq!(eligible_with_engine(&v(ok), RemoteCargoEngine::Blaze), Ok(true), "{ok:?}");
+        }
+        for no in [
+            &["build"][..],
+            &["run"],
+            &["clippy"],
+            &["metadata"],
+            &["test", "--release"],
+            &["check", "--profile", "release"],
+            &["test", "--target", "aarch64-apple-darwin"],
+            &["check", "--target-dir", "/other/cache"],
+            &["test", "--config", "build.target-dir='/other/cache'"],
+            &["+nightly", "test"],
+            &["test", "-Z", "unstable-options"],
+            &["check", "--offline"],
+            &["test", "--unknown-unsafe-option"],
+            &["check", "--", "--cfg", "custom"],
+            &[],
+        ] {
+            assert_eq!(eligible_with_engine(&v(no), RemoteCargoEngine::Blaze), Ok(false), "{no:?}");
+        }
+        let cargo_args = v(&["clippy", "--all-targets", "-p", "crate"]);
+        assert_eq!(eligible_with_engine(&cargo_args, RemoteCargoEngine::Cargo).unwrap(), eligible(&cargo_args));
+        assert_eq!(ensure_engine_enabled(RemoteCargoEngine::Cargo, &v(&["build"])), Ok(()), "Cargo is unconditionally enabled");
+        assert_eq!(ensure_engine_enabled(RemoteCargoEngine::Blaze, &v(&["check"])), Ok(()));
+        assert_eq!(ensure_engine_enabled(RemoteCargoEngine::Blaze, &v(&["clippy"])), Err(BLAZE_ARGS_UNSUPPORTED_MESSAGE));
+        assert!(matches!(
+            decide_offload_with_engine(Path::new("/missing/config.toml"), &v(&["test"]), Vec::<(String, String)>::new(), RemoteCargoEngine::Blaze),
+            Ok(Offload::Local(None))
+        ));
 
         let missing = Path::new("/missing/config.toml");
+        let valid = v(&["test"]);
+        let unsafe_args = v(&["test", "--release"]);
         assert_eq!(
-            run_command_cli(missing, None, Path::new("/missing/cwd"), &args, None, true, RemoteCargoEngine::Blaze),
+            run_command_cli(missing, None, Path::new("/missing/cwd"), &valid, None, true, RemoteCargoEngine::Blaze),
             EXIT_ENGINE_NOT_ENABLED,
-            "--list-hosts must reject Blaze before reading or selecting hosts"
+            "--list-hosts passes empty argv to the guard and fails closed"
         );
         assert_eq!(
-            run_cli_with_engine(missing, None, Path::new("/missing/cwd"), &args, None, RemoteCargoEngine::Blaze),
+            run_command_cli(missing, None, Path::new("/missing/cwd"), &unsafe_args, None, false, RemoteCargoEngine::Blaze),
             EXIT_ENGINE_NOT_ENABLED,
-            "engine rejection is not the 125 local-decline sentinel"
+            "unsafe explicit Blaze input is a hard error, never local-decline 125"
+        );
+        for rejected in [v(&["build"]), v(&["run"]), v(&["clippy"]), v(&["unknown"]), v(&["test", "--unknown-unsafe-option"])] {
+            assert_eq!(
+                run_command_cli(missing, None, Path::new("/missing/cwd"), &rejected, None, false, RemoteCargoEngine::Blaze),
+                EXIT_ENGINE_NOT_ENABLED,
+                "rejected explicit Blaze argv must fail before config/host work: {rejected:?}"
+            );
+        }
+        assert_eq!(
+            run_cli_with_engine(missing, None, Path::new("/missing/cwd"), &unsafe_args, None, RemoteCargoEngine::Blaze),
+            EXIT_ENGINE_NOT_ENABLED,
+            "unsafe explicit Blaze input is rejected before reading config"
         );
         assert_eq!(
             run_offload_on_with_id_and_engine(
                 &[],
                 Path::new("/missing/data"),
                 Path::new("/missing/cwd"),
-                &args,
+                &unsafe_args,
                 &Deadline::new(1),
                 "test-call",
                 RemoteCargoEngine::Blaze,
             ),
             EXIT_ENGINE_NOT_ENABLED,
-            "low-level dispatch must reject before acquiring a host or lease"
+            "low-level dispatch rejects unsafe input before host or lease acquisition"
         );
-        assert!(run_script_with_engine("/r/job", "", &LeaseToken::new(), 1, 0, RemoteCargoEngine::Blaze, &args).is_err());
+        assert!(run_script_with_engine("/r/job", "", &LeaseToken::new(), 1, 0, RemoteCargoEngine::Blaze, &unsafe_args).is_err());
     }
 
     #[test]
@@ -3932,6 +4132,182 @@ exec /bin/sh -c "$inner"
             run_script_with_engine("/r/job", "", &token, 2, 4, RemoteCargoEngine::Cargo, &args).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn blaze_script_uses_host_local_guarded_tools_and_propagates_fake_cargo_failure_once() {
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-blaze-script-{}", crate::db::ulid())));
+        let home = base.join("remote home");
+        let remote = base.join("remote source with spaces");
+        let runtime_base = home.join("host runtime with spaces");
+        let cargo_bin = home.join(".cargo/bin");
+        let blaze_bin = home.join(".local/share/agents-manager/blaze/bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        std::fs::create_dir_all(&blaze_bin).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+
+        let token = LeaseToken::parse("feedfacefeedfacefeedfacefeedface").unwrap();
+        let owner = PathBuf::from(format!("{}.owner", remote.display()));
+        std::fs::write(owner, token.as_str()).unwrap();
+        let rustc = home.join(".rustup/toolchains/1.99.0/bin/rustc");
+        std::fs::create_dir_all(rustc.parent().unwrap()).unwrap();
+        crate::testing::write_exec(&rustc, "#!/bin/sh\nexit 0\n");
+
+        let args_log = base.join("cargo args.log");
+        let env_log = base.join("cargo env.log");
+        let count_log = base.join("cargo calls.log");
+        crate::testing::write_exec(
+            cargo_bin.join("rustup"),
+            "#!/bin/sh\n[ \"$*\" = 'which --toolchain 1.99.0 rustc' ] || exit 39\nprintf '%s\\n' \"$FAKE_RUSTC\"\n",
+        );
+        crate::testing::write_exec(
+            cargo_bin.join("cargo"),
+            format!(r#"#!/bin/sh
+if [ "$1" = "--list" ]; then
+  selected="$AGM_BLAZE_BIN/cargo-blaze"
+  [ ! -x "$CARGO_HOME/bin/cargo-blaze" ] || selected="$CARGO_HOME/bin/cargo-blaze"
+  if [ -f .cargo/config.toml ] && grep -q 'blaze =' .cargo/config.toml; then selected="alias: version"; fi
+  printf 'Installed Commands:\n    blaze %s\n' "$selected"
+  exit 0
+fi
+printf 'call\n' >> '{count}'
+printf '%s\n' "$@" > '{args}'
+printf '%s\n' "$RUSTUP_TOOLCHAIN" "$RA_JIT_HOME" "$BLAZE_HOME" "$RA_JIT_RUSTC_BASE" "$BLAZE_RUSTC_BASE" "$CARGO_BUILD_JOBS" "$RUST_TEST_THREADS" "$RUSTC" "$CARGO_BUILD_RUSTC" "wrapper:$RUSTC_WRAPPER" "workspace:$RUSTC_WORKSPACE_WRAPPER" "cargo-wrapper:$CARGO_BUILD_RUSTC_WRAPPER" "cargo-workspace:$CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER" > '{env}'
+exit "${{FAKE_EXIT:-0}}"
+"#, count = count_log.display(), args = args_log.display(), env = env_log.display()),
+        );
+        crate::testing::write_exec(blaze_bin.join("cargo"), "#!/bin/sh\nexit 96\n");
+        crate::testing::write_exec(blaze_bin.join("rustup"), "#!/bin/sh\nexit 95\n");
+        crate::testing::write_exec(blaze_bin.join("cargo-blaze"), "#!/bin/sh\nexit 0\n");
+        crate::testing::write_exec(blaze_bin.join("ra-jit"), "#!/bin/sh\nexit 0\n");
+        std::fs::write(blaze_bin.join(".agm-blaze-memory-v1"), "verified fixture\n").unwrap();
+
+        let script = run_script_with_engine(
+            &remote.display().to_string(),
+            "",
+            &token,
+            3,
+            5,
+            RemoteCargoEngine::Blaze,
+            &[
+                "test".into(),
+                "-p".into(),
+                "package with spaces".into(),
+                "filter 'with quotes'".into(),
+                String::new(),
+                "--".into(),
+                "--test-threads=2".into(),
+            ],
+        )
+        .unwrap();
+
+        let run_with_options = |rustc_path: &Path, fake_exit: &str, cargo_home: &Path, alias: &str| {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("FAKE_RUSTC", rustc_path)
+                .env("FAKE_EXIT", fake_exit)
+                .env("CARGO_HOME", cargo_home)
+                .env("CARGO_ALIAS_BLAZE", alias)
+                .env("RUSTC", "/inherited/wrong-rustc")
+                .env("CARGO_BUILD_RUSTC", "/inherited/wrong-cargo-rustc")
+                .env("RUSTC_WRAPPER", "/inherited/wrapper")
+                .env("RUSTC_WORKSPACE_WRAPPER", "/inherited/workspace-wrapper")
+                .env("CARGO_BUILD_RUSTC_WRAPPER", "/inherited/cargo-wrapper")
+                .env("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "/inherited/cargo-workspace-wrapper")
+                .env("RA_JIT_HOME", "/inherited/old-ra")
+                .env("BLAZE_HOME", "/inherited/old-blaze")
+                .env("RA_JIT_RUSTC_BASE", "1")
+                .env("BLAZE_RUSTC_BASE", "1")
+                .env("AGM_BLAZE_BIN", &blaze_bin)
+                .env("AGM_BLAZE_RUNTIME_HOME", &runtime_base)
+                .env("FAKE_ARGS_LOG", &args_log)
+                .env("FAKE_ENV_LOG", &env_log)
+                .env("FAKE_COUNT_LOG", &count_log)
+                .output()
+                .unwrap()
+        };
+
+        let run_with_cargo_home = |rustc_path: &Path, fake_exit: &str, cargo_home: &Path| {
+            run_with_options(rustc_path, fake_exit, cargo_home, "")
+        };
+        let run = |rustc_path: &Path, fake_exit: &str| {
+            run_with_cargo_home(rustc_path, fake_exit, &home.join(".cargo"))
+        };
+
+        // Cargo searches CARGO_HOME/bin before PATH, even with the verified private bin first.
+        let unexpected_plugin = cargo_bin.join("cargo-blaze");
+        crate::testing::write_exec(&unexpected_plugin, "#!/bin/sh\nexit 98\n");
+        let out = run(&rustc, "0");
+        assert_eq!(out.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unverified Blaze plugin"));
+        assert!(!args_log.exists(), "unverified default Cargo-home plugin must fail before Cargo starts");
+        std::fs::remove_file(&unexpected_plugin).unwrap();
+
+        let alternate_cargo_home = base.join("alternate cargo home");
+        std::fs::create_dir_all(alternate_cargo_home.join("bin")).unwrap();
+        crate::testing::write_exec(alternate_cargo_home.join("bin/cargo-blaze"), "#!/bin/sh\nexit 99\n");
+        let out = run_with_cargo_home(&rustc, "0", &alternate_cargo_home);
+        assert_eq!(out.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unverified Blaze plugin"));
+        assert!(!args_log.exists(), "custom Cargo-home plugin must not bypass private-tool verification");
+
+        let out = run_with_options(&rustc, "0", &home.join(".cargo"), "version");
+        assert_eq!(out.status.code(), Some(127));
+        assert!(!args_log.exists(), "inherited Cargo alias must fail before a command executes");
+        std::fs::create_dir_all(remote.join(".cargo")).unwrap();
+        let alias_config = remote.join(".cargo/config.toml");
+        std::fs::write(&alias_config, "[alias]\nblaze = \"version\"\n").unwrap();
+        let out = run(&rustc, "0");
+        assert_eq!(out.status.code(), Some(127));
+        assert!(!args_log.exists(), "configured alias must not replace the verified plugin");
+        std::fs::remove_file(alias_config).unwrap();
+
+        let missing_rustc = base.join("missing rustc");
+        let out = run(&missing_rustc, "0");
+        assert_eq!(out.status.code(), Some(127), "missing Rust 1.99.0 must be a hard failure");
+        assert!(!args_log.exists(), "missing toolchain must fail before Cargo starts");
+
+        std::fs::remove_file(blaze_bin.join(".agm-blaze-memory-v1")).unwrap();
+        let out = run(&rustc, "0");
+        assert_eq!(out.status.code(), Some(127), "missing capability marker must be a hard failure");
+        assert!(!args_log.exists(), "missing capability must fail before Cargo starts");
+        std::fs::write(blaze_bin.join(".agm-blaze-memory-v1"), "verified fixture\n").unwrap();
+
+        std::fs::remove_file(blaze_bin.join("cargo-blaze")).unwrap();
+        let out = run(&rustc, "0");
+        assert_eq!(out.status.code(), Some(127), "missing private plugin must be a hard failure");
+        assert!(!args_log.exists(), "missing plugin must fail before Cargo starts");
+        crate::testing::write_exec(blaze_bin.join("cargo-blaze"), "#!/bin/sh\nexit 0\n");
+
+        std::fs::write(remote.join(".cargo/config.toml"), "[build]\nrustc = \"/configured/wrong-rustc\"\nrustc-wrapper = \"/configured/wrong-wrapper\"\nrustc-workspace-wrapper = \"/configured/wrong-workspace-wrapper\"\n").unwrap();
+        let out = run(&rustc, "37");
+        assert_eq!(out.status.code(), Some(37), "Blaze/Cargo failures must preserve the original exit status");
+        assert_eq!(std::fs::read_to_string(&count_log).unwrap().lines().count(), 1, "a failed remote command must not be retried locally");
+        let got_args = std::fs::read_to_string(&args_log).unwrap().split_terminator('\n').map(str::to_string).collect::<Vec<_>>();
+        let cache = format!("build.target-dir=\"{}/target\"", remote.display());
+        let build = format!("build.build-dir=\"{}/target\"", remote.display());
+        assert_eq!(
+            got_args,
+            vec![
+                "--config".to_string(), format!("build.rustc=\"{}\"", rustc.display()), "--config".into(), "build.rustc-wrapper=\"\"".into(), "--config".into(), "build.rustc-workspace-wrapper=\"\"".into(), "--config".to_string(), cache, "--config".to_string(), build, "blaze".to_string(), "test".to_string(), "-p".to_string(),
+                "package with spaces".to_string(), "filter 'with quotes'".to_string(), String::new(), "--".to_string(), "--test-threads=2".to_string(),
+            ]
+        );
+        let got_env = std::fs::read_to_string(&env_log).unwrap().lines().map(str::to_string).collect::<Vec<_>>();
+        let namespace = runtime_base.join("native-base-v1").display().to_string();
+        assert_eq!(
+            got_env,
+            vec!["1.99.0".to_string(), namespace.clone(), namespace, "0".into(), "0".into(), "3".into(), "5".into(), rustc.display().to_string(), rustc.display().to_string(), "wrapper:".into(), "workspace:".into(), "cargo-wrapper:".into(), "cargo-workspace:".into()]
+        );
+        assert!(!got_env.iter().any(|v| v.contains("inherited")), "host-local aliases must replace inherited paths");
+        let out = run(&rustc, "0");
+        assert_eq!(out.status.code(), Some(0), "verified fake Cargo success must propagate");
+        assert_eq!(std::fs::read_to_string(&count_log).unwrap().lines().count(), 2, "only the two explicit fake invocations may run");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
