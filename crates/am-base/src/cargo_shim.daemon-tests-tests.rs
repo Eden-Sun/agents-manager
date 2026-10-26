@@ -490,6 +490,34 @@ esac"#
         }
     }
 
+    #[test]
+    fn macos_local_project_tests_keep_the_remote_cargo_route_even_with_blaze_requested() {
+        for engine in ["auto", "blaze"] {
+            let s = Sandbox::new();
+            std::fs::create_dir_all(s.dir.join(".cargo")).unwrap();
+            std::fs::create_dir_all(s.dir.join("scripts")).unwrap();
+            std::fs::write(s.dir.join(".cargo/agm-blaze"), "").unwrap();
+            let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/project-cargo.sh");
+            write_exec(s.dir.join("scripts/project-cargo.sh"), std::fs::read_to_string(runner).unwrap());
+            let d = s.dir.display();
+            let helper = s.dir.join("remote-helper");
+            write_exec(&helper, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{d}/remote.log'\n"));
+            s.install_fake_curl(&format!("echo unexpected > '{d}/curl.log'\nexit 77\n"));
+            let mut env = lease_env(&s);
+            env.push(("AGM_RUST_ENGINE", engine.into()));
+            env.push(("AM_DAEMON_EXE", helper.display().to_string()));
+            env.push(("AM_CONFIG_PATH", s.dir.join("config.toml").display().to_string()));
+            env.push(("AM_TEST_FAKE_CARGO_LOG", s.dir.join("local.log").display().to_string()));
+            let (_, err, rc) = s.run(&as_refs(&env), &["test", "-p", "xtask"]);
+            assert_eq!(rc, 0, "{engine}: {err}");
+            let logged = std::fs::read_to_string(s.dir.join("remote.log")).unwrap();
+            assert!(logged.contains("remote-cargo\n") && logged.contains("test\n-p\nxtask"), "{logged}");
+            assert!(!logged.contains("blaze") && !logged.contains("ra-jit"), "{logged}");
+            assert!(!s.dir.join("local.log").exists());
+            assert!(!s.dir.join("curl.log").exists(), "remote tests must not acquire a local build slot");
+        }
+    }
+
     /// 不吃 rustc 的子指令（`--version`、`metadata`）直接 exec 真的 cargo，完全不碰排程器（curl 都不叫）。
     #[test]
     fn a_light_subcommand_skips_the_scheduler_entirely() {

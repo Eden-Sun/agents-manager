@@ -10,7 +10,7 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     log = base/'argv.json'
     def script(path, body):
         path.write_text('#!/bin/sh\n' + body); path.chmod(0o755)
-    script(tools/'cargo', 'exec python3 - "$@" <<\'REC\'\nimport os,json,sys\nwith open(os.environ["TEST_LOG"], "w") as f: json.dump({"args":sys.argv[1:],"toolchain":os.getenv("RUSTUP_TOOLCHAIN"),"tests":os.getenv("RA_JIT_TESTS"),"threads":os.getenv("RUST_TEST_THREADS")},f)\nsys.exit(int(os.getenv("TEST_EXIT","0")))\nREC\n')
+    script(tools/'cargo', 'exec python3 - "$@" <<\'REC\'\nimport os,json,sys\nwith open(os.environ["TEST_LOG"], "w") as f: json.dump({"args":sys.argv[1:],"toolchain":os.getenv("RUSTUP_TOOLCHAIN"),"tests":os.getenv("RA_JIT_TESTS"),"threads":os.getenv("RUST_TEST_THREADS"),"memory":os.getenv("RA_JIT_MEMORY_MAX"),"idle":os.getenv("RA_JIT_IDLE_SECS"),"runtime":os.getenv("RA_JIT_HOME")},f)\nsys.exit(int(os.getenv("TEST_EXIT","0")))\nREC\n')
     script(tools/'rustup', 'exit "${TEST_RUSTUP_EXIT:-0}"\n')
     script(tools/'uname', 'case "$1" in -s) echo "${TEST_OS:-Linux}";; -m) echo "${TEST_ARCH:-x86_64}";; esac\n')
     script(private/'cargo-ra-jit', 'exit 0\n')
@@ -24,9 +24,15 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
         got = json.loads(log.read_text()); assert got['args'] == expected,(args,got,r.stderr)
         count += 1
         return got
-    run(['build','-p','xtask'], ['ra-jit','build','-p','xtask'])
-    got=run(['test','a filter','--','--test-threads=2'], ['ra-jit','test','a filter','--','--test-threads=2'],RA_JIT_TESTS='affected',RUST_TEST_THREADS='3')
-    assert got['tests']=='all' and got['threads']=='3' and got['toolchain']=='1.99.0'
+    got=run(['build','-p','xtask'], ['ra-jit','build','-p','xtask'])
+    assert got['memory']=='8G' and got['idle']=='600' and got['runtime']==str(base/'home/.cache/agents-manager/blaze')
+    got=run(['build'],['ra-jit','build'],AGM_BLAZE_MEMORY_MAX='4G',AGM_BLAZE_IDLE_SECS='120')
+    assert got['memory']=='4G' and got['idle']=='120'
+    run(['build'],['build'],TEST_OS='Darwin',TEST_ARCH='arm64')
+    run(['build'],['ra-jit','build'],TEST_OS='Darwin',TEST_ARCH='arm64',AGM_RUST_ENGINE='blaze')
+    run(['test'],['test'],AGM_RUST_ENGINE='blaze')
+    got=run(['test','a filter','--','--test-threads=2'], ['test','a filter','--','--test-threads=2'],RA_JIT_TESTS='affected',RUST_TEST_THREADS='3')
+    assert got['tests']=='affected' and got['threads']=='3' and got['toolchain'] is None
     for args in [['build','--release'],['build','-r'],['run','--profile','custom'],['test','--profile=release'],['build','--target=x86_64-unknown-linux-gnu'],['build','--message-format=json'],['+nightly','build'],['check'],['clippy'],['fmt'],['dev']]:
         run(args,args)
     run(['run','--','--release'], ['ra-jit','run','--','--release'])

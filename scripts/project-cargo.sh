@@ -7,8 +7,8 @@ AGM_RUST_DISPATCHED=$$
 export AGM_RUST_DISPATCHED
 sub=${1:-}
 use_blaze=0
-case "$sub" in build|run|test) use_blaze=1 ;; esac
-# Only the default development/test profiles use the JIT. Compiler tools, explicit
+case "$sub" in build|run) use_blaze=1 ;; esac
+# Only the default development profiles use the JIT. Compiler tools, explicit
 # toolchains, cross targets and release/custom profiles retain their original Cargo semantics.
 for arg in "$@"; do
     [ "$arg" != -- ] || break
@@ -16,7 +16,10 @@ for arg in "$@"; do
 done
 [ "$engine" != cargo ] || use_blaze=0
 if [ "$use_blaze" = 0 ]; then exec cargo "$@"; fi
-case "$(uname -s):$(uname -m)" in Linux:x86_64|Linux:aarch64|Darwin:arm64) ;; *)
+host_os=$(uname -s)
+# The 16 GiB Mac host regularly reports memory pressure: acceleration there is explicit opt-in.
+if [ "$host_os" = Darwin ] && [ "$engine" = auto ]; then exec cargo "$@"; fi
+case "$host_os:$(uname -m)" in Linux:x86_64|Linux:aarch64|Darwin:arm64) ;; *)
     if [ "$engine" = blaze ]; then echo "project-cargo: Blaze does not support this host" >&2; exit 2; fi
     echo "project-cargo: unsupported Blaze host; using Cargo" >&2
     exec cargo "$@"
@@ -45,13 +48,13 @@ else
 fi
 RUSTUP_TOOLCHAIN=1.99.0
 export RUSTUP_TOOLCHAIN
-# Always run the complete selected test suite; do not inherit affected-tests-only settings.
-if [ "$sub" = test ]; then
-    RA_JIT_TESTS=all
-    BLAZE_TESTS=all
-    export RA_JIT_TESTS BLAZE_TESTS
-fi
-RUST_TEST_THREADS=${RUST_TEST_THREADS:-8}
-export RUST_TEST_THREADS
+# A project-owned namespace prevents an existing, unbounded user daemon from
+# silently ignoring these startup settings. All project worktrees share it.
+RA_JIT_HOME=${AGM_BLAZE_RUNTIME_HOME:-${HOME}/.cache/agents-manager/blaze}
+RA_JIT_MEMORY_MAX=${AGM_BLAZE_MEMORY_MAX:-8G}
+RA_JIT_IDLE_SECS=${AGM_BLAZE_IDLE_SECS:-600}
+BLAZE_MEMORY_MAX=$RA_JIT_MEMORY_MAX
+BLAZE_IDLE_SECS=$RA_JIT_IDLE_SECS
+export RA_JIT_HOME RA_JIT_MEMORY_MAX RA_JIT_IDLE_SECS BLAZE_MEMORY_MAX BLAZE_IDLE_SECS
 # No retry on failure: a compiler error or failed test must remain a failure.
 exec cargo "$plugin" "$@"
