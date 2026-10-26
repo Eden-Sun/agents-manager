@@ -8,6 +8,9 @@
 use crate::state::App;
 use super::*;
 
+#[path = "observed_status.rs"]
+mod observed_status;
+
 
 /// Unchanged polls at an empty composer before we complete the Turn ourselves (~14s; a slow hook still wins).
 pub const IDLE_POLLS: u32 = 20;
@@ -139,7 +142,16 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             // 讀不到（DB 一時 busy／I/O error）不是「回合收掉了」：延後重讀，不放掉這一回合（#193）。
             let run = match still_ours(&app2, &run_id, &bot_id, &turn_id, &mut bot, &mut sent).await {
                 Ok(Some(run)) => run,
-                Ok(None) => break,
+                Ok(None) => match observed_status::finish(&app2, &run_id, &turn_id).await {
+                    Ok(true) => break,
+                    // Stop may beat the idle redraw. Keep the existing poller/backoff until
+                    // its own receipt can be restored, or a successor turn takes the pane.
+                    Ok(false) => { failures = 0; continue; }
+                    Err(e) => {
+                        failures = poll_unreadable(&turn_id, failures, &e);
+                        continue;
+                    }
+                },
                 Err(e) => {
                     failures = poll_unreadable(&turn_id, failures, &e);
                     continue;
@@ -153,7 +165,15 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             }
             let Some(pane) = run.pane_id.clone() else { continue };
             let Ok(client) = client_for_run(&app2, &run).await else { continue };
+            let stamp = if observed_status::needed(&run, &turn_id) {
+                observed_status::Stamp::capture(&app2, &run).await.ok()
+            } else { None };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
+            if let Some(stamp) = stamp {
+                if let Err(e) = observed_status::observe(&app2, &client, &stamp, &turn_id, &bot.kind, &read.text).await {
+                    tracing::debug!(run = %run_id, turn = %turn_id, error = %e, "could not reconcile observed pane status");
+                }
+            }
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
             let live = sent.iter().fold(live, |acc, p| strip_echoed_prompt(&acc, p));
             // `clean_screen` drops the spinner row, so a thinking / tool phase needs its own `activity` field.
@@ -226,6 +246,9 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
                     }
                 }
             }
+        }
+        if let Err(e) = observed_status::finish(&app2, &run_id, &turn_id).await {
+            tracing::debug!(run = %run_id, turn = %turn_id, error = %e, "could not restore observed pane status");
         }
         flush_progress(&app2, &run_id, &mut pending, true).await;
         app2.progress_pollers().lock().await.remove(&run_id);
@@ -4647,6 +4670,10 @@ mod progress_poll_tests {
     async fn the_poller_stops_once_the_turn_is_really_closed() {
         let f = in_flight(BUSY, "Reply with PONG").await;
         let app = f.env.app.clone();
+        // A healthy Herdr working report has no synthetic receipt to restore. The stale-cache
+        // case (Stop before the idle redraw) is covered by observed_status's real-poller test.
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
+            .bind(&f.run_id).execute(&app.db).await.unwrap();
         fast(&f.run_id);
         let rx = this_poll_then_next(&f.run_id, || async {}, || async {});
         arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
