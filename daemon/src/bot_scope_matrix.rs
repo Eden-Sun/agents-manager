@@ -97,6 +97,7 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/supervisor/approvals", Expect::RoleRequired, None),
         allow_rule("POST", "/api/supervisor/approvals", "A Bot may request its own approval; requester_claim binds the request to that Bot and decisions remain AGM-role-only (#799)."),
         rule("POST", "/api/hosts/{name}/identities/{identity}/login", Expect::Forbidden, None),
+        rule("DELETE", "/api/hosts/{name}/shell-identities/{identity}", Expect::UserOnly, None),
         rule("GET", "/api/bots/{id}/scratchpad", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/scratchpad", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/scratchpad", Expect::Forbidden, None),

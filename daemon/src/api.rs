@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 #[path = "shell.rs"]
 pub mod shell;
+#[path = "shell_identity_delete.rs"]
+mod shell_identity_delete;
 
 fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
@@ -323,6 +325,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
+        .route("/hosts/{name}/shell-identities/{identity}", delete(shell_identity_delete::delete_shell_identity))
         .route("/hosts/{name}/agy/logout", post(logout_agy))
         .route("/hosts/{name}/agy/install", post(install_agy))
         .route("/hosts/{name}/gh", get(get_gh_status))
@@ -1128,6 +1131,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/baseline/restore", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/hosts/{name}/shell-identities/{identity}", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/install", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/login", BotRoutePolicy::UserOrAgm),
