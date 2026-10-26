@@ -60,7 +60,14 @@ RUSTUP_TOOLCHAIN=1.99.0
 export RUSTUP_TOOLCHAIN
 # A project-owned namespace prevents an existing, unbounded user daemon from
 # silently ignoring these startup settings. All project worktrees share it.
-RA_JIT_HOME=${AGM_BLAZE_RUNTIME_HOME:-${HOME}/.cache/agents-manager/blaze}
+# c8's saved dep-info omits modules: a newly loaded worker can mistake old rustc
+# code for current source. Build a native baseline before patching (#1997).
+# This switch is absent from upstream's worker identity; isolate old workers too.
+RA_JIT_HOME=${AGM_BLAZE_RUNTIME_HOME:-${HOME}/.cache/agents-manager/blaze}/native-base-v1
+BLAZE_HOME=$RA_JIT_HOME
+RA_JIT_RUSTC_BASE=0
+BLAZE_RUSTC_BASE=0
+export BLAZE_HOME RA_JIT_RUSTC_BASE BLAZE_RUSTC_BASE
 RA_JIT_MEMORY_MAX=${AGM_BLAZE_MEMORY_MAX:-8G}
 RA_JIT_IDLE_SECS=${AGM_BLAZE_IDLE_SECS:-600}
 BLAZE_MEMORY_MAX=$RA_JIT_MEMORY_MAX
