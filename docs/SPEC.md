@@ -85,6 +85,13 @@ claude／codex／grok 三種 pane 統一之後的結果（hook、poller、termin
 且不宣稱那是 daemon 的紀錄。daemon 重啟不清這一欄，所以「跑了多久」在重整理／換裝置／daemon 重啟
 之間是同一個數字，不會因為前端重新觀察而歸零。
 
+**Claude 的 cached status 補正（#2003）**：herdr 的 `agent list/get` 可能停在舊的 done／idle，
+即時 detector 與 pane 已經工作中。progress poller 沿用既有 `is_screen_busy` 及 live footer 的正向證據，
+在同一 host 世代、run／pane／session 與已送達回合仍吻合時，將 `idle`／`unknown` 補成 `working`，
+寫 info log（run、turn、依據）並發布原有 `bot_status`。不查每輪 `agent explain`，不另立 activity 權威；
+blocked、選單、舊快照、未知送達及讀取失敗不補標。回合結束後，確認 pane 已閒置且沒有新回合，
+僅以自身補標的狀態時間戳與世代做 CAS 還原 idle；接續 poller 可承接補標所有權，舊 poller 不得清掉新回合的標記。
+
 ## 3. 架構
 
 ```
@@ -630,6 +637,9 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   它也在 bot 鎖內呼叫同一支 `try_fallback`（在鎖外會與 hook 交錯成一回合兩則 assistant）；沒收成就繼續盯，Turn 被任一方收掉時迴圈自然結束。
   **讀不到不等於收掉了**（#193）：讀 DB 失敗（busy／I/O error）時退避重讀（一個輪詢間隔起加倍、最多 30 秒），只有**讀到了**回合不在飛或換了一筆、
   run 或 bot 沒了才退出——以前一次讀錯就退出，Stop hook 又剛好漏掉的話那一回合就沒人收。讀不到 agent 狀態的那一輪不算閒著。
+  Claude 的 cached status 與真 busy 畫面矛盾時，依 §2.2 補回同一筆 run 狀態；Stop／換代先贏就不補，
+  完成後僅還原自己的補標。Stop 先於 idle 重畫或收尾讀取暫時失敗時，沿用原輪詢器及退避等待證據；
+  新回合接管就交出所有權，仍無證據不寫 idle，原輪詢器的最長存活時間不變。
 - **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
   我們自己的 prompt 就被當成 agent 的回覆存下來。
 - **Codex hookless 回合回覆優先自 rollout 救援（#1988）**：
