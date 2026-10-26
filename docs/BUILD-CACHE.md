@@ -2,7 +2,7 @@
 
 ## Blaze 開發建置
 
-`scripts/project-cargo.sh` 是本專案開發用的 Cargo 入口，Linux／Mac 預設 `AGM_RUST_ENGINE=auto`，對 build/run 嘗試 Blaze；明確設 cargo 停用、設 blaze 要求工具可用。受管 Cargo shim 會往目前目錄的祖先找 `.cargo/agm-blaze` 與這支腳本，兩者同時存在才轉交；其他專案不受影響。轉交發生在拿名額之前，再以 `cargo blaze …`（舊版 release 用 `cargo ra-jit …`）進入既有 shim，仍只租一個建置名額，不直接呼叫加速器繞過排程。`cargo dev` 的 xtask 建 daemon 也使用此入口。daemon 換版後新寫入／刷新過的 shim 才會有自動轉交；換版前或非受管 shell 直接使用腳本。
+`scripts/project-cargo.sh` 是本專案開發用的 Cargo 入口，Linux／Mac 預設 `AGM_RUST_ENGINE=blaze`，對 build/run 要求 Blaze；缺工具／工具鏈時直接失敗，不自動退回 Cargo。明確設 `AGM_RUST_ENGINE=cargo` 才切換原生 Cargo；相容用的 `auto` 也須明確設定，才允許缺工具時 fallback。受管 Cargo shim 會往目前目錄的祖先找 `.cargo/agm-blaze` 與這支腳本，兩者同時存在才轉交；其他專案不受影響。轉交發生在拿名額之前，再以 `cargo blaze …`（舊版 release 用 `cargo ra-jit …`）進入既有 shim，仍只租一個建置名額，不直接呼叫加速器繞過排程。`cargo dev` 的 xtask 建 daemon 也使用此入口。daemon 換版後新寫入／刷新過的 shim 才會有自動轉交；換版前或非受管 shell 直接使用腳本。
 
 ```sh
 scripts/install-blaze.sh --source
@@ -21,9 +21,9 @@ AGM_RUST_ENGINE=cargo scripts/project-cargo.sh build -p agents-managerd
 | `test`（含明確要求 blaze）、`check`、Clippy、fmt、顯式 `+toolchain`、其他 Cargo 子指令 | 原生 Cargo |
 | `scripts/check.sh`、Ubuntu CI、macOS 原生驗證、正式打包 | 原生 Cargo／rustc，作為最終驗證 |
 
-`auto` 在不支援的主機、缺工具或缺 Rust 1.99.0 時明講並回到 Cargo；`AGM_RUST_ENGINE=blaze` 遇到這些條件則失敗，方便確認實際有走加速器。支援主機是 Linux x86-64／aarch64 與 macOS arm64。編譯或測試已執行而失敗時，入口不重試成另一條成功路徑。Blaze 自身的相容性 fallback 由上游管理；看到 `[ra-jit]` 才表示該輪由引擎建置。`test` 一律原樣交回 Cargo，保留 #1853 的遠端 worker 選擇（包含 r7）、遠端 target 池與測試執行緒上限；即使 `AGM_RUST_ENGINE=blaze` 也不改此路徑。這個取捨避免把多 agent 測試由 r7 移回 Ubuntu 16 核主機；本導入不以未量測的 JIT 測試負載取代既有分流。Blaze build/run 留在呼叫主機，以重用當地記憶體快取。
+明確設定 `AGM_RUST_ENGINE=auto` 才會在不支援的主機、缺工具或缺 Rust 1.99.0 時明講並回到 Cargo；`AGM_RUST_ENGINE=blaze` 遇到這些條件則失敗，方便確認實際有走加速器。支援主機是 Linux x86-64／aarch64 與 macOS arm64。編譯或測試已執行而失敗時，入口不重試成另一條成功路徑。Blaze 自身的相容性 fallback 由上游管理；看到 `[ra-jit]` 才表示該輪由引擎建置。`test` 一律原樣交回 Cargo，保留 #1853 的遠端 worker 選擇（包含 r7）、遠端 target 池與測試執行緒上限；即使 `AGM_RUST_ENGINE=blaze` 也不改此路徑。這個取捨避免把多 agent 測試由 r7 移回 Ubuntu 16 核主機；本導入不以未量測的 JIT 測試負載取代既有分流。Blaze build/run 留在呼叫主機，以重用當地記憶體快取。
 
-Mac 同樣預設嘗試 Blaze。執行編譯前，agent 仍須依共用負載／記憶體閘等到 normal；Mac 原生驗證一律走 `scripts/check.sh macos-local`，不能略過閘門。
+Mac 同樣預設要求 Blaze；缺工具時失敗，須明確設 `AGM_RUST_ENGINE=cargo` 才切換。執行編譯前，agent 仍須依共用負載／記憶體閘等到 normal；Mac 原生驗證一律走 `scripts/check.sh macos-local`，不能略過閘門。
 
 Blaze 把分析資料與機器碼留在每個使用者共用的背景服務；首次建置、依賴／manifest／建置輸入變動仍可能走 Cargo，局部函式修改才適合快路徑。本專案 daemon 的 `build.rs` 會輸出 commit SHA 與髒樹標記；切換 commit 或 clean→dirty 改變這些輸出時，Blaze 會要求 Cargo 重建再重新載入，所以不能把小型 xtask 的加速倍數套到每一輪 daemon 建置。每個 target dir 照舊獨立，既有 sccache wrapper 照舊處理 rustc 呼叫。背景 worker 可吃數 GiB，且命令結束後仍存在。
 
