@@ -170,10 +170,47 @@ pub async fn complete_api_bot_on(
     run_id: &str,
     turn_id: &str,
 ) -> Result<Outcome> {
-    edge("in_flight", "completed", "API-bot joined completion")?;
+    api_bot_terminal_on(
+        conn,
+        bot_id,
+        run_id,
+        turn_id,
+        "completed",
+        "API-bot joined completion",
+    )
+    .await
+}
+
+/// Fail one API-bot turn only while the exact live owner remains running.
+pub async fn fail_api_bot_on(
+    conn: &mut sqlx::SqliteConnection,
+    bot_id: &str,
+    run_id: &str,
+    turn_id: &str,
+) -> Result<Outcome> {
+    api_bot_terminal_on(
+        conn,
+        bot_id,
+        run_id,
+        turn_id,
+        "failed",
+        "API-bot joined failure",
+    )
+    .await
+}
+
+async fn api_bot_terminal_on(
+    conn: &mut sqlx::SqliteConnection,
+    bot_id: &str,
+    run_id: &str,
+    turn_id: &str,
+    target: &'static str,
+    why: &'static str,
+) -> Result<Outcome> {
+    edge("in_flight", target, why)?;
     let done = sqlx::query(
         "UPDATE turns
-            SET status='completed', completed_at=COALESCE(completed_at, ?)
+            SET status=?, completed_at=COALESCE(completed_at, ?)
           WHERE id=? AND run_id=? AND status='in_flight'
             AND EXISTS (
                 SELECT 1
@@ -185,6 +222,7 @@ pub async fn complete_api_bot_on(
                    AND c.bot_id=b.id
             )",
     )
+    .bind(target)
     .bind(crate::db::now())
     .bind(turn_id)
     .bind(run_id)
@@ -198,8 +236,8 @@ pub async fn complete_api_bot_on(
             &mut *conn,
             turn_id,
             "in_flight",
-            "completed",
-            "API-bot joined completion",
+            target,
+            why,
             "exact API-bot owner is no longer live",
         )
         .await,
