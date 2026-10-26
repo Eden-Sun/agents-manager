@@ -1953,11 +1953,110 @@ pub mod test_support {
     use super::*;
     use std::process::Stdio;
 
+    const MAX_DIAGNOSTIC_OUTPUTS: usize = 128;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FakeShellStderrClass {
+        Empty,
+        TrustMarker,
+        PermissionDenied,
+        NotFound,
+        Connection,
+        Timeout,
+        Other,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FakeShellOutput {
+        pub exit_code: Option<i32>,
+        pub succeeded: bool,
+        pub stderr_class: FakeShellStderrClass,
+        pub ends_with_done_tag: bool,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct FakeShellSnapshot {
+        pub callbacks: usize,
+        pub outputs: Vec<FakeShellOutput>,
+        pub overflow_outputs: usize,
+    }
+
+    #[derive(Clone, Default)]
+    pub struct FakeShellDiagnostics(std::sync::Arc<std::sync::Mutex<FakeShellSnapshot>>);
+
+    impl FakeShellDiagnostics {
+        fn record_callback(&self) {
+            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.callbacks = state.callbacks.saturating_add(1);
+        }
+
+        fn record_output(&self, output: &std::process::Output) {
+            let stderr_class = classify_stderr(&output.stderr);
+            let stdout = output.stdout.as_slice();
+            let tail = stdout
+                .strip_suffix(b"\r\n")
+                .or_else(|| stdout.strip_suffix(b"\n"))
+                .unwrap_or(stdout);
+            let record = FakeShellOutput {
+                exit_code: output.status.code(),
+                succeeded: output.status.success(),
+                stderr_class,
+                ends_with_done_tag: tail.ends_with(RFS_DONE_TAG.as_bytes()),
+            };
+
+            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.outputs.len() < MAX_DIAGNOSTIC_OUTPUTS {
+                state.outputs.push(record);
+            } else {
+                state.overflow_outputs = state.overflow_outputs.saturating_add(1);
+            }
+        }
+
+        pub fn take(&self) -> FakeShellSnapshot {
+            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *state)
+        }
+    }
+
+    fn classify_stderr(stderr: &[u8]) -> FakeShellStderrClass {
+        if stderr.is_empty() {
+            return FakeShellStderrClass::Empty;
+        }
+        let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+        if text.contains("untrusted path or file") || text.contains("host key verification failed") {
+            FakeShellStderrClass::TrustMarker
+        } else if text.contains("permission denied") || text.contains("operation not permitted") {
+            FakeShellStderrClass::PermissionDenied
+        } else if text.contains("no such file or directory") || text.contains("not found") {
+            FakeShellStderrClass::NotFound
+        } else if text.contains("connection refused") || text.contains("connection reset") {
+            FakeShellStderrClass::Connection
+        } else if text.contains("timed out") {
+            FakeShellStderrClass::Timeout
+        } else {
+            FakeShellStderrClass::Other
+        }
+    }
+
     pub fn local_sh_fake(host: &str, scratch: &Path) {
+        local_sh_fake_inner(host, scratch, None);
+    }
+
+    pub fn local_sh_fake_with_diagnostics(host: &str, scratch: &Path) -> FakeShellDiagnostics {
+        let diagnostics = FakeShellDiagnostics::default();
+        local_sh_fake_inner(host, scratch, Some(diagnostics.clone()));
+        diagnostics
+    }
+
+    fn local_sh_fake_inner(host: &str, scratch: &Path, diagnostics: Option<FakeShellDiagnostics>) {
         let scratch_buf = scratch.to_path_buf();
         let scratch_clone = scratch_buf.clone();
+        let io_diagnostics = diagnostics.clone();
 
         am_base::hosts::set_ssh_fake_io(host, move |script: &str, stdin: &[u8]| {
+            if let Some(diagnostics) = &io_diagnostics {
+                diagnostics.record_callback();
+            }
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(script);
             cmd.env("HOME", &scratch_clone);
@@ -1974,17 +2073,86 @@ pub mod test_support {
                 }
             }
             let out = child.wait_with_output().map_err(|e| anyhow::anyhow!("wait /bin/sh: {e}"))?;
+            if let Some(diagnostics) = &io_diagnostics {
+                diagnostics.record_output(&out);
+            }
             Ok(out.stdout)
         });
 
+        let text_diagnostics = diagnostics;
         am_base::hosts::set_ssh_fake(host, move |script: &str| {
+            if let Some(diagnostics) = &text_diagnostics {
+                diagnostics.record_callback();
+            }
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(script);
             cmd.env("HOME", &scratch_buf);
             cmd.env("TMPDIR", &scratch_buf);
             cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let out = cmd.output().map_err(|e| anyhow::anyhow!("exec /bin/sh: {e}"))?;
+            if let Some(diagnostics) = &text_diagnostics {
+                diagnostics.record_output(&out);
+            }
             Ok(String::from_utf8_lossy(&out.stdout).to_string())
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        fn output(stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+            std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+            }
+        }
+
+        #[test]
+        fn diagnostics_are_fixed_metadata_and_bound_overflow_without_payload() {
+            let diagnostics = FakeShellDiagnostics::default();
+            diagnostics.record_callback();
+            let missing_output = diagnostics.take();
+            assert_eq!(missing_output.callbacks, 1);
+            assert!(missing_output.outputs.is_empty());
+            assert_eq!(missing_output.overflow_outputs, 0);
+
+            diagnostics.record_callback();
+            diagnostics.record_output(&output(
+                b"private-stdout-sentinel\nAM_RFS_DONE\n",
+                b"Permission denied private-stderr-sentinel",
+            ));
+            let first = diagnostics.take();
+            assert_eq!(first.callbacks, 1);
+            assert_eq!(first.outputs.len(), 1);
+            assert_eq!(
+                first.outputs[0],
+                FakeShellOutput {
+                    exit_code: Some(0),
+                    succeeded: true,
+                    stderr_class: FakeShellStderrClass::PermissionDenied,
+                    ends_with_done_tag: true,
+                }
+            );
+            assert!(!format!("{first:?}").contains("private-stdout-sentinel"));
+            assert!(!format!("{first:?}").contains("private-stderr-sentinel"));
+
+            for _ in 0..(MAX_DIAGNOSTIC_OUTPUTS + 3) {
+                diagnostics.record_callback();
+                diagnostics.record_output(&output(
+                    b"overflow-stdout-sentinel",
+                    b"overflow-stderr-sentinel",
+                ));
+            }
+            let overflow = diagnostics.take();
+            assert_eq!(overflow.callbacks, MAX_DIAGNOSTIC_OUTPUTS + 3);
+            assert_eq!(overflow.outputs.len(), MAX_DIAGNOSTIC_OUTPUTS);
+            assert_eq!(overflow.overflow_outputs, 3);
+            let safe = format!("{overflow:?}");
+            assert!(!safe.contains("overflow-stdout-sentinel"));
+            assert!(!safe.contains("overflow-stderr-sentinel"));
+        }
     }
 }
