@@ -50,6 +50,22 @@ pub enum Error {
     Model(super::http::Error),
 }
 
+/// Project only user-visible text blocks from a completed provider response.
+///
+/// The checkpoint keeps the full protocol content for continuation; this projection is only for
+/// the ordinary assistant message and deliberately drops thinking/signatures/tool payloads.
+pub(crate) fn final_text(response: &Response) -> String {
+    let mut text = String::new();
+    for block in &response.content {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(part) = block.get("text").and_then(Value::as_str) {
+                text.push_str(part);
+            }
+        }
+    }
+    text
+}
+
 /// No automatic retry/fallback or crash replay. The host must fence run/generation and persist
 /// these checkpoints before exposing a production entry point (not included in A).
 pub async fn run(
