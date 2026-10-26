@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::OwnedMutexGuard;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::registry::{
@@ -22,6 +22,9 @@ use super::registry::{
 };
 
 const API_BOT_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const API_BOT_COMPLETION_MAX_ATTEMPTS: usize = 3;
+const API_BOT_COMPLETION_RETRY_DELAY: Duration = Duration::from_millis(25);
+const API_BOT_COMPLETION_STORAGE_ERROR: &str = "api_completion_storage";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct FullKey {
@@ -72,7 +75,7 @@ struct ControlRecord {
     joined: watch::Receiver<JoinState>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct SessionCursor {
     identity: super::adapter::AdapterIdentity,
     revision: i64,
@@ -228,22 +231,7 @@ impl ApiBotRuntime {
     }
 
     async fn admission_gate(&self, key: &ApiRunKey) -> OwnedMutexGuard<()> {
-        let gate_key = AdmissionKey {
-            bot_id: key.bot_id.clone(),
-            run_id: key.run_id.clone(),
-        };
-        let gate = {
-            let mut gates = self.inner.admission.lock().await;
-            gates.retain(|_, gate| gate.strong_count() > 0);
-            if let Some(gate) = gates.get(&gate_key).and_then(Weak::upgrade) {
-                gate
-            } else {
-                let gate = Arc::new(AsyncMutex::new(()));
-                gates.insert(gate_key, Arc::downgrade(&gate));
-                gate
-            }
-        };
-        gate.lock_owned().await
+        admission_gate_for(&self.inner, key).await
     }
 
     async fn spawn_gate(&self, key: &ApiTurnKey) -> OwnedMutexGuard<()> {
@@ -303,15 +291,8 @@ impl ApiBotRuntime {
             max_turn_microusd: limits.max_turn_cost_microusd,
             max_requests_per_hour: i64::from(limits.max_requests_per_hour),
         };
-        let identity = self.identity_for_turn(&app.db, &full).await?;
-        let session_cursor = {
-            self.inner
-                .sessions
-                .lock()
-                .expect("session mutex poisoned")
-                .get(&key.bot_id)
-                .cloned()
-        };
+        let (identity, expected_cursor) = self.identity_for_turn(&app.db, &full).await?;
+        let session_cursor = expected_cursor.clone();
         let (adapter, mut state) = if let Some(cursor) = session_cursor {
             let (adapter, state) = super::adapter::ApiBotAdapter::rebind(
                 app.db.clone(),
@@ -372,6 +353,7 @@ impl ApiBotRuntime {
         let tools = SharedTools(Arc::clone(&dependencies.tools));
         let max_calls = limits.max_api_calls_per_turn as usize;
         let turn_timeout = Duration::from_secs(limits.turn_timeout_secs);
+        let (final_text_tx, final_text_rx) = oneshot::channel();
         #[cfg(all(test, feature = "daemon-test-harness"))]
         let runner_run_id = key.run_id.clone();
         let run_ticket = self
@@ -391,11 +373,17 @@ impl ApiBotRuntime {
                 );
                 let (result, deadline_elapsed) =
                     await_runner_deadline(execution, &cancel, turn_timeout).await;
-                if deadline_elapsed {
-                    Ok(TurnOutcome::Failed("turn_timeout".into()))
+                let outcome = if deadline_elapsed {
+                    TurnOutcome::Failed("turn_timeout".into())
                 } else {
-                    Ok(map_runner_result(result, &cancel))
+                    map_runner_result(result, &cancel)
+                };
+                if matches!(&outcome, TurnOutcome::Completed) {
+                    if let Some(response) = state.responses.last() {
+                        let _ = final_text_tx.send(super::completion::FinalText::from_response(response));
+                    }
                 }
+                Ok(outcome)
             })
             .map_err(|_| ApiBotError::Busy)?;
 
@@ -419,8 +407,27 @@ impl ApiBotRuntime {
             inner: self.inner.clone(),
             bot_id: key.bot_id.clone(),
             identity,
+            expected: expected_cursor,
             #[cfg(test)]
             before_revision: None,
+            #[cfg(test)]
+            after_commit_before_publish: None,
+        };
+        let completion_owner = CompletionOwner {
+            app: app.shared(),
+            key: ApiTurnKey {
+                bot_id: key.bot_id.clone(),
+                run_id: key.run_id.clone(),
+                turn_id: key.turn_id.clone(),
+            },
+            identity: session_commit.identity.clone(),
+            final_text: final_text_rx,
+            #[cfg(test)]
+            before_storage: None,
+            #[cfg(test)]
+            retry_observer: None,
+            #[cfg(test)]
+            store_fault: None,
         };
         let shutdown_timeout = dependencies
             .shutdown_join_timeout
@@ -432,6 +439,7 @@ impl ApiBotRuntime {
                 shutdown,
                 joined_tx,
                 shutdown_timeout,
+                Some(completion_owner),
                 Some(session_commit),
             )
             .await;
@@ -445,7 +453,7 @@ impl ApiBotRuntime {
         &self,
         pool: &sqlx::SqlitePool,
         key: &FullKey,
-    ) -> Result<super::adapter::AdapterIdentity, ApiBotError> {
+    ) -> Result<(super::adapter::AdapterIdentity, Option<SessionCursor>), ApiBotError> {
         let session_cursor = {
             self.inner
                 .sessions
@@ -454,7 +462,7 @@ impl ApiBotRuntime {
                 .get(&key.bot_id)
                 .cloned()
         };
-        if let Some(cursor) = session_cursor {
+        if let Some(cursor) = session_cursor.clone() {
             let generation = if cursor.identity.run_id == key.run_id {
                 cursor.identity.generation
             } else {
@@ -464,13 +472,16 @@ impl ApiBotRuntime {
                     .checked_add(1)
                     .ok_or(ApiBotError::Unconfirmed)?
             };
-            return Ok(super::adapter::AdapterIdentity {
-                session_id: cursor.identity.session_id,
-                bot_id: key.bot_id.clone(),
-                run_id: key.run_id.clone(),
-                turn_id: key.turn_id.clone(),
-                generation,
-            });
+            return Ok((
+                super::adapter::AdapterIdentity {
+                    session_id: cursor.identity.session_id.clone(),
+                    bot_id: key.bot_id.clone(),
+                    run_id: key.run_id.clone(),
+                    turn_id: key.turn_id.clone(),
+                    generation,
+                },
+                Some(cursor),
+            ));
         }
         let existing: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL)",
@@ -482,13 +493,16 @@ impl ApiBotRuntime {
         if existing {
             return Err(ApiBotError::Unconfirmed);
         }
-        Ok(super::adapter::AdapterIdentity {
-            session_id: crate::db::ulid(),
-            bot_id: key.bot_id.clone(),
-            run_id: key.run_id.clone(),
-            turn_id: key.turn_id.clone(),
-            generation: 1,
-        })
+        Ok((
+            super::adapter::AdapterIdentity {
+                session_id: crate::db::ulid(),
+                bot_id: key.bot_id.clone(),
+                run_id: key.run_id.clone(),
+                turn_id: key.turn_id.clone(),
+                generation: 1,
+            },
+            None,
+        ))
     }
 
     async fn cancel_and_join_core(
@@ -574,8 +588,31 @@ struct SessionCommit {
     inner: Arc<RuntimeInner>,
     bot_id: String,
     identity: super::adapter::AdapterIdentity,
+    expected: Option<SessionCursor>,
     #[cfg(test)]
     before_revision: Option<Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    after_commit_before_publish: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+}
+
+struct CompletionOwner {
+    app: Arc<crate::state::App>,
+    key: ApiTurnKey,
+    identity: super::adapter::AdapterIdentity,
+    final_text: oneshot::Receiver<super::completion::FinalText>,
+    #[cfg(test)]
+    before_storage: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    #[cfg(test)]
+    retry_observer: Option<(Arc<std::sync::atomic::AtomicUsize>, Arc<tokio::sync::Notify>)>,
+    #[cfg(test)]
+    store_fault: Option<(CompletionStoreFault, Arc<std::sync::atomic::AtomicUsize>)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionStoreFault {
+    AmbiguousBeforeStore,
+    AmbiguousAfterCommit,
 }
 
 async fn own_ticket(
@@ -584,6 +621,7 @@ async fn own_ticket(
     shutdown: CancellationToken,
     result_tx: watch::Sender<JoinState>,
     shutdown_timeout: Duration,
+    completion_owner: Option<CompletionOwner>,
     session_commit: Option<SessionCommit>,
 ) {
     let join = ticket.join();
@@ -601,38 +639,226 @@ async fn own_ticket(
     if state == JoinState::TimedOut {
         tracing::warn!("API bot task join exceeded shutdown deadline; outcome remains unconfirmed");
     }
-    if matches!(state, JoinState::Joined(_)) {
-        if let Some(commit) = session_commit {
-            #[cfg(test)]
-            if let Some(notify) = &commit.before_revision {
-                notify.notify_one();
-            }
-            let revision = if shutdown.is_cancelled() {
-                None
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => None,
-                    revision = stored_revision(&commit.pool, &commit.identity) => revision,
-                }
-            };
-            if let Some(revision) = revision {
-                commit
-                    .inner
-                    .sessions
-                    .lock()
-                    .expect("session mutex poisoned")
-                    .insert(
-                        commit.bot_id,
-                        SessionCursor {
-                            identity: commit.identity,
-                            revision,
+    // This receipt certifies only the real task join. A storage transaction must never delay or
+    // rewrite it; stop waits on this watch before doing its own recovery transaction.
+    result_tx.send_replace(state);
+
+    let joined = match state {
+        JoinState::Joined(Ok(completion)) => Some(completion),
+        _ => None,
+    };
+    match (completion_owner, joined) {
+        (Some(mut owner), Some(joined)) => {
+            let admission = if let Some(commit) = &session_commit {
+                Some(
+                    admission_gate_for(
+                        &commit.inner,
+                        &ApiRunKey {
+                            bot_id: commit.bot_id.clone(),
+                            run_id: commit.identity.run_id.clone(),
                         },
-                    );
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            #[cfg(test)]
+            if let Some(notify) = &owner.before_storage {
+                notify.0.notify_one();
+                notify.1.notified().await;
+            }
+            let final_text = if joined == Completion::Completed {
+                (&mut owner.final_text).await.ok()
+            } else {
+                None
+            };
+            if let Some(committed) = settle_joined_completion(&owner, joined, final_text).await {
+                if let Some(commit) = session_commit {
+                    #[cfg(test)]
+                    if let Some((reached, release)) = &commit.after_commit_before_publish {
+                        reached.notify_one();
+                        release.notified().await;
+                    }
+                    publish_session_cursor(commit, committed.session_revision);
+                }
+                drop(admission);
+                // The exact cursor from the committing transaction is visible before notifications
+                // can trigger another turn. No sessions mutex is held during DB I/O or event awaits.
+                super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
+            } else {
+                drop(admission);
             }
         }
+        (None, Some(_)) => {
+            // The only remaining caller is the isolated post-join cursor test path; production
+            // always supplies a CompletionOwner and the transaction's exact revision.
+            if let Some(commit) = session_commit {
+                #[cfg(test)]
+                if let Some(notify) = &commit.before_revision {
+                    notify.notify_one();
+                }
+                let revision = if shutdown.is_cancelled() {
+                    None
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => None,
+                        revision = stored_revision(&commit.pool, &commit.identity) => revision,
+                    }
+                };
+                if let Some(revision) = revision {
+                    publish_session_cursor(commit, revision);
+                }
+            }
+        }
+        _ => {}
     }
-    result_tx.send_replace(state);
+}
+
+async fn admission_gate_for(
+    inner: &Arc<RuntimeInner>,
+    key: &ApiRunKey,
+) -> OwnedMutexGuard<()> {
+    let gate_key = AdmissionKey {
+        bot_id: key.bot_id.clone(),
+        run_id: key.run_id.clone(),
+    };
+    let gate = {
+        let mut gates = inner.admission.lock().await;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(&gate_key).and_then(Weak::upgrade) {
+            gate
+        } else {
+            let gate = Arc::new(AsyncMutex::new(()));
+            gates.insert(gate_key, Arc::downgrade(&gate));
+            gate
+        }
+    };
+    gate.lock_owned().await
+}
+
+async fn settle_joined_completion(
+    owner: &CompletionOwner,
+    joined: Completion,
+    final_text: Option<super::completion::FinalText>,
+) -> Option<super::completion::Committed> {
+    for attempt in 0..API_BOT_COMPLETION_MAX_ATTEMPTS {
+        #[cfg(test)]
+        let result = {
+            let injected_fault = owner.store_fault.as_ref().map(|(fault, calls)| {
+                (
+                    *fault,
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                )
+            });
+            store_joined_completion_with_test_fault(
+                owner,
+                joined,
+                final_text.as_ref(),
+                injected_fault,
+            )
+            .await
+        };
+        #[cfg(not(test))]
+        let result = store_joined_completion(owner, joined, final_text.as_ref()).await;
+        let retry = match result {
+            Ok(super::completion::Outcome::Committed(committed)) => return Some(committed),
+            Ok(super::completion::Outcome::Fenced) => return None,
+            Err(super::completion::StoreError::Retryable) => true,
+            Err(super::completion::StoreError::Ambiguous) => {
+                if !super::completion::exact_turn_is_uncommitted(&owner.app, &owner.key).await {
+                    warn_completion_storage(&owner.key);
+                    return None;
+                }
+                true
+            }
+        };
+        if retry {
+            #[cfg(test)]
+            if let Some((count, notify)) = &owner.retry_observer {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                notify.notify_one();
+            }
+        }
+        if attempt + 1 < API_BOT_COMPLETION_MAX_ATTEMPTS {
+            tokio::time::sleep(API_BOT_COMPLETION_RETRY_DELAY).await;
+        }
+    }
+    warn_completion_storage(&owner.key);
+    None
+}
+
+async fn store_joined_completion(
+    owner: &CompletionOwner,
+    joined: Completion,
+    final_text: Option<&super::completion::FinalText>,
+) -> Result<super::completion::Outcome, super::completion::StoreError> {
+    match (joined, final_text) {
+        (Completion::Completed, Some(text)) => {
+            super::completion::commit_after_join(
+                &owner.app,
+                &owner.key,
+                &owner.identity,
+                text,
+            )
+            .await
+        }
+        _ => super::completion::fail_after_join(
+            &owner.app,
+            &owner.key,
+            &owner.identity,
+        )
+        .await,
+    }
+}
+
+#[cfg(test)]
+async fn store_joined_completion_with_test_fault(
+    owner: &CompletionOwner,
+    joined: Completion,
+    final_text: Option<&super::completion::FinalText>,
+    injected_fault: Option<(CompletionStoreFault, usize)>,
+) -> Result<super::completion::Outcome, super::completion::StoreError> {
+    if injected_fault == Some((CompletionStoreFault::AmbiguousBeforeStore, 0)) {
+        return Err(super::completion::StoreError::Ambiguous);
+    }
+    let stored = store_joined_completion(owner, joined, final_text).await;
+    if injected_fault == Some((CompletionStoreFault::AmbiguousAfterCommit, 0))
+        && matches!(&stored, Ok(super::completion::Outcome::Committed(_)))
+    {
+        return Err(super::completion::StoreError::Ambiguous);
+    }
+    stored
+}
+
+fn warn_completion_storage(key: &ApiTurnKey) {
+    tracing::warn!(
+        bot = %key.bot_id,
+        run = %key.run_id,
+        turn = %key.turn_id,
+        error_code = API_BOT_COMPLETION_STORAGE_ERROR,
+        "joined API-bot completion storage requires recovery"
+    );
+}
+
+fn publish_session_cursor(commit: SessionCommit, revision: i64) -> bool {
+    let mut sessions = commit
+        .inner
+        .sessions
+        .lock()
+        .expect("session mutex poisoned");
+    if sessions.get(&commit.bot_id) != commit.expected.as_ref() {
+        return false;
+    }
+    sessions.insert(
+        commit.bot_id,
+        SessionCursor {
+            identity: commit.identity,
+            revision,
+        },
+    );
+    true
 }
 
 fn map_join_result(result: Result<TurnOutcome, RegistryError>) -> Result<Completion, JoinError> {
@@ -1156,16 +1382,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn stop_and_collect(app: &crate::state::App, key: &ApiTurnKey) -> ApiRunCompletion {
-        sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=?")
-            .bind(&key.run_id)
-            .bind(&key.bot_id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-        app.api_run_cancel_and_join(key).await.unwrap()
-    }
-
     fn clone_turn_key(key: &ApiTurnKey) -> ApiTurnKey {
         ApiTurnKey {
             bot_id: key.bot_id.clone(),
@@ -1182,6 +1398,110 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    async fn wait_until_completed(app: &crate::state::App, key: &ApiTurnKey) {
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            loop {
+                let status: Option<String> = sqlx::query_scalar(
+                    "SELECT status FROM turns WHERE id=? AND run_id=?",
+                )
+                .bind(&key.turn_id)
+                .bind(&key.run_id)
+                .fetch_optional(&app.db)
+                .await
+                .unwrap();
+                if status.as_deref() == Some("completed") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn create_completion_session(
+        app: &crate::state::App,
+        key: &ApiTurnKey,
+    ) -> super::super::adapter::AdapterIdentity {
+        let session_id = crate::db::ulid();
+        let identity = super::super::adapter::AdapterIdentity {
+            session_id: session_id.clone(),
+            bot_id: key.bot_id.clone(),
+            run_id: key.run_id.clone(),
+            turn_id: key.turn_id.clone(),
+            generation: 1,
+        };
+        let fence = am_base::db::api_bot::Fence {
+            session: &session_id,
+            bot: &key.bot_id,
+            run: &key.run_id,
+            turn: &key.turn_id,
+            generation: 1,
+            revision: 0,
+        };
+        let checkpoint = am_base::db::api_bot::Checkpoint::new(&json!({
+            "messages": [{"role":"user","content":"fixture prompt"}],
+            "responses": [],
+            "api_pending": false,
+            "tool_pending": null,
+            "completed_tool_ids": []
+        }))
+        .unwrap();
+        am_base::db::api_bot::create(&app.db, &fence, &checkpoint)
+            .await
+            .unwrap();
+        identity
+    }
+
+    async fn reserve_completion_attempt(
+        app: &crate::state::App,
+        identity: &super::super::adapter::AdapterIdentity,
+    ) {
+        let fence = am_base::db::api_bot::Fence {
+            session: &identity.session_id,
+            bot: &identity.bot_id,
+            run: &identity.run_id,
+            turn: &identity.turn_id,
+            generation: identity.generation,
+            revision: 0,
+        };
+        let checkpoint = am_base::db::api_bot::Checkpoint::new(&json!({
+            "messages": [{"role":"user","content":"fixture prompt"}],
+            "responses": [],
+            "api_pending": true,
+            "tool_pending": null,
+            "completed_tool_ids": []
+        }))
+        .unwrap();
+        am_base::db::api_bot::reserve(
+            &app.db,
+            &fence,
+            &am_base::db::api_bot::Attempt {
+                id: "runtime-completion-reservation",
+                ordinal: 0,
+                request_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                speed: "standard",
+                reserved_microusd: 250,
+                pricing_version: "fixture-v1",
+            },
+            &checkpoint,
+            1000,
+            10,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn completion_response() -> Response {
+        Response {
+            id: "runtime-join-fixture".into(),
+            model: "fixture-model".into(),
+            content: vec![json!({"type":"text","text":"joined final"})],
+            stop_reason: "end_turn".into(),
+            usage: json!({"input_tokens":1,"output_tokens":1}),
+        }
     }
 
     #[tokio::test]
@@ -1483,6 +1803,7 @@ mod tests {
             .unwrap();
             assert_eq!(sessions, 1, "parallel spawn cannot create a second session");
             wait_until_joined(&env.app, &key).await;
+            wait_until_completed(&env.app, &key).await;
             let checkpoint: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL")
                 .bind(&bot_id).fetch_one(&env.app.db).await.unwrap();
             let checkpoint: Value = serde_json::from_str(&checkpoint).unwrap();
@@ -1494,22 +1815,16 @@ mod tests {
                     .any(|message| message["content"] == json!(format!("turn {n}"))),
                 "every turn's prompt is durable before it is run"
             );
-            assert_eq!(
-                stop_and_collect(&env.app, &key).await,
-                ApiRunCompletion::Completed
-            );
-            sqlx::query("UPDATE runs SET state='stopped',ended_at=? WHERE id=?")
-                .bind(crate::db::now())
-                .bind(&run_id)
-                .execute(&env.app.db)
-                .await
-                .unwrap();
-            sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
-                .bind(crate::db::now())
-                .bind(&turn_id)
-                .execute(&env.app.db)
-                .await
-                .unwrap();
+            assert!(crate::lifecycle::stop_bot(&env.app, &bot_id).await.unwrap());
+            let terminal: (String, String) = sqlx::query_as(
+                "SELECT r.state,t.status FROM runs r JOIN turns t ON t.run_id=r.id WHERE r.id=? AND t.id=?",
+            )
+            .bind(&run_id)
+            .bind(&turn_id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+            assert_eq!(terminal, ("stopped".into(), "completed".into()));
             assert!(env.app.api_bot_runtime.control_count_for_test() <= 1);
         }
         assert_eq!(
@@ -2166,6 +2481,7 @@ mod tests {
             tx,
             Duration::from_millis(5),
             None,
+            None,
         ));
         tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified())
             .await
@@ -2261,6 +2577,7 @@ mod tests {
             shutdown.clone(),
             tx,
             DEADLOCK_TIMEOUT,
+            None,
             Some(SessionCommit {
                 pool: pool.clone(),
                 inner: runtime.inner.clone(),
@@ -2272,7 +2589,9 @@ mod tests {
                     turn_id: "t".into(),
                     generation: 1,
                 },
+                expected: None,
                 before_revision: Some(before_revision.clone()),
+                after_commit_before_publish: None,
             }),
         ));
 
@@ -2891,6 +3210,580 @@ mod tests {
         assert_eq!(turn_status.unwrap(), "completed", "idle proof does not rewrite a terminal turn");
         assert!(!runner_live_after_join);
         assert!(server_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn joined_completion_waits_for_real_ticket_join_and_publishes_cursor_before_events() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "join gate").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        let runtime = ApiBotRuntime::new();
+        let entered = Arc::new(Notify::new());
+        let release_runner = Arc::new(Notify::new());
+        let entered_task = entered.clone();
+        let release_task = release_runner.clone();
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                entered_task.notify_one();
+                release_task.notified().await;
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, mut joined_rx) = watch::channel(JoinState::Pending);
+        let before_storage = Arc::new(Notify::new());
+        let release_storage = Arc::new(Notify::new());
+        let mut events = env.app.subscribe();
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: Some((before_storage.clone(), release_storage.clone())),
+                retry_observer: None,
+                store_fault: None,
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id: bot_id.clone(),
+                identity: identity.clone(),
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: None,
+            }),
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
+        assert_eq!(*joined_rx.borrow_and_update(), JoinState::Pending);
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "in_flight");
+        assert_eq!(count, 0, "runner payload before task exit is not completion");
+
+        release_runner.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, before_storage.notified()).await.unwrap();
+        assert_eq!(*joined_rx.borrow_and_update(), JoinState::Joined(Ok(Completion::Completed)));
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "join receipt is independent of storage");
+        assert!(events.try_recv().is_err(), "no event before commit and cursor publication");
+
+        let waiter_inner = runtime.inner.clone();
+        let waiter_key = ApiRunKey {
+            bot_id: bot_id.clone(),
+            run_id: run_id.clone(),
+        };
+        let mut admission_waiter =
+            Box::pin(admission_gate_for(&waiter_inner, &waiter_key));
+        let first_poll = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(admission_waiter.as_mut().poll(cx))
+        })
+        .await;
+        assert!(first_poll.is_pending(), "new admission waits for cursor publication");
+
+        release_storage.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "completed");
+        let cursor = runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned().unwrap();
+        assert_eq!(cursor.identity, identity);
+        let db_revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?")
+            .bind(&cursor.identity.session_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(cursor.revision, db_revision);
+        let _admission = tokio::time::timeout(DEADLOCK_TIMEOUT, admission_waiter)
+            .await
+            .unwrap();
+        let admitted_cursor = waiter_inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&bot_id)
+            .cloned()
+            .expect("admission sees the committed cursor");
+        assert_eq!(admitted_cursor.identity, identity);
+        assert_eq!(admitted_cursor.revision, db_revision);
+        assert_eq!(events.try_recv().unwrap().kind, "message_added");
+        assert_eq!(events.try_recv().unwrap().kind, "turn_updated");
+    }
+
+    #[tokio::test]
+    async fn committed_cursor_is_published_even_if_stop_wins_before_cache_update() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "post-commit stop").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        let runtime = ApiBotRuntime::new();
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, _) = watch::channel(JoinState::Pending);
+        let after_commit = Arc::new(Notify::new());
+        let release_publish = Arc::new(Notify::new());
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: None,
+                store_fault: None,
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id: bot_id.clone(),
+                identity: identity.clone(),
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: Some((after_commit.clone(), release_publish.clone())),
+            }),
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, after_commit.notified()).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "completed", "completion transaction already committed");
+        let moved = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND state='running'")
+            .bind(&run_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(moved.rows_affected(), 1);
+        release_publish.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        let cursor = runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned().unwrap();
+        assert_eq!(cursor.identity, identity);
+        let db_revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?")
+            .bind(&cursor.identity.session_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(cursor.revision, db_revision);
+    }
+
+    #[tokio::test]
+    async fn late_join_owner_cannot_overwrite_a_newer_session_cursor() {
+        let runtime = ApiBotRuntime::new();
+        let bot_id = "cursor-bot".to_string();
+        let old = super::super::adapter::AdapterIdentity {
+            session_id: "s".into(),
+            bot_id: bot_id.clone(),
+            run_id: "r1".into(),
+            turn_id: "t1".into(),
+            generation: 1,
+        };
+        let newer = super::super::adapter::AdapterIdentity {
+            session_id: "s".into(),
+            bot_id: bot_id.clone(),
+            run_id: "r1".into(),
+            turn_id: "t2".into(),
+            generation: 1,
+        };
+        runtime.inner.sessions.lock().unwrap().insert(
+            bot_id.clone(),
+            SessionCursor { identity: newer.clone(), revision: 6 },
+        );
+        let commit = SessionCommit {
+            pool: sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+            inner: runtime.inner.clone(),
+            bot_id: bot_id.clone(),
+            identity: old.clone(),
+            expected: Some(SessionCursor { identity: old, revision: 4 }),
+            before_revision: None,
+            after_commit_before_publish: None,
+        };
+        assert!(!publish_session_cursor(commit, 5));
+        let current = runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned().unwrap();
+        assert_eq!(current.identity, newer);
+        assert_eq!(current.revision, 6);
+    }
+
+    #[tokio::test]
+    async fn transient_completion_db_error_retries_after_rollback() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "retry once").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER completion_retry_once BEFORE INSERT ON messages WHEN NEW.turn_id='{}' BEGIN SELECT RAISE(ABORT, 'injected transient completion error'); END",
+            turn_id
+        ))
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let runtime = ApiBotRuntime::new();
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, _) = watch::channel(JoinState::Pending);
+        let retry_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retry_wake = Arc::new(Notify::new());
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: Some((retry_count.clone(), retry_wake.clone())),
+                store_fault: None,
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id,
+                identity,
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: None,
+            }),
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            while retry_count.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+                retry_wake.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        sqlx::query("DROP TRIGGER completion_retry_once")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        assert_eq!(retry_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "completed");
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(messages, 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_completion_error_keeps_real_join_receipt_for_stop_recovery() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "stop recovers joined error").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        reserve_completion_attempt(&env.app, &identity).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER completion_permanent_failure BEFORE INSERT ON messages WHEN NEW.turn_id='{}' BEGIN SELECT RAISE(ABORT, 'injected permanent completion error'); END",
+            turn_id
+        ))
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let runtime = &env.app.api_bot_runtime;
+        runtime.set_test_dependencies(ApiBotDependencies {
+            endpoint: "http://127.0.0.1:1/no-call".into(),
+            key: "test-only".into(),
+            quote: Arc::new(Quote),
+            tools: Arc::new(NoTools),
+            shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
+        });
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
+        runtime.inner.controls.lock().unwrap().insert(
+            FullKey::from(&key),
+            ControlRecord { identity: Arc::new(()), cancel: cancel.clone(), joined: joined_rx.clone() },
+        );
+        let retry_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retry_wake = Arc::new(Notify::new());
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity,
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: Some((retry_count.clone(), retry_wake.clone())),
+                store_fault: None,
+            }),
+            None,
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            while retry_count.load(std::sync::atomic::Ordering::SeqCst) < API_BOT_COMPLETION_MAX_ATTEMPTS {
+                retry_wake.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        assert_eq!(
+            *joined_rx.borrow(),
+            JoinState::Joined(Ok(Completion::Completed)),
+            "storage retry exhaustion cannot rewrite genuine task completion"
+        );
+        let before_stop: (String, String, String) = sqlx::query_as(
+            "SELECT r.state,t.status,a.state FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.run_id=r.id WHERE r.id=? AND t.id=?",
+        )
+        .bind(&run_id)
+        .bind(&turn_id)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+        assert_eq!(before_stop, ("running".into(), "in_flight".into(), "reserved".into()));
+        sqlx::query("DROP TRIGGER completion_permanent_failure")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        assert!(crate::lifecycle::stop_bot(&env.app, &bot_id).await.unwrap());
+        let after_stop: (String, String, String, i64, i64) = sqlx::query_as(
+            "SELECT r.state,t.status,a.state,a.reserved_microusd,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant') FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.run_id=r.id WHERE r.id=? AND t.id=?",
+        )
+        .bind(&run_id)
+        .bind(&turn_id)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+        assert_eq!(after_stop, ("stopped".into(), "failed".into(), "unknown".into(), 250, 0));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_store_with_exact_uncommitted_owner_retries_once() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "retry ambiguous owner").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        let runtime = ApiBotRuntime::new();
+        let fault_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
+        let mut events = env.app.subscribe();
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: None,
+                store_fault: Some((CompletionStoreFault::AmbiguousBeforeStore, fault_calls.clone())),
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id: bot_id.clone(),
+                identity: identity.clone(),
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: None,
+            }),
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        assert_eq!(
+            *joined_rx.borrow(),
+            JoinState::Joined(Ok(Completion::Completed)),
+            "storage retry cannot replace the real RunTicket receipt"
+        );
+        assert_eq!(fault_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "completed");
+        let assistant: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id,content FROM messages WHERE turn_id=? AND role='assistant'",
+        )
+        .bind(&turn_id).fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(assistant.len(), 1, "retry commits one assistant message");
+        assert_eq!(assistant[0].1, "joined final");
+        // Completed turns publish bot_status after turn_updated; assert all completion events by
+        // their exact owner key so this legitimate projection does not mask a duplicate pair.
+        let mut message_events = Vec::new();
+        let mut turn_events = Vec::new();
+        let mut status_events = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "message_added"
+                && event.data["message"]["turn_id"].as_str() == Some(turn_id.as_str())
+            {
+                message_events.push(event);
+            } else if event.kind == "turn_updated"
+                && event.data["turn"]["id"].as_str() == Some(turn_id.as_str())
+            {
+                turn_events.push(event);
+            } else if event.kind == "bot_status"
+                && event.data["bot_id"].as_str() == Some(bot_id.as_str())
+                && event.data["run"]["id"].as_str() == Some(run_id.as_str())
+            {
+                status_events.push(event);
+            }
+        }
+        assert_eq!(message_events.len(), 1, "one message_added for this exact turn");
+        assert_eq!(
+            message_events[0].data["bot_id"].as_str(),
+            Some(bot_id.as_str())
+        );
+        assert_eq!(
+            message_events[0].data["message"]["id"].as_str(),
+            Some(assistant[0].0.as_str())
+        );
+        assert_eq!(message_events[0].data["message"]["role"], "assistant");
+        assert_eq!(turn_events.len(), 1, "one turn_updated for this exact turn");
+        assert_eq!(turn_events[0].data["bot_id"].as_str(), Some(bot_id.as_str()));
+        assert_eq!(
+            turn_events[0].data["turn"]["run_id"].as_str(),
+            Some(run_id.as_str())
+        );
+        assert_eq!(turn_events[0].data["turn"]["status"], "completed");
+        assert!(message_events[0].seq < turn_events[0].seq);
+        assert_eq!(status_events.len(), 1, "one bot_status for this exact bot/run");
+        assert!(turn_events[0].seq < status_events[0].seq);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_store_with_committed_assistant_does_not_retry_or_emit_success() {
+        let env = crate::testing::env().await;
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let turn_id = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &turn_id, &conv, &env.project_id, "stop ambiguous resend").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: turn_id.clone() };
+        let identity = create_completion_session(&env.app, &key).await;
+        let runtime = ApiBotRuntime::new();
+        let fault_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime.inner.registry.spawn_tracked(
+            RunTurnKey { run_id: run_id.clone(), turn_id: turn_id.clone() },
+            move |_cancel| async move {
+                let response = completion_response();
+                let _ = text_tx.send(super::super::completion::FinalText::from_response(&response));
+                Ok(TurnOutcome::Completed)
+            },
+        ).unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
+        let mut events = env.app.subscribe();
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            CancellationToken::new(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: None,
+                store_fault: Some((CompletionStoreFault::AmbiguousAfterCommit, fault_calls.clone())),
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id: bot_id.clone(),
+                identity,
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: None,
+            }),
+        ));
+
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
+        assert_eq!(
+            *joined_rx.borrow(),
+            JoinState::Joined(Ok(Completion::Completed)),
+            "ambiguous storage cannot erase the true join receipt"
+        );
+        assert_eq!(fault_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "completed", "the simulated lost acknowledgment followed a commit");
+        let assistant: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE turn_id=? AND role='assistant'",
+        )
+        .bind(&turn_id).fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(assistant, vec!["joined final".to_string()]);
+        assert!(events.try_recv().is_err(), "unconfirmed commit does not emit fake success");
     }
 
     #[tokio::test]
