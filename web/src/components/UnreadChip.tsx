@@ -76,6 +76,8 @@ interface ChipItem {
   title: string
   /** 主力晶片的快取倒數（`lib/cacheClock.ts`）；grok、沒紀錄、非主力是 `null`。 */
   cache: CacheState | null
+  /** 主力 codex 晶片（快取不冷、不倒數；改用淺藍色底代替，SPEC §6.5j）。 */
+  codexPrimary?: boolean
   /** 主力：保溫回覆到了、使用者還沒送新 prompt → 晶片框換色（`keepWarmChip.css`）。 */
   keepWarmReplied: boolean
   /** 主力：已按「不用保溫」→ 不畫倒數底色，tooltip 講「不保溫中」。 */
@@ -134,13 +136,14 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
   const shifted = dragging && drag.shifted.includes(it.id)
   // 落點標示：讓位的那一格（`drop-before`，標示畫在這顆左邊的空位）；落在行尾則畫在那一行最後一顆右邊（`drop-after`）。
   const mark = dragging && drag.before !== undefined ? (drag.after === it.id ? ' drop-after' : drag.after == null && drag.before === it.id ? ' drop-before' : '') : ''
-  // 快取倒數畫在底色上（`cacheClock.css`）：已涼不填，回到一般底色。
+  // 快取倒數畫在底色上（`cacheClock.css`）：已涼不填，回到一般底色。codex 主力用固定淺藍底（.cache-codex），不畫倒數寬度。
   const cache = it.cache && it.cache.level !== 'cold' ? it.cache : null
   const fill = cache ? ({ '--cache-fill': `${(cache.frac * 100).toFixed(1)}%` } as CSSProperties) : undefined
+  const cacheCls = cache ? ` cache-${cache.level}` : it.codexPrimary ? ' cache-codex' : ''
   return (
     <button
       type="button"
-      className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
+      className={`${chipClass(it)}${cacheCls}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）；狀態卡只剩手機長按。
       title={[it.title, it.limitTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
@@ -283,6 +286,7 @@ export function UnreadChip() {
         title: botTitle(b.name, pinned, n, needsReply, kids, current, t, atCapacity) + (nKids > 0 ? t('（{kids}）', { kids: kidsText(nKids) }) : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
         cache: pinned ? chipCache(runs[b.id], now, working) : null,
+        codexPrimary: pinned && b.kind === 'codex',
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
         limitTitle: pinned ? limitTitleOf(b.kind, b.limit_hit, now, t) : null,
       })

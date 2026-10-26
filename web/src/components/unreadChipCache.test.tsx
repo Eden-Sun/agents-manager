@@ -86,6 +86,21 @@ test('主力晶片：底色依剩餘時間填色、綠黃紅分級；已涼回�
   assert.ok(![...other.classList].some((c) => c.startsWith('cache-')))
 })
 
+test('codex 主力晶片：底色固定為淺藍（.cache-codex），不畫倒數寬度，不多加元素', async () => {
+  seed()
+  const s = useStore.getState()
+  const codexRun = { ...s.runs.warn, cache_ttl_secs: null }
+  useStore.setState({ runs: { ...s.runs, warn: codexRun } } as never)
+  await mount(<UnreadChip />)
+  const el = chip('warn')
+  assert.ok(el.classList.contains('cache-codex'), '帶 .cache-codex class')
+  assert.ok(!el.classList.contains('cache-warn') && !el.classList.contains('cache-fresh'), '不帶倒數等級 class')
+  assert.equal(el.style.getPropertyValue('--cache-fill'), '', '不畫倒數寬度 (--cache-fill 為空)')
+  // 子元素結構與一般主力晶片一致
+  const shape = (e: HTMLElement) => [...e.children].map((c) => c.className).join('|')
+  assert.equal(shape(el), shape(chip('cold')), '不多加元素、不改尺寸結構')
+})
+
 test('不多加元素：有倒數與已涼的晶片子元素結構一樣', async () => {
   seed()
   await mount(<UnreadChip />)

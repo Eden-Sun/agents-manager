@@ -17,7 +17,13 @@
   --cache-hue: var(--lamp-red);
 }
 
-.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low) {
+.unread-chip.pinned.cache-codex {
+  --cache-hue: var(--lamp-blue);
+  --cache-strong-pct: 12%;
+  --cache-faint-pct: 12%;
+}
+
+.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex) {
   --cache-strong: color-mix(in srgb, var(--cache-hue) var(--cache-strong-pct, 20%), transparent);
   --cache-faint: color-mix(in srgb, var(--cache-hue) var(--cache-faint-pct, 10%), transparent);
   background-image: linear-gradient(var(--cache-strong), var(--cache-strong)), linear-gradient(var(--cache-faint), var(--cache-faint));
@@ -36,22 +42,22 @@
 
 /* 中性底（閒置、在跑、等子 agent）原本是淡字：疊了色調後 12px 字在淺色模式掉到 4.5:1 以下，字往 `--text` 靠一半；
    hover 的底更亮（深色模式 `--bg-active`），黃色那級會掉到 4.3:1，hover 時直接用 `--text`。 */
-.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low):not(.unread, .needs-reply, .current) {
+.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex):not(.unread, .needs-reply, .current) {
   color: color-mix(in srgb, var(--text) 55%, var(--text-dim));
 }
 
-.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low):not(.unread, .needs-reply, .current):hover {
+.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex):not(.unread, .needs-reply, .current):hover {
   color: var(--text);
 }
 
 /* 要回答（淡紅底、hover 實心紅）上只疊薄薄一層（合起來約 15%）：色調太濃會把紅字／反白字的對比吃掉。
    未讀不塗底（2026-10-12），倒數照中性底的濃度畫。 */
-.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low) {
+.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex) {
   --cache-strong-pct: 9%;
   --cache-faint-pct: 6%;
 }
 
 /* 要回答（淡紅底紅字）：字往 `--text` 靠四分之一，兩種模式都維持 5:1 以上（原本淺色只有 4.5:1）。hover 換實心紅反白，照原本的白字。 */
-.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low):not(:hover) {
+.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex):not(:hover) {
   color: color-mix(in srgb, var(--danger) 75%, var(--text));
 }
