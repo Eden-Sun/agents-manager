@@ -1,7 +1,7 @@
 #!/bin/sh
 # Development Cargo entrypoint. Re-enter the managed Cargo shim so Blaze keeps its build slot.
 set -eu
-engine=${AGM_RUST_ENGINE:-cargo}
+engine=${AGM_RUST_ENGINE:-auto}
 case "$engine" in auto|blaze|cargo) ;; *) echo "project-cargo: AGM_RUST_ENGINE must be auto, blaze or cargo" >&2; exit 2 ;; esac
 AGM_RUST_DISPATCHED=$$
 export AGM_RUST_DISPATCHED
@@ -17,8 +17,6 @@ done
 [ "$engine" != cargo ] || use_blaze=0
 if [ "$use_blaze" = 0 ]; then exec cargo "$@"; fi
 host_os=$(uname -s)
-# The 16 GiB Mac host regularly reports memory pressure: acceleration there is explicit opt-in.
-if [ "$host_os" = Darwin ] && [ "$engine" = auto ]; then exec cargo "$@"; fi
 case "$host_os:$(uname -m)" in Linux:x86_64|Linux:aarch64|Darwin:arm64) ;; *)
     if [ "$engine" = blaze ]; then echo "project-cargo: Blaze does not support this host" >&2; exit 2; fi
     echo "project-cargo: unsupported Blaze host; using Cargo" >&2

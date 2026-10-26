@@ -2,7 +2,7 @@
 
 ## Blaze 開發建置
 
-`scripts/project-cargo.sh` 是本專案開發用的 Cargo 入口，預設 `AGM_RUST_ENGINE=cargo`。Linux 明確設 auto／blaze 才啟用 build/run；Mac 的 auto 維持原生 Cargo，只有明確 blaze 才啟用。受管 Cargo shim 會往目前目錄的祖先找 `.cargo/agm-blaze` 與這支腳本，兩者同時存在才轉交；其他專案不受影響。轉交發生在拿名額之前，再以 `cargo blaze …`（舊版 release 用 `cargo ra-jit …`）進入既有 shim，仍只租一個建置名額，不直接呼叫加速器繞過排程。`cargo dev` 的 xtask 建 daemon 也使用此入口。daemon 換版後新寫入／刷新過的 shim 才會有自動轉交；換版前或非受管 shell 直接使用腳本。
+`scripts/project-cargo.sh` 是本專案開發用的 Cargo 入口，Linux／Mac 預設 `AGM_RUST_ENGINE=auto`，對 build/run 嘗試 Blaze；明確設 cargo 停用、設 blaze 要求工具可用。受管 Cargo shim 會往目前目錄的祖先找 `.cargo/agm-blaze` 與這支腳本，兩者同時存在才轉交；其他專案不受影響。轉交發生在拿名額之前，再以 `cargo blaze …`（舊版 release 用 `cargo ra-jit …`）進入既有 shim，仍只租一個建置名額，不直接呼叫加速器繞過排程。`cargo dev` 的 xtask 建 daemon 也使用此入口。daemon 換版後新寫入／刷新過的 shim 才會有自動轉交；換版前或非受管 shell 直接使用腳本。
 
 ```sh
 scripts/install-blaze.sh --source
@@ -16,14 +16,14 @@ AGM_RUST_ENGINE=cargo AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p ag
 
 | 路徑 | 執行方式 |
 |---|---|
-| 明確啟用時，預設 profile 的 `build`／`run` | Blaze；完整保留參數與退出碼 |
+| 預設 profile 的 `build`／`run` | Blaze；完整保留參數與退出碼 |
 | `--release`／`-r`、顯式 `--profile`／`--target`、JSON 診斷、`-Z` | 原生 Cargo |
 | `test`（含明確要求 blaze）、`check`、Clippy、fmt、顯式 `+toolchain`、其他 Cargo 子指令 | 原生 Cargo |
 | `scripts/check.sh`、Ubuntu CI、macOS 原生驗證、正式打包 | 原生 Cargo／rustc，作為最終驗證 |
 
 `auto` 在不支援的主機、缺工具或缺 Rust 1.99.0 時明講並回到 Cargo；`AGM_RUST_ENGINE=blaze` 遇到這些條件則失敗，方便確認實際有走加速器。支援主機是 Linux x86-64／aarch64 與 macOS arm64。編譯或測試已執行而失敗時，入口不重試成另一條成功路徑。Blaze 自身的相容性 fallback 由上游管理；看到 `[ra-jit]` 才表示該輪由引擎建置。`test` 一律原樣交回 Cargo，保留 #1853 的遠端 worker 選擇（包含 r7）、遠端 target 池與測試執行緒上限；即使 `AGM_RUST_ENGINE=blaze` 也不改此路徑。這個取捨避免把多 agent 測試由 r7 移回 Ubuntu 16 核主機；本導入不以未量測的 JIT 測試負載取代既有分流。Blaze build/run 留在呼叫主機，以重用當地記憶體快取。
 
-Mac 主機常有 pressure=2，因此 auto 模式預設原生 Cargo。明確啟用 `AGM_RUST_ENGINE=blaze` 前，agent 仍須依共用負載／記憶體閘等到 normal；Mac 原生驗證一律走 `scripts/check.sh macos-local`，不能略過閘門。
+Mac 同樣預設嘗試 Blaze。執行編譯前，agent 仍須依共用負載／記憶體閘等到 normal；Mac 原生驗證一律走 `scripts/check.sh macos-local`，不能略過閘門。
 
 Blaze 把分析資料與機器碼留在每個使用者共用的背景服務；首次建置、依賴／manifest／建置輸入變動仍可能走 Cargo，局部函式修改才適合快路徑。本專案 daemon 的 `build.rs` 會輸出 commit SHA 與髒樹標記；切換 commit 或 clean→dirty 改變這些輸出時，Blaze 會要求 Cargo 重建再重新載入，所以不能把小型 xtask 的加速倍數套到每一輪 daemon 建置。每個 target dir 照舊獨立，既有 sccache wrapper 照舊處理 rustc 呼叫。背景 worker 可吃數 GiB，且命令結束後仍存在。
 
@@ -43,7 +43,7 @@ Ubuntu 16 vCPU、約 63 GiB RAM，Rust 1.99.0、上游固定 source `c8e5f6a88ae
 | 六次建置完成後，30 秒穩態中位數 | 20.76 GiB |
 | 前景 Cargo／rustc 合計峰值（不同時間點，不能相加） | 14.95 GiB |
 
-最後一個 worker 同時持有多個 worktree 的資料時，不會因 8G 軟預算被驅逐；因此這個預算不足以界定本專案的常駐 RSS。所有主機維持原生 Cargo 預設，Blaze 由明確設定啟用；未來若要改成預設加速，需重新驗證實際記憶體約束及多工作樹負載。大型量測服務完成穩態採樣後由啟動者以記錄的 PID 清理，600 秒閒置退出另以輕量隔離服務驗證，避免長時間占住約 21 GiB。
+最後一個 worker 同時持有多個 worktree 的資料時，不會因 8G 軟預算被驅逐；因此這個預算不足以界定本專案的常駐 RSS。Linux／Mac 的 build/run 採預設加速；實際記憶體使用仍須按此量測與主機狀態評估，不能以 8G 預算推定實際 RSS。大型量測服務完成穩態採樣後由啟動者以記錄的 PID 清理，600 秒閒置退出另以輕量隔離服務驗證，避免長時間占住約 21 GiB。
 
 狀態查詢須帶相同 namespace，例如 `RA_JIT_HOME="$HOME/.cache/agents-manager/blaze" ~/.local/share/agents-manager/blaze/bin/ra-jit status`。遇到產物／診斷差異，以 `AGM_RUST_ENGINE=cargo` 重現，最終以 `scripts/check.sh changed` 與 CI 結果為準。
 
