@@ -274,16 +274,16 @@ mod tests {
         // 額外主機設錯（主機名不合法、沒寫 user 又沿用到本機執行器的空 user）：只略過那台。
         let bad_extra = "[build.remote]\nenabled = true\nhost = \"local\"\n\
                          [[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n[[build.remote.hosts]]\nhost = \"r9\"\n";
-        match decide(bad_extra) {
-            Offload::Go(hosts) => {
-                assert!(cfg!(target_os = "linux"), "只有 Linux 的 local 可用");
-                assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]);
+        if cfg!(target_os = "linux") {
+            match decide(bad_extra) {
+                Offload::Go(hosts) => assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]),
+                _ => panic!("Linux 的 local 應保留，壞掉的額外主機應略過"),
             }
-            Offload::Local(Some(why)) => {
-                assert!(!cfg!(target_os = "linux"), "Linux 的 local 應保留：{why}");
-                assert_eq!(why, "設定檔 [build.remote] 的 local 不合法（本機執行器（host = \"local\"）只支援 Linux：守門要 flock 與 /proc）");
+        } else {
+            match decide(bad_extra) {
+                Offload::Local(Some(why)) => assert_eq!(why, "設定檔 [build.remote] 的 local 不合法（本機執行器（host = \"local\"）只支援 Linux：守門要 flock 與 /proc）"),
+                _ => panic!("非 Linux 的 local 應略過並回報 local 原因"),
             }
-            _ => panic!("全部都錯時要退回本機並講出 local 被略過的原因"),
         }
         let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..Default::default() }.targets());
         assert!(ok.is_empty() && skipped.len() == 1 && skipped[0].contains("r7"), "{skipped:?}");
