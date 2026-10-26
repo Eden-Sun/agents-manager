@@ -2774,7 +2774,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 
 閒置太久回來，claude／codex 的 prompt cache 已經冷了，下一回合要整份重寫（量過：claude 1 小時 TTL、每次 API 呼叫重設，閒置 < 60 分 0–1% 冷、
 > 1 小時 81–91% 冷、回來時重寫 30–40 萬 token；codex（luna）< 1 小時命中 91–98%、> 2 小時多半冷）。主力（★）晶片的底色就是倒數，提示快取什麼時候到期。
-**codex 不倒數（使用者 2026-10-24：「codex 快取不用冷卻」）**：codex 的 cache 視為不會因閒置冷掉，`cache_ttl_secs` 為 `null`（`last_api_at` 照帶），晶片不畫倒數、
+**codex 不倒數（使用者 2026-10-24：「codex 快取不用冷卻」）**：codex 的 cache 視為不會因閒置冷掉，`cache_ttl_secs` 為 `null`（`last_api_at` 照帶），晶片不畫倒數（主力晶片改以淺藍色底代替，不畫倒數寬度）、
 狀態列一律「快取 熱」、不保溫也不熱壓（§6.5k），`herdr agent list` 的子 agent 清單把閒置的 codex child 當成 cache 熱、排最前。
 
 - **daemon**（`cache_clock.rs`）：run JSON 帶 `last_api_at` 與 `cache_ttl_secs`（API.md「run 的附加欄位」）。不加欄位，用現有資料推算、取最晚：

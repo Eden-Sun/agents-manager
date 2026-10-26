@@ -140,6 +140,26 @@ test('快取倒數在完成待看的晶片上照一般濃度畫（不再因為�
   }
 })
 
+test('codex 主力晶片底色（.cache-codex）：淺藍底在淺色與深色模式下對比足夠（中性字 ≥ 4.5、hover 字 ≥ 4.5）', () => {
+  assert.ok(cacheCss.includes('.cache-codex'), 'cacheClock.css 定義 .cache-codex')
+  for (const theme of THEMES) {
+    const body = blockOf(styles, theme.header)
+    const lampBlue = hexOf(body, 'lamp-blue')
+    const bgPanel = hexOf(body, 'bg-panel')
+    const text = hexOf(body, 'text')
+    const textDim = hexOf(body, 'text-dim')
+    // cache-codex 使用 12% lamp-blue
+    const effBgRgb = [0, 1, 2].map((i) => rgb(lampBlue)[i] * 0.12 + rgb(bgPanel)[i] * 0.88)
+    const effBgLum = 0.2126 * lin(effBgRgb[0]) + 0.7152 * lin(effBgRgb[1]) + 0.0722 * lin(effBgRgb[2])
+    // 中性字 color-mix(in srgb, var(--text) 55%, var(--text-dim))
+    const textRgb = [0, 1, 2].map((i) => rgb(text)[i] * 0.55 + rgb(textDim)[i] * 0.45)
+    const textLum = 0.2126 * lin(textRgb[0]) + 0.7152 * lin(textRgb[1]) + 0.0722 * lin(textRgb[2])
+    const [hi, lo] = [effBgLum, textLum].sort((x, y) => y - x)
+    const c = (hi + 0.05) / (lo + 0.05)
+    assert.ok(c >= 4.5, `${theme.name}：codex 主力晶片字對底對比 ${c.toFixed(2)}:1 須 ≥ 4.5`)
+  }
+})
+
 for (const theme of THEMES) {
   test(`${theme.name}：選取藍框、藍色數字籤的對比符合目標（框對面板 ≥ 3、籤上的字 ≥ 4.5）`, () => {
     const body = blockOf(styles, theme.header)
