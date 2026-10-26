@@ -456,7 +456,7 @@ esac"#
     }
 
     #[test]
-    fn macos_local_project_blaze_dispatch_keeps_one_build_slot_and_requires_opt_in() {
+    fn macos_local_project_blaze_dispatch_keeps_one_build_slot_and_requires_repository_marker() {
         for sh in shells() {
             for mode in ["auto", "cargo", "unmarked", "default"] {
                 let s = Sandbox::new();
@@ -483,7 +483,7 @@ esac"#
                 let (_, err, rc) = s.run_group(cmd, None);
                 assert_eq!(rc, 0, "{sh} {mode}: {err}");
                 let logged = std::fs::read_to_string(&log).unwrap();
-                assert_eq!(logged.contains("ra-jit"), mode == "auto", "{logged}");
+                assert_eq!(logged.contains("ra-jit"), matches!(mode, "auto" | "default"), "{logged}");
                 assert!(logged.contains("a crate"), "{logged}");
                 let curl = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
                 assert_eq!(curl.lines().filter(|l| l.contains("acquire")).count(), 1, "{curl}");

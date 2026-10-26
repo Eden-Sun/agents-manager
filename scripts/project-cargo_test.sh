@@ -28,14 +28,14 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
         return got
     default_env=env.copy(); default_env.pop('AGM_RUST_ENGINE')
     default=subprocess.run(['sh',str(root/'scripts/project-cargo.sh'),'build'],env=default_env,capture_output=True,text=True)
-    assert default.returncode==0 and json.loads(log.read_text())['args']==['build']
+    assert default.returncode==0 and json.loads(log.read_text())['args']==['ra-jit','build']
     count+=1
-    run(['build'],['build'],AGM_RUST_ENGINE='')
+    run(['build'],['ra-jit','build'],AGM_RUST_ENGINE='')
     got=run(['build','-p','xtask'], ['ra-jit','build','-p','xtask'])
     assert got['memory']=='8G' and got['idle']=='600' and got['runtime']==str(base/'home/.cache/agents-manager/blaze')
     got=run(['build'],['ra-jit','build'],AGM_BLAZE_MEMORY_MAX='4G',AGM_BLAZE_IDLE_SECS='120')
     assert got['memory']=='4G' and got['idle']=='120'
-    run(['build'],['build'],TEST_OS='Darwin',TEST_ARCH='arm64')
+    run(['build'],['ra-jit','build'],TEST_OS='Darwin',TEST_ARCH='arm64')
     run(['build'],['ra-jit','build'],TEST_OS='Darwin',TEST_ARCH='arm64',AGM_RUST_ENGINE='blaze')
     run(['test'],['test'],AGM_RUST_ENGINE='blaze')
     got=run(['test','a filter','--','--test-threads=2'], ['test','a filter','--','--test-threads=2'],RA_JIT_TESTS='affected',RUST_TEST_THREADS='3')

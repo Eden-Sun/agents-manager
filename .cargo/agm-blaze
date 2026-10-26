@@ -1,1 +1,1 @@
-# Enable the project dispatcher when AGM_RUST_ENGINE is explicitly auto or blaze.
+# Use the project Blaze dispatcher by default; AGM_RUST_ENGINE=cargo opts out.

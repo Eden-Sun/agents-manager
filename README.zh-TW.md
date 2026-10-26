@@ -173,7 +173,7 @@ flowchart LR
 開發或不支援的平台用。除了 herdr，另需 Rust（`cargo`）與 [Bun](https://bun.sh)。
 
 
-Rust 開發建置可明確啟用 `scripts/project-cargo.sh` 使用 [Blaze](https://github.com/indexable-inc/blaze)（Linux x86-64／ARM64、Apple silicon）。Linux 主機安裝一次；目前 nightly 尚無記憶體預算支援，因此使用固定版本的原始碼建置：
+Rust 開發建置預設透過 `scripts/project-cargo.sh` 使用 [Blaze](https://github.com/indexable-inc/blaze)（Linux x86-64／ARM64、Apple silicon）。Linux 主機安裝一次；目前 nightly 尚無記憶體預算支援，因此使用固定版本的原始碼建置：
 
 ```bash
 scripts/install-blaze.sh --source
@@ -181,7 +181,7 @@ AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```
 
-所有主機預設原生 Cargo；Linux 明確設 `AGM_RUST_ENGINE=auto` 或 `blaze` 才啟用加速。受管 agent pane 在 daemon 更新後，也會把一般 `cargo build/run` 導向這個入口；`cargo dev` 建 daemon 時同樣使用它。沒有 Blaze 時會明講並退回 Cargo。release／自訂 profile、跨目標編譯、`check`、Clippy、格式檢查及 `scripts/check.sh`／CI 使用原生 Cargo。`test` 一律保留原生 Cargo 與既有遠端主機（r7）分流，設 `AGM_RUST_ENGINE=blaze` 也不改測試路徑。Mac 預設原生 Cargo，只有明確設 `blaze` 才啟用 build/run 加速。共用專案 daemon 使用 worker 軟預算 8 GiB、閒置 600 秒退出；三工作樹實測背景 RSS 峰值 23.33 GiB、穩態 20.76 GiB，因此維持明確啟用；設 `AGM_RUST_ENGINE=cargo` 可停用。首次建置需要載入專案，只有相容的暖態修改才能省掉重編與連結。工具鏈、記憶體與排錯方式見[建置引擎與快取](docs/BUILD-CACHE.md)。
+Linux／Apple silicon Mac 的 build/run 預設嘗試 Blaze（`AGM_RUST_ENGINE=auto`）。受管 agent pane 在 daemon 更新後，也會把一般 `cargo build/run` 導向這個入口；`cargo dev` 建 daemon 時同樣使用它。沒有 Blaze 時會明講並退回 Cargo。release／自訂 profile、跨目標編譯、`check`、Clippy、格式檢查及 `scripts/check.sh`／CI 使用原生 Cargo。`test` 一律保留原生 Cargo 與既有遠端主機（r7）分流，設 `AGM_RUST_ENGINE=blaze` 也不改測試路徑。共用專案 daemon 使用 worker 軟預算 8 GiB、閒置 600 秒退出；三工作樹實測背景 RSS 峰值 23.33 GiB、穩態 20.76 GiB，8 GiB 不可當作硬上限；設 `AGM_RUST_ENGINE=cargo` 可停用。首次建置需要載入專案，只有相容的暖態修改才能省掉重編與連結。工具鏈、記憶體與排錯方式見[建置引擎與快取](docs/BUILD-CACHE.md)。
 
 **開發模式**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
 
