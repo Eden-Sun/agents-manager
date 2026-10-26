@@ -4,6 +4,7 @@
 //! It does not try to make a Linux/x86_64 binary runnable on macOS/aarch64, and therefore keeps
 //! build/run/release work local.
 
+use crate::cli::RemoteCargoEngine;
 use crate::config::{BuildRemoteCfg, ConfigFile};
 use crate::lifecycle::LcError;
 use crate::state::App;
@@ -41,6 +42,10 @@ pub const EXIT_QUEUE_FULL: i32 = 75;
 
 /// 「這次不轉外部編譯，改在本機跑」的結束碼：shim 只認這一個，看到就往下去拿本機名額（`cargo_shim.rs`）。
 pub const EXIT_RUN_LOCALLY: i32 = 125;
+
+/// The engine option is protocol-ready, but Blaze remains disabled until its caller is approved.
+const EXIT_ENGINE_NOT_ENABLED: i32 = 2;
+const ENGINE_NOT_ENABLED_MESSAGE: &str = "remote Blaze engine is not enabled";
 
 /// ssh 自己沒進去時的結束碼（連不上、認證被拒、host key 不合）。遠端的指令真的跑起來之後，回的是那個指令的結束碼，
 /// 所以在交握階段看到 255 就是「我們根本沒進去」（issue #428）。
@@ -743,6 +748,18 @@ pub async fn install_settings(State(app): State<Arc<App>>) -> Result<Json<Value>
 /// 子指令前面可以有「原樣搬到遠端也是同一個意思」的全域旗標（`-v`／`-q`／`--locked`／`--color`，issue #195：`cargo --locked test` 也是驗證）。
 /// `+toolchain`（遠端不一定裝了）、`-C`／`--config`（本機路徑）、`--offline`／`--frozen`（取決於本機的快取）、`-Z` 不搬——回 false 讓它留在本機、照本機名額排。
 pub fn eligible(args: &[String]) -> bool {
+    eligible_with_engine(args, RemoteCargoEngine::Cargo).unwrap_or(false)
+}
+
+/// Engine-aware eligibility. Blaze is parsed by the CLI but deliberately has no production route yet.
+pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Result<bool, &'static str> {
+    match engine {
+        RemoteCargoEngine::Cargo => Ok(eligible_cargo(args)),
+        RemoteCargoEngine::Blaze => Err(ENGINE_NOT_ENABLED_MESSAGE),
+    }
+}
+
+fn eligible_cargo(args: &[String]) -> bool {
     // Cache invalidation must inspect the exact target/build directory used by Cargo.
     // Command-line overrides may redirect the managed cache location; --config may set either.
     if args.iter().take_while(|a| a.as_str() != "--").any(|a| {
@@ -1666,14 +1683,30 @@ impl Drop for Lease {
 ///
 /// `sub` 是本機 cwd 相對於同步過去的根的路徑（[`source_root`]；`""`＝就在根）：遠端也要在同一個子目錄下跑，
 /// 相對路徑的參數（`--manifest-path ../x`、`-p` 的路徑）才跟本機是同一個意思。
+#[cfg(test)]
 fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, test_threads: usize, args: &[String]) -> String {
+    run_script_with_engine(dir, sub, token, jobs, test_threads, RemoteCargoEngine::Cargo, args).expect("Cargo engine is enabled")
+}
+
+fn run_script_with_engine(
+    dir: &str,
+    sub: &str,
+    token: &LeaseToken,
+    jobs: usize,
+    test_threads: usize,
+    engine: RemoteCargoEngine,
+    args: &[String],
+) -> anyhow::Result<String> {
+    if engine != RemoteCargoEngine::Cargo {
+        anyhow::bail!("{}", ENGINE_NOT_ENABLED_MESSAGE);
+    }
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let tok = token.as_str();
     let cache_path = format!("{dir}/target");
     // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
     // Keep Cargo's cache under the inspected target without exporting cache overrides into
     // tests/build scripts that spawn another Cargo for an unrelated temporary project.
-    format!(
+    Ok(format!(
         "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
          && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
          || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
@@ -1684,7 +1717,7 @@ fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, test_thread
         sub = sh_quote(sub),
         jobs = jobs.max(1),
         threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
-    )
+    ))
 }
 
 /// 收到的第一個終止訊號（0＝沒有）；[`install_signal_handlers`] 的 handler 寫它，[`Deadline`] 讀它。
@@ -2915,9 +2948,18 @@ fn pick_test_threads(caller: Option<&str>, configured: usize) -> usize {
     caller.and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(configured)
 }
 
-fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String], deadline: &Deadline) -> anyhow::Result<i32> {
+fn run_remote(
+    remote: &BuildRemoteCfg,
+    data_dir: &Path,
+    lease: &Lease,
+    sub: &str,
+    args: &[String],
+    engine: RemoteCargoEngine,
+    deadline: &Deadline,
+) -> anyhow::Result<i32> {
     let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
-    let mut cmd = host_shell(remote, data_dir, &run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args))?;
+    let script = run_script_with_engine(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, engine, args)?;
+    let mut cmd = host_shell(remote, data_dir, &script)?;
     let status = if remote.is_local() {
         // 本機執行器的 cargo 自成 process group（不在前景）：接著終端的 stdin，測試一讀就被 SIGTTIN 停住；ssh 時遠端 stdin 本來就是 pipe。
         cmd.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -2938,11 +2980,26 @@ pub enum Offload {
     Local(Option<String>),
 }
 
-/// 決定這次要不要轉遠端（#324、#325）。設定檔存在卻讀不懂不能靜默退回本機（同 #138 類）：使用者以為在遠端編，實際整批在本機排隊。
+/// Cargo-default wrapper retained for existing callers and host-selection code.
 pub fn decide_offload(config_path: &Path, args: &[String], env: impl IntoIterator<Item = (String, String)>) -> Offload {
-    if !eligible(args) {
-        return Offload::Local(None);
+    decide_offload_with_engine(config_path, args, env, RemoteCargoEngine::Cargo).expect("Cargo engine is enabled")
+}
+
+/// Engine-aware offload decision. The not-enabled error is distinct from local-decline code 125.
+pub fn decide_offload_with_engine(
+    config_path: &Path,
+    args: &[String],
+    env: impl IntoIterator<Item = (String, String)>,
+    engine: RemoteCargoEngine,
+) -> Result<Offload, &'static str> {
+    if !eligible_with_engine(args, engine)? {
+        return Ok(Offload::Local(None));
     }
+    Ok(decide_offload_eligible(config_path, env))
+}
+
+/// Config and host checks after the engine and Cargo argv have been accepted.
+fn decide_offload_eligible(config_path: &Path, env: impl IntoIterator<Item = (String, String)>) -> Offload {
     let text = match std::fs::read_to_string(config_path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Offload::Local(None),
@@ -2985,15 +3042,51 @@ pub fn resolve_data_dir(config_path: &Path, given: Option<&Path>) -> anyhow::Res
 
 /// `only`＝`--host <名字>`：只用這一台、不分流（預熱逐台跑）；設定裡沒有這台就退回本機（125）。
 pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[String], only: Option<&str>) -> i32 {
-    let hosts = match decide_offload(config_path, args, std::env::vars()) {
-        Offload::Go(hosts) => match only_host(hosts, only) {
+    run_cli_with_engine(config_path, data_dir, cwd, args, only, RemoteCargoEngine::Cargo)
+}
+
+/// Single main.rs forwarding target. Reject unsupported engines before list-hosts or config access.
+pub fn run_command_cli(
+    config_path: &Path,
+    data_dir: Option<&Path>,
+    cwd: &Path,
+    args: &[String],
+    only: Option<&str>,
+    list_hosts: bool,
+    engine: RemoteCargoEngine,
+) -> i32 {
+    if let Err(why) = ensure_engine_enabled(engine) {
+        eprintln!("agents-manager: {why}");
+        return EXIT_ENGINE_NOT_ENABLED;
+    }
+    if list_hosts {
+        return list_hosts_cli(config_path);
+    }
+    run_cli_with_engine(config_path, data_dir, cwd, args, only, engine)
+}
+
+/// Engine-aware entry point. Blaze has no production route and is rejected before host selection.
+pub fn run_cli_with_engine(
+    config_path: &Path,
+    data_dir: Option<&Path>,
+    cwd: &Path,
+    args: &[String],
+    only: Option<&str>,
+    engine: RemoteCargoEngine,
+) -> i32 {
+    let hosts = match decide_offload_with_engine(config_path, args, std::env::vars(), engine) {
+        Err(why) => {
+            eprintln!("agents-manager: {why}");
+            return EXIT_ENGINE_NOT_ENABLED;
+        }
+        Ok(Offload::Go(hosts)) => match only_host(hosts, only) {
             Some(hosts) => hosts,
             None => {
                 eprintln!("agents-manager: 這次 cargo 不轉外部編譯：設定裡沒有建置主機 {}", only.unwrap_or(""));
                 return EXIT_RUN_LOCALLY;
             }
         },
-        Offload::Local(why) => {
+        Ok(Offload::Local(why)) => {
             if let Some(why) = why {
                 eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：{why}");
             }
@@ -3016,7 +3109,14 @@ pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[
     install_signal_handlers();
     let call_id = crate::db::ulid();
     // 整體上限是整組共用的（`hosts` 裡的主機不能各自設 timeout_secs）。
-    run_offload_on_with_id(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals(), &call_id)
+    run_offload_on_with_id_and_engine(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals(), &call_id, engine)
+}
+
+fn ensure_engine_enabled(engine: RemoteCargoEngine) -> Result<(), &'static str> {
+    match engine {
+        RemoteCargoEngine::Cargo => Ok(()),
+        RemoteCargoEngine::Blaze => Err(ENGINE_NOT_ENABLED_MESSAGE),
+    }
 }
 
 /// 這次 ssh 拿什麼登入（issue #428）。連不上的時候最想知道的就是這個——「沒設金鑰也沒有密碼檔」跟
@@ -3070,10 +3170,22 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 /// [`run_offload`] 的多台版（#1956）：先挑一台拿到租約（[`acquire`]），之後同步、編譯都在那一台。
 fn run_offload_on(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
     let call_id = crate::db::ulid();
-    run_offload_on_with_id(hosts, data_dir, cwd, args, ctl, &call_id)
+    run_offload_on_with_id_and_engine(hosts, data_dir, cwd, args, ctl, &call_id, RemoteCargoEngine::Cargo)
 }
 
-fn run_offload_on_with_id(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline, call_id: &str) -> i32 {
+fn run_offload_on_with_id_and_engine(
+    hosts: &[BuildRemoteCfg],
+    data_dir: &Path,
+    cwd: &Path,
+    args: &[String],
+    ctl: &Deadline,
+    call_id: &str,
+    engine: RemoteCargoEngine,
+) -> i32 {
+    if let Err(why) = ensure_engine_enabled(engine) {
+        eprintln!("agents-manager: {why}");
+        return EXIT_ENGINE_NOT_ENABLED;
+    }
     let mut used = 0;
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
@@ -3103,7 +3215,7 @@ fn run_offload_on_with_id(hosts: &[BuildRemoteCfg], data_dir: &Path, cwd: &Path,
         ctl.arm();
         lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
         sync_source(remote, data_dir, &root, &lease.hs.dir, ctl)?;
-        let code = run_remote(remote, data_dir, &lease, &sub, args, ctl)?;
+        let code = run_remote(remote, data_dir, &lease, &sub, args, engine, ctl)?;
         lease.finish();
         Ok(code)
     })();
@@ -3770,6 +3882,78 @@ exec /bin/sh -c "$inner"
         ] {
             assert!(eligible(&v(remote)), "release checks are safe because all source inputs are synced: {remote:?}");
         }
+    }
+
+    #[test]
+    fn blaze_engine_is_parsed_but_rejected_before_config_host_or_lease_work() {
+        let args = vec!["test".to_string()];
+        assert_eq!(eligible_with_engine(&args, RemoteCargoEngine::Cargo).unwrap(), eligible(&args));
+        assert_eq!(eligible_with_engine(&args, RemoteCargoEngine::Blaze), Err(ENGINE_NOT_ENABLED_MESSAGE));
+        assert_eq!(
+            decide_offload_with_engine(Path::new("/missing/config.toml"), &args, Vec::<(String, String)>::new(), RemoteCargoEngine::Blaze).err(),
+            Some(ENGINE_NOT_ENABLED_MESSAGE)
+        );
+
+        let missing = Path::new("/missing/config.toml");
+        assert_eq!(
+            run_command_cli(missing, None, Path::new("/missing/cwd"), &args, None, true, RemoteCargoEngine::Blaze),
+            EXIT_ENGINE_NOT_ENABLED,
+            "--list-hosts must reject Blaze before reading or selecting hosts"
+        );
+        assert_eq!(
+            run_cli_with_engine(missing, None, Path::new("/missing/cwd"), &args, None, RemoteCargoEngine::Blaze),
+            EXIT_ENGINE_NOT_ENABLED,
+            "engine rejection is not the 125 local-decline sentinel"
+        );
+        assert_eq!(
+            run_offload_on_with_id_and_engine(
+                &[],
+                Path::new("/missing/data"),
+                Path::new("/missing/cwd"),
+                &args,
+                &Deadline::new(1),
+                "test-call",
+                RemoteCargoEngine::Blaze,
+            ),
+            EXIT_ENGINE_NOT_ENABLED,
+            "low-level dispatch must reject before acquiring a host or lease"
+        );
+        assert!(run_script_with_engine("/r/job", "", &LeaseToken::new(), 1, 0, RemoteCargoEngine::Blaze, &args).is_err());
+    }
+
+    #[test]
+    fn cargo_engine_uses_the_legacy_remote_script_unchanged() {
+        let args = vec!["test".into(), "-p".into(), "xtask".into()];
+        let token = LeaseToken::parse("feedfacefeedfacefeedfacefeedface").unwrap();
+        // Golden wire script from before the engine protocol, independent of either wrapper.
+        let expected = r#"d=/r/job; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\n' "$g" > "$d.pgid-feedfacefeedfacefeedfacefeedface" && [ "$(cat "$d.owner" 2>/dev/null)" = feedfacefeedfacefeedfacefeedface ] || { echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }; cd "$d"/'' && PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=4 env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config 'build.target-dir="/r/job/target"' --config 'build.build-dir="/r/job/target"' test -p xtask"#;
+        assert_eq!(run_script("/r/job", "", &token, 2, 4, &args), expected);
+        assert_eq!(
+            run_script_with_engine("/r/job", "", &token, 2, 4, RemoteCargoEngine::Cargo, &args).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cargo_command_handler_forwards_list_hosts_and_native_decline() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-engine-cargo-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(&config, "[build.remote]\nenabled = true\nhost = \"build-host\"\nuser = \"builder\"\n").unwrap();
+        let args = vec!["test".to_string()];
+        assert!(matches!(decide_offload(&config, &args, Vec::<(String, String)>::new()), Offload::Go(_)));
+        assert_eq!(
+            run_command_cli(&config, None, &dir, &args, None, true, RemoteCargoEngine::Cargo),
+            0,
+            "Cargo list-hosts must accept the configured host without acquiring a lease"
+        );
+        std::fs::write(&config, "[build.remote]\nenabled = false\n").unwrap();
+        assert_eq!(
+            run_command_cli(&config, None, &dir, &args, None, false, RemoteCargoEngine::Cargo),
+            EXIT_RUN_LOCALLY,
+            "Cargo must retain the normal not-started decline path"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

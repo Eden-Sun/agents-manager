@@ -245,6 +245,15 @@ esac"#
             vec![("AM_DAEMON_EXE", helper.display().to_string()), ("AM_CONFIG_PATH", "/tmp/c.toml".into()), ("AM_DATA_DIR", "/tmp".into())]
         }
 
+        /// Test-only protocol seam: emulate a future explicit engine request without adding a production caller.
+        fn install_test_engine_request_shim(&self) {
+            let needle = "\"$AM_DAEMON_EXE\" remote-cargo --config";
+            let replacement = "\"$AM_DAEMON_EXE\" remote-cargo --engine blaze --config";
+            let shim = crate::cargo_shim::SHIM_SH.replace(needle, replacement);
+            assert_ne!(shim, crate::cargo_shim::SHIM_SH, "test seam must find the helper command");
+            write_exec(self.dir.join("bin/cargo"), shim);
+        }
+
         /// 會數「現在有幾顆同時在跑」的假 cargo：起來就留一個記號、把當下的數量記進 `peak.log`，睡一秒才收掉記號。
         fn install_counting_cargo(&self) {
             let d = self.dir.display();
@@ -1010,10 +1019,33 @@ esac
             assert_eq!(rc, helper_rc, "遠端的結果原樣帶出去：{why}");
             let helper_log = std::fs::read_to_string(s.dir.join("helper.log")).unwrap_or_default();
             assert!(helper_log.contains("remote-cargo") && helper_log.contains(sub), "helper 要被叫到：{why}\n{helper_log}");
+            assert!(!helper_log.contains("--engine"), "legacy Cargo requests omit the selector for old daemon compatibility: {helper_log}");
             let curl_log = std::fs::read_to_string(s.dir.join("curl.log")).unwrap_or_default();
             assert!(curl_log.is_empty(), "遠端編譯不該跟本機排程器要名額：{why}\n{curl_log}");
             assert!(!cargo_log.exists(), "轉到遠端的不該再在本機跑一次：{why}");
         }
+    }
+
+    /// An explicitly requested engine rejected by an older helper is a hard failure, before any local slot or Cargo run.
+    #[test]
+    fn an_explicit_engine_option_rejected_by_an_old_helper_does_not_fall_back_locally() {
+        let s = Sandbox::new();
+        s.install_lease_curl(30);
+        let remote = s.install_fake_helper(
+            "case \"$*\" in *'--engine blaze'*) echo 'unknown option --engine' >&2; exit 2 ;; *) exit 88 ;; esac",
+        );
+        s.install_test_engine_request_shim();
+        let cargo_log = s.dir.join("cargo.log");
+        let mut env = lease_env(&s);
+        env.extend(remote);
+        env.push(("AM_TEST_FAKE_CARGO_LOG", cargo_log.display().to_string()));
+
+        let (_, err, rc) = s.run(&as_refs(&env), &["test", "-p", "agents-managerd"]);
+        assert_eq!(rc, 2, "old helper's option error must survive: {err}");
+        let helper = std::fs::read_to_string(s.dir.join("helper.log")).unwrap();
+        assert!(helper.contains("remote-cargo --engine blaze"), "{helper}");
+        assert!(!s.dir.join("curl.log").exists(), "engine option errors must not take a local slot");
+        assert!(!cargo_log.exists(), "engine option errors must not run local Cargo");
     }
 
     /// 同一件事的另一面：helper 回 125（設定被關掉、不適合 offload）＝**沒有**在遠端跑，這時才真的落在本機——
@@ -1807,6 +1839,7 @@ esac"#,
         cmd.arg("-c")
             .arg(format!("'{}' build & echo $! > '{}'", s.dir.join("bin/cargo").display(), s.dir.join("shim.pid").display()))
             .env("PATH", format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()))
+            .current_dir(&s.dir)
             .env("HOME", s.dir.join("fake-home"));
         for (key, _) in std::env::vars() {
             if key.starts_with("AM_") {
@@ -2096,6 +2129,7 @@ while time.time() < end:
             .arg(inner)
             .arg(&marker)
             .env("PATH", format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()))
+            .current_dir(&s.dir)
             .env("HOME", s.dir.join("fake-home"));
         for (key, _) in std::env::vars() {
             if key.starts_with("AM_") {
