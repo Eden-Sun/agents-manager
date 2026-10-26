@@ -3725,11 +3725,447 @@ mod resume_args_tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         }
 
-        /// 只在失敗路徑呼叫：`sh -x` 逐行印出暫存搬運腳本，看每個 `stat` 比對的實際值。只帶指定的 `PATH`，不繼承環境。
-        fn trace_stage_script(script: &str, path: &str) -> String {
-            match std::process::Command::new("/bin/sh").arg("-x").arg("-c").arg(script).env_clear().env("PATH", path).output() {
-                Ok(o) => format!("exit={:?}\n{}", o.status.code(), String::from_utf8_lossy(&o.stderr)),
-                Err(e) => format!("sh spawn failed: {e}"),
+        fn run_with_diagnostics(script: &str, path: Option<&str>) -> (String, diagnostics::Handle) {
+            let handle = diagnostics::Handle::new();
+            let result = diagnostics::run(script, &handle, path)
+                .unwrap_or_else(|error| panic!("test diagnostic instrumentation refused: {}", error.summary()));
+            (String::from_utf8_lossy(&result.stdout).into_owned(), handle)
+        }
+
+        mod diagnostics {
+            use super::remote_stage_script;
+            use std::sync::{Arc, Mutex};
+
+            const RECORD_LIMIT: usize = 128;
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub(super) enum Code {
+                Missing(u8),
+                Same(u8),
+                StatSource,
+                StatSame,
+                StatFallback,
+                NlinkPre,
+                NlinkSame,
+                CanonOld,
+                CanonNew,
+                CanonCompare,
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum StdoutKind {
+                Empty,
+                Same,
+                Staged,
+                Missing,
+                MkdirFailed,
+                CopyFailed,
+                Other,
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            struct Record {
+                code: Option<Code>,
+                exit_code: Option<i32>,
+                stdout: StdoutKind,
+            }
+
+            #[derive(Debug, Default)]
+            struct RecordSet {
+                records: Vec<Record>,
+                overflow: usize,
+            }
+
+            #[derive(Debug, Clone, Default)]
+            pub(super) struct Handle(Arc<Mutex<RecordSet>>);
+
+            impl Handle {
+                pub(super) fn new() -> Self {
+                    Self::default()
+                }
+
+                fn record_output(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+                    let kind = stdout_kind(stdout);
+                    let mut found = false;
+                    let mut records = self.0.lock().expect("diagnostic record lock");
+                    for line in stderr.split(|byte| *byte == b'\n') {
+                        if let Some(code) = code_from_marker(line) {
+                            records.push(Record { code: Some(code), exit_code: status, stdout: kind });
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        records.push(Record { code: None, exit_code: status, stdout: kind });
+                    }
+                }
+
+                fn record_code(&self, code: Code) {
+                    self.0.lock().expect("diagnostic record lock").push(Record {
+                        code: Some(code),
+                        exit_code: Some(0),
+                        stdout: StdoutKind::Empty,
+                    });
+                }
+
+                pub(super) fn contains(&self, code: Code) -> bool {
+                    self.0.lock().expect("diagnostic record lock").records.iter().any(|record| record.code == Some(code))
+                }
+
+                pub(super) fn summary(&self) -> String {
+                    let records = self.0.lock().expect("diagnostic record lock");
+                    format!("records={:?}; overflow={}", records.records, records.overflow)
+                }
+
+                fn length_and_overflow(&self) -> (usize, usize) {
+                    let records = self.0.lock().expect("diagnostic record lock");
+                    (records.records.len(), records.overflow)
+                }
+            }
+
+            impl RecordSet {
+                fn push(&mut self, record: Record) {
+                    if self.records.len() < RECORD_LIMIT {
+                        self.records.push(record);
+                    } else {
+                        self.overflow = self.overflow.saturating_add(1);
+                    }
+                }
+            }
+
+            fn stdout_kind(stdout: &[u8]) -> StdoutKind {
+                match stdout.split(|byte| *byte == b'\n').next().unwrap_or_default() {
+                    b"AM_SAME" => StdoutKind::Same,
+                    b"AM_STAGED" => StdoutKind::Staged,
+                    b"AM_MISSING" => StdoutKind::Missing,
+                    b"AM_MKDIR_FAILED" => StdoutKind::MkdirFailed,
+                    b"AM_COPY_FAILED" => StdoutKind::CopyFailed,
+                    b"" => StdoutKind::Empty,
+                    _ => StdoutKind::Other,
+                }
+            }
+
+            fn code_from_marker(line: &[u8]) -> Option<Code> {
+                Some(match line {
+                    b"AM_DIAG:H:H01" => Code::Missing(1),
+                    b"AM_DIAG:H:H02" => Code::Missing(2),
+                    b"AM_DIAG:H:H03" => Code::Missing(3),
+                    b"AM_DIAG:H:H04" => Code::Same(4),
+                    b"AM_DIAG:H:H05" => Code::Missing(5),
+                    b"AM_DIAG:H:H06" => Code::Missing(6),
+                    b"AM_DIAG:H:H07" => Code::Missing(7),
+                    b"AM_DIAG:H:H08" => Code::Missing(8),
+                    b"AM_DIAG:H:H09" => Code::Missing(9),
+                    b"AM_DIAG:H:H10" => Code::Missing(10),
+                    b"AM_DIAG:H:H11" => Code::Missing(11),
+                    b"AM_DIAG:H:H12" => Code::Missing(12),
+                    b"AM_DIAG:H:H13" => Code::Missing(13),
+                    b"AM_DIAG:H:H14" => Code::Missing(14),
+                    b"AM_DIAG:H:H15" => Code::Missing(15),
+                    b"AM_DIAG:H:H16" => Code::Missing(16),
+                    b"AM_DIAG:H:H17" => Code::Missing(17),
+                    b"AM_DIAG:H:H18" => Code::Missing(18),
+                    b"AM_DIAG:H:H19" => Code::Missing(19),
+                    b"AM_DIAG:H:H20" => Code::Same(20),
+                    b"AM_DIAG:H:STAT_SOURCE" => Code::StatSource,
+                    b"AM_DIAG:H:STAT_SAME" => Code::StatSame,
+                    b"AM_DIAG:H:STAT_FALLBACK" => Code::StatFallback,
+                    b"AM_DIAG:H:NLINK_PRE" => Code::NlinkPre,
+                    b"AM_DIAG:H:NLINK_SAME" => Code::NlinkSame,
+                    b"AM_DIAG:H:CANON_OLD" => Code::CanonOld,
+                    b"AM_DIAG:H:CANON_NEW" => Code::CanonNew,
+                    b"AM_DIAG:H:CANON_COMPARE" => Code::CanonCompare,
+                    _ => return None,
+                })
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum Site {
+                MissingDefinition,
+                Missing(u8),
+                SameEarly,
+                SameLate,
+                FdStat,
+                SameFunction,
+                StatSource,
+                StatSame,
+                StatCompare,
+                NlinkGnu,
+                NlinkBsd,
+                CanonOld,
+                CanonNew,
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub(super) struct InstrumentError {
+                site: Site,
+                expected: usize,
+                found: usize,
+            }
+
+            impl InstrumentError {
+                pub(super) fn summary(self) -> String {
+                    format!("site={:?}; expected={}; found={}", self.site, self.expected, self.found)
+                }
+            }
+
+            fn replace_count(
+                source: &str,
+                needle: &str,
+                replacement: &str,
+                expected: usize,
+                site: Site,
+            ) -> Result<String, InstrumentError> {
+                let found = source.matches(needle).count();
+                if found != expected {
+                    return Err(InstrumentError { site, expected, found });
+                }
+                Ok(source.replace(needle, replacement))
+            }
+
+            fn instrument(mut script: String) -> Result<String, InstrumentError> {
+                let missing_count = script.matches("am_missing").count();
+                if missing_count != 19 {
+                    return Err(InstrumentError { site: Site::MissingDefinition, expected: 19, found: missing_count });
+                }
+                script = replace_count(
+                    &script,
+                    "am_missing() { printf 'AM_MISSING\\n'; exit 0; }",
+                    "am_missing() { printf 'AM_MISSING\\n'; exit 0; }",
+                    1,
+                    Site::MissingDefinition,
+                )?;
+
+                let missing = [
+                    ("case \"$K\" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac", "case \"$K\" in ''|.|..|*/*|*[[:cntrl:]]*) { printf 'AM_DIAG:H:H01\\n' >&9; am_missing; };; esac", 1),
+                    ("case \"$N\" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac", "case \"$N\" in ''|.|..|*/*|*[[:cntrl:]]*) { printf 'AM_DIAG:H:H02\\n' >&9; am_missing; };; esac", 2),
+                    ("case \"$N\" in *.jsonl) ;; *) am_missing;; esac", "case \"$N\" in *.jsonl) ;; *) { printf 'AM_DIAG:H:H03\\n' >&9; am_missing; };; esac", 3),
+                    ("[ ! -L \"$OLD\" ] && [ -d \"$OLD\" ] || am_missing", "[ ! -L \"$OLD\" ] && [ -d \"$OLD\" ] || { printf 'AM_DIAG:H:H05\\n' >&9; am_missing; }", 5),
+                    ("cd -- \"$OLD\" 2>/dev/null || am_missing", "cd -- \"$OLD\" 2>/dev/null || { printf 'AM_DIAG:H:H06\\n' >&9; am_missing; }", 6),
+                    ("[ ! -L \"$OLD\" ] && am_same \"$OLD\" . || am_missing", "[ ! -L \"$OLD\" ] && am_same \"$OLD\" . || { printf 'AM_DIAG:H:H07\\n' >&9; am_missing; }", 7),
+                    ("[ ! -L \"$K\" ] && [ -d \"$K\" ] || am_missing", "[ ! -L \"$K\" ] && [ -d \"$K\" ] || { printf 'AM_DIAG:H:H08\\n' >&9; am_missing; }", 8),
+                    ("cd -- \"$K\" 2>/dev/null || am_missing", "cd -- \"$K\" 2>/dev/null || { printf 'AM_DIAG:H:H09\\n' >&9; am_missing; }", 9),
+                    ("[ ! -L \"$OLD/$K\" ] && am_same \"$OLD/$K\" . || am_missing", "[ ! -L \"$OLD/$K\" ] && am_same \"$OLD/$K\" . || { printf 'AM_DIAG:H:H10\\n' >&9; am_missing; }", 10),
+                    ("[ ! -L \"$N\" ] && [ -f \"$N\" ] || am_missing", "[ ! -L \"$N\" ] && [ -f \"$N\" ] || { printf 'AM_DIAG:H:H11\\n' >&9; am_missing; }", 11),
+                    ("exec 3< \"$N\" || am_missing", "exec 3< \"$N\" || { printf 'AM_DIAG:H:H12\\n' >&9; am_missing; }", 12),
+                    ("am_same \"$N\" /dev/fd/3 && am_singlelink /dev/fd/3 || am_missing", "am_same \"$N\" /dev/fd/3 && am_singlelink /dev/fd/3 || { printf 'AM_DIAG:H:H13\\n' >&9; am_missing; }", 13),
+                    ("exec 5< . || am_missing", "exec 5< . || { printf 'AM_DIAG:H:H14\\n' >&9; am_missing; }", 14),
+                    ("am_same \"$SRC_DIR\" /dev/fd/5 || am_missing", "am_same \"$SRC_DIR\" /dev/fd/5 || { printf 'AM_DIAG:H:H15\\n' >&9; am_missing; }", 15),
+                    ("NEW_REAL=$(cd -- \"$NEW\" 2>/dev/null && pwd -P) || am_missing", "NEW_REAL=$(cd -- \"$NEW\" 2>/dev/null && pwd -P) || { printf 'AM_DIAG:H:CANON_NEW\\n' >&9; printf 'AM_DIAG:H:H16\\n' >&9; am_missing; }", 16),
+                    ("[ ! -L \"$DEST\" ] && [ -f \"$DEST\" ] || am_missing", "[ ! -L \"$DEST\" ] && [ -f \"$DEST\" ] || { printf 'AM_DIAG:H:H17\\n' >&9; am_missing; }", 17),
+                    ("exec 4< \"$DEST\" || am_missing", "exec 4< \"$DEST\" || { printf 'AM_DIAG:H:H18\\n' >&9; am_missing; }", 18),
+                    ("am_same \"$DEST\" /dev/fd/4 && am_singlelink /dev/fd/4 || am_missing", "am_same \"$DEST\" /dev/fd/4 && am_singlelink /dev/fd/4 || { printf 'AM_DIAG:H:H19\\n' >&9; am_missing; }", 19),
+                ];
+                for (needle, replacement, number) in missing {
+                    script = replace_count(&script, needle, replacement, 1, Site::Missing(number))?;
+                }
+
+                script = replace_count(
+                    &script,
+                    "    printf 'AM_SAME\\n'; exit 0\n  fi\nfi\n[ ! -L \"$OLD\" ]",
+                    "    printf 'AM_DIAG:H:H04\\n' >&9; printf 'AM_SAME\\n'; exit 0\n  fi\nfi\n[ ! -L \"$OLD\" ]",
+                    1,
+                    Site::SameEarly,
+                )?;
+                script = replace_count(
+                    &script,
+                    "[ \"$NEW_REAL\" = \"$OLD_REAL\" ] && { printf 'AM_SAME\\n'; exit 0; }",
+                    "if [ \"$NEW_REAL\" = \"$OLD_REAL\" ]; then printf 'AM_DIAG:H:H20\\n' >&9; printf 'AM_SAME\\n'; exit 0; else printf 'AM_DIAG:H:CANON_COMPARE\\n' >&9; fi",
+                    2,
+                    Site::SameLate,
+                )?;
+
+                script = replace_count(
+                    &script,
+                    "AM_FD_PY\n}",
+                    "AM_FD_PY\n  rc=$?\n  if [ \"$rc\" -ne 0 ]; then case \"$1\" in nlink1) printf 'AM_DIAG:H:NLINK_PRE\\n' >&9 ;; *) printf 'AM_DIAG:H:STAT_FALLBACK\\n' >&9 ;; esac; fi\n  return \"$rc\"\n}",
+                    1,
+                    Site::FdStat,
+                )?;
+                script = replace_count(
+                    &script,
+                    "if stat -c %Y \"$1\" >/dev/null 2>&1; then [ \"$1\" -ef \"$2\" ]; return; fi",
+                    "if stat -c %Y \"$1\" >/dev/null 2>&1; then [ \"$1\" -ef \"$2\" ]; rc=$?; if [ \"$rc\" -ne 0 ]; then printf 'AM_DIAG:H:STAT_SAME\\n' >&9; fi; return \"$rc\"; fi",
+                    1,
+                    Site::SameFunction,
+                )?;
+                script = replace_count(
+                    &script,
+                    "a=$(stat -L -f '%d %i' \"$1\" 2>/dev/null) || return 1;",
+                    "a=$(stat -L -f '%d %i' \"$1\" 2>/dev/null) || { printf 'AM_DIAG:H:STAT_SOURCE\\n' >&9; return 1; };",
+                    1,
+                    Site::StatSource,
+                )?;
+                script = replace_count(
+                    &script,
+                    "b=$(stat -L -f '%d %i' \"$2\" 2>/dev/null) || return 1;",
+                    "b=$(stat -L -f '%d %i' \"$2\" 2>/dev/null) || { printf 'AM_DIAG:H:STAT_SAME\\n' >&9; return 1; };",
+                    1,
+                    Site::StatSame,
+                )?;
+                script = replace_count(
+                    &script,
+                    "[ \"$a\" = \"$b\" ]",
+                    "[ \"$a\" = \"$b\" ]; rc=$?; if [ \"$rc\" -ne 0 ]; then printf 'AM_DIAG:H:STAT_SAME\\n' >&9; fi; return \"$rc\"",
+                    1,
+                    Site::StatCompare,
+                )?;
+                script = replace_count(
+                    &script,
+                    "l=$(stat -L -c %h \"$1\" 2>/dev/null) || return 1; [ \"$l\" = 1 ]; return;",
+                    "l=$(stat -L -c %h \"$1\" 2>/dev/null) || { printf 'AM_DIAG:H:NLINK_SAME\\n' >&9; return 1; }; [ \"$l\" = 1 ]; rc=$?; if [ \"$rc\" -ne 0 ]; then printf 'AM_DIAG:H:NLINK_SAME\\n' >&9; fi; return \"$rc\";",
+                    1,
+                    Site::NlinkGnu,
+                )?;
+                script = replace_count(
+                    &script,
+                    "l=$(stat -L -f %l \"$1\" 2>/dev/null) || return 1\n  [ \"$l\" = 1 ]",
+                    "l=$(stat -L -f %l \"$1\" 2>/dev/null) || { printf 'AM_DIAG:H:NLINK_SAME\\n' >&9; return 1; }\n  [ \"$l\" = 1 ]; rc=$?; if [ \"$rc\" -ne 0 ]; then printf 'AM_DIAG:H:NLINK_SAME\\n' >&9; fi; return \"$rc\"",
+                    1,
+                    Site::NlinkBsd,
+                )?;
+                script = replace_count(
+                    &script,
+                    "o=$(cd -- \"$OLD\" 2>/dev/null && pwd -P) || o=",
+                    "o=$(cd -- \"$OLD\" 2>/dev/null && pwd -P) || { printf 'AM_DIAG:H:CANON_OLD\\n' >&9; o=; }",
+                    1,
+                    Site::CanonOld,
+                )?;
+                script = replace_count(
+                    &script,
+                    "n=$(cd -- \"$NEW\" 2>/dev/null && pwd -P) || n=",
+                    "n=$(cd -- \"$NEW\" 2>/dev/null && pwd -P) || { printf 'AM_DIAG:H:CANON_NEW\\n' >&9; n=; }",
+                    1,
+                    Site::CanonNew,
+                )?;
+                Ok(format!("exec 9>&2\n{script}"))
+            }
+
+            pub(super) struct Run {
+                pub(super) stdout: Vec<u8>,
+                pub(super) status: Option<i32>,
+            }
+
+            pub(super) fn run(script: &str, handle: &Handle, path: Option<&str>) -> Result<Run, InstrumentError> {
+                let copy = instrument(script.to_owned())?;
+                let mut command = std::process::Command::new("/bin/sh");
+                command.arg("-c").arg(copy);
+                if let Some(path) = path {
+                    command.env("PATH", path);
+                }
+                let output = command.output().map_err(|_| InstrumentError { site: Site::MissingDefinition, expected: 1, found: 0 })?;
+                let status = output.status.code();
+                handle.record_output(status, &output.stdout, &output.stderr);
+                Ok(Run { stdout: output.stdout, status })
+            }
+
+            fn run_original(script: &str, path: Option<&str>) -> (Vec<u8>, Option<i32>) {
+                let mut command = std::process::Command::new("/bin/sh");
+                command.arg("-c").arg(script);
+                if let Some(path) = path {
+                    command.env("PATH", path);
+                }
+                match command.output() {
+                    Ok(output) => (output.stdout, output.status.code()),
+                    Err(_) => (Vec::new(), None),
+                }
+            }
+
+            #[test]
+            fn instrumented_staging_classifies_real_guards_without_changing_stdout_or_exit() {
+                let base = super::tmp();
+                let old = base.join("old");
+                std::fs::create_dir_all(old.join("k")).unwrap();
+                let target = base.join("private-fixture");
+                std::fs::write(&target, b"fixture").unwrap();
+                std::os::unix::fs::symlink(&target, old.join("k/sid.jsonl")).unwrap();
+                let new = base.join("new");
+                let missing_script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+                let original = run_original(&missing_script, None);
+                let handle = Handle::new();
+                let instrumented = run(&missing_script, &handle, None).unwrap();
+                assert!(original.0 == instrumented.stdout, "H diagnostics changed missing-case stdout");
+                assert_eq!(original.1, instrumented.status);
+                assert!(handle.contains(Code::Missing(11)), "{}", handle.summary());
+                assert!(matches!(stdout_kind(&instrumented.stdout), StdoutKind::Missing));
+
+                // The same-root case needs a regular transcript, not the prior rejection fixture.
+                std::fs::remove_file(old.join("k/sid.jsonl")).unwrap();
+                std::fs::write(old.join("k/sid.jsonl"), b"fixture").unwrap();
+                let link = base.join("same");
+                std::os::unix::fs::symlink(&old, &link).unwrap();
+                let same_script = remote_stage_script(&old.to_string_lossy(), &link.to_string_lossy(), "k", "sid.jsonl", None);
+                let original = run_original(&same_script, None);
+                let handle = Handle::new();
+                let instrumented = run(&same_script, &handle, None).unwrap();
+                assert!(original.0 == instrumented.stdout, "H diagnostics changed same-case stdout");
+                assert_eq!(original.1, instrumented.status);
+                assert!(handle.contains(Code::Same(4)), "{}", handle.summary());
+            }
+
+            #[test]
+            fn an_actual_same_file_identity_failure_gets_a_fixed_classification() {
+                let make_case = || {
+                    let base = super::tmp();
+                    let old = base.join("old");
+                    std::fs::create_dir_all(old.join("k")).unwrap();
+                    let source = old.join("k/sid.jsonl");
+                    std::fs::write(&source, b"fixture").unwrap();
+                    let secret = base.join("other-file");
+                    std::fs::write(&secret, b"other fixture").unwrap();
+                    let shim_dir = base.join("bin");
+                    std::fs::create_dir_all(&shim_dir).unwrap();
+                    let source_q = crate::hosts::sh_quote(&source.to_string_lossy());
+                    let secret_q = crate::hosts::sh_quote(&secret.to_string_lossy());
+                    let shim = shim_dir.join("stat");
+                    std::fs::write(
+                        &shim,
+                        format!(
+                            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%Y\" ]; then\n  if [ \"$3\" = sid.jsonl ]; then rm -f {source_q}; ln -s {secret_q} {source_q}; fi\n  printf '0\\n'; exit 0\nfi\nexec /usr/bin/stat \"$@\"\n"
+                        ),
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+                    let new = base.join("new");
+                    let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+                    let path = format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap_or_default());
+                    (base, script, path)
+                };
+
+                let (original_base, original_script, original_path) = make_case();
+                let original = run_original(&original_script, Some(&original_path));
+                let (instrumented_base, instrumented_script, instrumented_path) = make_case();
+                let handle = Handle::new();
+                let instrumented = run(&instrumented_script, &handle, Some(&instrumented_path)).unwrap();
+                assert!(original.0 == instrumented.stdout, "H diagnostics changed same-file rejection stdout");
+                assert_eq!(original.1, instrumented.status);
+                assert!(handle.contains(Code::Missing(13)), "{}", handle.summary());
+                assert!(handle.contains(Code::StatSame), "{}", handle.summary());
+                let _ = std::fs::remove_dir_all(original_base);
+                let _ = std::fs::remove_dir_all(instrumented_base);
+            }
+
+            #[test]
+            fn diagnostics_drop_unknown_stderr_bound_records_and_reject_changed_generators() {
+                let handle = Handle::new();
+                handle.record_output(
+                    Some(0),
+                    b"AM_MISSING\n",
+                    b"AM_DIAG:H:H11\nUNKNOWN_SENTINEL_PATH_PAYLOAD\n",
+                );
+                assert!(handle.contains(Code::Missing(11)));
+                assert!(!handle.summary().contains("UNKNOWN_SENTINEL_PATH_PAYLOAD"));
+                for _ in 0..RECORD_LIMIT + 2 {
+                    handle.record_code(Code::Missing(11));
+                }
+                assert_eq!(handle.length_and_overflow(), (RECORD_LIMIT, 3));
+
+                let base = super::tmp();
+                let script = remote_stage_script("/tmp/old", "/tmp/new", "k", "sid.jsonl", None);
+                let missing_callsite = script.replace("cd -- \"$OLD\" 2>/dev/null || am_missing", "cd -- \"$OLD\" 2>/dev/null || true");
+                assert!(instrument(missing_callsite).is_err(), "missing required H guard was accepted");
+                let duplicate_callsite = format!("{script}\ncd -- \"$OLD\" 2>/dev/null || am_missing\n");
+                assert!(instrument(duplicate_callsite).is_err(), "duplicate H guard was accepted");
+                let _ = std::fs::remove_dir_all(base);
             }
         }
 
@@ -3889,15 +4325,14 @@ esac
             let new = base.join("new-projects");
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
             let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).env("PATH", &path).output().unwrap();
-            let out = String::from_utf8_lossy(&out.stdout).into_owned();
-            assert!(out.contains("AM_STAGED"), "BSD stat 的 /dev/fd 裝置編號不同也要搬得過去：{out}\n{}", trace_stage_script(&script, &path));
-            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n");
+            let (out, diag) = run_with_diagnostics(&script, Some(&path));
+            assert!(out.contains("AM_STAGED"), "BSD stat staging output; {}", diag.summary());
+            assert!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap() == "{\"a\":1}\n", "BSD fixture content changed");
             // 同一個 projects（console-rpa 的情形：身份沒換）回 AM_SAME。
             let same = remote_stage_script(&old.to_string_lossy(), &old.to_string_lossy(), "k", "sid.jsonl", None);
             let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&same).env("PATH", path).output().unwrap();
-            assert!(String::from_utf8_lossy(&out.stdout).contains("AM_SAME"), "{}", String::from_utf8_lossy(&out.stdout));
+            let (out, diag) = run_with_diagnostics(&same, Some(&path));
+            assert!(out.contains("AM_SAME"), "BSD same-path output; {}", diag.summary());
             let _ = std::fs::remove_dir_all(&base);
         }
 
@@ -3913,8 +4348,8 @@ esac
             std::os::unix::fs::symlink(&real, &link).unwrap();
             for (old, new) in [(&link, &real), (&real, &link)] {
                 let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-                let out = run_script_locally(&script);
-                assert!(out.contains("AM_SAME"), "{} → {}：{out}", old.display(), new.display());
+                let (out, diag) = run_with_diagnostics(&script, None);
+                assert!(out.contains("AM_SAME"), "shared projects identity output; {}", diag.summary());
             }
             let names: Vec<_> = std::fs::read_dir(real.join("k")).unwrap().map(|e| e.unwrap().file_name()).collect();
             assert_eq!(names.len(), 1, "不該留下暫存檔或備份：{names:?}");
@@ -3923,7 +4358,9 @@ esac
             std::fs::write(&secret, "TOKEN").unwrap();
             std::os::unix::fs::symlink(&secret, real.join("k/evil.jsonl")).unwrap();
             let script = remote_stage_script(&link.to_string_lossy(), &real.to_string_lossy(), "k", "evil.jsonl", None);
-            assert!(run_script_locally(&script).contains("AM_MISSING"));
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MISSING"), "shared symlink-file rejection; {}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::Missing(5)), "{}", diag.summary());
             let _ = std::fs::remove_dir_all(&base);
         }
 
@@ -3937,8 +4374,9 @@ esac
             std::os::unix::fs::symlink(&secret, old.join("k/sid.jsonl")).unwrap();
             let new = base.join("new-projects");
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-            let out = run_script_locally(&script);
-            assert!(out.contains("AM_MISSING"), "{out}");
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MISSING"), "symlinked source rejection; {}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::Missing(11)), "{}", diag.summary());
             assert!(!new.exists(), "符號連結被跟著複製");
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -3953,8 +4391,9 @@ esac
             std::os::unix::fs::symlink(&real, &old).unwrap();
             let new = base.join("new-projects");
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-            let out = run_script_locally(&script);
-            assert!(out.contains("AM_MISSING"), "{out}");
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MISSING"), "projects symlink rejection; {}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::Missing(5)), "{}", diag.summary());
             assert!(!new.exists(), "transcript outside the owned projects tree was copied");
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -3971,8 +4410,8 @@ esac
             std::fs::create_dir(&new).unwrap();
             std::os::unix::fs::symlink(&outside, new.join("k")).unwrap();
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-            let out = run_script_locally(&script);
-            assert!(out.contains("AM_MKDIR_FAILED") || out.contains("AM_MISSING"), "{out}");
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MKDIR_FAILED") || out.contains("AM_MISSING"), "destination symlink rejection; {}", diag.summary());
             assert!(!outside.join("sid.jsonl").exists(), "destination cwd symlink was followed");
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -3987,8 +4426,10 @@ esac
             std::fs::hard_link(&secret, old.join("k/sid.jsonl")).unwrap();
             let new = base.join("new-projects");
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-            let out = run_script_locally(&script);
-            assert!(out.contains("AM_MISSING"), "{out}");
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MISSING"), "hard-linked source rejection; {}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::Missing(13)), "{}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::NlinkSame), "{}", diag.summary());
             assert!(!new.exists(), "hard-linked credential was copied as a transcript");
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -4009,9 +4450,9 @@ esac
                 src = crate::hosts::sh_quote(&src.to_string_lossy()),
                 secret = crate::hosts::sh_quote(&secret.to_string_lossy()),
             );
-            let out = run_script_locally(&injected);
-            assert!(out.contains("AM_STAGED"), "{out}");
-            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "ordinary transcript", "TOCTOU swap must keep reading the opened fd");
+            let (out, diag) = run_with_diagnostics(&injected, None);
+            assert!(out.contains("AM_STAGED"), "copy-time symlink swap staging; {}", diag.summary());
+            assert!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap() == "ordinary transcript", "TOCTOU swap must keep reading the opened fd");
             let _ = std::fs::remove_dir_all(&base);
         }
 
@@ -4024,9 +4465,10 @@ esac
             let new = base.join("new-projects");
 
             let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
-            let out = run_script_locally(&script);
-            assert!(out.contains("AM_MISSING"), "{out}");
-            assert!(!new.exists(), "沒東西好搬，不該建出目的目錄：{}", new.display());
+            let (out, diag) = run_with_diagnostics(&script, None);
+            assert!(out.contains("AM_MISSING"), "missing source output; {}", diag.summary());
+            assert!(diag.contains(diagnostics::Code::Missing(5)), "{}", diag.summary());
+            assert!(!new.exists(), "missing source must not create destination");
 
             let _ = std::fs::remove_dir_all(&base);
         }
