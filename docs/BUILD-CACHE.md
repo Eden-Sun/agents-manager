@@ -1,187 +1,45 @@
-# 共用編譯快取（sccache，issue #91）
+# Rust 建置引擎與快取
 
-多顆 agent 各自一個 worktree、各自一個 `CARGO_TARGET_DIR`（見 `AGENTS.md`「開工前」），是刻意的：
-避免大家搶同一份 `target/` 的鎖、也讓半成品互不干擾。代價是同樣沒改過的依賴（`axum`、`sqlx`、
-`tokio`…）在每個 worktree 各編一次，而這台機器的 rustc 併發又被壓到 2（`scripts/cargo-slot.sh`），
-編譯常常是整條產線的瓶頸。
+## Blaze 開發建置
 
-sccache 理論上補的是這一塊：它快取「rustc 這一次呼叫的輸出」，用內容雜湊當 key，跟輸出放在哪個
-`target/` 目錄無關。**第二輪（見下面「第二輪：root cause」）已經把命中率接近 0% 的原因查到底
-了——結論是負面的**：sccache 0.18.0 的 Rust 快取路徑跟這個專案「每個 worktree 各自
-`CARGO_TARGET_DIR`」的架構本質衝突，不是設定沒調對，官方文件建議的解法（`SCCACHE_BASEDIRS`）
-在 Rust 這條路徑上也沒有實作，換 target dir 之後不太可能拿到跨 worktree 的命中。已經確定有效、
-值得先合進 main 的是「wrapper 骨架＋不硬性依賴」這件事本身（見「怎麼接上去的」）——這部分完全
-不受這個結論影響，繼續留著當安全網。
-
-## 怎麼接上去的
-
-`.cargo/config.toml` 的 `build.rustc-wrapper` 指到 `scripts/sccache-wrapper.sh`，不是直接指
-`sccache` 本身：
-
-```
-cargo → rustc-wrapper（scripts/sccache-wrapper.sh）→ 有裝 sccache？ → sccache → rustc
-                                                    └ 沒裝／壞掉？ → 直接呼叫 rustc（原樣退化）
-```
-
-- **沒裝 sccache 的機器完全不受影響**：wrapper 找不到 `sccache` 執行檔就直接 `exec` 剩下的參數
-  （也就是原本那句 rustc 呼叫），編譯照常進行，只是沒有跨 worktree 的快取。這是刻意設計成
-  「非硬性依賴」——`.cargo/config.toml` 一旦合進 main，所有 worktree（含還沒裝 sccache 的
-  遠端主機）下一次 `git pull` 都會拿到這個設定，不能因此編不過。
-- **`CARGO_TARGET_DIR` 完全不動**：每個 worktree／每顆 agent 照舊各自一份，`cargo-slot.sh` 的
-  排隊名額機制也完全沒改——快取是正交的一層，接在 rustc 前面，不影響「誰能開始編」這件事。
-- **不會跨不相容設定汙染**：key 由 sccache 自己算（rustc 版本、target triple、`--cfg`/features、
-  原始碼雜湊……都在裡面），這裡沒有另外寫任何手動判斷「這兩次編譯算不算一樣」的邏輯，全部信任
-  sccache 自己的 key，也不做旁路的「直接複製 artifact」這種捷徑。
-- **workspace crate 不經過 sccache（#1440）**：帶 `-C incremental=…`（兩個 token）或 `-Cincremental=…`
-  （單一 token）的呼叫＝cargo 給 workspace 自己那幾個 crate 的，**直接 `exec` rustc，旗標原樣、連
-  `--show-stats` 探測都不做**。sccache 官方文件明講不支援 incremental compilation，經過它只會把這幾顆
-  crate 變成每次都非增量的整顆重編（2026-10-11 裝上 sccache 之後 ubuntu-ci 的 daemon 段從中位數 1m44 變成
-  8m12）。registry 依賴本來就沒有這個旗標，照常走 sccache，旗標原樣交給它、**不再濾除任何東西**。沒裝
-  sccache 時照舊原樣直編，同一個 worktree 內的 incremental compilation 不受影響。
-- **不是 `--out-dir` 或 `-L dependency=<target-dir>/…` 本身**——這兩個旗標天生跟著 target dir
-  走，但用一支不經過 cargo、單獨呼叫 `sccache rustc` 的最小重現（一個沒有依賴的 `lib` crate，
-  只有 `--out-dir`／`-L dependency=` 不同，其他完全一樣）驗證過：sccache 照樣算出同一把 key、
-  照樣命中。所以 sccache 本身確實有把這兩個旗標正規化掉。
-- **不是 `-C metadata=…` / `-C extra-filename=…` 隨 target dir 變**——直接用 `cargo build -v`
-  比對同一顆 crate（`xtask`，故意選零依賴的，排除依賴圖差異）在兩個不同 `CARGO_TARGET_DIR` 下的
-  完整 rustc 呼叫，兩邊的 `-C metadata=`／`-C extra-filename=` 完全一樣。
-- **（#91 當時的量測，已改掉）濾掉 `-C incremental=<path>` 之後**——用一份加了除錯輸出的 wrapper 複本重跑過一次，
-  確認送進 `sccache` 的參數裡真的已經沒有這個旗標；但即使濾乾淨，實際 build 的整體命中率仍然
-  接近 0%，代表這不是（或不是唯一的）主要原因。
-
-**還沒排除、留給下一輪的懷疑**：
-- 有 `build.rs` 的 crate（`libsqlite3-sys`、`ring`、`zerocopy`…）很可能透過
-  `include!(concat!(env!("OUT_DIR"), …))` 這類手法把 `OUT_DIR`（天生是 target-dir 底下的路徑）
-  燒進編譯輸出本身，這種情況下跨 target dir 本來就**不該**命中，算是正確行為而不是 bug——但目前
-  沒有量過「扣掉這些 crate 之後，剩下單純的 `lib` 依賴（像 `once_cell`）命中率是多少」。
-- 直接觀察到的反例：`once_cell`（沒有 build.rs、也沒有 `-C incremental`）在最小重現裡命中，
-  但在完整專案的實際 build 裡沒有命中，兩者的差異目前還沒有用 `SCCACHE_LOG=debug` 之類的工具
-  逐項比對出來（會需要再跑一輪完整 build，這一輪的名額配額已經用完，留給下一輪）。
-- cargo 或 sccache 是否把 `cargo-slot.sh` 設的 `CARGO_BUILD_JOBS=1`、或其他環境變數（`PWD`、
-  子 agent 各自不同的環境）意外編進了 cache key，也還沒排除。
-
-**建議**：下一輪先用 `SCCACHE_LOG=debug SCCACHE_ERROR_LOG=/tmp/sccache.log` 重跑一次 cold／warm
-兩輪，直接看 sccache 自己記錄的 hash 輸入，而不是像這一輪一樣用排除法猜。
-
-## 第二輪：root cause 確認（2026-09-18）
-
-**結論先講：查到底了，是負面結論**——sccache 0.18.0 對 Rust 的快取路徑跟「每個 worktree 各自
-`CARGO_TARGET_DIR`」這個架構前提衝突，不是這個 repo 設定沒調好，官方文件建議的正規化解法在
-Rust 這條路徑上也沒有實作。第一輪「不是 `--out-dir`／`-L dependency=` 本身」那條排除，**這一輪
-推翻**：第一輪的最小重現手寫了一個簡化過的 `sccache rustc` 呼叫，形狀跟 cargo 真正產生的呼叫
-對不起來，才會誤判成「有正規化」。
-
-**方法**：不再對整個 `agents-managerd` 重跑 cold／warm（吃 cargo 名額，量測雜訊也大），改用一顆
-兩個檔案、零依賴風險的最小 crate（`oncetest`，只依賴 `once_cell = "=1.21.4"`，跟 `Cargo.lock`
-釘的版本一致，沒有 `build.rs`），接上這個 repo 真正的 `scripts/sccache-wrapper.sh`，透過
-`SCCACHE_SERVER_PORT` 開一個獨立的 sccache server／`SCCACHE_DIR`（不影響其他 agent 正在用的那個
-共用 server），`SCCACHE_LOG=debug SCCACHE_ERROR_LOG=...` 直接看 sccache 記錄的 hash key 與參數。
-真正吃 cargo 名額的呼叫一樣全部走 `cargo-slot.sh`。
-
-**查到的第一個坑（測試方法論，不是 sccache 的問題）**：一開始用 `--manifest-path` 指到
-`oncetest/Cargo.toml`、但從別的目錄呼叫 `cargo-slot.sh`，wrapper 完全沒被呼叫到（`sccache
---show-stats` 掛的請求數是 0）。原因：**cargo 找 `.cargo/config.toml` 是照「呼叫當下的目前工作
-目錄」往上找，不是照 `--manifest-path` 所在的目錄**——這個坑也可能影響到過去派工指令裡「沒有先
-`cd` 進 worktree、只給 `CARGO_TARGET_DIR` 就直接呼叫 `cargo-slot.sh`」的呼叫，值得所有子 agent
-往後留意：呼叫 `cargo-slot.sh` 前先 `cd` 進那個 worktree 的目錄，不要只給 `--manifest-path`。
-改成先 `cd` 進 crate 目錄之後，wrapper 才真正被呼叫、sccache 才真的介入。
-
-**核心證據**：修好呼叫方式之後，`once_cell`（零依賴、沒有 `build.rs`）這種最單純的情況：
-- **同一個 `CARGO_TARGET_DIR` 重編一次**（其他都不動）→ **命中**（2/2）。
-- **换成另一個 `CARGO_TARGET_DIR` 重編一次**（原始碼、`SCCACHE_DIR`、sccache server session
-  都不動，只換 target dir）→ **完全沒中**（0/2）。
-
-直接比對 `SCCACHE_LOG=debug` 印出來的兩次 `once_cell` `Hash key:`，兩把 key 不一樣，而 cargo
-產生的完整 rustc 參數列表裡，兩次唯一的差異就是 `--out-dir`／`-L dependency=`（值跟著
-`CARGO_TARGET_DIR` 走）——`-C metadata=`／`-C extra-filename=` 兩次完全一樣（跟第一輪的排除
-結果一致）。這證明：**只要 `CARGO_TARGET_DIR` 换掉，這個 sccache 版本對 Rust 編譯的雜湊鍵就會
-換，不需要任何 `build.rs`／`OUT_DIR` 涉入就會發生**——第一輪懷疑的「有 `build.rs` 的 crate 才會
-不命中」不是主要原因，連最單純的葉節點依賴都不命中。
-
-**追查機制、但沒有完全對上**：查了 sccache 上游原始碼（`src/compiler/rust.rs`，
-`generate_hash_key`）。原始碼註解明講 `-L`／`--extern`／`--out-dir` 這幾個旗標**本身**會被排除在
-雜湊之外（換句話說，官方設計是「不管路徑字串，只雜湊路徑指到的檔案內容」），但同一段
-`generate_hash_key` 也明講會把**「這次編譯的 cwd」**放進雜湊（原文大意：cwd 會跑進編出來的
-rlib 裡）。這一輪的重現裡，`once_cell` 是從 `~/.cargo/registry` 讀出來編的、`oncetest` 是從固定
-的 crate 目錄編的，兩次呼叫的作業系統層級 cwd 照理說不會因為换了 `CARGO_TARGET_DIR` 而變──但
-實際命中率就是變了。**這一輪沒能在剩下的時間內把「原始碼講的排除清單」跟「實測觀察到的雜湊鍵
-變化」完全對上**，可能是這個雜湊還吃了什麼還沒找到的間接輸入（例如 dep-info 裡記的路徑、或
-`--out-dir`／`-L dependency=` 雖然字串本身被排除、但透過某個間接管道還是讓 hash 內容跟著變）。
-**誠實記錄這個沒對上的地方，不假裝已經完全弄懂內部機制**——但下面這個事實已經用直接對照
-`Hash key:` 與可重複的 A/B 測試釘住，不受這個機制細節影響。
-
-**官方建議的解法測過了，沒用**：sccache 文件建議用 `SCCACHE_BASEDIRS`（`:` 分隔的絕對路徑清單，
-把落在清單裡任一目錄底下的路徑，雜湊前先換算成相對路徑，讓不同機器/不同目錄結構的建置也能對上
-同一把 key）解決這類問題。這一輪測過：
-1. `strings` 直接查已安裝的 `sccache` 執行檔，確認 `SCCACHE_BASEDIRS` 這個字串真的在二進位裡
-   （不是編譯掉的功能）。
-2. 重啟一份獨立的 debug sccache server（不影響其他 agent 正在用的共用 server），啟動時就把
-   `oncetest` 用到的兩個 `CARGO_TARGET_DIR` 都塞進 `SCCACHE_BASEDIRS`（環境變數是伺服器啟動時
-   讀的設定，不是每個請求各自帶的，這裡有先重開伺服器確保設定生效）。
-3. 結果：**還是 0 命中**，跟沒設 `SCCACHE_BASEDIRS` 一樣。
-
-再查 `sccache` 二進位裡 `SCCACHE_BASEDIRS` 附近的字串，找到關鍵字：`"Stripping basedirs from
-preprocessor output with length "`——**這個正規化是接在「preprocessor 快取模式」（C/C++ 那條路）
-上的，不是 Rust 這條完全不同的雜湊路徑**。直接抓 sccache 上游 `src/compiler/rust.rs` 原始碼比對
-過，裡面完全沒有任何 `basedir` 相關的呼叫。這就是「照文件設定了，卻沒有效果」的原因：**這個版本
-的 sccache 對 Rust 編譯根本沒有實作 basedir 正規化**，不是我們設定錯。
-
-**結論（可以拿去用的部分）**：
-- 這個 repo「每個 worktree 各自 `CARGO_TARGET_DIR`」的架構要求，跟 sccache 0.18.0 對 Rust 編譯
-  的雜湊鍵設計互斥——換 target dir 幾乎保證雜湊鍵跟著換，不管專案多大、有沒有 `build.rs`，連
-  最單純的零依賴葉節點都一樣。這不是「調參數就能修好」的問題，是這個版本的 sccache 對 Rust 的
-  已知限制（官方的路徑正規化解法只覆蓋 C/C++ 路徑）。
-- issue #91 的驗收條件之一「兩個管理中的 worktree 編相同未改動依賴能拿到快取命中」**在目前的
-  sccache 版本、目前的架構要求下判定為做不到**，不是還沒查出來，建議把這條標成「已知不可行」
-  而不是繼續調參數重跑量測。
-- Wrapper 骨架（`.cargo/config.toml` 指到 `scripts/sccache-wrapper.sh`、沒裝 sccache 就原生
-  退化、workspace crate 不經過 sccache）本身正確、安全、零成本退化，這個結論不影響它繼續留著；只是
-  「跨 worktree 命中」這個目標效果，不建議再花時間追。
-- 沒有評估過、也不在這次範圍內的下一步（如果之後還要追這個目標）：換一個對 Rust 有實作
-  basedir/路徑正規化的編譯快取工具、或重新考慮「每個 worktree 各自 target dir」這個前提本身。
-
-## 快取位置與大小上限
-
-預設 `~/.cache/agents-manager-sccache`，上限 `10G`（sccache 自己做 LRU 淘汰，這裡不用另外寫
-清理腳本）。想換位置或大小，在跑 cargo 之前設環境變數即可，wrapper 只在**沒人設過**時才補預設，
-不會蓋掉：
+`scripts/project-cargo.sh` 是本專案開發用的 Cargo 入口，預設 `AGM_RUST_ENGINE=auto`。受管 Cargo shim 會往目前目錄的祖先找 `.cargo/agm-blaze` 與這支腳本，兩者同時存在才轉交；其他專案不受影響。轉交發生在拿名額之前，再以 `cargo blaze …`（舊版 release 用 `cargo ra-jit …`）進入既有 shim，仍只租一個建置名額，不直接呼叫加速器繞過排程。`cargo dev` 的 xtask 建 daemon 也使用此入口。daemon 換版後新寫入／刷新過的 shim 才會有自動轉交；換版前或非受管 shell 直接使用腳本。
 
 ```sh
-export SCCACHE_DIR=/some/bigger/disk/sccache
-export SCCACHE_CACHE_SIZE=30G
+scripts/install-blaze.sh
+scripts/project-cargo.sh build -p agents-managerd
+scripts/project-cargo.sh run -p agents-managerd -- serve
+scripts/project-cargo.sh test -p xtask
+AGM_RUST_ENGINE=cargo scripts/project-cargo.sh build -p agents-managerd
 ```
 
-## 診斷：現在有沒有在用、命中率多少
+安裝器固定上游 installer 的 commit，下載的 release 依上游 SHA256SUMS 校驗。工具放 `~/.local/share/agents-manager/blaze/bin`，不寫使用者 Cargo 設定、不執行 `blaze enable`；`AGM_BLAZE_INSTALL_HOME` 可改安裝位置，執行時以 `AGM_BLAZE_BIN` 指到對應 bin。入口把這個目錄加在 PATH 尾端，不蓋掉受管 Cargo shim。安裝器可能下載 Rust 1.99.0 與 rust-src；入口要求這個工具鏈並指定 `RUSTUP_TOOLCHAIN=1.99.0`，使 rustc 輸出與 Blaze 的 ABI 一致，不以其他版本的產物拼接。升級 Blaze 時需重新核對其工具鏈要求。
 
-```sh
-bash scripts/sccache-status.sh
+| 路徑 | 執行方式 |
+|---|---|
+| 預設 profile 的 `build`／`run`／`test` | Blaze；完整保留參數與退出碼 |
+| `--release`／`-r`、顯式 `--profile`／`--target`、JSON 診斷、`-Z` | 原生 Cargo |
+| `check`、Clippy、fmt、顯式 `+toolchain`、其他 Cargo 子指令 | 原生 Cargo |
+| `scripts/check.sh`、Ubuntu CI、macOS 原生驗證、正式打包 | 原生 Cargo／rustc，作為最終驗證 |
+
+`auto` 在不支援的主機、缺工具或缺 Rust 1.99.0 時明講並回到 Cargo；`AGM_RUST_ENGINE=blaze` 遇到這些條件則失敗，方便確認實際有走加速器。支援主機是 Linux x86-64／aarch64 與 macOS arm64。編譯或測試已執行而失敗時，入口不重試成另一條成功路徑。Blaze 自身的相容性 fallback 由上游管理；看到 `[ra-jit]` 才表示該輪由引擎建置。`test` 強制 `BLAZE_TESTS=all`／`RA_JIT_TESTS=all`，不採只跑受影響測試的模式；測試執行緒預設 8，可由 `RUST_TEST_THREADS` 覆寫。普通原生 Cargo 的遠端驗證規則保留；Blaze 指令保留在呼叫主機，以重用當地記憶體快取。
+
+Blaze 把分析資料與機器碼留在每個使用者共用的背景服務；首次建置、依賴／manifest／建置輸入變動仍可能走 Cargo，局部函式修改才適合快路徑。本專案 daemon 的 `build.rs` 會輸出 commit SHA 與髒樹標記；切換 commit 或 clean→dirty 改變這些輸出時，Blaze 會要求 Cargo 重建再重新載入，所以不能把小型 xtask 的加速倍數套到每一輪 daemon 建置。每個 target dir 照舊獨立，既有 sccache wrapper 照舊處理 rustc 呼叫。背景 worker 可吃數 GiB，且命令結束後仍存在；上游預設閒置 30 分鐘退出，worker 總記憶體預算為主機／cgroup 記憶體的一半。`RA_JIT_IDLE_SECS`、`RA_JIT_MEMORY_MAX` 可調，服務啟動時讀取；上游預算並非正在載入的 worker 的硬上限。不要把這層記憶體當成 Cargo 名額結束後就會釋放。
+
+可用 `~/.local/share/agents-manager/blaze/bin/ra-jit status` 查本次 release 的 worker 與 fallback；新版另有 `blaze` 入口。背景服務為同一使用者共用，停止前先協調其他 agent，遵守只終止自己記錄的 PID 的行程規則。遇到產物／診斷差異，以 `AGM_RUST_ENGINE=cargo` 重現，最終以 `scripts/check.sh changed` 與 CI 結果為準。
+
+## sccache 相依快取
+
+`.cargo/config.toml` 的 `build.rustc-wrapper` 指到 `scripts/sccache-wrapper.sh`。這一層與 Blaze 的記憶體編譯快取不同：它快取 rustc 呼叫的產物，不能省掉 Cargo 本身的調度與連結。
+
+- 帶 `-C incremental=…` 或 `-Cincremental=…` 的 workspace crate 原樣交給 rustc，不經過 sccache，也不做 server 探測，保留同一工作樹內的 Cargo 增量編譯。
+- 其餘呼叫在 sccache 已安裝且 `--show-stats` 探測成功時使用快取；缺工具或探測失敗就原樣執行 rustc。真正的編譯錯誤仍原樣傳回。
+- 預設 `SCCACHE_DIR=~/.cache/agents-manager-sccache`、`SCCACHE_CACHE_SIZE=10G`，呼叫端可覆寫。每台主機的工作樹共用此快取，各自的 `CARGO_TARGET_DIR` 與 Cargo 建置名額保持獨立。
+- 不假設換工作樹就會命中；Rust 的產物與建置輸入含有路徑差異，實際收益以 `sccache --show-stats` 為準，不共用或手動搬移不同設定的 target 產物。
+
+```text
+開發 build/run/test → project-cargo → 受管 Cargo shim／名額 → Blaze
+                                                         └ 首次／相容性 fallback → Cargo → sccache wrapper → rustc
+原生驗證／release → 受管 Cargo shim／既有遠端流程 → Cargo → sccache wrapper → rustc
 ```
 
-沒裝 sccache 時印一句「沒裝」加安裝提示就結束（exit 0，不是錯誤）；裝了就印 `SCCACHE_DIR` 與
-`sccache --show-stats`（含 request 數、cache hits/misses、快取目前用量）。
-
-## 遠端主機
-
-遠端 build host 一樣照這個機制：只要那台機器裝了 `sccache`、PATH 找得到，`.cargo/config.toml`
-一併帶過去（本來就是 repo 的一部分）就會自動生效；沒裝就自動退化成原生 rustc，不需要另外開關。
-多顆 agent 共用同一台遠端主機時，`SCCACHE_DIR` 預設也是那台主機自己的 `~/.cache/...`，一樣是
-主機層級共用，不是每個 worktree 各一份。
-
-## 工具鏈升級的影響
-
-sccache 的 cache key 含 rustc 版本／commit hash，所以：
-
-- **升級 rustc／toolchain 後，舊快取自然不會被誤用**——key 對不上就是 cache miss，退化成正常編譯
-  （較慢的第一次），不會拿舊工具鏈編出來的東西冒充新工具鏈的結果。
-- **舊版本的快取條目不會自動被清掉**，只會在 `SCCACHE_CACHE_SIZE` 頂到上限時被 LRU 淘汰掉。長期
-  只用單一 toolchain 的機器不用管；常常換 toolchain 版本測試的機器，快取的「有效命中比例」會下降
-  （因為總量裡混了多個版本的條目），可以調大 `SCCACHE_CACHE_SIZE` 或手動清空
-  `$SCCACHE_DIR` 重新開始。
-
-## 測試
-
-`scripts/sccache-wrapper_test.sh`（`bash scripts/sccache-wrapper_test.sh`）：隔離測試，PATH 鎖進
-暫時目錄，兩條路徑（裝了／沒裝 sccache）都覆蓋，不受跑測試的機器現況影響；釘住「沒裝時原樣呼叫
-rustc（含 incremental 旗標不受影響）」「裝了轉呼叫 sccache 而不是繞過它」「兩種寫法的
-`-C incremental=`／`-Cincremental=` 直接呼叫 rustc、不經過 sccache（#1440）」「快取目錄／大小上限的預設與
-不覆寫呼叫端設定」「結束碼原封不動回傳」，19 條全過。
+`bash scripts/project-cargo_test.sh` 驗證入口選擇、參數與錯誤傳遞；`bash scripts/sccache-wrapper_test.sh` 驗證相依快取的退回與增量行為。Cargo shim 的原生測試另外驗證 Blaze 只租用一個名額，以及測試執行緒不能超過名額上限；Mac 收尾入口見 [AGENT-VERIFY.md](AGENT-VERIFY.md)。

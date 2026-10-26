@@ -28,6 +28,9 @@
 # - 只做檢查，不改任何檔案（fmt 用 --check）。
 set -euo pipefail
 
+# Final verification must use rustc, including when the managed Cargo shim has Blaze enabled.
+export AGM_RUST_ENGINE=cargo
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 

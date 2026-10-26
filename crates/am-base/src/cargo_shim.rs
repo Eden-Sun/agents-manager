@@ -112,6 +112,14 @@ am_remote_cargo_eligible() {
 am_cargo_runs_tests() {
     case "$1" in
         t | test) return 0 ;;
+        blaze | ra-jit)
+            _plugin="$1"
+            shift
+            while [ "$#" -gt 0 ] && [ "$1" != "$_plugin" ]; do shift; done
+            [ "$#" -gt 0 ] || return 1
+            shift
+            case "${1:-}" in t | test) return 0 ;; *) return 1 ;; esac
+            ;;
         nextest)
             shift
             while [ "$#" -gt 0 ] && [ "$1" != nextest ]; do shift; done
@@ -506,6 +514,23 @@ am_cargo() {
     if ! am_cargo_is_heavy "$_sub"; then
         exec "$_real" "$@"
     fi
+    # Project opt-in happens before taking a slot: the runner re-enters this shim with
+    # `cargo blaze …`, so the whole compiler client still owns exactly one lease.
+    # The marker confines this behavior to repositories that explicitly adopt it.
+    if [ "${AGM_RUST_DISPATCHED:-}" != "$$" ] && [ -z "${AM_BUILD_SLOT_HELD:-}" ] && [ "${AGM_RUST_ENGINE:-auto}" != cargo ]; then
+        _project=$(pwd -P)
+        while [ "$_project" != / ]; do
+            if [ -f "$_project/.cargo/agm-blaze" ] && [ -f "$_project/scripts/project-cargo.sh" ]; then
+                AGM_RUST_DISPATCHED=$$
+                export AGM_RUST_DISPATCHED
+                exec sh "$_project/scripts/project-cargo.sh" "$@"
+            fi
+            _project=$(dirname "$_project")
+        done
+    fi
+    # Only this exec chain consumes the marker; programs started by `run` must not
+    # disable project dispatch in the agent panes they subsequently create.
+    unset AGM_RUST_DISPATCHED
     # 這條進程鏈上已經有人拿著名額（build script 或 xtask 再叫一次 cargo）：直接跑，不要再排一次。
     # 內層等的名額只會等到外層結束才空出來，而外層在等內層——就是上面那個死結。
     if [ -n "${AM_BUILD_SLOT_HELD:-}" ]; then

@@ -191,7 +191,8 @@ fn dev(root: &Path) {
     // Build first so `dev` doesn't return before the binary exists, and so we can
     // spawn the real binary directly (spawning through `cargo run`/`bun run` would
     // leave `cargo down` killing a wrapper process instead of the actual server).
-    let build = Command::new("cargo")
+    let build = Command::new("sh")
+        .arg(root.join("scripts/project-cargo.sh"))
         .args(["build", "--bin", "agents-managerd"])
         .current_dir(root)
         .status()

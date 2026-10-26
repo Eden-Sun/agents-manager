@@ -2,6 +2,10 @@
 
 這是 `AGENTS.md` 的驗證細則；開始驗證前依任務讀取。與收尾入口共用同一套政策，不另設 CI 判斷。
 
+## 建置引擎
+
+開發迭代的 `build/run/test` 透過受管 shim 或 `scripts/project-cargo.sh` 預設使用 Blaze，詳見 [BUILD-CACHE.md](BUILD-CACHE.md)。收尾入口 `scripts/check.sh` 與 Ubuntu CI 強制 `AGM_RUST_ENGINE=cargo`，連其下的 Cargo shim／xtask 都維持原生 rustc；macOS 原生驗證、release／打包、check／Clippy／fmt 同樣使用原生 Cargo。Blaze 的加速測試不算最終驗證，仍須執行以下收尾檢查。安裝與背景 worker 不會由驗證入口自動啟動。
+
 ## 驗證（收尾前必跑）
 - **瀏覽器簡稱（使用者 2026-10-14）**：對話與派工中的 `ab` 一律指 `agent-browser`；實際 CLI 指令仍用 `agent-browser`，沿用自己的 `--session <agent 名>`，做完 `close`。
 - Claude 端另有 project skill `verify`（`.claude/skills/verify/`，issue #747）在 commit 前叫起同一個 `scripts/check.sh changed`；它只是這條規則的入口，不另有判斷，Ubuntu Full CI 仍非同步。

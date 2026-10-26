@@ -172,6 +172,17 @@ flowchart LR
 
 開發或不支援的平台用。除了 herdr，另需 Rust（`cargo`）與 [Bun](https://bun.sh)。
 
+
+Rust 開發建置透過 `scripts/project-cargo.sh` 使用 [Blaze](https://github.com/indexable-inc/blaze)（Linux x86-64／ARM64、Apple silicon）。每台主機安裝一次：
+
+```bash
+scripts/install-blaze.sh
+scripts/project-cargo.sh build -p agents-managerd
+scripts/project-cargo.sh test -p xtask
+```
+
+受管 agent pane 在 daemon 更新後，也會把一般 `cargo build/run/test` 導向這個入口；`cargo dev` 建 daemon 時同樣使用它。沒有 Blaze 時會明講並退回 Cargo。release／自訂 profile、跨目標編譯、`check`、Clippy、格式檢查及 `scripts/check.sh`／CI 使用原生 Cargo。設 `AGM_RUST_ENGINE=cargo` 可停用，設 `blaze` 則要求加速器必須可用。首次建置需要載入專案，只有相容的暖態修改才能省掉重編與連結。工具鏈、記憶體與排錯方式見[建置引擎與快取](docs/BUILD-CACHE.md)。
+
 **開發模式**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
 
 ```bash
@@ -207,7 +218,7 @@ VITE_MOCK=1 bun run dev
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的 UI 取捨 |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
 | [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | 貢獻者與 agent 的驗證與 CI 流程 |
-| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | 跨 worktree 共用的 sccache 建置快取 |
+| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze 開發建置與 sccache 相依快取 |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包 macOS `.dmg` |
 | [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Claude 原生傳訊與 herdr 的評估 |
 | [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | 選用的 ChatGPT 網頁諮詢 worker |

@@ -172,6 +172,17 @@ flowchart LR
 
 For development or unsupported platforms. Needs Rust (`cargo`) and [Bun](https://bun.sh) in addition to herdr.
 
+
+Rust development builds use [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per host:
+
+```bash
+scripts/install-blaze.sh
+scripts/project-cargo.sh build -p agents-managerd
+scripts/project-cargo.sh test -p xtask
+```
+
+Managed agent panes also route ordinary `cargo build/run/test` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing Blaze falls back to Cargo with a message. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Set `AGM_RUST_ENGINE=cargo` to opt out, or `blaze` to require the accelerator. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
+
 **Development mode** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
 
 ```bash
@@ -207,7 +218,7 @@ VITE_MOCK=1 bun run dev
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | Settled UI trade-offs |
 | [`docs/HOOK.md`](docs/HOOK.md) | Hook subcommand contract and timing tests |
 | [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | Verification and CI workflow for contributors and agents |
-| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Shared sccache build cache across worktrees |
+| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze development builds and sccache dependency cache |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | Packaging the macOS `.dmg` |
 | [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Evaluation of Claude-native messaging versus herdr |
 | [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | Optional ChatGPT web consult worker |
