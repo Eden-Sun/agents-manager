@@ -14,6 +14,8 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     script(tools/'rustup', 'exit "${TEST_RUSTUP_EXIT:-0}"\n')
     script(tools/'uname', 'case "$1" in -s) echo "${TEST_OS:-Linux}";; -m) echo "${TEST_ARCH:-x86_64}";; esac\n')
     script(private/'cargo-ra-jit', 'exit 0\n')
+    script(private/'ra-jit', 'exit 0\n')
+    (private/'.agm-blaze-memory-v1').write_text('verified test engine')
     env = {k:v for k,v in os.environ.items() if not k.startswith(('AM_', 'AGM_', 'BLAZE_', 'RA_JIT_')) and k not in ('RUSTUP_TOOLCHAIN', 'RUST_TEST_THREADS')}
     env.update(PATH=f'{tools}:{os.environ.get("AM_CANARY_DIR", "/nonexistent")}:/usr/bin:/bin', HOME=str(base/'home'), AGM_BLAZE_BIN=str(private), TEST_LOG=str(log))
     count = 0
@@ -42,6 +44,12 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     run(['build'],['ra-jit','build'],TEST_EXIT='42')
     script(private/'cargo-blaze','exit 0\n')
     run(['build'],['blaze','build'])
+    (private/'.agm-blaze-memory-v1').unlink()
+    run(['build'],['build'])
+    log.unlink()
+    bad=subprocess.run(['sh',str(root/'scripts/project-cargo.sh'),'build'],env=env|{'AGM_RUST_ENGINE':'blaze'},capture_output=True,text=True)
+    assert bad.returncode==127 and not log.exists()
+    count+=1
     (private/'cargo-blaze').unlink(); (private/'cargo-ra-jit').unlink()
     run(['build'],['build'])
     for changes,code in [({'AGM_RUST_ENGINE':'blaze'},127),({'AGM_RUST_ENGINE':'invalid'},2),({'AGM_RUST_ENGINE':'blaze','TEST_OS':'Windows'},2),({'AGM_RUST_ENGINE':'blaze','TEST_RUSTUP_EXIT':'1'},127)]:

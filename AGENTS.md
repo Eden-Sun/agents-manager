@@ -38,7 +38,7 @@
 
 ## Rust 開發建置
 - Linux 開發用 `build`／`run` 預設使用 Blaze；Mac 預設原生 Cargo，只有明確 `AGM_RUST_ENGINE=blaze` 才啟用：受管 Cargo shim 在本專案有 `.cargo/agm-blaze` 時自動轉交 `scripts/project-cargo.sh`；尚未刷新 shim 或非受管環境直接使用該腳本。`cargo dev` 建 daemon 也走此入口。
-- 每台主機先跑 `scripts/install-blaze.sh`；缺工具時 auto 模式明講並退回 Cargo。要求一定使用 Blaze 可設 `AGM_RUST_ENGINE=blaze`，排錯比對設 `AGM_RUST_ENGINE=cargo`。不要用 `blaze enable` 改使用者全域 Cargo 設定，也不要直接呼叫 Blaze 繞過名額。
+- 每台主機先跑 `scripts/install-blaze.sh --source`；缺工具時 auto 模式明講並退回 Cargo。要求一定使用 Blaze 可設 `AGM_RUST_ENGINE=blaze`，排錯比對設 `AGM_RUST_ENGINE=cargo`。不要用 `blaze enable` 改使用者全域 Cargo 設定，也不要直接呼叫 Blaze 繞過名額。
 - `test` 一律保留原生 Cargo／既有 r7 分流，即使要求 `AGM_RUST_ENGINE=blaze` 也不走 JIT；專案共用背景服務預設 `RA_JIT_MEMORY_MAX=8G`（軟預算）、`RA_JIT_IDLE_SECS=600`，由上游服務閒置退出回收；不可隨意殺別的工作樹仍使用的服務。
 - release、跨目標、自訂 profile、check／Clippy／fmt、`scripts/check.sh` 與 CI 保留原生 Cargo；Blaze 開發建置不能取代收尾驗證。工具鏈／記憶體與使用方式見 [docs/BUILD-CACHE.md](docs/BUILD-CACHE.md)。
 

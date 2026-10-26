@@ -46,6 +46,16 @@ else
     echo "project-cargo: Blaze is not installed; using Cargo (install: scripts/install-blaze.sh)" >&2
     exec cargo "$@"
 fi
+# The pre-rename nightly ignores MEMORY_MAX. Only a capability-checked installation
+# may start a daemon; unsupported tools must never silently use an unbounded budget.
+plugin_path=$(command -v "cargo-$plugin")
+engine_path="$(dirname "$plugin_path")/ra-jit"
+capability="$(dirname "$plugin_path")/.agm-blaze-memory-v1"
+if [ ! -f "$capability" ] || [ ! -x "$engine_path" ] || [ "$engine_path" -nt "$capability" ]; then
+    if [ "$engine" = blaze ]; then echo "project-cargo: a memory-budget-capable Blaze is required; run scripts/install-blaze.sh --source" >&2; exit 127; fi
+    echo "project-cargo: Blaze memory-budget support is unverified; using Cargo (install: scripts/install-blaze.sh --source)" >&2
+    exec cargo "$@"
+fi
 RUSTUP_TOOLCHAIN=1.99.0
 export RUSTUP_TOOLCHAIN
 # A project-owned namespace prevents an existing, unbounded user daemon from
