@@ -777,6 +777,442 @@ if [ ! -e "$F" ] && [ ! -L "$F" ]; then printf 'AM_GROK_MISSING\n'; exit 0; fi
     )
 }
 
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod remote_grok_diagnostic_tests {
+    use super::remote_grok_read_script;
+    use std::sync::{Arc, Mutex};
+
+    const RECORD_LIMIT: usize = 128;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Code {
+        RootSymlink,
+        FileTypeOrSymlink,
+        FdOpen,
+        GnuPathStat,
+        GnuFdStat,
+        BsdPathStat,
+        BsdFdStat,
+        PathFdIdentity,
+        NlinkOrSize,
+        FinalSymlinkRecheck,
+        ReadReturn,
+        InstallUntrusted,
+        InstallChanged,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum StdoutKind {
+        Empty,
+        File,
+        Missing,
+        Untrusted,
+        Changed,
+        Installed,
+        Other,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Record {
+        code: Option<Code>,
+        exit_code: Option<i32>,
+        stdout: StdoutKind,
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordSet {
+        records: Vec<Record>,
+        overflow: usize,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub(super) struct Handle(Arc<Mutex<RecordSet>>);
+
+    impl Handle {
+        pub(super) fn new() -> Self {
+            Self::default()
+        }
+
+        fn record_output(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+            let stdout_kind = stdout_kind(stdout);
+            let mut found = false;
+            let mut records = self.0.lock().expect("diagnostic record lock");
+            for line in stderr.split(|byte| *byte == b'\n') {
+                if let Some(code) = code_from_marker(line) {
+                    records.push(Record { code: Some(code), exit_code: status, stdout: stdout_kind });
+                    found = true;
+                }
+            }
+            if !found {
+                records.push(Record { code: None, exit_code: status, stdout: stdout_kind });
+            }
+        }
+
+        fn record_code(&self, code: Code) {
+            self.0.lock().expect("diagnostic record lock").push(Record {
+                code: Some(code),
+                exit_code: Some(0),
+                stdout: StdoutKind::Empty,
+            });
+        }
+
+        pub(super) fn contains(&self, code: Code) -> bool {
+            self.0.lock().expect("diagnostic record lock").records.iter().any(|record| record.code == Some(code))
+        }
+
+        pub(super) fn summary(&self) -> String {
+            let records = self.0.lock().expect("diagnostic record lock");
+            format!("records={:?}; overflow={}", records.records, records.overflow)
+        }
+
+        fn length_and_overflow(&self) -> (usize, usize) {
+            let records = self.0.lock().expect("diagnostic record lock");
+            (records.records.len(), records.overflow)
+        }
+    }
+
+    impl RecordSet {
+        fn push(&mut self, record: Record) {
+            if self.records.len() < RECORD_LIMIT {
+                self.records.push(record);
+            } else {
+                self.overflow = self.overflow.saturating_add(1);
+            }
+        }
+    }
+
+    fn stdout_kind(stdout: &[u8]) -> StdoutKind {
+        let first = stdout.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        match first {
+            b"AM_GROK_FILE" => StdoutKind::File,
+            b"AM_GROK_MISSING" => StdoutKind::Missing,
+            b"AM_GROK_UNTRUSTED" => StdoutKind::Untrusted,
+            b"AM_GROK_CHANGED" => StdoutKind::Changed,
+            b"AM_GROK_INSTALLED" => StdoutKind::Installed,
+            b"" => StdoutKind::Empty,
+            _ => StdoutKind::Other,
+        }
+    }
+
+    fn code_from_marker(line: &[u8]) -> Option<Code> {
+        Some(match line {
+            b"AM_DIAG:G:ROOT_SYMLINK" => Code::RootSymlink,
+            b"AM_DIAG:G:FILE_TYPE_OR_SYMLINK" => Code::FileTypeOrSymlink,
+            b"AM_DIAG:G:FD_OPEN" => Code::FdOpen,
+            b"AM_DIAG:G:GNU_PATH_STAT" => Code::GnuPathStat,
+            b"AM_DIAG:G:GNU_FD_STAT" => Code::GnuFdStat,
+            b"AM_DIAG:G:BSD_PATH_STAT" => Code::BsdPathStat,
+            b"AM_DIAG:G:BSD_FD_STAT" => Code::BsdFdStat,
+            b"AM_DIAG:G:PATH_FD_IDENTITY" => Code::PathFdIdentity,
+            b"AM_DIAG:G:NLINK_OR_SIZE" => Code::NlinkOrSize,
+            b"AM_DIAG:G:FINAL_SYMLINK_RECHECK" => Code::FinalSymlinkRecheck,
+            b"AM_DIAG:G:READ_RETURN" => Code::ReadReturn,
+            b"AM_DIAG:G:INSTALL_UNTRUSTED" => Code::InstallUntrusted,
+            b"AM_DIAG:G:INSTALL_CHANGED" => Code::InstallChanged,
+            _ => return None,
+        })
+    }
+
+    #[derive(Debug, Clone)]
+    pub(super) struct Run {
+        pub(super) stdout: Vec<u8>,
+        pub(super) status: Option<i32>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Site {
+        ReadReturn,
+        RootSymlink,
+        FileTypeOrSymlink,
+        FdOpen,
+        GnuPathStat,
+        GnuFdStat,
+        BsdPathStat,
+        BsdFdStat,
+        PathFdIdentity,
+        NlinkOrSize,
+        FinalSymlinkRecheck,
+        InstallUntrusted,
+        InstallChanged,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct InstrumentError {
+        site: Site,
+        expected: usize,
+        found: usize,
+    }
+
+    impl InstrumentError {
+        pub(super) fn summary(self) -> String {
+            format!("site={:?}; expected={}; found={}", self.site, self.expected, self.found)
+        }
+    }
+
+    fn replace_count(
+        source: &str,
+        needle: &str,
+        replacement: &str,
+        expected: usize,
+        site: Site,
+    ) -> Result<String, InstrumentError> {
+        let found = source.matches(needle).count();
+        if found != expected {
+            return Err(InstrumentError { site, expected, found });
+        }
+        Ok(source.replace(needle, replacement))
+    }
+
+    fn instrument_read(mut script: String) -> Result<String, InstrumentError> {
+        let guard_count = script.matches("am_bad").count();
+        if guard_count != 11 {
+            return Err(InstrumentError { site: Site::ReadReturn, expected: 11, found: guard_count });
+        }
+        script = replace_count(
+            &script,
+            "am_bad() { printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }",
+            "am_bad() { printf 'AM_DIAG:G:READ_RETURN\\n' >&9; printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }",
+            1,
+            Site::ReadReturn,
+        )?;
+        let replacements = [
+            (
+                "[ -L \"$G\" ] && am_bad",
+                "[ -L \"$G\" ] && { printf 'AM_DIAG:G:ROOT_SYMLINK\\n' >&9; am_bad; }",
+                Site::RootSymlink,
+            ),
+            (
+                "[ ! -L \"$F\" ] && [ -f \"$F\" ] || am_bad",
+                "[ ! -L \"$F\" ] && [ -f \"$F\" ] || { printf 'AM_DIAG:G:FILE_TYPE_OR_SYMLINK\\n' >&9; am_bad; }",
+                Site::FileTypeOrSymlink,
+            ),
+            (
+                "exec 3< \"$F\" || am_bad",
+                "exec 3< \"$F\" || { printf 'AM_DIAG:G:FD_OPEN\\n' >&9; am_bad; }",
+                Site::FdOpen,
+            ),
+            (
+                "a=$(stat -L -c '%d %i %h %s' \"$F\") || am_bad",
+                "a=$(stat -L -c '%d %i %h %s' \"$F\") || { printf 'AM_DIAG:G:GNU_PATH_STAT\\n' >&9; am_bad; }",
+                Site::GnuPathStat,
+            ),
+            (
+                "b=$(stat -L -c '%d %i %h %s' /dev/fd/3) || am_bad",
+                "b=$(stat -L -c '%d %i %h %s' /dev/fd/3) || { printf 'AM_DIAG:G:GNU_FD_STAT\\n' >&9; am_bad; }",
+                Site::GnuFdStat,
+            ),
+            (
+                "a=$(stat -L -f '%d %i %l %z' \"$F\") || am_bad",
+                "a=$(stat -L -f '%d %i %l %z' \"$F\") || { printf 'AM_DIAG:G:BSD_PATH_STAT\\n' >&9; am_bad; }",
+                Site::BsdPathStat,
+            ),
+            (
+                "b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || am_bad",
+                "b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || { printf 'AM_DIAG:G:BSD_FD_STAT\\n' >&9; am_bad; }",
+                Site::BsdFdStat,
+            ),
+            (
+                "[ \"$a\" = \"$b\" ] || am_bad",
+                "[ \"$a\" = \"$b\" ] || { printf 'AM_DIAG:G:PATH_FD_IDENTITY\\n' >&9; am_bad; }",
+                Site::PathFdIdentity,
+            ),
+            (
+                "[ \"$3\" = 1 ] && [ \"$4\" -le 262144 ] || am_bad",
+                "[ \"$3\" = 1 ] && [ \"$4\" -le 262144 ] || { printf 'AM_DIAG:G:NLINK_OR_SIZE\\n' >&9; am_bad; }",
+                Site::NlinkOrSize,
+            ),
+            (
+                "[ ! -L \"$G\" ] && [ ! -L \"$F\" ] || am_bad",
+                "[ ! -L \"$G\" ] && [ ! -L \"$F\" ] || { printf 'AM_DIAG:G:FINAL_SYMLINK_RECHECK\\n' >&9; am_bad; }",
+                Site::FinalSymlinkRecheck,
+            ),
+        ];
+        for (needle, replacement, site) in replacements {
+            script = replace_count(&script, needle, replacement, 1, site)?;
+        }
+        Ok(format!("exec 9>&2\n{script}"))
+    }
+
+    fn instrument_install(script: String) -> Result<String, InstrumentError> {
+        let untrusted = "printf 'AM_GROK_UNTRUSTED\\n'; exit 0;";
+        let script = replace_count(
+            &script,
+            untrusted,
+            "printf 'AM_DIAG:G:INSTALL_UNTRUSTED\\n' >&9; printf 'AM_GROK_UNTRUSTED\\n'; exit 0;",
+            1,
+            Site::InstallUntrusted,
+        )?;
+        let hash_guard_count = script.matches("NOW=$(sha256sum").count();
+        let expected_changed = if hash_guard_count == 2 { 4 } else if hash_guard_count == 0 { 3 } else {
+            return Err(InstrumentError { site: Site::InstallChanged, expected: 0, found: hash_guard_count });
+        };
+        let changed = "printf 'AM_GROK_CHANGED\\n'; exit 0;";
+        let script = replace_count(
+            &script,
+            changed,
+            "printf 'AM_DIAG:G:INSTALL_CHANGED\\n' >&9; printf 'AM_GROK_CHANGED\\n'; exit 0;",
+            expected_changed,
+            Site::InstallChanged,
+        )?;
+        Ok(format!("exec 9>&2\n{script}"))
+    }
+
+    fn instrument(script: &str) -> Result<String, InstrumentError> {
+        if script.contains("am_bad() { printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }") {
+            instrument_read(script.to_owned())
+        } else {
+            instrument_install(script.to_owned())
+        }
+    }
+
+    pub(super) fn run(
+        script: &str,
+        handle: &Handle,
+        home: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Run, InstrumentError> {
+        let copy = instrument(script)?;
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(copy);
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = command.output().map_err(|_| InstrumentError { site: Site::ReadReturn, expected: 1, found: 0 })?;
+        let status = output.status.code();
+        handle.record_output(status, &output.stdout, &output.stderr);
+        Ok(Run { stdout: output.stdout, status })
+    }
+
+    fn run_original(script: &str) -> (Vec<u8>, Option<i32>) {
+        match std::process::Command::new("/bin/sh").arg("-c").arg(script).output() {
+            Ok(output) => (output.stdout, output.status.code()),
+            Err(_) => (Vec::new(), None),
+        }
+    }
+
+    #[test]
+    fn the_read_instrumenter_marks_a_real_guard_without_changing_stdout_or_exit() {
+        let base = crate::testing::scratch_dir("am-grok-diag");
+        let hooks_dir = base.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hooks = hooks_dir.join(super::GROK_HOOKS_FILE);
+        std::fs::write(&hooks, b"{}\n").unwrap();
+
+        let normal = remote_grok_read_script(&hooks_dir.to_string_lossy(), super::grok_hooks_file(None).as_str());
+        let original = run_original(&normal);
+        let handle = Handle::new();
+        let instrumented = run(&normal, &handle, None, None).unwrap();
+        assert!(original.0 == instrumented.stdout, "instrumentation changed the fixed read stdout");
+        assert_eq!(original.1, instrumented.status);
+        assert_eq!(stdout_kind(&instrumented.stdout), StdoutKind::File);
+
+        std::fs::remove_file(&hooks).unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        let rejected = run_original(&normal);
+        let handle = Handle::new();
+        let instrumented = run(&normal, &handle, None, None).unwrap();
+        assert!(rejected.0 == instrumented.stdout, "instrumentation changed the fixed rejected stdout");
+        assert_eq!(rejected.1, instrumented.status);
+        assert!(handle.contains(Code::FileTypeOrSymlink));
+        assert!(handle.contains(Code::ReadReturn));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn install_instrumenter_classifies_real_guards_without_changing_stdout_or_exit() {
+        let env = crate::testing::env().await;
+        let host = format!("grok-install-diag-{}", crate::db::ulid());
+        let home = crate::testing::scratch_dir("am-grok-install-diag");
+        let hooks_dir = home.join(".grok/hooks");
+        let outside = home.join("safe-fixture-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        let conn = env
+            .app
+            .hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        let diag = Handle::new();
+        let sink = diag.clone();
+        let fake_hooks_dir = hooks_dir.clone();
+        let fake_outside = outside.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            if script.starts_with("G=") {
+                return Ok("AM_GROK_MISSING\n".to_owned());
+            }
+
+            std::fs::create_dir_all(fake_hooks_dir.parent().expect("fixture parent"))?;
+            if let Ok(metadata) = std::fs::symlink_metadata(&fake_hooks_dir) {
+                if metadata.file_type().is_symlink() {
+                    std::fs::remove_file(&fake_hooks_dir)?;
+                } else {
+                    std::fs::remove_dir_all(&fake_hooks_dir)?;
+                }
+            }
+            std::os::unix::fs::symlink(&fake_outside, &fake_hooks_dir)?;
+            let original_untrusted = run_original(script);
+            let instrumented_untrusted = run(script, &sink, None, None)
+                .map_err(|error| anyhow::Error::msg(error.summary()))?;
+            assert!(original_untrusted.0 == instrumented_untrusted.stdout, "installer diagnostics changed untrusted stdout");
+            assert_eq!(original_untrusted.1, instrumented_untrusted.status, "installer diagnostics changed untrusted exit");
+            assert!(original_untrusted.0.as_slice() == b"AM_GROK_UNTRUSTED\n", "untrusted fixture missed its fixed branch");
+            assert_eq!(instrumented_untrusted.status, Some(0));
+
+            std::fs::remove_file(&fake_hooks_dir)?;
+            std::fs::create_dir_all(&fake_hooks_dir)?;
+            std::fs::write(fake_hooks_dir.join(super::GROK_HOOKS_FILE), b"safe fixture\n")?;
+            let original_changed = run_original(script);
+            let instrumented_changed = run(script, &sink, None, None)
+                .map_err(|error| anyhow::Error::msg(error.summary()))?;
+            assert!(original_changed.0 == instrumented_changed.stdout, "installer diagnostics changed changed-guard stdout");
+            assert_eq!(original_changed.1, instrumented_changed.status, "installer diagnostics changed changed-guard exit");
+            assert!(original_changed.0.as_slice() == b"AM_GROK_CHANGED\n", "changed fixture missed its fixed branch");
+            assert_eq!(instrumented_changed.status, Some(0));
+            assert!(sink.contains(Code::InstallUntrusted));
+            assert!(sink.contains(Code::InstallChanged));
+            Ok("AM_GROK_INSTALLED\n".to_owned())
+        });
+
+        super::install_remote_grok_hook(&conn, &serde_json::json!({}), None)
+            .await
+            .unwrap_or_else(|_| panic!("test installer flow failed"));
+        assert!(diag.contains(Code::InstallUntrusted), "{}", diag.summary());
+        assert!(diag.contains(Code::InstallChanged), "{}", diag.summary());
+        env.app.hosts.remove(&env.app, &host).await;
+    }
+
+    #[test]
+    fn diagnostics_discard_unknown_stderr_bound_records_and_reject_changed_generators() {
+        let handle = Handle::new();
+        let sentinel = b"UNKNOWN_SENTINEL_WITH_PATH_OR_PAYLOAD";
+        handle.record_output(Some(0), b"AM_GROK_UNTRUSTED\n", b"AM_DIAG:G:ROOT_SYMLINK\nUNKNOWN_SENTINEL_WITH_PATH_OR_PAYLOAD\n");
+        assert!(handle.contains(Code::RootSymlink));
+        assert!(!handle.summary().contains(std::str::from_utf8(sentinel).unwrap()));
+
+        for _ in 0..RECORD_LIMIT + 2 {
+            handle.record_code(Code::FdOpen);
+        }
+        assert_eq!(handle.length_and_overflow(), (RECORD_LIMIT, 3));
+
+        let script = remote_grok_read_script("/tmp/g", "hooks.json");
+        let missing_callsite = script.replace("[ -L \"$G\" ] && am_bad", "[ -L \"$G\" ] && true");
+        assert!(instrument(&missing_callsite).is_err(), "missing required G guard was accepted");
+        let duplicate_callsite = format!("{script}\n[ -L \"$G\" ] && am_bad\n");
+        assert!(instrument(&duplicate_callsite).is_err(), "duplicate G guard was accepted");
+    }
+}
+
 fn parse_remote_grok_file(out: &str) -> anyhow::Result<Option<(String, String)>> {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -3843,22 +4279,20 @@ mod remote_install_permission_tests {
             remote_path: String::new(),
         }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
-        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let diag = super::remote_grok_diagnostic_tests::Handle::new();
         let sink = diag.clone();
-        let (dir, file) = (hooks_dir.clone(), hooks_path.clone());
         crate::hosts::set_ssh_fake(&host, move |script| {
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
-            if !out.status.success() {
-                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+            let out = super::remote_grok_diagnostic_tests::run(script, &sink, None, None)
+                .map_err(|error| anyhow::Error::msg(error.summary()))?;
+            if out.status != Some(0) {
+                anyhow::bail!("test remote script exit status: {:?}", out.status);
             }
-            let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            if script.starts_with("G=") && text.starts_with("AM_GROK_UNTRUSTED") {
-                *sink.lock().unwrap() = super::remote_grok_merge_tests::read_script_diag(script, &[dir.as_path(), file.as_path()]);
-            }
-            Ok(text)
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         });
 
-        install_remote_grok_hook(&conn, &json!({}), None).await.unwrap_or_else(|e| panic!("{e:#}\n{}", diag.lock().unwrap()));
+        install_remote_grok_hook(&conn, &json!({}), None)
+            .await
+            .unwrap_or_else(|_| panic!("remote Grok install failed: {}", diag.summary()));
 
         let installed: Value = serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
         assert_eq!(mode_of(&hooks_dir), 0o700, "remote hooks directory must not let other users replace commands");
@@ -3900,15 +4334,23 @@ mod remote_install_permission_tests {
             remote_path: String::new(),
         }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
-        crate::hosts::set_ssh_fake(&host, |script| {
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
-            if !out.status.success() {
-                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+        let diag = super::remote_grok_diagnostic_tests::Handle::new();
+        let sink = diag.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            let out = super::remote_grok_diagnostic_tests::run(script, &sink, None, None)
+                .map_err(|error| anyhow::Error::msg(error.summary()))?;
+            if out.status != Some(0) {
+                anyhow::bail!("test remote script exit status: {:?}", out.status);
             }
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         });
 
-        assert!(install_remote_grok_hook(&conn, &json!({}), None).await.is_err(), "a directory isn't an absent hooks file");
+        assert!(
+            install_remote_grok_hook(&conn, &json!({}), None).await.is_err(),
+            "a directory isn't an absent hooks file; {}",
+            diag.summary()
+        );
+        assert!(diag.contains(super::remote_grok_diagnostic_tests::Code::FileTypeOrSymlink), "{}", diag.summary());
         assert_eq!(std::fs::read_to_string(user_file).unwrap(), "leave this directory alone");
         assert_eq!(std::fs::read_dir(&hooks_path).unwrap().count(), 1, "don't install a JSON file inside the user's directory");
     }
@@ -3985,28 +4427,20 @@ mod remote_grok_merge_tests {
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let remote_home = home.to_string_lossy().into_owned();
         let fake_home = remote_home.clone();
-        let diag = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let diag = super::remote_grok_diagnostic_tests::Handle::new();
         let sink = diag.clone();
-        let (dir, file) = (hooks.parent().unwrap().to_path_buf(), hooks.clone());
         crate::hosts::set_ssh_fake(&host, move |script| {
-            let out = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(script)
-                .env("HOME", &fake_home)
-                .output()?;
-            if !out.status.success() {
-                anyhow::bail!("remote script failed: {}", String::from_utf8_lossy(&out.stderr));
+            let out = super::remote_grok_diagnostic_tests::run(script, &sink, Some(&fake_home), None)
+                .map_err(|error| anyhow::Error::msg(error.summary()))?;
+            if out.status != Some(0) {
+                anyhow::bail!("test remote script exit status: {:?}", out.status);
             }
-            let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            if script.starts_with("G=") && text.starts_with("AM_GROK_UNTRUSTED") {
-                *sink.lock().unwrap() = read_script_diag(script, &[dir.as_path(), file.as_path()]);
-            }
-            Ok(text)
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         });
 
         super::install_remote_grok_hook(&conn, &json!({"GROK_HOME": grok_home.to_string_lossy()}), None)
             .await
-            .unwrap_or_else(|e| panic!("{e:#}\n{}", diag.lock().unwrap()));
+            .unwrap_or_else(|_| panic!("remote Grok install failed: {}", diag.summary()));
         let actual: Value = serde_json::from_slice(&std::fs::read(&hooks).unwrap()).unwrap();
         assert_eq!(actual["note"], "keep this");
         let commands = |event: &str| -> Vec<String> {
