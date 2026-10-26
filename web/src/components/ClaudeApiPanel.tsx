@@ -246,7 +246,20 @@ export function ClaudeApiPanel() {
             })}
           </p>
           {ledger.rows.length === 0 ? (
-            <p className="hint">{t('還沒有呼叫記錄。')}</p>
+            <div className="hint" data-testid="claude-api-empty-ledger">
+              <p>{t('還沒有呼叫記錄。')}</p>
+              <p>{t('本帳本只保留目前 daemon 行程的記憶體記錄，重啟後會清空；不包含 Claude Code、Codex 或其他 CLI 聊天。')}</p>
+              <p>{t('用途未啟用、key 無法使用或每小時額度已滿時，不會送出請求，也不會記入帳本。')}</p>
+              {!settings.key_present && <p>{t('共用 API key 尚未就緒，請到「設定」查看原因。')}</p>}
+              <p>
+                {settings.uses.some((u) => u.enabled && (u.legacy_section !== null || settings.enabled))
+                  ? t('目前已啟用的用途：{uses}。啟用不會立即呼叫 API，仍須觸發對應工作；既有快取可能不需再次呼叫。', {
+                    uses: settings.uses.filter((u) => u.enabled && (u.legacy_section !== null || settings.enabled)).map((u) => u.label).join('、'),
+                  })
+                  : t('目前沒有已啟用的 API 用途（更新框翻譯依自己的開關計算）。')}
+              </p>
+              <p>{t('取得 changelog 失敗或沒有待處理版本時，也不會觸發分診 API。')}</p>
+            </div>
           ) : (
             <div className="claude-api-ledger-scroll">
               <table className="as-cards">

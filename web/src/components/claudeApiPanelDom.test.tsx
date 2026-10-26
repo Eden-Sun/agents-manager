@@ -31,11 +31,11 @@ const ledger = {
   rows: [{ at: '2026-10-23T08:12:03.120Z', use: 'changelog_review', model: 'claude-sonnet-5-5', ms: 4210, ok: true, error_kind: null, input_tokens: 3480, output_tokens: 610, stop_reason: 'end_turn' }],
 }
 
-function stub(state: Record<string, unknown>, puts: unknown[]) {
+function stub(state: Record<string, unknown>, puts: unknown[], book: typeof ledger = ledger) {
   globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const path = String(input).replace(/^\/api/, '').split('?')[0]
     if (path === '/session') return new Response(JSON.stringify({ token: 'test-token' }), { status: 200 })
-    if (path === '/claude-api/ledger') return new Response(JSON.stringify(ledger), { status: 200 })
+    if (path === '/claude-api/ledger') return new Response(JSON.stringify(book), { status: 200 })
     if (path === '/claude-api/settings' && init?.method === 'PUT') {
       puts.push(JSON.parse(String(init.body)))
       return new Response(JSON.stringify(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) })), { status: 200 })
@@ -132,4 +132,61 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
   assert.equal(formPanel.hasAttribute('hidden'), false)
   assert.equal(bookPanel.hasAttribute('hidden'), true)
+})
+
+const emptyLedger = {
+  totals: { calls: 0, ok: 0, errors: 0, input_tokens: 0, output_tokens: 0 },
+  by_use: {},
+  rows: [],
+}
+
+test('零呼叫說明重啟清空、CLI 排除及送出前被擋不記帳，啟用不等於已呼叫', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [], emptyLedger)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
+  assert.match(text, /記憶體記錄，重啟後會清空/)
+  assert.match(text, /不包含 Claude Code、Codex 或其他 CLI 聊天/)
+  assert.match(text, /用途未啟用、key 無法使用或每小時額度已滿.*不會記入帳本/)
+  assert.match(text, /目前已啟用的用途：AGM 解析 changelog/)
+  assert.match(text, /啟用不會立即呼叫 API/)
+  assert.match(text, /取得 changelog 失敗或沒有待處理版本/)
+  assert.doesNotMatch(text, /共用 API key 尚未就緒|一切正常/)
+})
+
+test('空帳本顯示共用 key 未就緒與沒有啟用用途，避免只顯示零', async () => {
+  stub(settings({}), [], emptyLedger)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
+  assert.match(text, /共用 API key 尚未就緒/)
+  assert.match(text, /目前沒有已啟用的 API 用途/)
+})
+
+test('空帳本的用途狀態尊重總開關，但翻譯仍按自己的開關計算', async () => {
+  const configured = uses(true)
+  configured[1].enabled = true
+  stub(settings({ enabled: false, key_present: true, key_error: null, uses: configured }), [], emptyLedger)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
+  assert.match(text, /目前已啟用的用途：更新框翻譯/)
+  assert.doesNotMatch(text, /AGM 解析 changelog|目前沒有已啟用/)
+})
+
+test('空帳本顯示已存的用途，未儲存的表單變更不假裝已生效', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [], emptyLedger)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  root.querySelector<HTMLInputElement>('.claude-api-panel > .claude-api-switch input')!.click()
+  await settle()
+  assert.match(root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? '', /目前已啟用的用途：AGM 解析 changelog/)
+})
+
+test('已有呼叫記錄時保留帳表，不顯示空帳本診斷', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.equal(root.querySelector('[data-testid=claude-api-empty-ledger]'), null)
+  assert.equal(root.querySelectorAll('#api-book tbody tr').length, 1)
 })
