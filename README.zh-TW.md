@@ -181,7 +181,7 @@ scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```
 
-受管 agent pane 在 daemon 更新後，也會把一般 `cargo build/run/test` 導向這個入口；`cargo dev` 建 daemon 時同樣使用它。沒有 Blaze 時會明講並退回 Cargo。release／自訂 profile、跨目標編譯、`check`、Clippy、格式檢查及 `scripts/check.sh`／CI 使用原生 Cargo。設 `AGM_RUST_ENGINE=cargo` 可停用，設 `blaze` 則要求加速器必須可用。首次建置需要載入專案，只有相容的暖態修改才能省掉重編與連結。工具鏈、記憶體與排錯方式見[建置引擎與快取](docs/BUILD-CACHE.md)。
+受管 agent pane 在 daemon 更新後，也會把一般 `cargo build/run` 導向這個入口；`cargo dev` 建 daemon 時同樣使用它。沒有 Blaze 時會明講並退回 Cargo。release／自訂 profile、跨目標編譯、`check`、Clippy、格式檢查及 `scripts/check.sh`／CI 使用原生 Cargo。`test` 一律保留原生 Cargo 與既有遠端主機（r7）分流，設 `AGM_RUST_ENGINE=blaze` 也不改測試路徑。Mac 預設原生 Cargo，只有明確設 `blaze` 才啟用 build/run 加速。共用專案 daemon 預設 worker 軟預算 8 GiB、閒置 600 秒退出；設 `AGM_RUST_ENGINE=cargo` 可停用。首次建置需要載入專案，只有相容的暖態修改才能省掉重編與連結。工具鏈、記憶體與排錯方式見[建置引擎與快取](docs/BUILD-CACHE.md)。
 
 **開發模式**（daemon 在 `0.0.0.0:7788`，Vite dev server 在 `0.0.0.0:5173`）：
 

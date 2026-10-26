@@ -181,7 +181,7 @@ scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```
 
-Managed agent panes also route ordinary `cargo build/run/test` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing Blaze falls back to Cargo with a message. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Set `AGM_RUST_ENGINE=cargo` to opt out, or `blaze` to require the accelerator. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
+Managed agent panes also route ordinary `cargo build/run` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing Blaze falls back to Cargo with a message. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Tests always retain native Cargo and the configured remote worker route (r7); even `AGM_RUST_ENGINE=blaze` does not change this. macOS defaults to native Cargo; `AGM_RUST_ENGINE=blaze` explicitly opts build/run in. The shared project daemon defaults to an 8 GiB soft worker budget and a 600-second idle timeout. Set `AGM_RUST_ENGINE=cargo` to opt out. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
 
 **Development mode** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
 
