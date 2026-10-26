@@ -76,7 +76,8 @@ Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳�
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
 沒有另外做一套獨立的 pane 文字解析（`✻ Cooked for …`）當權威來源——`agent_status` 本身已經是
-claude／codex／grok 三種 pane 統一之後的結果（hook、poller、terminal fallback 都在寫它），另開一條
+claude／codex／grok 三種 pane 統一之後的結果（由 herdr 狀態事件、對帳等路徑維護，poller 依 live pane 補正；
+hookrecv 不直接寫入這一欄），另開一條
 平行的「activity」狀態機只會多一份可能跟它分岔的真相。挑 trigger 而不是在每個寫入點各補一行：
 寫入點分散在 `events`／`reconcile`／`default_session`／`bulk_restart`／`stuck_turns` 好幾個檔，
 漏一處就會讓某條路徑的起點跟丟。前端（`RunElapsed`／`lib/elapsed.ts` 的 `activityStartedAt`）
