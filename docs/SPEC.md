@@ -4505,6 +4505,15 @@ agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-to
 ### 16.3c kind 啟用開關（使用者 2026-11-14：grok 不訂閱）
 kind × host 一格：`kind_prefs` 表（`identity_prefs` 同一個 migration）。停用後不挑、不派、不啟動、不探測；已在跑的 Bot 不殺，重啟與 resume 擋下並回 409 `kind_disabled`。網頁在身份頁的「CLI 種類（本機）」切換。還沒做：新增 Bot 的 kind 選單與自動挑選不隱藏該 kind（目前靠 409 擋），狀態列與總計額度不隱藏，停用後標「kind 已停用」徽章。
 
+### 16.4 刪除 shell alias（保留登入資料）
+`DELETE /api/hosts/{name}/shell-identities/{identity}?kind=claude` 是明確的 alias 刪除；它不等同 `DELETE /api/identities/{name}?host=`，後者只刪 config.toml 的 `[[identities]]`。此 endpoint 只收 `kind=claude` 與 `cc0`…`cc6`，僅 User principal 可呼叫；它不登出、不刪 Claude 憑證目錄、不清對話或歷史，也不重啟 shell／Bot。
+
+daemon 只接受唯一的直接單行 alias 定義。本機 bash（目前 `SHELL=/bin/bash`）支援 `.bashrc` 候選；login profile 可直接載入 `.bashrc`，或只用明確的 `if [ -f …/.bashrc ]; then source …/.bashrc; fi` 條件區塊載入它，且 `.bash_aliases` 不存在。zsh（包含 m4p）候選為 `.zshrc`，`ZDOTDIR` 必須未設定或等於 `HOME`，其他使用者 startup 檔須不存在或只有註解／空行。候選檔可含註解、受限的靜態 `PATH`／`PS1`／`LANG`／`TERM`／`LC_*` 設定與其他直接單行靜態 alias；這些行原樣保留，target alias 行仍限 `alias ccN='[可選 CLAUDE_CONFIG_DIR=…] claude [靜態參數]'` 且唯一。所有其他非註解行（例如 `eval`、函式、複合命令、未知 `source`／generated chain）都拒絕；此支援 floor 不是一般 bashrc／zshrc 解譯器。來源不明、重複、複合／動態 target alias、symlink、hard link 數不為一、檔案非本人擁有、group/world 可寫或有 extended ACL/xattr 都拒絕。commit 前對暫存候選檔跑 `bash -n`／`zsh -n` 並丟棄 stderr；替換時保留 owner/group/mode。
+
+登入 shell 的 alias 探測結果不附來源檔資訊。daemon 對照允許的 startup 檔候選與當下有效 alias 值，只能證明探測時兩者相符，不能證明 shell 的實際 provenance 或排除未檢查的系統級 startup 設定。流程先建立、重讀驗證永久 `0600` 原檔備份並回確認路徑與候選 hash，這一步不改 startup 檔；commit 再比對原檔與已存在備份、跑候選語法檢查，然後以同目錄暫存檔、`fsync`、atomic rename 寫入，隨後執行 login-shell 重探。備份確認後的 commit／probe／reference 錯誤都回傳已確認的 `backup_path`；commit 回覆遺失時嘗試以該備份條件式恢復；備份不自動刪除。成功後推 `host_changed` 更新身份快照。
+
+備份位置由 daemon 在 prepare 前產生；prepare 回應遺失時只重讀該路徑核對，不重寫。仍無法確認則回 `alias_backup_unconfirmed` 與預定 `backup_path`（不宣稱檔案存在），原 rc 不改。備份目錄與檔案同樣檢查 ACL/xattr；失敗回復不成功時明確回 `alias_restore_conflict`。操作前後精確檢查同一 `(host, claude, ccN)` 的 Bot、active runtime identity、`supervisors`（含 patrol）與 `supervisor_roles` 引用；supervisor rows 透過自己的 `project_id`，沒有時才用關聯 Bot 的 project，限定精確 host。回傳 ref type 為 bot/runtime/supervisor/supervisor_role；runtime 的 id 是 run id。有明確引用回 409 並列出 reference。未綁 identity 的 Bot 即使使用同一個預設帳號，也不算引用，因刪除 alias 不刪憑證。操作期間若出現新引用或重探仍看得到 alias，僅在目前檔案內容仍等於本次候選時條件式恢復原檔；若比對不符就保留現況與備份並回報 `restored:false`。同 host 的 alias 刪除彼此序列化；其他 config writer 與外部編輯器沒有共用 admission lock。hash/stat 檢查到 rename 仍有 TOCTOU 窗口，這不是核心層 compare-and-swap，不能宣稱零覆蓋風險或線性化。UI 確認需列出 host 與 alias，並說明憑證／歷史保留、備份位置及外部編輯器競態限制。
+
 ### 16.4a 未知與未登入分開、顯示依據（使用者 2026-11-14）
 `logged_in` 三態：`true`／`false`（問到了：exit 0 且輸出認得）與 `null`（問不到：逾時、輸出無法解析、指令失敗、沒完成）。`null` 不會被寫成未登入；問不到時沿用上次的結果，但 `checked_at` 留上次的時間、`basis` 寫明這次為什麼沒問到，網頁身份列顯示「上次檢查 …」與依據。
 
