@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     script(private/'ra-jit', 'exit 0\n')
     (private/'.agm-blaze-memory-v1').write_text('verified test engine')
     env = {k:v for k,v in os.environ.items() if not k.startswith(('AM_', 'AGM_', 'BLAZE_', 'RA_JIT_')) and k not in ('RUSTUP_TOOLCHAIN', 'RUST_TEST_THREADS')}
-    env.update(PATH=f'{tools}:{os.environ.get("AM_CANARY_DIR", "/nonexistent")}:/usr/bin:/bin', HOME=str(base/'home'), AGM_BLAZE_BIN=str(private), TEST_LOG=str(log))
+    env.update(PATH=f'{tools}:{os.environ.get("AM_CANARY_DIR", "/nonexistent")}:/usr/bin:/bin', HOME=str(base/'home'), AGM_BLAZE_BIN=str(private), AGM_RUST_ENGINE='auto', TEST_LOG=str(log))
     count = 0
     def run(args, expected, **changes):
         global count
@@ -26,6 +26,11 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
         got = json.loads(log.read_text()); assert got['args'] == expected,(args,got,r.stderr)
         count += 1
         return got
+    default_env=env.copy(); default_env.pop('AGM_RUST_ENGINE')
+    default=subprocess.run(['sh',str(root/'scripts/project-cargo.sh'),'build'],env=default_env,capture_output=True,text=True)
+    assert default.returncode==0 and json.loads(log.read_text())['args']==['build']
+    count+=1
+    run(['build'],['build'],AGM_RUST_ENGINE='')
     got=run(['build','-p','xtask'], ['ra-jit','build','-p','xtask'])
     assert got['memory']=='8G' and got['idle']=='600' and got['runtime']==str(base/'home/.cache/agents-manager/blaze')
     got=run(['build'],['ra-jit','build'],AGM_BLAZE_MEMORY_MAX='4G',AGM_BLAZE_IDLE_SECS='120')

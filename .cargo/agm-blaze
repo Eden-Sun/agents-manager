@@ -1,1 +1,1 @@
-# Opt this repository into scripts/project-cargo.sh in managed Cargo panes.
+# Enable the project dispatcher when AGM_RUST_ENGINE is explicitly auto or blaze.

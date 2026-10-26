@@ -517,7 +517,7 @@ am_cargo() {
     # Project opt-in happens before taking a slot: the runner re-enters this shim with
     # `cargo blaze …`, so the whole compiler client still owns exactly one lease.
     # The marker confines this behavior to repositories that explicitly adopt it.
-    if [ "${AGM_RUST_DISPATCHED:-}" != "$$" ] && [ -z "${AM_BUILD_SLOT_HELD:-}" ] && [ "${AGM_RUST_ENGINE:-auto}" != cargo ]; then
+    if [ "${AGM_RUST_DISPATCHED:-}" != "$$" ] && [ -z "${AM_BUILD_SLOT_HELD:-}" ] && [ "${AGM_RUST_ENGINE:-cargo}" != cargo ]; then
         _project=$(pwd -P)
         while [ "$_project" != / ]; do
             if [ -f "$_project/.cargo/agm-blaze" ] && [ -f "$_project/scripts/project-cargo.sh" ]; then

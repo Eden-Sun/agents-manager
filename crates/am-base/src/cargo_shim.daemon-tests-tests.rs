@@ -458,7 +458,7 @@ esac"#
     #[test]
     fn macos_local_project_blaze_dispatch_keeps_one_build_slot_and_requires_opt_in() {
         for sh in shells() {
-            for mode in ["auto", "cargo", "unmarked"] {
+            for mode in ["auto", "cargo", "unmarked", "default"] {
                 let s = Sandbox::new();
                 std::fs::create_dir_all(s.dir.join(".cargo")).unwrap();
                 std::fs::create_dir_all(s.dir.join("scripts")).unwrap();
@@ -473,7 +473,9 @@ esac"#
                 ));
                 let log = s.dir.join("cargo.log");
                 let mut env = lease_env(&s);
-                env.push(("AGM_RUST_ENGINE", if mode == "cargo" { "cargo" } else { "auto" }.into()));
+                if mode != "default" {
+                    env.push(("AGM_RUST_ENGINE", if mode == "cargo" { "cargo" } else { "auto" }.into()));
+                }
                 env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
                 let mut cmd = s.command_in(Some(sh), &s.path());
                 cmd.current_dir(s.dir.join("nested")).args(["build", "-p", "a crate"]);
