@@ -256,15 +256,36 @@ mod tests {
                      [[build.remote.hosts]]\nhost = \"r7\"\nuser = \"r7\"\nmax_concurrent = 1\n\
                      [[build.remote.hosts]]\nhost = \"off\"\nuser = \"x\"\nenabled = false\n";
         let Offload::Go(hosts) = decide(multi) else { panic!("多台照轉") };
-        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local", "r7@r7:22"]);
-        assert_eq!((hosts[1].cargo_jobs, hosts[1].test_threads, hosts[1].max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
-        assert_eq!(hosts[1].password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
+        let labels = hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>();
+        if cfg!(target_os = "linux") {
+            assert_eq!(labels, vec!["local", "r7@r7:22"]);
+        } else {
+            assert_eq!(labels, vec!["r7@r7:22"]);
+            let cfg: crate::config::ConfigFile = toml::from_str(multi).unwrap();
+            let (_, skipped) = usable_targets(cfg.build.remote.targets());
+            assert_eq!(
+                skipped,
+                vec!["設定檔 [build.remote] 的 local 不合法（本機執行器（host = \"local\"）只支援 Linux：守門要 flock 與 /proc）"]
+            );
+        }
+        let r7 = hosts.iter().find(|host| host.target_label() == "r7@r7:22").expect("r7 要照設定順序保留");
+        assert_eq!((r7.cargo_jobs, r7.test_threads, r7.max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
+        assert_eq!(r7.password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
         // 額外主機設錯（主機名不合法、沒寫 user 又沿用到本機執行器的空 user）：只略過那台。
         let bad_extra = "[build.remote]\nenabled = true\nhost = \"local\"\n\
                          [[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n[[build.remote.hosts]]\nhost = \"r9\"\n";
-        let Offload::Go(hosts) = decide(bad_extra) else { panic!("一台設錯不拖累整組") };
-        assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]);
-        let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..hosts[0].clone() }.targets());
+        match decide(bad_extra) {
+            Offload::Go(hosts) => {
+                assert!(cfg!(target_os = "linux"), "只有 Linux 的 local 可用");
+                assert_eq!(hosts.iter().map(BuildRemoteCfg::target_label).collect::<Vec<_>>(), vec!["local"]);
+            }
+            Offload::Local(Some(why)) => {
+                assert!(!cfg!(target_os = "linux"), "Linux 的 local 應保留：{why}");
+                assert_eq!(why, "設定檔 [build.remote] 的 local 不合法（本機執行器（host = \"local\"）只支援 Linux：守門要 flock 與 /proc）");
+            }
+            _ => panic!("全部都錯時要退回本機並講出 local 被略過的原因"),
+        }
+        let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..Default::default() }.targets());
         assert!(ok.is_empty() && skipped.len() == 1 && skipped[0].contains("r7"), "{skipped:?}");
         // 全部都錯：退回本機並講是哪台。
         match decide("[build.remote]\nenabled = true\nhost = \"h;id\"\nuser = \"u\"\n") {
