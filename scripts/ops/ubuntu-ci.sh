@@ -16,6 +16,9 @@
 # 收尾的 agent 不等這一輪；要看結果就 `gh api repos/<repo>/commits/<sha>/status` 或讀 status.json。
 set -euo pipefail
 
+# Final verification must use rustc, including when the managed Cargo shim has Blaze enabled.
+export AGM_RUST_ENGINE=cargo
+
 CI_ROOT="${AGM_CI_ROOT:-${HOME}/.cache/agents-manager/ci}"
 REPO_URL="${AGM_CI_REPO_URL:-git@github.com:Eden-Sun/agents-manager.git}"
 GH_REPO="${AGM_CI_GH_REPO:-Eden-Sun/agents-manager}"

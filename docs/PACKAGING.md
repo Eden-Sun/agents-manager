@@ -1,5 +1,7 @@
 # 打包成 macOS .dmg
 
+正式打包使用原生 Cargo／rustc 的 release 產物；本專案的 Blaze 開發入口不接管 release／跨目標建置。開發迭代與切換方式見 [BUILD-CACHE.md](BUILD-CACHE.md)。
+
 目標：把 `agents-managerd` + web UI 包成一個 **Apple Silicon 專用**的 `AgentsManager.app`，
 再壓成 `.dmg` 給人安裝。**沒有 Apple Developer 帳號**，所以簽章是 ad-hoc，收到的人要手動放行一次。
 

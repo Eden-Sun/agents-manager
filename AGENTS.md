@@ -36,6 +36,11 @@
 - **debug 建置的堆疊**（#1465）：`tokio::spawn`／`TaskTracker::spawn` 一個大的 async 區塊（幾 KB 以上）寫成 `spawn(Box::pin(async move { … }))`——debug 下 tokio 的 spawn 會把 future 以值一層層傳下去，一個 25 KB 的 future 就吃掉 1 MiB 以上；一個 async fn 裡不要排二十幾段各自 await 大 future 的程式（poll 框是每個 await 暫存的總和），按段拆成函式、各自裝箱（見 `runners/supervisor/runtime.rs` 的 `tick_once`）；呼叫端放的是被呼叫 future 的整個值，所以大框的 async fn 要在**被呼叫端**裝箱（`fn x<'a>(…) -> impl Future<Output = T> + 'a { Box::pin(x_body(…)) }`，見 `start.rs` 的 `start_inner`），在呼叫端 `Box::pin(x())` 沒用。守門是 1 MiB 執行緒上的 `the_plain_bot_gate_path_fits_in_a_one_mib_stack`、`a_controller_tick_fits_in_a_one_mib_stack`、`a_restart_fits_in_a_one_mib_stack`（`per_principal_auth_tests`）。
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `crates/am-base/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
+## Rust 開發建置
+- 開發用 `build`／`run`／`test` 預設使用 Blaze：受管 Cargo shim 在本專案有 `.cargo/agm-blaze` 時自動轉交 `scripts/project-cargo.sh`；尚未刷新 shim 或非受管環境直接使用該腳本。`cargo dev` 建 daemon 也走此入口。
+- 每台主機先跑 `scripts/install-blaze.sh`；缺工具時 auto 模式明講並退回 Cargo。要求一定使用 Blaze 可設 `AGM_RUST_ENGINE=blaze`，排錯比對設 `AGM_RUST_ENGINE=cargo`。不要用 `blaze enable` 改使用者全域 Cargo 設定，也不要直接呼叫 Blaze 繞過名額。
+- release、跨目標、自訂 profile、check／Clippy／fmt、`scripts/check.sh` 與 CI 保留原生 Cargo；Blaze 測試不能取代收尾驗證。工具鏈／記憶體與使用方式見 [docs/BUILD-CACHE.md](docs/BUILD-CACHE.md)。
+
 ## 驗證（收尾前必跑）
 - 開始驗證前，必讀 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)；完整的負載閘、Mac 原生驗證、UI 真畫面與 CI 分工都在該檔，這裡不複製第二份。
 - 在自己的 worktree 跑 `CHECK_MAX_LOAD=40 scripts/check.sh changed`；共用基礎或大範圍改動才依細則擴大，不為保險另跑整樹或等待 GitHub Actions。

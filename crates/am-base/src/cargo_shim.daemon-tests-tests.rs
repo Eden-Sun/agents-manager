@@ -111,7 +111,8 @@
                 }
                 None => Command::new(self.dir.join("bin/cargo")),
             };
-            cmd.env("PATH", path);
+            cmd.env("PATH", path).current_dir(&self.dir);
+            cmd.env_remove("AGM_RUST_ENGINE").env_remove("AGM_RUST_DISPATCHED");
             for (key, _) in std::env::vars() {
                 if key.starts_with("AM_") {
                     cmd.env_remove(key);
@@ -451,6 +452,41 @@ esac"#
                     "#!/bin/sh\ncase \"$*\" in\n  *-A*pid=*ppid=*)\n    n=$(cat '{d}/ps.snapshots' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{d}/ps.snapshots'\n    if [ \"$n\" = 2 ] && [ ! -e '{d}/hup.sent' ]; then : > '{d}/hup.sent'; trap '' HUP; kill -HUP 0; fi ;;\nesac\nexec /bin/ps \"$@\"\n"
                 ),
             );
+        }
+    }
+
+    #[test]
+    fn macos_local_project_blaze_dispatch_keeps_one_build_slot_and_requires_opt_in() {
+        for sh in shells() {
+            for mode in ["auto", "cargo", "unmarked"] {
+                let s = Sandbox::new();
+                std::fs::create_dir_all(s.dir.join(".cargo")).unwrap();
+                std::fs::create_dir_all(s.dir.join("scripts")).unwrap();
+                std::fs::create_dir_all(s.dir.join("nested")).unwrap();
+                if mode != "unmarked" {
+                    std::fs::write(s.dir.join(".cargo/agm-blaze"), "").unwrap();
+                }
+                write_exec(s.dir.join("scripts/project-cargo.sh"), "#!/bin/sh\nexec cargo ra-jit \"$@\"\n");
+                s.install_fake_curl(&format!(
+                    "echo \"$*\" >> '{}/curl.log'\ncase \"$*\" in *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}' ;; *release*) printf '{{\"released\":true}}' ;; *) printf '{{}}' ;; esac\n",
+                    s.dir.display()
+                ));
+                let log = s.dir.join("cargo.log");
+                let mut env = lease_env(&s);
+                env.push(("AGM_RUST_ENGINE", if mode == "cargo" { "cargo" } else { "auto" }.into()));
+                env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+                let mut cmd = s.command_in(Some(sh), &s.path());
+                cmd.current_dir(s.dir.join("nested")).args(["build", "-p", "a crate"]);
+                for (key, val) in &env { cmd.env(key, val); }
+                let (_, err, rc) = s.run_group(cmd, None);
+                assert_eq!(rc, 0, "{sh} {mode}: {err}");
+                let logged = std::fs::read_to_string(&log).unwrap();
+                assert_eq!(logged.contains("ra-jit"), mode == "auto", "{logged}");
+                assert!(logged.contains("a crate"), "{logged}");
+                let curl = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
+                assert_eq!(curl.lines().filter(|l| l.contains("acquire")).count(), 1, "{curl}");
+                assert_eq!(curl.lines().filter(|l| l.contains("release")).count(), 1, "{curl}");
+            }
         }
     }
 
@@ -1211,6 +1247,22 @@ esac
             assert_eq!(rc, 0, "{args:?} {extra:?}: {err}");
             let got = std::fs::read_to_string(s.dir.join("nextest.log")).unwrap();
             assert_eq!(got.trim(), want, "{args:?} {extra:?}");
+        }
+    }
+
+    #[test]
+    fn macos_local_blaze_tests_obey_the_scheduler_test_thread_cap() {
+        for plugin in ["blaze", "ra-jit"] {
+            let s = Sandbox::new();
+            let d = s.dir.display();
+            write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"${{RUST_TEST_THREADS-unset}} $*\" > '{d}/blaze.log'\n"));
+            s.install_fake_curl("case \"$*\" in *acquire*) printf '{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30,\"test_threads\":3}' ;; *) printf '{}' ;; esac");
+            let mut env = lease_env(&s);
+            env.push(("RUST_TEST_THREADS", "16".into()));
+            let (_, err, rc) = s.run(&as_refs(&env), &[plugin, "test", "--", "--test-threads=16"]);
+            assert_eq!(rc, 0, "{err}");
+            let got = std::fs::read_to_string(s.dir.join("blaze.log")).unwrap();
+            assert_eq!(got.trim(), format!("3 {plugin} test -- --test-threads=3"), "{err}");
         }
     }
 
