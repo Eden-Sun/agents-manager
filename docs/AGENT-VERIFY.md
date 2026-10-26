@@ -4,7 +4,7 @@
 
 ## 建置引擎
 
-Linux／Mac 開發 `build/run` 預設以 `AGM_RUST_ENGINE=auto` 透過受管 shim 或 `scripts/project-cargo.sh` 嘗試 Blaze，詳見 [BUILD-CACHE.md](BUILD-CACHE.md)。收尾入口 `scripts/check.sh` 與 Ubuntu CI 強制 `AGM_RUST_ENGINE=cargo`，連其下的 Cargo shim／xtask 都維持原生 rustc；macOS 原生驗證、release／打包、check／Clippy／fmt 同樣使用原生 Cargo。`test` 一律保留原生 Cargo 與 r7 等設定的遠端分流。Blaze 開發建置不算最終驗證，仍須執行以下收尾檢查。安裝與背景 worker 不會由驗證入口自動啟動。
+Linux／Mac 開發 `build/run` 預設以 `AGM_RUST_ENGINE=blaze` 透過受管 shim 或 `scripts/project-cargo.sh` 要求 Blaze（缺工具時失敗，切換 Cargo 須明確設定），詳見 [BUILD-CACHE.md](BUILD-CACHE.md)。收尾入口 `scripts/check.sh` 與 Ubuntu CI 強制 `AGM_RUST_ENGINE=cargo`，連其下的 Cargo shim／xtask 都維持原生 rustc；macOS 原生驗證、release／打包、check／Clippy／fmt 同樣使用原生 Cargo。`test` 一律保留原生 Cargo 與 r7 等設定的遠端分流。Blaze 開發建置不算最終驗證，仍須執行以下收尾檢查。安裝與背景 worker 不會由驗證入口自動啟動。
 
 ## 驗證（收尾前必跑）
 - **瀏覽器簡稱（使用者 2026-10-14）**：對話與派工中的 `ab` 一律指 `agent-browser`；實際 CLI 指令仍用 `agent-browser`，沿用自己的 `--session <agent 名>`，做完 `close`。

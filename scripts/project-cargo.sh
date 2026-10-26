@@ -1,7 +1,7 @@
 #!/bin/sh
 # Development Cargo entrypoint. Re-enter the managed Cargo shim so Blaze keeps its build slot.
 set -eu
-engine=${AGM_RUST_ENGINE:-auto}
+engine=${AGM_RUST_ENGINE:-blaze}
 case "$engine" in auto|blaze|cargo) ;; *) echo "project-cargo: AGM_RUST_ENGINE must be auto, blaze or cargo" >&2; exit 2 ;; esac
 AGM_RUST_DISPATCHED=$$
 export AGM_RUST_DISPATCHED
