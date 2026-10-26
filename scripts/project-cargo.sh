@@ -32,7 +32,9 @@ if ! command -v rustup >/dev/null 2>&1; then
     PATH="${PATH}:${HOME}/.cargo/bin"
     export PATH
 fi
-if ! rustup run 1.99.0 rustc --version >/dev/null 2>&1; then
+# Resolve the fixed toolchain without starting rustc for every warm build. `which`
+# can return a missing path, so also require a regular, executable compiler file.
+if ! blaze_rustc=$(rustup which --toolchain 1.99.0 rustc 2>/dev/null) || [ ! -f "$blaze_rustc" ] || [ ! -x "$blaze_rustc" ]; then
     if [ "$engine" = blaze ]; then echo "project-cargo: Rust 1.99.0 is required; run scripts/install-blaze.sh" >&2; exit 127; fi
     echo "project-cargo: Blaze needs Rust 1.99.0; using Cargo (install: scripts/install-blaze.sh)" >&2
     exec cargo "$@"

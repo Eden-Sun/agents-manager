@@ -11,7 +11,8 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     def script(path, body):
         path.write_text('#!/bin/sh\n' + body); path.chmod(0o755)
     script(tools/'cargo', 'exec python3 - "$@" <<\'REC\'\nimport os,json,sys\nwith open(os.environ["TEST_LOG"], "w") as f: json.dump({"args":sys.argv[1:],"toolchain":os.getenv("RUSTUP_TOOLCHAIN"),"tests":os.getenv("RA_JIT_TESTS"),"threads":os.getenv("RUST_TEST_THREADS"),"memory":os.getenv("RA_JIT_MEMORY_MAX"),"idle":os.getenv("RA_JIT_IDLE_SECS"),"runtime":os.getenv("RA_JIT_HOME")},f)\nsys.exit(int(os.getenv("TEST_EXIT","0")))\nREC\n')
-    script(tools/'rustup', 'exit "${TEST_RUSTUP_EXIT:-0}"\n')
+    script(tools/'rustc', 'exit 0\n')
+    script(tools/'rustup', 'printf "%s\\n" "${TEST_RUSTC_PATH:-' + str(tools/'rustc') + '}"\nexit "${TEST_RUSTUP_EXIT:-0}"\n')
     script(tools/'uname', 'case "$1" in -s) echo "${TEST_OS:-Linux}";; -m) echo "${TEST_ARCH:-x86_64}";; esac\n')
     script(private/'cargo-ra-jit', 'exit 0\n')
     script(private/'ra-jit', 'exit 0\n')
@@ -45,6 +46,17 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     run(['run','--','--release'], ['ra-jit','run','--','--release'])
     run(['build'],['build'],AGM_RUST_ENGINE='cargo')
     run(['build'],['build'],TEST_RUSTUP_EXIT='1')
+    run(['build'],['build'],TEST_RUSTC_PATH=str(base/'missing-rustc'))
+    (base/'not-executable').write_text('not an executable')
+    run(['build'],['build'],TEST_RUSTC_PATH=str(base/'not-executable'))
+    run(['build'],['build'],TEST_RUSTC_PATH=str(tools))
+    for compiler in [base/'missing-rustc', base/'not-executable', tools]:
+        log.unlink(missing_ok=True)
+        bad = subprocess.run(['sh', str(root/'scripts/project-cargo.sh'), 'build'],
+            env=env|{'AGM_RUST_ENGINE':'blaze', 'TEST_RUSTC_PATH':str(compiler)}, capture_output=True, text=True)
+        assert bad.returncode == 127 and not log.exists(), (compiler, bad.returncode, bad.stderr)
+        assert 'Rust 1.99.0 is required' in bad.stderr, (compiler, bad.stderr)
+        count += 1
     run(['build'],['build'],TEST_OS='Darwin',TEST_ARCH='x86_64')
     run(['build'],['ra-jit','build'],TEST_EXIT='42')
     script(private/'cargo-blaze','exit 0\n')
