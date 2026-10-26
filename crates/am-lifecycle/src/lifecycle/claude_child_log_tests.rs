@@ -265,8 +265,8 @@ fn transcript_discovery_fails_closed_when_a_session_id_is_ambiguous() {
 /// run 已記錄的路徑優先於其它 worktree 的同 id transcript。
 #[test]
 fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
-    let dir = tt::track(std::env::temp_dir().join(format!("am-claude-recorded-{}", ulid::Ulid::new())));
-    let root = dir.join("root");
+    let root = tt::scratch_dir("am-claude-recorded");
+    assert_eq!(root, root.canonicalize().unwrap(), "fixture root must be canonical");
     let a = root.join(format!("projects/-a/{SID}.jsonl"));
     let b = root.join(format!("projects/-b/{SID}.jsonl"));
     std::fs::create_dir_all(a.parent().unwrap()).unwrap();
@@ -289,6 +289,37 @@ fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
         Some((b.to_string_lossy().into_owned(), "QUESTION-B".into())),
         "run.transcript_path 必須精確選到記錄的 worktree"
     );
+
+    #[cfg(unix)]
+    {
+        let alias_root = root.join("root-alias");
+        std::os::unix::fs::symlink(&root, &alias_root).unwrap();
+        let alias_b = alias_root.join(format!("projects/-b/{SID}.jsonl"));
+        assert_eq!(alias_root.canonicalize().unwrap(), root);
+        assert!(alias_b.is_file(), "the symlink alias must resolve to B's transcript");
+        let alias_script = format!(
+            "python3 -I -c {} {} 64 {} {} {}",
+            sh_quote(include_str!("claude_child_tail.py")),
+            sh_quote(SID),
+            sh_quote(LOG_MARK),
+            sh_quote(alias_b.to_string_lossy().as_ref()),
+            sh_quote(alias_root.to_string_lossy().as_ref()),
+        );
+        let alias_out = std::process::Command::new("sh")
+            .args(["-c", &alias_script])
+            .output()
+            .unwrap();
+        assert!(
+            alias_out.status.success(),
+            "reader errored instead of rejecting a symlinked root: {}",
+            String::from_utf8_lossy(&alias_out.stderr)
+        );
+        assert_eq!(
+            split_output(&String::from_utf8(alias_out.stdout).unwrap()),
+            None,
+            "reader must reject a symlinked root through O_NOFOLLOW"
+        );
+    }
 }
 
 #[test]
