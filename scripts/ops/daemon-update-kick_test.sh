@@ -128,7 +128,7 @@ STUB
   : > "$AGM_DIR/daemon-update.log"
 }
 teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; }
-run() { bash "$SCRIPT" >/dev/null 2>&1; echo $?; }
+run() { bash "$SCRIPT" >/dev/null 2>"$AGM_DIR/stderr.log"; echo $?; }
 ci() { echo "$2" > "$ROOT/ci/$1"; }   # ci <sha> <state>
 LOG() { echo "$AGM_DIR/daemon-update.log"; }
 
@@ -350,13 +350,29 @@ export STUB_SWAP_RC=3
 run >/dev/null
 check_eq "第 1 次失敗請求檔還在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
 check_eq "失敗計數是 1" "$C1 1" "$(cat "$AGM_DIR/daemon-update.now.fails")"
+check_eq "首次失敗沒有缺計數檔的 stderr" "" "$(cat "$AGM_DIR/stderr.log")"
 run >/dev/null
 check_eq "第 2 次失敗請求檔還在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "失敗計數是 2" "$C1 2" "$(cat "$AGM_DIR/daemon-update.now.fails")"
 check_no "還沒到上限不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
 run >/dev/null
 check_eq "第 3 次失敗收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-check "推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+check_eq "到上限只推一次 now_failed" "1" "$(count '^now_failed$' "$AGM_DIR/alerts.log")"
 check_eq "收掉後計數檔也清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
+teardown
+
+# 16d2. 新 sha 不沿用舊 sha 的失敗次數；成功後清掉請求與計數。
+setup
+echo "$C1 2" > "$AGM_DIR/daemon-update.now.fails"
+printf '{"sha":"%s"}' "$C3" > "$AGM_DIR/daemon-update.now.json"
+export STUB_SWAP_RC=3
+run >/dev/null
+check_eq "新 sha 的失敗次數從 1 開始" "$C3 1" "$(cat "$AGM_DIR/daemon-update.now.fails")"
+check_no "新 sha 不因舊計數提早推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+export STUB_SWAP_RC=0
+run >/dev/null
+check_eq "成功後請求檔清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "成功後失敗計數清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
 teardown
 
 # 16e. 立即部署一直等窗口（rc=4）：不算失敗，請求檔留著、不累計。
@@ -367,6 +383,11 @@ run >/dev/null; run >/dev/null; run >/dev/null
 check_eq "rc=4 三輪請求檔仍在" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
 check_eq "rc=4 不累計失敗" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
 check_no "rc=4 不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
+echo "$C1 2" > "$AGM_DIR/daemon-update.now.fails"
+run >/dev/null
+check_eq "rc=4 清掉已有失敗計數" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
+check_eq "rc=4 有舊計數時仍保留請求" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_no "rc=4 有舊計數也不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
 teardown
 
 # 16f. 立即部署遇到 daemon 太舊（rc=9）：做不了，立刻收掉。

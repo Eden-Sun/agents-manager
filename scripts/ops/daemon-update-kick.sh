@@ -219,7 +219,7 @@ drop_now() { rm -f "$NOW_FILE" "$NOW_FAILS"; log "收掉立即部署請求（$1�
 now_fail() { # now_fail <失敗描述>
   [ "$NOW" = 1 ] || return 0
   _nsha=""; _nn=0
-  read -r _nsha _nn < "$NOW_FAILS" 2>/dev/null || true
+  [ -f "$NOW_FAILS" ] && read -r _nsha _nn < "$NOW_FAILS" 2>/dev/null || true
   case "$_nn" in ''|*[!0-9]*) _nn=0 ;; esac
   if [ "$_nsha" = "$NOW_SHA" ]; then _nn=$((_nn + 1)); else _nn=1; fi
   echo "$NOW_SHA $_nn" > "$NOW_FAILS.tmp" && mv -f "$NOW_FAILS.tmp" "$NOW_FAILS"
