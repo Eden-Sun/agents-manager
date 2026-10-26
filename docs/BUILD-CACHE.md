@@ -9,7 +9,7 @@ scripts/install-blaze.sh --source
 AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p agents-managerd
 AGM_RUST_ENGINE=blaze scripts/project-cargo.sh run -p agents-managerd -- serve
 scripts/project-cargo.sh test -p xtask
-AGM_RUST_ENGINE=cargo AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p agents-managerd
+AGM_RUST_ENGINE=cargo scripts/project-cargo.sh build -p agents-managerd
 ```
 
 安裝器固定上游 installer 的 commit，下載的 release 依上游 SHA256SUMS 校驗。工具放 `~/.local/share/agents-manager/blaze/bin`，不寫使用者 Cargo 設定、不執行 `blaze enable`；`AGM_BLAZE_INSTALL_HOME` 可改安裝位置，執行時以 `AGM_BLAZE_BIN` 指到對應 bin。入口把這個目錄加在 PATH 尾端，不蓋掉受管 Cargo shim。安裝器可能下載 Rust 1.99.0 與 rust-src；入口要求這個工具鏈並指定 `RUSTUP_TOOLCHAIN=1.99.0`，使 rustc 輸出與 Blaze 的 ABI 一致，不以其他版本的產物拼接。升級 Blaze 時需重新核對其工具鏈要求。10/20 nightly 不支援 `RA_JIT_MEMORY_MAX`；預設 archive 安裝遇到它會失敗，不寫能力標記。`--source` 改以 Git commit hash 核對同一個固定 revision，在負載／記憶體閘後透過受管 Cargo 建置；六個程式以暫存檔 rename 更新，不覆寫正在執行的舊程式。安裝器檢查引擎含記憶體預算支援後，才寫入 `.agm-blaze-memory-v1`；入口要求標記存在且不早於引擎 binary，未核對的舊工具 auto 退回 Cargo、明確 blaze 則失敗，不能默默沿用無預算服務。
@@ -56,6 +56,13 @@ Ubuntu 16 vCPU、約 63 GiB RAM，Rust 1.99.0、上游固定 source `c8e5f6a88ae
 - 其餘呼叫在 sccache 已安裝且 `--show-stats` 探測成功時使用快取；缺工具或探測失敗就原樣執行 rustc。真正的編譯錯誤仍原樣傳回。
 - 預設 `SCCACHE_DIR=~/.cache/agents-manager-sccache`、`SCCACHE_CACHE_SIZE=10G`，呼叫端可覆寫。每台主機的工作樹共用此快取，各自的 `CARGO_TARGET_DIR` 與 Cargo 建置名額保持獨立。
 - 不假設換工作樹就會命中；Rust 的產物與建置輸入含有路徑差異，實際收益以 `sccache --show-stats` 為準，不共用或手動搬移不同設定的 target 產物。
+
+### 決策紀錄
+
+- **保留工作樹與 target 隔離（#91）**：各 worktree 使用自己的 `CARGO_TARGET_DIR`，避免 Cargo 鎖與半成品互相干擾；sccache 只作額外快取層，不以共用 target 取代隔離。
+- **sccache 0.18.0 的跨 target 限制**：以無 build.rs 的 `once_cell` 重現，同一 target 重編命中 2/2，換 target 後命中 0/2。這個版本的 Rust 快取鍵與各 worktree 獨立 target 的安排存在路徑相關衝突，不能預期跨工作樹命中；`SCCACHE_BASEDIRS` 的 Rust 路徑也未實作，單改此設定不能解決。保留 wrapper 與可選依賴設計，不承諾跨 target 的收益；實際命中仍以統計為準。
+- **保留 workspace incremental（#1440）**：sccache 不支援 Rust 增量編譯。2026-10-11 把 workspace crate 送進 sccache 後，ubuntu-ci daemon 段中位數由 **1m44 增至 8m12**。因此遇到兩種 `-C incremental=…` 寫法都直接呼叫 rustc，連快取健康探測也省掉；不刪除或改寫 incremental 旗標。registry 依賴仍可使用 sccache。
+- **退回不掩蓋失敗**：缺 sccache 或編譯前的健康探測失敗時使用原生 rustc；真正編譯開始後的失敗照實回傳。Blaze 加在 Cargo 入口，沿用這些決定。
 
 ```text
 開發 build/run → project-cargo → 受管 Cargo shim／名額 → Blaze
