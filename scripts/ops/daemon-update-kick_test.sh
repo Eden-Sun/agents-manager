@@ -375,6 +375,24 @@ check_eq "成功後請求檔清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.jso
 check_eq "成功後失敗計數清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
 teardown
 
+# 16d3. 計數路徑存在但讀取失敗須看得見；目錄下的既有 mv／計數行為不在這裡修。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+mkdir "$AGM_DIR/daemon-update.now.fails"
+export STUB_SWAP_RC=3
+run >/dev/null
+check "計數路徑是目錄時 read 錯誤可見" "[Ii]s a directory" "$AGM_DIR/stderr.log"
+check "目錄讀取失敗仍記原 swap 失敗" "daemon-swap 失敗 rc=3" "$(LOG)"
+check_eq "原 mv 把第一次計數放進目錄" "$C1 1" "$(cat "$AGM_DIR/daemon-update.now.fails/daemon-update.now.fails.tmp")"
+run >/dev/null; run >/dev/null; run >/dev/null
+check "重試目錄讀取錯誤仍可見" "[Ii]s a directory" "$AGM_DIR/stderr.log"
+check_eq "目錄故障每輪仍只寫計數 1（既有行為）" "$C1 1" "$(cat "$AGM_DIR/daemon-update.now.fails/daemon-update.now.fails.tmp")"
+check_eq "四輪仍各記原 swap 失敗" "4" "$(count '^[0-9-]* [0-9:]* daemon-swap 失敗 rc=3' "$(LOG)")"
+check "目錄故障連續失敗仍推原 check_failing" "^check_failing$" "$AGM_DIR/alerts.log"
+check_no "目錄計數無法累加而未推 now_failed（既有行為）" "^now_failed$" "$AGM_DIR/alerts.log"
+check_eq "目錄故障四輪後仍留請求（既有行為）" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+teardown
+
 # 16e. 立即部署一直等窗口（rc=4）：不算失敗，請求檔留著、不累計。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
