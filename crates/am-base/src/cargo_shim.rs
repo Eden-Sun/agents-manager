@@ -575,6 +575,7 @@ am_cargo() {
         if [ -n "$_remote_missing" ]; then
             printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${_sub:-cargo}" >&2
         else
+            # The omitted --engine is the Cargo-default wire format; keep old daemon CLIs compatible.
             if [ -n "${AM_DATA_DIR:-}" ]; then
                 "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
             else

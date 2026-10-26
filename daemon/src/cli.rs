@@ -1,8 +1,15 @@
 //! 命令列定義（clap）。住在 lib 裡是因為有測試要拿它驗 hook／statusLine 指令的 argv（`lifecycle::setup`、`build_info`）。
 
 use crate::build_info;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum RemoteCargoEngine {
+    Cargo,
+    Blaze,
+}
 
 #[derive(Parser)]
 #[command(name = "agents-managerd", version = build_info::VERSION)]
@@ -115,7 +122,42 @@ pub enum Cmd {
         /// 照設定順序印每台建置主機的名字就結束（#1956）。
         #[arg(long)]
         list_hosts: bool,
+        /// Engine requested for this remote verification. Blaze is recognized but not enabled yet.
+        #[arg(long, value_enum, default_value = "cargo")]
+        engine: RemoteCargoEngine,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         cargo_args: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_remote_cargo(args: &[&str]) -> RemoteCargoEngine {
+        let cli = Cli::try_parse_from(args.iter().copied()).unwrap();
+        let Cmd::RemoteCargo { engine, .. } = cli.cmd else { panic!("expected remote-cargo") };
+        engine
+    }
+
+    #[test]
+    fn remote_cargo_engine_defaults_to_cargo_and_parses_blaze_explicitly() {
+        assert_eq!(
+            parse_remote_cargo(&["agents-managerd", "remote-cargo", "--config", "config.toml", "--", "test"]),
+            RemoteCargoEngine::Cargo
+        );
+        assert_eq!(
+            parse_remote_cargo(&[
+                "agents-managerd",
+                "remote-cargo",
+                "--config",
+                "config.toml",
+                "--engine",
+                "blaze",
+                "--",
+                "test",
+            ]),
+            RemoteCargoEngine::Blaze
+        );
+    }
 }
