@@ -12,7 +12,7 @@ scripts/project-cargo.sh test -p xtask
 AGM_RUST_ENGINE=cargo scripts/project-cargo.sh build -p agents-managerd
 ```
 
-安裝器固定上游 installer 的 commit，下載的 release 依上游 SHA256SUMS 校驗。工具放 `~/.local/share/agents-manager/blaze/bin`，不寫使用者 Cargo 設定、不執行 `blaze enable`；`AGM_BLAZE_INSTALL_HOME` 可改安裝位置，執行時以 `AGM_BLAZE_BIN` 指到對應 bin。入口把這個目錄加在 PATH 尾端，不蓋掉受管 Cargo shim。安裝器可能下載 Rust 1.99.0 與 rust-src；入口要求這個工具鏈並指定 `RUSTUP_TOOLCHAIN=1.99.0`，使 rustc 輸出與 Blaze 的 ABI 一致，不以其他版本的產物拼接。升級 Blaze 時需重新核對其工具鏈要求。10/20 nightly 不支援 `RA_JIT_MEMORY_MAX`；預設 archive 安裝遇到它會失敗，不寫能力標記。`--source` 改以 Git commit hash 核對同一個固定 revision，在負載／記憶體閘後透過受管 Cargo 建置；六個程式以暫存檔 rename 更新，不覆寫正在執行的舊程式。安裝器檢查引擎含記憶體預算支援後，才寫入 `.agm-blaze-memory-v1`；入口要求標記存在且不早於引擎 binary，未核對的舊工具 auto 退回 Cargo、明確 blaze 則失敗，不能默默沿用無預算服務。
+安裝器固定上游 installer 的 commit，下載的 release 依上游 SHA256SUMS 校驗。工具放 `~/.local/share/agents-manager/blaze/bin`，不寫使用者 Cargo 設定、不執行 `blaze enable`；`AGM_BLAZE_INSTALL_HOME` 可改安裝位置，執行時以 `AGM_BLAZE_BIN` 指到對應 bin。入口把這個目錄加在 PATH 尾端，不蓋掉受管 Cargo shim。安裝器可能下載 Rust 1.99.0 與 rust-src；入口以 `rustup which --toolchain 1.99.0 rustc` 解析並確認編譯器是可執行的一般檔案，不為每次暖建置額外啟動 rustc 查版本；執行仍指定 `RUSTUP_TOOLCHAIN=1.99.0`，使 rustc 輸出與 Blaze 的 ABI 一致，不以其他版本的產物拼接。升級 Blaze 時需重新核對其工具鏈要求。10/20 nightly 不支援 `RA_JIT_MEMORY_MAX`；預設 archive 安裝遇到它會失敗，不寫能力標記。`--source` 改以 Git commit hash 核對同一個固定 revision，在負載／記憶體閘後透過受管 Cargo 建置；六個程式以暫存檔 rename 更新，不覆寫正在執行的舊程式。安裝器檢查引擎含記憶體預算支援後，才寫入 `.agm-blaze-memory-v1`；入口要求標記存在且不早於引擎 binary，未核對的舊工具 auto 退回 Cargo、明確 blaze 則失敗，不能默默沿用無預算服務。
 
 | 路徑 | 執行方式 |
 |---|---|
