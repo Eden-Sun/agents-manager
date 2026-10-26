@@ -10,7 +10,7 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     log = base/'argv.json'
     def script(path, body):
         path.write_text('#!/bin/sh\n' + body); path.chmod(0o755)
-    script(tools/'cargo', 'exec python3 - "$@" <<\'REC\'\nimport os,json,sys\nwith open(os.environ["TEST_LOG"], "w") as f: json.dump({"args":sys.argv[1:],"toolchain":os.getenv("RUSTUP_TOOLCHAIN"),"tests":os.getenv("RA_JIT_TESTS"),"threads":os.getenv("RUST_TEST_THREADS"),"memory":os.getenv("RA_JIT_MEMORY_MAX"),"idle":os.getenv("RA_JIT_IDLE_SECS"),"runtime":os.getenv("RA_JIT_HOME")},f)\nsys.exit(int(os.getenv("TEST_EXIT","0")))\nREC\n')
+    script(tools/'cargo', 'exec python3 - "$@" <<\'REC\'\nimport os,json,sys\nwith open(os.environ["TEST_LOG"], "w") as f: json.dump({"args":sys.argv[1:],"toolchain":os.getenv("RUSTUP_TOOLCHAIN"),"tests":os.getenv("RA_JIT_TESTS"),"threads":os.getenv("RUST_TEST_THREADS"),"memory":os.getenv("RA_JIT_MEMORY_MAX"),"idle":os.getenv("RA_JIT_IDLE_SECS"),"runtime":os.getenv("RA_JIT_HOME"),"blaze_home":os.getenv("BLAZE_HOME"),"rustc_base":os.getenv("RA_JIT_RUSTC_BASE"),"blaze_base":os.getenv("BLAZE_RUSTC_BASE")},f)\nsys.exit(int(os.getenv("TEST_EXIT","0")))\nREC\n')
     script(tools/'rustc', 'exit 0\n')
     script(tools/'rustup', 'printf "%s\\n" "${TEST_RUSTC_PATH:-' + str(tools/'rustc') + '}"\nexit "${TEST_RUSTUP_EXIT:-0}"\n')
     script(tools/'uname', 'case "$1" in -s) echo "${TEST_OS:-Linux}";; -m) echo "${TEST_ARCH:-x86_64}";; esac\n')
@@ -33,7 +33,19 @@ with tempfile.TemporaryDirectory(prefix='agm-blaze-test-') as tmp:
     count+=1
     run(['build'],['ra-jit','build'],AGM_RUST_ENGINE='')
     got=run(['build','-p','xtask'], ['ra-jit','build','-p','xtask'])
-    assert got['memory']=='8G' and got['idle']=='600' and got['runtime']==str(base/'home/.cache/agents-manager/blaze')
+    assert got['memory']=='8G' and got['idle']=='600' and got['runtime']==str(base/'home/.cache/agents-manager/blaze/native-base-v1')
+    assert got['blaze_home']==got['runtime'] and got['rustc_base']==got['blaze_base']=='0'
+    for engine in ['blaze','auto']:
+        got=run(['run'],['ra-jit','run'],AGM_RUST_ENGINE=engine,
+            AGM_BLAZE_RUNTIME_HOME=str(base/'private runtime'),RA_JIT_HOME='/old-ra',
+            BLAZE_HOME='/old-blaze',RA_JIT_RUSTC_BASE='1',BLAZE_RUSTC_BASE='1')
+        assert got['runtime']==got['blaze_home']==str(base/'private runtime/native-base-v1')
+        assert got['rustc_base']==got['blaze_base']=='0'
+    for args,engine in [(['test'],'blaze'),(['build','--release'],'blaze'),(['build'],'cargo')]:
+        got=run(args,args,AGM_RUST_ENGINE=engine,RA_JIT_HOME='/untouched-ra',
+            BLAZE_HOME='/untouched-blaze',RA_JIT_RUSTC_BASE='1',BLAZE_RUSTC_BASE='1')
+        assert got['runtime']=='/untouched-ra' and got['blaze_home']=='/untouched-blaze'
+        assert got['rustc_base']==got['blaze_base']=='1'
     got=run(['build'],['ra-jit','build'],AGM_BLAZE_MEMORY_MAX='4G',AGM_BLAZE_IDLE_SECS='120')
     assert got['memory']=='4G' and got['idle']=='120'
     run(['build'],['ra-jit','build'],TEST_OS='Darwin',TEST_ARCH='arm64')

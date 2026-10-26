@@ -27,9 +27,17 @@ Mac 同樣預設要求 Blaze；缺工具時失敗，須明確設 `AGM_RUST_ENGIN
 
 Blaze 把分析資料與機器碼留在每個使用者共用的背景服務；首次建置、依賴／manifest／建置輸入變動仍可能走 Cargo，局部函式修改才適合快路徑。本專案 daemon 的 `build.rs` 會輸出 commit SHA 與髒樹標記；切換 commit 或 clean→dirty 改變這些輸出時，Blaze 會要求 Cargo 重建再重新載入，所以不能把小型 xtask 的加速倍數套到每一輪 daemon 建置。每個 target dir 照舊獨立，既有 sccache wrapper 照舊處理 rustc 呼叫。背景 worker 可吃數 GiB，且命令結束後仍存在。
 
+### 首次 warm build 的正確性 guard
+
+固定 c8 引擎保存的 dep-info 只有 crate 根檔案，可能漏掉模組修改，讓新載入的 worker 把舊 rustc 產物當作目前來源。入口強制 `RA_JIT_RUSTC_BASE=0` 與 `BLAZE_RUSTC_BASE=0`，由 Blaze 先編自己的完整基底，再對後續修改做增量 patch。`[ra-jit]` 或退出碼 0 不足以證明內容更新，驗證須核對程式輸出。這不改 build/run 的 Blaze 預設，也不改 test／release 的 Cargo 路徑或 SHA／dirty 身分。
+
+此設定不在上游 worker 身分鍵內，因此使用 `native-base-v1` 子目錄隔離先前 worker。入口不殺舊共享服務、不預熱；舊服務照既有閒置政策退出。過渡時兩個 namespace 可能暫時並存，記憶體預算分別計算。首次載入須編完整基底，成本依 workspace 與 worker 狀態而異；暖修改仍使用 Blaze patch。一次隔離完整 daemon 實測中，原生 Cargo 冷建置 279.84 秒，Blaze 426.00 秒（慢約 52%），採樣合計 RSS 峰值分別為 5.40／15.77 GiB；同一 leaf 模組連續三次暖修改為 0.524／0.415／0.382 秒，逐次立即執行均得到新值。該私有實測使用 60 秒閒置，預載 daemon 曾在 Cargo 階段退出，因此冷成本不等同正式 600 秒設定；未做原生暖建置對照，也不外推其他模組或 Mac。
+
+Linux 可明確執行 `python3 scripts/project-cargo_blaze_fixture.py --run` 驗證小型真實 fixture；需已安裝 Blaze。它先過負載／記憶體閘，使用私有 namespace、記錄並清理自己的 PID，逐次驗 build/run、模組修改、語法錯誤與修復後輸出，失敗立即停，不以等待或重跑掩蓋首次錯誤；有界等待只用於確認私有程序收尾退出。此檢查不自動加入 ops；JSON 與 log 留在它印出的暫存目錄。
+
 ### 背景服務預算與清理
 
-入口在啟動 Blaze 前設定 `RA_JIT_MEMORY_MAX=8G`、`RA_JIT_IDLE_SECS=600`（並同步同名 BLAZE 前綴值）。`AGM_BLAZE_MEMORY_MAX`／`AGM_BLAZE_IDLE_SECS` 可明確覆寫。`RA_JIT_HOME` 固定到專案共用 namespace `~/.cache/agents-manager/blaze`（`AGM_BLAZE_RUNTIME_HOME` 可覆寫），避免接到已用上游「半台記憶體、30 分鐘」預設啟動的使用者全域服務。工作樹共用這個 namespace，不是一個 worktree 一顆服務；設定在服務啟動時讀取，修改後須等它正常閒置退出，或先協調所有使用者再重啟。
+入口在啟動 Blaze 前設定 `RA_JIT_MEMORY_MAX=8G`、`RA_JIT_IDLE_SECS=600`（並同步同名 BLAZE 前綴值）。`AGM_BLAZE_MEMORY_MAX`／`AGM_BLAZE_IDLE_SECS` 可明確覆寫。`RA_JIT_HOME` 與 `BLAZE_HOME` 同值，固定到專案共用 namespace `~/.cache/agents-manager/blaze/native-base-v1`（`AGM_BLAZE_RUNTIME_HOME` 可覆寫基底目錄，仍加上 `/native-base-v1`），避免接到已用上游「半台記憶體、30 分鐘」預設啟動的使用者全域服務。工作樹共用這個 namespace，不是一個 worktree 一顆服務；設定在服務啟動時讀取，修改後須等它正常閒置退出，或先協調所有使用者再重啟。
 
 8G 是 worker **軟預算，不是 RSS 硬上限**：上游不會為此終止正在載入／處理請求的 worker，最後使用的 worker 亦可能保留。預算不能取代負載／記憶體閘，也不能當成保證峰值低於 8 GiB。daemon 本身負責閒置 600 秒後退出並回收 worker；agent 負責結束自己啟動的前景 build/run 與暫存工作樹。共享服務仍有其他使用者時不得由單一 agent 擅自清掉；隔離實測服務由啟動者記錄 PID，完成後只清自己的 PID。
 
