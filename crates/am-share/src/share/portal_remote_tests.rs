@@ -38,6 +38,7 @@ struct Remote {
     workspace: PathBuf,
     outbox: PathBuf,
     conn: Arc<crate::hosts::HostConn>,
+    shell_diag: super::remote_fs::test_support::FakeShellDiagnostics,
     base: String,
 }
 
@@ -66,7 +67,7 @@ impl Remote {
 async fn setup(e: &tt::Env, tag: &str) -> Remote {
     let home = super::test_dirs::scratch_dir(&format!("rs3-{tag}"));
     let host = format!("rs3-{tag}-{}", db::ulid().to_lowercase());
-    super::remote_fs::test_support::local_sh_fake(&host, &home);
+    let shell_diag = super::remote_fs::test_support::local_sh_fake_with_diagnostics(&host, &home);
     let cfg = HostCfg {
         name: host.clone(),
         ssh: "fake-ssh".into(),
@@ -88,7 +89,7 @@ async fn setup(e: &tt::Env, tag: &str) -> Remote {
     store::insert_share_bot(&e.app.db, &bot.id, "restricted", &workspace.to_string_lossy()).await.unwrap();
     let token = store::enable(&e.app.db, &bot.id).await.unwrap().expect("a fresh share");
     let base = serve(portal::router(e.app.clone())).await;
-    Remote { bot, token, host, home, workspace, outbox, conn, base }
+    Remote { bot, token, host, home, workspace, outbox, conn, shell_diag, base }
 }
 
 fn jpeg(w: u32, h: u32) -> Vec<u8> {
@@ -104,7 +105,15 @@ fn jpeg(w: u32, h: u32) -> Vec<u8> {
 async fn an_upload_lands_in_the_remote_inbox() {
     let e = tt::env().await;
     let r = setup(&e, "up-ok").await;
+    let _ = r.shell_diag.take();
     let resp = r.upload("note.txt", b"hello remote".to_vec()).await;
+    if resp.status().as_u16() != 200 {
+        eprintln!(
+            "portal upload fake-shell diagnostics: status={} shell={:?}",
+            resp.status().as_u16(),
+            r.shell_diag.take(),
+        );
+    }
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let id = body["id"].as_str().unwrap();
