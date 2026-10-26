@@ -2190,75 +2190,65 @@ enum SourceInvalidation {
 #[derive(Debug, Default)]
 struct ManifestDiffCause {
     count: usize,
-    paths: Vec<String>,
 }
 
 #[derive(Debug)]
 struct SourceInvalidationReport {
     action: SourceInvalidation,
-    safe_files: Vec<PathBuf>,
+    safe_file_count: usize,
     touch_paths: BTreeSet<PathBuf>,
     fallback: BTreeMap<&'static str, ManifestDiffCause>,
+    targeted: BTreeMap<&'static str, usize>,
 }
 
 impl SourceInvalidationReport {
-    fn record_fallback(&mut self, cause: &'static str, path: Option<&[u8]>) {
-        let detail = self.fallback.entry(cause).or_default();
-        detail.count += 1;
-        if detail.paths.len() < 8 {
-            if let Some(path) = path {
-                detail.paths.push(String::from_utf8_lossy(path).into_owned());
-            }
-        }
+    fn record_fallback(&mut self, cause: &'static str) {
+        self.fallback.entry(cause).or_default().count += 1;
+    }
+
+    fn record_targeted(&mut self, cause: &'static str) {
+        *self.targeted.entry(cause).or_default() += 1;
     }
 
     fn log(&self) {
+        if let Some(message) = self.diagnostic() {
+            eprintln!("{message}");
+        }
+    }
+
+    fn diagnostic(&self) -> Option<String> {
         match &self.action {
-            SourceInvalidation::Unchanged => return,
+            SourceInvalidation::Unchanged => None,
             SourceInvalidation::Files(paths) => {
-                let sample = paths
+                let mut categories = vec![format!("safe regular-file changes ({})", self.safe_file_count)];
+                categories.extend(self
+                    .targeted
                     .iter()
-                    .take(8)
-                    .map(|path| format!("{path:?}"))
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "agents-manager: source manifest: targeted touch ({} paths): {}",
-                    paths.len(),
-                    sample.join(", ")
+                    .map(|(cause, count)| format!("{cause} ({count})"))
                 );
+                Some(format!(
+                    "agents-manager: source manifest: targeted touch ({} paths; {})",
+                    paths.len(),
+                    categories.join("; "),
+                ))
             }
             SourceInvalidation::Workspace => {
                 let reasons = self
                     .fallback
                     .iter()
-                    .map(|(cause, detail)| {
-                        let paths = if detail.paths.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" [{}]", detail.paths.join(", "))
-                        };
-                        format!("{cause} ({}{paths})", detail.count)
-                    })
+                    .map(|(cause, detail)| format!("{cause} ({})", detail.count))
                     .collect::<Vec<_>>();
-                let safe = self
-                    .safe_files
+                let targeted = self
+                    .targeted
                     .iter()
-                    .take(8)
-                    .map(|path| format!("{path:?}"))
+                    .map(|(cause, count)| format!("{cause} ({count})"))
                     .collect::<Vec<_>>();
-                let safe_note = if safe.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "; otherwise-safe files ({} total): {}",
-                        self.safe_files.len(),
-                        safe.join(", ")
-                    )
-                };
-                eprintln!(
-                    "agents-manager: source manifest: full-workspace touch fallback: {}{safe_note}",
-                    reasons.join("; ")
-                );
+                let targeted_note = if targeted.is_empty() { String::new() } else { format!("; targeted categories: {}", targeted.join("; ")) };
+                Some(format!(
+                    "agents-manager: source manifest: full-workspace touch fallback: {} ({} safe regular-file changes){targeted_note}",
+                    reasons.join("; "),
+                    self.safe_file_count,
+                ))
             }
         }
     }
@@ -2332,10 +2322,13 @@ wait_for_touch_stamp() {
 /// Decide whether the last successful source manifest allows precise invalidation.
 /// Existing regular-file changes can be invalidated narrowly; removing one touches its surviving
 /// parent directory. Any added file can change module resolution or a proc macro directory listing
-/// while absent from old dep-info, so additions force workspace invalidation.
+/// while absent from old dep-info, so additions force workspace invalidation except ordinary
+/// entries below the verified `web/dist` RustEmbed folder. Its stable source anchor is accepted
+/// only when it is a regular non-symlink file with the expected RustEmbed derive and folder.
 /// Cargo's dep-info detects missing file inputs,
 /// while parent-directory mtimes cover build-script watches for directory contents. Structural
-/// changes, Cargo controls, and symlinks stay global.
+/// changes outside that embed folder, Cargo controls, and symlinks stay global. A non-web regular
+/// file removal remains narrow by itself, but combined with embed structure changes it is global.
 #[cfg(test)]
 fn source_invalidation(
     root: &Path,
@@ -2352,18 +2345,21 @@ fn source_invalidation_report(
 ) -> SourceInvalidationReport {
     let mut report = SourceInvalidationReport {
         action: SourceInvalidation::Unchanged,
-        safe_files: Vec::new(),
+        safe_file_count: 0,
         touch_paths: BTreeSet::new(),
         fallback: BTreeMap::new(),
+        targeted: BTreeMap::new(),
     };
     let Some(previous) = previous else {
-        report.record_fallback("missing successful baseline", None);
+        report.record_fallback("missing successful baseline");
         report.action = SourceInvalidation::Workspace;
         return report;
     };
     if previous == current {
         return report;
     }
+    let embed_ui_anchor = verified_web_dist_embed_anchor(root);
+    let mut non_web_regular_file_removals = 0;
 
     // A directory symlink can feed include_* inputs in another package. A link outside the tree
     // is also unknowable from this manifest. If either exists, any source change gets full touch.
@@ -2372,24 +2368,32 @@ fn source_invalidation_report(
             continue;
         }
         let Some(path) = path_from_bytes(bytes) else {
-            report.record_fallback("unrepresentable symlink path", Some(bytes));
+            report.record_fallback("unrepresentable symlink path");
             continue;
         };
         let Ok(target) = root.join(path).canonicalize() else {
-            report.record_fallback("unresolved symlink", Some(bytes));
+            report.record_fallback("unresolved symlink");
             continue;
         };
         if !target.starts_with(root) {
-            report.record_fallback("symlink target outside workspace", Some(bytes));
+            report.record_fallback("symlink target outside workspace");
         } else if target.is_dir() {
-            report.record_fallback("directory symlink", Some(bytes));
+            report.record_fallback("directory symlink");
         }
     }
 
     for (bytes, now) in &current.entries {
         let Some(before) = previous.entries.get(bytes) else {
             if is_cargo_control_path(bytes) {
-                report.record_fallback("Cargo control input added", Some(bytes));
+                report.record_fallback("Cargo control input added");
+                continue;
+            }
+            if let Some(anchor) = embed_ui_anchor
+                .as_ref()
+                .filter(|_| is_web_dist_structural_entry(bytes, now.kind))
+            {
+                report.record_targeted("embedded UI entry added");
+                report.touch_paths.insert(anchor.clone());
                 continue;
             }
             // Compiler dep-info may list only existing files discovered by a proc macro.
@@ -2401,43 +2405,53 @@ fn source_invalidation_report(
                 b'F' => "file added",
                 _ => "added non-file path",
             };
-            report.record_fallback(cause, Some(bytes));
+            report.record_fallback(cause);
             continue;
         };
         if before == now {
             continue;
         }
         if before.kind != now.kind {
-            report.record_fallback("file type changed", Some(bytes));
+            report.record_fallback("file type changed");
             continue;
         }
         if before.kind != b'F' || now.kind != b'F' {
-            report.record_fallback("non-file entry changed", Some(bytes));
+            report.record_fallback("non-file entry changed");
             continue;
         }
         if is_cargo_control_path(bytes) {
-            report.record_fallback("Cargo control input changed", Some(bytes));
+            report.record_fallback("Cargo control input changed");
             continue;
         }
         let Some(path) = safe_source_path(bytes) else {
-            report.record_fallback("unsafe file path", Some(bytes));
+            report.record_fallback("unsafe file path");
             continue;
         };
-        report.safe_files.push(path.clone());
+        report.safe_file_count += 1;
         report.touch_paths.insert(path);
     }
     for bytes in previous.entries.keys() {
         if !current.entries.contains_key(bytes) {
             let before = &previous.entries[bytes];
             if is_cargo_control_path(bytes) {
-                report.record_fallback("Cargo control input removed", Some(bytes));
+                report.record_fallback("Cargo control input removed");
+                continue;
+            }
+            if is_web_dist_structural_entry(bytes, before.kind) {
+                if let Some(anchor) = &embed_ui_anchor {
+                    report.record_targeted("embedded UI entry removed");
+                    report.touch_paths.insert(anchor.clone());
+                } else {
+                    report.record_fallback("unverified web/dist structural entry removed");
+                }
                 continue;
             }
             if before.kind == b'F' && !is_cargo_control_path(bytes) {
                 if let Some(path) = safe_source_path(bytes) {
                     let parent = source_parent(&path);
                     if parent_dir_exists_in_manifest(current, &parent) {
-                        report.safe_files.push(path);
+                        non_web_regular_file_removals += 1;
+                        report.safe_file_count += 1;
                         report.touch_paths.insert(parent);
                         continue;
                     }
@@ -2449,12 +2463,19 @@ fn source_invalidation_report(
                 b'F' => "removed path",
                 _ => "removed non-file path",
             };
-            report.record_fallback(cause, Some(bytes));
+            report.record_fallback(cause);
         }
     }
 
+    if non_web_regular_file_removals > 0
+        && (report.targeted.contains_key("embedded UI entry added")
+            || report.targeted.contains_key("embedded UI entry removed"))
+    {
+        report.record_fallback("non-web regular files removed with embedded UI structure change");
+    }
+
     if report.fallback.is_empty() && report.touch_paths.is_empty() {
-        report.record_fallback("unclassified manifest difference", None);
+        report.record_fallback("unclassified manifest difference");
     }
     report.action = if report.fallback.is_empty() {
         if report.touch_paths.is_empty() {
@@ -2466,6 +2487,54 @@ fn source_invalidation_report(
         SourceInvalidation::Workspace
     };
     report
+}
+
+const WEB_DIST_ROOT: &[u8] = b"web/dist";
+const WEB_DIST_PREFIX: &[u8] = b"web/dist/";
+const WEB_DIST_EMBED_ANCHOR: &str = "crates/am-base/src/assets.rs";
+const WEB_DIST_EMBED_DECLARATION: [&str; 5] = [
+    "#[cfg(feature = \"embed-ui\")]",
+    "#[derive(rust_embed::Embed)]",
+    "#[folder = \"../../web/dist\"]",
+    "#[allow_missing = true]",
+    "struct WebAssets;",
+];
+const WEB_DIST_EMBED_PREAMBLE_USES: [&str; 2] = [
+    "use axum::http::{header, StatusCode, Uri};",
+    "use axum::response::{IntoResponse, Response};",
+];
+
+fn is_web_dist_structural_entry(bytes: &[u8], kind: u8) -> bool {
+    matches!(kind, b'D' | b'F')
+        && safe_source_path(bytes).is_some()
+        && (bytes == WEB_DIST_ROOT || bytes.starts_with(WEB_DIST_PREFIX))
+}
+
+fn verified_web_dist_embed_anchor(root: &Path) -> Option<PathBuf> {
+    let relative = Path::new(WEB_DIST_EMBED_ANCHOR);
+    let anchor = root.join(relative);
+    let metadata = std::fs::symlink_metadata(&anchor).ok()?;
+    let file_type = metadata.file_type();
+    if !file_type.is_file() || file_type.is_symlink() {
+        return None;
+    }
+    let source = std::fs::read_to_string(anchor).ok()?;
+    let mut lines = source.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        if line.is_empty() || line.starts_with("//") || WEB_DIST_EMBED_PREAMBLE_USES.contains(&line) {
+            continue;
+        }
+        if line != WEB_DIST_EMBED_DECLARATION[0] {
+            return None;
+        }
+        for wanted in &WEB_DIST_EMBED_DECLARATION[1..] {
+            if lines.next().map(str::trim) != Some(*wanted) {
+                return None;
+            }
+        }
+        return Some(relative.to_path_buf());
+    }
+    None
 }
 
 fn safe_source_path(bytes: &[u8]) -> Option<PathBuf> {
@@ -4793,6 +4862,38 @@ exit "$rc"
         }
     }
 
+    const TEST_WEB_EMBED_SOURCE: &str = r#"#[cfg(feature = "embed-ui")]
+#[derive(rust_embed::Embed)]
+#[folder = "../../web/dist"]
+#[allow_missing = true]
+struct WebAssets;
+
+use std::collections::BTreeMap;
+
+#[cfg(feature = "embed-ui")]
+pub fn files() -> BTreeMap<String, Vec<u8>> {
+    WebAssets::iter()
+        .map(|path| {
+            let path = path.to_string();
+            let data = WebAssets::get(&path).expect("embedded path").data.into_owned();
+            (path, data)
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "embed-ui"))]
+pub fn files() -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::new()
+}
+"#;
+    const ACTUAL_WEB_EMBED_SOURCE: &str = include_str!("../../crates/am-base/src/assets.rs");
+
+    fn install_test_web_embed_anchor(root: &Path) {
+        let path = root.join(WEB_DIST_EMBED_ANCHOR);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, ACTUAL_WEB_EMBED_SOURCE).unwrap();
+    }
+
     #[test]
     fn source_manifest_only_narrows_safe_regular_file_changes() {
         let root = Path::new("/workspace");
@@ -4915,8 +5016,8 @@ exit "$rc"
         let report = source_invalidation_report(root, Some(&existing_module_pair), &ambiguous_module);
         assert_eq!(report.action, SourceInvalidation::Workspace);
         assert_eq!(
-            report.fallback["file added"].paths,
-            vec!["src/foo.rs".to_string()],
+            report.fallback["file added"].count,
+            1,
             "a new Rust module candidate can affect old dep-info inputs"
         );
     }
@@ -4936,7 +5037,7 @@ exit "$rc"
     }
 
     #[test]
-    fn source_manifest_report_lists_fallback_reasons_and_safe_files() {
+    fn source_manifest_report_contains_only_categories_and_counts() {
         let root = Path::new("/workspace");
         let before = source_manifest(&[
             ("src", b'D', b"", 0o755),
@@ -4953,56 +5054,309 @@ exit "$rc"
 
         let report = source_invalidation_report(root, Some(&before), &after);
         assert_eq!(report.action, SourceInvalidation::Workspace);
-        assert_eq!(report.safe_files, vec![PathBuf::from("src/lib.rs")]);
-        assert_eq!(
-            report.fallback["added directory"].paths,
-            vec!["src/added-dir".to_string()]
-        );
-        assert_eq!(
-            report.fallback["removed directory"].paths,
-            vec!["src/removed-dir".to_string()]
-        );
-        assert_eq!(
-            report.fallback["Cargo control input changed"].paths,
-            vec!["Cargo.toml".to_string()]
-        );
+        assert_eq!(report.safe_file_count, 1);
+        assert_eq!(report.fallback["added directory"].count, 1);
+        assert_eq!(report.fallback["removed directory"].count, 1);
+        assert_eq!(report.fallback["Cargo control input changed"].count, 1);
+        let diagnostic = report.diagnostic().unwrap();
+        assert!(diagnostic.contains("added directory (1)"));
+        assert!(diagnostic.contains("1 safe regular-file changes"));
+        assert!(!diagnostic.contains("src/lib.rs"));
+        assert!(!diagnostic.contains("Cargo.toml"));
+        assert!(!diagnostic.contains("old"));
         let added_control = source_invalidation_report(
             root,
             Some(&source_manifest(&[])),
             &source_manifest(&[("rust-toolchain.toml", b'F', b"stable", 0o644)]),
         );
-        assert_eq!(
-            added_control.fallback["Cargo control input added"].paths,
-            vec!["rust-toolchain.toml".to_string()]
-        );
+        assert_eq!(added_control.fallback["Cargo control input added"].count, 1);
     }
 
     #[test]
-    fn added_and_removed_frontend_files_are_source_inputs() {
+    fn web_dist_structural_changes_use_verified_embed_anchor_and_union_safe_files() {
+        let base = base();
+        let root = base.join("source");
+        install_test_web_embed_anchor(&root);
+        let anchor = (WEB_DIST_EMBED_ANCHOR, b'F', ACTUAL_WEB_EMBED_SOURCE.as_bytes(), 0o644);
         let before = source_manifest(&[
+            anchor,
+            ("web", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"old", 0o644),
+        ]);
+        let after = source_manifest(&[
+            anchor,
             ("web", b'D', b"", 0o755),
             ("web/dist", b'D', b"", 0o755),
+            ("web/dist/index.html", b'F', b"stub", 0o644),
             ("web/dist/assets", b'D', b"", 0o755),
-            ("web/dist/index.html", b'F', b"old frontend", 0o644),
+            ("web/dist/assets/new-hash.js", b'F', b"new frontend", 0o644),
+            ("src/lib.rs", b'F', b"new", 0o644),
         ]);
+
+        let report = source_invalidation_report(&root, Some(&before), &after);
+        assert_eq!(
+            report.action,
+            SourceInvalidation::Files(vec![
+                PathBuf::from(WEB_DIST_EMBED_ANCHOR),
+                PathBuf::from("src/lib.rs"),
+            ]),
+            "new web output must touch the real embed consumer and union ordinary safe changes"
+        );
+        let diagnostic = report.diagnostic().unwrap();
+        assert!(diagnostic.contains("embedded UI entry added (4)"));
+        assert!(diagnostic.contains("safe regular-file changes (1)"));
+        assert!(!diagnostic.contains(WEB_DIST_EMBED_ANCHOR));
+        assert!(!diagnostic.contains("src/lib.rs"));
+        assert!(!diagnostic.contains("new frontend"));
+
+        let removed = source_manifest(&[
+            anchor,
+            ("web", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"newer", 0o644),
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&after), &removed).action,
+            SourceInvalidation::Files(vec![
+                PathBuf::from(WEB_DIST_EMBED_ANCHOR),
+                PathBuf::from("src/lib.rs"),
+            ]),
+            "removing web output must rebuild the embed consumer and union safe content changes"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn web_dist_structural_changes_require_a_regular_verified_anchor() {
+        use std::os::unix::fs::symlink;
+
+        let base = base();
+        let root = base.join("source");
+        let before = source_manifest(&[("web", b'D', b"", 0o755), ("web/dist", b'D', b"", 0o755)]);
         let after = source_manifest(&[
             ("web", b'D', b"", 0o755),
             ("web/dist", b'D', b"", 0o755),
-            ("web/dist/assets", b'D', b"", 0o755),
-            ("web/dist/index.html", b'F', b"old frontend", 0o644),
-            ("web/dist/assets/new.js", b'F', b"new frontend", 0o644),
+            ("web/dist/index.html", b'F', b"new", 0o644),
         ]);
-
+        let removed_before = source_manifest(&[
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/assets", b'D', b"", 0o755),
+            ("web/dist/assets/old.js", b'F', b"old asset", 0o644),
+        ]);
+        let removed_after = source_manifest(&[
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/assets", b'D', b"", 0o755),
+        ]);
         assert_eq!(
-            source_invalidation_report(Path::new("/workspace"), Some(&before), &after).action,
+            source_invalidation_report(&root, Some(&before), &after).action,
             SourceInvalidation::Workspace,
-            "new generated assets may change compiler inputs absent from old dep-info"
+            "a missing anchor cannot specialize a generic workspace"
         );
         assert_eq!(
-            source_invalidation_report(Path::new("/workspace"), Some(&after), &before).action,
-            SourceInvalidation::Files(vec![PathBuf::from("web/dist/assets")]),
-            "removing a generated asset invalidates via the surviving watched directory"
+            source_invalidation_report(&root, Some(&removed_before), &removed_after).action,
+            SourceInvalidation::Workspace,
+            "a missing anchor cannot narrow a lone asset removal to its surviving parent"
         );
+
+        install_test_web_embed_anchor(&root);
+        let anchor = root.join(WEB_DIST_EMBED_ANCHOR);
+        std::fs::write(&anchor, ACTUAL_WEB_EMBED_SOURCE.replace("../../web/dist", "../../web/other")).unwrap();
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &after).action,
+            SourceInvalidation::Workspace,
+            "an anchor for another folder cannot specialize web/dist changes"
+        );
+        assert_eq!(
+            source_invalidation_report(&root, Some(&removed_before), &removed_after).action,
+            SourceInvalidation::Workspace,
+            "a wrong-folder anchor cannot narrow a lone asset removal to its surviving parent"
+        );
+
+        let target = base.join("embed-anchor-target.rs");
+        std::fs::write(&target, TEST_WEB_EMBED_SOURCE).unwrap();
+        std::fs::remove_file(&anchor).unwrap();
+        symlink(&target, &anchor).unwrap();
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &after).action,
+            SourceInvalidation::Workspace,
+            "a symlink anchor is not trusted even when its target looks valid"
+        );
+        assert_eq!(
+            source_invalidation_report(&root, Some(&removed_before), &removed_after).action,
+            SourceInvalidation::Workspace,
+            "a symlink anchor cannot narrow a lone asset removal to its surviving parent"
+        );
+        assert_eq!(
+            source_invalidation_report(&root, None, &after).action,
+            SourceInvalidation::Workspace,
+            "a missing manifest baseline remains a full-workspace fallback"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn web_dist_fake_comment_and_raw_string_anchor_blocks_fall_back() {
+        let base = base();
+        let root = base.join("source");
+        let before = source_manifest(&[("web", b'D', b"", 0o755)]);
+        let after = source_manifest(&[
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/index.html", b'F', b"stub", 0o644),
+        ]);
+        let fake_declaration = WEB_DIST_EMBED_DECLARATION.join("\n");
+        let anchor = root.join(WEB_DIST_EMBED_ANCHOR);
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+
+        std::fs::write(&anchor, format!("/*\n{fake_declaration}\n*/\n")).unwrap();
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &after).action,
+            SourceInvalidation::Workspace,
+            "a declaration-shaped block comment is not a RustEmbed consumer"
+        );
+
+        std::fs::write(&anchor, format!("const FAKE: &str = r#\"{fake_declaration}\"#;\n")).unwrap();
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &after).action,
+            SourceInvalidation::Workspace,
+            "a declaration-shaped raw string is not a RustEmbed consumer"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn web_dist_structure_mixed_with_nonweb_regular_file_removal_is_workspace() {
+        let base = base();
+        let root = base.join("source");
+        install_test_web_embed_anchor(&root);
+        let common = [
+            (WEB_DIST_EMBED_ANCHOR, b'F', ACTUAL_WEB_EMBED_SOURCE.as_bytes(), 0o644),
+            ("src", b'D', b"", 0o755),
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("web/dist/index.html", b'F', b"index", 0o644),
+        ];
+        let before = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("src/removed.rs", b'F', b"old", 0o644),
+        ]);
+        let removed_only = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &removed_only).action,
+            SourceInvalidation::Files(vec![PathBuf::from("src")]),
+            "ordinary non-web file deletion keeps its existing parent-touch behavior"
+        );
+
+        let web_added_and_removed = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/assets", b'D', b"", 0o755),
+            ("web/dist/assets/new-hash.js", b'F', b"new", 0o644),
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &web_added_and_removed).action,
+            SourceInvalidation::Workspace,
+            "a surviving-parent non-web file deletion is not unioned with web structure changes"
+        );
+
+        let content_only = source_manifest(&[
+            common[0], common[1], common[2], common[3],
+            ("web/dist/index.html", b'F', b"updated index", 0o644),
+            ("src/removed.rs", b'F', b"old", 0o644),
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &content_only).action,
+            SourceInvalidation::Files(vec![PathBuf::from("web/dist/index.html")]),
+            "content-only web changes do not count as embed structure changes"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn web_dist_changes_do_not_mask_other_structural_control_symlink_or_unsafe_changes() {
+        use std::os::unix::fs::symlink;
+
+        let base = base();
+        let root = base.join("source");
+        install_test_web_embed_anchor(&root);
+        let common = [
+            (WEB_DIST_EMBED_ANCHOR, b'F', ACTUAL_WEB_EMBED_SOURCE.as_bytes(), 0o644),
+            ("web", b'D', b"", 0o755),
+            ("web/dist", b'D', b"", 0o755),
+            ("src", b'D', b"", 0o755),
+            ("src/lib.rs", b'F', b"same", 0o644),
+        ];
+        let before = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/index.html", b'F', b"index", 0o644),
+        ]);
+        let web_add = ("web/dist/assets/new-hash.js", b'F', b"asset".as_slice(), 0o644);
+
+        for (path, kind, value, mode) in [
+            ("crates/other", b'D', b"".as_slice(), 0o755),
+            ("Cargo.lock", b'F', b"lock".as_slice(), 0o644),
+            ("web/dist/../outside", b'F', b"unsafe".as_slice(), 0o644),
+        ] {
+            let mut entries = before.entries.iter().map(|(path, entry)| {
+                (String::from_utf8_lossy(path).into_owned(), entry.kind, entry.value.as_slice(), entry.mode)
+            }).collect::<Vec<_>>();
+            entries.push(("web/dist/assets/new-hash.js".to_string(), web_add.1, web_add.2, web_add.3));
+            entries.push((path.to_string(), kind, value, mode));
+            let entries = entries.iter().map(|(path, kind, value, mode)| (path.as_str(), *kind, *value, *mode)).collect::<Vec<_>>();
+            let current = source_manifest(&entries);
+            assert_eq!(
+                source_invalidation_report(&root, Some(&before), &current).action,
+                SourceInvalidation::Workspace,
+                "web/dist additions cannot hide non-web structural, Cargo control, or unsafe changes"
+            );
+        }
+
+        let before_with_removed_inputs = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/index.html", b'F', b"index", 0o644),
+            ("crates/other", b'D', b"", 0o755),
+            ("Cargo.lock", b'F', b"lock", 0o644),
+        ]);
+        let web_only_added = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/index.html", b'F', b"index", 0o644),
+            ("web/dist/assets", b'D', b"", 0o755),
+            web_add,
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before_with_removed_inputs), &web_only_added).action,
+            SourceInvalidation::Workspace,
+            "web/dist changes cannot hide non-web structural or Cargo control removals"
+        );
+
+        let type_changed = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/index.html", b'D', b"", 0o755),
+            web_add,
+        ]);
+        assert_eq!(
+            source_invalidation_report(&root, Some(&before), &type_changed).action,
+            SourceInvalidation::Workspace,
+            "a web/dist type transition remains global"
+        );
+
+        std::fs::create_dir_all(root.join("web/dist/assets")).unwrap();
+        std::fs::write(root.join("web/dist/assets/target.js"), b"target").unwrap();
+        symlink("target.js", root.join("web/dist/assets/link.js")).unwrap();
+        let linked = source_manifest(&[
+            common[0], common[1], common[2], common[3], common[4],
+            ("web/dist/index.html", b'F', b"index", 0o644),
+            ("web/dist/assets", b'D', b"", 0o755),
+            ("web/dist/assets/target.js", b'F', b"target", 0o644),
+            ("web/dist/assets/link.js", b'L', b"target.js", 0o777),
+        ]);
+        let linked_added = source_invalidation_report(&root, Some(&before), &linked);
+        assert_eq!(linked_added.action, SourceInvalidation::Workspace);
+        let linked_removed = source_invalidation_report(&root, Some(&linked), &before);
+        assert_eq!(linked_removed.action, SourceInvalidation::Workspace);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -5638,6 +5992,163 @@ fn listing_matches_current_tree() {
         run();
         std::fs::remove_file(cwd.join("assets/one.txt")).unwrap();
         run();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn web_dist_structural_sync_rebuilds_embed_contents_without_unrelated_build_script() {
+        if !has_program("rsync") {
+            return;
+        }
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crates/am-base", "apps/app", "crates/unrelated"]
+resolver = "2"
+
+[profile.test]
+debug-assertions = false
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("crates/am-base/src")).unwrap();
+        std::fs::write(cwd.join("crates/am-base/Cargo.toml"), r#"[package]
+name = "am-base"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["embed-ui"]
+embed-ui = []
+
+[dependencies]
+rust-embed = "8"
+"#).unwrap();
+        std::fs::write(cwd.join(WEB_DIST_EMBED_ANCHOR), TEST_WEB_EMBED_SOURCE).unwrap();
+        std::fs::write(cwd.join("crates/am-base/src/lib.rs"), "pub mod assets;\n").unwrap();
+
+        std::fs::create_dir_all(cwd.join("apps/app/src")).unwrap();
+        std::fs::write(cwd.join("apps/app/Cargo.toml"), r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+am-base = { path = "../../crates/am-base" }
+"#).unwrap();
+        std::fs::write(cwd.join("apps/app/src/lib.rs"), r#"#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn read_tree(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+        if !dir.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                read_tree(root, &path, files);
+            } else {
+                let relative = path.strip_prefix(root).unwrap().to_string_lossy();
+                files.insert(relative.into_owned(), std::fs::read(path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_inventory_and_bytes_match_the_current_dist() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/dist");
+        let mut expected = BTreeMap::new();
+        read_tree(&root, &root, &mut expected);
+        assert!(am_base::assets::files() == expected, "embedded files differ from web/dist");
+    }
+}
+"#).unwrap();
+
+        std::fs::create_dir_all(cwd.join("crates/unrelated/src")).unwrap();
+        std::fs::write(cwd.join("crates/unrelated/Cargo.toml"), r#"[package]
+name = "unrelated"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+"#).unwrap();
+        std::fs::write(cwd.join("crates/unrelated/build.rs"), r#"use std::{env, fs, path::PathBuf};
+fn main() {
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    let counter = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("runs");
+    let runs = fs::read_to_string(&counter).ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0) + 1;
+    fs::write(counter, runs.to_string()).unwrap();
+}
+"#).unwrap();
+        std::fs::write(cwd.join("crates/unrelated/src/lib.rs"), "pub fn stable() {}\n").unwrap();
+
+        let cargo = TestToolchain::current();
+        let lock = cargo
+            .command()
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(lock.status.success(), "fake workspace lockfile generation failed");
+
+        let dir = base.join("rc").join(cache_hash(&cwd)).join("shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        use_real_rsync_for_fake_remote(&base);
+        let sync = || {
+            with_fake_transport(&base, || {
+                sync_source(&remote, &data, &cwd, &dir.display().to_string(), &Deadline::new(60))
+            })
+            .expect("fake workspace source sync should succeed");
+        };
+        let test = || {
+            let output = cargo
+                .command()
+                .args(["test", "--offline", "--workspace", "--target-dir"])
+                .arg(dir.join("target"))
+                .current_dir(&dir)
+                .env("CARGO_TERM_COLOR", "never")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "isolated embed fixture test failed");
+        };
+        let unrelated_build_runs = || {
+            std::fs::read_dir(dir.join("target/debug/build"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("unrelated-"))
+                .find_map(|entry| std::fs::read_to_string(entry.path().join("out/runs")).ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("unrelated crate build counter should exist after the initial test")
+        };
+
+        // Keep the existing web parent in the baseline; only web/dist is added below.
+        std::fs::create_dir_all(cwd.join("web")).unwrap();
+        sync();
+        test();
+        let initial_counter = unrelated_build_runs();
+
+        std::fs::create_dir_all(cwd.join("web/dist/assets")).unwrap();
+        std::fs::write(cwd.join("web/dist/index.html"), b"index-v1").unwrap();
+        std::fs::write(cwd.join("web/dist/assets/app-a1b2.js"), b"asset-v1").unwrap();
+        sync();
+        test();
+        assert_eq!(
+            unrelated_build_runs(),
+            initial_counter,
+            "targeted embed invalidation must not rerun an unrelated crate build script"
+        );
+
+        std::fs::remove_dir_all(cwd.join("web/dist")).unwrap();
+        sync();
+        test();
+        assert_eq!(
+            unrelated_build_runs(),
+            initial_counter,
+            "removing embedded output must not rerun an unrelated crate build script"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
