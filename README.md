@@ -173,10 +173,10 @@ flowchart LR
 For development or unsupported platforms. Needs Rust (`cargo`) and [Bun](https://bun.sh) in addition to herdr.
 
 
-Rust development builds use [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per host:
+Rust development builds use [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per Linux host (the current nightly lacks memory-budget support, so use the pinned source build):
 
 ```bash
-scripts/install-blaze.sh
+scripts/install-blaze.sh --source
 scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```

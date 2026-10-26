@@ -173,10 +173,10 @@ flowchart LR
 開發或不支援的平台用。除了 herdr，另需 Rust（`cargo`）與 [Bun](https://bun.sh)。
 
 
-Rust 開發建置透過 `scripts/project-cargo.sh` 使用 [Blaze](https://github.com/indexable-inc/blaze)（Linux x86-64／ARM64、Apple silicon）。每台主機安裝一次：
+Rust 開發建置透過 `scripts/project-cargo.sh` 使用 [Blaze](https://github.com/indexable-inc/blaze)（Linux x86-64／ARM64、Apple silicon）。Linux 主機安裝一次；目前 nightly 尚無記憶體預算支援，因此使用固定版本的原始碼建置：
 
 ```bash
-scripts/install-blaze.sh
+scripts/install-blaze.sh --source
 scripts/project-cargo.sh build -p agents-managerd
 scripts/project-cargo.sh test -p xtask
 ```
