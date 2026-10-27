@@ -261,3 +261,29 @@ async fn receipt_stop_after_save_cannot_overwrite_or_revalidate_old_receipt() {
         "joined final"
     );
 }
+
+#[tokio::test]
+async fn receipt_exact_load_and_pending_match_do_not_expose_or_confuse_owner() {
+    let (e, i) = fixture().await;
+    let payload = Payload::visible("PRIVATE_READ_SENTINEL").unwrap();
+    save(&e.app.db, &i, 0, &payload).await.unwrap();
+    let stored = load(&e.app.db, &i).await.unwrap().unwrap();
+    assert!(matches!(stored.state, State::Pending));
+    assert_eq!(stored.item.payload.text(), Some("PRIVATE_READ_SENTINEL"));
+    assert!(!format!("{:?}", stored.item.payload).contains("PRIVATE_READ_SENTINEL"));
+    let mut wrong = i.clone();
+    wrong.run_id = "other".into();
+    assert!(load(&e.app.db, &wrong).await.unwrap().is_none());
+    let mut tx = crate::db::begin_write(&e.app.db).await.unwrap();
+    assert!(matches_on(&mut tx, &stored.item, State::Pending)
+        .await
+        .unwrap());
+    assert!(!matches_on(&mut tx, &stored.item, State::Applied)
+        .await
+        .unwrap());
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        Payload::visible(&"x".repeat(MAX_TEXT_BYTES + 1)).unwrap_err(),
+        Error::Bounds
+    );
+}
