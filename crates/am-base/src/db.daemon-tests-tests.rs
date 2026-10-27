@@ -1528,11 +1528,14 @@
             .bind(&now).bind(&now).bind(iso_in(86400)).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at)VALUES('ra','rs','rb','rr','rt',1,0,'hash','fast','unknown',123,'fixture',?)")
             .bind(&now).execute(&pool).await.unwrap();
+        // Snapshot committed pages through SQLite, including pages still in WAL.
+        sqlx::query("VACUUM INTO ?").bind(backup.to_str().unwrap()).execute(&pool).await.unwrap();
         pool.close().await;
         struct Cleanup(std::path::PathBuf);
         impl Drop for Cleanup { fn drop(&mut self) {let _=std::fs::remove_dir_all(&self.0);} }
         let _cleanup=Cleanup(dir.clone());
-        std::fs::copy(&path,&backup).unwrap();let bytes=std::fs::read(&backup).unwrap();
+        let bytes=std::fs::read(&backup).unwrap();
+        assert_eq!(u32::from_be_bytes(bytes[60..64].try_into().unwrap()),69,"backup must itself contain the old version");
         let upgraded=open(&path).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&upgraded).await.unwrap(),SCHEMA_VERSION);
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&upgraded).await.unwrap()),pinned(SCHEMA_VERSION));
@@ -1546,16 +1549,34 @@
             .bind(&now).execute(&upgraded).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,String>("PRAGMA integrity_check").fetch_one(&upgraded).await.unwrap(),"ok");
         assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&upgraded).await.unwrap().is_empty());
+        // Keep a second WAL connection alive to make restore ordering deterministic.
+        let restore_blocker=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&restore_blocker).await.unwrap(),SCHEMA_VERSION);
         upgraded.close().await;
         // A v69 reader's version fence must reject the upgraded image; never lower user_version.
         let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap()>69);
         // Exercise the real binary fence on a synthetic future version, not only a comparison.
-        sqlx::query(&format!("PRAGMA user_version={}",SCHEMA_VERSION+1)).execute(&raw).await.unwrap();raw.close().await;
+        sqlx::query(&format!("PRAGMA user_version={}",SCHEMA_VERSION+1)).execute(&raw).await.unwrap();
+        restore_blocker.close().await;
+        raw.close().await;
         assert!(open(&path).await.is_err());
         let fenced=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT final_text FROM api_bot_join_receipts").fetch_one(&fenced).await.unwrap(),"PRIVATE_RECEIPT_SENTINEL");
-        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&fenced).await.unwrap(),SCHEMA_VERSION+1);fenced.close().await;
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&fenced).await.unwrap(),SCHEMA_VERSION+1);
+        // Restoring the main file is safe only after the WAL users have stopped.
+        let checkpoint:(i64,i64,i64)=sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(&fenced).await.unwrap();
+        assert_eq!(checkpoint,(0,0,0),"restore requires a complete WAL checkpoint");
+        fenced.close().await;
+        for suffix in ["-wal","-shm"] {
+            let sidecar=path.with_file_name(format!("receipt.sqlite3{suffix}"));
+            match std::fs::remove_file(&sidecar) {
+                Ok(())=>{},
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(error)=>panic!("cannot remove synthetic restore sidecar: {error}"),
+            }
+            assert!(!sidecar.exists(),"old sidecars cannot accompany the backup");
+        }
         std::fs::copy(&backup,&path).unwrap();assert_eq!(std::fs::read(&path).unwrap(),bytes);
         let restored=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).foreign_keys(true)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&restored).await.unwrap(),69);
@@ -1563,6 +1584,19 @@
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT reserved_microusd FROM api_bot_attempts WHERE id='ra'").fetch_one(&restored).await.unwrap(),123);
         assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&restored).await.unwrap().is_empty());
         restored.close().await;
+        // Observe the actual pool contract, not asynchronous SQLite sidecar unlink timing.
+        static FAILED_POOL:std::sync::Mutex<Option<SqlitePool>>=std::sync::Mutex::new(None);
+        fn failing_migration(pool:&SqlitePool)->am_base::db::MigrationFuture<'_> {
+            *FAILED_POOL.lock().unwrap()=Some(pool.clone());
+            Box::pin(async { anyhow::bail!("synthetic migration failure") })
+        }
+        let failure=am_base::db::open_with(&dir.join("failed.sqlite3"),&[("synthetic_failure",failing_migration)]).await.err().unwrap();
+        assert!(failure.to_string().contains("synthetic migration failure"));
+        let observed=FAILED_POOL.lock().unwrap().take().unwrap();
+        let closed=observed.is_closed();
+        observed.close().await;
+        assert!(closed,"failed open must close its migration pool before returning");
+
     }
 
     async fn nr1944_http(router:axum::Router,method:&str,path:&str,body:String)->(axum::http::StatusCode,String) {
