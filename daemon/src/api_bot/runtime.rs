@@ -583,6 +583,7 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     }
 }
 
+#[derive(Clone)]
 struct SessionCommit {
     pool: sqlx::SqlitePool,
     inner: Arc<RuntimeInner>,
@@ -649,45 +650,14 @@ async fn own_ticket(
     };
     match (completion_owner, joined) {
         (Some(mut owner), Some(joined)) => {
-            let admission = if let Some(commit) = &session_commit {
-                Some(
-                    admission_gate_for(
-                        &commit.inner,
-                        &ApiRunKey {
-                            bot_id: commit.bot_id.clone(),
-                            run_id: commit.identity.run_id.clone(),
-                        },
-                    )
-                    .await,
-                )
-            } else {
-                None
-            };
-            #[cfg(test)]
-            if let Some(notify) = &owner.before_storage {
-                notify.0.notify_one();
-                notify.1.notified().await;
-            }
             let final_text = if joined == Completion::Completed {
                 (&mut owner.final_text).await.ok()
-            } else {
-                None
-            };
-            if let Some(committed) = settle_joined_completion(&owner, joined, final_text).await {
-                if let Some(commit) = session_commit {
-                    #[cfg(test)]
-                    if let Some((reached, release)) = &commit.after_commit_before_publish {
-                        reached.notify_one();
-                        release.notified().await;
-                    }
-                    publish_session_cursor(commit, committed.session_revision);
-                }
-                drop(admission);
-                // The exact cursor from the committing transaction is visible before notifications
-                // can trigger another turn. No sessions mutex is held during DB I/O or event awaits.
+            } else { None };
+            if let Some(committed) = settle_joined_completion(
+                &owner, joined, final_text, &shutdown, session_commit.as_ref(),
+            ).await {
+                // Settlement published the exact cursor under its short admission guard.
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
-            } else {
-                drop(admission);
             }
         }
         (None, Some(_)) => {
@@ -738,10 +708,72 @@ async fn admission_gate_for(
     gate.lock_owned().await
 }
 
-async fn settle_joined_completion(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionRecoveryReason {
+    ShortRetry,
+    Backoff,
+    AwaitingProof,
+    Recovered,
+    Shutdown,
+    Fenced,
+    OwnerEnded,
+}
+impl CompletionRecoveryReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ShortRetry => "api_completion_short_retry",
+            Self::Backoff => "api_completion_backoff",
+            Self::AwaitingProof => "api_completion_awaiting_proof",
+            Self::Recovered => "api_completion_recovered",
+            Self::Shutdown => "api_completion_shutdown",
+            Self::Fenced => "api_completion_fenced",
+            Self::OwnerEnded => "api_completion_owner_ended",
+        }
+    }
+}
+fn log_completion_recovery(key: &ApiTurnKey, reason: CompletionRecoveryReason, failures: usize) {
+    tracing::info!(bot = %key.bot_id, run = %key.run_id, turn = %key.turn_id,
+        reason = reason.code(), failures, "API bot joined-completion recovery");
+}
+fn completion_retry_delay(failures: usize) -> Duration {
+    if failures < API_BOT_COMPLETION_MAX_ATTEMPTS {
+        return API_BOT_COMPLETION_RETRY_DELAY;
+    }
+    Duration::from_secs(
+        1u64 << failures
+            .saturating_sub(API_BOT_COMPLETION_MAX_ATTEMPTS)
+            .min(5),
+    )
+    .min(Duration::from_secs(30))
+}
+
+async fn completion_retry_wait(shutdown: &CancellationToken, delay: Duration) -> bool {
+    tokio::select! { biased; _ = shutdown.cancelled() => false, _ = tokio::time::sleep(delay) => true }
+}
+
+// Keep the multi-await recovery frame out of own_ticket's debug spawn/call stack.
+fn settle_joined_completion<'a>(
+    owner: &'a CompletionOwner,
+    joined: Completion,
+    final_text: Option<super::completion::FinalText>,
+    shutdown: &'a CancellationToken,
+    session_commit: Option<&'a SessionCommit>,
+) -> impl Future<Output = Option<super::completion::Committed>> + Send + 'a {
+    Box::pin(settle_joined_completion_body(
+        owner,
+        joined,
+        final_text,
+        shutdown,
+        session_commit,
+    ))
+}
+
+async fn settle_joined_completion_body(
     owner: &CompletionOwner,
     joined: Completion,
     final_text: Option<super::completion::FinalText>,
+    shutdown: &CancellationToken,
+    session_commit: Option<&SessionCommit>,
 ) -> Option<super::completion::Committed> {
     let payload = match (joined, final_text.as_ref()) {
         (Completion::Completed, Some(text)) => text.receipt_payload(),
@@ -749,55 +781,198 @@ async fn settle_joined_completion(
     };
     let Ok(payload) = payload else {
         warn_completion_storage(&owner.key);
-        return None; // Oversize is never truncated or replayed as another request.
+        return None;
     };
-    for attempt in 0..API_BOT_COMPLETION_MAX_ATTEMPTS {
-        #[cfg(test)]
-        let result = {
-            let injected_fault = owner.store_fault.as_ref().map(|(fault, calls)| {
-                (
-                    *fault,
-                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                )
-            });
-            store_joined_completion_with_test_fault(owner, &payload, injected_fault).await
+    drop(final_text); // The recovery loop retains only the one bounded visible payload.
+    let mut failures = 0usize;
+    let mut needs_proof = false;
+    let mut last_reason = None;
+    loop {
+        if shutdown.is_cancelled() {
+            log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
+            return None;
+        }
+        let admission = if let Some(commit) = session_commit {
+            let key = ApiRunKey {
+                bot_id: commit.bot_id.clone(),
+                run_id: commit.identity.run_id.clone(),
+            };
+            Some(tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
+                    return None;
+                }
+                guard = admission_gate_for(&commit.inner, &key) => guard,
+            })
+        } else {
+            None
         };
-        #[cfg(not(test))]
-        let result = store_joined_completion(owner, &payload).await;
-        let retry = match result {
-            Ok(super::completion::Outcome::Committed(committed)) => return Some(committed),
-            Ok(super::completion::Outcome::Fenced) => return None,
-            Err(super::completion::StoreError::Retryable) => true,
+        #[cfg(test)]
+        if failures == 0 {
+            if let Some(notify) = &owner.before_storage {
+                notify.0.notify_one();
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return None,
+                    _ = notify.1.notified() => {},
+                }
+            }
+        }
+        // An unconfirmed commit switches to read-only proof polling. Never retry a write blindly.
+        let result = if needs_proof {
+            Err(super::completion::StoreError::Ambiguous)
+        } else {
+            #[cfg(test)]
+            {
+                let injected = owner.store_fault.as_ref().map(|(fault, calls)| {
+                    (
+                        *fault,
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    )
+                });
+                store_joined_completion_with_test_fault(owner, &payload, injected).await
+            }
+            #[cfg(not(test))]
+            {
+                store_joined_completion(owner, &payload).await
+            }
+        };
+        let committed = match result {
+            Ok(super::completion::Outcome::Committed(c)) => Some(c),
+            Ok(super::completion::Outcome::Fenced) => {
+                log_completion_recovery(&owner.key, CompletionRecoveryReason::Fenced, failures);
+                return None;
+            }
+            Err(super::completion::StoreError::Retryable) => {
+                if retire_stale_completion(owner).await {
+                    log_completion_recovery(
+                        &owner.key,
+                        CompletionRecoveryReason::OwnerEnded,
+                        failures,
+                    );
+                    return None;
+                }
+                None
+            }
             Err(super::completion::StoreError::Ambiguous) => {
                 match super::completion::probe_after_join(&owner.app, &owner.identity, &payload)
                     .await
                 {
-                    Ok(super::completion::Probe::Applied(committed)) => return Some(committed),
-                    Ok(super::completion::Probe::Pending) => true,
+                    Ok(super::completion::Probe::Applied(c)) => Some(c),
+                    Ok(super::completion::Probe::Pending) => {
+                        needs_proof = false;
+                        None
+                    }
                     Ok(super::completion::Probe::Stale(item)) => {
-                        let _ = super::receipt::fence_stale(&owner.app.db, &item).await;
+                        if super::receipt::fence_stale(&owner.app.db, &item)
+                            .await
+                            .is_err()
+                        {
+                            warn_completion_storage(&owner.key);
+                        }
+                        log_completion_recovery(
+                            &owner.key,
+                            CompletionRecoveryReason::Fenced,
+                            failures,
+                        );
                         return None;
                     }
                     _ => {
-                        warn_completion_storage(&owner.key);
-                        return None;
+                        needs_proof = true;
+                        // This only retires an old completion owner; it never creates join proof.
+                        if retire_stale_completion(owner).await {
+                            log_completion_recovery(
+                                &owner.key,
+                                CompletionRecoveryReason::OwnerEnded,
+                                failures,
+                            );
+                            return None;
+                        }
+                        None
                     }
                 }
             }
         };
-        if retry {
+        if let Some(committed) = committed {
             #[cfg(test)]
-            if let Some((count, notify)) = &owner.retry_observer {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                notify.notify_one();
+            if let Some(commit) = session_commit {
+                if let Some((reached, release)) = &commit.after_commit_before_publish {
+                    reached.notify_one();
+                    tokio::select! { biased; _ = shutdown.cancelled() => return None, _ = release.notified() => {} }
+                }
+            }
+            if shutdown.is_cancelled() {
+                log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
+                return None;
+            }
+            if let Some(commit) = session_commit {
+                publish_session_cursor(commit.clone(), committed.session_revision);
+            }
+            drop(admission);
+            if failures != 0 {
+                log_completion_recovery(&owner.key, CompletionRecoveryReason::Recovered, failures);
+            }
+            return Some(committed);
+        }
+        drop(admission); // All retry waits below are outside admission/bot/session locks.
+        failures = failures.saturating_add(1);
+        let reason = if needs_proof {
+            CompletionRecoveryReason::AwaitingProof
+        } else if failures >= API_BOT_COMPLETION_MAX_ATTEMPTS {
+            CompletionRecoveryReason::Backoff
+        } else {
+            CompletionRecoveryReason::ShortRetry
+        };
+        if last_reason != Some(reason) {
+            log_completion_recovery(&owner.key, reason, failures);
+            last_reason = Some(reason);
+        }
+        #[cfg(test)]
+        if let Some((count, notify)) = &owner.retry_observer {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            notify.notify_one();
+        }
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        if failures >= API_BOT_COMPLETION_MAX_ATTEMPTS {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
+                    return None;
+                }
+                _ = crate::lifecycle::race_point::hit("api_completion_backoff", &owner.key.run_id) => {},
             }
         }
-        if attempt + 1 < API_BOT_COMPLETION_MAX_ATTEMPTS {
-            tokio::time::sleep(API_BOT_COMPLETION_RETRY_DELAY).await;
+        if !completion_retry_wait(shutdown, completion_retry_delay(failures)).await {
+            log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
+            return None;
         }
     }
-    warn_completion_storage(&owner.key);
-    None
+}
+
+async fn retire_stale_completion(owner: &CompletionOwner) -> bool {
+    if !matches!(
+        super::completion::completion_owner_is_current_result(
+            &owner.app,
+            &owner.key,
+            &owner.identity
+        )
+        .await,
+        Ok(false)
+    ) {
+        return false; // Read errors never mean the owner ended.
+    }
+    if let Ok(Some(stored)) = super::receipt::load(&owner.app.db, &owner.identity).await {
+        if matches!(stored.state, super::receipt::State::Pending)
+            && super::receipt::fence_stale(&owner.app.db, &stored.item)
+                .await
+                .is_err()
+        {
+            warn_completion_storage(&owner.key);
+        }
+    }
+    true
 }
 
 async fn store_joined_completion(
@@ -821,6 +996,8 @@ async fn store_joined_completion_with_test_fault(
     if injected_fault == Some((CompletionStoreFault::AmbiguousAfterCommit, 0))
         && matches!(&stored, Ok(super::completion::Outcome::Committed(_)))
     {
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        crate::lifecycle::race_point::hit("api_completion_ack_lost", &owner.key.run_id).await;
         return Err(super::completion::StoreError::Ambiguous);
     }
     stored
@@ -3523,7 +3700,7 @@ mod tests {
         let identity = create_completion_session(&env.app, &key).await;
         reserve_completion_attempt(&env.app, &identity).await;
         sqlx::query(&format!(
-            "CREATE TRIGGER completion_permanent_failure BEFORE INSERT ON messages WHEN NEW.turn_id='{}' BEGIN SELECT RAISE(ABORT, 'injected permanent completion error'); END",
+            "CREATE TRIGGER completion_permanent_failure BEFORE INSERT ON messages WHEN NEW.role='assistant' AND NEW.turn_id='{}' BEGIN SELECT RAISE(ABORT, 'injected permanent completion error'); END",
             turn_id
         ))
         .execute(&env.app.db)
@@ -3580,7 +3757,6 @@ mod tests {
         })
         .await
         .unwrap();
-        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
         assert_eq!(
             *joined_rx.borrow(),
             JoinState::Joined(Ok(Completion::Completed)),
@@ -3598,11 +3774,13 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_join_receipts WHERE turn_id=?")
             .bind(&turn_id).fetch_one(&env.app.db).await.unwrap(), "pending",
             "short retry exhaustion retains durable recovery data for D2b/D3");
+        assert!(crate::lifecycle::stop_bot(&env.app, &bot_id).await.unwrap());
+        tokio::time::timeout(DEADLOCK_TIMEOUT, owner).await.unwrap().unwrap();
         sqlx::query("DROP TRIGGER completion_permanent_failure")
             .execute(&env.app.db)
             .await
             .unwrap();
-        assert!(crate::lifecycle::stop_bot(&env.app, &bot_id).await.unwrap());
+
         let after_stop: (String, String, String, i64, i64) = sqlx::query_as(
             "SELECT r.state,t.status,a.state,a.reserved_microusd,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant') FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.run_id=r.id WHERE r.id=? AND t.id=?",
         )
@@ -3872,7 +4050,7 @@ mod tests {
             vec![json!({"type":"text","text":"x".repeat(super::super::receipt::MAX_TEXT_BYTES+1)})];
         let text = super::super::completion::FinalText::from_response(&response);
         assert!(
-            settle_joined_completion(&owner, Completion::Completed, Some(text))
+            settle_joined_completion(&owner, Completion::Completed, Some(text), &CancellationToken::new(), None)
                 .await
                 .is_none()
         );
@@ -3939,7 +4117,7 @@ mod tests {
                 retry_observer: None,
                 store_fault: None,
             };
-            assert!(settle_joined_completion(&owner, joined, None)
+            assert!(settle_joined_completion(&owner, joined, None, &CancellationToken::new(), None)
                 .await
                 .is_some());
             let row: (String, String, Option<String>) = sqlx::query_as(
@@ -3969,6 +4147,542 @@ mod tests {
                 0
             );
         }
+    }
+
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BackoffProofFault {
+        None,
+        BeforeStore,
+        AfterCommit,
+    }
+    struct BackoffFixture {
+        env: crate::testing::Env,
+        key: ApiTurnKey,
+        identity: super::super::adapter::AdapterIdentity,
+        shutdown: CancellationToken,
+        owner: tokio::task::JoinHandle<()>,
+        retries: Arc<std::sync::atomic::AtomicUsize>,
+        wake: Arc<Notify>,
+        runner_calls: Arc<std::sync::atomic::AtomicUsize>,
+        store_calls: Arc<std::sync::atomic::AtomicUsize>,
+        joined: watch::Receiver<JoinState>,
+        at_backoff: Arc<Notify>,
+        release_backoff: Arc<Notify>,
+    }
+    impl Drop for BackoffFixture {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            self.release_backoff.notify_one();
+        }
+    }
+    async fn backoff_fixture() -> BackoffFixture {
+        backoff_fixture_with_proof_fault(BackoffProofFault::None).await
+    }
+    async fn backoff_fixture_with_proof_fault(mode: BackoffProofFault) -> BackoffFixture {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid();
+        let run = crate::db::ulid();
+        let turn = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot,
+            &run,
+            &turn,
+            &conv,
+            &env.project_id,
+            "storage backoff",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot.clone(),
+            run_id: run.clone(),
+            turn_id: turn.clone(),
+        };
+        let identity = create_completion_session(&env.app, &key).await;
+        reserve_completion_attempt(&env.app, &identity).await;
+        sqlx::query("CREATE TRIGGER completion_backoff_failure BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'synthetic backoff fault'); END")
+            .execute(&env.app.db).await.unwrap();
+        if mode == BackoffProofFault::BeforeStore {
+            sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO hidden_join_receipts")
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        if mode == BackoffProofFault::BeforeStore {
+            sqlx::query("ALTER TABLE bots RENAME TO hidden_bots")
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        if mode == BackoffProofFault::AfterCommit {
+            sqlx::query("DROP TRIGGER completion_backoff_failure")
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            let pool = env.app.db.clone();
+            crate::lifecycle::race_point::arm(
+                "api_completion_ack_lost",
+                &run,
+                move || async move {
+                    sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO hidden_join_receipts")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                },
+            );
+        }
+        let runtime = &env.app.api_bot_runtime;
+        runtime.set_test_dependencies(ApiBotDependencies {
+            endpoint: "http://127.0.0.1:1/no-call".into(),
+            key: "fake".into(),
+            quote: Arc::new(Quote),
+            tools: Arc::new(NoTools),
+            shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
+        });
+        let at_backoff = Arc::new(Notify::new());
+        let release_backoff = Arc::new(Notify::new());
+        let reached = at_backoff.clone();
+        let release = release_backoff.clone();
+        crate::lifecycle::race_point::arm("api_completion_backoff", &run, move || async move {
+            reached.notify_one();
+            release.notified().await;
+        });
+        let runner_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = runner_calls.clone();
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = runtime
+            .inner
+            .registry
+            .spawn_tracked(
+                RunTurnKey {
+                    run_id: run,
+                    turn_id: turn,
+                },
+                move |_cancel| async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = text_tx.send(super::super::completion::FinalText::from_response(
+                        &completion_response(),
+                    ));
+                    Ok(TurnOutcome::Completed)
+                },
+            )
+            .unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, joined) = watch::channel(JoinState::Pending);
+        runtime.inner.controls.lock().unwrap().insert(
+            FullKey::from(&key),
+            ControlRecord {
+                identity: Arc::new(()),
+                cancel: cancel.clone(),
+                joined: joined.clone(),
+            },
+        );
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake = Arc::new(Notify::new());
+        let shutdown = CancellationToken::new();
+        let store_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = tokio::spawn(own_ticket(
+            ticket,
+            cancel,
+            shutdown.clone(),
+            joined_tx,
+            DEADLOCK_TIMEOUT,
+            Some(CompletionOwner {
+                app: env.app.clone(),
+                key: clone_turn_key(&key),
+                identity: identity.clone(),
+                final_text: text_rx,
+                before_storage: None,
+                retry_observer: Some((retries.clone(), wake.clone())),
+                store_fault: match mode {
+                    BackoffProofFault::None => None,
+                    BackoffProofFault::BeforeStore => Some((
+                        CompletionStoreFault::AmbiguousBeforeStore,
+                        store_calls.clone(),
+                    )),
+                    BackoffProofFault::AfterCommit => Some((
+                        CompletionStoreFault::AmbiguousAfterCommit,
+                        store_calls.clone(),
+                    )),
+                },
+            }),
+            Some(SessionCommit {
+                pool: env.app.db.clone(),
+                inner: runtime.inner.clone(),
+                bot_id: bot,
+                identity: identity.clone(),
+                expected: None,
+                before_revision: None,
+                after_commit_before_publish: None,
+            }),
+        ));
+        BackoffFixture {
+            env,
+            key,
+            identity,
+            shutdown,
+            owner,
+            retries,
+            wake,
+            runner_calls,
+            store_calls,
+            joined,
+            at_backoff,
+            release_backoff,
+        }
+    }
+    async fn wait_for_long_backoff(f: &BackoffFixture) {
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            while f.retries.load(std::sync::atomic::Ordering::SeqCst)
+                < API_BOT_COMPLETION_MAX_ATTEMPTS
+            {
+                f.wake.notified().await;
+            }
+            f.at_backoff.notified().await;
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn joined_storage_recovers_after_short_retries_without_stop_or_runner_replay() {
+        let mut f = backoff_fixture().await;
+        wait_for_long_backoff(&f).await;
+        assert_eq!(
+            *f.joined.borrow(),
+            JoinState::Joined(Ok(Completion::Completed))
+        );
+        sqlx::query("DROP TRIGGER completion_backoff_failure")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        f.release_backoff.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "completed",
+            "joined storage must recover after the three short retries without Stop"
+        );
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            1
+        );
+        let cursor = f
+            .env
+            .app
+            .api_bot_runtime
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&f.key.bot_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(cursor.identity, f.identity);
+    }
+    #[tokio::test]
+    async fn completion_backoff_releases_all_locks_and_stop_wins_without_resurrection() {
+        let mut f = backoff_fixture().await;
+        wait_for_long_backoff(&f).await;
+        let key = ApiRunKey {
+            bot_id: f.key.bot_id.clone(),
+            run_id: f.key.run_id.clone(),
+        };
+        let guard = tokio::time::timeout(
+            DEADLOCK_TIMEOUT,
+            admission_gate_for(&f.env.app.api_bot_runtime.inner, &key),
+        )
+        .await
+        .expect("backoff must release admission");
+        drop(guard);
+        let bot_lock = f.env.app.bot_lock(&f.key.bot_id).await;
+        let guard = tokio::time::timeout(DEADLOCK_TIMEOUT, bot_lock.lock())
+            .await
+            .expect("backoff must not hold bot lock");
+        drop(guard);
+        assert!(f.env.app.api_bot_runtime.inner.sessions.try_lock().is_ok());
+        assert!(
+            matches!(
+                f.env.app.api_turn_spawn(&f.key).await,
+                Err(ApiBotError::Busy)
+            ),
+            "free admission does not authorize another runner before cursor publication"
+        );
+        assert!(tokio::time::timeout(
+            DEADLOCK_TIMEOUT,
+            crate::lifecycle::stop_bot(&f.env.app, &f.key.bot_id)
+        )
+        .await
+        .unwrap()
+        .unwrap());
+        f.release_backoff.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let row:(String,String,String,i64,i64)=sqlx::query_as("SELECT r.state,t.status,a.state,a.reserved_microusd,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant') FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE t.id=?")
+            .bind(&f.key.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(
+            row,
+            ("stopped".into(), "failed".into(), "unknown".into(), 250, 0)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM api_bot_join_receipts WHERE turn_id=?"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            "fenced"
+        );
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *f.joined.borrow(),
+            JoinState::Joined(Ok(Completion::Completed))
+        );
+    }
+    #[tokio::test]
+    async fn shutdown_interrupts_backoff_and_keeps_durable_pending_without_fake_completion() {
+        let mut f = backoff_fixture().await;
+        let mut events = f.env.app.subscribe();
+        wait_for_long_backoff(&f).await;
+        f.shutdown.cancel();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let row:(String,String,String,String,i64)=sqlx::query_as("SELECT r.state,t.status,a.state,j.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.turn_id=t.id JOIN api_bot_join_receipts j ON j.turn_id=t.id WHERE t.id=?")
+            .bind(&f.key.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(
+            row,
+            (
+                "running".into(),
+                "in_flight".into(),
+                "reserved".into(),
+                "pending".into(),
+                250
+            )
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(events.try_recv().is_err());
+        assert!(f
+            .env
+            .app
+            .api_bot_runtime
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&f.key.bot_id)
+            .is_none());
+        assert_eq!(
+            *f.joined.borrow(),
+            JoinState::Joined(Ok(Completion::Completed))
+        );
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn unconfirmed_storage_polls_read_only_until_proof_returns() {
+        let mut f = backoff_fixture_with_proof_fault(BackoffProofFault::BeforeStore).await;
+        wait_for_long_backoff(&f).await;
+        assert_eq!(
+            f.store_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "unconfirmed proof must not call the writer again"
+        );
+        sqlx::query("ALTER TABLE hidden_bots RENAME TO bots")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE hidden_join_receipts RENAME TO api_bot_join_receipts")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER completion_backoff_failure")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        f.release_backoff.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.store_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM api_bot_join_receipts WHERE turn_id=?"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            "applied"
+        );
+    }
+    #[test]
+    fn completion_backoff_is_bounded_and_does_not_overflow() {
+        assert_eq!(completion_retry_delay(1), Duration::from_millis(25));
+        assert_eq!(completion_retry_delay(2), Duration::from_millis(25));
+        for (failures, seconds) in [
+            (3, 1),
+            (4, 2),
+            (5, 4),
+            (6, 8),
+            (7, 16),
+            (8, 30),
+            (usize::MAX, 30),
+        ] {
+            assert_eq!(
+                completion_retry_delay(failures),
+                Duration::from_secs(seconds)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_retry_sleep_is_immediately_interruptible_without_advancing_time() {
+        let shutdown = CancellationToken::new();
+        let mut waiting = Box::pin(completion_retry_wait(&shutdown, Duration::from_secs(30)));
+        let first =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx))).await;
+        assert!(first.is_pending());
+        shutdown.cancel();
+        let interrupted =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx))).await;
+        assert_eq!(interrupted, std::task::Poll::Ready(false));
+        let active = CancellationToken::new();
+        let mut timer = Box::pin(completion_retry_wait(&active, Duration::from_secs(1)));
+        let first =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(timer.as_mut().poll(cx))).await;
+        assert!(first.is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(timer.await);
+    }
+
+    #[tokio::test]
+    async fn lost_commit_ack_keeps_read_only_recovery_when_turn_is_already_completed() {
+        let mut f = backoff_fixture_with_proof_fault(BackoffProofFault::AfterCommit).await;
+        let reached=tokio::time::timeout(DEADLOCK_TIMEOUT,async {
+            tokio::select! { result = &mut f.owner => { result.unwrap(); false }, _ = f.at_backoff.notified() => true }
+        }).await.unwrap();
+        assert!(
+            reached,
+            "a completed turn alone cannot retire recovery while Applied proof is unreadable"
+        );
+        assert_eq!(f.store_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        sqlx::query("ALTER TABLE hidden_join_receipts RENAME TO api_bot_join_receipts")
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        f.release_backoff.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            f.store_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Applied proof must not replay the writer"
+        );
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            1
+        );
+        let cursor = f
+            .env
+            .app
+            .api_bot_runtime
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&f.key.bot_id)
+            .cloned()
+            .expect("recovered applied proof publishes cursor");
+        assert_eq!(cursor.identity, f.identity);
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_with_pruned_session_exits_recovery_without_recreating_state() {
+        let mut f = backoff_fixture().await;
+        wait_for_long_backoff(&f).await;
+        assert!(crate::lifecycle::stop_bot(&f.env.app, &f.key.bot_id)
+            .await
+            .unwrap());
+        sqlx::query("DELETE FROM api_bot_sessions WHERE id=?")
+            .bind(&f.identity.session_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        f.release_backoff.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, &mut f.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let row:(String,String,String,i64)=sqlx::query_as("SELECT r.state,t.status,a.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE t.id=?")
+            .bind(&f.key.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(
+            row,
+            ("stopped".into(), "failed".into(), "unknown".into(), 250)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_bot_sessions")
+                .fetch_one(&f.env.app.db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_bot_join_receipts")
+                .fetch_one(&f.env.app.db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'"
+            )
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
 }
