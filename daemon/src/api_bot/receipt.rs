@@ -1,4 +1,4 @@
-//! Private storage contract only. No production caller or proof inference from checkpoint state.
+//! Private joined-completion storage. No proof inference from checkpoint state.
 //! D2 must supply these values only after observing a genuine RunTicket join.
 use super::{adapter::AdapterIdentity, protocol::Response};
 use sqlx::{Row, SqlitePool};
@@ -38,14 +38,22 @@ impl std::fmt::Debug for Payload {
 }
 impl Payload {
     pub(super) fn completed(response: &Response) -> Result<Self, Error> {
-        let text = super::runner::final_text(response);
+        Self::visible(&super::runner::final_text(response))
+    }
+    pub(super) fn visible(text: &str) -> Result<Self, Error> {
         if text.len() > MAX_TEXT_BYTES {
             return Err(Error::Bounds);
         }
         Ok(Self {
             outcome: JoinOutcome::Completed,
-            text: Some(text),
+            text: Some(text.to_owned()),
         })
+    }
+    pub(super) fn outcome(&self) -> JoinOutcome {
+        self.outcome
+    }
+    pub(super) fn text(&self) -> Option<&str> {
+        self.text.as_deref()
     }
     pub(super) fn ended(outcome: JoinOutcome) -> Result<Self, Error> {
         if outcome == JoinOutcome::Completed {
@@ -94,32 +102,7 @@ pub(super) async fn save(
         .await
         .map_err(|_| Error::Storage)?;
     let now = crate::db::now();
-    let expiry = crate::db::ts_sql("s.expires_at");
-    let current: bool = sqlx::query_scalar(&format!(
-        "SELECT EXISTS(
-        SELECT 1 FROM api_bot_sessions s
-        JOIN bots b ON b.id=s.bot_id
-        JOIN runs r ON r.id=s.owner_run_id AND r.bot_id=b.id
-        JOIN turns t ON t.id=s.owner_turn_id AND t.run_id=r.id
-        JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id
-        WHERE s.id=? AND b.id=? AND r.id=? AND t.id=?
-          AND s.generation=? AND s.revision=? AND s.retired_at IS NULL AND {expiry}>?
-          AND b.kind='claude-api' AND b.deleted_at IS NULL
-          AND r.state='running' AND t.status='in_flight' AND t.delivery='ok'
-          AND NOT EXISTS(SELECT 1 FROM runs successor WHERE successor.bot_id=b.id
-              AND successor.id!=r.id AND successor.state IN ('running','starting','stopping'))
-    )",
-    ))
-    .bind(&identity.session_id)
-    .bind(&identity.bot_id)
-    .bind(&identity.run_id)
-    .bind(&identity.turn_id)
-    .bind(identity.generation)
-    .bind(revision)
-    .bind(&now)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| Error::Storage)?;
+    let current = owner_on(&mut tx, identity, revision, "in_flight").await?;
     if !current {
         tx.rollback().await.map_err(|_| Error::Storage)?;
         return Ok(Saved::Fenced);
@@ -186,7 +169,7 @@ pub(super) enum Disposition {
     Applied,
     Fenced,
 }
-/// Used inside a future caller's completion transaction, never as proof that completion happened.
+/// Used inside the caller's completion transaction, never as proof that completion happened.
 pub(super) async fn mark_on(
     tx: &mut sqlx::SqliteConnection,
     item: &Pending,
@@ -202,4 +185,119 @@ pub(super) async fn mark_on(
         .bind(item.revision).bind(item.payload.outcome.as_str()).bind(&item.payload.text)
         .execute(tx).await.map_err(|_| Error::Storage)?.rows_affected();
     Ok(changed == 1)
+}
+
+/// Exact session/owner fence shared by insertion, consumption and read-only commit proof.
+pub(super) async fn owner_on(
+    conn: &mut sqlx::SqliteConnection,
+    identity: &AdapterIdentity,
+    revision: i64,
+    status: &str,
+) -> Result<bool, Error> {
+    let now = crate::db::now();
+    let expiry = crate::db::ts_sql("s.expires_at");
+    sqlx::query_scalar(&format!(
+        "SELECT EXISTS(
+        SELECT 1 FROM api_bot_sessions s
+        JOIN bots b ON b.id=s.bot_id
+        JOIN runs r ON r.id=s.owner_run_id AND r.bot_id=b.id
+        JOIN turns t ON t.id=s.owner_turn_id AND t.run_id=r.id
+        JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id
+        WHERE s.id=? AND b.id=? AND r.id=? AND t.id=?
+          AND s.generation=? AND s.revision=? AND s.retired_at IS NULL AND {expiry}>?
+          AND b.kind='claude-api' AND b.deleted_at IS NULL
+          AND r.state='running' AND t.status=? AND t.delivery='ok'
+          AND NOT EXISTS(SELECT 1 FROM runs successor WHERE successor.bot_id=b.id
+              AND successor.id!=r.id AND successor.state IN ('running','starting','stopping'))
+    )",
+    ))
+    .bind(&identity.session_id)
+    .bind(&identity.bot_id)
+    .bind(&identity.run_id)
+    .bind(&identity.turn_id)
+    .bind(identity.generation)
+    .bind(revision)
+    .bind(&now)
+    .bind(status)
+    .fetch_one(conn)
+    .await
+    .map_err(|_| Error::Storage)
+}
+
+pub(super) enum State {
+    Pending,
+    Applied,
+    Fenced,
+}
+pub(super) struct Stored {
+    pub(super) item: Pending,
+    pub(super) state: State,
+}
+
+pub(super) async fn load(
+    pool: &SqlitePool,
+    identity: &AdapterIdentity,
+) -> Result<Option<Stored>, Error> {
+    let row = sqlx::query("SELECT revision,outcome,final_text,state FROM api_bot_join_receipts WHERE session_id=? AND bot_id=? AND run_id=? AND turn_id=? AND generation=?")
+        .bind(&identity.session_id).bind(&identity.bot_id).bind(&identity.run_id).bind(&identity.turn_id).bind(identity.generation)
+        .fetch_optional(pool).await.map_err(|_| Error::Storage)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let payload = match row.get::<String, _>("outcome").as_str() {
+        "completed" => Payload::visible(
+            row.get::<Option<String>, _>("final_text")
+                .as_deref()
+                .ok_or(Error::Invalid)?,
+        )?,
+        "failed" => Payload::ended(JoinOutcome::Failed)?,
+        "cancelled" => Payload::ended(JoinOutcome::Cancelled)?,
+        _ => return Err(Error::Invalid),
+    };
+    let state = match row.get::<String, _>("state").as_str() {
+        "pending" => State::Pending,
+        "applied" => State::Applied,
+        "fenced" => State::Fenced,
+        _ => return Err(Error::Invalid),
+    };
+    Ok(Some(Stored {
+        item: Pending {
+            identity: identity.clone(),
+            revision: row.get("revision"),
+            payload,
+        },
+        state,
+    }))
+}
+
+pub(super) async fn matches_on(
+    conn: &mut sqlx::SqliteConnection,
+    item: &Pending,
+    state: State,
+) -> Result<bool, Error> {
+    let state = match state {
+        State::Pending => "pending",
+        State::Applied => "applied",
+        State::Fenced => "fenced",
+    };
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_join_receipts WHERE session_id=? AND bot_id=? AND run_id=? AND turn_id=? AND generation=? AND revision=? AND outcome=? AND final_text IS ? AND state=?)")
+        .bind(&item.identity.session_id).bind(&item.identity.bot_id).bind(&item.identity.run_id).bind(&item.identity.turn_id)
+        .bind(item.identity.generation).bind(item.revision).bind(item.payload.outcome.as_str()).bind(&item.payload.text).bind(state)
+        .fetch_one(conn).await.map_err(|_| Error::Storage)
+}
+
+/// Only the old receipt is changed. Recheck the stale owner under the same write transaction.
+pub(super) async fn fence_stale(pool: &SqlitePool, item: &Pending) -> Result<(), Error> {
+    let mut tx = crate::db::begin_write(pool)
+        .await
+        .map_err(|_| Error::Storage)?;
+    if matches_on(&mut tx, item, State::Pending).await?
+        && !owner_on(&mut tx, &item.identity, item.revision, "in_flight").await?
+    {
+        mark_on(&mut tx, item, Disposition::Fenced).await?;
+        tx.commit().await.map_err(|_| Error::Storage)?;
+    } else {
+        tx.rollback().await.map_err(|_| Error::Storage)?;
+    }
+    Ok(())
 }
