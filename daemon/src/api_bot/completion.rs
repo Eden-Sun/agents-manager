@@ -128,6 +128,34 @@ pub(super) async fn exact_turn_is_uncommitted(app: &Arc<App>, key: &ApiTurnKey) 
     .unwrap_or(false)
 }
 
+/// Only decide whether this old recovery actor should retire. This is NOT commit/join proof.
+/// A completed turn can still need its Applied receipt acknowledgment and cursor publication.
+pub(super) async fn completion_owner_is_current_result(
+    app: &Arc<App>,
+    key: &ApiTurnKey,
+    identity: &AdapterIdentity,
+) -> Result<bool, StoreError> {
+    if key.bot_id != identity.bot_id
+        || key.run_id != identity.run_id
+        || key.turn_id != identity.turn_id
+    {
+        return Ok(false);
+    }
+    let expiry = crate::db::ts_sql("s.expires_at");
+    sqlx::query_scalar(&format!("SELECT EXISTS(
+        SELECT 1 FROM bots b JOIN runs r ON r.bot_id=b.id
+        JOIN turns t ON t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id
+        JOIN api_bot_sessions s ON s.bot_id=b.id AND s.owner_run_id=r.id AND s.owner_turn_id=t.id
+        WHERE b.id=? AND r.id=? AND t.id=? AND s.id=? AND s.generation=?
+          AND b.kind='claude-api' AND b.deleted_at IS NULL AND r.state='running'
+          AND t.status IN ('in_flight','completed','failed') AND t.delivery='ok'
+          AND s.retired_at IS NULL AND {expiry}>?
+          AND NOT EXISTS(SELECT 1 FROM runs successor WHERE successor.bot_id=b.id AND successor.id!=r.id AND successor.state IN ('starting','running','stopping'))
+    )"))
+        .bind(&key.bot_id).bind(&key.run_id).bind(&key.turn_id).bind(&identity.session_id).bind(identity.generation).bind(crate::db::now())
+        .fetch_one(&app.db).await.map_err(|_| StoreError::Retryable)
+}
+
 /// Events are emitted only after commit and after the runtime publishes the returned exact cursor.
 pub(super) async fn emit_after_commit(app: &Arc<App>, key: &ApiTurnKey, committed: Committed) {
     if let Some(message) = committed.message {
@@ -436,7 +464,7 @@ pub(super) async fn probe_after_join(
         return Ok(Probe::Unconfirmed);
     }
     match stored.state {
-        State::Fenced => Ok(Probe::Unconfirmed),
+        State::Fenced => Ok(Probe::Stale(item)),
         State::Pending => {
             if !receipt::matches_on(&mut tx, &item, State::Pending)
                 .await
