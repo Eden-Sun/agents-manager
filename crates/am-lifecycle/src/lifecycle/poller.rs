@@ -11,6 +11,9 @@ use super::*;
 #[path = "observed_status.rs"]
 mod observed_status;
 
+#[path = "codex_session_refresh.rs"]
+mod codex_session_refresh;
+
 
 /// Unchanged polls at an empty composer before we complete the Turn ourselves (~14s; a slow hook still wins).
 pub const IDLE_POLLS: u32 = 20;
@@ -1615,6 +1618,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    let run = codex_session_refresh::refresh(app, &run, &bot, &turn.id).await.unwrap_or(run);
     // §12.5：沒有 hook 的 grok 先問它自己的對話檔，畫面只是備援。
     if let Some(done) = super::grok_transcript::settle_in_flight(app, &bot, &run, &turn).await {
         return Ok(done);
