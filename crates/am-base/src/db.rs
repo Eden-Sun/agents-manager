@@ -348,6 +348,25 @@ CREATE TABLE IF NOT EXISTS api_bot_attempts (
 );
 CREATE INDEX IF NOT EXISTS api_bot_attempts_created ON api_bot_attempts(created_at);
 CREATE INDEX IF NOT EXISTS api_bot_attempts_turn ON api_bot_attempts(turn_id);
+-- #1944 D1: private, inert until joined completion/recovery is wired.
+CREATE TABLE IF NOT EXISTS api_bot_join_receipts (
+  session_id TEXT NOT NULL REFERENCES api_bot_sessions(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  revision INTEGER NOT NULL CHECK(revision >= 0),
+  outcome TEXT NOT NULL CHECK(outcome IN ('completed','failed','cancelled')),
+  final_text TEXT,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','applied','fenced')),
+  created_at TEXT NOT NULL,
+  processed_at TEXT,
+  PRIMARY KEY(session_id, turn_id),
+  CHECK((outcome = 'completed' AND final_text IS NOT NULL) OR (outcome != 'completed' AND final_text IS NULL)),
+  CHECK(final_text IS NULL OR length(CAST(final_text AS BLOB)) <= 1048576),
+  CHECK((state = 'pending' AND processed_at IS NULL) OR (state != 'pending' AND processed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS api_bot_join_receipts_pending ON api_bot_join_receipts(created_at, session_id, turn_id) WHERE state = 'pending';
 
 "#;
 
@@ -501,6 +520,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (68, "26359d939fbd1275"),
     // #1944 B: private API bot checkpoints and attempt accounting, expanded bot kind CHECK.
     (69, "5c5a67ab8a3b16d2"),
+    // #1944 D1: private durable joined receipts (no production writer yet).
+    (70, "b87dfcf444f07cd0"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
