@@ -36,6 +36,25 @@
   white-space: nowrap;
 }
 
+.copy-chip-selectable {
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  cursor: text;
+}
+
+.copy-chip-selectable .copy-chip-value {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.copy-chip-hint {
+  color: var(--text-faint);
+}
+
 .copy-chip-ok {
   flex: none;
   color: var(--status-ok);
