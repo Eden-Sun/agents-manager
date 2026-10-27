@@ -11,6 +11,15 @@ use super::*;
 #[path = "observed_status.rs"]
 mod observed_status;
 
+/// Observe one Claude menu, or discard receipts for runs no longer active.
+pub async fn observe_claude_menu(app: &impl LcHost, run: Option<&db::Run>, active: &[String]) -> anyhow::Result<bool> {
+    observed_status::retain_menu_receipts(active);
+    match run {
+        Some(run) => observed_status::observe_menu(app, run).await,
+        None => Ok(false),
+    }
+}
+
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 
