@@ -814,20 +814,17 @@ test('插隊送出成功（interrupted／idle）不多說話', async () => {
  * 這幾天 daemon 新增的「暫時不行、之後可以原樣重來」的 409／503：`ApiError.message` 取 `reason`，
  * 通知就只剩 `composer_busy（HTTP 409）` 這種機器代碼——看不出是沒送出、字在不在、要等多久。
  */
-test('送出撞 409 composer_busy／resume_unverified：講人話（沒送出、怎麼辦），不是機器代碼', async () => {
+test('送出撞 409 composer_busy 顯示常駐提示；resume_unverified 講人話', async () => {
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'composer_busy', run_id: 'r1', retryable: true, sent: false }, 409))
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
-  let texts = noticeTexts()
-  assert.equal(texts.length, 1)
-  assert.doesNotMatch(texts[0], /composer_busy/)
-  assert.match(texts[0], /沒送出/)
-  assert.match(texts[0], /輸入框/)
+  assert.deepEqual(useStore.getState().composerDrafts.b1, { draft: '', token: '', truncated: false, actions: [] })
+  assert.equal(noticeTexts().length, 0)
 
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'resume_unverified', run_id: 'r1', session_id: 's1', retry_after_s: 90 }, 409))
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
-  texts = noticeTexts()
+  const texts = noticeTexts()
   assert.doesNotMatch(texts[0], /resume_unverified/)
   assert.match(texts[0], /沒送出/)
   assert.match(texts[0], /接回/)

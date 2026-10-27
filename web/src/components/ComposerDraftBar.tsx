@@ -32,6 +32,17 @@ export function ComposerDraftBar({
   const mine = text.trim()
   const hasMine = mine !== '' || attachments.length > 0
 
+  if (!block.draft) {
+    return (
+      <div className="composer-draft" role="status">
+        <span className="composer-draft-label">{t('讀不到終端內容，請到終端檢查；目前訊息保留')}</span>
+        <div className="composer-draft-actions">
+          <button type="button" className="mini-btn" onClick={() => dismiss(botId)}>{t('取消')}</button>
+        </div>
+      </div>
+    )
+  }
+
   const submitDraft = () => {
     void sendPrompt(botId, '', [], false, false, { action: 'submit', token: block.token })
   }

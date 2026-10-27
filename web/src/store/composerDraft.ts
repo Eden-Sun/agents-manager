@@ -30,13 +30,15 @@ export interface ComposerDraftBlock {
 
 const ACTIONS: readonly DraftAction[] = ['submit', 'clear']
 
-/** 409 裡描述草稿的欄位；舊 daemon 沒帶 `draft`（或讀不出字）＝`null`，照舊只跳通知。 */
+/** 409 裡描述草稿的欄位；讀不到內容時仍保留說明，但不能提供草稿動作。 */
 export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null
   const reason = e.body.reason
   if (reason !== 'composer_busy' && reason !== 'draft_changed' && reason !== 'draft_uncleared') return null
   const draft = e.body.draft
-  if (typeof draft !== 'string' || !draft.trim()) return null
+  if (typeof draft !== 'string' || !draft.trim()) {
+    return reason === 'composer_busy' ? { draft: '', token: '', truncated: false, actions: [] } : null
+  }
   const raw = Array.isArray(e.body.draft_actions) ? e.body.draft_actions : []
   const actions = ACTIONS.filter((a) => raw.includes(a))
   const token = typeof e.body.draft_token === 'string' ? e.body.draft_token : ''
