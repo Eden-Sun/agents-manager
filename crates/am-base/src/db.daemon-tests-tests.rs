@@ -1391,6 +1391,7 @@
         std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
+        sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
         if version == 67 {
@@ -1504,10 +1505,64 @@
         assert!(open(&path).await.is_err());
         let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap(),67);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM sqlite_master WHERE name IN('api_bot_sessions','api_bot_attempts')").fetch_one(&raw).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM sqlite_master WHERE name IN('api_bot_sessions','api_bot_attempts','api_bot_join_receipts')").fetch_one(&raw).await.unwrap(),0);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM bots WHERE id='old-b'").fetch_one(&raw).await.unwrap(),1);
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA writable_schema").fetch_one(&raw).await.unwrap(),0);
         raw.close().await;std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nr1944_v69_receipt_additive_upgrade_backup_fence_and_private_rows() {
+        let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
+        let pool=open(&path).await.unwrap();
+        sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
+        sqlx::query("PRAGMA user_version=69").execute(&pool).await.unwrap();
+        assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&pool).await.unwrap()),pinned(69));
+        let now=now();
+        sqlx::query("INSERT INTO projects(id,path,label,created_at)VALUES('rp','/synthetic','receipt',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('rb','rp','receipt','claude-api','fake',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at)VALUES('rr','rb','running',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at)VALUES('rc','rb',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at)VALUES('rt','rc','rr','web','in_flight',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,checkpoint_json,created_at,updated_at,expires_at)VALUES('rs','rb','rr','rt',1,'{}',?,?,?)")
+            .bind(&now).bind(&now).bind(iso_in(86400)).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at)VALUES('ra','rs','rb','rr','rt',1,0,'hash','fast','unknown',123,'fixture',?)")
+            .bind(&now).execute(&pool).await.unwrap();
+        pool.close().await;
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) {let _=std::fs::remove_dir_all(&self.0);} }
+        let _cleanup=Cleanup(dir.clone());
+        std::fs::copy(&path,&backup).unwrap();let bytes=std::fs::read(&backup).unwrap();
+        let upgraded=open(&path).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&upgraded).await.unwrap(),SCHEMA_VERSION);
+        assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&upgraded).await.unwrap()),pinned(SCHEMA_VERSION));
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM sqlite_master WHERE name IN('api_bot_join_receipts','api_bot_join_receipts_pending')").fetch_one(&upgraded).await.unwrap(),2);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM api_bot_join_receipts").fetch_one(&upgraded).await.unwrap(),0);
+        // Additive migration is idempotent, with existing private checkpoint/accounting intact.
+        migrate(&upgraded).await.unwrap();migrate(&upgraded).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT checkpoint_json FROM api_bot_sessions WHERE id='rs'").fetch_one(&upgraded).await.unwrap(),"{}");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT reserved_microusd FROM api_bot_attempts WHERE id='ra'").fetch_one(&upgraded).await.unwrap(),123);
+        sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,created_at)VALUES('rs','rb','rr','rt',1,0,'completed','PRIVATE_RECEIPT_SENTINEL',?)")
+            .bind(&now).execute(&upgraded).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,String>("PRAGMA integrity_check").fetch_one(&upgraded).await.unwrap(),"ok");
+        assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&upgraded).await.unwrap().is_empty());
+        upgraded.close().await;
+        // A v69 reader's version fence must reject the upgraded image; never lower user_version.
+        let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
+        assert!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap()>69);
+        // Exercise the real binary fence on a synthetic future version, not only a comparison.
+        sqlx::query(&format!("PRAGMA user_version={}",SCHEMA_VERSION+1)).execute(&raw).await.unwrap();raw.close().await;
+        assert!(open(&path).await.is_err());
+        let fenced=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT final_text FROM api_bot_join_receipts").fetch_one(&fenced).await.unwrap(),"PRIVATE_RECEIPT_SENTINEL");
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&fenced).await.unwrap(),SCHEMA_VERSION+1);fenced.close().await;
+        std::fs::copy(&backup,&path).unwrap();assert_eq!(std::fs::read(&path).unwrap(),bytes);
+        let restored=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).foreign_keys(true)).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&restored).await.unwrap(),69);
+        assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&restored).await.unwrap()),pinned(69));
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT reserved_microusd FROM api_bot_attempts WHERE id='ra'").fetch_one(&restored).await.unwrap(),123);
+        assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&restored).await.unwrap().is_empty());
+        restored.close().await;
     }
 
     async fn nr1944_http(router:axum::Router,method:&str,path:&str,body:String)->(axum::http::StatusCode,String) {
