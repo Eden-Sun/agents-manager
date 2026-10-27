@@ -1,4 +1,4 @@
-import { copyText } from "../lib/copyText"
+import { asyncCopyAvailable } from "../lib/copyText"
 import { useState } from "react"
 import { useT } from "../lib/i18n"
 import "./copyChip.css"
@@ -19,23 +19,30 @@ export function CopyChip({
   const t = useT()
   const [done, setDone] = useState<"ok" | "fail" | null>(null)
   if (!value) return null
+  if (!asyncCopyAvailable() || done === "fail") {
+    return (
+      <span className={`copy-chip copy-chip-selectable${className ? " " + className : ""}`} title={title}>
+        <span className="copy-chip-label">{label}</span>
+        <span className="copy-chip-value mono">{value}</span>
+        <span className="copy-chip-hint">{done === "fail" ? t("複製失敗，長按選取") : t("長按選取後複製")}</span>
+      </span>
+    )
+  }
   return (
     <button
       type="button"
       className={`copy-chip${done === "ok" ? " done" : ""}${className ? " " + className : ""}`}
       title={`${title}\n${value}${t("（點擊複製）")}`}
       onClick={() => {
-        void copyText(value).then((ok) => {
-          // 失敗也要有回饋：以前靜默 return，手機上看起來就是「點了沒反應」。
-          setDone(ok ? "ok" : "fail")
-          setTimeout(() => setDone(null), ok ? 1200 : 2400)
-        })
+        void navigator.clipboard.writeText(value).then(() => {
+          setDone("ok")
+          setTimeout(() => setDone(null), 1200)
+        }, () => setDone("fail"))
       }}
     >
       <span className="copy-chip-label">{label}</span>
       <span className="copy-chip-value mono">{value}</span>
       {done === "ok" ? <span className="copy-chip-ok">{t("已複製")}</span> : null}
-      {done === "fail" ? <span className="copy-chip-fail">{t("複製失敗，長按選取")}</span> : null}
     </button>
   )
 }

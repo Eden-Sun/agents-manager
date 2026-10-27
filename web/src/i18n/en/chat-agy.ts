@@ -24,6 +24,7 @@ const dict: Dict = {
   "自訂答案": "Custom answer",
   "已複製": "Copied",
   "複製失敗，長按選取": "Copy failed; long press to select",
+  "長按選取後複製": "Long press to select and copy",
   "點一下複製整條網址": "Click to copy full URL",
   "複製失敗，請手動選取網址": "Copy failed; please select URL manually",
   "有 {size}，超過 {max} 上限": "Size is {size}, exceeding the {max} limit",
