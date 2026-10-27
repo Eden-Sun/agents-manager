@@ -205,9 +205,24 @@ pub use crate::composer_parse::{
     BoxState, Cell, ComposerRow, SUGGESTION_MAX_CHARS,
 };
 
+/// 選單游標和 Claude 輸入列都用 ❯；完整輸入框中的編號草稿仍是草稿。
+pub(super) fn claude_open_choice_menu(screen: &str) -> bool {
+    let plain = strip_ansi(screen);
+    let lines: Vec<&str> = plain.lines().collect();
+    if let Some(marker) = lines.iter().rposition(|line| line.trim_start().starts_with('❯')) {
+        let framed = marker > 0
+            && is_rule_row(lines[marker - 1])
+            && lines[marker + 1..].iter().any(|line| is_rule_row(line));
+        if framed {
+            return false;
+        }
+    }
+    crate::tui_prompts::awaits_menu_choice(&plain)
+}
+
 /// 額度警告會保留舊的 composer 片段；它存在時不能借那格空框認定已 ready／已送出。
 pub fn box_state(kind: &str, screen: &str) -> BoxState {
-    if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
+    if kind == "claude" && (crate::tui_prompts::cold_resume_choice(screen).is_some() || claude_open_choice_menu(screen)) {
         BoxState::Unready
     } else {
         crate::composer_parse::box_state(kind, screen)
@@ -215,7 +230,7 @@ pub fn box_state(kind: &str, screen: &str) -> BoxState {
 }
 
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
-    if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
+    if kind == "claude" && (crate::tui_prompts::cold_resume_choice(screen).is_some() || claude_open_choice_menu(screen)) {
         BoxState::Unready
     } else {
         crate::composer_parse::box_state_within(kind, screen, tail)
@@ -1186,6 +1201,25 @@ mod plain_warn_tests {
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
+    #[test]
+    fn macos_local_a_numbered_choice_is_not_a_composer_draft() {
+        let menu = "Choose an option\n❯ 1. Example first\n  2. Example second\n";
+        assert_eq!(super::box_state("claude", menu), super::BoxState::Unready);
+        assert_eq!(super::box_state_within("claude", menu, 24), super::BoxState::Unready);
+        let ansi = "Choose an option\n\x1b[35m❯ 1. Example first\x1b[0m\n  2. Example second\n";
+        assert_eq!(super::box_state("claude", ansi), super::BoxState::Unready);
+        assert_eq!(super::box_state("agy", menu), crate::composer_parse::box_state("agy", menu));
+    }
+
+    #[test]
+    fn macos_local_a_numbered_draft_or_an_old_menu_above_a_composer_is_not_an_open_choice() {
+        let draft = "────────────\n❯ 1. First item\n  2. Second item\n────────────\n";
+        assert!(!super::claude_open_choice_menu(draft));
+        assert_eq!(super::box_state("claude", draft), super::BoxState::NonEmpty);
+        let quoted = "Earlier answer\n❯ 1. First option\n  2. Second option\n────────────\n❯\n────────────\n";
+        assert!(!super::claude_open_choice_menu(quoted));
+        assert_eq!(super::box_state("claude", quoted), super::BoxState::Empty);
+    }
     /// 送達掃描用的 source 必須是 herdr 認得的（純斷言，任何環境都跑）。真的 herdr 會不會收，另有
     /// `the_scan_source_is_one_real_herdr_accepts`（只有明講才連）。
     #[test]

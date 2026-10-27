@@ -651,6 +651,7 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
         "claude" if crate::tui_prompts::dangerous_rm_prompt(screen).is_some() => Some("dangerous_rm_pending"),
         "claude" if crate::tui_prompts::is_auto_mode_offer(screen)
             || crate::tui_prompts::is_switch_model_dialog(screen) => Some("dialog_open"),
+        "claude" if super::delivery::claude_open_choice_menu(screen) => Some("dialog_open"),
         "grok" if crate::tui_prompts::is_grok_trust_dialog(screen) => Some("dialog_open"),
         "agy" => crate::agy_screen::blocking_dialog(screen).map(|d| d.reason()),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
@@ -805,6 +806,12 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                     tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
                 }
             }
+        }
+        if !crate::tui_prompts::is_auto_mode_offer(&screen)
+            && !crate::tui_prompts::is_switch_model_dialog(&screen)
+            && super::delivery::claude_open_choice_menu(&screen)
+        {
+            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": "claude 正在等待選單選擇，請到終端處理後再送。"})));
         }
     }
     // agy 的登入框、色彩頁、條款頁、信任框、權限框 herdr 全判 idle：認到就不送、也不按任何鍵（條款頁一個 Enter 就切換同意與否）。
@@ -1413,6 +1420,27 @@ async fn send_now_fell_through(
 mod prompt_tests {
     use super::*;
     use crate::testing as tt;
+
+    #[tokio::test]
+    async fn macos_local_numbered_menu_is_reported_without_sending_keys() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-choice-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let screen = "Choose an option\n❯ 1. Example first\n  2. Example second\n";
+        f.env.herdr.set_screen("pane-choice-test", screen);
+        assert_eq!(agent_prompt_dialog_reason("claude", screen), Some("dialog_open"));
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "dialog_open");
+                assert!(v["message"].as_str().unwrap().contains("終端"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty());
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
 
     struct Fixture {
         env: tt::Env,
