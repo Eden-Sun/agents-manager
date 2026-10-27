@@ -743,6 +743,14 @@ async fn settle_joined_completion(
     joined: Completion,
     final_text: Option<super::completion::FinalText>,
 ) -> Option<super::completion::Committed> {
+    let payload = match (joined, final_text.as_ref()) {
+        (Completion::Completed, Some(text)) => text.receipt_payload(),
+        _ => super::receipt::Payload::ended(super::receipt::JoinOutcome::Failed),
+    };
+    let Ok(payload) = payload else {
+        warn_completion_storage(&owner.key);
+        return None; // Oversize is never truncated or replayed as another request.
+    };
     for attempt in 0..API_BOT_COMPLETION_MAX_ATTEMPTS {
         #[cfg(test)]
         let result = {
@@ -752,26 +760,29 @@ async fn settle_joined_completion(
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
                 )
             });
-            store_joined_completion_with_test_fault(
-                owner,
-                joined,
-                final_text.as_ref(),
-                injected_fault,
-            )
-            .await
+            store_joined_completion_with_test_fault(owner, &payload, injected_fault).await
         };
         #[cfg(not(test))]
-        let result = store_joined_completion(owner, joined, final_text.as_ref()).await;
+        let result = store_joined_completion(owner, &payload).await;
         let retry = match result {
             Ok(super::completion::Outcome::Committed(committed)) => return Some(committed),
             Ok(super::completion::Outcome::Fenced) => return None,
             Err(super::completion::StoreError::Retryable) => true,
             Err(super::completion::StoreError::Ambiguous) => {
-                if !super::completion::exact_turn_is_uncommitted(&owner.app, &owner.key).await {
-                    warn_completion_storage(&owner.key);
-                    return None;
+                match super::completion::probe_after_join(&owner.app, &owner.identity, &payload)
+                    .await
+                {
+                    Ok(super::completion::Probe::Applied(committed)) => return Some(committed),
+                    Ok(super::completion::Probe::Pending) => true,
+                    Ok(super::completion::Probe::Stale(item)) => {
+                        let _ = super::receipt::fence_stale(&owner.app.db, &item).await;
+                        return None;
+                    }
+                    _ => {
+                        warn_completion_storage(&owner.key);
+                        return None;
+                    }
                 }
-                true
             }
         };
         if retry {
@@ -791,39 +802,22 @@ async fn settle_joined_completion(
 
 async fn store_joined_completion(
     owner: &CompletionOwner,
-    joined: Completion,
-    final_text: Option<&super::completion::FinalText>,
+    payload: &super::receipt::Payload,
 ) -> Result<super::completion::Outcome, super::completion::StoreError> {
-    match (joined, final_text) {
-        (Completion::Completed, Some(text)) => {
-            super::completion::commit_after_join(
-                &owner.app,
-                &owner.key,
-                &owner.identity,
-                text,
-            )
-            .await
-        }
-        _ => super::completion::fail_after_join(
-            &owner.app,
-            &owner.key,
-            &owner.identity,
-        )
-        .await,
-    }
+    super::completion::store_durable_after_join(&owner.app, &owner.key, &owner.identity, payload)
+        .await
 }
 
 #[cfg(test)]
 async fn store_joined_completion_with_test_fault(
     owner: &CompletionOwner,
-    joined: Completion,
-    final_text: Option<&super::completion::FinalText>,
+    payload: &super::receipt::Payload,
     injected_fault: Option<(CompletionStoreFault, usize)>,
 ) -> Result<super::completion::Outcome, super::completion::StoreError> {
     if injected_fault == Some((CompletionStoreFault::AmbiguousBeforeStore, 0)) {
         return Err(super::completion::StoreError::Ambiguous);
     }
-    let stored = store_joined_completion(owner, joined, final_text).await;
+    let stored = store_joined_completion(owner, payload).await;
     if injected_fault == Some((CompletionStoreFault::AmbiguousAfterCommit, 0))
         && matches!(&stored, Ok(super::completion::Outcome::Committed(_)))
     {
@@ -3277,6 +3271,9 @@ mod tests {
             .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(status, "in_flight");
         assert_eq!(count, 0, "runner payload before task exit is not completion");
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_bot_join_receipts WHERE turn_id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap(), 0,
+            "visible payload before true join is not a durable receipt");
 
         release_runner.notify_one();
         tokio::time::timeout(DEADLOCK_TIMEOUT, before_storage.notified()).await.unwrap();
@@ -3304,6 +3301,11 @@ mod tests {
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
             .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(status, "completed");
+        let receipt: Option<(String, String)> = sqlx::query_as(
+            "SELECT state,final_text FROM api_bot_join_receipts WHERE session_id=? AND turn_id=?"
+        ).bind(&identity.session_id).bind(&turn_id).fetch_optional(&env.app.db).await.unwrap();
+        assert_eq!(receipt, Some(("applied".into(), "joined final".into())),
+            "a true joined completion must atomically apply its durable visible-text receipt");
         let cursor = runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned().unwrap();
         assert_eq!(cursor.identity, identity);
         let db_revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?")
@@ -3593,6 +3595,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(before_stop, ("running".into(), "in_flight".into(), "reserved".into()));
+        assert_eq!(sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_join_receipts WHERE turn_id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap(), "pending",
+            "short retry exhaustion retains durable recovery data for D2b/D3");
         sqlx::query("DROP TRIGGER completion_permanent_failure")
             .execute(&env.app.db)
             .await
@@ -3719,7 +3724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_store_with_committed_assistant_does_not_retry_or_emit_success() {
+    async fn ambiguous_store_proves_applied_receipt_and_emits_once_without_retry() {
         let env = crate::testing::env().await;
         let bot_id = crate::db::ulid();
         let run_id = crate::db::ulid();
@@ -3783,7 +3788,15 @@ mod tests {
         )
         .bind(&turn_id).fetch_all(&env.app.db).await.unwrap();
         assert_eq!(assistant, vec!["joined final".to_string()]);
-        assert!(events.try_recv().is_err(), "unconfirmed commit does not emit fake success");
+        let applied: String = sqlx::query_scalar("SELECT state FROM api_bot_join_receipts WHERE turn_id=?")
+            .bind(&turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(applied, "applied", "success requires durable applied proof, not an assistant alone");
+        let cursor = runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned().unwrap();
+        assert_eq!(cursor.identity.turn_id, turn_id);
+        let mut kinds = Vec::new();
+        while let Ok(event) = events.try_recv() { kinds.push(event.kind); }
+        assert_eq!(kinds.iter().filter(|kind| kind.as_str()=="message_added").count(), 1);
+        assert_eq!(kinds.iter().filter(|kind| kind.as_str()=="turn_updated").count(), 1);
     }
 
     #[tokio::test]
@@ -3820,4 +3833,142 @@ mod tests {
             .unwrap();
         assert_eq!(state, "running", "restart refusal leaves the run untouched");
     }
+    #[tokio::test]
+    async fn oversized_joined_final_text_fails_closed_without_receipt_or_accounting() {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid();
+        let run = crate::db::ulid();
+        let turn = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(
+            &env.app,
+            &bot,
+            &run,
+            &turn,
+            &conv,
+            &env.project_id,
+            "oversized fixture",
+        )
+        .await;
+        let key = ApiTurnKey {
+            bot_id: bot,
+            run_id: run,
+            turn_id: turn.clone(),
+        };
+        let identity = create_completion_session(&env.app, &key).await;
+        reserve_completion_attempt(&env.app, &identity).await;
+        let (_tx, rx) = oneshot::channel();
+        let owner = CompletionOwner {
+            app: env.app.clone(),
+            key,
+            identity,
+            final_text: rx,
+            before_storage: None,
+            retry_observer: None,
+            store_fault: None,
+        };
+        let mut response = completion_response();
+        response.content =
+            vec![json!({"type":"text","text":"x".repeat(super::super::receipt::MAX_TEXT_BYTES+1)})];
+        let text = super::super::completion::FinalText::from_response(&response);
+        assert!(
+            settle_joined_completion(&owner, Completion::Completed, Some(text))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_bot_join_receipts")
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&turn)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap(),
+            "in_flight"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_attempts WHERE turn_id=?")
+                .bind(&turn)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap(),
+            "reserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cancelled_or_missing_final_text_use_failure_receipts() {
+        for joined in [
+            Completion::Completed,
+            Completion::Failed,
+            Completion::Cancelled,
+        ] {
+            let env = crate::testing::env().await;
+            let bot = crate::db::ulid();
+            let run = crate::db::ulid();
+            let turn = crate::db::ulid();
+            let conv = crate::db::ulid();
+            insert_bot_and_turn(
+                &env.app,
+                &bot,
+                &run,
+                &turn,
+                &conv,
+                &env.project_id,
+                "failure fixture",
+            )
+            .await;
+            let key = ApiTurnKey {
+                bot_id: bot,
+                run_id: run,
+                turn_id: turn.clone(),
+            };
+            let identity = create_completion_session(&env.app, &key).await;
+            let (_tx, rx) = oneshot::channel();
+            let owner = CompletionOwner {
+                app: env.app.clone(),
+                key,
+                identity,
+                final_text: rx,
+                before_storage: None,
+                retry_observer: None,
+                store_fault: None,
+            };
+            assert!(settle_joined_completion(&owner, joined, None)
+                .await
+                .is_some());
+            let row: (String, String, Option<String>) = sqlx::query_as(
+                "SELECT state,outcome,final_text FROM api_bot_join_receipts WHERE turn_id=?",
+            )
+            .bind(&turn)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+            assert_eq!(row, ("applied".into(), "failed".into(), None));
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                    .bind(&turn)
+                    .fetch_one(&env.app.db)
+                    .await
+                    .unwrap(),
+                "failed"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'"
+                )
+                .bind(&turn)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap(),
+                0
+            );
+        }
+    }
+
 }
