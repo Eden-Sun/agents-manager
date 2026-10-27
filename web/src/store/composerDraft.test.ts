@@ -43,13 +43,12 @@ test('撞到框裡有字：留下一條草稿（框裡的字＋可用的動作�
   assert.deepEqual(notices(), [], '有那一條就不用 toast')
 })
 
-test('舊 daemon（409 沒帶 draft）：照舊只跳一句人話，不留一條空的', async () => {
+test('409 沒帶 draft：保留常駐提示，不提供任何草稿動作', async () => {
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'composer_busy', retryable: true, sent: false }, 409))
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
-  assert.equal(block(), undefined)
-  assert.equal(notices().length, 1)
-  assert.match(notices()[0].text, /沒送出/)
+  assert.deepEqual(block(), { draft: '', token: '', truncated: false, actions: [] })
+  assert.equal(notices().length, 0)
 })
 
 test('清掉再送我這則：帶 clear_draft＋expect_draft_token＋我的字；送出去了那一條就收掉', async () => {
@@ -137,7 +136,8 @@ test('draftBlockFrom：只認 daemon 給的兩種動作；沒有 full-draft toke
   const e = (body: Record<string, unknown>) => new ApiError(409, { error: 'conflict', ...body }, 'x')
   assert.deepEqual(draftBlockFrom(e({ reason: 'composer_busy', draft: 'd', draft_token: 'token-d', draft_actions: ['submit', 'rm -rf'] }))?.actions, ['submit'])
   assert.deepEqual(draftBlockFrom(e({ reason: 'composer_busy', draft: 'd', draft_actions: ['submit'] }))?.actions, [])
-  assert.equal(draftBlockFrom(e({ reason: 'composer_busy', draft: null, draft_actions: [] })), null)
+  assert.deepEqual(draftBlockFrom(e({ reason: 'composer_busy', draft: null, draft_actions: ['clear'], draft_token: 'unsafe' })), { draft: '', token: '', truncated: false, actions: [] })
+  assert.equal(draftBlockFrom(e({ reason: 'draft_changed', draft: null })), null)
   assert.equal(draftBlockFrom(e({ reason: 'a turn is already in flight', draft: 'd' })), null)
   assert.equal(draftBlockFrom(new Error('x')), null)
 })

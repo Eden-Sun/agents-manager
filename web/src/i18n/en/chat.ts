@@ -1,6 +1,7 @@
 import type { Dict } from '../../lib/i18n/types'
 
 export default {
+  '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
   // lib/agmAttachments.ts
   '交給 AGM 的任務還帶不了附件（{n} 個）：先移除附件，或取消「交給 AGM」直接送給 bot。': {
     one: 'AGM tasks cannot include {n} attachment. Remove it or turn off “Send to AGM” to send directly to the Bot.',
