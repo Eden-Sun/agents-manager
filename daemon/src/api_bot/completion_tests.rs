@@ -574,3 +574,240 @@ async fn ambiguous_commit_retry_requires_exact_inflight_turn_without_assistant()
     assert!(!completion::exact_turn_is_uncommitted(&f.env.app, &f.key).await);
 }
 
+async fn durable_item(f: &Fixture) -> super::receipt::Pending {
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?")
+        .bind(&f.identity.session_id)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+    let payload = super::receipt::Payload::completed(&response()).unwrap();
+    super::receipt::save(&f.env.app.db, &f.identity, revision, &payload)
+        .await
+        .unwrap();
+    super::receipt::load(&f.env.app.db, &f.identity)
+        .await
+        .unwrap()
+        .unwrap()
+        .item
+}
+
+#[tokio::test]
+async fn durable_receipt_and_completion_rollback_together_then_apply_once() {
+    let f = fixture(true).await;
+    let item = durable_item(&f).await;
+    sqlx::query("CREATE TRIGGER reject_receipt_apply BEFORE UPDATE OF state ON api_bot_join_receipts WHEN NEW.state='applied' BEGIN SELECT RAISE(ABORT,'synthetic receipt fault'); END")
+        .execute(&f.env.app.db).await.unwrap();
+    assert!(matches!(
+        completion::consume_receipt(&f.env.app, &f.key, &item).await,
+        Err(completion::StoreError::Retryable)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+            .bind(&f.key.turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+        "in_flight"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM api_bot_attempts WHERE id='completion-reservation'"
+        )
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap(),
+        "reserved"
+    );
+    assert!(messages(&f.env.app, &f.key.turn_id).await.is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_join_receipts")
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+        "pending"
+    );
+    sqlx::query("DROP TRIGGER reject_receipt_apply")
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    assert!(matches!(
+        completion::consume_receipt(&f.env.app, &f.key, &item)
+            .await
+            .unwrap(),
+        Outcome::Committed(_)
+    ));
+    assert!(matches!(
+        completion::probe_after_join(&f.env.app, &f.identity, &item.payload)
+            .await
+            .unwrap(),
+        completion::Probe::Applied(_)
+    ));
+    assert!(matches!(
+        completion::store_durable_after_join(&f.env.app, &f.key, &f.identity, &item.payload)
+            .await
+            .unwrap(),
+        Outcome::Committed(_)
+    ));
+    assert_eq!(messages(&f.env.app, &f.key.turn_id).await.len(), 1);
+    let cost:(String,Option<i64>,i64)=sqlx::query_as("SELECT state,estimated_microusd,reserved_microusd FROM api_bot_attempts WHERE id='completion-reservation'").fetch_one(&f.env.app.db).await.unwrap();
+    assert_eq!(cost, ("unknown".into(), None, 140));
+}
+
+#[tokio::test]
+async fn durable_receipt_stop_expiry_and_owner_change_only_fence_old_receipt() {
+    for mutation in [
+        "UPDATE runs SET state='stopping'",
+        "UPDATE api_bot_sessions SET revision=revision+1",
+        "UPDATE api_bot_sessions SET generation=generation+1",
+        "UPDATE api_bot_sessions SET expires_at='2000-01-01T00:00:00Z'",
+        "UPDATE api_bot_sessions SET owner_turn_id=NULL",
+    ] {
+        let f = fixture(true).await;
+        let item = durable_item(&f).await;
+        sqlx::query(mutation).execute(&f.env.app.db).await.unwrap();
+        let before:(String,String,String,i64)=sqlx::query_as("SELECT r.state,t.status,a.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE t.id=?").bind(&f.key.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(
+            matches!(
+                completion::consume_receipt(&f.env.app, &f.key, &item)
+                    .await
+                    .unwrap(),
+                Outcome::Fenced
+            ),
+            "{mutation}"
+        );
+        let after:(String,String,String,i64)=sqlx::query_as("SELECT r.state,t.status,a.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE t.id=?").bind(&f.key.turn_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(after, before, "{mutation}");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_join_receipts")
+                .fetch_one(&f.env.app.db)
+                .await
+                .unwrap(),
+            "fenced"
+        );
+        assert!(messages(&f.env.app, &f.key.turn_id).await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn durable_receipt_mismatched_identity_revision_outcome_or_text_cannot_settle() {
+    for field in 0..6 {
+        let f = fixture(true).await;
+        let mut item = durable_item(&f).await;
+        match field {
+            0 => item.identity.bot_id = "other".into(),
+            1 => item.identity.run_id = "other".into(),
+            2 => item.identity.turn_id = "other".into(),
+            3 => item.revision += 1,
+            4 => {
+                item.payload =
+                    super::receipt::Payload::ended(super::receipt::JoinOutcome::Failed).unwrap()
+            }
+            _ => item.payload = super::receipt::Payload::visible("wrong visible text").unwrap(),
+        };
+        assert!(!matches!(
+            completion::consume_receipt(&f.env.app, &f.key, &item).await,
+            Ok(Outcome::Committed(_))
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                .bind(&f.key.turn_id)
+                .fetch_one(&f.env.app.db)
+                .await
+                .unwrap(),
+            "in_flight"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM api_bot_attempts WHERE id='completion-reservation'"
+            )
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+            "reserved"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT state FROM api_bot_join_receipts")
+                .fetch_one(&f.env.app.db)
+                .await
+                .unwrap(),
+            "pending"
+        );
+        assert!(messages(&f.env.app, &f.key.turn_id).await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn applied_receipt_proof_requires_exact_visible_message_and_live_owner() {
+    let f = fixture(true).await;
+    let item = durable_item(&f).await;
+    completion::consume_receipt(&f.env.app, &f.key, &item)
+        .await
+        .unwrap();
+    assert!(matches!(
+        completion::probe_after_join(&f.env.app, &f.identity, &item.payload)
+            .await
+            .unwrap(),
+        completion::Probe::Applied(_)
+    ));
+    sqlx::query("UPDATE messages SET content='mismatched' WHERE turn_id=?")
+        .bind(&f.key.turn_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    assert!(matches!(
+        completion::probe_after_join(&f.env.app, &f.identity, &item.payload)
+            .await
+            .unwrap(),
+        completion::Probe::Unconfirmed
+    ));
+    sqlx::query("UPDATE messages SET content='final answer' WHERE turn_id=?")
+        .bind(&f.key.turn_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runs SET state='stopping' WHERE id=?")
+        .bind(&f.key.run_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    assert!(matches!(
+        completion::probe_after_join(&f.env.app, &f.identity, &item.payload)
+            .await
+            .unwrap(),
+        completion::Probe::Unconfirmed
+    ));
+    assert_eq!(messages(&f.env.app, &f.key.turn_id).await.len(), 1);
+}
+
+#[tokio::test]
+async fn ambiguous_read_error_keeps_durable_pending_and_reserved_cost() {
+    let f = fixture(true).await;
+    let item = durable_item(&f).await;
+    // A read failure must not authorize another write or infer zero charge.
+    sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO unavailable_receipts")
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    assert!(
+        completion::probe_after_join(&f.env.app, &f.identity, &item.payload)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM unavailable_receipts")
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap(),
+        "pending"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM api_bot_attempts WHERE id='completion-reservation'"
+        )
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap(),
+        "reserved"
+    );
+    assert!(messages(&f.env.app, &f.key.turn_id).await.is_empty());
+}
