@@ -596,6 +596,8 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 
 ### 4.3 備援來源：終端快照
 
+- **遲到的 Codex session**（#2012）：managed 或 adopted 的在飛回合若缺 native ID，備援前只以同主機／session／pane、terminal instance 與 kind 均吻合的即時 herdr 觀測補入；host fence 與條件式更新防止 run、adoption 或主機更替後誤綁，也不覆寫既有 ID。遠端只補 binding，rollout 擷取仍限本機。歷史三次 fallback 的當時 native ID 缺失尚無直接證據，不能因此認定這項缺口是其根因。
+
 - **觸發**：Turn `in_flight` 且 `delivery = ok`，agent 由 `working` 轉 **`idle`**（`blocked` 不觸發），5 秒內沒收到 hook。
 - **只收排定當下那一回合**（#216）：計時器在 `working → idle` 那一刻記下當時在飛的 Turn（沒有回合在飛就記「沒有」），到點時在飛的若不是它就不收——
   Stop hook 先收掉了上一回合、這 5 秒內使用者又送出新的一則（CLI 還沒畫 spinner、herdr 還沒報 working）時，到點在飛的是新回合，畫面上最後一段回覆卻是上一則的，
