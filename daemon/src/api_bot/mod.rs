@@ -19,3 +19,7 @@ mod adapter_tests;
 mod completion_tests;
 pub(crate) mod registry;
 pub(crate) mod runtime;
+
+mod receipt;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod receipt_tests;
