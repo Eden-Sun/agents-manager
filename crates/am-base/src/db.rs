@@ -586,8 +586,9 @@ pub async fn open_with(path: &Path, features: FeatureMigrations) -> Result<Sqlit
             .connect_with(opts.clone())
             .await
             .with_context(|| format!("open sqlite {}", path.display()))?;
-        migrate_with(&mpool, features).await?;
+        let migration = migrate_with(&mpool, features).await;
         mpool.close().await;
+        migration?;
     }
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
