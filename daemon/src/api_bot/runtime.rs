@@ -1193,6 +1193,456 @@ async fn stored_revision(
     .flatten()
 }
 
+
+// Startup-only capabilities: private metadata, never a new join or wire result.
+pub(super) struct StartupGuard {
+    identity: super::adapter::AdapterIdentity,
+    inner: Arc<RuntimeInner>,
+    _admission: OwnedMutexGuard<()>,
+}
+pub(super) enum StartupError {
+    NotStartup,
+    Busy,
+    Storage,
+}
+impl StartupError {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::NotStartup => "api_startup_not_exclusive",
+            Self::Busy => "api_startup_live_owner",
+            Self::Storage => "api_startup_storage",
+        }
+    }
+}
+pub(super) enum StartupCheckpoint {
+    Safe,
+    Fenced,
+    Unresolved,
+}
+pub(super) enum StartupRestore {
+    Restored,
+    AlreadyCurrent,
+    Fenced,
+    Unresolved,
+}
+
+#[cfg(test)]
+pub(super) struct StartupFixtureOwner {
+    pub(super) shutdown: CancellationToken,
+    pub(super) retries: Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) wake: Arc<tokio::sync::Notify>,
+    pub(super) task: tokio::task::JoinHandle<()>,
+}
+
+impl ApiBotRuntime {
+    fn startup_allowed(
+        &self,
+        app: &crate::state::App,
+        identity: &super::adapter::AdapterIdentity,
+    ) -> bool {
+        std::ptr::eq(self, &app.api_bot_runtime)
+            && !app.is_startup_ready()
+            && self
+                .dependencies
+                .lock()
+                .expect("dependency mutex poisoned")
+                .is_none()
+            && !self.inner.registry.is_active(&identity.run_id)
+            && !self
+                .inner
+                .controls
+                .lock()
+                .expect("control mutex poisoned")
+                .keys()
+                .any(|key| key.bot_id == identity.bot_id && key.run_id == identity.run_id)
+    }
+    pub(super) async fn startup_guard(
+        &self,
+        app: &crate::state::App,
+        identity: &super::adapter::AdapterIdentity,
+    ) -> Result<StartupGuard, StartupError> {
+        if !std::ptr::eq(self, &app.api_bot_runtime)
+            || app.is_startup_ready()
+            || self
+                .dependencies
+                .lock()
+                .expect("dependency mutex poisoned")
+                .is_some()
+        {
+            return Err(StartupError::NotStartup);
+        }
+        if !self.startup_allowed(app, identity) {
+            return Err(StartupError::Busy);
+        }
+        let key = ApiRunKey {
+            bot_id: identity.bot_id.clone(),
+            run_id: identity.run_id.clone(),
+        };
+        let admission = tokio::select! { biased; _=app.shutdown.cancelled()=>return Err(StartupError::NotStartup), gate=self.admission_gate(&key)=>gate };
+        if !self.startup_allowed(app, identity) {
+            return Err(StartupError::Busy);
+        }
+        Ok(StartupGuard {
+            identity: identity.clone(),
+            inner: self.inner.clone(),
+            _admission: admission,
+        })
+    }
+    fn startup_guard_matches(
+        &self,
+        app: &crate::state::App,
+        identity: &super::adapter::AdapterIdentity,
+        guard: &StartupGuard,
+    ) -> bool {
+        Arc::ptr_eq(&self.inner, &guard.inner)
+            && guard.identity == *identity
+            && self.startup_allowed(app, identity)
+    }
+    pub(super) async fn startup_checkpoint_status(
+        &self,
+        app: &crate::state::App,
+        identity: &super::adapter::AdapterIdentity,
+        revision: i64,
+        guard: &StartupGuard,
+    ) -> Result<StartupCheckpoint, StartupError> {
+        if !self.startup_guard_matches(app, identity, guard) {
+            return Ok(StartupCheckpoint::Fenced);
+        }
+        let mut tx = app.db.begin().await.map_err(|_| StartupError::Storage)?;
+        let result = startup_checkpoint_on(&mut tx, identity, revision).await;
+        tx.rollback().await.map_err(|_| StartupError::Storage)?;
+        result
+    }
+    pub(super) fn restore_startup_cursor<'a>(
+        &'a self,
+        app: &'a Arc<crate::state::App>,
+        identity: &'a super::adapter::AdapterIdentity,
+        revision: i64,
+        guard: &'a StartupGuard,
+    ) -> impl Future<Output = Result<StartupRestore, StartupError>> + Send + 'a {
+        Box::pin(self.restore_startup_cursor_body(app, identity, revision, guard))
+    }
+    async fn restore_startup_cursor_body(
+        &self,
+        app: &Arc<crate::state::App>,
+        identity: &super::adapter::AdapterIdentity,
+        revision: i64,
+        guard: &StartupGuard,
+    ) -> Result<StartupRestore, StartupError> {
+        use super::{completion, receipt};
+        if !self.startup_guard_matches(app, identity, guard) {
+            return Ok(StartupRestore::Fenced);
+        }
+        let expected = {
+            self.inner
+                .sessions
+                .lock()
+                .expect("session mutex poisoned")
+                .get(&identity.bot_id)
+                .cloned()
+        };
+        if expected
+            .as_ref()
+            .is_some_and(|cursor| cursor.identity != *identity || cursor.revision != revision)
+        {
+            return Ok(StartupRestore::Fenced);
+        }
+        let Some(stored) = receipt::load(&app.db, identity)
+            .await
+            .map_err(|_| StartupError::Storage)?
+        else {
+            return Ok(StartupRestore::Unresolved);
+        };
+        if stored.item.revision != revision {
+            return Ok(StartupRestore::Fenced);
+        }
+        if !matches!(stored.state, receipt::State::Applied) {
+            return Ok(StartupRestore::Unresolved);
+        }
+        let proven = match completion::probe_after_join(app, identity, &stored.item.payload)
+            .await
+            .map_err(|_| StartupError::Storage)?
+        {
+            completion::Probe::Applied(commit) => commit,
+            completion::Probe::Stale(_) => return Ok(StartupRestore::Fenced),
+            _ => return Ok(StartupRestore::Unresolved),
+        };
+        // Revalidate the read-only proof under a short write-intent lock; do not nest pool transactions.
+        let mut tx = crate::db::begin_write(&app.db)
+            .await
+            .map_err(|_| StartupError::Storage)?;
+        let safety = startup_checkpoint_on(&mut tx, identity, revision).await?;
+        if !matches!(safety, StartupCheckpoint::Safe) {
+            tx.rollback().await.map_err(|_| StartupError::Storage)?;
+            return Ok(match safety {
+                StartupCheckpoint::Fenced => StartupRestore::Fenced,
+                _ => StartupRestore::Unresolved,
+            });
+        }
+        let status = if stored.item.payload.outcome() == receipt::JoinOutcome::Completed {
+            "completed"
+        } else {
+            "failed"
+        };
+        let valid = receipt::matches_on(&mut tx, &stored.item, receipt::State::Applied)
+            .await
+            .map_err(|_| StartupError::Storage)?
+            && receipt::owner_on(&mut tx, identity, revision, status)
+                .await
+                .map_err(|_| StartupError::Storage)?
+            && startup_message_matches_on(&mut tx, identity, &proven).await?;
+        if !valid {
+            tx.rollback().await.map_err(|_| StartupError::Storage)?;
+            return Ok(StartupRestore::Fenced);
+        }
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        crate::lifecycle::race_point::hit("api_startup_before_cursor_cas", &identity.bot_id).await;
+        if !self.startup_guard_matches(app, identity, guard) {
+            tx.rollback().await.map_err(|_| StartupError::Storage)?;
+            return Ok(StartupRestore::Fenced);
+        }
+        let installed = {
+            let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+            if sessions.get(&identity.bot_id) != expected.as_ref() {
+                None
+            } else {
+                let already = expected.is_some();
+                sessions.insert(
+                    identity.bot_id.clone(),
+                    SessionCursor {
+                        identity: identity.clone(),
+                        revision,
+                    },
+                );
+                Some(already)
+            }
+        };
+        if tx.rollback().await.is_err() {
+            if installed == Some(false) {
+                let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+                if sessions.get(&identity.bot_id).is_some_and(|cursor| {
+                    cursor.identity == *identity && cursor.revision == revision
+                }) {
+                    sessions.remove(&identity.bot_id);
+                }
+            }
+            return Err(StartupError::Storage);
+        }
+        Ok(match installed {
+            Some(false) => StartupRestore::Restored,
+            Some(true) => StartupRestore::AlreadyCurrent,
+            None => StartupRestore::Fenced,
+        })
+    }
+    #[cfg(test)]
+    pub(super) fn startup_cursor_for_test(
+        &self,
+        bot: &str,
+    ) -> Option<(super::adapter::AdapterIdentity, i64)> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(bot)
+            .map(|c| (c.identity.clone(), c.revision))
+    }
+    #[cfg(test)]
+    pub(super) fn put_startup_cursor_for_test(
+        &self,
+        identity: super::adapter::AdapterIdentity,
+        revision: i64,
+    ) {
+        self.inner.sessions.lock().unwrap().insert(
+            identity.bot_id.clone(),
+            SessionCursor { identity, revision },
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn startup_set_fake_dependencies_for_test(
+        &self,
+        tools: Arc<dyn super::runner::Tools>,
+    ) {
+        self.set_test_dependencies(ApiBotDependencies {
+            endpoint: "http://127.0.0.1:1/no-call".into(),
+            key: "startup-test-only".into(),
+            quote: Arc::new(super::quote::FailClosed),
+            tools,
+            shutdown_join_timeout: None,
+        });
+    }
+    #[cfg(test)]
+    pub(super) fn startup_registry_for_test(&self) -> Arc<ApiBotRegistry> {
+        self.inner.registry.clone()
+    }
+    #[cfg(test)]
+    pub(super) fn spawn_startup_fixture_owner(
+        &self,
+        app: Arc<crate::state::App>,
+        key: ApiTurnKey,
+        identity: super::adapter::AdapterIdentity,
+        response: super::protocol::Response,
+    ) -> StartupFixtureOwner {
+        let (text_tx, text_rx) = oneshot::channel();
+        let ticket = self
+            .inner
+            .registry
+            .spawn_tracked(
+                RunTurnKey {
+                    run_id: key.run_id.clone(),
+                    turn_id: key.turn_id.clone(),
+                },
+                move |_cancel| async move {
+                    let _ = text_tx.send(super::completion::FinalText::from_response(&response));
+                    Ok(TurnOutcome::Completed)
+                },
+            )
+            .unwrap();
+        let cancel = ticket.cancellation_token();
+        let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
+        self.inner.controls.lock().unwrap().insert(
+            FullKey::from(&key),
+            ControlRecord {
+                identity: Arc::new(()),
+                cancel: cancel.clone(),
+                joined: joined_rx,
+            },
+        );
+        let shutdown = CancellationToken::new();
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let owner = CompletionOwner {
+            app,
+            key,
+            identity,
+            final_text: text_rx,
+            before_storage: None,
+            retry_observer: Some((retries.clone(), wake.clone())),
+            store_fault: None,
+        };
+        let task = tokio::spawn(Box::pin(own_ticket(
+            ticket,
+            cancel,
+            shutdown.clone(),
+            joined_tx,
+            Duration::from_secs(10),
+            Some(owner),
+            None,
+        )));
+        StartupFixtureOwner {
+            shutdown,
+            retries,
+            wake,
+            task,
+        }
+    }
+}
+
+async fn startup_checkpoint_on(
+    conn: &mut sqlx::SqliteConnection,
+    identity: &super::adapter::AdapterIdentity,
+    revision: i64,
+) -> Result<StartupCheckpoint, StartupError> {
+    use am_base::db::api_bot::{Checkpoint, MAX_CHECKPOINT_BYTES};
+    let live = super::receipt::owner_on(conn, identity, revision, "in_flight")
+        .await
+        .map_err(|_| StartupError::Storage)?
+        || super::receipt::owner_on(conn, identity, revision, "completed")
+            .await
+            .map_err(|_| StartupError::Storage)?
+        || super::receipt::owner_on(conn, identity, revision, "failed")
+            .await
+            .map_err(|_| StartupError::Storage)?;
+    if !live {
+        return Ok(StartupCheckpoint::Fenced);
+    }
+    let row:Option<(i64,Option<String>)>=sqlx::query_as("SELECT format_version,CASE WHEN length(CAST(checkpoint_json AS BLOB))<=? THEN checkpoint_json ELSE NULL END FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND revision=?")
+        .bind(MAX_CHECKPOINT_BYTES as i64).bind(&identity.session_id).bind(&identity.bot_id).bind(&identity.run_id).bind(&identity.turn_id).bind(identity.generation).bind(revision)
+        .fetch_optional(conn).await.map_err(|_|StartupError::Storage)?;
+    let Some((1, Some(raw))) = row else {
+        return Ok(StartupCheckpoint::Unresolved);
+    };
+    let safe = (|| {
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let checkpoint = Checkpoint::new(&value).ok()?;
+        let state: super::runner::State = serde_json::from_value(checkpoint.value()).ok()?;
+        Some(startup_context_settled(&state))
+    })()
+    .unwrap_or(false);
+    Ok(if safe {
+        StartupCheckpoint::Safe
+    } else {
+        StartupCheckpoint::Unresolved
+    })
+}
+fn startup_context_settled(state: &super::runner::State) -> bool {
+    if state.api_pending || state.tool_pending.is_some() {
+        return false;
+    }
+    let mut declared = std::collections::HashSet::new();
+    let mut returned = std::collections::HashSet::new();
+    for message in &state.messages {
+        let Some(blocks) = message.content.as_array() else {
+            continue;
+        };
+        for block in blocks {
+            match (
+                message.role.as_str(),
+                block.get("type").and_then(|v| v.as_str()),
+            ) {
+                ("assistant", Some("tool_use")) => {
+                    let Some(id) = block.get("id").and_then(|v| v.as_str()) else {
+                        return false;
+                    };
+                    declared.insert(id.to_owned());
+                }
+                ("user", Some("tool_result")) => {
+                    let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) else {
+                        return false;
+                    };
+                    if block.get("content").is_none() {
+                        return false;
+                    }
+                    returned.insert(id.to_owned());
+                }
+                _ => {}
+            }
+        }
+    }
+    for response in &state.responses {
+        let Ok(calls) = response.tools() else {
+            return false;
+        };
+        for call in calls {
+            declared.insert(call.id);
+        }
+    }
+    declared
+        .iter()
+        .all(|id| state.completed_tool_ids.contains(id) && returned.contains(id))
+        && returned.iter().all(|id| declared.contains(id))
+}
+
+async fn startup_message_matches_on(
+    conn: &mut sqlx::SqliteConnection,
+    identity: &super::adapter::AdapterIdentity,
+    proven: &super::completion::Committed,
+) -> Result<bool, StartupError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&identity.turn_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|_| StartupError::Storage)?;
+    let Some(message) = &proven.message else {
+        return Ok(count == 0);
+    };
+    if count != 1 {
+        return Ok(false);
+    }
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND conversation_id=? AND turn_id=? AND role='assistant' AND content=? AND source='transcript' AND incomplete=0 AND rewound_at IS NULL)")
+        .bind(&message.id).bind(&message.conversation_id).bind(&identity.turn_id).bind(&message.content).fetch_one(conn).await.map_err(|_|StartupError::Storage)
+}
+
 async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner) {
     let candidates: Vec<(FullKey, Arc<()>)> = {
         let controls = inner.controls.lock().expect("control mutex poisoned");

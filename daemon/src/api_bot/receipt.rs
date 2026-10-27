@@ -301,3 +301,75 @@ pub(super) async fn fence_stale(pool: &SqlitePool, item: &Pending) -> Result<(),
     }
     Ok(())
 }
+
+/// Opaque stable pagination key. Intentionally no Debug/Serialize.
+pub(super) struct StartupCursor {
+    created_at: String,
+    session: String,
+    turn: String,
+}
+pub(super) struct StartupPage {
+    pub(super) rows: Vec<Stored>,
+    pub(super) next: Option<StartupCursor>,
+}
+
+/// Includes Applied rows so a lost acknowledgment can restore a cursor without another insert.
+/// State transitions never change this key; neither deletion nor marking Fenced shifts offsets.
+pub(super) async fn startup_page(
+    pool: &SqlitePool,
+    after: Option<&StartupCursor>,
+    limit: usize,
+) -> Result<StartupPage, Error> {
+    if limit == 0 || limit > MAX_BATCH {
+        return Err(Error::Bounds);
+    }
+    let rows = sqlx::query("SELECT session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at FROM api_bot_join_receipts WHERE state IN ('pending','applied') AND (? IS NULL OR (created_at,session_id,turn_id) > (?,?,?)) ORDER BY created_at,session_id,turn_id LIMIT ?")
+        .bind(after.map(|c| &c.created_at)).bind(after.map(|c| &c.created_at))
+        .bind(after.map(|c| &c.session)).bind(after.map(|c| &c.turn)).bind(limit as i64)
+        .fetch_all(pool).await.map_err(|_| Error::Storage)?;
+    let next = if rows.len() == limit {
+        rows.last().map(|r| StartupCursor {
+            created_at: r.get("created_at"),
+            session: r.get("session_id"),
+            turn: r.get("turn_id"),
+        })
+    } else {
+        None
+    };
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in rows {
+        let payload = match row.get::<String, _>("outcome").as_str() {
+            "completed" => Payload::visible(
+                row.get::<Option<String>, _>("final_text")
+                    .as_deref()
+                    .ok_or(Error::Invalid)?,
+            )?,
+            "failed" => Payload::ended(JoinOutcome::Failed)?,
+            "cancelled" => Payload::ended(JoinOutcome::Cancelled)?,
+            _ => return Err(Error::Invalid),
+        };
+        let state = match row.get::<String, _>("state").as_str() {
+            "pending" => State::Pending,
+            "applied" => State::Applied,
+            _ => return Err(Error::Invalid),
+        };
+        decoded.push(Stored {
+            item: Pending {
+                identity: AdapterIdentity {
+                    session_id: row.get("session_id"),
+                    bot_id: row.get("bot_id"),
+                    run_id: row.get("run_id"),
+                    turn_id: row.get("turn_id"),
+                    generation: row.get("generation"),
+                },
+                revision: row.get("revision"),
+                payload,
+            },
+            state,
+        });
+    }
+    Ok(StartupPage {
+        rows: decoded,
+        next,
+    })
+}

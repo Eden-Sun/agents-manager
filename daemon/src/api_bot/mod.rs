@@ -23,3 +23,7 @@ pub(crate) mod runtime;
 mod receipt;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod receipt_tests;
+
+mod startup_recovery;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod startup_recovery_tests;
