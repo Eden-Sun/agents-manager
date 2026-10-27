@@ -43,6 +43,7 @@
 - release、跨目標、自訂 profile、check／Clippy／fmt、`scripts/check.sh` 與 CI 保留原生 Cargo；Blaze 開發建置不能取代收尾驗證。工具鏈／記憶體與使用方式見 [docs/BUILD-CACHE.md](docs/BUILD-CACHE.md)。
 
 ## 驗證（收尾前必跑）
+- 等待背景 log 完成用 `scripts/wait-log.py`（用法見 `--help`）。
 - 開始驗證前，必讀 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)；完整的負載閘、Mac 原生驗證、UI 真畫面與 CI 分工都在該檔，這裡不複製第二份。
 - 在自己的 worktree 跑 `CHECK_MAX_LOAD=40 scripts/check.sh changed`；共用基礎或大範圍改動才依細則擴大，不為保險另跑整樹或等待 GitHub Actions。
 - 修改 shell／行程／signal 或平台差異仍須 Mac 原生驗證；UI 改動仍須 agent-browser 真畫面驗證。不可把未執行或中斷的檢查報成通過。
