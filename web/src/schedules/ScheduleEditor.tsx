@@ -200,6 +200,13 @@ export function ScheduleEditor({
 
   // 建立時預設第一顆可用 Bot（之後使用者可改）：推導出來，不用 effect 寫回表單。
   const effectiveBotId = form.botId || (scheduleId ? '' : (eligible[0]?.id ?? ''))
+  // 執行端只讀已存的排程；表單有變動時不得用舊 Bot 或舊內容執行。
+  const unsaved = detail !== null && (
+    form.name.trim() !== detail.name || form.prompt !== detail.prompt || effectiveBotId !== detail.bot_id ||
+    form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) ||
+    JSON.stringify(specOf(form)) !== JSON.stringify(specOf(fromDetail(detail)))
+  )
+  const botUnavailable = detail !== null && !eligible.some((b) => b.id === detail.bot_id)
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     touchedRef.current.add(k)
@@ -277,7 +284,7 @@ export function ScheduleEditor({
   // 伺服器收下（回應成功）才 settle，下一次明確的手動執行才換新的；明確的 4xx 拒絕也 settle（不能讓舊 key 重放舊結果）。
   const runKey = scheduleId ? `schedule-run:${scheduleId}` : null
   const runNow = async () => {
-    if (!scheduleId || !runKey) return
+    if (!scheduleId || !runKey || unsaved || botUnavailable) return
     setBusy(true)
     setError(null)
     // 伺服器收下（POST 成功）之後，key 仍保留到詳情也重抓成功才 settle：詳情 503 時再按，送的還是同一個 key，
@@ -465,6 +472,8 @@ export function ScheduleEditor({
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
+      {unsaved ? <p className="hint" role="status">{t('請先儲存變更，再立即執行。')}</p> : null}
+      {!unsaved && botUnavailable ? <p className="hint" role="status">{t('已綁定的 Bot 無法使用，請選擇其他 Bot 並儲存。')}</p> : null}
 
       <div className="form-actions">
         <button type="button" className="btn primary" disabled={busy || (Boolean(scheduleId) && Boolean(loadError))} onClick={() => void save()}>
@@ -472,7 +481,7 @@ export function ScheduleEditor({
         </button>
         {detail ? (
           <>
-            <button type="button" className="btn" disabled={busy || loading || !detail.enabled} onClick={() => void runNow()}>
+            <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => void runNow()}>
               {t('立即執行')}
             </button>
             <button type="button" className="btn" disabled={busy || loading} onClick={() => void toggle()}>

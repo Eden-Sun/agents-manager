@@ -5981,6 +5981,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **綁定**：bot 鎖內，同一個 SQLite 交易裡寫 turn（`queued`，`awaits_idle=1`，沒有 run 或還在 starting 時 `awaits_start=1`）、message（`relay_from='daemon'`），並把 occurrence 設為 `queued` 綁 turn。commit 後放鎖，再叫既有 kick（沒有 run）與 flush。不 steer、不 interrupt、不覆蓋使用者已排的佇列（既有上限每個會話 1 筆 queued，已有人排著就等，`waiting_reason=bot_busy`）。Bot 停止中（`stopping`）不收不踢，`waiting_reason=stopping`。
 - **終態收斂**（tick 每 20 秒，啟動後 5 秒先跑一輪）：`completed`＋delivery ok → `done`；`completed_fallback`／`failed`＋delivery unknown → `unknown`（同交易暫停排程）；`failed` → `failed`；turn 不見了 → `cancelled`。`queued`／`in_flight` 繼續等，不提早取消已送出的執行。
 - **停用／編輯／刪除**：同 bot 鎖、同交易撤回未送出的排隊（`revoke_queued_turn_tx`），pending 直接取消；已送出的照跑。編輯與刪除在鎖內重讀，Bot 變了回 409。刪除是軟刪（保留關聯）。
+- **立即執行**使用已儲存的排程。編輯器有未儲存的變更或已綁定 Bot 不可用時，先顯示原因並停用立即執行；儲存可用設定後才可執行。
 - **跑完就清空對話**（issue #1779，`schedules.clear_after`，預設關）：終態收斂為 `done` 且勾了，就讓綁定的 Bot 開新對話（`StartOpts::default()`，同 `restart?resume=fresh`，之後的回合不會接回舊的 session）。背景做，不擋 tick。條件全成立才做，任一不成立就什麼都不動（留給使用者看）：Bot 正在跑（沒在跑不替它啟動）、沒有 `queued`／`in_flight` 的回合、沒有其他未結束的排程 occurrence、維護窗口沒開；重啟在 bot 鎖內再確認一次閒置（`require_idle`），不閒置回錯、不動。`failed`／`unknown`／`cancelled` 一律不清。它會清掉這顆 Bot 的對話記憶，所以網頁提示建議搭配專用 Bot。
 - **建立冪等**：`client_request_id` 加上 `(project_id)` 唯一；同內容回原筆、不同內容 409。手動執行同樣有 key 去重。
 - **通知**：只靠 WS 事件（見 API.md）。狀態轉移由 `notified` 去重，不靠前端記數。

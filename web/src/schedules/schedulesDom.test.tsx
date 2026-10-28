@@ -353,6 +353,49 @@ test('編輯器有「開啟 Bot 對話」：切到該 Bot 並關掉編輯器', a
   assert.equal(dialogs().filter((d) => d.textContent?.includes('新增排程')).length, 0, '編輯器要關掉')
 })
 
+test('已刪除的綁定 Bot 與未儲存的新 Bot 不可立即執行，儲存後才執行新 Bot', async () => {
+  const realFetch = globalThis.fetch
+  let schedule = { id: 's1', project_id: 'p1', bot_id: 'deleted', name: '每日摘要', prompt: 'x', mode: 'daily', tz: 'UTC', spec: { mode: 'daily', time: '09:00' }, next_due: null, enabled: true, generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', open: null }
+  const ran: string[] = []
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    const path = String(input)
+    const method = init?.method ?? 'GET'
+    if (method === 'PATCH' && path.endsWith('/schedules/s1')) {
+      schedule = { ...schedule, bot_id: (JSON.parse(init?.body ?? '{}') as { bot_id: string }).bot_id }
+      return new Response(JSON.stringify(schedule), { status: 200 })
+    }
+    if (method === 'POST' && path.endsWith('/schedules/s1/run')) {
+      ran.push(schedule.bot_id)
+      return new Response(JSON.stringify({ occurrence: null }), { status: 200 })
+    }
+    if (method === 'GET' && path.endsWith('/projects/p1/schedules')) return new Response(JSON.stringify({ schedules: [schedule] }), { status: 200 })
+    if (method === 'GET' && path.endsWith('/schedules/s1')) return new Response(JSON.stringify({ ...schedule, recent: [] }), { status: 200 })
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+  try {
+    await mount(<Sidebar />)
+    await settle()
+    await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+    await settle()
+    const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+    const run = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
+    assert.equal(run().disabled, true)
+    assert.match(dialog.textContent ?? '', /已綁定的 Bot 無法使用/)
+    const select = [...dialog.querySelectorAll<HTMLSelectElement>('select')].find((s) => [...s.options].some((o) => o.value === 'b2'))!
+    await act(async () => { select.value = 'b2'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    assert.equal(run().disabled, true)
+    assert.match(dialog.textContent ?? '', /請先儲存變更/)
+    assert.deepEqual(ran, [])
+    const save = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!
+    await click(save)
+    await settle()
+    assert.equal(run().disabled, false)
+    await click(run())
+    await settle()
+    assert.deepEqual(ran, ['b2'])
+  } finally { globalThis.fetch = realFetch }
+})
+
 test('手動執行：POST 已送達但回應遺失 → 重按用同一個 key，只產生一次執行（不重複 Model job）', async () => {
   const realFetch = globalThis.fetch
   const seenKeys = new Set<string>()
