@@ -626,3 +626,11 @@ mod tests {
         assert!(format!("{err}").contains("illegal turn status transition"), "{err}");
     }
 }
+
+/// Restart abandonment is evidence of interruption, not evidence of a joined runner.
+pub async fn abandon_api_run_turns_on(conn: &mut sqlx::SqliteConnection, bot: &str, run: &str) -> Result<u64> {
+    edge("in_flight", "failed", "API-bot restart abandonment")?;
+    edge("queued", "failed", "API-bot restart abandonment")?;
+    Ok(sqlx::query("UPDATE turns SET status='failed', completed_at=COALESCE(completed_at,?), delivery=CASE WHEN status='queued' THEN 'failed' ELSE delivery END WHERE run_id=? AND status IN ('in_flight','queued') AND EXISTS (SELECT 1 FROM conversations c JOIN runs r ON r.bot_id=c.bot_id JOIN bots b ON b.id=r.bot_id WHERE c.id=turns.conversation_id AND b.id=? AND b.kind='claude-api' AND r.id=? AND r.state IN ('starting','running','stopping'))")
+        .bind(crate::db::now()).bind(run).bind(bot).bind(run).execute(conn).await?.rows_affected())
+}

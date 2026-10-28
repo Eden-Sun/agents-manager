@@ -976,3 +976,10 @@ mod tests {
         assert_eq!(row, (None, None, Some(12)));
     }
 }
+
+/// Restart abandonment retains the reservation when the request outcome is unknown.
+/// Caller must prove the exact abandoned run in the same write transaction.
+pub async fn abandon_run_reserved_on(conn: &mut SqliteConnection, bot: &str, run: &str, at: &str) -> Result<u64> {
+    Ok(sqlx::query("UPDATE api_bot_attempts SET state='unknown', estimated_microusd=NULL, finished_at=? WHERE bot_id=? AND run_id=? AND state='reserved'")
+        .bind(at).bind(bot).bind(run).execute(conn).await?.rows_affected())
+}

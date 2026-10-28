@@ -11,6 +11,7 @@ pub(super) enum Error {
     Bounds,
     NotStartup,
     Storage,
+    Unresolved,
 }
 impl Error {
     pub(super) fn code(&self) -> &'static str {
@@ -18,6 +19,7 @@ impl Error {
             Self::Bounds => "api_startup_bounds",
             Self::NotStartup => "api_startup_not_exclusive",
             Self::Storage => "api_startup_storage",
+            Self::Unresolved => "api_startup_unresolved",
         }
     }
 }
@@ -42,12 +44,13 @@ pub(super) fn recover_receipt_page<'a>(
     after: Option<&'a receipt::StartupCursor>,
     limit: usize,
 ) -> impl std::future::Future<Output = Result<Page, Error>> + Send + 'a {
-    Box::pin(recover_page_body(app, after, limit))
+    Box::pin(recover_page_body(app, after, limit, true))
 }
 async fn recover_page_body(
     app: &Arc<crate::state::App>,
     after: Option<&receipt::StartupCursor>,
     limit: usize,
+    restore: bool,
 ) -> Result<Page, Error> {
     if app.is_startup_ready() {
         return Err(Error::NotStartup);
@@ -71,6 +74,15 @@ async fn recover_page_body(
             Err(StartupError::NotStartup) => return Err(Error::NotStartup),
             Err(StartupError::Storage) => return Err(Error::Storage),
         };
+        // A previous pass may already have retired this run after proving Applied.
+        // This is only an idempotence marker, never permission to consume a receipt.
+        if !restore && matches!(stored.state, receipt::State::Applied) {
+            let retired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.id=? AND b.kind='claude-api' AND r.id=? AND r.state='exited' AND r.exit_reason='api_restart_abandoned')")
+                .bind(&item.identity.bot_id).bind(&item.identity.run_id).fetch_one(&app.db).await.map_err(|_| Error::Storage)?;
+            if retired {
+                continue;
+            }
+        }
         match app
             .api_bot_runtime
             .startup_checkpoint_status(app, &item.identity, item.revision, &guard)
@@ -82,6 +94,10 @@ async fn recover_page_body(
                 continue;
             }
             StartupCheckpoint::Fenced => {
+                if !restore {
+                    counts.unresolved += 1;
+                    continue;
+                }
                 if matches!(stored.state, receipt::State::Pending) {
                     receipt::fence_stale(&app.db, &item)
                         .await
@@ -118,7 +134,7 @@ async fn recover_page_body(
                 false
             }
         };
-        if !confirmed {
+        if !confirmed || !restore {
             continue;
         }
         match app
@@ -163,4 +179,23 @@ async fn confirm_applied(
             Ok(false)
         }
     }
+}
+
+/// Inert boot candidate: receipt processing without installing a runtime cursor.
+pub(super) async fn recover_all(app: &Arc<crate::state::App>) -> Result<(), Error> {
+    if app.is_startup_ready() {
+        return Err(Error::NotStartup);
+    }
+    let mut after = None;
+    loop {
+        let page = recover_page_body(app, after.as_ref(), 64, false).await?;
+        if page.counts.unresolved != 0 || page.counts.fenced != 0 {
+            return Err(Error::Unresolved);
+        }
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    super::startup_abandonment::abandon_all(app).await
 }
