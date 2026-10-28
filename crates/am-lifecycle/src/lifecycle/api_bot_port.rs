@@ -52,6 +52,7 @@ pub enum ApiBotError {
 }
 
 pub trait ApiBotPort: Send + Sync {
+    fn api_recovery_ready(&self) -> bool { false }
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,

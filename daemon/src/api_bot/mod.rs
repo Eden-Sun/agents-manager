@@ -28,3 +28,7 @@ mod startup_recovery;
 mod startup_abandonment;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod startup_recovery_tests;
+
+pub(crate) mod startup_gate;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod startup_gate_tests;

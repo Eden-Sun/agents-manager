@@ -1211,6 +1211,10 @@ pub async fn env() -> Env {
         "test".into(),
         false,
     );
+    app.set_startup_ready(false);
+    crate::api_bot::startup_gate::barrier(&app).await;
+    assert!(app.api_startup_gate.ready(), "synthetic no-API startup must succeed");
+    app.set_startup_ready(true);
     app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     let pid = db::ulid();
     sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?, 'local', ?)")

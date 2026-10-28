@@ -172,6 +172,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
             .await
     });
     tracing::info!(%addr, "HTTP listener bound; startup requests receive 503");
+    crate::api_bot::startup_gate::barrier(&app).await;
     lifecycle::recover_live_apply_debts(&app).await;
     // #392：先把上一次額度讀數放回記憶體，API 開始服務時就能畫出 stale 的量表；新的探測回來後由 quota::set 蓋掉。
     // 上一輪在「占位」與「補答案」之間被收掉時留下的 pending 列，收成終態（issue #481／i339 review）。

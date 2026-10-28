@@ -131,7 +131,13 @@ impl Recovery {
                 Some(ids) => ids.contains(&run.id),
                 None => run.started_at <= self.boot,
             };
-            if owed && !rearm_run(app, &run).await {
+            if !owed { continue; }
+            match db::bot(app.db(), &run.bot_id).await {
+                Ok(Some(bot)) if bot.kind == "claude-api" => continue,
+                Ok(Some(_)) => {},
+                Ok(None) | Err(_) => { still.insert(run.id); continue; }
+            }
+            if !rearm_run(app, &run).await {
                 still.insert(run.id);
             }
         }
@@ -636,6 +642,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();
     for bot in bots {
+        if bot.kind == "claude-api" { continue; }
         let mut bot = bot;
         if handed_off.contains(bot.project_id.as_str()) {
             continue;
@@ -1757,6 +1764,48 @@ mod compat_tests {
             .fetch_optional(&app.db)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn d3b2_host_reconcile_skips_api_but_reconciles_cli_and_fails_closed_on_read_error() {
+        let env = tt::env().await;
+        let api = a_bot(&env, "d3b2-api").await;
+        let cli = a_bot(&env, "d3b2-cli").await;
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api).execute(&env.app.db).await.unwrap();
+        for (id, bot) in [("d3b2-api-run", &api), ("d3b2-cli-run", &cli)] {
+            sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,herdr_session,started_at) VALUES(?,?,'running','idle','test',?)").bind(id).bind(bot).bind(db::now()).execute(&env.app.db).await.unwrap();
+        }
+        sqlx::query("UPDATE runs SET pane_id='d3b2-missing' WHERE id='d3b2-cli-run'").execute(&env.app.db).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        super::reconcile_host(&env.app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(&env.app, &api).await.unwrap().state, "running");
+        assert_eq!(run_of(&env.app, &cli).await.unwrap().state, "exited");
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&env.app.db).await.unwrap();
+        assert!(super::reconcile_host(&env.app, crate::config::LOCAL_HOST).await.is_err());
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&env.app.db).await.unwrap();
+        assert_eq!(run_of(&env.app, &api).await.unwrap().state, "running");
+    }
+
+    #[tokio::test]
+    async fn d3b2_rearm_keeps_api_and_read_error_debt_but_adopts_cli() {
+        let env = tt::env().await;
+        let api = a_bot(&env, "d3b2-api-progress").await;
+        let cli = a_bot(&env, "d3b2-cli-progress").await;
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api).execute(&env.app.db).await.unwrap();
+        for (run, turn, bot) in [("d3b2-api-run", "d3b2-api-turn", &api), ("d3b2-cli-run", "d3b2-cli-turn", &cli)] {
+            let conv = db::conversation_id(&env.app.db, bot).await.unwrap();
+            sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)").bind(run).bind(bot).bind(db::now()).execute(&env.app.db).await.unwrap();
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(turn).bind(conv).bind(run).bind(db::now()).execute(&env.app.db).await.unwrap();
+        }
+        let mut recovery = super::Recovery::new();
+        recovery.boot = "9999-01-01".into();
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&env.app.db).await.unwrap();
+        recovery.rearm_in_flight(&env.app).await;
+        assert_eq!(recovery.runs.as_ref().unwrap().len(), 2);
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&env.app.db).await.unwrap();
+        recovery.rearm_in_flight(&env.app).await;
+        let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,delivery FROM turns WHERE id IN ('d3b2-api-turn','d3b2-cli-turn') ORDER BY id").fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(rows, vec![("d3b2-api-turn".into(),"pending".into()), ("d3b2-cli-turn".into(),"unknown".into())]);
     }
 
     #[tokio::test]

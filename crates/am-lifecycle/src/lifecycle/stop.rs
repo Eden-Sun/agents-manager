@@ -117,6 +117,9 @@ async fn stop_locked_body(
                 json!({"bot_id": bot_id}),
             ));
         }
+        if !crate::lifecycle::api_bot_port::ApiBotPort::api_recovery_ready(app) {
+            return Err(LcError::Unavailable(json!({"error":"api_startup_quarantined", "message":"修復 API bot 恢復問題後，正常重啟 daemon 再試", "retryable":true})));
+        }
         let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
             return Ok(false);
         };
@@ -1346,6 +1349,34 @@ mod stop_commit_tests {
 
     async fn state(app: &Arc<App>, run: &str) -> String {
         db::run(app.db(), run).await.unwrap().unwrap().state
+    }
+
+    #[tokio::test]
+    async fn d3b2_quarantined_api_stop_is_pre_cas_and_cli_stop_still_works() {
+        let env = tt::env().await;
+        let (cli, cli_run) = running_bot(&env).await;
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-api',?,'d3b2-api','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-run','d3b2-api','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('d3b2-conv','d3b2-api',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('d3b2-turn','d3b2-conv','d3b2-run','web','in_flight','ok',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,created_at) VALUES('d3b2-queued','d3b2-conv','web','queued','pending',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('d3b2-session','d3b2-api','d3b2-run','d3b2-turn',1,'bad-json',?,?,'9999-01-01T00:00:00Z')").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,created_at) VALUES('d3b2-session','d3b2-api','d3b2-run','d3b2-turn',1,0,'completed','fake',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('d3b2-attempt','d3b2-session','d3b2-api','d3b2-run','d3b2-turn',1,0,'fake','fast','reserved',123,'fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let app = tt::restart_app(&env).await;
+        app.set_startup_ready(false);
+        crate::api_bot::startup_gate::barrier(&app).await;
+        app.set_startup_ready(true);
+        let result = stop_bot(&app, "d3b2-api").await;
+        assert!(matches!(result, Err(LcError::Unavailable(ref value)) if value["error"] == "api_startup_quarantined"));
+        let before: (String,String,String,String,i64) = sqlx::query_as("SELECT r.state,t.status,j.state,a.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_join_receipts j ON j.turn_id=t.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE r.id='d3b2-run'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(before,("running".into(),"in_flight".into(),"pending".into(),"reserved".into(),123));
+        let queued: String = sqlx::query_scalar("SELECT status FROM turns WHERE id='d3b2-queued'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(queued, "queued");
+        assert!(matches!(stop_bot(&app, "d3b2-missing").await, Err(LcError::NotFound(_))));
+        assert!(stop_bot(&app, &cli).await.unwrap());
+        assert_eq!(state(&app, &cli_run).await, "stopped");
     }
 
     /// 一顆在跑的 bot：自己的 tab、pane、有名字的 agent（mock 收到 ctrl+c 就讓它離開）。不走 `start_bot`：
