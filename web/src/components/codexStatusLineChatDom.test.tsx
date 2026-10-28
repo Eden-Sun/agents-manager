@@ -88,7 +88,8 @@ test('對話分頁沒有 status 物件時，codex 的 footer 一樣拆成目錄�
 test('footer 沒有 Context 段時不畫 context 欄位；主題不畫', async () => {
   useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
   await mount(<StatusLineBar botId="b1" status={null} text={SHORTCUTS_LINE} />)
-  assert.deepEqual(items(), [{ k: '目錄', v: '~/project/agm-lx1685' }])
+  assert.equal(items()[0].v, '~/project/agm-lx1685')
+  assert.ok(document.querySelector('.context-card-trigger'))
 })
 
 test('Codex 沒有 context 讀數也能看到手動壓縮；忙碌時仍禁止送出', async () => {
@@ -97,6 +98,7 @@ test('Codex 沒有 context 讀數也能看到手動壓縮；忙碌時仍禁止�
     runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run },
   })
   await mount(<StatusLineBar botId="b1" status={null} text={null} />)
+  await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
   const button = document.querySelector<HTMLButtonElement>('.compact-btn')
   assert.ok(button, '沒有 context 讀數時仍應顯示壓縮')
   assert.equal(button.disabled, false)
@@ -112,6 +114,7 @@ test('Codex 必快取的手動壓縮會呼叫既有 API 一次', async () => {
   try {
     useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
     await mount(<StatusLineBar botId="b1" status={null} text={null} />)
+    await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
     await act(async () => { document.querySelector<HTMLButtonElement>('.compact-btn')!.click() })
     assert.deepEqual(requests, [['POST', '/bots/b1/compact']])
   } finally {
@@ -128,8 +131,9 @@ test('Codex 的 rollout context 在快取欄補顯時仍有壓縮按鈕', async 
   const bar = document.querySelector('.statusline-bar')!
   assert.match(bar.textContent ?? '', /38\.1%/)
   assert.match(bar.textContent ?? '', /必快取/)
-  assert.equal(bar.querySelectorAll('.compact-btn').length, 1)
-  assert.equal(bar.querySelector<HTMLButtonElement>('.compact-btn')!.disabled, false)
+  await act(() => bar.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
+  assert.equal(document.querySelectorAll('.compact-btn').length, 1)
+  assert.equal(document.querySelector<HTMLButtonElement>('.compact-btn')!.disabled, false)
 })
 
 test('終端分頁開著時，狀態列以終端解析的 footer 為準（含 warning），不再多畫一份 status_line', async () => {
@@ -151,4 +155,30 @@ test('非 codex 的 status_line 不當成 codex footer 解析', async () => {
   const bar = document.querySelector('.statusline-bar')?.textContent ?? ''
   assert.ok(!bar.includes('weekly 78% left'), bar)
   assert.equal(document.querySelector('.statusline-bar .statusline-text'), null)
+})
+
+test('context 小卡展開後才提供壓縮，沒有讀數也可開啟', async () => {
+  useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
+  await mount(<StatusLineBar botId="b1" status={null} text={null} />)
+  assert.equal(document.querySelector('.compact-btn'), null)
+  const trigger = document.querySelector<HTMLButtonElement>('.context-card-trigger')
+  assert.ok(trigger)
+  await act(() => trigger.click())
+  assert.ok(document.querySelector('.context-card .compact-btn'))
+})
+
+test('有讀數的 context 小卡只顯示實際值，Escape 關閉且不呼叫 API', async () => {
+  const requests: string[] = []
+  const original = rawTransport.request
+  rawTransport.request = async (_method, path) => { requests.push(path); return {} }
+  try {
+    useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' } as Run } })
+    await mount(<StatusLineBar botId="b1" status={status} text={CONTEXT_LINE} />)
+    await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
+    assert.match(document.querySelector('.context-card')?.textContent ?? '', /18%/)
+    assert.equal(document.querySelector<HTMLButtonElement>('.context-card .compact-btn')!.disabled, true)
+    assert.deepEqual(requests, [])
+    await act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    assert.equal(document.querySelector('.context-card'), null)
+  } finally { rawTransport.request = original }
 })
