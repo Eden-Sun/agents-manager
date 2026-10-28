@@ -169,6 +169,8 @@ const dict: Dict = {
   '目前有尚未結束的執行。若尚未送出，可先停用排程撤回，再儲存新 Bot。': 'A run is still open. If it has not been sent, pause the schedule to withdraw it before saving a different Bot.',
   '有未儲存的變更': 'Unsaved changes',
   '設定已儲存': 'Settings saved',
+  'Bot 啟動失敗（尚未送出）：{reason}': 'Bot failed to start (not sent): {reason}',
+  '開啟綁定 Bot 的對話': 'Open assigned Bot chat',
   '停用排程': 'Pause schedule',
   '只會撤回還沒送出的排隊執行，已經在跑的會繼續。': 'Only queued runs that have not been sent will be withdrawn. Runs already in progress will continue.',
   '請先儲存變更，再立即執行。': 'Save your changes before running.',

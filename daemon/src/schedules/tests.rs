@@ -94,6 +94,30 @@ async fn turn_status(app: &std::sync::Arc<crate::state::App>, turn: &str) -> Str
 }
 
 #[tokio::test]
+async fn occurrence_view_exposes_the_existing_turn_start_error_without_changing_it() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let id = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let turn = db::ulid();
+    let reason = "remote grok hooks file is not a safe regular file: AM_GROK_UNTRUSTED";
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at,awaits_start,start_error) VALUES (?,?,'web','queued','pending',?,1,?)")
+        .bind(&turn).bind(&conv).bind(db::now()).bind(reason).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=? WHERE id=?")
+        .bind(&turn).bind(&id).execute(&e.app.db).await.unwrap();
+    let occ = store::get_occurrence(&e.app.db, &id).await.unwrap().unwrap();
+    let view = store::occurrence_view(&e.app.db, &occ).await.unwrap();
+    assert_eq!(view["turn_start_error"], reason);
+    assert_eq!(view["turn_awaits_start"], 1);
+    let turn_row: (Option<String>, i64) = sqlx::query_as("SELECT start_error, awaits_start FROM turns WHERE id=?")
+        .bind(&turn).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(turn_row, (Some(reason.to_string()), 1));
+    let without_turn = Occurrence { turn_id: None, ..occ };
+    let view = store::occurrence_view(&e.app.db, &without_turn).await.unwrap();
+    assert!(view["turn_start_error"].is_null() && view["turn_awaits_start"].is_null());
+}
+
+#[tokio::test]
 async fn enqueue_waits_while_the_bot_is_stopping_and_creates_no_turn() {
     let (e, bot) = setup().await;
     let s = schedule(&e.app, &e.project_id, &bot.id).await;

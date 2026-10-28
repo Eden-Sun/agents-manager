@@ -106,6 +106,7 @@ export function ScheduleEditor({
   const [detail, setDetail] = useState<ScheduleDetail | null>(null)
   // 綁定 turn 的即時狀態（queued→in_flight→終態）：變了就重抓詳情；排程自己的事件也重抓。
   const liveStatus = useLiveTurnStatus(detail?.open?.bot_id, detail?.open?.turn_id)
+  const liveTurn = useStore((s) => detail?.open?.turn_id ? s.turns[detail.open.bot_id]?.[detail.open.turn_id] : undefined)
   const [form, setForm] = useState<FormState>(() =>
     copyOf && !scheduleId ? { ...fromDetail(copyOf), name: copyScheduleName(copyOf.name) } : emptyForm(''),
   )
@@ -210,6 +211,12 @@ export function ScheduleEditor({
   const botUnavailable = detail !== null && !eligible.some((b) => b.id === detail.bot_id)
   const changingBotWithOpen = detail?.open != null && effectiveBotId !== detail.bot_id
   const openIsRunning = (liveStatus ?? detail?.open?.turn_status) === 'in_flight'
+  const openForDisplay = detail?.open ? {
+    ...detail.open,
+    turn_start_error: liveTurn ? liveTurn.startError : detail.open.turn_start_error,
+    turn_awaits_start: liveTurn ? Number(liveTurn.awaitsStart) : detail.open.turn_awaits_start,
+  } : null
+  const hasStartError = openForDisplay?.status === 'queued' && (liveStatus ?? openForDisplay.turn_status) === 'queued' && openForDisplay.turn_awaits_start === 1 && Boolean(openForDisplay.turn_start_error)
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     touchedRef.current.add(k)
@@ -341,8 +348,9 @@ export function ScheduleEditor({
           <p>{t('已儲存的 Bot：{bot}', { bot: botLabel(detail.bot_id) })}</p>
           <p className="schedule-save-state" role="status">{unsaved ? t('有未儲存的變更') : t('設定已儲存')}</p>
           <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz) })}</p>
-          <p>{t('狀態：{status}', { status: detail.enabled ? (detail.open ? occurrenceLine(detail.open, liveStatus) : t('啟用中')) : t('已停用') })}</p>
-          {detail.open?.waiting_reason ? <p className="hint">{occurrenceLine(detail.open, liveStatus)}</p> : null}
+          <p>{t('狀態：{status}', { status: detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用') })}</p>
+          {openForDisplay?.waiting_reason ? <p className="hint">{occurrenceLine(openForDisplay, liveStatus)}</p> : null}
+          {hasStartError && detail.open ? <button type="button" className="btn" onClick={() => { selectBot(detail.open!.bot_id); onClose() }}>{t('開啟綁定 Bot 的對話')}</button> : null}
           {changingBotWithOpen ? <p className="schedule-change-help" role="status">{openIsRunning
             ? t('目前的執行已送出，請等它結束後再儲存新 Bot。')
             : t('目前有尚未結束的執行。若尚未送出，可先停用排程撤回，再儲存新 Bot。')}</p> : null}

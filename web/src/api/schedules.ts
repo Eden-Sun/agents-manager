@@ -33,6 +33,8 @@ export interface ScheduleOccurrence {
   /** 綁定 turn 的真實狀態與 delivery（UI 分辨等待、執行中、需確認）。 */
   turn_status?: string | null
   turn_delivery?: string | null
+  turn_start_error?: string | null
+  turn_awaits_start?: number | null
   merged_count: number
   conversation_id: string | null
   turn_id: string | null

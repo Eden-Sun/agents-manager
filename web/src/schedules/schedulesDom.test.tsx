@@ -396,6 +396,23 @@ test('已刪除的綁定 Bot 與未儲存的新 Bot 不可立即執行，儲存�
   } finally { globalThis.fetch = realFetch }
 })
 
+test('排程顯示綁定 turn 的啟動失敗原因，可開啟該 Bot 對話', async () => {
+  const reason = 'remote grok hooks file is not a safe regular file: AM_GROK_UNTRUSTED'
+  const open = { id: 'o1', schedule_id: 's1', source: 'manual', status: 'queued', turn_status: 'queued', turn_delivery: 'pending', turn_start_error: reason, turn_awaits_start: 1, scheduled_for: '', generation: 1, bot_id: 'b1', prompt: 'x', waiting_reason: null, merged_count: 0, conversation_id: null, turn_id: 't1', error: null, created_at: '', updated_at: '' }
+  const schedule = { id: 's1', project_id: 'p1', bot_id: 'b1', name: '每日摘要', prompt: 'x', mode: 'daily', tz: 'UTC', spec: { mode: 'daily', time: '09:00' }, next_due: null, enabled: true, generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', open, recent: [] }
+  fakeApi((req) => req.path.endsWith('/projects/p1/schedules') ? { schedules: [schedule] } : req.path.endsWith('/schedules/s1') ? schedule : undefined)
+  await mount(<Sidebar />)
+  await settle()
+  await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+  await settle()
+  const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+  assert.match(dialog.textContent ?? '', /Bot 啟動失敗（尚未送出）/)
+  assert.ok(dialog.textContent?.includes(reason))
+  const openChat = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '開啟綁定 Bot 的對話')!
+  await click(openChat)
+  assert.equal(useStore.getState().selectedBotId, 'b1')
+})
+
 test('排程有未結束執行時換 Bot 有說明；停用需確認，取消不送請求', async () => {
   const realFetch = globalThis.fetch
   try {

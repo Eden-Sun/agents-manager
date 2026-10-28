@@ -313,13 +313,15 @@ pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transitio
 
 /// 列表／詳情用：occurrence 加上綁定 turn 的真實狀態與 delivery，UI 才能分辨等待、執行中、需確認。
 pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serde_json::Value> {
-    let turn: Option<(String, String)> = match occ.turn_id.as_deref() {
-        Some(t) => sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(t).fetch_optional(pool).await?,
+    let turn: Option<(String, String, Option<String>, i64)> = match occ.turn_id.as_deref() {
+        Some(t) => sqlx::query_as("SELECT status, delivery, start_error, awaits_start FROM turns WHERE id = ?").bind(t).fetch_optional(pool).await?,
         None => None,
     };
     let mut v = serde_json::to_value(occ)?;
     v["turn_status"] = serde_json::json!(turn.as_ref().map(|t| t.0.clone()));
     v["turn_delivery"] = serde_json::json!(turn.as_ref().map(|t| t.1.clone()));
+    v["turn_start_error"] = serde_json::json!(turn.as_ref().and_then(|t| t.2.clone()));
+    v["turn_awaits_start"] = serde_json::json!(turn.as_ref().map(|t| t.3));
     Ok(v)
 }
 
