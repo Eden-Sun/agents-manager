@@ -2810,6 +2810,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
 - **Codex 快取提示（使用者 2026-10-24）**：狀態列固定顯示「codex 必快取」，不再以舊 rollout TTL 顯示倒數、已冷或輸入框重寫警示；沒有讀數與工作中均一致。rollout 的 context token 資料仍使用。以下熱冷顯示規則僅適用 Claude。
+  Codex 沒有 context 讀數時仍提供手動「壓縮」入口；按鈕只在正在執行且閒置時可用，後端維持既有送出守門。
 - **快取狀態的顯示（`prompt_cache.rs`、`StatusCache`、`ComposerCostHint`；使用者 2026-10-04）**：送出之前就讓人看到代價——狀態列常駐「快取 熱（剩 N 分）／已冷」，輸入框只在冷時警示（UI-DECISIONS）。只做 claude 與 codex，grok 完全不顯示。
   run JSON 另帶 `prompt_cache`（API.md）：claude 從 `runs.status_json` 的 statusLine `prompt_cache`（≥ 2.1.289）與 `context_window` 挑精簡欄位（**不外送原文**，
   `source:"statusline"`）；沒有這塊（舊版 claude）為 `null`。codex 沒有 statusLine，巡邏（`update_watch::sweep_runs`，30 秒）對每顆本機 codex run 讀它的

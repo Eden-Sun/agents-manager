@@ -1170,11 +1170,12 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   // codex 的 footer 拆成欄位，欄位交給下面跟 claude 同一套 SlItem 畫（模型與 effort 在頂端的主力晶片，額度在頂端額度列，這裡不重複）。
   const fields = useMemo(() => (footer?.modelLine ? parseCodexModelLine(footer.modelLine) : null), [footer?.modelLine])
   if (!status && !footer) {
-    if (!line) return null
+    if (!line && kind !== 'codex') return null
     return (
-      <div className="statusline-bar" title={line}>
+      <div className="statusline-bar" title={line || undefined}>
         {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
-        <span className="statusline-text mono">{trimClippedTail(line)}</span>
+        {line ? <span className="statusline-text mono">{trimClippedTail(line)}</span> : null}
+        {kind === 'codex' ? <><CompactButton botId={botId} /><StatusCache botId={botId} status={null} /></> : null}
       </div>
     )
   }
@@ -1214,6 +1215,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : null}
+      {ctxPct === null && kind === 'codex' ? <CompactButton botId={botId} /> : null}
       {status ? <StatusCache botId={botId} status={status} /> : null}
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
       {status?.version ? (
@@ -1557,7 +1559,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null
         }
         status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
-        hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
+        hasStatus={bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
         phoneFiles={<OutboxFiles />}
       />
 
