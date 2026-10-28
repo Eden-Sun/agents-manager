@@ -396,6 +396,51 @@ test('已刪除的綁定 Bot 與未儲存的新 Bot 不可立即執行，儲存�
   } finally { globalThis.fetch = realFetch }
 })
 
+test('排程有未結束執行時換 Bot 有說明；停用需確認，取消不送請求', async () => {
+  const realFetch = globalThis.fetch
+  try {
+    for (const phase of ['pending', 'queued', 'in_flight'] as const) {
+      let enabled = true
+      let patches = 0
+      const open = { id: `o-${phase}`, schedule_id: 's1', source: 'manual', status: phase === 'pending' ? 'pending' : 'queued', turn_status: phase === 'in_flight' ? 'in_flight' : 'queued', scheduled_for: '', generation: 1, bot_id: 'b1', prompt: 'x', waiting_reason: null, merged_count: 0, conversation_id: null, turn_id: 't1', error: null, created_at: '', updated_at: '', turn_delivery: 'pending' }
+      const schedule = () => ({ id: 's1', project_id: 'p1', bot_id: 'b1', name: '每日摘要', prompt: 'x', mode: 'daily', tz: 'UTC', spec: { mode: 'daily', time: '09:00' }, next_due: null, enabled, generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', open: enabled || phase === 'in_flight' ? open : null, recent: [] })
+      globalThis.fetch = (async (input: string, init?: { method?: string }) => {
+        const path = String(input)
+        if (init?.method === 'PATCH' && path.endsWith('/schedules/s1')) { patches++; enabled = false; return new Response(JSON.stringify(schedule()), { status: 200 }) }
+        if (path.endsWith('/projects/p1/schedules')) return new Response(JSON.stringify({ schedules: [schedule()] }), { status: 200 })
+        if (path.endsWith('/schedules/s1')) return new Response(JSON.stringify(schedule()), { status: 200 })
+        return new Response('{}', { status: 200 })
+      }) as typeof fetch
+      await mount(<Sidebar />)
+      await settle()
+      await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
+      await settle()
+      const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
+      assert.match(dialog.textContent ?? '', /已儲存的 Bot：bot-b1/)
+      assert.match(dialog.textContent ?? '', /設定已儲存/)
+      const select = [...dialog.querySelectorAll<HTMLSelectElement>('select')].find((s) => [...s.options].some((o) => o.value === 'b2'))!
+      await act(async () => { select.value = 'b2'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+      assert.match(dialog.textContent ?? '', /有未儲存的變更/)
+      assert.match(dialog.textContent ?? '', phase === 'in_flight' ? /請等它結束/ : /先停用排程撤回/)
+      const run = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
+      assert.equal(run.disabled, true)
+      const pause = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '停用')!
+      await click(pause)
+      let confirm = document.querySelector<HTMLElement>('[role="alertdialog"]')!
+      assert.match(confirm.textContent ?? '', /只會撤回還沒送出的排隊執行，已經在跑的會繼續/)
+      await click([...confirm.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '取消')!)
+      assert.equal(patches, 0)
+      await click(pause)
+      confirm = document.querySelector<HTMLElement>('[role="alertdialog"]')!
+      await click([...confirm.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '停用')!)
+      await settle()
+      assert.equal(patches, 1)
+      assert.match(dialog.textContent ?? '', /有未儲存的變更/, '停用不可丟掉新 Bot 的選擇')
+      await unmountAll()
+    }
+  } finally { globalThis.fetch = realFetch }
+})
+
 test('手動執行：POST 已送達但回應遺失 → 重按用同一個 key，只產生一次執行（不重複 Model job）', async () => {
   const realFetch = globalThis.fetch
   const seenKeys = new Set<string>()
