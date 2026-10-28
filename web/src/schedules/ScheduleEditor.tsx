@@ -117,6 +117,7 @@ export function ScheduleEditor({
   const [notice, setNotice] = useState<string | null>(null)
   const [botSheet, setBotSheet] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmPause, setConfirmPause] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   // 建立的冪等 key：重送同一張表單用同一個；後端說 key 已用在別的內容上才換新的。
   const [createKey, setCreateKey] = useState(() => newClientRequestId())
@@ -207,6 +208,8 @@ export function ScheduleEditor({
     JSON.stringify(specOf(form)) !== JSON.stringify(specOf(fromDetail(detail)))
   )
   const botUnavailable = detail !== null && !eligible.some((b) => b.id === detail.bot_id)
+  const changingBotWithOpen = detail?.open != null && effectiveBotId !== detail.bot_id
+  const openIsRunning = (liveStatus ?? detail?.open?.turn_status) === 'in_flight'
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     touchedRef.current.add(k)
@@ -335,9 +338,14 @@ export function ScheduleEditor({
       {loadError ? <p className="hint schedule-error">{t('讀取失敗：{reason}', { reason: loadError })}</p> : null}
       {detail ? (
         <section className="schedule-status" aria-label={t('排程狀態')}>
+          <p>{t('已儲存的 Bot：{bot}', { bot: botLabel(detail.bot_id) })}</p>
+          <p className="schedule-save-state" role="status">{unsaved ? t('有未儲存的變更') : t('設定已儲存')}</p>
           <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz) })}</p>
           <p>{t('狀態：{status}', { status: detail.enabled ? (detail.open ? occurrenceLine(detail.open, liveStatus) : t('啟用中')) : t('已停用') })}</p>
           {detail.open?.waiting_reason ? <p className="hint">{occurrenceLine(detail.open, liveStatus)}</p> : null}
+          {changingBotWithOpen ? <p className="schedule-change-help" role="status">{openIsRunning
+            ? t('目前的執行已送出，請等它結束後再儲存新 Bot。')
+            : t('目前有尚未結束的執行。若尚未送出，可先停用排程撤回，再儲存新 Bot。')}</p> : null}
         </section>
       ) : null}
 
@@ -484,7 +492,7 @@ export function ScheduleEditor({
             <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => void runNow()}>
               {t('立即執行')}
             </button>
-            <button type="button" className="btn" disabled={busy || loading} onClick={() => void toggle()}>
+            <button type="button" className="btn" disabled={busy || loading} onClick={() => detail.enabled ? setConfirmPause(true) : void toggle()}>
               {detail.enabled ? t('停用') : t('啟用')}
             </button>
             <button type="button" className="btn danger" disabled={busy || loading} onClick={() => setConfirmDelete(true)}>
@@ -530,6 +538,14 @@ export function ScheduleEditor({
           onCreated={(id) => setForm((f) => ({ ...f, botId: id }))}
         />
       </Modal>
+      <ConfirmDialog
+        open={confirmPause}
+        title={t('停用排程')}
+        body={<>{t('只會撤回還沒送出的排隊執行，已經在跑的會繼續。')}</>}
+        confirmLabel={t('停用')}
+        onConfirm={() => { setConfirmPause(false); void toggle() }}
+        onCancel={() => setConfirmPause(false)}
+      />
       <ConfirmDialog
         open={confirmDelete}
         title={t('刪除排程')}
