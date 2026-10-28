@@ -12,6 +12,7 @@ import context from '../testing/fixtures/codex-1755-terminal-context.json'
 import shortcuts from '../testing/fixtures/codex-1755-terminal-shortcuts.json'
 import { TerminalTab } from './TerminalTab'
 import { StatusLineBar } from './ChatPanel'
+import { rawTransport } from '../api'
 
 before(setupDom)
 afterEach(async () => { await unmountAll(); resetStoreForTest() })
@@ -88,6 +89,47 @@ test('footer 沒有 Context 段時不畫 context 欄位；主題不畫', async (
   useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
   await mount(<StatusLineBar botId="b1" status={null} text={SHORTCUTS_LINE} />)
   assert.deepEqual(items(), [{ k: '目錄', v: '~/project/agm-lx1685' }])
+})
+
+test('Codex 沒有 context 讀數也能看到手動壓縮；忙碌時仍禁止送出', async () => {
+  useStore.setState({
+    bots: [{ id: 'b1', kind: 'codex' } as Bot],
+    runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run },
+  })
+  await mount(<StatusLineBar botId="b1" status={null} text={null} />)
+  const button = document.querySelector<HTMLButtonElement>('.compact-btn')
+  assert.ok(button, '沒有 context 讀數時仍應顯示壓縮')
+  assert.equal(button.disabled, false)
+  assert.match(document.querySelector('.statusline-bar')?.textContent ?? '', /必快取/)
+  await act(() => useStore.setState({ runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' } as Run } }))
+  assert.equal(button.disabled, true)
+})
+
+test('Codex 必快取的手動壓縮會呼叫既有 API 一次', async () => {
+  const requests: Array<[string, string]> = []
+  const original = rawTransport.request
+  rawTransport.request = async (method, path) => { requests.push([method, path]); return { command: '/compact', kind: 'codex' } }
+  try {
+    useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
+    await mount(<StatusLineBar botId="b1" status={null} text={null} />)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.compact-btn')!.click() })
+    assert.deepEqual(requests, [['POST', '/bots/b1/compact']])
+  } finally {
+    rawTransport.request = original
+  }
+})
+
+test('Codex 的 rollout context 在快取欄補顯時仍有壓縮按鈕', async () => {
+  useStore.setState({
+    bots: [{ id: 'b1', kind: 'codex', model: 'gpt-6.1-terra' } as Bot],
+    runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle', prompt_cache: { context_used_pct: 38.1, context_used_tokens: 181000, context_size: 475000 } } as Run },
+  })
+  await mount(<StatusLineBar botId="b1" status={{ ...status, context_used_pct: null, context_used_tokens: null, context_size: null }} text={null} />)
+  const bar = document.querySelector('.statusline-bar')!
+  assert.match(bar.textContent ?? '', /38\.1%/)
+  assert.match(bar.textContent ?? '', /必快取/)
+  assert.equal(bar.querySelectorAll('.compact-btn').length, 1)
+  assert.equal(bar.querySelector<HTMLButtonElement>('.compact-btn')!.disabled, false)
 })
 
 test('終端分頁開著時，狀態列以終端解析的 footer 為準（含 warning），不再多畫一份 status_line', async () => {
