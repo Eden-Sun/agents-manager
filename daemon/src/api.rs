@@ -170,6 +170,32 @@ mod startup_readiness_tests {
 
         server.abort();
     }
+    #[tokio::test]
+    async fn d3b2_quarantine_stop_returns_503_while_cli_api_is_ready() {
+        let env = crate::testing::env().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-api',?,'d3b2-api','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-run','d3b2-api','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let app = crate::testing::restart_app(&env).await;
+        app.set_startup_ready(false);
+        sqlx::query("DROP TABLE api_bot_join_receipts").execute(&app.db).await.unwrap();
+        crate::api_bot::startup_gate::barrier(&app).await;
+        app.set_startup_ready(true);
+        let router = router(app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+        let client = reqwest::Client::new();
+        let state = client.get(format!("http://{addr}/api/state")).header("X-AM-Token", "test-token").send().await.unwrap();
+        assert_eq!(state.status(), StatusCode::OK);
+        let stop = client.post(format!("http://{addr}/api/bots/d3b2-api/stop")).header("X-AM-Token", "test-token").send().await.unwrap();
+        assert_eq!(stop.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(stop.json::<Value>().await.unwrap()["error"], "api_startup_quarantined");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id='d3b2-run'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "running");
+        server.abort();
+    }
+
 }
 
 /// 同時進行的附件上傳上限：body 先整個讀進記憶體（`Bytes`，單檔至多 `attach::MAX_BYTES`），不限並發就是 N × 50 MiB。

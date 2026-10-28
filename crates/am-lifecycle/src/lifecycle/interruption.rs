@@ -482,6 +482,11 @@ pub async fn adopt_turns_of_ended_runs(app: &impl InterruptionContext, boot: &st
     };
     let mut done = true;
     for (turn, run, bot, state) in rows {
+        match db::bot(app.db(), &bot).await {
+            Ok(Some(b)) if b.kind == "claude-api" => continue,
+            Ok(Some(_)) => {},
+            Ok(None) | Err(_) => { done = false; continue; }
+        }
         let lock = app.bot_lock(&bot).await;
         let _g = lock.lock_owned().await;
         let note = format!("這一回合的 run 已經結束（{state}），當時沒能把回合收掉；daemon 重啟時補收。");
@@ -520,6 +525,11 @@ pub async fn adopt_unbound_send_nows(app: &impl InterruptionContext, boot: &str)
     let mut done = true;
     let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
     for (turn, conv, bot) in rows {
+        match db::bot(app.db(), &bot).await {
+            Ok(Some(b)) if b.kind == "claude-api" => continue,
+            Ok(Some(_)) => {},
+            Ok(None) | Err(_) => { done = false; continue; }
+        }
         let lock = app.bot_lock(&bot).await;
         let _g = lock.lock_owned().await;
         // 送出鍵其實生效了（#229）：照平常的收尾做，不收成 unknown——不然 claude 替它送的 Stop 會認領被插隊的那一筆。
@@ -1500,6 +1510,33 @@ mod tests {
 
         assert_eq!(status_of(&app, &b.turn).await, "failed");
         assert!(system_notes(&app, &b.turn).await.iter().any(|n| n.contains("已經結束")), "{:?}", system_notes(&app, &b.turn).await);
+    }
+
+    #[tokio::test]
+    async fn d3b2_restart_interruption_guards_preserve_api_and_process_cli() {
+        let b = busy("d3b2-api").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&b.bot.id).execute(app.db()).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited',ended_at=? WHERE id=?").bind(db::now()).bind(&b.run).execute(app.db()).await.unwrap();
+        let cli = tt::claude_bot(&app, &b.env.project_id, "d3b2-cli").await;
+        let cli_run = tt::fake_run(&app, &cli.id).await;
+        sqlx::query("UPDATE runs SET state='exited',ended_at=? WHERE id=?").bind(db::now()).bind(&cli_run).execute(app.db()).await.unwrap();
+        let cli_conv = db::conversation_id(app.db(), &cli.id).await.unwrap();
+        let api_conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
+        for (id,conv,run) in [("d3b2-cli-ended", &cli_conv, Some(&cli_run)), ("d3b2-api-unbound", &api_conv, None), ("d3b2-cli-unbound", &cli_conv, None)] {
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(id).bind(conv).bind(run).bind(db::now()).execute(app.db()).await.unwrap();
+        }
+        assert!(adopt_turns_of_ended_runs(&app, "9999-01-01").await);
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
+        assert_eq!(status_of(&app, "d3b2-cli-ended").await, "failed");
+        assert!(adopt_unbound_send_nows(&app, "9999-01-01").await);
+        assert_eq!(status_of(&app, "d3b2-api-unbound").await, "in_flight");
+        assert_eq!(status_of(&app, "d3b2-cli-unbound").await, "failed");
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(app.db()).await.unwrap();
+        assert!(!adopt_turns_of_ended_runs(&app, "9999-01-01").await);
+        assert!(!adopt_unbound_send_nows(&app, "9999-01-01").await);
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(app.db()).await.unwrap();
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
     }
 
     /// #156：DB 一直寫不進去時，上一個 run 欠著的那一筆還沒補上、新的 run 又欠一筆——後來的不能蓋掉先前的，兩筆都要補上

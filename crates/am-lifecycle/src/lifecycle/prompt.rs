@@ -85,16 +85,21 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
     // `database is locked`（code 5／517），完全不等 busy_timeout——daemon 剛起來撞上前一顆還沒收乾淨的寫入就是這樣（正式環境
     // 一天 10 次）。一開始就要寫入鎖，才會等。
     let mut tx = db::begin_write(app.db()).await?;
-    let target: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT created_at, delivered_at FROM turns WHERE id=? AND restamp_pending=1",
+    let target: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT t.created_at, t.delivered_at, b.kind FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id LEFT JOIN bots b ON b.id=c.bot_id WHERE t.id=? AND t.restamp_pending=1",
     )
     .bind(turn_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((queued_at, first_at)) = target else {
+    let Some((queued_at, first_at, kind)) = target else {
         tx.rollback().await?;
         return Ok(());
     };
+    match kind.as_deref() {
+        Some("claude-api") => { tx.rollback().await?; return Ok(()); }
+        Some(_) => {},
+        None => anyhow::bail!("queued restamp bot unavailable"),
+    }
     let Some(first_at) = first_at else {
         anyhow::bail!("queued prompt restamp debt has no first delivered_at: {turn_id}");
     };
@@ -168,7 +173,7 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
 }
 
 pub async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
-    let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE restamp_pending=1 ORDER BY created_at, id")
+    let turns: Vec<String> = sqlx::query_scalar("SELECT t.id FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id LEFT JOIN bots b ON b.id=c.bot_id WHERE t.restamp_pending=1 AND (b.kind != 'claude-api' OR b.id IS NULL) ORDER BY t.created_at, t.id")
         .fetch_all(app.db())
         .await?;
     let mut failed = None;
@@ -4161,6 +4166,27 @@ mod restamp_tests {
 
     async fn created(app: &Arc<App>, id: &str) -> String {
         sqlx::query_scalar("SELECT created_at FROM messages WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn d3b2_restamp_skips_api_keeps_missing_debt_and_preserves_cli() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "d3b2-restamp").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let (turn, message) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "fixture").await;
+        sqlx::query("UPDATE turns SET restamp_pending=1,delivered_at='2026-09-30T13:38:55.000Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        restamp_queued_prompt(&app, &turn).await.unwrap();
+        assert_eq!(created(&app, &message).await, "2026-09-30T13:28:31.333Z");
+        let pending: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(pending, 1);
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&app.db).await.unwrap();
+        assert!(restamp_queued_prompt(&app, &turn).await.is_err());
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='claude' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        restamp_queued_prompt(&app, &turn).await.unwrap();
+        assert_eq!(created(&app, &message).await, "2026-09-30T13:38:55.000Z");
     }
 
     /// 2026-09-30（cf-ox-2）：13:28 排進佇列、13:38:55 才送出的那一則，要排到送出的時間，回覆才接在它後面。

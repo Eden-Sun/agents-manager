@@ -94,6 +94,7 @@ async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashMap<St
     };
     let mut still = HashMap::new();
     for bot in bots {
+        if bot.kind == "claude-api" { continue; }
         if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains_key(&bot.id)) {
             continue;
         }
@@ -253,6 +254,23 @@ pub async fn rearm_progress(app: &Arc<App>) {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    #[tokio::test]
+    async fn d3b2_autostart_skips_api_and_processes_cli_with_read_failure_closed() {
+        let env = tt::env().await;
+        let api = tt::claude_bot(&env.app, &env.project_id, "d3b2-auto-api").await;
+        let cli = tt::claude_bot(&env.app, &env.project_id, "d3b2-auto-cli").await;
+        sqlx::query("UPDATE bots SET autostart=1,kind='claude-api' WHERE id=?").bind(&api.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&cli.id).execute(&env.app.db).await.unwrap();
+        let mut owed = None;
+        assert!(autostart_pass(&env.app, LOCAL_HOST, &mut owed, &db::now()).await);
+        assert!(db::active_run(&env.app.db, &api.id).await.unwrap().is_none());
+        assert!(db::active_run(&env.app.db, &cli.id).await.unwrap().is_some());
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&env.app.db).await.unwrap();
+        assert!(!autostart_pass(&env.app, LOCAL_HOST, &mut owed, &db::now()).await);
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&env.app.db).await.unwrap();
+        assert!(db::active_run(&env.app.db, &api.id).await.unwrap().is_none());
+    }
 
     /// #888：start 失敗是 herdr 暫時不通（Upstream）、主機仍連線中 → 這一輪記進 owed、claim 不完成、背景會再試；
     /// 再試時自己失敗留下的那列 run 不算「有人動過它」。

@@ -557,11 +557,15 @@ impl Default for ApiBotRuntime {
 }
 
 impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
+    fn api_recovery_ready(&self) -> bool { self.api_startup_gate.ready() }
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,
     ) -> impl Future<Output = Result<(), ApiBotError>> + Send {
-        async move { self.api_bot_runtime.spawn(self, key).await }
+        async move {
+            if !self.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
+            self.api_bot_runtime.spawn(self, key).await
+        }
     }
 
     fn api_run_cancel_and_join(

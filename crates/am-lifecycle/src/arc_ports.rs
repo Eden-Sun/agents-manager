@@ -1361,6 +1361,7 @@ mod arc_port_api_bot {
     use std::future::Future;
 
     impl<T: ApiBotPort + ?Sized> ApiBotPort for std::sync::Arc<T> {
+        fn api_recovery_ready(&self) -> bool { <T as ApiBotPort>::api_recovery_ready(self.as_ref()) }
         fn api_turn_spawn(
             &self,
             key: &ApiTurnKey,

@@ -60,6 +60,11 @@ pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyh
 }
 
 async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
+    match db::bot(app.db(), bot_id).await? {
+        Some(bot) if bot.kind == "claude-api" => return Ok(()),
+        Some(_) => {},
+        None => anyhow::bail!("queued bot is unavailable"),
+    }
     // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
     match app.bot_handed_off_to(bot_id).await {
         Ok(None) => {}
@@ -705,7 +710,8 @@ pub async fn pending_queue_retries(app: &impl crate::capabilities::Db) -> anyhow
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT c.bot_id, COALESCE(t.next_flush_at, '1970-01-01T00:00:00Z')
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'queued'",
+           LEFT JOIN bots b ON b.id=c.bot_id
+          WHERE t.status = 'queued' AND (b.kind != 'claude-api' OR b.id IS NULL)",
     )
     .fetch_all(app.db())
     .await?;
@@ -1291,6 +1297,25 @@ mod flush_queue_tests {
         .await
         .unwrap();
         Fixture { env, bot_id, conv, run_id, turn_id }
+    }
+
+    #[tokio::test]
+    async fn d3b2_queue_guards_keep_api_and_rearm_cli_in_same_database() {
+        let f = queued_kind("claude-api", "test").await;
+        let cli = tt::claude_bot(&f.env.app, &f.env.project_id, "d3b2-cli").await;
+        let conv = db::conversation_id(f.env.app.db(), &cli.id).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES('d3b2-cli-turn',?,'web','queued','pending','ping',?)").bind(&conv).bind(db::now()).execute(f.env.app.db()).await.unwrap();
+        let pending = pending_queue_retries(&f.env.app).await.unwrap();
+        assert!(pending.iter().any(|(id,_)| id == &cli.id));
+        assert!(!pending.iter().any(|(id,_)| id == &f.bot_id));
+        flush_queued_locked(&f.env.app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt" || m == "pane.send_text"));
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(f.env.app.db()).await.unwrap();
+        assert!(pending_queue_retries(&f.env.app).await.is_err());
+        assert!(flush_queued_locked(&f.env.app, &f.bot_id).await.is_err());
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(f.env.app.db()).await.unwrap();
     }
 
     fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {
