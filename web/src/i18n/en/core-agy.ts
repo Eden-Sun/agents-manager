@@ -164,6 +164,8 @@ const dict: Dict = {
   '儲存': 'Save',
   '建立排程': 'Create schedule',
   '立即執行': 'Run now',
+  '請先儲存變更，再立即執行。': 'Save your changes before running.',
+  '已綁定的 Bot 無法使用，請選擇其他 Bot 並儲存。': 'The assigned Bot is unavailable. Select another Bot and save.',
   '停用': 'Disable',
   '啟用': 'Enabled',
   '刪除': 'Delete',
