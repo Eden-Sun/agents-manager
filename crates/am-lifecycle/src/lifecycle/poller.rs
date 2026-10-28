@@ -1712,16 +1712,24 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
     let reply_screen = compact_tail.unwrap_or(&fresh);
 
-    let codex_rollout_reply = if bot.kind == "codex" && codex_hit.is_none() && !compact_turn {
+    let codex_rollout_outcome = if bot.kind == "codex" && codex_hit.is_none() && !compact_turn {
         let sent = turn_echo_texts(app, &turn.id).await?;
         let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
-        super::codex_rollout::codex_rollout_reply_for_in_flight(app, &bot, &run, &sent, &since_iso).await
+        super::codex_rollout::codex_rollout_outcome_for_in_flight(app, &bot, &run, &sent, &since_iso).await
     } else {
         None
     };
+    let (codex_rollout_reply, codex_rollout_error) = match codex_rollout_outcome {
+        Some(super::codex_rollout::NativeOutcome::Reply(reply)) => (Some(reply), None),
+        Some(super::codex_rollout::NativeOutcome::Error { native_id, message, reply })
+            if turn.native_turn_id.as_deref().is_none_or(|id| id == native_id)
+                && turn.native_session_id.as_deref().is_none_or(|id| Some(id) == run.native_session_id.as_deref()) => (None, Some((native_id, message, reply))),
+        Some(super::codex_rollout::NativeOutcome::Error { .. }) => (None, None),
+        None => (None, None),
+    };
 
     // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
-    let reply = if codex_hit.is_some() || compact_turn {
+    let reply = if codex_hit.is_some() || codex_rollout_error.is_some() || compact_turn {
         None
     } else if let Some(r) = codex_rollout_reply.clone() {
         Some(r)
@@ -1753,7 +1761,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         }
     };
 
-    if compact_tail.is_some() && reply.is_none() {
+    if compact_tail.is_some() && reply.is_none() && codex_rollout_error.is_none() {
         // No cursor advance: every later idle poll must keep waiting until an
         // answer or hook arrives. The existing stuck-turn timeout remains active.
         return Ok(false);
@@ -1797,7 +1805,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     let is_codex_rollout_reply = codex_rollout_reply.is_some();
     let mut tx = app.db().begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
-    let res = if codex_hit.is_some() {
+    let res = if codex_hit.is_some() || codex_rollout_error.is_some() {
         super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
     } else if compact_turn {
         super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed", "Codex 壓縮完成，沒有 assistant 回覆").await?
@@ -1810,6 +1818,24 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
+
+    if let Some((native_id, error, partial_reply)) = codex_rollout_error {
+        sqlx::query("UPDATE turns SET native_session_id=COALESCE(native_session_id, ?), native_turn_id=COALESCE(native_turn_id, ?) WHERE id=? AND run_id=?")
+            .bind(&run.native_session_id).bind(&native_id).bind(&turn.id).bind(run_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE runs SET turn_error=? WHERE id=? AND bot_id=?")
+            .bind(&error).bind(run_id).bind(&bot.id).execute(&mut *tx).await?;
+        let partial = if let Some(reply) = partial_reply {
+            Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", &reply, "transcript", true, None).await?)
+        } else { None };
+        let message = insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &error, "system", true, None).await?;
+        remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
+        tx.commit().await?;
+        if let Some(message) = partial { emit_message_added(app, &bot.id, message).await; }
+        emit_message_added(app, &bot.id, message).await;
+        emit_turn(app, &turn.id).await;
+        app.emit_bot_status(&bot.id).await;
+        return Ok(true);
+    }
 
     if let Some(hit) = codex_hit {
         let message = insert_message_tx(
@@ -5826,6 +5852,70 @@ pub trait FallbackTimers: Send + Sync {
 mod reply_window_tests {
     use super::*;
     use crate::testing as tt;
+
+    async fn codex_empty_hook_case(has_error: bool, hook_first: bool, has_partial: bool) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx-native-error").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let session = "01a18888-0000-7000-8000-000000000002";
+        sqlx::query("UPDATE runs SET native_session_id=? WHERE id=?").bind(session).bind(&run).execute(&app.db).await.unwrap();
+        let home = app.data_dir.join("codex_error_home");
+        let dir = home.join("sessions/2026/10/25");
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = if has_error { serde_json::json!({"message":"Access to this deployment ended.","codex_error_info":"model_not_found"}) } else { serde_json::Value::Null };
+        let partial = has_partial.then_some("Access to this deployment ended.");
+        let rows = [
+            serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:00Z","payload":{"type":"task_started","turn_id":"native-error"}}),
+            serde_json::json!({"type":"response_item","timestamp":"2026-10-25T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test prompt"}]}}),
+            serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:05Z","payload":{"type":"task_complete","turn_id":"native-error","last_agent_message":partial,"error":error}}),
+        ];
+        std::fs::write(dir.join(format!("rollout-2026-10-25T01-00-00-{session}.jsonl")), rows.iter().map(|v| v.to_string() + "\n").collect::<String>()).unwrap();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(serde_json::json!({"CODEX_HOME":home.to_string_lossy()}).to_string()).bind(&bot.id).execute(&app.db).await.unwrap();
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text='test prompt', delivery='ok', native_turn_id='native-error', created_at='2026-10-25T00:59:50Z', delivered_at='2026-10-25T00:59:50Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{}", bot.id), "› test prompt\n\n› \n");
+        let hook = crate::hookrecv::HookBody { bot_id: bot.id.clone(), provider: "codex".into(), payload: serde_json::json!({"type":"agent-turn-complete","thread-id":session,"turn-id":"native-error","input-messages":["test prompt"],"last-assistant-message":""}), received_at: None, truncated: false, run_id: None };
+        if hook_first {
+            crate::hookrecv::process(&app, &hook).await.unwrap();
+            assert!(app.progress_pollers.lock().await.contains_key(&run), "empty hook arms the progress poller");
+        }
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        let error: Option<String> = sqlx::query_scalar("SELECT turn_error FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        let messages: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn).fetch_all(&app.db).await.unwrap();
+        if has_error {
+            assert_eq!(status, "failed");
+            assert_eq!(error.as_deref(), Some("Access to this deployment ended."));
+            assert_eq!(messages, ["Access to this deployment ended."]);
+            let replies: Vec<(String, i64)> = sqlx::query_as("SELECT content, incomplete FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn).fetch_all(&app.db).await.unwrap();
+            assert_eq!(replies, if has_partial { vec![("Access to this deployment ended.".into(), 1)] } else { vec![] });
+        } else {
+            assert_eq!(status, "completed_fallback");
+            assert_eq!(error, None);
+            assert!(messages.is_empty());
+        }
+        assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        if !hook_first {
+            crate::hookrecv::process(&app, &hook).await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+            let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&turn).fetch_one(&app.db).await.unwrap();
+            assert_eq!((count, errors), (1, i64::from(has_error)), "late hook must not duplicate the turn or error");
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_empty_hook_then_native_error_fails_once() { codex_empty_hook_case(true, true, false).await; }
+
+    #[tokio::test]
+    async fn codex_empty_hook_without_error_completes_fallback() { codex_empty_hook_case(false, true, false).await; }
+
+    #[tokio::test]
+    async fn codex_empty_hook_late_after_native_error_is_deduplicated() { codex_empty_hook_case(true, false, false).await; }
+
+    #[tokio::test]
+    async fn codex_empty_hook_with_partial_reply_and_error_preserves_both() { codex_empty_hook_case(true, true, true).await; }
 
     /// 多節 markdown 的長回覆（#1977）：標題、粗體、列表、空行都有，總長遠超過游標切得開的範圍。
     fn long_reply() -> String {

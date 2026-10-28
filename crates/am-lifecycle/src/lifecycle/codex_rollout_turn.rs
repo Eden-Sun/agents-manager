@@ -5,8 +5,11 @@ use serde_json::Value;
 pub(super) enum Proof {
     /// Historical logs without task_started retain the existing strict parser.
     Legacy,
-    Native(Option<String>),
+    Native(Option<NativeOutcome>),
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::lifecycle) enum NativeOutcome { Reply(String), Error { native_id: String, message: String, reply: Option<String> } }
 
 fn row(line: &str) -> Option<Value> {
     serde_json::from_str(line).ok()
@@ -81,7 +84,7 @@ pub(super) fn for_prompt(
             Proof::Legacy
         };
     };
-    let prove = || -> Option<String> {
+    let prove = || -> Option<NativeOutcome> {
         // The unchanged caller searches the last matching prompt. A second matching
         // submission in a different native task must not steal an older AGM turn.
         let mut matched_texts = Vec::new();
@@ -160,11 +163,14 @@ pub(super) fn for_prompt(
                 ordered_after(&lines[prompt + 1 + offset + 1..], t, native)?;
                 // A later *different* native task does not invalidate this proven
                 // completion. The caller already selected the last matching prompt.
-                return v
-                    .pointer("/payload/last_agent_message")?
-                    .as_str()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(str::to_owned);
+                let reply = v.pointer("/payload/last_agent_message").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+                let error = v.pointer("/payload/error").filter(|e| !e.is_null());
+                return match (reply, error) {
+                    (Some(text), None) => Some(NativeOutcome::Reply(text.to_owned())),
+                    (reply, Some(error)) => error.get("message").and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty()).map(|s| NativeOutcome::Error { native_id: native.to_owned(), message: s.to_owned(), reply: reply.map(str::to_owned) }),
+                    _ => None,
+                };
             }
         }
         None
@@ -235,7 +241,7 @@ pub(super) fn for_latest(lines: &[&str], complete: usize, since: &DateTime<Fixed
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
     };
-    Proof::Native(prove())
+    Proof::Native(prove().map(NativeOutcome::Reply))
 }
 
 #[cfg(test)]

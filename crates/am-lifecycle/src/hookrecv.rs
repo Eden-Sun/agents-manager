@@ -2021,6 +2021,18 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         .fetch_optional(app.db())
                         .await?;
                 if let Some(existing) = dup {
+                    if bot.kind == "codex" && assistant.as_deref().unwrap_or("").is_empty() && admitted.is_some() {
+                        if let Some(r) = &run {
+                            if db::in_flight_turn(app.db(), &r.id).await?.is_some_and(|t| t.id == existing) {
+                                let mut tx = app.db().begin().await?;
+                                stamp_source_event(&mut tx, &existing, event_id).await?;
+                                tx.commit().await?;
+                                *accepted_turn_id = Some(existing.clone());
+                                app.arm_progress(&r.id, &bot.id, &existing).await;
+                                return Ok(());
+                            }
+                        }
+                    }
                     tracing::info!(turn = %existing, "duplicate hook ignored");
                     return Ok(());
                 }
@@ -2070,6 +2082,21 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 other => (other, user),
             };
             let body_text = assistant.clone().unwrap_or_default();
+
+            // An empty Codex notify can hide a typed native error. Keep the exact
+            // matching turn in flight so the existing rollout fallback can decide.
+            if bot.kind == "codex" && body_text.is_empty() {
+                if let (Some(t), Some(r), Some(native)) = (&target, &run, turn_id.as_deref()) {
+                    if t.native_turn_id.as_deref() == Some(native) && admitted.is_some() {
+                        let mut tx = app.db().begin().await?;
+                        stamp_source_event(&mut tx, &t.id, event_id).await?;
+                        tx.commit().await?;
+                        *accepted_turn_id = Some(t.id.clone());
+                        app.arm_progress(&r.id, &bot.id, &t.id).await;
+                        return Ok(());
+                    }
+                }
+            }
 
             if let (Some(t), Some(admitted)) = (target, &admitted) {
                 // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
@@ -3561,6 +3588,55 @@ mod external_claim_tests {
             truncated: false,
             run_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn codex_empty_completion_with_matching_native_turn_waits_for_fallback() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, turn_id) = unknown_turn(&app, &env.project_id, "codex", "test prompt").await;
+        sqlx::query("UPDATE turns SET delivery='ok', native_turn_id='native-2026' WHERE id=?")
+            .bind(&turn_id).execute(&app.db).await.unwrap();
+        let mut hook = codex_done(&bot_id, "test prompt");
+        hook.payload["turn-id"] = json!("native-2026");
+        hook.payload["last-assistant-message"] = json!("");
+        process(&app, &hook).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "empty Codex hook must leave the turn for typed rollout recovery");
+    }
+
+    #[tokio::test]
+    async fn codex_nonempty_completion_still_finishes_matching_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, turn_id) = unknown_turn(&app, &env.project_id, "codex", "test prompt").await;
+        sqlx::query("UPDATE turns SET delivery='ok', native_turn_id='native-2026' WHERE id=?")
+            .bind(&turn_id).execute(&app.db).await.unwrap();
+        let mut hook = codex_done(&bot_id, "test prompt");
+        hook.payload["turn-id"] = json!("native-2026");
+        process(&app, &hook).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn codex_empty_completion_already_bound_to_session_rearms_poller() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, turn_id) = unknown_turn(&app, &env.project_id, "codex", "test prompt").await;
+        let mut hook = codex_done(&bot_id, "test prompt");
+        hook.payload["turn-id"] = json!("native-2026");
+        hook.payload["last-assistant-message"] = json!("");
+        let sid = hook.payload["thread-id"].as_str().unwrap();
+        sqlx::query("UPDATE turns SET delivery='ok', native_turn_id='native-2026', native_session_id=? WHERE id=?")
+            .bind(sid).bind(&turn_id).execute(&app.db).await.unwrap();
+        let run: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        process(&app, &hook).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight");
+        assert!(app.progress_pollers.lock().await.contains_key(&run));
     }
 
     /// 第二輪 review 送達線 #3：`unknown` 期間使用者在終端手打另一句，答案不能掛到原本那則、也不能把它標成已送達。
