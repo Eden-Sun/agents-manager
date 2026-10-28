@@ -1305,17 +1305,40 @@ mod flush_queue_tests {
         let cli = tt::claude_bot(&f.env.app, &f.env.project_id, "d3b2-cli").await;
         let conv = db::conversation_id(f.env.app.db(), &cli.id).await.unwrap();
         sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES('d3b2-cli-turn',?,'web','queued','pending','ping',?)").bind(&conv).bind(db::now()).execute(f.env.app.db()).await.unwrap();
+        let cli_run = db::ulid();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,workspace_id,pane_id,agent_name,herdr_session,started_at) VALUES(?,?,'running','idle','ws-1','pane-1','agent','test',?)").bind(&cli_run).bind(&cli.id).bind(db::now()).execute(f.env.app.db()).await.unwrap();
+        db::set_pane_typed(f.env.app.db(), &cli_run).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         let pending = pending_queue_retries(&f.env.app).await.unwrap();
         assert!(pending.iter().any(|(id,_)| id == &cli.id));
         assert!(!pending.iter().any(|(id,_)| id == &f.bot_id));
         flush_queued_locked(&f.env.app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
         assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt" || m == "pane.send_text"));
+        flush_queued_locked(&f.env.app, &cli.id).await.unwrap();
+        assert_eq!(turn(&f.env.app, "d3b2-cli-turn").await.status, "in_flight");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
         sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(f.env.app.db()).await.unwrap();
         assert!(pending_queue_retries(&f.env.app).await.is_err());
         assert!(flush_queued_locked(&f.env.app, &f.bot_id).await.is_err());
         assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
         sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(f.env.app.db()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn d3b2_missing_bot_flush_preserves_queue_and_retry_candidate() {
+        let f = queued("test").await;
+        let mut conn = f.env.app.db().acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&f.bot_id).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(db::bot(f.env.app.db(), &f.bot_id).await.unwrap().is_none());
+        assert!(pending_queue_retries(&f.env.app).await.unwrap().iter().any(|(id,_)| id == &f.bot_id));
+        assert!(flush_queued_locked(&f.env.app, &f.bot_id).await.is_err());
+        assert_eq!(turn(&f.env.app, &f.turn_id).await.status, "queued");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"));
     }
 
     fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {

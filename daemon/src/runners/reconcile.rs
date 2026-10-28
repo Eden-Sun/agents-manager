@@ -260,6 +260,13 @@ mod tests {
         let env = tt::env().await;
         let api = tt::claude_bot(&env.app, &env.project_id, "d3b2-auto-api").await;
         let cli = tt::claude_bot(&env.app, &env.project_id, "d3b2-auto-cli").await;
+        let missing = tt::claude_bot(&env.app, &env.project_id, "d3b2-auto-missing").await;
+        let mut conn = env.app.db.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&missing.id).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(!db::live_bots(&env.app.db).await.unwrap().iter().any(|b| b.id == missing.id));
         sqlx::query("UPDATE bots SET autostart=1,kind='claude-api' WHERE id=?").bind(&api.id).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&cli.id).execute(&env.app.db).await.unwrap();
         let mut owed = None;

@@ -227,3 +227,234 @@ async fn d3b2_bots_read_error_quarantines_without_blocking_global_ready() {
         "quarantine requires a fresh daemon boot"
     );
 }
+
+#[tokio::test]
+async fn d3b2_one_mib_stack_recovers_true_join_pending_and_active_orphan() {
+    use super::{adapter::AdapterIdentity, protocol::Response};
+    use am_base::db::api_bot::{self, Checkpoint, Fence};
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-stack-api',?,'d3b2-stack-api','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-stack-run','d3b2-stack-api','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('d3b2-stack-conv','d3b2-stack-api',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('d3b2-stack-turn','d3b2-stack-conv','d3b2-stack-run','web','in_flight','ok',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    let identity = AdapterIdentity {
+        session_id: "d3b2-stack-session".into(),
+        bot_id: "d3b2-stack-api".into(),
+        run_id: "d3b2-stack-run".into(),
+        turn_id: "d3b2-stack-turn".into(),
+        generation: 1,
+    };
+    let checkpoint = Checkpoint::new(&json!({"messages":[{"role":"user","content":"fixture"}],"responses":[],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]})).unwrap();
+    api_bot::create(
+        &env.app.db,
+        &Fence {
+            session: &identity.session_id,
+            bot: &identity.bot_id,
+            run: &identity.run_id,
+            turn: &identity.turn_id,
+            generation: 1,
+            revision: 0,
+        },
+        &checkpoint,
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER d3b2_block_assistant BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'fixture'); END").execute(&env.app.db).await.unwrap();
+    let response = Response {
+        id: "fixture".into(),
+        model: "fixture".into(),
+        content: vec![json!({"type":"text","text":"fixture"})],
+        stop_reason: "end_turn".into(),
+        usage: json!({}),
+    };
+    let key = crate::lifecycle::api_bot_port::ApiTurnKey {
+        bot_id: identity.bot_id.clone(),
+        run_id: identity.run_id.clone(),
+        turn_id: identity.turn_id.clone(),
+    };
+    let producer = env.app.api_bot_runtime.spawn_startup_fixture_owner(
+        env.app.clone(),
+        key,
+        identity.clone(),
+        response,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while producer.retries.load(Ordering::SeqCst) < 3 {
+            producer.wake.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    producer.shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), producer.task)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("DROP TRIGGER d3b2_block_assistant")
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-stack-orphan',?,'d3b2-stack-orphan','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-orphan-run','d3b2-stack-orphan','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    let worker = app.clone();
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(startup_gate::barrier(&worker))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(app.api_startup_gate.ready());
+    let receipt: String = sqlx::query_scalar(
+        "SELECT state FROM api_bot_join_receipts WHERE turn_id='d3b2-stack-turn'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(receipt, "applied");
+    let turns: (String,i64) = sqlx::query_as("SELECT t.status,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant') FROM turns t WHERE t.id='d3b2-stack-turn'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(turns, ("completed".into(), 1));
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM runs WHERE id IN ('d3b2-stack-run','d3b2-orphan-run') ORDER BY id",
+    )
+    .fetch_all(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(states, vec!["exited", "exited"]);
+    assert!(app
+        .api_bot_runtime
+        .startup_cursor_for_test(&identity.bot_id)
+        .is_none());
+}
+
+#[tokio::test]
+async fn d3b2_closed_spawn_valid_owner_leaves_runtime_and_database_untouched() {
+    use crate::lifecycle::api_bot_port::{ApiBotError, ApiBotPort, ApiTurnKey};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct CountingTools(Arc<AtomicUsize>);
+    impl super::runner::Tools for CountingTools {
+        fn execute<'a>(
+            &'a self,
+            _: &'a super::protocol::ToolCall,
+            _: &'a tokio_util::sync::CancellationToken,
+        ) -> futures::future::BoxFuture<'a, Result<String, String>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err("fixture".into()) })
+        }
+    }
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-owner',?,'d3b2-owner','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-owner-run','d3b2-owner','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO conversations(id,bot_id,created_at) VALUES('d3b2-owner-conv','d3b2-owner',?)",
+    )
+    .bind(&now)
+    .execute(&env.app.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES('d3b2-owner-turn','d3b2-owner-conv','d3b2-owner-run','web','in_flight','ok','fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    let app = crate::testing::restart_app(&env).await;
+    app.cfg
+        .update(|cfg| {
+            cfg.claude_api.enabled = true;
+            cfg.claude_api.api_bot.enabled = true;
+            cfg.claude_api.api_bot.max_turn_cost_microusd = Some(1000);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let http_calls = calls.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        loop {
+            tokio::select! { biased;
+                accepted = listener.accept() => match accepted {
+                    Ok(_) => { http_calls.fetch_add(1, Ordering::SeqCst); }
+                    Err(_) => break,
+                },
+                _ = &mut stop_rx => break,
+            }
+        }
+    });
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    app.api_bot_runtime
+        .startup_set_fake_dependencies_at_for_test(
+            Arc::new(CountingTools(tool_calls.clone())),
+            &format!("http://{address}/v1/messages"),
+        );
+    let key = ApiTurnKey {
+        bot_id: "d3b2-owner".into(),
+        run_id: "d3b2-owner-run".into(),
+        turn_id: "d3b2-owner-turn".into(),
+    };
+    let before: (String,String,String,String,String,i64,i64,i64) = sqlx::query_as("SELECT b.kind,r.state,t.status,t.delivery,t.prompt_text,(SELECT COUNT(*) FROM api_bot_sessions),(SELECT COUNT(*) FROM api_bot_attempts),(SELECT COUNT(*) FROM api_bot_join_receipts) FROM bots b JOIN runs r ON r.bot_id=b.id JOIN turns t ON t.run_id=r.id WHERE r.id='d3b2-owner-run'").fetch_one(&app.db).await.unwrap();
+    let controls = app.api_bot_runtime.control_count_for_test();
+    assert_eq!(controls, 0);
+    assert!(!app
+        .api_bot_runtime
+        .startup_registry_for_test()
+        .is_active(&key.run_id));
+    assert!(app
+        .api_bot_runtime
+        .startup_cursor_for_test(&key.bot_id)
+        .is_none());
+    assert_eq!(app.api_turn_spawn(&key).await, Err(ApiBotError::Upstream));
+    let after: (String,String,String,String,String,i64,i64,i64) = sqlx::query_as("SELECT b.kind,r.state,t.status,t.delivery,t.prompt_text,(SELECT COUNT(*) FROM api_bot_sessions),(SELECT COUNT(*) FROM api_bot_attempts),(SELECT COUNT(*) FROM api_bot_join_receipts) FROM bots b JOIN runs r ON r.bot_id=b.id JOIN turns t ON t.run_id=r.id WHERE r.id='d3b2-owner-run'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(after, before);
+    assert_eq!(app.api_bot_runtime.control_count_for_test(), controls);
+    assert!(!app
+        .api_bot_runtime
+        .startup_registry_for_test()
+        .is_active(&key.run_id));
+    assert!(app
+        .api_bot_runtime
+        .startup_cursor_for_test(&key.bot_id)
+        .is_none());
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn d3b2_fixture_endpoint_accepts_only_literal_loopback_with_port() {
+    let env = crate::testing::env().await;
+    let app = crate::testing::restart_app(&env).await;
+    for endpoint in ["http://127.0.0.1:1234/x", "http://[::1]:1234/x"] {
+        app.api_bot_runtime
+            .startup_set_fake_dependencies_at_for_test(std::sync::Arc::new(NoTools), endpoint);
+    }
+    for endpoint in [
+        "http://localhost:1234/x",
+        "https://127.0.0.1:1234/x",
+        "http://127.1:1234/x",
+        "http://127.0.0.1/x",
+        "http://127.0.0.1:0/x",
+        "http://192.0.2.1:1234/x",
+        "http://user@127.0.0.1:1234/x",
+    ] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.api_bot_runtime
+                .startup_set_fake_dependencies_at_for_test(std::sync::Arc::new(NoTools), endpoint)
+        }));
+        assert!(result.is_err(), "endpoint must be rejected: {endpoint}");
+    }
+}
