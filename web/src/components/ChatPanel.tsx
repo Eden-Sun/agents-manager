@@ -3,7 +3,7 @@ import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId, useMemo } from 'react'
-import { CompactButton } from './CompactButton'
+import { ContextCard } from './CompactButton'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -1175,7 +1175,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
       <div className="statusline-bar" title={line || undefined}>
         {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
         {line ? <span className="statusline-text mono">{trimClippedTail(line)}</span> : null}
-        {kind === 'codex' ? <><CompactButton botId={botId} /><StatusCache botId={botId} status={null} /></> : null}
+        {kind === 'codex' ? <StatusCache botId={botId} status={null} contextAction /> : null}
       </div>
     )
   }
@@ -1209,14 +1209,12 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
       ) : null}
       {ctxPct !== null ? (
         <SlItem k="context" title={ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined}>
-          {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
-          <CompactButton botId={botId} />
+          {kind === 'codex' || kind === 'claude' ? <ContextCard botId={botId}>{pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</ContextCard> : <>{pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</>}
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : null}
-      {ctxPct === null && kind === 'codex' ? <CompactButton botId={botId} /> : null}
-      {status ? <StatusCache botId={botId} status={status} /> : null}
+      {status || (ctxPct === null && kind === 'codex') ? <StatusCache botId={botId} status={status} contextAction={ctxPct === null && kind === 'codex'} /> : null}
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
       {status?.version ? (
         <SlItem k={t('版本')} className="sl-version">
