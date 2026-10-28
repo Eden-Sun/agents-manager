@@ -7,6 +7,7 @@
 mod turn_boundary;
 
 use serde_json::Value;
+pub(super) use turn_boundary::NativeOutcome;
 
 pub(super) fn is_turn_prompt_candidate(line: &str, sent: &[String], since: &chrono::DateTime<chrono::FixedOffset>) -> bool {
     let is_match = crate::lifecycle::delivery::codex_user_text(line)
@@ -47,6 +48,13 @@ pub(super) fn is_task_complete_candidate(line: &str, since: &chrono::DateTime<ch
 /// 5. 該 `task_complete` 的完成時間必須晚於 `since_iso`；
 /// 6. 已以 native ID 證明的完成不因之後另一 native turn 開始而失效；沒有這項證據時仍拒絕後續 user。
 pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option<String> {
+    match codex_outcome_for_turn(log, sent, since_iso)? {
+        NativeOutcome::Reply(reply) => Some(reply),
+        NativeOutcome::Error { reply, .. } => reply,
+    }
+}
+
+fn codex_outcome_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option<NativeOutcome> {
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
     let lines: Vec<&str> = log.lines().collect();
 
@@ -103,7 +111,7 @@ pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Opti
                 return None;
             }
         }
-        return Some(r);
+        return Some(NativeOutcome::Reply(r));
     }
 
     None
@@ -137,7 +145,7 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
     let pos = lines.iter().rposition(|l| is_task_complete_candidate(l, &since))?;
 
     match turn_boundary::for_latest(&lines, pos, &since) {
-        turn_boundary::Proof::Native(reply) => return reply,
+        turn_boundary::Proof::Native(reply) => return reply.and_then(|r| match r { NativeOutcome::Reply(s) => Some(s), NativeOutcome::Error { reply, .. } => reply }),
         turn_boundary::Proof::Legacy => {}
     }
 
@@ -163,6 +171,19 @@ pub async fn codex_rollout_reply_for_in_flight(
     sent: &[String],
     since_iso: &str,
 ) -> Option<String> {
+    match codex_rollout_outcome_for_in_flight(app, bot, run, sent, since_iso).await? {
+        NativeOutcome::Reply(reply) => Some(reply),
+        NativeOutcome::Error { reply, .. } => reply,
+    }
+}
+
+pub(super) async fn codex_rollout_outcome_for_in_flight(
+    app: &impl super::lc_host::LcHost,
+    bot: &crate::db::Bot,
+    run: &crate::db::Run,
+    sent: &[String],
+    since_iso: &str,
+) -> Option<NativeOutcome> {
     if !crate::db::project(app.db(), &bot.project_id).await.ok().flatten().is_some_and(|p| p.host == crate::config::LOCAL_HOST) {
         return None;
     }
@@ -175,7 +196,7 @@ pub async fn codex_rollout_reply_for_in_flight(
     tokio::task::spawn_blocking(move || {
         let path = super::delivery::codex_session_log(&home, &session)?;
         let log = super::codex_rollout_scan::read_in_flight_suffix(&path, &bot_id, &run_id, &sent, &since)?;
-        codex_reply_for_turn(&log, &sent, &since)
+        codex_outcome_for_turn(&log, &sent, &since)
     })
     .await
     .ok()?
@@ -207,6 +228,24 @@ pub async fn codex_rollout_reply_for_hookless(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_task_complete_error_requires_matching_native_boundaries() {
+        // Shape: Codex 0.165 TurnCompleteEvent; message: upstream retry_after.rs.
+        let start = serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:00Z","payload":{"type":"task_started","turn_id":"native-a"}});
+        let prompt = serde_json::json!({"type":"response_item","timestamp":"2026-10-25T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test prompt"}]}});
+        let complete = serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:02Z","payload":{"type":"task_complete","turn_id":"native-a","last_agent_message":null,"error":{"message":"Access to this deployment ended.","codex_error_info":"model_not_found"}}});
+        let log = format!("{start}\n{prompt}\n{complete}");
+        assert_eq!(super::codex_outcome_for_turn(&log, &["test prompt".into()], "2026-10-25T00:59:59Z"), Some(super::NativeOutcome::Error { native_id: "native-a".into(), message: "Access to this deployment ended.".into(), reply: None }));
+        let mut wrong_complete = complete.clone();
+        wrong_complete["payload"]["turn_id"] = serde_json::json!("native-b");
+        let wrong = format!("{start}\n{prompt}\n{wrong_complete}");
+        assert_eq!(super::codex_outcome_for_turn(&wrong, &["test prompt".into()], "2026-10-25T00:59:59Z"), None);
+        let mut with_reply = complete.clone();
+        with_reply["payload"]["last_agent_message"] = serde_json::json!("Access to this deployment ended.");
+        let combined = format!("{start}\n{prompt}\n{with_reply}");
+        assert_eq!(super::codex_reply_for_turn(&combined, &["test prompt".into()], "2026-10-25T00:59:59Z"), Some("Access to this deployment ended.".into()));
+        assert_eq!(super::codex_outcome_for_turn(&combined, &["test prompt".into()], "2026-10-25T00:59:59Z"), Some(super::NativeOutcome::Error { native_id: "native-a".into(), message: "Access to this deployment ended.".into(), reply: Some("Access to this deployment ended.".into()) }));
+    }
     use super::*;
 
     fn user_msg(at: &str, text: &str) -> String {
