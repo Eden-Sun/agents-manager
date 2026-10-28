@@ -262,12 +262,15 @@ fn other_menu_owner(screen: &str) -> bool {
 }
 
 async fn eligible_menu_turn(app: &impl LcHost, run: &db::Run) -> anyhow::Result<Option<String>> {
-    if db::in_flight_turn(app.db(), &run.id).await?.is_some() { return Ok(None) }
-    let latest: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id,status,completed_at FROM turns WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
+    let latest: Option<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id,status,completed_at,delivery FROM turns WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(&run.id).fetch_optional(app.db()).await?;
-    let Some((turn, status, completed)) = latest else { return Ok(None) };
-    if !matches!(status.as_str(), "completed" | "completed_fallback" | "failed") { return Ok(None) }
+    let Some((turn, status, completed, delivery)) = latest else { return Ok(None) };
+    let in_flight = db::in_flight_turn(app.db(), &run.id).await?;
+    if status == "in_flight" {
+        return Ok(in_flight.filter(|t| t.id == turn && delivery == "ok").map(|_| turn));
+    }
+    if in_flight.is_some() || !matches!(status.as_str(), "completed" | "completed_fallback" | "failed") { return Ok(None) }
     if status == "completed_fallback" || completed.as_deref().is_some_and(|at| at >= db::iso_in(-1800).as_str()) {
         Ok(Some(turn))
     } else { Ok(None) }
@@ -328,6 +331,8 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
             if prior.is_some() { reset_menu_clear_count(&key); return Ok(false) }
             if !matches!(fresh.agent_status.as_str(), "idle" | "unknown") { return Ok(false) }
             let Some(turn) = eligible_menu_turn(app, &fresh).await? else { return Ok(false) };
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            super::super::race_point::hit("observed_menu_before_cas", &fresh.id).await;
             let mut tx = app.db().begin().await?;
             let applied = sqlx::query(
                 "UPDATE runs SET agent_status='blocked' WHERE id=? AND state='running' AND ended_at IS NULL
@@ -336,9 +341,10 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
                  AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
                             WHERE b.id=runs.bot_id AND b.kind='claude' AND b.deleted_at IS NULL AND p.host=?)
                  AND ?=(SELECT id FROM turns WHERE run_id=runs.id ORDER BY created_at DESC,id DESC LIMIT 1)
-                 AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.status='in_flight')
-                 AND EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id
-                            AND (t.status='completed_fallback' OR (t.status IN ('completed','failed') AND t.completed_at>=?)))")
+                 AND EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id AND (
+                       (t.status='in_flight' AND t.delivery='ok') OR
+                       (NOT EXISTS(SELECT 1 FROM turns live WHERE live.run_id=runs.id AND live.status='in_flight')
+                        AND (t.status='completed_fallback' OR (t.status IN ('completed','failed') AND t.completed_at>=?)))))")
                 .bind(&fresh.id).bind(&fresh.agent_status).bind(&fresh.agent_status_since)
                 .bind(&stamp.run.pane_id).bind(&stamp.run.herdr_session).bind(&stamp.run.native_session_id)
                 .bind(&stamp.run.terminal_id).bind(&stamp.host).bind(stamp.generation)
@@ -449,6 +455,105 @@ mod tests {
         f.env
             .herdr
             .set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
+    }
+
+    #[tokio::test]
+    async fn p63_synthetic_in_flight_menu_is_blocked() {
+        let f = fixture().await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked", "in-flight menu should be visible");
+    }
+
+    #[tokio::test]
+    async fn in_flight_menu_blocks_only_delivered_turn_and_clears_after_two_reads() {
+        let f = fixture().await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id=?").bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "idle");
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        let now = std::time::Instant::now();
+        crate::lifecycle::stuck_turns::observe_at(&f.run.id, "idle", now - std::time::Duration::from_secs(600));
+        let closed = crate::lifecycle::stuck_turns::sweep_at(&f.env.app, None, now, std::time::Duration::from_secs(300)).await;
+        assert!(!closed.contains(&f.turn));
+        assert!(db::in_flight_turn(f.env.app.db(), &f.run.id).await.unwrap().is_some());
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "__READ_ERROR__");
+        observe_menu(&f.env.app, &run).await.unwrap();
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "unknown");
+        assert_eq!(crate::lifecycle::queue::take_scheduled_flush_count(&f.run.bot_id), 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_menu_receipt_cannot_restore_a_new_turn() {
+        let f = fixture().await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        complete(&f).await;
+        let conversation = db::conversation_id(f.env.app.db(), &f.run.bot_id).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+            .bind(db::ulid()).bind(conversation).bind(&f.run.id).bind(db::iso_in(1))
+            .execute(f.env.app.db()).await.unwrap();
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        assert!(!menu_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn delayed_in_flight_menu_read_cannot_block_a_new_turn() {
+        let f = fixture().await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        let app = f.env.app.clone(); let turn = f.turn.clone(); let run_id = f.run.id.clone();
+        let bot_id = f.run.bot_id.clone();
+        crate::lifecycle::race_point::arm("observed_menu_before_cas", &f.run.id, move || async move {
+            sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+                .bind(db::now()).bind(&turn).execute(app.db()).await.unwrap();
+            let conversation = db::conversation_id(app.db(), &bot_id).await.unwrap();
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+                .bind(db::ulid()).bind(conversation).bind(&run_id).bind(db::iso_in(1))
+                .execute(app.db()).await.unwrap();
+        });
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "idle");
+        assert!(!menu_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn in_flight_menu_allows_normal_turn_completion() {
+        let f = fixture().await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "Choose an option\n❯ 1. First\n  2. Second\n");
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+        let hook = crate::hookrecv::HookBody {
+            bot_id: f.run.bot_id.clone(), provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "last_assistant_message": "Synthetic completed answer"}),
+            received_at: None, truncated: false, run_id: Some(f.run.id.clone()),
+        };
+        crate::hookrecv::process(&f.env.app, &hook).await.unwrap();
+        assert!(db::in_flight_turn(f.env.app.db(), &f.run.id).await.unwrap().is_none());
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), IDLE);
+        let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        observe_menu(&f.env.app, &run).await.unwrap();
+        assert_eq!(status(&f).await, "unknown");
     }
 
     #[tokio::test]
