@@ -634,3 +634,6 @@ async fn completed_tool_history_is_preserved_without_replaying_tools() {
         original
     );
 }
+
+#[path = "startup_abandonment_tests.rs"]
+mod startup_abandonment_tests;
