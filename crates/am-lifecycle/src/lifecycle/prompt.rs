@@ -4189,6 +4189,57 @@ mod restamp_tests {
         assert_eq!(created(&app, &message).await, "2026-09-30T13:38:55.000Z");
     }
 
+    #[tokio::test]
+    async fn d3b2_mixed_restamp_scan_preserves_api_and_missing_while_processing_cli() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let api = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-api").await;
+        let cli = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-cli").await;
+        let missing = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-missing").await;
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api.id).execute(&app.db).await.unwrap();
+        let mut rows = Vec::new();
+        for bot in [&api, &cli, &missing] {
+            let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+            let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "fixture").await;
+            sqlx::query("UPDATE turns SET restamp_pending=1,delivered_at='2026-09-30T13:38:55.000Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+            rows.push((turn,msg));
+        }
+        let mut conn = app.db.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&missing.id).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(db::bot(&app.db, &missing.id).await.unwrap().is_none());
+        assert!(restamp_queued_prompt(&app, &rows[1].0).await.is_ok());
+        // Restore CLI debt so the scan itself must process it.
+        sqlx::query("UPDATE messages SET created_at='2026-09-30T13:28:31.333Z' WHERE id=?").bind(&rows[1].1).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET restamp_pending=1 WHERE id=?").bind(&rows[1].0).execute(&app.db).await.unwrap();
+        assert!(restamp_queued_prompt(&app, &rows[2].0).await.is_err());
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&app.db).await.unwrap();
+        for (turn, msg) in &rows {
+            assert!(restamp_queued_prompt(&app, turn).await.is_err());
+            let marker: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap();
+            assert_eq!(marker, 1);
+            assert_eq!(created(&app,msg).await, "2026-09-30T13:28:31.333Z");
+        }
+        assert!(rearm_queued_prompt_restamps(&app).await.is_err());
+        for (turn,msg) in &rows {
+            let marker: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap();
+            assert_eq!(marker, 1);
+            assert_eq!(created(&app,msg).await, "2026-09-30T13:28:31.333Z");
+        }
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&app.db).await.unwrap();
+        assert!(rearm_queued_prompt_restamps(&app).await.is_err());
+        for index in [0,2] {
+            let marker: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&rows[index].0).fetch_one(&app.db).await.unwrap();
+            assert_eq!(marker,1);
+            assert_eq!(created(&app,&rows[index].1).await,"2026-09-30T13:28:31.333Z");
+        }
+        let marker: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&rows[1].0).fetch_one(&app.db).await.unwrap();
+        assert_eq!(marker,0);
+        assert_eq!(created(&app,&rows[1].1).await,"2026-09-30T13:38:55.000Z");
+    }
+
     /// 2026-09-30（cf-ox-2）：13:28 排進佇列、13:38:55 才送出的那一則，要排到送出的時間，回覆才接在它後面。
     #[tokio::test]
     async fn a_prompt_that_waited_in_the_queue_moves_to_when_it_was_sent() {

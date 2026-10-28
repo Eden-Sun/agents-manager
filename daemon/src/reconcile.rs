@@ -1771,6 +1771,14 @@ mod compat_tests {
         let env = tt::env().await;
         let api = a_bot(&env, "d3b2-api").await;
         let cli = a_bot(&env, "d3b2-cli").await;
+        let missing = a_bot(&env, "d3b2-missing-host").await;
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-missing-host-run',?,'running',?)").bind(&missing).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let mut conn = env.app.db.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&missing).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(!db::live_bots_on_host(&env.app.db, crate::config::LOCAL_HOST).await.unwrap().iter().any(|b| b.id == missing));
         sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api).execute(&env.app.db).await.unwrap();
         for (id, bot) in [("d3b2-api-run", &api), ("d3b2-cli-run", &cli)] {
             sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,herdr_session,started_at) VALUES(?,?,'running','idle','test',?)").bind(id).bind(bot).bind(db::now()).execute(&env.app.db).await.unwrap();
@@ -1780,6 +1788,8 @@ mod compat_tests {
         super::reconcile_host(&env.app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(run_of(&env.app, &api).await.unwrap().state, "running");
         assert_eq!(run_of(&env.app, &cli).await.unwrap().state, "exited");
+        let missing_state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id='d3b2-missing-host-run'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(missing_state, "running");
         sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&env.app.db).await.unwrap();
         assert!(super::reconcile_host(&env.app, crate::config::LOCAL_HOST).await.is_err());
         sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&env.app.db).await.unwrap();
@@ -1806,6 +1816,30 @@ mod compat_tests {
         recovery.rearm_in_flight(&env.app).await;
         let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,delivery FROM turns WHERE id IN ('d3b2-api-turn','d3b2-cli-turn') ORDER BY id").fetch_all(&env.app.db).await.unwrap();
         assert_eq!(rows, vec![("d3b2-api-turn".into(),"pending".into()), ("d3b2-cli-turn".into(),"unknown".into())]);
+    }
+
+    #[tokio::test]
+    async fn d3b2_rearm_missing_bot_keeps_debt_and_processes_cli() {
+        let env = tt::env().await;
+        let missing = a_bot(&env, "d3b2-missing").await;
+        let cli = a_bot(&env, "d3b2-cli").await;
+        for (run, turn, bot) in [("d3b2-missing-run", "d3b2-missing-turn", &missing), ("d3b2-valid-run", "d3b2-valid-turn", &cli)] {
+            let conv = db::conversation_id(&env.app.db, bot).await.unwrap();
+            sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)").bind(run).bind(bot).bind(db::now()).execute(&env.app.db).await.unwrap();
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(turn).bind(conv).bind(run).bind(db::now()).execute(&env.app.db).await.unwrap();
+        }
+        let mut conn = env.app.db.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&missing).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(db::bot(&env.app.db, &missing).await.unwrap().is_none());
+        let mut recovery = super::Recovery::new();
+        recovery.boot = "9999-01-01".into();
+        recovery.rearm_in_flight(&env.app).await;
+        assert!(recovery.runs.as_ref().unwrap().contains("d3b2-missing-run"));
+        let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,delivery FROM turns WHERE id IN ('d3b2-missing-turn','d3b2-valid-turn') ORDER BY id").fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(rows, vec![("d3b2-missing-turn".into(),"pending".into()),("d3b2-valid-turn".into(),"unknown".into())]);
     }
 
     #[tokio::test]

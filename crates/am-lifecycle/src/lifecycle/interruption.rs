@@ -1539,6 +1539,34 @@ mod tests {
         assert_eq!(status_of(&app, &b.turn).await, "in_flight");
     }
 
+    #[tokio::test]
+    async fn d3b2_missing_bot_interruption_debt_does_not_block_cli() {
+        let b = busy("d3b2-missing-owner").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE runs SET state='exited',ended_at=? WHERE id=?").bind(db::now()).bind(&b.run).execute(app.db()).await.unwrap();
+        let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,created_at) VALUES('d3b2-missing-unbound',?,'web','in_flight','pending',?)").bind(&conv).bind(db::now()).execute(app.db()).await.unwrap();
+        let cli = tt::claude_bot(&app, &b.env.project_id, "d3b2-valid-cli").await;
+        let run = tt::fake_run(&app, &cli.id).await;
+        sqlx::query("UPDATE runs SET state='exited',ended_at=? WHERE id=?").bind(db::now()).bind(&run).execute(app.db()).await.unwrap();
+        let cli_conv = db::conversation_id(app.db(), &cli.id).await.unwrap();
+        for (id, run) in [("d3b2-valid-ended", Some(&run)), ("d3b2-valid-unbound", None)] {
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(id).bind(&cli_conv).bind(run).bind(db::now()).execute(app.db()).await.unwrap();
+        }
+        let mut conn = app.db().acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM bots WHERE id=?").bind(&b.bot.id).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(db::bot(app.db(), &b.bot.id).await.unwrap().is_none());
+        assert!(!adopt_turns_of_ended_runs(&app, "9999-01-01").await);
+        assert!(!adopt_unbound_send_nows(&app, "9999-01-01").await);
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
+        assert_eq!(status_of(&app, "d3b2-missing-unbound").await, "in_flight");
+        assert_eq!(status_of(&app, "d3b2-valid-ended").await, "failed");
+        assert_eq!(status_of(&app, "d3b2-valid-unbound").await, "failed");
+    }
+
     /// #156：DB 一直寫不進去時，上一個 run 欠著的那一筆還沒補上、新的 run 又欠一筆——後來的不能蓋掉先前的，兩筆都要補上
     /// （舊 run 已經結束，那一筆不會再有 hook，也不歸閒置 watchdog 管，帳一丟就永遠在飛）。
     #[tokio::test]

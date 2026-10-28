@@ -541,7 +541,7 @@ impl ApiBotRuntime {
 
     #[cfg(test)]
     #[doc(hidden)]
-    fn control_count_for_test(&self) -> usize {
+    pub(super) fn control_count_for_test(&self) -> usize {
         self.inner
             .controls
             .lock()
@@ -1466,8 +1466,19 @@ impl ApiBotRuntime {
         &self,
         tools: Arc<dyn super::runner::Tools>,
     ) {
+        self.startup_set_fake_dependencies_at_for_test(tools, "http://127.0.0.1:1/no-call");
+    }
+    #[cfg(test)]
+    pub(super) fn startup_set_fake_dependencies_at_for_test(
+        &self,
+        tools: Arc<dyn super::runner::Tools>,
+        endpoint: &str,
+    ) {
+        let authority = endpoint.strip_prefix("http://").and_then(|s| s.split(['/', '?', '#']).next());
+        let port = authority.and_then(|a| a.strip_prefix("127.0.0.1:").or_else(|| a.strip_prefix("[::1]:")));
+        assert!(port.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n != 0)), "fixture endpoint must be literal loopback with a port");
         self.set_test_dependencies(ApiBotDependencies {
-            endpoint: "http://127.0.0.1:1/no-call".into(),
+            endpoint: endpoint.into(),
             key: "startup-test-only".into(),
             quote: Arc::new(super::quote::FailClosed),
             tools,

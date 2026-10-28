@@ -1368,6 +1368,11 @@ mod stop_commit_tests {
         app.set_startup_ready(false);
         crate::api_bot::startup_gate::barrier(&app).await;
         app.set_startup_ready(true);
+        sqlx::query("ALTER TABLE bots RENAME TO d3b2_hidden_bots").execute(&app.db).await.unwrap();
+        assert!(stop_bot(&app, "d3b2-api").await.is_err());
+        let failed_snapshot: (String,String,String,String,i64,String) = sqlx::query_as("SELECT r.state,t.status,j.state,a.state,a.reserved_microusd,q.status FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_join_receipts j ON j.turn_id=t.id JOIN api_bot_attempts a ON a.turn_id=t.id JOIN turns q ON q.id='d3b2-queued' WHERE r.id='d3b2-run'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(failed_snapshot,("running".into(),"in_flight".into(),"pending".into(),"reserved".into(),123,"queued".into()));
+        sqlx::query("ALTER TABLE d3b2_hidden_bots RENAME TO bots").execute(&app.db).await.unwrap();
         let result = stop_bot(&app, "d3b2-api").await;
         assert!(matches!(result, Err(LcError::Unavailable(ref value)) if value["error"] == "api_startup_quarantined"));
         let before: (String,String,String,String,i64) = sqlx::query_as("SELECT r.state,t.status,j.state,a.state,a.reserved_microusd FROM runs r JOIN turns t ON t.run_id=r.id JOIN api_bot_join_receipts j ON j.turn_id=t.id JOIN api_bot_attempts a ON a.turn_id=t.id WHERE r.id='d3b2-run'").fetch_one(&app.db).await.unwrap();
