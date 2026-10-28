@@ -52,13 +52,14 @@ const WAIT_LABEL: Record<string, string> = {
 }
 
 /** 未結束的 occurrence 要顯示什麼：依 pending 的等待原因、queued 綁定 turn 的真實狀態。 */
-export function occurrenceLine(o: { status: OccurrenceStatus; waiting_reason?: string | null; turn_status?: string | null }, liveTurnStatus?: string): string {
+export function occurrenceLine(o: { status: OccurrenceStatus; waiting_reason?: string | null; turn_status?: string | null; turn_awaits_start?: number | null; turn_start_error?: string | null }, liveTurnStatus?: string): string {
   if (o.status === 'pending') return o.waiting_reason ? tr(WAIT_LABEL[o.waiting_reason] ?? msg('等待中')) : t('等待送出')
   if (o.status === 'queued') {
     // 即時狀態（store 的 turn_updated）優先；沒有就用列表回來的快照。
     const st = liveTurnStatus ?? o.turn_status
     if (st === 'in_flight') return t('執行中')
     if (st === 'completed' || st === 'completed_fallback' || st === 'failed') return t('回合已結束，結果同步中…')
+    if (st === 'queued' && o.turn_awaits_start === 1 && o.turn_start_error) return t('Bot 啟動失敗（尚未送出）：{reason}', { reason: o.turn_start_error })
     // 沒有投影 start_error／quota_hold：不猜原因。額度、離線、啟動失敗的原因請到 Bot 對話看。
     return t('已排隊，等待 Bot 接收')
   }
