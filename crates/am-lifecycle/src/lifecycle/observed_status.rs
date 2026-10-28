@@ -542,6 +542,12 @@ mod tests {
         let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
         observe_menu(&f.env.app, &run).await.unwrap();
         assert_eq!(status(&f).await, "blocked");
+        f.env.herdr.live_pane(f.run.pane_id.as_deref().unwrap(), crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let queued = crate::lifecycle::prompt_from_api_queue_if_busy(
+            &f.env.app, &f.run.bot_id, "Synthetic next message", "p63-queue", &[],
+            crate::lifecycle::RelaySrc::trusted(None), false, None,
+        ).await.unwrap();
+        assert_eq!(queued.delivery, "queued");
         let hook = crate::hookrecv::HookBody {
             bot_id: f.run.bot_id.clone(), provider: "claude".into(),
             payload: json!({"hook_event_name": "Stop", "last_assistant_message": "Synthetic completed answer"}),
@@ -553,7 +559,26 @@ mod tests {
         let run = db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap();
         observe_menu(&f.env.app, &run).await.unwrap();
         observe_menu(&f.env.app, &run).await.unwrap();
-        assert_eq!(status(&f).await, "unknown");
+        assert_eq!(status(&f).await, "unknown", "the queued turn must not invalidate the menu owner");
+        // The daemon-test harness records queue wakeups rather than spawning them.
+        crate::lifecycle::queue::take_scheduled_flush_count(&f.run.bot_id);
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"agent": "claude", "pane_id": f.run.pane_id, "agent_status": "idle"}),
+        };
+        crate::runners::events::handle_status(&f.env.app, "local", "test", &ev).await;
+        assert_eq!(status(&f).await, "idle");
+        assert!(crate::lifecycle::queue::take_scheduled_flush_count(&f.run.bot_id) > 0,
+            "the observed idle transition must request a queue flush");
+        crate::lifecycle::queue::flush_queued_locked(&f.env.app, &f.run.bot_id).await.unwrap();
+        let delivered = tt::eventually!(db::in_flight_turn(f.env.app.db(), &f.run.id).await.unwrap()
+            .is_some_and(|turn| turn.id == queued.turn_id && turn.delivery == "ok"));
+        let row: (String, String, Option<String>, Option<String>, i64) = sqlx::query_as(
+            "SELECT status,delivery,run_id,start_error,flush_retries FROM turns WHERE id=?")
+            .bind(&queued.turn_id).fetch_one(f.env.app.db()).await.unwrap();
+        eprintln!("queue metadata: {:?}, prompt calls: {}, pane send calls: {}", row,
+            f.env.herdr.calls_to("agent.prompt").len(), f.env.herdr.calls_to("pane.send_text").len());
+        assert!(delivered, "the exact queued turn must be delivered after the observed idle event");
     }
 
     #[tokio::test]
