@@ -21,6 +21,8 @@ import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { CodexAsyncQuestion } from './CodexAsyncQuestion'
+import { parseAsyncScreen } from '../lib/codexAsyncQuestion'
+import { isCodexUpdateMenu } from '../lib/codexUpdatePrompt'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
 const READABLE_COLUMNS = 60
@@ -54,7 +56,13 @@ export function BlockedModal({
   const pendingAt = pendingAtOnScreen(pending, menu)
   /** 選單模式預設只留問題與選項；終端原文、整排按鍵與鍵盤直通收在這顆開關後面。 */
   const [extras, setExtras] = useState(false)
-  const showRaw = !menu || extras
+  const dedicatedOptions = bot?.kind === 'codex' && (
+    isCodexUpdateMenu(snap?.text) || (
+      pendingStatus === 'ready' && parseAsyncScreen(snap?.text)?.expanded === false &&
+      pending.some((question) => question.options.length > 0)
+    )
+  )
+  const showRaw = (!menu && !dedicatedOptions) || extras
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
   // 手機：寬 pane 的畫面原樣折行讀不了，預設重排（`lib/termReflow.ts`）；「原樣」留一顆開關對照。
@@ -201,6 +209,11 @@ export function BlockedModal({
         ) : null}
 
         <div className="blocked-modal-foot">
+          {!menu && dedicatedOptions ? (
+            <button type="button" className="mini-btn bc-more" aria-expanded={extras} onClick={() => setExtras((v) => !v)}>
+              {extras ? t('收起終端原文') : t('終端原文與更多按鍵')}
+            </button>
+          ) : null}
           {menu ? (
             <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
           ) : null}

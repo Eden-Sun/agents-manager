@@ -13,8 +13,11 @@ import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { CodexAsyncQuestion } from './CodexAsyncQuestion'
+import { parseAsyncScreen } from '../lib/codexAsyncQuestion'
+import { isCodexUpdateMenu } from '../lib/codexUpdatePrompt'
 import { linkifyTerm } from './termLinks'
 import { useTermWrap } from './termWrap'
+import { useStore } from '../store/store'
 import './blockedPanel.css'
 
 /**
@@ -31,6 +34,7 @@ export function BlockedPanel({
   onExpand?: () => void
 }) {
   const t = useT()
+  const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 40, paused })
   const terminal = useCodexTerminalFooter(botId, snap)
   const press = usePaneKeys(botId, refresh)
@@ -48,7 +52,13 @@ export function BlockedPanel({
     ? t('讀取終端失敗：{err}', { err })
     : (snap ? terminal.body : (paused ? t('（全畫面終端開著，這裡暫停更新）') : t('讀取中…')))
   /** 選單模式預設把這兩樣收起來；認不出選單時它們就是這塊面板本身。 */
-  const showTerm = !menu || extras
+  const dedicatedOptions = kind === 'codex' && (
+    isCodexUpdateMenu(snap?.text) || (
+      pendingStatus === 'ready' && parseAsyncScreen(snap?.text)?.expanded === false &&
+      pending.some((question) => question.options.length > 0)
+    )
+  )
+  const showTerm = (!menu && !dedicatedOptions) || extras
   const showKeys = !menu || extras
 
   return (
@@ -97,6 +107,11 @@ export function BlockedPanel({
           {showPending ? <PendingQuestionCard questions={pending} current={pendingAt?.at ?? -1} /> : null}
           <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
         </>
+      ) : null}
+      {!menu && dedicatedOptions ? (
+        <button type="button" className="mini-btn bc-more" aria-expanded={extras} onClick={() => setExtras((v) => !v)}>
+          {extras ? t('收起終端原文') : t('終端原文與更多按鍵')}
+        </button>
       ) : null}
       {showTerm ? (
         <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
