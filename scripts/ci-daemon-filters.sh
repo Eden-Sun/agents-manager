@@ -111,6 +111,8 @@ while IFS= read -r f; do
         daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
         daemon/src/remote_cargo_hosts.rs) printf 'remote_cargo::hosts::\n' ;;
         daemon/src/state_limit_hit_tests.rs) printf 'state::limit_hit_tests::\n' ;;
+        # This sibling file is mounted inside startup_recovery_tests with #[path].
+        daemon/src/api_bot/startup_abandonment_tests.rs) printf 'api_bot::startup_recovery_tests::startup_abandonment_tests::\n' ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
             | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs \
             | crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs | crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs)
