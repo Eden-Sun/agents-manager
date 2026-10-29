@@ -762,7 +762,9 @@ if [ ! -e "$F" ] && [ ! -L "$F" ]; then printf 'AM_GROK_MISSING\n'; exit 0; fi
     b=$(stat -L -c '%d %i %h %s' /dev/fd/3) || am_bad
   else
     a=$(stat -L -f '%d %i %l %z' "$F") || am_bad
-    b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || am_bad
+    # macOS 的 /dev/fd/3 是 devfs 節點，%d 回的是 devfs 而不是檔案所在的磁碟，跟 "$F" 永遠對不上；
+    # BSD stat 不帶路徑時讀 stdin 的 fd，就是開著的那個檔。
+    b=$(stat -L -f '%d %i %l %z' <&3) || am_bad
   fi
   [ "$a" = "$b" ] || am_bad
   set -- $b
@@ -1007,8 +1009,8 @@ mod remote_grok_diagnostic_tests {
                 Site::BsdPathStat,
             ),
             (
-                "b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || am_bad",
-                "b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || { printf 'AM_DIAG:G:BSD_FD_STAT\\n' >&9; am_bad; }",
+                "b=$(stat -L -f '%d %i %l %z' <&3) || am_bad",
+                "b=$(stat -L -f '%d %i %l %z' <&3) || { printf 'AM_DIAG:G:BSD_FD_STAT\\n' >&9; am_bad; }",
                 Site::BsdFdStat,
             ),
             (
