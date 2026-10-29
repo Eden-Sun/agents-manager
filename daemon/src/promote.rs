@@ -644,7 +644,11 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        retired = crate::child_retire::retire(&app, &id, "promoted", crate::child_retire::Mode::Explicit).await.map(|_| ()).map_err(|e| e.to_string());
+        retired = crate::child_retire::retire(&app, &id, "promoted", crate::child_retire::Mode::Explicit).await.map(|outcome| {
+            if matches!(outcome, crate::child_retire::Outcome::Retired) {
+                crate::api_bot::schedule_retention_after_delete(&app);
+            }
+        }).map_err(|e| e.to_string());
         if retired.is_ok() {
             break;
         }
@@ -864,6 +868,68 @@ mod tests {
 
     /// 完整一趟：session 從 pane 行程找到 → transcript 複製到專案路徑的 projects 目錄（來源還在）→ child 停掉 →
     /// user bot 進 config.toml、以 `--resume <session>` 啟動 → child 紀錄收掉。
+    // An independent API child is a sentinel for the global retention scan; the promoted child remains Claude CLI.
+    async fn r2_api_sentinel(r: &Rig) {
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,managed_by,created_at) VALUES('r2-sentinel',?,'r2-sentinel','claude-api','fake','child',?)").bind(&r.e.project_id).bind(&now).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r2-old-run','r2-sentinel','exited',?)").bind(&now).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('r2-old-conv','r2-sentinel',?)").bind(&now).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('r2-old-turn','r2-old-conv','r2-old-run','web','completed','ok',?)").bind(&now).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES('r2-sentinel-session','r2-sentinel','r2-old-run','r2-old-turn',1,1,'{}',?,?,?)").bind(&now).bind(&now).bind(db::iso_in(-60)).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES('r2-sentinel-session','r2-sentinel','r2-old-run','r2-old-turn',1,1,'completed','fixture','applied',?,?)").bind(&now).bind(&now).execute(&r.e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES('r2-old-message','r2-old-conv','r2-old-turn','assistant','fixture','transcript',?)").bind(&now).execute(&r.e.app.db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r2_promote_retired_only_enqueues_scan() {
+        for already_gone in [false, true] {
+            let r = rig(true).await;
+            r2_api_sentinel(&r).await;
+            if already_gone {
+                let pool = r.e.app.db.clone(); let child = r.child.clone();
+                lifecycle::race_point::arm("promote_after_start", &r.child, move || async move {
+                    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(child).execute(&pool).await.unwrap();
+                });
+            }
+            let out = promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
+            assert_eq!(out["promoted_from"]["session_id"], SID);
+            assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), std::fs::read_to_string(r.src()).unwrap());
+            assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["done"]);
+            r.e.app.background_tasks.close();
+            tokio::time::timeout(std::time::Duration::from_secs(10), r.e.app.background_tasks.wait()).await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE id='r2-sentinel-session'").fetch_one(&r.e.app.db).await.unwrap();
+            assert_eq!(count, i64::from(already_gone));
+        }
+    }
+
+    #[tokio::test]
+    async fn r2_promote_recovery_retired_only_enqueues_scan() {
+        use std::os::unix::fs::MetadataExt as _;
+        for already_gone in [false, true] {
+            let r = rig(true).await;
+            r2_api_sentinel(&r).await;
+            let staged = stage_transcript(&r.src(), r.dest().parent().unwrap(), SID).unwrap();
+            let source = std::fs::metadata(r.src()).unwrap(); let dest = std::fs::metadata(r.dest()).unwrap();
+            sqlx::query("UPDATE runs SET state='stopped',native_session_id=?,transcript_path=? WHERE bot_id=?").bind(SID).bind(r.src().to_string_lossy().to_string()).bind(&r.child).execute(&r.e.app.db).await.unwrap();
+            let new_id = db::ulid();
+            let payload = json!({"new_id":new_id,"name":"kid-recovered","project_id":r.e.project_id,"session_id":SID,"source":r.src().to_string_lossy(),"source_identity":{"dev":source.dev(),"ino":source.ino()},"staged_identity":{"dev":dest.dev(),"ino":dest.ino()},"dest":staged.dest.to_string_lossy(),"created":staged.created.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>()});
+            let intent = crate::delete_intents::begin(&r.e.app, "promote", &r.child, LOCAL_HOST, &payload).await.unwrap();
+            if already_gone {
+                let pool = r.e.app.db.clone(); let child = r.child.clone();
+                lifecycle::race_point::arm("promote_seed", &r.child, move || async move {
+                    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(child).execute(&pool).await.unwrap();
+                });
+            }
+            assert!(matches!(crate::promote_intents::drive_once(&r.e.app, &intent).await, crate::runners::restart_intents::Outcome::Finished));
+            assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["done"]);
+            assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), std::fs::read_to_string(r.src()).unwrap());
+            r.e.app.background_tasks.close();
+            tokio::time::timeout(std::time::Duration::from_secs(10), r.e.app.background_tasks.wait()).await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE id='r2-sentinel-session'").fetch_one(&r.e.app.db).await.unwrap();
+            assert_eq!(count, i64::from(already_gone));
+        }
+    }
+
     #[tokio::test]
     async fn a_child_becomes_a_top_level_bot_on_the_same_session() {
         let r = rig(true).await;

@@ -34,3 +34,8 @@ mod startup_recovery_tests;
 pub(crate) mod startup_gate;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod startup_gate_tests;
+
+mod retention;
+pub(crate) use retention::{spawn_retention_ticker, schedule_retention_after_delete};
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod retention_tests;

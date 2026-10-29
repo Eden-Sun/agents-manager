@@ -186,6 +186,7 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    crate::api_bot::schedule_retention_after_delete(app);
     // 已定案：輸入框草稿跟著 bot 走，定案之後死掉時補上清草稿（#1063；清除冪等，失敗只記 log）。
     let draft_keys: Vec<String> = std::iter::once(&parent).chain(children.iter().map(|(id, _)| id)).map(|b| format!("bot:{b}")).collect();
     crate::drafts::clear_keys(app, &draft_keys).await;
@@ -231,6 +232,7 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    crate::api_bot::schedule_retention_after_delete(app);
     // 已定案：輸入框草稿跟著專案與它的 bot 走（#1063）。
     let draft_keys: Vec<String> = std::iter::once(format!("group:{project_id}")).chain(bots.iter().map(|(id, _)| format!("bot:{id}"))).collect();
     crate::drafts::clear_keys(app, &draft_keys).await;
