@@ -454,6 +454,18 @@ pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &(String,String
     Ok(changed == 1)
 }
 
+/// Delete one exact explicitly retired session after the caller proved settled receipts in this transaction.
+#[doc(hidden)]
+pub async fn explicit_retire_delete_on(conn: &mut SqliteConnection, c: &(String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>), at: &str) -> Result<bool> {
+    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS NULL AND ? IS NULL AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))")
+        .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).bind(&c.7).fetch_one(&mut *conn).await?;
+    if !valid { return Ok(false); }
+    sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE session_id=? AND state='reserved'").bind(at).bind(&c.1).execute(&mut *conn).await?;
+    let changed = sqlx::query("DELETE FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id IS ? AND owner_turn_id IS ? AND generation=? AND revision=? AND expires_at=? AND retired_at IS NULL")
+        .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).execute(&mut *conn).await?.rows_affected();
+    Ok(changed == 1)
+}
+
 /// Explicit handover only after a settled checkpoint, never a recovery replay.
 pub async fn rebind(
     pool: &SqlitePool,

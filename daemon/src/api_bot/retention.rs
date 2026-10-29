@@ -2,12 +2,12 @@
 use std::{future::Future, sync::Arc, time::Duration};
 use am_base::db::api_bot::{retention_candidates, retention_delete_on};
 
-type RetentionCandidate = (String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>);
+pub(super) type RetentionCandidate = (String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>);
 use crate::lifecycle::api_bot_port::ApiRunKey;
 
-struct RetentionDeletable;
+pub(super) struct RetentionDeletable;
 
-fn prove<'a>(conn: &'a mut sqlx::SqliteConnection, c: &'a RetentionCandidate) -> impl Future<Output = Result<RetentionDeletable, &'static str>> + Send + 'a {
+pub(super) fn prove<'a>(conn: &'a mut sqlx::SqliteConnection, c: &'a RetentionCandidate) -> impl Future<Output = Result<RetentionDeletable, &'static str>> + Send + 'a {
     Box::pin(prove_body(conn, c))
 }
 
