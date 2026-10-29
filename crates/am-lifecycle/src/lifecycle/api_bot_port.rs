@@ -51,8 +51,15 @@ pub enum ApiBotError {
     Upstream,
 }
 
+pub enum ApiBeginStopMode { User { withdraw: bool }, Idle }
+pub enum ApiBeginStopResult { Applied { withdrawn: Vec<(String, super::queue::Revoked)> }, Lost }
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApiBeginStopError { Storage, IdentityMismatch, Busy, Ambiguous }
+
 pub trait ApiBotPort: Send + Sync {
     fn api_recovery_ready(&self) -> bool { false }
+    fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode)
+        -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send;
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,

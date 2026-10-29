@@ -6,7 +6,7 @@
 //! the test-only seam and exercise the same runtime core compiled into production.
 
 use crate::lifecycle::api_bot_port::{
-    ApiBotError, ApiRunCompletion, ApiRunKey, ApiRunStopEvidence, ApiRunStopProof, ApiTurnKey,
+    ApiBeginStopError, ApiBeginStopMode, ApiBeginStopResult, ApiBotError, ApiRunCompletion, ApiRunKey, ApiRunStopEvidence, ApiRunStopProof, ApiTurnKey,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -73,6 +73,7 @@ struct ControlRecord {
     identity: Arc<()>,
     cancel: CancellationToken,
     joined: watch::Receiver<JoinState>,
+    finalized: Option<Arc<super::same_run::Finalized>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -251,19 +252,39 @@ impl ApiBotRuntime {
         let _admission = self.spawn_gate(key).await;
         cleanup_terminal_controls(&app.db, &self.inner).await;
         let full = FullKey::from(key);
-        let bot_run_already_admitted = {
-            self.inner
-                .controls
-                .lock()
-                .expect("control mutex poisoned")
-                .keys()
-                .any(|active| active.bot_id == full.bot_id && active.run_id == full.run_id)
+        let prior = {
+            let controls = self.inner.controls.lock().expect("control mutex poisoned");
+            let mut records = controls.iter().filter(|(k, _)| k.bot_id == full.bot_id && k.run_id == full.run_id);
+            match (records.next(), records.next()) {
+                (None, _) => None,
+                (Some((old, record)), None) => {
+                    if !matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed))) {
+                        tracing::info!(reason = "api_same_run_prior_not_completed", "API bot same-run admission remains busy");
+                        return Err(ApiBotError::Busy);
+                    }
+                    if old.turn_id == full.turn_id { return Err(ApiBotError::Busy); }
+                    let Some(proof) = record.finalized.clone() else { return Err(ApiBotError::Busy); };
+                    Some((old.clone(), record.identity.clone(), proof))
+                }
+                _ => return Err(ApiBotError::Busy),
+            }
         };
-        if bot_run_already_admitted {
-            return Err(ApiBotError::Busy);
+        if let Some((old, _, proof)) = &prior {
+            if proof.identity.bot_id != old.bot_id || proof.identity.run_id != old.run_id || proof.identity.turn_id != old.turn_id || self.inner.registry.is_active(&full.run_id) {
+                return Err(ApiBotError::Busy);
+            }
+            if !super::same_run::verify(&app.shared(), proof).await { return Err(ApiBotError::Busy); }
+            let sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+            if !sessions.get(&full.bot_id).is_some_and(|cursor| cursor.identity == proof.identity && cursor.revision == proof.revision) { return Err(ApiBotError::Busy); }
         }
 
         let (bot, project, run, prompt) = validated_turn(app, key).await?;
+        if let Some((_, _, proof)) = &prior {
+            let same_conversation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns old JOIN turns next ON next.conversation_id=old.conversation_id WHERE old.id=? AND old.run_id=? AND next.id=? AND next.run_id=? AND next.status='in_flight' AND next.delivery='ok')")
+                .bind(&proof.identity.turn_id).bind(&key.run_id).bind(&key.turn_id).bind(&key.run_id)
+                .fetch_one(&app.db).await.map_err(|_| ApiBotError::Busy)?;
+            if !same_conversation { return Err(ApiBotError::Busy); }
+        }
         let cfg = app.cfg.get().await;
         let limits = cfg
             .claude_api
@@ -307,7 +328,7 @@ impl ApiBotRuntime {
                 Some(dependencies.tools.clone()),
             )
             .await
-            .map_err(|_| ApiBotError::Unconfirmed)?;
+            .map_err(|_| if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed })?;
             (Arc::new(adapter), state)
         } else {
             let adapter = super::adapter::ApiBotAdapter::new(
@@ -326,7 +347,7 @@ impl ApiBotRuntime {
         };
 
         if state.api_pending || state.tool_pending.is_some() {
-            return Err(ApiBotError::Unconfirmed);
+            return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
         }
         state.messages.push(super::protocol::Message {
             role: "user".into(),
@@ -339,7 +360,7 @@ impl ApiBotRuntime {
         adapter
             .save(&state)
             .await
-            .map_err(|_| ApiBotError::Upstream)?;
+            .map_err(|_| if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Upstream })?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("api_run_spawn_after_owner_writes", &key.run_id).await;
 
@@ -356,6 +377,14 @@ impl ApiBotRuntime {
         let (final_text_tx, final_text_rx) = oneshot::channel();
         #[cfg(all(test, feature = "daemon-test-harness"))]
         let runner_run_id = key.run_id.clone();
+        #[cfg(all(test, feature = "daemon-test-harness"))]
+        crate::lifecycle::race_point::hit("api_same_run_before_control_cas", &key.run_id).await;
+        let (run_ticket, cancel) = {
+        let mut controls = self.inner.controls.lock().expect("control mutex poisoned");
+        if let Some((old, tag, proof)) = &prior {
+            let matches = controls.get(old).is_some_and(|r| Arc::ptr_eq(&r.identity, tag) && r.finalized.as_ref().is_some_and(|p| Arc::ptr_eq(p, proof)));
+            if !matches { return Err(ApiBotError::Busy); }
+        }
         let run_ticket = self
             .inner
             .registry
@@ -388,18 +417,18 @@ impl ApiBotRuntime {
             .map_err(|_| ApiBotError::Busy)?;
 
         let cancel = run_ticket.cancellation_token();
-        self.inner
-            .controls
-            .lock()
-            .expect("control mutex poisoned")
-            .insert(
-                full,
+        if let Some((old, _, _)) = &prior { controls.remove(old); }
+        controls.insert(
+                full.clone(),
                 ControlRecord {
-                    identity: identity_tag,
+                    identity: identity_tag.clone(),
                     cancel: cancel.clone(),
                     joined: joined_rx,
+                    finalized: None,
                 },
             );
+        (run_ticket, cancel)
+        };
 
         let shutdown = app.shutdown.clone();
         let session_commit = SessionCommit {
@@ -432,8 +461,11 @@ impl ApiBotRuntime {
         let shutdown_timeout = dependencies
             .shutdown_join_timeout
             .unwrap_or(API_BOT_SHUTDOWN_JOIN_TIMEOUT);
+        let owner_inner = self.inner.clone();
+        let owner_key = full.clone();
+        let supervisor_shutdown = shutdown.clone();
         app.background_tasks.spawn(Box::pin(async move {
-            own_ticket(
+            let task = tokio::spawn(Box::pin(own_ticket_inner(
                 run_ticket,
                 cancel,
                 shutdown,
@@ -441,8 +473,17 @@ impl ApiBotRuntime {
                 shutdown_timeout,
                 Some(completion_owner),
                 Some(session_commit),
-            )
-            .await;
+            )));
+            if let Ok(Some(proof)) = task.await {
+                #[cfg(all(test, feature = "daemon-test-harness"))]
+                crate::lifecycle::race_point::hit("api_same_run_proof_before_cas", &owner_key.run_id).await;
+                let mut controls = owner_inner.controls.lock().expect("control mutex poisoned");
+                if let Some(record) = controls.get_mut(&owner_key) {
+                    if !supervisor_shutdown.is_cancelled() && Arc::ptr_eq(&record.identity, &identity_tag) && matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed))) {
+                        record.finalized = Some(Arc::new(proof));
+                    }
+                }
+            }
         }));
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("api_run_spawn_after_registry", &key.run_id).await;
@@ -511,9 +552,16 @@ impl ApiBotRuntime {
         key: &ApiTurnKey,
     ) -> Result<ApiRunCompletion, ApiBotError> {
         let full = FullKey::from(key);
+        let admission = self.spawn_gate(key).await;
         let (cancel, mut joined) = {
             let controls = self.inner.controls.lock().expect("control mutex poisoned");
-            let record = controls.get(&full).ok_or(ApiBotError::Unconfirmed)?;
+            let Some(record) = controls.get(&full) else {
+                return Err(if controls.keys().any(|other| other.bot_id == full.bot_id && other.run_id == full.run_id) {
+                    ApiBotError::Busy
+                } else {
+                    ApiBotError::Unconfirmed
+                });
+            };
             (record.cancel.clone(), record.joined.clone())
         };
         let stopping: bool = sqlx::query_scalar(
@@ -528,6 +576,7 @@ impl ApiBotRuntime {
         if !stopping {
             return Err(ApiBotError::IdentityMismatch);
         }
+        drop(admission);
         cancel.cancel();
         let receipt = wait_join(&mut joined).await?;
         match receipt {
@@ -558,6 +607,19 @@ impl Default for ApiBotRuntime {
 
 impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     fn api_recovery_ready(&self) -> bool { self.api_startup_gate.ready() }
+    fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode) -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send {
+        async move {
+            let guard = tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => return Err(ApiBeginStopError::Busy),
+                guard = self.api_bot_runtime.admission_gate(key) => guard,
+            };
+            if self.shutdown.is_cancelled() { return Err(ApiBeginStopError::Busy); }
+            let result = crate::lifecycle::stop::api_begin_stop_transaction(&self.db, key, mode, &self.shutdown).await;
+            drop(guard);
+            result
+        }
+    }
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,
@@ -620,7 +682,7 @@ enum CompletionStoreFault {
     AmbiguousAfterCommit,
 }
 
-async fn own_ticket(
+async fn own_ticket_inner(
     ticket: RunTicket,
     cancel: CancellationToken,
     shutdown: CancellationToken,
@@ -628,7 +690,7 @@ async fn own_ticket(
     shutdown_timeout: Duration,
     completion_owner: Option<CompletionOwner>,
     session_commit: Option<SessionCommit>,
-) {
+) -> Option<super::same_run::Finalized> {
     let join = ticket.join();
     tokio::pin!(join);
     let state = tokio::select! {
@@ -657,11 +719,17 @@ async fn own_ticket(
             let final_text = if joined == Completion::Completed {
                 (&mut owner.final_text).await.ok()
             } else { None };
-            if let Some(committed) = settle_joined_completion(
+            if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
             ).await {
-                // Settlement published the exact cursor under its short admission guard.
+                let revision = committed.session_revision;
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
+                if joined == Completion::Completed && payload.outcome() == super::receipt::JoinOutcome::Completed && published {
+                    #[cfg(all(test, feature = "daemon-test-harness"))]
+                    crate::lifecycle::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
+                    if shutdown.is_cancelled() { return None; }
+                    return Some(super::same_run::Finalized { identity: owner.identity, revision, payload });
+                }
             }
         }
         (None, Some(_)) => {
@@ -688,6 +756,12 @@ async fn own_ticket(
         }
         _ => {}
     }
+    None
+}
+
+#[cfg(test)]
+async fn own_ticket(ticket: RunTicket, cancel: CancellationToken, shutdown: CancellationToken, result_tx: watch::Sender<JoinState>, shutdown_timeout: Duration, completion_owner: Option<CompletionOwner>, session_commit: Option<SessionCommit>) {
+    let _ = own_ticket_inner(ticket, cancel, shutdown, result_tx, shutdown_timeout, completion_owner, session_commit).await;
 }
 
 async fn admission_gate_for(
@@ -762,7 +836,7 @@ fn settle_joined_completion<'a>(
     final_text: Option<super::completion::FinalText>,
     shutdown: &'a CancellationToken,
     session_commit: Option<&'a SessionCommit>,
-) -> impl Future<Output = Option<super::completion::Committed>> + Send + 'a {
+) -> impl Future<Output = Option<(super::completion::Committed, super::receipt::Payload, bool)>> + Send + 'a {
     Box::pin(settle_joined_completion_body(
         owner,
         joined,
@@ -778,7 +852,7 @@ async fn settle_joined_completion_body(
     final_text: Option<super::completion::FinalText>,
     shutdown: &CancellationToken,
     session_commit: Option<&SessionCommit>,
-) -> Option<super::completion::Committed> {
+) -> Option<(super::completion::Committed, super::receipt::Payload, bool)> {
     let payload = match (joined, final_text.as_ref()) {
         (Completion::Completed, Some(text)) => text.receipt_payload(),
         _ => super::receipt::Payload::ended(super::receipt::JoinOutcome::Failed),
@@ -910,14 +984,12 @@ async fn settle_joined_completion_body(
                 log_completion_recovery(&owner.key, CompletionRecoveryReason::Shutdown, failures);
                 return None;
             }
-            if let Some(commit) = session_commit {
-                publish_session_cursor(commit.clone(), committed.session_revision);
-            }
+            let published = session_commit.is_some_and(|commit| publish_session_cursor(commit.clone(), committed.session_revision));
             drop(admission);
             if failures != 0 {
                 log_completion_recovery(&owner.key, CompletionRecoveryReason::Recovered, failures);
             }
-            return Some(committed);
+            return Some((committed, payload, published));
         }
         drop(admission); // All retry waits below are outside admission/bot/session locks.
         failures = failures.saturating_add(1);
@@ -1520,6 +1592,7 @@ impl ApiBotRuntime {
                 identity: Arc::new(()),
                 cancel: cancel.clone(),
                 joined: joined_rx,
+                finalized: None,
             },
         );
         let shutdown = CancellationToken::new();
@@ -1748,6 +1821,14 @@ mod tests {
             _: &'a crate::api_bot::protocol::ToolCall,
             _: &'a CancellationToken,
         ) -> futures::future::BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unexpected tool call".into()) })
+        }
+    }
+
+    struct CountingTools(Arc<AtomicUsize>);
+    impl super::super::runner::Tools for CountingTools {
+        fn execute<'a>(&'a self, _: &'a crate::api_bot::protocol::ToolCall, _: &'a CancellationToken) -> futures::future::BoxFuture<'a, Result<String, String>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Err("unexpected tool call".into()) })
         }
     }
@@ -2310,6 +2391,375 @@ mod tests {
             (0, 0),
             "FailClosed rejects before reserve and checkpoint creation"
         );
+        server_shutdown.cancel();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_missing_control_distinguishes_handover() {
+        let env = crate::testing::env().await;
+        enable_fake_runtime(&env.app, "http://127.0.0.1:1".into(), DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture").await;
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: second };
+        let old = FullKey { bot_id: bot, run_id: run, turn_id: first };
+        let (_tx, joined) = watch::channel(JoinState::Joined(Ok(Completion::Completed)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().insert(old.clone(), ControlRecord { identity: Arc::new(()), cancel: CancellationToken::new(), joined, finalized: None });
+        assert_eq!(env.app.api_run_cancel_and_join(&key).await, Err(ApiBotError::Busy));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().remove(&old);
+        assert_eq!(env.app.api_run_cancel_and_join(&key).await, Err(ApiBotError::Unconfirmed));
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_shutdown_while_waiting_for_gate_is_busy() {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        let key = ApiRunKey { bot_id: bot, run_id: run.clone() };
+        let guard = env.app.api_bot_runtime.admission_gate(&key).await;
+        let mut pending = Box::pin(env.app.api_run_begin_stop(&key, ApiBeginStopMode::User { withdraw: true }));
+        assert!(futures::poll!(pending.as_mut()).is_pending(), "stop must actually wait on admission");
+        env.app.shutdown.cancel();
+        let result = tokio::time::timeout(DEADLOCK_TIMEOUT, pending).await.unwrap();
+        assert!(matches!(result, Err(ApiBeginStopError::Busy)));
+        drop(guard);
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "running");
+    }
+
+    #[tokio::test]
+    async fn same_run_shutdown_prevents_finalized_proof_on_both_owner_boundaries() {
+        for point in ["api_same_run_owner_before_exit", "api_same_run_proof_before_cas"] {
+            let env = crate::testing::env().await;
+            let (endpoint, server_shutdown, server_task) = fake_server(Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new())).await;
+            enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+            let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+            insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+            let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+            let entered_hook = entered.clone(); let release_hook = release.clone();
+            crate::lifecycle::race_point::arm(point, &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+            let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
+            env.app.api_turn_spawn(&key).await.unwrap();
+            tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
+            env.app.shutdown.cancel();
+            env.app.background_tasks.close();
+            release.notify_one();
+            tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+            assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.finalized.is_none()));
+            server_shutdown.cancel(); server_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn same_run_owner_panic_never_publishes_finalized_proof() {
+        let env = crate::testing::env().await;
+        let (endpoint, shutdown, server) = fake_server(Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let reached_hook = reached.clone(); let release_hook = release.clone();
+        crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; panic!("synthetic owner failure"); });
+        let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
+        env.app.background_tasks.close(); release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.finalized.is_none()));
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[test]
+    fn same_run_success_and_blocked_owner_fit_one_mib_stack() {
+        std::thread::Builder::new().stack_size(1024 * 1024).spawn(|| {
+            same_run_second_turn_continues_after_joined_completion();
+            same_run_joined_owner_must_exit_before_next_admission();
+            completion_backoff_releases_all_locks_and_stop_wins_without_resurrection();
+        }).unwrap().join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_noncompleted_prior_is_busy_without_dispatch() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        let next = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn };
+        let old = FullKey { bot_id: bot, run_id: run, turn_id: crate::db::ulid() };
+        for state in [JoinState::Joined(Ok(Completion::Failed)), JoinState::Joined(Ok(Completion::Cancelled)), JoinState::Joined(Err(JoinError::Unconfirmed)), JoinState::Pending] {
+            let (_tx, joined) = watch::channel(state);
+            env.app.api_bot_runtime.inner.controls.lock().unwrap().insert(old.clone(), ControlRecord { identity: Arc::new(()), cancel: CancellationToken::new(), joined, finalized: None });
+            assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions").fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(sessions, 0);
+        }
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_control_aba_after_rebind_stays_busy_without_replay() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture first").await;
+        let old = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first };
+        env.app.api_turn_spawn(&old).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { while !env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&old)).is_some_and(|r| r.finalized.is_some()) { tokio::task::yield_now().await; } }).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let entered_hook = entered.clone(); let release_hook = release.clone();
+        crate::lifecycle::race_point::arm("api_same_run_before_control_cas", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+        let next = ApiTurnKey { bot_id: bot, run_id: run, turn_id: second };
+        let task_app = env.app.clone(); let task_key = clone_turn_key(&next);
+        let task = tokio::spawn(async move { task_app.api_turn_spawn(&task_key).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().get_mut(&FullKey::from(&old)).unwrap().identity = Arc::new(());
+        release.notify_one();
+        assert_eq!(tokio::time::timeout(DEADLOCK_TIMEOUT, task).await.unwrap().unwrap(), Err(ApiBotError::Busy));
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&FullKey::from(&old)));
+        let owner: String = sqlx::query_scalar("SELECT owner_turn_id FROM api_bot_sessions WHERE bot_id=?").bind(&next.bot_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(owner, next.turn_id);
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_cas_wins_after_first_finalized_before_second_spawn() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let tool_calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let mut deps = env.app.api_bot_runtime.test_dependencies().unwrap();
+        deps.tools = Arc::new(CountingTools(tool_calls.clone())); env.app.api_bot_runtime.set_test_dependencies(deps);
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture first").await;
+        let old = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first.clone() };
+        env.app.api_turn_spawn(&old).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { while !env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&old)).is_some_and(|r| r.finalized.is_some()) { tokio::task::yield_now().await; } }).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let tag = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&old)).unwrap().identity.clone();
+        let cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot).cloned().unwrap();
+        let run_key = ApiRunKey { bot_id: bot.clone(), run_id: run.clone() };
+        assert!(matches!(env.app.api_run_begin_stop(&run_key, ApiBeginStopMode::User { withdraw: false }).await, Ok(ApiBeginStopResult::Applied { .. })));
+        let next = ApiTurnKey { bot_id: bot.clone(), run_id: run, turn_id: second };
+        assert!(env.app.api_turn_spawn(&next).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1); assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        let controls = env.app.api_bot_runtime.inner.controls.lock().unwrap();
+        assert!(controls.get(&FullKey::from(&old)).is_some_and(|r| Arc::ptr_eq(&r.identity, &tag) && r.finalized.is_some()));
+        assert!(!controls.contains_key(&FullKey::from(&next))); drop(controls);
+        assert!(env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot) == Some(&cursor));
+        let owner: String = sqlx::query_scalar("SELECT owner_turn_id FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(owner, first);
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_cas_first_blocks_spawn_and_http() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        let run_key = ApiRunKey { bot_id: bot.clone(), run_id: run.clone() };
+        assert!(matches!(env.app.api_run_begin_stop(&run_key, ApiBeginStopMode::User { withdraw: false }).await, Ok(ApiBeginStopResult::Applied { .. })));
+        let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
+        assert!(env.app.api_turn_spawn(&key).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE bot_id=?").bind(&key.bot_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(sessions, 0);
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_waits_for_rebind_handover_before_cas() {
+        for point in ["api_run_spawn_after_owner_writes", "api_same_run_before_control_cas", "api_run_spawn_after_registry"] {
+            same_run_stop_handover_case(point).await;
+        }
+    }
+
+    async fn same_run_stop_handover_case(point: &'static str) {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture first").await;
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { while !env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.finalized.is_some()) { tokio::task::yield_now().await; } }).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let reached_hook = reached.clone(); let release_hook = release.clone();
+        crate::lifecycle::race_point::arm(point, &run, move || async move { reached_hook.notify_one(); release_hook.notified().await; });
+        let next = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: second };
+        let runner_reached = Arc::new(Notify::new()); let runner_release = Arc::new(Notify::new());
+        let runner_reached_hook = runner_reached.clone(); let runner_release_hook = runner_release.clone();
+        crate::lifecycle::race_point::arm("api_run_runner_before_entry", &run, move || async move { runner_reached_hook.notify_one(); runner_release_hook.notified().await; });
+        let spawn_app = env.app.clone();
+        let next_spawn = clone_turn_key(&next);
+        let spawn = tokio::spawn(async move { spawn_app.api_turn_spawn(&next_spawn).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
+        let old_retained = env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&FullKey::from(&key));
+        assert_eq!(old_retained, point != "api_run_spawn_after_registry");
+        let stop_key = ApiRunKey { bot_id: bot, run_id: run.clone() };
+        let mut stop = Box::pin(env.app.api_run_begin_stop(&stop_key, ApiBeginStopMode::User { withdraw: false }));
+        assert!(futures::poll!(stop.as_mut()).is_pending());
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "running");
+        release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, spawn).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, runner_reached.notified()).await.unwrap();
+        assert!(matches!(tokio::time::timeout(DEADLOCK_TIMEOUT, stop).await.unwrap(), Ok(ApiBeginStopResult::Applied { .. })));
+        let cancellation = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&next)).unwrap().cancel.clone();
+        let cancel_app = env.app.clone(); let cancel_key = clone_turn_key(&next);
+        let cancel = tokio::spawn(async move { cancel_app.api_run_cancel_and_join(&cancel_key).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, cancellation.cancelled()).await.unwrap();
+        runner_release.notify_one();
+        assert_eq!(tokio::time::timeout(DEADLOCK_TIMEOUT, cancel).await.unwrap().unwrap(), Ok(ApiRunCompletion::Cancelled));
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_joined_owner_must_exit_before_next_admission() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, server_shutdown, server_task) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "fixture first").await;
+        let entered = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let entered_hook = entered.clone(); let release_hook = release.clone();
+        crate::lifecycle::race_point::arm("api_same_run_owner_before_exit", &run, move || async move { entered_hook.notify_one(); release_hook.notified().await; });
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first.clone() };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','fixture second',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let next = ApiTurnKey { bot_id: bot, run_id: run, turn_id: second };
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            while !env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.finalized.is_some()) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        env.app.api_turn_spawn(&next).await.unwrap();
+        wait_until_completed(&env.app, &next).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server_shutdown.cancel(); server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_run_second_turn_continues_after_joined_completion() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, server_shutdown, server_task) = fake_server(calls.clone(), hit).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let mut deps = env.app.api_bot_runtime.test_dependencies().unwrap();
+        deps.tools = Arc::new(CountingTools(tool_calls.clone()));
+        env.app.api_bot_runtime.set_test_dependencies(deps);
+        let bot_id = crate::db::ulid();
+        let run_id = crate::db::ulid();
+        let first = crate::db::ulid();
+        let second = crate::db::ulid();
+        let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot_id, &run_id, &first, &conv, &env.project_id, "first fixture turn").await;
+        let key = ApiTurnKey { bot_id: bot_id.clone(), run_id: run_id.clone(), turn_id: first.clone() };
+        env.app.api_turn_spawn(&key).await.unwrap();
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            loop {
+                let cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot_id).cloned();
+                let finalized = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.finalized.is_some());
+                if cursor.is_some_and(|c| c.identity.turn_id == first) && finalized { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second fixture turn',?)")
+            .bind(&second).bind(&conv).bind(&run_id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let next = ApiTurnKey { bot_id, run_id, turn_id: second };
+        let original: String = sqlx::query_scalar("SELECT final_text FROM api_bot_join_receipts WHERE turn_id=?").bind(&first).fetch_one(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE api_bot_join_receipts SET final_text='altered' WHERE turn_id=?").bind(&first).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        sqlx::query("UPDATE api_bot_join_receipts SET final_text=? WHERE turn_id=?").bind(original).bind(&first).execute(&env.app.db).await.unwrap();
+        for state in ["pending", "fenced"] {
+            sqlx::query("UPDATE api_bot_join_receipts SET state=?,processed_at=CASE WHEN ?='pending' THEN NULL ELSE ? END WHERE turn_id=?").bind(state).bind(state).bind(crate::db::now()).bind(&first).execute(&env.app.db).await.unwrap();
+            assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        sqlx::query("UPDATE api_bot_join_receipts SET state='applied',processed_at=? WHERE turn_id=?").bind(crate::db::now()).bind(&first).execute(&env.app.db).await.unwrap();
+        sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO fixture_hidden_receipts").execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        sqlx::query("ALTER TABLE fixture_hidden_receipts RENAME TO api_bot_join_receipts").execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TABLE fixture_receipt AS SELECT * FROM api_bot_join_receipts WHERE turn_id=?").bind(&first).execute(&env.app.db).await.unwrap();
+        sqlx::query("DELETE FROM api_bot_join_receipts WHERE turn_id=?").bind(&first).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        sqlx::query("INSERT INTO api_bot_join_receipts SELECT * FROM fixture_receipt").execute(&env.app.db).await.unwrap();
+        let duplicate = crate::db::ulid();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,incomplete,created_at) VALUES(?,?,?,'assistant','fixture duplicate','transcript',0,?)")
+            .bind(&duplicate).bind(&conv).bind(&first).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        sqlx::query("DELETE FROM messages WHERE id=?").bind(&duplicate).execute(&env.app.db).await.unwrap();
+        let original_checkpoint: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&next.bot_id).fetch_one(&env.app.db).await.unwrap();
+        let mut pending: serde_json::Value = serde_json::from_str(&original_checkpoint).unwrap();
+        pending["api_pending"] = true.into();
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE bot_id=?").bind(pending.to_string()).bind(&next.bot_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE bot_id=?").bind(&original_checkpoint).bind(&next.bot_id).execute(&env.app.db).await.unwrap();
+        let mut tool_pending: serde_json::Value = serde_json::from_str(&original_checkpoint).unwrap();
+        tool_pending["tool_pending"] = "fixture-pending".into();
+        let tool_checkpoint = tool_pending.to_string();
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE bot_id=?").bind(&tool_checkpoint).bind(&next.bot_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        let still_pending: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&next.bot_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(still_pending, tool_checkpoint);
+        assert_eq!(calls.load(Ordering::SeqCst), 1); assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE bot_id=?").bind(original_checkpoint).bind(&next.bot_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        let old_cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&next.bot_id).cloned().unwrap();
+        env.app.api_bot_runtime.inner.sessions.lock().unwrap().get_mut(&next.bot_id).unwrap().revision += 1;
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        env.app.api_bot_runtime.inner.sessions.lock().unwrap().insert(next.bot_id.clone(), old_cursor.clone());
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id=?").bind(&next.turn_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(env.app.api_turn_spawn(&next).await, Err(ApiBotError::Busy));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&next.turn_id).execute(&env.app.db).await.unwrap();
+        let gate = Arc::new(tokio::sync::Barrier::new(3));
+        let app_a = env.app.clone(); let key_a = clone_turn_key(&next); let gate_a = gate.clone();
+        let app_b = env.app.clone(); let key_b = clone_turn_key(&next); let gate_b = gate.clone();
+        let a = tokio::spawn(async move { gate_a.wait().await; app_a.api_turn_spawn(&key_a).await });
+        let b = tokio::spawn(async move { gate_b.wait().await; app_b.api_turn_spawn(&key_b).await });
+        gate.wait().await;
+        let (a, b) = tokio::time::timeout(DEADLOCK_TIMEOUT, async { (a.await.unwrap(), b.await.unwrap()) }).await.unwrap();
+        assert!(matches!((a, b), (Ok(()), Err(ApiBotError::Busy)) | (Err(ApiBotError::Busy), Ok(()))));
+        wait_until_completed(&env.app, &next).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        let records: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM api_bot_sessions WHERE bot_id=?),(SELECT count(*) FROM api_bot_join_receipts WHERE bot_id=? AND state='applied'),(SELECT count(*) FROM messages WHERE turn_id IN (?,?) AND role='assistant')")
+            .bind(&next.bot_id).bind(&next.bot_id).bind(&first).bind(&next.turn_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(records, (1, 2, 2));
+        let (session, generation, revision, checkpoint): (String, i64, i64, String) = sqlx::query_as("SELECT id,generation,revision,checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&next.bot_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(session, old_cursor.identity.session_id);
+        assert_eq!(generation, old_cursor.identity.generation);
+        assert!(revision > old_cursor.revision);
+        let checkpoint: serde_json::Value = serde_json::from_str(&checkpoint).unwrap();
+        let messages = checkpoint["messages"].as_array().unwrap();
+        let first_pos = messages.iter().position(|m| m["content"] == "first fixture turn").unwrap();
+        let second_pos = messages.iter().position(|m| m["content"] == "second fixture turn").unwrap();
+        assert!(first_pos < second_pos);
         server_shutdown.cancel();
         server_task.await.unwrap();
     }
@@ -4193,7 +4643,7 @@ mod tests {
         let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
         runtime.inner.controls.lock().unwrap().insert(
             FullKey::from(&key),
-            ControlRecord { identity: Arc::new(()), cancel: cancel.clone(), joined: joined_rx.clone() },
+            ControlRecord { identity: Arc::new(()), cancel: cancel.clone(), joined: joined_rx.clone(), finalized: None },
         );
         let retry_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let retry_wake = Arc::new(Notify::new());
@@ -4742,6 +5192,7 @@ mod tests {
                 identity: Arc::new(()),
                 cancel: cancel.clone(),
                 joined: joined.clone(),
+                finalized: None,
             },
         );
         let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));

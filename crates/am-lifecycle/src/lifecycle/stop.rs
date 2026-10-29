@@ -132,11 +132,23 @@ async fn stop_locked_body(
                 ));
             }
         }
-        let (moved, withdrawn) = if only_if_idle {
-            (admit_idle_stop(app.db(), &run.id, bot_id, false).await.map_err(up)?, Vec::new())
-        } else {
-            let withdraw = !super::restart_hold::in_progress(bot_id);
-            begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
+        use super::api_bot_port::{ApiBeginStopError, ApiBeginStopMode, ApiBeginStopResult, ApiBotPort, ApiRunKey};
+        let key = ApiRunKey { bot_id: bot_id.to_string(), run_id: run.id.clone() };
+        let mode = if only_if_idle { ApiBeginStopMode::Idle } else {
+            ApiBeginStopMode::User { withdraw: !super::restart_hold::in_progress(bot_id) }
+        };
+        let (moved, withdrawn) = match app.api_run_begin_stop(&key, mode).await {
+            Ok(ApiBeginStopResult::Applied { withdrawn }) => (super::run_state::Moved::Applied, withdrawn),
+            Ok(ApiBeginStopResult::Lost) => (super::run_state::Moved::Lost, Vec::new()),
+            Err(error) => {
+                let reason = match error {
+                    ApiBeginStopError::Storage => "storage",
+                    ApiBeginStopError::IdentityMismatch => "identity_mismatch",
+                    ApiBeginStopError::Busy => "busy",
+                    ApiBeginStopError::Ambiguous => "unconfirmed",
+                };
+                return Err(LcError::Upstream(format!("api_bot_stop_unconfirmed:{reason}")));
+            }
         };
         for (turn_id, revoked) in withdrawn {
             app.announce_revoked(&turn_id, revoked).await;
@@ -452,6 +464,51 @@ enum StopCommit {
 /// 同一條路，502）。撤回放在這裡、不放在記 `stopped` 那一步：`stopped` 寫不進去時 run 停在 `stopping`，重試補上之前
 /// daemon 重啟的話，開機對帳把它收成 `exited`，`start_send::resume_after_boot` 看到沒有 run 就替它啟動——那一則照樣送出去。
 /// 跟著第一個 durable 的「使用者要它停」一起落地，之後不管怎麼收斂都送不出去。CAS 輸了什麼都不寫。
+#[doc(hidden)]
+pub fn api_begin_stop_transaction<'a>(pool: &'a sqlx::SqlitePool, key: &'a super::api_bot_port::ApiRunKey, mode: super::api_bot_port::ApiBeginStopMode, shutdown: &'a tokio_util::sync::CancellationToken) -> impl std::future::Future<Output = Result<super::api_bot_port::ApiBeginStopResult, super::api_bot_port::ApiBeginStopError>> + Send + 'a {
+    Box::pin(api_begin_stop_transaction_body(pool, key, mode, shutdown))
+}
+
+async fn api_begin_stop_transaction_body(pool: &sqlx::SqlitePool, key: &super::api_bot_port::ApiRunKey, mode: super::api_bot_port::ApiBeginStopMode, shutdown: &tokio_util::sync::CancellationToken) -> Result<super::api_bot_port::ApiBeginStopResult, super::api_bot_port::ApiBeginStopError> {
+    use super::api_bot_port::{ApiBeginStopError as E, ApiBeginStopMode as M, ApiBeginStopResult as R};
+    if shutdown.is_cancelled() { return Err(E::Busy); }
+    let mut tx = db::begin_write(pool).await.map_err(|_| E::Storage)?;
+    let result: Result<R, E> = async {
+        if shutdown.is_cancelled() { return Err(E::Busy); }
+        let state: Option<String> = sqlx::query_scalar("SELECT r.state FROM bots b JOIN runs r ON r.bot_id=b.id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND r.id=?")
+            .bind(&key.bot_id).bind(&key.run_id).fetch_optional(&mut *tx).await.map_err(|_| E::Storage)?;
+        let Some(state) = state else { return Err(E::IdentityMismatch); };
+        if !matches!(state.as_str(), "starting" | "running" | "stopping") { return Ok(R::Lost); }
+        if shutdown.is_cancelled() { return Err(E::Busy); }
+        match mode {
+            M::User { withdraw } => {
+                let moved = super::run_state::transition_on(&mut tx, &key.run_id, super::run_state::LIVE, "stopping", None).await.map_err(|_| E::Storage)?;
+                if moved == super::run_state::Moved::Lost { return Ok(R::Lost); }
+                let withdrawn = if withdraw { super::start_send::withdraw_waiting_tx(&mut tx, &key.bot_id).await.map_err(|_| E::Storage)? } else { Vec::new() };
+                Ok(R::Applied { withdrawn })
+            }
+            M::Idle => {
+                let count = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=? AND state='running' AND agent_status='idle' AND EXISTS(SELECT 1 FROM bots b WHERE b.id=runs.bot_id AND b.kind='claude-api' AND b.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.status='in_flight') AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='queued')")
+                    .bind(&key.run_id).bind(&key.bot_id).bind(&key.bot_id).execute(&mut *tx).await.map_err(|_| E::Storage)?.rows_affected();
+                Ok(if count == 1 { R::Applied { withdrawn: Vec::new() } } else { R::Lost })
+            }
+        }
+    }.await;
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    super::race_point::hit("api_begin_stop_before_commit", &key.run_id).await;
+    let result = if shutdown.is_cancelled() { Err(E::Busy) } else { result };
+    match result {
+        Ok(result) => {
+            let commit_result = tx.commit().await;
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            super::race_point::hit("api_begin_stop_after_commit", &key.run_id).await;
+            if commit_result.is_err() || shutdown.is_cancelled() { return Err(E::Ambiguous); }
+            Ok(result)
+        }
+        Err(error) => { tx.rollback().await.map_err(|_| E::Ambiguous)?; Err(error) }
+    }
+}
+
 async fn begin_stop(
     app: &impl crate::capabilities::Db,
     run_id: &str,
@@ -1382,6 +1439,93 @@ mod stop_commit_tests {
         assert!(matches!(stop_bot(&app, "d3b2-missing").await, Err(LcError::NotFound(_))));
         assert!(stop_bot(&app, &cli).await.unwrap());
         assert_eq!(state(&app, &cli_run).await, "stopped");
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_transaction_fences_and_rolls_back_shutdown() {
+        use super::super::api_bot_port::{ApiBeginStopMode as Mode, ApiBeginStopResult as Result, ApiBeginStopError as Error, ApiRunKey};
+        let env = tt::env().await;
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('same-bot',?,'same-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,started_at) VALUES('same-run','same-bot','running','idle',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let key = ApiRunKey { bot_id: "same-bot".into(), run_id: "same-run".into() };
+        let bad = ApiRunKey { bot_id: "missing".into(), run_id: key.run_id.clone() };
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &bad, Mode::Idle, &shutdown).await, Err(Error::IdentityMismatch)));
+        assert_eq!(state(&env.app, &key.run_id).await, "running");
+        let cancel = shutdown.clone();
+        super::super::race_point::arm("api_begin_stop_before_commit", &key.run_id, move || async move { cancel.cancel(); });
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: false }, &shutdown).await, Err(Error::Busy)));
+        assert_eq!(state(&env.app, &key.run_id).await, "running");
+        let fresh = tokio_util::sync::CancellationToken::new();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::Idle, &fresh).await, Ok(Result::Applied { .. })));
+        assert_eq!(state(&env.app, &key.run_id).await, "stopping");
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_withdraw_rollback_and_cli_pair() {
+        use super::super::api_bot_port::{ApiBeginStopMode as Mode, ApiBeginStopResult as Result, ApiBeginStopError as Error, ApiRunKey};
+        let env = tt::env().await;
+        let (cli, cli_run) = running_bot(&env).await;
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('tx-bot',?,'tx-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,started_at) VALUES('tx-run','tx-bot','running','idle',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('tx-conv','tx-bot',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,awaits_start,created_at) VALUES('tx-turn','tx-conv','web','queued','pending',1,?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let key = ApiRunKey { bot_id: "tx-bot".into(), run_id: "tx-run".into() };
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::Idle, &shutdown).await, Ok(Result::Lost)));
+        sqlx::query("CREATE TRIGGER fixture_refuse_withdraw BEFORE UPDATE ON turns WHEN OLD.id='tx-turn' BEGIN SELECT RAISE(ABORT,'fixture'); END").execute(&env.app.db).await.unwrap();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: true }, &shutdown).await, Err(Error::Storage)));
+        let error = stop_bot(&env.app, "tx-bot").await.expect_err("transaction failure must not stop the bot");
+        assert!(matches!(&error, LcError::Upstream(message) if message == "api_bot_stop_unconfirmed:storage"));
+        use axum::response::IntoResponse;
+        let response = error.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "upstream");
+        assert_eq!(body["message"], "api_bot_stop_unconfirmed:storage");
+        assert_eq!(state(&env.app, &key.run_id).await, "running");
+        let queued: String = sqlx::query_scalar("SELECT status FROM turns WHERE id='tx-turn'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(queued, "queued");
+        sqlx::query("DROP TRIGGER fixture_refuse_withdraw").execute(&env.app.db).await.unwrap();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: true }, &shutdown).await, Ok(Result::Applied { withdrawn }) if withdrawn.len() == 1));
+        assert_eq!(state(&env.app, &key.run_id).await, "stopping");
+        let queued: String = sqlx::query_scalar("SELECT status FROM turns WHERE id='tx-turn'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(queued, "failed");
+        assert!(stop_bot(&env.app, &cli).await.unwrap());
+        assert_eq!(state(&env.app, &cli_run).await, "stopped");
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_shutdown_after_commit_is_ambiguous() {
+        use super::super::api_bot_port::{ApiBeginStopMode as Mode, ApiBeginStopError as Error, ApiRunKey};
+        let env = tt::env().await;
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('after-bot',?,'after-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('after-run','after-bot','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let key = ApiRunKey { bot_id: "after-bot".into(), run_id: "after-run".into() };
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let cancel = shutdown.clone();
+        super::super::race_point::arm("api_begin_stop_after_commit", &key.run_id, move || async move { cancel.cancel(); });
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: false }, &shutdown).await, Err(Error::Ambiguous)));
+        assert_eq!(state(&env.app, &key.run_id).await, "stopping", "a confirmed post-commit fault cannot be reported as rollback");
+    }
+
+    #[tokio::test]
+    async fn same_run_stop_commit_error_is_ambiguous() {
+        use super::super::api_bot_port::{ApiBeginStopMode as Mode, ApiBeginStopError as Error, ApiRunKey};
+        let env = tt::env().await;
+        let now = db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('fault-bot',?,'fault-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('fault-run','fault-bot','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY)").execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TABLE fixture_child(parent INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED)").execute(&env.app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER fixture_commit_error AFTER UPDATE OF state ON runs WHEN NEW.id='fault-run' BEGIN INSERT INTO fixture_child(parent) VALUES(7); END").execute(&env.app.db).await.unwrap();
+        let key = ApiRunKey { bot_id: "fault-bot".into(), run_id: "fault-run".into() };
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        assert!(matches!(api_begin_stop_transaction(&env.app.db, &key, Mode::User { withdraw: false }, &shutdown).await, Err(Error::Ambiguous)));
     }
 
     /// 一顆在跑的 bot：自己的 tab、pane、有名字的 agent（mock 收到 ctrl+c 就讓它離開）。不走 `start_bot`：
