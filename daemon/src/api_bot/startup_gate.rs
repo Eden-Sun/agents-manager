@@ -43,9 +43,10 @@ async fn barrier_body(app: &Arc<crate::state::App>) {
         .await
         {
             Ok(false) => Ok(()),
-            Ok(true) => super::startup_recovery::recover_all(app)
-                .await
-                .map_err(|e| e.code()),
+            Ok(true) => match super::startup_recovery::recover_all(app).await {
+                Ok(()) => super::startup_retention::prune(app).await,
+                Err(e) => Err(e.code()),
+            },
             Err(_) => Err("api_startup_storage"),
         }
     };

@@ -26,6 +26,7 @@ mod receipt;
 mod receipt_tests;
 
 mod startup_recovery;
+mod startup_retention;
 mod startup_abandonment;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod startup_recovery_tests;
