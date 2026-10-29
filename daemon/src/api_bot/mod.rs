@@ -39,3 +39,7 @@ mod retention;
 pub(crate) use retention::{spawn_retention_ticker, schedule_retention_after_delete};
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod retention_tests;
+
+mod explicit_retirement;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod explicit_retirement_tests;

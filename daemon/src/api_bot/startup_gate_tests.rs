@@ -110,6 +110,9 @@ async fn d3b2_closed_gate_rejects_port_before_runtime_even_with_fake_dependencie
 
 struct PortFixture(bool);
 impl crate::lifecycle::api_bot_port::ApiBotPort for PortFixture {
+    async fn api_explicit_retire(&self, bot: &str, target: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError> {
+        if self.0 && bot == "forward-bot" && target.session_id == "forward-session" && target.generation == 7 { Ok(crate::lifecycle::api_bot_port::ApiFreshResult::Cleared) } else { Err(crate::lifecycle::api_bot_port::ApiFreshError::Unconfirmed) }
+    }
     async fn api_run_begin_stop(&self, key: &crate::lifecycle::api_bot_port::ApiRunKey, mode: crate::lifecycle::api_bot_port::ApiBeginStopMode) -> Result<crate::lifecycle::api_bot_port::ApiBeginStopResult, crate::lifecycle::api_bot_port::ApiBeginStopError> {
         if key.bot_id == "forward-bot" && key.run_id == "forward-run" && matches!(mode, crate::lifecycle::api_bot_port::ApiBeginStopMode::User { withdraw: true }) {
             Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Busy)
@@ -167,6 +170,7 @@ async fn same_run_arc_forwards_begin_stop_key_and_mode() {
 
 struct DefaultPort;
 impl crate::lifecycle::api_bot_port::ApiBotPort for DefaultPort {
+    async fn api_explicit_retire(&self, _: &str, _: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError> { Err(crate::lifecycle::api_bot_port::ApiFreshError::Unconfirmed) }
     async fn api_run_begin_stop(&self, _: &crate::lifecycle::api_bot_port::ApiRunKey, _: crate::lifecycle::api_bot_port::ApiBeginStopMode) -> Result<crate::lifecycle::api_bot_port::ApiBeginStopResult, crate::lifecycle::api_bot_port::ApiBeginStopError> {
         Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Storage)
     }
@@ -664,4 +668,13 @@ async fn r1_prune_commit_failure_never_opens_api_gate() {
     assert!(!app.api_startup_gate.ready());
     app.set_startup_ready(true);
     assert!(app.is_startup_ready());
+}
+
+#[tokio::test]
+async fn fresh_port_arc_forwards_exact_target_and_default_is_closed() {
+    use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshTarget, ApiFreshResult, ApiFreshError};
+    let target = ApiFreshTarget { session_id: "forward-session".into(), generation: 7 };
+    assert!(matches!(std::sync::Arc::new(PortFixture(true)).api_explicit_retire("forward-bot", &target).await, Ok(ApiFreshResult::Cleared)));
+    assert!(matches!(std::sync::Arc::new(PortFixture(false)).api_explicit_retire("forward-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
+    assert!(matches!(DefaultPort.api_explicit_retire("forward-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
 }

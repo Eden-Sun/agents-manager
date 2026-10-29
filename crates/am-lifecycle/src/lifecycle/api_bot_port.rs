@@ -56,8 +56,15 @@ pub enum ApiBeginStopResult { Applied { withdrawn: Vec<(String, super::queue::Re
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApiBeginStopError { Storage, IdentityMismatch, Busy, Ambiguous }
 
+/// Exact private session selected by the caller, never the current successor.
+pub struct ApiFreshTarget { pub session_id: String, pub generation: i64 }
+pub enum ApiFreshResult { Cleared }
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApiFreshError { Busy, IdentityMismatch, Unresolved, Storage, Unconfirmed }
+
 pub trait ApiBotPort: Send + Sync {
     fn api_recovery_ready(&self) -> bool { false }
+    fn api_explicit_retire(&self, _bot_id: &str, _target: &ApiFreshTarget) -> impl Future<Output = Result<ApiFreshResult, ApiFreshError>> + Send { async { Err(ApiFreshError::Unconfirmed) } }
     fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode)
         -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send;
     fn api_turn_spawn(

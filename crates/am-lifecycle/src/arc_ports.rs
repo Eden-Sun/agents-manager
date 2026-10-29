@@ -1362,6 +1362,9 @@ mod arc_port_api_bot {
 
     impl<T: ApiBotPort + ?Sized> ApiBotPort for std::sync::Arc<T> {
         fn api_recovery_ready(&self) -> bool { <T as ApiBotPort>::api_recovery_ready(self.as_ref()) }
+        fn api_explicit_retire(&self, bot_id: &str, target: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError>> + Send {
+            <T as ApiBotPort>::api_explicit_retire(self.as_ref(), bot_id, target)
+        }
         fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode) -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send {
             <T as ApiBotPort>::api_run_begin_stop(self.as_ref(), key, mode)
         }

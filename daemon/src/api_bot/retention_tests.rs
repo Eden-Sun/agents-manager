@@ -16,7 +16,7 @@ async fn r2_retention_removes_expired_proven_session() {
     assert_eq!(count, 0, "a proven expired session must be removed");
 }
 
-async fn fixture() -> crate::testing::Env {
+pub(super) async fn fixture() -> crate::testing::Env {
     let env = crate::testing::env().await;
     let now = crate::db::now();
     sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r2-bot',?,'r2-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
