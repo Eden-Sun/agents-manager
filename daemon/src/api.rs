@@ -294,7 +294,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot_http))
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
-        .route("/bots/{id}/start", post(start_bot))
+        .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
+        .route("/bots/{id}/start", post(start_bot_http))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/credential/rotate", post(rotate_bot_credential))
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
@@ -1057,6 +1058,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/attachments/{id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/local-image", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/api_fresh_target", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
@@ -6495,6 +6497,17 @@ async fn delete_identity(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
+async fn api_fresh_target(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    if principal != RequestPrincipal::User { return Err(bot_user_only()); }
+    use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshAvailability};
+    let value = match app.api_fresh_target(&id).await {
+        ApiFreshAvailability::Available(target) => json!({"availability":"available","session_id":target.session_id,"generation":target.generation}),
+        ApiFreshAvailability::None => json!({"availability":"none"}),
+        ApiFreshAvailability::Unavailable => json!({"availability":"unavailable"}),
+    };
+    Ok(Json(value))
+}
+
 #[derive(Deserialize, Default)]
 struct StartQuery {
     /// 沒帶（預設）：有記錄的 session 就接回，沒有才開新對話（2026-10-02 使用者：「預設必 resume」——console-rpa 換身分後
@@ -6550,6 +6563,41 @@ async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts)
         _ => (pending.is_some(), pending),
     };
     Ok(json!({"run_id": run_id, "resumed": resumed, "session_id": sid, "resume_outcome": outcome}))
+}
+
+#[derive(Deserialize, Default)]
+struct NativeStartQuery {
+    resume: Option<String>,
+    session: Option<String>,
+    api_expected_session_id: Option<String>,
+    api_expected_generation: Option<String>,
+}
+
+async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<NativeStartQuery>, Extension(principal): Extension<RequestPrincipal>) -> Result<Response, LcError> {
+    let common = StartQuery { resume: q.resume, session: q.session };
+    let opts = resume_opts(&common)?;
+    let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|b| b.kind);
+    if kind.as_deref() == Some("claude-api") {
+        use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshTarget, ApiNativeStartError, ApiNativeStartMode};
+        if opts.resume_session.is_some() { return Err(LcError::Bad("api_native_session_override_unsupported".into())); }
+        let fresh = common.resume.as_deref().is_some_and(|v| v.trim() == "fresh");
+        let mode = if fresh {
+            if principal != RequestPrincipal::User { return Err(bot_user_only()); }
+            let session_id = q.api_expected_session_id.as_ref().filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))).ok_or_else(|| LcError::Bad("api_fresh_target_required".into()))?;
+            let generation = q.api_expected_generation.as_deref().and_then(|g| g.parse::<i64>().ok()).filter(|g| *g > 0).ok_or_else(|| LcError::Bad("api_fresh_target_required".into()))?;
+            ApiNativeStartMode::Fresh(ApiFreshTarget { session_id: session_id.clone(), generation })
+        } else {
+            if q.api_expected_session_id.is_some() || q.api_expected_generation.is_some() { return Err(LcError::Bad("api_fresh_target_requires_fresh".into())); }
+            ApiNativeStartMode::Resume { required: opts.resume_required }
+        };
+        refuse_child_restart(&app, &id).await?;
+        let result = app.api_native_start(&id, mode).await.map_err(|error| match error {
+            ApiNativeStartError::Unconfirmed => LcError::Upstream("api_native_start_unconfirmed".into()),
+            ApiNativeStartError::ClearedButStartUnconfirmed => LcError::Upstream("api_fresh_cleared_start_unconfirmed".into()),
+        })?;
+        return Ok((StatusCode::OK, Json(json!({"run_id":result.run_id,"resumed":result.resumed}))).into_response());
+    }
+    start_bot(State(app), Path(id), Query(common)).await
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
@@ -7116,6 +7164,10 @@ async fn prompt_bot(
     Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
+    let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|bot| bot.kind);
+    if kind.as_deref() == Some("claude-api") && (b.start_if_stopped || b.send_now || b.queue_if_busy || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.relay_from.is_some() || b.ack || b.reply_to.is_some() || matches!(&principal, RequestPrincipal::Bot(_))) {
+        return Err(LcError::Bad("api_native_prompt_unsupported".into()));
+    }
     // 把回覆公開到分享頁只有使用者（UI token）能決定：Bot／Service 帶旗標一律 403，且不送出（issue #855）。
     if b.share_reply_visible && principal != RequestPrincipal::User {
         return Err(bot_user_only());
@@ -17094,5 +17146,98 @@ mod handoff_restore_tests {
 
         assert!(matches!(err, LcError::Conflict(ref body) if body["reason"] == "handed_off"), "expected handoff refusal, got {err:?}");
         assert!(db::bot(&e.app.db, &bot.id).await.unwrap().unwrap().deleted_at.is_some(), "handoff refusal leaves bot deleted");
+    }
+}
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod native_api_http_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::sync::CancellationToken;
+
+    async fn get(addr: std::net::SocketAddr, path: &str, auth: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_string(&mut response)).await.unwrap().unwrap();
+        response
+    }
+
+    async fn post(addr: std::net::SocketAddr, path: &str, auth: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_string(&mut response)).await.unwrap().unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn native_fresh_target_for_cli_survives_absent_private_tables() {
+        let env=crate::testing::env().await;
+        let bot=crate::testing::claude_bot(&env.app,&env.project_id,"native-descriptor-cli").await;
+        for table in ["api_bot_join_receipts","api_bot_attempts","api_bot_sessions"] {
+            sqlx::query(&format!("DROP TABLE {table}")).execute(&env.app.db).await.unwrap();
+        }
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr=listener.local_addr().unwrap();
+        let shutdown=CancellationToken::new(); let stop=shutdown.clone(); let router=super::router(env.app.clone());
+        let task=tokio::spawn(async move { axum::serve(listener,router.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        let user=format!("X-AM-Token: {}\r\n",env.app.ui_token);
+        let response=get(addr,&format!("/api/bots/{}/api_fresh_target",bot.id),&user).await;
+        let state=get(addr,"/api/state",&user).await;
+        shutdown.cancel(); tokio::time::timeout(std::time::Duration::from_secs(5),task).await.unwrap().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200") && response.contains("unavailable"));
+        assert!(state.starts_with("HTTP/1.1 200"));
+    }
+
+    #[tokio::test]
+    async fn native_fresh_target_is_user_only_and_unavailable_on_storage_error() {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid(); let session = crate::db::ulid(); let token = crate::db::ulid();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api',?,?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(&token).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,1,1,'{}',?,?,?)")
+            .bind(&session).bind(&bot).bind(&now).bind(&now).bind(crate::db::iso_in(3600)).execute(&env.app.db).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new(); let stop = shutdown.clone();
+        let router = super::router(env.app.clone());
+        let task = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        let user = format!("X-AM-Token: {}\r\n", env.app.ui_token);
+        let bot_auth = format!("X-AM-Bot-Id: {bot}\r\nX-AM-Bot-Token: {token}\r\n");
+        let path = format!("/api/bots/{bot}/api_fresh_target");
+        let visible = get(addr, &path, &user).await;
+        let bot_state = get(addr, "/api/state", &bot_auth).await;
+        let user_state = get(addr, "/api/state", &user).await;
+        let denied = get(addr, &path, &bot_auth).await;
+        crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&env.app.db, &bot, &env.project_id, "/tmp").await.unwrap();
+        let agm_denied = get(addr, &path, &bot_auth).await;
+        let fresh_path = format!("/api/bots/{bot}/start?resume=fresh&api_expected_session_id={session}&api_expected_generation=1");
+        let agm_fresh = post(addr, &fresh_path, &bot_auth).await;
+        let session_after_agm: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&env.app.db).await.unwrap();
+        let svc_token = crate::db::ulid();
+        env.app.service_tokens.write().unwrap().insert(crate::service_auth::DAEMON_SWAP.into(), svc_token.clone());
+        let svc_auth = format!("X-AM-Service-Id: {}\r\nX-AM-Service-Token: {}\r\n", crate::service_auth::DAEMON_SWAP, svc_token);
+        let svc_probe = get(addr, "/api/supervisor/health", &svc_auth).await;
+        let svc_denied = get(addr, &path, &svc_auth).await;
+        sqlx::query("DROP TABLE api_bot_sessions").execute(&env.app.db).await.unwrap();
+        let unavailable = get(addr, &path, &user).await;
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task).await.unwrap().unwrap();
+        assert!(visible.starts_with("HTTP/1.1 200"));
+        let value: Value = serde_json::from_str(visible.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(value, json!({"availability":"available","session_id":session,"generation":1}));
+        assert!(bot_state.starts_with("HTTP/1.1 200"));
+        assert!(user_state.starts_with("HTTP/1.1 200"));
+        assert!(!bot_state.contains(&session) && !user_state.contains(&session));
+        assert!(denied.starts_with("HTTP/1.1 403"));
+        assert!(agm_denied.starts_with("HTTP/1.1 403"));
+        assert!(agm_fresh.starts_with("HTTP/1.1 403"));
+        assert_eq!(session_after_agm, 1);
+        assert!(!svc_probe.starts_with("HTTP/1.1 401") && !svc_probe.starts_with("HTTP/1.1 403"));
+        assert!(svc_denied.starts_with("HTTP/1.1 403"));
+        assert!(unavailable.starts_with("HTTP/1.1 200"));
+        let value: Value = serde_json::from_str(unavailable.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(value, json!({"availability":"unavailable"}));
     }
 }

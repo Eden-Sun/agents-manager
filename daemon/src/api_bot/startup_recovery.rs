@@ -74,13 +74,12 @@ async fn recover_page_body(
             Err(StartupError::NotStartup) => return Err(Error::NotStartup),
             Err(StartupError::Storage) => return Err(Error::Storage),
         };
-        // A previous pass may already have retired this run after proving Applied.
-        // This is only an idempotence marker, never permission to consume a receipt.
+        // Terminal Applied history is read-only evidence for skipping this artifact only.
         if !restore && matches!(stored.state, receipt::State::Applied) {
-            let retired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.id=? AND b.kind='claude-api' AND r.id=? AND r.state='exited' AND r.exit_reason='api_restart_abandoned')")
-                .bind(&item.identity.bot_id).bind(&item.identity.run_id).fetch_one(&app.db).await.map_err(|_| Error::Storage)?;
-            if retired {
-                continue;
+            match super::startup_history::classify(&app.db, &item).await? {
+                super::startup_history::StartupHistoricalApplied::Skip => continue,
+                super::startup_history::StartupHistoricalApplied::Unresolved => { counts.unresolved += 1; continue; },
+                super::startup_history::StartupHistoricalApplied::Live => {},
             }
         }
         match app

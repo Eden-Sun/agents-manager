@@ -641,6 +641,8 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 `POST /api/bots/{id}/prompt`
 
+API bot 在送入結果確認時的 `delivery: "ok"` 表示受管 harness owner 已接受該回合，並不表示 provider 已收到、已計費或已完成。提交回報不明時即使資料列顯示 `ok` 仍不可據此推定接受成功。同 `client_request_id` 重送只讀原紀錄；僅 completed 且 user／assistant 訊息結構一致時回原結果，其他情況回 502 `upstream`、`api_native_prompt_unconfirmed`，不再送 HTTP 或工具。文字不同、缺失或重複 user 訊息也回未確認。請先查 turn 狀態；若確定要送一則新訊息，使用新的 `client_request_id`，不要自動換 ID 重試。API bot 尚不支援附件、插隊、relay、排隊、start-if-stopped、draft 及分享回覆旗標，會在寫入前拒絕。
+
 ```json
 { "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true, "queue_if_busy"?: true, "share_reply_visible"?: true }
 ```
@@ -1926,6 +1928,12 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
   - claude `effort` → `/effort <level>`（副作用：claude 存成該帳號新 session 的預設）。
   - codex `model` / `effort` / `fast` → 操作 `/model` 兩層選單與 `/fast` 開關（可一起改，只改 `fast` 也走這條），回讀狀態列確認，`run.runtime_*` 存讀回的值（副作用：寫進 `~/.codex/config.toml`）。
 - `identity` 不存在 404；kind 不符 400。
+
+### API bot fresh target 與 start（#1944）
+
+`GET /api/bots/{id}/api_fresh_target` 僅 User 可用；Bot、AGM bot 與 Service 為 403。回應 `availability` 為 `available` 時附 `session_id` 與 `generation`；`none` 表示沒有 session，`unavailable` 表示無法安全確認（含過期或隔離），不附 target。這是快照，刪除時仍重新驗證。
+
+`POST /api/bots/{id}/start?resume=fresh&api_expected_session_id=…&api_expected_generation=…` 僅 User 可操作 API bot，兩欄必填且須精確匹配。嚴格 `resume=native` 在建 run 前查證舊 context，未確認時拒絕，不退回 fresh；回應 `resumed:true` 表示這次查證通過，首次 prompt 仍會在 rebind 前再驗，可能因狀態變更而拒絕。依賴缺失或證據未確認回 502 `upstream`、`api_native_start_unconfirmed`。若目標已清而後續 start 未確認，回 `api_fresh_cleared_start_unconfirmed`，不可自行重送清除。API bot 的 KINDS 仍關閉，正式建立及使用須另核。
 
 ### 10.2a `POST /api/bots/{id}/start` 對睡著的 bot（2026-09-17，SPEC §6.11）
 

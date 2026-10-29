@@ -110,6 +110,16 @@ async fn d3b2_closed_gate_rejects_port_before_runtime_even_with_fake_dependencie
 
 struct PortFixture(bool);
 impl crate::lifecycle::api_bot_port::ApiBotPort for PortFixture {
+    async fn api_turn_spawn_pending(&self, key: &crate::lifecycle::api_bot_port::ApiTurnKey) -> Result<(), crate::lifecycle::api_bot_port::ApiBotError> { if self.0 && key.bot_id == key.run_id && key.turn_id != key.bot_id { Ok(()) } else { Err(crate::lifecycle::api_bot_port::ApiBotError::Upstream) } }
+    async fn api_native_prompt(&self, bot: &str, text: &str, crid: &str) -> Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError> {
+        if self.0 && text == crid { Ok(crate::lifecycle::PromptOut { turn_id:bot.into(), message_id:crid.into(), delivery:"ok".into(), send_now:None }) } else { Err(crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed) }
+    }
+    async fn api_fresh_target(&self, bot: &str) -> crate::lifecycle::api_bot_port::ApiFreshAvailability {
+        if self.0 { crate::lifecycle::api_bot_port::ApiFreshAvailability::Available(crate::lifecycle::api_bot_port::ApiFreshTarget { session_id:bot.into(), generation:7 }) } else { crate::lifecycle::api_bot_port::ApiFreshAvailability::Unavailable }
+    }
+    async fn api_native_start(&self, bot: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError> {
+        if self.0 && matches!(mode, crate::lifecycle::api_bot_port::ApiNativeStartMode::Resume { required:true }) { Ok(crate::lifecycle::api_bot_port::ApiNativeStartResult { run_id:bot.into(), resumed:true }) } else { Err(crate::lifecycle::api_bot_port::ApiNativeStartError::Unconfirmed) }
+    }
     async fn api_explicit_retire(&self, bot: &str, target: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError> {
         if self.0 && bot == "forward-bot" && target.session_id == "forward-session" && target.generation == 7 { Ok(crate::lifecycle::api_bot_port::ApiFreshResult::Cleared) } else { Err(crate::lifecycle::api_bot_port::ApiFreshError::Unconfirmed) }
     }
@@ -170,6 +180,10 @@ async fn same_run_arc_forwards_begin_stop_key_and_mode() {
 
 struct DefaultPort;
 impl crate::lifecycle::api_bot_port::ApiBotPort for DefaultPort {
+    async fn api_turn_spawn_pending(&self, _: &crate::lifecycle::api_bot_port::ApiTurnKey) -> Result<(), crate::lifecycle::api_bot_port::ApiBotError> { Err(crate::lifecycle::api_bot_port::ApiBotError::Upstream) }
+    async fn api_native_prompt(&self, _: &str, _: &str, _: &str) -> Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError> { Err(crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed) }
+    async fn api_fresh_target(&self, _: &str) -> crate::lifecycle::api_bot_port::ApiFreshAvailability { crate::lifecycle::api_bot_port::ApiFreshAvailability::Unavailable }
+    async fn api_native_start(&self, _: &str, _: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError> { Err(crate::lifecycle::api_bot_port::ApiNativeStartError::Unconfirmed) }
     async fn api_explicit_retire(&self, _: &str, _: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError> { Err(crate::lifecycle::api_bot_port::ApiFreshError::Unconfirmed) }
     async fn api_run_begin_stop(&self, _: &crate::lifecycle::api_bot_port::ApiRunKey, _: crate::lifecycle::api_bot_port::ApiBeginStopMode) -> Result<crate::lifecycle::api_bot_port::ApiBeginStopResult, crate::lifecycle::api_bot_port::ApiBeginStopError> {
         Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Storage)
@@ -677,4 +691,22 @@ async fn fresh_port_arc_forwards_exact_target_and_default_is_closed() {
     assert!(matches!(std::sync::Arc::new(PortFixture(true)).api_explicit_retire("forward-bot", &target).await, Ok(ApiFreshResult::Cleared)));
     assert!(matches!(std::sync::Arc::new(PortFixture(false)).api_explicit_retire("forward-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
     assert!(matches!(DefaultPort.api_explicit_retire("forward-bot", &target).await, Err(ApiFreshError::Unconfirmed)));
+}
+
+#[tokio::test]
+async fn native_port_arc_forwards_and_default_fails_closed() {
+    use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshAvailability, ApiNativeStartMode};
+    let bot=crate::db::ulid(); let crid=crate::db::ulid();
+    let port=std::sync::Arc::new(PortFixture(true));
+    let key=crate::lifecycle::api_bot_port::ApiTurnKey { bot_id:bot.clone(),run_id:bot.clone(),turn_id:crid.clone() };
+    assert!(port.api_turn_spawn_pending(&key).await.is_ok());
+    assert!(DefaultPort.api_turn_spawn_pending(&key).await.is_err());
+    let start=port.api_native_start(&bot,ApiNativeStartMode::Resume { required:true }).await.ok().unwrap();
+    assert_eq!(start.run_id,bot); assert!(start.resumed);
+    let prompt=port.api_native_prompt(&bot,&crid,&crid).await.ok().unwrap();
+    assert_eq!(prompt.turn_id,bot); assert_eq!(prompt.message_id,crid);
+    assert!(matches!(port.api_fresh_target(&bot).await,ApiFreshAvailability::Available(target) if target.session_id==bot && target.generation==7));
+    assert!(DefaultPort.api_native_start(&bot,ApiNativeStartMode::Resume { required:true }).await.is_err());
+    assert!(DefaultPort.api_native_prompt(&bot,&crid,&crid).await.is_err());
+    assert!(matches!(DefaultPort.api_fresh_target(&bot).await,ApiFreshAvailability::Unavailable));
 }

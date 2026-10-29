@@ -29,15 +29,38 @@ async fn candidate(conn: &mut sqlx::SqliteConnection, bot: &str, target: &ApiFre
         .bind(&target.session_id).bind(bot).bind(target.generation).fetch_optional(conn).await.map_err(|_| E::Storage)
 }
 
+pub(super) struct ApiOwnedBotLock {
+    bot: String,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl ApiOwnedBotLock {
+    pub(super) async fn acquire(app: &Arc<crate::state::App>, bot: &str) -> Result<Self, E> {
+        let lock = crate::capabilities::BotLocks::bot_lock(app.as_ref(), bot).await;
+        let guard = tokio::select! {
+            biased;
+            _ = app.shutdown.cancelled() => return Err(E::Busy),
+            guard = lock.lock_owned() => guard,
+        };
+        Ok(Self { bot: bot.to_owned(), _guard: guard })
+    }
+}
+
 async fn retire_body(app: &Arc<crate::state::App>, bot: &str, target: &ApiFreshTarget) -> Result<R, E> {
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() { return Err(E::Busy); }
     if target.session_id.is_empty() || target.generation <= 0 { return Err(E::IdentityMismatch); }
-    let lock = crate::capabilities::BotLocks::bot_lock(app.as_ref(), bot).await;
-    let _lifecycle = tokio::select! {
-        biased;
-        _ = app.shutdown.cancelled() => return Err(E::Busy),
-        guard = lock.lock_owned() => guard,
-    };
+    let lifecycle = ApiOwnedBotLock::acquire(app, bot).await?;
+    retire_body_locked(app, &lifecycle, target).await
+}
+
+pub(super) fn retire_body_locked<'a>(app: &'a Arc<crate::state::App>, lifecycle: &'a ApiOwnedBotLock, target: &'a ApiFreshTarget) -> impl Future<Output = Result<R, E>> + Send + 'a {
+    Box::pin(retire_body_locked_inner(app, lifecycle, target))
+}
+
+async fn retire_body_locked_inner(app: &Arc<crate::state::App>, lifecycle: &ApiOwnedBotLock, target: &ApiFreshTarget) -> Result<R, E> {
+    let bot = lifecycle.bot.as_str();
+    if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() { return Err(E::Busy); }
+    if target.session_id.is_empty() || target.generation <= 0 { return Err(E::IdentityMismatch); }
     if app.api_bot_runtime.explicit_retire_quarantined(bot) { return Err(E::Unconfirmed); }
     let mut conn = app.db.acquire().await.map_err(|_| E::Storage)?;
     let initial = candidate(&mut conn, bot, target).await?.ok_or(E::Unconfirmed)?;

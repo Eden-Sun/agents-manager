@@ -128,6 +128,14 @@ pub async fn start_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String
 }
 
 pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+    let kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
+    if kind == "claude-api" {
+        if opts.fork_session.is_some() || opts.fork_source_bot.is_some() || opts.resume_session.is_some() || opts.require_idle || opts.refuse_background_jobs {
+            return Err(LcError::Upstream("api_native_start_unconfirmed".into()));
+        }
+        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_start(app, bot_id, crate::lifecycle::api_bot_port::ApiNativeStartMode::Resume { required: opts.resume_required })
+            .await.map(|result| result.run_id).map_err(|_| LcError::Upstream("api_native_start_unconfirmed".into()));
+    }
     let locked_bot = bot_id.to_string();
     let _g = app.lock_bot_for_start(&locked_bot).await;
     start_bot_locked_with(app, bot_id, opts).await
@@ -158,6 +166,7 @@ async fn start_bot_locked_with_host_fence_body(
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
+    if bot.kind == "claude-api" { return Err(LcError::Upstream("api_native_start_unconfirmed".into())); }
     // A child only exists as the pane its parent opened; starting here would open an unrelated pane.
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
@@ -1760,6 +1769,7 @@ async fn restart_bot_with_authority_body(
     }
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.kind == "claude-api" { return Err(LcError::conflict("api_bot_restart_unsupported", json!({"bot_id": bot_id}))); }
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }

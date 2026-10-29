@@ -319,7 +319,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -411,7 +411,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -475,7 +475,7 @@ mod tests {
             Arc::new(FailClosedQuoteProvider),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -524,7 +524,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -595,7 +595,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -654,7 +654,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: "http://127.0.0.1:9".into(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -714,7 +714,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -844,7 +844,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -917,7 +917,7 @@ mod tests {
             }),
             AdapterHttpConfig {
                 endpoint: server.endpoint.clone(),
-                key: "sk-ant-test-key".into(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                 timeout: std::time::Duration::from_secs(5),
                 max_response_bytes: 1024 * 1024,
             },
@@ -982,7 +982,7 @@ mod tests {
                     }),
                     AdapterHttpConfig {
                         endpoint: server.endpoint.clone(),
-                        key: "sk-ant-test-key".into(),
+                        key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
                         timeout: std::time::Duration::from_secs(5),
                         max_response_bytes: 1024 * 1024,
                     },

@@ -989,6 +989,17 @@ async fn prompt_inner(
     // 主力保溫（#872）：計畫當時的 active run。鎖內 active run 已換掉、不再 idle 或有排隊回合就不送（`superseded_run`）。
     expected_run: Option<&str>,
 ) -> LcResult<PromptOut> {
+    let bot_kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
+    if bot_kind == "claude-api" {
+        if group_id.is_some() || deliver.is_some() || !attachment_ids.is_empty() || relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
+            return Err(LcError::Bad("api_native_prompt_unsupported".into()));
+        }
+        if text.trim().is_empty() || client_request_id.trim().is_empty() { return Err(LcError::Bad("api_native_prompt_invalid".into())); }
+        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt(app, bot_id, text, client_request_id)
+            .await.map_err(|error| match error {
+                crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
+            });
+    }
     let deliver = deliver.unwrap_or(text);
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;

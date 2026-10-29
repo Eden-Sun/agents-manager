@@ -2908,7 +2908,8 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 /// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
 pub const DELIVERY_CRITICAL_PREDICATE: &str = "(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
                        AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working')))
-      OR (t.status='in_flight' AND t.delivery='pending')";
+      OR (t.status='in_flight' AND t.delivery='pending')
+      OR (t.status='in_flight' AND t.delivery='ok' AND EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind='claude-api'))";
 
 /// 上面那份條件套在「任何一顆 bot」上，給 `NOT EXISTS (…)` 用。沒有 bind 參數。
 pub fn delivery_critical_anywhere_sql() -> String {
@@ -2925,7 +2926,7 @@ pub fn delivery_critical_anywhere_sql() -> String {
 pub fn delivery_critical_except_sql() -> String {
     format!(
         "SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE c.bot_id <> ? AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"
+          WHERE (c.bot_id <> ? OR EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind='claude-api')) AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"
     )
 }
 
@@ -5179,6 +5180,28 @@ mod persona_migration_tests {
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_api_turn_blocks_quiet_lease_including_own_requester() {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let conv = crate::db::ulid(); let turn = crate::db::ulid();
+        let now = crate::db::now(); let until = crate::db::iso_in(300);
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)").bind(&run).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)").bind(&conv).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(&turn).bind(&conv).bind(&run).bind(&now).execute(&env.app.db).await.unwrap();
+        for delivery in ["pending", "ok"] {
+            sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(&turn).execute(&env.app.db).await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), acquire_lease(&env.app.db, &crate::db::ulid(), "owner", None, None, &until, true, Some(&bot), &serde_json::json!({}))).await.unwrap().unwrap();
+            assert!(result.is_none(), "API requester cannot exclude its own live turn");
+        }
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&turn).execute(&env.app.db).await.unwrap();
+        assert!(acquire_lease(&env.app.db, &crate::db::ulid(), "owner", None, None, &until, true, Some(&bot), &serde_json::json!({})).await.unwrap().is_some());
+        sqlx::query("UPDATE bots SET kind='claude' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        let cli_turn = crate::db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','pending',?)").bind(&cli_turn).bind(&conv).bind(&run).bind(&now).execute(&env.app.db).await.unwrap();
+        assert!(acquire_lease(&env.app.db, &crate::db::ulid(), "owner", None, None, &until, true, Some(&bot), &serde_json::json!({})).await.unwrap().is_some(), "CLI self exclusion remains intact");
+    }
 
     /// #831：重申請讀完「要取代哪一筆 pending」、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖
     /// 直接 517，申請整個被拒；寫鎖從讀之前就拿著，插進來的那一筆等，新申請照建、舊的照樣被取代。
