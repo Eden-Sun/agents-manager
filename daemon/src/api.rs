@@ -2299,6 +2299,7 @@ async fn patch_project(
 
 pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await?;
+    crate::api_bot::schedule_retention_after_delete(app);
     crate::share::revoke_bot_share(app, bot_id).await
 }
 
@@ -2398,6 +2399,7 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
         crate::delete_intents::abandon(&app, &intent, "delete_in_config refused").await;
         return Err(e);
     }
+    crate::api_bot::schedule_retention_after_delete(&app);
     let mut share_retry = false;
     if let Err(e) = crate::share::revoke_project_shares(&app, &id).await {
         tracing::error!(project = %id, error = %e, "project deleted but its share links could not all be revoked; retrying in the background");
@@ -3376,6 +3378,7 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
         crate::delete_intents::abandon(&app, &intent, "the delete was refused").await;
         return Err(e);
     }
+    crate::api_bot::schedule_retention_after_delete(&app);
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
     // 輸入框草稿跟著 bot 走（含一併刪掉的 child）。

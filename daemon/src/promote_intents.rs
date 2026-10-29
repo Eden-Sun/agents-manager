@@ -220,9 +220,12 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     }
     // 4. 收掉 child 紀錄（它的 run 已經停了）。
     if child_live {
-        crate::child_retire::retire(app, &child_id, "promote_recovered", crate::child_retire::Mode::Explicit)
+        let outcome = crate::child_retire::retire(app, &child_id, "promote_recovered", crate::child_retire::Mode::Explicit)
             .await
             .map_err(|x| format!("cannot retire the child: {x:#}"))?;
+        if matches!(outcome, crate::child_retire::Outcome::Retired) {
+            crate::api_bot::schedule_retention_after_delete(app);
+        }
         lifecycle::purge_bot_dir(app, &child_id, LOCAL_HOST).await;
     }
     app.emit("bot_changed", json!({"bot_id": child_id})).await;

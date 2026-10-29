@@ -360,7 +360,13 @@ impl IngressCommands for App {
     ) -> impl Future<Output = Result<crate::child_retire::Outcome>> + 'a {
         let app = self.shared();
         let caller = std::panic::Location::caller();
-        async move { crate::runners::child_retire::retire_at(&app, bot_id, why, mode, caller).await }
+        async move {
+            let result = crate::runners::child_retire::retire_at(&app, bot_id, why, mode, caller).await;
+            if matches!(&result, Ok(crate::child_retire::Outcome::Retired)) {
+                crate::api_bot::schedule_retention_after_delete(&app);
+            }
+            result
+        }
     }
     async fn retirement_block(&self, bot_id: &str) -> Result<Option<String>> {
         crate::child_reconcile_safety::retirement_block(&self.db, bot_id).await
