@@ -56,6 +56,7 @@ check "api::bot_scope_matrix:: testing::scratch_leak_guard:: timestamp_compat_te
 check "runners::s6_l::app_ports_p4sess:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/app_ports_p4sess.rs"
 check "remote_cargo::hosts:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/remote_cargo_hosts.rs"
 check "state::limit_hit_tests:: testing::scratch_leak_guard::" "daemon/src/state_limit_hit_tests.rs"
+check "api_bot::startup_recovery_tests::startup_abandonment_tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/startup_abandonment_tests.rs"
 # 一般 production 檔加選跨檔守門，_tests.rs 測試檔不加選跨檔守門（#1983）。
 check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate.rs"
 check "testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/timestamp_compat_tests.rs"
