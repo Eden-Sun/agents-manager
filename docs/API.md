@@ -113,6 +113,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/*` | 無 principal；前端靜態檔 fallback |
 | GET | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
+| GET | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/outbox` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -187,6 +188,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/*` | 無 principal；前端靜態檔 fallback |
 | HEAD | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
+| HEAD | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/outbox` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
