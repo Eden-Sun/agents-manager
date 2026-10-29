@@ -1361,12 +1361,24 @@ mod arc_port_api_bot {
     use std::future::Future;
 
     impl<T: ApiBotPort + ?Sized> ApiBotPort for std::sync::Arc<T> {
+        fn api_native_start(&self, bot_id: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError>> + Send {
+            <T as ApiBotPort>::api_native_start(self.as_ref(), bot_id, mode)
+        }
+        fn api_native_prompt(&self, bot_id: &str, text: &str, crid: &str) -> impl Future<Output = Result<crate::lc_error::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
+            <T as ApiBotPort>::api_native_prompt(self.as_ref(), bot_id, text, crid)
+        }
+        fn api_fresh_target(&self, bot_id: &str) -> impl Future<Output = crate::lifecycle::api_bot_port::ApiFreshAvailability> + Send {
+            <T as ApiBotPort>::api_fresh_target(self.as_ref(), bot_id)
+        }
         fn api_recovery_ready(&self) -> bool { <T as ApiBotPort>::api_recovery_ready(self.as_ref()) }
         fn api_explicit_retire(&self, bot_id: &str, target: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError>> + Send {
             <T as ApiBotPort>::api_explicit_retire(self.as_ref(), bot_id, target)
         }
         fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode) -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send {
             <T as ApiBotPort>::api_run_begin_stop(self.as_ref(), key, mode)
+        }
+        fn api_turn_spawn_pending(&self, key: &ApiTurnKey) -> impl Future<Output = Result<(), ApiBotError>> + Send {
+            <T as ApiBotPort>::api_turn_spawn_pending(self.as_ref(), key)
         }
         fn api_turn_spawn(
             &self,

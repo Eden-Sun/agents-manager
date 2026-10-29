@@ -147,10 +147,12 @@ impl ApiBotRuntime {
     }
 
     async fn spawn(&self, app: &crate::state::App, key: &ApiTurnKey) -> Result<(), ApiBotError> {
-        let Some(dependencies) = self.dependencies_snapshot() else {
-            return Err(ApiBotError::Upstream);
-        };
-        self.spawn_with_dependencies(app, key, dependencies).await
+        self.spawn_with_dependencies(app, key, self.dependencies_snapshot(), false).await
+    }
+
+    pub(super) async fn spawn_native(&self, app: &crate::state::App, key: &ApiTurnKey) -> Result<(), ApiBotError> {
+        if !app.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
+        self.spawn_with_dependencies(app, key, self.dependencies_snapshot(), true).await
     }
 
     async fn cancel_and_join(
@@ -158,9 +160,7 @@ impl ApiBotRuntime {
         app: &crate::state::App,
         key: &ApiTurnKey,
     ) -> Result<ApiRunCompletion, ApiBotError> {
-        if self.dependencies_snapshot().is_none() {
-            return Err(ApiBotError::Upstream);
-        }
+        if !app.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
         self.cancel_and_join_core(app, key).await
     }
 
@@ -169,9 +169,8 @@ impl ApiBotRuntime {
         app: &crate::state::App,
         key: &ApiRunKey,
     ) -> Result<ApiRunStopProof, ApiBotError> {
-        let Some(dependencies) = self.dependencies_snapshot() else {
-            return Err(ApiBotError::Upstream);
-        };
+        if !app.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
+        let dependencies = self.dependencies_snapshot();
 
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("api_run_stop_before_admission", &key.run_id).await;
@@ -198,8 +197,8 @@ impl ApiBotRuntime {
             return Err(ApiBotError::Busy);
         }
 
-        let timeout = dependencies
-            .shutdown_join_timeout
+        let timeout = dependencies.as_ref()
+            .and_then(|d| d.shutdown_join_timeout)
             .unwrap_or(API_BOT_SHUTDOWN_JOIN_TIMEOUT);
         let joined = tokio::time::timeout(
             timeout,
@@ -233,9 +232,7 @@ impl ApiBotRuntime {
     }
 
     async fn live(&self, app: &crate::state::App, key: &ApiTurnKey) -> bool {
-        if self.dependencies_snapshot().is_none() {
-            return false;
-        }
+        if !app.api_startup_gate.ready() { return false; }
         cleanup_terminal_controls(&app.db, &self.inner).await;
         let full = FullKey::from(key);
         let controls = self.inner.controls.lock().expect("control mutex poisoned");
@@ -248,6 +245,7 @@ impl ApiBotRuntime {
     }
 
     // Lock order: lifecycle bot lock (when held) → API bot gate → run admission → controls.
+    // The only read-only gate user is the bounded fresh-target descriptor; it takes no later locks.
     async fn bot_gate(&self, bot_id: &str) -> OwnedMutexGuard<()> {
         let gate = {
             let mut gates = self.inner.bot_admission.lock().await;
@@ -262,6 +260,38 @@ impl ApiBotRuntime {
 
     async fn admission_gate(&self, key: &ApiRunKey) -> OwnedMutexGuard<()> {
         admission_gate_for(&self.inner, key).await
+    }
+
+    pub(super) async fn native_start_dependencies_ready(&self, app: &crate::state::App, bot_id: &str) -> Result<(), ApiBotError> {
+        let _gate = tokio::select! {
+            biased;
+            _ = app.shutdown.cancelled() => return Err(ApiBotError::Unconfirmed),
+            result = tokio::time::timeout(Duration::from_secs(3), self.bot_gate(bot_id)) => result.map_err(|_| ApiBotError::Busy)?,
+        };
+        if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { return Err(ApiBotError::Unconfirmed); }
+        let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ApiBotError::Upstream)?.filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or(ApiBotError::Unconfirmed)?;
+        let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| ApiBotError::Upstream)?.filter(|p| p.deleted_at.is_none() && p.host == crate::config::LOCAL_HOST && p.handed_off_to.is_none()).ok_or(ApiBotError::Unconfirmed)?;
+        let cfg = app.cfg.get().await;
+        let limits = cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| ApiBotError::Upstream)?.ok_or(ApiBotError::Upstream)?;
+        if self.dependencies_snapshot().is_none() {
+            let dependencies = production_dependencies(app, &bot, &project, &limits)?;
+            let key = dependencies.key_source.snapshot().await.map_err(|_| ApiBotError::Upstream)?;
+            if key.is_empty() { return Err(ApiBotError::Upstream); }
+            drop(key);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn native_start_guard(&self, key: &ApiRunKey) -> Result<NativeStartGuard, ApiBotError> {
+        let bot = self.bot_gate(&key.bot_id).await;
+        let run = self.admission_gate(key).await;
+        let controls = self.inner.controls.lock().expect("control mutex poisoned");
+        if self.inner.registry.is_active(&key.run_id) || controls.iter().any(|(k, r)| k.bot_id == key.bot_id && (!r.owner_exited || !matches!(*r.joined.borrow(), JoinState::Joined(Ok(_))) || self.inner.registry.is_active(&k.run_id))) {
+            tracing::info!(reason="api_native_start_owner_unconfirmed", "API start owner remains busy");
+            return Err(ApiBotError::Busy);
+        }
+        drop(controls);
+        Ok(NativeStartGuard { _bot: bot, _run: run })
     }
 
     pub(super) async fn retention_guard(&self, app: &crate::state::App, key: &ApiRunKey) -> Result<RetentionGuard, ApiBotError> {
@@ -366,16 +396,32 @@ impl ApiBotRuntime {
         .await
     }
 
-    async fn spawn_with_dependencies(
+    #[cfg(all(test, feature = "daemon-test-harness"))]
+    pub(super) fn arm_delivery_lost_ack_for_test(turn: &str) {
+        assert!(delivery_lost_acks().lock().unwrap().insert(turn.to_owned()));
+    }
+
+    fn spawn_with_dependencies<'a>(
+        &'a self,
+        app: &'a crate::state::App,
+        key: &'a ApiTurnKey,
+        dependencies: Option<ApiBotDependencies>,
+        native_pending: bool,
+    ) -> impl Future<Output = Result<(), ApiBotError>> + Send + 'a {
+        Box::pin(self.spawn_with_dependencies_body(app, key, dependencies, native_pending))
+    }
+
+    async fn spawn_with_dependencies_body(
         &self,
         app: &crate::state::App,
         key: &ApiTurnKey,
-        dependencies: ApiBotDependencies,
+        dependencies: Option<ApiBotDependencies>,
+        native_pending: bool,
     ) -> Result<(), ApiBotError> {
         let _bot_admission = self.bot_gate(&key.bot_id).await;
         if self.inner.explicit_quarantine.lock().expect("quarantine mutex poisoned").contains_key(&key.bot_id) { return Err(ApiBotError::Unconfirmed); }
         let _admission = self.spawn_gate(key).await;
-        cleanup_terminal_controls(&app.db, &self.inner).await;
+        if !native_pending { cleanup_terminal_controls(&app.db, &self.inner).await; }
         let full = FullKey::from(key);
         let prior = {
             let controls = self.inner.controls.lock().expect("control mutex poisoned");
@@ -405,8 +451,8 @@ impl ApiBotRuntime {
 
         let (bot, project, run, prompt) = validated_turn(app, key).await?;
         if let Some((_, _, proof)) = &prior {
-            let same_conversation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns old JOIN turns next ON next.conversation_id=old.conversation_id WHERE old.id=? AND old.run_id=? AND next.id=? AND next.run_id=? AND next.status='in_flight' AND next.delivery='ok')")
-                .bind(&proof.identity.turn_id).bind(&key.run_id).bind(&key.turn_id).bind(&key.run_id)
+            let same_conversation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns old JOIN turns next ON next.conversation_id=old.conversation_id WHERE old.id=? AND old.run_id=? AND next.id=? AND next.run_id=? AND next.status='in_flight' AND (next.delivery='ok' OR (? AND next.delivery='pending')))")
+                .bind(&proof.identity.turn_id).bind(&key.run_id).bind(&key.turn_id).bind(&key.run_id).bind(native_pending)
                 .fetch_one(&app.db).await.map_err(|_| ApiBotError::Busy)?;
             if !same_conversation { return Err(ApiBotError::Busy); }
         }
@@ -417,6 +463,10 @@ impl ApiBotRuntime {
             .validated(cfg.claude_api.enabled)
             .map_err(|_| ApiBotError::Upstream)?
             .ok_or(ApiBotError::Upstream)?;
+        let dependencies = match dependencies {
+            Some(dependencies) => dependencies,
+            None => production_dependencies(app, &bot, &project, &limits)?,
+        };
         let effort = bot.effort.clone().ok_or(ApiBotError::Upstream)?;
         let options = super::protocol::Options {
             effort,
@@ -437,10 +487,10 @@ impl ApiBotRuntime {
             max_turn_microusd: limits.max_turn_cost_microusd,
             max_requests_per_hour: i64::from(limits.max_requests_per_hour),
         };
-        let (identity, expected_cursor) = self.identity_for_turn(&app.db, &full).await?;
+        let (identity, expected_cursor, resume_old_admission) = self.identity_for_turn(app, &full).await?;
         let session_cursor = expected_cursor.clone();
         let (adapter, mut state) = if let Some(cursor) = session_cursor {
-            let (adapter, state) = super::adapter::ApiBotAdapter::rebind(
+            let (adapter, state) = match super::adapter::ApiBotAdapter::rebind(
                 app.db.clone(),
                 &cursor.identity,
                 cursor.revision,
@@ -451,9 +501,16 @@ impl ApiBotRuntime {
                 dependencies.quote.clone(),
                 api_http_config(&dependencies, &limits),
                 Some(dependencies.tools.clone()),
-            )
-            .await
-            .map_err(|_| if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed })?;
+            ).await {
+                Ok(value) => value,
+                Err(_) => {
+                    if resume_old_admission.is_some() {
+                        let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+                        if sessions.get(&key.bot_id) == Some(&cursor) { sessions.remove(&key.bot_id); }
+                    }
+                    return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
+                }
+            };
             (Arc::new(adapter), state)
         } else {
             let adapter = super::adapter::ApiBotAdapter::new(
@@ -471,6 +528,7 @@ impl ApiBotRuntime {
             (Arc::new(adapter), super::runner::State::default())
         };
 
+        drop(resume_old_admission);
         if state.api_pending || state.tool_pending.is_some() {
             return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
         }
@@ -500,6 +558,10 @@ impl ApiBotRuntime {
         let max_calls = limits.max_api_calls_per_turn as usize;
         let turn_timeout = Duration::from_secs(limits.turn_timeout_secs);
         let (final_text_tx, final_text_rx) = oneshot::channel();
+        let (release_tx, release_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
+        let (accept_tx, accept_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
+        let mut join_wait = joined_rx.clone();
+        let release_shutdown = app.shutdown.clone();
         #[cfg(all(test, feature = "daemon-test-harness"))]
         let runner_run_id = key.run_id.clone();
         #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -514,6 +576,10 @@ impl ApiBotRuntime {
             .inner
             .registry
             .spawn_tracked(registry_key, move |cancel| async move {
+                if let Some(release) = release_rx {
+                    let admitted = tokio::select! { biased; _ = release_shutdown.cancelled() => false, _ = cancel.cancelled() => false, result = release => result.is_ok() };
+                    if !admitted { return Ok(TurnOutcome::Cancelled); }
+                }
                 #[cfg(all(test, feature = "daemon-test-harness"))]
                 crate::lifecycle::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
@@ -589,15 +655,17 @@ impl ApiBotRuntime {
         let owner_inner = self.inner.clone();
         let owner_key = full.clone();
         let supervisor_shutdown = shutdown.clone();
+        let cancel_before_release = cancel.clone();
         app.background_tasks.spawn(Box::pin(async move {
+            let accepted = match accept_rx { Some(rx) => rx.await.unwrap_or(false), None => true };
             let task = tokio::spawn(Box::pin(own_ticket_inner(
                 run_ticket,
                 cancel,
                 shutdown,
                 joined_tx,
                 shutdown_timeout,
-                Some(completion_owner),
-                Some(session_commit),
+                accepted.then_some(completion_owner),
+                accepted.then_some(session_commit),
             )));
             let outcome = task.await;
             #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -614,6 +682,51 @@ impl ApiBotRuntime {
                 }
             }
         }));
+        if native_pending {
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            crate::lifecycle::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
+            let admitted = async {
+                let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| ())?;
+                let changed = sqlx::query("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.host='local' AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)")
+                    .bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id).bind(bot.cwd.as_deref()).bind(&project.path).execute(&mut *tx).await.map_err(|_| ())?;
+                if changed.rows_affected() != 1 || app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| ())?; return Err(()); }
+                tx.commit().await.map_err(|_| ())?;
+                #[cfg(all(test, feature = "daemon-test-harness"))]
+                if delivery_lost_acks().lock().unwrap().remove(&key.turn_id) { return Err(()); }
+                Ok::<(), ()>(())
+            }.await;
+            if admitted.is_err() {
+                if let Some(tx) = accept_tx { let _ = tx.send(false); }
+                cancel_before_release.cancel();
+                let _ = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM turns t JOIN runs r ON r.id=t.run_id JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND r.id=? AND r.bot_id=? AND c.bot_id=r.bot_id AND t.delivery='ok')")
+                    .bind(&key.turn_id).bind(&key.run_id).bind(&key.bot_id).fetch_one(&app.db).await;
+                drop(release_tx);
+                drop(_admission);
+                drop(_bot_admission);
+                let _ = tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait_join(&mut join_wait)).await;
+                return Err(ApiBotError::Unconfirmed);
+            }
+            #[cfg(all(test, feature = "daemon-test-harness"))]
+            crate::lifecycle::race_point::hit("api_native_after_delivery_commit", &key.turn_id).await;
+            if app.shutdown.is_cancelled() {
+                if let Some(tx) = accept_tx { let _ = tx.send(false); }
+                cancel_before_release.cancel();
+                drop(release_tx);
+                drop(_admission);
+                drop(_bot_admission);
+                let _ = tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait_join(&mut join_wait)).await;
+                return Err(ApiBotError::Unconfirmed);
+            }
+            let accepted = accept_tx.is_some_and(|tx| tx.send(true).is_ok());
+            let released = if accepted { release_tx.is_some_and(|tx| tx.send(()).is_ok()) } else { drop(release_tx); false };
+            if !accepted || !released {
+                cancel_before_release.cancel();
+                drop(_admission);
+                drop(_bot_admission);
+                let _ = tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait_join(&mut join_wait)).await;
+                return Err(ApiBotError::Unconfirmed);
+            }
+        }
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("api_run_spawn_after_registry", &key.run_id).await;
         Ok(())
@@ -621,9 +734,10 @@ impl ApiBotRuntime {
 
     async fn identity_for_turn(
         &self,
-        pool: &sqlx::SqlitePool,
+        app: &crate::state::App,
         key: &FullKey,
-    ) -> Result<(super::adapter::AdapterIdentity, Option<SessionCursor>), ApiBotError> {
+    ) -> Result<(super::adapter::AdapterIdentity, Option<SessionCursor>, Option<OwnedMutexGuard<()>>), ApiBotError> {
+        let pool = &app.db;
         let session_cursor = {
             self.inner
                 .sessions
@@ -651,6 +765,7 @@ impl ApiBotRuntime {
                     generation,
                 },
                 Some(cursor),
+                None,
             ));
         }
         let existing: bool = sqlx::query_scalar(
@@ -661,7 +776,32 @@ impl ApiBotRuntime {
         .await
         .map_err(|_| ApiBotError::Upstream)?;
         if existing {
-            return Err(ApiBotError::Unconfirmed);
+            if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() { return Err(ApiBotError::Unconfirmed); }
+            let old: Option<String> = sqlx::query_scalar("SELECT owner_run_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL")
+                .bind(&key.bot_id).fetch_optional(pool).await.map_err(|_| ApiBotError::Unconfirmed)?.flatten();
+            let Some(old) = old else { return Err(ApiBotError::Unconfirmed); };
+            if old == key.run_id { return Err(ApiBotError::Unconfirmed); }
+            // Caller holds bot gate then new-run admission. Old-run admission comes next;
+            // completion retries take only their own run gate and never acquire the bot gate.
+            let old_key = ApiRunKey { bot_id: key.bot_id.clone(), run_id: old.clone() };
+            let old_admission = self.admission_gate(&old_key).await;
+            let busy = {
+                let controls = self.inner.controls.lock().expect("control mutex poisoned");
+                self.inner.registry.is_active(&old) || self.inner.registry.is_active(&key.run_id)
+                    || controls.iter().any(|(k,r)| k.bot_id == key.bot_id && (!r.owner_exited || !matches!(*r.joined.borrow(), JoinState::Joined(Ok(_))) || self.inner.registry.is_active(&k.run_id)))
+            };
+            if busy { return Err(ApiBotError::Busy); }
+            let proof = match super::native_resume::prove(pool, &key.bot_id, &key.run_id, &old).await {
+                Ok(proof) => proof,
+                Err(error) => { tracing::info!(reason="api_native_resume_unconfirmed", "API session continuity unconfirmed"); return Err(error); }
+            };
+            if app.shutdown.is_cancelled() { return Err(ApiBotError::Unconfirmed); }
+            let cursor = SessionCursor { identity: proof.identity, revision: proof.revision };
+            let generation = cursor.identity.generation.checked_add(1).ok_or(ApiBotError::Unconfirmed)?;
+            let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+            if sessions.contains_key(&key.bot_id) { return Err(ApiBotError::Unconfirmed); }
+            sessions.insert(key.bot_id.clone(), cursor.clone());
+            return Ok((super::adapter::AdapterIdentity { session_id: cursor.identity.session_id.clone(), bot_id: key.bot_id.clone(), run_id: key.run_id.clone(), turn_id: key.turn_id.clone(), generation }, Some(cursor), Some(old_admission)));
         }
         Ok((
             super::adapter::AdapterIdentity {
@@ -671,6 +811,7 @@ impl ApiBotRuntime {
                 turn_id: key.turn_id.clone(),
                 generation: 1,
             },
+            None,
             None,
         ))
     }
@@ -737,6 +878,27 @@ impl Default for ApiBotRuntime {
 }
 
 impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
+    fn api_native_prompt(&self, bot_id: &str, text: &str, crid: &str) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
+        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid).await }
+    }
+    fn api_native_start(&self, bot_id: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError>> + Send {
+        async move { super::native_start::start(&self.shared(), bot_id, mode).await }
+    }
+    async fn api_fresh_target(&self, bot_id: &str) -> crate::lifecycle::api_bot_port::ApiFreshAvailability {
+        use crate::lifecycle::api_bot_port::{ApiFreshAvailability as A, ApiFreshTarget};
+        match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if bot.kind == "claude-api" && bot.deleted_at.is_none() => {}, _ => return A::Unavailable };
+        let _gate = match tokio::time::timeout(Duration::from_secs(3), self.api_bot_runtime.bot_gate(bot_id)).await { Ok(guard) => guard, Err(_) => return A::Unavailable };
+        let bot = match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if bot.kind == "claude-api" && bot.deleted_at.is_none() => bot, _ => return A::Unavailable };
+        if !self.api_startup_gate.ready() || self.shutdown.is_cancelled() || self.api_bot_runtime.explicit_retire_quarantined(&bot.id) { return A::Unavailable; }
+        if !matches!(crate::db::project(&self.db, &bot.project_id).await, Ok(Some(p)) if p.deleted_at.is_none() && p.host == crate::config::LOCAL_HOST && p.handed_off_to.is_none()) { return A::Unavailable; }
+        let expiry = crate::db::ts_sql("expires_at");
+        let sql = format!("SELECT id,generation,{expiry}>? FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL");
+        match sqlx::query_as::<_, (String,i64,bool)>(&sql).bind(crate::db::now()).bind(&bot.id).fetch_optional(&self.db).await {
+            Ok(Some((session_id,generation,true))) if generation > 0 => A::Available(ApiFreshTarget { session_id, generation }),
+            Ok(None) => A::None,
+            _ => A::Unavailable,
+        }
+    }
     fn api_recovery_ready(&self) -> bool { self.api_startup_gate.ready() }
     fn api_explicit_retire(&self, bot_id: &str, target: &crate::lifecycle::api_bot_port::ApiFreshTarget) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiFreshResult, crate::lifecycle::api_bot_port::ApiFreshError>> + Send {
         async move { super::explicit_retirement::retire(&self.shared(), bot_id, target).await }
@@ -760,6 +922,13 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
             result
         }
     }
+    fn api_turn_spawn_pending(&self, key: &ApiTurnKey) -> impl Future<Output = Result<(), ApiBotError>> + Send {
+        async move {
+            if !self.api_startup_gate.ready() { return Err(ApiBotError::Upstream); }
+            self.api_bot_runtime.spawn_native(self, key).await
+        }
+    }
+
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,
@@ -1302,10 +1471,38 @@ impl super::runner::Tools for SharedTools {
 #[derive(Clone)]
 struct ApiBotDependencies {
     endpoint: String,
-    key: String,
+    key_source: Arc<dyn super::adapter::KeySource>,
     quote: Arc<dyn super::quote::QuoteProvider>,
     tools: Arc<dyn super::runner::Tools>,
     shutdown_join_timeout: Option<Duration>,
+}
+
+struct ConfigKeySource(std::sync::Weak<crate::state::App>);
+impl super::adapter::KeySource for ConfigKeySource {
+    fn snapshot(&self) -> futures::future::BoxFuture<'_, Result<super::adapter::Secret, ()>> {
+        Box::pin(async move {
+            let app = self.0.upgrade().ok_or(())?;
+            let cfg = app.cfg.get().await;
+            cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| ())?.ok_or(())?;
+            crate::key_file::read_key(&cfg.claude_api.key_file).map(super::adapter::Secret::new).map_err(|_| ())
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn native_bwrap_available() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata("/usr/bin/bwrap").is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+#[cfg(not(target_os = "linux"))]
+fn native_bwrap_available() -> bool { false }
+
+fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, project: &crate::db::Project, limits: &am_config::api_bot::ValidatedLimits) -> Result<ApiBotDependencies, ApiBotError> {
+    if !native_bwrap_available() { return Err(ApiBotError::Upstream); }
+    let root = crate::lifecycle::start::bot_cwd(bot, project);
+    let tools = super::tools::LocalTools::new(std::path::Path::new(root), super::tools::Limits { timeout: Duration::from_secs(limits.command_timeout_secs), output_bytes: limits.max_tool_output_bytes }).map_err(|_| ApiBotError::Upstream)?;
+    let key_source = Arc::new(ConfigKeySource(Arc::downgrade(&app.shared())));
+    Ok(ApiBotDependencies { endpoint: "https://api.anthropic.com/v1/messages".into(), key_source, quote: Arc::new(super::pricing::Opus55Global), tools: Arc::new(tools), shutdown_join_timeout: None })
 }
 
 fn api_http_config(
@@ -1314,7 +1511,7 @@ fn api_http_config(
 ) -> super::adapter::AdapterHttpConfig {
     super::adapter::AdapterHttpConfig {
         endpoint: dependencies.endpoint.clone(),
-        key: dependencies.key.clone(),
+        key_source: dependencies.key_source.clone(),
         timeout: Duration::from_secs(limits.turn_timeout_secs),
         max_response_bytes: limits.max_checkpoint_bytes.min(8 * 1024 * 1024),
     }
@@ -1424,6 +1621,17 @@ async fn stored_revision(
 
 
 // Startup-only capabilities: private metadata, never a new join or wire result.
+#[cfg(all(test, feature = "daemon-test-harness"))]
+fn delivery_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub(super) struct NativeStartGuard {
+    _bot: OwnedMutexGuard<()>,
+    _run: OwnedMutexGuard<()>,
+}
+
 pub(super) struct StartupGuard {
     identity: super::adapter::AdapterIdentity,
     inner: Arc<RuntimeInner>,
@@ -1704,7 +1912,7 @@ impl ApiBotRuntime {
         assert!(port.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n != 0)), "fixture endpoint must be literal loopback with a port");
         self.set_test_dependencies(ApiBotDependencies {
             endpoint: endpoint.into(),
-            key: "startup-test-only".into(),
+            key_source: Arc::new(super::adapter::FixedTestKey("startup-test-only".into())),
             quote: Arc::new(super::quote::FailClosed),
             tools,
             shutdown_join_timeout: None,
@@ -1815,7 +2023,7 @@ async fn startup_checkpoint_on(
         StartupCheckpoint::Unresolved
     })
 }
-fn startup_context_settled(state: &super::runner::State) -> bool {
+pub(super) fn startup_context_settled(state: &super::runner::State) -> bool {
     if state.api_pending || state.tool_pending.is_some() {
         return false;
     }
@@ -1890,7 +2098,7 @@ async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner
         controls
             .iter()
             .filter_map(|(key, record)| {
-                (record.owner_exited && matches!(*record.joined.borrow(), JoinState::Joined(_)))
+                (record.owner_exited && matches!(*record.joined.borrow(), JoinState::Joined(Ok(_))))
                     .then(|| (key.clone(), record.identity.clone()))
             })
             .collect()
@@ -1919,7 +2127,7 @@ async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner
         let same_record = controls.get(&key).is_some_and(|record| {
             Arc::ptr_eq(&record.identity, &identity)
                 && record.owner_exited
-                && matches!(*record.joined.borrow(), JoinState::Joined(_))
+                && matches!(*record.joined.borrow(), JoinState::Joined(Ok(_)))
         });
         if same_record {
             controls.remove(&key);
@@ -1947,6 +2155,646 @@ mod tests {
     fn claude_api_kind_stays_out_of_the_bot_creation_allowlist() {
         // create_bot rejects any kind not accepted by this guard before it reaches storage.
         assert!(!crate::config::valid_kind("claude-api"));
+    }
+
+    #[test]
+    fn native_start_prompt_dispatch_fits_one_mib_stack() {
+        std::thread::Builder::new().stack_size(1024 * 1024).spawn(native_start_and_prompt_dispatch_to_fake_provider).unwrap().join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_start_and_prompt_dispatch_to_fake_provider() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid();
+        let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,fast,hook_token,created_at) VALUES(?,?,'native-api','claude-api','high',0,'fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let result = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            let run = crate::lifecycle::start_bot(&env.app, &bot).await.map_err(|_| "native start failed")?;
+            let pane: Option<String> = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?")
+                .bind(&run).fetch_one(&env.app.db).await.map_err(|_| "run missing")?;
+            if pane.is_some() { return Err("API run has a pane"); }
+            crate::lifecycle::prompt(&env.app, &bot, "fixture prompt", &crid)
+                .await.map_err(|_| "native prompt failed")?;
+            tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.map_err(|_| "fake provider not called")?;
+            Ok::<(), &str>(())
+        }).await;
+        shutdown.cancel();
+        server.await.unwrap();
+        assert!(matches!(result, Ok(Ok(()))), "native fake dispatch: {result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_start_guard_preserves_unconfirmed_and_unexited_owners() {
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let turn = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&turn).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let old = FullKey { bot_id: bot.clone(), run_id: run, turn_id: turn };
+        let key = ApiRunKey { bot_id: bot, run_id: crate::db::ulid() };
+        let (sender, joined) = watch::channel(JoinState::Joined(Err(JoinError::Unconfirmed)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().insert(old.clone(), ControlRecord { identity: Arc::new(()), cancel: CancellationToken::new(), joined, finalized: None, owner_exited: true });
+        cleanup_terminal_controls(&env.app.db, &env.app.api_bot_runtime.inner).await;
+        assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&old));
+        assert!(matches!(env.app.api_bot_runtime.native_start_guard(&key).await, Err(ApiBotError::Busy)));
+        sender.send_replace(JoinState::Joined(Ok(Completion::Completed)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().get_mut(&old).unwrap().owner_exited = false;
+        cleanup_terminal_controls(&env.app.db, &env.app.api_bot_runtime.inner).await;
+        assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&old));
+        assert!(matches!(env.app.api_bot_runtime.native_start_guard(&key).await, Err(ApiBotError::Busy)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().get_mut(&old).unwrap().owner_exited = true;
+        assert!(env.app.api_bot_runtime.native_start_guard(&key).await.is_ok());
+        cleanup_terminal_controls(&env.app.db, &env.app.api_bot_runtime.inner).await;
+        assert!(!env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&old));
+    }
+
+    #[tokio::test]
+    async fn native_pending_real_commit_synthetic_lost_ack_does_not_dispatch_on_retry() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        super::super::native_prompt::arm_pending_lost_ack_for_test(&crid);
+        let first = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await;
+        let retry = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await;
+        let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,delivery FROM turns WHERE client_request_id=?").bind(&crid).fetch_all(&env.app.db).await.unwrap();
+        let n = calls.load(Ordering::SeqCst);
+        shutdown.cancel(); server.await.unwrap();
+        assert!(first.is_err() && retry.is_err());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "pending");
+        assert_eq!(n, 0);
+        assert_eq!(env.app.api_bot_runtime.control_count_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_runner_waits_for_durable_delivery_acceptance() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let provider_hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), provider_hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let pending_reached = Arc::new(Notify::new()); let pending_release = Arc::new(Notify::new());
+        let a = pending_reached.clone(); let b = pending_release.clone();
+        crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+        let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
+        let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, pending_reached.notified()).await.unwrap();
+        let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
+        let before_reached = Arc::new(Notify::new()); let before_release = Arc::new(Notify::new());
+        let a = before_reached.clone(); let b = before_release.clone();
+        crate::lifecycle::race_point::arm("api_native_before_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+        pending_release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, before_reached.notified()).await.unwrap();
+        let before: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        let before_calls = calls.load(Ordering::SeqCst);
+        let controls = env.app.api_bot_runtime.control_count_for_test();
+        let after_reached = Arc::new(Notify::new()); let after_release = Arc::new(Notify::new());
+        let a = after_reached.clone(); let b = after_release.clone();
+        crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+        before_release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, after_reached.notified()).await.unwrap();
+        let committed: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        let committed_calls = calls.load(Ordering::SeqCst);
+        after_release.notify_one();
+        let result = tokio::time::timeout(DEADLOCK_TIMEOUT, task).await.unwrap().unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, provider_hit.notified()).await.unwrap();
+        let after: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        env.app.background_tasks.close();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(before, "pending"); assert_eq!(before_calls, 0); assert_eq!(controls, 1);
+        assert_eq!(committed, "ok"); assert_eq!(committed_calls, 0);
+        assert_eq!(after, "ok"); assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_fresh_start_holds_lifecycle_lock_until_new_run_is_created() {
+        use crate::lifecycle::api_bot_port::{ApiFreshTarget, ApiNativeStartMode};
+        async fn completed(app: &crate::state::App, key: &ApiTurnKey, stage: &str) {
+            let result = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+                loop {
+                    let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=? AND run_id=?")
+                        .bind(&key.turn_id).bind(&key.run_id).fetch_optional(&app.db).await.unwrap();
+                    if status.as_deref() == Some("completed") { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await;
+            assert!(result.is_ok(), "{stage} completion timed out");
+        }
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::start_bot(&env.app, &bot)).await.expect("first start timed out").unwrap();
+        let first = tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::prompt(&env.app, &bot, "first", &crate::db::ulid())).await.expect("first prompt timed out").unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("provider response barrier timed out");
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run, turn_id: first.turn_id };
+        completed(&env.app, &key, "first turn").await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.expect("first owner exit timed out");
+        let (session, generation): (String,i64) = sqlx::query_as("SELECT id,generation FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        let target = ApiFreshTarget { session_id: session.clone(), generation };
+        let committed = Arc::new(Notify::new()); let finish_first = Arc::new(Notify::new());
+        let a = committed.clone(); let b = finish_first.clone();
+        crate::lifecycle::race_point::arm("api_fresh_after_commit", &session, move || async move { a.notify_one(); b.notified().await; });
+        let app = env.app.clone(); let id = bot.clone(); let first_target = ApiFreshTarget { session_id:session.clone(), generation };
+        let first_start = tokio::spawn(async move { app.api_native_start(&id, ApiNativeStartMode::Fresh(first_target)).await });
+        let reached = tokio::time::timeout(DEADLOCK_TIMEOUT, committed.notified()).await;
+        if reached.is_err() { finish_first.notify_one(); panic!("fresh postcommit barrier timed out"); }
+        let queued = super::super::native_start::observe_next_lock_pending(&bot);
+        let app = env.app.clone(); let id = bot.clone();
+        let second_start = tokio::spawn(async move { app.api_native_start(&id, ApiNativeStartMode::Fresh(target)).await });
+        let observed = tokio::time::timeout(DEADLOCK_TIMEOUT, queued).await;
+        finish_first.notify_one();
+        assert!(matches!(observed, Ok(Ok(()))), "tracked owner did not poll the bot lock pending");
+        let next = match tokio::time::timeout(DEADLOCK_TIMEOUT, first_start).await.expect("first fresh owner timed out").expect("first fresh task failed") { Ok(value) => value, Err(_) => panic!("fresh start did not complete") };
+        assert!(tokio::time::timeout(DEADLOCK_TIMEOUT, second_start).await.expect("second fresh owner timed out").expect("second fresh task failed").is_err());
+        let second = tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::prompt(&env.app, &bot, "successor", &crate::db::ulid())).await.expect("successor prompt timed out").unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("provider response barrier timed out");
+        let next_key = ApiTurnKey { bot_id: bot.clone(), run_id: next.run_id, turn_id: second.turn_id };
+        completed(&env.app, &next_key, "successor turn").await;
+        let successor: String = sqlx::query_scalar("SELECT id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert_ne!(successor, session);
+        let still: String = sqlx::query_scalar("SELECT id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(still, successor); assert_eq!(calls.load(Ordering::SeqCst), 2);
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.expect("background task drain timed out");
+        shutdown.cancel(); tokio::time::timeout(DEADLOCK_TIMEOUT, server).await.expect("fake server shutdown timed out").unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_user_router_fresh_target_start_and_prompt_dispatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn request(addr: std::net::SocketAddr, method: &str, path: &str, token: &str, body: &str) -> (String, Value) {
+            tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                let request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(request.as_bytes()).await.unwrap();
+                let mut response = String::new(); stream.read_to_string(&mut response).await.unwrap();
+                let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response framing");
+                (headers.lines().next().unwrap().to_owned(), serde_json::from_str(body).expect("JSON response"))
+            }).await.expect("router HTTP request timed out")
+        }
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, provider_stop, provider) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
+        let router_stop = CancellationToken::new(); let stop = router_stop.clone();
+        let router = crate::api::router(env.app.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        let token = &env.app.ui_token;
+        let (status, started) = request(addr, "POST", &format!("/api/bots/{bot}/start"), token, "").await;
+        assert!(status.contains(" 200 "), "start status: {status}");
+        let run = started["run_id"].as_str().unwrap().to_owned();
+        let crid = crate::db::ulid();
+        let (status, first) = request(addr, "POST", &format!("/api/bots/{bot}/prompt"), token, &json!({"text":"first","client_request_id":crid}).to_string()).await;
+        assert!(status.contains(" 200 "), "first prompt status: {status}");
+        let turn = first["turn_id"].as_str().unwrap().to_owned();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("first provider request timed out");
+        let key = ApiTurnKey { bot_id:bot.clone(), run_id:run, turn_id:turn };
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.expect("first owner exit timed out");
+        let (status, descriptor) = request(addr, "GET", &format!("/api/bots/{bot}/api_fresh_target"), token, "").await;
+        assert!(status.contains(" 200 ")); assert_eq!(descriptor["availability"], "available");
+        let session = descriptor["session_id"].as_str().unwrap().to_owned(); let generation = descriptor["generation"].as_i64().unwrap();
+        let messages_before: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=?").bind(&key.turn_id).fetch_one(&env.app.db).await.unwrap();
+        let ledger_before: (String, String, i64) = sqlx::query_as("SELECT id,state,reserved_microusd FROM api_bot_attempts WHERE turn_id=?").bind(&key.turn_id).fetch_one(&env.app.db).await.unwrap();
+        let path = format!("/api/bots/{bot}/start?resume=fresh&api_expected_session_id={session}&api_expected_generation={generation}");
+        let (status, fresh) = request(addr, "POST", &path, token, "").await;
+        assert!(status.contains(" 200 "), "fresh start status: {status}");
+        let next_run = fresh["run_id"].as_str().unwrap().to_owned(); assert_ne!(next_run, key.run_id);
+        let target_exists: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&env.app.db).await.unwrap();
+        let messages_after: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=?").bind(&key.turn_id).fetch_one(&env.app.db).await.unwrap();
+        let ledger_after: (String, String, i64) = sqlx::query_as("SELECT id,state,reserved_microusd FROM api_bot_attempts WHERE id=?").bind(&ledger_before.0).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(target_exists, 0); assert_eq!(messages_before, 2); assert_eq!(messages_after, messages_before); assert_eq!(ledger_after, ledger_before);
+        let (status, second) = request(addr, "POST", &format!("/api/bots/{bot}/prompt"), token, &json!({"text":"second","client_request_id":crate::db::ulid()}).to_string()).await;
+        assert!(status.contains(" 200 "), "second prompt status: {status}");
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("second provider request timed out");
+        let next = ApiTurnKey { bot_id:bot.clone(), run_id:next_run, turn_id:second["turn_id"].as_str().unwrap().to_owned() };
+        wait_until_completed(&env.app, &next).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.expect("task drain timed out");
+        router_stop.cancel(); provider_stop.cancel();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, server).await.expect("router shutdown timed out").unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, provider).await.expect("provider shutdown timed out").unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_shutdown_after_delivery_commit_never_releases_runner() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let mut deps = env.app.api_bot_runtime.test_dependencies().unwrap();
+        deps.tools = Arc::new(CountingTools(tool_calls.clone()));
+        env.app.api_bot_runtime.set_test_dependencies(deps);
+        let bot = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let pending = Arc::new(Notify::new()); let pending_release = Arc::new(Notify::new());
+        let a = pending.clone(); let b = pending_release.clone();
+        crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+        let app = env.app.clone(); let id = bot.clone(); let request = crid.clone();
+        let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &id, "fixture", &request).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, pending.notified()).await.unwrap();
+        let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
+        let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let a = reached.clone(); let b = release.clone();
+        crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+        pending_release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
+        env.app.shutdown.cancel(); release.notify_one();
+        assert!(tokio::time::timeout(DEADLOCK_TIMEOUT, task).await.unwrap().unwrap().is_err());
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0); assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        assert_ne!(status, "completed");
+        shutdown.cancel(); server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_delivery_real_commit_synthetic_lost_ack_never_releases_runner() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let a = reached.clone(); let b = release.clone();
+        crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+        let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
+        let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
+        let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
+        ApiBotRuntime::arm_delivery_lost_ack_for_test(&turn);
+        release.notify_one();
+        let first = tokio::time::timeout(DEADLOCK_TIMEOUT, task).await.unwrap().unwrap();
+        let retry = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await;
+        let delivery: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        env.app.background_tasks.close();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        let registry_empty = !env.app.api_bot_runtime.inner.registry.is_active(&run);
+        let key_for_fault = turn.clone();
+        let owner_exited = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey { bot_id: bot, run_id: run, turn_id: turn }).is_some_and(|r| r.owner_exited);
+        shutdown.cancel(); server.await.unwrap();
+        assert!(first.is_err() && retry.is_err());
+        assert_eq!(delivery, "ok", "the real CAS committed before its synthetic lost acknowledgement");
+        assert!(!delivery_lost_acks().lock().unwrap().contains(&key_for_fault));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(registry_empty && owner_exited, "the unreleased runner and owner actually exited");
+    }
+
+    #[tokio::test]
+    async fn native_completed_crid_readback_after_receipt_removal_does_not_dispatch() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let first = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run, turn_id: first.turn_id.clone() };
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            loop {
+                let exited = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited);
+                if exited { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        sqlx::query("DELETE FROM api_bot_join_receipts WHERE turn_id=?").bind(&first.turn_id).execute(&env.app.db).await.unwrap();
+        let retry = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await.unwrap();
+        let mismatch = crate::lifecycle::prompt(&env.app, &bot, "different", &crid).await;
+        let duplicate = crate::db::ulid();
+        let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&first.turn_id).fetch_one(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'user','fixture','web',?)").bind(&duplicate).bind(&conv).bind(&first.turn_id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let duplicate_result = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await;
+        sqlx::query("DELETE FROM messages WHERE id IN (?,?)").bind(&duplicate).bind(&first.message_id).execute(&env.app.db).await.unwrap();
+        let missing_result = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await;
+        let failed_turn = crate::db::ulid(); let failed_crid = crate::db::ulid(); let failed_message = crate::db::ulid();
+        let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&first.turn_id).fetch_one(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,client_request_id,prompt_text,created_at) VALUES(?,?,?,'web','failed','ok',?,'fixture',?)").bind(&failed_turn).bind(&conv).bind(&key.run_id).bind(&failed_crid).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'user','fixture','web',?)").bind(&failed_message).bind(&conv).bind(&failed_turn).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let failed = crate::lifecycle::prompt(&env.app, &bot, "fixture", &failed_crid).await;
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert_eq!(retry.turn_id, first.turn_id); assert_eq!(retry.message_id, first.message_id);
+        assert!(mismatch.is_err() && duplicate_result.is_err() && missing_result.is_err() && failed.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_maintenance_and_delivery_acceptance_are_serialized() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot = crate::db::ulid(); let first_crid = crate::db::ulid(); let crid = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let until = crate::db::iso_in(300);
+        let lease = crate::supervisor::store::acquire_lease(&env.app.db, "restart", "fixture", None, None, &until, true, None, &json!({})).await.unwrap().unwrap();
+        let blocked = crate::lifecycle::prompt(&env.app, &bot, "fixture", &first_crid).await;
+        assert!(crate::supervisor::store::release_lease(&env.app.db, "restart", "fixture", lease.fence).await.unwrap());
+        let reached = Arc::new(Notify::new()); let release = Arc::new(Notify::new());
+        let a = reached.clone(); let b = release.clone();
+        crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit", &crid, move || async move { a.notify_one(); b.notified().await; });
+        let app = env.app.clone(); let task_bot = bot.clone(); let task_crid = crid.clone();
+        let task = tokio::spawn(async move { crate::lifecycle::prompt(&app, &task_bot, "fixture", &task_crid).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT, reached.notified()).await.unwrap();
+        let turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
+        let after_reached = Arc::new(Notify::new()); let after_release = Arc::new(Notify::new());
+        let a = after_reached.clone(); let b = after_release.clone();
+        crate::lifecycle::race_point::arm("api_native_after_delivery_commit", &turn, move || async move { a.notify_one(); b.notified().await; });
+        let pending_lease = crate::supervisor::store::acquire_lease(&env.app.db, "restart", "fixture", None, None, &until, true, None, &json!({})).await.unwrap();
+        release.notify_one();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, after_reached.notified()).await.unwrap();
+        let accepted_lease = crate::supervisor::store::acquire_lease(&env.app.db, "restart", "fixture", None, None, &until, true, Some(&bot), &json!({})).await.unwrap();
+        let before_release = calls.load(Ordering::SeqCst);
+        after_release.notify_one();
+        let out = tokio::time::timeout(DEADLOCK_TIMEOUT, task).await.unwrap().unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key = ApiTurnKey { bot_id: bot, run_id: run, turn_id: turn };
+        wait_until_completed(&env.app, &key).await;
+        let completed_lease = crate::supervisor::store::acquire_lease(&env.app.db, "restart", "fixture", None, None, &until, true, None, &json!({})).await.unwrap();
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert!(blocked.is_err() && out.is_ok());
+        assert!(pending_lease.is_none() && accepted_lease.is_none() && completed_lease.is_some());
+        assert_eq!(before_release, 0); assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE client_request_id=?").bind(&first_crid).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn native_join_error_is_busy_for_start_and_stop_does_not_forge_join() {
+        let env = crate::testing::env().await;
+        enable_fake_runtime(&env.app, "http://127.0.0.1:1".into(), DEADLOCK_TIMEOUT).await;
+        let bot=crate::db::ulid(); let run=crate::db::ulid(); let turn=crate::db::ulid(); let conv=crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "fixture").await;
+        let key=FullKey { bot_id:bot.clone(), run_id:run.clone(), turn_id:turn.clone() };
+        let (_tx, joined)=watch::channel(JoinState::Joined(Err(JoinError::Unconfirmed)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().insert(key.clone(), ControlRecord { identity:Arc::new(()), cancel:CancellationToken::new(), joined, finalized:None, owner_exited:true });
+        let start_key=ApiRunKey { bot_id:bot.clone(), run_id:crate::db::ulid() };
+        cleanup_terminal_controls(&env.app.db, &env.app.api_bot_runtime.inner).await;
+        assert!(matches!(env.app.api_bot_runtime.native_start_guard(&start_key).await, Err(ApiBotError::Busy)));
+        let stopped=tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::stop_bot(&env.app, &bot)).await.unwrap();
+        assert!(stopped.is_err(), "unconfirmed join must not be reported as a successful stop");
+        assert!(env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&key));
+        let state: String=sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "stopping");
+    }
+
+    #[test]
+    fn native_restart_resume_fits_one_mib_stack() {
+        std::thread::Builder::new().stack_size(1024 * 1024).spawn(native_restart_resume_rechecks_durable_proof_and_rebinds).unwrap().join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_restart_resume_rechecks_durable_proof_and_rebinds() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint.clone(), DEADLOCK_TIMEOUT).await;
+        let bot=crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let first = crate::lifecycle::prompt(&env.app, &bot, "first", &crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key = ApiTurnKey { bot_id: bot.clone(), run_id: run, turn_id: first.turn_id };
+        wait_until_completed(&env.app, &key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+        let session: String = sqlx::query_scalar("SELECT id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        crate::lifecycle::stop_bot(&env.app, &bot).await.unwrap();
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        let app = crate::testing::restart_app(&env).await;
+        app.set_startup_ready(false);
+        super::super::startup_gate::barrier(&app).await;
+        app.set_startup_ready(true);
+        assert!(app.api_startup_gate.ready());
+        assert!(app.api_bot_runtime.inner.sessions.lock().unwrap().is_empty(), "history skip does not restore a cursor");
+        enable_fake_runtime(&app, endpoint, DEADLOCK_TIMEOUT).await;
+        let run2 = crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native:true, resume_required:true, ..Default::default() }).await.unwrap();
+        let second = crate::lifecycle::prompt(&app, &bot, "second", &crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key2 = ApiTurnKey { bot_id:bot.clone(), run_id:run2, turn_id:second.turn_id };
+        wait_until_completed(&app, &key2).await;
+        app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, app.background_tasks.wait()).await.unwrap();
+        let (actual, generation): (String,i64) = sqlx::query_as("SELECT id,generation FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&app.db).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert_eq!(actual, session); assert_eq!(generation, 2); assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_key_snapshot_rotates_between_provider_calls_without_exposure() {
+        use std::os::unix::fs::PermissionsExt;
+        struct ServerState { calls: AtomicUsize, old_ok: std::sync::atomic::AtomicBool, new_ok: std::sync::atomic::AtomicBool, entered: Notify, release: Notify, tool: String }
+        async fn complete(axum::extract::State(s): axum::extract::State<Arc<ServerState>>, headers: axum::http::HeaderMap, Json(_): Json<Value>) -> Json<Value> {
+            let n = s.calls.fetch_add(1, Ordering::SeqCst);
+            let key = headers.get("x-api-key").map(|h| h.as_bytes()).unwrap_or_default();
+            if n == 0 {
+                s.old_ok.store(key == b"synthetic-first", Ordering::SeqCst); s.entered.notify_one(); s.release.notified().await;
+                Json(json!({"id":"fake-1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":s.tool.clone(),"name":"bash","input":{"command":"true"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}))
+            } else {
+                s.new_ok.store(key == b"synthetic-second", Ordering::SeqCst);
+                Json(json!({"id":"fake-2","model":"claude-opus-5-5","content":[{"type":"text","text":"fixture"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+            }
+        }
+        let env = crate::testing::env().await;
+        let fake_key = env.dir.join(format!("synthetic-{}", crate::db::ulid()));
+        std::fs::write(&fake_key, "synthetic-first").unwrap(); std::fs::set_permissions(&fake_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let state = Arc::new(ServerState { calls: AtomicUsize::new(0), old_ok: std::sync::atomic::AtomicBool::new(false), new_ok: std::sync::atomic::AtomicBool::new(false), entered: Notify::new(), release: Notify::new(), tool: crate::db::ulid() });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
+        let router = Router::new().route("/v1/messages", post(complete)).with_state(state.clone());
+        let shutdown = CancellationToken::new(); let stop = shutdown.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        enable_fake_runtime(&env.app, format!("http://{addr}/v1/messages"), DEADLOCK_TIMEOUT).await;
+        let path = fake_key.to_string_lossy().into_owned();
+        env.app.cfg.update(|cfg| { cfg.claude_api.key_file = path; Ok(()) }).await.unwrap();
+        env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies { endpoint:format!("http://{addr}/v1/messages"), key_source:Arc::new(ConfigKeySource(Arc::downgrade(&env.app))), quote:Arc::new(Quote), tools:Arc::new(NoTools), shutdown_join_timeout:Some(DEADLOCK_TIMEOUT) });
+        let bot=crate::db::ulid(); let crid=crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run=crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let out=crate::lifecycle::prompt(&env.app, &bot, "fixture", &crid).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, state.entered.notified()).await.unwrap();
+        std::fs::write(&fake_key, "synthetic-second").unwrap();
+        state.release.notify_one();
+        let key=ApiTurnKey { bot_id:bot, run_id:run, turn_id:out.turn_id };
+        wait_until_completed(&env.app, &key).await;
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        shutdown.cancel(); server.await.unwrap(); std::fs::remove_file(fake_key).unwrap();
+        assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+        assert!(state.old_ok.load(Ordering::SeqCst) && state.new_ok.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_key_read_fault_causes_no_reservation_or_http() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let tool_calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app, endpoint.clone(), DEADLOCK_TIMEOUT).await;
+        let missing = env.dir.join(format!("synthetic-missing-{}", crate::db::ulid())).to_string_lossy().into_owned();
+        env.app.cfg.update(|cfg| { cfg.claude_api.key_file = missing; Ok(()) }).await.unwrap();
+        env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies { endpoint, key_source:Arc::new(ConfigKeySource(Arc::downgrade(&env.app))), quote:Arc::new(Quote), tools:Arc::new(CountingTools(tool_calls.clone())), shutdown_join_timeout:Some(DEADLOCK_TIMEOUT) });
+        let bot=crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+        let _ = crate::lifecycle::prompt(&env.app, &bot, "fixture", &crate::db::ulid()).await;
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+        let reservations: i64=sqlx::query_scalar("SELECT count(*) FROM api_bot_attempts WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert_eq!(reservations, 0); assert_eq!(calls.load(Ordering::SeqCst), 0); assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_second_turn_reuses_same_run_only_after_finalized_owner() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let bot=crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run=crate::lifecycle::start_bot(&env.app,&bot).await.unwrap();
+        let first=crate::lifecycle::prompt(&env.app,&bot,"first",&crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key=ApiTurnKey { bot_id:bot.clone(),run_id:run.clone(),turn_id:first.turn_id };
+        wait_until_completed(&env.app,&key).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited && r.finalized.is_some()) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+        let session: String=sqlx::query_scalar("SELECT id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        let second=crate::lifecycle::prompt(&env.app,&bot,"second",&crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+        let key2=ApiTurnKey { bot_id:bot.clone(),run_id:run.clone(),turn_id:second.turn_id };
+        wait_until_completed(&env.app,&key2).await;
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key2)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+        crate::lifecycle::stop_bot(&env.app,&bot).await.unwrap();
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT,env.app.background_tasks.wait()).await.unwrap();
+        let restarted=crate::testing::restart_app(&env).await;
+        restarted.set_startup_ready(false);
+        super::super::startup_gate::barrier(&restarted).await;
+        let ready=restarted.api_startup_gate.ready();
+        let (s,g,r): (String,i64,String)=sqlx::query_as("SELECT id,generation,owner_run_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        shutdown.cancel(); server.await.unwrap();
+        assert!(ready, "historical same-run Applied receipts must not quarantine restart");
+        assert_eq!((s,g,r),(session,1,run)); assert_eq!(calls.load(Ordering::SeqCst),2);
+    }
+
+    #[tokio::test]
+    async fn native_preflight_disabled_refuses_fresh_before_stop_or_delete() {
+        let env = crate::testing::env().await;
+        let bot=crate::db::ulid(); let run=crate::db::ulid(); let turn=crate::db::ulid(); let conv=crate::db::ulid(); let session=crate::db::ulid();
+        insert_bot_and_turn(&env.app,&bot,&run,&turn,&conv,&env.project_id,"fixture").await;
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,1,0,'{}',?,?,?)").bind(&session).bind(&bot).bind(&run).bind(&turn).bind(crate::db::now()).bind(crate::db::now()).bind(crate::db::iso_in(3600)).execute(&env.app.db).await.unwrap();
+        let target=crate::lifecycle::api_bot_port::ApiFreshTarget { session_id:session.clone(),generation:1 };
+        let result=env.app.api_native_start(&bot,crate::lifecycle::api_bot_port::ApiNativeStartMode::Fresh(target)).await;
+        let state:String=sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&env.app.db).await.unwrap();
+        let attempts:i64=sqlx::query_scalar("SELECT count(*) FROM api_bot_attempts WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert!(result.is_err()); assert_eq!(state,"running"); assert_eq!(count,1); assert_eq!(attempts,0);
+    }
+
+    #[tokio::test]
+    async fn native_fresh_descriptor_gate_timeout_is_bot_scoped_and_quarantine_closed() {
+        use crate::lifecycle::api_bot_port::ApiFreshAvailability as A;
+        let env=crate::testing::env().await;
+        let a=crate::db::ulid(); let b=crate::db::ulid();
+        for bot in [&a,&b] {
+            let run=crate::db::ulid(); let turn=crate::db::ulid(); let conv=crate::db::ulid(); let session=crate::db::ulid();
+            insert_bot_and_turn(&env.app,bot,&run,&turn,&conv,&env.project_id,"fixture").await;
+            sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,1,0,'{}',?,?,?)").bind(session).bind(bot).bind(run).bind(turn).bind(crate::db::now()).bind(crate::db::now()).bind(crate::db::iso_in(3600)).execute(&env.app.db).await.unwrap();
+        }
+        let gate=env.app.api_bot_runtime.bot_gate(&a).await;
+        let app=env.app.clone(); let bot_a=a.clone();
+        let waiting=tokio::spawn(async move { app.api_fresh_target(&bot_a).await });
+        let other=tokio::time::timeout(DEADLOCK_TIMEOUT,env.app.api_fresh_target(&b)).await.unwrap();
+        let blocked=tokio::time::timeout(DEADLOCK_TIMEOUT,waiting).await.unwrap().unwrap();
+        drop(gate);
+        env.app.api_bot_runtime.inner.explicit_quarantine.lock().unwrap().insert(a.clone(),Arc::new(()));
+        let quarantined=env.app.api_fresh_target(&a).await;
+        let remaining:i64=sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE bot_id IN (?,?)").bind(&a).bind(&b).fetch_one(&env.app.db).await.unwrap();
+        assert!(matches!(other,A::Available(_)) && matches!(blocked,A::Unavailable) && matches!(quarantined,A::Unavailable));
+        assert_eq!(remaining,2);
+    }
+
+    #[tokio::test]
+    async fn native_delivery_cas_fault_cancels_and_joins_without_release() {
+        let env=crate::testing::env().await;
+        let calls=Arc::new(AtomicUsize::new(0)); let tool_calls=Arc::new(AtomicUsize::new(0));
+        let (endpoint,shutdown,server)=fake_server(calls.clone(),Arc::new(Notify::new())).await;
+        enable_fake_runtime(&env.app,endpoint.clone(),DEADLOCK_TIMEOUT).await;
+        env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies { endpoint, key_source:Arc::new(super::super::adapter::FixedTestKey("synthetic".into())),quote:Arc::new(Quote),tools:Arc::new(CountingTools(tool_calls.clone())),shutdown_join_timeout:Some(DEADLOCK_TIMEOUT) });
+        let bot=crate::db::ulid(); let crid=crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run=crate::lifecycle::start_bot(&env.app,&bot).await.unwrap();
+        let reached=Arc::new(Notify::new()); let release=Arc::new(Notify::new()); let a=reached.clone(); let b=release.clone();
+        crate::lifecycle::race_point::arm("api_native_prompt_after_pending_commit",&crid,move || async move { a.notify_one(); b.notified().await; });
+        let app=env.app.clone(); let task_bot=bot.clone(); let task_crid=crid.clone();
+        let task=tokio::spawn(async move { crate::lifecycle::prompt(&app,&task_bot,"fixture",&task_crid).await });
+        tokio::time::timeout(DEADLOCK_TIMEOUT,reached.notified()).await.unwrap();
+        let turn:String=sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&env.app.db).await.unwrap();
+        let trigger=format!("CREATE TRIGGER native_reject_delivery BEFORE UPDATE OF delivery ON turns WHEN NEW.id='{turn}' AND NEW.delivery='ok' BEGIN SELECT RAISE(ABORT,'fixture'); END");
+        sqlx::query(&trigger).execute(&env.app.db).await.unwrap(); release.notify_one();
+        let result=tokio::time::timeout(DEADLOCK_TIMEOUT,task).await.unwrap().unwrap();
+        let retry=crate::lifecycle::prompt(&env.app,&bot,"fixture",&crid).await;
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT,env.app.background_tasks.wait()).await.unwrap();
+        let delivery:String=sqlx::query_scalar("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        let exited=env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey { bot_id:bot,run_id:run.clone(),turn_id:turn }).is_some_and(|r|r.owner_exited);
+        let empty=!env.app.api_bot_runtime.inner.registry.is_active(&run);
+        shutdown.cancel(); server.await.unwrap();
+        assert!(result.is_err() && retry.is_err()); assert_eq!(delivery,"pending"); assert!(exited && empty);
+        assert_eq!(calls.load(Ordering::SeqCst),0); assert_eq!(tool_calls.load(Ordering::SeqCst),0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_key_read_failure_does_not_poison_another_bot_after_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let env=crate::testing::env().await; let calls=Arc::new(AtomicUsize::new(0)); let hit=Arc::new(Notify::new());
+        let (endpoint,shutdown,server)=fake_server(calls.clone(),hit.clone()).await;
+        enable_fake_runtime(&env.app,endpoint.clone(),DEADLOCK_TIMEOUT).await;
+        let fake_key=env.dir.join(format!("synthetic-{}",crate::db::ulid())); let path=fake_key.to_string_lossy().into_owned();
+        env.app.cfg.update(|cfg| {cfg.claude_api.key_file=path; Ok(())}).await.unwrap();
+        env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {endpoint,key_source:Arc::new(ConfigKeySource(Arc::downgrade(&env.app))),quote:Arc::new(Quote),tools:Arc::new(NoTools),shutdown_join_timeout:Some(DEADLOCK_TIMEOUT)});
+        let a=crate::db::ulid(); let b=crate::db::ulid();
+        for bot in [&a,&b] { sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)").bind(bot).bind(&env.project_id).bind(bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap(); crate::lifecycle::start_bot(&env.app,bot).await.unwrap(); }
+        let first=crate::lifecycle::prompt(&env.app,&a,"fixture",&crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT,async { loop { let status:String=sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&first.turn_id).fetch_one(&env.app.db).await.unwrap(); if status=="failed" {break} tokio::task::yield_now().await; } }).await.unwrap();
+        std::fs::write(&fake_key,"synthetic-repaired").unwrap(); std::fs::set_permissions(&fake_key,std::fs::Permissions::from_mode(0o600)).unwrap();
+        let second=crate::lifecycle::prompt(&env.app,&b,"fixture",&crate::db::ulid()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT,hit.notified()).await.unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT,async { loop { let status:String=sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&second.turn_id).fetch_one(&env.app.db).await.unwrap(); if status=="completed" {break} tokio::task::yield_now().await; } }).await.unwrap();
+        env.app.background_tasks.close(); tokio::time::timeout(DEADLOCK_TIMEOUT,env.app.background_tasks.wait()).await.unwrap();
+        let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM api_bot_attempts WHERE bot_id=?),(SELECT count(*) FROM api_bot_attempts WHERE bot_id=?)").bind(&a).bind(&b).fetch_one(&env.app.db).await.unwrap();
+        shutdown.cancel(); server.await.unwrap(); std::fs::remove_file(fake_key).unwrap();
+        assert_eq!(counts,(0,1)); assert_eq!(calls.load(Ordering::SeqCst),1);
     }
 
     struct Quote;
@@ -2203,7 +3051,7 @@ mod tests {
             .unwrap();
         app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
             endpoint,
-            key: "sk-ant-test-only".into(),
+            key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-only".into())),
             quote: Arc::new(Quote),
             tools: Arc::new(NoTools),
             shutdown_join_timeout: Some(shutdown_timeout),
@@ -5390,7 +6238,7 @@ mod tests {
         let runtime = &env.app.api_bot_runtime;
         runtime.set_test_dependencies(ApiBotDependencies {
             endpoint: "http://127.0.0.1:1/no-call".into(),
-            key: "test-only".into(),
+            key_source: Arc::new(super::super::adapter::FixedTestKey("test-only".into())),
             quote: Arc::new(Quote),
             tools: Arc::new(NoTools),
             shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
@@ -5916,7 +6764,7 @@ mod tests {
         let runtime = &env.app.api_bot_runtime;
         runtime.set_test_dependencies(ApiBotDependencies {
             endpoint: "http://127.0.0.1:1/no-call".into(),
-            key: "fake".into(),
+            key_source: Arc::new(super::super::adapter::FixedTestKey("fake".into())),
             quote: Arc::new(Quote),
             tools: Arc::new(NoTools),
             shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),

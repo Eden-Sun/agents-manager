@@ -455,6 +455,7 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/suggestion/accept", Expect::Forbidden, None),
         rule("GET", "/api/hosts/{name}/shells", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/shells", Expect::Forbidden, None),
+        rule("GET", "/api/bots/{id}/api_fresh_target", Expect::UserOnly, None),
         rule("GET", "/api/bots/{id}/start", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/start", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/start", Expect::Forbidden, None),

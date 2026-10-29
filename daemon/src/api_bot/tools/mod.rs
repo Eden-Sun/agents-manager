@@ -44,7 +44,7 @@ impl super::runner::Tools for LocalTools {
                         .get("command")
                         .and_then(serde_json::Value::as_str)
                         .ok_or("missing command")?;
-                    bash::execute(self.editor.root(), command, self.limits, cancel).await
+                    bash::execute(&self.editor, command, self.limits, cancel).await
                 }
                 "str_replace_based_edit_tool" => self.editor.execute(&call.input),
                 _ => Err("unsupported tool".into()),

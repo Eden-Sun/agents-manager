@@ -49,10 +49,33 @@ impl AdapterLimits {
     }
 }
 
+pub(super) struct Secret(String);
+impl Secret {
+    pub(super) fn new(value: String) -> Self { Self(value) }
+    pub(super) fn is_empty(&self) -> bool { self.0.trim().is_empty() }
+    fn as_str(&self) -> &str { &self.0 }
+}
+impl Drop for Secret {
+    fn drop(&mut self) {
+        // Volatile overwrites keep this best-effort clearing from being optimized away.
+        for byte in unsafe { self.0.as_bytes_mut() } { unsafe { std::ptr::write_volatile(byte, 0) }; }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
+pub(super) trait KeySource: Send + Sync {
+    fn snapshot(&self) -> BoxFuture<'_, Result<Secret, ()>>;
+}
+#[cfg(test)]
+pub(super) struct FixedTestKey(pub(super) String);
+#[cfg(test)]
+impl KeySource for FixedTestKey {
+    fn snapshot(&self) -> BoxFuture<'_, Result<Secret, ()>> { Box::pin(async { Ok(Secret::new(self.0.clone())) }) }
+}
+
 #[derive(Clone)]
 pub(crate) struct AdapterHttpConfig {
     pub(crate) endpoint: String,
-    pub(crate) key: String,
+    pub(super) key_source: Arc<dyn KeySource>,
     pub(crate) timeout: std::time::Duration,
     pub(crate) max_response_bytes: usize,
 }
@@ -87,6 +110,7 @@ struct ActiveAttempt {
     id: String,
     envelope: RequestEnvelope,
     permit_available: bool,
+    key: Option<Secret>,
 }
 
 impl ApiBotAdapter {
@@ -251,7 +275,7 @@ impl Model for ApiBotAdapter {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Response, http::Error>> {
         Box::pin(async move {
-            let (envelope, attempt_id) = {
+            let (envelope, attempt_id, key) = {
                 let mut cursor = self.cursor.lock().await;
                 let active = cursor
                     .active_attempt
@@ -273,14 +297,15 @@ impl Model for ApiBotAdapter {
                 }
                 // Invalid input does not spend the matching reservation's permit.
                 // Consume atomically only after identity validation, still before any HTTP.
+                let key = active.key.take().ok_or(http::Error::InvalidRequest)?;
                 active.permit_available = false;
 
-                (reconstructed, active.id.clone())
+                (reconstructed, active.id.clone(), key)
             };
 
             let req = http::FullMessagesRequest {
                 endpoint: &self.http_cfg.endpoint,
-                key: &self.http_cfg.key,
+                key: key.as_str(),
                 options: envelope.options(),
                 system: envelope.system(),
                 messages: envelope.messages(),
@@ -289,6 +314,7 @@ impl Model for ApiBotAdapter {
             };
 
             let res = http::complete(&req, cancel).await;
+            drop(key);
 
             let mut cursor = self.cursor.lock().await;
             match res {
@@ -428,6 +454,10 @@ impl Journal for ApiBotAdapter {
                         state.messages.clone(),
                     )
                     .map_err(|_| ())?;
+                    let key = self.http_cfg.key_source.snapshot().await.map_err(|_| {
+                        tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable");
+                    })?;
+                    if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); return Err(()); }
                     let quote = self.quote_provider.reserve(&envelope).map_err(|_| ())?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
@@ -463,6 +493,7 @@ impl Journal for ApiBotAdapter {
                                 id: attempt_id,
                                 envelope,
                                 permit_available: true,
+                                key: Some(key),
                             });
                             Ok(())
                         }

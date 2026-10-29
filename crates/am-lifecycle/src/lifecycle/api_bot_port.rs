@@ -62,11 +62,21 @@ pub enum ApiFreshResult { Cleared }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApiFreshError { Busy, IdentityMismatch, Unresolved, Storage, Unconfirmed }
 
+pub enum ApiNativePromptError { Unconfirmed }
+pub enum ApiFreshAvailability { Available(ApiFreshTarget), None, Unavailable }
+pub enum ApiNativeStartMode { Resume { required: bool }, Fresh(ApiFreshTarget) }
+pub struct ApiNativeStartResult { pub run_id: String, pub resumed: bool }
+pub enum ApiNativeStartError { Unconfirmed, ClearedButStartUnconfirmed }
+
 pub trait ApiBotPort: Send + Sync {
+    fn api_native_start(&self, _bot_id: &str, _mode: ApiNativeStartMode) -> impl Future<Output = Result<ApiNativeStartResult, ApiNativeStartError>> + Send { async { Err(ApiNativeStartError::Unconfirmed) } }
+    fn api_native_prompt(&self, _bot_id: &str, _text: &str, _crid: &str) -> impl Future<Output = Result<crate::lc_error::PromptOut, ApiNativePromptError>> + Send { async { Err(ApiNativePromptError::Unconfirmed) } }
+    fn api_fresh_target(&self, _bot_id: &str) -> impl Future<Output = ApiFreshAvailability> + Send { async { ApiFreshAvailability::Unavailable } }
     fn api_recovery_ready(&self) -> bool { false }
     fn api_explicit_retire(&self, _bot_id: &str, _target: &ApiFreshTarget) -> impl Future<Output = Result<ApiFreshResult, ApiFreshError>> + Send { async { Err(ApiFreshError::Unconfirmed) } }
     fn api_run_begin_stop(&self, key: &ApiRunKey, mode: ApiBeginStopMode)
         -> impl Future<Output = Result<ApiBeginStopResult, ApiBeginStopError>> + Send;
+    fn api_turn_spawn_pending(&self, _key: &ApiTurnKey) -> impl Future<Output = Result<(), ApiBotError>> + Send { async { Err(ApiBotError::Upstream) } }
     fn api_turn_spawn(
         &self,
         key: &ApiTurnKey,

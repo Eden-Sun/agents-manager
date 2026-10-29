@@ -31,6 +31,10 @@ impl Editor {
     pub fn root(&self) -> &Path {
         &self.root
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn directory(&self) -> &File {
+        &self.directory
+    }
     fn open(&self, path: &str, create: bool, write: bool) -> Result<File, String> {
         let given = Path::new(path);
         // Both the actual host worktree and the stable Bash mount name are accepted.

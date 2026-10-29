@@ -20,7 +20,7 @@ impl Limits {
 }
 
 pub async fn execute(
-    root: &Path,
+    editor: &super::editor::Editor,
     command: &str,
     limits: Limits,
     cancel: &CancellationToken,
@@ -45,7 +45,27 @@ pub async fn execute(
         if !bwrap.is_file() {
             return Err("bash isolation unavailable".into());
         }
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let directory = editor.directory();
+        let metadata = directory.metadata().map_err(|_| "worktree metadata failed")?;
+        let fd = directory.as_raw_fd();
+        if fd < 3 { return Err("worktree descriptor unavailable".into()); }
+        let expected = format!("{}:{}", metadata.dev(), metadata.ino());
+        let check = format!("test \"$(/usr/bin/stat -Lc '%d:%i' /workspace)\" = \"$1\" || exit 125; exec {fd}<&-; exec /bin/bash --noprofile --norc -c \"$2\"");
         let mut cmd = Command::new(bwrap);
+        // In the child only, mark every nonstandard descriptor close-on-exec, then
+        // allow exactly the pinned directory descriptor through the bwrap exec.
+        // An unsupported close_range or bind-fd fails closed before the command.
+        unsafe { cmd.pre_exec(move || {
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }); }
         cmd.args([
             "--unshare-all",
             "--die-with-parent",
@@ -58,9 +78,9 @@ pub async fn execute(
             }
         }
         cmd.args([
-            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind-fd",
         ])
-        .arg(root)
+        .arg(fd.to_string())
         .arg("/workspace")
         .args([
             "--chdir",
@@ -79,13 +99,12 @@ pub async fn execute(
             "--noprofile",
             "--norc",
             "-c",
-            command,
-        ]);
-        supervise(cmd, root, limits, cancel).await
+        ]).arg(check).arg("sandbox-check").arg(expected).arg(command);
+        supervise(cmd, editor.root(), limits, cancel).await
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = root;
+        let _ = editor;
         Err("bash isolation unsupported on this platform".into())
     }
 }
@@ -199,10 +218,124 @@ async fn supervise(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires approved real bubblewrap validation window"]
+    async fn real_bwrap_isolation() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, symlink};
+        { use std::os::unix::fs::PermissionsExt; let m = std::fs::metadata("/usr/bin/bwrap").unwrap(); assert!(m.is_file() && m.permissions().mode() & 0o111 != 0); }
+        assert_eq!(std::env::var("KX090P_FAKE_SENTINEL").as_deref(), Ok("synthetic"));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("native-bwrap-{}", crate::db::ulid())));
+        let workspace = root.join("workspace"); let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap(); std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "synthetic").unwrap();
+        symlink(outside.join("sentinel"), workspace.join("escape")).unwrap();
+        let file = std::fs::File::create(workspace.join("fake-fd")).unwrap();
+        let fd = file.as_raw_fd(); let meta = file.metadata().unwrap();
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let names = ["user", "mnt", "pid", "net"];
+        let host_inodes: Vec<u64> = names.iter().map(|name| std::fs::metadata(format!("/proc/self/ns/{name}")).unwrap().ino()).collect();
+        let python = format!("import os,socket; print(' '.join(str(os.stat('/proc/self/ns/'+n).st_ino) for n in ('user','mnt','pid','net'))); assert os.environ.get('KX090P_FAKE_SENTINEL') is None; assert set(os.environ)<=set(('PATH','HOME','LANG','PWD','SHLVL','_'));\ntry:\n s=os.fstat({fd}); assert (s.st_dev,s.st_ino)!=({dev},{ino})\nexcept OSError: pass\ns=socket.socket(); s.settimeout(1); assert s.connect_ex(('127.0.0.1',{port}))!=0", dev=meta.dev(), ino=meta.ino());
+        let command = format!("test ! -e /workspace/escape && test ! -e /home && printf synthetic > /workspace/writable && /usr/bin/python3 -c \"{}\"", python.replace('\"', "\\\""));
+        let command = format!("! /bin/ln -L /workspace/escape /workspace/hardlink && /bin/ln -s /workspace/escape /workspace/symlink && test ! -e /workspace/symlink && {command}");
+        let editor = super::super::editor::Editor::new(&workspace).unwrap();
+        let output = execute(&editor, &command, Limits { timeout: Duration::from_secs(5), output_bytes: 4096 }, &CancellationToken::new()).await;
+        drop(file);
+        let sandbox_inodes: Vec<u64> = output.as_deref().unwrap_or("").split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        let listener = listener.into_std().unwrap();
+        let no_connection = matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock);
+        let writable = std::fs::read_to_string(workspace.join("writable")).ok().as_deref() == Some("synthetic");
+        drop(listener); std::fs::remove_dir_all(&root).unwrap();
+        assert!(output.is_ok() && no_connection && writable);
+        assert_eq!(sandbox_inodes.len(), host_inodes.len());
+        assert!(sandbox_inodes.iter().zip(host_inodes).all(|(inside, outside)| *inside != outside));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn editor_fd_pins_identity_across_workspace_replacement() {
+        use std::os::unix::fs::MetadataExt;
+        let root = crate::testing::track(std::env::temp_dir().join(format!("native-pin-unit-{}", crate::db::ulid())));
+        let workspace = root.join("workspace"); let original = root.join("original");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let editor = super::super::editor::Editor::new(&workspace).unwrap();
+        let before = editor.directory().metadata().unwrap();
+        std::fs::rename(&workspace, &original).unwrap(); std::fs::create_dir(&workspace).unwrap();
+        let after = editor.directory().metadata().unwrap(); let replacement = std::fs::metadata(&workspace).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_ne!((after.dev(), after.ino()), (replacement.dev(), replacement.ino()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires approved real bubblewrap validation window"]
+    async fn real_bwrap_pinned_workspace_survives_rename_and_replacement() {
+        let root = crate::testing::track(std::env::temp_dir().join(format!("native-pin-{}", crate::db::ulid())));
+        let workspace = root.join("workspace"); let original = root.join("original");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let editor = super::super::editor::Editor::new(&workspace).unwrap();
+        let ready = execute(&editor, "true", Limits { timeout: Duration::from_secs(5), output_bytes: 1024 }, &CancellationToken::new()).await;
+        assert!(ready.is_ok(), "bubblewrap setup or fd binding unavailable");
+        std::fs::rename(&workspace, &original).unwrap(); std::fs::create_dir(&workspace).unwrap();
+        let result = execute(&editor, "printf synthetic > marker", Limits { timeout: Duration::from_secs(5), output_bytes: 1024 }, &CancellationToken::new()).await;
+        let pinned = original.join("marker").exists(); let replacement = workspace.join("marker").exists();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_err() || pinned, "command must be refused or run in the pinned directory");
+        assert!(!replacement, "replacement directory must never receive the write");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires approved real bubblewrap validation window"]
+    async fn real_bwrap_timeout_cancellation_descendants_and_output() {
+        { use std::os::unix::fs::PermissionsExt; let m = std::fs::metadata("/usr/bin/bwrap").unwrap(); assert!(m.is_file() && m.permissions().mode() & 0o111 != 0); }
+        let root = crate::testing::track(std::env::temp_dir().join(format!("native-bwrap-{}", crate::db::ulid())));
+        std::fs::create_dir(&root).unwrap();
+        let limits = Limits { timeout: Duration::from_secs(2), output_bytes: 1024 };
+        let editor = super::super::editor::Editor::new(&root).unwrap();
+        let capped = execute(&editor, "/usr/bin/yes x", limits, &CancellationToken::new()).await;
+        fn start_time(pid: u32) -> Option<u64> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+        }
+        fn children(pid: u32) -> Vec<u32> {
+            let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return vec![]; };
+            tasks.flatten().flat_map(|entry| std::fs::read_to_string(entry.path().join("children")).unwrap_or_default().split_whitespace().filter_map(|s| s.parse().ok()).collect::<Vec<u32>>()).collect()
+        }
+        fn descendants(root: u32, out: &mut Vec<(u32,u64)>) {
+            if let Some(start) = start_time(root) { out.push((root,start)); }
+            for child in children(root) { descendants(child, out); }
+        }
+        for cancel_mode in [false, true] {
+            let me = std::process::id();
+            let before = children(me);
+            let token = CancellationToken::new(); let worker_token = token.clone(); let worker_root = root.clone();
+            let task = tokio::spawn(async move { let editor = super::super::editor::Editor::new(&worker_root).unwrap(); execute(&editor, "/usr/bin/setsid /bin/bash -c 'while :; do /bin/sleep 1; done' >/dev/null 2>&1 & printf ready > ready; wait", Limits { timeout: Duration::from_secs(if cancel_mode { 8 } else { 2 }), output_bytes: 1024 }, &worker_token).await });
+            tokio::time::timeout(Duration::from_secs(5), async { while !root.join("ready").exists() { tokio::task::yield_now().await; } }).await.unwrap();
+            let roots: Vec<u32> = children(me).into_iter().filter(|pid| !before.contains(pid)).collect();
+            let mut owned = Vec::new();
+            for pid in roots { descendants(pid, &mut owned); }
+            if cancel_mode { token.cancel(); }
+            let result = tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while owned.iter().any(|(pid,start)| start_time(*pid) == Some(*start)) { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            assert!(owned.len() >= 2, "the test must observe its own sandbox and descendant PIDs");
+            assert!(matches!(result, Err(ref e) if e == if cancel_mode { "cancelled" } else { "command timed out" }));
+            std::fs::remove_file(root.join("ready")).unwrap();
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(matches!(capped, Err(ref e) if e == "command output limit exceeded"));
+    }
+
     #[tokio::test]
     async fn kill_guard_runs_before_isolation_or_spawn() {
         let result = execute(
-            Path::new("/not-a-worktree"),
+            &super::super::editor::Editor::new(Path::new("/tmp")).unwrap(),
             "pkill -f node",
             Limits {
                 timeout: Duration::from_secs(1),

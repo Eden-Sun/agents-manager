@@ -8,6 +8,7 @@ pub(crate) mod completion;
 pub(crate) mod http;
 pub(crate) mod protocol;
 pub(crate) mod quote;
+mod pricing;
 pub(crate) mod runner;
 #[cfg(test)]
 mod tests;
@@ -20,12 +21,16 @@ mod completion_tests;
 pub(crate) mod registry;
 pub(crate) mod runtime;
 mod same_run;
+mod native_resume;
+mod native_start;
+mod native_prompt;
 
 mod receipt;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod receipt_tests;
 
 mod startup_recovery;
+mod startup_history;
 mod startup_retention;
 mod startup_abandonment;
 #[cfg(all(test, feature = "daemon-test-harness"))]

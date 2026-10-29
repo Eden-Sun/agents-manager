@@ -88,6 +88,11 @@ async fn prompt_starting_or_queue_authorized(
 ) -> LcResult<PromptOut> {
     let accepted = {
         let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
+        match db::bot(app.db(), bot_id).await {
+            Ok(Some(bot)) if bot.kind != "claude-api" => {},
+            Ok(Some(_)) => return Err(LcError::Bad("api_native_prompt_unsupported".into())),
+            _ => return Err(LcError::Upstream("api_start_send_unconfirmed".into())),
+        }
         if let Some(token) = share_token {
             let valid = app.resolve_share_token(token).await.map_err(|e| LcError::Upstream(e.to_string()))?;
             if valid.as_deref() != Some(bot_id) {
@@ -263,6 +268,7 @@ async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
     // The kick may outlive a withdrawal/stop. Recheck at actual start admission under the
     // same lock as cancellation, then use the locked wake/start surfaces below.
     let bot_guard = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
+    if !matches!(db::bot(app.db(), bot_id).await, Ok(Some(bot)) if bot.kind != "claude-api") { return; }
     let waiting = sqlx::query_scalar::<_, bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id
           WHERE c.bot_id=? AND t.status='queued' AND t.awaits_start=1 AND {})",
@@ -571,6 +577,11 @@ async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<Stri
                 continue;
             }
         }
+        match db::bot(app.db(), &bot_id).await {
+            Ok(Some(bot)) if bot.kind != "claude-api" => {},
+            Ok(Some(_)) => continue,
+            _ => { unknown.insert(bot_id); continue; }
+        }
         tracing::info!(host, bot = %bot_id, "開機：有一則訊息等著這顆起來，替它啟動");
         kick(app, &bot_id);
         kicked += 1;
@@ -598,6 +609,43 @@ mod tests {
     use crate::testing as tt;
 
     const TEXT: &str = "起來後幫我跑一次測試";
+
+    #[tokio::test]
+    async fn native_api_start_send_refuses_before_write_and_preserves_waiting_debt() {
+        let e = tt::env().await;
+        let api = tt::claude_bot(&e.app, &e.project_id, "native-start-send").await;
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api.id).execute(&e.app.db).await.unwrap();
+        let crid = db::ulid();
+        let out = prompt_starting(&e.app, &api.id, TEXT, &crid, &[], RelaySrc::default()).await;
+        assert!(matches!(out, Err(LcError::Bad(ref message)) if message == "api_native_prompt_unsupported"));
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n, 0);
+        let conv = db::conversation_id(&e.app.db, &api.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,awaits_start,created_at) VALUES(?,?,'web','queued','pending',1,?)")
+            .bind(&turn).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+        start_for_waiting(&e.app, &api.id).await;
+        assert_eq!(resume_after_boot(&e.app, LOCAL_HOST).await, 0);
+        let row: (String,i64) = sqlx::query_as("SELECT status,awaits_start FROM turns WHERE id=?").bind(&turn).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(row, ("queued".into(),1));
+        assert!(db::active_run(&e.app.db, &api.id).await.unwrap().is_none());
+        let missing = db::ulid();
+        assert!(prompt_starting(&e.app, &missing, TEXT, &db::ulid(), &[], RelaySrc::default()).await.is_err());
+        let cli = tt::claude_bot(&e.app, &e.project_id, "native-start-send-cli").await;
+        let accepted = prompt_starting(&e.app, &cli.id, TEXT, &db::ulid(), &[], RelaySrc::default()).await.unwrap();
+        assert_eq!(accepted.delivery, "queued");
+    }
+
+    #[tokio::test]
+    async fn native_start_send_bot_read_error_refuses_before_writing() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "native-start-send-fault").await;
+        let crid = db::ulid();
+        sqlx::query("ALTER TABLE bots RENAME TO synthetic_unreadable_bots").execute(&e.app.db).await.unwrap();
+        let result = prompt_starting(&e.app, &bot.id, TEXT, &crid, &[], RelaySrc::default()).await;
+        let turns: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&e.app.db).await.unwrap();
+        assert!(result.is_err()); assert_eq!(turns, 0); assert_eq!(started(&e), 0);
+    }
 
     #[tokio::test]
     async fn a_delayed_kick_after_withdrawal_does_not_restart_the_stopped_bot() {
