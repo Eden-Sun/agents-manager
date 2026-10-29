@@ -110,6 +110,14 @@ async fn d3b2_closed_gate_rejects_port_before_runtime_even_with_fake_dependencie
 
 struct PortFixture(bool);
 impl crate::lifecycle::api_bot_port::ApiBotPort for PortFixture {
+    async fn api_run_begin_stop(&self, key: &crate::lifecycle::api_bot_port::ApiRunKey, mode: crate::lifecycle::api_bot_port::ApiBeginStopMode) -> Result<crate::lifecycle::api_bot_port::ApiBeginStopResult, crate::lifecycle::api_bot_port::ApiBeginStopError> {
+        if key.bot_id == "forward-bot" && key.run_id == "forward-run" && matches!(mode, crate::lifecycle::api_bot_port::ApiBeginStopMode::User { withdraw: true }) {
+            Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Busy)
+        } else {
+            Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Storage)
+        }
+    }
+
     fn api_recovery_ready(&self) -> bool {
         self.0
     }
@@ -148,8 +156,21 @@ fn d3b2_arc_port_forwards_readiness() {
     assert!(std::sync::Arc::new(PortFixture(true)).api_recovery_ready());
 }
 
+#[tokio::test]
+async fn same_run_arc_forwards_begin_stop_key_and_mode() {
+    use crate::lifecycle::api_bot_port::{ApiBeginStopError, ApiBeginStopMode, ApiBotPort, ApiRunKey};
+    let port = std::sync::Arc::new(PortFixture(true));
+    let key = ApiRunKey { bot_id: "forward-bot".into(), run_id: "forward-run".into() };
+    assert!(matches!(port.api_run_begin_stop(&key, ApiBeginStopMode::User { withdraw: true }).await, Err(ApiBeginStopError::Busy)));
+    assert!(matches!(port.api_run_begin_stop(&key, ApiBeginStopMode::Idle).await, Err(ApiBeginStopError::Storage)));
+}
+
 struct DefaultPort;
 impl crate::lifecycle::api_bot_port::ApiBotPort for DefaultPort {
+    async fn api_run_begin_stop(&self, _: &crate::lifecycle::api_bot_port::ApiRunKey, _: crate::lifecycle::api_bot_port::ApiBeginStopMode) -> Result<crate::lifecycle::api_bot_port::ApiBeginStopResult, crate::lifecycle::api_bot_port::ApiBeginStopError> {
+        Err(crate::lifecycle::api_bot_port::ApiBeginStopError::Storage)
+    }
+
     async fn api_turn_spawn(
         &self,
         _: &crate::lifecycle::api_bot_port::ApiTurnKey,
