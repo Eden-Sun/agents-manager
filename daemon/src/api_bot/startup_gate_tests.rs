@@ -320,6 +320,8 @@ async fn d3b2_one_mib_stack_recovers_true_join_pending_and_active_orphan() {
         .unwrap();
     sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('d3b2-stack-orphan',?,'d3b2-stack-orphan','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
     sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('d3b2-orphan-run','d3b2-stack-orphan','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-stack-expired',?,'r1-stack-expired','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-stack-expired-session','r1-stack-expired',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
     env.app.db.close().await;
     let app = crate::testing::restart_app(&env).await;
     app.set_startup_ready(false);
@@ -337,6 +339,8 @@ async fn d3b2_one_mib_stack_recovers_true_join_pending_and_active_orphan() {
         .join()
         .unwrap();
     assert!(app.api_startup_gate.ready());
+    let expired: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_sessions WHERE id='r1-stack-expired-session'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(expired, 0, "the 1 MiB barrier also executes retention");
     let receipt: String = sqlx::query_scalar(
         "SELECT state FROM api_bot_join_receipts WHERE turn_id='d3b2-stack-turn'",
     )
@@ -357,6 +361,17 @@ async fn d3b2_one_mib_stack_recovers_true_join_pending_and_active_orphan() {
         .api_bot_runtime
         .startup_cursor_for_test(&identity.bot_id)
         .is_none());
+    // Only after the previous boot consumed the genuine join and retired the run, expire its
+    // Applied historical session and verify the next boot may prune it without reinserting text.
+    sqlx::query("UPDATE api_bot_sessions SET expires_at=? WHERE id=?").bind(crate::db::iso_in(-60)).bind(&identity.session_id).execute(&app.db).await.unwrap();
+    app.db.close().await;
+    let again = crate::testing::restart_app(&env).await;
+    again.set_startup_ready(false);
+    startup_gate::barrier(&again).await;
+    assert!(again.api_startup_gate.ready());
+    let remaining: (i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM api_bot_sessions WHERE id=?),(SELECT count(*) FROM api_bot_join_receipts WHERE session_id=?),(SELECT count(*) FROM messages WHERE turn_id=? AND role='assistant')")
+        .bind(&identity.session_id).bind(&identity.session_id).bind(&identity.turn_id).fetch_one(&again.db).await.unwrap();
+    assert_eq!(remaining, (0, 0, 1));
 }
 
 #[tokio::test]
@@ -478,4 +493,175 @@ async fn d3b2_fixture_endpoint_accepts_only_literal_loopback_with_port() {
         }));
         assert!(result.is_err(), "endpoint must be rejected: {endpoint}");
     }
+}
+
+#[tokio::test]
+async fn r1_startup_prunes_expired_session_after_recovery() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-bot',?,'r1-bot','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r1-run','r1-bot','exited',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-session','r1-bot','r1-run',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    startup_gate::barrier(&app).await;
+    assert!(app.api_startup_gate.ready());
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_sessions WHERE id='r1-session'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(count, 0, "expired session must be pruned before startup becomes ready");
+}
+
+#[tokio::test]
+async fn r1_no_api_bot_does_not_read_any_private_table() {
+    let env = crate::testing::env().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    for table in ["api_bot_join_receipts", "api_bot_attempts", "api_bot_sessions"] {
+        sqlx::query(&format!("DROP TABLE {table}")).execute(&app.db).await.unwrap();
+    }
+    startup_gate::barrier(&app).await;
+    assert!(app.api_startup_gate.ready());
+}
+
+#[tokio::test]
+async fn r1_unresolved_receipt_is_preserved_and_cli_remains_ready() {
+    for (applied, soft_deleted) in [(false, false), (true, false), (false, true), (true, true)] {
+        let env = crate::testing::env().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-u-bot',?,'r1-u','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+        if soft_deleted { sqlx::query("UPDATE bots SET deleted_at=? WHERE id='r1-u-bot'").bind(&now).execute(&env.app.db).await.unwrap(); }
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r1-u-run','r1-u-bot','running',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('r1-u-conv','r1-u-bot',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        let status = if applied { "completed" } else { "in_flight" };
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('r1-u-turn','r1-u-conv','r1-u-run','web',?,'ok',?)").bind(status).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-u-session','r1-u-bot','r1-u-run','r1-u-turn',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
+        let state = if applied { "applied" } else { "pending" };
+        let processed = if applied { Some(now.as_str()) } else { None };
+        sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES('r1-u-session','r1-u-bot','r1-u-run','r1-u-turn',1,0,'completed','fixture',?,?,?)").bind(state).bind(&now).bind(processed).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('r1-u-attempt','r1-u-session','r1-u-bot','r1-u-run','r1-u-turn',1,0,'fixture','standard','reserved',123,'fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+        env.app.db.close().await;
+        let app = crate::testing::restart_app(&env).await;
+        app.set_startup_ready(false);
+        startup_gate::barrier(&app).await;
+        assert!(!app.api_startup_gate.ready());
+        app.set_startup_ready(true);
+        assert!(app.is_startup_ready());
+        let snapshot: (String,String,i64,String,i64) = sqlx::query_as("SELECT j.state,a.state,a.reserved_microusd,r.state,(SELECT count(*) FROM api_bot_sessions WHERE id='r1-u-session') FROM api_bot_join_receipts j JOIN api_bot_attempts a ON a.session_id=j.session_id JOIN runs r ON r.id=j.run_id WHERE j.session_id='r1-u-session'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(snapshot, (state.into(), "reserved".into(), 123, "running".into(), 1));
+    }
+}
+
+#[tokio::test]
+async fn r1_prune_failure_rolls_back_and_quarantines() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-f-bot',?,'r1-f','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-f-session','r1-f-bot',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('r1-f-attempt','r1-f-session','r1-f-bot',1,0,'fixture','standard','reserved',123,'fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER r1_reject_delete BEFORE DELETE ON api_bot_sessions BEGIN SELECT RAISE(ABORT,'fixture'); END").execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    assert!(matches!(super::startup_retention::prune(&app).await, Err("api_startup_retention_storage")));
+    startup_gate::barrier(&app).await;
+    assert!(!app.api_startup_gate.ready());
+    app.set_startup_ready(true);
+    assert!(app.is_startup_ready());
+    let row: (String,Option<i64>,i64,i64) = sqlx::query_as("SELECT a.state,a.estimated_microusd,a.reserved_microusd,(SELECT count(*) FROM api_bot_sessions WHERE id='r1-f-session') FROM api_bot_attempts a WHERE a.id='r1-f-attempt'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(row, ("reserved".into(), None, 123, 1));
+}
+
+#[tokio::test]
+async fn r1_prune_preserves_accounting_and_handles_soft_deleted_bots() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    for bot in ["r1-exp", "r1-soft", "r1-live"] {
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at,deleted_at) VALUES(?,?,?,'claude-api','fake',?,?)")
+            .bind(bot).bind(&env.project_id).bind(bot).bind(&now).bind(if bot == "r1-soft" { Some(now.as_str()) } else { None }).execute(&env.app.db).await.unwrap();
+        let expires = if bot == "r1-exp" { crate::db::iso_in(-60) } else { crate::db::iso_in(3600) };
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,1,'{}',?,?,?)")
+            .bind(format!("{bot}-session")).bind(bot).bind(&now).bind(&now).bind(expires).execute(&env.app.db).await.unwrap();
+    }
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r1-old-run','r1-live','exited',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('r1-old-conv','r1-live',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('r1-old-turn','r1-old-conv','r1-old-run','web','failed','ok',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,state,created_at,processed_at) VALUES('r1-live-session','r1-live','r1-old-run','r1-old-turn',1,0,'failed','fenced',?,?)").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+    for (id,state,estimate) in [("r1-reserved","reserved",None),("r1-recorded","recorded",Some(44_i64)),("r1-failed","failed",None),("r1-unknown","unknown",None)] {
+        sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,'r1-exp-session','r1-exp',1,?,'fixture','standard',?,123,?,'fixture',?)")
+            .bind(id).bind(id.len() as i64).bind(state).bind(estimate).bind(&now).execute(&env.app.db).await.unwrap();
+    }
+    sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('r1-null',NULL,'r1-live',1,0,'fixture','standard','reserved',321,'fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    startup_gate::barrier(&app).await;
+    assert!(app.api_startup_gate.ready());
+    let sessions: Vec<String> = sqlx::query_scalar("SELECT id FROM api_bot_sessions ORDER BY id").fetch_all(&app.db).await.unwrap();
+    assert_eq!(sessions, ["r1-live-session"]);
+    let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM api_bot_join_receipts WHERE session_id='r1-live-session' AND state='fenced'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(receipts, 1, "non-candidate fenced receipt neither blocks nor is removed");
+    let rows: Vec<(String,String,Option<String>,Option<i64>,i64)> = sqlx::query_as("SELECT id,state,session_id,estimated_microusd,reserved_microusd FROM api_bot_attempts ORDER BY id").fetch_all(&app.db).await.unwrap();
+    assert_eq!(rows, vec![
+        ("r1-failed".into(),"failed".into(),None,None,123),
+        ("r1-null".into(),"unknown".into(),None,None,321),
+        ("r1-recorded".into(),"recorded".into(),None,Some(44),123),
+        ("r1-reserved".into(),"unknown".into(),None,None,123),
+        ("r1-unknown".into(),"unknown".into(),None,None,123),
+    ]);
+    app.db.close().await;
+    let again = crate::testing::restart_app(&env).await;
+    again.set_startup_ready(false);
+    startup_gate::barrier(&again).await;
+    assert!(again.api_startup_gate.ready());
+    let repeated: Vec<(String,String,Option<String>,Option<i64>,i64)> = sqlx::query_as("SELECT id,state,session_id,estimated_microusd,reserved_microusd FROM api_bot_attempts ORDER BY id").fetch_all(&again.db).await.unwrap();
+    assert_eq!(repeated, rows);
+}
+
+#[tokio::test]
+async fn r1_candidate_fenced_receipt_blocks_all_pruning_and_preserves_hold() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-b-bot',?,'r1-b','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r1-b-run','r1-b-bot','exited',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('r1-b-conv','r1-b-bot',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('r1-b-turn','r1-b-conv','r1-b-run','web','failed','ok',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-b-session','r1-b-bot','r1-b-run','r1-b-turn',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,state,created_at,processed_at) VALUES('r1-b-session','r1-b-bot','r1-b-run','r1-b-turn',1,0,'failed','fenced',?,?)").bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES('r1-b-attempt','r1-b-session','r1-b-bot',1,0,'fixture','standard','reserved',123,'fixture',?)").bind(&now).execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    assert!(matches!(super::startup_retention::prune(&app).await, Err("api_startup_retention_unresolved")));
+    startup_gate::barrier(&app).await;
+    assert!(!app.api_startup_gate.ready());
+    app.set_startup_ready(true);
+    assert!(app.is_startup_ready());
+    let row: (String,String,Option<i64>,i64,i64) = sqlx::query_as("SELECT j.state,a.state,a.estimated_microusd,a.reserved_microusd,(SELECT count(*) FROM api_bot_sessions WHERE id='r1-b-session') FROM api_bot_join_receipts j JOIN api_bot_attempts a ON a.session_id=j.session_id WHERE j.session_id='r1-b-session'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(row, ("fenced".into(), "reserved".into(), None, 123, 1));
+}
+
+#[tokio::test]
+async fn r1_guard_read_error_is_not_empty_receipts() {
+    let env = crate::testing::env().await;
+    sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO r1_hidden_receipts").execute(&env.app.db).await.unwrap();
+    assert!(crate::db::api_bot::prune_unless_unresolved(&env.app.db).await.is_err());
+    sqlx::query("ALTER TABLE r1_hidden_receipts RENAME TO api_bot_join_receipts").execute(&env.app.db).await.unwrap();
+}
+
+#[tokio::test]
+async fn r1_prune_commit_failure_never_opens_api_gate() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('r1-c-bot',?,'r1-c','claude-api','fake',?)").bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,generation,checkpoint_json,created_at,updated_at,expires_at) VALUES('r1-c-session','r1-c-bot',1,'{}',?,?,?)").bind(&now).bind(&now).bind(crate::db::iso_in(-60)).execute(&env.app.db).await.unwrap();
+    sqlx::query("CREATE TABLE r1_parent(id INTEGER PRIMARY KEY)").execute(&env.app.db).await.unwrap();
+    sqlx::query("CREATE TABLE r1_child(parent INTEGER REFERENCES r1_parent(id) DEFERRABLE INITIALLY DEFERRED)").execute(&env.app.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER r1_commit_fault AFTER DELETE ON api_bot_sessions BEGIN INSERT INTO r1_child(parent) VALUES(3); END").execute(&env.app.db).await.unwrap();
+    env.app.db.close().await;
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    startup_gate::barrier(&app).await;
+    assert!(!app.api_startup_gate.ready());
+    app.set_startup_ready(true);
+    assert!(app.is_startup_ready());
 }

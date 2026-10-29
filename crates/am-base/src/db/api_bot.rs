@@ -412,6 +412,28 @@ pub async fn prune(pool: &SqlitePool) -> Result<u64> {
     Ok(n)
 }
 
+/// Startup retention is blocked if a candidate session contains unverified evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartupPrune {
+    Pruned(u64),
+    Blocked,
+}
+
+/// Recheck receipt evidence in the same write transaction as the existing startup prune.
+pub async fn prune_unless_unresolved(pool: &SqlitePool) -> Result<StartupPrune> {
+    let mut tx = super::begin_write(pool).await?;
+    let at = super::now();
+    let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_join_receipts j JOIN api_bot_sessions s ON s.id=j.session_id JOIN bots b ON b.id=s.bot_id WHERE (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND j.state!='applied')")
+        .bind(&at).fetch_one(&mut *tx).await?;
+    if blocked {
+        tx.rollback().await?;
+        return Ok(StartupPrune::Blocked);
+    }
+    let n = prune_in(&mut tx, &at).await?;
+    tx.commit().await?;
+    Ok(StartupPrune::Pruned(n))
+}
+
 /// Explicit handover only after a settled checkpoint, never a recovery replay.
 pub async fn rebind(
     pool: &SqlitePool,
