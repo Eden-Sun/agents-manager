@@ -2403,7 +2403,8 @@ async fn patch_project(
         let project = project_for_gate.as_ref().expect("mode project");
         let sessions = crate::expert_marker::sessions(&app, project).await.map_err(any_err)?;
         if let Err(e) = crate::expert_marker::set(&app, &project.host, &id, &sessions, true).await {
-            if project.mode != "expert" { let _ = crate::expert_marker::remove_project(&app, &project.host, &id).await; }
+            app.expert_marker_blocked.lock().await.insert(project.host.clone());
+            crate::expert_marker::alert(&app, &project.host, &format!("專家標記寫入失敗：{e}")).await;
             return Err(LcError::Unavailable(json!({"error":"expert_marker_unavailable","message":format!("無法建立專家模式主機標記：{e}")})));
         }
         Some(sessions)
@@ -2432,15 +2433,19 @@ async fn patch_project(
     })
     .await;
     if let Err(e) = projection {
-        if let (Some(project), Some(sessions)) = (&project_for_gate, &marker_sessions) {
-            if project.mode != "expert" { let _ = crate::expert_marker::set(&app, &project.host, &id, sessions, false).await; }
+        if let (Some(project), Some(_)) = (&project_for_gate, &marker_sessions) {
+            app.expert_marker_blocked.lock().await.insert(project.host.clone());
+            crate::expert_marker::alert(&app, &project.host, &format!("專案 {id} 投影失敗；保留專家標記直到設定與資料庫對帳完成")).await;
         }
         return Err(if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) });
     }
     if b.mode.as_deref() == Some("parent_child") {
         let project = project_for_gate.as_ref().expect("mode project");
-        crate::expert_marker::remove_project(&app, &project.host, &id).await
-            .map_err(|e| LcError::Unavailable(json!({"error":"expert_marker_unavailable","message":format!("無法移除專家模式主機標記：{e}")})))?;
+        if let Err(e) = crate::expert_marker::reconcile_host_inner(&app, &project.host).await {
+            app.expert_marker_blocked.lock().await.insert(project.host.clone());
+            crate::expert_marker::alert(&app, &project.host, &format!("切換模式後標記對帳失敗：{e:#}")).await;
+            return Err(LcError::Unavailable(json!({"error":"expert_marker_unavailable","message":format!("無法對帳專家模式主機標記：{e}")})));
+        }
     }
     if let Some(h) = &handed_off_to {
         tracing::warn!(project_id = %id, handed_off_to = ?h, http = %crate::config_audit::http_caller(), "project handoff changed");
@@ -7468,6 +7473,10 @@ async fn prompt_bot(
     let relay = crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?;
     if !b.expect_result {
         if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
+        else if principal == RequestPrincipal::User {
+            let expert_host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.mode='expert'").bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
+            if let Some(host) = expert_host { if app.expert_marker_blocked.lock().await.contains(&host) { return Err(LcError::Unavailable(json!({"error":"expert_marker_unavailable","reason":"expert marker reconciliation pending"}))); } }
+        }
     }
     if b.expect_result {
         let RequestPrincipal::Bot(sender) = &principal else { return Err(LcError::Bad("expect_result requires a bot principal".into())); };
@@ -17710,6 +17719,42 @@ mod relay_result_api_tests {
 mod expert_activation_tests {
     use super::*;
     #[tokio::test]
+    async fn failed_projection_and_rollback_keeps_old_shell_guarded_after_restart() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "rollback-manager").await;
+        let bot_cfg: crate::config::BotCfg = serde_json::from_value(json!({"id":bot.id,"name":bot.name,"kind":"claude"})).unwrap();
+        env.app.cfg.update(|cfg| { cfg.projects.push(crate::config::ProjectCfg { id:Some(env.project_id.clone()), path:env.repo.to_string_lossy().to_string(), label:"proj".into(), host:"local".into(), mode:"parent_child".into(), bots:vec![bot_cfg], handed_off_to:None }); Ok(()) }).await.unwrap();
+        crate::projection::project_config(&env.app.cfg, &env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET daemon_url_injected=1 WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
+        let shim = crate::herdr_shim::install_local(&env.app.data_dir.join("bots").join(&bot.id)).unwrap();
+        let real = env.dir.join("fake-herdr"); crate::testing::write_exec(&real, "#!/bin/sh\nprintf 'delivered\\n'\n");
+        std::fs::create_dir_all(env.dir.join(".config")).unwrap();
+        std::os::unix::fs::symlink(&env.app.data_dir, env.dir.join(".config/agents-manager")).unwrap();
+        let shell = || std::process::Command::new(shim.join("herdr")).env_clear().env("HOME", &env.dir).env("PATH", "/usr/bin:/bin")
+            .env("AM_REAL_HERDR", &real).env("AM_BOT_ID", &bot.id).env("AM_BOT_TOKEN", "tok").env("AM_PROJECT_MODE", "parent_child")
+            .env("HERDR_SESSION", "test").args(["agent", "prompt", "w1:p2", "work"]).output().unwrap();
+        assert!(shell().status.success());
+        sqlx::query("CREATE TRIGGER fail_expert_projection BEFORE UPDATE ON projects WHEN NEW.mode='expert' BEGIN SELECT RAISE(ABORT,'projection failure'); END").execute(&env.app.db).await.unwrap();
+        let path = env.app.cfg.path.clone(); let backup = env.dir.join("expert-config-backup");
+        let path2 = path.clone(); let backup2 = backup.clone();
+        crate::lifecycle::race_point::arm("expert_projection_before_rollback", &path.to_string_lossy(), move || async move {
+            std::fs::rename(&path2, &backup2).unwrap(); std::fs::create_dir(&path2).unwrap();
+        });
+        let result = patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode:Some("expert".into()), manager_bot_id:Some(bot.id.clone()), label:None, handed_off_to:None })).await;
+        assert!(result.is_err());
+        std::fs::remove_dir(&path).unwrap(); std::fs::rename(&backup, &path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("expert"));
+        assert_eq!(shell().status.code(), Some(77));
+        sqlx::query("DROP TRIGGER fail_expert_projection").execute(&env.app.db).await.unwrap();
+        crate::projection::project_config_at_startup(&env.app.cfg, &env.app.db, false).await.unwrap();
+        let restarted = crate::testing::restart_app(&env).await;
+        crate::expert_marker::reconcile_host(&restarted, "local").await.unwrap();
+        assert_eq!(db::project(&restarted.db, &env.project_id).await.unwrap().unwrap().mode, "expert");
+        assert_eq!(shell().status.code(), Some(77));
+    }
+
+    #[tokio::test]
     async fn marker_write_failure_rejects_expert_activation() {
         let env = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "marker-manager").await;
@@ -17741,7 +17786,6 @@ mod expert_activation_tests {
         assert!(old_shell("w1:p2").status.success());
         let project = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
         let sessions = crate::expert_marker::sessions(&env.app, &project).await.unwrap();
-        crate::expert_marker::set(&env.app, "local", "another-project", &sessions, true).await.unwrap();
         let patch = |mode: &str| PatchProject { mode:Some(mode.into()), manager_bot_id:Some(bot.id.clone()), label:None, handed_off_to:None };
         patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("expert"))).await.unwrap();
         let dir = env.app.data_dir.join("expert-sessions").join(am_base::expert_marker::encode(&sessions[0]));
@@ -17749,10 +17793,6 @@ mod expert_activation_tests {
         for target in ["w1:p2", "manager"] { assert_eq!(old_shell(target).status.code(), Some(77)); }
         patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("parent_child"))).await.unwrap();
         assert!(!dir.join(am_base::expert_marker::encode(&env.project_id)).exists());
-        assert!(dir.join(am_base::expert_marker::encode("another-project")).exists());
-        // The other project's marker still protects this session; removing it restores old behavior.
-        assert_eq!(old_shell("w1:p2").status.code(), Some(77));
-        crate::expert_marker::remove_project(&env.app, "local", "another-project").await.unwrap();
         assert!(old_shell("w1:p2").status.success());
     }
 

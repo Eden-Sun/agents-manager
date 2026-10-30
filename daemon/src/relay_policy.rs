@@ -24,6 +24,9 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") { return Err(RelayDenied::Denied("expert_cross_project".into())); }
     if project.mode == "expert" {
+        if app.expert_marker_blocked.lock().await.contains(&project.host) {
+            return Err(RelayDenied::Unavailable("expert marker reconciliation pending".into()));
+        }
         let direct_family = from.parent_bot_id.as_deref() == Some(to.id.as_str());
         if !direct_family && kind == Admission::NewRequest {
             let run = crate::db::active_run(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
