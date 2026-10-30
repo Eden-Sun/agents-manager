@@ -26,6 +26,7 @@ pub mod codex_model_migration;
 pub mod credential_spawn;
 pub mod dangerous_rm;
 pub mod default_session;
+pub(crate) mod db_pool;
 pub mod events;
 pub mod herdr_maintenance;
 pub mod herdr_version;
