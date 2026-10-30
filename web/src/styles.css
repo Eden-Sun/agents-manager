@@ -3865,5 +3865,14 @@ button.model-tag:hover:not(:disabled) {
   color: var(--text-faint);
 }
 
+/* 環境設定→顯示：模型用法模式 */
+.model-mode { margin: 14px 0 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; }
+.model-mode legend { padding: 0; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.model-mode-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
+.model-mode-row input { margin-top: 3px; }
+.model-mode-desc { display: block; font-size: 11.5px; line-height: 1.6; color: var(--text-faint); }
+.model-mode-note { margin: 0; font-size: 12px; }
+.model-mode-note.err { color: var(--danger, #c0392b); }
+
 /* blocked 的原因（daemon 的 run.blocked_reason）：狀態字旁的小字，窄欄放不下就截斷，完整字在 hover。 */
 .bot-state-reason { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; font-weight: 400; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

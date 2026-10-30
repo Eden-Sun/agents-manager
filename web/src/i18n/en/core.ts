@@ -306,4 +306,9 @@ export default {
   '開始在 {where} 安裝 agy（下載約 50 MB 並驗 sha512）…': 'Installing agy on {where} (downloads about 50 MB and verifies sha512)…',
   '關閉失敗：{reason}': 'Closing failed: {reason}',
   '；': '; ',
+  // components/ModelModePanel.tsx
+  '模型用法模式': 'Model usage mode',
+  '讀不到模型用法模式：{message}': 'Cannot read model usage mode: {message}',
+  '已儲存。已在跑的 bot 要重啟才套用新規則。': 'Saved. Bots that are already running must be restarted to pick up the new rules.',
+  '已儲存。': 'Saved.',
 } satisfies Dict

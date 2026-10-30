@@ -134,6 +134,7 @@ These are optional and off until configured.
 - **Jev suggestions** — a judge layer that scores the options of a blocked question and marks them as "Jev suggestion"; it never answers for you. [SPEC §4.3c](docs/SPEC.md).
 - **Claude API key** — lets one-off LLM jobs (update triage, changelog translation) skip a full Claude Code session. [SPEC §4.3d](docs/SPEC.md).
 - **Share bots** — restricted or trusted bots exposed through a separate share entry point. [SPEC §20](docs/SPEC.md).
+- **Model usage mode** — Settings → Display picks `claude` (default, unchanged) or `claude_codex` (Claude parent with Codex helpers: opus parent; fable and gpt-6-astra advise; gpt-6.1-terra, gpt-6-luna, haiku and sonnet execute; Codex children stay long-lived per module, Claude children are one-shot). The mode's rules are injected into bots at start, so running bots must be restarted after switching.
 - **Update checks** — one settings tab lists herdr, agent CLIs and hook integrations per host. [SPEC §6.9c](docs/SPEC.md).
 
 ![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/en/settings-updates.png)

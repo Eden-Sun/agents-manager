@@ -1321,3 +1321,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **daemon 回傳的錯誤與系統訊息、使用者內容、模型名、指令不翻**：那些是別人產生的資料，不是介面。規則與譯名表在 FRONTEND.md〈多語系〉。
 - **英文字比中文寬，版面為英文留餘地**：手機標題列的分頁（Chat／Terminal／Preview）在英文時收窄左右內距與字級，bot 名才排得下（390px）；更新檢查表的狀態欄在英文放寬到 124px（「Update available」）。這些只在 `:lang(en)` 生效，繁中版面不動。
 - **README 截圖兩套**：英文放 `docs/screenshots/readme/en/`、繁中放 `zh-TW/`，各自給對應語言的 README 引用；用 mock 的 `?lang=` 拍，示範資料（訊息、任務、Issue）跟著語言。
+
+## 模型用法模式
+- **放在環境設定→顯示**：兩個單選（`claude` 預設、`claude_codex`＝「claude主codex輔助模式」），選了立即 `PUT /api/model-mode`，不另設儲存鈕。
+- **選項名稱與說明全由 daemon 回**（`GET /api/model-mode` 的 `modes[]`）：選模型策略文字不在前端寫死；舊 daemon（404／405）整塊不出現。
+- **改完提示重啟**：回應 `needs_restart_bots` 時顯示「已在跑的 bot 要重啟才套用新規則」；不自動重啟任何 bot。
