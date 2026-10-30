@@ -19,16 +19,16 @@ pub async fn set(app: &Arc<App>, host: &str, project: &str, sessions: &[String],
         Some(app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host {host}"))?)
     };
     for session in sessions {
-        am_base::expert_marker::set(&app.data_dir, conn.as_ref(), project, session, enabled).await?;
+        am_base::expert_marker::set(&app.data_dir, conn.as_ref(), app.instance().as_deref(), project, session, enabled).await?;
     }
     Ok(())
 }
 
 /// Remove only this project's markers, including old sessions after bots were moved.
 pub async fn remove_project(app: &Arc<App>, host: &str, project: &str) -> anyhow::Result<()> {
-    let name = am_base::expert_marker::encode(project);
+    let name = am_base::expert_marker::marker_name(app.instance().as_deref(), project);
     if host == crate::config::LOCAL_HOST {
-        let root = app.data_dir.join("expert-sessions");
+        let root = am_base::expert_marker::local_root(&app.data_dir);
         let entries = match std::fs::read_dir(root) { Ok(v) => v, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), Err(e) => return Err(e.into()) };
         for entry in entries {
             let path = entry?.path().join(&name);
@@ -96,11 +96,28 @@ pub(crate) async fn reconcile_host_inner(app: &Arc<App>, host: &str) -> anyhow::
             }
         }
     }
-    let keep: HashSet<(String, String)> = desired.iter().map(|(project, session)| (am_base::expert_marker::encode(session), am_base::expert_marker::encode(project))).collect();
+    let mut owned_sessions = HashSet::new();
+    let default = app.session_for_host(host).await.ok_or_else(|| anyhow::anyhow!("host session unavailable"))?;
+    owned_sessions.insert(am_base::expert_marker::encode(&default));
+    for project in projects.iter().filter(|p| p.host == host) {
+        for session in sessions(app, project).await? { owned_sessions.insert(am_base::expert_marker::encode(&session)); }
+    }
+    for project in disk.projects.iter().chain(&memory.projects).filter(|p| p.host == host) {
+        for bot in &project.bots {
+            let session = bot.herdr_session.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&default);
+            owned_sessions.insert(am_base::expert_marker::encode(session));
+        }
+    }
+    let keep: HashSet<(String, String)> = desired.iter().map(|(project, session)| (am_base::expert_marker::encode(session), am_base::expert_marker::marker_name(app.instance().as_deref(), project))).collect();
     for (session, project) in list_markers(app, host).await? {
-        if !keep.contains(&(session.clone(), project.clone())) { remove_encoded(app, host, &session, &project).await?; }
+        if owned_sessions.contains(&session) && !keep.contains(&(session.clone(), project.clone())) { remove_encoded(app, host, &session, &project).await?; }
     }
     Ok(())
+}
+
+fn owned_name(app: &Arc<App>, name: &str) -> bool {
+    let prefix = format!("i{}-p", am_base::expert_marker::encode(app.instance().as_deref().unwrap_or("default")));
+    name.strip_prefix(&prefix).is_some_and(hex_name)
 }
 
 fn hex_name(s: &str) -> bool { !s.is_empty() && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) }
@@ -108,7 +125,7 @@ fn hex_name(s: &str) -> bool { !s.is_empty() && s.len() % 2 == 0 && s.bytes().al
 async fn list_markers(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<(String,String)>> {
     let mut out = Vec::new();
     if host == crate::config::LOCAL_HOST {
-        let root = app.data_dir.join("expert-sessions");
+        let root = am_base::expert_marker::local_root(&app.data_dir);
         let entries = match std::fs::read_dir(root) { Ok(v) => v, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out), Err(e) => return Err(e.into()) };
         for entry in entries {
             let entry = entry?;
@@ -116,23 +133,23 @@ async fn list_markers(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<(String,
             if !hex_name(&session) || !entry.file_type()?.is_dir() { continue; }
             for item in std::fs::read_dir(entry.path())? {
                 let item = item?; let project = item.file_name().to_string_lossy().into_owned();
-                if hex_name(&project) && item.file_type()?.is_file() { out.push((session.clone(), project)); }
+                if owned_name(app, &project) && item.file_type()?.is_file() { out.push((session.clone(), project)); }
             }
         }
     } else {
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host {host}"))?;
         let script = "set -eu\nroot=\"$HOME/.config/agents-manager/expert-sessions\"\nfor dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; for file in \"$dir\"/*; do [ -f \"$file\" ] || continue; printf '%s/%s\\n' \"${dir##*/}\" \"${file##*/}\"; done; done\n";
         for line in conn.ssh_exec(script).await?.lines() {
-            if let Some((session, project)) = line.split_once('/') { if hex_name(session) && hex_name(project) { out.push((session.to_string(), project.to_string())); } }
+            if let Some((session, project)) = line.split_once('/') { if hex_name(session) && owned_name(app, project) { out.push((session.to_string(), project.to_string())); } }
         }
     }
     Ok(out)
 }
 
 async fn remove_encoded(app: &Arc<App>, host: &str, session: &str, project: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(hex_name(session) && hex_name(project), "invalid marker filename");
+    anyhow::ensure!(hex_name(session) && owned_name(app, project), "invalid marker filename");
     if host == crate::config::LOCAL_HOST {
-        let file = app.data_dir.join("expert-sessions").join(session).join(project);
+        let file = am_base::expert_marker::local_root(&app.data_dir).join(session).join(project);
         match std::fs::remove_file(file) { Ok(()) => {}, Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, Err(e) => return Err(e.into()) }
     } else {
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host {host}"))?;
@@ -155,13 +172,48 @@ mod tests {
         set(&e.app, "local", &e.project_id, &sessions, true).await.unwrap();
         set(&e.app, "local", &other, &sessions, true).await.unwrap();
         reconcile_host(&e.app, "local").await.unwrap();
-        let root = e.app.data_dir.join("expert-sessions").join(am_base::expert_marker::encode("test"));
-        assert!(!root.join(am_base::expert_marker::encode(&e.project_id)).exists());
-        assert!(root.join(am_base::expert_marker::encode(&other)).exists());
+        let root = am_base::expert_marker::local_root(&e.app.data_dir).join(am_base::expert_marker::encode("test"));
+        assert!(!root.join(am_base::expert_marker::marker_name(e.app.instance().as_deref(), &e.project_id)).exists());
+        assert!(root.join(am_base::expert_marker::marker_name(e.app.instance().as_deref(), &other)).exists());
         // A missing expert marker is repaired when a host reconnects.
-        std::fs::remove_file(root.join(am_base::expert_marker::encode(&other))).unwrap();
+        std::fs::remove_file(root.join(am_base::expert_marker::marker_name(e.app.instance().as_deref(), &other))).unwrap();
         reconcile_host(&e.app, "local").await.unwrap();
-        assert!(root.join(am_base::expert_marker::encode(&other)).exists());
+        assert!(root.join(am_base::expert_marker::marker_name(e.app.instance().as_deref(), &other)).exists());
+    }
+
+    #[tokio::test]
+    async fn macos_local_shared_remote_markers_are_owned_by_instance_and_session() {
+        use std::io::Write;
+        let a = crate::testing::env().await; let b = crate::testing::env().await;
+        a.app.set_instance(Some("instance-a".into())); b.app.set_instance(Some("instance-b".into()));
+        let host = format!("shared-{}", db::ulid());
+        let cfg: crate::config::HostCfg = serde_json::from_value(serde_json::json!({"name":host,"ssh":"test","herdr_session":"shared-session"})).unwrap();
+        a.app.hosts.insert_remote_for_test(cfg.clone()).await; b.app.hosts.insert_remote_for_test(cfg).await;
+        for e in [&a, &b] {
+            sqlx::query("UPDATE projects SET host=?,mode='expert' WHERE id=?").bind(&host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        }
+        let home = a.dir.join("remote-home"); std::fs::create_dir_all(&home).unwrap(); let remote_home = home.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            let mut child = std::process::Command::new("/bin/sh").arg("-s").env("HOME", &remote_home).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+            child.stdin.take().unwrap().write_all(script.as_bytes())?;
+            let out = child.wait_with_output()?;
+            anyhow::ensure!(out.status.success(), "fake remote script: {}", String::from_utf8_lossy(&out.stderr));
+            Ok(String::from_utf8(out.stdout)?)
+        });
+        reconcile_host(&a.app, &host).await.unwrap(); reconcile_host(&b.app, &host).await.unwrap();
+        set(&b.app, &host, &b.project_id, &["other-session".into()], true).await.unwrap();
+        let root = home.join(".config/agents-manager/expert-sessions");
+        let shared = root.join(am_base::expert_marker::encode("shared-session"));
+        let other = root.join(am_base::expert_marker::encode("other-session"));
+        let file_a = shared.join(am_base::expert_marker::marker_name(a.app.instance().as_deref(), &a.project_id));
+        let file_b = shared.join(am_base::expert_marker::marker_name(b.app.instance().as_deref(), &b.project_id));
+        let file_other = other.join(am_base::expert_marker::marker_name(b.app.instance().as_deref(), &b.project_id));
+        assert!(file_a.exists() && file_b.exists() && file_other.exists());
+        sqlx::query("UPDATE projects SET mode='parent_child' WHERE id=?").bind(&a.project_id).execute(&a.app.db).await.unwrap();
+        reconcile_host(&a.app, &host).await.unwrap();
+        assert!(!file_a.exists()); assert!(file_b.exists() && file_other.exists());
+        reconcile_host(&b.app, &host).await.unwrap();
+        assert!(file_b.exists() && file_other.exists());
     }
 
     #[tokio::test]
@@ -174,7 +226,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new())); let seen2 = seen.clone();
         crate::hosts::set_ssh_fake(&host, move |script| { seen2.lock().unwrap().push(script.to_string()); Ok(String::new()) });
         reconcile_host(&e.app, &host).await.unwrap();
-        assert!(seen.lock().unwrap().iter().any(|s| s.contains(&am_base::expert_marker::encode("remote-session")) && s.contains(&am_base::expert_marker::encode(&e.project_id))));
+        assert!(seen.lock().unwrap().iter().any(|s| s.contains(&am_base::expert_marker::encode("remote-session")) && s.contains(&am_base::expert_marker::marker_name(e.app.instance().as_deref(), &e.project_id))));
         crate::hosts::set_ssh_fake(&host, |_| anyhow::bail!("ssh unavailable"));
         assert!(reconcile_host(&e.app, &host).await.is_err());
         assert!(e.app.expert_marker_blocked.lock().await.contains(&host));
@@ -186,7 +238,7 @@ mod tests {
         let a = crate::testing::claude_bot(&e.app, &e.project_id, "marker-repair-a").await;
         let b = crate::testing::claude_bot(&e.app, &e.project_id, "marker-repair-b").await;
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&e.project_id).execute(&e.app.db).await.unwrap();
-        let root = e.app.data_dir.join("expert-sessions");
+        let root = am_base::expert_marker::local_root(&e.app.data_dir);
         std::fs::write(&root, "unwritable").unwrap();
         assert!(reconcile_host(&e.app, "local").await.is_err());
         assert!(matches!(crate::relay_policy::relay_prompt_allowed(&e.app, &a.id, &b.id, crate::relay_policy::Admission::Deliver).await, Err(crate::relay_policy::RelayDenied::Unavailable(_))));

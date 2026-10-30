@@ -2,10 +2,19 @@
 use std::{path::Path, sync::Arc};
 use crate::hosts::HostConn;
 
+/// All daemon instances on a host share this directory; tests use their isolated data root.
+pub fn local_root(data_dir: &Path) -> std::path::PathBuf {
+    if cfg!(any(test, feature = "test-hooks")) { return data_dir.join("expert-sessions"); }
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config/agents-manager/expert-sessions"))
+        .unwrap_or_else(|| data_dir.join("expert-sessions"))
+}
+
 pub fn encode(s: &str) -> String { s.as_bytes().iter().map(|b| format!("{b:02x}")).collect() }
 
-pub async fn set(data_dir: &Path, remote: Option<&Arc<HostConn>>, project: &str, session: &str, enabled: bool) -> anyhow::Result<()> {
-    let project_hex = encode(project);
+pub fn marker_name(instance: Option<&str>, project: &str) -> String { format!("i{}-p{}", encode(instance.unwrap_or("default")), encode(project)) }
+
+pub async fn set(data_dir: &Path, remote: Option<&Arc<HostConn>>, instance: Option<&str>, project: &str, session: &str, enabled: bool) -> anyhow::Result<()> {
+    let project_hex = marker_name(instance, project);
     let session_hex = encode(session);
     if let Some(conn) = remote {
         let dir = format!("$HOME/.config/agents-manager/expert-sessions/{session_hex}");
@@ -15,7 +24,7 @@ pub async fn set(data_dir: &Path, remote: Option<&Arc<HostConn>>, project: &str,
         } else { format!("set -eu\nrm -f \"{dir}/{project_hex}\"\n") };
         conn.ssh_exec(&script).await?;
     } else {
-        let dir = data_dir.join("expert-sessions").join(&session_hex);
+        let dir = local_root(data_dir).join(&session_hex);
         let file = dir.join(&project_hex);
         if enabled {
             std::fs::create_dir_all(&dir)?;
