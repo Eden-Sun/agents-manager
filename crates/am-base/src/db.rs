@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
+CREATE TABLE IF NOT EXISTS relay_requests (
+  id TEXT PRIMARY KEY,
+  from_bot_id TEXT NOT NULL REFERENCES bots(id),
+  to_bot_id TEXT NOT NULL REFERENCES bots(id),
+  client_request_id TEXT NOT NULL,
+  prompt_text TEXT NOT NULL, attachments_json TEXT NOT NULL,
+  to_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  to_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','delivered','answered','notified','failed')),
+  created_at TEXT NOT NULL, answered_at TEXT, notified_at TEXT,
+  notice_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL, processed_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0, error TEXT, alerted_at TEXT,
+  UNIQUE(from_bot_id, to_bot_id, client_request_id),
+  UNIQUE(to_turn_id)
+);
+CREATE INDEX IF NOT EXISTS relay_requests_target_state ON relay_requests(to_bot_id,state);
+CREATE INDEX IF NOT EXISTS relay_requests_source ON relay_requests(from_bot_id,created_at);
 CREATE TABLE IF NOT EXISTS child_done_state (
   child_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
   idle_at TEXT NOT NULL, idle_turn_id TEXT NOT NULL, initialized_at TEXT NOT NULL,
@@ -536,6 +553,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // #1944 D1: private durable joined receipts (no production writer yet).
     (70, "b87dfcf444f07cd0"),
     (71, "d32e25a1e3418557"),
+    (72, "60ac969ab5fc0d2d"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

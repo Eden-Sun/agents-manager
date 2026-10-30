@@ -186,6 +186,31 @@
         }
     }
 
+    #[test]
+    fn macos_local_expect_result_uses_remote_daemon_without_direct_herdr_prompt() {
+        let s = Sandbox::new();
+        let calls = s.dir.join("curl-args");
+        s.install_fake_curl(&format!(r#"printf '%s\n' "$*" >> '{}'
+case "$*" in
+  */api/relay/resolve*) printf '{{"to_bot_id":"target","to_run_id":null,"to_agent":null}}\n200' ;;
+  */api/bots/target/prompt*) printf '{{"request_id":"request-123"}}\n200' ;;
+  *) exit 1 ;;
+esac"#, calls.display()));
+        let log = s.dir.join("herdr-calls");
+        let env = [("AM_BOT_ID", "sender"), ("AM_BOT_TOKEN", "token"), ("AM_DAEMON_URL", "http://daemon:7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+        let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "bot:target", "--expect-result", "--request-id", "stable", "--timeout", "5000", "hello"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["request_id=request-123"]);
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert!(calls.contains("http://daemon:7788/api/relay/resolve"));
+        assert!(calls.contains("http://daemon:7788/api/bots/target/prompt"));
+        assert!(calls.contains("stable") && calls.contains("expect_result"));
+        let timeouts: Vec<f64> = calls.lines().map(|line| line.split("--max-time ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap()).collect();
+        assert_eq!(timeouts.len(), 2);
+        assert!(timeouts.iter().all(|t| *t > 0.0 && *t <= 5.0), "{timeouts:?}");
+        assert!(!std::fs::read_to_string(log).unwrap_or_default().contains("agent prompt"));
+    }
+
     /// §6.5e：`--purpose` 是我們自己的旗標，不轉給 herdr；`tab create` 沒指定 workspace 時補專案的。
     #[test]
     fn pane_creation_strips_our_purpose_flag_and_defaults_the_workspace() {
