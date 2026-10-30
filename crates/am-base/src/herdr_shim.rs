@@ -378,13 +378,18 @@ am_kv_get() {
 # A marker is scoped to the herdr session; if the session is unavailable, conservatively
 # check every session on the host. It protects natural stale panes, not a hostile OS user.
 am_expert_session_marked() {
-    _am_mark_root="${HOME}/.config/agents-manager/expert-sessions"
-    if [ -n "${AM_PORT:-}" ] && [ -n "${AM_CONFIG_PATH:-}" ] && [ -f "$AM_CONFIG_PATH" ]; then _am_mark_root="${AM_CONFIG_PATH%/*}/expert-sessions"; fi
+    _am_default_root="${HOME}/.config/agents-manager/expert-sessions"
+    _am_legacy_root="$_am_default_root"
+    if [ -n "${AM_CONFIG_PATH:-}" ] && [ -f "$AM_CONFIG_PATH" ]; then _am_legacy_root="${AM_CONFIG_PATH%/*}/expert-sessions"; fi
     if [ -n "${HERDR_SESSION:-}" ]; then
         _am_mark_session=$(printf '%s' "$HERDR_SESSION" | LC_ALL=C od -An -tx1 | tr -d ' \n')
-        for _am_mark in "$_am_mark_root/$_am_mark_session/"*; do [ -f "$_am_mark" ] && return 0; done
+        for _am_mark_root in "$_am_default_root" "$_am_legacy_root"; do
+            for _am_mark in "$_am_mark_root/$_am_mark_session/"*; do [ -f "$_am_mark" ] && return 0; done
+        done
     else
-        for _am_mark in "$_am_mark_root/"*/*; do [ -f "$_am_mark" ] && return 0; done
+        for _am_mark_root in "$_am_default_root" "$_am_legacy_root"; do
+            for _am_mark in "$_am_mark_root/"*/*; do [ -f "$_am_mark" ] && return 0; done
+        done
     fi
     return 1
 }

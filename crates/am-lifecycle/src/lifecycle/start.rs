@@ -214,7 +214,7 @@ async fn start_bot_locked_with_host_fence_body(
         let conn = if project.host == crate::config::LOCAL_HOST { None } else {
             Some(app.hosts().get(&project.host).await.ok_or_else(|| LcError::Upstream("expert marker host unavailable".into()))?)
         };
-        am_base::expert_marker::set(app.data_dir(), conn.as_ref(), &project.id, &session, true).await
+        am_base::expert_marker::set(app.data_dir(), conn.as_ref(), app.instance().as_deref(), &project.id, &session, true).await
             .map_err(|e| LcError::Upstream(format!("expert session marker unavailable: {e}")))?;
     }
     // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
