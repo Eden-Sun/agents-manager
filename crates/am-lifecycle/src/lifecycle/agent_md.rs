@@ -24,7 +24,6 @@ pub const PERSONA_FILE: &str = "persona.md";
 /// 遠端主機睡著、ssh 逾時的那一刻開 bot，不能變成「兩邊都沒有規則」。
 #[derive(Debug, Default)]
 pub struct AgentMd {
-    pub claude_codex: bool,
     pub configured: bool,
     pub text: String,
     pub problems: Vec<String>,
@@ -57,16 +56,8 @@ pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAcce
             }
         });
     }
-    let mut result = collect(reads);
-    result.claude_codex = agents.model_mode == crate::config::ModelMode::ClaudeCodex;
-    if result.claude_codex {
-        if !result.text.is_empty() { result.text.push_str("\n\n"); }
-        result.text.push_str(MODEL_MODE_RULES);
-    }
-    result
+    collect(reads)
 }
-
-pub const MODEL_MODE_RULES: &str = "## claude主codex輔助模式（硬規則，優先於前述衝突規則）\n主 parent 使用 opus。顧問 fable、gpt-6-astra 只幫忙決策及 review，不做主要實作。執行者由 parent 依難度自行選 gpt-6.1-terra medium、gpt-6-luna xhigh、haiku、sonnet，不必先問使用者；使用者點名時照使用者指定。codex child 長駐專職，閒置不會讓 cache 冷掉，做完不收；同專案或模組後續交給同一顆，不相關新題從它 fork --last 分出去。claude child 驗收完就收，除非一小時內有同一塊的後續工作。codex 不當 parent；需要另派時寫進回報交給 claude parent 決定。";
 
 
 /// Stable per-source fingerprints make startup snapshots identifiable without changing the
@@ -538,7 +529,7 @@ mod tests {
     async fn a_remote_projects_file_is_read_on_its_host() {
         let host = "agent-md-box";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into());
         crate::hosts::set_ssh_fake(host, |script| {
@@ -756,7 +747,7 @@ mod tests {
                 .unwrap();
             let host = "profile-remote-failure";
             project.host = host.into();
-            let cfg = crate::config::HostCfg {
+            let cfg = crate::config::HostCfg { daemon_url: None,
                 name: host.into(),
                 ssh: host.into(),
                 ssh_port: 22,
@@ -809,7 +800,7 @@ mod tests {
                 .unwrap();
             let host = "profile-remote-success";
             project.host = host.into();
-            let cfg = crate::config::HostCfg {
+            let cfg = crate::config::HostCfg { daemon_url: None,
                 name: host.into(),
                 ssh: host.into(),
                 ssh_port: 22,

@@ -1,3 +1,4 @@
+import { ProjectExpertSettings } from './ProjectExpertSettings'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -649,6 +650,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           </button>
         </div>
       </div>
+      <ProjectExpertSettings projectId={projectId} />
       <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
       {memberCount === 0 ? (

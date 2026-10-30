@@ -128,7 +128,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("gh-fence-{}", db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),
@@ -240,7 +240,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("gh-gone-{}", db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),

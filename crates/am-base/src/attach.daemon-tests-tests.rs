@@ -516,7 +516,7 @@
     async fn remote_host(app: &Arc<App>) -> String {
         let host = format!("attach-remote-{}", crate::db::ulid().to_ascii_lowercase());
         app.hosts
-            .insert_remote_for_test(crate::config::HostCfg {
+            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),

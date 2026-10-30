@@ -414,7 +414,7 @@ async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> boo
 /// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身份；args 不帶——那是收編時看到的舊 argv）。
 /// handler 與開機補完（`promote_intents`）共用同一份，補完出來的跟 handler 做的一模一樣。
 pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Option<String>, effort: &Option<String>) -> BotCfg {
-    BotCfg {
+    BotCfg { role: None,
         id: Some(new_id.to_string()),
         name: name.to_string(),
         kind: "claude".into(),
@@ -748,7 +748,7 @@ mod tests {
                     env: [("CLAUDE_CONFIG_DIR".to_string(), d.clone())].into(),
                     args: vec![],
                 });
-                c.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await

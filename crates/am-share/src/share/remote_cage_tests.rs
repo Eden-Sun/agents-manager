@@ -65,7 +65,7 @@ async fn fake_host(e: &tt::Env, tag: &str, version: &str, managed: bool) -> Fake
             .map_err(|e| anyhow::anyhow!("exec /bin/sh: {e}"))?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     });
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.clone(),
         ssh: "fake-ssh".into(),
         ssh_port: 22,
@@ -268,7 +268,7 @@ async fn preflight_does_not_read_claude_version_from_a_banner() {
         }
         Ok("AM_MS=NONE\n".to_string())
     });
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.clone(),
         ssh: "fake-ssh".into(),
         ssh_port: 22,
@@ -381,7 +381,7 @@ async fn creating_a_remote_share_bot_over_http_refuses_unknown_and_unreachable_h
     e.app
         .cfg
         .update(|c| {
-            c.hosts.push(HostCfg {
+            c.hosts.push(HostCfg { daemon_url: None,
                 name: f.host.clone(),
                 ssh: "fake-ssh".into(),
                 ssh_port: 22,
@@ -390,7 +390,7 @@ async fn creating_a_remote_share_bot_over_http_refuses_unknown_and_unreachable_h
                 shared_session: false,
                 remote_path: String::new(),
             });
-            c.projects.push(crate::config::ProjectCfg {
+            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                 id: Some(pid.clone()),
                 path: "/srv/app".into(),
                 label: "proj".into(),
@@ -480,7 +480,7 @@ async fn odd_host(e: &tt::Env, tag: &str, version: &'static str, managed: Result
         }
         Ok(String::new())
     });
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.clone(),
         ssh: "fake-ssh".into(),
         ssh_port: 22,

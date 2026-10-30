@@ -1541,7 +1541,7 @@ mod tests {
         assert!(matches!(call(HeaderMap::new(), "local", Some("latest"), Some("0.9.3")).await, LcError::Bad(_)));
         assert!(matches!(call(HeaderMap::new(), "local", None, Some("0.9.3")).await, LcError::Bad(_)));
         assert!(matches!(call(HeaderMap::new(), "nope", Some("0.9.3"), Some("0.9.3")).await, LcError::NotFound(_)));
-        let cfg = |name: &str, shared: bool| crate::config::HostCfg {
+        let cfg = |name: &str, shared: bool| crate::config::HostCfg { daemon_url: None,
             name: name.into(), ssh: "x".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(),
             remote_path: String::new(), shared_session: shared,
         };
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     async fn remote_env(env: &tt::Env, host: &str) -> tt::MockHerdr {
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             name: host.into(), ssh: "never-connect.invalid".into(), ssh_port: 22, ssh_opts: vec![],
             herdr_session: "remote-owner".into(), remote_path: String::new(), shared_session: false,
         };

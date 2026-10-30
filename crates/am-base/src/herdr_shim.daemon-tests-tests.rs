@@ -82,6 +82,7 @@
             write_script(
                 &fake.join("curl"),
                 "case \"$*\" in\n\
+                   */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
                    */relay/spawn/abort*) printf '{\"released\":true}\\n200'; exit 0 ;;\n\
@@ -269,6 +270,7 @@ esac"#, calls.display()));
             &format!(
                 "printf '%s\\n' \"$@\" >> '{}'\n\
                  case \"$*\" in\n\
+                   */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                  esac\n",
@@ -996,7 +998,8 @@ esac"#, calls.display()));
                 &format!(
                     "printf '%s\\n' \"$@\" >> '{}'\n\
                      case \"$*\" in\n\
-                       */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                       */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                        */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                      esac\n",
                     log.display()
@@ -1485,14 +1488,26 @@ esac"#, calls.display()));
     }
 
     #[test]
-    fn opted_in_child_receives_its_own_kind_and_mode() {
+    fn remote_parent_child_without_url_keeps_spawn_but_expert_fails_closed() {
+        let s = Sandbox::new();
+        let base = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "bot"), ("AM_PROJECT_MODE", "parent_child")];
+        let (_, _, rc) = s.run_full(&base, &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0);
+        let expert = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "bot"), ("AM_PROJECT_MODE", "expert")];
+        let (_, err, rc) = s.run_full(&expert, &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 77);
+        assert!(err.contains("缺少 daemon 位址"), "{err}");
+    }
+
+    #[test]
+    fn obsolete_global_mode_does_not_restrict_or_propagate() {
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
-        let env = [("AM_AGENT_NAME", "p"), ("AM_KIND", "claude"), ("AM_MODEL_MODE", "claude_codex"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
-        s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        let env = [("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex"), ("AM_MODEL_MODE", "claude_codex"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
+        let (_, _, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0);
         let (_, sent) = s.sourced_env();
-        assert!(sent.contains("export AM_KIND='codex'"), "{sent}");
-        assert!(sent.contains("export AM_MODEL_MODE='claude_codex'"), "{sent}");
+        assert!(!sent.contains("export AM_MODEL_MODE="), "{sent}");
     }
 
     /// 值裡有單引號要逃脫，不然那個 export 的邊界會斷在半路。
@@ -1702,7 +1717,8 @@ esac"#, calls.display()));
         s.install_fake_curl(&format!(
             "printf '%s\\n' \"$*\" >> '{}'\n\
              case \"$*\" in\n\
-               */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+               */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
              esac\n",
@@ -1720,7 +1736,8 @@ esac"#, calls.display()));
             "printf '%s\\n' \"$*\" >> '{}'\n\
              cat >> '{}'\n\
              case \"$*\" in\n\
-               */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+               */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
              esac\n",
@@ -1832,7 +1849,8 @@ esac"#, calls.display()));
         let s = Sandbox::new();
         s.install_fake_curl(
             "case \"$*\" in\n\
-               */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
+               */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
                */relay/spawn/claim*) printf '{}\\n503'; exit 0 ;;\n\
              esac\n",

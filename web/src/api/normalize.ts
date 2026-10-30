@@ -286,6 +286,7 @@ export function toProject(v: unknown): Project | null {
   return {
     id,
     path,
+    mode: v.mode === 'expert' ? 'expert' : 'parent_child',
     label: str(pick(v, 'label'), path.split('/').pop() ?? id),
     workspace_id: optStr(v.workspace_id),
     host: str(pick(v, 'host'), 'local') || 'local',
@@ -318,6 +319,9 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     id,
     project_id: str(pick(v, 'project_id'), projectId ?? ''),
     name: str(pick(v, 'name'), id),
+    role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' ? v.role : null,
+    role_pending: bool(v.role_pending),
+    runtime_role_policy: optStr(v.runtime_role_policy),
     kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
     model: optStr(pick(v, 'model')),
     effort: optStr(pick(v, 'effort')),

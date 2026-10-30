@@ -5,7 +5,7 @@
     use crate::testing as tt;
 
     fn remote_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg {
+        crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.to_string(),
             ssh: "unused".into(),

@@ -80,7 +80,7 @@
     }
 
     fn remote_host_cfg(name: &str, target: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg {
+        crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: name.into(),
             ssh: target.into(),
