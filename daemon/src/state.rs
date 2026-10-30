@@ -170,6 +170,7 @@ pub struct App {
     /// 換不動）時寫進來，`supervisor::incidents` 的探針拿它開票，下一次補版成功就移除。
     /// 記憶體、重啟重算（SPEC §18.9）：daemon 一重啟每台都會重連、重補一次。
     pub remote_shim_stale: tokio::sync::Mutex<std::collections::HashMap<String, String>>,
+    pub expert_marker_blocked: tokio::sync::Mutex<std::collections::HashSet<String>>,
     /// API gate and startup bot launches wait until recovery, reconciliation, and poller setup finish.
     pub startup_ready: std::sync::atomic::AtomicBool,
     startup_ready_watch: tokio::sync::watch::Sender<bool>,
@@ -388,6 +389,7 @@ impl App {
             classify_failures: std::sync::atomic::AtomicU32::new(0),
             spool_fold_stuck: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             remote_shim_stale: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            expert_marker_blocked: tokio::sync::Mutex::new(std::collections::HashSet::new()),
             startup_ready: std::sync::atomic::AtomicBool::new(true),
             startup_ready_watch,
             connected: std::sync::atomic::AtomicBool::new(false),

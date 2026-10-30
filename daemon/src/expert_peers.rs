@@ -45,6 +45,7 @@ pub(crate) async fn spawn_authority(State(app): State<Arc<App>>, Extension(princ
     let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|p| p.deleted_at.is_none()).ok_or_else(|| LcError::Forbidden(json!({"error":"forbidden"})))?;
     if bot.parent_bot_id.is_some() || bot.managed_by == "child" { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"child_cannot_spawn"}))); }
     if project.mode == "expert" {
+        if app.expert_marker_blocked.lock().await.contains(&project.host) { return Err(LcError::Upstream("expert marker reconciliation pending".into())); }
         let run = crate::db::active_run(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         let policy = format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or(""));
         if bot.role.as_deref() != Some("manager") || run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(policy.as_str()) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"role_not_applied"}))); }
