@@ -45,6 +45,8 @@ impl Drop for Working {
 }
 
 /// 終端擷取（`completed_fallback`）收下的回合，先等這麼久再通知，讓「剛開出來、只回了開場白」的子 agent 有時間繼續動起來（#878）。
+/// 回合收掉後還沒有任何回覆文字時，等這麼久才用佔位文字通知 parent（秒）。
+const NO_REPLY_GRACE_SECS: i64 = 60;
 const FALLBACK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 通知被佇列收成 failed（字沒打進去）之後，隔多久才補送下一次（#874）。
@@ -103,7 +105,9 @@ pub async fn sweep(app: &Arc<App>) -> usize {
                  WHERE pr.bot_id = b.parent_bot_id
                    AND pr.state IN ('starting','running','stopping')
             )
-            AND EXISTS (SELECT 1 FROM messages a WHERE a.turn_id = t.id AND a.role = 'assistant')
+            -- 沒有 assistant 訊息的回合（沒有 Stop hook、畫面也沒抓到回覆）：等 NO_REPLY_GRACE 後照報，不再略過。
+            AND (EXISTS (SELECT 1 FROM messages a WHERE a.turn_id = t.id AND a.role = 'assistant')
+                 OR julianday(t.completed_at) <= julianday('now', '-60 seconds'))
             AND NOT EXISTS (
                 SELECT 1 FROM turns sent
                   JOIN conversations pc ON pc.id = sent.conversation_id
@@ -181,7 +185,7 @@ struct CompletedTurn {
     completed_at: String,
     run_id: Option<String>,
     kind: String,
-    reply: String,
+    reply: Option<String>,
 }
 
 pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
@@ -198,16 +202,26 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
             AND t.status IN ('completed','completed_fallback')
             AND t.completed_at IS NOT NULL
             AND b.managed_by = 'child' AND b.deleted_at IS NULL
-            AND TRIM(COALESCE(b.parent_bot_id, '')) <> ''
-            AND EXISTS (SELECT 1 FROM messages a WHERE a.turn_id = t.id AND a.role = 'assistant')",
+            AND TRIM(COALESCE(b.parent_bot_id, '')) <> ''",
     )
     .bind(turn_id)
     .fetch_optional(&app.db)
     .await?;
-    let Some(turn) = row else { return Ok(()) };
-    if turn.reply.trim().is_empty() {
-        return Ok(());
+    let Some(mut turn) = row else { return Ok(()) };
+    if turn.reply.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        // 沒有 Stop hook、畫面也沒擷取到回覆：不能靜默略過，parent 會以為 child 還在做。剛收掉的先等一等，
+        // 晚到的回覆可能還在寫；sweep 之後會再來。
+        let fresh = chrono::DateTime::parse_from_rfc3339(&turn.completed_at)
+            .is_ok_and(|at| chrono::Utc::now().signed_duration_since(at).num_seconds() < NO_REPLY_GRACE_SECS);
+        if fresh {
+            tracing::debug!(child = %turn.child_name, turn = %turn.id, "child turn completed without a captured reply yet; waiting before notifying the parent");
+            return Ok(());
+        }
+        tracing::warn!(child = %turn.child_name, turn = %turn.id, status = %turn.status, "child turn completed without a captured reply; notifying the parent anyway");
+        turn.reply = Some(format!("（daemon 附註：此回合已結束，但沒有 Stop hook、終端畫面也未擷取到回覆，子 agent 已閒置。未擷取到回覆，請讀它的 pane：herdr agent read {} --lines 200）", turn.child_name));
     }
+    let turn = turn;
+    let reply = turn.reply.clone().unwrap_or_default();
     // 終端擷取的回合不保證是結尾（剛開出來只回了開場白、工作還在跑）：子 agent 還在忙就先不報，等它真的停下來
     // （sweep 會再來；那時更新的回合已經在了，舊的由 `superseded` 擋掉）。
     if turn.status == "completed_fallback" && child_still_active(app, turn.run_id.as_deref()).await {
@@ -287,14 +301,14 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         &turn.child_id,
         &prefix,
         &turn.id,
-        &turn.reply,
+        &reply,
     )
     .await?;
     if reported {
         return Ok(());
     }
 
-    let quoted_reply = truncate(turn.reply.trim(), NEAR_DUPLICATE_MAX_CHARS);
+    let quoted_reply = truncate(reply.trim(), NEAR_DUPLICATE_MAX_CHARS);
     if has_recent_near_duplicate(
         &app.db,
         &parent_conversation,
@@ -313,7 +327,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         .bind(&turn.parent_id)
         .fetch_one(&app.db)
         .await?;
-    let message = message_for_child(&turn.child_id, &turn.child_name, &turn.reply, notice_reply_limit(&parent_kind));
+    let message = message_for_child(&turn.child_id, &turn.child_name, &reply, notice_reply_limit(&parent_kind));
     match app
         .prompt_relayed_queueable(
             &turn.parent_id,
