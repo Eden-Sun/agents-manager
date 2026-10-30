@@ -26,7 +26,7 @@
             r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; [ "$1" = bootstrap ] && cp "$3" "$AM_CAPTURE"; exit 0"#,
         );
         fake(&bin, "sleep", "exit 0");
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             name: "sh1".into(),
             ssh: "sh1.invalid".into(),
             ssh_port: 22,
@@ -69,7 +69,7 @@
         fake(&bin, "stat", "id -un");
         fake(&bin, "launchctl", r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; exit 0"#);
         fake(&bin, "sleep", "exit 0");
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             name: "sh1".into(),
             ssh: "sh1.invalid".into(),
             ssh_port: 22,

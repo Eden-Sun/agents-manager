@@ -7,7 +7,7 @@
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: "unreachable-box".into(),
             ssh: "127.0.0.1".into(),
@@ -24,7 +24,7 @@
     async fn a_remote_model_identity_does_not_probe_without_home_and_recovers() {
         let e = crate::testing::env().await;
         let host = format!("model-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -69,7 +69,7 @@
     async fn the_builtin_default_effort_depends_on_the_model_alias() {
         let e = crate::testing::env().await;
         let host = format!("model-eff-880-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -127,7 +127,7 @@
     async fn a_model_list_from_a_superseded_host_does_not_reach_the_cache() {
         let e = crate::testing::env().await;
         let host = "models-347";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),

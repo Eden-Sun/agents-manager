@@ -128,6 +128,8 @@ pub struct SpawnBegin {
     pub bot_id: String,
     #[serde(default)]
     pub timeout_ms: String,
+    #[serde(default)]
+    pub purpose: String,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +162,15 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         Ok(bot) => bot,
         Err(response) => return response,
     };
+    let project = match crate::db::project(&app.db, &bot.project_id).await {
+        Ok(Some(project)) if project.deleted_at.is_none() => project,
+        _ => return fail(StatusCode::FORBIDDEN, "project_unavailable", "project unavailable; spawn refused"),
+    };
+    if project.mode == "expert" && body.purpose != "pane" {
+        if crate::expert_peers::spawn_authority(State(app.clone()), axum::Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await.is_err() {
+            return fail(StatusCode::FORBIDDEN, "role_not_applied", "current expert role does not authorize spawn");
+        }
+    }
     let host = match crate::db::bot_host(&app.db, &bot.id).await {
         Ok(host) => host,
         Err(e) => {
@@ -389,7 +400,7 @@ mod tests {
         let (status, Json(body)) = begin(
             State(app.clone()),
             bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new() }),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new() }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "spawn begin should reserve the parent credential: {body}");

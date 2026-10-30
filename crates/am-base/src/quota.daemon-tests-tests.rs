@@ -766,7 +766,7 @@
         let mut q = codex_q("codex-limit-hit", Some(hit));
         q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         set(&app, LOCAL_HOST, "codex", q).await;
-        let bot = |identity: &str| crate::db::Bot {
+        let bot = |identity: &str| crate::db::Bot { role: None,
             id: format!("b-{identity}"),
             project_id: "p".into(),
             name: identity.into(),
@@ -1449,7 +1449,7 @@
     #[tokio::test]
     async fn a_quota_reading_from_a_superseded_host_probe_is_not_published() {
         let app = crate::testing::env().await.app.clone();
-        let cfg = |ssh: &str| crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None, name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let fence = app.hosts.fence("build1").await.unwrap();
         let reading = || Quota {

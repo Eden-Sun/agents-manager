@@ -7,7 +7,7 @@
     async fn reading_the_disk_version_of_a_down_host_does_not_dial_ssh() {
         let host = "changelog-asleep";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         assert!(!conn.is_connected());
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -124,7 +124,7 @@
     async fn an_installed_version_is_read_from_the_clis_own_line_not_a_banner() {
         let host = "changelog-banner";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         crate::hosts::set_ssh_fake(host, |_| Ok("Ubuntu 22.04.3 LTS\nAM_VER=2.1.288 (Claude Code)\n".into()));
@@ -136,7 +136,7 @@
     async fn a_banner_without_the_clis_version_line_is_not_a_version() {
         let host = "changelog-banner-only";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         crate::hosts::set_ssh_fake(host, |_| Ok("Ubuntu 22.04.3 LTS\n".into()));

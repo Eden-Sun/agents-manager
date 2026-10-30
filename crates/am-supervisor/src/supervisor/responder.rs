@@ -203,7 +203,7 @@ pub async fn ensure_env(
             let pidx = match pidx {
                 Some(i) => i,
                 None => {
-                    cfg.projects.push(ProjectCfg {
+                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(),
                         handed_off_to: None,
                         id: Some(fresh_project.clone()),
                         path: p2.clone(),
@@ -233,7 +233,7 @@ pub async fn ensure_env(
                     if proj.bots.iter().any(|b| b.name == BOT_NAME) {
                         anyhow::bail!("name-taken");
                     }
-                    proj.bots.push(BotCfg {
+                    proj.bots.push(BotCfg { role: None,
                         id: Some(fresh_bot.clone()),
                         name: BOT_NAME.to_string(),
                         kind: "claude".into(),
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     fn cfg_project(id: &str, path: &std::path::Path, label: &str, bots: Vec<BotCfg>) -> ProjectCfg {
-        ProjectCfg {
+        ProjectCfg { mode: "parent_child".into(),
             handed_off_to: None,
             id: Some(id.into()),
             path: crate::config::canonical_path(&path.to_string_lossy()).unwrap(),

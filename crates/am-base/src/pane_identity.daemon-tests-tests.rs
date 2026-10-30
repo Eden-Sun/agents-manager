@@ -82,7 +82,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("child-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -128,7 +128,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-db-{name}-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -181,7 +181,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-repoint-{}", crate::db::ulid().to_ascii_lowercase());
-        let host_cfg = || crate::config::HostCfg {
+        let host_cfg = || crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),

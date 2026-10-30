@@ -571,7 +571,7 @@ mod tests {
         let (pid, path) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         app.cfg
             .update(move |cfg| {
-                cfg.projects = vec![crate::config::ProjectCfg {
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(),
                     id: Some(pid),
                     path,
                     label: "proj".into(),

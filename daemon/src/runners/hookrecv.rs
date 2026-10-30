@@ -463,7 +463,7 @@ mod local_spool_tests {
         let host = format!("spool-stall-{}", db::ulid());
         let conn = app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg {
+            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
@@ -527,7 +527,7 @@ mod local_spool_tests {
         let host = format!("spool-remote-stall-{}", db::ulid());
         let conn = app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg {
+            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),

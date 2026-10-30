@@ -228,6 +228,11 @@ pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
 pub struct ConfigInvalid(pub String);
 
 fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
+    for project in &cfg.projects {
+        if !matches!(project.mode.as_str(), "parent_child" | "expert") { bail!("invalid project mode"); }
+        if project.bots.iter().any(|b| !matches!(b.role.as_deref(), None | Some("manager" | "executor" | "advisor"))) { bail!("invalid bot role"); }
+        if project.mode == "expert" && project.bots.iter().filter(|b| b.role.as_deref() == Some("manager")).count() != 1 { bail!("expert project requires exactly one manager"); }
+    }
     // #639：超大的 lease_ttl_secs 會在 acquire 時 `as i64` 變負數或讓 DateTime 加法 panic。
     crate::config::checked_build_lease_ttl(cfg.build.lease_ttl_secs).map_err(anyhow::Error::msg)?;
     // `[[hosts]]` 以前完全沒驗（issue #506）：`create_host` 擋的四件事只擋得住 API，手改 TOML
@@ -236,6 +241,10 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
     // `is_local()` 翻成 false，本機的一切開始走 ssh，而 log 只留一行 `host configured`。
     let mut seen_hosts: HashSet<&str> = HashSet::new();
     for h in &cfg.hosts {
+        if let Some(raw) = &h.daemon_url {
+            let url = reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid host daemon_url"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() { bail!("invalid host daemon_url"); }
+        }
         if h.name == LOCAL_HOST {
             bail!("`{LOCAL_HOST}` is reserved for this machine; remove the [[hosts]] entry named `{LOCAL_HOST}`");
         }
@@ -541,9 +550,9 @@ async fn project_inner(
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
         sqlx::query(
-            "INSERT INTO projects (id, path, label, host, position, handed_off_to, created_at) VALUES (?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, created_at) VALUES (?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
-               host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, deleted_at=NULL",
+               host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, mode=excluded.mode, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
@@ -552,6 +561,7 @@ async fn project_inner(
         // 陣列位置就是側欄順序（`POST /api/order` 會重排這個陣列）。
         .bind(p_at as i64)
         .bind(p.handed_off_to.as_deref().map(str::trim))
+        .bind(&p.mode)
         .bind(&now)
         .execute(&mut *tx)
         .await?;
@@ -562,10 +572,10 @@ async fn project_inner(
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, position, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, role, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, position, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
-                   model=excluded.model, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
+                   model=excluded.model, role=excluded.role, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
                    auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, position=excluded.position, deleted_at=NULL",
             )
             .bind(&bid)
@@ -573,6 +583,7 @@ async fn project_inner(
             .bind(&b.name)
             .bind(&b.kind)
             .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()).map(|m| crate::models::canonical_model(&b.kind, m.trim())))
+            .bind(&b.role)
             // v4.0: effort is kind-dependent; a hand-edited value that the kind rejects is dropped.
             .bind(crate::config::normalize_effort(&b.kind, b.effort.as_deref()).unwrap_or(None))
             .bind(b.fast as i64)
@@ -883,7 +894,7 @@ mod tests {
     #[test]
     fn hand_edited_hosts_are_validated_like_the_api_validates_them() {
         use crate::config::{ConfigFile, HostCfg};
-        let host = |name: &str, ssh: &str| HostCfg {
+        let host = |name: &str, ssh: &str| HostCfg { daemon_url: None,
             shared_session: false,
             name: name.into(),
             ssh: ssh.into(),
@@ -894,7 +905,7 @@ mod tests {
         };
         let with = |hosts: Vec<HostCfg>| ConfigFile { hosts, ..Default::default() };
         // serde 的 `default` 只在缺 key 時生效：手寫一個空字串照樣進得來。
-        let blank_session = |s: &str| HostCfg { herdr_session: s.into(), ..host("m4p", "me@10.0.0.2") };
+        let blank_session = |s: &str| HostCfg { daemon_url: None, herdr_session: s.into(), ..host("m4p", "me@10.0.0.2") };
 
         validate(&with(vec![host("m4p", "me@10.0.0.2")])).expect("一台正常的遠端要過");
         // 前後空白交給 `project_inner` trim 掉寫回，不在這裡擋開機。
@@ -912,7 +923,7 @@ mod tests {
             ("ssh 帶空白", with(vec![host("m4p", "me@host extra")]), "ssh target"),
             ("herdr_session 帶斜線（會進遠端路徑）", with(vec![blank_session("../../x")]), "herdr_session"),
             ("herdr_session 帶引號（會進 plist）", with(vec![blank_session("a\"b")]), "herdr_session"),
-            ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("m4p", "me@10.0.0.2") }]), "ssh_opts"),
+            ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { daemon_url: None, ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("m4p", "me@10.0.0.2") }]), "ssh_opts"),
         ] {
             let err = validate(&cfg).expect_err(what).to_string();
             assert!(err.contains(needle), "{what}: {err}");
@@ -925,7 +936,7 @@ mod tests {
     #[test]
     fn duplicate_ids_and_names_are_refused_before_they_merge_into_one_row() {
         fn bot(id: Option<&str>, name: &str) -> crate::config::BotCfg {
-            crate::config::BotCfg {
+            crate::config::BotCfg { role: None,
                 id: id.map(str::to_string),
                 name: name.into(),
                 kind: "claude".into(),
@@ -945,7 +956,7 @@ mod tests {
             }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
-            crate::config::ProjectCfg {
+            crate::config::ProjectCfg { mode: "parent_child".into(),
                 id: id.map(str::to_string),
                 path: "/tmp".into(),
                 label: label.into(),
@@ -1599,12 +1610,12 @@ mod tests {
         assert!(validate(&cfg).is_err(), "身份 args 也不可把 NUL 帶進啟動 argv");
 
         cfg.identities.clear();
-        cfg.projects.push(crate::config::ProjectCfg {
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
             id: Some("p1".into()),
             path: "/tmp".into(),
             label: "demo".into(),
             host: "local".into(),
-            bots: vec![crate::config::BotCfg {
+            bots: vec![crate::config::BotCfg { role: None,
                 id: Some("b1".into()),
                 name: "worker".into(),
                 kind: "claude".into(),

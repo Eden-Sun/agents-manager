@@ -6015,6 +6015,27 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ### 模型用法模式
 
-`[agents] model_mode` 預設 `claude`，保留既有行為。`claude_codex` 注入額外硬規則：opus parent；fable、gpt-6-astra 為顧問；執行者由 parent 依難度選 gpt-6.1-terra medium、gpt-6-luna xhigh、haiku、sonnet，使用者點名優先。codex child 長駐並按專案或模組沿用，不相關工作 fork；claude child 驗收後收掉，除非一小時內同區塊有後續。codex 不當 parent。切換設定後重啟 bot 才更新注入規則。
+`[agents] model_mode` 已廢棄，僅為相容讀取，不再注入全域模式規則或執行專用 child 清理。既有 pane 已載入的指示仍須逐顆重啟才會移除，不自動重啟。
 
-在 `claude_codex` 模式，daemon 僅在完成通知已送達、沒有進行中回合且仍閒置時，自動收掉閒置超過 70 分鐘的 Claude child；每位 parent 的閒置 Codex child 超過三顆時，優先收掉最久閒置者，並在 parent 對話留下 system 說明。Codex pane 的 herdr shim 拒絕啟動 child。`claude` 模式不啟用這些自動化。
+
+### 專案專家模式
+
+專案預設 `parent_child`；expert 專案由 User 指定一位頂層 manager，其他 bot 可為 executor、advisor 或未分配。角色與模型、`managed_by`、`parent_bot_id` 分開；child 只能是 executor、advisor 或未分配，設成 manager 回 400。fork 不繼承角色。只有 User 可更改模式與角色。專案模式、bot 角色與啟動時載入的政策不同時標示待套用；未知的舊 run 也保守標示待套用，不自動重啟。
+
+expert 的 manager 須在當前政策已載入後才能開 child；executor、advisor 與未分配者不能派 child，既有 child 不能再開 child。角色規則為靜態啟動指示，成員與狀態由 `agm peers` 按需查詢；需要結果通知的請求用 `herdr agent prompt bot:<id> --expect-result`，進度以 `agm requests --open` 查詢。
+
+派工授權以 daemon 當下資料判斷為準，shim 是第一道防線；啟用 expert 前檢查活躍 bot 的 shim，過期時列出 bot 並拒絕。已啟用後 shim 過期標待套用並告警；reconcile 發現非管理者開 child 時仍追蹤並向管理者與 ops 告警。
+
+expert 專案的 bot relay 收件規則（直接 parent-child 通道保留）：
+
+| 收件角色 | 同專案可寄件者 |
+| --- | --- |
+| manager | 任何成員 |
+| advisor | 任何成員 |
+| executor 或未分配 | manager |
+
+expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒時回覆原因與管理者名稱。
+
+新請求須驗證來源 run 已載入目前角色政策；排隊及重啟補投重新驗證目前專案與角色，不要求來源在線。結果通知僅確認原寄件者仍存在，離線時持續保留，不套角色收件規則。
+
+切換 expert 前，所有 active run 均須已注入 `AM_DAEMON_URL`（本機亦算），否則列出 bot、主機與待重啟原因並拒絕。遠端 parent-child 未設定 daemon URL 時維持原有派工；expert 缺 URL 時拒絕，URL 可用時以 daemon 當前模式核權。

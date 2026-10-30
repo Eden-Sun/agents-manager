@@ -1740,7 +1740,7 @@ mod tests {
     }
 
     fn test_host_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg {
+        crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: format!("target-{host}"),
@@ -1885,7 +1885,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "cli-update-repoint";
-        let host_cfg = |ssh: &str| crate::config::HostCfg {
+        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -2462,7 +2462,7 @@ mod tests {
     async fn an_update_whose_host_was_repointed_mid_install_touches_nothing_on_the_new_target() {
         let env = crate::testing::env().await;
         let host = "cx-347";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -2509,7 +2509,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "cli-update-notice-repoint";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -2808,7 +2808,7 @@ mod tests {
     async fn a_started_update_persists_its_host_target_for_recovery() {
         let env = crate::testing::env().await;
         let host = "start-authority-347";
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: "target-a".into(),
@@ -3075,7 +3075,7 @@ mod tests {
     async fn recovery_does_not_adopt_a_repointed_host_that_already_has_the_target_version() {
         let env = crate::testing::env().await;
         let host = "recover-347";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -3405,7 +3405,7 @@ mod tests {
     async fn recovery_keeps_the_free_lock_fence_through_version_and_notice_publish() {
         let env = crate::testing::env().await;
         let host = "recover-fence-347";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),

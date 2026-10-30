@@ -3028,7 +3028,7 @@ mod prompt_tests {
         let f = fixture("claude", "test").await;
         let app = f.env.app.clone();
         let host = format!("prompt-repoint-{}", db::ulid());
-        let host_cfg = |ssh: &str| crate::config::HostCfg {
+        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),
