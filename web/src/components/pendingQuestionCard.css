@@ -99,9 +99,12 @@
   color: var(--text-faint);
 }
 
-/* 認不出選單時卡片排在終端快照上面：自己捲，不把底部按鍵擠出去。 */
+/* 認不出選單時卡片排在終端快照上面：自己捲，不把底部按鍵擠出去。不可跟終端一起縮：手機上終端
+   `flex: 1 1 auto` 會把它壓成一條縫、題目看不見；改成固定高度、上限 40% 視窗高，超出自己捲。 */
 .blocked-modal > .pending-q {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  max-height: 40vh;
+  max-height: 40dvh;
   min-height: 0;
   overflow-y: auto;
   margin: 0 16px;
