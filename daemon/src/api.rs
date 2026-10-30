@@ -310,6 +310,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/keep-warm/skip", post(keep_warm_skip_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
+        .route("/relay-requests", get(list_relay_requests))
+        .route("/relay/resolve", get(resolve_relay_target))
         // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
         .route("/bots/{id}/share", get(crate::runners::share_admin::get_share).post(crate::runners::share_admin::post_share))
         .route("/bots/{id}/share/rotate", post(crate::runners::share_admin::post_rotate))
@@ -7122,6 +7124,8 @@ struct PromptIn {
     #[serde(default)]
     text: String,
     client_request_id: Option<String>,
+    #[serde(default)]
+    expect_result: bool,
     /// In display order.
     #[serde(default)]
     attachments: Vec<String>,
@@ -7160,6 +7164,78 @@ struct PromptIn {
     share_reply_visible: bool,
 }
 
+#[derive(Deserialize)]
+struct RelayRequestsQuery {
+    from: Option<String>,
+    to: Option<String>,
+    open: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RelayResolveQuery { target: String }
+
+async fn resolve_relay_target(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Query(q): Query<RelayResolveQuery>,
+) -> Result<Json<Value>, LcError> {
+    let RequestPrincipal::Bot(sender) = principal else {
+        return Err(LcError::Bad("relay resolution requires a bot principal".into()));
+    };
+    if let Some(id) = q.target.strip_prefix("bot:") {
+        if id == sender { return Err(LcError::Bad("relay_self".into())); }
+        let bot = db::bot(&app.db, id).await.map_err(any_err)?
+            .filter(|bot| bot.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay target".into()))?;
+        check_relay_policy(&app, &sender, &bot.id).await?;
+        let run = db::active_run(&app.db, &bot.id).await.map_err(any_err)?;
+        return Ok(Json(json!({"to_bot_id": bot.id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref())})));
+    }
+    let host = db::bot_host(&app.db, &sender).await.map_err(any_err)?;
+    let session = app.session_for_host(&host).await.ok_or_else(|| LcError::NotFound("host session".into()))?;
+    let candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT b.id,r.id,r.agent_name,r.pane_id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
+    ).bind(&host).bind(&session).bind(&session).bind(&q.target).bind(&q.target).bind(&q.target)
+        .fetch_all(&app.db).await.map_err(any_err)?;
+    let mut rows = Vec::new();
+    for candidate in candidates {
+        match crate::relay_policy::relay_prompt_allowed(&app, &sender, &candidate.0, crate::relay_policy::Admission::NewRequest).await {
+            Ok(()) => rows.push(candidate),
+            Err(crate::relay_policy::RelayDenied::Denied(_)) => {},
+            Err(crate::relay_policy::RelayDenied::Unavailable(e)) => return Err(LcError::Upstream(e)),
+        }
+    }
+    if rows.is_empty() { return Err(LcError::NotFound("relay target".into())); }
+    if rows.len() != 1 {
+        return Err(LcError::Conflict(json!({"error":"ambiguous_relay_target", "candidates":rows.iter().map(|r| &r.0).collect::<Vec<_>>() })));
+    }
+    let (bot, run, agent, pane) = &rows[0];
+    Ok(Json(json!({"to_bot_id":bot,"to_run_id":run,"to_agent":agent.as_ref().or(pane.as_ref())})))
+}
+
+async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), LcError> {
+    match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::NewRequest).await {
+        Ok(()) => Ok(()),
+        Err(crate::relay_policy::RelayDenied::Denied(reason)) => Err(LcError::Forbidden(json!({"error":"forbidden","reason":reason}))),
+        Err(crate::relay_policy::RelayDenied::Unavailable(reason)) => Err(LcError::Upstream(reason)),
+    }
+}
+
+async fn list_relay_requests(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Query(q): Query<RelayRequestsQuery>,
+) -> Result<Json<Value>, LcError> {
+    let caller = match &principal { RequestPrincipal::Bot(id) => Some(id.as_str()), _ => None };
+    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id,from_bot_id,to_bot_id,to_run_id,to_turn_id,state,created_at,answered_at,notified_at,notice_turn_id,processed_at,attempts,error FROM relay_requests WHERE (? IS NULL OR from_bot_id=? OR to_bot_id=?) AND (? IS NULL OR from_bot_id=?) AND (? IS NULL OR to_bot_id=?) AND (?=0 OR state IN ('pending','delivered')) ORDER BY created_at DESC"
+    ).bind(caller).bind(caller).bind(caller).bind(&q.from).bind(&q.from).bind(&q.to).bind(&q.to)
+        .bind(i64::from(q.open.as_deref() == Some("1"))).fetch_all(&app.db).await.map_err(any_err)?;
+    Ok(Json(json!({"requests": rows.into_iter().map(|(id,from,to,run,turn,state,created,answered,notified,notice_turn,processed,attempts,error)| json!({
+        "id":id,"from_bot_id":from,"to_bot_id":to,"to_run_id":run,"to_turn_id":turn,"state":state,
+        "created_at":created,"answered_at":answered,"notified_at":notified,"notice_turn_id":notice_turn,"processed_at":processed,"attempts":attempts,"error":error
+    })).collect::<Vec<_>>() })))
+}
+
 async fn prompt_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -7192,12 +7268,59 @@ async fn prompt_bot(
         None => None,
     };
     let crid = given_crid.clone().unwrap_or_else(db::ulid);
+    if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") {
+        return Err(LcError::Bad("client_request_id uses a reserved daemon prefix".into()));
+    }
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
     // attributed to the id already authenticated by middleware. A User request claiming a bot
     // without that bot's token is refused (#410 ended #339's unsigned compatibility branch).
     let relay_claim = b.relay_from.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let effective_relay = relay_claim.or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()));
     let relay = crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?;
+    if let Some(r) = &relay {
+        check_relay_policy(&app, &r.from, &id).await?;
+    }
+    if b.expect_result {
+        let RequestPrincipal::Bot(sender) = &principal else { return Err(LcError::Bad("expect_result requires a bot principal".into())); };
+        if relay.as_ref().map(|r| &r.from) != Some(sender) { return Err(LcError::Bad("expect_result requires authenticated relay".into())); }
+        if b.text.trim().is_empty() { return Err(LcError::Bad("text must not be empty".into())); }
+        crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
+        if b.send_now || b.start_if_stopped || b.clear_draft || b.submit_draft || b.ack || b.reply_to.is_some() {
+            return Err(LcError::Bad("expect_result cannot be combined with interruption, startup, drafts or acknowledgement".into()));
+        }
+        let request_id = db::ulid();
+        let files = serde_json::to_string(&b.attachments).map_err(any_err)?;
+        sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,?,?,?,'pending',?)")
+            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).execute(&app.db).await.map_err(any_err)?;
+        let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=?")
+            .bind(sender).bind(&id).bind(&crid).fetch_one(&app.db).await.map_err(any_err)?;
+        if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
+        let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
+        let _guard = lock.lock().await;
+        let (request_state, stored_turn): (String,Option<String>) = sqlx::query_as("SELECT state,to_turn_id FROM relay_requests WHERE id=?")
+            .bind(&request_id).fetch_one(&app.db).await.map_err(any_err)?;
+        if request_state == "failed" {
+            return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":stored_turn,"message_id":null,"delivery":"failed"}))).into_response());
+        }
+        let delivery_key = format!("relay-request:{request_id}");
+        let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)), false, None).await {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!(request = %request_id, "relay request accepted for later reconciliation");
+                let mut permanent = matches!(&e, LcError::Bad(_) | LcError::BadValue(_) | LcError::NotFound(_) | LcError::Forbidden(_));
+                if permanent {
+                    permanent = sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=relay_requests.to_bot_id AND t.client_request_id=?)")
+                        .bind("request could not be delivered").bind(&request_id).bind(&delivery_key).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
+                }
+                return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":if permanent { "failed" } else { "pending" }}))).into_response());
+            }
+        };
+        sqlx::query("UPDATE relay_requests SET to_turn_id=?,to_run_id=(SELECT run_id FROM turns WHERE id=?),state=CASE WHEN state='pending' AND EXISTS(SELECT 1 FROM turns WHERE id=? AND status<>'queued' AND delivery='ok' AND delivery_verified=1) THEN 'delivered' ELSE state END WHERE id=?")
+            .bind(&out.turn_id).bind(&out.turn_id).bind(&out.turn_id).bind(&request_id).execute(&app.db).await.map_err(any_err)?;
+        let mut response = serde_json::to_value(out).map_err(any_err)?;
+        response["request_id"] = json!(request_id);
+        return Ok((StatusCode::OK, Json(response)).into_response());
+    }
     // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
     if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
@@ -10223,7 +10346,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false };
+        let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -16139,6 +16262,7 @@ mod relay_from_auth_tests {
         let mut h = HeaderMap::new();
         h.insert("X-AM-Bot-Token", axum::http::HeaderValue::from_bytes(raw).unwrap());
         let body = PromptIn {
+            expect_result: false,
             text: "幫我看一下".into(),
             client_request_id: Some(crid.into()),
             attachments: vec![],
@@ -16168,6 +16292,7 @@ mod relay_from_auth_tests {
             h.insert("X-AM-Bot-Token", t.parse().unwrap());
         }
         let body = PromptIn {
+            expect_result: false,
             text: "幫我看一下".into(),
             client_request_id: Some(crid.into()),
             attachments: vec![],
@@ -16253,6 +16378,7 @@ mod relay_from_auth_tests {
         let f = fx().await;
         let stopped = crate::testing::claude_bot(&f.e.app, &f.e.project_id, "sleeper").await;
         let body = PromptIn {
+            expect_result: false,
             text: "起來後看一下".into(),
             client_request_id: Some("sis".into()),
             attachments: vec![],
@@ -16282,6 +16408,7 @@ mod relay_from_auth_tests {
         f.e.herdr.live_pane("pane-relay", crate::testing::LivePane { zero_revision: true, width: Some(120), boxed: true, composer: vec!["假草稿".into()], ..Default::default() });
         let call = |clear: bool, submit: bool, expect: Option<&str>, relay: Option<String>| {
             let body = PromptIn {
+            expect_result: false,
                 text: if submit { String::new() } else { "我的".into() },
                 client_request_id: Some(db::ulid()),
                 attachments: vec![],
@@ -17242,5 +17369,78 @@ mod native_api_http_tests {
         assert!(unavailable.starts_with("HTTP/1.1 200"));
         let value: Value = serde_json::from_str(unavailable.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(value, json!({"availability":"unavailable"}));
+    }
+}
+
+#[cfg(test)]
+mod relay_result_api_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn explicit_bot_id_resolves_across_hosts_without_running_target() {
+        let env = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "resolve-a").await;
+        let project = db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','m4p',?)")
+            .bind(&project).bind(format!("/remote/{project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let b = crate::testing::claude_bot(&env.app, &project, "resolve-b").await;
+        let Json(result) = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(a.id)), Query(RelayResolveQuery { target: format!("bot:{}", b.id) })).await.unwrap();
+        assert_eq!(result["to_bot_id"], b.id);
+        assert!(result["to_run_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn result_request_requires_bot_principal() {
+        let env = crate::testing::env().await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "requests-user-target").await;
+        let body: PromptIn = serde_json::from_value(json!({"text":"hello","expect_result":true})).unwrap();
+        let error = prompt_bot(State(env.app.clone()), Path(b.id), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await.unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn relay_request_query_only_shows_callers_participation() {
+        let env = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "requests-a").await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "requests-b").await;
+        let c = crate::testing::claude_bot(&env.app, &env.project_id, "requests-c").await;
+        for (from,to) in [(&a.id,&b.id),(&b.id,&c.id)] {
+            sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,'key','text','[]','pending',?)")
+                .bind(db::ulid()).bind(from).bind(to).bind(db::now()).execute(&env.app.db).await.unwrap();
+        }
+        let Json(result) = list_relay_requests(State(env.app.clone()), Extension(RequestPrincipal::Bot(a.id.clone())), Query(RelayRequestsQuery { from: None, to: None, open: Some("1".into()) })).await.unwrap();
+        let rows = result["requests"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["from_bot_id"], a.id);
+        assert_eq!(rows[0]["to_bot_id"], b.id);
+    }
+
+    #[tokio::test]
+    async fn same_authenticated_request_id_queues_only_once() {
+        let env = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "relay-idempotent-a").await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "relay-idempotent-b").await;
+        let run = crate::testing::fake_run(&env.app, &b.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", a.id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+        let body = json!({"text":"please answer","client_request_id":"stable-key","expect_result":true,"queue_if_busy":true});
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let response = prompt_bot(State(env.app.clone()), Path(b.id.clone()), h.clone(), Extension(RequestPrincipal::Bot(a.id.clone())), Json(serde_json::from_value(body.clone()).unwrap())).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            ids.push(value["request_id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(ids[0], ids[1]);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests WHERE from_bot_id=? AND to_bot_id=?")
+            .bind(&a.id).bind(&b.id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=?")
+            .bind(&b.id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 1);
     }
 }

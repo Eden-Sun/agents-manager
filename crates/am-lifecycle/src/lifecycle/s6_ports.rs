@@ -499,6 +499,7 @@ impl<T> StopContext for T where
 {}
 
 pub trait QueueServices: Send + Sync {
+    fn relay_queue_denial(&self, turn_id: &str) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
     fn turn_changed(&self, turn_id: &str) -> impl Future<Output = ()> + Send;
     fn message_added(&self, bot_id: &str, message: db::Message) -> impl Future<Output = ()> + Send;
     fn bot_status_changed(&self, bot_id: &str) -> impl Future<Output = ()> + Send;

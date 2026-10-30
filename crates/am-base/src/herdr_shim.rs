@@ -825,6 +825,10 @@ os.replace(tmp, os.path.join(sd, "%d-%d.json" % (time.time_ns(), os.getpid())))
 AMPY
 }
 
+am_daemon_base() {
+    if [ -n "${AM_DAEMON_URL:-}" ]; then printf '%s' "$AM_DAEMON_URL"; elif [ -n "${AM_PORT:-}" ]; then printf 'http://127.0.0.1:%s' "$AM_PORT"; else return 1; fi
+}
+
 am_agent_prompt() {
     shift 2
     case "${1:-}" in
@@ -835,6 +839,76 @@ am_agent_prompt() {
     esac
     _requested=$1
     shift
+    _expect_result=""
+    _request_id=""
+    _n=$#
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _a=$1; shift; _i=$((_i + 1))
+        case "$_a" in
+            --expect-result) _expect_result=1; continue ;;
+            --request-id) [ "$_i" -lt "$_n" ] || am_announce_refuse 75 "$_requested" "--request-id requires a value"; _request_id=$1; shift; _i=$((_i + 1)); continue ;;
+            --request-id=*) _request_id=${_a#--request-id=}; continue ;;
+        esac
+        set -- "$@" "$_a"
+    done
+    _remote_bot=""
+    case "$_requested" in bot:*) [ -n "${AM_PORT:-}" ] || _remote_bot=1 ;; esac
+    if [ -n "$_expect_result" ] || [ -n "$_remote_bot" ]; then
+        [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] || am_announce_refuse 77 "$_requested" "expect-result requires bot credentials"
+        command -v python3 >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "python3 is required"
+        _base=$(am_daemon_base) || am_announce_refuse 75 "$_requested" "daemon address unavailable"
+        _text=""; _skip=0; _ack=""; _reply_to=""; _want_reply_to=0; _want_timeout=0; _timeout_ms=30000
+        for _a in "$@"; do
+            if [ "$_want_reply_to" = 1 ]; then _reply_to=$_a; _want_reply_to=0; continue; fi
+            if [ "$_want_timeout" = 1 ]; then _timeout_ms=$_a; _want_timeout=0; continue; fi
+            if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+            case "$_a" in
+                --wait|--until=*) continue ;;
+                --until) _skip=1; continue ;;
+                --timeout) _want_timeout=1; continue ;;
+                --timeout=*) _timeout_ms=${_a#--timeout=}; continue ;;
+                --to-bot-id|--to-run-id|--to-pane-id) _skip=1; continue ;;
+                --to-bot-id=*|--to-run-id=*|--to-pane-id=*) continue ;;
+                --ack) _ack=1; continue ;;
+                --reply-to) _want_reply_to=1; continue ;;
+                --reply-to=*) _reply_to=${_a#--reply-to=}; continue ;;
+            esac
+            _text="${_text:+$_text }$_a"
+        done
+        [ "$_want_timeout" = 0 ] || am_announce_refuse 75 "$_requested" "--timeout requires milliseconds"
+        _timeout=$(python3 -c 'import sys; s=sys.argv[1]; assert s.isascii() and s.isdigit() and int(s)>0; print(int(s)/1000)' "$_timeout_ms" 2>/dev/null) || am_announce_refuse 75 "$_requested" "--timeout must be a positive millisecond count"
+        _deadline=$(python3 -c 'import sys,time; print(time.monotonic()+float(sys.argv[1]))' "$_timeout") || exit 75
+        _selector=$_requested
+        case "$_requested" in
+            bot:*|*:p*) : ;;
+            *)
+                _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select a child display name"
+                for _target in "$_candidate" "$_requested"; do
+                    _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
+                    _pane=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys; p=json.load(sys.stdin)["result"]["agent"]["pane_id"]; assert isinstance(p,str) and p and not any(ord(c)<33 or ord(c)==127 for c in p); print(p)' 2>/dev/null) || _pane=""
+                    if [ -n "$_pane" ]; then _selector=$_pane; break; fi
+                done
+                ;;
+        esac
+        _remaining=$(python3 -c 'import sys,time; t=float(sys.argv[1])-time.monotonic(); assert t>0; print(t)' "$_deadline" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
+        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_selector" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
+        _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
+        _resolve=$(printf '%s\n' "$_resolve_out" | sed '$d')
+        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 無法解析目標（HTTP ${_code}）：$_resolve" ;; esac
+        _target=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin)["to_bot_id"])') || am_announce_refuse 75 "$_requested" "daemon 未提供目標 bot ID"
+        [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3],"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$AM_BOT_ID" "$_expect_result" "$_ack" "$_reply_to") || exit 75
+        _remaining=$(python3 -c 'import sys,time; t=float(sys.argv[1])-time.monotonic(); assert t>0; print(t)' "$_deadline" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
+        _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
+        _code=$(printf '%s\n' "$_out" | tail -n 1)
+        _reply=$(printf '%s\n' "$_out" | sed '$d')
+        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}；用 --request-id $_request_id 原樣重試" ;; esac
+        if [ -z "$_expect_result" ]; then printf '%s\n' "$_reply"; return 0; fi
+        _rid=$(printf '%s' "$_reply" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])') || am_announce_refuse 75 "$_requested" "回應缺少 request_id；用 --request-id $_request_id 原樣重試"
+        printf 'request_id=%s\n' "$_rid"
+        return 0
+    fi
     _name=""
     # Explicit IDs never go through name lookup. A bot ID needs daemon routing; remote callers use pane IDs.
     case "$_requested" in
