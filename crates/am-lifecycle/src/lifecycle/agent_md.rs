@@ -56,8 +56,16 @@ pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAcce
             }
         });
     }
-    collect(reads)
+    let mut result = collect(reads);
+    if agents.model_mode == crate::config::ModelMode::ClaudeCodex {
+        if !result.text.is_empty() { result.text.push_str("\n\n"); }
+        result.text.push_str(MODEL_MODE_RULES);
+    }
+    result
 }
+
+pub const MODEL_MODE_RULES: &str = "## claude主codex輔助模式（硬規則，優先於前述衝突規則）\n主 parent 使用 opus。顧問 fable、gpt-6-astra 只幫忙決策及 review，不做主要實作。執行者由 parent 依難度自行選 gpt-6.1-terra medium、gpt-6-luna xhigh、haiku、sonnet，不必先問使用者；使用者點名時照使用者指定。codex child 長駐專職，閒置不會讓 cache 冷掉，做完不收；同專案或模組後續交給同一顆，不相關新題從它 fork --last 分出去。claude child 驗收完就收，除非一小時內有同一塊的後續工作。codex 不當 parent；需要另派時寫進回報交給 claude parent 決定。";
+
 
 /// Stable per-source fingerprints make startup snapshots identifiable without changing the
 /// prompt on every restart. Empty documents must still reach `collect` as empty documents.

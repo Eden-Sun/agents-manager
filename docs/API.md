@@ -125,6 +125,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
 | GET | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
@@ -200,6 +201,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
@@ -379,6 +381,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/begin` | Bot per-bot `X-AM-Bot-Token`；body 身份／permit 需和驗證憑證一致 |
 | POST | `/relay/spawn/claim` | Bot per-bot `X-AM-Bot-Token`；body `bot_id` 需和驗證憑證一致 |
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身份／permit 需和驗證憑證一致 |
+| PUT | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/schedules` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -3279,3 +3282,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `schedule_notice {project_id, schedule_id, occurrence_id, status, error}`：終態且依 `notify` 該通知（`failure`＝失敗或結果不明；`all`＝另加完成）。每筆終態只推一次（`notified` 去重）。
 
 `occurrence.status`：`pending`（等待，`waiting_reason`：`bot_busy`／`stopping`）→ `queued`（已綁定 turn，等它進終態）→ `done`／`failed`／`cancelled`／`unknown`。`unknown`＝綁定的 turn 送出結果不明（delivery unknown），同交易把排程暫停（`enabled=false`），不會自動重跑；使用者到 Bot 對話確認後明確重新啟用，才會排未來的執行。
+
+### GET /api/model-mode / PUT /api/model-mode
+
+僅限 User；Bot principal 回 403 `user_only`。GET 回傳 `{"mode":"claude","modes":[{"id":"claude","label":"claude","description":"..."}, ...]}`，模式與說明由 daemon 提供。PUT 接受 `{"mode":"claude"}` 或 `{"mode":"claude_codex"}`，寫入 `[agents] model_mode`，成功回 `{"mode":"...","needs_restart_bots":true}`；未知模式回 400。新規則在 bot 重啟後注入。

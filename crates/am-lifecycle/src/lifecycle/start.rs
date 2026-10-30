@@ -1366,8 +1366,8 @@ async fn start_inner_body(
     // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
     // below the PTY shell limit. Stage the full startup persona in a file and pass its short path.
     // Grok also needs the child-rules file when no custom [agents] document is configured.
-    let child_md = super::setup::child_instructions(agent_md.configured.then_some(agent_md.text.as_str()).unwrap_or(""));
-    let child_instructions_path = if agent_md.configured || bot.kind == "grok" {
+    let child_md = super::setup::child_instructions(&agent_md.text);
+    let child_instructions_path = if agent_md.configured || !agent_md.text.is_empty() || bot.kind == "grok" {
         super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await
     } else {
         None
@@ -1384,7 +1384,7 @@ async fn start_inner_body(
     let staged_persona = if restricted.is_some() {
         StagedPersona::NotNeeded
     } else {
-        stage_persona(app, bot, project, shim_dir.as_deref(), &env, &agent, agent_md.configured.then_some(agent_md.text.as_str()), &identity_args_v, fork_note.as_deref())
+        stage_persona(app, bot, project, shim_dir.as_deref(), &env, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), &identity_args_v, fork_note.as_deref())
             .await
     };
     let refuse = match (&staged_persona, bot.kind.as_str()) {
@@ -1420,7 +1420,7 @@ async fn start_inner_body(
         args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
-        args.extend(persona_args_cli_docs(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
+        args.extend(persona_args_cli_docs(bot, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
         args.extend(identity_args_v);
         args.extend(bot.args());

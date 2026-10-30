@@ -241,6 +241,7 @@ macro_rules! agm_gate {
 pub fn router(app: Arc<App>) -> Router {
     let upload_slots = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
     let api = Router::new()
+        .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
@@ -1054,6 +1055,8 @@ enum BotRoutePolicy {
 }
 
 const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
+    ("GET", "/api/model-mode", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/hosts/{name}/shells/{pane_id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/attachments/{id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),

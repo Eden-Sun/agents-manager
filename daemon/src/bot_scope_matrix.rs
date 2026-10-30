@@ -120,6 +120,8 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/abort", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/abort", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/abort", Expect::Forbidden, None),
+        rule("GET", "/api/model-mode", Expect::UserOnly, None),
+        rule("PUT", "/api/model-mode", Expect::UserOnly, None),
         rule("GET", "/api/build/remote", Expect::UserOnly, None),
         rule("PUT", "/api/build/remote", Expect::UserOnly, None),
         rule("POST", "/relay/spawn/begin", Expect::Allow, None),
