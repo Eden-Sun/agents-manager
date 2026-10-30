@@ -1704,6 +1704,10 @@ pub async fn pane_env_for_fence(
     env.insert("AM_PROJECT_MODE".into(), json!(mode));
     env.remove("AM_DAEMON_URL");
     let daemon_url = if host == LOCAL_HOST { Some(format!("http://127.0.0.1:{}", app.port())) } else { fence.conn().cfg.as_ref().and_then(|c| c.daemon_url.clone()).filter(|s| !s.is_empty()) };
+    if daemon_url.is_none() && host != LOCAL_HOST {
+        let expert_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE host=? AND mode='expert' AND deleted_at IS NULL)").bind(host).fetch_one(app.db()).await?;
+        if expert_exists { anyhow::bail!("主機 {host} 有 expert 專案，但未設定 daemon_url，拒絕啟動 bot"); }
+    }
     if let Some(url) = daemon_url { env.insert("AM_DAEMON_URL".into(), json!(url)); }
     reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir().to_string_lossy().into_owned());
@@ -3765,6 +3769,16 @@ mod pane_env_tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn remote_host_with_expert_refuses_new_pane_without_daemon_url() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "remote-other").await;
+        remote_home(&env.app, "box", "/home/remote").await;
+        sqlx::query("INSERT INTO projects(id,path,label,host,mode,created_at) VALUES('expert-other','/tmp/expert','expert','box','expert',?)").bind(crate::db::now()).execute(env.app.db()).await.unwrap();
+        let err = pane_env(&env.app, &bot, "box", "run", "name", None).await.unwrap_err();
+        assert!(err.to_string().contains("daemon_url"), "{err:?}");
     }
 
     #[tokio::test]

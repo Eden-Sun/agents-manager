@@ -18,6 +18,13 @@ pub type FeatureMigration = for<'a> fn(&'a SqlitePool) -> MigrationFuture<'a>;
 /// `(名字, migrate)`，名字只給 log／測試看。順序就是執行順序。
 pub type FeatureMigrations = &'static [(&'static str, FeatureMigration)];
 
+/// Serialize expert activation with bot startup on the same host.
+pub fn expert_host_gate(host: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    gates.entry(host.to_string()).or_default().clone()
+}
+
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
