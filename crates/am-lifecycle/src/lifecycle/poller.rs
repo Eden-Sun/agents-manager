@@ -20,6 +20,11 @@ pub async fn observe_claude_menu(app: &impl LcHost, run: Option<&db::Run>, activ
     }
 }
 
+/// Safety net for a run left at `working` after its turn ended (see `observed_status::settle_stale_working`).
+pub async fn settle_stale_working(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    observed_status::settle_stale_working(app, run).await
+}
+
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 
