@@ -192,7 +192,7 @@
         let calls = s.dir.join("curl-args");
         s.install_fake_curl(&format!(r#"printf '%s\n' "$*" >> '{}'
 case "$*" in
-  */api/relay/resolve*) printf '{{"to_bot_id":"target","to_run_id":null,"to_agent":null}}\n200' ;;
+  */api/relay/resolve*) sleep 1; printf '{{"to_bot_id":"target","to_run_id":null,"to_agent":null}}\n200' ;;
   */api/bots/target/prompt*) printf '{{"request_id":"request-123"}}\n200' ;;
   *) exit 1 ;;
 esac"#, calls.display()));
@@ -208,6 +208,7 @@ esac"#, calls.display()));
         let timeouts: Vec<f64> = calls.lines().map(|line| line.split("--max-time ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap()).collect();
         assert_eq!(timeouts.len(), 2);
         assert!(timeouts.iter().all(|t| *t > 0.0 && *t <= 5.0), "{timeouts:?}");
+        assert!(timeouts[1] < timeouts[0] - 0.5, "resolution must consume the same deadline: {timeouts:?}");
         assert!(!std::fs::read_to_string(log).unwrap_or_default().contains("agent prompt"));
     }
 
