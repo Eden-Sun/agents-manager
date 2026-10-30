@@ -135,7 +135,7 @@ mod tests {
                 let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{bot_id}'\nname = '{bot_name}'\nkind = 'claude'\n")).unwrap();
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(bot),
-                    None => cfg.projects.push(crate::config::ProjectCfg {
+                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                         handed_off_to: None,
                         id: Some(pid),
                         path: repo,

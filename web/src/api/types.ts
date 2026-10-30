@@ -17,6 +17,7 @@ export type MessageSource = 'web' | 'hook' | 'transcript' | 'terminal_fallback' 
 export type TerminalSource = 'visible' | 'recent_unwrapped'
 
 export interface Project {
+  mode?: 'parent_child' | 'expert'
   id: string
   path: string
   label: string
@@ -277,6 +278,9 @@ export const HOST_DEFAULTS = {
 } as const
 
 export interface Bot {
+  role?: 'manager' | 'executor' | 'advisor' | null
+  role_pending?: boolean
+  runtime_role_policy?: string | null
   id: string
   project_id: string
   name: string
@@ -767,6 +771,8 @@ export interface NewProjectInput {
 }
 
 export interface PatchProjectInput {
+  mode?: 'parent_child' | 'expert'
+  manager_bot_id?: string
   label?: string
   /** #708：字串＝移交，`null`＝收回。 */
   handed_off_to?: string | null
@@ -829,6 +835,7 @@ export interface NewBotInput {
 
 /** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */
 export interface PatchBotInput {
+  role?: 'manager' | 'executor' | 'advisor' | null
   name?: string
   model?: string | null
   effort?: string | null

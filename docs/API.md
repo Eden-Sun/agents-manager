@@ -125,6 +125,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
+| GET | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
@@ -201,6 +203,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
+| HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -3285,4 +3289,12 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 ### GET /api/model-mode / PUT /api/model-mode
 
-僅限 User；Bot principal 回 403 `user_only`。GET 回傳 `{"mode":"claude","modes":[{"id":"claude","label":"claude","description":"..."}, ...]}`，模式與說明由 daemon 提供。PUT 接受 `{"mode":"claude"}` 或 `{"mode":"claude_codex"}`，寫入 `[agents] model_mode`，成功回 `{"mode":"...","needs_restart_bots":true}`；未知模式回 400。新規則在 bot 重啟後注入。
+僅限 User；Bot principal 回 403 `user_only`。GET 回 `deprecated: true`、`effective: false`；PUT 回 409 `deprecated`，不修改設定。舊的 `[agents] model_mode` 僅為相容讀取，不再生效。
+
+### 專案專家模式與成員
+
+`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。`PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
+
+`GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。
+
+遠端 host 可在 `[[hosts]] daemon_url` 設定 daemon 的可信入口；啟動時以 `AM_DAEMON_URL` 傳給 bot，未設定則不猜。`agm peers`、`agm requests` 使用自己的 bot 憑證；`agm requests --to ID --from ID --open` 呼叫 `GET /api/relay-requests`。

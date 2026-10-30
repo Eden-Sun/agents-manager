@@ -25,7 +25,7 @@ use super::test_dirs;
 #[cfg(not(feature = "daemon-test-harness"))]
 fn site(scratch: &Path, host: &str) -> RemoteSite {
     test_support::local_sh_fake(host, scratch);
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.to_string(),
         ssh: "fake-ssh".to_string(),
         ssh_port: 22,
@@ -259,7 +259,7 @@ mod with_app {
 
     /// 把測試 app 的專案搬到一台假遠端主機（`local_sh_fake`：本機 sh 扮演它，家目錄＝scratch）。
     async fn remote_host(e: &tt::Env, host: &str, scratch: &Path) -> Arc<HostConn> {
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             name: host.into(),
             ssh: "fake-ssh".into(),
             ssh_port: 22,

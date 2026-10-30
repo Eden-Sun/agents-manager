@@ -241,6 +241,8 @@ macro_rules! agm_gate {
 pub fn router(app: Arc<App>) -> Router {
     let upload_slots = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
     let api = Router::new()
+        .route("/projects/{id}/peers", get(crate::expert_peers::list))
+        .route("/spawn-authority", get(crate::expert_peers::spawn_authority))
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
@@ -1677,12 +1679,17 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         .zip(crate::runners::quota::limit_hits_for_bots(app, &bots).await)
         .filter_map(|(b, hit)| hit.map(|hit| (b.id.clone(), hit)))
         .collect();
+    let stale_hosts = app.remote_shim_stale.lock().await.clone();
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
             let queued_turn = queued_turns.remove(&b.id);
+            let shim_stale = if p.host == LOCAL_HOST {
+                let path = app.data_dir.join("bots").join(&b.id).join("bin/herdr");
+                (run.is_some() || path.exists()) && std::fs::read_to_string(path).ok().as_deref() != Some(crate::herdr_shim::SHIM_SH)
+            } else { stale_hosts.contains_key(&p.host) };
             // host 就是這個專案的 host（`db::bot_host` 的 JOIN 同一個欄位），不必再讀 bot／bot_host 兩次。
             let bot_connected = app.bot_connected_on(b, &p.host).await;
             let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
@@ -1696,6 +1703,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 // Keep the stored value intact, but project the concise name through shared state.
                 "name": if b.managed_by == "child" { crate::config::short_child_name(&p.label, &b.name) } else { b.name.clone() },
                 "kind": b.kind,
+                "role": b.role,
+                "runtime_role_policy": run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()),
+                "role_pending": shim_stale || run.as_ref().is_some_and(|r| r.runtime_role_policy.as_deref() != Some(format!("{}:{}:{}:{}", p.id, p.host, p.mode, b.role.as_deref().unwrap_or("")).as_str())),
                 "model": b.model,
                 "effort": b.effort,
                 "fast": b.fast == 1,
@@ -1741,7 +1751,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             }));
         }
         out.push(json!({
-            "id": p.id, "path": p.path, "label": p.label, "host": p.host,
+            "id": p.id, "path": p.path, "label": p.label, "host": p.host, "mode": p.mode,
             "workspace_id": p.workspace_id,
             "handed_off_to": p.handed_off_to,
             // 群組未讀與已讀標記跨裝置共用（read_marks.rs，#756）。
@@ -2138,7 +2148,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
             anyhow::bail!("duplicate");
         }
-        cfg.projects.push(crate::config::ProjectCfg {
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
             handed_off_to: None,
             id: Some(id.clone()),
             path: path.clone(),
@@ -2239,6 +2249,8 @@ async fn get_issue(
 
 #[derive(Deserialize)]
 struct PatchProject {
+    mode: Option<String>,
+    manager_bot_id: Option<String>,
     label: Option<String>,
     /// #708：字串＝移交給那台主機的 daemon，`null`＝收回，不帶＝不動。
     #[serde(default)]
@@ -2249,8 +2261,30 @@ struct PatchProject {
 async fn patch_project(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<PatchProject>,
 ) -> Result<Response, LcError> {
+    if (b.mode.is_some() || b.manager_bot_id.is_some()) && principal != RequestPrincipal::User { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"}))); }
+    if b.mode.as_deref() == Some("expert") {
+        let project = db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?;
+        let mut stale = Vec::new();
+        let remote_stale = app.remote_shim_stale.lock().await.contains_key(&project.host);
+        for bot in db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|bot| bot.project_id == id) {
+            let run = db::active_run(&app.db, &bot.id).await.map_err(any_err)?;
+            let invalid = if project.host == LOCAL_HOST {
+                let path = app.data_dir.join("bots").join(&bot.id).join("bin/herdr");
+                (run.is_some() || path.exists()) && std::fs::read_to_string(path).ok().as_deref() != Some(crate::herdr_shim::SHIM_SH)
+            } else { remote_stale };
+            let mut reasons = Vec::new();
+            if invalid { reasons.push("shim 過期"); }
+            if run.as_ref().is_some_and(|r| r.daemon_url_injected == 0) { reasons.push("run 未取得 daemon 位址，需重啟"); }
+            if !reasons.is_empty() { stale.push(json!({"id":bot.id,"name":bot.name,"host":project.host,"reasons":reasons})); }
+        }
+        if !stale.is_empty() {
+            let names = stale.iter().map(|b| format!("{}（{}：{}）", b["name"].as_str().unwrap_or("?"), b["host"].as_str().unwrap_or("?"), b["reasons"].as_array().into_iter().flatten().filter_map(|r| r.as_str()).collect::<Vec<_>>().join("、"))).collect::<Vec<_>>().join("；");
+            return Err(LcError::Conflict(json!({"error":"expert_not_ready","bots":stale,"message":format!("無法啟用專家模式：{names}")})));
+        }
+    }
     let label = match &b.label {
         None => None,
         Some(l) => {
@@ -2274,6 +2308,14 @@ async fn patch_project(
             .iter_mut()
             .find(|p| p.id.as_deref() == Some(id.as_str()))
             .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+        if let Some(manager) = &b.manager_bot_id {
+            if !p.bots.iter().any(|bot| bot.id.as_deref() == Some(manager.as_str())) { anyhow::bail!("manager must be a project bot"); }
+            for bot in &mut p.bots {
+                if bot.id.as_deref() == Some(manager.as_str()) { bot.role = Some("manager".into()); }
+                else if bot.role.as_deref() == Some("manager") { bot.role = None; }
+            }
+        }
+        if let Some(mode) = &b.mode { p.mode = mode.clone(); }
         if let Some(l) = &label {
             p.label = l.clone();
         }
@@ -2299,7 +2341,13 @@ async fn patch_project(
         }
     }
     app.emit("project_changed", json!({"project_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
+    let mut needs_restart = false;
+    if b.mode.is_some() || b.manager_bot_id.is_some() {
+        for bot in db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|bot| bot.project_id == id) {
+            if db::active_run(&app.db, &bot.id).await.map_err(any_err)?.is_some() { needs_restart = true; break; }
+        }
+    }
+    Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": needs_restart}))).into_response())
 }
 
 pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
@@ -2733,7 +2781,7 @@ async fn create_bot(
             b.name.clone()
         };
         *used_name.lock().unwrap() = name.clone();
-        p.bots.push(crate::config::BotCfg {
+        p.bots.push(crate::config::BotCfg { role: None,
             id: Some(id.clone()),
             name,
             kind: b.kind.clone(),
@@ -2897,6 +2945,8 @@ async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Resu
 
 #[derive(Deserialize)]
 struct PatchBot {
+    #[serde(default, deserialize_with = "double_option")]
+    role: Option<Option<String>>,
     /// `Some(Some(m))` sets, `Some(None)` / `Some("")` clears, absent = unchanged.
     #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<String>>,
@@ -2933,6 +2983,7 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
         sets.push(format!("{col} = ?"));
         vals.push(v);
     };
+    if let Some(role) = &b.role { push("role", role.clone()); }
     if let Some(idn) = &b.identity {
         push("identity", idn.clone().filter(|s| !s.trim().is_empty()));
     }
@@ -3012,9 +3063,10 @@ async fn patch_bot(
     Extension(principal): Extension<RequestPrincipal>,
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
-    if (b.identity.is_some() || b.env.is_some()) && principal != RequestPrincipal::User {
+    if (b.identity.is_some() || b.env.is_some() || b.role.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
+    if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor") { return Err(LcError::Bad("invalid role".into())); } }
     if let Some(env) = &b.env {
         check_env_names(env)?;
     }
@@ -3044,7 +3096,7 @@ async fn patch_bot(
     if let Some(args) = &b.args {
         crate::bot_input::check_args(args)?;
     }
-    let restart_relevant = b.model.is_some()
+    let restart_relevant = b.role.is_some() || b.model.is_some()
         || b.effort.is_some()
         || b.fast.is_some()
         || b.persona.is_some()
@@ -3114,6 +3166,7 @@ async fn patch_bot(
     // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
     // child 的 primary 與其他欄位都在 bots 表，交給同一條 UPDATE，避免失敗時留下半套狀態。
     let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+    if managed_by != "user" && b.role.as_ref().and_then(|r| r.as_deref()) == Some("manager") { return Err(LcError::Bad("child cannot be manager".into())); }
     if managed_by == "user" {
         if let Some(pin) = b.is_primary {
             let n = crate::primary_order::set_pinned(&app.db, &id, pin).await.map_err(any_err)?;
@@ -3141,6 +3194,7 @@ async fn patch_bot(
             .flat_map(|p| p.bots.iter_mut())
             .find(|x| x.id.as_deref() == Some(id.as_str()))
             .ok_or_else(|| anyhow::anyhow!("no-bot"))?;
+        if let Some(role) = &b.role { bot.role = role.clone(); }
         if let Some(idn) = &b.identity {
             bot.identity = idn.clone().filter(|s| !s.trim().is_empty());
         }
@@ -3285,7 +3339,17 @@ async fn patch_bot(
         },
         None => false,
     };
-    let mut out = json!({"needs_restart": needs_restart});
+    let role_needs_restart = if b.role.is_some() {
+        match (db::bot(&app.db, &id).await, db::active_run(&app.db, &id).await) {
+            (Ok(Some(bot)), Ok(Some(run))) => match db::project(&app.db, &bot.project_id).await {
+                Ok(Some(project)) => run.runtime_role_policy.as_deref() != Some(format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or("")).as_str()),
+                _ => true,
+            },
+            (Ok(_), Ok(None)) => false,
+            _ => true,
+        }
+    } else { false };
+    let mut out = json!({"needs_restart": needs_restart || role_needs_restart});
     if let Some(value) = remapped { out["remapped"] = value; }
     if let Some(outcome) = live {
         let (applied, pending_bookkeeping, reason) = match outcome {
@@ -3613,7 +3677,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身份起。
         let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let env = serde_json::from_str(&bot.env_json).map_err(|e| LcError::conflict("bot env_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
-        let entry = crate::config::BotCfg {
+        let entry = crate::config::BotCfg { role: None,
             id: Some(bot.id.clone()),
             name: bot.name.clone(),
             kind: bot.kind.clone(),
@@ -3778,7 +3842,7 @@ async fn create_host(
     // 更新既有主機時，沒帶的選填欄位一律沿用舊值（共用 session 是安全開關 #709；remote_path 被清掉會讓遠端 PATH 找不到 herdr，#1752）。
     // 新主機才用預設值。
     let prev = app.cfg.get().await.hosts.into_iter().find(|h| h.name == b.name);
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: prev.as_ref().and_then(|p| p.daemon_url.clone()),
         name: b.name.clone(),
         ssh: b.ssh.trim().to_string(),
         ssh_port: b.ssh_port.or(prev.as_ref().map(|p| p.ssh_port)).unwrap_or(22),
@@ -4254,7 +4318,7 @@ mod baseline_apply_route_tests {
 
     /// 遠端主機（假 ssh）：apply／restore 腳本在假 HOME 裡用真的 `/bin/sh` 跑，其他（偵測）一律失敗。回傳 HOME 與被叫了幾次。
     async fn remote_host(app: &Arc<App>, host: &str) -> (std::path::PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: "unused".into(),
@@ -4731,7 +4795,7 @@ mod identity_auth_error_tests {
 
         let e = crate::testing::env().await;
         let host = format!("identity-api-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(HostCfg {
+        let conn = e.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -4799,7 +4863,7 @@ mod identity_auth_error_tests {
         // 先把主機寫進 config（不必等它真的連上：這條測的是閘門，不是連線）。
         e.app.cfg
             .update(move |f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     shared_session: false,
                     name: "zz92".into(),
                     ssh: "old-box".into(),
@@ -4814,7 +4878,7 @@ mod identity_auth_error_tests {
             .unwrap();
         // 這台上放一個活著的專案。
         crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                 handed_off_to: None,
                 id: Some("01PROJZZ92".into()),
                 path: "/srv/work".into(),
@@ -4866,7 +4930,7 @@ mod identity_auth_error_tests {
         let host = "zz92-cleanup";
         app.cfg
             .update(|f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     shared_session: false,
                     name: host.into(),
                     ssh: "unused-test-host".into(),
@@ -4926,7 +4990,7 @@ mod identity_auth_error_tests {
         app.cfg
             .update(|f| {
                 for name in [old, new] {
-                    f.hosts.push(HostCfg {
+                    f.hosts.push(HostCfg { daemon_url: None,
                         shared_session: false,
                         name: name.into(),
                         ssh: "unused-test-host".into(),
@@ -4956,7 +5020,7 @@ mod identity_auth_error_tests {
         let host = "zz92-orphan";
         app.cfg
             .update(|f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     shared_session: false,
                     name: host.into(),
                     ssh: "unused-test-host".into(),
@@ -5003,7 +5067,7 @@ mod identity_auth_error_tests {
         let host = "zz92-config-project-race";
         app.cfg
             .update(|f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     shared_session: false,
                     name: host.into(),
                     ssh: "unused-test-host".into(),
@@ -5012,7 +5076,7 @@ mod identity_auth_error_tests {
                     herdr_session: "agents-manager".into(),
                     remote_path: String::new(),
                 });
-                f.projects.push(crate::config::ProjectCfg {
+                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     id: Some("01CONFIGRACE".into()),
                     path: "/tmp/xreview-host-config-race".into(),
                     label: "config race".into(),
@@ -5048,7 +5112,7 @@ mod identity_auth_error_tests {
         let host = "zz92-repoint-orphan";
         app.cfg
             .update(|f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     shared_session: false,
                     name: host.into(),
                     ssh: "old-test-target".into(),
@@ -5116,7 +5180,7 @@ mod identity_auth_error_tests {
             .update({
                 let host = host.clone();
                 move |f| {
-                    f.hosts.push(HostCfg {
+                    f.hosts.push(HostCfg { daemon_url: None,
                         shared_session: false,
                         name: host,
                         ssh: "old-test-target".into(),
@@ -5497,7 +5561,7 @@ mod project_tests {
         // `testing::env` only seeds the db row; the rename edits config.toml.
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: e.repo.to_string_lossy().to_string(),
@@ -5513,7 +5577,8 @@ mod project_tests {
         let res = patch_project(
             State(app.clone()),
             Path(pid.clone()),
-            Json(PatchProject { label: Some("  改過的名字  ".into()), handed_off_to: None }),
+            Extension(RequestPrincipal::User),
+            Json(PatchProject { mode: None, manager_bot_id: None, label: Some("  改過的名字  ".into()), handed_off_to: None }),
         )
         .await
         .unwrap();
@@ -5522,13 +5587,13 @@ mod project_tests {
         assert_eq!(p.label, "改過的名字", "the label is trimmed and projected into the db");
         assert!(app.cfg.get().await.projects.iter().any(|x| x.label == "改過的名字"), "and written to config.toml");
 
-        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("   ".into()), handed_off_to: None }))
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: None, manager_bot_id: None, label: Some("   ".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::Bad(_)), "blank label is a 400, got {err:?}");
         assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().label, "改過的名字");
 
-        let err = patch_project(State(app), Path("nope".into()), Json(PatchProject { label: Some("x".into()), handed_off_to: None }))
+        let err = patch_project(State(app), Path("nope".into()), Extension(RequestPrincipal::User), Json(PatchProject { mode: None, manager_bot_id: None, label: Some("x".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::NotFound(_)), "unknown project is a 404, got {err:?}");
@@ -5570,7 +5635,7 @@ mod project_tests {
         let app = e.app.clone();
         app.cfg
             .update(|f| {
-                f.hosts.push(HostCfg {
+                f.hosts.push(HostCfg { daemon_url: None,
                     name: "keep1".into(),
                     ssh: "keep1.invalid".into(),
                     ssh_port: 2222,
@@ -5622,7 +5687,7 @@ mod project_tests {
         let path = e.repo.to_string_lossy().to_string();
         app.cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     id: Some(pid.clone()),
                     path,
                     label: "proj".into(),
@@ -5635,27 +5700,27 @@ mod project_tests {
             .await
             .unwrap();
         let pid = e.project_id.clone();
-        let patch = |v: Value| PatchProject { label: None, handed_off_to: Some(v) };
+        let patch = |v: Value| PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: Some(v) };
         let state_flag = |app: Arc<App>| async move {
             let s = state_json(&app).await.unwrap();
             s["projects"].as_array().unwrap()[0]["handed_off_to"].clone()
         };
 
-        patch_project(State(app.clone()), Path(pid.clone()), Json(patch(json!(" agm-host ")))).await.unwrap();
+        patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(patch(json!(" agm-host ")))).await.unwrap();
         assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().handed_off_to.as_deref(), Some("agm-host"));
         assert_eq!(app.cfg.get().await.projects[0].handed_off_to.as_deref(), Some("agm-host"), "written to config.toml");
         assert_eq!(state_flag(app.clone()).await, json!("agm-host"));
 
         for bad in [json!("  "), json!(3)] {
-            let err = patch_project(State(app.clone()), Path(pid.clone()), Json(patch(bad))).await.unwrap_err();
+            let err = patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(patch(bad))).await.unwrap_err();
             assert!(matches!(err, LcError::Bad(_)), "got {err:?}");
         }
-        patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()), handed_off_to: None }))
+        patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: None, manager_bot_id: None, label: Some("renamed".into()), handed_off_to: None }))
             .await
             .unwrap();
         assert_eq!(state_flag(app.clone()).await, json!("agm-host"), "a label-only patch leaves the handoff alone");
 
-        patch_project(State(app.clone()), Path(pid.clone()), Json(patch(Value::Null))).await.unwrap();
+        patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(patch(Value::Null))).await.unwrap();
         assert!(db::project(&app.db, &pid).await.unwrap().unwrap().handed_off_to.is_none());
         assert!(app.cfg.get().await.projects[0].handed_off_to.is_none());
         assert_eq!(state_flag(app.clone()).await, Value::Null);
@@ -5677,7 +5742,7 @@ mod project_tests {
         // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: repo.clone(),
@@ -5685,7 +5750,7 @@ mod project_tests {
                     host: LOCAL_HOST.into(),
                     bots: ["b1", "b2", "b3", "b4"]
                         .into_iter()
-                        .map(|id| crate::config::BotCfg {
+                        .map(|id| crate::config::BotCfg { role: None,
                             id: Some(id.to_string()),
                             name: id.to_string(),
                             kind: "claude".into(),
@@ -5720,7 +5785,7 @@ mod project_tests {
         std::fs::write(&app.cfg.path, &reduced).unwrap();
         app.cfg.update(|_| Ok(())).await.unwrap();
 
-        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()), handed_off_to: None }))
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: None, manager_bot_id: None, label: Some("renamed".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         match err {
@@ -6071,7 +6136,7 @@ mod delete_identity_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
                 Ok(())
             })
             .await
@@ -6201,7 +6266,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -6231,7 +6296,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer2", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -8823,7 +8888,7 @@ mod delete_bot_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects = vec![crate::config::ProjectCfg {
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(pid),
                     path: repo,
@@ -10806,7 +10871,7 @@ mod bot_config_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(pid),
                     path: repo,
@@ -10948,7 +11013,7 @@ mod bot_config_tests {
         let remote_err = create_project(State(e.app.clone()), Json(remote_relative)).await.unwrap_err();
         assert!(matches!(&remote_err, LcError::Bad(message) if message.contains("absolute")), "遠端專案也要先拒絕相對路徑：{remote_err:?}");
         let pid = e.app.cfg.get().await.projects.last().and_then(|p| p.id.clone()).unwrap();
-        let r = patch_project(State(e.app.clone()), Path(pid), Json(serde_json::from_value(json!({"label": "a\u{1b}b"})).unwrap())).await;
+        let r = patch_project(State(e.app.clone()), Path(pid), Extension(RequestPrincipal::User), Json(serde_json::from_value(json!({"label": "a\u{1b}b"})).unwrap())).await;
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&file).ok();
@@ -12832,7 +12897,7 @@ mod per_principal_auth_tests {
         }
         let configured_bots = [&patrol, &responder, &patrol_target, &responder_target]
             .into_iter()
-            .map(|bot| crate::config::BotCfg {
+            .map(|bot| crate::config::BotCfg { role: None,
                 id: Some(bot.id.clone()),
                 name: bot.name.clone(),
                 kind: bot.kind.clone(),
@@ -12855,7 +12920,7 @@ mod per_principal_auth_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(project_id),
                     path: repo,
@@ -14707,7 +14772,7 @@ mod per_principal_auth_tests {
             .update(move |cfg| {
                 let mut bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted2}'\nname = 'AGM'\nkind = 'claude'\n")).unwrap();
                 bot.persona = Some("我是普通 bot".into());
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -14726,7 +14791,7 @@ mod per_principal_auth_tests {
         app.cfg
             .update(move |cfg| {
                 let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted_resp2}'\nname = 'AGM-responder'\nkind = 'claude'\n")).unwrap();
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -15565,7 +15630,7 @@ mod caller_audit_tests {
                     toml::from_str(&format!("id = '{bid}'\nname = '{bname}'\nkind = 'claude'\n")).unwrap();
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(entry),
-                    None => cfg.projects.push(crate::config::ProjectCfg {
+                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
                         handed_off_to: None,
                         id: Some(pid),
                         path: repo,
@@ -15748,7 +15813,7 @@ mod mixed_store_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -15910,7 +15975,7 @@ mod create_bot_idempotency_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -16814,7 +16879,7 @@ mod state_query_count_tests {
         for i in 0..10 {
             env.app
                 .hosts
-                .insert_remote_for_test(crate::config::HostCfg {
+                .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                     shared_session: false,
                     name: format!("cfg-host-{i}"),
                     ssh: "unused".into(),
@@ -16964,7 +17029,7 @@ mod host_target_tests {
     /// without the same explicit repoint confirmation as a new ssh target.
     #[test]
     fn changing_ssh_identity_options_is_a_host_repoint() {
-        let old = HostCfg {
+        let old = HostCfg { daemon_url: None,
             name: "build-box".into(),
             ssh: "build-box".into(),
             ssh_port: 22,
@@ -17242,5 +17307,28 @@ mod native_api_http_tests {
         assert!(unavailable.starts_with("HTTP/1.1 200"));
         let value: Value = serde_json::from_str(unavailable.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(value, json!({"availability":"unavailable"}));
+    }
+}
+
+#[cfg(test)]
+mod expert_activation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn remote_running_without_daemon_url_blocks_expert_activation() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "remote-worker").await;
+        crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE projects SET host='remote' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let err = patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: Some("expert".into()), manager_bot_id: Some(bot.id), label: None, handed_off_to: None })).await.unwrap_err();
+        match err { LcError::Conflict(body) => { assert_eq!(body["error"], "expert_not_ready"); assert_eq!(body["bots"][0]["name"], "remote-worker"); assert_eq!(body["bots"][0]["host"], "remote"); assert!(body["bots"][0]["reasons"].to_string().contains("daemon")); }, _ => panic!("unexpected error {err:?}") }
+    }
+
+    #[tokio::test]
+    async fn stale_running_shim_blocks_expert_activation() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "stale-worker").await;
+        crate::testing::fake_run(&env.app, &bot.id).await;
+        let err = patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: Some("expert".into()), manager_bot_id: Some(bot.id), label: None, handed_off_to: None })).await.unwrap_err();
+        match err { LcError::Conflict(body) => { assert_eq!(body["error"], "expert_not_ready"); assert_eq!(body["bots"][0]["name"], "stale-worker"); assert_eq!(body["bots"][0]["host"], "local"); assert!(body["bots"][0]["reasons"].to_string().contains("daemon")); }, _ => panic!("unexpected error {err:?}") }
     }
 }

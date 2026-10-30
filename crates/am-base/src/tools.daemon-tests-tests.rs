@@ -553,7 +553,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         );
     }
     fn host_cfg(ssh: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false }
+        crate::config::HostCfg { daemon_url: None, name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false }
     }
 
     fn ht_marked(marker: &str) -> HostTools {
@@ -603,7 +603,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         use crate::host_baseline::{BaselineEnv, BaselineReport};
         let host = "c5-1371";
         let app = crate::testing::env().await.app.clone();
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.into(), ..host_cfg("target-a") }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, name: host.into(), ..host_cfg("target-a") }).await;
         crate::hosts::set_ssh_fake(host, |_| Err(anyhow::anyhow!("timed out")));
         let old = app.hosts.fence(host).await.unwrap();
         conn.bump_generation_for_test();
@@ -622,7 +622,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         use crate::host_baseline::{BaselineEnv, BaselineReport};
         let host = "c5-1371";
         let app = crate::testing::env().await.app.clone();
-        app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.into(), ..host_cfg("target-a") }).await;
+        app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, name: host.into(), ..host_cfg("target-a") }).await;
         crate::hosts::set_ssh_fake(host, |_| Err(anyhow::anyhow!("timed out")));
         let current = app.hosts.fence(host).await.unwrap();
         app.baseline_cache().lock().await.insert(
@@ -664,7 +664,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "login-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ..host_cfg(ssh) };
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None, name: host.into(), ..host_cfg(ssh) };
         let slug = format!("t347{}", &crate::db::ulid()[16..]).to_ascii_lowercase();
         app.set_instance(Some(slug.clone()));
         let dir = crate::hosts::short_dir(Some(&slug));
@@ -756,7 +756,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -810,7 +810,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("detect-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),

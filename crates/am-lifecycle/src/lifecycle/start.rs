@@ -282,12 +282,13 @@ async fn start_bot_locked_with_host_fence_body(
         app.hosts().fence(&project.host).await.and_then(|f| f.target_epoch())
     };
     let ins = sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, launch_rev, started_at, host, host_generation) VALUES (?,?,'starting','unknown',?,?,?,?,?,?)",
+        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, runtime_role_policy, launch_rev, started_at, host, host_generation) VALUES (?,?,'starting','unknown',?,?,?,?,?,?,?)",
     )
     .bind(&run_id)
     .bind(bot_id)
     .bind(&session)
     .bind(&started_identity)
+    .bind(format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or("")))
     // 這個 run 載入的啟動設定版本（#353）：之後 config 改了、版本對不上＝需要重啟，不靠 PATCH 回應裡那個會遺失的布林。
     .bind(crate::launch_rev::of(&bot))
     .bind(db::now())
@@ -1335,7 +1336,12 @@ async fn start_inner_body(
         None => env,
     };
     // §6.5i：agent md 讀一次，母 bot 的 persona 與子 agent 的檔用同一份。
-    let agent_md = if restricted.is_some() { Default::default() } else { super::agent_md::load(app, project).await };
+    let mut agent_md = if restricted.is_some() { Default::default() } else { super::agent_md::load(app, project).await };
+    let child_base_text = agent_md.text.clone();
+    if restricted.is_none() && project.mode == "expert" {
+        let role = bot.role.as_deref().unwrap_or("未分配");
+        agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。只有管理者可開 child；既有 child 不可再開 child。執行者與顧問需要人手時向管理者請求。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
+    }
     if !agent_md.problems.is_empty() {
         let mut reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
         if !agent_md.unreadable.is_empty() {
@@ -1350,11 +1356,8 @@ async fn start_inner_body(
         super::agent_md::push_unreadable_alert(app, bot, &agent_md.unreadable).await;
     }
     let mut env = env;
-    if restricted.is_none() && agent_md.claude_codex {
-        if let Some(map) = env.as_object_mut() {
-            map.insert("AM_MODEL_MODE".into(), serde_json::json!("claude_codex"));
-        }
-    }
+    let daemon_url_injected = env.get("AM_DAEMON_URL").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty());
+    sqlx::query("UPDATE runs SET daemon_url_injected=? WHERE id=?").bind(i64::from(daemon_url_injected)).bind(run_id).execute(app.db()).await.map_err(up)?;
     if agent_md.cli_docs_disabled() {
         // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
         // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。
@@ -1371,7 +1374,7 @@ async fn start_inner_body(
     // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
     // below the PTY shell limit. Stage the full startup persona in a file and pass its short path.
     // Grok also needs the child-rules file when no custom [agents] document is configured.
-    let child_md = super::setup::child_instructions(&agent_md.text);
+    let child_md = super::setup::child_instructions(&child_base_text);
     let child_instructions_path = if agent_md.configured || !agent_md.text.is_empty() || bot.kind == "grok" {
         super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await
     } else {
@@ -4658,7 +4661,7 @@ esac
             let e = env().await;
             let pm = claude_bot(&e.app, &e.project_id, "pm").await;
             let host = format!("resume-home-616-{}", db::ulid().to_ascii_lowercase());
-            let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
@@ -4702,7 +4705,7 @@ esac
             let port = listener.local_addr().unwrap().port();
             drop(listener); // 沒有人在聽這個 port 了：接下來連過去是 connection refused，快速失敗。
 
-            let host_cfg = crate::config::HostCfg {
+            let host_cfg = crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: "unreachable-box".into(),
                 ssh: "127.0.0.1".into(),

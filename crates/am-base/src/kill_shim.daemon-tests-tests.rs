@@ -297,7 +297,7 @@
     #[test]
     fn the_shim_is_in_the_shared_shim_list_and_install_local_is_atomic_and_idempotent() {
         let list = shims();
-        assert_eq!(list.len(), 4);
+        assert_eq!(list.len(), 5);
         for n in NAMES {
             assert_eq!(list.iter().find(|(name, _)| *name == n).map(|(_, c)| *c), Some(shim_sh()), "{n}");
         }
