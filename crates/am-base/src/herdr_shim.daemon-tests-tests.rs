@@ -1501,20 +1501,26 @@ esac"#, calls.display()));
         let home = s.dir.join("home");
         let data = home.join(".config/agents-manager");
         let home_str = home.to_str().unwrap();
-        let old = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session")];
+        let call_log = s.dir.join("calls.log");
+        let old = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session"), ("AM_TEST_CALL_LOG", call_log.to_str().unwrap())];
         let (_, _, rc) = s.run_full(&old, &["agent", "prompt", "w1:p2", "before"]);
         assert_eq!(rc, 0);
         // Parent restarts with a daemon URL; the previously created shell retains `old`.
         let restarted = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session"), ("AM_DAEMON_URL", "http://daemon:7788")];
         s.install_fake_curl("printf '{\"error\":\"forbidden\"}\n403'");
         assert_eq!(s.run_full(&restarted, &["agent", "prompt", "w1:p2", "work"]).2, 77);
-        am_base::expert_marker::set(&data, None, "project-a", "test-session", true).await.unwrap();
+        am_base::expert_marker::set(&data, None, None, "project-a", "test-session", true).await.unwrap();
+        std::fs::write(&call_log, "").unwrap();
         for target in ["w1:p2", "colleague"] {
             let (out, _, rc) = s.run_full(&old, &["agent", "prompt", target, "work"]);
             assert_eq!(rc, 77); assert!(out.is_empty());
         }
+        assert!(!std::fs::read_to_string(&call_log).unwrap().contains("agent prompt"), "blocked prompts never reach herdr");
         assert_eq!(s.run_full(&old, &["agent", "start", "kid", "--pane", "w1:p9"]).2, 77);
-        am_base::expert_marker::set(&data, None, "project-a", "test-session", false).await.unwrap();
+        am_base::expert_marker::set(&data, None, Some("other-instance"), "project-b", "test-session", true).await.unwrap();
+        am_base::expert_marker::set(&data, None, None, "project-a", "test-session", false).await.unwrap();
+        assert_eq!(s.run_full(&old, &["agent", "prompt", "w1:p2", "still guarded"]).2, 77);
+        am_base::expert_marker::set(&data, None, Some("other-instance"), "project-b", "test-session", false).await.unwrap();
         assert_eq!(s.run_full(&old, &["agent", "prompt", "w1:p2", "after"]).2, 0);
     }
 

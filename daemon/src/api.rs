@@ -17758,10 +17758,12 @@ mod expert_activation_tests {
     async fn marker_write_failure_rejects_expert_activation() {
         let env = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "marker-manager").await;
+        let before = std::fs::read_to_string(&env.app.cfg.path).unwrap();
         std::fs::write(env.app.data_dir.join("expert-sessions"), b"not a directory").unwrap();
         let error = patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: Some("expert".into()), manager_bot_id: Some(bot.id), label: None, handed_off_to: None })).await.unwrap_err();
         match error { LcError::Unavailable(v) => assert_eq!(v["error"], "expert_marker_unavailable"), _ => panic!("unexpected {error:?}") }
         assert_eq!(db::project(&env.app.db, &env.project_id).await.unwrap().unwrap().mode, "parent_child");
+        assert_eq!(std::fs::read_to_string(&env.app.cfg.path).unwrap(), before);
     }
 
     #[tokio::test]
@@ -17789,10 +17791,10 @@ mod expert_activation_tests {
         let patch = |mode: &str| PatchProject { mode:Some(mode.into()), manager_bot_id:Some(bot.id.clone()), label:None, handed_off_to:None };
         patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("expert"))).await.unwrap();
         let dir = env.app.data_dir.join("expert-sessions").join(am_base::expert_marker::encode(&sessions[0]));
-        assert!(dir.join(am_base::expert_marker::encode(&env.project_id)).is_file());
+        assert!(dir.join(am_base::expert_marker::marker_name(env.app.instance().as_deref(), &env.project_id)).is_file());
         for target in ["w1:p2", "manager"] { assert_eq!(old_shell(target).status.code(), Some(77)); }
         patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("parent_child"))).await.unwrap();
-        assert!(!dir.join(am_base::expert_marker::encode(&env.project_id)).exists());
+        assert!(!dir.join(am_base::expert_marker::marker_name(env.app.instance().as_deref(), &env.project_id)).exists());
         assert!(old_shell("w1:p2").status.success());
     }
 
