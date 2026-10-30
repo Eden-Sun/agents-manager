@@ -50,7 +50,7 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL_MODE AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
 
 # API calls use the independent bot credential. Keep the hook-token fallback for already-running
 # hook-enabled panes until they restart to receive AM_BOT_TOKEN.
@@ -383,6 +383,10 @@ am_agent_start() {
             -h | --help) exec "$AM_HERDR" agent start "$@" ;;
         esac
     done
+    if [ "${AM_MODEL_MODE:-}" = claude_codex ] && [ "${AM_KIND:-}" = codex ]; then
+        printf 'agents-manager: 這個模式下 codex 不開 child，把要另派的事寫進回報交給 claude parent\n' >&2
+        exit 77
+    fi
     if [ -n "${AM_CHILD_OF:-}" ]; then
         printf 'agents-manager: 你是 `%s` 派出的子 agent，禁止再開子 agent。需要更多人手：停下來在回報裡寫清楚要另派什麼、為什麼，由 `%s` 決定要不要開兄弟 agent\n' "$AM_CHILD_OF" "$AM_CHILD_OF" >&2
         exit 77
@@ -664,7 +668,7 @@ am_agent_start() {
     fi
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
-    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name"
+    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}"
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
     fi
@@ -742,6 +746,7 @@ am_reexport_env_before_start() {
         [ -z "$_acct_key" ] || [ "$_k" != "$_acct_key" ] || continue
         eval "_v=\${$_k:-}"
         [ "$_k" != AM_AGENT_NAME ] || [ -z "$_child_name" ] || _v=$_child_name
+        if [ "$_k" = AM_KIND ] && [ "${AM_MODEL_MODE:-}" = claude_codex ] && [ -n "$5" ]; then _v=$5; fi
         [ -n "$_v" ] || continue
         [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
         _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
