@@ -24,7 +24,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") { return Err(RelayDenied::Denied("expert_cross_project".into())); }
     if project.mode == "expert" {
-        let direct_family = from.parent_bot_id.as_deref() == Some(to.id.as_str()) || to.parent_bot_id.as_deref() == Some(from.id.as_str());
+        let direct_family = from.parent_bot_id.as_deref() == Some(to.id.as_str());
         if !direct_family && kind == Admission::NewRequest {
             let run = crate::db::active_run(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
             let expected = format!("{}:{}:{}:{}", project.id, project.host, project.mode, from.role.as_deref().unwrap_or(""));
@@ -72,7 +72,9 @@ mod expert_tests {
         assert!(relay_prompt_allowed(&env.app, &worker.id, &advisor.id, Admission::NewRequest).await.is_ok());
         assert!(matches!(relay_prompt_allowed(&env.app, &advisor.id, &worker.id, Admission::Deliver).await, Err(RelayDenied::Denied(_))));
         sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&advisor.id).bind(&worker.id).execute(&env.app.db).await.unwrap();
-        assert!(relay_prompt_allowed(&env.app, &advisor.id, &worker.id, Admission::Deliver).await.is_ok());
+        assert!(matches!(relay_prompt_allowed(&env.app, &advisor.id, &worker.id, Admission::NewRequest).await, Err(RelayDenied::Denied(_))));
+        assert!(matches!(relay_prompt_allowed(&env.app, &advisor.id, &worker.id, Admission::Deliver).await, Err(RelayDenied::Denied(_))));
+        assert!(relay_prompt_allowed(&env.app, &worker.id, &advisor.id, Admission::Deliver).await.is_ok());
         sqlx::query("UPDATE bots SET parent_bot_id=NULL, managed_by='user' WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE bot_id=?").bind(crate::db::now()).bind(&advisor.id).execute(&env.app.db).await.unwrap();
         assert!(relay_prompt_allowed(&env.app, &advisor.id, &manager.id, Admission::Deliver).await.is_ok());

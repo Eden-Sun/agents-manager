@@ -873,6 +873,9 @@ am_agent_prompt() {
         esac
         set -- "$@" "$_a"
     done
+    if [ "${AM_PROJECT_MODE:-}" = expert ] && ! am_daemon_base >/dev/null; then
+        am_announce_refuse 77 "$_requested" "expert 模式缺少 daemon 位址，不能確認收件權限"
+    fi
     _remote_bot=""
     case "$_requested" in bot:*) [ -n "${AM_PORT:-}" ] || _remote_bot=1 ;; esac
     if [ -n "$_expect_result" ] || [ -n "$_remote_bot" ]; then
@@ -1020,7 +1023,8 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
         esac
         _text="${_text:+$_text }$_a"
     done
-    if [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && [ -n "${AM_PORT:-}" ]; then
+    if [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && am_daemon_base >/dev/null; then
+        _base=$(am_daemon_base)
         # 「確定沒送到 daemon」與「送了但回覆不明」要分清楚（issue #143）。直送 pane 只有一種情形站得住腳：**連線根本沒建立**
         # （curl 7，daemon 不在），request 一定沒進 daemon。其餘——逾時、空回應、連線被重置、任何非 2xx、看不懂的 2xx——
         # request 可能已經進了 daemon（durable 的 bot_request 可能已經 commit，只是回覆沒收完整）：直送會變成佇列一份、pane 一份，
@@ -1034,7 +1038,7 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
             # 第一次 2 秒；再問就給久一點（daemon 可能已經排進佇列、只是回得慢）。沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
             if [ "$_try" = 1 ]; then _m=2; else _m=15; fi
             # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。`-w` 在回應後面補一行 HTTP 狀態碼。
-            _out=$(am_curl_bot -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
+            _out=$(am_curl_bot -s -m "$_m" -w '\n%{http_code}' --noproxy '*' -X POST "${_base%/}/relay/announce" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
                 --data-urlencode "to_agent=${_name}" \
                 --data-urlencode "to_bot_id=${_to_bot_id}" \
@@ -1047,6 +1051,9 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
             case "$_rc" in 0 | 7) break ;; esac
             [ "$_try" -lt 2 ] || break
         done
+        if [ "$_rc" = 7 ] && { [ -n "${AM_DAEMON_URL:-}" ] || [ "${AM_PROJECT_MODE:-}" = expert ]; }; then
+            am_announce_refuse 75 "$_name" "daemon 無法連線，未送出"
+        fi
         if [ "$_rc" != 7 ]; then
             if [ "$_rc" != 0 ]; then
                 am_announce_refuse 75 "$_name" "問 daemon 時連線出了狀況（curl 結束碼 ${_rc}），不確定它有沒有收到；同一句再送一次就好，daemon 以內容去重"
@@ -1090,6 +1097,10 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
                     ;;
             esac
         fi
+    elif [ -n "${AM_BOT_ID:-}" ] && am_daemon_base >/dev/null; then
+        am_announce_refuse 77 "$_name" "缺少 bot 憑證，無法確認 daemon 授權"
+    elif [ "${AM_PROJECT_MODE:-}" = expert ]; then
+        am_announce_refuse 77 "$_name" "expert 模式無法確認 daemon 身分或位址"
     elif [ -n "${AM_BOT_ID:-}" ] && [ -z "${AM_PORT:-}" ]; then
         # 遠端沒有 daemon 可以解 run→pane；沒有明確 pane 地址的舊呼叫不報備身份。
         if [ -n "$_to_pane_id" ]; then
