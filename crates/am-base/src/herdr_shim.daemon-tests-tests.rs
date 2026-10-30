@@ -44,6 +44,12 @@
                    fi\n\
                    exit 1\n\
                  fi\n\
+                 if [ \"$1 $2\" = 'integration install' ]; then\n\
+                   printf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"${AM_TEST_INSTALL_LOG:-/dev/null}\"\n\
+                   [ -z \"${AM_TEST_INSTALL_FAIL:-}\" ] || exit 1\n\
+                   printf '{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"command\":\"bash herdr-agent-state.sh session\"}]}]}}' > \"$CLAUDE_CONFIG_DIR/settings.json\"\n\
+                   exit 0\n\
+                 fi\n\
                  if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
                    [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
                    printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
@@ -157,6 +163,8 @@
             cmd.env_remove("HERDR_PANE_ID");
             // env 補送的暫存檔預設寫進沙盒，不要在 /tmp 留一堆（2026-10-01 一次測試留下幾十個 am-env.*）；測試自己給的 TMPDIR 照用。
             cmd.env("TMPDIR", &self.dir);
+            // HOME 也進沙盒：claude child 的 hook 補裝（am_ensure_claude_hook）預設看 `$HOME/.claude`，測試絕不能碰真的。
+            cmd.env("HOME", &self.dir);
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -378,6 +386,52 @@
             let left_out = LEFT_OUT.iter().any(|(k, _)| *k == key);
             assert!(passed_down || left_out, "daemon 會把 {key} 注入 bot 的 pane，但 herdr shim 開子 pane 時不會傳它——加進 AM_RESERVED_ENV_KEYS，或列進 LEFT_OUT 並寫理由（issue #138）");
         }
+    }
+
+    /// claude child 的 session 靠身分目錄裡 herdr 的 SessionStart hook：缺就在 `agent start` 前補裝（先備份、只加不改）。
+    fn claude_start_with_identity_dir(s: &Sandbox, settings: Option<&str>, extra: &[(&str, &str)]) -> (Vec<String>, String, std::path::PathBuf) {
+        let cfg = s.dir.join("claude-cc1");
+        std::fs::create_dir_all(&cfg).unwrap();
+        if let Some(text) = settings {
+            std::fs::write(cfg.join("settings.json"), text).unwrap();
+        }
+        let installs = s.dir.join("installs.log");
+        let mut env = vec![
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_TEST_INSTALL_LOG", installs.to_str().unwrap()),
+            ("CLAUDE_CONFIG_DIR", cfg.to_str().unwrap()),
+        ];
+        env.extend_from_slice(extra);
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        (out, err, cfg)
+    }
+
+    #[test]
+    fn a_claude_child_start_installs_the_missing_herdr_hook_after_backing_up_settings() {
+        let s = Sandbox::new();
+        let rtk = r#"{"hooks":{"PreToolUse":[]}}"#;
+        let (out, err, cfg) = claude_start_with_identity_dir(&s, Some(rtk), &[]);
+        assert!(out.starts_with(&["agent".to_string(), "start".to_string()]), "照常開 agent：{out:?}");
+        assert!(err.contains("已補裝 herdr 的 SessionStart hook"), "{err}");
+        assert!(std::fs::read_to_string(cfg.join("settings.json")).unwrap().contains("herdr-agent-state"));
+        assert_eq!(std::fs::read_to_string(cfg.join("settings.json.am-bak-herdr")).unwrap(), rtk, "備份是原檔");
+        assert_eq!(std::fs::read_to_string(s.dir.join("installs.log")).unwrap().trim(), cfg.to_str().unwrap(), "裝的是身分那個目錄");
+    }
+
+    #[test]
+    fn a_claude_child_start_whose_hook_install_fails_says_so_but_still_starts() {
+        let s = Sandbox::new();
+        let (out, err, _) = claude_start_with_identity_dir(&s, Some("{}"), &[("AM_TEST_INSTALL_FAIL", "1")]);
+        assert!(out.starts_with(&["agent".to_string(), "start".to_string()]), "{out:?}");
+        assert!(err.contains("補裝失敗") && err.contains("不會有 session"), "{err}");
+    }
+
+    #[test]
+    fn a_claude_child_start_leaves_a_dir_that_already_has_the_hook_alone() {
+        let s = Sandbox::new();
+        let (_, err, cfg) = claude_start_with_identity_dir(&s, Some(r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"bash herdr-agent-state.sh session"}]}]}}"#), &[]);
+        assert!(!err.contains("補裝") && !err.contains("警告"), "{err}");
+        assert!(!s.dir.join("installs.log").exists() && !cfg.join("settings.json.am-bak-herdr").exists(), "冪等：沒有安裝、沒有備份");
     }
 
     #[test]

@@ -657,6 +657,11 @@ am_agent_start() {
             exit 2
             ;;
     esac
+    if [ "${_kind:-${AM_KIND:-}}" = "claude" ]; then
+        _hd=""
+        [ -z "$_idkv" ] || _hd=$(am_kv_get "$_idkv" CLAUDE_CONFIG_DIR)
+        am_ensure_claude_hook "$_hd"
+    fi
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name"
@@ -688,6 +693,33 @@ am_agent_start() {
     am_spawn_finish "$_pane" "" || exit $?
     [ -z "$_start_out" ] || printf '%s\n' "$_start_out"
     exit 0
+}
+
+# claude 子 agent 的 session 全靠 herdr 的 SessionStart hook 綁（SPEC §12.5b）：身分目錄的 settings.json 沒有它，
+# 這顆 child 永遠沒有 session、回合只能靠畫面快照。開 claude child 前先補裝（只加不改；先備份一次），補不上就在
+# stderr 明講，不默默開成沒有 session 的 child。`$1` 是身分的 CLAUDE_CONFIG_DIR（空＝沿用目前環境／預設 `~/.claude`）。
+am_ensure_claude_hook() {
+    _hd=$1
+    [ -n "$_hd" ] || _hd=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    case "$_hd" in
+        "~") _hd=$HOME ;;
+        "~/"*) _hd=$HOME/${_hd#"~/"} ;;
+    esac
+    [ -d "$_hd" ] || return 0
+    grep -q 'herdr-agent-state' "$_hd/settings.json" 2>/dev/null && return 0
+    if [ -f "$_hd/settings.json" ] && [ ! -e "$_hd/settings.json.am-bak-herdr" ]; then
+        cp -p "$_hd/settings.json" "$_hd/settings.json.am-bak-herdr" 2>/dev/null || {
+            printf 'agents-manager: 警告：%s 缺 herdr 的 SessionStart hook，備份 settings.json 失敗所以沒補裝；這顆 claude 子 agent 不會有 session\n' "$_hd" >&2
+            return 0
+        }
+    fi
+    CLAUDE_CONFIG_DIR=$_hd "$AM_HERDR" integration install claude >/dev/null 2>&1
+    if grep -q 'herdr-agent-state' "$_hd/settings.json" 2>/dev/null; then
+        printf 'agents-manager: 已補裝 herdr 的 SessionStart hook 到 %s\n' "$_hd" >&2
+    else
+        printf 'agents-manager: 警告：%s 缺 herdr 的 SessionStart hook，補裝失敗；這顆 claude 子 agent 不會有 session（讀不到對話檔、回合只能靠畫面快照）。手動：CLAUDE_CONFIG_DIR=%s herdr integration install claude\n' "$_hd" "$_hd" >&2
+    fi
+    return 0
 }
 
 # issue #57：`agent start` 沒有 `--env`，全靠假設「目標 pane 是 pane split 剛開的、帳號早就注入了」——

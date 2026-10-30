@@ -1314,6 +1314,13 @@ async fn start_inner_body(
         let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         return Err(LcError::Bad(reason));
     }
+    // 1c. claude 身分目錄的 herdr hook 是 session 來源的必要條件：缺就補裝，補不上明講（不擋啟動，也不默默啟動成沒有 session 的 agent）。
+    if let Some(warning) = app.claude_hook_preflight(bot, &host).await {
+        tracing::warn!(bot = %bot.name, host = %host, "{warning}");
+        if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
+            let _ = insert_message(app, &conv, None, "system", &warning, "system", false, None).await;
+        }
+    }
     let agent = crate::config::agent_name(&project.label, &bot.id);
     // 分享用的受限 bot（SPEC「分享 bot」）：沒有 shim（不能開子 agent）、env 收窄、不讀 agent md／CLAUDE.md、argv 換成籠子那一套。
     let restricted = app.prepare_restricted_bot(bot, &host).await?;

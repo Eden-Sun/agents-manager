@@ -124,6 +124,14 @@ impl SessionProviderPort for App {
 }
 
 impl ShimInstallPort for App {
+    fn claude_hook_preflight<'a>(&'a self, bot: &'a crate::db::Bot, host: &'a str) -> impl std::future::Future<Output = Option<String>> + Send + 'a {
+        async move {
+            if bot.kind != "claude" {
+                return None;
+            }
+            crate::claude_session_watch::preflight(&crate::claude_session_watch::Real(self), host, bot.identity.as_deref()).await
+        }
+    }
     fn install_local_herdr_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         crate::herdr_shim::install_local(bot_dir)
     }
