@@ -44,7 +44,7 @@ beforeEach(() => {
 })
 
 const rowOf = (id: string) => document.querySelector<HTMLElement>(`.bot-row[data-bot-id="${id}"]`)!
-const chipOf = (name: string) => [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((e) => e.querySelector('.unread-chip-name')?.textContent === name) ?? null
+const chipOf = (name: string) => document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${name.replace(/^bot-/, '')}"]`)
 
 test('normalize：turn_error_kind 照 daemon 給的收；舊 daemon 沒帶是 null', () => {
   const base = { id: 'r', bot_id: 'b', state: 'running', agent_status: 'idle', started_at: '2026-10-13T00:00:00Z' }

@@ -226,6 +226,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
 export function UnreadChip() {
   const t = useT()
   const bots = useStore((s) => s.bots)
+  const projects = useStore((s) => s.projects)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
   // 燈號走 `botLamp`（同側欄與 `useBotLamp`）：run 已 exited、主機斷線時不算在跑／要你回答。只看 agent_status 會讓死掉的 pane 永遠黃燈。
@@ -252,6 +253,7 @@ export function UnreadChip() {
       bots.filter((b) => b.parent_bot_id === id && (lamps[b.id] === 'working' || lamps[b.id] === 'blocked')).length
     const hidden = new Set(hiddenBotIds)
     const out: ChipItem[] = []
+    const projectInitials = new Map(projects.map((p) => [p.id, Array.from((p.label ?? '').trim())[0]?.toUpperCase()]))
     for (const b of bots) {
       if (b.pending || hidden.has(b.id)) continue
       // 釘選是使用者自己指定的，不受排除規則影響。
@@ -268,7 +270,7 @@ export function UnreadChip() {
       if (!show) continue
       out.push({
         id: b.id,
-        name: b.name,
+        name: pinned && projectInitials.get(b.project_id) ? `${projectInitials.get(b.project_id)}.${b.name}` : b.name,
         go: () => {
           selectBot(b.id)
           if (pinned) requestBotToTop(b.id) // 主力晶片：側欄把那顆 bot 捲到頂端（#1676）
@@ -292,12 +294,11 @@ export function UnreadChip() {
       })
     }
     return out
-  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now])
+  }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now])
 
   // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
   const sidebarRank = useStore((s) => s.botOrder)
-  const projects = useStore((s) => s.projects)
   const projectOrder = useStore((s) => s.projectOrder)
   const otherItems = useMemo(() => {
     const rank = new Map(orderedBotIds({ projects, projectOrder, bots, botOrder: sidebarRank }).map((id, i) => [id, i]))
