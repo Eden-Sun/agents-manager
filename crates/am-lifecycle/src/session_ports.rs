@@ -86,6 +86,10 @@ pub trait ShimInstallPort {
         conn: &'a crate::hosts::HostConn,
         remote_bot_dir: &'a str,
     ) -> impl std::future::Future<Output = Result<String>> + Send + 'a;
+    /// 啟動前：claude 身分目錄的 herdr SessionStart hook 缺就補裝；補不上回一句警告（寫進啟動回應，仍照常啟動）。預設不檢查。
+    fn claude_hook_preflight<'a>(&'a self, _bot: &'a crate::db::Bot, _host: &'a str) -> impl std::future::Future<Output = Option<String>> + Send + 'a {
+        async { None }
+    }
 }
 
 /// 發一則 JSON object 事件（原 `app.emit(kind, json!(…))`）。`payload` 一定是 object，失敗只記 log（原本的 emit 沒有失敗路徑）。

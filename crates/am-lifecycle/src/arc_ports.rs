@@ -666,6 +666,7 @@ mod arc_port_44_shiminstallport {
             conn: &'a crate::hosts::HostConn,
             remote_bot_dir: &'a str,
         ) -> impl std::future::Future<Output = Result<String>> + Send + 'a { <T as crate::lifecycle::start::ports::ShimInstallPort>::install_remote_kill_shim(self.as_ref(), conn, remote_bot_dir) }
+        fn claude_hook_preflight<'a>(&'a self, bot: &'a crate::db::Bot, host: &'a str) -> impl std::future::Future<Output = Option<String>> + Send + 'a { <T as crate::lifecycle::start::ports::ShimInstallPort>::claude_hook_preflight(self.as_ref(), bot, host) }
     }
 }
 

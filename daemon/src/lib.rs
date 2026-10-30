@@ -269,6 +269,7 @@ pub use am_share::share;
 #[path = "../../crates/am-share/src/share/mod.rs"]
 pub mod share;
 mod herdr_upgrade;
+mod claude_session_watch;
 mod herdr_integration;
 mod herdr_recovery;
 mod gone_burst;
