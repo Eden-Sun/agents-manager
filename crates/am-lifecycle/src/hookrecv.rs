@@ -88,10 +88,13 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
     Ok(())
 }
 
-async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
+// Accept the caller's transaction as well as a pool; hook writes must not borrow
+// another pool slot while holding SQLite's write lock.
+async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
     let run = run?;
-    // 讀不到主機＝認不出來就不標（寧可少標，不要錯標）。
-    let host = db::bot_host(app.db(), &run.bot_id).await.ok()?;
+    let host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
+        .bind(&run.bot_id).fetch_optional(conn).await.ok()?;
+    let host = host.unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     crate::agent_relay::claim_relayed(&host, &run.id, echo)
 }
 
@@ -819,7 +822,6 @@ async fn human_started_prompt(payload: &Value, transcript_path: Option<&str>) ->
 /// 一樣時不存（為了擋背景工作喚醒那一輪，見 [`repeats_answered_prompt`]）；使用者真的重送同一句時這裡補回來。
 /// 回合上已有使用者訊息就不動。
 async fn store_resent_prompt_tx(
-    app: &impl crate::capabilities::Db,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     conv: &str,
     turn: &db::Turn,
@@ -839,7 +841,7 @@ async fn store_resent_prompt_tx(
         return Ok(None);
     }
     tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
-    let from = relay_source(app, run, text).await;
+    let from = relay_source(&mut **tx, run, text).await;
     let msg = tx.insert_message_relayed_tx(conv, Some(&turn.id), "user", text, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
     crate::lifecycle::messages::mark_relay_turn(tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
     Ok(Some(msg))
@@ -853,7 +855,7 @@ async fn store_resent_prompt(app: &(impl crate::capabilities::Db + crate::events
     let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
     // 先數有沒有使用者訊息再寫：deferred 的話數完之後別的 writer 一 commit，INSERT 就 517，那一句補不上（#831）。
     let mut tx = db::begin_write(app.db()).await?;
-    let added = store_resent_prompt_tx(app, &mut tx, conv, turn, run, &text).await?;
+    let added = store_resent_prompt_tx(&mut tx, conv, turn, run, &text).await?;
     tx.commit().await?;
     if let Some(m) = added {
         app.emit_message_added(bot_id, m).await;
@@ -1726,8 +1728,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             // 不會變成第二次收尾（issue #79 驗收第二條）。`delivery` 不動——字是送出去了，失敗的是回合。
             // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
             // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
-            let mut tx = app.db().begin().await?;
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
+            let mut tx = app.db().begin().await?;
             let claimed = tx.fail_with_native_evidence(&t.id, admitted, native).await?;
             if claimed != lifecycle::turn_controller::Outcome::Applied {
                 tracing::info!(turn = %t.id, ?claimed, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
@@ -2101,8 +2103,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             if let (Some(t), Some(admitted)) = (target, &admitted) {
                 // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
-                let mut tx = app.db().begin().await?;
+                // Transcript reads can wait on filesystem I/O / the blocking pool. Resolve
+                // them before borrowing a connection or taking SQLite's write lock.
+                let resent_prompt = if t.origin == "external" && user.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+                    human_started_prompt(&body.payload, transcript_read_path.as_deref()).await
+                } else { None };
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
+                let mut tx = app.db().begin().await?;
                 #[cfg(all(test, feature = "daemon-test-harness"))]
                 crate::lifecycle::race_point::hit("hook_before_complete_cas", &t.id).await;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
@@ -2143,7 +2150,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                                 .fetch_all(&mut *tx)
                                 .await?;
                         if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
-                            let from = relay_source(app, run.as_ref(), u).await;
+                            let from = relay_source(&mut *tx, run.as_ref(), u).await;
                             let msg = tx
                                 .insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str()))
                                 .await?;
@@ -2154,8 +2161,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                             // 同一個 id 在 commit 後再推一次：前端遇到內容不同的同 id 訊息會換掉（#1006）。
                             added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
                         }
-                    } else if let Some(text) = human_started_prompt(&body.payload, transcript_read_path.as_deref()).await {
-                        added.extend(store_resent_prompt_tx(app, &mut tx, &conv, &t, run.as_ref(), &text).await?);
+                    } else if let Some(text) = resent_prompt {
+                        added.extend(store_resent_prompt_tx(&mut tx, &conv, &t, run.as_ref(), &text).await?);
                     }
                 }
                 if !body_text.is_empty() {
@@ -2216,7 +2223,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             .await?;
             let mut added = Vec::new();
             if let Some(u) = user.filter(|s| !s.is_empty()) {
-                let from = relay_source(app, run.as_ref(), &u).await;
+                let from = relay_source(&mut *tx, run.as_ref(), &u).await;
                 let msg = tx.insert_message_relayed_tx(&conv, Some(&tid), "user", &u, "hook", false, None, from.as_ref().map(|r| r.from_bot.as_str())).await?;
                 crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
                 added.push(msg);
@@ -5422,11 +5429,11 @@ mod external_claim_tests {
                 "to_agent":"agent", "to_bot_id":target.id, "to_run_id":target_run, "delivery_id":"nr-stable-delivery", "text":text}) };
         process(&env.app, &body).await.unwrap();
         let other_run = db::run(&env.app.db, &other_run).await.unwrap().unwrap();
-        assert_eq!(relay_source(&env.app, Some(&other_run), text).await, None);
+        assert_eq!(relay_source(&env.app.db, Some(&other_run), text).await, None);
         let target_run = db::run(&env.app.db, &target_run).await.unwrap().unwrap();
-        assert_eq!(relay_source(&env.app, Some(&target_run), text).await.unwrap().from_bot, from.id);
+        assert_eq!(relay_source(&env.app.db, Some(&target_run), text).await.unwrap().from_bot, from.id);
         process(&env.app, &body).await.unwrap();
-        assert_eq!(relay_source(&env.app, Some(&target_run), text).await, None, "同一 delivery 的重播不能再認領");
+        assert_eq!(relay_source(&env.app.db, Some(&target_run), text).await, None, "同一 delivery 的重播不能再認領");
     }
 
     #[tokio::test]
@@ -5572,9 +5579,9 @@ mod external_claim_tests {
         process(&env.app, &announce).await.unwrap();
 
         let remote_run = db::run(&env.app.db, &remote_run).await.unwrap().unwrap();
-        assert_eq!(relay_source(&env.app, Some(&remote_run), text).await, None, "另一台主機的同名 agent 不能認領");
+        assert_eq!(relay_source(&env.app.db, Some(&remote_run), text).await, None, "另一台主機的同名 agent 不能認領");
         let local_run = db::run(&env.app.db, &local_run).await.unwrap().unwrap();
-        assert_eq!(relay_source(&env.app, Some(&local_run), text).await.map(|r| r.from_bot).as_deref(), Some(from.id.as_str()), "真正的收件方照常認領");
+        assert_eq!(relay_source(&env.app.db, Some(&local_run), text).await.map(|r| r.from_bot).as_deref(), Some(from.id.as_str()), "真正的收件方照常認領");
     }
 
     /// #927：報備記下寄件 bot 送它當下正在跑的回合，收件方的回音認領時一起帶出來（child_done 靠它認「這一回合已經自己回報」）。
@@ -5606,7 +5613,7 @@ mod external_claim_tests {
         process(&env.app, &announce).await.unwrap();
 
         let local_run = db::run(&env.app.db, &local_run).await.unwrap().unwrap();
-        let relayed = relay_source(&env.app, Some(&local_run), text).await.expect("收件方的回音認得出來");
+        let relayed = relay_source(&env.app.db, Some(&local_run), text).await.expect("收件方的回音認得出來");
         assert_eq!(relayed.from_bot, from.id);
         assert_eq!(relayed.from_turn.as_deref(), Some(sender_turn.as_str()));
     }
@@ -5754,6 +5761,25 @@ mod external_claim_tests {
             let stored = user_texts_on(&app, &external).await;
             assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin:?}");
             assert_eq!(turn_row(&app, &external).await.status, "completed", "origin={origin:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_and_late_stop_need_only_one_available_pool_connection() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        for fallback_closed in [false, true] {
+            let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, fallback_closed).await;
+            let hook = claude_stop_for(&bot_id, json!({"agm_user_text": "現在部 demo", "agm_origin_kind": "human"}));
+            let mut held = Vec::new();
+            for _ in 1..app.db.options().get_max_connections() {
+                held.push(app.db.acquire().await.unwrap());
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(2), process(&app, &hook)).await
+                .expect("hook transaction must not acquire a second pool connection").unwrap();
+            drop(held);
+            assert_eq!(user_texts_on(&app, &external).await, vec!["現在部 demo".to_string()]);
+            assert_eq!(turn_row(&app, &external).await.status, "completed");
         }
     }
 

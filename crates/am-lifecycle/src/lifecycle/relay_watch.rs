@@ -320,7 +320,10 @@ async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
         if out != turn_controller::Outcome::Applied {
             return Ok(None);
         }
-        let conv = db::conversation_id(app.db(), &w.bot_id).await?;
+        // The turn already owns its conversation. Reuse this transaction rather than
+        // acquiring a second pooled connection while holding SQLite's write lock.
+        let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?")
+            .bind(turn_id).fetch_one(&mut *tx).await?;
         let m = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
         tx.commit().await?;
         Ok(Some(m))
@@ -874,6 +877,24 @@ mod tests {
         let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&tid).fetch_one(app.db()).await.unwrap();
         assert_eq!(notes, 1);
         assert_eq!(step(&app, &mut w, t0 + GIVE_UP_AFTER).await, Step::Done, "回合已經收了");
+    }
+
+    #[tokio::test]
+    async fn give_up_needs_only_one_available_pool_connection() {
+        let f = fixture("one-connection-give-up").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "sender").await;
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+        let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.unwrap();
+        let w = watch(&f, Some(tid.clone()), Instant::now());
+        let mut held = Vec::new();
+        for _ in 1..app.db().options().get_max_connections() {
+            held.push(app.db().acquire().await.unwrap());
+        }
+        assert_eq!(tokio::time::timeout(Duration::from_secs(2), give_up(&app, &w)).await
+            .expect("give_up must not acquire a second connection inside its transaction"), Step::GaveUp);
+        drop(held);
+        assert_eq!(status_of(&f, &tid).await, "failed");
     }
 
     fn close_pane(f: &F) {

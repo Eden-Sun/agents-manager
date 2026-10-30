@@ -4500,6 +4500,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 
 AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、persona、approval／incident／lease 與維護狀態、證據搜尋）只給 User 或已驗證的 patrol/responder role；一般 Bot 回 `403 role_required`，role 查詢失敗時拒絕，不降級放行。明確列入 service scope 的快照仍供對應 daemon service 讀取；這不授予一般 Bot 管理面視野。
 
+SQLite 池健康探測獨立於使用 DB 的業務巡邏：每 30 秒檢查池是否仍有閒置連線，沒有時最多等 5 秒取用一條並立即歸還。取用失敗記錄 `consumer=sqlite_pool_health`、`size`、`idle`、`max`、`waited_ms` 與錯誤；這只能證明池無法提供連線，不能單憑它斷定是連線被握住或 SQL 停滯。探測由受追蹤的背景 runner 執行，關機時取消等待。hook 收尾與 relay 送達失敗收尾在交易內重用同一條連線，不向池巢狀取用；hook 的 transcript 讀檔先在交易外完成。
+
 ### 18.1 開發用 dev server（5173）
 
 - 位址 `http://<本機>:5173`，`--strictPort`（使用者手機書籤寫死，搶不到就失敗，不換 port）。
