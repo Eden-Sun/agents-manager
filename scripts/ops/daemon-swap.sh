@@ -884,6 +884,30 @@ if not isinstance(status, str) or not status.strip():
     raise SystemExit(1)
 print(status.strip())'
 }
+# 換版後的 waiting_quota 有 daemon 記下的未來重置時間（quota_reset_at）＝額度閘門擋著，跟 binary 無關（issue #2033）：
+# 舊 daemon 換版前可能還報 idle（還沒碰到額度），新 daemon 一啟動讀到額度就轉 waiting_quota。讀不到重置時間就不放寬。
+supervisor_quota_gated() {
+    set -o pipefail
+    agm supervisor | "$PYTHON" -c 'import json,sys
+from datetime import datetime,timezone
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+sup = d if isinstance(d.get("status"), str) else (d.get("supervisor") if isinstance(d.get("supervisor"), dict) else {})
+at = sup.get("quota_reset_at")
+if sup.get("status") != "waiting_quota" or not isinstance(at, str) or not at.strip():
+    raise SystemExit(1)
+try:
+    t = datetime.fromisoformat(at.strip().replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if t.tzinfo is None:
+    t = t.replace(tzinfo=timezone.utc)
+if t <= datetime.now(timezone.utc):
+    raise SystemExit(1)
+print(at.strip())'
+}
 PRE_SUP=$(read_supervisor_status 2>/dev/null) || PRE_SUP=""
 log "supervisor status before swap: ${PRE_SUP:-讀不到}"
 
@@ -994,6 +1018,8 @@ case "$SUP" in
         # 換版前健康、換版後才 waiting_quota 仍然回滾。
         if [ "$PRE_SUP" = waiting_quota ]; then
             log "supervisor status waiting_quota：換版前就是 waiting_quota，額度等待與這顆 binary 無關，不回滾"
+        elif RESET_AT=$(supervisor_quota_gated 2>/dev/null); then
+            log "supervisor status waiting_quota：額度閘門擋著（重置 ${RESET_AT}），與這顆 binary 無關，不回滾"
         else
             rollback "supervisor status 不健康或未知（${SUP:-空}）"
         fi ;;
