@@ -104,6 +104,10 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | 方法 | 路徑 | 權限 |
 |---|---|---|
 | ANY | `/api/*` | 無 principal；未知 API 路徑回 JSON 404 |
+| GET | `/api/relay-requests` | User 可查全部；Bot 只能查自己為來源或目標的請求 |
+| HEAD | `/api/relay-requests` | 同 GET |
+| GET | `/api/relay/resolve` | 已驗證 Bot；依 relay 授權解析目標 |
+| HEAD | `/api/relay/resolve` | 同 GET |
 | DELETE | `/api/bots/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/bots/{id}/preview` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/hosts/{name}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -2626,6 +2630,14 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   而 UI 目前沒有 pdf 預覽；要做預覽時再一起評估。
 
 `attachments.mime` 照舊原樣存、原樣出現在附件 JSON 裡，UI 判斷要不要畫縮圖看的是那個，不受影響。
+
+### 請求結果通知
+
+`POST /api/bots/{id}/prompt` 可由已驗證 bot principal 帶 `expect_result:true`；User principal 不可使用。同一來源、目標及 `client_request_id` 重送同一內容回相同 `request_id`，不同內容拒絕。回應除一般 prompt 欄位外帶 `request_id`；若請求已保存但尚未取得目標 turn，回 202、`delivery:pending`（確認不可投遞時為 `failed`）與空的 turn／message id，稍後對帳。shim 的 `--expect-result` 會輸出 `request_id=<id>`，可用 `--request-id` 指定重試鍵；`--timeout` 的單位是毫秒。目標回合終態的通知帶原 ID，送達與通知回合處理分開；忙碌時排隊，離線保留，不自動啟動。
+
+`GET /api/relay-requests?from=<bot-id>&to=<bot-id>&open=1` 查詢請求；bot principal 只能讀自己是來源或目標的列，`open=1` 限 `pending`／`delivered`。回應 `requests` 包含 id、來源與目標 bot、目標 run／turn、state、時間、attempts 與 error；`notice_turn_id` 可查通知的回合，`notified_at` 是送達證據，`processed_at` 是通知回合完成時間，兩者各自記錄。
+
+`GET /api/relay/resolve?target=<selector>` 為已驗證 bot 做唯讀解析：明確 `bot:<id>` 可跨主機；名稱與 pane ID 限來源 host／herdr session。唯一命中回 `to_bot_id`、`to_run_id`、`to_agent`；無命中 404，多個命中 409 附候選。遠端連線使用配置注入的 `AM_DAEMON_URL` 與 bot 自己的憑證。
 
 ### prompt / 群組聊天帶附件
 `POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
