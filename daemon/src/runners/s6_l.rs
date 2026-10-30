@@ -42,6 +42,7 @@ impl s6_ports::StuckTurnServices for App {
 
     async fn sweep_child_done(&self) {
         let _ = crate::runners::child_done::sweep(&self.shared()).await;
+        crate::runners::relay_requests::sweep(&self.shared()).await;
         crate::runners::model_mode_cleanup::sweep(&self.shared()).await;
     }
 
@@ -628,6 +629,9 @@ impl s6_ports::StopServices for App {
 }
 
 impl s6_ports::QueueServices for App {
+    async fn relay_queue_denial(&self, turn_id: &str) -> anyhow::Result<Option<String>> {
+        crate::runners::relay_requests::queue_denial(&self.shared(), turn_id).await
+    }
     async fn turn_changed(&self, turn_id: &str) {
         crate::lifecycle::send_now::ports::turn_changed(&crate::app_ports_p4::AppTurnEvents::new(&self.shared()), turn_id).await;
     }

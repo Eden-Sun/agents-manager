@@ -34,6 +34,129 @@
         }
     }
 
+    #[tokio::test]
+    async fn result_notice_turn_does_not_echo_to_parent() {
+        let f = fixture("hook", "completed").await;
+        sqlx::query("UPDATE turns SET queue_class='daemon',client_request_id='relay-result:request:r0' WHERE id=?")
+            .bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        sweep(&f.env.app).await;
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND queue_class='daemon'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(notices, 0);
+    }
+
+    #[tokio::test]
+    async fn processed_parent_result_notice_can_be_covered_for_idle_stop() {
+        let f = fixture("hook", "completed").await;
+        let parent: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET queue_class='daemon',client_request_id='relay-result:request:r0' WHERE id=?")
+            .bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,notice_turn_id,notified_at,created_at) VALUES('request',?,?,'key','text','[]','notified',?,?,?)")
+            .bind(&f.child_id).bind(&parent).bind(&f.child_turn).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 0);
+        let idle_at: String = sqlx::query_scalar("SELECT idle_at FROM child_done_state WHERE child_id=?").bind(&f.child_id).fetch_one(&f.env.app.db).await.unwrap();
+        let result = crate::lifecycle::stop::admit_idle_stop_with_notice(&f.env.app.db, &f.child_run, &f.child_id, false, Some(&idle_at)).await.unwrap();
+        assert!(matches!(result, crate::lifecycle::run_state::Moved::Applied));
+    }
+
+    #[tokio::test]
+    async fn result_notice_does_not_hide_an_older_unreported_child_turn() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-busy-before-result").await;
+        let notice = add_completed_turn(&f, "notification reply should not be sent").await;
+        sqlx::query("UPDATE turns SET queue_class='daemon',client_request_id='relay-result:request:r0' WHERE id=?")
+            .bind(&notice).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &notice).await.unwrap();
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.queue_class='daemon' AND m.role='user'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("工作完成，結果如下。"));
+        assert!(!content.contains("notification reply should not be sent"));
+    }
+
+    #[tokio::test]
+    async fn parent_request_waits_for_result_delivery_and_covers_child_turn() {
+        let f = fixture("hook", "completed").await;
+        let parent: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap();
+        let id = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,'key','text','[]',?,'answered',?)")
+            .bind(&id).bind(&parent).bind(&f.child_id).bind(&f.child_turn).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        make_parent_busy(&f, "parent-waiting-result").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 0);
+        // Even if a different child_done batch advanced the watermark, this open request
+        // must keep the idle-stop gate closed until its result notice is delivered.
+        let idle_at = db::now();
+        sqlx::query("UPDATE child_done_state SET active=0,idle_at=?,notified_at=?,covered_rowid=(SELECT rowid FROM turns WHERE id=?) WHERE child_id=?")
+            .bind(&idle_at).bind(&idle_at).bind(&f.child_turn).bind(&f.child_id).execute(&f.env.app.db).await.unwrap();
+        let blocked = crate::lifecycle::stop::admit_idle_stop_with_notice(&f.env.app.db, &f.child_run, &f.child_id, false, Some(&idle_at)).await.unwrap();
+        assert!(matches!(blocked, crate::lifecycle::run_state::Moved::Lost));
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,delivery_verified,client_request_id,queue_class,created_at,completed_at) VALUES(?,?,'web','completed','ok',1,?,'daemon',?,?)")
+            .bind(db::ulid()).bind(&f.parent_conversation).bind(format!("relay-result:{id}:r0")).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE relay_requests SET state='notified',notified_at=? WHERE id=?").bind(db::now()).bind(&id).execute(&f.env.app.db).await.unwrap();
+        let awaiting_cover = crate::lifecycle::stop::admit_idle_stop_with_notice(&f.env.app.db, &f.child_run, &f.child_id, false, Some(&idle_at)).await.unwrap();
+        assert!(matches!(awaiting_cover, crate::lifecycle::run_state::Moved::Lost));
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 0);
+        let covered: i64 = sqlx::query_scalar("SELECT covered FROM child_done_sources WHERE child_id=? AND turn_id=?").bind(&f.child_id).bind(&f.child_turn).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(covered, 1);
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND queue_class='daemon'").bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(total, 1);
+        let ready: bool = sqlx::query_scalar("SELECT active=0 AND notified_at IS NOT NULL AND pending_turn_id IS NULL AND notified_background=0 AND covered_rowid >= (SELECT rowid FROM turns WHERE id=?) FROM child_done_state WHERE child_id=?")
+            .bind(&f.child_turn).bind(&f.child_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(ready);
+        let idle_at: String = sqlx::query_scalar("SELECT idle_at FROM child_done_state WHERE child_id=?").bind(&f.child_id).fetch_one(&f.env.app.db).await.unwrap();
+        let result = crate::lifecycle::stop::admit_idle_stop_with_notice(&f.env.app.db, &f.child_run, &f.child_id, false, Some(&idle_at)).await.unwrap();
+        assert!(matches!(result, crate::lifecycle::run_state::Moved::Applied));
+    }
+
+    #[tokio::test]
+    async fn failed_result_notice_falls_back_to_child_done() {
+        let f = fixture("hook", "failed").await;
+        let parent: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,alerted_at,created_at) VALUES(?,?,?,'key','text','[]',?,'failed',?,?)")
+            .bind(db::ulid()).bind(&parent).bind(&f.child_id).bind(&f.child_turn).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        let idle_at = db::now();
+        sqlx::query("INSERT INTO child_done_state(child_id,idle_at,idle_turn_id,initialized_at,notified_at,covered_rowid,active) VALUES(?,?,?,?,?,(SELECT rowid FROM turns WHERE id=?),0)")
+            .bind(&f.child_id).bind(&idle_at).bind(&f.child_turn).bind(&idle_at).bind(&idle_at).bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        let blocked = crate::lifecycle::stop::admit_idle_stop_with_notice(&f.env.app.db, &f.child_run, &f.child_id, false, Some(&idle_at)).await.unwrap();
+        assert!(matches!(blocked, crate::lifecycle::run_state::Moved::Lost));
+        make_parent_busy(&f, "parent-waiting-fallback").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 1);
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.queue_class='daemon' AND m.role='user'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("失敗，沒有可確認的完整回覆"));
+        assert!(!content.contains("工作完成，結果如下。"));
+    }
+
+    #[tokio::test]
+    async fn unknown_result_delivery_never_triggers_a_duplicate_fallback() {
+        let f = fixture("hook", "completed").await;
+        let parent: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,error,alerted_at,created_at) VALUES(?,?,?,'key','text','[]',?,'failed','notification delivery unconfirmed',?,?)")
+            .bind(db::ulid()).bind(&parent).bind(&f.child_id).bind(&f.child_turn).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        make_parent_busy(&f, "parent-waiting-unknown").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 0);
+    }
+
+    #[tokio::test]
+    async fn other_child_turns_are_reported_while_parent_request_waits() {
+        let f = fixture("hook", "completed").await;
+        let parent: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&f.parent_run).fetch_one(&f.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,'key','text','[]',?,'answered',?)")
+            .bind(db::ulid()).bind(&parent).bind(&f.child_id).bind(&f.child_turn).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        let other = add_completed_turn(&f, "independent child work").await;
+        make_parent_busy(&f, "parent-busy-other-work").await;
+        notify_turn(&f.env.app, &other).await.unwrap();
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.queue_class='daemon' AND m.role='user'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("independent child work"));
+        assert!(!content.contains("工作完成，結果如下。"));
+    }
+
     /// 掛在 `parent_bot_id` 底下的一顆 child，完成一個帶回覆的回合；回傳 (child id, run, conversation, turn)。
     async fn child_of(app: &Arc<App>, project_id: &str, parent_bot_id: &str, source: &str, status: &str) -> (String, String, String, String) {
         let child_id = db::ulid();
