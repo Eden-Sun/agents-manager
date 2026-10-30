@@ -1350,6 +1350,11 @@ async fn start_inner_body(
         super::agent_md::push_unreadable_alert(app, bot, &agent_md.unreadable).await;
     }
     let mut env = env;
+    if restricted.is_none() && agent_md.claude_codex {
+        if let Some(map) = env.as_object_mut() {
+            map.insert("AM_MODEL_MODE".into(), serde_json::json!("claude_codex"));
+        }
+    }
     if agent_md.cli_docs_disabled() {
         // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
         // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。

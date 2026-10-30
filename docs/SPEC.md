@@ -6008,3 +6008,5 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 模型用法模式
 
 `[agents] model_mode` 預設 `claude`，保留既有行為。`claude_codex` 注入額外硬規則：opus parent；fable、gpt-6-astra 為顧問；執行者由 parent 依難度選 gpt-6.1-terra medium、gpt-6-luna xhigh、haiku、sonnet，使用者點名優先。codex child 長駐並按專案或模組沿用，不相關工作 fork；claude child 驗收後收掉，除非一小時內同區塊有後續。codex 不當 parent。切換設定後重啟 bot 才更新注入規則。
+
+在 `claude_codex` 模式，daemon 僅在完成通知已送達、沒有進行中回合且仍閒置時，自動收掉閒置超過 70 分鐘的 Claude child；每位 parent 的閒置 Codex child 超過三顆時，優先收掉最久閒置者，並在 parent 對話留下 system 說明。Codex pane 的 herdr shim 拒絕啟動 child。`claude` 模式不啟用這些自動化。

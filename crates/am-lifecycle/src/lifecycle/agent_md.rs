@@ -24,6 +24,7 @@ pub const PERSONA_FILE: &str = "persona.md";
 /// 遠端主機睡著、ssh 逾時的那一刻開 bot，不能變成「兩邊都沒有規則」。
 #[derive(Debug, Default)]
 pub struct AgentMd {
+    pub claude_codex: bool,
     pub configured: bool,
     pub text: String,
     pub problems: Vec<String>,
@@ -57,7 +58,8 @@ pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAcce
         });
     }
     let mut result = collect(reads);
-    if agents.model_mode == crate::config::ModelMode::ClaudeCodex {
+    result.claude_codex = agents.model_mode == crate::config::ModelMode::ClaudeCodex;
+    if result.claude_codex {
         if !result.text.is_empty() { result.text.push_str("\n\n"); }
         result.text.push_str(MODEL_MODE_RULES);
     }

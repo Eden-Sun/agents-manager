@@ -31,7 +31,7 @@ pub fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, false, false, None).await
+    stop_locked(app, bot_id, false, false, false, None, None).await
 }
 
 /// 閒置回收用的 [`stop_bot_locked`]：記 `stopping` 的那一步同時是**收機許可**（issue #144）——`agent_status` 還是
@@ -42,13 +42,18 @@ pub async fn stop_bot_locked(app: &impl StopContext, bot_id: &str) -> LcResult<b
 /// 同一句 UPDATE 裡，跟那一句寫入由 SQLite 排序：它先落地，這裡 0 rows 不停；這裡先落地，run 已經是 `stopping`，
 /// `begin_external_turn`（在鎖裡看 `state == running`）就不會替一個正在關的 pane 開回合。
 pub async fn stop_bot_locked_if_idle(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, true, false, None).await
+    stop_locked(app, bot_id, false, true, false, None, None).await
+}
+
+/// Stop an idle child only while the completion notification still covers its current idle period.
+pub async fn stop_bot_locked_if_notified(app: &impl StopContext, bot_id: &str, idle_at: &str) -> LcResult<bool> {
+    stop_locked(app, bot_id, false, true, true, None, Some(idle_at)).await
 }
 
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
 pub async fn stop_for_restart_locked(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, false, false, None).await
+    stop_locked(app, bot_id, true, false, false, None, None).await
 }
 
 pub async fn stop_for_restart_locked_with_host_fence(
@@ -56,13 +61,13 @@ pub async fn stop_for_restart_locked_with_host_fence(
     bot_id: &str,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, false, false, Some(fence)).await
+    stop_locked(app, bot_id, true, false, false, Some(fence), None).await
 }
 
 /// 一鍵重啟（`require_idle`）那一半的 stop：記 `stopping` 的那一步同時是**「還是閒著才准停」的許可**（#346，同 [`stop_bot_locked_if_idle`]），
 /// 使用者剛在 pane 裡打字（`handle_status` 不拿鎖）落在鎖裡看過閒置之後，這一句 UPDATE 輸了、什麼都不動，回 409 `no_longer_idle`。
 pub async fn stop_for_restart_if_idle_locked(app: &impl StopContext, bot_id: &str, refuse_background_jobs: bool) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, true, refuse_background_jobs, None).await
+    stop_locked(app, bot_id, true, true, refuse_background_jobs, None, None).await
 }
 
 pub async fn stop_for_restart_if_idle_locked_with_host_fence(
@@ -71,7 +76,7 @@ pub async fn stop_for_restart_if_idle_locked_with_host_fence(
     refuse_background_jobs: bool,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, true, refuse_background_jobs, Some(fence)).await
+    stop_locked(app, bot_id, true, true, refuse_background_jobs, Some(fence), None).await
 }
 
 /// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
@@ -95,8 +100,9 @@ fn stop_locked<'a>(
     only_if_idle: bool,
     refuse_background_jobs: bool,
     host_fence: Option<&'a crate::hosts::HostFence>,
+    notified_idle_at: Option<&'a str>,
 ) -> impl std::future::Future<Output = LcResult<bool>> + 'a {
-    Box::pin(stop_locked_body(app, bot_id, for_restart, only_if_idle, refuse_background_jobs, host_fence))
+    Box::pin(stop_locked_body(app, bot_id, for_restart, only_if_idle, refuse_background_jobs, host_fence, notified_idle_at))
 }
 
 async fn stop_locked_body(
@@ -106,6 +112,7 @@ async fn stop_locked_body(
     only_if_idle: bool,
     refuse_background_jobs: bool,
     host_fence: Option<&crate::hosts::HostFence>,
+    notified_idle_at: Option<&str>,
 ) -> LcResult<bool> {
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
@@ -294,7 +301,7 @@ async fn stop_locked_body(
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
     // 使用者的 stop 在同一個交易撤回等它起來才送的那幾則（[`begin_stop`]，#199）。閒置回收的許可本來就要求沒有排著的。
     let (moved, withdrawn) = if only_if_idle {
-        (admit_idle_stop(app.db(), &run.id, bot_id, for_restart).await.map_err(up)?, Vec::new())
+        (admit_idle_stop_with_notice(app.db(), &run.id, bot_id, for_restart, notified_idle_at).await.map_err(up)?, Vec::new())
     } else {
         let withdraw = !for_restart && !super::restart_hold::in_progress(bot_id);
         begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
@@ -529,22 +536,31 @@ async fn begin_stop(
 ///
 /// `allow_queued`：重啟那一半（#346）排隊中的訊息不擋——`restart_hold` 本來就把它們留給新的 run；閒置回收（收起來不再送）才擋。
 pub async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool) -> Result<super::run_state::Moved, sqlx::Error> {
+    admit_idle_stop_with_notice(db, run_id, bot_id, allow_queued, None).await
+}
+
+async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool, idle_at: Option<&str>) -> Result<super::run_state::Moved, sqlx::Error> {
     let queued = if allow_queued {
         ""
     } else {
         "AND NOT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
                              WHERE c.bot_id = ? AND t.status = 'queued')"
     };
+    let notice = if idle_at.is_some() {
+        "AND EXISTS (SELECT 1 FROM child_done_state d WHERE d.child_id=runs.bot_id AND d.active=0 AND d.idle_at=? AND d.notified_at IS NOT NULL AND d.pending_turn_id IS NULL AND d.notified_background=0 AND (runs.agent_status_since IS NULL OR julianday(runs.agent_status_since)<=julianday(d.idle_at)) AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=d.child_id AND s.covered=0) AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=d.child_id AND t.status IN ('completed','completed_fallback','failed') AND t.rowid>d.covered_rowid))"
+    } else { "" };
     let sql = format!(
         "UPDATE runs SET state = 'stopping'
           WHERE id = ? AND state = 'running' AND agent_status = 'idle'
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.run_id = runs.id AND t.status = 'in_flight')
-            {queued}"
+            {queued}
+            {notice}"
     );
     let mut q = sqlx::query(&sql).bind(run_id);
     if !allow_queued {
         q = q.bind(bot_id);
     }
+    if let Some(idle) = idle_at { q = q.bind(idle); }
     let r = q.execute(db).await?;
     Ok(if r.rows_affected() == 0 { super::run_state::Moved::Lost } else { super::run_state::Moved::Applied })
 }

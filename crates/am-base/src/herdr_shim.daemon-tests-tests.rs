@@ -1448,6 +1448,29 @@
         assert!(err.contains("禁止再開子 agent") && err.contains("`p-1` 決定"), "{err}");
     }
 
+    #[test]
+    fn codex_cannot_start_children_only_in_claude_codex_mode() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex"), ("AM_MODEL_MODE", "claude_codex")];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 77);
+        assert!(out.is_empty());
+        assert!(err.contains("codex 不開 child") && err.contains("claude parent"), "{err}");
+        let (_, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex")], &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn opted_in_child_receives_its_own_kind_and_mode() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p"), ("AM_KIND", "claude"), ("AM_MODEL_MODE", "claude_codex"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
+        s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        let (_, sent) = s.sourced_env();
+        assert!(sent.contains("export AM_KIND='codex'"), "{sent}");
+        assert!(sent.contains("export AM_MODEL_MODE='claude_codex'"), "{sent}");
+    }
+
     /// 值裡有單引號要逃脫，不然那個 export 的邊界會斷在半路。
     #[test]
     fn agent_start_reexport_escapes_single_quotes_in_values() {
