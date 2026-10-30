@@ -229,6 +229,20 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         return Ok(());
     }
 
+    match app.relay_queue_denial(&turn.id).await {
+        Ok(Some(why)) => {
+            if let Err(e) = revoke_queued_turn(app, &turn.id, &why).await {
+                schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
+                return Err(e.context("relay authorization denied; queued prompt could not be withdrawn"));
+            }
+            return Ok(());
+        }
+        Ok(None) => {},
+        Err(e) => {
+            schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            return Err(e.context("relay authorization unavailable; prompt remains queued"));
+        }
+    }
     // 讀完 run、還沒認領的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {

@@ -539,7 +539,7 @@ pub async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, 
     admit_idle_stop_with_notice(db, run_id, bot_id, allow_queued, None).await
 }
 
-async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool, idle_at: Option<&str>) -> Result<super::run_state::Moved, sqlx::Error> {
+pub(crate) async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool, idle_at: Option<&str>) -> Result<super::run_state::Moved, sqlx::Error> {
     let queued = if allow_queued {
         ""
     } else {
@@ -547,7 +547,7 @@ async fn admit_idle_stop_with_notice(db: &sqlx::SqlitePool, run_id: &str, bot_id
                              WHERE c.bot_id = ? AND t.status = 'queued')"
     };
     let notice = if idle_at.is_some() {
-        "AND EXISTS (SELECT 1 FROM child_done_state d WHERE d.child_id=runs.bot_id AND d.active=0 AND d.idle_at=? AND d.notified_at IS NOT NULL AND d.pending_turn_id IS NULL AND d.notified_background=0 AND (runs.agent_status_since IS NULL OR julianday(runs.agent_status_since)<=julianday(d.idle_at)) AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=d.child_id AND s.covered=0) AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=d.child_id AND t.status IN ('completed','completed_fallback','failed') AND t.rowid>d.covered_rowid))"
+        "AND EXISTS (SELECT 1 FROM child_done_state d WHERE d.child_id=runs.bot_id AND d.active=0 AND d.idle_at=? AND d.notified_at IS NOT NULL AND d.pending_turn_id IS NULL AND d.notified_background=0 AND (runs.agent_status_since IS NULL OR julianday(runs.agent_status_since)<=julianday(d.idle_at)) AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=d.child_id AND s.covered=0) AND NOT EXISTS(SELECT 1 FROM relay_requests r JOIN bots b ON b.id=r.to_bot_id WHERE b.id=d.child_id AND b.parent_bot_id=r.from_bot_id AND (r.state IN ('pending','delivered','answered') OR (r.state='failed' AND r.notified_at IS NULL AND (r.alerted_at IS NULL OR r.error LIKE 'notification delivery unconfirmed%' OR EXISTS(SELECT 1 FROM turns rt JOIN conversations rc ON rc.id=rt.conversation_id AND rc.bot_id=b.id WHERE (rt.id=r.to_turn_id OR rt.client_request_id='relay-request:'||r.id) AND NOT EXISTS(SELECT 1 FROM child_done_sources cs WHERE cs.child_id=b.id AND cs.turn_id=rt.id AND cs.covered=1)))))) AND NOT EXISTS(SELECT 1 FROM relay_requests r JOIN bots b ON b.id=r.to_bot_id JOIN turns rt ON (rt.id=r.to_turn_id OR rt.client_request_id='relay-request:'||r.id) JOIN conversations rc ON rc.id=rt.conversation_id AND rc.bot_id=b.id WHERE b.id=d.child_id AND b.parent_bot_id=r.from_bot_id AND r.notified_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM child_done_sources cs WHERE cs.child_id=b.id AND cs.turn_id=rt.id AND cs.covered=1)) AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=d.child_id AND t.status IN ('completed','completed_fallback','failed') AND t.rowid>d.covered_rowid))"
     } else { "" };
     let sql = format!(
         "UPDATE runs SET state = 'stopping'
