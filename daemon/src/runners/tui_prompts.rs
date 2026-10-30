@@ -92,6 +92,10 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                     crate::session_paused::forget_ended(&app, &runs).await;
                     crate::dangerous_rm::forget_ended(&app, &runs).await;
                     for run in runs {
+                        // 回合收了、herdr 也 idle，DB 卻還是 working 的卡死狀態：校正並 log。
+                        if run.agent_status == "working" {
+                            let _ = crate::lifecycle::poller::settle_stale_working(&app, &run).await;
+                        }
                         // #1876：啟動的一幀空框之後才跳警告、或事件漏掉的備援；跟送達共用 bot 鎖。
                         if matches!(run.agent_status.as_str(), "blocked" | "idle" | "unknown") {
                             let lock = app.bot_lock(&run.bot_id).await;

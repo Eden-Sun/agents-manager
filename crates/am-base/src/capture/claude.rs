@@ -180,6 +180,12 @@ pub fn is_spinner_glyph(c: char) -> bool {
 /// 輸入框上緣。只接受畫面底部那個框：`❯` 後面只剩規則線與狀態列
 /// （`claude-2.1.281-feedback-survey.txt`：`────` / `❯` / `────` / 狀態列 / `⏵⏵`）。
 /// 回覆上面的 `❯ 使用者句子` 後面還有內容，不是框。
+/// 畫面底部有沒有輸入框（框內有沒有字都算，例如使用者還沒送出的草稿）。
+pub fn composer_visible(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    composer_top(&lines).is_some()
+}
+
 fn composer_top(lines: &[&str]) -> Option<usize> {
     let prompt_at = lines.iter().rposition(|l| l.trim_start().starts_with('❯'))?;
     let footer = lines[prompt_at + 1..].iter().all(|l| {

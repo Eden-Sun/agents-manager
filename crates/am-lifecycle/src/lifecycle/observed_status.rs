@@ -192,7 +192,8 @@ pub(super) async fn finish(app: &impl LcHost, run: &str, turn: &str) -> anyhow::
     let screen = client.pane_read(pane, "recent_unwrapped", 160).await?;
     if menu(&screen.text)
         || crate::capture::claude::PARSER.still_busy(&screen.text)
-        || !super::pane_awaits_input("claude", &screen.text)
+        // 輸入框裡可以有使用者還沒送出的草稿（2026-10-30 hub-8p5dpe）：只要求框在、沒有 spinner。
+        || !(super::pane_awaits_input("claude", &screen.text) || crate::capture::claude::composer_visible(&screen.text))
     {
         return Ok(false);
     }
@@ -229,6 +230,65 @@ pub(super) async fn finish(app: &impl LcHost, run: &str, turn: &str) -> anyhow::
         super::super::queue::schedule_flush_queued(app, &fresh.bot_id);
     }
     Ok(changed || receipt(run).is_none())
+}
+
+/// 一個 working 超過這麼久、回合早已收掉的 run 才進安全網。
+const STALE_WORKING_AFTER_SECS: i64 = 120;
+
+/// 防呆（2026-10-30 hub-8p5dpe）：`finish` 的收據在 daemon 重啟、poller 被取代或 40 分鐘上限時會遺失，
+/// herdr 本身已經是 idle/done 就不會再有 `-> idle` 邊，DB 的 working 永遠不動。
+/// 條件全部成立才校正：run 在跑、`working` 超過 [`STALE_WORKING_AFTER_SECS`]、沒有 in_flight 回合、
+/// 最後一回合已收掉且收掉超過同樣時間、herdr 回報 idle/done、畫面沒有 spinner 或選單且輸入框在。
+/// 用與 `finish` 相同的 CAS（`agent_status_since`）；回傳 true 表示有改。
+pub(super) async fn settle_stale_working(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    if run.state != "running" || run.ended_at.is_some() || run.agent_status != "working" { return Ok(false) }
+    let cutoff = db::iso_in(-STALE_WORKING_AFTER_SECS);
+    let Some(since) = run.agent_status_since.clone().filter(|s| *s < cutoff) else { return Ok(false) };
+    let Some(pane) = run.pane_id.clone().filter(|p| !p.trim().is_empty()) else { return Ok(false) };
+    if !matches!(db::bot(app.db(), &run.bot_id).await?, Some(bot) if bot.kind == "claude") { return Ok(false) }
+    if db::in_flight_turn(app.db(), &run.id).await?.is_some() { return Ok(false) }
+    let latest: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id,status,completed_at FROM turns WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
+        .bind(&run.id).fetch_optional(app.db()).await?;
+    let Some((turn, status, completed)) = latest else { return Ok(false) };
+    if !matches!(status.as_str(), "completed" | "completed_fallback" | "failed")
+        || !completed.as_deref().is_some_and(|at| at < cutoff.as_str()) { return Ok(false) }
+    let stamp = Stamp::capture(app, run).await?;
+    let client = client_for_run(app, run).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let live = client.pane_get(&pane).await?;
+    if !live.and_then(|p| p.agent_status).is_some_and(|s| s.normalized() == crate::herdr::AgentStatus::Idle) { return Ok(false) }
+    let screen = client.pane_read(&pane, "recent_unwrapped", 160).await?;
+    if menu(&screen.text)
+        || crate::capture::claude::PARSER.still_busy(&screen.text)
+        || !crate::capture::claude::composer_visible(&screen.text) { return Ok(false) }
+    let lock = app.bot_lock(&run.bot_id).await;
+    let Ok(guard) = lock.try_lock() else { return Ok(false) };
+    let changed = client.fence.run_current(Box::pin(async {
+        if db::bot_host(app.db(), &run.bot_id).await? != client.fence.conn().name { return Ok::<_, anyhow::Error>(false) }
+        let Some(fresh) = db::run(app.db(), &run.id).await? else { return Ok(false) };
+        if !stamp.matches(app, &fresh).await? { return Ok(false) }
+        let result = sqlx::query(
+            "UPDATE runs SET agent_status='idle' WHERE id=? AND state='running' AND ended_at IS NULL
+             AND agent_status='working' AND agent_status_since IS ? AND pane_id IS ? AND herdr_session IS ?
+             AND native_session_id IS ? AND terminal_id IS ? AND host IS ? AND host_generation IS ?
+             AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
+                        WHERE b.id=runs.bot_id AND b.kind='claude' AND b.deleted_at IS NULL AND p.host=?)
+             AND ?=(SELECT id FROM turns WHERE run_id=runs.id ORDER BY created_at DESC,id DESC LIMIT 1)
+             AND NOT EXISTS(SELECT 1 FROM turns WHERE run_id=runs.id AND status IN('queued','in_flight'))")
+            .bind(&run.id).bind(&since).bind(&stamp.run.pane_id).bind(&stamp.run.herdr_session)
+            .bind(&stamp.run.native_session_id).bind(&stamp.run.terminal_id)
+            .bind(&stamp.host).bind(stamp.generation).bind(&client.fence.conn().name).bind(&turn)
+            .execute(app.db()).await?;
+        Ok(result.rows_affected() == 1)
+    })).await.transpose()?.unwrap_or(false);
+    drop(guard);
+    if changed {
+        tracing::warn!(run = %run.id, turn = %turn, working_since = %since, "run stuck at working after its turn completed and the pane is idle; settled to idle");
+        owned().lock().unwrap_or_else(|e| e.into_inner()).remove(&run.id);
+        app.emit_bot_status(&run.bot_id).await;
+        super::super::queue::schedule_flush_queued(app, &run.bot_id);
+    }
+    Ok(changed)
 }
 
 // A distinct key in the existing receipt table keeps a late working poller from retiring
@@ -398,6 +458,7 @@ mod tests {
 
     const BUSY: &str = "❯ Work\n✻ Drizzling… (1m 24s · ↓ 6.2k tokens)\n──────\n❯\n──────\n";
     const IDLE: &str = "❯ Work\n⏺ Done\n✻ Cooked for 2s\n──────\n❯\n──────\n";
+    const DRAFT: &str = "❯ Work\n⏺ Done\n✻ Cooked for 2s\n──────\n❯ ship it to prod now\n──────\n";
 
     struct Fixture {
         env: tt::Env,
@@ -687,6 +748,48 @@ mod tests {
             1,
             "restoring idle must wake the queue even without a Herdr idle edge"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unsent_draft_in_the_composer_does_not_block_the_restore() {
+        let f = fixture().await;
+        sample(&f, BUSY).await;
+        assert_eq!(status(&f).await, "working");
+        complete(&f).await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), DRAFT);
+        finish(&f.env.app, &f.run.id, &f.turn).await.unwrap();
+        assert_eq!(status(&f).await, "idle", "composer draft must not keep the run working");
+    }
+
+    async fn stale_working(f: &Fixture, minutes_ago: i64, screen: &str) -> db::Run {
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run.id).execute(f.env.app.db()).await.unwrap();
+        let old = db::iso_in(-minutes_ago * 60);
+        sqlx::query("UPDATE runs SET agent_status_since=? WHERE id=?").bind(&old).bind(&f.run.id).execute(f.env.app.db()).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(&old).bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), screen);
+        db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_stuck_at_working_after_its_turn_ended_is_settled_by_the_sweep() {
+        let f = fixture().await;
+        let run = stale_working(&f, 10, DRAFT).await;
+        assert!(settle_stale_working(&f.env.app, &run).await.unwrap());
+        assert_eq!(status(&f).await, "idle");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_leaves_fresh_busy_or_in_flight_runs_alone() {
+        let f = fixture().await;
+        let run = stale_working(&f, 1, IDLE).await;
+        assert!(!settle_stale_working(&f.env.app, &run).await.unwrap(), "not stale long enough");
+        let run = stale_working(&f, 10, BUSY).await;
+        assert!(!settle_stale_working(&f.env.app, &run).await.unwrap(), "spinner still on screen");
+        let run = stale_working(&f, 10, IDLE).await;
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) SELECT ?,conversation_id,run_id,'web','in_flight','ok',? FROM turns WHERE id=?")
+            .bind(db::ulid()).bind(db::now()).bind(&f.turn).execute(f.env.app.db()).await.unwrap();
+        assert!(!settle_stale_working(&f.env.app, &run).await.unwrap(), "turn still in flight");
+        assert_eq!(status(&f).await, "working");
     }
 
     #[tokio::test]

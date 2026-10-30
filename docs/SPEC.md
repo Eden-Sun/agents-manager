@@ -93,6 +93,8 @@ hookrecv 不直接寫入這一欄），另開一條
 blocked、選單、舊快照、未知送達及讀取失敗不補標。回合結束後，確認 pane 已閒置且沒有新回合，
 僅以自身補標的狀態時間戳與世代做 CAS 還原 idle；接續 poller 可承接補標所有權，舊 poller 不得清掉新回合的標記。
 
+**卡 working 的還原與防呆（2026-10-30）**：上段還原 idle 只要求畫面沒有 spinner／選單、輸入框在；輸入框裡有使用者沒送出的草稿也算（以前要求空框，草稿會讓補標的 working 永遠還原不了，herdr 本身已 idle 又不會再給邊）。另有安全網：survey 掃描每輪對 `working` 的 claude run 檢查，狀態時間戳與最後回合收掉時間都超過 120 秒、沒有 queued／in_flight 回合、herdr 回報 idle／done、畫面沒有 spinner 與選單且輸入框在時，以同一組世代 CAS 改回 idle、喚醒 queue 並寫 warn log（收據遺失的情況：daemon 重啟、poller 被取代、超過 40 分鐘上限）。
+
 Claude 的 live pane 有一般編號選單時，herdr cache 可能停在 done／idle，不論回合仍在進行或已結束（#2017）。沿用同一份補標所有權與 fence：只有最近 30 分鐘結束的最後一回合、最後一回合為 completed_fallback，或最後一回合仍在 in_flight 且 delivery 為 ok，才可將 idle／unknown 補成 blocked；完整輸入框與已有專責處理的對話框排除。每 60 秒輪轉掃描，單輪最多八次讀取，遠端序列讀且每次最多五秒，不保留畫面；失敗不加速。選單消失須連續兩次新鮮有效讀取，才以原狀態時間戳與世代 CAS 將自己的 blocked 改回 unknown，不叫醒 queue；讀取失敗或證據不足不還原。這是修正快取脫節，不是另一套 activity 權威，也不按鍵。
 
 ## 3. 架構
