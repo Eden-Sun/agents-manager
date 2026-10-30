@@ -55,6 +55,7 @@ pub mod hook_cmd;
 pub mod hook_inbox;
 pub mod host_baseline;
 pub mod hosts;
+pub mod expert_marker;
 pub mod kids_cache;
 pub mod kind_probe;
 pub mod kill_guard;
