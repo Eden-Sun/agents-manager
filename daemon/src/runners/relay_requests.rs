@@ -34,7 +34,7 @@ pub async fn sweep(app: &Arc<App>) {
 
 async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
     let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{id}"));
-    let _guard = lock.lock().await;
+    let Ok(_guard) = lock.try_lock() else { return Ok(()) };
     let row: Option<(String,String,String,String,Option<String>,String,i64,Option<String>)> = sqlx::query_as("SELECT from_bot_id,to_bot_id,prompt_text,attachments_json,to_turn_id,state,attempts,error FROM relay_requests WHERE id=?")
         .bind(id).fetch_optional(&app.db).await?;
     let Some((from, to, text, attachments, mut turn, state, attempts, failure)) = row else { return Ok(()) };

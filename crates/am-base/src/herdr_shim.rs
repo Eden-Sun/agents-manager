@@ -374,6 +374,21 @@ am_kv_get() {
     return 1
 }
 
+# Old shell panes may retain a pre-expert environment after their bot restarts.
+# A marker is scoped to the herdr session; if the session is unavailable, conservatively
+# check every session on the host. It protects natural stale panes, not a hostile OS user.
+am_expert_session_marked() {
+    _am_mark_root="${HOME}/.config/agents-manager/expert-sessions"
+    if [ -n "${AM_PORT:-}" ] && [ -n "${AM_CONFIG_PATH:-}" ] && [ -f "$AM_CONFIG_PATH" ]; then _am_mark_root="${AM_CONFIG_PATH%/*}/expert-sessions"; fi
+    if [ -n "${HERDR_SESSION:-}" ]; then
+        _am_mark_session=$(printf '%s' "$HERDR_SESSION" | LC_ALL=C od -An -tx1 | tr -d ' \n')
+        for _am_mark in "$_am_mark_root/$_am_mark_session/"*; do [ -f "$_am_mark" ] && return 0; done
+    else
+        for _am_mark in "$_am_mark_root/"*/*; do [ -f "$_am_mark" ] && return 0; done
+    fi
+    return 1
+}
+
 # Names are display strings; changing one cannot change the durable spawn claim.
 am_agent_rename() {
     exec "$AM_HERDR" "$@"
@@ -397,7 +412,7 @@ am_agent_start() {
         if [ -z "$_spawn_url" ] && [ -n "${AM_PORT:-}" ]; then _spawn_url="http://127.0.0.1:${AM_PORT}"; fi
         _spawn_token=$(am_bot_token)
         if [ -z "$_spawn_url" ]; then
-            if [ "${AM_PROJECT_MODE:-parent_child}" != parent_child ]; then
+            if [ "${AM_PROJECT_MODE:-parent_child}" != parent_child ] || am_expert_session_marked; then
                 printf 'agents-manager: expert 或未知模式缺少 daemon 位址，無法確認派工權限\n' >&2
                 exit 77
             fi
@@ -873,7 +888,7 @@ am_agent_prompt() {
         esac
         set -- "$@" "$_a"
     done
-    if [ "${AM_PROJECT_MODE:-}" = expert ] && ! am_daemon_base >/dev/null; then
+    if ! am_daemon_base >/dev/null && { [ "${AM_PROJECT_MODE:-}" = expert ] || am_expert_session_marked; }; then
         am_announce_refuse 77 "$_requested" "expert 模式缺少 daemon 位址，不能確認收件權限"
     fi
     _remote_bot=""
@@ -1051,7 +1066,7 @@ except Exception: sys.exit(1)' 2>/dev/null) || _name=""
             case "$_rc" in 0 | 7) break ;; esac
             [ "$_try" -lt 2 ] || break
         done
-        if [ "$_rc" = 7 ] && { [ -n "${AM_DAEMON_URL:-}" ] || [ "${AM_PROJECT_MODE:-}" = expert ]; }; then
+        if [ "$_rc" = 7 ] && { [ -n "${AM_DAEMON_URL:-}" ] || [ "${AM_PROJECT_MODE:-}" = expert ] || am_expert_session_marked; }; then
             am_announce_refuse 75 "$_name" "daemon 無法連線，未送出"
         fi
         if [ "$_rc" != 7 ]; then
