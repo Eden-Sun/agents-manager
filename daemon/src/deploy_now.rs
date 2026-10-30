@@ -232,6 +232,19 @@ fn read_request(agm_dir: &Path) -> Option<Value> {
     })
 }
 
+/// 使用者按了「立即部署」＝這次部署不等工作中的 bot（使用者 2026-10-30：「不用等沒有 bot 在工作吧」）：
+/// 請求檔還在、而且這張是 daemon-swap 為**同一顆 sha** 開的自動核准，就跟等滿門檻一樣放寬——working 不擋，
+/// 送達臨界區、別人的租約、讀不到狀態照樣擋（`maintenance::escalation_for`）。例行自動部署不受影響。
+pub fn requested_for(app: &impl crate::capabilities::DataDir, a: &store::Approval) -> bool {
+    let auto = format!("service({})", crate::service_auth::DAEMON_SWAP);
+    if a.decided_by.as_deref() != Some(auto.as_str()) {
+        return false;
+    }
+    let Some(req) = read_request(&crate::supervisor::setup::agm_dir(app)) else { return false };
+    let sha = req.get("sha").and_then(Value::as_str).unwrap_or_default().trim();
+    a.target_commit.as_deref().map(str::trim).is_some_and(|c| c.len() >= 7 && sha.len() >= 7 && (sha.starts_with(c) || c.starts_with(sha)))
+}
+
 /// 正在 `working` 的 bot（確認框列出來：換 binary 要等它們，不是按了就砍）。
 async fn working_bots(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView)) -> Vec<Value> {
     match crate::supervisor::maintenance::safety(app, &[]).await {
@@ -457,6 +470,40 @@ mod tests {
         std::fs::write(agm_dir.join(KICK_SCRIPT), format!("#!/bin/bash\n# reads {REQUEST_FILE}\n")).unwrap();
         let ctx = Ctx { repo, agm_dir, live_sha: live[..8].to_string() };
         Fixture { env, ctx, live, docs_only, code, head }
+    }
+
+    #[tokio::test]
+    async fn a_deploy_now_request_waives_the_idle_wait_only_for_its_own_auto_approval() {
+        let f = fixture().await;
+        let sha = "906a98eb6436e7f7070421295cc6da35a8b609e9";
+        let ap = |commit: &str, by: &str| store::Approval {
+            id: "a1".into(),
+            supervisor_id: "s".into(),
+            requester: "daemon-update-kick".into(),
+            purpose: "restart".into(),
+            scope: "daemon".into(),
+            target_commit: Some(commit.into()),
+            status: "approved".into(),
+            decided_by: Some(by.into()),
+            decided_at: None,
+            reason: None,
+            request_reason: None,
+            expires_at: None,
+            client_request_id: None,
+            requester_unverified: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            wait_since: None,
+        };
+        let auto = format!("service({})", crate::service_auth::DAEMON_SWAP);
+        assert!(!requested_for(&f.env.app, &ap(sha, &auto)), "沒有請求檔＝例行部署，照樣等");
+        let dir = crate::supervisor::setup::agm_dir(&f.env.app);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(REQUEST_FILE), format!(r#"{{"sha":"{sha}","requested_by":"ui"}}"#)).unwrap();
+        assert!(requested_for(&f.env.app, &ap(sha, &auto)));
+        assert!(!requested_for(&f.env.app, &ap("057668f9cb7d848b730c30f9e84a70ce54689396", &auto)), "別顆 sha 的核准不放寬");
+        assert!(!requested_for(&f.env.app, &ap(sha, "AGM")), "不是 daemon-swap 的自動核准不放寬");
+        let _ = &f.live;
     }
 
     #[tokio::test]

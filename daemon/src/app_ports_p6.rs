@@ -213,7 +213,7 @@ impl LocalAccountView for App {
         crate::background_jobs::duration(self, run_id)
     }
     fn deploy_user_escalated_for(&self, approval: &crate::supervisor::store::Approval) -> bool {
-        crate::deploy_wait::user_escalated_for(self, approval)
+        crate::deploy_wait::user_escalated_for(self, approval) || crate::deploy_now::requested_for(self, approval)
     }
 }
 
