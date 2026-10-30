@@ -1505,6 +1505,29 @@ esac"#, calls.display()));
         assert_eq!(rc, 77); assert!(err.contains("daemon"));
     }
 
+    #[tokio::test]
+    async fn macos_local_old_shell_is_guarded_through_expert_migration() {
+        let s = Sandbox::new();
+        let home = s.dir.join("home");
+        let data = home.join(".config/agents-manager");
+        let home_str = home.to_str().unwrap();
+        let old = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session")];
+        let (_, _, rc) = s.run_full(&old, &["agent", "prompt", "w1:p2", "before"]);
+        assert_eq!(rc, 0);
+        // Parent restarts with a daemon URL; the previously created shell retains `old`.
+        let restarted = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session"), ("AM_DAEMON_URL", "http://daemon:7788")];
+        s.install_fake_curl("printf '{\"error\":\"forbidden\"}\n403'");
+        assert_eq!(s.run_full(&restarted, &["agent", "prompt", "w1:p2", "work"]).2, 77);
+        am_base::expert_marker::set(&data, None, "project-a", "test-session", true).await.unwrap();
+        for target in ["w1:p2", "colleague"] {
+            let (out, _, rc) = s.run_full(&old, &["agent", "prompt", target, "work"]);
+            assert_eq!(rc, 77); assert!(out.is_empty());
+        }
+        assert_eq!(s.run_full(&old, &["agent", "start", "kid", "--pane", "w1:p9"]).2, 77);
+        am_base::expert_marker::set(&data, None, "project-a", "test-session", false).await.unwrap();
+        assert_eq!(s.run_full(&old, &["agent", "prompt", "w1:p2", "after"]).2, 0);
+    }
+
     #[test]
     fn remote_parent_child_without_url_keeps_spawn_but_expert_fails_closed() {
         let s = Sandbox::new();
