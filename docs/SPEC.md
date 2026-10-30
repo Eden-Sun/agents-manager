@@ -2194,6 +2194,13 @@ herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只
 
 ### 6.5d agent 對 agent 的 prompt 標出來源
 
+明確要求結果的 relay 以 `expect_result` 建立持久請求；來源取自已驗證 bot 身分，與一個目標回合綁定，`client_request_id` 重送不再投遞。目標回合終態後記下通知義務，對來源以 daemon 通知 lane 排隊，離線時保留到上線，不啟動來源 bot。送達須有證據，無法確認時不猜測是否送達；失敗有上限並發 ops alert。通知不是請求，不產生回音；再次提問須建立新請求。回合失敗、無回覆或混入其他輸入時回報可確認狀態，不把整段結果歸給多個來源；回合已回覆不表示整項工作已完成。授權在排隊訊息實際投遞前重新檢查：既有請求補投不要求來源仍在線，結果通知只檢查原寄件者仍存在且未刪除，不套新的收件角色限制。
+
+結果通知引發的回合不成為 child_done 的來源；若通知收件者是對方的 child，也不會因此向對方自動回音。先前尚未回報的其他 child 回合仍照常對帳。
+parent 明確向 child 要求結果時，該回合優先由請求結果通知送達；確認送達後才記為 child_done 已涵蓋。確認通知最終失敗時由 child_done 補送；送達不明則告警、保留守門，不猜測後重送。其他未關聯的 child 回合照常合併回報。
+
+`herdr agent prompt <target> --expect-result` 使用 daemon 的唯讀解析與 prompt API。`bot:<id>` 可跨主機，名稱或 pane ID 只在寄件 bot 的 host 與 herdr session 內解析；不唯一則拒絕。遠端 daemon 位址取 `AM_DAEMON_URL`，未設定時不猜。
+
 relay 身份只使用穩定 ID（issue #1794）：`to_agent` 只供顯示／herdr 傳輸；報備必須攜 `to_bot_id`、`to_run_id`、`delivery_id`，角色收件由 bot id 對角色表，監看由 run id 對 host／herdr session。shim 自有旗標 `--to-bot-id`／`--to-run-id`（遠端另加 `--to-pane-id`）不傳給 herdr，本機送字以 daemon 回傳的 pane 地址為準；本機 curl 重試及遠端 spool v2 沿用同一 delivery id。缺 ID 的舊 shim／spool 保持未知，不用名稱補猜，不開監看、不補標或攔進 AGM 佇列。回音按 run id 認領，遲到報備還須訊息的 turn 明確屬於該 run；同一 delivery 的已認領記錄保留在有界、五分鐘的行程內表內，避免 spool 重播誤標第二句（重啟不保留此去重）。移交目標不標記來源。
 
 核准申請的 bot principal 必須以經驗證的 bot id 作 requester／lease owner，不接受 bot 名或 agent 名。自我核准比較 bot id，不因改名或舊名重用改變。User principal 可用保留 ID `principal:user` 申請，在申請交易內同時寫入既有 `supervisor_notes` 的 `approval_principal` 證據，記錄獨立人類身份／bot id，不由舊 requester 字串回推；其他外部／舊申請未保存獨立 principal 證據時保持未知，拒絕核准（`requester_identity_unknown`，可 deny／revoke 或以已驗證 bot id 重申請）；此票不新增 schema。既有 daemon-swap service 與使用者立即部署的專用核准流程不變。
@@ -2204,7 +2211,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 
 1. shim 的 `agent prompt` 接受 pane ID、`bot:<bot_id>`，或作為一次性選取器的顯示名稱。child 簡稱先查顯示前綴補成的候選，再查原字串；選取成功後立即從 `agent get` 回應固定 pane ID。查不到 pane 證據就 exit 75，不猜名字。
    決定 ID 後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token`），再用固定 pane ID 轉給真的 herdr。daemon 不再按名字查身份；舊 shim 只送名稱而無 ID 證據時保持未知。
-   `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據時不解析，shim exit 75）。非角色解析成功回 `to_pane_id`，shim 使用該 ID；遠端無 daemon 時須直接使用 pane ID。
+   本機一般 `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據時不解析，shim exit 75）。遠端 `bot:<bot_id>` 則使用 daemon API 投遞；沒有配置 daemon 位址時明確拒絕。
    `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
    **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才容許已固定 pane ID 的直送（尚未解析的 bot ID 仍拒絕）。
    其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，

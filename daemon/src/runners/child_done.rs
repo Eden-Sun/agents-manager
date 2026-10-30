@@ -107,6 +107,18 @@ struct State {
 #[derive(sqlx::FromRow)]
 struct SourceTurn { rowid: i64, id: String, completed_at: String, status: String, reply: Option<String> }
 
+/// A parent's result request owns its child turn until its result was delivered or failed.
+/// A verified result delivery can cover the child turn, but never skip unrelated outstanding work.
+async fn cover_delivered_relay(app: &Arc<App>, child: &Child, background: bool) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO child_done_sources(child_id,turn_id,covered) SELECT ?,t.id,1 FROM relay_requests r JOIN turns t ON (t.id=r.to_turn_id OR t.client_request_id='relay-request:'||r.id) JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=r.to_bot_id WHERE r.from_bot_id=? AND r.to_bot_id=? AND (r.state='notified' OR (r.state='failed' AND r.notified_at IS NOT NULL)) AND t.status IN ('completed','completed_fallback','failed') ON CONFLICT(child_id,turn_id) DO UPDATE SET covered=1 WHERE child_done_sources.batch IS NULL")
+        .bind(&child.child_id).bind(&child.parent_id).bind(&child.child_id).execute(&app.db).await?;
+    sqlx::query("INSERT INTO child_done_sources(child_id,turn_id,covered) SELECT ?,t.id,1 FROM relay_requests r JOIN turns t ON t.id=r.notice_turn_id JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=r.from_bot_id WHERE r.from_bot_id=? AND r.to_bot_id=? AND (r.state='notified' OR (r.state='failed' AND r.notified_at IS NOT NULL)) AND t.status IN ('completed','completed_fallback','failed') ON CONFLICT(child_id,turn_id) DO UPDATE SET covered=1 WHERE child_done_sources.batch IS NULL")
+        .bind(&child.child_id).bind(&child.child_id).bind(&child.parent_id).execute(&app.db).await?;
+    sqlx::query("UPDATE child_done_state SET covered_rowid=(SELECT t.rowid FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? ORDER BY t.rowid DESC LIMIT 1), idle_turn_id=(SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? ORDER BY t.rowid DESC LIMIT 1), idle_at=COALESCE(?,?), active=0, notified_at=?, notified_background=? WHERE child_id=? AND pending_turn_id IS NULL AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=? AND s.covered=0) AND EXISTS(SELECT 1 FROM relay_requests r JOIN turns t ON (t.id=r.to_turn_id OR t.id=r.notice_turn_id) JOIN conversations c ON c.id=t.conversation_id WHERE ((r.from_bot_id=? AND r.to_bot_id=? AND t.id=r.to_turn_id) OR (r.from_bot_id=? AND r.to_bot_id=? AND t.id=r.notice_turn_id)) AND (r.state='notified' OR (r.state='failed' AND r.notified_at IS NOT NULL)) AND t.rowid=(SELECT max(t2.rowid) FROM turns t2 WHERE t2.conversation_id=c.id)) AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND t.rowid>child_done_state.covered_rowid AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=c.bot_id AND s.turn_id=t.id AND s.covered=1))")
+        .bind(&child.child_id).bind(&child.child_id).bind(&child.status_since).bind(crate::db::now()).bind(crate::db::now()).bind(i64::from(background)).bind(&child.child_id).bind(&child.child_id).bind(&child.parent_id).bind(&child.child_id).bind(&child.child_id).bind(&child.parent_id).bind(&child.child_id).execute(&app.db).await?;
+    Ok(())
+}
+
 /// Reconcile one child; the turn id is only a lookup hint, not the unit of deduplication.
 pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
     let child: Option<Child> = sqlx::query_as(
@@ -119,6 +131,11 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     // Persist the obligation before inspecting the pane, even without a captured turn.
     sqlx::query("INSERT OR IGNORE INTO child_done_state(child_id,idle_at,idle_turn_id,initialized_at) VALUES(?,?,?,?)")
         .bind(&child.child_id).bind(child.status_since.as_deref().unwrap_or(&crate::db::now())).bind(turn_id).bind(crate::db::now()).execute(&app.db).await?;
+    // A result notice is not a new request, including when its recipient is this child's parent.
+    // Do not turn the notice's reply (or its idle edge) into a child_done echo. Uncovered older
+    // child work and already-pending child_done notices still reconcile normally.
+    let notice_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND t.id=(SELECT t2.id FROM turns t2 WHERE t2.conversation_id=c.id AND t2.status IN ('completed','completed_fallback','failed') ORDER BY t2.completed_at DESC,t2.rowid DESC LIMIT 1) AND t.queue_class='daemon' AND t.client_request_id LIKE 'relay-result:%') AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id JOIN child_done_state d ON d.child_id=c.bot_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND NOT (t.queue_class='daemon' AND COALESCE(t.client_request_id,'') LIKE 'relay-result:%') AND t.rowid>d.covered_rowid AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=c.bot_id AND s.turn_id=t.id AND s.covered=1)) AND NOT EXISTS(SELECT 1 FROM child_done_state d WHERE d.child_id=? AND d.pending_turn_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=? AND s.covered=0)")
+        .bind(&child.child_id).bind(&child.child_id).bind(&child.child_id).bind(&child.child_id).fetch_one(&app.db).await?;
     if child_still_active(app, Some(&child.run_id)).await {
         sqlx::query("UPDATE child_done_state SET active=1 WHERE child_id=?").bind(&child.child_id).execute(&app.db).await?;
         return Ok(())
@@ -136,10 +153,14 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     let idle: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r WHERE r.id=? AND r.state='running' AND r.agent_status IN ('idle','unknown') AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.status='in_flight'))")
         .bind(&child.run_id).fetch_one(&app.db).await?;
     if !idle { return Ok(()) }
+    cover_delivered_relay(app, &child, background).await?;
+    if notice_only { return Ok(()) }
     let mut turns: Vec<SourceTurn> = sqlx::query_as("SELECT t.rowid, t.id, t.completed_at, t.status,
         (SELECT m.content FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) reply
         FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=?
         AND t.status IN ('completed','completed_fallback','failed') AND t.completed_at IS NOT NULL
+        AND NOT (t.queue_class='daemon' AND COALESCE(t.client_request_id,'') LIKE 'relay-result:%')
+        AND NOT EXISTS(SELECT 1 FROM relay_requests rr WHERE rr.from_bot_id=? AND rr.to_bot_id=c.bot_id AND (rr.state<>'failed' OR rr.notified_at IS NOT NULL OR rr.alerted_at IS NULL OR rr.error LIKE 'notification delivery unconfirmed%') AND (rr.to_turn_id=t.id OR t.client_request_id='relay-request:'||rr.id))
         AND (t.rowid=(SELECT recent.rowid FROM turns recent WHERE recent.conversation_id=c.id AND recent.status IN ('completed','completed_fallback','failed') AND recent.completed_at IS NOT NULL ORDER BY recent.completed_at DESC,recent.rowid DESC LIMIT 1)
           OR NOT EXISTS(SELECT 1 FROM child_done_sources cs WHERE cs.child_id=c.bot_id AND cs.turn_id=t.id AND cs.covered=1))
         AND (julianday(t.completed_at)>=julianday((SELECT initialized_at FROM child_done_state WHERE child_id=c.bot_id),'-1 hour')
@@ -147,9 +168,14 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
               (SELECT 1 FROM runs pr WHERE pr.bot_id=? AND julianday(pr.started_at)<=julianday(t.completed_at)
                  AND (pr.ended_at IS NULL OR julianday(pr.ended_at)>=julianday(t.completed_at)))))
         ORDER BY t.completed_at,t.rowid")
-        .bind(&child.child_id).bind(&child.parent_id).fetch_all(&app.db).await?;
+        .bind(&child.child_id).bind(&child.parent_id).bind(&child.parent_id).fetch_all(&app.db).await?;
     let has_pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM child_done_state WHERE child_id=? AND pending_turn_id IS NOT NULL)")
         .bind(&child.child_id).fetch_one(&app.db).await?;
+    if turns.is_empty() && !has_pending {
+        let latest_is_notice: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND t.id=(SELECT t2.id FROM turns t2 WHERE t2.conversation_id=c.id AND t2.status IN ('completed','completed_fallback','failed') ORDER BY t2.completed_at DESC,t2.rowid DESC LIMIT 1) AND ((t.queue_class='daemon' AND t.client_request_id LIKE 'relay-result:%') OR EXISTS(SELECT 1 FROM relay_requests r WHERE r.from_bot_id=? AND r.to_bot_id=c.bot_id AND (r.state<>'failed' OR r.notified_at IS NOT NULL OR r.alerted_at IS NULL OR r.error LIKE 'notification delivery unconfirmed%') AND (r.to_turn_id=t.id OR t.client_request_id='relay-request:'||r.id))))")
+            .bind(&child.child_id).bind(&child.parent_id).fetch_one(&app.db).await?;
+        if latest_is_notice { return Ok(()) }
+    }
     if turns.is_empty() && (child.status_since.is_some() || has_pending) {
         turns.push(SourceTurn { rowid: 0, id: child.run_id.clone(), completed_at: child.status_since.clone().unwrap_or_else(crate::db::now), status: "idle_without_turn".into(), reply: None });
     }
@@ -262,6 +288,14 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         excerpts.push(format!("來源回合已無法讀取，請讀 child 的 pane：herdr agent read {} --lines 200", child.child_name));
     }
     for t in turns.iter().filter(|t| batch_turns.contains(&t.id)) {
+        if t.status == "failed" {
+            let failed_relay: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_requests r WHERE r.from_bot_id=? AND r.to_bot_id=? AND r.state='failed' AND (r.to_turn_id=? OR EXISTS(SELECT 1 FROM turns rt WHERE rt.id=? AND rt.client_request_id='relay-request:'||r.id)))")
+                .bind(&child.parent_id).bind(&child.child_id).bind(&t.id).bind(&t.id).fetch_one(&app.db).await?;
+            if failed_relay {
+                excerpts.push(format!("回合 {}：失敗，沒有可確認的完整回覆。", t.id));
+                continue;
+            }
+        }
         let reply = t.reply.as_deref().filter(|r| !r.trim().is_empty());
         if let Some(reply) = reply {
             if child_already_reported(&app.db,&conv,&child.child_id,&prefix,&t.id,reply).await? { continue }
