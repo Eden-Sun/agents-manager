@@ -1488,6 +1488,24 @@ esac"#, calls.display()));
     }
 
     #[test]
+    fn ordinary_expert_prompt_is_guarded_on_local_and_remote() {
+        for (key, address) in [("AM_PORT", "7788"), ("AM_DAEMON_URL", "http://daemon:7788")] {
+            let s = Sandbox::new();
+            let log = s.dir.join("guard.log");
+            s.install_fake_curl(&format!("printf '%s' \"$*\" > '{}'; printf '{{\"error\":\"forbidden\",\"reason\":\"executor 只接受 manager\"}}\\n403'", log.display()));
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "expert"), (key, address)];
+            let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "w1:p2", "work"]);
+            assert_eq!(rc, 77, "{out:?} {err}");
+            assert!(out.is_empty());
+            assert!(err.contains("executor"), "{err}");
+            assert!(std::fs::read_to_string(log).unwrap().contains("/relay/announce"));
+        }
+        let s = Sandbox::new();
+        let (_, err, rc) = s.run_full(&[("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "expert")], &["agent", "prompt", "w1:p2", "work"]);
+        assert_eq!(rc, 77); assert!(err.contains("daemon"));
+    }
+
+    #[test]
     fn remote_parent_child_without_url_keeps_spawn_but_expert_fails_closed() {
         let s = Sandbox::new();
         let base = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "bot"), ("AM_PROJECT_MODE", "parent_child")];

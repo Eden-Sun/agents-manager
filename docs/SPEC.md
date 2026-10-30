@@ -6027,7 +6027,7 @@ expert 的 manager 須在當前政策已載入後才能開 child；executor、ad
 
 派工授權以 daemon 當下資料判斷為準，shim 是第一道防線；啟用 expert 前檢查活躍 bot 的 shim，過期時列出 bot 並拒絕。已啟用後 shim 過期標待套用並告警；reconcile 發現非管理者開 child 時仍追蹤並向管理者與 ops 告警。
 
-expert 專案的 bot relay 收件規則（直接 parent-child 通道保留）：
+expert 專案的 bot relay 收件規則（child 向自身 parent 回報不受收件角色限制）：
 
 | 收件角色 | 同專案可寄件者 |
 | --- | --- |
@@ -6040,3 +6040,5 @@ expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒�
 新請求須驗證來源 run 已載入目前角色政策；排隊及重啟補投重新驗證目前專案與角色，不要求來源在線。結果通知僅確認原寄件者仍存在，離線時持續保留，不套角色收件規則。
 
 切換 expert 前，所有 active run 均須已注入 `AM_DAEMON_URL`（本機亦算），否則列出 bot、主機與待重啟原因並拒絕。遠端 parent-child 未設定 daemon URL 時維持原有派工；expert 缺 URL 時拒絕，URL 可用時以 daemon 當前模式核權。
+
+啟用 expert 前，所在 host／herdr session 的所有 active run 都須已注入 daemon URL 且 shim 未過期；遠端 host 也必須設定 daemon_url。同一 host／session 已有 expert 專案時，缺 URL 不得啟動 bot。因此沒有 URL 的舊 parent-child pane 沿用直送時，不會在同一 host／session 命中 expert 收件者。有 URL 的一般 prompt 在送字前經 daemon 即時檢查角色；無 URL 的 expert prompt 拒絕。直接親子豁免只適用 child 向自己的 parent 回報。
