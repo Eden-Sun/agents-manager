@@ -6040,4 +6040,4 @@ expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒�
 
 切換 expert 前，所有 active run 均須已注入 `AM_DAEMON_URL`（本機亦算），否則列出 bot、主機與待重啟原因並拒絕。遠端 parent-child 未設定 daemon URL 時維持原有派工；expert 缺 URL 時拒絕，URL 可用時以 daemon 當前模式核權。
 
-啟用 expert 前，所在 host／herdr session 的所有 active run 都須已注入 daemon URL 且 shim 未過期；遠端 host 也必須設定 daemon_url。同一 host／session 已有 expert 專案時，缺 URL 不得啟動 bot。因此沒有 URL 的舊 parent-child pane 沿用直送時，不會在同一 host／session 命中 expert 收件者。有 URL 的一般 prompt 在送字前經 daemon 即時檢查角色；無 URL 的 expert prompt 拒絕。直接親子豁免只適用 child 向自己的 parent 回報。
+啟用 expert 前，所在 host／herdr session 的所有 active run 都須已注入 daemon URL 且 shim 未過期；遠端 host 也必須設定 daemon_url。daemon 先在各 session 寫入並驗證專案標記，啟動 expert bot 時也為其 session 建立標記；切回 parent_child 或刪除專案時移除該專案的標記，不移除其他專案的標記。舊 shell 可能在 parent 重啟後仍持有沒有 URL 的環境：新版 shim 在有標記的 session 無法連到 daemon 時拒絕 prompt 與開 child；無標記的 parent_child 舊 pane 維持原有行為。有 URL 的一般 prompt 在送字前經 daemon 即時檢查角色。同一 host／session 已有 expert 專案時，缺 URL 不得啟動 bot。標記只防自然遺留 pane，不防同一作業系統使用者蓄意修改標記、shim 或環境；角色授權以 daemon 判斷為準。直接親子豁免只適用 child 向自己的 parent 回報。

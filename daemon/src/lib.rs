@@ -3,6 +3,7 @@
 
 pub mod model_mode;
 mod expert_peers;
+mod expert_marker;
 pub mod relay_policy;
 pub mod runners;
 pub mod codex_reset;

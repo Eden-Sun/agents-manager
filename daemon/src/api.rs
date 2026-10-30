@@ -2338,12 +2338,12 @@ async fn patch_project(
     Json(b): Json<PatchProject>,
 ) -> Result<Response, LcError> {
     if (b.mode.is_some() || b.manager_bot_id.is_some()) && principal != RequestPrincipal::User { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"}))); }
-    let project_for_gate = if b.mode.as_deref() == Some("expert") {
+    let project_for_gate = if b.mode.is_some() {
         Some(db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?)
     } else { None };
     let expert_gate = project_for_gate.as_ref().map(|p| db::expert_host_gate(&p.host));
     let _expert_guard = match &expert_gate { Some(gate) => Some(gate.lock().await), None => None };
-    if project_for_gate.is_some() {
+    if b.mode.as_deref() == Some("expert") {
         let project = db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?;
         let mut stale = Vec::new();
         if project.host != LOCAL_HOST {
@@ -2356,6 +2356,7 @@ async fn patch_project(
         for bot in bots.iter().filter(|b| b.project_id == id) {
             let session = app.session_for_bot(bot, &project.host).await.ok_or_else(|| LcError::Unavailable(json!({"error":"session_unavailable"})))?;
             sessions.insert(session);
+            if let Some(run_session) = db::active_run(&app.db, &bot.id).await.map_err(any_err)?.and_then(|run| run.herdr_session) { sessions.insert(run_session); }
         }
         if sessions.is_empty() { sessions.insert(app.session_for_host(&project.host).await.ok_or_else(|| LcError::Unavailable(json!({"error":"session_unavailable"})))?); }
         let remote_stale = app.remote_shim_stale.lock().await.contains_key(&project.host);
@@ -2398,7 +2399,16 @@ async fn patch_project(
         Some(Value::String(h)) if !h.trim().is_empty() => Some(Some(h.trim().to_string())),
         Some(_) => return Err(LcError::Bad("handed_off_to must be a non-empty host name or null".into())),
     };
-    crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+    let marker_sessions = if b.mode.as_deref() == Some("expert") {
+        let project = project_for_gate.as_ref().expect("mode project");
+        let sessions = crate::expert_marker::sessions(&app, project).await.map_err(any_err)?;
+        if let Err(e) = crate::expert_marker::set(&app, &project.host, &id, &sessions, true).await {
+            if project.mode != "expert" { let _ = crate::expert_marker::remove_project(&app, &project.host, &id).await; }
+            return Err(LcError::Unavailable(json!({"error":"expert_marker_unavailable","message":format!("無法建立專家模式主機標記：{e}")})));
+        }
+        Some(sessions)
+    } else { None };
+    let projection =     crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
             .iter_mut()
@@ -2420,8 +2430,18 @@ async fn patch_project(
         }
         Ok(())
     })
-    .await
-    .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) })?;
+    .await;
+    if let Err(e) = projection {
+        if let (Some(project), Some(sessions)) = (&project_for_gate, &marker_sessions) {
+            if project.mode != "expert" { let _ = crate::expert_marker::set(&app, &project.host, &id, sessions, false).await; }
+        }
+        return Err(if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) });
+    }
+    if b.mode.as_deref() == Some("parent_child") {
+        let project = project_for_gate.as_ref().expect("mode project");
+        crate::expert_marker::remove_project(&app, &project.host, &id).await
+            .map_err(|e| LcError::Unavailable(json!({"error":"expert_marker_unavailable","message":format!("無法移除專家模式主機標記：{e}")})))?;
+    }
     if let Some(h) = &handed_off_to {
         tracing::warn!(project_id = %id, handed_off_to = ?h, http = %crate::config_audit::http_caller(), "project handoff changed");
         // 收回：下一輪對帳照常接手，不等下一個 herdr 事件。
@@ -2527,6 +2547,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     if let Some(host) = project.handed_off_to {
         return Err(LcError::conflict("handed_off", json!({"project_id": id, "handed_off_to": host})));
     }
+    let marker_cleanup = project.mode == "expert";
     let host = project.host;
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
@@ -2534,13 +2555,15 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     let snapshot: Vec<Value> = in_project.iter().map(|b| json!({"id": b.id, "managed_by": b.managed_by})).collect();
     let requested_by = crate::config_audit::http_caller();
     tracing::warn!(project_id = %id, http = %requested_by, "project delete requested");
-    detach(&id, finish_project_delete(app, id.clone(), host, held, ids, in_project, snapshot, requested_by, guards)).await
+    detach(&id, finish_project_delete(app, id.clone(), host, held, ids, in_project, snapshot, requested_by, guards, marker_cleanup)).await
 }
 
 /// 定案之後的收尾（#1065）：在 `detach` 裡跑，client 斷線也會跑完；`begin` 之後的步驟都在這裡。
 #[allow(clippy::too_many_arguments)]
-async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: std::collections::HashSet<String>, ids: Vec<String>, in_project: Vec<db::Bot>, snapshot: Vec<Value>, requested_by: String, guards: Vec<tokio::sync::OwnedMutexGuard<()>>) -> Result<Response, LcError> {
-    let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by}))
+async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: std::collections::HashSet<String>, ids: Vec<String>, in_project: Vec<db::Bot>, snapshot: Vec<Value>, requested_by: String, guards: Vec<tokio::sync::OwnedMutexGuard<()>>, marker_cleanup: bool) -> Result<Response, LcError> {
+    let expert_gate = db::expert_host_gate(&host);
+    let _expert_guard = expert_gate.lock().await;
+    let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by, "expert_marker": marker_cleanup}))
         .await?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
@@ -2549,6 +2572,13 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
         return Err(e);
     }
     crate::api_bot::schedule_retention_after_delete(&app);
+    let mut marker_retry = false;
+    if marker_cleanup {
+        if let Err(e) = crate::expert_marker::remove_project(&app, &host, &id).await {
+            tracing::warn!(project = %id, error = %e, "could not remove expert marker after project deletion; retrying");
+            marker_retry = true;
+        }
+    }
     let mut share_retry = false;
     if let Err(e) = crate::share::revoke_project_shares(&app, &id).await {
         tracing::error!(project = %id, error = %e, "project deleted but its share links could not all be revoked; retrying in the background");
@@ -2612,7 +2642,7 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
         }
         tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
     }
-    let retry_failed = !failed.is_empty() || share_retry;
+    let retry_failed = !failed.is_empty() || share_retry || marker_retry;
     if retry_failed {
         // 各路徑自己的記憶體重試 task 換成 intent 的重試（#355）：intent 留著，背景用 recovery 補完（含清目錄），daemon 死掉開機也接得回。
         crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some project cleanup could not be completed".into());
@@ -7456,16 +7486,18 @@ async fn prompt_bot(
         check_relay_policy(&app, sender, &id).await?;
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
         let request_id = db::ulid();
+        let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
+        let _guard = lock.lock().await;
         let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,?,?,?,'pending',?)")
             .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
         let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=?")
             .bind(sender).bind(&id).bind(&crid).fetch_one(&app.db).await.map_err(any_err)?;
         if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
-        let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
-        let _guard = lock.lock().await;
         let (request_state, stored_turn): (String,Option<String>) = sqlx::query_as("SELECT state,to_turn_id FROM relay_requests WHERE id=?")
             .bind(&request_id).fetch_one(&app.db).await.map_err(any_err)?;
-        if !inserted {
+        if !inserted || request_state != "pending" || stored_turn.is_some() {
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":stored_turn,"message_id":null,"delivery":request_state,"state":request_state}))).into_response());
         }
         let delivery_key = format!("relay-request:{request_id}");
@@ -7481,8 +7513,12 @@ async fn prompt_bot(
                 return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":if permanent { "failed" } else { "pending" }}))).into_response());
             }
         };
-        sqlx::query("UPDATE relay_requests SET to_turn_id=?,to_run_id=(SELECT run_id FROM turns WHERE id=?),state=CASE WHEN state='pending' AND EXISTS(SELECT 1 FROM turns WHERE id=? AND status<>'queued' AND delivery='ok' AND delivery_verified=1) THEN 'delivered' ELSE state END WHERE id=?")
-            .bind(&out.turn_id).bind(&out.turn_id).bind(&out.turn_id).bind(&request_id).execute(&app.db).await.map_err(any_err)?;
+        let updated = sqlx::query("UPDATE relay_requests SET to_turn_id=?,to_run_id=(SELECT run_id FROM turns WHERE id=?),state=CASE WHEN state='pending' AND EXISTS(SELECT 1 FROM turns WHERE id=? AND status<>'queued' AND delivery='ok' AND delivery_verified=1) THEN 'delivered' ELSE state END WHERE id=? AND state IN ('pending','delivered')")
+            .bind(&out.turn_id).bind(&out.turn_id).bind(&out.turn_id).bind(&request_id).execute(&app.db).await.map_err(any_err)?.rows_affected();
+        if updated == 0 {
+            let (state, turn_id): (String, Option<String>) = sqlx::query_as("SELECT state,to_turn_id FROM relay_requests WHERE id=?").bind(&request_id).fetch_one(&app.db).await.map_err(any_err)?;
+            return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
+        }
         let mut response = serde_json::to_value(out).map_err(any_err)?;
         response["request_id"] = json!(request_id);
         return Ok((StatusCode::OK, Json(response)).into_response());
@@ -17609,6 +17645,40 @@ mod relay_result_api_tests {
     }
 
     #[tokio::test]
+    async fn first_request_holds_lock_during_sweep_and_respects_terminal_state() {
+        for terminal in ["failed", "delivered"] {
+            let env = crate::testing::env().await;
+            let a = crate::testing::claude_bot(&env.app, &env.project_id, "race-source").await;
+            let b = crate::testing::claude_bot(&env.app, &env.project_id, "race-target").await;
+            let run = crate::testing::fake_run(&env.app, &b.id).await;
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
+            let key = db::ulid();
+            let turn = db::ulid();
+            let conv = db::conversation_id(&env.app.db, &b.id).await.unwrap();
+            let app = env.app.clone(); let key2 = key.clone(); let turn2 = turn.clone(); let conv2 = conv.clone();
+            crate::lifecycle::race_point::arm("relay_request_after_insert", &key, move || async move {
+                crate::runners::relay_requests::sweep(&app).await;
+                let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE client_request_id=?").bind(&key2).fetch_one(&app.db).await.unwrap();
+                assert_eq!(state, "pending", "sweep must skip the locked request");
+                if terminal == "delivered" {
+                    sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,created_at) VALUES(?,?,'web','in_flight','ok',?)").bind(&turn2).bind(&conv2).bind(db::now()).execute(&app.db).await.unwrap();
+                    sqlx::query("UPDATE relay_requests SET state='delivered',to_turn_id=? WHERE client_request_id=?").bind(&turn2).bind(&key2).execute(&app.db).await.unwrap();
+                } else {
+                    sqlx::query("UPDATE relay_requests SET state='failed' WHERE client_request_id=?").bind(&key2).execute(&app.db).await.unwrap();
+                }
+            });
+            let mut headers = HeaderMap::new(); headers.insert("X-AM-Bot-Id", a.id.parse().unwrap()); headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+            let body = serde_json::from_value(json!({"text":"work","client_request_id":key,"expect_result":true})).unwrap();
+            let response = prompt_bot(State(env.app.clone()), Path(b.id.clone()), headers, Extension(RequestPrincipal::Bot(a.id)), Json(body)).await.unwrap();
+            let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+            assert_eq!(value["state"], terminal);
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE conversation_id=?").bind(&conv).fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(count, if terminal == "delivered" { 1 } else { 0 });
+            if terminal == "delivered" { assert_eq!(value["turn_id"], turn); } else { assert!(value["turn_id"].is_null()); }
+        }
+    }
+
+    #[tokio::test]
     async fn same_authenticated_request_id_queues_only_once() {
         let env = crate::testing::env().await;
         let a = crate::testing::claude_bot(&env.app, &env.project_id, "relay-idempotent-a").await;
@@ -17639,6 +17709,53 @@ mod relay_result_api_tests {
 #[cfg(test)]
 mod expert_activation_tests {
     use super::*;
+    #[tokio::test]
+    async fn marker_write_failure_rejects_expert_activation() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "marker-manager").await;
+        std::fs::write(env.app.data_dir.join("expert-sessions"), b"not a directory").unwrap();
+        let error = patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(PatchProject { mode: Some("expert".into()), manager_bot_id: Some(bot.id), label: None, handed_off_to: None })).await.unwrap_err();
+        match error { LcError::Unavailable(v) => assert_eq!(v["error"], "expert_marker_unavailable"), _ => panic!("unexpected {error:?}") }
+        assert_eq!(db::project(&env.app.db, &env.project_id).await.unwrap().unwrap().mode, "parent_child");
+    }
+
+    #[tokio::test]
+    async fn activation_and_return_to_parent_child_manage_only_the_project_marker() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "marker-manager").await;
+        let bot_cfg: crate::config::BotCfg = serde_json::from_value(json!({"id":bot.id,"name":bot.name,"kind":"claude"})).unwrap();
+        env.app.cfg.update(|cfg| { cfg.projects.push(crate::config::ProjectCfg { id:Some(env.project_id.clone()), path:env.repo.to_string_lossy().to_string(), label:"proj".into(), host:"local".into(), mode:"parent_child".into(), bots:vec![bot_cfg], handed_off_to:None }); Ok(()) }).await.unwrap();
+        crate::projection::project_config(&env.app.cfg, &env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET daemon_url_injected=1 WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
+        let shim_dir = crate::herdr_shim::install_local(&env.app.data_dir.join("bots").join(&bot.id)).unwrap();
+        let real_herdr = env.dir.join("fake-herdr");
+        std::fs::create_dir_all(env.dir.join(".config")).unwrap();
+        std::os::unix::fs::symlink(&env.app.data_dir, env.dir.join(".config/agents-manager")).unwrap();
+        crate::testing::write_exec(&real_herdr, "#!/bin/sh\nprintf 'delivered\\n'\n");
+        let old_shell = |target: &str| std::process::Command::new(shim_dir.join("herdr"))
+            .env_clear().env("HOME", &env.dir).env("PATH", "/usr/bin:/bin").env("AM_CONFIG_PATH", env.app.cfg.path.to_string_lossy().as_ref())
+            .env("AM_REAL_HERDR", &real_herdr).env("AM_BOT_ID", &bot.id).env("AM_BOT_TOKEN", "tok")
+            .env("AM_PROJECT_MODE", "parent_child").env("HERDR_SESSION", "test")
+            .args(["agent", "prompt", target, "work"]).output().unwrap();
+        assert!(old_shell("w1:p2").status.success());
+        let project = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
+        let sessions = crate::expert_marker::sessions(&env.app, &project).await.unwrap();
+        crate::expert_marker::set(&env.app, "local", "another-project", &sessions, true).await.unwrap();
+        let patch = |mode: &str| PatchProject { mode:Some(mode.into()), manager_bot_id:Some(bot.id.clone()), label:None, handed_off_to:None };
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("expert"))).await.unwrap();
+        let dir = env.app.data_dir.join("expert-sessions").join(am_base::expert_marker::encode(&sessions[0]));
+        assert!(dir.join(am_base::expert_marker::encode(&env.project_id)).is_file());
+        for target in ["w1:p2", "manager"] { assert_eq!(old_shell(target).status.code(), Some(77)); }
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch("parent_child"))).await.unwrap();
+        assert!(!dir.join(am_base::expert_marker::encode(&env.project_id)).exists());
+        assert!(dir.join(am_base::expert_marker::encode("another-project")).exists());
+        // The other project's marker still protects this session; removing it restores old behavior.
+        assert_eq!(old_shell("w1:p2").status.code(), Some(77));
+        crate::expert_marker::remove_project(&env.app, "local", "another-project").await.unwrap();
+        assert!(old_shell("w1:p2").status.success());
+    }
+
     #[tokio::test]
     async fn another_project_run_in_same_session_without_url_blocks_expert() {
         let env = crate::testing::env().await;
