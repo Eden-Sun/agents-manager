@@ -91,7 +91,8 @@ pub(super) fn pane_of(run: &db::Run) -> Option<String> {
 /// 框的狀態＋框裡的字（跟送 prompt 前的檢查同一種讀法：帶樣式，TUI 自己畫的提示不算字）。
 pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, crate::herdr::PaneRead)> {
     let read = super::delivery::read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
-    if read.pane_id != pane || read.source != SCAN_SOURCE || read.truncated {
+    // `truncated` 只代表上面還有更舊的歷史（長時間跑的 pane 都是），不代表框沒讀完整；見 `stop::clear_restored_prompt`。
+    if read.pane_id != pane || read.source != SCAN_SOURCE {
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
     }
     let state = box_state(kind, &read.text);
@@ -105,7 +106,6 @@ pub(super) fn same_snapshot(kind: &str, before: &crate::herdr::PaneRead, after: 
     before.pane_id == after.pane_id
         && before.source == after.source
         && before.format == after.format
-        && !before.truncated && !after.truncated
         && composer_frame(kind, &before.text).is_some_and(|frame| Some(frame) == composer_frame(kind, &after.text))
 }
 

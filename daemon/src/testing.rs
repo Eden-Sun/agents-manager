@@ -92,6 +92,8 @@ pub struct LivePane {
     pub revision: u64,
     /// 像真的 herdr 0.9.5：`pane.read` 的 revision 恆為 0（#1909）。預設 false，其他測試維持 `revision.max(1)`。
     pub zero_revision: bool,
+    /// 像真的 herdr 讀一顆歷史比要的列數還長的 pane：`pane.read` 回 `truncated: true`（截掉的是上面較舊的歷史，底部的框照樣完整）。
+    pub long_history: bool,
     /// A TUI that eats the Enter: the text stays in the box.
     pub swallow_enter: bool,
     /// A TUI that throws the typed text away without submitting it (the 2026-09-14 incident).
@@ -649,15 +651,15 @@ impl MockHerdr {
                                 let mut live = st.live.lock().unwrap();
                                 live.get_mut(&pid).map(|p| {
                                     p.reads += 1;
-                                    (p.render(), if p.zero_revision { 0 } else { p.revision.max(1) })
+                                    (p.render(), if p.zero_revision { 0 } else { p.revision.max(1) }, p.long_history)
                                 })
                             };
-                            let (text, revision) = live_read.unwrap_or_else(|| {
+                            let (text, revision, truncated) = live_read.unwrap_or_else(|| {
                                 let screens = st.screens.lock().unwrap();
                                 let text = screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default();
                                 let revisions = st.screen_revisions.lock().unwrap();
                                 let revision = revisions.get(&pid).or_else(|| revisions.get("*")).copied().unwrap_or(1);
-                                (text, revision)
+                                (text, revision, false)
                             });
                             // A screen set to this marker answers like a broken pane: the caller
                             // must treat a read failure as an error, never as an empty screen.
@@ -668,7 +670,7 @@ impl MockHerdr {
                                 let format = if asked_ansi && !st.ignore_ansi.load(std::sync::atomic::Ordering::SeqCst) { "ansi" } else { "text" };
                                 json!({"id": id, "result": {"type": "pane_read", "read": {
                                     "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
-                                    "format": format, "text": text, "revision": revision, "truncated": false}}})
+                                    "format": format, "text": text, "revision": revision, "truncated": truncated}}})
                             }
                         }
                         "pane.process_info" if !st.knows(&wid_of("pane_id")) => {
