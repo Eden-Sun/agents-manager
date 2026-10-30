@@ -196,6 +196,24 @@
         assert_eq!(notice_count(&f).await, 1, "once the child stops, the sweep reports it");
     }
 
+    /// 2026-10-30 m4p：child 回合 completed_fallback 卻沒有任何 assistant 訊息，parent 不能被靜默略過。
+    #[tokio::test]
+    async fn a_completed_turn_with_no_captured_reply_still_notifies_the_parent() {
+        let f = fixture("terminal_fallback", "completed_fallback").await;
+        make_parent_busy(&f, "parent-working-noreply").await;
+        sqlx::query("DELETE FROM messages WHERE turn_id = ?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        // 剛收掉的回合先等一下（訊息可能還在寫）：不報。
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await, 0, "just completed: wait for a late reply");
+        sqlx::query("UPDATE turns SET completed_at = ? WHERE id = ?").bind(db::iso_in(-300)).bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        assert_eq!(sweep(&f.env.app).await, 1);
+        assert_eq!(notice_count(&f).await, 1, "no reply captured, parent is still told the child is idle");
+        let sent: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.conversation_id = ? AND m.role = 'user' ORDER BY m.rowid DESC LIMIT 1")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(sent.contains("未擷取到回覆"), "{sent}");
+    }
+
     /// 同樣在忙，hook 收的回合照舊立刻報（只有畫面備援不可信）。
     #[tokio::test]
     async fn a_hook_turn_is_still_reported_immediately_while_the_child_works_on() {
