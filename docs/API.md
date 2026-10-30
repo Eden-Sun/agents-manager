@@ -3305,7 +3305,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 ### 專案專家模式與成員
 
-`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 啟用時無法寫入或驗證 host session 標記回 503 `expert_marker_unavailable`，不啟用 expert；切回時若標記清除失敗也回 503，設定已切回，可重試清除。`PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
+`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 啟用時無法寫入或驗證 host session 標記回 503 `expert_marker_unavailable`，不啟用 expert；切回時若標記對帳失敗也回 503，設定已切回，daemon 會重試。主機標記對帳未完成時，送往該主機 expert bot 的新 prompt 暫停，使用者請求回 503 `expert_marker_unavailable`，bot relay 回暫時不可用。`PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
 
 `GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。
 
