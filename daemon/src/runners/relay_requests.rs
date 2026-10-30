@@ -268,6 +268,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_expert_request_is_withdrawn_when_sender_is_demoted_before_flush() {
+        let env = crate::testing::env().await;
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "queued-manager").await;
+        let executor = crate::testing::claude_bot(&env.app, &env.project_id, "queued-executor").await;
+        let replacement = crate::testing::claude_bot(&env.app, &env.project_id, "new-manager").await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&executor.id).execute(&env.app.db).await.unwrap();
+        let manager_run = crate::testing::fake_run(&env.app, &manager.id).await;
+        let executor_run = crate::testing::fake_run(&env.app, &executor.id).await;
+        let snapshot = format!("{}:local:expert:manager", env.project_id);
+        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(snapshot).bind(&manager_run).execute(&env.app.db).await.unwrap();
+        assert!(crate::relay_policy::relay_prompt_allowed(&env.app, &manager.id, &executor.id, crate::relay_policy::Admission::NewRequest).await.is_ok());
+
+        let conv = db::conversation_id(&env.app.db, &executor.id).await.unwrap();
+        let request = db::ulid();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,prompt_text,client_request_id,queue_class,created_at) VALUES(?,?,'web','queued','pending','do the work',?,'relay',?)")
+            .bind(&turn).bind(&conv).bind(format!("relay-request:{request}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,'demotion','do the work','[]',?,'pending',?)")
+            .bind(&request).bind(&manager.id).bind(&executor.id).bind(&turn).bind(db::now()).execute(&env.app.db).await.unwrap();
+        // Keep exactly one manager while revoking the queued sender's dispatch authority.
+        sqlx::query("UPDATE bots SET role=CASE WHEN id=? THEN 'advisor' WHEN id=? THEN 'manager' ELSE role END WHERE id IN (?,?)")
+            .bind(&manager.id).bind(&replacement.id).bind(&manager.id).bind(&replacement.id).execute(&env.app.db).await.unwrap();
+        env.herdr.know_pane(&format!("pane-{}", executor.id));
+        let before_text = env.herdr.calls_to("pane.send_text").len();
+        let before_keys = env.herdr.calls_to("pane.send_keys").len();
+        let lock = env.app.bot_lock(&executor.id).await;
+        let _guard = lock.lock().await;
+        lifecycle::queue::flush_queued_locked(&env.app, &executor.id).await.unwrap();
+
+        let (state, error): (String, Option<String>) = sqlx::query_as("SELECT state,error FROM relay_requests WHERE id=?").bind(&request).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed");
+        assert!(error.as_deref().unwrap_or_default().contains("executor 只接受 manager"), "{error:?}");
+        let (status, run_id): (String, Option<String>) = sqlx::query_as("SELECT status,run_id FROM turns WHERE id=?").bind(&turn).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(status, "failed");
+        assert_ne!(run_id.as_deref(), Some(executor_run.as_str()), "被撤回的 turn 不得認領到 run");
+        assert!(db::queued_turn(&env.app.db, &conv).await.unwrap().is_none());
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), before_text);
+        assert_eq!(env.herdr.calls_to("pane.send_keys").len(), before_keys);
+    }
+
+    #[tokio::test]
     async fn offline_sender_keeps_answered_obligation() {
         let env = crate::testing::env().await;
         let a = crate::testing::claude_bot(&env.app, &env.project_id, "relay-a").await;
