@@ -878,7 +878,7 @@ am_agent_prompt() {
         done
         [ "$_want_timeout" = 0 ] || am_announce_refuse 75 "$_requested" "--timeout requires milliseconds"
         _timeout=$(python3 -c 'import sys; s=sys.argv[1]; assert s.isascii() and s.isdigit() and int(s)>0; print(int(s)/1000)' "$_timeout_ms" 2>/dev/null) || am_announce_refuse 75 "$_requested" "--timeout must be a positive millisecond count"
-        _deadline=$(python3 -c 'import sys,time; print(time.monotonic()+float(sys.argv[1]))' "$_timeout") || exit 75
+        _deadline=$(python3 -c 'import sys,time; print(time.time()+float(sys.argv[1]))' "$_timeout") || exit 75
         _selector=$_requested
         case "$_requested" in
             bot:*|*:p*) : ;;
@@ -891,7 +891,7 @@ am_agent_prompt() {
                 done
                 ;;
         esac
-        _remaining=$(python3 -c 'import sys,time; t=float(sys.argv[1])-time.monotonic(); assert t>0; print(t)' "$_deadline" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
+        _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
         _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_selector" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
         _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
         _resolve=$(printf '%s\n' "$_resolve_out" | sed '$d')
@@ -899,7 +899,7 @@ am_agent_prompt() {
         _target=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin)["to_bot_id"])') || am_announce_refuse 75 "$_requested" "daemon 未提供目標 bot ID"
         [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
         _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3],"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$AM_BOT_ID" "$_expect_result" "$_ack" "$_reply_to") || exit 75
-        _remaining=$(python3 -c 'import sys,time; t=float(sys.argv[1])-time.monotonic(); assert t>0; print(t)' "$_deadline" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
+        _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
         _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
         _code=$(printf '%s\n' "$_out" | tail -n 1)
         _reply=$(printf '%s\n' "$_out" | sed '$d')
