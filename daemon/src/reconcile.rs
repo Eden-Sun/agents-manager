@@ -4613,6 +4613,11 @@ mod compat_tests {
             let parent_conv = db::conversation_id(&restarted.db, &parent_id).await.unwrap();
             sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
                 .bind(db::ulid()).bind(&parent_conv).bind(&parent_run.id).bind(db::now()).execute(&restarted.db).await.unwrap();
+            // Terminal-fallback completions wait out a short settle window (child_done FALLBACK_SETTLE_SECS)
+            // before they are reported; age the capture past it instead of sleeping.
+            sqlx::query("UPDATE turns SET completed_at=? WHERE id=?")
+                .bind((chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .bind(&turn_id).execute(&restarted.db).await.unwrap();
             // Immediate notification is disabled under cfg(test); invoke its production handler.
             crate::runners::child_done::notify_turn(&restarted, &turn_id).await.unwrap();
             let crid = format!("child-done:{kid}:{turn_id}");
