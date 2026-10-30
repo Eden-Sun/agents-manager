@@ -139,7 +139,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_RECHECK_WORKING="" STUB_RECHECK_DELIVERING="" STUB_ESCALATED_APPROVAL=""
   # 舊 daemon 的形狀：acquire 回應說放寬了（這張核准），複查的 safety 卻說 escalated=false（Swapping 後放寬不算）。
   export STUB_WINDOW_ESCALATED_BY="" STUB_RECHECK_UNREADABLE="" STUB_RECHECK_OTHER_LEASE="" STUB_RECHECK_NO_FIELDS=""
-  unset STUB_SUPERVISOR_BEFORE
+  unset STUB_SUPERVISOR_BEFORE STUB_QUOTA_RESET_AT
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
   export STUB_RESTART_HELD=false
@@ -208,7 +208,7 @@ case "$sub:$op" in
                  if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ] || [ "${STUB_AGM_SUPERVISOR_FAIL_AT:-0}" = "$sup_calls" ]; then printf '{"status":"idle"}'; exit 1; fi
                  # 換版前（started 還沒出現）可用 STUB_SUPERVISOR_BEFORE 單獨指定；沒設就跟換版後同一個值。
                  if [ ! -e "$AGM_DIR/started" ] && [ -n "${STUB_SUPERVISOR_BEFORE+x}" ]; then printf '{"status":"%s"}' "$STUB_SUPERVISOR_BEFORE"; exit 0; fi
-                 printf '{"status":"%s","last_deploy":{"sha":"x","sha_full":"%s","dirty":%s}}' "$STUB_SUPERVISOR" "$STUB_DAEMON_SHA" "${STUB_DAEMON_DIRTY:-false}" ;;
+                 printf '{"status":"%s","quota_reset_at":%s,"last_deploy":{"sha":"x","sha_full":"%s","dirty":%s}}' "$STUB_SUPERVISOR" "$( [ -n "${STUB_QUOTA_RESET_AT:-}" ] && printf '"%s"' "$STUB_QUOTA_RESET_AT" || printf null )" "$STUB_DAEMON_SHA" "${STUB_DAEMON_DIRTY:-false}" ;;
   state:*)       if [ -e "$AGM_DIR/started" ]; then
                    phase=after
                    n=$(cat "$ROOT/after-state-reads" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$ROOT/after-state-reads"
@@ -892,6 +892,22 @@ for status in waiting_quota unknown; do
   check "拒絕 supervisor 非健康／未知狀態" "supervisor status 不健康或未知" "$SWAP_LOG"
   teardown
 done
+
+# issue #2033：換版前 idle（舊 daemon 還沒碰到額度）、換版後 waiting_quota 且有未來的重置時間＝額度閘門，不回滾。
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="idle" STUB_SUPERVISOR="waiting_quota" STUB_QUOTA_RESET_AT="2999-01-01T00:00:00Z"
+rc=$(run)
+check_eq "換版後 waiting_quota 帶未來重置時間不回滾（rc=0）" "0" "$rc"
+check "log 講明是額度閘門" "額度閘門擋著（重置 2999-01-01T00:00:00Z）" "$SWAP_LOG"
+check_no "沒有 ROLLBACK" "ROLLBACK requested" "$SWAP_LOG"
+teardown
+
+# 重置時間已過還在 waiting_quota：不是額度閘門能解釋的，照樣回滾。
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="idle" STUB_SUPERVISOR="waiting_quota" STUB_QUOTA_RESET_AT="2000-01-01T00:00:00Z"
+rc=$(run)
+check_eq "換版後 waiting_quota、重置時間已過要 rollback（rc=7）" "7" "$rc"
+teardown
 
 # 換版前就是 unknown（不是 waiting_quota）：沒有「額度等待」這個前提，換版後仍 unknown 也照樣 rollback。
 setup 10 10

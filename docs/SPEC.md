@@ -4572,7 +4572,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   **不另寫一套 build＋swap**，也不 fork 自己的 kick（`PATH` 只在 plist／unit 裡；launchd／systemd 都保證同一個 job 不會疊）。
   kick 讀到請求檔就**部署那顆 sha，不等 `ubuntu-ci`**（使用者按下就是裁示）：建置、換版與例行路徑同一套，安全條件（沒人 working、換前複查、備份、驗證失敗回滾）一條都不省。
   kick 再驗一次目標在 `origin/main` 上、線上版本是它的祖先（否則推 `ops_alert` 並收掉請求；`daemon-swap.sh` 取得窗口後還會重驗，#638）、相對線上有 binary 差異（沒有就收掉請求）。
-  等不到窗口（結束碼 4）就留著請求下一輪（5 分鐘）再試，同一顆已建好不會重建；請求只在換版完成（含往前修／回滾）、線上已是那顆、或目標不能部署時才收掉。
+  等不到窗口（結束碼 4）就留著請求下一輪（5 分鐘）再試，同一顆已建好不會重建；請求只在換版完成（含往前修／回滾）、線上已是那顆、目標不能部署、或請求超過 2 小時（看 `requested_at`，`AGM_NOW_TTL_SECS` 可調；推 `now_request_expired`，#2033）時才收掉。
   daemon 只把含有效 `sha`（非空白字串且沒有內部空格）的請求檔算作進行中；請求檔 JSON 壞掉或 `sha` 無效時不回報部署進行中，由 kick 偵測並清掉。有效請求檔還在、或有人握著 rebuild／restart 租約時回 409 `deploy_in_progress`。
 
 ### 18.2d 決策紀錄：不設 CD 信任閘門（使用者 2026-09-21）

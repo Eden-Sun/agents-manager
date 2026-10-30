@@ -251,7 +251,7 @@ teardown
 # 10. 立即部署：不等 ubuntu-ci（那顆是 pending），換完才刪請求檔。
 setup
 ci "$C3" pending
-printf '{"sha":"%s","live_sha":"x","requested_by":"ui"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+printf '{"sha":"%s","live_sha":"x","requested_at":"%s","requested_by":"ui"}' "$C1" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$AGM_DIR/daemon-update.now.json"
 rc=$(run)
 check_eq "rc=0" "0" "$rc"
 check "換的是請求的那顆" "--sha $C1" "$AGM_DIR/swap.log"
@@ -283,6 +283,12 @@ printf 'not json' > "$AGM_DIR/daemon-update.now.json"
 run >/dev/null
 check "推 now_request_corrupt" "now_request_corrupt" "$AGM_DIR/alerts.log"
 check_eq "壞檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+# issue #2033：超過時效的請求（timer 停著時留下的）收掉並喊人，不拿它換版。
+printf '{"sha":"%s","requested_at":"2000-01-01T00:00:00.000Z"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+run >/dev/null
+check "推 now_request_expired" "now_request_expired" "$AGM_DIR/alerts.log"
+check_eq "過期請求收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "過期請求不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
 # 13. 立即部署：只動到不進 binary 的檔（C2 相對線上 C0 之間有 C1，所以改成把線上設成 C1 再要 C2）。

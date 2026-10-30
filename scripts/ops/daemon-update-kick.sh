@@ -229,15 +229,34 @@ now_fail() { # now_fail <失敗描述>
   fi
   return 0
 }
+# 請求有時效（issue #2033）：timer 停著時留下的舊請求，會讓之後的手動觸發換成不是剛核准的那一版。
+# 超過 NOW_TTL 秒（看 requested_at；沒有這欄的舊檔不算過期）就收掉並喊人。
+NOW_TTL=${AGM_NOW_TTL_SECS:-7200}
 if [ -f "$NOW_FILE" ]; then
+  NOW_RC=0
   NOW_SHA=$(python3 -c '
 import json,sys
+from datetime import datetime,timezone
 with open(sys.argv[1]) as f: d=json.load(f)
 c=d.get("sha")
 if not isinstance(c,str) or not c.strip() or " " in c.strip(): sys.exit(1)
 print(c.strip())
-' "$NOW_FILE" 2>/dev/null) || NOW_SHA=""
-  if [ -n "$NOW_SHA" ]; then
+at=d.get("requested_at")
+if isinstance(at,str) and at.strip():
+    try: t=datetime.fromisoformat(at.strip().replace("Z","+00:00"))
+    except ValueError: sys.exit(0)
+    if t.tzinfo is None: t=t.replace(tzinfo=timezone.utc)
+    if (datetime.now(timezone.utc)-t).total_seconds()>int(sys.argv[2]): sys.exit(3)
+' "$NOW_FILE" "$NOW_TTL" 2>/dev/null) || NOW_RC=$?
+  if [ "$NOW_RC" = 3 ] && [ -n "$NOW_SHA" ]; then
+    alert now_request_expired "立即部署請求 ${NOW_SHA} 已超過 ${NOW_TTL} 秒沒做，已收掉；要部署請使用者重按一次"
+    drop_now "請求過期"
+    NOW_SHA=""
+  elif [ "$NOW_RC" != 0 ]; then
+    NOW_SHA=""
+    alert now_request_corrupt "立即部署請求 ${NOW_FILE} 讀不出 sha，已收掉；請使用者重按一次"
+    drop_now "檔案壞掉"
+  elif [ -n "$NOW_SHA" ]; then
     NOW=1
     log "立即部署請求：commit ${NOW_SHA}（使用者按下，不等 ubuntu-ci）"
   else
