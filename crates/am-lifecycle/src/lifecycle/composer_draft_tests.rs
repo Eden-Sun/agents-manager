@@ -764,17 +764,34 @@ async fn nr1913_zero_revision_clear_rejects_changed_screen_with_same_draft() {
 fn nr1913_snapshot_checks_content_and_metadata_even_with_zero_revision() {
     let before = crate::herdr::PaneRead { pane_id: "pane-a".into(), source: "visible".into(), format: "ansi".into(), text: "────\n❯ draft\n────".into(), revision: 0, truncated: false };
     assert!(same_snapshot("claude", &before, &before));
-    for field in ["pane", "source", "format", "text", "truncated"] {
+    for field in ["pane", "source", "format", "text"] {
         let mut after = before.clone();
         match field {
             "pane" => after.pane_id = "other".into(),
             "source" => after.source = "recent".into(),
             "format" => after.format = "text".into(),
-            "text" => after.text = "changed".into(),
-            _ => after.truncated = true,
+            _ => after.text = "changed".into(),
         }
         assert!(!same_snapshot("claude", &before, &after), "{field}");
     }
+    // herdr 的 `truncated` 只說上面還有更舊的歷史；框一樣就是同一個框（w17:p21 2026-10-30）。
+    let long = crate::herdr::PaneRead { truncated: true, ..before.clone() };
+    assert!(same_snapshot("claude", &long, &long));
+    assert!(same_snapshot("claude", &before, &long));
+}
+
+/// 長時間跑的 pane 歷史超過讀取列數，herdr 回 `truncated: true`：草稿照樣讀得到、清得掉（w17:p21 2026-10-30）。
+#[tokio::test]
+async fn a_long_history_pane_still_offers_and_clears_its_draft() {
+    let f = idle("claude", &["draft A"], false).await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().long_history = true;
+    let token = current_draft_token(&f, "observe").await;
+    let run = db::active_run(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+    let bot = db::bot(&f.env.app.db, &f.bot_id).await.unwrap().unwrap();
+    let client = crate::herdr::HerdrClient::new(f.env.dir.join("data/herdr.sock"));
+    clear(&f.env.app, &client, &run, &bot, &token, false).await.unwrap();
+    assert_eq!(f.keys(), [json!(["ctrl+c"])]);
+    assert!(f.composer().is_empty());
 }
 
 #[tokio::test]

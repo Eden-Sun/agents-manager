@@ -143,6 +143,19 @@ async fn an_interrupt_clears_a_restored_prompt_taller_than_the_default_tail() {
     assert!(f.env.herdr.pane("pane-a").unwrap().composer.is_empty());
 }
 
+/// 歷史比讀取列數長的 pane（herdr 回 `truncated: true`）：網頁 Esc 後放回框裡的那則照樣清掉。
+/// 以前把 `truncated` 當成畫面不完整、一聲不吭地跳過，框就一直卡著那段字（w17:p21 2026-10-30）。
+#[tokio::test]
+async fn an_interrupt_clears_a_restored_prompt_on_a_long_history_pane() {
+    let f = claude_with(vec!["等待時先強制修復該pane".into()]).await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-a").unwrap().long_history = true;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "等待時先強制修復該pane").await;
+    let _ = interrupt_turn(&f.env.app, &f.bot_id, None).await;
+    assert!(f.cleared(), "{:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert!(f.env.herdr.pane("pane-a").unwrap().composer.is_empty());
+}
+
 /// A new draft typed during the 400 ms settle belongs to the user and survives the abort cleanup.
 #[tokio::test]
 async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {

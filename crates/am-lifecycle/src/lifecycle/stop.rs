@@ -980,7 +980,9 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
         tracing::warn!(run = %run.id, "interrupt: could not read the pane to look for a restored prompt; nothing cleared");
         return;
     };
-    if candidate.pane_id != pane || candidate.source != SCAN_SOURCE || candidate.truncated {
+    // `truncated` 不看：herdr 只要 pane 的歷史比要的列數長就回 true（截的是上面較舊的歷史），長時間跑的 bot 幾乎都是；
+    // 框完不完整由 composer parser 要求框頂、框底都在範圍內把關（w17:p21 2026-10-30：放回的字因此一直沒清）。
+    if candidate.pane_id != pane || candidate.source != SCAN_SOURCE {
         return;
     }
     if !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
