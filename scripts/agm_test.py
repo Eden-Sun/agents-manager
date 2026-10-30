@@ -1500,6 +1500,25 @@ class IncidentsCommandTest(CliCase):
         self.assertEqual(self.bad("incidents")["error"], "unsupported")
 
 
+class ExpertBotCommandsTest(CliCase):
+    def test_peers_and_requests_use_only_bot_proof_without_runtime(self):
+        FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": []})
+        FakeDaemon.routes["GET /api/relay-requests"] = (200, {"requests": []})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("peers")
+            self.ok("requests", "--open", "--to", "bot-b")
+        self.assertEqual(len(FakeDaemon.seen), 2)
+        for request in FakeDaemon.seen:
+            self.assertEqual(request["bot_id"], "bot-a")
+            self.assertEqual(request["bot_token"], "bot-secret")
+            self.assertIsNone(request["token"])
+        self.assertIn("open=1", FakeDaemon.seen[-1]["path"])
+
+    def test_bot_remote_without_daemon_url_does_not_guess(self):
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
+            self.assertEqual(self.bad("peers")["error"], "no_daemon_url")
+
+
 class ModelsCommandTest(CliCase):
     @patch.dict(os.environ, {"AM_BOT_ID": "bot-agm", "AM_BOT_TOKEN": "model-test-proof"})
     def test_remote_refresh_preserves_host_identity_and_bot_auth(self):

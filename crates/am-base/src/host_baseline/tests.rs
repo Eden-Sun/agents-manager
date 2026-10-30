@@ -676,7 +676,7 @@ async fn a_failed_detection_marks_the_kept_baseline_stale_and_a_good_one_clears_
     let host = format!("stale-{}", crate::db::ulid().to_ascii_lowercase());
     let conn = app
         .hosts
-        .insert_remote_for_test(crate::config::HostCfg {
+        .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),

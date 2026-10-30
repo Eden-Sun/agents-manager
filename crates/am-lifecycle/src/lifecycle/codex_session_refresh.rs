@@ -74,7 +74,7 @@ mod tests {
             let host = format!("synthetic-remote-{}", db::ulid());
             let socket = env.dir.join("remote-refresh.sock");
             let mock = tt::MockHerdr::start(socket.clone());
-            let cfg = crate::config::HostCfg { shared_session: false, name: host.clone(), ssh: "fake".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
+            let cfg = crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.clone(), ssh: "fake".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
             app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(socket)).await;
             let fence = app.hosts.fence(&host).await.unwrap();
             sqlx::query("UPDATE runs SET host=?,host_generation=? WHERE id=?").bind(&host).bind(fence.target_epoch()).bind(&run).execute(&app.db).await.unwrap();

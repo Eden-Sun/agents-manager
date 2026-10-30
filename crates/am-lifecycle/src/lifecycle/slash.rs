@@ -1271,7 +1271,7 @@ mod login_slash_tests {
     use crate::db;
 
     fn run(state: &str, agent_status: &str, pane_id: Option<&str>) -> db::Run {
-        db::Run {
+        db::Run { daemon_url_injected: 0, runtime_role_policy: None,
             id: "r1".into(),
             bot_id: "b1".into(),
             state: state.into(),

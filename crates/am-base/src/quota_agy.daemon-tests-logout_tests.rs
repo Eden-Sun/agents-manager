@@ -60,7 +60,7 @@
         assert!(matches!(logout(&app, "no-such-host").await, Err(LogoutError::UnknownHost)));
         // 遠端那台的 agy 額度不受本機登出影響。
         let host = format!("agy-lo-{}", crate::db::ulid().to_ascii_lowercase());
-        app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -81,7 +81,7 @@
         let e = tt::env().await;
         let app = e.app.clone();
         let host = format!("agy-lo-r-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -117,7 +117,7 @@
     }
 
     fn remote_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg {
+        crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.to_string(),
             ssh: "unused".into(),

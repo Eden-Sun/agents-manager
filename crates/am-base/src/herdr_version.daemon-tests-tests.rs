@@ -79,7 +79,7 @@
     #[tokio::test]
     async fn a_cli_version_measured_before_a_reconfigure_is_not_attached_to_the_new_host() {
         let app = crate::testing::env().await.app.clone();
-        let cfg = |ssh: &str| crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None, name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let fence = app.hosts.fence("build1").await.unwrap();
         app.hosts.insert_remote_for_test(cfg("target-b")).await;
@@ -128,7 +128,7 @@ impl Drop for Finish {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
     let app = crate::testing::env().await.app.clone();
-    let cfg = |name: &str| crate::config::HostCfg { name: name.into(), ssh: name.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+    let cfg = |name: &str| crate::config::HostCfg { daemon_url: None, name: name.into(), ssh: name.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
     for name in ["aa-herdr-hung", "zz-herdr-ok"] {
         let conn = app.hosts.insert_remote_for_test(cfg(name)).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);

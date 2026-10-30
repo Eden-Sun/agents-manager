@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 ///
 /// **本機開機掃描（[`refresh_all`]）與遠端同步（[`remote_sync_script`]）讀的是同一份**——兩邊不會各改各的、
 /// 飄成兩套 shim（issue #124）。
-pub fn shims() -> [(&'static str, &'static str); 4] {
+pub fn shims() -> [(&'static str, &'static str); 5] {
     let kill = crate::kill_shim::shim_sh();
-    [("herdr", crate::herdr_shim::SHIM_SH), ("cargo", crate::cargo_shim::SHIM_SH), ("pkill", kill), ("killall", kill)]
+    [("herdr", crate::herdr_shim::SHIM_SH), ("cargo", crate::cargo_shim::SHIM_SH), ("pkill", kill), ("killall", kill), ("agm", include_str!("../../../scripts/agm.py"))]
 }
 
 /// shim 該有的權限。內容跟權限是兩件事，各自判：光內容對不代表 pane 打得起來。
@@ -107,7 +107,7 @@ pub fn refresh_all(data_dir: &Path) -> LocalRefresh {
         let started = bin.join("herdr").exists();
         for (name, content) in shims() {
             let path = bin.join(name);
-            if !path.exists() && !(started && crate::kill_shim::NAMES.contains(&name)) {
+            if !path.exists() && !(started && (crate::kill_shim::NAMES.contains(&name) || name == "agm")) {
                 continue;
             }
             let who = format!("{}/{name}", entry.file_name().to_string_lossy());
@@ -186,7 +186,7 @@ pub fn remote_sync_script(bot_dirs: &[String], names: &[&str], create_missing: b
     for name in {list}; do
         f="$B/$name"
         if [ ! -f "$f" ]; then
-            [ "{create}" = 1 ] || continue
+            [ "{create}" = 1 ] || {{ [ "$name" = agm ] && [ -f "$B/herdr" ]; }} || continue
         elif cmp -s "$T/$name" "$f"; then
             chmod 755 "$f" 2>/dev/null
             continue

@@ -567,7 +567,7 @@ AM_USAGE_DONE=0
     async fn a_superseded_claude_probe_cannot_overwrite_the_new_hosts_identity() {
         let app = crate::testing::env().await.app.clone();
         let host = "claude-identity-347";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -623,7 +623,7 @@ AM_USAGE_DONE=0
         let host = format!("claude-home-595-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg {
+            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),

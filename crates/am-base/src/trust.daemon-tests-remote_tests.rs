@@ -27,7 +27,7 @@
         let env = tt::env().await;
         let home = env.dir.join("remote-home");
         std::fs::create_dir_all(&home).unwrap();
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: host.into(),

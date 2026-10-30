@@ -19,7 +19,7 @@ use super::test_dirs;
 
 fn make_test_remote_site(scratch: &Path, host_name: &str) -> RemoteSite {
     test_support::local_sh_fake(host_name, scratch);
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host_name.to_string(),
         ssh: "fake-ssh".to_string(),
         ssh_port: 22,
@@ -573,7 +573,7 @@ async fn site_resolve_tests() {
     fences.insert("rem-1".to_string(), rem_site.conn.fence().clone());
 
     // 斷線的主機
-    let cfg_down = HostCfg {
+    let cfg_down = HostCfg { daemon_url: None,
         name: "rem-down".to_string(),
         ssh: "fake-down".to_string(),
         ssh_port: 22,
@@ -1105,7 +1105,7 @@ async fn the_local_sh_fake_survives_a_script_that_exits_before_reading_stdin() {
     let scratch = test_dirs::scratch_dir("rfs-epipe");
     let host = "host-epipe-1";
     test_support::local_sh_fake(host, &scratch);
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.to_string(),
         ssh: "fake-ssh".to_string(),
         ssh_port: 22,

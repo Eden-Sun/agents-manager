@@ -68,7 +68,7 @@
 
         let app = crate::testing::env().await.app.clone();
         let host = format!("grok-home-618-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),

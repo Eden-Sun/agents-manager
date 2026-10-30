@@ -27,7 +27,7 @@
         let host = unique_host();
         let sock = env.dir.join(format!("{host}.sock"));
         let herdr = tt::MockHerdr::start(sock.clone());
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             name: host.clone(),
             ssh: "sh1.invalid".into(),
             ssh_port: 22,

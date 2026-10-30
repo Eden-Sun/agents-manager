@@ -68,7 +68,7 @@ async fn setup(e: &tt::Env, tag: &str) -> Remote {
     let home = super::test_dirs::scratch_dir(&format!("rs3-{tag}"));
     let host = format!("rs3-{tag}-{}", db::ulid().to_lowercase());
     let shell_diag = super::remote_fs::test_support::local_sh_fake_with_diagnostics(&host, &home);
-    let cfg = HostCfg {
+    let cfg = HostCfg { daemon_url: None,
         name: host.clone(),
         ssh: "fake-ssh".into(),
         ssh_port: 22,
@@ -540,7 +540,7 @@ async fn an_unreadable_remote_svg_is_not_checked_and_not_remembered() {
 // ───────────────────────── 主機改指（#1026） ─────────────────────────
 
 fn host_cfg_for(r: &Remote) -> HostCfg {
-    HostCfg {
+    HostCfg { daemon_url: None,
         name: r.host.clone(),
         ssh: "fake-ssh".into(),
         ssh_port: 22,

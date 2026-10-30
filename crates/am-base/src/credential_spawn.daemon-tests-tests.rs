@@ -68,7 +68,7 @@
         let begin_with = |timeout_ms: &str| {
             let (app, id, t) = (app.clone(), bot.id.clone(), timeout_ms.to_string());
             async move {
-                let (st, Json(v)) = begin(State(app), bot_headers(), axum::extract::Form(SpawnBegin { bot_id: id, timeout_ms: t })).await;
+                let (st, Json(v)) = begin(State(app), bot_headers(), axum::extract::Form(SpawnBegin { bot_id: id, timeout_ms: t, purpose: String::new() })).await;
                 assert_eq!(st, StatusCode::OK, "{v}");
                 v["permit_id"].as_str().unwrap().to_string()
             }
@@ -97,7 +97,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("spawn-repoint-{}", crate::db::ulid().to_ascii_lowercase());
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),
@@ -120,7 +120,7 @@
         let (status, Json(begin_body)) = begin(
             State(app.clone()),
             bot_headers(),
-            axum::extract::Form(SpawnBegin { bot_id: bot.id.clone(), timeout_ms: String::new() }),
+            axum::extract::Form(SpawnBegin { bot_id: bot.id.clone(), timeout_ms: String::new(), purpose: String::new() }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{begin_body}");

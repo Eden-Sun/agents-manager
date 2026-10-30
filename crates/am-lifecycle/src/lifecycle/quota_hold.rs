@@ -682,7 +682,7 @@ mod tests {
     async fn a_previous_boot_hold_only_counts_while_the_host_still_points_at_the_same_machine() {
         let env = tt::env().await;
         let app = env.app.clone();
-        let cfg = |name: &str, ssh: &str| crate::config::HostCfg {
+        let cfg = |name: &str, ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: name.into(),
             ssh: ssh.into(),

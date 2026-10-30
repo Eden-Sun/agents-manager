@@ -4015,7 +4015,7 @@ mod external_claim_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("repoint-{}", db::ulid());
-        let host_cfg = |ssh: &str| crate::config::HostCfg {
+        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),
@@ -4142,7 +4142,7 @@ mod external_claim_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("samemachine-{}", db::ulid());
-        let host_cfg = |remote_path: &str| crate::config::HostCfg {
+        let host_cfg = |remote_path: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "m4p@100.112.229.82".into(),

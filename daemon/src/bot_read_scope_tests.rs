@@ -146,7 +146,7 @@ async fn bot_state_is_scoped_to_self_and_descendants_and_redacts_launch_secrets(
                 env: [("IDENTITY_ENV_SECRET".into(), "identity-secret".into())].into(),
                 args: vec!["IDENTITY_ARG_SECRET".into()],
             });
-            cfg.hosts.push(crate::config::HostCfg {
+            cfg.hosts.push(crate::config::HostCfg { daemon_url: None,
                 name: "victim-host".into(),
                 ssh: "victim-host.example".into(),
                 ssh_port: 22,

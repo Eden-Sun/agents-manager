@@ -480,7 +480,7 @@ mod tests {
     async fn remote_operations_all_use_the_selected_hosts_ssh_and_remote_paths() {
         let env = crate::testing::env().await;
         let name = format!("upgrade-{}", crate::db::ulid());
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             name: name.clone(),
             ssh: "never-connect.invalid".into(),
             ssh_port: 22,

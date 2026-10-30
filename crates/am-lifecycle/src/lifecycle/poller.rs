@@ -3755,7 +3755,7 @@ mod issue_17_tests {
 
     /// 把 fixture 的專案放到遠端主機 `m4p`（同一個假 herdr 當那台的 socket）。
     async fn on_remote_host(f: &Fixture) {
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
