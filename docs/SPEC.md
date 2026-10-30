@@ -4813,7 +4813,7 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 - 記憶體不足導致指令被殺就回報並停止，不重試迴圈。
 
 ### 18.5 AGM 派 child 的模型預設
-`cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；
+`cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；使用者以 `POST /api/supervisor/fallback {"model":"sonnet"}` 固定成 `sonnet` 時控制器不再切換（使用者 2026-10-30：fable 對巡檢不划算，改 sonnet low）；
 控制器讀的額度 key 跟寫入端同一條規則（`quota::quota_base_for_host(local, "claude", identity)`），查不到就是沒有讀數（不動），**不借裸 `claude` 那格**——那可能是另一個帳號（review2 quota L3）；
 協調者固定 `cc0/opus/high`，沒有自動切換（§18.15）。
 
