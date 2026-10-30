@@ -88,9 +88,18 @@ pub async fn strip_remote_control_args(app: &(impl crate::capabilities::Cfg + cr
     Ok(stale.len())
 }
 
+/// 巡檢可用的模型。`fable`／`opus` 由控制器依 Fable 週桶自動互換；`sonnet` 是使用者
+/// 指定的固定模型（2026-10-30），控制器不會把它切走，只有 `fallback {model}` 改得動。
+pub const CANDIDATES: [&str; 3] = ["fable", "opus", "sonnet"];
+
+/// 不認得的值一律當 `fable`（舊行為）。
+pub fn candidate(model: &str) -> &'static str {
+    CANDIDATES.into_iter().find(|c| *c == model).unwrap_or("fable")
+}
+
 /// Resolve the supervisor candidate and apply the shared retired-model policy before launch.
 pub fn model_arg(candidate: &str) -> &'static str {
-    crate::models::canonical_model("claude", if candidate == "opus" { "opus" } else { "fable" })
+    crate::models::canonical_model("claude", self::candidate(candidate))
 }
 
 pub fn other_candidate(candidate: &str) -> &'static str {
@@ -395,6 +404,8 @@ mod tests {
     #[test]
     fn candidates_stay_aliases_so_a_model_release_cannot_strand_the_supervisor() {
         assert_eq!(model_arg("fable"), "fable");
+        assert_eq!(model_arg("sonnet"), "sonnet");
+        assert_eq!(model_arg("bogus"), "fable");
         assert_eq!(model_arg("opus"), "claude-opus-5-5");
         assert_eq!(other_candidate("fable"), "opus");
         assert_eq!(other_candidate("opus"), "fable");

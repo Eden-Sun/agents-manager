@@ -454,7 +454,7 @@ pub async fn switch_candidate(
         return Ok(false);
     }
 
-    let next = if next == "opus" { "opus" } else { "fable" };
+    let next = super::setup::candidate(next);
     let model = super::setup::model_arg(next).to_string();
     // Config first, so a restart comes up on the new candidate even if the live switch fails.
     #[cfg(test)]

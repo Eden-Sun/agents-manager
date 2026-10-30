@@ -66,11 +66,22 @@ pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcErr
     Ok(Json(super::status_json(app.as_ref()).await?))
 }
 
-/// Switch to the other fixed candidate. Bounded: see `runtime::switch_candidate`.
-pub async fn post_fallback(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+#[derive(Deserialize, Default)]
+pub struct FallbackIn {
+    /// 指定要切去哪個候選（`setup::CANDIDATES`）；省略＝fable／opus 互換。
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Switch to the other fixed candidate, or to `model` when given. Bounded: see `runtime::switch_candidate`.
+pub async fn post_fallback(State(app): State<Arc<App>>, body: Option<Json<FallbackIn>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let next = setup::other_candidate(&sup.active_model);
+    let next = match body.and_then(|Json(b)| b.model) {
+        Some(m) if setup::CANDIDATES.contains(&m.as_str()) => setup::candidate(&m),
+        Some(m) => return Err(LcError::Bad(format!("unknown supervisor model `{m}` (one of {:?})", setup::CANDIDATES))),
+        None => setup::other_candidate(&sup.active_model),
+    };
     let switched = super::runtime::switch_candidate(&app, next, "requested", None).await?;
     let mut out = super::status_json(&app).await?;
     out["switched"] = json!(switched);

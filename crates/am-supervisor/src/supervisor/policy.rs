@@ -116,6 +116,10 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
         return if budget_spent && !reset_passed { Decision::Keep } else { Decision::Resume };
     }
 
+    // 使用者指定的固定模型（sonnet）：Fable 週桶跟它無關，不自動切走。
+    if !matches!(sup.active_model.as_str(), "fable" | "opus") {
+        return Decision::Keep;
+    }
     let idle = matches!(liveness, "idle" | "stopped");
     let fable = usable_fable(q, now);
     if sup.active_model == "fable" {
@@ -353,5 +357,17 @@ mod tests {
         let q = quota(w(24.0, LATER), w(40.0, MUCH_LATER), None);
         assert_eq!(decide(&sup("fable", "", None, None), Some(&q), "idle", now()), Decision::Keep);
         assert_eq!(decide(&sup("opus", "", None, None), Some(&q), "idle", now()), Decision::Keep);
+    }
+
+    #[test]
+    fn a_pinned_sonnet_is_never_switched_but_still_waits_on_quota() {
+        // Fable 見底、或 Fable 又滿了：sonnet 都不動。
+        for fable in [w(99.0, MUCH_LATER), w(0.0, MUCH_LATER)] {
+            let q = quota(w(24.0, LATER), w(40.0, MUCH_LATER), fable);
+            assert_eq!(decide(&sup("sonnet", "", None, None), Some(&q), "idle", now()), Decision::Keep);
+        }
+        // 共用窗見底照樣等額度。
+        let q = quota(w(99.0, LATER), w(40.0, MUCH_LATER), w(10.0, MUCH_LATER));
+        assert!(matches!(decide(&sup("sonnet", "", None, None), Some(&q), "idle", now()), Decision::WaitQuota { .. }));
     }
 }
