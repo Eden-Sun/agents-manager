@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn a_zero_ssh_port_is_refused_before_it_can_be_written() {
         let mut cfg = ConfigFile::default();
-        cfg.hosts.push(crate::config::HostCfg { shared_session: false, name: "m4p".into(), ssh: "m4p@host".into(), ssh_port: 0, ssh_opts: vec![], herdr_session: "s".into(), remote_path: String::new() });
+        cfg.hosts.push(crate::config::HostCfg { daemon_url: None, shared_session: false, name: "m4p".into(), ssh: "m4p@host".into(), ssh_port: 0, ssh_opts: vec![], herdr_session: "s".into(), remote_path: String::new() });
         let err = crate::projection::validate(&cfg).unwrap_err().to_string();
         assert!(err.contains("ssh_port"), "{err}");
         let mut cfg = ConfigFile::default();

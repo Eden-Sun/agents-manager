@@ -258,7 +258,7 @@ async fn r2_user_bot_and_project_routes_enqueue_after_projection() {
         let cli_id = cli.id.clone();
         env.app.cfg.update(move |cfg| {
             let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{cli_id}'\nname = 'r2-cli'\nkind = 'claude'\n")).unwrap();
-            cfg.projects = vec![crate::config::ProjectCfg { handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![bot] }, crate::config::ProjectCfg { handed_off_to: None, id: Some("r2-sentinel-project".into()), path: sentinel_path, label: "sentinel".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
+            cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![bot] }, crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some("r2-sentinel-project".into()), path: sentinel_path, label: "sentinel".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
             Ok(())
         }).await.unwrap();
         let response = if target == "bot" {
@@ -413,7 +413,7 @@ async fn r2_project_route_cleans_child_adopted_after_snapshot() {
     let project_id = env.project_id.clone(); let repo = env.repo.to_string_lossy().to_string(); let cli_id = cli.id.clone();
     env.app.cfg.update(move |cfg| {
         let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{cli_id}'\nname = 'r2-cli'\nkind = 'claude'\n")).unwrap();
-        cfg.projects = vec![crate::config::ProjectCfg { handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![bot] }, crate::config::ProjectCfg { handed_off_to: None, id: Some("r2-other".into()), path: other_path, label: "other".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
+        cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![bot] }, crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some("r2-other".into()), path: other_path, label: "other".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
         Ok(())
     }).await.unwrap();
     let pool = env.app.db.clone(); let project_id = env.project_id.clone();
@@ -489,7 +489,7 @@ async fn r2_uncommitted_project_intent_does_not_enqueue_scan() {
     let env = fixture().await;
     let project_id = env.project_id.clone(); let repo = env.repo.to_string_lossy().to_string();
     env.app.cfg.update(move |cfg| {
-        cfg.projects = vec![crate::config::ProjectCfg { handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
+        cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(project_id), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] }];
         Ok(())
     }).await.unwrap();
     let payload = serde_json::json!({"bots": []});

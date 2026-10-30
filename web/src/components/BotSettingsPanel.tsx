@@ -536,6 +536,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-banner ok" role="status">{t('已儲存，回合結束後自動套用。')}</div>
       ) : null}
 
+      {bot.role_pending ? <div className="bs-banner warn" role="status">待套用：設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</div> : null}
+      {project?.mode === 'expert' ? <label>角色
+        <select value={bot.role ?? ''} onChange={(e) => void patchBot(botId, { role: (e.target.value || null) as 'manager' | 'executor' | 'advisor' | null })}>
+          <option value="">未分配</option><option value="executor">執行者</option><option value="advisor">顧問</option><option value="manager" disabled>管理者（在專案設定中指定）</option>
+        </select>
+      </label> : null}
       <div className="bs-body">
         <form
           className="form"

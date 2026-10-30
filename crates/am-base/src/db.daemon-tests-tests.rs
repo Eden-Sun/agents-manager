@@ -1392,6 +1392,9 @@
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
         sqlx::query("DROP TABLE relay_requests").execute(&mut *tx).await.unwrap();
+        for (table, col) in [("projects", "mode"), ("bots", "role"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
+            sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
+        }
         sqlx::query("DROP TABLE child_done_sources").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
@@ -1519,6 +1522,9 @@
         let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
         let pool=open(&path).await.unwrap();
         sqlx::query("DROP TABLE relay_requests").execute(&pool).await.unwrap();
+        for (table, col) in [("projects", "mode"), ("bots", "role"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
+            sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
+        }
         sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();

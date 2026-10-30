@@ -49,7 +49,7 @@
     async fn a_repointed_host_cannot_publish_the_old_connection_snapshot() {
         let env = crate::testing::env().await;
         let host = "host-changed-fence-test";
-        let cfg = |ssh: &str| HostCfg {
+        let cfg = |ssh: &str| HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -189,7 +189,7 @@
     async fn a_fenced_host_operation_holds_its_authority_until_completion() {
         let env = crate::testing::env().await;
         let host = "authority-gate-test";
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: "target-a".into(),
@@ -471,7 +471,7 @@
     }
 
     fn cfg() -> HostCfg {
-        HostCfg {
+        HostCfg { daemon_url: None,
             shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
@@ -538,7 +538,7 @@
     async fn replacing_a_host_forgets_what_was_observed_through_the_old_connection() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        let mk = |name: &str, ssh: &str| HostCfg { name: name.into(), ssh: ssh.into(), ..cfg() };
+        let mk = |name: &str, ssh: &str| HostCfg { daemon_url: None, name: name.into(), ssh: ssh.into(), ..cfg() };
         app.hosts.insert_remote_for_test(mk("inv-347", "target-a")).await;
         app.hosts.insert_remote_for_test(mk("other-347", "target-o")).await;
         let reading = || crate::quota::Quota {
@@ -830,7 +830,7 @@
     async fn a_remote_directory_whose_path_has_a_newline_is_refused_not_truncated() {
         let host = "canon-newline-host";
         set_ssh_fake(host, |_| Ok("/home/u/a\nb\n".to_string()));
-        let conn = HostConn::remote(HostCfg { name: host.into(), ..cfg() }, None);
+        let conn = HostConn::remote(HostCfg { daemon_url: None, name: host.into(), ..cfg() }, None);
         let err = remote_canonical_dir(&conn, "/home/u/a\nb").await;
         assert!(err.is_err(), "換行的路徑不能被截成 /home/u/a：{err:?}");
     }
@@ -839,7 +839,7 @@
     async fn remote_canonical_dir_preserves_trailing_spaces_in_the_path() {
         let host = format!("canon-space-{}", crate::db::ulid());
         set_ssh_fake(&host, |_| Ok("/home/u/project  \n".to_string()));
-        let conn = HostConn::remote(HostCfg { name: host, ..cfg() }, None);
+        let conn = HostConn::remote(HostCfg { daemon_url: None, name: host, ..cfg() }, None);
         let path = remote_canonical_dir(&conn, "/home/u/project  ").await.unwrap();
         assert_eq!(path, "/home/u/project  ");
 
@@ -853,7 +853,7 @@
     /// shared_session 不換機器，指紋不動；改了任一個被看的欄位就變。跨行程要算得出一樣的數字（決定性）。
     #[test]
     fn target_epoch_follows_the_machine_not_the_settings() {
-        let base = HostCfg {
+        let base = HostCfg { daemon_url: None,
             shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
@@ -865,10 +865,10 @@
         let e = target_epoch(&base);
         assert!(e >= 0, "指紋去掉符號位：{e}");
         assert_eq!(target_epoch(&base.clone()), e);
-        assert_eq!(target_epoch(&HostCfg { remote_path: "/opt/bin".into(), ..base.clone() }), e, "remote_path 不換機器");
-        assert_eq!(target_epoch(&HostCfg { ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()], ..base.clone() }), e, "ssh_opts 不換機器");
-        assert_eq!(target_epoch(&HostCfg { shared_session: true, ..base.clone() }), e, "shared_session 不換機器");
-        assert_ne!(target_epoch(&HostCfg { ssh: "m4p@10.0.0.9".into(), ..base.clone() }), e, "ssh 目標換了就是另一台");
-        assert_ne!(target_epoch(&HostCfg { ssh_port: 2222, ..base.clone() }), e);
-        assert_ne!(target_epoch(&HostCfg { herdr_session: "other".into(), ..base.clone() }), e);
+        assert_eq!(target_epoch(&HostCfg { daemon_url: None, remote_path: "/opt/bin".into(), ..base.clone() }), e, "remote_path 不換機器");
+        assert_eq!(target_epoch(&HostCfg { daemon_url: None, ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()], ..base.clone() }), e, "ssh_opts 不換機器");
+        assert_eq!(target_epoch(&HostCfg { daemon_url: None, shared_session: true, ..base.clone() }), e, "shared_session 不換機器");
+        assert_ne!(target_epoch(&HostCfg { daemon_url: None, ssh: "m4p@10.0.0.9".into(), ..base.clone() }), e, "ssh 目標換了就是另一台");
+        assert_ne!(target_epoch(&HostCfg { daemon_url: None, ssh_port: 2222, ..base.clone() }), e);
+        assert_ne!(target_epoch(&HostCfg { daemon_url: None, herdr_session: "other".into(), ..base.clone() }), e);
     }

@@ -2,6 +2,8 @@
 
 
 pub mod model_mode;
+mod expert_peers;
+pub mod relay_policy;
 pub mod runners;
 pub mod codex_reset;
 pub mod schedules;
@@ -217,7 +219,6 @@ pub mod build_info;
 #[cfg(test)]
 #[path = "../../crates/am-supervisor/src/relay_auth.rs"]
 pub mod relay_auth;
-pub mod relay_policy;
 mod app_ports_r2a9;
 mod api;
 #[cfg(test)]

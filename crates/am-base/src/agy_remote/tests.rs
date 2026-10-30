@@ -227,7 +227,7 @@ async fn remote_conn(env: &tt::Env, home: &Path) -> (std::sync::Arc<HostConn>, S
     let conn = env
         .app
         .hosts
-        .insert_remote_for_test(HostCfg { shared_session: false, name: host.clone(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() })
+        .insert_remote_for_test(HostCfg { daemon_url: None, shared_session: false, name: host.clone(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() })
         .await;
     *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
     let fake_home = home.to_path_buf();

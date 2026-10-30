@@ -295,7 +295,7 @@ mod tests {
         let sock = env.dir.join("data").join("herdr-m4p.sock");
         let remote = tt::MockHerdr::start(sock.clone());
         remote.set_screen(&s.pane_id, crate::tui_prompts::screens::AUTO_MODE);
-        let cfg = crate::config::HostCfg {
+        let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),

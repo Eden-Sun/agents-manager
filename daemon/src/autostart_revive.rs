@@ -260,7 +260,7 @@ mod tests {
     async fn an_unreachable_remote_host_loses_nothing_and_revives_nothing() {
         let env = tt::env().await;
         let host = "revive-asleep";
-        let cfg = config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         assert!(!conn.is_connected());
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
@@ -285,7 +285,7 @@ mod tests {
 
         let env = tt::env().await;
         let host = "revive-late-offline";
-        let cfg = config::HostCfg {
+        let cfg = config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: "127.0.0.1".into(),

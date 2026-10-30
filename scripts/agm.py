@@ -202,9 +202,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base: str, timeout: float = DEFAULT_TIMEOUT, extra_headers: dict | None = None) -> None:
+    def __init__(self, base: str, timeout: float = DEFAULT_TIMEOUT, extra_headers: dict | None = None, *, bot_remote: bool = False) -> None:
         # 再擋一次 loopback：Client 可能被別的路徑（測試、之後的呼叫端）直接建出來。
-        self.base = check_loopback(base).rstrip("/")
+        if bot_remote:
+            parts = urllib.parse.urlsplit(base)
+            if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
+                raise AgmError("bad_daemon_url", "AM_DAEMON_URL 不合法", 2)
+            self.base = f"{parts.scheme}://{parts.netloc}"
+        else:
+            self.base = check_loopback(base).rstrip("/")
         self.timeout = timeout
         self._token: str | None = None
         # 角色身份（見 bot_auth_headers）。只跟著需要驗證的 API 請求走，不送去 /api/session。
@@ -1909,6 +1915,17 @@ def _with_relay(body: dict, cfg: dict, args) -> None:
 QUOTA_PROBE_TIMEOUT = 300.0
 
 
+def cmd_peers(client: Client, cfg: dict, args) -> object:
+    project_id = os.environ.get("AM_PROJECT_ID", "")
+    if not project_id:
+        raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
+    return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers")
+
+
+def cmd_requests(client: Client, cfg: dict, args) -> object:
+    return client.get("/api/relay-requests", {"from": args.from_bot, "to": args.to_bot, "open": "1" if args.open else None})
+
+
 def cmd_models(client: Client, cfg: dict, args) -> object:
     """模型查詢／刷新沿用 Client 的角色憑證，權限由 daemon 判定。"""
     query = {"kind": args.kind, "host": args.host, "identity": args.identity,
@@ -2901,6 +2918,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
 
+    s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
+    s.set_defaults(func=cmd_peers)
+    s = sub.add_parser("requests", help="查詢請求結果通知")
+    s.add_argument("--to", dest="to_bot")
+    s.add_argument("--from", dest="from_bot")
+    s.add_argument("--open", action="store_true")
+    s.set_defaults(func=cmd_requests)
+
     s = sub.add_parser("models", help="查可用模型；--refresh 由 AGM／User 更新指定主機與身份快取")
     s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"])
     s.add_argument("--host", default="local", help="執行 CLI 的主機名；不是 daemon 的位址")
@@ -3011,9 +3036,21 @@ def main(argv: list[str] | None = None) -> int:
         cfg: dict = {}
         client = None
         if getattr(args, "needs_client", True):
-            cfg = load_runtime(args.runtime_dir)
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            client = Client(daemon_url(cfg), timeout, bot_auth_headers(cfg))
+            if args.cmd in ("peers", "requests") and os.environ.get("AM_BOT_ID"):
+                headers = bot_auth_headers({})
+                if not headers.get("X-AM-Bot-Token"):
+                    raise AgmError("no_bot_token", "缺少 bot 憑證", 2)
+                url = os.environ.get("AM_DAEMON_URL")
+                if not url:
+                    port = os.environ.get("AM_PORT")
+                    if not port or not port.isdigit():
+                        raise AgmError("no_daemon_url", "缺少 AM_DAEMON_URL；遠端主機需設定 daemon_url", 2)
+                    url = f"http://127.0.0.1:{port}"
+                client = Client(url, timeout, headers, bot_remote=True)
+            else:
+                cfg = load_runtime(args.runtime_dir)
+                client = Client(daemon_url(cfg), timeout, bot_auth_headers(cfg))
             # 沒用 --timeout 明講、而且是 daemon 這一側本來就跑得久的操作：放寬預設（見 SLOW_TIMEOUT）。
             if args.timeout is None and _is_slow_command(args):
                 client.timeout = SLOW_TIMEOUT
