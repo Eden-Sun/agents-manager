@@ -2879,6 +2879,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   `herdr agent start` 開的 claude child 不帶 daemon 的 `--settings`，吃帳號自己的設定，**保留原生閒置壓縮**（child 不在保溫對象內，沒有別的機制替它省 context）。
   設定檔只在 bot 啟動時寫，修正前就在跑的 parent 要重啟一次才生效；不要在帳號層的 `settings.json` 關掉它，那樣 child 也一起關了。
 - 對話頁點 context 展開小卡，顯示既有用量和手動壓縮入口；Codex 沒有讀數時仍可展開。手機從 Git／專案資訊彈窗進入；只有閒置時能送出。
+- 主力晶片的顯示名稱以專案名稱首字大寫加句點作前綴；專案缺失或空白時顯示原名，不更動 bot 名稱。
 - **Codex 壓縮完成（issue #1878）**：只以本輪已記錄的輸入為證據：實際送出的 `prompt_text` 是 `/compact`（可帶參數），未記錄時才退回檢查 user 訊息全是該指令，才按壓縮收尾，只留系統訊息、不落 assistant。daemon 的 `lifecycle::compact`（主力熱壓與 context 旁的手動壓縮鈕）送出成功後，在同一個 bot 鎖內建立帶 `prompt_text=/compact` 的 external turn 並啟動進度備援，不等 working edge 建立無輸入的回合。
   壓縮 turn 閒置完成時收為 completed；畫面上的 `Context compacted · <時間>` 只用來補系統訊息的時長，不能證明事件。主力熱壓已有說明時沿用，120 秒內的重播不重寫。
   其他 turn（含對話中途自動壓縮、沒有 echo 的畫面）一律按普通回覆擷取與收尾；不得因 `Context compacted` 字樣丟棄回覆或保留 in_flight。終端擷取以完成列分隔 history cell、保留最新回覆並剝掉尾端 `Worked for …`；自動壓縮後若已有新回覆，保留新回覆，不把前一個壓縮 cell 拼進正文。正常回答即使完全等於 `Context compacted · 3s` 且緊接完成列，也照常落訊息。

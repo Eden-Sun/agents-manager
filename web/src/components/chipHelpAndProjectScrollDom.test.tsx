@@ -68,3 +68,21 @@ test('點左邊 menu 的專案標題：選取並把那個專案捲到側欄頂�
     else delete proto.scrollIntoView
   }
 })
+
+test('主力名稱加所屬專案首字，專案變更會更新；其他與未知專案維持原名', async () => {
+  useStore.setState({
+    projects: [{ ...project('p1'), label: 'agents Manager' }, { ...project('p2'), label: 'wits' }],
+    bots: [bot('b1', 'p1', true), bot('b2', 'p2', true), bot('b3', 'missing', true), bot('b4', 'p2', false)],
+    runs: { b4: { state: 'running', agent_status: 'working' } },
+  } as never)
+  await mount(<UnreadChip />)
+  assert.equal(document.querySelector('[data-bot-id="b1"] .unread-chip-name')?.textContent, 'A.bot-b1')
+  assert.equal(document.querySelector('[data-bot-id="b2"] .unread-chip-name')?.textContent, 'W.bot-b2')
+  assert.equal(document.querySelector('[data-bot-id="b3"] .unread-chip-name')?.textContent, 'bot-b3')
+  assert.ok([...document.querySelectorAll('.unread-chip-name')].some((e) => e.textContent === 'bot-b4'))
+  await act(() => useStore.setState({ projects: [{ ...project('p1'), label: 'pt' }, { ...project('p2'), label: 'wits' }] } as never))
+  assert.equal(document.querySelector('[data-bot-id="b1"] .unread-chip-name')?.textContent, 'P.bot-b1')
+  await act(() => useStore.setState({ projects: [{ id: 'p1' }, { ...project('p2'), label: ' ' }] } as never))
+  assert.equal(document.querySelector('[data-bot-id="b1"] .unread-chip-name')?.textContent, 'bot-b1')
+  assert.equal(document.querySelector('[data-bot-id="b2"] .unread-chip-name')?.textContent, 'bot-b2')
+})
