@@ -72,6 +72,7 @@ pub async fn child_already_reported(
     let relayed: Vec<String> = sqlx::query_scalar(
         "SELECT m.content FROM messages m
           WHERE m.conversation_id = ? AND m.role = 'user' AND m.relay_from = ? AND m.relay_turn_id = ?
+            AND EXISTS (SELECT 1 FROM turns delivered WHERE delivered.id = m.turn_id AND delivered.delivery = 'ok' AND delivered.delivery_verified = 1 AND delivered.status <> 'queued')
             AND NOT EXISTS (SELECT 1 FROM turns nt WHERE nt.id = m.turn_id
                              AND substr(nt.client_request_id, 1, length(?)) = ?)
           ORDER BY m.created_at DESC LIMIT 16",
@@ -204,17 +205,21 @@ pub async fn record_unsent_attempt(
     .execute(db)
     .await?;
     if attempt >= limit {
-        let payload = serde_json::json!({
-            "source": "daemon",
-            "reason": "child_done_undeliverable",
-            "subject": child_name,
-            "bot_id": parent_bot_id,
-            "detail": format!("子 agent {child_name} 的完成通知連續 {} 次送不進 parent 的輸入框（composer_unreadable），已停止補送。", attempt + 1),
-            "action": "到 parent 的終端看輸入框：要送就按 Enter，不要就清掉；之後的通知才會再送。",
-        });
-        crate::supervisor_inbox::push_inbox(db, &format!("child_done_undeliverable:{base_crid}"), "ops_alert", None, Some(parent_bot_id), None, &payload).await?;
+        alert_undeliverable(db, parent_bot_id, child_name, base_crid, attempt).await?;
     }
     Ok(attempt)
+}
+
+/// Persist one operator alert for an exhausted delivery batch, including failures from the queue.
+pub async fn alert_undeliverable(db: &sqlx::SqlitePool, parent_bot_id: &str, child_name: &str, base: &str, attempt: u32) -> anyhow::Result<()> {
+    let payload = serde_json::json!({
+        "source": "daemon", "reason": "child_done_undeliverable", "subject": child_name,
+        "bot_id": parent_bot_id,
+        "detail": format!("子 agent {child_name} 的完成通知連續 {} 次未能送達，已停止補送。", attempt + 1),
+        "action": "檢查 parent 的終端與通知佇列，並讀取 child 的 pane。",
+    });
+    crate::supervisor_inbox::push_inbox(db, &format!("child_done_undeliverable:{base}"), "ops_alert", None, Some(parent_bot_id), None, &payload).await?;
+    Ok(())
 }
 
 pub fn truncate(s: &str, limit: usize) -> String {
