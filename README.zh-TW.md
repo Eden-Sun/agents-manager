@@ -134,6 +134,7 @@ hook 細節見 [`docs/HOOK.md`](docs/HOOK.md)。
 - **Jev 建議** — 判斷層替 blocked 問題的選項評分並標「Jev 建議」；只建議，不代答。[SPEC §4.3c](docs/SPEC.md)。
 - **Claude API key** — 一次性 LLM 工作（更新分診、changelog 翻譯）不必開完整的 Claude Code session。[SPEC §4.3d](docs/SPEC.md)。
 - **分享 Bot** — 受限或信任的 Bot，透過獨立的分享入口提供。[SPEC §20](docs/SPEC.md)。
+- **模型用法模式** — 設定→顯示可選 `claude`（預設，行為不變）或 `claude_codex`（claude 主、codex 輔助：主 parent 用 opus；fable、gpt-6-astra 當顧問；gpt-6.1-terra、gpt-6-luna、haiku、sonnet 當執行者；codex child 依專案／模組長駐、claude child 一次性）。模式規則在 bot 啟動時注入，切換後已在跑的 bot 要重啟才套用。
 - **更新檢查** — 設定的一個分頁列出每台主機的 herdr、agent CLI 與 hook integration。[SPEC §6.9c](docs/SPEC.md)。
 
 ![設定的更新檢查：各主機的 CLI 與 herdr integration 版本](docs/screenshots/readme/zh-TW/settings-updates.png)
