@@ -3204,6 +3204,7 @@ max_input_chars={n}
 - 來源 session：來源 bot 最近一次有 `native_session_id` 的 run（跑著的也算——三家 CLI 的 fork 都是讀對話檔，不打擾原本那顆）。本機對話檔不在就拒絕，避免 CLI 找不到對話直接退出。
 - 新 bot：config.toml 條目照抄來源（同一個 identity／env 才找得到那段對話），`autostart=false`，名字預設 `<來源>-fork`，**插在來源正下方**（陣列位置＝側欄順序；使用者 2026-09-15）。建好後以 `StartOpts.fork_session` 啟動一次：
   claude、grok 附 `--resume <id> --fork-session`；codex 的 `fork` 是子命令，`fork <id>` 排在所有參數最前（三家 CLI help 2026-09-14 實測）。不寫 `runs.resume_session_id`：fork 本來就會拿到新 id，不能當成 resume mismatch。
+- fork bot 每次啟動時由 `fork_ops` 辨識來源，將來源 bot 名、agent 名及啟動當下仍登錄的來源 child agent 名加入該 bot 的專屬啟動指示，提醒先核對 `AM_AGENT_NAME` 與 `herdr agent list`；不操作 child。一般 bot、clone 與來源 bot 不受影響。Claude、Grok 與 Codex 使用各自既有完整指示注入管道；Codex fork 若指定自訂 profile 而無法保證完整注入則拒絕啟動。
 - 對話檔（claude）：只找來源 bot 自己的 run（`bot_id` ＋同 sid，取最新一筆；別顆 bot 的同 sid 不算，`native_session_id` 是 provider 的 id，不是全域的 run id；#1168）。搬到新 bot 的身份失敗（檔不在、複製失敗）就**不啟動**、`fork_ops` 記 `failed` 與 `start_error`，不再只記 warn 硬開一顆接不到對話的 fork。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - **還沒記到自己 session 就重啟（#1761）**：fork 出來的第一代還沒回報 session（剛 fork 就換身份重啟；遠端 hook 經 spool 晚幾秒才到），

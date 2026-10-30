@@ -1193,6 +1193,22 @@ async fn codex_home_dir(app: &impl HostsAccess, project: &db::Project, env: &Val
     Some(format!("{}/.codex", home.trim_end_matches('/')))
 }
 
+/// Build the fork-specific suffix from the durable fork operation and current source children.
+async fn fork_identity_note(pool: &sqlx::SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+    let source: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT b.id, b.name, p.label FROM fork_ops f JOIN bots b ON b.id=f.source_bot_id JOIN projects p ON p.id=b.project_id WHERE f.target_bot_id=? ORDER BY f.created_at DESC LIMIT 1",
+    ).bind(bot_id).fetch_optional(pool).await?;
+    let Some((source_id, source_name, label)) = source else { return Ok(None) };
+    let source_agent: Option<String> = sqlx::query_scalar("SELECT agent_name FROM runs WHERE bot_id=? AND agent_name IS NOT NULL ORDER BY rowid DESC LIMIT 1")
+        .bind(&source_id).fetch_optional(pool).await?;
+    let source_agent = source_agent.unwrap_or_else(|| crate::config::agent_name(&label, &source_id));
+    let children: Vec<String> = sqlx::query_scalar(
+        "SELECT r.agent_name FROM bots b JOIN runs r ON r.rowid=(SELECT r2.rowid FROM runs r2 WHERE r2.bot_id=b.id AND r2.agent_name IS NOT NULL ORDER BY r2.rowid DESC LIMIT 1) WHERE b.parent_bot_id=? AND b.deleted_at IS NULL ORDER BY r.agent_name",
+    ).bind(&source_id).fetch_all(pool).await?;
+    let children = if children.is_empty() { "（目前沒有已知 child）".to_string() } else { children.join("、") };
+    Ok(Some(format!("你是從 {source_name}（agent 名 {source_agent}）fork 出來的新 bot。來源對話裡的 child {children} 屬於來源 bot，不屬於你。派工或操作 child 前，先確認 `$AM_AGENT_NAME`，並用 `herdr agent list` 確認 child 屬於自己。")))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stage_persona(
     app: &impl HostsAccess,
@@ -1203,11 +1219,17 @@ async fn stage_persona(
     agent: &str,
     agent_md: Option<&str>,
     identity_args: &[String],
+    fork_note: Option<&str>,
 ) -> StagedPersona {
     let staged = |name: Option<String>| name.map(StagedPersona::Staged).unwrap_or(StagedPersona::Failed);
+    let full_persona = || {
+        let mut full = super::setup::persona_text(bot, agent, agent_md);
+        if let Some(note) = fork_note { full.push_str("\n\n"); full.push_str(note); }
+        full
+    };
     match bot.kind.as_str() {
         "claude" | "grok" => {
-            let full = super::setup::persona_text(bot, agent, agent_md);
+            let full = full_persona();
             let path = if bot.kind == "grok" {
                 super::agent_md::install_grok_rules(app, bot, project, shim_dir, &full).await
             } else {
@@ -1218,6 +1240,7 @@ async fn stage_persona(
         "codex" => {
             let own = bot.args();
             if has_profile_arg(identity_args.iter().chain(own.iter())) {
+                if fork_note.is_some() { return StagedPersona::FailedWithReason("fork 的 Codex 自訂 profile 無法注入完整身分提醒；請移除 -p／--profile".into()); }
                 return StagedPersona::KeptInline(
                     "這顆 codex bot 的參數已指定 -p／--profile，完整啟動指示無法走 profile；改以 -c developer_instructions= 帶入，\
                      會被 herdr 的 900 bytes 指令上限截斷（只剩 AG Man 規則的前段）。要完整指示請拿掉 -p／--profile"
@@ -1225,7 +1248,7 @@ async fn stage_persona(
                 );
             }
             let Some(home) = codex_home_dir(app, project, env).await else { return StagedPersona::Failed };
-            let full = super::setup::persona_text(bot, agent, agent_md);
+            let full = full_persona();
             match super::agent_md::install_codex_profile(app, bot, project, &home, &full).await {
                 Ok(name) => StagedPersona::Staged(name),
                 Err(error) => StagedPersona::FailedWithReason(error.to_string()),
@@ -1350,10 +1373,11 @@ async fn start_inner_body(
     }
     // Identity args are read once: `stage_persona` needs them to see a codex `-p`, and the argv below appends them.
     let identity_args_v = if restricted.is_some() { Vec::new() } else { identity_args(app, bot, &project.host).await };
+    let fork_note = if restricted.is_some() { None } else { fork_identity_note(app.db(), &bot.id).await.map_err(up)? };
     let staged_persona = if restricted.is_some() {
         StagedPersona::NotNeeded
     } else {
-        stage_persona(app, bot, project, shim_dir.as_deref(), &env, &agent, agent_md.configured.then_some(agent_md.text.as_str()), &identity_args_v)
+        stage_persona(app, bot, project, shim_dir.as_deref(), &env, &agent, agent_md.configured.then_some(agent_md.text.as_str()), &identity_args_v, fork_note.as_deref())
             .await
     };
     let refuse = match (&staged_persona, bot.kind.as_str()) {
@@ -2790,7 +2814,7 @@ mod resume_args_tests {
         let no_env = serde_json::json!({});
         let stage = |b: db::Bot| {
             let (app, project, no_env) = (e.app.clone(), project.clone(), no_env.clone());
-            async move { super::stage_persona(&app, &b, &project, None, &no_env, "x", None, &[]).await }
+            async move { super::stage_persona(&app, &b, &project, None, &no_env, "x", None, &[], None).await }
         };
         assert!(matches!(stage(bot.clone()).await, super::StagedPersona::Failed), "claude without a bot dir");
         let mut grok = bot.clone();
@@ -3223,6 +3247,51 @@ mod resume_args_tests {
         let staged = e.dir.join("own-cfg/projects/-own/sid-src.jsonl");
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "{}\n", "來源對話要搬到 fork 出來的身份底下");
         assert!(started_args(&e).pop().unwrap().windows(3).any(|w| w == ["--resume", "sid-src", "--fork-session"]), "{:?}", started_args(&e));
+    }
+
+    #[tokio::test]
+    async fn fork_note_is_staged_for_all_three_provider_paths() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "fork-stage").await;
+        let project = db::project(e.app.db(), &e.project_id).await.unwrap().unwrap();
+        let shim = e.dir.join("fork-stage/shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        let home = e.dir.join("fork-codex-home");
+        let env = serde_json::json!({"CODEX_HOME": home.to_string_lossy()});
+        for kind in ["claude", "grok", "codex"] {
+            let mut b = bot.clone(); b.kind = kind.into();
+            let result = super::stage_persona(&e.app, &b, &project, Some(shim.to_str().unwrap()), &env, "new-agent", None, &[], Some("FORK-REMINDER-2043")).await;
+            let super::StagedPersona::Staged(reference) = result else { panic!("{kind} staging failed") };
+            let file = if kind == "codex" { home.join(format!("{reference}.config.toml")) } else { std::path::PathBuf::from(&reference) };
+            let contents = std::fs::read_to_string(file).unwrap();
+            assert!(contents.contains("FORK-REMINDER-2043"), "{kind}");
+            assert!(contents.contains("new-agent"), "{kind}");
+            let args = super::super::setup::persona_args(&b, "new-agent", None, Some(&reference));
+            assert!(args.iter().any(|a| a.contains(&reference)), "{kind}: {args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_identity_note_uses_source_and_its_children_only() {
+        let e = env().await;
+        crate::fork_ops::migrate(e.app.db()).await.unwrap();
+        let src = claude_bot(&e.app, &e.project_id, "old-bot").await;
+        let target = claude_bot(&e.app, &e.project_id, "new-bot").await;
+        let child = claude_bot(&e.app, &e.project_id, "old-child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&src.id).bind(&child.id).execute(e.app.db()).await.unwrap();
+        for (bot, agent) in [(&src, "old-agent"), (&child, "old-agent-child")] {
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES (?,?,'stopped','idle',?,?)")
+                .bind(db::ulid()).bind(&bot.id).bind(agent).bind(db::now()).execute(e.app.db()).await.unwrap();
+        }
+        crate::fork_ops::insert(e.app.db(), &crate::fork_ops::ForkOp {
+            client_request_id: db::ulid(), source_bot_id: src.id.clone(), requested_name: String::new(),
+            target_bot_id: target.id.clone(), session_id: "old-session".into(), name: target.name.clone(),
+            state: "started".into(), run_id: None, start_error: None,
+        }).await.unwrap();
+        let note = super::fork_identity_note(e.app.db(), &target.id).await.unwrap().unwrap();
+        for text in ["old-bot", "old-agent", "old-agent-child", "$AM_AGENT_NAME", "herdr agent list"] { assert!(note.contains(text), "{note}"); }
+        assert!(super::fork_identity_note(e.app.db(), &src.id).await.unwrap().is_none());
+        assert!(super::fork_identity_note(e.app.db(), &child.id).await.unwrap().is_none());
     }
 
     /// #1761：剛 fork 就換身份重啟，第一代還沒回報 session（遠端 hook 晚到）：接回原對話時改從 fork 的來源再分一次，
