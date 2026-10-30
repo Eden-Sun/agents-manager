@@ -39,6 +39,11 @@ async function openIdleChatWithAUserMessage(text: string) {
       return useStore.getState().runs[bot.id]?.state === 'running'
     }, 'bot running')
   }
+  // 共用 mock 是行程單例：同一分片前面的測試（例如 keepWarmDom）可能留下還沒結束的回合，送之前先等它閒下來，否則 409。
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[bot.id]?.agent_status === 'idle'
+  }, 'bot idle before prompting')
   await mock.request('POST', `/bots/${bot.id}/prompt`, { text, client_request_id: `rw-${Date.now()}` })
   // mock 的回合約 2.4 秒；用 /state 推進前端看到的 run 狀態，等到 idle。
   await until(async () => {
