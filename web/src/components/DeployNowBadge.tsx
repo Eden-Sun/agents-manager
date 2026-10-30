@@ -3,7 +3,7 @@
  *
  * 線上 binary 落後 origin/main、而且有會進 binary 的差異時才出現，寫落後幾個 commit；按下去先開確認框
  * （要上線的 commit 範圍、正在 working 的 bot），確認後 `POST /api/deploy/now`——daemon 寫下請求檔
- * 並叫起既有的自動部署（daemon-update-kick），直接部署那顆 commit、不等 ubuntu-ci，沒人 working 才換版等安全條件照舊。部署在跑時 chip 改寫「部署中」、不給再按。
+ * 並叫起既有的自動部署（daemon-update-kick），直接部署那顆 commit、不等 ubuntu-ci，也不等 working 的 bot（送達臨界區等安全條件照舊）。部署在跑時 chip 改寫「部署中」、不給再按。
  */
 import { useCallback, useEffect, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
@@ -118,7 +118,7 @@ export function DeployNowBadge() {
             </ul>
             <p className={status.working.length ? 'deploy-working' : undefined}>
               {status.working.length
-                ? t('正在 working：{names}——換 binary 會等它們跑完，不會中途砍掉。', { names: status.working.map((w) => w.name).join(t('、')) })
+                ? t('正在 working：{names}——不等它們跑完就換版；pane 不會關，正在送訊息時才等。', { names: status.working.map((w) => w.name).join(t('、')) })
                 : t('目前沒有 bot 在 working。')}
             </p>
             <p className="deploy-note">

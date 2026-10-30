@@ -390,7 +390,7 @@ export default {
   '送出中': 'Sending',
   '線上 {live} → 上線 {target}（origin/main），共 {behind} 個 commit，其中 {code} 個動到程式碼。': 'Live {live} → deploy {target} (origin/main): {behind} commits in total, {code} of them touch code.',
   '…還有 {n} 個': '…{n} more',
-  '正在 working：{names}——換 binary 會等它們跑完，不會中途砍掉。': 'Working: {names}. Swapping the binary waits for them to finish; nothing is killed midway.',
+  '正在 working：{names}——不等它們跑完就換版；pane 不會關，正在送訊息時才等。': 'Working: {names}. The swap does not wait for them to finish; panes stay open, and it only waits while a message is being delivered.',
   '目前沒有 bot 在 working。': 'No Bot is working right now.',
   '不等排程、不等 ubuntu-ci；在專用乾淨 checkout 建置（建置已在推 main 前測過），備份 binary 與 DB，驗證失敗自動回滾。進度看 {log}': 'Does not wait for the schedule or ubuntu-ci. Builds in a dedicated clean checkout (already tested before the push to main), backs up the binary and DB, and rolls back automatically if verification fails. Progress: {log}',
   '裝好的 daemon-update-kick.sh 還不認得立即部署，要先照 scripts/ops/README.md install 新版。': 'The installed daemon-update-kick.sh does not recognize Deploy now yet. Install the new version first, following scripts/ops/README.md.',
