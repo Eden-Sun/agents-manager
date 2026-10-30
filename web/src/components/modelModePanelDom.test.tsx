@@ -4,11 +4,17 @@ import { mount, setupDom, settle, teardownDom, unmountAll } from '../testing/dom
 import { resetStoreForTest } from '../store/store'
 import { ModelModePanel } from './ModelModePanel'
 
-afterEach(unmountAll)
+// 這裡直接換掉全域 fetch：每條測試後放回，否則同一個 bun 行程（分片）後面的測試會吃到這份假回應。
+const realFetch = globalThis.fetch
+afterEach(async () => {
+  globalThis.fetch = realFetch
+  await unmountAll()
+})
 before(setupDom)
-after(() => {
+after(async () => {
+  globalThis.fetch = realFetch
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 function stub(puts: string[]) {
