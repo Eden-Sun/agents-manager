@@ -660,6 +660,16 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
   )
 }
 
+/** 未登入時的登入入口：codex 走 shell／身份登入，其餘走 `/login` 或身份登入。 */
+function PopLogin({ entry, host }: { entry: QuotaEntry; host: string }) {
+  const t = useT()
+  return entry.kind === 'codex' ? (
+    <CodexShellLogin host={host} identity={entry.identity} />
+  ) : (
+    <QuotaLoginSlash kind={entry.kind} host={host} hostLabel={hostLabel(host, t)} identity={entry.identity} />
+  )
+}
+
 /** Codex 預設帳號開 shell 登入；命名身份走 daemon 展開該主機的設定。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
   const t = useT()
@@ -836,13 +846,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
                   ? t('背景查詢中')
                   : t('尚未取得（啟動一個 {kind} bot 後回報）', { kind: KIND_LABEL[entry.kind] })}
           </p>
-          {loggedOut ? (
-            entry.kind === 'codex' ? (
-              <CodexShellLogin host={host} identity={entry.identity} />
-            ) : (
-              <QuotaLoginSlash kind={entry.kind} host={host} hostLabel={hostLabel(host, t)} identity={entry.identity} />
-            )
-          ) : null}
+          {loggedOut ? <PopLogin entry={entry} host={host} /> : null}
         </>
       ) : (
         entry.kind === 'agy' ? (
@@ -874,6 +878,13 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
         </>
         )
       )}
+      {/* 留著舊讀數的帳號登出了（2026-10-30 本機 cc1：10-25 登出後一直灰著，登入鈕卻只在「完全沒讀數」時才出現）：照樣給登入。 */}
+      {loggedOut && supported && !agyMissing && known && (five !== null || seven !== null || fable !== null) ? (
+        <>
+          <p className="quota-pop-note warn">{t('{host} 上這個帳號未登入，上面是登出前的舊讀數。', { host: hostLabel(host, t) })}</p>
+          <PopLogin entry={entry} host={host} />
+        </>
+      ) : null}
       {entry.kind === 'codex' ? <CodexResetHint now={now} detail /> : null}
       {/* agy 沒有 CLI 登出，daemon 直接清憑證；已經未登入就沒東西可清。 */}
       {entry.kind === 'agy' && !loggedOut ? (
