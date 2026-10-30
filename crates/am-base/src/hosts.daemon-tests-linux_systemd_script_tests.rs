@@ -49,7 +49,7 @@ exit 0"#,
         );
         // nohup 分支是背景起的：真的睡一下，等待迴圈才不會在假 herdr 起來之前就跑完（最多 20 × 50ms）。
         fake(&bin, "sleep", "/bin/sleep 0.05");
-        let cfg = HostCfg {
+        let cfg = HostCfg { daemon_url: None,
             name: "lx1".into(),
             ssh: "lx1.invalid".into(),
             ssh_port: 22,

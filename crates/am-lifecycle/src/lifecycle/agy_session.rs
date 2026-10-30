@@ -374,7 +374,7 @@ mod tests {
             .app
             .hosts
             .insert_remote_with_client_for_test(
-                crate::config::HostCfg {
+                crate::config::HostCfg { daemon_url: None,
                     shared_session: false,
                     name: host.clone(),
                     ssh: "unused".into(),

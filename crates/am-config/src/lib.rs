@@ -177,6 +177,8 @@ pub struct BotCfg {
     pub id: Option<String>,
     pub name: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// None = the CLI's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -251,6 +253,8 @@ impl IdentityCfg {
 /// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostCfg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_url: Option<String>,
     /// `"local"` is reserved.
     pub name: String,
     pub ssh: String,
@@ -272,6 +276,8 @@ pub struct HostCfg {
     pub shared_session: bool,
 }
 
+fn default_project_mode() -> String { "parent_child".into() }
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
     /// Missing on hand-written files; filled in (ULID) and written back on first load.
@@ -279,6 +285,8 @@ pub struct ProjectCfg {
     pub id: Option<String>,
     pub path: String,
     pub label: String,
+    #[serde(default = "default_project_mode")]
+    pub mode: String,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -430,7 +438,7 @@ mod host_baseline_cfg_tests {
     use super::*;
 
     fn host(name: &str) -> HostCfg {
-        HostCfg {
+        HostCfg { daemon_url: None,
             name: name.into(),
             ssh: "box".into(),
             ssh_port: 22,
@@ -2236,7 +2244,7 @@ mod v40_tests {
     use super::{attach_command, normalize_effort, HostCfg};
 
     fn host(port: u16) -> HostCfg {
-        HostCfg {
+        HostCfg { daemon_url: None,
             shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
@@ -2920,7 +2928,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

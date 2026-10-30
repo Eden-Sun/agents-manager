@@ -50,7 +50,7 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL_MODE AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_DAEMON_URL AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_PROJECT_MODE AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
 
 # API calls use the independent bot credential. Keep the hook-token fallback for already-running
 # hook-enabled panes until they restart to receive AM_BOT_TOKEN.
@@ -147,7 +147,11 @@ _AM_SPAWN_TIMEOUT_MS=""
 # 遠端 bot 就一顆子 pane／子 agent 都開不出來。遠端子 pane 本來也登記不到 daemon（/relay/pane 一樣要 AM_PORT），
 # fence 在那邊保護不到任何東西。
 am_spawn_fenced() {
-    [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_PORT:-}" ]
+    [ -n "${AM_BOT_ID:-}" ] && { [ -n "${AM_DAEMON_URL:-}" ] || [ -n "${AM_PORT:-}" ]; }
+}
+
+am_spawn_daemon_base() {
+    if [ -n "${AM_DAEMON_URL:-}" ]; then printf '%s' "${AM_DAEMON_URL%/}"; elif [ -n "${AM_PORT:-}" ]; then printf 'http://127.0.0.1:%s' "$AM_PORT"; else return 1; fi
 }
 
 am_spawn_begin() {
@@ -158,9 +162,10 @@ am_spawn_begin() {
         printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
         return 75
     fi
-    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/begin" \
+    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/begin" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
-        --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" 2>/dev/null)
+        --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" \
+        --data-urlencode "purpose=${1:-agent}" 2>/dev/null)
     _rc=$?
     _code=$(printf '%s\n' "$_out" | tail -n 1)
     _body=$(printf '%s\n' "$_out" | sed '$d')
@@ -186,11 +191,11 @@ am_spawn_finish() {
         return 75
     fi
     _tok=$(am_bot_token)
-    if [ -z "$_tok" ] || [ -z "${AM_PORT:-}" ] || ! command -v curl >/dev/null 2>&1; then
+    if [ -z "$_tok" ] || [ -z "$(am_spawn_daemon_base)" ] || ! command -v curl >/dev/null 2>&1; then
         printf 'agents-manager: 無法登記憑證繼承 pane；保留 spawn fence\n' >&2
         return 75
     fi
-    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/finish" \
+    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/finish" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" \
         --data-urlencode "pane_id=${_pane}" \
@@ -209,8 +214,8 @@ am_spawn_abort() {
     [ -n "${_AM_SPAWN_PERMIT:-}" ] || return 0
     [ -n "${AM_BOT_ID:-}" ] || return 0
     _tok=$(am_bot_token)
-    if [ -n "$_tok" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
-        am_curl_bot -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/abort" \
+    if [ -n "$_tok" ] && [ -n "$(am_spawn_daemon_base)" ] && command -v curl >/dev/null 2>&1; then
+        am_curl_bot -s -m 2 -X POST "$(am_spawn_daemon_base)/relay/spawn/abort" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" >/dev/null 2>&1 || true
     fi
@@ -383,13 +388,30 @@ am_agent_start() {
             -h | --help) exec "$AM_HERDR" agent start "$@" ;;
         esac
     done
-    if [ "${AM_MODEL_MODE:-}" = claude_codex ] && [ "${AM_KIND:-}" = codex ]; then
-        printf 'agents-manager: 這個模式下 codex 不開 child，把要另派的事寫進回報交給 claude parent\n' >&2
-        exit 77
-    fi
     if [ -n "${AM_CHILD_OF:-}" ]; then
         printf 'agents-manager: 你是 `%s` 派出的子 agent，禁止再開子 agent。需要更多人手：停下來在回報裡寫清楚要另派什麼、為什麼，由 `%s` 決定要不要開兄弟 agent\n' "$AM_CHILD_OF" "$AM_CHILD_OF" >&2
         exit 77
+    fi
+    if [ -n "${AM_BOT_ID:-}" ]; then
+        _spawn_url=${AM_DAEMON_URL:-}
+        if [ -z "$_spawn_url" ] && [ -n "${AM_PORT:-}" ]; then _spawn_url="http://127.0.0.1:${AM_PORT}"; fi
+        _spawn_token=$(am_bot_token)
+        if [ -z "$_spawn_url" ]; then
+            if [ "${AM_PROJECT_MODE:-parent_child}" != parent_child ]; then
+                printf 'agents-manager: expert 或未知模式缺少 daemon 位址，無法確認派工權限\n' >&2
+                exit 77
+            fi
+        else
+            if [ -z "$_spawn_token" ] || ! command -v curl >/dev/null 2>&1; then
+                printf 'agents-manager: 無法確認目前派工權限（缺 bot 憑證或 curl）\n' >&2
+                exit 77
+            fi
+            _spawn_status=$(am_curl_bot --noproxy '*' -H "X-AM-Bot-Id: ${AM_BOT_ID}" -s -o /dev/null -w '%{http_code}' -m 3 "${_spawn_url%/}/api/spawn-authority" 2>/dev/null) || _spawn_status=""
+            if [ "$_spawn_status" != 200 ]; then
+                printf 'agents-manager: 目前角色沒有派工權限或無法確認權限；請向 manager 請求人手\n' >&2
+                exit 77
+            fi
+        fi
     fi
     _n=$#
     _i=0
@@ -666,7 +688,7 @@ am_agent_start() {
         [ -z "$_idkv" ] || _hd=$(am_kv_get "$_idkv" CLAUDE_CONFIG_DIR)
         am_ensure_claude_hook "$_hd"
     fi
-    am_spawn_begin || exit $?
+    am_spawn_begin agent || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}"
     if [ -z "${AM_BOT_ID:-}" ]; then
@@ -746,7 +768,6 @@ am_reexport_env_before_start() {
         [ -z "$_acct_key" ] || [ "$_k" != "$_acct_key" ] || continue
         eval "_v=\${$_k:-}"
         [ "$_k" != AM_AGENT_NAME ] || [ -z "$_child_name" ] || _v=$_child_name
-        if [ "$_k" = AM_KIND ] && [ "${AM_MODEL_MODE:-}" = claude_codex ] && [ -n "$5" ]; then _v=$5; fi
         [ -n "$_v" ] || continue
         [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
         _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
@@ -1115,7 +1136,7 @@ am_forward_with_env() {
     # Every managed pane creation is fenced, even without a display purpose: an empty pane still
     # retains AM_BOT_ID / AM_BOT_TOKEN and can start a child after the parent restarts.
     if am_spawn_fenced; then
-        am_spawn_begin || exit $?
+        am_spawn_begin pane || exit $?
         trap 'am_spawn_abort; exit 130' INT TERM
         _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
         _rc=$?
@@ -1193,13 +1214,14 @@ pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
     // 暫存檔 + rename：直接覆寫的話，正在跑的那支 shim 會讀到寫到一半的內容，而且中途死掉會留下
     // 一個不能執行的檔案（`shim_refresh::write_atomic`）。內容一樣就不動。
     crate::shim_refresh::write_atomic(&dir.join("herdr"), SHIM_SH)?;
+    crate::shim_refresh::write_atomic(&dir.join("agm"), include_str!("../../../scripts/agm.py"))?;
     Ok(dir)
 }
 
 /// Same ssh path as `hook.sh` (SPEC §11.4). 暫存檔＋chmod＋rename（原子），內容一樣就不重寫——
 /// 跟本機、跟重連後的補版（`shim_refresh::sync_remote`）是同一支腳本（issue #124）。
 pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> anyhow::Result<String> {
-    let r = crate::shim_refresh::sync_remote(conn, &[remote_bot_dir.to_string()], &["herdr"], true).await?;
+    let r = crate::shim_refresh::sync_remote(conn, &[remote_bot_dir.to_string()], &["herdr", "agm"], true).await?;
     if !r.failed.is_empty() {
         anyhow::bail!("remote herdr shim install failed: {:?}", r.failed);
     }

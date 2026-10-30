@@ -18,6 +18,8 @@ pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate
         // event_key 帶內容雜湊：同一個版本換不動只會有一則（`push_inbox` 是 INSERT OR IGNORE），
         // 下一顆 binary 帶了新 shim 又失敗才是新的一則。
         let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor_inbox::short_hash(wanted.as_bytes()));
+        let expert: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND p.mode='expert' AND b.deleted_at IS NULL AND p.deleted_at IS NULL)").bind(bot_id).fetch_one(app.db()).await.unwrap_or(false);
+        if expert { let _ = crate::supervisor_inbox::push_inbox(app.db(), &format!("expert-shim-stale:{who}"), "ops_alert", None, Some(bot_id), None, &json!({"bot_id":bot_id,"message":"bot shim 更新失敗，專家模式派工權限可能過期"})).await; }
         let _ = crate::supervisor_inbox::push_inbox(
             app.db(),
             &key,
@@ -69,7 +71,9 @@ pub(crate) async fn refresh_remote_host(app: &(impl crate::capabilities::Db + cr
 /// 網路斷了幾分鐘、sshd 還沒起來、磁碟滿了有人正在清，三次加起來 80 秒全都趕不上，
 /// 而補版的下一次機會要等這台**掉線再連上**（一直連著就等到 daemon 重啟）。
 /// 補版沒成的原因記在 `app.remote_shim_stale`，由 `supervisor::incidents` 開票（issue #534）。
-async fn note_stale(app: &impl crate::shim_refresh::RemoteShimStale, host: &str, why: String) {
+async fn note_stale(app: &(impl crate::shim_refresh::RemoteShimStale + crate::capabilities::Db), host: &str, why: String) {
+    let expert: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE host=? AND mode='expert' AND deleted_at IS NULL)").bind(host).fetch_one(app.db()).await.unwrap_or(false);
+    if expert { let _ = crate::supervisor_inbox::push_inbox(app.db(), &format!("expert-remote-shim-stale:{host}"), "ops_alert", None, None, None, &json!({"host":host,"message":why})).await; }
     app.remote_shim_stale().lock().await.insert(host.to_string(), why);
 }
 

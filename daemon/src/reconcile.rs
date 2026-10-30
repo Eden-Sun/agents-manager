@@ -1192,6 +1192,7 @@ async fn adopt_child(
             bot_id
         }
     };
+    alert_expert_child(app, parent, child_name, &bot_id).await?;
     let run_id = db::ulid();
     let status = agent.agent_status.normalized().as_str().to_string();
     sqlx::query(
@@ -1218,6 +1219,24 @@ async fn adopt_child(
         sync_pane_model(app, host, client, &child, agent).await;
     }
     Ok(bot_id)
+}
+
+async fn alert_expert_child(app: &(impl Db + Emit + TurnCommands), parent: &db::Bot, child_name: &str, bot_id: &str) -> anyhow::Result<()> {
+    if let Some(project) = db::project(app.db(), &parent.project_id).await? {
+        if project.mode == "expert" && (parent.role.as_deref() != Some("manager") || parent.parent_bot_id.is_some() || parent.managed_by == "child") {
+            let key = format!("expert-unauthorized-child:{bot_id}");
+            let message = format!("專家模式發現非管理者 {} 開出 child {}；已追蹤此 child，請檢查派工來源。", parent.name, child_name);
+            let inserted = crate::supervisor_inbox::push_inbox(app.db(), &key, "ops_alert", None, Some(&parent.id), None, &json!({"project_id":project.id,"child_id":bot_id,"message":message})).await?;
+            if inserted.is_some() {
+                let manager: Option<String> = sqlx::query_scalar("SELECT id FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(app.db()).await?;
+                if let Some(manager) = manager {
+                    let conv = db::conversation_id(app.db(), &manager).await?;
+                    app.insert_message(&conv, None, "system", &message, "system", false, None).await?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 讀不出狀態列時，連續失敗的兩次讀取之間跳過的拍數上限（一拍約 10 秒，64 拍約 10 分鐘）。
@@ -2610,7 +2629,7 @@ mod compat_tests {
             .update(move |cfg| {
                 let b: crate::config::BotCfg =
                     toml::from_str(&format!("id = '{alfa}'\nname = 'alfa'\nkind = 'claude'\n")).unwrap();
-                cfg.projects = vec![crate::config::ProjectCfg {
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(),
                     handed_off_to: None,
                     id: Some(pid),
                     path,
@@ -5481,5 +5500,25 @@ mod codex_runtime_probe_tests {
         };
         assert_eq!(model.as_deref(), Some("gpt-6.1-sol"));
         assert!(passes <= 65, "讀得出來後要在封頂的拍數內校正，實際第 {passes} 拍");
+    }
+}
+
+#[cfg(test)]
+mod expert_alert_tests {
+    use super::*;
+    #[tokio::test]
+    async fn non_manager_child_is_reported_once_to_manager() {
+        let env = crate::testing::env().await;
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "manager").await;
+        let worker = crate::testing::claude_bot(&env.app, &env.project_id, "worker").await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        alert_expert_child(&*env.app, &worker, "kid", "child-id").await.unwrap();
+        alert_expert_child(&*env.app, &worker, "kid", "child-id").await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM supervisor_inbox WHERE kind='ops_alert' AND event_key='expert-unauthorized-child:child-id'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 1);
+        let conv = db::conversation_id(&env.app.db, &manager.id).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE conversation_id=? AND content LIKE '%worker%'").bind(conv).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(count, 1);
     }
 }

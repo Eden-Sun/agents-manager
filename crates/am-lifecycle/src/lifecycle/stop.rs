@@ -1695,7 +1695,7 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = "restart-stop-repoint";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
@@ -1756,7 +1756,7 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = "restart-preview-repoint";
-        let cfg = |ssh: &str| crate::config::HostCfg {
+        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: ssh.into(),

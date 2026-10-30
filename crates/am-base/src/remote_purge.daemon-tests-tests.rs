@@ -13,7 +13,7 @@
     /// 專案在遠端主機 `host`、主機連線物件有家目錄（不必真的 ssh），ssh 換成記錄腳本的假貨。
     async fn remote(host: &str) -> Remote {
         let env = tt::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/home/x".into());
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
@@ -39,7 +39,7 @@
 
     /// 第二台遠端主機與它自己的專案（同一份 calls、同一個 fail 開關），回傳專案 id。
     async fn second_remote_project(r: &Remote, host: &str) -> String {
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = r.env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/home/x".into());
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);

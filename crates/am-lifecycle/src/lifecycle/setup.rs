@@ -1134,7 +1134,7 @@ mod remote_grok_diagnostic_tests {
         let conn = env
             .app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg {
+            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
@@ -1700,6 +1700,11 @@ pub async fn pane_env_for_fence(
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
+    let mode = crate::db::project(app.db(), &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("project missing while preparing pane environment"))?.mode;
+    env.insert("AM_PROJECT_MODE".into(), json!(mode));
+    env.remove("AM_DAEMON_URL");
+    let daemon_url = if host == LOCAL_HOST { Some(format!("http://127.0.0.1:{}", app.port())) } else { fence.conn().cfg.as_ref().and_then(|c| c.daemon_url.clone()).filter(|s| !s.is_empty()) };
+    if let Some(url) = daemon_url { env.insert("AM_DAEMON_URL".into(), json!(url)); }
     reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir().to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
@@ -2366,7 +2371,7 @@ mod model_args_tests {
     use crate::db::Bot;
 
     fn bot(kind: &str, model: Option<&str>, effort: Option<&str>, fast: bool) -> Bot {
-        Bot {
+        Bot { role: None,
             id: "b".into(),
             project_id: "p".into(),
             name: "n".into(),
@@ -3730,7 +3735,7 @@ mod pane_env_tests {
     use crate::testing as tt;
 
     async fn remote_home(app: &Arc<App>, host: &str, home: &str) {
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.into(),
             ssh: "unused".into(),
@@ -3760,6 +3765,25 @@ mod pane_env_tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn daemon_url_is_owned_by_daemon_and_missing_remote_is_not_guessed() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "url").await;
+        remote_home(&env.app, "box", "/home/remote").await;
+        let local = pane_env(&env.app, &bot, LOCAL_HOST, "run", "name", None).await.unwrap();
+        assert_eq!(local["AM_DAEMON_URL"], json!(format!("http://127.0.0.1:{}", env.app.port)));
+        let remote = pane_env(&env.app, &bot, "box", "run", "name", None).await.unwrap();
+        assert!(remote.get("AM_DAEMON_URL").is_none());
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            daemon_url: Some("http://100.80.47.75:7788".into()), shared_session: false,
+            name: "box2".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![],
+            herdr_session: "agents-manager".into(), remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some("/home/remote".into());
+        let remote = pane_env(&env.app, &bot, "box2", "run", "name", None).await.unwrap();
+        assert_eq!(remote["AM_DAEMON_URL"], json!("http://100.80.47.75:7788"));
     }
 
     /// §6.5f：本機 pane 拿到自己的 outbox（啟動時就建好），自訂 env 搬不走；遠端拿那台上的目錄（網頁走 ssh 列）。
@@ -3874,7 +3898,7 @@ mod pane_env_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener); // 沒人在聽：連線一定失敗，不會碰到真的主機。
-        let host_cfg = crate::config::HostCfg {
+        let host_cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: "box".into(),
             ssh: "127.0.0.1".into(),
@@ -3901,7 +3925,7 @@ mod pane_env_tests {
         let env = tt::env().await;
         let app = &env.app;
         let host = format!("pane-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -4214,7 +4238,7 @@ mod remote_install_permission_tests {
         let conn = env
             .app
             .hosts
-            .insert_remote_for_test(HostCfg {
+            .insert_remote_for_test(HostCfg { daemon_url: None,
                 shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
@@ -4271,7 +4295,7 @@ mod remote_install_permission_tests {
         });
         std::fs::write(&hooks_path, existing.to_string()).unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -4326,7 +4350,7 @@ mod remote_install_permission_tests {
         let user_file = hooks_path.join("user-config.json");
         std::fs::write(&user_file, "leave this directory alone").unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
@@ -4417,7 +4441,7 @@ mod remote_grok_merge_tests {
             }
         }).to_string()).unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),

@@ -536,6 +536,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // #1944 D1: private durable joined receipts (no production writer yet).
     (70, "b87dfcf444f07cd0"),
     (71, "d32e25a1e3418557"),
+    (72, "bdef5954870f6a83"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -795,6 +796,10 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
         // #708：專案已移交給另一台主機的 daemon；NULL＝本機管。
         ("projects", "handed_off_to", "ALTER TABLE projects ADD COLUMN handed_off_to TEXT"),
+        ("projects", "mode", "ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'parent_child'"),
+        ("bots", "role", "ALTER TABLE bots ADD COLUMN role TEXT"),
+        ("runs", "runtime_role_policy", "ALTER TABLE runs ADD COLUMN runtime_role_policy TEXT"),
+        ("runs", "daemon_url_injected", "ALTER TABLE runs ADD COLUMN daemon_url_injected INTEGER NOT NULL DEFAULT 0"),
         // 收這一筆回合的那則 hook 在收件匣的 `hook_events.id`（發現 2，l8 審查）：收件匣的「處理完」標記是 `process()` 返回後才另寫，
         // 兩者之間 daemon 重啟，重播的同一則 hook 沒有 native turn id 可去重，會再開一個外部回合與訊息。回合與這把鑰匙同一個交易寫，
         // 重播先查它（見 `hookrecv::process_for`）。NULL＝不是 hook 收件匣收的（網頁送出的、備援抓的、舊列）。
@@ -1339,6 +1344,7 @@ pub struct Project {
     pub created_at: String,
     /// #708：已移交給這台主機的 daemon；`None`＝這顆 daemon 管。
     pub handed_off_to: Option<String>,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1349,6 +1355,7 @@ pub struct Bot {
     pub kind: String,
     /// NULL = the CLI's own default.
     pub model: Option<String>,
+    pub role: Option<String>,
     pub effort: Option<String>,
     /// codex Fast service tier (`-c service_tier="priority"`).
     pub fast: i64,
@@ -1419,6 +1426,8 @@ pub struct Run {
     pub runtime_fast: Option<i64>,
     /// 啟動時的身份（issue #238），解讀見 [`Run::started_identity`]。
     pub runtime_identity: Option<String>,
+    pub runtime_role_policy: Option<String>,
+    pub daemon_url_injected: i64,
     /// `API Error: …` that cut the last turn short; cleared when the next turn opens (`turn_error`).
     pub turn_error: Option<String>,
     /// Herdr terminal identity captured while adopting a child; NULL is not evidence.

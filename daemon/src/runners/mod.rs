@@ -17,7 +17,6 @@ pub mod bulk_restart;
 pub mod child_alerts;
 pub(crate) mod claude_child_log;
 pub mod child_done;
-pub mod model_mode_cleanup;
 pub mod child_retire;
 pub mod codex_async_question;
 pub mod codex_async_question_remote;
