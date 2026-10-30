@@ -6004,3 +6004,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。
 - `POST /api/schedules/{id}/run` 在 `BEGIN IMMEDIATE` 交易內：先查這個 key 的 mapping，有就回那一筆；沒有就併進未結束的 occurrence（不論它是排程來的或手動來的），或新開一筆；不論併進哪一筆，都寫下 key → occurrence 的 mapping。所以回應丟失後的重送，不論那筆是否已經結束，都回同一筆，不多排 turn。
 - 前端的 key 走共用的 `createRequestId("schedule-run:<scheduleId>")`（存在 sessionStorage，關掉再開仍沿用）；伺服器收下（回應成功）才 `settleCreateRequest`；明確的 4xx 拒絕也 settle；網路錯誤與 5xx 保留同一個 key。
+
+### 模型用法模式
+
+`[agents] model_mode` 預設 `claude`，保留既有行為。`claude_codex` 注入額外硬規則：opus parent；fable、gpt-6-astra 為顧問；執行者由 parent 依難度選 gpt-6.1-terra medium、gpt-6-luna xhigh、haiku、sonnet，使用者點名優先。codex child 長駐並按專案或模組沿用，不相關工作 fork；claude child 驗收後收掉，除非一小時內同區塊有後續。codex 不當 parent。切換設定後重啟 bot 才更新注入規則。

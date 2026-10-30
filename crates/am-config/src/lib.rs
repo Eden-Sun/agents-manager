@@ -549,8 +549,18 @@ impl CodexHistoryCfg {
 /// codex `developer_instructions`、grok `--rules`），子 agent 經 herdr shim 拿同一份。路徑可用 `~`；讀不到只警告。
 /// `projects` 的 key 是專案 id 或 label，值是那個專案的 agent md（接在全域那份後面）：一個路徑或路徑陣列（依序接起來；
 /// CLAUDE.md 的 `@AGENTS.md` 匯入不會展開，要兩份就兩份都列）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    #[default]
+    Claude,
+    ClaudeCodex,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentsCfg {
+    #[serde(default)]
+    pub model_mode: ModelMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions_file: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -2838,6 +2848,17 @@ model = "gpt-6"
         let path = dir.join("config.toml");
         std::fs::write(&path, text).unwrap();
         (ConfigStore::load(path.clone()).await.unwrap(), path)
+    }
+
+    #[tokio::test]
+    async fn model_mode_defaults_and_persists() {
+        let (store, path) = store_with("[agents]\ninstructions_file = \"~/rules.md\"\n").await;
+        assert_eq!(store.agents_fresh().await.model_mode, ModelMode::Claude);
+        store.update(|c| { c.agents.model_mode = ModelMode::ClaudeCodex; Ok(()) }).await.unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("model_mode = \"claude_codex\""));
+        assert_eq!(parse_config(&contents).unwrap().0.agents.model_mode, ModelMode::ClaudeCodex);
+        assert!(parse_config("[agents]\nmodel_mode = \"unknown\"").is_err());
     }
 
     /// 寫回只改動被改的值：手寫的註解、未知區段與未知鍵都留著，檔案重讀起來跟記憶體一致。
