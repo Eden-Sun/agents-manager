@@ -101,6 +101,19 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
+CREATE TABLE IF NOT EXISTS child_done_state (
+  child_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+  idle_at TEXT NOT NULL, idle_turn_id TEXT NOT NULL, initialized_at TEXT NOT NULL,
+  notified_at TEXT, covered_rowid INTEGER NOT NULL DEFAULT 0, covered_at TEXT,
+  pending_turn_id TEXT, pending_rowid INTEGER, pending_at TEXT, pending_idle_at TEXT, pending_background INTEGER,
+  notified_background INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS child_done_sources (
+  child_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+  batch TEXT, covered INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(child_id, turn_id)
+);
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL UNIQUE REFERENCES bots(id), created_at TEXT NOT NULL
 );
@@ -522,6 +535,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (69, "5c5a67ab8a3b16d2"),
     // #1944 D1: private durable joined receipts (no production writer yet).
     (70, "b87dfcf444f07cd0"),
+    (71, "d32e25a1e3418557"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

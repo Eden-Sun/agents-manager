@@ -53,7 +53,7 @@
         let child_conversation = db::conversation_id(&app.db, &child_id).await.unwrap();
         let child_turn = db::ulid();
         let started_at = db::iso_in(-60);
-        let completed_at = db::now();
+        let completed_at = db::iso_in(-5);
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
              VALUES (?,?,?,'web',?,'ok',?,?)",
@@ -202,9 +202,9 @@
         let f = fixture("terminal_fallback", "completed_fallback").await;
         make_parent_busy(&f, "parent-working-noreply").await;
         sqlx::query("DELETE FROM messages WHERE turn_id = ?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
-        // 剛收掉的回合先等一下（訊息可能還在寫）：不報。
+        // No reply is needed to establish that the settled child is idle.
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        assert_eq!(notice_count(&f).await, 0, "just completed: wait for a late reply");
+        assert_eq!(notice_count(&f).await, 1);
         sqlx::query("UPDATE turns SET completed_at = ? WHERE id = ?").bind(db::iso_in(-300)).bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
         assert_eq!(sweep(&f.env.app).await, 1);
@@ -214,14 +214,14 @@
         assert!(sent.contains("未擷取到回覆"), "{sent}");
     }
 
-    /// 同樣在忙，hook 收的回合照舊立刻報（只有畫面備援不可信）。
+    /// Hook completion also waits until the child is idle.
     #[tokio::test]
-    async fn a_hook_turn_is_still_reported_immediately_while_the_child_works_on() {
+    async fn a_hook_turn_waits_until_the_child_is_idle() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-hook").await;
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        assert_eq!(notice_count(&f).await, 1);
+        assert_eq!(notice_count(&f).await, 0);
     }
 
     #[tokio::test]
@@ -250,7 +250,7 @@
             .await
             .unwrap();
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        assert_eq!(sweep(&f.env.app).await, 0);
+        sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 0);
     }
 
@@ -317,7 +317,7 @@
         make_parent_busy(&f, "parent-working-sweep").await;
         assert_eq!(sweep(&f.env.app).await, 1);
         assert_eq!(notice_count(&f).await, 1);
-        assert_eq!(sweep(&f.env.app).await, 0);
+        sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 1);
     }
 
@@ -337,19 +337,23 @@
             .execute(&f.env.app.db)
             .await
             .unwrap();
-        assert_eq!(sweep(&f.env.app).await, 0);
+        sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 0);
     }
 
     /// child 在 parent 對話裡留一則 `relay_from = child` 的訊息（模擬它自己 `herdr agent prompt` 回報）。
     /// `sent_in`＝寄件當下 child 正在跑的回合（`relay_turn_id`，#927）。
     async fn child_relays_to_parent(f: &Fixture, content: &str, sent_in: &str) {
+        let relay_turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at,completed_at) VALUES (?,?,'external','completed','ok',?,?)")
+            .bind(&relay_turn).bind(&f.parent_conversation).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
         sqlx::query(
             "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_turn_id, created_at)
-             VALUES (?,?,NULL,'user',?,'hook',?,?,?)",
+             VALUES (?,?,?,'user',?,'hook',?,?,?)",
         )
         .bind(db::ulid())
         .bind(&f.parent_conversation)
+        .bind(&relay_turn)
         .bind(content)
         .bind(&f.child_id)
         .bind(sent_in)
@@ -388,7 +392,7 @@
         let other = add_completed_turn(&f, "另一個回合的回覆").await;
         child_relays_to_parent(&f, "工作完成，結果如下。", &other).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        assert_eq!(notice_count(&f).await, 1);
+        assert_eq!(all_child_notice_count(&f).await, 1);
     }
 
     async fn parent_bot_id(f: &Fixture) -> String {
@@ -443,13 +447,15 @@
             .execute(&f.env.app.db)
             .await
             .unwrap();
-        assert_eq!(sweep(&f.env.app).await, 0, "parent 沒有在線 run：沒有人收");
+        sweep(&f.env.app).await;
+        assert_eq!(notice_count(&f).await, 0, "parent 沒有在線 run：沒有人收");
         parent_returns(&f).await;
-        // 兩個回合都在 parent 離線期間完成（2.5 小時前與 2 小時前）：都被撈出來，但最新的先送、較舊的被 `superseded` 擋掉。
-        assert_eq!(sweep(&f.env.app).await, 2);
+        // Both offline turns are included in one notice.
+        assert_eq!(sweep(&f.env.app).await, 1);
         assert_eq!(notice_count(&f).await, 1);
-        assert_eq!(all_child_notice_count(&f).await, 1, "每顆 child 最多補一則：較舊的視為被取代");
-        assert_eq!(sweep(&f.env.app).await, 0, "不重送");
+        assert_eq!(all_child_notice_count(&f).await, 1);
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 1, "不重送");
     }
 
     /// #871：離線補送的窗口是 7 天，再舊的不補。
@@ -458,7 +464,7 @@
         let f = fixture("hook", "completed").await;
         parent_run_window(&f, 24 * 9, 24 * 8 + 12, 24 * 8).await;
         parent_returns(&f).await;
-        assert_eq!(sweep(&f.env.app).await, 0);
+        sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 0);
         // 6 天前完成（同樣離線期間）就補。
         parent_run_window(&f, 24 * 9, 24 * 7, 24 * 6).await;
@@ -467,64 +473,7 @@
     }
 
     #[tokio::test]
-    async fn active_background_work_defers_notices_and_sweep_reports_only_the_latest_turn() {
-        let f = fixture("hook", "completed").await;
-        make_parent_busy(&f, "parent-working-background").await;
-        crate::background_jobs::record(
-            &mut f
-                .env
-                .app
-                .background_jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-            &f.child_run,
-            1,
-        );
-        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        let later = add_completed_turn(&f, "工作完成，結果如下。細節已確認。").await;
-        notify_turn(&f.env.app, &later).await.unwrap();
-        assert_eq!(
-            all_child_notice_count(&f).await,
-            0,
-            "known background work defers both turns"
-        );
-
-        crate::background_jobs::record(
-            &mut f
-                .env
-                .app
-                .background_jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-            &f.child_run,
-            0,
-        );
-        sweep(&f.env.app).await;
-        assert_eq!(
-            notice_count(&f).await,
-            0,
-            "older deferred turn is superseded"
-        );
-        let latest_id = format!("{CRID_PREFIX}{}:{later}", f.child_id);
-        let latest: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id=?",
-        )
-        .bind(&f.parent_conversation)
-        .bind(latest_id)
-        .fetch_one(&f.env.app.db)
-        .await
-        .unwrap();
-        assert_eq!(latest, 1);
-        assert_eq!(all_child_notice_count(&f).await, 1);
-        assert_eq!(
-            sweep(&f.env.app).await,
-            0,
-            "the durable notice is not repeated"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_recent_near_duplicate_reply_is_suppressed_for_the_same_child() {
+    async fn a_new_turn_does_not_fan_out_an_outstanding_notice() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-near-duplicate").await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
@@ -716,36 +665,6 @@
     }
 
     #[tokio::test]
-    async fn a_delivered_or_unknown_notice_is_never_repeated() {
-        for (status, delivery) in [("completed", "ok"), ("failed", "unknown")] {
-            let f = fixture("hook", "completed").await;
-            make_parent_busy(&f, "parent-working-delivered").await;
-            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-            // queued → completed 不是合法邊（turn_guard）：先認領成 in_flight。
-            if status == "completed" {
-                sqlx::query("UPDATE turns SET status='in_flight' WHERE conversation_id=? AND client_request_id=?")
-                    .bind(&f.parent_conversation)
-                    .bind(base_crid(&f))
-                    .execute(&f.env.app.db)
-                    .await
-                    .unwrap();
-            }
-            sqlx::query("UPDATE turns SET status=?, delivery=?, completed_at=? WHERE conversation_id=? AND client_request_id=?")
-                .bind(status)
-                .bind(delivery)
-                .bind(db::iso_in(-600))
-                .bind(&f.parent_conversation)
-                .bind(base_crid(&f))
-                .execute(&f.env.app.db)
-                .await
-                .unwrap();
-            sweep(&f.env.app).await;
-            notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-            assert_eq!(all_child_notice_count(&f).await, 1, "status={status} delivery={delivery}");
-        }
-    }
-
-    #[tokio::test]
     async fn a_withdrawn_notice_is_not_retried() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-withdrawn").await;
@@ -772,34 +691,6 @@
         sweep(&f.env.app).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(all_child_notice_count(&f).await, 1, "撤回＝使用者說不要，不重送");
-    }
-
-    #[tokio::test]
-    async fn retries_stop_after_the_limit() {
-        let f = fixture("hook", "completed").await;
-        make_parent_busy(&f, "parent-working-limit").await;
-        let base = base_crid(&f);
-        // r0..r3 全部字沒打進去，時間都超過冷卻。
-        for (n, ago) in [(0, 900), (1, 800), (2, 700), (3, 600)] {
-            let crid = if n == 0 { base.clone() } else { format!("{base}:r{n}") };
-            sqlx::query(
-                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, completed_at)
-                 VALUES (?,?,?,'web','failed','failed',?,?,?)",
-            )
-            .bind(db::ulid())
-            .bind(&f.parent_conversation)
-            .bind(&f.parent_run)
-            .bind(&crid)
-            .bind(db::iso_in(-ago - 5))
-            .bind(db::iso_in(-ago))
-            .execute(&f.env.app.db)
-            .await
-            .unwrap();
-        }
-        sweep(&f.env.app).await;
-        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        assert_eq!(crid_count(&f, &format!("{base}:r4")).await, 0);
-        assert_eq!(all_child_notice_count(&f).await, 4);
     }
 
     // ---- #1984：codex parent 的通知短上限、composer_unreadable 記成一次失敗 attempt ----
@@ -899,4 +790,177 @@
         sweep(&f.env.app).await;
         assert_eq!(all_child_notice_count(&f).await, 1 + RETRY_LIMIT as i64, "r0..r3 之後不再多一則");
         assert_eq!(crid_count(&f, &format!("{base}:r{}", RETRY_LIMIT + 1)).await, 0);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_combines_unreported_turns_and_does_not_wait_for_a_reply() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-combined").await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        assert_eq!(all_child_notice_count(&f).await,0);
+        let later = add_completed_turn(&f, "第二個回合結果").await;
+        sqlx::query("DELETE FROM messages WHERE turn_id=?").bind(&later).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app, &later).await.unwrap();
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id=? AND m.role='user'")
+            .bind(&f.parent_conversation).bind(format!("{CRID_PREFIX}{}:{later}",f.child_id)).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("工作完成，結果如下。"));
+        assert!(content.contains("未擷取到回覆"));
+        assert!(content.contains("herdr agent read"));
+        assert_eq!(all_child_notice_count(&f).await, 1);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_reports_background_and_again_after_it_finishes() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-background-reconcile").await;
+        crate::background_jobs::record(&mut f.env.app.background_jobs.lock().unwrap(), &f.child_run, 1);
+        notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+        let text: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id=? AND m.role='user'")
+            .bind(&f.parent_conversation).bind(base_crid(&f)).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(text.contains("背景工作仍在跑"));
+        // Model the queue's confirmed delivery independently of completion of the parent turn.
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id='parent-background-reconcile'").bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',run_id=? WHERE conversation_id=? AND client_request_id=?")
+            .bind(&f.parent_run).bind(&f.parent_conversation).bind(base_crid(&f)).execute(&f.env.app.db).await.unwrap();
+        crate::background_jobs::record(&mut f.env.app.background_jobs.lock().unwrap(), &f.child_run, 0);
+        sweep(&f.env.app).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id LIKE ?")
+            .bind(&f.parent_conversation).bind(format!("{}:background%",base_crid(&f))).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(count,1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_queue_failures_raise_an_operator_alert() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-queue-failures").await;
+        let base = base_crid(&f);
+        for n in 0..=RETRY_LIMIT {
+            notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+            let crid = if n == 0 { base.clone() } else { format!("{base}:r{n}") };
+            assert_eq!(crid_count(&f,&crid).await,1);
+            fail_undelivered(&f,&crid,180).await;
+        }
+        sweep(&f.env.app).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key=? AND kind='ops_alert'")
+            .bind(format!("child_done_undeliverable:{base}")).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(count,1);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_waits_for_child_to_be_idle_and_persists_while_busy() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-child-idleness").await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+        assert_eq!(all_child_notice_count(&f).await,0);
+        let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child_done_state WHERE child_id=?")
+            .bind(&f.child_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(persisted,1);
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(notice_count(&f).await,1);
+    }
+
+    #[tokio::test]
+    async fn similar_result_after_new_activity_is_not_suppressed() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-similar-new").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id='parent-similar-new'")
+            .bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',delivery_verified=1,delivered_at=?,run_id=? WHERE conversation_id=? AND client_request_id=?")
+            .bind(db::now()).bind(&f.parent_run).bind(&f.parent_conversation).bind(base_crid(&f)).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        let later = add_completed_turn(&f, "工作完成，結果如下。").await;
+        notify_turn(&f.env.app, &later).await.unwrap();
+        assert_eq!(crid_count(&f, &format!("{CRID_PREFIX}{}:{later}", f.child_id)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn unverified_inflight_delivery_is_not_an_acknowledgement() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-unverified").await;
+        notify_turn(&f.env.app, &f.child_turn).await.unwrap();
+        sqlx::query("UPDATE turns SET status='failed',delivery='unknown',delivery_verified=0,completed_at=? WHERE conversation_id=? AND client_request_id=?")
+            .bind(db::iso_in(-180)).bind(&f.parent_conversation).bind(base_crid(&f)).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(crid_count(&f, &format!("{}:r1",base_crid(&f))).await, 1);
+        let notified: Option<String> = sqlx::query_scalar("SELECT notified_at FROM child_done_state WHERE child_id=?")
+            .bind(&f.child_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(notified.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_turn_created_earlier_but_completed_later_is_not_lost() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-out-of-order").await;
+        let earlier = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,created_at) VALUES(?,?,'web','queued','pending',?)")
+            .bind(&earlier).bind(&f.child_conversation).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        let later = add_completed_turn(&f,"先完成的回合").await;
+        notify_turn(&f.env.app,&later).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id='parent-out-of-order'")
+            .bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',delivery_verified=1,delivered_at=?,run_id=? WHERE conversation_id=? AND client_request_id=?")
+            .bind(db::now()).bind(&f.parent_run).bind(&f.parent_conversation).bind(format!("{CRID_PREFIX}{}:{later}",f.child_id)).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',run_id=? WHERE id=?").bind(&f.child_run).bind(&earlier).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(db::iso_in(1)).bind(&earlier).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app,&earlier).await.unwrap();
+        assert_eq!(crid_count(&f,&format!("{CRID_PREFIX}{}:{earlier}",f.child_id)).await,1);
+    }
+
+    #[tokio::test]
+    async fn idle_child_without_any_captured_turn_still_reports() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-no-turn").await;
+        sqlx::query("DELETE FROM messages WHERE turn_id=?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("DELETE FROM turns WHERE id=?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        let msg: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND m.role='user' AND t.client_request_id LIKE 'child-done:%'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(msg.contains("未擷取到回覆"));
+        assert!(msg.contains("pane"));
+    }
+
+    #[tokio::test]
+    async fn idle_pane_with_an_in_flight_child_turn_does_not_notify() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-child-inflight").await;
+        let current = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+            .bind(&current).bind(&f.child_conversation).bind(&f.child_run).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+        assert_eq!(all_child_notice_count(&f).await,0);
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(db::now()).bind(&current).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await,1);
+    }
+
+    #[tokio::test]
+    async fn unknown_child_status_does_not_suppress_an_idle_turn() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-unknown-child").await;
+        sqlx::query("UPDATE runs SET agent_status='unknown' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+        assert_eq!(notice_count(&f).await,1);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_source_turn_does_not_silently_cancel_a_pending_retry() {
+        let f = fixture("hook", "completed").await;
+        make_parent_busy(&f, "parent-source-deleted").await;
+        notify_turn(&f.env.app,&f.child_turn).await.unwrap();
+        fail_undelivered(&f,&base_crid(&f),180).await;
+        sqlx::query("DELETE FROM messages WHERE turn_id=?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("DELETE FROM turns WHERE id=?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id=? AND m.role='user'")
+            .bind(&f.parent_conversation).bind(format!("{}:r1",base_crid(&f))).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("來源回合已無法讀取"));
+        assert!(content.contains("herdr agent read"));
     }

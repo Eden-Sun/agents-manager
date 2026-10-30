@@ -1391,6 +1391,8 @@
         std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
+        sqlx::query("DROP TABLE child_done_sources").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE child_done_state").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
@@ -1515,6 +1517,8 @@
     async fn nr1944_v69_receipt_additive_upgrade_backup_fence_and_private_rows() {
         let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
         let pool=open(&path).await.unwrap();
+        sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
         sqlx::query("PRAGMA user_version=69").execute(&pool).await.unwrap();
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&pool).await.unwrap()),pinned(69));
