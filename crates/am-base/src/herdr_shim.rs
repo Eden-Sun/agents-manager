@@ -383,10 +383,6 @@ am_agent_start() {
             -h | --help) exec "$AM_HERDR" agent start "$@" ;;
         esac
     done
-    if [ "${AM_MODEL_MODE:-}" = claude_codex ] && [ "${AM_KIND:-}" = codex ]; then
-        printf 'agents-manager: 這個模式下 codex 不開 child，把要另派的事寫進回報交給 claude parent\n' >&2
-        exit 77
-    fi
     if [ -n "${AM_CHILD_OF:-}" ]; then
         printf 'agents-manager: 你是 `%s` 派出的子 agent，禁止再開子 agent。需要更多人手：停下來在回報裡寫清楚要另派什麼、為什麼，由 `%s` 決定要不要開兄弟 agent\n' "$AM_CHILD_OF" "$AM_CHILD_OF" >&2
         exit 77
