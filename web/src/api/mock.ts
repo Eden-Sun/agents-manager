@@ -5,7 +5,7 @@
 
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
-import type { BotKind, ExecutorPoolEntry } from './types'
+import type { BotKind, ExecutorPoolEntry, RuntimeSettings } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { CODEX_ASYNC_QUESTIONS, codexAsyncKeys, codexAsyncScreen, codexAsyncStart, type CodexAsyncState } from './mockCodexAsync'
@@ -235,6 +235,7 @@ interface MockBot {
   kind: BotKind
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
   track?: string | null
+  runtime_override?: RuntimeSettings | null
   role_pending?: boolean
   daemon_url_pending?: boolean
   manager_use?: boolean
@@ -271,6 +272,7 @@ interface MockIdentity {
 
 interface MockProject {
   id: string
+  role_policy?: Record<string, RuntimeSettings>
   path: string
   label: string
   mode?: 'parent_child' | 'expert'
@@ -2356,6 +2358,7 @@ export class MockTransport implements Transport {
         host: p.host,
         github: p.github,
         executor_pool: p.executor_pool ?? [],
+        role_policy: p.role_policy ?? {},
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2367,6 +2370,7 @@ export class MockTransport implements Transport {
               kind: b.kind,
               role: b.role ?? null,
               track: b.track ?? null,
+              runtime_override: b.runtime_override ?? null,
               role_pending: b.role_pending ?? false,
               daemon_url_pending: b.daemon_url_pending ?? false,
               manager_use: b.manager_use ?? true,
@@ -2469,6 +2473,10 @@ export class MockTransport implements Transport {
     }
     if (b.executor_pool !== undefined) {
       p.executor_pool = mockPoolFromInput(b.executor_pool)
+    }
+    if (b.role_policy !== undefined) {
+      // 整份覆寫；空物件＝全部跟預設。
+      p.role_policy = b.role_policy && typeof b.role_policy === 'object' ? (b.role_policy as Record<string, RuntimeSettings>) : {}
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }
@@ -2660,6 +2668,10 @@ export class MockTransport implements Transport {
     }
     if (b.effort !== undefined) {
       bot.effort = typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null
+    }
+    if (b.runtime_override !== undefined) {
+      // B 期：覆寫整份存（null＝跟角色）；欄位範圍的檢查以 daemon 為準。
+      bot.runtime_override = b.runtime_override && typeof b.runtime_override === 'object' ? (b.runtime_override as RuntimeSettings) : null
     }
     if (b.track !== undefined) {
       // 與 daemon 一致：track 只有專家用；清掉或空白就是 null。

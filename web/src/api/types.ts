@@ -31,7 +31,7 @@ export interface Project {
   /** 專家模式專案的執行者池條目清單 */
   executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（role -> policy；B 期才用，現在只讀），預設 {} */
-  role_policy?: Record<string, unknown> | null
+  role_policy?: Record<string, RuntimeSettings> | null
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
 }
@@ -288,12 +288,21 @@ export const HOST_DEFAULTS = {
   remote_path: '/opt/homebrew/bin:$HOME/.local/bin',
 } as const
 
+/** 角色 policy 或 bot 執行期覆寫的一層（B 期）；欄位 `null`/缺＝跟上一層或預設。 */
+export interface RuntimeSettings {
+  context_tokens?: number | null
+  keep_warm?: boolean | null
+  keep_warm_after_min?: number | null
+  hot_compact_after_min?: number | null
+  hot_compact_min_pct?: number | null
+}
+
 export interface Bot {
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
   /** 專家（specialist）負責的軌道；role=specialist 時必填 */
   track?: string | null
   /** 執行期覆蓋（B 期才用）；null＝跟角色 */
-  runtime_override?: Record<string, unknown> | null
+  runtime_override?: RuntimeSettings | null
   role_pending?: boolean
   daemon_url_pending?: boolean
   runtime_role_policy?: string | null
@@ -753,7 +762,7 @@ export interface PatchProjectInput {
   /** 專家模式專案的執行者池條目（覆蓋整份陣列） */
   executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（User 才能改；`null`＝清掉） */
-  role_policy?: Record<string, unknown> | null
+  role_policy?: Record<string, RuntimeSettings> | null
 }
 
 export interface DirEntry {
@@ -813,6 +822,8 @@ export interface NewBotInput {
 
 /** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */
 export interface PatchBotInput {
+  /** 執行期覆寫（B 期，User-only）；`null`＝跟角色。 */
+  runtime_override?: RuntimeSettings | null
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
   /** 專家軌道（只有 User 能改）；`null`＝清掉 */
   track?: string | null

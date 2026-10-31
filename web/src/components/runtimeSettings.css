@@ -1,0 +1,123 @@
+/* 執行期設定欄位（角色卡與 bot 覆寫共用）：沿用表單的 pill 與欄位標題，不另做裸元件。 */
+.rt-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rt-ctx-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rt-ctx-row input[type='range'] {
+  flex: 1 1 180px;
+  min-width: 120px;
+}
+
+.rt-ctx-value {
+  min-width: 4.5em;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.rt-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.rt-advanced {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+
+.rt-advanced > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.rt-advanced .field {
+  margin-top: 10px;
+}
+
+/* 角色設定：每個角色一張卡（沿用表單的卡片樣式與 pill）。 */
+.role-policy-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.rp-title {
+  margin: 0;
+  font-size: 14px;
+}
+
+.rp-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.rp-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.rp-card.dirty {
+  border-color: var(--accent);
+}
+
+.rp-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rp-cache {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.rp-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rp-err {
+  color: var(--status-warn);
+}
+
+.rp-savebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rp-savebar .hint {
+  margin-right: auto;
+}
+
+.rt-override {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  grid-column: 1 / -1;
+}

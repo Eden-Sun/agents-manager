@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { ExecutorPoolEditor } from './ExecutorPoolEditor'
+import { RolePolicyEditor } from './RolePolicyEditor'
 
 export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   const t = useT()
@@ -50,6 +51,7 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
         </p>
 
         {isExpert ? <ExecutorPoolEditor project={project} bots={bots} /> : null}
+        {isExpert ? <RolePolicyEditor project={project} /> : null}
       </div>
     </div>
   )

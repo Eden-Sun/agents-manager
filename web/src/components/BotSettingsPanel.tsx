@@ -15,6 +15,9 @@ import { BotShareSection } from './BotShareSection'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
+import { RuntimeSettingsFields } from './RuntimeSettingsFields'
+import { cleanSettings, firstRangeError, sameSettings } from '../lib/runtimePolicy'
+import type { RuntimeSettings } from '../api/types'
 import { computeBotPatch, effectiveForm, pruneSaved, settledKeys, type BotFormKey, type BotFormValues } from './botSettingsForm'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { msg, t, useT } from '../lib/i18n'
@@ -253,6 +256,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const trackHintId = useId()
   const trackOk = specTrack.trim() !== ''
   const roleValue = roleDraft !== undefined ? roleDraft : (bot?.role ?? null)
+  /** 執行期覆寫是表單的一欄（B 期）：undefined＝沒動過，否則是草稿，跟其他欄位一起按「儲存」送出。 */
+  const [overrideDraft, setOverrideDraft] = useState<RuntimeSettings | undefined>(undefined)
+  const overrideValue: RuntimeSettings = overrideDraft !== undefined ? overrideDraft : (bot?.runtime_override ?? {})
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
@@ -437,10 +443,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     : trackChanged
       ? { track: specTrack.trim() }
       : {}
-  const sendPatch: PatchBotInput = { ...patch, ...roleTrackPatch }
+  const overrideChanged = overrideDraft !== undefined && !sameSettings(overrideDraft, bot.runtime_override ?? {})
+  const overridePatch: PatchBotInput = overrideChanged
+    ? { runtime_override: Object.keys(cleanSettings(overrideValue)).length > 0 ? cleanSettings(overrideValue) : null }
+    : {}
+  const sendPatch: PatchBotInput = { ...patch, ...roleTrackPatch, ...overridePatch }
   const changedKeys = Object.keys(sendPatch)
   const dirty = changedKeys.length > 0
-  const canSave = dirty && (sendPatch.name === undefined || nameOk) && (roleValue !== 'specialist' || trackOk) && !saving
+  const overrideRangeBad = firstRangeError(overrideValue) !== null
+  const canSave = dirty && (sendPatch.name === undefined || nameOk) && (roleValue !== 'specialist' || trackOk) && !overrideRangeBad && !saving
   const interruptsTurn = bot.kind === 'codex' && turnWorking && (sendPatch.model !== undefined || sendPatch.effort !== undefined)
 
   const save = () => {
@@ -452,6 +463,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       setSaving(false)
       if (!res) return
       setRoleDraft(undefined)
+      setOverrideDraft(undefined)
       // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
       // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
       setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
@@ -633,6 +645,18 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               setFast(v)
             }}
           />
+          <div className="field rt-override">
+            <span>{t('執行期覆寫')}</span>
+            <p className="hint">{t('只覆寫這顆 Bot；沒設＝跟角色（角色設定在專案設定）。改動後需重啟 Bot 才生效。')}</p>
+            <RuntimeSettingsFields
+              idPrefix={`bot-ov-${botId}`}
+              value={overrideValue}
+              inheritLabel={t('跟角色')}
+              disabled={saving}
+              onChange={(next) => setOverrideDraft(next)}
+            />
+            {overrideRangeBad ? <span className="hint rp-err">{t('數值超出範圍，請修正後再儲存')}</span> : null}
+          </div>
           <IdentityOptions
             kind={bot.kind}
             host={host}
