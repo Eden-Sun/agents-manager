@@ -81,6 +81,8 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
+import { ExpertBadge, ExpertRoleTag, ExpertSectionHeader } from './ExpertBadge'
+import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
@@ -188,6 +190,8 @@ function BotRowImpl({
   const t = useT()
   renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
+  const project = useStore((s) => s.projects.find((p) => p.id === bot?.project_id))
+  const isExpertProject = project?.mode === 'expert'
   const run = useStore((s) => s.runs[botId] ?? null)
   // 主力按了「不用保溫」（冰凍）：列名旁畫雪花（SPEC §6.5k）。
   const frozen = bot?.primary === true && run?.keep_warm_skip === true
@@ -289,8 +293,10 @@ function BotRowImpl({
   const showTitle = Boolean(agentTitle) && selected && !compact
 
   const dragging = drag?.id === botId
-  // 只在同專案內排序。
-  const sameProject = drag?.projectId === bot.project_id
+  // 只在同專案內排序；專家模式只能在同角色段落內拖曳。
+  const dragBot = drag ? useStore.getState().bots.find((b) => b.id === drag.id) : null
+  const canReorderWithDrag = !isExpertProject || !dragBot || canReorderInExpertMode(dragBot.role, bot.role)
+  const sameProject = drag?.projectId === bot.project_id && canReorderWithDrag
   const dropEdge = drag && sameProject && drag.id !== botId && drag.overId === botId ? drag.edge : null
 
   const edgeAt = (e: { currentTarget: HTMLElement; clientY: number }): 'before' | 'after' => {
@@ -426,6 +432,7 @@ function BotRowImpl({
           </span>
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
+            {isExpertProject && !compact ? <ExpertRoleTag role={bot.role} rolePending={bot.role_pending} /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
@@ -899,6 +906,7 @@ function ProjectTitle({
   // 排除規則跟分頁標題 `(N)` 同一份（`store/unread.ts`）：總管專案的不算，額度停用而被側欄
   // 收起來的也不算——收合的專案掛著 `!3`、展開卻只看得到「已隱藏」，那個數字點不掉（issue #510）。
   const foldedUnread = useStore((s) => (folded ? projectUnread(s, projectId) : 0))
+  const isExpert = useStore((s) => s.projects.find((p) => p.id === projectId)?.mode === 'expert')
   const selectProject = useStore((s) => s.selectProject)
   // `<input>` can't live in a `<button>`: renaming swaps the row for a same-class `<div>`.
   const [editing, setEditing] = useState(false)
@@ -908,6 +916,7 @@ function ProjectTitle({
         ⌗
       </span>
       <ProjectNameField projectId={projectId} label={label} variant="row" armed={false} editing={editing} onEditing={setEditing} />
+      {isExpert ? <ExpertBadge /> : null}
       {foldedUnread > 0 ? (
         <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
           !{foldedUnread > 99 ? '99+' : foldedUnread}
@@ -1128,7 +1137,10 @@ export function Sidebar() {
 
   const dropAt = useStableCallback((dragId: string, overId: string, edge: 'before' | 'after') => {
     const bot = bots.find((b) => b.id === overId)
-    if (!bot) return
+    const dragItem = bots.find((b) => b.id === dragId)
+    if (!bot || !dragItem) return
+    const proj = useStore.getState().projects.find((p) => p.id === bot.project_id)
+    if (proj?.mode === 'expert' && !canReorderInExpertMode(dragItem.role, bot.role)) return
     const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
     const at = ids.indexOf(overId)
     if (at < 0) return
@@ -1142,9 +1154,12 @@ export function Sidebar() {
   const nudge = useStableCallback((botId: string, dir: -1 | 1) => {
     const bot = bots.find((b) => b.id === botId)
     if (!bot || bot.parent_bot_id) return
-    const ids = botsOfProject({ bots, botOrder }, bot.project_id)
-      .filter((b) => !b.parent_bot_id)
-      .map((b) => b.id)
+    const proj = useStore.getState().projects.find((p) => p.id === bot.project_id)
+    const allParentBots = botsOfProject({ bots, botOrder }, bot.project_id).filter((b) => !b.parent_bot_id)
+    const ids = (proj?.mode === 'expert'
+      ? allParentBots.filter((b) => canReorderInExpertMode(bot.role, b.role))
+      : allParentBots
+    ).map((b) => b.id)
     const at = ids.indexOf(botId)
     const to = at + dir
     if (at < 0 || to < 0 || to >= ids.length) return
@@ -1419,50 +1434,101 @@ export function Sidebar() {
               ) : (
                 // 子清單是父列的兄弟，靠 aria-owns 掛回，巢狀 list 才合法。
                 <div className="bot-list" role="list" aria-label={t('{name} 的 Bot', { name: p.label })}>
-                {list.map((b) => {
-                  const kids = descendantsOf(b.id)
-                  // 搜尋中一律展開。
-                  const shut = kids.length > 0 && collapsed.has(b.id) && !query
-                  const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
-                  const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
-                  return (
-                    <Fragment key={b.id}>
-                      <BotRow
-                        botId={b.id}
-                        hit={hits[b.id]}
-                        childCount={kids.length}
-                        collapsed={shut}
-                        kidsLamp={kidsLamp}
-                        kidsWait={kidsWait}
-                        kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
-                        onToggleChildren={toggleChildren}
-                        drag={drag}
-                        onDrag={setDrag}
-                        onDropAt={dropAt}
-                        onNudge={nudge}
-                        onStep={step}
-                      />
-                      {shut || kids.length === 0 ? null : (
-                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
-                          {kids.map((c, i) => (
-                            <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
-                              <BotRow
-                                compact
-                                botId={c.id}
-                                hit={hits[c.id]}
-                                drag={drag}
-                                onDrag={setDrag}
-                                onDropAt={dropAt}
-                                onNudge={nudge}
-                                onStep={step}
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                {p.mode === 'expert' ? (
+                  groupExpertSections(list).map((sec) => (
+                    <Fragment key={sec.role}>
+                      <ExpertSectionHeader title={sec.title} count={sec.items.length} />
+                      {sec.items.map((b) => {
+                        const kids = descendantsOf(b.id)
+                        const shut = kids.length > 0 && collapsed.has(b.id) && !query
+                        const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
+                        const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
+                        return (
+                          <Fragment key={b.id}>
+                            <BotRow
+                              botId={b.id}
+                              hit={hits[b.id]}
+                              childCount={kids.length}
+                              collapsed={shut}
+                              kidsLamp={kidsLamp}
+                              kidsWait={kidsWait}
+                              kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
+                              onToggleChildren={toggleChildren}
+                              drag={drag}
+                              onDrag={setDrag}
+                              onDropAt={dropAt}
+                              onNudge={nudge}
+                              onStep={step}
+                            />
+                            {shut || kids.length === 0 ? null : (
+                              <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
+                                {kids.map((c, i) => (
+                                  <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
+                                    <BotRow
+                                      compact
+                                      botId={c.id}
+                                      hit={hits[c.id]}
+                                      drag={drag}
+                                      onDrag={setDrag}
+                                      onDropAt={dropAt}
+                                      onNudge={nudge}
+                                      onStep={step}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </Fragment>
+                        )
+                      })}
                     </Fragment>
-                  )
-                })}
+                  ))
+                ) : (
+                  list.map((b) => {
+                    const kids = descendantsOf(b.id)
+                    // 搜尋中一律展開。
+                    const shut = kids.length > 0 && collapsed.has(b.id) && !query
+                    const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
+                    const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
+                    return (
+                      <Fragment key={b.id}>
+                        <BotRow
+                          botId={b.id}
+                          hit={hits[b.id]}
+                          childCount={kids.length}
+                          collapsed={shut}
+                          kidsLamp={kidsLamp}
+                          kidsWait={kidsWait}
+                          kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
+                          onToggleChildren={toggleChildren}
+                          drag={drag}
+                          onDrag={setDrag}
+                          onDropAt={dropAt}
+                          onNudge={nudge}
+                          onStep={step}
+                        />
+                        {shut || kids.length === 0 ? null : (
+                          <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
+                            {kids.map((c, i) => (
+                              <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
+                                <BotRow
+                                  compact
+                                  botId={c.id}
+                                  hit={hits[c.id]}
+                                  drag={drag}
+                                  onDrag={setDrag}
+                                  onDropAt={dropAt}
+                                  onNudge={nudge}
+                                  onStep={step}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </Fragment>
+                    )
+                  })
+                )}
                 </div>
               )}
               {/* 這個專案被 trace 的 shell／服務 pane（§6.5e）：點一下在這裡打開，不是任開任關。 */}

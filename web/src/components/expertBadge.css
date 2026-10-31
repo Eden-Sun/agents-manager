@@ -1,0 +1,104 @@
+/* 專家模式標籤與角色標示 */
+
+.project-expert-tag {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+/* 角色短標（管／顧／執） */
+.bot-role-tag {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+  vertical-align: middle;
+}
+
+/* 柔和色票（亮暗主題透過 CSS 變數或 color-mix 自然適應） */
+.bot-role-tag.role-manager {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
+  color: var(--accent-ink);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.bot-role-tag.role-advisor {
+  background: color-mix(in srgb, var(--lamp-yellow) 18%, var(--bg-panel));
+  color: var(--status-warn);
+  border: 1px solid color-mix(in srgb, var(--lamp-yellow) 36%, transparent);
+}
+
+.bot-role-tag.role-executor {
+  background: color-mix(in srgb, var(--lamp-green) 16%, var(--bg-panel));
+  color: var(--status-ok);
+  border: 1px solid color-mix(in srgb, var(--lamp-green) 34%, transparent);
+}
+
+/* role_pending 待套用提示點 */
+.bot-role-tag.pending .bot-role-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lamp-yellow);
+  box-shadow: 0 0 0 1px var(--bg-panel);
+}
+
+/* 專家模式側欄分段標題 */
+.expert-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 3px 14px;
+  user-select: none;
+}
+
+.expert-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.expert-section-count {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+/* 手機與 BotSwitcher 內的專家段落標題 */
+.bot-switcher-expert-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 2px;
+  user-select: none;
+}
+
+.bot-switcher-expert-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.bot-switcher-expert-count {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}

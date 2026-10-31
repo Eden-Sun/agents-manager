@@ -233,6 +233,9 @@ interface MockBot {
   project_id: string
   name: string
   kind: BotKind
+  role?: 'manager' | 'executor' | 'advisor' | null
+  role_pending?: boolean
+  daemon_url_pending?: boolean
   /** API.md v3.3：null = 不帶 `--model` */
   model: string | null
   effort: string | null
@@ -268,6 +271,7 @@ interface MockProject {
   id: string
   path: string
   label: string
+  mode?: 'parent_child' | 'expert'
   workspace_id: string | null
   host: string
   /** null = not a GitHub project */
@@ -801,6 +805,7 @@ export class MockTransport implements Transport {
     this.seedLongHistory(p.id)
     this.seedGroupRelay(p.id)
     this.seedSharedBot()
+    this.seedExpertDemoProject()
     installDevHelpers(this)
   }
 
@@ -821,6 +826,156 @@ export class MockTransport implements Transport {
     this.addMessage({ ...base, role: 'assistant', source: 'hook', content: L('你好，我是產品客服助理，可以回答安裝與帳號相關的問題，也可以看你上傳的設定檔。', "Hi, I'm the product support assistant. I can answer install and account questions, and look at config files you upload.") })
     this.addMessage({ ...base, role: 'user', source: 'share', content: L('我的 config.toml 裝完之後一直說 port 被佔用，幫我看一下', 'After installing, my config.toml keeps saying the port is in use. Can you take a look?'), attachments_json: JSON.stringify([{ id: 'att_share_demo', name: 'config.toml', mime: 'text/plain', size: 412, path: 'inbox/config.toml' }]) })
     this.addMessage({ ...base, role: 'assistant', source: 'hook', content: L('看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。改成 `7789` 之後重開就好，我把改好的檔放在「bot 給你的檔案」裡。', 'I read your config: `listen = "127.0.0.1:7788"` collides with another service. Change it to `7789` and restart. I put the fixed file under "Files from the bot".') })
+  }
+
+  /** 專家模式專案示範資料（1 管理者、1 顧問、2 執行者、1 未分配、管理者底下 1 個 child） */
+  private seedExpertDemoProject() {
+    const p: MockProject = {
+      id: ulid('proj'),
+      path: '/Users/me/project/expert-sample',
+      label: L('專家模式示範', 'Expert Sample'),
+      mode: 'expert',
+      workspace_id: null,
+      host: 'local',
+      github: null,
+      created_at: now(),
+    }
+    this.projects.push(p)
+
+    const mgr: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-mgr',
+      kind: 'claude',
+      role: 'manager',
+      model: 'claude-3-7-sonnet',
+      effort: null,
+      fast: 0,
+      persona: L('專家專案總管', 'Project Manager'),
+      args_json: '[]',
+      autostart: 1,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      is_primary: 1,
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(mgr)
+
+    const child: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-mgr-child',
+      kind: 'claude',
+      role: null,
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'child',
+      parent_bot_id: mgr.id,
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(child)
+
+    const adv: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-adv',
+      kind: 'codex',
+      role: 'advisor',
+      model: 'gpt-5-turbo',
+      effort: null,
+      fast: 0,
+      persona: L('技術架構顧問', 'Architecture Advisor'),
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(adv)
+
+    const exec1: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-exec-1',
+      kind: 'claude',
+      role: 'executor',
+      role_pending: true,
+      model: 'claude-3-5-haiku',
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(exec1)
+
+    const exec2: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-exec-2',
+      kind: 'grok',
+      role: 'executor',
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(exec2)
+
+    const unassigned: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-unassigned',
+      kind: 'claude',
+      role: null,
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(unassigned)
   }
 
   /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
@@ -2139,6 +2294,7 @@ export class MockTransport implements Transport {
         id: p.id,
         path: p.path,
         label: p.label,
+        mode: p.mode ?? 'parent_child',
         workspace_id: p.workspace_id,
         host: p.host,
         github: p.github,
@@ -2151,6 +2307,9 @@ export class MockTransport implements Transport {
               project_id: b.project_id,
               name: b.name,
               kind: b.kind,
+              role: b.role ?? null,
+              role_pending: b.role_pending ?? false,
+              daemon_url_pending: b.daemon_url_pending ?? false,
               model: b.model,
               effort: b.effort,
               fast: b.fast === 1,
@@ -2230,6 +2389,18 @@ export class MockTransport implements Transport {
       const label = String(b.label ?? '').trim()
       if (!label) throw new ApiError(400, { reason: 'project label must not be empty' }, 'bad_request')
       p.label = label
+    }
+    if (b.mode !== undefined) {
+      p.mode = b.mode === 'expert' ? 'expert' : 'parent_child'
+    }
+    if (b.manager_bot_id !== undefined) {
+      const managerId = String(b.manager_bot_id)
+      for (const bot of this.bots) {
+        if (bot.project_id === id) {
+          if (bot.id === managerId) bot.role = 'manager'
+          else if (bot.role === 'manager') bot.role = null
+        }
+      }
     }
     if (b.handed_off_to !== undefined) {
       const to = b.handed_off_to === null ? null : String(b.handed_off_to).trim()
@@ -2426,6 +2597,9 @@ export class MockTransport implements Transport {
     }
     if (b.effort !== undefined) {
       bot.effort = typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null
+    }
+    if (b.role !== undefined) {
+      bot.role = b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' ? b.role : null
     }
     if (b.model !== undefined) {
       bot.model = typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null

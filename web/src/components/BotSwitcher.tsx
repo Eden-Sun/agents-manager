@@ -8,6 +8,8 @@ import { botsOfProject, orderedProjects, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
+import { ExpertRoleTag } from './ExpertBadge'
+import { groupExpertSections } from '../lib/expertSections'
 import './botSwitcher.css'
 import { t, useT } from '../lib/i18n'
 
@@ -73,6 +75,10 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
     })
     .filter((g) => g.bots.length > 0)
 
+  const currentBot = useStore((s) => s.bots.find((b) => b.id === botId))
+  const currentProject = useStore((s) => s.projects.find((p) => p.id === currentBot?.project_id))
+  const isExpertProject = currentProject?.mode === 'expert'
+
   return (
     <div className="bot-switcher" ref={ref}>
       <button
@@ -84,6 +90,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
         title={t('換一顆 bot')}
         onClick={() => setOpen((v) => !v)}
       >
+        {isExpertProject && currentBot ? <ExpertRoleTag role={currentBot.role} rolePending={currentBot.role_pending} /> : null}
         <strong>{name}</strong>
         <span className="bot-switcher-chev" aria-hidden="true">
           ▾
@@ -134,26 +141,54 @@ export function BotSwitcherMenu({
   useT()
   return (
     <div ref={popRef} className="bot-switcher-pop" role="menu" aria-label={t('切換 bot')} style={style} onKeyDown={onKeyDown}>
-      {groups.map((g) => (
-        <div key={g.project.id} className="bot-switcher-group" role="group" aria-label={g.project.label}>
-          <div className="bot-switcher-project" aria-hidden="true">⌗ {g.project.label}</div>
-          {g.bots.map((b) => (
-            <button
-              key={b.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={b.id === botId}
-              tabIndex={-1}
-              className={`bot-switcher-item${b.id === botId ? ' on' : ''}`}
-              onClick={() => onPick(b.id)}
-            >
-              <RowLamp botId={b.id} />
-              <KindTag kind={b.kind} />
-              <span className="bot-switcher-name">{b.name}</span>
-            </button>
-          ))}
-        </div>
-      ))}
+      {groups.map((g) => {
+        const isExpert = g.project.mode === 'expert'
+        return (
+          <div key={g.project.id} className="bot-switcher-group" role="group" aria-label={g.project.label}>
+            <div className="bot-switcher-project" aria-hidden="true">⌗ {g.project.label}</div>
+            {isExpert
+              ? groupExpertSections(g.bots).map((sec) => (
+                  <div key={sec.role} className="bot-switcher-section">
+                    <div className="bot-switcher-expert-head" aria-hidden="true">
+                      <span className="bot-switcher-expert-title">{sec.title}</span>
+                      <span className="bot-switcher-expert-count">{sec.items.length}</span>
+                    </div>
+                    {sec.items.map((b) => (
+                      <button
+                        key={b.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={b.id === botId}
+                        tabIndex={-1}
+                        className={`bot-switcher-item${b.id === botId ? ' on' : ''}`}
+                        onClick={() => onPick(b.id)}
+                      >
+                        <RowLamp botId={b.id} />
+                        <KindTag kind={b.kind} />
+                        <ExpertRoleTag role={b.role} rolePending={b.role_pending} />
+                        <span className="bot-switcher-name">{b.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              : g.bots.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={b.id === botId}
+                    tabIndex={-1}
+                    className={`bot-switcher-item${b.id === botId ? ' on' : ''}`}
+                    onClick={() => onPick(b.id)}
+                  >
+                    <RowLamp botId={b.id} />
+                    <KindTag kind={b.kind} />
+                    <span className="bot-switcher-name">{b.name}</span>
+                  </button>
+                ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
