@@ -37,7 +37,9 @@ test('部署在跑時照樣出現（寫部署中），不因為差異算不出�
 test('送出的結果分得清楚：開始了／已經在跑／不用部署／其他錯', () => {
   const ok = deployNowNotice({ short: 'bbbbbbbb', log_path: '/x/log' }, null)
   assert.equal(ok.level, 'info')
-  assert.match(ok.text, /bbbbbbbb.*\/x\/log/)
+  assert.match(ok.text, /bbbbbbbb/)
+  // 使用者看不到伺服器上的檔案：通知不寫 log 路徑（2026-10-31）。
+  assert.ok(!ok.text.includes('/x/log'), ok.text)
   const busy = deployNowNotice(null, new ApiError(409, { error: 'conflict', reason: 'deploy_in_progress', message: '已經有部署在跑' }, 'x'))
   assert.deepEqual([busy.level, /沒有再開一趟/.test(busy.text), /已經有部署在跑/.test(busy.text)], ['error', true, true])
   const none = deployNowNotice(null, new ApiError(409, { error: 'conflict', reason: 'nothing_to_deploy', message: '只動到文件' }, 'x'))

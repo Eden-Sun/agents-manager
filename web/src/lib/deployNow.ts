@@ -47,7 +47,7 @@ export function deployVisible(s: DeployStatus | null): boolean {
 export function runningText(r: DeployRunning): string {
   switch (r.kind) {
     case 'requested':
-      return t('已按下立即部署{sha}，等自動部署接手、建置或等安全窗口', { sha: r.sha ? t('（{sha}）', { sha: r.sha.slice(0, 8) }) : '' })
+      return t('部署中{sha}：建置中或等換版窗口', { sha: r.sha ? t('（{sha}）', { sha: r.sha.slice(0, 8) }) : '' })
     case 'lease':
       return t('{owner}正握著 {resource} 窗口（重建或換版進行中）', { owner: r.owner || t('有人'), resource: r.resource ?? '' })
     default:
@@ -65,7 +65,7 @@ export function deployNowNotice(result: { short?: string; log_path?: string } | 
   if (result) {
     return {
       level: 'info',
-      text: t('已開始立即部署 {short}：不等 ubuntu-ci，在專用 checkout 建置，沒人 working 才換 binary。進度看 {log}', { short: result.short ?? '', log: result.log_path ?? 'daemon-update.log' }),
+      text: t('已送出部署 {short}。左上角會顯示「部署中」，換好後自動消失；等太久會跳出等待提示。', { short: result.short ?? '' }),
     }
   }
   if (error instanceof ApiError) {
