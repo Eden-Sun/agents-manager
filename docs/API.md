@@ -74,7 +74,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 ### Bot principal 的路徑資源範圍
 
-`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。User principal 維持原行為。
+`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。例外：巡檢（patrol）角色可對任何頂層 bot 打 `POST /api/bots/{id}/restart`、`/start`（child 與其他操作仍限自己的樹）。User principal 維持原行為。
 
 | 端點 | 方法 | Bot 能否跨 bot | 應有範圍 |
 |---|---|---|---|

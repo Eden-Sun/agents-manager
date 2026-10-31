@@ -462,6 +462,29 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     if (!deleteOpen && !closeConfirmOpen && !loginOpen) requestClose()
   }
 
+  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
+  const restartButton = child ? null : (
+    <button
+      type="button"
+      className="btn primary"
+      disabled={restarting}
+      onClick={() => {
+        setRestarting(true)
+        // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
+        // 改模型等其他設定後的重啟會開新對話、整個失憶。
+        void restartBot(botId).then((ok) => {
+          setRestarting(false)
+          if (ok) {
+            setBanner(null)
+            notify('info', t('{name} 已重新啟動', { name: bot.name }))
+          }
+        })
+      }}
+    >
+      {restarting ? t('重啟中…') : t('立即重啟')}
+    </button>
+  )
+
   return (
     <div className="bs-scrim" role="presentation">
     <div
@@ -502,25 +525,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : (
             <span>{t('已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。')}</span>
           )}
-          {child ? null : <button
-            type="button"
-            className="btn primary"
-            disabled={restarting}
-            onClick={() => {
-              setRestarting(true)
-              // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
-              // 改模型等其他設定後的重啟會開新對話、整個失憶。
-              void restartBot(botId).then((ok) => {
-                setRestarting(false)
-                if (ok) {
-                  setBanner(null)
-                  notify('info', t('{name} 已重新啟動', { name: bot.name }))
-                }
-              })
-            }}
-          >
-            {restarting ? t('重啟中…') : t('立即重啟')}
-          </button>}
+          {restartButton}
         </div>
       ) : null}
       {banner === 'saved' ? (
@@ -536,7 +541,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-banner ok" role="status">{t('已儲存，回合結束後自動套用。')}</div>
       ) : null}
 
-      {bot.role_pending ? <div className="bs-banner warn" role="status">待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</div> : null}
+      {bot.role_pending ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
       {project?.mode === 'expert' ? <label>角色
         <select value={bot.role ?? ''} onChange={(e) => void patchBot(botId, { role: (e.target.value || null) as 'manager' | 'executor' | 'advisor' | null })}>
           <option value="">未分配</option><option value="executor">執行者</option><option value="advisor">顧問</option><option value="manager" disabled>管理者（在專案設定中指定）</option>

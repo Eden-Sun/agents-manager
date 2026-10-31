@@ -425,7 +425,7 @@ function BotRowImpl({
             ) : null}
           </span>
           {/* 選取中的列，點名字才改名。 */}
-          <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
+          <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
@@ -874,7 +874,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   )
 }
 
-/** SPEC §13.5/§13.6: title opens the group view; whole row is the hit area (v4.0, ≥ 32px). */
+/** SPEC §13.5/§13.6: title opens project settings; whole row is the hit area (v4.0, ≥ 32px). */
 function ProjectTitle({
   projectId,
   label,
@@ -907,7 +907,7 @@ function ProjectTitle({
       <span className="project-group-icon" aria-hidden="true">
         ⌗
       </span>
-      <ProjectNameField projectId={projectId} label={label} variant="row" armed={selected} editing={editing} onEditing={setEditing} />
+      <ProjectNameField projectId={projectId} label={label} variant="row" armed={false} editing={editing} onEditing={setEditing} />
       {foldedUnread > 0 ? (
         <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
           !{foldedUnread > 99 ? '99+' : foldedUnread}
@@ -928,7 +928,7 @@ function ProjectTitle({
     <button
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
-      title={t('開啟「{name}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n{path}{drag}', { name: label, path, drag: draggable ? t('\n拖曳可調整專案順序') : '' })}
+      title={t('開啟「{name}」的專案設定\n{path}{drag}', { name: label, path, drag: draggable ? t('\n拖曳可調整專案順序') : '' })}
       // 不是開關，用 aria-current（同 bot 列）。
       aria-current={selected ? 'true' : undefined}
       onClick={(e) => {
