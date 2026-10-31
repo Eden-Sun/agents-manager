@@ -65,6 +65,7 @@
 .bot-track-tag {
   flex: none;
   max-width: 9em;
+  margin-right: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

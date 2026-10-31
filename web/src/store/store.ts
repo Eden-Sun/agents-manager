@@ -698,7 +698,7 @@ const REASON_CODE_TEXT: Record<string, string> = {
   // `MAX_PROVABLE_CHARS`（am-lifecycle delivery.rs）：超過就證明不了送達，daemon 不送。
   prompt_too_long_to_prove: msg('這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送'),
   // 專家（specialist）：track 必填（400，`error` 欄位）；track 與 role 只有使用者能改（403 user_only）。
-  track_required: msg('專家一定要填寫專長軌道，空白不能儲存'),
+  track_required: msg('專家必須填負責任務（track），空白不能儲存'),
   user_only: msg('只有使用者能改這個設定'),
 }
 

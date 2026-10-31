@@ -1,6 +1,6 @@
 /**
- * 專家（specialist）角色的設定面板：選了「專家」要先填 track，空白不能儲存；存的是 PATCH {role:"specialist", track}。
- * 錯誤碼（track_required／user_only）要顯示成人話，不是原始代碼。
+ * 專家（specialist）在設定框：角色是表單的一欄（pill 按鈕），選「專家」才出現「負責任務（track）」，
+ * 空白時底部的「儲存」停用；存的是一次 PATCH {role, track}。錯誤碼 track_required／user_only 顯示成人話。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,9 +28,9 @@ function Harness() {
   return open ? <BotSettingsPanel botId="b1" /> : null
 }
 
-const roleSelect = () => document.querySelector<HTMLSelectElement>('label select')!
-const trackInput = () => document.querySelector<HTMLInputElement>('form[aria-label] input[type="text"]')
-const saveSpecialist = () => document.querySelector<HTMLButtonElement>('form[aria-label] button[type="submit"]')!
+const pill = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('.role-field button[role="radio"]')].find((b) => b.textContent?.trim() === label)!
+const trackInput = () => document.querySelector<HTMLInputElement>('.track-field input')
+const saveButton = () => document.querySelector<HTMLButtonElement>('button[form="bot-settings-form-b1"]')!
 
 async function setup(bot: Bot) {
   const sent: PatchBotInput[] = []
@@ -51,42 +51,36 @@ async function setup(bot: Bot) {
   return sent
 }
 
-test('選專家後沒填 track：儲存停用，且不送出 PATCH', async () => {
+test('選專家後出現 track 欄；空白時儲存停用，且不送出', async () => {
   const sent = await setup(mk(null))
-  const select = roleSelect()
-  await act(async () => {
-    select.value = 'specialist'
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  })
+  await click(pill('專家'))
   assert.ok(trackInput(), '選了專家就出現 track 欄位')
-  assert.equal(saveSpecialist().disabled, true, '空白 track 不能儲存')
-  await click(saveSpecialist())
-  assert.deepEqual(sent, [], '空白不送出')
+  assert.equal(saveButton().disabled, true, '空白 track 不能儲存')
+  assert.match(document.querySelector('.track-field')?.textContent ?? '', /空白不能儲存/)
+  assert.deepEqual(sent, [], '選角色本身不送出，要按儲存')
 })
 
-test('填了 track 後儲存：PATCH {role:"specialist", track}', async () => {
+test('填了 track 後按底部儲存：一次 PATCH {role:"specialist", track}', async () => {
   const sent = await setup(mk(null))
-  const select = roleSelect()
-  await act(async () => {
-    select.value = 'specialist'
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  })
+  await click(pill('專家'))
   await typeInto(trackInput()!, ' infra ')
   await act(async () => {})
-  assert.equal(saveSpecialist().disabled, false)
-  await click(saveSpecialist())
+  assert.equal(saveButton().disabled, false)
+  await click(saveButton())
   assert.deepEqual(sent, [{ role: 'specialist', track: 'infra' }])
 })
 
-test('已是專家時 track 欄位帶入現有值', async () => {
+test('已是專家時 track 欄位帶入現有值，選其他角色不出現 track 欄', async () => {
   await setup(mk('specialist', 'ui'))
-  assert.equal(roleSelect().value, 'specialist')
+  assert.equal(pill('專家').getAttribute('aria-checked'), 'true')
   assert.equal(trackInput()?.value, 'ui')
+  await click(pill('顧問'))
+  assert.equal(trackInput(), null)
 })
 
 test('錯誤碼 track_required 與 user_only 顯示成人話', async () => {
   const { ApiError } = await import('../api/types')
   const { errTextForTest } = await import('../store/store')
-  assert.match(errTextForTest(new ApiError(400, { error: 'track_required' }, 'bad request')), /專長軌道/)
+  assert.match(errTextForTest(new ApiError(400, { error: 'track_required' }, 'bad request')), /負責任務/)
   assert.match(errTextForTest(new ApiError(403, { error: 'forbidden', reason: 'user_only' }, 'forbidden')), /只有使用者能改/)
 })

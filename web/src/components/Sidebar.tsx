@@ -433,7 +433,6 @@ function BotRowImpl({
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {isExpertProject && !compact ? <ExpertRoleTag role={bot.role} rolePending={bot.role_pending} /> : null}
-            {isExpertProject && !compact && bot.role === 'specialist' && bot.track ? <ExpertTrackTag track={bot.track} /> : null}
             {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
@@ -463,6 +462,8 @@ function BotRowImpl({
           </span>
         ) : null}
         <span className="bot-sub">
+          {/* 專家的 track 放在這一行（名字那行被截，塞不下）。 */}
+          {isExpertProject && !compact && bot.role === 'specialist' && bot.track ? <ExpertTrackTag track={bot.track} /> : null}
           {/* 身份一定要標，同 CLI 兩帳號才分得出來。精簡列放在 kind 圖示正下方（上面 bot-kind-wrap），這裡不重複。 */}
           {!showIdentity || compact ? null : divergedChildren ? (
             <span

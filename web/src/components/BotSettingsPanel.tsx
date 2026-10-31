@@ -246,13 +246,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const loginBusy = useStore((s) => s.busy[`login:${botId}`] === true)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
-  /** 角色下拉選了「專家」但還沒存（track 必填）：這時 select 顯示專家，實際角色仍是 bot.role。 */
-  const [roleDraft, setRoleDraft] = useState<'specialist' | null>(null)
+  /** 角色是表單的一欄：undefined＝沒動過（沿用 bot.role），否則是使用者選的值，跟其他欄位一起按「儲存」送出。 */
+  const [roleDraft, setRoleDraft] = useState<'manager' | 'executor' | 'advisor' | 'specialist' | null | undefined>(undefined)
   const [specTrack, setSpecTrack] = useState(bot?.track ?? '')
-  const [savingTrack, setSavingTrack] = useState(false)
+  const roleLabelId = useId()
   const trackHintId = useId()
   const trackOk = specTrack.trim() !== ''
-  const roleValue = roleDraft ?? bot?.role ?? ''
+  const roleValue = roleDraft !== undefined ? roleDraft : (bot?.role ?? null)
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
@@ -429,19 +429,29 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   const form = effectiveForm(base, { name, model, effort, fast, persona, identity }, touched)
   const patch: PatchBotInput = computeBotPatch(base, form, touched, bot.kind)
-  const changedKeys = Object.keys(patch)
+  // 角色與 track：只有專家會帶 track；換成專家或改了 track 才送。
+  const roleChanged = roleDraft !== undefined && roleDraft !== (bot.role ?? null)
+  const trackChanged = roleValue === 'specialist' && specTrack.trim() !== (bot.track ?? '')
+  const roleTrackPatch: PatchBotInput = roleChanged
+    ? { role: roleValue, ...(roleValue === 'specialist' ? { track: specTrack.trim() } : {}) }
+    : trackChanged
+      ? { track: specTrack.trim() }
+      : {}
+  const sendPatch: PatchBotInput = { ...patch, ...roleTrackPatch }
+  const changedKeys = Object.keys(sendPatch)
   const dirty = changedKeys.length > 0
-  const canSave = dirty && (patch.name === undefined || nameOk) && !saving
-  const interruptsTurn = bot.kind === 'codex' && turnWorking && (patch.model !== undefined || patch.effort !== undefined)
+  const canSave = dirty && (sendPatch.name === undefined || nameOk) && (roleValue !== 'specialist' || trackOk) && !saving
+  const interruptsTurn = bot.kind === 'codex' && turnWorking && (sendPatch.model !== undefined || sendPatch.effort !== undefined)
 
   const save = () => {
     if (!canSave) return
     setSaving(true)
     setBanner(null)
-    const sent = patch
+    const sent = sendPatch
     void patchBot(botId, sent).then((res) => {
       setSaving(false)
       if (!res) return
+      setRoleDraft(undefined)
       // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
       // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
       setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
@@ -549,51 +559,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
 
       {bot.role_pending ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
-      {project?.mode === 'expert' ? <label>角色
-        <select
-          value={roleValue}
-          onChange={(e) => {
-            const next = e.target.value
-            if (next === 'specialist') {
-              // 專家要先填軌道才能存：先不送，等「儲存專家」按鈕。
-              setRoleDraft('specialist')
-              return
-            }
-            setRoleDraft(null)
-            void patchBot(botId, { role: (next || null) as 'manager' | 'executor' | 'advisor' | null })
-          }}
-        >
-          <option value="">未分配</option><option value="specialist">專家</option><option value="advisor">顧問</option><option value="executor">執行者</option><option value="manager" disabled>管理者（在專案設定中指定）</option>
-        </select>
-      </label> : null}
-      {project?.mode === 'expert' && roleValue === 'specialist' ? (
-        <form
-          className="bs-specialist"
-          aria-label={t('專家設定')}
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (!trackOk || savingTrack) return
-            setSavingTrack(true)
-            void patchBot(botId, { role: 'specialist', track: specTrack.trim() }).then((res) => {
-              setSavingTrack(false)
-              if (res) setRoleDraft(null)
-            })
-          }}
-        >
-          <label>{t('專長軌道（必填）')}
-            <input
-              type="text"
-              value={specTrack}
-              placeholder={t('例如 infra、ui')}
-              aria-invalid={!trackOk || undefined}
-              aria-describedby={trackOk ? undefined : trackHintId}
-              onChange={(e) => setSpecTrack(e.target.value)}
-            />
-          </label>
-          {trackOk ? null : <span id={trackHintId} className="hint">{t('專家一定要填軌道，空白不能儲存')}</span>}
-          <button type="submit" className="btn primary" disabled={!trackOk || savingTrack}>{t('儲存專家')}</button>
-        </form>
-      ) : null}
       <div className="bs-body">
         <form
           className="form"
@@ -622,6 +587,32 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             {nameBad ? <span id={nameHintId} className="hint">{t.tr(BOT_NAME_HINT)}</span> : null}
           </label>
 
+          {project?.mode === 'expert' ? (
+            <div className="field role-field">
+              <span id={roleLabelId}>{t('角色')}</span>
+              <div className="opt-group" role="radiogroup" aria-labelledby={roleLabelId}>
+                <button type="button" role="radio" aria-checked={roleValue === null} className={`opt${roleValue === null ? ' on' : ''}`} onClick={() => setRoleDraft(null)}>{t('未分配')}</button>
+                <button type="button" role="radio" aria-checked={roleValue === 'specialist'} className={`opt${roleValue === 'specialist' ? ' on' : ''}`} onClick={() => setRoleDraft('specialist')}>{t('專家')}</button>
+                <button type="button" role="radio" aria-checked={roleValue === 'advisor'} className={`opt${roleValue === 'advisor' ? ' on' : ''}`} onClick={() => setRoleDraft('advisor')}>{t('顧問')}</button>
+                <button type="button" role="radio" aria-checked={roleValue === 'executor'} className={`opt${roleValue === 'executor' ? ' on' : ''}`} onClick={() => setRoleDraft('executor')}>{t('執行者')}</button>
+                <button type="button" role="radio" aria-checked={roleValue === 'manager'} className={`opt${roleValue === 'manager' ? ' on' : ''}`} disabled title={t('管理者在專案設定中指定')}>{t('管理者')}</button>
+              </div>
+            </div>
+          ) : null}
+          {project?.mode === 'expert' && roleValue === 'specialist' ? (
+            <label className="field track-field">
+              <span>{t('負責任務（track）')}</span>
+              <input
+                type="text"
+                value={specTrack}
+                placeholder={t('例如 infra、ui')}
+                aria-invalid={!trackOk || undefined}
+                aria-describedby={trackOk ? undefined : trackHintId}
+                onChange={(e) => setSpecTrack(e.target.value)}
+              />
+              {trackOk ? null : <span id={trackHintId} className="hint">{t('專家必須填負責任務（track），空白不能儲存')}</span>}
+            </label>
+          ) : null}
           <ApiModelFields
             kind={bot.kind}
             host={host}
