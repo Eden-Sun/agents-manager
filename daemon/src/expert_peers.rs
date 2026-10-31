@@ -90,6 +90,9 @@ pub(crate) async fn list(
         rank_tier: u32,
         /// 同 track 的專家：排在所有候選最前面（理由「專家（同 track）」）。
         specialist_match: bool,
+        /// fork 提示用：codex、同 track（最近一筆 relay 的 track）、正在忙。
+        fork_hint: bool,
+        kind: String,
     }
 
     let mut candidates = Vec::new();
@@ -179,6 +182,7 @@ pub(crate) async fn list(
         let last_req_track: Option<Option<String>> = sqlx::query_scalar(
             "SELECT track FROM relay_requests WHERE to_bot_id=? ORDER BY created_at DESC LIMIT 1"
         ).bind(&bot.id).fetch_optional(&app.db).await.ok().flatten();
+        let same_track = matches!(&last_req_track, Some(Some(t)) if t == for_track);
         if let Some(Some(t)) = last_req_track {
             if t == for_track {
                 score += 1000;
@@ -218,8 +222,12 @@ pub(crate) async fn list(
         }
 
         let rank = model_cost_rank(bot.model.as_deref()).unwrap_or(99);
+        let busy = !matches!(status.as_str(), "idle" | "done" | "unknown");
+        let fork_hint = bot.kind == "codex" && same_track && busy;
 
         candidates.push(Candidate {
+            fork_hint,
+            kind: bot.kind.clone(),
             bot_id: bot.id,
             name: bot.name,
             role: bot.role,
@@ -240,6 +248,14 @@ pub(crate) async fn list(
             .then_with(|| a.bot_id.cmp(&b.bot_id))
     });
 
+    // 只是提示：同 track 有 codex 執行者在忙、而且它有 session，就指給 manager 看（不自動 fork）。
+    let mut fork_suggestion = Value::Null;
+    for c in candidates.iter().filter(|c| c.fork_hint) {
+        if crate::db::last_native_session_id(&app.db, &c.bot_id).await.ok().flatten().is_some() {
+            fork_suggestion = json!({"source_bot_id": c.bot_id, "name": c.name, "kind": c.kind});
+            break;
+        }
+    }
     let cand_json: Vec<Value> = candidates.into_iter().map(|c| json!({
         "id": c.bot_id,
         "name": c.name,
@@ -250,7 +266,7 @@ pub(crate) async fn list(
         "reasons": c.reasons,
     })).collect();
 
-    Ok(Json(json!({"project_id":project_id,"candidates":cand_json})))
+    Ok(Json(json!({"project_id":project_id,"candidates":cand_json,"fork_suggestion":fork_suggestion})))
 }
 
 pub(crate) const EXPERT_NO_CHILD: &str = "專家模式沒有 child：用 agm peers 找同專案的頂層執行者／顧問，以 herdr agent prompt bot:<id> --expect-result 派工；管理者缺人手用 agm hire 增聘執行者。";
@@ -424,5 +440,37 @@ mod specialist_peers_tests {
         assert_eq!(cands[0]["id"], mine.id, "同 track 的專家排第一：{res}");
         assert!(cands[0]["reasons"].as_array().unwrap().iter().any(|r| r == "專家（同 track）"));
         assert!(cands.iter().all(|c| c["id"] != other.id), "其他 track 的專家不當候選：{res}");
+    }
+}
+
+#[cfg(test)]
+mod fork_suggestion_tests {
+    use super::*;
+
+    /// 同 track（最近一筆 relay 的 track）的 codex 執行者正忙、而且有 session：`fork_suggestion` 指給它；閒著就不指。
+    #[tokio::test]
+    async fn a_busy_same_track_codex_with_a_session_is_suggested_as_a_fork_source() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let codex = crate::testing::claude_bot(&app, &env.project_id, "codex-exec").await;
+        sqlx::query("UPDATE bots SET kind='codex', role='executor' WHERE id=?").bind(&codex.id).execute(&app.db).await.unwrap();
+        // 有一段已結束、記到 session 的 run（fork 的來源）。
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-c','2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')")
+            .bind(crate::db::ulid()).bind(&codex.id).execute(&app.db).await.unwrap();
+        // 目前正在跑的 run：忙。
+        let run = crate::testing::fake_run(&app, &codex.id).await;
+        sqlx::query("UPDATE runs SET state='running', agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES('rr-fork',?,?,'c-fork','p','[]','delivered',?,'infra')")
+            .bind(&codex.id).bind(&codex.id).bind(crate::db::now()).execute(&app.db).await.unwrap();
+
+        let query = || PeersQuery { for_track: Some("infra".into()) };
+        let busy = list(State(app.clone()), Path(env.project_id.clone()), Query(query()), Extension(RequestPrincipal::User)).await.unwrap().0;
+        assert_eq!(busy["fork_suggestion"]["source_bot_id"], codex.id, "忙的同 track codex 有 session：提示它：{busy}");
+
+        // 閒著：只是候選，不再提示 fork。
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let idle = list(State(app.clone()), Path(env.project_id.clone()), Query(query()), Extension(RequestPrincipal::User)).await.unwrap().0;
+        assert!(idle["fork_suggestion"].is_null(), "閒著不提示：{idle}");
     }
 }

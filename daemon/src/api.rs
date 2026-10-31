@@ -2846,7 +2846,7 @@ async fn create_bot(
             b.name.clone()
         };
         *used_name.lock().unwrap() = name.clone();
-        p.bots.push(crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+        p.bots.push(crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
             id: Some(id.clone()),
             name,
             kind: b.kind.clone(),
@@ -3204,6 +3204,31 @@ struct HireMember {
     role: Option<String>,
     #[serde(default)]
     track: Option<String>,
+    /// C 期：從同專案、同主機、codex、有 session 的 codex bot 分岔（新 member 第一次啟動用 `codex fork <session>`）。
+    #[serde(default)]
+    fork_from: Option<String>,
+}
+
+/// `fork_from` 的來源檢查（違反回 400／409，錯誤碼見 API.md）。回傳來源最近一段的 codex session id（只為了驗證存在）。
+async fn validate_fork_source(app: &Arc<App>, project: &db::Project, source_id: &str, new_kind: &str) -> Result<(), LcError> {
+    let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason, "fork_from": source_id}));
+    if new_kind != "codex" {
+        return Err(bad("fork_target_not_codex"));
+    }
+    let source = db::bot(&app.db, source_id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| bad("fork_source_not_found"))?;
+    if source.project_id != project.id {
+        return Err(bad("fork_source_other_project"));
+    }
+    if db::bot_host(&app.db, &source.id).await.map_err(any_err)? != project.host {
+        return Err(bad("fork_source_other_host"));
+    }
+    if source.kind != "codex" {
+        return Err(bad("fork_source_not_codex"));
+    }
+    if db::last_native_session_id(&app.db, &source.id).await.map_err(any_err)?.is_none() {
+        return Err(LcError::conflict("fork_source_no_session", json!({"reason": "fork_source_no_session", "fork_from": source_id})));
+    }
+    Ok(())
 }
 
 /// 專家模式的 manager 增聘執行者（使用者 2026-10-31：專家模式沒有 child，manager 要人手就增聘成員）。
@@ -3239,6 +3264,14 @@ async fn hire_member(
     let project_cfg = cfg.projects.iter().find(|c| c.id.as_deref() == Some(pid.as_str()));
     let entries = project.executor_pool();
     let entry = crate::executor_pool::resolve_hire(&entries, manager, b.kind.as_deref(), b.model.as_deref(), b.effort.as_deref(), b.pool_entry.as_deref())?;
+    // fork：先驗來源（同專案、同主機、codex、有 session），新 member 也得是 codex；再算條目容量。
+    let planned_kind = match entry {
+        Some(e) => e.kind.clone(),
+        None => b.kind.clone().unwrap_or_default(),
+    };
+    if let Some(source) = b.fork_from.as_deref() {
+        validate_fork_source(&app, &project, source, &planned_kind).await?;
+    }
     let bots = project_cfg.map(|c| c.bots.as_slice()).unwrap_or(&[]);
     if let (true, Some(entry)) = (manager, entry) {
         crate::executor_pool::check_capacity(entry, bots)?;
@@ -3263,13 +3296,15 @@ async fn hire_member(
     let patch: PatchBot = serde_json::from_value(json!({"role": role, "track": track})).map_err(any_err)?;
     patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
     // 條目與它的 context 啟動環境只寫進 config（pool_entry 不進 DB）。
-    if pool_entry.is_some() || !env.is_empty() {
+    if pool_entry.is_some() || !env.is_empty() || b.fork_from.is_some() {
         let bot_id = id.clone();
+        let fork_from = b.fork_from.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
             let p = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).ok_or_else(|| anyhow::anyhow!("no-project"))?;
             if let Some(bot) = p.bots.iter_mut().find(|bot| bot.id.as_deref() == Some(bot_id.as_str())) {
                 bot.pool_entry = pool_entry.clone();
                 bot.env.extend(env.clone());
+                bot.fork_from = fork_from.clone();
             }
             Ok(())
         })
@@ -3991,7 +4026,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身份起。
         let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let env = serde_json::from_str(&bot.env_json).map_err(|e| LcError::conflict("bot env_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
-        let entry = crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+        let entry = crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
             id: Some(bot.id.clone()),
             name: bot.name.clone(),
             kind: bot.kind.clone(),
@@ -6065,7 +6100,7 @@ mod project_tests {
                     host: LOCAL_HOST.into(),
                     bots: ["b1", "b2", "b3", "b4"]
                         .into_iter()
-                        .map(|id| crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+                        .map(|id| crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
                             id: Some(id.to_string()),
                             name: id.to_string(),
                             kind: "claude".into(),
@@ -13193,7 +13228,7 @@ mod per_principal_auth_tests {
         }
         let configured_bots = [&patrol, &responder, &patrol_target, &responder_target]
             .into_iter()
-            .map(|bot| crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+            .map(|bot| crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
                 id: Some(bot.id.clone()),
                 name: bot.name.clone(),
                 kind: bot.kind.clone(),
@@ -17925,7 +17960,7 @@ mod expert_member_tests {
         let manager = add(&env, "hire-manager").await;
         let peer = add(&env, "hire-peer").await;
         let hire = |caller: &str| hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(caller.to_string())),
-            Json(HireMember { name: "worker-1".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None }));
+            Json(HireMember { name: "worker-1".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None }));
         assert!(hire(&manager).await.is_err(), "parent_child project");
         make_expert(&env, &manager).await;
         assert!(hire(&peer).await.is_err(), "non-manager");
@@ -17934,7 +17969,7 @@ mod expert_member_tests {
 
         // User is unrestricted by pool
         let user_hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User),
-            Json(HireMember { name: "worker-0".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None })).await.unwrap();
+            Json(HireMember { name: "worker-0".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None })).await.unwrap();
         let bytes0 = axum::body::to_bytes(user_hire.into_body(), 1 << 20).await.unwrap();
         let id0 = serde_json::from_slice::<Value>(&bytes0).unwrap()["bot_id"].as_str().unwrap().to_string();
         assert!(!id0.is_empty());
@@ -17955,7 +17990,7 @@ mod expert_member_tests {
         patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch_p2)).await.unwrap();
         assert!(matches!(hire(&manager).await, Err(LcError::BadValue(ref v)) if v["reason"] == "pool_entry_required" && v["entries"].as_array().map(Vec::len) == Some(2)));
         let res = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
-            Json(HireMember { name: "worker-2".into(), kind: None, model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None })).await.map_err(|e| format!("{e:?}")).unwrap();
+            Json(HireMember { name: "worker-2".into(), kind: None, model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None, fork_from: None })).await.map_err(|e| format!("{e:?}")).unwrap();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
         let worker = db::bot(&env.app.db, &id).await.unwrap().unwrap();
@@ -17964,7 +17999,7 @@ mod expert_member_tests {
         assert_eq!(cfg_bot.pool_entry.as_deref(), Some("claude-2"));
         // manager 帶了不一致的 effort／kind → mismatch
         assert!(matches!(hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
-            Json(HireMember { name: "worker-3".into(), kind: Some("codex".into()), model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None })).await,
+            Json(HireMember { name: "worker-3".into(), kind: Some("codex".into()), model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None, fork_from: None })).await,
             Err(LcError::BadValue(ref v)) if v["reason"] == "pool_entry_mismatch"));
         sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
@@ -18188,5 +18223,132 @@ mod runtime_policy_api_tests {
         let p = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
         assert_eq!(p.role_policy()["manager"]["keep_warm_after_min"], 30);
         assert!(p.role_policy()["manager"].get("context_tokens").is_none(), "存正規化後的形狀（沒設的欄位不寫，TOML 也沒有 null）");
+    }
+}
+
+/// C 期（`agm hire --fork-from`）：來源檢查的四種拒絕、條目容量計入 fork 出來的成員、config 記下待 fork 的來源。
+#[cfg(test)]
+mod hire_fork_api_tests {
+    use super::*;
+
+    /// 專家模式專案（一位 manager、池裡有 claude 與 codex 條目）。回傳 manager 的 bot id。
+    async fn expert_project(env: &crate::testing::Env) -> String {
+        let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        env.app.cfg.update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        }).await.unwrap();
+        let manager = add_bot(env, &env.project_id, "claude", false).await;
+        let set_manager = serde_json::from_value::<PatchBot>(json!({"role": "manager"})).unwrap();
+        patch_bot(State(env.app.clone()), Path(manager.clone()), Extension(RequestPrincipal::User), Json(set_manager)).await.map_err(|e| format!("{e:?}")).unwrap();
+        let pool = serde_json::from_value::<PatchProject>(json!({"executor_pool": [
+            {"id": "claude-1", "kind": "claude", "model": "", "count": 5},
+            {"id": "codex-1", "kind": "codex", "model": "", "count": 5}
+        ]})).unwrap();
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(pool)).await.map_err(|e| format!("{e:?}")).unwrap();
+        crate::projection::update_and_project(&env.app.cfg, &env.app.db, |cfg| {
+            for p in cfg.projects.iter_mut() {
+                p.mode = "expert".into();
+            }
+            Ok(())
+        }).await.map_err(|e| format!("{e:?}")).unwrap();
+        manager
+    }
+
+    /// 建一顆 bot（名字唯一）；`session` 為真就給它一段已結束的 run 與 codex session。
+    async fn add_bot(env: &crate::testing::Env, project_id: &str, kind: &str, session: bool) -> String {
+        let name = format!("b{}", db::ulid().chars().rev().take(10).collect::<String>().to_lowercase());
+        let res = create_bot(State(env.app.clone()), Path(project_id.to_string()), Json(serde_json::from_value(json!({"name": name, "kind": kind})).unwrap())).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        if session {
+            sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-src','2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')")
+                .bind(db::ulid())
+                .bind(&id)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    fn hire(env: &crate::testing::Env, manager: &str, body: Value) -> impl std::future::Future<Output = Result<Response, LcError>> {
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let caller = RequestPrincipal::Bot(manager.to_string());
+        let body = serde_json::from_value::<HireMember>(body).unwrap();
+        async move { hire_member(State(app), Path(pid), Extension(caller), Json(body)).await }
+    }
+
+    #[tokio::test]
+    async fn fork_source_is_checked_and_refused_with_a_reason() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        let claude_src = add_bot(&env, &env.project_id, "claude", true).await;
+        let codex_src = add_bot(&env, &env.project_id, "codex", true).await;
+        let codex_nosess = add_bot(&env, &env.project_id, "codex", false).await;
+        // 來源不是 codex。
+        let err = hire(&env, &manager, json!({"name": "fk1", "kind": "codex", "fork_from": claude_src})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_not_codex"), "{err:?}");
+        // 新成員不是 codex。
+        let err = hire(&env, &manager, json!({"name": "fk2", "kind": "claude", "fork_from": codex_src})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_target_not_codex"), "{err:?}");
+        // 來源沒有 session。
+        let err = hire(&env, &manager, json!({"name": "fk3", "kind": "codex", "fork_from": codex_nosess})).await.err().unwrap();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "fork_source_no_session"), "{err:?}");
+        // 來源不存在。
+        let err = hire(&env, &manager, json!({"name": "fk4", "kind": "codex", "fork_from": "nope"})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_not_found"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fork_source_from_another_project_is_refused() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        let other = crate::db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let foreign = crate::testing::claude_bot(&env.app, &other, "foreign").await.id;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&foreign).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-f','2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')")
+            .bind(crate::db::ulid()).bind(&foreign).execute(&env.app.db).await.unwrap();
+        let err = hire(&env, &manager, json!({"name": "fk5", "kind": "codex", "fork_from": foreign})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_other_project"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fork_source_on_another_host_is_refused() {
+        // 來源 bot 的主機由它的專案決定（`bot_host` 就是專案的 host），所以這裡直接用「專案的 host 跟來源不同」驗證檢查本身。
+        let env = crate::testing::env().await;
+        let _manager = expert_project(&env).await;
+        let source = add_bot(&env, &env.project_id, "codex", true).await;
+        let mut project = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
+        project.host = "m4p".into();
+        let err = validate_fork_source(&env.app, &project, &source, "codex").await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_other_host"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_fork_member_counts_toward_the_executor_pool_and_remembers_its_source() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        let source = add_bot(&env, &env.project_id, "codex", true).await;
+        // 條目 codex-1 只有 1 顆：容量縮成 1。
+        let pool = serde_json::from_value::<PatchProject>(json!({"executor_pool": [
+            {"id": "claude-1", "kind": "claude", "model": "", "count": 5},
+            {"id": "codex-1", "kind": "codex", "model": "", "count": 1}
+        ]})).unwrap();
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(pool)).await.map_err(|e| format!("{e:?}")).unwrap();
+
+        let res = hire(&env, &manager, json!({"name": "forked", "kind": "codex", "fork_from": source})).await.map_err(|e| format!("{e:?}")).unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        let cfg_bot = env.app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.id.as_deref() == Some(id.as_str())).cloned().unwrap();
+        assert_eq!((cfg_bot.pool_entry.as_deref(), cfg_bot.fork_from.as_deref()), (Some("codex-1"), Some(source.as_str())));
+
+        // 條目只有 1 顆：fork 出來的已經佔滿，第二次增聘（不論 fork 與否）都是 409。
+        let err = hire(&env, &manager, json!({"name": "again", "kind": "codex"})).await.err().unwrap();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
+        let err = hire(&env, &manager, json!({"name": "again2", "kind": "codex", "fork_from": source})).await.err().unwrap();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
     }
 }

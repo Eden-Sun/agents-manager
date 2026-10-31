@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn duplicate_ids_and_names_are_refused_before_they_merge_into_one_row() {
         fn bot(id: Option<&str>, name: &str) -> crate::config::BotCfg {
-            crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+            crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
                 id: id.map(str::to_string),
                 name: name.into(),
                 kind: "claude".into(),
@@ -1629,7 +1629,7 @@ mod tests {
             path: "/tmp".into(),
             label: "demo".into(),
             host: "local".into(),
-            bots: vec![crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+            bots: vec![crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
                 id: Some("b1".into()),
                 name: "worker".into(),
                 kind: "claude".into(),

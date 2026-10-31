@@ -230,6 +230,9 @@ pub struct BotCfg {
     /// 增聘時套用的執行者池條目 id（只寫 config，不進 DB）；用量＝同專案 executor 中此值相同的 bot 數。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_entry: Option<String>,
+    /// 增聘時 `--fork-from` 指定的來源 codex bot：這顆第一次啟動時用 `codex fork <來源的 session>` 分岔（之後走它自己的 session）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_from: Option<String>,
 }
 
 impl Default for BotCfg {
@@ -241,6 +244,7 @@ impl Default for BotCfg {
             role: None,
             track: None,
             runtime_override: None,
+            fork_from: None,
             manager_use: true,
             model: None,
             effort: None,

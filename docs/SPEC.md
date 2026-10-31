@@ -2888,6 +2888,8 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。
 
 
+**分岔增聘（C 期，2026-11，`agm hire --fork-from`）**：manager 增聘 codex 成員時可指定來源 codex bot（同專案、同主機、有 session）。新成員第一次啟動用 `codex fork <來源 session>` 接著同一段脈絡分岔，之後重啟走它自己的 session，不再從來源分岔。來源記在 config（`fork_from`），不進 DB、不升 schema；計入執行者池（同一套容量）。`agm peers --for <track>` 在同 track 有 codex 執行者正忙、而且有 session 時回 `fork_suggestion`，只是提示給 manager，不自動分岔。
+
 **角色 policy 與 bot 覆寫（B 期，2026-11）**：保溫與熱壓的門檻不再只有常數。生效順序 bot 覆寫（`bots.runtime_override_json`）> 角色 policy（`projects.role_policy_json`，依 bot 的角色）> 預設（`58` 分保溫、`110` 分熱壓、`30%`，預設 policy 為空＝行為完全不變，不偷偷幫管理者開保溫）。`keep_warm` 讓非主力的 claude 也保溫（管理者預設建議開，顧問關），`keep_warm: false` 可關掉主力的保溫；codex 永不保溫（現有規則不變）。保溫對象＝`keep_warm` 有值就以它為準，否則是主力。換算與合併在 `am-base::runtime_policy`（[`effective`]／[`KeepWarmTuning`]），保溫判斷 `decide_with`；驗證在 daemon `role_policy.rs`（context 視窗同池條目，保溫分鐘 < TTL）。context 的啟動參數重用 `am-config::executor_pool::launch_params`（claude `CLAUDE_CODE_AUTO_COMPACT_WINDOW`＋超過 200k 用 `[1m]`；codex `-c model_auto_compact_token_limit=N`），只在 context 來自覆寫或角色 policy 時補上（池條目的早就寫在 bot env）；policy 變了 run 標「待套用（需重啟）」，以 `runs.policy_rev`（v79）比對。codex 注入的指示除名稱段外逐字相同（測試鎖住），prompt cache 前綴才共用得到。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
