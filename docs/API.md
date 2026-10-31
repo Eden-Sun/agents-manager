@@ -2083,14 +2083,7 @@ child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pan
 
 ### 10.5 `POST /relay/announce`
 
-shim 可將 `to_agent` 設為已固定的 pane ID 或 `bot:<bot_id>`；daemon 只從這些穩定 selector 補齊收件 bot／run，不按顯示名稱重新推斷。pane 查詢只比 `runs.pane_id`，限定寄件 host／目前 herdr session，不比 `agent_name`。bot ID 可直接識別角色 bot；普通 bot 必須在同作用域有唯一 running run，成功沿用 `{"to_pane_id":"…"}` 回應；缺證據保持未知，未解析的 `bot:` selector 由 shim 拒絕直送。
-
-**不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
-表單編碼 `bot_id`、`to_bot_id?`、`to_run_id?`、`delivery_id?`、`to_agent?`、`text` → `200 {"to_pane_id":"<穩定傳輸地址>"}`（已綁定的本機 run）或 `200 {}`（未知／移交）；bot 不存在、已刪或 token 不符 → 401。
-`to_agent` 的普通名稱只供顯示；角色收件使用明確或由穩定 selector 解析的 `to_bot_id`；一般報備還需要對應的 `to_run_id`，並限寄件方 host／herdr session 的 running run。bot／run 不符回 400 `relay_recipient_mismatch`。
-shim 的 `agent prompt <傳輸目標> <文字> --to-bot-id <id> --to-run-id <id>` 會移除這兩個自有旗標，產生一次投遞共用的 `delivery_id`，供本機 curl 重試及遠端 spool v2 沿用。本機已綁定目標改用 daemon 回傳的 pane 地址送字，不再重查名字；遠端還需 `--to-pane-id <pane id>`，缺明確 pane 地址的報備保持未知。遠端 `AmRelayAnnounce` 必須攜帶 `to_bot_id`、`to_run_id`、`delivery_id`、`text`；舊的只有 `to_agent` 的事件保持未知，不用名稱補猜。
-daemon 記在行程內（5 分鐘、容量有界）；回音以穩定 run id 認領一次，delivery 重播不重複認領。此去重不跨 daemon 重啟持久化，無 schema 變動。
-缺穩定 ID 的舊 shim 仍可直送文字，但不開監看回合、不補標來源、不依名稱攔入 AGM 佇列。已移交的專案仍回 `200 {}`，不開回合、不盯 pane、不標來源，留 `relay_handoff_direct` log。遲到報備只補標明確綁定該 run 回合的 hook／terminal_fallback 訊息，不碰只有 conversation 證據的訊息。
+舊版 shim 的相容報備入口，使用 per-bot `X-AM-Bot-Token` 與表單 `bot_id`、`to_agent`、`to_bot_id?`、`to_run_id?`、`delivery_id?`、`text`。daemon 必須在寄件者 host／session 找到唯一的收件 run，並以當前 relay 政策授權；目標無法確認或權限不足回 403，身分不符回 401，bot ID 與 run 不符回 400，授權資料不可讀回 503。新版 shim 使用 `GET /api/relay/resolve` 與 `POST /api/bots/{id}/prompt`，不直接送字。
 
 ### 10.6 hook 端點 `POST /hook/{claude|codex|grok|agy}`
 body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X-AM-Bot-Token`。`run_id` 是送出這則 hook 的 CLI 行程
@@ -3305,9 +3298,9 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 ### 專案專家模式與成員
 
-`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 啟用時無法寫入或驗證 host session 標記回 503 `expert_marker_unavailable`，不啟用 expert；切回時若標記對帳失敗也回 503，設定已切回，daemon 會重試。主機標記對帳未完成時，送往該主機 expert bot 的新 prompt 暫停，使用者請求回 503 `expert_marker_unavailable`，bot relay 回暫時不可用。`PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
+`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 `PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
 
-`GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。
+`GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。 受管 bot 的 prompt 必須經 daemon 解析與授權；缺少位址、daemon 不可達或授權不明時拒絕，不直接送到 herdr。daemon 不可達時無法派工。`/api/state` 的 `daemon_url_pending` 表示遠端執行中 bot 啟動時未取得位址，需由使用者重啟。
 
 遠端 host 可在 `[[hosts]] daemon_url` 設定 daemon 的可信入口；啟動時以 `AM_DAEMON_URL` 傳給 bot，未設定則不猜。`agm peers`、`agm requests` 使用自己的 bot 憑證；`agm requests --to ID --from ID --open` 呼叫 `GET /api/relay-requests`。
 

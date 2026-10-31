@@ -232,12 +232,6 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
-    let payload: Value = serde_json::from_str(&intent.payload_json).map_err(|e| format!("invalid delete intent payload: {e}"))?;
-    if payload["expert_marker"].as_bool() == Some(true) {
-        let gate = db::expert_host_gate(&intent.host);
-        let _guard = gate.lock().await;
-        crate::expert_marker::remove_project(app, &intent.host, &project_id).await.map_err(|e| format!("cannot remove expert marker: {e}"))?;
-    }
     crate::api_bot::schedule_retention_after_delete(app);
     // 已定案：輸入框草稿跟著專案與它的 bot 走（#1063）。
     let draft_keys: Vec<String> = std::iter::once(format!("group:{project_id}")).chain(bots.iter().map(|(id, _)| format!("bot:{id}"))).collect();
