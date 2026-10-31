@@ -6,7 +6,7 @@
 use crate::lifecycle::LcError;
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{MissionOps, TurnOps};
+use super::ports::{TurnOps};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
@@ -16,9 +16,6 @@ use std::sync::Arc;
 
 use super::{controller, health_core, setup, store};
 
-pub(crate) use crate::supervisor::api::mission_gate;
-#[cfg(test)]
-pub(crate) use crate::supervisor::api::user_pause_reason;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
@@ -172,12 +169,6 @@ pub struct AssignIn {
     /// token），UI／腳本呼叫則是協調者。
     #[serde(default)]
     pub review_role: Option<String>,
-    /// 群組任務：這件交辦屬於哪個任務（`/api/missions/{id}`），以及擔任的角色
-    /// `executor | reviewer | verifier`。兩個一起給或都不給。
-    #[serde(default)]
-    pub mission_id: Option<String>,
-    #[serde(default)]
-    pub role: Option<String>,
     /// 交接給另一個 AGM 角色時明講「這是回覆」：`ack`（純告知）或 `reply_to`（回哪一則事件）。
     /// 都沒帶就叫醒對方（SPEC §18.15）；對一般 bot 的交辦帶它是 400。
     #[serde(default)]
@@ -228,16 +219,15 @@ pub async fn post_assignment(
         return Err(LcError::Bad("kind must be task | notice".into()));
     }
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
-    // 一般 bot（被證明身份、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收、不掛任務）——
-    // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦、掛任務的交辦
+    // 一般 bot（被證明身份、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收）——
+    // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦
     // 是 AGM 的事（它們會直接叫那顆 bot 做事）。
     if let Some(bot) = super::bot_requests::declared_plain_bot(&app, &headers).await? {
         let to_role = super::roles::role_of_bot(&app.db, &b.target_bot_id).await.map_err(up)?.is_some();
-        let has_mission = b.mission_id.as_deref().is_some_and(|m| !m.trim().is_empty()) || b.role.as_deref().is_some_and(|r| !r.trim().is_empty());
-        if b.expects_review() || !to_role || has_mission {
+        if b.expects_review() || !to_role {
             return Err(super::bot_requests::plain_bot_forbidden(
                 &bot,
-                "一般 bot 只能對 AGM 角色 bot 送 notice（kind=notice）；派工、要驗收的交辦與任務交辦只給 AGM 角色或使用者",
+                "一般 bot 只能對 AGM 角色 bot 送 notice（kind=notice）；派工與要驗收的交辦只給 AGM 角色或使用者",
             ));
         }
         // 通過上面的檢查：就是這顆一般 bot 自己寫給 AGM 的 notice。寄件者必須是它自己；不能走 `super::assign`，
@@ -266,16 +256,6 @@ pub async fn post_assignment(
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
         None => actor,
     };
-    // 任務連結先驗證再建交辦：錯的 mission_id 不該留下一件已派出去、卻掛不回任務的工作。
-    let mission = match (b.mission_id.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.role.as_deref().map(str::trim)) {
-        (None, None | Some("")) => None,
-        (Some(mid), Some(role)) if crate::mission::pick::Role::parse(role).is_some() => {
-            let m = app.mission(mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
-            mission_gate(&m)?;
-            Some((mid.to_string(), role.to_string()))
-        }
-        _ => return Err(LcError::Bad("mission_id and role (executor | reviewer | verifier) go together".into())),
-    };
     let a = super::assign(
         &app,
         &b.target_bot_id,
@@ -285,7 +265,6 @@ pub async fn post_assignment(
         &b.ownership,
         None,
         b.expects_review(),
-        mission.as_ref().map(|(m, r)| (m.as_str(), r.as_str())),
         review_role,
         actor,
         super::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() },
@@ -490,16 +469,6 @@ pub async fn post_review(
         // Validate the target before the transaction: a read, and a 400 for a bot that cannot
         // take work is more useful than a rolled-back transaction.
         super::check_assignable(&app.db, &target).await?;
-        // 續作會掛在同一個任務上開一件新的交辦：任務已經結案（完成／取消）就不能再開（issue #119）。這裡在
-        // supervisor 鎖裡，跟 `mission cancel`／`complete` 關任務的那一步序列化。暫停不在這裡擋——那是既有的語意，
-        // 換手的 followup 在 daemon 設的暫停底下本來就要走得通。
-        if let Some(mid) = a.mission_id.as_deref() {
-            if let Some(m) = app.mission(mid).await.map_err(up)? {
-                if m.completed_at.is_some() || m.cancelled_at.is_some() {
-                    return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
-                }
-            }
-        }
         Some((target, crid.to_string(), text.to_string()))
     } else {
         None
@@ -642,10 +611,6 @@ pub async fn post_review(
         // The transport facts stay readable next to the warning: a cancelled `unknown` keeps
         // its `delivery` and `turn_id` precisely so nobody has to guess afterwards.
         out["may_still_be_running"] = json!(true);
-    }
-    // 群組任務的交辦：裁示之後任務的下一步由 daemon 推導（issue #74，`mission::flow`），一併回給裁示的人。
-    if let Some(mid) = updated.mission_id.as_deref() {
-        out["mission_next"] = app.mission_next_json(mid).await;
     }
     Ok(Json(out))
 }
@@ -2688,32 +2653,29 @@ mod review_boundary_tests {
         app
     }
 
-    /// #334：同一個 client_request_id、同 text、同 bot，但 notice／ownership／mission／review_role 不同——
+    /// #334：同一個 client_request_id、同 text、同 bot，但 notice／ownership／review_role 不同——
     /// 不能靜默回原筆 200（呼叫端的新意圖被吃掉）；完全一樣的重送照舊回原筆。
     #[tokio::test]
     async fn a_retry_that_changes_the_settings_is_refused_not_silently_answered_with_the_original() {
         let app = app().await;
         store::insert_assignment(&app.db, None, "bot", "crid-1", "do the thing", &["a/b".to_string()], None, true).await.unwrap();
-        let go = |expects_review: bool, own: &[String], mission: Option<(&str, &str)>, role: Option<crate::supervisor::roles::Role>| {
+        let go = |expects_review: bool, own: &[String], role: Option<crate::supervisor::roles::Role>| {
             let app = app.clone();
             let own = own.to_vec();
-            let mission = mission.map(|(a, b)| (a.to_string(), b.to_string()));
             async move {
                 crate::supervisor::assign(
-                    &app, "bot", "do the thing", "crid-1", None, &own, None, expects_review,
-                    mission.as_ref().map(|(a, b)| (a.as_str(), b.as_str())), role, None, Default::default(),
+                    &app, "bot", "do the thing", "crid-1", None, &own, None, expects_review, role, None, Default::default(),
                 )
                 .await
             }
         };
         let own = ["a/b".to_string()];
-        assert!(go(true, &own, None, None).await.is_ok(), "完全一樣的重送回原筆");
-        assert!(go(true, &own, None, Some(crate::supervisor::roles::Role::Responder)).await.is_ok(), "沒寫＝協調者：明講 responder 的重送是同一件");
+        assert!(go(true, &own, None).await.is_ok(), "完全一樣的重送回原筆");
+        assert!(go(true, &own, Some(crate::supervisor::roles::Role::Responder)).await.is_ok(), "沒寫＝協調者：明講 responder 的重送是同一件");
         for (label, r) in [
-            ("expects_review", go(false, &own, None, None).await),
-            ("ownership", go(true, &[], None, None).await),
-            ("mission", go(true, &own, Some(("m1", "executor")), None).await),
-            ("review_role", go(true, &own, None, Some(crate::supervisor::roles::Role::Patrol)).await),
+            ("expects_review", go(false, &own, None).await),
+            ("ownership", go(true, &[], None).await),
+            ("review_role", go(true, &own, Some(crate::supervisor::roles::Role::Patrol)).await),
         ] {
             let LcError::Conflict(d) = r.expect_err(label) else { panic!("{label}: expected 409") };
             assert_eq!(d["reason"], "assignment_request_mismatch", "{label}");
@@ -2934,7 +2896,7 @@ mod review_boundary_tests {
     async fn an_oversized_assignment_is_refused_up_front_and_leaves_no_row() {
         let app = app().await;
         let big = "x".repeat(crate::lifecycle::MAX_PROVABLE_CHARS + 1);
-        let err = crate::supervisor::assign(&app, "bot", &big, "crid-big", None, &[], None, true, None, None, None, Default::default())
+        let err = crate::supervisor::assign(&app, "bot", &big, "crid-big", None, &[], None, true, None, None, Default::default())
             .await
             .expect_err("too long");
         let LcError::Unprocessable(d) = err else { panic!("expected 422, got {err:?}") };
@@ -3094,18 +3056,7 @@ mod review_boundary_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
-    /// 使用者按的暫停要擋住 `assign --mission`；daemon 自己設的那幾種不擋——runbook 要 AGM 在那些
-    /// 狀態下繼續處理（交付失敗就請執行者 rebase 再交付）。
-    #[test]
-    fn only_a_pause_a_person_set_stops_more_work() {
-        assert_eq!(user_pause_reason(Some("user_pause")), Some("user_pause"));
-        assert_eq!(user_pause_reason(Some("manual")), Some("manual"));
-        assert_eq!(user_pause_reason(None), None, "沒暫停就不擋");
-        assert_eq!(user_pause_reason(Some("  ")), None);
-        for daemon_set in ["max_rounds", "no_fable_for_verifier", "push_main_failed", "pr_failed", "clarify"] {
-            assert_eq!(user_pause_reason(Some(daemon_set)), None, "{daemon_set} 是 daemon 自己設的，不擋");
-        }
-    }
+
 
     #[tokio::test]
     async fn safety_query_excludes_only_requested_bots_and_matches_acquire_probe() {

@@ -75,8 +75,6 @@ pub struct Assignment {
     /// 因額度自動重送過幾次。
     pub quota_retries: i64,
     /// 群組任務：所屬任務與角色（見 migrate 的欄位註解）。
-    pub mission_id: Option<String>,
-    pub mission_role: Option<String>,
     /// 回合結束時 run 上的 `turn_error`。
     pub turn_error: Option<String>,
     /// 回報給哪個 AGM 角色驗收（`patrol` | `responder`；NULL = 協調者）。見 roles.rs。
@@ -129,8 +127,6 @@ impl Assignment {
             "expects_review": !self.is_notice(),
             "resume_at": self.resume_at,
             "quota_retries": self.quota_retries,
-            "mission_id": self.mission_id,
-            "role": self.mission_role,
             "turn_error": self.turn_error,
             "conflict_since": self.conflict_since,
         })

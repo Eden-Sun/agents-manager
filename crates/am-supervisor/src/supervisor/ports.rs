@@ -1,6 +1,6 @@
 //! supervisor 對其他 feature 的窄介面（crate 拆分第 3 步 P6，行為不變）。
 //!
-//! supervisor 的 production 程式碼不再直接 `crate::lifecycle::…`／`crate::quota::…`／`crate::mission::…`／`crate::judge::…`
+//! supervisor 的 production 程式碼不再直接 `crate::lifecycle::…`／`crate::quota::…`／`crate::judge::…`
 //! 等呼叫別的 feature：每個外部能力是這裡的一個小 trait（一個領域一個），由 `App` 實作在 `app_ports_p6.rs`，
 //! 實作逐行委派給原本被呼叫的函式，所以回合、額度、任務、鎖與事件的語意不變。呼叫端寫成 `app.stop_bot(&id)`，
 //! 跟原本 `lifecycle::stop_bot(app, &id)` 同一個 await 點、同一個錯誤型別。
@@ -78,28 +78,6 @@ pub trait QuotaOps {
     async fn quota_reading(&self, key: &str) -> Option<Quota>;
 }
 
-/// mission：派工身份候選、暫停、事件、背景掃描。語意＝同名的 `crate::mission` 函式。
-pub trait MissionOps {
-    async fn mission(&self, mission_id: &str) -> anyhow::Result<Option<crate::mission::store::Mission>>;
-    async fn mission_candidates(&self, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<Quota>)>>;
-    async fn mission_billing_identity(&self, host: &str, bot: &db::Bot) -> anyhow::Result<Option<String>>;
-    async fn mission_add_event(&self, mission_id: &str, kind: &str, text: &str, relay_from: Option<&str>, payload: &Value) -> anyhow::Result<()>;
-    /// 在呼叫端已開的交易裡暫停任務（`mission::store::pause_on`）。
-    async fn mission_pause_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        mission_id: &str,
-        reason: &str,
-        detail: Option<&str>,
-        text: &str,
-        payload: &Value,
-    ) -> anyhow::Result<bool>;
-    async fn ensure_can_assign(&self, mission_id: &str, role: &str) -> Result<(), crate::lifecycle::LcError>;
-    async fn mission_next_json(&self, mission_id: &str) -> Value;
-    async fn mission_wake_stalled(&self);
-    async fn mission_sweep_closed_temp_bots(&self);
-}
-
 /// judge（Jev 影子報告、卡住掃描、撞單排程）。語意＝同名的 `crate::judge` 函式。
 pub trait JudgeOps {
     async fn judge_shadow_settled(&self, assignment_id: &str, bot_id: &str, turn_id: Option<&str>, turn_status: &str, result: Option<&str>);
@@ -159,11 +137,6 @@ pub trait ControllerRuntime {
     fn spawn_supervisor_controller(&self, generation: i64);
 }
 
-/// Controller reconciliation's composition-only cleanup for cancelled missions.
-pub trait MissionCancellation {
-    async fn collect_cancelled_missions(&self);
-}
-
 /// App-backed pieces required to apply a chosen manager model at runtime.
 pub trait CandidateSwitch {
     async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError>;
@@ -201,7 +174,7 @@ pub trait ConfigProjection {
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     /// supervisor 的 production 程式碼（不含 `#[cfg(test)]` 的項目）不再直接呼叫其他 feature 的函式：這些呼叫只准出現在
-    /// `app_ports_p6.rs`。純值型別／純函式（`quota::Bucket`、`lifecycle::LcError`、`mission::pick`…）不在此限，它們是之後搬進
+    /// `app_ports_p6.rs`。純值型別／純函式（`quota::Bucket`、`lifecycle::LcError`…）不在此限，它們是之後搬進
     /// am-core 的東西，不是「呼叫另一個 feature」。
     const SOURCES: &[(&str, &str)] = &[
         ("api.rs", include_str!("api.rs")),
@@ -278,13 +251,6 @@ mod tests {
         "quota::limit_cleared_since(",
         "quota::clear_limit_hit(",
         "quota::snapshot(",
-        "mission::candidates(",
-        "mission::billing_identity_named(",
-        "mission::workflow::",
-        "mission::api::",
-        "mission::store::get(",
-        "mission::store::add_event(",
-        "mission::store::pause_on(",
         "judge::report::",
         "judge::stuck::",
         "judge::collision::",
@@ -324,7 +290,7 @@ mod tests {
     #[test]
     fn the_adapter_still_calls_what_the_guard_forbids_elsewhere() {
         let adapter = include_str!("../../../../daemon/src/app_ports_p6.rs");
-        for pat in ["lifecycle::stop_bot(", "quota::try_limit_hit_for_bot(", "mission::workflow::wake_stalled(", "runners::judge::shadow_settled(", "memproc::dump("] {
+        for pat in ["lifecycle::stop_bot(", "quota::try_limit_hit_for_bot(", "runners::judge::shadow_settled(", "memproc::dump("] {
             assert!(adapter.contains(pat), "{pat} 應該在 app_ports_p6.rs");
         }
         assert!(test_mask("fn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn c() {}\n") == vec![false, true, true, true, true, false]);

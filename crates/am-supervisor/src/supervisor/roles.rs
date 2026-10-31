@@ -204,6 +204,7 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
             payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Responder),
             true,
         ),
+        // Keep routing historical inbox entries created before missions were removed.
         "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" | "mission_paused" | "mission_cancelled" | "mission_next" => r(Role::Responder, true),
         // 倒下的就是巡檢自己：它的看門狗放棄、或它的通知一直送不出去（`notify_exhausted`）。送給巡檢等於
@@ -1194,7 +1195,7 @@ mod tests {
     fn every_kind_written_to_the_inbox_has_its_own_routing_branch() {
         let kinds = inbox_kinds_written_in_source();
         // 撈取本身要撈得到東西：否則 regex 一壞，這個測試會安靜地變成恆真。
-        for must in ["assignment_quota_blocked", "assignment_quota_resumed", "assignment_undeliverable", "assignment_completed", "approval_requested", "bot_request", "incident_opened", "mission_question"] {
+        for must in ["assignment_quota_blocked", "assignment_quota_resumed", "assignment_undeliverable", "assignment_completed", "approval_requested", "bot_request", "incident_opened"] {
             assert!(kinds.contains_key(must), "source scan lost {must}: {kinds:?}");
         }
         // 撈不到的寫法（panes.rs 用 tuple 陣列決定 kind）逐一列在這裡，免得新 kind 又從預設路由溜走。

@@ -154,7 +154,7 @@ pub fn clear_schedule(app: &impl crate::supervisor::watchdog::WatchdogDeadlines,
 }
 
 /// One controller tick's worth of watching.
-pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::MissionOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::MissionCancellation + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static)) {
+pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static)) {
     let Ok(sup) = store::get_or_init(app.db()).await else { return };
     let Some(bot_id) = sup.bot_id.clone() else { return };
     // 讀不到 liveness ＝ 不知道，不是「已停止」：不排程、不計次、不動任何 watchdog 狀態，下一個 tick 再看（#249）。
@@ -245,7 +245,7 @@ async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilitie
     app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
 }
 
-async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::MissionOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::MissionCancellation + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static), bot_id: &str, failures: i64) {
+async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static), bot_id: &str, failures: i64) {
     let _g = super::lock().await;
     // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
     let Ok(sup) = store::get_or_init(app.db()).await else { return };
