@@ -1271,10 +1271,21 @@ esac"#, calls.display()));
     }
 
     #[test]
+    fn macos_local_managed_prompt_rejects_unrecognized_successful_delivery() {
+        for reply in ["{}", "not-json", "{\"turn_id\":null}"] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log");
+            s.install_fake_curl(&format!("case \"$*\" in *relay/resolve*) printf '{{\"to_bot_id\":\"target\"}}\\n200';; *) printf '%s\\n200' '{}';; esac", reply));
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let (_, _, rc) = s.run_full(&env, &["agent", "prompt", "w1:p2", "work"]);
+            assert_ne!(rc, 0, "{reply}"); assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty());
+        }
+    }
+
+    #[test]
     fn macos_local_managed_prompt_uses_daemon_for_local_remote_and_results() {
         for (key, value, target, expect) in [("AM_PORT", "7788", "w1:p2", false), ("AM_DAEMON_URL", "http://daemon:7788", "worker", false), ("AM_DAEMON_URL", "http://daemon:7788", "bot:target", true)] {
             let s = Sandbox::new(); let log = s.dir.join("calls.log"); let curl_log = s.dir.join("curl.log");
-            s.install_fake_curl(&format!("printf '%s\\n' \"$*\" >> '{}'; case \"$*\" in *relay/resolve*) printf '{{\"to_bot_id\":\"target\"}}\\n200';; *) printf '{{\"request_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}\\n200';; esac", curl_log.display()));
+            s.install_fake_curl(&format!("printf '%s\\n' \"$*\" >> '{}'; case \"$*\" in *relay/resolve*) printf '{{\"to_bot_id\":\"target\"}}\\n200';; *) printf '{{\"request_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"turn_id\":\"turn\",\"message_id\":\"message\",\"delivery\":\"queued\"}}\\n200';; esac", curl_log.display()));
             let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), (key, value), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
             let args = if expect { vec!["agent", "prompt", target, "--expect-result", "work"] } else { vec!["agent", "prompt", target, "work"] };
             let (out, err, rc) = s.run_full(&env, &args); assert_eq!(rc, 0, "{err}");
