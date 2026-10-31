@@ -29,6 +29,25 @@
   vertical-align: middle;
 }
 
+/* 已停用管理者使用小標記 */
+.bot-manager-disabled-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0 4px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  user-select: none;
+  vertical-align: middle;
+  background: color-mix(in srgb, var(--text-dim) 12%, var(--bg-panel));
+  color: var(--text-dim);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
 /* 柔和色票（亮暗主題透過 CSS 變數或 color-mix 自然適應） */
 .bot-role-tag.role-manager {
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));

@@ -34,6 +34,15 @@ export function ExpertRoleTag({
   )
 }
 
+export function ExpertDisabledMark() {
+  useT()
+  return (
+    <span className="bot-manager-disabled-tag" title={t('已停用：管理者不能使用此成員')}>
+      {t('停用')}
+    </span>
+  )
+}
+
 export function ExpertSectionHeader({
   title,
   count,

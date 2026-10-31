@@ -49,6 +49,16 @@
 - **專案標題與 Bot 短標**：expert 專案標題旁加「專家」徽章；頂層 Bot 名稱旁加柔和色短標（管／顧／執），若 `role_pending` 則附小提示點並在 tooltip 提示「待套用（需重啟）」。
 - **手機與 BotSwitcher 一致**：手機標題換 Bot 選單同樣呈現專家分段與角色短標。
 
+## 專家模式保護額度的兩個開關（2026-10-31，使用者）
+
+- **可被管理者使用（`manager_use`）**：
+  - 專案模式為 expert 時，role 為 executor 或 advisor 的成員在尾端 `⋯` 選單中提供切換開關「允許管理者使用／禁止管理者使用」（發送 `PATCH /api/bots/{id}` `{"manager_use": bool}`）。
+  - 當 `manager_use` 為 false 時，側欄 bot 列上名稱旁顯示灰色小標籤「停用」（tooltip 提示「已停用：管理者不能使用此成員」），沿用系統中性 tag 風格，不干擾主狀態燈號；使用者自己仍可正常對話與操作，但 manager 不能派工給它、不能啟動／重啟它。
+- **執行者池（`executor_pool`）**：
+  - 專案設定（`ProjectSettingsPanel` -> `ProjectExpertSettings`）在專家模式下提供「執行者池」編輯，列出 4 種 kind（claude / codex / grok / agy）各自的數量上限輸入框（0–10，0 代表不開放該 kind）。
+  - 說明文字明確提示：「管理者增聘執行者時只能用這裡開放的 kind 與數量；全部 0＝不能增聘」。
+  - 編輯後有明確的儲存按鈕，儲存時過濾掉 0 的項目並送出 `PATCH /api/projects/{id}` `{"executor_pool": {...}}`，確保使用者能清晰掌控資源開銷與 manager 的增聘權限。
+
 ## 側欄
 
 - 專案卡：第一行名稱、第二行截斷路徑（完整路徑在 tooltip）。拖標題列整個專案一起搬；**排序存 daemon**（`POST /api/order`），手機桌機一致；搜尋中不能拖。
