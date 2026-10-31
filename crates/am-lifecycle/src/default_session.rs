@@ -281,7 +281,7 @@ async fn ensure_imported_bot(
             .ok_or_else(|| anyhow::anyhow!("project disappeared from config.toml"))?;
         let used: HashSet<String> = p.bots.iter().map(|b| b.name.clone()).collect();
         let name = imported_name(agent_name, &used);
-        p.bots.push(config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+        p.bots.push(config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
             id: Some(bot_id.clone()),
             name: name.clone(),
             kind: kind.to_string(),

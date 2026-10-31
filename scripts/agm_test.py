@@ -1552,6 +1552,12 @@ class ExpertBotCommandsTest(CliCase):
         self.assertEqual(FakeDaemon.seen[1]["path"], "/api/bots/b1/member")
         self.assertEqual(FakeDaemon.seen[1]["body"], {"role": "advisor", "effort": "high", "session_id": "s1"})
 
+    def test_hire_fork_from_sends_the_source(self):
+        FakeDaemon.routes["POST /api/projects/p1/members"] = (200, {"bot_id": "b-f1", "name": "f1", "role": "executor"})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("hire", "f1", "--kind", "codex", "--fork-from", "b-src")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"name": "f1", "kind": "codex", "fork_from": "b-src"})
+
     def test_hire_specialist_sends_role_and_track(self):
         FakeDaemon.routes["POST /api/projects/p1/members"] = (200, {"bot_id": "b-s1", "name": "s1", "role": "specialist"})
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):

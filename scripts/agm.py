@@ -1814,7 +1814,7 @@ def cmd_hire(client: Client, cfg: dict, args) -> object:
     if not args.kind and not args.pool_entry:
         raise AgmError("bad_args", "hire 需要 --kind 或 --pool <條目 id>", 2)
     body = {"name": args.name}
-    for key in ("kind", "pool_entry", "model", "effort", "identity", "role", "track"):
+    for key in ("kind", "pool_entry", "model", "effort", "identity", "role", "track", "fork_from"):
         if getattr(args, key, None):
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
@@ -2835,6 +2835,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--identity")
     s.add_argument("--role", choices=["executor", "specialist"], help="預設 executor；specialist 必須同時給 --track")
     s.add_argument("--track", help="專家負責的軌道（--role specialist 必填）")
+    s.add_argument("--fork-from", dest="fork_from", metavar="BOT", help="從同專案同主機的 codex bot 分岔（新成員也必須是 codex；第一次啟動用 codex fork，之後走自己的 session）")
     s.set_defaults(func=cmd_hire)
     s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
     s.add_argument("bot_id")

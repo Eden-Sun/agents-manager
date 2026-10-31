@@ -233,7 +233,7 @@ pub async fn ensure_env(
                     if proj.bots.iter().any(|b| b.name == BOT_NAME) {
                         anyhow::bail!("name-taken");
                     }
-                    proj.bots.push(BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
+                    proj.bots.push(BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
                         id: Some(fresh_bot.clone()),
                         name: BOT_NAME.to_string(),
                         kind: "claude".into(),
