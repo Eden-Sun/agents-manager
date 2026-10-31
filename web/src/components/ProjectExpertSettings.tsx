@@ -43,8 +43,8 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   }
 
   return (
-    <details open className="project-expert-settings-details">
-      <summary>{t('專案模式設定')}</summary>
+    <div className="project-expert-settings-section">
+      <h3>{t('專案模式設定')}</h3>
       <div className="project-expert-settings-body">
         <label>
           {t('管理者')}{' '}
@@ -113,6 +113,6 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
           </div>
         ) : null}
       </div>
-    </details>
+    </div>
   )
 }
