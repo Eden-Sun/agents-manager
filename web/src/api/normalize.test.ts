@@ -99,17 +99,7 @@ test('#699：同名但不同 host 的 identities 都保留', () => {
   )
 })
 
-test('專案帶 daemon 算的群組未讀與已讀標記；舊 daemon 沒給就是 undefined／null（#756）', () => {
-  const st = toState({ projects: [
-    { id: 'p1', path: '/p1', group_unread: 3, group_read_mark: { at: '2026-09-15T01:00:00.000Z', id: 'm1', seq: 18 }, bots: [] },
-    { id: 'p2', path: '/p2', bots: [] },
-    { id: 'p3', path: '/p3', group_unread: -1, group_read_mark: { at: '' }, bots: [] },
-  ] })
-  assert.deepEqual(st.projects.map((p) => [p.group_unread, p.group_read_mark]), [
-    [3, { at: '2026-09-15T01:00:00.000Z', id: 'm1', seq: 18 }],
-    [undefined, null],
-    [undefined, null],
-  ])
+test('Bot 已讀標記帶出 seq', () => {
   assert.deepEqual(toBot({ id: 'b1', read_mark: { at: '2026-09-15T02:00:00.000Z', id: 'm2', seq: 19 } })?.read_mark,
     { at: '2026-09-15T02:00:00.000Z', id: 'm2', seq: 19 })
 })

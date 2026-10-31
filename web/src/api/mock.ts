@@ -3,7 +3,6 @@
  * Prompt keywords (`blocked`/`fallback`/`slow`) and `window.__amMock` helpers: see docs/FRONTEND.md.
  */
 
-import { parseMentions } from './mentions'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
@@ -1012,7 +1011,6 @@ export class MockTransport implements Transport {
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
-    { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
@@ -1085,10 +1083,8 @@ export class MockTransport implements Transport {
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
     if (method === 'PATCH' && seg[0] === 'projects' && seg.length === 2) return this.patchProject(seg[1], b)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
-    if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'messages') return this.projectMessages(seg[1], q)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
-    if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
 
     // 群組任務
     if (seg[0] === 'projects' && seg[2] === 'missions' && !this.missionsDisabled) {
@@ -4121,97 +4117,6 @@ export class MockTransport implements Transport {
       turns: this.turns.filter((t) => t.bot_id === botId),
       has_more: rows.length > limit,
     }
-  }
-
-  // group chat (SPEC §13)
-
-  /** Mirrors `daemon/src/group.rs::messages`. */
-  private projectMessages(projectId: string, q: URLSearchParams) {
-    if (!this.projects.some((p) => p.id === projectId)) {
-      throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
-    }
-    const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
-    const before = q.get('before') ?? ''
-    const byId = new Map(this.bots.map((b) => [b.id, b] as const))
-    if (before) {
-      const at = this.messages.find((m) => m.id === before)
-      // daemon（#766）：游標要是這個專案某顆 bot 的訊息；被刪掉的 → gone，別個專案的 → not_in_conversation。
-      if (!at) throw lostCursor('before_message_gone', before)
-      if (byId.get(at.bot_id)?.project_id !== projectId) throw lostCursor('before_message_not_in_conversation', before)
-    }
-    const rows = this.messages
-      .filter((m) => byId.get(m.bot_id)?.project_id === projectId)
-      .filter((m) => !before || m.id < before)
-      .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
-    const page = rows.slice(0, limit).reverse()
-    return {
-      project_id: projectId,
-      messages: page.map((m) => ({ ...m, bot_name: byId.get(m.bot_id)?.name ?? m.bot_id })),
-      has_more: rows.length > limit,
-    }
-  }
-
-  /** Mirrors `daemon/src/group.rs::chat`. */
-  private projectChat(projectId: string, b: Rec) {
-    if (!this.projects.some((p) => p.id === projectId)) {
-      throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
-    }
-    const text = String(b.text ?? '')
-    const crid = typeof b.client_request_id === 'string' && b.client_request_id ? b.client_request_id : ulid('crid')
-    const members = this.bots.filter((x) => x.project_id === projectId)
-    const ids = Array.isArray(b.recipient_ids) ? b.recipient_ids.filter((x): x is string => typeof x === 'string') : []
-    const targets = ids.length ? members.filter((m) => ids.includes(m.id)) : parseMentions(text, members)
-    if (targets.length === 0) {
-      throw new ApiError(
-        400,
-        {
-          error: 'no_mention',
-          message: 'text must mention @all or at least one bot of this project',
-          bots: members.map((m) => ({ id: m.id, name: m.name, kind: m.kind })),
-        },
-        'no mention',
-      )
-    }
-    const sent: Rec[] = []
-    const skipped: Rec[] = []
-    for (const t of targets) {
-      try {
-        const out = this.prompt(t.id, { text, client_request_id: `${crid}:${t.id}` }, crid) as Rec
-        sent.push({ bot_id: t.id, bot_name: t.name, turn_id: out.turn_id, message_id: out.message_id, delivery: out.delivery })
-      } catch (e) {
-        const reason = e instanceof ApiError ? String(e.body.reason ?? e.message) : String(e)
-        const code = /no active run|not running/.test(reason)
-          ? 'not_running'
-          : /blocked/.test(reason)
-            ? 'blocked'
-            : /in flight/.test(reason)
-              ? 'in_flight'
-              : /unknown delivery/.test(reason)
-                ? 'unknown_delivery'
-                : 'conflict'
-        const label: Record<string, string> = {
-          not_running: 'bot 未啟動（不會自動啟動）',
-          blocked: 'agent 正在等待終端回應',
-          in_flight: '上一回合仍在進行中',
-          unknown_delivery: '上一回合送達狀態未知，請先放棄該回合',
-        }
-        const dup = this.messages.some((m) => m.bot_id === t.id && m.group_id === crid && m.role === 'system')
-        if (!dup) {
-          this.addMessage({
-            conversation_id: this.conv(t.id),
-            turn_id: null,
-            bot_id: t.id,
-            role: 'system',
-            content: `群組訊息未送達 ${t.name}：${label[code] ?? reason}`,
-            source: 'system',
-            incomplete: 0,
-            group_id: crid,
-          })
-        }
-        skipped.push({ bot_id: t.id, bot_name: t.name, reason: code, detail: reason })
-      }
-    }
-    return { group_id: crid, project_id: projectId, sent, skipped }
   }
 
   // 主機 shell

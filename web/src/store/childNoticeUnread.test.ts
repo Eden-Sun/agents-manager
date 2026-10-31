@@ -24,7 +24,7 @@ function seed() {
     messages: { b1: [] },
     loadedBots: {},
     botUnread: {},
-    groupUnread: {},
+
     notices: [],
     selectedBotId: null,
     selectedProjectId: null,

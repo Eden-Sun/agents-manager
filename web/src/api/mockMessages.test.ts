@@ -91,7 +91,5 @@ test('`before` 指到不存在或別顆 bot 的訊息：404＋reason，跟 daemo
   }
   assert.deepEqual(await lost(`/bots/${a}/messages?before=m-never-existed`), { status: 404, reason: 'before_message_gone' })
   assert.deepEqual(await lost(`/bots/${a}/messages?before=${foreign}`), { status: 404, reason: 'before_message_not_in_conversation' })
-  // 群組時間軸同一條規則。
-  const projectId = st.projects[0].id
-  assert.deepEqual(await lost(`/projects/${projectId}/messages?before=m-never-existed`), { status: 404, reason: 'before_message_gone' })
+
 })

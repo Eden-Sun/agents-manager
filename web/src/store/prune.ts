@@ -27,13 +27,6 @@ export type PrunableState = Pick<
   | 'liveReply'
   | 'composerDrafts'
   | 'previews'
-  | 'groupMessages'
-  | 'loadedProjects'
-  | 'missions'
-  | 'missionsCapped'
-  | 'missionDetail'
-  | 'missionLoading'
-  | 'missionLoadErrors'
   | 'sidePanes'
   | 'botOrder'
   | 'drafts'
@@ -52,9 +45,9 @@ function keepKeys<V>(rec: Rec<V>, keep: (key: string) => boolean): Rec<V> {
 }
 
 /** 草稿的 key：`bot:<id>`／`group:<id>`；別種（`shell:…`）不是這裡管的，一律留著。 */
-function draftAlive(key: string, liveBot: (id: string) => boolean, liveProject: (id: string) => boolean): boolean {
+function draftAlive(key: string, liveBot: (id: string) => boolean, _liveProject: (id: string) => boolean): boolean {
   if (key.startsWith('bot:')) return liveBot(key.slice(4))
-  if (key.startsWith('group:')) return liveProject(key.slice(6))
+  if (key.startsWith('group:')) return false
   return true
 }
 
@@ -63,13 +56,8 @@ export function pruneDeadKeys(s: PrunableState): Partial<PrunableState> | null {
   const projectIds = new Set(s.projects.map((p: Project) => p.id))
   const liveBot = (id: string) => botIds.has(id)
   const liveProject = (id: string) => projectIds.has(id)
-  // `moreMessages`／`loadingMore`／`messageCapFloors` 的 key 可能是 bot id 也可能是專案 id（群組時間軸）。
-  const liveConversation = (id: string) => botIds.has(id) || projectIds.has(id)
+  const liveConversation = liveBot
   // 任務細節只為清單上的卡片載入；不在任何清單上（結案超過上限、專案沒了）的沒有人會再看。
-  const missionsByProject = keepKeys(s.missions, liveProject)
-  const missionIds = new Set<string>()
-  for (const list of Object.values(missionsByProject)) for (const m of list) missionIds.add(m.id)
-  const liveMission = (id: string) => missionIds.has(id)
 
   const next: Partial<PrunableState> = {}
   const set = <K extends keyof PrunableState>(key: K, value: PrunableState[K]) => {
@@ -87,13 +75,6 @@ export function pruneDeadKeys(s: PrunableState): Partial<PrunableState> | null {
   set('shareRev', keepKeys(s.shareRev, liveBot))
   set('composerDrafts', keepKeys(s.composerDrafts, liveBot))
   set('previews', keepKeys(s.previews, liveBot))
-  set('groupMessages', keepKeys(s.groupMessages, liveProject))
-  set('loadedProjects', keepKeys(s.loadedProjects, liveProject))
-  set('missions', missionsByProject)
-  set('missionsCapped', keepKeys(s.missionsCapped, liveProject))
-  set('missionDetail', keepKeys(s.missionDetail, liveMission))
-  set('missionLoading', keepKeys(s.missionLoading, liveMission))
-  set('missionLoadErrors', keepKeys(s.missionLoadErrors, liveMission))
   set('sidePanes', keepKeys(s.sidePanes, liveProject))
   set('botOrder', keepKeys(s.botOrder, liveProject))
   set('drafts', keepKeys(s.drafts, (k) => draftAlive(k, liveBot, liveProject)))

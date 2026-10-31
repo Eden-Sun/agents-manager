@@ -196,7 +196,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '登入 {kind}': 'Sign in to {kind}',
   '此 kind 的 CLI 尚未安裝，無法建立': 'Cannot create this Bot because its CLI is not installed',
   '新增並啟動': 'Add and start',
-  '{n} 則未讀的群組回覆': { one: '{n} unread Group chat reply', other: '{n} unread Group chat replies' },
   '收合的 Bot 裡有 {n} 個回合已完成，還沒看過': { one: '{n} finished turn unread in a collapsed Bot', other: '{n} finished turns unread in collapsed Bots' },
   '開啟「{name}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n{path}{drag}': 'Open the Group chat for “{name}” (@bot or @all to message multiple Bots)\n{path}{drag}',
   '\n拖曳可調整專案順序': '\nDrag to reorder Projects',

@@ -38,7 +38,7 @@ export function raiseFloor(floors: CapFloors, key: string, added: number, loaded
   return { ...floors, [key]: next }
 }
 
-/** 整頁重灌（`loadMessages`／`loadGroupMessages`）：那一頁就是新的基準，餘裕歸零。 */
+/** 整頁重灌（`loadMessages`）：那一頁就是新的基準，餘裕歸零。 */
 export function clearFloor(floors: CapFloors, key: string): CapFloors {
   if (floors[key] === undefined) return floors
   const out = { ...floors }

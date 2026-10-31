@@ -29,8 +29,6 @@ export interface Project {
   /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
-  group_unread?: number
-  group_read_mark?: { at: string; id: string; seq?: number } | null
   created_at: string
 }
 
@@ -584,57 +582,6 @@ export interface Message {
   seq?: number
   /** 「保溫」那一回合的訊息（使用者那則與 bot 的保溫回覆）：不算未讀（`store/unread.ts`）。 */
   keep_warm?: boolean
-}
-
-/** SPEC §13.4 `GET /api/projects/:id/messages` */
-export interface GroupMessage extends Message {
-  bot_id: string
-  bot_name: string
-}
-
-export interface GroupMessagesPage {
-  project_id: string
-  messages: GroupMessage[]
-  has_more: boolean
-}
-
-/** SPEC §13.4 `POST /api/projects/:id/chat` */
-export interface GroupChatResult {
-  group_id: string
-  /** false＝一顆都沒送到（全被跳過）；舊 daemon 沒有這欄，用 `sent.length` 判斷（見 `groupSendDelivered`）。 */
-  delivered?: boolean
-  sent: { bot_id: string; bot_name: string; turn_id: string; message_id: string | null; delivery: TurnDelivery }[]
-  skipped: { bot_id: string; bot_name: string; reason: GroupSkipReason; detail: string }[]
-}
-
-/** §13.3；人類可讀說明在 `detail`。 */
-export type GroupSkipReason =
-  | 'not_running'
-  | 'blocked'
-  | 'in_flight'
-  | 'unknown_delivery'
-  | 'conflict'
-  | 'not_found'
-  | 'bad_request'
-  | 'upstream'
-  | 'unprocessable'
-  | 'forbidden'
-  | 'unavailable'
-  | 'uncommitted'
-
-export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
-  not_running: msg('未啟動'),
-  blocked: msg('等待終端回應'),
-  in_flight: msg('上一回合進行中'),
-  unknown_delivery: msg('上一回合送達狀態未知'),
-  conflict: msg('狀態衝突'),
-  not_found: msg('找不到 bot'),
-  bad_request: msg('請求不合法'),
-  upstream: msg('herdr / DB 錯誤'),
-  unprocessable: msg('這則訊息對方無法確認送達'),
-  forbidden: msg('沒有權限替這顆 bot 轉述'),
-  unavailable: msg('暫時讀不到維護窗口狀態'),
-  uncommitted: msg('送出結果還不確定'),
 }
 
 export interface AppState {

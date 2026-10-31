@@ -14,8 +14,7 @@ import { createResyncRunner } from './resyncQueue'
 import { quotaLimitChanged } from './quotaLimitChange'
 import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
-import { groupSendDelivered, groupSkipText } from './groupSend'
-import { UNKNOWN_GROUP_NOTICE, UNKNOWN_SENT_NOTICE, unknownLock } from './deliveryUnknown'
+import { UNKNOWN_SENT_NOTICE, unknownLock } from './deliveryUnknown'
 import { create } from 'zustand'
 import { markUserNav } from './userNav'
 import * as api from '../api'
@@ -30,7 +29,6 @@ import {
   toHerdrVersion,
   toHostBaseline,
   optStr,
-  sortByInsert,
   sortByTime,
   str,
   toMessage,
@@ -47,7 +45,7 @@ import {
 import { ApiError } from '../api/types'
 import { DRAFT_REASON_TEXT, draftBlockFrom, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
+import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
@@ -56,10 +54,10 @@ import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byInsert, byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
+import { byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
-import { markRewound, markRewoundInGroup } from '../lib/rewind'
+import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { bumpEventRevs } from './eventRevs'
 import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
@@ -73,8 +71,6 @@ import { suggestionFailureText } from './promptSuggestion'
 import { dismissKey, pruneDismissed, type PendingLogin } from '../lib/loginPrompt'
 import { sendNowFellThrough } from './sendNowOutcome'
 import { sendNowNotice } from './sendNowCopy'
-import { missionRequests } from './missionRequests'
-import { MISSION_USER_PAUSE } from '../lib/missionView'
 
 
 /** `patchBot` 的結果：要不要重啟，以及 daemon 有沒有把送進去的停用模型換掉（issue #539）。 */
@@ -83,10 +79,9 @@ export interface PatchBotOutcome {
   deferred: boolean
   remappedModel: ModelRemap | null
 }
-import { laterMark, serverGroupUnread, serverUnread } from './sharedUnread'
+import { laterMark, serverUnread } from './sharedUnread'
 import { isKeepWarmRequestId } from '../lib/keepWarm'
-import { viewingBot, viewingGroup } from './viewing'
-import { confirmGroupTurn, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
+import { viewingBot } from './viewing'
 import {
   botKey,
   clearHookCompletion,
@@ -117,9 +112,6 @@ import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { pruneStoredIds } from '../lib/storedIds'
 import { msg, t, tr } from '../lib/i18n'
 
-const sendMissionRequest = missionRequests(api.newClientRequestId)
-const missionLoads = new Map<string, () => Promise<void>>()
-const missionListLoads = new Map<string, () => Promise<void>>()
 /** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
 const messagePageGenerations = new Map<string, number>()
 let legacyQueueMigrationAttempted = false
@@ -139,16 +131,12 @@ function noteGoneBots(bots: Bot[]): void {
  * 模組層的帳（不在 state 裡，`pruneDeadKeys` 管不到）：不在快照名單上的 bot／專案／任務不留。
  * 每個 bot／專案／任務各一格、沒有人會回頭清——長時間開著的分頁裡只增不減。
  */
-function pruneStoreMemo(s: Pick<StoreState, 'bots' | 'projects' | 'missions'>): void {
+function pruneStoreMemo(s: Pick<StoreState, 'bots'>): void {
   const botIds = new Set(s.bots.map((b) => b.id))
-  const projectIds = new Set(s.projects.map((p) => p.id))
-  const missionIds = new Set(Object.values(s.missions).flatMap((list) => list.map((m) => m.id)))
   for (const key of [...messagePageGenerations.keys()]) {
     const id = key.slice(key.indexOf(':') + 1)
-    if (!(key.startsWith('bot:') ? botIds.has(id) : projectIds.has(id))) messagePageGenerations.delete(key)
+    if (!botIds.has(id)) messagePageGenerations.delete(key)
   }
-  for (const id of [...missionListLoads.keys()]) if (!projectIds.has(id)) missionListLoads.delete(id)
-  for (const id of [...missionLoads.keys()]) if (!missionIds.has(id)) missionLoads.delete(id)
   pruneIdleEdges(botIds)
   forgetBlockedExcept(botIds)
 }
@@ -157,31 +145,21 @@ function pruneStoreMemo(s: Pick<StoreState, 'bots' | 'projects' | 'missions'>): 
 export function storeMemoKeysForTest() {
   return {
     messagePageGenerations: [...messagePageGenerations.keys()],
-    missionListLoads: [...missionListLoads.keys()],
-    missionLoads: [...missionLoads.keys()],
   }
 }
 
-export function noteMessagePageForTest(kind: 'bot' | 'group', id: string) {
+export function noteMessagePageForTest(kind: 'bot', id: string) {
   advanceMessagePageGeneration(kind, id)
 }
 
-function messagePageGeneration(kind: 'bot' | 'group', id: string): number {
+function messagePageGeneration(kind: 'bot', id: string): number {
   return messagePageGenerations.get(`${kind}:${id}`) ?? 0
 }
 
-function advanceMessagePageGeneration(kind: 'bot' | 'group', id: string): void {
+function advanceMessagePageGeneration(kind: 'bot', id: string): void {
   const key = `${kind}:${id}`
   messagePageGenerations.set(key, (messagePageGenerations.get(key) ?? 0) + 1)
 }
-
-/**
- * 已結案（done／cancelled）各抓最近幾筆；進行中的另外抓、不跟它們搶名額。
- * 以前一次 `status=all&limit=50`：專案又開了 50 筆任務之後，停著等你回答的那筆就掉出清單，卡片跟回答框一起消失（review3 c1 M6）。
- */
-export const MISSION_CLOSED_LIMIT = 50
-/** 進行中的實際上不設限：daemon 的 `limit` 最多收 500，同一個專案不會同時開著這麼多筆。 */
-const MISSION_OPEN_LIMIT = 500
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal' | 'preview'
@@ -199,7 +177,7 @@ const KIND_DISPLAY_KEY = 'am.kindDisplay'
 const DRAFT_CURSORS_KEY = 'am.draftCursors'
 const SELECTION_KEY = 'am.selection'
 
-/** Open conversation (mirrored to localStorage). `projectId` non-null = group chat (SPEC §13); `botId` stays parked. */
+/** Open conversation (mirrored to localStorage). `projectId` non-null = project settings; `botId` stays parked. */
 interface Selection {
   botId: string | null
   projectId: string | null
@@ -269,9 +247,9 @@ function writeShellView(v: ShellView | null) {
 
 const initialShellView = readShellView()
 
-/** Composer drafts survive bot / group / tab switches and reloads. */
+/** Composer drafts survive bot and tab switches and reloads. */
 /** `shell:` 是 host shell 面板的指令草稿（#758，見 `shellDraft.ts`）。 */
-export type DraftKey = `bot:${string}` | `group:${string}` | `shell:${string}`
+export type DraftKey = `bot:${string}` | `shell:${string}`
 
 export interface DraftCursor {
   start: number
@@ -333,7 +311,7 @@ function setReadMark(key: string, mark: ReadMark) {
   readMarks = recordReadMark(readMarks, key, mark)
 }
 
-/** 群組未讀不存本機：daemon 算、跨裝置共用（`serverGroupUnread`），本機只留記憶體裡的即時 +1。 */
+/** 只儲存 Bot 未讀數。 */
 function persistUnread(s: { botUnread: Record<string, number> }) {
   saveCounts({ bots: s.botUnread })
 }
@@ -460,12 +438,8 @@ export interface StoreState {
   /** Render only while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows. */
   liveReply: Record<string, LiveReply>
 
-  /** SPEC §13 group view; non-null overrides `selectedBotId` (which is kept). */
+  /** 專案設定視圖；非 null 時覆蓋目前 Bot 的畫面。 */
   selectedProjectId: string | null
-  groupMessages: Record<string, GroupMessage[]>
-  loadedProjects: Record<string, boolean>
-  /** §13.6: replies that arrived while that project's group view was not open (memory only). */
-  groupUnread: Record<string, number>
 
   /**
    * 總管（AGM）專案 id（`GET /api/supervisor`）。排除總管與其工人**只能靠 id**：
@@ -474,30 +448,8 @@ export interface StoreState {
   supervisorProjectId: string | null
   loadSupervisorProject: () => Promise<void>
 
-  // 群組任務（mission，docs/goals/agm-missions.md §5）
-  missions: Record<string, Mission[]>
-  missionDetail: Record<string, MissionDetail>
-  missionLoading: Record<string, boolean>
-  missionLoadErrors: Record<string, string>
-  /** false = daemon 沒有 `/api/missions`（舊版）：入口靜默消失。 */
-  missionsSupported: boolean
-  /** `supervisor_changed` 事件的累計次數：AGM 面板（本身不輪詢）開著時拿它當「該重讀了」的訊號。 */
   supervisorRev: number
-  /** 重連／resync 之後通知已掛載的排程列表與詳情重抓。 */
   schedulesRev: number
-  /** 已結案那兩段是不是被 `MISSION_CLOSED_LIMIT` 截掉了（標題要說「最近 N 筆」，不能冒充總數）。 */
-  missionsCapped: Record<string, { done: boolean; cancelled: boolean }>
-  loadMissions: (projectId: string) => Promise<void>
-  /** 重連／resync 之後把已經載過的清單與任務重抓一次：斷線期間的 `mission_updated` 收不到。 */
-  refreshLoadedMissions: () => Promise<void>
-  loadMission: (missionId: string) => Promise<void>
-  startMission: (projectId: string, input: NewMissionInput) => Promise<string | null>
-  controlMission: (missionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
-  answerMission: (missionId: string, text: string) => Promise<boolean>
-  /** 只留話並叫醒 AGM，不改任何交付。 */
-  askMission: (missionId: string, text: string) => Promise<boolean>
-  /** 開一筆續作，原成果不會被改到。 */
-  reviseMission: (missionId: string, text: string) => Promise<string | null>
 
   /** 非 null = 主面板顯示 `HostShellPanel`（優先於其他選取）。 */
   shellView: ShellView | null
@@ -525,10 +477,6 @@ export interface StoreState {
   /** 以側邊欄順序往前 / 後選一個（頭尾繞回去）。 */
   selectAdjacentBot: (dir: -1 | 1) => void
   selectProject: (projectId: string | null) => void
-  loadGroupMessages: (projectId: string) => Promise<void>
-  loadEarlierGroupMessages: (projectId: string) => Promise<void>
-  /** null = failed (reason already shown as a notice). */
-  sendGroupChat: (projectId: string, text: string, attachments?: string[], recipientIds?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
   /** `beforeId = null` = 移到最後。同專案內才有效。 */
@@ -542,7 +490,6 @@ export interface StoreState {
   loadMessages: (botId: string) => Promise<void>
   loadEarlierMessages: (botId: string) => Promise<void>
   markBotRead: (botId: string) => void
-  markGroupRead: (projectId: string) => void
   markCurrentRead: () => void
   /** 存下來的數字只是重整前的快照，訊息載入後要用已讀標記重算。 */
   recountBot: (botId: string) => void
@@ -866,23 +813,9 @@ function sendReadMark(botId: string, mark: ReadMark) {
     .catch(() => {})
 }
 
-/** 群組已讀同理（#756）：補送成功前 `serverGroupUnread` 跳過這些專案。 */
-const unsentGroupReads = new Map<string, ReadMark>()
-
-function sendGroupReadMark(projectId: string, mark: ReadMark) {
-  unsentGroupReads.set(projectId, mark)
-  void api
-    .markGroupRead(projectId, mark)
-    .then(() => {
-      if (unsentGroupReads.get(projectId) === mark) unsentGroupReads.delete(projectId)
-    })
-    .catch(() => {})
-}
-
 /** socket 重開＝daemon 回來了，把欠的已讀補送出去（別台裝置也才看得到）。 */
 function flushUnsentReads() {
   for (const [botId, mark] of [...unsentReads]) sendReadMark(botId, mark)
-  for (const [projectId, mark] of [...unsentGroupReads]) sendGroupReadMark(projectId, mark)
 }
 
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
@@ -985,18 +918,9 @@ export const useStore = create<StoreState>((set, get) => {
   loginPromptDismissed: {},
 
   selectedProjectId: initialSelection.projectId,
-  groupMessages: {},
-  loadedProjects: {},
-  groupUnread: {},
 
-  missions: {},
-  missionDetail: {},
-  missionLoading: {},
-  missionLoadErrors: {},
-  missionsSupported: true,
   supervisorRev: 0,
   schedulesRev: 0,
-  missionsCapped: {},
   shellView: initialShellView,
   supervisorProjectId: null,
   agmDeleteAsk: null,
@@ -1185,16 +1109,12 @@ export const useStore = create<StoreState>((set, get) => {
         persistUnread(get())
       }
       // 群組未讀同樣以 daemon 為準（#756）：別台讀過的清掉、這個分頁沒開著時回來的補上。
-      const g = serverGroupUnread(s.projects, s.groupUnread, (id) => viewingGroup(s, id) && windowActive(), unsentGroupReads)
-      if (g) set({ groupUnread: g })
     }
     get().pruneUnread()
     get().pruneDead()
     if (behindFrames) void get().refreshState()
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
-    const proj = get().selectedProjectId
-    if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
     // 讀不到就算了：排除規則退回「不排除」，只是多幾顆晶片。
     if (get().supervisorProjectId === null) void get().loadSupervisorProject()
     if (!identityPrefsAsked) {
@@ -1237,126 +1157,6 @@ export const useStore = create<StoreState>((set, get) => {
       rightTab: 'chat',
       settingsBotId: null,
     })
-    if (projectId && windowActive()) get().markGroupRead(projectId)
-    if (projectId) void get().loadGroupMessages(projectId)
-  },
-
-  async loadGroupMessages(projectId) {
-    // 同 `loadMessages`（#1802）：逆序回應的舊頁丟掉。
-    advanceMessagePageGeneration('group', projectId)
-    const generation = messagePageGeneration('group', projectId)
-    try {
-      const startedAt = new Date().toISOString()
-      const page = await api.fetchProjectMessages(projectId)
-      if (generation !== messagePageGeneration('group', projectId)) return
-      noteGroupPrompts(page.messages)
-      advanceMessagePageGeneration('group', projectId)
-      set((s) => {
-        // 同 `loadMessages`：請求飛在半路時進來的 `message_added` 不能被舊的那一頁蓋掉。
-        const kept = keptAfterPage(s.groupMessages[projectId] ?? [], page.messages, startedAt)
-        return {
-          groupMessages: {
-            ...s.groupMessages,
-            [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], kept.length > 0 ? sortByInsert([...page.messages, ...kept]) : page.messages),
-          },
-          loadedProjects: { ...s.loadedProjects, [projectId]: true },
-          moreMessages: { ...s.moreMessages, [projectId]: page.has_more },
-          messageCapFloors: clearFloor(s.messageCapFloors, projectId),
-        }
-      })
-    } catch (e) {
-      // 已經有更新的整頁請求開始（或已經成功）：這一次的失敗不算數，不跳通知（#1802 review）。
-      if (generation !== messagePageGeneration('group', projectId)) return
-      get().notify('error', t('載入群組訊息失敗：{reason}', { reason: errText(e) }))
-    }
-  },
-
-  async loadEarlierGroupMessages(projectId) {
-    const s0 = get()
-    const oldest = s0.groupMessages[projectId]?.[0]
-    if (!oldest || s0.loadingMore[projectId]) return
-    const generation = messagePageGeneration('group', projectId)
-    let lost: unknown
-    set((s) => ({ loadingMore: { ...s.loadingMore, [projectId]: true } }))
-    try {
-      const page = await api.fetchProjectMessages(projectId, PAGE_SIZE, oldest.id)
-      set((s) => {
-        if (generation !== messagePageGeneration('group', projectId)) return {}
-        const have = new Set((s.groupMessages[projectId] ?? []).map((m) => m.id))
-        const older = page.messages.filter((m) => !have.has(m.id))
-        const merged = [...older, ...(s.groupMessages[projectId] ?? [])]
-        return {
-          groupMessages: { ...s.groupMessages, [projectId]: merged },
-          moreMessages: { ...s.moreMessages, [projectId]: page.has_more && older.length > 0 },
-          // issue #457：同 bot 時間軸。
-          messageCapFloors: raiseFloor(s.messageCapFloors, projectId, older.length, merged.length),
-        }
-      })
-    } catch (e) {
-      lost = e
-    } finally {
-      set((s) => ({ loadingMore: withoutKey(s.loadingMore, projectId) }))
-    }
-    if (lost === undefined) return
-    const recovered = await recoverLostCursor(`group:${projectId}`, lost, () => get().loadGroupMessages(projectId), () => get().loadEarlierGroupMessages(projectId))
-    if (!recovered) get().notify('error', t('載入更早的群組訊息失敗：{reason}', { reason: errText(lost) }))
-  },
-
-  async sendGroupChat(projectId, text, attachments = [], recipientIds = []) {
-    // 跟 `sendPrompt` 同一條規則（#367）：連線斷在 daemon 收下之後（回應遺失），使用者會再按一次同一句，
-    // 要拿同一個 crid——daemon 以它冪等（API.md 11.2：重送回同一組 turn_id、不再打字）。每次都換新的鍵，
-    // 等於把這個冪等關掉，N 顆 bot 各收到兩則。只有「沒收到任何回覆」的失敗才沿用；daemon 回了就作廢。
-    const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}\u0000${recipientIds.join(',')}`
-    // 同 `sendPrompt`（#1815）：每個收件人的回合都已是終態＝那件事做完了，再用舊 crid 只會被 daemon 當重送；有一個還沒結束或本機沒看到，就沿用。
-    const held = peekRequestId(reqKey)
-    if (held && groupSendIsSpent(get().turns, held, recipientIds)) settleCreateRequest(reqKey)
-    // 同 `sendPrompt`：重送窗口過了就是新的動作。
-    const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
-    try {
-      const res = await api.sendGroupChat(projectId, text, crid, attachments, recipientIds)
-      settleCreateRequest(reqKey)
-      // Lock each recipient's composer right away (same as `sendPrompt`).
-      set((s) => {
-        const turns = { ...s.turns }
-        for (const x of res.sent) {
-          if (x.delivery === 'failed' || !x.turn_id) continue
-          turns[x.bot_id] = {
-            ...(turns[x.bot_id] ?? {}),
-            [x.turn_id]: {
-              ...(turns[x.bot_id]?.[x.turn_id] ?? {
-                id: x.turn_id,
-                conversation_id: '',
-                run_id: s.runs[x.bot_id]?.id ?? null,
-                bot_id: x.bot_id,
-                origin: 'web' as const,
-                status: 'in_flight' as const,
-                client_request_id: `${crid}:${x.bot_id}`,
-                created_at: new Date().toISOString(),
-                completed_at: null,
-              }),
-              delivery: x.delivery,
-            },
-          }
-        }
-        return { turns }
-      })
-      if (res.sent.some((x) => x.delivery === 'unknown')) {
-        get().notify('info', UNKNOWN_GROUP_NOTICE)
-      }
-      if (!groupSendDelivered(res)) {
-        // 一顆都沒送到：回 null，輸入框才會保留草稿與附件（#340）。
-        get().notify('error', t('一顆都沒送到，草稿已保留：{list}', { list: res.skipped.map((x) => t('@{name}（{state}）', { name: x.bot_name, state: groupSkipText(x) })).join(t('、')) }))
-        return null
-      }
-      if (res.skipped.length > 0) {
-        get().notify('info', t('未送達：{list}', { list: res.skipped.map((x) => t('@{name}（{state}）', { name: x.bot_name, state: groupSkipText(x) })).join(t('、')) }))
-      }
-      return res
-    } catch (e) {
-      if (e instanceof ApiError) settleCreateRequest(reqKey)
-      get().notify('error', errText(e))
-      return null
-    }
   },
 
   // 切分頁等於離開設定面板（面板是蓋在對話/終端上的）。
@@ -1450,7 +1250,6 @@ export const useStore = create<StoreState>((set, get) => {
       const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
       if (generation !== messagePageGeneration('bot', botId)) return
-      noteGroupPrompts(page.messages)
       advanceMessagePageGeneration('bot', botId)
       set((s) => {
         const kept = keptAfterPage(s.messages[botId] ?? [], page.messages, startedAt)
@@ -1532,34 +1331,22 @@ export const useStore = create<StoreState>((set, get) => {
     persistUnread(get())
   },
 
-  markGroupRead: (projectId) => {
-    // 已讀位置在 daemon（#756），本機不留標記：開著的群組時間軸若比標記新，daemon 只往前推。
-    sendGroupReadMark(projectId, markOfMessages(get().groupMessages[projectId] ?? []) ?? markNow())
-    if (!get().groupUnread[projectId]) return
-    set((s) => ({ groupUnread: withoutKey(s.groupUnread, projectId) }))
-  },
-
   markCurrentRead: () => {
     if (!windowActive()) return
     const s = get()
     // shell 面板蓋住的是整個主畫面（`App.tsx`）：bot 對話與群組時間軸都不算「正在看」（issue #509）。
     if (s.shellView) return
-    if (s.selectedProjectId) {
-      get().markGroupRead(s.selectedProjectId)
-      return
-    }
+    if (s.selectedProjectId) return
     if (s.selectedBotId) get().markBotRead(s.selectedBotId)
   },
 
   pruneUnread: () => {
     const s = get()
     const liveBot = (id: string) => s.bots.some((b) => b.id === id)
-    const liveProject = (id: string) => s.projects.some((p) => p.id === id)
     readMarks = prunePersistedMarks(readMarks, liveBot)
     const botUnread = pruneUnread(s.botUnread, liveBot)
-    const groupUnread = pruneUnread(s.groupUnread, liveProject)
-    if (Object.keys(botUnread).length === Object.keys(s.botUnread).length && Object.keys(groupUnread).length === Object.keys(s.groupUnread).length) return
-    set({ botUnread, groupUnread })
+    if (Object.keys(botUnread).length === Object.keys(s.botUnread).length) return
+    set({ botUnread })
     persistUnread(get())
   },
 
@@ -2317,10 +2104,10 @@ export const useStore = create<StoreState>((set, get) => {
     const botIds = get().bots.filter((b) => b.project_id === projectId).map((b) => b.id)
     try {
       await api.deleteProject(projectId)
-      for (const k of [`group:${projectId}`, ...botIds.map((id) => `bot:${id}`)]) draftSync.forget(k)
+      for (const k of botIds.map((id) => `bot:${id}`)) draftSync.forget(k)
       set((s) => {
-        let drafts = withoutKey(s.drafts, `group:${projectId}`)
-        let draftCursors = withoutKey(s.draftCursors, `group:${projectId}`)
+        let drafts = s.drafts
+        let draftCursors = s.draftCursors
         for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
         for (const id of botIds) draftCursors = withoutKey(draftCursors, `bot:${id}`)
         writeDraftCursors(s.draftCursors, draftCursors)
@@ -2715,178 +2502,6 @@ export const useStore = create<StoreState>((set, get) => {
     return needs
   },
 
-  // 群組任務（mission）
-  async loadMissions(projectId) {
-    let run = missionListLoads.get(projectId)
-    if (!run) {
-      // 一次湧進好幾則 `mission_updated` 時只打一輪（外加結尾補一輪），不是每則都三支請求。
-      run = singleFlight(async () => {
-        if (!get().missionsSupported) return
-        try {
-          const [open, done, cancelled] = await Promise.all([
-            api.fetchMissions(projectId, 'open', MISSION_OPEN_LIMIT),
-            api.fetchMissions(projectId, 'done', MISSION_CLOSED_LIMIT),
-            api.fetchMissions(projectId, 'cancelled', MISSION_CLOSED_LIMIT),
-          ])
-          set((s) => ({
-            missions: { ...s.missions, [projectId]: newestFirst([...open, ...done, ...cancelled]) },
-            missionsCapped: {
-              ...s.missionsCapped,
-              [projectId]: { done: done.length >= MISSION_CLOSED_LIMIT, cancelled: cancelled.length >= MISSION_CLOSED_LIMIT },
-            },
-          }))
-        } catch (e) {
-          if (api.isMissionsUnsupported(e)) {
-            set({ missionsSupported: false })
-            return
-          }
-          get().notify('error', t('載入任務失敗：{reason}', { reason: errText(e) }))
-        }
-      })
-      missionListLoads.set(projectId, run)
-    }
-    await run()
-  },
-
-  async refreshLoadedMissions() {
-    const s = get()
-    if (!s.missionsSupported) return
-    // 斷線期間交辦可能已經換了好幾個階段：卡片會一直停在舊的那一格，直到使用者重整（review3 c1 M5）。
-    // 正在看的專案也要重抓：第一次載入失敗的話清單從來沒有進 `missions`，這裡不補就整條任務列消失（#1214）。
-    const pids = new Set(Object.keys(s.missions))
-    if (s.selectedProjectId) pids.add(s.selectedProjectId)
-    await Promise.all([
-      ...[...pids].map((pid) => s.loadMissions(pid)),
-      ...Object.keys(s.missionDetail).map((id) => s.loadMission(id)),
-    ])
-  },
-
-  async loadMission(missionId) {
-    let run = missionLoads.get(missionId)
-    if (!run) {
-      // Coalesce concurrent reads but run again after an update received mid-request.
-      run = singleFlight(async () => {
-        if (!get().missionsSupported) return
-        set((s) => ({
-          missionLoading: { ...s.missionLoading, [missionId]: true },
-          missionLoadErrors: { ...s.missionLoadErrors, [missionId]: '' },
-        }))
-        try {
-          const detail = await api.fetchMission(missionId)
-          if (!detail) throw new Error(t('任務資料不完整'))
-          set((s) => ({
-            missionDetail: { ...s.missionDetail, [missionId]: detail },
-            missions: mergeMission(s.missions, detail),
-          }))
-        } catch (e) {
-          if (api.isMissionsUnsupported(e)) {
-            set({ missionsSupported: false })
-            return
-          }
-          // 這一筆被清掉了（AGM 結案時常有）：收掉這張卡就好，其他任務跟「交給 AGM」開關照常。
-          if (api.isMissionGone(e)) {
-            set((s) => ({
-              missionDetail: withoutKey(s.missionDetail, missionId),
-              missions: dropMission(s.missions, missionId),
-              missionLoadErrors: { ...s.missionLoadErrors, [missionId]: t('這筆任務已經不在了') },
-            }))
-            return
-          }
-          set((s) => ({ missionLoadErrors: { ...s.missionLoadErrors, [missionId]: errText(e) } }))
-        } finally {
-          set((s) => ({ missionLoading: { ...s.missionLoading, [missionId]: false } }))
-        }
-      })
-      missionLoads.set(missionId, run)
-    }
-    await run()
-  },
-
-  async startMission(projectId, input) {
-    try {
-      // crid 交給 `missionRequests`：每按一次就換一個（例如 `Date.now()`）等於把 API 的冪等關掉——
-      // daemon 已經 commit 但回應在路上斷掉時，使用者照提示再按一次就會多出第二筆任務。
-      // 選項也算進 key：同一段文字改了執行者或交付方式再送是另一個要求。沿用舊 crid 的話 daemon 不比對內容、
-      // 直接回舊的那筆（`created:false` 不提示），輸入框還被清掉（第二輪 review 修正驗證 #6）。
-      const variant = [input.delivery_mode, input.executor_kind, input.on_5h_limit, input.max_rounds ?? ''].join('|')
-      const { mission, created } = await sendMissionRequest(`create:${variant}`, projectId, input.text, (id) =>
-        api.createMission(projectId, { ...input, client_request_id: id }),
-      )
-      if (!mission) return null
-      set((s) => ({ missions: mergeMission(s.missions, mission) }))
-      // 同 client_request_id 重送回 `created:false`，不再提示。
-      if (created) get().notify('info', t('已交給 AGM，任務卡會顯示進度'))
-      return mission.id
-    } catch (e) {
-      if (api.isMissionsUnsupported(e)) {
-        set({ missionsSupported: false })
-        get().notify('error', t('這個 daemon 還沒有群組任務（需要更新）'))
-        return null
-      }
-      const reason = api.missionRejectReason(e)
-      get().notify(
-        'error',
-        reason === 'remote_not_supported' ? t('群組任務目前只支援本機專案') : t('交給 AGM 失敗：{reason}', { reason: errText(e) }),
-      )
-      return null
-    }
-  },
-
-  async controlMission(missionId, action) {
-    // 連點：第二下會撞「已經暫停／已經取消」的 409，跳一則多餘的失敗通知。
-    await guarded(
-      set,
-      get,
-      `mission:${missionId}`,
-      async () => {
-        // daemon 的 pause 必須帶 `reason`：以前送 `{}`，反序列化就 422，按鈕從上線起沒成功過（review3 c1 M4）。
-        const mission = await api.controlMission(missionId, action, action === 'pause' ? { reason: MISSION_USER_PAUSE } : undefined)
-        if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
-        await get().loadMission(missionId)
-      },
-      (e) => t('任務操作失敗：{reason}', { reason: errText(e) }),
-    )
-  },
-
-  async answerMission(missionId, text) {
-    try {
-      // 一支 API 原子完成記錄＋放行＋喚醒（兩支會斷成半套）；crid 讓重送安全。
-      await sendMissionRequest('answer', missionId, text, (id) => api.answerMission(missionId, { text, client_request_id: id }))
-      await get().loadMission(missionId)
-      return true
-    } catch (e) {
-      get().notify('error', t('回覆任務失敗：{reason}', { reason: errText(e) }))
-      return false
-    }
-  },
-
-  async askMission(missionId, text) {
-    try {
-      await sendMissionRequest('ask', missionId, text, (id) => api.askMission(missionId, { text, client_request_id: id }))
-      await get().loadMission(missionId)
-      return true
-    } catch (e) {
-      get().notify('error', t('追問失敗：{reason}', { reason: errText(e) }))
-      return false
-    }
-  },
-
-  async reviseMission(missionId, text) {
-    try {
-      const next = await sendMissionRequest('revise', missionId, text, (id) => api.reviseMission(missionId, { text, client_request_id: id }))
-      // 兩邊都要重讀：原成果多了「已開續作」的連結，新任務要進清單。
-      await get().loadMission(missionId)
-      if (next) {
-        await get().loadMission(next.id)
-        await get().loadMissions(next.project_id)
-        get().notify('info', t('已開一筆續作任務，原本的成果保持不變'))
-      }
-      return next?.id ?? null
-    } catch (e) {
-      get().notify('error', t('追加修改失敗：{reason}', { reason: errText(e) }))
-      return null
-    }
-  },
 }
 })
 
@@ -2935,40 +2550,6 @@ function markWithdrawnTurn(set: SetFn, get: GetFn, botId: string, turnId: string
       },
     },
   }))
-}
-
-/** 任務不在了：從已載入的清單裡拿掉，沒載過的專案不動。 */
-function dropMission(map: Record<string, Mission[]>, missionId: string): Record<string, Mission[]> {
-  const out: Record<string, Mission[]> = {}
-  let changed = false
-  for (const [pid, list] of Object.entries(map)) {
-    const next = list.filter((m) => m.id !== missionId)
-    if (next.length !== list.length) changed = true
-    out[pid] = next
-  }
-  return changed ? out : map
-}
-
-/**
- * 清單沒載過就不併：憑一筆建出半份清單會讓任務看起來只有一筆。
- *
- * 已經在清單裡的**原地替換**：以前一律搬到最前面，點開已完成清單的第 6 筆，回應一到它就跳到第 1 位、
- * 畫面在手指底下移動（review3 c1 L10）。找不到的（剛建、或從連結點進來的舊任務）才插到最前。
- */
-function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<string, Mission[]> {
-  const list = map[mission.project_id]
-  if (!list) return map
-  const at = list.findIndex((m) => m.id === mission.id)
-  const next = at < 0 ? [mission, ...list] : list.map((m, i) => (i === at ? mission : m))
-  return { ...map, [mission.project_id]: next }
-}
-
-/** open／done／cancelled 三份合成一份，新的在前；同一筆只留一次。 */
-function newestFirst(list: Mission[]): Mission[] {
-  const seen = new Set<string>()
-  return list
-    .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
 }
 
 // One subscription instead of a write at every mutation site (covers future ones too).
@@ -3098,7 +2679,6 @@ function connectSocket(set: SetFn, get: GetFn) {
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
         void get().refreshState()
-        void get().refreshLoadedMissions()
         const openedBefore = openedOnce
         if (openedOnce) void reloadLoadedConversations(get)
         openedOnce = true
@@ -3146,42 +2726,6 @@ function botIdsNeedingConversationReload(get: GetFn): string[] {
  */
 export async function reloadLoadedConversations(get: GetFn): Promise<void> {
   for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
-  const proj = get().selectedProjectId
-  if (proj) await get().loadGroupMessages(proj)
-}
-
-/** A restored or moved bot may have messages outside a previously loaded group's newest page. */
-async function mergeLatestGroupPage(set: SetFn, get: GetFn, projectId: string): Promise<void> {
-  try {
-    const atRequestStart = new Map((get().groupMessages[projectId] ?? []).map((message) => [message.id, message]))
-    const page = await api.fetchProjectMessages(projectId)
-    noteGroupPrompts(page.messages)
-    set((s) => {
-      if (!s.loadedProjects[projectId]) return {}
-      const current = s.groupMessages[projectId] ?? []
-      const currentById = new Map(current.map((message) => [message.id, message]))
-      const activeBots = new Set(s.bots.filter((bot) => bot.project_id === projectId).map((bot) => bot.id))
-      const byId = new Map(current.map((message) => [message.id, message]))
-      for (const message of page.messages) {
-        // A same-ID WS update or bot deletion can land while this snapshot is in flight. Preserve
-        // the newer local row, and never resurrect a member that left the project in the meantime.
-        if (!activeBots.has(message.bot_id)) continue
-        const latest = currentById.get(message.id)
-        byId.set(message.id, latest && latest !== atRequestStart.get(message.id) ? latest : message)
-      }
-      const merged = sortByInsert([...byId.values()])
-      const cut = capList(merged, capFor(s.messageCapFloors, projectId))
-      return {
-        groupMessages: {
-          ...s.groupMessages,
-          [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], cut.list),
-        },
-        moreMessages: { ...s.moreMessages, [projectId]: page.has_more || cut.trimmed },
-      }
-    })
-  } catch (e) {
-    get().notify('error', t('載入群組訊息失敗：{reason}', { reason: errText(e) }))
-  }
 }
 
 const resyncTrigger = (() => {
@@ -3200,10 +2744,7 @@ const resyncTrigger = (() => {
       void draftSync.load().catch(() => {})
       void get().refreshPanes()
       for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
-      const proj = get().selectedProjectId
-      if (proj) await get().loadGroupMessages(proj)
-      await get().refreshLoadedMissions()
-    } catch (e) {
+      } catch (e) {
       reportStateRefreshError(set, get, e)
     }
   })
@@ -3222,25 +2763,6 @@ function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
   if (!takeTurnCompletion(botId, turnId)) return
   set((s) => ({ botUnread: { ...s.botUnread, [botId]: (s.botUnread[botId] ?? 0) + 1 } }))
   persistUnread(get())
-}
-
-/** 同上，記在專案群組（§13.6）。 */
-function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: string) {
-  if (viewingGroup(get(), projectId) && windowActive()) {
-    get().markGroupRead(projectId)
-    return
-  }
-  if (!takeTurnCompletion(`group:${projectId}`, turnId)) return
-  set((s) => ({ groupUnread: { ...s.groupUnread, [projectId]: (s.groupUnread[projectId] ?? 0) + 1 } }))
-}
-
-/** 只有群組回合才記到專案（`store/groupUnread.ts`）；要抓訊息確認時非同步記。 */
-function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: string | null, key: string, turn: Turn | null | undefined) {
-  const pid = get().bots.find((b) => b.id === botId)?.project_id
-  if (!pid) return
-  void confirmGroupTurn(botId, turnId, turn, (id, tid, before) => api.fetchMessages(id, 50, before, { turnId: tid, role: 'user' })).then((yes) => {
-    if (yes) noteGroupTurnDone(set, get, pid, key)
-  })
 }
 
 /**
@@ -3321,7 +2843,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!isRec(data)) return
       const key = str(pick(data, 'key'))
       const rev = num(pick(data, 'rev'), 0)
-      if (!key || rev <= 0) return
+      if (!key || key.startsWith('group:') || rev <= 0) return
       draftSync.remote({ key, text: str(pick(data, 'text')), rev, client_id: str(pick(data, 'client_id')) })
       return
     }
@@ -3467,7 +2989,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
           noteTurnDone(set, get, botId, key)
           // `run:` 開頭是終端直接輸入的新回合，latest 仍是上一筆（多半是群組回合）。
           // 拿那個舊 id 去記群組未讀，每個終端回合都會 +1（#650）。
-          if (latest && key === latest) noteGroupCompletion(set, get, botId, latest, key, map[latest])
         }
       }
       return
@@ -3483,10 +3004,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         const patch: Partial<StoreState> = {}
         const next = markRewound(s.messages[botId] ?? [], id, at)
         if (next) patch.messages = { ...s.messages, [botId]: next }
-        const pid = s.bots.find((b) => b.id === botId)?.project_id
-        const group = pid ? s.groupMessages[pid] : undefined
-        const nextGroup = pid && group ? markRewoundInGroup(group, id, at) : null
-        if (pid && nextGroup) patch.groupMessages = { ...s.groupMessages, [pid]: nextGroup }
         return patch
       })
       return
@@ -3496,7 +3013,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       // 已刪 bot 的遲到幀（daemon 還在送完成訊息）：不重建它的訊息、未讀。
       if (botId && goneBotIds.has(botId)) return
       const msg = toMessage(unwrap(data, 'message'), botId ?? undefined)
-      if (msg) noteGroupPrompt(msg)
       if (!msg || !botId) {
         // Cannot attribute it — reload the visible conversation.
         const sel = get().selectedBotId
@@ -3524,18 +3040,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         if (msg.role === 'assistant' && s.liveReply[botId] && (!msg.turn_id || s.liveReply[botId].turnId === msg.turn_id)) {
           patch.liveReply = withoutKey(s.liveReply, botId)
         }
-        // §13: route the same frame into its project's group timeline + unread counter.
-        const bot = s.bots.find((b) => b.id === botId)
-        if (bot) {
-          const pid = bot.project_id
-          const group = s.groupMessages[pid]
-          const grownGroup = group ? upsertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byInsert, sameShown) : null
-          if (grownGroup) {
-            const cut = capList(grownGroup, capFor(s.messageCapFloors, pid))
-            patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }
-            if (cut.trimmed) more[pid] = true
-          }
-        }
         if (Object.keys(more).length > 0) patch.moreMessages = { ...s.moreMessages, ...more }
         return patch
       })
@@ -3547,7 +3051,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
-        noteGroupCompletion(set, get, botId, msg.turn_id, turnId, get().turns[botId]?.[turnId])
       } else if (msg.role === 'assistant' && keepWarmTurn) {
         // 保溫回覆不亮未讀，但 hook 已經報過這次完成：接著的 idle 邊緣別再補記一次。
         markHookCompletion(botId)
@@ -3572,7 +3075,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         // 保溫回合是 daemon 代送的，不算未讀（`lib/keepWarm.ts`）；hook 標記照記，免得 idle 邊緣補記一筆。
         if (!isKeepWarmRequestId(turn.client_request_id)) {
           noteTurnDone(set, get, botId, turn.id)
-          noteGroupCompletion(set, get, botId, turn.id, turn.id, turn)
         }
       }
       return
@@ -3656,25 +3158,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (quotaLimitChanged(before, [[kind, quota]])) void get().refreshState()
       return
     }
-    case 'mission_updated': {
-      // 只帶 id 與狀態（API.md），細節重抓一次；清單還沒載過就不主動去載（使用者沒在看）。
-      const d = isRec(frame.data) ? frame.data : {}
-      const missionId = str(d.mission_id)
-      const projectId = str(d.project_id)
-      if (!missionId) return null
-      queueMicrotask(() => {
-        const s = useStore.getState()
-        if (s.missionDetail[missionId]) void s.loadMission(missionId)
-        // A child finishing changes its parent's continuation button and relation list too.
-        for (const detail of Object.values(s.missionDetail)) {
-          if (detail.revisions.some((r) => r.id === missionId)) void s.loadMission(detail.id)
-        }
-        // 正在看的專案就算清單沒載成功也要重載（#1214）；沒在看、又沒載過的不主動去載。
-        if (projectId && (s.missions[projectId] || s.selectedProjectId === projectId)) void s.loadMissions(projectId)
-      })
-      return null
-    }
-
     // SPEC §6.9：批次重啟的進度。一顆一顆來，`index` 是第幾顆（1-based）。
     case 'bots_restart_progress': {
       if (!isRec(data)) return
@@ -3774,8 +3257,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     }
     case 'identities_changed':
     case 'project_changed':
-    case 'bot_read':
-    case 'group_read': {
+    case 'bot_read': {
       void get().refreshState()
       return
     }
@@ -3786,38 +3268,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       void get().refreshState()
       return
     }
-    case 'bot_changed': {
-      const botId = isRec(data) ? str(pick(data, 'bot_id')) : ''
-      const before = botId ? get().bots.find((b) => b.id === botId) : undefined
-      void get().refreshState().then(() => {
-        const after = botId ? get().bots.find((b) => b.id === botId) : undefined
-        if (before?.name === after?.name && before?.project_id === after?.project_id) return
-        // 群組訊息快取帶著 bot_name，而 API 排除已刪除 bot。同步已載入的快取時保留使用者翻出的歷史。
-        const projects = new Set([before?.project_id, after?.project_id].filter((id): id is string => Boolean(id)))
-        for (const projectId of projects) {
-          if (!get().loadedProjects[projectId]) continue
-          const activeHere = after?.project_id === projectId
-          set((s) => {
-            const current = s.groupMessages[projectId]
-            if (!current) return {}
-            const next = activeHere
-              ? current.map((message) =>
-                  message.bot_id === botId && message.bot_name !== after.name
-                    ? { ...message, bot_name: after.name }
-                    : message,
-                )
-              : current.filter((message) => message.bot_id !== botId)
-            return next.some((message, index) => message !== current[index]) || next.length !== current.length
-              ? { groupMessages: { ...s.groupMessages, [projectId]: next } }
-              : {}
-          })
-          if (activeHere && (!before || before.project_id !== after.project_id)) {
-            void mergeLatestGroupPage(set, get, projectId)
-          }
-        }
-      })
+    case 'bot_changed':
+      void get().refreshState()
       return
-    }
     default:
       return
   }
@@ -3846,11 +3299,6 @@ const SEND_RETRY_WINDOW_MS = 5 * 60 * 1000
 /** 這個 crid 在本機已經對應到一個終態的回合＝那件事做完（或撤回）了，再用它只會被 daemon 當成重送。 */
 function sendIdIsSpent(turns: Record<string, Turn> | undefined, crid: string): boolean {
   return Object.values(turns ?? {}).some((t) => t.client_request_id === crid && t.status !== 'queued' && t.status !== 'in_flight')
-}
-
-/** 群組這次送出的每個收件人（`<crid>:<bot_id>`）都已是終態才算消耗；沒有收件人、或有一個本機沒看到，就保守地不算（沿用，daemon 冪等）。 */
-function groupSendIsSpent(turns: Record<string, Record<string, Turn>>, crid: string, recipientIds: string[]): boolean {
-  return recipientIds.length > 0 && recipientIds.every((botId) => sendIdIsSpent(turns[botId], `${crid}:${botId}`))
 }
 
 function draftWithText(text: string, current: string): string {
@@ -4324,31 +3772,6 @@ export function liveReplyOf(state: StoreState, botId: string): LiveReply | null 
   return inflight && inflight.id === live.turnId ? live : null
 }
 
-/** SPEC §13.5 composer rule: the group composer is open as long as *one* member can be sent to. */
-export interface GroupComposerState {
-  disabled: boolean
-  reason: string
-  /** member bots that would accept a prompt right now */
-  sendable: string[]
-}
-
-export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
-  if (!projectId) return { disabled: true, reason: '', sendable: [] }
-  const members = state.bots.filter((b) => b.project_id === projectId)
-  if (members.length === 0) return { disabled: true, reason: t('這個 Project 還沒有 Bot'), sendable: [] }
-  const sendable = members
-    .filter((b) => {
-      const cs = composerState(state, b.id)
-      return !cs.disabled && !cs.queued
-    })
-    .map((b) => b.id)
-  if (sendable.length === 0) {
-    const first = composerState(state, members[0].id).reason
-    return { disabled: true, reason: t('專案內沒有可送訊息的 Bot（{first}）', { first }), sendable }
-  }
-  return { disabled: false, reason: '', sendable }
-}
-
 // 草稿以 daemon 為準（`draftSync.ts`）：這裡把同步引擎接上 store 與 DOM。
 function composerFocused(key: string): boolean {
   if (typeof document === 'undefined' || !document.hasFocus()) return false
@@ -4359,7 +3782,7 @@ function composerFocused(key: string): boolean {
 export const draftSync = new DraftSync({
   clientId: newClientId(),
   put: (key, text, clientId) => api.putDraft(key, text, clientId),
-  fetchAll: () => api.fetchDrafts(),
+  fetchAll: async () => (await api.fetchDrafts()).filter((draft) => !draft.key.startsWith('group:')),
   read: (key) => useStore.getState().drafts[key] ?? '',
   write: (key, text) =>
     useStore.setState((s) => ({

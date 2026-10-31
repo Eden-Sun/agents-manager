@@ -1,5 +1,5 @@
 import { MockTransport } from './mock'
-import { toHostBaselinePlan, toHostBaselineApplyResult, toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toHostBaselinePlan, toHostBaselineApplyResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
@@ -17,13 +17,6 @@ import type {
   GhStatus,
   HostBaselinePlan,
   HostBaselineApplyResult,
-  GroupChatResult,
-  Mission,
-  MissionDetail,
-  MissionEvent,
-  NewMissionInput,
-  GroupMessagesPage,
-  GroupSkipReason,
   HostResult,
   HostShell,
   UpdateReview,
@@ -51,7 +44,6 @@ import type {
   TerminalSnapshot,
   TerminalSource,
   ToolMap,
-  TurnDelivery,
 ProjectSubmodule,
 } from './types'
 import { t, langFromSearch, setLangOverride } from '../lib/i18n'
@@ -97,52 +89,6 @@ export async function fetchMessages(
   if (filter?.role) q.set('role', filter.role)
   const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/messages?${q.toString()}`)
   return toMessagesPage(raw, botId)
-}
-
-/** SPEC §13.4 — every member bot's messages, merged. */
-export async function fetchProjectMessages(projectId: string, limit = 200, before?: string): Promise<GroupMessagesPage> {
-  const q = new URLSearchParams({ limit: String(limit) })
-  if (before) q.set('before', before)
-  const raw = await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/messages?${q.toString()}`)
-  return toGroupMessagesPage(raw, projectId)
-}
-
-/** SPEC §13.4. Daemon resolves mentions; none valid → 400 `no_mention` (`ApiError`). */
-export async function sendGroupChat(
-  projectId: string,
-  text: string,
-  clientRequestId: string,
-  attachments: string[] = [],
-  recipientIds: string[] = [],
-): Promise<GroupChatResult> {
-  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/chat`, {
-    text,
-    client_request_id: clientRequestId,
-    ...(attachments.length ? { attachments } : {}),
-    // 收件人以 bot id 為準（#1796）：文字裡的 `@名字` 只是顯示，輸入後改名也不會漏送或送錯。
-    ...(recipientIds.length ? { recipient_ids: recipientIds } : {}),
-  })
-  const o = isRec(raw) ? raw : {}
-  return {
-    group_id: str(pick(o, 'group_id'), clientRequestId),
-    sent: arr(o.sent)
-      .filter(isRec)
-      .map((x) => ({
-        bot_id: str(pick(x, 'bot_id')),
-        bot_name: str(pick(x, 'bot_name')),
-        turn_id: str(pick(x, 'turn_id')),
-        message_id: str(pick(x, 'message_id')) || null,
-        delivery: str(pick(x, 'delivery'), 'pending') as TurnDelivery,
-      })),
-    skipped: arr(o.skipped)
-      .filter(isRec)
-      .map((x) => ({
-        bot_id: str(pick(x, 'bot_id')),
-        bot_name: str(pick(x, 'bot_name')),
-        reason: str(pick(x, 'reason'), 'conflict') as GroupSkipReason,
-        detail: str(pick(x, 'detail')),
-      })),
-  }
 }
 
 /** SPEC §6.5e：專案底下的非 agent pane（shell／服務）。 */
@@ -280,11 +226,6 @@ export async function fetchTerminal(
 /** 跨裝置共用的已讀位置：只往前推，daemon 會推 `bot_read` 給其他分頁／裝置。 */
 export async function markBotRead(botId: string, mark: { at: string; id: string }): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/read`, { at: mark.at, message_id: mark.id })
-}
-
-/** 專案群組的已讀位置，同 `markBotRead`；daemon 推 `group_read`。 */
-export async function markGroupRead(projectId: string, mark: { at: string; id: string }): Promise<void> {
-  await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/group/read`, { at: mark.at, message_id: mark.id })
 }
 
 export async function movePaneToTab(botId: string): Promise<void> {
@@ -1274,93 +1215,3 @@ export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull
 // 群組任務：見 docs/API.md「群組任務」
 
 /** 同 `client_request_id` 回同一筆（冪等）；遠端專案 → 400 `remote_not_supported`。 */
-export async function createMission(
-  projectId: string,
-  input: NewMissionInput,
-): Promise<{ mission: Mission | null; created: boolean }> {
-  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/missions`, input)
-  const root = isRec(raw) ? raw : {}
-  return { mission: toMission(pick(root, 'mission') ?? raw), created: pick(root, 'created') !== false }
-}
-
-/** 這一筆任務不在（daemon 的結構化 404，`docs/API.md`「群組任務」）。 */
-export function isMissionGone(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 404 && e.body.error === 'not_found'
-}
-
-/**
- * 舊 daemon 沒這些路由（SPA fallback 會回 index.html）。
- * 404 兩種都有：body 認得出是 daemon 的結構化錯誤就代表路由在、只是那一筆不見了——
- * 把它一起當成「這台不支援」會因為一張過期的任務卡把整個群組任務功能靜默關掉。
- */
-export function isMissionsUnsupported(e: unknown): boolean {
-  if (!(e instanceof ApiError)) return false
-  return e.status === 405 || e.status === 501 || (e.status === 404 && !isMissionGone(e))
-}
-
-export function missionRejectReason(e: unknown): string | null {
-  return e instanceof ApiError ? (e.body?.error ?? null) : null
-}
-
-/** `open` 含 paused。已結案的要自己帶 `limit`，進行中的別跟它們擠同一個上限（見 store 的 `loadMissions`）。 */
-export async function fetchMissions(
-  projectId: string,
-  status: 'all' | 'open' | 'done' | 'cancelled',
-  limit: number,
-): Promise<Mission[]> {
-  const qs = new URLSearchParams({ status, limit: String(limit) }).toString()
-  return toMissions(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/missions?${qs}`))
-}
-
-export async function fetchMission(missionId: string): Promise<MissionDetail | null> {
-  return toMissionDetail(await transport.request('GET', `/missions/${encodeURIComponent(missionId)}`))
-}
-
-/** 契約：不帶 `relay_from` ＝ 使用者本人說的；bot 轉述才帶自己的 bot id。 */
-export async function addMissionEvent(
-  missionId: string,
-  input: { kind: 'report' | 'note' | 'verified'; text: string; relay_from?: string; payload?: unknown },
-): Promise<MissionEvent | null> {
-  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/events`, input)
-  const root = isRec(raw) ? raw : {}
-  return toMissionEvent(pick(root, 'event') ?? raw, missionId)
-}
-
-/** 追問只留言並叫醒 AGM，不改狀態（要改用 `reviseMission`）；`client_request_id` 冪等。 */
-export async function askMission(
-  missionId: string,
-  input: { text: string; client_request_id: string },
-): Promise<MissionEvent | null> {
-  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/question`, input)
-  const root = isRec(raw) ? raw : {}
-  return toMissionEvent(pick(root, 'event') ?? raw, missionId)
-}
-
-/** daemon 端單一交易；別自己串 events + resume（中途斷掉會留半套）。 */
-export async function answerMission(
-  missionId: string,
-  input: { text: string; client_request_id: string },
-): Promise<{ mission: Mission | null; resumed: boolean }> {
-  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/answer`, input)
-  const root = isRec(raw) ? raw : {}
-  return { mission: toMission(pick(root, 'mission')), resumed: pick(root, 'resumed') === true }
-}
-
-/** 回新任務（`parent_mission_id` 指回來），原成果不動。 */
-export async function reviseMission(
-  missionId: string,
-  input: { text: string; client_request_id: string },
-): Promise<Mission | null> {
-  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/revise`, input)
-  return toMission(isRec(raw) ? (pick(raw, 'mission') ?? raw) : raw)
-}
-
-export async function controlMission(
-  missionId: string,
-  action: 'pause' | 'resume' | 'cancel',
-  body?: unknown,
-): Promise<Mission | null> {
-  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/${action}`, body ?? {})
-  const root = isRec(raw) ? raw : {}
-  return toMission(pick(root, 'mission') ?? raw)
-}
