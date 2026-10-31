@@ -7,10 +7,9 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { groupComposerState, resetStoreForTest, useStore } from '../store/store'
+import { resetStoreForTest, useStore } from '../store/store'
 import { toRun } from '../api/normalize'
 import { ChatPanel } from './ChatPanel'
-import { GroupChatPanel } from './GroupChatPanel'
 
 before(setupDom)
 afterEach(async () => {
@@ -56,21 +55,7 @@ function seedBot(draft: string, inFlight: boolean) {
   } as never)
 }
 
-function seedGroup(draft: string) {
-  useStore.setState({
-    connected: true,
-    defaultConnected: true,
-    bots: [{ id: 'gb', name: 'gb', kind: 'claude', project_id: 'gp', herdr_session: 'agents-manager', managed_by: 'user', parent_bot_id: null, args: [], env: {} }],
-    projects: [{ id: 'gp', path: '/gp', host: 'local', label: 'gp' }],
-    runs: { gb: toRun({ id: 'gr', bot_id: 'gb', state: 'running', agent_status: 'idle' }) },
-    turns: { gb: {} },
-    loadedProjects: { gp: true },
-    drafts: { 'group:gp': draft },
-    groupMessages: { gp: [] },
-    messages: { gb: [] },
-  } as never)
-  assert.equal(groupComposerState(useStore.getState(), 'gp').disabled, false, '群組輸入區可送出')
-}
+
 
 test('一般送出：送出途中別的裝置送來新草稿，成功回來後保留新草稿、不同步空字串', { timeout: 30_000 }, async () => {
   const requests = fakeApi(() => undefined)
@@ -164,64 +149,6 @@ test('併送（補充）：草稿沒被改過，成功後照常清空', { timeou
   assert.equal(useStore.getState().drafts['bot:b'] ?? '', '')
 })
 
-test('群組：送出途中草稿被改過就保留，沒改過才清', { timeout: 30_000 }, async () => {
-  const requests = fakeApi(() => undefined)
-  seedGroup('@gb first prompt')
-  const sent = gate<{ id: string } | null>()
-  useStore.setState({ sendGroupChat: () => sent.promise } as never)
-  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
-  await settle()
-  await keydown(textarea(), 'Enter')
-  await remoteDraft('group:gp', '@gb ' + NEW)
-  await act(async () => sent.resolve({ id: 'chat-1' }))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'], '@gb ' + NEW, '群組送出成功後新草稿還在')
-  assert.deepEqual(emptyPuts(requests), [])
-})
-
-test('群組：草稿沒被改過，成功後照常清空並同步空字串', { timeout: 30_000 }, async () => {
-  const requests = fakeApi(() => undefined)
-  seedGroup('@gb first prompt')
-  const sent = gate<{ id: string } | null>()
-  useStore.setState({ sendGroupChat: () => sent.promise } as never)
-  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
-  await settle()
-  await keydown(textarea(), 'Enter')
-  await act(async () => sent.resolve({ id: 'chat-1' }))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'] ?? '', '')
-  assert.equal(emptyPuts(requests).length, 1, '清空要同步回 daemon')
-})
-
-async function sendMission(text: string) {
-  seedGroup(text)
-  useStore.setState({ missionsSupported: true } as never)
-  const started = gate<string | null>()
-  useStore.setState({ startMission: () => started.promise } as never)
-  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
-  await settle()
-  await act(async () => document.querySelector<HTMLButtonElement>('.agm-toggle')!.click())
-  await act(async () => document.querySelector<HTMLButtonElement>('.send-btn')!.click())
-  return { started }
-}
-
-test('交給 AGM：送出途中草稿被改過就保留文字，沒改過才清', { timeout: 30_000 }, async () => {
-  fakeApi(() => undefined)
-  const { started } = await sendMission('@gb first prompt')
-  await remoteDraft('group:gp', 'new text from another device')
-  await act(async () => started.resolve('mission-1'))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'], 'new text from another device', '新草稿還在')
-})
-
-test('交給 AGM：草稿沒被改過，成功後照常清空', { timeout: 30_000 }, async () => {
-  fakeApi(() => undefined)
-  const { started } = await sendMission('@gb first prompt')
-  await act(async () => started.resolve('mission-2'))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'] ?? '', '')
-})
-
 // 草稿追蹤的訂閱與 React 自己的訂閱都走 `useStore.subscribe`：包一層記下還活著的，數目回到原值就代表都解除了。
 const liveListeners = new Set<() => void>()
 const realSubscribe = useStore.subscribe
@@ -286,39 +213,6 @@ test('一般送出：送出在途中卸載，回來後訂閱解除', { timeout: 
   await act(async () => sent.resolve(true))
   await settle()
   assert.equal(liveListeners.size, base, '卸載後 ChatPanel 與送出追蹤的訂閱都回到原值')
-})
-
-test('群組：送出途中本機打字也保留；失敗（resolve(null)）不清框、訂閱解除', { timeout: 30_000 }, async () => {
-  fakeApi(() => undefined)
-  seedGroup('@gb first prompt')
-  const sent = gate<{ id: string } | null>()
-  useStore.setState({ sendGroupChat: () => sent.promise } as never)
-  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
-  await settle()
-  const idle = liveListeners.size
-  await keydown(textarea(), 'Enter')
-  await act(async () => useStore.getState().setDraft('group:gp', '@gb typed locally'))
-  await act(async () => sent.resolve(null))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'], '@gb typed locally', '本機打字還在')
-  assert.equal(liveListeners.size, idle, '送出失敗後追蹤訂閱已解除')
-})
-
-test('交給 AGM：建任務失敗（resolve(null)）不清框，訂閱解除', { timeout: 30_000 }, async () => {
-  fakeApi(() => undefined)
-  seedGroup('@gb first prompt')
-  useStore.setState({ missionsSupported: true } as never)
-  const started = gate<string | null>()
-  useStore.setState({ startMission: () => started.promise } as never)
-  await mount(<GroupChatPanel projectId="gp" onOpenSidebar={() => {}} />)
-  await settle()
-  const idle = liveListeners.size
-  await act(async () => document.querySelector<HTMLButtonElement>('.agm-toggle')!.click())
-  await act(async () => document.querySelector<HTMLButtonElement>('.send-btn')!.click())
-  await act(async () => started.resolve(null))
-  await settle()
-  assert.equal(useStore.getState().drafts['group:gp'], '@gb first prompt', '失敗後草稿照舊')
-  assert.equal(liveListeners.size, idle, '失敗後追蹤訂閱已解除')
 })
 
 test('一般送出：送出連線失敗（傳輸層 reject）不清框，訂閱解除', { timeout: 30_000 }, async () => {

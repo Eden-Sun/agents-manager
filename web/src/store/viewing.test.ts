@@ -6,7 +6,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset } from './storeEnv.harness.ts'
 import type { Bot, Project } from '../api/types.ts'
-import { viewingBot, viewingGroup } from './viewing.ts'
 
 const { useStore } = await import('./store.ts')
 
@@ -32,10 +31,10 @@ function seed(extra: Record<string, unknown>) {
   useStore.setState({
     projects: [project()],
     bots: [bot('b1')],
-    groupMessages: {},
+
     messages: {},
     botUnread: {},
-    groupUnread: {},
+
     selectedBotId: null,
     selectedProjectId: null,
     shellView: null,
@@ -43,30 +42,6 @@ function seed(extra: Record<string, unknown>) {
   })
 }
 
-test('viewingGroup／viewingBot：shell 一掛上，兩種對話都不算在看', () => {
-  const base = { selectedBotId: 'b1', selectedProjectId: null, shellView: null }
-  assert.equal(viewingBot(base, 'b1'), true)
-  assert.equal(viewingBot({ ...base, shellView: shell }, 'b1'), false)
-  assert.equal(viewingBot({ ...base, selectedProjectId: 'p1' }, 'b1'), false, '開著群組就不是在看單一 bot')
-
-  const group = { selectedBotId: 'b1', selectedProjectId: 'p1', shellView: null }
-  assert.equal(viewingGroup(group, 'p1'), true)
-  assert.equal(viewingGroup(group, 'p2'), false)
-  assert.equal(viewingGroup({ ...group, shellView: shell }, 'p1'), false, 'shell 蓋住時群組時間軸根本沒畫出來')
-})
-
-test('選著專案又開了 shell：視窗回前景不可以把群組未讀清掉', () => {
-  // 側欄「其他 pane」的 viewPane、專案 ⋯ 的「在這裡開 shell」都只設 shellView，不清 selectedProjectId。
-  seed({ selectedProjectId: 'p1', shellView: shell, groupUnread: { p1: 3 } })
-  focused(() => useStore.getState().markCurrentRead())
-  assert.deepEqual(useStore.getState().groupUnread, { p1: 3 })
-})
-
-test('真的在看群組：視窗回前景照樣清成已讀', () => {
-  seed({ selectedProjectId: 'p1', groupUnread: { p1: 3 } })
-  focused(() => useStore.getState().markCurrentRead())
-  assert.deepEqual(useStore.getState().groupUnread, {})
-})
 
 test('選著 bot 又開了 shell：bot 未讀一樣守住（原本就對，別修回去）', () => {
   seed({ selectedBotId: 'b1', shellView: shell, botUnread: { b1: 3 } })

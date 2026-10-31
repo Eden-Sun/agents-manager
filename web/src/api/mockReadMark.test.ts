@@ -15,15 +15,3 @@ test('POST /bots/{id}/read 只帶 message_id：read_mark.at 是那則訊息的�
   assert.equal(out.read_mark.id, m.id)
   assert.equal(out.read_mark.at, m.created_at)
 })
-
-test('POST /projects/{id}/group/read 只帶 message_id：read_mark.at 也是那則訊息的時間', async () => {
-  const st = (await mock.request('GET', '/state')) as { projects: { id: string; bots: { id: string }[] }[] }
-  const project = st.projects.find((p) => p.bots.length > 0)
-  assert.ok(project, 'seed 要有一個專案有 bot')
-  const { messages } = (await mock.request('GET', `/projects/${project.id}/messages`)) as { messages: { id: string; created_at: string }[] }
-  const m = messages[messages.length - 1]
-  assert.ok(m, 'seed 的專案要有訊息')
-  const out = (await mock.request('POST', `/projects/${project.id}/group/read`, { message_id: m.id })) as { read_mark: { at: string; id: string } }
-  assert.equal(out.read_mark.id, m.id)
-  assert.equal(out.read_mark.at, m.created_at)
-})

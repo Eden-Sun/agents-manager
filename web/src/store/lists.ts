@@ -129,7 +129,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
- * 一頁重載回來的清單裡，內容沒變的項目沿用舊物件。`loadMessages`／`loadGroupMessages` 每次都把整頁重新 normalize 成
+ * 一頁重載回來的清單裡，內容沒變的項目沿用舊物件。`loadMessages` 每次都把整頁重新 normalize 成
  * 新物件（WS 重連、resync、送失敗重讀、撤回都會走），`memo(Bubble)` 看到每則的 `msg` 都換了身份，整段歷史重新渲染——
  * 每則都重新解析 markdown（量測：500 則短訊息約 1 秒、每 KB 約 11 ms）。內容一樣就留舊的；全部一樣（同順序）時連陣列也回舊的，
  * 訂閱整份清單的選取器才不會白跑。內容變了的（遲到的 hook 以原文取代備援抓的回覆）才換新物件。
