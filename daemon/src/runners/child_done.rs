@@ -105,7 +105,7 @@ struct State {
 }
 
 #[derive(sqlx::FromRow)]
-struct SourceTurn { rowid: i64, id: String, completed_at: String, status: String, reply: Option<String> }
+struct SourceTurn { rowid: i64, id: String, completed_at: String, status: String, delivery: String, reply: Option<String> }
 
 /// A parent's result request owns its child turn until its result was delivered or failed.
 /// A verified result delivery can cover the child turn, but never skip unrelated outstanding work.
@@ -155,7 +155,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     if !idle { return Ok(()) }
     cover_delivered_relay(app, &child, background).await?;
     if notice_only { return Ok(()) }
-    let mut turns: Vec<SourceTurn> = sqlx::query_as("SELECT t.rowid, t.id, t.completed_at, t.status,
+    let mut turns: Vec<SourceTurn> = sqlx::query_as("SELECT t.rowid, t.id, t.completed_at, t.status, t.delivery,
         (SELECT m.content FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) reply
         FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=?
         AND t.status IN ('completed','completed_fallback','failed') AND t.completed_at IS NOT NULL
@@ -177,7 +177,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         if latest_is_notice { return Ok(()) }
     }
     if turns.is_empty() && (child.status_since.is_some() || has_pending) {
-        turns.push(SourceTurn { rowid: 0, id: child.run_id.clone(), completed_at: child.status_since.clone().unwrap_or_else(crate::db::now), status: "idle_without_turn".into(), reply: None });
+        turns.push(SourceTurn { rowid: 0, id: child.run_id.clone(), completed_at: child.status_since.clone().unwrap_or_else(crate::db::now), status: "idle_without_turn".into(), delivery: "ok".into(), reply: None });
     }
     let Some(latest) = turns.last() else { return Ok(()) };
     for t in turns.iter().filter(|t| t.status != "idle_without_turn") {
@@ -288,6 +288,10 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         excerpts.push(format!("來源回合已無法讀取，請讀 child 的 pane：herdr agent read {} --lines 200", child.child_name));
     }
     for t in turns.iter().filter(|t| batch_turns.contains(&t.id)) {
+        if t.status == "failed" && t.delivery == "unknown" {
+            excerpts.push(format!("回合 {}：送出未確認，請檢查輸入框：herdr agent read {} --lines 200", t.id, child.child_name));
+            continue;
+        }
         if t.status == "failed" {
             let failed_relay: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_requests r WHERE r.from_bot_id=? AND r.to_bot_id=? AND r.state='failed' AND (r.to_turn_id=? OR EXISTS(SELECT 1 FROM turns rt WHERE rt.id=? AND rt.client_request_id='relay-request:'||r.id)))")
                 .bind(&child.parent_id).bind(&child.child_id).bind(&t.id).bind(&t.id).fetch_one(&app.db).await?;
@@ -319,6 +323,9 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     let parent_kind: String = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&child.parent_id).fetch_one(&app.db).await?;
     let reply = excerpts.join("\n\n");
     let mut message = message_for_child(&child.child_id,&child.child_name,&reply,notice_reply_limit(&parent_kind));
+    if turns.iter().any(|t| batch_turns.contains(&t.id) && t.status == "failed" && t.delivery == "unknown") {
+        message = message.replacen("已完成一個回合", "有回合送出未確認", 1);
+    }
     let annotation = if state.pending_background == Some(1) { "回合停了、背景工作仍在跑。\n" }
         else if background_finished { "背景工作已結束，child 仍閒置。\n" } else { "" };
     if !annotation.is_empty() { message = message.replacen("\n\n", &format!("\n{annotation}\n"), 1); }

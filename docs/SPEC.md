@@ -45,6 +45,7 @@ origin:   web | external                     （external = 非本系統送出、
 ```
 
 - 「進行中」= `status = in_flight`（不論 delivery）；`completed_fallback` 不算。
+- 送出後以紀錄或輸入框確認；框內逐字仍是原訊息時可有限次補按送出鍵，無法辨識或草稿已改變時不按。閒置逾時仍無送達或回覆證據時，回合標為 `failed`、保留 `delivery=unknown`，通知 parent「送出未確認」並請其檢查輸入框，不得宣稱完成或盲目重送。
 - `delivery = unknown` 時禁止再送 prompt，只允許 `interrupt`、`stop` 或 `POST /turns/:id/abandon`——否則下一則 hook 會配錯回合。
   hook 回報回合結束時照舊認領這顆 run 唯一的 in-flight turn 並把 `unknown` 升成 `ok`，**除非** hook 看得到這一回合的使用者訊息（codex 直接帶 `input-messages`；claude 從 `transcript_path` 尾巴讀最後一則），而且跟這筆的 `prompt_text` 比對時（把連續空白折成一個空格並保留詞界；只有原文含字面 Tab 時才另試去 Tab 候選）沒有相同候選，也沒有一方包含另一方且較短部分至少 8 字元（容忍折行與截短）。這是使用者在終端手打的另一句：不認領、記成一筆外部回合，原本那筆維持 `in_flight`／`unknown`（第二輪 review 送達線 #3）。讀不到使用者訊息時不下判斷。
 

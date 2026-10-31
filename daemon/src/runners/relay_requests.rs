@@ -97,7 +97,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
             .bind(turn_id).fetch_one(&app.db).await?
     } else { false };
     let (status, reply) = if state == "failed" { ("denied".to_string(), None) } else if let Some(turn_id) = turn {
-        let result: Option<(String,Option<String>)> = sqlx::query_as("SELECT t.status,(SELECT m.content FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) FROM turns t WHERE t.id=?")
+        let result: Option<(String,Option<String>)> = sqlx::query_as("SELECT CASE WHEN t.status='failed' AND t.delivery='unknown' THEN 'unconfirmed' ELSE t.status END,(SELECT m.content FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) FROM turns t WHERE t.id=?")
             .bind(&turn_id).fetch_optional(&app.db).await?;
         let Some(result) = result else { return Ok(()) }; result
     } else if state == "answered" { ("unavailable".to_string(), None) } else { return Ok(()) };
@@ -145,7 +145,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
         .bind(&conv).bind(&notice_key).fetch_one(&app.db).await?;
     if slot_busy { return Ok(()) }
     let kind: String = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&from).fetch_one(&app.db).await?;
-    let answer = if status == "denied" { format!("請求未投遞：{}。", failure.as_deref().unwrap_or("目前的授權或參與者狀態不允許")) } else if status == "unavailable" { "目標回合紀錄已不存在，無法確認回覆內容。".to_string() } else if status == "failed" { "目標回合失敗；沒有可確認的完整回覆。".to_string() } else if mixed { "目標回合混入其他輸入，無法可靠歸屬回覆；請查看該回合。".to_string() } else if let Some(reply) = reply.filter(|s| !s.trim().is_empty()) {
+    let answer = if status == "denied" { format!("請求未投遞：{}。", failure.as_deref().unwrap_or("目前的授權或參與者狀態不允許")) } else if status == "unavailable" { "目標回合紀錄已不存在，無法確認回覆內容。".to_string() } else if status == "unconfirmed" { "送出未確認；請檢查目標輸入框，勿盲目重送。".to_string() } else if status == "failed" { "目標回合失敗；沒有可確認的完整回覆。".to_string() } else if mixed { "目標回合混入其他輸入，無法可靠歸屬回覆；請查看該回合。".to_string() } else if let Some(reply) = reply.filter(|s| !s.trim().is_empty()) {
         let limit = crate::child_done::notice_reply_limit(&kind);
         let mut excerpt: String = reply.chars().take(limit).collect();
         if reply.chars().count() > limit { excerpt.push_str("…（已截斷，請讀取目標對話）"); }
