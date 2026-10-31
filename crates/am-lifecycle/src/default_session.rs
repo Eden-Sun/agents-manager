@@ -281,7 +281,7 @@ async fn ensure_imported_bot(
             .ok_or_else(|| anyhow::anyhow!("project disappeared from config.toml"))?;
         let used: HashSet<String> = p.bots.iter().map(|b| b.name.clone()).collect();
         let name = imported_name(agent_name, &used);
-        p.bots.push(config::BotCfg { role: None, manager_use: true,
+        p.bots.push(config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None,
             id: Some(bot_id.clone()),
             name: name.clone(),
             kind: kind.to_string(),
@@ -345,7 +345,7 @@ mod tests {
             "workspace_id":ws.workspace_id,"tab_id":pane.tab_id,"pane_id":pane.pane_id,
             "agent_session":{"kind":"id","value":sid}});
         app.cfg.update(|cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(),
                 id: Some(env.project_id.clone()), path: env.repo.to_string_lossy().into_owned(),
                 label: "proj".into(), host: "local".into(), handed_off_to: None, bots: vec![],
             });

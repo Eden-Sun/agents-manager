@@ -182,6 +182,12 @@ pub struct BotCfg {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// 專家模式專長軌道（role=specialist 時必填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    /// 專家模式執行期覆蓋（JSON，Phase B，NULL＝跟角色）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_override: Option<serde_json::Value>,
     /// false＝manager 不能派工給它、不能啟動／重啟它、agm peers 列為不可派。使用者自己照常可用。
     #[serde(default = "default_true")]
     pub manager_use: bool,
@@ -233,6 +239,8 @@ impl Default for BotCfg {
             name: String::new(),
             kind: String::new(),
             role: None,
+            track: None,
+            runtime_override: None,
             manager_use: true,
             model: None,
             effort: None,
@@ -325,6 +333,9 @@ pub struct ProjectCfg {
     /// 專家模式執行者池（條目陣列；舊版 `{kind: n}` 讀進來自動轉換，見 `executor_pool.rs`）。
     #[serde(default, deserialize_with = "executor_pool::deserialize_pool", skip_serializing_if = "Vec::is_empty")]
     pub executor_pool: Vec<ExecutorPoolEntry>,
+    /// 專家模式角色政策（role -> policy，Phase B 用）
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_policy: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -343,6 +354,7 @@ impl Default for ProjectCfg {
             label: String::new(),
             mode: default_project_mode(),
             executor_pool: Vec::new(),
+            role_policy: std::collections::BTreeMap::new(),
             host: default_host(),
             bots: Vec::new(),
             handed_off_to: None,
@@ -2981,7 +2993,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await
@@ -3202,5 +3214,54 @@ mod share_cfg_tests {
                 "appending /s/<token> after a query or fragment cannot route to the share page: {base_url}"
             );
         }
+    }
+}
+
+/// 專家模式（specialist）：`track`、`runtime_override`、`role_policy` 寫進 config.toml 再讀回來要一樣；沒設的不寫出來。
+#[cfg(test)]
+mod specialist_cfg_tests {
+    use super::{BotCfg, ProjectCfg};
+
+    #[test]
+    fn track_runtime_override_and_role_policy_round_trip() {
+        let text = r#"
+id = "p1"
+path = "/srv/work"
+label = "demo"
+mode = "expert"
+
+[role_policy.specialist]
+max_turns = 3
+
+[[bots]]
+id = "b1"
+name = "infra-spec"
+kind = "claude"
+role = "specialist"
+track = "infra"
+
+[bots.runtime_override]
+model = "claude-haiku-5-5"
+"#;
+        let p: ProjectCfg = toml::from_str(text).unwrap();
+        assert_eq!(p.role_policy["specialist"]["max_turns"], 3);
+        let b = &p.bots[0];
+        assert_eq!(b.role.as_deref(), Some("specialist"));
+        assert_eq!(b.track.as_deref(), Some("infra"));
+        assert_eq!(b.runtime_override.as_ref().unwrap()["model"], "claude-haiku-5-5");
+
+        let again: ProjectCfg = toml::from_str(&toml::to_string_pretty(&p).unwrap()).unwrap();
+        assert_eq!(again, p, "config.toml 寫出去再讀回來要完全一樣");
+    }
+
+    #[test]
+    fn unset_specialist_fields_are_not_written() {
+        let plain = BotCfg { id: Some("b2".into()), name: "w".into(), kind: "claude".into(), ..Default::default() };
+        let text = toml::to_string_pretty(&plain).unwrap();
+        for key in ["track", "runtime_override"] {
+            assert!(!text.contains(key), "{key} 沒設就不寫出來：\n{text}");
+        }
+        let project = ProjectCfg { id: Some("p2".into()), path: "/tmp".into(), label: "x".into(), ..Default::default() };
+        assert!(!toml::to_string_pretty(&project).unwrap().contains("role_policy"));
     }
 }

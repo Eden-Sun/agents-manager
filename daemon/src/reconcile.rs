@@ -2649,7 +2649,7 @@ mod compat_tests {
             .update(move |cfg| {
                 let b: crate::config::BotCfg =
                     toml::from_str(&format!("id = '{alfa}'\nname = 'alfa'\nkind = 'claude'\n")).unwrap();
-                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(),
                     handed_off_to: None,
                     id: Some(pid),
                     path,

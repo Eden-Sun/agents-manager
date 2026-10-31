@@ -1800,18 +1800,21 @@ def cmd_peers(client: Client, cfg: dict, args) -> object:
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
-    return client.put("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/role", {"role": role})
+    body = {"role": role}
+    if getattr(args, "track", None):
+        body["track"] = args.track
+    return client.put("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/role", body)
 
 
 def cmd_hire(client: Client, cfg: dict, args) -> object:
-    """專家模式 manager 增聘執行者（頂層成員，角色固定 executor；不自動啟動）。"""
+    """專家模式 manager 增聘成員（頂層；預設 executor，--role specialist 時必帶 --track；不自動啟動）。"""
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
         raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
     if not args.kind and not args.pool_entry:
         raise AgmError("bad_args", "hire 需要 --kind 或 --pool <條目 id>", 2)
     body = {"name": args.name}
-    for key in ("kind", "pool_entry", "model", "effort", "identity"):
+    for key in ("kind", "pool_entry", "model", "effort", "identity", "role", "track"):
         if getattr(args, key, None):
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
@@ -2818,9 +2821,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態（專家模式另回 executor_pool 條目與每條已用／上限）")
     s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）；執行者池條目用 agm hire --pool <id> 增聘")
     s.set_defaults(func=cmd_peers)
-    s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／none）")
+    s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／specialist／none）")
     s.add_argument("bot_id")
-    s.add_argument("role", choices=["executor", "advisor", "none"])
+    s.add_argument("role", choices=["executor", "advisor", "specialist", "none"])
+    s.add_argument("--track", help="role specialist 時必填：專家負責的軌道")
     s.set_defaults(func=cmd_role)
     s = sub.add_parser("hire", help="專家模式管理者：增聘同專案執行者（不自動啟動，之後 agm bot start）。--pool <條目 id> 套用執行者池條目（kind／model／effort／context 由條目決定）；只有一條符合 --kind 時可省略 --pool")
     s.add_argument("name")
@@ -2829,6 +2833,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", help="與條目不同會被拒絕（條目 model 空字串＝任何模型）")
     s.add_argument("--effort", help="與條目不同會被拒絕")
     s.add_argument("--identity")
+    s.add_argument("--role", choices=["executor", "specialist"], help="預設 executor；specialist 必須同時給 --track")
+    s.add_argument("--track", help="專家負責的軌道（--role specialist 必填）")
     s.set_defaults(func=cmd_hire)
     s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
     s.add_argument("bot_id")

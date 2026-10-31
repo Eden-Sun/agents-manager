@@ -233,7 +233,7 @@ interface MockBot {
   project_id: string
   name: string
   kind: BotKind
-  role?: 'manager' | 'executor' | 'advisor' | null
+  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
   role_pending?: boolean
   daemon_url_pending?: boolean
   manager_use?: boolean

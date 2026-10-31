@@ -24,7 +24,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
     let is_agm = crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some();
-    if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor")) && to.manager_use == 0 {
+    if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) && to.manager_use == 0 {
         return Err(RelayDenied::Denied("member_disabled".into()));
     }
     if is_agm { return Ok(()); }
