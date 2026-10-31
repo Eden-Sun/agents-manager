@@ -321,6 +321,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     name: str(pick(v, 'name'), id),
     role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' ? v.role : null,
     role_pending: bool(v.role_pending),
+    daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
     kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
     model: optStr(pick(v, 'model')),

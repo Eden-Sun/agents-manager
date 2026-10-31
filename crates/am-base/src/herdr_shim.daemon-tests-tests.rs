@@ -166,6 +166,12 @@
             cmd.env("TMPDIR", &self.dir);
             // HOME 也進沙盒：claude child 的 hook 補裝（am_ensure_claude_hook）預設看 `$HOME/.claude`，測試絕不能碰真的。
             cmd.env("HOME", &self.dir);
+            // Existing child-start fixtures model a reachable remote daemon unless they
+            // explicitly exercise a missing address. The shim itself never fills this in.
+            if args.starts_with(&["agent", "start"]) && env.iter().any(|(k, _)| *k == "AM_BOT_ID")
+                && !env.iter().any(|(k, _)| matches!(*k, "AM_PORT" | "AM_DAEMON_URL" | "AM_TEST_NO_DAEMON")) {
+                cmd.env("AM_DAEMON_URL", "http://daemon:7788").env("AM_BOT_TOKEN", "test-token");
+            }
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -578,53 +584,7 @@ esac"#, calls.display()));
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
     }
 
-    /// 2026-09-30：遠端 bot（沒有 `AM_PORT`）直送的一句，要在打字前寫一則報備進自己的 hook spool，
-    /// daemon 收 hook 時才認得出寄件者。沒有 bot 目錄就什麼都不寫，照舊轉發。
-    #[test]
-    fn a_remote_bot_spools_a_relay_announce_before_prompting() {
-        let s = Sandbox::new();
-        let home = s.dir.join("home");
-        let spool = home.join(".config/agents-manager/bots/B-REMOTE/hook-spool.d");
-        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
-        let home_s = home.to_string_lossy().to_string();
-        let env = [("HOME", home_s.as_str()), ("AM_BOT_ID", "B-REMOTE"), ("AM_KIND", "claude"), ("AM_TEST_AGENTS", "robins-hub-3b84sb")];
-        let (out, _) = s.run(&env, &["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait", "--to-bot-id", "stable-recipient", "--to-run-id=stable-run", "--to-pane-id", "stable-pane"]);
-        assert_eq!(out, ["agent", "prompt", "stable-pane", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"], "照舊轉發");
-        let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
-        assert_eq!(files.len(), 1, "一則報備：{files:?}");
-        let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
-        assert_eq!(body["bot_id"], "B-REMOTE");
-        assert_eq!(body["provider"], "claude");
-        assert_eq!(body["payload"]["hook_event_name"], "AmRelayAnnounce");
-        assert_eq!(body["payload"]["to_agent"], "stable-pane");
-        assert_eq!(body["payload"]["version"], 2);
-        assert_eq!(body["payload"]["to_bot_id"], "stable-recipient");
-        assert_eq!(body["payload"]["to_run_id"], "stable-run");
-        assert!(!body["payload"]["delivery_id"].as_str().unwrap().is_empty());
-        assert_eq!(body["payload"]["text"], "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait 不進正文");
-        let at = body["received_at"].as_str().unwrap();
-        assert!(crate::db::parse_ts(at).is_some() && at.len() == "2026-09-30T04:23:28.123Z".len() && at.ends_with('Z'), "毫秒 UTC 格式：{at}");
 
-        // 本機 bot（有 AM_PORT）不走 spool；沒有 bot 目錄的也不寫。
-        let s2 = Sandbox::new();
-        let home2 = s2.dir.join("home");
-        let home2_s = home2.to_string_lossy().to_string();
-        std::fs::create_dir_all(&home2).unwrap();
-        let (out, _) = s2.run(&[("HOME", home2_s.as_str()), ("AM_BOT_ID", "B-NODIR"), ("AM_TEST_AGENTS", "x-agent")], &["agent", "prompt", "x-agent", "hello there relay"]);
-        assert_eq!(out[..2], ["agent", "prompt"]);
-        assert!(!home2.join(".config").exists(), "沒有 bot 目錄就不建");
-    }
-
-    #[test]
-    fn nr_relay_local_prompt_uses_the_resolved_pane_after_a_name_is_reused() {
-        let s = Sandbox::new();
-        s.install_fake_curl(r#"printf '%s\n' '{"to_pane_id":"w1:p7"}' 200"#);
-        let (out, err, rc) = s.run_full(&[("AM_BOT_ID","sender"), ("AM_BOT_TOKEN","token"),
-            ("AM_PORT","7788"), ("AM_TEST_AGENTS","reused-name")], &["agent","prompt","reused-name",
-            "交辦給穩定目標", "--to-bot-id", "target-bot", "--to-run-id", "target-run"]);
-        assert_eq!(rc, 0, "{err}");
-        assert_eq!(out, ["agent","prompt","w1:p7","交辦給穩定目標"]);
-    }
 
     /// 既有目標（AGM、頂層 bot）不改名，否則 unknown_target。
     #[test]
@@ -638,25 +598,6 @@ esac"#, calls.display()));
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "hi"]);
     }
 
-    /// daemon 說「排進協調佇列了」：不再轉給真的 herdr（那會打進 AGM 的 pane、燒巡檢一回合）。
-    /// daemon 沒說（一般 bot、舊部署、daemon 不在）就照舊轉發。
-    #[test]
-    fn a_request_the_daemon_queued_for_agm_is_not_typed_into_its_pane() {
-        let s = Sandbox::new();
-        let fake_curl = s.dir.join("real").join("curl");
-        write_script(&fake_curl, "printf '%s\\n%s' \"${AM_TEST_CURL_REPLY:-}\" \"${AM_TEST_CURL_CODE:-200}\"\n");
-        let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-        let mut env = base.to_vec();
-        env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e1"}"#));
-        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
-        assert!(out.is_empty(), "真的 herdr 沒被叫到：{out:?}");
-        assert!(err.contains("協調佇列") && err.contains("e1"), "{err}");
-
-        let mut env = base.to_vec();
-        env.push(("AM_TEST_CURL_REPLY", "{}"));
-        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
-        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
-    }
 
     /// daemon 說「這是寫給 AGM 的，但現在排不進佇列」（issue #143，5xx＋`routing_unavailable`）：不能照舊直送——
     /// 那會繞過協調佇列、打進 AGM 的 pane。明確失敗，讓寄件的 bot 自己重試。
@@ -673,65 +614,6 @@ esac"#, calls.display()));
         assert!(err.contains("routing_unavailable") || err.contains("稍後重試"), "{err}");
     }
 
-    /// `--ack`／`--reply-to` 是我們的旗標（review 2026-09-16 H1：寄件端明講才算回覆）：送給 daemon、不給真的
-    /// herdr。herdr 自己的 `--wait --timeout` 不算正文。curl 逾時（28）先再問一次，不直接打進 AGM 的 pane。
-    #[test]
-    fn reply_marks_go_to_the_daemon_and_a_slow_daemon_is_asked_again_before_falling_back() {
-        let s = Sandbox::new();
-        let log = s.dir.join("curl.log");
-        let count = s.dir.join("curl.count");
-        let fake_curl = s.dir.join("real").join("curl");
-        // 每次呼叫把 --data-urlencode 的值一行一行記下來；第一次照 AM_TEST_CURL_FIRST_RC 結束。
-        write_script(
-            &fake_curl,
-            &format!(
-                "n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{count}'\n\
-                 prev=''\n\
-                 for a in \"$@\"; do [ \"$prev\" = --data-urlencode ] && printf '%s\\n' \"$a\" >> '{log}'; prev=$a; done\n\
-                 echo --- >> '{log}'\n\
-                 if [ \"$n\" = 1 ] && [ -n \"${{AM_TEST_CURL_FIRST_RC:-}}\" ]; then exit \"$AM_TEST_CURL_FIRST_RC\"; fi\n\
-                 printf '%s\\n%s' \"${{AM_TEST_CURL_REPLY:-}}\" \"${{AM_TEST_CURL_CODE:-200}}\"\n",
-                count = count.display(),
-                log = log.display(),
-            ),
-        );
-        let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-
-        // daemon 沒排進佇列（`{}`）→ 照舊直送，但我們的旗標不給 herdr，herdr 的旗標原樣保留。
-        let mut env = base.to_vec();
-        env.push(("AM_TEST_CURL_REPLY", "{}"));
-        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "收到", "--ack", "--reply-to", "ev-1", "--wait", "--timeout", "5000"]);
-        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "收到", "--wait", "--timeout", "5000"]);
-        let sent = std::fs::read_to_string(&log).unwrap();
-        assert!(sent.contains("text=收到\n"), "正文不含 herdr 的旗標：{sent}");
-        assert!(sent.contains("ack=1\n") && sent.contains("reply_to=ev-1\n"), "{sent}");
-
-        // 沒帶旗標：ack／reply_to 送空的（daemon 當成新的事、叫醒）。
-        std::fs::remove_file(&log).unwrap();
-        std::fs::remove_file(&count).unwrap();
-        let (_, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
-        let sent = std::fs::read_to_string(&log).unwrap();
-        assert!(sent.contains("ack=\n") && sent.contains("reply_to=\n"), "{sent}");
-
-        // 第一次逾時、第二次 daemon 說排進佇列了：不打進 pane。
-        std::fs::remove_file(&log).unwrap();
-        std::fs::remove_file(&count).unwrap();
-        let mut env = base.to_vec();
-        env.push(("AM_TEST_CURL_FIRST_RC", "28"));
-        env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e9"}"#));
-        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
-        assert!(out.is_empty(), "逾時後再問到了，真的 herdr 不該被叫到：{out:?}");
-        assert!(err.contains("e9"), "{err}");
-        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
-
-        // 連不上（7）不重問，照舊直送。
-        std::fs::remove_file(&count).unwrap();
-        let mut env = base.to_vec();
-        env.push(("AM_TEST_CURL_FIRST_RC", "7"));
-        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
-        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
-        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
-    }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
     fn shells() -> Vec<&'static str> {
@@ -774,42 +656,6 @@ esac"#, calls.display()));
         }
     }
 
-    /// issue #143（重開）：「送了但回覆不明」——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）：request 可能已進 daemon。
-    /// 同一個請求再問一次（daemon 以內容指紋去重，不會變兩筆），還是不明就明確失敗，**絕不直送**；再問到了就照 daemon 說的做。
-    /// 只有 curl 7（連線根本沒建立，request 一定沒到 daemon）才照舊直送（既有測試）。
-    #[test]
-    fn an_ambiguous_transport_failure_is_asked_again_and_then_stops_instead_of_typing_into_the_pane() {
-        for (sh, rc) in shells().into_iter().flat_map(|sh| [28, 52, 56, 55, 18].into_iter().map(move |rc| (sh, rc))) {
-            let s = Sandbox::new();
-            let count = s.dir.join("curl.count");
-            s.install_fake_curl(&format!(
-                "n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{c}'\n\
-                 if [ -n \"${{AM_TEST_CURL_RC:-}}\" ] && [ \"$n\" -le \"${{AM_TEST_CURL_FAILS:-99}}\" ]; then exit \"$AM_TEST_CURL_RC\"; fi\n\
-                 printf '%s\\n%s' \"${{AM_TEST_CURL_REPLY:-}}\" \"${{AM_TEST_CURL_CODE:-200}}\"",
-                c = count.display()
-            ));
-            let rc_s = rc.to_string();
-            let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-
-            // 一直不明：問兩次就停，不直送。
-            let mut env = base.to_vec();
-            env.push(("AM_TEST_CURL_RC", &rc_s));
-            let (out, err, code) = s.run_in(Some(sh), &env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
-            assert!(out.is_empty(), "{sh} curl {rc}：回覆不明不能直送：{out:?} {err}");
-            assert_eq!(code, 75, "curl {rc}: {err}");
-            assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "同一個請求問兩次（第二次給久一點）");
-            assert!(err.contains(&format!("curl 結束碼 {rc}")) && err.contains("沒有送出"), "{err}");
-
-            // 第一次不明、再問到了（daemon 說排進佇列）：照 daemon 說的，不直送。
-            std::fs::remove_file(&count).unwrap();
-            let mut env = base.to_vec();
-            env.push(("AM_TEST_CURL_RC", &rc_s));
-            env.push(("AM_TEST_CURL_FAILS", "1"));
-            env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e7"}"#));
-            let (out, err, code) = s.run_in(Some(sh), &env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
-            assert!(out.is_empty() && code == 0, "{sh} curl {rc}：再問到了就照佇列：{out:?} {code} {err}");
-        }
-    }
 
     /// 受管的 bot（有 bot 身份與 `AM_PORT`）而這台機器沒有 curl：問不了 daemon 這句要不要走佇列——一樣不直送，明確失敗。
     /// 沒有 bot 身份的人工 shell 照舊直送（daemon 根本不知道它）。
@@ -839,107 +685,6 @@ esac"#, calls.display()));
         assert_eq!((rc, out), (0, vec!["agent".to_string(), "prompt".into(), "agm-pxf2pv".into(), "hi".into()]));
     }
 
-    /// issue #143 的回歸（重開）：daemon **已經**把申請 durable 寫進協調者的收件匣，回覆卻在路上斷掉（curl 52，empty reply）——
-    /// shim 不能因此直送 pane（佇列一份、pane 一份）；重問同一句（內容指紋去重）收件匣仍只有一筆；回覆通了之後照佇列說的做。
-    /// **真的** router（跟 daemon 同一份）＋**真的** curl＋**真的** shim；中間一個 TCP proxy 把 daemon 的回覆吞掉。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-    async fn a_reply_lost_after_the_request_was_queued_is_never_answered_with_a_direct_prompt() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::Arc;
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        use tokio::net::{TcpListener, TcpStream};
-
-        let app = crate::supervisor::bot_requests::flow_tests::app().await;
-        crate::supervisor::bot_requests::flow_tests::configure_responder(&app).await;
-        let router_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let router_port = router_l.local_addr().unwrap().port();
-        router_l.set_nonblocking(true).unwrap();
-        let router = crate::api::router(app.clone());
-        let server = tokio::spawn(async move {
-            let l = TcpListener::from_std(router_l).unwrap();
-            let _ = axum::serve(l, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
-        });
-
-        let drop_reply = Arc::new(AtomicBool::new(true));
-        let seen = Arc::new(AtomicUsize::new(0));
-        let proxy_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_port = proxy_l.local_addr().unwrap().port();
-        let (dr, sn) = (drop_reply.clone(), seen.clone());
-        let proxy = tokio::spawn(async move {
-            loop {
-                let Ok((mut client, _)) = proxy_l.accept().await else { return };
-                let (dr, sn) = (dr.clone(), sn.clone());
-                tokio::spawn(async move {
-                    // 讀完整個 request（標頭＋Content-Length 的本文）。
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 4096];
-                    let (head_end, want) = loop {
-                        let n = client.read(&mut tmp).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&tmp[..n]);
-                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
-                            let cl = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
-                            break (pos + 4, cl);
-                        }
-                    };
-                    while buf.len() < head_end + want {
-                        let n = client.read(&mut tmp).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&tmp[..n]);
-                    }
-                    sn.fetch_add(1, Ordering::SeqCst);
-                    // 轉給真的 router（要它關連線，才讀得到整個回覆）。
-                    let mut req = buf[..head_end - 2].to_vec();
-                    req.extend_from_slice(b"Connection: close\r\n\r\n");
-                    req.extend_from_slice(&buf[head_end..]);
-                    let Ok(mut up) = TcpStream::connect(("127.0.0.1", router_port)).await else { return };
-                    let _ = up.write_all(&req).await;
-                    let mut resp = Vec::new();
-                    let _ = up.read_to_end(&mut resp).await;
-                    if dr.load(Ordering::SeqCst) {
-                        return; // request 已經處理完、daemon 也回了，但回覆不轉給 curl：它看到 empty reply。
-                    }
-                    let _ = client.write_all(&resp).await;
-                });
-            }
-        });
-
-        let s = Sandbox::new();
-        // This test exercises a real TCP proxy; use the machine's curl, not the sandbox fake
-        // that answers only the spawn-permit endpoints.
-        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
-        let port = proxy_port.to_string();
-        let text = "請核准重建 relay-143-lost-reply";
-        let run = |s: Sandbox, port: String| {
-            tokio::task::spawn_blocking(move || {
-                let env = [("AM_AGENT_NAME", "fixer-abc"), ("AM_TEST_AGENTS", "AGM"), ("AM_BOT_ID", "w1"), ("AM_HOOK_TOKEN", "tok-w1"), ("AM_PORT", port.as_str())];
-                let r = s.run_full(&env, &["agent", "prompt", "bot:patrol", text]);
-                (s, r)
-            })
-        };
-        let inbox = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request'").fetch_one(&app.db).await.unwrap() };
-
-        // 回覆一直斷：request 進了 daemon（收件匣一筆），shim 問兩次後不直送、明確失敗。
-        let (s, (out, err, rc)) = run(s, port.clone()).await.unwrap();
-        assert!(out.is_empty(), "回覆丟了不能直送 pane（佇列一份、pane 一份）：{out:?} {err}");
-        assert_eq!(rc, 75, "{err}");
-        assert_eq!(seen.load(Ordering::SeqCst), 2, "同一個請求問了兩次：{err}");
-        assert_eq!(inbox().await, 1, "兩次都進了 daemon，內容指紋去重後仍只有一筆 durable 申請");
-
-        // 回覆通了：daemon 說已排進佇列，shim 不直送、exit 0；收件匣還是一筆。
-        drop_reply.store(false, Ordering::SeqCst);
-        let (_s, (out, err, rc)) = run(s, port).await.unwrap();
-        assert!(out.is_empty() && rc == 0, "{out:?} {rc} {err}");
-        assert!(err.contains("協調佇列"), "{err}");
-        assert_eq!(inbox().await, 1, "重問不會變兩筆");
-        proxy.abort();
-        server.abort();
-    }
 
     #[test]
     fn an_agent_prompt_with_flags_first_requires_a_stable_target() {
@@ -1488,52 +1233,55 @@ esac"#, calls.display()));
             assert_eq!(rc, 77, "{out:?} {err}");
             assert!(out.is_empty());
             assert!(err.contains("executor"), "{err}");
-            assert!(std::fs::read_to_string(log).unwrap().contains("/relay/announce"));
+            assert!(std::fs::read_to_string(log).unwrap().contains("/api/relay/resolve"));
         }
         let s = Sandbox::new();
         let (_, err, rc) = s.run_full(&[("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "expert")], &["agent", "prompt", "w1:p2", "work"]);
         assert_eq!(rc, 77); assert!(err.contains("daemon"));
     }
 
-    #[tokio::test]
-    async fn macos_local_old_shell_is_guarded_through_expert_migration() {
-        let s = Sandbox::new();
-        let home = s.dir.join("home");
-        let data = home.join(".config/agents-manager");
-        let home_str = home.to_str().unwrap();
-        let call_log = s.dir.join("calls.log");
-        let old = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session"), ("AM_TEST_CALL_LOG", call_log.to_str().unwrap())];
-        let (_, _, rc) = s.run_full(&old, &["agent", "prompt", "w1:p2", "before"]);
-        assert_eq!(rc, 0);
-        // Parent restarts with a daemon URL; the previously created shell retains `old`.
-        let restarted = [("HOME", home_str), ("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("HERDR_SESSION", "test-session"), ("AM_DAEMON_URL", "http://daemon:7788")];
-        s.install_fake_curl("printf '{\"error\":\"forbidden\"}\n403'");
-        assert_eq!(s.run_full(&restarted, &["agent", "prompt", "w1:p2", "work"]).2, 77);
-        am_base::expert_marker::set(&data, None, None, "project-a", "test-session", true).await.unwrap();
-        std::fs::write(&call_log, "").unwrap();
-        for target in ["w1:p2", "colleague"] {
-            let (out, _, rc) = s.run_full(&old, &["agent", "prompt", target, "work"]);
-            assert_eq!(rc, 77); assert!(out.is_empty());
+    #[test]
+    fn macos_local_managed_actions_fail_closed_without_daemon() {
+        let s = Sandbox::new(); let log = s.dir.join("calls.log");
+        let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("AM_TEST_NO_DAEMON", "1"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+        for args in [vec!["agent", "prompt", "w1:p2", "work"], vec!["agent", "start", "kid", "--pane", "w1:p9"]] {
+            let (_, err, rc) = s.run_full(&env, &args); assert_ne!(rc, 0); assert!(err.contains("重啟"), "{err}");
         }
-        assert!(!std::fs::read_to_string(&call_log).unwrap().contains("agent prompt"), "blocked prompts never reach herdr");
-        assert_eq!(s.run_full(&old, &["agent", "start", "kid", "--pane", "w1:p9"]).2, 77);
-        am_base::expert_marker::set(&data, None, Some("other-instance"), "project-b", "test-session", true).await.unwrap();
-        am_base::expert_marker::set(&data, None, None, "project-a", "test-session", false).await.unwrap();
-        assert_eq!(s.run_full(&old, &["agent", "prompt", "w1:p2", "still guarded"]).2, 77);
-        am_base::expert_marker::set(&data, None, Some("other-instance"), "project-b", "test-session", false).await.unwrap();
-        assert_eq!(s.run_full(&old, &["agent", "prompt", "w1:p2", "after"]).2, 0);
+        assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty());
     }
 
     #[test]
-    fn remote_parent_child_without_url_keeps_spawn_but_expert_fails_closed() {
-        let s = Sandbox::new();
-        let base = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "bot"), ("AM_PROJECT_MODE", "parent_child")];
-        let (_, _, rc) = s.run_full(&base, &["agent", "start", "kid", "--pane", "w1:p9"]);
-        assert_eq!(rc, 0);
-        let expert = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "bot"), ("AM_PROJECT_MODE", "expert")];
-        let (_, err, rc) = s.run_full(&expert, &["agent", "start", "kid", "--pane", "w1:p9"]);
-        assert_eq!(rc, 77);
-        assert!(err.contains("缺少 daemon 位址"), "{err}");
+    fn macos_local_managed_prompt_never_direct_sends_on_daemon_failure() {
+        for script in ["exit 7", "printf '{}\\n403'", "printf '{}\\n503'", "exit 28", "printf 'unknown\\n200'"] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log"); s.install_fake_curl(script);
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let (_, _, rc) = s.run_full(&env, &["agent", "prompt", "w1:p2", "work"]); assert_ne!(rc, 0, "{script}");
+            assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty(), "{script}");
+        }
+    }
+
+    #[test]
+    fn macos_local_managed_child_start_never_calls_herdr_when_daemon_fails() {
+        for script in ["exit 7", "printf 403", "printf 503", "exit 28"] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log"); s.install_fake_curl(script);
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_AGENT_NAME", "parent"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let (_, _, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p9"]); assert_ne!(rc, 0, "{script}");
+            assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty(), "{script}");
+        }
+    }
+
+    #[test]
+    fn macos_local_managed_prompt_uses_daemon_for_local_remote_and_results() {
+        for (key, value, target, expect) in [("AM_PORT", "7788", "w1:p2", false), ("AM_DAEMON_URL", "http://daemon:7788", "worker", false), ("AM_DAEMON_URL", "http://daemon:7788", "bot:target", true)] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log"); let curl_log = s.dir.join("curl.log");
+            s.install_fake_curl(&format!("printf '%s\\n' \"$*\" >> '{}'; case \"$*\" in *relay/resolve*) printf '{{\"to_bot_id\":\"target\"}}\\n200';; *) printf '{{\"request_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}\\n200';; esac", curl_log.display()));
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), (key, value), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let args = if expect { vec!["agent", "prompt", target, "--expect-result", "work"] } else { vec!["agent", "prompt", target, "work"] };
+            let (out, err, rc) = s.run_full(&env, &args); assert_eq!(rc, 0, "{err}");
+            if expect { assert!(out.iter().any(|s| s.starts_with("request_id="))); }
+            let calls = std::fs::read_to_string(curl_log).unwrap(); assert!(calls.contains("/api/relay/resolve") && calls.contains("/api/bots/target/prompt"));
+            assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty());
+        }
     }
 
     #[test]
@@ -2028,10 +1776,9 @@ esac"#, calls.display()));
         assert!(sent.contains("/relay/spawn/abort"), "{sent}");
     }
 
-    /// 遠端主機上的 bot 沒有 `AM_PORT`（SPEC §11.4）：spawn fence 問不到 daemon 也不能擋，
-    /// pane split 與 agent start 都要照開，而且一通 curl 都不打（127.0.0.1 在遠端是那台機器自己）。
+    /// 遠端沒有 AM_PORT 時也必須用明確的 daemon URL 授權。
     #[test]
-    fn a_remote_bot_without_am_port_still_spawns_children() {
+    fn a_remote_bot_uses_daemon_url_to_spawn_children() {
         let s = Sandbox::new();
         let log = curl_log(&s);
         let created = r#"{"id":"pane.created","result":{"pane":{"pane_id":"w1:p-child"}}}"#;
@@ -2049,7 +1796,9 @@ esac"#, calls.display()));
         let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
         assert_eq!(rc, 0, "{out:?} {err}");
         assert!(!err.contains("拒絕"), "{err}");
-        assert!(!log.exists(), "遠端 bot 不該打任何 curl：{:?}", std::fs::read_to_string(&log));
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("http://daemon:7788/api/spawn-authority") && calls.contains("/relay/spawn/begin"), "{calls}");
+        assert!(!calls.contains("127.0.0.1"), "{calls}");
     }
 
     /// #665：母名已經 32 字時，子 agent 不能被改成母 bot 自己；不同字尾也不能撞成同一個名字。
@@ -2575,14 +2324,4 @@ for a in "$@"; do printf '%s\n' "$a"; done
         let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent")], &["agent", "prompt", "w1:p2", "hello"]);
         assert_eq!(rc, 0);
         assert_eq!(out, ["agent", "prompt", "w1:p2", "hello"]);
-    }
-
-    #[test]
-    fn nr_claim_bot_id_uses_the_daemons_resolved_pane() {
-        let s = Sandbox::new();
-        s.install_fake_curl("printf '%s\\n200' '{\"target_pane_id\":\"w1:p-stable\"}'");
-        let (out, err, rc) = s.run_full(&[("AM_BOT_ID", "sender"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "1")],
-            &["agent", "prompt", "bot:stable-id", "hello"]);
-        assert_eq!(rc, 0, "{err}");
-        assert_eq!(out, ["agent", "prompt", "w1:p-stable", "hello"]);
     }

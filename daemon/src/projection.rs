@@ -29,8 +29,6 @@ pub fn new_token() -> String {
 /// 否則 A 會讀到 B 剛寫的 config、把 B 的刪除當成自己沒授權的 removal，或反過來替 B 放行（sol 三輪）。
 static PROJECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(crate) async fn marker_snapshot_lock() -> tokio::sync::MutexGuard<'static, ()> { PROJECTION.lock().await }
-
 /// Fill in missing ids (writing them back to the TOML) and upsert everything into SQLite.
 ///
 /// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 每次都從磁碟重讀，
@@ -421,8 +419,6 @@ where
     // `project_inner`，不重新拿鎖）。DB 沒被別人動過（還在臨界區內），所以 `project_inner` 自己那次
     // `guard_removals` 一定過，純粹是既有流程（補 id、upsert、soft-delete）的重用。
     if let Err(e) = project_inner(at, store, pool, None, false).await {
-        #[cfg(test)]
-        crate::lifecycle::race_point::hit("expert_projection_before_rollback", &store.path.to_string_lossy()).await;
         match restore_config(at, store, snapshot).await {
             Ok(()) => tracing::warn!(caller = %at, "投影失敗，config.toml 已退回這次寫入之前"),
             Err(restore) => {

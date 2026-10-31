@@ -2201,35 +2201,14 @@ parent 明確向 child 要求結果時，該回合優先由請求結果通知送
 
 `herdr agent prompt <target> --expect-result` 使用 daemon 的唯讀解析與 prompt API。`bot:<id>` 可跨主機，名稱或 pane ID 只在寄件 bot 的 host 與 herdr session 內解析；不唯一則拒絕。遠端 daemon 位址取 `AM_DAEMON_URL`，未設定時不猜。
 
-relay 身份只使用穩定 ID（issue #1794）：`to_agent` 只供顯示／herdr 傳輸；報備必須攜 `to_bot_id`、`to_run_id`、`delivery_id`，角色收件由 bot id 對角色表，監看由 run id 對 host／herdr session。shim 自有旗標 `--to-bot-id`／`--to-run-id`（遠端另加 `--to-pane-id`）不傳給 herdr，本機送字以 daemon 回傳的 pane 地址為準；本機 curl 重試及遠端 spool v2 沿用同一 delivery id。缺 ID 的舊 shim／spool 保持未知，不用名稱補猜，不開監看、不補標或攔進 AGM 佇列。回音按 run id 認領，遲到報備還須訊息的 turn 明確屬於該 run；同一 delivery 的已認領記錄保留在有界、五分鐘的行程內表內，避免 spool 重播誤標第二句（重啟不保留此去重）。移交目標不標記來源。
+relay 身份由 daemon 驗證，受管 bot 的 prompt 經 daemon 解析 bot ID 並授權、投遞。歷史 spool 的 relay 事件仍可對帳，不作為新 prompt 的直送入口。
 
 核准申請的 bot principal 必須以經驗證的 bot id 作 requester／lease owner，不接受 bot 名或 agent 名。自我核准比較 bot id，不因改名或舊名重用改變。User principal 可用保留 ID `principal:user` 申請，在申請交易內同時寫入既有 `supervisor_notes` 的 `approval_principal` 證據，記錄獨立人類身份／bot id，不由舊 requester 字串回推；其他外部／舊申請未保存獨立 principal 證據時保持未知，拒絕核准（`requester_identity_unknown`，可 deny／revoke 或以已驗證 bot id 重申請）；此票不新增 schema。既有 daemon-swap service 與使用者立即部署的專用核准流程不變。
 
 
 走 daemon 的派工（`POST /api/bots/{id}/prompt` 帶 `relay_from`、總管的 assignment）會寫 `messages.relay_from`，UI 畫成「X → 這顆 bot」。
-agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話只以 prompt 回音從 hook 回來，會跟使用者打的字長得一樣。補法同 §6.5b，做成機制：
+受管 bot 的 `herdr agent prompt` 先由 daemon 以 ID、名稱或 pane 解析目標並驗證目前權限，再由 `POST /api/bots/{id}/prompt` 投遞；名稱與 pane 僅在目前 host／session 解析。daemon 無法確認時拒絕，不呼叫 herdr。舊版 shim 已持久化的 `AmRelayAnnounce` spool 事件仍可對帳，但新版不再以 spool 授權或送字。
 
-1. shim 的 `agent prompt` 接受 pane ID、`bot:<bot_id>`，或作為一次性選取器的顯示名稱。child 簡稱先查顯示前綴補成的候選，再查原字串；選取成功後立即從 `agent get` 回應固定 pane ID。查不到 pane 證據就 exit 75，不猜名字。
-   決定 ID 後先 `POST /relay/announce`（表單 `bot_id`／`to_bot_id`／`to_run_id`／`delivery_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token`），再用固定 pane ID 轉給真的 herdr。daemon 不再按名字查身份；舊 shim 只送名稱而無 ID 證據時保持未知。
-   本機一般 `bot:<bot_id>` 由 daemon 以 ID 路由角色 bot，或在寄件 host／session 範圍內取得唯一 running run 的 pane ID（缺證據時不解析，shim exit 75）。遠端 `bot:<bot_id>` 則使用 daemon API 投遞；沒有配置 daemon 位址時明確拒絕。
-   `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
-   **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才容許已固定 pane ID 的直送（尚未解析的 bot ID 仍拒絕）。
-   其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，
-   同一個請求再問一次（第二次 15 秒；沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆），還是不明就 exit 75；HTTP 非 2xx
-   （400／404／5xx，身份被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `to_pane_id` 就按該地址直送；回 `{}` 則為未知／移交，不記來源而按傳輸目標直送。受管的 bot（有 bot 身份與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
-   target 必須在旗標前面；缺 pane 證據時 exit 75。
-2. daemon 把「誰要送什麼給哪個 run」記在行程內的短命表（5 分鐘；上限：每顆寄件 bot 最多 64 筆報備（含已認領的 delivery 去重記錄）、超過丟它自己最舊的，整張表最多 1024 筆，每筆只留 `text` 的前 4000 字；#1352），連同寄件者所在的主機及 delivery id與**寄件當下寄件 bot 正在跑的回合**
-   （`sender_turn_at`：本機 API 用現在；遠端 spool 用 shim 寫進報備的 `received_at`，取時間落在 `[created_at, completed_at]` 之間、最新的那一回合；找不到就 NULL）。
-   遠端 bot 須載入新版 shim 才能產生 v2 身份報備。
-3. 回音從 hook 回來時用 run 的**主機**與穩定 `run_id` 認領（改名不影響；另一個同名 run 不能認領）：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
-   認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了），同一筆寫入 `relay_turn_id`＝報備記下的寄件回合（#927）。
-4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
-5. **遠端 bot 走 spool**（2026-09-30 使用者：console-rpa 直送給 cicd 的一句被當成使用者打的）：遠端 bot 有 bot 身份但沒有 `AM_PORT`（遠端不開回 daemon 的埠），
-   打不到 `/relay/announce`。shim 改在打字前寫一則 `{"hook_event_name":"AmRelayAnnounce","to_agent","text"}` 的 hook body 進**自己** bot 目錄的
-   `hook-spool.d/`（`python3` 寫暫存檔再 rename，一則一檔；沒有 bot 目錄或 python3 就不寫、照舊直送），daemon 收 spool 時一起收（寄件者＝那個目錄的 bot）。
-   spool 每 30 秒左右才收一次，收件方的回音常常先到、已經存成使用者訊息：收到報備時除了照第 2 點記下，也回頭找寄件者那台主機上 `id` 是 `to_run_id`、bot id 符合 `to_bot_id`
-   的在跑 run，且訊息的 turn 必須屬於該 run；只從五分鐘內來源為 `hook` 或 `terminal_fallback`、還沒標來源且內容對得上（同第 3 點）的最新一則使用者訊息補標 `relay_from`（`relay_unverified=0`）。
-   `web` 訊息不列入候選，即使內容相同；補標成功才用掉那筆報備，再推一次同 id 的 `message_added`（前端同 id 來源變了就換掉）。這一條要等遠端 bot 重啟、裝到新版 shim 才生效。
 5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_run_id` 只在寄件 bot 所在的 host 與 herdr session 解析，並驗證收件 bot id；
    舊 run 沒記 session 時以該 host 的設定為準。只有明確 ID 對到 running run 才盯梢；顯示名稱與單獨 pane id 都不作身份對應。
    找到目標時，daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
@@ -3505,7 +3484,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
 - `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish`、`/relay/spawn/abort`、`/relay/spawn/claim` 驗 **per-bot** `X-AM-Bot-Token`。
-  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；permit 捕獲目前 host、session 與可選的 active run；managed shell 沒有 active run 時仍可取得 permit，這允許母 CLI 停止後、同 host/session 上仍執行的 child 繼續建立 pane。輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒；`agent start` 帶 `--timeout` 時涵蓋它再加 30 秒、上限 330 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；`finish` 確認 host、session 與 active run 仍符合 permit（run 仍缺席可完成；run 出現或 ID 改變、host/session 改變則拒絕），再用捕獲的 herdr session 呼叫 `pane.get` 確認 pane 存在（空 shell pane 不要求已有 agent），原子綁定唯一 `pane_id` 並登記到 `panes` inventory 才釋放 permit。找不到 pane 時回 503 並保留 permit，允許相同 pane id 重試。同一 permit 並行重送不能登記第二個 pane，finish 註冊期間的 abort 不會釋放它；登記失敗保留 pane 綁定，只有相同 pane id 可重試（不同 id 回 409）。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。遠端主機上的 bot（有 bot 身份、沒有 `AM_PORT`，§11.4）不走 fence：問不到 daemon 不是「確認不了」，子 pane 照開、不打 curl（遠端子 pane 本來也登記不到 `panes`）。
+  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；permit 捕獲目前 host、session 與可選的 active run；managed shell 沒有 active run 時仍可取得 permit，這允許母 CLI 停止後、同 host/session 上仍執行的 child 繼續建立 pane。輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒；`agent start` 帶 `--timeout` 時涵蓋它再加 30 秒、上限 330 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；`finish` 確認 host、session 與 active run 仍符合 permit（run 仍缺席可完成；run 出現或 ID 改變、host/session 改變則拒絕），再用捕獲的 herdr session 呼叫 `pane.get` 確認 pane 存在（空 shell pane 不要求已有 agent），原子綁定唯一 `pane_id` 並登記到 `panes` inventory 才釋放 permit。找不到 pane 時回 503 並保留 permit，允許相同 pane id 重試。同一 permit 並行重送不能登記第二個 pane，finish 註冊期間的 abort 不會釋放它；登記失敗保留 pane 綁定，只有相同 pane id 可重試（不同 id 回 409）。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。遠端 bot 以 `AM_DAEMON_URL` 取得 permit；沒有位址或 daemon 不可達時拒絕開 child。
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息，並整份重拉只靠事件維持的資料（額度、輸入框草稿、身份停用名單；身份停用與草稿在重連時也重拉）。重連／`resync` 後也會遞增排程 revision，讓已掛載的排程列表與詳情重新讀取；正常 `schedules_changed` 仍按專案與排程 id 精準刷新。
@@ -5453,10 +5432,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **只留紀錄（`wake=0`）**：`health_changed` 兩半都 `healthy`（恢復）、`deploy_waiting` 的後續更新（自動放寬、拿到窗口、完成、放棄、使用者操作）與「只有 working 擋著、放寬已排定」的首次通知、`incident_resolved`、退避窗內重複的 `ops_alert`、`assignment_noticed`／`queued`／`quota_*`、`judge_report_evidence`、`--ack`／`--reply-to` 的 `bot_request` 回覆。
   - 不認得的新事件種類仍預設叫醒巡檢（寧可被看見一次）；要降噪就在 `roles::known_route` 明寫分支。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
-- **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
+- **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 經 daemon 的解析及 prompt API），
   協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。
   路由狀態**不知道**不等於「不是 AGM」（issue #143）：`/relay/announce` 查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，回 **503 `routing_unavailable`**
-  （`retryable:true`），shim 看到就明確失敗（exit 75）、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。只有連線根本沒建立（curl 7）才照舊直送；回覆不明、非 2xx、身份被拒都不直送（§6.5b／§18.15）。
+  （`retryable:true`），shim 看到就明確失敗（exit 75）、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。連線失敗、回覆不明、非 2xx、身份被拒都不直送（§6.5b／§18.15）。
   去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋一個十分鐘的**滑動視窗**——後者只擋**還沒結案**的那一筆：前一筆已經 `handled` 之後同一句再送是新的申請，換 `#2`、`#3` 的鍵重新入列（review 2026-09-16 c3 L1）。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
   **視窗錨在「還會被送出的那筆申請」的 `created_at`**，不是牆上時鐘切出來的固定格子（issue #442）：寫入前先找同寄件者、同指紋、
   狀態是 `pending` 或 `delivered`、而且 `created_at` 距現在不超過十分鐘（含剛好十分鐘）的最新一筆，有就沿用它的錨點。
@@ -5630,7 +5609,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   協調者**沒在跑**（setup 完還沒 start、start 失敗、手動 stop、bot 被刪）而佇列裡有會叫醒它的事件（`wake_pending>0`）也是 `degraded`：分流只看「建立過」，
   以前這種狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積而沒有人被叫醒（review 2026-09-16 c3 M1）。
   `responder start` 先記 `desired_running=1` 再啟動，失敗交給看門狗重試。
-- **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane、或 daemon 不在時 shim 退回直送，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
+- **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
   協調者已經併回巡檢的專案（見上方「一顆總管、一個專案」），所以 web 的「剛跑完」晶片列排除 `GET /api/supervisor` 的 `project_id` 時兩個角色一起排除。
 - **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→
   `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。DB 版本已升的話要一併還原備份（§18.13）。
@@ -6040,4 +6019,4 @@ expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒�
 
 切換 expert 前，所有 active run 均須已注入 `AM_DAEMON_URL`（本機亦算），否則列出 bot、主機與待重啟原因並拒絕。遠端 parent-child 未設定 daemon URL 時維持原有派工；expert 缺 URL 時拒絕，URL 可用時以 daemon 當前模式核權。
 
-啟用 expert 前，所在 host／herdr session 的所有 active run 都須已注入 daemon URL 且 shim 未過期；遠端 host 也必須設定 daemon_url。daemon 必須先在各 session 寫入並驗證帶實例與專案歸屬的標記，才提交 expert 的 config 與 DB；啟動 expert bot 時也為其 session 建立標記。切回 parent_child 須先確認 config 與 DB 已回復才移除該實例的專案標記；對帳只清理本實例管理的 session，不刪別的實例或 session 的標記。同 session 任一實例的標記都使沒有 daemon 連線的舊 shell 拒絕直送。舊 shell 可能在 parent 重啟後仍持有沒有 URL 的環境：新版 shim 在有標記的 session 無法連到 daemon 時拒絕 prompt 與開 child；無標記的 parent_child 舊 pane 維持原有行為。有 URL 的一般 prompt 在送字前經 daemon 即時檢查角色。同一 host／session 已有 expert 專案時，缺 URL 不得啟動 bot。標記只防自然遺留 pane，不防同一作業系統使用者蓄意修改標記、shim 或環境；上述先寫標記、後啟用的順序保證 expert 不會自然缺標記，外部刪除屬信任邊界外，對帳會嘗試補寫並在失敗時告警。角色授權以 daemon 判斷為準。 投影或設定回滾失敗時保留標記並告警；daemon 啟動與主機重連時，以磁碟設定、記憶體設定和資料庫對帳，任一仍為 expert 就先補標記，三者確認不再需要才清除各專案的多餘標記。補寫或讀取失敗時保留標記、推送 ops_alert，並暫停該主機的 expert 請求和派工授權，直到對帳成功。直接親子豁免只適用 child 向自己的 parent 回報。
+受管 bot（有 AM_BOT_ID）向其他 agent 發 prompt 與開 child，唯一入口是 daemon 授權；本機使用 AM_PORT 或 AM_DAEMON_URL，遠端使用 AM_DAEMON_URL。位址缺失、daemon 不可達、拒絕或回應不明時拒絕操作，不走 spool 或 herdr 直送；因此 daemon 不可達時無法派工。未受管 pane 維持原有行為。遠端 run 啟動時未取得位址，在網頁顯示「待套用（需重啟）」；不自動重啟。expert 僅 manager 可開 child，既有 child 不可再開 child；child 向自己 parent 回報仍經 daemon 授權。
