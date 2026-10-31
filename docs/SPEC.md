@@ -5752,9 +5752,9 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ### 專案專家模式
 
-專案預設 `parent_child`；expert 專案由 User 指定一位頂層 manager，其他 bot 可為 executor、advisor 或未分配。角色與模型、`managed_by`、`parent_bot_id` 分開；child 只能是 executor、advisor 或未分配，設成 manager 回 400。fork 不繼承角色。只有 User 可更改模式與指定 manager；manager 可替同專案頂層 bot 與自己的 child 設 executor／advisor 或清掉（`agm role`），並可啟動／重啟它們讓角色套用（`agm bot restart`）（使用者 2026-10-31：manager 要能照指示分配角色）。專案模式、bot 角色與啟動時載入的政策不同時標示待套用；未知的舊 run 也保守標示待套用，不自動重啟。
+專案預設 `parent_child`；expert 專案由 User 指定一位頂層 manager，其他 bot 可為 executor、advisor 或未分配。角色與模型、`managed_by`、`parent_bot_id` 分開；child 只能是 executor、advisor 或未分配，設成 manager 回 400（只有切成 expert 前留下的 child 會遇到）。fork 不繼承角色。只有 User 可更改模式與指定 manager；manager 可替同專案頂層 bot 與自己的 child 設 executor／advisor 或清掉（`agm role`），並可啟動／重啟它們讓角色套用（`agm bot restart`）（使用者 2026-10-31：manager 要能照指示分配角色）。專案模式、bot 角色與啟動時載入的政策不同時標示待套用；未知的舊 run 也保守標示待套用，不自動重啟。
 
-expert 的 manager 須在當前政策已載入後才能開 child；executor、advisor 與未分配者不能派 child，既有 child 不能再開 child。角色規則為靜態啟動指示，成員與狀態由 `agm peers` 按需查詢；需要結果通知的請求用 `herdr agent prompt bot:<id> --expect-result`，進度以 `agm requests --open` 查詢。
+專家模式沒有 child（使用者 2026-10-31）：expert 專案的任何角色都不能開 child（spawn 授權回 403 `expert_no_child`，提示改找同專案頂層執行者／顧問），shell pane 照常可開；執行者、顧問一律是使用者建立並指派角色的頂層 bot。專案切成 expert 前留下的 child 不自動收，由使用者改建頂層 bot（例：resume 原 session）後收掉。角色規則為靜態啟動指示，成員與狀態由 `agm peers` 按需查詢；需要結果通知的請求用 `herdr agent prompt bot:<id> --expect-result`，進度以 `agm requests --open` 查詢。
 
 派工授權以 daemon 當下資料判斷為準，shim 是第一道防線；啟用 expert 前檢查活躍 bot 的 shim，過期時列出 bot 並拒絕。已啟用後 shim 過期標待套用並告警；reconcile 發現非管理者開 child 時仍追蹤並向管理者與 ops 告警。
 

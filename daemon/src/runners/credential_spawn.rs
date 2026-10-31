@@ -195,7 +195,7 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     };
     if project.mode == "expert" && body.purpose != "pane" {
         if crate::expert_peers::spawn_authority(State(app.clone()), axum::Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await.is_err() {
-            return fail(StatusCode::FORBIDDEN, "role_not_applied", "current expert role does not authorize spawn");
+            return fail(StatusCode::FORBIDDEN, "expert_no_child", crate::expert_peers::EXPERT_NO_CHILD);
         }
     }
     let host = match crate::db::bot_host(&app.db, &bot.id).await {

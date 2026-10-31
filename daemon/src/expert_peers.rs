@@ -39,16 +39,15 @@ pub(crate) async fn list(State(app): State<Arc<App>>, Path(project_id): Path<Str
     Ok(Json(json!({"project_id":project_id,"peers":peers})))
 }
 
+pub(crate) const EXPERT_NO_CHILD: &str = "專家模式沒有 child：用 agm peers 找同專案的頂層執行者／顧問，以 herdr agent prompt bot:<id> --expect-result 派工；缺人手請使用者建立頂層 bot 並指派角色。";
+
 pub(crate) async fn spawn_authority(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     let RequestPrincipal::Bot(id) = principal else { return Err(LcError::Forbidden(json!({"error":"forbidden"}))); };
     let bot = crate::db::bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::Forbidden(json!({"error":"forbidden"})))?;
     let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|p| p.deleted_at.is_none()).ok_or_else(|| LcError::Forbidden(json!({"error":"forbidden"})))?;
     if bot.parent_bot_id.is_some() || bot.managed_by == "child" { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"child_cannot_spawn"}))); }
-    if project.mode == "expert" {
-        let run = crate::db::active_run(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-        let policy = format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or(""));
-        if bot.role.as_deref() != Some("manager") || run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(policy.as_str()) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"role_not_applied"}))); }
-    }
+    // 專家模式沒有 child（使用者 2026-10-31）：執行者、顧問都是使用者建立的頂層 bot。
+    if project.mode == "expert" { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"expert_no_child","message":EXPERT_NO_CHILD}))); }
     Ok(Json(json!({"allowed":true})))
 }
 
@@ -68,22 +67,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expert_spawn_requires_current_manager_policy_and_never_allows_child() {
+    async fn expert_projects_never_spawn_children() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "peer").await;
+        assert!(spawn_authority(State(app.clone()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await.is_ok(), "parent_child keeps children");
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        assert!(matches!(spawn_authority(State(app.clone()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await, Err(LcError::Forbidden(_))));
-        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         let run = crate::testing::fake_run(&app, &bot.id).await;
-        let policy = format!("{}:local:expert:manager", env.project_id);
-        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(&policy).bind(&run).execute(&app.db).await.unwrap();
-        assert!(spawn_authority(State(app.clone()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await.is_ok());
-        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        assert!(spawn_authority(State(app.clone()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await.is_err());
-        sqlx::query("UPDATE bots SET role='manager', managed_by='child' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        assert!(matches!(spawn_authority(State(app), Extension(RequestPrincipal::Bot(bot.id))).await, Err(LcError::Forbidden(_))));
+        for role in ["manager", "executor", "advisor"] {
+            sqlx::query("UPDATE bots SET role=? WHERE id=?").bind(role).bind(&bot.id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:{role}", env.project_id)).bind(&run).execute(&app.db).await.unwrap();
+            match spawn_authority(State(app.clone()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await {
+                Err(LcError::Forbidden(v)) => assert_eq!(v["reason"], "expert_no_child", "{role}"),
+                other => panic!("{role}: {:?}", other.map(|j| j.0)),
+            }
+        }
     }
 }
 
