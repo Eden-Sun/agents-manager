@@ -107,7 +107,7 @@ test('受限 bot：分享中隨時看得到完整連結；重產（確認後）�
   assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')!.checked, false)
 })
 
-test('舊資料只有雜湊：設定面板提示重產一次', async () => {
+test('舊資料只有雜湊：設定面板提示重產', async () => {
   const { shared } = await setup()
   const { rawTransport } = await import('../api/index')
   const orig = rawTransport.request.bind(rawTransport)
@@ -119,7 +119,7 @@ test('舊資料只有雜湊：設定面板提示重產一次', async () => {
     await mount(<BotShareSection botId={shared.id} />)
     await settle()
     assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
-    assert.match(document.querySelector('.bs-share-hint')!.textContent!, /舊版開的.*「重產連結」一次/)
+    assert.match(document.querySelector('.bs-share-legacy')!.textContent!, /舊連結無法顯示，請重產.*舊版開的/)
   } finally {
     rawTransport.request = orig
   }

@@ -135,11 +135,17 @@ export function BotShareSection({ botId }: { botId: string }) {
               <p className="hint">{t('聊天區頂端的「🔗 複製連結」也能隨時複製。')}</p>
             </>
           ) : currentShare?.needs_rotate ? (
-            <p className="bs-share-hint">
-              {t.x('目前的連結結尾 {token}，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。', {
-                token: <code>{currentShare.token_hint ?? '…'}</code>,
-              })}
-            </p>
+            <div className="bs-share-legacy" role="alert">
+              <strong>{t('舊連結無法顯示，請重產')}</strong>
+              <p className="hint">
+                {t.x('目前的連結結尾 {token}，是舊版開的（只存雜湊），拿不回完整網址。重產一次後，完整連結就會顯示在這裡，可以一鍵複製。舊連結會立刻失效。', {
+                  token: <code>{currentShare.token_hint ?? '…'}</code>,
+                })}
+              </p>
+              <button type="button" className="btn primary" disabled={busy} onClick={() => setConfirm('rotate')}>
+                {t('重產連結')}
+              </button>
+            </div>
           ) : (
             <p className="bs-share-hint">
               {t.x('目前的連結結尾 {token}。config.toml 的 [share] base_url 沒設，組不出完整網址。', {
