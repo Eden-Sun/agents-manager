@@ -70,8 +70,8 @@ pub async fn sweep(app: &Arc<App>) -> usize {
         "SELECT COALESCE((SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id
                      WHERE c.bot_id=b.id AND t.status IN ('completed','completed_fallback','failed') AND t.completed_at IS NOT NULL
                      ORDER BY t.completed_at DESC,t.rowid DESC LIMIT 1),r.id), b.parent_bot_id
-         FROM bots b JOIN runs r ON r.bot_id=b.id AND r.state='running'
-         WHERE b.managed_by='child' AND b.deleted_at IS NULL AND COALESCE(b.parent_bot_id,'')<>''
+         FROM bots b JOIN runs r ON r.bot_id=b.id AND (r.state='running' OR (b.deleted_at IS NOT NULL AND r.rowid=(SELECT max(rowid) FROM runs WHERE bot_id=b.id) AND EXISTS(SELECT 1 FROM intents i WHERE i.kind='retire_child' AND i.subject_id=b.id AND json_extract(i.payload_json,'$.cause')='agent_missing')))
+         WHERE b.managed_by='child' AND (b.deleted_at IS NULL OR EXISTS(SELECT 1 FROM intents i WHERE i.kind='retire_child' AND i.subject_id=b.id AND json_extract(i.payload_json,'$.cause')='agent_missing')) AND COALESCE(b.parent_bot_id,'')<>''
         "
     ).fetch_all(&app.db).await {
         Ok(rows) => rows,
@@ -95,7 +95,7 @@ pub async fn sweep(app: &Arc<App>) -> usize {
 #[derive(sqlx::FromRow)]
 struct Child {
     child_id: String, child_name: String, parent_id: String, kind: String,
-    run_id: String, status_since: Option<String>,
+    run_id: String, status_since: Option<String>, gone: bool, cwd: Option<String>, last_status: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -122,10 +122,10 @@ async fn cover_delivered_relay(app: &Arc<App>, child: &Child, background: bool) 
 /// Reconcile one child; the turn id is only a lookup hint, not the unit of deduplication.
 pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
     let child: Option<Child> = sqlx::query_as(
-        "SELECT b.id child_id, b.name child_name, b.parent_bot_id parent_id, b.kind, r.id run_id, r.agent_status_since status_since
-         FROM bots b JOIN runs r ON r.bot_id=b.id AND r.state='running'
+        "SELECT b.id child_id, b.name child_name, b.parent_bot_id parent_id, b.kind, r.id run_id, r.agent_status_since status_since, b.deleted_at IS NOT NULL gone, b.cwd, r.agent_status last_status
+         FROM bots b JOIN runs r ON r.bot_id=b.id AND (r.state='running' OR (b.deleted_at IS NOT NULL AND r.rowid=(SELECT max(rowid) FROM runs WHERE bot_id=b.id) AND EXISTS(SELECT 1 FROM intents i WHERE i.kind='retire_child' AND i.subject_id=b.id AND json_extract(i.payload_json,'$.cause')='agent_missing')))
          WHERE (r.id=? OR EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=b.id AND t.id=?))
-           AND b.managed_by='child' AND b.deleted_at IS NULL AND COALESCE(b.parent_bot_id,'')<>''"
+           AND b.managed_by='child' AND (b.deleted_at IS NULL OR EXISTS(SELECT 1 FROM intents i WHERE i.kind='retire_child' AND i.subject_id=b.id AND json_extract(i.payload_json,'$.cause')='agent_missing')) AND COALESCE(b.parent_bot_id,'')<>''"
     ).bind(turn_id).bind(turn_id).fetch_optional(&app.db).await?;
     let Some(child) = child else { return Ok(()) };
     // Persist the obligation before inspecting the pane, even without a captured turn.
@@ -136,25 +136,25 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     // child work and already-pending child_done notices still reconcile normally.
     let notice_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND t.id=(SELECT t2.id FROM turns t2 WHERE t2.conversation_id=c.id AND t2.status IN ('completed','completed_fallback','failed') ORDER BY t2.completed_at DESC,t2.rowid DESC LIMIT 1) AND t.queue_class='daemon' AND t.client_request_id LIKE 'relay-result:%') AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id JOIN child_done_state d ON d.child_id=c.bot_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND NOT (t.queue_class='daemon' AND COALESCE(t.client_request_id,'') LIKE 'relay-result:%') AND t.rowid>d.covered_rowid AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=c.bot_id AND s.turn_id=t.id AND s.covered=1)) AND NOT EXISTS(SELECT 1 FROM child_done_state d WHERE d.child_id=? AND d.pending_turn_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM child_done_sources s WHERE s.child_id=? AND s.covered=0)")
         .bind(&child.child_id).bind(&child.child_id).bind(&child.child_id).bind(&child.child_id).fetch_one(&app.db).await?;
-    if child_still_active(app, Some(&child.run_id)).await {
+    if !child.gone && child_still_active(app, Some(&child.run_id)).await {
         sqlx::query("UPDATE child_done_state SET active=1 WHERE child_id=?").bind(&child.child_id).execute(&app.db).await?;
         return Ok(())
     }
     let inflight: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=? AND status='in_flight')")
         .bind(&child.run_id).fetch_one(&app.db).await?;
-    if inflight {
+    if inflight && !child.gone {
         sqlx::query("UPDATE child_done_state SET active=1 WHERE child_id=?").bind(&child.child_id).execute(&app.db).await?;
         return Ok(())
     }
-    let background = background_work_running(app, Some(&child.run_id), &child.kind).await;
+    let background = !child.gone && background_work_running(app, Some(&child.run_id), &child.kind).await;
     let parent = parent_lock(&child.parent_id);
     let _guard = parent.lock().await;
     // Recheck DB state under the lock: a new turn may have started during pane I/O.
     let idle: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r WHERE r.id=? AND r.state='running' AND r.agent_status IN ('idle','unknown') AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.run_id=r.id AND t.status='in_flight'))")
         .bind(&child.run_id).fetch_one(&app.db).await?;
-    if !idle { return Ok(()) }
+    if !idle && !child.gone { return Ok(()) }
     cover_delivered_relay(app, &child, background).await?;
-    if notice_only { return Ok(()) }
+    if notice_only && !child.gone { return Ok(()) }
     let mut turns: Vec<SourceTurn> = sqlx::query_as("SELECT t.rowid, t.id, t.completed_at, t.status, t.delivery,
         (SELECT m.content FROM messages m WHERE m.turn_id=t.id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) reply
         FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=?
@@ -174,9 +174,9 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     if turns.is_empty() && !has_pending {
         let latest_is_notice: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('completed','completed_fallback','failed') AND t.id=(SELECT t2.id FROM turns t2 WHERE t2.conversation_id=c.id AND t2.status IN ('completed','completed_fallback','failed') ORDER BY t2.completed_at DESC,t2.rowid DESC LIMIT 1) AND ((t.queue_class='daemon' AND t.client_request_id LIKE 'relay-result:%') OR EXISTS(SELECT 1 FROM relay_requests r WHERE r.from_bot_id=? AND r.to_bot_id=c.bot_id AND (r.state<>'failed' OR r.notified_at IS NOT NULL OR r.alerted_at IS NULL OR r.error LIKE 'notification delivery unconfirmed%') AND (r.to_turn_id=t.id OR t.client_request_id='relay-request:'||r.id))))")
             .bind(&child.child_id).bind(&child.parent_id).fetch_one(&app.db).await?;
-        if latest_is_notice { return Ok(()) }
+        if latest_is_notice && !child.gone { return Ok(()) }
     }
-    if turns.is_empty() && (child.status_since.is_some() || has_pending) {
+    if turns.is_empty() && (child.status_since.is_some() || has_pending || child.gone) {
         turns.push(SourceTurn { rowid: 0, id: child.run_id.clone(), completed_at: child.status_since.clone().unwrap_or_else(crate::db::now), status: "idle_without_turn".into(), delivery: "ok".into(), reply: None });
     }
     let Some(latest) = turns.last() else { return Ok(()) };
@@ -184,7 +184,7 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         sqlx::query("INSERT OR IGNORE INTO child_done_sources(child_id,turn_id) VALUES(?,?)")
             .bind(&child.child_id).bind(&t.id).execute(&app.db).await?;
     }
-    if latest.status == "completed_fallback" && chrono::DateTime::parse_from_rfc3339(&latest.completed_at)
+    if !child.gone && latest.status == "completed_fallback" && chrono::DateTime::parse_from_rfc3339(&latest.completed_at)
         .is_ok_and(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < FALLBACK_SETTLE_SECS) { return Ok(()) }
     sqlx::query("UPDATE child_done_state SET idle_at=CASE WHEN active=1 OR idle_turn_id<>? OR (? IS NOT NULL AND ? > idle_at) THEN max(COALESCE(?,''),?) ELSE idle_at END, idle_turn_id=?, active=0 WHERE child_id=?")
         .bind(&latest.id).bind(&child.status_since).bind(&child.status_since).bind(&child.status_since).bind(&latest.completed_at).bind(&latest.id).bind(&child.child_id).execute(&app.db).await?;
@@ -252,13 +252,18 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     if crate::db::active_run(&app.db, &child.parent_id).await?.is_none() { return Ok(()) }
     let unassigned: Vec<String> = sqlx::query_scalar("SELECT turn_id FROM child_done_sources WHERE child_id=? AND batch IS NULL AND covered=0")
         .bind(&child.child_id).fetch_all(&app.db).await?;
+    let gone_base = format!("{prefix}gone:{}", child.run_id);
+    let gone_delivered: bool = if child.gone { sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE conversation_id=? AND (client_request_id=? OR substr(client_request_id,1,length(?)+2)=?||':r') AND delivery='ok' AND delivery_verified=1 AND status<>'queued')")
+        .bind(&conv).bind(&gone_base).bind(&gone_base).bind(&gone_base).fetch_one(&app.db).await? } else { false };
+    let gone_owed = child.gone && !gone_delivered;
     let background_finished = state.notified_background != 0 && !background;
     let idle_again = state.notified_at.as_ref().is_some_and(|at| at < &state.idle_at)
         || (state.notified_at.is_none() && latest.status == "idle_without_turn");
     if state.pending_turn_id.is_none() {
-        if unassigned.is_empty() && !background_finished && !idle_again { return Ok(()) }
+        if unassigned.is_empty() && !background_finished && !idle_again && !gone_owed { return Ok(()) }
+        if child.gone && !gone_owed { return Ok(()) }
         let latest_unassigned = turns.iter().rev().find(|t| unassigned.contains(&t.id)).unwrap_or(latest);
-        let mut base = if unassigned.is_empty() {
+        let mut base = if gone_owed { gone_base.clone() } else if unassigned.is_empty() {
             let tag = if background_finished { "background" } else { "idle" };
             format!("{prefix}{}:{tag}{}", latest.id, crate::db::ulid())
         } else { format!("{prefix}{}", latest_unassigned.id) };
@@ -266,8 +271,8 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
             .bind(&conv).bind(&base).bind(&base).bind(&base).fetch_one(&app.db).await?;
         // Preserve the retry history for a single legacy turn. A multi-turn batch needs a
         // fresh key: the old notice may have omitted the earlier turns.
-        let adopt_legacy = exists && unassigned.len() == 1 && state.pending_idle_at.is_none() && !background;
-        if exists && !adopt_legacy { base = format!("{base}:episode{}", crate::db::ulid()); }
+        let adopt_legacy = !child.gone && exists && unassigned.len() == 1 && state.pending_idle_at.is_none() && !background;
+        if exists && !adopt_legacy && !gone_owed { base = format!("{base}:episode{}", crate::db::ulid()); }
         let mut tx = app.db.begin().await?;
         sqlx::query("UPDATE child_done_sources SET batch=? WHERE child_id=? AND batch IS NULL AND covered=0")
             .bind(&base).bind(&child.child_id).execute(&mut *tx).await?;
@@ -284,8 +289,8 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     let mut excerpts = Vec::new();
     let batch_turns: Vec<String> = sqlx::query_scalar("SELECT turn_id FROM child_done_sources WHERE child_id=? AND batch=? AND covered=0")
         .bind(&child.child_id).bind(base).fetch_all(&app.db).await?;
-    if batch_turns.is_empty() && state.pending_rowid.is_some_and(|row| row > 0) {
-        excerpts.push(format!("來源回合已無法讀取，請讀 child 的 pane：herdr agent read {} --lines 200", child.child_name));
+    if batch_turns.is_empty() && !child.gone && state.pending_rowid.is_some_and(|row| row > 0) {
+        excerpts.push(format!("來源回合紀錄已刪除，請讀 child 的 pane：herdr agent read {} --lines 200", child.child_name));
     }
     for t in turns.iter().filter(|t| batch_turns.contains(&t.id)) {
         if t.status == "failed" && t.delivery == "unknown" {
@@ -304,9 +309,9 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
         if let Some(reply) = reply {
             if child_already_reported(&app.db,&conv,&child.child_id,&prefix,&t.id,reply).await? { continue }
             excerpts.push(format!("回合 {}：\n{}", t.id, reply));
-        } else { excerpts.push(format!("回合 {}：未擷取到回覆，請讀它的 pane：herdr agent read {} --lines 200",t.id,child.child_name)); }
+        } else if child.gone { excerpts.push(format!("回合 {}：沒有回覆文字；child pane 已收掉。", t.id)); } else { excerpts.push(format!("回合 {}：未擷取到回覆（沒有回覆文字），請讀它的 pane：herdr agent read {} --lines 200",t.id,child.child_name)); }
     }
-    if excerpts.is_empty() && !background_finished && !idle_again && state.pending_background != Some(1) {
+    if excerpts.is_empty() && !background_finished && !idle_again && !gone_owed && state.pending_background != Some(1) {
         // All turns were explicitly reported by the child itself.
         let mut tx = app.db.begin().await?;
         sqlx::query("UPDATE child_done_sources SET covered=1 WHERE child_id=? AND batch=?")
@@ -319,14 +324,17 @@ pub(crate) async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result
     let n = excerpts.len();
     excerpts.reverse();
     if n > 1 { excerpts.insert(0, format!("本次合併 {n} 個回合（最新回合在前；完整內容可讀 child 的對話或 pane）。")); }
-    if excerpts.is_empty() { excerpts.push(if background_finished { "背景工作已結束，child 仍閒置。" } else { "未擷取到回覆，child 已閒置，請讀它的 pane。" }.into()); }
+    if excerpts.is_empty() { excerpts.push(if child.gone { "child pane 已收掉，沒有新的回覆文字。" } else if background_finished { "背景工作已結束，child 仍閒置。" } else { "未擷取到回覆，child 已閒置，請讀它的 pane。" }.into()); }
     let parent_kind: String = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&child.parent_id).fetch_one(&app.db).await?;
     let reply = excerpts.join("\n\n");
     let mut message = message_for_child(&child.child_id,&child.child_name,&reply,notice_reply_limit(&parent_kind));
     if turns.iter().any(|t| batch_turns.contains(&t.id) && t.status == "failed" && t.delivery == "unknown") {
         message = message.replacen("已完成一個回合", "有回合送出未確認", 1);
     }
-    let annotation = if state.pending_background == Some(1) { "回合停了、背景工作仍在跑。\n" }
+    if child.gone { message = message.replacen("已完成一個回合。", "意外結束。", 1); }
+    let last_turn: Option<String> = if child.gone { sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? ORDER BY t.rowid DESC LIMIT 1").bind(&child.child_id).fetch_optional(&app.db).await? } else { None };
+    let gone_annotation = format!("child 意外結束（agent 不在）；最後狀態：{}；最後一回合 id：{}；worktree 路徑：{}。\n", child.last_status, last_turn.as_deref().unwrap_or("未知"), child.cwd.as_deref().unwrap_or("未知"));
+    let annotation = if child.gone { gone_annotation.as_str() } else if state.pending_background == Some(1) { "回合停了、背景工作仍在跑。\n" }
         else if background_finished { "背景工作已結束，child 仍閒置。\n" } else { "" };
     if !annotation.is_empty() { message = message.replacen("\n\n", &format!("\n{annotation}\n"), 1); }
     // Another daemon notice occupies the single queue slot; waiting is not a failed delivery.
