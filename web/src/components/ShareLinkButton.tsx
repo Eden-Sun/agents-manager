@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { asyncCopyAvailable, copyText } from '../lib/copyText'
@@ -10,6 +11,9 @@ import { useT, type TFn } from '../lib/i18n'
 import './shareLinkButton.css'
 
 /** 分享連結拿不到完整網址時的人話（舊資料只有雜湊，或 base_url 沒設）。 */
+/** 分享選單的寬度上限（px）；窄視窗會再縮成視窗減 16px。 */
+const MENU_WIDTH = 360
+
 function noUrlText(s: ShareState, t: TFn): string {
   return s.needs_rotate
     ? t('這條連結（結尾 {token}）是舊版開的，拿不回完整網址；從旁邊的選單「重產連結」一次就好', { token: s.token_hint ?? '…' })
@@ -51,7 +55,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const [busy, setBusy] = useState(false)
   const [menu, setMenu] = useState(false)
   // 選單用 fixed 定位貼著圖示鈕：名字列 overflow 會剪掉 absolute 的選單（#1072）。
-  const [menuAt, setMenuAt] = useState<{ top: number; right: number } | null>(null)
+  const [menuAt, setMenuAt] = useState<{ top: number; left: number } | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
   const menuRef = useRef<HTMLSpanElement>(null)
@@ -70,7 +74,8 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   useEffect(() => {
     if (!menu) return
     const close = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setMenu(false)
+      const target = e.target as Node
+      if (!wrapRef.current?.contains(target) && !menuRef.current?.contains(target)) setMenu(false)
     }
     const esc = (e: KeyboardEvent) => e.key === 'Escape' && setMenu(false)
     document.addEventListener('mousedown', close)
@@ -93,8 +98,13 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   }
 
   const openMenu = () => {
+    // 選單貼著按鈕的右緣往左展開，但整個框要留在視窗裡（寬度上限＝視窗減 16px）。
     const r = mainRef.current?.getBoundingClientRect()
-    setMenuAt(r ? { top: r.bottom + 4, right: Math.max(0, window.innerWidth - r.right) } : null)
+    if (r) {
+      const width = Math.min(MENU_WIDTH, window.innerWidth - 16)
+      const left = Math.min(Math.max(8, r.right - width), window.innerWidth - width - 8)
+      setMenuAt({ top: r.bottom + 4, left })
+    } else setMenuAt(null)
     setMenu(true)
   }
 
@@ -180,7 +190,9 @@ export function ShareLinkButton({ botId }: { botId: string }) {
       >
         <LinkIcon />
       </button>
-      {menu ? (
+      {menu
+        ? // 選單放到 body：側欄的記憶體晶片等元素有自己的 z-index，會蓋住在標題列裡的選單（#2026-10-31）。
+          createPortal(
         <span
           ref={menuRef}
           className="share-link-menu"
@@ -192,15 +204,16 @@ export function ShareLinkButton({ botId }: { botId: string }) {
               ? // 可選取的連結比選單寬：手機上貼齊左右邊（各留 8px），不讓它從左邊跑出畫面。
                 selectOnly && window.innerWidth <= 640
                 ? { position: 'fixed', top: menuAt.top, left: 8, right: 8 }
-                : { position: 'fixed', top: menuAt.top, right: menuAt.right }
+                : { position: 'fixed', top: menuAt.top, left: menuAt.left }
               : undefined
           }
         >
           {selectOnly ? (
             share?.enabled && share.url ? (
-              <input
+              <textarea
                 className="share-link-url"
                 readOnly
+                rows={2}
                 value={share.url}
                 aria-label={t('分享連結：長按選取後複製')}
                 title={t('這個瀏覽器（非 https）不能直接寫剪貼簿：長按選取後複製')}
@@ -211,9 +224,18 @@ export function ShareLinkButton({ botId }: { botId: string }) {
               <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
             )
           ) : (
-            <button type="button" role="menuitem" tabIndex={-1} onClick={onCopyFromMenu}>
-              {t('複製連結')}
-            </button>
+            <>
+              {share?.enabled && share.url ? (
+                <div className="share-link-url-text" aria-label={t('分享連結')}>
+                  {share.url}
+                </div>
+              ) : (
+                <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
+              )}
+              <button type="button" role="menuitem" tabIndex={-1} className="share-link-copy" onClick={onCopyFromMenu}>
+                {t('複製連結')}
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -238,8 +260,10 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           >
             {t('關閉分享')}
           </button>
-        </span>
-      ) : null}
+        </span>,
+          document.body,
+          )
+        : null}
       {/* 兩個框分開：同一個框有 800ms 防連點（同 BotShareSection）。 */}
       <ConfirmDialog
         open={confirm === 'rotate'}

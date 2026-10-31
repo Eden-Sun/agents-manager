@@ -913,25 +913,10 @@ button:disabled {
   pointer-events: auto;
 }
 
-/* `⋯` 常駐但低調，不做 opacity: 0——看不見的鍵在觸控上等於不存在。 */
+/* 名字列上的操作鈕（⋯、⚙、🔗）一律全不透明、不等 hover 才出現（2026-10-31 使用者裁示，取代先前「常駐但低調」的 0.78）。 */
 
 .bot-actions .icon-btn {
-  /* 0.55 對白底只有 2.26:1（圖示門檻 3:1）；0.78 仍顯淡且過門檻（白底 3.47）。 */
-  opacity: 0.78;
-  transition: opacity 0.12s ease;
-}
-
-.bot-row:hover .bot-actions .icon-btn,
-.bot-row:focus-within .bot-actions .icon-btn,
-.bot-row.selected .bot-actions .icon-btn,
-.bot-row.confirming .bot-actions .icon-btn {
   opacity: 1;
-}
-
-@media (hover: none) {
-  .bot-actions .icon-btn {
-    opacity: 1;
-  }
 }
 
 .bot-row .mini-btn {
