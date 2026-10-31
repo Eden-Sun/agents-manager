@@ -115,6 +115,16 @@ async fn busy_reason_locked(app: &impl StartContext, bot_id: &str, refuse_backgr
     Ok(None)
 }
 
+/// 專家（specialist）的範圍段：bot 專屬，接在 agent md 後面；不改共用的 `child_agent_rules`（改它會讓所有 bot 快取失效）。
+/// 沒有 track 的 specialist 不會被投影進來（daemon 先擋 `track_required`），這裡回 `None`。
+pub(crate) fn specialist_role_section(role: Option<&str>, track: Option<&str>) -> Option<String> {
+    if role != Some("specialist") {
+        return None;
+    }
+    let track = track.map(str::trim).filter(|t| !t.is_empty())?;
+    Some(format!("\n\n## 專家範圍\n你是本專案 {track} 的專家，範圍限於 {track}；超出範圍的工作回報管理者，不要自己做。"))
+}
+
 fn not_idle(bot_id: &str, why: &str) -> LcError {
     LcError::conflict("not_idle", json!({"bot_id": bot_id, "busy": why}))
 }
@@ -1349,6 +1359,11 @@ async fn start_inner_body(
     if restricted.is_none() && project.mode == "expert" {
         let role = bot.role.as_deref().unwrap_or("未分配");
         agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
+    }
+    if restricted.is_none() {
+        if let Some(section) = specialist_role_section(bot.role.as_deref(), bot.track.as_deref()) {
+            agent_md.text.push_str(&section);
+        }
     }
     if !agent_md.problems.is_empty() {
         let mut reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
@@ -6232,5 +6247,20 @@ mod account_file_tests {
         assert_eq!(super::claude_account_file_dir(&set, "/home/u"), "/home/u/.claude-cc1");
         let blank: BTreeMap<String, String> = [("CLAUDE_CONFIG_DIR".to_string(), "  ".to_string())].into();
         assert_eq!(super::claude_account_file_dir(&blank, "/home/u"), "/home/u");
+    }
+}
+
+/// 專家（specialist）的範圍段只給 specialist、且一定帶 track（bot 專屬段，不進共用的 child_agent_rules）。
+#[cfg(test)]
+mod specialist_section_tests {
+    use super::specialist_role_section;
+
+    #[test]
+    fn only_a_specialist_with_a_track_gets_the_scope_section() {
+        let section = specialist_role_section(Some("specialist"), Some("infra")).expect("specialist 有範圍段");
+        assert!(section.contains("你是本專案 infra 的專家，範圍限於 infra；超出範圍的工作回報管理者，不要自己做。"), "{section}");
+        assert!(specialist_role_section(Some("executor"), Some("infra")).is_none());
+        assert!(specialist_role_section(None, Some("infra")).is_none());
+        assert!(specialist_role_section(Some("specialist"), Some("  ")).is_none());
     }
 }

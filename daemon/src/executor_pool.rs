@@ -124,9 +124,12 @@ pub fn resolve_hire<'a>(
     }
 }
 
-/// 條目的已用數＝同專案 executor 中 `pool_entry` 等於它 id 的 bot 數（只看 config）。
+/// 條目的已用數＝同專案 executor 或 specialist 中 `pool_entry` 等於它 id 的 bot 數（只看 config）。
+/// 專家與執行者共用同一個池（specialist 增聘走同一套 resolve_hire／check_capacity）。
 pub fn used(bots: &[BotCfg], entry_id: &str) -> u32 {
-    bots.iter().filter(|b| b.role.as_deref() == Some("executor") && b.pool_entry.as_deref() == Some(entry_id)).count() as u32
+    bots.iter()
+        .filter(|b| matches!(b.role.as_deref(), Some("executor" | "specialist")) && b.pool_entry.as_deref() == Some(entry_id))
+        .count() as u32
 }
 
 /// manager 增聘時，條目滿了就 409。

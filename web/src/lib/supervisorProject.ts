@@ -8,7 +8,7 @@ export function chipTracked(
     pending?: boolean | null
     parent_bot_id: string | null
     project_id: string
-    role?: 'manager' | 'executor' | 'advisor' | null
+    role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
   },
   supervisorProjectId: string | null,
 ): boolean {

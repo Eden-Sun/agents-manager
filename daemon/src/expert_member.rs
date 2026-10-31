@@ -13,6 +13,8 @@ pub(crate) struct AdoptMember {
     pub effort: Option<String>,
     /// 下次 native resume 要接回的原生對話（例：codex session id）；不帶就沿用 run 上記的。
     pub session_id: Option<String>,
+    /// role=specialist 時必帶：專家負責的軌道（缺 → 400 `track_required`）。
+    pub track: Option<String>,
 }
 
 fn up(e: impl std::fmt::Display) -> LcError { LcError::Upstream(e.to_string()) }
@@ -28,19 +30,25 @@ pub(crate) async fn adopt(
     if child.managed_by != "child" || project.mode != "expert" {
         return Err(LcError::conflict("only a child in an expert project becomes a member", json!({"reason": "not_expert_child"})));
     }
-    let role = b.role.filter(|r| !r.trim().is_empty());
+    let role = b.role.clone().filter(|r| !r.trim().is_empty());
+    let track = b.track.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     match &principal {
         RequestPrincipal::User => {
-            if !matches!(role.as_deref(), None | Some("executor" | "advisor")) { return Err(LcError::Bad("role must be executor, advisor or empty".into())); }
+            if !matches!(role.as_deref(), None | Some("executor" | "advisor" | "specialist")) { return Err(LcError::Bad("role must be executor, advisor, specialist or empty".into())); }
         }
         RequestPrincipal::Bot(caller) => {
             let manager = db::bot(&app.db, caller).await.map_err(up)?.filter(|m| m.deleted_at.is_none());
             let is_manager = manager.as_ref().is_some_and(|m| m.role.as_deref() == Some("manager") && m.parent_bot_id.is_none() && m.project_id == child.project_id);
-            if !is_manager || !matches!(role.as_deref(), None | Some("executor" | "advisor")) {
+            if !is_manager || !matches!(role.as_deref(), None | Some("executor" | "advisor" | "specialist")) {
                 return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "manager_role_scope"})));
             }
         }
         _ => return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"}))),
+    }
+    // 專家一定要有 track（與 PATCH／PUT role 同一條規則）。
+    let specialist = role.as_deref() == Some("specialist");
+    if specialist && track.is_none() {
+        return Err(LcError::BadValue(json!({"error": "track_required"})));
     }
     if !crate::config::valid_bot_name(&child.name) {
         return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
@@ -49,7 +57,7 @@ pub(crate) async fn adopt(
         return Err(LcError::conflict("a member with this name already exists in the project", json!({"name": child.name})));
     }
     let effort = b.effort.clone().or_else(|| child.effort.clone());
-    let cfg = BotCfg { manager_use: true,
+    let cfg = BotCfg { manager_use: true, track: if specialist { track.clone() } else { None }, runtime_override: None,
         role: role.clone(),
         id: Some(id.clone()),
         name: child.name.clone(),

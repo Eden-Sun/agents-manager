@@ -59,9 +59,11 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        peers.push(json!({"id":bot.id,"name":bot.name,"role":bot.role,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open}));
+        peers.push(json!({"id":bot.id,"name":bot.name,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open}));
     }
     let Some(for_track) = query.for_track.as_deref() else {
+        // 沒給 --for：專家照一般排序但排在執行者之後（穩定排序，相對順序不動）。
+        peers.sort_by_key(|p| p["role"].as_str() == Some("specialist"));
         // 執行者池條目與每條的已用數（`agm hire --pool <id>` 用的 id 就從這裡看）。
         let cfg = app.cfg.get().await;
         let cfg_bots = cfg.projects.iter().find(|c| c.id.as_deref() == Some(project_id.as_str())).map(|c| c.bots.as_slice()).unwrap_or(&[]);
@@ -86,10 +88,17 @@ pub(crate) async fn list(
         reasons: Vec<String>,
         score: i64,
         rank_tier: u32,
+        /// 同 track 的專家：排在所有候選最前面（理由「專家（同 track）」）。
+        specialist_match: bool,
     }
 
     let mut candidates = Vec::new();
-    for bot in bots.into_iter().filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor")) {
+    for bot in bots.into_iter().filter(|b| b.project_id == project_id && matches!(b.role.as_deref(), Some("executor" | "specialist"))) {
+        // 其他 track 的專家不是這個 track 的候選（不搶別的 track）。
+        let is_specialist = bot.role.as_deref() == Some("specialist");
+        if is_specialist && bot.track.as_deref() != Some(for_track) {
+            continue;
+        }
         let run = crate::db::active_run(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         let mut status = run.as_ref().map(|r| r.agent_status.clone()).unwrap_or_else(|| "unknown".to_string());
         if let Some(r) = &run {
@@ -162,6 +171,9 @@ pub(crate) async fn list(
 
         // 排序分數計算
         let mut score: i64 = 0;
+        if is_specialist {
+            reasons.push("專家（同 track）".to_string());
+        }
 
         // 最近一筆 relay_requests 的 track 相同者最優先（理由「同 track」）
         let last_req_track: Option<Option<String>> = sqlx::query_scalar(
@@ -216,11 +228,13 @@ pub(crate) async fn list(
             reasons,
             score,
             rank_tier: rank,
+            specialist_match: is_specialist,
         });
     }
 
     candidates.sort_by(|a, b| {
         b.eligible.cmp(&a.eligible)
+            .then_with(|| b.specialist_match.cmp(&a.specialist_match))
             .then_with(|| b.score.cmp(&a.score))
             .then_with(|| a.rank_tier.cmp(&b.rank_tier))
             .then_with(|| a.bot_id.cmp(&b.bot_id))
@@ -379,5 +393,36 @@ mod spawn_gate_tests {
         let body = crate::runners::credential_spawn::SpawnBegin { bot_id: bot.id, timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() };
         let (status, _) = crate::runners::credential_spawn::begin(State(env.app.clone()), headers, axum::extract::Form(body)).await;
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod specialist_peers_tests {
+    use super::*;
+
+    /// 專家的候選規則：同 track 的專家排第一（理由「專家（同 track）」）；其他 track 的專家不是候選；
+    /// 沒給 --for 時專家排在執行者之後。
+    #[tokio::test]
+    async fn same_track_specialist_leads_other_tracks_drop_out_and_specialists_sort_last() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let exec = crate::testing::claude_bot(&app, &env.project_id, "exec").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&exec.id).execute(&app.db).await.unwrap();
+        let mine = crate::testing::claude_bot(&app, &env.project_id, "spec-infra").await;
+        sqlx::query("UPDATE bots SET role='specialist', track='infra' WHERE id=?").bind(&mine.id).execute(&app.db).await.unwrap();
+        let other = crate::testing::claude_bot(&app, &env.project_id, "spec-ui").await;
+        sqlx::query("UPDATE bots SET role='specialist', track='ui' WHERE id=?").bind(&other.id).execute(&app.db).await.unwrap();
+
+        let plain = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::User)).await.unwrap().0;
+        let ids: Vec<&str> = plain["peers"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+        let pos = |id: &str| ids.iter().position(|x| *x == id).unwrap();
+        assert!(pos(&exec.id) < pos(&mine.id) && pos(&exec.id) < pos(&other.id), "專家排在執行者之後：{plain}");
+
+        let res = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery { for_track: Some("infra".into()) }), Extension(RequestPrincipal::User)).await.unwrap().0;
+        let cands = res["candidates"].as_array().unwrap();
+        assert_eq!(cands[0]["id"], mine.id, "同 track 的專家排第一：{res}");
+        assert!(cands[0]["reasons"].as_array().unwrap().iter().any(|r| r == "專家（同 track）"));
+        assert!(cands.iter().all(|c| c["id"] != other.id), "其他 track 的專家不當候選：{res}");
     }
 }

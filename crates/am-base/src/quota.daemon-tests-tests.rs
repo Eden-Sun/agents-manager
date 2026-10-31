@@ -766,7 +766,7 @@
         let mut q = codex_q("codex-limit-hit", Some(hit));
         q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         set(&app, LOCAL_HOST, "codex", q).await;
-        let bot = |identity: &str| crate::db::Bot { role: None, manager_use: 1,
+        let bot = |identity: &str| crate::db::Bot { role: None, manager_use: 1, track: None, runtime_override_json: None,
             id: format!("b-{identity}"),
             project_id: "p".into(),
             name: identity.into(),
