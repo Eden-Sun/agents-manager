@@ -3310,3 +3310,5 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 遠端 host 可在 `[[hosts]] daemon_url` 設定 daemon 的可信入口；啟動時以 `AM_DAEMON_URL` 傳給 bot，未設定則不猜。`agm peers`、`agm requests` 使用自己的 bot 憑證；`agm requests --to ID --from ID --open` 呼叫 `GET /api/relay-requests`。
 
 `/relay/announce` 對涉及 expert 專案的普通 prompt 以驗證過的 pane／run 核對 `NewRequest` 授權，拒絕時回 403 與原因，狀態不可讀回 503。相同 `expect_result` 的 `client_request_id` 重送時直接回原請求狀態，不依目前 conversation 重新送出。
+
+已驗證 child 可對 `/relay/spawn/begin` 指定 `purpose=pane`，並以同一 child 憑證完成 `/relay/spawn/finish` 或 `/relay/spawn/abort`；daemon 使用憑證對應的 child 身分，不接受 child 建立 agent。`POST /api/pane-authorize` 也接受 child 憑證，僅允許自己的 pane 與非 agent pane。

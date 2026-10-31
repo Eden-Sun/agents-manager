@@ -842,7 +842,8 @@ export AM_CHILD_TOKEN='${_AM_CHILD_TOKEN}'
         printf 'agents-manager: 無法安全注入 child 憑證，拒絕啟動\n' >&2
         return 75
     fi
-    am_herdr pane send-text "$_pane" "$_line" >/dev/null 2>&1
+    am_herdr pane send-text "$_pane" "$_line
+" >/dev/null 2>&1
 }
 
 # 寫給 daemon 問過、但**不能**直送的結果（issue #143）：講明原因、不碰 pane，明確失敗讓寄件端重試。
