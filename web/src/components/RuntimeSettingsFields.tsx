@@ -14,12 +14,15 @@ export function RuntimeSettingsFields({
   inheritLabel,
   idPrefix,
   disabled,
+  codexNote,
 }: {
   value: RuntimeSettings
   onChange: (next: RuntimeSettings) => void
   inheritLabel: string
   idPrefix: string
   disabled?: boolean
+  /** 只有 codex bot 的覆寫框才顯示「codex 永快取」提示（角色卡上講一次就好，見 RolePolicyEditor 的說明）。 */
+  codexNote?: boolean
 }) {
   const t = useT()
   const uid = useId()
@@ -68,7 +71,7 @@ export function RuntimeSettingsFields({
             {t('關')}
           </button>
         </div>
-        <span className="hint">{t('codex 永快取，不需保溫（這個設定只影響 claude）')}</span>
+        {codexNote ? <span className="hint">{t('codex 永快取，不需保溫（這個設定只影響 claude）')}</span> : null}
       </div>
 
       <label className="field">

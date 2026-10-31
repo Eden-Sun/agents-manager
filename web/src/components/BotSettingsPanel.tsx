@@ -652,6 +652,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               idPrefix={`bot-ov-${botId}`}
               value={overrideValue}
               inheritLabel={t('跟角色')}
+              codexNote={bot.kind === 'codex'}
               disabled={saving}
               onChange={(next) => setOverrideDraft(next)}
             />
