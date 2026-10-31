@@ -55,6 +55,23 @@
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
+.bot-role-tag.role-specialist {
+  background: color-mix(in srgb, var(--lamp-blue) 16%, var(--bg-panel));
+  color: var(--accent-ink);
+  border: 1px solid color-mix(in srgb, var(--lamp-blue) 34%, transparent);
+}
+
+/* 專家的 track（軌道）小字，接在角色小標後面。 */
+.bot-track-tag {
+  flex: none;
+  max-width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72em;
+  color: var(--text-faint);
+}
+
 .bot-role-tag.role-advisor {
   background: color-mix(in srgb, var(--lamp-yellow) 18%, var(--bg-panel));
   color: var(--status-warn);

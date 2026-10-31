@@ -128,3 +128,11 @@ test('run.background_tasks／session_crons：hook 報的明細照收、壞形狀
   ])
   assert.deepEqual(r?.session_crons, [{ id: 'c', schedule: '0 9 * * *', recurring: true, prompt: 'p' }])
 })
+
+test('specialist 角色與 track 不會在 normalize 時被丟掉（/api/state 的 bot）', () => {
+  const b = toBot({ id: 'b-spec', role: 'specialist', track: 'infra', runtime_override: null })
+  assert.equal(b?.role, 'specialist')
+  assert.equal(b?.track, 'infra')
+  assert.equal(b?.runtime_override, null)
+  assert.equal(toBot({ id: 'b-x', role: 'bogus' })?.role, null, '不認得的角色仍當未分配')
+})

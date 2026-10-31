@@ -333,5 +333,12 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '管': 'Mgr',
   '顧': 'Adv',
   '執': 'Exe',
+  '專': 'Spc',
+  '專長軌道（必填）': 'Track (required)',
+  '例如 infra、ui': 'e.g. infra, ui',
+  '專家設定': 'Specialist settings',
+  '儲存專家': 'Save specialist',
+  '專家一定要填軌道，空白不能儲存': 'A specialist needs a track; a blank track cannot be saved',
+  '專長軌道：{track}': 'Track: {track}',
   '待套用（需重啟）': 'Pending (restart required)',
 } satisfies Dict

@@ -34,6 +34,11 @@ export function ExpertRoleTag({
   )
 }
 
+/** 專家（specialist）負責的軌道：名字旁的灰色小字。 */
+export function ExpertTrackTag({ track }: { track: string }) {
+  return <span className="bot-track-tag" title={t('專長軌道：{track}', { track })}>{track}</span>
+}
+
 export function ExpertDisabledMark() {
   useT()
   return (

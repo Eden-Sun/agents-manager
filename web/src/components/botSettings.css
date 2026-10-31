@@ -311,3 +311,24 @@
   font-size: 11px;
   line-height: 1.4;
 }
+
+/* 專家（specialist）：角色下拉選專家後，軌道欄與「儲存專家」同一列；空白時按鈕停用。 */
+.bs-specialist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 16px 8px;
+}
+
+.bs-specialist label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bs-specialist .hint {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--text-faint);
+}
