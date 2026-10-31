@@ -376,7 +376,10 @@ async fn the_history_only_shows_the_end_user_and_the_bot() {
         let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["attachments", "by", "created_at", "id", "role", "text"], "只有這幾個欄位：{m}");
     }
-    let text = v.to_string();
+    // id 是隨機 ULID，可能剛好拼出「AGM」之類的字，掃洩漏前先拿掉。
+    let mut scrubbed = v.clone();
+    for m in scrubbed["messages"].as_array_mut().unwrap() { m.as_object_mut().unwrap().remove("id"); }
+    let text = scrubbed.to_string();
     for leak in ["SECRET-SNAPSHOT", "/home/ubuntu", "01OTHERBOTID", "conversation_id", "turn_id", "主人", "AGM", "倒回", "owner", "分享使用者"] {
         assert!(!text.contains(leak), "{leak} 漏出去了：{text}");
     }
