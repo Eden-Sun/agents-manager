@@ -38,7 +38,7 @@ pub fn provider_matches_kind(provider: &str, kind: &str) -> bool {
 
 /// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
 /// 認不出來就當使用者自己打的——寧可少標一次，也不要冤枉一句話。
-/// 遠端 shim 寫進 spool 的報備事件名（`herdr_shim.rs` 的 `am_spool_relay`）。
+/// 舊版遠端 shim 寫進 spool 的報備事件名，保留對既有事件的對帳。
 pub const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
 /// 遠端 shim 開完子 agent 後寫進自己 bot spool 的登記（issue #1790，`herdr_shim.rs` 的 `am_spawn_claim`）。
 pub const SPAWN_CLAIM_EVENT: &str = "AmSpawnClaim";

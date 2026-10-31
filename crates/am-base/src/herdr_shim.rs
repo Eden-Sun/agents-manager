@@ -225,7 +225,7 @@ am_spawn_abort() {
 
 # issue #1790：`agent start` 成功後登記「這顆 pane 是我（${AM_BOT_ID}）開的」。daemon 以這個事實認 parent，不看 herdr 名字前綴
 # （bot 常把輸出 pipe 掉，PostToolUse 撈 stdout 的 spawn hint 不可靠）。本機走 `/relay/spawn/claim`；遠端沒有 `AM_PORT`，
-# 寫一則 `AmSpawnClaim` 進自己 bot 的 hook spool（跟 `am_spool_relay` 同一條路）。登記失敗只印 warn，不讓 start 失敗。
+# 寫一則 `AmSpawnClaim` 進自己 bot 的 hook spool。登記失敗只印 warn，不讓 start 失敗。
 am_spawn_claim() {
     _cpane=$1
     [ -n "${AM_BOT_ID:-}" ] && [ -n "$_cpane" ] || return 0
@@ -374,26 +374,6 @@ am_kv_get() {
     return 1
 }
 
-# Old shell panes may retain a pre-expert environment after their bot restarts.
-# A marker is scoped to the herdr session; if the session is unavailable, conservatively
-# check every session on the host. It protects natural stale panes, not a hostile OS user.
-am_expert_session_marked() {
-    _am_default_root="${HOME}/.config/agents-manager/expert-sessions"
-    _am_legacy_root="$_am_default_root"
-    if [ -n "${AM_CONFIG_PATH:-}" ] && [ -f "$AM_CONFIG_PATH" ]; then _am_legacy_root="${AM_CONFIG_PATH%/*}/expert-sessions"; fi
-    if [ -n "${HERDR_SESSION:-}" ]; then
-        _am_mark_session=$(printf '%s' "$HERDR_SESSION" | LC_ALL=C od -An -tx1 | tr -d ' \n')
-        for _am_mark_root in "$_am_default_root" "$_am_legacy_root"; do
-            for _am_mark in "$_am_mark_root/$_am_mark_session/"*; do [ -f "$_am_mark" ] && return 0; done
-        done
-    else
-        for _am_mark_root in "$_am_default_root" "$_am_legacy_root"; do
-            for _am_mark in "$_am_mark_root/"*/*; do [ -f "$_am_mark" ] && return 0; done
-        done
-    fi
-    return 1
-}
-
 # Names are display strings; changing one cannot change the durable spawn claim.
 am_agent_rename() {
     exec "$AM_HERDR" "$@"
@@ -417,10 +397,8 @@ am_agent_start() {
         if [ -z "$_spawn_url" ] && [ -n "${AM_PORT:-}" ]; then _spawn_url="http://127.0.0.1:${AM_PORT}"; fi
         _spawn_token=$(am_bot_token)
         if [ -z "$_spawn_url" ]; then
-            if [ "${AM_PROJECT_MODE:-parent_child}" != parent_child ] || am_expert_session_marked; then
-                printf 'agents-manager: expert 或未知模式缺少 daemon 位址，無法確認派工權限\n' >&2
-                exit 77
-            fi
+            printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它\n' >&2
+            exit 77
         else
             if [ -z "$_spawn_token" ] || ! command -v curl >/dev/null 2>&1; then
                 printf 'agents-manager: 無法確認目前派工權限（缺 bot 憑證或 curl）\n' >&2
@@ -845,33 +823,32 @@ am_announce_refuse() {
 # 遠端 bot（有 bot 身份、沒有 `AM_PORT`：遠端不開回 daemon 的埠）打不到 `/relay/announce`，收件方的回音就會被當成
 # 使用者打的字（2026-09-30 使用者）。改寫一則報備進自己 bot 目錄的 hook spool，daemon 收 hook 時一起收。
 # 寫不了（沒有目錄、沒有 python3）就算了，照舊直送：標不出來源不是送不出去的理由。
-am_spool_relay() {
-    _sd="$HOME/.config/agents-manager${AM_INSTANCE:+/instances/$AM_INSTANCE}/bots/${AM_BOT_ID}"
-    [ -d "$_sd" ] || return 0
-    command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$1" "$2" "$_to_bot_id" "$_to_run_id" "$_delivery_id" <<'AMPY' >/dev/null 2>&1 || true
-import datetime, json, os, sys, tempfile, time
-sd, bot, kind, to_agent, text, to_bot_id, to_run_id, delivery_id = sys.argv[1:9]
-os.makedirs(sd, exist_ok=True)
-# 跟 daemon 的 db::now() 同一種毫秒 UTC 格式：hook_events.received_at 只存這種（issue #101／#730）。
-now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
-        "received_at": now,
-        "payload": {"hook_event_name": "AmRelayAnnounce", "version": 2, "to_agent": to_agent,
-                    "to_bot_id": to_bot_id, "to_run_id": to_run_id, "delivery_id": delivery_id, "text": text}}
-fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
-with os.fdopen(fd, "w") as f:
-    f.write(json.dumps(body, ensure_ascii=False) + "\n")
-os.replace(tmp, os.path.join(sd, "%d-%d.json" % (time.time_ns(), os.getpid())))
-AMPY
-}
-
 am_daemon_base() {
     if [ -n "${AM_DAEMON_URL:-}" ]; then printf '%s' "$AM_DAEMON_URL"; elif [ -n "${AM_PORT:-}" ]; then printf 'http://127.0.0.1:%s' "$AM_PORT"; else return 1; fi
 }
 
 am_agent_prompt() {
     shift 2
+    if [ -z "${AM_BOT_ID:-}" ]; then
+        _unmanaged_target=${1:-}; [ "$#" -gt 0 ] && shift
+        case "$_unmanaged_target" in
+            *:p*|bot:*) : ;;
+            *)
+                _candidate=$(am_child_name "$_unmanaged_target" 2>/dev/null) || exit 75
+                _pane=""
+                for _target in "$_candidate" "$_unmanaged_target"; do
+                    _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
+                    _pane=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys; p=json.load(sys.stdin)["result"]["agent"]["pane_id"]; assert isinstance(p,str) and p and not any(ord(c)<33 or ord(c)==127 for c in p); print(p)' 2>/dev/null) || _pane=""
+                    [ -z "$_pane" ] || break
+                done
+                [ -n "$_pane" ] || am_announce_refuse 75 "$_unmanaged_target" "no stable pane_id evidence"
+                _unmanaged_target=$_pane ;;
+        esac
+        exec "$AM_HERDR" agent prompt "$_unmanaged_target" "$@"
+    fi
+    if ! am_daemon_base >/dev/null; then
+        am_announce_refuse 77 "${1:-}" "此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它"
+    fi
     case "${1:-}" in
         -* | "")
             # 旗標在名字前面（或根本沒給名字）：交給真的 herdr 去講清楚，我們不猜。
@@ -893,13 +870,9 @@ am_agent_prompt() {
         esac
         set -- "$@" "$_a"
     done
-    if ! am_daemon_base >/dev/null && { [ "${AM_PROJECT_MODE:-}" = expert ] || am_expert_session_marked; }; then
-        am_announce_refuse 77 "$_requested" "expert 模式缺少 daemon 位址，不能確認收件權限"
-    fi
-    _remote_bot=""
-    case "$_requested" in bot:*) [ -n "${AM_PORT:-}" ] || _remote_bot=1 ;; esac
-    if [ -n "$_expect_result" ] || [ -n "$_remote_bot" ]; then
-        [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] || am_announce_refuse 77 "$_requested" "expect-result requires bot credentials"
+    if :; then
+        [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] || am_announce_refuse 77 "$_requested" "缺少 bot 憑證"
+        command -v curl >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "這台機器沒有 curl，無法確認 daemon 授權"
         command -v python3 >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "python3 is required"
         _base=$(am_daemon_base) || am_announce_refuse 75 "$_requested" "daemon address unavailable"
         _text=""; _skip=0; _ack=""; _reply_to=""; _want_reply_to=0; _want_timeout=0; _timeout_ms=30000
@@ -924,22 +897,23 @@ am_agent_prompt() {
         _timeout=$(python3 -c 'import sys; s=sys.argv[1]; assert s.isascii() and s.isdigit() and int(s)>0; print(int(s)/1000)' "$_timeout_ms" 2>/dev/null) || am_announce_refuse 75 "$_requested" "--timeout must be a positive millisecond count"
         _deadline=$(python3 -c 'import sys,time; print(time.time()+float(sys.argv[1]))' "$_timeout") || exit 75
         _selector=$_requested
-        case "$_requested" in
-            bot:*|*:p*) : ;;
-            *)
-                _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select a child display name"
-                for _target in "$_candidate" "$_requested"; do
-                    _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
-                    _pane=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys; p=json.load(sys.stdin)["result"]["agent"]["pane_id"]; assert isinstance(p,str) and p and not any(ord(c)<33 or ord(c)==127 for c in p); print(p)' 2>/dev/null) || _pane=""
-                    if [ -n "$_pane" ]; then _selector=$_pane; break; fi
-                done
-                ;;
-        esac
         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
         _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_selector" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
         _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
+        case "$_requested" in
+            bot:*|*:p*) : ;;
+            *)
+                if [ "$_code" = 404 ]; then
+                    _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select child name"
+                    if [ "$_candidate" != "$_requested" ]; then
+                        _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
+                        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_candidate" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
+                        _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
+                    fi
+                fi ;;
+        esac
         _resolve=$(printf '%s\n' "$_resolve_out" | sed '$d')
-        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 無法解析目標（HTTP ${_code}）：$_resolve" ;; esac
+        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）：$_resolve" ;; *) am_announce_refuse 75 "$_requested" "daemon 無法解析目標（HTTP ${_code}）：$_resolve" ;; esac
         _target=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin)["to_bot_id"])') || am_announce_refuse 75 "$_requested" "daemon 未提供目標 bot ID"
         [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
         _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3],"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$AM_BOT_ID" "$_expect_result" "$_ack" "$_reply_to") || exit 75
@@ -953,186 +927,7 @@ am_agent_prompt() {
         printf 'request_id=%s\n' "$_rid"
         return 0
     fi
-    _name=""
-    # Explicit IDs never go through name lookup. A bot ID needs daemon routing; remote callers use pane IDs.
-    case "$_requested" in
-        bot:*)
-            [ -n "${AM_PORT:-}" ] || am_announce_refuse 75 "$_requested" "bot_id requires daemon resolution; use pane_id on remote hosts"
-            _name=$_requested
-            ;;
-        *:p*) _name=$_requested ;;
-        *)
-            command -v python3 >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "cannot freeze a name without a JSON parser"
-            _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select a child display name"
-            # Child shorthand first: a stranger holding the short name must not steal the prompt.
-            for _target in "$_candidate" "$_requested"; do
-                _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
-                _name=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys
-try:
-    pane=json.load(sys.stdin)["result"]["agent"]["pane_id"]
-    assert isinstance(pane,str) and pane and not any(ord(c)<33 or ord(c)==127 for c in pane)
-    print(pane)
-except Exception: sys.exit(1)' 2>/dev/null) || _name=""
-                [ -z "$_name" ] || break
-            done
-            [ -n "$_name" ] || am_announce_refuse 75 "$_requested" "no stable pane_id evidence; use pane_id or bot:<bot_id>"
-            ;;
-    esac
-    # 我們自己的旗標（SPEC §18.15）：`--ack`（純告知，不叫醒 AGM）、`--reply-to <id>`（回哪一則事件／交辦）。
-    # 真的 herdr 不認得，一律剝掉；沒帶就是新的事，AGM 會被叫醒。
-    _to_pane_id=""
-    _to_bot_id=""
-    _to_run_id=""
-    # 一次投遞的 ID 在 curl 重試與 spool 裡沿用；產不出來就維持未知。
-    _delivery_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null) || _delivery_id=""
-    _ack=""
-    _reply_to=""
-    _n=$#
-    _i=0
-    while [ "$_i" -lt "$_n" ]; do
-        _a=$1
-        shift
-        _i=$((_i + 1))
-        case "$_a" in
-            --to-bot-id | --to-run-id | --to-pane-id)
-                if [ "$_i" -lt "$_n" ]; then
-                    case "$_a" in --to-bot-id) _to_bot_id=$1 ;; --to-run-id) _to_run_id=$1 ;; --to-pane-id) _to_pane_id=$1 ;; esac
-                    shift
-                    _i=$((_i + 1))
-                fi
-                continue
-                ;;
-            --to-pane-id=*) _to_pane_id=${_a#--to-pane-id=}; continue ;;
-            --to-bot-id=*) _to_bot_id=${_a#--to-bot-id=}; continue ;;
-            --to-run-id=*) _to_run_id=${_a#--to-run-id=}; continue ;;
-            --ack)
-                _ack=1
-                continue
-                ;;
-            --reply-to)
-                if [ "$_i" -lt "$_n" ]; then
-                    _reply_to=$1
-                    shift
-                    _i=$((_i + 1))
-                fi
-                continue
-                ;;
-            --reply-to=*)
-                _reply_to=${_a#--reply-to=}
-                continue
-                ;;
-        esac
-        set -- "$@" "$_a"
-    done
-    [ -z "$_to_pane_id" ] || _name=$_to_pane_id
-    # 正文只是 TEXT 那個位置參數：`--wait`、`--until X`、`--timeout X` 是 herdr 的旗標，混進正文會讓
-    # 同一句申請因為逾時值不同就變成兩個指紋。
-    _text=""
-    _skip=0
-    for _a in "$@"; do
-        if [ "$_skip" = 1 ]; then
-            _skip=0
-            continue
-        fi
-        case "$_a" in
-            --wait | --until=* | --timeout=*) continue ;;
-            --until | --timeout)
-                _skip=1
-                continue
-                ;;
-        esac
-        _text="${_text:+$_text }$_a"
-    done
-    if [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && am_daemon_base >/dev/null; then
-        _base=$(am_daemon_base)
-        # 「確定沒送到 daemon」與「送了但回覆不明」要分清楚（issue #143）。直送 pane 只有一種情形站得住腳：**連線根本沒建立**
-        # （curl 7，daemon 不在），request 一定沒進 daemon。其餘——逾時、空回應、連線被重置、任何非 2xx、看不懂的 2xx——
-        # request 可能已經進了 daemon（durable 的 bot_request 可能已經 commit，只是回覆沒收完整）：直送會變成佇列一份、pane 一份，
-        # 而且 401／403 這種身份被拒也不能變成繞過控制面的旁路。這些一律明確失敗（exit 75／77），讓寄件端自己重試。
-        if ! command -v curl >/dev/null 2>&1; then
-            am_announce_refuse 75 "$_name" "這台機器沒有 curl，問不了 daemon 這句要不要走協調佇列"
-        fi
-        _try=0
-        while :; do
-            _try=$((_try + 1))
-            # 第一次 2 秒；再問就給久一點（daemon 可能已經排進佇列、只是回得慢）。沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
-            if [ "$_try" = 1 ]; then _m=2; else _m=15; fi
-            # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。`-w` 在回應後面補一行 HTTP 狀態碼。
-            _out=$(am_curl_bot -s -m "$_m" -w '\n%{http_code}' --noproxy '*' -X POST "${_base%/}/relay/announce" \
-                --data-urlencode "bot_id=${AM_BOT_ID}" \
-                --data-urlencode "to_agent=${_name}" \
-                --data-urlencode "to_bot_id=${_to_bot_id}" \
-                --data-urlencode "to_run_id=${_to_run_id}" \
-                --data-urlencode "delivery_id=${_delivery_id}" \
-                --data-urlencode "text=${_text}" \
-                --data-urlencode "ack=${_ack}" \
-                --data-urlencode "reply_to=${_reply_to}" 2>/dev/null)
-            _rc=$?
-            case "$_rc" in 0 | 7) break ;; esac
-            [ "$_try" -lt 2 ] || break
-        done
-        if [ "$_rc" = 7 ] && { [ -n "${AM_DAEMON_URL:-}" ] || [ "${AM_PROJECT_MODE:-}" = expert ] || am_expert_session_marked; }; then
-            am_announce_refuse 75 "$_name" "daemon 無法連線，未送出"
-        fi
-        if [ "$_rc" != 7 ]; then
-            if [ "$_rc" != 0 ]; then
-                am_announce_refuse 75 "$_name" "問 daemon 時連線出了狀況（curl 結束碼 ${_rc}），不確定它有沒有收到；同一句再送一次就好，daemon 以內容去重"
-            fi
-            _code=$(printf '%s\n' "$_out" | tail -n 1)
-            _resp=$(printf '%s\n' "$_out" | sed '$d')
-            case "$_resp" in
-                # 寫給 AGM、但 daemon 現在排不進協調佇列（issue #143）：不直送，明確失敗讓寄件端重試。
-                # 直送會繞過 durable inbox 與去重，控制面也不知道這則走了旁路。
-                *'"routing_unavailable":'*)
-                    printf 'agents-manager: 寫給 %s 的訊息現在排不進 AGM 協調佇列，沒有送出、也不直接打進它的 pane；請稍後重試：%s\n' "$_name" "$_resp" >&2
-                    exit 75
-                    ;;
-            esac
-            case "$_code" in
-                2??)
-                    case "$_resp" in
-                        # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，否則同一句話會先燒一輪巡檢的回合。
-                        *'"routed":'*)
-                            printf 'agents-manager: 已排入 AGM 協調佇列，不直接打進 %s 的 pane：%s\n' "$_name" "$_resp" >&2
-                            exit 0
-                            ;;
-                        # daemon 明確說「不是給協調者的」（announce 已記下）：照舊直送。
-                        *'"to_pane_id":'*)
-                            _pane=$(printf '%s' "$_resp" | sed -n 's/.*"to_pane_id" *: *"\([^"\]*\)".*/\1/p')
-                            [ -n "$_pane" ] || am_announce_refuse 75 "$_name" "daemon 未提供可驗證的 pane 地址"
-                            _name=$_pane
-                            ;;
-                        '{}') : ;;
-                        *'"target_pane_id":'*)
-                            _name=$(printf '%s' "$_resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_pane_id"])') || exit 75
-                            ;;
-                        *) am_announce_refuse 75 "$_name" "daemon 回了看不懂的內容：$(printf '%s' "$_resp" | cut -c1-200)" ;;
-                    esac
-                    ;;
-                401 | 403)
-                    am_announce_refuse 77 "$_name" "daemon 不認這顆 bot 的身份（HTTP ${_code}）：$(printf '%s' "$_resp" | cut -c1-200)"
-                    ;;
-                *)
-                    am_announce_refuse 75 "$_name" "daemon 回 HTTP ${_code}：$(printf '%s' "$_resp" | cut -c1-200)"
-                    ;;
-            esac
-        fi
-    elif [ -n "${AM_BOT_ID:-}" ] && am_daemon_base >/dev/null; then
-        am_announce_refuse 77 "$_name" "缺少 bot 憑證，無法確認 daemon 授權"
-    elif [ "${AM_PROJECT_MODE:-}" = expert ]; then
-        am_announce_refuse 77 "$_name" "expert 模式無法確認 daemon 身分或位址"
-    elif [ -n "${AM_BOT_ID:-}" ] && [ -z "${AM_PORT:-}" ]; then
-        # 遠端沒有 daemon 可以解 run→pane；沒有明確 pane 地址的舊呼叫不報備身份。
-        if [ -n "$_to_pane_id" ]; then
-            am_spool_relay "$_name" "$_text"
-        else
-            _to_bot_id=""
-            _to_run_id=""
-            am_spool_relay "$_name" "$_text"
-        fi
-    fi
-    case "$_name" in bot:*) am_announce_refuse 75 "$_name" "daemon did not resolve bot_id to a pane" ;; esac
-    exec "$AM_HERDR" agent prompt "$_name" "$@"
+
 }
 
 # herdr spawns a pane from the *server*, not from this shell, so nothing is inherited: a child

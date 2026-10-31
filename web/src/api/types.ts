@@ -280,6 +280,7 @@ export const HOST_DEFAULTS = {
 export interface Bot {
   role?: 'manager' | 'executor' | 'advisor' | null
   role_pending?: boolean
+  daemon_url_pending?: boolean
   runtime_role_policy?: string | null
   id: string
   project_id: string

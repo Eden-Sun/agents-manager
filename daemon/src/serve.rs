@@ -192,30 +192,8 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         Err(e) => tracing::warn!(error = ?e, "could not re-arm keep-warm windows; a keep-warm reply may count as activity once"),
     }
 
-    // No expert admission until each host has reconciled its persisted marker set.
-    {
-        let mut blocked = app.expert_marker_blocked.lock().await;
-        blocked.insert(config::LOCAL_HOST.to_string());
-        blocked.extend(host_cfg.iter().map(|h| h.name.clone()));
-    }
     // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &host_cfg).await;
-    // A transient marker I/O failure must not leave expert admission blocked forever.
-    let marker_app = app.clone();
-    app.background_tasks.spawn(Box::pin(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = marker_app.shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    let hosts: Vec<String> = marker_app.expert_marker_blocked.lock().await.iter().cloned().collect();
-                    for host in hosts { if let Err(e) = crate::runners::reconcile::reconcile_host(&marker_app, &host).await { tracing::warn!(host, error = %e, "expert marker retry failed"); } }
-                }
-            }
-        }
-    }));
     // #1773：舊版 run 記的是連線世代，重啟後對不上；還沒結束的遠端 run 改記這台目前設定的目標指紋（之後只有換機器才圍掉）。
     for h in host_cfg.iter().filter(|h| h.name != config::LOCAL_HOST) {
         match db::rebase_active_run_host_epoch(&app.db, &h.name, am_base::hosts::target_epoch(h)).await {

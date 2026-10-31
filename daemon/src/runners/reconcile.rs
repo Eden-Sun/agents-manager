@@ -31,10 +31,6 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
 }
 
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
-    if let Err(e) = crate::expert_marker::reconcile_host(app, host).await {
-        if crate::expert_marker::host_may_be_expert(app, host).await { return Err(e); }
-        tracing::warn!(host, error = %e, "parent-child host reconciliation continues while stale marker cleanup retries");
-    }
     let lost = {
         let lock = crate::reconcile::host_pass_lock(app.as_ref(), host).await;
         let _pass = lock.lock().await;
