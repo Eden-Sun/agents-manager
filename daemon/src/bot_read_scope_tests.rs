@@ -491,44 +491,6 @@ async fn bot_project_timeline_and_bot_tree_reads_do_not_cross_to_siblings_or_anc
         markers.push(marker);
     }
 
-    let parent_timeline = get(
-        e.app.clone(),
-        &format!("/api/projects/{}/messages", e.project_id),
-        &bot_headers(&parent),
-    )
-    .await;
-    assert!(parent_timeline.starts_with("HTTP/1.1 200"), "parent retains its scoped group timeline: {parent_timeline}");
-    for marker in [markers[0], markers[1], markers[2]] {
-        assert!(parent_timeline.contains(marker), "parent should read its tree's group messages ({marker}): {parent_timeline}");
-    }
-    assert!(!parent_timeline.contains(markers[3]), "project timeline leaked a sibling bot message: {parent_timeline}");
-
-    // A sibling's newest row must not consume the Bot's page limit or become a usable cursor.
-    let limited = get(
-        e.app.clone(),
-        &format!("/api/projects/{}/messages?limit=1", e.project_id),
-        &bot_headers(&parent),
-    )
-    .await;
-    assert!(limited.starts_with("HTTP/1.1 200") && limited.contains(markers[2]), "scope filtering happens before the page limit: {limited}");
-    assert!(!limited.contains(markers[3]), "the limited page leaked a sibling: {limited}");
-    let sibling_message_id: String = sqlx::query_scalar(
-        "SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.content=?",
-    )
-    .bind(&sibling.id)
-    .bind(markers[3])
-    .fetch_one(&e.app.db)
-    .await
-    .unwrap();
-    let sibling_cursor = get(
-        e.app.clone(),
-        &format!("/api/projects/{}/messages?before={sibling_message_id}", e.project_id),
-        &bot_headers(&parent),
-    )
-    .await;
-    assert!(sibling_cursor.starts_with("HTTP/1.1 404"), "a sibling message cannot be used as a timeline cursor: {sibling_cursor}");
-    assert!(!sibling_cursor.contains(markers[3]), "foreign cursor error disclosed its message: {sibling_cursor}");
-
     let child_state_response = get(e.app.clone(), "/api/state", &bot_headers(&child)).await;
     assert!(child_state_response.starts_with("HTTP/1.1 200"), "child can read its scoped state: {child_state_response}");
     let child_state = body(&child_state_response);
@@ -550,14 +512,6 @@ async fn bot_project_timeline_and_bot_tree_reads_do_not_cross_to_siblings_or_anc
         }
     }
 
-    let user_timeline = get(
-        e.app.clone(),
-        &format!("/api/projects/{}/messages", e.project_id),
-        &format!("X-AM-Token: {}\r\n", e.app.ui_token),
-    )
-    .await;
-    assert!(user_timeline.starts_with("HTTP/1.1 200"), "UI timeline remains available: {user_timeline}");
-    assert!(user_timeline.contains(markers[3]), "UI keeps the full project timeline: {user_timeline}");
 }
 
 #[tokio::test]

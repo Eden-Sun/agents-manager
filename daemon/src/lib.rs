@@ -265,7 +265,6 @@ mod remote_perms;
 mod promote;
 mod gh_auth;
 mod git_quick;
-mod group;
 #[cfg(not(test))]
 pub use am_share::share;
 // App-backed share tests (tests.rs etc.) belong to the daemon crate: under `cargo test` compile the

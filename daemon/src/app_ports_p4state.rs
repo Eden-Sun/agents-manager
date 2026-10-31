@@ -361,10 +361,9 @@ pub async fn queue_for_next_turn(
     text: &str,
     plain_text: &str,
     client_request_id: &str,
-    model: Option<&str>,
     relay: crate::lifecycle::RelaySrc<'_>,
 ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-    crate::lifecycle::queue_for_next_turn(app, conv, bot_id, text, plain_text, client_request_id, model, relay).await
+    crate::lifecycle::queue_for_next_turn(app, conv, bot_id, text, plain_text, client_request_id, relay).await
 }
 
 pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {

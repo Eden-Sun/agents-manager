@@ -698,7 +698,7 @@ mod tests {
                     if queue_in_window {
                         let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
                         let relay = super::super::prompt::RelaySrc::trusted(Some("agm"));
-                        super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", None, relay).await.unwrap();
+                        super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", relay).await.unwrap();
                     }
                     let sent = check_at(&e.app, &bot.id, t0 + IDLE_WAIT).await;
                     let want = *killed_tool && verified && !queue_in_window;
@@ -868,7 +868,7 @@ mod tests {
         resumable(&e, &bot.id, "exited", "working").await;
         let conv = db::conversation_id(e.app.db(), &bot.id).await.unwrap();
         let relay = super::super::prompt::RelaySrc::trusted(Some("agm"));
-        super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", None, relay).await.unwrap();
+        super::super::prompt::queue_for_next_turn(&e.app, &conv, &bot.id, "派工", "派工", "agm-1", relay).await.unwrap();
         let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
         settle(&e, &bot.id, &run, Some("verified")).await;
         assert!(!check_at(&e.app, &bot.id, Instant::now()).await);

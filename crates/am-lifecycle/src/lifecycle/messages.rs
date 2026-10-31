@@ -19,7 +19,7 @@ pub async fn insert_message(
     incomplete: bool,
     snapshot: Option<&str>,
 ) -> anyhow::Result<db::Message> {
-    insert_message_grouped(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, None).await
+    insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -77,22 +77,6 @@ pub async fn emit_message_added(app: &impl crate::capabilities::Emit, bot_id: &s
     app.emit("message_added", json!({ "bot_id": bot_id, "message": message })).await;
 }
 
-/// `insert_message` with a SPEC §13 `group_id` (project group chat).
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_message_grouped(
-    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
-    conversation_id: &str,
-    turn_id: Option<&str>,
-    role: &str,
-    content: &str,
-    source: &str,
-    incomplete: bool,
-    snapshot: Option<&str>,
-    group_id: Option<&str>,
-) -> anyhow::Result<db::Message> {
-    insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id, None).await
-}
-
 /// 別的 bot 送來的訊息記下寄件 bot 送它當下正在跑的回合（`relay_turn_id`，#927）。跟插入同一個交易，寫在 [`insert_message_relayed_tx`] 之後。
 pub async fn mark_relay_turn(conn: &mut sqlx::SqliteConnection, message_id: &str, turn: Option<&str>) -> anyhow::Result<()> {
     let Some(turn) = turn else { return Ok(()) };
@@ -112,7 +96,6 @@ pub async fn insert_message_full(
     source: &str,
     incomplete: bool,
     snapshot: Option<&str>,
-    group_id: Option<&str>,
     relay_from: Option<&str>,
 ) -> anyhow::Result<db::Message> {
     // 先讀 owner 再寫訊息（#613 要它們同一個交易）：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，
@@ -128,8 +111,8 @@ pub async fn insert_message_full(
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, relay_from, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, relay_from, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(conversation_id)
@@ -139,7 +122,6 @@ pub async fn insert_message_full(
     .bind(source)
     .bind(incomplete as i64)
     .bind(snapshot)
-    .bind(group_id)
     .bind(relay_from)
     .bind(&now)
     .execute(&mut *tx)

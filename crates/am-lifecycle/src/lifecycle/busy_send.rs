@@ -83,7 +83,6 @@ pub(super) async fn queue_awaiting_idle(
     text: &str,
     deliver: &str,
     client_request_id: &str,
-    group_id: Option<&str>,
     relay: prompt::RelaySrc<'_>,
     files: &[Attachment],
 ) -> LcResult<prompt::PromptOut> {
@@ -142,14 +141,13 @@ pub(super) async fn queue_awaiting_idle(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at)
-         VALUES (?, ?, ?, 'user', ?, 'web', ?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at)
+         VALUES (?, ?, ?, 'user', ?, 'web', ?, ?, ?)",
     )
     .bind(&message_id)
     .bind(conversation_id)
     .bind(&turn_id)
     .bind(text)
-    .bind(group_id)
     .bind(relay.from)
     .bind(relay.unverified)
     .bind(&now)
@@ -179,7 +177,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     async fn admit(app: &Arc<App>, conv: &str, bot_id: &str, text: &str, crid: &str) -> LcResult<prompt::PromptOut> {
-        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::trusted(None), &[]).await
+        queue_awaiting_idle(app, conv, bot_id, text, text, crid, prompt::RelaySrc::trusted(None), &[]).await
     }
 
     async fn queued(app: &Arc<App>, conv: &str) -> (i64, i64) {
@@ -211,7 +209,7 @@ mod tests {
 
     /// daemon 自己排的通知（lane 由受信任的 caller 指定，來源標記只供 UI 顯示）。
     async fn admit_notice(app: &Arc<App>, conv: &str, bot_id: &str, text: &str, crid: &str) -> LcResult<prompt::PromptOut> {
-        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::daemon_notice(Some("daemon")), &[]).await
+        queue_awaiting_idle(app, conv, bot_id, text, text, crid, prompt::RelaySrc::daemon_notice(Some("daemon")), &[]).await
     }
 
     async fn queued_rows(app: &Arc<App>, conv: &str) -> i64 {

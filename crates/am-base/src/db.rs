@@ -1580,8 +1580,6 @@ pub struct Message {
     pub source: String,
     pub incomplete: i64,
     pub terminal_snapshot: Option<String>,
-    /// SPEC §13: shared by every message of one `POST /projects/:id/chat` send.
-    pub group_id: Option<String>,
     /// See `attach.rs`.
     pub attachments_json: Option<String>,
     /// NULL = the user typed it.
@@ -1618,7 +1616,6 @@ pub struct MessageWire {
     source: String,
     incomplete: i64,
     terminal_snapshot: Option<String>,
-    group_id: Option<String>,
     attachments_json: Option<String>,
     relay_from: Option<String>,
     relay_unverified: i64,
@@ -1642,7 +1639,6 @@ impl From<Message> for MessageWire {
             source,
             incomplete: m.incomplete,
             terminal_snapshot: m.terminal_snapshot,
-            group_id: m.group_id,
             attachments_json: m.attachments_json,
             relay_from: m.relay_from,
             relay_unverified: m.relay_unverified,

@@ -226,11 +226,6 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/supervisor/maintenance/safety", Expect::RoleRequired, None),
         rule("GET", "/api/bots/deleted", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/build-inputs", Expect::RoleRequired, None),
-        rule("GET", "/api/projects/{id}/chat", Expect::Forbidden, None),
-        rule("POST", "/api/projects/{id}/chat", Expect::Forbidden, None),
-        rule("PUT", "/api/projects/{id}/chat", Expect::Forbidden, None),
-        rule("PATCH", "/api/projects/{id}/chat", Expect::Forbidden, None),
-        rule("DELETE", "/api/projects/{id}/chat", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/assignments/{id}/review", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/assignments/{id}/review", Expect::Forbidden, None),
         rule("PUT", "/api/supervisor/assignments/{id}/review", Expect::Forbidden, None),
@@ -261,11 +256,6 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/hosts/{name}/identities/{identity}/logout", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/agy/logout", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/agy/install", Expect::Forbidden, None),
-        rule("GET", "/api/projects/{id}/messages", Expect::Forbidden, None),
-        rule("POST", "/api/projects/{id}/messages", Expect::Forbidden, None),
-        rule("PUT", "/api/projects/{id}/messages", Expect::Forbidden, None),
-        rule("PATCH", "/api/projects/{id}/messages", Expect::Forbidden, None),
-        rule("DELETE", "/api/projects/{id}/messages", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/responder/persona", Expect::RoleRequired, None),
         deny_rule("PUT", "/api/supervisor/responder/persona", Expect::RoleRequired, "Responder persona is supervisory configuration; only User or a registered AGM role may change it."),
         rule("GET", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
@@ -1092,24 +1082,9 @@ async fn plain_bot_in_its_own_project() -> (crate::testing::Env, u16, String) {
 }
 
 #[tokio::test]
-async fn a_plain_bot_cannot_post_group_chat_or_create_a_mission_in_its_own_project() {
+async fn a_plain_bot_cannot_create_a_mission_in_its_own_project() {
     let (env, port, a) = plain_bot_in_its_own_project().await;
     let client = reqwest::Client::new();
-    let chat = client
-        .post(format!("http://127.0.0.1:{port}/api/projects/{}/chat", env.project_id))
-        .header("content-type", "application/json")
-        .header("X-AM-Bot-Id", &a)
-        .header("X-AM-Bot-Token", "token-a")
-        .body(r#"{"text":"@all hi","client_request_id":"y1-chat"}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(chat.status(), StatusCode::FORBIDDEN);
-    let body = chat.text().await.unwrap();
-    assert!(body.contains("\"reason\":\"user_only\""), "{body}");
-    let said: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE content LIKE '%@all hi%'").fetch_one(&env.app.db).await.unwrap();
-    assert_eq!(said, 0, "a refused group chat must not reach any bot as the user");
-
     let mission = json!({"text":"y1","client_request_id":"y1-m","delivery_mode":"pr","executor_kind":"claude","on_5h_limit":"wait"}).to_string();
     let made = client
         .post(format!("http://127.0.0.1:{port}/api/projects/{}/missions", env.project_id))
