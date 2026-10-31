@@ -61,16 +61,25 @@
   border: 1px solid color-mix(in srgb, var(--lamp-blue) 34%, transparent);
 }
 
-/* 專家的 track（軌道）小字，接在角色小標後面。 */
-.bot-track-tag {
-  flex: none;
+/* 專家的 track：第二行（模型標籤前面）的一顆小標，高度與模型／身份標籤一致，不靠名字框寬度。 */
+.bot-sub .bot-track-tag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
   max-width: 9em;
-  margin-right: 4px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--lamp-blue) 34%, transparent);
+  background: color-mix(in srgb, var(--lamp-blue) 14%, var(--bg-panel));
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.72em;
-  color: var(--text-faint);
 }
 
 .bot-role-tag.role-advisor {
