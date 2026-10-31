@@ -399,6 +399,8 @@ export function UnreadChip() {
               /* 裁切高度用量的，不寫死 px：晶片加了星號與徽章就會變高，寫死會把最後一行切一半（541afe7）。 */
               style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
             >
+              {/* 沒釘的那組跟主力分開標明，免得在跑的 bot 被看成主力（2026-10-31 使用者）。 */}
+              {!pinned && pinnedItems.length > 0 ? <span className="unread-group-label">{t('進行中')}</span> : null}
               {group.map((it) => (
                 <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} />
               ))}

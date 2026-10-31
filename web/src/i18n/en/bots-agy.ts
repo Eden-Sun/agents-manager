@@ -290,6 +290,7 @@ export default {
   '往右看更多': 'Scroll right for more',
   '（{kids}）': ' ({kids})',
   '在跑或剛完成的 bot': 'Running or recently completed Bots',
+  '進行中': 'Active',
   '主力 bot': 'Primary Bot',
   '{title}：{names}': '{title}: {names}',
   '收合成 {n} 排': {
