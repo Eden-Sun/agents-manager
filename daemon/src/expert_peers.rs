@@ -39,7 +39,7 @@ pub(crate) async fn list(State(app): State<Arc<App>>, Path(project_id): Path<Str
     Ok(Json(json!({"project_id":project_id,"peers":peers})))
 }
 
-pub(crate) const EXPERT_NO_CHILD: &str = "專家模式沒有 child：用 agm peers 找同專案的頂層執行者／顧問，以 herdr agent prompt bot:<id> --expect-result 派工；缺人手請使用者建立頂層 bot 並指派角色。";
+pub(crate) const EXPERT_NO_CHILD: &str = "專家模式沒有 child：用 agm peers 找同專案的頂層執行者／顧問，以 herdr agent prompt bot:<id> --expect-result 派工；管理者缺人手用 agm hire 增聘執行者。";
 
 pub(crate) async fn spawn_authority(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     let RequestPrincipal::Bot(id) = principal else { return Err(LcError::Forbidden(json!({"error":"forbidden"}))); };
