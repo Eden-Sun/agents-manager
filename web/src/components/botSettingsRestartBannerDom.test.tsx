@@ -86,3 +86,20 @@ test('daemon 回 needs_restart:true（要重啟的欄位／套用失敗）：才
   await until(() => text().includes('重啟 Bot 後生效'), '重啟橫幅')
   assert.ok(buttonByText('立即重啟'), '有立即重啟鈕')
 })
+
+test('「待套用（需重啟）」橫幅（遠端啟動時沒拿到 daemon 位址）也給立即重啟，按下去呼叫 /restart', async () => {
+  const restarted: string[] = []
+  useStore.setState({
+    bots: [{ ...bot, role_pending: true, daemon_url_pending: true } as Bot],
+    runs: { b1: run },
+    busy: {},
+    restartBot: async (id: string) => { restarted.push(id); return true },
+  })
+  await mount(<BotSettingsPanel botId="b1" />)
+  assert.ok(text().includes('此 bot 啟動時未取得 daemon 位址'))
+  const btn = buttonByText('立即重啟')
+  assert.ok(btn, '待套用橫幅要有立即重啟')
+  await click(btn)
+  await until(() => restarted.length === 1, '呼叫重啟')
+  assert.deepEqual(restarted, ['b1'])
+})
