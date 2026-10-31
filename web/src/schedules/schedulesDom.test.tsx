@@ -631,6 +631,11 @@ test('編輯器：任務內容在名稱之後、Bot 選單之前，textarea 至�
   assert.ok(prompt.compareDocumentPosition(bot) & follows, '任務內容要在 Bot 選單之前')
   assert.equal(prompt.getAttribute('rows'), '8', '任務內容框最少 8 行')
   assert.match(dialog.textContent ?? '', /⌘\/Ctrl\+Enter 儲存/, 'label 旁要有快捷鍵提示')
+  const timing = dialog.querySelector('.schedule-time-grid')!
+  assert.ok(timing.textContent?.includes('時間（所選時區）'), '時間標明依所選時區')
+  assert.ok(timing.textContent?.includes('時區'), '時區與時間在同一組')
+  assert.equal(dialog.querySelectorAll('.schedule-bot-actions button').length, 2, 'Bot 輔助動作並列')
+  assert.ok(dialog.querySelector('.schedule-editor .form-actions .primary'), '主要操作保留在表單中')
 })
 
 test('編輯器：最近執行收在預設收合的 <details> 裡，放在表單最下方', async () => {
