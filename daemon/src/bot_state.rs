@@ -61,10 +61,6 @@ pub async fn view_for_bot(app: &(impl crate::capabilities::Db + crate::events::p
         if bots.is_empty() {
             continue;
         }
-        if let Some(fields) = project.as_object_mut() {
-            fields.remove("group_unread");
-            fields.remove("group_read_mark");
-        }
         scoped_projects.push(project);
     }
     *projects = scoped_projects;

@@ -343,7 +343,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/projects/{id}/git/pull` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/git/push` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/github/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/projects/{id}/group/read` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/projects/{id}/missions` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `user_only`（#989） |
 | POST | `/api/quota/probe` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/dispatched` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -444,7 +443,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 
 ## 2. `GET /api/state`
 
-User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只收到自己與後代 child 所在的專案及 bot；不含其他專案、主機清單或全域 identities。Bot view 會移除每顆可見 bot 的 `persona`、`args`、`identity`、`env`、`herdr_session`、`unread`、`read_mark`，以及專案的 `group_unread`／`group_read_mark`；若 parent 不在可見 tree 中，也移除 `parent_bot_id`。頂層不回傳 `restart_batch`、`cli_updates`、`herdr_updates`、`default_connected`、`herdr_session`、`hosts`、`identities`。Service principal 依明列 path scope 不可讀 `/api/state`。前端收到 resync 或變更事件後仍以 User token 重拉完整快照。
+User principal 保留完整快照。Bot principal（包括 AGM 角色 bot）只收到自己與後代 child 所在的專案及 bot；不含其他專案、主機清單或全域 identities。Bot view 會移除每顆可見 bot 的 `persona`、`args`、`identity`、`env`、`herdr_session`、`unread`、`read_mark`；若 parent 不在可見 tree 中，也移除 `parent_bot_id`。頂層不回傳 `restart_batch`、`cli_updates`、`herdr_updates`、`default_connected`、`herdr_session`、`hosts`、`identities`。Service principal 依明列 path scope 不可讀 `/api/state`。前端收到 resync 或變更事件後仍以 User token 重拉完整快照。
 
 `host_baseline_orphan_sync_keys`（issue #719 階段 3a，只在 User 視圖；Bot 視圖沒有這欄）：`config.toml` 的 `[host_baseline.sync]` 裡對不上 `local` 或任何 `[[hosts]]` 名稱的鍵（主機改名或刪掉後留下的），排好序的字串陣列，沒有就是 `[]`。這些鍵一律當 off、不會自動清，留給使用者手動刪（SPEC §16.7）。只在 `GET /api/state` 回應裡，沒有對應的 WS 事件：改了 config 之後下一次重拉才看得到。
 
@@ -909,7 +908,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `answer` 為 `null`＝沒有回答（取消／Esc／多題沒答這一題），`header`、`notes` 可省略；自訂文字照原文。`id` 是 `ask:<conversation_id>:<tool_use_id>`（同一提問重送也只有一則），`turn_id` 是當時的回合，
 `created_at` 是答完的時間。UI 畫成「Claude 問／你答」卡，不是使用者的 prompt；用 `message_added` 推送，不會開新回合。
 `rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
-`keep_warm`：boolean，這則訊息屬於保溫回合（主力 58 分那則 `any updates` 與 bot 的保溫回覆；回合的 `client_request_id` 以 `keep-warm:` 或舊的 `keepalive:` 開頭）。網頁淡化顯示；`unread` 與 `group_unread` 一律不計這些訊息。
+`keep_warm`：boolean，這則訊息屬於保溫回合（主力 58 分那則 `any updates` 與 bot 的保溫回覆；回合的 `client_request_id` 以 `keep-warm:` 或舊的 `keepalive:` 開頭）。網頁淡化顯示；`unread` 不計這些訊息。
 
 `sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
 `seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。本端點與 WS `message_added` 的 `message` 都帶。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
@@ -1027,7 +1026,6 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `mission_updated` | `{"mission_id","project_id","status"}`：任務狀態有變（「群組任務（mission）」一節） |
 | `bot_share_changed` | `{"bot_id","enabled","allow_embed"}`：這顆 bot 的分享連結開／關／重產（§5.6、SPEC §20）；只告訴前端重畫分享鈕，不帶連結。`allow_embed`＝這條連結現在允不允許 `<iframe>` 嵌入（關閉時一律 `false`） |
 | `bot_read` | `{"bot_id","read_mark":{"at","id","seq"?},"unread"}`：已讀標記前進了（`POST /api/bots/{id}/read`，同樣的標記再送、較舊的不推）；其他分頁／裝置收到就重拉 state |
-| `group_read` | `{"project_id","read_mark":{"at","id","seq"?},"unread"}`：群組已讀標記前進了（`POST /api/projects/{id}/group/read`），規則同 `bot_read` |
 | `deploy_wait` | `{"wait": <wait 物件>, "first": boolean}`：部署等待換版窗口的通知／狀態變了（`first:true`＝第一次通知）；見「部署等太久：通知與調度」、SPEC §18.10 |
 | `upstream_update` | 上游有新版的快照有變或要通知：上游一筆 item ＋ `notify`；見「上游有新版可裝」 |
 | `identities_changed` | `{}`：帳號身份（identities）有變，重拉 state（「身份 identities」一節） |
@@ -1108,12 +1106,7 @@ bot 或 active Run 不存在 404。
 回 `{"bot_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；`message_id` 超過 64 字元、含 `A-Za-z0-9-_:.` 以外的字元，或不在這顆 bot 對話裡 → 400，什麼都不存（空字串＝只推時間）；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。標記訊息仍存在時會帶 `seq`；訊息已刪或舊 daemon 未提供時省略。
 `GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id,seq?}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
-### `POST /api/projects/{id}/group/read`
-專案群組的已讀位置（#756），語意同上：非空 `message_id` 必須指向這個專案任一 bot 的訊息（含已軟刪 bot 留下的歷史），提供 `at` 時必須等於該訊息時間；省略 `at` 時，有 id 取訊息時間，沒有 id 取現在。標記只往前推、時間先正規化並夾到現在。
-回 `{"project_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 格式錯誤或不屬於專案 → 400，專案不存在**或已軟刪** 404。`seq` 是標記訊息仍存在時的插入序；已刪或舊 daemon 未提供時省略。
-`GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id,seq?}` 或 `null`）。同時間戳依訊息插入序判斷。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
-
-兩個 `POST .../read` 都是瀏覽器共用的已讀狀態，只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，不會寫入標記或推事件。Service principal 不在這些路徑的 service scope 中，於全域授權時拒絕。
+`POST .../read` 是瀏覽器共用的已讀狀態，只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，不會寫入標記或推事件。Service principal 不在此路徑的 service scope 中，於全域授權時拒絕。
 
 ### 輸入框草稿 `GET /api/drafts`、`PUT /api/drafts/{key}`（使用者 2026-10-01）
 對話輸入框還沒送出的字，以 daemon 為準，各瀏覽器（手機、電腦）共用；網頁不再把草稿存在 localStorage。

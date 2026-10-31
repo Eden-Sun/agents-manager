@@ -574,6 +574,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (71, "d32e25a1e3418557"),
     (72, "1ea615a552a5e0ad"),
     (73, "7b90de666223749d"),
+    // Remove obsolete project group read marks.
+    (74, "1b4fc0fe9e17728b"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
