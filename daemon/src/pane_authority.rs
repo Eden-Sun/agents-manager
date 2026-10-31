@@ -13,14 +13,37 @@ pub(crate) struct PaneAuthority {
     pub machine: Option<String>,
 }
 
+/// Authenticated caller; child credentials are connected by the child principal slice.
+pub(crate) struct PaneCaller {
+    pub bot_id: String,
+    pub is_child_principal: bool,
+}
+
 pub(crate) async fn authorize(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
     Json(input): Json<PaneAuthority>,
 ) -> Result<Json<Value>, LcError> {
-    let RequestPrincipal::Bot(id) = principal else {
+    let RequestPrincipal::Bot(bot_id) = principal else {
         return Err(LcError::Forbidden(json!({"error":"forbidden"})));
     };
+    authorize_caller(
+        app,
+        PaneCaller {
+            bot_id,
+            is_child_principal: false,
+        },
+        input,
+    )
+    .await
+}
+
+pub(crate) async fn authorize_caller(
+    app: Arc<App>,
+    caller: PaneCaller,
+    input: PaneAuthority,
+) -> Result<Json<Value>, LcError> {
+    let id = caller.bot_id;
     let bot = db::bot(&app.db, &id)
         .await
         .map_err(up)?
@@ -96,7 +119,7 @@ pub(crate) async fn authorize(
         .ok_or_else(|| LcError::NotFound("pane".into()))?;
     let agents = client.agent_list().await.map_err(up)?;
     let own = run.as_ref().and_then(|r| r.pane_id.as_deref()) == Some(pane_id.as_str());
-    let child = if bot.managed_by == "child" {
+    let child = if caller.is_child_principal || bot.managed_by == "child" {
         false
     } else {
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM bots b JOIN runs r ON r.bot_id=b.id JOIN projects p ON p.id=b.project_id WHERE b.deleted_at IS NULL AND b.managed_by='child' AND b.parent_bot_id=? AND r.state IN ('starting','running','stopping') AND r.pane_id=? AND COALESCE(r.host,p.host)=? AND COALESCE(r.herdr_session,?)=?)")
@@ -223,6 +246,28 @@ mod tests {
             .execute(&e.app.db)
             .await
             .unwrap();
+        // Even if mapped to a parent bot, a child principal never inherits its child exception.
+        for (target, allowed) in [
+            (&own, true),
+            (&"shell-pane".to_string(), true),
+            (&kid, false),
+        ] {
+            let result = authorize_caller(
+                e.app.clone(),
+                PaneCaller {
+                    bot_id: parent.id.clone(),
+                    is_child_principal: true,
+                },
+                PaneAuthority {
+                    kind: "pane".into(),
+                    target: Some(target.clone()),
+                    session: None,
+                    machine: None,
+                },
+            )
+            .await;
+            assert_eq!(result.is_ok(), allowed, "{target}");
+        }
         // Child principals cannot obtain the parent exception for descendants.
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?")
             .bind(&child.id)
