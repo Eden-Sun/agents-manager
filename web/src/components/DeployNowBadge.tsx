@@ -79,7 +79,7 @@ export function DeployNowBadge() {
         disabled={busy}
         onClick={() => {
           if (running) {
-            notify('info', t('{text}。進度看 {log}', { text: runningText(running), log: status.log_path }))
+            notify('info', t('{text}。換好後這裡會自動消失。', { text: runningText(running) }))
             return
           }
           if (offline) return
@@ -122,9 +122,7 @@ export function DeployNowBadge() {
                 : t('目前沒有 bot 在 working。')}
             </p>
             <p className="deploy-note">
-              {t.x('不等排程、不等 ubuntu-ci；在專用乾淨 checkout 建置（建置已在推 main 前測過），備份 binary 與 DB，驗證失敗自動回滾。進度看 {log}', {
-                log: <code>{status.log_path}</code>,
-              })}
+              {t('不等排程、不等 ubuntu-ci；在專用乾淨 checkout 建置（建置已在推 main 前測過），備份 binary 與 DB，驗證失敗自動回滾。')}
             </p>
             {!status.kick_ready ? (
               <p className="deploy-working">{t('裝好的 daemon-update-kick.sh 還不認得立即部署，要先照 scripts/ops/README.md install 新版。')}</p>

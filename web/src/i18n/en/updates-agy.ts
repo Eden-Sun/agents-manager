@@ -138,12 +138,12 @@ const dict: Dict = {
     'Failed to install {kind} on {where}: {why}; install terminal closed, please click Install again',
 
   // lib/deployNow.ts
-  '已按下立即部署{sha}，等自動部署接手、建置或等安全窗口': 'Deploy now requested{sha}; waiting for auto-deploy, build, or safe restart window',
+  '部署中{sha}：建置中或等換版窗口': 'Deploying{sha}: building or waiting for the swap window',
   '{owner}正握著 {resource} 窗口（重建或換版進行中）': '{owner} is holding {resource} window (rebuild or restart in progress)',
   '有人': 'Someone',
   '有部署在跑': 'Deploy in progress',
-  '已開始立即部署 {short}：不等 ubuntu-ci，在專用 checkout 建置，沒人 working 才換 binary。進度看 {log}':
-    'Deploy now started for {short}: builds in dedicated checkout without waiting for ubuntu-ci, swaps binary only when no bots are working. Progress in {log}',
+  '已送出部署 {short}。左上角會顯示「部署中」，換好後自動消失；等太久會跳出等待提示。':
+    'Deploy of {short} sent. The top-left shows "Deploying" and clears once swapped; a waiting notice appears if it takes too long.',
   '沒有再開一趟：{msg}': 'Not started again: {msg}',
   '不用部署：{msg}': 'No deploy needed: {msg}',
   '部署已拒絕：{msg}': 'Deploy rejected: {msg}',
