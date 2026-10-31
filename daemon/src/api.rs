@@ -3110,7 +3110,18 @@ async fn put_bot_role(
         _ => return Err(bot_user_only()),
     }
     let patch: PatchBot = serde_json::from_value(json!({ "role": role })).map_err(any_err)?;
-    patch_bot(State(app), Path(id), Extension(RequestPrincipal::User), Json(patch)).await
+    let response = patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
+    // A child cannot be restarted in place (its parent respawns it and that makes a new record), so its
+    // role applies to the running child immediately; the parent tells the child what the role means.
+    if let Some(bot) = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.managed_by == "child") {
+        if let (Some(run), Some(project)) = (db::active_run(&app.db, &id).await.map_err(any_err)?, db::project(&app.db, &bot.project_id).await.map_err(any_err)?) {
+            let policy = format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or(""));
+            sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(&policy).bind(&run.id).execute(&app.db).await.map_err(any_err)?;
+            app.emit("bot_changed", json!({"bot_id": id})).await;
+            return Ok((StatusCode::OK, Json(json!({"needs_restart": false, "applied_live": true}))).into_response());
+        }
+    }
+    Ok(response)
 }
 
 async fn patch_bot(
@@ -17535,6 +17546,10 @@ mod manager_role_scope_tests {
         assert!(call(&manager.id, &peer.id, Some("manager")).await.is_err(), "manager cannot appoint another manager");
         assert!(expert_manager_over(&env.app, &manager.id, &db::bot(&env.app.db, &child.id).await.unwrap().unwrap()).await.unwrap(), "the manager's own child");
         assert!(!expert_manager_over(&env.app, &peer.id, &db::bot(&env.app.db, &child.id).await.unwrap().unwrap()).await.unwrap(), "someone else's child");
+        let child_run = crate::testing::fake_run(&env.app, &child.id).await;
+        put_bot_role(State(env.app.clone()), Path(child.id.clone()), Extension(RequestPrincipal::Bot(manager.id.clone())), Json(PutBotRole { role: Some("advisor".into()) })).await.map_err(|e| format!("{e:?}")).unwrap();
+        let policy: Option<String> = sqlx::query_scalar("SELECT runtime_role_policy FROM runs WHERE id=?").bind(&child_run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(policy, Some(format!("{}:local:expert:advisor", env.project_id)), "a child's role applies without a restart");
         assert!(manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/restart", peer.id)).await);
         assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/stop", peer.id)).await, "only start/restart");
         assert!(!manager_may_start(&env.app, &peer.id, "POST", &format!("/api/bots/{}/restart", manager.id)).await, "non-manager");
