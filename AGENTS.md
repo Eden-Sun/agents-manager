@@ -91,5 +91,16 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 找程式、看呼叫關係時先用 CodeGraph，再退回 grep：MCP 工具 `codegraph_explore`（claude 由 `.mcp.json`、codex 由 `.codex/config.toml` 載入），或 shell `codegraph explore "<符號或問題>"`、`codegraph callers <符號>`、`codegraph impact <符號>`。
 - 索引只建在主樹的 `.codegraph/`（不進 git）；worktree 裡查到的是主樹那份，會提示「來自不同的 worktree」，只在你自己分支新增的符號查不到，改用 grep。**禁止在 worktree 跑 `codegraph init`**（一份索引約 180 MB）。查不到明顯該有的符號時，在主樹跑 `codegraph sync` 補索引。
 
+## 最小完整改動（取自 Ponytail，https://github.com/DietrichGebert/ponytail，使用者 2026-10-31）
+用最少的新程式把整個問題解決；懶在解法，不懶在改動本身。
+- **先看範圍**：讀任務與它碰到的程式，列出改動必須到達的每一處（呼叫端、測試、fixture、設定、匯出），以及會不會毀掉或外洩資料、讓呼叫端壞掉。那才是範圍，額外功能不是。
+- **依序取第一個完全可行的**：不必存在就不做（一句話寫明略過了什麼）→ 這個 codebase 已有的 helper／元件／模式，照周圍的用法用 → 標準庫或平台功能 → 已安裝的依賴（不為幾行加新依賴）→ 一眼看懂的一行 → 最少能動的程式。
+- 不加沒人要的抽象、包裝、型別轉換、選項、設定、「以後用得到」的程式；刪除勝過新增；沿用既有的分層與慣例。一行要解碼才看得懂不算短。
+- 修 bug：動手前 grep 該函式的所有呼叫端，在共用的地方一次修掉根因。搬移或合併的程式保留原本的錯誤處理與驗證。同樣大小的選項，選邊界情況正確的那個。
+- 新的非平凡邏輯（分支、迴圈、解析、金額或安全、整支新腳本）至少留一個小測試或 assert 自檢；瑣碎改動不用。
+- 已知限制的捷徑要留註解：`shortcut: <限制>, <何時該升級>`。
+- **絕不省**：信任邊界的驗證、防止資料遺失的錯誤處理、安全、無障礙、使用者要求的任何東西。
+- 回報最後一兩行寫明略過或沒檢查的地方與使用者該知道的風險（併入下面的回報格式）。
+
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
