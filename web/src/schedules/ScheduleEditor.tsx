@@ -397,79 +397,84 @@ export function ScheduleEditor({
       <p className="hint">
         {t('排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。')}
       </p>
-      <button type="button" className="btn" disabled={loading} onClick={() => setBotSheet(true)}>
-        {t('建立專用 Bot…')}
-      </button>
-      {effectiveBotId ? (
-        <button
-          type="button"
-          className="btn"
-          disabled={loading}
-          onClick={() => {
-            // 到 Bot 對話看執行與額度、離線原因；不另建 API。
-            selectBot(effectiveBotId)
-            onClose()
-          }}
-        >
-          {t('開啟 Bot 對話')}
+      <div className="schedule-bot-actions">
+        <button type="button" className="btn" disabled={loading} onClick={() => setBotSheet(true)}>
+          {t('建立專用 Bot…')}
         </button>
-      ) : null}
+        {effectiveBotId ? (
+          <button
+            type="button"
+            className="btn"
+            disabled={loading}
+            onClick={() => {
+              // 到 Bot 對話看執行與額度、離線原因；不另建 API。
+              selectBot(effectiveBotId)
+              onClose()
+            }}
+          >
+            {t('開啟 Bot 對話')}
+          </button>
+        ) : null}
+      </div>
 
-      <label className="field">
-        <span>{t('模式')}</span>
-        <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as FormState['mode'])}>
-          <option value="once">{t('單次')}</option>
-          <option value="interval">{t('固定間隔')}</option>
-          <option value="daily">{t('每天')}</option>
-          <option value="weekdays">{t('週一至週五')}</option>
-          <option value="weekly">{t('每週')}</option>
-        </select>
-      </label>
-      {form.mode === 'once' ? (
+      <div className="schedule-time-grid">
         <label className="field">
-          <span>{t('時間（本地）')}</span>
-          <input type="datetime-local" value={form.at} disabled={loading} onChange={(e) => set('at', e.target.value)} />
+          <span>{t('模式')}</span>
+          <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as FormState['mode'])}>
+            <option value="once">{t('單次')}</option>
+            <option value="interval">{t('固定間隔')}</option>
+            <option value="daily">{t('每天')}</option>
+            <option value="weekdays">{t('週一至週五')}</option>
+            <option value="weekly">{t('每週')}</option>
+          </select>
         </label>
-      ) : null}
-      {form.mode === 'interval' ? (
-        <label className="field">
-          <span>{t('每幾分鐘（以建立時為起點，不隨任務耗時漂移）')}</span>
-          <input type="number" min={1} max={525600} value={Math.round(form.everySecs / 60)} disabled={loading} onChange={(e) => set('everySecs', Number(e.target.value) * 60)} />
-        </label>
-      ) : null}
-      {form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays' ? (
-        <label className="field">
-          <span>{t('時間（本地）')}</span>
-          <input type="time" value={form.time} disabled={loading} onChange={(e) => set('time', e.target.value)} />
-        </label>
-      ) : null}
-      {form.mode === 'weekly' ? (
-        <fieldset className="field">
-          <legend>{t('星期')}</legend>
-          {WEEKDAYS.map((label, i) => (
-            <label key={label} className="inline-check">
-              <input
-                type="checkbox"
-                checked={form.weekdays.includes(i)}
-                disabled={loading}
-                onChange={(e) => set('weekdays', e.target.checked ? [...form.weekdays, i] : form.weekdays.filter((d) => d !== i))}
-              />
-              {t.tr(label)}
-            </label>
-          ))}
-        </fieldset>
-      ) : null}
+        {form.mode === 'once' ? (
+          <label className="field">
+            <span>{t('時間（所選時區）')}</span>
+            <input type="datetime-local" value={form.at} disabled={loading} onChange={(e) => set('at', e.target.value)} />
+          </label>
+        ) : null}
+        {form.mode === 'interval' ? (
+          <label className="field">
+            <span>{t('每幾分鐘（以建立時為起點，不隨任務耗時漂移）')}</span>
+            <input type="number" min={1} max={525600} value={Math.round(form.everySecs / 60)} disabled={loading} onChange={(e) => set('everySecs', Number(e.target.value) * 60)} />
+          </label>
+        ) : null}
+        {form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays' ? (
+          <label className="field">
+            <span>{t('時間（所選時區）')}</span>
+            <input type="time" value={form.time} disabled={loading} onChange={(e) => set('time', e.target.value)} />
+          </label>
+        ) : null}
+        {form.mode === 'weekly' ? (
+          <fieldset className="field">
+            <legend>{t('星期')}</legend>
+            {WEEKDAYS.map((label, i) => (
+              <label key={label} className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={form.weekdays.includes(i)}
+                  disabled={loading}
+                  onChange={(e) => set('weekdays', e.target.checked ? [...form.weekdays, i] : form.weekdays.filter((d) => d !== i))}
+                />
+                {t.tr(label)}
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
 
-      <label className="field">
-        <span>{t('時區')}</span>
-        <select value={form.tz} disabled={loading} onChange={(e) => set('tz', e.target.value)}>
-          {timeZoneOptions(form.tz).map((z) => (
-            <option key={z} value={z}>
-              {z}
-            </option>
-          ))}
-        </select>
-      </label>
+        <label className="field">
+          <span>{t('時區')}</span>
+          <select value={form.tz} disabled={loading} onChange={(e) => set('tz', e.target.value)}>
+            {timeZoneOptions(form.tz).map((z) => (
+              <option key={z} value={z}>
+                {z}
+              </option>
+            ))}
+          </select>
+        </label>
+
+      </div>
 
       <label className="field">
         <span>{t('通知')}</span>

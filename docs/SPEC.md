@@ -5732,6 +5732,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **終態收斂**（tick 每 20 秒，啟動後 5 秒先跑一輪）：`completed`＋delivery ok → `done`；`completed_fallback`／`failed`＋delivery unknown → `unknown`（同交易暫停排程）；`failed` → `failed`；turn 不見了 → `cancelled`。`queued`／`in_flight` 繼續等，不提早取消已送出的執行。
 - **停用／編輯／刪除**：同 bot 鎖、同交易撤回未送出的排隊（`revoke_queued_turn_tx`），pending 直接取消；已送出的照跑。編輯與刪除在鎖內重讀，Bot 變了回 409。刪除是軟刪（保留關聯）。
 - **立即執行**使用已儲存的排程。編輯器有未儲存的變更或已綁定 Bot 不可用時，先顯示原因並停用立即執行；儲存可用設定後才可執行。
+- 排程編輯器將頻率、時間和時區歸組，時間欄標明依所選時區解讀；建立、儲存與排程操作保留於編輯區底部的可見操作列。
 - 編輯器顯示已儲存的 Bot 與未儲存狀態；有未結束的執行時換 Bot，說明先停用撤回未送出項目或等待已送出的回合結束。停用前要求確認，不自動撤回或重送。
 - 等待啟動的已排隊回合若有 `start_error`，排程狀態顯示相同原因並提供開啟綁定 Bot 對話；已進入執行或不再等待啟動時不顯示過期錯誤。
 - **跑完就清空對話**（issue #1779，`schedules.clear_after`，預設關）：終態收斂為 `done` 且勾了，就讓綁定的 Bot 開新對話（`StartOpts::default()`，同 `restart?resume=fresh`，之後的回合不會接回舊的 session）。背景做，不擋 tick。條件全成立才做，任一不成立就什麼都不動（留給使用者看）：Bot 正在跑（沒在跑不替它啟動）、沒有 `queued`／`in_flight` 的回合、沒有其他未結束的排程 occurrence、維護窗口沒開；重啟在 bot 鎖內再確認一次閒置（`require_idle`），不閒置回錯、不動。`failed`／`unknown`／`cancelled` 一律不清。它會清掉這顆 Bot 的對話記憶，所以網頁提示建議搭配專用 Bot。

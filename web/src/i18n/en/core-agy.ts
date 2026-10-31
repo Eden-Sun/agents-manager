@@ -93,7 +93,7 @@ const dict: Dict = {
   '每天': 'Daily',
   '週一至週五': 'Monday to Friday',
   '每週': 'Weekly',
-  '時間（本地）': 'Time (local)',
+  '時間（所選時區）': 'Time (selected time zone)',
   '每幾分鐘（以建立時為起點，不隨任務耗時漂移）': 'Every N minutes (anchored to creation time, not drifting with run duration)',
   '星期': 'Weekdays',
   '時區': 'Time zone',
