@@ -1271,6 +1271,12 @@ pub(crate) fn codex_instant_interrupt_args(flag_on: bool, restricted: bool) -> V
     }
 }
 
+pub(super) async fn record_daemon_url_injected(pool: &sqlx::SqlitePool, run_id: &str, env: &Value) -> LcResult<()> {
+    let injected = env.get("AM_DAEMON_URL").and_then(|value| value.as_str()).is_some_and(|value| !value.is_empty());
+    sqlx::query("UPDATE runs SET daemon_url_injected=? WHERE id=?").bind(i64::from(injected)).bind(run_id).execute(pool).await.map_err(up)?;
+    Ok(())
+}
+
 fn start_inner<'a>(
     app: &'a impl StartContext,
     bot: &'a db::Bot,
@@ -1358,8 +1364,7 @@ async fn start_inner_body(
         super::agent_md::push_unreadable_alert(app, bot, &agent_md.unreadable).await;
     }
     let mut env = env;
-    let daemon_url_injected = env.get("AM_DAEMON_URL").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty());
-    sqlx::query("UPDATE runs SET daemon_url_injected=? WHERE id=?").bind(i64::from(daemon_url_injected)).bind(run_id).execute(app.db()).await.map_err(up)?;
+    record_daemon_url_injected(app.db(), run_id, &env).await?;
     if agent_md.cli_docs_disabled() {
         // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
         // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。

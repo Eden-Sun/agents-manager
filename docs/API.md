@@ -3307,7 +3307,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 `GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。 `POST /api/pane-authorize` 以 bot 憑證及 `{kind: "pane" | "agent" | "context", target?, session?, machine?}` 請求授權；daemon 根據呼叫 bot 的 host／session、活動 run、child 歸屬及 herdr 的 pane／agent 清單判斷，允許自己的 pane、自己的 child 與非 agent shell pane。其他 agent 的 pane 回 403 並要求改用 agent prompt；狀態不明拒絕。成功回 `{allowed:true,pane_id?}`，agent 名稱會固定為 pane ID。 受管 bot 的 prompt 必須經 daemon 解析與授權；缺少位址、daemon 不可達或授權不明時拒絕，不直接送到 herdr。daemon 不可達時無法派工。`/api/state` 的 `daemon_url_pending` 表示遠端執行中 bot 啟動時未取得位址，需由使用者重啟。
 
-遠端 host 可在 `[[hosts]] daemon_url` 設定 daemon 的可信入口；啟動時以 `AM_DAEMON_URL` 傳給 bot，未設定則不猜。`agm peers`、`agm requests` 使用自己的 bot 憑證；`agm requests --to ID --from ID --open` 呼叫 `GET /api/relay-requests`。
+遠端 host 預設以 SSH 連線的來源 IP 與 daemon port 推得 `AM_DAEMON_URL`；`[[hosts]] daemon_url` 可選填覆寫（例如 NAT 或反向代理）。SSH 資訊缺失或無效時不注入。`agm peers`、`agm requests` 使用自己的 bot 憑證；`agm requests --to ID --from ID --open` 呼叫 `GET /api/relay-requests`。
 
 `/relay/announce` 對涉及 expert 專案的普通 prompt 以驗證過的 pane／run 核對 `NewRequest` 授權，拒絕時回 403 與原因，狀態不可讀回 503。相同 `expect_result` 的 `client_request_id` 重送時直接回原請求狀態，不依目前 conversation 重新送出。
 

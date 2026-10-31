@@ -417,7 +417,7 @@ am_agent_start() {
         if [ -z "$_spawn_url" ] && [ -n "${AM_PORT:-}" ]; then _spawn_url="http://127.0.0.1:${AM_PORT}"; fi
         _spawn_token=$(am_principal_headers)
         if [ -z "$_spawn_url" ]; then
-            printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它\n' >&2
+            printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址（可能 SSH_CONNECTION 缺失或無效）；請檢查 SSH 或設定 daemon_url 覆寫，再在 AG Man 重啟它\n' >&2
             exit 77
         else
             if [ -z "$_spawn_token" ] || ! command -v curl >/dev/null 2>&1; then
@@ -879,7 +879,7 @@ am_agent_prompt() {
         am_exec agent prompt "$_unmanaged_target" "$@"
     fi
     if ! am_daemon_base >/dev/null; then
-        am_announce_refuse 77 "${1:-}" "此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它"
+        am_announce_refuse 77 "${1:-}" "此 bot 啟動時沒拿到 daemon 位址（可能 SSH_CONNECTION 缺失或無效）；請檢查 SSH 或設定 daemon_url 覆寫，再在 AG Man 重啟它"
     fi
     case "${1:-}" in
         -* | "")
@@ -906,7 +906,7 @@ am_agent_prompt() {
         [ -n "${AM_BOT_ID:-}" ] && am_principal_headers >/dev/null || am_announce_refuse 77 "$_requested" "缺少 bot 憑證"
         command -v curl >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "這台機器沒有 curl，無法確認 daemon 授權"
         command -v python3 >/dev/null 2>&1 || am_announce_refuse 75 "$_requested" "python3 is required"
-        _base=$(am_daemon_base) || am_announce_refuse 75 "$_requested" "daemon address unavailable"
+        _base=$(am_daemon_base) || am_announce_refuse 75 "$_requested" "daemon 位址不可用；請檢查 SSH_CONNECTION 或 daemon_url 覆寫"
         _text=""; _skip=0; _ack=""; _reply_to=""; _want_reply_to=0; _want_timeout=0; _timeout_ms=30000
         for _a in "$@"; do
             if [ "$_want_reply_to" = 1 ]; then _reply_to=$_a; _want_reply_to=0; continue; fi
@@ -1190,7 +1190,7 @@ am_exec() {
 }
 am_authorize_pane() {
     _auth_kind=$1; _auth_target=$2
-    _auth_base=$(am_daemon_base) || { printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它\n' >&2; return 77; }
+    _auth_base=$(am_daemon_base) || { printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址（可能 SSH_CONNECTION 缺失或無效）；請檢查 SSH 或設定 daemon_url 覆寫，再在 AG Man 重啟它\n' >&2; return 77; }
     am_principal_headers >/dev/null && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || { printf 'agents-manager: 無法確認 daemon 授權\n' >&2; return 77; }
     _auth_body=$(python3 -c 'import json,sys; print(json.dumps(dict(kind=sys.argv[1],target=sys.argv[2] or None,session=sys.argv[3] or None,machine=sys.argv[4] or None)))' "$_auth_kind" "$_auth_target" "$_AM_HERDR_SESSION" "$_AM_HERDR_MACHINE") || return 75
     _auth_out=$(am_principal_curl --noproxy '*' --connect-timeout 2 --max-time 5 -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_auth_body" "${_auth_base%/}/api/pane-authorize") || { printf 'agents-manager: daemon 無法確認 pane 授權\n' >&2; return 75; }
