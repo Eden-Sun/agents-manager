@@ -891,6 +891,7 @@ am_agent_prompt() {
     shift
     _expect_result=""
     _request_id=""
+    _track=""
     _n=$#
     _i=0
     while [ "$_i" -lt "$_n" ]; do
@@ -899,6 +900,8 @@ am_agent_prompt() {
             --expect-result) _expect_result=1; continue ;;
             --request-id) [ "$_i" -lt "$_n" ] || am_announce_refuse 75 "$_requested" "--request-id requires a value"; _request_id=$1; shift; _i=$((_i + 1)); continue ;;
             --request-id=*) _request_id=${_a#--request-id=}; continue ;;
+            --track) [ "$_i" -lt "$_n" ] || am_announce_refuse 75 "$_requested" "--track requires a value"; _track=$1; shift; _i=$((_i + 1)); continue ;;
+            --track=*) _track=${_a#--track=}; continue ;;
         esac
         set -- "$@" "$_a"
     done
@@ -950,7 +953,7 @@ am_agent_prompt() {
         [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
         _relay_sender=$AM_BOT_ID
         [ -z "${AM_CHILD_TOKEN:-}" ] || _relay_sender=""
-        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3] or None,"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$_relay_sender" "$_expect_result" "$_ack" "$_reply_to") || exit 75
+        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3] or None,"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None,"track":sys.argv[7] or None}))' "$_text" "$_request_id" "$_relay_sender" "$_expect_result" "$_ack" "$_reply_to" "$_track") || exit 75
         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
         _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
         _code=$(printf '%s\n' "$_out" | tail -n 1)

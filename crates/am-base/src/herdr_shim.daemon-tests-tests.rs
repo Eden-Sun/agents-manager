@@ -206,13 +206,13 @@ case "$*" in
 esac"#, calls.display()));
         let log = s.dir.join("herdr-calls");
         let env = [("AM_BOT_ID", "sender"), ("AM_BOT_TOKEN", "token"), ("AM_DAEMON_URL", "http://daemon:7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
-        let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "bot:target", "--expect-result", "--request-id", "stable", "--timeout", "5000", "hello"]);
+        let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "bot:target", "--expect-result", "--request-id", "stable", "--track", "ticket-42", "--timeout", "5000", "hello"]);
         assert_eq!(rc, 0, "{err}");
         assert_eq!(out, ["request_id=request-123"]);
         let calls = std::fs::read_to_string(calls).unwrap();
         assert!(calls.contains("http://daemon:7788/api/relay/resolve"));
         assert!(calls.contains("http://daemon:7788/api/bots/target/prompt"));
-        assert!(calls.contains("stable") && calls.contains("expect_result"));
+        assert!(calls.contains("stable") && calls.contains("expect_result") && calls.contains("ticket-42"));
         let timeouts: Vec<f64> = calls.lines().map(|line| line.split("--max-time ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap()).collect();
         assert_eq!(timeouts.len(), 2);
         assert!(timeouts.iter().all(|t| *t > 0.0 && *t <= 5.0), "{timeouts:?}");
