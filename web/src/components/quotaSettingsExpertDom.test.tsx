@@ -44,7 +44,10 @@ beforeEach(() => {
         path: '/expert',
         host: 'local',
         mode: 'expert',
-        executor_pool: { codex: 2, claude: 1 },
+        executor_pool: [
+          { id: 'codex-luna-xhigh-256k', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 2 },
+          { id: 'claude-haiku-low-200k', kind: 'claude', model: 'haiku', effort: 'low', context_tokens: 200000, count: 1 },
+        ],
       },
     ],
     bots: [
@@ -180,37 +183,33 @@ test('bot 列 ⋯ 選單：切換「禁止管理者使用」／「允許管理�
   assert.equal(patchedBots[1].input.manager_use, true)
 })
 
-test('專案設定 ProjectExpertSettings：編輯執行者池並儲存送出 PATCH /api/projects/{id}', async () => {
+test('專案設定 ProjectExpertSettings：條目改上限後儲存，送出整份條目陣列', async () => {
+  fakeApi()
   await mount(<ProjectExpertSettings projectId="p-expert" />)
   await settle()
 
-  const codexInput = document.querySelector<HTMLInputElement>('.project-executor-pool-row input[min="0"]')!
-  assert.ok(codexInput, '應找到執行者池輸入框')
+  const rows = document.querySelectorAll<HTMLElement>('.executor-pool-entry')
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].dataset.poolId, 'codex-luna-xhigh-256k')
+  assert.match(rows[0].textContent ?? '', /codex/)
+  assert.match(rows[0].textContent ?? '', /256k/)
 
-  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('.project-executor-pool-row input'))
-  // BOT_KINDS: claude, codex, grok, agy
-  // claude = 1, codex = 2
-  assert.equal(inputs[0].value, '1') // claude
-  assert.equal(inputs[1].value, '2') // codex
-
-  // 修改 grok 為 3
-  await typeInto(inputs[2], '3')
+  const countInput = rows[0].querySelector<HTMLInputElement>('input[type="number"]')!
+  assert.equal(countInput.value, '2')
+  await typeInto(countInput, '3')
   await settle()
 
   const saveBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
     (b) => b.textContent?.includes('儲存執行者池'),
   )!
-  assert.ok(saveBtn, '應有儲存執行者池按鈕')
   assert.equal(saveBtn.disabled, false)
-
   await click(saveBtn)
   await settle()
 
   assert.equal(patchedProjects.length, 1)
   assert.equal(patchedProjects[0].id, 'p-expert')
-  assert.deepEqual(patchedProjects[0].input.executor_pool, {
-    claude: 1,
-    codex: 2,
-    grok: 3,
-  })
+  assert.deepEqual(patchedProjects[0].input.executor_pool, [
+    { id: 'codex-luna-xhigh-256k', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 3 },
+    { id: 'claude-haiku-low-200k', kind: 'claude', model: 'haiku', effort: 'low', context_tokens: 200000, count: 1 },
+  ])
 })
