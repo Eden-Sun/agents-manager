@@ -1337,7 +1337,9 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
                 }
             }
         } else { false };
-        if policy == Some(BotRoutePolicy::UserOnly) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role) {
+        // 專家模式的 manager 可以啟動／重啟它管的 bot（角色改了要重啟才套用；使用者 2026-10-31）。
+        let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && manager_may_start(&app, bot_id, method, path).await;
+        if policy == Some(BotRoutePolicy::UserOnly) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1472,6 +1474,9 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 }
                 // 專家模式的管理者可以替同專案的頂層 bot 設執行者／顧問角色（使用者 2026-10-31）；handler 再驗一次並只收 role。
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
+                    return Ok(());
+                }
+                if method == "POST" && parts.len() == 4 && matches!(parts[3], "restart" | "start") && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
                 // 巡檢（patrol）可以重啟／啟動任何頂層 bot（使用者 2026-10-31）；child 與其他操作仍限自己的樹。
@@ -3058,9 +3063,10 @@ async fn relabel_tab(app: &App, bot_id: &str) {
     }
 }
 
-/// `caller` 是 expert 專案的 manager，`target` 是同專案、不是自己的存活頂層 bot。
+/// `caller` 是 expert 專案的 manager，`target` 是同專案、不是自己的存活頂層 bot，或自己開的 child。
 async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> Result<bool, LcError> {
-    if target.id == caller || target.parent_bot_id.is_some() || target.deleted_at.is_some() {
+    let own_child = target.managed_by == "child" && target.parent_bot_id.as_deref() == Some(caller);
+    if target.id == caller || (target.parent_bot_id.is_some() && !own_child) || target.deleted_at.is_some() {
         return Ok(false);
     }
     let Some(me) = db::bot(&app.db, caller).await.map_err(any_err)? else { return Ok(false) };
@@ -3068,6 +3074,16 @@ async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> 
         return Ok(false);
     }
     Ok(db::project(&app.db, &me.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none() && p.mode == "expert"))
+}
+
+/// `POST /api/bots/{id}/start|restart` by an expert manager over that bot.
+async fn manager_may_start(app: &Arc<App>, caller: &str, method: &str, path: &str) -> bool {
+    let Some(parts) = decoded_bot_path_segments(path) else { return false };
+    if method != "POST" || parts.len() != 4 || parts[0] != "api" || parts[1] != "bots" || !matches!(parts[3].as_str(), "start" | "restart") {
+        return false;
+    }
+    let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
+    expert_manager_over(app, caller, &target).await.unwrap_or(false)
 }
 
 #[derive(Deserialize)]
@@ -17517,7 +17533,12 @@ mod manager_role_scope_tests {
             put_bot_role(State(env.app.clone()), Path(target.to_string()), Extension(RequestPrincipal::Bot(caller.to_string())), Json(PutBotRole { role: role.map(str::to_string) }))
         };
         assert!(call(&manager.id, &peer.id, Some("manager")).await.is_err(), "manager cannot appoint another manager");
-        assert!(call(&manager.id, &child.id, Some("executor")).await.is_err(), "children are not top-level");
+        assert!(expert_manager_over(&env.app, &manager.id, &db::bot(&env.app.db, &child.id).await.unwrap().unwrap()).await.unwrap(), "the manager's own child");
+        assert!(!expert_manager_over(&env.app, &peer.id, &db::bot(&env.app.db, &child.id).await.unwrap().unwrap()).await.unwrap(), "someone else's child");
+        assert!(manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/restart", peer.id)).await);
+        assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/stop", peer.id)).await, "only start/restart");
+        assert!(!manager_may_start(&env.app, &peer.id, "POST", &format!("/api/bots/{}/restart", manager.id)).await, "non-manager");
+        assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/restart", outsider.id)).await, "other project");
         assert!(call(&manager.id, &manager.id, None).await.is_err(), "cannot change itself");
     }
 
