@@ -23,3 +23,26 @@
 .executor-pool-ctx-range { display: flex; align-items: center; gap: 8px; }
 .executor-pool-error { margin: 8px 0 0; color: var(--danger, #c0392b); font-size: 13px; }
 .project-executor-pool-actions { margin-top: 6px; }
+
+/* 手機：專案設定的標題列（固定 60px）塞不下額度條，額度條換到第二行、標題列依內容撐高，
+   否則額度條會溢出到下面的未讀晶片列上（2026-11 使用者截圖）。對照 bot 對話頁的 `.bot-head`（grid，額度在第二列）。 */
+@media (width <= 640px) {
+  .main-head.project-settings-head {
+    flex: none;
+    height: auto;
+    min-height: 60px;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .main-head.project-settings-head > .quota-strip {
+    order: 9;
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+}

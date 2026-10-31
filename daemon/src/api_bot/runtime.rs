@@ -4524,7 +4524,16 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(terminal, ("stopped".into(), "completed".into()));
-            assert!(env.app.api_bot_runtime.control_count_for_test() <= 1);
+            // 收尾（終端控制紀錄的修剪）跑在另一個 task，負載高時會比斷言慢：等它到位，而不是只看一瞬間。
+            let mut controls = env.app.api_bot_runtime.control_count_for_test();
+            for _ in 0..200 {
+                if controls <= 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                controls = env.app.api_bot_runtime.control_count_for_test();
+            }
+            assert!(controls <= 1, "terminal control records pruned (have {controls})");
         }
         assert_eq!(
             calls.load(Ordering::SeqCst),

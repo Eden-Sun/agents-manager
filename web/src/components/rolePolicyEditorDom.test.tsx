@@ -72,9 +72,11 @@ test('已存的政策：卡片顯示存的值，「還原」回到存的值', as
   assert.equal(pill(card('專家'), '開').getAttribute('aria-checked'), 'true', '還原回存的值')
 })
 
-test('codex 永快取的說明在每張角色卡上', async () => {
+test('保溫只影響 claude 的說明只在「角色設定」說明講一次，卡片上不重複', async () => {
   await setupEditor(expert())
-  assert.match(card('執行者').textContent ?? '', /codex 永快取，不需保溫/)
+  assert.match(document.querySelector('.role-policy-editor .hint')?.textContent ?? '', /codex 永快取不需保溫/)
+  assert.doesNotMatch(card('執行者').textContent ?? '', /codex/)
+  assert.doesNotMatch(card('管理者').textContent ?? '', /codex/)
 })
 
 function Harness() {
@@ -101,6 +103,7 @@ test('Bot 執行期覆寫：清掉＝送 null；改動跟底部的儲存一起�
     },
   } as never)
   await mount(<Harness />)
+  assert.equal(document.querySelector('.rt-override')?.textContent?.includes('codex'), false, 'claude bot 不顯示 codex 提示')
   const section = document.querySelector<HTMLElement>('.rt-override')!
   assert.equal(pill(section, '關').getAttribute('aria-checked'), 'true', '覆寫存的值')
   await click(pill(section, '跟角色'))

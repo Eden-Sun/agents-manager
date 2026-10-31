@@ -44,7 +44,7 @@ export function RolePolicyEditor({ project }: { project: Project }) {
   return (
     <div className="role-policy-editor" aria-label={t('角色設定')}>
       <h4 className="rp-title">{t('角色設定')}</h4>
-      <p className="hint">{t('設定角色的 context 上限與保溫。不設＝跟預設（現有行為）；「加入建議」只帶入草稿，要按儲存才會生效（改動後的 Bot 需重啟）。')}</p>
+      <p className="hint">{t('設定角色的 context 上限與保溫。不設＝跟預設（現有行為）；「加入建議」只帶入草稿，要按儲存才會生效（改動後的 Bot 需重啟）。保溫只影響 claude，codex 永快取不需保溫。')}</p>
       <div className="rp-cards">
         {RUNTIME_ROLES.map((r) => {
           const value = draft[r] ?? {}

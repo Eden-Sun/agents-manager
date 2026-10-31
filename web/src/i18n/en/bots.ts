@@ -341,7 +341,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '管理者在專案設定中指定': 'Managers are set in project settings',
   '待套用（需重啟）': 'Pending (restart required)',
   '角色設定': 'Role settings',
-  '設定角色的 context 上限與保溫。不設＝跟預設（現有行為）；「加入建議」只帶入草稿，要按儲存才會生效（改動後的 Bot 需重啟）。': 'Set each role\'s context limit and keep-warm. Unset means default (current behavior). Suggestions only fill the draft; Save applies them (running bots restart to pick up changes).',
+  '設定角色的 context 上限與保溫。不設＝跟預設（現有行為）；「加入建議」只帶入草稿，要按儲存才會生效（改動後的 Bot 需重啟）。保溫只影響 claude，codex 永快取不需保溫。': 'Set each role\'s context limit and keep-warm. Unset means default (current behavior). Suggestions only fill the draft; Save applies them (running bots restart to pick up changes).',
   '快取命中': 'Cache hit',
   '快取命中率需要 daemon 提供，目前沒有資料': 'Cache hit rate needs daemon data; none yet',
   '數值超出範圍：{field}': 'Value out of range: {field}',

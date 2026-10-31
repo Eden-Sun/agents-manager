@@ -24,7 +24,7 @@ export function ProjectSettingsPanel({ projectId, onOpenSidebar }: { projectId: 
   if (!project) return <div className="main-head"><span>{t('找不到 Project')}</span></div>
   const blockers = projectDeleteBlockers(members, runs, projectId)
   return <>
-    <div className="main-head">
+    <div className="main-head project-settings-head">
       {onOpenSidebar ? <button type="button" className="btn menu-btn icon-tip" onClick={onOpenSidebar} aria-label={t('開啟側邊欄')} data-tip={t('開啟側邊欄')}>☰</button> : null}
       <div className="main-title"><ProjectNameField projectId={projectId} label={project.label} editing={editing} onEditing={setEditing} /> <HostBadge host={host} connected={connected} /></div>
       <span className="spacer" />
