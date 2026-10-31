@@ -390,9 +390,47 @@ pub fn codex_context_pct(run_id: &str) -> Option<f64> {
     (u.window > 0).then(|| u.input as f64 / u.window as f64 * 100.0)
 }
 
+/// 網頁看見的「讀數失效」旗標（`runs.status_json` 的 `_agm_context_unknown`，值為 `true`）：剛 resume／壓縮，
+/// 還沒有真的用量讀數，context 不是 0% 而是未知（[`mask_invalidated_context`]）。
+pub const CONTEXT_UNKNOWN_KEY: &str = "_agm_context_unknown";
+
+/// 有 `_agm_context_invalidated`（resume 或壓縮之後的界線）、而且 context 裡沒有任何實際用量（空重繪的 0／null）＝讀數失效。
+/// 這時 `used_percentage`、`total_input_tokens` 變成 `null`，並標 [`CONTEXT_UNKNOWN_KEY`]；網頁照 `null` 顯示「context —」，
+/// 不把 0 當成真的 0%。有真讀數（任一欄位大於 0）就不動，下一回合的 statusLine 會自然取代界線。
+/// 只給網頁看的副本，DB 裡的原文不改（`primary_keep_warm` 等保守判斷仍讀原文）。沒有影響＝`None`。
+pub fn mask_invalidated_context(raw: &str) -> Option<String> {
+    let mut v: Value = serde_json::from_str(raw).ok()?;
+    if v.get("_agm_context_invalidated").is_none() {
+        return None;
+    }
+    let ctx = v.get("context_window").filter(|c| c.is_object())?;
+    let positive = |key: &str| ctx.get(key).and_then(Value::as_f64).is_some_and(|n| n > 0.0);
+    let usage_sum = ctx.get("current_usage").and_then(Value::as_object).map(|u| {
+        ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+            .iter()
+            .filter_map(|k| u.get(*k).and_then(Value::as_f64))
+            .sum::<f64>()
+    });
+    if positive("used_percentage") || positive("total_input_tokens") || usage_sum.is_some_and(|n| n > 0.0) {
+        return None;
+    }
+    let ctx = v.get_mut("context_window")?.as_object_mut()?;
+    ctx.insert("used_percentage".into(), Value::Null);
+    ctx.insert("total_input_tokens".into(), Value::Null);
+    ctx.remove("current_usage");
+    v[CONTEXT_UNKNOWN_KEY] = json!(true);
+    Some(v.to_string())
+}
+
 /// 在 run JSON 上補 `prompt_cache`（claude／codex；grok、沒有資料＝`null`）；沒有 run（`null`）不動。
+/// claude 的 `status_json` 若是讀數失效（[`mask_invalidated_context`]），會換成遮罩後的副本再挑欄位。
 pub fn annotate(run_json: &mut Value, kind: &str, now_ms: i64) {
     let Some(o) = run_json.as_object_mut() else { return };
+    if kind == "claude" {
+        if let Some(masked) = o.get("status_json").and_then(Value::as_str).and_then(mask_invalidated_context) {
+            o.insert("status_json".into(), Value::String(masked));
+        }
+    }
     let pc = match kind {
         "claude" => o.get("status_json").and_then(Value::as_str).map_or(Value::Null, from_statusline),
         "codex" => {

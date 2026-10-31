@@ -490,6 +490,11 @@ export interface StatusInfo {
   context_used_pct: number | null
   context_used_tokens: number | null
   context_size: number | null
+  /**
+   * 剛 resume／壓縮，還沒有真的用量讀數（daemon 的 `_agm_context_unknown`，見 API.md run.status_json）：
+   * 百分比與 token 數都是 `null`，網頁顯示「context —」，不當成 0%。舊 daemon 沒有＝false。
+   */
+  context_unknown: boolean
   five_hour_pct: number | null
   /** epoch 秒 */
   five_hour_resets_at: number | null

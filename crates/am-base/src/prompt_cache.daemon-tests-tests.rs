@@ -113,6 +113,46 @@ fn a_token_count_older_than_the_tail_is_still_found() {
     }
 
     #[test]
+    fn resumed_or_compacted_zero_redraw_is_unknown_not_zero_percent() {
+        // resume／壓縮後的空重繪：used=0、total=0，界線留在 status_json。網頁要看到 null＋未知旗標，不是 0%。
+        let raw = r#"{"session_id":"s1","_agm_context_invalidated":"s1","context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":1000000,"current_usage":{"input_tokens":0}},"prompt_cache":{"warm":true,"ttl":"1h"}}"#;
+        let mut run = json!({"id": "r-lead", "status_json": raw});
+        annotate(&mut run, "claude", 0);
+        let masked: Value = serde_json::from_str(run["status_json"].as_str().unwrap()).unwrap();
+        assert_eq!(masked[CONTEXT_UNKNOWN_KEY], true);
+        assert!(masked["context_window"]["used_percentage"].is_null());
+        assert!(masked["context_window"]["total_input_tokens"].is_null());
+        assert_eq!(masked["context_window"]["context_window_size"], 1000000, "the window size is still known");
+        assert!(run["prompt_cache"]["context_used_pct"].is_null());
+        assert!(run["prompt_cache"]["context_used_tokens"].is_null());
+        assert_eq!(run["prompt_cache"]["warm"], true, "cache warmth is not affected by the context mask");
+        // 只遮罩網頁副本：傳進來的原文字串不被改寫（保溫判斷仍讀 DB 原文）。
+        assert!(raw.contains("\"used_percentage\":0"));
+    }
+
+    #[test]
+    fn a_real_reading_after_the_boundary_is_shown_as_is() {
+        let real = r#"{"session_id":"s1","_agm_context_invalidated":"s1","context_window":{"used_percentage":15,"total_input_tokens":150000,"context_window_size":1000000},"prompt_cache":{"warm":true,"ttl":"1h"}}"#;
+        assert!(mask_invalidated_context(real).is_none());
+        let mut run = json!({"id": "r-real", "status_json": real});
+        annotate(&mut run, "claude", 0);
+        assert_eq!(run["status_json"], real);
+        assert_eq!(run["prompt_cache"]["context_used_pct"], 15.0);
+        // 四捨五入成 0% 但確實讀到 input token：也是真讀數。
+        let rounded = r#"{"session_id":"s1","_agm_context_invalidated":"s1","context_window":{"used_percentage":0,"current_usage":{"input_tokens":300},"context_window_size":1000000}}"#;
+        assert!(mask_invalidated_context(rounded).is_none());
+    }
+
+    #[test]
+    fn a_zero_without_the_boundary_is_left_alone() {
+        // 沒有失效界線的 0 不在這裡判斷（不是 resume／壓縮的情況），原樣保留。
+        let plain = r#"{"session_id":"s1","context_window":{"used_percentage":0,"total_input_tokens":0}}"#;
+        assert!(mask_invalidated_context(plain).is_none());
+        assert!(mask_invalidated_context("not json").is_none());
+        assert!(mask_invalidated_context(r#"{"_agm_context_invalidated":"s1"}"#).is_none(), "no context_window to mask");
+    }
+
+    #[test]
     fn a_ttl_that_is_not_ascii_or_overflows_is_unknown_not_a_panic() {
         // 單位若取最後一個位元組會切在字元中間（panic）；秒數乘上單位溢位（debug 直接 panic，release 繞成負數）。
         for ttl in ["5分", "分", "9000000000000000h"] {

@@ -21,6 +21,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '{n} 個子 agent 在跑': { one: '{n} sub-agent running', other: '{n} sub-agents running' },
   '（{used} / {size}）': ' ({used} / {size})',
   '約 {n} tokens': '~{n} tokens',
+  '剛 resume／壓縮，等下一回合更新': 'Just resumed or compacted; updates on the next turn',
   '模型滿載': 'Model at capacity',
   '模型滿載：OpenAI 目前容量不夠，這一回合沒有跑；不是 bot 卡住、也不是額度用完。換個模型或稍後再送一次（不會自動重送、也不會自動換模型）': 'OpenAI is currently at capacity, so this turn did not run. The Bot is not stuck and has not run out of quota. Try another model or send it again later; it will not retry or switch models automatically.',
   '等待回應：{reason}': 'Waiting for a response: {reason}',

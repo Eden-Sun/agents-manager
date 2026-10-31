@@ -447,6 +447,8 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
     context_used_pct: numOrNull(pick(ctx, 'used_percentage')),
     context_used_tokens: numOrNull(pick(ctx, 'total_input_tokens')),
     context_size: numOrNull(pick(ctx, 'context_window_size')),
+    // daemon 把讀數失效的 status_json 遮成 null 並標這個旗標（CONTEXT_UNKNOWN_KEY）；0 不再代表真的 0%。
+    context_unknown: raw._agm_context_unknown === true,
     five_hour_pct: numOrNull(pick(five, 'used_percentage')),
     five_hour_resets_at: numOrNull(pick(five, 'resets_at')),
     seven_day_pct: numOrNull(pick(seven, 'used_percentage')),
