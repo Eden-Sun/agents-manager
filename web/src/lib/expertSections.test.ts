@@ -14,6 +14,7 @@ describe('expertSections pure functions', () => {
     assert.equal(roleToExpertSection('manager'), 'manager')
     assert.equal(roleToExpertSection('advisor'), 'advisor')
     assert.equal(roleToExpertSection('executor'), 'executor')
+    assert.equal(roleToExpertSection('specialist'), 'specialist')
     assert.equal(roleToExpertSection(null), 'unassigned')
     assert.equal(roleToExpertSection(undefined), 'unassigned')
   })
@@ -22,29 +23,33 @@ describe('expertSections pure functions', () => {
     assert.equal(roleShortLabel('manager'), '管')
     assert.equal(roleShortLabel('advisor'), '顧')
     assert.equal(roleShortLabel('executor'), '執')
+    assert.equal(roleShortLabel('specialist'), '專')
     assert.equal(roleShortLabel(null), '')
 
     assert.equal(roleTitle('manager'), '管理者')
     assert.equal(roleTitle('advisor'), '顧問')
     assert.equal(roleTitle('executor'), '執行者')
+    assert.equal(roleTitle('specialist'), '專家')
     assert.equal(roleTitle(null), '未分配')
   })
 
-  test('groupExpertSections: fixed order (manager -> advisor -> executor -> unassigned)', () => {
+  test('groupExpertSections: fixed order (manager -> specialist -> advisor -> executor -> unassigned)', () => {
     const bots: Partial<Bot>[] = [
       { id: 'b1', name: 'bot-exec-1', role: 'executor' },
       { id: 'b2', name: 'bot-unassigned', role: null },
       { id: 'b3', name: 'bot-mgr', role: 'manager' },
       { id: 'b4', name: 'bot-adv', role: 'advisor' },
       { id: 'b5', name: 'bot-exec-2', role: 'executor' },
+      { id: 'b6', name: 'bot-spec', role: 'specialist' },
     ]
 
     const sections = groupExpertSections(bots)
-    assert.deepEqual(sections.map((s) => s.role), ['manager', 'advisor', 'executor', 'unassigned'])
+    assert.deepEqual(sections.map((s) => s.role), ['manager', 'specialist', 'advisor', 'executor', 'unassigned'])
     assert.deepEqual(sections[0].items.map((b) => b.id), ['b3'])
-    assert.deepEqual(sections[1].items.map((b) => b.id), ['b4'])
-    assert.deepEqual(sections[2].items.map((b) => b.id), ['b1', 'b5'])
-    assert.deepEqual(sections[3].items.map((b) => b.id), ['b2'])
+    assert.deepEqual(sections[1].items.map((b) => b.id), ['b6'])
+    assert.deepEqual(sections[2].items.map((b) => b.id), ['b4'])
+    assert.deepEqual(sections[3].items.map((b) => b.id), ['b1', 'b5'])
+    assert.deepEqual(sections[4].items.map((b) => b.id), ['b2'])
   })
 
   test('groupExpertSections: empty sections are skipped', () => {

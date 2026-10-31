@@ -234,6 +234,7 @@ interface MockBot {
   name: string
   kind: BotKind
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
+  track?: string | null
   role_pending?: boolean
   daemon_url_pending?: boolean
   manager_use?: boolean
@@ -1009,6 +1010,29 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.bots.push(unassigned)
+
+    const specialist: MockBot = {
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'expert-spec-infra',
+      kind: 'claude',
+      role: 'specialist',
+      track: 'infra',
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    }
+    this.bots.push(specialist)
   }
 
   /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
@@ -2342,6 +2366,7 @@ export class MockTransport implements Transport {
               name: b.name,
               kind: b.kind,
               role: b.role ?? null,
+              track: b.track ?? null,
               role_pending: b.role_pending ?? false,
               daemon_url_pending: b.daemon_url_pending ?? false,
               manager_use: b.manager_use ?? true,
@@ -2636,8 +2661,16 @@ export class MockTransport implements Transport {
     if (b.effort !== undefined) {
       bot.effort = typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null
     }
+    if (b.track !== undefined) {
+      // 與 daemon 一致：track 只有專家用；清掉或空白就是 null。
+      bot.track = typeof b.track === 'string' && b.track.trim() ? b.track.trim() : null
+    }
     if (b.role !== undefined) {
-      bot.role = b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' ? b.role : null
+      bot.role =
+        b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' || b.role === 'specialist' ? b.role : null
+    }
+    if (bot.role === 'specialist' && !bot.track) {
+      throw new ApiError(400, { error: 'track_required' }, 'bad request')
     }
     if (b.manager_use !== undefined) {
       bot.manager_use = Boolean(b.manager_use)

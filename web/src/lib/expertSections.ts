@@ -1,7 +1,7 @@
 import type { Bot } from '../api/types'
 import { t } from './i18n'
 
-export type ExpertRole = 'manager' | 'advisor' | 'executor' | 'unassigned'
+export type ExpertRole = 'manager' | 'specialist' | 'advisor' | 'executor' | 'unassigned'
 
 export interface ExpertSection<T extends { role?: Bot['role'] }> {
   role: ExpertRole
@@ -10,10 +10,11 @@ export interface ExpertSection<T extends { role?: Bot['role'] }> {
   items: T[]
 }
 
-export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'advisor', 'executor', 'unassigned'] as const
+export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'unassigned'] as const
 
 export function roleToExpertSection(role: Bot['role']): ExpertRole {
   if (role === 'manager') return 'manager'
+  if (role === 'specialist') return 'specialist'
   if (role === 'advisor') return 'advisor'
   if (role === 'executor') return 'executor'
   return 'unassigned'
@@ -21,6 +22,7 @@ export function roleToExpertSection(role: Bot['role']): ExpertRole {
 
 export function roleShortLabel(role: Bot['role'] | ExpertRole): string {
   if (role === 'manager') return t('管')
+  if (role === 'specialist') return t('專')
   if (role === 'advisor') return t('顧')
   if (role === 'executor') return t('執')
   return ''
@@ -28,18 +30,20 @@ export function roleShortLabel(role: Bot['role'] | ExpertRole): string {
 
 export function roleTitle(role: Bot['role'] | ExpertRole): string {
   if (role === 'manager') return t('管理者')
+  if (role === 'specialist') return t('專家')
   if (role === 'advisor') return t('顧問')
   if (role === 'executor') return t('執行者')
   return t('未分配')
 }
 
 /**
- * 在專家模式下，依固定順序（管理者 -> 顧問 -> 執行者 -> 未分配）將頂層項目分段；
+ * 在專家模式下，依固定順序（管理者 -> 專家 -> 顧問 -> 執行者 -> 未分配）將頂層項目分段；
  * 沒有項目的分段自動略過不畫。
  */
 export function groupExpertSections<T extends { role?: Bot['role'] }>(items: readonly T[]): ExpertSection<T>[] {
   const buckets: Record<ExpertRole, T[]> = {
     manager: [],
+    specialist: [],
     advisor: [],
     executor: [],
     unassigned: [],

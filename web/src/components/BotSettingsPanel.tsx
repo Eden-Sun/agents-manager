@@ -246,6 +246,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const loginBusy = useStore((s) => s.busy[`login:${botId}`] === true)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
+  /** 角色下拉選了「專家」但還沒存（track 必填）：這時 select 顯示專家，實際角色仍是 bot.role。 */
+  const [roleDraft, setRoleDraft] = useState<'specialist' | null>(null)
+  const [specTrack, setSpecTrack] = useState(bot?.track ?? '')
+  const [savingTrack, setSavingTrack] = useState(false)
+  const trackHintId = useId()
+  const trackOk = specTrack.trim() !== ''
+  const roleValue = roleDraft ?? bot?.role ?? ''
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
@@ -543,10 +550,50 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
       {bot.role_pending ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
       {project?.mode === 'expert' ? <label>角色
-        <select value={bot.role ?? ''} onChange={(e) => void patchBot(botId, { role: (e.target.value || null) as 'manager' | 'executor' | 'advisor' | null })}>
-          <option value="">未分配</option><option value="executor">執行者</option><option value="advisor">顧問</option><option value="manager" disabled>管理者（在專案設定中指定）</option>
+        <select
+          value={roleValue}
+          onChange={(e) => {
+            const next = e.target.value
+            if (next === 'specialist') {
+              // 專家要先填軌道才能存：先不送，等「儲存專家」按鈕。
+              setRoleDraft('specialist')
+              return
+            }
+            setRoleDraft(null)
+            void patchBot(botId, { role: (next || null) as 'manager' | 'executor' | 'advisor' | null })
+          }}
+        >
+          <option value="">未分配</option><option value="specialist">專家</option><option value="advisor">顧問</option><option value="executor">執行者</option><option value="manager" disabled>管理者（在專案設定中指定）</option>
         </select>
       </label> : null}
+      {project?.mode === 'expert' && roleValue === 'specialist' ? (
+        <form
+          className="bs-specialist"
+          aria-label={t('專家設定')}
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!trackOk || savingTrack) return
+            setSavingTrack(true)
+            void patchBot(botId, { role: 'specialist', track: specTrack.trim() }).then((res) => {
+              setSavingTrack(false)
+              if (res) setRoleDraft(null)
+            })
+          }}
+        >
+          <label>{t('專長軌道（必填）')}
+            <input
+              type="text"
+              value={specTrack}
+              placeholder={t('例如 infra、ui')}
+              aria-invalid={!trackOk || undefined}
+              aria-describedby={trackOk ? undefined : trackHintId}
+              onChange={(e) => setSpecTrack(e.target.value)}
+            />
+          </label>
+          {trackOk ? null : <span id={trackHintId} className="hint">{t('專家一定要填軌道，空白不能儲存')}</span>}
+          <button type="submit" className="btn primary" disabled={!trackOk || savingTrack}>{t('儲存專家')}</button>
+        </form>
+      ) : null}
       <div className="bs-body">
         <form
           className="form"

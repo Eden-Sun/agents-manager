@@ -290,6 +290,7 @@ export function toProject(v: unknown): Project | null {
       return { owner, repo, url: str(pick(g, 'url')) || `https://github.com/${owner}/${repo}` }
     })(),
     created_at: str(v.created_at),
+    role_policy: isRec(v.role_policy) ? v.role_policy : {},
     executor_pool: (() => {
       const ep = pick(v, 'executor_pool')
       if (Array.isArray(ep)) {
@@ -337,7 +338,9 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     id,
     project_id: str(pick(v, 'project_id'), projectId ?? ''),
     name: str(pick(v, 'name'), id),
-    role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' ? v.role : null,
+    role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' || v.role === 'specialist' ? v.role : null,
+    track: optStr(v.track),
+    runtime_override: isRec(v.runtime_override) ? v.runtime_override : null,
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
     pool_entry: optStr(pick(v, 'pool_entry')),
     role_pending: bool(v.role_pending),

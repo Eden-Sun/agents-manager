@@ -697,12 +697,16 @@ const REASON_TEXT: Record<string, string> = {
 const REASON_CODE_TEXT: Record<string, string> = {
   // `MAX_PROVABLE_CHARS`（am-lifecycle delivery.rs）：超過就證明不了送達，daemon 不送。
   prompt_too_long_to_prove: msg('這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送'),
+  // 專家（specialist）：track 必填（400，`error` 欄位）；track 與 role 只有使用者能改（403 user_only）。
+  track_required: msg('專家一定要填寫專長軌道，空白不能儲存'),
+  user_only: msg('只有使用者能改這個設定'),
 }
 
 function reasonText(e: ApiError): string {
   const known = REASON_TEXT[e.message]
   if (known) return tr(known)
-  const byCode = typeof e.body.reason === 'string' ? REASON_CODE_TEXT[e.body.reason] : undefined
+  const code = typeof e.body.reason === 'string' ? e.body.reason : typeof e.body.error === 'string' ? e.body.error : undefined
+  const byCode = code ? REASON_CODE_TEXT[code] : undefined
   if (byCode) return tr(byCode)
   const human = e.body.message
   if (typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
@@ -728,6 +732,9 @@ export async function sendWithFreshRun(get: () => StoreState, botId: string, sen
     void get().refreshState()
   }
 }
+
+/** 測試用：錯誤碼轉人話的對照（同 errText）。 */
+export const errTextForTest = (e: unknown): string => errText(e)
 
 function errText(e: unknown): string {
   const net = networkErrText(e)

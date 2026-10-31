@@ -38,3 +38,8 @@ test('專家模式的執行者／顧問不進晶片列，管理者照算（成�
   assert.equal(chipTracked({ ...userBot, role: 'manager' }, SUP), true)
   assert.equal(chipTracked({ ...userBot, role: null }, SUP), true)
 })
+
+test('chipTracked: specialist 與 executor／advisor 一樣不進晶片列', () => {
+  const spec = { pending: false, parent_bot_id: null, project_id: 'p1', role: 'specialist' as const }
+  assert.equal(chipTracked(spec, null), false)
+})

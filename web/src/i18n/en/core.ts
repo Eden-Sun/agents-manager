@@ -218,6 +218,8 @@ export default {
   '這個 bot 沒在跑。先啟動它，再按登入。': 'This Bot is not running. Start it, then press sign in.',
   '這個 claude 還沒登入，先到「終端」分頁完成登入。': 'This claude is not signed in yet; finish signing in on the “Terminal” tab.',
   '這則訊息超過 20 萬字，無法確認對方收到，請縮短或分段再送': 'This message is over 200,000 characters, so delivery cannot be confirmed; shorten it or split it and send again',
+  '專家一定要填寫專長軌道，空白不能儲存': 'A specialist needs a track; a blank track cannot be saved',
+  '只有使用者能改這個設定': 'Only the user can change this setting',
   '這回合還在跑，送出會排到結束後': 'This turn is still running; the message will be sent after it ends',
   '這顆 daemon 還沒有 /api/build/remote（回的是網頁不是 JSON），二進位比前端舊；要 cargo build --release 後重啟 daemon。': 'This daemon has no /api/build/remote yet (it returned a web page, not JSON). The binary is older than the frontend; run cargo build --release and restart the daemon.',
   '這顆 pane 已經關掉了': 'This pane has already been closed',

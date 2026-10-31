@@ -16,6 +16,7 @@ export function chipTracked(
     !bot.pending &&
     bot.parent_bot_id === null &&
     bot.role !== 'executor' &&
+    bot.role !== 'specialist' &&
     bot.role !== 'advisor' &&
     bot.project_id !== supervisorProjectId
   )
