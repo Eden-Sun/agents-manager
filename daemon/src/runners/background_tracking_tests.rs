@@ -113,11 +113,6 @@ async fn default_session_poller_is_tracked_and_stops_at_shutdown() {
     tracked_and_stops(true, crate::runners::default_session::spawn_poller).await;
 }
 
-#[tokio::test]
-async fn mission_relay_is_tracked_and_stops_at_shutdown() {
-    tracked_and_stops(true, crate::runners::mission::spawn_relay).await;
-}
-
 /// 第一輪 tick panic 之後 supervisor 重啟迴圈，後面的輪次照常（`PANIC_RETRY` 在 test 是 5ms）。
 #[tokio::test]
 async fn hook_inbox_worker_survives_a_panic_in_one_tick() {

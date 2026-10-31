@@ -1,5 +1,5 @@
 //! P6 supervisor 的窄介面由 `App` 實作的地方（crate 拆分第 3 步）。每個方法逐行委派給 supervisor 原本呼叫的函式，不加任何邏輯，
-//! 所以行為與錯誤型別不變。介面本身在 `supervisor/ports.rs`；這個檔案是 supervisor 唯一還知道 lifecycle／quota／mission／judge…
+//! 所以行為與錯誤型別不變。介面本身在 `supervisor/ports.rs`；這個檔案是 supervisor 唯一還知道 lifecycle／quota／judge…
 //! 實作細節的地方（composition root 側的 adapter，不屬於未來的 am-supervisor-runtime）。
 //!
 //! 模組掛在 `supervisor/mod.rs`（`#[path]`），不碰 `lib.rs`，免得跟其他包各自加 `mod` 行互相衝突。
@@ -10,7 +10,7 @@ use crate::db;
 use crate::lifecycle::{self, LcResult, PromptOut, Revoked, StartOpts};
 use crate::quota::{self, LimitHit, Quota};
 use crate::state::App;
-use crate::supervisor::ports::{BotLamp, ConfigProjection, HostProbes, JudgeOps, LocalAccountView, MissionOps, QuotaOps, TurnOps};
+use crate::supervisor::ports::{BotLamp, ConfigProjection, HostProbes, JudgeOps, LocalAccountView, QuotaOps, TurnOps};
 use serde_json::Value;
 use std::future::Future;
 use std::time::Duration;
@@ -113,44 +113,6 @@ impl QuotaOps for App {
     }
 }
 
-impl MissionOps for App {
-    async fn mission(&self, mission_id: &str) -> anyhow::Result<Option<crate::mission::store::Mission>> {
-        crate::mission::store::get(&self.db, mission_id).await
-    }
-    async fn mission_candidates(&self, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<Quota>)>> {
-        crate::mission::candidates(&self.shared(), host, kind).await
-    }
-    async fn mission_billing_identity(&self, host: &str, bot: &db::Bot) -> anyhow::Result<Option<String>> {
-        crate::mission::billing_identity_named(&self.shared(), host, bot).await
-    }
-    async fn mission_add_event(&self, mission_id: &str, kind: &str, text: &str, relay_from: Option<&str>, payload: &Value) -> anyhow::Result<()> {
-        crate::mission::store::add_event(&self.db, mission_id, kind, text, relay_from, payload).await.map(|_| ())
-    }
-    async fn mission_pause_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        mission_id: &str,
-        reason: &str,
-        detail: Option<&str>,
-        text: &str,
-        payload: &Value,
-    ) -> anyhow::Result<bool> {
-        crate::mission::store::pause_on(tx, mission_id, reason, detail, text, payload).await
-    }
-    async fn ensure_can_assign(&self, mission_id: &str, role: &str) -> Result<(), crate::lifecycle::LcError> {
-        crate::mission::workflow::ensure_can_assign(&self.shared(), mission_id, role).await
-    }
-    async fn mission_next_json(&self, mission_id: &str) -> Value {
-        crate::mission::workflow::next_json(&self.shared(), mission_id).await
-    }
-    async fn mission_wake_stalled(&self) {
-        crate::mission::workflow::wake_stalled(&self.shared()).await
-    }
-    async fn mission_sweep_closed_temp_bots(&self) {
-        crate::runners::mission::api::sweep_closed_mission_temp_bots(&self.shared()).await
-    }
-}
-
 impl JudgeOps for App {
     async fn judge_shadow_settled(&self, assignment_id: &str, bot_id: &str, turn_id: Option<&str>, turn_status: &str, result: Option<&str>) {
         crate::runners::judge::shadow_settled(&self.shared(), assignment_id, bot_id, turn_id, turn_status, result).await
@@ -250,14 +212,12 @@ impl BotLamp for App {
     }
 }
 
-impl crate::supervisor::ports::MissionCancellation for App {
-    async fn collect_cancelled_missions(&self) {
-        crate::runners::supervisor::runtime::collect_cancelled_missions(&self.shared()).await
-    }
-}
-
 impl crate::supervisor::ports::CandidateSwitch for App {
     async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError> {
         crate::runners::supervisor::runtime::switch_candidate(&self.shared(), next, reason, reset_at).await
     }
+}
+
+impl crate::relay_auth::RelayTokenVerify for App {
+    fn ct_eq(&self, a: &str, b: &str) -> bool { crate::api::ct_eq(a, b) }
 }

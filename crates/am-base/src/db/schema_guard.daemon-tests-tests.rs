@@ -32,7 +32,7 @@
             ("trigger", "supervisor_assignments_status_transition"),
             ("trigger", "turns_status_transition"),
             ("index", "hook_events_dedupe"),
-            ("index", "missions_one_open_child"),
+            ("table", "identity_prefs"),
             ("table", "panes"),
             ("table", "build_slots"),
             ("table", "release_triage"),
@@ -90,12 +90,12 @@
 
         // 只改排版與註解：同一個索引照舊版的排版重建，指紋不變。
         let pool = fresh().await;
-        sqlx::query("DROP INDEX missions_one_open_child").execute(&pool).await.unwrap();
+        sqlx::query("DROP INDEX projects_host_path_live").execute(&pool).await.unwrap();
         sqlx::query(
-            "CREATE UNIQUE INDEX missions_one_open_child
+            "CREATE UNIQUE INDEX projects_host_path_live
                -- 舊版寫在 DDL 字串裡的排版
-               ON missions ( parent_mission_id )
-               WHERE parent_mission_id IS NOT NULL   AND completed_at IS NULL AND cancelled_at IS NULL",
+               ON projects ( host, path )
+               WHERE deleted_at IS NULL",
         )
         .execute(&pool)
         .await
@@ -288,10 +288,10 @@
         {
             let pool = open(&path).await.unwrap();
             for s in [
-                "DROP INDEX missions_one_open_child",
-                "CREATE UNIQUE INDEX IF NOT EXISTS missions_one_open_child
-                   ON missions(parent_mission_id)
-                   WHERE parent_mission_id IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL",
+                "DROP INDEX projects_host_path_live",
+                "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live
+                   ON projects(host, path)
+                   WHERE deleted_at IS NULL",
                 "CREATE TABLE teams (id TEXT PRIMARY KEY, name TEXT)",
                 "CREATE INDEX teams_name ON teams(name)",
                 "CREATE TRIGGER teams_touch AFTER UPDATE ON teams BEGIN SELECT 1; END",

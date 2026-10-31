@@ -264,26 +264,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/panes/{id}/close", post(crate::runners::panes::close))
         .route("/panes/{id}/focus", post(crate::runners::panes::focus))
         .route("/panes", get(crate::runners::panes::list_all))
-        // 群組任務（docs/goals/agm-missions.md）。
-        .route(
-            "/projects/{id}/missions",
-            get(crate::runners::mission::api::get_missions).post(crate::runners::mission::api::post_mission),
-        )
-        .route("/missions/{id}", get(crate::runners::mission::api::get_mission))
-        .route("/missions/{id}/events", post(crate::runners::mission::api::post_event))
-        .route("/missions/{id}/pause", post(crate::runners::mission::api::post_pause))
-        .route("/missions/{id}/resume", post(crate::runners::mission::api::post_resume))
-        // 完成後的追問／回覆／追加修改（AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）。
-        .route("/missions/{id}/question", post(crate::runners::mission::api::post_question))
-        .route("/missions/{id}/answer", post(crate::runners::mission::api::post_answer))
-        .route("/missions/{id}/revise", post(crate::runners::mission::api::post_revise))
-        .route("/missions/{id}/cancel", post(crate::runners::mission::api::post_cancel))
-        .route("/missions/{id}/complete", post(crate::runners::mission::api::post_complete))
-        .route("/missions/{id}/round", post(crate::runners::mission::api::post_round).layer(agm_gate!(app)))
-        .route("/missions/{id}/pick", get(crate::runners::mission::api::get_pick))
-        .route("/missions/{id}/deliver", post(crate::runners::mission::api::post_deliver))
-        .route("/identity-prefs", get(crate::runners::mission::api::get_identity_prefs))
-        .route("/identities/{name}/disabled", axum::routing::put(crate::runners::mission::api::put_identity_disabled))
+        .route("/identity-prefs", get(crate::identity_prefs::get_identity_prefs))
+        .route("/identities/{name}/disabled", axum::routing::put(crate::identity_prefs::put_identity_disabled))
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/submodules", get(get_submodules))
         .route("/projects/{id}/git", get(get_git))
@@ -1190,8 +1172,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
-    // #989：網頁專用的寫入——建任務、撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
-    ("POST", "/api/projects/{id}/missions", BotRoutePolicy::UserOrAgm),
+    // #989：網頁專用的寫入——撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
     ("POST", "/api/turns/{id}/withdraw", BotRoutePolicy::UserOnly),
     ("POST", "/api/turns/{id}/abandon", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/projects", BotRoutePolicy::UserOrAgm),
@@ -1221,9 +1202,6 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("DELETE", "/api/identities/{name}", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
-    ("POST", "/api/missions/{id}/pause", BotRoutePolicy::UserOrAgm),
-    ("POST", "/api/missions/{id}/resume", BotRoutePolicy::UserOrAgm),
-    ("POST", "/api/missions/{id}/cancel", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/dispatched", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/auto", BotRoutePolicy::UserOrAgm),
@@ -1471,7 +1449,7 @@ fn decode_api_path_segment(segment: &str) -> Option<String> {
 }
 
 /// Enforce ownership on routes whose path identifier resolves to a bot, project, turn,
-/// attachment, mission, or assignment. User and service principals retain their existing route
+/// attachment, or assignment. User and service principals retain their existing route
 /// behavior; AGM role bots keep their explicitly delegated cross-resource scope.
 async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &str) -> Result<(), LcError> {
     let decoded = decoded_bot_path_segments(path).ok_or_else(|| bot_scope_denied(caller))?;
@@ -1509,14 +1487,7 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
         }
         (Some("projects"), Some(id)) => {
             if db::project(&app.db, id).await.map_err(any_err)?.is_some() {
-                let mission_collection = parts.len() == 4
-                    && parts.get(3) == Some(&"missions")
-                    && matches!(method, "GET" | "POST");
-                if project_in_bot_tree(app, caller, id).await?
-                    || (mission_collection && bot_role_may_cross(app, caller).await?)
-                {
-                    return Ok(());
-                }
+                if project_in_bot_tree(app, caller, id).await? { return Ok(()); }
                 Some("project")
             } else {
                 None
@@ -1550,37 +1521,6 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                     return Ok(());
                 }
                 Some("attachment")
-            } else {
-                None
-            }
-        }
-        (Some("missions"), Some(id)) => {
-            let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM missions WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&app.db)
-                .await
-                .map_err(any_err)?;
-            if let Some(project_id) = project_id {
-                let in_project = project_in_bot_tree(app, caller, &project_id).await?;
-                let assigned: i64 = sqlx::query_scalar(
-                    "WITH RECURSIVE owned(id) AS (
-                         SELECT id FROM bots WHERE id = ?
-                         UNION
-                         SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
-                     )
-                     SELECT EXISTS(
-                         SELECT 1 FROM supervisor_assignments a JOIN owned ON owned.id = a.target_bot_id WHERE a.mission_id = ?
-                     )",
-                )
-                .bind(caller)
-                .bind(id)
-                .fetch_one(&app.db)
-                .await
-                .map_err(any_err)?;
-                if in_project || assigned != 0 || bot_role_may_cross(app, caller).await? {
-                    return Ok(());
-                }
-                Some("mission")
             } else {
                 None
             }
@@ -2430,7 +2370,7 @@ pub(crate) struct DeleteQuery {
     pub(crate) confirm: Option<String>,
 }
 
-/// HTTP 進來的刪除先過 AGM 閘門；daemon 內部（mission 收臨時 bot）直接叫 `delete_bot`／`delete_project`。
+/// HTTP 進來的刪除先過 AGM 閘門。
 pub(crate) async fn delete_project_http(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2533,20 +2473,6 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
     // 輸入框草稿跟著專案走：群組草稿與每顆 bot 的草稿都清掉，其他瀏覽器也會收到清除事件。
     let draft_keys: Vec<String> = std::iter::once(format!("group:{id}")).chain(ids.iter().map(|b| format!("bot:{b}"))).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
-    // 專案沒了，它底下還開著的任務也跟著收（issue #498）：任務沒有軟刪，而 `mission::store::open_unpaused`
-    // （`workflow::wake_stalled_at` 掃的那份）沒有存活性條件——不收的話它們永遠停在 open，十分鐘後還會推一則
-    // `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務。順帶把它們底下還開著的交辦也收掉。
-    //
-    // 臨時 bot（`agm-mission-*`）**不是**走 `closed_with_live_temp_bots` 那條（issue #498 的複看）：
-    // 那條要求 `bots.deleted_at IS NULL`，而下面的 `delete_in_config` 與逐顆軟刪已經先把它們收掉了，
-    // 所以那條掃不到、也不需要掃——刪專案本來就把專案裡每一顆 bot 都軟刪了。
-    //
-    // 盡力而為：收不掉只記 log，不讓刪除回頭——專案在 config 裡已經定案刪除了。
-    match crate::mission::store::cancel_open_for_project(&app.db, &id, "project_deleted").await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(project = %id, missions = n, "project deleted; its open missions were cancelled"),
-        Err(e) => tracing::error!(project = %id, error = ?e, "project deleted but its open missions could not be cancelled"),
-    }
     // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
     // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
     // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
@@ -7397,7 +7323,7 @@ async fn prompt_bot(
             return Err(bot_user_only());
         }
     }
-    // #923：冪等鍵進 turns 的唯一索引、再隨回應與日誌回出去，先驗長度與字元（同 fork／mission 的做法）。
+    // #923：冪等鍵進 turns 的唯一索引、再隨回應與日誌回出去，先驗長度與字元（同 fork 的做法）。
     let given_crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
         None => None,
@@ -9263,86 +9189,6 @@ mod delete_bot_tests {
         assert!(db::active_run(&app.db, &parent).await.unwrap().is_none(), "母 bot 已刪，它的 run 一定要停");
         sqlx::query("DROP TRIGGER am_test_fail_kid").execute(&app.db).await.unwrap();
         assert!(crate::testing::eventually!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some()), "寫得進去之後背景補上");
-    }
-
-    /// issue #498：刪專案要把它底下**還開著**的任務一起收掉，並留下為什麼。
-    ///
-    /// 不收的話任務永遠停在 open（任務沒有軟刪），`workflow::wake_stalled_at` 十分鐘後還會推一則
-    /// `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務——「叫醒之後不再叫」那一半由
-    /// `mission::workflow` 的 `a_mission_whose_project_was_deleted_is_not_woken_any_more` 釘。
-    #[tokio::test]
-    async fn deleting_a_project_cancels_its_open_missions() {
-        let e = crate::testing::env().await;
-        let app = e.app.clone();
-        // 專案要在 config.toml 裡，`delete_project` 才肯動（否則 409 not_in_config）。
-        let b1 = a_bot(&e, "alfa", "user").await;
-        in_config(&e, &[(&b1, "alfa")]).await;
-        let open = crate::mission::store::create(
-            &app.db,
-            &crate::mission::store::NewMission {
-                project_id: &e.project_id,
-                client_request_id: "crid-open",
-                text: "還開著的",
-                delivery_mode: "push_main",
-                executor_kind: "claude",
-                on_5h_limit: "wait",
-                max_rounds: 2,
-                parent_mission_id: None,
-            },
-        )
-        .await
-        .unwrap()
-        .0;
-        // 已經結案的那一筆不能被再寫一次（`cancelled_at` 只給還開著的）。
-        let done = crate::mission::store::create(
-            &app.db,
-            &crate::mission::store::NewMission {
-                project_id: &e.project_id,
-                client_request_id: "crid-done",
-                text: "早就完成的",
-                delivery_mode: "push_main",
-                executor_kind: "claude",
-                on_5h_limit: "wait",
-                max_rounds: 2,
-                parent_mission_id: None,
-            },
-        )
-        .await
-        .unwrap()
-        .0;
-        sqlx::query("UPDATE missions SET completed_at = ?, result_summary = '交付了' WHERE id = ?")
-            .bind(db::now())
-            .bind(&done.id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        // 底下一件還開著的交辦：任務收了，它也要跟著收（issue #498 的複看：不收的話額度回來時
-        // 還會被 dispatch 到已經軟刪的 bot，收成 awaiting_review 再推一則 assignment_failed）。
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &b1, "crid-a1", "做事", &[], None, true).await.unwrap();
-        crate::supervisor::store::set_mission_link(&app.db, &a.id, &open.id, "executor").await.unwrap();
-
-        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
-
-        let a_after = crate::supervisor::store::assignment(&app.db, &a.id).await.unwrap().unwrap();
-        assert_eq!(a_after.status, "cancelled", "任務收了，底下開著的交辦也要收：{}", a_after.status);
-
-        let after = crate::mission::store::get(&app.db, &open.id).await.unwrap().unwrap();
-        assert!(after.cancelled_at.is_some(), "開著的任務要跟著專案收掉");
-        let ev = crate::mission::store::events(&app.db, &open.id).await.unwrap();
-        let last = ev.last().expect("有事件");
-        assert_eq!(last.kind, "cancelled");
-        let payload: Value = serde_json::from_str(&last.payload_json).unwrap();
-        assert_eq!(payload["reason"], "project_deleted", "為什麼被收要查得到：{payload}");
-
-        let done_after = crate::mission::store::get(&app.db, &done.id).await.unwrap().unwrap();
-        assert!(done_after.cancelled_at.is_none() && done_after.completed_at.is_some(), "已經結案的不動它");
-        assert_eq!(
-            crate::mission::store::events(&app.db, &done.id).await.unwrap().iter().filter(|e| e.kind == "cancelled").count(),
-            0,
-            "結案的任務不該多一則 cancelled"
-        );
     }
 
     /// #298：專案已刪的 child 不能還原成看不到的活 bot。
@@ -13130,7 +12976,7 @@ mod per_principal_auth_tests {
         serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap()
     }
 
-    /// Every routed path whose identifier resolves to a bot, project, run/turn, mission,
+    /// Every routed path whose identifier resolves to a bot, project, run/turn,
     /// attachment, assignment, or bot-owned pane is exercised here. A valid Bot A credential
     /// must not cross into Bot B's project or bot-owned data; the prompt route is the one
     /// explicit cross-bot exception because relay authentication authorizes its recipient.
@@ -13191,16 +13037,6 @@ mod per_principal_auth_tests {
             .unwrap();
         let outbox_b = crate::outbox::ensure(&e.app.data_dir, &bot_b.id).unwrap();
         std::fs::write(outbox_b.join("x.txt"), b"B outbox fixture").unwrap();
-        let mission_b = db::ulid();
-        sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
-            .bind(&mission_b)
-            .bind(&project_b)
-            .bind(format!("scope-{}", mission_b))
-            .bind(&now)
-            .bind(&now)
-            .execute(&e.app.db)
-            .await
-            .unwrap();
         let assignment_b = db::ulid();
         sqlx::query("INSERT INTO supervisor_assignments (id, supervisor_id, target_bot_id, client_request_id, text, created_at, updated_at) VALUES (?,'main',?,?, 'scope fixture',?,?)")
             .bind(&assignment_b)
@@ -13260,7 +13096,6 @@ mod per_principal_auth_tests {
             ("PATCH", "/api/projects/{project}"), ("DELETE", "/api/projects/{project}"),
             ("POST", "/api/projects/{project}/bots"),
             ("GET", "/api/projects/{project}/panes"),
-            ("GET", "/api/projects/{project}/missions"), ("POST", "/api/projects/{project}/missions"),
             ("POST", "/api/projects/{project}/github/refresh"), ("GET", "/api/projects/{project}/submodules"),
             ("GET", "/api/projects/{project}/git"), ("POST", "/api/projects/{project}/git/commit"),
             ("POST", "/api/projects/{project}/git/push"), ("POST", "/api/projects/{project}/git/pull"),
@@ -13282,13 +13117,6 @@ mod per_principal_auth_tests {
             ("POST", "/api/bots/{bot}/restore"), ("GET", "/api/attachments/{attachment}"),
             ("POST", "/api/turns/{turn}/abandon"), ("POST", "/api/turns/{turn}/withdraw"),
             ("POST", "/api/turns/{encoded_turn}/withdraw"),
-            ("GET", "/api/missions/{mission}"), ("POST", "/api/missions/{mission}/events"),
-            ("GET", "/api/missions/{encoded_mission}"),
-            ("POST", "/api/missions/{mission}/pause"), ("POST", "/api/missions/{mission}/resume"),
-            ("POST", "/api/missions/{mission}/question"), ("POST", "/api/missions/{mission}/answer"),
-            ("POST", "/api/missions/{mission}/revise"), ("POST", "/api/missions/{mission}/cancel"),
-            ("POST", "/api/missions/{mission}/complete"), ("POST", "/api/missions/{mission}/round"),
-            ("GET", "/api/missions/{mission}/pick?role=executor"), ("POST", "/api/missions/{mission}/deliver"),
             ("GET", "/api/supervisor/assignments/{assignment}"),
             ("GET", "/api/supervisor/assignments/{encoded_assignment}"),
             ("POST", "/api/supervisor/assignments/{assignment}/review"),
@@ -13299,21 +13127,18 @@ mod per_principal_auth_tests {
         ];
         let encoded_project = format!("%{:02X}{}", project_b.as_bytes()[0], &project_b[1..]);
         let encoded_turn = format!("%{:02X}{}", turn_b.as_bytes()[0], &turn_b[1..]);
-        let encoded_mission = format!("%{:02X}{}", mission_b.as_bytes()[0], &mission_b[1..]);
         let encoded_assignment = format!("%{:02X}{}", assignment_b.as_bytes()[0], &assignment_b[1..]);
         let encoded_attachment = format!("%{:02X}{}", attachment_b.as_bytes()[0], &attachment_b[1..]);
         let requests = paths.into_iter().map(|(method, template)| {
             let path = template
                 .replace("{encoded_project}", &encoded_project)
                 .replace("{encoded_turn}", &encoded_turn)
-                .replace("{encoded_mission}", &encoded_mission)
                 .replace("{encoded_assignment}", &encoded_assignment)
                 .replace("{encoded_attachment}", &encoded_attachment)
                 .replace("{bot}", &bot_b.id)
                 .replace("{project}", &project_b)
                 .replace("{attachment}", &attachment_b)
                 .replace("{turn}", &turn_b)
-                .replace("{mission}", &mission_b)
                 .replace("{assignment}", &assignment_b)
                 .replace("{pane}", &pane_b);
             let body = if matches!(method, "GET" | "DELETE") {
@@ -13398,18 +13223,6 @@ mod per_principal_auth_tests {
         )
         .await;
         assert!(role_project_write.starts_with("HTTP/1.1 403") || role_project_write.starts_with("HTTP/1.1 404"), "AGM role must not inherit generic cross-project bot creation: {role_project_write}");
-        let role_project_missions = raw(
-            e.app.clone(),
-            format!("GET /api/projects/{project_b}/missions HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
-        )
-        .await;
-        assert!(role_project_missions.starts_with("HTTP/1.1 200"), "AGM role may list missions across projects: {role_project_missions}");
-        let role_mission = raw(
-            e.app.clone(),
-            format!("GET /api/missions/{mission_b} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
-        )
-        .await;
-        assert!(role_mission.starts_with("HTTP/1.1 200"), "mission API explicitly supports AGM role access: {role_mission}");
         let role_assignment = raw(
             e.app.clone(),
             format!("GET /api/supervisor/assignments/{assignment_b} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
@@ -14844,7 +14657,6 @@ mod per_principal_auth_tests {
         for (what, body) in [
             ("要驗收的交辦", json!({"target_bot_id": patrol.id, "text": "做 X", "client_request_id": "n1"})),
             ("notice 給一般 bot", json!({"target_bot_id": victim.id, "text": "照做", "client_request_id": "n2", "kind": "notice"})),
-            ("掛任務", json!({"target_bot_id": patrol.id, "text": "x", "client_request_id": "n3", "kind": "notice", "mission_id": "m1", "role": "executor"})),
             ("expects_review=true 的 notice", json!({"target_bot_id": patrol.id, "text": "x", "client_request_id": "n4", "kind": "notice", "expects_review": true})),
         ] {
             let r = post(body, Some(&plain)).await;

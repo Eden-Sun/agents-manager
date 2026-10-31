@@ -1,9 +1,8 @@
 //! `Arc<T>` forwarding for ports whose composition host is stored behind an `Arc`.
 
-use crate::mission::ports::{CallerOps, EventOps, IdentityOps, SupervisorOps};
 use crate::supervisor::ports::{
     BotLamp, CandidateSwitch, ClassifyFailureState, ConfigProjection, ControllerRuntime, DaemonConnection, HostProbes, IncidentState,
-    JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps,
+    JudgeOps, QuotaOps, TurnOps,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -107,44 +106,6 @@ impl<T: QuotaOps + ?Sized> QuotaOps for Arc<T> {
     }
 }
 
-impl<T: MissionOps + ?Sized> MissionOps for Arc<T> {
-    async fn mission(&self, mission_id: &str) -> anyhow::Result<Option<crate::mission::store::Mission>> {
-        (**self).mission(mission_id).await
-    }
-    async fn mission_candidates(&self, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<crate::quota::Quota>)>> {
-        (**self).mission_candidates(host, kind).await
-    }
-    async fn mission_billing_identity(&self, host: &str, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
-        (**self).mission_billing_identity(host, bot).await
-    }
-    async fn mission_add_event(&self, mission_id: &str, kind: &str, text: &str, relay_from: Option<&str>, payload: &serde_json::Value) -> anyhow::Result<()> {
-        (**self).mission_add_event(mission_id, kind, text, relay_from, payload).await
-    }
-    async fn mission_pause_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        mission_id: &str,
-        reason: &str,
-        detail: Option<&str>,
-        text: &str,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<bool> {
-        (**self).mission_pause_in_tx(tx, mission_id, reason, detail, text, payload).await
-    }
-    async fn ensure_can_assign(&self, mission_id: &str, role: &str) -> Result<(), crate::lifecycle::LcError> {
-        (**self).ensure_can_assign(mission_id, role).await
-    }
-    async fn mission_next_json(&self, mission_id: &str) -> serde_json::Value {
-        (**self).mission_next_json(mission_id).await
-    }
-    async fn mission_wake_stalled(&self) {
-        (**self).mission_wake_stalled().await
-    }
-    async fn mission_sweep_closed_temp_bots(&self) {
-        (**self).mission_sweep_closed_temp_bots().await
-    }
-}
-
 impl<T: JudgeOps + ?Sized> JudgeOps for Arc<T> {
     async fn judge_shadow_settled(&self, assignment_id: &str, bot_id: &str, turn_id: Option<&str>, turn_status: &str, result: Option<&str>) {
         (**self).judge_shadow_settled(assignment_id, bot_id, turn_id, turn_status, result).await
@@ -204,12 +165,6 @@ impl<T: ControllerRuntime + ?Sized> ControllerRuntime for Arc<T> {
     }
 }
 
-impl<T: MissionCancellation + ?Sized> MissionCancellation for Arc<T> {
-    async fn collect_cancelled_missions(&self) {
-        (**self).collect_cancelled_missions().await
-    }
-}
-
 impl<T: CandidateSwitch + ?Sized> CandidateSwitch for Arc<T> {
     async fn switch_supervisor_candidate(&self, next: &str, reason: &str, reset_at: Option<&str>) -> Result<bool, crate::lifecycle::LcError> {
         (**self).switch_supervisor_candidate(next, reason, reset_at).await
@@ -240,66 +195,6 @@ impl<T: DaemonConnection + ?Sized> DaemonConnection for Arc<T> {
 impl<T: BotLamp + ?Sized> BotLamp for Arc<T> {
     fn bot_lamp<'a>(&'a self, bot_id: &'a str, run: Option<&'a crate::db::Run>) -> impl Future<Output = &'static str> + Send + 'a {
         (**self).bot_lamp(bot_id, run)
-    }
-}
-
-impl<T: IdentityOps + ?Sized> IdentityOps for Arc<T> {
-    async fn billing_identity(&self, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
-        <T as IdentityOps>::billing_identity(self.as_ref(), bot).await
-    }
-    async fn known_identities(&self, host: &str) -> Vec<crate::mission::ports::KnownIdentity> {
-        (**self).known_identities(host).await
-    }
-    async fn quota_base_for_host(&self, host: &str, kind: &str, identity: Option<&str>) -> String {
-        <T as IdentityOps>::quota_base_for_host(self.as_ref(), host, kind, identity).await
-    }
-    async fn quota_readings(&self, host: &str, bases: &[String]) -> Vec<Option<crate::quota::Quota>> {
-        (**self).quota_readings(host, bases).await
-    }
-}
-
-impl<T: CallerOps + ?Sized> CallerOps for Arc<T> {
-    async fn verified_bot_id(&self, headers: &axum::http::HeaderMap) -> Result<Option<String>, crate::lifecycle::LcError> {
-        (**self).verified_bot_id(headers).await
-    }
-    async fn actor_role(&self, headers: &axum::http::HeaderMap) -> Result<Option<crate::mission::ports::AgmRole>, crate::lifecycle::LcError> {
-        (**self).actor_role(headers).await
-    }
-    async fn role_of_bot(&self, bot_id: &str) -> anyhow::Result<Option<crate::mission::ports::AgmRole>> {
-        (**self).role_of_bot(bot_id).await
-    }
-    async fn responder_configured(&self) -> anyhow::Result<bool> {
-        (**self).responder_configured().await
-    }
-    fn ct_eq(&self, a: &str, b: &str) -> bool {
-        <T as CallerOps>::ct_eq(self.as_ref(), a, b)
-    }
-}
-
-impl<T: SupervisorOps + ?Sized> SupervisorOps for Arc<T> {
-    type OpGuard = T::OpGuard;
-    #[track_caller]
-    fn supervisor_lock(&self) -> impl Future<Output = Self::OpGuard> {
-        (**self).supervisor_lock()
-    }
-    async fn cancel_assignment(
-        &self,
-        assignment_id: &str,
-        headers: &axum::http::HeaderMap,
-        actor: &str,
-        source: &str,
-        reason: String,
-    ) -> Result<serde_json::Value, crate::lifecycle::LcError> {
-        (**self).cancel_assignment(assignment_id, headers, actor, source, reason).await
-    }
-    async fn delete_bot(&self, bot_id: &str) -> Result<(), String> {
-        (**self).delete_bot(bot_id).await
-    }
-}
-
-impl<T: EventOps + ?Sized> EventOps for Arc<T> {
-    async fn emit_event(&self, kind: &str, data: serde_json::Value) {
-        (**self).emit_event(kind, data).await
     }
 }
 

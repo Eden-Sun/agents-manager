@@ -1470,7 +1470,7 @@ mod tests {
             .unwrap();
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-948", None, &[], None, true, None, None, None, Default::default()),
+            crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-948", None, &[], None, true, None, None, Default::default()),
         )
         .await
         .expect("派工不能等 Jev")
@@ -1495,7 +1495,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let out = crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-557", None, &[], None, true, None, None, None, Default::default())
+        let out = crate::supervisor::assign(&app, &bot.id, "修 quota 橫幅的誤判", "crid-557", None, &[], None, true, None, None, Default::default())
             .await
             .unwrap();
         assert!(out["ownership_conflicts"].as_array().is_some_and(|v| v.is_empty()), "撞題不併進 ownership_conflicts");
@@ -1532,7 +1532,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let out = crate::supervisor::assign(&app, &bot.id, "\u{1b}[2J\u{1b}[31m", "crid-568", None, &[], None, true, None, None, None, Default::default())
+        let out = crate::supervisor::assign(&app, &bot.id, "\u{1b}[2J\u{1b}[31m", "crid-568", None, &[], None, true, None, None, Default::default())
             .await
             .unwrap();
         let id = out["id"].as_str().unwrap().to_string();

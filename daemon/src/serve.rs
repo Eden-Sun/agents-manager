@@ -321,8 +321,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::runners::supervisor::runtime::respawn(&app).await;
     crate::runners::supervisor::health::spawn(app.clone());
     crate::api_bot::spawn_retention_ticker(app.clone());
-    // 交辦改狀態時補推 mission_updated，任務卡才跟得上（review3 c1 M5）。
-    crate::runners::mission::spawn_relay(app.clone());
     // Agent titles have no herdr event, so they are polled.
     crate::runners::events::spawn_title_poller(app.clone());
     // 狀態寫不進 DB、重放也用完的 pane，靠這裡定時重讀 herdr 補回來（#1184）。
