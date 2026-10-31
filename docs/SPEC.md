@@ -5849,7 +5849,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 - **閒置收起**（§6.11）：`decide` 的 `share_bot`，排在 `supervisor` 之後、`primary` 之前；認的是 `shared_bots` 有一列，讀不到就這輪不收。
 - **隱式退役**（`child_retire`，對帳 agent 不見／run 早就結束、維護窗口收尾）：分享用 bot 不會是 child，入口仍多一道保險，回 `ShareBot`、不軟刪。
-- **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`）；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
+- **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`），巡檢角色例外可重啟／啟動任何頂層 bot（使用者 2026-10-31）；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
   `DELETE /api/projects/{id}`（專案裡有活著的分享用 bot）一律 403 `share_bot_protected`。重啟照准（會自己起回來）；使用者（UI token）照常能停能刪。
 - **outbox**：不走 1 小時清理，改走分享保留政策（14 天、500 MiB／1000 檔，#850，§6.5f 分享用 bot 例外）。
 - **停了自動接回**：pane 被關、daemon 重啟、主機重開之後它就是停著（對帳只把 run 收成 exited，不刪 bot）。end user 送來一則時照「先落地、再啟動」
