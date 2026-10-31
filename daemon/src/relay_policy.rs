@@ -24,7 +24,10 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
     if crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some() { return Ok(()); }
-    if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") { return Err(RelayDenied::Denied("expert_cross_project".into())); }
+    // 跨專案只准送到 expert 專案的 manager（對外窗口，使用者 2026-10-31）；送件者若在 expert 專案也必須是它的 manager。
+    let to_front_desk = target_project.mode == "expert" && to.role.as_deref() == Some("manager") && to.parent_bot_id.is_none();
+    let from_may_leave = project.mode != "expert" || (from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none());
+    if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") && !(to_front_desk && from_may_leave) { return Err(RelayDenied::Denied("expert_cross_project".into())); }
     if project.mode == "expert" {
         let direct_family = from.parent_bot_id.as_deref() == Some(to.id.as_str());
         if !direct_family && kind == Admission::NewRequest {
@@ -108,6 +111,10 @@ mod agm_cross_project_tests {
         let worker = crate::testing::claude_bot(&env.app, &other, "expert-worker").await;
         sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
         assert!(matches!(relay_prompt_allowed(&env.app, &plain.id, &worker.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "expert_cross_project"));
+        let manager = crate::testing::claude_bot(&env.app, &other, "expert-front").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        assert!(relay_prompt_allowed(&env.app, &plain.id, &manager.id, Admission::NewRequest).await.is_ok(), "other projects reach the expert manager");
+        assert!(matches!(relay_prompt_allowed(&env.app, &worker.id, &plain.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "expert_cross_project"), "expert executors do not leave the project");
         crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
         crate::supervisor::store::set_env(&env.app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
