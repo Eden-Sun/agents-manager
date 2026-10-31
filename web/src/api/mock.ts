@@ -5,7 +5,7 @@
 
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
-import type { BotKind } from './types'
+import type { BotKind, ExecutorPoolEntry } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { CODEX_ASYNC_QUESTIONS, codexAsyncKeys, codexAsyncScreen, codexAsyncStart, type CodexAsyncState } from './mockCodexAsync'
@@ -279,7 +279,7 @@ interface MockProject {
   github: { owner: string; repo: string; url: string } | null
   /** #708 */
   handed_off_to?: string | null
-  executor_pool?: Record<string, number>
+  executor_pool?: ExecutorPoolEntry[]
   created_at: string
 }
 
@@ -397,6 +397,32 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 /** 函式：說明文字依語言，要等 `?lang=` 套用後才取。 */
+/** mock 版的執行者池驗證（對齊 API 契約的基本檢查；超出的值照 daemon 的 400 語意回錯）。 */
+function mockPoolFromInput(input: unknown): ExecutorPoolEntry[] {
+  if (!Array.isArray(input)) throw new ApiError(400, { reason: 'executor_pool must be an array' }, 'bad_request')
+  if (input.length > 20) throw new ApiError(400, { reason: 'too_many_entries' }, 'bad_request')
+  const seen = new Set<string>()
+  return input.map((raw: Rec) => {
+    const kind = String(raw.kind) as BotKind
+    if (!BOT_KINDS.includes(kind)) throw new ApiError(400, { reason: 'bad kind' }, 'bad_request')
+    const count = Number(raw.count)
+    if (!Number.isInteger(count) || count < 1 || count > 10) throw new ApiError(400, { reason: 'count must be 1..=10' }, 'bad_request')
+    const ctx = raw.context_tokens == null ? null : Number(raw.context_tokens)
+    if (ctx !== null && kind === 'agy') throw new ApiError(400, { error: 'context_unsupported' }, 'bad_request')
+    const key = [kind, String(raw.model ?? ''), raw.effort ?? null, ctx].join('|')
+    if (seen.has(key)) throw new ApiError(400, { error: 'duplicate_pool_entry' }, 'bad_request')
+    seen.add(key)
+    return {
+      id: String(raw.id),
+      kind,
+      model: String(raw.model ?? ''),
+      effort: raw.effort == null || raw.effort === '' ? null : String(raw.effort),
+      context_tokens: ctx,
+      count,
+    }
+  })
+}
+
 const models = (): Record<BotKind, Rec[]> => ({
   claude: [
     { id: 'opus', display_name: 'Opus', description: L('最強推理', 'Strongest reasoning'), is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
@@ -840,7 +866,10 @@ export class MockTransport implements Transport {
       workspace_id: null,
       host: 'local',
       github: null,
-      executor_pool: { codex: 2, claude: 1 },
+      executor_pool: [
+        { id: 'codex-luna-xhigh-256k', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 2 },
+        { id: 'claude-haiku-low-200k', kind: 'claude', model: 'haiku', effort: 'low', context_tokens: 200000, count: 1 },
+      ],
       created_at: now(),
     }
     this.projects.push(p)
@@ -2302,7 +2331,7 @@ export class MockTransport implements Transport {
         workspace_id: p.workspace_id,
         host: p.host,
         github: p.github,
-        executor_pool: p.executor_pool ?? {},
+        executor_pool: p.executor_pool ?? [],
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2414,18 +2443,7 @@ export class MockTransport implements Transport {
       p.handed_off_to = to
     }
     if (b.executor_pool !== undefined) {
-      if (b.executor_pool && typeof b.executor_pool === 'object') {
-        const pool: Record<string, number> = {}
-        for (const [k, v] of Object.entries(b.executor_pool as Rec)) {
-          const num = Number(v)
-          if (BOT_KINDS.includes(k as BotKind) && Number.isInteger(num) && num >= 1 && num <= 10) {
-            pool[k] = num
-          }
-        }
-        p.executor_pool = pool
-      } else {
-        p.executor_pool = {}
-      }
+      p.executor_pool = mockPoolFromInput(b.executor_pool)
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }
