@@ -20,7 +20,7 @@
 .unread-chip.pinned.cache-codex {
   --cache-hue: var(--lamp-blue);
   --cache-strong-pct: 12%;
-  --cache-faint-pct: 12%;
+  --cache-faint-pct: 6%;
 }
 
 .unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex) {
