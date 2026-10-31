@@ -5766,7 +5766,7 @@ expert 專案的 bot relay 收件規則（child 向自身 parent 回報不受收
 | advisor | 任何成員 |
 | executor 或未分配 | manager |
 
-expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒時回覆原因與管理者名稱。
+expert 跨專案 relay 拒絕（AGM 角色不受此限）；parent_child 保持既有 relay 規則。被拒時回覆原因與管理者名稱。
 
 新請求須驗證來源 run 已載入目前角色政策；排隊及重啟補投重新驗證目前專案與角色，不要求來源在線。結果通知僅確認原寄件者仍存在，離線時持續保留，不套角色收件規則。
 
