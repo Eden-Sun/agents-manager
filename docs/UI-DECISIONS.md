@@ -54,10 +54,12 @@
 - **可被管理者使用（`manager_use`）**：
   - 專案模式為 expert 時，role 為 executor 或 advisor 的成員在尾端 `⋯` 選單中提供切換開關「允許管理者使用／禁止管理者使用」（發送 `PATCH /api/bots/{id}` `{"manager_use": bool}`）。
   - 當 `manager_use` 為 false 時，側欄 bot 列上名稱旁顯示灰色小標籤「停用」（tooltip 提示「已停用：管理者不能使用此成員」），沿用系統中性 tag 風格，不干擾主狀態燈號；使用者自己仍可正常對話與操作，但 manager 不能派工給它、不能啟動／重啟它。
-- **執行者池（`executor_pool`）**：
-  - 專案設定（`ProjectSettingsPanel` -> `ProjectExpertSettings`）在專家模式下提供「執行者池」編輯，列出 4 種 kind（claude / codex / grok / agy）各自的數量上限輸入框（0–10，0 代表不開放該 kind）。
-  - 說明文字明確提示：「管理者增聘執行者時只能用這裡開放的 kind 與數量；全部 0＝不能增聘」。
-  - 編輯後有明確的儲存按鈕，儲存時過濾掉 0 的項目並送出 `PATCH /api/projects/{id}` `{"executor_pool": {...}}`，確保使用者能清晰掌控資源開銷與 manager 的增聘權限。
+- **執行者池（`executor_pool`，條目制，2026-10-31 使用者）**：
+  - 池是**條目清單**，不是 kind→數量。每條目：種類、模型、強度（可空＝預設）、context（可空＝模型預設；agy 不支援，灰掉並註明）、可增聘上限 1..10。條目最多 20 條；四元組（種類、模型、強度、context）相同不可重複。
+  - 列表每條一列：`kind · model · effort · context · 已用/上限`（已用＝同專案 role=executor 且 `pool_entry` 指向該條目的 bot 數）；可改上限、刪除。舊資料 `{kind: n}` 顯示成 model 為空的「任何模型（舊資料）」條目，存檔後轉成陣列。
+  - **加入建議**：列出五條預設（claude haiku low 200k ×2、claude sonnet medium 200k ×1、codex terra medium 256k ×1、codex luna xhigh 256k ×1、agy gemini flash low ×2），每條要勾選才加入，不自動加。model 一律取 `GET /api/models?kind=&host=` 當下版本號最大的（`[1m]` 變體不算）；查不到的家族不列。已在池中的組合顯示「已在池中」且不能再勾。
+  - **新增條目**：種類、模型（下拉取 `/api/models`）、強度（下拉取該模型的 `efforts`，另有「預設強度」）、context（「用模型預設」或拉條；上限取 `context_window`，沒有就 claude 200k（清單有該模型的 `[1m]` 變體才 1M）、codex 400k；下限 32k）、數量。
+  - 編輯後才亮起「儲存執行者池」，存檔送出 `PATCH /api/projects/{id}` `{"executor_pool": [...]}` 整份覆蓋。
 
 ## 專案設定頁與主力列（2026-11-01，使用者）
 

@@ -28,10 +28,19 @@ export interface Project {
   github: ProjectGithub | null
   /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
-  /** 專家模式專案的執行者池（kind -> 數量上限），預設 {} */
-  executor_pool?: Record<string, number>
+  /** 專家模式專案的執行者池條目清單 */
+  executor_pool?: ExecutorPoolEntry[]
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
+}
+
+export interface ExecutorPoolEntry {
+  id: string
+  kind: BotKind
+  model: string
+  effort: string | null
+  context_tokens: number | null
+  count: number
 }
 
 export interface ProjectGithub {
@@ -284,6 +293,8 @@ export interface Bot {
   runtime_role_policy?: string | null
   /** 專家模式下是否可被管理者使用（預設 true） */
   manager_use?: boolean
+  /** 專家模式下增聘所綁定的池條目 id */
+  pool_entry?: string | null
   id: string
   project_id: string
   name: string
@@ -733,8 +744,8 @@ export interface PatchProjectInput {
   label?: string
   /** #708：字串＝移交，`null`＝收回。 */
   handed_off_to?: string | null
-  /** 專家模式專案的執行者池（kind -> 1..=10，0 或缺＝移除該 kind） */
-  executor_pool?: Record<string, number>
+  /** 專家模式專案的執行者池條目（覆蓋整份陣列） */
+  executor_pool?: ExecutorPoolEntry[]
 }
 
 export interface DirEntry {
@@ -917,6 +928,8 @@ export interface ModelInfo {
   account_default_effort?: string | null
   /** 空陣列 = 該模型不支援 */
   efforts: string[]
+  /** 模型視窗大小（tokens），若 daemon 未回傳為 undefined 或 null */
+  context_window?: number | null
   /** 含 `priority` 時 UI 才顯示「Fast」開關 */
   service_tiers: { id: string; name: string; description: string }[]
 }

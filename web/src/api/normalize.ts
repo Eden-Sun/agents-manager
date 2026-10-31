@@ -20,6 +20,7 @@ import type {
   Bot,
   BotKind,
   BotManagedBy,
+  ExecutorPoolEntry,
   HostShell,
   Host,
   HerdrVersion,
@@ -121,6 +122,10 @@ function num(v: unknown, fallback = 0): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
   return fallback
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
 function pick(o: Rec, ...keys: string[]): unknown {
@@ -287,14 +292,38 @@ export function toProject(v: unknown): Project | null {
     created_at: str(v.created_at),
     executor_pool: (() => {
       const ep = pick(v, 'executor_pool')
-      if (!isRec(ep)) return {}
-      const res: Record<string, number> = {}
-      for (const [k, val] of Object.entries(ep)) {
-        if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-          res[k] = Math.floor(val)
-        }
+      if (Array.isArray(ep)) {
+        return ep
+          .filter(isRec)
+          .map((entry) => {
+            const id = str(pick(entry, 'id'))
+            const kind = oneOf<BotKind>(pick(entry, 'kind'), BOT_KINDS, 'claude')
+            const model = str(pick(entry, 'model'))
+            const effort = optStr(pick(entry, 'effort'))
+            const context_tokens = numOrNull(pick(entry, 'context_tokens'))
+            const count = Math.max(1, Math.min(10, num(pick(entry, 'count'), 1)))
+            return { id, kind, model, effort, context_tokens, count }
+          })
+          .filter((entry) => entry.id)
       }
-      return res
+      if (isRec(ep)) {
+        // 向下相容：讀到舊的物件形狀 {kind: n}，轉成條目
+        const res: ExecutorPoolEntry[] = []
+        for (const [k, val] of Object.entries(ep)) {
+          if (BOT_KINDS.includes(k as BotKind) && typeof val === 'number' && Number.isFinite(val) && val > 0) {
+            res.push({
+              id: `${k}-legacy`,
+              kind: k as BotKind,
+              model: '',
+              effort: null,
+              context_tokens: null,
+              count: Math.max(1, Math.min(10, Math.floor(val))),
+            })
+          }
+        }
+        return res
+      }
+      return []
     })(),
   }
 }
@@ -310,6 +339,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     name: str(pick(v, 'name'), id),
     role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' ? v.role : null,
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
+    pool_entry: optStr(pick(v, 'pool_entry')),
     role_pending: bool(v.role_pending),
     daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
@@ -894,6 +924,7 @@ export function toModels(raw: unknown): ModelInfo[] {
         default_effort: optStr(pick(m, 'default_effort')),
         account_default_effort: optStr(pick(m, 'account_default_effort')),
         efforts: arr(pick(m, 'efforts')).map((e) => str(e)).filter(Boolean),
+        context_window: numOrNull(pick(m, 'context_window')),
         service_tiers: arr(pick(m, 'service_tiers'))
           .filter(isRec)
           .map((t) => ({ id: str(pick(t, 'id')), name: str(pick(t, 'name'), str(pick(t, 'id'))), description: str(pick(t, 'description')) })),
