@@ -448,6 +448,7 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("GET", "/api/relay-requests", Expect::Allow, None),
         rule("GET", "/api/relay/resolve", Expect::Allow, None),
+        rule("POST", "/api/pane-authorize", Expect::Allow, None),
         rule("POST", "/api/bots/{id}/prompt", Expect::Allow, None),
         rule("PUT", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/prompt", Expect::Forbidden, None),

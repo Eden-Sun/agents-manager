@@ -4,6 +4,7 @@
 pub mod model_mode;
 mod expert_peers;
 pub mod relay_policy;
+mod pane_authority;
 pub mod runners;
 pub mod codex_reset;
 pub mod schedules;
