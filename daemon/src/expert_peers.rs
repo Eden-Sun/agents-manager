@@ -59,7 +59,7 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        peers.push(json!({"id":bot.id,"name":bot.name,"role":bot.role,"model":bot.model,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open}));
+        peers.push(json!({"id":bot.id,"name":bot.name,"role":bot.role,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open}));
     }
     let Some(for_track) = query.for_track.as_deref() else {
         return Ok(Json(json!({"project_id":project_id,"peers":peers})));
@@ -102,6 +102,12 @@ pub(crate) async fn list(
 
         let mut eligible = true;
         let mut reasons = Vec::new();
+
+        // 0. manager_use 停用開關（SPEC quota protection）
+        if bot.manager_use == 0 {
+            eligible = false;
+            reasons.push("使用者已停用".to_string());
+        }
 
         // 1. 與專案同主機
         let bot_host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| project.host.clone());
@@ -254,6 +260,39 @@ mod tests {
         let other = crate::db::ulid();
         sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert!(matches!(list(State(app), Path(other), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(bot.id))).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn peers_manager_use_disabled_marks_ineligible() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+
+        let b1 = crate::testing::claude_bot(&app, &env.project_id, "b1").await;
+        sqlx::query("UPDATE bots SET role='executor', manager_use=0 WHERE id=?").bind(&b1.id).execute(&app.db).await.unwrap();
+        let r1 = crate::testing::fake_run(&app, &b1.id).await;
+        sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
+
+        // 1. peers list without for
+        let list_res = list(
+            State(app.clone()),
+            Path(env.project_id.clone()),
+            Query(PeersQuery::default()),
+            Extension(RequestPrincipal::Bot(b1.id.clone())),
+        ).await.unwrap().0;
+        let p1 = list_res["peers"].as_array().unwrap().iter().find(|p| p["id"] == b1.id).unwrap();
+        assert_eq!(p1["manager_use"], false);
+
+        // 2. candidates evaluation with for_track
+        let cand_res = list(
+            State(app.clone()),
+            Path(env.project_id.clone()),
+            Query(PeersQuery { for_track: Some("track-1".into()) }),
+            Extension(RequestPrincipal::Bot(b1.id.clone())),
+        ).await.unwrap().0;
+        let c1 = cand_res["candidates"].as_array().unwrap().iter().find(|c| c["id"] == b1.id).unwrap();
+        assert_eq!(c1["eligible"], false);
+        assert!(c1["reasons"].as_array().unwrap().iter().any(|r| r == "使用者已停用"));
     }
 
     #[tokio::test]

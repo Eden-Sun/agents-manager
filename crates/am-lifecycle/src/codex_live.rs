@@ -2703,7 +2703,7 @@ mod tests {
     }
 
     fn bot(model: Option<&str>, effort: Option<&str>, fast: bool) -> crate::db::Bot {
-        crate::db::Bot { role: None,
+        crate::db::Bot { role: None, manager_use: 1,
             id: "b".into(),
             project_id: "p".into(),
             name: "b".into(),

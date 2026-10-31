@@ -1888,7 +1888,7 @@ codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
 body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env` 傳整個物件為**取代**：
 
 ```json
-{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…" }
+{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "manager_use": true, "persona": "…" }
 ```
 
 AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` 更新這三欄；只會 PATCH 命令列有帶的欄位，至少要帶一欄。成功時完整輸出 daemon 回應（包括 `needs_restart` 與可能出現的 `live_apply`）；4xx／5xx 以 CLI 結構化錯誤輸出至 stderr 並以非 0 退出。
@@ -3074,7 +3074,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 ### 專案專家模式與成員
 
-`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 `PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`PUT /api/bots/{id}/role` body `{"role": "executor"|"advisor"|"manager"|null}` 只改角色：User 可設任何角色；expert 專案的 manager（Bot principal）只能把同專案、非自己的存活頂層 bot 或自己開的 child 設為 `executor`、`advisor` 或 null，其他一律 `403 manager_role_scope`（`agm role <bot_id> executor|advisor|none`）。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
+`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）、`manager_bot_id` 及 `executor_pool`（專家模式執行者池，`{"codex": 2, "claude": 1}`，數量 1..=10，0 或缺移除該 kind，非 User 回 403 `user_only`）；expert 必須有且僅有一名頂層 manager。 `PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬；`manager_use`（bool，預設 true，非 User 回 403 `user_only`）控制成員是否可被管理者使用（關閉時管理者不可派工、不可啟動／重啟／停止／刪除、peers 候選標記不可派）。`PUT /api/bots/{id}/role` body `{"role": "executor"|"advisor"|"manager"|null}` 只改角色：User 可設任何角色；expert 專案的 manager（Bot principal）只能把同專案、非自己的存活頂層 bot 或自己開的 child 設為 `executor`、`advisor` 或 null，其他一律 `403 manager_role_scope`（`agm role <bot_id> executor|advisor|none`）。`POST /api/projects/{id}/members`（`agm hire`）增聘執行者時，manager 受到 `executor_pool` 限制（不在池內 403 `kind_not_in_pool`、滿額 409 `executor_pool_full`；User 不受池限制）。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入，專案帶 `executor_pool`、bot 帶 `manager_use`。
 
 `GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。帶 `?for=<track>` 時改回傳 `candidates`：僅列 `role=executor` 的成員，每項包含 `eligible`、`score` 與 `reasons`，硬篩跨主機、未在 running、已阻塞或 5h 額度 ≥ 85% 者，並設衝突防護（track 進行中時排除其他執行者）；排序依同 track、閒置、cache 熱與模型便宜程度綜合計分。`GET /api/spawn-authority` 使用 bot 憑證檢查能否開 child；expert 專案一律 403 `expert_no_child`（含提示訊息），child 一律 403 `child_cannot_spawn`。 `POST /api/pane-authorize` 以 bot 憑證及 `{kind: "pane" | "agent" | "context", target?, session?, machine?}` 請求授權；daemon 根據呼叫 bot 的 host／session、活動 run、child 歸屬及 herdr 的 pane／agent 清單判斷，允許自己的 pane、自己的 child 與非 agent shell pane。其他 agent 的 pane 回 403 並要求改用 agent prompt；狀態不明拒絕。成功回 `{allowed:true,pane_id?}`，agent 名稱會固定為 pane ID。 受管 bot 的 prompt 必須經 daemon 解析與授權；缺少位址、daemon 不可達或授權不明時拒絕，不直接送到 herdr。daemon 不可達時無法派工。`/api/state` 的 `daemon_url_pending` 表示遠端執行中 bot 啟動時未取得位址，需由使用者重啟。
 

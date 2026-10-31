@@ -390,7 +390,7 @@ async fn creating_a_remote_share_bot_over_http_refuses_unknown_and_unreachable_h
                 shared_session: false,
                 remote_path: String::new(),
             });
-            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
+            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
                 id: Some(pid.clone()),
                 path: "/srv/app".into(),
                 label: "proj".into(),

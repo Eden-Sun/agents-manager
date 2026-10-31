@@ -49,7 +49,7 @@ pub(crate) async fn adopt(
         return Err(LcError::conflict("a member with this name already exists in the project", json!({"name": child.name})));
     }
     let effort = b.effort.clone().or_else(|| child.effort.clone());
-    let cfg = BotCfg {
+    let cfg = BotCfg { manager_use: true,
         role: role.clone(),
         id: Some(id.clone()),
         name: child.name.clone(),
