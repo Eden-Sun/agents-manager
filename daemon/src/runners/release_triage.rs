@@ -32,6 +32,7 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 /// 這次呼叫是一般 Bot 就回它的 id；User、Service，還有**註冊的 AGM 角色**（它也是 `RequestPrincipal::Bot`）回 `None`（#1040）。
 /// 角色 bot 跟 User 一樣看全域帳本、可以人工補交，不套派工綁定。每次都重讀角色，撤掉角色下一次呼叫就照一般 Bot 算。
 async fn ordinary_bot<'a>(app: &App, principal: &'a RequestPrincipal) -> Result<Option<&'a str>, LcError> {
+    if let RequestPrincipal::Child { child_id, .. } = principal { return Ok(Some(child_id)); }
     let RequestPrincipal::Bot(caller) = principal else { return Ok(None) };
     let role = crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(up)?;
     Ok(role.is_none().then_some(caller.as_str()))

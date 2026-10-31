@@ -68,7 +68,7 @@
         let begin_with = |timeout_ms: &str| {
             let (app, id, t) = (app.clone(), bot.id.clone(), timeout_ms.to_string());
             async move {
-                let (st, Json(v)) = begin(State(app), bot_headers(), axum::extract::Form(SpawnBegin { bot_id: id, timeout_ms: t, purpose: String::new() })).await;
+                let (st, Json(v)) = begin(State(app), bot_headers(), axum::extract::Form(SpawnBegin { bot_id: id, timeout_ms: t, purpose: String::new(), pane_id: String::new(), child_name: String::new() })).await;
                 assert_eq!(st, StatusCode::OK, "{v}");
                 v["permit_id"].as_str().unwrap().to_string()
             }
@@ -120,7 +120,7 @@
         let (status, Json(begin_body)) = begin(
             State(app.clone()),
             bot_headers(),
-            axum::extract::Form(SpawnBegin { bot_id: bot.id.clone(), timeout_ms: String::new(), purpose: String::new() }),
+            axum::extract::Form(SpawnBegin { bot_id: bot.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{begin_body}");

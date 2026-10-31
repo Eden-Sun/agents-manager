@@ -1195,6 +1195,8 @@ async fn adopt_child(
     alert_expert_child(app, parent, child_name, &bot_id).await?;
     let run_id = db::ulid();
     let status = agent.agent_status.normalized().as_str().to_string();
+    // Publishing the run and activating its credential are one durable operation.
+    let mut tx = app.db().begin().await?;
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, native_session_id, terminal_id, started_at)
          VALUES (?,?,'running',?,?,?,?,1,?,?,?,?,?)",
@@ -1210,8 +1212,26 @@ async fn adopt_child(
     .bind(&native_id)
     .bind(agent.terminal_id.as_deref().filter(|id| !id.trim().is_empty()))
     .bind(&now)
-    .execute(app.db())
+    .execute(&mut *tx)
     .await?;
+    // The daemon recorded this tuple during authenticated spawn. Do not trust an environment
+    // variable or name supplied by the child as proof of its parent or pane.
+    let expiry = db::ts_sql("expires_at");
+    let pending: Vec<(String, String, String)> = sqlx::query_as(&format!(
+        "SELECT spawn_id,parent_bot_id,child_name FROM child_credentials WHERE host=? AND herdr_session=? AND pane_id=? AND state='pending' AND {expiry}>?"
+    )).bind(host).bind(session).bind(&agent.pane_id).bind(db::now()).fetch_all(&mut *tx).await?;
+    for (spawn_id, expected_parent, expected_name) in pending {
+        if expected_parent == parent.id && expected_name == name {
+            sqlx::query(&format!("UPDATE child_credentials SET state='active',child_bot_id=?,run_id=? WHERE spawn_id=? AND state='pending' AND {expiry}>?"))
+                .bind(&bot_id).bind(&run_id).bind(&spawn_id).bind(db::now()).execute(&mut *tx).await?;
+        } else {
+            sqlx::query("UPDATE child_credentials SET state='revoked' WHERE spawn_id=? AND state='pending'").bind(&spawn_id).execute(&mut *tx).await?;
+            let key = format!("child-credential-mismatch:{spawn_id}");
+            let message = format!("child 憑證的 parent 或名稱與認領結果不符：pane {}、agent {}", agent.pane_id, name);
+            crate::supervisor_inbox::push_inbox_tx(&mut tx, &key, "ops_alert", None, Some(&parent.id), None, &json!({"message":message,"spawn_id":spawn_id})).await?;
+        }
+    }
+    tx.commit().await?;
     app.watch_pane_on_session(host, session, &agent.pane_id).await;
     // The pane is the only source for both its conversation (§4.3) and its model (argv).
     app.spawn_adopted_capture(&run_id, &bot_id);
@@ -5520,5 +5540,93 @@ mod expert_alert_tests {
         let conv = db::conversation_id(&env.app.db, &manager.id).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE conversation_id=? AND content LIKE '%worker%'").bind(conv).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(count, 1);
+    }
+}
+
+#[cfg(test)]
+mod child_credential_e2e_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn macos_local_child_spawn_environment_authenticates_as_child_through_router() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let parent = crate::testing::claude_bot(&app, &env.project_id, "parent").await;
+        let other = crate::testing::claude_bot(&app, &env.project_id, "other").await;
+        let parent_run = crate::testing::fake_run(&app, &parent.id).await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (workspace, root) = client.workspace_create("/tmp", "p", json!({})).await.unwrap();
+        let pane = client.pane_split(&root.pane_id, "right", "/tmp", json!({})).await.unwrap();
+        sqlx::query("UPDATE runs SET pane_id=?,agent_name='parent',agent_status='working',workspace_id=?,tab_id=? WHERE id=?")
+            .bind(&root.pane_id).bind(&workspace.workspace_id).bind(&root.tab_id).bind(&parent_run).execute(&app.db).await.unwrap();
+        env.herdr.set_agent("parent", &root.pane_id, false);
+        env.herdr.agents.lock().unwrap()[0]["agent_status"] = json!("working");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = crate::api::router(app.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+        let shim = env.dir.join("shim");
+        std::fs::write(&shim, crate::herdr_shim::SHIM_SH).unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fake = env.dir.join("fake-herdr");
+        std::fs::write(&fake, "#!/bin/sh\ncase \"$1 $2\" in\n'pane get') echo '{}';;\n'pane send-text') printf '%s' \"$4\" > \"$TEST_CAPTURE\";;\n'agent get') printf '{\"result\":{\"agent\":{\"pane_id\":\"%s\"}}}\\n' \"$TEST_PANE\";;\n'agent start') :;;\nesac\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let capture = env.dir.join("capture");
+        let test_path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+        let output = tokio::process::Command::new(&shim).env_clear().env("PATH", &test_path)
+            .env("HOME", &env.dir).env("TMPDIR", &env.dir).env("AM_REAL_HERDR", &fake)
+            .env("AM_BOT_ID", &parent.id).env("AM_BOT_TOKEN", &parent.hook_token)
+            .env("AM_AGENT_NAME", "parent").env("AM_KIND", "codex").env("AM_DAEMON_URL", format!("http://{addr}"))
+            .env("HERDR_PANE_ID", &root.pane_id).env("TEST_CAPTURE", &capture).env("TEST_PANE", &pane.pane_id)
+            .args(["agent", "start", "kid", "--kind", "codex", "--pane", &pane.pane_id]).output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let source = std::fs::read_to_string(&capture).unwrap();
+        let source_path = source.trim().strip_prefix(". '").unwrap().split("' && rm -f '").next().unwrap();
+        let source_path = std::path::PathBuf::from(source_path);
+        let child_command = |target: &str| {
+            let mut cmd = tokio::process::Command::new("/bin/sh");
+            cmd.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &env.dir).env("SOURCE", &source_path).env("SHIM", &shim).env("TARGET", target)
+                .arg("-c").arg(". \"$SOURCE\"; exec \"$SHIM\" agent prompt \"$TARGET\" hello");
+            cmd
+        };
+        let before = child_command(&format!("bot:{}", parent.id)).output().await.unwrap();
+        assert!(!before.status.success() && String::from_utf8_lossy(&before.stderr).contains("child_not_registered"));
+        // A different declared name in the same pane must never acquire a credential.
+        let mismatched = db::ulid();
+        sqlx::query("INSERT INTO child_credentials(spawn_id,token_hash,parent_bot_id,child_name,host,herdr_session,pane_id,state,created_at,expires_at) VALUES(?,?,?,'wrong-name','local','test',?,'pending',?,?)")
+            .bind(&mismatched).bind(crate::child_credentials::hash_token("other-secret"))
+            .bind(&parent.id).bind(&pane.pane_id).bind(db::now()).bind(db::iso_in(900)).execute(&app.db).await.unwrap();
+        env.herdr.set_agent("parent-kid", &pane.pane_id, true);
+        let agent: crate::herdr::AgentInfo = serde_json::from_value(json!({"name":"parent-kid","agent":"codex","agent_status":"idle", "workspace_id":workspace.workspace_id,"tab_id":pane.tab_id,"pane_id":pane.pane_id,"cwd":"/tmp","agent_session":{"kind":"id","value":"sess-1"}})).unwrap();
+        let child_id = super::adopt_child(&app, "local", &client, "test", &agent, "parent-kid", &parent, "kid", "kid", "codex").await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM child_credentials WHERE spawn_id=?").bind(&mismatched).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "revoked");
+        let alert: i64 = sqlx::query_scalar("SELECT count(*) FROM supervisor_inbox WHERE event_key=? AND kind='ops_alert'").bind(format!("child-credential-mismatch:{mismatched}")).fetch_one(&app.db).await.unwrap();
+        assert_eq!(alert, 1);
+        let sent = child_command(&format!("bot:{}", parent.id)).output().await.unwrap();
+        assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+        let from: Option<String> = sqlx::query_scalar("SELECT relay_from FROM messages WHERE relay_from=? ORDER BY rowid DESC LIMIT 1").bind(&child_id).fetch_optional(&app.db).await.unwrap().flatten();
+        assert_eq!(from.as_deref(), Some(child_id.as_str()));
+        let denied = child_command(&format!("bot:{}", other.id)).output().await.unwrap();
+        assert!(!denied.status.success() && String::from_utf8_lossy(&denied.stderr).contains("HTTP 403"));
+        let injected = std::fs::read_to_string(&source_path).unwrap();
+        let secret = |name: &str| injected.lines().find_map(|line| line.strip_prefix(&format!("export {name}='"))?.strip_suffix("'")).unwrap().to_string();
+        let spawn_result = reqwest::Client::new().post(format!("http://{addr}/relay/spawn/begin"))
+            .header("X-AM-Child-Spawn-Id", secret("AM_CHILD_SPAWN_ID"))
+            .header("X-AM-Child-Token", secret("AM_CHILD_TOKEN"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!("bot_id={}", parent.id)).send().await.unwrap();
+        assert_eq!(spawn_result.status(), reqwest::StatusCode::FORBIDDEN);
+        let spawn_from_shim = tokio::process::Command::new("/bin/sh").env_clear().env("PATH", "/usr/bin:/bin")
+            .env("HOME", &env.dir).env("SOURCE", &source_path).env("SHIM", &shim)
+            .arg("-c").arg(". \"$SOURCE\"; exec \"$SHIM\" agent start forbidden --kind codex --pane w1:p-new")
+            .output().await.unwrap();
+        assert!(!spawn_from_shim.status.success());
+        let run = db::active_run(&app.db, &child_id).await.unwrap().unwrap();
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(run.id).execute(&app.db).await.unwrap();
+        let after = child_command(&format!("bot:{}", parent.id)).output().await.unwrap();
+        assert!(!after.status.success());
+        server.abort();
     }
 }
