@@ -31,3 +31,10 @@ test('子 agent、還沒建好的一樣不進晶片列（原本的規則沒有�
   assert.equal(chipTracked({ ...userBot, parent_bot_id: 'mother' }, SUP), false)
   assert.equal(chipTracked({ ...userBot, pending: true }, SUP), false)
 })
+
+test('專家模式的執行者／顧問不進晶片列，管理者照算（成員取代 child，沒有 parent_bot_id）', () => {
+  assert.equal(chipTracked({ ...userBot, role: 'executor' }, SUP), false)
+  assert.equal(chipTracked({ ...userBot, role: 'advisor' }, SUP), false)
+  assert.equal(chipTracked({ ...userBot, role: 'manager' }, SUP), true)
+  assert.equal(chipTracked({ ...userBot, role: null }, SUP), true)
+})
