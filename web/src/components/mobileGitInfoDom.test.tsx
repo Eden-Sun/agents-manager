@@ -57,6 +57,7 @@ function statusWith(account_warning: string | null): StatusInfo {
     context_used_pct: 12,
     context_used_tokens: null,
     context_size: null,
+    context_unknown: false,
     five_hour_pct: null,
     five_hour_resets_at: null,
     seven_day_pct: null,

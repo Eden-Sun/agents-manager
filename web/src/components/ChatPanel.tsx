@@ -1105,6 +1105,7 @@ function derivedStatus(
     context_used_pct: null,
     context_used_tokens: null,
     context_size: null,
+    context_unknown: false,
     five_hour_pct: five.pct,
     five_hour_resets_at: five.at,
     seven_day_pct: seven.pct,
@@ -1192,7 +1193,10 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   const solOn = solWindowApplies(kind, effectiveModel)
   // token 先取 daemon 的 prompt_cache（rollout 實際值），沒有才用 statusLine 的實際值；都沒有就不畫（不退回 CLI 的 `Context N% used`）。
   const solCtx = solOn ? sol500kContext(kind, effectiveModel, runPromptCache?.context_used_tokens ?? status?.context_used_tokens) : null
-  const ctxPct = solOn ? (solCtx?.pct ?? null) : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
+  // 讀數失效（剛 resume／壓縮）：連終端 footer 的百分比也不採用，免得把 0% 從另一條路又帶回來。
+  const ctxPct = solOn
+    ? (solCtx?.pct ?? null)
+    : status?.context_unknown ? null : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
   const ctxDetail = solOn
     ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
     : status && status.context_used_tokens !== null && status.context_size !== null
@@ -1223,6 +1227,9 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
+      ) : status?.context_unknown ? (
+        // 剛 resume／壓縮：讀數還沒有，顯示「—」而不是 0%（daemon 把失效的讀數遮成 null）。
+        <SlItem k="context" title={t('剛 resume／壓縮，等下一回合更新')}>—</SlItem>
       ) : null}
       {status || (ctxPct === null && kind === 'codex') ? <StatusCache botId={botId} status={status} contextAction={ctxPct === null && kind === 'codex'} /> : null}
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}

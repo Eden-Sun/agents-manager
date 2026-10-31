@@ -125,6 +125,11 @@ export function BotStatusCard({
             <dt>context</dt>
             <dd>{t('已用 {ctx}', { ctx })}</dd>
           </>
+        ) : status?.context_unknown ? (
+          <>
+            <dt>context</dt>
+            <dd title={t('剛 resume／壓縮，等下一回合更新')}>—</dd>
+          </>
         ) : null}
         {model ? (
           <>
