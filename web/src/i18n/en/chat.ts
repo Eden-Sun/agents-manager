@@ -2,11 +2,6 @@ import type { Dict } from '../../lib/i18n/types'
 
 export default {
   '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
-  // lib/agmAttachments.ts
-  '交給 AGM 的任務還帶不了附件（{n} 個）：先移除附件，或取消「交給 AGM」直接送給 bot。': {
-    one: 'AGM tasks cannot include {n} attachment. Remove it or turn off “Send to AGM” to send directly to the Bot.',
-    other: 'AGM tasks cannot include {n} attachments. Remove them or turn off “Send to AGM” to send directly to the Bot.',
-  },
   // lib/agoLabel.ts
   '剛剛': 'just now',
   '{n} 分鐘前': { one: '{n} minute ago', other: '{n} minutes ago' },
@@ -151,15 +146,6 @@ export default {
   // store/draftNotice.ts
   '這份草稿太長，沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices. It is still in this input.',
   '這份草稿太長（上限 {limit}），沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices (limit: {limit}). It is still in this input.',
-  // store/groupSend.ts
-  'bot 未啟動（群組訊息不會自動啟動它）': 'The bot is not running (group messages do not start it automatically)',
-  'agent 正在等終端回應': 'The agent is waiting for a terminal response',
-  '上一回合還在進行中': 'The previous turn is still in progress',
-  '上一回合送達狀態未知，請先放棄該回合': 'Delivery for the previous turn is unknown. Abandon that turn first.',
-  '這則訊息對方無法確認送達（多半是太長），請縮短後再送': 'The recipient could not confirm delivery (the message may be too long). Shorten it and try again.',
-  '沒有權限替這顆 bot 轉述': 'No permission to relay for this Bot',
-  '維護窗口的狀態暫時讀不到，先不送；稍後再試': 'The maintenance window status is temporarily unavailable. The message was not sent; try again shortly.',
-  '送出的結果還不確定，請到對話裡確認': 'The send result is unknown. Check the conversation.',
   // store/promptSuggestion.ts
   '建議已經不在了（可能剛被用掉，或終端的輸入框裡有字），沒有送出': 'The suggestion is no longer available (it may have been used, or the terminal input may contain text). Nothing was sent.',
   '建議換成別句了，沒有送出；看一下新的再按': 'The suggestion changed. Nothing was sent; review the new suggestion and try again.',
@@ -355,39 +341,5 @@ export default {
   'Esc 取消': 'Esc to cancel',
   '收起終端原文': 'Hide raw terminal output',
   '終端原文與更多按鍵': 'Raw terminal output and more controls',
-  // components/GroupChatPanel.tsx
-  '群組成員': 'Group members',
-  '（尚無 Bot）': '(no Bots yet)',
-  '{n} 個成員': { one: '{n} member', other: '{n} members' },
-  '{name}：{status}（點擊開啟單獨對話）': '{name}: {status} (click to open a private chat)',
-  '{name}：{status}': '{name}: {status}',
-  '在下方以 @bot 或 @all 對成員送出第一則訊息。': 'Send your first message to group members below with @bot or @all.',
-  '載入群組訊息中…': 'Loading group messages…',
-  '你 → {targets}': 'You → {targets}',
-  '這則訊息送給了這些 Bot': 'This message was sent to these Bots',
-  '所有 Bot（{n}）': 'All Bots ({n})',
-  '交給 AGM：由它派執行者、reviewer 與驗證者做完，而不是直接丟給某一顆 bot': 'Assign this to AGM to coordinate an implementer, reviewer, and verifier instead of sending it directly to one Bot',
-  '交給 AGM': 'Send to AGM',
-  '這一則會變成一個任務，AGM 自己調度': 'This will become a task that AGM schedules',
-  '收件者': 'Recipients',
-  '送給全部 {n} 個 bot': 'Send to all Bots ({n})',
-  '@all · {n} 個 bot': { one: '@all · {n} Bot', other: '@all · {n} Bots' },
-  '送給 @{name}': 'Send to @{name}',
-  '選擇收件 Bot': 'Choose recipient Bots',
-  '要 AGM 做什麼？（它會派執行者、reviewer 與驗證者）': 'What should AGM do? (It will assign an implementer, reviewer, and verifier.)',
-  '@bot 或 @all …': 'Use @bot or @all…',
-  '以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行': 'Use @<bot> or @all to choose recipients. Enter sends; Shift+Enter adds a line break.',
-  '建一個任務交給 AGM': 'Create a task for AGM',
-  '請選擇收件者（上方 chip 或 @mention）': 'Choose recipients using the chips above or an @mention',
-  '送給 {targets}': 'Send to {targets}',
-  '請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定': 'Choose recipients above, or use @<bot name> / @all',
-  '@all（{n} 個 bot）': { one: '@all ({n} Bot)', other: '@all ({n} Bots)' },
-  '{targets} 目前無法接收，會被略過（不會自動啟動）': '{targets} cannot receive messages right now and will be skipped (they will not be started automatically)',
-  '{project} 群組': '{project} group chat',
-  '找不到 Project': 'Project not found',
-  '群組': 'Group chat',
-  '回到單一 Bot 的對話': 'Return to the single-Bot chat',
-  '關閉群組': 'Close group',
   '此專案尚無 Bot': 'This Project has no Bots yet',
-  '為此專案建立第一個 Bot 後，即可在群組中交代任務。': 'Add a Bot to this Project to start assigning tasks in the group.',
 } satisfies Dict

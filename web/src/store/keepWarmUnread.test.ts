@@ -28,7 +28,7 @@ function seed() {
     messages: { b1: [] },
     loadedBots: {},
     botUnread: {},
-    groupUnread: {},
+
     notices: [],
     selectedBotId: null,
     selectedProjectId: null,
@@ -76,13 +76,6 @@ test('一般回合照記未讀（對照組）', () => {
   seed()
   runTurn('t1', 'web-1', false)
   assert.equal(useStore.getState().botUnread.b1, 1)
-})
-
-test('保溫回覆（新前綴 keep-warm:）不亮未讀', () => {
-  seed()
-  runTurn('t1', 'keep-warm:anchor1', true)
-  assert.equal(useStore.getState().botUnread.b1, undefined)
-  assert.equal(useStore.getState().groupUnread.p1 ?? 0, 0)
 })
 
 test('保溫回覆（DB 舊前綴 keepalive:）也不亮；訊息沒帶 keep_warm 時靠回合前綴擋住', () => {

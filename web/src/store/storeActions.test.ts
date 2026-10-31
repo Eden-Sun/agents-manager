@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
 import { installManualTimers } from '../testing/manualTimers.ts'
-import type { Bot, Message, Mission, MissionDetail, Project } from '../api/types.ts'
+import type { Bot, Message, Project } from '../api/types.ts'
 import { MESSAGE_CAP, capList } from './lists.ts'
 import { capFor } from './messageCap.ts'
 import { queuedSendFor } from './queuedSend.ts'
@@ -28,11 +28,11 @@ function seed() {
     botUnread: {},
     drafts: {},
     notices: [],
-    missions: {},
-    missionDetail: {},
-    missionLoadErrors: {},
-    missionsSupported: true,
-    missionsCapped: {},
+
+
+
+
+
     selectedBotId: null,
     selectedProjectId: null,
     agmDeleteAsk: null,
@@ -46,145 +46,24 @@ const flush = async () => {
 }
 const noticeTexts = () => useStore.getState().notices.map((n) => n.text)
 
-test('任務被清掉：收掉那一張卡，其他任務與「交給 AGM」不受影響', async () => {
+test('舊群組草稿不會由 daemon 載回 store', async () => {
   seed()
-  const gone = { id: 'm1', project_id: 'p1' } as Mission
-  useStore.setState({
-    missions: { p1: [gone, { id: 'm2', project_id: 'p1' } as Mission] },
-    missionDetail: { m1: { id: 'm1', project_id: 'p1' } as MissionDetail },
-  })
-  routeDaemon(() => json({ error: 'not_found', what: 'mission' }, 404))
-  await useStore.getState().loadMission('m1')
-  const s = useStore.getState()
-  assert.equal(s.missionsSupported, true, '一筆找不到不等於這台 daemon 沒有群組任務')
-  assert.equal(s.missionDetail.m1, undefined)
-  assert.deepEqual(
-    s.missions.p1.map((m) => m.id),
-    ['m2'],
-  )
-  assert.match(s.missionLoadErrors.m1, /不在/)
+  const { draftSync, dispatchFrameForTest } = await import('./store.ts')
+  routeDaemon((req) => req.path.endsWith('/api/drafts') ? json({ drafts: [{ key: 'group:p1', text: 'old', rev: 1 }] }, 200) : json({}, 200))
+  await draftSync.load()
+  dispatchFrameForTest({ type: 'draft_updated', data: { key: 'group:p1', text: 'old', rev: 2, client_id: 'other' } })
+  assert.equal(useStore.getState().drafts['group:p1'], undefined)
 })
 
-test('重抓一筆已在清單裡的任務：原地換掉，不搬到最前面（畫面不在手指底下跳）', async () => {
+test('選取專案設定及重連不請求群組聊天路由', async () => {
   seed()
-  const row = (id: string, text: string) => ({ id, project_id: 'p1', text, status: 'done' }) as Mission
-  useStore.setState({ missions: { p1: [row('m1', 'a'), row('m2', 'b'), row('m3', 'c')] } })
-  routeDaemon((r) =>
-    r.path.includes('/missions/m3')
-      ? json({ id: 'm3', project_id: 'p1', text: 'c（重抓）', status: 'done', events: [], assignments: [], revisions: [], parent: null }, 200)
-      : json({}, 404),
-  )
-  await useStore.getState().loadMission('m3')
-  assert.deepEqual(
-    useStore.getState().missions.p1.map((m) => [m.id, m.text]),
-    [
-      ['m1', 'a'],
-      ['m2', 'b'],
-      ['m3', 'c（重抓）'],
-    ],
-  )
-  // 清單裡沒有的（從連結點進來的舊任務）才插到最前面。
-  routeDaemon(() => json({ id: 'm9', project_id: 'p1', text: '舊的', status: 'done', events: [], assignments: [], revisions: [], parent: null }, 200))
-  await useStore.getState().loadMission('m9')
-  assert.deepEqual(
-    useStore.getState().missions.p1.map((m) => m.id),
-    ['m9', 'm1', 'm2', 'm3'],
-  )
-})
-
-test('任務卡按「暫停」：帶 reason 送出，daemon 收得下（不帶就是 422）', async () => {
-  seed()
-  useStore.setState({ missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] } })
-  // 照 daemon 的 `Json<PauseIn>`：`reason` 是必填字串，缺了在 handler 之前就被拒。
-  routeDaemon((r) => {
-    if (r.method === 'POST' && r.path.endsWith('/missions/m1/pause')) {
-      const reason = (r.body as { reason?: unknown } | undefined)?.reason
-      if (typeof reason !== 'string' || !reason) return json({ error: 'unprocessable', message: 'missing field `reason`' }, 422)
-      return json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: reason }, 200)
-    }
-    return json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: 'user_pause', events: [], assignments: [], revisions: [], parent: null }, 200)
-  })
-  await useStore.getState().controlMission('m1', 'pause')
-  assert.deepEqual(noticeTexts(), [], '不該跳「任務操作失敗」')
-  const post = requests.find((r) => r.method === 'POST')
-  assert.deepEqual(post?.body, { reason: 'user_pause' })
-  assert.equal(useStore.getState().missions.p1[0].paused_reason, 'user_pause')
-})
-
-test('等你回答的舊任務不會被 50 筆已完成的新任務擠出清單；已結案那段標成「最近 N 筆」', async () => {
-  seed()
-  const at = (i: number) => `2026-09-${String(10 + Math.floor(i / 1000)).padStart(2, '0')}T00:00:${String(i % 60).padStart(2, '0')}Z`
-  const waiting = { id: 'old-paused', project_id: 'p1', status: 'paused', paused_reason: 'max_rounds', created_at: '2026-09-01T00:00:00Z' }
-  const doneRows = Array.from({ length: 50 }, (_, i) => ({ id: `d${i}`, project_id: 'p1', status: 'done', created_at: at(i + 1) }))
-  // 照 daemon：各狀態分開篩、新的在前、`limit` 截斷。`all` 只回最新 50 筆，那筆等你回答的就不在裡面。
-  routeDaemon((r) => {
-    const q = new URL(r.path, 'http://x').searchParams
-    const limit = Number(q.get('limit') ?? 100)
-    const rows =
-      q.get('status') === 'open' ? [waiting] : q.get('status') === 'done' ? doneRows : q.get('status') === 'cancelled' ? [] : [...doneRows, waiting]
-    return json({ project_id: 'p1', missions: rows.slice(0, limit) }, 200)
-  })
-  await useStore.getState().loadMissions('p1')
-  const s = useStore.getState()
-  assert.ok(s.missions.p1.some((m) => m.id === 'old-paused'), '停著等回答的那筆要在清單裡，否則沒地方回答')
-  assert.equal(s.missions.p1.filter((m) => m.status === 'done').length, 50)
-  assert.deepEqual(s.missionsCapped.p1, { done: true, cancelled: false })
-  assert.equal(s.missions.p1.at(-1)?.id, 'old-paused', '合起來仍是新的在前')
-})
-
-test('重連之後已載入的任務清單與卡片全部重抓（斷線期間的 mission_updated 收不到）', async () => {
-  seed()
-  useStore.setState({
-    missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] },
-    missionDetail: { m1: { id: 'm1', project_id: 'p1' } as MissionDetail },
-  })
-  routeDaemon((r) =>
-    r.path.includes('/missions/m1')
-      ? json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: 'max_rounds', events: [], assignments: [], revisions: [], parent: null }, 200)
-      : json({ project_id: 'p1', missions: [] }, 200),
-  )
-  await useStore.getState().refreshLoadedMissions()
-  assert.ok(
-    requests.some((r) => r.path.includes('/projects/p1/missions')),
-    '清單要重抓',
-  )
-  assert.ok(requests.some((r) => r.path.includes('/missions/m1')), '卡片的細節也要重抓')
-  assert.equal(useStore.getState().missionDetail.m1?.paused_reason, 'max_rounds')
-})
-
-test('SPA fallback 的 404（body 不是 daemon 的錯誤）仍然當成這台沒有群組任務', async () => {
-  seed()
-  routeDaemon(() => new Response('<!doctype html>', { status: 404 }))
-  await useStore.getState().loadMission('m9')
-  assert.equal(useStore.getState().missionsSupported, false)
-})
-
-test('交給 AGM 的回應在路上斷掉：再按一次沿用同一個 crid，不會開出第二筆任務', async () => {
-  seed()
-  const input = { text: '幫我修 lint', delivery_mode: 'push_main', executor_kind: 'claude', on_5h_limit: 'wait' } as const
-  routeDaemon(() => json({ error: 'upstream', message: 'connection dropped' }, 502))
-  assert.equal(await useStore.getState().startMission('p1', { ...input }), null)
-  // 使用者看到「交給 AGM 失敗」才再按一次，中間一定隔了一段時間：拿時間當 crid 的寫法在這裡才現形。
-  await settle()
-  routeDaemon(() => json({ mission: { id: 'm1', project_id: 'p1' }, created: false }, 200))
-  assert.equal(await useStore.getState().startMission('p1', { ...input }), 'm1')
-  const crids = requests
-    .filter((r) => r.method === 'POST')
-    .map((r) => (r.body as { client_request_id?: string }).client_request_id)
-  assert.equal(crids.length, 2)
-  assert.ok(crids[0], 'store 要自己給 crid')
-  assert.equal(crids[0], crids[1], '重送必須是同一個 crid，daemon 才回同一筆')
-})
-
-test('交給 AGM 失敗後改了執行者再送：是另一個要求，不能沿用舊 crid 拿回舊的那筆', async () => {
-  seed()
-  const input = { text: '幫我修 型別', delivery_mode: 'push_main', executor_kind: 'claude', on_5h_limit: 'wait' } as const
-  routeDaemon(() => json({ error: 'upstream', message: 'connection dropped' }, 502))
-  assert.equal(await useStore.getState().startMission('p1', { ...input }), null)
-  await useStore.getState().startMission('p1', { ...input, executor_kind: 'codex' })
-  const crids = requests.filter((r) => r.method === 'POST').map((r) => (r.body as { client_request_id?: string }).client_request_id)
-  assert.equal(crids.length, 2)
-  assert.notEqual(crids[0], crids[1])
+  routeDaemon(() => json({ messages: [], turns: [], has_more: false }, 200))
+  useStore.getState().selectProject('p1')
+  useStore.getState().markCurrentRead()
+  const { reloadLoadedConversations } = await import('./store.ts')
+  await reloadLoadedConversations(useStore.getState)
+  assert.equal(useStore.getState().selectedProjectId, 'p1')
+  assert.equal(requests.some((r) => /\/projects\/p1\/(messages|chat|group\/read)/.test(r.path)), false)
 })
 
 test('排序沒存起來：通知說回到原本的順序，畫面就真的要回去', async () => {
@@ -1024,22 +903,6 @@ test('seqAfterFrame：progress 與 resync 不推進耐久 seq，耐久幀兩個�
   assert.deepEqual(seqAfterFrame(at(99, 14), 'message_added', 5), at(99, 14))
 })
 
-test('任務「暫停」連點兩下：只送一次，不跳「任務操作失敗」', async () => {
-  seed()
-  useStore.setState({ missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] } })
-  let pauses = 0
-  routeDaemon((r) => {
-    if (r.method === 'POST' && r.path.endsWith('/missions/m1/pause')) {
-      pauses += 1
-      return pauses === 1 ? json({ id: 'm1', project_id: 'p1', status: 'paused' }, 200) : json({ error: 'conflict', reason: 'already paused' }, 409)
-    }
-    return json({ id: 'm1', project_id: 'p1', status: 'paused', events: [], assignments: [], revisions: [], parent: null }, 200)
-  })
-  await Promise.all([useStore.getState().controlMission('m1', 'pause'), useStore.getState().controlMission('m1', 'pause')])
-  assert.equal(pauses, 1)
-  assert.deepEqual(noticeTexts(), [])
-})
-
 test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失敗通知（#276）', async () => {
   seed()
   const hits = { del: 0, bot: 0, proj: 0 }
@@ -1116,9 +979,9 @@ test('別的瀏覽器的 draft_updated：套用到輸入框；自己的回音與
 test('開頁／重連載入：GET /api/drafts 的草稿放進輸入框', async () => {
   seed()
   const { draftSync } = await import('./store.ts')
-  routeDaemon((req) => (req.method === 'GET' && req.path.endsWith('/api/drafts') ? json({ drafts: [{ key: 'group:p1', text: '桌機打的', rev: 3, updated_at: 'x' }] }, 200) : json({}, 200)))
+  routeDaemon((req) => (req.method === 'GET' && req.path.endsWith('/api/drafts') ? json({ drafts: [{ key: 'bot:b-draft', text: '桌機打的', rev: 3, updated_at: 'x' }] }, 200) : json({}, 200)))
   await draftSync.load()
-  assert.equal(useStore.getState().drafts['group:p1'], '桌機打的')
+  assert.equal(useStore.getState().drafts['bot:b-draft'], '桌機打的')
 })
 
 test('送出時連線斷了（回應遺失）：再送同一句要沿用同一個 client_request_id（#367）', async () => {
@@ -1137,49 +1000,6 @@ test('送出時連線斷了（回應遺失）：再送同一句要沿用同一�
   await useStore.getState().sendPrompt('b1', '跑測試')
   const last = requests.filter((r) => r.path.endsWith('/prompt')).at(-1)!.body as { client_request_id?: string }
   assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
-})
-
-test('群組送出時連線斷了（回應遺失）：再送同一句要沿用同一個 client_request_id，daemon 才回同一組 turn、不再打字', async () => {
-  seed()
-  let n = 0
-  routeDaemon(() => {
-    n += 1
-    if (n === 1) throw new TypeError('Failed to fetch')
-    return json({ group_id: 'g1', sent: [{ bot_id: 'b1', bot_name: 'b1', turn_id: 't1', message_id: 'm1', delivery: 'ok' }], skipped: [] }, 200)
-  })
-  assert.equal(await useStore.getState().sendGroupChat('p1', '@all 跑測試'), null)
-  assert.ok(await useStore.getState().sendGroupChat('p1', '@all 跑測試'))
-  const crids = requests.filter((r) => r.path.endsWith('/chat')).map((r) => (r.body as { client_request_id?: string }).client_request_id)
-  assert.equal(crids.length, 2)
-  assert.equal(crids[0], crids[1], '回應遺失後重送要是同一個 crid（API.md 11.2：同 crid 重送冪等）')
-  await useStore.getState().sendGroupChat('p1', '@all 跑測試')
-  const last = requests.filter((r) => r.path.endsWith('/chat')).at(-1)!.body as { client_request_id?: string }
-  assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
-})
-
-test('群組送出帶 recipient_ids：收件人以 bot id 為準（#1796）', async () => {
-  seed()
-  routeDaemon(() => json({ group_id: 'g1', sent: [], skipped: [] }, 200))
-  await useStore.getState().sendGroupChat('p1', '@old 嗨', [], ['b1'])
-  await useStore.getState().sendGroupChat('p1', '@all 嗨')
-  const bodies = requests.filter((r) => r.path.endsWith('/chat')).map((r) => r.body as { recipient_ids?: string[] })
-  assert.deepEqual(bodies[0].recipient_ids, ['b1'])
-  assert.equal(bodies[1].recipient_ids, undefined, '沒帶就不送這個欄位（舊行為：daemon 解析文字）')
-})
-
-test('群組送出被 daemon 明確拒絕（400 no_mention）：下一次是新的動作，不沿用舊 crid', async () => {
-  seed()
-  let n = 0
-  routeDaemon(() => {
-    n += 1
-    if (n === 1) return json({ error: 'bad_request', reason: 'no_mention' }, 400)
-    return json({ group_id: 'g1', sent: [{ bot_id: 'b1', bot_name: 'b1', turn_id: 't1', message_id: 'm1', delivery: 'ok' }], skipped: [] }, 200)
-  })
-  assert.equal(await useStore.getState().sendGroupChat('p1', '沒有 mention'), null)
-  assert.ok(await useStore.getState().sendGroupChat('p1', '沒有 mention'))
-  const crids = requests.filter((r) => r.path.endsWith('/chat')).map((r) => (r.body as { client_request_id?: string }).client_request_id)
-  assert.equal(crids.length, 2)
-  assert.notEqual(crids[0], crids[1], 'daemon 回了明確的錯＝那個動作結束了，鍵要作廢')
 })
 
 test('重載同一頁訊息：內容沒變的沿用原物件（memo 的 Bubble 才不會整串重新解析 markdown）', async () => {
@@ -1450,20 +1270,6 @@ test('#457：那一頁一則都沒補到時不抬下緣（避免每按一次就�
   assert.equal(s.moreMessages.b1, false, 'older 是空的 → 沒有更早的了')
 })
 
-test('#457：群組時間軸走同一條規則', async () => {
-  seed()
-  const list = Array.from({ length: MESSAGE_CAP }, (_, i) => ({ ...capMsg(1000 + i), bot_id: 'b1', bot_name: 'b1' }))
-  useStore.setState({ groupMessages: { p1: list as never }, moreMessages: { p1: true }, messageCapFloors: {} })
-  // 群組那條路的 `toGroupMessage` 沒有 bot_id 就整則丟掉，所以這一頁要帶。
-  routeDaemon(() => olderPage(200, 800, { bot_id: 'b1', bot_name: 'b1' }))
-  await useStore.getState().loadEarlierGroupMessages('p1')
-  await settle()
-  const s = useStore.getState()
-  assert.equal(s.groupMessages.p1.length, MESSAGE_CAP + 200)
-  assert.equal(s.messageCapFloors.p1, MESSAGE_CAP + 200 + MESSAGE_CAP)
-  assert.equal(capWouldTrim(s.groupMessages.p1, 'p1'), false)
-})
-
 test('#624：較早頁晚於整頁重抓回來時丟棄舊邊界，下一頁仍能補齊 bot 對話', async () => {
   seed()
   const page = (from: number, count: number, extra: Record<string, unknown> = {}) =>
@@ -1500,46 +1306,6 @@ test('#624：較早頁晚於整頁重抓回來時丟棄舊邊界，下一頁仍�
   )
   assert.equal(
     new URL(requests.filter((r) => r.path.includes('/bots/b1/messages') && r.path.includes('before=')).at(-1)!.path, 'http://x').searchParams.get('before'),
-    capMsg(101).id,
-  )
-})
-
-test('#624：群組較早頁晚於整頁重抓回來時丟棄舊邊界，下一頁仍能補齊', async () => {
-  seed()
-  const groupPage = (from: number, count: number) =>
-    json({ messages: Array.from({ length: count }, (_, i) => ({ ...capMsg(from + i), bot_id: 'b1', bot_name: 'b1' })), has_more: true }, 200)
-  useStore.setState({
-    groupMessages: { p1: Array.from({ length: 150 }, (_, i) => ({ ...capMsg(i + 1), bot_id: 'b1', bot_name: 'b1' })) as never },
-    loadedProjects: { p1: true },
-    moreMessages: { p1: true },
-  })
-  let resolveEarlier!: (response: Response) => void
-  const earlierResponse = new Promise<Response>((resolve) => {
-    resolveEarlier = resolve
-  })
-  routeDaemon((r) => {
-    const before = new URL(r.path, 'http://x').searchParams.get('before')
-    if (before === capMsg(1).id) return earlierResponse
-    if (before === capMsg(101).id) return groupPage(1, 100)
-    if (before) return groupPage(-99, 50)
-    return groupPage(101, 50)
-  })
-
-  const earlier = useStore.getState().loadEarlierGroupMessages('p1')
-  await settle()
-  await useStore.getState().loadGroupMessages('p1')
-  resolveEarlier(groupPage(-49, 50))
-  await earlier
-
-  assert.deepEqual(useStore.getState().groupMessages.p1.map((m) => m.id), Array.from({ length: 50 }, (_, i) => capMsg(i + 101).id))
-  await useStore.getState().loadEarlierGroupMessages('p1')
-  assert.deepEqual(
-    useStore.getState().groupMessages.p1.map((m) => m.id),
-    Array.from({ length: 150 }, (_, i) => capMsg(i + 1).id),
-    '下一次載入要從重抓後的最舊訊息開始，補上中間缺少的一段',
-  )
-  assert.equal(
-    new URL(requests.filter((r) => r.path.includes('/projects/p1/messages') && r.path.includes('before=')).at(-1)!.path, 'http://x').searchParams.get('before'),
     capMsg(101).id,
   )
 })
@@ -1644,26 +1410,6 @@ test('#766：其他錯誤（500）不重載，照舊跳錯誤', async () => {
   await settle()
   assert.equal(requests.length, 1)
   assert.equal(noticeTexts().filter((t) => t.includes('載入更早的訊息失敗')).length, 1)
-})
-
-test('#766：群組時間軸翻頁收到 404 before_message_gone：同樣重載第一頁再翻一次', async () => {
-  seed()
-  const g = (n: number) => ({ ...capMsg(n), bot_id: 'b1', bot_name: 'b1' })
-  useStore.setState({ groupMessages: { p1: [g(100), g(101)] as never }, loadedProjects: { p1: true }, moreMessages: { p1: true } })
-  let stale = true
-  routeDaemon((r) => {
-    const before = new URL(r.path, 'http://x').searchParams.get('before')
-    if (before === capMsg(100).id && stale) {
-      stale = false
-      return cursor404('before_message_gone')
-    }
-    if (before) return json({ messages: [g(1)], has_more: false }, 200)
-    return json({ messages: [g(102), g(103)], has_more: true }, 200)
-  })
-  await useStore.getState().loadEarlierGroupMessages('p1')
-  await settle()
-  assert.deepEqual(noticeTexts(), [])
-  assert.deepEqual(useStore.getState().groupMessages.p1.map((m) => m.id), [capMsg(1).id, capMsg(102).id, capMsg(103).id])
 })
 
 /** 進度事件把跳過的也算「處理過」（done 計 ok＋failed＋skipped）；收尾的 `bots_restart_done` 要用同一套算，不然 done 前後對不上。 */

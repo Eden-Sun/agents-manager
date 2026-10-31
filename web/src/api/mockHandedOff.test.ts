@@ -52,22 +52,6 @@ test('已移交的專案：bot 的 start／stop／restart／prompt／keys／text
   }
 })
 
-test('已移交的專案：群組訊息每顆都跳過，reason 是 conflict、detail 是 handed_off', async () => {
-  const m = new MockTransport()
-  const bot = (await bots(m)).find((b) => !b.parent_bot_id)!
-  await m.request('PATCH', `/projects/${bot.project_id}`, { handed_off_to: 'agm-host' })
-  const res = (await m.request('POST', `/projects/${bot.project_id}/chat`, { text: '@all hi', client_request_id: 'g-1' })) as {
-    sent: unknown[]
-    skipped: { reason: string; detail: string }[]
-  }
-  assert.equal(res.sent.length, 0)
-  assert.ok(res.skipped.length > 0)
-  for (const s of res.skipped) {
-    assert.equal(s.reason, 'conflict')
-    assert.equal(s.detail, 'handed_off')
-  }
-})
-
 test('收回（handed_off_to: null）之後照常動作', async () => {
   const m = new MockTransport()
   const bot = (await bots(m)).find((b) => !b.parent_bot_id && !b.run)!

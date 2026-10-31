@@ -13,7 +13,7 @@ import { ChatPanel } from './components/ChatPanel'
 import { HostOfflineBanner } from './components/HostOffline'
 import { LoginPromptBanner } from './components/LoginPromptBanner'
 import { OnboardingBanner } from './components/OnboardingChecklist'
-import { GroupChatPanel } from './components/GroupChatPanel'
+import { ProjectSettingsPanel } from './components/ProjectSettingsPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { MobilePreview } from './components/MobilePreview'
@@ -253,7 +253,7 @@ export default function App() {
             onOpenSidebar={() => setDrawer(true)}
           />
         ) : groupProjectId ? (
-          <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
+          <ProjectSettingsPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
           // key：換 bot 重新掛載，未送出的附件與捲動位置才不會跑到下一顆（草稿在 store，不受影響）。
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />

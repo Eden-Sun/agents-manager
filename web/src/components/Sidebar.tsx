@@ -896,7 +896,6 @@ function ProjectTitle({
 }) {
   useT()
   const selected = useStore((s) => s.selectedProjectId === projectId)
-  const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
   // 排除規則跟分頁標題 `(N)` 同一份（`store/unread.ts`）：總管專案的不算，額度停用而被側欄
   // 收起來的也不算——收合的專案掛著 `!3`、展開卻只看得到「已隱藏」，那個數字點不掉（issue #510）。
   const foldedUnread = useStore((s) => (folded ? projectUnread(s, projectId) : 0))
@@ -909,11 +908,6 @@ function ProjectTitle({
         ⌗
       </span>
       <ProjectNameField projectId={projectId} label={label} variant="row" armed={selected} editing={editing} onEditing={setEditing} />
-      {unread > 0 ? (
-        <span className="unread-badge" title={t('{n} 則未讀的群組回覆', { n: unread })}>
-          {unread > 99 ? '99+' : unread}
-        </span>
-      ) : null}
       {foldedUnread > 0 ? (
         <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
           !{foldedUnread > 99 ? '99+' : foldedUnread}

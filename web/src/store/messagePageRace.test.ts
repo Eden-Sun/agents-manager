@@ -95,20 +95,6 @@ test('整頁快照不把本地已到終態的回合蓋回 in_flight（#649）', 
   assert.equal(useStore.getState().turns.b1?.t1?.status, 'completed')
 })
 
-test('群組：逆序回應不蓋掉較新請求的整頁', async () => {
-  reset()
-  const waiting = holdPages('/projects/p1/messages')
-  useStore.setState({ groupMessages: {}, loadedProjects: {} })
-  const older = useStore.getState().loadGroupMessages('p1')
-  const newer = useStore.getState().loadGroupMessages('p1')
-  assert.equal(waiting.length, 2)
-  waiting[1](page('new transcript'))
-  await newer
-  waiting[0](page('old fallback'))
-  await older
-  assert.equal(useStore.getState().groupMessages.p1?.[0]?.content, 'new transcript')
-})
-
 const failure = () => new Response('{"error":"boom"}', { status: 500 })
 const loadFailedNotices = () => useStore.getState().notices.filter((n) => /載入(群組)?訊息失敗/.test(n.text))
 
@@ -142,18 +128,4 @@ test('新請求失敗，舊請求成功晚到：對話保持未載入，畫面�
   assert.notEqual(s.loadedBots.b1, true, '舊頁不能把對話算成已載入')
   assert.equal(s.messageLoadFailed.b1, true, '新請求失敗要給重試鈕')
   assert.equal(loadFailedNotices().length, 1, '新請求的失敗要跳通知')
-})
-
-test('群組：舊請求晚到失敗，新請求已成功：不跳錯誤通知', async () => {
-  reset()
-  const waiting = holdPages('/projects/p1/messages')
-  useStore.setState({ groupMessages: {}, loadedProjects: {}, notices: [] })
-  const older = useStore.getState().loadGroupMessages('p1')
-  const newer = useStore.getState().loadGroupMessages('p1')
-  waiting[1](page('new transcript'))
-  await newer
-  waiting[0](failure())
-  await older
-  assert.equal(useStore.getState().loadedProjects.p1, true)
-  assert.equal(loadFailedNotices().length, 0, '舊請求的失敗不能跳通知')
 })
