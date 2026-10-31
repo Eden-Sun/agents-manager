@@ -1,0 +1,4 @@
+.project-settings { padding: 24px; overflow: auto; }
+.project-settings h2 { margin-top: 0; }
+.project-settings-members { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+.project-settings-member { display: inline-flex; align-items: center; gap: 6px; }
