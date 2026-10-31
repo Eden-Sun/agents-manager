@@ -78,6 +78,9 @@ interface ChipItem {
   cache: CacheState | null
   /** 主力 codex 晶片（快取不冷、不倒數；改用淺藍色底代替，SPEC §6.5j）。 */
   codexPrimary?: boolean
+  /** Codex context 已用比例；null 代表沒有可用的實測數據。 */
+  codexUsage: number | null
+  codexUsageTitle: string | null
   /** 主力：保溫回覆到了、使用者還沒送新 prompt → 晶片框換色（`keepWarmChip.css`）。 */
   keepWarmReplied: boolean
   /** 主力：已按「不用保溫」→ 不畫倒數底色，tooltip 講「不保溫中」。 */
@@ -127,7 +130,7 @@ function ChipLamp({ id }: { id: string }) {
 }
 
 function chipHints(it: ChipItem): ChipHints {
-  return { current: it.current, unread: it.unread, needsReply: it.needsReply, atCapacity: it.atCapacity, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
+  return { current: it.current, unread: it.unread, needsReply: it.needsReply, atCapacity: it.atCapacity, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.codexUsageTitle ?? it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
 }
 
 function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
@@ -136,16 +139,16 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
   const shifted = dragging && drag.shifted.includes(it.id)
   // 落點標示：讓位的那一格（`drop-before`，標示畫在這顆左邊的空位）；落在行尾則畫在那一行最後一顆右邊（`drop-after`）。
   const mark = dragging && drag.before !== undefined ? (drag.after === it.id ? ' drop-after' : drag.after == null && drag.before === it.id ? ' drop-before' : '') : ''
-  // 快取倒數畫在底色上（`cacheClock.css`）：已涼不填，回到一般底色。codex 主力用固定淺藍底（.cache-codex），不畫倒數寬度。
+  // Claude 是快取剩餘時間；Codex 保留淡藍底，深藍長度表示實際 context 已用比例。
   const cache = it.cache && it.cache.level !== 'cold' ? it.cache : null
-  const fill = cache ? ({ '--cache-fill': `${(cache.frac * 100).toFixed(1)}%` } as CSSProperties) : undefined
-  const cacheCls = cache ? ` cache-${cache.level}` : it.codexPrimary ? ' cache-codex' : ''
+  const fill = it.codexPrimary ? ({ '--cache-fill': `${((it.codexUsage ?? 0) * 100).toFixed(1)}%` } as CSSProperties) : cache ? ({ '--cache-fill': `${(cache.frac * 100).toFixed(1)}%` } as CSSProperties) : undefined
+  const cacheCls = it.codexPrimary ? ' cache-codex' : cache ? ` cache-${cache.level}` : ''
   return (
     <button
       type="button"
       className={`${chipClass(it)}${cacheCls}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）；狀態卡只剩手機長按。
-      title={[it.title, it.limitTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
+      title={[it.title, it.limitTitle, it.codexUsageTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
         drag?.dragId === it.id
@@ -179,7 +182,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       {it.limitTitle ? <span className="unread-chip-limit" aria-hidden="true" /> : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
       {/* 撞限文字併進既有的 label（角標本身 aria-hidden），螢幕閱讀器只念一次。 */}
-      <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle].filter(Boolean).join(' · ')}</span>
+      <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle, it.codexUsageTitle].filter(Boolean).join(' · ')}</span>
     </button>
   )
 }
@@ -268,6 +271,11 @@ export function UnreadChip() {
       const current = b.id === selectedBotId
       const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || working || needsReply || atCapacity))
       if (!show) continue
+      const pc = runs[b.id]?.prompt_cache
+      const used = pc?.context_used_tokens
+      const size = pc?.context_size
+      const codexUsage = pinned && b.kind === 'codex' && used != null && size != null && Number.isFinite(used) && Number.isFinite(size) && used >= 0 && size > 0 ? Math.max(0, Math.min(1, used / size)) : null
+      const codexUsageTitle = pinned && b.kind === 'codex' ? `context · ${codexUsage === null ? t('未知') : `${(codexUsage * 100).toFixed(1)}%`}` : null
       out.push({
         id: b.id,
         name: pinned && projectInitials.get(b.project_id) ? `${projectInitials.get(b.project_id)}.${b.name}` : b.name,
@@ -289,12 +297,14 @@ export function UnreadChip() {
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
         cache: pinned ? chipCache(runs[b.id], now, working) : null,
         codexPrimary: pinned && b.kind === 'codex',
+        codexUsage,
+        codexUsageTitle,
         noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
         limitTitle: pinned ? limitTitleOf(b.kind, b.limit_hit, now, t) : null,
       })
     }
     return out
-  }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now])
+  }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now, t])
 
   // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
