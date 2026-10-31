@@ -1791,7 +1791,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "role": b.role,
                 "runtime_role_policy": run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()),
                 "daemon_url_pending": p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0),
-                "role_pending": shim_stale || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| r.runtime_role_policy.as_deref() != Some(format!("{}:{}:{}:{}", p.id, p.host, p.mode, b.role.as_deref().unwrap_or("")).as_str())),
+                "role_pending": shim_stale || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref())),
                 "model": b.model,
                 "effort": b.effort,
                 "fast": b.fast == 1,
@@ -17569,6 +17569,16 @@ mod relay_result_api_tests {
     }
 }
 
+/// 跑著的 run 是否還在用舊的角色政策。專家模式上線前起的 run 沒有記錄（`None`）：
+/// 一般 parent_child 專案、沒分配角色的 bot 跟新政策沒有差別，不算待套用（不然每顆舊 bot 都被要求重啟）。
+fn role_policy_drifted(runtime: Option<&str>, project_id: &str, host: &str, mode: &str, role: Option<&str>) -> bool {
+    let role = role.unwrap_or("");
+    match runtime {
+        Some(policy) => policy != format!("{project_id}:{host}:{mode}:{role}"),
+        None => !(mode == "parent_child" && role.is_empty()),
+    }
+}
+
 #[cfg(test)]
 mod daemon_url_pending_tests {
     use super::*;
@@ -17584,6 +17594,15 @@ mod daemon_url_pending_tests {
         sqlx::query("UPDATE runs SET daemon_url_injected=1 WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
         let state = state_json(&env.app).await.unwrap();
         assert_eq!(state["projects"][0]["bots"][0]["daemon_url_pending"], false);
+    }
+
+    #[test]
+    fn pre_expert_runs_in_plain_projects_are_not_role_pending() {
+        assert!(!role_policy_drifted(None, "p", "local", "parent_child", None));
+        assert!(role_policy_drifted(None, "p", "local", "expert", None));
+        assert!(role_policy_drifted(None, "p", "local", "parent_child", Some("executor")));
+        assert!(!role_policy_drifted(Some("p:local:expert:executor"), "p", "local", "expert", Some("executor")));
+        assert!(role_policy_drifted(Some("p:local:parent_child:"), "p", "local", "expert", None));
     }
 }
 
