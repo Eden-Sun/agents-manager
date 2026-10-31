@@ -1522,6 +1522,14 @@ class ExpertBotCommandsTest(CliCase):
             self.assertIsNone(request["token"])
         self.assertIn("open=1", FakeDaemon.seen[-1]["path"])
 
+    def test_role_puts_with_bot_proof(self):
+        FakeDaemon.routes["PUT /api/bots/bot-b/role"] = (200, {"needs_restart": True})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("role", "bot-b", "executor")
+            self.ok("role", "bot-b", "none")
+        self.assertEqual([r["bot_id"] for r in FakeDaemon.seen], ["bot-a", "bot-a"])
+        self.assertEqual([r.get("body") for r in FakeDaemon.seen], [{"role": "executor"}, {"role": None}])
+
     def test_bot_remote_without_daemon_url_does_not_guess(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
             self.assertEqual(self.bad("peers")["error"], "no_daemon_url")

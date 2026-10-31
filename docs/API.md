@@ -278,6 +278,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/prompt` | User 或 Bot；Bot `relay_from` 必須是自己，但可送給其他目標 Bot |
 | POST | `/api/bots/{id}/read` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/restart` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| PUT | `/api/bots/{id}/role` | User 可設任何角色；expert 專案的 manager 只能把同專案頂層 bot 設為 executor／advisor／null；其他 Bot → 403 `manager_role_scope` |
 | POST | `/api/bots/{id}/restore` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/rewind` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/start` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -3071,7 +3072,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 ### 專案專家模式與成員
 
-`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 `PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
+`PATCH /api/projects/{id}` 可由 User 設定 `mode`（`parent_child` 或 `expert`）及 `manager_bot_id`；expert 必須有且僅有一名頂層 manager。 `PATCH /api/bots/{id}` 的 `role` 可由 User 設為 `manager`、`executor`、`advisor` 或 null，角色不更改 bot 的歸屬。`PUT /api/bots/{id}/role` body `{"role": "executor"|"advisor"|"manager"|null}` 只改角色：User 可設任何角色；expert 專案的 manager（Bot principal）只能把同專案、非自己的存活頂層 bot 設為 `executor`、`advisor` 或 null，其他一律 `403 manager_role_scope`（`agm role <bot_id> executor|advisor|none`）。`/api/state` 的 `role_pending` 與 `runtime_role_policy` 標示目前設定是否已載入。
 
 `GET /api/projects/{id}/peers` 列出專案內活著及停止的 bot；bot principal 只能查自己的專案。`open_requests` 是待投遞或待回覆的請求數；資料不可讀時為 null。`agent_status` 是按需向 herdr 觀察的狀態，附 `observed_at`；因 herdr 快取可能過期而標示 `status_stale`，未能確認時為 unknown、觀察時間為 null；done 不表示工作驗收完成。`GET /api/spawn-authority` 使用 bot 憑證，根據目前角色與啟動快照檢查派工權限。 `POST /api/pane-authorize` 以 bot 憑證及 `{kind: "pane" | "agent" | "context", target?, session?, machine?}` 請求授權；daemon 根據呼叫 bot 的 host／session、活動 run、child 歸屬及 herdr 的 pane／agent 清單判斷，允許自己的 pane、自己的 child 與非 agent shell pane。其他 agent 的 pane 回 403 並要求改用 agent prompt；狀態不明拒絕。成功回 `{allowed:true,pane_id?}`，agent 名稱會固定為 pane ID。 受管 bot 的 prompt 必須經 daemon 解析與授權；缺少位址、daemon 不可達或授權不明時拒絕，不直接送到 herdr。daemon 不可達時無法派工。`/api/state` 的 `daemon_url_pending` 表示遠端執行中 bot 啟動時未取得位址，需由使用者重啟。
 
