@@ -210,13 +210,6 @@ async fn start_bot_locked_with_host_fence_body(
             return Err(host_superseded(bot_id, &project.host));
         }
     }
-    if project.mode == "expert" {
-        let conn = if project.host == crate::config::LOCAL_HOST { None } else {
-            Some(app.hosts().get(&project.host).await.ok_or_else(|| LcError::Upstream("expert marker host unavailable".into()))?)
-        };
-        am_base::expert_marker::set(app.data_dir(), conn.as_ref(), app.instance().as_deref(), &project.id, &session, true).await
-            .map_err(|e| LcError::Upstream(format!("expert session marker unavailable: {e}")))?;
-    }
     // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
     // as cc0). Refuse; a confirmed-logged-out explicit identity fails closed the same way instead of
     // falling back to the host's default account (GH #83: it used to just warn and start anyway,
@@ -1366,15 +1359,6 @@ async fn start_inner_body(
     }
     let mut env = env;
     let daemon_url_injected = env.get("AM_DAEMON_URL").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty());
-    if !daemon_url_injected {
-        let projects = db::live_projects(app.db()).await.map_err(up)?;
-        let bots = db::live_bots(app.db()).await.map_err(up)?;
-        for peer in &bots {
-            if !projects.iter().any(|p| p.id == peer.project_id && p.host == host && p.mode == "expert") { continue; }
-            let peer_session = app.session_for_bot(peer, &host).await.ok_or_else(|| LcError::Upstream("expert session unavailable".into()))?;
-            if peer_session == session { return Err(LcError::conflict("expert_daemon_url_required", serde_json::json!({"host":host,"session":session}))); }
-        }
-    }
     sqlx::query("UPDATE runs SET daemon_url_injected=? WHERE id=?").bind(i64::from(daemon_url_injected)).bind(run_id).execute(app.db()).await.map_err(up)?;
     if agent_md.cli_docs_disabled() {
         // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
