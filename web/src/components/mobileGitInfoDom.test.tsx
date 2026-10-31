@@ -68,6 +68,31 @@ function statusWith(account_warning: string | null): StatusInfo {
   }
 }
 
+test('桌機：GitHub 收合，狀態列保留，按鈕可展開並關閉資訊', async () => {
+  const original = window.matchMedia
+  window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  try {
+    const id = await running('am-claude')
+    const run = useStore.getState().runs[id]!
+    await act(() => useStore.setState({ selectedBotId: id, runs: { ...useStore.getState().runs, [id]: { ...run, status: statusWith(null) } } }))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    const btn = document.querySelector<HTMLButtonElement>('.desktop-git-info')!
+    assert.ok(btn)
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.ok(document.querySelector('.context-bar > .statusline-bar'))
+    assert.equal(document.querySelector('.issues-bar'), null)
+    await click(btn)
+    await until(() => document.querySelector('.modal .issues-bar') !== null, '展開 GitHub')
+    assert.equal(btn.getAttribute('aria-expanded'), 'true')
+    assert.ok(document.querySelector('.context-bar > .statusline-bar'))
+    await click(document.querySelector<HTMLButtonElement>('.modal button[aria-label="關閉"]')!)
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(document.querySelector('.modal .issues-bar'), null)
+  } finally {
+    window.matchMedia = original
+  }
+})
+
 test('手機：Git 鈕打開的彈窗裡有「bot 給你的檔案」，列出 outbox 的檔名（#929）', async () => {
   const restore = asPhone()
   try {
