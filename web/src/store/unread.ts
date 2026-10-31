@@ -11,10 +11,9 @@ const MARKS_KEY = 'am.readMarks'
 const COUNTS_KEY = 'am.unread'
 
 /** bot 對話或 project 群組聊天（§13）。 */
-export type UnreadKey = `bot:${string}` | `group:${string}`
+export type UnreadKey = `bot:${string}`
 
 export const botKey = (botId: string): UnreadKey => `bot:${botId}`
-export const groupKey = (projectId: string): UnreadKey => `group:${projectId}`
 
 /** `(at, seq)` 是新 daemon 的讀取位置全序；舊資料沒有 seq 時，同一時間戳退回 id。 */
 export interface ReadMark {
@@ -82,7 +81,7 @@ export function saveMarks(marks: Record<string, ReadMark>) {
   }
 }
 
-/** 只有 bot 的數字存本機；群組未讀以 daemon 為準（`group_unread`，#756），不在這裡。 */
+/** 只有 bot 的未讀數字存本機。 */
 export interface UnreadCounts {
   bots: Record<string, number>
 }

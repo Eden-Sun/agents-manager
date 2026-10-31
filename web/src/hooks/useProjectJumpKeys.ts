@@ -21,7 +21,7 @@ export function jumpTargetId(slot: number, shown: readonly string[] | null, orde
 }
 
 /**
- * Control+1…9 跳到側欄第 n 個專案的群組對話並把游標放進輸入框（2026-09-16 使用者）。
+ * Control+1…9 跳到側欄第 n 個專案設定（2026-09-16 使用者）。
  *
  * 用 Control 不用 ⌘：macOS 的 ⌘1…9 是瀏覽器換分頁，攔不下來也不該攔。`code` 認實體鍵位，中文輸入法照樣有效；
  * 對話框開著、正在組字、或已經被別人處理掉（`defaultPrevented`）就不動。
@@ -45,16 +45,10 @@ export function useProjectJumpKeys() {
       if (!id) return
       e.preventDefault()
       selectProject(id)
-      // 選完才畫得出輸入框：等這一輪 render 完再給焦點，拿不到就退回專案標題（至少鍵盤位置對了）。
+      // 等這一輪 render 完再把焦點交給專案標題。
       requestAnimationFrame(() => {
         // 側欄捲到這個專案並讓它貼齊頂端（2026-09-16 使用者：「menu 也要 scroll 到指定點」）。
         scrollProjectIntoView(id)
-        const box = document.querySelector<HTMLTextAreaElement>('.composer textarea')
-        if (box && !box.disabled) {
-          // focus 會把元素捲進視野：`preventScroll` 保住上面那一捲，也避免主面板被拉動。
-          box.focus({ preventScroll: true })
-          return
-        }
         document.querySelector<HTMLElement>('.project-label-btn.selected')?.focus({ preventScroll: true })
       })
     }

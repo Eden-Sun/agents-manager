@@ -161,27 +161,6 @@ test('refreshState：快照比本機已看到的幀還舊時，不能把剛由 W
   assert.equal(queuedSendFor(useStore.getState(), 'b1')?.turnId, 't1', '舊快照不能清掉比它新的回合')
 })
 
-test('群組送出同一道理：回應遺失後隔了重送窗口再送同一句，是新的動作', async () => {
-  seed()
-  const realNow = Date.now
-  const crids: string[] = []
-  routeDaemon((req) => {
-    if (!req.path.endsWith('/chat')) return json({})
-    crids.push((req.body as { client_request_id: string }).client_request_id)
-    if (crids.length === 1) throw new TypeError('network down')
-    return json({ results: [] })
-  })
-  try {
-    await useStore.getState().sendGroupChat('p1', '大家好-stale-4')
-    Date.now = () => realNow() + 6 * 60 * 1000
-    await useStore.getState().sendGroupChat('p1', '大家好-stale-4')
-  } finally {
-    Date.now = realNow
-  }
-  assert.equal(crids.length, 2)
-  assert.notEqual(crids[1], crids[0])
-})
-
 // ───────── 第二輪：佔槽的人要講清楚、同句兩分頁不能把字又塞回去 ─────────
 
 const slotRoutes = (holder: unknown, queuedText: string) => (req: { path: string }) => {
@@ -282,19 +261,6 @@ test('舊 daemon 沒回 holder 時，同一句也必須退回輸入框，不能�
   const ok = await useStore.getState().sendPrompt('b1', '繼續', [], false, false, undefined, true)
   assert.equal(ok, false, '舊 daemon 沒有 holder，來源不明時不能當成這句已送出')
   assert.equal(useStore.getState().drafts[draftKey], '繼續', '使用者輸入要留在草稿')
-})
-
-test('群組送出被跳過的收件者：toast 講人話，草稿保留', async () => {
-  seed()
-  routeDaemon((req) =>
-    req.path.endsWith('/chat')
-      ? json({ group_id: 'g1', delivered: false, sent: [], skipped: [{ bot_id: 'b1', bot_name: 'b1', reason: 'not_running', detail: 'bot has no active run' }] })
-      : json({}),
-  )
-  const res = await useStore.getState().sendGroupChat('p1', '@b1 嗨-skip-1')
-  assert.equal(res, null, '一顆都沒送到：回 null，輸入框才保留草稿')
-  const text = useStore.getState().notices.at(-1)?.text ?? ''
-  assert.ok(text.includes('bot 未啟動') && !text.includes('no active run'), text)
 })
 
 test('同一顆 bot 同時按兩次重啟：只送一個 /restart 請求（第二下被 store 合併，不是再重啟一次）', async () => {

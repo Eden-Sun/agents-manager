@@ -20,8 +20,6 @@ import type {
   Bot,
   BotKind,
   BotManagedBy,
-  GroupMessage,
-  GroupMessagesPage,
   HostShell,
   Host,
   HerdrVersion,
@@ -297,14 +295,6 @@ export function toProject(v: unknown): Project | null {
       const repo = str(pick(g, 'repo'))
       if (!owner || !repo) return null
       return { owner, repo, url: str(pick(g, 'url')) || `https://github.com/${owner}/${repo}` }
-    })(),
-    ...(() => {
-      const n = pick(v, 'group_unread')
-      const m = pick(v, 'group_read_mark')
-      return {
-        group_unread: typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined,
-        group_read_mark: readMark(m),
-      }
     })(),
     created_at: str(v.created_at),
   }
@@ -635,24 +625,6 @@ export function toMessage(v: unknown, botId?: string): Message | null {
 }
 
 /** SPEC §13.4 */
-export function toGroupMessage(v: unknown): GroupMessage | null {
-  const m = toMessage(v)
-  if (!m || !isRec(v)) return null
-  const bot_id = str(pick(v, 'bot_id'))
-  if (!bot_id) return null
-  return { ...m, bot_id, bot_name: str(pick(v, 'bot_name'), bot_id) }
-}
-
-export function toGroupMessagesPage(raw: unknown, projectId: string): GroupMessagesPage {
-  const o = isRec(raw) ? raw : {}
-  const out: GroupMessage[] = []
-  for (const m of arr(pick(o, 'messages'))) {
-    const gm = toGroupMessage(m)
-    if (gm) out.push(gm)
-  }
-  return { project_id: str(pick(o, 'project_id'), projectId), messages: sortByInsert(out), has_more: bool(pick(o, 'has_more')) }
-}
-
 /** Insert order — the daemon paginates by rowid (`seq`); ULID order only when `seq` is missing. */
 export function sortByInsert<T extends { id: string; seq?: number }>(items: T[]): T[] {
   return [...items].sort(byInsert)
