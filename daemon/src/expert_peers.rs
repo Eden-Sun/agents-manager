@@ -6,7 +6,7 @@ use crate::{api::RequestPrincipal, lifecycle::LcError, state::App};
 pub(crate) async fn list(State(app): State<Arc<App>>, Path(project_id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     match principal {
         RequestPrincipal::User => {},
-        RequestPrincipal::Bot(id) => {
+        RequestPrincipal::Bot(id) | RequestPrincipal::Child { child_id: id, .. } => {
             let bot = crate::db::bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::Forbidden(json!({"error":"forbidden"})))?;
             if bot.project_id != project_id { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cross_project"}))); }
         }
@@ -98,7 +98,7 @@ mod spawn_gate_tests {
         sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("X-AM-Bot-Token", bot.hook_token.parse().unwrap());
-        let body = crate::runners::credential_spawn::SpawnBegin { bot_id: bot.id, timeout_ms: String::new(), purpose: String::new() };
+        let body = crate::runners::credential_spawn::SpawnBegin { bot_id: bot.id, timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() };
         let (status, _) = crate::runners::credential_spawn::begin(State(env.app.clone()), headers, axum::extract::Form(body)).await;
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
     }

@@ -50,19 +50,29 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_DAEMON_URL AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_PROJECT_MODE AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_CHILD_SPAWN_ID AM_CHILD_TOKEN AM_PORT AM_DAEMON_URL AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_PROJECT_MODE AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE AM_KEEP_CLI_DOCS"
 
 # API calls use the independent bot credential. Keep the hook-token fallback for already-running
 # hook-enabled panes until they restart to receive AM_BOT_TOKEN.
 am_bot_token() {
-    if [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
+    if [ -n "${AM_CHILD_TOKEN:-}" ]; then printf '%s' "$AM_CHILD_TOKEN"; elif [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
 }
 
-# Keep bot credentials out of curl's process arguments; curl reads this header from stdin.
+# The child credential always takes precedence over its inherited parent's credential.
+am_principal_headers() {
+    if [ -n "${AM_CHILD_TOKEN:-}" ] || [ -n "${AM_CHILD_SPAWN_ID:-}" ]; then
+        [ -n "${AM_CHILD_TOKEN:-}" ] && [ -n "${AM_CHILD_SPAWN_ID:-}" ] || return 77
+        printf 'X-AM-Child-Spawn-Id: %s\nX-AM-Child-Token: %s\n' "$AM_CHILD_SPAWN_ID" "$AM_CHILD_TOKEN"
+    else
+        _tok=$(am_bot_token)
+        [ -n "$_tok" ] && [ -n "${AM_BOT_ID:-}" ] || return 77
+        printf 'X-AM-Bot-Id: %s\nX-AM-Bot-Token: %s\n' "$AM_BOT_ID" "$_tok"
+    fi
+}
+
 am_curl_bot() {
-    _tok=$(am_bot_token)
-    [ -n "$_tok" ] || return 77
-    printf 'X-AM-Bot-Token: %s\n' "$_tok" | curl -H @- "$@"
+    _headers=$(am_principal_headers) || return $?
+    printf '%s\n' "$_headers" | curl -H @- "$@"
 }
 
 # 子 agent 的標記（使用者 2026-09-30）：bot 開出來的 pane 一律帶 `AM_CHILD_OF=<母 bot_id>`，
@@ -162,10 +172,11 @@ am_spawn_begin() {
         printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
         return 75
     fi
-    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/begin" \
+    _out=$(am_curl_bot -s --connect-timeout 2 -m 5 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/begin" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" \
-        --data-urlencode "purpose=${1:-agent}" 2>/dev/null)
+        --data-urlencode "purpose=${1:-agent}" \
+        --data-urlencode "pane_id=${_pane:-}" --data-urlencode "child_name=${_child_name:-}" 2>/dev/null)
     _rc=$?
     _code=$(printf '%s\n' "$_out" | tail -n 1)
     _body=$(printf '%s\n' "$_out" | sed '$d')
@@ -177,6 +188,15 @@ am_spawn_begin() {
     if [ -z "$_AM_SPAWN_PERMIT" ]; then
         printf 'agents-manager: daemon 沒有回 spawn permit，拒絕建立子 pane\n' >&2
         return 75
+    fi
+    if [ "${1:-agent}" = agent ]; then
+        _AM_CHILD_SPAWN_ID=$(printf '%s\n' "$_body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("spawn_id", ""))' 2>/dev/null)
+        _AM_CHILD_TOKEN=$(printf '%s\n' "$_body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("child_token", ""))' 2>/dev/null)
+        if [ -z "$_AM_CHILD_SPAWN_ID" ] || [ -z "$_AM_CHILD_TOKEN" ]; then
+            printf 'agents-manager: daemon 未提供 child 憑證，拒絕啟動\n' >&2
+            am_spawn_abort
+            return 75
+        fi
     fi
     return 0
 }
@@ -404,7 +424,7 @@ am_agent_start() {
                 printf 'agents-manager: 無法確認目前派工權限（缺 bot 憑證或 curl）\n' >&2
                 exit 77
             fi
-            _spawn_status=$(am_curl_bot --noproxy '*' -H "X-AM-Bot-Id: ${AM_BOT_ID}" -s -o /dev/null -w '%{http_code}' -m 3 "${_spawn_url%/}/api/spawn-authority" 2>/dev/null) || _spawn_status=""
+            _spawn_status=$(am_curl_bot --noproxy '*' -s -o /dev/null -w '%{http_code}' -m 3 "${_spawn_url%/}/api/spawn-authority" 2>/dev/null) || _spawn_status=""
             if [ "$_spawn_status" != 200 ]; then
                 printf 'agents-manager: 目前角色沒有派工權限或無法確認權限；請向 manager 請求人手\n' >&2
                 exit 77
@@ -688,7 +708,7 @@ am_agent_start() {
     fi
     am_spawn_begin agent || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
-    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}"
+    am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}" || { am_spawn_abort; exit 75; }
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
     fi
@@ -762,7 +782,14 @@ am_reexport_env_before_start() {
     [ -n "$_pane" ] || return 0
     _body=""
     _line=""
+    if [ -n "${_AM_CHILD_SPAWN_ID:-}" ] && [ -n "${_AM_CHILD_TOKEN:-}" ]; then
+        _body="export AM_CHILD_SPAWN_ID='${_AM_CHILD_SPAWN_ID}'
+export AM_CHILD_TOKEN='${_AM_CHILD_TOKEN}'
+"
+        _line="export AM_CHILD_SPAWN_ID='${_AM_CHILD_SPAWN_ID}'; export AM_CHILD_TOKEN='${_AM_CHILD_TOKEN}'; "
+    fi
     for _k in $AM_RESERVED_ENV_KEYS AM_INSTANCE AM_DATA_DIR; do
+        case "$_k" in AM_CHILD_SPAWN_ID|AM_CHILD_TOKEN) [ -z "${_AM_CHILD_SPAWN_ID:-}" ] || continue ;; esac
         [ -z "$_acct_key" ] || [ "$_k" != "$_acct_key" ] || continue
         eval "_v=\${$_k:-}"
         [ "$_k" != AM_AGENT_NAME ] || [ -z "$_child_name" ] || _v=$_child_name
@@ -796,7 +823,7 @@ am_reexport_env_before_start() {
     [ -n "$_body" ] || return 0
     # #389：整串 export 一行行打進 pane 會灌滿終端畫面（沒 hook 的 bot 靠快照補回覆也會讀到）。
     # 寫進 0600 暫存檔，pane 只收一行 ` . '<檔>' && rm -f '<檔>'`（行首空白：不進 shell history）。
-    # 暫存檔放 ${TMPDIR}（不能是 scratchpad／outbox）或 /tmp；寫不出來才退回舊的逐行 export，環境不能丟。
+    # 暫存檔放 ${TMPDIR}（不能是 scratchpad／outbox）或 /tmp；child 憑證寫不出時直接拒絕，避免明文打進 pane。
     _dir=${TMPDIR:-/tmp}
     case "$_dir" in
         *scratchpad* | */outbox/* | */outbox) _dir=/tmp ;;
@@ -805,11 +832,16 @@ am_reexport_env_before_start() {
     if [ -n "$_f" ] && printf '%s' "$_body" > "$_f" 2>/dev/null; then
         chmod 600 "$_f" 2>/dev/null
         _qf=$(printf '%s' "$_f" | sed "s/'/'\\\\''/g")
-        "$AM_HERDR" pane send-text "$_pane" " . '$_qf' && rm -f '$_qf'
-" >/dev/null 2>&1
-        return 0
+        if "$AM_HERDR" pane send-text "$_pane" " . '$_qf' && rm -f '$_qf'
+" >/dev/null 2>&1; then return 0; fi
+        rm -f "$_f"
+        return 75
     fi
     [ -z "$_f" ] || rm -f "$_f"
+    if [ -n "${_AM_CHILD_TOKEN:-}" ]; then
+        printf 'agents-manager: 無法安全注入 child 憑證，拒絕啟動\n' >&2
+        return 75
+    fi
     "$AM_HERDR" pane send-text "$_pane" "$_line
 " >/dev/null 2>&1
 }
@@ -898,7 +930,7 @@ am_agent_prompt() {
         _deadline=$(python3 -c 'import sys,time; print(time.time()+float(sys.argv[1]))' "$_timeout") || exit 75
         _selector=$_requested
         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
-        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_selector" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
+        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -G --data-urlencode "target=$_selector" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
         _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
         case "$_requested" in
             bot:*|*:p*) : ;;
@@ -907,7 +939,7 @@ am_agent_prompt() {
                     _candidate=$(am_child_name "$_requested" 2>/dev/null) || am_announce_refuse 75 "$_requested" "cannot select child name"
                     if [ "$_candidate" != "$_requested" ]; then
                         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時"
-                        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -G --data-urlencode "target=$_candidate" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
+                        _resolve_out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -G --data-urlencode "target=$_candidate" "$_base/api/relay/resolve") || am_announce_refuse 75 "$_requested" "daemon 無法解析目標"
                         _code=$(printf '%s\n' "$_resolve_out" | tail -n 1)
                     fi
                 fi ;;
@@ -916,9 +948,11 @@ am_agent_prompt() {
         case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）：$_resolve" ;; *) am_announce_refuse 75 "$_requested" "daemon 無法解析目標（HTTP ${_code}）：$_resolve" ;; esac
         _target=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin)["to_bot_id"])') || am_announce_refuse 75 "$_requested" "daemon 未提供目標 bot ID"
         [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3],"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$AM_BOT_ID" "$_expect_result" "$_ack" "$_reply_to") || exit 75
+        _relay_sender=$AM_BOT_ID
+        [ -z "${AM_CHILD_TOKEN:-}" ] || _relay_sender=""
+        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3] or None,"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None}))' "$_text" "$_request_id" "$_relay_sender" "$_expect_result" "$_ack" "$_reply_to") || exit 75
         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
-        _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H "X-AM-Bot-Id: $AM_BOT_ID" -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
+        _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
         _code=$(printf '%s\n' "$_out" | tail -n 1)
         _reply=$(printf '%s\n' "$_out" | sed '$d')
         case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}；用 --request-id $_request_id 原樣重試" ;; esac

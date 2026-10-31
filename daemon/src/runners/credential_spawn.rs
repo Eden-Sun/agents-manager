@@ -130,6 +130,10 @@ pub struct SpawnBegin {
     pub timeout_ms: String,
     #[serde(default)]
     pub purpose: String,
+    #[serde(default)]
+    pub pane_id: String,
+    #[serde(default)]
+    pub child_name: String,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +161,15 @@ pub struct SpawnAbort {
 
 /// `POST /relay/spawn/begin`: reserve the parent's credential while a shim invokes herdr.
 pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, axum::extract::Form(body): axum::extract::Form<SpawnBegin>) -> (StatusCode, Json<Value>) {
+    if headers.contains_key("X-AM-Child-Spawn-Id") || headers.contains_key("X-AM-Child-Token") {
+        let id = headers.get("X-AM-Child-Spawn-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let token = headers.get("X-AM-Child-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+        return match crate::child_credentials::authenticate(&app, id, token).await {
+            Ok(_) => fail(StatusCode::FORBIDDEN, "child_scope_denied", "children cannot spawn agents"),
+            Err(StatusCode::CONFLICT) => fail(StatusCode::CONFLICT, "child_not_registered", "child not registered"),
+            Err(status) => fail(status, "bad_child_proof", "child credential unavailable or invalid"),
+        };
+    }
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let bot = match authenticated_bot(&app, &body.bot_id, token).await {
         Ok(bot) => bot,
@@ -220,6 +233,43 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     if !still_current {
         release(&app, &body.bot_id, &permit_id);
         return fail(StatusCode::CONFLICT, "spawn_authority_changed", "bot host or run changed while reserving spawn; retry");
+    }
+    if body.purpose == "agent" && !body.pane_id.is_empty() && !body.child_name.is_empty() {
+        let Some(client) = app.herdr_for_host_fence(&fence, &authority.herdr_session).await else {
+            release(&app, &body.bot_id, &permit_id);
+            return fail(StatusCode::SERVICE_UNAVAILABLE, "spawn_session_unavailable", "cannot verify child pane");
+        };
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::try_join!(client.pane_get(&body.pane_id), client.agent_list())
+        }).await;
+        let empty_pane = matches!(observed, Ok(Ok((Some(ref pane), ref list))) if pane.agent.as_deref().is_none_or(str::is_empty) && !list.iter().any(|a| a.pane_id == body.pane_id));
+        if !empty_pane || !fence.is_current_now() {
+            release(&app, &body.bot_id, &permit_id);
+            return fail(StatusCode::CONFLICT, "spawn_pane_unverified", "child pane is missing, occupied, or cannot be verified");
+        }
+        let current = crate::db::active_run(&app.db, &bot.id).await.ok().flatten();
+        let role_allowed = crate::expert_peers::spawn_authority(State(app.clone()), axum::Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await.is_ok();
+        if !role_allowed || current.as_ref().map(|r| r.id.as_str()) != authority.run_id.as_deref() || !fence.is_current_now() {
+            release(&app, &body.bot_id, &permit_id);
+            return fail(StatusCode::FORBIDDEN, "spawn_authority_changed", "spawn authorization changed during pane verification");
+        }
+        if !body.child_name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-')) {
+            release(&app, &body.bot_id, &permit_id);
+            return fail(StatusCode::BAD_REQUEST, "invalid_child_name", "child name contains invalid characters");
+        }
+        let spawn_id = crate::db::ulid();
+        let child_token = crate::projection::new_token();
+        let token_hash = crate::child_credentials::hash_token(&child_token);
+        let inserted = sqlx::query("INSERT INTO child_credentials(spawn_id,token_hash,parent_bot_id,child_name,host,herdr_session,pane_id,state,created_at,expires_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)")
+            .bind(&spawn_id).bind(token_hash).bind(&bot.id).bind(&body.child_name)
+            .bind(&authority.host).bind(&authority.herdr_session).bind(&body.pane_id)
+            .bind(crate::db::now()).bind(crate::db::iso_in(900)).execute(&app.db).await;
+        if let Err(error) = inserted {
+            tracing::warn!(%error, "cannot issue child credential");
+            release(&app, &body.bot_id, &permit_id);
+            return fail(StatusCode::SERVICE_UNAVAILABLE, "child_credential_unavailable", "cannot issue child credential");
+        }
+        return (StatusCode::OK, Json(json!({"permit_id":permit_id,"spawn_id":spawn_id,"child_token":child_token})));
     }
     (StatusCode::OK, Json(json!({"permit_id": permit_id})))
 }
@@ -400,7 +450,7 @@ mod tests {
         let (status, Json(body)) = begin(
             State(app.clone()),
             bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new() }),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "spawn begin should reserve the parent credential: {body}");
@@ -419,6 +469,22 @@ mod tests {
             }),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn child_credential_is_not_issued_for_an_occupied_pane() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "occupied-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        e.herdr.live_pane("w1:p-busy", crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("existing-agent", "w1:p-busy", false);
+        let (status, _) = begin(State(e.app.clone()), bot_headers(&parent.hook_token), Form(SpawnBegin {
+            bot_id: parent.id, timeout_ms: String::new(), purpose: "agent".into(),
+            pane_id: "w1:p-busy".into(), child_name: "other-child".into(),
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM child_credentials").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

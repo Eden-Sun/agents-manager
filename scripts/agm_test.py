@@ -31,6 +31,14 @@ import agm  # noqa: E402
 TOKEN = "test-token-do-not-leak"
 
 
+
+class ChildAuthHeadersTest(unittest.TestCase):
+    def test_child_credential_takes_precedence_and_never_falls_back(self):
+        with patch.dict(os.environ, {"AM_BOT_ID": "parent", "AM_BOT_TOKEN": "parent-token", "AM_CHILD_SPAWN_ID": "spawn", "AM_CHILD_TOKEN": "child-token"}, clear=True):
+            self.assertEqual(agm.bot_auth_headers({}), {"X-AM-Child-Spawn-Id": "spawn", "X-AM-Child-Token": "child-token"})
+        with patch.dict(os.environ, {"AM_BOT_ID": "parent", "AM_BOT_TOKEN": "parent-token", "AM_CHILD_SPAWN_ID": "spawn"}, clear=True):
+            self.assertNotIn("X-AM-Bot-Token", agm.bot_auth_headers({}))
+
 class Raw:
     def __init__(self, text: str, content_type: str = "text/html") -> None:
         self.text = text
