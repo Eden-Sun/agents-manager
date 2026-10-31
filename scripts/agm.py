@@ -40,7 +40,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 30.0
-# daemon 這一側本來就會跑很久的操作（`mission deliver`：fetch＋push＋gh；`release-triage publish`：一串 gh 呼叫、每個最久 40 秒）：
+# daemon 這一側本來就會跑很久的操作（`release-triage publish`：一串 gh 呼叫、每個最久 40 秒）：
 # 沿用 30 秒的話 CLI 先逾時、daemon 卻繼續做完，呼叫端以為失敗。只有沒用 `--timeout` 明講時才放寬。
 SLOW_TIMEOUT = 300.0
 MAX_TIMEOUT = 3600.0
@@ -789,14 +789,6 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
         body["ack"] = True
     if getattr(args, "reply_to", None):
         body["reply_to"] = args.reply_to
-    # 群組任務：這件交辦屬於哪個任務、擔任哪個角色。兩個一起給——少一個 daemon 會回 400，
-    # 在這裡先擋，免得一件沒掛上任務的工作被派出去。
-    mission, role = getattr(args, "mission", None), getattr(args, "role", None)
-    if bool(mission) != bool(role):
-        raise AgmError("bad_args", "--mission 與 --role 要一起給（role：executor / reviewer / verifier）", 2)
-    if mission:
-        body["mission_id"] = mission
-        body["role"] = role
     try:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
@@ -1793,128 +1785,6 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
     return client.put("/api/supervisor/handoff", {"summary": summary})
 
 
-def _post_with_request_id(client: Client, path: str, body: dict, what: str, mission_id: str) -> object:
-    """帶冪等鍵的 mission 寫入逾時或送出後斷線時，回報送達未知；原樣重送可安全對帳。"""
-    try:
-        return client.post(path, body)
-    except AgmError as e:
-        if e.kind in ("timeout", "connection_lost"):
-            request_id = body.get("client_request_id")
-            raise AgmError(
-                "delivery_unknown",
-                f"{what} 逾時或連線中斷，送達狀態未知。用**同一個** --request-id {request_id} 原樣重送一次（daemon 會回同一筆）；不要換新的 id。",
-                7,
-                client_request_id=request_id,
-                mission_id=mission_id,
-            )
-        raise
-
-
-def cmd_mission(client: Client, cfg: dict, args) -> object:
-    """群組任務（docs/API.md「群組任務」）。每個 op 對一個端點，不在 CLI 裡另外拼流程。"""
-    op = args.op
-    if args.as_user and (op != "answer" or args.reply_to or args.as_daemon):
-        raise AgmError("bad_args", "--as-user 僅用於依使用者明確指示回答暫停任務，不可搭配 --reply-to/--as-daemon", 2)
-    if op == "list":
-        if not args.project:
-            raise AgmError("bad_args", "mission list 需要 --project", 2)
-        return client.get(
-            f"/api/projects/{path_segment(args.project)}/missions",
-            {"status": args.status, "limit": args.limit},
-        )
-    if not args.mission_id:
-        raise AgmError("bad_args", f"mission {op} 需要 mission id", 2)
-    base = f"/api/missions/{path_segment(args.mission_id)}"
-    if op == "get":
-        return client.get(base)
-    if op == "events":
-        out = client.get(base)
-        return {"mission_id": args.mission_id, "events": out.get("events", []) if isinstance(out, dict) else []}
-    if op == "event":
-        if not args.kind or not (args.text or args.text_file):
-            raise AgmError("bad_args", "mission event 需要 --kind（report / note / verified）與 --text 或 --text-file", 2)
-        body: dict = {"kind": args.kind, "text": _mission_text(args)}
-        # verified 要說驗的是哪個 commit：交付時 daemon 只放行 HEAD 等於它的工作樹（review3 c1 M9）。
-        if args.kind == "verified" and not (args.worktree or args.sha):
-            raise AgmError("bad_args", "mission event --kind verified 需要 --worktree（驗過的工作樹）或 --sha（驗過的 commit）", 2)
-        if args.worktree:
-            body["worktree"] = str(Path(args.worktree).expanduser())
-        if args.sha:
-            body["sha"] = args.sha
-        _with_relay(body, cfg, args)
-        return client.post(f"{base}/events", body)
-    if op == "pause":
-        if not args.reason:
-            raise AgmError("bad_args", "mission pause 需要 --reason", 2)
-        body = {"reason": args.reason}
-        if args.detail:
-            body["detail"] = args.detail
-        return client.post(f"{base}/pause", body)
-    if op in ("resume", "cancel"):
-        return client.post(f"{base}/{op}", {})
-    if op == "round":
-        # 逾時重送要沿用同一個鍵，daemon 才不會多扣一輪。
-        if not args.request_id:
-            raise AgmError("bad_args", "mission round 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
-        return _post_with_request_id(client, f"{base}/round", {"client_request_id": args.request_id}, "mission round", args.mission_id)
-    if op in ("question", "answer", "revise"):
-        # 三個都要冪等鍵：重送回同一筆，不會變成第二個問題／第二輪續作。
-        if not (args.text or args.text_file):
-            raise AgmError("bad_args", f"mission {op} 需要 --text 或 --text-file", 2)
-        if not args.request_id:
-            raise AgmError("bad_args", f"mission {op} 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
-        body = {"text": _mission_text(args), "client_request_id": args.request_id}
-        if op == "answer" and args.reply_to:
-            body["reply_to"] = args.reply_to
-        # Never silently turn the manager into the user. A user-authorized paused
-        # answer must explicitly select --as-user; normal bot replies need --reply-to.
-        if not args.as_user:
-            _with_relay(body, cfg, args)
-        return _post_with_request_id(client, f"{base}/{op}", body, f"mission {op}", args.mission_id)
-    if op == "complete":
-        if not (args.text or args.text_file):
-            raise AgmError("bad_args", "mission complete 需要 --text 或 --text-file（結果摘要）", 2)
-        body = {"result_summary": _mission_text(args)}
-        # 沒交付就結案要明講理由（issue #74）；no_changes 派過執行者時 daemon 會要 --worktree 來查。
-        if args.no_delivery:
-            body["no_delivery"] = args.no_delivery
-        if args.worktree:
-            body["worktree"] = str(Path(args.worktree).expanduser())
-        _with_relay(body, cfg, args)
-        return client.post(f"{base}/complete", body)
-    if op == "pick":
-        if not args.role:
-            raise AgmError("bad_args", "mission pick 需要 --role（executor / reviewer / verifier）", 2)
-        return client.get(f"{base}/pick", {"role": args.role, "exclude": args.exclude})
-    if op == "deliver":
-        if not args.worktree:
-            raise AgmError("bad_args", "mission deliver 需要 --worktree（本機絕對路徑）", 2)
-        body = {"worktree": str(Path(args.worktree).expanduser())}
-        for key, val in (("title", args.title), ("body", args.body)):
-            if val:
-                body[key] = val
-        _with_relay(body, cfg, args)
-        return client.post(f"{base}/deliver", body)
-    raise AgmError("bad_args", f"未知的 mission op：{op}", 2)
-
-
-def _mission_text(args) -> str:
-    return _text_of(args, "--text", "text_file", "text", "內容")
-
-
-def _with_relay(body: dict, cfg: dict, args) -> None:
-    """回報進群組時間軸的話要標來源。預設是總管自己（runtime.json 的 manager_bot_id），
-    `--as-daemon` 標成 daemon。沒有 bot id 就不帶——daemon 會當成使用者本人，這裡寧可報錯。"""
-    if getattr(args, "as_daemon", False):
-        body["relay_from"] = "daemon"
-        return
-    # 以這個 runtime 自己的 bot 發言：協調者的回報不能掛在巡檢名下。
-    manager = cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id")
-    if not manager:
-        raise AgmError("bad_args", "runtime.json 沒有 manager_bot_id，無法標示這則回報是誰說的", 2)
-    body["relay_from"] = manager
-
-
 # 強制 `/usage` 探測：daemon 要先等同一台的 probe_lock（背景輪詢一個一個探身份時會佔著），再自己探最久 40 秒。
 QUOTA_PROBE_TIMEOUT = 300.0
 
@@ -2674,11 +2544,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm lease safety / agm lease acquire rebuild --approval <id> --commit <sha>\n"
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
-            "  agm mission list --project <id> --status open  群組任務；pick --role verifier 照規則挑身份\n"
             "  agm issue claim 425 --child i425 --worktree … --branch …   派工前先認領（exit 3＝別人在做）\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
-            "注意：mission round／question／answer／revise 逾時也是送達未知（exit 7），用同一個 --request-id 原樣重送。\n"
             "注意：回合結束不等於工作完成。交辦會停在 awaiting_review，要 `agm review` 才會結案。"
         ),
     )
@@ -2742,8 +2610,6 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="EVENT_ID",
         help="只用在交接給另一個 AGM 角色：這句回的是哪一則 inbox 事件，不叫醒對方。要對方處理的事不要帶",
     )
-    s.add_argument("--mission", help="群組任務 id：這件交辦屬於哪個任務（要和 --role 一起給）")
-    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="在任務裡擔任的角色")
     s.add_argument(
         "--review-by",
         dest="review_by",
@@ -2945,46 +2811,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_quota)
 
     s = sub.add_parser(
-        "mission",
-        help="群組任務：list / get / events / event / pause / resume / cancel / complete / round / pick / deliver",
-        description="對應 docs/API.md「群組任務」的端點。回報進群組的 event / complete / deliver 預設標成總管說的。",
-    )
-    s.add_argument(
-        "op",
-        choices=[
-            "list", "get", "events", "event", "pause", "resume", "cancel", "complete", "round", "pick", "deliver",
-            # 完成之後還能往下談：question 問一句（不改東西）、answer 回覆、revise 開續作。
-            "question", "answer", "revise",
-        ],
-    )
-    s.add_argument("mission_id", nargs="?", type=_id_arg, help="list 以外都需要")
-    s.add_argument("--project", help="list：專案 id")
-    s.add_argument("--status", choices=["all", "open", "done", "cancelled"], help="list：篩選（已完成任務＝done）")
-    s.add_argument("--limit", type=_limit_arg, help="list：筆數上限")
-    s.add_argument("--kind", choices=["report", "note", "verified"], help="event：事件種類（verified＝驗證通過，交付前必須有）")
-    s.add_argument("--text", help="event：內容／complete：結果摘要")
-    s.add_argument("--text-file", dest="text_file", help="從檔案讀 --text")
-    s.add_argument("--reason", help="pause：暫停原因（機器碼，例如 waiting_user）")
-    s.add_argument("--detail", help="pause：補充說明")
-    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身份")
-    s.add_argument("--exclude", help="pick：排除的身份（reviewer 排除執行者的身份）")
-    s.add_argument("--worktree", help="deliver：要交付的 worktree；event --kind verified：驗過的 worktree（daemon 記下它的 HEAD）；complete --no-delivery no_changes：執行者的 worktree（daemon 查它沒有改動）")
-    s.add_argument(
-        "--no-delivery",
-        dest="no_delivery",
-        choices=["no_changes", "user_declined"],
-        help="complete：沒交付就結案的理由（no_changes＝沒有改東西；user_declined＝使用者回答過不要交付）",
-    )
-    s.add_argument("--sha", help="event --kind verified：驗過的 commit（沒有 --worktree 時必給）")
-    s.add_argument("--request-id", dest="request_id", help="question/answer/revise：穩定的冪等鍵，重送沿用同一個")
-    s.add_argument("--reply-to", dest="reply_to", help="answer：回的是哪一則 question 的事件 id")
-    s.add_argument("--as-user", action="store_true", help="answer：依使用者明確指示代送暫停回答（不帶 relay_from）")
-    s.add_argument("--title", help="deliver（pr）：PR 標題")
-    s.add_argument("--body", help="deliver（pr）：PR 內文")
-    s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
-    s.set_defaults(func=cmd_mission)
-
-    s = sub.add_parser(
         "issue",
         help="issue 認領：claim / touch / release（#425、#1980；只用 gh，不連 daemon）",
         description=(
@@ -3023,7 +2849,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _is_slow_command(args) -> bool:
     op = getattr(args, "op", None)
-    return (args.cmd == "mission" and op == "deliver") or (args.cmd == "release-triage" and op in ("publish", "auto"))
+    return args.cmd == "release-triage" and op in ("publish", "auto")
 
 
 def main(argv: list[str] | None = None) -> int:

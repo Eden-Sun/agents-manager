@@ -186,7 +186,7 @@ class CliCase(unittest.TestCase):
             self.addCleanup(lambda v=var: os.environ.pop(v, None))
         # 在 bot 的 pane 裡跑測試時這些都有值：agm 一看到 AM_BOT_ID 就改用 Bot 身份（#556），
         # 期望「一般 shell＝User token」的測試會紅。每個測試從乾淨的身份環境開始，要的自己設。
-        for var in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
+        for var in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_CHILD_SPAWN_ID", "AM_CHILD_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
             old = os.environ.pop(var, None)
             if old is not None:
                 self.addCleanup(lambda v=var, o=old: os.environ.__setitem__(v, o))
@@ -1847,199 +1847,11 @@ class DualRoleTest(CliCase):
         self.assertEqual(body["inbox_event_id"], "e1")
         self.assertNotIn("error", body)
 
-    def test_reports_are_attributed_to_this_role_not_the_patrol(self):
-        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
-        self.ok("mission", "event", "m1", "--kind", "note", "--text", "已核准")
-        self.assertEqual(self.last("POST", "/api/missions/m1/events")["body"]["relay_from"], "bot-resp")
-
     def test_responder_persona_goes_to_its_own_endpoint(self):
         FakeDaemon.routes["PUT /api/supervisor/responder/persona"] = (200, {"role": "responder"})
         self.ok("persona", "set", "--role", "responder", "--text", "你是 AGM 的協調者")
         self.assertEqual(self.last("PUT", "/api/supervisor/responder/persona")["body"], {"text": "你是 AGM 的協調者"})
         self.assertEqual(self.bad("persona", "adopt-embedded", "--role", "responder")["error"], "bad_args")
-
-
-class MissionCommandTest(CliCase):
-    """群組任務：每個 op 打對一個端點，回報預設標成總管說的。"""
-
-    def posts(self, path: str) -> list:
-        return [r for r in FakeDaemon.seen if r["method"] == "POST" and r["path"] == path]
-
-    def test_list_needs_project_and_passes_status(self):
-        self.assertEqual(self.bad("mission", "list")["error"], "bad_args")
-        FakeDaemon.routes["GET /api/projects/p1/missions"] = (200, {"missions": [{"id": "m1"}]})
-        out = self.ok("mission", "list", "--project", "p1", "--status", "done", "--limit", "5")
-        self.assertEqual(out["missions"][0]["id"], "m1")
-        gets = [r["path"] for r in FakeDaemon.seen if r["method"] == "GET" and r["path"].startswith("/api/projects/")]
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(gets[0]).query)
-        self.assertEqual(q, {"status": ["done"], "limit": ["5"]})
-
-    def test_get_and_events(self):
-        FakeDaemon.routes["GET /api/missions/m1"] = (200, {"id": "m1", "phase": "executing", "events": [{"kind": "instruction"}]})
-        self.assertEqual(self.ok("mission", "get", "m1")["phase"], "executing")
-        self.assertEqual(self.ok("mission", "events", "m1"), {"mission_id": "m1", "events": [{"kind": "instruction"}]})
-        self.assertEqual(self.bad("mission", "get")["error"], "bad_args", "沒給 mission id 要先擋")
-
-    def test_event_is_attributed_to_the_manager_by_default(self):
-        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
-        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "cargo test 644 passed", "--sha", "abc1234")
-        body = self.posts("/api/missions/m1/events")[0]["body"]
-        self.assertEqual(body, {"kind": "verified", "text": "cargo test 644 passed", "sha": "abc1234", "relay_from": "bot-agm"})
-        self.ok("mission", "event", "m1", "--kind", "note", "--text", "排程", "--as-daemon")
-        self.assertEqual(self.posts("/api/missions/m1/events")[1]["body"]["relay_from"], "daemon")
-
-    def test_verified_names_the_commit_it_verified(self):
-        """交付只放行驗過的那個 commit：verified 沒帶 --worktree／--sha 就不送（review3 c1 M9）。"""
-        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
-        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "verified", "--text", "全過")["error"], "bad_args")
-        self.assertEqual(self.posts("/api/missions/m1/events"), [], "缺 commit 時什麼都不送")
-        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "全過", "--worktree", "/tmp/wt-exec")
-        self.assertEqual(self.posts("/api/missions/m1/events")[0]["body"]["worktree"], "/tmp/wt-exec")
-
-    def test_question_answer_revise_need_an_idempotency_key(self):
-        """三支都會改變狀態，沒有穩定的 request id 就不要送——重送會變成第二個問題／第二輪續作。"""
-        for op in ("question", "answer", "revise"):
-            self.assertEqual(self.bad("mission", op, "m1", "--text", "x")["error"], "bad_args")
-            self.assertEqual(self.bad("mission", op, "m1", "--request-id", "r1")["error"], "bad_args")
-        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺欄位時什麼都不送")
-
-    def test_question_and_revise_keep_the_manager_as_the_source(self):
-        """總管代問／代開續作時要留下來源，不然時間軸上會長得像使用者自己說的。"""
-        FakeDaemon.routes["POST /api/missions/m1/question"] = (200, {"event": {"id": "e1"}})
-        FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2"})
-        self.ok("mission", "question", "m1", "--text", "這會影響登入嗎", "--request-id", "q1")
-        self.assertEqual(self.posts("/api/missions/m1/question")[0]["body"]["relay_from"], "bot-agm")
-        self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
-        self.assertEqual(self.posts("/api/missions/m1/revise")[0]["body"]["relay_from"], "bot-agm")
-
-    def test_answering_for_the_user_does_not_wear_the_manager_identity(self):
-        """明確 --as-user 才代表依使用者指示回答暫停任務。"""
-        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
-        self.ok("mission", "answer", "m1", "--text", "照你說的做", "--request-id", "a1", "--as-user")
-        self.assertNotIn("relay_from", self.posts("/api/missions/m1/answer")[0]["body"])
-
-    def test_answer_without_reply_to_does_not_silently_claim_to_be_the_user(self):
-        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {})
-        self.ok("mission", "answer", "m1", "--text", "hello", "--request-id", "a1")
-        self.assertEqual(self.posts("/api/missions/m1/answer")[0]["body"]["relay_from"], "bot-agm")
-
-    def test_answer_carries_the_manager_identity_when_replying(self):
-        """AGM 回覆追問要指回那一則，並用自己的身份；不帶 --reply-to 就是使用者回答暫停那條路。"""
-        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
-        self.ok("mission", "answer", "m1", "--text", "不會", "--request-id", "a1", "--reply-to", "e9")
-        body = self.posts("/api/missions/m1/answer")[0]["body"]
-        self.assertEqual(body["reply_to"], "e9")
-        self.assertEqual(body["relay_from"], "bot-agm")
-
-
-    def test_revise_posts_to_its_own_endpoint(self):
-        FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2", "parent_mission_id": "m1"})
-        out = self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
-        self.assertEqual(out["parent_mission_id"], "m1", "續作是新的一筆，指回原成果")
-        body = self.posts("/api/missions/m1/revise")[0]["body"]
-        self.assertEqual((body["text"], body["client_request_id"]), ("順便改標題", "rev1"))
-
-    def test_event_without_kind_or_text_sends_nothing(self):
-        self.assertEqual(self.bad("mission", "event", "m1", "--text", "x")["error"], "bad_args")
-        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "report", "--text", "  ")["error"], "bad_args")
-        self.assertEqual(self.posts("/api/missions/m1/events"), [])
-
-    def test_event_refuses_to_speak_without_a_manager_id(self):
-        """沒有 bot id 就不帶來源，daemon 會把它當成使用者本人說的——寧可報錯。"""
-        self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}"})
-        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "report", "--text", "x")["error"], "bad_args")
-        self.assertEqual(self.posts("/api/missions/m1/events"), [])
-
-    def test_pause_resume_cancel_round(self):
-        for op in ("pause", "resume", "cancel", "round"):
-            FakeDaemon.routes[f"POST /api/missions/m1/{op}"] = (200, {"status": op})
-        self.assertEqual(self.bad("mission", "pause", "m1")["error"], "bad_args")
-        self.ok("mission", "pause", "m1", "--reason", "waiting_user", "--detail", "等使用者選交付方式")
-        self.assertEqual(self.posts("/api/missions/m1/pause")[0]["body"], {"reason": "waiting_user", "detail": "等使用者選交付方式"})
-        for op in ("resume", "cancel"):
-            self.assertEqual(self.ok("mission", op, "m1")["status"], op)
-        self.assertEqual(self.bad("mission", "round", "m1")["error"], "bad_args")
-        self.assertEqual(self.ok("mission", "round", "m1", "--request-id", "rnd-1")["status"], "round")
-        self.assertEqual(self.posts("/api/missions/m1/round")[0]["body"], {"client_request_id": "rnd-1"})
-
-    def test_a_timed_out_round_is_delivery_unknown_with_its_request_id(self):
-        FakeDaemon.routes["POST /api/missions/m1/round"] = (200, {"round": 2})
-        FakeDaemon.slow = {"/api/missions/m1/round"}
-        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-7")
-        body = json.loads(err)
-        self.assertEqual((code, body["error"], body["client_request_id"], body["mission_id"]), (7, "delivery_unknown", "r-7", "m1"))
-        self.assertEqual(len(self.posts("/api/missions/m1/round")), 1, "逾時不能自己重送")
-
-    def test_question_answer_revise_timeouts_are_delivery_unknown_too(self):
-        for op in ("question", "answer", "revise"):
-            path = f"/api/missions/m1/{op}"
-            FakeDaemon.slow = {path}
-            code, _out, err = self.run_cli("--timeout", "0.3", "mission", op, "m1", "--text", "x", "--request-id", "q-1")
-            body = json.loads(err)
-            self.assertEqual((code, body["error"], body["client_request_id"]), (7, "delivery_unknown", "q-1"), op)
-
-    def test_a_dropped_connection_after_send_is_delivery_unknown(self):
-        FakeDaemon.drop = {"/api/missions/m1/round"}
-        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-drop")
-        self.assertEqual((code, json.loads(err)["error"]), (7, "delivery_unknown"))
-
-    def test_a_token_fetch_timeout_before_a_round_is_not_delivery_unknown(self):
-        FakeDaemon.slow = {"/api/session"}
-        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "round", "m1", "--request-id", "r-token")
-        self.assertNotEqual(json.loads(err)["error"], "delivery_unknown")
-        self.assertEqual(self.posts("/api/missions/m1/round"), [])
-
-    def test_ops_without_a_request_id_keep_the_plain_timeout(self):
-        FakeDaemon.slow = {"/api/missions/m1/pause"}
-        code, _out, err = self.run_cli("--timeout", "0.3", "mission", "pause", "m1", "--reason", "waiting_user")
-        self.assertEqual((code, json.loads(err)["error"]), (5, "timeout"))
-
-    def test_round_over_the_cap_surfaces_the_conflict(self):
-        FakeDaemon.routes["POST /api/missions/m1/round"] = (409, {"error": "conflict", "reason": "max_rounds", "rounds_used": 2})
-        err = self.bad("mission", "round", "m1", "--request-id", "rnd-cap")
-        self.assertEqual(err["status"], 409)
-        self.assertEqual(err["detail"]["reason"], "max_rounds")
-
-    def test_complete_sends_the_summary_as_the_manager(self):
-        FakeDaemon.routes["POST /api/missions/m1/complete"] = (200, {"status": "done"})
-        f = Path(self.dir.name) / "summary.md"
-        f.write_text("修好了，commit abc123", encoding="utf-8")
-        self.ok("mission", "complete", "m1", "--text-file", str(f))
-        body = self.posts("/api/missions/m1/complete")[0]["body"]
-        self.assertEqual(body, {"result_summary": "修好了，commit abc123", "relay_from": "bot-agm"})
-
-    def test_complete_without_delivery_states_the_reason(self):
-        FakeDaemon.routes["POST /api/missions/m1/complete"] = (200, {"status": "done"})
-        self.ok("mission", "complete", "m1", "--text", "只查了原因", "--no-delivery", "no_changes", "--worktree", "/tmp/wt")
-        body = self.posts("/api/missions/m1/complete")[0]["body"]
-        self.assertEqual(
-            body,
-            {"result_summary": "只查了原因", "no_delivery": "no_changes", "worktree": "/tmp/wt", "relay_from": "bot-agm"},
-        )
-        # 理由只收兩種，打錯字在 CLI 就擋下來，不送出一個 daemon 看不懂的值。
-        code, _, _ = self.run_cli("mission", "complete", "m1", "--text", "x", "--no-delivery", "later")
-        self.assertEqual(code, 2)
-        self.assertEqual(len(self.posts("/api/missions/m1/complete")), 1, "打錯的那次沒有送出")
-
-    def test_pick_passes_role_and_exclude(self):
-        self.assertEqual(self.bad("mission", "pick", "m1")["error"], "bad_args")
-        FakeDaemon.routes["GET /api/missions/m1/pick"] = (200, {"pick": {"decision": "use", "identity": "cc1"}})
-        out = self.ok("mission", "pick", "m1", "--role", "reviewer", "--exclude", "cc2")
-        self.assertEqual(out["pick"]["identity"], "cc1")
-        path = [r["path"] for r in FakeDaemon.seen if r["path"].startswith("/api/missions/m1/pick")][0]
-        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(path).query), {"role": ["reviewer"], "exclude": ["cc2"]})
-
-    def test_deliver_needs_a_worktree(self):
-        self.assertEqual(self.bad("mission", "deliver", "m1")["error"], "bad_args")
-        FakeDaemon.routes["POST /api/missions/m1/deliver"] = (200, {"mode": "push_main", "sha": "abc"})
-        self.ok("mission", "deliver", "m1", "--worktree", "/tmp/wt", "--title", "修錯字")
-        body = self.posts("/api/missions/m1/deliver")[0]["body"]
-        self.assertEqual(body, {"worktree": "/tmp/wt", "title": "修錯字", "relay_from": "bot-agm"})
-
-    def test_deliver_failure_is_a_non_zero_structured_error(self):
-        FakeDaemon.routes["POST /api/missions/m1/deliver"] = (409, {"error": "conflict", "reason": "not_fast_forward"})
-        err = self.bad("mission", "deliver", "m1", "--worktree", "/tmp/wt")
-        self.assertEqual(err["detail"]["reason"], "not_fast_forward")
 
 
 class ServicePrincipalClientTest(CliCase):
@@ -2080,25 +1892,13 @@ class ServicePrincipalClientTest(CliCase):
         self.assertEqual(FakeDaemon.seen, [], "an exposed service-token directory must fail before sending any request")
 
 
-class AssignMissionFlagsTest(CliCase):
-    def test_mission_and_role_go_into_the_body(self):
-        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1", "mission_id": "m1", "role": "executor"})
-        self.ok("assign", "--bot", "b1", "--text", "做 X", "--request-id", "r1", "--mission", "m1", "--role", "executor")
-        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
-        self.assertEqual(body["mission_id"], "m1")
-        self.assertEqual(body["role"], "executor")
-
-    def test_one_without_the_other_is_refused_before_sending(self):
-        self.assertEqual(self.bad("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--mission", "m1")["error"], "bad_args")
-        self.assertEqual(self.bad("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--role", "verifier")["error"], "bad_args")
-        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
-
-    def test_plain_assign_stays_unchanged(self):
-        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a2"})
-        self.ok("assign", "--bot", "b1", "--text", "做這個", "--request-id", "t-1")
-        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
-        self.assertNotIn("mission_id", body)
-        self.assertNotIn("role", body)
+class RemovedMissionCommandTest(CliCase):
+    def test_removed_command_and_assign_flags_are_rejected(self):
+        for argv in (("mission", "list"),
+                     ("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--mission", "m1"),
+                     ("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--role", "executor")):
+            self.assertEqual(self.bad(*argv)["error"], "bad_args")
+        self.assertEqual(FakeDaemon.seen, [])
 
 
 class HelpTest(unittest.TestCase):
@@ -3910,12 +3710,11 @@ class CliHardeningTest(CliCase):
             return {}
 
         with mock.patch.object(agm.Client, "_raw", fake_raw):
-            self.ok("mission", "deliver", "m1", "--worktree", "/tmp/w")
             self.ok("release-triage", "publish")
             self.ok("--timeout", "7", "release-triage", "publish")
             self.ok("--timeout", "30", "release-triage", "publish")
             self.ok("health")
-        self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, agm.SLOW_TIMEOUT, 7.0, 30.0, agm.DEFAULT_TIMEOUT], seen)
+        self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, 7.0, 30.0, agm.DEFAULT_TIMEOUT], seen)
 
 
 class PythonThreeNineTest(unittest.TestCase):
