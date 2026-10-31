@@ -56,22 +56,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             }
         }
     }
-    // 專案群組的已讀標記（#756）：同樣第一次建表才把既有專案設成「現在」，同一個交易。
-    let group_existed: Option<String> =
-        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='project_group_reads'").fetch_optional(&mut *tx).await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS project_group_reads (
-           project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT ''
-         )",
-    )
-    .execute(&mut *tx)
-    .await?;
-    if group_existed.is_none() {
-        sqlx::query("INSERT OR IGNORE INTO project_group_reads (project_id, read_at, message_id) SELECT id, ?, '' FROM projects")
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query("DROP TABLE IF EXISTS project_group_reads").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -196,91 +181,6 @@ pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -
     Ok((ReadMark { at, message_id, seq }, advanced))
 }
 
-pub async fn group_marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
-    let rows: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT r.project_id, r.read_at, r.message_id, m.rowid
-           FROM project_group_reads r
-           LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
-            AND EXISTS (SELECT 1 FROM conversations c JOIN bots b ON b.id = c.bot_id
-                         WHERE c.id = m.conversation_id AND b.project_id = r.project_id)",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(|(p, at, message_id, seq)| (p, ReadMark { at, message_id, seq })).collect())
-}
-
-/// 群組未讀回合數（專案標題的藍色數字）：只算還活著的 bot（跟 `group::messages` 的時間軸同一個範圍，不然已刪 bot 比最後一則可見訊息新的回覆會永遠清不掉）；群組回覆＝同一個回合的 user 訊息帶 `group_id`（API.md §11.1，直接 prompt
-/// API 設不了 `group_id`）的 assistant 回合；標記之後、依 `turn_id` 去重。沒有標記＝全部未讀，同 bot。
-pub async fn group_unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(GROUP_UNREAD_SQL).fetch_all(pool).await?;
-    Ok(rows.into_iter().collect())
-}
-
-/// 同 [`UNREAD_SQL`]：從 bot 出發、只讀專案標記之後的訊息。
-const GROUP_UNREAD_SQL: &str = "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
-           FROM bots b
-           CROSS JOIN conversations c ON c.bot_id = b.id
-           LEFT JOIN project_group_reads r ON r.project_id = b.project_id
-           CROSS JOIN messages m INDEXED BY messages_conv_time
-           LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
-            AND EXISTS (SELECT 1 FROM conversations rc JOIN bots rb ON rb.id = rc.bot_id
-                         WHERE rc.id = read_m.conversation_id AND rb.project_id = b.project_id)
-          WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '')
-            AND b.deleted_at IS NULL AND m.role = 'assistant' AND m.turn_id IS NOT NULL
-            AND EXISTS (SELECT 1 FROM messages u
-                         WHERE u.conversation_id = m.conversation_id AND u.turn_id = m.turn_id
-                           AND u.role = 'user' AND u.group_id IS NOT NULL)
-            AND (r.project_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
-                 CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
-          GROUP BY b.project_id";
-
-/// 同 [`mark`]：只往前推；第二個值是這次有沒有真的改到。專案不存在（或已軟刪）回 `None`。
-pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<Option<(ReadMark, bool)>> {
-    let at = normalize_at(at, &crate::db::now()).ok_or_else(|| anyhow::anyhow!("at must be an RFC 3339 timestamp"))?;
-    let advanced = sqlx::query(
-        "INSERT INTO project_group_reads (project_id, read_at, message_id)
-         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)
-         ON CONFLICT(project_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
-          WHERE excluded.read_at > project_group_reads.read_at
-             OR (excluded.read_at = project_group_reads.read_at AND CASE
-                  WHEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
-                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND b.project_id = excluded.project_id) IS NOT NULL
-                   AND (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
-                         WHERE m.id = project_group_reads.message_id AND m.created_at = project_group_reads.read_at AND b.project_id = project_group_reads.project_id) IS NOT NULL
-                  THEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
-                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND b.project_id = excluded.project_id)
-                     > (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
-                         WHERE m.id = project_group_reads.message_id AND m.created_at = project_group_reads.read_at AND b.project_id = project_group_reads.project_id)
-                  ELSE excluded.message_id > project_group_reads.message_id END)",
-    )
-    .bind(project_id)
-    .bind(&at)
-    .bind(message_id)
-    .bind(project_id)
-    .execute(pool)
-    .await?
-    .rows_affected()
-        > 0;
-    let live: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)")
-        .bind(project_id)
-        .fetch_one(pool)
-        .await?;
-    if !live {
-        return Ok(None);
-    }
-    let (at, message_id, seq): (String, String, Option<i64>) = sqlx::query_as(
-        "SELECT r.read_at, r.message_id, m.rowid FROM project_group_reads r
-          LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
-           AND EXISTS (SELECT 1 FROM conversations c JOIN bots b ON b.id = c.bot_id
-                        WHERE c.id = m.conversation_id AND b.project_id = r.project_id)
-         WHERE r.project_id = ?",
-    )
-        .bind(project_id)
-        .fetch_one(pool)
-        .await?;
-    Ok(Some((ReadMark { at, message_id, seq }, advanced)))
-}
-
 /// 讀到的訊息 id：真的 id 是 26 字元的 ULID。這個字串整個存進 DB、又隨 `GET /api/state` 與 WS 廣播給每個分頁，
 /// 所以長度要有上限、字元要乾淨（空字串＝只推時間）。
 fn valid_message_id(id: &str) -> bool {
@@ -354,46 +254,6 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
     Ok(Json(out))
 }
 
-/// `POST /api/projects/{id}/group/read`
-pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, body: Option<Json<MarkIn>>) -> Result<Json<Value>, LcError> {
-    let b = body.map(|Json(b)| b).unwrap_or_default();
-    // 已軟刪的專案跟 `/chat`、`/messages` 一樣當它不存在：不替一個看不到的專案存標記、再廣播出去。
-    if crate::db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none_or(|p| p.deleted_at.is_some()) {
-        return Err(LcError::NotFound("project".into()));
-    }
-    #[cfg(test)]
-    crate::lifecycle::race_point::hit("group_read_after_liveness_check", &id).await;
-    let message_id = b.message_id.as_deref().unwrap_or("");
-    if !valid_message_id(message_id) {
-        return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
-    }
-    let message_at = if message_id.is_empty() {
-        None
-    } else {
-        sqlx::query_scalar::<_, String>(
-            "SELECT m.created_at FROM messages m JOIN conversations c ON c.id = m.conversation_id
-              JOIN bots b ON b.id = c.bot_id WHERE b.project_id = ? AND m.id = ?",
-        )
-        .bind(&id)
-        .bind(message_id)
-        .fetch_optional(&app.db)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?
-    };
-    if !message_id.is_empty() && message_at.is_none() {
-        return Err(LcError::Bad("message_id must identify a message in this project's conversations".into()));
-    }
-    let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
-    let m = mark_group(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let Some((m, advanced)) = m else { return Err(LcError::NotFound("project".into())) };
-    let unread = group_unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
-    let out = json!({"project_id": id, "read_mark": json_value(&m), "unread": unread});
-    if advanced {
-        app.emit("group_read", out.clone()).await;
-    }
-    Ok(Json(out))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +262,20 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-read-marks-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         (crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap(), dir)
+    }
+
+    #[tokio::test]
+    async fn migration_drops_legacy_group_reads_and_preserves_bot_reads() {
+        let (pool, _dir) = pool().await;
+        sqlx::query("CREATE TABLE project_group_reads (project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO project_group_reads VALUES ('p', '2026-01-01', '')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bot_reads VALUES ('b', '2026-01-01T00:00:00.000Z', '')").execute(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='project_group_reads'").fetch_one(&pool).await.unwrap();
+        assert_eq!(exists, 0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_reads WHERE bot_id='b'").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
     }
 
     /// #831：migrate 看完 `bot_reads` 在不在、還沒建的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 CREATE 直接
@@ -447,7 +321,6 @@ mod tests {
         for (name, sql, index) in [
             ("unread", UNREAD_SQL, "COVERING INDEX messages_assistant_unread"),
             ("unread_one", UNREAD_ONE_SQL, "COVERING INDEX messages_assistant_unread"),
-            ("group_unread", GROUP_UNREAD_SQL, "INDEX messages_conv_time"),
         ] {
             let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&pool).await.unwrap();
             let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
@@ -548,132 +421,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// 群組未讀（#756）：只算「同回合的 user 訊息帶 group_id」的 assistant 回合，依回合去重，標記之後才算；
-    /// 標記只往前推、跟 bot 的已讀互不相干；沒有標記＝全部未讀。
-    #[tokio::test]
-    async fn group_unread_counts_only_group_turns_after_the_projects_shared_mark() {
-        let (pool, dir) = pool().await;
-        seed(&pool).await;
-        // seed 的三回合 user 訊息都沒有 group_id：不是群組回合。
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None, "直接對話不算群組未讀");
-        for tid in ["t1", "t3"] {
-            sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user' AND turn_id = ?").bind(tid).execute(&pool).await.unwrap();
-        }
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "t1、t3 是群組回合；同回合兩則 assistant 算一個");
-        let m = mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a0-t1").await.unwrap().unwrap().0;
-        assert_eq!(m.at, "2026-09-15T01:00:00.000Z");
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "a1-t1 的 id 較大仍未讀，t3 也是");
-        mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&1));
-        let m = mark_group(&pool, "p", "2026-09-15T00:30:00.000Z", "").await.unwrap().unwrap().0;
-        assert_eq!(m.at, "2026-09-15T01:00:00.000Z", "較舊的標記不倒退");
-        assert_eq!(group_marks(&pool).await.unwrap().get("p").map(|m| m.message_id.as_str()), Some("a1-t1"));
-        mark_group(&pool, "p", "2026-09-15T03:00:00.000Z", "a1-t3").await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None);
-        assert_eq!(unread(&pool).await, Some(3), "bot 的已讀不受群組標記影響");
-        assert!(mark_group(&pool, "p", "yesterday", "").await.is_err());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// 群組時間軸（`group::messages`）不含已軟刪的 bot，已讀標記是前端從「看得到的最後一則」算的：已刪 bot 比那則更新的
-    /// 群組回覆若還算在未讀裡，這個專案的藍色數字就永遠清不掉（沒有任何可見訊息能把標記推過它）。
-    #[tokio::test]
-    async fn a_deleted_bots_group_reply_is_not_unread() {
-        let (pool, dir) = pool().await;
-        seed(&pool).await;
-        sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user'").execute(&pool).await.unwrap();
-        // 另一顆 bot 的群組回覆最新（04:00），之後那顆 bot 被刪。
-        let now = "2026-09-15T00:00:00.000Z";
-        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t',?)").bind(now).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2',?)").bind(now).execute(&pool).await.unwrap();
-        let at = "2026-09-15T04:00:00.000Z";
-        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES ('t4','c2','web','completed',?,?)").bind(at).bind(at).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,group_id,created_at) VALUES ('u-t4','c2','t4','user','q','web','g-1',?)").bind(at).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-t4','c2','t4','assistant','a','hook',?)").bind(at).execute(&pool).await.unwrap();
-        // 使用者在群組讀到可見的最後一則（b 的 t3，03:00）。
-        mark_group(&pool, "p", "2026-09-15T03:00:00.000Z", "a1-t3").await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&1), "前提：b2 還在時，04:00 的回覆未讀");
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b2'").bind(at).execute(&pool).await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None, "bot 刪了，它的回覆不在時間軸上，也不算未讀");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// 多裝置同時標讀（#756 審查）：同一個專案的標記以任何順序、同時到達，最後都停在 `(at, id)` 最大的那個，
-    /// 沒有哪一次較舊的寫入把它倒退回去（upsert 的條件在同一個 SQL 裡，不是先讀再寫）。
-    #[tokio::test]
-    async fn concurrent_group_marks_settle_on_the_largest_whatever_the_arrival_order() {
-        let (pool, dir) = pool().await;
-        seed(&pool).await;
-        let marks = [
-            ("2026-09-15T01:00:00.000Z", "a0-t1"),
-            ("2026-09-15T02:00:00.000Z", "a0-t2"),
-            ("2026-09-15T02:00:00.000Z", "a1-t2"),
-            ("2026-09-15T02:00:00.000Z", ""),
-            ("2026-09-15T00:30:00.000Z", "zzz"),
-        ];
-        for round in 0..20 {
-            sqlx::query("UPDATE project_group_reads SET read_at='2026-09-15T00:00:00.000Z', message_id=''").execute(&pool).await.unwrap();
-            let mut order: Vec<usize> = (0..marks.len()).collect();
-            order.rotate_left(round % marks.len());
-            if round % 2 == 1 {
-                order.reverse();
-            }
-            let mut tasks = Vec::new();
-            for i in order {
-                let pool = pool.clone();
-                let (at, id) = marks[i];
-                tasks.push(tokio::spawn(async move { mark_group(&pool, "p", at, id).await.unwrap() }));
-            }
-            for t in tasks {
-                t.await.unwrap();
-            }
-            let m = group_marks(&pool).await.unwrap().remove("p").unwrap();
-            assert_eq!((m.at.as_str(), m.message_id.as_str()), ("2026-09-15T02:00:00.000Z", "a1-t2"), "round {round}");
-        }
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// 群組成員增減（#756 審查）：新加入的 bot 在標記之後的群組回覆算未讀、標記之前的不算；軟刪不算（35d926d6）、
-    /// 還原回來又算——數字永遠等於「現在還在的成員」在標記之後的群組回合。
-    #[tokio::test]
-    async fn group_unread_follows_the_members_that_are_there_now() {
-        let (pool, dir) = pool().await;
-        seed(&pool).await;
-        sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user'").execute(&pool).await.unwrap();
-        mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap();
-        let unread_p = |pool: SqlitePool| async move { group_unread_counts(&pool).await.unwrap().get("p").copied() };
-        assert_eq!(unread_p(pool.clone()).await, Some(1), "只有 t3");
-        // 新成員 b2：一則標記前的舊回覆（不算）、一則標記後的（算）。
-        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t','2026-09-15T01:30:00.000Z')").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2','2026-09-15T01:30:00.000Z')").execute(&pool).await.unwrap();
-        for (tid, at) in [("x1", "2026-09-15T01:45:00.000Z"), ("x2", "2026-09-15T02:30:00.000Z")] {
-            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES (?,'c2','web','completed',?,?)").bind(tid).bind(at).bind(at).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,group_id,created_at) VALUES (?,'c2',?,'user','q','web','g-1',?)").bind(format!("u-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c2',?,'assistant','a','hook',?)").bind(format!("a-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
-        }
-        assert_eq!(unread_p(pool.clone()).await, Some(2), "t3 + x2；x1 在標記之前");
-        sqlx::query("UPDATE bots SET deleted_at='2026-09-15T04:00:00.000Z' WHERE id='b2'").execute(&pool).await.unwrap();
-        assert_eq!(unread_p(pool.clone()).await, Some(1), "b2 軟刪：它的回覆不算");
-        sqlx::query("UPDATE bots SET deleted_at=NULL WHERE id='b2'").execute(&pool).await.unwrap();
-        assert_eq!(unread_p(pool.clone()).await, Some(2), "還原回來又算");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// 升級時（表第一次建起來）既有專案的群組舊訊息都算已讀；再跑一次 migrate 不重設。
-    #[tokio::test]
-    async fn creating_the_group_table_marks_existing_projects_read() {
-        let (pool, dir) = pool().await;
-        seed(&pool).await;
-        sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user'").execute(&pool).await.unwrap();
-        sqlx::query("DROP TABLE project_group_reads").execute(&pool).await.unwrap();
-        migrate(&pool).await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None, "升級時舊群組訊息都算已讀");
-        sqlx::query("UPDATE project_group_reads SET read_at='2026-09-15T00:30:00.000Z'").execute(&pool).await.unwrap();
-        migrate(&pool).await.unwrap();
-        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&3), "再跑一次 migrate 不重設標記");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
     /// 建表後 seed 失敗要整筆回滾：表不能留下來，否則下次啟動當作「已存在」永遠不補，升級前的訊息全變未讀。
     #[tokio::test]
     async fn a_failed_seed_rolls_back_the_table_so_the_next_start_seeds_again() {
@@ -694,46 +441,12 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // ───────── 群組／bot 已讀標記端點的審查（#756 之後） ─────────
+    // ───────── bot 已讀標記端點的審查（#756 之後） ─────────
 
     async fn app_with_bot() -> (crate::testing::Env, String) {
         let e = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&e.app, &e.project_id, "rm-bot").await;
         (e, bot.id)
-    }
-
-    /// 已軟刪的專案：`/chat`、`/messages` 都當它不存在（404），已讀標記也要一致，不能替一個看不到的專案存標記、再廣播出去。
-    #[tokio::test]
-    async fn a_soft_deleted_project_has_no_group_read_endpoint() {
-        let (e, _) = app_with_bot().await;
-        sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&e.project_id).execute(&e.app.db).await.unwrap();
-        let err = post_group(State(e.app.clone()), Path(e.project_id.clone()), None).await.unwrap_err();
-        assert!(matches!(err, LcError::NotFound(_)), "{err:?}");
-        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_group_reads WHERE project_id = ?").bind(&e.project_id).fetch_one(&e.app.db).await.unwrap();
-        assert_eq!(stored, 0);
-    }
-
-    #[tokio::test]
-    async fn a_project_deleted_after_group_read_validation_is_not_marked_or_broadcast() {
-        let (e, _) = app_with_bot().await;
-        let (app, project_id) = (e.app.clone(), e.project_id.clone());
-        let delete_project_id = project_id.clone();
-        crate::lifecycle::race_point::arm("group_read_after_liveness_check", &project_id, move || async move {
-            sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
-                .bind(crate::db::now())
-                .bind(delete_project_id)
-                .execute(&app.db)
-                .await
-                .unwrap();
-        });
-        let err = post_group(State(e.app.clone()), Path(e.project_id.clone()), None).await.unwrap_err();
-        assert!(matches!(err, LcError::NotFound(_)), "a deleted project must still be hidden: {err:?}");
-        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_group_reads WHERE project_id = ?")
-            .bind(&e.project_id)
-            .fetch_one(&e.app.db)
-            .await
-            .unwrap();
-        assert_eq!(stored, 0, "racing deletion must not leave a read mark");
     }
 
     /// `message_id` 是任意字串、整個存進 DB、又由 `GET /api/state` 與 WS 廣播給每個分頁：一個 1 MB 的 id 就把每次快照撐大。
@@ -745,11 +458,9 @@ mod tests {
         for id in &bad {
             let body = || Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
             let a = post(State(e.app.clone()), Path(bot.clone()), body()).await;
-            let b = post_group(State(e.app.clone()), Path(e.project_id.clone()), body()).await;
             assert!(matches!(a, Err(LcError::Bad(_))), "bot mark {id:?}: {a:?}");
-            assert!(matches!(b, Err(LcError::Bad(_))), "group mark {id:?}: {b:?}");
         }
-        let stored: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM bot_reads) + (SELECT COUNT(*) FROM project_group_reads)").fetch_one(&e.app.db).await.unwrap();
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_reads").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(stored, 0, "被拒的請求什麼都不存");
         // 真實訊息 id 與空字串（只推時間）照收。
         let conv = crate::db::conversation_id(&e.app.db, &bot).await.unwrap();
@@ -765,8 +476,6 @@ mod tests {
         for (id, mark_at) in [(valid_id, Some(at)), (String::new(), None)] {
             let body = Some(Json(MarkIn { at: mark_at.clone(), message_id: Some(id.clone()) }));
             assert!(post(State(e.app.clone()), Path(bot.clone()), body).await.is_ok(), "{id:?}");
-            let body = Some(Json(MarkIn { at: mark_at, message_id: Some(id.clone()) }));
-            assert!(post_group(State(e.app.clone()), Path(e.project_id.clone()), body).await.is_ok(), "{id:?}");
         }
     }
 
@@ -803,12 +512,8 @@ mod tests {
         let bot_mark = |message_id: &str| {
             Some(Json(MarkIn { at: Some(at.into()), message_id: Some(message_id.into()) }))
         };
-        let group_mark = |message_id: &str| {
-            Some(Json(MarkIn { at: Some(at.into()), message_id: Some(message_id.into()) }))
-        };
         assert!(matches!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("same-project-message")).await, Err(LcError::Bad(_))));
         assert!(matches!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("unknown-message")).await, Err(LcError::Bad(_))));
-        assert!(matches!(post_group(State(e.app.clone()), Path(e.project_id.clone()), group_mark("other-project-message")).await, Err(LcError::Bad(_))));
         assert!(matches!(
             post(
                 State(e.app.clone()),
@@ -818,13 +523,12 @@ mod tests {
             .await,
             Err(LcError::Bad(_))
         ), "a timestamp cannot move a message-bound mark past that message");
-        let rejected: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM bot_reads) + (SELECT COUNT(*) FROM project_group_reads)")
+        let rejected: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_reads")
             .fetch_one(&e.app.db)
             .await
             .unwrap();
         assert_eq!(rejected, 0, "foreign and mismatched marks do not write or broadcast a position");
         assert!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("own-message")).await.is_ok());
-        assert!(post_group(State(e.app.clone()), Path(e.project_id.clone()), group_mark("same-project-message")).await.is_ok());
     }
 
     #[tokio::test]
@@ -851,15 +555,6 @@ mod tests {
         assert_eq!(first["read_mark"]["id"], "z-earlier");
         assert_eq!(unread_counts(&e.app.db).await.unwrap().get(&bot), Some(&1));
 
-        let Json(first_group) = post_group(
-            State(e.app.clone()),
-            Path(e.project_id.clone()),
-            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("z-earlier".into()) })),
-        )
-        .await
-        .unwrap();
-        assert_eq!(first_group["read_mark"]["id"], "z-earlier");
-
         let Json(marked) = post(
             State(e.app.clone()),
             Path(bot.clone()),
@@ -870,15 +565,6 @@ mod tests {
         assert_eq!(marked["read_mark"]["id"], "a-later", "同時間戳標記依 insert seq 前進，即使 id 反向");
         let seq: i64 = sqlx::query_scalar("SELECT rowid FROM messages WHERE id='a-later'").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(marked["read_mark"]["seq"], seq, "API 回傳同時間戳比較所用的插入序");
-
-        let Json(group_marked) = post_group(
-            State(e.app.clone()),
-            Path(e.project_id.clone()),
-            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("a-later".into()) })),
-        )
-        .await
-        .unwrap();
-        assert_eq!(group_marked["read_mark"]["id"], "a-later", "群組標記也依 insert seq 前進");
 
         let unread = unread_counts(&e.app.db).await.unwrap().get(&bot).copied().unwrap_or(0);
         assert_eq!(unread, 0, "a later inserted message is a later read mark even when its id sorts first");
@@ -905,11 +591,6 @@ mod tests {
         post(State(app.clone()), Path(id.to_string()), Some(Json(body))).await.unwrap().0
     }
 
-    async fn post_group_at(app: &Arc<App>, id: &str, at: &str) -> Value {
-        let body = MarkIn { at: Some(at.to_string()), message_id: None };
-        post_group(State(app.clone()), Path(id.to_string()), Some(Json(body))).await.unwrap().0
-    }
-
     #[tokio::test]
     async fn a_bot_read_post_that_does_not_advance_the_mark_is_not_broadcast() {
         let env = crate::testing::env().await;
@@ -933,26 +614,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_group_read_post_that_does_not_advance_the_mark_is_not_broadcast() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        sqlx::query("DELETE FROM project_group_reads").execute(&app.db).await.unwrap();
-        let mut rx = app.subscribe();
-        let (older, newer, newest) = (rfc(120), rfc(60), rfc(30));
-
-        let out = post_group_at(&app, &env.project_id, &newer).await;
-        assert_eq!(out["read_mark"]["at"], newer.as_str());
-        assert_eq!(drain(&mut rx, "group_read"), 1);
-        post_group_at(&app, &env.project_id, &newer).await;
-        assert_eq!(drain(&mut rx, "group_read"), 0, "同一標記再送不廣播");
-        let out = post_group_at(&app, &env.project_id, &older).await;
-        assert_eq!(drain(&mut rx, "group_read"), 0, "較舊的標記不廣播");
-        assert_eq!(out["read_mark"]["at"], newer.as_str());
-        post_group_at(&app, &env.project_id, &newest).await;
-        assert_eq!(drain(&mut rx, "group_read"), 1);
-    }
-
-    #[tokio::test]
     async fn mark_reports_whether_it_advanced() {
         let (pool, dir) = pool().await;
         seed(&pool).await;
@@ -962,9 +623,6 @@ mod tests {
         assert!(!mark(&pool, "b", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap().1, "較舊");
         assert!(mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap().1, "同時間、較大的 id");
         assert!(!mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap().1, "同時間、較小的 id");
-        assert!(mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
-        assert!(!mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "").await.unwrap().unwrap().1);
-        assert!(mark_group(&pool, "no-such", "2026-09-15T02:00:00.000Z", "").await.unwrap().is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 

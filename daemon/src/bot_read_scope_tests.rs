@@ -77,7 +77,7 @@ fn assert_no_browser_state_events(events: &mut tokio::sync::broadcast::Receiver<
     loop {
         match events.try_recv() {
             Ok(event) => assert!(
-                !matches!(event.kind.as_str(), "draft_updated" | "bot_read" | "group_read"),
+                !matches!(event.kind.as_str(), "draft_updated" | "bot_read"),
                 "rejected Bot request emitted a browser-state event: {event:?}"
             ),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return,
@@ -339,7 +339,6 @@ async fn browser_drafts_and_shared_read_marks_are_user_only() {
         .await
         .unwrap();
     assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), Some(&2));
-    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), Some(&1));
     let mut events = e.app.subscribe();
     let bot_auth = bot_headers(&caller);
     let user_auth = format!("X-AM-Token: {}\r\n", e.app.ui_token);
@@ -368,15 +367,6 @@ async fn browser_drafts_and_shared_read_marks_are_user_only() {
         )
         .await;
         assert_user_only(&response, if is_agm { "POST /api/bots/{id}/read (AGM)" } else { "POST /api/bots/{id}/read" });
-        let response = send(
-            e.app.clone(),
-            "POST",
-            &format!("/api/projects/{}/group/read", e.project_id),
-            &bot_auth,
-            "{}",
-        )
-        .await;
-        assert_user_only(&response, if is_agm { "POST /api/projects/{id}/group/read (AGM)" } else { "POST /api/projects/{id}/group/read" });
         assert_no_browser_state_events(&mut events);
     }
     for (key, expected) in [(own_draft_key.as_str(), "unsent-private-draft"), (private_draft_key, "unsent-shell-command")] {
@@ -392,15 +382,8 @@ async fn browser_drafts_and_shared_read_marks_are_user_only() {
         .fetch_optional(&e.app.db)
         .await
         .unwrap();
-    let group_mark: Option<String> = sqlx::query_scalar("SELECT read_at FROM project_group_reads WHERE project_id=?")
-        .bind(&e.project_id)
-        .fetch_optional(&e.app.db)
-        .await
-        .unwrap();
     assert_eq!(bot_mark, None, "denied Bot request must not advance the bot read mark");
-    assert_eq!(group_mark, None, "denied Bot request must not advance the group read mark");
     assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), Some(&2), "denied Bot request leaves the bot's unread badge unchanged");
-    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), Some(&1), "denied Bot request leaves the project's group unread badge unchanged");
     assert_no_browser_state_events(&mut events);
 
     let user_list = get(e.app.clone(), "/api/drafts", &user_auth).await;
@@ -414,12 +397,11 @@ async fn browser_drafts_and_shared_read_marks_are_user_only() {
     )
     .await;
     assert!(user_write.starts_with("HTTP/1.1 200"), "User retains draft writes: {user_write}");
-    for path in [format!("/api/bots/{}/read", caller.id), format!("/api/projects/{}/group/read", e.project_id)] {
+    for path in [format!("/api/bots/{}/read", caller.id)] {
         let marked = send(e.app.clone(), "POST", &path, &user_auth, "{}").await;
         assert!(marked.starts_with("HTTP/1.1 200"), "User retains read-mark updates at {path}: {marked}");
     }
     assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), None, "User read marks clear the bot unread badge as before");
-    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), None, "User read marks clear the group unread badge as before");
 }
 
 #[tokio::test]
