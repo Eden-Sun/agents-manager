@@ -35,6 +35,30 @@
     }
 
     #[tokio::test]
+    async fn missing_agent_retirement_is_notified_once_across_restart() {
+        let f = fixture("hook", "failed").await;
+        make_parent_busy(&f, "parent-busy-gone").await;
+        sqlx::query("UPDATE bots SET deleted_at=?,cwd='/tmp/child-worktree' WHERE id=?").bind(db::now()).bind(&f.child_id).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited',agent_status='working' WHERE id=?").bind(&f.child_run).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO intents(id,kind,subject_id,payload_json,status,created_at,updated_at,expires_at) VALUES(?,'retire_child',?, ?,'done',?,?,?)")
+            .bind(db::ulid()).bind(&f.child_id).bind(r#"{"cause":"agent_missing"}"#).bind(db::now()).bind(db::now()).bind(db::now()).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        assert_eq!(all_child_notice_count(&f).await, 1);
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.queue_class='daemon' AND m.role='user'")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("child 意外結束（agent 不在）"));
+        assert!(content.contains("working") && content.contains(&f.child_turn) && content.contains("/tmp/child-worktree"));
+        let restarted = crate::testing::restart_app(&f.env).await;
+        sweep(&restarted).await;
+        assert_eq!(all_child_notice_count(&f).await, 1);
+        sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',delivery_verified=1,delivered_at=? WHERE conversation_id=? AND queue_class='daemon'")
+            .bind(db::now()).bind(&f.parent_conversation).execute(&f.env.app.db).await.unwrap();
+        sweep(&restarted).await;
+        sweep(&restarted).await;
+        assert_eq!(all_child_notice_count(&f).await, 1);
+    }
+
+    #[tokio::test]
     async fn result_notice_turn_does_not_echo_to_parent() {
         let f = fixture("hook", "completed").await;
         sqlx::query("UPDATE turns SET queue_class='daemon',client_request_id='relay-result:request:r0' WHERE id=?")
@@ -1084,6 +1108,6 @@
         sweep(&f.env.app).await;
         let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id=? AND m.role='user'")
             .bind(&f.parent_conversation).bind(format!("{}:r1",base_crid(&f))).fetch_one(&f.env.app.db).await.unwrap();
-        assert!(content.contains("來源回合已無法讀取"));
+        assert!(content.contains("來源回合紀錄已刪除"));
         assert!(content.contains("herdr agent read"));
     }
