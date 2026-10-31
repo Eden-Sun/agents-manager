@@ -1537,6 +1537,18 @@ class ExpertBotCommandsTest(CliCase):
         self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
         self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/bot-b/restart")
 
+    def test_hire_and_member_use_bot_proof(self):
+        FakeDaemon.routes["POST /api/projects/p1/members"] = (200, {"bot_id": "b-w1", "name": "w1", "role": "executor"})
+        FakeDaemon.routes["POST /api/bots/b1/member"] = (200, {"ok": True, "role": "advisor", "effort": "high", "native_session_id": "s1"})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("hire", "w1", "--kind", "codex")
+            self.ok("member", "b1", "--role", "advisor", "--effort", "high", "--session-id", "s1")
+        self.assertEqual([r["bot_id"] for r in FakeDaemon.seen], ["bot-a", "bot-a"])
+        self.assertEqual(FakeDaemon.seen[0]["path"], "/api/projects/p1/members")
+        self.assertEqual(FakeDaemon.seen[0]["body"], {"name": "w1", "kind": "codex"})
+        self.assertEqual(FakeDaemon.seen[1]["path"], "/api/bots/b1/member")
+        self.assertEqual(FakeDaemon.seen[1]["body"], {"role": "advisor", "effort": "high", "session_id": "s1"})
+
     def test_bot_remote_without_daemon_url_does_not_guess(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
             self.assertEqual(self.bad("peers")["error"], "no_daemon_url")

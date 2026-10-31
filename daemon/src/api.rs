@@ -276,6 +276,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/issues/{number}", get(get_issue))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot_http))
         .route("/bots/{id}/role", axum::routing::put(put_bot_role))
+        .route("/bots/{id}/member", post(crate::expert_member::adopt))
+        .route("/projects/{id}/members", post(hire_member))
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
@@ -1476,7 +1478,7 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
-                if method == "POST" && parts.len() == 4 && matches!(parts[3], "restart" | "start") && expert_manager_over(app, caller, &target_bot).await? {
+                if manager_lifecycle_op(method, &parts, &target_bot) && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
                 // 巡檢（patrol）可以重啟／啟動任何頂層 bot（使用者 2026-10-31）；child 與其他操作仍限自己的樹。
@@ -3079,11 +3081,61 @@ async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> 
 /// `POST /api/bots/{id}/start|restart` by an expert manager over that bot.
 async fn manager_may_start(app: &Arc<App>, caller: &str, method: &str, path: &str) -> bool {
     let Some(parts) = decoded_bot_path_segments(path) else { return false };
-    if method != "POST" || parts.len() != 4 || parts[0] != "api" || parts[1] != "bots" || !matches!(parts[3].as_str(), "start" | "restart") {
-        return false;
-    }
+    if parts.len() < 3 || parts[0] != "api" || parts[1] != "bots" { return false }
     let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
+    if !manager_lifecycle_op(method, &parts, &target) { return false }
     expert_manager_over(app, caller, &target).await.unwrap_or(false)
+}
+
+/// start／restart：manager 管的任何成員；stop 與刪除：只限執行者（顧問常駐，只有使用者收）。
+fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> bool {
+    let sub = parts.get(3).map(|p| p.as_ref());
+    match (method, parts.len(), sub) {
+        ("POST", 4, Some("start" | "restart")) => true,
+        ("POST", 4, Some("stop")) | ("DELETE", 3, None) => target.role.as_deref() == Some("executor"),
+        _ => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct HireMember {
+    name: String,
+    kind: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    identity: Option<String>,
+}
+
+/// 專家模式的 manager 增聘執行者（使用者 2026-10-31：專家模式沒有 child，manager 要人手就增聘成員）。
+/// 建好的是頂層成員、角色固定 executor；顧問只有使用者能建。不自動啟動，manager 用 `agm bot start` 啟動。
+async fn hire_member(
+    State(app): State<Arc<App>>,
+    Path(pid): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<HireMember>,
+) -> Result<Response, LcError> {
+    let project = db::project(&app.db, &pid).await.map_err(any_err)?.filter(|p| p.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("project".into()))?;
+    let allowed = match &principal {
+        RequestPrincipal::User => true,
+        RequestPrincipal::Bot(caller) => db::bot(&app.db, caller).await.map_err(any_err)?
+            .is_some_and(|m| m.deleted_at.is_none() && m.parent_bot_id.is_none() && m.role.as_deref() == Some("manager") && m.project_id == pid),
+        _ => false,
+    };
+    if !allowed || project.mode != "expert" {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "manager_role_scope"})));
+    }
+    let new: NewBot = serde_json::from_value(json!({"name": b.name, "kind": b.kind, "model": b.model, "effort": b.effort, "identity": b.identity})).map_err(|e| LcError::Bad(e.to_string()))?;
+    let res = create_bot(State(app.clone()), Path(pid), Json(new)).await?;
+    let (parts, body) = res.into_parts();
+    let bytes = axum::body::to_bytes(body, 1 << 20).await.map_err(any_err)?;
+    let created: Value = serde_json::from_slice(&bytes).map_err(any_err)?;
+    let Some(id) = created["bot_id"].as_str().map(str::to_string) else { return Ok(Response::from_parts(parts, axum::body::Body::from(bytes))) };
+    let patch: PatchBot = serde_json::from_value(json!({"role": "executor"})).map_err(any_err)?;
+    patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
+    Ok((StatusCode::OK, Json(json!({"bot_id": id, "name": created["name"], "role": "executor"}))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -17581,5 +17633,75 @@ mod manager_role_scope_tests {
         let call = |role: &str| put_bot_role(State(env.app.clone()), Path(peer.clone()), Extension(RequestPrincipal::Bot(manager.clone())), Json(PutBotRole { role: Some(role.into()) }));
         call("executor").await.map_err(|e| format!("{e:?}")).unwrap();
         assert_eq!(db::bot(&env.app.db, &peer).await.unwrap().unwrap().role.as_deref(), Some("executor"));
+    }
+}
+
+#[cfg(test)]
+mod expert_member_tests {
+    use super::*;
+
+    async fn seed(env: &crate::testing::Env) {
+        let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        env.app.cfg.update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        }).await.unwrap();
+    }
+
+    async fn add(env: &crate::testing::Env, name: &str) -> String {
+        let res = create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(json!({"name": name, "kind": "claude"})).unwrap())).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string()
+    }
+
+    async fn make_expert(env: &crate::testing::Env, manager: &str) {
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(manager).execute(&env.app.db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_expert_child_becomes_a_member_in_place() {
+        let env = crate::testing::env().await;
+        seed(&env).await;
+        let manager = add(&env, "mem-manager").await;
+        let child = crate::testing::claude_bot(&env.app, &env.project_id, "astra").await;
+        sqlx::query("UPDATE bots SET managed_by='child', parent_bot_id=? WHERE id=?").bind(&manager).bind(&child.id).execute(&env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &child.id).await;
+        make_expert(&env, &manager).await;
+        let body = crate::expert_member::AdoptMember { role: Some("advisor".into()), effort: Some("high".into()), session_id: Some("sess-keep".into()) };
+        crate::expert_member::adopt(State(env.app.clone()), Path(child.id.clone()), Extension(RequestPrincipal::User), Json(body)).await.map_err(|e| format!("{e:?}")).unwrap();
+        let b = db::bot(&env.app.db, &child.id).await.unwrap().unwrap();
+        assert_eq!((b.managed_by.as_str(), b.parent_bot_id.as_deref(), b.role.as_deref(), b.deleted_at.is_none()), ("user", None, Some("advisor"), true));
+        let session: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(session.as_deref(), Some("sess-keep"), "the running pane keeps its session for the next resume");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "running", "the pane is not restarted");
+        let again = crate::expert_member::adopt(State(env.app.clone()), Path(child.id.clone()), Extension(RequestPrincipal::User), Json(Default::default())).await;
+        assert!(again.is_err(), "already a member");
+    }
+
+    #[tokio::test]
+    async fn an_expert_manager_hires_executors_only_in_its_project() {
+        let env = crate::testing::env().await;
+        seed(&env).await;
+        let manager = add(&env, "hire-manager").await;
+        let peer = add(&env, "hire-peer").await;
+        let hire = |caller: &str| hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(caller.to_string())),
+            Json(HireMember { name: "worker-1".into(), kind: "claude".into(), model: None, effort: None, identity: None }));
+        assert!(hire(&manager).await.is_err(), "parent_child project");
+        make_expert(&env, &manager).await;
+        assert!(hire(&peer).await.is_err(), "non-manager");
+        let res = hire(&manager).await.map_err(|e| format!("{e:?}")).unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        let worker = db::bot(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!((worker.role.as_deref(), worker.parent_bot_id.as_deref(), worker.managed_by.as_str()), (Some("executor"), None, "user"));
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        assert!(manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/stop")).await, "managers retire executors");
+        assert!(manager_may_start(&env.app, &manager, "DELETE", &format!("/api/bots/{id}")).await);
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
+        assert!(!manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/stop")).await, "advisors stay");
+        assert!(manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/restart")).await);
     }
 }
