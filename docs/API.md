@@ -73,7 +73,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 ### Bot principal 的路徑資源範圍
 
-`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。例外：巡檢（patrol）角色可對任何頂層 bot 打 `POST /api/bots/{id}/restart`、`/start`（child 與其他操作仍限自己的樹）。expert 專案的 manager 可對同專案頂層 bot 與自己的 child 打 `/start`、`/restart`（角色改了要重啟才套用；`agm bot restart` 走 `AM_DAEMON_URL`）。User principal 維持原行為。
+`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。例外：巡檢（patrol）角色可對任何頂層 bot 打 `POST /api/bots/{id}/restart`、`/start`（child 與其他操作仍限自己的樹）。expert 專案的 manager 可對同專案頂層 bot 與自己的 child 打 `/start`、`/restart`（角色改了要重啟才套用；child 不能原地重啟，`PUT .../role` 對執行中的 child 直接套用並回 `needs_restart:false`；遠端或 expert 的 `agm bot start|restart|stop|restore` 走 `AM_DAEMON_URL`）。User principal 維持原行為。
 
 | 端點 | 方法 | Bot 能否跨 bot | 應有範圍 |
 |---|---|---|---|
