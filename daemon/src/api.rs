@@ -1717,11 +1717,27 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         .filter_map(|(b, hit)| hit.map(|hit| (b.id.clone(), hit)))
         .collect();
     let stale_hosts = app.remote_shim_stale.lock().await.clone();
+    // B 期：每顆 bot 在 run 啟動時記下的生效政策指紋（NULL＝沒記，不誤報待套用）。
+    let policy_revs: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
+        "SELECT bot_id, policy_rev FROM runs WHERE state IN ('starting','running','stopping') AND policy_rev IS NOT NULL",
+    )
+    .fetch_all(&app.db)
+    .await
+    .map_err(any_err)?
+    .into_iter()
+    .collect();
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
+        let role_policy = p.role_policy();
+        let cfg_project = cfg.projects.iter().find(|c| c.id.as_deref() == Some(p.id.as_str()));
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
+            let policy_drift = policy_revs.get(&b.id).is_some_and(|recorded| {
+                let pool_entry = cfg_project.and_then(|c| c.bots.iter().find(|x| x.id.as_deref() == Some(b.id.as_str()))).and_then(|x| x.pool_entry.as_deref());
+                let pool = cfg_project.map(|c| c.executor_pool.as_slice()).unwrap_or(&[]);
+                crate::lifecycle::runtime_overlay::policy_rev_now(b, &role_policy, pool, pool_entry) != *recorded
+            });
             let queued_turn = queued_turns.remove(&b.id);
             let shim_stale = if p.host == LOCAL_HOST {
                 let path = app.data_dir.join("bots").join(&b.id).join("bin/herdr");
@@ -1743,7 +1759,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "role": b.role,
                 "runtime_role_policy": run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()),
                 "daemon_url_pending": p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0),
-                "role_pending": shim_stale || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref())),
+                "role_pending": shim_stale || policy_drift || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref())),
                 "model": b.model,
                 "effort": b.effort,
                 "fast": b.fast == 1,
@@ -2349,7 +2365,8 @@ async fn patch_project(
                 if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist") || !policy.is_object() {
                     return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_role_policy", "role": role})));
                 }
-                out.insert(role.clone(), policy.clone());
+                let normalized = crate::role_policy::validate_role(role, policy)?;
+                out.insert(role.clone(), normalized);
             }
             Some(out)
         }
@@ -3017,12 +3034,23 @@ struct PatchBot {
     /// 專家模式專長軌道（role=specialist 時必填；只限 User 角色修改）。`null`／空字串＝清掉。
     #[serde(default, deserialize_with = "double_option")]
     track: Option<Option<String>>,
+    /// 執行期覆寫（B 期，只限 User）：物件＝覆寫；`null`＝清掉（跟角色）。欄位見 `role_policy.rs`。
+    #[serde(default, deserialize_with = "double_option_value")]
+    runtime_override: Option<Option<Value>>,
     #[serde(default, deserialize_with = "double_option")]
     identity: Option<Option<String>>,
     env: Option<BTreeMap<String, String>>,
 }
 
 fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
+}
+
+/// `Option<Option<Value>>`：缺＝不動，`null`＝清掉，其他＝設成那個值。
+fn double_option_value<'de, D>(d: D) -> Result<Option<Option<Value>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -3086,6 +3114,10 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
     if let Some(t) = &b.track {
         sets.push("track = ?".into());
         vals.push(t.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()));
+    }
+    if let Some(ro) = &b.runtime_override {
+        sets.push("runtime_override_json = ?".into());
+        vals.push(ro.as_ref().map(|v| v.to_string()));
     }
     if sets.is_empty() {
         return Ok(());
@@ -3307,7 +3339,7 @@ async fn patch_bot(
     Extension(principal): Extension<RequestPrincipal>,
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
-    if (b.identity.is_some() || b.env.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some()) && principal != RequestPrincipal::User {
+    if (b.identity.is_some() || b.env.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
     if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist") { return Err(LcError::Bad("invalid role".into())); } }
@@ -3365,7 +3397,8 @@ async fn patch_bot(
         || b.env.is_some()
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some()
-        || b.track.is_some();
+        || b.track.is_some()
+        || b.runtime_override.is_some();
     let mut pre_patch_rev = None;
     // 改設定之前：active run 還沒記啟動版本就用「改之前」的補記，改完才看得出過期（#353）。
     // 這是設定提交的 admission prerequisite；任何讀取或補記不確定都不可以繼續寫 TOML／DB。
@@ -3410,6 +3443,17 @@ async fn patch_bot(
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
     };
+    // 執行期覆寫：看得到 kind／model（PATCH 帶的 model 優先，否則用現在存的），用同一套 context 視窗與 TTL 規則驗證，存正規化後的物件。
+    if let Some(Some(ro)) = &b.runtime_override {
+        let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        let model = match &b.model {
+            Some(Some(m)) => m.clone(),
+            Some(None) => String::new(),
+            None => current.model.clone().unwrap_or_default(),
+        };
+        let normalized = crate::role_policy::validate_bot(&kind, &model, ro)?;
+        b.runtime_override = Some(Some(normalized));
+    }
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
             let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
@@ -3494,6 +3538,9 @@ async fn patch_bot(
         }
         if let Some(t) = &b.track {
             bot.track = t.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        }
+        if let Some(ro) = &b.runtime_override {
+            bot.runtime_override = ro.clone();
         }
         Ok(())
     })
@@ -17934,7 +17981,7 @@ mod expert_member_tests {
         // Test PATCH permissions
         let bot_caller = RequestPrincipal::Bot(manager.clone());
         // Bot cannot PATCH manager_use
-        let patch_mu = PatchBot { role: None, model: None, effort: None, fast: None, persona: None, args: None, autostart: None, name: None, inject_hooks: None, auto_approve: None, is_primary: None, manager_use: Some(false), track: None, identity: None, env: None };
+        let patch_mu = PatchBot { role: None, model: None, effort: None, fast: None, persona: None, args: None, autostart: None, name: None, inject_hooks: None, auto_approve: None, is_primary: None, manager_use: Some(false), track: None, runtime_override: None, identity: None, env: None };
         assert!(matches!(patch_bot(State(env.app.clone()), Path(id.clone()), Extension(bot_caller.clone()), Json(patch_mu)).await, Err(LcError::Forbidden(ref v)) if v["reason"] == "user_only"));
 
         // Bot cannot PATCH executor_pool
@@ -18058,7 +18105,7 @@ mod specialist_role_tests {
         let (manager, _member) = expert_project(&env).await;
         let patch = |caller: RequestPrincipal, v: Value| patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(caller), Json(serde_json::from_value::<PatchProject>(v).unwrap()));
 
-        let err = patch(RequestPrincipal::Bot(manager.clone()), json!({"role_policy": {"specialist": {"max_turns": 3}}})).await.err().unwrap();
+        let err = patch(RequestPrincipal::Bot(manager.clone()), json!({"role_policy": {"specialist": {"keep_warm_after_min": 30}}})).await.err().unwrap();
         assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
 
         let err = patch(RequestPrincipal::User, json!({"role_policy": "nope"})).await.err().unwrap();
@@ -18072,10 +18119,74 @@ mod specialist_role_tests {
         assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "invalid_role_policy"), "{err:?}");
         assert!(db::project(&env.app.db, &env.project_id).await.unwrap().unwrap().role_policy().is_empty(), "invalid input writes nothing");
 
-        patch(RequestPrincipal::User, json!({"role_policy": {"specialist": {"max_turns": 3}}})).await.map_err(|e| format!("{e:?}")).unwrap();
+        patch(RequestPrincipal::User, json!({"role_policy": {"specialist": {"keep_warm_after_min": 30}}})).await.map_err(|e| format!("{e:?}")).unwrap();
         let p = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
-        assert_eq!(p.role_policy()["specialist"]["max_turns"], 3);
+        assert_eq!(p.role_policy()["specialist"]["keep_warm_after_min"], 30);
         let cfg_policy = env.app.cfg.get().await.projects.iter().find(|p| p.id.as_deref() == Some(env.project_id.as_str())).unwrap().role_policy.clone();
-        assert_eq!(cfg_policy["specialist"]["max_turns"], 3);
+        assert_eq!(cfg_policy["specialist"]["keep_warm_after_min"], 30);
+    }
+}
+
+/// B 期角色 policy／bot 覆寫：User-only、值的驗證（看 kind 的視窗與 TTL）、寫進 config 並投影到 DB。
+#[cfg(test)]
+mod runtime_policy_api_tests {
+    use super::*;
+
+    async fn project_with_bot(env: &crate::testing::Env, kind: &str, model: &str) -> String {
+        let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        env.app.cfg.update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        }).await.unwrap();
+        let res = create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(json!({"name": "rp-bot", "kind": kind, "model": model})).unwrap())).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn bot_override_is_user_only_validated_and_projected() {
+        let env = crate::testing::env().await;
+        let bot = project_with_bot(&env, "claude", "opus").await;
+        let model_before = db::bot(&env.app.db, &bot).await.unwrap().unwrap().model;
+        let patch = |caller: RequestPrincipal, v: Value| patch_bot(State(env.app.clone()), Path(bot.clone()), Extension(caller), Json(serde_json::from_value::<PatchBot>(v).unwrap()));
+
+        let err = patch(RequestPrincipal::Bot("someone".into()), json!({"runtime_override": {"keep_warm": true}})).await.err().unwrap();
+        assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
+
+        // 模型改成 haiku（視窗 200k）時，512k 的覆寫要被擋。
+        let err = patch(RequestPrincipal::User, json!({"model": "haiku", "runtime_override": {"context_tokens": 512000}})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "context_out_of_range"), "{err:?}");
+        assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().model, model_before, "驗證失敗什麼都不寫");
+
+        patch(RequestPrincipal::User, json!({"runtime_override": {"context_tokens": 512000, "keep_warm": false}})).await.map_err(|e| format!("{e:?}")).unwrap();
+        let b = db::bot(&env.app.db, &bot).await.unwrap().unwrap();
+        let stored: Value = serde_json::from_str(b.runtime_override_json.as_deref().unwrap()).unwrap();
+        assert_eq!((stored["context_tokens"].clone(), stored["keep_warm"].clone()), (json!(512000), json!(false)));
+        let in_cfg = env.app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|x| x.id.as_deref() == Some(bot.as_str())).and_then(|x| x.runtime_override.clone());
+        assert_eq!(in_cfg.as_ref().and_then(|v| v.get("context_tokens")), Some(&json!(512000)), "真相在 config.toml");
+
+        // 清掉＝跟角色。
+        patch(RequestPrincipal::User, json!({"runtime_override": null})).await.map_err(|e| format!("{e:?}")).unwrap();
+        assert!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().runtime_override_json.is_none());
+    }
+
+    #[tokio::test]
+    async fn role_policy_values_are_validated_before_anything_is_written() {
+        let env = crate::testing::env().await;
+        let _bot = project_with_bot(&env, "claude", "opus").await;
+        let patch = |v: Value| patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(serde_json::from_value::<PatchProject>(v).unwrap()));
+
+        let err = patch(json!({"role_policy": {"manager": {"keep_warm_after_min": 60}}})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "invalid_runtime_policy" && v["field"] == "keep_warm_after_min" && v["role"] == "manager"), "{err:?}");
+        let err = patch(json!({"role_policy": {"executor": {"context_tokens": 1000}}})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["field"] == "context_tokens"), "{err:?}");
+        let err = patch(json!({"role_policy": {"manager": {"keep_warm": true}, "advisor": {"bogus": 1}}})).await.err().unwrap();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "invalid_runtime_policy"), "{err:?}");
+        assert!(db::project(&env.app.db, &env.project_id).await.unwrap().unwrap().role_policy().is_empty(), "整份不寫入");
+
+        patch(json!({"role_policy": {"manager": {"keep_warm": true, "keep_warm_after_min": 30}}})).await.map_err(|e| format!("{e:?}")).unwrap();
+        let p = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
+        assert_eq!(p.role_policy()["manager"]["keep_warm_after_min"], 30);
+        assert!(p.role_policy()["manager"].get("context_tokens").is_none(), "存正規化後的形狀（沒設的欄位不寫，TOML 也沒有 null）");
     }
 }

@@ -76,6 +76,7 @@ pub mod pasted_content;
 pub mod pending_question;
 pub mod preview_bind;
 pub mod primary_keep_warm;
+pub mod runtime_policy;
 pub mod private_files;
 pub mod probe_ws;
 pub mod prompt_cache;

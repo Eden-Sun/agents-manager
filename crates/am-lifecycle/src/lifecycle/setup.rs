@@ -1700,6 +1700,10 @@ pub async fn pane_env_for_fence(
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
+    // B 期：角色 policy／bot 覆寫的 context 啟動環境（池條目的已在 bot.env，這裡不重複）。
+    for (k, v) in super::runtime_overlay::overlay_for(app.as_ref(), bot).await?.env {
+        env.insert(k, json!(v));
+    }
     let mode = crate::db::project(app.db(), &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("project missing while preparing pane environment"))?.mode;
     env.insert("AM_PROJECT_MODE".into(), json!(mode));
     env.remove("AM_DAEMON_URL");
@@ -2528,6 +2532,26 @@ mod model_args_tests {
         let doc = super::herdr_skill_doc("# Herdr\n\nbody\n");
         assert!(doc.starts_with("## AG Man 規則"));
         assert!(doc.ends_with("# Herdr\n\nbody\n"));
+    }
+
+    /// 同角色的兩顆 codex bot：注入的指示（含 developer_instructions／staged profile 的內容）除了名稱段，逐字相同。
+    /// 名稱段是最後一行 [`agent_name_note`]；替換成佔位後再比對，所以 prompt cache 的前綴只差這一段。
+    #[test]
+    fn codex_prefix_is_identical_across_same_role_bots_except_the_name_note() {
+        use super::{agent_name_note, persona_args};
+        let mut a = bot("codex", None, None, false);
+        a.role = Some("executor".into());
+        a.persona = Some("同一個角色的人設：先讀 README，再動手。".into());
+        let mut b = a.clone();
+        b.name = "other-name".into();
+        let md = Some("## 專案規則\n所有成員共用的內容。");
+        let (na, nb) = ("proj-aaaaaa", "proj-bbbbbb");
+        let strip = |args: Vec<String>, name: &str| -> Vec<String> { args.into_iter().map(|x| x.replace(&agent_name_note(name), "<NAME-NOTE>")).collect() };
+        let xa = strip(persona_args(&a, na, md, None), na);
+        let xb = strip(persona_args(&b, nb, md, None), nb);
+        assert_eq!(xa, xb, "名稱段以外的注入指示要逐字相同");
+        assert!(xa.iter().any(|x| x.contains("<NAME-NOTE>")), "名稱段確實在裡面（替換有作用）");
+        assert_ne!(persona_args(&a, na, md, None), persona_args(&b, nb, md, None), "沒替換前名稱不同");
     }
 
     #[test]

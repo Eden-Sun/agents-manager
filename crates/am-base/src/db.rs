@@ -584,6 +584,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (77, "02d3beb36275b2dc"),
     // 專家模式專家（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`（A／B 合一版）。
     (78, "7191b39c27eab19f"),
+    // B 期角色 policy（2026-11）：`runs.policy_rev`（ALTER ADD）。
+    (79, "a75a882aefa18996"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -847,6 +849,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("bots", "role", "ALTER TABLE bots ADD COLUMN role TEXT"),
         ("runs", "runtime_role_policy", "ALTER TABLE runs ADD COLUMN runtime_role_policy TEXT"),
         ("runs", "daemon_url_injected", "ALTER TABLE runs ADD COLUMN daemon_url_injected INTEGER NOT NULL DEFAULT 0"),
+        // B 期角色 policy（2026-11）：run 啟動時生效政策的指紋；之後 policy 變了 bot 標待套用。NULL＝沒記（舊 run），不誤報。
+        ("runs", "policy_rev", "ALTER TABLE runs ADD COLUMN policy_rev TEXT"),
         // 收這一筆回合的那則 hook 在收件匣的 `hook_events.id`（發現 2，l8 審查）：收件匣的「處理完」標記是 `process()` 返回後才另寫，
         // 兩者之間 daemon 重啟，重播的同一則 hook 沒有 native turn id 可去重，會再開一個外部回合與訊息。回合與這把鑰匙同一個交易寫，
         // 重播先查它（見 `hookrecv::process_for`）。NULL＝不是 hook 收件匣收的（網頁送出的、備援抓的、舊列）。
