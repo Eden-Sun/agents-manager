@@ -2877,7 +2877,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if args.cmd in ("peers", "requests", "role") and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart") and os.environ.get("AM_PROJECT_MODE") == "expert")) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

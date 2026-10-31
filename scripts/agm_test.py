@@ -1530,6 +1530,13 @@ class ExpertBotCommandsTest(CliCase):
         self.assertEqual([r["bot_id"] for r in FakeDaemon.seen], ["bot-a", "bot-a"])
         self.assertEqual([r.get("body") for r in FakeDaemon.seen], [{"role": "executor"}, {"role": None}])
 
+    def test_expert_manager_restart_uses_bot_proof_and_daemon_url(self):
+        FakeDaemon.routes["POST /api/bots/bot-b/restart"] = (200, {"ok": True})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_PROJECT_MODE": "expert", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("bot", "restart", "bot-b")
+        self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/bot-b/restart")
+
     def test_bot_remote_without_daemon_url_does_not_guess(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
             self.assertEqual(self.bad("peers")["error"], "no_daemon_url")
