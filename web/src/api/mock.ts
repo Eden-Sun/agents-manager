@@ -236,6 +236,7 @@ interface MockBot {
   role?: 'manager' | 'executor' | 'advisor' | null
   role_pending?: boolean
   daemon_url_pending?: boolean
+  manager_use?: boolean
   /** API.md v3.3：null = 不帶 `--model` */
   model: string | null
   effort: string | null
@@ -278,6 +279,7 @@ interface MockProject {
   github: { owner: string; repo: string; url: string } | null
   /** #708 */
   handed_off_to?: string | null
+  executor_pool?: Record<string, number>
   created_at: string
 }
 
@@ -838,6 +840,7 @@ export class MockTransport implements Transport {
       workspace_id: null,
       host: 'local',
       github: null,
+      executor_pool: { codex: 2, claude: 1 },
       created_at: now(),
     }
     this.projects.push(p)
@@ -950,6 +953,7 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       managed_by: 'user',
+      manager_use: false,
       cwd: null,
       created_at: now(),
     }
@@ -2298,6 +2302,7 @@ export class MockTransport implements Transport {
         workspace_id: p.workspace_id,
         host: p.host,
         github: p.github,
+        executor_pool: p.executor_pool ?? {},
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2310,6 +2315,7 @@ export class MockTransport implements Transport {
               role: b.role ?? null,
               role_pending: b.role_pending ?? false,
               daemon_url_pending: b.daemon_url_pending ?? false,
+              manager_use: b.manager_use ?? true,
               model: b.model,
               effort: b.effort,
               fast: b.fast === 1,
@@ -2406,6 +2412,20 @@ export class MockTransport implements Transport {
       const to = b.handed_off_to === null ? null : String(b.handed_off_to).trim()
       if (to === '') throw new ApiError(400, { reason: 'handed_off_to must be a non-empty host name or null' }, 'bad_request')
       p.handed_off_to = to
+    }
+    if (b.executor_pool !== undefined) {
+      if (b.executor_pool && typeof b.executor_pool === 'object') {
+        const pool: Record<string, number> = {}
+        for (const [k, v] of Object.entries(b.executor_pool as Rec)) {
+          const num = Number(v)
+          if (BOT_KINDS.includes(k as BotKind) && Number.isInteger(num) && num >= 1 && num <= 10) {
+            pool[k] = num
+          }
+        }
+        p.executor_pool = pool
+      } else {
+        p.executor_pool = {}
+      }
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }
@@ -2600,6 +2620,9 @@ export class MockTransport implements Transport {
     }
     if (b.role !== undefined) {
       bot.role = b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' ? b.role : null
+    }
+    if (b.manager_use !== undefined) {
+      bot.manager_use = Boolean(b.manager_use)
     }
     if (b.model !== undefined) {
       bot.model = typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null

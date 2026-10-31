@@ -2,3 +2,16 @@
 .project-settings h2 { margin-top: 0; }
 .project-settings-members { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
 .project-settings-member { display: inline-flex; align-items: center; gap: 6px; }
+
+.project-expert-settings-details { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--bg-card); }
+.project-expert-settings-details summary { font-weight: 600; cursor: pointer; margin-bottom: 8px; }
+.project-expert-settings-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.project-expert-settings-actions { display: flex; gap: 8px; }
+
+.project-executor-pool-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.project-executor-pool-section h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.project-executor-pool-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.project-executor-pool-row { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.executor-pool-kind { font-family: var(--font-mono); text-transform: capitalize; min-width: 50px; }
+.executor-pool-input { width: 54px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-input); color: var(--text); font-size: 13px; }
+.project-executor-pool-actions { margin-top: 6px; }
