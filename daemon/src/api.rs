@@ -1100,6 +1100,7 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
 pub(crate) enum RequestPrincipal {
     User,
     Bot(String),
+    Child { child_id: String, parent_bot_id: String },
     Service(String),
 }
 
@@ -1290,7 +1291,22 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
     let has_bot = headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token");
     let has_service = headers.contains_key("X-AM-Service-Id") || headers.contains_key("X-AM-Service-Token");
     let has_ui = headers.contains_key("X-AM-Token");
-    let principal = if has_bot || has_service {
+    let has_child = headers.contains_key("X-AM-Child-Spawn-Id") || headers.contains_key("X-AM-Child-Token");
+    let principal = if has_child {
+        if has_bot || has_service || has_ui { return unauthorized(); }
+        let id = headers.get("X-AM-Child-Spawn-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let token = headers.get("X-AM-Child-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let child = match crate::child_credentials::authenticate(&app, id, token).await {
+            Ok(child) => child,
+            Err(StatusCode::CONFLICT) => return (StatusCode::CONFLICT, Json(json!({"error":"child_not_registered"}))).into_response(),
+            Err(status) => return status.into_response(),
+        };
+        let path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or_else(|| req.uri().path());
+        let is_read = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
+        let allowed_prompt = *req.method() == axum::http::Method::POST && decoded_bot_path_segments(path).is_some_and(|p| p == vec!["api", "bots", child.parent_id.as_str(), "prompt"]);
+        if !is_read && !allowed_prompt { return (StatusCode::FORBIDDEN, Json(json!({"error":"child_scope_denied"}))).into_response(); }
+        RequestPrincipal::Child { child_id: child.child_id, parent_bot_id: child.parent_id }
+    } else if has_bot || has_service {
         // A presented identity is decisive: partial, invalid, or mixed credentials never fall
         // through to the shared user token.
         if has_bot == has_service || has_ui {
@@ -1331,12 +1347,12 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         }
         RequestPrincipal::User
     };
-    if let RequestPrincipal::Bot(bot_id) = &principal {
+    if let RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } = &principal {
         let uri = req.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| req.uri());
         let method = req.method().as_str();
         let path = uri.path();
         let policy = bot_route_policy(method, uri);
-        let is_agm_role = if policy == Some(BotRoutePolicy::UserOrAgm) {
+        let is_agm_role = if policy == Some(BotRoutePolicy::UserOrAgm) && matches!(&principal, RequestPrincipal::Bot(_)) {
             match crate::supervisor::roles::role_of_bot(&app.db, bot_id).await {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
@@ -1366,7 +1382,11 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         return next.run(req).await;
     }
     // 只有 hook token 對得上才算「驗過的 bot」；`X-AM-Caller` 一律只當自稱記（review d77434c0 #3）。
-    let verified = if matches!(principal, RequestPrincipal::Bot(_)) { verified_caller_bot(&app, &headers).await } else { None };
+    let verified = match &principal {
+        RequestPrincipal::Child { child_id, .. } => Some(child_id.clone()),
+        RequestPrincipal::Bot(_) => verified_caller_bot(&app, &headers).await,
+        _ => None,
+    };
     let service = match &principal { RequestPrincipal::Service(id) => Some(id.as_str()), _ => None };
     let caller = crate::config_audit::describe_request(&req, verified.as_deref(), service);
     crate::config_audit::HTTP_CALLER.scope(caller, next.run(req)).await
@@ -1598,7 +1618,7 @@ async fn get_session(
 ) -> Response {
     // This route bootstraps the shared UI token, so it intentionally has no UI-token auth layer.
     // Bot and Service credentials must not turn that exception into a way to obtain the UI token.
-    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
+    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
         .iter()
         .any(|name| headers.contains_key(*name))
     {
@@ -1636,6 +1656,11 @@ mod session_principal_tests {
         let body = response.text().await.unwrap();
         assert_eq!(status, StatusCode::FORBIDDEN, "a Bot must not reach the User-token bootstrap: {body}");
         assert!(!body.contains(&env.app.ui_token), "the User token must stay secret: {body}");
+        for header in ["X-AM-Child-Spawn-Id", "X-AM-Child-Token"] {
+            let response = client.get(format!("http://{addr}/api/session")).header(header, "child-proof").send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(!response.text().await.unwrap().contains(&env.app.ui_token));
+        }
 
         let response = client.get(format!("http://{addr}/api/session")).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "the browser bootstrap remains unauthenticated on loopback");
@@ -1857,7 +1882,7 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
             state["host_baseline_sync"] = Value::Object(sync);
             Ok(Json(state))
         }
-        RequestPrincipal::Bot(bot_id) => Ok(Json(crate::bot_state::view_for_bot(&app, &bot_id).await?)),
+        RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } => Ok(Json(crate::bot_state::view_for_bot(&app, &bot_id).await?)),
         RequestPrincipal::Service(_) => Err(bot_user_only()),
     }
 }
@@ -5571,8 +5596,8 @@ async fn get_models(
         return Err(LcError::NotFound("host".into()));
     }
     let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty());
-    if let RequestPrincipal::Bot(bot_id) = &principal {
-        if crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(any_err)?.is_none() {
+    if let RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } = &principal {
+        if matches!(&principal, RequestPrincipal::Child { .. }) || crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(any_err)?.is_none() {
             if let Some(cached) = crate::models::cached(&app, &host, &q.kind, identity).await {
                 return Ok(Json(cached));
             }
@@ -7285,7 +7310,7 @@ async fn resolve_relay_target(
     Extension(principal): Extension<RequestPrincipal>,
     Query(q): Query<RelayResolveQuery>,
 ) -> Result<Json<Value>, LcError> {
-    let RequestPrincipal::Bot(sender) = principal else {
+    let (RequestPrincipal::Bot(sender) | RequestPrincipal::Child { child_id: sender, .. }) = principal else {
         return Err(LcError::Bad("relay resolution requires a bot principal".into()));
     };
     if let Some(id) = q.target.strip_prefix("bot:") {
@@ -7333,7 +7358,7 @@ async fn list_relay_requests(
     Extension(principal): Extension<RequestPrincipal>,
     Query(q): Query<RelayRequestsQuery>,
 ) -> Result<Json<Value>, LcError> {
-    let caller = match &principal { RequestPrincipal::Bot(id) => Some(id.as_str()), _ => None };
+    let caller = match &principal { RequestPrincipal::Bot(id) | RequestPrincipal::Child { child_id: id, .. } => Some(id.as_str()), _ => None };
     let rows: Vec<(String, String, String, Option<String>, Option<String>, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, Option<String>)> = sqlx::query_as(
         "SELECT id,from_bot_id,to_bot_id,to_run_id,to_turn_id,state,created_at,answered_at,notified_at,notice_turn_id,processed_at,attempts,error FROM relay_requests WHERE (? IS NULL OR from_bot_id=? OR to_bot_id=?) AND (? IS NULL OR from_bot_id=?) AND (? IS NULL OR to_bot_id=?) AND (?=0 OR state IN ('pending','delivered')) ORDER BY created_at DESC"
     ).bind(caller).bind(caller).bind(caller).bind(&q.from).bind(&q.from).bind(&q.to).bind(&q.to)
@@ -7352,7 +7377,7 @@ async fn prompt_bot(
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
     let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|bot| bot.kind);
-    if kind.as_deref() == Some("claude-api") && (b.start_if_stopped || b.send_now || b.queue_if_busy || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.relay_from.is_some() || b.ack || b.reply_to.is_some() || matches!(&principal, RequestPrincipal::Bot(_))) {
+    if kind.as_deref() == Some("claude-api") && (b.start_if_stopped || b.send_now || b.queue_if_busy || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.relay_from.is_some() || b.ack || b.reply_to.is_some() || matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. })) {
         return Err(LcError::Bad("api_native_prompt_unsupported".into()));
     }
     // 把回覆公開到分享頁只有使用者（UI token）能決定：Bot／Service 帶旗標一律 403，且不送出（issue #855）。
@@ -7383,14 +7408,26 @@ async fn prompt_bot(
     // attributed to the id already authenticated by middleware. A User request claiming a bot
     // without that bot's token is refused (#410 ended #339's unsigned compatibility branch).
     let relay_claim = b.relay_from.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    let effective_relay = relay_claim.or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()));
-    let relay = crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?;
+    let relay = match &principal {
+        RequestPrincipal::Child { child_id, parent_bot_id } => {
+            let child = db::bot(&app.db, child_id).await.map_err(any_err)?;
+            let still_owned = child.is_some_and(|b| b.deleted_at.is_none() && b.managed_by == "child" && b.parent_bot_id.as_deref() == Some(parent_bot_id.as_str()));
+            if !still_owned || child_id.as_str() == crate::agent_relay::DAEMON_SENDER || &id != parent_bot_id || child_id == &id || relay_claim.is_some_and(|claim| claim != child_id.as_str()) {
+                return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"child_scope_denied"})));
+            }
+            Some(crate::relay_auth::Relay { from: child_id.clone() })
+        }
+        _ => {
+            let effective_relay = relay_claim.or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()));
+            crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
+        }
+    };
     if !b.expect_result {
         if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
 
     }
     if b.expect_result {
-        let RequestPrincipal::Bot(sender) = &principal else { return Err(LcError::Bad("expect_result requires a bot principal".into())); };
+        let (RequestPrincipal::Bot(sender) | RequestPrincipal::Child { child_id: sender, .. }) = &principal else { return Err(LcError::Bad("expect_result requires a bot principal".into())); };
         if relay.as_ref().map(|r| &r.from) != Some(sender) { return Err(LcError::Bad("expect_result requires authenticated relay".into())); }
         if b.text.trim().is_empty() { return Err(LcError::Bad("text must not be empty".into())); }
         if b.send_now || b.start_if_stopped || b.clear_draft || b.submit_draft || b.ack || b.reply_to.is_some() {
@@ -7912,7 +7949,7 @@ async fn get_project_messages(
     let user = principal == RequestPrincipal::User;
     let mut messages = match principal {
         RequestPrincipal::User => crate::group::messages(&app, &id, before, limit).await?,
-        RequestPrincipal::Bot(bot_id) => crate::group::messages_for_bot_tree(&app, &id, before, limit, &bot_id).await?,
+        RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } => crate::group::messages_for_bot_tree(&app, &id, before, limit, &bot_id).await?,
         RequestPrincipal::Service(_) => return Err(bot_user_only()),
     };
     if user {
@@ -8004,7 +8041,7 @@ async fn ws_handler(
     // `/ws` is outside the `/api` auth middleware, but it is still a User-only endpoint.
     // Do not silently ignore an explicit Bot/Service identity when the query also carries the
     // shared UI token; that would let one request cross principal boundaries.
-    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
+    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
         .iter()
         .any(|name| headers.contains_key(*name))
     {
@@ -13651,6 +13688,8 @@ mod per_principal_auth_tests {
         for (identity, headers) in [
             ("Bot", bot_headers.as_str()),
             ("partial Bot", "X-AM-Bot-Token: ignored\r\n"),
+            ("Child id", "X-AM-Child-Spawn-Id: ignored\r\n"),
+            ("Child token", "X-AM-Child-Token: ignored\r\n"),
             ("Service", service_headers),
         ] {
             let mixed = raw_head(e.app.clone(), upgrade("/ws", &e.app.ui_token, headers)).await;
