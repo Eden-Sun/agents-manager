@@ -2235,6 +2235,16 @@ button.pane-toggle:hover:not(:disabled) {
   color: var(--danger);
 }
 
+.notice.notice-top-center {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 12px);
+  left: 0;
+  right: 0;
+  width: min(560px, calc(100vw - 32px));
+  margin-inline: auto;
+  box-sizing: border-box;
+}
+
 /* 關閉鍵不用 opacity 0.6 繼承色（錯誤通知上紅字對比掉到 3.3），改固定次要文字色。 */
 
 .notice button {

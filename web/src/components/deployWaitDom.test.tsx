@@ -8,7 +8,7 @@ import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing
 import { rawTransport } from '../api/index'
 import { toDeployWait } from '../api/deployWait'
 import { resetStoreForTest, useStore } from '../store/store'
-import { applyDeployWaitSnapshot, onDeployWaitFrame, setDeployWait, useDeployWait } from '../store/deployWait'
+import { applyDeployWaitSnapshot, deployWaitNotice, onDeployWaitFrame, setDeployWait, useDeployWait } from '../store/deployWait'
 import { DeployWaitChip } from './DeployWaitChip'
 
 afterEach(async () => {
@@ -40,7 +40,9 @@ const wait = (over: Record<string, unknown> = {}) => ({
 const btn = (label: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)!
 
 test('WS：第一次通知跳一則，擋的人換了只更新，換好再跳一則', () => {
-  assert.equal(onDeployWaitFrame({ wait: wait(), first: true })?.text, wait().summary)
+  const notice = onDeployWaitFrame({ wait: wait(), first: true })
+  assert.equal(notice?.topCenter, true)
+  assert.match(notice?.text ?? '', /abcdef12.*alpha.*UTC\+8.*26 分鐘後/)
   assert.equal(onDeployWaitFrame({ wait: wait({ rev: 2, blockers: [{ bot_id: 'b2', name: 'bravo', why: 'working' }] }), first: false }), null, '換人擋不洗版')
   assert.equal(useDeployWait.getState().wait?.blockers[0].name, 'bravo', '但 header 跟著更新')
   assert.equal(onDeployWaitFrame({ wait: wait({ rev: 3, phase: 'done', summary: '換好了' }), first: false })?.kind, 'info')
@@ -48,6 +50,15 @@ test('WS：第一次通知跳一則，擋的人換了只更新，換好再跳一
   assert.ok(useDeployWait.getState().wait, '舊 daemon 沒這欄：不動')
   applyDeployWaitSnapshot(null)
   assert.equal(useDeployWait.getState().wait, null, 'daemon 說沒有就收掉')
+})
+
+test('部署通知使用 UTC+8 時分與剩餘分鐘，無效或已過時間不虛構倒數', () => {
+  const now = Date.parse('2026-10-31T11:30:00Z')
+  const w = toDeployWait(wait({ since: '2026-10-31T11:27:00Z', escalates_at: '2026-10-31T11:42:17Z' }))!
+  assert.match(deployWaitNotice(w, now), /19:42（UTC\+8，13 分鐘後）/)
+  assert.doesNotMatch(deployWaitNotice(w, now), /2026-10-31T/)
+  assert.doesNotMatch(deployWaitNotice({ ...w, escalates_at: 'invalid' }, now), /分鐘後|UTC\+8/)
+  assert.match(deployWaitNotice(w, Date.parse('2026-10-31T11:43:00Z')), /已到 19:42（UTC\+8）/)
 })
 
 test('header：在等才出現；「現在換版」「先等」打對的端點；點擋住的 bot 跳過去', async () => {

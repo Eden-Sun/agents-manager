@@ -320,6 +320,7 @@ export interface Notice {
   id: number
   kind: 'error' | 'info'
   text: string
+  topCenter?: boolean
   /** 可按的動作（刪 bot 後的「復原」）：放通知上，誤刪當下人就在看它。 */
   action?: { label: string; run: () => void | Promise<void> }
 }
@@ -496,7 +497,7 @@ export interface StoreState {
   pruneUnread: () => void
   /** 快照上已經不在的 bot／專案／任務，它們在 store 裡各張表的 key 一併帶走（`store/prune.ts`）。 */
   pruneDead: () => void
-  notify: (kind: Notice['kind'], text: string, action?: Notice['action']) => void
+  notify: (kind: Notice['kind'], text: string, action?: Notice['action'], topCenter?: boolean) => void
   dismiss: (id: number) => void
 
   startBot: (botId: string) => Promise<void>
@@ -941,13 +942,13 @@ export const useStore = create<StoreState>((set, get) => {
   cliUpdates: [],
   upstreamUpdates: {},
 
-  notify: (kind, text, action) => {
+  notify: (kind, text, action, topCenter) => {
     // 同一則還掛在畫面上就不要再疊一張（issue #530）：重試迴圈會把同一句話刷成一整排，
     // 而第二張沒有帶任何新資訊。帶動作的不去重——那是要人按的按鈕，不是狀態播報。
     if (!action && get().notices.some((n) => n.kind === kind && n.text === text)) return
     noticeSeq += 1
     const id = noticeSeq
-    set((s) => ({ notices: [...s.notices, { id, kind, text, action }] }))
+    set((s) => ({ notices: [...s.notices, { id, kind, text, action, topCenter }] }))
     // 帶動作的通知留久一點：4 秒不夠一個人意識到自己按錯了。
     const timer = setTimeout(() => {
       noticeTimers.delete(id)
@@ -3179,7 +3180,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     // 部署等換版窗口超過 3 分鐘（SPEC §18.10）：狀態在 `deployWait.ts`，這裡只跳通知。
     case 'deploy_wait': {
       const n = onDeployWaitFrame(data)
-      if (n) get().notify(n.kind, n.text)
+      if (n) get().notify(n.kind, n.text, undefined, n.topCenter)
       return
     }
     case 'herdr_update_progress':

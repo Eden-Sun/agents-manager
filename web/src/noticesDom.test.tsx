@@ -44,6 +44,17 @@ test('之後才加的通知出現在同一個容器裡；錯誤是 alert、一�
   }
 })
 
+test('部署通知使用頂部置中樣式，普通通知不受影響', async () => {
+  await mount(<Notices />)
+  await act(async () => {
+    useStore.getState().notify('error', '部署等待', undefined, true)
+    useStore.getState().notify('error', '其他錯誤')
+  })
+  assert.equal(document.querySelectorAll('.notice-top-center').length, 1)
+  assert.equal(document.querySelector('.notice-top-center')?.textContent?.includes('部署等待'), true)
+  assert.equal([...document.querySelectorAll('.notice')].find((n) => n.textContent?.includes('其他錯誤'))?.classList.contains('notice-top-center'), false)
+})
+
 test('#1920 重設測試 store 會清除通知的自動消失 timer', () => {
   useStore.getState().notify('error', '測試通知')
   assert.ok(pendingDomTimers().some((timer) => timer.timeout === 8000), '錯誤通知使用 8 秒 timer')
