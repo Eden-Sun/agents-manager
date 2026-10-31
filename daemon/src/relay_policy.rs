@@ -22,6 +22,8 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let to = crate::db::bot(&app.db, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("target_missing".into()))?;
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
+    // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
+    if crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some() { return Ok(()); }
     if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") { return Err(RelayDenied::Denied("expert_cross_project".into())); }
     if project.mode == "expert" {
         let direct_family = from.parent_bot_id.as_deref() == Some(to.id.as_str());
@@ -88,5 +90,27 @@ mod expert_tests {
         assert!(matches!(relay_prompt_allowed(&env.app, &worker.id, &advisor.id, Admission::NewRequest).await, Err(RelayDenied::Denied(_))));
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(crate::db::now()).bind(&worker.id).execute(&env.app.db).await.unwrap();
         assert!(matches!(relay_prompt_allowed(&env.app, &worker.id, &manager.id, Admission::Deliver).await, Err(RelayDenied::Denied(_))));
+    }
+}
+
+#[cfg(test)]
+mod agm_cross_project_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agm_role_reaches_expert_projects_but_plain_bots_do_not() {
+        let env = crate::testing::env().await;
+        let agm = crate::testing::claude_bot(&env.app, &env.project_id, "agm-cross").await;
+        let plain = crate::testing::claude_bot(&env.app, &env.project_id, "plain-cross").await;
+        let other = crate::db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'expert-x','local',?,'expert')")
+            .bind(&other).bind(format!("/tmp/{other}")).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let worker = crate::testing::claude_bot(&env.app, &other, "expert-worker").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
+        assert!(matches!(relay_prompt_allowed(&env.app, &plain.id, &worker.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "expert_cross_project"));
+        crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&env.app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
+        assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::Deliver).await.is_ok());
     }
 }
