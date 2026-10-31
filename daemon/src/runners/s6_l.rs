@@ -496,7 +496,7 @@ impl s6_ports::ResumeNudgeServices for App {
         relay_from: &str,
     ) -> anyhow::Result<crate::lifecycle::PromptOut> {
         let relay = crate::lifecycle::prompt::RelaySrc::daemon_notice(Some(relay_from));
-        app_ports_p4state::queue_for_next_turn(&self.shared(), conversation_id, bot_id, text, text, client_request_id, None, relay)
+        app_ports_p4state::queue_for_next_turn(&self.shared(), conversation_id, bot_id, text, text, client_request_id, relay)
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))
     }

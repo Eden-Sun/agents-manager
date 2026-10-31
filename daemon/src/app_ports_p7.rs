@@ -5,8 +5,8 @@
 //! 模組掛在 `mission/mod.rs`（`#[path]`），不碰 `lib.rs`，免得跟其他包各自加 `mod` 行互相衝突。
 
 use crate::db;
-use crate::lifecycle::{self, LcError, LcResult, PromptOut};
-use crate::mission::ports::{AgmRole, CallerOps, EventOps, GroupTurnOps, IdentityOps, KnownIdentity, SupervisorOps};
+use crate::lifecycle::LcError;
+use crate::mission::ports::{AgmRole, CallerOps, EventOps, IdentityOps, KnownIdentity, SupervisorOps};
 use crate::quota::{self, Quota};
 use crate::state::App;
 use crate::supervisor::roles::{self, Role};
@@ -91,40 +91,6 @@ impl SupervisorOps for App {
 impl EventOps for App {
     async fn emit_event(&self, kind: &str, data: Value) {
         self.emit(kind, data).await
-    }
-}
-
-impl GroupTurnOps for App {
-    async fn prompt_grouped(
-        &self,
-        bot_id: &str,
-        text: &str,
-        client_request_id: &str,
-        group_id: Option<&str>,
-        deliver: Option<&str>,
-        attachment_ids: &[String],
-        relay_from: Option<&str>,
-    ) -> LcResult<PromptOut> {
-        lifecycle::prompt_grouped(&self.shared(), bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from).await
-    }
-    fn owed_as_unknown(&self, res: LcResult<PromptOut>) -> LcResult<PromptOut> {
-        lifecycle::owed_as_unknown(res)
-    }
-    async fn insert_message_grouped(
-        &self,
-        conversation_id: &str,
-        turn_id: Option<&str>,
-        role: &str,
-        content: &str,
-        source: &str,
-        incomplete: bool,
-        snapshot: Option<&str>,
-        group_id: Option<&str>,
-    ) -> anyhow::Result<db::Message> {
-        lifecycle::insert_message_grouped(&self.shared(), conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id).await
-    }
-    fn cursor_not_found(&self, reason: &str, message_id: &str) -> LcError {
-        crate::api::cursor_not_found(reason, message_id)
     }
 }
 

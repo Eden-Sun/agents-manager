@@ -1,13 +1,13 @@
 //! mission 對其他 feature 的窄介面（crate 拆分第 3 步 P7，行為不變）。
 //!
-//! mission／group／relay_auth 的 production 程式碼不再直接 `crate::supervisor::…`／`crate::quota::…`／
+//! mission／relay_auth 的 production 程式碼不再直接 `crate::supervisor::…`／`crate::quota::…`／
 //! `crate::tools::…`／`crate::lifecycle::…` 的函式、也不再 `crate::api::…` 借 helper：每個外部能力是這裡的一個小 trait
 //! （一個領域一個），由 `App`（或 repo context `SqlitePool`）實作在 `app_ports_p7.rs`，實作逐行委派給原本被呼叫的函式，
 //! 所以任務、額度、鎖與事件的語意不變。呼叫端寫成 `app.verified_bot_id(&headers)`，跟原本
 //! `supervisor::bot_requests::verified_bot_id(app, &headers)` 同一個 await 點、同一個錯誤型別。
 //!
 //! 為什麼不是 `am-ports` 的 `TurnControl`／`QuotaAccess`／`EventSink`：這些合約以 am-core 的值型別表達，而 mission 現行
-//! 用的是帶 `LcError`／`PromptOut`／`db::Bot`／`quota::Quota` 的細節（含 401／403／409 的區分、群組送字的 `PromptOut`），
+//! 用的是帶 `LcError`／`db::Bot`／`quota::Quota` 的細節（含 401／403／409 的區分），
 //! 硬塞進合約會丟掉這些分類。這些 trait 是合約之上的 daemon 側過渡介面：型別（`LcError`、`db::*`、`quota::*`）搬進
 //! am-core／am-store 之後，簽名換成合約型別、trait 搬進 `am-ports`（`crates/am-ports/src/mission.rs`）。
 //!
@@ -22,7 +22,7 @@
 #![allow(async_fn_in_trait)]
 
 use crate::db;
-use crate::lifecycle::{LcError, LcResult, PromptOut};
+use crate::lifecycle::LcError;
 use crate::quota::Quota;
 use axum::http::HeaderMap;
 use serde_json::Value;
@@ -143,37 +143,6 @@ pub trait EventOps {
     async fn emit_event(&self, kind: &str, data: Value);
 }
 
-/// 群組送字用的回合與訊息操作（原 `lifecycle::{prompt_grouped, owed_as_unknown, insert_message_grouped}`）。
-pub trait GroupTurnOps {
-    #[allow(clippy::too_many_arguments)]
-    async fn prompt_grouped(
-        &self,
-        bot_id: &str,
-        text: &str,
-        client_request_id: &str,
-        group_id: Option<&str>,
-        deliver: Option<&str>,
-        attachment_ids: &[String],
-        relay_from: Option<&str>,
-    ) -> LcResult<PromptOut>;
-    /// `lifecycle::owed_as_unknown`：送達結果還欠著時當 `unknown`。
-    fn owed_as_unknown(&self, res: LcResult<PromptOut>) -> LcResult<PromptOut>;
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_message_grouped(
-        &self,
-        conversation_id: &str,
-        turn_id: Option<&str>,
-        role: &str,
-        content: &str,
-        source: &str,
-        incomplete: bool,
-        snapshot: Option<&str>,
-        group_id: Option<&str>,
-    ) -> anyhow::Result<db::Message>;
-    /// `api::cursor_not_found`：`before` 游標指的訊息不存在或不在這個對話裡。
-    fn cursor_not_found(&self, reason: &str, message_id: &str) -> LcError;
-}
-
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     /// 受護欄管的 mission 側 production 檔（含 `group`／`relay_auth` 等同包檔案）。
@@ -186,7 +155,6 @@ mod tests {
         ("mission/relay.rs", include_str!("relay.rs")),
         ("mission/store.rs", include_str!("store.rs")),
         ("mission/workflow.rs", include_str!("workflow.rs")),
-        ("group.rs", include_str!("../../../../daemon/src/group.rs")),
         ("agent_relay.rs", include_str!("../../../am-base/src/agent_relay.rs")),
         ("relay_auth.rs", include_str!("../relay_auth.rs")),
         ("handoff.rs", include_str!("../../../am-lifecycle/src/handoff.rs")),
@@ -283,9 +251,7 @@ mod tests {
             "quota::billing_identity(",
             "quota::quota_base_for_host(",
             "tools::identities_for_host(",
-            "lifecycle::prompt_grouped(",
             "api::delete_bot(",
-            "api::cursor_not_found(",
             "api::ct_eq(",
         ] {
             assert!(adapter.contains(pat), "adapter 不再含 {pat}：更新 FORBIDDEN_CALLS 或 adapter");
