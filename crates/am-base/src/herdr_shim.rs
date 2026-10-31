@@ -376,7 +376,7 @@ am_kv_get() {
 
 # Names are display strings; changing one cannot change the durable spawn claim.
 am_agent_rename() {
-    exec "$AM_HERDR" "$@"
+    am_exec "$@"
 }
 
 am_agent_start() {
@@ -385,7 +385,7 @@ am_agent_start() {
     for _a in "$@"; do
         case "$_a" in
             --) break ;;
-            -h | --help) exec "$AM_HERDR" agent start "$@" ;;
+            -h | --help) am_exec agent start "$@" ;;
         esac
     done
     if [ -n "${AM_CHILD_OF:-}" ]; then
@@ -668,7 +668,7 @@ am_agent_start() {
     # 目標 pane 裡已經有 agent（別顆 bot 的 pane、拿錯的 id）就一個字都不送：補送 env 那行會被打進那顆 agent 的
     # 輸入框（2026-10-02 A issuers-1 拿 wW:p3 去開 child，那是別顆 bot 的 pane，使用者收到一行 ` . '/tmp/am-env…'`）。
     # 問不到（pane 不在、herdr 沒回）就照舊交給 herdr 自己判斷，只有確定有 agent 才擋。
-    _tagent=$("$AM_HERDR" pane get "$_pane" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"agent" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+    _tagent=$(am_herdr pane get "$_pane" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"agent" *: *"\([^"]*\)".*/\1/p' | head -n 1)
     if [ -n "$_tagent" ]; then
         printf 'agents-manager: --pane %s 裡已經在跑 %s，不是空的 shell；先 herdr pane split 開新 pane，再把新 pane id 給 --pane。沒有送任何東西\n' "$_pane" "$_tagent" >&2
         exit 2
@@ -690,9 +690,9 @@ am_agent_start() {
     trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}"
     if [ -z "${AM_BOT_ID:-}" ]; then
-        exec "$AM_HERDR" agent start "$@"
+        am_exec agent start "$@"
     fi
-    _start_out=$("$AM_HERDR" agent start "$@")
+    _start_out=$(am_herdr agent start "$@")
     _rc=$?
     # 失敗也登記：上面已確認 `--pane` 是空的、是這顆 bot 要用的 pane。herdr 等不到 agent 起好就回 `timeout`，
     # 但 agent 常常隨後才起來、被 reconcile 收編（2026-10-16 m4p ro-ocr 開 cifable：start 回 timeout，沒有登記，
@@ -705,7 +705,7 @@ am_agent_start() {
         exit "$_rc"
     fi
     # start 的成功回覆不是名稱登錄的證據。不能把名稱對到別顆 pane 的 child 當成這次派工成功。
-    _registration=$("$AM_HERDR" agent get "$_child_name" 2>/dev/null)
+    _registration=$(am_herdr agent get "$_child_name" 2>/dev/null)
     _registration_rc=$?
     _registered_pane=$(printf '%s\n' "$_registration" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
     if [ "$_registration_rc" -ne 0 ] || [ "$_registered_pane" != "$_pane" ]; then
@@ -737,7 +737,7 @@ am_ensure_claude_hook() {
             return 0
         }
     fi
-    CLAUDE_CONFIG_DIR=$_hd "$AM_HERDR" integration install claude >/dev/null 2>&1
+    CLAUDE_CONFIG_DIR=$_hd am_herdr integration install claude >/dev/null 2>&1
     if grep -q 'herdr-agent-state' "$_hd/settings.json" 2>/dev/null; then
         printf 'agents-manager: 已補裝 herdr 的 SessionStart hook 到 %s\n' "$_hd" >&2
     else
@@ -805,12 +805,12 @@ am_reexport_env_before_start() {
     if [ -n "$_f" ] && printf '%s' "$_body" > "$_f" 2>/dev/null; then
         chmod 600 "$_f" 2>/dev/null
         _qf=$(printf '%s' "$_f" | sed "s/'/'\\\\''/g")
-        "$AM_HERDR" pane send-text "$_pane" " . '$_qf' && rm -f '$_qf'
+        am_herdr pane send-text "$_pane" " . '$_qf' && rm -f '$_qf'
 " >/dev/null 2>&1
         return 0
     fi
     [ -z "$_f" ] || rm -f "$_f"
-    "$AM_HERDR" pane send-text "$_pane" "$_line
+    am_herdr pane send-text "$_pane" "$_line
 " >/dev/null 2>&1
 }
 
@@ -837,14 +837,14 @@ am_agent_prompt() {
                 _candidate=$(am_child_name "$_unmanaged_target" 2>/dev/null) || exit 75
                 _pane=""
                 for _target in "$_candidate" "$_unmanaged_target"; do
-                    _agent_json=$("$AM_HERDR" agent get "$_target" 2>/dev/null) || continue
+                    _agent_json=$(am_herdr agent get "$_target" 2>/dev/null) || continue
                     _pane=$(printf '%s' "$_agent_json" | python3 -c 'import json,sys; p=json.load(sys.stdin)["result"]["agent"]["pane_id"]; assert isinstance(p,str) and p and not any(ord(c)<33 or ord(c)==127 for c in p); print(p)' 2>/dev/null) || _pane=""
                     [ -z "$_pane" ] || break
                 done
                 [ -n "$_pane" ] || am_announce_refuse 75 "$_unmanaged_target" "no stable pane_id evidence"
                 _unmanaged_target=$_pane ;;
         esac
-        exec "$AM_HERDR" agent prompt "$_unmanaged_target" "$@"
+        am_exec agent prompt "$_unmanaged_target" "$@"
     fi
     if ! am_daemon_base >/dev/null; then
         am_announce_refuse 77 "${1:-}" "此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它"
@@ -1025,7 +1025,7 @@ am_forward_with_env() {
     if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ]; then
         _ws=""
         if [ -n "${HERDR_PANE_ID:-}" ]; then
-            _ws=$("$AM_HERDR" pane get "$HERDR_PANE_ID" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"workspace_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+            _ws=$(am_herdr pane get "$HERDR_PANE_ID" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"workspace_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
         fi
         [ -n "$_ws" ] || _ws=${AM_WORKSPACE_ID:-}
         if [ -n "$_ws" ]; then
@@ -1048,7 +1048,7 @@ am_forward_with_env() {
     if am_spawn_fenced; then
         am_spawn_begin pane || exit $?
         trap 'am_spawn_abort; exit 130' INT TERM
-        _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
+        _out=$(am_herdr "$_sub1" "$_sub2" "$@")
         _rc=$?
         [ -z "$_out" ] || printf '%s\n' "$_out"
         _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
@@ -1068,7 +1068,7 @@ am_forward_with_env() {
     # 一定帶得下去），這裡只補**用途**：`--purpose <文字>` 是我們自己的旗標，轉發前剝掉。
     # 沒有 curl／沒有 token 就只是少一個字串，pane 照開。
     if [ -n "$_purpose" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
-        _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
+        _out=$(am_herdr "$_sub1" "$_sub2" "$@")
         _rc=$?
         printf '%s\n' "$_out"
         [ "$_rc" -eq 0 ] || exit "$_rc"
@@ -1082,13 +1082,13 @@ am_forward_with_env() {
             --data-urlencode "purpose=${_purpose}" >/dev/null 2>&1 || true
         exit 0
     fi
-    exec "$AM_HERDR" "$_sub1" "$_sub2" "$@"
+    am_exec "$_sub1" "$_sub2" "$@"
 }
 
 # `agent list` 之後把子 agent 的 prompt cache 還熱多久印到 stderr（使用者 2026-10-04：派工優先用 cache 還熱的 child，
 # 省 token）。herdr 的 JSON 原封不動在 stdout、exit code 照舊；問不到 daemon、或自己就是子 agent（不能派工），就不印。
 am_agent_list() {
-    "$AM_HERDR" "$@"
+    am_herdr "$@"
     _rc=$?
     if [ -z "${AM_CHILD_OF:-}" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_PORT:-}" ] && [ -n "$(am_bot_token)" ] \
         && command -v curl >/dev/null 2>&1; then
@@ -1105,15 +1105,163 @@ if [ -z "$AM_HERDR" ]; then
     exit 127
 fi
 
+# A single wrapper is shared with child principal support added by the credential slice.
+am_principal_curl() { am_curl_bot -H "X-AM-Bot-Id: $AM_BOT_ID" "$@"; }
+
+_AM_HERDR_SESSION=""; _AM_HERDR_MACHINE=""; _AM_HERDR_REMOTE=""; _AM_HERDR_REMOTE_KEYS=""; _AM_HERDR_HANDOFF=""
+if [ -n "${AM_BOT_ID:-}" ]; then
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --session|--machine)
+                _flag=$1; shift; [ "$#" -gt 0 ] || { printf 'agents-manager: %s 缺少值\n' "$_flag" >&2; exit 75; }
+                [ -n "$1" ] && am_arg_ok "$1" || exit 75
+                if [ "$_flag" = --session ]; then [ -z "$_AM_HERDR_SESSION" ] || exit 75; _AM_HERDR_SESSION=$1
+                else [ -z "$_AM_HERDR_MACHINE" ] || exit 75; _AM_HERDR_MACHINE=$1; fi
+                shift ;;
+            --session=*|--machine=*)
+                _flag=${1%%=*}; _value=${1#*=}; [ -n "$_value" ] && am_arg_ok "$_value" || exit 75
+                if [ "$_flag" = --session ]; then [ -z "$_AM_HERDR_SESSION" ] || exit 75; _AM_HERDR_SESSION=$_value
+                else [ -z "$_AM_HERDR_MACHINE" ] || exit 75; _AM_HERDR_MACHINE=$_value; fi
+                shift ;;
+            --remote|--remote-keybindings)
+                _flag=$1; shift; [ "$#" -gt 0 ] && am_arg_ok "$1" || exit 75
+                if [ "$_flag" = --remote ]; then _AM_HERDR_REMOTE=$1; else _AM_HERDR_REMOTE_KEYS=$1; fi
+                shift ;;
+            --remote=*|--remote-keybindings=*)
+                _flag=${1%%=*}; _value=${1#*=}; [ -n "$_value" ] && am_arg_ok "$_value" || exit 75
+                if [ "$_flag" = --remote ]; then _AM_HERDR_REMOTE=$_value; else _AM_HERDR_REMOTE_KEYS=$_value; fi
+                shift ;;
+            --handoff) _AM_HERDR_HANDOFF=1; shift ;;
+            -h|--help|-V|--version|--skill|--default-config) break ;;
+            -*) printf 'agents-manager: 無法驗證此 herdr 全域旗標：%s\n' "$1" >&2; exit 75 ;;
+            *) break ;;
+        esac
+    done
+fi
+am_herdr() {
+    [ -z "$_AM_HERDR_HANDOFF" ] || set -- --handoff "$@"
+    [ -z "$_AM_HERDR_REMOTE_KEYS" ] || set -- --remote-keybindings "$_AM_HERDR_REMOTE_KEYS" "$@"
+    [ -z "$_AM_HERDR_REMOTE" ] || set -- --remote "$_AM_HERDR_REMOTE" "$@"
+    [ -z "$_AM_HERDR_SESSION" ] || set -- --session "$_AM_HERDR_SESSION" "$@"
+    [ -z "$_AM_HERDR_MACHINE" ] || set -- --machine "$_AM_HERDR_MACHINE" "$@"
+    "$AM_HERDR" "$@"
+}
+am_exec() {
+    [ -z "$_AM_HERDR_HANDOFF" ] || set -- --handoff "$@"
+    [ -z "$_AM_HERDR_REMOTE_KEYS" ] || set -- --remote-keybindings "$_AM_HERDR_REMOTE_KEYS" "$@"
+    [ -z "$_AM_HERDR_REMOTE" ] || set -- --remote "$_AM_HERDR_REMOTE" "$@"
+    [ -z "$_AM_HERDR_SESSION" ] || set -- --session "$_AM_HERDR_SESSION" "$@"
+    [ -z "$_AM_HERDR_MACHINE" ] || set -- --machine "$_AM_HERDR_MACHINE" "$@"
+    exec "$AM_HERDR" "$@"
+}
+am_authorize_pane() {
+    _auth_kind=$1; _auth_target=$2
+    _auth_base=$(am_daemon_base) || { printf 'agents-manager: 此 bot 啟動時沒拿到 daemon 位址，請在 AG Man 重啟它\n' >&2; return 77; }
+    [ -n "$(am_bot_token)" ] && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || { printf 'agents-manager: 無法確認 daemon 授權\n' >&2; return 77; }
+    _auth_body=$(python3 -c 'import json,sys; print(json.dumps(dict(kind=sys.argv[1],target=sys.argv[2] or None,session=sys.argv[3] or None,machine=sys.argv[4] or None)))' "$_auth_kind" "$_auth_target" "$_AM_HERDR_SESSION" "$_AM_HERDR_MACHINE") || return 75
+    _auth_out=$(am_principal_curl --noproxy '*' --connect-timeout 2 --max-time 5 -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_auth_body" "${_auth_base%/}/api/pane-authorize") || { printf 'agents-manager: daemon 無法確認 pane 授權\n' >&2; return 75; }
+    _auth_code=$(printf '%s\n' "$_auth_out" | tail -n 1); _auth_reply=$(printf '%s\n' "$_auth_out" | sed '$d')
+    case "$_auth_code" in 2??) : ;; 401|403) printf 'agents-manager: daemon 拒絕 pane 操作；請改用 agent prompt：%s\n' "$_auth_reply" >&2; return 77 ;; *) printf 'agents-manager: daemon 無法確認 pane 授權（HTTP %s）\n' "$_auth_code" >&2; return 75 ;; esac
+    _AM_AUTH_PANE=$(printf '%s' "$_auth_reply" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("allowed") is True; p=d.get("pane_id", ""); assert isinstance(p,str); print(p)' 2>/dev/null) || { printf 'agents-manager: daemon 授權回應無法解析\n' >&2; return 75; }
+    [ "$_auth_kind" = context ] || [ -n "$_AM_AUTH_PANE" ] || return 75
+}
+if [ -n "${AM_BOT_ID:-}" ] && { [ -n "$_AM_HERDR_REMOTE" ] || [ -n "$_AM_HERDR_REMOTE_KEYS" ] || [ -n "$_AM_HERDR_HANDOFF" ]; }; then
+    case "${1:-} ${2:-}" in
+        'agent prompt'|'agent start'|'agent send-keys'|'agent attach'|'agent rename'|'pane send-text'|'pane send-keys'|'pane run'|'pane close'|'pane rename'|'pane input'|'pane report-agent'|'pane report-agent-session'|'pane release-agent'|'pane report-metadata'|'tab close'|'workspace close')
+            printf 'agents-manager: 無法驗證遠端 attach／handoff 的寫入目標\n' >&2; exit 75 ;;
+    esac
+fi
+if [ -n "${AM_BOT_ID:-}" ] && { [ -n "$_AM_HERDR_SESSION" ] || [ -n "$_AM_HERDR_MACHINE" ]; }; then
+    case "${1:-} ${2:-}" in
+        'agent prompt'|'agent start') am_authorize_pane context '' || exit $? ;;
+    esac
+fi
+
+am_authorize_report() {
+    _report_target=""; _report_skip=0; _report_current=0
+    for _arg in "$@"; do
+        if [ "$_report_skip" = pane ]; then [ -z "$_report_target" ] || return 75; _report_target=$_arg; _report_skip=0; continue; fi
+        if [ "$_report_skip" = value ]; then _report_skip=0; continue; fi
+        case "$_arg" in
+            --) break ;;
+            --pane) _report_skip=pane ;;
+            --pane=*) [ -z "$_report_target" ] || return 75; _report_target=${_arg#--pane=} ;;
+            --current) printf 'agents-manager: 請明確指定 pane ID，以確認寫入目標\n' >&2; return 75 ;;
+            --source|--agent|--state|--message|--seq|--agent-session-id|--agent-session-path|--session-start-source|--applies-to-source|--title|--display-agent|--state-label|--token|--clear-token|--ttl-ms|--right-click) _report_skip=value ;;
+            --*=*|--clear-title|--clear-display-agent|--clear-state-labels) : ;;
+            -*) printf 'agents-manager: 無法驗證 pane 選項 %s\n' "$_arg" >&2; return 75 ;;
+            *) [ -z "$_report_target" ] || return 75; _report_target=$_arg ;;
+        esac
+    done
+    [ "$_report_skip" = 0 ] || return 75
+    if [ "$_report_current" = 1 ]; then [ -z "$_report_target" ] || return 75; _report_target=${HERDR_PANE_ID:-}; fi
+    [ -n "$_report_target" ] || { printf 'agents-manager: pane 目標不明\n' >&2; return 75; }
+    am_authorize_pane pane "$_report_target"
+}
+
 case "${1:-} ${2:-}" in
-    "agent start") am_agent_start "$@" ;;
-    "agent rename") am_agent_rename "$@" ;;
+    "agent start")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            _start_pane=""; _want_pane=0; _help=0
+            for _arg in "$@"; do
+                [ "$_arg" != -- ] || break
+                if [ "$_want_pane" = 1 ]; then _start_pane=$_arg; _want_pane=0; continue; fi
+                case "$_arg" in --pane) _want_pane=1 ;; --pane=*) _start_pane=${_arg#--pane=} ;; -h|--help) _help=1 ;; esac
+            done
+            if [ "$_help" = 0 ] && [ -n "$_start_pane" ]; then am_authorize_pane pane "$_start_pane" || exit $?; fi
+        fi
+        am_agent_start "$@" ;;
+    "agent rename")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${3:-}" in ''|-*) printf 'agents-manager: agent 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
+            am_authorize_pane agent "$3" || exit $?
+            shift 3; am_exec agent rename "$_AM_AUTH_PANE" "$@"
+        fi
+        am_agent_rename "$@" ;;
     "agent prompt") am_agent_prompt "$@" ;;
     "agent list") am_agent_list "$@" ;;
+    "pane send-text" | "pane send-keys" | "pane run" | "pane close")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${3:-}" in ''|-*) printf 'agents-manager: pane 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
+            am_authorize_pane pane "$3" || exit $?
+            _sub=$2; shift 3; am_exec pane "$_sub" "$_AM_AUTH_PANE" "$@"
+        fi
+        am_exec "$@" ;;
+    "pane rename")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${3:-}" in ''|-*) printf 'agents-manager: pane 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
+            am_authorize_pane pane "$3" || exit $?
+            shift 3; am_exec pane rename "$_AM_AUTH_PANE" "$@"
+        fi
+        am_exec "$@" ;;
+    "pane input" | "pane report-agent" | "pane report-agent-session" | "pane release-agent" | "pane report-metadata")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            _sub1=$1; _sub2=$2; shift 2
+            am_authorize_report "$@" || exit $?
+            am_exec "$_sub1" "$_sub2" "$@"
+        fi
+        am_exec "$@" ;;
+    "agent send-keys" | "agent attach")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${3:-}" in ''|-*) printf 'agents-manager: agent 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
+            am_authorize_pane agent "$3" || exit $?
+            _sub=$2; shift 3; am_exec agent "$_sub" "$_AM_AUTH_PANE" "$@"
+        fi
+        am_exec "$@" ;;
     # `workspace create` 也會開一個 root pane（herdr 0.8.2 有 `--env`）。`worktree create/open` 同樣開 workspace，
     # 但沒有 `--env` 可帶：那個 pane 由 herdr server 開，什麼 AM_* 都拿不到，hook 不會觸發，也就不會送錯實例。
     "pane split" | "pane new" | "tab create" | "workspace create") am_forward_with_env "$@" ;;
-    *) exec "$AM_HERDR" "$@" ;;
+    "tab close" | "workspace close")
+        if [ -n "${AM_BOT_ID:-}" ]; then printf 'agents-manager: 請逐個關閉已授權的 pane\n' >&2; exit 77; fi
+        am_exec "$@" ;;
+    *)
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${1:-} ${2:-}" in
+                "agent "|"agent list"|"agent get"|"agent read"|"agent focus"|"agent wait"|"agent explain"|"agent --help"|"agent -h"|"pane "|"pane list"|"pane current"|"pane get"|"pane layout"|"pane process-info"|"pane neighbor"|"pane edges"|"pane focus"|"pane resize"|"pane zoom"|"pane read"|"pane wait-output"|"pane --help"|"pane -h") : ;;
+                agent\ *|pane\ *) printf 'agents-manager: 不支援或無法驗證的 agent／pane 操作\n' >&2; exit 75 ;;
+            esac
+        fi
+        am_exec "$@" ;;
 esac
 "##;
 
