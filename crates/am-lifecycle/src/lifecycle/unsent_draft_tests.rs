@@ -132,20 +132,20 @@ async fn a_spent_resend_budget_is_not_pressed_again_after_a_restart() {
     assert_eq!(alerts(&f).await, vec![format!("undelivered_draft:{}", f.turn_id)]);
 }
 
-/// 框是空的：照原本收成 completed_fallback，一個鍵都不按、不吵巡檢。
+/// 框是空的但沒有送達證據：標失敗並保留 unknown，一個鍵都不按。
 #[tokio::test]
-async fn an_empty_composer_keeps_the_fallback_close() {
+async fn an_empty_composer_does_not_prove_submission() {
     let f = fixture(&[], false).await;
     let t0 = Instant::now();
     observe_at(&f.run_id, "idle", t0);
 
     assert_eq!(sweep(&f, t0, 6).await, vec![f.turn_id.clone()]);
-    assert_eq!(turn(&f).await.status, "completed_fallback");
+    assert_eq!(turn(&f).await.status, "failed");
     assert_eq!(enters(&f), 0);
     assert!(alerts(&f).await.is_empty());
 }
 
-/// 框裡是使用者改過的字（對不上這一則）：不按任何鍵，suspect alert 只發一次，照原本收尾。
+/// 框裡是使用者改過的字：不按任何鍵，告警並標記送出未確認。
 #[tokio::test]
 async fn an_edited_draft_is_never_submitted_and_raises_one_suspect_alert() {
     let f = fixture(&["請照 #1872 的裁示把 CI 的快取鍵改成別的名字"], false).await;
@@ -154,7 +154,7 @@ async fn an_edited_draft_is_never_submitted_and_raises_one_suspect_alert() {
 
     assert_eq!(sweep(&f, t0, 6).await, vec![f.turn_id.clone()]);
     assert_eq!(enters(&f), 0, "不是我們那一則就不按");
-    assert_eq!(turn(&f).await.status, "completed_fallback");
+    assert_eq!(turn(&f).await.status, "failed");
     let key = format!("undelivered_draft_suspect:{}", f.turn_id);
     assert_eq!(alerts(&f).await, vec![key.clone()]);
 
@@ -256,7 +256,7 @@ async fn an_unreadable_screen_waits_three_sweeps_then_closes_as_before() {
             assert_eq!(closed, vec![f.turn_id.clone()], "第 {UNREADABLE_ROUNDS} 輪還讀不到：照原本收尾");
         }
     }
-    assert_eq!(turn(&f).await.status, "completed_fallback");
+    assert_eq!(turn(&f).await.status, "failed");
     assert_eq!(enters(&f), 0);
     assert!(alerts(&f).await.is_empty());
     let warns: Vec<String> = logs.text().lines()

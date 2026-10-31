@@ -916,6 +916,19 @@
     }
 
     #[tokio::test]
+    async fn unconfirmed_delivery_notice_does_not_claim_completion() {
+        let f = fixture("hook", "failed").await;
+        make_parent_busy(&f, "parent-unconfirmed").await;
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("DELETE FROM messages WHERE turn_id=? AND role='assistant'").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
+        sweep(&f.env.app).await;
+        let content: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id LIKE 'child-done:%' AND m.role='user' ORDER BY m.rowid DESC LIMIT 1")
+            .bind(&f.parent_conversation).fetch_one(&f.env.app.db).await.unwrap();
+        assert!(content.contains("送出未確認"), "{content}");
+        assert!(!content.contains("已完成一個回合"), "{content}");
+    }
+
+    #[tokio::test]
     async fn reconciliation_combines_unreported_turns_and_does_not_wait_for_a_reply() {
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-combined").await;

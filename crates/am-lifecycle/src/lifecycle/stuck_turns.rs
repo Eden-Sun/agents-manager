@@ -273,7 +273,7 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
 
 /// 卡住的回合怎麼收：`delivery='pending'` ＝ 從來沒送出去（送達結果還沒寫、也沒證據字進過 pane），
 /// 不能收成 `completed_fallback`（那等於說「agent 做完了」），收成 failed 請使用者重送（#903）。
-/// 其餘（`ok`／`unknown`…）才走「證得出回覆就 completed、否則 completed_fallback」那條。
+/// `unknown` 若仍未驗證，收成 failed 並保留 unknown；已確認送達才可走完成備援。
 async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     if turn.delivery == "pending" {
         return fail_never_sent(app, run, turn).await;
@@ -306,10 +306,27 @@ async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::
     Ok(true)
 }
 
+async fn fail_unconfirmed(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    let mut tx = app.db().begin().await?;
+    let out = super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "送出未確認").await?;
+    if out != super::turn_controller::Outcome::Applied { return Ok(false) }
+    let m = insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", "送出未確認：無法證明這則訊息已送出或收到回覆。請檢查終端輸入框，再決定是否送出；不要盲目重送。", "system", false, None).await?;
+    tx.commit().await?;
+    emit_message_added(app, &bot.id, m).await;
+    app.emit_turn(&turn.id).await;
+    Ok(true)
+}
+
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
 async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     let reply = proven_reply(app, &bot, run, turn).await?;
+    // An idle screen is not evidence that an unconfirmed submission ran. Preserve
+    // unknown delivery so an operator can inspect the composer without resending.
+    if turn.delivery == "unknown" && turn.delivery_verified == 0 {
+        return fail_unconfirmed(app, run, turn).await;
+    }
     let already_answered: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'assistant')")
             .bind(&turn.id)
@@ -937,6 +954,19 @@ mod tests {
         sqlx::query("UPDATE hook_events SET processed_at=? WHERE bot_id=?").bind(db::iso_in(-900)).bind(&f.bot_id).execute(app.db()).await.unwrap();
         assert!(sweep_at(&app, None, t0 + 8 * MIN, 5 * MIN).await.is_empty(), "從上次看到活動重新計時，還沒滿門檻");
         assert_eq!(sweep_at(&app, None, t0 + 14 * MIN, 5 * MIN).await, vec![f.turn_id.clone()], "hook 停了、再閒置滿門檻才收");
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_idle_turn_is_not_completed_without_a_proven_reply() {
+        let f = stuck("unconfirmed prompt").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(app.db()).await.unwrap();
+        let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert!(close_locked(&app, &run, &t, CloseWhy::Idle(5 * MIN)).await.unwrap());
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "unknown"));
+        assert!(messages(&app, &f.turn_id).await.iter().any(|m| m.2.contains("送出未確認")));
     }
 
     /// #903：`delivery='pending'` ＝ 從來沒送出去（送達結果沒寫、也沒有字進過 pane）的 in_flight 回合，閒置 watchdog
