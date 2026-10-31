@@ -2,6 +2,9 @@
 //! and is projected from TOML (see `projection.rs`).
 
 pub mod api_bot;
+pub mod executor_pool;
+
+pub use executor_pool::ExecutorPoolEntry;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -218,6 +221,9 @@ pub struct BotCfg {
     pub create_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_fingerprint: Option<String>,
+    /// 增聘時套用的執行者池條目 id（只寫 config，不進 DB）；用量＝同專案 executor 中此值相同的 bot 數。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_entry: Option<String>,
 }
 
 impl Default for BotCfg {
@@ -241,6 +247,7 @@ impl Default for BotCfg {
             herdr_session: None,
             create_request_id: None,
             create_fingerprint: None,
+            pool_entry: None,
         }
     }
 }
@@ -315,8 +322,9 @@ pub struct ProjectCfg {
     pub label: String,
     #[serde(default = "default_project_mode")]
     pub mode: String,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub executor_pool: std::collections::BTreeMap<String, u32>,
+    /// 專家模式執行者池（條目陣列；舊版 `{kind: n}` 讀進來自動轉換，見 `executor_pool.rs`）。
+    #[serde(default, deserialize_with = "executor_pool::deserialize_pool", skip_serializing_if = "Vec::is_empty")]
+    pub executor_pool: Vec<ExecutorPoolEntry>,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -334,7 +342,7 @@ impl Default for ProjectCfg {
             path: String::new(),
             label: String::new(),
             mode: default_project_mode(),
-            executor_pool: std::collections::BTreeMap::new(),
+            executor_pool: Vec::new(),
             host: default_host(),
             bots: Vec::new(),
             handed_off_to: None,

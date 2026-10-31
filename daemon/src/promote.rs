@@ -431,6 +431,7 @@ pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Op
         herdr_session: None,
         create_request_id: None,
         create_fingerprint: None,
+        pool_entry: None,
     }
 }
 

@@ -957,6 +957,7 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
+                pool_entry: None,
             }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
@@ -1636,6 +1637,7 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
+                pool_entry: None,
             }],
             handed_off_to: None,
         });

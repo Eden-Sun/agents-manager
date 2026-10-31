@@ -5761,7 +5761,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 專家模式保護額度開關（使用者 2026-10-31）：
 1. 成員開關 `manager_use`（bool，預設 true）：顧問／執行者各自有「可被管理者使用」切換。設為 false 時，manager 不能派工給它（relay prompt 拒絕 `member_disabled`）、不能啟動／重啟／停止／刪除它（`manager_may_start` 拒絕）、`agm peers --for` 列為不可派（eligible=false、理由「使用者已停用」）。ResultNotice 不受影響；使用者自己照常可用。
-2. 執行者池 `executor_pool`（專案層級，kind→正整數，預設空 `{}`）：限制 manager 可增聘的 kind 與數量（例如 `codex = 2, claude = 1`）。manager 透過 `agm hire` 增聘時，該 kind 不在池內拒絕 403 `kind_not_in_pool`；同專案存活且角色為 executor 的同 kind 成員數已達數量拒絕 409 `executor_pool_full`。池是空的＝manager 不能增聘（預設保守以保護額度）。User 角色不受池限制。
+2. 執行者池 `executor_pool`（專案層級，**條目陣列**，預設空）：每條目是一組 kind／model／effort／context 上限加數量（1..=10），最多 20 條，由使用者自己加入（web 提供「加入建議」，不自動加）。config 寫成 `[[projects.executor_pool]]`，DB 的 `projects.executor_pool_json` 存同一陣列。manager 透過 `agm hire --pool <id>` 增聘（或只給 `--kind` 且恰好只有一條符合時省略 `--pool`），kind／model／effort／context 由條目決定；已用數＝同專案 executor 中 config 記 `pool_entry` 等於該 id 的 bot 數，滿了 409 `executor_pool_full`。池是空的＝manager 不能增聘（預設保守以保護額度）。User 角色不受池限制，可選擇套用條目。舊形狀 `{kind: n}` 讀進來轉成 `<kind>-legacy` 條目（model 空＝任何模型），下一次寫入改存陣列。條目規則與 context 啟動參數的完整定義見 `docs/API.md` 的 `PATCH /api/projects/{id}`；context 寫法：claude 用 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（實測語意見該 commit 訊息），codex 用 `-c model_auto_compact_token_limit`，agy 不支援。
 
 派工授權以 daemon 當下資料判斷為準，shim 是第一道防線；啟用 expert 前檢查活躍 bot 的 shim，過期時列出 bot 並拒絕。已啟用後 shim 過期標待套用並告警；reconcile 發現非管理者開 child 時仍追蹤並向管理者與 ops 告警。
 

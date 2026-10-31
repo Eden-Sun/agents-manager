@@ -300,6 +300,7 @@ async fn ensure_imported_bot(
             herdr_session: Some(SESSION.to_string()),
             create_request_id: None,
             create_fingerprint: None,
+            pool_entry: None,
         });
         Ok(name)
     })
