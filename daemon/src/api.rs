@@ -314,6 +314,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/prompt", post(prompt_bot))
         .route("/relay-requests", get(list_relay_requests))
         .route("/relay/resolve", get(resolve_relay_target))
+        .route("/pane-authorize", post(crate::pane_authority::authorize))
         // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
         .route("/bots/{id}/share", get(crate::runners::share_admin::get_share).post(crate::runners::share_admin::post_share))
         .route("/bots/{id}/share/rotate", post(crate::runners::share_admin::post_rotate))

@@ -82,6 +82,7 @@
             write_script(
                 &fake.join("curl"),
                 "case \"$*\" in\n\
+                   */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200'; exit 0 ;;\n\
                    */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
@@ -743,6 +744,7 @@ esac"#, calls.display()));
                 &format!(
                     "printf '%s\\n' \"$@\" >> '{}'\n\
                      case \"$*\" in\n\
+                       */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
                        */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                        */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
@@ -1241,6 +1243,50 @@ esac"#, calls.display()));
     }
 
     #[test]
+    fn macos_local_global_flags_cannot_bypass_daemon_auth() {
+        for args in [vec!["--session", "test", "agent", "prompt", "w1:p2", "work"], vec!["--machine", "local", "agent", "start", "kid", "--pane", "w1:p9"], vec!["--unknown", "x", "pane", "run", "w1:p2", "work"]] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log");
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_TEST_NO_DAEMON", "1"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let (_, _, rc) = s.run_full(&env, &args); assert_ne!(rc, 0, "{args:?}");
+            assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty(), "{args:?}");
+        }
+        for args in [vec!["--session", "test", "agent", "prompt", "w1:p2", "work"], vec!["--machine", "local", "agent", "start", "kid", "--pane", "w1:p9"]] {
+            let s = Sandbox::new(); let log = s.dir.join("calls.log"); s.install_fake_curl("printf '{\"error\":\"forbidden\"}\\n403'");
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+            let (_, _, rc) = s.run_full(&env, &args); assert_ne!(rc, 0, "{args:?}");
+            assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn macos_local_authorized_global_flags_are_forwarded_to_child_start() {
+        let s = Sandbox::new(); let log = s.dir.join("global.log");
+        write_script(&s.dir.join("real/herdr"), &format!("printf '%s\\n' \"$*\" >> '{}'; while [ \"$1\" = --session ] || [ \"$1\" = --machine ]; do shift 2; done; case \"$1 $2\" in 'pane get') printf '{{\"result\":{{\"pane\":{{\"agent\":null}}}}}}\\n';; 'agent get') printf '{{\"result\":{{\"agent\":{{\"pane_id\":\"w1:p9\"}}}}}}\\n';; *) printf '{{\"ok\":true}}\\n';; esac", log.display()));
+        s.install_fake_curl("case \"$*\" in */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200';; */api/spawn-authority*) printf 200;; */relay/spawn/begin*) printf '{\"permit_id\":\"permit\"}\\n200';; *) printf '{}\\n200';; esac");
+        let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex")];
+        let (_, err, rc) = s.run_full(&env, &["--machine", "local", "--session", "test", "agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("--machine local --session test agent start parent-kid"), "{calls}");
+    }
+
+    #[test]
+    fn macos_local_managed_pane_writes_require_daemon_and_preserve_global_flags() {
+        for args in [vec!["pane", "send-text", "w1:p2", "text"], vec!["pane", "send-keys", "w1:p2", "Enter"], vec!["pane", "run", "w1:p2", "command"], vec!["pane", "close", "w1:p2"], vec!["agent", "send-keys", "peer", "Esc"], vec!["agent", "attach", "peer"], vec!["agent", "rename", "peer", "new-name"], vec!["pane", "rename", "w1:p2", "name"], vec!["pane", "input", "--right-click", "menu", "w1:p2"], vec!["pane", "report-agent", "--source", "test", "--agent", "claude", "--state", "idle", "w1:p2"], vec!["pane", "report-agent-session", "--source", "test", "--agent", "claude", "w1:p2"], vec!["pane", "release-agent", "--source", "test", "--agent", "claude", "w1:p2"], vec!["pane", "report-metadata", "--source", "test", "w1:p2"]] {
+            for script in ["exit 7", "printf '{}\\n403'", "printf '{}\\n503'", "exit 28", "printf '{}\\n200'"] {
+                let s = Sandbox::new(); let log = s.dir.join("calls.log"); s.install_fake_curl(script);
+                let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+                let (_, _, rc) = s.run_full(&env, &args); assert_ne!(rc, 0, "{args:?} {script}");
+                assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty(), "{args:?} {script}");
+            }
+        }
+        let s = Sandbox::new(); s.install_fake_curl("printf '{\"allowed\":true,\"pane_id\":\"w1:p2\"}\\n200'");
+        let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788")];
+        let (out, err, rc) = s.run_full(&env, &["--session", "test", "pane", "send-text", "w1:p2", "hello"]);
+        assert_eq!(rc, 0, "{err}"); assert_eq!(out, ["--session", "test", "pane", "send-text", "w1:p2", "hello"]);
+    }
+
+    #[test]
     fn macos_local_managed_actions_fail_closed_without_daemon() {
         let s = Sandbox::new(); let log = s.dir.join("calls.log");
         let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PROJECT_MODE", "parent_child"), ("AM_TEST_NO_DAEMON", "1"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
@@ -1513,6 +1559,7 @@ esac"#, calls.display()));
         s.install_fake_curl(&format!(
             "printf '%s\\n' \"$*\" >> '{}'\n\
              case \"$*\" in\n\
+               */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
                */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
                */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
@@ -1645,6 +1692,7 @@ esac"#, calls.display()));
         let s = Sandbox::new();
         s.install_fake_curl(
             "case \"$*\" in\n\
+               */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200'; exit 0 ;;\n\
                */api/spawn-authority*) printf '200'; exit 0 ;;\n\
                    */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
@@ -2305,7 +2353,8 @@ esac"#, calls.display()));
         }
         let (out, _) = s.run(&[("AM_AGENT_NAME", "original"), ("AM_BOT_ID", "other-bot")], &["pane", "split", "--pane", "w1:p1"]);
         assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["other-bot"], "reusing a display name cannot reuse parent identity");
-        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "renamed"), ("AM_BOT_ID", "stable-bot")], &["agent", "rename", "w1:p2", "free-display-name"]);
+        s.install_fake_curl("printf '{\"allowed\":true,\"pane_id\":\"w1:p2\"}\\n200'");
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "renamed"), ("AM_BOT_ID", "stable-bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788")], &["agent", "rename", "w1:p2", "free-display-name"]);
         assert_eq!(rc, 0);
         assert_eq!(out, ["agent", "rename", "w1:p2", "free-display-name"]);
     }
