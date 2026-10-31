@@ -613,6 +613,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   （權限框、AskUserQuestion、`Session paused`…；認法同上一段 Session paused 的選單部分，不要求標題）時，那不是回合結束，
   選單那幾行更不是回覆：`try_fallback` 與沒有 hook 的擷取都不收、不存，回合留在飛，等使用者選完由 hook／下一次 idle edge 收；
   一直沒人選就走 §4.3b（blocked 的不收；herdr 判 idle 的照 §4.3b 寫系統說明收尾，不存畫面）。
+  但若 Codex 的 rollout 已經證明該 turn 完成（有 `task_complete` 或提問回覆）時，不受終端殘留選項選單阻擋，優先自 rollout 結算回合。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
 - **Claude 取最後一段文字、不取工具呼叫**（#753）：回合結束時畫面最底的 `⏺` 常是工具呼叫（`⏺ Bash(…)`＋`⎿` 輸出），真正的回答在它上面。
@@ -1713,6 +1714,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限；「在框裡」＝框裡讀回的列逐列對得上原文的一段，列內的字與空白逐字相同，接縫不計；尾段被改、或後面接了別的字就不是我們那則，不按 Enter，#1669）；
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
+   （判失敗前若 Codex rollout 已有該回合的 `task_complete`，直接走備援補收，不誤判為 stall；畫面若有 `• Ran ` 等指令執行標誌亦認作活躍）；
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
    退款或 failed 與說明的交易寫入失敗也保留 watchdog；未打字的重送退款欠帳在下一輪先補成功，才重新認領額度（#1487）。
    補送按過鍵證明不了、`delivery='unknown'` 卻寫不進去就欠著，每一輪先補，補上之前不判（打過的字可能已經被收下）。

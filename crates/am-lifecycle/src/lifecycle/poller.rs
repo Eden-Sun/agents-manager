@@ -1423,6 +1423,24 @@ async fn fail_stalled_turn(
         tracing::info!(turn = %turn_id, bot = %bot_id, "prompt stall watchdog saw hook activity for this turn; not failing it");
         return Ok(());
     }
+    // Codex: 判失敗前先看 rollout 是否已完成回覆（例如 task_complete）。
+    // 若已有回覆，走 try_fallback 補收，不寫 stall 誤報。
+    let bot_for_check = db::bot(app.db(), bot_id).await?;
+    if bot_for_check.as_ref().is_some_and(|b| b.kind == "codex") {
+        let sent = turn_echo_texts(app, turn_id).await.unwrap_or_default();
+        let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
+        let rollout_done = if let Some(bot) = bot_for_check.as_ref() {
+            super::codex_rollout::codex_rollout_outcome_for_in_flight(app, bot, &run, &sent, &since_iso).await.is_some()
+        } else {
+            false
+        };
+        if rollout_done {
+            tracing::info!(turn = %turn_id, bot = %bot_id, "prompt stall watchdog saw codex rollout task_complete; attempting try_fallback");
+            if try_fallback(app, run_id, Some(turn_id)).await.unwrap_or(false) {
+                return Ok(());
+            }
+        }
+    }
     // Quote the screen, never assert a cause (the host may well be logged in).
     let mut snapshot: Option<String> = None;
     let mut hints: Vec<String> = Vec::new();
@@ -3864,6 +3882,60 @@ mod issue_17_tests {
         let idle = fixture("claude", IDLE_BOX).await;
         fail_stalled_turn(&idle.env.app, &idle.run_id, &idle.bot_id, &idle.turn_id, false, false, None).await.unwrap();
         assert_eq!(turn_status(&idle).await, "failed", "沒有任何活動跡象：照舊判 STALL");
+    }
+
+    /// Codex: fail_stalled_turn 前若 rollout 已有 task_complete，走 try_fallback 補收而不判 failed
+    #[tokio::test]
+    async fn codex_stall_recovers_via_rollout_fallback_instead_of_failing() {
+        let f = fixture("codex", "› Reply with PONG\n\n• idle\n").await;
+        let app = f.env.app.clone();
+        let session = "01a18888-1994-7000-8000-000000000099";
+        let home = f.env.dir.join("codex");
+        let logs = home.join("sessions/2026/10/25");
+        std::fs::create_dir_all(&logs).unwrap();
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CODEX_HOME": home}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET native_session_id=? WHERE id=?")
+            .bind(session)
+            .bind(&f.run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET prompt_text='Reply with PONG',delivery='ok',created_at='2026-10-25T10:00:00Z',delivered_at='2026-10-25T10:00:01Z' WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let log_file = logs.join(format!("rollout-2026-10-25T10-00-00-{session}.jsonl"));
+        let start = serde_json::json!({
+            "type": "event_msg",
+            "timestamp": "2026-10-25T10:00:01Z",
+            "payload": {"type": "task_started", "turn_id": "native-1"}
+        }).to_string();
+        let user = serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-10-25T10:00:02Z",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Reply with PONG"}]}
+        }).to_string();
+        let event = serde_json::json!({
+            "type": "event_msg",
+            "timestamp": "2026-10-25T10:00:05Z",
+            "payload": {"type": "task_complete", "turn_id": "native-1", "last_agent_message": "work finished successfully"}
+        }).to_string();
+        std::fs::write(&log_file, format!("{start}\n{user}\n{event}\n")).unwrap();
+
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, None).await.unwrap();
+        assert_eq!(turn_status(&f).await, "completed", "rollout 已完成時由 fallback 補收為 completed，不判 failed");
+        let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(reply, "work finished successfully");
     }
 
     /// issue #1769：遠端 hook 先躺在那台的 spool，要等一輪掃描才進 `hook_events`；本機的 12 秒不能原封不動套給遠端。

@@ -691,8 +691,16 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         app.prompt_suggestion_on_idle(&run);
     }
 
-    // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
-    if prev == "working" && status == "idle" {
+    // §4.3: working -> idle arms the terminal fallback.
+    // blocked -> idle 時若有 in-flight turn（例如 codex 中途被彈出視窗短暫 blocked），也 arm_fallback 收回合。
+    let inflight = if prev == "working" && status == "idle" {
+        true
+    } else if prev == "blocked" && status == "idle" {
+        crate::db::in_flight_turn(&app.db, &run.id).await.ok().flatten().is_some()
+    } else {
+        false
+    };
+    if inflight {
         app.arm_fallback(&run.id, &run.bot_id).await;
         // A prompt queued while the agent was still working waits for exactly this edge.
         app.schedule_flush_queued(&run.bot_id);
@@ -1010,6 +1018,35 @@ mod tests {
         handle_status(&app, LOCAL_HOST, "test", &unknown).await;
         let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "idle", "running Codex unknown keeps the #732 idle behavior");
+    }
+
+    /// blocked -> idle 時若有 in-flight turn，也排定 terminal fallback。
+    #[tokio::test]
+    async fn a_blocked_to_idle_transition_arms_fallback_when_turn_is_in_flight() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "blocked-idle").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let conv = crate::db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES ('turn-bi', ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(&conv)
+            .bind(&run)
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+
+        let idle_ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"agent": "codex", "pane_id": pane, "agent_status": "idle"}),
+        };
+        handle_status(&app, LOCAL_HOST, "test", &idle_ev).await;
+        let timers = app.fallback_timers.lock().await;
+        assert!(timers.contains_key(&run), "blocked->idle 在有 in-flight turn 時要 arm fallback");
     }
 
     /// herdr 之後若多出一個我們不認得的 agent_status 值：`runs.agent_status` 有 CHECK 只認四種，原樣寫進去整句 UPDATE 失敗
