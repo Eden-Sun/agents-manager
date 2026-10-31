@@ -1,11 +1,11 @@
 /* components/HeadMoreMenu.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* Action strip stays absolute so hover does not resize the title; active header reserves 112px (108 + 4px inset). */
+/* Action strip stays absolute so hover does not resize the title; active header reserves 80px (72px buttons + 4px inset + 4px gap). */
 
 .project-head.selected,
 .project-head:has(.project-head-actions:hover),
 .project-head:focus-within,
 .project-head:has(.head-menu-pop) {
-  padding-right: 112px;
+  padding-right: 80px;
 }
 
 .bot-row.compact .bot-actions .menu-btn,
