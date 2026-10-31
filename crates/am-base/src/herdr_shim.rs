@@ -922,7 +922,17 @@ am_agent_prompt() {
         _code=$(printf '%s\n' "$_out" | tail -n 1)
         _reply=$(printf '%s\n' "$_out" | sed '$d')
         case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}；用 --request-id $_request_id 原樣重試" ;; esac
-        if [ -z "$_expect_result" ]; then printf '%s\n' "$_reply"; return 0; fi
+        if [ -z "$_expect_result" ]; then
+            printf '%s' "$_reply" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin)
+ assert isinstance(d,dict)
+ turn=all(isinstance(d.get(k),str) and d[k] for k in ("turn_id","message_id","delivery"))
+ routed=isinstance(d.get("routed"),str) and bool(d["routed"]) and d.get("queued") is True and isinstance(d.get("inbox_event_id"),str) and bool(d["inbox_event_id"])
+ assert turn or routed
+except Exception: sys.exit(1)' || am_announce_refuse 75 "$_requested" "daemon 回應無法確認；用 --request-id $_request_id 原樣重試"
+            printf '%s\n' "$_reply"; return 0
+        fi
         _rid=$(printf '%s' "$_reply" | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])') || am_announce_refuse 75 "$_requested" "回應缺少 request_id；用 --request-id $_request_id 原樣重試"
         printf 'request_id=%s\n' "$_rid"
         return 0
