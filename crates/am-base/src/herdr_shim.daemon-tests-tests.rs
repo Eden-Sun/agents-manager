@@ -1448,16 +1448,14 @@
         assert!(err.contains("禁止再開子 agent") && err.contains("`p-1` 決定"), "{err}");
     }
 
+    /// 全域 claude_codex 模式已撤回：啟動時帶進 pane 的舊 `AM_MODEL_MODE` 不能再擋 codex 開 child。
     #[test]
-    fn codex_cannot_start_children_only_in_claude_codex_mode() {
+    fn stale_claude_codex_env_does_not_block_codex_children() {
         let s = Sandbox::new();
         let env = [("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex"), ("AM_MODEL_MODE", "claude_codex")];
-        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p9"]);
-        assert_eq!(rc, 77);
-        assert!(out.is_empty());
-        assert!(err.contains("codex 不開 child") && err.contains("claude parent"), "{err}");
-        let (_, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex")], &["agent", "start", "kid", "--pane", "w1:p9"]);
-        assert_eq!(rc, 0);
+        let (_, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!err.contains("codex 不開 child"), "{err}");
     }
 
     #[test]
