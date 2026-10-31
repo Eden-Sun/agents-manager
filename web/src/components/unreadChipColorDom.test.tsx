@@ -148,8 +148,9 @@ test('codex 主力晶片底色（.cache-codex）：淺藍底在淺色與深色�
     const bgPanel = hexOf(body, 'bg-panel')
     const text = hexOf(body, 'text')
     const textDim = hexOf(body, 'text-dim')
-    // cache-codex 使用 12% lamp-blue
-    const effBgRgb = [0, 1, 2].map((i) => rgb(lampBlue)[i] * 0.12 + rgb(bgPanel)[i] * 0.88)
+    // 已用區疊上 12% 深藍與 6% 淡藍，驗證最深背景的對比。
+    const alpha = 0.12 + 0.06 * 0.88
+    const effBgRgb = [0, 1, 2].map((i) => rgb(lampBlue)[i] * alpha + rgb(bgPanel)[i] * (1 - alpha))
     const effBgLum = 0.2126 * lin(effBgRgb[0]) + 0.7152 * lin(effBgRgb[1]) + 0.0722 * lin(effBgRgb[2])
     // 中性字 color-mix(in srgb, var(--text) 55%, var(--text-dim))
     const textRgb = [0, 1, 2].map((i) => rgb(text)[i] * 0.55 + rgb(textDim)[i] * 0.45)

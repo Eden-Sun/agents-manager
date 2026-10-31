@@ -19,7 +19,7 @@ function seed() {
     id, name: id, project_id: 'p1', kind, identity: null, model: null, effort: null, args: [], env: {}, autostart: false,
     inject_hooks: true, auto_approve: false, managed_by: 'user', parent_bot_id: null, primary, primary_position: 0, cwd: null,
   })
-  const bots = [bot('fresh', 'claude', true), bot('warn', 'codex', true), bot('low', 'claude', true), bot('cold', 'claude', true), bot('busy', 'claude', true), bot('grok', 'grok', true), bot('other', 'claude', false)]
+  const bots = [bot('fresh', 'claude', true), bot('warn', 'claude', true), bot('low', 'claude', true), bot('cold', 'claude', true), bot('busy', 'claude', true), bot('grok', 'grok', true), bot('other', 'claude', false)]
   const run = (id: string, status: string, last: string | null, ttl: number | null) => ({
     id: `r-${id}`, bot_id: id, state: 'running', agent_status: status, pane_id: 'w1:p1', started_at: minAgo(300), agent_status_since: minAgo(300),
     last_api_at: last, cache_ttl_secs: ttl,
@@ -86,16 +86,17 @@ test('主力晶片：底色依剩餘時間填色、綠黃紅分級；已涼回�
   assert.ok(![...other.classList].some((c) => c.startsWith('cache-')))
 })
 
-test('codex 主力晶片：底色固定為淺藍（.cache-codex），不畫倒數寬度，不多加元素', async () => {
+test('codex 主力晶片：未知用量維持淡藍、標明未知，不多加元素', async () => {
   seed()
   const s = useStore.getState()
   const codexRun = { ...s.runs.warn, cache_ttl_secs: null }
-  useStore.setState({ runs: { ...s.runs, warn: codexRun } } as never)
+  useStore.setState({ bots: s.bots.map((b) => b.id === 'warn' ? { ...b, kind: 'codex' } : b), runs: { ...s.runs, warn: codexRun } } as never)
   await mount(<UnreadChip />)
   const el = chip('warn')
   assert.ok(el.classList.contains('cache-codex'), '帶 .cache-codex class')
   assert.ok(!el.classList.contains('cache-warn') && !el.classList.contains('cache-fresh'), '不帶倒數等級 class')
-  assert.equal(el.style.getPropertyValue('--cache-fill'), '', '不畫倒數寬度 (--cache-fill 為空)')
+  assert.equal(el.style.getPropertyValue('--cache-fill'), '0.0%', '未知時不假裝滿格')
+  assert.match(el.title, /context.*未知/)
   // 子元素結構與一般主力晶片一致
   const shape = (e: HTMLElement) => [...e.children].map((c) => c.className).join('|')
   assert.equal(shape(el), shape(chip('cold')), '不多加元素、不改尺寸結構')
@@ -127,4 +128,22 @@ test('不用保溫（keep_warm_skip）：晶片不畫倒數底色、tooltip 講�
   assert.ok(chip('fresh').classList.contains('cache-fresh'))
   assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '75.0%')
   assert.match(await hoverText('fresh'), /快取約 45 分後到期/)
+})
+
+
+test('codex 主力依實際 session token 比例填色，超界與缺值安全處理', async () => {
+  seed()
+  const s = useStore.getState()
+  useStore.setState({ bots: s.bots.map((b) => b.id === 'warn' ? { ...b, kind: 'codex' } : b), runs: { ...s.runs, warn: { ...s.runs.warn, cache_ttl_secs: null, prompt_cache: { context_used_tokens: 128000, context_size: 512000 } } } } as never)
+  await mount(<UnreadChip />)
+  assert.equal(chip('warn').style.getPropertyValue('--cache-fill'), '25.0%')
+  assert.match(chip('warn').title, /context.*25/)
+  await act(() => { const state = useStore.getState(); useStore.setState({ runs: { ...state.runs, warn: { ...state.runs.warn, prompt_cache: { context_used_tokens: 500, context_size: 100 } } } } as never) })
+  assert.equal(chip('warn').style.getPropertyValue('--cache-fill'), '100.0%')
+  await act(() => { const state = useStore.getState(); useStore.setState({ runs: { ...state.runs, warn: { ...state.runs.warn, prompt_cache: { context_used_tokens: 0, context_size: 100 } } } } as never) })
+  assert.equal(chip('warn').style.getPropertyValue('--cache-fill'), '0.0%')
+  assert.doesNotMatch(chip('warn').title, /context.*未知/)
+  await act(() => { const state = useStore.getState(); useStore.setState({ runs: { ...state.runs, warn: { ...state.runs.warn, prompt_cache: { context_used_tokens: -1, context_size: 100 } } } } as never) })
+  assert.equal(chip('warn').style.getPropertyValue('--cache-fill'), '0.0%')
+  assert.match(chip('warn').title, /context.*未知/)
 })
