@@ -70,7 +70,7 @@ export function Notices() {
   return (
     <div className="notices" role="status" aria-live="polite">
       {notices.map((n) => (
-        <div key={n.id} className={`notice ${n.kind}`} role={n.kind === 'error' ? 'alert' : undefined}>
+        <div key={n.id} className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}`} role={n.kind === 'error' ? 'alert' : undefined}>
           <span style={{ flex: 1 }}>{n.text}</span>
           {n.action ? (
             <button
