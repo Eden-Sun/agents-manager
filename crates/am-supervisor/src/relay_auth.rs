@@ -41,9 +41,10 @@ pub trait RelayTokenVerify: Send + Sync {
     fn ct_eq(&self, a: &str, b: &str) -> bool;
 }
 
-/// 驗證 mission 端點 relay 身份需要的 AGM 角色檢查能力。
-pub trait RelayAuthOps: RelayTokenVerify {
-    async fn is_agm_role(&self, headers: &HeaderMap) -> Result<bool, LcError>;
+impl<T: RelayTokenVerify + ?Sized> RelayTokenVerify for std::sync::Arc<T> {
+    fn ct_eq(&self, a: &str, b: &str) -> bool {
+        (**self).ct_eq(a, b)
+    }
 }
 
 /// 驗過之後的來源（bot id）。
@@ -90,7 +91,7 @@ enum Proof {
     Absent,
 }
 
-/// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 與 mission 端點共用的那一段（issue #409）。
+/// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 的驗證（issue #409）。
 /// `claimed` 已 trim、非空、不是 `daemon`。
 async fn prove_bot(app: &(impl crate::capabilities::Db + RelayTokenVerify), headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
     // A Bot principal (the `/api` middleware already proved `X-AM-Bot-Id` + its token) may only
@@ -133,35 +134,4 @@ fn mismatch() -> LcError {
         "reason": "relay_from_mismatch",
         "message": "X-AM-Bot-Id／X-AM-Bot-Token 不是 relay_from 那顆 bot 的；只能以自己的身份轉述",
     }))
-}
-
-/// mission 端點（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from`（issue #409）。
-/// 省略 effective claim＝`Ok(None)`（User principal 本人）；the mission API handler derives a missing or blank Bot claim from the authenticated `X-AM-Bot-Id`.
-/// 跟 `/prompt` 共用 `prove_bot`，差在兩格：
-///
-/// | relay_from | 條件 | 結果 |
-/// |---|---|---|
-/// | `daemon` | 呼叫端是驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`） | 照收：`agm mission … --as-daemon` |
-/// | `daemon` | 其他 | **403** `relay_from_reserved` |
-/// | bot | 沒帶 `X-AM-Bot-Token` | **403** `relay_from_token_required`，沒有相容期 |
-///
-/// 沒有相容期：唯一帶 `relay_from` 的呼叫端是 `bin/agm`，它在角色自己的 pane 裡一律帶那顆的 token
-/// （`scripts/agm.py` `bot_auth_headers`）；web 從不帶。照收就得在 `mission_events` 另記「未驗證」。
-pub async fn authenticate_mission(app: &(impl crate::capabilities::Db + RelayAuthOps), headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
-    let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
-    if claimed == crate::agent_relay::DAEMON_SENDER {
-        // API middleware already rejected invalid Bot proof with 401; here `None` means a valid Bot that is not an AGM role.
-        if app.is_agm_role(headers).await? {
-            return Ok(Some(claimed.to_string()));
-        }
-        return Err(LcError::Forbidden(json!({
-            "error": "forbidden",
-            "reason": "relay_from_reserved",
-            "message": "relay_from=daemon 只給驗證過的 AGM 角色 bot 代記（X-AM-Bot-Id＋X-AM-Bot-Token）",
-        })));
-    }
-    match prove_bot(app, headers, claimed).await? {
-        Proof::Verified(from) => Ok(Some(from)),
-        Proof::Absent => Err(token_required()),
-    }
 }

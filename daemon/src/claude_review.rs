@@ -629,7 +629,6 @@ async fn dispatch_to_bot(app: &Arc<App>, kind: &str, to: &str, found: &Found) ->
         true,
         None,
         None,
-        None,
         app_ports_p13::ReplyMark::default(),
     )
     .await?;
@@ -739,7 +738,7 @@ mod tests {
         // kick 派的那一筆（正文是它自己的版本）。
         let kick_text = format!("{TASK}\n---\n本次：舊版 2.1.276 → 新版 2.1.277\n");
         app_ports_p13::supervisor_assign(
-            &app, "resp1", &kick_text, &request_id("claude", "2.1.277"), None, &[], None, true, None, None, None,
+            &app, "resp1", &kick_text, &request_id("claude", "2.1.277"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -755,7 +754,7 @@ mod tests {
 
         // 直接用不同正文重送同一個 crid 會被擋成 409（所以上面那條短路是必要的）。
         let err = app_ports_p13::supervisor_assign(
-            &app, "resp1", "完全不同的正文", &request_id("claude", "2.1.277"), None, &[], None, true, None, None, None,
+            &app, "resp1", "完全不同的正文", &request_id("claude", "2.1.277"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -874,7 +873,7 @@ mod tests {
         assert_eq!(review_state(&app, "claude", "2.1.280").await.unwrap().state, "none");
 
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -909,7 +908,7 @@ mod tests {
             .await
             .unwrap();
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.281"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.281"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -982,7 +981,7 @@ mod tests {
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.282"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.282"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1012,7 +1011,7 @@ mod tests {
         review_fixture(&app, &e.project_id).await;
         let base = ui_request_id("claude", "2.1.282");
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1021,7 +1020,7 @@ mod tests {
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
         let r2 = format!("{base}-r2");
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "重新解析", &r2, None, &[], None, true, None, None, None,
+            &app, "resp1", "重新解析", &r2, None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1042,7 +1041,7 @@ mod tests {
         review_fixture(&app, &e.project_id).await;
         let base = ui_request_id("claude", "2.1.282");
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1050,7 +1049,7 @@ mod tests {
         let head = app_ports_p13::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
         let leaf_crid = format!("{base}-f1");
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
+            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1081,7 +1080,7 @@ mod tests {
             .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1090,7 +1089,7 @@ mod tests {
 
         let leaf_crid = format!("{}-f1", ui_request_id("claude", "2.1.280"));
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
+            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1126,7 +1125,7 @@ mod tests {
             .await
             .unwrap();
         let parent = app_ports_p13::supervisor_assign(
-            &app, "resp1", "第一件", "parent-link", None, &[], None, true, None, None, None,
+            &app, "resp1", "第一件", "parent-link", None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1141,7 +1140,7 @@ mod tests {
         .unwrap();
 
         let result = app_ports_p13::supervisor_assign(
-            &app, "resp1", "接續", "child-link", None, &[], Some(&parent_id), true, None, None, None,
+            &app, "resp1", "接續", "child-link", None, &[], Some(&parent_id), true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await;
@@ -1161,7 +1160,7 @@ mod tests {
             .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1183,7 +1182,7 @@ mod tests {
         assert!(app_ports_p13::assignment_by_crid(&app.db, &crid).await.unwrap().is_none(), "確實是沒人用過的 crid");
 
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "重新解析一下", &crid, None, &[], follow_up_of.as_deref(), true, None, None, None,
+            &app, "resp1", "重新解析一下", &crid, None, &[], follow_up_of.as_deref(), true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1233,7 +1232,7 @@ mod tests {
         review_fixture(&app, &e.project_id).await;
         app.changelog.seed("herdr", herdr_md).await;
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
+            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1257,7 +1256,7 @@ mod tests {
         let again = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
         assert_eq!(again.0["duplicate"], json!(true), "重按回同一筆");
         let kick = app_ports_p13::supervisor_assign(
-            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
+            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await
@@ -1312,7 +1311,7 @@ mod tests {
             .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
         app_ports_p13::supervisor_assign(
-            &app, "resp1", "解析 codex", &ui_request_id("codex", "0.157.0"), None, &[], None, true, None, None, None,
+            &app, "resp1", "解析 codex", &ui_request_id("codex", "0.157.0"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
         )
         .await

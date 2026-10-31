@@ -803,7 +803,7 @@ pub(crate) mod flow_tests {
         let app = app().await;
         configure_responder(&app).await;
         let out = crate::supervisor::assign(
-            &app, "resp", "交接：builder 卡在 rebase，請你接手協調", "handover-1", None, &[], None, false, None, None, Some(Role::Patrol), ReplyMark::default(),
+            &app, "resp", "交接：builder 卡在 rebase，請你接手協調", "handover-1", None, &[], None, false, None, Some(Role::Patrol), ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -827,7 +827,7 @@ pub(crate) mod flow_tests {
         turn_for(&app, "resp", "run-r", "c-r", "t-r").await;
         roles::mark_delivered(&app.db, &[ev[0].id.clone()], Role::Responder, "t-r", "ok").await.unwrap();
         let back = crate::supervisor::assign(
-            &app, "patrol", "收到，我接手 builder", "handover-1-ack", None, &[], None, false, None, None, Some(Role::Responder),
+            &app, "patrol", "收到，我接手 builder", "handover-1-ack", None, &[], None, false, None, Some(Role::Responder),
             ReplyMark { ack: true, reply_to: None },
         )
         .await
@@ -839,7 +839,7 @@ pub(crate) mod flow_tests {
 
         // 同一個回合裡另一句「要使用者裁示」沒有標記：那是新的事，叫醒巡檢（review 2026-09-16 H1 的第二條路）。
         let ask = crate::supervisor::assign(
-            &app, "patrol", "builder 要刪使用者的 worktree，需要使用者裁示", "handover-1-ask", None, &[], None, false, None, None, Some(Role::Responder),
+            &app, "patrol", "builder 要刪使用者的 worktree，需要使用者裁示", "handover-1-ask", None, &[], None, false, None, Some(Role::Responder),
             ReplyMark::default(),
         )
         .await
@@ -850,14 +850,14 @@ pub(crate) mod flow_tests {
 
         // 對一般 bot 的交辦帶 ack 是呼叫端搞錯了，不要默默吞掉。
         let err = crate::supervisor::assign(
-            &app, "w1", "去做", "ack-to-worker", None, &[], None, false, None, None, Some(Role::Responder), ReplyMark { ack: true, reply_to: None },
+            &app, "w1", "去做", "ack-to-worker", None, &[], None, false, None, Some(Role::Responder), ReplyMark { ack: true, reply_to: None },
         )
         .await;
         assert!(matches!(err, Err(LcError::Bad(_))), "{err:?}");
 
         // 對自己交辦仍然是錯的。
         let err = crate::supervisor::assign(
-            &app, "resp", "自言自語", "self-1", None, &[], None, false, None, None, Some(Role::Responder), ReplyMark::default(),
+            &app, "resp", "自言自語", "self-1", None, &[], None, false, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await;
         assert!(err.is_err());
@@ -886,12 +886,12 @@ pub(crate) mod flow_tests {
         }
 
         let by_responder = crate::supervisor::assign(
-            &app, "w1", "去修 builder 的 rebase", "src-resp", None, &[], None, true, None, None, Some(Role::Responder), ReplyMark::default(),
+            &app, "w1", "去修 builder 的 rebase", "src-resp", None, &[], None, true, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await
         .unwrap();
         let by_patrol = crate::supervisor::assign(
-            &app, "w2", "去看登入流程", "src-patrol", None, &[], None, true, None, None, Some(Role::Patrol), ReplyMark::default(),
+            &app, "w2", "去看登入流程", "src-patrol", None, &[], None, true, None, Some(Role::Patrol), ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -920,7 +920,7 @@ pub(crate) mod flow_tests {
 
         // 認不出呼叫者就不猜：記成交辦文字本身，不替某個人編一句話。
         let anon = crate::supervisor::assign(
-            &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, None, ReplyMark::default(),
+            &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -930,7 +930,7 @@ pub(crate) mod flow_tests {
 
         // 明講別人的回合也不行。
         let err = crate::supervisor::assign(
-            &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, None, Some(Role::Responder), ReplyMark::default(),
+            &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await;
         assert!(err.is_err(), "協調者不能指巡檢的回合當來源");

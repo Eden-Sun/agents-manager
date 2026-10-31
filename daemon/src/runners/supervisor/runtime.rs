@@ -8,7 +8,7 @@ use crate::supervisor::controller::{
     iso_in, late_reply_for_turn, note_classify_result, notify, on_turn_done, past, quota_reset_at,
     reconcile, recover_unacked, resume_quota_blocked, MAX_AUTO_SWITCHES, SWITCH_COOLDOWN_SECS,
 };
-use crate::supervisor::ports::{HostProbes, JudgeOps, MissionOps, TurnOps};
+use crate::supervisor::ports::{HostProbes, JudgeOps, TurnOps};
 use crate::supervisor::store;
 use serde_json::json;
 use std::sync::Arc;
@@ -151,8 +151,6 @@ pub(crate) fn tick_once(app: &Arc<App>) -> Boxed<'_> {
         tick_responder_notify(app).await;
         tick_watchdog(app).await;
         tick_responder_watchdog(app).await;
-        tick_mission_wake_stalled(app).await;
-        tick_mission_sweep_temp_bots(app).await;
         // 閒置太久的 bot 收起來省 RAM（§6.11）。巡邏自己節流成每分鐘一次，
         // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
         super::timing::seg(app, "idle_sleep", async { super::idle_sleep::tick(app) }).await;
@@ -219,7 +217,7 @@ fn tick_roles(app: &Arc<App>) -> Boxed<'_> {
         // `role IS NULL`，而 `due_for` 三個分支全都比 `roles::OWNER`，
         // 所以那些事件對兩個通知者同時隱形——沒人被叫醒、`notify_attempts` 也不會累積
         // （走不到 `notify_exhausted`）。以前這裡是 `let _ =`，連一行 log 都沒有。
-        // 整拍不因此中止：後面幾段（watchdog、mission、idle_sleep）跟分類無關，
+        // 整拍不因此中止：後面幾段（watchdog、idle_sleep）跟分類無關，
         // 為了一個分類失敗把它們一起停掉只會多壞一件事。
         note_classify_result(app.as_ref(), super::timing::seg(app.as_ref(), "roles_classify", super::roles::classify(&app.db)).await);
         if let Err(e) = super::timing::seg(app.as_ref(), "roles_coalesce_patrol", super::roles::coalesce_patrol(&app.db)).await {
@@ -253,16 +251,6 @@ fn tick_watchdog(app: &Arc<App>) -> Boxed<'_> {
 
 fn tick_responder_watchdog(app: &Arc<App>) -> Boxed<'_> {
     Box::pin(super::timing::seg(app, "responder_watchdog", super::responder::watchdog_tick(app)))
-}
-
-/// 群組任務停在「輪到 AGM」很久沒動靜（重啟、回合中斷）：照持久狀態推出的下一步叫醒它（issue #74）。
-fn tick_mission_wake_stalled(app: &Arc<App>) -> Boxed<'_> {
-    Box::pin(super::timing::seg(app.as_ref(), "mission_wake_stalled", app.as_ref().mission_wake_stalled()))
-}
-
-/// 結案時沒收乾淨的臨時 bot（當機、一時讀不到狀態、遠端斷線）在這裡補收（issue #343）。
-fn tick_mission_sweep_temp_bots(app: &Arc<App>) -> Boxed<'_> {
-    Box::pin(super::timing::seg(app.as_ref(), "mission_sweep_temp_bots", app.as_ref().mission_sweep_closed_temp_bots()))
 }
 
 /// 開機讀不到 supervisor 列時的重試間隔，最後一個之後一直用最後一個（#300）。
@@ -308,53 +296,6 @@ pub(crate) async fn respawn_with(app: &Arc<App>, delays: &'static [Duration]) {
                     }
                 }
             });
-        }
-    }
-}
-
-/// Re-apply mission cancellation cleanup through the App-backed review API.
-pub(crate) async fn collect_cancelled_missions(app: &Arc<App>) {
-    let idle: Vec<&str> = super::assignment_state::ALL
-        .iter()
-        .copied()
-        .filter(|s| !super::assignment_state::is_terminal(s) && !matches!(*s, "delivered" | "unknown"))
-        .collect();
-    let marks = vec!["?"; idle.len()].join(",");
-    let sql = format!(
-        "SELECT a.* FROM supervisor_assignments a JOIN missions m ON m.id = a.mission_id
-          WHERE a.supervisor_id = ? AND m.cancelled_at IS NOT NULL
-            AND (a.status IN ({marks}) OR (a.status IN ('delivered','unknown')
-                 AND EXISTS (SELECT 1 FROM turns t WHERE t.id = a.turn_id AND t.status = 'queued')))
-          ORDER BY a.created_at, a.rowid LIMIT 50"
-    );
-    let mut q = sqlx::query_as::<_, store::Assignment>(&sql).bind(store::SUPERVISOR_ID);
-    for status in &idle {
-        q = q.bind(*status);
-    }
-    let Ok(rows) = q.fetch_all(&app.db).await else { return };
-    for assignment in rows {
-        let mission = assignment.mission_id.clone().unwrap_or_default();
-        let review = super::api::ReviewIn {
-            decision: "cancel".into(),
-            actor: Some("daemon".into()),
-            source: Some("mission_cancel".into()),
-            reason: Some(format!("群組任務 {mission} 已取消（取消當下這一件沒收成，補收）")),
-            evidence: None,
-            followup_text: None,
-            followup_request_id: None,
-            followup_bot_id: None,
-            ownership: Vec::new(),
-        };
-        match super::api::post_review(
-            axum::extract::State(app.clone()),
-            axum::extract::Path(assignment.id.clone()),
-            axum::http::HeaderMap::new(),
-            axum::Json(review),
-        )
-        .await
-        {
-            Ok(_) => tracing::info!(assignment = %assignment.id, mission, "collected an assignment its cancelled mission left open"),
-            Err(error) => tracing::warn!(assignment = %assignment.id, mission, error = ?error, "could not collect an assignment its cancelled mission left open"),
         }
     }
 }

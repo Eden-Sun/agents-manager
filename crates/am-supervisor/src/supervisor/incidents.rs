@@ -519,7 +519,7 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                 severity: "critical".into(),
                 detail: json!({
                     "consecutive_failures": failures,
-                    "action": "看 daemon.log 裡「roles::classify 失敗」那幾行的 error；分類不通時 bot 申請、核准與 mission 事件都不會被送出",
+                    "action": "看 daemon.log 裡「roles::classify 失敗」那幾行的 error；分類不通時 bot 申請與核准都不會被送出",
                 })
                 .to_string(),
             });

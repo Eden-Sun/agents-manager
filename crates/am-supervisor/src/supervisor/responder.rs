@@ -8,7 +8,7 @@
 //! * 使用者入口只有巡檢一個。
 //! * **額度用完就等**。事件留在 inbox、狀態寫 `waiting_quota` 與下次重試時間。**例外是核准**：
 //!   `approval_requested` 開超過 5 分鐘而協調者不可用（含撞限）時改派給巡檢，見 `failover.rs`
-//!   與 SPEC §18.15。其餘種類（bot 的申請、mission 事件）照舊留在協調者佇列等它回來。
+//!   與 SPEC §18.15。其餘種類（bot 的申請）照舊留在協調者佇列等它回來。
 
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
@@ -570,7 +570,7 @@ async fn report_missing(db: &SqlitePool, bot_id: &str) {
         None,
         None,
         None,
-        &json!({"bot_id": bot_id, "action": "`bin/agm responder setup` 再 `responder start`；bot 申請與 mission 事件留在協調者佇列，等超過 5 分鐘的核准會改派給巡檢"}),
+        &json!({"bot_id": bot_id, "action": "`bin/agm responder setup` 再 `responder start`；bot 申請留在協調者佇列，等超過 5 分鐘的核准會改派給巡檢"}),
     )
     .await;
     if matches!(pushed, Ok(Some(_))) {
@@ -591,7 +591,7 @@ async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilitie
         None,
         None,
         None,
-        &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請與 mission 事件留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
+        &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
     )
     .await;
     let Ok(Some(_)) = pushed else { return };
@@ -848,7 +848,7 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
             // issue #421：這句以前寫「不會改由巡檢處理」。核准現在會改派（開超過 5 分鐘就換巡檢裁示），
             // 其餘種類才是真的留著等——UI 讀的就是這段字，寫錯會讓人以為核准還在協調者手上。
             let detail = format!(
-                "{} 的額度見底；{next} 再試。bot 申請與 mission 事件留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
+                "{} 的額度見底；{next} 再試。bot 申請留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
                 bot.identity.as_deref().unwrap_or("(身份不明)")
             );
             let _ = roles::set_status(app.db(), Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
