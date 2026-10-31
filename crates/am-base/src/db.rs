@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS relay_requests (
   created_at TEXT NOT NULL, answered_at TEXT, notified_at TEXT,
   notice_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL, processed_at TEXT,
   attempts INTEGER NOT NULL DEFAULT 0, error TEXT, alerted_at TEXT,
+  track TEXT,
   UNIQUE(from_bot_id, to_bot_id, client_request_id),
   UNIQUE(to_turn_id)
 );
@@ -577,6 +578,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // Remove obsolete project group read marks.
     (74, "1b4fc0fe9e17728b"),
     (75, "dab5e06d25106ac2"),
+    // 專家模式 track（2026-10-31）：`relay_requests.track`。
+    (76, "f00a57c2bd7cfbfa"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -846,6 +849,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
         // issue #1779：跑完就清空對話（排程勾了 clear_after）。
         ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
+        // 專家模式 track（2026-10-31）：relay_requests 所屬的票號或模組。
+        ("relay_requests", "track", "ALTER TABLE relay_requests ADD COLUMN track TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

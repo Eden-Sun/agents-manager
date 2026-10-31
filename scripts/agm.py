@@ -1793,7 +1793,8 @@ def cmd_peers(client: Client, cfg: dict, args) -> object:
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
         raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
-    return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers")
+    query = {"for": args.for_track} if getattr(args, "for_track", None) else None
+    return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers", query)
 
 
 def cmd_role(client: Client, cfg: dict, args) -> object:
@@ -2813,6 +2814,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_handoff)
 
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
+    s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
     s.set_defaults(func=cmd_peers)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／none）")
     s.add_argument("bot_id")

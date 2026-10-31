@@ -7344,6 +7344,8 @@ struct PromptIn {
     /// 帶 `true`＝這一則觸發的回覆照樣出現在分享頁（例如替 bot 補一句要對 end user 說的話）。
     #[serde(default)]
     share_reply_visible: bool,
+    #[serde(default)]
+    track: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -7496,8 +7498,8 @@ async fn prompt_bot(
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
-        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,?,?,?,'pending',?)")
-            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
+        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES(?,?,?,?,?,?,'pending',?,?)")
+            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
         #[cfg(test)]
         crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
         let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=?")
@@ -10386,7 +10388,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false };
+        let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false, track: None };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -16278,6 +16280,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
+            track: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
@@ -16308,6 +16311,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
+            track: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
@@ -16394,6 +16398,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
+            track: None,
         };
         let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await.expect_err("unsigned relay");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
@@ -16424,6 +16429,7 @@ mod relay_from_auth_tests {
                 submit_draft: submit,
                 expect_draft_token: expect.map(str::to_string),
                 share_reply_visible: false,
+                track: None,
             };
             // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
             let mut headers = HeaderMap::new();
