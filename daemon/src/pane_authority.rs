@@ -24,18 +24,12 @@ pub(crate) async fn authorize(
     Extension(principal): Extension<RequestPrincipal>,
     Json(input): Json<PaneAuthority>,
 ) -> Result<Json<Value>, LcError> {
-    let RequestPrincipal::Bot(bot_id) = principal else {
-        return Err(LcError::Forbidden(json!({"error":"forbidden"})));
+    let caller = match principal {
+        RequestPrincipal::Bot(bot_id) => PaneCaller { bot_id, is_child_principal: false },
+        RequestPrincipal::Child { child_id, .. } => PaneCaller { bot_id: child_id, is_child_principal: true },
+        _ => return Err(LcError::Forbidden(json!({"error":"forbidden"}))),
     };
-    authorize_caller(
-        app,
-        PaneCaller {
-            bot_id,
-            is_child_principal: false,
-        },
-        input,
-    )
-    .await
+    authorize_caller(app, caller, input).await
 }
 
 pub(crate) async fn authorize_caller(

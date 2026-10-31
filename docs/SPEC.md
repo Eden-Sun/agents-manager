@@ -6027,3 +6027,5 @@ expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒�
 受管 bot 的 herdr 全域旗標先解析，session／machine 必須經 daemon 核對；無法安全辨認的寫入旗標拒絕。pane send-text、send-keys、run、close 與 agent send-keys、attach、rename 等操作必須先向 daemon 驗證目標：只允許自己的 pane、自己的 child 或非 agent shell，其他 bot／agent 拒絕並提示用 agent prompt；狀態不明拒絕。child principal 不繼承可控制 child 的權限。
 
 受管 bot（有 AM_BOT_ID）向其他 agent 發 prompt 與開 child，唯一入口是 daemon 授權；本機使用 AM_PORT 或 AM_DAEMON_URL，遠端使用 AM_DAEMON_URL。位址缺失、daemon 不可達、拒絕或回應不明時拒絕操作，不走 spool 或 herdr 直送；因此 daemon 不可達時無法派工。未受管 pane 維持原有行為。遠端 run 啟動時未取得位址，在網頁顯示「待套用（需重啟）」；不自動重啟。expert 僅 manager 可開 child，既有 child 不可再開 child；child 向自己 parent 回報仍經 daemon 授權。
+
+已驗證 child 可透過 spawn fence 建立 shell pane；daemon 以 child 憑證決定身分並僅接受 pane 用途，不允許 child 建立 agent。child 可操作自己的 pane 與非 agent pane，不能操作 parent 或其他 agent 的 pane。

@@ -1286,7 +1286,7 @@ esac"#, calls.display()));
     fn macos_local_authorized_global_flags_are_forwarded_to_child_start() {
         let s = Sandbox::new(); let log = s.dir.join("global.log");
         write_script(&s.dir.join("real/herdr"), &format!("printf '%s\\n' \"$*\" >> '{}'; while [ \"$1\" = --session ] || [ \"$1\" = --machine ]; do shift 2; done; case \"$1 $2\" in 'pane get') printf '{{\"result\":{{\"pane\":{{\"agent\":null}}}}}}\\n';; 'agent get') printf '{{\"result\":{{\"agent\":{{\"pane_id\":\"w1:p9\"}}}}}}\\n';; *) printf '{{\"ok\":true}}\\n';; esac", log.display()));
-        s.install_fake_curl("case \"$*\" in */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200';; */api/spawn-authority*) printf 200;; */relay/spawn/begin*) printf '{\"permit_id\":\"permit\"}\\n200';; *) printf '{}\\n200';; esac");
+        s.install_fake_curl("case \"$*\" in */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200';; */api/spawn-authority*) printf 200;; */relay/spawn/begin*) printf '{\"permit_id\":\"permit\",\"spawn_id\":\"spawn\",\"child_token\":\"child-token\"}\\n200';; *) printf '{}\\n200';; esac");
         let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_AGENT_NAME", "parent"), ("AM_KIND", "codex")];
         let (_, err, rc) = s.run_full(&env, &["--machine", "local", "--session", "test", "agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
         assert_eq!(rc, 0, "{err}");
@@ -2172,6 +2172,49 @@ esac"#, calls.display()));
             let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
         });
         (port, server)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn macos_local_child_credential_can_create_and_use_shell_but_not_parent_pane() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "credential-parent").await;
+        let child = crate::testing::claude_bot(&e.app, &e.project_id, "credential-child").await;
+        sqlx::query("UPDATE bots SET managed_by='child',parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&child.id).execute(&e.app.db).await.unwrap();
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let run = crate::testing::fake_run(&e.app, &child.id).await;
+        sqlx::query("UPDATE runs SET native_session_id='sess-1' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+        let child_pane = format!("pane-{}", child.id); let parent_pane = format!("pane-{}", parent.id);
+        e.herdr.set_agent("credential-parent-child", &child_pane, true);
+        e.herdr.set_agent("credential-parent", &parent_pane, false);
+        let spawn = crate::db::ulid(); let token = crate::projection::new_token();
+        sqlx::query("INSERT INTO child_credentials(spawn_id,token_hash,parent_bot_id,child_name,host,herdr_session,pane_id,state,created_at,expires_at,child_bot_id,run_id) VALUES(?,?,?,'credential-parent-child','local','test',?,'active',?,?,?,?)")
+            .bind(&spawn).bind(crate::child_credentials::hash_token(&token)).bind(&parent.id).bind(&child_pane).bind(crate::db::now()).bind(crate::db::iso_in(900)).bind(&child.id).bind(&run).execute(&e.app.db).await.unwrap();
+        use tower::ServiceExt as _;
+        let denied = axum::http::Request::builder().method("POST").uri("/relay/spawn/begin")
+            .header("host", "127.0.0.1:7799").header("X-AM-Child-Spawn-Id", &spawn).header("X-AM-Child-Token", &token)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(format!("bot_id={}&purpose=agent", parent.id))).unwrap();
+        let response = crate::api::router(e.app.clone()).oneshot(denied).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let denial = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let denial: serde_json::Value = serde_json::from_slice(&denial).unwrap();
+        assert_eq!(denial["reason"], "child_scope_denied");
+        let (_, shell) = e.app.herdr.workspace_create("/tmp", "shell", serde_json::json!({})).await.unwrap();
+        let created = serde_json::json!({"result":{"pane":{"pane_id":shell.pane_id}}}).to_string();
+        let (port, server) = serve_daemon_router(e.app.clone()).await;
+        let vars: Vec<(&str, String)> = vec![("AM_BOT_ID", parent.id.clone()), ("AM_BOT_TOKEN", "parent-inherited".into()), ("AM_CHILD_OF", parent.id.clone()), ("AM_CHILD_SPAWN_ID", spawn), ("AM_CHILD_TOKEN", token), ("AM_PORT", port.to_string()), ("AM_TEST_CREATE_JSON", created)];
+        let shell_id = shell.pane_id.clone(); let parent_id = parent_pane.clone();
+        let s = Sandbox::new(); std::fs::remove_file(s.dir.join("real/curl")).unwrap();
+        let results = tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> = vars.iter().map(|(k,v)| (*k,v.as_str())).collect();
+            [s.run_full(&env, &["pane", "split", "--pane", &child_pane]), s.run_full(&env, &["pane", "send-text", &shell_id, "hello"]), s.run_full(&env, &["pane", "send-text", &parent_id, "forbidden"]), s.run_full(&env, &["agent", "list"]), s.run_full(&env, &["agent", "start", "grandchild", "--pane", &shell_id])]
+        }).await.unwrap();
+        assert_eq!(results[0].2, 0, "{:?}", results[0]);
+        assert_eq!(results[1].2, 0, "{:?}", results[1]);
+        assert_ne!(results[2].2, 0, "{:?}", results[2]); assert!(results[2].0.is_empty());
+        assert_eq!(results[3].2, 0, "{:?}", results[3]);
+        assert_eq!(results[4].2, 77, "{:?}", results[4]);
+        server.abort();
     }
 
     /// #1456（#1412 的回歸）：bot 在自己的 pane 裡開子 pane，shim 經**真的** router 跟 daemon 走完 spawn fence。

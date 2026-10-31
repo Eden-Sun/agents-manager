@@ -1305,7 +1305,7 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         let path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or_else(|| req.uri().path());
         let is_read = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
         let allowed_prompt = *req.method() == axum::http::Method::POST && decoded_bot_path_segments(path).is_some_and(|p| p == vec!["api", "bots", child.parent_id.as_str(), "prompt"]);
-        if !is_read && !allowed_prompt { return (StatusCode::FORBIDDEN, Json(json!({"error":"child_scope_denied"}))).into_response(); }
+        if !is_read && !allowed_prompt && !(*req.method() == axum::http::Method::POST && path == "/api/pane-authorize") { return (StatusCode::FORBIDDEN, Json(json!({"error":"child_scope_denied"}))).into_response(); }
         RequestPrincipal::Child { child_id: child.child_id, parent_bot_id: child.parent_id }
     } else if has_bot || has_service {
         // A presented identity is decisive: partial, invalid, or mixed credentials never fall

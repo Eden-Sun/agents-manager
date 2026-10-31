@@ -34,6 +34,28 @@ async fn authenticated_bot(app: &impl crate::capabilities::Db, bot_id: &str, tok
     }
 }
 
+// Child requests use their own verified identity, never the inherited parent token.
+async fn spawn_actor(app: &Arc<App>, headers: &axum::http::HeaderMap, claimed: &str) -> Result<(crate::db::Bot, bool), (StatusCode, Json<Value>)> {
+    let child = headers.contains_key("X-AM-Child-Spawn-Id") || headers.contains_key("X-AM-Child-Token");
+    if child {
+        if headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token") || headers.contains_key("X-AM-Token") || headers.contains_key("X-AM-Service-Id") || headers.contains_key("X-AM-Service-Token") {
+            return Err(fail(StatusCode::UNAUTHORIZED, "mixed_proof", "mixed credentials"));
+        }
+        let id = headers.get("X-AM-Child-Spawn-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let token = headers.get("X-AM-Child-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let identity = crate::child_credentials::authenticate(app, id, token).await.map_err(|status| fail(status, "bad_child_proof", "child credential unavailable or invalid"))?;
+        if claimed != identity.parent_id && claimed != identity.child_id { return Err(fail(StatusCode::FORBIDDEN, "child_scope_denied", "child identity mismatch")); }
+        let bot = crate::db::bot(&app.db, &identity.child_id).await.map_err(|_| fail(StatusCode::SERVICE_UNAVAILABLE, "bot_unreadable", "child unavailable"))?.filter(|bot| bot.deleted_at.is_none()).ok_or_else(|| fail(StatusCode::UNAUTHORIZED, "bad_child_proof", "child unavailable"))?;
+        if crate::db::refuses_bot_principal(&app.db, &bot.id).await {
+            return Err(fail(StatusCode::FORBIDDEN, "restricted_bot", "a restricted share bot cannot spawn panes"));
+        }
+        Ok((bot, true))
+    } else {
+        let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+        authenticated_bot(app, claimed, token).await.map(|bot| (bot, false))
+    }
+}
+
 /// Drop resets a failed or cancelled `finish` so the same pane can be retried, while keeping the
 /// pane binding. A successful finish consumes the permit atomically after recording the pane.
 struct FinishClaim {
@@ -160,21 +182,13 @@ pub struct SpawnAbort {
 }
 
 /// `POST /relay/spawn/begin`: reserve the parent's credential while a shim invokes herdr.
-pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, axum::extract::Form(body): axum::extract::Form<SpawnBegin>) -> (StatusCode, Json<Value>) {
-    if headers.contains_key("X-AM-Child-Spawn-Id") || headers.contains_key("X-AM-Child-Token") {
-        let id = headers.get("X-AM-Child-Spawn-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let token = headers.get("X-AM-Child-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-        return match crate::child_credentials::authenticate(&app, id, token).await {
-            Ok(_) => fail(StatusCode::FORBIDDEN, "child_scope_denied", "children cannot spawn agents"),
-            Err(StatusCode::CONFLICT) => fail(StatusCode::CONFLICT, "child_not_registered", "child not registered"),
-            Err(status) => fail(status, "bad_child_proof", "child credential unavailable or invalid"),
-        };
-    }
-    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let bot = match authenticated_bot(&app, &body.bot_id, token).await {
-        Ok(bot) => bot,
+pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, axum::extract::Form(mut body): axum::extract::Form<SpawnBegin>) -> (StatusCode, Json<Value>) {
+    let (bot, is_child) = match spawn_actor(&app, &headers, &body.bot_id).await {
+        Ok(actor) => actor,
         Err(response) => return response,
     };
+    if is_child && body.purpose != "pane" { return fail(StatusCode::FORBIDDEN, "child_scope_denied", "children cannot spawn agents"); }
+    body.bot_id = bot.id.clone();
     let project = match crate::db::project(&app.db, &bot.project_id).await {
         Ok(Some(project)) if project.deleted_at.is_none() => project,
         _ => return fail(StatusCode::FORBIDDEN, "project_unavailable", "project unavailable; spawn refused"),
@@ -216,7 +230,7 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     }
     // Close the read-before-reserve window: a rotation may have committed between the first token
     // read and reserve(), after which its fence is already down and only this second read notices.
-    if let Err(response) = authenticated_bot(&app, &body.bot_id, token).await {
+    if let Err(response) = spawn_actor(&app, &headers, &body.bot_id).await {
         release(&app, &body.bot_id, &permit_id);
         return response;
     }
@@ -307,13 +321,13 @@ pub async fn claim(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
 pub async fn finish(
     State(app): State<Arc<App>>,
     headers: axum::http::HeaderMap,
-    axum::extract::Form(body): axum::extract::Form<SpawnFinish>,
+    axum::extract::Form(mut body): axum::extract::Form<SpawnFinish>,
 ) -> (StatusCode, Json<Value>) {
-    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let bot = match authenticated_bot(&app, &body.bot_id, token).await {
-        Ok(bot) => bot,
+    let (bot, _) = match spawn_actor(&app, &headers, &body.bot_id).await {
+        Ok(actor) => actor,
         Err(response) => return response,
     };
+    body.bot_id = bot.id.clone();
     let pane_id = body.pane_id.trim();
     if pane_id.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "pane_id_missing", "herdr did not identify the created pane; spawn remains fenced");
@@ -424,12 +438,13 @@ pub async fn finish(
 pub async fn abort(
     State(app): State<Arc<App>>,
     headers: axum::http::HeaderMap,
-    axum::extract::Form(body): axum::extract::Form<SpawnAbort>,
+    axum::extract::Form(mut body): axum::extract::Form<SpawnAbort>,
 ) -> (StatusCode, Json<Value>) {
-    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if let Err(response) = authenticated_bot(&app, &body.bot_id, token).await {
-        return response;
-    }
+    let (bot, _) = match spawn_actor(&app, &headers, &body.bot_id).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    body.bot_id = bot.id;
     let released = release(&app, &body.bot_id, &body.permit_id);
     (StatusCode::OK, Json(json!({"released": released})))
 }
