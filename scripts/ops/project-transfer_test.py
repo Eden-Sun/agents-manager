@@ -40,9 +40,9 @@ def schema_statements():
     ]
 
 
-# 協調者與群組任務的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
+# 協調者的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
 # 先建表、再補欄、最後建索引（有些索引用到 ALTER 才加的欄，例如 supervisor_inbox.role）。
-MODULES = ["crates/am-supervisor/src/supervisor/store.rs", "crates/am-supervisor/src/supervisor/roles.rs", "crates/am-supervisor/src/mission/store.rs"]
+MODULES = ["crates/am-supervisor/src/supervisor/store.rs", "crates/am-supervisor/src/supervisor/roles.rs"]
 
 
 def module_statements():
@@ -120,13 +120,6 @@ def seed_source(conn, att_file):
     x(att, ("a-dead", B2, "dead.png", "image/png", 4, att_file, att_file, "local", "m-dead", "ready", T0))
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B1, T0, "m2"))
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B2, T0, "m-dead"))
-    mission = ("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit,"
-               " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
-    x(mission, ("ms-hub", PID, "crid-ms-hub", "修 bug", "auto", "codex", "wait", T0, T0))
-    x(mission, ("ms-other", OTHER, "crid-ms-other", "別的專案", "auto", "codex", "wait", T0, T0))
-    ev = "INSERT INTO mission_events (id, mission_id, kind, text, created_at) VALUES (?,?,?,?,?)"
-    x(ev, ("me-hub", "ms-hub", "instruction", "開工", T0))
-    x(ev, ("me-other", "ms-other", "instruction", "別的", T0))
     conn.commit()
 
 
@@ -292,8 +285,7 @@ class ProjectTransferTest(unittest.TestCase):
         self.export()
         out = json.loads(self.imp().stdout)
         self.assertEqual(out["inserted"], {"projects": 1, "bots": 2, "conversations": 2, "runs": 3, "turns": 3,
-                                           "messages": 3, "attachments": 2, "bot_reads": 1,
-                                           "missions": 1, "mission_events": 1}, "群組任務跟著專案走，別的專案的不帶")
+                                           "messages": 3, "attachments": 2, "bot_reads": 1})
         self.assertIsNone(out["supervisor"], "沒加 --with-supervisor 就不碰協調者")
         self.assertEqual(out["autostart_turned_off"], ["hub-main"])
         self.assertEqual((out["runs_closed"], out["turns_failed"]), (2, 2))
@@ -508,7 +500,7 @@ class ProjectTransferTest(unittest.TestCase):
         return json.loads(gzip.decompress(slurp(self.bundle)))
 
     def sup_target(self):
-        """目標開機過：有自己的 AGM 那一列與 responder，外加會撞唯一索引的 inbox、交辦與群組任務。"""
+        """目標開機過：有自己的 AGM 那一列與 responder，外加會撞唯一索引的 inbox 與交辦。"""
         c = self.tgt()
         c.execute("INSERT INTO supervisors (id, generation, status, created_at, updated_at) VALUES ('AGM', 5, 'failed', ?, ?)", (T0, T0))
         c.execute("INSERT INTO supervisor_roles (role, bot_id, wakes, created_at, updated_at) VALUES ('responder','old-bot',1,?,?)", (T0, T0))
@@ -611,19 +603,6 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertTrue(out["dry_run"])
         self.assertEqual(out["supervisor"]["inbox_parked"], 2)
         self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
-
-    def test_a_mission_crid_collision_is_skipped_and_reported(self):
-        self.export()
-        c = self.tgt()
-        c.execute("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit,"
-                  " created_at, updated_at) VALUES ('t-ms', ?, 'crid-ms-hub', 'x', 'auto', 'codex', 'wait', ?, ?)", (PID, T0, T0))
-        c.commit()
-        c.close()
-        out = json.loads(self.imp().stdout)
-        self.assertEqual((out["inserted"]["missions"], out["inserted"]["mission_events"]), (0, 0))
-        self.assertEqual([(x["table"], x["id"]) for x in out["skipped_unique"]],
-                         [("missions", "ms-hub"), ("mission_events", "me-hub")], "任務被跳過，它的事件也不留孤兒")
-        self.assertEqual(out["inserted"]["projects"], 1, "撞到的只跳過那一筆，專案照樣搬")
 
     def test_failed_insert_rolls_back_db_and_config(self):
         self.export()
