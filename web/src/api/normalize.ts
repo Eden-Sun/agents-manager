@@ -285,6 +285,17 @@ export function toProject(v: unknown): Project | null {
       return { owner, repo, url: str(pick(g, 'url')) || `https://github.com/${owner}/${repo}` }
     })(),
     created_at: str(v.created_at),
+    executor_pool: (() => {
+      const ep = pick(v, 'executor_pool')
+      if (!isRec(ep)) return {}
+      const res: Record<string, number> = {}
+      for (const [k, val] of Object.entries(ep)) {
+        if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+          res[k] = Math.floor(val)
+        }
+      }
+      return res
+    })(),
   }
 }
 
@@ -298,6 +309,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     project_id: str(pick(v, 'project_id'), projectId ?? ''),
     name: str(pick(v, 'name'), id),
     role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' ? v.role : null,
+    manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
     role_pending: bool(v.role_pending),
     daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
