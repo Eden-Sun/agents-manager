@@ -95,6 +95,22 @@ test('project 標題列的 ⋯ 與它的選單項、確認框：不選取專案'
   assert.equal(useStore.getState().selectedProjectId, null, '點確認框不能冒泡成選取專案')
 })
 
+test('project 標題列選中時名稱正常顯示不被隱藏或擠壓', async () => {
+  useStore.setState({
+    selectedProjectId: 'p1',
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const header = document.querySelector<HTMLElement>('.project-head.selected')!
+  assert.ok(header, '應有選中的專案標題')
+  const label = header.querySelector<HTMLElement>('.project-label')!
+  assert.ok(label, '應有專案名稱元素')
+  assert.equal(label.textContent, 'proj-p1')
+  // 驗證按鈕與標題保留 aria-current 與名稱
+  const btn = header.querySelector<HTMLButtonElement>('.project-label-btn.selected')!
+  assert.equal(btn.getAttribute('aria-current'), 'true')
+})
+
 test('額度 critical 保留模型標籤，一般列與精簡子列都顯示短紅晶片', async () => {
   const critical = { used_pct: 98, low: true, critical: true, resets_at: null }
   const parent = { ...bot('b1', 'p1'), model: 'claude-opus-5' }
