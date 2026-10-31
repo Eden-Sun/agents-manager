@@ -345,6 +345,7 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
                         herdr_session: None,
                         create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL.into()),
                         create_fingerprint: None,
+                        pool_entry: None,
                     });
                     proj.bots.len() - 1
                 }

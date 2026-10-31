@@ -62,7 +62,11 @@ pub(crate) async fn list(
         peers.push(json!({"id":bot.id,"name":bot.name,"role":bot.role,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open}));
     }
     let Some(for_track) = query.for_track.as_deref() else {
-        return Ok(Json(json!({"project_id":project_id,"peers":peers})));
+        // 執行者池條目與每條的已用數（`agm hire --pool <id>` 用的 id 就從這裡看）。
+        let cfg = app.cfg.get().await;
+        let cfg_bots = cfg.projects.iter().find(|c| c.id.as_deref() == Some(project_id.as_str())).map(|c| c.bots.as_slice()).unwrap_or(&[]);
+        let pool = crate::executor_pool::list_json(&project.executor_pool(), cfg_bots);
+        return Ok(Json(json!({"project_id":project_id,"peers":peers,"executor_pool":pool})));
     };
 
     // Candidates evaluation for `for_track`

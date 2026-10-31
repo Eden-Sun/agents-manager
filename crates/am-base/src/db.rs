@@ -1409,8 +1409,9 @@ fn default_one() -> i64 {
 }
 
 impl Project {
-    pub fn executor_pool(&self) -> std::collections::BTreeMap<String, u32> {
-        serde_json::from_str(&self.executor_pool_json).unwrap_or_default()
+    /// 執行者池條目；舊的 `{kind: n}` 形狀讀進來自動轉成條目（見 `am_config::executor_pool`）。
+    pub fn executor_pool(&self) -> Vec<am_config::ExecutorPoolEntry> {
+        am_config::executor_pool::parse_pool_json(&self.executor_pool_json)
     }
 }
 

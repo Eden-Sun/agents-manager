@@ -799,6 +799,7 @@ mod tests {
                     autostart: false,
                     create_request_id: None,
                     create_fingerprint: None,
+                    pool_entry: None,
                     ..src_cfg
                 });
                 Ok(())

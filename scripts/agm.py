@@ -1808,9 +1808,11 @@ def cmd_hire(client: Client, cfg: dict, args) -> object:
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
         raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
-    body = {"name": args.name, "kind": args.kind}
-    for key in ("model", "effort", "identity"):
-        if getattr(args, key):
+    if not args.kind and not args.pool_entry:
+        raise AgmError("bad_args", "hire 需要 --kind 或 --pool <條目 id>", 2)
+    body = {"name": args.name}
+    for key in ("kind", "pool_entry", "model", "effort", "identity"):
+        if getattr(args, key, None):
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
 
@@ -2813,18 +2815,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
 
-    s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
-    s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
+    s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態（專家模式另回 executor_pool 條目與每條已用／上限）")
+    s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）；執行者池條目用 agm hire --pool <id> 增聘")
     s.set_defaults(func=cmd_peers)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／none）")
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "none"])
     s.set_defaults(func=cmd_role)
-    s = sub.add_parser("hire", help="專家模式管理者：增聘同專案執行者（不自動啟動，之後 agm bot start）")
+    s = sub.add_parser("hire", help="專家模式管理者：增聘同專案執行者（不自動啟動，之後 agm bot start）。--pool <條目 id> 套用執行者池條目（kind／model／effort／context 由條目決定）；只有一條符合 --kind 時可省略 --pool")
     s.add_argument("name")
-    s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"])
-    s.add_argument("--model")
-    s.add_argument("--effort")
+    s.add_argument("--pool", dest="pool_entry", metavar="ENTRY_ID", help="執行者池條目 id（`agm peers` 列出）")
+    s.add_argument("--kind", choices=["claude", "codex", "grok", "agy"], help="未給 --pool 時必填；給了就必須與條目一致")
+    s.add_argument("--model", help="與條目不同會被拒絕（條目 model 空字串＝任何模型）")
+    s.add_argument("--effort", help="與條目不同會被拒絕")
     s.add_argument("--identity")
     s.set_defaults(func=cmd_hire)
     s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
