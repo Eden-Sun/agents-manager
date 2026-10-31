@@ -243,6 +243,18 @@ CREATE TABLE IF NOT EXISTS spawn_claims (
   parent_run_id TEXT, herdr_session TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, PRIMARY KEY(host, herdr_session, pane_id)
 );
+-- Spawn credentials are stored as hashes and become valid only after child adoption.
+CREATE TABLE IF NOT EXISTS child_credentials (
+  spawn_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, parent_bot_id TEXT NOT NULL,
+  child_name TEXT NOT NULL, host TEXT NOT NULL, herdr_session TEXT NOT NULL, pane_id TEXT NOT NULL,
+  child_bot_id TEXT, run_id TEXT, state TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS child_credentials_pane ON child_credentials(host, herdr_session, pane_id);
+CREATE TRIGGER IF NOT EXISTS child_credential_run_closed AFTER UPDATE OF state ON runs WHEN NEW.state IN ('stopped','exited') BEGIN UPDATE child_credentials SET state='revoked' WHERE run_id=NEW.id; END;
+CREATE TRIGGER IF NOT EXISTS child_credential_bot_unlinked AFTER UPDATE OF managed_by,parent_bot_id,deleted_at ON bots WHEN NEW.managed_by<>'child' OR NEW.parent_bot_id IS NOT OLD.parent_bot_id OR NEW.deleted_at IS NOT NULL BEGIN UPDATE child_credentials SET state='revoked' WHERE child_bot_id=NEW.id; END;
+CREATE TRIGGER IF NOT EXISTS child_credential_bot_deleted AFTER DELETE ON bots BEGIN UPDATE child_credentials SET state='revoked' WHERE child_bot_id=OLD.id OR parent_bot_id=OLD.id; END;
+CREATE TRIGGER IF NOT EXISTS child_credential_run_deleted AFTER DELETE ON runs BEGIN UPDATE child_credentials SET state='revoked' WHERE run_id=OLD.id; END;
 -- 預覽模式（issue #253）：頂層 bot 的專案起的 vite dev server。一顆 bot 一列；`status` 是 off／starting／running／failed，
 -- `pane_id` 是放在該 bot 那個 tab 裡的 service pane，`off` 時是 NULL、`port` 也不再算被佔用。
 CREATE TABLE IF NOT EXISTS bot_previews (
@@ -561,6 +573,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (70, "b87dfcf444f07cd0"),
     (71, "d32e25a1e3418557"),
     (72, "1ea615a552a5e0ad"),
+    (73, "7b90de666223749d"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

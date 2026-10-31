@@ -172,6 +172,10 @@ def bot_auth_headers(cfg: dict) -> dict:
 
     pane 宣告了 bot id 就帶上該 id；沒有 token 或 token 對不上時，daemon 拒絕該 Bot 請求，
     Client 不會改用共用 User token。角色權限仍由 daemon 依驗過的 bot id 判斷。"""
+    child_id = os.environ.get("AM_CHILD_SPAWN_ID", "")
+    child_token = os.environ.get("AM_CHILD_TOKEN", "")
+    if child_id or child_token:
+        return {"X-AM-Child-Spawn-Id": child_id, "X-AM-Child-Token": child_token}
     bot = os.environ.get("AM_BOT_ID", "")
     tok = os.environ.get("AM_BOT_TOKEN") or os.environ.get("AM_HOOK_TOKEN", "")
     if bot:
@@ -260,11 +264,11 @@ class Client:
             if service_id or service_file:
                 if not service_id or not service_file:
                     raise AgmError("bad_service_auth", "AM_SERVICE_ID 與 AM_SERVICE_TOKEN_FILE 必須一起設定", 2)
-                if "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
+                if any(k in self._extra for k in ("X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token")):
                     raise AgmError("bad_service_auth", "service 與 bot 身份不能同時使用", 2)
                 headers["X-AM-Service-Id"] = service_id
                 headers["X-AM-Service-Token"] = self._read_private_token(service_file)
-            elif "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
+            elif any(k in self._extra for k in ("X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token")):
                 # Exactly one principal per request: a proven bot does not also send the shared UI token.
                 headers.update(self._extra)
             else:
@@ -272,7 +276,7 @@ class Client:
                 headers.update(self._extra)
         credential_values = tuple(
             value for name, value in headers.items()
-            if name.lower() in {"x-am-token", "x-am-bot-token", "x-am-service-token"} and value
+            if name.lower() in {"x-am-token", "x-am-bot-token", "x-am-child-token", "x-am-service-token"} and value
         )
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -1247,7 +1251,7 @@ def cmd_whoami(client: Client, cfg: dict, args) -> object:
         "role": runtime_role(cfg),
         "self_bot_id": cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id"),
         "manager_bot_id": cfg.get("manager_bot_id"),
-        "bot_token_present": bool(headers.get("X-AM-Bot-Token")),
+        "bot_token_present": bool(headers.get("X-AM-Bot-Token") or headers.get("X-AM-Child-Token")),
     }
 
 
@@ -3039,7 +3043,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
             if args.cmd in ("peers", "requests") and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
-                if not headers.get("X-AM-Bot-Token"):
+                if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)
                 url = os.environ.get("AM_DAEMON_URL")
                 if not url:
