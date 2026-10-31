@@ -1127,13 +1127,14 @@ function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
   /** 只在手機畫在彈窗最下面的「bot 給你的檔案」（#929）：手機沒有檔案暫存托盤，outbox 沒有別的入口；桌面在托盤下半段。 */
   phoneFiles?: ReactNode
   mobileOpen: boolean
+  onOpen: () => void
   onClose: () => void
 }) {
   const t = useT()
@@ -1151,7 +1152,15 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onClose
       {content}
       {phoneFiles}
     </Modal>
-  ) : content
+  ) : (
+    <>
+      <div className="context-bar">
+        {issues ? <button type="button" className="mini-btn desktop-git-info" aria-label={t('Git / 專案資訊 / 檔案')} aria-haspopup="dialog" aria-expanded={mobileOpen} onClick={onOpen}><GitIcon /> GitHub</button> : null}
+        {hasStatus ? status : null}
+      </div>
+      {issues && mobileOpen ? <Modal open title={t('Git / 專案資訊 / 檔案')} onClose={onClose}><div className="context-bar">{issues}</div></Modal> : null}
+    </>
+  )
 }
 
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
@@ -1543,6 +1552,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
       <ContextBar
         mobileOpen={gitInfoBotId === botId}
+        onOpen={() => setGitInfoBotId(botId)}
         onClose={() => setGitInfoBotId(null)}
         issues={
           phone || (tab === 'chat' && !settingsOpen) ? (
@@ -1551,7 +1561,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 projectId={bot.project_id}
                 draftKey={`bot:${botId}`}
                 inputRef={composerRef}
-                onInserted={phone ? () => setGitInfoBotId(null) : undefined}
+                onInserted={() => setGitInfoBotId(null)}
               />
               <GitBar projectId={bot.project_id} />
             </>
