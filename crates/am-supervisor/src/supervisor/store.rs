@@ -371,8 +371,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("expects_review", "ALTER TABLE supervisor_assignments ADD COLUMN expects_review INTEGER NOT NULL DEFAULT 1"),
         ("resume_at", "ALTER TABLE supervisor_assignments ADD COLUMN resume_at TEXT"),
         ("quota_retries", "ALTER TABLE supervisor_assignments ADD COLUMN quota_retries INTEGER NOT NULL DEFAULT 0"),
-        // 群組任務（mission/，docs/goals/agm-missions.md）：這件交辦屬於哪個任務、擔任哪個角色
-        // （executor | reviewer | verifier）。follow-up 會沿用父交辦的這兩欄。
+        // 舊版群組任務的欄位保留以維持資料庫相容；程式不再讀寫。
         ("mission_id", "ALTER TABLE supervisor_assignments ADD COLUMN mission_id TEXT"),
         ("mission_role", "ALTER TABLE supervisor_assignments ADD COLUMN mission_role TEXT"),
         // 回合結束時 run 上記的 `turn_error`（撞限、API 錯誤、斷線…）。`turn_status` 只有
@@ -942,14 +941,10 @@ pub async fn insert_assignment(
     follow_up_of: Option<&str>,
     expects_review: bool,
 ) -> Result<Assignment> {
-    insert_assignment_linked(pool, request_id, target_bot_id, client_request_id, text, ownership, follow_up_of, expects_review, None, None).await
+    insert_assignment_linked(pool, request_id, target_bot_id, client_request_id, text, ownership, follow_up_of, expects_review, None).await
 }
 
-/// 同 [`insert_assignment`]，連同任務連結（`(mission_id, role)`）與驗收角色**同一句 INSERT** 寫下去（issue #136）。
-///
-/// 以前是先 insert（commit）、再各自 UPDATE：後面那句失敗時那列已經以 `queued` 留下、沒掛任務，下一個 tick
-/// 就被派出去；用同一個 request id 重試又被冪等路徑原樣回成功——任務從此看不到自己的執行者。派送當下就可能
-/// 撞額度，那時 controller 要看得到任務設定，所以連結也一定要在派送之前、跟列一起存在。
+/// 建立交辦並同時記錄驗收角色。
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_assignment_linked(
     pool: &SqlitePool,
@@ -960,15 +955,14 @@ pub async fn insert_assignment_linked(
     ownership: &[String],
     follow_up_of: Option<&str>,
     expects_review: bool,
-    mission: Option<(&str, &str)>,
     review_role: Option<&str>,
 ) -> Result<Assignment> {
     let now = crate::db::now();
     sqlx::query(
         "INSERT INTO supervisor_assignments
            (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
-            ownership_json, follow_up_of, expects_review, mission_id, mission_role, review_role, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ownership_json, follow_up_of, expects_review, review_role, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?, ?)",
     )
     .bind(crate::db::ulid())
     .bind(SUPERVISOR_ID)
@@ -979,27 +973,12 @@ pub async fn insert_assignment_linked(
     .bind((!ownership.is_empty()).then(|| serde_json::to_string(ownership).unwrap_or_default()))
     .bind(follow_up_of)
     .bind(i64::from(expects_review))
-    .bind(mission.map(|(m, _)| m))
-    .bind(mission.map(|(_, r)| r))
     .bind(review_role)
     .bind(&now)
     .bind(&now)
     .execute(pool)
     .await?;
     Ok(assignment_by_crid(pool, client_request_id).await?.expect("just inserted"))
-}
-
-/// 把一件交辦掛到群組任務上（測試夾具用；正式路徑在 [`insert_assignment_linked`] 裡跟列一起寫）。
-#[cfg(test)]
-pub async fn set_mission_link(pool: &SqlitePool, id: &str, mission_id: &str, role: &str) -> Result<()> {
-    sqlx::query("UPDATE supervisor_assignments SET mission_id = ?, mission_role = ?, updated_at = ? WHERE id = ?")
-        .bind(mission_id)
-        .bind(role)
-        .bind(crate::db::now())
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 /// 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）。
@@ -1010,21 +989,6 @@ pub async fn set_turn_error(pool: &SqlitePool, id: &str, turn_error: &str) -> Re
         .execute(pool)
         .await?;
     Ok(())
-}
-
-/// 一個群組任務底下的所有交辦，舊的在前。
-///
-/// 同一毫秒派出去的兩件照**寫入順序**排（`rowid`）：`created_at` 只到毫秒，AGM 背靠背派下一個角色時
-/// 兩件常擠在同一格，而 `id` 是 ULID、同一毫秒內的亂數段不保證遞增。這裡排錯不只是清單難看——
-/// `mission::api::phase` 取的是「最後一件還開著的交辦」（`.iter().rev().find(..)`），順序一翻，
-/// 任務卡上的階段就會在 executing／verifying／reviewing 之間跳掉（同 a4605b2 的根因）。
-pub async fn mission_assignments(pool: &SqlitePool, mission_id: &str) -> Result<Vec<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>(
-        "SELECT * FROM supervisor_assignments WHERE mission_id = ? ORDER BY created_at, rowid",
-    )
-    .bind(mission_id)
-    .fetch_all(pool)
-    .await?)
 }
 
 pub async fn list_assignments(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
@@ -1814,16 +1778,12 @@ pub async fn review_with_followup(
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-                // 接續的工作仍然是同一個任務、同一個角色（撞限換手的 followup 就是靠這個接回任務）。
+                // Preserve the review role for the follow-up.
                 sqlx::query(
                     "UPDATE supervisor_assignments
-                        SET mission_id = (SELECT mission_id FROM supervisor_assignments WHERE id = ?),
-                            mission_role = (SELECT mission_role FROM supervisor_assignments WHERE id = ?),
-                            review_role = (SELECT review_role FROM supervisor_assignments WHERE id = ?)
+                        SET review_role = (SELECT review_role FROM supervisor_assignments WHERE id = ?)
                       WHERE id = ?",
                 )
-                .bind(id)
-                .bind(id)
                 .bind(id)
                 .bind(&new_id)
                 .execute(&mut *tx)
@@ -4910,37 +4870,7 @@ mod tests {
 
     /// AGM 背靠背派出的兩件交辦（同一毫秒）照寫入順序排，不看 ULID 的亂數段。
     ///
-    /// 這條守的是 `mission::api::phase`：它取「最後一件還開著的交辦」的角色當任務階段，
-    /// 順序一翻，任務卡就會顯示成 verifying 而不是 executing。
-    #[tokio::test]
-    async fn mission_assignments_written_in_the_same_millisecond_keep_their_order() {
-        let p = pool().await;
-        let at = "2026-09-17T12:00:00.000Z";
-        // id 故意跟寫入順序相反：舊的 `ORDER BY created_at, id` 會把這兩件倒過來。
-        for (id, role) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "executor"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "verifier")] {
-            sqlx::query(
-                "INSERT INTO supervisor_assignments
-                   (id, supervisor_id, target_bot_id, client_request_id, text, status, attempts,
-                    mission_id, mission_role, created_at, updated_at)
-                 VALUES (?,?, 'bot1', ?, 'x', 'queued', 0, 'm1', ?, ?, ?)",
-            )
-            .bind(id)
-            .bind(SUPERVISOR_ID)
-            .bind(format!("crid-{id}"))
-            .bind(role)
-            .bind(at)
-            .bind(at)
-            .execute(&p)
-            .await
-            .unwrap();
-        }
-        let rows = mission_assignments(&p, "m1").await.unwrap();
-        let roles: Vec<&str> = rows.iter().filter_map(|a| a.mission_role.as_deref()).collect();
-        assert_eq!(roles, vec!["executor", "verifier"], "同一毫秒照寫入順序，不是照 ULID");
-    }
-
-    /// 稽核：controller 的工作清單（`open_assignments`）與「還欠 AGM 的全部」（`unsettled_assignments`）要照寫入順序派，
-    /// 同一毫秒建的兩件不能看 ULID 的亂數段（`mission_assignments` 同一個坑，這兩支漏了）。
+    /// 同一毫秒建的兩件不能看 ULID 的亂數段。
     #[tokio::test]
     async fn open_and_unsettled_assignments_written_in_the_same_millisecond_keep_their_order() {
         let p = pool().await;

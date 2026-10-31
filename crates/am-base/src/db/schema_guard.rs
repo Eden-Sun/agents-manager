@@ -1,7 +1,7 @@
 //! Schema 的全貌與它的兩道守衛（issue #72）。
 //!
 //! 一顆 DB 的 schema 不只 `db::SCHEMA`：還有 ALTER 名單、`db::sync_trigger` 裝的 trigger，以及 `db::migrate` 的交易
-//! commit 之後才跑的各子模組 migrate（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、`mission::store`、
+//! commit 之後才跑的各子模組 migrate（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、`identity_prefs`、
 //! `hook_inbox`、`build_scheduler`、`release_triage::ledger`…）各自建的表、索引、trigger。這裡不解析任何一份 DDL 原文，
 //! 而是拿**一顆全新的 in-memory DB 跑同一套 migrate**，讀它的 `sqlite_master` 當標準答案——以後多一個子模組、或在
 //! 任何地方多建一個物件，都自動涵蓋，不必記得來這裡登記。

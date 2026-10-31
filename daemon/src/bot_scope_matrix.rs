@@ -81,7 +81,6 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("GET", "/api/supervisor", Expect::RoleRequired, None),
         principal_allow_rule("POST", "/api/services/daemon-swap/restart-window", "This operation is allowed only to the daemon-swap Service principal; a Bot credential must be rejected."),
-        rule("GET", "/api/missions/{id}/pick", Expect::Forbidden, None),
         rule("GET", "/api/fs/dirs", Expect::Forbidden, None),
         rule("POST", "/api/fs/dirs", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/persona", Expect::RoleRequired, None),
@@ -164,11 +163,6 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/projects/{id}/issues", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/issues", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/shells/{pane_id}/keys", Expect::Forbidden, None),
-        rule("GET", "/api/projects/{id}/missions", Expect::Forbidden, None),
-        rule("POST", "/api/projects/{id}/missions", Expect::Forbidden, None),
-        rule("PUT", "/api/projects/{id}/missions", Expect::Forbidden, None),
-        rule("PATCH", "/api/projects/{id}/missions", Expect::Forbidden, None),
-        rule("DELETE", "/api/projects/{id}/missions", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
@@ -212,7 +206,6 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
         rule("PATCH", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
-        rule("POST", "/api/missions/{id}/pause", Expect::UserOnly, None),
         deny_rule("GET", "/api/deploy/status", Expect::UserOnly, "The response includes global Bot activity, deployment repository state, and log paths; it is for the User UI."),
         deny_rule("POST", "/api/deploy/wait/escalate", Expect::UserOnly, "Relaxing a waiting deployment is the user's dispatch decision (SPEC 18.10); AGM must ask the user, not press it."),
         deny_rule("POST", "/api/deploy/wait/dismiss", Expect::UserOnly, "Hiding the deploy-wait notice is the user's own UI action (SPEC 18.10)."),
@@ -287,12 +280,6 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/supervisor/handoff", Expect::Forbidden, None),
         rule("PATCH", "/api/supervisor/handoff", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/handoff", Expect::Forbidden, None),
-        scoped_allow_rule("POST", "/api/missions/{id}/question", "A Bot may ask about a mission where it is assigned; this probe targets Bot B's mission and must be rejected."),
-        rule("GET", "/api/missions/{id}/round", Expect::Forbidden, None),
-        rule("POST", "/api/missions/{id}/round", Expect::Forbidden, None),
-        rule("PUT", "/api/missions/{id}/round", Expect::Forbidden, None),
-        rule("PATCH", "/api/missions/{id}/round", Expect::Forbidden, None),
-        rule("DELETE", "/api/missions/{id}/round", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/restore", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/restore", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/restore", Expect::Forbidden, None),
@@ -317,9 +304,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/projects/{id}/panes", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/panes", Expect::Forbidden, None),
         rule("POST", "/api/projects", Expect::UserOnly, None),
-        rule("POST", "/api/missions/{id}/resume", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/responder", Expect::RoleRequired, None),
-        scoped_allow_rule("POST", "/api/missions/{id}/events", "A Bot may report to a mission where it is assigned; verified events still require the verifier/gatekeeper role. This Bot-A-to-B probe must be rejected."),
         rule("GET", "/api/bots/{id}/fork", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/fork", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/fork", Expect::Forbidden, None),
@@ -425,7 +410,6 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("POST", "/api/turns/{id}/withdraw", Expect::UserOnly, None),
-        scoped_allow_rule("POST", "/api/missions/{id}/complete", "An assigned Bot may complete its own mission when workflow and delivery gates pass; this Bot-A-to-B probe must be rejected."),
         rule("POST", "/api/supervisor/herdr-maintenance/end", Expect::Forbidden, None),
         allow_rule("GET", "/api/release-triage", "A Bot sees only the dispatched rows assigned to it (or to a child under it), with their dispatch_gen; the global ledger is for User and AGM roles (#801)."),
         principal_allow_rule("POST", "/api/services/herdr-upgrade/notify", "This notification path is allowed only to the herdr-upgrade Service principal; a Bot credential must be rejected."),
@@ -438,7 +422,6 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/prompt", Expect::Forbidden, None),
-        scoped_allow_rule("POST", "/api/missions/{id}/answer", "An assigned Bot may answer its own mission's question; this Bot-A-to-B probe must be rejected."),
         rule("GET", "/api/bots/{id}/text", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/text", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/text", Expect::Forbidden, None),
@@ -465,9 +448,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/hosts/{name}/cli-update", Expect::Forbidden, None),
         rule("POST", "/api/turns/{id}/abandon", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/assignments", Expect::RoleRequired, None),
-        scoped_allow_rule("POST", "/api/supervisor/assignments", "An ordinary Bot may send a notice to a registered AGM role; it may not dispatch work to Bot B, ask for review, or attach a mission."),
-        scoped_allow_rule("POST", "/api/missions/{id}/revise", "An assigned Bot may open a revision for its own completed mission; this Bot-A-to-B probe must be rejected."),
-        deny_rule("POST", "/api/missions/{id}/deliver", Expect::Forbidden, "Delivery is a gatekeeper operation for User/AGM, not a general participant report; an ordinary Bot must not publish a mission."),
+        scoped_allow_rule("POST", "/api/supervisor/assignments", "An ordinary Bot may send a notice to a registered AGM role; it may not dispatch work to Bot B or ask for review."),
         rule("GET", "/api/projects/{id}/bots", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/bots", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/bots", Expect::Forbidden, None),
@@ -495,13 +476,11 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/supervisor/herdr-maintenance", Expect::RoleRequired, None),
         rule("POST", "/api/hosts/{name}/reconnect", Expect::Forbidden, None),
         rule("POST", "/api/services/herdr-upgrade/resume/{id}", Expect::Forbidden, None),
-        rule("GET", "/api/missions/{id}", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/read", Expect::Forbidden, None),
-        rule("POST", "/api/missions/{id}/cancel", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/health", Expect::RoleRequired, None),
         rule("GET", "/api/bots/{id}/keys", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/keys", Expect::Forbidden, None),
@@ -630,7 +609,7 @@ fn router_paths_and_methods(debug: &str) -> Vec<(String, String)> {
     out
 }
 
-fn fill(template: &str, bot_b: &str, project_b: &str, mission_b: &str) -> String {
+fn fill(template: &str, bot_b: &str, project_b: &str) -> String {
     let mut s = template.to_string();
     while let Some(start) = s.find('{') {
         let end = s[start..].find('}').map(|i| start + i).unwrap_or(s.len() - 1);
@@ -639,7 +618,6 @@ fn fill(template: &str, bot_b: &str, project_b: &str, mission_b: &str) -> String
         let value = match (before.rsplit('/').next().unwrap_or(""), key) {
             ("bots", "id") => bot_b,
             ("projects", "id") => project_b,
-            ("missions", "id") => mission_b,
             ("turns", "id") => "turn-b",
             ("attachments", "id") => "att-b",
             ("assignments", "id") => "asg-b",
@@ -693,12 +671,6 @@ fn request_body(method: &str, template: &str, bot_a: &str, bot_b: &str) -> Strin
         ("POST", "/api/supervisor/assignments") => json!({"target_bot_id":bot_b, "text":"cross-bot task", "client_request_id":"matrix-cross-bot-task", "kind":"task"}),
         ("POST", "/api/supervisor/leases/{resource}/acquire") => json!({"owner":bot_b, "approval_id":"approval-b", "require_idle":false}),
         ("POST", "/api/supervisor/leases/{resource}/renew" | "/api/supervisor/leases/{resource}/release") => json!({"owner":bot_b, "fence":1}),
-        ("POST", "/api/missions/{id}/question") => json!({"text":"cross-mission question", "client_request_id":"matrix-question"}),
-        ("POST", "/api/missions/{id}/events") => json!({"kind":"note", "text":"cross-mission event"}),
-        ("POST", "/api/missions/{id}/complete") => json!({"result_summary":"cross-mission completion"}),
-        ("POST", "/api/missions/{id}/answer") => json!({"text":"cross-mission answer", "client_request_id":"matrix-answer", "reply_to":"question-b"}),
-        ("POST", "/api/missions/{id}/revise") => json!({"text":"cross-mission revision", "client_request_id":"matrix-revision"}),
-        ("POST", "/api/missions/{id}/deliver") => json!({"worktree":"/tmp"}),
         ("POST", "/api/services/daemon-swap/restart-window") => json!({"owner":"daemon-update-kick", "commit":"abcdef0", "ttl_secs":600}),
         ("POST", "/api/services/herdr-upgrade/notify") => json!({"text":"matrix notification"}),
         _ => json!({}),
@@ -734,34 +706,6 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         (std::time::Instant::now(), json!({"kind":"codex", "host":"local", "models":[{"id":"cached-model"}]})),
     );
 
-    // A real foreign mission with an assignment to Bot B makes the mission probes distinguish
-    // participant authorization from a nonexistent-id 404.
-    let mission_b = crate::db::ulid();
-    sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
-        .bind(&mission_b)
-        .bind("pb")
-        .bind(format!("matrix-{}", mission_b))
-        .bind(&now)
-        .bind(&now)
-        .execute(&env.app.db)
-        .await
-        .unwrap();
-    let assignment_b = crate::supervisor::store::insert_assignment(
-        &env.app.db,
-        None,
-        &bot_b.id,
-        &format!("matrix-assignment-{}", mission_b),
-        "Bot B owns this mission",
-        &[],
-        None,
-        false,
-    )
-    .await
-    .unwrap();
-    crate::supervisor::store::set_mission_link(&env.app.db, &assignment_b.id, &mission_b, "executor")
-        .await
-        .unwrap();
-
     // A real verdict against a seeded ledger row, so the matrix proves the write endpoint is reachable.
     // Bot A is not assigned this version, so the binding (#801) must refuse it.
     let sections = crate::release_triage::source_sections("claude", include_str!("../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
@@ -784,6 +728,8 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
 
     let router = router(env.app.clone());
     let discovered = router_paths_and_methods(&format!("{router:?}"));
+    assert!(discovered.iter().all(|(_, path)| !path.starts_with("/api/missions/") && path != "/api/projects/{id}/missions"));
+    assert!(discovered.iter().any(|(_, path)| path == "/api/identity-prefs"));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -798,26 +744,7 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
     let table = rules();
     let mut seen = vec![false; table.len()];
     for (method, template) in &discovered {
-        // The principal middleware checks a real foreign mission before Axum can return 405,
-        // so unsupported verbs would look like unlisted protected endpoints. Probe those verbs
-        // with a nonexistent mission first; registered handlers reach their own 404/validation.
-        if template.starts_with("/api/missions/") && !table.iter().any(|r| r.method == method && r.path == template) {
-            let probe_uri = fill(template, &bot_b.id, "pb", "no-such-mission");
-            let probe_body = request_body(method, template, &bot_a.id, &bot_b.id);
-            let probe = client
-                .request(method.parse().unwrap(), format!("http://127.0.0.1:{port}{probe_uri}"))
-                .header("content-type", "application/json")
-                .header("X-AM-Bot-Id", &bot_a.id)
-                .header("X-AM-Bot-Token", "token-a")
-                .body(probe_body)
-                .send()
-                .await
-                .unwrap();
-            if probe.status() == StatusCode::METHOD_NOT_ALLOWED {
-                continue;
-            }
-        }
-        let mut uri = fill(template, &bot_b.id, "pb", &mission_b);
+        let mut uri = fill(template, &bot_b.id, "pb");
         if template == "/api/models" {
             uri.push_str("?kind=codex");
         }
@@ -902,76 +829,6 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         }
     }
     assert!(misses.is_empty(), "允許表與 router 不一致：\n{}", misses.join("\n"));
-}
-
-/// The cross-project matrix does not catch routes that pass the project boundary. A plain Bot in
-/// the same project still must not use the review-only round endpoint on a mission assigned to a
-/// sibling Bot; the documented principal policy is User or AGM role.
-#[tokio::test]
-async fn a_same_project_bot_cannot_spend_another_missions_round() {
-    let env = crate::testing::env().await;
-    env.app.set_startup_ready(true);
-    let bot_a = crate::testing::claude_bot(&env.app, &env.project_id, "round-caller").await;
-    let bot_b = crate::testing::claude_bot(&env.app, &env.project_id, "round-owner").await;
-    sqlx::query("UPDATE bots SET hook_token='token-a' WHERE id=?")
-        .bind(&bot_a.id)
-        .execute(&env.app.db)
-        .await
-        .unwrap();
-    let mission_id = crate::db::ulid();
-    let now = crate::db::now();
-    sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
-        .bind(&mission_id)
-        .bind(&env.project_id)
-        .bind(format!("round-scope-{mission_id}"))
-        .bind(&now)
-        .bind(&now)
-        .execute(&env.app.db)
-        .await
-        .unwrap();
-    crate::supervisor::store::insert_assignment_linked(
-        &env.app.db,
-        None,
-        &bot_b.id,
-        &format!("round-assignment-{mission_id}"),
-        "Bot B owns this mission",
-        &[],
-        None,
-        false,
-        Some((&mission_id, "executor")),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let router = router(env.app.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-    let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/api/missions/{mission_id}/round"))
-        .header("content-type", "application/json")
-        .header("X-AM-Bot-Id", &bot_a.id)
-        .header("X-AM-Bot-Token", "token-a")
-        .body("{}")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN, "a sibling Bot cannot spend the mission's review round");
-    let body = response.text().await.unwrap();
-    assert!(body.contains("\"reason\":\"role_required\""), "the documented route contract distinguishes the role gate: {body}");
-    let used: i64 = sqlx::query_scalar("SELECT rounds_used FROM missions WHERE id=?")
-        .bind(&mission_id)
-        .fetch_one(&env.app.db)
-        .await
-        .unwrap();
-    assert_eq!(used, 0, "a denied request must not advance the mission");
 }
 
 /// #855：把回覆公開到分享頁只有使用者能決定；Bot 帶 `share_reply_visible:true` 在任何副作用前就 403。
@@ -1074,46 +931,6 @@ async fn plain_bot_in_its_own_project() -> (crate::testing::Env, u16, String) {
         let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
     });
     (env, port, bot_a.id)
-}
-
-#[tokio::test]
-async fn a_plain_bot_cannot_create_a_mission_in_its_own_project() {
-    let (env, port, a) = plain_bot_in_its_own_project().await;
-    let client = reqwest::Client::new();
-    let mission = json!({"text":"y1","client_request_id":"y1-m","delivery_mode":"pr","executor_kind":"claude","on_5h_limit":"wait"}).to_string();
-    let made = client
-        .post(format!("http://127.0.0.1:{port}/api/projects/{}/missions", env.project_id))
-        .header("content-type", "application/json")
-        .header("X-AM-Bot-Id", &a)
-        .header("X-AM-Bot-Token", "token-a")
-        .body(mission.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(made.status(), StatusCode::FORBIDDEN);
-    let body = made.text().await.unwrap();
-    assert!(body.contains("\"reason\":\"user_only\""), "{body}");
-    let missions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM missions").fetch_one(&env.app.db).await.unwrap();
-    assert_eq!(missions, 0);
-
-    // 同一顆 bot 登記成巡檢（AGM 角色）之後，建任務照舊能過這道閘（不是 403）。
-    let supervisor = crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
-    sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
-        .bind(&a)
-        .bind(&supervisor.id)
-        .execute(&env.app.db)
-        .await
-        .unwrap();
-    let as_role = client
-        .post(format!("http://127.0.0.1:{port}/api/projects/{}/missions", env.project_id))
-        .header("content-type", "application/json")
-        .header("X-AM-Bot-Id", &a)
-        .header("X-AM-Bot-Token", "token-a")
-        .body(mission)
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(as_role.status(), StatusCode::FORBIDDEN, "the registered AGM role keeps mission creation: {:?}", as_role.text().await);
 }
 
 #[tokio::test]

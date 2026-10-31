@@ -576,6 +576,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (73, "7b90de666223749d"),
     // Remove obsolete project group read marks.
     (74, "1b4fc0fe9e17728b"),
+    (75, "dab5e06d25106ac2"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -673,7 +674,7 @@ async fn migrate_with(pool: &SqlitePool, features: FeatureMigrations) -> Result<
 /// （issue #58）。裡面全是 SQLite 認得在交易內執行的 DDL（`CREATE TABLE`／`CREATE INDEX`／
 /// `ALTER TABLE ADD COLUMN`），沒有 `VACUUM`／`ATTACH`／`PRAGMA journal_mode` 這類定義上就
 /// 不能包進交易的動作。下面各子模組自己的 `migrate`（`supervisor::store`、`read_marks`、
-/// `panes`、`herdr_maintenance`、`mission::store`）不在這個交易裡：它們各自維護自己那張表，
+/// `panes`、`herdr_maintenance`、`identity_prefs`）不在這個交易裡：它們各自維護自己那張表，
 /// 風險最高的「加欄＋回填」已經各自包了自己的 transaction（見 `read_marks::migrate`、
 /// `supervisor::roles::migrate` 的 `claimed_by`），要把全部子模組併進同一個跨檔案交易得先把
 /// 它們的 `&SqlitePool` 簽名都換成共用的連線／交易 handle，範圍超出這張 issue，先不動。

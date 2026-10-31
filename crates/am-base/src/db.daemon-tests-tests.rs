@@ -1380,6 +1380,13 @@
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Versions through 74 contained mission tables. Reconstruct them only in historical fixtures.
+    async fn restore_legacy_mission_schema(conn: &mut sqlx::SqliteConnection) {
+        for stmt in include_str!("db/legacy_mission.sql").split(";\n").map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(stmt).execute(&mut *conn).await.unwrap();
+        }
+    }
+
     /// 造一個全新的歷史 schema fixture（67 或 68）；從來不碰正式 DB 或複本，由呼叫端在測完後刪掉整個目錄。
     /// - 67：移除 #748 的 `runs.codex_instant_interrupt`（67 還沒有這一欄）。
     /// - 68：保留它，舊 run 記 1，驗證升到 69 不會丟掉、也不會改寫它。
@@ -1391,6 +1398,7 @@
         std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
+        restore_legacy_mission_schema(&mut tx).await;
         sqlx::query("CREATE TABLE project_group_reads (project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')").execute(&mut *tx).await.unwrap();
         for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
             sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&mut *tx).await.unwrap();
@@ -1462,6 +1470,7 @@
 
         let pool = open(&path).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_, i64>("PRAGMA user_version").fetch_one(&pool).await.unwrap(), SCHEMA_VERSION);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('missions', 'mission_events')").fetch_one(&pool).await.unwrap(), 0);
         for (table, id) in [("bots", "old-b"), ("runs", "old-r"), ("turns", "old-t")] {
             assert_eq!(sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table} WHERE id=?")).bind(id).fetch_one(&pool).await.unwrap(), 1);
         }
@@ -1526,6 +1535,10 @@
     async fn nr1944_v69_receipt_additive_upgrade_backup_fence_and_private_rows() {
         let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
         let pool=open(&path).await.unwrap();
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            restore_legacy_mission_schema(&mut conn).await;
+        }
         sqlx::query("CREATE TABLE project_group_reads (project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')").execute(&pool).await.unwrap();
         for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
             sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&pool).await.unwrap();

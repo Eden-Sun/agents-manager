@@ -42,7 +42,7 @@ pub use am_lifecycle::{
     turn_error,
 };
 #[cfg(not(test))]
-pub use am_supervisor::{build_info, mission, relay_auth, supervisor};
+pub use am_supervisor::{build_info, relay_auth, supervisor};
 // App-backed unit tests still belong to the daemon crate. Under `cargo test`, compile the same
 // source modules at the crate root so their `crate::` paths and the App adapters share one set of
 // types. Production builds use the extracted crate re-exports above.
@@ -211,7 +211,6 @@ mod panes;
 mod supervisor_owned;
 mod deleted_bots;
 mod app_ports_p6;
-mod app_ports_p7;
 #[cfg(test)]
 #[path = "../../crates/am-supervisor/src/test_dirs.rs"]
 mod test_dirs;
@@ -278,9 +277,7 @@ mod herdr_integration;
 mod herdr_recovery;
 mod gone_burst;
 mod swap_window;
-#[cfg(test)]
-#[path = "../../crates/am-supervisor/src/mission/mod.rs"]
-pub mod mission;
+pub mod identity_prefs;
 mod preview;
 mod primary_order;
 mod pane_probe;

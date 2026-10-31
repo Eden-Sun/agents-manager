@@ -69,7 +69,7 @@ mod notify_crid_tests {
 
 use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
-use self::ports::{BotLamp, CandidateSwitch, ControllerRuntime, JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps};
+use self::ports::{BotLamp, CandidateSwitch, ControllerRuntime, JudgeOps, QuotaOps, TurnOps};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
@@ -146,7 +146,7 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 ///
 /// 啟動本身失敗時意圖照樣留著：交給看門狗的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded
 /// （999480e 對協調者的決定，這裡跟它一致）。
-pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + MissionOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + MissionCancellation + Clone + Send + Sync + 'static)) -> Result<(), LcError> {
+pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + Clone + Send + Sync + 'static)) -> Result<(), LcError> {
     // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
     // directly on Opus instead of briefly opening the wrong session.
     // 大 future 包成 Box（#1461，理由見 runners::supervisor::api::post_start）。
@@ -187,7 +187,7 @@ fn persist_intent_failed<E: std::fmt::Display>(e: E) -> LcError {
 ///
 /// 這裡**不動** `desired_running`：看門狗與換模型重啟都走這條，寫意圖會把看門狗的重試次數歸零
 /// （`set_desired_running` 的語意是「人做了新決定」），有界重試就變成永遠重試。
-pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ports::TurnOps + ports::MissionOps + ports::ControllerRuntime + ports::MissionCancellation + ports::QuotaOps + ports::JudgeOps + Clone + Send + Sync + 'static), detail: Option<&str>) -> Result<(), LcError> {
+pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ports::TurnOps + ports::ControllerRuntime + ports::QuotaOps + ports::JudgeOps + Clone + Send + Sync + 'static), detail: Option<&str>) -> Result<(), LcError> {
     let bot = manager_bot(app.db())
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
@@ -310,7 +310,7 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
 /// 「看完即可」），送到、回合結束就結案，不進 awaiting_review、不會被當成卡住的工作。
 #[allow(clippy::too_many_arguments)]
 pub async fn assign(
-    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + MissionOps + QuotaOps + TurnOps + JudgeOps),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + QuotaOps + TurnOps + JudgeOps),
     target_bot_id: &str,
     text: &str,
     client_request_id: &str,
@@ -318,8 +318,6 @@ pub async fn assign(
     ownership: &[String],
     follow_up_of: Option<&str>,
     expects_review: bool,
-    // 群組任務：(mission_id, role)。呼叫端已驗證過。
-    mission: Option<(&str, &str)>,
     // 回報給哪個 AGM 角色驗收；`None` = 協調者（roles.rs 的預設）。
     review_role: Option<roles::Role>,
     // 呼叫端自己是哪個角色（bot token 驗過的）。`None` = UI／腳本。
@@ -368,8 +366,6 @@ pub async fn assign(
             Some("expects_review")
         } else if have_own != want_own {
             Some("ownership")
-        } else if a.mission_id.as_deref() != mission.map(|(m, _)| m) || a.mission_role.as_deref() != mission.map(|(_, r)| r) {
-            Some("mission")
         } else if a.review_role.as_deref().unwrap_or("responder") != review_role.map_or("responder", roles::Role::as_str) {
             // 沒寫＝協調者（跟 to_json 的預設同一個），明講 responder 的重送不算不同。
             Some("review_role")
@@ -436,19 +432,12 @@ pub async fn assign(
         .await
         .map_err(up)?;
 
-    // 一個任務同時只有一件開著的交辦（SPEC §18.14，issue #74）。跟下面的 ownership 衝突不同：
-    // 那個是猜的（字串比對），這個是查得到的事實，所以這個擋、那個只回報。
-    if let Some((mission_id, role)) = mission {
-        app.ensure_can_assign(mission_id, role).await?;
-    }
-
     // Who else is already holding these files. Reported, never enforced: the daemon cannot
     // know that two modules are really independent, so this goes to AGM to arbitrate rather
     // than refusing work on a string match (SPEC §18.4).
     let conflicts = ownership_conflicts(app.db(), ownership, None).await?;
 
-    // 任務連結與驗收角色跟列**同一句 INSERT**（issue #136）：派送當下撞到額度時 controller 要看得到這件屬於哪個
-    // 任務、什麼角色，派工訊息標成哪個角色送的也看這一欄——分開寫的話，後一句失敗會留下一件沒掛任務、照樣被派出去的交辦。
+    // 驗收角色與交辦一同寫入。
     let a = store::insert_assignment_linked(
         app.db(),
         Some(&request_id),
@@ -458,7 +447,6 @@ pub async fn assign(
         ownership,
         follow_up_of,
         expects_review,
-        mission,
         review_role.map(roles::Role::as_str),
     )
     .await
