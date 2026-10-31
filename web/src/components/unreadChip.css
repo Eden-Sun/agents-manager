@@ -32,6 +32,17 @@
   padding: 1px;
 }
 
+/* 主力與「進行中」之間一條虛線＋小標（2026-10-31 使用者：沒釘的在跑 bot 不該看起來像主力）。 */
+.unread-group[data-group='pinned'] + .unread-group[data-group='others'] {
+  border-top: 1px dashed var(--border-strong);
+  padding-top: 6px;
+}
+.unread-group-label {
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* 展開時給上限自己捲，免得 30 顆 bot 壓掉對話區。 */
 .unread-bar.expanded {
   max-height: 30vh;
