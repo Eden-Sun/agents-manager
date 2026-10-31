@@ -23,7 +23,11 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
-    if crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some() { return Ok(()); }
+    let is_agm = crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some();
+    if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor")) && to.manager_use == 0 {
+        return Err(RelayDenied::Denied("member_disabled".into()));
+    }
+    if is_agm { return Ok(()); }
     // 跨專案只准送到 expert 專案的 manager（對外窗口，使用者 2026-10-31）；送件者若在 expert 專案也必須是它的 manager。
     let to_front_desk = target_project.mode == "expert" && to.role.as_deref() == Some("manager") && to.parent_bot_id.is_none();
     let from_may_leave = project.mode != "expert" || (from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none());
@@ -119,5 +123,14 @@ mod agm_cross_project_tests {
         crate::supervisor::store::set_env(&env.app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::Deliver).await.is_ok());
+
+        // manager_use=0 (member_disabled)
+        sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
+        // Plain bot / manager to disabled worker -> member_disabled
+        assert!(matches!(relay_prompt_allowed(&env.app, &manager.id, &worker.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "member_disabled"));
+        // ResultNotice is unaffected
+        assert!(relay_prompt_allowed(&env.app, &manager.id, &worker.id, Admission::ResultNotice).await.is_ok());
+        // AGM is unaffected
+        assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
     }
 }

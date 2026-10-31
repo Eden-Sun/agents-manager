@@ -1079,7 +1079,7 @@ async fn creating_a_restricted_bot_cages_it_before_it_exists() {
     e.app
         .cfg
         .update(|c| {
-            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
+            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
                 id: Some(pid.clone()),
                 path: e.repo.to_string_lossy().into_owned(),
                 label: "proj".into(),

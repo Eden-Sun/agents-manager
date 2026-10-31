@@ -549,10 +549,12 @@ async fn project_inner(
     let mut tx = db::begin_write(pool).await?;
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
+        let executor_pool_json = serde_json::to_string(&p.executor_pool)?;
         sqlx::query(
-            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, created_at) VALUES (?,?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, executor_pool_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
-               host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, mode=excluded.mode, deleted_at=NULL",
+               host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, mode=excluded.mode,
+               executor_pool_json=excluded.executor_pool_json, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
@@ -562,6 +564,7 @@ async fn project_inner(
         .bind(p_at as i64)
         .bind(p.handed_off_to.as_deref().map(str::trim))
         .bind(&p.mode)
+        .bind(&executor_pool_json)
         .bind(&now)
         .execute(&mut *tx)
         .await?;
@@ -572,11 +575,11 @@ async fn project_inner(
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, role, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, position, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, role, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, position, manager_use, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
                    model=excluded.model, role=excluded.role, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
-                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, position=excluded.position, deleted_at=NULL",
+                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, position=excluded.position, manager_use=excluded.manager_use, deleted_at=NULL",
             )
             .bind(&bid)
             .bind(&pid)
@@ -596,6 +599,7 @@ async fn project_inner(
             .bind(&env_json)
             .bind(&b.herdr_session)
             .bind(b_at as i64)
+            .bind(b.manager_use as i64)
             .bind(&token)
             .bind(&now)
             .execute(&mut *tx)
@@ -936,7 +940,7 @@ mod tests {
     #[test]
     fn duplicate_ids_and_names_are_refused_before_they_merge_into_one_row() {
         fn bot(id: Option<&str>, name: &str) -> crate::config::BotCfg {
-            crate::config::BotCfg { role: None,
+            crate::config::BotCfg { role: None, manager_use: true,
                 id: id.map(str::to_string),
                 name: name.into(),
                 kind: "claude".into(),
@@ -956,7 +960,7 @@ mod tests {
             }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
-            crate::config::ProjectCfg { mode: "parent_child".into(),
+            crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
                 id: id.map(str::to_string),
                 path: "/tmp".into(),
                 label: label.into(),
@@ -1610,12 +1614,12 @@ mod tests {
         assert!(validate(&cfg).is_err(), "身份 args 也不可把 NUL 帶進啟動 argv");
 
         cfg.identities.clear();
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(),
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(),
             id: Some("p1".into()),
             path: "/tmp".into(),
             label: "demo".into(),
             host: "local".into(),
-            bots: vec![crate::config::BotCfg { role: None,
+            bots: vec![crate::config::BotCfg { role: None, manager_use: true,
                 id: Some("b1".into()),
                 name: "worker".into(),
                 kind: "claude".into(),

@@ -2375,7 +2375,7 @@ mod model_args_tests {
     use crate::db::Bot;
 
     fn bot(kind: &str, model: Option<&str>, effort: Option<&str>, fast: bool) -> Bot {
-        Bot { role: None,
+        Bot { role: None, manager_use: 1,
             id: "b".into(),
             project_id: "p".into(),
             name: "n".into(),

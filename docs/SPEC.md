@@ -5759,6 +5759,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 專家模式沒有 child（使用者 2026-10-31）：expert 專案的任何角色都不能開 child（spawn 授權回 403 `expert_no_child`，提示改找同專案頂層執行者／顧問），shell pane 照常可開；expert 專案只有成員、沒有 parent／child 之分，差別只在角色。manager 缺人手時增聘執行者（`POST /api/projects/{id}/members`／`agm hire`，角色固定 executor、不自動啟動），可啟動／重啟任何成員、停止或刪除執行者；顧問只由使用者建立與收掉。專案切成 expert 前留下的 child 由 `POST /api/bots/{id}/member`（`agm member`）原地轉成成員：同 bot id 寫進 config.toml、清 parent，pane 與對話不動，可帶 `session_id` 供下次 native resume。角色規則為靜態啟動指示，成員與狀態由 `agm peers` 按需查詢；多個執行者時，管理者或使用者可用 `agm peers --for <track>`（`GET /api/projects/{id}/peers?for=<track>`）評估候選執行者（硬篩同主機、運行中非阻塞、5h 額度未達 85% 與 track 衝突防護，並依同 track 歷史、閒置、cache 熱與模型成本排序）。需要結果通知的請求用 `herdr agent prompt bot:<id> --expect-result --track <票號或模組>`，進度以 `agm requests --open` 查詢。
 
+專家模式保護額度開關（使用者 2026-10-31）：
+1. 成員開關 `manager_use`（bool，預設 true）：顧問／執行者各自有「可被管理者使用」切換。設為 false 時，manager 不能派工給它（relay prompt 拒絕 `member_disabled`）、不能啟動／重啟／停止／刪除它（`manager_may_start` 拒絕）、`agm peers --for` 列為不可派（eligible=false、理由「使用者已停用」）。ResultNotice 不受影響；使用者自己照常可用。
+2. 執行者池 `executor_pool`（專案層級，kind→正整數，預設空 `{}`）：限制 manager 可增聘的 kind 與數量（例如 `codex = 2, claude = 1`）。manager 透過 `agm hire` 增聘時，該 kind 不在池內拒絕 403 `kind_not_in_pool`；同專案存活且角色為 executor 的同 kind 成員數已達數量拒絕 409 `executor_pool_full`。池是空的＝manager 不能增聘（預設保守以保護額度）。User 角色不受池限制。
+
 派工授權以 daemon 當下資料判斷為準，shim 是第一道防線；啟用 expert 前檢查活躍 bot 的 shim，過期時列出 bot 並拒絕。已啟用後 shim 過期標待套用並告警；reconcile 發現非管理者開 child 時仍追蹤並向管理者與 ops 告警。
 
 expert 專案的 bot relay 收件規則（child 向自身 parent 回報不受收件角色限制）：

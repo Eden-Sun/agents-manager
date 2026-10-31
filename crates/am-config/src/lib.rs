@@ -179,6 +179,9 @@ pub struct BotCfg {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// false＝manager 不能派工給它、不能啟動／重啟它、agm peers 列為不可派。使用者自己照常可用。
+    #[serde(default = "default_true")]
+    pub manager_use: bool,
     /// None = the CLI's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -215,6 +218,31 @@ pub struct BotCfg {
     pub create_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_fingerprint: Option<String>,
+}
+
+impl Default for BotCfg {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            kind: String::new(),
+            role: None,
+            manager_use: true,
+            model: None,
+            effort: None,
+            fast: false,
+            persona: None,
+            args: Vec::new(),
+            autostart: false,
+            inject_hooks: true,
+            auto_approve: true,
+            identity: None,
+            env: std::collections::BTreeMap::new(),
+            herdr_session: None,
+            create_request_id: None,
+            create_fingerprint: None,
+        }
+    }
 }
 
 /// Lets several bots of one kind run under different accounts (`CLAUDE_CONFIG_DIR`, `GROK_HOME`).
@@ -287,6 +315,8 @@ pub struct ProjectCfg {
     pub label: String,
     #[serde(default = "default_project_mode")]
     pub mode: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub executor_pool: std::collections::BTreeMap<String, u32>,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -295,6 +325,21 @@ pub struct ProjectCfg {
     /// bot／pane 一律不動（SPEC §6.5h）；清掉＝收回，下一輪對帳照常接手。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handed_off_to: Option<String>,
+}
+
+impl Default for ProjectCfg {
+    fn default() -> Self {
+        Self {
+            id: None,
+            path: String::new(),
+            label: String::new(),
+            mode: default_project_mode(),
+            executor_pool: std::collections::BTreeMap::new(),
+            host: default_host(),
+            bots: Vec::new(),
+            handed_off_to: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2928,7 +2973,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

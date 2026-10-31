@@ -580,6 +580,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (75, "dab5e06d25106ac2"),
     // 專家模式 track（2026-10-31）：`relay_requests.track`。
     (76, "f00a57c2bd7cfbfa"),
+    // 專家模式保護額度（2026-10-31）：`bots.manager_use`、`projects.executor_pool_json`。
+    (77, "02d3beb36275b2dc"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -851,6 +853,10 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
         // 專家模式 track（2026-10-31）：relay_requests 所屬的票號或模組。
         ("relay_requests", "track", "ALTER TABLE relay_requests ADD COLUMN track TEXT"),
+        // 專家模式保護額度開關 A：bot manager_use
+        ("bots", "manager_use", "ALTER TABLE bots ADD COLUMN manager_use INTEGER NOT NULL DEFAULT 1"),
+        // 專家模式保護額度開關 B：專案執行者池 JSON
+        ("projects", "executor_pool_json", "ALTER TABLE projects ADD COLUMN executor_pool_json TEXT NOT NULL DEFAULT '{}'"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -1390,6 +1396,22 @@ pub struct Project {
     /// #708：已移交給這台主機的 daemon；`None`＝這顆 daemon 管。
     pub handed_off_to: Option<String>,
     pub mode: String,
+    #[serde(default = "default_empty_json_object")]
+    pub executor_pool_json: String,
+}
+
+fn default_empty_json_object() -> String {
+    "{}".into()
+}
+
+fn default_one() -> i64 {
+    1
+}
+
+impl Project {
+    pub fn executor_pool(&self) -> std::collections::BTreeMap<String, u32> {
+        serde_json::from_str(&self.executor_pool_json).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1424,6 +1446,9 @@ pub struct Bot {
     pub is_primary: i64,
     /// 主力那列的固定順序（issue #344）：1 起算，0＝從沒排過；取消釘選不清。純顯示，不進 config.toml。
     pub primary_position: i64,
+    /// 專家模式保護額度開關 A：可被管理者使用（1＝true，0＝false）
+    #[serde(default = "default_one")]
+    pub manager_use: i64,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,
