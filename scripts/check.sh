@@ -214,7 +214,7 @@ check_macos_local() {
     step "macOS native Cargo: $local_cargo"
 
     # 記憶體閘（issue #1783）：不管有沒有設 CHECK_MAX_LOAD 都先等記憶體夠才開編（CPU 負載由上面的 CHECK_MAX_LOAD 閘管，這裡不看）。
-    step "記憶體閘：可用記憶體 ≥ ${CHECK_MIN_FREE_MEM:-30}% 且壓力 normal 才開編（最多等 ${CHECK_LOAD_TIMEOUT:-1800} 秒）"
+    step "記憶體閘：可用記憶體 ≥ ${CHECK_MIN_FREE_MEM:-30}% 且壓力不是 critical 才開編（最多等 ${CHECK_LOAD_TIMEOUT:-1800} 秒）"
     bash scripts/wait-load.sh --max 999999 --min-free-mem "${CHECK_MIN_FREE_MEM:-30}" --timeout "${CHECK_LOAD_TIMEOUT:-1800}" || return $?
 
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-macos-local.XXXXXX")"

@@ -80,9 +80,12 @@ out="$(WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 -
 equals "可用記憶體不夠、--timeout 0：逾時 124" "${rc}" 124
 has "失敗時講明可用記憶體" "${out}" "可用記憶體 12%"
 echo "80 2" > "${MEM}"
+WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
+equals "free% 夠、壓力 warn：放行（warn 是常態）" "${rc}" 0
+echo "80 4" > "${MEM}"
 out="$(WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 2>&1)"; rc=$?
-equals "free% 夠但壓力是 warn：不放行（124）" "${rc}" 124
-has "失敗時講明壓力等級" "${out}" "記憶體壓力等級 2"
+equals "free% 夠但壓力是 critical：不放行（124）" "${rc}" 124
+has "失敗時講明壓力等級" "${out}" "記憶體壓力等級 4"
 echo "80 1" > "${MEM}"
 echo "152.30 1 1" > "${LOAD}"
 WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
