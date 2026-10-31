@@ -271,7 +271,33 @@ pub fn decide(
     context_pct: Option<f64>,
     min_context_pct: f64,
 ) -> Step {
-    if age_secs >= WARM_COMPACT_AFTER_SECS {
+    decide_with(
+        age_secs,
+        cache_age_secs,
+        ttl_secs,
+        kept_since_anchor,
+        compacted_since_anchor,
+        context_pct,
+        min_context_pct,
+        KEEP_WARM_AFTER_SECS,
+        WARM_COMPACT_AFTER_SECS,
+    )
+}
+
+/// [`decide`] 的門檻可調版本：保溫與熱壓的分鐘由角色 policy／bot 覆寫換算（[`crate::runtime_policy::KeepWarmTuning`]）。
+#[allow(clippy::too_many_arguments)]
+pub fn decide_with(
+    age_secs: i64,
+    cache_age_secs: i64,
+    ttl_secs: i64,
+    kept_since_anchor: bool,
+    compacted_since_anchor: bool,
+    context_pct: Option<f64>,
+    min_context_pct: f64,
+    keep_warm_after_secs: i64,
+    warm_compact_after_secs: i64,
+) -> Step {
+    if age_secs >= warm_compact_after_secs {
         if !compacted_since_anchor
             && cache_age_secs < ttl_secs - WARM_COMPACT_TTL_MARGIN_SECS
             && context_pct.is_some_and(|p| p > min_context_pct)
@@ -280,7 +306,7 @@ pub fn decide(
         } else {
             Step::Wait
         }
-    } else if age_secs >= KEEP_WARM_AFTER_SECS
+    } else if age_secs >= keep_warm_after_secs
         && age_secs < ttl_secs
         && cache_age_secs < ttl_secs
         && !kept_since_anchor
@@ -582,7 +608,11 @@ async fn retry_pending_notes<M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
 async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
     let in_flight = db::in_flight_turn(db.pool(), &run.id).await?.is_some();
     let queued = db::queued_turn_for_bot(db.pool(), &bot.id).await?.is_some();
-    if !eligible(&bot.kind, bot.is_primary != 0, &run.state, &run.agent_status, in_flight, queued) {
+    let eff = effective_runtime(db, bot).await?;
+    let tuning = eff.keep_warm_tuning(KEEP_WARM_AFTER_SECS, WARM_COMPACT_AFTER_SECS, warm_compact_min_context_pct(&bot.kind));
+    // 對象：主力，或 effective keep_warm==true；effective keep_warm==false 可關掉主力的保溫。
+    let target = tuning.enabled.unwrap_or(bot.is_primary != 0);
+    if !eligible(&bot.kind, target, &run.state, &run.agent_status, in_flight, queued) {
         return Ok(None);
     }
     let (anchor, last_turn) = anchor_of(db, bot, run, now).await?;
@@ -594,7 +624,7 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     let first_look_secs = if frozen {
         cache_clock::ttl_secs(&bot.kind).map_or(i64::MAX, |ttl| ttl - FROZEN_COMPACT_LEAD_SECS)
     } else {
-        KEEP_WARM_AFTER_SECS
+        tuning.keep_warm_after_secs
     };
     if age_secs < first_look_secs {
         return Ok(None);
@@ -634,19 +664,37 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     }
     let compacted = last_compact.is_some_and(|t| t > anchor_t);
     let context_pct = context_used_pct(&bot.kind, &run.id, run.status_json.as_deref());
-    let min_context_pct = warm_compact_min_context_pct(&bot.kind).unwrap_or(f64::INFINITY);
+    let min_context_pct = tuning.min_context_pct.unwrap_or(f64::INFINITY);
     if frozen {
         return Ok(Some(Plan { step: decide_frozen(cache_age_secs, cache_ttl_secs, compacted, context_pct, min_context_pct), anchor, age_secs }));
     }
-    Ok(Some(Plan { step: decide(
+    Ok(Some(Plan {
+        step: decide_with(
             age_secs,
             cache_age_secs,
             cache_ttl_secs,
             kept,
             compacted,
-            context_used_pct(&bot.kind, &run.id, run.status_json.as_deref()),
-            warm_compact_min_context_pct(&bot.kind).unwrap_or(f64::INFINITY),
-    ), anchor, age_secs }))
+            context_pct,
+            min_context_pct,
+            tuning.keep_warm_after_secs,
+            tuning.warm_compact_after_secs,
+        ),
+        anchor,
+        age_secs,
+    }))
+}
+
+/// 這顆 bot 生效的執行期設定：bot 覆寫（`bots.runtime_override_json`）＋它角色在專案的 policy（`projects.role_policy_json`）。
+/// 池條目的 context 不影響保溫，所以這裡不傳。讀不懂的 JSON 一律當沒設（不因此誤開保溫）。
+pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> anyhow::Result<crate::runtime_policy::Effective> {
+    use crate::runtime_policy::{effective, RuntimeSettings};
+    let ov: Option<RuntimeSettings> = bot.runtime_override_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    let role: Option<RuntimeSettings> = match (db::project(db.pool(), &bot.project_id).await?, bot.role.as_deref()) {
+        (Some(p), Some(role)) => p.role_policy().get(role).and_then(|v| serde_json::from_value(v.clone()).ok()),
+        _ => None,
+    };
+    Ok(effective(ov.as_ref(), None, role.as_ref()))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]

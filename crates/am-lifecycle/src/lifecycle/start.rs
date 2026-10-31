@@ -1451,9 +1451,24 @@ async fn start_inner_body(
         args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     } else {
         args.extend(persona_args_cli_docs(bot, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
-        args.extend(model_args(&effort_checked(app, bot, &project.host).await));
+        // B 期：角色 policy／bot 覆寫生效時，啟動模型與 context 參數以它為準（沒有覆寫就是 bot 自己的，完全不變）。
+        let overlay = super::runtime_overlay::overlay_for(app, bot).await.map_err(up)?;
+        let mut model_bot = effort_checked(app, bot, &project.host).await;
+        if overlay.model.is_some() {
+            model_bot.model = overlay.model.clone();
+        }
+        args.extend(model_args(&model_bot));
         args.extend(identity_args_v);
         args.extend(bot.args());
+        args.extend(overlay.args.clone());
+        if let Err(e) = sqlx::query("UPDATE runs SET policy_rev = ? WHERE id = ?")
+            .bind(super::runtime_overlay::policy_rev_of(&overlay.eff))
+            .bind(run_id)
+            .execute(app.db())
+            .await
+        {
+            tracing::warn!(bot = %bot.name, error = %e, "could not record the runtime policy revision for this run");
+        }
     }
     // issue #748：`[codex] instant_interrupt` 開著才替 codex 打開它那一側的 instant_interrupt；進了 argv 才記 1，
     // 記錄跟 argv 出自同一個判斷（send_now 的閘門靠它分辨「這個 run 起的時候有沒有帶」）。寫不進去只記 log：
@@ -2194,8 +2209,14 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
 
     let mut args = super::setup::permission_args(&bot.kind, bot.auto_approve != 0);
     // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
-    args.extend(model_args(&effort_checked(app, &bot, &host).await));
+    let overlay = super::runtime_overlay::overlay_for(app, &bot).await.map_err(up)?;
+    let mut model_bot = effort_checked(app, &bot, &host).await;
+    if overlay.model.is_some() {
+        model_bot.model = overlay.model.clone();
+    }
+    args.extend(model_args(&model_bot));
     args.extend(bot.args());
+    args.extend(overlay.args.clone());
     let resume = match db::last_native_session(app.db(), bot_id).await.map_err(up)? {
         Some((sid, _)) => match resume_args_by_kind(&bot.kind, &sid) {
             Ok(a) => Some((sid, a)),

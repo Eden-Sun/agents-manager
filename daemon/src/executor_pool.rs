@@ -6,24 +6,11 @@ use crate::lifecycle::LcError;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+// context 規則與啟動參數的實作在 am-config（role policy 與 am-lifecycle 也用同一份）。
+pub use am_config::executor_pool::{context_window, launch_params, LaunchParams, CLAUDE_BASE_WINDOW, CONTEXT_MIN};
+
 pub const MAX_ENTRIES: usize = 20;
 pub const MAX_COUNT: u32 = 10;
-pub const CONTEXT_MIN: u32 = 32_000;
-/// claude 的 `[1m]` 變體以上才用得到的門檻：超過它就把模型換成 `<model>[1m]`。
-const CLAUDE_BASE_WINDOW: u32 = 200_000;
-
-/// 模型視窗（token）。`/api/models` 目前沒有 context window 欄位，所以用家族預設：
-/// claude 的 opus／sonnet 有 `[1m]` 變體→1M（超過 200k 的條目會套 `[1m]`）；haiku 與其他 claude model
-/// （含空字串）→200k，因為 haiku 沒有 1M 變體，`haiku[1m]` 會啟動失敗；codex 400k；其他 kind 不支援 context（0）。
-pub fn context_window(kind: &str, model: &str) -> u32 {
-    match kind {
-        "claude" if model.contains("opus") || model.contains("sonnet") => 1_000_000,
-        "claude" => CLAUDE_BASE_WINDOW,
-        "codex" => 400_000,
-        _ => 0,
-    }
-}
-
 /// PATCH `executor_pool` 的整份陣列驗證；整份覆蓋，所以這裡一次檢查全部條目。
 pub fn parse_patch(raw: &Value) -> Result<Vec<ExecutorPoolEntry>, LcError> {
     let Value::Array(items) = raw else {
@@ -141,38 +128,6 @@ pub fn check_capacity(entry: &ExecutorPoolEntry, bots: &[BotCfg]) -> Result<(), 
         })));
     }
     Ok(())
-}
-
-/// 增聘時 context 寫進啟動參數：claude → env `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（超過 200k 改用 `[1m]` 模型），
-/// codex → `-c model_auto_compact_token_limit=N`，agy 不支援（驗證時已擋）。
-pub struct LaunchParams {
-    pub model: Option<String>,
-    pub env: BTreeMap<String, String>,
-    pub args: Vec<String>,
-}
-
-pub fn launch_params(entry: &ExecutorPoolEntry) -> LaunchParams {
-    let model = (!entry.model.is_empty()).then(|| entry.model.clone());
-    let mut out = LaunchParams { model, env: BTreeMap::new(), args: Vec::new() };
-    let Some(tokens) = entry.context_tokens else { return out };
-    match entry.kind.as_str() {
-        "claude" => {
-            out.env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), tokens.to_string());
-            if tokens > CLAUDE_BASE_WINDOW {
-                if let Some(m) = out.model.as_mut() {
-                    if !m.ends_with("[1m]") {
-                        m.push_str("[1m]");
-                    }
-                }
-            }
-        }
-        "codex" => {
-            out.args.push("-c".into());
-            out.args.push(format!("model_auto_compact_token_limit={tokens}"));
-        }
-        _ => {}
-    }
-    out
 }
 
 /// `/api/state` 與 peers 用的條目 JSON，附上已用數。
