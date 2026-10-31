@@ -84,7 +84,7 @@
                 "case \"$*\" in\n\
                    */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200'; exit 0 ;;\n\
                    */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
                    */relay/spawn/abort*) printf '{\"released\":true}\\n200'; exit 0 ;;\n\
                    *) exit 7 ;;\n\
@@ -278,7 +278,7 @@ esac"#, calls.display()));
                 "printf '%s\\n' \"$@\" >> '{}'\n\
                  case \"$*\" in\n\
                    */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                  esac\n",
                 log.display()
@@ -746,7 +746,7 @@ esac"#, calls.display()));
                      case \"$*\" in\n\
                        */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
                        */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
                        */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                      esac\n",
                     log.display()
@@ -1446,10 +1446,21 @@ esac"#, calls.display()));
     fn an_unwritable_env_file_falls_back_to_inline_exports() {
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
-        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         let text = s.sent_text().1;
-        assert!(text.contains("export AM_BOT_ID='b1'; "), "{text}");
+        assert!(text.contains("export AM_AGENT_NAME='p-1-kid'; "), "{text}");
+    }
+
+    #[test]
+    fn an_unwritable_child_credential_file_refuses_to_start() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(rc, 75, "{err}");
+        assert!(out.is_empty() && !log.exists());
+        assert!(err.contains("無法安全注入"));
     }
 
     /// `--pane` 沒給（herdr 自己會因為缺必要旗標報錯）：shim 沒有目標可補，不猜、不炸。
@@ -1585,7 +1596,7 @@ esac"#, calls.display()));
              case \"$*\" in\n\
                */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
                */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
                */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
              esac\n",
@@ -1604,7 +1615,7 @@ esac"#, calls.display()));
              cat >> '{}'\n\
              case \"$*\" in\n\
                */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
                */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
              esac\n",
@@ -1718,7 +1729,7 @@ esac"#, calls.display()));
             "case \"$*\" in\n\
                */api/pane-authorize*) printf '{\"allowed\":true,\"pane_id\":\"w1:p9\"}\\n200'; exit 0 ;;\n\
                */api/spawn-authority*) printf '200'; exit 0 ;;\n\
-                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}\\n200'; exit 0 ;;\n\
                */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
                */relay/spawn/claim*) printf '{}\\n503'; exit 0 ;;\n\
              esac\n",
@@ -2408,4 +2419,47 @@ for a in "$@"; do printf '%s\n' "$a"; done
         let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "parent")], &["agent", "prompt", "w1:p2", "hello"]);
         assert_eq!(rc, 0);
         assert_eq!(out, ["agent", "prompt", "w1:p2", "hello"]);
+    }
+
+    #[test]
+    fn child_start_injects_the_daemon_issued_credential() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "parent"), ("AM_BOT_ID", "parent-id"),
+                   ("AM_BOT_TOKEN", "parent-token"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        let (_, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        let (_, injected) = s.sourced_env();
+        assert!(injected.contains("export AM_CHILD_SPAWN_ID='test-spawn'"));
+        assert!(injected.contains("export AM_CHILD_TOKEN='test-child-token'"));
+        assert!(injected.contains("export AM_CHILD_OF='parent-id'"));
+    }
+
+    #[test]
+    fn child_prompt_uses_child_headers_instead_of_inherited_parent_headers() {
+        let s = Sandbox::new();
+        let headers = s.dir.join("headers");
+        s.install_fake_curl(&format!("cat > '{}'; printf '{{\"error\":\"denied\"}}\\n403'", headers.display()));
+        let env = [("AM_BOT_ID", "parent"), ("AM_BOT_TOKEN", "parent-secret"),
+                   ("AM_CHILD_SPAWN_ID", "spawn"), ("AM_CHILD_TOKEN", "child-secret"),
+                   ("AM_DAEMON_URL", "http://daemon:7788")];
+        let (_, _, rc) = s.run_full(&env, &["agent", "prompt", "bot:parent", "hello"]);
+        assert_eq!(rc, 77);
+        let headers = std::fs::read_to_string(headers).unwrap();
+        assert!(headers.contains("X-AM-Child-Spawn-Id: spawn"));
+        assert!(headers.contains("X-AM-Child-Token: child-secret"));
+        assert!(!headers.contains("parent-secret"));
+    }
+
+    #[test]
+    fn legacy_child_without_credential_cannot_self_relay_as_parent() {
+        let s = Sandbox::new();
+        let calls = s.dir.join("calls");
+        s.install_fake_curl("printf '{\"error\":\"relay_self\"}\\n400'");
+        let env = [("AM_BOT_ID", "parent"), ("AM_BOT_TOKEN", "parent-token"),
+                   ("AM_CHILD_OF", "parent"), ("AM_DAEMON_URL", "http://daemon:7788"),
+                   ("AM_TEST_CALL_LOG", calls.to_str().unwrap())];
+        let (_, _, rc) = s.run_full(&env, &["agent", "prompt", "bot:parent", "hello"]);
+        assert_ne!(rc, 0);
+        assert!(!std::fs::read_to_string(calls).unwrap_or_default().contains("agent prompt"));
     }

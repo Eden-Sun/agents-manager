@@ -1391,6 +1391,10 @@
         std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
+        for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
+            sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&mut *tx).await.unwrap();
+        }
+        sqlx::query("DROP TABLE child_credentials").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE relay_requests").execute(&mut *tx).await.unwrap();
         for (table, col) in [("projects", "mode"), ("bots", "role"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
@@ -1521,6 +1525,10 @@
     async fn nr1944_v69_receipt_additive_upgrade_backup_fence_and_private_rows() {
         let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
         let pool=open(&path).await.unwrap();
+        for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
+            sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&pool).await.unwrap();
+        }
+        sqlx::query("DROP TABLE child_credentials").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE relay_requests").execute(&pool).await.unwrap();
         for (table, col) in [("projects", "mode"), ("bots", "role"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
