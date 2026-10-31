@@ -58,6 +58,20 @@
   color: var(--text-dim);
 }
 
+.bs-share-legacy {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.bs-share-legacy p {
+  margin: 0;
+}
+
 .bs-share-meta {
   display: grid;
   grid-template-columns: auto 1fr;
