@@ -1165,6 +1165,16 @@ am_authorize_pane() {
     _AM_AUTH_PANE=$(printf '%s' "$_auth_reply" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("allowed") is True; p=d.get("pane_id", ""); assert isinstance(p,str); print(p)' 2>/dev/null) || { printf 'agents-manager: daemon 授權回應無法解析\n' >&2; return 75; }
     [ "$_auth_kind" = context ] || [ -n "$_AM_AUTH_PANE" ] || return 75
 }
+# Managed calls may not enter an interactive client or mutate shared server state.
+if [ -n "${AM_BOT_ID:-}" ]; then
+    case "${1:-} ${2:-}" in
+        'agent '*|'pane '*|'tab '*|'workspace '*|'worktree '*|'notification '*|'status '*|'api snapshot'|'api schema'|'session list'|'integration install'|'--help '*|'-h '*|'--version '*|'-V '*|'--skill '*|'--default-config '*) : ;;
+        *) printf 'agents-manager: 受管 bot 不允許此 herdr 命令\n' >&2; exit 75 ;;
+    esac
+    if [ -n "$_AM_HERDR_REMOTE" ] || [ -n "$_AM_HERDR_HANDOFF" ]; then
+        printf 'agents-manager: 受管 bot 不允許互動式遠端連線或 handoff\n' >&2; exit 75
+    fi
+fi
 if [ -n "${AM_BOT_ID:-}" ] && { [ -n "$_AM_HERDR_REMOTE" ] || [ -n "$_AM_HERDR_REMOTE_KEYS" ] || [ -n "$_AM_HERDR_HANDOFF" ]; }; then
     case "${1:-} ${2:-}" in
         'agent prompt'|'agent start'|'agent send-keys'|'agent attach'|'agent rename'|'pane send-text'|'pane send-keys'|'pane run'|'pane close'|'pane rename'|'pane input'|'pane report-agent'|'pane report-agent-session'|'pane release-agent'|'pane report-metadata'|'tab close'|'workspace close')
