@@ -1802,6 +1802,24 @@ def cmd_role(client: Client, cfg: dict, args) -> object:
     return client.put("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/role", {"role": role})
 
 
+def cmd_hire(client: Client, cfg: dict, args) -> object:
+    """專家模式 manager 增聘執行者（頂層成員，角色固定 executor；不自動啟動）。"""
+    project_id = os.environ.get("AM_PROJECT_ID", "")
+    if not project_id:
+        raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
+    body = {"name": args.name, "kind": args.kind}
+    for key in ("model", "effort", "identity"):
+        if getattr(args, key):
+            body[key] = getattr(args, key)
+    return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
+
+
+def cmd_member(client: Client, cfg: dict, args) -> object:
+    """把 expert 專案裡留下的 child 原地轉成成員（pane 與對話不動）。"""
+    body = {key: getattr(args, key) for key in ("role", "effort", "session_id") if getattr(args, key)}
+    return client.post("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/member", body)
+
+
 def cmd_requests(client: Client, cfg: dict, args) -> object:
     return client.get("/api/relay-requests", {"from": args.from_bot, "to": args.to_bot, "open": "1" if args.open else None})
 
@@ -2800,6 +2818,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "none"])
     s.set_defaults(func=cmd_role)
+    s = sub.add_parser("hire", help="專家模式管理者：增聘同專案執行者（不自動啟動，之後 agm bot start）")
+    s.add_argument("name")
+    s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"])
+    s.add_argument("--model")
+    s.add_argument("--effort")
+    s.add_argument("--identity")
+    s.set_defaults(func=cmd_hire)
+    s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
+    s.add_argument("bot_id")
+    s.add_argument("--role", choices=["executor", "advisor"])
+    s.add_argument("--effort")
+    s.add_argument("--session-id", dest="session_id")
+    s.set_defaults(func=cmd_member)
     s = sub.add_parser("requests", help="查詢請求結果通知")
     s.add_argument("--to", dest="to_bot")
     s.add_argument("--from", dest="from_bot")
@@ -2877,7 +2908,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

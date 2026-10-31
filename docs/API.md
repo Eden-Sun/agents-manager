@@ -73,7 +73,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 ### Bot principal 的路徑資源範圍
 
-`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。例外：巡檢（patrol）角色可對任何頂層 bot 打 `POST /api/bots/{id}/restart`、`/start`（child 與其他操作仍限自己的樹）。expert 專案的 manager 可對同專案頂層 bot 與自己的 child 打 `/start`、`/restart`（角色改了要重啟才套用；child 不能原地重啟，`PUT .../role` 對執行中的 child 直接套用並回 `needs_restart:false`；遠端或 expert 的 `agm bot start|restart|stop|restore` 走 `AM_DAEMON_URL`）。User principal 維持原行為。
+`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。例外：巡檢（patrol）角色可對任何頂層 bot 打 `POST /api/bots/{id}/restart`、`/start`（child 與其他操作仍限自己的樹）。expert 專案的 manager 可對同專案成員打 `/start`、`/restart`，對執行者另可 `/stop` 與 `DELETE`（顧問只有 User 收）（角色改了要重啟才套用；child 不能原地重啟，`PUT .../role` 對執行中的 child 直接套用並回 `needs_restart:false`；遠端或 expert 的 `agm bot start|restart|stop|restore` 走 `AM_DAEMON_URL`）。User principal 維持原行為。
 
 | 端點 | 方法 | Bot 能否跨 bot | 應有範圍 |
 |---|---|---|---|
@@ -278,6 +278,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/prompt` | User 或 Bot；Bot `relay_from` 必須是自己，但可送給其他目標 Bot |
 | POST | `/api/bots/{id}/read` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/restart` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/bots/{id}/member` | User 或同專案 expert manager；把 expert 專案留下的 child 原地轉成成員（同 id 寫進 config.toml、清 parent），body `{role?: executor|advisor, effort?, session_id?}`；pane 不重啟，回 `needs_restart:true` |
+| POST | `/api/projects/{id}/members` | User 或該 expert 專案的 manager；增聘頂層成員，角色固定 executor，body `{name, kind, model?, effort?, identity?}`，不自動啟動 |
 | PUT | `/api/bots/{id}/role` | User 可設任何角色；expert 專案的 manager 只能把同專案頂層 bot 或自己的 child 設為 executor／advisor／null；其他 Bot → 403 `manager_role_scope` |
 | POST | `/api/bots/{id}/restore` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/rewind` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
