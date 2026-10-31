@@ -1,27 +1,15 @@
 import { useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Bot } from '../api/types'
-import { useBotLamp } from '../hooks/useBotLamp'
 import { useT } from '../lib/i18n'
 import { projectHostName, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
-import { KindIcon } from './KindTag'
 import { ProjectExpertSettings } from './ProjectExpertSettings'
 import { ProjectNameField } from './ProjectNameField'
 import { projectDeleteBlockers } from './projectDeleteGuard'
-import { StatusLamp } from './StatusLamp'
+import { QuotaStrip } from './QuotaStrip'
+import { UnreadChip } from './UnreadChip'
 import './projectSettingsPanel.css'
-
-function Member({ bot }: { bot: Bot }) {
-  const t = useT()
-  const selectBot = useStore((s) => s.selectBot)
-  const { lamp, background, label, kids } = useBotLamp(bot.id)
-  const status = t('{name}：{status}', { name: bot.name, status: t.tr(label) })
-  return <button type="button" className="btn project-settings-member" title={status} onClick={() => selectBot(bot.id)}>
-    <KindIcon kind={bot.kind} /> <StatusLamp lamp={lamp} background={background} kids={kids} title={status} /> {bot.name}
-  </button>
-}
 
 export function ProjectSettingsPanel({ projectId, onOpenSidebar }: { projectId: string; onOpenSidebar?: () => void }) {
   const t = useT()
@@ -37,17 +25,16 @@ export function ProjectSettingsPanel({ projectId, onOpenSidebar }: { projectId: 
   const blockers = projectDeleteBlockers(members, runs, projectId)
   return <>
     <div className="main-head">
-      {onOpenSidebar ? <button type="button" className="btn menu-btn icon-tip" onClick={onOpenSidebar} aria-label={t('開啟側邊欄')}>☰</button> : null}
+      {onOpenSidebar ? <button type="button" className="btn menu-btn icon-tip" onClick={onOpenSidebar} aria-label={t('開啟側邊欄')} data-tip={t('開啟側邊欄')}>☰</button> : null}
       <div className="main-title"><ProjectNameField projectId={projectId} label={project.label} editing={editing} onEditing={setEditing} /> <HostBadge host={host} connected={connected} /></div>
+      <span className="spacer" />
+      <QuotaStrip />
     </div>
+    <UnreadChip />
     <div className="project-settings">
       <h2>{t('專案設定')}</h2>
       <p>{t('路徑')}：<code>{project.path}</code></p>
       <ProjectExpertSettings projectId={projectId} />
-      <h3>{t('成員')}</h3>
-      <div className="project-settings-members" role="list" aria-label={t('專案成員')}>
-        {members.length ? members.map((bot) => <span role="listitem" key={bot.id}><Member bot={bot} /></span>) : <span className="hint">{t('（尚無 Bot）')}</span>}
-      </div>
       <button type="button" className="btn" onClick={() => setDeleting(true)}>{t('刪除專案…')}</button>
     </div>
     <ConfirmDialog open={deleting} title={t('刪除 Project')} confirmLabel={t('刪除 Project')} danger confirmDisabled={blockers.active > 0}

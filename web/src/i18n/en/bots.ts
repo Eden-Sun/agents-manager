@@ -2,8 +2,7 @@ import type { Dict } from '../../lib/i18n/types'
 
 export default {  // 共用 Bot／Project 狀態與驗證提示
   '專案設定': 'Project settings',
-  '專案成員': 'Project members',
-  '成員': 'Members',
+  '專案模式設定': 'Project mode settings',
   '開啟「{name}」的專案設定\n{path}{drag}': 'Open project settings for {name}\n{path}{drag}',
   '1–32 個字，不可含 @ , : ; 與看不見的字元，空白只能單一個、夾在中間': '1–32 characters; no @ , : ; or invisible characters. Use at most one space, not at either end',
   '其中 {items}': 'Including {items}',
