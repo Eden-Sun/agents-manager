@@ -28,6 +28,8 @@ export interface Project {
   github: ProjectGithub | null
   /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
+  /** 專家模式專案的執行者池（kind -> 數量上限），預設 {} */
+  executor_pool?: Record<string, number>
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
 }
@@ -280,6 +282,8 @@ export interface Bot {
   role_pending?: boolean
   daemon_url_pending?: boolean
   runtime_role_policy?: string | null
+  /** 專家模式下是否可被管理者使用（預設 true） */
+  manager_use?: boolean
   id: string
   project_id: string
   name: string
@@ -724,6 +728,8 @@ export interface PatchProjectInput {
   label?: string
   /** #708：字串＝移交，`null`＝收回。 */
   handed_off_to?: string | null
+  /** 專家模式專案的執行者池（kind -> 1..=10，0 或缺＝移除該 kind） */
+  executor_pool?: Record<string, number>
 }
 
 export interface DirEntry {
@@ -784,6 +790,7 @@ export interface NewBotInput {
 /** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */
 export interface PatchBotInput {
   role?: 'manager' | 'executor' | 'advisor' | null
+  manager_use?: boolean
   name?: string
   model?: string | null
   effort?: string | null

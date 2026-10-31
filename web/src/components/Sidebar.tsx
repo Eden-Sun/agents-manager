@@ -81,7 +81,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { ExpertBadge, ExpertRoleTag, ExpertSectionHeader } from './ExpertBadge'
+import { ExpertBadge, ExpertDisabledMark, ExpertRoleTag, ExpertSectionHeader } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
@@ -433,6 +433,7 @@ function BotRowImpl({
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {isExpertProject && !compact ? <ExpertRoleTag role={bot.role} rolePending={bot.role_pending} /> : null}
+            {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
