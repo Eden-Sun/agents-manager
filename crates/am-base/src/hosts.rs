@@ -404,6 +404,8 @@ pub struct HostConn {
     /// 這台從什麼時候開始連不上（`db::now()` 格式）；連著時為 `None`。daemon 起來後還沒連上過＝從建立連線物件算起。
     down_since: std::sync::Mutex<Option<String>>,
     pub remote_home: Mutex<Option<String>>,
+    /// Source IP observed by the remote SSH server on the current connection.
+    pub remote_ssh_source: Mutex<Option<std::net::IpAddr>>,
     master: Mutex<Option<tokio::process::Child>>,
     pub supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Bumped on every explicit reconnect so a stale supervisor exits.
@@ -420,6 +422,17 @@ pub struct HostConn {
     /// This daemon's instance slug at the time this host was (re)configured — namespaces the
     /// ctl/sock paths (issue #85). Unused for `local` (never spawns an SSH master).
     instance: Option<String>,
+}
+
+/// SSH_CONNECTION is `client_ip client_port server_ip server_port`.
+fn parse_ssh_connection(value: &str) -> Option<std::net::IpAddr> {
+    let mut fields = value.split_whitespace();
+    let source = fields.next()?.parse::<std::net::IpAddr>().ok()?;
+    let source_port = fields.next()?.parse::<u16>().ok()?;
+    let _destination = fields.next()?.parse::<std::net::IpAddr>().ok()?;
+    let destination_port = fields.next()?.parse::<u16>().ok()?;
+    if source_port == 0 || destination_port == 0 || fields.next().is_some() || source.is_unspecified() { return None; }
+    Some(source)
 }
 
 /// 每條新連線（本機、設定換掉的同名遠端）的世代從不同的區間開始：am-ports 的 `HostFence` 只有 host id＋世代，沒有連線物件，
@@ -439,6 +452,7 @@ impl HostConn {
             error: Mutex::new(None),
             down_since: std::sync::Mutex::new(None),
             remote_home: Mutex::new(dirs::home_dir().map(|p| p.to_string_lossy().to_string())),
+            remote_ssh_source: Mutex::new(None),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(first_generation()),
@@ -460,6 +474,7 @@ impl HostConn {
             error: Mutex::new(None),
             down_since: std::sync::Mutex::new(Some(crate::db::now())),
             remote_home: Mutex::new(None),
+            remote_ssh_source: Mutex::new(None),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(first_generation()),
@@ -681,11 +696,26 @@ impl HostConn {
         self.ssh_exec_timeout(&format!("{}{script}", self.path_prefix()), timeout).await
     }
 
+    /// A configured reverse proxy or NAT override wins over the address observed by SSH.
+    pub async fn daemon_url(&self, port: u16) -> Option<String> {
+        if let Some(url) = self.cfg.as_ref().and_then(|c| c.daemon_url.as_deref()).filter(|s| !s.is_empty()) {
+            return Some(url.to_string());
+        }
+        self.remote_ssh_source.lock().await.map(|ip| match ip {
+            std::net::IpAddr::V4(ip) => format!("http://{ip}:{port}"),
+            std::net::IpAddr::V6(ip) => format!("http://[{ip}]:{port}"),
+        })
+    }
+
     pub async fn home(&self) -> Result<String> {
         if let Some(h) = self.remote_home.lock().await.clone() {
             return Ok(h);
         }
-        let h = self.ssh_exec("printf '%s' \"$HOME\"").await?.trim().to_string();
+        let out = self.ssh_exec("printf '%s\\nAM_SSH_CONNECTION=%s\\n' \"$HOME\" \"${SSH_CONNECTION:-}\"").await?;
+        let mut lines = out.lines();
+        let h = lines.next().unwrap_or("").trim().to_string();
+        let source = lines.find_map(|line| line.strip_prefix("AM_SSH_CONNECTION=")).and_then(parse_ssh_connection);
+        *self.remote_ssh_source.lock().await = source;
         if h.is_empty() {
             bail!("remote $HOME is empty");
         }
@@ -701,7 +731,7 @@ impl HostConn {
         let q = sh_quote(sess);
         let rounds = REMOTE_SESSION_WAIT_ROUNDS;
         let script = format!(
-            r#"printf 'AM_HOME=%s\n' "$HOME"
+            r#"printf 'AM_HOME=%s\nAM_SSH_CONNECTION=%s\n' "$HOME" "${{SSH_CONNECTION:-}}"
 # #887：暫存檔與 log 一律只有自己讀得到；server 本身要用回原本的 umask（見 nohup 分支）。
 AM_UMASK=$(umask); umask 077
 S={q}
@@ -819,14 +849,18 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         let cfg = self.cfg.as_ref().unwrap();
         let sess = &cfg.herdr_session;
         let script = Self::remote_session_script(cfg, shared);
+        *self.remote_ssh_source.lock().await = None;
         let out = self.ssh_exec_path_timeout(&script, REMOTE_SESSION_TIMEOUT).await?;
         let mut home = None;
+        let mut ssh_source = None;
         let mut sock = None;
         let mut ok = false;
         let mut mode = String::from("?");
         for line in out.lines() {
             if let Some(v) = line.strip_prefix("AM_HOME=") {
                 home = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("AM_SSH_CONNECTION=") {
+                ssh_source = parse_ssh_connection(v);
             } else if let Some(v) = line.strip_prefix("AM_SOCK=") {
                 sock = Some(v.trim().to_string());
             } else if let Some(v) = line.strip_prefix("AM_MODE=") {
@@ -842,6 +876,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         if !ok {
             bail!("remote herdr session `{sess}` did not come up (mode {mode}):\n{}", out.trim());
         }
+        *self.remote_ssh_source.lock().await = ssh_source;
         tracing::info!(host = %self.name, session = %sess, socket = %sock, mode = %mode, "remote session ensured");
         Ok(sock)
     }
@@ -1660,6 +1695,7 @@ pub fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
         || a.ssh_opts != b.ssh_opts
         || a.herdr_session != b.herdr_session
         || a.remote_path != b.remote_path
+        || a.daemon_url != b.daemon_url
 }
 
 /// 主機名指到的是哪一台機器的指紋（issue #1773）：`ssh`、`ssh_port`、`herdr_session` 三欄（`\0` 串接）的 FNV-1a 64，
@@ -1861,4 +1897,63 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
         bail!("remote directory does not exist: {path}");
     }
     Ok(line.to_string())
+}
+
+#[cfg(test)]
+mod ssh_daemon_address_tests {
+    use super::*;
+    fn cfg(name: &str, override_url: Option<&str>) -> HostCfg {
+        HostCfg { name: name.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new(), shared_session: false, daemon_url: override_url.map(str::to_string) }
+    }
+    #[test]
+    fn changed_override_replaces_the_cached_connection() {
+        let a = cfg("host", None);
+        let mut b = a.clone();
+        b.daemon_url = Some("https://proxy.example:443".into());
+        assert!(cfg_differs(&a, &b));
+        assert_eq!(target_epoch(&a), target_epoch(&b), "an override does not change host identity");
+    }
+    #[test]
+    fn parses_only_complete_ssh_connection_addresses() {
+        for (raw, expected) in [
+            ("100.80.47.75 44662 100.112.229.82 22", Some("100.80.47.75")),
+            ("2001:db8::1 54321 2001:db8::2 22", Some("2001:db8::1")),
+            ("", None), ("100.80.47.75", None), ("bad 1 127.0.0.1 22", None),
+            ("127.0.0.1 zero 127.0.0.1 22", None), ("127.0.0.1 1 127.0.0.1 22 extra", None),
+        ] { assert_eq!(parse_ssh_connection(raw).map(|ip| ip.to_string()), expected.map(str::to_string), "{raw}"); }
+    }
+    #[tokio::test]
+    async fn home_probe_gets_source_in_the_same_ssh_call() {
+        let name = "ssh-daemon-home-probe";
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        set_ssh_fake(name, move |script| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(script.contains("SSH_CONNECTION"));
+            Ok("/home/test\nAM_SSH_CONNECTION=100.80.47.75 44662 100.112.229.82 22\n".into())
+        });
+        let conn = HostConn::remote(cfg(name, None), None);
+        assert_eq!(conn.home().await.unwrap(), "/home/test");
+        assert_eq!(conn.daemon_url(7788).await.as_deref(), Some("http://100.80.47.75:7788"));
+        assert_eq!(conn.home().await.unwrap(), "/home/test");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn session_probe_caches_source_and_override_wins() {
+        let name = "ssh-daemon-source-probe";
+        set_ssh_fake(name, |script| {
+            assert!(script.contains("SSH_CONNECTION"));
+            Ok("AM_HOME=/home/test\nAM_SSH_CONNECTION=2001:db8::1 54321 2001:db8::2 22\nAM_SOCK=/tmp/herdr.sock\nAM_OK=1\n".into())
+        });
+        let conn = HostConn::remote(cfg(name, None), None);
+        conn.ensure_remote_session(false).await.unwrap();
+        assert_eq!(conn.home().await.unwrap(), "/home/test");
+        assert_eq!(conn.daemon_url(7788).await.as_deref(), Some("http://[2001:db8::1]:7788"));
+        let override_conn = HostConn::remote(cfg(name, Some("https://proxy.example:443")), None);
+        override_conn.ensure_remote_session(false).await.unwrap();
+        assert_eq!(override_conn.daemon_url(7788).await.as_deref(), Some("https://proxy.example:443"));
+        set_ssh_fake(name, |_| Ok("AM_HOME=/home/test\nAM_SSH_CONNECTION=\nAM_SOCK=/tmp/herdr.sock\nAM_OK=1\n".into()));
+        conn.ensure_remote_session(false).await.unwrap();
+        assert_eq!(conn.daemon_url(7788).await, None);
+    }
 }

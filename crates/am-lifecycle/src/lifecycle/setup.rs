@@ -1703,10 +1703,10 @@ pub async fn pane_env_for_fence(
     let mode = crate::db::project(app.db(), &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("project missing while preparing pane environment"))?.mode;
     env.insert("AM_PROJECT_MODE".into(), json!(mode));
     env.remove("AM_DAEMON_URL");
-    let daemon_url = if host == LOCAL_HOST { Some(format!("http://127.0.0.1:{}", app.port())) } else { fence.conn().cfg.as_ref().and_then(|c| c.daemon_url.clone()).filter(|s| !s.is_empty()) };
+    let daemon_url = if host == LOCAL_HOST { Some(format!("http://127.0.0.1:{}", app.port())) } else { fence.conn().daemon_url(app.port()).await };
     if daemon_url.is_none() && host != LOCAL_HOST {
         let expert_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE host=? AND mode='expert' AND deleted_at IS NULL)").bind(host).fetch_one(app.db()).await?;
-        if expert_exists { anyhow::bail!("主機 {host} 有 expert 專案，但未設定 daemon_url，拒絕啟動 bot"); }
+        if expert_exists { anyhow::bail!("主機 {host} 有 expert 專案，SSH_CONNECTION 缺失或格式無效，無法推得 daemon 位址；請檢查 SSH 連線或設定 daemon_url 覆寫"); }
     }
     if let Some(url) = daemon_url { env.insert("AM_DAEMON_URL".into(), json!(url)); }
     reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
@@ -3790,12 +3790,22 @@ mod pane_env_tests {
         assert_eq!(local["AM_DAEMON_URL"], json!(format!("http://127.0.0.1:{}", env.app.port)));
         let remote = pane_env(&env.app, &bot, "box", "run", "name", None).await.unwrap();
         assert!(remote.get("AM_DAEMON_URL").is_none());
+        let source_conn = env.app.hosts.get("box").await.unwrap();
+        *source_conn.remote_ssh_source.lock().await = Some("100.80.47.75".parse().unwrap());
+        let remote = pane_env(&env.app, &bot, "box", "run", "name", None).await.unwrap();
+        assert_eq!(remote["AM_DAEMON_URL"], json!(format!("http://100.80.47.75:{}", env.app.port)));
+        let run = tt::fake_run(&env.app, &bot.id).await;
+        crate::lifecycle::start::record_daemon_url_injected(env.app.db(), &run, &remote).await.unwrap();
+        let injected: i64 = sqlx::query_scalar("SELECT daemon_url_injected FROM runs WHERE id=?").bind(&run).fetch_one(env.app.db()).await.unwrap();
+        assert_eq!(injected, 1, "the inferred remote address is recorded for the active run");
+
         let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg {
             daemon_url: Some("http://100.80.47.75:7788".into()), shared_session: false,
             name: "box2".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![],
             herdr_session: "agents-manager".into(), remote_path: String::new(),
         }).await;
         *conn.remote_home.lock().await = Some("/home/remote".into());
+        *conn.remote_ssh_source.lock().await = Some("2001:db8::1".parse().unwrap());
         let remote = pane_env(&env.app, &bot, "box2", "run", "name", None).await.unwrap();
         assert_eq!(remote["AM_DAEMON_URL"], json!("http://100.80.47.75:7788"));
     }
