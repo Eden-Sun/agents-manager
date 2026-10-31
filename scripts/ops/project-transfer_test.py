@@ -40,7 +40,7 @@ def schema_statements():
     ]
 
 
-# 協調者的表：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
+# 協調者的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
 # 先建表、再補欄、最後建索引（有些索引用到 ALTER 才加的欄，例如 supervisor_inbox.role）。
 MODULES = ["crates/am-supervisor/src/supervisor/store.rs", "crates/am-supervisor/src/supervisor/roles.rs"]
 
@@ -500,7 +500,7 @@ class ProjectTransferTest(unittest.TestCase):
         return json.loads(gzip.decompress(slurp(self.bundle)))
 
     def sup_target(self):
-        """目標開機過：有自己的 AGM 那一列與 responder，外加會撞唯一索引的 inbox、交辦與群組任務。"""
+        """目標開機過：有自己的 AGM 那一列與 responder，外加會撞唯一索引的 inbox 與交辦。"""
         c = self.tgt()
         c.execute("INSERT INTO supervisors (id, generation, status, created_at, updated_at) VALUES ('AGM', 5, 'failed', ?, ?)", (T0, T0))
         c.execute("INSERT INTO supervisor_roles (role, bot_id, wakes, created_at, updated_at) VALUES ('responder','old-bot',1,?,?)", (T0, T0))
@@ -603,32 +603,6 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertTrue(out["dry_run"])
         self.assertEqual(out["supervisor"]["inbox_parked"], 2)
         self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
-
-    def test_legacy_mission_collision_is_skipped_and_reported(self):
-        # Old databases and bundles can still contain the removed feature's tables.
-        ddl = [
-            "CREATE TABLE missions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, client_request_id TEXT NOT NULL, text TEXT NOT NULL, delivery_mode TEXT NOT NULL, executor_kind TEXT NOT NULL, on_5h_limit TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, client_request_id))",
-            "CREATE TABLE mission_events (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
-        ]
-        for path in (self.src_path, self.tgt_path):
-            c = sqlite3.connect(path)
-            for stmt in ddl:
-                c.execute(stmt)
-            c.close()
-        c = sqlite3.connect(self.src_path)
-        c.execute("INSERT INTO missions VALUES ('ms-hub', ?, 'crid-ms-hub', 'x', 'auto', 'codex', 'wait', ?, ?)", (PID, T0, T0))
-        c.execute("INSERT INTO mission_events VALUES ('me-hub', 'ms-hub', 'instruction', 'x', ?)", (T0,))
-        c.commit()
-        c.close()
-        self.export()
-        c = self.tgt()
-        c.execute("INSERT INTO missions VALUES ('t-ms', ?, 'crid-ms-hub', 'x', 'auto', 'codex', 'wait', ?, ?)", (PID, T0, T0))
-        c.commit()
-        c.close()
-        out = json.loads(self.imp().stdout)
-        self.assertEqual((out["inserted"]["missions"], out["inserted"]["mission_events"]), (0, 0))
-        self.assertEqual([(x["table"], x["id"]) for x in out["skipped_unique"]], [("missions", "ms-hub"), ("mission_events", "me-hub")])
-        self.assertEqual(out["inserted"]["projects"], 1)
 
     def test_failed_insert_rolls_back_db_and_config(self):
         self.export()

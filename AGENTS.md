@@ -53,7 +53,7 @@
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
 - **推完不必等 CI**：`scripts/check.sh changed` 綠了就推、繼續做事。`ubuntu-ci` 之後回報紅燈時，紅的是你造成的就修；不是就回報派工者，指出**哪一條測試、哪個 sha**（log 在 agm-host 的 `~/.cache/agents-manager/ci/logs/<sha>.log`）。
-- 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `hosts` / `quota` / `mission` 等，第一行說**為什麼**。
+- 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `hosts` / `quota` 等，第一行說**為什麼**。
 - 回報 commit hash，讓派工者在主樹只做 `git -C <主樹> merge --ff-only <你的分支>`；需要 rebase 時在自己的 worktree 做完再推自己的分支，禁止在主樹 stash、`checkout --` 或 autostash。
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。整合完成後移除自己的 worktree：`git worktree remove .claude/worktrees/<你的 agent 名>`。
 

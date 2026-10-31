@@ -110,15 +110,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 ### 3.1 daemon（`agents-managerd`）
 
 - axum + tokio + serde；SQLite 用 sqlx（每條連線 `foreign_keys=ON`、`journal_mode=WAL`）。
-- **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor／mission 各自的 migration），不升級更舊的檔案；
+- **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor 的 migration），不升級更舊的檔案；
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
   **trigger 例外**（issue #186）：內容由程式產生的守衛（`turns_status_transition`、`supervisor_assignments_status_transition`，
   連同 `runs_agent_status_since`）不能只 `IF NOT EXISTS`——轉移表改了，舊 DB 裡那一份會永遠停在舊規則（新的合法邊被擋、拿掉的照樣放行）。
   每次開 DB 都由 `db::sync_trigger` 拿 `sqlite_master.sql` 跟現在的 DDL 比，不同就在同一個交易裡 DROP 再建，舊 DB 不必等人手動重建。
   改轉移表仍然算 schema 變更、要升 `SCHEMA_VERSION`（見下面的版本戳記）：不然舊 binary 開到這個 DB，會照它自己的轉移表把守衛換回舊規則。
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
-  不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
-  `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
+  不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
   - **不能用 `ALTER` 改的東西要重建表**（issue #474）：SQLite 的 `ALTER TABLE` 加不了外鍵，也改不了 `CHECK`。
     既有資料庫缺了這種約束時，migrate 要在**同一個交易內** `CREATE …_new` ＋ `INSERT … SELECT` ＋ `DROP` ＋
     `RENAME`，而且只對真的缺的那種資料庫做（`pragma_foreign_key_list` 有東西就跳過，跑第二次是 no-op）。
@@ -282,7 +281,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   「AGM 的 bot」＝`supervisors`／`supervisor_roles` 的 bot 本身、parent 是它們的、**或在它們的專案裡**（`project_id`，即 `supervisor/*` 那個目錄）。
   只認 parent 是 #398 沒擋到的原因：AGM 的固定工人（build／triage／browser-gc／responder）都是 `managed_by=user`、`parent_bot_id=NULL`，直接放在總管專案底下。
   隱式投影遇到就拒絕（沒有放行開關）；刪除 API 沒帶 `?confirm=supervisor` 就 409 `supervisor_owned`、什麼都不動（`delete_bot_http`／`delete_project_http` 在拿鎖、寫 intent 之前擋）。
-  daemon 內部的刪除（mission 收自己開的臨時 bot）直接呼叫核心，不過這道閘。兩條被擋時都推一筆 `ops_alert`（`source=daemon`，同一小時同一原因只推一次）給巡檢，detail 帶呼叫端——不准靜默刪，也不准靜默擋。
+  兩條被擋時都推一筆 `ops_alert`（`source=daemon`，同一小時同一原因只推一次）給巡檢，detail 帶呼叫端——不准靜默刪，也不准靜默擋。
   **「一次最多 1 顆」跨投影累計**：隱式投影要軟刪 bot 時，把前 60 秒（`REMOVAL_WINDOW_SECS`）內已經軟刪的 user bot（不論投影或刪除 API 刪的）一起算，超過 1 顆就拒絕並推 `ops_alert`。
   只看單次投影的話，config 被連續改兩次、兩次投影各少 1 顆就繞過去了。計數直接讀 DB 的 `deleted_at`（跨重啟、跨呼叫端同一份帳，不另記）；代價是刪除 API 剛刪完一顆的 60 秒內，隱式投影再少一顆也會被擋——那種巧合本來就該有人看。
   經過 `update_and_project` 的 mutation 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與
@@ -544,8 +543,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 - **世代就是 `runs` 那一列本身**，先後看**寫入順序**（SQLite 的隱式 `rowid`）。不另外養計數器欄位——
   `INSERT INTO runs` 有七十幾處，半populated 的欄位只會給出假的保證，而 `rowid` 每一列本來就有。
   **不可以拿 `runs.id`（ULID）的字典序當世代序**：ULID 只有毫秒精度的時間戳，同一毫秒內的隨機段不保證
-  單調，兩個 run 巧合落在同一毫秒時，先寫進去的那個字典序反而可能比較大（issue #98；同源的還有
-  `a4605b2` 的 `mission_events` 排序與 §6.5 佇列的 `ORDER BY rowid`）。
+  單調，兩個 run 巧合落在同一毫秒時，先寫進去的那個字典序反而可能比較大（issue #98；同源的還有 §6.5 佇列的 `ORDER BY rowid`）。
 - **`Current`**（照常處理）：事件指名的就是這個 run；或它帶的 native session 等於這個 run 的 `native_session_id`
   或 `resume_session_id`（`resume_native` 起的 run 在第一則 hook 把 session 收進來之前的那個窗口）。
 - **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run，而這個 run 是 daemon 自己起的（`adopted=0`）；或它帶的
@@ -741,7 +739,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   額度拒絕認兩種前綴（CLI 2.1.271 的橫幅前綴表同時有 `You've hit your` 與 `You've reached your`）：`reached your … limit` 照舊；`hit your … limit` 只認速率桶。
   標成用完的桶照字面分（CLI 2.1.273 的字串表）：`session limit`→5h、`weekly limit`→7d、`Opus limit`／`Sonnet limit`→**模型自己的週桶**（`opus`／`sonnet`）、
   `Fable limit`→Fable 桶，認不出才先 5h 再 7d。模型桶不標任何量表（daemon 沒有那格），重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 跟 `weekly_all` 同一個週期；
-  它們只擋跑那個模型的 bot（§18.8b），以前記成 7d 會讓同帳號所有 claude bot 停派到週重置、群組任務換掉整個身份（review3 c4 M1）。
+  它們只擋跑那個模型的 bot（§18.8b），以前記成 7d 會讓同帳號所有 claude bot 停派到週重置（review3 c4 M1）。
   `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
   codex 模型滿載（`■ Selected model is at capacity. Please try a different model.`，行首必須是 `■`；`•` 回覆與縮排引文不算）同樣是回合錯誤，
@@ -1518,7 +1516,7 @@ hold 是行程記憶體，但被打斷的重啟由持久的 `restart` intent（#
 - 讀主機的其他地方同一條規則：`next_reset_for_bot` 讀不到回沒有（只看橫幅的時間）、`clear_limit_hit_for_bot` 讀不到不清（不把本機帳號真的
   撞限清掉）、`limit_cleared_since` 讀不到回沒清過、`running_model` 讀不到 run 回不知道（照擋，不退回設定值）、claude statusLine 讀不到主機
   就丟掉那一份（不寫進本機那一格、不拿它去校正本機的撞限）。supervisor 的派送／重送仍用 `quota::limit_hit_for_bot`（讀不到回沒有並記 warn；
-  那邊拿到撞限會 park、群組任務會換身份，不能拿假的撞限去擋）。
+  那邊拿到撞限會 park，不能拿假的撞限去擋）。
   **grok 的撞限長不一樣**（2026-09-19 w168:pB7）：它畫在訊息區塊裡——`Turn failed: Request failed (402): Grok Build usage balance
   exhausted`、`You hit your weekly limit.`，底下還有 `1 (○) Upgrade tier` 等三行。**那三行不是可以選的選單**：方向鍵動不了、
   ANSI 也看不到游標，是 grok 用文字講出路，所以不畫成按鈕。`screen::grok_limit_hit_line` 認這兩句（402 那句要同時提到 grok），
@@ -2233,22 +2231,19 @@ relay 身份由 daemon 驗證，受管 bot 的 prompt 經 daemon 解析 bot ID �
    herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
 Child 的 `agent start` 經 daemon spawn 授權後取得一次性的 `AM_CHILD_SPAWN_ID`／`AM_CHILD_TOKEN`；daemon 只保存 token 雜湊，並以已驗證的 parent、主機、herdr session、目標 pane 與 child 名稱，在認領時綁定 child 紀錄。未認領的憑證於 15 分鐘後失效；認領前呼叫回 409 `child_not_registered`。shim 優先使用 child 憑證，帶 child headers 的 `/api/session` 與 `/ws` 不提供使用者權限；child 只能向自己的 parent relay 和使用既有唯讀查詢；不能派工或開 child。child 收掉、解除認領或 pane 確認消失後撤銷；無法確認 terminal 或 native session 身分時暫回 503，避免 pane 重用造成誤認。parent 的 hook 環境仍為相容而繼承；同一 OS 使用者刻意移除 child token 並改用繼承的 parent 憑證不在此信任邊界內。
 
-6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身份 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身份都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
+6. **`POST /api/bots/{id}/prompt`  是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身份 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身份都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
    User 請求帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 卻無有效 Bot principal 時，在 auth 中介層先回 401，不進相容分支。未帶 Bot 身份 header 且有有效 `X-AM-Token` 的請求是 User；這保留使用者裁示接受的共用 UI token／`allow_lan` 風險，並不提供額外的人類證明。Bot 憑證沿用 hook token，User 用 credential rotation 立即失效；活 bot 重啟取得新值，停止 bot 下次啟動取得。
    `relay_from:"daemon"` 從 Bot／User HTTP 請求一律 403 `relay_from_reserved`——daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。維運腳本（`daemon-swap.sh`、`herdr-upgrade.sh`）走 service principal，不自稱 `relay_from`。
    **`relay_from` 不能是收件的那顆 bot 自己** → 400 `relay_self`：`relay_from` 的意思是「這句話不是收件者自己想的」，
    指向本人就沒有來源可標，UI 會畫出「A → A」；daemon 的 child 警示是 child → 母代，本來就是兩顆不同的 bot。
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
    不是同機的惡意行程。
-   **Bot principal 的路徑資源範圍**（2026-10-03）：所有以 bot／project／turn／mission／assignment／attachment 識別資源的 `/api` 路徑，都在共用 auth layer 以驗證過的 Bot id 查授權，不採信額外 header 或未解碼的 URI 別名。一般 bot 只可讀寫自己、後代 child、自己／後代所在專案、派給自己／後代的任務與交辦；turn／attachment 先反查其擁有 bot 再判。AGM 角色不會因此取得通用 bot、project、turn 或 attachment 跨資源權限；明確的跨資源管理入口限於 `GET／POST /api/projects/{id}/missions`、`/api/missions/{id}…` 與 `/api/supervisor/assignments/{id}` 的讀取／角色限定 review。唯一可直接指定其他 bot 的 Bot 路由是 `POST /api/bots/{id}/prompt`，仍須 `relay_auth` 驗 sender proof；附件上傳不繼承 prompt 的跨 bot 例外。`/api/drafts[/{key}]`、`/api/panes…` 與 `/api/hosts/{name}/shells…` 是網頁面，Bot principal `403 user_only`；User 維持原行為。Service principal 仍只依各自明列的 service path 授權。
+   **Bot principal 的路徑資源範圍**（2026-10-03）：所有以 bot／project／turn／assignment／attachment 識別資源的 `/api` 路徑，都在共用 auth layer 以驗證過的 Bot id 查授權，不採信額外 header 或未解碼的 URI 別名。一般 bot 只可讀寫自己、後代 child、自己／後代所在專案、派給自己／後代的交辦；turn／attachment 先反查其擁有 bot 再判。AGM 角色不會因此取得通用 bot、project、turn 或 attachment 跨資源權限；明確的跨資源管理入口限於 `/api/supervisor/assignments/{id}` 的讀取／角色限定 review。唯一可直接指定其他 bot 的 Bot 路由是 `POST /api/bots/{id}/prompt`，仍須 `relay_auth` 驗 sender proof；附件上傳不繼承 prompt 的跨 bot 例外。`/api/drafts[/{key}]`、`/api/panes…` 與 `/api/hosts/{name}/shells…` 是網頁面，Bot principal `403 user_only`；User 維持原行為。Service principal 仍只依各自明列的 service path 授權。
    Bot 對 `/api/bots/{id}/messages`、`/terminal` 與 `/api/turns/{id}/…` 只可沿自己的 bot-tree 存取。子 Bot 可讀自己與自己的 descendants，不可讀 parent 或 sibling。Bot 收到 `/api/state` 也是自己與 descendants 的投影，ancestor 不可見時不回傳 `parent_bot_id`。`/ws` 僅接受 UI token，Bot／Service principal 不能用 token query 或混合 credentials 訂閱全域事件；獨立分享 SSE 只送指定 bot 的 user／assistant 訊息與狀態。
    **Bot principal 的操作類別**（2026-10-03，`api::BOT_ROUTE_POLICIES`）：Bot 資源範圍只回答「能碰哪個 bot／project」，不代表可做所有管理動作。API.md 完整路由表標為 User-only 的路徑由同一個 auth policy 在 handler 前拒絕；Bot（含 AGM 角色）均回 `403 user_only`。這包括 `/api/drafts[/{key}]`、read marks、已刪 bot 清單、全機 memory/process inventory 與 pane preview、recovery intents、build-slot 清單、使用者檔案（attachments/local-image/outbox）、pane inventory/actions、host shells、bot keys/text 與附件上傳。Service principal 繼續只依明列的 service scope 授權；`GET /api/panes` 的 Herdr upgrade service scope 保留。其他 User-only 管理路徑只拒絕一般 Bot，AGM 角色仍受各自資源與 handler 規則限制。拒絕在 handler／主機 RPC／上傳 body extractor 前發生。`GET /api/quota` 讀取快照；一般 Bot 的 `refresh=1|true|yes` 回 403。`GET /api/models` 對一般 Bot 只回 10 分鐘內快取；未命中或過期回 503 `model_cache_miss` 且不執行 CLI，`refresh=1|true|yes` 回 403；User 與 AGM 沿用原有探測行為。一般 Bot 可提交 requester 綁定自己的 approval、只能向 AGM role 送不需驗收的 notice；persona 修改需 AGM role。Bot 只能操作 owner 是自己的 lease，tokenless 舊租約相容不擴大跨 Bot 權限。release-triage 的 `dispatched`／`publish` 對一般 Bot 回 403；`GET` 與 `verdicts` 仍保留 Bot 呼叫，但全域帳本讀取與提交是否按任務範圍綁定，待 #801 使用者決定.
    AGM 提供 `bin/agm models --kind <kind> --host <host> [--identity <name>] [--refresh]` 查詢／刷新命令，沿用 CLI 的 Client 認證，權限仍由 daemon 判定；不因 403／503 切換憑證或自動重試。
    Bot 的模型查詢操作指引由 `[agents].instructions_file` 的共用來源提供：明列 daemon 的部署入口、per-bot headers、目標執行主機 `host`／身份 `identity` 與快取失效處理。遠端無 `AM_PORT` 不得推論 daemon 位於遠端 localhost，也不改變遠端 hook／spool 的既有設計。指引更新在下次啟動載入；既有 session 由故障處理者同步告知，不宣稱自動熱更新。
    `GET /api/changelog` 與 `GET /api/deploy/status` 只供 User，Bot（含 AGM role）回 403 `user_only`：前者會在指定 host 讀 CLI 版本，後者回傳全域工作 Bot 與部署路徑。`GET /api/session` 的 loopback UI bootstrap 仍免 token，但帶 Bot／Service header 的請求回 403、不回 UI token。
-   **mission 端點**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from` 共用同一段 token 比對（#409，`relay_auth::authenticate_mission`），
-   差在兩格：沒帶 token 直接 403 `relay_from_token_required`（沒有相容期——唯一帶 `relay_from` 的呼叫端 `bin/agm` 在角色自己的 pane 裡一律帶 token，web 從不帶）；
-   `relay_from:"daemon"` 只給驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`），其他一律 403 `relay_from_reserved`。
    evidence 搜尋也回傳訊息實際的 `relay_from` 與 `relay_unverified`：對 `role=user` 訊息，`relay_from:null` 且 `relay_unverified:false` 表示 daemon 記錄為使用者直接輸入，`relay_unverified:true` 是 #410 之前相容期留下的未驗證來源自稱。舊 daemon 缺少這兩欄時，`agm search` 保留為 `null`／`null`（來源未知），不可把缺欄位轉成空字串。
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
@@ -2715,7 +2710,7 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 - **收口的寫入**：`mark_run_exited` 對它回 `AlreadyEnded`（什麼都不寫；pane 關閉事件、dead-pane 巡邏、default session 都經過它），
   `child_retire` 的隱式退役回 `HandedOff`（不軟刪）。
 - **其他會觸及 bot／pane 的入口**：autostart 補開、遠端回收區補還原與目錄 purge 在候選掃描及 bot 鎖內都排除已移交專案；
-  Bot／專案刪除與 bot 還原、preview stop、建立新 mission／續作 mission 回 409 `handed_off`，不改狀態、不呼叫 pane／SSH。
+  Bot／專案刪除與 bot 還原、preview stop 回 409 `handed_off`，不改狀態、不呼叫 pane／SSH。
 - **不操作**：start／stop／restart 與 prompt 回 409 `handed_off`（閒置回收、一鍵重啟、codex 升級後的重啟都經過 stop／start，
   一起擋下）；佇列原樣留著、一則都不送（收回後照常送）；`client_for_run`／`App::herdr_for_run` 不給 client，所以 keys／text／
   interrupt／login 與背景巡邏（survey、update watch、child alerts……）一個 pane RPC 都不打，連讀畫面都不讀；直接拿主機 client 的
@@ -3710,10 +3705,10 @@ config 是在原文後面追加 `[[projects]]` 區塊，不整份重寫（標準
 `projects = []`，追加前先拿掉那一行，否則 duplicate key 會讓 daemon 起不來。組好的文字先用 `tomllib` 解析，必須**正好等於「原本的 config 多一個專案」**
 才寫（dry-run 也驗），寫完再重讀比一次，不符就還原 config、回滾 DB；`projects` 是別種寫法（inline 陣列等）一律拒絕、請人手動處理。
 
-**搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`、該專案的群組任務 `missions`／`mission_events`（#720；撞 `client_request_id` 唯一索引就跳過並列進 `skipped_unique`，事件跟著它的任務跳過），
+**搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
 照來源的 rowid 順序插（`last_native_session` 挑最後一個 run 的第二鍵是 rowid，#461）；附件位元組一起打包（來源讀不到的列在 `missing_files`）。
 export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀、讀完當下刪快照，來源 DB 一個字都不寫；bundle 權限 600（內含對話）。
-不搬：憑證與身份（`identity` 只帶名字，B 要自己有同名身份或 A 機的 alias 認得，import 會列警告）、supervisor／mission／spawn hint／預覽等執行期表、
+不搬：憑證與身份（`identity` 只帶名字，B 要自己有同名身份或 A 機的 alias 認得，import 會列警告）、supervisor／spawn hint／預覽等執行期表、
 掛在這個專案 bot 底下卻屬於別的專案的 child（列警告）。
 
 **改寫**：專案與附件的 `host` → `--host`；`path`、`agent_path`、`native_session_id`、`transcript_path` 不變（接回用；改在 B 本機跑時見 §11.9a 的 `--path-map`）；
@@ -3859,7 +3854,7 @@ import 進複本、`cutover-helper.py drill-verify` 直接讀複本（專案 hos
 
 | 步驟 | 秒 | 量 |
 |---|---|---|
-| export | 6 | Agents Manager 61 MB（11 bot、102 run、2786 turn、4480 message、232 附件——2 個附件檔已不在——、2 mission）；AGM-DM-GRUP 24 MB（5 bot、112 run、3474 turn、1 mission，加協調者資料） |
+| export | 6 | Agents Manager 61 MB（11 bot、102 run、2786 turn、4480 message、232 附件——2 個附件檔已不在——）；AGM-DM-GRUP 24 MB（5 bot、112 run、3474 turn，加協調者資料） |
 | transcripts | 60 | 41 段、72 個檔、436 MB（逐檔兩趟 ssh）；協調者專案 3 段舊 session 在 Mac 上已經沒有檔（build／triage／responder 更早的 session，不是任何 bot 的最後一段，閘門放行） |
 | ship | 1 | |
 | import（兩個專案各 dry-run＋正式） | 15 | 全數插入；協調者：`supervisors`／兩個角色更新，requests 1355、assignments 1550、reviews 1145、notes 1116、incidents 79、approvals 492、inbox 1606 列；Team 舊欄位整批 NULL 略過；身份警告是誤報——目標認得自己 shell 的 `cc0`／`cc1` alias（都已登入；`cc2` 沒登入，這兩個專案沒人用） |
@@ -4145,7 +4140,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 
 ## 13. 專案設定
 
-點選側欄專案標題開啟專案設定；專案群組聊天與群組任務畫面已移除。mission 的 daemon 資料與 API 暫時保留（§18.14）。既有 `messages.group_id` 欄位留在 SQLite 以相容舊資料，daemon 不再讀寫或輸出此欄位。
+點選側欄專案標題開啟專案設定；專案群組聊天與群組任務畫面已移除。既有 `messages.group_id` 欄位留在 SQLite 以相容舊資料，daemon 不再讀寫或輸出此欄位。
 
 單 bot 訊息依 `(created_at, seq)` 顯示，翻頁游標取已載入訊息中 `seq` 最小者。整頁重抓重疊載入更早的訊息時，重抓套用後才返回的舊頁丟棄。
 
@@ -4346,7 +4341,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 
 ### 16.3b 停用一個身份（使用者 2026-09-16）
 `PUT /api/identities/{name}/disabled {kind, disabled, host?}`（daemon 的 `identity_prefs`，不是瀏覽器 localStorage）。
-停用是**挑不挑得到**的問題，不是能不能跑：群組任務挑身份、Bot 設定的身份選單、**標題列的額度條**、快速新增 Bot 的清單、側欄的身份計數都不再出現它（使用者 2026-09-16：「停用就別顯示在 header 及任何地方」）；唯一還看得到它的是環境設定那一頁自己，不然沒有地方把它按回來。
+停用是**挑不挑得到**的問題，不是能不能跑：Bot 設定的身份選單、**標題列的額度條**、快速新增 Bot 的清單、側欄的身份計數都不再出現它（使用者 2026-09-16：「停用就別顯示在 header 及任何地方」）；唯一還看得到它的是環境設定那一頁自己，不然沒有地方把它按回來。
 已經綁著它的 bot 照跑，那顆 bot 的設定裡仍看得到自己選的那一個（否則設定看起來會像空的）。
 額度也不再探測它（`quota_claude::refresh_claude` 跳過），**除非它還有 run 在跑**——停用是「別再挑它」，不是把正在用的額度弄瞎。共用預設帳號的身份（cc0）也一樣：指到裸 `claude` 的身份全都停用、都沒有 run、也沒有不帶身份的 claude bot 在跑，才跳過裸 `claude` 的探測。
 主機上的 alias 不動、登入狀態不動，隨時可以按「啟用」放回來。偵測到但不打算用的 `ccN`（例如只是 zshrc 裡留著）就用這個標掉。
@@ -4875,7 +4870,7 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
   `hold` 15 秒後用同一個 crid 再問，冪等那條路回寫好的結果才照一般規則記。
 - 驗收走 `POST /api/supervisor/assignments/{id}/review`，記 actor、來源、理由、證據（`supervisor_reviews`），同 decision 重送冪等。回合還在跑時只接受 `cancel`（不中止回合，之後的回覆不再記到這筆）；
   `block` 要等回合結束。
-- 「要求續作」是新開一筆 `follow_up_of` 指回原本的交辦（原本變 `superseded`），用 `followup_request_id` 去重——不改寫已送出的文字。續作繼承 mission 連結。
+- 「要求續作」是新開一筆 `follow_up_of` 指回原本的交辦（原本變 `superseded`），用 `followup_request_id` 去重——不改寫已送出的文字。
 - 未結案 = `queued`/`delivered`/`unknown`/`awaiting_review`/`blocked`/`quota_blocked`；open count、handoff、`/supervisor/state`、UI、例行更新判斷都吃這一組。
 - 舊資料：migration 只把已關的舊 row 標 `legacy_closed=1`（UI 標「舊資料·未經驗收」），不重開不重派。
 
@@ -4906,7 +4901,7 @@ codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地
   帶月日、沒有年份的橫幅維持舊規則（過去 ≤ 15 分鐘＝舊橫幅，更久才滾到明年）。算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
 - **額度記在 run 的身份**（issue #238，使用者 2026-09-19 決定）：bot 在跑的時候改身份（PATCH 回 `needs_restart`），按重啟之前 pane 裡還是**起來時的帳號**。
   `start_bot` 建 run 時把當時的身份蓋進 `runs.runtime_identity`（`''`＝沒有身份）；statusLine 讀數、撞限記帳（含欠著的比對）、成功回合清撞限、
-  派送與排隊 prompt 的閘門與憑據、開機回填、協調者額度、mission 換手判斷、codex 狀態列與 claude 探測的「在跑的身份」都看它（`quota::billing_identity`），
+  派送與排隊 prompt 的閘門與憑據、開機回填、協調者額度、codex 狀態列與 claude 探測的「在跑的身份」都看它（`quota::billing_identity`），
   所以**重啟前排著的 prompt 照舊身份擋**（它會送進舊帳號的行程）；重啟之後才換成新身份。沒有 run、或 run 沒記（收編的 pane、加欄位之前的舊列）才用 `bots.identity`；
   讀不到 run 回錯，閘門照擋、記帳由收件匣重試（不拿設定的身份猜——那正是會記錯格的那一個）。以前一律看 `bots.identity`：舊帳號用盡記到新帳號名下，
   新帳號被誤擋、舊帳號的其他 bot 照樣被派工。
@@ -4936,25 +4931,8 @@ codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地
   `source=parked-assignment`）。**每台主機每個行程只跑一次**，只收這個行程起來之前就停下的交辦：不綁 controller 的 `spawn`（每次換 generation 都會跑，會把成功回合剛清掉的撞限種回去），
   也不在身份偵測之前算 key（`cc0` 會落到沒人讀的 `claude:cc0`、遠端還沒連上）（review 2026-09-16）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
   沒有 `quota_blocked` 交辦、只有排著的 prompt 被額度閘擋下的（AGM 派到回合中 bot 的 `delivered`＋queued turn、AGM 的通知），憑據在 `turns.quota_hold`，同一個時機由 `quota_hold::backfill_once` 種回（§6「目標身份沒額度就不送」）。
-- **任務被使用者暫停時不自動重送**：交辦屬於一個還開著、被**使用者**暫停的任務時，`resume_quota_blocked` 整件跳過（也不算重試次數）——
-  暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。daemon 自己設的暫停
-  （`push_main_failed`／`pr_failed`／`max_rounds`／`no_fable_for_verifier`／`clarify`）照常重送：那些是「等 AGM 處理」，派工的閘門也不擋，
-  交付失敗之後 AGM 派的 rebase 若因此不重送，交付永遠不會成功、暫停也永遠解不開（issue #137，兩道閘門共用 `api::user_pause_reason`）。
-  409 退避中的交辦（`queued`，`drain_queue` 的重試）一樣：`dispatch` 看到任務被使用者暫停就 `hold` 30 秒、不送、不花重試（issue #175）；
-  以前只有等額度的重送看暫停，排著的那件幾秒後照樣打進 bot。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident；只在交辦**真的**轉進／轉出 `quota_blocked` 時推——
-  讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。
-  **任務的撞限政策讀不到就不判**（issue #160）：換手／停下來問人要讀的任務、目標 bot、它在哪台主機、身份停用清單、reviewer 要排除的執行者身份，任何一項讀不到都是第三態——什麼都不改（排著的交辦 `hold` 10 秒、回合已結束的留著給下一輪對帳），不退回一般等待、不當成 `local`、不當成「沒有停用」、不拿掉排除條件；使用者暫停讀不到時等額度的交辦也不重送。驗證者挑不到 Fable 時，交辦收成 `quota_exhausted` 與任務停成 `no_fable_for_verifier`（含 `paused` 事件）是同一個交易，寫不進去就整批不發生、不發 paused。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
-  mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身份，
-  挑不到別的身份就回 `no_independent_reviewer`（＝原地等），不會偷偷讓 reviewer 跟執行者同一個帳號（review3 c1 L11）。
-  **「跑 CLI 預設帳號」要先解析成候選清單裡的名字**（issue #468，`mission::billing_identity_named`）：
-  那種 bot 的 `quota::billing_identity` 回 `None`（它確實沒有名字），拿去跟候選清單比就永遠不相等，
-  於是「挑到的還是同一個身份就別換手」與 reviewer 的 `exclude` 兩道都會落空——第一次撞限就換手、
-  甚至換到它已經在用的那個帳號，而換手是開新 bot＋新 session。解析規則跟額度 key 的收斂同一份
-  （`quota::identity_shares_default`：沒有自己 home 變數的那個身份就是預設帳號），順序照 `CLAUDE_ORDER`，
-  跟 `pick` 挑的順序一致，所以兩個身份都收斂到預設帳號時兩邊講同一個名字。
-  **解析不出來（那台的身份表還沒偵測完）是第三態**：`quota_policy` 一律回 `Wait`——沒有證據說它現在在哪，
-  就不要為了換身份丟掉一個 session，下一輪查得到再判。
+  讀完之後已被裁示掉（取消等）的不推。
 
 ### 18.9 總管健康與系統 incident
 
@@ -5159,208 +5137,6 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - 舊的 `on_turn_done` 會把跑完的交辦直接寫成 `completed`，且不會標 `legacy_closed`。
 - 舊 binary 不看租約（restart 窗口不 hold 派工，也沒有 prompt 入場閘門）；舊的 `ensure_env` 會用內嵌版覆寫人設——回滾前先確認內嵌版就是要的那份。
 
-### 18.14 群組任務（mission）的 AGM runbook（2026-09-13）
-
-使用者決策見本節末的 D1–D8，API 契約 `docs/API.md`「群組任務」。daemon 做確定性的部分（任務／事件持久化、
-身份挑選、輪數上限、fast-forward 交付、**流程推進**：下一步是哪一關、哪些關卡開著）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
-不拼 curl。一個任務同時只有一件開著的交辦；`phase` 由交辦推導，AGM 不另存狀態。
-
-**下一步由 daemon 推導（issue #74，`mission::flow`）。** `mission get`（與清單）帶 `next`，交辦裁示（`review`）的回應帶
-`mission_next`，`mission_resumed`／`mission_answered` 的 payload 帶放行之後的 `next`——AGM 照 `next.action` 做，不必自己記
-下面的順序（下面的步驟講的是**每一步怎麼做**）。`next` 是純函式，輸入只有任務列、交辦、事件，daemon 重啟後推得出同一個答案。
-
-| `next.action` | 意思 | AGM 做什麼 |
-|---|---|---|
-| `assign`（`role`） | 派這個角色。`retry_of`＝上一件同角色沒做完（`fail`／`cancel`）的重派；`rework`＝退回之後的重做 | 第 2／3／4 步 |
-| `review`（`assignment_id`） | 那件交辦停在 `awaiting_review`／`blocked` | 讀結果、裁示（accept／followup／fail／cancel） |
-| `wait` | 交辦在跑或在等額度 | 不用做事，回合結束會收到通知 |
-| `record_verification` | 驗證者的交辦被接受了、還沒記 `verified` | 讀 am-verify：通過 → `mission event --kind verified`；沒過 → `mission round` |
-| `deliver`（`sha`） | 這一代驗過的 commit 還沒交付 | 第 5 步 |
-| `complete`（`sha`） | 驗過的 commit 已交付 | 第 6 步 |
-| `paused`（`paused_reason`、`then`） | 任務停著在等人；`then` 是放行之後那一步 | 第 8 步 |
-| `closed` | 已完成／已取消 | — |
-
-`alternatives` 列出同一個判斷點上也合法的分支：`skip_reviewer`（沒有獨立 reviewer）、`round`（am-review 回 changes、am-verify 沒過）。
-**選哪一條是 AGM 的判斷**，daemon 只保證每條分支之後的下一步推得出來。推導規則：
-
-- **代（generation）**：每一則 `round` 開啟新的一代。`round`／`verified` 事件的 payload 記 `after_assignment`（寫下時最後一件交辦），
-  之後派的交辦才屬於新的一代——位置在交辦清單裡比，不比毫秒時間戳（AGM 背靠背呼叫時會撞在同一格）；這個欄位之前的舊事件退回用時間比。
-- **一代之內**：執行者被接受 → reviewer 被接受（或已經派過驗證者＝審查這關 AGM 放行了）→ 驗證者被接受並記 `verified(commit)` →
-  `delivered(同一個 commit)` → 可結案。驗完又派了執行者（rebase、補改）回到**驗證**那一關，審查不重來。
-- **一般 Bot 記 `verified` 的資格**：只限目前這一代最後一件交辦的 verifier，且該交辦不能是 failed、cancelled 或 superseded；同一顆 Bot 不能也擔任過這個任務的 executor。資格在 `verified` 寫入交易的 snapshot 裡重查，舊一代 verifier 或失敗的 verifier 不能替新成果背書。
-- **失敗與重試**：交辦被 `fail`／`cancel`（bot 沒把工作做完）＝同一個角色再派一次，不換關、不算一輪；同一代後續補做失敗時，即使前面已有被接受的成果或驗證，`flow.stage`／`next` 仍以最新未成功交辦的角色為準。重派成功後清除 `retry_of`，依新成果接續；執行者在驗證後補做成功仍要重新驗證。工作做完但**成果**不行（am-review changes、am-verify 沒過）＝接受那件交辦、`mission round`，下一代從執行者重做。
-- **分工**：交辦自己的 `status` 歸 #71（`supervisor::assignment_state`），任務流程只讀、不寫；要動交辦一律走 supervisor 的入口。
-- **接續**：任務停在「輪到 AGM」（`assign`／`record_verification`／`deliver`／`complete`）超過 10 分鐘，沒有開著的交辦、這個任務也沒有
-  沒處理的 inbox，controller 推一則 `mission_next`（協調者、叫醒；payload 帶 `next`）。event_key 是那一步的簽名（動作、角色、代、交辦數、commit），
-  全部來自持久狀態，所以同一步只叫一次、重啟後也不會再叫一次。daemon 重啟、AGM 回合中斷、AGM 漏掉，三種情況都從這裡接回。暫停中的任務不叫（在等人）。
-
-**這幾條由 daemon 擋，不再只是 AGM 要記得的規矩（issue #74，`mission::workflow`）：**
-
-- `assign --mission` 時任務已經有一件開著的交辦 → 409 `mission_busy`（附上那一件）。`phase` 是「取最後一件
-  還開著的交辦的角色」，同時開兩件時它就不是一個定義良好的答案——任務卡、`mission get` 與 AGM 的下一步
-  讀同一個函式卻可能得到不同結果。退回／換手走 `review followup` 不受影響：那條在同一個交易裡把原件標成
-  `superseded` 再開新的，任何一刻都只有一件開著。
-- **刪掉專案會把它底下還開著的任務一併取消**（issue #498，理由寫進 `cancelled` 事件的 payload：`project_deleted`）。專案經由別條路變成已刪（從 config.toml 拿掉的投影軟刪、API 刪除時收任務失敗、兩步之間 daemon 死了）時，`wake_stalled_at` 每輪先掃一次：專案軟刪滿 5 分鐘（或專案列根本不在）、底下還開著的任務一樣收掉（理由同 `project_deleted`），所以不靠刪除當下那一次呼叫。
-  任務沒有軟刪、只有完成／取消兩種終態，而 `mission::store::open_unpaused`（`workflow::wake_stalled_at` 掃的那份）
-  沒有存活性條件——不收的話那些任務永遠停在 open，十分鐘後還會推一則 `mission_next` 要 AGM 去推一個
-  專案與 bot 都不存在的任務，而清臨時 bot 那條只收**已結案**的任務，連 `agm-mission-*` 都不會被收。
-  **專案之後又回到 config（同一個 id 復活）也不會把任務救回來**：取消是終態，要繼續做就重開一筆。
-  收不掉只記 log、不讓刪除回頭：專案在 config 裡已經定案刪除了。
-- `mission complete` 時底下還有開著的交辦 → 409 `assignments_open`。以前 `complete` 除了「任務還開著」
-  什麼都不查：那顆 bot 會繼續做一件已經關掉的任務，回合結束還會推一則沒有人要的 `assignment_completed`。
-  先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條本來就會逐件取消）。
-- `assign --mission --role reviewer|verifier` 時這一代還沒有被接受的執行成果（第一次派工、或退回之後還沒重做）→ 409 `out_of_order`
-  （附 `next`、`allowed_roles`）。審一份不存在的成果、或退回後沒重做就重審舊的那份，都是流程跳了一步。執行者在任何一關都派得出去。
-- `deliver` 時最新的 `verified` 之後有 `round`、或又派了執行者 → 409 `verification_stale`（`stale_because: round | new_executor`）——
-  **就算 HEAD 沒變**。被退回的那一份不改一個字，靠舊驗證也推不上去；commit 比對（`head_not_verified`）擋不到這一半。
-- `mission complete` 對交付的要求（`flow::delivery_requirement`，判定結果寫進 `completed` 事件的 `payload.delivery`）：這一代驗過的 commit
-  已經交付 → 放行並記下 commit。沒交付就必須帶 `no_delivery`，而且理由要對得上事實：
-  `no_changes`＝任務從來沒有 `verified`，派過執行者的話還要附執行者的 `--worktree`，daemon 查它乾淨、HEAD 已在 `origin/<base>` 裡（不 fetch，
-  本地 ref 舊了只會更嚴）；`user_declined`＝最近一次暫停之後使用者本人回答過（`answer` 事件、`relay_from` 空）。
-  對不上 → 409 `not_delivered`／`has_verified_changes`／`worktree_has_changes`／`user_not_asked`。以前 `complete` 什麼都不查：驗過卻沒交付、
-  或根本沒驗就結案，成果卡寫著「完成」，main 上什麼都沒有。
-- **判定與寫入在同一個 commit boundary**（issue #74 重開）：`round`／`verified` 這些改變「代」的寫入不走 supervisor 鎖，
-  鎖外算好的判定寫下去時可能已經過期。所以三個寫入都在 `BEGIN IMMEDIATE` 交易裡重讀任務、交辦與事件再判（`mission::store::Snapshot`）：
-  `round` 的 `rounds_used` 與 `round` 事件同一個交易；`verified` 落地時任務要還開著、還在它驗的那一代（否則 `already_closed`／`verification_stale`）；
-  `complete` 照 commit 當下的樣子重判開著的交辦與交付要求，跟鎖外判的不是同一件事就 409 `mission_changed`。
-  git 不進交易：先在交易外算證據，交易裡只確認「算證據時看到的那一代還是同一代」。`deliver` 的 push 是對外的副作用，擋不回來，
-  它的 `delivered` 照實記；但 `delivered` 只有在它的 commit 就是**這一代**驗過的那一個時才算數（`flow`），所以 push 途中被退回的話，
-  那一則放行不了新一代的結案。
-- **任務關了，排著的交辦就不送**（issue #171）：`mission cancel` 先在 supervisor 鎖裡把任務關掉、放鎖後才逐件 `review cancel`。
-  `controller::dispatch` 先看交辦所屬的任務，已取消／已結案就不送（留在 `queued` 由取消那條路收掉；讀不到任務就 `hold` 幾秒再看）；
-  所有派送入口（`drain_queue`、`assign`、`review followup`、等額度回來的 `resume_quota_blocked`）都在同一把鎖裡呼叫它，
-  檢查到打字之間取消插不進來。以前中間那一瞬拿到鎖的派送照樣把使用者剛取消的工作打進 bot。
-  #473 保留這個鎖範圍：沒有可恢復的派送中狀態時，不把 prompt 送出移到鎖外；若量測顯示 API 排隊，先增加可由 `client_request_id` 冪等恢復的派送認領，再縮短臨界區。
-  逐件 `review cancel` 有一件失敗（DB 暫時寫不進去）時，那件會一直開著：controller 的對帳（`controller::reconcile`，每個 tick）
-  把「所屬任務已取消、沒在跑」的交辦補做同一個裁示（`post_review` cancel，`source=mission_cancel`），可重入；`delivered`／`unknown`
-  且 turn 為 `in_flight`（或沒有可確認的 queued turn）的回合可能還在跑，等它結束、收到 `awaiting_review` 再收；若 turn 明確仍為 `queued`，則立刻補做取消並撤回 prompt，避免任務取消後才送出（issue #185）。
-
-需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
-與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
-
-1. **收到 `mission_created`**（inbox）：讀 `mission get`。指示不清或範圍太大 → 向使用者詢問（`mission event --kind note`
-   ＋ `mission pause --reason clarify`），不猜。與其他未結案交辦的 ownership 重疊 → 先排隊，在任務記 `note`。
-2. **執行者**：`mission pick --role executor` → `use` 就用該身份（`model` 有值要換模型）開臨時 bot（乾淨 worktree，命名
-   `agm-mission-<id 尾 6 碼>-exec`），`assign --mission <id> --role executor`，文字含：指示原文、cwd、ownership、完成條件、
-   「推 origin/main 由 AGM 交付，執行者只推 task branch」。`wait` → **照樣**用 `pick` 回的那個身份開臨時 bot 並 `assign --mission`：派送時 daemon 查到撞限，
-   交辦停在 `quota_blocked`，額度回來 controller 自己重送（`assignment_quota_resumed`）。不要「什麼都不做」——
-   那時候還沒有任何交辦，額度回來也沒有東西會叫醒你，任務會永遠停在「等 AGM 接手…」（review3 c1 M12）。
-   `ask_user` 只會出現在驗證者。
-3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身份>`；
-   `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
-   （`approve|changes`＋findings）。先 `review accept` reviewer 那件（它的工作做完了），`changes` → `mission round --request-id <這次退回的穩定鍵>`
-   （409 `max_rounds` 就停，任務已 `paused`，向使用者詢問）→ `next` 變成 `assign executor`（`rework:true`）：**新開**一件
-   `assign --mission --role executor`，文字帶 findings——執行者那件早就 accept 了，已結案的交辦不能 followup。
-4. **驗證者**：`mission pick --role verifier`；Fable 還有額度、只是 5h 窗撞限時回 `wait`（時間是 5h 的，不是 Fable 的下週），
-   `ask_user` 只留給真的沒有 Fable 額度的情況（review3 c1 L12）。`ask_user` 時任務已停在 `no_fable_for_verifier`，向使用者詢問要等哪個身份
-   或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
-   `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
-   （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
-   失敗 → `mission round --request-id <這次退回的穩定鍵>`（逾時重送沿用同一個鍵；這一代還沒派執行者時再呼叫是 409 `round_not_due`，不扣輪）→ 新開一件執行者交辦退回重做（同第 3 步）。驗證者的**交辦**沒做完（bot 掛了、撞限放棄）是另一回事：
-   `review fail`／`cancel` 那件，`next` 會是同一個角色再派（`retry_of`），不算一輪。
-5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
-   409 `not_verified`／`verified_without_sha`／`verification_stale`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過、又退回過），任務**不會**停下來，回第 4 步重驗這個 commit；
-   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），向使用者說明原因。**不 force 推 main**。第一次交付就 `nothing_to_deliver`（沒有新 commit 要交）的 commit 會被作廢，重試時仍是 `nothing_to_deliver`，不會因為「試過」就報成已交付（#1388）。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
-   執行 git 時固定 `LC_ALL=C`，讓用來判斷缺少遠端分支或 lease 過期的錯誤訊息不受 daemon 啟動時的語系影響。
-   之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
-   交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
-6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），
-   daemon 的任務事件記 `completed`（payload 的 `delivery` 記交了哪個 commit）。**沒交付**的任務要帶 `--no-delivery`：
-   只查問題、沒改東西 → `no_changes`（派過執行者要加 `--worktree <執行者的工作樹>`）；交付失敗或使用者改主意，已向使用者詢問、
-   使用者回答不要交付 → `user_declined`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
-   目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且**確定**沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
-   `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；`state_unreadable`（DB 讀不到它的 bot 列或 active run，daemon 不知道它還在不在跑，
-   所以不刪、不停）等 DB 好了照同樣處置；刪除保留對話紀錄與 `mission_events` 作證據。
-   **結案那一刻沒收乾淨會自動補收**（issue #343）：清理在結案 commit 之後才做，當機或一時讀不到狀態時任務已經是終態、不會再打 complete。
-   supervisor tick 每輪從持久狀態（已結案任務 ＋ 交辦目標 bot 名字為 `agm-mission-*` 且未軟刪）找出還欠清理的任務，走同一條清理（同樣三個條件、fail-closed、冪等）；
-   重啟後照樣接得回去，不另開欠帳表。補收只在真的刪掉東西時寫一筆 note（`已補收臨時 bot`），還在跑或讀不到的每輪重看但不寫事件。
-   所以第 2、4 步開臨時 bot 時**一定照這個命名**，否則收尾時不會被認出來。
-7. **撞額度換手（`mission_identity_switch`）**：那件交辦停在 `awaiting_review`／`identity_switch`。用 `to_identity`（與
-   `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；
-   followup 會沿用 `mission_id`／`role`。同身份同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
-8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
-   都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續（`mission_resumed`／`mission_answered` 的 `next`、
-   或 `mission get` 的 `next.then` 就是那一步）；使用者取消 → `mission cancel`。
-   **daemon 自己的停下來不蓋使用者的暫停**：任務已經被使用者停著（reason 不在上面那幾種）時，daemon 想停成 `max_rounds`／`no_fable_for_verifier`／交付失敗（含驗證者撞限的那條路）都什麼都不寫，使用者的 reason 原封不動——蓋掉的話 `mission_gate` 就不再當它是使用者要停手，AGM 又派得出新交辦。
-   停在 `max_rounds` 的任務被放行（`answer`／`resume`）時 daemon 會把上限加一輪，所以「再改一輪」是走得通的：
-   放行後照第 3 步 `mission round` 再 followup 一次（加的是一輪，用完又會停下來問人）。
-   **使用者自己按暫停／取消**（web 的任務卡，或別人代按）daemon 會叫醒你：
-   - `mission_paused`（payload 帶 `reason`、`open_assignments[]`）：不要再派新交辦、不要交付——`deliver` 會回
-     409 `mission_paused`（交付失敗那兩種暫停例外，那是重試的路）。已經在跑的回合 daemon 不中止，回合結束照常驗收，
-     下一步等 `mission_resumed`／`mission_answered`。
-   - `mission_cancelled`：daemon 已經把底下未結案的交辦逐件 `cancel`（排隊中的 turn 撤回、等額度的不再自動重送），
-     還在跑的回合不會被中止——`mission get` 的 note 與回應的 `temp_bots.skipped` 列出還活著的臨時 bot，
-     照第 6 步 `bot stop` 再 `bot delete`。你自己呼叫 pause／cancel 不會產生通知。
-9. **不做的事**：不代使用者回答問卷；不在一個任務裡同時開兩件交辦；不用 `/loop` 輪詢任務（`mission_updated` 與 inbox
-   事件會來）；臨時 bot 不開 remote。
-10. **實跑教訓（2026-09-13 兩個任務）**：
-   - 驗證者的截圖**不要放在執行者的 worktree**（deliver 會 409 `dirty_worktree`）；放 AGM 的 scratchpad 或另一個目錄，路徑寫進 `verified` 事件。
-   - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
-     要它 `git rebase origin/main`；rebase 乾淨就**重走第 4 步**（派了執行者之後舊的 `verified` 就不算數——daemon 回
-     `verification_stale`／`head_not_verified`，`next` 也會回到 `assign verifier`，審查不重來），驗過再 `deliver`；**有衝突才**停下問人。
-   - `mission complete` 只會自動刪「確定沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過、讀不到 run 的狀態的會被 `state_unreadable` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
-11. **完成之後的追問與追加修改（2026-09-13，AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）**：交付完不是句點，使用者還會
-    問問題、還會想再改一點。兩條路刻意分開，因為後果不同：
-   - **追問**（`mission question`，inbox `mission_question`）：只是問一句話。你回 `mission answer <id> --reply-to <question 事件 id>`
-     （CLI 會自動帶你自己的 `relay_from`）。**不要**因為一句追問就去改碼、開交辦或動交付——要改東西是下一條。
-     已完成的任務也能問；它不會把任務弄回進行中，`completed_at` 與成果摘要都不會變。
-   - **追加修改**（`mission revise`，inbox 是一則帶 `parent_mission_id` 的 `mission_created`）：那是**新的一筆任務**，
-     舊那筆原封不動。payload 帶 `runbook_start_step: 2`——脈絡（原指示、結果摘要、commit／PR、`verified` 摘要、新要求）
-     已經在快照裡，你從第 2 步（挑執行者）接手，不用重新規劃。臨時 bot 用**新任務**的 id 尾 6 碼命名。
-   - 快照是**參考，不是證據**：新任務要自己跑第 4 步拿到自己的 `verified` 才能交付，舊的驗證對它無效
-     （交付關卡看的是這筆任務自己的事件）。快照會帶原成果的 `verified` 事件**連同它的 payload**（截圖路徑、
-     測試數字都在裡面）。
-   - 原成果現在在不在基底裡，daemon **不知道**：`parent_delivery_in_main` 一律是 `"unknown"`，只有
-     `parent_delivery_mode` 說得出當初用哪種方式交付。push 過的可能被 revert，PR 也可能早就合併了——
-     動手前自己查目前基底，兩個方向都不要假設。
-   - 一個成果同時只能有一輪未結案的續作（第二筆會被 409 `revision_in_progress` 擋下並指向既存那筆）。
-   - 使用者回答暫停的任務（web 直接回答；CLI 依使用者明確指示代送時用 `mission answer --as-user`，不帶 `--reply-to`）或按「不回答直接繼續」（`mission resume`），
-     daemon 都會推 inbox 叫醒你；你自己呼叫 resume 不會產生通知。
-
-
-**使用者決策（群組任務的需求本身，不是實作細節）**
-
-- D1 「已完成任務」＝專案底下一份可回顧的完成清單（原始指示、結果摘要、commit、驗證證據）。
-- D2 交付方式由使用者每個任務選：直接推 main，或開 PR。
-- D3 驗證者必須用 Fable 模型，且該身份的 Fable 週桶還有有效額度。
-- D4 帳號用盡才換下一個（cc2 → cc1 → cc0），必須能偵測撞限並切換。
-  **「用盡」＝量表見底而且那個窗還沒重置**（issue #464，`mission::pick` 的 `exhausted`）：`quota_cache` 的讀數活得比重置久
-  （daemon 停機超過一個窗長、帳號探測失敗在退避、主機斷線），所以一份「見底、`resets_at` 已經過去」的舊讀數不算用盡——
-  那個窗早就重置了，只是還沒有新讀數。`quota::load_cache` 早就為了同一個理由在開機時清掉過期的撞限橫幅，量表這一側原本漏了。
-  判斷只有一份：`quota::Window::exhausted_at`，`mission::pick`／`supervisor::policy`／`supervisor::responder` 三處共用
-  （以前各寫一份，其中 `pick` 那份連重置時刻都不看，對「解不開的時間戳」又跟另外兩份相反）。
-  **解不開的 `resets_at` 當成已經重置**，沿用 `supervisor::policy::past` 的先例（「壞掉的時間戳不該把人永久卡住」）。
-  「這筆讀數跨過了重置」要**兩個條件**都成立：`resets_at` 已經過去，**而且**那一桶的 `observed_at` 不晚於它（issue #489）。
-  只看前者會把一筆剛讀到、真的見底的讀數放行：codex 狀態列的讀數沒有 `resets_at`，`set` 會沿用上一份（原本純為顯示），
-  app-server 探測壞掉時那個繼承來的時刻早就過去了，於是 97% 用掉的新讀數被當成有額度——跟 §18.14 D4 要修的方向正好相反。
-  觀測比重置新，就表示這筆讀數已經反映重置後的狀態，它說見底就是真的。`observed_at` 沒有時退回只看前者（＝舊行為），
-  **時間戳解不開的一律當成「已過去／已過期」**（issue #518，收口）：`policy::past`、`Window::reset_passed`、
-  `already_past`、`pick::reset_of`、`Quota::reads_older_than_window` 五處同向。注意兩種 `true` 的安全方向相反——
-  `already_past` 的 `true` 是**丟棄**那個值（嚴格），`reset_passed` 的 `true` 是**放行**（`exhausted_at` 變 false）；
-  兩者相容只因為壞值到不了 `reset_passed`（所有寫 `Window.resets_at` 的入口都驗過格式，含 `load_cache`）。
-  年齡判斷（`reading_older_than_window`）先看 `observed_at`、解不開退回 `updated_at`、**兩個都解不開就當過期**——
-  否則「見底＋沒有 `resets_at`＋年齡說不出來」會讓那個身份永久算用盡，就是 §18.14 D4 要修的那個問題換一條路回來。
-  時間戳一律走 `quota::parse_utc` 這一支（#518 把散落的 `parse_from_rfc3339` 收乾淨），不要再各寫一個方向不同的解析。
-  **刻意不拿 `updated_at` 當備援**（那是整筆寫入時間，不是那一桶的觀測時間）。`set` 也不再沿用**已經過去**的 `resets_at`：
-  對顯示沒有意義（會寫成「N 小時前重置」），而且它就是上面那個破口的來源。
-  **沒有 `resets_at` 的見底讀數**：窗長之內算用盡（無從判斷，寧可繼續等），**比那一桶自己的窗長還舊就當成「沒有讀數」**
-  （`quota::Quota::usable_window`）——一筆比窗長還舊的讀數必定跨過一次重置，而橫幅早就有到期規則、量表沒有。
-  這條在**每次判斷時**都跑，不只開機：`quota_claude` 的 statusline 路徑解不出重置時間就寫 `None`，而百分比照樣可能見底，
-  所以同一次 uptime 內就會出現「永久用盡」的身份（issue #475，原本只在 `load_cache` 做一次）。
-  年齡看**那一桶自己的** `Window::observed_at`（最後一次真的出現在新讀數裡的時間），不是整筆的 `updated_at`：
-  `set` 會沿用新讀數缺的窗而把 `updated_at` 蓋成現在，statusline 每幾秒進來一次，被沿用的那一桶年齡就永遠是 0，
-  窗長到期永遠不成立（i267 review）。`seed_limit_hit`／`restore_limit_hit` 只改 `limit_hit` 與 `updated_at`，窗是原本那幾個，
-  所以不會重設年齡。沒有 `observed_at`（這個欄位出現以前的快取列）才退回 `updated_at`。
-  回「沒有讀數」而不是「沒見底」，是為了讓「不知道」跟「有額度」分開：`supervisor::responder` 要兩個共用窗**都有說得出話的讀數**
-  才敢宣稱恢復。有 `resets_at` 的**不套**這條——那時 `reset_passed` 判得更準，而 7d 窗的讀數本來就可能好幾天前才更新、窗卻還沒到。
-  `Pick::Wait` 的 `until` 一律**不得是過去的時刻**：
-  呼叫端拿它排重試，過去的時間沒有意義（橫幅指名桶那條路不看 `exhausted`，所以那一桶的 `resets_at` 也要過濾）。
-- D5 5h 撞限時等重置還是直接換身份，開任務時選（`on_5h_limit = wait|switch`）。
-- D6 驗證者找不到 Fable 有效額度 → 停下來問使用者，不自動降級、不乾等。
-- D7 執行者 kind 開任務時選（claude／codex／grok）；帳號輪換只對 claude 有效。
-- D8 推 main 失敗（非 fast-forward、rebase 衝突、驗證沒過）→ 停下來問使用者，不自動改開 PR。
-
-
 ### 18.15 AGM 雙角色：巡檢與協調（2026-09-13）
 
 使用者 2026-09-13：主動找問題用 fable-low（不足 opus-low），回應 bots 用 opus-high。在那之前每個 bot 申請、交辦回報、核准請求、健康事件都打進同一顆 AGM，
@@ -5373,10 +5149,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | 入口 | 使用者 web／對話（**唯一**的使用者入口） | 沒有使用者入口；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`deploy_waiting`、`release_triage_notice`（daemon 用 Claude API 分診完一版的結論，§18.2c）、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
+| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`deploy_waiting`、`release_triage_notice`（daemon 用 Claude API 分診完一版的結論，§18.2c）、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
-**協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，
+**協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求 的唯一收件人，
 以前 `status` 只取巡檢與系統兩半的較差者，協調者 `waiting_quota` 或倒掉時使用者入口仍顯示 `healthy`、沒有任何人被叫醒，
 申請可以躺好幾天。`responder_health` 那一格照舊分開列。
 `health_changed` 的入列也看這一半：debounce 的鍵是「巡檢嚴重度／協調者嚴重度」，路由表在任一半不是 `healthy` 時叫醒巡檢——只算進頂層而不入列的話，UI 變 degraded 卻沒有人被叫醒。`responder_bot_missing` 的 event_key 也加了小時格，
@@ -5404,7 +5180,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   窗從**上一次真的叫醒**起算（被退避壓掉的不算），所以沒解決的事每 12 小時最多再提醒一次。判斷在 `roles::classify`（路由表算出叫醒之後的最後一關），只套用 `ops_alert`：近 7 天 93 次 `ops_alert` 喚醒大半是同一支腳本的同一個 `reason` 每小時換小時格 `event_key` 重講（`swap_probe_skipped` 從「累計 70 次」講到「101 次」）。
   新的 `reason`／`source`、別顆 bot 的同一個 `reason`、`pane_unowned`、`bot_request`、核准、incident 不在這條裡，各自照常叫醒。
 - **叫醒／只記錄的清單**（近 7 天 172 回合只有 2 回合是使用者交辦，其餘是 ack 通知，issue #1478）：
-  - **需要 AGM 判斷（`wake=1`）**：`ops_alert` 的新類型與退避窗外的再提醒、`incident_opened`（含 `role_unavailable`／`notify_exhausted` 給對方角色）、`bot_restart_failed`／`supervisor_restart_retry`／`bot_lost`、`responder_watchdog_gave_up`／`responder_bot_missing`／`watchdog_gave_up`、`pane_unowned`／`pane_orphaned`、`child_retire_refused`、`persona_changed`、`judge_stuck_screen`／`judge_same_work`、核准單（`approval_requested`，含 failover 改派給巡檢的）、未標回覆的 `bot_request`、交辦回報（`assignment_completed`／`failed`／`undeliverable`）、mission 事件、`health_changed` 任一半非 `healthy`、`deploy_waiting` 首次通知且放寬放不行（`deploy_wait::clears_itself` 為否）、`release_triage_notice`（payload 的 `text` 是要轉述給使用者的結論，`wake` 預設 true）。
+  - **需要 AGM 判斷（`wake=1`）**：`ops_alert` 的新類型與退避窗外的再提醒、`incident_opened`（含 `role_unavailable`／`notify_exhausted` 給對方角色）、`bot_restart_failed`／`supervisor_restart_retry`／`bot_lost`、`responder_watchdog_gave_up`／`responder_bot_missing`／`watchdog_gave_up`、`pane_unowned`／`pane_orphaned`、`child_retire_refused`、`persona_changed`、`judge_stuck_screen`／`judge_same_work`、核准單（`approval_requested`，含 failover 改派給巡檢的）、未標回覆的 `bot_request`、交辦回報（`assignment_completed`／`failed`／`undeliverable`）、`health_changed` 任一半非 `healthy`、`deploy_waiting` 首次通知且放寬放不行（`deploy_wait::clears_itself` 為否）、`release_triage_notice`（payload 的 `text` 是要轉述給使用者的結論，`wake` 預設 true）。
   `ops_alert` 預設由巡檢收；只有冷 resume 告警在 supervisor 角色紀錄確認事件 bot 就是巡檢本人時，payload 才帶 `to_role:"responder"`，由協調者收。
   - **只留紀錄（`wake=0`）**：`health_changed` 兩半都 `healthy`（恢復）、`deploy_waiting` 的後續更新（自動放寬、拿到窗口、完成、放棄、使用者操作）與「只有 working 擋著、放寬已排定」的首次通知、`incident_resolved`、退避窗內重複的 `ops_alert`、`assignment_noticed`／`queued`／`quota_*`、`judge_report_evidence`、`--ack`／`--reply-to` 的 `bot_request` 回覆。
   - 不認得的新事件種類仍預設叫醒巡檢（寧可被看見一次）；要降噪就在 `roles::known_route` 明寫分支。
@@ -5504,7 +5280,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   **讀不到畫面不是故障**：那一拍只記 `probe_failed`，原因維持上一拍的結論，incident 不開也不解——沒有證據就宣告故障，
   等於把核准從一顆其實健康的協調者手上搬走。成功查詢到沒有 active run 是已知的 `no_run`，不算 `probe_failed`；只有 active-run 查詢失敗，或有 run 但 pane／herdr 畫面讀不到才是 blind。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
 - **核准會改派，其他種類不會**（issue #421，使用者 2026-09-24 裁示；`supervisor/failover.rs`）。上面那條「不倒回巡檢」對
-  `bot_request` 與 `mission_*` 仍然成立——那些是「請協調者處理一件事」，換人做沒有意義。**`approval_requested` 是例外**：
+  `bot_request` 仍然成立——那些是「請協調者處理一件事」，換人做沒有意義。**`approval_requested` 是例外**：
   它是一道閘門，卡住的不是協調者的工作，而是別人的部署。
   - **判定不可用**：`health::responder_state`（#420 後續）。順序是 `supervisor_roles.responder` 的 `status`
     （`needs_login` / `waiting_quota`，§18.15 上一條，由 #420 寫入）→ 沒有 active run（`no_run`）→ `Available`；
@@ -5584,7 +5360,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   「fable 不會因為 bot 申請被叫醒」看巡檢的 `wakes` 與 `last_wake_reason` 裡沒有 `bot_request`。
 - **健康**：`GET /api/supervisor/health` 另有 `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}`，併進頂層 `status`（見上方「協調者的健康算進頂層」）。
   協調者**沒在跑**（setup 完還沒 start、start 失敗、手動 stop、bot 被刪）而佇列裡有會叫醒它的事件（`wake_pending>0`）也是 `degraded`：分流只看「建立過」，
-  以前這種狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積而沒有人被叫醒（review 2026-09-16 c3 M1）。
+  以前這種狀態只要 `desired_running=0` 就算 healthy，申請、核准無限期累積而沒有人被叫醒（review 2026-09-16 c3 M1）。
   `responder start` 先記 `desired_running=1` 再啟動，失敗交給看門狗重試。
 - **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
   協調者已經併回巡檢的專案（見上方「一顆總管、一個專案」），所以 web 的「剛跑完」晶片列排除 `GET /api/supervisor` 的 `project_id` 時兩個角色一起排除。

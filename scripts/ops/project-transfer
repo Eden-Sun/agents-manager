@@ -8,7 +8,7 @@
 
 export 先對來源 DB 做 SQLite online backup（唯讀開來源，快照放暫存目錄、讀完當下刪），
 從快照取出專案、它活著的 bot（含 child；已軟刪的 bot 與它的一切都不帶）、conversations、runs、turns、messages、
-attachments（連同 daemon 讀得到的位元組）、bot_reads 與該專案的群組任務（missions／mission_events，#720），
+attachments（連同 daemon 讀得到的位元組）、bot_reads，
 寫成一個 gzip JSON。來源 DB 一個字都不寫。`--with-supervisor` 另帶協調者（AGM）的資料，import 也加同一個旗標時
 在同一個交易裡合併進目標（規則見下方「協調者」一節與 SPEC §11.9b）。
 
@@ -43,15 +43,12 @@ import tempfile
 
 FORMAT = "agm-project-transfer/1"
 DB_NAME = "agents-manager.sqlite3"
-# 插入順序＝外鍵順序。`bot_reads`、`missions`／`mission_events` 是子模組的表，舊 DB 可能沒有。
-TABLES = ["projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads",
-          "missions", "mission_events"]
-OPTIONAL_TABLES = {"bot_reads", "missions", "mission_events"}
-# 撞到唯一索引就跳過並列進報告（#720，使用者 2026-09-28），不整批中止：這些表的 client_request_id／event_key
-# 在兩顆 daemon 各自產生，碰巧同名不代表是同一筆。專案本體（projects／bots／對話）照舊撞了就整批回滾。
-SKIP_ON_UNIQUE = {"missions", "mission_events"}
+# 插入順序＝外鍵順序。`bot_reads` 是子模組的表，舊 DB 可能沒有。
+TABLES = ["projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads"]
+OPTIONAL_TABLES = {"bot_reads"}
+SKIP_ON_UNIQUE = set()
 # 父列被跳過時，子列一起跳過（不留孤兒）：子表 → (指向父列的欄位, 父表)。
-FOLLOWS_PARENT = {"mission_events": ("mission_id", "missions"), "supervisor_reviews": ("assignment_id", "supervisor_assignments")}
+FOLLOWS_PARENT = {"supervisor_reviews": ("assignment_id", "supervisor_assignments")}
 ACTIVE_RUN = ("starting", "running", "stopping")
 OPEN_TURN = ("queued", "in_flight")
 EXIT_REASON = "project transfer"
@@ -178,15 +175,6 @@ def collect(conn, project_id):
         )
     data["attachments"] = by_bot("attachments")
     data["bot_reads"] = by_bot("bot_reads") if has_table(conn, "bot_reads") else []
-    # 群組任務跟著專案走（#720）：以前沒帶，專案搬過去群組任務的歷史就不見了。
-    data["missions"] = (rows(conn, "SELECT * FROM missions WHERE project_id = ? ORDER BY rowid", (project_id,))
-                        if has_table(conn, "missions") else [])
-    mission_ids = [m["id"] for m in data["missions"]]
-    data["mission_events"] = (
-        rows(conn, f"SELECT * FROM mission_events WHERE mission_id IN ({in_list(mission_ids)}) ORDER BY rowid", mission_ids)
-        if mission_ids and has_table(conn, "mission_events") else []
-    )
-
     files, missing = {}, []
     for a in data["attachments"]:
         if a.get("state") != "ready":
