@@ -275,6 +275,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot_http))
+        .route("/bots/{id}/role", axum::routing::put(put_bot_role))
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
@@ -1467,6 +1468,10 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
             }
             if let Some(target_bot) = db::bot(&app.db, id).await.map_err(any_err)? {
                 if bot_may_access_bot(app, caller, id).await? {
+                    return Ok(());
+                }
+                // 專家模式的管理者可以替同專案的頂層 bot 設執行者／顧問角色（使用者 2026-10-31）；handler 再驗一次並只收 role。
+                if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
                 // 巡檢（patrol）可以重啟／啟動任何頂層 bot（使用者 2026-10-31）；child 與其他操作仍限自己的樹。
@@ -3051,6 +3056,45 @@ async fn relabel_tab(app: &App, bot_id: &str) {
         Ok(()) => tracing::info!(bot = %bot.name, tab_id, "herdr tab relabelled after rename"),
         Err(e) => tracing::warn!(bot = %bot.name, tab_id, error = %e, "could not relabel the herdr tab after rename"),
     }
+}
+
+/// `caller` 是 expert 專案的 manager，`target` 是同專案、不是自己的存活頂層 bot。
+async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> Result<bool, LcError> {
+    if target.id == caller || target.parent_bot_id.is_some() || target.deleted_at.is_some() {
+        return Ok(false);
+    }
+    let Some(me) = db::bot(&app.db, caller).await.map_err(any_err)? else { return Ok(false) };
+    if me.deleted_at.is_some() || me.parent_bot_id.is_some() || me.role.as_deref() != Some("manager") || me.project_id != target.project_id {
+        return Ok(false);
+    }
+    Ok(db::project(&app.db, &me.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none() && p.mode == "expert"))
+}
+
+#[derive(Deserialize)]
+struct PutBotRole {
+    role: Option<String>,
+}
+
+/// 只改角色：使用者可設任何角色；expert 專案的 manager 只能把同專案頂層 bot 設成 executor／advisor 或清掉。
+async fn put_bot_role(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<PutBotRole>,
+) -> Result<Response, LcError> {
+    let role = b.role.filter(|r| !r.trim().is_empty());
+    match &principal {
+        RequestPrincipal::User => {}
+        RequestPrincipal::Bot(caller) => {
+            let target = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+            if !expert_manager_over(&app, caller, &target).await? || !matches!(role.as_deref(), None | Some("executor" | "advisor")) {
+                return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "manager_role_scope"})));
+            }
+        }
+        _ => return Err(bot_user_only()),
+    }
+    let patch: PatchBot = serde_json::from_value(json!({ "role": role })).map_err(any_err)?;
+    patch_bot(State(app), Path(id), Extension(RequestPrincipal::User), Json(patch)).await
 }
 
 async fn patch_bot(
@@ -17442,5 +17486,64 @@ mod patrol_restart_scope_tests {
         assert!(denied(authorize_bot_path(&env.app, &patrol.id, "POST", &format!("/api/bots/{}/stop", other.id)).await), "only restart/start are widened");
         assert!(denied(authorize_bot_path(&env.app, &patrol.id, "DELETE", &format!("/api/bots/{}", other.id)).await));
         assert!(denied(authorize_bot_path(&env.app, &plain.id, "POST", &restart).await), "non-patrol bots unchanged");
+    }
+}
+
+#[cfg(test)]
+mod manager_role_scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expert_manager_sets_executor_and_advisor_roles_in_its_project_only() {
+        let env = crate::testing::env().await;
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "role-manager").await;
+        let peer = crate::testing::claude_bot(&env.app, &env.project_id, "role-peer").await;
+        let child = crate::testing::claude_bot(&env.app, &env.project_id, "role-child").await;
+        sqlx::query("UPDATE bots SET managed_by='child',parent_bot_id=? WHERE id=?").bind(&manager.id).bind(&child.id).execute(&env.app.db).await.unwrap();
+        let other_project = db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'other','local',?,'expert')")
+            .bind(&other_project).bind(format!("/tmp/{other_project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let outsider = crate::testing::claude_bot(&env.app, &other_project, "role-outsider").await;
+        let path = |id: &str| format!("/api/bots/{id}/role");
+        let denied = |r: Result<(), LcError>| matches!(r, Err(LcError::Forbidden(_)));
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&peer.id)).await), "parent_child project: no exception");
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        assert!(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&peer.id)).await.is_ok());
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", peer.id)).await), "only the role route");
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&outsider.id)).await), "other project");
+        assert!(denied(authorize_bot_path(&env.app, &peer.id, "PUT", &path(&manager.id)).await), "non-manager");
+        let call = |caller: &str, target: &str, role: Option<&str>| {
+            put_bot_role(State(env.app.clone()), Path(target.to_string()), Extension(RequestPrincipal::Bot(caller.to_string())), Json(PutBotRole { role: role.map(str::to_string) }))
+        };
+        assert!(call(&manager.id, &peer.id, Some("manager")).await.is_err(), "manager cannot appoint another manager");
+        assert!(call(&manager.id, &child.id, Some("executor")).await.is_err(), "children are not top-level");
+        assert!(call(&manager.id, &manager.id, None).await.is_err(), "cannot change itself");
+    }
+
+    #[tokio::test]
+    async fn manager_role_change_is_written_like_the_web_setting() {
+        let env = crate::testing::env().await;
+        let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        env.app.cfg.update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        }).await.unwrap();
+        let add = |name: &'static str| {
+            let app = env.app.clone();
+            let pid = env.project_id.clone();
+            async move {
+                let res = create_bot(State(app), Path(pid), Json(serde_json::from_value(json!({"name": name, "kind": "claude"})).unwrap())).await.unwrap();
+                let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string()
+            }
+        };
+        let manager = add("cfg-manager").await;
+        let peer = add("cfg-peer").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let call = |role: &str| put_bot_role(State(env.app.clone()), Path(peer.clone()), Extension(RequestPrincipal::Bot(manager.clone())), Json(PutBotRole { role: Some(role.into()) }));
+        call("executor").await.map_err(|e| format!("{e:?}")).unwrap();
+        assert_eq!(db::bot(&env.app.db, &peer).await.unwrap().unwrap().role.as_deref(), Some("executor"));
     }
 }

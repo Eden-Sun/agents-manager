@@ -1796,6 +1796,12 @@ def cmd_peers(client: Client, cfg: dict, args) -> object:
     return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers")
 
 
+def cmd_role(client: Client, cfg: dict, args) -> object:
+    """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
+    role = None if args.role == "none" else args.role
+    return client.put("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/role", {"role": role})
+
+
 def cmd_requests(client: Client, cfg: dict, args) -> object:
     return client.get("/api/relay-requests", {"from": args.from_bot, "to": args.to_bot, "open": "1" if args.open else None})
 
@@ -2790,6 +2796,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
     s.set_defaults(func=cmd_peers)
+    s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／none）")
+    s.add_argument("bot_id")
+    s.add_argument("role", choices=["executor", "advisor", "none"])
+    s.set_defaults(func=cmd_role)
     s = sub.add_parser("requests", help="查詢請求結果通知")
     s.add_argument("--to", dest="to_bot")
     s.add_argument("--from", dest="from_bot")
@@ -2867,7 +2877,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if args.cmd in ("peers", "requests") and os.environ.get("AM_BOT_ID"):
+            if args.cmd in ("peers", "requests", "role") and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)
