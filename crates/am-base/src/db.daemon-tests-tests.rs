@@ -1391,6 +1391,7 @@
         std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let pool = open(path).await.unwrap();
         let mut tx = begin_write(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE project_group_reads (project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')").execute(&mut *tx).await.unwrap();
         for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
             sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&mut *tx).await.unwrap();
         }
@@ -1525,6 +1526,7 @@
     async fn nr1944_v69_receipt_additive_upgrade_backup_fence_and_private_rows() {
         let dir=tmp_dir(); let path=dir.join("receipt.sqlite3"); let backup=dir.join("receipt.bak");
         let pool=open(&path).await.unwrap();
+        sqlx::query("CREATE TABLE project_group_reads (project_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')").execute(&pool).await.unwrap();
         for trigger in ["child_credential_run_closed", "child_credential_bot_unlinked", "child_credential_bot_deleted", "child_credential_run_deleted"] {
             sqlx::query(&format!("DROP TRIGGER {trigger}")).execute(&pool).await.unwrap();
         }
