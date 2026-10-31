@@ -6019,6 +6019,8 @@ expert 跨專案 relay 拒絕；parent_child 保持既有 relay 規則。被拒�
 
 切換 expert 前，所有 active run 均須已注入 `AM_DAEMON_URL`（本機亦算），否則列出 bot、主機與待重啟原因並拒絕。所有模式的受管 bot 缺少 daemon 位址時均拒絕派工；daemon 依目前專案模式核權。
 
+受管 bot 的 herdr 頂層命令採白名單；互動式 session／遠端 attach 與修改共用 server、session、設定、更新或主機的命令拒絕。非受管 pane 維持原行為。
+
 受管 bot 的 herdr 全域旗標先解析，session／machine 必須經 daemon 核對；無法安全辨認的寫入旗標拒絕。pane send-text、send-keys、run、close 與 agent send-keys、attach、rename 等操作必須先向 daemon 驗證目標：只允許自己的 pane、自己的 child 或非 agent shell，其他 bot／agent 拒絕並提示用 agent prompt；狀態不明拒絕。child principal 不繼承可控制 child 的權限。
 
 受管 bot（有 AM_BOT_ID）向其他 agent 發 prompt 與開 child，唯一入口是 daemon 授權；本機使用 AM_PORT 或 AM_DAEMON_URL，遠端使用 AM_DAEMON_URL。位址缺失、daemon 不可達、拒絕或回應不明時拒絕操作，不走 spool 或 herdr 直送；因此 daemon 不可達時無法派工。未受管 pane 維持原有行為。遠端 run 啟動時未取得位址，在網頁顯示「待套用（需重啟）」；不自動重啟。expert 僅 manager 可開 child，既有 child 不可再開 child；child 向自己 parent 回報仍經 daemon 授權。

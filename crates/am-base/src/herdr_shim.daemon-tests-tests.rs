@@ -1243,6 +1243,20 @@ esac"#, calls.display()));
     }
 
     #[test]
+    fn macos_local_managed_top_level_commands_are_allowlisted() {
+        let s = Sandbox::new(); let log = s.dir.join("top-level.log");
+        let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_TEST_CALL_LOG", log.to_str().unwrap())];
+        for args in [vec![], vec!["--remote", "host"], vec!["session", "attach", "x"], vec!["server", "stop"], vec!["server"], vec!["session", "stop", "x"], vec!["session", "delete", "x"], vec!["update"], vec!["config", "reset-keys"], vec!["channel", "set", "preview"], vec!["machine", "add", "x"], vec!["unknown", "command"]] {
+            let (_, _, rc) = s.run_full(&env, &args); assert_eq!(rc, 75, "{args:?}");
+        }
+        assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty());
+        for args in [vec!["status"], vec!["session", "list"], vec!["api", "snapshot"], vec!["api", "schema"], vec!["integration", "install"], vec!["--help"]] {
+            let (_, err, rc) = s.run_full(&env, &args); assert_eq!(rc, 0, "{args:?}: {err}");
+        }
+        let (_, _, rc) = s.run_full(&[], &["session", "attach", "x"]); assert_eq!(rc, 0);
+    }
+
+    #[test]
     fn macos_local_global_flags_cannot_bypass_daemon_auth() {
         for args in [vec!["--session", "test", "agent", "prompt", "w1:p2", "work"], vec!["--machine", "local", "agent", "start", "kid", "--pane", "w1:p9"], vec!["--unknown", "x", "pane", "run", "w1:p2", "work"]] {
             let s = Sandbox::new(); let log = s.dir.join("calls.log");
