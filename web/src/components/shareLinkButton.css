@@ -19,8 +19,9 @@
   color: var(--text-dim);
 }
 
+/* 分享中：用 accent 字色（不是 --accent-text，那是疊在 accent 底色上的白字；放在淺色標題列上會變成看不見，2026-10-31）。 */
 .icon-btn.share-link-main.on {
-  color: var(--accent-text);
+  color: var(--accent);
 }
 
 /* 信任分享（trusted）：分享中才上警示色，跟受限的 accent 一眼分得出來。 */
@@ -43,18 +44,50 @@
 }
 
 .share-link-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 40;
+  /* 選單是 fixed、掛在 body 底下（ShareLinkButton）：z-index 要蓋過側欄與標題列的所有元素。寬度不超過視窗。 */
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  min-width: 120px;
-  padding: 4px;
+  gap: 4px;
+  width: min(360px, calc(100vw - 16px));
+  min-width: 0;
+  padding: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-panel);
   box-shadow: var(--shadow);
+}
+
+.share-link-menu button.share-link-copy {
+  padding: 8px 10px;
+  border: 1px solid var(--btn-primary-border);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  font-weight: 600;
+  text-align: center;
+}
+
+.share-link-menu button.share-link-copy:hover {
+  background: var(--btn-primary-bg-hover);
+  color: var(--btn-primary-fg-hover);
+}
+
+/* 完整網址：自動換行、不截斷，可長按／雙擊選取。 */
+.share-link-url-text {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .share-link-menu button {
@@ -94,9 +127,13 @@
 /* 非 https 的手機：選單第一項是可選取的連結（不能寫剪貼簿，不給複製鈕）。 */
 .share-link-url {
   box-sizing: border-box;
-  width: min(100%, 320px);
-  min-width: min(70vw, 320px);
-  margin-bottom: 4px;
+  width: 100%;
+  min-width: 0;
+  min-height: 3em;
+  resize: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-bottom: 0;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
