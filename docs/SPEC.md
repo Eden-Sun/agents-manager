@@ -70,7 +70,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
-Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話或群組專案，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
+Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
 `GET /api/state` 對 Bot principal 只列自己與後代 child，並移除 persona、args、identity、env、herdr session、未讀數、read marks，以及含全域部署阻擋者的 `deploy_wait`；若 caller 是 child，state 不揭露 tree 以外 parent 的 bot id。UI User principal 維持完整快照。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
@@ -1632,7 +1632,7 @@ flush：放回佇列照退避與重試上限，或收成 failed＋說明）那�
 
 stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。
-- **補送的字與比對的字**都讀 `turns.prompt_text`＝當初**實際送出**的字（群組去掉 @mention、附件路徑展開；直接送與排隊都寫），
+- **補送的字與比對的字**都讀 `turns.prompt_text`＝當初**實際送出**的字（附件路徑展開；直接送與排隊都寫），
   不讀訊息泡泡的原文——泡泡帶著 @mention，拿去搜畫面一定找不到、重送還會把路由語法打進 pane（review3 c3 M4）。沒有 `prompt_text` 的舊列才從訊息重算。
 - **補送按過鍵卻證明不了**（`Unproven`，或打字之後出錯）：不是「agent 沒反應」，turn 改記 `delivery='unknown'`（不判 `failed`），
   插一則 system 訊息說明「已重打一次、證明不了，字可能還在框裡或已被收下」。hook 來了照 §6.7 認領；沒人收由 §4.3b 收尾（review3 c3 M5）。
@@ -2238,7 +2238,7 @@ Child 的 `agent start` 經 daemon spawn 授權後取得一次性的 `AM_CHILD_S
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
    不是同機的惡意行程。
    **Bot principal 的路徑資源範圍**（2026-10-03）：所有以 bot／project／turn／mission／assignment／attachment 識別資源的 `/api` 路徑，都在共用 auth layer 以驗證過的 Bot id 查授權，不採信額外 header 或未解碼的 URI 別名。一般 bot 只可讀寫自己、後代 child、自己／後代所在專案、派給自己／後代的任務與交辦；turn／attachment 先反查其擁有 bot 再判。AGM 角色不會因此取得通用 bot、project、turn 或 attachment 跨資源權限；明確的跨資源管理入口限於 `GET／POST /api/projects/{id}/missions`、`/api/missions/{id}…` 與 `/api/supervisor/assignments/{id}` 的讀取／角色限定 review。唯一可直接指定其他 bot 的 Bot 路由是 `POST /api/bots/{id}/prompt`，仍須 `relay_auth` 驗 sender proof；附件上傳不繼承 prompt 的跨 bot 例外。`/api/drafts[/{key}]`、`/api/panes…` 與 `/api/hosts/{name}/shells…` 是網頁面，Bot principal `403 user_only`；User 維持原行為。Service principal 仍只依各自明列的 service path 授權。
-   Bot 對 `/api/bots/{id}/messages`、`/terminal` 與 `/api/turns/{id}/…` 只可沿自己的 bot-tree 存取；`/api/projects/{id}/messages` 的 Bot 時間軸只含自己與 descendants 的訊息，先 scope 再分頁，外部游標 404。子 Bot 可讀自己與自己的 descendants，不可讀 parent 或 sibling。Bot 收到 `/api/state` 也是自己與 descendants 的投影，ancestor 不可見時不回傳 `parent_bot_id`。`/ws` 僅接受 UI token，Bot／Service principal 不能用 token query 或混合 credentials 訂閱全域事件；獨立分享 SSE 只送指定 bot 的 user／assistant 訊息與狀態。
+   Bot 對 `/api/bots/{id}/messages`、`/terminal` 與 `/api/turns/{id}/…` 只可沿自己的 bot-tree 存取。子 Bot 可讀自己與自己的 descendants，不可讀 parent 或 sibling。Bot 收到 `/api/state` 也是自己與 descendants 的投影，ancestor 不可見時不回傳 `parent_bot_id`。`/ws` 僅接受 UI token，Bot／Service principal 不能用 token query 或混合 credentials 訂閱全域事件；獨立分享 SSE 只送指定 bot 的 user／assistant 訊息與狀態。
    **Bot principal 的操作類別**（2026-10-03，`api::BOT_ROUTE_POLICIES`）：Bot 資源範圍只回答「能碰哪個 bot／project」，不代表可做所有管理動作。API.md 完整路由表標為 User-only 的路徑由同一個 auth policy 在 handler 前拒絕；Bot（含 AGM 角色）均回 `403 user_only`。這包括 `/api/drafts[/{key}]`、read marks、已刪 bot 清單、全機 memory/process inventory 與 pane preview、recovery intents、build-slot 清單、使用者檔案（attachments/local-image/outbox）、pane inventory/actions、host shells、bot keys/text 與附件上傳。Service principal 繼續只依明列的 service scope 授權；`GET /api/panes` 的 Herdr upgrade service scope 保留。其他 User-only 管理路徑只拒絕一般 Bot，AGM 角色仍受各自資源與 handler 規則限制。拒絕在 handler／主機 RPC／上傳 body extractor 前發生。`GET /api/quota` 讀取快照；一般 Bot 的 `refresh=1|true|yes` 回 403。`GET /api/models` 對一般 Bot 只回 10 分鐘內快取；未命中或過期回 503 `model_cache_miss` 且不執行 CLI，`refresh=1|true|yes` 回 403；User 與 AGM 沿用原有探測行為。一般 Bot 可提交 requester 綁定自己的 approval、只能向 AGM role 送不需驗收的 notice；persona 修改需 AGM role。Bot 只能操作 owner 是自己的 lease，tokenless 舊租約相容不擴大跨 Bot 權限。release-triage 的 `dispatched`／`publish` 對一般 Bot 回 403；`GET` 與 `verdicts` 仍保留 Bot 呼叫，但全域帳本讀取與提交是否按任務範圍綁定，待 #801 使用者決定.
    AGM 提供 `bin/agm models --kind <kind> --host <host> [--identity <name>] [--refresh]` 查詢／刷新命令，沿用 CLI 的 Client 認證，權限仍由 daemon 判定；不因 403／503 切換憑證或自動重試。
    Bot 的模型查詢操作指引由 `[agents].instructions_file` 的共用來源提供：明列 daemon 的部署入口、per-bot headers、目標執行主機 `host`／身份 `identity` 與快取失效處理。遠端無 `AM_PORT` 不得推論 daemon 位於遠端 localhost，也不改變遠端 hook／spool 的既有設計。指引更新在下次啟動載入；既有 session 由故障處理者同步告知，不宣稱自動熱更新。
@@ -3268,7 +3268,7 @@ max_input_chars={n}
   是重點：接不回原本那段對話時**不默默開新的**——「只留下 resume」是這個功能的全部前提，悄悄換成
   空白對話等於把脈絡弄丟還不說。真的接不回（session／transcript 在睡眠期間被清掉）就退回開新對話，
   但在那顆 bot 自己的對話裡寫明「原本那段接不回來（原因）」。三個入口：
-  1. `lifecycle::prompt`（拿到 bot 鎖**之後**，用 `wake_locked`）——使用者送訊息、AGM 派 assignment、group chat、
+  1. `lifecycle::prompt`（拿到 bot 鎖**之後**，用 `wake_locked`）——使用者送訊息、AGM 派 assignment、
      team relay 全走這裡，所以「下次要用」自動就叫醒了。**不是睡著的 bot 只多一次索引查詢。**
      叫醒必須在鎖裡（issue #123）：放在鎖外會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被巡邏收掉，prompt 拿到鎖
      只看到 409 `bot has no active run`；而且那條路在「已標記、還沒停」的瞬間會把標記清掉，留下一顆沒人知道要叫醒的 bot。
@@ -3396,7 +3396,7 @@ max_input_chars={n}
   確認框（寫明這則之後幾則會拿掉、檔案不還原）→
   `POST /api/bots/{id}/rewind`（`crates/am-base/src/rewind.rs`，HTTP handler 在 `daemon/src/runners/rewind.rs`）。成功後那則的原文接回網頁輸入框**最前面**（原本打到一半的字留著），畫面上那則與之後收成淡色＋「已倒回」。
 - **範圍**：只收 claude；codex／grok 409 `unsupported_kind`。子 agent 也可以（daemon 本來就對子 agent 的 pane 打字）；從使用者自己 default session 匯入的
-  不行（§6.5.1：只看不代打）。bot 要在跑而且**閒著**（idle、沒有在飛或排隊的回合）；從檢查到打完字都**持 bot 鎖**，期間 prompt 進不來。群組發言（`group_id`）網頁不給按。
+  不行（§6.5.1：只看不代打）。bot 要在跑而且**閒著**（idle、沒有在飛或排隊的回合）；從檢查到打完字都**持 bot 鎖**，期間 prompt 進不來。
 - **做法：驅動 TUI 自己的 `/rewind`**（使用者 2026-09-23 裁示）。同一個 session、同一個 jsonl 內分支：session id 不變、不多一個檔、**不重啟**，被倒掉的原文 CLI 會自己放回輸入列。
   不用的做法：`--resume-session-at`（2.1.280 只在 print 模式生效，help 原文「Ignored outside print mode」；2.1.289 互動模式實測仍忽略）；daemon 自己截斷 transcript 另存新 session 再 `--resume`
   （要理解 transcript 格式、要重啟、換 session id——#405 第一版，已放棄）。
@@ -4139,43 +4139,13 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
 `/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身份要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身份＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身份切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
 
-## 13. 專案群組聊天
+## 13. 專案設定
 
-### 13.1 資料模型
-- **一個 Project 就是一個群組**，成員 = 其下所有存活的 bot；不另設 conversation 型別。時間軸 = 成員所有訊息依 daemon 的 `seq`（rowid）插入序合併；舊 daemon 沒有 `seq` 時退回 `message.id`。每則附 `bot_id`、`bot_name`。
-- 群組發言以 §6.3 `prompt()` 送給每個目標：**各建一個 Turn 與一則 user Message**，`client_request_id = <crid>:<bot_id>`。
-- 群組重送的鍵（#1815，同 §6.3 `sendPrompt`）：回應遺失後同一句沿用原 crid；**只有每一個收件人的回合在本機都已是終態**才換新鍵（那件事做完了，再沿用會被 daemon 當重送、回舊結果）。有一個還在 in_flight／queued，或本機沒看到（未知），就沿用、維持冪等。
-- `messages.group_id`：同一次發言的 user 副本與「未送達」system 註記共用（= 該次 `client_request_id`）；回覆為 NULL。前端把同 `group_id` 的副本折成一則並列出目標。
-- 送給 agent 的文字去掉 mention。
+點選側欄專案標題開啟專案設定；專案群組聊天與群組任務畫面已移除。mission 的 daemon 資料與 API 暫時保留（§18.14）。既有 `messages.group_id` 欄位留在 SQLite 以相容舊資料，daemon 不再讀寫或輸出此欄位。
 
-### 13.2 mention 解析（後端為準，前端只提示）
-- `@all` = 專案內所有 bot（不分大小寫）。`@<name>` 比對暱稱，支援 unicode 暱稱與全形標點（含全形冒號、分號）；尾隨標點切掉。
-  暱稱唯一性分大小寫（`Claude` 與 `claude` 可以同時在）。提及先對大小寫完全相同的那顆；沒有完全相同、而且摺完恰好一顆時才不分大小寫。摺完有兩顆以上就都不算，這樣第二顆才點得到（#657）。
-- 暱稱可以有空白（2026-09-19）：`@` 後面正好接著某個有空白的暱稱**整段**（不分大小寫、後面是結尾或分隔字元）就是它，最長的先比（`@my bot 2` 不會被 `my bot` 搶走）；尾隨的 `-`／`_` 可作連接符，但後面若還有名字字元就不能截短命中；沒對上的照原本逐字規則（`@my botanist` → `my`）。
-- `@` 須在開頭或非字元之後（`me@example.com` 不算）。沒有有效 mention → 400 `{error:"no_mention", message, bots}`。目標依專案內 bot 順序去重。
-- **收件人認 id，不認名字**（#1796）：`POST .../chat` 可帶 `recipient_ids`（bot id 陣列）；有帶就只看 id（依專案內 bot 順序），文字裡的 `@名字` 只是顯示，解析不再看名字——輸入後、送出前改名或舊名被別人接手，都不會漏送、送錯。不在專案裡的 id 進 `skipped`（`reason:"not_found"`）。沒帶就照上面的文字規則（腳本、bot 對 bot 等舊呼叫端）。前端在**打字當下**用當時的成員名單把 `@名字` 解析成 id（文字沒變就沿用，之後改名不重算），chip 與送出都看 id，顯示用現在的名字。
+單 bot 訊息依 `(created_at, seq)` 顯示，翻頁游標取已載入訊息中 `seq` 最小者。整頁重抓重疊載入更早的訊息時，重抓套用後才返回的舊頁丟棄。
 
-### 13.3 不可送的 bot（略過，不自動啟動）
-沒有 active Run、非 `running`、`blocked`、已有 in-flight Turn、有 `delivery=unknown` → 略過，列在 `skipped:[{bot_id, bot_name, reason, detail}]`
-（`reason ∈ not_running | blocked | in_flight | unknown_delivery | conflict | not_found | bad_request | upstream`），並在該 bot 對話寫一則同 `group_id` 的 system Message
-（「群組訊息未送達 X：…（不會自動啟動）」）；同 crid 重送不重寫。**絕不自動啟動。**
-**例外**：那一顆的字已經送進去、只是送達結果寫不進 DB（`LcError::Uncommitted`，§6 送達那段，#149／#167）**不算略過**——放進 `sent`（`delivery:"unknown"`，
-herdr 明確拒收才是 `failed`）、不寫「未送達」，之後由 daemon 補結果；同 crid 重送走冪等分支，不再打字。
-`skipped[].detail` 與那則 system 訊息是給人看的：錯誤本體是 JSON 的（維護窗口、被擋的 pane、送不出去的 prompt…）時取 `message`→`reason`→`error` 那一句，不貼原始 JSON；web 的 toast 另把機器碼翻成中文（`groupSkipText`）。
-
-API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md`）。WS 沿用 `message_added`（含 `group_id`）與 `turn_updated`。
-Bot token 讀群組時間軸時只會取得自己與 descendant bots 的訊息；同專案 sibling 的訊息與游標不可跨讀。UI token 維持完整的專案時間軸。
-
-### 13.4 前端
-- sidebar Project 標題可點進群組視圖；標題列顯示專案名、群組標籤、host 徽章與成員燈號列（點成員跳到單獨對話）。
-- 時間軸：bot 回覆／system 訊息帶 bot 名徽章（依 kind 配色）；user 副本折疊顯示 `→ @a, @b`；每個仍在回覆的成員各一個 typing 指示。
-- `bot_changed` 刷新 bot 快照後，若 bot 名稱或所屬 project 改變、被刪除或復原，同步已載入群組時間軸的徽章名稱與成員；新增成員合併最新頁並保留已翻出的歷史。
-- 單 bot 訊息依 `(created_at, seq)` 顯示；翻頁游標依已載入訊息中 `seq` 最小的一則選取，避免 daemon 時鐘校正後把時間排序的第一則誤當成插入序最早的一則。群組時間軸依 `seq` 插入序顯示。
-- 載入更早的訊息與整頁重抓重疊時，重抓套用後才回來的舊頁丟棄；下一頁從重抓後清單插入序最早的一則接續分頁。單 bot 與群組時間軸一致。
-- 「開同類分身」送出到 daemon 建好之間的灰色佔位列，靠建立請求的 `client_request_id`（`GET /api/state` 的 `bots[].create_request_id`，daemon 從 config.toml 帶出）對到真 bot，**不比對名字**（#1796）：建立期間真 bot 被改名佔位照樣被換掉，同名的既有 bot 吃不掉佔位；鍵還沒出現就佔位列留著。
-- 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
-- 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。已軟刪專案的標記端點回 404，upsert 也以存檔當下 project 仍存活為條件，避免併發刪除留下標記。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重；相同訊息時間依 `seq` 插入序判斷。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
-Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot（包含 AGM 角色）不能推進這些跨裝置已讀標記，service principal 的 scope 不包含這些路徑。
+「開同類分身」的佔位列以建立請求的 `client_request_id` 對上 `bots[].create_request_id`，不以名稱比對（#1796）。
 
 ## 14. 每台主機各自的額度
 
@@ -4242,7 +4212,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 
 ### 14.5 UI
 - 桌機（>640px）額度列在完整／收合狀態均填滿標題列剩餘寬；啟用格等寬、量表隨格增長，停用格與更新 chip 維持內容寬。完整需求按「當下最寬啟用格 × 格數」加其他內容與間距量出，放不下才收合；資料與字型更新也重量。兩種狀態都以量到的最寬內容為每格下限，不能擠壓文字；收合仍逐列顯示全部窗口（條至少 24px、字級 9.5px），真的放不下的尾巴裁掉，點格看明細。
-- 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、群組用 Project 的，都沒選是本機。
+- 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、專案設定用該 Project 的，都沒選是本機。
 - 條上不掛主機名牌（標題列左邊的 `@host` 已經說了，2026-09-29 使用者）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
 - popover 的帳號列可點列內空白處切換暫時停用；按鈕等控制項保留自身操作。登入確認框以 portal 顯示，點確認框內容不會切換背後的帳號列。
 - 未登入列有命名身份時，一律呼叫 `POST /api/hosts/{host}/identities/{identity}/login`，由 daemon 依該主機展開 env；不把 config 原文拼進 shell 指令。預設帳號才走 shell／TUI：codex 開 shell 跑 `codex login`，claude 開 shell 跑 `claude auth login`，grok 有同 host 的執行中 bot 就送 `/login`，否則開 shell 跑 `grok login`。
@@ -4432,14 +4402,14 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 
-對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`、host shell 面板的 `shell:<host>/<pane id>`——pane 結束時清，#758）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
+對話輸入框還沒送出的字（bot 的 `bot:<id>`、舊版保留的 `group:<project id>`、host shell 面板的 `shell:<host>/<pane id>`——pane 結束時清，#758）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
 各瀏覽器共用；不再存 localStorage（游標位置 `am.draftCursors` 仍是各瀏覽器自己的）。API 見 API.md「輸入框草稿」，實作 `daemon/src/drafts.rs`（網頁 `store/draftSync.ts`）。
 `GET /api/drafts` 與 `PUT /api/drafts/{key}` 只接受 User principal；Bot（包含 AGM 角色）不得讀取或改寫尚未送出的文字，service principal 的 scope 不包含這些路徑。
 
 - `rev` 每個 key 單調遞增，空字串寫入留墓碑（`text=''`）而不整列刪，rev 才不會從 1 重來被網頁當成舊事件丟掉。內容沒變的寫入不加 rev、不推事件。
 - 非空寫入的目標（bot／專案）已刪就不寫（404 `draft_target_gone`）：存活檢查與寫入同一個交易，刪除定案後晚到的 PUT 不能把墓碑復活（#1806）。shell 草稿還沒做這層檢查。
 - 網頁：開頁與每次 WS 重連 `GET /api/drafts` 整份拉；本機打字 debounce 400 ms 後 `PUT`，**清空（送出）不等 debounce**；同一個 key 同時只有一個 PUT 在飛。
-- 送出成功回來時只清「送出期間草稿沒被改過」的輸入框（#1811）：本機打字或別台的 `draft_updated` 套進來都算改過，A→B→A 也算。改過就保留目前的字、不送空字串；附件照常清掉已送出的那幾個。一般送出、send-now、併送、群組送出、群組的「交給 AGM」任務、輸入框卡著草稿時的「清掉再送」都照這條。
+- 送出成功回來時只清「送出期間草稿沒被改過」的輸入框（#1811）：本機打字或別台的 `draft_updated` 套進來都算改過，A→B→A 也算。改過就保留目前的字、不送空字串；附件照常清掉已送出的那幾個。一般送出、send-now、併送、輸入框卡著草稿時的「清掉再送」都照這條。
 - 收到別的 client 的 `draft_updated`：輸入框**有焦點而且本機有還沒同步的修改**時不覆蓋（本機那次 PUT 照送，最後寫入者贏），其餘都套用。同 `client_id` 的回音只記 rev、不重套；`rev` 不大於已知的丟掉。
 - 在飛 PUT 成功回來時，若已有更高 rev 的遠端版本就保留該版本；否則在沒有尚未被遠端取代的新本機輸入時，畫面套回這次 PUT 確認寫入的文字。仍較新的本機輸入維持待送，避免畫面與 daemon 在同 rev 留下不同內容。若是在飛期間才到的遠端版本（PUT 在它之前 commit）因為輸入框有焦點而略過，PUT 回應之後本機那段字會再送一次（本機優先），不把它當成已同步（#1665）。
 - PUT 失敗（斷線）：草稿留在這個分頁、維持待送，3 秒重試，重連後 `load` 完再補送。重連時 daemon 沒有、而本機沒有待送修改的草稿視為已被刪（別處送出、bot 被刪），跟著清。
@@ -5050,7 +5020,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   ops 腳本**不把 token 放進 argv 或 log**（review2 2026-09-16、issue #477）：`daemon-swap.sh` 把它寫進 AGM 目錄裡 `mktemp` 建的 0600 檔，交還窗口用 `--lease-token-file`，離開時不管成敗都刪掉。
 - **持有 `restart` 租約＝daemon 全域的 prompt 入場閘門**（issue #86）。`maintenance::window_held` 是唯一的定義，三個入口都讀它：
   - `controller::dispatch`：交辦 **hold**（留 `queued`，不算重試）——它是有自己重試與驗收的持久工作項，窗口關掉照常送出去，不遺失也不重送（`dispatch_crid` 冪等）。
-  - `lifecycle::prompt`（使用者、web、群組、工具、AGM 派工都走它）：**409 `maintenance_window`**，body 帶 `held_by`／`resource`／`expires_at`／`retry_after_secs`／`retryable:true`。
+  - `lifecycle::prompt`（使用者、web、工具、AGM 派工都走它）：**409 `maintenance_window`**，body 帶 `held_by`／`resource`／`expires_at`／`retry_after_secs`／`retryable:true`。
     擋在建 turn **之前**，所以連一列都不建、也不廣播 `message_added`——建完再撤的話使用者會看到一顆泡泡冒出來又消失。
     使用者的 prompt **不因維護窗口而排隊**：即使帶 `queue_if_busy:true`，窗口握著時仍回 409，不寫 turn；維護結束後由使用者重送。這跟 §6.4 的忙碌回合佇列是兩種情況：#733 只收下 bot 正在跑但 agent 忙碌的訊息，不會把維護中的訊息延後送出。
   - `lifecycle::queue::flush_queued_locked`：排隊的 prompt **留在佇列**，掛一個到窗口到期為止的 timer，不算重試（擋它的是我們自己開的窗口，不是 bot 的狀態）。
@@ -5264,7 +5234,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
 
-1. **收到 `mission_created`**（inbox）：讀 `mission get`。指示不清或範圍太大 → 在群組問使用者（`mission event --kind note`
+1. **收到 `mission_created`**（inbox）：讀 `mission get`。指示不清或範圍太大 → 向使用者詢問（`mission event --kind note`
    ＋ `mission pause --reason clarify`），不猜。與其他未結案交辦的 ownership 重疊 → 先排隊，在任務記 `note`。
 2. **執行者**：`mission pick --role executor` → `use` 就用該身份（`model` 有值要換模型）開臨時 bot（乾淨 worktree，命名
    `agm-mission-<id 尾 6 碼>-exec`），`assign --mission <id> --role executor`，文字含：指示原文、cwd、ownership、完成條件、
@@ -5275,10 +5245,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身份>`；
    `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
    （`approve|changes`＋findings）。先 `review accept` reviewer 那件（它的工作做完了），`changes` → `mission round --request-id <這次退回的穩定鍵>`
-   （409 `max_rounds` 就停，任務已 `paused`，在群組問人）→ `next` 變成 `assign executor`（`rework:true`）：**新開**一件
+   （409 `max_rounds` 就停，任務已 `paused`，向使用者詢問）→ `next` 變成 `assign executor`（`rework:true`）：**新開**一件
    `assign --mission --role executor`，文字帶 findings——執行者那件早就 accept 了，已結案的交辦不能 followup。
 4. **驗證者**：`mission pick --role verifier`；Fable 還有額度、只是 5h 窗撞限時回 `wait`（時間是 5h 的，不是 Fable 的下週），
-   `ask_user` 只留給真的沒有 Fable 額度的情況（review3 c1 L12）。`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身份
+   `ask_user` 只留給真的沒有 Fable 額度的情況（review3 c1 L12）。`ask_user` 時任務已停在 `no_fable_for_verifier`，向使用者詢問要等哪個身份
    或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
    `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
    （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
@@ -5286,13 +5256,13 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
    `review fail`／`cancel` 那件，`next` 會是同一個角色再派（`retry_of`），不算一輪。
 5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
    409 `not_verified`／`verified_without_sha`／`verification_stale`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過、又退回過），任務**不會**停下來，回第 4 步重驗這個 commit；
-   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人。**不 force 推 main**。第一次交付就 `nothing_to_deliver`（沒有新 commit 要交）的 commit 會被作廢，重試時仍是 `nothing_to_deliver`，不會因為「試過」就報成已交付（#1388）。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
+   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），向使用者說明原因。**不 force 推 main**。第一次交付就 `nothing_to_deliver`（沒有新 commit 要交）的 commit 會被作廢，重試時仍是 `nothing_to_deliver`，不會因為「試過」就報成已交付（#1388）。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
    執行 git 時固定 `LC_ALL=C`，讓用來判斷缺少遠端分支或 lease 過期的錯誤訊息不受 daemon 啟動時的語系影響。
    之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
 6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），
-   群組時間軸由 daemon 記 `completed`（payload 的 `delivery` 記交了哪個 commit）。**沒交付**的任務要帶 `--no-delivery`：
-   只查問題、沒改東西 → `no_changes`（派過執行者要加 `--worktree <執行者的工作樹>`）；交付失敗或使用者改主意，在群組問過、
+   daemon 的任務事件記 `completed`（payload 的 `delivery` 記交了哪個 commit）。**沒交付**的任務要帶 `--no-delivery`：
+   只查問題、沒改東西 → `no_changes`（派過執行者要加 `--worktree <執行者的工作樹>`）；交付失敗或使用者改主意，已向使用者詢問、
    使用者回答不要交付 → `user_declined`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
    目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且**確定**沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
    `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；`state_unreadable`（DB 讀不到它的 bot 列或 active run，daemon 不知道它還在不在跑，
