@@ -163,7 +163,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/projects/{id}/git` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/issues` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/issues/{number}` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| GET | `/api/projects/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/missions` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/panes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/submodules` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -240,7 +239,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/projects/{id}/git` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/projects/{id}/issues` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/projects/{id}/issues/{number}` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| HEAD | `/api/projects/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/projects/{id}/missions` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/projects/{id}/panes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/projects/{id}/submodules` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -341,7 +339,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/panes/{id}/focus` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/projects` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/bots` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/projects/{id}/chat` | User-only；Bot 與 AGM role 均 → 403 `user_only`（#989：網頁群組聊天，一般 Bot 不能以使用者名義 @all） |
 | POST | `/api/projects/{id}/git/commit` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/git/pull` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/projects/{id}/git/push` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -865,7 +862,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` 指向已載入訊息中 rowid 最小的一則；客戶端需依 `seq` 選游標，不能假定時間排序第一則就是游標），回傳的 `messages` 已依時間正序。`agm messages` 會保留回傳的 `seq`，並以本頁 `seq` 最小訊息的 id 作 `next_cursor`；舊 daemon 未回 `seq` 或值為 0 時沿用本頁時間正序第一筆。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
 
-代發訊息（`relay_from` 有值）另補 `relay_from_name`（來源 bot 的名字，來源已收掉也有）與 `relay_from_deleted`（來源 bot 已收掉）；只給 User principal，Bot principal 讀到的訊息不帶這兩欄，名字不外洩自己樹外的 bot。同樣的兩欄也補在群組訊息 `GET /api/projects/{id}/messages`（User principal）與 WS `message_added` 幀（WS 只接 User）。`relay_from` 為 `daemon` 或來源 bot 已不存在時不帶。前端另在本分頁記住曾解析到的名字，收掉後清單沒有、daemon 也沒補時仍顯示「名字（已收掉）」。
+代發訊息（`relay_from` 有值）另補 `relay_from_name`（來源 bot 的名字，來源已收掉也有）與 `relay_from_deleted`（來源 bot 已收掉）；只給 User principal，Bot principal 讀到的訊息不帶這兩欄，名字不外洩自己樹外的 bot。同樣的兩欄也補在 WS `message_added` 幀（WS 只接 User）。`relay_from` 為 `daemon` 或來源 bot 已不存在時不帶。前端另在本分頁記住曾解析到的名字，收掉後清單沒有、daemon 也沒補時仍顯示「名字（已收掉）」。
 Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ancestor、sibling 或其他 bot 回 `403 bot_resource_scope`。User principal 維持完整讀取。`before` 空字串等同沒帶（回第一頁）。`before` 必須是這顆 bot 的 conversation 裡**還在**的訊息：被刪掉（例如撤回排隊的 prompt、撤掉過期的「未送達」note）或根本不存在 → **404** `{"error":"not_found","what":"before message","reason":"before_message_gone","message_id"}`；是別顆 bot 的訊息 → 404 `reason:"before_message_not_in_conversation"`。不會默默拿全域 rowid 切出錯的一頁；呼叫端的正解是重載第一頁（不是重試同一個游標）。
 沒有這個 bot → 404；已刪除的 bot 仍讀得到歷史。
 
@@ -881,7 +878,6 @@ Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ance
       "source": "web" | "hook" | "transcript" | "terminal_fallback" | "system",
       "incomplete": 0,
       "terminal_snapshot": null,
-      "group_id": null,
       "relay_from": null, "relay_unverified": 0,
       "attachments": [],
       "created_at": "2026-09-05T15:31:00.000Z",
@@ -916,7 +912,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `keep_warm`：boolean，這則訊息屬於保溫回合（主力 58 分那則 `any updates` 與 bot 的保溫回覆；回合的 `client_request_id` 以 `keep-warm:` 或舊的 `keepalive:` 開頭）。網頁淡化顯示；`unread` 與 `group_unread` 一律不計這些訊息。
 
 `sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
-`seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。三處都帶：本端點、`GET /api/projects/{id}/messages`（§13.4）每一則、WS `message_added` 的 `message`。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
+`seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。本端點與 WS `message_added` 的 `message` 都帶。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
 
 ### 6.1 對話倒回 `POST /api/bots/{id}/rewind`（SPEC §6.13，issue #405）
 `{"message_id": "<messages.id>"}`：在 bot 的終端驅動 claude 自己的 `/rewind`，把對話倒回到這則**使用者訊息送出之前**——這則與之後的問答都不在 CLI 的 context 裡，
@@ -1114,7 +1110,7 @@ bot 或 active Run 不存在 404。
 
 ### `POST /api/projects/{id}/group/read`
 專案群組的已讀位置（#756），語意同上：非空 `message_id` 必須指向這個專案任一 bot 的訊息（含已軟刪 bot 留下的歷史），提供 `at` 時必須等於該訊息時間；省略 `at` 時，有 id 取訊息時間，沒有 id 取現在。標記只往前推、時間先正規化並夾到現在。
-回 `{"project_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 格式錯誤或不屬於專案 → 400，專案不存在**或已軟刪** 404（跟 `/chat`、`/messages` 一致）。`seq` 是標記訊息仍存在時的插入序；已刪或舊 daemon 未提供時省略。
+回 `{"project_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 格式錯誤或不屬於專案 → 400，專案不存在**或已軟刪** 404。`seq` 是標記訊息仍存在時的插入序；已刪或舊 daemon 未提供時省略。
 `GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id,seq?}` 或 `null`）。同時間戳依訊息插入序判斷。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
 
 兩個 `POST .../read` 都是瀏覽器共用的已讀狀態，只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，不會寫入標記或推事件。Service principal 不在這些路徑的 service scope 中，於全域授權時拒絕。
@@ -2100,43 +2096,7 @@ StatusLine 例外：不進收件匣，照舊 fire-and-forget 回 200。grok 的 
 `transcriptPath`、`lastAssistantMessage`、`reason`、`stopHookActive`）；`reason ≠ end_turn` 與 `session_end` 忽略，`session_start` 只回填 `native_session_id`（SPEC §12.3）。
 agy 的 `payload` 是 stdin JSON（camelCase：`conversationId`、`transcriptPath`、`terminationReason`、`error`、`fullyIdle`…）再加 hook 子行程補的 `hookEventName`（`SessionStart`／`PreInvocation`／`Stop`／`state`；agy 自己不帶事件名）與 `Stop` 的 `lastAssistantMessage`／`lastUserMessage`（讀 transcript）。`state`（statusLine，snake_case）跟 StatusLine 一樣不進收件匣。分類見 SPEC §12a.3。
 
-## 11. 專案群組聊天（SPEC §13）
-
-一個 Project 就是一個群組：`@<暱稱>` 或 `@all` 經 §5 的 prompt 路徑送給每個目標 bot，回覆回到合併時間軸。不自動啟動 bot。
-
-- **`messages.group_id`**：同一次 chat 產生的 user 副本與「未送達」system 註記共用（= 該次 `client_request_id`），其他訊息 `null`。
-- **mention（daemon 為準，前端一致）**：`@all` = 專案內所有 bot；`@<name>` token 為連續非空白、非標點字元（支援 `@小幫手，看一下`），不分大小寫；
-  `@` 須在開頭或非字元之後（`me@example.com` 不算）。目標依專案內 bot 順序去重。送給 bot 的文字去掉 mention 與其後的 `, : ; ，：；、`。
-
-### 11.1 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
-UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token 只取得自己與 descendant bots 的訊息，依插入順序（`rowid`）倒序分頁、回傳正序；SQL 先過濾 bot scope 再套 `limit`，游標若指向 scope 外的訊息回 404。`before` 空字串等同沒帶（回第一頁）。`limit` 1–500。每則多 `bot_id`、`bot_name`。Project 不存在 404。
-
-```json
-{ "project_id": "01M1...",
-  "messages": [
-    { "id": "01M1...", "role": "user", "content": "@all Reply with exactly GROUP-OK", "source": "web", "group_id": "c-group-1", "bot_id": "01M1...", "bot_name": "g-claude", "...": "…" },
-    { "role": "assistant", "content": "GROUP-OK", "source": "hook", "group_id": null, "bot_name": "g-claude", "...": "…" }
-  ],
-  "has_more": false }
-```
-
-### 11.2 `POST /api/projects/{id}/chat`
-`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...], "recipient_ids"?: ["bot_id", …] }`。**`recipient_ids`（#1796）**：有帶就以 bot id 決定收件人（依專案內 bot 順序），文字裡的 `@名字` 只是顯示、不再用來解析，所以輸入後改名或舊名被別人接手不會漏送／送錯；不在專案裡的 id 進 `skipped`（`reason:"not_found"`，`bot_name:""`）；沒帶就照文字裡的 mention 解析（原行為）。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。此格式是群組未讀查詢的穩定候選契約；前端仍需以同回合 user 訊息的 `group_id` 核實群組來源。
-
-```json
-200 { "group_id": "c-group-4", "project_id": "01M1...", "delivered": true,
-      "sent": [ { "bot_id": "01M1...", "bot_name": "g-claude", "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" } ],
-      "skipped": [ { "bot_id": "01M1...", "bot_name": "g-codex", "reason": "not_running", "detail": "bot has no active run" } ] }
-```
-
-- `delivered`：`sent` 是否非空。**一顆都沒送到（全被略過）仍回 200、`delivered:false`**（各顆的「未送達」note 已記）；前端該把它當成「沒送出」（保留草稿與附件、跳錯誤通知），不是成功。同一個 `client_request_id` 重送後某顆送到了，先前對它寫的「未送達」note 會被撤掉。
-- 部分略過仍 200。`sent[].delivery` 同 §5。`skipped[].reason`：`not_running`、`blocked`、`in_flight`、`unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；
-  `detail` 即單 bot prompt 的 409 reason。每個略過的 bot 對話多一則同 `group_id` 的 system 訊息（經 `message_added` 推）。
-  **字已經送進去、送達結果寫不進 DB**（單 bot prompt 的 `503 delivery_state_uncommitted`，§5，#149）不是略過：那個收件人放進 `sent`，
-  `delivery` 依 `owed_delivery::owed_as_unknown` 標成 `unknown`（herdr 明確拒收才是 `failed`），帶 `turn_id`／`message_id`，**不**插「群組訊息未送達」。
-  daemon 自己補上結果；同一個群組訊息（同 `client_request_id`）重送走冪等分支，不會再打字，DB 好了之後拿到寫好的 `delivery`。
-- 錯誤：`400 {"error":"no_mention","message","bots":[{id,name,kind}]}`；`400` 空 text；`404` project。
-- WS 沒有新事件：各 bot 各自推 `message_added`（帶 `group_id`）與 `turn_updated`，前端依 `bot_id → project_id` 歸群組。
+## 11. daemon 實例
 
 ### 11.3 第二個 daemon 實例
 資料目錄＝`[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`（`hook` 子命令讀 `AM_DATA_DIR`）。
@@ -2641,9 +2601,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 `GET /api/relay/resolve?target=<selector>` 為已驗證 bot 做唯讀解析：明確 `bot:<id>` 可跨主機；名稱與 pane ID 限來源 host／herdr session。唯一命中回 `to_bot_id`、`to_run_id`、`to_agent`；無命中 404，多個命中 409 附候選。遠端連線使用配置注入的 `AM_DAEMON_URL` 與 bot 自己的憑證。
 
-### prompt / 群組聊天帶附件
-`POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
-- id 以 **project** 為範圍（群組一次上傳、每個收件 bot 拿同一路徑）；跨專案或還沒 `ready` 一律 `400 unknown attachment`。
+### prompt 帶附件
+`POST /api/bots/{id}/prompt` 可帶 `"attachments": ["01M1…"]`：
+- id 以 **project** 為範圍；跨專案或還沒 `ready` 一律 `400 unknown attachment`。
 - agent 收到「文字 + 附加圖片／附加檔案（請讀取這些檔案來查看）：<絕對路徑>」（全是圖片才說「圖片」）；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
 - 綁定（`attach::bind`，把 `messages.attachments_json` 與每筆 `attachments.message_id` 一起寫）是單一 SQLite
   transaction：任何一步失敗（含 `UPDATE` 沒打中任何 row）整批 rollback，不會有 message 指向沒綁成功的附件。
@@ -3115,7 +3075,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--si
 
 ## 群組任務（mission，2026-09-13 新增，使用者決策見 SPEC §18.14 D1–D8）
 
-群組裡的「交給 AGM」：使用者下一句指示，AGM 派執行者／reviewer／驗證者完成。daemon 只提供確定性的部分——
+任務指示由 API 提交，AGM 派執行者／reviewer／驗證者完成。daemon 只提供確定性的部分——
 任務與事件的持久化、身份挑選規則、輪數上限、交付前的 fast-forward 檢查；拆工與判斷結果是 AGM 的事。
 **第一版只支援本機專案**。
 
@@ -3164,7 +3124,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--si
 - 驗證者找不到 Fable 有效額度 → 交辦進 `awaiting_review`（`turn_status = "quota_exhausted"`），任務停在 `no_fable_for_verifier` 等使用者決定。
 - 不屬於任何任務的交辦，行為與先前完全相同。
 
-事件（`GET /api/missions/{id}` 的 `events[]`，也是群組時間軸上這個任務的那一串）：
+事件（`GET /api/missions/{id}` 的 `events[]`）：
 `{id, mission_id, kind, text, relay_from, payload_json, reply_to, client_request_id, request_fingerprint, created_at}`，
 `kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed | question | answer`（`question`／`answer` 是 `POST …/question`、`POST …/answer` 寫的追問與回覆，兩者都在 `events[]` 裡）。
 `reply_to`＝指回它回的那一則 `question` 事件的 id：bot／AGM 的 `answer` 一定帶，使用者的 `answer` 可以帶可以不帶，其他種類是 `null`；網頁的追問配對靠它。
@@ -3248,7 +3208,7 @@ payload `{mission_id, project_id, text, message, action, next, flow, idle_since,
 | `agm mission deliver <mission> --worktree <絕對路徑> [--title …] [--body …] [--as-daemon]` | `POST /api/missions/{id}/deliver` |
 | `agm assign … --mission <mission> --role executor\|reviewer\|verifier` | `POST /api/supervisor/assignments` 的 `mission_id`／`role` |
 
-`event`／`complete`／`deliver` 預設帶 `relay_from = runtime.json 的 manager_bot_id`（群組時間軸上顯示成總管說的）；
+`event`／`complete`／`deliver` 預設帶 `relay_from = runtime.json 的 manager_bot_id`；
 `--as-daemon` 改標 `daemon`。`runtime.json` 沒有 bot id 時直接報 `bad_args`，不送出——沒帶來源的回報會被當成使用者本人說的。
 `--mission` 與 `--role` 只給一個也在送出前擋下。HTTP 錯誤照舊是非 0 結束碼＋`{"error":"http_error","status":…,"detail":…}`。
 

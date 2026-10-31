@@ -2343,7 +2343,7 @@ mod abandon_tests {
         .unwrap();
 
         env.herdr.set_agent("agent", "pane-1", true);
-        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[], None)
+        let out = prompt_with_attachments_and_relay(&app, &bot_id, "next", "request-1", &[], None)
             .await
             .expect("a completed unknown-delivery row must not block the next prompt");
         assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");

@@ -258,14 +258,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
-        .route("/projects/{id}/messages", get(get_project_messages))
         // §6.5e：非 agent 的 shell／服務 pane。
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
         .route("/panes/{id}/close", post(crate::runners::panes::close))
         .route("/panes/{id}/focus", post(crate::runners::panes::focus))
         .route("/panes", get(crate::runners::panes::list_all))
-        .route("/projects/{id}/chat", post(project_chat))
         // 群組任務（docs/goals/agm-missions.md）。
         .route(
             "/projects/{id}/missions",
@@ -1194,8 +1192,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
-    // #989：網頁專用的寫入——群組聊天（以使用者名義）、建任務、撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
-    ("POST", "/api/projects/{id}/chat", BotRoutePolicy::UserOnly),
+    // #989：網頁專用的寫入——建任務、撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
     ("POST", "/api/projects/{id}/missions", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/turns/{id}/withdraw", BotRoutePolicy::UserOnly),
     ("POST", "/api/turns/{id}/abandon", BotRoutePolicy::UserOrAgm),
@@ -7812,8 +7809,7 @@ async fn get_messages(
         }
         None => None,
     };
-    // `turn_id` / `role`：前端要證明某個回合是不是群組回覆（帶 `group_id` 的 user 訊息），沒有它就得
-    // 翻整段歷史猜。只在同一個 conversation 底下過濾，查不到的 turn 是空清單不是 404。
+    // 只在同一個 conversation 底下過濾，查不到的 turn 是空清單不是 404。
     let turn_filter = q.get("turn_id").map(|s| s.as_str()).filter(|s| !s.is_empty());
     let role_filter = match q.get("role").map(|s| s.as_str()).filter(|s| !s.is_empty()) {
         // 靜默忽略會讓呼叫端以為過濾過了，拿整段當成某個 role 的全部。
@@ -7936,68 +7932,6 @@ async fn get_messages_with_relay_names(
         add_relay_names(&app, &mut body).await?;
     }
     Ok(Json(body))
-}
-
-/// SPEC §13.4.
-async fn get_project_messages(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-    Extension(principal): Extension<RequestPrincipal>,
-) -> Result<Json<Value>, LcError> {
-    let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
-    let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
-    let user = principal == RequestPrincipal::User;
-    let mut messages = match principal {
-        RequestPrincipal::User => crate::group::messages(&app, &id, before, limit).await?,
-        RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } => crate::group::messages_for_bot_tree(&app, &id, before, limit, &bot_id).await?,
-        RequestPrincipal::Service(_) => return Err(bot_user_only()),
-    };
-    if user {
-        add_relay_names(&app, &mut messages).await?;
-    }
-    Ok(Json(messages))
-}
-
-/// `POST /projects/{id}/chat` 的 body：比 `PromptIn` 多 `recipient_ids`（issue #1796）。
-#[derive(Deserialize)]
-struct ChatIn {
-    #[serde(default)]
-    text: String,
-    client_request_id: Option<String>,
-    #[serde(default)]
-    attachments: Vec<String>,
-    /// 收件 bot id（有帶就只認 id，文字裡的 `@名字` 只是顯示）；沒帶＝照舊解析文字裡的 mention。
-    #[serde(default)]
-    recipient_ids: Vec<String>,
-}
-
-/// SPEC §13.4: `@<bot>` / `@all` fan-out. No valid mention → 400 `{error:"no_mention", bots}`.
-async fn project_chat(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<ChatIn>,
-) -> Response {
-    let crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
-        Some(c) => match crate::request_id::validate("client_request_id", c) {
-            Ok(v) => v,
-            Err(e) => return e.into_response(),
-        },
-        None => db::ulid(),
-    };
-    match crate::group::chat(&app, &id, &b.text, &crid, &b.attachments, &b.recipient_ids).await {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(crate::group::Response400::Lc(e)) => e.into_response(),
-        Err(crate::group::Response400::NoMention(bots)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "no_mention",
-                "message": "text must mention @all or at least one bot of this project",
-                "bots": bots,
-            })),
-        )
-            .into_response(),
-    }
 }
 
 async fn get_terminal(
@@ -8664,9 +8598,9 @@ mod message_tests {
     }
 
     /// 同一毫秒的訊息、id 不照插入序：每一則帶 `seq`（SQLite rowid，單調遞增），前端在 created_at 相同時靠它排，
-    /// 不必退回 id（ULID 的隨機段在同一毫秒內不單調）。REST 分頁、群組時間軸與 WS `message_added` 三條路都要帶。
+    /// 不必退回 id（ULID 的隨機段在同一毫秒內不單調）。REST 分頁與 WS `message_added` 都要帶。
     #[tokio::test]
-    async fn every_message_carries_the_monotonic_insert_seq_on_rest_group_and_ws() {
+    async fn every_message_carries_the_monotonic_insert_seq_on_rest_and_ws() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         let bot = crate::testing::claude_bot(&app, &e.project_id, "seq-bot").await;
@@ -8691,16 +8625,6 @@ mod message_tests {
         assert!(rest.windows(2).all(|w| w[0].1 >= 0 && w[0].1 < w[1].1), "REST 的 seq 要單調遞增：{rest:?}");
         let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM messages WHERE id='m1'").fetch_one(&app.db).await.unwrap();
         assert_eq!(rest[1].1, rowid, "seq 就是 rowid，跟 before= 分頁用的同一把尺");
-
-        let Json(group) = get_project_messages(
-            State(app.clone()),
-            Path(e.project_id.clone()),
-            Query(HashMap::new()),
-            Extension(RequestPrincipal::User),
-        )
-        .await
-        .unwrap();
-        assert_eq!(seqs(&group), rest, "群組時間軸帶同一個 seq");
 
         let mut rx = app.subscribe();
         let m = crate::lifecycle::insert_message(&app, &conv, None, "assistant", "new", "hook", false, None).await.unwrap();
@@ -8790,21 +8714,6 @@ mod message_tests {
             Some("before_message_not_in_conversation")
         );
 
-        // 群組時間軸同一條規則：訊息要屬於這個專案的某顆 bot（含已刪的：游標在清單載入後才刪 bot 照樣能翻）。
-        let project = e.project_id.clone();
-        let Json(ok) = crate::group::messages(&app, &project, Some("m-mine-2"), 10).await.map(Json).unwrap();
-        assert!(ok["messages"].as_array().unwrap().iter().any(|m| m["id"] == "m-other-1"));
-        let group = |r: crate::lifecycle::LcResult<Value>| r.map(Json);
-        assert_eq!(not_found_reason(group(crate::group::messages(&app, &project, Some("m-gone"), 10).await)).await.as_deref(), Some("before_message_gone"));
-        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p-elsewhere','/tmp/elsewhere','e',?)").bind(db::now()).execute(&app.db).await.unwrap();
-        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b-elsewhere','p-elsewhere','x','claude','tok',?)").bind(db::now()).execute(&app.db).await.unwrap();
-        let conv_elsewhere = db::conversation_id(&app.db, "b-elsewhere").await.unwrap();
-        a_turn(&app.db, &conv_elsewhere, "t-else").await;
-        a_message(&app.db, &conv_elsewhere, "m-elsewhere", "t-else", "user", None).await;
-        assert_eq!(
-            not_found_reason(group(crate::group::messages(&app, &project, Some("m-elsewhere"), 10).await)).await.as_deref(),
-            Some("before_message_not_in_conversation")
-        );
     }
 
     /// `before=` 空字串是第一頁，不是 404 before_message_gone（同 turn_id／role 的空字串也當沒帶）。
@@ -8870,7 +8779,7 @@ mod message_tests {
         assert!(r["bots"][0]["snippet"].as_str().unwrap().contains("後寫的"), "{r}");
     }
 
-    /// 前端要判斷「這個回合是不是群組回覆」：只問那個 turn 的 user 訊息，不必翻整段歷史。
+    /// 依回合與角色篩選訊息，不必翻整段歷史。
     #[tokio::test]
     async fn turn_id_and_role_filter_the_page() {
         let e = crate::testing::env().await;
@@ -8880,7 +8789,7 @@ mod message_tests {
         a_turn(&app.db, &conv, "t-group").await;
         a_message(&app.db, &conv, "m-old", "t-old", "user", None).await;
         a_message(&app.db, &conv, "m-group", "t-group", "user", Some("grp-1")).await;
-        // 群組 prompt 後面跟著一長串 assistant：以前靠翻頁找就會被擠出去。
+        // prompt 後面跟著一長串 assistant：以前靠翻頁找就會被擠出去。
         for i in 0..250 {
             a_message(&app.db, &conv, &format!("m-a{i:03}"), "t-group", "assistant", None).await;
         }
@@ -8890,7 +8799,7 @@ mod message_tests {
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["id"], "m-group");
-        assert_eq!(messages[0]["group_id"], "grp-1");
+        assert!(messages[0].get("group_id").is_none(), "legacy group metadata is not exposed");
         assert_eq!(body["has_more"], false);
 
         // turn 只過濾 turn，不順便挑 role。
@@ -8947,7 +8856,6 @@ mod message_tests {
         let Json(first) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
         assert_eq!(first["has_more"], true);
         let oldest = first["messages"][0]["id"].as_str().unwrap().to_string();
-        assert!(first["messages"].as_array().unwrap().iter().all(|m| m["group_id"].is_null()));
 
         let q = HashMap::from([
             ("turn_id".to_string(), "t-g".to_string()),
@@ -8958,7 +8866,6 @@ mod message_tests {
         let Json(second) = get_messages(State(app), Path(bot_id), Query(q)).await.unwrap();
         assert_eq!(second["has_more"], false);
         assert_eq!(second["messages"][0]["id"], "u-group");
-        assert_eq!(second["messages"][0]["group_id"], "grp-1");
     }
 
     fn turn_ids(body: &Value) -> Vec<String> {
@@ -12894,7 +12801,7 @@ mod unknown_api_route_tests {
     #[tokio::test]
     async fn an_unknown_api_path_is_a_json_404_not_the_spa_shell() {
         let env = crate::testing::env().await;
-        for req in ["GET /api/no-such-endpoint", "POST /api/no-such-endpoint", "GET /api/bots/x/no-such-sub"] {
+        for req in ["GET /api/no-such-endpoint", "POST /api/no-such-endpoint", "GET /api/bots/x/no-such-sub", "GET /api/projects/x/messages", "POST /api/projects/x/chat"] {
             let out = raw(env.app.clone(), req).await;
             assert!(out.starts_with("HTTP/1.1 404"), "{req}: {out}");
             assert!(out.contains("\"error\":\"not_found\""), "{req}: {out}");
@@ -13348,8 +13255,8 @@ mod per_principal_auth_tests {
         let paths = [
             ("GET", "/api/drafts"), ("PUT", "/api/drafts/bot%3A{bot}"),
             ("PATCH", "/api/projects/{project}"), ("DELETE", "/api/projects/{project}"),
-            ("POST", "/api/projects/{project}/bots"), ("GET", "/api/projects/{project}/messages"),
-            ("GET", "/api/projects/{project}/panes"), ("POST", "/api/projects/{project}/chat"),
+            ("POST", "/api/projects/{project}/bots"),
+            ("GET", "/api/projects/{project}/panes"),
             ("GET", "/api/projects/{project}/missions"), ("POST", "/api/projects/{project}/missions"),
             ("POST", "/api/projects/{project}/github/refresh"), ("GET", "/api/projects/{project}/submodules"),
             ("GET", "/api/projects/{project}/git"), ("POST", "/api/projects/{project}/git/commit"),
@@ -13617,14 +13524,10 @@ mod per_principal_auth_tests {
             ("encoded dot traversal across API prefix", "GET", format!("/foo/%2e%2e/api/bots/{}/messages", bot_b.id), false),
             ("dot traversal inside API prefix", "GET", format!("/api/../api/bots/{}/messages", bot_b.id), true),
             ("encoded dot traversal inside API prefix", "GET", format!("/api/%2e%2e/api/bots/{}/messages", bot_b.id), true),
-            ("project NFC alias of NFD id", "GET", format!("/api/projects/{nfc_path}/messages"), true),
-            ("project canonical NFD id", "GET", format!("/api/projects/{nfd_path}/messages"), true),
             ("uppercase API prefix", "GET", format!("/API/bots/{}/messages", bot_b.id), false),
             ("encoded API prefix", "GET", format!("/%61pi/bots/{}/messages", bot_b.id), false),
             ("HEAD uses bot scope", "HEAD", format!("/api/bots/{}/messages", bot_b.id), true),
             ("OPTIONS uses bot scope", "OPTIONS", format!("/api/bots/{}/messages", bot_b.id), true),
-            ("HEAD uses project scope", "HEAD", format!("/api/projects/{project_b}/messages"), true),
-            ("OPTIONS uses project scope", "OPTIONS", format!("/api/projects/{project_b}/messages"), true),
         ];
         let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot_a.id, bot_a.hook_token);
         let requests = cases

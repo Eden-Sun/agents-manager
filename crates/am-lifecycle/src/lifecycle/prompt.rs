@@ -365,7 +365,7 @@ pub const SEND_NOW_NOTE: &str = "被插隊送出打斷（claude send-now）";
 /// 這一則 prompt 在維護窗口（`restart` 租約）前面算哪一類（issue #86）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// 一般送入（使用者、web、群組、工具、AGM 派工）：窗口持有期間擋下，回 409 `maintenance_window`。
+    /// 一般送入（使用者、web、工具、AGM 派工）：窗口持有期間擋下，回 409 `maintenance_window`。
     Gated,
     /// 控制面自己的送入：AGM／協調者啟動時那一則握手。**不擋**——窗口就是為了「把東西停下來再起來」
     /// 而開的，連起來時的握手都擋掉就會把控制面鎖死在自己的閘門外（issue #86 驗收第三條）。
@@ -387,7 +387,7 @@ pub(super) async fn maintenance_refusal(app: &impl crate::lifecycle::send_now::p
 }
 
 pub async fn prompt(app: &impl LcHost, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None, &[], None).await
+    prompt_with_attachments_and_relay(app, bot_id, text, client_request_id, &[], None).await
 }
 
 /// `prompt` with images (`attach.rs`): the agent gets paths on its host; the timeline renders
@@ -400,7 +400,7 @@ pub async fn prompt_with(
     client_request_id: &str,
     attachment_ids: &[String],
 ) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, None).await
+    prompt_with_attachments_and_relay(app, bot_id, text, client_request_id, attachment_ids, None).await
 }
 
 /// queued turn 的 lane，由 daemon 的可信寫入路徑選定；request id 前綴不參與分類。
@@ -453,7 +453,7 @@ pub async fn prompt_relayed(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from).await
+    prompt_with_attachments_and_relay(app, bot_id, text, client_request_id, attachment_ids, relay_from).await
 }
 
 /// `POST /bots/{id}/prompt`：一般送出（`send_now=false`）或插隊送出，來源已由 `relay_auth` 驗過（issue #339）。
@@ -469,7 +469,7 @@ pub async fn prompt_from_api(
     // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
     clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None, None).await
 }
 
 /// `POST /prompt` with `queue_if_busy:true`: queue a user prompt only while the active run is busy.
@@ -489,8 +489,6 @@ pub async fn prompt_from_api_queue_if_busy(
         bot_id,
         text,
         client_request_id,
-        None,
-        None,
         attachment_ids,
         relay,
         true,
@@ -520,8 +518,6 @@ pub async fn prompt_from_share_with_token(
         bot_id,
         text,
         client_request_id,
-        None,
-        None,
         attachment_ids,
         relay,
         queue_if_busy,
@@ -553,8 +549,6 @@ pub async fn prompt_relayed_queueable(
         bot_id,
         text,
         client_request_id,
-        None,
-        None,
         &[],
         RelaySrc { from: relay_from, unverified: false, queue_class },
         true,
@@ -593,7 +587,6 @@ pub async fn queue_for_next_turn(
     text: &str,
     deliver: &str,
     client_request_id: &str,
-    group_id: Option<&str>,
     relay: RelaySrc<'_>,
 ) -> LcResult<PromptOut> {
     let turn_id = db::ulid();
@@ -615,13 +608,12 @@ pub async fn queue_for_next_turn(
         return Err(queue_insert_error(bot_id, conv, e));
     }
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
     )
     .bind(&msg_id)
     .bind(conv)
     .bind(&turn_id)
     .bind(text)
-    .bind(group_id)
     .bind(relay.from)
     .bind(relay.unverified)
     .bind(db::now())
@@ -908,17 +900,15 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
     Ok(())
 }
 
-pub async fn prompt_grouped(
+pub async fn prompt_with_attachments_and_relay(
     app: &impl LcHost,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
-    group_id: Option<&str>,
-    deliver: Option<&str>,
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None, None, None).await
 }
 
 /// 主力保溫專用（#872）：跟 [`prompt`] 同一條路，但在 bot 鎖內確認 active run 仍是計畫時的那顆、仍 idle、沒有排隊回合，
@@ -930,7 +920,7 @@ pub async fn prompt_expect_run(
     client_request_id: &str,
     expected_run_id: &str,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(None), false, false, Admission::Gated, false, None, None, Some(expected_run_id)).await
+    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc::trusted(None), false, false, Admission::Gated, false, None, None, Some(expected_run_id)).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -960,7 +950,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -969,8 +959,6 @@ async fn prompt_inner(
     bot_id: &str,
     text: &str,
     client_request_id: &str,
-    group_id: Option<&str>,
-    deliver: Option<&str>,
     attachment_ids: &[String],
     // `from: None` = 使用者自己在畫面上打的。
     relay: RelaySrc<'_>,
@@ -991,7 +979,7 @@ async fn prompt_inner(
 ) -> LcResult<PromptOut> {
     let bot_kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
     if bot_kind == "claude-api" {
-        if group_id.is_some() || deliver.is_some() || !attachment_ids.is_empty() || relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
+        if !attachment_ids.is_empty() || relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
         if text.trim().is_empty() || client_request_id.trim().is_empty() { return Err(LcError::Bad("api_native_prompt_invalid".into())); }
@@ -1000,7 +988,6 @@ async fn prompt_inner(
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
             });
     }
-    let deliver = deliver.unwrap_or(text);
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
     let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
@@ -1049,7 +1036,7 @@ async fn prompt_inner(
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
     // 打進 pane 的字先清成 CLI 會原樣收下的樣子（#205，`pane_text`）：`prompt_text` 存清過的字，泡泡（`text`）留原文。
-    let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(deliver, &files));
+    let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
     if super::pane_text::nothing_left(text, &deliver) {
         return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
     }
@@ -1108,7 +1095,7 @@ async fn prompt_inner(
     if queue_awaits_idle {
         let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
         if in_flight.is_some() || run.agent_status != "idle" {
-            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await;
+            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await;
         }
     }
     if run.agent_status == "blocked" {
@@ -1133,7 +1120,7 @@ async fn prompt_inner(
         Some(t) if send_now_ok => Some(t),
         Some(t) => {
             if queue_if_busy {
-                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await;
+                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await;
             }
             let mut detail = json!({"turn_id": t.id});
             if let Some(r) = refused {
@@ -1158,12 +1145,12 @@ async fn prompt_inner(
     // AGM 派工排進佇列（驗證完或到期由 flush 送）；其他送入跟「對方回合中」一樣回可重試的 409。
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
         if queue_awaits_idle {
-            let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await?;
+            let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
             schedule_flush_retry(app, bot_id, left);
             return Ok(out);
         }
         if queue_if_busy {
-            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await?;
             schedule_flush_retry(app, bot_id, left);
             return Ok(out);
         }
@@ -1179,11 +1166,11 @@ async fn prompt_inner(
     if queue_if_busy && !users_own {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
             if queue_awaits_idle {
-                let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await?;
+                let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
                 schedule_flush_retry(app, bot_id, wait);
                 return Ok(out);
             }
-            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await?;
             schedule_flush_retry(app, bot_id, wait);
             return Ok(out);
         }
@@ -1231,7 +1218,7 @@ async fn prompt_inner(
     // 兩次都在同一顆 per-bot 鎖裡排隊，第二次打斷的是第一次掛上去的那一則。
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
-    // `prompt_text` 存**實際送出**的字（群組去掉 @mention、附件路徑展開後），跟排隊那條同一欄：
+    // `prompt_text` 存**實際送出**的字（附件路徑展開後），跟排隊那條同一欄：
     // stall 重送、畫面比對、hook 對 prompt 都讀它，不讀泡泡原文（review3 c3 M4）。
     // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
@@ -1269,13 +1256,12 @@ async fn prompt_inner(
     let msg_id = db::ulid();
     // 真的要打斷一個進行中的回合才標「插隊」；閒著時按插隊就是一般送出。
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
     .bind(text)
-    .bind(group_id)
     .bind(relay.from)
     .bind(relay.unverified)
     .bind(send_now_active.then_some("send_now"))
@@ -1497,12 +1483,12 @@ mod prompt_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "x", "x", "c-fail", None, RelaySrc::default()).await.unwrap_err();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "x", "x", "c-fail", RelaySrc::default()).await.unwrap_err();
         assert!(matches!(err, LcError::Upstream(_)), "真的寫入失敗要照實回，不是 409：{err:?}");
         sqlx::query("DROP TRIGGER am_test_no_turns").execute(&app.db).await.unwrap();
 
-        queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", None, RelaySrc::default()).await.unwrap();
-        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", None, RelaySrc::default()).await.unwrap_err();
+        queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", RelaySrc::default()).await.unwrap();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", RelaySrc::default()).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(_)), "真的已經有一筆在排才是 409：{err:?}");
     }
 
@@ -2021,25 +2007,6 @@ mod prompt_tests {
             assert_eq!(db::queued_turns_by_bot(&app.db).await.unwrap()[&f.bot_id].id, user.turn_id, "GET /api/state picks the user turn");
             assert_ne!(user.turn_id, relay.turn_id);
         }
-    }
-
-    /// 群組訊息：泡泡留原文（含 @mention），turn 上記實際送出的字，stall 重送與畫面比對讀它（review3 c3 M4）。
-    #[tokio::test]
-    async fn a_direct_prompt_records_the_text_actually_delivered_on_its_turn() {
-        let f = fixture("codex", "test").await;
-        let app = f.env.app.clone();
-        let out = prompt_grouped(&app, &f.bot_id, "@prompt-test 跑一次測試", "group-1:b", Some("group-1"), Some("跑一次測試"), &[], None)
-            .await
-            .unwrap();
-        let (bubble, delivered): (String, Option<String>) = sqlx::query_as(
-            "SELECT m.content, t.prompt_text FROM turns t JOIN messages m ON m.turn_id = t.id AND m.role = 'user' WHERE t.id = ?",
-        )
-        .bind(&out.turn_id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
-        assert_eq!(bubble, "@prompt-test 跑一次測試", "泡泡照使用者打的");
-        assert_eq!(delivered.as_deref(), Some("跑一次測試"), "turn 記的是送給 bot 的字");
     }
 
     /// 打字前 `runs.pane_typed` 寫不進去（SQLite 鎖逾時、磁碟滿）：一個字都沒打，所以是 409＋撤回 turn，

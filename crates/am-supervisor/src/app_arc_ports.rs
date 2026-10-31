@@ -1,6 +1,6 @@
 //! `Arc<T>` forwarding for ports whose composition host is stored behind an `Arc`.
 
-use crate::mission::ports::{CallerOps, EventOps, GroupTurnOps, IdentityOps, SupervisorOps};
+use crate::mission::ports::{CallerOps, EventOps, IdentityOps, SupervisorOps};
 use crate::supervisor::ports::{
     BotLamp, CandidateSwitch, ClassifyFailureState, ConfigProjection, ControllerRuntime, DaemonConnection, HostProbes, IncidentState,
     JudgeOps, MissionCancellation, MissionOps, QuotaOps, TurnOps,
@@ -300,40 +300,6 @@ impl<T: SupervisorOps + ?Sized> SupervisorOps for Arc<T> {
 impl<T: EventOps + ?Sized> EventOps for Arc<T> {
     async fn emit_event(&self, kind: &str, data: serde_json::Value) {
         (**self).emit_event(kind, data).await
-    }
-}
-
-impl<T: GroupTurnOps + ?Sized> GroupTurnOps for Arc<T> {
-    async fn prompt_grouped(
-        &self,
-        bot_id: &str,
-        text: &str,
-        client_request_id: &str,
-        group_id: Option<&str>,
-        deliver: Option<&str>,
-        attachment_ids: &[String],
-        relay_from: Option<&str>,
-    ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-        (**self).prompt_grouped(bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from).await
-    }
-    fn owed_as_unknown(&self, res: crate::lifecycle::LcResult<crate::lifecycle::PromptOut>) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-        (**self).owed_as_unknown(res)
-    }
-    async fn insert_message_grouped(
-        &self,
-        conversation_id: &str,
-        turn_id: Option<&str>,
-        role: &str,
-        content: &str,
-        source: &str,
-        incomplete: bool,
-        snapshot: Option<&str>,
-        group_id: Option<&str>,
-    ) -> anyhow::Result<crate::db::Message> {
-        (**self).insert_message_grouped(conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id).await
-    }
-    fn cursor_not_found(&self, reason: &str, message_id: &str) -> crate::lifecycle::LcError {
-        (**self).cursor_not_found(reason, message_id)
     }
 }
 
