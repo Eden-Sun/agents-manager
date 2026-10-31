@@ -1,6 +1,10 @@
 import type { Dict } from '../../lib/i18n/types'
 
 export default {  // 共用 Bot／Project 狀態與驗證提示
+  '專案設定': 'Project settings',
+  '專案成員': 'Project members',
+  '成員': 'Members',
+  '開啟「{name}」的專案設定\n{path}{drag}': 'Open project settings for {name}\n{path}{drag}',
   '1–32 個字，不可含 @ , : ; 與看不見的字元，空白只能單一個、夾在中間': '1–32 characters; no @ , : ; or invisible characters. Use at most one space, not at either end',
   '其中 {items}': 'Including {items}',
   '都是比較不急的': 'All lower priority',
@@ -198,7 +202,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '新增並啟動': 'Add and start',
   '{n} 則未讀的群組回覆': { one: '{n} unread Group chat reply', other: '{n} unread Group chat replies' },
   '收合的 Bot 裡有 {n} 個回合已完成，還沒看過': { one: '{n} finished turn unread in a collapsed Bot', other: '{n} finished turns unread in collapsed Bots' },
-  '開啟「{name}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n{path}{drag}': 'Open the Group chat for “{name}” (@bot or @all to message multiple Bots)\n{path}{drag}',
   '\n拖曳可調整專案順序': '\nDrag to reorder Projects',
   '選擇 Project': 'Select a Project',
   'Bot 順序可以拖曳調整，鍵盤按 Alt 加上下方向鍵移動一格。': 'Drag to reorder Bots, or press Alt+Up/Down to move one position.',
