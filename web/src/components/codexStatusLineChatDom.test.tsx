@@ -89,7 +89,7 @@ test('footer 沒有 Context 段時不畫 context 欄位；主題不畫', async (
   useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot] })
   await mount(<StatusLineBar botId="b1" status={null} text={SHORTCUTS_LINE} />)
   assert.equal(items()[0].v, '~/project/agm-lx1685')
-  assert.ok(document.querySelector('.context-card-trigger'))
+  assert.ok(document.querySelector('.compact-btn'))
 })
 
 test('Codex 沒有 context 讀數也能看到手動壓縮；忙碌時仍禁止送出', async () => {
@@ -98,7 +98,6 @@ test('Codex 沒有 context 讀數也能看到手動壓縮；忙碌時仍禁止�
     runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run },
   })
   await mount(<StatusLineBar botId="b1" status={null} text={null} />)
-  await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
   const button = document.querySelector<HTMLButtonElement>('.compact-btn')
   assert.ok(button, '沒有 context 讀數時仍應顯示壓縮')
   assert.equal(button.disabled, false)
@@ -114,7 +113,6 @@ test('Codex 必快取的手動壓縮會呼叫既有 API 一次', async () => {
   try {
     useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
     await mount(<StatusLineBar botId="b1" status={null} text={null} />)
-    await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
     await act(async () => { document.querySelector<HTMLButtonElement>('.compact-btn')!.click() })
     assert.deepEqual(requests, [['POST', '/bots/b1/compact']])
   } finally {
@@ -131,7 +129,6 @@ test('Codex 的 rollout context 在快取欄補顯時仍有壓縮按鈕', async 
   const bar = document.querySelector('.statusline-bar')!
   assert.match(bar.textContent ?? '', /38\.1%/)
   assert.match(bar.textContent ?? '', /必快取/)
-  await act(() => bar.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
   assert.equal(document.querySelectorAll('.compact-btn').length, 1)
   assert.equal(document.querySelector<HTMLButtonElement>('.compact-btn')!.disabled, false)
 })
@@ -157,28 +154,31 @@ test('非 codex 的 status_line 不當成 codex footer 解析', async () => {
   assert.equal(document.querySelector('.statusline-bar .statusline-text'), null)
 })
 
-test('context 小卡展開後才提供壓縮，沒有讀數也可開啟', async () => {
-  useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
-  await mount(<StatusLineBar botId="b1" status={null} text={null} />)
-  assert.equal(document.querySelector('.compact-btn'), null)
-  const trigger = document.querySelector<HTMLButtonElement>('.context-card-trigger')
-  assert.ok(trigger)
-  await act(() => trigger.click())
-  assert.ok(document.querySelector('.context-card .compact-btn'))
-})
+for (const kind of ['claude', 'codex'] as const) {
+  test(`${kind} context 用量只顯示一次，壓縮直接可見而非下拉`, async () => {
+    useStore.setState({ bots: [{ id: 'b1', kind } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as Run } })
+    await mount(<StatusLineBar botId="b1" status={{ ...status, context_used_pct: 13, context_used_tokens: 132000, context_size: 1000000 }} text={null} />)
+    const context = document.querySelector('[data-k="context"]')!
+    assert.equal((context.textContent ?? '').match(/132k\/1M/g)?.length, 1)
+    assert.equal(context.querySelectorAll('.compact-btn').length, 1)
+    assert.equal(context.querySelector<HTMLButtonElement>('.compact-btn')!.disabled, false)
+    assert.equal(document.querySelector('.context-card-trigger'), null)
+    assert.equal(document.querySelector('[role="dialog"]'), null)
+  })
+}
 
-test('有讀數的 context 小卡只顯示實際值，Escape 關閉且不呼叫 API', async () => {
+test('忙碌時用量仍可讀、壓縮禁用，不會開卡片或送出 API', async () => {
   const requests: string[] = []
   const original = rawTransport.request
   rawTransport.request = async (_method, path) => { requests.push(path); return {} }
   try {
-    useStore.setState({ bots: [{ id: 'b1', kind: 'codex' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' } as Run } })
-    await mount(<StatusLineBar botId="b1" status={status} text={CONTEXT_LINE} />)
-    await act(() => document.querySelector<HTMLButtonElement>('.context-card-trigger')!.click())
-    assert.match(document.querySelector('.context-card')?.textContent ?? '', /18%/)
-    assert.equal(document.querySelector<HTMLButtonElement>('.context-card .compact-btn')!.disabled, true)
+    useStore.setState({ bots: [{ id: 'b1', kind: 'claude' } as Bot], runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' } as Run } })
+    await mount(<StatusLineBar botId="b1" status={status} text={null} />)
+    assert.match(document.querySelector('[data-k="context"]')?.textContent ?? '', /18%/)
+    const button = document.querySelector<HTMLButtonElement>('.compact-btn')!
+    assert.equal(button.disabled, true)
+    await act(() => button.click())
     assert.deepEqual(requests, [])
-    await act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
-    assert.equal(document.querySelector('.context-card'), null)
+    assert.equal(document.querySelector('[role="dialog"]'), null)
   } finally { rawTransport.request = original }
 })

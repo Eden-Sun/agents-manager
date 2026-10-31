@@ -46,9 +46,7 @@
   line-height: 20px;
 }
 
-.context-card-trigger { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 2px 4px; }
-.context-card-trigger:focus-visible { outline: 2px solid var(--accent); }
-.context-card { position: fixed; z-index: 10000; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); padding: 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--text); box-shadow: 0 4px 20px #0003; white-space: normal; }
-.context-card .compact-btn { display: block; margin: 12px 0 0; min-height: 40px; padding: 0 14px; font-size: 14px; }
-.context-card p { margin: 8px 0 0; font-size: 12px; color: var(--text-dim); }
-@media (width <= 640px) { .context-card-trigger { min-height: 40px; } }
+/* Keep the inline action usable on phones. */
+@media (width <= 640px) {
+  .compact-btn:not(.keep-warm-skip-btn) { min-height: 40px; min-width: 40px; }
+}

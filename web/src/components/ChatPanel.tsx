@@ -3,7 +3,7 @@ import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId, useMemo } from 'react'
-import { ContextCard } from './CompactButton'
+import { CompactButton } from './CompactButton'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -1209,7 +1209,8 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
       ) : null}
       {ctxPct !== null ? (
         <SlItem k="context" title={ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined}>
-          {kind === 'codex' || kind === 'claude' ? <ContextCard botId={botId}>{pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</ContextCard> : <>{pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}</>}
+          {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
+          <CompactButton botId={botId} />
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
