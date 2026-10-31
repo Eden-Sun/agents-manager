@@ -18,3 +18,6 @@ ui-token
 
 /dist
 docs/screenshots/goal/cdp-profile*/
+
+# CodeGraph 索引（每台機器本地，只建在主樹；worktree 會沿用主樹的索引）
+/.codegraph/

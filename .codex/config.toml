@@ -1,0 +1,4 @@
+# CodeGraph MCP（https://github.com/colbymchenry/codegraph）；codex 只在信任的專案載入這層。
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]

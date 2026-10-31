@@ -87,5 +87,9 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 要交給使用者的檔案放 outbox：`$AM_OUTBOX`＝`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（本機 bot 啟動時 daemon 注入並建好，子 pane 繼承；沒有這個變數的舊 pane 自己拼同一個路徑）。空目錄會被清理收掉，**寫之前一律 `mkdir -p "$AM_OUTBOX"`**。只保留 1 小時（從檔案**搬進** outbox 起算，`mv`／`cp -p` 進來的舊檔不會立刻被清），AGM 的 `com.agm.outbox-gc` 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。網頁「檔案暫存」只列 outbox 的檔案，scratchpad 一律看不到（SPEC §6.5f）。
 - 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；瀏覽器一律走 agent-browser，不另起別的 headless、不留 profile 目錄。登入態（使用者 2026-10-15；2026-10-18 拿掉「bot 不替使用者登入」）：使用者要 bot 登入時可以照做；使用者也可以在自己的環境用 ab 登入，再把登入態（`--state` 檔、cookie、session）交給 bot 的 ab session 接著執行。登入態檔算憑證，一樣不放 scratchpad、outbox 或 repo，用完就刪。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
 
+## CodeGraph（程式碼圖譜，使用者 2026-10-31）
+- 找程式、看呼叫關係時先用 CodeGraph，再退回 grep：MCP 工具 `codegraph_explore`（claude 由 `.mcp.json`、codex 由 `.codex/config.toml` 載入），或 shell `codegraph explore "<符號或問題>"`、`codegraph callers <符號>`、`codegraph impact <符號>`。
+- 索引只建在主樹的 `.codegraph/`（不進 git）；worktree 裡查到的是主樹那份，會提示「來自不同的 worktree」，只在你自己分支新增的符號查不到，改用 grep。**禁止在 worktree 跑 `codegraph init`**（一份索引約 180 MB）。查不到明顯該有的符號時，在主樹跑 `codegraph sync` 補索引。
+
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
