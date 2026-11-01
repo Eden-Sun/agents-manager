@@ -571,7 +571,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-banner ok" role="status">{t('已儲存，回合結束後自動套用。')}</div>
       ) : null}
 
-      {bot.role_pending ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
+      {/* claude-api 每回合重讀設定、沒有重啟：不出「待套用」。 */}
+      {bot.role_pending && bot.kind !== 'claude-api' ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
       <div className="bs-body">
         <form
           className="form"
@@ -646,7 +647,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               setFast(v)
             }}
           />
-          <div className="field rt-override">
+          {bot.kind === 'claude-api' ? null : <div className="field rt-override">
             <span>{t('執行期覆寫')}</span>
             <p className="hint">{t('只覆寫這顆 Bot；沒設＝跟角色（角色設定在專案設定）。改動後需重啟 Bot 才生效。')}</p>
             <RuntimeSettingsFields
@@ -658,7 +659,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               onChange={(next) => setOverrideDraft(next)}
             />
             {overrideRangeBad ? <span className="hint rp-err">{t('數值超出範圍，請修正後再儲存')}</span> : null}
-          </div>
+          </div>}
           <IdentityOptions
             kind={bot.kind}
             host={host}
