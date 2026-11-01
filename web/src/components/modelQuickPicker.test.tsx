@@ -92,7 +92,7 @@ test('haiku bot（存完整 id）：「廠推薦」標在 haiku 的預設強度 
   await openMenu()
   const tagged = [...document.querySelectorAll('.effort-recommended')].map((e) => e.closest('button')?.textContent ?? '')
   assert.equal(tagged.length, 1, tagged.join('|'))
-  assert.ok(tagged[0].startsWith('M'), tagged[0])
+  assert.ok(tagged[0].startsWith('Medium'), tagged[0])
 })
 
 test('沒指定模型的 bot：預設那顆亮著', async () => {
@@ -107,7 +107,7 @@ test('沒指定強度：模型的預設強度亮著', async () => {
   await openMenu()
   const checkedEfforts = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')]
   assert.equal(checkedEfforts.length, 1)
-  assert.ok(checkedEfforts[0].textContent?.startsWith('H'))
+  assert.ok(checkedEfforts[0].textContent?.startsWith('High'))
 })
 
 test('有指定強度就照指定的', async () => {
@@ -115,7 +115,7 @@ test('有指定強度就照指定的', async () => {
   await openMenu()
   const checkedEfforts = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')]
   assert.equal(checkedEfforts.length, 1)
-  assert.ok(checkedEfforts[0].textContent?.startsWith('L'))
+  assert.ok(checkedEfforts[0].textContent?.startsWith('Low'))
 })
 
 test('沒指定時點亮著的預設那顆仍會送出', async () => {
@@ -136,11 +136,11 @@ test('帳號記住的強度另標「此帳號預設」，不冒充廠推薦；�
   await openMenu()
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="強度"] button')]
   const text = (label: string) => buttons.find((b) => b.textContent?.startsWith(label))?.textContent ?? ''
-  assert.equal(text('H'), 'H廠推薦')
-  assert.equal(text('L'), 'L此帳號預設')
-  assert.equal(text('M'), 'M')
+  assert.equal(text('High'), 'High廠推薦')
+  assert.equal(text('Low'), 'Low此帳號預設')
+  assert.equal(text('Medium'), 'Medium')
   const checked = buttons.filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent)
-  assert.deepEqual(checked, ['L此帳號預設'])
+  assert.deepEqual(checked, ['Low此帳號預設'])
 })
 
 test('沒有帳號記住的值：只有廠推薦，亮的是廠推薦那一級', async () => {
@@ -151,5 +151,5 @@ test('沒有帳號記住的值：只有廠推薦，亮的是廠推薦那一級',
   await openMenu()
   assert.equal(document.querySelectorAll('.effort-account').length, 0)
   const checked = [...document.querySelectorAll('[aria-label="強度"] button[aria-checked="true"]')].map((b) => b.textContent)
-  assert.deepEqual(checked, ['H廠推薦'])
+  assert.deepEqual(checked, ['High廠推薦'])
 })
