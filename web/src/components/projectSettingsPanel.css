@@ -46,3 +46,4 @@
     scrollbar-width: none;
   }
 }
+.project-savebar { position: sticky; bottom: 0; z-index: 1; margin-top: 12px; padding: 10px 0; background: var(--bg-panel, var(--bg)); border-top: 1px solid var(--border); }

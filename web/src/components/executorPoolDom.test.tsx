@@ -102,7 +102,7 @@ test('建議：只列出查得到的家族，勾選後才加入，模型取版�
 
   // 加入後預設建議自動收起，列表多一條；存檔才會送出
   assert.equal(document.querySelectorAll('.executor-pool-entry').length, 2)
-  await click(button('儲存執行者池'))
+  await click(button('儲存'))
   await settle()
   assert.equal(patched.length, 1)
   const pool = patched[0].executor_pool!
@@ -174,7 +174,7 @@ test('新增條目：送出後以 id 唯一的條目寫入，數量 1..10', asyn
   assert.equal(count.value, '10')
   await click(button('加入條目'))
   await settle()
-  await click(button('儲存執行者池'))
+  await click(button('儲存'))
   await settle()
   const pool = patched[0].executor_pool!
   assert.equal(pool.length, 2)

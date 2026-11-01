@@ -4,6 +4,7 @@ import { useT } from '../lib/i18n'
 import { ROLE_SUGGESTIONS, RUNTIME_ROLES, type RuntimeRole, cleanSettings, firstRangeError, sameSettings } from '../lib/runtimePolicy'
 import { useStore } from '../store/store'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
+import { useSavePart } from './projectSaveGroup'
 
 /** 專案內每個角色的 Bot 的 `run.prompt_cache.hit_ratio`（0–1）平均；沒有任何讀數＝null（畫「—」）。 */
 function roleHitRatios(bots: Bot[], runs: Record<string, Run | null | undefined>, projectId: string): Record<RuntimeRole, number | null> {
@@ -46,16 +47,23 @@ export function RolePolicyEditor({ project }: { project: Project }) {
   const dirtyRoles = RUNTIME_ROLES.filter((r) => !sameSettings(draft[r] ?? {}, saved[r] ?? {}))
   const rangeErrors = RUNTIME_ROLES.map((r) => ({ role: r, field: firstRangeError(draft[r] ?? {}) })).filter((x) => x.field)
   const canSave = dirtyRoles.length > 0 && rangeErrors.length === 0 && !saving
+  const body = () => {
+    const out: Record<string, RuntimeSettings> = {}
+    for (const r of RUNTIME_ROLES) {
+      const c = cleanSettings(draft[r] ?? {})
+      if (Object.keys(c).length > 0) out[r] = c
+    }
+    return out
+  }
+  const group = useSavePart('roles', { label: t('角色設定'), dirty: dirtyRoles.length > 0, valid: rangeErrors.length === 0 }, {
+    patch: () => ({ role_policy: body() }),
+    reset: () => setDraft(saved),
+  })
 
   const save = () => {
     if (!canSave) return
-    const body: Record<string, RuntimeSettings> = {}
-    for (const r of RUNTIME_ROLES) {
-      const c = cleanSettings(draft[r] ?? {})
-      if (Object.keys(c).length > 0) body[r] = c
-    }
     setSaving(true)
-    void patchProject(project.id, { role_policy: body }).finally(() => setSaving(false))
+    void patchProject(project.id, { role_policy: body() }).finally(() => setSaving(false))
   }
 
   return (
@@ -97,7 +105,7 @@ export function RolePolicyEditor({ project }: { project: Project }) {
           )
         })}
       </div>
-      <div className="rp-savebar">
+      {group.grouped ? null : <div className="rp-savebar">
         <span className="hint">{dirtyRoles.length > 0 ? t('已變更：{roles}', { roles: dirtyRoles.map((r) => roleLabel[r]).join('、') }) : t('沒有變更')}</span>
         <button type="button" className="btn" disabled={dirtyRoles.length === 0 || saving} onClick={() => setDraft(saved)}>
           {t('還原')}
@@ -105,7 +113,7 @@ export function RolePolicyEditor({ project }: { project: Project }) {
         <button type="button" className="btn primary" disabled={!canSave} onClick={save}>
           {t('儲存角色設定')}
         </button>
-      </div>
+      </div>}
     </div>
   )
 }

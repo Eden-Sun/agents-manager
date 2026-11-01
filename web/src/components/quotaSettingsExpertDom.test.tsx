@@ -332,7 +332,7 @@ test('專案設定 ProjectExpertSettings：條目改上限後儲存，送出整�
   await settle()
 
   const saveBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
-    (b) => b.textContent?.includes('儲存執行者池'),
+    (b) => b.closest('.project-savebar') !== null && b.textContent?.trim() === '儲存',
   )!
   assert.equal(saveBtn.disabled, false)
   await click(saveBtn)
