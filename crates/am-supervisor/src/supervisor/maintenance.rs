@@ -1309,6 +1309,28 @@ mod tests {
         assert_eq!(s["held_leases"][0]["owner"], "someone-else");
     }
 
+    /// #1944：claude-api 的 in_flight 回合只有在 run 真的 running、且回合在 15 分鐘內才擋窗口；
+    /// 卡在 stopping run 裡的舊回合（2026-11-01 擋了換版兩小時多）不擋。
+    #[tokio::test]
+    async fn a_stuck_claude_api_turn_does_not_block_the_window_forever() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('ab',?,'ab','claude-api','tok-ab',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ca','ab',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('ra','ab','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('ta','ca','ra','web','in_flight','pending',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert!(store::delivery_critical_anywhere(&app.db).await.unwrap(), "running 的 run、剛送出的回合：擋");
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id='ra'").execute(&app.db).await.unwrap();
+        assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap(), "run 卡在 stopping：不擋");
+        sqlx::query("UPDATE runs SET state='running' WHERE id='ra'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET created_at=? WHERE id='ta'").bind(crate::db::iso_in(-3600)).execute(&app.db).await.unwrap();
+        assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap(), "回合掛超過 15 分：不擋");
+    }
+
     /// issue #86 的 TOCTOU：safety 是在拿租約**之前**讀的，中間還是可能有一則 prompt 把 turn
     /// commit 進來。`acquire_lease` 那一句 UPDATE 自己帶了同一份送達臨界區條件，所以寫下去的那一刻
     /// 有人在打字就拿不到——跟 `lifecycle::prompt` 那邊的
