@@ -283,6 +283,7 @@ interface MockProject {
   /** #708 */
   handed_off_to?: string | null
   executor_pool?: ExecutorPoolEntry[]
+  deputy?: { bot_id: string; after_sec: number } | null
   created_at: string
 }
 
@@ -2359,6 +2360,7 @@ export class MockTransport implements Transport {
         github: p.github,
         executor_pool: p.executor_pool ?? [],
         role_policy: p.role_policy ?? {},
+        deputy: p.deputy ?? null,
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2477,6 +2479,20 @@ export class MockTransport implements Transport {
     if (b.role_policy !== undefined) {
       // 整份覆寫；空物件＝全部跟預設。
       p.role_policy = b.role_policy && typeof b.role_policy === 'object' ? (b.role_policy as Record<string, RuntimeSettings>) : {}
+    }
+    if (b.deputy !== undefined) {
+      if (b.deputy === null) {
+        p.deputy = null
+      } else {
+        const d = b.deputy as Rec
+        const botId = String(d.bot_id ?? '')
+        const bot = this.bots.find((x) => x.id === botId && x.project_id === id)
+        if (!bot) throw new ApiError(400, { reason: 'deputy_bot_not_found' }, 'bad_request')
+        if (bot.role !== 'advisor' && bot.role !== 'specialist') throw new ApiError(400, { reason: 'deputy_role_invalid' }, 'bad_request')
+        const after = d.after_sec === undefined || d.after_sec === null ? 180 : Number(d.after_sec)
+        if (!Number.isFinite(after) || after < 60) throw new ApiError(400, { reason: 'deputy_after_sec_too_small', min: 60 }, 'bad_request')
+        p.deputy = { bot_id: botId, after_sec: after }
+      }
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }

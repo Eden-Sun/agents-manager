@@ -32,8 +32,16 @@ export interface Project {
   executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（role -> policy；B 期才用，現在只讀），預設 {} */
   role_policy?: Record<string, RuntimeSettings> | null
+  /** 專家模式副管理者；沒設＝null。管理者回合中太久時，排隊給它的請求改送這位。 */
+  deputy?: ProjectDeputy | null
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
+}
+
+export interface ProjectDeputy {
+  bot_id: string
+  /** 管理者忙（請求排隊）多久才改派，秒；下限 60；送出時不帶＝180。 */
+  after_sec?: number | null
 }
 
 export interface ExecutorPoolEntry {
@@ -763,6 +771,8 @@ export interface PatchProjectInput {
   executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（User 才能改；`null`＝清掉） */
   role_policy?: Record<string, RuntimeSettings> | null
+  /** 副管理者（User 才能改；`null`＝清掉；`after_sec` 下限 60，不帶＝180） */
+  deputy?: ProjectDeputy | null
 }
 
 export interface DirEntry {

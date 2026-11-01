@@ -173,3 +173,19 @@
   font-family: var(--font-mono);
   color: var(--text-faint);
 }
+
+/* 副管理者小標：跟 track 標同高，用管理者的強調色系。 */
+.bot-sub .bot-deputy-tag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+}

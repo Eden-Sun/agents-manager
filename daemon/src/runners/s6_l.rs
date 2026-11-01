@@ -43,6 +43,7 @@ impl s6_ports::StuckTurnServices for App {
     async fn sweep_child_done(&self) {
         let _ = crate::runners::child_done::sweep(&self.shared()).await;
         crate::runners::relay_requests::sweep(&self.shared()).await;
+        crate::runners::relay_deputy::sweep(&self.shared()).await;
     }
 
     async fn local_transcript_allowed(&self, bot: &crate::db::Bot, raw_path: &str) -> bool {

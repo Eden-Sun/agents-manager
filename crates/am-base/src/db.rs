@@ -586,6 +586,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (78, "7191b39c27eab19f"),
     // B 期角色 policy（2026-11）：`runs.policy_rev`（ALTER ADD）。
     (79, "a75a882aefa18996"),
+    // 專家模式副管理者（2026-11）：`projects.deputy_bot_id`／`deputy_after_sec`、`relay_requests.redirected_from`／`redirected_at`／`digest_at`（ALTER ADD）。
+    (80, "f2044f7ae8a9f49a"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -867,6 +869,12 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("bots", "track", "ALTER TABLE bots ADD COLUMN track TEXT"),
         ("bots", "runtime_override_json", "ALTER TABLE bots ADD COLUMN runtime_override_json TEXT"),
         ("projects", "role_policy_json", "ALTER TABLE projects ADD COLUMN role_policy_json TEXT NOT NULL DEFAULT '{}'"),
+        // 專家模式副管理者：專案設定與改派紀錄（不進 CREATE TABLE，指紋欄序不動）。
+        ("projects", "deputy_bot_id", "ALTER TABLE projects ADD COLUMN deputy_bot_id TEXT"),
+        ("projects", "deputy_after_sec", "ALTER TABLE projects ADD COLUMN deputy_after_sec INTEGER"),
+        ("relay_requests", "redirected_from", "ALTER TABLE relay_requests ADD COLUMN redirected_from TEXT"),
+        ("relay_requests", "redirected_at", "ALTER TABLE relay_requests ADD COLUMN redirected_at TEXT"),
+        ("relay_requests", "digest_at", "ALTER TABLE relay_requests ADD COLUMN digest_at TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -1410,6 +1418,11 @@ pub struct Project {
     pub executor_pool_json: String,
     #[serde(default = "default_empty_json_object")]
     pub role_policy_json: String,
+    /// 專家模式副管理者（`ProjectCfg.deputy` 的投影）。
+    #[serde(default)]
+    pub deputy_bot_id: Option<String>,
+    #[serde(default)]
+    pub deputy_after_sec: Option<i64>,
 }
 
 fn default_empty_json_object() -> String {

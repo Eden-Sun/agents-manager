@@ -91,6 +91,15 @@ export function ExpertTrackTag({ track }: { track: string }) {
   return <span className="bot-track-tag" title={t('負責任務：{track}', { track })}>{track}</span>
 }
 
+/** 副管理者：成員列第二行的小標。 */
+export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
+  useT()
+  const title = afterSec
+    ? t('副管理者：管理者回合中超過 {sec} 秒時，代收排隊中的請求', { sec: afterSec })
+    : t('副管理者：管理者回合中太久時，代收排隊中的請求')
+  return <span className="bot-deputy-tag" title={title}>{t('副')}</span>
+}
+
 export function ExpertDisabledMark() {
   useT()
   return (

@@ -363,4 +363,13 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '執行期覆寫': 'Runtime override',
   '只覆寫這顆 Bot；沒設＝跟角色（角色設定在專案設定）。改動後需重啟 Bot 才生效。': 'Overrides this bot only; unset means use the role (role settings live in project settings). Restart the bot after changes.',
   '數值超出範圍，請修正後再儲存': 'A value is out of range; fix it before saving',
+  '副管理者': 'Deputy manager',
+  '管理者回合中、請求排隊超過門檻時，改送副管理者處理；管理者閒下來後會收到處理摘要。副管理者代班期間可派工與啟動／重啟成員，不能增聘。': 'When requests have waited past the threshold while the manager is mid-turn, they go to the deputy manager instead; the manager gets a digest once idle. While covering, the deputy can dispatch work and start/restart members but cannot hire.',
+  '不設': 'None',
+  '門檻（秒）': 'Threshold (sec)',
+  '門檻最小 {min} 秒': 'The minimum threshold is {min} seconds',
+  '沒有可選的成員：先把一位成員設為顧問或專家。': 'No eligible member: make a member an advisor or specialist first.',
+  '副管理者：管理者回合中超過 {sec} 秒時，代收排隊中的請求': 'Deputy manager: takes over queued requests when the manager has been mid-turn for over {sec} s',
+  '副管理者：管理者回合中太久時，代收排隊中的請求': 'Deputy manager: takes over queued requests when the manager has been mid-turn too long',
+  '副': 'Dep',
 } satisfies Dict

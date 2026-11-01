@@ -325,6 +325,17 @@ pub struct HostCfg {
 
 fn default_project_mode() -> String { "parent_child".into() }
 
+/// 副管理者設定：`bot_id` 是同專案的成員；`after_sec` 是管理者忙多久（也是請求排隊多久）才改派，下限 `DEPUTY_MIN_AFTER_SEC`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeputyCfg {
+    pub bot_id: String,
+    #[serde(default = "default_deputy_after_sec")]
+    pub after_sec: u32,
+}
+pub const DEPUTY_MIN_AFTER_SEC: u32 = 60;
+pub const DEPUTY_DEFAULT_AFTER_SEC: u32 = 180;
+fn default_deputy_after_sec() -> u32 { DEPUTY_DEFAULT_AFTER_SEC }
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
     /// Missing on hand-written files; filled in (ULID) and written back on first load.
@@ -340,6 +351,9 @@ pub struct ProjectCfg {
     /// 專家模式角色政策（role -> policy，Phase B 用）
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub role_policy: std::collections::BTreeMap<String, serde_json::Value>,
+    /// 專家模式副管理者（管理者忙太久時代收排隊中的請求，見 `daemon/src/runners/relay_deputy.rs`）；沒設＝不啟用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deputy: Option<DeputyCfg>,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -348,6 +362,17 @@ pub struct ProjectCfg {
     /// bot／pane 一律不動（SPEC §6.5h）；清掉＝收回，下一輪對帳照常接手。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handed_off_to: Option<String>,
+}
+
+impl ProjectCfg {
+    /// 副管理者不再合格（bot 被刪、換成別專案、角色變成管理者／執行者或沒角色）就清掉設定；回傳有沒有清。
+    /// 所有 config 變更都經 `update_and_project`，它在每次變更後呼叫這支，所以刪除或換角色不會留下失效的 `deputy`。
+    pub fn clear_invalid_deputy(&mut self) -> bool {
+        let Some(d) = &self.deputy else { return false };
+        let ok = self.mode == "expert" && self.bots.iter().any(|b| b.id.as_deref() == Some(d.bot_id.as_str()) && matches!(b.role.as_deref(), Some("advisor" | "specialist")));
+        if !ok { self.deputy = None; }
+        !ok
+    }
 }
 
 impl Default for ProjectCfg {
@@ -359,6 +384,7 @@ impl Default for ProjectCfg {
             mode: default_project_mode(),
             executor_pool: Vec::new(),
             role_policy: std::collections::BTreeMap::new(),
+            deputy: None,
             host: default_host(),
             bots: Vec::new(),
             handed_off_to: None,
@@ -2997,7 +3023,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

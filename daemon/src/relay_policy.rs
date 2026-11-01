@@ -18,6 +18,8 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE id=? AND deleted_at IS NULL) AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL)")
         .bind(from_bot_id).bind(to_bot_id).fetch_one(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
     if !live { return Err(RelayDenied::Denied("relay participant or project unavailable".into())); }
+    // 改派給副管理者的請求：原本送管理者時已通過 NewRequest，送達時不重驗副管理者（跨專案送件者本來進不了它）。
+    if kind == Admission::Deliver && crate::runners::relay_deputy::redirected_open(app, from_bot_id, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Ok(()); }
     let from = crate::db::bot(&app.db, from_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("source_missing".into()))?;
     let to = crate::db::bot(&app.db, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("target_missing".into()))?;
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
@@ -39,7 +41,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
             let expected = format!("{}:{}:{}:{}", project.id, project.host, project.mode, from.role.as_deref().unwrap_or(""));
             if run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(expected.as_str()) { return Err(RelayDenied::Denied("role_not_applied".into())); }
         }
-        if !direct_family && !matches!(to.role.as_deref(), Some("manager" | "advisor")) && from.role.as_deref() != Some("manager") {
+        if !direct_family && !matches!(to.role.as_deref(), Some("manager" | "advisor")) && from.role.as_deref() != Some("manager") && !crate::runners::relay_deputy::acting(app, &from.id).await {
             let manager: Option<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
             return Err(RelayDenied::Denied(format!("executor 只接受 manager 派工，請改送給管理者 {}", manager.as_deref().unwrap_or("（未指定）"))));
         }

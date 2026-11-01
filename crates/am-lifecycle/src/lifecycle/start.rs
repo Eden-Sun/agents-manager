@@ -133,6 +133,18 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。".to_string())
 }
 
+/// 副管理者設定後的專屬段（只給管理者與副管理者本人，其他 bot 不變）：管理者知道摘要會回來，副管理者知道自己的邊界。
+pub(crate) fn deputy_role_section(bot_id: &str, role: Option<&str>, deputy_bot_id: Option<&str>) -> Option<String> {
+    let deputy = deputy_bot_id?;
+    if role == Some("manager") {
+        Some("\n\n## 副管理者\n你設有副管理者：你在回合中太久時，排隊給你的請求會改送他處理；你閒下來後會收到他處理過哪些的摘要，需要你決策的自行接手。".to_string())
+    } else if bot_id == deputy {
+        Some("\n\n## 副管理者\n你是本專案的副管理者：只處理管理者忙不過來、改派給你的請求（訊息開頭會註明）。能回就直接回；需要管理者決策的明說「留給管理者」，不要自己拍板。代班期間可對成員派工與啟動／重啟，不能增聘；處理過的事會以摘要回報給管理者。".to_string())
+    } else {
+        None
+    }
+}
+
 fn not_idle(bot_id: &str, why: &str) -> LcError {
     LcError::conflict("not_idle", json!({"bot_id": bot_id, "busy": why}))
 }
@@ -1393,6 +1405,9 @@ async fn start_inner_body(
         let role = bot.role.as_deref().unwrap_or("未分配");
         agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
         if let Some(extra) = manager_role_section(bot.role.as_deref()) {
+            agent_md.text.push_str(&extra);
+        }
+        if let Some(extra) = deputy_role_section(&bot.id, bot.role.as_deref(), project.deputy_bot_id.as_deref()) {
             agent_md.text.push_str(&extra);
         }
     }
@@ -6326,6 +6341,18 @@ mod specialist_section_tests {
         assert!(specialist_role_section(Some("executor"), Some("infra")).is_none());
         assert!(specialist_role_section(None, Some("infra")).is_none());
         assert!(specialist_role_section(Some("specialist"), Some("  ")).is_none());
+    }
+
+    #[test]
+    fn deputy_section_only_for_manager_and_the_deputy_when_one_is_set() {
+        use super::deputy_role_section;
+        assert!(deputy_role_section("m", Some("manager"), None).is_none(), "沒設副管理者就不加");
+        assert!(deputy_role_section("d", Some("advisor"), None).is_none());
+        let m = deputy_role_section("m", Some("manager"), Some("d")).expect("管理者知道有副管理者");
+        assert!(m.contains("收到他處理過哪些的摘要"), "{m}");
+        let d = deputy_role_section("d", Some("advisor"), Some("d")).expect("副管理者本人");
+        assert!(d.contains("不能增聘") && d.contains("留給管理者"), "{d}");
+        assert!(deputy_role_section("x", Some("executor"), Some("d")).is_none(), "其他成員不變");
     }
 
     #[test]

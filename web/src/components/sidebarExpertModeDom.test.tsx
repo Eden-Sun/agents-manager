@@ -118,3 +118,39 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   assert.ok(childRow, 'child 列存在')
   assert.ok(childRow.closest('.bot-kids'), 'child 列應掛在父列底下')
 })
+
+test('副管理者：只有專案設定的那位成員多一顆「副」小標；沒設副管理者的專案沒有', async () => {
+  useStore.setState({
+    projects: [
+      { ...project('p-dep', 'expert'), deputy: { bot_id: 'dep-adv', after_sec: 120 } } as Project,
+      project('p-nodep', 'expert'),
+    ],
+    bots: [
+      bot('dep-mgr', 'p-dep', 'manager'),
+      bot('dep-adv', 'p-dep', 'advisor'),
+      bot('dep-spc', 'p-dep', 'advisor'),
+      bot('nodep-mgr', 'p-nodep', 'manager'),
+      bot('nodep-adv', 'p-nodep', 'advisor'),
+    ],
+    runs: {},
+    botOrder: {},
+    projectOrder: [],
+    botUnread: {},
+    connected: true,
+    defaultConnected: true,
+    socket: 'open',
+    selectedBotId: 'dep-mgr',
+    selectedProjectId: null,
+    sidePanes: {},
+    unownedPanes: [],
+  } as never)
+
+  await mount(<Sidebar />)
+  await settle()
+
+  const tag = document.querySelector<HTMLElement>('[data-bot-id="dep-adv"] .bot-deputy-tag')
+  assert.ok(tag, '副管理者有小標')
+  assert.equal(tag?.textContent?.trim(), '副')
+  assert.match(tag?.getAttribute('title') ?? '', /120 秒/, 'tooltip 寫明門檻')
+  assert.equal(document.querySelectorAll('.bot-deputy-tag').length, 1, '其他成員、其他專案都沒有')
+})
