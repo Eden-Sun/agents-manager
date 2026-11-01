@@ -125,6 +125,14 @@ pub(crate) fn specialist_role_section(role: Option<&str>, track: Option<&str>) -
     Some(format!("\n\n## 專家範圍\n你是本專案 {track} 的專家，範圍限於 {track}；超出範圍的工作回報管理者，不要自己做。"))
 }
 
+/// 管理者（manager）的短回合／派工段：bot 專屬，接在「## 專家模式角色」後面；不改共用的 `child_agent_rules`。
+pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
+    if role != Some("manager") {
+        return None;
+    }
+    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。".to_string())
+}
+
 fn not_idle(bot_id: &str, why: &str) -> LcError {
     LcError::conflict("not_idle", json!({"bot_id": bot_id, "busy": why}))
 }
@@ -1384,6 +1392,9 @@ async fn start_inner_body(
     if restricted.is_none() && project.mode == "expert" {
         let role = bot.role.as_deref().unwrap_or("未分配");
         agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
+        if let Some(extra) = manager_role_section(bot.role.as_deref()) {
+            agent_md.text.push_str(&extra);
+        }
     }
     if restricted.is_none() {
         if let Some(section) = specialist_role_section(bot.role.as_deref(), bot.track.as_deref()) {
@@ -6306,7 +6317,7 @@ mod account_file_tests {
 /// 專家（specialist）的範圍段只給 specialist、且一定帶 track（bot 專屬段，不進共用的 child_agent_rules）。
 #[cfg(test)]
 mod specialist_section_tests {
-    use super::specialist_role_section;
+    use super::{manager_role_section, specialist_role_section};
 
     #[test]
     fn only_a_specialist_with_a_track_gets_the_scope_section() {
@@ -6315,6 +6326,18 @@ mod specialist_section_tests {
         assert!(specialist_role_section(Some("executor"), Some("infra")).is_none());
         assert!(specialist_role_section(None, Some("infra")).is_none());
         assert!(specialist_role_section(Some("specialist"), Some("  ")).is_none());
+    }
+
+    #[test]
+    fn manager_role_section_only_present_for_manager() {
+        let manager_sec = manager_role_section(Some("manager")).expect("manager 有專屬段");
+        assert!(manager_sec.contains("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。"), "{manager_sec}");
+
+        assert!(manager_role_section(Some("executor")).is_none());
+        assert!(manager_role_section(Some("advisor")).is_none());
+        assert!(manager_role_section(Some("specialist")).is_none());
+        assert!(manager_role_section(None).is_none());
+        assert!(manager_role_section(Some("other")).is_none());
     }
 }
 
