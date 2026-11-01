@@ -87,17 +87,18 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             {t('升級成頂層…')}
           </button>
         ) : null}
-        {/* 專家專案中 executor / advisor 角色可切換是否允許管理者使用 */}
-        {project?.mode === 'expert' && (bot.role === 'executor' || bot.role === 'advisor') ? (
+        {/* 專家專案中 executor / advisor / specialist 角色可切換是否允許管理者使用 */}
+        {project?.mode === 'expert' && (bot.role === 'executor' || bot.role === 'advisor' || bot.role === 'specialist') ? (
           <button
             type="button"
             className="head-menu-item"
-            role="menuitem"
+            role="menuitemcheckbox"
+            aria-checked={bot.manager_use !== false}
             disabled={busyPatch}
             title={bot.manager_use === false ? t('開啟後管理者可派工、啟動或重啟此成員') : t('關閉後管理者不能派工給它、不能啟動或重啟它')}
             onClick={() => void patchBot(botId, { manager_use: bot.manager_use === false })}
           >
-            {bot.manager_use === false ? t('允許管理者使用') : t('禁止管理者使用')}
+            {bot.manager_use === false ? `☐ ${t('管理者可用')}` : `☑ ${t('管理者可用')}`}
           </button>
         ) : null}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>

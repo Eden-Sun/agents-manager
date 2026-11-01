@@ -48,6 +48,36 @@
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
+/* 側欄管理者可用勾選框容器與控制項（手機寬度觸控區至少 32px） */
+.bot-manager-use-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 2px;
+}
+
+.bot-manager-use-checkbox {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.bot-manager-use-checkbox:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 停用成員名稱淡化 */
+.bot-row.manager-disabled .bot-name {
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
 /* 柔和色票（亮暗主題透過 CSS 變數或 color-mix 自然適應） */
 .bot-role-tag.role-manager {
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
