@@ -914,10 +914,10 @@ pub(crate) async fn pending_fork(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow
     else {
         return Ok(None);
     };
-    if db::last_native_session_id(app.db(), &bot.id).await?.is_some() {
+    if db::latest_native_session_id(app.db(), &bot.id).await?.is_some() {
         return Ok(None);
     }
-    match db::last_native_session_id(app.db(), &source).await? {
+    match db::latest_native_session_id(app.db(), &source).await? {
         Some(sid) => Ok(Some((sid, source))),
         None => {
             tracing::warn!(bot = %bot.name, source = %source, "fork source has no session; starting without a fork");

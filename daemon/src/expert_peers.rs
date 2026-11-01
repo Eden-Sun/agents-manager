@@ -251,7 +251,7 @@ pub(crate) async fn list(
     // 只是提示：同 track 有 codex 執行者在忙、而且它有 session，就指給 manager 看（不自動 fork）。
     let mut fork_suggestion = Value::Null;
     for c in candidates.iter().filter(|c| c.fork_hint) {
-        if crate::db::last_native_session_id(&app.db, &c.bot_id).await.ok().flatten().is_some() {
+        if crate::db::latest_native_session_id(&app.db, &c.bot_id).await.ok().flatten().is_some() {
             fork_suggestion = json!({"source_bot_id": c.bot_id, "name": c.name, "kind": c.kind});
             break;
         }

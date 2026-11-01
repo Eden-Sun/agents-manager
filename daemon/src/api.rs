@@ -3225,7 +3225,7 @@ async fn validate_fork_source(app: &Arc<App>, project: &db::Project, source_id: 
     if source.kind != "codex" {
         return Err(bad("fork_source_not_codex"));
     }
-    if db::last_native_session_id(&app.db, &source.id).await.map_err(any_err)?.is_none() {
+    if db::latest_native_session_id(&app.db, &source.id).await.map_err(any_err)?.is_none() {
         return Err(LcError::conflict("fork_source_no_session", json!({"reason": "fork_source_no_session", "fork_from": source_id})));
     }
     Ok(())
