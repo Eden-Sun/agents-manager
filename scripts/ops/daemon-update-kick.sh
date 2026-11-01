@@ -15,9 +15,8 @@
 #      那顆 sha，不等 ubuntu-ci（使用者按下就是裁示）；做完（或那顆 sha 不能部署）才刪檔，
 #      等不到安全窗口就留著，下一輪再來。
 #   6. 任何失敗照舊推 ops_alert（同 source+reason 由 daemon 節流），並寫 `daemon-update.log`。
-#   6b. 換版成功後同步主樹（`sync_main_tree`）：快轉，或本地 commit 已全在上游時對齊 origin/main；其餘不動、推 ops_alert。
+#   6b. 換版成功後，以及「沒有會進 binary 的差異」那一輪，同步主樹（`sync_main_tree`）：快轉，或本地 commit 已全在上游時對齊 origin/main；其餘不動、推 ops_alert。
 #
-
 #   7. （旗標，**預設關**）已安裝的 ops 腳本自動換新：旗標＝環境變數 `AGM_OPS_AUTO_INSTALL=1` 或檔案 `<AGM>/ops-auto-install.enabled`。
 #      開著時，換版成功之後、以及「沒有會進 binary 的差異」那一輪（ops 腳本改了不會產生新 binary，只靠換版後那一步會永遠漏掉），
 #      用該 sha 的 `scripts/ops/ops-install.sh` 把「已經裝了、跟 repo 不同」的 ops 腳本裝進 AGM bin：備份、原子替換、
@@ -348,6 +347,7 @@ else
   # 線上那顆到 origin/main 之間沒有會進 binary 的差異就結束，不去問 GitHub。
   if binary_same "$BUILT_FULL" "$HEAD_SHA"; then
     log "${BUILT_SHA} 之後沒有會進 binary 的差異，跳過（origin/main ${HEAD_SHA}）"
+    sync_main_tree
     ops_install_step "$HEAD_SHA" 1
     exit 0
   fi
