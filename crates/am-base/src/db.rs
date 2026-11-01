@@ -1843,7 +1843,6 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
 }
