@@ -9,10 +9,12 @@ import { langFromStorageEvent, missingKeys, getLang } from './lib/i18n'
 import { applyTheme, loadTheme, themeFromStorageEvent } from './lib/theme'
 import { startRouteSync } from './store/routeSync'
 import { startShelfPersistence } from './store/shelfPersist'
+import { startResetCreditsNotice } from './store/resetCreditsNotice'
 
 startShelfPersistence()
 // 網址 ↔ store 的雙向同步。掛在 render 之前，開頁的路徑才不會被第一次繪製吃掉。
 startRouteSync()
+startResetCreditsNotice()
 
 applyTheme(loadTheme())
 window.addEventListener('storage', (e) => {

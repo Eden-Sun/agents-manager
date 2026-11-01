@@ -516,4 +516,5 @@ export default {
   '（預設帳號）': '(default account)',
   '登入狀態未知': 'Sign-in status unknown',
   '尚未定義任何身份。': 'No identities defined yet.',
+  '{name} 的重置券：{from} → {to} 張': '{name} reset credits: {from} → {to}',
 } satisfies Dict
