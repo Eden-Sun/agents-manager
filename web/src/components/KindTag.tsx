@@ -16,6 +16,14 @@ export function KindIcon({ kind }: { kind: BotKind }) {
           <path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
         </svg>
       )
+    case 'claude-api':
+      // claude 星芒＋右下角小「API」標，一眼分得出是直打 API 的 bot。
+      return (
+        <svg viewBox="0 0 20 16" width="1.25em" height="1em" aria-hidden="true">
+          <path d="M7 1.5v11M1.5 7h11M3.1 3.1l7.8 7.8M10.9 3.1l-7.8 7.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
+          <text x="19.5" y="15.2" textAnchor="end" fontSize="7" fontWeight="800" fill="currentColor" fontFamily="system-ui, sans-serif">API</text>
+        </svg>
+      )
     case 'codex':
       // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
       return (

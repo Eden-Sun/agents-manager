@@ -58,6 +58,7 @@ import type {
 import {
   UNKNOWN_HERDR,
   BOT_KINDS,
+  CREATABLE_KINDS,
   hostOfQuotaKey,
   TOOL_UNKNOWN,
 } from './types.ts'
@@ -256,6 +257,8 @@ export function toToolMap(raw: unknown): ToolMap {
   }
   const out = {} as ToolMap
   for (const k of BOT_KINDS) out[k] = one(root[k])
+  // claude-api 沒有 CLI 可探測：永遠視為可用（只讓 `tools[bot.kind]` 不炸；建立入口不看這格）。
+  out['claude-api'] = { installed: true, path: null, version: null, logged_in: null }
   return out
 }
 
@@ -348,7 +351,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     role_pending: bool(v.role_pending),
     daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
-    kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
+    kind: oneOf<BotKind>(v.kind, CREATABLE_KINDS, 'claude'),
     model: optStr(pick(v, 'model')),
     effort: optStr(pick(v, 'effort')),
     fast: bool(pick(v, 'fast'), false),

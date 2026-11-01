@@ -80,7 +80,7 @@ const MOCK_TINY_ASK_JEV = {
 const MOCK_TWO_ASK_JEV = { ...MOCK_TINY_ASK_JEV, questions: [{ index: 0, scores: [0.91, 0.08], suggested: 0 }] }
 
 function toKind(v: unknown): BotKind {
-  return BOT_KINDS.includes(v as BotKind) ? (v as BotKind) : 'claude'
+  return BOT_KINDS.includes(v as BotKind) || v === 'claude-api' ? (v as BotKind) : 'claude'
 }
 
 type Rec = Record<string, unknown>
@@ -395,6 +395,7 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   codex: { installed: true, path: '/opt/homebrew/bin/codex', version: '0.68.0', logged_in: true },
   grok: { installed: true, path: '/Users/me/.local/bin/grok', version: '1.0.13', logged_in: null },
   agy: { installed: true, path: '/Users/me/.local/bin/agy', version: '1.2.16', logged_in: null },
+  'claude-api': { installed: true, path: null, version: null, logged_in: null },
 }
 
 /** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
@@ -479,6 +480,9 @@ const models = (): Record<BotKind, Rec[]> => ({
     { id: 'gemini-3.8-flash-medium', display_name: 'gemini-3.8-flash-medium', description: '', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-high', display_name: 'gemini-3.8-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+  ],
+  'claude-api': [
+    { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', description: '', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [{ id: 'fast', name: 'fast', description: L('speed=fast（單價 2 倍）', 'speed=fast (2x price)') }] },
   ],
 })
 
@@ -579,6 +583,7 @@ export class MockTransport implements Transport {
     codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
     grok: { installed: false, path: null, version: null, logged_in: null },
     agy: { ...TOOLS_ALL_OK.agy, logged_in: true },
+    'claude-api': { ...TOOLS_ALL_OK['claude-api'] },
   }
   /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
   /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
@@ -737,6 +742,26 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       is_primary: 1,
+      managed_by: 'user',
+      cwd: null,
+      created_at: now(),
+    })
+    // claude-api bot（#1944）：演 Add Bot／API 用量列／降級掉 pane 與 restart 的對話頁。
+    this.bots.push({
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'am-api',
+      kind: 'claude-api',
+      model: 'claude-opus-5-5',
+      effort: 'high',
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
       managed_by: 'user',
       cwd: null,
       created_at: now(),
@@ -1171,6 +1196,7 @@ export class MockTransport implements Transport {
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
+    { const m = rawPath.match(/^\/bots\/([^/]+)\/api-usage$/); if (method === 'GET' && m) return this.apiUsage(decodeURIComponent(m[1])) }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
@@ -1357,7 +1383,7 @@ export class MockTransport implements Transport {
 
   /** Unknown kind → 400; down host → 502. */
   private models(kind: string, host: string, identity: string) {
-    if (!BOT_KINDS.includes(kind as BotKind)) {
+    if (!BOT_KINDS.includes(kind as BotKind) && kind !== 'claude-api') {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
     }
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -2083,7 +2109,7 @@ export class MockTransport implements Transport {
       error: null,
       disconnected_since: now(),
       // grok missing (exercises the tools hint).
-      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null } },
+      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null }, 'claude-api': { ...TOOLS_ALL_OK['claude-api'] } },
       identities: {
         ...Object.fromEntries(
           this.identities.map((i) => [
@@ -2498,6 +2524,26 @@ export class MockTransport implements Transport {
     return { project_id: id, needs_restart: false }
   }
 
+  /** `GET /bots/{id}/api-usage`：演示用數字，每次有 assistant 回覆就多一筆（見 `apiUsageTurns`）。 */
+  private apiUsageTurns = new Map<string, number>()
+  private apiUsage(botId: string) {
+    const bot = this.bot(botId)
+    if (bot.kind !== 'claude-api') throw new ApiError(400, { error: 'bad_request', reason: 'not_api_bot' }, 'bad request')
+    const n = this.apiUsageTurns.get(botId) ?? 3
+    const input = 1200 * n
+    const cacheRead = 9000 * n
+    const cacheCreation = 2500
+    const fast = bot.fast === 1
+    return {
+      bot_id: botId,
+      attempts: { total: n + 1, recorded: n, reserved: 1, unknown: 0, failed: 0 },
+      cost_microusd: { recorded: 21_400 * n, reserved: 4_163_840, unknown: 0 },
+      tokens: { input, output: 480 * n, cache_read: cacheRead, cache_creation: cacheCreation },
+      cache_hit_rate: cacheRead / (input + cacheRead + cacheCreation),
+      last: { speed: fast ? 'fast' : 'standard', at: now(), input_tokens: 1200, output_tokens: 480, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 },
+    }
+  }
+
   private deleteProject(id: string) {
     const bots = this.bots.filter((x) => x.project_id === id)
     if (bots.some((x) => this.activeRun(x.id))) {
@@ -2520,13 +2566,21 @@ export class MockTransport implements Transport {
     if (!this.projects.some((p) => p.id === projectId)) {
       throw new ApiError(404, { reason: 'project not found' }, 'not found')
     }
+    if (b.kind === 'claude-api') {
+      // 照 daemon：CLI 欄位與遠端專案一律 400。
+      const proj = this.projects.find((p) => p.id === projectId)
+      if (proj && proj.host !== 'local') throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_local_project_only' }, 'bad request')
+      if (b.identity || b.autostart || b.share_profile || (Array.isArray(b.args) && b.args.length) || (b.env && Object.keys(b.env as Rec).length)) {
+        throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_cli_fields_unsupported' }, 'bad request')
+      }
+    }
     const bot: MockBot = {
       id: ulid('bot'),
       project_id: projectId,
       name,
       kind: toKind(b.kind),
-      model: typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
-      effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null,
+      model: b.kind === 'claude-api' ? 'claude-opus-5-5' : typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
+      effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : b.kind === 'claude-api' ? 'high' : null,
       fast: b.fast === true ? 1 : 0,
       persona: typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),

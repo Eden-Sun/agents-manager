@@ -17,6 +17,7 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'components/BlockedDraft.tsx',
     'components/BlockedModal.tsx',
     'components/BlockedPanel.tsx',
+    'components/ApiBotUsageBar.tsx',
     'components/ChatPanel.tsx',
     'components/CodexAsyncQuestion.tsx',
     'components/CodexResetHint.tsx',

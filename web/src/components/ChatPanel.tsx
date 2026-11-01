@@ -87,6 +87,7 @@ import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/d
 import { JevNoticeText } from './JevNoticeText'
 import { SafeMarkdown } from './SafeMarkdown'
 import { TerminalTab } from './TerminalTab'
+import { ApiBotUsageBar } from './ApiBotUsageBar'
 import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
@@ -1279,7 +1280,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     const name = projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
     return name === 'local' || (s.hosts.find((h) => h.name === name)?.connected ?? false)
   })
-  const rawTab = useStore((s) => s.rightTab)
+  const rawTab0 = useStore((s) => s.rightTab)
+  // claude-api bot 沒有 pane／終端：終端分頁一律退回對話（舊網址、切 bot 時殘留的 terminal 分頁）。
+  const apiBot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId)?.kind === 'claude-api')
+  const rawTab = apiBot && rawTab0 === 'terminal' ? 'chat' : rawTab0
   // 預覽只給頂層 bot；切到子 agent 時 store 會回 chat，這裡再擋一次（例如舊網址）。
   // 桌機預覽在 `.app` 最右欄（PreviewColumn）；只有抽屜版面（≤1024px，含手機）沒有那一欄，才留分頁。
   const drawerLayout = useMediaQuery(DRAWER_QUERY)
@@ -1467,7 +1471,12 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             {/* 同理：名字列會整顆剪掉，使用者「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
             <TurnErrorBadge botId={botId} />
             <KindTag kind={bot.kind} fast={codexFast} />
-            {bot.model || statusInfo?.model_name ? (
+            {apiBot ? (
+              <span className={`model-tag${bot.fast ? ' fast' : ''}`} title={t('claude-api 固定用 {model}', { model: bot.model ?? '' })}>
+                {shortModel(bot.kind, bot.model)}
+                {bot.effort ? <span className="model-tag-extra">{` · ${headerEffortLabel(bot.effort)}${bot.fast ? ' · fast' : ''}`}</span> : null}
+              </span>
+            ) : bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
                 botId={botId}
                 kind={bot.kind}
@@ -1484,7 +1493,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </ModelQuickPicker>
             ) : null}
             {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
-            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={t('{pane}（{status}）', { pane: herdrId?.title ?? `pane ${run.pane_id}`, status: stateLabel })} /> : null}
+            {run?.pane_id && !apiBot ? <PaneCopy paneId={run.pane_id} detail={t('{pane}（{status}）', { pane: herdrId?.title ?? `pane ${run.pane_id}`, status: stateLabel })} /> : null}
           </div>}
         </div>
         {phone ? (
@@ -1526,7 +1535,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           >
             {t('對話')}
           </button>
-          <button
+          {apiBot ? null : <button
             type="button"
             className="tab"
             role="tab"
@@ -1539,7 +1548,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             }}
           >
             {t('終端')}
-          </button>
+          </button>}
           {canPreview ? (
             <button
               type="button"
@@ -1591,8 +1600,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </>
           ) : null
         }
-        status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
-        hasStatus={bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
+        status={apiBot ? <ApiBotUsageBar botId={botId} /> : <StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
+        hasStatus={apiBot || bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
         phoneFiles={<OutboxFiles />}
       />
 

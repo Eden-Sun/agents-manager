@@ -5,7 +5,7 @@ import { onboardingModel } from './onboarding'
 
 const missing: ToolStatus = { installed: false, path: null, version: null, logged_in: null }
 const tool = (logged_in: boolean | null): ToolStatus => ({ installed: true, path: '/bin/x', version: '1.0.0', logged_in })
-const tools = (o: Partial<ToolMap> = {}): ToolMap => ({ claude: missing, codex: missing, grok: missing, agy: missing, ...o })
+const tools = (o: Partial<ToolMap> = {}): ToolMap => ({ claude: missing, codex: missing, grok: missing, agy: missing, 'claude-api': missing, ...o })
 const base = { identities: {} as IdentityStatusMap, herdrConnected: true, projectCount: 1 }
 
 test('一個 CLI 都沒裝：要顯示，下一步是裝 CLI，沒有任何一種就緒', () => {

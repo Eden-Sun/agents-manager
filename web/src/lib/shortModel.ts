@@ -12,7 +12,7 @@ export function shortModel(kind: string, model: string | null): string | null {
   // agy 只跑 Gemini，slug 尾巴的 high／medium／low 其實是強度（2026-10-17 使用者：「只要 3.8-flash 就好而 high 是 effort」），
   // 強度由 [`agyEffort`] 拆出來放在強度那格。
   if (kind === 'agy') return model.replace(/^gemini-/, '').replace(AGY_EFFORT_SUFFIX, '')
-  if (kind !== 'claude') return model
+  if (kind !== 'claude' && kind !== 'claude-api') return model
   const m = /^claude-(fable|opus|sonnet|haiku)(?:-\d.*)?$/.exec(model)
   return m ? m[1] : model
 }

@@ -1390,3 +1390,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **「可被管理者使用」（manager_use）**：預設勾選（管理者角色隱藏此項）。
 - **用途（分享）區塊隱藏**：專家模式專案之團隊成員不做分享 bot，隱藏分享路徑與設定區塊；人設（persona）欄位保留。
 - **送出與錯誤處理**：建立 Bot 時透過 `POST /api/projects/{id}/bots` 建立，若有角色、track、manager_use 或 runtime_override，立即接續呼叫 `PATCH /api/bots/{id}`。若 PATCH 失敗，在對話框內顯示錯誤提示並保留 bot，供使用者在選單中補設，不自動刪除。
+
+## claude-api bot 的前端（2026-11-01，使用者核准開放，#1944）
+
+- **kind 另分兩份**：`BOT_KINDS`（有 CLI：工具偵測、額度、模型清單、身份逐一迴圈）不動；`CREATABLE_KINDS`＝`BOT_KINDS`＋`claude-api`，只給「新增 Bot」用。`BotKind` 含 `claude-api`；`ToolMap`／`MODEL_OPTIONS` 等以 `BotKind` 為鍵的表為 `claude-api` 補一格（工具永遠視為可用）。
+- **新增 Bot**：選 `claude-api` 只剩名稱、強度（5 級，預設 high）、Fast（標「speed=fast（單價 2 倍）」）；身份、人設、分享設定隱藏，送出不帶 `identity`／`model`／`persona`（模型由 daemon 固定 `claude-opus-5-5`）。遠端專案的那顆 kind 按鈕停用並標「僅限本機」（daemon 也 400）。
+- **對話頁降級**：沒有終端分頁（舊的 terminal 分頁退回對話）、沒有 pane id、沒有 CLI statusLine／context、沒有重啟（設定面板的「立即重啟」隱藏，daemon 回 `api_bot_restart_unsupported`；停止後再啟動）；模型 chip 是純文字（固定一個模型，不開選單）。狀態列換成 `ApiBotUsageBar`：累計花費＝(recorded＋reserved＋unknown)÷1e6 美元（預留與結果不明先當花掉算，與真 API 驗收停線同口徑，有預留時標「含預留」）、快取命中率、最近一次 `usage.speed`（fast 時加粗）、請求數；回合結束後立刻重抓，其餘每 10 秒輪詢（沒有 WS 事件），讀不到顯示「讀不到 API 用量」。
+- **側欄辨識**：kind 圖示是 claude 星芒加右下「API」小標，文字模式的標籤用虛線邊框的 claude 配色。

@@ -6,7 +6,7 @@ import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
 import { useStore } from '../store/store'
-import { BOT_KINDS } from '../api/types'
+import { BOT_KINDS, CREATABLE_KINDS } from '../api/types'
 import { Sidebar } from './Sidebar'
 
 afterEach(unmountAll)
@@ -97,7 +97,7 @@ test('kind 選項是 radio，選中的那顆 aria-checked=true', async () => {
   await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)
   await settle()
   const radios = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="kind"] [role="radio"]')]
-  assert.equal(radios().length, BOT_KINDS.length)
+  assert.equal(radios().length, CREATABLE_KINDS.length)
   const checked = () => radios().filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent?.trim())
   assert.deepEqual(checked(), ['claude'])
   await click(radios().find((b) => b.textContent?.trim() === 'codex')!)
@@ -114,7 +114,7 @@ async function openNewBotWithKind(kind: string) {
   await settle()
   await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)
   await settle()
-  await click([...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.trim() === kind)!)
+  await click([...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.querySelector('.opt-label')?.textContent?.trim() === kind)!)
   await settle()
 }
 const hasHint = () => (document.body.textContent ?? '').includes(LOGGED_OUT_HINT)
@@ -142,4 +142,33 @@ test('預設帳號的登入狀態是 null（問不到）或 true：不顯示', a
     await openNewBotWithKind('codex')
     assert.equal(hasHint(), false, `logged_in=${String(state)} 不下結論`)
   }
+})
+
+test('claude-api：只剩名稱／強度／fast，送出的 body 不帶身份與模型，預設強度 high 由 daemon 補', async () => {
+  useStore.setState({ localTools: toolsWithCodex(true) } as never)
+  await openNewBotWithKind('claude-api')
+  const text = document.querySelector('form.form')?.textContent ?? ''
+  assert.ok(text.length > 0)
+  assert.ok(!text.includes('身份'), 'claude-api 沒有帳號身份欄位')
+  assert.ok(!document.querySelector('.share-profile-field'), '沒有分享設定')
+  assert.ok(text.includes('Fast') && text.includes('單價 2 倍'), '有 fast 開關並標明單價 2 倍')
+  await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!)
+  await settle(50)
+  const post = requests.find((r) => r.method === 'POST' && /\/projects\/p1\/bots$/.test(r.path))
+  const body = post?.body as Record<string, unknown>
+  assert.equal(body.kind, 'claude-api')
+  assert.equal(body.identity, null)
+  assert.equal(body.model, null)
+  assert.equal(body.persona, null)
+  assert.equal(body.fast, false)
+})
+
+test('claude-api 只能建在本機專案：遠端專案那顆 kind 按鈕停用', async () => {
+  useStore.setState({ projects: [{ ...project('p1'), host: 'm4p' }], hosts: [{ name: 'm4p', connected: true }], localTools: toolsWithCodex(true) } as never)
+  await mount(<Sidebar />)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)
+  await settle()
+  const btn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.querySelector('.opt-label')?.textContent?.trim() === 'claude-api')!
+  assert.equal(btn.disabled, true)
 })

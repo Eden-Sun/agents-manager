@@ -34,7 +34,7 @@ const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_0
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.includes(text))
 const row = (kind: string) => document.querySelector(`.onb-row[data-kind="${kind}"]`)!
 const none = { installed: false, path: null, version: null, logged_in: null }
-const fresh = (over: Partial<ToolMap> = {}): ToolMap => ({ claude: none, codex: none, grok: none, agy: none, ...over })
+const fresh = (over: Partial<ToolMap> = {}): ToolMap => ({ claude: none, codex: none, grok: none, agy: none, 'claude-api': none, ...over })
 
 /** 共用的 mock 是行程單例：這支把它的本機 tools 也換成同一份，之後 `refreshTools` 讀回來才對得上。 */
 type MockInternals = { localTools: ToolMap; localIdentityStatus: Record<string, unknown> }

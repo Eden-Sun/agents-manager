@@ -8,7 +8,7 @@ import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { MOCK_MODE } from '../api'
 import type { Bot, BotKind, Lamp, MessageHit, ShareProfile } from '../api/types'
-import { BOT_KINDS, LOCAL_HOST } from '../api/types'
+import { BOT_KINDS, CREATABLE_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { labelAfterPick } from '../lib/projectLabel'
 import { eventIsFromCurrentTarget, eventTargetIsInsideCurrentTarget } from '../lib/domEvents'
@@ -689,10 +689,11 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
 
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
-  const cliOk = Boolean(tools[kind]?.installed)
+  const apiKind = kind === 'claude-api'
+  const cliOk = apiKind || Boolean(tools[kind]?.installed)
   /** 不指定身份＝用那台的預設帳號；它沒登入時 bot 會停在登入畫面（`logged_in === null` 是問不到，不下結論）。 */
-  const defaultLoggedOut = cliOk && identity === '' && tools[kind]?.logged_in === false
-  const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
+  const defaultLoggedOut = !apiKind && cliOk && identity === '' && tools[kind]?.logged_in === false
+  const shareOn = !apiKind && shareProfile !== null && !shareProfileBlocked(kind)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
   const projectPath = projects.find((p) => p.id === pid)?.path
   const canSubmit = nameOk && cliOk && Boolean(pid) && !busy && !(folderIn && 'error' in folderIn)
@@ -793,14 +794,17 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         void addBot(pid, {
           name: name.trim(),
           kind,
-          model,
+          // claude-api：模型由 daemon 固定、不送；effort 沒選＝預設 high；fast＝speed:"fast"（單價 2 倍）。
+          model: apiKind ? null : model,
           effort,
-          fast: kind === 'codex' ? fast : undefined,
-          persona: persona.trim() || null,
+          fast: kind === 'codex' || apiKind ? fast : undefined,
+          persona: apiKind ? null : persona.trim() || null,
           autostart: false,
-          identity: identity || null,
+          identity: apiKind ? null : identity || null,
           // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關；信任分享照一般 bot。
-          ...(folderIn && 'value' in folderIn && shareProfile === 'restricted'
+          ...(apiKind
+            ? {}
+            : folderIn && 'value' in folderIn && shareProfile === 'restricted'
             ? { share_profile: 'restricted' as const, share_folder: folderIn.value, auto_approve: false }
             : folderIn && 'value' in folderIn && shareProfile === 'trusted'
               ? { share_profile: 'trusted' as const, share_folder: folderIn.value, confirm_trusted: true, auto_approve: true }
@@ -863,9 +867,11 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
       <div className="field">
         <span>kind</span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
-          {BOT_KINDS.map((k) => {
-            const missing = !tools[k].installed
-            const reason = missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
+          {CREATABLE_KINDS.map((k) => {
+            // claude-api 沒有 CLI 要裝，但只能建在本機專案（daemon 內的 harness；遠端專案 400）。
+            const remoteOnly = k === 'claude-api' && host !== 'local'
+            const missing = k === 'claude-api' ? false : !tools[k].installed
+            const reason = remoteOnly ? t('claude-api 只能建在本機專案') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -873,13 +879,14 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
                   role="radio"
                   aria-checked={kind === k}
                   className={`opt${kind === k ? ' on' : ''}`}
-                  disabled={missing}
+                  disabled={missing || remoteOnly}
                   title={reason}
                   onClick={() => pickKind(k)}
                 >
                   <KindTag kind={k} />
                   <span className="opt-label">{k}</span>
                 </button>
+                {remoteOnly ? <span className="kind-missing-reason">{t('僅限本機')}</span> : null}
                 {missing ? (
                   <>
                     <span className="kind-missing-reason">{t('未安裝')}</span>
@@ -902,7 +909,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         fast={fast}
         onFast={setFast}
       />
-      <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
+      {apiKind ? null : <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />}
       {defaultLoggedOut ? (
         <span className="hint identity-selection-warning" role="status">
           {t('{host} 上的 {kind} 預設帳號還沒登入：bot 起來會停在登入畫面。先登入，或在上面選一個已登入的身份。', { host: host === 'local' ? t('本機') : host, kind })}
@@ -930,8 +937,8 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         {name && !nameOk ? <span id={nameHintId} className="hint">{t.tr(BOT_NAME_HINT)}</span> : null}
         {!cliOk ? <span className="hint">{t('此 kind 的 CLI 尚未安裝，無法建立')}</span> : null}
       </label>
-      <PersonaField value={persona} onChange={setPersona} collapsible />
-      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />
+      {apiKind ? null : <PersonaField value={persona} onChange={setPersona} collapsible />}
+      {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />}
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           {t('取消')}

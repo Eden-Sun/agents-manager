@@ -5,4 +5,5 @@ export const KIND_TITLE: Record<BotKind, string> = {
   codex: 'Codex',
   grok: 'Grok',
   agy: 'Antigravity',
+  'claude-api': 'Claude API',
 }
