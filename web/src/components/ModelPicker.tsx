@@ -23,9 +23,10 @@ function staticModels(kind: BotKind): ModelInfo[] {
     display_name: id,
     description: '',
     is_default: i === 0,
-    default_effort: null,
+    default_effort: kind === 'claude-api' ? 'high' : null,
     efforts,
-    service_tiers: [],
+    // claude-api 的 fast 是固定可用的（speed=fast，單價 2 倍）；API 清單到了會被覆蓋成同一份。
+    service_tiers: kind === 'claude-api' ? [{ id: 'fast', name: 'fast', description: t('speed=fast（單價 2 倍）') }] : [],
   }))
 }
 
@@ -60,6 +61,9 @@ function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
     .sort((a, b) => rank(a.m.id) - rank(b.m.id) || a.i - b.i)
     .map((x) => x.m)
 }
+
+/** codex 的 fast 是 `priority`；claude-api 的是 `fast`（speed=fast，單價 2 倍）。 */
+const isFastTier = (id: string) => id === FAST_TIER || id === 'fast'
 
 export function ApiModelFields({
   kind,
@@ -105,7 +109,7 @@ export function ApiModelFields({
   const selectedModel = model ?? defaultModel?.id ?? null
   const fallbackEffort = (suggestedEffort && efforts.includes(suggestedEffort)) ? suggestedEffort : effectiveDefaultEffort(current)
   const selectedEffort = effort ?? fallbackEffort
-  const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
+  const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
 
   // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
   // 只認 API 清單：靜態退路會把好的值誤標不支援。
@@ -120,7 +124,7 @@ export function ApiModelFields({
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
     // 只有清單來自 API 才能斷定「不支援」；內建清單的 service_tiers 是空的，不代表沒有 Fast（同 modelSwitchPatch）。
-    if (fromApi && fast && next && !next.service_tiers.some((t) => t.id === FAST_TIER)) onFast(false)
+    if (fromApi && fast && next && !next.service_tiers.some((t) => isFastTier(t.id))) onFast(false)
     if (effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(effort)) {
       const fallback = (suggestedEffort && next.efforts.includes(suggestedEffort)) ? suggestedEffort : next.default_effort
       onEffort(fallback)
@@ -212,7 +216,7 @@ export function ApiModelFields({
           <span>
             Fast
             <span className="field-note">
-              {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || t('優先佇列（service_tier=priority）')}
+              {current?.service_tiers.find((t) => isFastTier(t.id))?.description || t('優先佇列（service_tier=priority）')}
             </span>
             {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
             {liveFast(kind) ? <span className="field-note live-note">{t('執行中改會即時套用，不用重啟')}</span> : null}
@@ -401,7 +405,7 @@ export function ModelQuickPicker({
     void apply({ fast: !fast })
   }
 
-  const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
+  const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
 
   const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false), cached)
   const hintId = useId()
@@ -475,13 +479,13 @@ export function ModelQuickPicker({
                 tabIndex={-1}
                 className={`opt${fast ? ' on' : ''}`}
                 disabled={patching}
-                title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || t('優先佇列（service_tier=priority）')}
+                title={current?.service_tiers.find((t) => isFastTier(t.id))?.description || t('優先佇列（service_tier=priority）')}
                 onClick={toggleFast}
               >
                 Fast
               </button>
               <span className="field-note" aria-hidden="true">
-                {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '2x speed, increased usage'}
+                {current?.service_tiers.find((t) => isFastTier(t.id))?.description || '2x speed, increased usage'}
               </span>
             </div>
           </div>

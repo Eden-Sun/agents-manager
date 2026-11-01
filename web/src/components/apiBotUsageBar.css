@@ -1,0 +1,19 @@
+/* components/ApiBotUsageBar.tsx：claude-api bot 的用量列（沿用狀態列的 .sl-item）。 */
+.api-usage-bar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+}
+.api-usage-bar.warn {
+  color: var(--text-dim);
+}
+.api-usage-hold {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.api-usage-fast .sl-v {
+  color: var(--warn, #b26a00);
+  font-weight: 650;
+}

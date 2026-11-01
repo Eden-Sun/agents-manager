@@ -492,7 +492,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
-  const restartButton = child ? null : (
+  // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
+  const restartButton = child || bot.kind === 'claude-api' ? null : (
     <button
       type="button"
       className="btn primary"

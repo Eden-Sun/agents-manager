@@ -379,4 +379,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '副管理者：管理者回合中超過 {sec} 秒時，代收排隊中的請求': 'Deputy manager: takes over queued requests when the manager has been mid-turn for over {sec} s',
   '副管理者：管理者回合中太久時，代收排隊中的請求': 'Deputy manager: takes over queued requests when the manager has been mid-turn too long',
   '副': 'Dep',
+  'claude-api 只能建在本機專案': 'claude-api can only be created in a local project',
+  '僅限本機': 'Local only',
+  'claude-api · 直接打 Claude API 的 bot（daemon 內的 harness，沒有 CLI／pane）': 'claude-api · a bot that calls the Claude API directly (in-daemon harness; no CLI or pane)',
+  'speed=fast（單價 2 倍）': 'speed=fast (2x price)',
 } satisfies Dict

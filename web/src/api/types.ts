@@ -2,9 +2,13 @@ import { msg, t, tr } from '../lib/i18n'
 
 /** Wire types for the daemon API. Source of truth: SPEC §7, appendix C, `daemon/src/api.rs`, docs/API.md; shape drift is absorbed in `normalize.ts`. */
 
-export type BotKind = 'claude' | 'codex' | 'grok' | 'agy'
-/** SPEC §12 */
+/** `claude-api`＝daemon 內 harness 直接打 Claude API 的 bot（#1944）：沒有 CLI／pane／安裝探測／額度，所以不在 BOT_KINDS。 */
+export type BotKind = 'claude' | 'codex' | 'grok' | 'agy' | 'claude-api'
+/** SPEC §12：有 CLI 的 kind（工具偵測、額度、模型清單、身份都逐一迴圈它）。 */
 export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
+/** 可以建立的 kind＝BOT_KINDS＋claude-api。 */
+export const CREATABLE_KINDS: readonly BotKind[] = [...BOT_KINDS, 'claude-api']
+export const API_BOT_KIND: BotKind = 'claude-api'
 
 export type RunState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'unknown'
@@ -895,6 +899,8 @@ export const AGY_DEFAULT_MODEL = 'gemini-3.8-flash-medium'
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
+  // claude-api：harness 只送這一個模型（daemon `API_BOT_MODEL`，價目表也只核准它）。
+  'claude-api': ['claude-opus-5-5'],
   // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）

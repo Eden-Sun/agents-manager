@@ -32,6 +32,13 @@
   color: var(--kind-claude);
 }
 
+.kind-tag.claude-api {
+  background: #f6ede4;
+  border-color: #d3a77a;
+  border-style: dashed;
+  color: var(--kind-claude);
+}
+
 .kind-tag.codex {
   background: #e7f6f1;
   border-color: #b3e0d3;
@@ -52,7 +59,8 @@
 
 /* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .kind-tag.claude {
+  :root:not([data-theme="light"]) .kind-tag.claude,
+  :root:not([data-theme="light"]) .kind-tag.claude-api {
     background: #38291b;
     border-color: #5c4429;
     color: var(--kind-claude);
@@ -77,7 +85,8 @@
   }
 }
 
-:root[data-theme="dark"] .kind-tag.claude {
+:root[data-theme="dark"] .kind-tag.claude,
+:root[data-theme="dark"] .kind-tag.claude-api {
   background: #38291b;
   border-color: #5c4429;
   color: var(--kind-claude);
