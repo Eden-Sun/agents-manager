@@ -535,6 +535,7 @@ bump_x() { # bump_x <內容>：改 x-kick.sh 並推上去，回 sha
 only_ops_since_built() { # 線上那顆之後只剩 ops 的改動（不進 binary）
   "$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
   seed_ops
+  "$GITBIN" -C "$AGM_REPO" reset -q --hard "$C0"   # 主樹停在舊的 C0（落後，可快轉），不是分岔
 }
 x_line() { sed -n 2p "$AGM_DIR/bin/x-kick.sh"; }
 
@@ -809,6 +810,16 @@ rc=$(run)
 check_eq "有本地獨有 commit rc=0" "0" "$rc"
 check_eq "有本地獨有 commit：主樹不動" "$LOCAL" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
 check "有本地獨有 commit：推 main_tree_diverged" "main_tree_diverged" "$AGM_DIR/alerts.log"
+teardown
+
+# 9d. 沒有會進 binary 的差異那一輪（只有 AGENTS.md／.mcp.json 這類文件改動）：不建置、不換版，主樹照樣快轉。
+sync_setup
+echo "$(echo "$C3" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"   # 線上已是 C3：C3 之後沒有 binary 差異
+rc=$(run)
+check_eq "no-diff rc=0" "0" "$rc"
+check_eq "no-diff：沒有換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "no-diff：主樹快轉到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+check "no-diff：log 說快轉" "主樹快轉到" "$(LOG)"
 teardown
 
 echo "$PASS passed, $FAIL failed"

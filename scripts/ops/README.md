@@ -190,7 +190,7 @@ Flow (SPEC §18.2): `git fetch` in the dedicated checkout → compare with `daem
 binary differs, stop → walk back along first-parent to the newest sha whose `ubuntu-ci` is `success`
 (`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`) → the kick's adjacent `build-web-bundle.py`
 runs `bun install --frozen-lockfile` and `bun run build --outDir <staging>` →
-`cargo build --release -p agents-managerd` in the dedicated checkout → swap with `daemon-swap.sh` → after a successful swap, sync the main tree `AGM_REPO` to `origin/main` (fast-forward; or `reset --keep` when every local commit is already upstream by patch-id; anything else is left alone and raises `main_tree_diverged`). bots read `AGENTS.md`/`.mcp.json` from that tree.
+`cargo build --release -p agents-managerd` in the dedicated checkout → swap with `daemon-swap.sh` → after a successful swap — and also on a round with no binary diff (docs/config-only commits) — sync the main tree `AGM_REPO` to `origin/main` (fast-forward; or `reset --keep` when every local commit is already upstream by patch-id; anything else is left alone and raises `main_tree_diverged`). bots read `AGENTS.md`/`.mcp.json` from that tree.
 
 The staging directory is beside `dist` on the same filesystem. The helper compares the complete relative file/directory
 lists and every file's bytes. An identical bundle leaves all `dist` file and directory mtimes intact, preserving Cargo's
