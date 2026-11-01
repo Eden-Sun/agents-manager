@@ -12,6 +12,7 @@ import { envDisplayText } from './identityEnv'
 import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { BotShareSection } from './BotShareSection'
+import { ApiBotControls } from './ApiBotControls'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
@@ -761,6 +762,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : null}
         </form>
 
+        {bot.kind === 'claude-api' ? <ApiBotControls botId={botId} name={bot.name} /> : null}
         <BotShareSection botId={botId} />
 
         {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}
