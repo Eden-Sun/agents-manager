@@ -160,8 +160,8 @@ mod tests {
         let o = build_overlay(&b, &eff, true);
         assert_eq!(o.env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").map(String::as_str), Some("512000"));
         assert_eq!(o.model.as_deref(), Some("opus[1m]"), "超過 200k 改用 [1m] 變體");
-        // 夾到模型視窗：haiku 只有 200k。
-        let h = bot("claude", Some("haiku"), Some("manager"), None);
+        // 夾到模型視窗：不認得的 claude 模型只有 200k。
+        let h = bot("claude", Some("claude-x"), Some("manager"), None);
         assert_eq!(build_overlay(&h, &eff, true).env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").map(String::as_str), Some("200000"));
         // 沒有模型又超過 200k：不補（記 log）。
         assert_eq!(build_overlay(&bot("claude", None, Some("manager"), None), &eff, true), Overlay { eff: eff.clone(), ..Default::default() });

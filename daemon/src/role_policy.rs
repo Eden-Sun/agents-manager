@@ -122,8 +122,9 @@ mod tests {
 
     #[test]
     fn bot_override_uses_the_kind_window_and_ttl() {
-        // haiku 視窗 200k：512k 超出；opus 有 1M 視窗。
-        assert_eq!(reason(validate_bot("claude", "haiku", &json!({"context_tokens": 512000})).unwrap_err()).0, "context_out_of_range");
+        // 不認得的 claude 模型視窗 200k：512k 超出；opus／haiku 有 1M 視窗。
+        assert_eq!(reason(validate_bot("claude", "claude-x", &json!({"context_tokens": 512000})).unwrap_err()).0, "context_out_of_range");
+        assert!(validate_bot("claude", "haiku", &json!({"context_tokens": 512000})).is_ok());
         assert!(validate_bot("claude", "opus", &json!({"context_tokens": 512000})).is_ok());
         // claude 超過 200k 必須有模型。
         assert!(validate_bot("claude", "", &json!({"context_tokens": 300000})).is_err());

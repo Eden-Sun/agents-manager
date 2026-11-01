@@ -8,7 +8,7 @@ export const RUNTIME_ROLES = ['manager', 'specialist', 'advisor', 'executor'] as
 export type RuntimeRole = (typeof RUNTIME_ROLES)[number]
 
 /** context 拉條的刻度（token）。上限 1M＝角色政策的上限；實際套用時夾到該 bot 的模型視窗。 */
-export const CONTEXT_TICKS = [200_000, 400_000, 512_000, 1_000_000] as const
+export const CONTEXT_TICKS = [200_000, 300_000, 400_000, 500_000, 600_000, 800_000, 1_000_000] as const
 export const KEEP_WARM_MIN = 5
 export const KEEP_WARM_MAX = 59
 export const HOT_COMPACT_MIN = 5
@@ -18,7 +18,7 @@ export const HOT_PCT_MAX = 100
 /** 「加入建議」帶入的值（只帶入草稿，不會自動儲存）。 */
 export const ROLE_SUGGESTIONS: Record<RuntimeRole, RuntimeSettings> = {
   manager: { keep_warm: true },
-  specialist: { context_tokens: 512_000, keep_warm: true },
+  specialist: { context_tokens: 500_000, keep_warm: true },
   advisor: { keep_warm: false },
   executor: { context_tokens: 200_000, keep_warm: false },
 }
