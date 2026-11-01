@@ -18188,8 +18188,8 @@ mod runtime_policy_api_tests {
         let err = patch(RequestPrincipal::Bot("someone".into()), json!({"runtime_override": {"keep_warm": true}})).await.err().unwrap();
         assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
 
-        // 模型改成 haiku（視窗 200k）時，512k 的覆寫要被擋。
-        let err = patch(RequestPrincipal::User, json!({"model": "haiku", "runtime_override": {"context_tokens": 512000}})).await.err().unwrap();
+        // 模型改成視窗 200k 的 claude 模型時，512k 的覆寫要被擋。
+        let err = patch(RequestPrincipal::User, json!({"model": "claude-x", "runtime_override": {"context_tokens": 512000}})).await.err().unwrap();
         assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "context_out_of_range"), "{err:?}");
         assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().model, model_before, "驗證失敗什麼都不寫");
 

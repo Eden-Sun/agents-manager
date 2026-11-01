@@ -34,10 +34,11 @@ test('pickSuggestedModel：agy 只收 Gemini 3.8+，優先 -low 檔', () => {
   assert.equal(pickSuggestedModel(POOL_SUGGESTIONS[4], list)?.id, 'gemini-3.8-flash-low')
 })
 
-test('contextCap：有 context_window 用它；claude 只有清單含 [1m] 變體才給 1M；codex 後備 400k', () => {
+test('contextCap：有 context_window 用它；claude opus／sonnet／haiku 或清單含 [1m] 變體給 1M；codex 後備 400k', () => {
   assert.equal(contextCap('claude', m('x', { context_window: 300000 }), []), 300000)
   assert.equal(contextCap('claude', m('claude-sonnet-5-5'), [m('claude-sonnet-5-5'), m('claude-sonnet-5-5[1m]')]), 1000000)
-  assert.equal(contextCap('claude', m('claude-sonnet-5-5'), [m('claude-sonnet-5-5')]), 200000)
+  assert.equal(contextCap('claude', m('claude-haiku-5-5'), []), 1000000)
+  assert.equal(contextCap('claude', m('claude-x'), [m('claude-x')]), 200000)
   assert.equal(contextCap('codex', m('gpt-6-luna'), []), 400000)
 })
 
