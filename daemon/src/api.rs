@@ -281,6 +281,7 @@ pub fn router(app: Arc<App>) -> Router {
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
+        .route("/bots/{id}/api-session/retire", post(crate::api_bot_retire_route::retire_api_session))
         .route("/bots/{id}/start", post(start_bot_http))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/credential/rotate", post(rotate_bot_credential))
@@ -1103,6 +1104,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/local-image", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/api_fresh_target", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/api-session/retire", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),

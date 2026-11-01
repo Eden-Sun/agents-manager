@@ -116,6 +116,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| POST | `/api/bots/{id}/api-session/retire` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/outbox` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1922,6 +1923,8 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 ### API bot fresh target 與 start（#1944）
 
 `GET /api/bots/{id}/api_fresh_target` 僅 User 可用；Bot、AGM bot 與 Service 為 403。回應 `availability` 為 `available` 時附 `session_id` 與 `generation`；`none` 表示沒有 session，`unavailable` 表示無法安全確認（含過期或隔離），不附 target。這是快照，刪除時仍重新驗證。
+
+`POST /api/bots/{id}/api-session/retire`（explicit retire，清掉 API session 讓下一次開新對話）body `{"session_id":"…","generation":N}`，兩欄必填且須是 `api_fresh_target` 回的那一組；缺欄或格式不對回 400 `api_fresh_target_required`。僅 User 可用；Bot、AGM bot 與 Service 為 403 `user_only`。找不到未退役的 claude-api session 回 404 `api_session_not_found`；generation 不符回 409 `api_fresh_target_mismatch`。成功回 200 `{"result":"cleared","session_id","generation"}`，只在 join receipt 證明通過、且目標精確刪除後才回成功。忙碌、證據待決、儲存錯誤、未確認一律 fail closed 成 502 `upstream`（`api_retire_busy`／`api_retire_unresolved`／`api_retire_storage`／`api_retire_unconfirmed`），不捏造成功；502 後 session 可能仍在，先以 `GET api_fresh_target` 重新確認，不自行重送清除。
 
 `POST /api/bots/{id}/start?resume=fresh&api_expected_session_id=…&api_expected_generation=…` 僅 User 可操作 API bot，兩欄必填且須精確匹配。嚴格 `resume=native` 在建 run 前查證舊 context，未確認時拒絕，不退回 fresh；回應 `resumed:true` 表示這次查證通過，首次 prompt 仍會在 rebind 前再驗，可能因狀態變更而拒絕。依賴缺失或證據未確認回 502 `upstream`、`api_native_start_unconfirmed`。若目標已清而後續 start 未確認，回 `api_fresh_cleared_start_unconfirmed`，不可自行重送清除。API bot 的 KINDS 仍關閉，正式建立及使用須另核。
 
