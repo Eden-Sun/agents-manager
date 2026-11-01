@@ -81,7 +81,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { ExpertBadge, ExpertDisabledMark, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag } from './ExpertBadge'
+import { ExpertBadge, ExpertDisabledMark, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag, ManagerUseCheckbox } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
@@ -306,12 +306,13 @@ function BotRowImpl({
   }
 
   const quotaWho = quotaIdentity(bot, run)
+  const isExpertMemberWithManagerUse = isExpertProject && (bot.role === 'advisor' || bot.role === 'executor' || bot.role === 'specialist')
 
   return (
     <div
       className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
-      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
+      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}${isExpertMemberWithManagerUse && bot.manager_use === false ? ' manager-disabled' : ''}`}
       // 不用 listbox option：option 內不准有按鈕，螢幕閱讀器會吃掉。
       role="listitem"
       aria-current={selected ? 'true' : undefined}
@@ -513,6 +514,9 @@ function BotRowImpl({
           </span>
         ) : null}
       </span>
+      {isExpertMemberWithManagerUse ? (
+        <ManagerUseCheckbox botId={botId} managerUse={bot.manager_use !== false} />
+      ) : null}
       <BotRowMenu botId={botId} compact={compact} />
 
     </div>
