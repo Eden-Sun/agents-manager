@@ -2143,6 +2143,8 @@ Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
 | `agy` | `agy-cli`（本機讀到 `agy models`）／`static`（讀不到、遠端） | 只收 Gemini 3.8 含以上（`gemini-<主>[.<次>]-…` 版本 ≥ 3.8，使用者 2026-10-14：「agy 只收 Gemini，3.8 含以上」；取代 2026-10-05 的 3.8 Flash 三檔）。本機清單來自 `agy models` 經規則過濾；讀不到就是寫死的 `gemini-3.8-flash-{medium,high,low}`。預設 `gemini-3.8-flash-medium` 排第一。claude、gpt-oss、3.7 以下不給；已存在的 bot 設了這些，寫設定時 `remapped_model` 回報換成 3.8 medium，啟動時也照換 | `[]`（強度在 slug 裡） | `[]` |
 
+`kind=claude-api` 不問 CLI，固定回 `{kind,host:"local",source:"static",models:[{id:"claude-opus-5-5",efforts:[low…max],default_effort:"high",service_tiers:[{id:"fast"}]}]}`；建立 `claude-api` bot 的規則見 SPEC §18 API bot 的啟用防線（模型固定、effort 預設 high、CLI 欄位 400）。
+
 `GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-6-sol`／`gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
 
 Codex 清單排除上述改派值；app-server 的預設若是被排除的模型，`is_default` 移到改派目標。身份 `config.toml` 設了舊值時，同樣以改派目標標預設與套用 `model_reasoning_effort`；目標不在清單時不標預設。既存 DB 的 `gpt-6-sol` 啟動參數改用 `gpt-6.1-sol`，不回寫 DB。

@@ -323,8 +323,8 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
             if !seen_names.insert(b.name.as_str()) {
                 bail!("duplicate bot name `{}` in project `{}`", b.name, p.label);
             }
-            if !crate::config::valid_kind(&b.kind) {
-                bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
+            if !crate::config::valid_bot_kind(&b.kind) {
+                bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::bot_kinds_list());
             }
             crate::bot_input::check_env(&b.env).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;
             crate::bot_input::check_args(&b.args).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;

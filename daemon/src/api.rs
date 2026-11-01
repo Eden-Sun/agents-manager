@@ -2691,6 +2691,32 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
     Ok(Some(name))
 }
 
+/// claude-api bot 沒有 CLI、沒有 pane、沒有帳號身份：只收本機專案，模型只能是價目表核准的那一個，
+/// 其餘只對 CLI 有意義的欄位一律 400（不默默忽略，免得使用者以為生效）。
+async fn check_api_bot_create(app: &Arc<App>, pid: &str, b: &NewBot) -> Result<(), LcError> {
+    let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
+    if let Some(m) = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        if m != crate::config::API_BOT_MODEL {
+            return Err(bad("api_bot_model_unsupported"));
+        }
+    }
+    let host = db::project(&app.db, pid).await.map_err(any_err)?.map(|p| p.host);
+    if host.as_deref().is_some_and(|h| h != crate::config::LOCAL_HOST) {
+        return Err(bad("api_bot_local_project_only"));
+    }
+    if b.identity.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || !b.args.is_empty()
+        || b.env.as_ref().is_some_and(|e| !e.is_empty())
+        || b.share_profile.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || b.share_folder.is_some()
+        || b.confirm_trusted
+        || b.autostart
+    {
+        return Err(bad("api_bot_cli_fields_unsupported"));
+    }
+    Ok(())
+}
+
 fn remap_model(kind: &str, model: Option<&str>) -> (Option<String>, Option<Value>) {
     let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else { return (None, None) };
     match crate::models::remap_deprecated_model(kind, model) {
@@ -2714,8 +2740,12 @@ async fn create_bot(
     if !valid_bot_name(&b.name) {
         return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
     }
-    if !crate::config::valid_kind(&b.kind) {
-        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
+    if !crate::config::valid_bot_kind(&b.kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::bot_kinds_list())));
+    }
+    let api_bot = b.kind == crate::config::API_BOT_KIND;
+    if api_bot {
+        check_api_bot_create(&app, &pid, &b).await?;
     }
     // model／env／args 最後是 CLI 的 argv 與 pane 的環境變數，形狀不對在這裡就擋（`bot_input`）。
     if let Some(m) = &b.model {
@@ -2764,7 +2794,7 @@ async fn create_bot(
     let share_bot = share_profile.is_some();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
-    let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
+    let (model, remapped) = if api_bot { (Some(crate::config::API_BOT_MODEL.to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
     // 受限 bot 沒指定模型：用 `/api/models` 當下列出的最新 Opus（使用者 2026-10-03：不寫死，CLI 的帳號預設會跑到舊版）。
     let model = match (restricted, model) {
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
@@ -2784,7 +2814,10 @@ async fn create_bot(
         Some(_) => Some(b.share_folder.clone().unwrap_or(crate::share::folder::ShareFolderIn::New { name: b.name.clone() })),
         None => None,
     };
-    let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
+    let mut effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
+    if api_bot && effort.is_none() {
+        effort = Some(crate::config::API_BOT_DEFAULT_EFFORT.to_string());
+    }
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     check_env_names(&env)?;
     let id = db::ulid();
@@ -5889,11 +5922,27 @@ mod changelog_route_tests {
     }
 }
 
+fn api_bot_models() -> Value {
+    json!({
+        "kind": crate::config::API_BOT_KIND, "host": LOCAL_HOST, "source": "static", "fetched_at": db::now(),
+        "models": [{
+            "id": crate::config::API_BOT_MODEL, "display_name": "Claude Opus 5.5", "description": "", "is_default": true,
+            "default_effort": crate::config::API_BOT_DEFAULT_EFFORT,
+            "efforts": crate::config::efforts_for_kind(crate::config::API_BOT_KIND),
+            "service_tiers": [{"id": "fast", "name": "fast", "description": "speed=fast（單價 2 倍）"}],
+        }],
+    })
+}
+
 async fn get_models(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
     Query(q): Query<ModelsQuery>,
 ) -> Result<Json<Value>, LcError> {
+    if q.kind == crate::config::API_BOT_KIND {
+        // 沒有 CLI 可問：清單是寫死的一筆（harness 只會送這個模型），不看 host／身份、也不走快取。
+        return Ok(Json(api_bot_models()));
+    }
     if !crate::config::valid_kind(&q.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
@@ -16309,6 +16358,41 @@ mod create_bot_idempotency_tests {
 
     async fn bots_in_config(e: &Env) -> usize {
         e.app.cfg.get().await.projects[0].bots.len()
+    }
+
+    /// #1944：claude-api 可建；模型固定、effort 預設 high、CLI 專用欄位與遠端專案一律 400。
+    #[tokio::test]
+    async fn creating_a_claude_api_bot_pins_model_defaults_effort_and_refuses_cli_fields() {
+        let e = env().await;
+        seed_project(&e).await;
+        let ok = create(&e, json!({"name": "apibot", "kind": "claude-api", "fast": true})).await.unwrap();
+        let bot = db::bot(&e.app.db, ok["bot_id"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!(bot.kind, "claude-api");
+        assert_eq!(bot.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(bot.effort.as_deref(), Some("high"));
+        assert_eq!(bot.fast, 1);
+        let ok = create(&e, json!({"name": "apibot2", "kind": "claude-api", "model": "claude-opus-5-5", "effort": "low"})).await.unwrap();
+        let bot = db::bot(&e.app.db, ok["bot_id"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!((bot.effort.as_deref(), bot.fast), (Some("low"), 0));
+        for body in [
+            json!({"name": "x1", "kind": "claude-api", "model": "claude-haiku-5-5"}),
+            json!({"name": "x2", "kind": "claude-api", "effort": "ultra"}),
+            json!({"name": "x3", "kind": "claude-api", "args": ["--foo"]}),
+            json!({"name": "x4", "kind": "claude-api", "identity": "cc1"}),
+            json!({"name": "x5", "kind": "claude-api", "autostart": true}),
+            json!({"name": "x6", "kind": "claude-api", "share_profile": "restricted"}),
+        ] {
+            assert!(matches!(create(&e, body.clone()).await, Err(LcError::Bad(_) | LcError::BadValue(_))), "{body}");
+        }
+        assert_eq!(e.app.cfg.get().await.projects[0].bots.len(), 2, "拒絕的請求沒寫進 config");
+        assert!(matches!(create(&e, json!({"name": "x7", "kind": "gemini"})).await, Err(LcError::Bad(_))));
+    }
+
+    #[test]
+    fn the_claude_api_model_list_is_static() {
+        let v = api_bot_models();
+        assert_eq!(v["models"][0]["id"], "claude-opus-5-5");
+        assert_eq!(v["models"][0]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
     }
 
     /// #654：child 占著 `review` 時，再建同名要 409，config 不能先寫進去。
