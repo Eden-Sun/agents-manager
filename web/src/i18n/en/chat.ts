@@ -268,6 +268,7 @@ export default {
   '⚠ 未登入，用的是預設帳號': '⚠ Signed out; using the default account',
   '目錄': 'Directory',
   '已用 {detail} tokens': '{detail} tokens used',
+  '已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）': '{detail} tokens used; auto-compacts at {limit} (model window {window})',
   '版本': 'Version',
   '開啟側邊欄': 'Open sidebar',
   '未選擇 Bot': 'No Bot selected',
