@@ -44,10 +44,10 @@ function compareVersion(a: number[], b: number[]): number {
 }
 
 /** 模型的視窗上限：優先用 daemon 給的 `context_window`，沒有才用後備值。 */
-export function contextCap(kind: BotKind, model: ModelInfo, list: readonly ModelInfo[]): number {
+export function contextCap(kind: BotKind, model: ModelInfo, _list: readonly ModelInfo[]): number {
   if (typeof model.context_window === 'number' && model.context_window > 0) return model.context_window
-  // opus／sonnet／haiku 都有 [1m] 變體（daemon `context_window` 同一份）；其他 claude 看清單有沒有 [1m]。
-  if (kind === 'claude') return /opus|sonnet|haiku/i.test(model.id) || list.some((m) => m.id === `${model.id}[1m]`) ? CONTEXT_FALLBACK.claude1m : CONTEXT_FALLBACK.claude
+  // claude 一律 1M（daemon `context_window` 同一份；2026-11-01 使用者）。
+  if (kind === 'claude') return CONTEXT_FALLBACK.claude1m
   if (kind === 'codex') return CONTEXT_FALLBACK.codex
   return CONTEXT_FALLBACK.other
 }

@@ -102,12 +102,11 @@ pub const CONTEXT_MIN: u32 = 200_000;
 pub const CLAUDE_BASE_WINDOW: u32 = 200_000;
 
 /// 模型視窗（token）。`/api/models` 目前沒有 context window 欄位，所以用家族預設：
-/// claude 的 opus／sonnet／haiku 有 `[1m]` 變體→1M（超過 200k 的條目會套 `[1m]`；haiku 5.5 起實測 `haiku[1m]`
-/// 可用，2026-11-01）；其他 claude model（含空字串）→200k；codex 400k；其他 kind 不支援 context（0）。
+/// claude 一律 1M（2026-11-01 使用者：「所有 claude 都是上限 1M」；超過 200k 的條目會套 `[1m]`，所以要有模型名，
+/// 那一條由呼叫端另外檢查）；codex 400k；其他 kind 不支援 context（0）。
 pub fn context_window(kind: &str, model: &str) -> u32 {
     match kind {
-        "claude" if model.contains("opus") || model.contains("sonnet") || model.contains("haiku") => 1_000_000,
-        "claude" => CLAUDE_BASE_WINDOW,
+        "claude" => 1_000_000,
         "codex" => 400_000,
         _ => 0,
     }
