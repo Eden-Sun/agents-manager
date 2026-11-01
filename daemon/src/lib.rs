@@ -243,6 +243,7 @@ pub mod release_triage_auto;
 pub mod changelog_translate;
 pub mod claude_api;
 mod api_bot;
+mod api_bot_retire_route;
 mod cli_update;
 mod app_ports_p0;
 mod app_ports_p1;
