@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Bot, Project } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { useSavePart } from './projectSaveGroup'
 
 const MIN_AFTER_SEC = 60
 const DEFAULT_AFTER_SEC = 180
@@ -25,7 +26,15 @@ export function ProjectDeputyEditor({ project, bots }: { project: Project; bots:
   const sec = Number(afterSec)
   const secOk = Number.isInteger(sec) && sec >= MIN_AFTER_SEC
   const dirty = botId !== (saved?.bot_id ?? '') || (botId !== '' && sec !== (saved?.after_sec ?? DEFAULT_AFTER_SEC))
-  const canSave = dirty && !saving && (botId === '' || secOk)
+  const valid = botId === '' || secOk
+  const group = useSavePart('deputy', { label: t('副管理者'), dirty, valid }, {
+    patch: () => ({ deputy: botId ? { bot_id: botId, after_sec: sec } : null }),
+    reset: () => {
+      setBotId(saved?.bot_id ?? '')
+      setAfterSec(String(saved?.after_sec ?? DEFAULT_AFTER_SEC))
+    },
+  })
+  const canSave = dirty && !saving && valid
 
   const save = () => {
     if (!canSave) return
@@ -64,9 +73,11 @@ export function ProjectDeputyEditor({ project, bots }: { project: Project; bots:
           style={{ width: '6em' }}
         />
       </label>{' '}
-      <button type="button" className="btn" disabled={!canSave} onClick={save}>
-        {t('儲存')}
-      </button>
+      {group.grouped ? null : (
+        <button type="button" className="btn" disabled={!canSave} onClick={save}>
+          {t('儲存')}
+        </button>
+      )}
       {botId !== '' && !secOk ? <p className="hint">{t('門檻最小 {min} 秒', { min: MIN_AFTER_SEC })}</p> : null}
       {candidates.length === 0 ? <p className="hint">{t('沒有可選的成員：先把一位成員設為顧問或專家。')}</p> : null}
     </div>

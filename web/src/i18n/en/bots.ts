@@ -353,6 +353,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '這個角色的 Bot 目前快取命中率的平均': 'Average cache hit rate of this role’s bots',
   '數值超出範圍：{field}': 'Value out of range: {field}',
   '已變更：{roles}': 'Changed: {roles}',
+  '已變更：{parts}': 'Changed: {parts}',
+  '（有欄位超出範圍）': '(a field is out of range)',
   '還原': 'Revert',
   '儲存角色設定': 'Save role settings',
   'context 上限': 'Context limit',

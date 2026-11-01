@@ -14,6 +14,7 @@ import {
 } from '../lib/executorPool'
 import { modelsKey } from '../store/modelsCache'
 import { useStore } from '../store/store'
+import { useSavePart } from './projectSaveGroup'
 
 /** 專家模式的執行者池：條目列表、新增表單、預設建議（不自動加）。 */
 export function ExecutorPoolEditor({ project, bots }: { project: Project; bots: Bot[] }) {
@@ -42,6 +43,13 @@ export function ExecutorPoolEditor({ project, bots }: { project: Project; bots: 
   const [showAdd, setShowAdd] = useState(false)
 
   const pool: ExecutorPoolEntry[] = draft ?? project.executor_pool ?? []
+  const group = useSavePart('pool', { label: t('執行者池'), dirty: draft !== null, valid: true }, {
+    patch: () => (draft === null ? {} : { executor_pool: draft }),
+    reset: () => {
+      setDraft(null)
+      setError(null)
+    },
+  })
   const usedBy = (id: string) => bots.filter((b) => b.role === 'executor' && b.pool_entry === id).length
 
   const commit = (next: ExecutorPoolEntry[]) => {
@@ -301,11 +309,13 @@ export function ExecutorPoolEditor({ project, bots }: { project: Project; bots: 
         </p>
       ) : null}
 
-      <div className="project-executor-pool-actions">
-        <button type="button" className="btn" disabled={saving || draft === null} onClick={() => void save()}>
-          {saving ? t('儲存中…') : t('儲存執行者池')}
-        </button>
-      </div>
+      {group.grouped ? null : (
+        <div className="project-executor-pool-actions">
+          <button type="button" className="btn" disabled={saving || draft === null} onClick={() => void save()}>
+            {saving ? t('儲存中…') : t('儲存執行者池')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
