@@ -1251,13 +1251,14 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 不動 daemon：`remaining_pct` 與 low／critical 旗標的算法不變，這只是顯示用字。
 
 ## 環境設定頁的手機版（使用者 2026-10-12，issue #1466；分頁導覽見 #1922，觸控與卡片規則仍在）
-使用者：「修環境設定的 rwd，手機不好用」。只動 ≤640px（跟全螢幕 sheet 同一個斷點，`PHONE_QUERY`）；桌機與平板版面不動。樣式在 `components/envPanelPhone.css`（所有規則掛 `.env-panel`，整檔只有一個手機 media 區塊，`envPanelPhoneCss.test.ts` 釘住）。
+使用者：「修環境設定的 rwd，手機不好用」。只動 ≤640px（跟全螢幕 sheet 同一個斷點，`PHONE_QUERY`）；桌機與平板版面不動。樣式在 `components/envShell.css` 的手機 media 區塊（所有規則掛 `.env-panel`，#1922 的分頁外殼根節點；`envShellPhoneCss.test.ts` 釘住）。
 - **每區是一條可點的標題列（`EnvSection`）**：已被 #1922 的折行分頁（手機）與左側分頁（桌機）取代。原手風琴按鈕移除。
 - **觸控目標 ≥44px**（按鈕、勾選列、輸入框、展開鍵）；**文字 ≥13px**，輸入框 16px 照 styles.css 的手機規則（不重寫）。表單標籤在上、欄位撐滿。
 - **主機列**：燈＋名稱＋ssh 在上，重連／開 shell／刪除獨占下一行（四顆鍵並排會把名稱擠成一條縫）；ssh 目標、身份 env、shell 名稱折行，不再用省略號（手機沒有 hover 看 title）。
 - **沒有巢狀捲動**：「最近刪除」清單與主機基準差異清單在手機取消自己的 `max-height`＋捲軸，整頁只有 sheet 一條捲軸。
 - **Jev 帳本表格在手機攤成卡片**（`JudgeLedger`：每格帶 `data-label` 與 ARIA role，表頭視覺上收掉、螢幕閱讀器仍讀得到）；數字欄（時間、機率、耗時、各窗口筆數）不折行。桌機仍是帶橫向捲動容器的表格。
 - 沒有 ego 看不到真畫面，這一版沒有截圖；以 DOM／CSS 結構測試釘住，交使用者在手機上確認。
+- **手機設定頁按鈕維持 44px 觸控高度，按鈕列換行不溢出**（2026-11-01 接回分頁外殼）：身份列的 Switch／Sign out／Disable、✕ 刪除鍵都是 44px，列內 `flex-wrap` 折行，不靠縮小目標；八個分頁在 390px 寬的 `scrollWidth` 都是 390，無水平捲動。
 
 ## 環境設定重造為分頁導覽（issue #1922，2026-10-23）
 
