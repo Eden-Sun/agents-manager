@@ -151,7 +151,6 @@ export function BotSwitcherMenu({
                   <div key={sec.role} className="bot-switcher-section">
                     <div className="bot-switcher-expert-head" aria-hidden="true">
                       <span className="bot-switcher-expert-title">{sec.title}</span>
-                      <span className="bot-switcher-expert-count">{sec.items.length}</span>
                     </div>
                     {sec.items.map((b) => (
                       <button
@@ -165,7 +164,7 @@ export function BotSwitcherMenu({
                       >
                         <RowLamp botId={b.id} />
                         <KindTag kind={b.kind} />
-                        <ExpertRoleTag role={b.role} rolePending={b.role_pending} />
+                        {b.role_pending ? <ExpertRoleTag role={b.role} rolePending /> : null}
                         <span className="bot-switcher-name">{b.name}</span>
                       </button>
                     ))}

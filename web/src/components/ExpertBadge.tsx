@@ -48,17 +48,10 @@ export function ExpertDisabledMark() {
   )
 }
 
-export function ExpertSectionHeader({
-  title,
-  count,
-}: {
-  title: string
-  count: number
-}) {
+export function ExpertSectionHeader({ title }: { title: string }) {
   return (
     <div className="expert-section-head" role="presentation" aria-hidden="true">
       <span className="expert-section-title">{title}</span>
-      <span className="expert-section-count">{count}</span>
     </div>
   )
 }

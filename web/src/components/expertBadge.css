@@ -111,21 +111,16 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px 3px 14px;
+  padding: 4px 12px 1px 14px;
   user-select: none;
 }
 
+/* 像分隔線不像清單項：小字、淡色、不帶人數（2026-11-01 使用者：太複雜）。 */
 .expert-section-title {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  color: var(--text-dim);
-  letter-spacing: 0.02em;
-}
-
-.expert-section-count {
-  font-size: 10.5px;
-  font-family: var(--font-mono);
   color: var(--text-faint);
+  letter-spacing: 0.04em;
 }
 
 /* 手機與 BotSwitcher 內的專家段落標題 */

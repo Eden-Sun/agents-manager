@@ -432,7 +432,8 @@ function BotRowImpl({
           </span>
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
-            {isExpertProject && !compact ? <ExpertRoleTag role={bot.role} rolePending={bot.role_pending} /> : null}
+            {/* 分段標題已經寫了角色，列上不再重複小標；只有「待套用」時留著（黃點是要重啟的訊號）。 */}
+            {isExpertProject && !compact && bot.role_pending ? <ExpertRoleTag role={bot.role} rolePending /> : null}
             {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
@@ -1440,7 +1441,7 @@ export function Sidebar() {
                 {p.mode === 'expert' ? (
                   groupExpertSections(list).map((sec) => (
                     <Fragment key={sec.role}>
-                      <ExpertSectionHeader title={sec.title} count={sec.items.length} />
+                      <ExpertSectionHeader title={sec.title} />
                       {sec.items.map((b) => {
                         const kids = descendantsOf(b.id)
                         const shut = kids.length > 0 && collapsed.has(b.id) && !query

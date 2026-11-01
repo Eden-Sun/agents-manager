@@ -97,21 +97,13 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
 
   // 分段標題驗證：順序 管理者 -> 顧問 -> 執行者 -> 未分配
   const headers = [...expSection.querySelectorAll('.expert-section-head')].map((el) => el.textContent?.trim())
-  assert.deepEqual(headers, ['管理者1', '專家1', '顧問1', '執行者1', '未分配1'], '專家分段標題順序與數量正確')
+  assert.deepEqual(headers, ['管理者', '專家', '顧問', '執行者', '未分配'], '專家分段標題順序正確（不帶人數）')
 
-  // 頂層 bot 角色短標驗證
-  const mgrTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-mgr"] .bot-role-tag')
-  assert.ok(mgrTag, '管理者 bot 應有角色短標')
-  assert.equal(mgrTag?.textContent?.trim(), '管', '管理者短標為「管」')
-
-  const advTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-adv"] .bot-role-tag')
-  assert.ok(advTag, '顧問 bot 應有角色短標')
-  assert.equal(advTag?.textContent?.trim(), '顧', '顧問短標為「顧」')
-
-  // 專家：角色小標「專」，名字旁顯示 track（小灰字）
-  const specTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-spec"] .bot-role-tag')
-  assert.equal(specTag?.textContent?.trim(), '專', '專家短標為「專」')
-  assert.equal(expSection.querySelector('[data-bot-id="exp-spec"] .bot-track-tag')?.textContent?.trim(), 'infra', '專家名字旁顯示 track')
+  // 分段標題已寫角色：列上不再重複角色小標（2026-11-01 使用者），只有待套用的留著
+  for (const id of ['exp-mgr', 'exp-adv', 'exp-spec']) {
+    assert.equal(expSection.querySelector(`[data-bot-id="${id}"] .bot-role-tag`), null, `${id} 不應有角色短標`)
+  }
+  assert.equal(expSection.querySelector('[data-bot-id="exp-spec"] .bot-track-tag')?.textContent?.trim(), 'infra', '專家顯示 track')
   assert.equal(expSection.querySelector('[data-bot-id="exp-adv"] .bot-track-tag'), null, '非專家不顯示 track')
 
   const execTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-exec"] .bot-role-tag')
