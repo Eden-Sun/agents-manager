@@ -15,8 +15,8 @@ const POLL_MS = 30_000
 /**
  * 選單（側欄）裡每個專案被 trace 的 shell／服務 pane（SPEC §6.5e）。
  *
- * 使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」。專案頁的「其他 pane」區塊（`ProjectPanes`）
- * 管的是看細節、聚焦與關閉；這裡只做一件事——**點一下就在這個 app 裡打開那顆 pane**，手機上也進得去
+ * 使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」。過去專案頁的「其他 pane」區塊管看細節、聚焦與關閉（已移除）。
+ * 這裡只做一件事——**點一下就在這個 app 裡打開那顆 pane**，手機上也進得去
  * （herdr 的聚焦只動得了那台機器的 TUI）。
  *
  * 有 listen port 的 pane（dev server 之類）只能看不能打字——界線在 daemon（`shell::allowed`），面板也照著鎖住。
