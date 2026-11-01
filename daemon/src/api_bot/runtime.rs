@@ -90,6 +90,8 @@ struct RuntimeInner {
     admission: AsyncMutex<HashMap<AdmissionKey, Weak<AsyncMutex<()>>>>,
     bot_admission: AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     explicit_quarantine: Mutex<HashMap<String, Arc<()>>>,
+    /// 失敗 turn 的固定原因代碼（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
+    fail_reasons: Mutex<HashMap<FullKey, String>>,
 }
 
 /// Runtime storage is initialized without tasks, sockets, or database work.
@@ -118,6 +120,7 @@ impl ApiBotRuntime {
                 admission: AsyncMutex::new(HashMap::new()),
                 bot_admission: AsyncMutex::new(HashMap::new()),
                 explicit_quarantine: Mutex::new(HashMap::new()),
+                fail_reasons: Mutex::new(HashMap::new()),
             }),
             dependencies: Mutex::new(None),
         }
@@ -281,9 +284,9 @@ impl ApiBotRuntime {
         if matches!(cap, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
         let limits = cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("api_bot_disabled"))?;
         if self.dependencies_snapshot().is_none() {
-            // 單次預留上限（與 pricing::Opus55Global::reserve 同式）：1M input token × 輸入單價 + max_output_tokens × 輸出單價。
-            let (rate_in, rate_out) = if bot.fast != 0 { (8_i64, 40_i64) } else { (4, 20) };
-            let reserve = 1_000_000_i64 * rate_in + i64::from(limits.max_output_tokens) * rate_out;
+            // 單次預留現在依實際 request 估；啟動時還沒有 request，用「3 萬 token 輸入（按快取寫入價）＋ max_output_tokens」當最低門檻。
+            let factor = if bot.fast != 0 { 2_i64 } else { 1 };
+            let reserve = (32_768_i64 * 5 + i64::from(limits.max_output_tokens) * 20) * factor;
             if limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
             if !native_bwrap_available() || !bwrap_userns_works().await { return Err(E::Refused("api_bot_sandbox_unavailable")); }
             let dependencies = production_dependencies(app, &bot, &project, &limits).map_err(|_| E::Refused("api_bot_workspace_unavailable"))?;
@@ -441,7 +444,7 @@ impl ApiBotRuntime {
             match (records.next(), records.next()) {
                 (None, _) => None,
                 (Some((old, record)), None) => {
-                    if !matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed))) {
+                    if !matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed | Completion::Failed))) {
                         tracing::info!(reason = "api_same_run_prior_not_completed", "API bot same-run admission remains busy");
                         return Err(ApiBotError::Busy);
                     }
@@ -568,6 +571,8 @@ impl ApiBotRuntime {
         let adapter = Arc::clone(&adapter);
         let tools = SharedTools(Arc::clone(&dependencies.tools));
         let max_calls = limits.max_api_calls_per_turn as usize;
+        let fail_inner = self.inner.clone();
+        let fail_key = full.clone();
         let turn_timeout = Duration::from_secs(limits.turn_timeout_secs);
         let (final_text_tx, final_text_rx) = oneshot::channel();
         let (release_tx, release_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
@@ -605,11 +610,15 @@ impl ApiBotRuntime {
                 );
                 let (result, deadline_elapsed) =
                     await_runner_deadline(execution, &cancel, turn_timeout).await;
+                let refusal = adapter.take_refusal();
                 let outcome = if deadline_elapsed {
                     TurnOutcome::Failed("turn_timeout".into())
                 } else {
-                    map_runner_result(result, &cancel)
+                    map_runner_result(result, &cancel, refusal)
                 };
+                if let TurnOutcome::Failed(reason) = &outcome {
+                    fail_inner.fail_reasons.lock().expect("fail reason mutex poisoned").insert(fail_key.clone(), reason.clone());
+                }
                 if matches!(&outcome, TurnOutcome::Completed) {
                     if let Some(response) = state.responses.last() {
                         let _ = final_text_tx.send(super::completion::FinalText::from_response(response));
@@ -687,7 +696,7 @@ impl ApiBotRuntime {
                 if Arc::ptr_eq(&record.identity, &identity_tag) {
                     record.owner_exited = true;
                     if let Ok(Some(proof)) = outcome {
-                        if !supervisor_shutdown.is_cancelled() && matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed))) {
+                        if !supervisor_shutdown.is_cancelled() && matches!(*record.joined.borrow(), JoinState::Joined(Ok(Completion::Completed | Completion::Failed))) {
                             record.finalized = Some(Arc::new(proof));
                         }
                     }
@@ -1040,12 +1049,20 @@ async fn own_ticket_inner(
             let final_text = if joined == Completion::Completed {
                 (&mut owner.final_text).await.ok()
             } else { None };
+            let fail_reason = owner.app.api_bot_runtime.inner.fail_reasons.lock().expect("fail reason mutex poisoned").remove(&FullKey::from(&owner.key));
             if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
             ).await {
                 let revision = committed.session_revision;
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
-                if joined == Completion::Completed && payload.outcome() == super::receipt::JoinOutcome::Completed && published {
+                if joined == Completion::Failed {
+                    super::completion::post_failure_notice(&owner.app, &owner.key, fail_reason.as_deref().unwrap_or("unknown")).await;
+                }
+                // 乾淨地結束（完成，或失敗但 checkpoint 已由 receipt 結清）才算 same-run 可接續；失敗後的下一則由 checkpoint 決定能不能繼續
+                // （有 unknown 的送出會在 rebind 時以 pending_unknown 明確失敗），不再卡在 in_flight/pending。
+                let clean = (joined == Completion::Completed && payload.outcome() == super::receipt::JoinOutcome::Completed)
+                    || (joined == Completion::Failed && payload.outcome() == super::receipt::JoinOutcome::Failed);
+                if clean && published {
                     #[cfg(all(test, feature = "daemon-test-harness"))]
                     crate::lifecycle::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
                     if shutdown.is_cancelled() { return None; }
@@ -1583,24 +1600,28 @@ async fn validated_turn(
 fn map_runner_result(
     result: Result<super::runner::Halt, super::runner::Error>,
     cancel: &CancellationToken,
+    refusal: Option<&'static str>,
 ) -> TurnOutcome {
+    use super::http::Error as H;
     match result {
         Ok(super::runner::Halt::EndTurn | super::runner::Halt::Refusal) => TurnOutcome::Completed,
         Ok(super::runner::Halt::MaxTokens) => TurnOutcome::Failed("max_tokens".into()),
         Ok(super::runner::Halt::Other(_)) => TurnOutcome::Failed("unknown_stop".into()),
         Err(super::runner::Error::Cancelled) => TurnOutcome::Cancelled,
-        Err(super::runner::Error::Model(super::http::Error::Cancelled))
-            if cancel.is_cancelled() =>
-        {
-            TurnOutcome::Cancelled
-        }
-        Err(super::runner::Error::Budget) => TurnOutcome::Failed("budget".into()),
-        Err(super::runner::Error::Journal) => TurnOutcome::Failed("journal".into()),
+        Err(super::runner::Error::Model(H::Cancelled)) if cancel.is_cancelled() => TurnOutcome::Cancelled,
+        Err(super::runner::Error::Budget) => TurnOutcome::Failed("api_bot_max_calls_reached".into()),
+        // 預留被拒絕時儲存失敗會冒成 Journal；有明確原因（額度、key、報價）就用它。
+        Err(super::runner::Error::Journal) => TurnOutcome::Failed(refusal.unwrap_or("journal").into()),
         Err(super::runner::Error::PendingUnknown) => TurnOutcome::Failed("pending_unknown".into()),
-        Err(super::runner::Error::InvalidResponse) => {
-            TurnOutcome::Failed("invalid_response".into())
-        }
-        Err(super::runner::Error::Model(_)) => TurnOutcome::Failed("model".into()),
+        Err(super::runner::Error::InvalidResponse) => TurnOutcome::Failed("invalid_response".into()),
+        Err(super::runner::Error::Model(e)) => TurnOutcome::Failed(match e {
+            H::RateLimited { .. } => "api_rate_limited".into(),
+            H::Http(status) => format!("api_http_{status}"),
+            H::Timeout => "api_timeout".into(),
+            H::TransportUnknown => "api_transport_unknown".into(),
+            H::TooLarge | H::InvalidResponse => "api_invalid_response".into(),
+            H::InvalidRequest | H::Cancelled => "api_invalid_request".into(),
+        }),
     }
 }
 
@@ -2209,6 +2230,53 @@ mod tests {
         server.await.unwrap();
         assert!(matches!(result, Ok(Ok(()))), "native fake dispatch: {result:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 工具迴圈第二次呼叫被「整個 turn 累計」的成本上限擋下：turn 失敗要留一則帶 reason 的系統訊息，
+    /// 而且同一個 run 的下一則不能卡在 in_flight/pending（bug：失敗後 same-run 一律 Busy，stop 也跟著 busy）。
+    #[tokio::test]
+    async fn cap_exceeded_turn_posts_a_reason_notice_and_the_next_turn_still_runs() {
+        async fn complete(axum::extract::State(calls): axum::extract::State<Arc<AtomicUsize>>, Json(_): Json<Value>) -> Json<Value> {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Json(json!({"id":"t1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_cap","name":"bash","input":{"command":"pwd"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}))
+            } else {
+                Json(json!({"id":"t2","model":"claude-opus-5-5","content":[{"type":"text","text":"second answer"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+            }
+        }
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
+        let router = Router::new().route("/v1/messages", post(complete)).with_state(calls.clone());
+        let shutdown = CancellationToken::new(); let stop = shutdown.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        enable_fake_runtime(&env.app, format!("http://{addr}/v1/messages"), DEADLOCK_TIMEOUT).await;
+        // 測試報價：預留 100、結算 50。上限 120：第一次呼叫後累計 50，再預留 100 → 150 > 120。
+        env.app.cfg.update(|c| { c.claude_api.api_bot.max_turn_cost_microusd = Some(120); Ok(()) }).await.unwrap();
+        let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "use a tool").await;
+        let one = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first.clone() };
+        env.app.api_turn_spawn(&one).await.unwrap();
+        let status = |turn: String| { let app = env.app.clone(); async move { tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_optional(&app.db).await.unwrap();
+            if matches!(s.as_deref(), Some("failed" | "completed")) { return s.unwrap(); }
+            tokio::task::yield_now().await;
+        } }).await.unwrap() } };
+        assert_eq!(status(first.clone()).await, "failed");
+        // 系統訊息可見、帶 reason
+        let notice = tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop {
+            let m: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&first).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(m) = m { return m; }
+            tokio::task::yield_now().await;
+        } }).await.unwrap();
+        assert!(notice.contains("api_bot_turn_cost_cap_exceeded"), "{notice}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "被擋下的預留不能送出第二次請求");
+        // 同一個 run 的下一則：不再卡 Busy，會跑完
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','again',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let two = ApiTurnKey { bot_id: bot, run_id: run, turn_id: second.clone() };
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { match env.app.api_turn_spawn(&two).await { Ok(()) => break, Err(ApiBotError::Busy) => tokio::task::yield_now().await, Err(e) => panic!("{e:?}") } } }).await.unwrap();
+        assert_eq!(status(second).await, "completed");
+        shutdown.cancel(); server.await.unwrap();
     }
 
     /// 確定沒有副作用的前置失敗要回明確 reason，不能全折成 unconfirmed（使用者實測：沒開 `[claude_api.api_bot]` 只看到 unconfirmed）。

@@ -39,7 +39,45 @@ impl Options {
     }
 }
 
+/// Prompt caching（5 分鐘 ephemeral）：斷點放在 system 末尾（涵蓋 tools＋system）、最後一則訊息與其前一則的最後一個 block，
+/// 共 3 個（上限 4）。下一次呼叫時前一次的「最後一則」就是前綴，因此讀得到快取。斷點只加在送出的 body，不進 checkpoint。
+fn ephemeral() -> Value {
+    json!({"type": "ephemeral"})
+}
+
+fn mark_last_block(content: &Value) -> Value {
+    match content {
+        Value::String(text) if !text.is_empty() => {
+            json!([{"type": "text", "text": text, "cache_control": ephemeral()}])
+        }
+        Value::Array(blocks) => {
+            let mut blocks = blocks.clone();
+            if let Some(Value::Object(last)) = blocks.last_mut() {
+                // thinking 區塊不能帶 cache_control。
+                if !matches!(last.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking")) {
+                    last.insert("cache_control".into(), ephemeral());
+                }
+            }
+            Value::Array(blocks)
+        }
+        other => other.clone(),
+    }
+}
+
 pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value {
+    let system = mark_last_block(system);
+    let last = messages.len().saturating_sub(1);
+    let messages: Vec<Message> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i == last || (i + 2 == messages.len()) {
+                Message { role: m.role.clone(), content: mark_last_block(&m.content) }
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
     let mut body = json!({
         "model": "claude-opus-5-5", "max_tokens": options.max_tokens,
         "output_config": {"effort": options.effort},
