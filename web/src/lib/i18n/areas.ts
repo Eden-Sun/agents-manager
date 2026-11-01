@@ -100,7 +100,6 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'components/PrimaryStar.tsx',
     'components/ProjectMemBadge.tsx',
     'components/ProjectNameField.tsx',
-    'components/ProjectPanes.tsx',
     'components/QuickAddBots.tsx',
     'components/ShareLinkButton.tsx',
     'components/ShareProfileField.tsx',

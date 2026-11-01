@@ -721,17 +721,6 @@ export interface MessagesPage {
   has_more: boolean
 }
 
-export interface StartResult {
-  run_id: string
-}
-
-/** daemon `WsEvent` */
-export interface WsFrame {
-  seq?: number
-  type: string
-  data?: unknown
-}
-
 export interface ApiErrorBody {
   /** machine code: `conflict` | `bad_request` | `not_found` | `upstream` */
   error?: string
@@ -948,10 +937,6 @@ export function canonicalModel(kind: BotKind, id: string): string {
   if (kind === 'agy' && !agyModelAllowed(id)) return AGY_DEFAULT_MODEL
   return DEPRECATED_MODELS[`${kind}:${id}`] ?? id
 }
-
-/** `<select>` sentinel 值 */
-export const MODEL_DEFAULT = ''
-export const MODEL_CUSTOM = 'custom'
 
 /** `GET /api/models?kind=&host=` */
 export interface ModelInfo {

@@ -3,8 +3,8 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
-import { t, useLang, useT } from '../lib/i18n'
-import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
+import { t, useT } from '../lib/i18n'
+import { missingTools, runningBotsOnHost, useStore } from '../store/store'
 import { AgyInstallButton } from './AgyInstall'
 import { KindTag } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
@@ -154,49 +154,6 @@ function missingFromKey(key: string): { host: string; kind: BotKind }[] {
     const i = part.lastIndexOf(':')
     return { host: part.slice(0, i), kind: part.slice(i + 1) as BotKind }
   })
-}
-
-/** Compact amber icon + count for the main header when the full bar is not shown. */
-export function ToolsHintIcon() {
-  useLang() // 標題文字走模組層的 t()：訂閱語言，切換時重繪
-  const missingKey = useStore((s) => missingKeyOf(s))
-  const dismissed = useStore((s) => s.toolHintDismissed)
-  const selectedBotId = useStore((s) => s.selectedBotId)
-  const selectedProjectId = useStore((s) => s.selectedProjectId)
-  const bots = useStore((s) => s.bots)
-  const missing = useMemo(() => missingFromKey(missingKey), [missingKey])
-
-  const focus = useMemo(() => {
-    const state = useStore.getState()
-    if (selectedProjectId) {
-      const host = projectHostName(state, selectedProjectId)
-      const kinds = bots.filter((b) => b.project_id === selectedProjectId).map((b) => b.kind)
-      return { host, kinds: [...new Set(kinds)] as BotKind[] }
-    }
-    if (selectedBotId) {
-      const bot = bots.find((b) => b.id === selectedBotId)
-      if (!bot) return null
-      return { host: projectHostName(state, bot.project_id), kinds: [bot.kind] as BotKind[] }
-    }
-    return null
-  }, [selectedBotId, selectedProjectId, bots])
-
-  const relevant = relevantMissing(missing, focus?.host, focus?.kinds)
-  if (dismissed || missing.length === 0 || relevant.length > 0) return null
-
-  const title = summarizeMissing(
-    missing.reduce((map, m) => {
-      map.set(m.host, [...(map.get(m.host) ?? []), m.kind])
-      return map
-    }, new Map<string, BotKind[]>()),
-  )
-
-  return (
-    <span className="tools-hint-icon" title={title} aria-label={title}>
-      <span aria-hidden="true">⚠</span>
-      <span className="tools-hint-count">{missing.length}</span>
-    </span>
-  )
 }
 
 /** Banner under the header: only when the current bot / group recipients are affected. */

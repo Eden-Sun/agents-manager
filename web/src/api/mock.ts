@@ -1198,8 +1198,6 @@ export class MockTransport implements Transport {
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/api-usage$/); if (method === 'GET' && m) return this.apiUsage(decodeURIComponent(m[1])) }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
-    // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
-    { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
     // 全部被 trace 的 pane；`unowned=1` 只回對不到專案的，並標哪一顆是 scratch（§6.5e）。
     if (method === 'GET' && rawPath === '/panes') return { panes: q.get('unowned') === '1' ? this.unownedPanes() : this.allPanes() }
     { const m = rawPath.match(/^\/panes\/([^/]+)\/(focus|close|adopt)$/); if (method === 'POST' && m) {
@@ -1626,12 +1624,6 @@ export class MockTransport implements Transport {
   private allPanes() {
     this.seedPanes()
     return this.panes.map((p) => this.paneRow(p))
-  }
-
-  private projectPanes(projectId: string) {
-    this.seedPanes()
-    const project = this.projects.find((p) => p.id === projectId)
-    return { project_id: projectId, host: project?.host ?? 'local', panes: this.allPanes().filter((p) => p.project_id === projectId) }
   }
 
   /** scratch＝對不到專案的 shell 裡 `first_seen` 最早的那顆，由 daemon 標，前端不重算。 */

@@ -141,12 +141,6 @@ function toPane(v: unknown): ProjectPane {
   }
 }
 
-export async function fetchProjectPanes(projectId: string): Promise<ProjectPane[]> {
-  const raw = await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/panes`)
-  const list = (raw as { panes?: unknown[] })?.panes
-  return Array.isArray(list) ? list.map(toPane) : []
-}
-
 /** 全部被 trace 的 pane（`GET /api/panes`）：重整／深連結時用來把「從選單點進去的 pane」還原回來。 */
 export async function fetchAllPanes(): Promise<ProjectPane[]> {
   const raw = await transport.request('GET', '/panes')

@@ -42,12 +42,7 @@ test('跑著 vim、沒有 port 的 pane：唯讀是 false，打得進去', async
   assert.equal(await status(mock.request('POST', '/hosts/local/shells/w168%3Ap63/text', { text: ':q', enter: true })), 200)
 })
 
-test('專案只回自己的 pane；沒歸屬的只在 ?unowned=1，並標出 scratch', async () => {
-  const pid = await projectId()
-  const mine = (await mock.request('GET', `/projects/${pid}/panes`)) as { panes: Row[] }
-  assert.ok(mine.panes.length > 0)
-  assert.ok(mine.panes.every((p) => p.project_id === pid))
-  assert.deepEqual(((await mock.request('GET', '/projects/other/panes')) as { panes: Row[] }).panes, [])
+test('沒歸屬的只在 ?unowned=1，並標出 scratch', async () => {
   const unowned = (await mock.request('GET', '/panes?unowned=1')) as { panes: Row[] }
   assert.ok(unowned.panes.every((p) => p.project_id === null))
   assert.equal(unowned.panes.filter((p) => p.scratch).length, 1, '只有一顆 scratch')
