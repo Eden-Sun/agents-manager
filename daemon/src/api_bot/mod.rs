@@ -1,6 +1,6 @@
-//! #1944 A/C1: inert building blocks only. No kind, route, lifecycle entry, or paid call site.
-//! The future host must persist checkpoints before acknowledging them and recover pending
-//! attempts/tools as unknown, never by replaying their side effects.
+//! API bot（claude-api）後端。`runtime.rs` 是已接線的入口（lifecycle 與 HTTP 路由由它進入），
+//! 其餘模組是它依賴的協議、HTTP、報價、註冊表、完成儲存與啟動復原。
+//! 持久化規則：checkpoint 必須先落盤才回應；復原時進行中的 attempt／tool 標為 unknown，不重放副作用。
 #![allow(dead_code)]
 
 pub(crate) mod adapter;
