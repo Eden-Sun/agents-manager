@@ -72,9 +72,11 @@ pub(crate) async fn list(
     };
 
     // Candidates evaluation for `for_track`
+    // track 名稱只在專案內有意義：別的專案的同名 track 不算「進行中」（以收件 bot 的 project_id 劃範圍）。
     let active_track_holder: Option<String> = sqlx::query_scalar(
-        "SELECT to_bot_id FROM relay_requests WHERE track=? AND state IN ('pending','delivered') ORDER BY created_at DESC LIMIT 1"
-    ).bind(for_track).fetch_optional(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        "SELECT r.to_bot_id FROM relay_requests r JOIN bots b ON b.id = r.to_bot_id \
+         WHERE r.track=? AND b.project_id=? AND r.state IN ('pending','delivered') ORDER BY r.created_at DESC LIMIT 1"
+    ).bind(for_track).bind(&project_id).fetch_optional(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
 
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.unwrap_or_default();
     let now = chrono::Utc::now();
@@ -392,6 +394,38 @@ mod tests {
         let b2_in_conflict = cands2.iter().find(|c| c["id"] == b2.id).unwrap();
         assert_eq!(b2_in_conflict["eligible"], false);
         assert!(b2_in_conflict["reasons"].as_array().unwrap().iter().any(|r| r.as_str().unwrap().contains("進行中")));
+    }
+
+    #[tokio::test]
+    async fn an_active_track_in_another_project_does_not_block_this_project() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let here = crate::testing::claude_bot(&app, &env.project_id, "here").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&here.id).execute(&app.db).await.unwrap();
+        let r = crate::testing::fake_run(&app, &here.id).await;
+        sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(&r).execute(&app.db).await.unwrap();
+
+        // 另一個專案的 bot 手上有同名 track 的 pending 委派。
+        let other = crate::db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&app.db).await.unwrap();
+        let there = crate::testing::claude_bot(&app, &other, "there").await;
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES('rr-x',?,?,'cx','p','[]','pending',?,'billing')")
+            .bind(&there.id).bind(&there.id).bind(crate::db::now()).execute(&app.db).await.unwrap();
+
+        let res = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery { for_track: Some("billing".into()) }), Extension(RequestPrincipal::Bot(here.id.clone()))).await.unwrap().0;
+        let c = res["candidates"].as_array().unwrap().iter().find(|c| c["id"] == here.id).unwrap().clone();
+        assert_eq!(c["eligible"], true, "{c}");
+        assert!(!c["reasons"].as_array().unwrap().iter().any(|r| r.as_str().unwrap().contains("進行中")), "{c}");
+
+        // 同專案的同名 track 仍會擋。
+        let peer = crate::testing::claude_bot(&app, &env.project_id, "peer").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&peer.id).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES('rr-y',?,?,'cy','p','[]','pending',?,'billing')")
+            .bind(&peer.id).bind(&peer.id).bind(crate::db::now()).execute(&app.db).await.unwrap();
+        let res = list(State(app), Path(env.project_id.clone()), Query(PeersQuery { for_track: Some("billing".into()) }), Extension(RequestPrincipal::Bot(here.id.clone()))).await.unwrap().0;
+        let c = res["candidates"].as_array().unwrap().iter().find(|c| c["id"] == here.id).unwrap().clone();
+        assert!(c["reasons"].as_array().unwrap().iter().any(|r| r.as_str().unwrap().contains("進行中")), "{c}");
     }
 }
 
