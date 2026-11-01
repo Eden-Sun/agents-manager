@@ -47,6 +47,12 @@ function modelLabel(m: ModelInfo): string {
   return name.replace(/^gpt-/i, '')
 }
 
+function menuEffortLabel(kind: BotKind, effort: string): string {
+  if (kind !== 'claude' && kind !== 'codex') return effortLabel(effort)
+  const labels: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', max: 'X', ultra: 'U' }
+  return labels[effort.toLowerCase()] ?? effortLabel(effort)
+}
+
 /** 照 `MODEL_OPTIONS` 排序：API 順序隨 CLI 版本變會毀掉肌肉記憶；新模型接在後面。 */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
   const want = MODEL_OPTIONS[kind] ?? []
@@ -167,10 +173,11 @@ export function ApiModelFields({
                 role="radio"
                 aria-checked={selectedEffort === e}
                 className={`opt${selectedEffort === e ? ' on' : ''}`}
-                title={effortTitle(kind, current, e) ?? e}
+                title={effortTitle(kind, current, e) ?? effortLabel(e)}
+                aria-label={[effortLabel(e), effortTitle(kind, current, e)].filter(Boolean).join(' — ')}
                 onClick={() => onEffort(e)}
               >
-                {effortLabel(e)}
+                {menuEffortLabel(kind, e)}
                 {effortBadges(current, e)}
               </button>
             ))}
@@ -443,10 +450,11 @@ export function ModelQuickPicker({
                   tabIndex={-1}
                   className={`opt${selectedEffort === e ? ' on' : ''}`}
                   disabled={patching}
-                  title={effortTitle(kind, current, e)}
+                  title={effortTitle(kind, current, e) ?? effortLabel(e)}
+                  aria-label={[effortLabel(e), effortTitle(kind, current, e)].filter(Boolean).join(' — ')}
                   onClick={() => pickEffort(e)}
                 >
-                  {effortLabel(e)}
+                  {menuEffortLabel(kind, e)}
                   {effortBadges(current, e)}
                 </button>
               ))}
