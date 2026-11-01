@@ -63,7 +63,7 @@ import {
   TOOL_UNKNOWN,
 } from './types.ts'
 import { identityRowKey } from '../store/identityRows'
-import { byInsert, byTime } from '../store/lists'
+import { byTime } from '../store/lists'
 
 type Rec = Record<string, unknown>
 
@@ -665,25 +665,8 @@ export function toMessage(v: unknown, botId?: string): Message | null {
 }
 
 /** SPEC §13.4 */
-/** Insert order — the daemon paginates by rowid (`seq`); ULID order only when `seq` is missing. */
-export function sortByInsert<T extends { id: string; seq?: number }>(items: T[]): T[] {
-  return [...items].sort(byInsert)
-}
-
 export function sortByTime<T extends { created_at: string; id: string; seq?: number }>(items: T[]): T[] {
   return [...items].sort(byTime)
-}
-
-/**
- * Same, but same-millisecond items keep the order the daemon sent them in.
- *
- * Mission events already come back in write order (`ORDER BY created_at, rowid`); `created_at` only
- * has millisecond resolution and the ids are ULIDs, whose random section is not monotonic inside one
- * millisecond, so tie-breaking on `id` here would scramble a round/paused/resumed burst all over again.
- * `Array.prototype.sort` is stable, so returning 0 for a tie keeps the incoming order.
- */
-export function sortByTimeStable<T extends { created_at: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
 /** `host_baseline_sync`（#719 階段 3b）：只收 "ask"；其他值、缺欄（舊 daemon、bot 視圖）一律 off——缺值時不准預設可以寫。 */

@@ -13,12 +13,6 @@ export function parseEnvText(text: string): Record<string, string> {
   return out
 }
 
-export function envToText(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n')
-}
-
 /**
  * 跟 Rust `str::trim`（`char::is_whitespace`＝Unicode White_Space）同一組空白：daemon 用它判斷 env 值是不是空的（`check_identity_env_values`）。
  * JS 的 `trim()` 集合不同：它多算 U+FEFF、少算 U+0085，同一個值前後端會判得不一樣。

@@ -142,7 +142,6 @@ export default {
   '上一回合的送達狀態未知，請先「放棄該回合」或停止 Bot': 'Delivery for the previous turn is unknown. Use “Abandon turn” or stop the Bot first.',
   'Bot 正在處理，送達尚未確認；確認後輸入框會自動解鎖': 'The Bot is working. Delivery is not confirmed yet; the input will unlock automatically once it is.',
   '訊息已送出，送達尚未確認（delivery=unknown）：確認 bot 收到後輸入框會自動解鎖；若 bot 一直閒著、輸入框仍鎖著，才需要「放棄該回合」。': 'The message was sent, but delivery is unconfirmed (delivery=unknown). The input will unlock when the bot receives it. Use “Abandon turn” only if the bot stays idle and the input remains locked.',
-  '部分訊息送達尚未確認（delivery=unknown）：確認 bot 收到後會自動解鎖；若某顆 bot 一直閒著、輸入框仍鎖著，才需要「放棄該回合」。': 'Some messages have unconfirmed delivery (delivery=unknown). The input will unlock when the bots receive them. Use “Abandon turn” only if a bot stays idle and the input remains locked.',
   // store/draftNotice.ts
   '這份草稿太長，沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices. It is still in this input.',
   '這份草稿太長（上限 {limit}），沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices (limit: {limit}). It is still in this input.',

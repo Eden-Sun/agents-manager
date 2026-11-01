@@ -20,11 +20,6 @@ export const UNKNOWN_SENT_NOTICE = msg(
   '訊息已送出，送達尚未確認（delivery=unknown）：確認 bot 收到後輸入框會自動解鎖；若 bot 一直閒著、輸入框仍鎖著，才需要「放棄該回合」。',
 )
 
-/** 群組送出：有幾顆 bot 回 unknown。 */
-export const UNKNOWN_GROUP_NOTICE = msg(
-  '部分訊息送達尚未確認（delivery=unknown）：確認 bot 收到後會自動解鎖；若某顆 bot 一直閒著、輸入框仍鎖著，才需要「放棄該回合」。',
-)
-
 /** composer 鎖住的原因：`working` 為真時是「還在確認」，該回合的「放棄」按鈕不當成第一個選項。 */
 export function unknownLock(agentStatus: string | null | undefined): { reason: string; working: boolean } {
   return agentStatus === 'working'

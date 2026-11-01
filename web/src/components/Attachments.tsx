@@ -184,16 +184,6 @@ export function FileIcon() {
   )
 }
 
-export function ImageIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <circle cx="5.75" cy="6.25" r="1.15" fill="currentColor" />
-      <path d="M2.5 11.5l3.25-3 2.5 2.25L11 8.25l2.5 2.75" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
 /** Object URL per attachment id, shared across bubbles. */
 const urlCache = new Map<string, Promise<string>>()
 /** LRU 上限：每個 object URL 釘住最大 50 MB Blob；已解碼的 `<img>` 不受 revoke 影響。 */

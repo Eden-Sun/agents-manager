@@ -3759,13 +3759,6 @@ export function runningBotsOnHost(state: StoreState, host: string): Bot[] {
   })
 }
 
-/** v4.0: the `herdr …` attach command for the host a project sits on. */
-export function attachCommandOf(state: StoreState, projectId: string | null): string {
-  const host = projectHostName(state, projectId)
-  if (host === 'local') return state.attachCommand
-  return state.hosts.find((h) => h.name === host)?.attach_command ?? state.attachCommand
-}
-
 /**
  * The partial reply to show as a live bubble: only for the turn that is actually in flight.
  *

@@ -9,8 +9,6 @@ import { t } from '../lib/i18n'
  *
  * Composer 只在 daemon 回報 send_now_supported 時畫按鈕；送出時仍由 daemon 再確認。
  */
-export type SendNowKind = 'claude' | 'codex'
-
 export interface SendNowButton {
   label: string
   title: string
