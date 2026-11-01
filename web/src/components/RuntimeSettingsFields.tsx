@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useId, type CSSProperties } from 'react'
 import type { RuntimeSettings } from '../api/types'
 import { useT } from '../lib/i18n'
 import { CONTEXT_TICKS, HOT_COMPACT_MAX, HOT_COMPACT_MIN, HOT_PCT_MAX, KEEP_WARM_MAX, KEEP_WARM_MIN, formatContext, nearestTickIndex, numberOrNull } from '../lib/runtimePolicy'
@@ -34,11 +34,21 @@ export function RuntimeSettingsFields({
   return (
     <div className="rt-fields">
       <div className="field">
-        <span id={`${ctxId}-label`}>{t('context 上限')}</span>
-        <div className="rt-ctx-row">
+        <div className="rt-ctx-head">
+          <span id={`${ctxId}-label`}>{t('context 上限')}</span>
+          <span className="rt-ctx-value">{value.context_tokens == null ? inheritLabel : formatContext(value.context_tokens)}</span>
+          {value.context_tokens != null ? (
+            <button type="button" className="rt-ctx-reset" disabled={disabled} onClick={() => set({ context_tokens: null })}>
+              {inheritLabel}
+            </button>
+          ) : null}
+        </div>
+        {/* 刻度與拉條同寬、逐格對齊（位置扣掉拇指半寬）；沒設時拇指淡化，不假裝停在 32k。 */}
+        <div className={`rt-ctx-slider${value.context_tokens == null ? ' inherit' : ''}`} style={{ '--rt-steps': CONTEXT_TICKS.length - 1 } as CSSProperties}>
           <input
             type="range"
             aria-labelledby={`${ctxId}-label`}
+            aria-valuetext={value.context_tokens == null ? inheritLabel : formatContext(value.context_tokens)}
             min={0}
             max={CONTEXT_TICKS.length - 1}
             step={1}
@@ -46,15 +56,13 @@ export function RuntimeSettingsFields({
             value={ctxIdx}
             onChange={(e) => set({ context_tokens: CONTEXT_TICKS[Number(e.target.value)] })}
           />
-          <span className="rt-ctx-value">{value.context_tokens == null ? inheritLabel : formatContext(value.context_tokens)}</span>
-          <button type="button" className="btn" disabled={disabled || value.context_tokens == null} onClick={() => set({ context_tokens: null })}>
-            {inheritLabel}
-          </button>
-        </div>
-        <div className="rt-ticks" aria-hidden="true">
-          {CONTEXT_TICKS.map((n) => (
-            <span key={n}>{formatContext(n)}</span>
-          ))}
+          <div className="rt-ticks" aria-hidden="true">
+            {CONTEXT_TICKS.map((n, i) => (
+              <span key={n} className={value.context_tokens === n ? 'on' : undefined} style={{ '--rt-i': i } as CSSProperties}>
+                {formatContext(n)}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
 
