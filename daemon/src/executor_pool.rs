@@ -183,13 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn haiku_has_a_1m_window_but_unknown_claude_models_stay_at_200k() {
-        let other = json!([{"id": "h", "kind": "claude", "model": "claude-x", "context_tokens": 300000, "count": 1}]);
+    fn every_claude_model_has_a_1m_window() {
+        let other = json!([{"id": "h", "kind": "claude", "model": "claude-x", "context_tokens": 1000001, "count": 1}]);
         assert_eq!(reason(parse_patch(&other).unwrap_err()), "context_out_of_range");
         assert!(parse_patch(&json!([{"id": "h", "kind": "claude", "model": "haiku", "context_tokens": 800000, "count": 1}])).is_ok());
         assert!(parse_patch(&json!([{"id": "o", "kind": "claude", "model": "opus", "context_tokens": 900000, "count": 1}])).is_ok());
         assert_eq!(context_window("claude", "haiku"), 1_000_000);
-        assert_eq!(context_window("claude", "claude-x"), 200_000);
+        assert_eq!(context_window("claude", "claude-x"), 1_000_000);
         assert_eq!(context_window("claude", "sonnet"), 1_000_000);
     }
 

@@ -68,7 +68,7 @@
   - 池是**條目清單**，不是 kind→數量。每條目：種類、模型、強度（可空＝預設）、context（可空＝模型預設；agy 不支援，灰掉並註明）、可增聘上限 1..10。條目最多 20 條；四元組（種類、模型、強度、context）相同不可重複。
   - 列表每條一列：`kind · model · effort · context · 已用/上限`（已用＝同專案 role=executor 且 `pool_entry` 指向該條目的 bot 數）；可改上限、刪除。舊資料 `{kind: n}` 顯示成 model 為空的「任何模型（舊資料）」條目，存檔後轉成陣列。
   - **加入建議**：列出五條預設（claude haiku low 200k ×2、claude sonnet medium 200k ×1、codex terra medium 256k ×1、codex luna xhigh 256k ×1、agy gemini flash low ×2），每條要勾選才加入，不自動加。model 一律取 `GET /api/models?kind=&host=` 當下版本號最大的（`[1m]` 變體不算）；查不到的家族不列。已在池中的組合顯示「已在池中」且不能再勾。
-  - **新增條目**：種類、模型（下拉取 `/api/models`）、強度（下拉取該模型的 `efforts`，另有「預設強度」）、context（「用模型預設」或拉條；上限取 `context_window`，沒有就 claude opus／sonnet／haiku 1M、其他 claude 200k（清單有該模型的 `[1m]` 變體也算 1M）、codex 400k；下限 200k）、數量。
+  - **新增條目**：種類、模型（下拉取 `/api/models`）、強度（下拉取該模型的 `efforts`，另有「預設強度」）、context（「用模型預設」或拉條；上限取 `context_window`，沒有就 claude 一律 1M、codex 400k；下限 200k）、數量。
   - 編輯後才亮起「儲存執行者池」，存檔送出 `PATCH /api/projects/{id}` `{"executor_pool": [...]}` 整份覆蓋。
 
 ## 專案設定頁與主力列（2026-11-01，使用者）
