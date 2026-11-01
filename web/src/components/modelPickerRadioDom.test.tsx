@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ApiModelFields, ModelQuickPicker } from './ModelPicker'
-import { effortLabel, type ModelInfo } from '../api/types'
+import { type ModelInfo } from '../api/types'
 
 before(setupDom)
 afterEach(async () => {
@@ -92,10 +92,20 @@ test('強度選項同理：[aria-label="強度"] [role="radio"][aria-checked="tr
 
   const checked = group.querySelectorAll('[role="radio"][aria-checked="true"]')
   assert.equal(checked.length, 1, '應恰好有一顆 radio 是 aria-checked="true"')
-  assert.ok(
-    checked[0].textContent?.includes(effortLabel('high')),
-    `文字應包含 high 對應標籤 ${effortLabel('high')}`,
-  )
+  assert.equal(checked[0].textContent?.trim(), 'H')
+  assert.match(checked[0].getAttribute('aria-label') ?? '', /High/)
+})
+
+test('Codex 簡寫仍能區分 Medium 和 Max，選擇送出原始值', async () => {
+  const chosen: (string | null)[] = []
+  useStore.setState({ models: { 'codex@local@': [{ ...testModels[0], efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], default_effort: null }] } })
+  await mount(<ApiModelFields kind="codex" host="local" model="alpha" onModel={() => {}} effort="medium" onEffort={(e) => chosen.push(e)} fast={false} onFast={() => {}} />)
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="強度"] button')]
+  assert.deepEqual(buttons.map((b) => b.textContent?.trim()), ['L', 'M', 'H', 'XH', 'X', 'U'])
+  assert.match(buttons[1].getAttribute('aria-label') ?? '', /Medium/)
+  assert.match(buttons[4].getAttribute('aria-label') ?? '', /Max/)
+  await click(buttons[4])
+  assert.deepEqual(chosen, ['max'])
 })
 
 test('沒指定模型時標在預設那顆', async () => {

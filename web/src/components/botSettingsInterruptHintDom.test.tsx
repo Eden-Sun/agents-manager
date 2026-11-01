@@ -26,8 +26,6 @@ const botOf = (kind: 'codex' | 'claude') =>
 const runOf = (agent_status: string) => ({ id: 'r1', bot_id: 'b1', state: 'running', agent_status }) as unknown as Run
 
 const text = () => document.body.textContent ?? ''
-const buttonByText = (label: string) =>
-  [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim().startsWith(label))!
 
 async function open(kind: 'codex' | 'claude', agent: string): Promise<void> {
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
@@ -38,18 +36,18 @@ async function open(kind: 'codex' | 'claude', agent: string): Promise<void> {
 test('codex 回合進行中改 effort：儲存前就說明會先停下目前回合、套用後送 continue', async () => {
   await open('codex', 'working')
   assert.ok(!text().includes('先按 Esc'), '還沒改任何值：不出現')
-  await click(buttonByText('High'))
+  await click(document.querySelector<HTMLButtonElement>('[role="radio"][aria-label^="High"]')!)
   assert.ok(text().includes('先按 Esc 停下目前回合') && text().includes('continue'), '改了 effort 才出現')
 })
 
 test('codex 閒著、或不是 codex：改 effort 不出現打斷說明', async () => {
   await open('codex', 'idle')
-  await click(buttonByText('High'))
+  await click(document.querySelector<HTMLButtonElement>('[role="radio"][aria-label^="High"]')!)
   assert.ok(!text().includes('先按 Esc'), 'codex 閒著')
   await act(async () => {
     await unmountAll()
   })
   await open('claude', 'working')
-  await click(buttonByText('High'))
+  await click(document.querySelector<HTMLButtonElement>('[role="radio"][aria-label^="High"]')!)
   assert.ok(!text().includes('先按 Esc'), 'claude 不打斷')
 })

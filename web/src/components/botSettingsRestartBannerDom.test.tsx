@@ -46,7 +46,7 @@ const buttonByText = (label: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim().startsWith(label))!
 
 async function saveEffortHigh(): Promise<void> {
-  await click(buttonByText('High'))
+  await click(document.querySelector<HTMLButtonElement>('[role="radio"][aria-label^="High"]')!)
   await click(buttonByText('儲存'))
 }
 
