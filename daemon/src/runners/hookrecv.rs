@@ -314,13 +314,6 @@ async fn replay_local_spools(app: &Arc<App>) -> usize {
     n
 }
 
-#[allow(dead_code)]
-pub async fn replay_all(app: &Arc<App>) {
-    for host in app.hosts.names().await {
-        replay_host(app, &host).await;
-    }
-}
-
 /// 重放一台 host 的 spool。列舉 bot 讀不到、或某顆 bot 的重放失敗，都不能當成「沒有 spool」：
 /// 記下來、背景重試到補齊為止（#243），沒有新的 reconnect／status 事件也會補。
 pub async fn replay_host(app: &Arc<App>, host: &str) {

@@ -156,7 +156,6 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
                 client_request_id: None,
                 status: "pending".into(),
                 waiting_reason: None,
-                notified: 0,
                 merged_count: 0,
                 conversation_id: None,
                 turn_id: None,
@@ -346,22 +345,6 @@ pub async fn withdraw_open_tx(
         .execute(&mut **tx)
         .await?;
     Ok(Some((turn_id, revoked)))
-}
-
-/// 取 bot 鎖後單獨撤回（沒有其他寫入時用）。
-pub async fn withdraw_open_for(app: &Arc<App>, bot_id: &str, schedule_id: &str, why: &str) -> Result<()> {
-    let pool = app.db.clone();
-    let lock = app.bot_lock(bot_id).await;
-    let _guard = lock.lock().await;
-    let now = db::now();
-    let mut tx = db::begin_write(&pool).await?;
-    let revoked = withdraw_open_tx(&mut tx, schedule_id, why, &now).await?;
-    tx.commit().await?;
-    drop(_guard);
-    if let Some((turn_id, r)) = revoked {
-        crate::lifecycle::announce_revoked(app, &turn_id, r).await;
-    }
-    Ok(())
 }
 
 /// Bot 資格：未刪、同專案（指定時）、非 child／分享／受限，專案未刪未移交。回傳 Bot 種類。

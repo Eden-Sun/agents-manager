@@ -41,16 +41,6 @@ pub async fn revoke_project_shares(app: &Arc<App>, project_id: &str) -> Result<(
 // Lifecycle Ports
 // ============================================================================
 
-/// Closes a herdr pane and its parent tab.
-pub async fn close_pane_and_tab(
-    client: &crate::herdr::HerdrClient,
-    workspace_id: Option<&str>,
-    tab_id: Option<&str>,
-    pane_id: &str,
-) {
-    lifecycle::close_pane_and_tab(client, workspace_id, tab_id, pane_id).await;
-}
-
 /// Closes a pane and confirms herdr removed it before callers discard its local records.
 pub async fn close_and_confirm(
     client: &crate::herdr::HerdrClient,
@@ -74,14 +64,6 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
 /// Checks if a run is sitting in default herdr session.
 pub fn in_default_session(run: &crate::db::Run) -> bool {
     lifecycle::in_default_session(run)
-}
-
-/// Resolves remote bot directory info.
-pub async fn remote_bot_dir(
-    conn: &crate::hosts::HostConn,
-    bot_id: &str,
-) -> anyhow::Result<crate::lifecycle::RemoteHookPaths> {
-    crate::runners::s6_l::remote_bot_dir(conn, bot_id).await
 }
 
 // ============================================================================

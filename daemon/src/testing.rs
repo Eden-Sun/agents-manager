@@ -22,7 +22,6 @@ pub struct MockTab {
 }
 
 pub struct MockHerdr {
-    #[allow(dead_code)]
     pub workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
     pub tabs: Arc<StdMutex<Vec<MockTab>>>,
     /// `pane.read` answers, per pane id.

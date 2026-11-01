@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::capabilities::HerdrRoutes;
+#[cfg(test)]
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::events::ports::{BotOpsPort, TurnCommands};
@@ -13,22 +14,6 @@ use crate::state::{App, AutostartHostStatus};
 
 const DEFERRED_PASS_DELAY: std::time::Duration =
     if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(15) };
-
-pub async fn reconcile(app: &Arc<App>) -> Result<()> {
-    let mut first_err = None;
-    for host in app.hosts.names().await {
-        if let Err(e) = reconcile_host(app, &host).await {
-            tracing::error!(host = %host, error = ?e, "reconcile failed");
-            if host == LOCAL_HOST && first_err.is_none() {
-                first_err = Some(e);
-            }
-        }
-    }
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
-}
 
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let lost = {

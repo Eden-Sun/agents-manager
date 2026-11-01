@@ -391,7 +391,6 @@ async fn finish_serve<E>(app: &Arc<state::App>, serve_result: Result<(), E>) -> 
     serve_result
 }
 
-#[allow(dead_code)]
 /// LAN is the default for dev runs; only the packaged macOS app stays localhost-only. Security
 /// boundary: an .app bundle can't be forgotten like an env var on the many manual restarts.
 /// `AM_DEV_LAN=0|1` overrides either way.
@@ -409,8 +408,6 @@ fn in_app_bundle(exe: &std::path::Path) -> bool {
     dirs.next().is_some_and(|d| d.file_name().is_some_and(|n| n == "MacOS"))
         && dirs.next().is_some_and(|d| d.file_name().is_some_and(|n| n == "Contents"))
 }
-
-fn _assert_send(_: &Arc<state::App>) {}
 
 #[cfg(test)]
 mod tests {

@@ -47,8 +47,6 @@ pub struct Occurrence {
     pub client_request_id: Option<String>,
     pub status: String,
     pub waiting_reason: Option<String>,
-    #[serde(skip)]
-    pub notified: i64,
     pub merged_count: i64,
     pub conversation_id: Option<String>,
     pub turn_id: Option<String>,

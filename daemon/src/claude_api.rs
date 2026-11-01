@@ -21,7 +21,6 @@ use crate::key_file::{key_status, read_key, stage_key};
 use crate::lc_error::LcError;
 use crate::state::App;
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// 帳本留最近這麼多筆；累計 token 不受這個上限影響。
 const LEDGER_CAP: usize = 200;
 
@@ -266,7 +265,6 @@ pub struct ClaudeReply {
     pub model: String,
     pub stop_reason: Option<String>,
     pub usage: Option<Usage>,
-    pub elapsed_ms: u64,
 }
 
 /// 失敗的分類。呼叫端只需要知道「要不要退回舊路徑」：任何一種都該退回，這裡不替它決定。
@@ -386,7 +384,7 @@ pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest
         if o.text.trim().is_empty() {
             return Err((ClaudeError::BadResponse(format!("empty text (stop_reason {})", o.stop_reason.as_deref().unwrap_or("none"))), usage));
         }
-        Ok(ClaudeReply { text: o.text, model: o.model.unwrap_or_else(|| state.model.clone()), stop_reason: o.stop_reason, usage: o.usage, elapsed_ms })
+        Ok(ClaudeReply { text: o.text, model: o.model.unwrap_or_else(|| state.model.clone()), stop_reason: o.stop_reason, usage: o.usage })
     });
     match outcome {
         Ok(reply) => {

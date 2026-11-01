@@ -52,7 +52,6 @@ impl ProcEnv for PsProcEnv {
 pub struct ProcEnvHook(std::sync::OnceLock<Arc<dyn ProcEnv>>);
 
 impl ProcEnvHook {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set(&self, reader: Arc<dyn ProcEnv>) {
         let _ = self.0.set(reader);
     }

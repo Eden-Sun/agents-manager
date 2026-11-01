@@ -13,36 +13,6 @@ use anyhow::Result;
 
 // --- Screen & Cursor Bookkeeping ---
 
-/// 更新 runs 表的 pane cursor。
-pub async fn remember_pane_cursor(app: &impl crate::capabilities::Db, run_id: &str, revision: i64, tail_hash: &str) -> Result<()> {
-    sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
-        .bind(revision)
-        .bind(tail_hash)
-        .bind(run_id)
-        .execute(app.db())
-        .await?;
-    Ok(())
-}
-
-/// 查詢對話訊息總數。
-pub async fn conversation_message_count(app: &impl crate::capabilities::Db, conversation_id: &str) -> Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
-        .bind(conversation_id)
-        .fetch_one(app.db())
-        .await?)
-}
-
-/// 查詢最新 assistant 訊息內容。
-pub async fn last_assistant_content(app: &impl crate::capabilities::Db, conversation_id: &str) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
-         ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(app.db())
-    .await?)
-}
-
 /// 讀取 pane recent unwrapped 文字。
 pub async fn read_pane_recent_unwrapped(
     app: &impl crate::capabilities::HerdrRoutes,
@@ -53,12 +23,6 @@ pub async fn read_pane_recent_unwrapped(
     let Some(client) = app.herdr_for_run(run).await else { return Ok(None) };
     let read = client.pane_read(pane_id, "recent_unwrapped", lines).await?;
     Ok(Some(read))
-}
-
-/// 將 system notice 存入 messages 表。
-pub async fn insert_system_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), conversation_id: &str, content: &str) -> Result<()> {
-    crate::lifecycle::insert_message(app, conversation_id, None, "system", content, "system", false, None).await?;
-    Ok(())
 }
 
 /// 記錄 shadow limit hit（裁判）。
@@ -208,49 +172,6 @@ pub async fn started_by_the_cli_itself(app: &Arc<App>, bot: &db::Bot, transcript
 }
 
 // --- Poller & Turn Error Adapters ---
-
-/// 清除 turn error。
-pub async fn clear_turn_error(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::login_prompt::LoginNeeded), run_id: &str, bot_id: &str) -> Result<()> {
-    crate::turn_error::clear(app, run_id, bot_id).await
-}
-
-/// 檢查是否重複已回答的 prompt。
-pub async fn repeats_answered_prompt(
-    conn: &mut sqlx::SqliteConnection,
-    conv: &str,
-    turn_id: &str,
-    text: &str,
-) -> Result<bool> {
-    crate::hookrecv::repeats_answered_prompt(conn, conv, turn_id, text).await
-}
-
-/// 重建或讀取 turn 的 prompt texts 與 attachment 衍生交付文字。
-pub async fn turn_echo_texts(app: &impl crate::capabilities::Db, turn_id: &str) -> Result<Vec<String>> {
-    let rows = db::turn_user_messages_with_attachments(app.db(), turn_id).await?;
-    let mut out = Vec::new();
-    let delivered: Option<String> = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?")
-        .bind(turn_id)
-        .fetch_optional(app.db())
-        .await?
-        .flatten();
-    if let Some(p) = delivered.filter(|p| !p.trim().is_empty()) {
-        out.push(p);
-    }
-    for (content, attachments) in rows {
-        if let Some(json) = attachments.as_deref() {
-            if let Ok(items) = serde_json::from_str::<Vec<crate::attach::Attachment>>(json) {
-                let delivered = crate::attach::deliver_text(&content, &items);
-                if delivered != content && !out.contains(&delivered) {
-                    out.push(delivered);
-                }
-            }
-        }
-        if !out.contains(&content) {
-            out.push(content);
-        }
-    }
-    Ok(out)
-}
 
 // --- Grok Transcript Host & Process Adapters ---
 

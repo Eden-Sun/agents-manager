@@ -14,47 +14,9 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
     crate::api::ct_eq(a, b)
 }
 
-/// Checks if a bot principal is forbidden from spawning panes (restricted share bot).
-pub async fn refuses_bot_principal(pool: &sqlx::SqlitePool, bot_id: &str) -> bool {
-    crate::share::refuses_bot_principal(pool, bot_id).await
-}
-
-/// Notes the purpose of a created pane on the host.
-pub async fn note_purpose(
-    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
-    host: &str,
-    pane_id: &str,
-    bot: &crate::db::Bot,
-    purpose: &str,
-) -> anyhow::Result<()> {
-    crate::panes::note_purpose(app, host, pane_id, bot, purpose).await
-}
-
 /// Emits a host-changed event using the given host fence.
 pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) {
     crate::state::emit_host_changed(app, fence).await;
-}
-
-/// Reads shell screen text for login assistance.
-pub async fn shell_read(
-    app: &Arc<App>,
-    host: &str,
-    pane_id: &str,
-    source: &str,
-    lines: u32,
-) -> LcResult<serde_json::Value> {
-    crate::api::shell::read(app, host, pane_id, source, lines).await
-}
-
-/// Sends text to a login shell pane.
-pub async fn shell_send_text(
-    app: &Arc<App>,
-    host: &str,
-    pane_id: &str,
-    text: &str,
-    enter: bool,
-) -> LcResult<()> {
-    crate::api::shell::send_text(app, host, pane_id, text, enter).await
 }
 
 /// Closes a pane and its enclosing tab if empty.
@@ -116,26 +78,6 @@ pub async fn child_runtime_follow(
     effort: Option<&str>,
 ) -> anyhow::Result<()> {
     crate::child_runtime::follow(app, bot_id, model, effort).await.map_err(Into::into)
-}
-
-/// Reads styled pane snapshot as text.
-pub async fn read_styled(
-    client: &crate::herdr::HerdrClient,
-    pane_id: &str,
-    source: &str,
-    lines: u32,
-) -> anyhow::Result<String> {
-    crate::lifecycle::read_styled(client, pane_id, source, lines).await
-}
-
-/// Reads styled pane snapshot structured record.
-pub async fn read_styled_snapshot(
-    client: &crate::herdr::HerdrClient,
-    pane_id: &str,
-    source: &str,
-    lines: u32,
-) -> anyhow::Result<crate::herdr::PaneRead> {
-    crate::lifecycle::read_styled_snapshot(client, pane_id, source, lines).await
 }
 
 pub(crate) use crate::lifecycle::BoxState;

@@ -228,15 +228,6 @@ async fn token_present(fence: &crate::hosts::HostFence) -> Option<bool> {
 
 pub(crate) const REMOTE_PRESENT_SCRIPT: &str = "if [ -s \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\" ] || { command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; }; then echo AM_YES; else echo AM_NO; fi";
 
-/// 把 `tools.agy.logged_in` 寫成 `logged_in`（已知有裝 agy 才寫），有變就推 `host_changed`。額度那格的「未登入」與登入鈕吃這個旗標（網頁 `useLoggedOut`）。
-async fn set_logged_in(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
-    let changed = set_logged_in_quiet(app, host, fence, logged_in).await;
-    if changed {
-        crate::state::emit_host_changed(app, fence).await;
-    }
-    changed
-}
-
 /// 同上但不推：呼叫端還有別的東西要一起變（[`record_probe_result`] 一輪只推一次）。
 pub(crate) async fn set_logged_in_quiet(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
     let mut all = app.tools.lock().await;

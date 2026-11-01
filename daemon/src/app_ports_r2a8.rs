@@ -3,8 +3,6 @@
 //! Provides composition helpers for prompt_suggestion, primary_keep_warm,
 //! and prompt_cache so they do not directly depend on lifecycle or its p4 app_ports.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use crate::state::App;
 use am_ports::DbContext;

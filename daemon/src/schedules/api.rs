@@ -407,7 +407,6 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         client_request_id: crid,
         status: "pending".into(),
         waiting_reason: None,
-        notified: 0,
         merged_count: 0,
         conversation_id: None,
         turn_id: None,
