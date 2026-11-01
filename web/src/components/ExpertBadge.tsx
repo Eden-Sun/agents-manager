@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import type { Bot } from '../api/types'
 import { roleShortLabel, roleTitle } from '../lib/expertSections'
 import { t, useT } from '../lib/i18n'
+import { useStore } from '../store/store'
 import './expertBadge.css'
 
 export function ExpertBadge() {
@@ -8,6 +10,56 @@ export function ExpertBadge() {
   return (
     <span className="project-expert-tag" title={t('專家模式專案')}>
       {t('專家')}
+    </span>
+  )
+}
+
+/** 專家模式側欄列上的管理者可用勾選框 */
+export function ManagerUseCheckbox({
+  botId,
+  managerUse,
+  disabled,
+}: {
+  botId: string
+  managerUse: boolean
+  disabled?: boolean
+}) {
+  useT()
+  const isPatching = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
+  const [localOptimistic, setLocalOptimistic] = useState<boolean | null>(null)
+
+  const effectiveChecked = localOptimistic !== null ? localOptimistic : managerUse
+  const title = t('管理者可用：開啟後管理者可派工、啟動或重啟此成員')
+
+  return (
+    <span
+      className="bot-manager-use-wrap"
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      <input
+        type="checkbox"
+        className="bot-manager-use-checkbox"
+        aria-label={title}
+        title={title}
+        checked={effectiveChecked}
+        disabled={disabled || isPatching}
+        onChange={(e) => {
+          const nextVal = e.target.checked
+          setLocalOptimistic(nextVal)
+          const patch = useStore.getState().patchBot
+          void patch(botId, { manager_use: nextVal }).then((res) => {
+            if (!res) {
+              setLocalOptimistic(null)
+            } else {
+              setLocalOptimistic(null)
+            }
+          }).catch(() => {
+            setLocalOptimistic(null)
+          })
+        }}
+      />
     </span>
   )
 }
