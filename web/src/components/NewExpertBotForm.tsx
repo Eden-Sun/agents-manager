@@ -13,6 +13,7 @@ import {
   firstRangeError,
 } from '../lib/runtimePolicy'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
+import { modelMatches } from '../lib/modelMatches'
 import { projectHostName, toolsOfHost, useStore } from '../store/store'
 import { ApiModelFields } from './ModelPicker'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
@@ -91,6 +92,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   // 名稱
   const [name, setName] = useState(() => computeDefaultName(existingManager ? 'specialist' : 'manager', '', pid, bots))
   const nameTouched = useRef(false)
+  const effortTouched = useRef(false)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -156,6 +158,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     setErrorMsg(null)
     setCustomizeRuntime(false)
     setRuntimeDraft({})
+    effortTouched.current = false
 
     if (r === 'executor') {
       if (poolEntries.length > 0) {
@@ -166,14 +169,14 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         const sugg = pickRoleSuggested(r)
         setKind(sugg.kind)
         setModel(sugg.model)
-        setEffort(sugg.effort)
+        setEffort(null)
       }
     } else {
       setSelectedPoolEntryId('custom')
       const sugg = pickRoleSuggested(r)
       setKind(sugg.kind)
       setModel(sugg.model)
-      setEffort(sugg.effort)
+      setEffort(null)
     }
 
     if (!nameTouched.current) {
@@ -185,7 +188,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const onSelectPoolEntry = (id: string) => {
     setSelectedPoolEntryId(id)
     if (id === 'custom') {
-      // 保持目前或套用建議
+      effortTouched.current = false
+      setEffort(null)
     } else {
       const found = poolEntries.find((e) => e.id === id)
       if (found) {
@@ -207,6 +211,14 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const selectedPool = role === 'executor' && selectedPoolEntryId !== 'custom' ? poolEntries.find((e) => e.id === selectedPoolEntryId) : null
   const isPoolLocked = Boolean(selectedPool)
 
+  const suggestedEffort = useMemo(() => {
+    if (role === 'manager') return 'high'
+    if (role === 'advisor') return 'high'
+    if (role === 'specialist') return 'medium'
+    if (role === 'executor') return selectedPool?.effort ?? null
+    return null
+  }, [role, selectedPool])
+
   // 驗證
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
@@ -225,11 +237,22 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       ? cleanSettings(runtimeDraft)
       : null
 
+    // 模型目前可用的強度清單與預設值
+    const kindKey = `${kind}@${host || 'local'}@${identity || ''}`
+    const modelsList = modelsCache[kindKey] ?? []
+    const defaultM = modelsList.find((m) => m.is_default) ?? modelsList[0]
+    const curM = (model && (modelsList.find((m) => m.id === model) ?? modelsList.find((m) => modelMatches(m.id, model)))) || defaultM
+    const curEfforts = curM?.efforts ?? []
+    const fallbackEffort = (suggestedEffort && curEfforts.includes(suggestedEffort))
+      ? suggestedEffort
+      : (curM?.account_default_effort ?? curM?.default_effort ?? null)
+    const effectiveEffort = effortTouched.current ? effort : (effort ?? fallbackEffort)
+
     const createdBotId = await addBot(pid, {
       name: name.trim(),
       kind,
       model,
-      effort,
+      effort: effectiveEffort,
       fast: kind === 'codex' ? fast : undefined,
       persona: persona.trim() || null,
       autostart: false,
@@ -399,7 +422,9 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                     if (isPoolLocked) return
                     setKind(k)
                     setModel(null)
-                    setEffort(null)
+                    if (!effortTouched.current) {
+                      setEffort(null)
+                    }
                     setFast(false)
                   }}
                 >
@@ -422,12 +447,16 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
           }}
           effort={effort}
           onEffort={(ef) => {
-            if (!isPoolLocked) setEffort(ef)
+            if (!isPoolLocked) {
+              effortTouched.current = true
+              setEffort(ef)
+            }
           }}
           fast={fast}
           onFast={(f) => {
             if (!isPoolLocked) setFast(f)
           }}
+          suggestedEffort={suggestedEffort}
         />
       </div>
 

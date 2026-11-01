@@ -77,6 +77,7 @@ export function ApiModelFields({
   onEffort,
   fast,
   onFast,
+  suggestedEffort,
 }: {
   kind: BotKind
   host: string
@@ -88,6 +89,7 @@ export function ApiModelFields({
   onEffort: (v: string | null) => void
   fast: boolean
   onFast: (v: boolean) => void
+  suggestedEffort?: string | null
 }) {
   const t = useT()
   const key = `${kind}@${host || 'local'}@${identity || ''}`
@@ -107,7 +109,8 @@ export function ApiModelFields({
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
   const efforts = current?.efforts ?? []
   const selectedModel = model ?? defaultModel?.id ?? null
-  const selectedEffort = effort ?? effectiveDefaultEffort(current)
+  const fallbackEffort = (suggestedEffort && efforts.includes(suggestedEffort)) ? suggestedEffort : effectiveDefaultEffort(current)
+  const selectedEffort = effort ?? fallbackEffort
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
   // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
@@ -125,7 +128,8 @@ export function ApiModelFields({
     // 只有清單來自 API 才能斷定「不支援」；內建清單的 service_tiers 是空的，不代表沒有 Fast（同 modelSwitchPatch）。
     if (fromApi && fast && next && !next.service_tiers.some((t) => t.id === FAST_TIER)) onFast(false)
     if (effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(effort)) {
-      onEffort(next.default_effort)
+      const fallback = (suggestedEffort && next.efforts.includes(suggestedEffort)) ? suggestedEffort : next.default_effort
+      onEffort(fallback)
     }
   }
 
@@ -178,7 +182,7 @@ export function ApiModelFields({
                 onClick={() => onEffort(e)}
               >
                 {menuEffortLabel(kind, e)}
-                {effortBadges(current, e)}
+                {effortBadges(current, e, suggestedEffort)}
               </button>
             ))}
           </div>
@@ -236,11 +240,18 @@ function effectiveDefaultEffort(m: ModelInfo | undefined): string | null {
   return m?.account_default_effort ?? m?.default_effort ?? null
 }
 
-/** 「廠推薦」只標廠商內建預設（每個帳號一樣）；帳號記住的值另標「此帳號預設」，不冒充廠推薦。 */
-function effortBadges(m: ModelInfo | undefined, e: string): ReactNode {
+/** 「廠推薦」只標廠商內建預設（每個帳號一樣）；帳號記住的值另標「此帳號預設」，不冒充廠推薦。
+ * 若有角色建議強度（suggestedEffort），則在該強度標「建議」，取代廠推薦。 */
+function effortBadges(m: ModelInfo | undefined, e: string, suggestedEffort?: string | null): ReactNode {
   return (
     <>
-      {m?.default_effort === e ? (
+      {suggestedEffort ? (
+        suggestedEffort === e ? (
+          <span className="effort-recommended" aria-hidden="true">
+            {t('建議')}
+          </span>
+        ) : null
+      ) : m?.default_effort === e ? (
         <span className="effort-recommended" aria-hidden="true">
           {t('廠推薦')}
         </span>
