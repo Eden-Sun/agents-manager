@@ -1494,6 +1494,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             ) : null}
             {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
             {run?.pane_id && !apiBot ? <PaneCopy paneId={run.pane_id} detail={t('{pane}（{status}）', { pane: herdrId?.title ?? `pane ${run.pane_id}`, status: stateLabel })} /> : null}
+            {/* claude-api 沒有 pane：改放 bot id，讓人有個可以指稱的識別碼（2026-11-01 使用者）。 */}
+            {apiBot ? <PaneCopy what="bot" paneId={bot.id} detail={t('Claude API bot（{status}）', { status: stateLabel })} /> : null}
           </div>}
         </div>
         {phone ? (
