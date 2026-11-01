@@ -65,9 +65,9 @@ async fn retire_body_locked_inner(app: &Arc<crate::state::App>, lifecycle: &ApiO
     let mut conn = app.db.acquire().await.map_err(|_| E::Storage)?;
     let initial = candidate(&mut conn, bot, target).await?.ok_or(E::Unconfirmed)?;
     drop(conn);
-    let (Some(owner_run), Some(_)) = (initial.2.as_ref(), initial.3.as_ref()) else { return Err(E::Unresolved); };
+    let (Some(owner_run), Some(_)) = (initial.2.as_ref(), initial.3.as_ref()) else { tracing::warn!(bot, reason="api_retire_unresolved", gate="no_owner_run_turn", "explicit retire unresolved"); return Err(E::Unresolved); };
     if let Some(active) = crate::db::active_run(&app.db, bot).await.map_err(|_| E::Storage)? {
-        if active.id != *owner_run { return Err(E::Busy); }
+        if active.id != *owner_run { tracing::warn!(bot, active_run=%active.id, owner_run=%owner_run, reason="api_retire_busy", gate="active_run_not_owner", "explicit retire busy"); return Err(E::Busy); }
         crate::lifecycle::stop::stop_bot_locked(app, bot).await.map_err(|_| E::Unconfirmed)?;
     }
     let mut conn = app.db.acquire().await.map_err(|_| E::Storage)?;

@@ -323,6 +323,7 @@ impl ApiBotRuntime {
         use crate::lifecycle::api_bot_port::ApiFreshError as E;
         let (Some(run), Some(turn)) = (c.2.as_ref(), c.3.as_ref()) else { return Err(E::Unresolved); };
         let key = FullKey { bot_id: c.0.clone(), run_id: run.clone(), turn_id: turn.clone() };
+        cleanup_terminal_controls(&app.db, &self.inner).await;
         let wait = async {
             loop {
                 let waiting = {
@@ -331,22 +332,22 @@ impl ApiBotRuntime {
                 };
                 if !waiting { break; }
                 tokio::select! {
-                    _ = app.shutdown.cancelled() => return Err(E::Busy),
+                    _ = app.shutdown.cancelled() => { tracing::warn!(bot=%c.0, reason="api_retire_busy", gate="shutdown_while_waiting_owner_exit", "explicit retire busy"); return Err(E::Busy) }
                     _ = tokio::time::sleep(Duration::from_millis(10)) => {}
                 }
             }
             Ok(())
         };
-        tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait).await.map_err(|_| E::Busy)??;
+        tokio::time::timeout(API_BOT_SHUTDOWN_JOIN_TIMEOUT, wait).await.map_err(|_| { tracing::warn!(bot=%c.0, reason="api_retire_busy", gate="owner_exit_timeout", "explicit retire busy"); E::Busy })??;
         let bot = self.bot_gate(&c.0).await;
         let admission = self.admission_gate(&ApiRunKey { bot_id: c.0.clone(), run_id: run.clone() }).await;
-        if app.shutdown.is_cancelled() || self.inner.registry.is_active(run) { return Err(E::Busy); }
+        if app.shutdown.is_cancelled() || self.inner.registry.is_active(run) { tracing::warn!(bot=%c.0, run=%run, reason="api_retire_busy", gate="registry_active_or_shutdown", "explicit retire busy"); return Err(E::Busy); }
         let control = {
             let controls = self.inner.controls.lock().expect("control mutex poisoned");
-            if controls.keys().any(|other| other.bot_id == c.0 && other != &key) { return Err(E::Busy); }
+            if let Some(other) = controls.keys().find(|other| other.bot_id == c.0 && *other != &key) { tracing::warn!(bot=%c.0, other_run=%other.run_id, reason="api_retire_busy", gate="other_control_record", "explicit retire busy"); return Err(E::Busy); }
             match controls.get(&key) {
                 Some(record) if record.owner_exited && matches!(*record.joined.borrow(), JoinState::Joined(Ok(_))) => Some(record.identity.clone()),
-                Some(_) => return Err(E::Busy),
+                Some(r) => { tracing::warn!(bot=%c.0, run=%run, owner_exited=r.owner_exited, joined=?*r.joined.borrow(), reason="api_retire_busy", gate="own_control_not_joined", "explicit retire busy"); return Err(E::Busy) }
                 None => None,
             }
         };
@@ -3536,6 +3537,29 @@ mod tests {
             fresh_applied_receipt_waits_for_actual_owner_exit();
             fresh_waits_for_stop_true_join_and_owner_before_deletion();
         }).unwrap().join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn retire_after_stop_prunes_stale_terminal_controls_of_earlier_runs() {
+        use crate::lifecycle::api_bot_port::{ApiFreshTarget, ApiFreshResult};
+        let env = super::super::retention_tests::fixture().await;
+        sqlx::query("DELETE FROM api_bot_join_receipts WHERE session_id='r2-session'").execute(&env.app.db).await.unwrap();
+        let session = crate::db::ulid();
+        sqlx::query("UPDATE api_bot_sessions SET id=? WHERE id='r2-session'").bind(&session).execute(&env.app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,'r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&session).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        // 較早一個已停止的 run 留下的 terminal control record：停止後清除對話不該被它擋成 api_retire_busy。
+        let other = crate::db::ulid(); let other_run = crate::db::ulid(); let other_turn = crate::db::ulid(); let other_conv = crate::db::ulid();
+        insert_bot_and_turn(&env.app, &other, &other_run, &other_turn, &other_conv, &env.project_id, "fixture").await;
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&other_turn).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped',bot_id='r2-bot' WHERE id=?").bind(&other_run).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET conversation_id=conversation_id WHERE id=?").bind(&other_turn).execute(&env.app.db).await.unwrap();
+        let stale = FullKey { bot_id: "r2-bot".into(), run_id: other_run, turn_id: other_turn };
+        let (_tx, joined) = watch::channel(JoinState::Joined(Ok(Completion::Completed)));
+        env.app.api_bot_runtime.inner.controls.lock().unwrap().insert(stale.clone(), ControlRecord { identity: Arc::new(()), cancel: CancellationToken::new(), joined, finalized: None, owner_exited: true });
+        let target = ApiFreshTarget { session_id: session.clone(), generation: 1 };
+        assert!(matches!(env.app.api_explicit_retire("r2-bot", &target).await, Ok(ApiFreshResult::Cleared)));
+        assert!(!env.app.api_bot_runtime.inner.controls.lock().unwrap().contains_key(&stale));
     }
 
     #[tokio::test]

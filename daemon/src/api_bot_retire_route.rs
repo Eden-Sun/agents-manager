@@ -76,7 +76,11 @@ pub(crate) async fn retire_api_session(
     }
     let target = parse_target(&body)?;
     preflight(&app, &id, &target).await?;
-    match app.api_explicit_retire(&id, &target).await.map_err(map_error)? {
+    let outcome = app.api_explicit_retire(&id, &target).await;
+    if let Err(error) = &outcome {
+        tracing::warn!(bot=%id, session=%target.session_id, generation=target.generation, error=?error, "api session retire refused");
+    }
+    match outcome.map_err(map_error)? {
         ApiFreshResult::Cleared => {}
     }
     Ok((StatusCode::OK, Json(json!({"result": "cleared", "session_id": target.session_id, "generation": target.generation}))).into_response())

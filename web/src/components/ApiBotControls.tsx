@@ -17,6 +17,14 @@ export function ApiBotControls({ botId, name }: { botId: string; name: string })
   const [busy, setBusy] = useState<'stop' | 'retire' | null>(null)
   const [confirm, setConfirm] = useState(false)
   const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+  const retireErrText = (e: unknown) => {
+    const raw = errText(e)
+    if (raw.includes('api_retire_busy')) return t('bot 仍有進行中的回合或關閉尚未完成，請稍後再試')
+    if (raw.includes('api_retire_unresolved')) return t('對話還有未結清的紀錄，暫時無法清除')
+    if (raw.includes('api_retire_unconfirmed')) return t('無法確認清除結果，請重新整理後再確認')
+    if (raw.includes('api_retire_storage')) return t('資料庫暫時無法寫入，請稍後再試')
+    return raw
+  }
 
   const stop = async () => {
     setBusy('stop')
@@ -37,7 +45,7 @@ export function ApiBotControls({ botId, name }: { botId: string; name: string })
       const done = await retireApiSession(botId)
       notify('info', done ? t('已清除 {name} 的對話，下一則從新對話開始', { name }) : t('{name} 目前沒有可清除的對話', { name }))
     } catch (e) {
-      notify('error', t('清除對話失敗：{reason}', { reason: errText(e) }))
+      notify('error', t('清除對話失敗：{reason}', { reason: retireErrText(e) }))
     } finally {
       setBusy(null)
       void refresh()
