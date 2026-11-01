@@ -1,14 +1,29 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Project, RuntimeSettings } from '../api/types'
+import type { Bot, Project, Run, RuntimeSettings } from '../api/types'
 import { useT } from '../lib/i18n'
 import { ROLE_SUGGESTIONS, RUNTIME_ROLES, type RuntimeRole, cleanSettings, firstRangeError, sameSettings } from '../lib/runtimePolicy'
 import { useStore } from '../store/store'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
 
+/** 專案內每個角色的 Bot 的 `run.prompt_cache.hit_ratio`（0–1）平均；沒有任何讀數＝null（畫「—」）。 */
+function roleHitRatios(bots: Bot[], runs: Record<string, Run | null | undefined>, projectId: string): Record<RuntimeRole, number | null> {
+  const out = {} as Record<RuntimeRole, number | null>
+  for (const r of RUNTIME_ROLES) {
+    const vals = bots
+      .filter((b) => b.project_id === projectId && b.role === r)
+      .map((b) => runs[b.id]?.prompt_cache?.hit_ratio)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+    out[r] = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  }
+  return out
+}
+
 /** 專案設定的「角色設定」：每個角色一張卡（context、保溫、保溫分鐘、進階）。只存草稿，按「儲存」才送 PATCH（User-only）。 */
 export function RolePolicyEditor({ project }: { project: Project }) {
   const t = useT()
   const patchProject = useStore((s) => s.patchProject)
+  const bots = useStore((s) => s.bots)
+  const runs = useStore((s) => s.runs)
   const saved = useMemo<Record<string, RuntimeSettings>>(() => project.role_policy ?? {}, [project.role_policy])
   const savedKey = JSON.stringify(saved)
   const [draft, setDraft] = useState<Record<string, RuntimeSettings>>(saved)
@@ -25,6 +40,8 @@ export function RolePolicyEditor({ project }: { project: Project }) {
     advisor: t('顧問'),
     executor: t('執行者'),
   }
+
+  const hitRatio = useMemo(() => roleHitRatios(bots, runs, project.id), [bots, runs, project.id])
 
   const dirtyRoles = RUNTIME_ROLES.filter((r) => !sameSettings(draft[r] ?? {}, saved[r] ?? {}))
   const rangeErrors = RUNTIME_ROLES.map((r) => ({ role: r, field: firstRangeError(draft[r] ?? {}) })).filter((x) => x.field)
@@ -54,8 +71,8 @@ export function RolePolicyEditor({ project }: { project: Project }) {
             <section key={r} className={`rp-card${isDirty ? ' dirty' : ''}`} aria-label={roleLabel[r]}>
               <header className="rp-card-head">
                 <strong>{roleLabel[r]}</strong>
-                <span className="rp-cache" title={t('快取命中率需要 daemon 提供，目前沒有資料')}>
-                  {t('快取命中')} —
+                <span className="rp-cache" title={hitRatio[r] == null ? t('這個角色的 Bot 目前沒有快取命中率資料') : t('這個角色的 Bot 目前快取命中率的平均')}>
+                  {t('快取命中')} {hitRatio[r] == null ? '—' : `${Math.round(hitRatio[r] * 100)}%`}
                 </span>
               </header>
               <RuntimeSettingsFields
