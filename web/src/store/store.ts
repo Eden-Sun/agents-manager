@@ -1511,6 +1511,27 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false) {
+    // claude-api（#1944）：daemon 只收純文字 prompt，插隊／排隊／草稿／附件／停著自動啟動等旗標一律 400
+    // `api_native_prompt_unsupported`。停著就先 start 再送；其餘旗標拿掉，附件直接告知不支援。
+    if (get().bots.find((b) => b.id === botId)?.kind === 'claude-api') {
+      if (attachments.length > 0) {
+        get().notify('error', t('Claude API bot 還不支援附件'))
+        return false
+      }
+      const r = get().runs[botId]
+      if (startIfStopped && !(r && (r.state === 'running' || r.state === 'starting'))) {
+        try {
+          await api.startBot(botId)
+        } catch (e) {
+          get().notify('error', t('啟動失敗：{reason}', { reason: errText(e) }))
+          return false
+        }
+      }
+      sendNow = false
+      startIfStopped = false
+      queueIfBusy = false
+      draft = undefined
+    }
     // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
     const draftKey = draft ? `:${draft.action}:${draft.token}` : ''

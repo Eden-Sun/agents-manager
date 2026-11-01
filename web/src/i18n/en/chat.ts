@@ -268,6 +268,8 @@ export default {
   '目錄': 'Directory',
   '已用 {detail} tokens': '{detail} tokens used',
   '已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）': '{detail} tokens used; auto-compacts at {limit} (model window {window})',
+  'Claude API bot 還不支援附件': 'Claude API bots do not support attachments yet',
+  '啟動失敗：{reason}': 'Start failed: {reason}',
   '版本': 'Version',
   '開啟側邊欄': 'Open sidebar',
   '未選擇 Bot': 'No Bot selected',
