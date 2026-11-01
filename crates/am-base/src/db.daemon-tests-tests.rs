@@ -1644,10 +1644,11 @@
         (status,String::from_utf8(bytes.to_vec()).unwrap())
     }
     #[tokio::test]
-    async fn nr1944_real_create_api_still_rejects_claude_api_with_no_side_effects() {
+    // a68ae215e 起 claude-api 可以建立（使用者 2026-11-01 核准）；這裡改驗：CLI 專用欄位被拒時沒有任何副作用，KINDS 仍不含它。
+    async fn nr1944_real_create_api_refuses_cli_fields_with_no_side_effects() {
         let e=crate::testing::env().await;let cfg=std::fs::read(e.dir.join("data/config.toml")).unwrap();let before=e.herdr.methods();
-        let (status,body)=nr1944_http(crate::api::router(e.app.clone()),"POST",&format!("/api/projects/{}/bots",e.project_id),serde_json::json!({"name":"not-enabled-yet","kind":"claude-api"}).to_string()).await;
-        assert_eq!(status,axum::http::StatusCode::BAD_REQUEST,"{body}");assert!(body.contains("kind must"));
+        let (status,body)=nr1944_http(crate::api::router(e.app.clone()),"POST",&format!("/api/projects/{}/bots",e.project_id),serde_json::json!({"name":"api-with-args","kind":"claude-api","args":["--x"]}).to_string()).await;
+        assert_eq!(status,axum::http::StatusCode::BAD_REQUEST,"{body}");assert!(body.contains("api_bot_cli_fields_unsupported"),"{body}");
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM bots").fetch_one(&e.app.db).await.unwrap(),0);
         assert_eq!(std::fs::read(e.dir.join("data/config.toml")).unwrap(),cfg);assert_eq!(e.herdr.methods(),before);
         assert!(!crate::config::valid_kind("claude-api"));
