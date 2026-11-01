@@ -774,5 +774,42 @@ check_eq "helper build failure prevents swap" "0" "$(wc -l < "$AGM_DIR/swap.log"
 check_eq "helper build failure removes staging" "0" "$(find "$ROOT/deploy/web" -name '.dist-stage-*' | wc -l | tr -d ' ')"
 teardown
 
+# 9. 換版成功後同步主樹（bot 啟動讀的 AGENTS.md／.mcp.json 來自主樹）。主樹先停在 C0（落後上游 C3）。
+sync_setup() {
+  setup
+  ci "$C3" success
+  "$GITBIN" -C "$AGM_REPO" reset -q --hard "$C0"
+}
+# 9a. 落後、可以快轉：主樹快轉到 origin/main。
+sync_setup
+rc=$(run)
+check_eq "快轉 rc=0" "0" "$rc"
+check_eq "快轉：主樹到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+check "快轉：log 說快轉" "主樹快轉到" "$(LOG)"
+teardown
+
+# 9b. 本地 commit 內容已被上游 rebase 進去（patch 等價、hash 不同）：對齊到 origin/main，本地那顆不留。
+sync_setup
+echo "fix one" >> "$AGM_REPO/daemon/src/a.rs"
+"$GITBIN" -C "$AGM_REPO" add daemon >/dev/null
+"$GITBIN" -C "$AGM_REPO" -c user.name=t -c user.email=t@t commit -q -m "local copy of fix one"
+rc=$(run)
+check_eq "已 rebase rc=0" "0" "$rc"
+check_eq "已 rebase：主樹對齊到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+check "已 rebase：log 說對齊" "對齊到" "$(LOG)"
+teardown
+
+# 9c. 有上游沒有的本地 commit：不動主樹、推 ops_alert。部署本身照常成功。
+sync_setup
+echo "local only" > "$AGM_REPO/daemon/src/local.rs"
+"$GITBIN" -C "$AGM_REPO" add daemon >/dev/null
+"$GITBIN" -C "$AGM_REPO" -c user.name=t -c user.email=t@t commit -q -m "local only"
+LOCAL=$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)
+rc=$(run)
+check_eq "有本地獨有 commit rc=0" "0" "$rc"
+check_eq "有本地獨有 commit：主樹不動" "$LOCAL" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+check "有本地獨有 commit：推 main_tree_diverged" "main_tree_diverged" "$AGM_DIR/alerts.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

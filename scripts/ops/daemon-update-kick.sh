@@ -15,7 +15,9 @@
 #      那顆 sha，不等 ubuntu-ci（使用者按下就是裁示）；做完（或那顆 sha 不能部署）才刪檔，
 #      等不到安全窗口就留著，下一輪再來。
 #   6. 任何失敗照舊推 ops_alert（同 source+reason 由 daemon 節流），並寫 `daemon-update.log`。
+#   6b. 換版成功後同步主樹（`sync_main_tree`）：快轉，或本地 commit 已全在上游時對齊 origin/main；其餘不動、推 ops_alert。
 #
+
 #   7. （旗標，**預設關**）已安裝的 ops 腳本自動換新：旗標＝環境變數 `AGM_OPS_AUTO_INSTALL=1` 或檔案 `<AGM>/ops-auto-install.enabled`。
 #      開著時，換版成功之後、以及「沒有會進 binary 的差異」那一輪（ops 腳本改了不會產生新 binary，只靠換版後那一步會永遠漏掉），
 #      用該 sha 的 `scripts/ops/ops-install.sh` 把「已經裝了、跟 repo 不同」的 ops 腳本裝進 AGM bin：備份、原子替換、
@@ -94,6 +96,36 @@ ops_install_step() {
     alert ops_install_failed "自動換新已安裝的 ops 腳本有失敗（沒換成的舊版原封不動）：$(printf '%s\n' "$_oout" | grep '^failed ' | head -3 | tr '\n' ';')。細節見 ${LOG}，備份在 ${DIR}/ops-install-backups"
   else
     log "ops 自動安裝：已把 ${_on} 支換成 $(printf '%s' "$_osha" | cut -c1-8) 的版本"
+  fi
+  return 0
+}
+
+# 主樹同步（bot 啟動時讀的 AGENTS.md／.mcp.json 來自主樹，主樹不會自己跟上 origin/main）。
+# 只做兩件安全的事：快轉；或本地 commit 全都已在上游（patch 等價，例如上游已 rebase）時對齊到 origin/main。
+# 其他（有上游沒有的 commit、有已追蹤檔的未提交改動、不在 main 上）一律不動，推 ops_alert。永遠回 0：不影響部署結果。
+sync_main_tree() {
+  _br=$("$GIT" -C "$REPO" symbolic-ref -q --short HEAD 2>/dev/null) || _br=""
+  [ "$_br" = main ] || { log "主樹 ${REPO} 在「${_br:-分離的 HEAD}」，不是 main，不同步"; return 0; }
+  "$GIT" -C "$REPO" fetch -q origin main >> "$LOG" 2>&1 || { log "主樹 fetch 失敗，這次不同步"; return 0; }
+  _up=$("$GIT" -C "$REPO" rev-parse --verify -q origin/main 2>/dev/null) || { log "讀不到主樹的 origin/main，不同步"; return 0; }
+  [ "$("$GIT" -C "$REPO" rev-parse HEAD 2>/dev/null)" = "$_up" ] && return 0
+  if "$GIT" -C "$REPO" merge-base --is-ancestor HEAD "$_up" 2>/dev/null &&
+     "$GIT" -C "$REPO" merge -q --ff-only "$_up" >> "$LOG" 2>&1; then
+    log "主樹快轉到 $(printf '%s' "$_up" | cut -c1-8)"; return 0
+  fi
+  _cherry=$("$GIT" -C "$REPO" cherry "$_up" HEAD 2>>"$LOG") || { alert main_tree_sync_failed "讀不出主樹 ${REPO} 與 origin/main 的差異，不同步"; return 0; }
+  if printf '%s\n' "$_cherry" | grep -q '^+'; then
+    alert main_tree_diverged "主樹 ${REPO} 有 origin/main 沒有的本地 commit，自動同步不動它；請人工確認（git -C ${REPO} log origin/main..HEAD）後對齊"
+    return 0
+  fi
+  if ! "$GIT" -C "$REPO" diff --quiet HEAD -- 2>/dev/null; then
+    alert main_tree_diverged "主樹 ${REPO} 有已追蹤檔的未提交改動，自動同步不動它；請人工確認後對齊 origin/main"
+    return 0
+  fi
+  if "$GIT" -C "$REPO" reset -q --keep "$_up" >> "$LOG" 2>&1; then
+    log "主樹的本地 commit 都已在 origin/main，對齊到 $(printf '%s' "$_up" | cut -c1-8)"
+  else
+    alert main_tree_sync_failed "主樹 ${REPO} 對齊 origin/main 失敗（細節見 ${LOG}），主樹未動"
   fi
   return 0
 }
@@ -409,6 +441,7 @@ case "$SWAP_RC" in
   0)
     log "已換上 ${SHORT}"
     [ "$NOW" = 1 ] && drop_now "已部署 ${SHORT}"
+    sync_main_tree
     ops_install_step "$TARGET" 0
     ;;
   4)
