@@ -382,7 +382,8 @@ max_turn_cost_microusd = 500000
 
     #[test]
     fn claude_api_is_not_a_valid_kind() {
-        assert!(!crate::valid_kind("claude-api"));
+        assert!(!crate::valid_kind("claude-api"), "KINDS 不含 claude-api（CLI 迴圈用）");
+        assert!(crate::valid_bot_kind("claude-api"));
     }
     #[test]
     fn fractional_or_negative_money_is_not_an_integer_budget() {

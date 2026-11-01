@@ -2155,6 +2155,7 @@ mod tests {
     fn claude_api_kind_stays_out_of_the_bot_creation_allowlist() {
         // create_bot rejects any kind not accepted by this guard before it reaches storage.
         assert!(!crate::config::valid_kind("claude-api"));
+        assert!(crate::config::valid_bot_kind("claude-api"));
     }
 
     #[test]
