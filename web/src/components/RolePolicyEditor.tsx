@@ -60,7 +60,17 @@ export function RolePolicyEditor({ project }: { project: Project }) {
 
   return (
     <div className="role-policy-editor" aria-label={t('角色設定')}>
-      <h4 className="rp-title">{t('角色設定')}</h4>
+      <div className="rp-head">
+        <h4 className="rp-title">{t('角色設定')}</h4>
+        {/* 一顆就好：建議值四個角色一起帶入草稿（原本每張卡各一顆）。 */}
+        <button type="button" className="btn" disabled={saving} onClick={() => setDraft((d) => {
+          const next = { ...d }
+          for (const r of RUNTIME_ROLES) next[r] = { ...ROLE_SUGGESTIONS[r] }
+          return next
+        })}>
+          {t('全部加入建議')}
+        </button>
+      </div>
       <p className="hint">{t('設定角色的 context 上限與保溫。不設＝跟預設（現有行為）；「加入建議」只帶入草稿，要按儲存才會生效（改動後的 Bot 需重啟）。保溫只影響 claude，codex 永快取不需保溫。')}</p>
       <div className="rp-cards">
         {RUNTIME_ROLES.map((r) => {
@@ -83,11 +93,6 @@ export function RolePolicyEditor({ project }: { project: Project }) {
                 onChange={(next) => setDraft((d) => ({ ...d, [r]: next }))}
               />
               {err ? <span className="hint rp-err">{t('數值超出範圍：{field}', { field: err })}</span> : null}
-              <div className="rp-card-actions">
-                <button type="button" className="btn" disabled={saving} onClick={() => setDraft((d) => ({ ...d, [r]: { ...ROLE_SUGGESTIONS[r] } }))}>
-                  {t('加入建議')}
-                </button>
-              </div>
             </section>
           )
         })}

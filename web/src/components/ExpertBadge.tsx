@@ -7,9 +7,10 @@ import './expertBadge.css'
 
 export function ExpertBadge() {
   useT()
+  // 專案徽章是「專家模式」，不是角色「專家」（英文 Specialist）：同一個中文字，英文要分開。
   return (
     <span className="project-expert-tag" title={t('專家模式專案')}>
-      {t('專家')}
+      {t('專家模式').replace(/模式$| mode$/, '')}
     </span>
   )
 }

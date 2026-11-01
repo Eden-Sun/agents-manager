@@ -141,9 +141,11 @@
   color: var(--text-faint);
 }
 
-.rp-card-actions {
+.rp-head {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .rp-err {
