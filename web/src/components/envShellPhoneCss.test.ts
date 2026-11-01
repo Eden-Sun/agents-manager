@@ -1,6 +1,6 @@
 /**
- * 環境設定頁的手機版樣式（issue #1466）：`envPanelPhone.css` 的規則全部關在 `@media (width <= 640px)` 裡，
- * 桌機（>1024px）與平板（641–1024px）版面不動；手機的觸控目標 ≥44px、字級 ≥13px、沒有巢狀捲動。
+ * 環境設定頁的手機版樣式（issue #1466）：手機規則併在 `envShell.css` 的 `@media (width <= 640px)` 區塊裡，
+ * 桌機與平板版面不動；手機的觸控目標 ≥44px、字級 ≥13px、沒有巢狀捲動。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -39,11 +39,16 @@ function decl(css: string, selector: string): string {
   return all.join('\n')
 }
 
-const phone = phoneBlocks(read('envPanelPhone.css'))
+const phone = phoneBlocks(read('envShell.css'))
 
-test('envPanelPhone.css 只有 ≤640px 的規則（桌機版面不動）', () => {
-  assert.equal(phone.outside.trim(), '', `區塊外不該有規則：${phone.outside.trim().slice(0, 80)}`)
+test('手機的 .env-panel 規則都在 ≤640px 區塊裡（桌機版面不動）', () => {
   assert.ok(phone.inside.includes('.env-panel'))
+  assert.doesNotMatch(phone.outside, /\.env-panel \.(identity|host|btn|mini-btn|field)/)
+})
+
+test('手機：身份列的 ✕ 刪除鍵 ≥44px，登入／停用晶片可折行', () => {
+  assert.match(decl(phone.inside, '.env-panel .identity-row .icon-btn'), /min-height:\s*44px/)
+  assert.match(decl(phone.inside, '.env-panel .identity-row .identity-login'), /white-space:\s*normal/)
 })
 
 test('手機：可點的目標 ≥44px', () => {
