@@ -295,7 +295,7 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
             let pidx = match pidx {
                 Some(i) => i,
                 None => {
-                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(),
+                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
                         handed_off_to: None,
                         id: Some(fresh_project.clone()),
                         path: p2.clone(),

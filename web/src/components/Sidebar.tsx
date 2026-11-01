@@ -81,7 +81,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { ExpertBadge, ExpertDisabledMark, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag, ManagerUseCheckbox } from './ExpertBadge'
+import { ExpertBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag, ManagerUseCheckbox } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
@@ -465,6 +465,7 @@ function BotRowImpl({
           </span>
         ) : null}
         <span className="bot-sub">
+          {isExpertProject && !compact && project?.deputy?.bot_id === bot.id ? <ExpertDeputyTag afterSec={project.deputy.after_sec} /> : null}
           {/* 專家的 track 放在這一行（名字那行被截，塞不下）。 */}
           {isExpertProject && !compact && bot.role === 'specialist' && bot.track ? <ExpertTrackTag track={bot.track} /> : null}
           {/* 身份一定要標，同 CLI 兩帳號才分得出來。精簡列放在 kind 圖示正下方（上面 bot-kind-wrap），這裡不重複。 */}

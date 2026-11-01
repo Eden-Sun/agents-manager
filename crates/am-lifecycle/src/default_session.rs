@@ -345,7 +345,7 @@ mod tests {
             "workspace_id":ws.workspace_id,"tab_id":pane.tab_id,"pane_id":pane.pane_id,
             "agent_session":{"kind":"id","value":sid}});
         app.cfg.update(|cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(),
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
                 id: Some(env.project_id.clone()), path: env.repo.to_string_lossy().into_owned(),
                 label: "proj".into(), host: "local".into(), handed_off_to: None, bots: vec![],
             });

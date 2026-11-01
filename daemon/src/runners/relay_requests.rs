@@ -35,13 +35,14 @@ pub async fn sweep(app: &Arc<App>) {
 async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
     let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{id}"));
     let Ok(_guard) = lock.try_lock() else { return Ok(()) };
-    let row: Option<(String,String,String,String,Option<String>,String,i64,Option<String>)> = sqlx::query_as("SELECT from_bot_id,to_bot_id,prompt_text,attachments_json,to_turn_id,state,attempts,error FROM relay_requests WHERE id=?")
+    let row: Option<(String,String,String,String,Option<String>,String,i64,Option<String>,Option<String>)> = sqlx::query_as("SELECT from_bot_id,to_bot_id,prompt_text,attachments_json,to_turn_id,state,attempts,error,redirected_from FROM relay_requests WHERE id=?")
         .bind(id).fetch_optional(&app.db).await?;
-    let Some((from, to, text, attachments, mut turn, state, attempts, failure)) = row else { return Ok(()) };
+    let Some((from, to, text, attachments, mut turn, state, attempts, failure, redirected_from)) = row else { return Ok(()) };
     if state == "pending" || state == "delivered" {
         if turn.is_none() {
             let files: Vec<String> = serde_json::from_str(&attachments)?;
             let key = format!("relay-request:{id}");
+            let text = crate::runners::relay_deputy::decorate(app, &text, redirected_from.as_deref()).await;
             let existing: Option<String> = sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
                 .bind(&to).bind(&key).fetch_optional(&app.db).await?;
             if existing.is_none() && state == "delivered" {
