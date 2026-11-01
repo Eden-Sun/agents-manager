@@ -147,6 +147,7 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'lib/cliLogin.ts',
     'lib/hostBaseline.ts',
     'lib/hostForm.ts',
+    'lib/apiBotStartReason.ts',
     'lib/hostOffline.ts',
     'lib/jevLabel.ts',
     'lib/judgeStats.ts',

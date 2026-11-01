@@ -262,21 +262,33 @@ impl ApiBotRuntime {
         admission_gate_for(&self.inner, key).await
     }
 
-    pub(super) async fn native_start_dependencies_ready(&self, app: &crate::state::App, bot_id: &str) -> Result<(), ApiBotError> {
+    /// 建 run 前的前置檢查。確定沒有副作用就拒絕時回 `Refused(reason)`（穩定 reason，前端有中文說明）；
+    /// 只有 DB／鎖／關機這類真的無法確認的情況才回 `Unconfirmed`。
+    pub(super) async fn native_start_dependencies_ready(&self, app: &crate::state::App, bot_id: &str) -> Result<(), crate::lifecycle::api_bot_port::ApiNativeStartError> {
+        use crate::lifecycle::api_bot_port::ApiNativeStartError as E;
         let _gate = tokio::select! {
             biased;
-            _ = app.shutdown.cancelled() => return Err(ApiBotError::Unconfirmed),
-            result = tokio::time::timeout(Duration::from_secs(3), self.bot_gate(bot_id)) => result.map_err(|_| ApiBotError::Busy)?,
+            _ = app.shutdown.cancelled() => return Err(E::Unconfirmed),
+            result = tokio::time::timeout(Duration::from_secs(3), self.bot_gate(bot_id)) => result.map_err(|_| E::Unconfirmed)?,
         };
-        if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { return Err(ApiBotError::Unconfirmed); }
-        let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ApiBotError::Upstream)?.filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or(ApiBotError::Unconfirmed)?;
-        let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| ApiBotError::Upstream)?.filter(|p| p.deleted_at.is_none() && p.host == crate::config::LOCAL_HOST && p.handed_off_to.is_none()).ok_or(ApiBotError::Unconfirmed)?;
+        if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { return Err(E::Unconfirmed); }
+        let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| E::Unconfirmed)?.filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or(E::Unconfirmed)?;
+        let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| E::Unconfirmed)?.filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or(E::Unconfirmed)?;
+        if project.host != crate::config::LOCAL_HOST { return Err(E::Refused("api_bot_local_project_only")); }
         let cfg = app.cfg.get().await;
-        let limits = cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| ApiBotError::Upstream)?.ok_or(ApiBotError::Upstream)?;
+        if !cfg.claude_api.enabled || !cfg.claude_api.api_bot.enabled { return Err(E::Refused("api_bot_disabled")); }
+        let cap = cfg.claude_api.api_bot.max_turn_cost_microusd;
+        if matches!(cap, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
+        let limits = cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("api_bot_disabled"))?;
         if self.dependencies_snapshot().is_none() {
-            let dependencies = production_dependencies(app, &bot, &project, &limits)?;
-            let key = dependencies.key_source.snapshot().await.map_err(|_| ApiBotError::Upstream)?;
-            if key.is_empty() { return Err(ApiBotError::Upstream); }
+            // 單次預留上限（與 pricing::Opus55Global::reserve 同式）：1M input token × 輸入單價 + max_output_tokens × 輸出單價。
+            let (rate_in, rate_out) = if bot.fast != 0 { (8_i64, 40_i64) } else { (4, 20) };
+            let reserve = 1_000_000_i64 * rate_in + i64::from(limits.max_output_tokens) * rate_out;
+            if limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
+            if !native_bwrap_available() || !bwrap_userns_works().await { return Err(E::Refused("api_bot_sandbox_unavailable")); }
+            let dependencies = production_dependencies(app, &bot, &project, &limits).map_err(|_| E::Refused("api_bot_workspace_unavailable"))?;
+            let key = dependencies.key_source.snapshot().await.map_err(|_| E::Refused("api_bot_key_unavailable"))?;
+            if key.is_empty() { return Err(E::Refused("api_bot_key_unavailable")); }
             drop(key);
         }
         Ok(())
@@ -1497,6 +1509,15 @@ fn native_bwrap_available() -> bool {
 #[cfg(not(target_os = "linux"))]
 fn native_bwrap_available() -> bool { false }
 
+/// 探測 bwrap 能不能真的開 user namespace（Ubuntu 24 的 AppArmor 限制會讓它失敗）。不打 API、不碰 key。
+async fn bwrap_userns_works() -> bool {
+    let mut cmd = tokio::process::Command::new("/usr/bin/bwrap");
+    cmd.args(["--unshare-user", "--ro-bind", "/", "/", "/usr/bin/true"]).env_clear()
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let Ok(mut child) = cmd.spawn() else { return false };
+    matches!(tokio::time::timeout(Duration::from_secs(5), child.wait()).await, Ok(Ok(st)) if st.success())
+}
+
 fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, project: &crate::db::Project, limits: &am_config::api_bot::ValidatedLimits) -> Result<ApiBotDependencies, ApiBotError> {
     if !native_bwrap_available() { return Err(ApiBotError::Upstream); }
     let root = crate::lifecycle::start::bot_cwd(bot, project);
@@ -2188,6 +2209,33 @@ mod tests {
         server.await.unwrap();
         assert!(matches!(result, Ok(Ok(()))), "native fake dispatch: {result:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 確定沒有副作用的前置失敗要回明確 reason，不能全折成 unconfirmed（使用者實測：沒開 `[claude_api.api_bot]` 只看到 unconfirmed）。
+    #[tokio::test]
+    async fn native_start_refuses_with_a_specific_reason_before_any_side_effect() {
+        use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError as E, ApiNativeStartMode};
+        let env = crate::testing::env().await;
+        let bot = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,fast,hook_token,created_at) VALUES(?,?,'refuse-api','claude-api','high',0,'fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let reason = |r: Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, E>| match r { Err(E::Refused(x)) => x, Err(E::Unconfirmed) => "UNCONFIRMED", Err(_) => "OTHER", Ok(_) => "OK" };
+        let go = || env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: false });
+        assert_eq!(reason(go().await), "api_bot_disabled");
+        env.app.cfg.update(|c| { c.claude_api.enabled = true; Ok(()) }).await.unwrap();
+        assert_eq!(reason(go().await), "api_bot_disabled", "雙開關缺一不可");
+        env.app.cfg.update(|c| { c.claude_api.api_bot.enabled = true; Ok(()) }).await.unwrap();
+        assert_eq!(reason(go().await), "api_bot_turn_cost_cap_missing");
+        env.app.cfg.update(|c| { c.claude_api.api_bot.max_turn_cost_microusd = Some(1000); Ok(()) }).await.unwrap();
+        assert_eq!(reason(go().await), "api_bot_turn_cost_cap_too_low");
+        let missing = env.dir.join("no-such-key").to_string_lossy().into_owned();
+        env.app.cfg.update(move |c| { c.claude_api.api_bot.max_turn_cost_microusd = Some(5_000_000); c.claude_api.key_file = missing; Ok(()) }).await.unwrap();
+        // 沒有 bwrap／userns 就是 sandbox；有的話下一關是讀不到 key。兩者都是明確拒絕，不是 unconfirmed。
+        assert!(matches!(reason(go().await), "api_bot_sandbox_unavailable" | "api_bot_key_unavailable"));
+        sqlx::query("UPDATE projects SET host='remote-x' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(reason(go().await), "api_bot_local_project_only");
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(runs, 0, "拒絕不留 run");
     }
 
     #[tokio::test]

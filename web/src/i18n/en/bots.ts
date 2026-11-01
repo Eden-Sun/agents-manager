@@ -383,4 +383,12 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '僅限本機': 'Local only',
   'claude-api · 直接打 Claude API 的 bot（daemon 內的 harness，沒有 CLI／pane）': 'claude-api · a bot that calls the Claude API directly (in-daemon harness; no CLI or pane)',
   'speed=fast（單價 2 倍）': 'speed=fast (2x price)',
+  'Claude API 沒有開：config 要同時打開 [claude_api] enabled 與 [claude_api.api_bot] enabled，再重新載入設定。': 'Claude API is off: enable both [claude_api] enabled and [claude_api.api_bot] enabled in the config, then reload it.',
+  '沒有設定單次成本上限：在 [claude_api.api_bot] 填 max_turn_cost_microusd（必須大於 0）。': 'No per-turn cost cap: set max_turn_cost_microusd (> 0) under [claude_api.api_bot].',
+  '單次成本上限低於一次請求的預留額（標準速度約 4.17 美元；快速加倍）：把 max_turn_cost_microusd 調高（至少 4163840）。': 'The per-turn cost cap is below one request reserve (about $4.17 at standard speed; doubled for fast): raise max_turn_cost_microusd (at least 4163840).',
+  '[claude_api.api_bot] 的設定值超出允許範圍，請檢查各項上限。': 'A value in [claude_api.api_bot] is out of range; check the limits.',
+  '這台機器沒有可用的沙箱：需要安裝 bwrap（/usr/bin/bwrap），且要能建立 user namespace。': 'No usable sandbox on this machine: bwrap (/usr/bin/bwrap) must be installed and able to create a user namespace.',
+  'Bot 的工作目錄無法使用，請確認路徑存在且可存取。': 'The bot working directory is unusable; make sure the path exists and is accessible.',
+  '讀不到 API key：請確認 [claude_api] key_file 指向存在、權限正確且非空的檔案。': 'Cannot read the API key: make sure [claude_api] key_file points to an existing, non-empty file with correct permissions.',
+  'claude-api bot 只能放在本機專案。': 'A claude-api bot can only live in a local project.',
 } satisfies Dict
