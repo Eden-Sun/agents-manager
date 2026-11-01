@@ -1,6 +1,5 @@
 //! Supervisor composition adapters: HTTP handlers and App-backed middleware.
 
-use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::State;
 use axum::middleware::Next;
@@ -27,5 +26,3 @@ pub async fn gate_plain_bots(State(app): State<Arc<App>>, req: axum::extract::Re
     }
 }
 
-#[allow(dead_code)]
-fn _error_type(_: LcError) {}

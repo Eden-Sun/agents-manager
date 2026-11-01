@@ -333,7 +333,6 @@ impl App {
     }
 
     /// 驗過世代、再找 `session` 對應的 herdr client。
-    #[allow(dead_code)]
     async fn port_client(&self, fence: &PortFence, session: &SessionId) -> Result<crate::herdr::HerdrClient, PortError> {
         self.port_conn(fence).await?;
         self.herdr_for_session(&fence.host_id, session)
@@ -343,7 +342,6 @@ impl App {
 }
 
 /// App 對指定 pane 的讀／寫實作；trait adapter 透過這裡沿用既有 fence 與 herdr client 路徑。
-#[allow(dead_code)]
 impl App {
     pub(crate) async fn port_read_pane(
         &self,

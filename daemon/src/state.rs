@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -117,7 +117,6 @@ pub struct TurnEvent {
 
 impl TurnEvent {
     /// Whether this turn has finished (the only transition a scheduler acts on).
-    #[allow(dead_code)]
     /// 回合真的結束了嗎。**`queued` 不算**：排隊中的 turn 還沒送出去，把它當成結束會讓交辦被
     /// 當作失敗結案（2026-09-16 AGM：notice 排進佇列卻推了 assignment_failed）。
     pub fn is_done(&self) -> bool {
@@ -180,8 +179,6 @@ pub struct App {
     pub background_tasks: tokio_util::task::TaskTracker,
     pub(crate) api_bot_runtime: crate::api_bot::runtime::ApiBotRuntime,
     pub(crate) api_startup_gate: crate::api_bot::startup_gate::Gate,
-    /// External relay turns whose composer delivery watcher is active, keyed by turn id.
-    pub(crate) relay_watchers: std::sync::Mutex<HashSet<String>>,
     /// 狀態寫不進 DB、重放也用完的 pane，等修復（#1184）。放在 App 上，不放 process-global：平行的測試各有各的 DB，
     /// 不能互相撿到對方的 pane 再去清掉它。
     pub(crate) status_repairs: std::sync::Mutex<HashMap<crate::events::PaneKey, crate::runners::events::StatusRepair>>,
@@ -396,7 +393,6 @@ impl App {
             background_tasks: tokio_util::task::TaskTracker::new(),
             api_bot_runtime: crate::api_bot::runtime::ApiBotRuntime::new(),
             api_startup_gate: crate::api_bot::startup_gate::Gate::new(),
-            relay_watchers: std::sync::Mutex::new(HashSet::new()),
             status_repairs: std::sync::Mutex::new(HashMap::new()),
             watchdog_deadlines: std::sync::Mutex::new(Default::default()),
             proc_env: Default::default(),
@@ -616,7 +612,6 @@ impl App {
     }
 
     /// 訂閱回合結束。沒有 ring buffer：落後的訂閱者拿到 `RecvError::Lagged`，自己回頭讀 DB。
-    #[allow(dead_code)]
     pub fn subscribe_turns(&self) -> broadcast::Receiver<TurnEvent> {
         self.turn_bus.subscribe()
     }
@@ -624,12 +619,6 @@ impl App {
     /// Publish a turn transition. Sending with no subscribers is not an error.
     pub fn publish_turn(&self, ev: TurnEvent) {
         let _ = self.turn_bus.send(ev);
-    }
-
-    /// How many subscribers are currently listening (for tests / diagnostics).
-    #[allow(dead_code)]
-    pub fn turn_subscribers(&self) -> usize {
-        self.turn_bus.receiver_count()
     }
 
     pub async fn emit(&self, kind: &str, mut data: Value) {

@@ -71,7 +71,6 @@ async fn pending(app: &std::sync::Arc<crate::state::App>, s: &Schedule) -> Strin
         client_request_id: None,
         status: "pending".into(),
         waiting_reason: None,
-        notified: 0,
         merged_count: 0,
         conversation_id: None,
         turn_id: None,
