@@ -1843,8 +1843,22 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
+}
+
+/// 這顆 bot 最近一個有記 native session id 的 run（**含還在跑的**），`agm hire --fork-from` 用：
+/// 來源 codex 正忙時也要能分岔，不能只看已結束的 run（[`last_native_session`] 是給 resume 用的）。
+pub async fn latest_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT native_session_id FROM runs
+          WHERE bot_id = ? AND native_session_id IS NOT NULL
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 /// Transcript path included so a restart can tell a resumable session from one never written.
