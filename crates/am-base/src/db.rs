@@ -1719,15 +1719,6 @@ impl From<Message> for MessageWire {
     }
 }
 
-#[derive(Debug, Clone, FromRow, serde::Serialize)]
-pub struct GroupMessage {
-    #[sqlx(flatten)]
-    #[serde(flatten)]
-    pub message: Message,
-    pub bot_id: String,
-    pub bot_name: String,
-}
-
 pub const ACTIVE_STATES: &str = "('starting','running','stopping')";
 
 pub async fn bot(pool: &SqlitePool, id: &str) -> Result<Option<Bot>> {

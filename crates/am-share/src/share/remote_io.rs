@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::outbox::{content_disposition, mime_of, ShareFileError, MAX_BYTES};
+use crate::outbox::{content_disposition, mime_of, ShareFileError};
 use crate::share::compose::{self, PhotoMeta, PrefetchedSource};
 use crate::share::remote_fs::{RemoteFile, TIMEOUT_STREAM_IDLE};
 use am_base::hosts::{HostFence, SshStream};
@@ -216,6 +216,3 @@ pub async fn embed_remote(site: &RemoteSite, svg: Vec<u8>) -> Vec<u8> {
 
 /// 一次嵌圖從遠端抓回來的照片合計上限（§5.4）；超過的那幾張 `source_too_large`。
 pub const REMOTE_PHOTOS_TOTAL_MAX: u64 = 64 * 1024 * 1024;
-
-/// 遠端 outbox 單檔大小上限（與本機分享下載相同）。
-pub const DOWNLOAD_MAX: u64 = MAX_BYTES;

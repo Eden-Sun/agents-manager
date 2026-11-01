@@ -62,12 +62,6 @@ pub fn target_for_test(conn: Arc<HostConn>, dir: impl Into<String>) -> Target {
     Target { conn, dir: dir.into(), keep: false }
 }
 
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn target_for_test_keep(conn: Arc<HostConn>, dir: impl Into<String>) -> Target {
-    Target { conn, dir: dir.into(), keep: true }
-}
-
 fn unreachable_body(host: &str) -> serde_json::Value {
     json!({"reason": "outbox_remote_unreachable", "host": host})
 }
@@ -279,7 +273,7 @@ printf 'AM_OUTBOX_DONE\n'
     )
 }
 
-fn hex_bytes(hex: &str) -> Vec<u8> {
+pub fn hex_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect()
 }
 

@@ -45,11 +45,6 @@ pub async fn stop_bot_locked_if_idle(app: &impl StopContext, bot_id: &str) -> Lc
     stop_locked(app, bot_id, false, true, false, None, None).await
 }
 
-/// Stop an idle child only while the completion notification still covers its current idle period.
-pub async fn stop_bot_locked_if_notified(app: &impl StopContext, bot_id: &str, idle_at: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, true, true, None, Some(idle_at)).await
-}
-
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
 pub async fn stop_for_restart_locked(app: &impl StopContext, bot_id: &str) -> LcResult<bool> {

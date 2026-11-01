@@ -71,12 +71,6 @@ pub async fn overlay_for(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow::Result
     Ok(build_overlay(bot, &eff, apply))
 }
 
-/// 這顆 bot 現在的生效指紋（與啟動時 `runs.policy_rev` 比較，決定 role_pending）。
-pub async fn current_policy_rev(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow::Result<String> {
-    let (policy, pool, pool_entry) = load(app, bot).await?;
-    Ok(policy_rev_of(&resolve(bot, &policy, pool_context(&pool, pool_entry.as_deref())).0))
-}
-
 /// 角色 policy（DB 投影）、專案的池條目與這顆 bot 的 `pool_entry`（config）。
 async fn load(app: &(impl Cfg + Db), bot: &db::Bot) -> anyhow::Result<(BTreeMap<String, serde_json::Value>, Vec<ExecutorPoolEntry>, Option<String>)> {
     let project = db::project(app.db(), &bot.project_id).await?;

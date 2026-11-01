@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use am_base::hosts::{sh_quote, HostFence, SshStream};
+use am_base::outbox_remote::hex_bytes;
 use am_base::outbox::{content_is_withheld, withheld_name, ShareFileError};
 use serde_json::{json, Value};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -804,9 +805,6 @@ printf 'AM_RFS_DONE\n'
     )
 }
 
-fn hex_bytes(hex: &str) -> Vec<u8> {
-    (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect()
-}
 
 pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> {
     let frames = parse_rfs_frames(out, &["ENTRY"])?;
@@ -1294,10 +1292,6 @@ pub fn parse_photo_fetch(
         }
     }
     Ok(results)
-}
-
-pub fn measure_script(workspace: &str, outbox: &str) -> String {
-    measure_script_at(workspace, outbox, "")
 }
 
 pub fn measure_script_at(workspace: &str, outbox: &str, race: &str) -> String {

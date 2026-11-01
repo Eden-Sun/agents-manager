@@ -1,5 +1,6 @@
 //! Reading a terminal screen: cursor bookkeeping, echo stripping, noise and reply extraction.
 
+use am_base::capture::claude::codex_usage_notice_line;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 use crate::capabilities::Db;
 use super::s6_ports::{ScreenContext, ScreenServices};
@@ -624,26 +625,6 @@ pub fn strip_grok_decor(line: &str) -> String {
         }
     }
     s
-}
-
-/// Codex usage-reset hint line; its glyph (`•` / `■`, varies by release) is not stored.
-fn codex_usage_notice_line(line: &str) -> Option<String> {
-    let body = line
-        .trim()
-        .strip_prefix('•')
-        .or_else(|| line.trim().strip_prefix('■'))
-        .map(str::trim_start)
-        .unwrap_or_else(|| line.trim());
-    let lower = body.to_ascii_lowercase();
-    if lower.starts_with("you have ")
-        && lower.contains("usage limit reset")
-        && lower.contains("available")
-        && lower.contains("run /usage")
-    {
-        Some(body.to_string())
-    } else {
-        None
-    }
 }
 
 /// `ERROR: You've hit your usage limit. Upgrade to Pro …, or try again at Aug 8th, 2025 1:47 PM.`

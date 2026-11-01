@@ -1165,11 +1165,6 @@ pub fn set_ssh_fake_io(host: &str, f: impl Fn(&str, &[u8]) -> Result<Vec<u8>> + 
     v.push((host.to_string(), Arc::new(f)));
 }
 #[cfg(any(test, feature = "test-hooks"))]
-pub fn clear_ssh_fake_io(host: &str) {
-    let mut v = SSH_FAKE_IOS.lock().unwrap();
-    v.retain(|(h, _)| h != host);
-}
-#[cfg(any(test, feature = "test-hooks"))]
 fn ssh_fake_io_for(host: &str) -> Option<SshFakeIo> {
     SSH_FAKE_IOS.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
 }
@@ -1265,10 +1260,6 @@ pub struct HostAuthorityKey {
 impl HostAuthorityKey {
     pub fn matches(&self, fence: &HostFence) -> bool {
         self.generation == fence.generation && self.conn.ptr_eq(&Arc::downgrade(&fence.conn))
-    }
-
-    pub fn scope_id(&self) -> String {
-        format!("{:p}#{}", self.conn.as_ptr(), self.generation)
     }
 }
 

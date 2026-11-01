@@ -17,7 +17,7 @@ pub use am_core::{
     TurnEvent, TurnId, UnixMillis,
 };
 pub use capture::CaptureParser;
-pub use clock::{Clock, IdSource};
+pub use clock::Clock;
 pub use database::DbContext;
 pub use events::{EventSink, TurnEvents};
 pub use host::{HerdrPort, HostRuntime};
@@ -26,5 +26,3 @@ pub use quota::QuotaAccess;
 pub use run_pane::{RunPaneReader, StyledRunPaneReader};
 pub use system_message::SystemMessageWriter;
 pub use turn::{CodexRolloutAccess, RemoteRollout, TurnControl};
-
-pub type PortResult<T> = Result<T, PortError>;
