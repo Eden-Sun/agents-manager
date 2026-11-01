@@ -134,7 +134,7 @@ test('新增條目：重複的四元組被擋下並顯示錯誤，不寫入池',
   await change(modelSel, 'gpt-6-luna')
   await change(effortSel, 'xhigh')
   const ctxBox = form.querySelector<HTMLInputElement>('input[type="checkbox"]')!
-  await click(ctxBox) // 取消「用模型預設」→ 出現拉條，預設 32000
+  await click(ctxBox) // 取消「用模型預設」→ 出現拉條，預設 200000（下限）
   await settle()
   const range = form.querySelector<HTMLInputElement>('input[type="range"]')!
   await change(range, '256000', 'input')

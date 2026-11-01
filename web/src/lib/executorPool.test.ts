@@ -42,9 +42,9 @@ test('contextCap：有 context_window 用它；claude 只有清單含 [1m] 變�
 })
 
 test('resolveSuggestion：建議的 context 不超過模型視窗；agy 沒有 context；模型沒有該強度就退成預設', () => {
-  const list = [m('gpt-6.1-terra', { efforts: ['low', 'high'], context_window: 128000 })]
+  const list = [m('gpt-6.1-terra', { efforts: ['low', 'high'], context_window: 300000 })]
   const r = resolveSuggestion(POOL_SUGGESTIONS[2], list)
-  assert.deepEqual(r, { kind: 'codex', model: 'gpt-6.1-terra', effort: null, context_tokens: 128000, count: 1 })
+  assert.deepEqual(r, { kind: 'codex', model: 'gpt-6.1-terra', effort: null, context_tokens: 256000, count: 1 })
   const a = resolveSuggestion(POOL_SUGGESTIONS[4], [m('gemini-3.8-flash-low', { efforts: [] })])
   assert.deepEqual(a, { kind: 'agy', model: 'gemini-3.8-flash-low', effort: null, context_tokens: null, count: 2 })
   assert.equal(resolveSuggestion(POOL_SUGGESTIONS[3], []), null)

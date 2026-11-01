@@ -9,8 +9,8 @@ test('cleanSettings 去掉 null，只送有值的欄位', () => {
 
 test('nearestTickIndex 取最近的刻度；缺值＝第 0 格', () => {
   assert.equal(nearestTickIndex(null), 0)
-  assert.equal(nearestTickIndex(512_000), 3)
-  assert.equal(nearestTickIndex(300_000), 2)
+  assert.equal(nearestTickIndex(512_000), 2)
+  assert.equal(nearestTickIndex(350_000), 1)
   assert.equal(formatContext(1_000_000), '1M')
   assert.equal(formatContext(128_000), '128k')
 })

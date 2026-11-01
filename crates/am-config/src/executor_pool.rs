@@ -97,7 +97,7 @@ mod tests {
 }
 
 // ---- 條目與 role policy 共用的 context 規則與啟動參數（daemon／am-lifecycle 都用）----
-pub const CONTEXT_MIN: u32 = 32_000;
+pub const CONTEXT_MIN: u32 = 200_000;
 /// claude 的 `[1m]` 變體以上才用得到的門檻：超過它就把模型換成 `<model>[1m]`。
 pub const CLAUDE_BASE_WINDOW: u32 = 200_000;
 
