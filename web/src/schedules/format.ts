@@ -74,6 +74,29 @@ export function scheduleStatusLine(s: Schedule, liveTurnStatus?: string): string
   return t('下次 {due}', { due: formatDue(s.next_due, s.tz) })
 }
 
+/** 側欄列的短時間：`11/02 08:33`；排程時區跟瀏覽器不同才補時區縮寫。完整字串放 title（`scheduleStatusLine`）。 */
+export function formatDueShort(iso: string, tz: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz, ...(tz === defaultTimeZone() ? {} : { timeZoneName: 'short' }) }).formatToParts(d)
+    const p = (type: string) => parts.find((x) => x.type === type)?.value ?? ''
+    const zone = p('timeZoneName')
+    return `${p('month')}/${p('day')} ${p('hour')}:${p('minute')}${zone ? ` ${zone}` : ''}`
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e
+    return formatZoned(iso, tz)
+  }
+}
+
+/** 側欄一行的短狀態（2026-11-01 使用者：排程列「該優化」）：停用／已完成／未結束的 occurrence／下次短時間。 */
+export function scheduleStatusShort(s: Schedule, liveTurnStatus?: string): string {
+  if (s.enabled === false) return t('已停用')
+  if (s.open) return occurrenceLine(s.open, liveTurnStatus)
+  if (!s.next_due) return t('已完成')
+  return formatDueShort(s.next_due, s.tz)
+}
+
 /** 用瀏覽器時區當預設；不支援 supportedValuesOf 時退回 UTC。 */
 export function defaultTimeZone(): string {
   try {

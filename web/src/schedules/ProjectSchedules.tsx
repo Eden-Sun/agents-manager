@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listSchedules, type Schedule } from '../api/schedules'
 import { useStore } from '../store/store'
-import { scheduleStatusLine } from './format'
+import { scheduleStatusLine, scheduleStatusShort } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleRowMenu } from './ScheduleRowMenu'
 import './schedules.css'
@@ -11,10 +11,11 @@ function ScheduleRow({ s, onOpen, onTurnChange }: { s: Schedule; onOpen: (id: st
   const live = useLiveTurnStatus(s.open?.bot_id, s.open?.turn_id)
   useOnTurnChange(live, onTurnChange)
   return (
-    <li className="project-schedule-item">
-      <button type="button" className="project-schedule-row" onClick={() => onOpen(s.id)}>
+    <li className={`project-schedule-item${s.enabled === false ? ' off' : ''}`}>
+      {/* 一行：名稱靠左、短狀態靠右；完整時間（含時區）放 title。 */}
+      <button type="button" className="project-schedule-row" title={`${s.name} — ${scheduleStatusLine(s, live)}`} onClick={() => onOpen(s.id)}>
         <span className="project-schedule-name">⏱ {s.name}</span>
-        <span className="project-schedule-status">{scheduleStatusLine(s, live)}</span>
+        <span className="project-schedule-status">{scheduleStatusShort(s, live)}</span>
       </button>
       <ScheduleRowMenu schedule={s} onOpen={onOpen} />
     </li>

@@ -219,7 +219,7 @@ test('綁定 turn 的狀態：queued→in_flight→終態，列表即時跟上�
   await act(async () => useStore.setState({ turns: { b1: { t1: { id: 't1', status: 'completed', delivery: 'ok' } } } } as never))
   await settle()
   assert.doesNotMatch(rowText(), /執行中|已排隊/, '終態後不再顯示執行中')
-  assert.match(rowText(), /下次/, '回到下一次的時間')
+  assert.match(rowText(), /\d\d\/\d\d \d\d:\d\d/, '回到下一次的時間')
 })
 
 test('別的 Bot 的 turn 更新不會讓這一列重抓（只看自己綁的 turn）', async () => {
