@@ -1,6 +1,7 @@
 import type { Dict } from '../../lib/i18n/types'
 
 export default {  // 共用 Bot／Project 狀態與驗證提示
+  '建議': 'Suggested',
   '專案設定': 'Project settings',
   '專案模式設定': 'Project mode settings',
   '開啟「{name}」的專案設定\n{path}{drag}': 'Open project settings for {name}\n{path}{drag}',

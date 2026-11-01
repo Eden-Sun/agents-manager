@@ -258,3 +258,96 @@ test('專家模式：管理者角色不顯示「可被管理者使用」勾選',
   const advMgrUse = [...document.querySelectorAll<HTMLSpanElement>('span')].find((s) => s.textContent?.trim() === '可被管理者使用')
   assert.ok(advMgrUse, '顧問角色應顯示「可被管理者使用」')
 })
+
+test('專家模式：選專家 → 強度預選 medium；手動改 high 後切換模型仍是 high；改選顧問 → high', async () => {
+  useStore.setState({
+    projects: [project('p-expert', 'expert')],
+    bots: [bot('mgr-1', 'p-expert', 'manager', 'existing-mgr')],
+    selectedProjectId: 'p-expert',
+    selectedBotId: null,
+    models: {
+      'claude@local@': [
+        {
+          id: 'claude-sonnet-4-6',
+          display_name: 'Claude Sonnet 4.6',
+          description: '',
+          is_default: true,
+          default_effort: 'medium',
+          account_default_effort: 'high',
+          efforts: ['low', 'medium', 'high'],
+          service_tiers: [],
+        },
+        {
+          id: 'claude-opus-4-6',
+          display_name: 'Claude Opus 4.6',
+          description: '',
+          is_default: false,
+          default_effort: 'high',
+          account_default_effort: 'high',
+          efforts: ['low', 'medium', 'high'],
+          service_tiers: [],
+        },
+      ],
+      'codex@local@': [
+        {
+          id: 'codex-astra',
+          display_name: 'Codex Astra',
+          description: '',
+          is_default: true,
+          default_effort: 'high',
+          account_default_effort: 'high',
+          efforts: ['low', 'medium', 'high'],
+          service_tiers: [],
+        },
+      ],
+    },
+  } as never)
+
+  await openAddBot()
+
+  // 1. 選專家 → 強度預選 medium（儘管帳號預設是 high，仍應優先選建議值 medium，且標記「建議」）
+  const specCard = [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes('專家'))!
+  await click(specCard)
+  await settle()
+
+  const effortGroup = document.querySelector('[role="radiogroup"][aria-label="強度"]')
+  assert.ok(effortGroup, '應顯示強度選項組')
+
+  const mediumBtn = [...effortGroup.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.includes('M'))
+  assert.ok(mediumBtn, '應有 medium 按鈕')
+  assert.equal(mediumBtn.getAttribute('aria-checked'), 'true', '專家模式下選專家強度應預選 medium')
+  assert.ok(mediumBtn.querySelector('.effort-recommended')?.textContent?.includes('建議'), 'medium 應標記「建議」')
+
+  const highBtn = [...effortGroup.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.includes('H'))
+  assert.ok(highBtn, '應有 high 按鈕')
+  assert.equal(highBtn.getAttribute('aria-checked'), 'false', 'high 不應被預選')
+  assert.ok(highBtn.querySelector('.effort-account')?.textContent?.includes('此帳號預設'), 'high 應保留「此帳號預設」標記')
+
+  // 2. 手動改 high 後切換模型仍是 high
+  await click(highBtn)
+  await settle()
+  assert.equal(highBtn.getAttribute('aria-checked'), 'true', '手動點選後 high 應為 checked')
+
+  // 切換模型到 claude-opus-4-6
+  const opusModelBtn = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="模型"] .opt')].find(
+    (b) => b.title?.includes('claude-opus-4-6') || b.textContent?.includes('Opus')
+  )
+  assert.ok(opusModelBtn, '應有 Opus 模型按鈕')
+  await click(opusModelBtn)
+  await settle()
+
+  const highBtnAfterModelSwitch = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="強度"] .opt')].find(
+    (b) => b.textContent?.includes('H')
+  )
+  assert.equal(highBtnAfterModelSwitch?.getAttribute('aria-checked'), 'true', '切換模型後手動選擇的 high 仍應被保留')
+
+  // 3. 改選顧問 → 強度重設並預選顧問的建議值 high
+  const advCard = [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes('顧問'))!
+  await click(advCard)
+  await settle()
+
+  const advHighBtn = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="強度"] .opt')].find(
+    (b) => b.textContent?.includes('H')
+  )
+  assert.equal(advHighBtn?.getAttribute('aria-checked'), 'true', '改選顧問後強度應預選 high')
+})
