@@ -62,7 +62,7 @@ test('有未儲存變更時 ⌥↓ 先彈「放棄未儲存的變更？」、不
   switched.length = 0
   assert.ok(!text().includes('放棄未儲存的變更？'))
 
-  await click(document.querySelector<HTMLButtonElement>('[role="radio"][aria-label^="High"]')!)
+  await click(buttonByText('High'))
   const blocked = await altDown()
   await until(() => text().includes('放棄未儲存的變更？'), '確認框出現')
   assert.deepEqual(switched, [], '有未儲存變更：沒有換 bot')
