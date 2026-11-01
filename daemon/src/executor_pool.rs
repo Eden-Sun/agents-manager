@@ -173,8 +173,8 @@ mod tests {
 
     #[test]
     fn duplicates_and_full_pool_are_rejected() {
-        let same = json!({"id": "a", "kind": "codex", "model": "t", "effort": "low", "context_tokens": 64000, "count": 1});
-        let twin = json!({"id": "b", "kind": "codex", "model": "t", "effort": "low", "context_tokens": 64000, "count": 2});
+        let same = json!({"id": "a", "kind": "codex", "model": "t", "effort": "low", "context_tokens": 300000, "count": 1});
+        let twin = json!({"id": "b", "kind": "codex", "model": "t", "effort": "low", "context_tokens": 300000, "count": 2});
         assert_eq!(reason(parse_patch(&json!([same.clone(), twin])).unwrap_err()), "duplicate_pool_entry");
         let dup_id = json!({"id": "a", "kind": "claude", "model": "t", "count": 1});
         assert_eq!(reason(parse_patch(&json!([same, dup_id])).unwrap_err()), "duplicate_pool_id");
@@ -194,9 +194,9 @@ mod tests {
 
     #[test]
     fn context_bounds_and_agy_are_checked() {
-        let bad_agy = json!([{"id": "f", "kind": "agy", "model": "g", "context_tokens": 64000, "count": 1}]);
+        let bad_agy = json!([{"id": "f", "kind": "agy", "model": "g", "context_tokens": 300000, "count": 1}]);
         assert_eq!(reason(parse_patch(&bad_agy).unwrap_err()), "context_unsupported");
-        let low = json!([{"id": "c", "kind": "codex", "model": "t", "context_tokens": 31999, "count": 1}]);
+        let low = json!([{"id": "c", "kind": "codex", "model": "t", "context_tokens": 199999, "count": 1}]);
         assert_eq!(reason(parse_patch(&low).unwrap_err()), "context_out_of_range");
         let high = json!([{"id": "c", "kind": "codex", "model": "t", "context_tokens": 400001, "count": 1}]);
         assert_eq!(reason(parse_patch(&high).unwrap_err()), "context_out_of_range");

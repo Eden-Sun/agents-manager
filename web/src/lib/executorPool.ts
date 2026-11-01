@@ -6,7 +6,7 @@ import { agyModelAllowed, type BotKind, type ExecutorPoolEntry, type ModelInfo }
 
 export const POOL_MAX_ENTRIES = 20
 export const POOL_MAX_COUNT = 10
-export const POOL_CONTEXT_MIN = 32000
+export const POOL_CONTEXT_MIN = 200000
 /** 沒有 `context_window` 欄位時的後備上限（claude 只有清單含 `[1m]` 變體才給 1M）。 */
 export const CONTEXT_FALLBACK = { claude: 200000, claude1m: 1000000, codex: 400000, other: 200000 } as const
 

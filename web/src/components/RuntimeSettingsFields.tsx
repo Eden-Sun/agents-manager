@@ -43,7 +43,7 @@ export function RuntimeSettingsFields({
             </button>
           ) : null}
         </div>
-        {/* 刻度與拉條同寬、逐格對齊（位置扣掉拇指半寬）；沒設時拇指淡化，不假裝停在 32k。 */}
+        {/* 刻度與拉條同寬、逐格對齊（位置扣掉拇指半寬）；沒設時拇指淡化，不假裝停在 200k。 */}
         <div className={`rt-ctx-slider${value.context_tokens == null ? ' inherit' : ''}`} style={{ '--rt-steps': CONTEXT_TICKS.length - 1 } as CSSProperties}>
           <input
             type="range"

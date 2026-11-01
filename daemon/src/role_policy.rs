@@ -127,7 +127,7 @@ mod tests {
         assert!(validate_bot("claude", "opus", &json!({"context_tokens": 512000})).is_ok());
         // claude 超過 200k 必須有模型。
         assert!(validate_bot("claude", "", &json!({"context_tokens": 300000})).is_err());
-        assert_eq!(reason(validate_bot("agy", "", &json!({"context_tokens": 64000})).unwrap_err()).0, "context_unsupported");
+        assert_eq!(reason(validate_bot("agy", "", &json!({"context_tokens": 300000})).unwrap_err()).0, "context_unsupported");
         assert!(validate_bot("codex", "gpt-6", &json!({"context_tokens": 400000})).is_ok());
         // 保溫分鐘 < claude TTL（60 分）；codex 沒有 TTL 限制。
         assert!(validate_bot("claude", "opus", &json!({"keep_warm_after_min": 59})).is_ok());

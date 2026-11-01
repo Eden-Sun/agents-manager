@@ -8,7 +8,7 @@ export const RUNTIME_ROLES = ['manager', 'specialist', 'advisor', 'executor'] as
 export type RuntimeRole = (typeof RUNTIME_ROLES)[number]
 
 /** context 拉條的刻度（token）。上限 1M＝角色政策的上限；實際套用時夾到該 bot 的模型視窗。 */
-export const CONTEXT_TICKS = [32_000, 128_000, 200_000, 512_000, 1_000_000] as const
+export const CONTEXT_TICKS = [200_000, 400_000, 512_000, 1_000_000] as const
 export const KEEP_WARM_MIN = 5
 export const KEEP_WARM_MAX = 59
 export const HOT_COMPACT_MIN = 5
