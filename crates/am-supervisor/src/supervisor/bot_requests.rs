@@ -8,6 +8,7 @@
 //! 不攔的：使用者（沒有 `relay_from`）、daemon 自己（`relay_from=daemon`）、協調者還沒建立的
 //! 舊部署、以及目標不是兩個角色 bot 的一般 prompt。
 
+use am_base::agent_relay::ct_eq;
 use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
@@ -192,14 +193,6 @@ pub async fn sender_verified(db: &SqlitePool, token: Option<&str>, from: &str) -
     matches!(crate::db::bot(db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && ct_eq(t, &b.hook_token))
 }
 
-/// 固定長度後逐位元累積差異，避免 token 比對在第一個不同位元組就提早結束。
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
 
 /// 帶了 `X-AM-Bot-Id` 卻驗不過：整個請求 403，不降級。
 fn bad_proof() -> LcError {

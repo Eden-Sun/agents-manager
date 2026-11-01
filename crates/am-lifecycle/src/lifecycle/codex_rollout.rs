@@ -163,20 +163,6 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 嘗試為 Codex 的 in-flight turn 自本地 rollout 取得精確回覆。
-pub async fn codex_rollout_reply_for_in_flight(
-    app: &impl super::lc_host::LcHost,
-    bot: &crate::db::Bot,
-    run: &crate::db::Run,
-    sent: &[String],
-    since_iso: &str,
-) -> Option<String> {
-    match codex_rollout_outcome_for_in_flight(app, bot, run, sent, since_iso).await? {
-        NativeOutcome::Reply(reply) => Some(reply),
-        NativeOutcome::Error { reply, .. } => reply,
-    }
-}
-
 pub(super) async fn codex_rollout_outcome_for_in_flight(
     app: &impl super::lc_host::LcHost,
     bot: &crate::db::Bot,

@@ -31,9 +31,6 @@ pub const RUN_STATES: [&str; 5] = ["starting", "running", "stopping", "stopped",
 /// `crates/am-base/src/db.rs` SCHEMA 的 `turns.status` CHECK 約束。
 pub const TURN_STATUSES: [&str; 5] = ["queued", "in_flight", "completed", "completed_fallback", "failed"];
 
-/// `crates/am-base/src/db.rs` SCHEMA 的 `turns.delivery` CHECK 約束。
-pub const TURN_DELIVERIES: [&str; 4] = ["pending", "ok", "unknown", "failed"];
-
 /// 觀察到的 `runs.state` 合法邊。`exited` 不會回到 active（`starting`／`running`／`stopping`）——一顆 run 進了
 /// `exited` 就是這輩子結束了，要再跑得開一顆新 run。唯一從它出去的邊是改標成另一個終態 `stopped`（見下）。
 ///

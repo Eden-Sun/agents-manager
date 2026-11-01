@@ -360,7 +360,7 @@ fn is_codex_idle_prompt(s: &str) -> bool {
     body.to_ascii_lowercase().starts_with("ask codex to do")
 }
 
-fn codex_usage_notice_line(line: &str) -> Option<String> {
+pub fn codex_usage_notice_line(line: &str) -> Option<String> {
     let body = line
         .trim()
         .strip_prefix('•')
