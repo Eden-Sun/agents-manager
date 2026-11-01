@@ -124,7 +124,7 @@ async fn restart(f: &Fixture) -> Arc<crate::state::App> {
     app
 }
 async fn recover(app: &Arc<crate::state::App>) -> startup_recovery::Page {
-    startup_recovery::recover_receipt_page(app, None, 64)
+    startup_recovery::recover_page_body(app, None, 64, true)
         .await
         .unwrap_or_else(|e| panic!("{}", e.code()))
 }
@@ -390,7 +390,8 @@ async fn newer_active_run_and_live_registry_owner_are_rejected_without_cost_muta
         .api_bot_runtime
         .startup_cursor_for_test(&f.identity.bot_id)
         .is_none());
-    ticket.cancel_and_join().await.unwrap();
+    ticket.cancellation_token().cancel();
+    ticket.join().await.unwrap();
 }
 struct NeverTools(std::sync::atomic::AtomicUsize);
 impl super::runner::Tools for NeverTools {
@@ -409,7 +410,7 @@ async fn ready_app_or_provider_dependencies_forbid_startup_restore() {
     let app = restart(&f).await;
     app.set_startup_ready(true);
     assert!(matches!(
-        startup_recovery::recover_receipt_page(&app, None, 64).await,
+        startup_recovery::recover_page_body(&app, None, 64, true).await,
         Err(Error::NotStartup)
     ));
     app.set_startup_ready(false);
@@ -422,7 +423,7 @@ async fn ready_app_or_provider_dependencies_forbid_startup_restore() {
         Err(StartupError::NotStartup)
     ));
     assert!(matches!(
-        startup_recovery::recover_receipt_page(&app, None, 64).await,
+        startup_recovery::recover_page_body(&app, None, 64, true).await,
         Err(Error::NotStartup)
     ));
     assert_eq!(ledger(&app).await, before);
@@ -474,7 +475,7 @@ async fn page_bounds_keyset_and_read_errors_are_not_silently_empty() {
     let app = restart(&f).await;
     for limit in [0, 65] {
         assert!(matches!(
-            startup_recovery::recover_receipt_page(&app, None, limit).await,
+            startup_recovery::recover_page_body(&app, None, limit, true).await,
             Err(Error::Bounds)
         ));
     }
@@ -509,7 +510,7 @@ async fn page_bounds_keyset_and_read_errors_are_not_silently_empty() {
         .await
         .unwrap();
     assert!(matches!(
-        startup_recovery::recover_receipt_page(&app, None, 64).await,
+        startup_recovery::recover_page_body(&app, None, 64, true).await,
         Err(Error::Storage)
     ));
 }
@@ -537,7 +538,7 @@ async fn malformed_oversized_checkpoint_and_unreadable_session_are_fail_closed()
         .await
         .unwrap();
     assert!(matches!(
-        startup_recovery::recover_receipt_page(&app, None, 64).await,
+        startup_recovery::recover_page_body(&app, None, 64, true).await,
         Err(Error::Storage)
     ));
 }

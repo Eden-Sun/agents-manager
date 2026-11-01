@@ -1002,8 +1002,8 @@ mod tests {
             let release_gate = Arc::new(Notify::new());
             let release_gate_child = release_gate.clone();
 
-            let _token = registry
-                .spawn(key.clone(), move |cancel| async move {
+            let ticket = registry
+                .spawn_tracked(key.clone(), move |cancel| async move {
                     let mut state = State::default();
                     state.messages = vec![Message {
                         role: "user".into(),
@@ -1041,7 +1041,11 @@ mod tests {
                     .unwrap();
 
                 // 2. Poll cancel_and_join to Pending to guarantee cancel token is fired
-                let mut join_fut = Box::pin(registry.cancel_and_join(&run));
+                let cancel_token = ticket.cancellation_token();
+                let mut join_fut = Box::pin(async move {
+                    cancel_token.cancel();
+                    ticket.join().await
+                });
                 assert!(poll_once(join_fut.as_mut()).is_pending());
 
                 // 3. Unpause server so HTTP completes, but adapter discovers owner is stopping
@@ -1102,7 +1106,11 @@ mod tests {
                 assert_eq!(runner_res, Ok(Halt::EndTurn));
 
                 // 3. Poll cancel_and_join to Pending to ensure subscription
-                let mut join_fut = Box::pin(registry.cancel_and_join(&run));
+                let cancel_token = ticket.cancellation_token();
+                let mut join_fut = Box::pin(async move {
+                    cancel_token.cancel();
+                    ticket.join().await
+                });
                 assert!(poll_once(join_fut.as_mut()).is_pending());
 
                 // 4. Release task to allow it to exit cleanly

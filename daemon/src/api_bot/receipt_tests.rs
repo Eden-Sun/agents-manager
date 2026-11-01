@@ -42,6 +42,10 @@ async fn fixture() -> (crate::testing::Env, AdapterIdentity) {
     .unwrap();
     (e, i)
 }
+/// 完成回應的可見文字投影：與 `runner::final_text` 同源。
+fn visible_of(response: &Response) -> Payload {
+    Payload::visible(&super::runner::final_text(response)).unwrap()
+}
 fn response(text: &str) -> Response {
     Response {
         id: "fixture".into(),
@@ -59,7 +63,7 @@ fn response(text: &str) -> Response {
 #[tokio::test]
 async fn receipt_visible_only_redacted_idempotent_and_conflict() {
     let (e, i) = fixture().await;
-    let p = Payload::completed(&response("PRIVATE_VISIBLE_SENTINEL")).unwrap();
+    let p = visible_of(&response("PRIVATE_VISIBLE_SENTINEL"));
     let debug = format!("{p:?}");
     assert!(!debug.contains("PRIVATE_VISIBLE_SENTINEL"));
     assert!(debug.contains("redacted"));
@@ -70,7 +74,7 @@ async fn receipt_visible_only_redacted_idempotent_and_conflict() {
             &e.app.db,
             &i,
             0,
-            &Payload::completed(&response("different")).unwrap()
+            &visible_of(&response("different"))
         )
         .await
         .unwrap_err(),
@@ -96,23 +100,23 @@ async fn receipt_visible_only_redacted_idempotent_and_conflict() {
         .unwrap()
         .to_string()
         .contains("PRIVATE_VISIBLE_SENTINEL"));
-    assert_eq!(pending(&e.app.db, 1).await.unwrap().len(), 1);
+    assert_eq!(startup_page(&e.app.db, None, 1).await.unwrap().rows.len(), 1);
 }
 #[tokio::test]
 async fn receipt_bounds_and_terminal_payload_contract() {
     assert_eq!(
-        Payload::completed(&response(&"é".repeat(MAX_TEXT_BYTES / 2 + 1))).unwrap_err(),
+        Payload::visible(&super::runner::final_text(&response(&"é".repeat(MAX_TEXT_BYTES / 2 + 1)))).unwrap_err(),
         Error::Bounds
     );
-    assert!(Payload::completed(&response(&"x".repeat(MAX_TEXT_BYTES))).is_ok());
+    assert!(Payload::visible(&super::runner::final_text(&response(&"x".repeat(MAX_TEXT_BYTES)))).is_ok());
     assert_eq!(
         Payload::ended(JoinOutcome::Completed).unwrap_err(),
         Error::Invalid
     );
     let (e, i) = fixture().await;
-    assert!(matches!(pending(&e.app.db, 0).await, Err(Error::Bounds)));
+    assert!(matches!(startup_page(&e.app.db, None, 0).await, Err(Error::Bounds)));
     assert!(matches!(
-        pending(&e.app.db, MAX_BATCH + 1).await,
+        startup_page(&e.app.db, None, MAX_BATCH + 1).await,
         Err(Error::Bounds)
     ));
     assert_eq!(
@@ -206,7 +210,13 @@ async fn receipt_mark_cas_and_retention_preserve_ledger_and_owner() {
     )
     .await
     .unwrap();
-    let mut items = pending(&e.app.db, MAX_BATCH).await.unwrap();
+    let mut items: Vec<Pending> = startup_page(&e.app.db, None, MAX_BATCH)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|stored| stored.item)
+        .collect();
     let item = &mut items[0];
     item.revision = 1;
     let mut tx = crate::db::begin_write(&e.app.db).await.unwrap();
@@ -215,7 +225,7 @@ async fn receipt_mark_cas_and_retention_preserve_ledger_and_owner() {
     assert!(mark_on(&mut tx, item, Disposition::Fenced).await.unwrap());
     assert!(!mark_on(&mut tx, item, Disposition::Applied).await.unwrap());
     tx.commit().await.unwrap();
-    assert!(pending(&e.app.db, 1).await.unwrap().is_empty());
+    assert!(startup_page(&e.app.db, None, 1).await.unwrap().rows.is_empty());
     sqlx::query("DELETE FROM api_bot_sessions WHERE id='s'")
         .execute(&e.app.db)
         .await
@@ -246,7 +256,7 @@ async fn receipt_mark_cas_and_retention_preserve_ledger_and_owner() {
 #[tokio::test]
 async fn receipt_stop_after_save_cannot_overwrite_or_revalidate_old_receipt() {
     let (e, i) = fixture().await;
-    let p = Payload::completed(&response("joined final")).unwrap();
+    let p = visible_of(&response("joined final"));
     assert_eq!(save(&e.app.db, &i, 0, &p).await.unwrap(), Saved::Inserted);
     sqlx::query("UPDATE runs SET state='stopping' WHERE id='r'")
         .execute(&e.app.db)

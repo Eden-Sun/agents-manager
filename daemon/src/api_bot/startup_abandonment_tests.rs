@@ -241,7 +241,8 @@ async fn d3b1_busy_or_not_startup_cannot_abandon_orphan() {
     );
     assert_eq!(turn_status(&app, &f.identity).await, "in_flight");
     assert_eq!(ledger(&app).await, vec![("reserved".into(), None, 123)]);
-    ticket.cancel_and_join().await.unwrap();
+    ticket.cancellation_token().cancel();
+    ticket.join().await.unwrap();
 }
 
 #[tokio::test]

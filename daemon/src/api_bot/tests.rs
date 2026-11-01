@@ -96,7 +96,7 @@ impl Model for HttpModel<'_> {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Response, http::Error>> {
         Box::pin(async move {
-            crate::claude_api::complete_full_messages(&http::FullMessagesRequest {
+            crate::api_bot::http::complete(&http::FullMessagesRequest {
                 endpoint:&self.0.endpoint,key:"fixture-not-a-real-key",options:&options(),
                 system:&json!([{"type":"text","text":"stable rules","cache_control":{"type":"ephemeral"}}]),
                 messages,timeout:Duration::from_secs(2),max_response_bytes:64*1024,

@@ -71,28 +71,14 @@ pub(crate) struct ApiBotRegistry {
 /// A ticket is obtained exclusively via `ApiBotRegistry::spawn_tracked`.
 /// Dropping the ticket does NOT cancel or abort the runner task, and does NOT detach the supervisor.
 pub(crate) struct RunTicket {
-    key: RunTurnKey,
     cancel_token: CancellationToken,
     outcome_rx: watch::Receiver<Option<Result<TurnOutcome, RegistryError>>>,
 }
 
 impl RunTicket {
-    /// Returns a reference to the turn identification key.
-    pub(crate) fn key(&self) -> &RunTurnKey {
-        &self.key
-    }
-
     /// Clones the cancellation signal without cloning the single-use join ticket.
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
         self.cancel_token.clone()
-    }
-
-    /// Signals cancellation via the turn's cancellation token and waits for genuine task completion.
-    /// Consumes the ticket.
-    pub(crate) async fn cancel_and_join(self) -> Result<TurnOutcome, RegistryError> {
-        self.cancel_token.cancel();
-        let mut rx = self.outcome_rx;
-        wait_outcome(&mut rx).await
     }
 
     /// Waits for genuine task completion without signaling cancellation.
@@ -199,24 +185,9 @@ impl ApiBotRegistry {
         );
 
         Ok(RunTicket {
-            key,
             cancel_token,
             outcome_rx,
         })
-    }
-
-    /// Backwards-compatible spawn: delegates to `spawn_tracked` and returns `CancellationToken`.
-    pub(crate) fn spawn<F, Fut>(
-        self: &Arc<Self>,
-        key: RunTurnKey,
-        task_fn: F,
-    ) -> Result<CancellationToken, RegistryError>
-    where
-        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<TurnOutcome, RegistryError>> + Send + 'static,
-    {
-        let ticket = self.spawn_tracked(key, task_fn)?;
-        Ok(ticket.cancel_token)
     }
 
     /// Checks if a run currently has an active runner slot.
@@ -312,7 +283,7 @@ mod tests {
         let notify_clone = notify.clone();
 
         let _token = registry
-            .spawn(key.clone(), move |_cancel| async move {
+            .spawn_tracked(key.clone(), move |_cancel| async move {
                 notify_clone.notified().await;
                 Ok(TurnOutcome::Completed)
             })
@@ -325,11 +296,11 @@ mod tests {
             run_id: "r1".into(),
             turn_id: "t2".into(),
         };
-        match registry.spawn(key_dup, |_| async { Ok(TurnOutcome::Completed) }) {
+        match registry.spawn_tracked(key_dup, |_| async { Ok(TurnOutcome::Completed) }) {
             Err(RegistryError::AlreadyRunning { existing_turn_id }) => {
                 assert_eq!(existing_turn_id, "t1");
             }
-            other => panic!("expected AlreadyRunning, got {:?}", other),
+            other => panic!("expected AlreadyRunning, got {:?}", other.map(|_| ())),
         }
 
         // Release task and wait for completion
@@ -400,7 +371,7 @@ mod tests {
         };
 
         let _token = registry
-            .spawn(key.clone(), |_| async move {
+            .spawn_tracked(key.clone(), |_| async move {
                 panic!("controlled simulation panic for test");
                 #[allow(unreachable_code)]
                 Ok(TurnOutcome::Completed)
@@ -424,7 +395,7 @@ mod tests {
         let notify_clone = notify.clone();
 
         let _token = registry
-            .spawn(key.clone(), move |_| async move {
+            .spawn_tracked(key.clone(), move |_| async move {
                 notify_clone.notified().await;
                 Ok(TurnOutcome::Completed)
             })
@@ -462,7 +433,7 @@ mod tests {
         let (tx_done, rx_done) = oneshot::channel();
 
         let _token = registry
-            .spawn(key.clone(), move |_cancel| async move {
+            .spawn_tracked(key.clone(), move |_cancel| async move {
                 let _ = rx_done.await;
                 Ok(TurnOutcome::Completed)
             })
@@ -515,7 +486,7 @@ mod tests {
             let (tx_start_signal, rx_start_signal) = oneshot::channel();
 
             let _token = registry
-                .spawn(key.clone(), move |cancel| async move {
+                .spawn_tracked(key.clone(), move |cancel| async move {
                     if i % 2 == 0 {
                         // Cancel-first branch
                         cancel.cancelled().await;
@@ -567,7 +538,6 @@ mod tests {
                 })
                 .unwrap();
 
-            assert_eq!(ticket.key(), &key);
             assert!(registry.is_active("r_late"));
 
             // Poll legacy join to Pending before releasing runner
@@ -652,7 +622,8 @@ mod tests {
 
             // Old ticket 1 executes cancel_and_join
             // Because turn 1 already finished, it consumes ticket1 and returns turn 1 outcome
-            let old_outcome = ticket1.cancel_and_join().await.unwrap();
+            ticket1.cancellation_token().cancel();
+            let old_outcome = ticket1.join().await.unwrap();
             assert_eq!(old_outcome, TurnOutcome::Completed);
 
             // Verify turn 2 token was NOT cancelled and slot remains active
@@ -687,7 +658,8 @@ mod tests {
                 })
                 .unwrap();
 
-            let outcome = ticket.cancel_and_join().await.unwrap();
+            ticket.cancellation_token().cancel();
+            let outcome = ticket.join().await.unwrap();
             assert_eq!(outcome, TurnOutcome::Cancelled);
             assert!(!registry.is_active("r_cancel_t"));
         })

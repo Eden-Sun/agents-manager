@@ -1,6 +1,6 @@
 //! Private joined-completion storage. No proof inference from checkpoint state.
 //! D2 must supply these values only after observing a genuine RunTicket join.
-use super::{adapter::AdapterIdentity, protocol::Response};
+use super::adapter::AdapterIdentity;
 use sqlx::{Row, SqlitePool};
 
 pub(super) const MAX_TEXT_BYTES: usize = 1024 * 1024;
@@ -37,9 +37,6 @@ impl std::fmt::Debug for Payload {
     }
 }
 impl Payload {
-    pub(super) fn completed(response: &Response) -> Result<Self, Error> {
-        Self::visible(&super::runner::final_text(response))
-    }
     pub(super) fn visible(text: &str) -> Result<Self, Error> {
         if text.len() > MAX_TEXT_BYTES {
             return Err(Error::Bounds);
@@ -129,39 +126,6 @@ pub(super) async fn save(
         .execute(&mut *tx).await.map_err(|_| Error::Storage)?;
     tx.commit().await.map_err(|_| Error::Storage)?;
     Ok(Saved::Inserted)
-}
-
-/// Read at most 64 private receipts; processing requires a separate exact-owner fence in D2/D3.
-pub(super) async fn pending(pool: &SqlitePool, limit: usize) -> Result<Vec<Pending>, Error> {
-    if limit == 0 || limit > MAX_BATCH {
-        return Err(Error::Bounds);
-    }
-    let rows = sqlx::query("SELECT session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text FROM api_bot_join_receipts WHERE state='pending' ORDER BY created_at,session_id,turn_id LIMIT ?")
-        .bind(limit as i64).fetch_all(pool).await.map_err(|_| Error::Storage)?;
-    rows.into_iter()
-        .map(|row| {
-            let outcome = match row.get::<String, _>("outcome").as_str() {
-                "completed" => JoinOutcome::Completed,
-                "failed" => JoinOutcome::Failed,
-                "cancelled" => JoinOutcome::Cancelled,
-                _ => return Err(Error::Invalid),
-            };
-            Ok(Pending {
-                identity: AdapterIdentity {
-                    session_id: row.get("session_id"),
-                    bot_id: row.get("bot_id"),
-                    run_id: row.get("run_id"),
-                    turn_id: row.get("turn_id"),
-                    generation: row.get("generation"),
-                },
-                revision: row.get("revision"),
-                payload: Payload {
-                    outcome,
-                    text: row.get("final_text"),
-                },
-            })
-        })
-        .collect()
 }
 
 #[derive(Clone, Copy)]

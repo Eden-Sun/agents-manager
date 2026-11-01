@@ -39,14 +39,7 @@ pub(super) struct Page {
     pub(super) next: Option<receipt::StartupCursor>,
 }
 
-pub(super) fn recover_receipt_page<'a>(
-    app: &'a Arc<crate::state::App>,
-    after: Option<&'a receipt::StartupCursor>,
-    limit: usize,
-) -> impl std::future::Future<Output = Result<Page, Error>> + Send + 'a {
-    Box::pin(recover_page_body(app, after, limit, true))
-}
-async fn recover_page_body(
+pub(super) async fn recover_page_body(
     app: &Arc<crate::state::App>,
     after: Option<&receipt::StartupCursor>,
     limit: usize,
