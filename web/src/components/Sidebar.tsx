@@ -83,6 +83,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { ExpertBadge, ExpertDisabledMark, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
+import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
@@ -721,6 +722,59 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
 
   if (projects.length === 0) {
     return <p className="hint">{t('請先新增一個 Project。')}</p>
+  }
+
+  const selectedProj = projects.find((p) => p.id === pid)
+  if (selectedProj?.mode === 'expert') {
+    return (
+      <div className="new-bot-dialog-expert-wrapper">
+        {initialProjectId ? null : (
+          <div className="field">
+            <span>{t('Project')}</span>
+            {projects.length > 6 ? (
+              <input
+                type="text"
+                className="opt-filter"
+                value={projectFilter}
+                placeholder={t('過濾 Project…')}
+                aria-label={t('過濾 Project')}
+                spellCheck={false}
+                onChange={(e) => setProjectFilter(e.target.value)}
+              />
+            ) : null}
+            <div className="opt-group" role="radiogroup" aria-label="Project">
+              {visibleProjects.map((p) => {
+                const up = hostUp(p.host)
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={pid === p.id}
+                    className={`opt${pid === p.id ? ' on' : ''}`}
+                    disabled={!up}
+                    title={up ? p.path : t('{name}（主機未連線）', { name: p.label })}
+                    onClick={() => {
+                      setProjectId(p.id)
+                      nameTouched.current = false
+                    }}
+                  >
+                    <span className="opt-label">{p.label}</span>
+                    <HostBadge host={p.host} connected={up} />
+                  </button>
+                )
+              })}
+            </div>
+            {visibleProjects.length === 0 ? <span className="hint">{t('沒有符合的 Project。')}</span> : null}
+          </div>
+        )}
+        <NewExpertBotForm
+          project={selectedProj}
+          onDone={onDone}
+          onCreated={onCreated}
+        />
+      </div>
+    )
   }
 
   return (
