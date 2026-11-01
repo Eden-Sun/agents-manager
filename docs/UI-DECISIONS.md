@@ -1363,3 +1363,18 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **放在環境設定→顯示**：兩個單選（`claude` 預設、`claude_codex`＝「claude主codex輔助模式」），選了立即 `PUT /api/model-mode`，不另設儲存鈕。
 - **選項名稱與說明全由 daemon 回**（`GET /api/model-mode` 的 `modes[]`）：選模型策略文字不在前端寫死；舊 daemon（404／405）整塊不出現。
 - **改完提示重啟**：回應 `needs_restart_bots` 時顯示「已在跑的 bot 要重啟才套用新規則」；不自動重啟任何 bot。
+
+## 專家模式專案的新增 Bot（2026-11-01）
+
+使用者指定：專案為專家模式（`project.mode === 'expert'`）時，新增 Bot 對話框流程與一般模式分流；一般模式（`parent_child`）維持既有佈局與行為不變。
+
+- **先選角色（必選四選一卡片）**：管理者／顧問／執行者／專家，各附一行說明。
+  - 管理者（Manager）：專案若已有管理者則該卡片 disabled，並標記「已有管理者 <名稱>」（全專案僅限一位）。管理者不顯示「可被管理者使用」勾選框。
+  - 專家（Specialist）：必填「負責範圍（track）」文字欄位（例如 billing、CI）；未填不能送出。預設名稱為該 track。
+  - 執行者（Executor）：先列出執行者池（`executor_pool`）條目（`kind · model · effort · context · 已用/上限`），點選即套用並鎖定 kind／模型／強度／context 欄位；亦提供「自訂」選項自由調整。池為空時顯示提示並直接走自訂。預設名稱為 `exec-<n>`。
+  - 顧問（Advisor）：預設名稱為 `advisor-<n>`。
+- **kind／模型／強度依角色給建議預設**：標「建議」提示標籤（管理者 claude opus high；顧問 codex 最新 astra high；專家 claude sonnet medium 或 codex 最新 sol medium；執行者照池條目）。模型 ID 動態自 `/api/models` 清單挑選當下最新版本，不寫死版號。
+- **context 與保溫**：顯示該角色於專案 `role_policy` 的預設值摘要；點擊「自訂」展開後可個別修改（修改後寫入 `runtime_override`）。codex 顯示「永快取」不顯示保溫；agy 之 context 灰掉不可選。
+- **「可被管理者使用」（manager_use）**：預設勾選（管理者角色隱藏此項）。
+- **用途（分享）區塊隱藏**：專家模式專案之團隊成員不做分享 bot，隱藏分享路徑與設定區塊；人設（persona）欄位保留。
+- **送出與錯誤處理**：建立 Bot 時透過 `POST /api/projects/{id}/bots` 建立，若有角色、track、manager_use 或 runtime_override，立即接續呼叫 `PATCH /api/bots/{id}`。若 PATCH 失敗，在對話框內顯示錯誤提示並保留 bot，供使用者在選單中補設，不自動刪除。
