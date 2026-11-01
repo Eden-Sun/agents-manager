@@ -113,3 +113,18 @@ test('Bot 執行期覆寫：清掉＝送 null；改動跟底部的儲存一起�
   await click(save)
   assert.deepEqual(sent, [{ runtime_override: null }], '全部清掉＝null（跟角色）')
 })
+
+test('角色卡快取命中率：取該專案同角色 Bot 的 run.prompt_cache.hit_ratio 平均；沒資料畫「—」', async () => {
+  const mk = (id: string, role: Bot['role'], project_id = 'p1') => ({ id, name: id, project_id, kind: 'claude', role }) as unknown as Bot
+  const pc = (hit_ratio: number | null) => ({ id: 'r', state: 'running', prompt_cache: { hit_ratio } })
+  useStore.setState({
+    bots: [mk('m1', 'manager'), mk('e1', 'executor'), mk('e2', 'executor'), mk('e3', 'executor', 'other'), mk('a1', 'advisor')],
+    runs: { m1: pc(0.994), e1: pc(0.9), e2: pc(0.5), e3: pc(0), a1: pc(null) },
+  } as never)
+  await mount(<RolePolicyEditor project={expert()} />)
+  const cache = (label: string) => card(label).querySelector('.rp-cache')!.textContent!.replace(/\s+/g, ' ').trim()
+  assert.match(cache('管理者'), /99%$/)
+  assert.match(cache('執行者'), /70%$/, '只算同專案：(0.9+0.5)/2')
+  assert.match(cache('顧問'), /—$/, 'hit_ratio 為 null')
+  assert.match(cache('專家'), /—$/, '沒有這個角色的 Bot')
+})
