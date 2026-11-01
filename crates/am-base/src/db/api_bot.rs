@@ -186,6 +186,24 @@ pub enum Reservation {
     Fresh(i64),
     Existing { revision: i64, state: String },
 }
+/// 預留被「額度」拒絕（還沒送任何請求）：呼叫端用 `downcast_ref` 取得原因，其他錯誤仍是儲存失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveRefused {
+    /// 這個 turn 已花（或已預留）的錢加上這次預留會超過 `max_turn_cost_microusd`。
+    TurnBudget,
+    /// 過去一小時的請求數已達 `max_requests_per_hour`。
+    HourlyLimit,
+}
+impl std::fmt::Display for ReserveRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TurnBudget => "API bot turn budget exhausted",
+            Self::HourlyLimit => "API bot request rate exhausted",
+        })
+    }
+}
+impl std::error::Error for ReserveRefused {}
+
 /// An existing attempt is NEVER permission to send again, including failed/unknown attempts.
 pub async fn reserve(
     pool: &SqlitePool,
@@ -225,18 +243,17 @@ pub async fn reserve(
     let before = Checkpoint::new(&serde_json::from_str(&row.checkpoint_json)?)?;
     ensure!(!before.pending(), "unresolved checkpoint cannot send again");
     let spent:i64=sqlx::query_scalar("SELECT COALESCE(SUM(COALESCE(estimated_microusd,reserved_microusd)),0) FROM api_bot_attempts WHERE turn_id=?").bind(f.turn).fetch_one(&mut *tx).await?;
-    ensure!(
-        spent
-            .checked_add(a.reserved_microusd)
-            .is_some_and(|n| n <= max_turn_microusd),
-        "API bot turn budget exhausted"
-    );
+    if !spent.checked_add(a.reserved_microusd).is_some_and(|n| n <= max_turn_microusd) {
+        return Err(anyhow::Error::new(ReserveRefused::TurnBudget));
+    }
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_attempts WHERE created_at>=?")
             .bind(super::iso_in(-3600))
             .fetch_one(&mut *tx)
             .await?;
-    ensure!(count < max_per_hour, "API bot request rate exhausted");
+    if count >= max_per_hour {
+        return Err(anyhow::Error::new(ReserveRefused::HourlyLimit));
+    }
     let revision = cas(&mut tx, f, checkpoint, &at).await?;
     sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?,?)")
         .bind(a.id).bind(f.session).bind(f.bot).bind(f.run).bind(f.turn).bind(f.generation).bind(a.ordinal).bind(a.request_hash).bind(a.speed).bind(a.reserved_microusd).bind(a.pricing_version).bind(&at).execute(&mut *tx).await?;

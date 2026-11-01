@@ -90,6 +90,8 @@ pub(crate) struct ApiBotAdapter {
     http_cfg: AdapterHttpConfig,
     tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
+    /// 預留被拒絕（還沒送請求）的原因，給 runtime 寫進失敗通知；只存固定代碼。
+    refusal: std::sync::Mutex<Option<&'static str>>,
 }
 
 struct CursorState {
@@ -114,6 +116,14 @@ struct ActiveAttempt {
 }
 
 impl ApiBotAdapter {
+    fn refuse(&self, reason: &'static str) {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+    }
+    /// 取走（並清掉）最近一次預留被拒絕的原因。
+    pub(crate) fn take_refusal(&self) -> Option<&'static str> {
+        self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
     /// Create adapter for the first turn (generation 1, fresh session at revision 0).
     pub(crate) async fn new(
         pool: SqlitePool,
@@ -165,6 +175,7 @@ impl ApiBotAdapter {
             quote_provider,
             http_cfg,
             tools,
+            refusal: std::sync::Mutex::new(None),
             cursor: Mutex::new(CursorState {
                 revision: 0,
                 last_api_pending: false,
@@ -248,6 +259,7 @@ impl ApiBotAdapter {
             quote_provider,
             http_cfg,
             tools,
+            refusal: std::sync::Mutex::new(None),
             cursor: Mutex::new(CursorState {
                 revision: new_rev,
                 last_api_pending: false,
@@ -456,9 +468,10 @@ impl Journal for ApiBotAdapter {
                     .map_err(|_| ())?;
                     let key = self.http_cfg.key_source.snapshot().await.map_err(|_| {
                         tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable");
+                        self.refuse("api_bot_key_unavailable");
                     })?;
-                    if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); return Err(()); }
-                    let quote = self.quote_provider.reserve(&envelope).map_err(|_| ())?;
+                    if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); self.refuse("api_bot_key_unavailable"); return Err(()); }
+                    let quote = self.quote_provider.reserve(&envelope).map_err(|_| self.refuse("api_bot_quote_refused"))?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
                     }
@@ -482,7 +495,11 @@ impl Journal for ApiBotAdapter {
                         self.limits.max_requests_per_hour,
                     )
                     .await
-                    .map_err(|_| ())?;
+                    .map_err(|e| match e.downcast_ref::<db_api::ReserveRefused>() {
+                        Some(db_api::ReserveRefused::TurnBudget) => self.refuse("api_bot_turn_cost_cap_exceeded"),
+                        Some(db_api::ReserveRefused::HourlyLimit) => self.refuse("api_bot_hourly_limit_reached"),
+                        None => {}
+                    })?;
 
                     match res {
                         db_api::Reservation::Fresh(next_rev) => {

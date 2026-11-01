@@ -756,7 +756,7 @@ function errText(e: unknown): string {
  */
 function startErrText(e: unknown): string {
   if (e instanceof ApiError) {
-    const apiBot = apiBotStartReasonText(e.body.reason ?? e.body.error)
+    const apiBot = apiBotStartReasonText(e.body.reason) ?? apiBotStartReasonText(e.body.message) ?? apiBotStartReasonText(e.body.error)
     if (apiBot) return apiBot
   }
   if (e instanceof ApiError && e.body.reason === 'identity_not_logged_in' && typeof e.body.hint === 'string' && e.body.hint) {
@@ -1647,7 +1647,7 @@ export const useStore = create<StoreState>((set, get) => {
         get().notify('error', e.body.send_now_message)
         return false
       }
-      get().notify('error', errText(e))
+      get().notify('error', startErrText(e))
       return false
     }
   },
