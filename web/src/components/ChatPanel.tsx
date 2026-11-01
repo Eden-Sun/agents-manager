@@ -10,6 +10,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { quotaKey } from '../api/types'
 import { headerEffortLabel } from '../lib/headerEffort'
+import { compactThreshold } from '../lib/contextLimit'
 import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useComposerFocus } from '../hooks/useComposerFocus'
@@ -1175,6 +1176,11 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
     return effectiveModelOf(r?.runtime_model, s.bots.find((b) => b.id === botId)?.model)
   })
   const runPromptCache = useStore((s) => s.runs[botId]?.prompt_cache ?? null)
+  // 設了自動壓縮門檻（角色／覆寫／池條目）：分母改用門檻，模型視窗放 tooltip（2026-11-01 使用者：「怎麼還是 /1M」）。
+  const threshold = useStore((s) => {
+    const b = s.bots.find((x) => x.id === botId)
+    return compactThreshold(b, b ? s.projects.find((p) => p.id === b.project_id) : undefined)
+  })
   const line = text?.trim() ?? ''
   // 終端解析的 footer 優先（帶 warning）；沒掛終端時（對話分頁）用 daemon 寫進 run.status_line 的同一行（#1755）。
   const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
@@ -1195,14 +1201,24 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   // token 先取 daemon 的 prompt_cache（rollout 實際值），沒有才用 statusLine 的實際值；都沒有就不畫（不退回 CLI 的 `Context N% used`）。
   const solCtx = solOn ? sol500kContext(kind, effectiveModel, runPromptCache?.context_used_tokens ?? status?.context_used_tokens) : null
   // 讀數失效（剛 resume／壓縮）：連終端 footer 的百分比也不採用，免得把 0% 從另一條路又帶回來。
-  const ctxPct = solOn
-    ? (solCtx?.pct ?? null)
-    : status?.context_unknown ? null : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
-  const ctxDetail = solOn
-    ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
-    : status && status.context_used_tokens !== null && status.context_size !== null
-      ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
-      : null
+  const usedTokens = runPromptCache?.context_used_tokens ?? status?.context_used_tokens ?? null
+  const windowSize = solOn ? GPT_61_SOL_CONTEXT_WINDOW : (status?.context_size ?? runPromptCache?.context_size ?? null)
+  const limit = threshold !== null && usedTokens !== null && !status?.context_unknown && (windowSize === null || threshold < windowSize) ? threshold : null
+  const ctxPct = limit !== null
+    ? (usedTokens! / limit) * 100
+    : solOn
+      ? (solCtx?.pct ?? null)
+      : status?.context_unknown ? null : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
+  const ctxDetail = limit !== null
+    ? `${compactTokens(usedTokens!)}/${compactTokens(limit)}`
+    : solOn
+      ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
+      : status && status.context_used_tokens !== null && status.context_size !== null
+        ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
+        : null
+  const ctxTitle = limit !== null
+    ? t('已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）', { detail: ctxDetail ?? '', limit: compactTokens(limit), window: windowSize !== null ? compactTokens(windowSize) : '—' })
+    : ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined
   const cwd = fields?.cwd ?? status?.cwd ?? null
   return (
     <div className="statusline-bar" title={line || footer?.modelLine || undefined}>
@@ -1222,7 +1238,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
         </SlItem>
       ) : null}
       {ctxPct !== null ? (
-        <SlItem k="context" title={ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined}>
+        <SlItem k="context" title={ctxTitle}>
           {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
           {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
