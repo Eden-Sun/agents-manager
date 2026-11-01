@@ -82,7 +82,7 @@ export function RuntimeSettingsFields({
         {codexNote ? <span className="hint">{t('codex 永快取，不需保溫（這個設定只影響 claude）')}</span> : null}
       </div>
 
-      <label className="field">
+      {value.keep_warm === false ? null : <label className="field">
         <span>{t('保溫分鐘')}</span>
         <input
           type="number"
@@ -94,7 +94,7 @@ export function RuntimeSettingsFields({
           value={value.keep_warm_after_min ?? ''}
           onChange={(e) => set({ keep_warm_after_min: numberOrNull(e.target.value) })}
         />
-      </label>
+      </label>}
 
       <details className="rt-advanced">
         <summary>{t('進階')}</summary>

@@ -40,15 +40,23 @@ async function setupEditor(project: Project) {
   return sent
 }
 
-test('加入建議只帶入草稿，不送出；儲存才送整份 role_policy（沒設的欄位不送）', async () => {
+test('全部加入建議只帶入草稿，不送出；儲存才送整份 role_policy（沒設的欄位不送）', async () => {
   const sent = await setupEditor(expert())
-  await click(button(card('管理者'), '加入建議'))
+  assert.equal(document.querySelectorAll('.role-policy-editor button').length > 0, true)
+  assert.equal([...document.querySelectorAll('.rp-card button')].some((b) => b.textContent?.includes('建議')), false, '卡片上不再各放一顆建議')
+  await click(button(document, '全部加入建議'))
   await act(async () => {})
   assert.equal(pill(card('管理者'), '開').getAttribute('aria-checked'), 'true', '管理者建議：保溫開')
   assert.deepEqual(sent, [], '建議不自動存')
   assert.equal(saveBtn().disabled, false, '有變更，儲存可按')
   await click(saveBtn())
-  assert.deepEqual(sent, [{ role_policy: { manager: { keep_warm: true } } }])
+  assert.deepEqual(sent, [{ role_policy: { manager: { keep_warm: true }, specialist: { context_tokens: 500000, keep_warm: true }, advisor: { keep_warm: false }, executor: { context_tokens: 200000, keep_warm: false } } }])
+})
+
+test('保溫關：不顯示保溫分鐘', async () => {
+  await setupEditor(expert({ advisor: { keep_warm: false } }))
+  assert.doesNotMatch(card('顧問').textContent ?? '', /保溫分鐘/)
+  assert.match(card('管理者').textContent ?? '', /保溫分鐘/)
 })
 
 test('超出範圍：儲存停用並提示欄位', async () => {
