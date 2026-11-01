@@ -8,7 +8,8 @@ import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
-import { effortLabel, quotaKey } from '../api/types'
+import { quotaKey } from '../api/types'
+import { headerEffortLabel } from '../lib/headerEffort'
 import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useComposerFocus } from '../hooks/useComposerFocus'
@@ -1117,12 +1118,12 @@ function derivedStatus(
   }
 }
 
-/** `高 · fast` — the model's settings, shown beside the model badge. */
+/** `H · fast` — the model's settings, shown beside the model badge. */
 function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast: boolean): string {
   // `slugEffort`：agy 的強度寫在 slug 尾巴（`agyEffort`），statusLine 不報強度。
   const effort = status?.effort ?? slugEffort
   // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
-  return [effort ? effortLabel(effort) : null, fast ? 'fast' : null]
+  return [effort ? headerEffortLabel(effort) : null, fast ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
@@ -1436,7 +1437,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               {bot.model || statusInfo?.model_name ? (
                 <span className="mobile-bot-model">
                   {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
-                  {statusInfo?.effort || slugEffort ? ` · ${effortLabel(statusInfo?.effort ?? slugEffort ?? '')}` : ''}
+                  {statusInfo?.effort || slugEffort ? ` · ${headerEffortLabel(statusInfo?.effort ?? slugEffort ?? '')}` : ''}
                 </span>
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
