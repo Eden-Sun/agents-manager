@@ -34,7 +34,7 @@ async fn start_body_inner(app: &Arc<crate::state::App>, bot: &str, mode: Mode) -
     #[cfg(not(all(test, feature = "daemon-test-harness")))]
     let lock = super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot).await.map_err(|_| E::Unconfirmed)?;
     if app.api_bot_runtime.explicit_retire_quarantined(bot) { return Err(E::Unconfirmed); }
-    app.api_bot_runtime.native_start_dependencies_ready(app, bot).await.map_err(|_| E::Unconfirmed)?;
+    app.api_bot_runtime.native_start_dependencies_ready(app, bot).await?;
     let (cleared, required) = match mode {
         Mode::Resume { required } => (false, required),
         Mode::Fresh(target) => {

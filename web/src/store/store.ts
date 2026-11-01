@@ -111,6 +111,7 @@ import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { pruneStoredIds } from '../lib/storedIds'
 import { msg, t, tr } from '../lib/i18n'
+import { apiBotStartReasonText } from '../lib/apiBotStartReason'
 
 /** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
 const messagePageGenerations = new Map<string, number>()
@@ -754,6 +755,10 @@ function errText(e: unknown): string {
  * `hint`，直接顯示它，不要漏成原始的 `identity_not_logged_in` 代碼。
  */
 function startErrText(e: unknown): string {
+  if (e instanceof ApiError) {
+    const apiBot = apiBotStartReasonText(e.body.reason ?? e.body.error)
+    if (apiBot) return apiBot
+  }
   if (e instanceof ApiError && e.body.reason === 'identity_not_logged_in' && typeof e.body.hint === 'string' && e.body.hint) {
     return e.body.hint
   }

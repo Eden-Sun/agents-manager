@@ -7137,6 +7137,8 @@ async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Que
         let result = app.api_native_start(&id, mode).await.map_err(|error| match error {
             ApiNativeStartError::Unconfirmed => LcError::Upstream("api_native_start_unconfirmed".into()),
             ApiNativeStartError::ClearedButStartUnconfirmed => LcError::Upstream("api_fresh_cleared_start_unconfirmed".into()),
+            ApiNativeStartError::Refused("api_bot_local_project_only") => LcError::BadValue(json!({"error": "bad_request", "reason": "api_bot_local_project_only"})),
+            ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
         })?;
         return Ok((StatusCode::OK, Json(json!({"run_id":result.run_id,"resumed":result.resumed}))).into_response());
     }

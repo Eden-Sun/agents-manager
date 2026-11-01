@@ -164,7 +164,10 @@ pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOp
             return Err(LcError::Upstream("api_native_start_unconfirmed".into()));
         }
         return crate::lifecycle::api_bot_port::ApiBotPort::api_native_start(app, bot_id, crate::lifecycle::api_bot_port::ApiNativeStartMode::Resume { required: opts.resume_required })
-            .await.map(|result| result.run_id).map_err(|_| LcError::Upstream("api_native_start_unconfirmed".into()));
+            .await.map(|result| result.run_id).map_err(|e| match e {
+                crate::lifecycle::api_bot_port::ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
+                _ => LcError::Upstream("api_native_start_unconfirmed".into()),
+            });
     }
     let locked_bot = bot_id.to_string();
     let _g = app.lock_bot_for_start(&locked_bot).await;
