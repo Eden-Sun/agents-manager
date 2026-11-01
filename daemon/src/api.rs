@@ -282,6 +282,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
         .route("/bots/{id}/api-session/retire", post(crate::api_bot_retire_route::retire_api_session))
+        .route("/bots/{id}/api-usage", get(api_bot_usage))
         .route("/bots/{id}/start", post(start_bot_http))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/credential/rotate", post(rotate_bot_credential))
@@ -1105,6 +1106,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/bots/{id}/local-image", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/api_fresh_target", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/api-session/retire", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/api-usage", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
@@ -6987,6 +6989,55 @@ async fn delete_identity(
     forget_identity_models(&app, &name).await;
     app.emit("identities_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// `GET /api/bots/{id}/api-usage`：claude-api bot 的累計花費與 token 用量（唯讀，只讀 `api_bot_attempts`，不含 prompt／回覆）。
+/// 金額都是整數微美元：`recorded`＝已結算的估價；`reserved`＝已預留、還沒回的；`unknown`＝結果不明、保留預留額（不捏造成零）。
+/// 命中率＝cache_read ÷ (input＋cache_read＋cache_creation)（Anthropic 的 `input_tokens` 不含快取的部分）。
+async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    if principal != RequestPrincipal::User { return Err(bot_user_only()); }
+    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.kind != crate::config::API_BOT_KIND {
+        return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "not_api_bot"})));
+    }
+    type Totals = (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64);
+    let t: Totals = sqlx::query_as(
+        "SELECT COUNT(*),
+                COALESCE(SUM(state='recorded'),0), COALESCE(SUM(state='reserved'),0), COALESCE(SUM(state='unknown'),0), COALESCE(SUM(state='failed'),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd,0) END),0),
+                COALESCE(SUM(CASE WHEN state='reserved' THEN reserved_microusd END),0),
+                COALESCE(SUM(CASE WHEN state='unknown' THEN COALESCE(estimated_microusd,reserved_microusd) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.input_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),0) END),0)
+         FROM api_bot_attempts WHERE bot_id=?",
+    )
+    .bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
+    let output: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(COALESCE(json_extract(usage_json,'$.output_tokens'),0)),0) FROM api_bot_attempts WHERE bot_id=? AND state='recorded'",
+    )
+    .bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
+    let last: Option<(Option<String>, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT actual_speed, requested_speed, usage_json, created_at FROM api_bot_attempts WHERE bot_id=? AND state='recorded' ORDER BY created_at DESC, ordinal DESC LIMIT 1",
+    )
+    .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
+    let (input, cache_read, cache_creation) = (t.8, t.9, t.10);
+    let denom = input + cache_read + cache_creation;
+    let hit_rate = if denom > 0 { json!(cache_read as f64 / denom as f64) } else { Value::Null };
+    let last_json = last.map(|(actual, requested, usage, at)| {
+        let u: Value = usage.and_then(|u| serde_json::from_str(&u).ok()).unwrap_or(Value::Null);
+        let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+        json!({"speed": actual.unwrap_or(requested), "at": at, "input_tokens": g("input_tokens"), "output_tokens": g("output_tokens"),
+               "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens")})
+    });
+    Ok(Json(json!({
+        "bot_id": id,
+        "attempts": {"total": t.0, "recorded": t.1, "reserved": t.2, "unknown": t.3, "failed": t.4},
+        "cost_microusd": {"recorded": t.5, "reserved": t.6, "unknown": t.7},
+        "tokens": {"input": input, "output": output, "cache_read": cache_read, "cache_creation": cache_creation},
+        "cache_hit_rate": hit_rate,
+        "last": last_json,
+    })))
 }
 
 async fn api_fresh_target(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
@@ -17664,6 +17715,45 @@ mod native_api_http_tests {
         shutdown.cancel(); tokio::time::timeout(std::time::Duration::from_secs(5),task).await.unwrap().unwrap();
         assert!(response.starts_with("HTTP/1.1 200") && response.contains("unavailable"));
         assert!(state.starts_with("HTTP/1.1 200"));
+    }
+
+    #[tokio::test]
+    async fn api_usage_sums_attempts_and_is_user_only() {
+        let env = crate::testing::env().await;
+        let (bot, token, cli) = (crate::db::ulid(), crate::db::ulid(), crate::testing::claude_bot(&env.app, &env.project_id, "usage-cli").await);
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api',?,?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(&token).bind(&now).execute(&env.app.db).await.unwrap();
+        let ins = |n: i64, state: &'static str, speed: Option<&'static str>, usage: Option<&'static str>, reserved: i64, est: Option<i64>| {
+            let (db, bot, now) = (env.app.db.clone(), bot.clone(), now.clone());
+            async move {
+                sqlx::query("INSERT INTO api_bot_attempts(id,bot_id,generation,ordinal,request_hash,requested_speed,actual_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,1,?,'h','standard',?,?,?,?,?,'v',?)")
+                    .bind(crate::db::ulid()).bind(&bot).bind(n).bind(speed).bind(state).bind(usage).bind(reserved).bind(est).bind(&now).execute(&db).await.unwrap();
+            }
+        };
+        ins(0, "recorded", Some("standard"), Some(r#"{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":300,"cache_creation_input_tokens":100}"#), 4_000_000, Some(2_000)).await;
+        ins(1, "reserved", None, None, 4_100_000, None).await;
+        ins(2, "unknown", None, None, 4_200_000, None).await;
+        ins(3, "failed", None, None, 4_300_000, None).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new(); let stop = shutdown.clone();
+        let router = super::router(env.app.clone());
+        let task = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
+        let user = format!("X-AM-Token: {}\r\n", env.app.ui_token);
+        let bot_auth = format!("X-AM-Bot-Id: {bot}\r\nX-AM-Bot-Token: {token}\r\n");
+        let ok = get(addr, &format!("/api/bots/{bot}/api-usage"), &user).await;
+        let denied = get(addr, &format!("/api/bots/{bot}/api-usage"), &bot_auth).await;
+        let cli_resp = get(addr, &format!("/api/bots/{}/api-usage", cli.id), &user).await;
+        shutdown.cancel(); tokio::time::timeout(std::time::Duration::from_secs(5), task).await.unwrap().unwrap();
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        let body: Value = serde_json::from_str(ok.split("\r\n\r\n").nth(1).unwrap().trim()).unwrap();
+        assert_eq!(body["attempts"], json!({"total":4,"recorded":1,"reserved":1,"unknown":1,"failed":1}));
+        assert_eq!(body["cost_microusd"], json!({"recorded":2000,"reserved":4_100_000,"unknown":4_200_000}));
+        assert_eq!(body["tokens"], json!({"input":100,"output":50,"cache_read":300,"cache_creation":100}));
+        assert_eq!(body["cache_hit_rate"], json!(0.6));
+        assert_eq!(body["last"]["speed"], "standard");
+        assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+        assert!(cli_resp.starts_with("HTTP/1.1 400"), "{cli_resp}");
     }
 
     #[tokio::test]

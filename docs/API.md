@@ -117,6 +117,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/api-session/retire` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/outbox` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -192,6 +193,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | HEAD | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/messages` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/outbox` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1921,6 +1923,8 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - `identity` 不存在 404；kind 不符 400。
 
 ### API bot fresh target 與 start（#1944）
+
+`GET /api/bots/{id}/api-usage`（User-only，唯讀，只讀 `api_bot_attempts`）：claude-api bot 的累計用量，非 claude-api → 400 `not_api_bot`、bot 不存在或已刪 → 404。回 `{bot_id, attempts:{total,recorded,reserved,unknown,failed}, cost_microusd:{recorded,reserved,unknown}, tokens:{input,output,cache_read,cache_creation}, cache_hit_rate:number|null, last:{speed,at,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}|null}`。金額為整數微美元：`recorded`＝已結算估價，`reserved`＝已預留未回，`unknown`＝結果不明、保留預留額（不當成零）；token 與命中率只算 `recorded`；`cache_hit_rate`＝cache_read÷(input＋cache_read＋cache_creation)，分母 0 → null；`last` 是最近一筆 recorded 的 `usage.speed`（沒有則請求的 speed）與 token。花費上限判斷用 `recorded+reserved+unknown`。
 
 `GET /api/bots/{id}/api_fresh_target` 僅 User 可用；Bot、AGM bot 與 Service 為 403。回應 `availability` 為 `available` 時附 `session_id` 與 `generation`；`none` 表示沒有 session，`unavailable` 表示無法安全確認（含過期或隔離），不附 target。這是快照，刪除時仍重新驗證。
 
