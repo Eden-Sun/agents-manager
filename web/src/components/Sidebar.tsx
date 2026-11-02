@@ -870,10 +870,9 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         <span>kind</span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {CREATABLE_KINDS.map((k) => {
-            // claude-api 沒有 CLI 要裝，但只能建在本機專案（daemon 內的 harness；遠端專案 400）。
-            const remoteOnly = k === 'claude-api' && host !== 'local'
+            // claude-api 沒有 CLI 要裝；本機與遠端專案都能建（遠端不隔離，經 ssh 執行）。
             const missing = k === 'claude-api' ? false : !tools[k].installed
-            const reason = remoteOnly ? t('claude-api 只能建在本機專案') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
+            const reason = missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -881,14 +880,13 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
                   role="radio"
                   aria-checked={kind === k}
                   className={`opt${kind === k ? ' on' : ''}`}
-                  disabled={missing || remoteOnly}
+                  disabled={missing}
                   title={reason}
                   onClick={() => pickKind(k)}
                 >
                   <KindTag kind={k} />
                   <span className="opt-label">{k}</span>
                 </button>
-                {remoteOnly ? <span className="kind-missing-reason">{t('僅限本機')}</span> : null}
                 {missing ? (
                   <>
                     <span className="kind-missing-reason">{t('未安裝')}</span>

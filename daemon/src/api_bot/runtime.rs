@@ -277,7 +277,9 @@ impl ApiBotRuntime {
         if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { return Err(E::Unconfirmed); }
         let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| E::Unconfirmed)?.filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or(E::Unconfirmed)?;
         let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| E::Unconfirmed)?.filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or(E::Unconfirmed)?;
-        if project.host != crate::config::LOCAL_HOST { return Err(E::Refused("api_bot_local_project_only")); }
+        // 遠端專案不隔離、不需要 bwrap，但主機要連得上；沒連線就明確拒絕（不建 run）。
+        let remote = project.host != crate::config::LOCAL_HOST;
+        if remote && !app.hosts.get(&project.host).await.is_some_and(|c| c.is_connected()) { return Err(E::Refused("api_bot_host_offline")); }
         let cfg = app.cfg.get().await;
         if !cfg.claude_api.enabled || !cfg.claude_api.api_bot.enabled { return Err(E::Refused("api_bot_disabled")); }
         let cap = cfg.claude_api.api_bot.max_turn_cost_microusd;
@@ -288,8 +290,8 @@ impl ApiBotRuntime {
             let factor = if bot.fast != 0 { 2_i64 } else { 1 };
             let reserve = (32_768_i64 * 5 + i64::from(limits.max_output_tokens) * 20) * factor;
             if limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
-            if !native_bwrap_available() || !bwrap_userns_works().await { return Err(E::Refused("api_bot_sandbox_unavailable")); }
-            let dependencies = production_dependencies(app, &bot, &project, &limits).map_err(|_| E::Refused("api_bot_workspace_unavailable"))?;
+            if !remote && (!native_bwrap_available() || !bwrap_userns_works().await) { return Err(E::Refused("api_bot_sandbox_unavailable")); }
+            let dependencies = production_dependencies(app, &bot, &project, &limits).await.map_err(|_| E::Refused("api_bot_workspace_unavailable"))?;
             let key = dependencies.key_source.snapshot().await.map_err(|_| E::Refused("api_bot_key_unavailable"))?;
             if key.is_empty() { return Err(E::Refused("api_bot_key_unavailable")); }
             drop(key);
@@ -481,7 +483,7 @@ impl ApiBotRuntime {
             .ok_or(ApiBotError::Upstream)?;
         let dependencies = match dependencies {
             Some(dependencies) => dependencies,
-            None => production_dependencies(app, &bot, &project, &limits)?,
+            None => production_dependencies(app, &bot, &project, &limits).await?,
         };
         let effort = bot.effort.clone().ok_or(ApiBotError::Upstream)?;
         let options = super::protocol::Options {
@@ -497,6 +499,7 @@ impl ApiBotRuntime {
             &bot,
             agent_name,
             crate::lifecycle::start::bot_cwd(&bot, &project),
+            (project.host != crate::config::LOCAL_HOST).then_some(project.host.as_str()),
             Some(&agent_md.text),
         ));
         let adapter_limits = super::adapter::AdapterLimits {
@@ -1539,12 +1542,19 @@ async fn bwrap_userns_works() -> bool {
     matches!(tokio::time::timeout(Duration::from_secs(5), child.wait()).await, Ok(Ok(st)) if st.success())
 }
 
-fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, project: &crate::db::Project, limits: &am_config::api_bot::ValidatedLimits) -> Result<ApiBotDependencies, ApiBotError> {
-    if !native_bwrap_available() { return Err(ApiBotError::Upstream); }
+/// 專案在本機＝LocalTools（bwrap 沙箱，要先確認 bwrap）；在遠端主機＝RemoteTools（ssh、不隔離，使用者 2026-11-02 裁示）。
+async fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, project: &crate::db::Project, limits: &am_config::api_bot::ValidatedLimits) -> Result<ApiBotDependencies, ApiBotError> {
     let root = crate::lifecycle::start::bot_cwd(bot, project);
-    let tools = super::tools::LocalTools::new(std::path::Path::new(root), super::tools::Limits { timeout: Duration::from_secs(limits.command_timeout_secs), output_bytes: limits.max_tool_output_bytes }).map_err(|_| ApiBotError::Upstream)?;
+    let tool_limits = super::tools::Limits { timeout: Duration::from_secs(limits.command_timeout_secs), output_bytes: limits.max_tool_output_bytes };
+    let tools: Arc<dyn super::runner::Tools> = if project.host == crate::config::LOCAL_HOST {
+        if !native_bwrap_available() { return Err(ApiBotError::Upstream); }
+        Arc::new(super::tools::LocalTools::new(std::path::Path::new(root), tool_limits).map_err(|_| ApiBotError::Upstream)?)
+    } else {
+        let conn = app.hosts.get(&project.host).await.ok_or(ApiBotError::Upstream)?;
+        Arc::new(super::tools::RemoteTools::new(conn, root, tool_limits).map_err(|_| ApiBotError::Upstream)?)
+    };
     let key_source = Arc::new(ConfigKeySource(Arc::downgrade(&app.shared())));
-    Ok(ApiBotDependencies { endpoint: "https://api.anthropic.com/v1/messages".into(), key_source, quote: Arc::new(super::pricing::Opus55Global), tools: Arc::new(tools), shutdown_join_timeout: None })
+    Ok(ApiBotDependencies { endpoint: "https://api.anthropic.com/v1/messages".into(), key_source, quote: Arc::new(super::pricing::Opus55Global), tools, shutdown_join_timeout: None })
 }
 
 fn api_http_config(
@@ -2305,7 +2315,13 @@ mod tests {
         // 沒有 bwrap／userns 就是 sandbox；有的話下一關是讀不到 key。兩者都是明確拒絕，不是 unconfirmed。
         assert!(matches!(reason(go().await), "api_bot_sandbox_unavailable" | "api_bot_key_unavailable"));
         sqlx::query("UPDATE projects SET host='remote-x' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
-        assert_eq!(reason(go().await), "api_bot_local_project_only");
+        // 遠端專案不再擋成「只限本機」：主機沒連線（或不認得）就明確拒絕，並且不留 run。
+        assert_eq!(reason(go().await), "api_bot_host_offline");
+        // 連上線的遠端主機：不需要 bwrap，直接走到下一關（讀不到 key）。
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, shared_session: false, name: "remote-x".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() }).await;
+        assert_eq!(reason(go().await), "api_bot_host_offline", "有登記但沒連線也是離線");
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reason(go().await), "api_bot_key_unavailable");
         let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(runs, 0, "拒絕不留 run");
     }
