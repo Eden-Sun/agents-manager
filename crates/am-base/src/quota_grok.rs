@@ -10,6 +10,7 @@
 //! Resets: September 12, 16:28
 //! ```
 
+use crate::capture::claude::month_num_token;
 use crate::config::LOCAL_HOST;
 use crate::herdr::{AgentStatus, HerdrClient};
 use crate::quota::{Quota, Window};
@@ -33,16 +34,6 @@ fn clean(line: &str) -> String {
     s.trim().to_string()
 }
 
-fn month_num(tok: &str) -> Option<u32> {
-    const M: [&str; 12] =
-        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let t = tok.trim_matches(|c: char| !c.is_alphabetic()).to_ascii_lowercase();
-    if t.len() < 3 {
-        return None;
-    }
-    M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
-}
-
 /// grok omits the year: assume this one, rolled forward if that puts the reset in the past.
 /// The time is the wall clock of the host grok runs on (#629): `now` carries that host's zone.
 pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String> {
@@ -52,7 +43,7 @@ pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String
     let mut hm = None;
     for tok in rest.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()) {
         if month.is_none() {
-            if let Some(m) = month_num(tok) {
+            if let Some(m) = month_num_token(tok) {
                 month = Some(m);
                 continue;
             }
@@ -212,44 +203,13 @@ pub async fn parse_probe_screen(app: &impl crate::tools::ToolsTable, host: &str,
     parse_grok_usage_remote(screen, now, offset)
 }
 
-const PROBE_SESSION: &str = "am-quota";
 /// Lets stale probe workspaces be recognised after a daemon restart.
 const PROBE_LABEL: &str = "am-quota-grok";
-
-async fn probe_client() -> Result<HerdrClient> {
-    let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
-    if client.ping().await.is_ok() {
-        return Ok(client);
-    }
-    // `herdr --session … server` stays in the foreground; detach it and wait for the socket.
-    let child = std::process::Command::new("/bin/sh")
-        .arg("-lc")
-        .arg(format!("exec herdr --session {PROBE_SESSION} server"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow!("could not start the `{PROBE_SESSION}` herdr session: {e}"))?;
-    reap_in_background(child);
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if client.ping().await.is_ok() {
-            return Ok(client);
-        }
-    }
-    Err(anyhow!("the `{PROBE_SESSION}` herdr session did not come up"))
-}
-
-fn reap_in_background(mut child: std::process::Child) {
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-}
 
 /// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.
 pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     crate::probe_ws::init(app.data_dir());
-    if let Ok(c) = probe_client().await {
+    if let Ok(c) = crate::quota_claude::probe_client().await {
         sweep_probes(&c).await;
     }
     sweep_stale_on_hosts(app).await;
@@ -310,7 +270,7 @@ impl Drop for Probe {
 /// Remote hosts borrow the forwarded session — see [`crate::quota_claude::client_for`].
 pub async fn client_for_fence(app: &impl crate::capabilities::HerdrRoutes, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
     if fence.conn().is_local() {
-        return probe_client().await;
+        return crate::quota_claude::probe_client().await;
     }
     if !fence.conn().is_connected() {
         return Err(anyhow!("host `{}` is not connected", fence.conn().name));

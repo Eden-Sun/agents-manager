@@ -32,7 +32,7 @@ mod portal_remote_tests;
 mod remote_cage_tests;
 
 #[cfg(test)]
-mod test_dirs;
+use am_base::test_dirs;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests;

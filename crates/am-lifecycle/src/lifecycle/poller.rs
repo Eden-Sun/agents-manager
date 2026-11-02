@@ -373,21 +373,7 @@ pub fn live_reply(kind: &str, text: &str) -> Option<String> {
 
 pub const ACTIVITY_MAX: usize = crate::capture::ACTIVITY_MAX;
 
-/// Empty composer = waiting for input? The bare marker row after stripping box frames (grok's
-/// `│ ❯ │` never matches `clean_screen`'s test). Also true while claude works under a spinner, so
-/// only meaningful with "nothing changed" (the progress poller's idle net → `try_fallback`).
-pub fn pane_awaits_input(kind: &str, text: &str) -> bool {
-    if kind == "claude" {
-        return crate::capture::claude::PARSER.awaits_input(text);
-    }
-    let Some(marker) = prompt_echo_prefix(kind).and_then(|p| p.trim_end().chars().next()) else { return false };
-    text.lines().rev().take(12).any(|l| {
-        // 空白用 `is_whitespace`：claude 2.1.285 的空框是 `❯` 接 U+00A0（2026-10-01 cf-ox-2），只認空格與 tab 會當成框裡有字。
-        let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━".contains(*c));
-        chars.next() == Some(marker) && chars.next().is_none()
-    })
-}
-
+pub use am_base::composer_parse::pane_awaits_input;
 /// 空 composer 靜止幾輪才算等輸入。herdr 說閒著且畫面印過東西 → 14 秒（2026-09-06 grok 卡 working
 /// 的安全網）；herdr 說 working 或這回合什麼都沒印過 → 63 秒（2026-09-13 GROK 還在想就被關）。
 pub fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {

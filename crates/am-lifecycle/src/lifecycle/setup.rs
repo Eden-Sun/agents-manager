@@ -782,9 +782,6 @@ if [ ! -e "$F" ] && [ ! -L "$F" ]; then printf 'AM_GROK_MISSING\n'; exit 0; fi
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod remote_grok_diagnostic_tests {
     use super::remote_grok_read_script;
-    use std::sync::{Arc, Mutex};
-
-    const RECORD_LIMIT: usize = 128;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum Code {
@@ -804,7 +801,7 @@ mod remote_grok_diagnostic_tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum StdoutKind {
+    pub(super) enum StdoutKind {
         Empty,
         File,
         Missing,
@@ -814,74 +811,8 @@ mod remote_grok_diagnostic_tests {
         Other,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct Record {
-        code: Option<Code>,
-        exit_code: Option<i32>,
-        stdout: StdoutKind,
-    }
-
-    #[derive(Debug, Default)]
-    struct RecordSet {
-        records: Vec<Record>,
-        overflow: usize,
-    }
-
-    #[derive(Debug, Clone, Default)]
-    pub(super) struct Handle(Arc<Mutex<RecordSet>>);
-
-    impl Handle {
-        pub(super) fn new() -> Self {
-            Self::default()
-        }
-
-        fn record_output(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
-            let stdout_kind = stdout_kind(stdout);
-            let mut found = false;
-            let mut records = self.0.lock().expect("diagnostic record lock");
-            for line in stderr.split(|byte| *byte == b'\n') {
-                if let Some(code) = code_from_marker(line) {
-                    records.push(Record { code: Some(code), exit_code: status, stdout: stdout_kind });
-                    found = true;
-                }
-            }
-            if !found {
-                records.push(Record { code: None, exit_code: status, stdout: stdout_kind });
-            }
-        }
-
-        fn record_code(&self, code: Code) {
-            self.0.lock().expect("diagnostic record lock").push(Record {
-                code: Some(code),
-                exit_code: Some(0),
-                stdout: StdoutKind::Empty,
-            });
-        }
-
-        pub(super) fn contains(&self, code: Code) -> bool {
-            self.0.lock().expect("diagnostic record lock").records.iter().any(|record| record.code == Some(code))
-        }
-
-        pub(super) fn summary(&self) -> String {
-            let records = self.0.lock().expect("diagnostic record lock");
-            format!("records={:?}; overflow={}", records.records, records.overflow)
-        }
-
-        fn length_and_overflow(&self) -> (usize, usize) {
-            let records = self.0.lock().expect("diagnostic record lock");
-            (records.records.len(), records.overflow)
-        }
-    }
-
-    impl RecordSet {
-        fn push(&mut self, record: Record) {
-            if self.records.len() < RECORD_LIMIT {
-                self.records.push(record);
-            } else {
-                self.overflow = self.overflow.saturating_add(1);
-            }
-        }
-    }
+    pub(super) type Handle = crate::lifecycle::diag_support::Recorder<Code, StdoutKind>;
+    use crate::lifecycle::diag_support::RECORD_LIMIT;
 
     fn stdout_kind(stdout: &[u8]) -> StdoutKind {
         let first = stdout.split(|byte| *byte == b'\n').next().unwrap_or_default();
@@ -922,7 +853,7 @@ mod remote_grok_diagnostic_tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Site {
+    pub(super) enum Site {
         ReadReturn,
         RootSymlink,
         FileTypeOrSymlink,
@@ -938,32 +869,8 @@ mod remote_grok_diagnostic_tests {
         InstallChanged,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) struct InstrumentError {
-        site: Site,
-        expected: usize,
-        found: usize,
-    }
-
-    impl InstrumentError {
-        pub(super) fn summary(self) -> String {
-            format!("site={:?}; expected={}; found={}", self.site, self.expected, self.found)
-        }
-    }
-
-    fn replace_count(
-        source: &str,
-        needle: &str,
-        replacement: &str,
-        expected: usize,
-        site: Site,
-    ) -> Result<String, InstrumentError> {
-        let found = source.matches(needle).count();
-        if found != expected {
-            return Err(InstrumentError { site, expected, found });
-        }
-        Ok(source.replace(needle, replacement))
-    }
+    pub(super) type InstrumentError = crate::lifecycle::diag_support::InstrumentError<Site>;
+    use crate::lifecycle::diag_support::replace_count;
 
     fn instrument_read(mut script: String) -> Result<String, InstrumentError> {
         let guard_count = script.matches("am_bad").count();
@@ -1084,7 +991,7 @@ mod remote_grok_diagnostic_tests {
         }
         let output = command.output().map_err(|_| InstrumentError { site: Site::ReadReturn, expected: 1, found: 0 })?;
         let status = output.status.code();
-        handle.record_output(status, &output.stdout, &output.stderr);
+        handle.record_output(status, stdout_kind(&output.stdout), &output.stderr, code_from_marker);
         Ok(Run { stdout: output.stdout, status })
     }
 
@@ -1198,12 +1105,12 @@ mod remote_grok_diagnostic_tests {
     fn diagnostics_discard_unknown_stderr_bound_records_and_reject_changed_generators() {
         let handle = Handle::new();
         let sentinel = b"UNKNOWN_SENTINEL_WITH_PATH_OR_PAYLOAD";
-        handle.record_output(Some(0), b"AM_GROK_UNTRUSTED\n", b"AM_DIAG:G:ROOT_SYMLINK\nUNKNOWN_SENTINEL_WITH_PATH_OR_PAYLOAD\n");
+        handle.record_output(Some(0), stdout_kind(b"AM_GROK_UNTRUSTED\n"), b"AM_DIAG:G:ROOT_SYMLINK\nUNKNOWN_SENTINEL_WITH_PATH_OR_PAYLOAD\n", code_from_marker);
         assert!(handle.contains(Code::RootSymlink));
         assert!(!handle.summary().contains(std::str::from_utf8(sentinel).unwrap()));
 
         for _ in 0..RECORD_LIMIT + 2 {
-            handle.record_code(Code::FdOpen);
+            handle.record_code(Code::FdOpen, StdoutKind::Empty);
         }
         assert_eq!(handle.length_and_overflow(), (RECORD_LIMIT, 3));
 

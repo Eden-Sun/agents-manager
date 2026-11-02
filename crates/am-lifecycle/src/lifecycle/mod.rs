@@ -63,6 +63,8 @@ pub mod claude_child_log;
 pub mod grok_hook_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod suggestion_list_tests;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+pub(crate) mod diag_support;
 pub mod start;
 pub mod runtime_overlay;
 pub(crate) mod resume_context;

@@ -1,6 +1,7 @@
 //! Reading a terminal screen: cursor bookkeeping, echo stripping, noise and reply extraction.
 
-use am_base::capture::claude::codex_usage_notice_line;
+use am_base::capture::claude::{codex_usage_notice_line, month_num_token};
+pub use am_base::composer_parse::{prompt_echo_prefix, strip_grok_decor};
 #[cfg(all(test, feature = "daemon-test-harness"))]
 use crate::capabilities::Db;
 use super::s6_ports::{ScreenContext, ScreenServices};
@@ -202,17 +203,6 @@ pub fn slice_after_sent_echo(kind: &str, text: &str, sent: &[String]) -> Option<
 /// 記 debug log 用的指紋（前 8 位十六進位）。log 只放指紋、不放內容（#1977）。
 pub fn fingerprint(text: &str) -> String {
     format!("{:x}", md5ish(text)).chars().take(8).collect()
-}
-
-/// Prompt-echo prefix per CLI; single source for `after_last_prompt_echo` / `last_prompt_echo_text`.
-pub fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
-    match kind {
-        "claude" | "grok" => Some("❯ "),
-        "codex" => Some("› "),
-        // agy：使用者那句回音是 `> 原文`（1.2.16 真機）；輸入列是單獨一個 `>`。
-        "agy" => Some("> "),
-        _ => None,
-    }
 }
 
 /// Index after the last prompt echo (`❯ …` / `› …`), or 0 when not on screen.
@@ -609,24 +599,6 @@ fn is_grok_banner(s: &str) -> bool {
     s.strip_prefix("Grok Build ").is_some_and(|rest| rest.trim_start().trim_start_matches('v').chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
-/// Strip grok's right-edge scrollbar `█` and right-aligned `h:mm AM|PM` clock.
-pub fn strip_grok_decor(line: &str) -> String {
-    let mut s = line.trim_end().trim_end_matches('█').trim_end().to_string();
-    if let Some(rest) = s.strip_suffix(" AM").or_else(|| s.strip_suffix(" PM")) {
-        if let Some((head, clock)) = rest.rsplit_once(' ') {
-            let ok = clock.len() >= 4
-                && clock.len() <= 5
-                && clock.chars().filter(|c| *c == ':').count() == 1
-                && clock.chars().all(|c| c.is_ascii_digit() || c == ':');
-            // Two or more spaces before the clock = right-aligned column, not prose.
-            if ok && head.ends_with(' ') {
-                s = head.trim_end().to_string();
-            }
-        }
-    }
-    s
-}
-
 /// `ERROR: You've hit your usage limit. Upgrade to Pro …, or try again at Aug 8th, 2025 1:47 PM.`
 /// grok 撞額度時畫在訊息區塊裡的那幾句（2026-09-19 w168:pB7 真畫面）：
 ///
@@ -868,16 +840,6 @@ fn banner_is_last_cell(lines: &[&str], from: usize) -> bool {
 
 fn has_try_again(notice: &str) -> bool {
     notice.to_ascii_lowercase().contains("try again at")
-}
-
-fn month_num_token(tok: &str) -> Option<u32> {
-    const M: [&str; 12] =
-        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let t = tok.trim_matches(|c: char| !c.is_alphabetic()).to_ascii_lowercase();
-    if t.len() < 3 {
-        return None;
-    }
-    M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
 }
 
 /// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC. The date is optional: same-day resets are

@@ -101,7 +101,8 @@ mod tests {
     /// `include_str!` 相對於這個檔案，在 am-supervisor 本身與 daemon（`#[path]` 引入）兩邊都解得到同一支 build.rs。
     #[test]
     fn the_build_script_reruns_when_any_workspace_crate_changes() {
-        let script = include_str!("../build.rs");
+        // 清單在 build.rs（`WORKSPACE_WATCH`），迴圈與 `if release` 在兩支 build script 共用的 build_common.rs。
+        let script = format!("{}{}", include_str!("../build.rs"), include_str!("../build_common.rs"));
         for p in ["../../daemon/src", "../../crates", "../../Cargo.toml", "../../Cargo.lock"] {
             assert!(script.contains(p), "build.rs must keep `{p}` in its rerun-if-changed list");
         }
