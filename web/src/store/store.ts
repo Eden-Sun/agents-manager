@@ -3638,7 +3638,11 @@ export function composerState(state: StoreState, botId: string | null): Composer
   const handedOff = bot ? handedOffTo(state.projects, bot.project_id) : null
   if (handedOff) return { ...base, reason: handedOffReason(handedOff) }
   const hostName = bot ? projectHostName(state, bot.project_id) : 'local'
-  if (hostName !== 'local') {
+  // claude-api（#1944）沒有終端也不經 herdr：不看 herdr 連線，停著時直接可送（sendPrompt 會先 start），不顯示「Bot 沒在跑」。
+  const apiBot = bot?.kind === 'claude-api'
+  if (apiBot) {
+    // 不經 herdr，不看連線
+  } else if (hostName !== 'local') {
     const host = hostOfBot(state, botId)
     if (!host || !host.connected) {
       // 原因（ssh 錯誤字串）在聊天區頂端的離線橫幅；這裡只講結果，輸入框 placeholder 才放得下。
@@ -3654,6 +3658,7 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, disabled: false, queued: true, reason: startingSendLabel(starting).replace(/：$/, '') }
   }
   if (!run) {
+    if (apiBot) return { ...base, disabled: false, autoStart: true }
     return { ...base, disabled: false, queued: true, autoStart: true, reason: t('Bot 沒在跑：送出會先啟動它，起來後自動送出') }
   }
   if (run.state !== 'running') return { ...base, reason: t('Run 狀態為 {state}，尚無法送出訊息', { state: run.state }) }
