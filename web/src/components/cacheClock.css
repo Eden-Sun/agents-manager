@@ -61,3 +61,25 @@
 .unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low, .cache-codex):not(:hover) {
   color: color-mix(in srgb, var(--danger) 75%, var(--text));
 }
+
+/* 側欄 model-effort 標籤也畫同一套倒數底色（使用者 2026-11-02：child 沒有主力晶片，直接在標籤上看）。已涼不加 class。 */
+.model-tag.cache-fresh {
+  --cache-hue: var(--lamp-green);
+}
+
+.model-tag.cache-warn {
+  --cache-hue: var(--lamp-yellow);
+}
+
+.model-tag.cache-low {
+  --cache-hue: var(--lamp-red);
+}
+
+.model-tag:is(.cache-fresh, .cache-warn, .cache-low) {
+  --cache-strong: color-mix(in srgb, var(--cache-hue) 22%, transparent);
+  --cache-faint: color-mix(in srgb, var(--cache-hue) 8%, transparent);
+  background-image: linear-gradient(var(--cache-strong), var(--cache-strong)), linear-gradient(var(--cache-faint), var(--cache-faint));
+  background-size: var(--cache-fill, 100%) 100%, 100% 100%;
+  background-repeat: no-repeat;
+  background-position: left center;
+}
