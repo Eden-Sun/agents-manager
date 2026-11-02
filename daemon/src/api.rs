@@ -468,6 +468,8 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .nest("/api", api)
         .route("/ws", get(ws_handler))
+        // 主機 shell 的畫面推送：WebSocket 瀏覽器帶不了 X-AM-Token，所以跟 `/ws` 一樣掛在 `/api` 認證層外、用 query token（shell_stream.rs）。
+        .route("/api/hosts/{name}/shells/{pane_id}/stream", get(crate::shell_stream::stream))
         .route("/hook/{provider}", post(crate::runners::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
         // Credential-bearing pane creation is fenced against concurrent credential rotation.
@@ -5767,7 +5769,12 @@ async fn get_host_shell_terminal(
     require_user(&principal)?;
     let source = q.get("source").cloned().unwrap_or_else(|| "visible".into());
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
-    Ok(Json(shell::read(&app, &name, &pane_id, &source, lines).await?))
+    let ansi = match q.get("format").map(String::as_str) {
+        None | Some("text") => false,
+        Some("ansi") => true,
+        Some(_) => return Err(LcError::Bad("bad format".into())),
+    };
+    Ok(Json(shell::read_as(&app, &name, &pane_id, &source, lines, ansi).await?))
 }
 
 #[derive(Deserialize)]
@@ -5781,11 +5788,13 @@ async fn host_shell_text(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
     Extension(principal): Extension<RequestPrincipal>,
+    Query(q): Query<HashMap<String, String>>,
     Json(b): Json<ShellTextIn>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
     shell::send_text(&app, &name, &pane_id, &b.text, b.enter.unwrap_or(true)).await?;
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    let body = shell::echo_after_send(&app, &name, &pane_id, q.get("echo").map(String::as_str) == Some("ansi")).await;
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 /// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為 claude 身份登入開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
@@ -5827,11 +5836,13 @@ async fn host_shell_keys(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
     Extension(principal): Extension<RequestPrincipal>,
+    Query(q): Query<HashMap<String, String>>,
     Json(b): Json<ShellKeysIn>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
     shell::send_keys(&app, &name, &pane_id, &b.keys).await?;
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    let body = shell::echo_after_send(&app, &name, &pane_id, q.get("echo").map(String::as_str) == Some("ansi")).await;
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 /// 記憶體清單或 `panes` 表認得的才關；兩邊都沒有 404。走 `panes` 表的那條照 `?confirm=` 決定要不要先 409（`shell::close_confirmed`）。
@@ -8511,10 +8522,10 @@ async fn ws_handler(
 }
 
 /// 一條開著的 WebSocket 連線佔的名額（[`crate::state::App::ws_connections`]）；連線結束（含 client 斷線、被我們踢掉）時放回。
-struct WsSlot(Arc<App>);
+pub(crate) struct WsSlot(Arc<App>);
 
 impl WsSlot {
-    fn take(app: &Arc<App>) -> Option<WsSlot> {
+    pub(crate) fn take(app: &Arc<App>) -> Option<WsSlot> {
         let max = app.ws_max_connections.load(Ordering::SeqCst);
         app.ws_connections
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))

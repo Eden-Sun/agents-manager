@@ -289,6 +289,7 @@ mod primary_order;
 mod pane_probe;
 mod agy_install;
 mod tool_install_shell;
+pub(crate) mod shell_stream;
 mod read_marks;
 pub mod remote_cargo;
 mod reconcile;
