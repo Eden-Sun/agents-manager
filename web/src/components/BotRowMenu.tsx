@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { anchorOf, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HeadMoreMenu } from './HeadMoreMenu'
+import { BotRowCacheNote } from './BotRowCacheNote'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { useT } from '../lib/i18n'
 
@@ -41,6 +42,7 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   return (
     <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
       <HeadMoreMenu label={t('{name} 的操作', { name: bot.name })}>
+        <BotRowCacheNote botId={botId} />
         <button
           type="button"
           className="head-menu-item"
