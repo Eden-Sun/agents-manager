@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { act, click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, fakeWebSocket } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { installManualTimers } from '../testing/manualTimers'
 import { untilVirtual } from '../testing/untilVirtual'
@@ -22,6 +22,8 @@ const elapse = (ms: number) =>
     await advanceMockTime(ms)
   })
 beforeEach(() => {
+  // 桌面直通會開 xterm 的推送 WebSocket；假掉，免得真的去連。
+  fakeWebSocket()
   timers = installManualTimers()
 })
 afterEach(async () => {

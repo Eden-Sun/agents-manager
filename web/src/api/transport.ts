@@ -23,6 +23,14 @@ export interface Transport {
   /** Attachments need the token header, which `<img src>` can't carry — so fetch and blob-URL. */
   blobUrl: (path: string) => Promise<string>
   openSocket: (handlers: SocketHandlers) => () => void
+  /** 另開一條 WebSocket（`path` 是 `/api` 以下的路徑）；沒有實作的 transport（mock）就沒有這個方法，呼叫端退回輪詢。 */
+  openStream?: (path: string, handlers: StreamHandlers) => () => void
+}
+
+export interface StreamHandlers {
+  onMessage: (msg: unknown) => void
+  /** 連上過才為 `true`；握手被拒（舊 daemon 回 404、token 不對）是 `false`，沒有 HTTP 狀態可看。 */
+  onClose: (opened: boolean) => void
 }
 
 export interface UploadOptions {
@@ -314,6 +322,51 @@ export class HttpTransport implements Transport {
       throw e
     } finally {
       timers.clearTimeout(timeoutId)
+    }
+  }
+
+  openStream(path: string, handlers: StreamHandlers): () => void {
+    let closed = false
+    let opened = false
+    let sock: WebSocket | null = null
+    const connect = () => {
+      if (closed) return
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+      const qs = new URLSearchParams({ token: this.token })
+      const ws = new WebSocket(`${scheme}://${location.host}/api${path}${path.includes('?') ? '&' : '?'}${qs.toString()}`)
+      sock = ws
+      ws.onopen = () => {
+        if (sock === ws) opened = true
+      }
+      ws.onmessage = (ev: MessageEvent<string>) => {
+        if (sock !== ws) return
+        let msg: unknown = null
+        try {
+          msg = JSON.parse(ev.data)
+        } catch {
+          return
+        }
+        handlers.onMessage(msg)
+      }
+      // 錯誤之後一定接 close；這裡不處理（不加 handler 的話 runtime 會把 error 當成未處理的例外）。
+      ws.onerror = () => {}
+      ws.onclose = () => {
+        if (sock !== ws || closed) return
+        sock = null
+        handlers.onClose(opened)
+      }
+    }
+    // token 空的時候連了也會被踢掉，先補一次再連（同 openSocket）。
+    if (this.token) connect()
+    else
+      void this.refreshToken().then(connect, () => {
+        if (!closed) handlers.onClose(false)
+      })
+    return () => {
+      closed = true
+      const old = sock
+      sock = null
+      if (old) old.close()
     }
   }
 

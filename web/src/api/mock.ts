@@ -1294,8 +1294,10 @@ export class MockTransport implements Transport {
       if (method === 'GET' && seg[4] === 'terminal') {
         return this.shellTerminal(host, pane, q.get('source') ?? 'visible', Number(q.get('lines') ?? 200))
       }
-      if (method === 'POST' && seg[4] === 'text') return this.shellText(host, pane, String(b.text ?? ''), b.enter !== false)
-      if (method === 'POST' && seg[4] === 'keys') return this.shellKeys(host, pane, b.keys)
+      // `echo=ansi`（xterm 送完立刻畫）：回 `{terminal}`；mock 沒有 ANSI，回的是同一份文字。
+      const echo = (r: unknown) => (q.get('echo') === 'ansi' ? { terminal: this.shellTerminal(host, pane, 'visible', 200) } : r)
+      if (method === 'POST' && seg[4] === 'text') return echo(this.shellText(host, pane, String(b.text ?? ''), b.enter !== false))
+      if (method === 'POST' && seg[4] === 'keys') return echo(this.shellKeys(host, pane, b.keys))
     }
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)

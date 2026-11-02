@@ -1,0 +1,13 @@
+/* 主機 shell 鍵盤直通的 xterm 容器（HostShellXterm）。配色走全站 --term-*，不另定一套。
+   xterm 的 cols×rows 由 fit addon 依這個盒子定，所以盒子本身不捲動（捲動交給 xterm 自己的視窗與回看）。 */
+.shell-pane .shell-xterm {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  background: var(--term-bg);
+  color: var(--term-text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}

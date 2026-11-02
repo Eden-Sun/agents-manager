@@ -3,7 +3,7 @@ import { toHostBaselinePlan, toHostBaselineApplyResult, toHostShell, toHostShell
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
-import type { SocketHandlers, Transport, UploadOptions } from './transport'
+import type { SocketHandlers, StreamHandlers, Transport, UploadOptions } from './transport'
 import type {
   MemProcesses,
   MemSnapshot,
@@ -41,6 +41,7 @@ import type {
   RestartPlan,
   RestartSkip,
   BotKind,
+  TerminalFormat,
   TerminalSnapshot,
   TerminalSource,
   ToolMap,
@@ -1033,21 +1034,42 @@ export async function readHostShell(
   paneId: string,
   source: TerminalSource,
   lines: number,
+  format: TerminalFormat = 'text',
 ): Promise<TerminalSnapshot> {
+  const fmt = format === 'ansi' ? '&format=ansi' : ''
   const raw = await transport.request(
     'GET',
-    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/terminal?source=${source}&lines=${lines}`,
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/terminal?source=${source}&lines=${lines}${fmt}`,
   )
-  return toTerminal(raw, source)
+  const snap = toTerminal(raw, source)
+  return format === 'ansi' ? { ...snap, format: 'ansi' } : snap
+}
+
+/** `echo: true`（`echo=ansi`）：送完約 20ms 後 daemon 回一張 visible ANSI 快照，xterm 立刻畫上；沒帶回 `null`。 */
+export interface ShellEchoOpt {
+  echo?: boolean
+}
+
+/** `echo=ansi` 的回應 `{terminal}`；舊 daemon 沒有這欄就是 `null`。 */
+function echoedTerminal(raw: unknown): TerminalSnapshot | null {
+  const o = isRec(raw) && isRec(raw.terminal) ? raw.terminal : null
+  return o ? { ...toTerminal(o, 'visible'), format: 'ansi' } : null
 }
 
 /** `enter` 是獨立按鍵而非 `\n`（herdr 把換行當貼上）；空字串 + `enter` = 只按 Enter。 */
-export async function sendHostShellText(host: string, paneId: string, text: string, enter = true): Promise<void> {
-  await transport.request(
+export async function sendHostShellText(
+  host: string,
+  paneId: string,
+  text: string,
+  enter = true,
+  opt: ShellEchoOpt = {},
+): Promise<TerminalSnapshot | null> {
+  const raw = await transport.request(
     'POST',
-    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/text`,
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/text${opt.echo ? '?echo=ansi' : ''}`,
     { text, enter },
   )
+  return opt.echo ? echoedTerminal(raw) : null
 }
 
 /** daemon 為 claude 身份登入開的 pane 上，從畫面取出的登入進度（#838）；網址只在這個回應裡，不進事件。 */
@@ -1105,11 +1127,29 @@ export async function submitLoginCode(host: string, paneId: string, code: string
   }
 }
 
-export async function sendHostShellKeys(host: string, paneId: string, keys: string[]): Promise<void> {
-  await transport.request(
+export async function sendHostShellKeys(
+  host: string,
+  paneId: string,
+  keys: string[],
+  opt: ShellEchoOpt = {},
+): Promise<TerminalSnapshot | null> {
+  const raw = await transport.request(
     'POST',
-    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/keys`,
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/keys${opt.echo ? '?echo=ansi' : ''}`,
     { keys },
+  )
+  return opt.echo ? echoedTerminal(raw) : null
+}
+
+/**
+ * 推送：`GET …/shells/{pane}/stream?source=visible&format=ansi`（WebSocket，token 走 query 同 `/ws`）。
+ * 回 `null`＝這個 transport 沒有 WebSocket（mock）；握手被拒（舊 daemon 404）時 `onClose(false)`，呼叫端退回輪詢。
+ */
+export function openHostShellStream(host: string, paneId: string, handlers: StreamHandlers): (() => void) | null {
+  if (!transport.openStream) return null
+  return transport.openStream(
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/stream?source=visible&format=ansi`,
+    handlers,
   )
 }
 
