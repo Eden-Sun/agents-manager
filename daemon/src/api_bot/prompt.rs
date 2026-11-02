@@ -15,7 +15,8 @@ pub fn api_bot_sandbox_instructions() -> &'static str {
 - **無瀏覽器工具**：環境中沒有 agent-browser，無法直接瀏覽外部網頁。\n\
 - **無 outbox 輸出目錄**：環境中沒有 `$AM_OUTBOX` 機制，檔案產物直接在 `/workspace` 內處理。\n\
 - **無終端互動或 CLI 登入態**：你直接由 API 驅動，不具備終端互動介面或 CLI 登入憑證。\n\
-- **終止行程**：背景行程僅能透過自己記錄的 PID 清理，禁止使用廣域 kill 指令。"
+- **終止行程**：背景行程僅能透過自己記錄的 PID 清理，禁止使用廣域 kill 指令。\n\
+後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入或 `$AM_*` 環境變數，在這個環境一律不適用，以本段為準。"
 }
 
 /// Compose the system prompt for an API bot (`claude-api`).
@@ -84,6 +85,7 @@ mod tests {
         assert!(prompt.contains("沒有 agent-browser"));
         assert!(prompt.contains("沒有 `$AM_OUTBOX`"));
         assert!(prompt.contains("名稱是 `claude-api-opus`"));
+        assert!(prompt.contains("以本段為準"));
         assert!(prompt.contains("你是一位專業的程式碼審查專家。"));
         assert!(prompt.contains("# 專案說明\n這是測試專案。"));
 
