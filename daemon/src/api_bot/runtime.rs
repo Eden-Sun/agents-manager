@@ -272,11 +272,13 @@ impl ApiBotRuntime {
         let _gate = tokio::select! {
             biased;
             _ = app.shutdown.cancelled() => return Err(E::Unconfirmed),
-            result = tokio::time::timeout(Duration::from_secs(3), self.bot_gate(bot_id)) => result.map_err(|_| E::Unconfirmed)?,
+            result = tokio::time::timeout(Duration::from_secs(3), self.bot_gate(bot_id)) => result.map_err(|_| { tracing::warn!(bot = bot_id, "api native start not confirmed: bot gate busy for 3s"); E::Unconfirmed })?,
         };
-        if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { return Err(E::Unconfirmed); }
-        let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| E::Unconfirmed)?.filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or(E::Unconfirmed)?;
-        let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| E::Unconfirmed)?.filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or(E::Unconfirmed)?;
+        if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { tracing::warn!(bot = bot_id, "api native start not confirmed: startup gate not ready or bot quarantined"); return Err(E::Unconfirmed); }
+        let bot = crate::db::bot(&app.db, bot_id).await.map_err(|error| { tracing::warn!(bot = bot_id, ?error, "api native start not confirmed: bot lookup failed"); E::Unconfirmed })?
+            .filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: bot missing, deleted or not claude-api"); E::Unconfirmed })?;
+        let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|error| { tracing::warn!(bot = bot_id, ?error, "api native start not confirmed: project lookup failed"); E::Unconfirmed })?
+            .filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: project missing, deleted or handed off"); E::Unconfirmed })?;
         // 遠端專案不隔離、不需要 bwrap，但主機要連得上；沒連線就明確拒絕（不建 run）。
         let remote = project.host != crate::config::LOCAL_HOST;
         if remote && !app.hosts.get(&project.host).await.is_some_and(|c| c.is_connected()) { return Err(E::Refused("api_bot_host_offline")); }
@@ -715,7 +717,7 @@ impl ApiBotRuntime {
             crate::lifecycle::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
             let admitted = async {
                 let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| ())?;
-                let changed = sqlx::query("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.host='local' AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)")
+                let changed = sqlx::query("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)")
                     .bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id).bind(bot.cwd.as_deref()).bind(&project.path).execute(&mut *tx).await.map_err(|_| ())?;
                 if changed.rows_affected() != 1 || app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| ())?; return Err(()); }
                 tx.commit().await.map_err(|_| ())?;
@@ -918,7 +920,7 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
         let _gate = match tokio::time::timeout(Duration::from_secs(3), self.api_bot_runtime.bot_gate(bot_id)).await { Ok(guard) => guard, Err(_) => return A::Unavailable };
         let bot = match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if bot.kind == "claude-api" && bot.deleted_at.is_none() => bot, _ => return A::Unavailable };
         if !self.api_startup_gate.ready() || self.shutdown.is_cancelled() || self.api_bot_runtime.explicit_retire_quarantined(&bot.id) { return A::Unavailable; }
-        if !matches!(crate::db::project(&self.db, &bot.project_id).await, Ok(Some(p)) if p.deleted_at.is_none() && p.host == crate::config::LOCAL_HOST && p.handed_off_to.is_none()) { return A::Unavailable; }
+        if !matches!(crate::db::project(&self.db, &bot.project_id).await, Ok(Some(p)) if p.deleted_at.is_none() && p.handed_off_to.is_none()) { return A::Unavailable; }
         let expiry = crate::db::ts_sql("expires_at");
         let sql = format!("SELECT id,generation,{expiry}>? FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL");
         match sqlx::query_as::<_, (String,i64,bool)>(&sql).bind(crate::db::now()).bind(&bot.id).fetch_optional(&self.db).await {
@@ -1585,7 +1587,6 @@ async fn validated_turn(
         .map_err(|_| ApiBotError::Upstream)?
         .ok_or(ApiBotError::IdentityMismatch)?;
     if project.deleted_at.is_some()
-        || project.host != crate::config::LOCAL_HOST
         || project.handed_off_to.is_some()
     {
         return Err(ApiBotError::IdentityMismatch);
@@ -2417,6 +2418,33 @@ mod tests {
         assert_eq!(before, "pending"); assert_eq!(before_calls, 0); assert_eq!(controls, 1);
         assert_eq!(committed, "ok"); assert_eq!(committed_calls, 0);
         assert_eq!(after, "ok"); assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 遠端主機的專案：start 建得出 run（`runs.host` 仍是 'local'，run 在 daemon 內跑），第一則 prompt 也能走完；
+    /// 以前 start／prompt 的 SQL 都夾著 `p.host='local'`，遠端專案在建 run 那步靜默回 `api_native_start_unconfirmed`。
+    #[tokio::test]
+    async fn native_start_and_prompt_work_for_a_remote_host_project() {
+        let env = crate::testing::env().await;
+        let calls = Arc::new(AtomicUsize::new(0)); let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, shared_session: false, name: "remote-run".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() }).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        sqlx::query("UPDATE projects SET host='remote-run' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let bot = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+            .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let run = tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::start_bot(&env.app, &bot)).await.expect("start timed out").unwrap();
+        let host: String = sqlx::query_scalar("SELECT host FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(host, "local");
+        let first = tokio::time::timeout(DEADLOCK_TIMEOUT, crate::lifecycle::prompt(&env.app, &bot, "hi", &crate::db::ulid())).await.expect("prompt timed out").unwrap();
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("provider response barrier timed out");
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop {
+            let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=? AND run_id=?").bind(&first.turn_id).bind(&run).fetch_optional(&env.app.db).await.unwrap();
+            if status.as_deref() == Some("completed") { break; }
+            tokio::task::yield_now().await;
+        } }).await.expect("remote project turn did not complete");
+        shutdown.cancel(); server.await.unwrap();
     }
 
     #[tokio::test]
@@ -4594,24 +4622,10 @@ mod tests {
                     env.app.api_turn_spawn(&wrong_run).await,
                     Err(ApiBotError::IdentityMismatch)
                 );
-                sqlx::query("UPDATE projects SET host='remote-fixture' WHERE id=?")
-                    .bind(&env.project_id)
-                    .execute(&env.app.db)
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    env.app.api_turn_spawn(&key).await,
-                    Err(ApiBotError::IdentityMismatch)
-                );
-                sqlx::query("UPDATE projects SET host='local' WHERE id=?")
-                    .bind(&env.project_id)
-                    .execute(&env.app.db)
-                    .await
-                    .unwrap();
                 assert_eq!(
                     calls.load(Ordering::SeqCst),
                     0,
-                    "bad ownership and remote projects are rejected before HTTP"
+                    "bad ownership is rejected before HTTP"
                 );
             }
             if n == 0 {
