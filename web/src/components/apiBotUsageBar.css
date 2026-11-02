@@ -73,3 +73,9 @@
   border-color: transparent;
   color: var(--text-dim, #888);
 }
+
+/* 手機標題第二行的餘額（ApiBalanceInline） */
+.mobile-bot-balance {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
