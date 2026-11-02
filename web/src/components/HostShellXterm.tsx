@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import * as api from '../api'
 import { ApiError } from '../api/types'
@@ -15,9 +14,9 @@ import './hostShellXterm.css'
 /**
  * 主機 shell「鍵盤直通」的終端：xterm.js 取代快照 `<pre>`（桌面限定；手機仍用一行輸入）。
  *
- * - 尺寸：xterm 的 cols×rows 由 fit addon 依面板大小定（容器不會被撐出去，聚焦時瀏覽器也不會捲走畫面）。
- *   herdr pane 比面板高時取**最底下**的那段（shell 的提示列在底下）；寬時「換行」決定折行或截掉右邊。
- *   pane 的實際大小只拿來顯示在標題列。
+ * - 尺寸：xterm 的 cols×rows 一律等於 herdr pane 的實際幾何（frame 帶來）。面板放不下就縮字級，還放不下就容器捲動；
+ *   不用 fit 決定列數（那樣會把 pane 的列切掉、長行折成兩列，畫面就疊了殘影）。
+ *   「換行」對應 DECAWM（pane 寬度與 xterm 一致，理論上不會折行；保險用）。
  * - 畫面：優先連 `…/stream` 收推送 frame；連不上（舊 daemon 404、mock）就每 250ms 輪詢 `terminal?format=ansi`。
  * - 輸入：xterm `onData` → `createInputBatcher` → text 走 `text`（enter=false）、控制鍵走 `keys`，都帶 `echo=ansi`，
  *   回應的畫面立刻畫上；比已畫的舊（序號較小）就丟掉。
@@ -56,15 +55,17 @@ export interface HostShellXtermProps {
   onSend: (err: unknown | null) => void
   /** herdr pane 的實際 cols×rows（標題列用；推送與回應都帶）。 */
   onGeometry: (cols: number, rows: number) => void
+  /** 目前是推送（true）還是輪詢退回（false）；狀態列據此寫。 */
+  onStreaming: (on: boolean) => void
 }
 
-export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, onGeometry }: HostShellXtermProps) {
+export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, onGeometry, onStreaming }: HostShellXtermProps) {
   const boxRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   // 回呼每次 parent 重畫都可能換：放 ref，effect 不因此重建 xterm（重建會清掉捲動歷史）。
-  const cb = useRef({ onTyping, onRead, onSend, onGeometry, wrap })
+  const cb = useRef({ onTyping, onRead, onSend, onGeometry, onStreaming, wrap })
   useEffect(() => {
-    cb.current = { onTyping, onRead, onSend, onGeometry, wrap }
+    cb.current = { onTyping, onRead, onSend, onGeometry, onStreaming, wrap }
   })
   useEffect(() => {
     termRef.current?.write(wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
@@ -81,14 +82,14 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
 
     const term = new Terminal({
       scrollback: 5000,
-      cursorBlink: true,
+      cursorBlink: false,
+      cursorStyle: 'block',
+      cursorInactiveStyle: 'outline',
       fontSize: 13,
       fontFamily: getComputedStyle(el).getPropertyValue('--font-mono').trim() || 'monospace',
       theme: readTheme(el),
     })
     termRef.current = term
-    const fit = new FitAddon()
-    term.loadAddon(fit)
     term.open(el)
     if (!cb.current.wrap) term.write(AUTOWRAP_OFF)
     const ta = term.textarea
@@ -125,6 +126,11 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
     let appliedId = 0
     let nextId = 0
     let streamOn = false
+    const setStreamOn = (on: boolean) => {
+      if (streamOn === on) return
+      streamOn = on
+      if (alive) cb.current.onStreaming(on)
+    }
     let closeStream: (() => void) | null = null
     let streamTimer: ReturnType<typeof setTimeout> | null = null
     let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -135,10 +141,27 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
       if (plan.out) term.write(plan.out + cursorSeq(plan.lines))
       prev = plan.lines
     }
+    /** 字級：先讓整個 pane 放得進面板；太小就停在 7px，剩下的交給容器捲動。 */
+    const fitFont = () => {
+      if (!alive) return
+      const w = el.clientWidth - 16
+      const h = el.clientHeight - 12
+      if (w <= 0 || h <= 0 || term.cols <= 0 || term.rows <= 0) return
+      const size = Math.min(w / (term.cols * 0.6), h / (term.rows * 1.2))
+      const next = Math.max(7, Math.min(13, Math.floor(size * 2) / 2))
+      if (term.options.fontSize !== next) term.options.fontSize = next
+    }
     const draw = (id: number, text: string, pane: { cols: number | null; rows: number | null }) => {
       if (!alive || id < appliedId) return
       appliedId = id
-      if (pane.cols && pane.rows) cb.current.onGeometry(pane.cols, pane.rows)
+      if (pane.cols && pane.rows) {
+        cb.current.onGeometry(pane.cols, pane.rows)
+        if (pane.cols !== term.cols || pane.rows !== term.rows) {
+          term.resize(pane.cols, pane.rows)
+          prev = []
+          fitFont()
+        }
+      }
       lastText = text
       paint()
     }
@@ -146,21 +169,7 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
       if (alive) cb.current.onRead(e)
     }
 
-    /** 依面板大小定 cols×rows；變了就整屏重畫（列數變了 planFrame 會自己整屏畫）。 */
-    const fitToBox = () => {
-      const before = [term.cols, term.rows]
-      try {
-        fit.fit()
-      } catch {
-        /* 隱藏中（沒有尺寸）：下一次 ResizeObserver 再說 */
-      }
-      if (term.cols !== before[0] || term.rows !== before[1]) {
-        prev = []
-        paint()
-      }
-    }
-    fitToBox()
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fitToBox())
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fitFont())
     ro?.observe(el)
 
     const pollOnce = async () => {
@@ -189,7 +198,7 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
         onMessage: (msg) => {
           const m = (msg ?? {}) as { type?: unknown; text?: unknown; cols?: unknown; rows?: unknown }
           if (m.type === 'frame' && typeof m.text === 'string') {
-            streamOn = true
+            setStreamOn(true)
             lastStreamErr = false
             const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : null)
             draw(++nextId, m.text, { cols: num(m.cols), rows: num(m.rows) })
@@ -197,11 +206,11 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
           } else if (m.type === 'error') {
             // 錯誤幀之後 daemon 會關線；onClose 看到 lastStreamErr 就放慢重連。
             lastStreamErr = true
-            streamOn = false
+            setStreamOn(false)
           }
         },
         onClose: (opened) => {
-          streamOn = false
+          setStreamOn(false)
           closeStream = null
           if (!alive || stop) return
           streamTimer = setTimeout(startStream, opened && !lastStreamErr ? STREAM_REOPEN_MS : STREAM_RETRY_MS)
@@ -211,25 +220,42 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
       if (close) closeStream = close
     }
 
-    // 輸入：同一個 frame 內的 onData 合成一次送出；送出串成一條鏈，順序不亂。
-    let chain: Promise<void> = Promise.resolve()
-    const sendOps = (ops: ShellOp[]) => {
-      chain = chain.then(async () => {
-        for (const op of ops) {
-          const id = ++nextId
-          try {
-            const snap =
-              op.kind === 'text'
-                ? await api.sendHostShellText(host, paneId, op.text, false, { echo: true })
-                : await api.sendHostShellKeys(host, paneId, op.keys, { echo: true })
-            if (!alive) return
-            if (snap) draw(id, snap.text, { cols: snap.columns, rows: snap.rows })
-            cb.current.onSend(null)
-          } catch (e) {
-            if (alive) cb.current.onSend(e)
+    // 輸入：送出是「一次只飛一個請求」的泵（順序保證），但不逐個等回應再送下一個：
+    // 飛行中打的字先排進佇列，這一趟結束就整批送出。遠端（echo 約 220ms）打快時，每趟自然把期間的字合成一批，
+    // 延遲不會隨打字量累積。只有每批的最後一個操作要 echo（畫面回應）；中間的只要確認送達。
+    let queue: ShellOp[] = []
+    let flying = false
+    const pump = async () => {
+      if (flying) return
+      flying = true
+      try {
+        while (alive && queue.length > 0) {
+          const batch = queue
+          queue = []
+          for (let k = 0; k < batch.length && alive; k++) {
+            const op = batch[k]
+            const echo = k === batch.length - 1
+            const id = echo ? ++nextId : 0
+            try {
+              const snap =
+                op.kind === 'text'
+                  ? await api.sendHostShellText(host, paneId, op.text, false, { echo })
+                  : await api.sendHostShellKeys(host, paneId, op.keys, { echo })
+              if (!alive) return
+              if (snap) draw(id, snap.text, { cols: snap.columns, rows: snap.rows })
+              cb.current.onSend(null)
+            } catch (e) {
+              if (alive) cb.current.onSend(e)
+            }
           }
         }
-      })
+      } finally {
+        flying = false
+      }
+    }
+    const sendOps = (ops: ShellOp[]) => {
+      queue.push(...ops)
+      void pump()
     }
     const batcher = createInputBatcher(sendOps)
     const dataSub = term.onData((data) => batcher(data))

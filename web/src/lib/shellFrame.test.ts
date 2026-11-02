@@ -39,13 +39,19 @@ test('列數改了（resize）→ 整屏重畫', () => {
 })
 
 test('ANSI 的 SGR 在比對時照字串原樣比，顏色不同就算不同列', () => {
-  const p = planFrame(['\x1b[31mred\x1b[0m'], ['red'])
+  const p = planFrame(['\x1b[31mred\x1b[0m', 'a', 'b', 'c'], ['red', 'a', 'b', 'c'])
   assert.equal(p.out, '\x1b[1;1H\x1b[2Kred\x1b[0m')
 })
 
 test('游標擺在最後一個有字的列的字尾（全形字算 2 格），全空白擺左上', () => {
-  assert.equal(cursorSeq(['a', '$ echo', '']), '\x1b[2;7H')
-  assert.equal(cursorSeq(['a', '\x1b[32m$ x\x1b[0m', '']), '\x1b[2;4H')
-  assert.equal(cursorSeq(['你好', '']), '\x1b[1;5H')
-  assert.equal(cursorSeq(['', '']), '\x1b[1;1H')
+  assert.equal(cursorSeq(['a', '$ echo', '']), '\x1b[2;7H\x1b[?25h')
+  assert.equal(cursorSeq(['a', '\x1b[32m$ x\x1b[0m', '']), '\x1b[2;4H\x1b[?25h')
+  assert.equal(cursorSeq(['你好', '']), '\x1b[1;5H\x1b[?25h')
+  assert.equal(cursorSeq(['', '']), '\x1b[1;1H\x1b[?25h')
+})
+
+test('變動的列超過三分之一（全螢幕重繪）→ 整屏重畫，不留殘影', () => {
+  const p = planFrame(['a', 'b', 'c', 'd', 'e', 'f'], ['A', 'B', 'C', 'd', 'e', 'f'])
+  assert.ok(p.out.startsWith('\x1b[H\x1b[2J'))
+  assert.deepEqual(p.lines, ['A', 'B', 'C', 'd', 'e', 'f'])
 })
