@@ -2,12 +2,26 @@
 import { rawTransport } from './index'
 import { isRec, num, optStr, pick } from './normalize'
 
+export interface ApiTurnCost {
+  turn_id: string
+  requests: number
+  cost_usd: number
+  reserved_usd: number
+  in_flight: boolean
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+}
+
 export interface ApiBotUsage {
   attempts: { total: number; recorded: number; reserved: number; unknown: number; failed: number }
   cost_microusd: { recorded: number; reserved: number; unknown: number }
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
   /** cache_read ÷ (input＋cache_read＋cache_creation)；沒有 recorded 用量時 null。 */
   cache_hit_rate: number | null
+  /** 最近 50 個 turn 各自的花費（美元；cost_usd＝recorded，reserved_usd＝進行中的預留）。 */
+  turns: ApiTurnCost[]
   last: { speed: string; at: string | null; input_tokens: number; output_tokens: number } | null
 }
 
@@ -21,7 +35,19 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
   const tk = rec(r.tokens)
   const last = isRec(r.last) ? r.last : null
   const rate = r.cache_hit_rate
+  const turns = (Array.isArray(r.turns) ? r.turns : []).filter(isRec).map((x): ApiTurnCost => ({
+    turn_id: optStr(pick(x, 'turn_id')) ?? '',
+    requests: n(x, 'requests'),
+    cost_usd: n(x, 'cost_usd'),
+    reserved_usd: n(x, 'reserved_usd'),
+    in_flight: x.in_flight === true,
+    input_tokens: n(x, 'input_tokens'),
+    output_tokens: n(x, 'output_tokens'),
+    cache_read_tokens: n(x, 'cache_read_tokens'),
+    cache_write_tokens: n(x, 'cache_write_tokens'),
+  }))
   return {
+    turns,
     attempts: { total: n(a, 'total'), recorded: n(a, 'recorded'), reserved: n(a, 'reserved'), unknown: n(a, 'unknown'), failed: n(a, 'failed') },
     cost_microusd: { recorded: n(c, 'recorded'), reserved: n(c, 'reserved'), unknown: n(c, 'unknown') },
     tokens: { input: n(tk, 'input'), output: n(tk, 'output'), cache_read: n(tk, 'cache_read'), cache_creation: n(tk, 'cache_creation') },

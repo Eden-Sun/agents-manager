@@ -1,4 +1,5 @@
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
+import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
@@ -253,6 +254,7 @@ const PlainBubble = memo(function PlainBubble({
         </div>
         {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
         {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
+        {msg.role === 'assistant' && msg.bot_id ? <ApiTurnCostTag botId={msg.bot_id} turnId={msg.turn_id} /> : null}
         {system ? null : (
           <time
             className="msg-time"
@@ -364,6 +366,7 @@ export function LiveBubble({
           {from ? <span className="msg-from">{from}</span> : null}
           <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
           <span>{text ? t('輸出中…') : (act ?? t('等待回覆…'))}</span>
+          {kind === 'claude-api' && botId ? <ApiTurnProgress botId={botId} /> : null}
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
               {open ? t('收起內容') : t('看目前內容（{n} 字）', { n: text.length })}

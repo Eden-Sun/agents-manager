@@ -246,6 +246,7 @@ pub mod claude_api_balance;
 pub mod claude_api_cap;
 mod api_bot;
 mod api_bot_retire_route;
+mod api_bot_turn_cost;
 mod cli_update;
 mod app_ports_p0;
 mod app_ports_p1;
