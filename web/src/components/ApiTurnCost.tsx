@@ -16,7 +16,7 @@ export function ApiTurnCostTag({ botId, turnId }: { botId: string; turnId: strin
   return <span className="msg-cost mono" title={tip}>${turn.cost_usd.toFixed(3)}</span>
 }
 
-/** live bubble 的進度列：第 N 次請求 · 已花 $X（含預留 $Y）。 */
+/** live bubble 的進度列：第 N 次請求 · 已花 $X（含預留 $Y）；同 ApiBotUsageBar，預留先當花掉算進 X。 */
 export function ApiTurnProgress({ botId }: { botId: string }) {
   const t = useT()
   const turnSig = useStore((s) => Object.values(s.turns[botId] ?? {}).find((x) => x.status === 'in_flight')?.id ?? null)
@@ -25,7 +25,7 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
   if (!turn) return null
   return (
     <span className="msg-cost mono">
-      {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: turn.cost_usd.toFixed(3), y: turn.reserved_usd.toFixed(3) })}
+      {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: (turn.cost_usd + turn.reserved_usd).toFixed(3), y: turn.reserved_usd.toFixed(3) })}
     </span>
   )
 }
