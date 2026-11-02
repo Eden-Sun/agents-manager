@@ -253,8 +253,8 @@ const PlainBubble = memo(function PlainBubble({
           {msg.rewound_at ? <RewoundTag at={msg.rewound_at} /> : null}
         </div>
         {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
-        {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {msg.role === 'assistant' && msg.bot_id ? <ApiTurnCostTag botId={msg.bot_id} turnId={msg.turn_id} /> : null}
+        {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {system ? null : (
           <time
             className="msg-time"
