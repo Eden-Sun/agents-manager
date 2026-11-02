@@ -69,6 +69,27 @@ test('收合：一列群集、計數、成員不畫，單列照舊', async () =>
   assert.ok(rowIds().includes('solo'))
 })
 
+test('收合列也顯示 kind 圖示、身份、模型與強度（取第一顆成員）', async () => {
+  seed()
+  useStore.setState((st) => ({
+    bots: st.bots.map((b) => (b.cluster === 'haiku' ? { ...b, identity: 'cc1', effort: 'medium' } : b)),
+    runs: {
+      ...st.runs,
+      h1: { ...st.runs.h1, runtime_model: 'claude-haiku-5-5', runtime_effort: 'medium', runtime_fast: null, runtime_identity: 'cc1' },
+    },
+  }) as never)
+  await mount(<Sidebar />)
+  await settle()
+  const row = clusterRow()!
+  assert.ok(row.querySelector('.kind-tag.claude'), 'kind 圖示')
+  const identity = row.querySelector('.identity-badge')
+  assert.ok(identity && /cc1/.test(identity.textContent ?? ''), '身份 cc1')
+  const model = row.querySelector('.model-tag')
+  assert.ok(model && /haiku/.test(model.textContent ?? ''), '模型 haiku')
+  assert.ok(model && /Medium/.test(model.textContent ?? ''), '強度 Medium')
+  assert.match(row.textContent ?? '', /1 執行中 · 2 閒置/)
+})
+
 test('展開：顯示成員且各自有勾選框，狀態記在 localStorage', async () => {
   seed()
   await mount(<Sidebar />)
