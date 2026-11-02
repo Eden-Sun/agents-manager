@@ -94,7 +94,8 @@ pub fn resolve_hire<'a>(
         }
         return Ok(Some(entry));
     }
-    if !manager {
+    // 池還沒設（entries 為空）＝不受池限制，manager 與 User 一樣照帶的 kind／model 增聘（使用者 2026-11-02）。
+    if !manager || entries.is_empty() {
         return Ok(None);
     }
     let kind = kind.ok_or_else(|| LcError::Bad("kind is required".into()))?;
@@ -224,6 +225,18 @@ mod tests {
         assert!(resolve_hire(&entries, true, None, Some("any-model"), None, Some("claude-any")).is_ok());
         // User：不受池限制；沒指定條目就是 None
         assert!(resolve_hire(&entries, false, Some("agy"), None, None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_pool_leaves_the_manager_unrestricted() {
+        // 池還沒設：manager 不帶條目也拿到 Ok(None)，kind／model 由請求決定。
+        assert!(resolve_hire(&[], true, Some("claude"), Some("sonnet"), None, None).unwrap().is_none());
+        assert!(resolve_hire(&[], true, Some("agy"), None, None, None).unwrap().is_none());
+        // 池有條目時規則照舊：kind 不在池內仍 403。
+        let entries = vec![entry("codex-terra", "codex", "terra", None, None, 1)];
+        assert_eq!(reason(resolve_hire(&entries, true, Some("claude"), None, None, None).unwrap_err()), "kind_not_in_pool");
+        // 空池 + 指定不存在的條目 → not_in_pool（條目本來就沒有）。
+        assert_eq!(reason(resolve_hire(&[], true, None, None, None, Some("codex-terra")).unwrap_err()), "not_in_pool");
     }
 
     #[test]
