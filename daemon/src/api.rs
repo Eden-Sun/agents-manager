@@ -18200,7 +18200,14 @@ mod expert_member_tests {
         assert!(hire(&manager).await.is_err(), "parent_child project");
         make_expert(&env, &manager).await;
         assert!(hire(&peer).await.is_err(), "non-manager");
-        // executor_pool is empty by default, manager hire gets 403 kind_not_in_pool
+        // executor_pool 預設是空的：manager 不受池限制，增聘成功（role=executor）。
+        let empty_hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
+            Json(HireMember { name: "worker-empty".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None })).await.unwrap();
+        let empty_id = serde_json::from_slice::<Value>(&axum::body::to_bytes(empty_hire.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
+        assert_eq!(db::bot(&env.app.db, &empty_id).await.unwrap().unwrap().role.as_deref(), Some("executor"));
+        // 池有條目、kind 不在池內 → 403 kind_not_in_pool
+        let codex_only = PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: None, executor_pool: Some(json!([{"id": "codex-1", "kind": "codex", "model": "", "count": 1}])), ..Default::default() };
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(codex_only)).await.unwrap();
         assert!(matches!(hire(&manager).await, Err(LcError::Forbidden(ref v)) if v["reason"] == "kind_not_in_pool"));
 
         // User is unrestricted by pool
