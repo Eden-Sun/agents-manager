@@ -68,6 +68,8 @@ pub async fn execute(
         }); }
         cmd.args([
             "--unshare-all",
+            // 使用者 2026-11-02 裁示全部開放網路：只共用 net namespace，其餘照舊隔離。
+            "--share-net",
             "--die-with-parent",
             "--new-session",
             "--clearenv",
@@ -76,6 +78,10 @@ pub async fn execute(
             if Path::new(path).exists() {
                 cmd.args(["--ro-bind", path, path]);
             }
+        }
+        // 網路要能用：DNS、TLS 憑證、使用者名稱解析。只唯讀掛這幾個，不掛整個 /etc。
+        for path in NETWORK_ETC {
+            cmd.args(["--ro-bind-try", path, path]);
         }
         cmd.args([
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind-fd",
@@ -236,9 +242,9 @@ mod tests {
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let names = ["user", "mnt", "pid", "net"];
+        let names = ["user", "mnt", "pid"]; // net 共用（--share-net），不比
         let host_inodes: Vec<u64> = names.iter().map(|name| std::fs::metadata(format!("/proc/self/ns/{name}")).unwrap().ino()).collect();
-        let python = format!("import os,socket; print(' '.join(str(os.stat('/proc/self/ns/'+n).st_ino) for n in ('user','mnt','pid','net'))); assert os.environ.get('KX090P_FAKE_SENTINEL') is None; assert set(os.environ)<=set(('PATH','HOME','LANG','PWD','SHLVL','_'));\ntry:\n s=os.fstat({fd}); assert (s.st_dev,s.st_ino)!=({dev},{ino})\nexcept OSError: pass\ns=socket.socket(); s.settimeout(1); assert s.connect_ex(('127.0.0.1',{port}))!=0", dev=meta.dev(), ino=meta.ino());
+        let python = format!("import os,socket; print(' '.join(str(os.stat('/proc/self/ns/'+n).st_ino) for n in ('user','mnt','pid'))); assert os.environ.get('KX090P_FAKE_SENTINEL') is None; assert set(os.environ)<=set(('PATH','HOME','LANG','PWD','SHLVL','_'));\ntry:\n s=os.fstat({fd}); assert (s.st_dev,s.st_ino)!=({dev},{ino})\nexcept OSError: pass\ns=socket.socket(); s.settimeout(1); assert s.connect_ex(('127.0.0.1',{port}))==0", dev=meta.dev(), ino=meta.ino());
         let command = format!("test ! -e /workspace/escape && test ! -e /home && printf synthetic > /workspace/writable && /usr/bin/python3 -c \"{}\"", python.replace('\"', "\\\""));
         let command = format!("! /bin/ln -L /workspace/escape /workspace/hardlink && /bin/ln -s /workspace/escape /workspace/symlink && test ! -e /workspace/symlink && {command}");
         let editor = super::super::editor::Editor::new(&workspace).unwrap();
@@ -246,10 +252,10 @@ mod tests {
         drop(file);
         let sandbox_inodes: Vec<u64> = output.as_deref().unwrap_or("").split_whitespace().filter_map(|s| s.parse().ok()).collect();
         let listener = listener.into_std().unwrap();
-        let no_connection = matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock);
+        let connected = listener.accept().is_ok();
         let writable = std::fs::read_to_string(workspace.join("writable")).ok().as_deref() == Some("synthetic");
         drop(listener); std::fs::remove_dir_all(&root).unwrap();
-        assert!(output.is_ok() && no_connection && writable);
+        assert!(output.is_ok() && connected && writable);
         assert_eq!(sandbox_inodes.len(), host_inodes.len());
         assert!(sandbox_inodes.iter().zip(host_inodes).all(|(inside, outside)| *inside != outside));
     }
@@ -451,3 +457,10 @@ mod process_tests {
         );
     }
 }
+
+/// 開網路時唯讀掛進沙箱的 /etc 檔案（不存在就略過）。
+#[cfg(target_os = "linux")]
+const NETWORK_ETC: [&str; 9] = [
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/host.conf", "/etc/gai.conf",
+    "/etc/ssl", "/etc/ca-certificates", "/etc/passwd", "/etc/group",
+];
