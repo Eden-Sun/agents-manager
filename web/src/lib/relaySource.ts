@@ -9,13 +9,19 @@ export function relaySource(input: {
   fromName: string
   toName: string
   unverified: boolean
+  /** 群集派工：群集名與接手成員是哪一端（成員是收件端＝派工泡泡，是寄件端＝結果通知）。 */
+  cluster?: string | null
+  fromIsAssignee?: boolean
+  toIsAssignee?: boolean
 }): { text: string; title: string; daemon: boolean } {
-  const { fromId, fromName, toName, unverified } = input
+  const { fromId, fromName, unverified, cluster } = input
   // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：排程／daemon 自發，沒有人按過。
   if (fromId === 'daemon') {
     return { text: t('daemon 自動觸發'), title: t('daemon 自動觸發的訊息（排程／自動化，不是人送的）'), daemon: true }
   }
-  const from = fromName || fromId
+  const tag = (name: string, on?: boolean) => (cluster && on && name ? t('{name}（{cluster} 群集）', { name, cluster }) : name)
+  const from = tag(fromName || fromId, input.fromIsAssignee)
+  const toName = tag(input.toName, input.toIsAssignee)
   const text = unverified
     ? toName
       ? t('{from} → {to}（未驗證）', { from, to: toName })

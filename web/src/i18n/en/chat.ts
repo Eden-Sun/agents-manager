@@ -118,6 +118,7 @@ export default {
   '{from} → {to}（未驗證）': '{from} → {to} (unverified)',
   '{from}（未驗證）': '{from} (unverified)',
   '{from} → {to}': '{from} → {to}',
+  '{name}（{cluster} 群集）': '{name} ({cluster} cluster)',
   '寄件端自稱是這顆 bot，但沒有帶它自己的 bot token 證明（不是你送的；來源未驗證）': 'The sender claims to be this bot but did not prove its identity with its bot token (not sent by you; unverified source)',
   '由其他 agent 代為交辦的訊息（不是你送的）': 'Message relayed by another agent (not sent by you)',
   // lib/remoteImage.ts

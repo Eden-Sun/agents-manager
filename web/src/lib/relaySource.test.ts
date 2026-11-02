@@ -24,3 +24,18 @@ test('daemon 哨符', () => {
   assert.equal(r.text, 'daemon 自動觸發')
   assert.equal(r.daemon, true)
 })
+
+test('群集派工：收件端是接手的成員，標頭寫「ops → hk2（haiku 群集）」', () => {
+  const l = relaySource({ fromId: 'm', fromName: 'ops', toName: 'hk2', unverified: false, cluster: 'haiku', toIsAssignee: true })
+  assert.equal(l.text, 'ops → hk2（haiku 群集）')
+})
+
+test('群集派工的結果通知：寄件端是成員', () => {
+  const l = relaySource({ fromId: 'k', fromName: 'hk2', toName: 'ops', unverified: false, cluster: 'haiku', fromIsAssignee: true })
+  assert.equal(l.text, 'hk2（haiku 群集） → ops')
+})
+
+test('一般派工不受影響', () => {
+  assert.equal(relaySource({ fromId: 'm', fromName: 'ops', toName: 'hk2', unverified: false }).text, 'ops → hk2')
+  assert.equal(relaySource({ fromId: 'm', fromName: 'ops', toName: 'hk2', unverified: false, cluster: null, toIsAssignee: true }).text, 'ops → hk2')
+})

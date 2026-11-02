@@ -222,6 +222,10 @@ interface MockMessage {
   attachments_json: string | null
   /** null = 使用者 / daemon 自己。 */
   relay_from: string | null
+  /** 群集派工（`bot:cluster:<名稱>`）：群集名與實際接手的成員（daemon 補的）。 */
+  via_cluster?: string
+  assignee_bot_id?: string
+  assignee_name?: string
   /** `send_now`＝插隊、`supplement`＝補充；沒有＝一般送出。 */
   sent_via?: 'send_now' | 'supplement' | null
   /** 保溫回合的訊息（使用者那則與保溫回覆）：不算未讀。 */
@@ -1011,6 +1015,15 @@ export class MockTransport implements Transport {
         }
       }, 3000)
     }, 50)
+
+    // 群集派工的兩端：成員收到的 relay 泡泡、管理者收到的結果通知（標出群集名與接手的成員）。
+    const member = this.bots.find((b) => b.id === clusterIds[1])
+    if (member) {
+      const via = { via_cluster: this.clusterOf(member) ?? 'haiku', assignee_bot_id: member.id, assignee_name: member.name }
+      const mk = { turn_id: null, role: 'user' as const, source: 'web' as const, incomplete: 0 }
+      this.addMessage({ ...mk, bot_id: member.id, conversation_id: this.conv(member.id), content: L('幫我把 README 的安裝步驟核對一遍', 'Please double-check the install steps in the README'), relay_from: mgr.id, ...via })
+      this.addMessage({ ...mk, bot_id: mgr.id, conversation_id: this.conv(mgr.id), content: L('[daemon 請求結果通知，不是新請求]\n目標的這一回合已回覆。', '[daemon request result notice, not a new request]\nThe target turn has replied.'), relay_from: member.id, ...via })
+    }
 
     const exec2: MockBot = {
       id: ulid('bot'),
@@ -2333,6 +2346,9 @@ export class MockTransport implements Transport {
       group_id?: string | null
       attachments_json?: string | null
       relay_from?: string | null
+      via_cluster?: string
+      assignee_bot_id?: string
+      assignee_name?: string
     },
   ): MockMessage {
     const msg: MockMessage = {

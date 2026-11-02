@@ -127,12 +127,16 @@ const RelayFrom = memo(function RelayFrom({
   unverified,
   savedName,
   savedDeleted,
+  cluster,
+  assigneeId,
 }: {
   fromId: string
   toId: string | null
   unverified: boolean
   savedName?: string | null
   savedDeleted: boolean
+  cluster?: string | null
+  assigneeId?: string | null
 }) {
   // Subscribe so this memoized source label rerenders when the UI language changes.
   useT()
@@ -143,7 +147,15 @@ const RelayFrom = memo(function RelayFrom({
     })),
   )
   const fromName = relayFromName({ fromId, liveName: names.from, savedName, deleted: savedDeleted })
-  const label = relaySource({ fromId, fromName, toName: names.to, unverified })
+  const label = relaySource({
+    fromId,
+    fromName,
+    toName: names.to,
+    unverified,
+    cluster,
+    fromIsAssignee: !!assigneeId && assigneeId === fromId,
+    toIsAssignee: !!assigneeId && assigneeId === toId,
+  })
   return (
     <span className={`msg-targets relay${fromName ? '' : ' daemon'}${unverified ? ' unverified' : ''}`} title={label.title}>
       {label.text}
@@ -213,7 +225,7 @@ const PlainBubble = memo(function PlainBubble({
               {from}
             </span>
           ) : null}
-          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} savedName={msg.relay_from_name} savedDeleted={msg.relay_from_deleted === true} /> : null}
+          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} savedName={msg.relay_from_name} savedDeleted={msg.relay_from_deleted === true} cluster={msg.via_cluster} assigneeId={msg.assignee_bot_id} /> : null}
           {quoted ? (
             <span className="msg-targets relay quoted" title={t('這一則的內容來自 {source}，不是使用者自己打的', { source: quoted })}>
               {quoted}{t('（轉述）')}

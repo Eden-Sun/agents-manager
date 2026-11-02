@@ -8367,6 +8367,40 @@ fn stamp_relay_name(m: &mut Value, names: &HashMap<String, (String, bool)>) {
     }
 }
 
+/// 群集派工的紀錄（`relay_requests.cluster`）：`turn_id → (群集名, 實際接手的成員 id)`。
+/// 成員那邊的 relay 訊息所在回合的 `client_request_id` 是 `relay-request:<id>`，管理者那邊的結果通知是 `relay-result:<id>:r<n>`，
+/// 兩者都對回同一筆請求；不改 schema，現查現補。一般派工（`cluster IS NULL`）不會出現在結果裡。
+async fn cluster_dispatch_by_turn(app: &App, turn_ids: &[&str]) -> Result<HashMap<String, (String, String)>, LcError> {
+    if turn_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!(
+        "SELECT t.id, r.cluster, r.to_bot_id FROM turns t JOIN relay_requests r ON r.id = CASE \
+           WHEN t.client_request_id LIKE 'relay-request:%' THEN substr(t.client_request_id, 15) \
+           WHEN t.client_request_id LIKE 'relay-result:%' THEN substr(substr(t.client_request_id, 14), 1, instr(substr(t.client_request_id, 14) || ':', ':') - 1) END \
+         WHERE r.cluster IS NOT NULL AND t.id IN ({})",
+        vec!["?"; turn_ids.len()].join(",")
+    );
+    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
+    for id in turn_ids {
+        query = query.bind(*id);
+    }
+    Ok(query.fetch_all(&app.db).await.map_err(any_err)?.into_iter().map(|(t, c, b)| (t, (c, b))).collect())
+}
+
+/// 把 `via_cluster`／`assignee_bot_id`／`assignee_name` 補到一則群集派工相關的訊息上。
+fn stamp_cluster_dispatch(m: &mut Value, by_turn: &HashMap<String, (String, String)>, names: &HashMap<String, (String, bool)>) {
+    let Some((cluster, assignee)) = m["turn_id"].as_str().and_then(|t| by_turn.get(t)).cloned() else { return };
+    if m["relay_from"].is_null() {
+        return;
+    }
+    m["via_cluster"] = json!(cluster);
+    if let Some((name, _)) = names.get(&assignee) {
+        m["assignee_name"] = json!(name);
+    }
+    m["assignee_bot_id"] = json!(assignee);
+}
+
 /// 整頁 `messages` 補代發來源名字（REST 的單 bot 與群組兩條路共用）。
 async fn add_relay_names(app: &App, body: &mut Value) -> Result<(), LcError> {
     let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -8376,9 +8410,14 @@ async fn add_relay_names(app: &App, body: &mut Value) -> Result<(), LcError> {
     ids.sort_unstable();
     ids.dedup();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let names = relay_names(app, &refs).await?;
+    let mut names = relay_names(app, &refs).await?;
+    let turns: Vec<&str> = msgs.iter().filter(|m| m["relay_from"].is_string()).filter_map(|m| m["turn_id"].as_str()).collect();
+    let clusters = cluster_dispatch_by_turn(app, &turns).await?;
+    let missing: Vec<&str> = clusters.values().map(|(_, b)| b.as_str()).filter(|b| !names.contains_key(*b)).collect();
+    names.extend(relay_names(app, &missing).await?);
     for m in msgs.iter_mut() {
         stamp_relay_name(m, &names);
+        stamp_cluster_dispatch(m, &clusters, &names);
     }
     Ok(())
 }
@@ -8394,6 +8433,14 @@ async fn ws_frame_text(app: &App, e: &crate::state::WsEvent) -> String {
     if let Some(id) = relay {
         if let Ok(names) = relay_names(app, &[id.as_str()]).await {
             stamp_relay_name(&mut v["data"]["message"], &names);
+        }
+    }
+    if let Some(turn) = v["data"]["message"]["turn_id"].as_str().filter(|_| v["data"]["message"]["relay_from"].is_string()).map(str::to_owned) {
+        if let Ok(clusters) = cluster_dispatch_by_turn(app, &[turn.as_str()]).await {
+            let assignee: Vec<String> = clusters.values().map(|(_, b)| b.clone()).collect();
+            let refs: Vec<&str> = assignee.iter().map(String::as_str).collect();
+            let names = relay_names(app, &refs).await.unwrap_or_default();
+            stamp_cluster_dispatch(&mut v["data"]["message"], &clusters, &names);
         }
     }
     v.to_string()
@@ -9051,6 +9098,40 @@ mod message_tests {
         let Json(bot) = get_messages_with_relay_names(State(app), Path(target.into()), Query(HashMap::new()), Extension(RequestPrincipal::Bot(listener.into()))).await.unwrap();
         assert!(bot["messages"][0].get("relay_from_name").is_none(), "{bot}");
         assert_eq!(bot["messages"][0]["relay_from"], relay);
+    }
+
+    /// 群集派工：成員那邊的 relay 訊息與管理者那邊的結果通知都帶 `via_cluster`／`assignee_bot_id`／`assignee_name`；
+    /// 一般派工（`cluster IS NULL`）不帶。
+    #[tokio::test]
+    async fn cluster_dispatch_messages_carry_cluster_and_assignee_but_plain_relay_does_not() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        for (id, name) in [("ct-mgr", "ops"), ("ct-member", "hk2")] {
+            sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,'claude','tok',?)")
+                .bind(id).bind(&e.project_id).bind(name).bind(db::now()).execute(&app.db).await.unwrap();
+        }
+        let (mc, kc) = (db::conversation_id(&app.db, "ct-mgr").await.unwrap(), db::conversation_id(&app.db, "ct-member").await.unwrap());
+        for (req, cluster) in [("rq-cluster", Some("haiku")), ("rq-plain", None)] {
+            sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,?,'x','[]','answered',?,?)")
+                .bind(req).bind("ct-mgr").bind("ct-member").bind(req).bind(db::now()).bind(cluster).execute(&app.db).await.unwrap();
+            // 成員那邊收到的 relay 訊息、管理者那邊的結果通知。
+            for (conv, turn, crid, from) in [(&kc, format!("t-member-{req}"), format!("relay-request:{req}"), "ct-mgr"), (&mc, format!("t-notice-{req}"), format!("relay-result:{req}:r0"), "ct-member")] {
+                sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, client_request_id, created_at) VALUES (?,?,'external','completed',?,?)")
+                    .bind(&turn).bind(conv).bind(crid).bind(db::now()).execute(&app.db).await.unwrap();
+                sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, created_at) VALUES (?,?,?,'user','x','web',?,?)")
+                    .bind(format!("m-{turn}")).bind(conv).bind(&turn).bind(from).bind(db::now()).execute(&app.db).await.unwrap();
+            }
+        }
+        for (bot, req_ok) in [("ct-member", "t-member-"), ("ct-mgr", "t-notice-")] {
+            let Json(body) = get_messages_with_relay_names(State(app.clone()), Path(bot.into()), Query(HashMap::new()), Extension(RequestPrincipal::User)).await.unwrap();
+            let find = |turn: String| body["messages"].as_array().unwrap().iter().find(|m| m["turn_id"] == turn.as_str()).unwrap().clone();
+            let hit = find(format!("{req_ok}rq-cluster"));
+            assert_eq!(hit["via_cluster"], "haiku", "{hit}");
+            assert_eq!(hit["assignee_bot_id"], "ct-member");
+            assert_eq!(hit["assignee_name"], "hk2");
+            let plain = find(format!("{req_ok}rq-plain"));
+            assert!(plain.get("via_cluster").is_none() && plain.get("assignee_bot_id").is_none(), "{plain}");
+        }
     }
 
     /// WS 的 `message_added` 幀也要帶來源名字（已收掉的 child 照樣認得出）；其他事件原樣。
