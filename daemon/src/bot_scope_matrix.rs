@@ -360,6 +360,7 @@ fn rules() -> Vec<Rule> {
         deny_rule("POST", "/api/changelog/translation", Expect::UserOnly, "Paid changelog translation is user-only; a Bot must not start a spend."),
         rule("POST", "/relay/announce", Expect::Allow, None),
         rule("POST", "/api/build/remote/install-toolchain", Expect::UserOnly, None),
+        deny_rule("GET", "/api/hosts/{name}/shells/{pane_id}/stream", Expect::Unauthorized, "Host shell push stream: outside the /api auth layer like /ws, accepts only the UI token in the query; bot credentials are refused as mixed/invalid."),
         deny_rule("GET", "/ws", Expect::Unauthorized, "The WebSocket carries global UI events and accepts the UI token; Bot credentials do not authorize a subscription."),
         rule("POST", "/api/hosts/{name}/gh/login", Expect::Forbidden, None),
         rule("PUT", "/api/identities/{name}/disabled", Expect::UserOnly, None),
@@ -788,7 +789,7 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
             .header("X-AM-Bot-Id", &bot_a.id)
             .header("X-AM-Bot-Token", "token-a")
             .body(body);
-        if template == "/ws" {
+        if template == "/ws" || template.ends_with("/shells/{pane_id}/stream") {
             request = request
                 .header("connection", "Upgrade")
                 .header("upgrade", "websocket")

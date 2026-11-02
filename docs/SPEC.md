@@ -3687,6 +3687,11 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
   終端上在 shell 等輸入的地方（從畫面推：最後一行有字的行尾）畫一個閃爍游標，焦點在終端上才閃。
   ⌘ 系列與 herdr 不收的鍵（Delete／Home／End／PgUp）回 `null` 留給瀏覽器，使用者不會被關在框裡。localStorage 只記被關掉直通的 pane。
   送出一律走同一個佇列（`keyQueue`）：同一時間只有一個請求在路上，否則抵達順序不保證，打 `ls` 可能變成 `sl`。
+- **主機 shell 的畫面推送**（2026-11-02，給 xterm.js 用；API 見 API.md「畫面推送」）：daemon 端每顆 pane 一條讀取迴圈，輪詢 `pane.read`（ANSI）、用內容 hash 判斷變了沒。
+  變了才推整張畫面（`frame`）；閒置時 50ms→1s 逐步退避，送字／送鍵（`text`／`keys`）與新觀看者會立刻喚醒。沒有觀看者就停、不留登記。
+  herdr 0.9.5 的 `events.subscribe` 不接受畫面變動的訂閱（變體清單裡沒有），`pane.get` 的 `revision` 也不隨畫面動，所以不能靠事件觸發，只能輪詢。
+  送字／送鍵可帶 `echo=ansi`，回應直接附上送完後的 ANSI 快照，省一次往返。推送與輪詢可以並存：舊的 `…/terminal` 輪詢照常可用。
+  每一拍只花一趟 herdr 呼叫（`pane.read`）；pane 身分與幾何（`pane.get`＋`pane.layout`）只在畫面變了、或距上次確認超過 1 秒才問。遠端主機每趟實測約 110 ms（本機約 0.5 ms），每拍多兩趟會把推送壓到約 3 幀/秒。
 
 ### 11.7 不做
 密碼／互動認證、跳板（交給 ssh_config 的 ProxyJump）、遠端 transcript 回補、多 daemon（同一台主機給兩顆 daemon 共用 session 的例外見 §11.10）。
