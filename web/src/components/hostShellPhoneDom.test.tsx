@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until, type FakeRequest } from '../testing/domHarness'
+import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until, type FakeRequest, fakeWebSocket } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
@@ -22,6 +22,8 @@ after(() => {
   teardownDom()
 })
 beforeEach(() => {
+  // 桌面直通會開 xterm 的推送 WebSocket；這裡假掉，免得真的去連（happy-dom 會把錯誤當成未處理的例外）。
+  fakeWebSocket()
   localStorage.removeItem('am.shellKeySyncOff')
   localStorage.removeItem('am.shellKeySyncOn')
 })

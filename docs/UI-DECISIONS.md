@@ -333,6 +333,8 @@
   卡片尺寸一致。非圖片**不開 object URL、不抓位元組回來、不開放大預覽**——一個 CSV 的縮圖沒有意義，
   看的是檔名與路徑；訊息上的非圖片附件點開只顯示檔名與 agent 讀得到的絕對路徑。
 - 主機 shell：bot 標題列底下第三個分頁（沒選 bot 時整頁）；一行輸入＋一排按鍵、↑↓ 是指令歷史；「清畫面」真的送 `clear`；
+
+  - **鍵盤直通改用 xterm.js**（2026-11-02）：桌面直通開著時，畫面由 `HostShellXterm`（`@xterm/xterm`）畫，不再是快照 `<pre>`。收到 `…/stream` 推送就照幀畫（只重畫變了的列、往上捲出去的列進 xterm 的捲動歷史，回看可用）；推送連不上（舊 daemon 404）退回每 250ms 輪詢 `terminal?format=ansi`。輸入經 `createInputBatcher` 合併後送 `text`（enter=false）／`keys`，都帶 `echo=ansi`，回應的畫面立刻畫上。xterm 的 cols×rows 由 fit addon 依面板大小定（盒子不捲動，聚焦時瀏覽器不會把畫面捲走）；pane 比面板高時取最底下那段（提示列在底下），pane 的實際大小只放標題列；「換行」對應 DECAWM（開＝折行、關＝截掉右邊）。手機、唯讀、看「含捲動歷史」仍走舊的 `<pre>`（手機沒有實體鍵盤，維持一行輸入）。
   ~~「關閉」與「結束 shell」分開~~ → 2026-09-17 起只剩「結束 shell」（二次確認），「關閉」拿掉；草稿與畫面跨重新整理保留；**指令草稿存 daemon、跨裝置共用**（#758：同對話輸入框的 `shell:<host>/<pane id>` 草稿，不再存 localStorage；舊版 `am.shellDrafts` 不遷移）。指令歷史與「鍵盤直通關閉」仍是各瀏覽器自己的偏好。
   daemon 重啟後，面板自己開的 shell 不在 daemon 記憶體的清單裡（`DELETE` 會回 200 卻什麼都不關）：「結束 shell」先查那份清單，不在就改走 `POST /api/panes/{id}/close?confirm=true`，兩邊都不認得才當作已經不在；關失敗就留著面板並通知。
 - 身份登入：紅色只代表確定未登入，無法判斷顯示「未知」；登入入口在每個主機身份列、開臨時 shell，完成後收 pane。
