@@ -1608,3 +1608,34 @@ mod mock_herdr_contract_tests {
         assert_eq!(code_of(&e), "agent_not_found", "暫態不是穩態：pane id 查不到它");
     }
 }
+
+/// 設定檔要跟 DB 對得上（投影會拒絕「只有 DB 有的專案」）：把測試環境的專案寫回 config.toml。
+/// `testing::env` 只種 DB 那一列；bot 要從設定檔進來的測試先呼叫這個。
+pub async fn seed_project_config(e: &Env) {
+    let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+    e.app
+        .cfg
+        .update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// 讀一個 server→client 的 WebSocket text 幀（沒有 mask；長度 126 以上才有 16-bit 的延伸長度）。
+pub async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value {
+    use tokio::io::AsyncReadExt as _;
+    let mut hdr = [0u8; 2];
+    s.read_exact(&mut hdr).await.unwrap();
+    assert_eq!(hdr[0] & 0x0f, 1, "只預期 text 幀，拿到 opcode {:x}", hdr[0] & 0x0f);
+    let mut len = (hdr[1] & 0x7f) as usize;
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        s.read_exact(&mut ext).await.unwrap();
+        len = u16::from_be_bytes(ext) as usize;
+    }
+    let mut buf = vec![0u8; len];
+    s.read_exact(&mut buf).await.unwrap();
+    serde_json::from_slice(&buf).unwrap()
+}

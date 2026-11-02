@@ -4,6 +4,7 @@
 //! Sonnet/Opus 週列忽略；[`parse_claude_usage`] 仍認舊 TUI 對話框版面（有人手動貼畫面來測）。
 //! Each identity is probed separately (empty-env / `cc0` shares the bare `claude` key).
 
+use crate::capture::claude::month_num_token;
 use crate::config::{expand_home, LOCAL_HOST};
 use crate::herdr::HerdrClient;
 use crate::quota::{Quota, Window};
@@ -51,16 +52,6 @@ fn parse_used_pct(line: &str) -> Option<f64> {
         }
     }
     None
-}
-
-fn month_num(tok: &str) -> Option<u32> {
-    const M: [&str; 12] =
-        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let t = tok.trim_matches(|c: char| !c.is_alphabetic()).to_ascii_lowercase();
-    if t.len() < 3 {
-        return None;
-    }
-    M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
 }
 
 fn parse_ampm_time(tok: &str) -> Option<(u32, u32)> {
@@ -121,7 +112,7 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
             }
         }
         if month.is_none() {
-            if let Some(m) = month_num(tok) {
+            if let Some(m) = month_num_token(tok) {
                 month = Some(m);
                 continue;
             }
@@ -279,7 +270,7 @@ pub async fn client_for_fence(host: &str, fence: &crate::hosts::HostFence) -> Re
     Ok(conn.client.clone())
 }
 
-async fn probe_client() -> Result<HerdrClient> {
+pub(crate) async fn probe_client() -> Result<HerdrClient> {
     let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
     if client.ping().await.is_ok() {
         return Ok(client);

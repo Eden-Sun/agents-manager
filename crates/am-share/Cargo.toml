@@ -28,8 +28,6 @@ rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 mime_guess = "2"
 chrono = { version = "0.4", features = ["serde"] }
-# flock(2)：同一個資料目錄只准一顆 daemon（startup.rs）
-libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [dev-dependencies]

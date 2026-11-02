@@ -3932,9 +3932,6 @@ mod resume_args_tests {
 
         mod diagnostics {
             use super::remote_stage_script;
-            use std::sync::{Arc, Mutex};
-
-            const RECORD_LIMIT: usize = 128;
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             pub(super) enum Code {
@@ -3951,7 +3948,7 @@ mod resume_args_tests {
             }
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            enum StdoutKind {
+            pub(super) enum StdoutKind {
                 Empty,
                 Same,
                 Staged,
@@ -3961,74 +3958,8 @@ mod resume_args_tests {
                 Other,
             }
 
-            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            struct Record {
-                code: Option<Code>,
-                exit_code: Option<i32>,
-                stdout: StdoutKind,
-            }
-
-            #[derive(Debug, Default)]
-            struct RecordSet {
-                records: Vec<Record>,
-                overflow: usize,
-            }
-
-            #[derive(Debug, Clone, Default)]
-            pub(super) struct Handle(Arc<Mutex<RecordSet>>);
-
-            impl Handle {
-                pub(super) fn new() -> Self {
-                    Self::default()
-                }
-
-                fn record_output(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
-                    let kind = stdout_kind(stdout);
-                    let mut found = false;
-                    let mut records = self.0.lock().expect("diagnostic record lock");
-                    for line in stderr.split(|byte| *byte == b'\n') {
-                        if let Some(code) = code_from_marker(line) {
-                            records.push(Record { code: Some(code), exit_code: status, stdout: kind });
-                            found = true;
-                        }
-                    }
-                    if !found {
-                        records.push(Record { code: None, exit_code: status, stdout: kind });
-                    }
-                }
-
-                fn record_code(&self, code: Code) {
-                    self.0.lock().expect("diagnostic record lock").push(Record {
-                        code: Some(code),
-                        exit_code: Some(0),
-                        stdout: StdoutKind::Empty,
-                    });
-                }
-
-                pub(super) fn contains(&self, code: Code) -> bool {
-                    self.0.lock().expect("diagnostic record lock").records.iter().any(|record| record.code == Some(code))
-                }
-
-                pub(super) fn summary(&self) -> String {
-                    let records = self.0.lock().expect("diagnostic record lock");
-                    format!("records={:?}; overflow={}", records.records, records.overflow)
-                }
-
-                fn length_and_overflow(&self) -> (usize, usize) {
-                    let records = self.0.lock().expect("diagnostic record lock");
-                    (records.records.len(), records.overflow)
-                }
-            }
-
-            impl RecordSet {
-                fn push(&mut self, record: Record) {
-                    if self.records.len() < RECORD_LIMIT {
-                        self.records.push(record);
-                    } else {
-                        self.overflow = self.overflow.saturating_add(1);
-                    }
-                }
-            }
+            pub(super) type Handle = crate::lifecycle::diag_support::Recorder<Code, StdoutKind>;
+            use crate::lifecycle::diag_support::RECORD_LIMIT;
 
             fn stdout_kind(stdout: &[u8]) -> StdoutKind {
                 match stdout.split(|byte| *byte == b'\n').next().unwrap_or_default() {
@@ -4077,7 +4008,7 @@ mod resume_args_tests {
             }
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            enum Site {
+            pub(super) enum Site {
                 MissingDefinition,
                 Missing(u8),
                 SameEarly,
@@ -4093,32 +4024,8 @@ mod resume_args_tests {
                 CanonNew,
             }
 
-            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            pub(super) struct InstrumentError {
-                site: Site,
-                expected: usize,
-                found: usize,
-            }
-
-            impl InstrumentError {
-                pub(super) fn summary(self) -> String {
-                    format!("site={:?}; expected={}; found={}", self.site, self.expected, self.found)
-                }
-            }
-
-            fn replace_count(
-                source: &str,
-                needle: &str,
-                replacement: &str,
-                expected: usize,
-                site: Site,
-            ) -> Result<String, InstrumentError> {
-                let found = source.matches(needle).count();
-                if found != expected {
-                    return Err(InstrumentError { site, expected, found });
-                }
-                Ok(source.replace(needle, replacement))
-            }
+            pub(super) type InstrumentError = crate::lifecycle::diag_support::InstrumentError<Site>;
+            use crate::lifecycle::diag_support::replace_count;
 
             fn instrument(mut script: String) -> Result<String, InstrumentError> {
                 let missing_count = script.matches("am_missing").count();
@@ -4252,7 +4159,7 @@ mod resume_args_tests {
                 }
                 let output = command.output().map_err(|_| InstrumentError { site: Site::MissingDefinition, expected: 1, found: 0 })?;
                 let status = output.status.code();
-                handle.record_output(status, &output.stdout, &output.stderr);
+                handle.record_output(status, stdout_kind(&output.stdout), &output.stderr, code_from_marker);
                 Ok(Run { stdout: output.stdout, status })
             }
 
@@ -4347,13 +4254,14 @@ mod resume_args_tests {
                 let handle = Handle::new();
                 handle.record_output(
                     Some(0),
-                    b"AM_MISSING\n",
+                    stdout_kind(b"AM_MISSING\n"),
                     b"AM_DIAG:H:H11\nUNKNOWN_SENTINEL_PATH_PAYLOAD\n",
+                    code_from_marker,
                 );
                 assert!(handle.contains(Code::Missing(11)));
                 assert!(!handle.summary().contains("UNKNOWN_SENTINEL_PATH_PAYLOAD"));
                 for _ in 0..RECORD_LIMIT + 2 {
-                    handle.record_code(Code::Missing(11));
+                    handle.record_code(Code::Missing(11), StdoutKind::Empty);
                 }
                 assert_eq!(handle.length_and_overflow(), (RECORD_LIMIT, 3));
 

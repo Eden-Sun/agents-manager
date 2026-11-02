@@ -26,8 +26,6 @@ anyhow = "1"
 thiserror = "2"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-# flock(2)：同一個資料目錄只准一顆 daemon（startup.rs）
-libc = "0.2"
 
 [dev-dependencies]
 am-base = { path = "../am-base", features = ["test-hooks"] }

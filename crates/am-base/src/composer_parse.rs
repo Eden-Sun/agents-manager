@@ -367,7 +367,8 @@ pub fn is_rule_row(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
 }
 
-pub(crate) fn strip_grok_decor(line: &str) -> String {
+/// Strip grok's right-edge scrollbar `█` and right-aligned `h:mm AM|PM` clock.
+pub fn strip_grok_decor(line: &str) -> String {
     let mut s = line.trim_end().trim_end_matches('█').trim_end().to_string();
     if let Some(rest) = s.strip_suffix(" AM").or_else(|| s.strip_suffix(" PM")) {
         if let Some((head, clock)) = rest.rsplit_once(' ') {
@@ -375,6 +376,7 @@ pub(crate) fn strip_grok_decor(line: &str) -> String {
                 && clock.len() <= 5
                 && clock.chars().filter(|c| *c == ':').count() == 1
                 && clock.chars().all(|c| c.is_ascii_digit() || c == ':');
+            // Two or more spaces before the clock = right-aligned column, not prose.
             if ok && head.ends_with(' ') {
                 s = head.trim_end().to_string();
             }
@@ -383,21 +385,27 @@ pub(crate) fn strip_grok_decor(line: &str) -> String {
     s
 }
 
-pub(crate) fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
+/// Prompt-echo prefix per CLI; single source for `after_last_prompt_echo` / `last_prompt_echo_text`.
+pub fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" | "grok" => Some("❯ "),
         "codex" => Some("› "),
+        // agy：使用者那句回音是 `> 原文`（1.2.16 真機）；輸入列是單獨一個 `>`。
         "agy" => Some("> "),
         _ => None,
     }
 }
 
-pub(crate) fn pane_awaits_input(kind: &str, text: &str) -> bool {
+/// Empty composer = waiting for input? The bare marker row after stripping box frames (grok's
+/// `│ ❯ │` never matches `clean_screen`'s test). Also true while claude works under a spinner, so
+/// only meaningful with "nothing changed" (the progress poller's idle net → `try_fallback`).
+pub fn pane_awaits_input(kind: &str, text: &str) -> bool {
     if kind == "claude" {
         return crate::capture::claude::PARSER.awaits_input(text);
     }
     let Some(marker) = prompt_echo_prefix(kind).and_then(|p| p.trim_end().chars().next()) else { return false };
     text.lines().rev().take(12).any(|l| {
+        // 空白用 `is_whitespace`：claude 2.1.285 的空框是 `❯` 接 U+00A0（2026-10-01 cf-ox-2），只認空格與 tab 會當成框裡有字。
         let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━".contains(*c));
         chars.next() == Some(marker) && chars.next().is_none()
     })

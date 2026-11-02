@@ -214,8 +214,7 @@ mod supervisor_owned;
 mod deleted_bots;
 mod app_ports_p6;
 #[cfg(test)]
-#[path = "../../crates/am-supervisor/src/test_dirs.rs"]
-mod test_dirs;
+use am_base::test_dirs;
 #[cfg(test)]
 #[path = "../../crates/am-supervisor/src/build_info.rs"]
 pub mod build_info;

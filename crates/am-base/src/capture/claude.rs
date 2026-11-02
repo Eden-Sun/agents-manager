@@ -360,6 +360,17 @@ fn is_codex_idle_prompt(s: &str) -> bool {
     body.to_ascii_lowercase().starts_with("ask codex to do")
 }
 
+/// 英文月份縮寫（前三個字母）→ 1..=12；grok／claude 的額度文字與 codex 橫幅共用。
+pub fn month_num_token(tok: &str) -> Option<u32> {
+    const M: [&str; 12] =
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let t = tok.trim_matches(|c: char| !c.is_alphabetic()).to_ascii_lowercase();
+    if t.len() < 3 {
+        return None;
+    }
+    M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
+}
+
 pub fn codex_usage_notice_line(line: &str) -> Option<String> {
     let body = line
         .trim()

@@ -6561,19 +6561,6 @@ mod delete_identity_tests {
         assert!(hostless_identity_in_effect(&cc, "m4p", None, "cc1"), "還沒偵測：照最保守的算");
     }
 
-    /// 設定檔要跟 DB 對得上（投影會拒絕「只有 DB 有的專案」）：把測試環境的專案寫回設定（同 `seed_project`）。
-    async fn seed_project(e: &crate::testing::Env) {
-        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
     async fn cache_put(app: &Arc<App>, key: &str) {
         app.models_cache.lock().await.insert(key.to_string(), (std::time::Instant::now(), json!({"models": []})));
     }
@@ -6587,7 +6574,7 @@ mod delete_identity_tests {
     async fn deleting_or_recreating_an_identity_drops_its_cached_model_list() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        seed_project(&env).await;
+        crate::testing::seed_project_config(&env).await;
         cache_put(app, "local/codex/work").await;
         cache_put(app, "m4p/codex/work").await;
         cache_put(app, "local/codex/other").await;
@@ -6624,7 +6611,7 @@ mod delete_identity_tests {
     async fn deleting_an_identity_forgets_its_quota_reading() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        seed_project(&env).await;
+        crate::testing::seed_project_config(&env).await;
         app.cfg.update(|f| { f.identities.push(ident("work", "claude", None)); f.identities.push(ident("other", "claude", None)); Ok(()) }).await.unwrap();
         for key in ["claude:work", "claude:other"] {
             app.quotas.lock().await.insert(key.into(), reading("local"));
@@ -6644,7 +6631,7 @@ mod delete_identity_tests {
     async fn an_identity_whose_name_a_shell_alias_still_carries_keeps_its_quota_reading() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        seed_project(&env).await;
+        crate::testing::seed_project_config(&env).await;
         app.cfg.update(|f| { f.identities.push(ident("cc1", "claude", None)); Ok(()) }).await.unwrap();
         app.tools.lock().await.insert("local".into(), crate::tools::HostTools {
             tools: Default::default(), identities: Default::default(), shell_identities: vec![ident("cc1", "claude", None)],
@@ -8800,22 +8787,6 @@ mod ws_backlog_dedupe_tests {
         String::from_utf8_lossy(&head).into_owned()
     }
 
-    /// server→client 的 text 幀沒有 mask；長度 126 以上才有 16-bit 的延伸長度。
-    async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value {
-        let mut hdr = [0u8; 2];
-        s.read_exact(&mut hdr).await.unwrap();
-        assert_eq!(hdr[0] & 0x0f, 1, "只預期 text 幀，拿到 opcode {:x}", hdr[0] & 0x0f);
-        let mut len = (hdr[1] & 0x7f) as usize;
-        if len == 126 {
-            let mut ext = [0u8; 2];
-            s.read_exact(&mut ext).await.unwrap();
-            len = u16::from_be_bytes(ext) as usize;
-        }
-        let mut buf = vec![0u8; len];
-        s.read_exact(&mut buf).await.unwrap();
-        serde_json::from_slice(&buf).unwrap()
-    }
-
     /// 修正前：那一則落在 backlog 與即時串流兩邊，客戶端連收兩次同一個 `seq`——而
     /// `bots_restart_progress` 這類 handler 是純累加，重複就是多算一次。
     #[tokio::test]
@@ -8846,13 +8817,13 @@ mod ws_backlog_dedupe_tests {
         assert!(head.starts_with("HTTP/1.1 101"), "要真的升級成 websocket：{head}");
 
         // 第一幀＝backlog 裡的那一則（沒有它就是漏送，不是重複）。
-        let first = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
         assert_eq!(first["data"]["mark"], "in_window", "窗口裡那一則要從 backlog 送出來：{first}");
         let first_seq = first["seq"].as_u64().unwrap();
 
         // 哨兵在第一幀之後才送，所以它一定排在「重複的那一則」後面：下一幀是誰就見分曉。
         env.app.emit("bot_changed", json!({"mark": "sentinel"})).await;
-        let second = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
         assert_eq!(second["data"]["mark"], "sentinel", "同一個 seq 被送第二次（backlog 一次、即時串流一次）：{second}");
         assert!(second["seq"].as_u64().unwrap() > first_seq, "哨兵的 seq 要比前一則大：{second}");
         drop(client);
@@ -8873,21 +8844,6 @@ mod ws_heartbeat_tests {
             head.push(b[0]);
         }
         assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
-    }
-
-    async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value {
-        let mut hdr = [0u8; 2];
-        s.read_exact(&mut hdr).await.unwrap();
-        assert_eq!(hdr[0] & 0x0f, 1, "只預期 text 幀，拿到 opcode {:x}", hdr[0] & 0x0f);
-        let mut len = (hdr[1] & 0x7f) as usize;
-        if len == 126 {
-            let mut ext = [0u8; 2];
-            s.read_exact(&mut ext).await.unwrap();
-            len = u16::from_be_bytes(ext) as usize;
-        }
-        let mut buf = vec![0u8; len];
-        s.read_exact(&mut buf).await.unwrap();
-        serde_json::from_slice(&buf).unwrap()
     }
 
     async fn connect(app: &std::sync::Arc<crate::state::App>) -> tokio::net::TcpStream {
@@ -8913,7 +8869,7 @@ mod ws_heartbeat_tests {
         env.app.set_ws_ping_every(std::time::Duration::from_millis(60));
         let mut client = connect(&env.app).await;
         for _ in 0..2 {
-            let ping = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+            let ping = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
             assert_eq!(ping["type"], "ping", "{ping}");
             assert!(ping.get("seq").is_none(), "ping 不佔 seq（不能推動客戶端的 lastSeq／重播環）：{ping}");
         }
@@ -8930,7 +8886,7 @@ mod ws_heartbeat_tests {
         env.app.emit("bot_changed", serde_json::json!({"mark": "x"})).await;
         let mut got_event = false;
         for _ in 0..5 {
-            let f = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+            let f = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
             if f["type"] == "bot_changed" {
                 got_event = true;
                 break;
@@ -11469,26 +11425,6 @@ mod bot_config_tests {
     use crate::testing as tt;
     use crate::testing::{env, Env};
 
-    /// `testing::env` 只種 DB 那一列；bot 要從 config.toml 進來，所以先把專案寫進 config。
-    async fn seed_project(e: &Env) {
-        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
-                    handed_off_to: None,
-                    id: Some(pid),
-                    path: repo,
-                    label: "proj".into(),
-                    host: LOCAL_HOST.into(),
-                    bots: vec![],
-                });
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
     async fn add(e: &Env, body: Value) -> Result<String, LcError> {
         let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await?;
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
@@ -11519,7 +11455,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn bot_create_and_patch_refuse_flag_like_models_reserved_env_and_control_characters_in_names() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let cfg_before = e.app.cfg.get().await;
         for body in [
             json!({"name": "m1", "kind": "claude", "model": "--dangerously-skip-permissions"}),
@@ -11556,7 +11492,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn patch_repairs_a_semantically_invalid_external_config_and_keeps_final_validation() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let target = add(&e, json!({"name": "repair-me", "kind": "claude"})).await.unwrap();
         add(&e, json!({"name": "other", "kind": "claude"})).await.unwrap();
         let path = e.app.cfg.path.clone();
@@ -11651,7 +11587,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn deprecated_models_are_remapped_at_create_and_patch_and_response_says_so() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let create = create_bot(
             State(e.app.clone()),
             Path(e.project_id.clone()),
@@ -11718,7 +11654,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn claude_starts_without_pinning_instruction_files_and_a_legacy_field_is_ignored() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "legacy", "kind": "claude", "persona": "P", "instruction_files": "managed-only"})).await.unwrap();
         assert_eq!(stored(&e, &id).await, (Some("P".into()), Some("P".into())), "舊欄位不影響其他欄位");
 
@@ -11740,7 +11676,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn state_carries_the_create_request_id_so_a_placeholder_can_be_matched_without_the_name() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let with = add(&e, json!({"name": "clone-a", "kind": "claude", "client_request_id": "crid-clone-1"})).await.unwrap();
         let without = add(&e, json!({"name": "clone-b", "kind": "claude"})).await.unwrap();
         let st = state_json(&e.app).await.unwrap();
@@ -11752,7 +11688,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn patch_accepts_full_claude_model_names_and_codex_catalog_models() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let claude = add(&e, json!({"name": "claude", "kind": "claude"})).await.unwrap();
         let codex = add(&e, json!({"name": "codex", "kind": "codex"})).await.unwrap();
 
@@ -11768,7 +11704,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_second_restart_of_the_same_bot_is_coalesced_not_run_again() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "dbl", "kind": "claude"})).await.unwrap();
         lifecycle::start_bot(&e.app, &id).await.unwrap();
         let starts = || e.herdr.calls_to("agent.start").len();
@@ -11819,7 +11755,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn an_invalid_env_variable_name_is_refused_up_front_not_dropped_at_use_time() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let reason = |err: LcError| match err {
             LcError::Bad(m) => m,
             other => panic!("要 400：{other:?}"),
@@ -11878,7 +11814,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn identity_args_reject_nul_before_persistence() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let input = NewIdentity {
             name: "cc-nul".into(),
             kind: "claude".into(),
@@ -11894,7 +11830,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_bot_token_cannot_switch_its_identity_or_cli_config_directory() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "identity-guard", "kind": "claude"})).await.unwrap();
         let before = db::bot(&e.app.db, &id).await.unwrap().unwrap();
         for body in [json!({"identity": null}), json!({"env": {"CLAUDE_CONFIG_DIR": e.dir.join("foreign").to_string_lossy()}})] {
@@ -12242,7 +12178,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_config_change_under_a_running_bot_stays_visible_after_the_patch_response_is_lost() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "a", "kind": "claude"})).await.unwrap();
         let run = lifecycle::start_bot(&e.app, &id).await.unwrap();
         let stamped: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run).fetch_one(&e.app.db).await.unwrap();
@@ -12282,7 +12218,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_patch_that_leaves_the_running_bots_settings_as_loaded_does_not_ask_for_a_restart() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "a", "kind": "claude", "persona": "P"})).await.unwrap();
         lifecycle::start_bot(&e.app, &id).await.unwrap();
 
@@ -12297,7 +12233,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn patch_does_not_commit_when_the_old_launch_revision_cannot_be_recorded() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "baseline", "kind": "claude", "persona": "A"})).await.unwrap();
         let run_id = lifecycle::start_bot(&e.app, &id).await.unwrap();
         let old_rev = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
@@ -12330,7 +12266,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn live_apply_stamps_the_run_selected_after_the_patch_snapshot() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "run-bound", "kind": "claude", "model": "claude-sonnet-4-5"})).await.unwrap();
         let run_a = tt::fake_run(&e.app, &id).await;
         let old_rev = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
@@ -12392,7 +12328,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_deferred_live_apply_keeps_its_stamp_retry_after_launch_write_fails() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(
             &e,
             json!({"name": "deferred-stamp-retry", "kind": "codex", "model": "gpt-6-luna", "effort": "max", "fast": false}),
@@ -12543,7 +12479,7 @@ mod bot_config_tests {
 
     /// 在跑一個回合的 codex bot（#712）：model／effort 已對上，fast 關。回 (bot id, run id, pane)。
     async fn busy_codex(e: &tt::Env, name: &str) -> (String, String, String) {
-        seed_project(e).await;
+        crate::testing::seed_project_config(e).await;
         let id = add(e, json!({"name": name, "kind": "codex", "model": "gpt-6-luna", "effort": "max", "fast": false})).await.unwrap();
         let run_id = tt::fake_run(&e.app, &id).await;
         let pane = format!("pane-{id}");
@@ -12918,7 +12854,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_busy_claude_defers_one_field_and_asks_for_restart_on_a_second() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "claude-busy", "kind": "claude", "model": "claude-sonnet-4-5", "effort": "high"})).await.unwrap();
         let run_id = tt::fake_run(&e.app, &id).await;
         let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
@@ -12941,7 +12877,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_live_apply_with_a_failed_runtime_write_is_not_reported_as_applied() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(
             &e,
             json!({"name": "runtime-write-fails", "kind": "claude", "model": "claude-sonnet-4-5"}),
@@ -13099,7 +13035,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn restoring_a_deleted_bot_keeps_its_persona() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "keep", "kind": "claude", "persona": "P"})).await.unwrap();
 
         delete_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
@@ -13113,7 +13049,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn restoring_keeps_env_args_and_session_and_refuses_unreadable_json() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "keep2", "kind": "claude"})).await.unwrap();
         delete_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
         sqlx::query(r#"UPDATE bots SET herdr_session='sess', env_json='{"A":"1"}', args_json='["--x"]' WHERE id=?"#).bind(&id).execute(&e.app.db).await.unwrap();
@@ -13136,7 +13072,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn restoring_a_bot_whose_project_is_deleted_is_a_conflict_not_a_502() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, json!({"name": "orphan", "kind": "claude"})).await.unwrap();
         delete_project(State(e.app.clone()), Path(e.project_id.clone())).await.unwrap();
         let err = restore_bot(State(e.app.clone()), Path(id.clone())).await.unwrap_err();
@@ -13148,7 +13084,7 @@ mod bot_config_tests {
     #[tokio::test]
     async fn a_leftover_instruction_files_key_in_config_toml_is_ignored() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = db::ulid();
         let bid = id.clone();
         e.app
@@ -16375,18 +16311,6 @@ mod mixed_store_tests {
     use crate::testing::{env, Env};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn seed_project(e: &Env) {
-        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
     async fn add(e: &Env, name: &str) -> String {
         let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(json!({"name": name, "kind": "claude"})).unwrap())).await.unwrap();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
@@ -16495,7 +16419,7 @@ mod mixed_store_tests {
     #[tokio::test]
     async fn a_patch_mixing_primary_with_a_config_field_is_rejected_and_changes_nothing() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let id = add(&e, "mix").await;
         let before = model_of(&e, &id).await;
         let err = patch(&e, &id, json!({"primary": true, "model": "opus"})).await.unwrap_err();
@@ -16512,7 +16436,7 @@ mod mixed_store_tests {
     #[tokio::test]
     async fn an_order_request_mixing_primary_with_config_orders_is_rejected_and_changes_nothing() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let a = add(&e, "a").await;
         let b = add(&e, "b").await;
         let order_of = |e: &Env| {
@@ -16537,18 +16461,6 @@ mod create_bot_idempotency_tests {
     use super::*;
     use crate::testing::{env, Env};
 
-    async fn seed_project(e: &Env) {
-        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
     async fn create(e: &Env, body: Value) -> Result<Value, LcError> {
         let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await?;
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
@@ -16563,7 +16475,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn creating_a_claude_api_bot_pins_model_defaults_effort_and_refuses_cli_fields() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let ok = create(&e, json!({"name": "apibot", "kind": "claude-api", "fast": true})).await.unwrap();
         let bot = db::bot(&e.app.db, ok["bot_id"].as_str().unwrap()).await.unwrap().unwrap();
         assert_eq!(bot.kind, "claude-api");
@@ -16598,7 +16510,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn creating_a_bot_with_a_childs_name_conflicts_and_the_next_create_still_works() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         create(&e, json!({"name": "alfa", "kind": "claude"})).await.unwrap();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
@@ -16623,7 +16535,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn a_resent_create_with_the_same_request_id_returns_the_original_bot() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let body = |name: &str| json!({"name": name, "name_auto": true, "kind": "claude", "client_request_id": "req-1"});
         let first = create(&e, body("cc1-1")).await.unwrap();
         // 回應遺失後重送：瀏覽器清單已同步，`nextName` 算出來的名字變成 cc1-2——名字只是 name_auto 的提示，不算請求內容。
@@ -16638,7 +16550,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn the_same_request_id_with_a_different_request_is_a_409() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         create(&e, json!({"name": "a", "kind": "claude", "client_request_id": "req-2"})).await.unwrap();
         let err = create(&e, json!({"name": "b", "kind": "codex", "client_request_id": "req-2"})).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(_)), "同 id 換 kind：{err:?}");
@@ -16648,7 +16560,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn a_new_request_id_is_a_deliberate_second_create() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         let a = create(&e, json!({"name": "cc1-1", "name_auto": true, "kind": "claude", "client_request_id": "req-3"})).await.unwrap();
         let b = create(&e, json!({"name": "cc1-1", "name_auto": true, "kind": "claude", "client_request_id": "req-4"})).await.unwrap();
         assert_ne!(a["bot_id"], b["bot_id"]);
@@ -16659,7 +16571,7 @@ mod create_bot_idempotency_tests {
     #[tokio::test]
     async fn a_create_without_a_request_id_behaves_as_before() {
         let e = env().await;
-        seed_project(&e).await;
+        crate::testing::seed_project_config(&e).await;
         create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
         create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
         assert_eq!(bots_in_config(&e).await, 2);
