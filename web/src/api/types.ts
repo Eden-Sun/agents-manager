@@ -620,6 +620,10 @@ export interface Message {
   relay_unverified?: boolean
   /** 代發來源的名字（daemon 補的，只給使用者）：來源 bot 已收掉、前端 bots 清單找不到它時用。 */
   relay_from_name?: string | null
+  /** 群集派工（`bot:cluster:<名稱>`）：群集名、實際接手的成員與它的名字（daemon 補的，只給使用者）。 */
+  via_cluster?: string | null
+  assignee_bot_id?: string | null
+  assignee_name?: string | null
   /** true = 代發來源的 bot 已收掉（`deleted_at` 有值），顯示名字時標「已收掉」。 */
   relay_from_deleted?: boolean
   /** `terminal_fallback` 當下的整個 pane 畫面；`content` 裁錯時真正的回覆還在這裡。其他來源為 null。 */
