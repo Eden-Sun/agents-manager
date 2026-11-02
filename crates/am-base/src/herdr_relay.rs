@@ -54,8 +54,11 @@ impl Relay {
     }
 
     /// 送一行請求（已含結尾換行），等一行回應。`expect_id` 用來確認回應對得上這個請求。
+    /// 中繼忙著（另一個請求還在等回應）就**不排隊**：回 `NotSent`，呼叫端直連 socket。請求還沒送出，所以不會重送。
     pub async fn exchange(&self, line: &str, expect_id: &str, timeout: Duration) -> Exchange {
-        let mut st = self.state.lock().await;
+        let Ok(mut st) = self.state.try_lock() else {
+            return Exchange::NotSent(anyhow!("herdr relay busy"));
+        };
         if st.disabled_until.is_some_and(|t| Instant::now() < t) {
             return Exchange::NotSent(anyhow!("herdr relay disabled for now"));
         }
@@ -129,6 +132,22 @@ impl Relay {
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("relay stdout missing"))?;
         Ok(Proc { child, stdin, stdout: BufReader::new(stdout) })
     }
+}
+
+/// 短呼叫白名單：只有這些 method、而且參數裡沒有 `timeout_ms`，才走中繼。
+/// 其餘（`agent.wait`、`agent.start`、`pane.wait_output`……）可能長等，一律直連 socket，免得把中繼占住、擋住同主機的其他 RPC。
+pub fn is_short_call(method: &str, params: &serde_json::Value) -> bool {
+    const SHORT: &[&str] = &[
+        "ping",
+        "pane.get",
+        "pane.list",
+        "pane.read",
+        "pane.layout",
+        "pane.process_info",
+        "pane.send_text",
+        "pane.send_keys",
+    ];
+    SHORT.contains(&method) && params.get("timeout_ms").is_none()
 }
 
 /// 回應的 `id`（不是 JSON 或沒有 id 就是 `None`）。
@@ -275,6 +294,55 @@ mod tests {
         client.set_relay(Some(Relay::new(vec!["/nonexistent/herdr-relay-binary".into()])));
         let v = client.call("ping", serde_json::json!({})).await.expect("answered via the socket");
         assert_eq!(v["echo"], "ping");
+        server.abort();
+    }
+
+    #[test]
+    fn only_short_calls_use_the_relay() {
+        use serde_json::json;
+        assert!(is_short_call("pane.read", &json!({"pane_id": "w1:p1"})));
+        assert!(is_short_call("pane.send_keys", &json!({"keys": ["enter"]})));
+        assert!(!is_short_call("agent.wait", &json!({"timeout_ms": 5000})), "長等不走中繼");
+        assert!(!is_short_call("agent.start", &json!({"timeout_ms": 30000})));
+        assert!(!is_short_call("pane.read", &json!({"timeout_ms": 1})), "帶 timeout_ms 的一律直連");
+        assert!(!is_short_call("pane.wait_output", &json!({"pane_id": "w1:p1"})), "不在白名單就直連");
+    }
+
+    /// 長呼叫（帶 timeout_ms）不經中繼：中繼就算壞掉或卡住，這條呼叫照樣直連 socket 成功。
+    #[tokio::test]
+    async fn a_long_call_does_not_touch_the_relay() {
+        let (sock, server) = fake_herdr("long");
+        let client = crate::herdr::HerdrClient::new(&sock);
+        // 會卡住的中繼：一行回應都不給。若長呼叫走了它，這裡會等到逾時。
+        client.set_relay(Some(Relay::new(vec!["sh".into(), "-c".into(), "cat > /dev/null".into()])));
+        let v = tokio::time::timeout(Duration::from_secs(5), client.call("agent.wait", serde_json::json!({"timeout_ms": 1000})))
+            .await
+            .expect("長呼叫不該等中繼")
+            .expect("answered via socket");
+        assert_eq!(v["echo"], "agent.wait");
+        server.abort();
+    }
+
+    /// 中繼忙碌（另一個請求還佔著）時，短呼叫不排隊，直接退回 socket 完成。
+    #[tokio::test]
+    async fn a_busy_relay_is_skipped_not_queued() {
+        let (sock, server) = fake_herdr("busy");
+        let relay = Relay::new(vec!["sh".into(), "-c".into(), "cat > /dev/null".into()]);
+        let client = crate::herdr::HerdrClient::new(&sock);
+        client.set_relay(Some(relay.clone()));
+        // 另一個任務持有中繼（模擬一個正在等回應的請求）。
+        let holder = relay.clone();
+        let hold = tokio::spawn(async move {
+            let _g = holder.state.lock().await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let v = tokio::time::timeout(Duration::from_secs(3), client.call("pane.get", serde_json::json!({"pane_id": "x"})))
+            .await
+            .expect("忙碌時不排隊，該立刻走 socket")
+            .expect("answered via socket");
+        assert_eq!(v["echo"], "pane.get");
+        hold.abort();
         server.abort();
     }
 }
