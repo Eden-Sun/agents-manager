@@ -65,3 +65,13 @@
     padding: 4px;
   }
 }
+
+/* bot 列選單頂端的快取倒數：資訊列，不是可按的項目。 */
+.head-menu-note {
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
