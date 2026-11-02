@@ -18,6 +18,7 @@ pub(crate) mod tools;
 mod adapter_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod completion_tests;
+pub(crate) mod prompt;
 pub(crate) mod registry;
 pub(crate) mod runtime;
 mod same_run;
