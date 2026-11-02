@@ -279,6 +279,8 @@ export interface FakeSocketControl {
   open(): Promise<void>
   /** 連線掉了（心跳斷線／網路斷）：最新那條 `onclose`。 */
   drop(): Promise<void>
+  /** 伺服器推一則 JSON 訊息到最新那條（例如主機 shell 的 `frame`）。 */
+  message(obj: unknown): Promise<void>
 }
 
 /** 假的 `WebSocket`：測試手動決定什麼時候連上、什麼時候掉線；`HttpTransport.openSocket` 的重連與 backoff 照真的跑。 */
@@ -320,6 +322,12 @@ export function fakeWebSocket(): FakeSocketControl {
       await act(async () => {
         w.readyState = 3
         w.onclose?.()
+      })
+    },
+    async message(obj: unknown) {
+      const w = latest()
+      await act(async () => {
+        w.onmessage?.({ data: JSON.stringify(obj) })
       })
     },
   }

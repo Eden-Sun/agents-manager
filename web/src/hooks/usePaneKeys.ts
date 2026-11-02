@@ -84,10 +84,14 @@ export function useShellKeys(host: string, paneId: string, onSettled?: (error: u
   const queue = useMemo(
     () =>
       new KeyQueue(
-        (keys) => api.sendHostShellKeys(targetRef.current.host, targetRef.current.paneId, keys),
+        async (keys) => {
+          await api.sendHostShellKeys(targetRef.current.host, targetRef.current.paneId, keys)
+        },
         (e) => onSettledRef.current?.(e),
         // 貼上不能拆成鍵：文字裡的換行會變成 Enter，一段多行貼上就直接被執行了。
-        (text) => api.sendHostShellText(targetRef.current.host, targetRef.current.paneId, text, false),
+        async (text) => {
+          await api.sendHostShellText(targetRef.current.host, targetRef.current.paneId, text, false)
+        },
       ),
     [],
   )
