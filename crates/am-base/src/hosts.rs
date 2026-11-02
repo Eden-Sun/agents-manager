@@ -934,6 +934,12 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
             }
             if self.client.ping().await.is_ok() {
                 tracing::info!(host = %self.name, socket = %local_sock.display(), "ssh master up; herdr ping ok");
+                // RPC 改走同一條 ssh 主連線上的持久中繼（每個 RPC 一條 `ssh -L` 新連線要 ~110 ms，見 herdr_relay.rs）。
+                // 中繼起不來時 client 會自動退回上面那個 socket，所以這裡設上去不會讓遠端變得更不能用。
+                let mut opts = vec!["-S".to_string(), ctl.display().to_string()];
+                opts.extend(self.ssh_args());
+                let argv = crate::herdr_relay::ssh_argv(&opts, &cfg.ssh, remote_sock);
+                self.client.set_relay(Some(crate::herdr_relay::Relay::new(argv)));
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -951,6 +957,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         }
         let cfg = self.cfg.as_ref().unwrap();
         let ctl = self.ctl_path();
+        self.client.set_relay(None);
         if ctl.exists() {
             let mut cmd = tokio::process::Command::new("ssh");
             cmd.arg("-S").arg(&ctl).arg("-O").arg("exit").args(self.ssh_args()).arg(&cfg.ssh);

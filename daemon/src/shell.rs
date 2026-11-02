@@ -243,8 +243,9 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
         }
     }
     let probe = app.probe();
-    let dump = probe.dump(app, host).await.ok()?;
     let shell = client.pane_shell(pane_id).await.ok()?;
+    let shell_pid = i32::try_from(shell.shell_pid?).ok()?;
+    let dump = probe.shell_tree(app, host, shell_pid).await.ok()?;
     let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
     let ports = probe.listen_ports(host, &facts.listen_pids).await?;
     let verdict = if !ports.is_empty() { LiveVerdict::ReadOnly } else { LiveVerdict::Typeable };
@@ -483,7 +484,9 @@ async fn echo_terminal(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Va
     Ok(terminal_json(host, pane_id, &cwd, &read, columns, rows, true))
 }
 
-pub const ECHO_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+/// 送完到讀快照之間的等待。實測（2026-11-02，本機）：送出的字在 pane 裡可見的時間中位數 0.5 ms、最慢 1 ms，
+/// 所以 5 ms 已經有餘裕；畫面要是還沒跟上，推送串流會在下一拍補上。
+pub const ECHO_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 const ECHO_LINES: u32 = 200;
 
 /// `POST /api/hosts/:name/shells/:pane_id/text`. Enter is a **separate** `pane.send_keys`: a `\n`

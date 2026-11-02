@@ -271,6 +271,8 @@ pub struct HerdrClient {
     seq: std::sync::Arc<AtomicU64>,
     /// 最近一次 ping 成功的回應（UI 顯示 herdr 版本用，[`crate::herdr_version`]）；clone 共用。
     last_pong: std::sync::Arc<std::sync::Mutex<Option<Pong>>>,
+    /// 遠端才有：長駐的 ssh 中繼（[`crate::herdr_relay`]），RPC 優先走它；clone 共用，遠端主機連上後由 hosts 設定。
+    relay: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::herdr_relay::Relay>>>>,
 }
 
 pub const EXPECTED_PROTOCOL: u32 = 20;
@@ -336,7 +338,12 @@ pub fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
 
 impl HerdrClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Self { socket: socket.into(), seq: Default::default(), last_pong: Default::default() }
+        Self { socket: socket.into(), seq: Default::default(), last_pong: Default::default(), relay: Default::default() }
+    }
+
+    /// 設定（或清掉）這條 client 的中繼。clone 共用同一份設定。
+    pub fn set_relay(&self, relay: Option<std::sync::Arc<crate::herdr_relay::Relay>>) {
+        *self.relay.lock().unwrap() = relay;
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -364,20 +371,10 @@ impl HerdrClient {
     pub async fn call_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         let id = self.next_id();
         let req = json!({"id": id.clone(), "method": method, "params": params});
+        let mut line = serde_json::to_vec(&req)?;
+        line.push(b'\n');
         let fut = async {
-            let mut stream = UnixStream::connect(&self.socket)
-                .await
-                .map_err(|source| HerdrUnreachable { socket: self.socket.display().to_string(), source })?;
-            let mut line = serde_json::to_vec(&req)?;
-            line.push(b'\n');
-            stream.write_all(&line).await?;
-            stream.flush().await?;
-            let mut reader = BufReader::new(stream);
-            let mut buf = String::new();
-            let n = reader.read_line(&mut buf).await?;
-            if n == 0 {
-                bail!("herdr closed connection without a response ({method})");
-            }
+            let buf = self.exchange_line(&line, &id, method, timeout).await?;
             let resp: RawResponse = serde_json::from_str(buf.trim_end())
                 .with_context(|| format!("parse herdr response for {method}: {}", snippet(method, &buf)))?;
             validate_response_id(&resp, &id, method)?;
@@ -390,6 +387,30 @@ impl HerdrClient {
         tokio::time::timeout(timeout, fut)
             .await
             .map_err(|_| anyhow!("herdr rpc {method} timed out after {timeout:?}"))?
+    }
+
+    /// 送一行請求、拿一行回應。有中繼就走中繼；中繼說「還沒送出」才直連 socket（那條路一個請求一條連線）。
+    async fn exchange_line(&self, line: &[u8], id: &str, method: &str, timeout: Duration) -> Result<String> {
+        let relay = self.relay.lock().unwrap().clone();
+        if let Some(relay) = relay {
+            let text = String::from_utf8_lossy(line).into_owned();
+            match relay.exchange(&text, id, timeout).await {
+                crate::herdr_relay::Exchange::Sent(answer) => return answer,
+                crate::herdr_relay::Exchange::NotSent(e) => tracing::debug!(%method, error = %e, "herdr relay not usable; using the socket"),
+            }
+        }
+        let mut stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(|source| HerdrUnreachable { socket: self.socket.display().to_string(), source })?;
+        stream.write_all(line).await?;
+        stream.flush().await?;
+        let mut reader = BufReader::new(stream);
+        let mut buf = String::new();
+        let n = reader.read_line(&mut buf).await?;
+        if n == 0 {
+            bail!("herdr closed connection without a response ({method})");
+        }
+        Ok(buf)
     }
 
     async fn call_as<T: DeserializeOwned>(&self, method: &str, params: Value, field: &str) -> Result<T> {
