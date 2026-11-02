@@ -775,7 +775,7 @@ fn digest(events: &[store::InboxEvent]) -> String {
         "[AG Man 協調通知] 以下是 bot 的申請與你追蹤中的事件（已依 event_key 去重、同一段時間合併成一次）。\n\
          處理完用 `bin/agm ack <event_id>`。回覆 bot 用 `bin/agm assign --notice --bot <bot_id> --request-id <穩定id> --text …`；\
          純告知（「收到」）不必回。標「只記錄」的是對方明講的回覆（--ack／--reply-to），沒標的都是新的事；你回巡檢只是告知時加 `--ack`。\n\
-         交辦結果要看證據後 `bin/agm review`；核准用 `bin/agm approval decide`。系統故障與使用者對話是巡檢 AGM 的事，不在這裡。\n",
+         交辦結果要看證據後 `bin/agm review`；申請與核准請求一律轉巡檢 AGM 裁示，不自己 `bin/agm approval decide`。系統故障與使用者對話是巡檢 AGM 的事，不在這裡。\n",
     );
     for e in events {
         let p: Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
@@ -1226,7 +1226,8 @@ mod tests {
     fn the_responder_persona_is_its_own_text() {
         let body = persona_body();
         assert!(body.starts_with("你是 AGM 的協調者"), "{:?}", &body[..40.min(body.len())]);
-        assert!(body.contains("cc0/opus/high"));
+        assert!(body.contains("cc0/haiku/low"));
+        assert!(body.contains("你不裁示"), "協調者只轉運（使用者 2026-11-02）");
         assert!(!body.contains("Remote Control"), "手機 Remote Control 已廢（#1477），人設不再提它");
     }
 
