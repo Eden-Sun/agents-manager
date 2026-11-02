@@ -202,10 +202,9 @@
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 6px;
-  min-height: 32px;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
   padding: 4px 6px 4px 10px;
   background: none;
   border: 0;
@@ -222,9 +221,27 @@
   font-size: 10px;
 }
 
+/* 第一行：群集名＋計數；第二行 `.bot-sub` 放身份、模型與強度、執行中／閒置（同單顆列的版面）。 */
+.bot-cluster-main .bot-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.bot-cluster-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
 .bot-cluster-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
   white-space: nowrap;
 }
 
@@ -235,10 +252,11 @@
 }
 
 .bot-cluster-stat {
-  flex-basis: 100%;
-  padding-left: 16px;
-  color: var(--text-dim);
-  font-size: 11px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bot-cluster-members {

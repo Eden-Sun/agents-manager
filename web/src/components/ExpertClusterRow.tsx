@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Bot } from '../api/types'
+import { LOCAL_HOST, type Bot } from '../api/types'
+import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { t, useT } from '../lib/i18n'
-import { botLamp, useStore } from '../store/store'
+import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
+import { botLamp, identitiesOfHost, projectHostName, useStore } from '../store/store'
+import { IdentityBadge } from './IdentitiesPanel'
+import { KindTag } from './KindTag'
+import { ModelTag } from './ModelTag'
 
 const storeKey = (projectId: string, name: string) => `agm.expertCluster.${projectId}.${name}`
 
@@ -51,6 +56,24 @@ export function ExpertClusterRow({
   const idle = lamps.filter((l) => l === 'idle').length
   const busyPatch = useStore(useShallow((s) => ids.some((id) => Boolean(s.busy[`patch:${id}`]))))
 
+  // 列上的 kind／身份／模型取第一顆成員（群集同設定）；身份晶片的顯示規則同單顆列（BotRowImpl）。
+  const first = members[0]
+  const firstId = first?.id ?? ''
+  const firstRun = useStore((s) => s.runs[firstId] ?? null)
+  const runningIdentity = runtimeIdentity(firstRun)
+  const identityUnknown = Boolean(firstRun && (firstRun.state === 'running' || firstRun.state === 'starting') && firstRun.runtime_identity === null)
+  const showIdentity = useStore(
+    useShallow((s) => {
+      const b = s.bots.find((x) => x.id === firstId)
+      if (!b) return false
+      const host = projectHostName(s, b.project_id)
+      const hostIds = identitiesOfHost(s.identities, host === LOCAL_HOST ? s.localIdentityStatus : {}, host)
+      const used = s.bots.filter((x) => x.kind === b.kind && projectHostName(s, x.project_id) === host).map((x) => x.identity)
+      return identityBadgeVisible(b.kind, hostIds, used)
+    }),
+  )
+  const fast = useStore((s) => first?.kind === 'codex' && runningFast(first, s.runs[firstId] ?? null))
+
   const on = members.filter((m) => m.manager_use !== false).length
   const all = on === members.length
   const some = on > 0 && !all
@@ -77,9 +100,31 @@ export function ExpertClusterRow({
           onClick={toggleOpen}
         >
           <span className="bot-cluster-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
-          <span className="bot-cluster-name">{t('{name} 群集', { name })}</span>
-          <span className="bot-cluster-count">×{members.length}</span>
-          <span className="bot-cluster-stat">{t('{w} 執行中 · {i} 閒置', { w: working, i: idle })}</span>
+          {first ? (
+            <span className="bot-ident">
+              <span className="bot-kind-wrap">
+                <KindTag kind={first.kind} className="bot-kind" fast={fast} />
+              </span>
+            </span>
+          ) : null}
+          <span className="bot-main">
+            <span className="bot-cluster-head">
+              <span className="bot-cluster-name">{t('{name} 群集', { name })}</span>
+              <span className="bot-cluster-count">×{members.length}</span>
+            </span>
+            <span className="bot-sub">
+              {first && showIdentity ? (
+                <IdentityBadge
+                  name={runningIdentity === undefined ? first.identity : runningIdentity}
+                  showDefault
+                  kind={first.kind}
+                  unknown={identityUnknown}
+                />
+              ) : null}
+              {first ? <ModelTag botId={first.id} /> : null}
+              <span className="bot-cluster-stat">{t('{w} 執行中 · {i} 閒置', { w: working, i: idle })}</span>
+            </span>
+          </span>
         </button>
         <span
           className="bot-manager-use-wrap"
