@@ -345,6 +345,9 @@ n=$(wc -l < "$AGM_DIR/probe.log" | tr -d ' ')
 if [ -n "$STUB_PROBE_FIRST_INFLIGHT" ] && [ "$n" = 1 ]; then
   printf '409 {"error":"conflict","reason":"a turn is already in flight"}'; exit 0
 fi
+if [ -n "$STUB_PROBE_NO_RUN_BOT" ] && [ "$1" = "$STUB_PROBE_NO_RUN_BOT" ]; then
+  printf '404 {"error":"not_found","reason":"no active run"}'; exit 0
+fi
 printf '%s' "$STUB_PROBE"
 STUB
   export SWAP_PROBE_CMD="$ROOT/bin/probe"
@@ -1276,7 +1279,7 @@ check_eq "略過計數：自測成功 rc=0" "0" "$rc"
 check_file "自測 200 成功就清掉計數檔" no "$AGM_DIR/daemon-swap.probe-skips"
 teardown
 
-# 16f-3. 自測對象的來源：SWAP_PROBE_BOT ＞ runtime.json 的 swap_probe_bot_id ＞ runtime.json 的 manager_bot_id（AGM 本人）。
+# 16f-3. 自測對象的來源：SWAP_PROBE_BOT ＞ runtime.json 的 swap_probe_bot_id ＞ responder_bot_id ＞ manager_bot_id（AGM 本人）。
 setup 10 10
 unset SWAP_PROBE_BOT
 printf '{"swap_probe_bot_id": "bot-from-runtime"}\n' > "$AGM_DIR/runtime.json"
@@ -1298,6 +1301,34 @@ printf '{"manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
 rc=$(run)
 check_eq "沒有 swap_probe_bot_id：rc=0" "0" "$rc"
 check "沒設就用 manager_bot_id" "bot-agm-self" "$AGM_DIR/probe.log"
+teardown
+# 協調者（responder_bot_id）排在 manager_bot_id 前面：自測不再每趟叫醒巡檢（使用者 2026-11-02）。
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check_eq "responder 與 manager 並存：rc=0" "0" "$rc"
+check "自測送給協調者" "bot-responder" "$AGM_DIR/probe.log"
+check_no "不叫醒巡檢" "bot-agm-self" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"swap_probe_bot_id": "bot-from-runtime", "responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+rc=$(run)
+check "swap_probe_bot_id 仍最優先" "bot-from-runtime" "$AGM_DIR/probe.log"
+check_no "有指定就不碰協調者" "bot-responder" "$AGM_DIR/probe.log"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+export STUB_PROBE_NO_RUN_BOT=bot-responder
+rc=$(run)
+unset STUB_PROBE_NO_RUN_BOT
+check_eq "協調者沒在跑：退回巡檢、照樣換版（rc=0）" "0" "$rc"
+check "先試協調者" "bot-responder" "$AGM_DIR/probe.log"
+check "再退回 manager_bot_id" "bot-agm-self" "$AGM_DIR/probe.log"
+check "log 講明改送誰" "改送 bot-agm-self" "$SWAP_LOG"
+check_file "退回後自測成功，不算略過" no "$AGM_DIR/daemon-swap.probe-skips"
 teardown
 setup 10 10
 unset SWAP_PROBE_BOT

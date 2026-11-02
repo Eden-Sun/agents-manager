@@ -38,22 +38,32 @@ PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
 HERDR="${HERDR_BIN:-herdr}"
-# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 同檔的 manager_bot_id（巡檢 AGM 本人：常駐、一定在）。
+# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 同檔的 responder_bot_id（協調者：常駐、haiku，便宜）
+# ＞ 同檔的 manager_bot_id（巡檢 AGM 本人）。自測是真的送一則 prompt 驗送達線，每趟換版一次（一天可達數十次）：
+# 以前直接落到 manager_bot_id，等於每趟都叫醒 sonnet 的巡檢、背著它 20 多萬 token 的 context（使用者 2026-11-02 裁示改送協調者）。
+# 協調者沒有在跑（no active run）時，退回 manager_bot_id 再試一次，送達自測不因此少做。
 # 以前最後一順位是寫死的 browser-gc child id（issue #882）：那顆早就不跑，自測連續略過上百次（使用者 2026-10-12 裁示改指 AGM）。
-# 三個都拿不到就留空，3b 照「對象沒有 run」的既有路徑略過並計數。
+# 都拿不到就留空，3b 照「對象沒有 run」的既有路徑略過並計數。
 PROBE_BOT="${SWAP_PROBE_BOT:-}"
+PROBE_FALLBACK=""
 if [ -z "$PROBE_BOT" ]; then
-    PROBE_BOT=$("$PYTHON" -c 'import json,sys
+    _probe_ids=$("$PYTHON" -c 'import json,sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     d = {}
 ok = lambda v: isinstance(v, str) and v.strip() and len(v.split()) == 1
-for k in ("swap_probe_bot_id", "manager_bot_id"):
+ids = []
+for k in ("swap_probe_bot_id", "responder_bot_id", "manager_bot_id"):
     v = d.get(k) if isinstance(d, dict) else None
-    if ok(v):
-        print(v.strip())
-        break' "$AGM_DIR/runtime.json" 2>/dev/null) || PROBE_BOT=""
+    if ok(v) and v.strip() not in ids:
+        ids.append(v.strip())
+    if k == "swap_probe_bot_id" and ids:
+        break
+print(ids[0] if ids else "")
+print(ids[-1] if len(ids) > 1 else "")' "$AGM_DIR/runtime.json" 2>/dev/null) || _probe_ids=""
+    PROBE_BOT=$(printf '%s\n' "$_probe_ids" | sed -n 1p)
+    PROBE_FALLBACK=$(printf '%s\n' "$_probe_ids" | sed -n 2p)
 fi
 PROBE_SKIPS="$AGM_DIR/daemon-swap.probe-skips"   # 連續略過 3b 自測的次數（daemon-update-kick 讀它喊人）
 PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
@@ -513,7 +523,13 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
     case "$PROBE" in
         200*) break ;;
         *"a turn is already in flight"*) sleep 10 ;;
-        *"no active run"*) PROBE_SKIPPED=yes; break ;;
+        *"no active run"*)
+            if [ -n "$PROBE_FALLBACK" ] && [ "$PROBE_FALLBACK" != "$PROBE_BOT" ]; then
+                log "3b 自測對象 $PROBE_BOT 沒有在跑，改送 $PROBE_FALLBACK"
+                PROBE_BOT="$PROBE_FALLBACK"; PROBE_FALLBACK=""; i=$((i - 1))
+                continue
+            fi
+            PROBE_SKIPPED=yes; break ;;
         *) log "ABORT: 自測 prompt 回 $(printf '%s' "$PROBE" | head -c 160)"; exit 3 ;;
     esac
 done
