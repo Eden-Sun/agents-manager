@@ -691,6 +691,19 @@ export interface TerminalSnapshot {
   /** Pane geometry; null when herdr does not report it. */
   columns: number | null
   rows: number | null
+  /** 只有主機 shell 的 `format=ansi` 讀取（或 `echo=ansi` 回應）才帶：`text` 是 ANSI 原樣，不能當純文字顯示。 */
+  format?: TerminalFormat
+}
+
+/** 主機 shell 讀畫面的格式：`text` 是預設（舊的 `<pre>` 用），`ansi` 給 xterm.js 畫。 */
+export type TerminalFormat = 'text' | 'ansi'
+
+/** 主機 shell 推送 WebSocket（`…/shells/{pane}/stream`）的一張畫面；只在內容變了才送。 */
+export interface ShellStreamFrame {
+  seq: number
+  text: string
+  cols: number | null
+  rows: number | null
 }
 
 /** `POST /api/hosts/:name/shells` 開的純 shell pane；`pane_id` 只在 daemon 這一輪有效。 */

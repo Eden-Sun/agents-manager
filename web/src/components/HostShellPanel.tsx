@@ -13,6 +13,7 @@ import { useStore } from '../store/store'
 import { shellDraftKey } from '../store/shellDraft'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ServicePaneNote } from './ServicePaneNote'
+import { HostShellXterm } from './HostShellXterm'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './termLinks'
 import { fitRules } from '../lib/termRules'
@@ -162,6 +163,10 @@ export function HostShellPanel({
   const syncOn = keySyncActive(sync, readOnly)
   /** 有沒有真的握著鍵盤：同步開著但焦點在別處時，打字不會進到 pane，要講清楚。 */
   const [typing, setTyping] = useState(false)
+  /** 桌面鍵盤直通＝xterm.js 取代快照 `<pre>`（手機、唯讀、看捲動歷史仍走舊的畫面）。 */
+  const xtermMode = syncOn && !phone && !readOnly && source === 'visible'
+  /** xterm 收到的畫面幾何（pane 的 cols×rows），給標題列的尺寸標籤用。 */
+  const [xtermGeo, setXtermGeo] = useState<{ cols: number; rows: number } | null>(null)
   const termRef = useRef<HTMLPreElement>(null)
   const [confirmEnd, setConfirmEnd] = useState(false)
   /** daemon 說要再確認（服務 pane 在 listen，或讀不到它在跑什麼）時帶回來的那一列。 */
@@ -183,9 +188,12 @@ export function HostShellPanel({
     setHistAt(-1)
     setSyncState(initialSync())
     setTyping(false)
+    setXtermGeo(null)
   }
 
   useEffect(() => {
+    // xterm 模式下畫面由 HostShellXterm 自己推／拉，這裡不再輪詢（免得兩邊各打一份）。
+    if (xtermMode) return
     let alive = true
     // 上一趟還沒回來：回前景時不另外再打一趟（#1129，同 useTerminalSnapshot）。
     let busy = false
@@ -233,9 +241,27 @@ export function HostShellPanel({
       document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
     }
-  }, [paneGone, lockShellView, host, paneId, source, lines, nonce, syncOn])
+  }, [paneGone, lockShellView, host, paneId, source, lines, nonce, syncOn, xtermMode])
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
+
+  /** xterm 的讀取結果：同舊輪詢的 catch 分支（404 pane 不見、403 唯讀、其他顯示在面板上）。 */
+  const xtermRead = useCallback(
+    (e: unknown | null) => {
+      if (e === null) {
+        setErr(null)
+        return
+      }
+      if (e instanceof ApiError && e.status === 404) {
+        paneGone(host, paneId)
+        return
+      }
+      const denied = shellForbidden(e)
+      if (denied) lockShellView(host, paneId, denied)
+      setErr(denied ?? (e instanceof Error ? e.message : String(e)))
+    },
+    [paneGone, lockShellView, host, paneId],
+  )
 
   useEffect(() => {
     if (syncOn) termRef.current?.focus()
@@ -311,6 +337,15 @@ export function HostShellPanel({
       },
       [failed, refresh],
     ),
+  )
+
+  /** xterm 送字／送鍵的結果：回應的畫面已經由 xterm 自己畫上，這裡只管錯誤。 */
+  const xtermSend = useCallback(
+    (e: unknown | null) => {
+      if (e) failed(e)
+      else setSendErr(null)
+    },
+    [failed],
   )
 
   const setSync = useCallback(
@@ -486,7 +521,11 @@ export function HostShellPanel({
           </label>
           <span className="hint term-pane-chip" title={`herdr pane ${paneId}`}>
             pane <code>{paneId}</code>
-            {snap?.columns ? t('・{cols}×{rows}', { cols: snap.columns, rows: snap.rows ?? '?' }) : ''}
+            {xtermMode && xtermGeo
+              ? t('・{cols}×{rows}', { cols: xtermGeo.cols, rows: xtermGeo.rows })
+              : snap?.columns
+                ? t('・{cols}×{rows}', { cols: snap.columns, rows: snap.rows ?? '?' })
+                : ''}
           </span>
           {snap?.truncated ? <span className="hint">{t('已截斷')}</span> : null}
           <span className="spacer" />
@@ -508,6 +547,18 @@ export function HostShellPanel({
           </div>
         ) : null}
 
+        {xtermMode ? (
+          <HostShellXterm
+            key={`${host}/${paneId}`}
+            host={host}
+            paneId={paneId}
+            wrap={wrap}
+            onTyping={setTyping}
+            onRead={xtermRead}
+            onSend={xtermSend}
+            onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
+          />
+        ) : (
         <pre
           ref={termRef}
           className={`term shell-term${wrap ? ' term-wrap' : ''}${syncOn ? ' term-sync' : ''}${syncOn && typing ? ' term-sync-live' : ''}`}
@@ -521,6 +572,7 @@ export function HostShellPanel({
         >
           {body}
         </pre>
+        )}
         {syncOn ? (
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
