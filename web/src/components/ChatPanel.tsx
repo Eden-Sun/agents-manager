@@ -1024,7 +1024,7 @@ function Composer({
           /* 斷線也讓人繼續打（草稿先留在這個分頁，連回來再同步）。 */
           disabled={sending}
           /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
-          placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting) })}
+          placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting), noFiles: botKind === 'claude-api' })}
           title={t('Enter 送出，Shift+Enter 換行；檔案可拖放或貼上')}
           onChange={(e) => {
             setText(e.target.value)
