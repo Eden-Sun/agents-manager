@@ -109,7 +109,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
 
   return (
     <span className="api-usage-bar" data-testid="api-usage-bar">
-      {balance?.configured && balance.remaining_usd !== undefined ? (
+      {balance ? (
         editingBalance ? (
           <form className="api-balance-form" onSubmit={(e) => void handleSaveAnchor(e)}>
             <label className="sl-k" htmlFor="cal-balance-input">Balance $</label>
@@ -137,6 +137,16 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
               {t('取消')}
             </button>
           </form>
+        ) : !balance.configured || balance.remaining_usd === undefined ? (
+          <button
+            type="button"
+            className="sl-item api-balance-chip"
+            data-k="balance-setup"
+            title={balance.error ?? t('輸入 Console 目前顯示的餘額，之後依官方報表與本機帳自動扣減')}
+            onClick={handleStartEdit}
+          >
+            <span className="sl-k">{t('設定餘額')}</span>
+          </button>
         ) : (
           <button
             type="button"
