@@ -2,6 +2,8 @@ import type { Dict } from '../../lib/i18n/types'
 
 export default {  // 共用 Bot／Project 狀態與驗證提示
   '建議': 'Suggested',
+  '{name} 群集': '{name} cluster',
+  '{w} 執行中 · {i} 閒置': '{w} running · {i} idle',
   '專案設定': 'Project settings',
   '專案模式設定': 'Project mode settings',
   '專家模式': 'Expert mode',

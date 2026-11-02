@@ -322,6 +322,8 @@ export interface Bot {
   manager_use?: boolean
   /** 專家模式下增聘所綁定的池條目 id */
   pool_entry?: string | null
+  /** 專家模式執行者群集名（同設定、≥2 顆才有）；null＝不在群集內 */
+  cluster?: string | null
   id: string
   project_id: string
   name: string

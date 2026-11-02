@@ -81,6 +81,8 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
+import { ExpertClusterRow } from './ExpertClusterRow'
+import { groupClusterItems } from '../lib/expertClusters'
 import { ExpertBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ExpertTrackTag, ManagerUseCheckbox } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
@@ -1508,7 +1510,8 @@ export function Sidebar() {
                   groupExpertSections(list).map((sec) => (
                     <Fragment key={sec.role}>
                       <ExpertSectionHeader title={sec.title} />
-                      {sec.items.map((b) => {
+                      {(sec.role === 'executor' ? groupClusterItems(sec.items) : sec.items.map((item) => ({ kind: 'single' as const, item }))).map((entry) => {
+                        const renderMember = (b: Bot) => {
                         const kids = descendantsOf(b.id)
                         const shut = kids.length > 0 && collapsed.has(b.id) && !query
                         const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
@@ -1549,6 +1552,13 @@ export function Sidebar() {
                               </div>
                             )}
                           </Fragment>
+                        )
+                        }
+                        if (entry.kind === 'single') return renderMember(entry.item)
+                        return (
+                          <ExpertClusterRow key={`cluster:${entry.name}`} projectId={p.id} name={entry.name} members={entry.members}>
+                            {entry.members.map(renderMember)}
+                          </ExpertClusterRow>
                         )
                       })}
                     </Fragment>
