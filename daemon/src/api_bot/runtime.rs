@@ -493,7 +493,7 @@ impl ApiBotRuntime {
 
         let agent_name = run.agent_name.as_deref().unwrap_or(&bot.name);
         let agent_md = crate::lifecycle::agent_md::load(app, &project).await;
-        let system = serde_json::Value::String(crate::lifecycle::setup::persona_text(
+        let system = serde_json::Value::String(super::prompt::compose_api_bot_system_prompt(
             &bot,
             agent_name,
             Some(&agent_md.text),
