@@ -7040,6 +7040,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "tokens": {"input": input, "output": output, "cache_read": cache_read, "cache_creation": cache_creation},
         "cache_hit_rate": hit_rate,
         "last": last_json,
+        "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
     })))
 }
 
@@ -17806,6 +17807,18 @@ mod native_api_http_tests {
         ins(1, "reserved", None, None, 4_100_000, None).await;
         ins(2, "unknown", None, None, 4_200_000, None).await;
         ins(3, "failed", None, None, 4_300_000, None).await;
+        let bot2 = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api',?,?)")
+            .bind(&bot2).bind(&env.project_id).bind(&bot2).bind(crate::db::ulid()).bind(&now).execute(&env.app.db).await.unwrap();
+        let conv = crate::db::ulid();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)").bind(&conv).bind(&bot2).bind(&now).execute(&env.app.db).await.unwrap();
+        for turn in ["t1", "t2"] {
+            sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,created_at) VALUES(?,?,'web','completed',?)").bind(turn).bind(&conv).bind(&now).execute(&env.app.db).await.unwrap();
+        }
+        for (n, turn, state, usage, reserved, est) in [(10, "t1", "recorded", Some(r#"{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":7}"#), 100, Some(119_000)), (11, "t1", "recorded", Some(r#"{"input_tokens":1,"output_tokens":2}"#), 100, Some(1_000)), (12, "t2", "reserved", None, 500_000, None)] {
+            sqlx::query("INSERT INTO api_bot_attempts(id,bot_id,turn_id,generation,ordinal,request_hash,requested_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,?,1,?,'h','standard',?,?,?,?,'v',?)")
+                .bind(crate::db::ulid()).bind(&bot2).bind(turn).bind(n).bind(state).bind(usage).bind(reserved).bind(est).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
         let shutdown = CancellationToken::new(); let stop = shutdown.clone();
         let router = super::router(env.app.clone());
@@ -17815,6 +17828,7 @@ mod native_api_http_tests {
         let ok = get(addr, &format!("/api/bots/{bot}/api-usage"), &user).await;
         let denied = get(addr, &format!("/api/bots/{bot}/api-usage"), &bot_auth).await;
         let cli_resp = get(addr, &format!("/api/bots/{}/api-usage", cli.id), &user).await;
+        let turns_resp = get(addr, &format!("/api/bots/{bot2}/api-usage"), &user).await;
         shutdown.cancel(); tokio::time::timeout(std::time::Duration::from_secs(5), task).await.unwrap().unwrap();
         assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
         let body: Value = serde_json::from_str(ok.split("\r\n\r\n").nth(1).unwrap().trim()).unwrap();
@@ -17823,6 +17837,15 @@ mod native_api_http_tests {
         assert_eq!(body["tokens"], json!({"input":100,"output":50,"cache_read":300,"cache_creation":100}));
         assert_eq!(body["cache_hit_rate"], json!(0.6));
         assert_eq!(body["last"]["speed"], "standard");
+        assert_eq!(body["turns"], json!([]), "沒有 turn_id 的 attempt 不算 turn");
+        let body2: Value = serde_json::from_str(turns_resp.split("\r\n\r\n").nth(1).unwrap().trim()).unwrap();
+        let turns = body2["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 2);
+        let t1 = turns.iter().find(|t| t["turn_id"] == "t1").unwrap();
+        assert_eq!((t1["requests"].as_i64(), t1["cost_usd"].as_f64(), t1["in_flight"].as_bool()), (Some(2), Some(0.12), Some(false)));
+        assert_eq!((t1["input_tokens"].as_i64(), t1["output_tokens"].as_i64(), t1["cache_read_tokens"].as_i64(), t1["cache_write_tokens"].as_i64()), (Some(11), Some(7), Some(20), Some(7)));
+        let t2 = turns.iter().find(|t| t["turn_id"] == "t2").unwrap();
+        assert_eq!((t2["in_flight"].as_bool(), t2["reserved_usd"].as_f64(), t2["cost_usd"].as_f64()), (Some(true), Some(0.5), Some(0.0)));
         assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
         assert!(cli_resp.starts_with("HTTP/1.1 400"), "{cli_resp}");
     }
