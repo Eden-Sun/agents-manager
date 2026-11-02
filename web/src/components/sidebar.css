@@ -570,20 +570,6 @@
   padding: 2px 0 4px;
 }
 
-.env-sec + .env-sec {
-  margin-top: 14px;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-}
-
-.env-sec h3 {
-  margin: 0 0 2px;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-}
-
 .project-empty {
   display: flex;
   flex-direction: column;
@@ -680,11 +666,6 @@ p.project-quota-hidden {
   grid-column: 1;
 }
 
-.project-label-btn .unread-badge {
-  grid-row: 1;
-  grid-column: 3;
-}
-
 .project-label-btn .host-badge {
   grid-row: 1;
   grid-column: 4;
@@ -707,19 +688,6 @@ p.project-quota-hidden {
 .project-head.selected .project-group-icon,
 .project-label-btn.selected .project-group-icon {
   color: var(--accent-ink);
-}
-
-.unread-badge {
-  flex: none;
-  min-width: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
 }
 
 /* option rows (kind / effort / identity / project) */
