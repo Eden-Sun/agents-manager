@@ -40,10 +40,7 @@ const isBlank = (line: string) => line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
 export function planFrame(prev: string[], next: string[]): FramePlan {
   const n = next.length
   if (prev.length !== n || n === 0) {
-    return {
-      out: `\x1b[H\x1b[2J` + next.map((line, i) => pos(i) + line + SGR_RESET).join(''),
-      lines: next,
-    }
+    return fullRedraw(next)
   }
   const score = (s: number) => {
     let hit = 0
@@ -66,10 +63,22 @@ export function planFrame(prev: string[], next: string[]): FramePlan {
     out += `\x1b[${n};1H` + '\r\n'.repeat(best)
     cur = [...prev.slice(best), ...Array<string>(best).fill('')]
   }
+  const changed: number[] = []
   for (let i = 0; i < n; i++) {
-    if (cur[i] !== next[i]) out += pos(i) + next[i] + SGR_RESET
+    if (cur[i] !== next[i]) changed.push(i)
   }
+  // 變動太多（全螢幕程式：vim、less、top…）就不做增量：增量很容易留下殘影（舊列沒被清到），整屏重畫才保證正確。
+  if (best === 0 && changed.length * 3 > n) return fullRedraw(next)
+  for (const i of changed) out += pos(i) + next[i] + SGR_RESET
   return { out, lines: next }
+}
+
+/** 整屏重畫：清掉整個視窗再從頭畫（回捲動歷史不動）。 */
+function fullRedraw(next: string[]): FramePlan {
+  return {
+    out: `\x1b[H\x1b[2J` + next.map((line, i) => pos(i) + line + SGR_RESET).join(''),
+    lines: next,
+  }
 }
 
 /** 顯示寬度（去 SGR、中日韓全形算 2）。 */
@@ -98,6 +107,7 @@ function displayWidth(line: string): number {
 export function cursorSeq(lines: string[]): string {
   let row = lines.length - 1
   while (row > 0 && isBlank(lines[row])) row--
-  if (row < 0 || isBlank(lines[row])) return '\x1b[1;1H'
-  return `\x1b[${row + 1};${displayWidth(lines[row]) + 1}H`
+  if (row < 0 || isBlank(lines[row])) return '\x1b[1;1H\x1b[?25h'
+  // TUI 的畫面文字裡可能夾了「隱藏游標」，這裡一律打開。
+  return `\x1b[${row + 1};${displayWidth(lines[row]) + 1}H\x1b[?25h`
 }

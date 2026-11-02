@@ -167,6 +167,8 @@ export function HostShellPanel({
   const xtermMode = syncOn && !phone && !readOnly && source === 'visible'
   /** xterm 收到的畫面幾何（pane 的 cols×rows），給標題列的尺寸標籤用。 */
   const [xtermGeo, setXtermGeo] = useState<{ cols: number; rows: number } | null>(null)
+  /** xterm 目前是推送還是輪詢退回（狀態列用）。 */
+  const [xtermStreaming, setXtermStreaming] = useState(false)
   const termRef = useRef<HTMLPreElement>(null)
   const [confirmEnd, setConfirmEnd] = useState(false)
   /** daemon 說要再確認（服務 pane 在 listen，或讀不到它在跑什麼）時帶回來的那一列。 */
@@ -189,6 +191,7 @@ export function HostShellPanel({
     setSyncState(initialSync())
     setTyping(false)
     setXtermGeo(null)
+    setXtermStreaming(false)
   }
 
   useEffect(() => {
@@ -530,7 +533,11 @@ export function HostShellPanel({
           {snap?.truncated ? <span className="hint">{t('已截斷')}</span> : null}
           <span className="spacer" />
           <span className="hint term-bar-note">
-            {syncOn ? t('鍵盤直通中，每 0.25 秒更新') : t('每秒更新，指令送出後立刻重讀')}
+            {syncOn
+              ? xtermMode && xtermStreaming
+                ? t('鍵盤直通中，推送更新')
+                : t('鍵盤直通中，每 0.25 秒更新')
+              : t('每秒更新，指令送出後立刻重讀')}
           </span>
           {embedded ? headActions : null}
         </div>
@@ -557,6 +564,7 @@ export function HostShellPanel({
             onRead={xtermRead}
             onSend={xtermSend}
             onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
+            onStreaming={setXtermStreaming}
           />
         ) : (
         <pre
@@ -576,7 +584,7 @@ export function HostShellPanel({
         {syncOn ? (
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
-              ? t('鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。')
+              ? t('鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的。')
               : phone
                 ? t('手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框。')
                 : t('鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。')}
