@@ -5,7 +5,7 @@ import * as api from '../api'
 import { ApiError } from '../api/types'
 import { copyText } from '../lib/copyText'
 import { t } from '../lib/i18n'
-import { cursorSeq, planFrame, splitFrame } from '../lib/shellFrame'
+import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from '../lib/shellFrame'
 import { fontSizeFor } from '../lib/shellFont'
 import { createInputBatcher } from '../lib/xtermInput'
 import type { ShellOp } from '../lib/xtermInput'
@@ -191,10 +191,16 @@ export function HostShellXterm({
     }
     el.addEventListener('scroll', onScroll, { passive: true })
 
+    /** 使用者自己打在行尾、還沒被別的輸入蓋過的空白格數（游標估算用）。 */
+    let typedSpaces = 0
+    let lastCursor = ''
     const paint = () => {
       if (!alive) return
       const plan = planFrame(prev, splitFrame(lastText, term.rows))
-      if (plan.out) term.write(plan.out + cursorSeq(plan.lines), () => requestAnimationFrame(follow))
+      const cur = cursorSeq(plan.lines, typedSpaces)
+      // 畫面沒變但游標估算變了（例如打了一個空白）也要移游標。
+      if (plan.out || cur !== lastCursor) term.write(plan.out + cur, () => requestAnimationFrame(follow))
+      lastCursor = cur
       prev = plan.lines
     }
     /** 字級：預設不低於 12px（放不下就捲動）；縮放至全螢幕時縮到整個 pane 放得下。 */
@@ -299,6 +305,7 @@ export function HostShellXterm({
             const op = batch[k]
             const echo = k === batch.length - 1
             const id = echo ? ++nextId : 0
+            typedSpaces = typedSpacesAfter(typedSpaces, op)
             try {
               const snap =
                 op.kind === 'text'
