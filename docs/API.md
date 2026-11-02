@@ -149,6 +149,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/baseline/restore` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。照主機上的備份還原（§12.6c） |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/hosts/{name}/shells/{pane_id}/stream` | User-only（UI token 經 query `token` 驗證；bot／service／child 憑證 401）；見「畫面推送」 |
 | GET | `/api/identity-prefs` | User 或 Bot principal；只回 disabled host/kind/identity 名稱，不含 credential；Service 僅可走其明列 method/path scope |
 | GET | `/api/intents` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/judge/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -224,6 +225,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/hosts/{name}/baseline/plan` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/hosts/{name}/shells/{pane_id}/stream` | User-only（UI token 經 query `token` 驗證；bot／service／child 憑證 401）；見「畫面推送」 |
 | HEAD | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/identity-prefs` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/intents` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1715,7 +1717,9 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 |---|---|---|
 | POST | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200` | `{host,pane_id,cwd,source,text,revision,truncated,columns,rows}`；`source`／`lines` 同 §7 |
+| GET | `/api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200[&format=text\|ansi]` | `{host,pane_id,cwd,source,text,revision,truncated,columns,rows}`；`source`／`lines` 同 §7。`format` 預設 `text`（行為不變）；`ansi` 時內文是 `pane read --format ansi` 的 SGR 樣式輸出，回應多帶 `"format":"ansi"`，其餘欄位同形狀。其他值 400 |
+| GET | `/api/hosts/{name}/shells/{pane_id}/stream?source=visible&format=ansi&token=…` | WebSocket 推送畫面，見下方「畫面推送」。認證同 `/ws`：Origin 必須本機、只收 UI token（query `token`）；帶 bot／service／child 憑證 401 |
+| HEAD | `/api/hosts/{name}/shells/{pane_id}/stream?source=visible&format=ansi&token=…` | WebSocket 推送畫面，見下方「畫面推送」。認證同 `/ws`：Origin 必須本機、只收 UI token（query `token`）；帶 bot／service／child 憑證 401 |
 | POST | `/api/hosts/{name}/shells/{pane_id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells/{pane_id}/login` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權）。只服務 daemon 為 claude 身份登入開的 pane（見 §「手機版登入協助」），其餘 404 |
@@ -1733,6 +1737,14 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   兩者共用同一個前端佇列（`web/src/lib/keyQueue.ts`）：**同一時間只有一個請求在路上**，飛的期間按的鍵合成下一批。
   一鍵一個 POST 會同時在路上、抵達順序不保證——打 `ls` 可能變成 `sl`。貼上不拆成鍵：文字裡的換行會變成 Enter 直接執行。
 - 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
+- **送字／送鍵的 `echo=ansi` 快路徑**：`POST …/text` 與 `POST …/keys` 帶 query `echo=ansi` 時，送完等約 20ms 再讀一張 visible ANSI 快照，回應 `{"terminal": <terminal 形狀，format:"ansi">}`。沒帶時回應維持 `{}`。
+  送已經成功，所以快照讀失敗不會讓請求變成錯誤，而是 `{"terminal": null}`（呼叫端一報錯就會重送，那就是把字打兩次）。
+- **畫面推送** `GET /api/hosts/{name}/shells/{pane_id}/stream?source=visible&format=ansi&token=…`（WebSocket，認證與 `/ws` 相同，掛在 `/api` 認證層外，因為瀏覽器 WebSocket 帶不了 `X-AM-Token`）。
+  - server→client 只有兩種訊息：`{"type":"frame","seq":N,"text":"<ANSI 整張畫面>","cols":C|null,"rows":R|null}` 與 `{"type":"error","code":"…"}`（之後關線）。
+  - 連上先送一張目前的完整畫面；之後只在內容（文字＋幾何）的 hash 變了才送。`seq` 是這一輪串流內的序號，斷線重連從 1 重算，client 不要拿舊連線的 seq 去比。
+  - 錯誤碼：`not_found`（pane 不在、被重用到別的 tab、登記已失效）、`upstream`（讀 herdr 失敗）、`bad_source`、`bad_format`。錯誤不帶內部訊息。
+  - 讀取節奏（daemon 內部）：herdr 0.9.5 的 `events.subscribe` 沒有「畫面變動」事件，所以是輪詢 `pane.read`；有變化時 50ms、連續沒變化每拍加倍、封頂 1s。送字／送鍵會立刻喚醒。同一顆 pane 的所有觀看者共用一個讀取迴圈，最後一個離開就停。
+  - 一般 Bot 等 bot principal 不能連（401）；限使用者。
 - **白名單兩份**（2026-09-16，SPEC §6.5e「選單點得進去」）：`terminal`／`text`／`keys` 除了這裡開的 shell，也接受 `panes` 表裡的 pane。
   **打字看 listen port，不看 `kind`**——本機有 port（pane 列 `read_only:true`）只可看，打字回
   `403 {"error":"read_only_pane","listen_ports":[…],"message":"…"}`；沒 port 的（含跑著 vim 的 `service`）可以打字。

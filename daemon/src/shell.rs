@@ -364,6 +364,36 @@ async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -
 
 /// `GET /api/hosts/:name/shells/:pane_id/terminal` — same shape as `GET /bots/:id/terminal`.
 pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines: u32) -> LcResult<Value> {
+    read_as(app, host, pane_id, source, lines, false).await
+}
+
+/// `format=ansi` 時多帶 `"format":"ansi"`，其餘形狀照舊（文字版的回應不變）。
+pub async fn read_as(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines: u32, ansi: bool) -> LcResult<Value> {
+    let snap = snapshot(app, host, pane_id, source, lines, ansi).await?;
+    Ok(terminal_json(host, pane_id, &snap.cwd, &snap.read, snap.columns, snap.rows, ansi))
+}
+
+fn terminal_json(host: &str, pane_id: &str, cwd: &str, read: &crate::herdr::PaneRead, columns: Option<u32>, rows: Option<u32>, ansi: bool) -> Value {
+    let mut v = json!({
+        "host": host, "pane_id": pane_id, "cwd": cwd,
+        "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
+        "columns": columns, "rows": rows,
+    });
+    if ansi {
+        v["format"] = json!("ansi");
+    }
+    v
+}
+
+/// 一張畫面與它的幾何（`read_as` 用）：身分檢查、讀、幾何，三趟 herdr 呼叫都在這裡。
+pub(crate) struct Snapshot {
+    pub cwd: String,
+    pub read: crate::herdr::PaneRead,
+    pub columns: Option<u32>,
+    pub rows: Option<u32>,
+}
+
+pub(crate) async fn snapshot(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines: u32, ansi: bool) -> LcResult<Snapshot> {
     let shell = registered(app, host, pane_id, Access::View).await?;
     if !["visible", "recent", "recent_unwrapped", "detection"].contains(&source) {
         return Err(LcError::Bad("bad source".into()));
@@ -378,18 +408,83 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
     if !same_pane(&shell, &current) {
         return Err(LcError::NotFound("shell".into()));
     }
-    let read = client.pane_read(pane_id, source, lines).await.map_err(up)?;
+    let read = if ansi {
+        client.pane_read_ansi(pane_id, source, lines).await
+    } else {
+        client.pane_read(pane_id, source, lines).await
+    }
+    .map_err(up)?;
     // Best effort, as in `get_terminal`: a snapshot is still worth returning without geometry.
     let (columns, rows) = match client.pane_size(pane_id).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
     };
-    Ok(json!({
-        "host": host, "pane_id": pane_id, "cwd": shell.cwd,
-        "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
-        "columns": columns, "rows": rows,
-    }))
+    Ok(Snapshot { cwd: shell.cwd, read, columns, rows })
 }
+
+/// 只讀畫面：登記與 session 照查（都在記憶體裡），**不**再問 herdr 這顆 pane 是不是同一顆、也不取幾何。
+/// 一趟 herdr 呼叫。推送串流的每一拍用它；身分與幾何由 [`geometry_checked`] 在需要時另外確認。
+pub(crate) async fn read_quick(app: &Arc<App>, host: &str, pane_id: &str, lines: u32) -> LcResult<(String, crate::herdr::PaneRead)> {
+    let shell = registered(app, host, pane_id, Access::View).await?;
+    let (client, session) = client_for(app, host).await?;
+    if session != shell.herdr_session {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    let read = client.pane_read_ansi(pane_id, "visible", lines).await.map_err(up)?;
+    Ok((shell.cwd, read))
+}
+
+/// 這顆 pane 還是不是登記的那一顆（workspace／tab 對得上），再取幾何。兩趟 herdr 呼叫。
+pub(crate) async fn geometry_checked(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<(Option<u32>, Option<u32>)> {
+    let shell = registered(app, host, pane_id, Access::View).await?;
+    let (client, session) = client_for(app, host).await?;
+    if session != shell.herdr_session {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    let Some(current) = client.pane_get(pane_id).await.map_err(up)? else {
+        return Err(LcError::NotFound("shell".into()));
+    };
+    if !same_pane(&shell, &current) {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    Ok(match client.pane_size(pane_id).await {
+        Ok(Some((w, h))) => (Some(w), Some(h)),
+        _ => (None, None),
+    })
+}
+
+/// 送字／送鍵之後的 `echo=ansi` 快路徑（[`ECHO_DELAY`] 後讀一張 visible ANSI 快照）。
+/// 沒要就回空物件（舊形狀）。送已經成功，所以讀失敗只回 `terminal: null`，不把整個請求報錯：
+/// 呼叫端一報錯就會重送，那就是把字打兩次。送字本身已經確認過 pane 身分，這裡不再重做。
+pub async fn echo_after_send(app: &Arc<App>, host: &str, pane_id: &str, want: bool) -> Value {
+    if !want {
+        return json!({});
+    }
+    tokio::time::sleep(ECHO_DELAY).await;
+    match echo_terminal(app, host, pane_id).await {
+        Ok(terminal) => json!({ "terminal": terminal }),
+        Err(e) => {
+            tracing::warn!("shell echo read failed after a successful send: {e:?}");
+            json!({ "terminal": null })
+        }
+    }
+}
+
+async fn echo_terminal(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Value> {
+    let (cwd, read) = read_quick(app, host, pane_id, ECHO_LINES).await?;
+    // 幾何只是附帶資訊：取不到就 null，不影響快照本身。
+    let (columns, rows) = match client_for(app, host).await {
+        Ok((client, _)) => match client.pane_size(pane_id).await {
+            Ok(Some((w, h))) => (Some(w), Some(h)),
+            _ => (None, None),
+        },
+        Err(_) => (None, None),
+    };
+    Ok(terminal_json(host, pane_id, &cwd, &read, columns, rows, true))
+}
+
+pub const ECHO_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+const ECHO_LINES: u32 = 200;
 
 /// `POST /api/hosts/:name/shells/:pane_id/text`. Enter is a **separate** `pane.send_keys`: a `\n`
 /// in `pane.send_text` is a pasted line break to herdr. Empty `text` + `enter` = "just press Enter".
@@ -402,6 +497,7 @@ pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, en
     if enter {
         client.pane_send_keys(pane_id, &["enter"]).await.map_err(up)?;
     }
+    crate::shell_stream::wake(app, host, pane_id);
     Ok(())
 }
 
@@ -410,7 +506,9 @@ pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String
     check_keys(keys)?;
     let client = client_for_typeable(app, host, pane_id).await?;
     let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-    client.pane_send_keys(pane_id, &refs).await.map_err(up)
+    client.pane_send_keys(pane_id, &refs).await.map_err(up)?;
+    crate::shell_stream::wake(app, host, pane_id);
+    Ok(())
 }
 
 /// Pin validation and the following input to the same Herdr session. Resolving the current session
@@ -481,6 +579,23 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
     crate::login_assist::forget(app, host, pane_id);
     tracing::info!(host, pane_id, "closed a host shell");
     Ok(())
+}
+
+/// 測試用：開一顆 pane 並登記成我們的 shell（跟 `a_reused_pane_id_is_not_read_as_our_shell_terminal` 同一套前置）。
+#[cfg(test)]
+pub(crate) async fn tracked_test_pane(app: &Arc<App>) -> crate::herdr::PaneInfo {
+    let session = app.session_for_host("local").await.unwrap();
+    let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+    *app.host_shells.lock().await = vec![HostShell {
+        host: "local".into(),
+        herdr_session: session,
+        workspace_id: pane.workspace_id.clone(),
+        tab_id: pane.tab_id.clone(),
+        pane_id: pane.pane_id.clone(),
+        cwd: "/tmp".into(),
+        created_at: crate::db::now(),
+    }];
+    pane
 }
 
 #[cfg(test)]
@@ -1247,6 +1362,47 @@ mod tests {
             Some(ports) => assert!(ports.contains(&port), "lsof 讀得到就要看到 {port}：{ports:?}"),
         }
         drop(listener);
+    }
+
+    /// `format=ansi` 只多帶 `format`；文字版的形狀跟以前一模一樣（沒有 `format` 欄位）。
+    #[tokio::test]
+    async fn the_terminal_shape_is_unchanged_for_text_and_marked_for_ansi() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let pane = tracked_test_pane(app).await;
+        env.herdr.set_screen(&pane.pane_id, "plain screen");
+        let text = read_as(app, "local", &pane.pane_id, "visible", 200, false).await.unwrap();
+        assert!(text.get("format").is_none(), "文字版不加欄位：{text}");
+        assert_eq!(text["text"], "plain screen");
+        let ansi = read_as(app, "local", &pane.pane_id, "visible", 200, true).await.unwrap();
+        assert_eq!(ansi["format"], "ansi");
+        assert_eq!(ansi["text"], "plain screen");
+        assert_eq!(text.as_object().unwrap().keys().filter(|k| *k != "format").count(), ansi.as_object().unwrap().keys().filter(|k| *k != "format").count(), "其餘欄位同形狀");
+    }
+
+    /// `echo=ansi`：送完後回 `{"terminal": <ansi 快照>}`；沒要就是空物件（舊形狀）。
+    #[tokio::test]
+    async fn an_echo_after_a_send_carries_the_ansi_snapshot_and_plain_sends_stay_empty() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let pane = tracked_test_pane(app).await;
+        env.herdr.set_screen(&pane.pane_id, "typed-echo");
+        let echoed = echo_after_send(app, "local", &pane.pane_id, true).await;
+        assert_eq!(echoed["terminal"]["format"], "ansi", "{echoed}");
+        assert_eq!(echoed["terminal"]["pane_id"], pane.pane_id.as_str());
+        assert!(echoed["terminal"]["text"].as_str().unwrap().contains("typed-echo"));
+        assert_eq!(echo_after_send(app, "local", &pane.pane_id, false).await, json!({}), "沒要 echo 就維持舊回應");
+    }
+
+    /// 送完之後讀失敗：送字已經成功，回應不能變成錯誤（否則呼叫端會重送、字打兩次）。
+    #[tokio::test]
+    async fn a_failed_echo_read_keeps_the_send_successful() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let pane = tracked_test_pane(app).await;
+        env.herdr.set_screen(&pane.pane_id, "__READ_ERROR__");
+        let echoed = echo_after_send(app, "local", &pane.pane_id, true).await;
+        assert_eq!(echoed, json!({"terminal": null}));
     }
 }
 
