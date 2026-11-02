@@ -2702,18 +2702,14 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
     Ok(Some(name))
 }
 
-/// claude-api bot 沒有 CLI、沒有 pane、沒有帳號身份：只收本機專案，模型只能是價目表核准的那一個，
+/// claude-api bot 沒有 CLI、沒有 pane、沒有帳號身份：本機與遠端專案都收（遠端不隔離，見 SPEC），模型只能是價目表核准的那一個，
 /// 其餘只對 CLI 有意義的欄位一律 400（不默默忽略，免得使用者以為生效）。
-async fn check_api_bot_create(app: &Arc<App>, pid: &str, b: &NewBot) -> Result<(), LcError> {
+fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
     let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
     if let Some(m) = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         if m != crate::config::API_BOT_MODEL {
             return Err(bad("api_bot_model_unsupported"));
         }
-    }
-    let host = db::project(&app.db, pid).await.map_err(any_err)?.map(|p| p.host);
-    if host.as_deref().is_some_and(|h| h != crate::config::LOCAL_HOST) {
-        return Err(bad("api_bot_local_project_only"));
     }
     if b.identity.as_deref().is_some_and(|s| !s.trim().is_empty())
         || !b.args.is_empty()
@@ -2756,7 +2752,7 @@ async fn create_bot(
     }
     let api_bot = b.kind == crate::config::API_BOT_KIND;
     if api_bot {
-        check_api_bot_create(&app, &pid, &b).await?;
+        check_api_bot_create(&b)?;
     }
     // model／env／args 最後是 CLI 的 argv 與 pane 的環境變數，形狀不對在這裡就擋（`bot_input`）。
     if let Some(m) = &b.model {
@@ -7146,7 +7142,6 @@ async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Que
         let result = app.api_native_start(&id, mode).await.map_err(|error| match error {
             ApiNativeStartError::Unconfirmed => LcError::Upstream("api_native_start_unconfirmed".into()),
             ApiNativeStartError::ClearedButStartUnconfirmed => LcError::Upstream("api_fresh_cleared_start_unconfirmed".into()),
-            ApiNativeStartError::Refused("api_bot_local_project_only") => LcError::BadValue(json!({"error": "bad_request", "reason": "api_bot_local_project_only"})),
             ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
         })?;
         return Ok((StatusCode::OK, Json(json!({"run_id":result.run_id,"resumed":result.resumed}))).into_response());

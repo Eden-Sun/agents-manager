@@ -2588,9 +2588,7 @@ export class MockTransport implements Transport {
       throw new ApiError(404, { reason: 'project not found' }, 'not found')
     }
     if (b.kind === 'claude-api') {
-      // 照 daemon：CLI 欄位與遠端專案一律 400。
-      const proj = this.projects.find((p) => p.id === projectId)
-      if (proj && proj.host !== 'local') throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_local_project_only' }, 'bad request')
+      // 照 daemon：CLI 欄位一律 400（本機與遠端專案都能建）。
       if (b.identity || b.autostart || b.share_profile || (Array.isArray(b.args) && b.args.length) || (b.env && Object.keys(b.env as Rec).length)) {
         throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_cli_fields_unsupported' }, 'bad request')
       }

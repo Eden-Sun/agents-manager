@@ -15,7 +15,7 @@ const TEXT: Record<string, string> = {
   api_native_prompt_unconfirmed: msg('daemon 無法確認這一則有沒有交給 Claude API（可能上一回合還沒結算，或 bot 正忙）；輸入已保留，請稍後再送，或先停止再啟動。'),
   api_native_start_unconfirmed: msg('daemon 無法確認 claude-api bot 的啟動狀態；請稍後再試。'),
   'api_bot_stop_unconfirmed:busy': msg('bot 還有一個回合沒有結算，暫時無法停止；請稍後再試。'),
-  api_bot_local_project_only: msg('claude-api bot 只能放在本機專案。'),
+  api_bot_host_offline: msg('這顆 claude-api bot 的專案在遠端主機，但那台主機目前沒有連線：等主機連上線再啟動。'),
 }
 
 export function apiBotStartReasonText(reason: unknown): string | null {

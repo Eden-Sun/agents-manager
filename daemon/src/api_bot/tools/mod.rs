@@ -1,7 +1,9 @@
 mod bash;
 pub(super) mod editor;
+mod remote;
 use super::protocol::ToolCall;
 pub use bash::Limits;
+pub use remote::RemoteTools;
 use futures::future::BoxFuture;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;

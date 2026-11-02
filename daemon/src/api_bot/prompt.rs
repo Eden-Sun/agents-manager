@@ -22,6 +22,20 @@ pub fn api_bot_sandbox_instructions() -> &'static str {
 後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入、`$AM_*` 環境變數、auto compact、fork/resume，在這個環境一律不適用，以本段為準。"
 }
 
+/// 專案在遠端主機時的環境說明（使用者 2026-11-02 裁示：遠端不做沙箱，直接用該主機 ssh 帳號的權限執行）。
+pub fn api_bot_remote_instructions(host: &str, project_dir: &str) -> String {
+    let dir = project_dir.trim_end_matches('/');
+    format!("你在主機 `{host}` 上以 AG Man 登入該主機的 ssh 帳號權限執行，**沒有沙箱**；這是使用者的真實機器，具備以下環境條件與限制：\n\
+- **可用工具**：只有 `bash`（bash_20250124）與 `str_replace_based_edit_tool`（text_editor_20250728；`view`／`create`／`str_replace`／`insert`，路徑限專案目錄底下）。\n\
+- **工作目錄**：cwd 是專案目錄 `{dir}`，`/workspace` 也代表它（`/workspace/foo` 等於 `{dir}/foo`）；編輯器的路徑可寫相對路徑、`{dir}/…` 或 `/workspace/…`，含 `..` 的路徑會被拒絕。bash 不受目錄限制，是該帳號的完整權限。\n\
+- **每次呼叫獨立**：每次 bash 呼叫都是新的一次 ssh 連線與新的 shell，前一次的 cd、export、shell 變數與背景行程都不會延續，不能留背景服務；需要多步驟請在同一次呼叫中以 `&&` 串接。\n\
+- **可以連網**：curl、git clone/fetch、套件下載可用；`HOME` 是該帳號的家目錄，寫進去的檔案（含專案目錄）會保留。\n\
+- **無 herdr 與 CLI 週邊**：沒有 herdr、不能開子 agent、沒有 agent-browser、沒有 outbox（`$AM_OUTBOX`）、沒有 CLI 登入憑證。\n\
+- **無跨對話記憶與自動 compact**：對話不會自動 compact，會持續累積至 context 上限；一旦超限回合將失敗，需由使用者在介面按「清除對話」；不支援 fork/resume 或模型查詢 API。\n\
+- **小心操作**：沒有沙箱擋著，刪除檔案、覆寫、`git reset --hard`、強制推送、改系統設定這類破壞性或難以復原的操作，**先向使用者說明再做**；不要碰專案目錄以外與任務無關的東西。\n\
+後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入、`$AM_*` 環境變數、auto compact、fork/resume，在這個環境一律不適用，以本段為準。")
+}
+
 /// `/workspace` 對應主機上的哪個目錄：使用者與專案指示寫的是主機路徑，bot 要自己換成 `/workspace`。
 fn path_mapping_note(host_root: &str) -> String {
     let root = host_root.trim_end_matches('/');
@@ -30,18 +44,24 @@ fn path_mapping_note(host_root: &str) -> String {
 
 /// Compose the system prompt for an API bot (`claude-api`).
 ///
-/// Combines the sandbox instructions, project agent instructions (`agent_md`),
+/// Combines the environment instructions (local bwrap sandbox, or the remote no-sandbox variant when
+/// `remote_host` is `Some(host name)`), project agent instructions (`agent_md`),
 /// the bot's custom persona, and the agent name note.
-pub fn compose_api_bot_system_prompt(bot: &Bot, agent_name: &str, host_root: &str, agent_md: Option<&str>) -> String {
-    let base = match agent_md.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(md) => format!("{}\n\n{}", api_bot_sandbox_instructions(), md),
+pub fn compose_api_bot_system_prompt(bot: &Bot, agent_name: &str, host_root: &str, remote_host: Option<&str>, agent_md: Option<&str>) -> String {
+    let environment = match remote_host {
+        Some(host) => api_bot_remote_instructions(host, host_root),
         None => api_bot_sandbox_instructions().to_string(),
+    };
+    let base = match agent_md.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(md) => format!("{environment}\n\n{md}"),
+        None => environment,
     };
     let with_persona = match bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(persona) => format!("{base}\n\n{persona}"),
         None => base,
     };
-    format!("{with_persona}\n\n你在 AG Man 裡的 agent 名稱是 `{agent_name}`。\n\n{}", path_mapping_note(host_root))
+    let tail = if remote_host.is_some() { String::new() } else { format!("\n\n{}", path_mapping_note(host_root)) };
+    format!("{with_persona}\n\n你在 AG Man 裡的 agent 名稱是 `{agent_name}`。{tail}")
 }
 
 #[cfg(test)]
@@ -83,7 +103,7 @@ mod tests {
     #[test]
     fn api_bot_prompt_contains_sandbox_and_omits_cli_rules() {
         let bot = test_bot("claude-api-opus", Some("你是一位專業的程式碼審查專家。"));
-        let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", "/home/u/proj/", Some("# 專案說明\n這是測試專案。"));
+        let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", "/home/u/proj/", None, Some("# 專案說明\n這是測試專案。"));
 
         // Must contain sandbox environment facts
         assert!(prompt.contains("str_replace_based_edit_tool"));
@@ -115,12 +135,39 @@ mod tests {
     #[test]
     fn api_bot_prompt_without_optional_fields() {
         let bot = test_bot("api-worker", None);
-        let prompt = compose_api_bot_system_prompt(&bot, "api-worker", "/srv/p", None);
+        let prompt = compose_api_bot_system_prompt(&bot, "api-worker", "/srv/p", None, None);
         assert!(prompt.contains("名稱是 `api-worker`"));
         assert!(prompt.contains("/workspace"));
         assert!(prompt.contains("str_replace_based_edit_tool"));
         assert!(prompt.contains("可以連網"));
         assert!(prompt.contains("`/etc` 只唯讀掛入"));
         assert!(prompt.contains("自動 compact"));
+    }
+
+    #[test]
+    fn remote_prompt_describes_an_unsandboxed_ssh_account_and_drops_bwrap_facts() {
+        let bot = test_bot("api-remote", Some("你是遠端助手。"));
+        let prompt = compose_api_bot_system_prompt(&bot, "api-remote", "/Users/u/proj/", Some("m4p"), Some("# 專案說明"));
+        assert!(prompt.contains("主機 `m4p`"));
+        assert!(prompt.contains("沒有沙箱"));
+        assert!(prompt.contains("cwd 是專案目錄 `/Users/u/proj`"));
+        assert!(prompt.contains("`/workspace` 也代表它"));
+        assert!(prompt.contains("每次呼叫獨立"));
+        assert!(prompt.contains("`&&` 串接"));
+        assert!(prompt.contains("可以連網"));
+        assert!(prompt.contains("`HOME` 是該帳號的家目錄"));
+        assert!(prompt.contains("不能開子 agent"));
+        assert!(prompt.contains("沒有 herdr"));
+        assert!(prompt.contains("真實機器"));
+        assert!(prompt.contains("先向使用者說明再做"));
+        assert!(prompt.contains("# 專案說明") && prompt.contains("你是遠端助手。"));
+        assert!(prompt.contains("名稱是 `api-remote`"));
+        // 本機沙箱的說法與路徑對應不能混進來
+        for gone in ["bwrap", "bubblewrap", "HOME=/tmp", "tmpfs", "唯讀", "路徑對應"] {
+            assert!(!prompt.contains(gone), "remote prompt must not mention {gone}");
+        }
+        // 本機版不受影響
+        let local = compose_api_bot_system_prompt(&bot, "api-remote", "/home/u/proj", None, None);
+        assert!(local.contains("bubblewrap") && local.contains("路徑對應") && !local.contains("沒有沙箱"));
     }
 }
