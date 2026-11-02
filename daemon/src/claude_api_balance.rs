@@ -354,7 +354,10 @@ pub async fn get_claude_api_balance(
 
     // 嘗試抓取 cost_report
     let mut api_error: Option<String> = None;
-    let report_buckets = if let Some(ref key) = admin_key {
+    // 錨點隔天 0 點還沒過完一整天時，cost_report 不會有任何可用的日子；這時去查會被回 400（ending 必須晚於 starting）。
+    let report_buckets = if start_of_next_day(anchor_dt) >= start_of_day(now) {
+        Vec::new()
+    } else if let Some(ref key) = admin_key {
         let starting_at_req = am_base::db::iso_at(start_of_next_day(anchor_dt));
         if let Some(cached) = cache.get(&starting_at_req).await {
             cached
