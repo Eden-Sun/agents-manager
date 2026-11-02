@@ -472,6 +472,8 @@ export interface Run {
   cache_ttl_secs?: number | null
   /** 主力的「保溫」／「熱壓」讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
   cache_kept_warm_at?: string | null
+  /** 最後一次壓縮不早於最後一次活動（壓縮後 cache 作廢、context 變小）：不畫倒數、daemon 也不保溫；有新回合就恢復為 `false`。 */
+  cache_compacted?: boolean
   /** 「不用保溫」開著：這顆主力這一輪閒置跳過保溫與熱壓；有真的活動後 daemon 自動清掉。 */
   keep_warm_skip?: boolean
   /** 最近一次「保溫回覆」完成的時間；使用者送出新 prompt 時 daemon 清成 `null`。非 `null`＝主力晶片框換色（`lib/keepWarm.ts`）。 */

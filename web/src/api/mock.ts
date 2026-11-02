@@ -150,6 +150,7 @@ interface MockRun {
   last_api_at?: string | null
   cache_ttl_secs?: number | null
   cache_kept_warm_at?: string | null
+  cache_compacted?: boolean
   keep_warm_skip?: boolean
   keep_warm_replied_at?: string | null
 }
@@ -3883,12 +3884,13 @@ export class MockTransport implements Transport {
   }
 
   /** 快取倒數的「上次活動」改成幾分鐘前（`__amMock.cacheAge`，截圖用）；沒有 run 或 grok 不動。 */
-  setCacheAge(botId: string, minutesAgo: number) {
+  setCacheAge(botId: string, minutesAgo: number, compacted = false) {
     const run = this.activeRun(botId)
     if (!run?.cache_ttl_secs) return
     const at = new Date(Date.now() - minutesAgo * 60_000).toISOString()
     run.last_api_at = at
     if (run.cache_kept_warm_at) run.cache_kept_warm_at = at
+    run.cache_compacted = compacted
     this.emitBotStatus(botId)
   }
 
@@ -4396,7 +4398,7 @@ function installDevHelpers(mock: MockTransport) {
     runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),
     // 截圖用：快取倒數的上次活動改成幾分鐘前（`__amMock.cacheAge('am-claude', 75)`＝已涼）。
-    cacheAge: (botIdOrName: string, minutesAgo: number) => mock.setCacheAge(mock.botIdByName(botIdOrName) ?? botIdOrName, minutesAgo),
+    cacheAge: (botIdOrName: string, minutesAgo: number, compacted = false) => mock.setCacheAge(mock.botIdByName(botIdOrName) ?? botIdOrName, minutesAgo, compacted),
     // 截圖用：演一輪保溫回覆（晶片框換色、不亮未讀）：`__amMock.keepWarmReply('am-claude')`。
     keepWarmReply: (botIdOrName: string) => mock.simulateKeepWarmReply(mock.botIdByName(botIdOrName) ?? botIdOrName),
     // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。

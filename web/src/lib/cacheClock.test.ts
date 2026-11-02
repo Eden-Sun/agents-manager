@@ -92,6 +92,14 @@ test('chipCache：keep_warm_skip=true 無倒數、false／未帶照常倒數、�
   assert.deepEqual(chipCache({ ...run, keep_warm_skip: false }, T0), cacheState(run.last_api_at, 3600, T0, false, null))
 })
 
+test('chipCache：壓縮後（cache_compacted）不畫倒數，新回合後恢復', () => {
+  const run = { last_api_at: at(15), cache_ttl_secs: 3600, cache_compacted: true }
+  assert.equal(chipCache(run, T0), null)
+  assert.equal(chipCache({ ...run, cache_compacted: false }, T0)!.level, 'fresh', '壓縮後有新回合：daemon 帶 false，倒數恢復')
+  assert.equal(chipCache({ ...run, last_api_at: at(1), cache_compacted: false }, T0)!.level, 'fresh')
+  assert.equal(chipCache({ ...run, cache_compacted: undefined }, T0)!.level, 'fresh')
+})
+
 test('跨年：上次活動在去年，tooltip 的時間要帶年份', () => {
   const now = new Date(2027, 0, 1, 0, 20).getTime()
   const last = new Date(2026, 11, 31, 23, 30).toISOString()

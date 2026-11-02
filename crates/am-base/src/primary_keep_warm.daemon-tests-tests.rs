@@ -380,6 +380,25 @@
         }
     }
 
+    /// 壓縮過（任何一種，不只熱壓）：cache 已作廢，不再為它保溫；之後有新回合就照常。
+    #[tokio::test]
+    async fn a_compacted_bot_is_not_kept_warm_until_a_new_turn() {
+        let env = tt::env().await;
+        let now = chrono::Utc::now();
+        let (bot, run) = primary(&env, "kw-compacted", "idle").await;
+        turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
+        assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap().unwrap().step, Step::KeepWarm);
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        crate::lifecycle::insert_message(&env.app, &conv, None, "system", "手動 /compact：200K tokens → 摘要 9K tokens", "system", false, None)
+            .await
+            .unwrap();
+        assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap().unwrap().step, Step::Wait, "壓縮後不保溫");
+        let fresh = now + chrono::Duration::minutes(1);
+        turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
+        let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(58)).await.unwrap().unwrap();
+        assert_eq!(p.step, Step::KeepWarm, "新回合之後照常保溫");
+    }
+
     async fn primary(env: &tt::Env, name: &str, agent_status: &str) -> (db::Bot, db::Run) {
         let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
         sqlx::query("UPDATE bots SET is_primary = 1 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();

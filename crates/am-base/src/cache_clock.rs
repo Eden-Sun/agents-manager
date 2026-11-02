@@ -49,8 +49,21 @@ pub struct LastTurn {
     pub keep_warm_skip: bool,
     /// 最近一次保溫回覆完成的時間；比它晚的非保溫回合（使用者送了新 prompt）一出現就是 `None`。
     pub keep_warm_replied_at: Option<String>,
+    /// 最近一次壓縮（任何一種）的系統訊息時間，而且之後沒有新的非保溫回合；沒壓過、或壓縮後使用者又送了 prompt 是 `None`。
+    pub compacted_at: Option<String>,
 }
 
+/// 壓縮收尾回合與 statusLine 重送離壓縮說明有幾秒的誤差：活動不比壓縮早超過這麼久才算「壓縮之後」。
+const COMPACT_SKEW_SECS: i64 = 30;
+
+/// 壓縮過後 prompt cache 已作廢（context 也變小）：最後一次壓縮不早於最後一次真的活動（容許 [`COMPACT_SKEW_SECS`] 誤差）
+/// ＝倒數停掉、也不保溫；之後有新回合 `compacted_at` 變 `None`（或活動晚於壓縮）就照常。`last_api_at` 是回合進行中的「現在」時不會成立。
+pub fn compacted_since(last_api_at: Option<&str>, last_turn: Option<&LastTurn>) -> bool {
+    let (Some(at), Some(c)) = (last_api_at.and_then(db::parse_ts), last_turn.and_then(|t| t.compacted_at.as_deref()).and_then(db::parse_ts)) else {
+        return false;
+    };
+    c + chrono::Duration::seconds(COMPACT_SKEW_SECS) >= at
+}
 fn store() -> &'static Mutex<HashMap<String, String>> {
     static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     S.get_or_init(Default::default)
@@ -139,8 +152,11 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     let since = o.get("agent_status_since").and_then(Value::as_str).map(str::to_owned);
     let line = o.get("id").and_then(Value::as_str).and_then(statusline_at);
     let at = derive(kind, status.as_deref(), since.as_deref(), last_turn, line.as_deref(), &db::now());
-    o.insert("last_api_at".into(), at.into());
+    o.insert("last_api_at".into(), at.clone().into());
     o.insert("cache_ttl_secs".into(), ttl_secs(kind).into());
+    // 壓縮後 cache 作廢：網頁不畫倒數（回合進行中 `at`＝現在，不會成立）。codex 不倒數，照舊不帶。
+    let compacted = ttl_secs(kind).is_some() && status.as_deref() != Some("working") && compacted_since(at.as_deref(), last_turn);
+    o.insert("cache_compacted".into(), compacted.into());
     // 只有保溫過的主力才帶（網頁拿它算顏色；數字仍是 `last_api_at` 的真實年齡）。
     o.insert("cache_kept_warm_at".into(), last_turn.and_then(|t| t.kept_warm_at.clone()).into());
     o.insert("keep_warm_skip".into(), last_turn.is_some_and(|t| t.keep_warm_skip).into());
@@ -150,7 +166,7 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
 
 #[allow(unused_imports)]
 pub use crate::db::predicates::{
-    is_keep_warm_crid, keep_warm_crid_sql, warm_compact_note_sql, KEEP_WARM_CRID_PREFIX, LEGACY_KEEP_WARM_CRID_PREFIX,
+    any_compact_note_sql, is_keep_warm_crid, COMPACT_NOTE_PREFIXES, keep_warm_crid_sql, warm_compact_note_sql, KEEP_WARM_CRID_PREFIX, LEGACY_KEEP_WARM_CRID_PREFIX,
     LEGACY_WARM_COMPACT_NOTE_PREFIX, WARM_COMPACT_NOTE_PREFIX,
 };
 
@@ -163,6 +179,7 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     let kw_u = keep_warm_crid_sql("u.client_request_id");
     let kw_t = keep_warm_crid_sql("client_request_id");
     let note = warm_compact_note_sql("m.content");
+    let any_note = any_compact_note_sql("m.content");
     format!(
         "SELECT c.bot_id, t.status, t.completed_at,
        NULLIF(COALESCE((SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
@@ -170,6 +187,8 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
                            AND k.status IN ('in_flight','completed','completed_fallback')
                            AND COALESCE(k.completed_at, k.created_at) > COALESCE((SELECT MAX(m.created_at) FROM messages m
                                 WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')), ''), '') AS kept_warm_at,
+       (SELECT NULLIF(MAX(m.created_at), '') FROM messages m WHERE m.conversation_id = c.id AND m.role = 'system' AND {any_note}
+          AND m.created_at > t.created_at) AS compacted_at,
        EXISTS(SELECT 1 FROM keep_warm_skip s WHERE s.bot_id = c.bot_id) AS keep_warm_skip,
        (SELECT COALESCE(k.completed_at, k.created_at) FROM turns k
          WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')
@@ -184,11 +203,11 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-type LastTurnRow = (String, String, Option<String>, Option<String>, i64, Option<String>);
+type LastTurnRow = (String, String, Option<String>, Option<String>, Option<String>, i64, Option<String>);
 
 fn last_turn_of(row: LastTurnRow) -> (String, LastTurn) {
-    let (bot, status, completed_at, kept_warm_at, skip, replied_at) = row;
-    (bot, LastTurn { status, completed_at, kept_warm_at, keep_warm_skip: skip != 0, keep_warm_replied_at: replied_at })
+    let (bot, status, completed_at, kept_warm_at, compacted_at, skip, replied_at) = row;
+    (bot, LastTurn { status, completed_at, kept_warm_at, keep_warm_skip: skip != 0, keep_warm_replied_at: replied_at, compacted_at })
 }
 
 /// 每顆 bot 最近一筆送出去的回合，一次讀完（`/api/state` 用，免得逐顆查）。
@@ -390,6 +409,45 @@ mod tests {
         .unwrap();
         let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
         assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("failed", Some("2026-10-04T11:02:00.000Z")));
+    }
+
+    /// 壓縮後 cache 作廢：壓縮晚於最後一次活動 → 倒數停（`cache_compacted`）；壓縮後有新回合 → 恢復；codex 不帶。
+    #[tokio::test]
+    async fn compaction_stops_the_countdown_until_a_new_turn() {
+        let pool = bare_pool().await;
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
+               ('t0','c','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('k','c','completed','2026-10-04T11:30:00.000Z','2026-10-04T11:31:00.000Z','keep-warm:a');
+             INSERT INTO messages VALUES ('m1','c','system','Claude 閒置壓縮：200K tokens → 摘要 10K tokens','2026-10-04T11:00:00.000Z');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!(last.compacted_at.as_deref(), Some("2026-10-04T11:00:00.000Z"));
+        let mut run = serde_json::json!({"id": "r-compact", "agent_status": "idle"});
+        annotate(&mut run, "claude", Some(&last));
+        assert_eq!(run["cache_compacted"], true, "壓縮（11:00）晚於最後活動（10:05），保溫回合不算");
+        let mut codex = serde_json::json!({"id": "r-compact-codex", "agent_status": "idle"});
+        annotate(&mut codex, "codex", Some(&last));
+        assert_eq!(codex["cache_compacted"], false, "codex 沒有倒數");
+
+        // 壓縮後使用者送了新回合：倒數恢復。
+        sqlx::query("INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES ('t1','c','completed','2026-10-04T11:10:00.000Z','2026-10-04T11:12:00.000Z',NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
+        assert_eq!(last.compacted_at, None);
+        annotate(&mut run, "claude", Some(&last));
+        assert_eq!(run["cache_compacted"], false);
+
+        // 回合進行中永遠不算壓縮過。
+        let working = LastTurn { compacted_at: Some("2026-10-04T11:00:00.000Z".into()), ..done("2026-10-04T10:05:00.000Z") };
+        let mut busy = serde_json::json!({"id": "r-compact-busy", "agent_status": "working"});
+        annotate(&mut busy, "claude", Some(&working));
+        assert_eq!(busy["cache_compacted"], false);
     }
 
     #[tokio::test]
