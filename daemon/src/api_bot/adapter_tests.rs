@@ -273,6 +273,8 @@ mod tests {
             max_checkpoint_bytes: 8 * 1024 * 1024,
             max_turn_microusd: 50_000,
             max_requests_per_hour: 100,
+            total_cap_usd: None,
+            total_cap_since: None,
         }
     }
 
@@ -1142,5 +1144,73 @@ mod tests {
         assert_eq!(wire_calls.load(Ordering::SeqCst), total_iterations);
 
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_total_cap_enforced_in_adapter_save() {
+        use super::super::runner::Journal;
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let mut limits = test_limits();
+        limits.total_cap_usd = Some(1.0);
+        limits.total_cap_since = Some("2026-11-02T00:00:00Z".to_string());
+
+        let http_cfg = AdapterHttpConfig {
+            endpoint: "http://127.0.0.1:9".into(),
+            key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+            timeout: std::time::Duration::from_secs(1),
+            max_response_bytes: 1024,
+        };
+
+        let identity = AdapterIdentity {
+            session_id: session,
+            bot_id: bot,
+            run_id: run,
+            turn_id: turn,
+            generation: 1,
+        };
+
+        // 插入一筆已花費 0.95 美元 (950,000 微美元) 的 attempt
+        sqlx::query(
+            "INSERT INTO api_bot_attempts(id, session_id, bot_id, run_id, turn_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, created_at)
+             VALUES(?, NULL, ?, ?, ?, 1, 0, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', 'standard', 'recorded', 950000, 950000, 'v1', '2026-11-02T01:00:00Z')",
+        )
+        .bind(am_base::db::ulid())
+        .bind(&identity.bot_id)
+        .bind(&identity.run_id)
+        .bind(&identity.turn_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 報價 100,000 微美元（0.1 美元），累計 0.95 + 0.1 = 1.05 > 1.0 上限
+        let quote = Arc::new(TestQuoteProvider {
+            reserved_amount: 100_000,
+            estimated_amount: 100_000,
+        });
+
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            identity.clone(),
+            test_options(),
+            serde_json::json!({}),
+            limits.clone(),
+            quote,
+            http_cfg,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut state = State::default();
+        state.messages.push(Message {
+            role: "user".into(),
+            content: serde_json::json!("hello"),
+        });
+        state.api_pending = true;
+
+        let res = adapter.save(&state).await;
+        assert!(res.is_err(), "save must fail when total cap is exceeded");
+        let refusal = adapter.take_refusal();
+        assert_eq!(refusal.as_deref(), Some("api_total_cap_reached:cap=1:spent=0.95"));
     }
 }

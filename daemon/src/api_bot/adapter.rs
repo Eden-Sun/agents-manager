@@ -30,11 +30,13 @@ pub(crate) struct AdapterIdentity {
     pub(crate) generation: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AdapterLimits {
     pub(crate) max_checkpoint_bytes: usize,
     pub(crate) max_turn_microusd: i64,
     pub(crate) max_requests_per_hour: i64,
+    pub(crate) total_cap_usd: Option<f64>,
+    pub(crate) total_cap_since: Option<String>,
 }
 
 impl AdapterLimits {
@@ -91,7 +93,7 @@ pub(crate) struct ApiBotAdapter {
     tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
     /// 預留被拒絕（還沒送請求）的原因，給 runtime 寫進失敗通知；只存固定代碼。
-    refusal: std::sync::Mutex<Option<&'static str>>,
+    refusal: std::sync::Mutex<Option<String>>,
 }
 
 struct CursorState {
@@ -116,11 +118,11 @@ struct ActiveAttempt {
 }
 
 impl ApiBotAdapter {
-    fn refuse(&self, reason: &'static str) {
-        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+    fn refuse(&self, reason: impl Into<String>) {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.into());
     }
     /// 取走（並清掉）最近一次預留被拒絕的原因。
-    pub(crate) fn take_refusal(&self) -> Option<&'static str> {
+    pub(crate) fn take_refusal(&self) -> Option<String> {
         self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
@@ -474,6 +476,35 @@ impl Journal for ApiBotAdapter {
                     let quote = self.quote_provider.reserve(&envelope).map_err(|_| self.refuse("api_bot_quote_refused"))?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
+                    }
+
+                    if let (Some(cap_usd), Some(ref since)) = (self.limits.total_cap_usd, &self.limits.total_cap_since) {
+                        if cap_usd >= 0.0 && !since.is_empty() {
+                            let spent_microusd: i64 = sqlx::query_scalar(
+                                "SELECT COALESCE(SUM(
+                                    CASE WHEN state='recorded' THEN COALESCE(estimated_microusd, 0)
+                                         WHEN state='reserved' THEN reserved_microusd
+                                         WHEN state='unknown' THEN COALESCE(estimated_microusd, reserved_microusd)
+                                         ELSE 0 END
+                                 ), 0)
+                                 FROM api_bot_attempts
+                                 WHERE created_at >= ? AND state IN ('recorded', 'reserved', 'unknown')",
+                            )
+                            .bind(since)
+                            .fetch_one(&self.pool)
+                            .await
+                            .unwrap_or(0);
+
+                            let cap_microusd = (cap_usd * 1_000_000.0).round() as i64;
+                            let total_with_reservation = spent_microusd.saturating_add(quote.reserved_microusd.max(0));
+                            if total_with_reservation > cap_microusd {
+                                let spent_usd = spent_microusd as f64 / 1_000_000.0;
+                                let cap_str = crate::claude_api_cap::format_usd_pretty(cap_usd);
+                                let spent_str = crate::claude_api_cap::format_usd_pretty(spent_usd);
+                                self.refuse(format!("api_total_cap_reached:cap={cap_str}:spent={spent_str}"));
+                                return Err(());
+                            }
+                        }
                     }
 
                     let attempt_id = am_base::db::ulid();

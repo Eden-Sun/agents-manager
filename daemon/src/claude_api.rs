@@ -752,6 +752,19 @@ pub(crate) async fn put_balance_anchor(
     Ok(Json(res))
 }
 
+pub(crate) async fn get_cap(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let res = crate::claude_api_cap::get_claude_api_cap(app).await?;
+    Ok(Json(res))
+}
+
+pub(crate) async fn put_cap(
+    State(app): State<Arc<App>>,
+    Json(body): Json<crate::claude_api_cap::PutCapRequest>,
+) -> Result<Json<Value>, LcError> {
+    let res = crate::claude_api_cap::put_claude_api_cap(app, body).await?;
+    Ok(Json(res))
+}
+
 pub fn routes() -> axum::Router<Arc<App>> {
     use axum::routing::get;
     axum::Router::new()
@@ -759,6 +772,7 @@ pub fn routes() -> axum::Router<Arc<App>> {
         .route("/claude-api/ledger", get(get_ledger))
         .route("/claude-api/balance", get(get_balance))
         .route("/claude-api/balance-anchor", axum::routing::put(put_balance_anchor))
+        .route("/claude-api/cap", get(get_cap).put(put_cap))
 }
 
 

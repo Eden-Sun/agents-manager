@@ -503,6 +503,8 @@ impl ApiBotRuntime {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
             max_requests_per_hour: i64::from(limits.max_requests_per_hour),
+            total_cap_usd: cfg.claude_api.api_bot.total_cap_usd,
+            total_cap_since: cfg.claude_api.api_bot.total_cap_since.clone(),
         };
         let (identity, expected_cursor, resume_old_admission) = self.identity_for_turn(app, &full).await?;
         let session_cursor = expected_cursor.clone();
@@ -1602,7 +1604,7 @@ async fn validated_turn(
 fn map_runner_result(
     result: Result<super::runner::Halt, super::runner::Error>,
     cancel: &CancellationToken,
-    refusal: Option<&'static str>,
+    refusal: Option<String>,
 ) -> TurnOutcome {
     use super::http::Error as H;
     match result {
@@ -1613,7 +1615,7 @@ fn map_runner_result(
         Err(super::runner::Error::Model(H::Cancelled)) if cancel.is_cancelled() => TurnOutcome::Cancelled,
         Err(super::runner::Error::Budget) => TurnOutcome::Failed("api_bot_max_calls_reached".into()),
         // 預留被拒絕時儲存失敗會冒成 Journal；有明確原因（額度、key、報價）就用它。
-        Err(super::runner::Error::Journal) => TurnOutcome::Failed(refusal.unwrap_or("journal").into()),
+        Err(super::runner::Error::Journal) => TurnOutcome::Failed(refusal.unwrap_or_else(|| "journal".into())),
         Err(super::runner::Error::PendingUnknown) => TurnOutcome::Failed("pending_unknown".into()),
         Err(super::runner::Error::InvalidResponse) => TurnOutcome::Failed("invalid_response".into()),
         Err(super::runner::Error::Model(e)) => TurnOutcome::Failed(match e {

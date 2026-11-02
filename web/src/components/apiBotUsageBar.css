@@ -31,9 +31,16 @@
   border-radius: 4px;
   transition: opacity 0.15s ease;
 }
-.api-balance-chip:hover {
+.api-balance-chip:hover:not(.readonly) {
   opacity: 0.8;
   text-decoration: underline;
+}
+.api-balance-chip.readonly {
+  cursor: default;
+}
+.api-balance-chip.warn {
+  color: var(--warn, #b26a00);
+  font-weight: 650;
 }
 .api-balance-form {
   display: inline-flex;
