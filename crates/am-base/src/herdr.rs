@@ -374,7 +374,7 @@ impl HerdrClient {
         let mut line = serde_json::to_vec(&req)?;
         line.push(b'\n');
         let fut = async {
-            let buf = self.exchange_line(&line, &id, method, timeout).await?;
+            let buf = self.exchange_line(&line, &id, method, &params, timeout).await?;
             let resp: RawResponse = serde_json::from_str(buf.trim_end())
                 .with_context(|| format!("parse herdr response for {method}: {}", snippet(method, &buf)))?;
             validate_response_id(&resp, &id, method)?;
@@ -389,10 +389,11 @@ impl HerdrClient {
             .map_err(|_| anyhow!("herdr rpc {method} timed out after {timeout:?}"))?
     }
 
-    /// 送一行請求、拿一行回應。有中繼就走中繼；中繼說「還沒送出」才直連 socket（那條路一個請求一條連線）。
-    async fn exchange_line(&self, line: &[u8], id: &str, method: &str, timeout: Duration) -> Result<String> {
+    /// 送一行請求、拿一行回應。短呼叫且中繼閒著才走中繼；中繼說「還沒送出」才直連 socket（那條路一個請求一條連線）。
+    async fn exchange_line(&self, line: &[u8], id: &str, method: &str, params: &Value, timeout: Duration) -> Result<String> {
         let relay = self.relay.lock().unwrap().clone();
-        if let Some(relay) = relay {
+        // 只有短呼叫走中繼（白名單，見 herdr_relay::is_short_call）；長等的一律直連 socket，不占中繼。
+        if let Some(relay) = relay.filter(|_| crate::herdr_relay::is_short_call(method, params)) {
             let text = String::from_utf8_lossy(line).into_owned();
             match relay.exchange(&text, id, timeout).await {
                 crate::herdr_relay::Exchange::Sent(answer) => return answer,

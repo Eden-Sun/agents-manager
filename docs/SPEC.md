@@ -3692,7 +3692,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
   herdr 0.9.5 的 `events.subscribe` 不接受畫面變動的訂閱（變體清單裡沒有），`pane.get` 的 `revision` 也不隨畫面動，所以不能靠事件觸發，只能輪詢。
   送字／送鍵可帶 `echo=ansi`，回應直接附上送完後的 ANSI 快照，省一次往返。推送與輪詢可以並存：舊的 `…/terminal` 輪詢照常可用。
   每一拍只花一趟 herdr 呼叫（`pane.read`）；pane 身分與幾何（`pane.get`＋`pane.layout`）只在畫面變了、或距上次確認超過 1 秒才問。遠端主機每趟實測約 110 ms（本機約 0.5 ms），每拍多兩趟會把推送壓到約 3 幀/秒。
-  遠端 herdr 的 RPC 走持久中繼（`am-base::herdr_relay`）：同一條 ssh 主連線上開一個 `python3` session 逐行轉送到遠端 herdr socket。直連 `ssh -L` 的 unix socket 每個 RPC 要 ~110 ms（herdr 每條連線只收一個請求，沒辦法在 socket 上重用）；中繼實測 ~1.2 ms。中繼送出請求後失敗一律回錯、不重送（按鍵不能打兩次）；中繼沒成功過才退回直連 socket。
+  遠端 herdr 的 RPC 走持久中繼（`am-base::herdr_relay`）：同一條 ssh 主連線上開一個 `python3` session 逐行轉送到遠端 herdr socket。直連 `ssh -L` 的 unix socket 每個 RPC 要 ~110 ms（herdr 每條連線只收一個請求，沒辦法在 socket 上重用）；中繼實測 ~1.2 ms。中繼只接短呼叫（白名單 `herdr_relay::is_short_call`：pane.read／pane.get／pane.list／pane.send_text／pane.send_keys 等，且不帶 `timeout_ms`）；`agent.wait`、`agent.start`、`pane.wait_output` 這類可能長等的一律直連 socket，不占中繼。中繼忙著時不排隊，直接退回 socket（請求還沒送出，不會重送）。中繼送出請求後失敗一律回錯、不重送（按鍵不能打兩次）；中繼沒成功過才退回直連 socket。
 
 ### 11.7 不做
 密碼／互動認證、跳板（交給 ssh_config 的 ProxyJump）、遠端 transcript 回補、多 daemon（同一台主機給兩顆 daemon 共用 session 的例外見 §11.10）。
