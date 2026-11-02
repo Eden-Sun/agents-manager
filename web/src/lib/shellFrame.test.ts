@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cursorSeq, planFrame, splitFrame } from './shellFrame'
+import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from './shellFrame'
 
 test('splitFrame：尾端的換行不算一列，有給 rows 就補空列到那個高度', () => {
   assert.deepEqual(splitFrame('a\nb\n', null), ['a', 'b'])
@@ -54,4 +54,20 @@ test('變動的列超過三分之一（全螢幕重繪）→ 整屏重畫，不�
   const p = planFrame(['a', 'b', 'c', 'd', 'e', 'f'], ['A', 'B', 'C', 'd', 'e', 'f'])
   assert.ok(p.out.startsWith('\x1b[H\x1b[2J'))
   assert.deepEqual(p.lines, ['A', 'B', 'C', 'd', 'e', 'f'])
+})
+
+test('cursorSeq：zsh 退格留下的行尾空白不算字尾，使用者自己打的空白才補回', () => {
+  assert.equal(cursorSeq(['m4p@m4p wt % fe      ', '']), '\x1b[1;16H\x1b[?25h')
+  assert.equal(cursorSeq(['$ echo ', ''], 1), '\x1b[1;8H\x1b[?25h')
+  assert.equal(cursorSeq(['$ echo', ''], 3), '\x1b[1;7H\x1b[?25h', '畫面上沒有空白就不補')
+})
+
+test('typedSpacesAfter：打空白累加、其他字歸零、退格減一、其他鍵歸零', () => {
+  assert.equal(typedSpacesAfter(0, { kind: 'text', text: 'echo ' }), 1)
+  assert.equal(typedSpacesAfter(1, { kind: 'text', text: ' ' }), 2)
+  assert.equal(typedSpacesAfter(2, { kind: 'text', text: 'x' }), 0)
+  assert.equal(typedSpacesAfter(2, { kind: 'keys', keys: ['backspace'] }), 1)
+  assert.equal(typedSpacesAfter(0, { kind: 'keys', keys: ['backspace'] }), 0)
+  assert.equal(typedSpacesAfter(2, { kind: 'keys', keys: ['left'] }), 0)
+  assert.equal(typedSpacesAfter(2, { kind: 'text', text: 'a \n' }), 0)
 })

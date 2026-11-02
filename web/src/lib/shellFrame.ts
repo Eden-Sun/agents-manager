@@ -102,12 +102,29 @@ function displayWidth(line: string): number {
 
 /**
  * 游標擺哪：herdr 的畫面不帶游標位置，所以放在最後一個有字的列的字尾（shell 的提示後面就是打字的地方）。
+ * 行尾空白不算字尾：zsh 退格是用空白蓋掉舊字，畫面會留下一串空白，算進去游標就跑到後面。
+ * 例外是使用者自己剛打的空白（`typedSpaces`，見 [`typedSpacesAfter`]），最多補回那麼多格。
  * 全部是空白＝擺在左上。
  */
-export function cursorSeq(lines: string[]): string {
+export function cursorSeq(lines: string[], typedSpaces = 0): string {
   let row = lines.length - 1
   while (row > 0 && isBlank(lines[row])) row--
   if (row < 0 || isBlank(lines[row])) return '\x1b[1;1H\x1b[?25h'
+  const plain = lines[row].replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  const trimmed = plain.replace(/ +$/, '')
+  const col = displayWidth(trimmed) + Math.min(typedSpaces, plain.length - trimmed.length)
   // TUI 的畫面文字裡可能夾了「隱藏游標」，這裡一律打開。
-  return `\x1b[${row + 1};${displayWidth(lines[row]) + 1}H\x1b[?25h`
+  return `\x1b[${row + 1};${col + 1}H\x1b[?25h`
+}
+
+/** 送出一個輸入後，「使用者自己打在行尾的空白」還剩幾格：打空白累加、打其他字歸零、退格減一、其他按鍵歸零。 */
+export function typedSpacesAfter(prev: number, op: { kind: 'text'; text: string } | { kind: 'keys'; keys: string[] }): number {
+  if (op.kind === 'text') {
+    if (/[\r\n]/.test(op.text)) return 0
+    const tail = op.text.length - op.text.replace(/ +$/, '').length
+    return tail === op.text.length ? prev + tail : tail
+  }
+  let n = prev
+  for (const k of op.keys) n = k === 'backspace' ? Math.max(0, n - 1) : 0
+  return n
 }
