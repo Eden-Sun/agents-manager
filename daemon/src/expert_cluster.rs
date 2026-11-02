@@ -1,4 +1,4 @@
-//! 專家模式「群集」：同專案裡 (kind, model, effort, identity) 相同、role=executor、存活的頂層成員 ≥2 顆就是一個群集。
+//! 專家模式「群集」：同專案裡 (kind, model, effort, identity) 相同、role=executor、存活的頂層成員 ≥2 顆就是一個群集（不論有沒有在跑）。
 //! 管理者可以 `herdr agent prompt bot:cluster:<名稱>` 派工，由 daemon 挑閒置成員；沒有閒置的就排進 relay_requests
 //! 的 pending 佇列（`relay_requests.cluster`），第一個閒下來的成員接手（`runners::relay_requests` 的 reconcile）。
 use std::collections::BTreeMap;
@@ -16,6 +16,10 @@ pub struct Member {
     pub identity: Option<String>,
     pub manager_use: bool,
     pub running: bool,
+    /// 有任何進行中的 run（starting／running／stopping）；false＝停著。
+    pub active: bool,
+    /// run 正在 starting。
+    pub starting: bool,
     pub idle: bool,
     pub working: bool,
     /// agent_status 最後一次改變的時間（越晚＝越近閒下來＝cache 越熱）。
@@ -70,7 +74,7 @@ pub fn short_model(kind: &str, model: Option<&str>) -> String {
 pub fn group(members: &[Member]) -> Vec<Cluster> {
     type Key = (String, String, String, String);
     let mut by: BTreeMap<Key, Vec<Member>> = BTreeMap::new();
-    for m in members.iter().filter(|m| m.running) {
+    for m in members {
         let key = (m.kind.clone(), m.model.clone().unwrap_or_default(), m.effort.clone().unwrap_or_default(), m.identity.clone().unwrap_or_default());
         by.entry(key).or_default().push(m.clone());
     }
@@ -114,8 +118,9 @@ pub fn clusters_of(bots: &[db::Bot], runs: &std::collections::HashMap<String, db
         .map(|b| {
             let r = runs.get(&b.id);
             let running = r.is_some_and(|r| r.state == "running");
+            let starting = r.is_some_and(|r| r.state == "starting");
             Member { id: b.id.clone(), kind: b.kind.clone(), model: b.model.clone(), effort: b.effort.clone(), identity: b.identity.clone(),
-                manager_use: b.manager_use == 1, running, idle: running && r.is_some_and(|r| r.agent_status == "idle"),
+                manager_use: b.manager_use == 1, running, active: r.is_some(), starting, idle: running && r.is_some_and(|r| r.agent_status == "idle"),
                 working: running && r.is_some_and(|r| r.agent_status == "working"), since: r.and_then(|r| r.agent_status_since.clone()) }
         }).collect();
     group(&members)
@@ -140,13 +145,39 @@ pub async fn member_idle(app: &Arc<App>, bot_id: &str) -> bool {
     db::active_run(&app.db, bot_id).await.ok().flatten().is_some_and(|r| r.state == "running" && r.agent_status == "idle")
 }
 
+impl Cluster {
+    /// 沒有閒置成員時該啟動哪一顆：manager_use=1、完全沒有進行中 run 的成員（id 最小的）。
+    /// 群集裡已有「啟動中」的成員就回 `None`（一次只啟動一顆）。
+    pub fn pick_to_start(&self) -> Option<&Member> {
+        if self.members.iter().any(|m| m.starting) { return None }
+        self.members.iter().filter(|m| m.manager_use && !m.active).min_by(|a, b| a.id.cmp(&b.id))
+    }
+}
+
+/// 群集沒有閒置成員時，啟動一顆停著的成員（走既有的 `lifecycle::start_bot`，脫離呼叫端執行）；請求留在 pending，
+/// 等它起來閒置後由 reconcile 送出。回傳被啟動的 bot id；沒啟動（已有啟動中、或沒有可啟動的停著成員）回 `None`。
+pub async fn start_one_if_needed(app: &Arc<App>, project_id: &str, cluster: &str) -> Option<String> {
+    let clusters = project_clusters(app, project_id).await.ok()?;
+    let c = clusters.iter().find(|c| c.name == cluster)?;
+    if c.pick_idle().is_some() { return None }
+    let id = c.pick_to_start()?.id.clone();
+    let (app, bot) = (app.clone(), id.clone());
+    tokio::spawn(Box::pin(async move {
+        if let Err(e) = crate::lifecycle::start_bot(&app, &bot).await { tracing::warn!(bot = %bot, error = ?e, "cluster auto-start failed"); }
+    }));
+    Some(id)
+}
+
 /// 群集請求（還沒送出）現在該由誰接：第一個閒置成員（cache 最熱的優先）。沒有閒置成員回 `None`＝繼續等。
 /// 目標換人時以 CAS 改 `to_bot_id`（紀錄裡寫實際接手的 bot）；回傳最後的目標。
 pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, cluster: &str) -> anyhow::Result<Option<String>> {
     let Some(bot) = db::bot(&app.db, project_bot).await? else { return Ok(None) };
     let clusters = project_clusters(app, &bot.project_id).await?;
     let Some(c) = clusters.iter().find(|c| c.name == cluster) else { return Ok(None) };
-    let Some(pick) = c.pick_idle() else { return Ok(None) };
+    let Some(pick) = c.pick_idle() else {
+        start_one_if_needed(app, &bot.project_id, cluster).await;
+        return Ok(None)
+    };
     if pick.id == project_bot { return Ok(Some(pick.id.clone())) }
     let moved = sqlx::query("UPDATE OR IGNORE relay_requests SET to_bot_id=?,attempts=0,error=NULL WHERE id=? AND state='pending' AND to_turn_id IS NULL AND to_bot_id=? AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations cv ON cv.id=t.conversation_id WHERE cv.bot_id=? AND t.client_request_id='relay-request:'||relay_requests.id)")
         .bind(&pick.id).bind(request_id).bind(project_bot).bind(project_bot).execute(&app.db).await?.rows_affected();
@@ -159,7 +190,7 @@ mod tests {
 
     fn m(id: &str, model: &str, effort: &str, identity: &str) -> Member {
         Member { id: id.into(), kind: "claude".into(), model: Some(model.into()), effort: if effort.is_empty() { None } else { Some(effort.into()) },
-            identity: if identity.is_empty() { None } else { Some(identity.into()) }, manager_use: true, running: true, idle: false, working: false, since: None }
+            identity: if identity.is_empty() { None } else { Some(identity.into()) }, manager_use: true, running: true, active: true, starting: false, idle: false, working: false, since: None }
     }
 
     #[test]
@@ -178,10 +209,16 @@ mod tests {
     }
 
     #[test]
-    fn stopped_members_do_not_count() {
+    fn stopped_members_still_count_and_start_one_at_a_time() {
         let mut b = m("b", "claude-haiku-4-5", "", "");
-        b.running = false;
-        assert!(group(&[m("a", "claude-haiku-4-5", "", ""), b]).is_empty());
+        b.running = false; b.active = false;
+        let mut a = m("a", "claude-haiku-4-5", "", "");
+        a.running = false; a.active = false;
+        let cs = group(&[a.clone(), b.clone()]);
+        assert_eq!((cs.len(), cs[0].name.as_str(), cs[0].members.len()), (1, "haiku", 2));
+        assert_eq!(cs[0].pick_to_start().map(|x| x.id.as_str()), Some("a"));
+        a.active = true; a.starting = true;
+        assert!(group(&[a, b]).remove(0).pick_to_start().is_none(), "已有啟動中的就不再啟動");
     }
 
     #[test]
@@ -238,5 +275,32 @@ mod tests {
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
         let to: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id='rq'").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(to, b.id);
+    }
+
+    #[tokio::test]
+    async fn all_stopped_cluster_dispatch_starts_exactly_one_member() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let manager = expert_member(&env, "mgr", "manager", "idle").await;
+        let mut ids = vec![];
+        for n in ["w1", "w2"] {
+            let bot = crate::testing::claude_bot(&env.app, &env.project_id, n).await;
+            sqlx::query("UPDATE bots SET role='executor', model='claude-haiku-5-5' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+            ids.push(bot.id);
+        }
+        let cs = project_clusters(&env.app, &env.project_id).await.unwrap();
+        assert_eq!((cs.len(), cs[0].members.len()), (1, 2));
+        let started = start_one_if_needed(&env.app, &env.project_id, "haiku").await;
+        assert!(started.is_some());
+        // 已有啟動中的成員：不重複啟動。
+        let first = started.unwrap();
+        let run = crate::testing::fake_run(&env.app, &first).await;
+        sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
+        assert_eq!(start_one_if_needed(&env.app, &env.project_id, "haiku").await, None);
+        // 起來並閒置後，請求送達它。
+        sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE bot_id=?").bind(&first).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq',?,?,'k','p','[]','pending',?,'haiku')")
+            .bind(&manager.id).bind(ids.iter().find(|i| **i != first).unwrap()).bind(db::now()).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq", ids.iter().find(|i| **i != first).unwrap(), "haiku").await.unwrap(), Some(first));
     }
 }
