@@ -493,7 +493,8 @@ impl Journal for ApiBotAdapter {
                             .bind(since)
                             .fetch_one(&self.pool)
                             .await
-                            .unwrap_or(0);
+                            // 讀不到已花金額就當成超過上限（fail-closed），不冒險送出請求。
+                            .unwrap_or(i64::MAX);
 
                             let cap_microusd = (cap_usd * 1_000_000.0).round() as i64;
                             let total_with_reservation = spent_microusd.saturating_add(quote.reserved_microusd.max(0));
