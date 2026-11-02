@@ -349,6 +349,8 @@ export default {
   '已截斷': 'Truncated',
   '鍵盤直通中，每 0.25 秒更新': 'Passthrough on, updates every 0.25 seconds',
   '鍵盤直通中，推送更新': 'Passthrough on, live updates',
+  '縮放至全螢幕': 'Fit to screen',
+  '把整個 pane 縮進面板（字會變小）；關掉時字不小於 12px，放不下就捲動。': 'Shrink the whole pane into the panel (text gets smaller). When off, text stays at least 12px and the panel scrolls.',
   '每秒更新，指令送出後立刻重讀': 'Updates every second; reloads right after a command is sent',
   '最後一次讀取失敗（{error}）——上面顯示的是先前的畫面。': 'The last read failed ({error}); the screen above is from before.',
   '送出失敗（{error}）——這次的輸入沒有送進 pane。': 'Send failed ({error}); this input did not reach the pane.',

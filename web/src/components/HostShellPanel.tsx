@@ -19,6 +19,7 @@ import { linkifyTerm } from './termLinks'
 import { fitRules } from '../lib/termRules'
 import { splitAtCursor } from '../lib/termCursor'
 import { setTermWrap, useTermWrap } from './termWrap'
+import { readFitScreen, writeFitScreen } from './shellFitScreen'
 import './hostShellPanel.css'
 
 /**
@@ -169,6 +170,12 @@ export function HostShellPanel({
   const [xtermGeo, setXtermGeo] = useState<{ cols: number; rows: number } | null>(null)
   /** xterm 目前是推送還是輪詢退回（狀態列用）。 */
   const [xtermStreaming, setXtermStreaming] = useState(false)
+  /** 縮放至全螢幕（per-browser，預設關）。 */
+  const [fitScreen, setFitScreenState] = useState(readFitScreen)
+  const setFitScreen = (on: boolean) => {
+    setFitScreenState(on)
+    writeFitScreen(on)
+  }
   const termRef = useRef<HTMLPreElement>(null)
   const [confirmEnd, setConfirmEnd] = useState(false)
   /** daemon 說要再確認（服務 pane 在 listen，或讀不到它在跑什麼）時帶回來的那一列。 */
@@ -522,6 +529,12 @@ export function HostShellPanel({
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
             {t('換行')}
           </label>
+          {xtermMode ? (
+            <label className="conn" title={t('把整個 pane 縮進面板（字會變小）；關掉時字不小於 12px，放不下就捲動。')}>
+              <input type="checkbox" checked={fitScreen} onChange={(e) => setFitScreen(e.target.checked)} />
+              {t('縮放至全螢幕')}
+            </label>
+          ) : null}
           <span className="hint term-pane-chip" title={`herdr pane ${paneId}`}>
             pane <code>{paneId}</code>
             {xtermMode && xtermGeo
@@ -565,6 +578,7 @@ export function HostShellPanel({
             onSend={xtermSend}
             onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
             onStreaming={setXtermStreaming}
+            fitScreen={fitScreen}
           />
         ) : (
         <pre
