@@ -427,11 +427,17 @@ pub struct ClaudeApi {
     client: Mutex<Arc<dyn MessagesClient>>,
     pub ledger: Ledger,
     sent: Mutex<HashMap<String, VecDeque<Instant>>>,
+    pub balance_cache: Arc<crate::claude_api_balance::BalanceCache>,
 }
 
 impl ClaudeApi {
     pub fn new() -> Self {
-        Self { client: Mutex::new(Arc::new(AnthropicHttpClient)), ledger: Ledger::default(), sent: Mutex::new(HashMap::new()) }
+        Self {
+            client: Mutex::new(Arc::new(AnthropicHttpClient)),
+            ledger: Ledger::default(),
+            sent: Mutex::new(HashMap::new()),
+            balance_cache: Arc::new(crate::claude_api_balance::BalanceCache::new()),
+        }
     }
 
     #[cfg(test)]
@@ -731,9 +737,28 @@ pub(crate) async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<Ledg
     Json(app.claude_api.ledger.snapshot(q.limit.unwrap_or(20).clamp(1, LEDGER_CAP)))
 }
 
+pub(crate) async fn get_balance(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let cache = app.claude_api.balance_cache.clone();
+    let res = crate::claude_api_balance::get_claude_api_balance(app, cache).await?;
+    Ok(Json(res))
+}
+
+pub(crate) async fn put_balance_anchor(
+    State(app): State<Arc<App>>,
+    Json(body): Json<crate::claude_api_balance::PutBalanceAnchorRequest>,
+) -> Result<Json<Value>, LcError> {
+    let cache = app.claude_api.balance_cache.clone();
+    let res = crate::claude_api_balance::put_claude_api_balance_anchor(app, cache, body).await?;
+    Ok(Json(res))
+}
+
 pub fn routes() -> axum::Router<Arc<App>> {
     use axum::routing::get;
-    axum::Router::new().route("/claude-api/settings", get(get_settings).put(put_settings)).route("/claude-api/ledger", get(get_ledger))
+    axum::Router::new()
+        .route("/claude-api/settings", get(get_settings).put(put_settings))
+        .route("/claude-api/ledger", get(get_ledger))
+        .route("/claude-api/balance", get(get_balance))
+        .route("/claude-api/balance-anchor", axum::routing::put(put_balance_anchor))
 }
 
 

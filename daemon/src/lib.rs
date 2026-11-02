@@ -242,6 +242,7 @@ mod claude_review_api;
 pub mod release_triage_auto;
 pub mod changelog_translate;
 pub mod claude_api;
+pub mod claude_api_balance;
 mod api_bot;
 mod api_bot_retire_route;
 mod cli_update;

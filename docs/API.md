@@ -137,6 +137,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
 | GET | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | GET | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
+| GET | `/api/claude-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | GET | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -212,6 +213,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | HEAD | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
+| HEAD | `/api/claude-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | HEAD | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -295,6 +297,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/build/remote/install-toolchain` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/build/remote/test` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
+| PUT | `/api/claude-api/balance-anchor` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/deploy/now` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/deploy/wait/escalate` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
@@ -1925,6 +1928,10 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 ### API bot fresh target 與 start（#1944）
 
 `GET /api/bots/{id}/api-usage`（User-only，唯讀，只讀 `api_bot_attempts`）：claude-api bot 的累計用量，非 claude-api → 400 `not_api_bot`、bot 不存在或已刪 → 404。回 `{bot_id, attempts:{total,recorded,reserved,unknown,failed}, cost_microusd:{recorded,reserved,unknown}, tokens:{input,output,cache_read,cache_creation}, cache_hit_rate:number|null, last:{speed,at,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}|null}`。金額為整數微美元：`recorded`＝已結算估價，`reserved`＝已預留未回，`unknown`＝結果不明、保留預留額（不當成零）；token 與命中率只算 `recorded`；`cache_hit_rate`＝cache_read÷(input＋cache_read＋cache_creation)，分母 0 → null；`last` 是最近一筆 recorded 的 `usage.speed`（沒有則請求的 speed）與 token。花費上限判斷用 `recorded+reserved+unknown`。 claude-api 的 turn 失敗（`max_turn_cost_microusd` 累計超限 `api_bot_turn_cost_cap_exceeded`、`api_bot_hourly_limit_reached`、`api_bot_key_unavailable`、`api_bot_quote_refused`、`api_bot_max_calls_reached`、`turn_timeout`、`pending_unknown`、`api_rate_limited`、`api_http_<status>`、`api_timeout`、`api_transport_unknown`…）會在對話裡新增一則 `role:system` 的 `message_added`「⚠ 這一回合失敗（reason）：…」，daemon 同時記 warn；訊息不含 provider 回應或請求內容。失敗結算後同一 run 可直接送下一則（有送出未結算的 unknown 時下一回合以 `pending_unknown` 失敗，需退役對話）。
+
+`GET /api/claude-api/balance`（User-only，唯讀）：Anthropic 預付剩餘額度。若未配置 admin_key_file 或 balance_anchor_usd，回 `{configured: false}`。若配置則回 `{configured: true, anchor: {usd, at}, spent_usd, remaining_usd, report_through, local_since, as_of, error?}`。花費以三段式計算（錨點當天本機帳、完整日 Anthropic cost_report 報表、未涵蓋日本機帳），結果在記憶體快取 10 分鐘；Anthropic API 錯誤時退回本機帳並附帶 `error`。
+
+`PUT /api/claude-api/balance-anchor`（User-only）：更新 Anthropic 預付餘額錨點。body `{usd: number, at?: string}`（`at` 預設為目前 UTC 時間）。更新 `[claude_api]` 配置並持久化至 config。回傳更新後的 `GET /api/claude-api/balance` 內容。
 
 `GET /api/bots/{id}/api_fresh_target` 僅 User 可用；Bot、AGM bot 與 Service 為 403。回應 `availability` 為 `available` 時附 `session_id` 與 `generation`；`none` 表示沒有 session，`unavailable` 表示無法安全確認（含過期或隔離），不附 target。這是快照，刪除時仍重新驗證。
 
