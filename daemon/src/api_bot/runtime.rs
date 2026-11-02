@@ -496,6 +496,7 @@ impl ApiBotRuntime {
         let system = serde_json::Value::String(super::prompt::compose_api_bot_system_prompt(
             &bot,
             agent_name,
+            crate::lifecycle::start::bot_cwd(&bot, &project),
             Some(&agent_md.text),
         ));
         let adapter_limits = super::adapter::AdapterLimits {
