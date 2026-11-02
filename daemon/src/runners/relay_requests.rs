@@ -37,7 +37,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
     let Ok(_guard) = lock.try_lock() else { return Ok(()) };
     let row: Option<(String,String,String,String,Option<String>,String,i64,Option<String>,Option<String>)> = sqlx::query_as("SELECT from_bot_id,to_bot_id,prompt_text,attachments_json,to_turn_id,state,attempts,error,redirected_from FROM relay_requests WHERE id=?")
         .bind(id).fetch_optional(&app.db).await?;
-    let Some((from, to, text, attachments, mut turn, state, attempts, failure, redirected_from)) = row else { return Ok(()) };
+    let Some((from, mut to, text, attachments, mut turn, state, attempts, failure, redirected_from)) = row else { return Ok(()) };
     if state == "pending" || state == "delivered" {
         if turn.is_none() {
             let files: Vec<String> = serde_json::from_str(&attachments)?;
@@ -49,6 +49,14 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                 sqlx::query("UPDATE relay_requests SET state='answered',answered_at=?,error='target turn unavailable' WHERE id=? AND state='delivered' AND to_turn_id IS NULL")
                     .bind(db::now()).bind(id).execute(&app.db).await?;
                 return Ok(())
+            }
+            // 群集請求：等到有閒置成員才送；第一個閒下來的成員接手（to_bot_id 改成它）。
+            let cluster: Option<String> = sqlx::query_scalar("SELECT cluster FROM relay_requests WHERE id=?").bind(id).fetch_one(&app.db).await?;
+            if let (Some(cluster), true) = (cluster, existing.is_none() && state == "pending") {
+                match crate::expert_cluster::claim_target(app, id, &to, &cluster).await? {
+                    Some(target) => to = target,
+                    None => return Ok(()),
+                }
             }
             if existing.is_none() {
                 match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
