@@ -4,6 +4,7 @@ import { LOCAL_HOST, type Bot } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { t, useT } from '../lib/i18n'
 import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
+import { clusterStatText } from '../lib/expertClusters'
 import { botLamp, identitiesOfHost, projectHostName, useStore } from '../store/store'
 import { IdentityBadge } from './IdentitiesPanel'
 import { KindTag } from './KindTag'
@@ -27,7 +28,7 @@ function writeOpen(key: string, open: boolean) {
   }
 }
 
-/** 一列「<name> 群集 ×N　X 執行中 · Y 閒置」，可展開看成員；勾選框一次切整組。 */
+/** 一列「<name> 群集 ×N」，第三行列出各狀態的數量（加總等於成員數），可展開看成員；勾選框一次切整組。 */
 export function ExpertClusterRow({
   projectId,
   name,
@@ -52,8 +53,6 @@ export function ExpertClusterRow({
 
   const ids = members.map((m) => m.id)
   const lamps = useStore(useShallow((s) => ids.map((id) => botLamp(s, id))))
-  const working = lamps.filter((l) => l === 'working').length
-  const idle = lamps.filter((l) => l === 'idle').length
   const busyPatch = useStore(useShallow((s) => ids.some((id) => Boolean(s.busy[`patch:${id}`]))))
 
   // 列上的 kind／身份／模型取第一顆成員（群集同設定）；身份晶片的顯示規則同單顆列（BotRowImpl）。
@@ -123,7 +122,7 @@ export function ExpertClusterRow({
               ) : null}
               {first ? <ModelTag botId={first.id} /> : null}
             </span>
-            <span className="bot-cluster-stat">{t('{w} 執行中 · {i} 閒置', { w: working, i: idle })}</span>
+            <span className="bot-cluster-stat">{clusterStatText(lamps)}</span>
           </span>
         </button>
         <span
