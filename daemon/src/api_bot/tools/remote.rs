@@ -525,7 +525,8 @@ mod tests {
         let write = |script: String, data: &str| {
             let mut child = Command::new("/bin/sh").arg("-c").arg(&script).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
             use std::io::Write;
-            child.stdin.take().unwrap().write_all(data.as_bytes()).unwrap();
+            // 拒絕的腳本（檔已存在、父目錄不在）不讀 stdin 就先退出，寫入可能撞 EPIPE：那是預期的，結果看 stdout。
+            let _ = child.stdin.take().unwrap().write_all(data.as_bytes());
             parse_write_reply(&String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout))
         };
         assert!(write(create_script(root, "sub/new.txt"), "hi\n").is_ok());
