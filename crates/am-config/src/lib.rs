@@ -879,6 +879,15 @@ pub struct ClaudeApiCfg {
     pub endpoint: String,
     #[serde(default = "default_claude_api_timeout_ms")]
     pub timeout_ms: u64,
+    /// Anthropic 組織查詢 cost_report 用的 admin key 檔路徑（選填，預設 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_key_file: Option<String>,
+    /// 使用者在某時間點看到的 Console 餘額錨點（美元）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_anchor_usd: Option<f64>,
+    /// 餘額錨點的時間點（RFC3339 字串）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_anchor_at: Option<String>,
     #[serde(default, skip_serializing_if = "api_bot::ApiBotCfg::is_default")]
     pub api_bot: api_bot::ApiBotCfg,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -943,6 +952,9 @@ impl Default for ClaudeApiCfg {
             key_file: default_claude_api_key_file(),
             endpoint: default_claude_api_endpoint(),
             timeout_ms: default_claude_api_timeout_ms(),
+            admin_key_file: None,
+            balance_anchor_usd: None,
+            balance_anchor_at: None,
             api_bot: api_bot::ApiBotCfg::default(),
             uses: Default::default(),
         }

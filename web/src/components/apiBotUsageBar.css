@@ -17,3 +17,52 @@
   color: var(--warn, #b26a00);
   font-weight: 650;
 }
+
+/* Balance 晶片與校準輸入 */
+.api-balance-chip {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: opacity 0.15s ease;
+}
+.api-balance-chip:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+.api-balance-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.api-balance-input {
+  width: 80px;
+  padding: 1px 4px;
+  font-size: 12px;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 4px;
+  background: var(--bg-input, #fff);
+  color: var(--text, inherit);
+}
+.api-balance-btn {
+  padding: 1px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 4px;
+  background: var(--bg-btn, #eee);
+  color: var(--text, inherit);
+  cursor: pointer;
+}
+.api-balance-btn:hover:not(:disabled) {
+  background: var(--bg-btn-hover, #ddd);
+}
+.api-balance-btn.cancel {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim, #888);
+}
