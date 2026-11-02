@@ -68,7 +68,8 @@ pub(crate) async fn list(
         let cfg = app.cfg.get().await;
         let cfg_bots = cfg.projects.iter().find(|c| c.id.as_deref() == Some(project_id.as_str())).map(|c| c.bots.as_slice()).unwrap_or(&[]);
         let pool = crate::executor_pool::list_json(&project.executor_pool(), cfg_bots);
-        return Ok(Json(json!({"project_id":project_id,"peers":peers,"executor_pool":pool})));
+        let clusters: Vec<Value> = crate::expert_cluster::project_clusters(&app, &project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.iter().map(|c| c.to_json()).collect();
+        return Ok(Json(json!({"project_id":project_id,"peers":peers,"executor_pool":pool,"clusters":clusters})));
     };
 
     // Candidates evaluation for `for_track`

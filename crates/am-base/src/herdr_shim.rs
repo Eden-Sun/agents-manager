@@ -950,10 +950,11 @@ am_agent_prompt() {
         _resolve=$(printf '%s\n' "$_resolve_out" | sed '$d')
         case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）：$_resolve" ;; *) am_announce_refuse 75 "$_requested" "daemon 無法解析目標（HTTP ${_code}）：$_resolve" ;; esac
         _target=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin)["to_bot_id"])') || am_announce_refuse 75 "$_requested" "daemon 未提供目標 bot ID"
+        _cluster=$(printf '%s' "$_resolve" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cluster") or "")' 2>/dev/null) || _cluster=""
         [ -n "$_request_id" ] || _request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
         _relay_sender=$AM_BOT_ID
         [ -z "${AM_CHILD_TOKEN:-}" ] || _relay_sender=""
-        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3] or None,"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None,"track":sys.argv[7] or None}))' "$_text" "$_request_id" "$_relay_sender" "$_expect_result" "$_ack" "$_reply_to" "$_track") || exit 75
+        _body=$(python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1],"client_request_id":sys.argv[2],"relay_from":sys.argv[3] or None,"expect_result":bool(sys.argv[4]),"queue_if_busy":True,"ack":bool(sys.argv[5]),"reply_to":sys.argv[6] or None,"track":sys.argv[7] or None,"cluster":sys.argv[8] or None}))' "$_text" "$_request_id" "$_relay_sender" "$_expect_result" "$_ack" "$_reply_to" "$_track" "$_cluster") || exit 75
         _remaining=$(python3 -c 'import sys,time; t=min(float(sys.argv[2]),float(sys.argv[1])-time.time()); assert t>0; print(t)' "$_deadline" "$_timeout" 2>/dev/null) || am_announce_refuse 75 "$_requested" "解析目標已超時；請用 --request-id $_request_id 原樣重試"
         _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
         _code=$(printf '%s\n' "$_out" | tail -n 1)

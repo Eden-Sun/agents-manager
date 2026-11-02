@@ -4,6 +4,7 @@
 mod child_credentials;
 pub mod model_mode;
 mod expert_peers;
+pub mod expert_cluster;
 mod expert_member;
 pub mod relay_policy;
 mod pane_authority;

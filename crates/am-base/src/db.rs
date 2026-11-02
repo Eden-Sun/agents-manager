@@ -588,6 +588,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (79, "a75a882aefa18996"),
     // 專家模式副管理者（2026-11）：`projects.deputy_bot_id`／`deputy_after_sec`、`relay_requests.redirected_from`／`redirected_at`／`digest_at`（ALTER ADD）。
     (80, "f2044f7ae8a9f49a"),
+    // 專家模式群集派工（2026-11）：`relay_requests.cluster`（ALTER ADD）。
+    (81, "791ac96276182d69"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -875,6 +877,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("relay_requests", "redirected_from", "ALTER TABLE relay_requests ADD COLUMN redirected_from TEXT"),
         ("relay_requests", "redirected_at", "ALTER TABLE relay_requests ADD COLUMN redirected_at TEXT"),
         ("relay_requests", "digest_at", "ALTER TABLE relay_requests ADD COLUMN digest_at TEXT"),
+        // 專家模式群集派工：請求是對哪個群集發的（NULL＝一般派工）；沒有閒置成員時 pending 等第一個閒下來的成員。
+        ("relay_requests", "cluster", "ALTER TABLE relay_requests ADD COLUMN cluster TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

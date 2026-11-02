@@ -130,7 +130,7 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     if role != Some("manager") {
         return None;
     }
-    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。".to_string())
+    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。".to_string())
 }
 
 /// 副管理者設定後的專屬段（只給管理者與副管理者本人，其他 bot 不變）：管理者知道摘要會回來，副管理者知道自己的邊界。

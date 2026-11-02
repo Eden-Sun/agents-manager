@@ -1740,6 +1740,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         let mut bl = Vec::new();
         let role_policy = p.role_policy();
         let cfg_project = cfg.projects.iter().find(|c| c.id.as_deref() == Some(p.id.as_str()));
+        // 專家模式群集（同設定的執行者）：用這份快照算，不另外查 DB。
+        let cluster_names = if p.mode == "expert" { crate::expert_cluster::names_by_bot(&crate::expert_cluster::clusters_of(&bots, &runs, &p.id)) } else { Default::default() };
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
             let policy_drift = policy_revs.get(&b.id).is_some_and(|recorded| {
@@ -1758,7 +1760,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
             let limit_hit = crate::state::limit_hit_value(b, limit_hits.get(&b.id));
-            bl.push(json!({
+            let mut bot_v = json!({
                 "id": b.id,
                 "project_id": b.project_id,
                 // Legacy child nicknames may contain a redundant generated project-agent prefix.
@@ -1816,7 +1818,10 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 // 跨裝置共用的未讀回合數與已讀標記（read_marks.rs）。
                 "unread": unread.get(&b.id).copied().unwrap_or(0),
                 "read_mark": read_marks.get(&b.id).map(crate::read_marks::json_value),
-            }));
+            });
+            // 專家模式群集名（同專案同設定執行者 ≥2 顆）；不在群集內＝null（json! 巨集已到遞迴上限，所以在外面補）。
+            bot_v["cluster"] = json!(cluster_names.get(&b.id));
+            bl.push(bot_v);
         }
         out.push(json!({
             "id": p.id, "path": p.path, "label": p.label, "host": p.host, "mode": p.mode,
@@ -7706,6 +7711,9 @@ struct PromptIn {
     share_reply_visible: bool,
     #[serde(default)]
     track: Option<String>,
+    /// 群集派工（shim 解析 `bot:cluster:<名稱>` 後帶來）：只對 `expect_result` 有意義。
+    #[serde(default)]
+    cluster: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -7726,6 +7734,9 @@ async fn resolve_relay_target(
     let (RequestPrincipal::Bot(sender) | RequestPrincipal::Child { child_id: sender, .. }) = principal else {
         return Err(LcError::Bad("relay resolution requires a bot principal".into()));
     };
+    if let Some(name) = q.target.strip_prefix("bot:cluster:") {
+        return resolve_cluster_target(&app, &sender, name).await;
+    }
     if let Some(id) = q.target.strip_prefix("bot:") {
         if id == sender { return Err(LcError::Bad("relay_self".into())); }
         let bot = db::bot(&app.db, id).await.map_err(any_err)?
@@ -7756,6 +7767,26 @@ async fn resolve_relay_target(
     }
     let (bot, run, agent, pane) = &rows[0];
     Ok(Json(json!({"to_bot_id":bot,"to_run_id":run,"to_agent":agent.as_ref().or(pane.as_ref())})))
+}
+
+/// `bot:cluster:<名稱>`：只有 manager（或代班中的副管理者）可對群集派工；挑同群集閒置、manager_use=1 的成員，
+/// 都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，等第一個閒下來的成員接手。
+pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &str) -> Result<Json<Value>, LcError> {
+    let from = db::bot(&app.db, sender).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay sender".into()))?;
+    let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
+    if !is_manager && !crate::runners::relay_deputy::acting(app, &from.id).await {
+        return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
+    }
+    let clusters = crate::expert_cluster::project_clusters(app, &from.project_id).await.map_err(any_err)?;
+    let cluster = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
+    let chosen = match cluster.pick_idle() {
+        Some(m) => Some((m.id.clone(), true)),
+        None => cluster.members.iter().filter(|m| m.manager_use && m.running).map(|m| m.id.clone()).next().map(|id| (id, false)),
+    };
+    let Some((bot_id, idle)) = chosen else { return Err(LcError::NotFound("cluster member".into())) };
+    check_relay_policy(app, sender, &bot_id).await?;
+    let run = db::active_run(&app.db, &bot_id).await.map_err(any_err)?;
+    Ok(Json(json!({"to_bot_id": bot_id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref()), "cluster": name, "cluster_idle": idle})))
 }
 
 async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), LcError> {
@@ -7854,12 +7885,22 @@ async fn prompt_bot(
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
         }
         check_relay_policy(&app, sender, &id).await?;
+        let cluster = b.cluster.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+        if let Some(name) = &cluster {
+            let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
+            let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
+            if !is_manager && !crate::runners::relay_deputy::acting(&app, &from.id).await {
+                return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
+            }
+            let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
+            if !clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id)) { return Err(LcError::Bad("target is not a member of that cluster".into())); }
+        }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
-        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES(?,?,?,?,?,?,'pending',?,?)")
-            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
+        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster) VALUES(?,?,?,?,?,?,'pending',?,?,?)")
+            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
         #[cfg(test)]
         crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
         let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=?")
@@ -7869,6 +7910,11 @@ async fn prompt_bot(
             .bind(&request_id).fetch_one(&app.db).await.map_err(any_err)?;
         if !inserted || request_state != "pending" || stored_turn.is_some() {
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":stored_turn,"message_id":null,"delivery":request_state,"state":request_state}))).into_response());
+        }
+        // 群集派工且被挑中的成員已不閒（resolve 當時都忙，或之後被別的工作佔走）：留在 pending，
+        // 由 relay_requests 的 reconcile 在第一個閒下來的成員身上送出，不在忙的成員後面排隊。
+        if cluster.is_some() && !crate::expert_cluster::member_idle(&app, &id).await {
+            return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
         }
         let delivery_key = format!("relay-request:{request_id}");
         let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)), false, None).await {
@@ -10748,7 +10794,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false, track: None };
+        let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false, track: None, cluster: None };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -16676,7 +16722,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
-            track: None,
+            track: None, cluster: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
@@ -16707,7 +16753,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
-            track: None,
+            track: None, cluster: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
             Ok(r) => r,
@@ -16794,7 +16840,7 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
             share_reply_visible: false,
-            track: None,
+            track: None, cluster: None,
         };
         let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await.expect_err("unsigned relay");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
@@ -16825,7 +16871,7 @@ mod relay_from_auth_tests {
                 submit_draft: submit,
                 expect_draft_token: expect.map(str::to_string),
                 share_reply_visible: false,
-                track: None,
+                track: None, cluster: None,
             };
             // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
             let mut headers = HeaderMap::new();
