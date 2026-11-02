@@ -1,22 +1,25 @@
 //! System prompt builder for API bots (`claude-api`).
 //!
 //! Unlike CLI bots running in interactive terminal sessions with herdr and browser hooks,
-//! API bots operate in a restricted bwrap sandbox with only the bash tool. Their prompt
-//! describes the real sandbox environment and omits CLI-only capabilities (herdr child agents,
-//! agent-browser, outbox file exchange, and CLI OAuth logins).
+//! API bots operate in a restricted bwrap sandbox with only the bash and str_replace_based_edit_tool tools.
+//! Their prompt describes the real sandbox environment and omits CLI-only capabilities
+//! (herdr child agents, agent-browser, outbox file exchange, CLI OAuth logins, auto compact, fork/resume).
 
 use am_base::db::Bot;
 
 /// Instructions describing the bubblewrap sandbox environment and tool constraints.
 pub fn api_bot_sandbox_instructions() -> &'static str {
-    "你在 bubblewrap（bwrap）沙箱環境中執行，只能透過 bash 工具執行命令。沙箱環境具備以下限制：\n\
-- **工作目錄與檔案**：目前工作目錄（cwd）為 `/workspace`，綁定至專案目錄；家目錄 `HOME` 設為 `/tmp`。\n\
-- **無 herdr 支援**：環境中沒有 herdr 指令或 pane，不能開子 agent，也不支援多 pane 派工。\n\
-- **無瀏覽器工具**：環境中沒有 agent-browser，無法直接瀏覽外部網頁。\n\
-- **無 outbox 輸出目錄**：環境中沒有 `$AM_OUTBOX` 機制，檔案產物直接在 `/workspace` 內處理。\n\
-- **無終端互動或 CLI 登入態**：你直接由 API 驅動，不具備終端互動介面或 CLI 登入憑證。\n\
-- **終止行程**：背景行程僅能透過自己記錄的 PID 清理，禁止使用廣域 kill 指令。\n\
-後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入或 `$AM_*` 環境變數，在這個環境一律不適用，以本段為準。"
+    "你在 bubblewrap（bwrap）沙箱環境中執行，具備以下真實環境條件與限制：\n\
+- **可用工具**：只有 `bash`（bash_20250124）與 `str_replace_based_edit_tool`（text_editor_20250728，檔案路徑使用 `/workspace/...`）。\n\
+- **每次呼叫獨立**：每次 bash 呼叫都是全新的 bwrap 沙箱行程（--unshare-all --clearenv --die-with-parent），前一次的 cd、export、shell 變數與背景行程都不會延續；指令結束時行程群組即被 SIGKILL，不能留背景服務；需要多步驟請在同一次呼叫中以 `&&` 串接。\n\
+- **臨時目錄無狀態**：`/tmp` 為每次呼叫獨立的 tmpfs，`HOME=/tmp`；寫入 `/tmp` 或 `~` 的檔案在該次呼叫結束後即消失，要保留的檔案必須放在 `/workspace`。\n\
+- **工作目錄可讀寫**：`/workspace` 綁定至專案目錄，可讀寫且指令間會保留；預設工作目錄（cwd）為 `/workspace`。\n\
+- **檔案系統唯讀限制**：根目錄僅唯讀掛載 `/usr`、`/bin`、`/lib`、`/lib64`，另有 `/proc` 與 `/dev`；系統中沒有 /etc（無 hostname、passwd、DNS 設定、git/ssh 全域設定）。\n\
+- **沒有網路**：沙箱隔離網路（unshare-all），curl、git fetch/push 或套件安裝等網路操作均會失敗。\n\
+- **精簡環境變數**：環境變數僅提供 `PATH=/usr/bin:/bin`、`HOME=/tmp`、`LANG=C.UTF-8`；沒有任何 `$AM_*` 環境變數。\n\
+- **無 herdr 與 CLI 週邊**：沒有 herdr、不能開子 agent、沒有 agent-browser、沒有 outbox（`$AM_OUTBOX`）、沒有 CLI 登入憑證。\n\
+- **無跨對話記憶與自動 compact**：對話不會自動 compact，會持續累積至 context 上限；一旦超限回合將失敗，需由使用者在介面按「清除對話」；不支援 fork/resume 或模型查詢 API。\n\
+後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入、`$AM_*` 環境變數、auto compact、fork/resume，在這個環境一律不適用，以本段為準。"
 }
 
 /// Compose the system prompt for an API bot (`claude-api`).
@@ -77,13 +80,18 @@ mod tests {
         let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", Some("# 專案說明\n這是測試專案。"));
 
         // Must contain sandbox environment facts
+        assert!(prompt.contains("str_replace_based_edit_tool"));
+        assert!(prompt.contains("每次呼叫"));
+        assert!(prompt.contains("沒有網路"));
+        assert!(prompt.contains("沒有 /etc"));
+        assert!(prompt.contains("自動 compact"));
         assert!(prompt.contains("/workspace"));
-        assert!(prompt.contains("HOME"));
-        assert!(prompt.contains("/tmp"));
+        assert!(prompt.contains("HOME=/tmp"));
         assert!(prompt.contains("不能開子 agent"));
         assert!(prompt.contains("沒有 herdr"));
         assert!(prompt.contains("沒有 agent-browser"));
-        assert!(prompt.contains("沒有 `$AM_OUTBOX`"));
+        assert!(prompt.contains("沒有 outbox"));
+        assert!(prompt.contains("fork/resume"));
         assert!(prompt.contains("名稱是 `claude-api-opus`"));
         assert!(prompt.contains("以本段為準"));
         assert!(prompt.contains("你是一位專業的程式碼審查專家。"));
@@ -103,5 +111,9 @@ mod tests {
         let prompt = compose_api_bot_system_prompt(&bot, "api-worker", None);
         assert!(prompt.contains("名稱是 `api-worker`"));
         assert!(prompt.contains("/workspace"));
+        assert!(prompt.contains("str_replace_based_edit_tool"));
+        assert!(prompt.contains("沒有網路"));
+        assert!(prompt.contains("沒有 /etc"));
+        assert!(prompt.contains("自動 compact"));
     }
 }
