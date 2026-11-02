@@ -2597,7 +2597,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 `GET /api/relay-requests?from=<bot-id>&to=<bot-id>&open=1` 查詢請求；bot principal 只能讀自己是來源或目標的列，`open=1` 限 `pending`／`delivered`。回應 `requests` 包含 id、來源與目標 bot、目標 run／turn、state、時間、attempts 與 error；`notice_turn_id` 可查通知的回合，`notified_at` 是送達證據，`processed_at` 是通知回合完成時間，兩者各自記錄。
 
-`GET /api/relay/resolve?target=<selector>` 為已驗證 bot 做唯讀解析：明確 `bot:<id>` 可跨主機；名稱與 pane ID 限來源 host／herdr session。唯一命中回 `to_bot_id`、`to_run_id`、`to_agent`；無命中 404，多個命中 409 附候選。遠端連線使用配置注入的 `AM_DAEMON_URL` 與 bot 自己的憑證。
+`GET /api/relay/resolve?target=<selector>` 為已驗證 bot 做唯讀解析：明確 `bot:<id>` 可跨主機；名稱與 pane ID 限來源 host／herdr session。同 host／session 沒有任何候選時，才以 agent 名稱（`agent_name`，全域唯一）跨所有主機找一次；bot 名稱與 pane ID 不做跨主機比對。唯一命中回 `to_bot_id`、`to_run_id`、`to_agent`；無命中 404，多個命中 409 附候選。遠端連線使用配置注入的 `AM_DAEMON_URL` 與 bot 自己的憑證。
 
 ### prompt 帶附件
 `POST /api/bots/{id}/prompt` 可帶 `"attachments": ["01M1…"]`：
