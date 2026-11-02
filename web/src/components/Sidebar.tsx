@@ -492,7 +492,7 @@ function BotRowImpl({
               unknown={identityUnknown}
             />
           )}
-          <ModelTag botId={botId} short={compact} />
+          <ModelTag botId={botId} short={compact} cache />
           {quotaWarning ? (
             <span
               className="bot-quota-chip crit"
