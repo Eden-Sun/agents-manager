@@ -22,6 +22,15 @@ pub fn keep_warm_crid_sql(col: &str) -> String {
     format!("({col} LIKE '{KEEP_WARM_CRID_PREFIX}%' OR {col} LIKE '{LEGACY_KEEP_WARM_CRID_PREFIX}%')")
 }
 
+/// Claude 壓縮對話時 `compaction::record` 留的系統訊息開頭（閒置／自動／手動／不明）。
+pub const COMPACT_NOTE_PREFIXES: [&str; 4] = ["Claude 閒置壓縮", "Claude 自動壓縮（context 快滿）", "手動 /compact", "Claude 壓縮了對話"];
+
+/// SQL 條件：`col` 是任何一種壓縮留下的系統訊息內容（熱壓或上面那四種）；「最後一次壓縮」的持久記號。
+pub fn any_compact_note_sql(col: &str) -> String {
+    let plain: Vec<String> = COMPACT_NOTE_PREFIXES.iter().map(|p| format!("{col} LIKE '{p}%'")).collect();
+    format!("({} OR {})", warm_compact_note_sql(col), plain.join(" OR "))
+}
+
 /// SQL 條件：`col` 是熱壓留下的系統訊息內容。
 pub fn warm_compact_note_sql(col: &str) -> String {
     format!("({col} LIKE '{WARM_COMPACT_NOTE_PREFIX}%' OR {col} LIKE '{LEGACY_WARM_COMPACT_NOTE_PREFIX}%')")

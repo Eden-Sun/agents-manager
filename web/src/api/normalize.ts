@@ -578,6 +578,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     agent_status_since: optStr(pick(v, 'agent_status_since')),
     last_api_at: optStr(pick(v, 'last_api_at')),
     cache_kept_warm_at: optStr(pick(v, 'cache_kept_warm_at')),
+    cache_compacted: bool(pick(v, 'cache_compacted')),
     keep_warm_skip: bool(pick(v, 'keep_warm_skip')),
     keep_warm_replied_at: optStr(pick(v, 'keep_warm_replied_at')),
     prompt_cache: toPromptCache(v.prompt_cache) ?? null,

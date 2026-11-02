@@ -2885,6 +2885,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   使用者自己打的 `/compact`（終端 UserPromptSubmit 或網頁送的，只有那則 user 訊息、還沒回覆）也是壓縮自己的回合，一樣收掉，沒帶 `agm_compact` 時至少標「手動 /compact」（#1762）。
   終端備援先到時，畫面只剩壓縮提示（至少一行含 `compacted`，其餘是壓縮後列出的 `Referenced file …`／`Read … lines)`／`Loaded …`）就不存成終端擷取泡泡；stuck sweep 收這種空回合也不寫「沒有偵測到結束」（#1758）。
 - **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keep_warm::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
+- **壓縮之後不倒數、不保溫**：claude 壓縮對話（閒置／自動／手動／熱壓，以聊天室的壓縮系統訊息為準）之後舊 cache 已作廢、context 也變小；最後一次壓縮不早於最後一次真的活動（容許 30 秒誤差）時，run JSON 的 `cache_compacted=true`、巡邏不再為它保溫；之後有新回合就恢復。codex 照舊。
 - **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_warm_at`（API.md）＝最近一次成功保溫回合讓 cache 實際變熱的時間（熱壓不算；比最近一次熱壓早的保溫也不算，熱壓後是 `null`、等新活動後的新保溫），
   網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。
 

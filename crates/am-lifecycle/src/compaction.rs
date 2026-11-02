@@ -22,10 +22,11 @@ const WARM_COMPACT_WINDOW_SECS: i64 = 15 * 60;
 /// 收件匣重播或兩個來源各報一次：這段時間內已有壓縮說明就不再寫。
 const DEDUPE_SECS: i64 = 120;
 
-const IDLE_NOTE: &str = "Claude 閒置壓縮";
-const AUTO_NOTE: &str = "Claude 自動壓縮（context 快滿）";
-const MANUAL_NOTE: &str = "手動 /compact";
-const UNKNOWN_NOTE: &str = "Claude 壓縮了對話";
+// 開頭由 `cache_clock::COMPACT_NOTE_PREFIXES` 統一定義（cache 倒數／保溫靠它認出「最後一次壓縮」）。
+const IDLE_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[0];
+const AUTO_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[1];
+const MANUAL_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[2];
+const UNKNOWN_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[3];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactInfo {
@@ -251,6 +252,8 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
         app.emit_turn(&turn).await;
         app.schedule_flush_queued(&bot.id);
     }
+    // 壓縮之後 cache 倒數要停（`run.cache_compacted`）：馬上推一次狀態，不等下一次狀態變動。
+    app.emit_bot_status(&bot.id).await;
     Ok(())
 }
 

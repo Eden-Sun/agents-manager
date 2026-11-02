@@ -91,14 +91,16 @@ export function cacheState(
 export const NO_WARM_TEXT = msg('不保溫：cache 到期前會自動壓縮（context 夠大時）')
 
 /**
- * 主力晶片用的快取狀態：使用者已按「不用保溫」（`run.keep_warm_skip`）就不畫倒數底色（回 `null`、晶片回一般樣式），
+ * 主力晶片用的快取狀態：壓縮過（`run.cache_compacted`）也不畫；使用者已按「不用保溫」（`run.keep_warm_skip`）就不畫倒數底色（回 `null`、晶片回一般樣式），
  * 取消後（daemon 廣播 `keep_warm_skip=false`）恢復；其餘照 `cacheState`。
  */
 export function chipCache(
-  run: { last_api_at?: string | null; cache_ttl_secs?: number | null; cache_kept_warm_at?: string | null; keep_warm_skip?: boolean } | null | undefined,
+  run: { last_api_at?: string | null; cache_ttl_secs?: number | null; cache_kept_warm_at?: string | null; keep_warm_skip?: boolean; cache_compacted?: boolean } | null | undefined,
   nowMs: number,
   working = false,
 ): CacheState | null {
   if (run?.keep_warm_skip === true) return null
+  // 壓縮過後 cache 已作廢（daemon 判定 `cache_compacted`；回合進行中不會是 true）：同冷掉一樣不畫倒數，新回合後恢復。
+  if (run?.cache_compacted === true && !working) return null
   return cacheState(run?.last_api_at, run?.cache_ttl_secs, nowMs, working, run?.cache_kept_warm_at)
 }

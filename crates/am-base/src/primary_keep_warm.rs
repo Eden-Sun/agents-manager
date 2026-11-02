@@ -618,6 +618,10 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     let (anchor, last_turn) = anchor_of(db, bot, run, now).await?;
     let Some(anchor) = anchor else { return Ok(None) };
     let Some(anchor_t) = db::parse_ts(&anchor) else { return Ok(None) };
+    // 壓縮過後 cache 已作廢、context 也變小：保溫沒有意義，直到真的有新回合。
+    if cache_clock::compacted_since(Some(&anchor), last_turn.as_ref()) {
+        return Ok(Some(Plan { step: Step::Wait, age_secs: (now - anchor_t).num_seconds(), anchor }));
+    }
     // 「不用保溫」（冰凍）：按下之後沒有真的活動（錨點不晚於按下的時間）就不保溫；context 夠大時只在 cache 到期前壓一次（[`decide_frozen`]）。
     let frozen = skip_since(db.pool(), &bot.id).await?.is_some_and(|since| anchor_t <= since);
     let age_secs = (now - anchor_t).num_seconds();
