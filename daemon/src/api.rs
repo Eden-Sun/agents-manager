@@ -1160,6 +1160,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/claude-api/ledger", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/claude-api/balance", BotRoutePolicy::UserOnly),
     ("PUT", "/api/claude-api/balance-anchor", BotRoutePolicy::UserOnly),
+    ("GET", "/api/claude-api/cap", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/claude-api/cap", BotRoutePolicy::UserOnly),
     ("GET", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/credential/rotate", BotRoutePolicy::UserOrAgm),

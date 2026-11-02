@@ -413,6 +413,8 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/claude-api/ledger", Expect::UserOnly, None),
         rule("GET", "/api/claude-api/balance", Expect::UserOnly, None),
         rule("PUT", "/api/claude-api/balance-anchor", Expect::UserOnly, None),
+        rule("GET", "/api/claude-api/cap", Expect::UserOnly, None),
+        rule("PUT", "/api/claude-api/cap", Expect::UserOnly, None),
         rule("GET", "/api/projects/{id}/github/refresh", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/github/refresh", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/github/refresh", Expect::Forbidden, None),

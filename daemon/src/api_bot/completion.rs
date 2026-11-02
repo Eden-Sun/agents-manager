@@ -446,32 +446,46 @@ async fn assistant_count(conn: &mut sqlx::SqliteConnection, turn: &str) -> Resul
 }
 
 /// 失敗原因的人話；只含固定代碼，不含任何 provider 回應或請求內容。
-fn failure_explanation(reason: &str) -> &'static str {
+fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str> {
+    if let Some(rest) = reason.strip_prefix("api_total_cap_reached:cap=") {
+        if let Some((cap, spent)) = rest.split_once(":spent=") {
+            return format!("已達總花費上限 ${cap}（已花 ${spent}）").into();
+        }
+    }
     match reason {
-        "api_bot_turn_cost_cap_exceeded" => "這一回合累計花費加上下一次請求的預留額，會超過單回合成本上限（max_turn_cost_microusd），所以沒有送出請求。",
-        "api_bot_hourly_limit_reached" => "過去一小時的請求數已達上限（max_requests_per_hour），所以沒有送出請求。",
-        "api_bot_key_unavailable" => "讀不到 API key（[claude_api] key_file），所以沒有送出請求。",
-        "api_bot_quote_refused" => "請求無法估價（超過上下文上限或含未核准的欄位），所以沒有送出請求。",
-        "api_bot_max_calls_reached" => "這一回合的 API 呼叫次數已達上限（max_api_calls_per_turn）。",
-        "turn_timeout" => "這一回合超過時間上限（turn_timeout_secs）。",
-        "max_tokens" => "回覆在輸出 token 上限被截斷。",
-        "unknown_stop" => "模型以未知的原因停止。",
-        "pending_unknown" => "上一次請求的送達與計費無法確認，為了避免重複計費已停止；請退役這個對話後再試。",
-        "journal" => "對話狀態無法寫入，已停止。",
-        "invalid_response" | "api_invalid_response" => "收到無法驗證的回應（用量或內容不合規則），已停止。",
-        "api_rate_limited" => "Anthropic API 回報請求過於頻繁（429）。",
-        "api_timeout" => "Anthropic API 請求逾時。",
-        "api_transport_unknown" => "與 Anthropic API 的連線中斷，無法確認請求是否送達。",
-        "api_invalid_request" => "請求不合法，沒有送出。",
-        r if r.starts_with("api_http_") => "Anthropic API 回了錯誤狀態碼。",
-        _ => "原因未知。",
+        "api_total_cap_reached" => "已達總花費上限。".into(),
+        "api_bot_turn_cost_cap_exceeded" => "這一回合累計花費加上下一次請求的預留額，會超過單回合成本上限（max_turn_cost_microusd），所以沒有送出請求。".into(),
+        "api_bot_hourly_limit_reached" => "過去一小時的請求數已達上限（max_requests_per_hour），所以沒有送出請求。".into(),
+        "api_bot_key_unavailable" => "讀不到 API key（[claude_api] key_file），所以沒有送出請求。".into(),
+        "api_bot_quote_refused" => "請求無法估價（超過上下文上限或含未核准的欄位），所以沒有送出請求。".into(),
+        "api_bot_max_calls_reached" => "這一回合的 API 呼叫次數已達上限（max_api_calls_per_turn）。".into(),
+        "turn_timeout" => "這一回合超過時間上限（turn_timeout_secs）。".into(),
+        "max_tokens" => "回覆在輸出 token 上限被截斷。".into(),
+        "unknown_stop" => "模型以未知的原因停止。".into(),
+        "pending_unknown" => "上一次請求的送達與計費無法確認，為了避免重複計費已停止；請退役這個對話後再試。".into(),
+        "journal" => "對話狀態無法寫入，已停止。".into(),
+        "invalid_response" | "api_invalid_response" => "收到無法驗證的回應（用量或內容不合規則），已停止。".into(),
+        "api_rate_limited" => "Anthropic API 回報請求過於頻繁（429）。".into(),
+        "api_timeout" => "Anthropic API 請求逾時。".into(),
+        "api_transport_unknown" => "與 Anthropic API 的連線中斷，無法確認請求是否送達。".into(),
+        "api_invalid_request" => "請求不合法，沒有送出。".into(),
+        r if r.starts_with("api_http_") => "Anthropic API 回了錯誤狀態碼。".into(),
+        _ => "原因未知。".into(),
     }
 }
 
 /// 失敗的 turn 在對話裡留一則可見的系統訊息（帶 reason），並記 warn。寫不進去只記 log，不影響已提交的失敗結算。
 pub(super) async fn post_failure_notice(app: &Arc<App>, key: &ApiTurnKey, reason: &str) {
     tracing::warn!(bot = %key.bot_id, run = %key.run_id, turn = %key.turn_id, reason = %reason, "API bot turn failed");
-    let text = format!("⚠ 這一回合失敗（{reason}）：{}", failure_explanation(reason));
+    let text = if let Some(rest) = reason.strip_prefix("api_total_cap_reached:cap=") {
+        if let Some((cap, spent)) = rest.split_once(":spent=") {
+            format!("⚠ 這一回合失敗（api_total_cap_reached）：已達總花費上限 ${cap}（已花 ${spent}）")
+        } else {
+            format!("⚠ 這一回合失敗（api_total_cap_reached）：{}", failure_explanation(reason))
+        }
+    } else {
+        format!("⚠ 這一回合失敗（{reason}）：{}", failure_explanation(reason))
+    };
     let posted: Result<Option<crate::db::Message>> = async {
         let mut tx = crate::db::begin_write(&app.db).await?;
         let conversation: Option<String> = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=? AND run_id=?")

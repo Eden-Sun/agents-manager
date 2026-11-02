@@ -14,7 +14,7 @@ after(async () => {
   await teardownDom()
 })
 
-test('ApiBotUsageBar 顯示 Balance 晶片與點擊編輯表單', async () => {
+test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除表單', async () => {
   useStore.setState({ turns: { 'bot-1': {} } })
 
   const origRequest = rawTransport.request.bind(rawTransport)
@@ -26,6 +26,12 @@ test('ApiBotUsageBar 顯示 Balance 晶片與點擊編輯表單', async () => {
     remaining_usd: 98.5,
     report_through: '2026-11-01T23:59:59Z',
     local_since: '2026-11-02T00:00:00Z',
+  }
+
+  let currentCap: { cap_usd: number | null; since: string | null; spent_usd: number } = {
+    cap_usd: null,
+    since: null,
+    spent_usd: 0,
   }
 
   rawTransport.request = (async (method: string, path: string, body?: unknown) => {
@@ -41,15 +47,19 @@ test('ApiBotUsageBar 顯示 Balance 晶片與點擊編輯表單', async () => {
     if (path === '/claude-api/balance') {
       return currentBalance
     }
-    if (path === '/claude-api/balance-anchor' && method === 'PUT') {
-      const b = body as { usd: number; at?: string }
-      currentBalance = {
-        ...currentBalance,
-        anchor: { usd: b.usd, at: b.at ?? '2026-11-02T04:00:00Z' },
-        spent_usd: 0,
-        remaining_usd: b.usd,
+    if (path === '/claude-api/cap') {
+      if (method === 'GET') {
+        return currentCap
       }
-      return currentBalance
+      if (method === 'PUT') {
+        const b = body as { cap_usd: number | null }
+        currentCap = {
+          cap_usd: b.cap_usd,
+          since: b.cap_usd !== null ? '2026-11-02T05:00:00Z' : null,
+          spent_usd: 0,
+        }
+        return currentCap
+      }
     }
     return origRequest(method as any, path, body)
   }) as typeof rawTransport.request
@@ -65,26 +75,31 @@ test('ApiBotUsageBar 顯示 Balance 晶片與點擊編輯表單', async () => {
     const bar = document.querySelector('[data-testid="api-usage-bar"]')
     assert.ok(bar, 'api-usage-bar should render')
 
-    const balanceChip = bar.querySelector<HTMLButtonElement>('.api-balance-chip')
+    // Balance 晶片唯讀渲染
+    const balanceChip = bar.querySelector<HTMLElement>('.api-balance-chip[data-k="balance"]')
     assert.ok(balanceChip, 'balance chip should render when configured')
+    assert.ok(balanceChip.classList.contains('readonly'), 'balance chip must be readonly')
     assert.ok(balanceChip.textContent?.includes('≈ $98.50'), 'shows remaining balance')
 
-    // 點擊進行校準
+    // 未設定上限時應顯示「設定上限」
+    const capSetupBtn = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap-setup"]')
+    assert.ok(capSetupBtn, 'cap setup button should render when cap is null')
+
+    // 點擊進行設定上限
     await act(async () => {
-      balanceChip.click()
+      capSetupBtn.click()
     })
 
     const form = bar.querySelector<HTMLFormElement>('.api-balance-form')
-    assert.ok(form, 'form should render in editing mode')
+    assert.ok(form, 'form should render in cap editing mode')
 
-    const input = form.querySelector<HTMLInputElement>('.api-balance-input')
-    assert.ok(input, 'input should render')
-    assert.equal(input.value, '98.50')
+    const input = form.querySelector<HTMLInputElement>('#cap-input')
+    assert.ok(input, 'cap input should render')
 
-    // 變更數值並送出
+    // 變更數值為 10.00 並送出
     await act(async () => {
       const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')!.set!
-      set.call(input, '95.00')
+      set.call(input, '10.00')
       input.dispatchEvent(new Event('input', { bubbles: true }))
       input.dispatchEvent(new Event('change', { bubbles: true }))
     })
@@ -94,10 +109,29 @@ test('ApiBotUsageBar 顯示 Balance 晶片與點擊編輯表單', async () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
-    // 表單應關閉，並顯示新餘額
-    const updatedChip = bar.querySelector<HTMLButtonElement>('.api-balance-chip')
-    assert.ok(updatedChip, 'chip should be visible after save')
-    assert.ok(updatedChip.textContent?.includes('≈ $95.00'), 'updated balance should be shown')
+    // 表單應關閉，並顯示新上限「上限 $0.00 / $10.00」
+    const updatedCapChip = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap"]')
+    assert.ok(updatedCapChip, 'cap chip should be visible after save')
+    assert.ok(updatedCapChip.textContent?.includes('$0.00 / $10.00'), 'updated cap should be shown')
+
+    // 再次點擊打開表單並測試清除
+    await act(async () => {
+      updatedCapChip.click()
+    })
+
+    const form2 = bar.querySelector<HTMLFormElement>('.api-balance-form')
+    assert.ok(form2, 'form should render again')
+    const clearBtn = form2.querySelector<HTMLButtonElement>('.api-balance-btn.clear')
+    assert.ok(clearBtn, 'clear button should exist')
+
+    await act(async () => {
+      clearBtn.click()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    // 清除後應變回「設定上限」
+    const revertedSetupBtn = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap-setup"]')
+    assert.ok(revertedSetupBtn, 'should revert to cap setup button after clear')
   } finally {
     rawTransport.request = origRequest
   }

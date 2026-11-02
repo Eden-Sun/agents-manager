@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Claude API Bot (`[claude_api.api_bot]`) 執行限制與超額保險絲設定（SPEC §4.3d，issue #1944）。
 /// 預設全關，只有在 `[claude_api] enabled = true` 且 `[claude_api.api_bot] enabled = true` 雙開時才生效。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiBotCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -22,6 +22,12 @@ pub struct ApiBotCfg {
     pub max_tool_output_bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turn_cost_microusd: Option<u64>,
+    /// 總花費上限（美元），從 total_cap_since 起算，所有 claude-api bot 合計。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cap_usd: Option<f64>,
+    /// 總花費上限生效的時間起點（RFC3339 字串）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cap_since: Option<String>,
 }
 
 pub fn default_max_api_calls_per_turn() -> u32 {
@@ -64,6 +70,8 @@ impl Default for ApiBotCfg {
             command_timeout_secs: default_command_timeout_secs(),
             max_tool_output_bytes: default_max_tool_output_bytes(),
             max_turn_cost_microusd: None,
+            total_cap_usd: None,
+            total_cap_since: None,
         }
     }
 }
@@ -392,5 +400,18 @@ max_turn_cost_microusd = 500000
                 format!("[claude_api.api_bot]\nenabled=true\nmax_turn_cost_microusd={value}\n");
             assert!(toml::from_str::<ConfigFile>(&text).is_err());
         }
+    }
+
+    #[test]
+    fn total_cap_fields_roundtrip_and_defaults() {
+        let text = "[claude_api.api_bot]\nenabled=true\ntotal_cap_usd=25.5\ntotal_cap_since=\"2026-11-02T00:00:00Z\"\n";
+        let cfg: ConfigFile = toml::from_str(text).unwrap();
+        assert_eq!(cfg.claude_api.api_bot.total_cap_usd, Some(25.5));
+        assert_eq!(cfg.claude_api.api_bot.total_cap_since.as_deref(), Some("2026-11-02T00:00:00Z"));
+
+        let default_text = "[claude_api.api_bot]\nenabled=true\n";
+        let default_cfg: ConfigFile = toml::from_str(default_text).unwrap();
+        assert_eq!(default_cfg.claude_api.api_bot.total_cap_usd, None);
+        assert_eq!(default_cfg.claude_api.api_bot.total_cap_since, None);
     }
 }
