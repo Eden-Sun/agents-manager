@@ -1654,7 +1654,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null}
           <HostOfflineChatNotice botId={botId} />
           <MessageList botId={botId} />
-          {!active && !waitingForStart ? (
+          {!active && !waitingForStart && bot.kind !== 'claude-api' ? (
             <div className="bot-stopped-bar" role="status">
               <span>{composerReason || t('Bot 未在執行中，無法送出訊息')}</span>
               <button
