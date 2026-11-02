@@ -7762,14 +7762,21 @@ async fn resolve_relay_target(
         ).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
     }
     let mut rows = Vec::new();
+    let mut denied_reason: Option<String> = None;
     for candidate in candidates {
         match crate::relay_policy::relay_prompt_allowed(&app, &sender, &candidate.0, crate::relay_policy::Admission::NewRequest).await {
             Ok(()) => rows.push(candidate),
-            Err(crate::relay_policy::RelayDenied::Denied(_)) => {},
+            Err(crate::relay_policy::RelayDenied::Denied(reason)) => { denied_reason.get_or_insert(reason); },
             Err(crate::relay_policy::RelayDenied::Unavailable(e)) => return Err(LcError::Upstream(e)),
         }
     }
-    if rows.is_empty() { return Err(LcError::NotFound("relay target".into())); }
+    if rows.is_empty() {
+        // 候選存在但全被政策擋掉：回 403 帶原因，不要吞成 404。
+        return Err(match denied_reason {
+            Some(reason) => LcError::Forbidden(json!({"error":"forbidden","reason":reason})),
+            None => LcError::NotFound("relay target".into()),
+        });
+    }
     if rows.len() != 1 {
         return Err(LcError::Conflict(json!({"error":"ambiguous_relay_target", "candidates":rows.iter().map(|r| &r.0).collect::<Vec<_>>() })));
     }
@@ -17922,6 +17929,20 @@ mod relay_result_api_tests {
             let error = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: target.into() })).await.unwrap_err();
             assert_eq!(error.into_response().status(), StatusCode::NOT_FOUND, "{target} must not match a remote-host bot");
         }
+    }
+
+    #[tokio::test]
+    async fn policy_blocked_candidate_resolves_to_403_with_reason() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "blocked-sender").await;
+        let (remote_bot, _) = insert_remote_run(&env.app, "blocked-remote", "agents-manager-blocked-rly", "pane-blocked").await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=(SELECT project_id FROM bots WHERE id=?)").bind(&remote_bot).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&remote_bot).execute(&env.app.db).await.unwrap();
+        let error = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: "agents-manager-blocked-rly".into() })).await.unwrap_err();
+        let LcError::Forbidden(body) = error else { panic!("expected 403") };
+        assert_eq!(body["reason"], "expert_cross_project");
+        let missing = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id)), Query(RelayResolveQuery { target: "no-such-agent".into() })).await.unwrap_err();
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
