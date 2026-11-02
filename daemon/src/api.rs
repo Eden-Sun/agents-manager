@@ -7751,10 +7751,16 @@ async fn resolve_relay_target(
     let fallback = app.session_for_host(&host).await.ok_or_else(|| LcError::NotFound("host session".into()))?;
     let sender_run = db::active_run(&app.db, &sender).await.map_err(any_err)?;
     let session = sender_run.as_ref().and_then(|r| r.herdr_session.as_deref()).unwrap_or(&fallback);
-    let candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+    let mut candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT b.id,r.id,r.agent_name,r.pane_id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
     ).bind(&host).bind(&fallback).bind(session).bind(&q.target).bind(&q.target).bind(&q.target)
         .fetch_all(&app.db).await.map_err(any_err)?;
+    if candidates.is_empty() {
+        // 跨主機：只用 agent 名稱（帶 $AM_AGENT_NAME 前綴，全域應唯一）找；pane id 與 bot 名稱各主機自己的，不做跨主機比對。
+        candidates = sqlx::query_as(
+            "SELECT b.id,r.id,r.agent_name,r.pane_id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
+        ).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
+    }
     let mut rows = Vec::new();
     for candidate in candidates {
         match crate::relay_policy::relay_prompt_allowed(&app, &sender, &candidate.0, crate::relay_policy::Admission::NewRequest).await {
@@ -17883,6 +17889,52 @@ mod relay_result_api_tests {
         let Json(result) = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(a.id)), Query(RelayResolveQuery { target: format!("bot:{}", b.id) })).await.unwrap();
         assert_eq!(result["to_bot_id"], b.id);
         assert!(result["to_run_id"].is_null());
+    }
+
+    async fn insert_remote_run(app: &Arc<App>, name: &str, agent_name: &str, pane_id: &str) -> (String, String) {
+        let project = db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','m4p',?)")
+            .bind(&project).bind(format!("/remote/{project}")).bind(db::now()).execute(&app.db).await.unwrap();
+        let bot = crate::testing::claude_bot(app, &project, name).await;
+        let run = db::ulid();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,pane_id,agent_name,started_at) VALUES(?,?,'running','idle',?,?,?)")
+            .bind(&run).bind(&bot.id).bind(pane_id).bind(agent_name).bind(db::now()).execute(&app.db).await.unwrap();
+        (bot.id, run)
+    }
+
+    #[tokio::test]
+    async fn agent_name_resolves_across_hosts() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "xhost-sender").await;
+        let (remote_bot, remote_run) = insert_remote_run(&env.app, "xhost-remote", "agents-manager-xhost-rly", "remote-pane").await;
+        let Json(result) = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: "agents-manager-xhost-rly".into() })).await.unwrap();
+        assert_eq!(result["to_bot_id"], remote_bot);
+        assert_eq!(result["to_run_id"], remote_run);
+        assert_eq!(result["to_agent"], "agents-manager-xhost-rly");
+    }
+
+    #[tokio::test]
+    async fn bot_name_and_pane_id_do_not_resolve_across_hosts() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "xhost-clash-sender").await;
+        let (_remote_bot, _run) = insert_remote_run(&env.app, "xhost-clash-name", "xhost-clash-agent", "pane-clash").await;
+        for target in ["xhost-clash-name", "pane-clash"] {
+            let error = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: target.into() })).await.unwrap_err();
+            assert_eq!(error.into_response().status(), StatusCode::NOT_FOUND, "{target} must not match a remote-host bot");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_name_on_two_hosts_is_ambiguous() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "xhost-amb-sender").await;
+        let (first, _) = insert_remote_run(&env.app, "xhost-amb-one", "agents-manager-xhost-amb", "pane-amb-1").await;
+        let (second, _) = insert_remote_run(&env.app, "xhost-amb-two", "agents-manager-xhost-amb", "pane-amb-2").await;
+        let error = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: "agents-manager-xhost-amb".into() })).await.unwrap_err();
+        let LcError::Conflict(body) = error else { panic!("expected ambiguous conflict") };
+        assert_eq!(body["error"], "ambiguous_relay_target");
+        let candidates = body["candidates"].as_array().unwrap();
+        assert!(candidates.iter().any(|c| c == &first) && candidates.iter().any(|c| c == &second));
     }
 
     #[tokio::test]
