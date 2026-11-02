@@ -7781,7 +7781,14 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
     let cluster = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
     let chosen = match cluster.pick_idle() {
         Some(m) => Some((m.id.clone(), true)),
-        None => cluster.members.iter().filter(|m| m.manager_use && m.running).map(|m| m.id.clone()).next().map(|id| (id, false)),
+        None => {
+            // 沒有閒置成員：先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
+            crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await;
+            cluster.members.iter().filter(|m| m.manager_use && (m.running || m.starting)).map(|m| m.id.clone()).next()
+                .or_else(|| cluster.pick_to_start().map(|m| m.id.clone()))
+                .or_else(|| cluster.members.iter().filter(|m| m.manager_use).map(|m| m.id.clone()).next())
+                .map(|id| (id, false))
+        }
     };
     let Some((bot_id, idle)) = chosen else { return Err(LcError::NotFound("cluster member".into())) };
     check_relay_policy(app, sender, &bot_id).await?;
