@@ -49,7 +49,7 @@ test('推送的 frame 畫進終端，並回報 pane 的幾何', async () => {
       onRead={() => {}}
       onSend={() => {}}
       onGeometry={(c, r) => geo.push([c, r])}
-      onStreaming={() => {}}
+      onStreaming={() => {}} fitScreen={false}
     />,
   )
   await ws.open()
@@ -60,7 +60,7 @@ test('推送的 frame 畫進終端，並回報 pane 的幾何', async () => {
 
 test('連不上推送（舊 daemon 握手被拒）就每隔一陣子輪詢 terminal?format=ansi', async () => {
   const pane = await openPane()
-  await mount(<HostShellXterm host="local" paneId={pane} wrap onTyping={() => {}} onRead={() => {}} onSend={() => {}} onGeometry={() => {}} onStreaming={() => {}} />)
+  await mount(<HostShellXterm host="local" paneId={pane} wrap onTyping={() => {}} onRead={() => {}} onSend={() => {}} onGeometry={() => {}} onStreaming={() => {}} fitScreen={false} />)
   // 不 open：WebSocket 停在 CONNECTING，等同握手沒成功，應該由輪詢補畫面。
   await until(() => terminalReads() >= 2, '沒有推送時要輪詢 terminal?format=ansi')
   assert.ok(requests.some((r) => r.path.includes('format=ansi')))

@@ -6,6 +6,7 @@ import { ApiError } from '../api/types'
 import { copyText } from '../lib/copyText'
 import { t } from '../lib/i18n'
 import { cursorSeq, planFrame, splitFrame } from '../lib/shellFrame'
+import { fontSizeFor } from '../lib/shellFont'
 import { createInputBatcher } from '../lib/xtermInput'
 import type { ShellOp } from '../lib/xtermInput'
 import { useStore } from '../store/store'
@@ -57,16 +58,33 @@ export interface HostShellXtermProps {
   onGeometry: (cols: number, rows: number) => void
   /** 目前是推送（true）還是輪詢退回（false）；狀態列據此寫。 */
   onStreaming: (on: boolean) => void
+  /** 縮放至全螢幕：字級縮到整個 pane 放得下（關＝字級不低於 12px，放不下就捲動）。 */
+  fitScreen: boolean
 }
 
-export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, onGeometry, onStreaming }: HostShellXtermProps) {
+export function HostShellXterm({
+  host,
+  paneId,
+  wrap,
+  onTyping,
+  onRead,
+  onSend,
+  onGeometry,
+  onStreaming,
+  fitScreen,
+}: HostShellXtermProps) {
   const boxRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   // 回呼每次 parent 重畫都可能換：放 ref，effect 不因此重建 xterm（重建會清掉捲動歷史）。
-  const cb = useRef({ onTyping, onRead, onSend, onGeometry, onStreaming, wrap })
+  const cb = useRef({ onTyping, onRead, onSend, onGeometry, onStreaming, wrap, fitScreen })
+  /** 目前的字級重算（effect 內設定）；切換縮放時從外面呼叫。 */
+  const refitRef = useRef<() => void>(() => {})
   useEffect(() => {
-    cb.current = { onTyping, onRead, onSend, onGeometry, onStreaming, wrap }
+    cb.current = { onTyping, onRead, onSend, onGeometry, onStreaming, wrap, fitScreen }
   })
+  useEffect(() => {
+    refitRef.current()
+  }, [fitScreen])
   useEffect(() => {
     termRef.current?.write(wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
   }, [wrap])
@@ -135,22 +153,64 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
     let streamTimer: ReturnType<typeof setTimeout> | null = null
     let pollTimer: ReturnType<typeof setTimeout> | null = null
 
+    // 自動跟隨：游標在視窗外就捲過去。使用者自己往上捲、游標移出視窗時暫停；捲回游標所在處恢復。
+    let following = true
+    let autoTop = -1
+    let autoLeft = -1
+    const cursorEl = () => el.querySelector('.xterm-cursor') as HTMLElement | null
+    const cursorVisible = () => {
+      const c = cursorEl()
+      if (!c) return true
+      const b = el.getBoundingClientRect()
+      const r = c.getBoundingClientRect()
+      return r.top >= b.top && r.bottom <= b.bottom && r.left >= b.left && r.right <= b.right
+    }
+    const follow = () => {
+      if (!alive || !following) return
+      const c = cursorEl()
+      if (!c) return
+      const b = el.getBoundingClientRect()
+      const r = c.getBoundingClientRect()
+      const top = r.top - b.top + el.scrollTop
+      const left = r.left - b.left + el.scrollLeft
+      let nt = el.scrollTop
+      let nl = el.scrollLeft
+      if (top < el.scrollTop) nt = top - 8
+      else if (top + r.height > el.scrollTop + el.clientHeight) nt = top + r.height - el.clientHeight + 8
+      if (left < el.scrollLeft) nl = left - 8
+      else if (left + r.width > el.scrollLeft + el.clientWidth) nl = left + r.width - el.clientWidth + 8
+      if (nt !== el.scrollTop) el.scrollTop = nt
+      if (nl !== el.scrollLeft) el.scrollLeft = nl
+      autoTop = el.scrollTop
+      autoLeft = el.scrollLeft
+    }
+    const onScroll = () => {
+      // 自己捲的不算：只有使用者捲動才改跟隨狀態。
+      if (el.scrollTop === autoTop && el.scrollLeft === autoLeft) return
+      following = cursorVisible()
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+
     const paint = () => {
       if (!alive) return
       const plan = planFrame(prev, splitFrame(lastText, term.rows))
-      if (plan.out) term.write(plan.out + cursorSeq(plan.lines))
+      if (plan.out) term.write(plan.out + cursorSeq(plan.lines), () => requestAnimationFrame(follow))
       prev = plan.lines
     }
-    /** 字級：先讓整個 pane 放得進面板；太小就停在 7px，剩下的交給容器捲動。 */
+    /** 字級：預設不低於 12px（放不下就捲動）；縮放至全螢幕時縮到整個 pane 放得下。 */
     const fitFont = () => {
       if (!alive) return
-      const w = el.clientWidth - 16
-      const h = el.clientHeight - 12
-      if (w <= 0 || h <= 0 || term.cols <= 0 || term.rows <= 0) return
-      const size = Math.min(w / (term.cols * 0.6), h / (term.rows * 1.2))
-      const next = Math.max(7, Math.min(13, Math.floor(size * 2) / 2))
-      if (term.options.fontSize !== next) term.options.fontSize = next
+      const next = fontSizeFor(
+        { width: el.clientWidth - 16, height: el.clientHeight - 12 },
+        { cols: term.cols, rows: term.rows },
+        cb.current.fitScreen,
+      )
+      if (term.options.fontSize !== next) {
+        term.options.fontSize = next
+        requestAnimationFrame(follow)
+      }
     }
+    refitRef.current = fitFont
     const draw = (id: number, text: string, pane: { cols: number | null; rows: number | null }) => {
       if (!alive || id < appliedId) return
       appliedId = id
@@ -169,7 +229,10 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
       if (alive) cb.current.onRead(e)
     }
 
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fitFont())
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
+      fitFont()
+      requestAnimationFrame(follow)
+    })
     ro?.observe(el)
 
     const pollOnce = async () => {
@@ -277,6 +340,8 @@ export function HostShellXterm({ host, paneId, wrap, onTyping, onRead, onSend, o
       closeStream?.()
       document.removeEventListener('visibilitychange', onVisible)
       ro?.disconnect()
+      el.removeEventListener('scroll', onScroll)
+      refitRef.current = () => {}
       ta?.removeEventListener('focus', onFocus)
       ta?.removeEventListener('blur', onBlur)
       dataSub.dispose()
