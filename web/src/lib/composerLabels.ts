@@ -14,7 +14,7 @@ export interface ComposerLabelState {
   autoStart?: boolean
 }
 
-export function composerPlaceholder(state: ComposerLabelState, o: { phone: boolean; starting: boolean }): string {
+export function composerPlaceholder(state: ComposerLabelState, o: { phone: boolean; starting: boolean; noFiles?: boolean }): string {
   if (state.disabled) return o.phone
     ? state.reason || t('目前無法送出訊息')
     : t('{reason}——可以先打，恢復後再送', { reason: state.reason || t('目前無法送出訊息') })
@@ -25,7 +25,8 @@ export function composerPlaceholder(state: ComposerLabelState, o: { phone: boole
       ? t('先打下一則…（bot 起來、前一則送出後才輪到它）')
       : t('這回合還在跑，先打下一則…（送出會排隊）')
   }
-  return o.phone ? t('輸入訊息…') : t('輸入訊息…（檔案可直接拖放或貼上）')
+  // claude-api（#1944）不收附件，不提示拖放檔案。
+  return o.phone || o.noFiles ? t('輸入訊息…') : t('輸入訊息…（檔案可直接拖放或貼上）')
 }
 
 /** 有附件上傳失敗時按送出（或 Enter）的提示；送出會少了那個檔案（issue #917）。 */

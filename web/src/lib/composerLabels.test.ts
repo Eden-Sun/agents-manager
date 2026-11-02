@@ -50,3 +50,7 @@ test('#917 有附件上傳失敗：送出鍵說有附件失敗；送出中／上
   assert.equal(sendButtonTitle(idle, true, true), '附件上傳中…')
   assert.equal(sendButtonTitle(running, false, false), '這回合結束後自動送出')
 })
+
+test('claude-api 不提示拖放檔案', () => {
+  assert.equal(composerPlaceholder(idle, { phone: false, starting: false, noFiles: true }), composerPlaceholder(idle, { phone: true, starting: false }))
+})
