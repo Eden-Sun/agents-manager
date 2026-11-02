@@ -189,3 +189,59 @@
   font-size: 11px;
   font-weight: 600;
 }
+
+/* 專家模式執行者群集列（ExpertClusterRow）：一列收一組同設定的執行者，成員展開縮排。 */
+.bot-cluster-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.bot-cluster-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  min-height: 32px;
+  padding: 4px 6px 4px 10px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bot-cluster-caret {
+  flex: none;
+  width: 10px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.bot-cluster-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.bot-cluster-count {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.bot-cluster-stat {
+  flex-basis: 100%;
+  padding-left: 16px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.bot-cluster-members {
+  margin-left: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}

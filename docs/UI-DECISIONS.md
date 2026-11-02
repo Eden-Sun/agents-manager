@@ -1393,3 +1393,12 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **新增 Bot**：選 `claude-api` 只剩名稱、強度（5 級，預設 high）、Fast（標「speed=fast（單價 2 倍）」）；身份、人設、分享設定隱藏，送出不帶 `identity`／`model`／`persona`（模型由 daemon 固定 `claude-opus-5-5`）。遠端專案的那顆 kind 按鈕停用並標「僅限本機」（daemon 也 400）。
 - **對話頁降級**：沒有終端分頁（舊的 terminal 分頁退回對話）、沒有 pane id、沒有 CLI statusLine／context、沒有重啟（設定面板的「立即重啟」隱藏，daemon 回 `api_bot_restart_unsupported`；停止後再啟動）；模型 chip 是純文字（固定一個模型，不開選單）。狀態列換成 `ApiBotUsageBar`：累計花費＝(recorded＋reserved＋unknown)÷1e6 美元（預留與結果不明先當花掉算，與真 API 驗收停線同口徑，有預留時標「含預留」）、快取命中率、最近一次 `usage.speed`（fast 時加粗）、請求數；回合結束後立刻重抓，其餘每 10 秒輪詢（沒有 WS 事件），讀不到顯示「讀不到 API 用量」。
 - **側欄辨識**：kind 圖示是 claude 星芒加右下「API」小標，文字模式的標籤用虛線邊框的 claude 配色。
+
+## 專家模式執行者群集列（2026-11-02）
+
+使用者選定「合併列＋群集派工」：專家模式側欄「執行者」區，daemon 在 `/api/state` 每個 bot 回 `cluster`（同專案、role=executor、(kind, model, effort, identity) 相同、≥2 顆才有名字；否則 null）。
+
+- **收成一列**：同 `cluster` 的成員收成一列「<name> 群集 ×N」，第二行「X 執行中 · Y 閒置」（用燈號 working／idle 數，離線不算）；放在第一個成員原本的位置。`cluster` 為 null 或只剩一顆的成員照舊單列。缺 `cluster` 欄位（舊 daemon）視為 null。
+- **展開**：點整列展開成員（縮排＋左線），每個成員保留自己的管理者可用勾選框；展開狀態記在 localStorage（`agm.expertCluster.<專案>.<名>`，讀寫都 try/catch，不可用時只當次有效），預設收合。
+- **整組勾選**：收合列的勾選框一次切整組——全部勾才顯示勾、部分勾顯示半勾（indeterminate）；點下去半勾與全未勾都變全勾，全勾變全不勾，各成員各送一個 `PATCH manager_use`。
+- **為什麼不另做群集設定**：群集是「同設定自然聚成」的投影，沒有獨立實體；要改個別成員設定仍到成員自己的選單。第二行獨立成行是因為側欄窄時同一行會把「執行中」截成 `1 run…`。

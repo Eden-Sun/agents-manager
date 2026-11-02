@@ -993,6 +993,23 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.bots.push(exec1)
+    // 群集示範：再加 2 顆同設定 haiku 執行者（連 exec1 共 3 顆）；其中一顆開著並在忙。
+    const clusterIds = [exec1.id]
+    for (const n of [2, 3]) {
+      const twin: MockBot = { ...exec1, id: ulid('bot'), name: `expert-haiku-${n}`, role_pending: false }
+      this.bots.push(twin)
+      clusterIds.push(twin.id)
+    }
+    later(() => {
+      for (const id of clusterIds) this.start(id)
+      later(() => {
+        const run = this.activeRun(clusterIds[1])
+        if (run && run.state === 'running') {
+          setAgentStatus(run, 'working')
+          this.emitBotStatus(clusterIds[1])
+        }
+      }, 3000)
+    }, 50)
 
     const exec2: MockBot = {
       id: ulid('bot'),
@@ -1061,6 +1078,16 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.bots.push(specialist)
+  }
+
+  /** 專家模式執行者群集名（契約：同專案、role=executor、(kind,model,effort,identity) 相同、≥2 顆）；單顆回 null。 */
+  private clusterOf(b: MockBot): string | null {
+    if (b.role !== 'executor' || b.parent_bot_id) return null
+    const key = (x: MockBot) => [x.kind, x.model ?? '', x.effort ?? '', x.identity ?? ''].join('\u0000')
+    const peers = this.bots.filter((x) => x.project_id === b.project_id && x.role === 'executor' && !x.parent_bot_id && key(x) === key(b))
+    if (peers.length < 2) return null
+    const short = (b.model ?? b.kind).replace(/^claude-(\d+-)*/, '').replace(/[^a-z0-9.-]+/gi, '-').toLowerCase() || b.kind
+    return short
   }
 
   /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
@@ -2394,6 +2421,7 @@ export class MockTransport implements Transport {
               role_pending: b.role_pending ?? false,
               daemon_url_pending: b.daemon_url_pending ?? false,
               manager_use: b.manager_use ?? true,
+              cluster: this.clusterOf(b),
               model: b.model,
               effort: b.effort,
               fast: b.fast === 1,

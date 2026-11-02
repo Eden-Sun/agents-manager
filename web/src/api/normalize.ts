@@ -347,6 +347,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     track: optStr(v.track),
     runtime_override: isRec(v.runtime_override) ? (v.runtime_override as RuntimeSettings) : null,
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
+    cluster: optStr(v.cluster),
     pool_entry: optStr(pick(v, 'pool_entry')),
     role_pending: bool(v.role_pending),
     daemon_url_pending: bool(v.daemon_url_pending),
