@@ -365,6 +365,7 @@ export default {
   '含預留': 'incl. reserved',
   '快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合': 'Cache hit rate = cache_read ÷ (input + cache_read + cache_creation), settled turns only',
   '快取命中': 'Cache hit',
+  'Anthropic 預付餘額（估計）': 'Anthropic prepaid balance (estimate)',
   '官方報表涵蓋至：{dt}': 'Official report covers through: {dt}',
   '本機帳計算自：{dt}': 'Local ledger counted since: {dt}',
   '警告：{err}': 'Warning: {err}',

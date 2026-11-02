@@ -88,6 +88,7 @@ import { JevNoticeText } from './JevNoticeText'
 import { SafeMarkdown } from './SafeMarkdown'
 import { TerminalTab } from './TerminalTab'
 import { ApiBotUsageBar } from './ApiBotUsageBar'
+import { ApiBalanceInline } from './ApiBalanceInline'
 import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
@@ -1460,6 +1461,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                   {statusInfo?.effort || slugEffort ? ` · ${headerEffortLabel(statusInfo?.effort ?? slugEffort ?? '')}` : ''}
                 </span>
               ) : null}
+              {apiBot ? <ApiBalanceInline /> : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
               {/* 手機不放「背景執行中」chip（2026-09-28 使用者：多餘）：輸入框上方那條說明已經講了。 */}
