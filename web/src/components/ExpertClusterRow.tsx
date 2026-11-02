@@ -122,8 +122,8 @@ export function ExpertClusterRow({
                 />
               ) : null}
               {first ? <ModelTag botId={first.id} /> : null}
-              <span className="bot-cluster-stat">{t('{w} 執行中 · {i} 閒置', { w: working, i: idle })}</span>
             </span>
+            <span className="bot-cluster-stat">{t('{w} 執行中 · {i} 閒置', { w: working, i: idle })}</span>
           </span>
         </button>
         <span
