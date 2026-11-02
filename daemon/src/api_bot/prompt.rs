@@ -22,11 +22,17 @@ pub fn api_bot_sandbox_instructions() -> &'static str {
 後面的共用／專案指示若提到 herdr、開子 agent、agent-browser、outbox、CLI 登入、`$AM_*` 環境變數、auto compact、fork/resume，在這個環境一律不適用，以本段為準。"
 }
 
+/// `/workspace` 對應主機上的哪個目錄：使用者與專案指示寫的是主機路徑，bot 要自己換成 `/workspace`。
+fn path_mapping_note(host_root: &str) -> String {
+    let root = host_root.trim_end_matches('/');
+    format!("**路徑對應**：`/workspace` 就是主機上的 `{root}`。使用者或上面的指示提到 `{root}/…`（或 `~/` 開頭、指向這個目錄的路徑）時，一律換成 `/workspace/…` 再操作；回報時可兩者並列。`{root}` 以外的主機路徑（例如其他專案、`~/.config/agents-manager`）在沙箱裡看不到，直接說明無法存取，不要猜。")
+}
+
 /// Compose the system prompt for an API bot (`claude-api`).
 ///
 /// Combines the sandbox instructions, project agent instructions (`agent_md`),
 /// the bot's custom persona, and the agent name note.
-pub fn compose_api_bot_system_prompt(bot: &Bot, agent_name: &str, agent_md: Option<&str>) -> String {
+pub fn compose_api_bot_system_prompt(bot: &Bot, agent_name: &str, host_root: &str, agent_md: Option<&str>) -> String {
     let base = match agent_md.map(str::trim).filter(|s| !s.is_empty()) {
         Some(md) => format!("{}\n\n{}", api_bot_sandbox_instructions(), md),
         None => api_bot_sandbox_instructions().to_string(),
@@ -35,7 +41,7 @@ pub fn compose_api_bot_system_prompt(bot: &Bot, agent_name: &str, agent_md: Opti
         Some(persona) => format!("{base}\n\n{persona}"),
         None => base,
     };
-    format!("{with_persona}\n\n你在 AG Man 裡的 agent 名稱是 `{agent_name}`。")
+    format!("{with_persona}\n\n你在 AG Man 裡的 agent 名稱是 `{agent_name}`。\n\n{}", path_mapping_note(host_root))
 }
 
 #[cfg(test)]
@@ -77,7 +83,7 @@ mod tests {
     #[test]
     fn api_bot_prompt_contains_sandbox_and_omits_cli_rules() {
         let bot = test_bot("claude-api-opus", Some("你是一位專業的程式碼審查專家。"));
-        let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", Some("# 專案說明\n這是測試專案。"));
+        let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", "/home/u/proj/", Some("# 專案說明\n這是測試專案。"));
 
         // Must contain sandbox environment facts
         assert!(prompt.contains("str_replace_based_edit_tool"));
@@ -94,6 +100,7 @@ mod tests {
         assert!(prompt.contains("fork/resume"));
         assert!(prompt.contains("名稱是 `claude-api-opus`"));
         assert!(prompt.contains("以本段為準"));
+        assert!(prompt.contains("`/workspace` 就是主機上的 `/home/u/proj`"));
         assert!(prompt.contains("你是一位專業的程式碼審查專家。"));
         assert!(prompt.contains("# 專案說明\n這是測試專案。"));
 
@@ -108,7 +115,7 @@ mod tests {
     #[test]
     fn api_bot_prompt_without_optional_fields() {
         let bot = test_bot("api-worker", None);
-        let prompt = compose_api_bot_system_prompt(&bot, "api-worker", None);
+        let prompt = compose_api_bot_system_prompt(&bot, "api-worker", "/srv/p", None);
         assert!(prompt.contains("名稱是 `api-worker`"));
         assert!(prompt.contains("/workspace"));
         assert!(prompt.contains("str_replace_based_edit_tool"));
