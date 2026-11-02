@@ -577,6 +577,116 @@ pub async fn dump(app: &impl HostsAccess, host: &str) -> anyhow::Result<String> 
     conn.ssh_exec_path(PS_TREE_ENV).await
 }
 
+/// 打字前複查用的「一棵子樹」dump（本機 Linux）：只為 `shell_pid` 底下的行程組出與 [`PS_TREE_ENV`] 同格式的文字，
+/// 所以 [`pane_facts_for_shell`] 原封不動吃得下。不跑 `sh`／`ps`，也不讀全機的 environ——全機那一趟要 60 多 ms，
+/// 而 facts 只看 `shell_pid` 往下的行程（樹、環境、listen pid 都是）。環境只讀子樹裡的，`HERDR_PANE_ID` 歸屬規則不變。
+/// `None`＝讀不到（pid 不在、`/proc` 不可讀）。
+#[cfg(target_os = "linux")]
+pub fn linux_subtree_dump(shell_pid: i32) -> Option<String> {
+    use std::fmt::Write as _;
+    // 子樹：有 `task/*/children`（CONFIG_PROC_CHILDREN，現在的核心都有）就直接沿著它走，不必掃全機；
+    // 沒有才退回掃 `/proc/*/stat` 建父子表。
+    let members = match subtree_via_children(shell_pid) {
+        Some(m) => m,
+        None => {
+            let parent = all_parents();
+            if !parent.contains_key(&shell_pid) {
+                return None;
+            }
+            subtree_from_parents(&parent, shell_pid)
+        }
+    };
+    let mut tree = String::new();
+    let mut env = String::new();
+    for &pid in &members {
+        let Some((ppid, comm, rss_kib)) = read_stat(pid) else { continue };
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let argv: String = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>().join(" ");
+        // 核心執行緒沒有 cmdline，ps 會印 `[comm]`，這裡一樣。
+        let argv = if argv.is_empty() { format!("[{comm}]") } else { argv.replace(['\n', '\r'], " ") };
+        let _ = writeln!(tree, "{pid} {ppid} {rss_kib} {argv}");
+        if let Ok(raw) = std::fs::read(format!("/proc/{pid}/environ")) {
+            if !raw.is_empty() {
+                let _ = writeln!(env, "{pid} NUL:{}", STANDARD.encode(&raw));
+            }
+        }
+    }
+    let mut out = tree;
+    out.push_str("---AM-START---\n---AM-ENV---\n");
+    out.push_str(LINUX_ENV_MARKER);
+    out.push('\n');
+    out.push_str(&env);
+    Some(out)
+}
+
+/// 沿 `/proc/<pid>/task/<tid>/children` 由上往下收子樹（根在最前）。根的 children 讀不到就回 `None`（核心沒開這個介面）。
+#[cfg(target_os = "linux")]
+fn subtree_via_children(root: i32) -> Option<Vec<i32>> {
+    let children_of = |pid: i32| -> Option<Vec<i32>> {
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+        let mut kids = Vec::new();
+        for t in tasks.flatten() {
+            if let Ok(text) = std::fs::read_to_string(t.path().join("children")) {
+                kids.extend(text.split_whitespace().filter_map(|c| c.parse::<i32>().ok()));
+            }
+        }
+        Some(kids)
+    };
+    children_of(root)?;
+    let mut members = vec![root];
+    let mut at = 0;
+    while at < members.len() {
+        let mut kids = children_of(members[at]).unwrap_or_default();
+        kids.sort_unstable();
+        for k in kids {
+            if !members.contains(&k) {
+                members.push(k);
+            }
+        }
+        at += 1;
+    }
+    Some(members)
+}
+
+/// 退路：掃全機 `/proc/*/stat` 建 `pid → ppid`。
+#[cfg(target_os = "linux")]
+fn all_parents() -> HashMap<i32, i32> {
+    let mut parent = HashMap::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else { return parent };
+    for ent in dir.flatten() {
+        let Some(pid) = ent.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+        if let Some((ppid, _, _)) = read_stat(pid) {
+            parent.insert(pid, ppid);
+        }
+    }
+    parent
+}
+
+#[cfg(target_os = "linux")]
+fn subtree_from_parents(parent: &HashMap<i32, i32>, root: i32) -> Vec<i32> {
+    let mut members = vec![root];
+    let mut at = 0;
+    while at < members.len() {
+        let cur = members[at];
+        let mut kids: Vec<i32> = parent.iter().filter(|(_, pp)| **pp == cur).map(|(p, _)| *p).filter(|p| !members.contains(p)).collect();
+        kids.sort_unstable();
+        members.extend(kids);
+        at += 1;
+    }
+    members
+}
+
+/// `/proc/<pid>/stat` → `(ppid, comm, rss KiB)`。`comm` 可含空白與括號：以第一個 `(` 與最後一個 `)` 切開。
+#[cfg(target_os = "linux")]
+fn read_stat(pid: i32) -> Option<(i32, String, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (open, close) = (stat.find('(')?, stat.rfind(')')?);
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    let ppid = fields.get(1)?.parse::<i32>().ok()?;
+    let rss_pages = fields.get(21)?.parse::<u64>().ok()?;
+    Some((ppid, stat[open + 1..close].to_string(), rss_pages.saturating_mul(4)))
+}
+
 /// `GET /api/mem/processes?host=…`
 pub async fn processes(app: &impl MemEnv, host: &str) -> anyhow::Result<Value> {
     let out = dump(app, host).await?;
@@ -1300,5 +1410,41 @@ mod tests {
             screen_kill(DUMP, 402),
             Ok(Err(KillDenied::Bot(_)))
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod subtree_tests {
+    use super::*;
+
+    /// 原生子樹 dump 與真的 `ps` 全機 dump，對同一棵子樹給出的 facts 要一樣：子行程的 pid 與 bot 歸屬。
+    /// 測試行程自己 spawn 一顆帶 `HERDR_PANE_ID`／`AM_BOT_ID` 的 `sleep` 當固定的子行程，不靠整棵樹的內容
+    /// （同一個測試行程裡其他測試也會起子行程，那些是會變的）。
+    #[test]
+    fn the_native_subtree_dump_gives_the_same_facts_as_the_ps_dump() {
+        let me = std::process::id() as i32;
+        let mut kid = std::process::Command::new("sleep")
+            .arg("30")
+            .env("HERDR_PANE_ID", "pane-x")
+            .env("AM_BOT_ID", "bot-z")
+            .spawn()
+            .expect("spawn sleep");
+        let kid_pid = kid.id() as i32;
+        let started = std::time::Instant::now();
+        let native = linux_subtree_dump(me).expect("自己的 pid 在 /proc 裡");
+        eprintln!("linux_subtree_dump took {:?}", started.elapsed());
+        let full = {
+            let o = std::process::Command::new("/bin/sh").arg("-c").arg(PS_TREE_ENV).output().unwrap();
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let a = pane_facts_for_shell(&native, "pane-x", me).expect("native facts");
+        let b = pane_facts_for_shell(&full, "pane-x", me).expect("ps facts");
+        let _ = kid.kill();
+        let _ = kid.wait();
+        assert_eq!(a.bot_ids, vec!["bot-z".to_string()], "原生版要認得子行程環境裡的 AM_BOT_ID");
+        assert_eq!(a.bot_ids, b.bot_ids, "和 ps 版歸屬一致");
+        assert!(a.pids.contains(&kid_pid) && b.pids.contains(&kid_pid), "子行程兩邊都在樹裡");
+        assert_eq!(a.pids.first(), Some(&me), "根就是 shell 自己");
+        assert!(linux_subtree_dump(i32::MAX).is_none(), "不存在的 pid 回 None");
     }
 }

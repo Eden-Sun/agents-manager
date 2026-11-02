@@ -16,6 +16,8 @@ pub trait PaneProbe: Send + Sync {
     fn dump<'a>(&'a self, app: &'a Arc<App>, host: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     /// 這些 pid 合起來 listen 的 port；`None`＝讀不到。
     fn listen_ports<'a>(&'a self, host: &'a str, pids: &'a [i32]) -> BoxFuture<'a, Option<Vec<u16>>>;
+    /// 只為 `shell_pid` 這棵子樹的行程 dump（給 [`crate::panes::facts_from`]）。打字前每一下都會問，所以本機 Linux 走原生 /proc 版（`am-base` 的 `linux_subtree_dump`），不跑全機 `ps`＋environ 掃描。
+    fn shell_tree<'a>(&'a self, app: &'a Arc<App>, host: &'a str, shell_pid: i32) -> BoxFuture<'a, anyhow::Result<String>>;
 }
 
 /// 真的 `ps`（本機）／ssh（遠端）與 `lsof`。
@@ -27,6 +29,19 @@ impl PaneProbe for Real {
     }
     fn listen_ports<'a>(&'a self, host: &'a str, pids: &'a [i32]) -> BoxFuture<'a, Option<Vec<u16>>> {
         Box::pin(crate::panes::listen_ports(host, pids))
+    }
+    fn shell_tree<'a>(&'a self, app: &'a Arc<App>, host: &'a str, shell_pid: i32) -> BoxFuture<'a, anyhow::Result<String>> {
+        #[cfg(target_os = "linux")]
+        if host == crate::config::LOCAL_HOST {
+            return Box::pin(async move {
+                tokio::task::spawn_blocking(move || crate::memproc::linux_subtree_dump(shell_pid))
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| anyhow::anyhow!("pid {shell_pid} 不在 /proc 裡"))
+            });
+        }
+        Box::pin(async move { self.dump(app, host).await })
     }
 }
 
@@ -59,6 +74,9 @@ impl Fixed {
 #[cfg(test)]
 impl PaneProbe for Fixed {
     fn dump<'a>(&'a self, _: &'a Arc<App>, _: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move { Ok(self.dump.clone()) })
+    }
+    fn shell_tree<'a>(&'a self, _: &'a Arc<App>, _: &'a str, _: i32) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move { Ok(self.dump.clone()) })
     }
     fn listen_ports<'a>(&'a self, host: &'a str, pids: &'a [i32]) -> BoxFuture<'a, Option<Vec<u16>>> {
