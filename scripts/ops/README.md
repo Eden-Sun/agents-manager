@@ -376,7 +376,9 @@ is pinned by `daemon-swap_test.sh`:
   the default would kill the daemon's child processes too. The platform comes from `uname -s` (tests override it with
   `AGM_OPS_PLATFORM`); without `XDG_RUNTIME_DIR` it fills in `/run/user/<uid>`.
 - Step 3b sends a self-test prompt to a fixed probe bot: `SWAP_PROBE_BOT` > `swap_probe_bot_id` in `AGM_DIR/runtime.json` >
-  `manager_bot_id` in the same file (the AGM supervisor itself: resident, always present; issue #882). If the target has
+  `responder_bot_id` (the cheap haiku responder; the probe fires on every swap, so it no longer wakes the sonnet supervisor with its
+  200k+ context, 2026-11-02) > `manager_bot_id` in the same file (the AGM supervisor itself; issue #882). If the responder has
+  no active run, the step retries once against `manager_bot_id`. If the target has
   **no active run** (`no active run`) the step is skipped, logged and counted in `daemon-swap.probe-skips` (the kick reads
   it to raise an alert) without blocking the deploy; any other non-200 aborts. With none of the three available, 3b is
   skipped through the same path.

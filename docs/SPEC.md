@@ -4779,7 +4779,7 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 ### 18.5 AGM 派 child 的模型預設
 `cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；使用者以 `POST /api/supervisor/fallback {"model":"sonnet"}` 固定成 `sonnet` 時控制器不再切換（使用者 2026-10-30：fable 對巡檢不划算，改 sonnet low）；
 控制器讀的額度 key 跟寫入端同一條規則（`quota::quota_base_for_host(local, "claude", identity)`），查不到就是沒有讀數（不動），**不借裸 `claude` 那格**——那可能是另一個帳號（review2 quota L3）；
-協調者固定 `cc0/opus/high`，沒有自動切換（§18.15）。
+協調者固定模型，沒有自動切換：目前部署是 `cc0/haiku/low`（使用者 2026-11-02 裁示，§18.15）。
 
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
 
@@ -5150,18 +5150,24 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 
 ### 18.15 AGM 雙角色：巡檢與協調（2026-09-13）
 
-使用者 2026-09-13：主動找問題用 fable-low（不足 opus-low），回應 bots 用 opus-high。在那之前每個 bot 申請、交辦回報、核准請求、健康事件都打進同一顆 AGM，
+使用者 2026-09-13：主動找問題用 fable-low（不足 opus-low），回應 bots 用 opus-high（2026-11-02 起改為 haiku-low，見下方「協調者只負責轉運」）。在那之前每個 bot 申請、交辦回報、核准請求、健康事件都打進同一顆 AGM，
 而它跑在 fable 上——bot 的例行申請與十分鐘一次的 `health_changed` 是 fable 用量最大的來源。
 
 | | 巡檢（patrol） | 協調（responder） |
 | --- | --- | --- |
 | 是誰 | 原本那顆 AGM：`supervisors.bot_id`、`GET /api/supervisor` 的頂層欄位 | 第二顆 bot `AGM-responder`：`supervisor_roles` 的 `responder` 列 |
-| 模型 | cc0/fable/low → cc0/opus/low（§18.5 的控制器） | cc0/opus/high，固定，沒有自動切換（`responder setup` 可指定） |
+| 模型 | cc0/fable/low → cc0/opus/low（§18.5 的控制器）；目前部署是 cc0/sonnet/low | **cc0/haiku/low**（目前部署，使用者 2026-11-02 裁示），固定，沒有自動切換（`responder setup` 可指定；第一次建立的預設值仍是 cc0/opus/high） |
 | 入口 | 使用者 web／對話（**唯一**的使用者入口） | 沒有使用者入口；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
 | 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`deploy_waiting`、`release_triage_notice`（daemon 用 Claude API 分診完一版的結論，§18.2c）、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
+
+**協調者只負責轉運，裁示交給 AGM 主體（使用者 2026-11-02）**：協調者目前跑 haiku／low，工作限於分類、去重、核對事件原文與來源、`ack`、通知與轉達；
+核准／拒絕、授權判斷、換版與重啟、bot 生命週期這類**裁示**一律交給巡檢 AGM 主體（`bin/agm assign --notice` 轉巡檢，再由巡檢回覆原申請者），協調者不自己裁示。
+為什麼：實際 24 小時的用量是每天約 6 個回合、每回合約 12 秒，且最近的回合都是轉巡檢；haiku 夠做轉運，不值得為幾個回合養一顆 opus-high。
+協調者的 context 常駐約 350k token，cache 冷掉一次要重寫約 320k：因此它的 `runtime_override.context_tokens`（claude 的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`）宜設在下限 200000，而不是 500000（部署設定由 AGM 處理，不在這份文件裡寫死）。
+`daemon-swap.sh` 的換版前送達自測（§18.10）預設送協調者而不是巡檢（`swap_probe_bot_id` ＞ `responder_bot_id` ＞ `manager_bot_id`；協調者沒在跑時退回巡檢）：每趟換版一則「回 ok 即可」，不該每次叫醒 sonnet 巡檢和它的大 context。
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求 的唯一收件人，
 以前 `status` 只取巡檢與系統兩半的較差者，協調者 `waiting_quota` 或倒掉時使用者入口仍顯示 `healthy`、沒有任何人被叫醒，
@@ -5323,7 +5329,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   **只自動取代 `pending`**：`approved` 是人做過的裁示，不能因為排程又跑了一輪就無聲消失（部署腳本可能正要拿它開窗口）；
   明講 `--supersedes` 才動得了它。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓整筆申請失敗。
 - **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
-  以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
+  以前沒有次數上限——協調者漏 ack 一則，（當時的）opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
   現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），
   或**事件開著超過 6 小時而且已經送達 ≥3 次**（6 小時 ＝ 12 個 ack deadline；照 deadline 的節奏五次補送約 2.5 小時，所以正常是次數先到，時窗只收「慢慢滴」的那種；
   要求 ≥3 次是為了不放棄「只送過一次、協調者還在等額度」的事件）就**停手**：

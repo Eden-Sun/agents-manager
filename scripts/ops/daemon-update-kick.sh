@@ -486,6 +486,6 @@ esac
 _skips=$(cat "$DIR/daemon-swap.probe-skips" 2>/dev/null)
 case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
 if [ "$_skips" -ge 3 ]; then
-  alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（對象沒有 run）：在 ${DIR}/runtime.json 設 swap_probe_bot_id 指到一顆常駐、會回 ok 的 bot"
+  alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（對象沒有 run）：在 ${DIR}/runtime.json 設 swap_probe_bot_id 指到一顆常駐、會回 ok 的 bot（沒設時依序用 responder_bot_id、manager_bot_id）"
 fi
 exit 0
