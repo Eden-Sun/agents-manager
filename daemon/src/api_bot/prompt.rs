@@ -11,11 +11,11 @@ use am_base::db::Bot;
 pub fn api_bot_sandbox_instructions() -> &'static str {
     "你在 bubblewrap（bwrap）沙箱環境中執行，具備以下真實環境條件與限制：\n\
 - **可用工具**：只有 `bash`（bash_20250124）與 `str_replace_based_edit_tool`（text_editor_20250728，檔案路徑使用 `/workspace/...`）。\n\
-- **每次呼叫獨立**：每次 bash 呼叫都是全新的 bwrap 沙箱行程（--unshare-all --clearenv --die-with-parent），前一次的 cd、export、shell 變數與背景行程都不會延續；指令結束時行程群組即被 SIGKILL，不能留背景服務；需要多步驟請在同一次呼叫中以 `&&` 串接。\n\
+- **每次呼叫獨立**：每次 bash 呼叫都是全新的 bwrap 沙箱行程（--unshare-all --share-net --clearenv --die-with-parent），前一次的 cd、export、shell 變數與背景行程都不會延續；指令結束時行程群組即被 SIGKILL，不能留背景服務；需要多步驟請在同一次呼叫中以 `&&` 串接。\n\
 - **臨時目錄無狀態**：`/tmp` 為每次呼叫獨立的 tmpfs，`HOME=/tmp`；寫入 `/tmp` 或 `~` 的檔案在該次呼叫結束後即消失，要保留的檔案必須放在 `/workspace`。\n\
 - **工作目錄可讀寫**：`/workspace` 綁定至專案目錄，可讀寫且指令間會保留；預設工作目錄（cwd）為 `/workspace`。\n\
-- **檔案系統唯讀限制**：根目錄僅唯讀掛載 `/usr`、`/bin`、`/lib`、`/lib64`，另有 `/proc` 與 `/dev`；系統中沒有 /etc（無 hostname、passwd、DNS 設定、git/ssh 全域設定）。\n\
-- **沒有網路**：沙箱隔離網路（unshare-all），curl、git fetch/push 或套件安裝等網路操作均會失敗。\n\
+- **檔案系統唯讀限制**：根目錄僅唯讀掛載 `/usr`、`/bin`、`/lib`、`/lib64`，另有 `/proc` 與 `/dev`；`/etc` 只唯讀掛入 resolv.conf、hosts、nsswitch.conf、host.conf、gai.conf、ssl、ca-certificates、passwd、group，沒有 hostname、git/ssh 全域設定或憑證。\n\
+- **可以連網**：沙箱共用主機網路，curl、git clone/fetch、套件下載可用；DNS 與 TLS 憑證已掛入。\n\
 - **精簡環境變數**：環境變數僅提供 `PATH=/usr/bin:/bin`、`HOME=/tmp`、`LANG=C.UTF-8`；沒有任何 `$AM_*` 環境變數。\n\
 - **無 herdr 與 CLI 週邊**：沒有 herdr、不能開子 agent、沒有 agent-browser、沒有 outbox（`$AM_OUTBOX`）、沒有 CLI 登入憑證。\n\
 - **無跨對話記憶與自動 compact**：對話不會自動 compact，會持續累積至 context 上限；一旦超限回合將失敗，需由使用者在介面按「清除對話」；不支援 fork/resume 或模型查詢 API。\n\
@@ -88,8 +88,8 @@ mod tests {
         // Must contain sandbox environment facts
         assert!(prompt.contains("str_replace_based_edit_tool"));
         assert!(prompt.contains("每次呼叫"));
-        assert!(prompt.contains("沒有網路"));
-        assert!(prompt.contains("沒有 /etc"));
+        assert!(prompt.contains("可以連網"));
+        assert!(prompt.contains("`/etc` 只唯讀掛入"));
         assert!(prompt.contains("自動 compact"));
         assert!(prompt.contains("/workspace"));
         assert!(prompt.contains("HOME=/tmp"));
@@ -119,8 +119,8 @@ mod tests {
         assert!(prompt.contains("名稱是 `api-worker`"));
         assert!(prompt.contains("/workspace"));
         assert!(prompt.contains("str_replace_based_edit_tool"));
-        assert!(prompt.contains("沒有網路"));
-        assert!(prompt.contains("沒有 /etc"));
+        assert!(prompt.contains("可以連網"));
+        assert!(prompt.contains("`/etc` 只唯讀掛入"));
         assert!(prompt.contains("自動 compact"));
     }
 }
