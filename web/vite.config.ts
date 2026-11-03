@@ -32,7 +32,14 @@ export default defineConfig({
     // The daemon rejects requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`
     // (docs/API.md §0), so the proxy must rewrite Host to the target: changeOrigin: true.
     proxy: {
-      '/api': { target: DAEMON, changeOrigin: true, configure: rewriteOrigin },
+      // `/api/hosts/:name/shells/:pane/stream`（主機 shell 的推送串流）是 WebSocket：不開 ws 的話 dev 只剩輪詢、看不到 observe 模式。
+      '/api': {
+        target: DAEMON,
+        ws: true,
+        changeOrigin: true,
+        configure: rewriteOrigin,
+        bypass: req => (req.headers.upgrade && !devHostAllowed(req.headers.host, DEV_ALLOWED_HOSTS) ? false : undefined),
+      },
       '/hook': { target: DAEMON, changeOrigin: true, configure: rewriteOrigin },
       // `allowedHosts` 只管一般 HTTP：proxy 的 WebSocket upgrade 不經過它，而 changeOrigin／rewriteOrigin 又把 Host／Origin
       // 改成 daemon 自己的位址，daemon 那一側的 Host 檢查等於被繞過。upgrade 這裡補上同一條規則（false＝直接斷線）。
