@@ -281,6 +281,8 @@ export interface FakeSocketControl {
   drop(): Promise<void>
   /** 伺服器推一則 JSON 訊息到最新那條（例如主機 shell 的 `frame`）。 */
   message(obj: unknown): Promise<void>
+  /** 最新那條連線客戶端送過來的 JSON 訊息（例如主機 shell 的 `size`）。 */
+  sent(): unknown[]
 }
 
 /** 假的 `WebSocket`：測試手動決定什麼時候連上、什麼時候掉線；`HttpTransport.openSocket` 的重連與 backoff 照真的跑。 */
@@ -297,9 +299,14 @@ export function fakeWebSocket(): FakeSocketControl {
     onerror: (() => void) | null = null
     onclose: (() => void) | null = null
     readonly url: string
+    /** 客戶端送出的 JSON 訊息（`send`）。 */
+    readonly sent: unknown[] = []
     constructor(url: string) {
       this.url = url
       all.push(this)
+    }
+    send(data: string) {
+      this.sent.push(JSON.parse(data))
     }
     close() {
       this.readyState = 3
@@ -330,6 +337,7 @@ export function fakeWebSocket(): FakeSocketControl {
         w.onmessage?.({ data: JSON.stringify(obj) })
       })
     },
+    sent: () => latest()?.sent ?? [],
   }
 }
 
