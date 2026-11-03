@@ -25,25 +25,48 @@ export interface FoundLink {
 const MAX_SPAN = 12
 const URL_RE = /https?:\/\/[^\s"'<>`]+/g
 
-function full(row: CellRow | undefined): boolean {
-  if (!row || row.length === 0) return false
-  // 最後一格是寬字的後半也算寫滿。
-  const last = row[row.length - 1]
-  return last === '' || last.trim() !== ''
+/** 這一列用到第幾格（含寬字的後半）；全空白是 0。 */
+function usedWidth(row: CellRow): number {
+  for (let i = row.length - 1; i >= 0; i--) if (row[i] === '' || row[i].trim() !== '') return i + 1
+  return 0
+}
+
+/**
+ * herdr 的 pane 實際寬度比 xterm 的欄數少 1～3 格（pane 的捲軸／邊框那幾格；xterm 欄數取自 herdr 的版面矩形，
+ * 量不到真正的欄數）。折行的列只會寫到 pane 的寬度，最後幾格永遠是空的，所以「寫滿」不能只看最後一格。
+ */
+export const WRAP_SLACK = 4
+
+/**
+ * 折行的寬度：畫面上用得最寬的那一列。折行的列一定寫滿 pane 的寬度（任何列都不會比它寬），
+ * 所以畫面上有折行時，最寬的那列就是 pane 寬；最寬的列離右邊還很遠（超過 [`WRAP_SLACK`]）代表畫面上沒有折行，回傳 `null`＝沒有列算寫滿。
+ */
+export function wrapWidth(rows: CellRow[], cols: number): number | null {
+  let widest = 0
+  for (const r of rows) widest = Math.max(widest, usedWidth(r))
+  return widest >= cols - WRAP_SLACK ? widest : null
+}
+
+function full(row: CellRow | undefined, wrapAt: number | null | undefined): boolean {
+  if (!row || row.length === 0 || wrapAt === null) return false
+  return usedWidth(row) >= Math.min(wrapAt ?? row.length, row.length)
 }
 
 /** 第 `y` 列上（含從上一列折下來、或折到下一列的）網址。`rowAt` 讀不到回 undefined。 */
-export function linksOnRow(rowAt: (y: number) => CellRow | undefined, y: number): FoundLink[] {
+export function linksOnRow(rowAt: (y: number) => CellRow | undefined, y: number, wrapAt?: number | null): FoundLink[] {
+  // `wrapAt`：用到第幾格才算寫滿（[`wrapWidth`]）；不給＝寫滿到最後一格；`null`＝沒有折行。
   if (!rowAt(y)) return []
   let top = y
-  while (top > 0 && y - top < MAX_SPAN && full(rowAt(top - 1))) top--
+  while (top > 0 && y - top < MAX_SPAN && full(rowAt(top - 1), wrapAt)) top--
   let bottom = y
-  while (bottom - y < MAX_SPAN && full(rowAt(bottom)) && rowAt(bottom + 1)) bottom++
+  while (bottom - y < MAX_SPAN && full(rowAt(bottom), wrapAt) && rowAt(bottom + 1)) bottom++
   let text = ''
   const map: CellPos[] = []
   for (let r = top; r <= bottom; r++) {
     const row = rowAt(r) ?? []
-    for (let c = 0; c < row.length; c++) {
+    // 折行的列最後幾格是空的（pane 比 xterm 窄），不能算進網址。
+    const isFull = full(row, wrapAt)
+    for (let c = 0, end = isFull ? usedWidth(row) : row.length; c < end; c++) {
       const ch = row[c] === '' ? '' : row[c] || ' '
       for (let i = 0; i < ch.length; i++) {
         text += ch[i]
@@ -51,7 +74,7 @@ export function linksOnRow(rowAt: (y: number) => CellRow | undefined, y: number)
       }
     }
     // 沒寫滿的列是一行的結尾：補一個空白，網址不會黏到下一行。
-    if (!full(row)) {
+    if (!isFull) {
       text += ' '
       map.push({ x: row.length, y: r })
     }

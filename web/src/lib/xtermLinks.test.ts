@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { linksOnRow, type CellRow } from './xtermLinks'
+import { linksOnRow, wrapWidth, type CellRow } from './xtermLinks'
 
 const cells = (s: string, cols: number): CellRow => [...s.padEnd(cols, ' ')].slice(0, cols)
 
@@ -40,4 +40,28 @@ test('寬字佔兩格：網址的欄位照格子算', () => {
   const [l] = linksOnRow(() => row, 0)
   assert.deepEqual(l.start, { x: 5, y: 0 })
   assert.equal(l.url, 'https://x.example/a')
+})
+
+test('pane 比 xterm 欄數窄：折行的列最後幾格是空的，仍從任一列拿到整串', () => {
+  // 實測：xterm 213 欄、pane 實際 212 欄；204 字網址 + 長 a 串折成 212 + 餘。
+  const cols = 213
+  const url = `https://example.com/${'a'.repeat(300)}?x=1`
+  const rows: CellRow[] = [cells(url.slice(0, 212), cols), cells(url.slice(212), cols), cells('ubuntu@ubuntu:~$ ', cols)]
+  const wrapAt = wrapWidth(rows, cols)
+  assert.equal(wrapAt, 212)
+  for (const y of [0, 1]) {
+    const [l] = linksOnRow((i) => rows[i], y, wrapAt)
+    assert.equal(l.url, url, `row ${y}`)
+    assert.equal(l.url.length, 324)
+    assert.deepEqual(l.end, { x: url.length - 212 - 1, y: 1 })
+  }
+  assert.deepEqual(linksOnRow((i) => rows[i], 2, wrapAt), [])
+})
+
+test('畫面上沒有折行（最寬的列離右邊很遠）：行尾的網址不跟下一列接', () => {
+  const cols = 213
+  const rows: CellRow[] = [cells('see https://a.example/abc', cols), cells('ubuntu@ubuntu:~$ ', cols)]
+  assert.equal(wrapWidth(rows, cols), null)
+  const [l] = linksOnRow((i) => rows[i], 0, wrapWidth(rows, cols))
+  assert.equal(l.url, 'https://a.example/abc')
 })

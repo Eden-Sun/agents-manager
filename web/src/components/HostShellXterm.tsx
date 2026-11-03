@@ -8,7 +8,7 @@ import { copyText } from '../lib/copyText'
 import { t } from '../lib/i18n'
 import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from '../lib/shellFrame'
 import { fontSizeFor } from '../lib/shellFont'
-import { linksOnRow, type CellRow } from '../lib/xtermLinks'
+import { linksOnRow, wrapWidth, type CellRow } from '../lib/xtermLinks'
 import { createInputBatcher } from '../lib/xtermInput'
 import type { ShellOp } from '../lib/xtermInput'
 import { useStore } from '../store/store'
@@ -20,8 +20,9 @@ import './hostShellXterm.css'
  * 兩種畫面模式（依 daemon 推來的訊息決定，`onObserve` 告訴呼叫端）：
  *
  * - observe（`raw`）：herdr 的終端串流，位元組原封不動寫進 xterm。游標、同步更新都由 ANSI 本身決定，不估游標。
- *   xterm 的 cols×rows 由面板大小 fit 決定（字級固定 13px），變了 debounce 約 150ms 送 `{type:'size'}` 給 daemon，
- *   herdr 照那個尺寸畫；full 幀先 reset 再寫。「縮放至全螢幕」在這個模式下沒有意義（隱藏）。
+ *   xterm 的 cols×rows 等於 herdr pane 的實際大小（daemon 在幀裡回報；字級固定 13px，放不下就捲動）：observe 不改 pane 寬高、
+ *   只把 pane 的格子裁切／補白成要求的尺寸，要求得比 pane 窄，長行每列右邊就被砍掉（不是自動換行的問題）。
+ *   連上與每 3 秒讀一次 pane 的實際大小（REST），有變就送 `{type:'size'}` 給 daemon；full 幀先 reset 再寫。「縮放至全螢幕」在這個模式下沒有意義（隱藏）。
  * - frame（舊）：推送整張文字快照（`frame`），或退回每 250ms 輪詢 `terminal?format=ansi`。尺寸與字級照舊：
  *   xterm 的 cols×rows 等於 herdr pane 的實際幾何；不用 fit 決定列數（那樣會把 pane 的列切掉、長行折成兩列，畫面就疊了殘影）。
  *   游標用 `planFrame`＋`cursorSeq` 估。
@@ -34,6 +35,8 @@ import './hostShellXterm.css'
 const POLL_MS = 250
 /** observe 模式：面板尺寸變了，等這麼久才送 size（拖曳縮放時不一直送）。 */
 const SIZE_DEBOUNCE_MS = 150
+/** observe 模式：多久重讀一次 pane 的實際大小（在 herdr 那邊被拉大／縮小時串流要跟著換）。 */
+const PANE_DIMS_MS = 3_000
 /** observe 模式的字級（固定；面板大小只決定 cols×rows）。 */
 const OBSERVE_FONT = 13
 /** 連上又被關（代理、daemon 重啟）：很快重連一次。握手就被拒：慢一點，免得舊 daemon 上每秒打一發 404。 */
@@ -148,7 +151,18 @@ export function HostShellXterm({
           }
           return row
         }
-        const found = linksOnRow(rowAt, line - 1)
+        // observe 模式：pane 比 xterm 欄數窄幾格，折行的列寫不到最後一格；用畫面上最寬的列判斷哪些列是寫滿折行的。
+        let wrapAt: number | undefined | null
+        if (observeRef.current) {
+          const top = buf.viewportY
+          const rows: CellRow[] = []
+          for (let y = top; y < top + term.rows; y++) {
+            const r = rowAt(y)
+            if (r) rows.push(r)
+          }
+          wrapAt = wrapWidth(rows, term.cols)
+        }
+        const found = linksOnRow(rowAt, line - 1, wrapAt)
         done(
           found.length === 0
             ? undefined
@@ -223,6 +237,7 @@ export function HostShellXterm({
     /** 往目前這條推送線送 JSON；沒有連線（或已斷）就是 null。 */
     let sendStream: ((msg: unknown) => void) | null = null
     let sizeTimer: ReturnType<typeof setTimeout> | null = null
+    let dimsTimer: ReturnType<typeof setInterval> | null = null
     /** 最後送給 daemon 的 cols×rows（`colsxrows`）；相同就不重送。 */
     let sentSize = ''
 
@@ -276,16 +291,30 @@ export function HostShellXterm({
       lastCursor = cur
       prev = plan.lines
     }
-    /** observe 模式：面板大小 → xterm 的 cols×rows（本地先 resize），再 debounce 送給 daemon。 */
+    /** herdr pane 的實際 cols×rows（REST 讀來的；還沒讀到是 null，先用面板大小頂著）。 */
+    let paneDims: { cols: number; rows: number } | null = null
+    /** observe 模式：告訴 daemon 要串流多大。必須等於 pane 的實際大小：observe 不改 pane，只裁切／補白，窄了長行每列右邊就沒了。 */
     const sendSize = (force: boolean) => {
       sizeTimer = null
       if (!alive || !sendStream) return
-      const d = fit.proposeDimensions()
+      const d = paneDims ?? fit.proposeDimensions()
       if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 1 || d.rows < 1) return
       const key = `${d.cols}x${d.rows}`
       if (!force && key === sentSize) return
       sentSize = key
       sendStream({ type: 'size', cols: d.cols, rows: d.rows })
+    }
+    /** 讀 pane 的實際大小；變了就重送 size（pane 在 herdr 那邊被拉大／縮小，串流跟著換）。 */
+    const refreshPaneDims = async () => {
+      try {
+        const s = await api.readHostShell(host, paneId, 'visible', 1)
+        if (!alive || !s.columns || !s.rows) return
+        if (paneDims?.cols === s.columns && paneDims.rows === s.rows) return
+        paneDims = { cols: s.columns, rows: s.rows }
+        sendSize(false)
+      } catch {
+        /* 讀不到就維持原本的尺寸 */
+      }
     }
     const scheduleSize = () => {
       if (sizeTimer) clearTimeout(sizeTimer)
@@ -293,7 +322,9 @@ export function HostShellXterm({
     }
     const fitObserve = () => {
       if (!alive) return
-      fit.fit()
+      // xterm 的 cols×rows 不再跟面板走：herdr observe 不改 pane 寬高，只把 pane 的格子裁切／補白成要求的尺寸，
+      // 要求的比 pane 窄就把每列右邊砍掉。所以送給 daemon 的尺寸是 pane 的實際大小，xterm 照幀裡回報的大小 resize（drawRaw），
+      // 面板放不下就捲動。size 訊息送的是 pane 的實際大小（sendSize）。
       scheduleSize()
     }
     /** 字級：預設不低於 12px（放不下就捲動）；縮放至全螢幕時縮到整個 pane 放得下。observe 模式改走 fitObserve。 */
@@ -336,7 +367,6 @@ export function HostShellXterm({
       setObserve(true)
       if (full) {
         term.reset()
-        // herdr 把超過面板寬的行寫成一長串、靠自動換行折下去：關掉就會截斷（實測 204 字網址只剩 122 字）。
         term.write(AUTOWRAP_ON)
       }
       if (pane.cols && pane.rows) {
@@ -410,11 +440,16 @@ export function HostShellXterm({
           // 連上就告訴 daemon 面板大小（舊 daemon 不認得這則，忽略即可）。
           sentSize = ''
           sendSize(true)
+          void refreshPaneDims()
+          if (dimsTimer) clearInterval(dimsTimer)
+          dimsTimer = setInterval(() => void refreshPaneDims(), PANE_DIMS_MS)
         },
         onClose: (opened) => {
           sendStream = null
           if (sizeTimer) clearTimeout(sizeTimer)
           sizeTimer = null
+          if (dimsTimer) clearInterval(dimsTimer)
+          dimsTimer = null
           setObserve(false)
           setStreamOn(false)
           closeStream = null
@@ -483,6 +518,7 @@ export function HostShellXterm({
       if (pollTimer) clearTimeout(pollTimer)
       if (streamTimer) clearTimeout(streamTimer)
       if (sizeTimer) clearTimeout(sizeTimer)
+      if (dimsTimer) clearInterval(dimsTimer)
       sendStream = null
       closeStream?.()
       document.removeEventListener('visibilitychange', onVisible)
