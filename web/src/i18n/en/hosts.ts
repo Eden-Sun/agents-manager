@@ -263,6 +263,7 @@ export default {
   '一次性碼': 'One-time code',
   '複製碼': 'Copy code',
   '已複製': 'Copied',
+  '複製失敗，請選取上面的碼': 'Copy failed — select the code above',
   '到登入網站輸入上面的一次性碼，完成後這裡會自動更新。不用貼回終端。': 'Enter the one-time code above on the sign-in site. This updates here when it finishes. No need to paste it back into the terminal.',
   // components/JudgePanel.tsx・JudgeLedger.tsx（Jev 設定與帳本）
   '讀取中…': 'Loading…',

@@ -3,6 +3,7 @@ import * as api from '../api'
 import { ApiError } from '../api/types'
 import { identityStatusOfHost, useStore } from '../store/store'
 import { useT } from '../lib/i18n'
+import { copyText } from '../lib/copyText'
 import { canSubmitCode, loginHint, loginPhase } from '../lib/loginAssist'
 import { holdLoginPane } from '../lib/loginPaneHold'
 import './claudeLoginAssist.css'
@@ -178,7 +179,8 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
  */
 function DeviceCode({ code }: { code: string | null }) {
   const t = useT()
-  const [copied, setCopied] = useState(false)
+  // 'fail'：瀏覽器不給寫剪貼簿（少見；http 位址靠 copyText 的同步 execCommand 已經能複製）——提示改成手動選取。
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle')
   if (!code) return <div className="login-assist-hint" role="status">{t('等 CLI 印出一次性碼…')}</div>
   return (
     <div className="login-assist-device">
@@ -189,23 +191,16 @@ function DeviceCode({ code }: { code: string | null }) {
         type="button"
         className="btn login-assist-copy"
         onClick={() => {
+          // 同步呼叫（不 await 在前）：execCommand('copy') 只在點擊手勢當下有效。
           copyText(code).then(
-            (ok) => setCopied(ok),
-            () => setCopied(false),
+            (ok) => setCopied(ok ? 'ok' : 'fail'),
+            () => setCopied('fail'),
           )
         }}
       >
-        {copied ? t('已複製') : t('複製碼')}
+        {copied === 'ok' ? t('已複製') : copied === 'fail' ? t('複製失敗，請選取上面的碼') : t('複製碼')}
       </button>
     </div>
   )
 }
 
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
-  }
-}
