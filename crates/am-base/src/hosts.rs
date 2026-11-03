@@ -940,6 +940,13 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
                 opts.extend(self.ssh_args());
                 let argv = crate::herdr_relay::ssh_argv(&opts, &cfg.ssh, remote_sock);
                 self.client.set_relay(Some(crate::herdr_relay::Relay::new(argv)));
+                // 畫面串流（herdr terminal session observe）也走同一條 ssh 主連線，在遠端跑同一支 CLI。
+                self.client.set_observe_remote(Some(crate::herdr::RemoteObserve {
+                    ssh_opts: opts.clone(),
+                    target: cfg.ssh.clone(),
+                    remote_sock: remote_sock.to_string(),
+                    path_prefix: remote_path_prefix(&cfg.remote_path),
+                }));
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {

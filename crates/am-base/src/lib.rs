@@ -44,6 +44,7 @@ pub mod git_sh;
 pub mod github;
 pub mod key_file;
 pub mod herdr;
+pub mod herdr_observe;
 pub mod herdr_relay;
 pub mod herdr_maintenance;
 pub mod herdr_shim;

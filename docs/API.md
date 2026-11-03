@@ -1740,10 +1740,18 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 - **送字／送鍵的 `echo=ansi` 快路徑**：`POST …/text` 與 `POST …/keys` 帶 query `echo=ansi` 時，送完等約 20ms 再讀一張 visible ANSI 快照，回應 `{"terminal": <terminal 形狀，format:"ansi">}`。沒帶時回應維持 `{}`。
   送已經成功，所以快照讀失敗不會讓請求變成錯誤，而是 `{"terminal": null}`（呼叫端一報錯就會重送，那就是把字打兩次）。
 - **畫面推送** `GET /api/hosts/{name}/shells/{pane_id}/stream?source=visible&format=ansi&token=…`（WebSocket，認證與 `/ws` 相同，掛在 `/api` 認證層外，因為瀏覽器 WebSocket 帶不了 `X-AM-Token`）。
-  - server→client 只有兩種訊息：`{"type":"frame","seq":N,"text":"<ANSI 整張畫面>","cols":C|null,"rows":R|null}` 與 `{"type":"error","code":"…"}`（之後關線）。
-  - 連上先送一張目前的完整畫面；之後只在內容（文字＋幾何）的 hash 變了才送。`seq` 是這一輪串流內的序號，斷線重連從 1 重算，client 不要拿舊連線的 seq 去比。
+  - **client→server**：連上後送 `{"type":"size","cols":C,"rows":R}`（1–500）；之後尺寸變了再送一次，daemon 就換成那個尺寸的串流。不送也行（等 150ms 後用 80×24）；不合法的 size 當沒送。
+  - **server→client** 有三種訊息，靠 `type` 分辨：
+    - `{"type":"raw","seq":N,"full":bool,"cols":W,"rows":H,"data":"<base64 ANSI 位元組>"}`：**observe 模式（預設）**。herdr 0.9.5 `terminal session observe` 的一幀原封不動轉過來；`full:true` 時 client 先 reset 再寫。ANSI 內含真實游標（`ESC[r;cH`、`ESC[?25h/l`）與同步更新（`ESC[?2026h/l`），前端不用估游標。第一幀一定是 `full:true`；之後只送差異。
+    - `{"type":"frame","seq":N,"text":"<ANSI 整張畫面>","cols":C|null,"rows":R|null}`：**快照退路**。observe 起不來或一幀都沒給時（舊 herdr、遠端 ssh 不通…），這顆 host 冷卻 60 秒內改用 `pane.read` 輪詢整張畫面（行為同舊版）。client 兩種都要處理。
+    - `{"type":"error","code":"…"}`（之後關線）。
+  - 連上先收到**回放**：最近一張完整幀加上之後的差異，所以中途連上也畫得對。`seq` 是這一條（host, pane, 尺寸）串流內的序號，只增不減；斷線重連重開子行程後，第一幀是 `full:true`，client 照 reset 處理即可，不用拿舊連線的 seq 比。
+  - observe 子行程意外結束會自動重開（退避 100ms 起、封頂 5s），新的第一幀是完整幀。回放超過 256 KB 或 1024 幀也會重開，讓 herdr 送新的完整幀。
+  - 同一 `(host, pane, 尺寸)` 的所有觀看者共用一條 observe（或一個快照輪詢）；不同尺寸各自一條。最後一個觀看者離開，子行程就被殺掉。
+  - 每秒確認一次 pane 還是登記的那一顆（workspace／tab 對得上，pane id 會被重用）；對不上就 `not_found`。
   - 錯誤碼：`not_found`（pane 不在、被重用到別的 tab、登記已失效）、`upstream`（讀 herdr 失敗）、`bad_source`、`bad_format`。錯誤不帶內部訊息。
-  - 讀取節奏（daemon 內部）：herdr 0.9.5 的 `events.subscribe` 沒有「畫面變動」事件，所以是輪詢 `pane.read`；有變化時 50ms、連續沒變化每拍加倍、封頂 1s。送字／送鍵會立刻喚醒。同一顆 pane 的所有觀看者共用一個讀取迴圈，最後一個離開就停。
+  - 遠端主機的 observe 經 ssh 主連線（同 hosts 的 `ssh -S <ctl>`）在遠端跑同一支 `herdr terminal session observe`，`HERDR_SOCKET_PATH` 指遠端 API socket。
+  - 送字／送鍵會喚醒所有尺寸的串流（快照模式立即讀；observe 模式不需要，子行程自己推）。
   - 一般 Bot 等 bot principal 不能連（401）；限使用者。
 - **白名單兩份**（2026-09-16，SPEC §6.5e「選單點得進去」）：`terminal`／`text`／`keys` 除了這裡開的 shell，也接受 `panes` 表裡的 pane。
   **打字看 listen port，不看 `kind`**——本機有 port（pane 列 `read_only:true`）只可看，打字回

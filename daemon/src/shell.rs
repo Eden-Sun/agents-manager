@@ -435,6 +435,16 @@ pub(crate) async fn read_quick(app: &Arc<App>, host: &str, pane_id: &str, lines:
     Ok((shell.cwd, read))
 }
 
+/// observe 串流用的 client：確認這顆 pane 是登記的、session 對得上，回那條 client（子行程要的 socket 與遠端設定都在上面）。
+pub(crate) async fn observe_client(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<HerdrClient> {
+    let shell = registered(app, host, pane_id, Access::View).await?;
+    let (client, session) = client_for(app, host).await?;
+    if session != shell.herdr_session {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    Ok(client)
+}
+
 /// 這顆 pane 還是不是登記的那一顆（workspace／tab 對得上），再取幾何。兩趟 herdr 呼叫。
 pub(crate) async fn geometry_checked(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<(Option<u32>, Option<u32>)> {
     let shell = registered(app, host, pane_id, Access::View).await?;
