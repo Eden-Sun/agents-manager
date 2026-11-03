@@ -1817,7 +1817,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
     （網頁鎖條上的「補充」）。不建新回合，字直接打進 pane；打字（含 Enter）成功後**同一把 bot 鎖裡**把它記成這個 run 進行中回合的
     user Message（`source=web`、`sent_via='supplement'`、掛那一筆的 `turn_id`）並推 `message_added`。沒有進行中的回合不記（CLI 會開新的一輪，
     外部回合自己存那句）；打字失敗一則都不記；打完了才寫不進去只記 log、回 `message_id: null`——字已經進 pane，回錯會讓人再補一次。
-    補充若被 claude CLI 排進終端佇列（正在跑工具，畫面有 `Press up to edit queued messages`），網頁的「送出排隊的補充」呼叫 `POST /bots/{id}/send-queued-now`：讀畫面確認有排隊才送 `ctrl+x ctrl+s`（打斷這一輪、立刻送出），沒排隊 409 `nothing_queued`、一個鍵都不送（`lifecycle/queued_send_now.rs`）。
+    補充若被 claude CLI 排進終端佇列（正在跑工具，畫面有 `Press up to edit queued messages`），網頁的「送出排隊的補充」呼叫 `POST /bots/{id}/send-queued-now`：讀畫面確認有排隊才送 `ctrl+x ctrl+s`（打斷這一輪、立刻送出），沒排隊 409 `nothing_queued`、一個鍵都不送（`lifecycle/queued_send_now.rs`）。子 agent 沒有 statusLine、版本未知，不看 `send_now_supported`：按鈕對所有 claude 顯示，daemon 以畫面上 CLI 印的 `ctrl+enter to send now` 證明支援。
     claude 把補充的字當成 transcript 裡同一回合的一則新使用者訊息，所以 hook 認領時它也算這一回合送出去的字（§6.7 第 4 點），
     回合照常認領、不開外部回合，也不多存一則重複的使用者訊息。終端備援與 stuck 回合的「送了什麼」（`turn_echo_texts`）本來就讀
     這一回合全部的 user Message，補充也在裡面。對話倒回倒到一則補充時用它自己的原文，不是回合的 `prompt_text`。

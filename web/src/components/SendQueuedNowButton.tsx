@@ -13,12 +13,11 @@ import { useStore } from '../store/store'
 export function SendQueuedNowButton({ botId, inFlightTurnId, inputEmpty }: { botId: string; inFlightTurnId: string | null | undefined; inputEmpty: boolean }) {
   const t = useT()
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
-  const sendNowSupported = useStore((s) => s.runs[botId]?.send_now_supported === true)
   const hasSupplement = useStore((s) =>
     Boolean(inFlightTurnId) && (s.messages[botId] ?? []).some((m) => m.turn_id === inFlightTurnId && m.role === 'user' && m.sent_via === 'supplement'),
   )
   const { busy, click } = useSendQueuedNow(botId)
-  if (!inFlightTurnId || !isClaude || !sendNowSupported || !hasSupplement || !inputEmpty) return null
+  if (!inFlightTurnId || !isClaude || !hasSupplement || !inputEmpty) return null
   return (
     <button type="button" className="mini-btn" disabled={busy} title={t('補充還排在終端佇列（CLI 正在跑工具）時，打斷目前這一輪、立刻送進去')} onClick={() => void click()}>
       {t('送出排隊的補充')}
@@ -47,13 +46,13 @@ function useSendQueuedNow(botId: string, onSettled?: () => void) {
   return { busy, click }
 }
 
-/** 對話裡標「補充」的那則旁的小鈕：該則屬於進行中的回合、claude 支援 send-now 時才畫；回 nothing_queued 就藏起來。 */
+/** 對話裡標「補充」的那則旁的小鈕：該則屬於進行中的回合、claude 才畫（子 agent 沒有 statusLine、版本未知，由 daemon 讀畫面判斷能不能插隊）；回 nothing_queued 就藏起來。 */
 export function SupplementSendNow({ msg: m }: { msg: Pick<Message, 'role' | 'sent_via' | 'turn_id' | 'bot_id'> }) {
   const t = useT()
   const botId = m.bot_id ?? ''
   const eligible = useStore((s) =>
     m.role === 'user' && m.sent_via === 'supplement' && Boolean(botId) && Boolean(m.turn_id) &&
-    s.bots.find((b) => b.id === botId)?.kind === 'claude' && s.runs[botId]?.send_now_supported === true &&
+    s.bots.find((b) => b.id === botId)?.kind === 'claude' &&
     Object.values(s.turns[botId] ?? {}).some((x) => x.id === m.turn_id && x.status === 'in_flight'),
   )
   const [gone, setGone] = useState(false)

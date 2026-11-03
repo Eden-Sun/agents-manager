@@ -14,7 +14,7 @@ for (const [name, draft, sentVia, supported, shown] of [
   ['有補充、輸入框空、支援', '', 'supplement', true, true],
   ['輸入框有字', '補一句', 'supplement', true, false],
   ['沒有補充', '', null, true, false],
-  ['不支援 send-now', '', 'supplement', false, false],
+  ['版本未知（子 agent）仍顯示，由 daemon 讀畫面判斷', '', 'supplement', false, true],
 ] as const) {
   test(`送出排隊的補充鈕：${name}`, async () => {
     fakeApi(() => undefined)
@@ -37,7 +37,7 @@ for (const [name, status, sentVia, supported, shown] of [
   ['進行中回合的補充', 'in_flight', 'supplement', true, true],
   ['回合已結束', 'completed', 'supplement', true, false],
   ['不是補充', 'in_flight', null, true, false],
-  ['不支援 send-now', 'in_flight', 'supplement', false, false],
+  ['版本未知（子 agent）仍顯示，由 daemon 讀畫面判斷', 'in_flight', 'supplement', false, true],
 ] as const) {
   test(`補充訊息旁的插隊鈕：${name}`, async () => {
     fakeApi(() => undefined)
