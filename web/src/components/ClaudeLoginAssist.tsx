@@ -42,6 +42,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
         const s = await api.fetchLoginStatus(host, paneId)
         if (stop) return
         if (s) {
+          if (!seen.current) dropShellKeyboard()
           seen.current = true
           // 這顆是登入 pane：CLI 結束後 pane 被收掉，面板也不能跟著拆（`lib/loginPaneHold`）。
           release ??= holdLoginPane(host, paneId)
@@ -171,6 +172,15 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
       )}
     </div>
   )
+}
+
+/**
+ * 觸控裝置上，shell 一打開就把焦點放進指令列，鍵盤彈出來蓋住協助條（網址鈕、碼）。登入 pane 不需要打字，收掉焦點。
+ */
+function dropShellKeyboard() {
+  if (typeof window === 'undefined' || !window.matchMedia?.('(pointer: coarse)').matches) return
+  const el = document.activeElement
+  if (el instanceof HTMLElement && el.closest('.shell-pane')) el.blur()
 }
 
 /**

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ADD_PROJECT_EVENT, KIND_STATE_LABEL, type OnbKindRow } from '../lib/onboarding'
 import { useOnboarding } from '../lib/useOnboarding'
 import { installBusyKey, installKindOnHost } from '../lib/onboardingActions'
-import { AGY_LOGIN_GUIDE, cliLoginCommand } from '../lib/quotaLogin'
+import { AGY_LOGIN_GUIDE, CODEX_LOGIN_GUIDE, cliLoginCommand } from '../lib/quotaLogin'
 import { useStore } from '../store/store'
 import { AgyInstallButton } from './AgyInstall'
 import { useT } from '../lib/i18n'
@@ -46,7 +46,7 @@ function KindRowView({ row }: { row: OnbKindRow }) {
         )
       ) : row.state === 'out' ? (
         <div className="onb-act">
-          <QuotaLoginShell host="local" hostLabel={t('本機')} kind={row.kind} command={cliLoginCommand(row.kind, {})} guide={row.kind === 'agy' ? AGY_LOGIN_GUIDE : undefined} />
+          <QuotaLoginShell host="local" hostLabel={t('本機')} kind={row.kind} command={cliLoginCommand(row.kind, {})} guide={row.kind === 'agy' ? t.tr(AGY_LOGIN_GUIDE) : row.kind === 'codex' ? t.tr(CODEX_LOGIN_GUIDE) : undefined} />
         </div>
       ) : null}
     </li>

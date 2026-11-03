@@ -69,4 +69,6 @@ function shellQuote(v: string): string {
 }
 
 /** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
+/** codex 用裝置碼登入（`codex login --device-auth`）：不會跳瀏覽器，終端印網址與碼。 */
+export const CODEX_LOGIN_GUIDE = msg('終端會印出登入網址和一次性碼：用手機或任何裝置打開網址、輸入那組碼就好，不用貼回終端。')
 export const AGY_LOGIN_GUIDE = msg('agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。')
