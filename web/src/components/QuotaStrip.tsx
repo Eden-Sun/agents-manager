@@ -22,7 +22,7 @@ import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
 import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, msUntil, resetBadge } from '../lib/quotaReset'
-import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
+import { CODEX_LOGIN_GUIDE, cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
 import { noFiveHourCap, projectNoFiveHour } from '../lib/quotaNoFiveHour'
@@ -677,7 +677,7 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
   if (shouldUseIdentityLogin(identity)) {
     return <IdentityCliLogin kind="codex" host={host} hostLabel={hostLabel(host, t)} identity={identity} />
   }
-  return <QuotaLoginShell host={host} hostLabel={hostLabel(host, t)} kind="codex" command={command} />
+  return <QuotaLoginShell host={host} hostLabel={hostLabel(host, t)} kind="codex" command={command} guide={t.tr(CODEX_LOGIN_GUIDE)} />
 }
 
 function blockedLine(hit: QuotaLimitHit, t: ReturnType<typeof useT>): string {
@@ -930,6 +930,13 @@ export function QuotaStrip({
     setPopTop(phone && r ? Math.round(r.bottom + 6) : null)
   }
   const wrap = useRef<HTMLDivElement>(null)
+  // 手機：從明細按了登入／開 shell，畫面切到 shell 時收起明細——它正好蓋住登入協助條（桌機不擋，留著看狀態）。
+  const shellPane = useStore((s) => s.shellView?.paneId ?? null)
+  const [seenShellPane, setSeenShellPane] = useState(shellPane)
+  if (seenShellPane !== shellPane) {
+    setSeenShellPane(shellPane)
+    if (shellPane && open && phone) setOpen(false)
+  }
 
   useEffect(() => {
     if (!open) return

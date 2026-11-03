@@ -75,7 +75,7 @@ export default {
   '等 CLI 印出登入網址…': 'Waiting for the CLI to print the sign-in link…',
   '去登入網站完成授權，網站會給你一串 code；CLI 準備好收 code 後這裡就能貼。': 'Finish authorization on the sign-in site; it will give you a code. Once the CLI is ready for the code, paste it here.',
   'code 只會有英數字與 _ . ~ # : / + = % -，看一下有沒有多貼到別的字': 'A code only contains letters, digits and _ . ~ # : / + = % -. Check whether extra characters were pasted.',
-  '把網站給的 code 貼在這裡，按送出。': 'Paste the code from the site here, then press Submit.',
+  '把網站給的 code 貼在這裡，按送出。': 'Paste the code from the site here, then press Send code.',
   '已送出，等 CLI 回應…': 'Submitted, waiting for the CLI to respond…',
   '登入失敗：重新按「登入」再來一次。': 'Sign-in failed: press "Sign in" to try again.',
   '登入程序已結束。': 'The sign-in process has ended.',
@@ -107,6 +107,7 @@ export default {
   // lib/jevLabel.ts・quotaLogin.ts
   'Jev（TypeSafe 型別判斷）': 'Jev (TypeSafe type judgment)',
   '只是建議，不會自動動作': 'Advisory only, no automatic action',
+  '終端會印出登入網址和一次性碼：用手機或任何裝置打開網址、輸入那組碼就好，不用貼回終端。': 'The terminal prints a sign-in URL and a one-time code: open the URL on your phone or any device and enter the code. No need to paste anything back into the terminal.',
   'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。': 'The agy TUI walks you through sign-in: over SSH it prints an authorization URL. Finish authorization in the browser, then paste the code back into that terminal. When signed in, type /quit to exit.',
   // api/claudeApi.ts・judge.ts
   '還沒有可用的 API key，先貼上 key 再開。': 'No usable API key yet. Paste a key before turning this on.',
