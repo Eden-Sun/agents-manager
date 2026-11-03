@@ -32,7 +32,7 @@ import { msgTimeLabel, msgTimeTitle } from '../lib/msgTime'
 import { useLocalDay } from '../hooks/useLocalDay'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
-import { OutboxFiles } from './OutboxFiles'
+import { PhoneOutboxTray } from './PhoneOutboxTray'
 import { anchorOf, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { handedOffTo } from '../lib/handoff'
@@ -1150,12 +1150,10 @@ function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, mobileOpen, onOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
-  /** 只在手機畫在彈窗最下面的「bot 給你的檔案」（#929）：手機沒有檔案暫存托盤，outbox 沒有別的入口；桌面在托盤下半段。 */
-  phoneFiles?: ReactNode
   mobileOpen: boolean
   onOpen: () => void
   onClose: () => void
@@ -1171,17 +1169,16 @@ function ContextBar({ issues, status, hasStatus, phoneFiles, mobileOpen, onOpen,
     </div>
   )
   return phone ? (
-    <Modal open title={t('Git / 專案資訊 / 檔案')} onClose={onClose}>
+    <Modal open title={t('Git / 專案資訊')} onClose={onClose}>
       {content}
-      {phoneFiles}
     </Modal>
   ) : (
     <>
       <div className="context-bar">
-        {issues ? <button type="button" className="mini-btn desktop-git-info" aria-label={t('Git / 專案資訊 / 檔案')} aria-haspopup="dialog" aria-expanded={mobileOpen} onClick={onOpen}><GitIcon /> GitHub</button> : null}
+        {issues ? <button type="button" className="mini-btn desktop-git-info" aria-label={t('Git / 專案資訊')} aria-haspopup="dialog" aria-expanded={mobileOpen} onClick={onOpen}><GitIcon /> GitHub</button> : null}
         {hasStatus ? status : null}
       </div>
-      {issues && mobileOpen ? <Modal open title={t('Git / 專案資訊 / 檔案')} onClose={onClose}><div className="context-bar">{issues}</div></Modal> : null}
+      {issues && mobileOpen ? <Modal open title={t('Git / 專案資訊')} onClose={onClose}><div className="context-bar">{issues}</div></Modal> : null}
     </>
   )
 }
@@ -1524,7 +1521,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               type="button"
               className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}`}
               // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
-              aria-label={statusInfo?.account_warning ? t('Git / 專案資訊 / 檔案（帳號警告）') : t('Git / 專案資訊 / 檔案')}
+              aria-label={statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}
@@ -1624,7 +1621,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         }
         status={apiBot ? <ApiBotUsageBar botId={botId} /> : <StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={apiBot || bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
-        phoneFiles={<OutboxFiles />}
       />
 
 
@@ -1689,6 +1685,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </div>
           ) : null}
           <BackgroundJobsBar botId={botId} />
+          {/* 手機的「bot 給的檔案」：輸入框上方的收合列（使用者 2026-11-03）；桌面在右側欄托盤。 */}
+          <PhoneOutboxTray />
           <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
