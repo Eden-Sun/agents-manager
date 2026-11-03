@@ -29,6 +29,8 @@ export interface Transport {
 
 export interface StreamHandlers {
   onMessage: (msg: unknown) => void
+  /** 連上（onopen）時呼叫，給 `send` 往這條線送 JSON（主機 shell 的 `size`）；之後斷線 `send` 會變成 no-op。 */
+  onOpen?: (send: (msg: unknown) => void) => void
   /** 連上過才為 `true`；握手被拒（舊 daemon 回 404、token 不對）是 `false`，沒有 HTTP 狀態可看。 */
   onClose: (opened: boolean) => void
 }
@@ -336,7 +338,12 @@ export class HttpTransport implements Transport {
       const ws = new WebSocket(`${scheme}://${location.host}/api${path}${path.includes('?') ? '&' : '?'}${qs.toString()}`)
       sock = ws
       ws.onopen = () => {
-        if (sock === ws) opened = true
+        if (sock !== ws) return
+        opened = true
+        handlers.onOpen?.((msg) => {
+          // 1 = OPEN；不用 WebSocket.OPEN 常數，測試的假 WebSocket 不一定帶。
+          if (sock === ws && ws.readyState === 1) ws.send(JSON.stringify(msg))
+        })
       }
       ws.onmessage = (ev: MessageEvent<string>) => {
         if (sock !== ws) return
