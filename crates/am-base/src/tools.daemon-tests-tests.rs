@@ -492,7 +492,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         env.insert("CLAUDE_CONFIG_DIR".into(), "/tmp/cc one".into());
         env.insert("bad name".into(), "must not be emitted".into());
         assert_eq!(identity_login_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude auth login"));
-        assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login"));
+        assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login --device-auth"));
         assert_eq!(identity_login_command("grok", &BTreeMap::new()).as_deref(), Some("grok login"));
         assert!(identity_login_command("other", &BTreeMap::new()).is_none());
     }

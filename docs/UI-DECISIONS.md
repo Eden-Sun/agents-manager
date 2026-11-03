@@ -791,6 +791,13 @@ daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案�
 - mock 模式下檔名帶 `stall`（停在 25%）、`fail`（傳到 40% 回 502）、`slow` 可以重現這幾種畫面。
   ![桌機上傳中](screenshots/upload-progress/desktop-uploading.png) ![桌機失敗](screenshots/upload-progress/desktop-failed.png) ![手機上傳中](screenshots/upload-progress/phone-uploading.png) ![手機失敗](screenshots/upload-progress/phone-failed.png)
 
+## codex 用裝置碼登入（2026-11-03，使用者：「讓 codex 身份的登入能在遠端／手機完成，比照 claude」）
+
+- **`codex login --device-auth`，不是 `codex login`**：預設的 `codex login` 在那台主機等 localhost:1455 的回呼，人在手機上、或身份在遠端主機時根本登不進去。裝置碼流程印出固定網址與一次性碼，任何裝置開網址輸入碼即可，CLI 自己輪詢完成。
+- **網頁不貼 code、不開輸入框**：codex 登入協助條是「打開登入網站」（新分頁）＋一次性碼大字顯示＋「複製碼」。碼只在畫面上，不進 store、不進 localStorage。手機上碼與按鈕各佔一整列（≥40px）。CLI 結束後 pane 收掉，條上顯示重新偵測後的結果（已登入／仍未登入）與「重新偵測」。
+- **共用同一條路**：同一個 `GET …/shells/{pane}/login`（多一個 `flow`／`device_code` 欄位）、同一個身份 reservation、同一個登入 watcher；claude 的貼 code 流程不動。
+- **被登出提示也涵蓋 codex**：探測說未登入，或綁著身份的 codex bot 回合整則是授權失效的錯誤，就進主畫面頂端同一條提示條，「立即登入」走裝置碼登入。只認整則單行的錯誤（引用不算）。
+
 ## claude 用 CLI 登入、不佔 bot 的 pane（2026-09-25，使用者：「抓到 auth fail 要能快速登入，用 cli 的方式而不是卡著」）
 
 cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「這一回合失敗收尾（帳號或授權）」，沒有能按的東西；而 Bot 設定與額度 popover 的「登入」是把 `/login` 送進那顆 bot 的 pane——

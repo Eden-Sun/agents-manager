@@ -127,7 +127,7 @@ struct Fx {
 async fn login_pane(screen: &str) -> Fx {
     let env = tt::env().await;
     let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
-    reserve(&env.app, "local", "cc9").unwrap().register(&shell.pane_id, &shell.created_at);
+    reserve(&env.app, "local", "cc9").unwrap().register(&shell.pane_id, &shell.created_at, "claude");
     env.herdr.set_screen(&shell.pane_id, screen);
     // 打字前 daemon 會即時問 herdr／行程樹這顆 pane 現在的樣子（`shell::live_verdict`）：給一棵沒有 listen port 的樹。
     env.herdr.set_shell_pid(&shell.pane_id, 41101);
@@ -179,7 +179,7 @@ async fn only_registered_login_panes_are_served() {
     assert!(env.herdr.calls_to("pane.send_text").is_empty());
 
     // 登記過，但帳上那顆 shell 的身份（created_at）對不上＝pane id 被別的 shell 重用。
-    reserve(&env.app, "local", "cc9").unwrap().register(&plain.pane_id, "some-other-shell");
+    reserve(&env.app, "local", "cc9").unwrap().register(&plain.pane_id, "some-other-shell", "claude");
     assert!(matches!(status(&env.app, "local", &plain.pane_id).await, Err(LcError::NotFound(_))));
     assert!(!is_registered(&env.app, "local", &plain.pane_id), "對不上就順手清掉");
 
@@ -196,7 +196,7 @@ async fn a_second_live_pane_for_the_same_host_identity_is_rejected() {
     let env = tt::env().await;
     let first = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
     let second = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
-    reserve(&env.app, "local", "cc9").unwrap().register(&first.pane_id, &first.created_at);
+    reserve(&env.app, "local", "cc9").unwrap().register(&first.pane_id, &first.created_at, "claude");
     let conflict = match reserve(&env.app, "local", "cc9") {
         Err(error) => error,
         Ok(_) => panic!("a second live pane for this identity was reserved"),
@@ -222,7 +222,7 @@ async fn identity_login_reservations_serialize_open_and_release_when_closed() {
     drop(first);
 
     let second = reserve(&env.app, "local", "cc9").unwrap();
-    second.register("w1:p1", "shell-1");
+    second.register("w1:p1", "shell-1", "claude");
     let conflict = match reserve(&env.app, "local", "cc9") {
         Err(error) => error,
         Ok(_) => panic!("an active login pane did not keep the identity reservation"),
@@ -377,4 +377,51 @@ async fn a_finished_login_clears_the_login_prompt_but_a_failed_one_keeps_it() {
         assert_eq!(out["outcome"], if cleared { "finished" } else { "failed" });
         assert_eq!(crate::login_prompt::get(&f.env.app, "local", "cc9").is_none(), cleared);
     }
+}
+
+/// `codex login --device-auth` 的真輸出（codex-cli 0.166.0，本機拋棄式 CODEX_HOME 實測；碼換成假的）。
+const CODEX_DEVICE: &str = "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\"\n\
+\n\
+Welcome to Codex [v0.166.0]\n\
+OpenAI's command-line coding agent\n\
+\n\
+Follow these steps to sign in with ChatGPT using device code authorization:\n\
+\n\
+1. Open this link in your browser and sign in to your account\n\
+   https://auth.openai.com/codex/device\n\
+\n\
+2. Enter this one-time code (expires in 15 minutes)\n\
+   AB7K-QX29\n\
+\n\
+Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.\n";
+
+#[test]
+fn codex_device_screen_gives_the_fixed_url_and_the_one_time_code() {
+    let s = parse_device_screen(CODEX_DEVICE);
+    assert_eq!(s.url.as_deref(), Some("https://auth.openai.com/codex/device"));
+    assert_eq!(s.device_code.as_deref(), Some("AB7K-QX29"));
+    assert!(!s.awaiting_code, "裝置碼流程不貼 code");
+    assert_eq!(s.failure, None);
+}
+
+#[test]
+fn a_device_code_is_only_taken_from_the_line_after_the_prompt() {
+    // 畫面還沒印出碼（只有網址）：不取。
+    let before = "   https://auth.openai.com/codex/device\n2. Enter this one-time code (expires in 15 minutes)\n";
+    assert_eq!(parse_device_screen(before).device_code, None);
+    // 提示後面的那一行不是碼（含空白、符號、太長）：不取，網址照給。
+    for bad in ["   <b>AB7K-QX29</b>", "   AB7K QX29", "   AB7K_QX29", "   ABCDEFGHIJKLMNOPQRSTUVWXYZ"] {
+        let text = format!("https://auth.openai.com/codex/device\nenter this one-time code\n{bad}\n");
+        let s = parse_device_screen(&text);
+        assert_eq!(s.device_code, None, "{bad:?}");
+        assert!(s.url.is_some());
+    }
+    // 網址只認 codex 的裝置頁，別的網址不交給網頁。
+    assert_eq!(parse_device_screen("https://evil.example/codex/device\none-time code\nAB7K-QX29").url, None);
+}
+
+#[test]
+fn a_failed_device_login_reports_the_cli_line() {
+    let s = parse_device_screen("Login failed: device code expired\n");
+    assert_eq!(s.failure.as_deref(), Some("Login failed: device code expired"));
 }

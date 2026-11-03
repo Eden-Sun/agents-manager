@@ -412,7 +412,7 @@ pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
 pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
     let login = match kind {
         "claude" => "claude auth login",
-        "codex" => "codex login",
+        "codex" => "codex login --device-auth",
         "grok" => "grok login",
         _ => return None,
     };
@@ -1135,7 +1135,7 @@ pub fn install_prompt(kind: &str) -> Option<String> {
         "codex" => (
             "OpenAI Codex CLI",
             "有 npm 用 `npm i -g @openai/codex`，否則有 brew 用 `brew install codex`，兩者都沒有就回報需要先安裝 Node.js 或 Homebrew，不要自行改裝別的東西",
-            "codex login",
+            "codex login --device-auth",
         ),
         "grok" => ("xAI Grok CLI", "官方安裝腳本", "grok login"),
         _ => return None,

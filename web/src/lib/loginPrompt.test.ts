@@ -120,3 +120,38 @@ test('提示文字：說清楚哪個身份、哪台主機、幾顆 bot、怎麼�
   const local = base({ bots: [{ id: 'b', name: 'l', project_id: 'p-local', identity: 'cc1', kind: 'claude' }], hosts: [], localIdentityStatus: { cc1: st({ logged_in: false }) } })
   assert.match(loginPromptText(pendingLogins(local)[0]).title, /本機/)
 })
+
+test('codex：探測說未登入、有 codex bot 綁著：提示；綁的是 claude bot 不算（kind 要對）', () => {
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
+  const codexDown = (over: Partial<IdentityStatus>) =>
+    base({ bots: [codexBot], hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', ...over }) } }] })
+  const p = pendingLogins(codexDown({ logged_in: false }))
+  assert.equal(p.length, 1)
+  assert.deepEqual({ identity: p[0].identity, via: p[0].via, bots: p[0].bots }, { identity: 'cx1', via: 'probe', bots: [{ id: 'bx', name: 'cx-ops' }] })
+  // 同名身份但綁的是 claude bot：codex 身份不靠它提示。
+  const mismatch = base({ hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: false }) } }] })
+  assert.deepEqual(pendingLogins(mismatch), [])
+})
+
+test('codex：回合整則 401／refresh token 失效被記下（login_needed）→ 提示，episode＝since，文字說是回合失敗', () => {
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
+  const turn = base({
+    bots: [codexBot],
+    hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: null, login_needed: { since: 'TX', via: 'turn_auth_failure' } }) } }],
+  })
+  const [p] = pendingLogins(turn)
+  assert.equal(p.episode, 'TX')
+  assert.equal(p.via, 'turn')
+  assert.match(loginPromptText(p).detail, /1 顆 bot.*回合.*失敗/)
+})
+
+test('codex 身份登入成功（探測回已登入、記號清掉）：不再提示，關掉的紀錄清掉', () => {
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
+  const dismissed = { [dismissKey('m4p', 'cx1')]: 'TX' }
+  const ok = base({
+    bots: [codexBot],
+    hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: true, login_needed: null }) } }],
+  })
+  assert.deepEqual(pendingLogins(ok), [])
+  assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(ok, pendingLogins(ok), dismissed)), {})
+})

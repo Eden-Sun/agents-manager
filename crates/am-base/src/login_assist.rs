@@ -35,6 +35,8 @@ pub const READ_LINES: u32 = 80;
 
 pub struct Entry {
     pub identity: String,
+    /// `claude`（貼 code）或 `codex`（裝置碼：網站上輸入畫面的碼，不用貼回來）。
+    pub kind: String,
     /// 開 pane 當時 `HostShell.created_at`：pane id 被重用時對不上。
     pub shell_created_at: String,
     pub opened: Instant,
@@ -73,6 +75,8 @@ pub struct LoginScreen {
     pub awaiting_code: bool,
     /// CLI 吐出的失敗說明（`Login failed: …`）。
     pub failure: Option<String>,
+    /// codex 裝置碼登入：網站上要輸入的一次性碼（`WL4L-OTCJ9` 這種）。claude 永遠 `None`。
+    pub device_code: Option<String>,
 }
 
 fn is_url_char(c: char) -> bool {
@@ -92,6 +96,36 @@ pub fn is_login_url(url: &str) -> bool {
     }
     let ok_host = ["claude.com", "claude.ai", "anthropic.com"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")));
     ok_host && rest[host.len()..].contains("/oauth/authorize")
+}
+
+/// codex 裝置碼登入（`codex login --device-auth`，codex 0.166.0 實測）：網址固定，一次性碼印在
+/// `Enter this one-time code (expires in 15 minutes)` 的下一個非空行。CLI 自己輪詢，網頁不用送任何東西回去。
+pub const CODEX_DEVICE_URL: &str = "https://auth.openai.com/codex/device";
+
+/// 一次性碼：英數字與 `-`（實測 `WL4L-OTCJ9`），長度 4–24；畫面是任意輸出，不符合就不取。
+pub fn valid_device_code(code: &str) -> bool {
+    (4..=24).contains(&code.len()) && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+pub fn parse_device_screen(text: &str) -> LoginScreen {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r').trim()).collect();
+    let mut out = LoginScreen::default();
+    if lines.iter().any(|l| l.contains(CODEX_DEVICE_URL)) {
+        out.url = Some(CODEX_DEVICE_URL.to_string());
+    }
+    if let Some(at) = lines.iter().position(|l| l.to_ascii_lowercase().contains("one-time code")) {
+        out.device_code = lines[at + 1..].iter().find(|l| !l.is_empty()).filter(|c| valid_device_code(c)).map(|c| c.to_string());
+    }
+    out.failure = failure_line(&lines);
+    out
+}
+
+fn failure_line<S: AsRef<str>>(lines: &[S]) -> Option<String> {
+    lines.iter().rev().find_map(|l| {
+        let l = l.as_ref();
+        let at = l.find("Login failed")?;
+        Some(l[at..].trim().chars().take(200).collect::<String>())
+    })
 }
 
 pub fn parse_screen(text: &str) -> LoginScreen {
@@ -119,10 +153,7 @@ pub fn parse_screen(text: &str) -> LoginScreen {
     }
     let last = lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
     out.awaiting_code = last == Some(PROMPT);
-    out.failure = lines.iter().rev().find_map(|l| {
-        let at = l.find("Login failed")?;
-        Some(l[at..].trim().chars().take(200).collect::<String>())
-    });
+    out.failure = failure_line(&lines);
     out
 }
 
@@ -133,6 +164,7 @@ pub fn valid_code(code: &str) -> bool {
 
 pub struct Target {
     pub identity: String,
+    pub kind: String,
     pub code_sent: bool,
 }
 

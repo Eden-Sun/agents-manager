@@ -16,6 +16,8 @@ export type LoginPhase =
   | 'starting'
   /** 有網址，可以去登入；提示還沒出現（或 CLI 還在處理）。 */
   | 'url'
+  /** codex 裝置碼：網址與一次性碼都在畫面上，到網站輸入碼即可，不貼回終端。 */
+  | 'device'
   /** 畫面正在等貼 code。 */
   | 'waiting_code'
   /** code 已送出，等 CLI 回應。 */
@@ -28,6 +30,7 @@ export type LoginPhase =
 export function loginPhase(status: LoginStatus | null, ended: boolean): LoginPhase {
   if (ended || !status) return 'ended'
   if (status.failure) return 'failed'
+  if (status.flow === 'device') return status.url && status.device_code ? 'device' : 'starting'
   if (status.code_sent) return 'submitted'
   if (status.awaiting_code) return 'waiting_code'
   return status.url ? 'url' : 'starting'
@@ -43,6 +46,8 @@ export function loginHint(phase: LoginPhase, code: string): string {
   switch (phase) {
     case 'starting':
       return t('等 CLI 印出登入網址…')
+    case 'device':
+      return t('到登入網站輸入上面的一次性碼，完成後這裡會自動更新。不用貼回終端。')
     case 'url':
       return t('去登入網站完成授權，網站會給你一串 code；CLI 準備好收 code 後這裡就能貼。')
     case 'waiting_code':

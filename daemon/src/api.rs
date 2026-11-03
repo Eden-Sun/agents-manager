@@ -5028,11 +5028,13 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         crate::tools::identity_login_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
-    let login_reservation = if !logout && idn.kind == "claude" {
+    // claude（貼 code）與 codex（裝置碼）的登入 pane 都登記，網頁才拿得到網址與碼。
+    let login_reservation = if !logout && matches!(idn.kind.as_str(), "claude" | "codex") {
         Some(crate::runners::login_assist::reserve(&app, &name, &identity)?)
     } else {
         None
     };
+    let login_kind = idn.kind.clone();
     let app_for_open = app.clone();
     let name_for_open = name.clone();
     let command_for_open = command.clone();
@@ -5043,7 +5045,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
             return Err(e);
         }
         if let Some(reservation) = login_reservation {
-            reservation.register(&shell.pane_id, &shell.created_at);
+            reservation.register(&shell.pane_id, &shell.created_at, &login_kind);
         }
         Ok::<_, LcError>(shell)
     }).await;

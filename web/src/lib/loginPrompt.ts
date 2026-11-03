@@ -39,11 +39,12 @@ export function pendingLogins(s: LoginPromptInput): PendingLogin[] {
   const out: PendingLogin[] = []
   for (const { host, status } of sources) {
     for (const [identity, st] of Object.entries(status)) {
-      if (st.kind !== 'claude') continue
+      // claude（回合授權失敗＝`Not logged in`）與 codex（回合整則是 401／refresh token 失效）；其他 kind 沒有這條提示。
+      if (st.kind !== 'claude' && st.kind !== 'codex') continue
       const turn = st.login_needed ?? null
       if (st.logged_in !== false && !turn) continue
       const bots = s.bots
-        .filter((b) => b.kind === 'claude' && b.identity === identity && (hostOf.get(b.project_id) ?? 'local') === host)
+        .filter((b) => b.kind === st.kind && b.identity === identity && (hostOf.get(b.project_id) ?? 'local') === host)
         .map((b) => ({ id: b.id, name: b.name }))
       if (bots.length === 0) continue
       out.push({ host, identity, episode: turn?.since ?? 'probe', via: turn ? 'turn' : 'probe', bots })

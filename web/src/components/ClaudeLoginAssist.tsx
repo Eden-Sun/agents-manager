@@ -85,10 +85,13 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
     }
   }
 
+  const device = status?.flow === 'device'
   return (
-    <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || 'claude' })}>
+    <div className="login-assist" role="group" aria-label={t('登入 {identity}', { identity: identity || (device ? 'codex' : 'claude') })}>
       <div className="login-assist-title">
-        {t.x('登入 claude 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
+        {device
+          ? t.x('登入 codex 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })
+          : t.x('登入 claude 身份 {identity}（{where}）', { identity: <strong>{identity || '…'}</strong>, where })}
       </div>
       {phase === 'ended' ? (
         <div className="login-assist-done" role="status">
@@ -103,6 +106,22 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
             {toolsBusy ? t('偵測中…') : t('重新偵測')}
           </button>
         </div>
+      ) : device ? (
+        <>
+          {status?.url ? (
+            <a className="btn primary login-assist-open" href={status.url} target="_blank" rel="noopener noreferrer">
+              {t('打開登入網站')}
+            </a>
+          ) : (
+            <button type="button" className="btn primary login-assist-open" disabled>
+              {t('打開登入網站')}
+            </button>
+          )}
+          <DeviceCode code={status?.device_code ?? null} />
+          <div className="login-assist-hint" role="status">
+            {loginHint(phase, code)}
+          </div>
+        </>
       ) : (
         <>
           {status?.url ? (
@@ -146,4 +165,42 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
       )}
     </div>
   )
+}
+
+/**
+ * codex 裝置碼：一次性碼大字顯示，手機上一整列好按（≥40px）；複製失敗（沒有剪貼簿權限）就只剩大字讓人抄。
+ * 碼只在這個元件的 state 裡，不進 store、不進 localStorage。
+ */
+function DeviceCode({ code }: { code: string | null }) {
+  const t = useT()
+  const [copied, setCopied] = useState(false)
+  if (!code) return <div className="login-assist-hint" role="status">{t('等 CLI 印出一次性碼…')}</div>
+  return (
+    <div className="login-assist-device">
+      <div className="login-assist-devcode" aria-label={t('一次性碼')}>
+        {code}
+      </div>
+      <button
+        type="button"
+        className="btn login-assist-copy"
+        onClick={() => {
+          copyText(code).then(
+            (ok) => setCopied(ok),
+            () => setCopied(false),
+          )
+        }}
+      >
+        {copied ? t('已複製') : t('複製碼')}
+      </button>
+    </div>
+  )
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    return false
+  }
 }

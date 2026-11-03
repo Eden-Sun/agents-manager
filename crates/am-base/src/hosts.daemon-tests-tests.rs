@@ -559,7 +559,7 @@
             app.models_cache.lock().await.insert(format!("{h}/codex/"), (std::time::Instant::now(), json!({})));
             app.host_shells.lock().await.push(shell(h));
             if h == "inv-347" {
-                crate::runners::login_assist::reserve(app, h, "cc9").unwrap().register("w1:p1", &shell(h).created_at);
+                crate::runners::login_assist::reserve(app, h, "cc9").unwrap().register("w1:p1", &shell(h).created_at, "claude");
             }
         }
         let cached_rows = |key: &'static str| async move {

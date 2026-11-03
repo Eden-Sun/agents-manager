@@ -244,3 +244,28 @@ async fn forgetting_a_host_drops_only_that_hosts_markers() {
     assert!(get(&env.app, HOST, "cc1").is_some(), "別台不受影響");
     assert!(!forget_host(&env.app, "m4p"), "已經沒有：回 false");
 }
+
+/// codex 的整則授權失敗才算；引用、夾在敘述裡、多行、或別的錯誤都不算。
+#[test]
+fn a_codex_auth_failure_must_be_the_whole_message() {
+    for yes in [
+        "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+        "Error: refresh token has expired",
+        "unexpected status 401 Unauthorized",
+        "401 Unauthorized",
+    ] {
+        assert!(is_auth_failure_line("codex", yes), "{yes:?}");
+    }
+    for no in [
+        "",
+        "我看到 unexpected status 401 Unauthorized 這行",
+        "unexpected status 401 Unauthorized\n然後呢",
+        "rate limit reached, try again later",
+        "refresh token 是存在 auth.json 裡的",
+        "Your access token could not be refreshed. Retry in a moment.",
+    ] {
+        assert!(!is_codex_auth_failure_line(no), "{no:?}");
+    }
+    assert!(!is_auth_failure_line("grok", "Not logged in · Please run /login"), "只有 claude／codex 有這條提示");
+    assert!(is_auth_failure_line("claude", "Not logged in · Please run /login"));
+}
