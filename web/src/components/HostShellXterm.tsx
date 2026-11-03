@@ -108,8 +108,10 @@ export function HostShellXterm({
   useEffect(() => {
     refitRef.current()
   }, [fitScreen])
+  /** observe 模式中：herdr 已照面板寬折好行、靠終端自動換行接續，「換行」勾選不套用。 */
+  const observeRef = useRef(false)
   useEffect(() => {
-    termRef.current?.write(wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
+    if (!observeRef.current) termRef.current?.write(wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
   }, [wrap])
 
   useEffect(() => {
@@ -207,7 +209,10 @@ export function HostShellXterm({
     const setObserve = (on: boolean) => {
       if (observe === on) return
       observe = on
+      observeRef.current = on
       if (!alive) return
+      // 回到快照模式才照「換行」勾選；observe 一律自動換行（不然折行的長輸出會被截掉）。
+      term.write(on || cb.current.wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
       cb.current.onObserve?.(on)
       // 模式換了：字級與尺寸規則跟著換（observe 固定字級、frame 照 fitScreen 算）。
       fitFont()
@@ -331,7 +336,8 @@ export function HostShellXterm({
       setObserve(true)
       if (full) {
         term.reset()
-        term.write(cb.current.wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
+        // herdr 把超過面板寬的行寫成一長串、靠自動換行折下去：關掉就會截斷（實測 204 字網址只剩 122 字）。
+        term.write(AUTOWRAP_ON)
       }
       if (pane.cols && pane.rows) {
         cb.current.onGeometry(pane.cols, pane.rows)

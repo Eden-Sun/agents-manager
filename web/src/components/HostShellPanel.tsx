@@ -530,10 +530,13 @@ export function HostShellPanel({
           >
             {syncOn ? t('鍵盤直通') : t('鍵盤直通（關）')}
           </button>
+          {/* observe：herdr 已照面板寬折好行，「換行」沒有作用，跟「縮放至全螢幕」一樣隱藏。 */}
+          {xtermMode && xtermObserve ? null : (
           <label className="conn" title={t('折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。')}>
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
             {t('換行')}
           </label>
+          )}
           {xtermMode && !xtermObserve ? (
             <label className="conn" title={t('把整個 pane 縮進面板（字會變小）；關掉時字不小於 12px，放不下就捲動。')}>
               <input type="checkbox" checked={fitScreen} onChange={(e) => setFitScreen(e.target.checked)} />
