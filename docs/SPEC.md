@@ -4235,7 +4235,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 - 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、專案設定用該 Project 的，都沒選是本機。
 - 條上不掛主機名牌（標題列左邊的 `@host` 已經說了，2026-09-29 使用者）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
 - popover 的帳號列可點列內空白處切換暫時停用；按鈕等控制項保留自身操作。登入確認框以 portal 顯示，點確認框內容不會切換背後的帳號列。
-- 未登入列有命名身份時，一律呼叫 `POST /api/hosts/{host}/identities/{identity}/login`，由 daemon 依該主機展開 env；不把 config 原文拼進 shell 指令。預設帳號才走 shell／TUI：codex 開 shell 跑 `codex login`，claude 開 shell 跑 `claude auth login`，grok 有同 host 的執行中 bot 就送 `/login`，否則開 shell 跑 `grok login`。
+- 未登入列有命名身份時，一律呼叫 `POST /api/hosts/{host}/identities/{identity}/login`，由 daemon 依該主機展開 env；不把 config 原文拼進 shell 指令。預設帳號才走 shell／TUI：codex 開 shell 跑 `codex login --device-auth`，claude 開 shell 跑 `claude auth login`，grok 有同 host 的執行中 bot 就送 `/login`，否則開 shell 跑 `grok login`。
 - 側欄 bot 的 critical 警告讀該 bot 所在主機的列。
 - 兩個 daemon 管同一台遠端會搶同一條 ssh master（`hosts::short_dir()` 只用 uid 命名），測試 daemon 要先停掉另一個。
 
@@ -4332,15 +4332,17 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 `[[identities]]` 仍可手寫、可從 UI 新增刪除；shell 認來的唯讀（要改去改那台的 alias）。
 
 ### 16.3a 主機層一鍵登入
-`POST /api/hosts/{name}/identities/{identity}/login`：在該主機 manager session 開臨時 host-shell pane，identity env 以該主機 `$HOME` 展開後執行 `claude auth login`、`codex login` 或 `grok login`。
+`POST /api/hosts/{name}/identities/{identity}/login`：在該主機 manager session 開臨時 host-shell pane，identity env 以該主機 `$HOME` 展開後執行 `claude auth login`、`codex login --device-auth` 或 `grok login`。
 claude 用子命令而不是 `claude /login`：後者起一整個 REPL、登完也不退出，下面的「CLI 結束」永遠等不到，pane 要到 15 分鐘上限才收。
-pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
+codex 用 `--device-auth`（2026-11-03 本機 0.166.0 實測，拋棄式 `CODEX_HOME`）：預設的 `codex login` 在那台主機的 localhost:1455 等回呼，遠端或手機操作時登不進去；裝置碼流程印出固定網址 `https://auth.openai.com/codex/device` 與一次性碼（`Enter this one-time code` 的下一行），任何裝置開網址輸入碼即可，CLI 自己輪詢完成。預設帳號（沒綁身份）開 shell 打的也是這一行。
+pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件（codex 的一次性碼與網址只在登入協助的 `GET …/login` 回應裡，`no-store`）。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
 **被登出時主動提示**（#838 補充，使用者 2026-10-04：「應該要偵測到有被登出就提示我登入，而不是去身份裡面點」；`login_prompt.rs`、網頁 `lib/loginPrompt.ts`）：網頁在主畫面最上面放一條「cc1（m4p）已登出 → 立即登入」，來源有兩個——
 ① 身份探測（`identities[].logged_in === false`，host 快照原本就有，網頁自己看）；② daemon 記的 `login_needed`：綁著身份的 claude bot 回合授權失敗（hook `StopFailure` 分類成 `FailureReason::Auth`，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`，引用那句話的回報不算）。
+**codex**（2026-11-03）：探測說未登入、或綁著身份的 codex bot 回合整則是授權失效的錯誤（`is_codex_auth_failure_line`：開頭是 `Your access token could not be refreshed …`／`refresh token …` 且含 already used／expired／revoked／invalid／sign in again，或開頭 `unexpected status 401`／`401 unauthorized`；只認整則、單行、不超過 300 字）同樣提示，「立即登入」走同一條身份登入（裝置碼）。codex 的 hook 只有 `agent-turn-complete`（沒有 `StopFailure`），所以授權失效只能從回合的最後回覆認；這些字樣是 codex 的 refresh 失敗訊息，**尚未在真的失效帳號上實測**（不為此弄壞真帳號），之後 codex 改字要跟著改。
 **② 是遠端 claude 唯一的來源**：遠端 claude 的探測問不出「未登入」（`tools::login_answer_to_cache` 刻意丟掉 false），m4p 的 cc1 被登出時只有回合會說。標記時立刻 `recheck_identity_login` 重探該身份（不等探測週期）並推 `host_changed`；記憶體帳 `App.login_needed`，`(host, identity) → {since, via}`，隨 `hosts[].identities.<name>.login_needed` 出去（API.md §8）。
-只提示**有 bot 綁著它**（同一台主機）、claude、而且那台主機連得上的身份；沒綁身份的 bot（用預設帳號）沒有「哪個身份」可講，不處理。清掉的時機：探測把它從非已登入變成已登入、登入 watcher 收尾重驗已登入、登入協助貼完 code 且 CLI 沒報失敗、綁著它的 bot 又正常答完一回合。
-「立即登入」＝`loginIdentity`（打開上面的登入協助面板）。「先關掉」只存**這一頁的記憶體**（不存 daemon、不用 localStorage——關掉是「這個畫面先別吵我」，不是跨裝置的事實；兩台裝置各自關各自的），以 `since`（探測來源用固定字 `probe`）比對「同一次登出」：同一次不重複洗版，登入成功後記錄清掉，下一次被登出（或新的一次授權失敗）會再提示。沒有新增 API 路由。
+只提示**有 bot 綁著它**（同一台主機、同 kind：claude 或 codex）、而且那台主機連得上的身份；沒綁身份的 bot（用預設帳號）沒有「哪個身份」可講，不處理。清掉的時機：探測把它從非已登入變成已登入、登入 watcher 收尾重驗已登入、登入協助貼完 code 且 CLI 沒報失敗、綁著它的 bot 又正常答完一回合。
+「立即登入」＝`loginIdentity`（打開上面的登入協助面板；codex 開的是裝置碼版本）。「先關掉」只存**這一頁的記憶體**（不存 daemon、不用 localStorage——關掉是「這個畫面先別吵我」，不是跨裝置的事實；兩台裝置各自關各自的），以 `since`（探測來源用固定字 `probe`）比對「同一次登出」：同一次不重複洗版，登入成功後記錄清掉，下一次被登出（或新的一次授權失敗）會再提示。沒有新增 API 路由。
 
 **首次啟動的環境準備**（issue #1931，使用者 2026-10-23；網頁 `lib/onboarding.ts`、`OnboardingChecklist`）：一個 CLI 都沒裝／沒登入時，網頁主畫面放「環境準備」清單——herdr 是否連得上、claude／codex／grok／agy 各一列（已安裝／已登入／`logged_in === null` 的「問不到」），旁邊「安裝」「登入」鈕，就緒後引導新增 Project → 新增 Bot。出現條件：沒有 Project、本機沒有可用 kind（已安裝且已登入或問不到；有已登入的命名身份算已登入）、或 herdr 連不上；都好了自動收起，環境設定的「環境準備」分頁仍可看。安裝：claude／codex／grok 打 `POST /api/hosts/{name}/tools/install` 且**不帶** `via_bot_id`（daemon 開臨時 host-shell pane 跑官方安裝指令，回 `{"pane_id","mode":"shell","install_id"}`，結束後重新偵測並推 `host_changed`，再推 `tool_install_done`：網頁只解除對應 `install_id` 的「安裝中…」；換代回 `outcome:superseded` 且不帶舊 pane ID，正常完成事件與清理受原 fence 保護；逾時一律保留 pane 並回 `installed:false`，UI 優先講逾時，不因完成事件重新開舊 pane）；agy 沿用 `POST …/agy/install`。登入沿用既有流程（命名身份 `…/identities/{identity}/login`；預設帳號開新 shell 打 `<cli> login`，agy 打 `agy`；QuickAddBots 登入後提供「登入好了，重新偵測」，重驗成功才按更新後狀態新增 Bot）。已登出橫幅的條件不變，沒有 bot 綁著的已登出身份不提示，「一個 kind 都沒登入」由這份清單提示。
 

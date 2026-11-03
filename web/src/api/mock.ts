@@ -110,6 +110,9 @@ const WORKSPACE_COLUMNS = 185
 
 /** mock 的 claude 登入網址（形狀同真的 `claude auth login`，state／challenge 是假值）。 */
 const MOCK_AGY_LOGIN_URL = 'https://accounts.example.test/o/oauth2/auth?client=agy-mock'
+/** codex 裝置碼登入的假資料（mock 用，碼不是真的）。 */
+const MOCK_CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device'
+const MOCK_CODEX_DEVICE_CODE = 'MOCK-7K2Q'
 const MOCK_LOGIN_URL =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=FAKEchallengeFAKEchallengeFAKEchallenge00&code_challenge_method=S256&state=FAKEstateFAKEstateFAKEstateFAKEstate000'
 
@@ -597,6 +600,7 @@ export class MockTransport implements Transport {
   private localIdentityStatus: Record<string, MockIdentityStatus> = {
     cc0: { name: 'cc0', kind: 'claude', logged_in: true, account: 'me@example.com', plan: 'max', source: 'config' },
     cc1: { name: 'cc1', kind: 'claude', logged_in: false, source: 'config' },
+    cx1: { name: 'cx1', kind: 'codex', logged_in: false, source: 'config' },
     cc2: {
       name: 'cc2',
       kind: 'claude',
@@ -1857,6 +1861,10 @@ export class MockTransport implements Transport {
       // 跟 daemon 的登入 pane 一樣：claude 2.1.289 `auth login` 的畫面（網址＋等 code 的提示），網頁從這裡取網址、送 code（#838）。
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Opening browser to sign in…', `If the browser didn't open, visit: ${MOCK_LOGIN_URL}`, 'Paste code here if prompted >')
       this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false })
+    } else if (st.kind === 'codex') {
+      // 跟 daemon 的裝置碼流程一樣：固定網址、一次性碼在下一行，不用貼回終端（mock 的碼是假的）。
+      pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Follow these steps to sign in with ChatGPT using device code authorization:', '1. Open this link in your browser and sign in to your account', `   ${MOCK_CODEX_DEVICE_URL}`, '2. Enter this one-time code (expires in 15 minutes)', `   ${MOCK_CODEX_DEVICE_CODE}`, '')
+      this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false, kind: 'codex' })
     } else {
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', '登入完成，正在重新偵測…', '')
     }
@@ -1870,13 +1878,17 @@ export class MockTransport implements Transport {
   private loginStatus(host: string, pane: string) {
     const lp = this.loginPanes.get(`${host}/${pane}`)
     if (!lp || !this.shells.has(`${host}/${pane}`)) throw new ApiError(404, { error: 'not_found', what: 'login pane' }, 'login pane not found')
-    return { host, pane_id: pane, identity: lp.identity, kind: 'claude', url: MOCK_LOGIN_URL, awaiting_code: !lp.codeSent, code_sent: lp.codeSent, failure: null }
+    if (lp.kind === 'codex') {
+      return { host, pane_id: pane, identity: lp.identity, kind: 'codex', flow: 'device', url: MOCK_CODEX_DEVICE_URL, device_code: MOCK_CODEX_DEVICE_CODE, awaiting_code: false, code_sent: false, failure: null }
+    }
+    return { host, pane_id: pane, identity: lp.identity, kind: 'claude', flow: 'code', url: MOCK_LOGIN_URL, device_code: null, awaiting_code: !lp.codeSent, code_sent: lp.codeSent, failure: null }
   }
 
   /** 送 code：畫面還在等才收（否則 409 `not_awaiting_code`）；收了就當 CLI 結束、pane 被收掉。 */
   private loginCode(host: string, pane: string, code: string) {
     const lp = this.loginPanes.get(`${host}/${pane}`)
     if (!lp || !this.shells.has(`${host}/${pane}`)) throw new ApiError(404, { error: 'not_found', what: 'login pane' }, 'login pane not found')
+    if (lp.kind === 'codex') throw new ApiError(409, { error: 'conflict', reason: 'login_code_not_used', sent: false, message: '這個身份用裝置碼登入：到登入網站輸入畫面上的碼就好，不需要貼回終端' }, 'login_code_not_used')
     if (!/^[A-Za-z0-9_.~#:/+=%-]{1,1024}$/.test(code.trim())) throw new ApiError(400, { error: 'bad_request', message: 'code 只能有英數字與 _ . ~ # : / + = % -，最長 1024 字' }, 'bad request')
     if (lp.codeSent) {
       throw new ApiError(409, { error: 'conflict', reason: 'not_awaiting_code', sent: false, retryable: true, message: '登入終端現在不在等 code，一個字都沒送' }, 'not_awaiting_code')
@@ -4047,7 +4059,7 @@ export class MockTransport implements Transport {
 
   /** 有真的行緩衝，`shellText` 依指令追加輸出，mock 下才試得出輸入框與按鍵列。 */
   /** claude 身份的登入 pane（key＝`host/pane_id`）。 */
-  private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean }>()
+  private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean; kind?: 'codex' }>()
 
   private openShell(host: string, cwd: string) {
     if (host !== 'local') {

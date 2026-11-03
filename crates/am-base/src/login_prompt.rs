@@ -87,6 +87,29 @@ pub fn is_not_logged_in_line(text: &str) -> bool {
     rest == "run /login"
 }
 
+/// codex 授權失效的整則錯誤：refresh token 被用掉、撤銷或過期，或直接 401。只認整則（開頭就是這句、不超過 300 字、單行），
+/// 引用或夾在敘述裡的不算（同 [`is_not_logged_in_line`]）。字樣是 codex 的 refresh 失敗訊息；這台機器不會為了測它去弄壞真帳號，
+/// 所以以下面測試的樣本為準，之後 codex 改字就要跟著改這裡。
+pub fn is_codex_auth_failure_line(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(['.', '。']).trim().to_ascii_lowercase();
+    let t = t.strip_prefix("error: ").or_else(|| t.strip_prefix("error:")).unwrap_or(&t).trim();
+    if t.is_empty() || t.contains('\n') || t.chars().count() > 300 {
+        return false;
+    }
+    let refresh_failed = (t.starts_with("your access token could not be refreshed") || t.starts_with("refresh token"))
+        && ["already been used", "already used", "expired", "revoked", "invalid", "sign in again", "log in again"].iter().any(|w| t.contains(w));
+    refresh_failed || t.starts_with("unexpected status 401") || t.starts_with("401 unauthorized")
+}
+
+/// 這個 kind 的回合文字是不是授權失效（claude：沒登入那一行；codex：上面的整則錯誤）。其他 kind 一律不算。
+pub fn is_auth_failure_line(kind: &str, text: &str) -> bool {
+    match kind {
+        "claude" => is_not_logged_in_line(text),
+        "codex" => is_codex_auth_failure_line(text),
+        _ => false,
+    }
+}
+
 /// 「請登入」提示。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait LoginNeeded: Send + Sync {
     fn login_needed(&self) -> &crate::login_prompt::Registry;

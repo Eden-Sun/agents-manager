@@ -1809,7 +1809,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 - 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
 - `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
-  **`login_needed`**（#838 補充，2026-10-04，沒有就不帶）：`{"since": ISO, "via": "turn_auth_failure"}`＝daemon 記下「這個身份要重新登入」——綁著它的 claude bot 的回合因授權失敗收尾（hook `StopFailure` 分類成 Auth，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`）。
+  **`login_needed`**（#838 補充，2026-10-04，沒有就不帶）：`{"since": ISO, "via": "turn_auth_failure"}`＝daemon 記下「這個身份要重新登入」——綁著它的 claude bot 的回合因授權失敗收尾（hook `StopFailure` 分類成 Auth，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`）；codex bot 的回合整則是授權失效的錯誤（refresh token 失效、401，見 SPEC §16.3a）也記。
   **遠端 claude 的探測一律問不出「未登入」**（ssh 沒有 GUI session、讀不到 Keychain，探測的 false 被丟掉），所以這是 m4p 之類遠端主機被登出時唯一的訊號；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。標記時 daemon 立刻重探該身份並推 `host_changed`（`GET /api/state`、`host_changed`、`POST …/tools/refresh` 都帶）。
   `since` 是這一次的識別（同一次不會變；清掉後再發生是新的一次），網頁拿它判斷「關掉過的是同一次」。清掉的時機：該身份被探測成已登入（從非已登入變過來）、登入 watcher 收尾時重驗已登入、登入協助貼完 code 且 CLI 沒報失敗（`finished`）、綁著它的 bot 又正常答完一回合。沒綁身份的 bot 不處理；記憶體帳，daemon 重啟後由探測與下一次授權失敗補回。
 - 同名時的優先序（`tools::merge_identities`）：明寫這一台的 config → 本機才有：沒寫 host 的 config → 那台的 shell `ccN` → 遠端才有：沒寫 host 的 config（名字是 `ccN` 時等那台偵測過才給）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
@@ -1843,7 +1843,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
-在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude auth login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
+在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude auth login` / `codex login --device-auth` / `grok login`。codex 用 `--device-auth`（印固定網址＋一次性碼，任何裝置開網址輸入碼即可，不靠那台主機的 localhost 回呼；2026-11-03 本機 0.166.0 實測）。env 只送進該 pane，不寫 daemon log 或事件。
 claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並等 `Paste code here if prompted >`，登完就結束）：舊的 `claude /login` 會起整個 REPL、登完不退出，pane 要掛滿 15 分鐘才收。
 回應是主機 shell 的 pane 物件；UI 從它的 terminal 顯示 device code / URL。登入指令結束後 daemon 重新探測該身份並關 pane。
 
@@ -1857,8 +1857,8 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 ### 手機版登入協助：`GET …/shells/{pane_id}/login`、`POST …/shells/{pane_id}/login/code`（#838，2026-10-04）
 手機上要從終端選取 `claude auth login` 的長 OAuth 網址、再把網站給的 code 貼回終端幾乎做不到。`POST …/identities/{identity}/login` 開出的 **claude** 登入 pane（登出與別的 kind 不算）因此多兩個端點，讓網頁直接給「打開登入網站」按鈕與 code 輸入框（UI-DECISIONS）。兩個都只有使用者本人（`user_only`），而且**只服務 daemon 自己開的登入 pane**：記憶體帳 `(host, pane_id)`，pane 關了（watcher 收尾、手動關）就清；不在帳上、或帳上那顆 shell 已被收掉／pane id 被別的 shell 重用，一律 `404 {"what":"login pane"}`。
 
-`GET /api/hosts/{name}/shells/{pane_id}/login` → `200 {"host","pane_id","identity","kind":"claude","url","awaiting_code","code_sent","failure"}`，`Cache-Control: no-store`。daemon 讀 pane 的 `recent_unwrapped` 畫面（折行還原成一整行；硬折的舊讀法也接得起來）：
-- `url`：畫面上最後一個 `https://` 網址，**原樣**；只有 https、host 是 `claude.com`／`claude.ai`／`anthropic.com`（含子網域）、路徑含 `/oauth/authorize` 才交出，否則 `null`（畫面是任意終端輸出，不能讓它塞別的網址）。CLI 還沒印出來也是 `null`。
+`GET /api/hosts/{name}/shells/{pane_id}/login` → `200 {"host","pane_id","identity","kind","flow","url","device_code","awaiting_code","code_sent","failure"}`，`Cache-Control: no-store`。`kind` 是 `claude` 或 `codex`；`flow` 是 `code`（claude：網址＋把網站給的 code 貼回來）或 `device`（codex：網址＋一次性碼，到網站輸入即可，**不貼回終端**）。`device_code`：codex 裝置碼的一次性碼（`XXXX-XXXX` 這類英數字與 `-`，4–24 字），畫面還沒印出來或不是裝置碼流程＝`null`；claude 永遠 `null`。daemon 讀 pane 的 `recent_unwrapped` 畫面（折行還原成一整行；硬折的舊讀法也接得起來）：
+- `url`：claude 是畫面上最後一個 `https://` 網址，**原樣**；只有 https、host 是 `claude.com`／`claude.ai`／`anthropic.com`（含子網域）、路徑含 `/oauth/authorize` 才交出，否則 `null`（畫面是任意終端輸出，不能讓它塞別的網址）。codex 只認固定的 `https://auth.openai.com/codex/device`。CLI 還沒印出來也是 `null`。
 - `awaiting_code`：最後一個非空行**正好是** `Paste code here if prompted >`（claude 2.1.289 實測）。CLI 吐出錯誤（那一行後面接 `Login failed: …`）、結束、回到 shell 提示，都不再是。
 - `code_sent`：這顆 pane 已經送過 code；`failure`：畫面上的 `Login failed: …` 那一句（最多 200 字）。
 
@@ -1867,11 +1867,12 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 |---|---|
 | code 空、超過 1024 字、或有 OAuth code 不會有的字元（只收 `A-Za-z0-9_.~#:/+=%-`，去頭尾空白） | `400`，什麼都沒讀 |
 | 不是登入 pane | `404 {"what":"login pane"}` |
+| codex 登入 pane（`flow:"device"`）：裝置碼流程不貼 code，CLI 自己輪詢 | `409 {"reason":"login_code_not_used","sent":false,"message"}`，什麼都沒讀、沒送 |
 | 畫面最後一行不是等 code 的提示，或 pane 的前景程序已經不是 `claude`（讀畫面到打字之間 CLI 結束，字會落進 shell） | `409 {"reason":"not_awaiting_code","sent":false,"message","retryable":true}`，一個字、一個鍵都沒送 |
 | 這顆 pane 已送過 code（包含並行或重送的 POST） | `409 {"reason":"code_already_sent","sent":false,"message"}`，不讀畫面、不再送字；關閉終端後重新登入 |
 | 通過 | `pane.send_text`（code 一次整段）＋另送 `enter`，等 CLI 反應最多 8 秒：畫面出現 `Login failed` → `outcome:"failed"`＋`message`（pane 隨後會被收掉，網頁來不及再讀）；提示消失或 pane 已收掉 → `finished`（成功與否看身份列的重驗，這裡不猜）；還在等 → `pending` |
 
-**網址與 code 不進 daemon log 或事件**：網址只在 `GET …/login` 的回應裡，code 只經過 `…/login/code` 的 body 到 `pane.send_text`；沒有任何 tracing 帶它們、不推 WS、網頁也不存。CLI 結束後的重驗、關 pane 仍是既有的登入 watcher（SPEC §16.3a），完成後推 `host_changed` 讓身份列更新。本機與遠端主機（例如 m4p）同一條路。
+**網址與 code 不進 daemon log 或事件**：網址與 codex 一次性碼只在 `GET …/login` 的回應裡（`no-store`），code 只經過 `…/login/code` 的 body 到 `pane.send_text`；沒有任何 tracing 帶它們、不推 WS、網頁也不存。CLI 結束後的重驗、關 pane 仍是既有的登入 watcher（SPEC §16.3a），完成後推 `host_changed` 讓身份列更新。本機與遠端主機（例如 m4p）同一條路。
 
 ### `POST /api/hosts/{name}/identities/{identity}/logout`
 同一條路、同一組 env，只是指令換成 `claude auth logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。

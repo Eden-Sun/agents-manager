@@ -41,7 +41,7 @@ export function findLoginTargetId(
 /** TUI 外登入指令（claude 2.1.263 `auth login`、grok 1.0.13 `login`）。 */
 const CLI_LOGIN: Record<BotKind, string> = {
   claude: 'claude auth login',
-  codex: 'codex login',
+  codex: 'codex login --device-auth',
   grok: 'grok login',
   // agy 沒有 `login` 子命令，登入只在 TUI 裡（使用者自己做，AG Man 不代按）。版本由 AG Man 管：登入用的這次也關背景自我更新。
   agy: 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy',

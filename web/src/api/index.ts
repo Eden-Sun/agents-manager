@@ -1084,6 +1084,12 @@ export interface LoginStatus {
   code_sent: boolean
   /** CLI 吐出的 `Login failed: …`。 */
   failure: string | null
+  /** `claude`（貼 code）或 `codex`（裝置碼）。 */
+  kind: string
+  /** `code`＝網址＋把網站給的 code 貼回來；`device`＝網址＋一次性碼（輸入到網站，不貼回終端）。 */
+  flow: 'code' | 'device'
+  /** codex 裝置碼的一次性碼；畫面還沒印出來或不是裝置碼流程＝`null`。 */
+  device_code: string | null
 }
 
 /** `null`＝這顆 pane 不是（或已不是）daemon 開的登入 pane（404）。其他錯誤照丟。 */
@@ -1099,6 +1105,9 @@ export async function fetchLoginStatus(host: string, paneId: string): Promise<Lo
       awaiting_code: o.awaiting_code === true,
       code_sent: o.code_sent === true,
       failure: str(pick(o, 'failure')) || null,
+      kind: str(pick(o, 'kind')) || 'claude',
+      flow: pick(o, 'flow') === 'device' ? 'device' : 'code',
+      device_code: str(pick(o, 'device_code')) || null,
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return null

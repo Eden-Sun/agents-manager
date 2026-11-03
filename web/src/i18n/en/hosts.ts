@@ -253,6 +253,12 @@ export default {
   '貼上網站給的 code': 'Paste the code from the site',
   '登入 code': 'Sign-in code',
   '送出 code': 'Send code',
+  '登入 codex 身份 {identity}（{where}）': 'Sign in codex identity {identity} ({where})',
+  '等 CLI 印出一次性碼…': 'Waiting for the CLI to print the one-time code…',
+  '一次性碼': 'One-time code',
+  '複製碼': 'Copy code',
+  '已複製': 'Copied',
+  '到登入網站輸入上面的一次性碼，完成後這裡會自動更新。不用貼回終端。': 'Enter the one-time code above on the sign-in site. This updates here when it finishes. No need to paste it back into the terminal.',
   // components/JudgePanel.tsx・JudgeLedger.tsx（Jev 設定與帳本）
   '讀取中…': 'Loading…',
   '這顆 daemon 還沒有這個功能（需要更新 daemon）。': 'This daemon does not have this feature yet (update the daemon).',

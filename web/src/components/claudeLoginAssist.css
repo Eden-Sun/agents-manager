@@ -1,4 +1,4 @@
-/* components/ClaudeLoginAssist.tsx：登入 pane 上方的「打開登入網站」＋ code 輸入框。手機一欄、整列好按。 */
+/* components/ClaudeLoginAssist.tsx：登入 pane 上方的「打開登入網站」＋ code 輸入框（codex 則是一次性碼）。手機一欄、整列好按。 */
 
 .login-assist {
   display: flex;
@@ -71,5 +71,46 @@
 
   .login-assist-form {
     flex: 1 0 100%;
+  }
+}
+
+/* codex 裝置碼：碼大字、等寬、可以框選抄；複製鍵跟碼同一列。 */
+.login-assist-device {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.login-assist-devcode {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text);
+  user-select: all;
+  padding: 6px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.login-assist-copy {
+  min-height: 40px;
+}
+
+@media (width <= 640px) {
+  .login-assist-device {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .login-assist-devcode {
+    font-size: 24px;
+    text-align: center;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 }

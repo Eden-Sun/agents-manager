@@ -1604,9 +1604,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
 
     // 登入失效的主動提示（#838，`login_prompt.rs`）：沒登入時回合只回 `Not logged in · Please run /login`（走 `Stop`，不是 `StopFailure`）
     // ＝授權失敗；綁著身份的 bot 正常答完一回合＝那個身份是通的。
-    if provider == "claude" && admitted.is_some() {
+    if (provider == "claude" || provider == "codex") && admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
-            if crate::login_prompt::is_not_logged_in_line(a) {
+            if crate::login_prompt::is_auth_failure_line(&provider, a) {
                 app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             } else if !a.trim().is_empty() {
                 app.login_on_turn_ok(&bot, admitted_fence.as_ref()).await;

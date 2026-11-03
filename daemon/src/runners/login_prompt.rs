@@ -39,7 +39,7 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
         }
         return;
     }
-    if bot.kind != "claude" {
+    if bot.kind != "claude" && bot.kind != "codex" {
         return;
     }
     let Some(fence) = admitted else { return };
@@ -73,7 +73,7 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
 
 /// 綁著身份的 claude bot 又正常答完一回合：那個身份是通的。
 pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
-    if bot.kind != "claude" {
+    if bot.kind != "claude" && bot.kind != "codex" {
         return;
     }
     let Some(fence) = admitted else { return };
