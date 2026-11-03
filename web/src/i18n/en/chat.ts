@@ -7,10 +7,11 @@ export default {
   '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
   // components/PhoneOutboxTray.tsx
   'bot 給的檔案（{n}）': 'Files from bot ({n})',
+  '點一下縮回整張': 'Tap to fit',
+  '點一下放大': 'Tap to zoom',
   '收合後新進來的檔案': 'Files added while collapsed',
   '+{n} 新': '+{n} new',
   '預覽 {name}': 'Preview {name}',
-  '下載': 'Download',
   // lib/agoLabel.ts
   '剛剛': 'just now',
   '{n} 分鐘前': { one: '{n} minute ago', other: '{n} minutes ago' },
