@@ -1206,7 +1206,7 @@ am_authorize_pane() {
 # Managed calls may not enter an interactive client or mutate shared server state.
 if [ -n "${AM_BOT_ID:-}" ]; then
     case "${1:-} ${2:-}" in
-        'agent '*|'pane '*|'tab '*|'workspace '*|'worktree '*|'notification '*|'status '*|'api snapshot'|'api schema'|'session list'|'integration install'|'--help '*|'-h '*|'--version '*|'-V '*|'--skill '*|'--default-config '*) : ;;
+        'agent '*|'pane '*|'terminal session'|'tab '*|'workspace '*|'worktree '*|'notification '*|'status '*|'api snapshot'|'api schema'|'session list'|'integration install'|'--help '*|'-h '*|'--version '*|'-V '*|'--skill '*|'--default-config '*) : ;;
         *) printf 'agents-manager: 受管 bot 不允許此 herdr 命令\n' >&2; exit 75 ;;
     esac
     if [ -n "$_AM_HERDR_REMOTE" ] || [ -n "$_AM_HERDR_HANDOFF" ]; then
@@ -1273,6 +1273,23 @@ case "${1:-} ${2:-}" in
             case "${3:-}" in ''|-*) printf 'agents-manager: pane 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
             am_authorize_pane pane "$3" || exit $?
             _sub=$2; shift 3; am_exec pane "$_sub" "$_AM_AUTH_PANE" "$@"
+        fi
+        am_exec "$@" ;;
+    # `terminal session observe <pane>` 只讀畫面串流（同 `pane read`，不需授權）；`control <pane>` 會送輸入，
+    # 比照 `pane send-keys` 先過 daemon 的 pane 授權，遠端 attach／handoff 一律拒絕。
+    "terminal session")
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            case "${3:-}" in
+                observe|''|-h|--help) : ;;
+                control)
+                    if [ -n "$_AM_HERDR_REMOTE" ] || [ -n "$_AM_HERDR_REMOTE_KEYS" ] || [ -n "$_AM_HERDR_HANDOFF" ]; then
+                        printf 'agents-manager: 無法驗證遠端 attach／handoff 的寫入目標\n' >&2; exit 75
+                    fi
+                    case "${4:-}" in ''|-*) printf 'agents-manager: pane 目標不明，拒絕操作\n' >&2; exit 75 ;; esac
+                    am_authorize_pane pane "$4" || exit $?
+                    shift 4; am_exec terminal session control "$_AM_AUTH_PANE" "$@" ;;
+                *) printf 'agents-manager: 受管 bot 不允許此 herdr 命令\n' >&2; exit 75 ;;
+            esac
         fi
         am_exec "$@" ;;
     "pane rename")

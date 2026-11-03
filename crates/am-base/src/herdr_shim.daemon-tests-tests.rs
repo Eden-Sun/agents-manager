@@ -1310,6 +1310,32 @@ esac"#, calls.display()));
         assert_eq!(rc, 0, "{err}"); assert_eq!(out, ["--session", "test", "pane", "send-text", "w1:p2", "hello"]);
     }
 
+    /// `terminal session observe` 只讀，比照 `pane read` 直接放行；`control` 會送輸入，要先過 daemon 的 pane 授權。
+    #[test]
+    fn managed_terminal_session_observe_passes_and_control_needs_pane_authorization() {
+        let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788")];
+        let s = Sandbox::new();
+        s.install_fake_curl("exit 7");
+        let (out, err, rc) = s.run_full(&env, &["terminal", "session", "observe", "w1:p2"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["terminal", "session", "observe", "w1:p2"]);
+        for script in ["exit 7", "printf '{}\\n403'"] {
+            let s = Sandbox::new();
+            s.install_fake_curl(script);
+            let (_, _, rc) = s.run_full(&env, &["terminal", "session", "control", "w1:p2"]);
+            assert_ne!(rc, 0, "{script}");
+        }
+        let s = Sandbox::new();
+        s.install_fake_curl("printf '{\"allowed\":true,\"pane_id\":\"w1:p2\"}\\n200'");
+        let (out, err, rc) = s.run_full(&env, &["terminal", "session", "control", "w1:p2"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(out, ["terminal", "session", "control", "w1:p2"]);
+        let (_, _, rc) = s.run_full(&env, &["terminal", "attach", "w1:p2"]);
+        assert_ne!(rc, 0, "其他 terminal 子命令仍不放行");
+        let (_, _, rc) = s.run_full(&env, &["terminal", "session", "control"]);
+        assert_ne!(rc, 0, "沒有目標就拒絕");
+    }
+
     #[test]
     fn macos_local_managed_actions_fail_closed_without_daemon() {
         let s = Sandbox::new(); let log = s.dir.join("calls.log");
