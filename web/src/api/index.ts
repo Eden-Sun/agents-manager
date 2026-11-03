@@ -619,6 +619,11 @@ export async function sendText(botId: string, text: string, enter: boolean, expe
   })
 }
 
+/** 補充排在 claude 終端佇列時，送 send-now 鍵立刻送出。沒有排隊 → 409 `nothing_queued`（daemon 一個鍵都不送）。 */
+export async function sendQueuedNow(botId: string, expectRunId: string | null): Promise<void> {
+  await transport.request('POST', `/bots/${encodeURIComponent(botId)}/send-queued-now`, expectRunId ? { expect_run_id: expectRunId } : {})
+}
+
 export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
 }
