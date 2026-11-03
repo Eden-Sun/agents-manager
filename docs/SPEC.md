@@ -3687,8 +3687,13 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
   終端上在 shell 等輸入的地方（從畫面推：最後一行有字的行尾）畫一個閃爍游標，焦點在終端上才閃。
   ⌘ 系列與 herdr 不收的鍵（Delete／Home／End／PgUp）回 `null` 留給瀏覽器，使用者不會被關在框裡。localStorage 只記被關掉直通的 pane。
   送出一律走同一個佇列（`keyQueue`）：同一時間只有一個請求在路上，否則抵達順序不保證，打 `ls` 可能變成 `sl`。
-- **主機 shell 的畫面推送**（2026-11-02，給 xterm.js 用；API 見 API.md「畫面推送」）：daemon 端每顆 pane 一條讀取迴圈，輪詢 `pane.read`（ANSI）、用內容 hash 判斷變了沒。
+- **主機 shell 的畫面推送**（2026-11-02 首版輪詢；2026-11-03 改為 observe 串流，API 見 API.md「畫面推送」）：預設每 `(host, pane, 尺寸)` 起一個 `herdr terminal session observe <pane> --cols C --rows R` 子行程（`am-base::herdr_observe`，逐行讀 CLI 的 JSON），herdr 吐的 ANSI 差異幀原封不動以 `raw` 推給瀏覽器。
+  observe 是 client socket 的二進位協定（不是 API socket 的 JSON-RPC），所以用 CLI 子行程而不自己重做握手；遠端經同一條 ssh 主連線在遠端跑同一支 CLI（`HERDR_SOCKET_PATH` 指遠端 API socket）。游標位置、同步更新都在 ANSI 裡，前端不估游標；只送差異（打字約 92 B、移游標約 55 B），第一幀完整。
+  client 送 `size` 就換成那個尺寸的串流；新觀看者先拿回放（最近的完整幀＋之後的差異）。子行程意外結束或回放超過 256 KB／1024 幀就重開，新的第一幀是完整幀。沒有觀看者就殺子行程、不留登記。
+  observe 起不來、或起來了一幀都沒給（舊版 herdr、遠端 ssh 不通）時，這顆 host 冷卻 60 秒，改用下面的快照輪詢（退路，行為同首版）。冷卻是 daemon 行程內記憶體，重啟就清。
+  **快照退路**：輪詢 `pane.read`（ANSI）、用內容 hash 判斷變了沒。
   變了才推整張畫面（`frame`）；閒置時 50ms→1s 逐步退避，送字／送鍵（`text`／`keys`）與新觀看者會立刻喚醒。沒有觀看者就停、不留登記。
+  送字／送鍵的喚醒只對快照模式有用；observe 模式子行程自己推，不需要 `echo=ansi` 快路徑之外的任何補償。
   herdr 0.9.5 的 `events.subscribe` 不接受畫面變動的訂閱（變體清單裡沒有），`pane.get` 的 `revision` 也不隨畫面動，所以不能靠事件觸發，只能輪詢。
   送字／送鍵可帶 `echo=ansi`，回應直接附上送完後的 ANSI 快照，省一次往返。推送與輪詢可以並存：舊的 `…/terminal` 輪詢照常可用。
   每一拍只花一趟 herdr 呼叫（`pane.read`）；pane 身分與幾何（`pane.get`＋`pane.layout`）只在畫面變了、或距上次確認超過 1 秒才問。遠端主機每趟實測約 110 ms（本機約 0.5 ms），每拍多兩趟會把推送壓到約 3 幀/秒。

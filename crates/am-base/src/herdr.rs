@@ -273,6 +273,19 @@ pub struct HerdrClient {
     last_pong: std::sync::Arc<std::sync::Mutex<Option<Pong>>>,
     /// 遠端才有：長駐的 ssh 中繼（[`crate::herdr_relay`]），RPC 優先走它；clone 共用，遠端主機連上後由 hosts 設定。
     relay: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::herdr_relay::Relay>>>>,
+    /// observe 串流要起的 CLI 程式（預設 `herdr`；測試換成假的）。clone 共用。
+    observe_bin: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// 遠端才有：observe 改經 ssh 在遠端跑 CLI（見 [`crate::herdr_observe`]）；clone 共用，遠端主機連上後由 hosts 設定。
+    observe_remote: std::sync::Arc<std::sync::Mutex<Option<RemoteObserve>>>,
+}
+
+/// 遠端 observe 的連線資料：沿用 hosts 的 ssh 主連線（`ssh_opts` 已含 `-S <ctl>`），遠端 API socket，與遠端 PATH 前綴。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteObserve {
+    pub ssh_opts: Vec<String>,
+    pub target: String,
+    pub remote_sock: String,
+    pub path_prefix: String,
 }
 
 pub const EXPECTED_PROTOCOL: u32 = 20;
@@ -338,7 +351,34 @@ pub fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
 
 impl HerdrClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Self { socket: socket.into(), seq: Default::default(), last_pong: Default::default(), relay: Default::default() }
+        Self {
+            socket: socket.into(),
+            seq: Default::default(),
+            last_pong: Default::default(),
+            relay: Default::default(),
+            observe_bin: Default::default(),
+            observe_remote: Default::default(),
+        }
+    }
+
+    /// 設定（或清掉）observe 要起的 CLI 程式。測試用；正式執行不設＝PATH 上的 `herdr`。
+    pub fn set_observe_program(&self, program: Option<String>) {
+        *self.observe_bin.lock().unwrap() = program;
+    }
+
+    /// 設定（或清掉）遠端 observe 的 ssh 資料。遠端主機的 client 由 hosts 在連上時設定。
+    pub fn set_observe_remote(&self, remote: Option<RemoteObserve>) {
+        *self.observe_remote.lock().unwrap() = remote;
+    }
+
+    /// 這條 client 的 observe 要起的子行程：遠端（有設 [`RemoteObserve`]）走 ssh，本機直接跑 CLI。
+    pub fn observe_cmd(&self, pane: &str, cols: u32, rows: u32) -> crate::herdr_observe::ObserveCmd {
+        if let Some(r) = self.observe_remote.lock().unwrap().clone() {
+            let script = crate::herdr_observe::remote_script(&r.path_prefix, &r.remote_sock, pane, cols, rows);
+            return crate::herdr_observe::remote_cmd(&r.ssh_opts, &r.target, &script);
+        }
+        let program = self.observe_bin.lock().unwrap().clone().unwrap_or_else(|| "herdr".to_string());
+        crate::herdr_observe::local_cmd(&program, &self.socket, pane, cols, rows)
     }
 
     /// 設定（或清掉）這條 client 的中繼。clone 共用同一份設定。
