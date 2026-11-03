@@ -69,6 +69,7 @@ import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
 import { suggestionFailureText } from './promptSuggestion'
 import { dismissKey, pruneDismissed, type PendingLogin } from '../lib/loginPrompt'
+import { codexLoginReplacesLogin } from '../lib/codexLoginGuard'
 import { sendNowFellThrough } from './sendNowOutcome'
 import { sendNowNotice } from './sendNowCopy'
 
@@ -530,6 +531,11 @@ export interface StoreState {
    */
   loginPromptDismissed: Record<string, string>
   dismissLoginPrompt: (host: string, identity: string, episode: string) => void
+  /** codex 登入會取代已登入的帳號（`lib/codexLoginGuard`）：確認框等使用者按確定（`true`）或取消（`false`）。 */
+  codexLoginAsk: { resolve: (ok: boolean) => void } | null
+  /** 這次登入是 codex 且那個帳號目前已登入：先問，回傳使用者的選擇；其他情況直接回 `true`。`identity` 為 `null`＝預設帳號。 */
+  confirmCodexLoginReplace: (host: string, kind: BotKind, identity: string | null) => Promise<boolean>
+  answerCodexLoginAsk: (ok: boolean) => void
   pruneLoginPromptDismissed: (pending: PendingLogin[]) => void
   /** 一鍵送出 claude 的建議下一句（`run.prompt_suggestion`）：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣。`true`＝送出了；失敗已跳通知。 */
   acceptSuggestion: (botId: string) => Promise<boolean>
@@ -929,6 +935,7 @@ export const useStore = create<StoreState>((set, get) => {
   liveReply: {},
   composerDrafts: {},
   loginPromptDismissed: {},
+  codexLoginAsk: null,
 
   selectedProjectId: initialSelection.projectId,
 
@@ -2334,7 +2341,26 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async loginIdentity(host, identity) {
+    const kind = (identityStatusOfHost(get(), host)[identity]?.kind ?? 'claude') as BotKind
+    if (!(await get().confirmCodexLoginReplace(host, kind, identity))) return false
     return identityAuth(set, get, host, identity, 'login')
+  },
+
+  confirmCodexLoginReplace(host, kind, identity) {
+    const s = get()
+    const loggedIn = identity
+      ? identityStatusOfHost(s, host)[identity]?.logged_in
+      : (host && host !== 'local' ? s.hosts.find((h) => h.name === host)?.tools : s.localTools)?.[kind]?.logged_in
+    if (!codexLoginReplacesLogin(kind, loggedIn)) return Promise.resolve(true)
+    // 還有一個沒答的確認：舊的算取消，免得它的 promise 永遠不結束。
+    get().codexLoginAsk?.resolve(false)
+    return new Promise<boolean>((resolve) => set({ codexLoginAsk: { resolve } }))
+  },
+
+  answerCodexLoginAsk(ok) {
+    const ask = get().codexLoginAsk
+    set({ codexLoginAsk: null })
+    ask?.resolve(ok)
   },
 
   async logoutIdentity(host, identity) {

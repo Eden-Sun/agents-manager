@@ -39,6 +39,8 @@ export function QuotaLoginShell({
   const agyMissing = useAgyMissing(host) && kind === 'agy'
 
   async function run() {
+    // codex 會先刪掉已登入帳號的 auth.json：已登入就先問（`lib/codexLoginGuard`）。
+    if (!(await useStore.getState().confirmCodexLoginReplace(host, kind, null))) return
     // 一律新開（不接回舊 shell，#915）：指令不會被打進別人前景的 vim／sudo／手動開的 claude。
     const { opened, typed } = await openFreshShellAndType(host, command)
     if (!opened) return

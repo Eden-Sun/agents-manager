@@ -4,6 +4,7 @@ import { ApiError } from '../api/types'
 import { identityStatusOfHost, useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 import { canSubmitCode, loginHint, loginPhase } from '../lib/loginAssist'
+import { holdLoginPane } from '../lib/loginPaneHold'
 import './claudeLoginAssist.css'
 
 const POLL_MS = 2000
@@ -34,12 +35,15 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
     let stop = false
     let timer: ReturnType<typeof setTimeout> | undefined
     seen.current = false
+    let release: (() => void) | undefined
     const tick = async () => {
       try {
         const s = await api.fetchLoginStatus(host, paneId)
         if (stop) return
         if (s) {
           seen.current = true
+          // 這顆是登入 pane：CLI 結束後 pane 被收掉，面板也不能跟著拆（`lib/loginPaneHold`）。
+          release ??= holdLoginPane(host, paneId)
           setIsLogin(true)
           setStatus(s)
         } else if (seen.current) {
@@ -59,6 +63,7 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
     return () => {
       stop = true
       if (timer) clearTimeout(timer)
+      release?.()
     }
   }, [host, paneId, refreshTools])
 
