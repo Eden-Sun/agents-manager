@@ -170,6 +170,8 @@ export function HostShellPanel({
   const [xtermGeo, setXtermGeo] = useState<{ cols: number; rows: number } | null>(null)
   /** xterm 目前是推送還是輪詢退回（狀態列用）。 */
   const [xtermStreaming, setXtermStreaming] = useState(false)
+  /** xterm 是否在 observe（串流）模式；這時面板大小由 fit 決定，「縮放至全螢幕」不作用，隱藏。 */
+  const [xtermObserve, setXtermObserve] = useState(false)
   /** 縮放至全螢幕（per-browser，預設關）。 */
   const [fitScreen, setFitScreenState] = useState(readFitScreen)
   const setFitScreen = (on: boolean) => {
@@ -199,6 +201,7 @@ export function HostShellPanel({
     setTyping(false)
     setXtermGeo(null)
     setXtermStreaming(false)
+    setXtermObserve(false)
   }
 
   useEffect(() => {
@@ -529,7 +532,7 @@ export function HostShellPanel({
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
             {t('換行')}
           </label>
-          {xtermMode ? (
+          {xtermMode && !xtermObserve ? (
             <label className="conn" title={t('把整個 pane 縮進面板（字會變小）；關掉時字不小於 12px，放不下就捲動。')}>
               <input type="checkbox" checked={fitScreen} onChange={(e) => setFitScreen(e.target.checked)} />
               {t('縮放至全螢幕')}
@@ -578,6 +581,7 @@ export function HostShellPanel({
             onSend={xtermSend}
             onGeometry={(cols, rows) => setXtermGeo({ cols, rows })}
             onStreaming={setXtermStreaming}
+            onObserve={setXtermObserve}
             fitScreen={fitScreen}
           />
         ) : (
