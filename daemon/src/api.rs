@@ -311,6 +311,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/attachments/{id}", get(get_attachment))
         .route("/bots/{id}/keys", post(keys_bot))
+        .route("/bots/{id}/send-queued-now", post(send_queued_now_bot))
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/suggestion/accept", post(accept_suggestion))
         .route("/bots/{id}/messages", get(get_messages_with_relay_names))
@@ -1129,6 +1130,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/projects/{id}/panes", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/attachments", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/keys", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/send-queued-now", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/read", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/suggestion/accept", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/text", BotRoutePolicy::UserOnly),
@@ -8091,6 +8093,24 @@ async fn keys_bot(
     shell::check_keys(&b.keys)?;
     lifecycle::send_keys(&app, &id, b.keys, b.expect_run_id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct SendQueuedNowIn {
+    expect_run_id: Option<String>,
+}
+
+/// `POST /api/bots/:id/send-queued-now`：補充排在 claude 終端佇列時，送 send-now 鍵立刻送出（`lifecycle::queued_send_now`）。
+async fn send_queued_now_bot(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    body: Option<Json<SendQueuedNowIn>>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    lifecycle::send_queued_now(&app, &id, b.expect_run_id).await?;
+    Ok((StatusCode::OK, Json(json!({"sent": true}))).into_response())
 }
 
 #[derive(Deserialize)]

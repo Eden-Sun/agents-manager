@@ -76,6 +76,7 @@ pub mod delivery;
 pub mod codex_banner;
 pub mod composer_draft;
 pub mod suggestion;
+pub mod queued_send_now;
 pub mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub use delivery::{plain_without_hints, read_styled};
@@ -217,6 +218,7 @@ pub use start::*;
 pub use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_with_share_token, withdraw_turn};
 pub use composer_draft::submit as submit_composer_draft;
 pub use suggestion::accept as accept_prompt_suggestion;
+pub use queued_send_now::send_queued_now;
 pub use stop::*;
 pub use interrupt_grace::{settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 pub use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};

@@ -1,3 +1,4 @@
+import { SendQueuedNowButton } from './SendQueuedNowButton'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
@@ -1012,6 +1013,7 @@ function Composer({
               ) : null}
             </>
           ) : null}
+          <SendQueuedNowButton botId={botId} inFlightTurnId={state.inFlightTurnId} inputEmpty={!pending.trim()} />
           {/* esc 送不進去時回合會卡死；這顆先解鎖，送鍵只是順帶。 */}
           {state.inFlightTurnId || state.unknownTurnId ? (
             <button
