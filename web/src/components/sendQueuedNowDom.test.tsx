@@ -32,3 +32,26 @@ for (const [name, draft, sentVia, supported, shown] of [
     assert.equal(found, shown)
   })
 }
+
+for (const [name, status, sentVia, supported, shown] of [
+  ['進行中回合的補充', 'in_flight', 'supplement', true, true],
+  ['回合已結束', 'completed', 'supplement', true, false],
+  ['不是補充', 'in_flight', null, true, false],
+  ['不支援 send-now', 'in_flight', 'supplement', false, false],
+] as const) {
+  test(`補充訊息旁的插隊鈕：${name}`, async () => {
+    fakeApi(() => undefined)
+    useStore.setState({
+      connected: true, defaultConnected: true, selectedBotId: 'bq',
+      bots: [{ id: 'bq', name, kind: 'claude', project_id: 'pq', herdr_session: 'default' }],
+      projects: [{ id: 'pq', path: '/tmp/q', host: 'local' }],
+      runs: { bq: toRun({ id: 'rq', bot_id: 'bq', state: 'running', agent_status: 'working', send_now_supported: supported }) },
+      turns: { bq: { tq: { id: 'tq', run_id: 'rq', status, delivery: 'ok' } } },
+      drafts: { 'bot:bq': 'draft' },
+      messages: { bq: [{ id: 'm1', bot_id: 'bq', turn_id: 'tq', role: 'user', content: 'x', attachments: [], created_at: '2026-01-01T00:00:00Z', sent_via: sentVia }] },
+    } as never)
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    const found = [...document.querySelectorAll('.msg-meta button, .msg button, .bubble button')].some((b) => b.textContent === '插隊')
+    assert.equal(found, shown)
+  })
+}
