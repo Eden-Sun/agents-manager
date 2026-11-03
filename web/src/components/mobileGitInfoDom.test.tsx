@@ -1,6 +1,6 @@
 /**
- * 手機（≤640px）「Git / 專案資訊 / 檔案」彈窗（真的掛 `ChatPanel` 進 happy-dom，後端是 `MockTransport`）：
- * - #929：彈窗裡畫「bot 給你的檔案」（手機沒有檔案暫存托盤，outbox 沒有別的入口）。
+ * 手機（≤640px）「Git / 專案資訊」彈窗（真的掛 `ChatPanel` 進 happy-dom，後端是 `MockTransport`）：
+ * - #929 → 2026-11-03：「bot 給你的檔案」不在彈窗裡，改在對話下方的收合列（`PhoneOutboxTray`）。
  * - #930：帳號警告在手機不被藏，彈窗裡看得到、標題列的 Git 鈕帶 `warn`。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -94,18 +94,18 @@ test('桌機：GitHub 收合，狀態列保留，按鈕可展開並關閉資訊'
   }
 })
 
-test('手機：Git 鈕打開的彈窗裡有「bot 給你的檔案」，列出 outbox 的檔名（#929）', async () => {
+test('手機：Git 彈窗不再放「bot 給你的檔案」（2026-11-03 改到對話下方的收合列）', async () => {
   const restore = asPhone()
   try {
     const id = await running('am-claude')
     await act(() => useStore.setState({ selectedBotId: id }))
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
-    assert.equal(document.querySelector('.outbox-files'), null, '彈窗沒開就沒有')
-    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊 / 檔案', '入口的名字要提到檔案')
+    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊')
     await click(gitBtn())
-    await until(() => document.querySelector('.modal .outbox-files') !== null, '彈窗裡有 outbox 區塊')
-    await until(() => (document.querySelector('.modal .outbox-files')?.textContent ?? '').includes('tracking.tsv'), '列出 mock 的檔名')
-    assert.ok(document.querySelector('.modal')?.textContent?.includes('Git / 專案資訊 / 檔案'), '彈窗標題')
+    await until(() => document.querySelector('.modal') !== null, '彈窗打開')
+    assert.equal(document.querySelector('.modal .outbox-files'), null, '彈窗裡沒有 outbox')
+    assert.ok(document.querySelector('.modal')?.textContent?.includes('Git / 專案資訊'), '彈窗標題')
+    await until(() => (document.querySelector('.phone-outbox-bar')?.textContent ?? '').includes('bot 給的檔案'), '輸入框上方的收合列')
   } finally {
     restore()
   }
@@ -146,18 +146,16 @@ test('手機：沒有帳號警告時 Git 鈕不帶 warn', async () => {
     )
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     assert.equal(gitBtn().classList.contains('warn'), false)
-    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊 / 檔案')
+    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊')
   } finally {
     restore()
   }
 })
 
-test('CSS：手機只收帳號 email，不收帳號警告；outbox 在彈窗裡不套托盤的高度上限', () => {
+test('CSS：手機只收帳號 email，不收帳號警告', () => {
   const chat = readFileSync(new URL('./chatPanel.css', import.meta.url), 'utf8')
   assert.match(chat, /\.sl-item\.sl-account:not\(\.sl-warn\)\s*\{\s*display:\s*none/, '收掉帳號欄的規則要排除 sl-warn')
   assert.doesNotMatch(chat, /\.sl-item\.sl-account\s*\{\s*display:\s*none/, '不能有無條件收掉整個帳號欄的規則')
   assert.match(chat, /\.context-bar \.sl-item\.sl-account:not\(\.sl-warn\) \+ \.sl-item/, '分隔線規則同步')
   assert.match(chat, /\.mobile-git-info\.warn::after/)
-  const outbox = readFileSync(new URL('./outboxFiles.css', import.meta.url), 'utf8')
-  assert.match(outbox, /\.modal \.outbox-files\s*\{\s*max-height:\s*none/)
 })
