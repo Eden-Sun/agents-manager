@@ -1,4 +1,4 @@
-import { SendQueuedNowButton } from './SendQueuedNowButton'
+import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
@@ -235,6 +235,7 @@ const PlainBubble = memo(function PlainBubble({
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title={t('daemon 自動通知，不是使用者直接輸入')}>{t('daemon 通知')}</span> : null}
           <SentViaTag msg={msg} />
+          <SupplementSendNow msg={msg} />
           {notice === 'warn' ? (
             <span className="src-tag fallback" title={t.tr(DELIVERY_WARN_TEXT)}>
               {t('未驗證送達')}
