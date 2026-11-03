@@ -12,6 +12,8 @@ export interface CostStatus {
   context_used_tokens: number | null
   context_size: number | null
   prompt_cache?: PromptCacheInfo | null
+  /** 剛壓縮／resume、還沒有新讀數（daemon 的 `_agm_context_unknown`）。 */
+  context_unknown?: boolean
 }
 
 export interface CacheInput {
@@ -38,6 +40,8 @@ export interface CacheView {
   approx: boolean
   /** 冷了送出要重寫幾 token；不知道為 null。 */
   rewriteTokens: number | null
+  /** 剛壓縮／resume，context 大小要等下一回合才知道（警示不寫「整段」嚇人）。 */
+  contextUnknown?: boolean
 }
 
 /** 450000 → `450K`、1250000 → `1.3M`；500 以下直接寫數字。單位看四捨五入之後的值：999500 不寫成 1000K。 */
@@ -125,12 +129,16 @@ export function cacheView(input: CacheInput): CacheView | null {
   const pc = input.promptCache ?? status?.prompt_cache ?? null
   const tokens = contextTokens(status, pc)
   const viaPc = pc ? fromPromptCache(pc, input, tokens) : undefined
-  if (viaPc !== undefined) return viaPc
+  if (viaPc !== undefined) return markUnknown(viaPc, status)
   const cs = cacheState(lastApiAt, ttlSecs, nowMs, working, input.keptWarmAt)
   if (!cs) return null
   if (working) return { state: 'hot', mins: null, working: true, approx: false, rewriteTokens: null }
-  if (cs.level === 'cold') return { state: 'cold', mins: null, working: false, approx: false, rewriteTokens: tokens }
+  if (cs.level === 'cold') return markUnknown({ state: 'cold', mins: null, working: false, approx: false, rewriteTokens: tokens }, status)
   return { state: 'hot', mins: Math.max(1, Math.ceil(cs.remainingSecs / 60)), working: false, approx: false, rewriteTokens: null }
+}
+
+function markUnknown(v: CacheView, status: CostStatus | null | undefined): CacheView {
+  return v.state === 'cold' && v.rewriteTokens === null && status?.context_unknown ? { ...v, contextUnknown: true } : v
 }
 
 /** 狀態列「快取」欄的值：`熱（剩 23 分）`／`熱`（回合中）／`已冷`；rollout 推估加「約」。 */
@@ -147,5 +155,7 @@ export function coldWarning(v: CacheView | null): string | null {
   if (!v || v.state !== 'cold' || v.working) return null
   return v.rewriteTokens !== null
     ? t('快取已過期，送出這則會重寫約 {tokens}', { tokens: tokensK(v.rewriteTokens) })
-    : t('快取已過期，送出這則會重寫整段 context')
+    : v.contextUnknown
+      ? t('快取已過期；剛壓縮或接回過，context 大小下一回合才知道')
+      : t('快取已過期，送出這則會重寫整段 context')
 }

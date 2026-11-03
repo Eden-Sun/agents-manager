@@ -56,6 +56,7 @@ export default {
   '熱（約剩 {n} 分）': 'Warm (about {n} min left)',
   '熱（剩 {n} 分）': 'Warm ({n} min left)',
   '快取已過期，送出這則會重寫約 {tokens}': 'The cache has expired. Sending this will rewrite about {tokens}',
+  '快取已過期；剛壓縮或接回過，context 大小下一回合才知道': 'The cache has expired. It was just compacted or resumed, so the context size is known after the next turn',
   '快取已過期，送出這則會重寫整段 context': 'The cache has expired. Sending this will rewrite the full context',
   // lib/composerLabels.ts
   '目前無法送出訊息': 'Cannot send a message right now',

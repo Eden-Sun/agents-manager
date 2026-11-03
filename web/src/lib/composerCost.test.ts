@@ -90,6 +90,12 @@ test('缺 recache_tokens_if_cold：退用 context token 數；都沒有就寫整
   assert.equal(coldWarning(cacheView({ ...base, status: s })), '快取已過期，送出這則會重寫整段 context')
 })
 
+test('剛壓縮／resume（context_unknown）且沒有數字：警示改說下一回合才知道大小', () => {
+  const s = toStatusInfo({ _agm_context_invalidated: 'x', _agm_context_unknown: true, prompt_cache: { warm: false, expires_at: 1, ttl: '1h' } })!
+  assert.equal(s.context_unknown, true)
+  assert.equal(coldWarning(cacheView({ ...base, status: s })), '快取已過期；剛壓縮或接回過，context 大小下一回合才知道')
+})
+
 test('沒有 prompt_cache（舊版 claude）才退回 last_api_at＋ttl 推算', () => {
   const s = toStatusInfo({ context_window: { used_percentage: 45, total_input_tokens: 450_000 } })!
   const cold = cacheView({ ...base, status: s, lastApiAt: ago(125) })!
