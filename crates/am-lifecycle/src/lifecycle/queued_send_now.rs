@@ -8,6 +8,11 @@ use super::*;
 
 const QUEUED_MARKER: &str = "Press up to edit queued messages";
 
+/// CLI 在排隊的訊息下印的 send-now 提示（`ctrl+enter to send now`）：版本未知時用它證明這個 CLI 有 send-now 鍵。
+pub fn screen_offers_send_now(screen: &str) -> bool {
+    screen.lines().any(|l| l.contains("to send now"))
+}
+
 /// 畫面上有沒有「訊息排在佇列」的提示行。
 pub fn screen_has_queued(screen: &str) -> bool {
     screen.lines().any(|l| l.contains(QUEUED_MARKER))
@@ -27,7 +32,9 @@ pub async fn send_queued_now(
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
         }
     }
-    if super::send_now::supported(&bot.kind, run.status_json.as_deref()).is_err() {
+    // 子 agent 沒有 statusLine，版本未知（VersionUnknown）：改由畫面上 CLI 自己印的 send-now 提示證明它認得這顆鍵。
+    let support = super::send_now::supported(&bot.kind, run.status_json.as_deref());
+    if matches!(support, Err(ref r) if !matches!(r, super::send_now::Refusal::VersionUnknown)) {
         return Err(LcError::conflict("send_now_unsupported", json!({"run_id": run.id, "sent": false})));
     }
     let client = client_for_run(app, &run).await?;
@@ -35,6 +42,9 @@ pub async fn send_queued_now(
     let screen = client.pane_read(&pane, "visible", 60).await.map_err(|e| up(e))?.text;
     if !screen_has_queued(&screen) {
         return Err(LcError::conflict("nothing_queued", json!({"run_id": run.id, "sent": false})));
+    }
+    if support.is_err() && !screen_offers_send_now(&screen) {
+        return Err(LcError::conflict("send_now_unsupported", json!({"run_id": run.id, "sent": false})));
     }
     let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
     let keys: Vec<String> = delivery::Submit::SendNow.keys().iter().map(|k| k.to_string()).collect();
@@ -56,5 +66,11 @@ mod tests {
     fn plain_screen_has_no_queue() {
         assert!(!screen_has_queued("● Bash(sleep 600)\n  ⎿  Running…\n╭────╮\n│ > │\n╰────╯"));
         assert!(!screen_has_queued(""));
+    }
+
+    #[test]
+    fn send_now_hint_is_detected() {
+        assert!(super::screen_offers_send_now("❯ 補充\n  ctrl+enter to send now\n"));
+        assert!(!super::screen_offers_send_now("❯ Press up to edit queued messages"));
     }
 }
