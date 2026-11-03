@@ -31,7 +31,7 @@ function writeOpen(open: boolean) {
  * 手機（≤640px）對話下方、輸入框上方的「bot 給的檔案」收合列（使用者 2026-11-03：「手機版放在那個位置不合理。
  * 應該放到下面，做一個收合開關，並且要可以預覽」）。取代 #929 放在 Git 彈窗最下面的那個入口。
  *
- * 沒有檔案整條不畫；預設收合，有新檔只在列上的數字標出來，不自動展開。清單、下載、開新分頁預覽與桌面托盤共用
+ * 沒有檔案整條不畫；預設收合，有新檔只在列上的數字標出來，不自動展開。清單與開新分頁預覽與桌面托盤共用（手機不給下載）
  * `useOutboxFiles`；縮圖與全螢幕預覽共用 `outboxPreviewCache` 的 blob 快取。
  */
 export function PhoneOutboxTray() {
@@ -42,7 +42,7 @@ export function PhoneOutboxTray() {
 
 function PhoneOutboxTrayInner() {
   const t = useT()
-  const { botId, files, fetchedAt, now, loadedFor, busy, download } = useOutboxFiles()
+  const { botId, files, fetchedAt, now, loadedFor, busy, openPreview } = useOutboxFiles()
   const [open, setOpen] = useState(readOpen)
   const [viewing, setViewing] = useState<OutboxFile | null>(null)
   /** 看過幾個檔：之後多出來的在列上標「+N 新」。`null`＝這顆 bot 的清單還沒讀到；第一次讀到的那批不算新。 */
@@ -110,9 +110,9 @@ function PhoneOutboxTrayInner() {
                     type="button"
                     className="outbox-file"
                     disabled={isBusy}
-                    // 圖檔點名字開預覽（預覽裡有下載鈕）；其他照原本點一下就下載。
-                    title={image ? t('預覽 {name}', { name: f.name }) : t('下載 {name}', { name: f.name })}
-                    onClick={() => (image ? setViewing(f) : void download(f.name))}
+                    // 手機不給下載（使用者 2026-11-03）：圖檔點名字開放大預覽，其他檔在新分頁打開。
+                    title={t('預覽 {name}', { name: f.name })}
+                    onClick={() => (image ? setViewing(f) : void openPreview(f.name))}
                   >
                     <span className="outbox-name">
                       {folder ? <span className="outbox-dir">{folder}</span> : null}
@@ -121,17 +121,8 @@ function PhoneOutboxTrayInner() {
                     <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                       {fileSize(f.size)}
                       {left === null ? '' : ` · ${remainingLabel(left)}`}
-                      {isBusy ? t(' · 下載中…') : ''}
+                      {isBusy ? t(' · 開啟中…') : ''}
                     </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn phone-outbox-dl"
-                    disabled={isBusy}
-                    aria-label={t('下載 {name}', { name: f.name })}
-                    onClick={() => void download(f.name)}
-                  >
-                    ⤓
                   </button>
                 </li>
               )
@@ -141,20 +132,28 @@ function PhoneOutboxTrayInner() {
       ) : null}
       {viewing ? (
         <Modal open title={splitOutboxName(viewing.name).base} width={960} onClose={() => setViewing(null)}>
-          <div className="phone-outbox-viewer">
-            <OutboxThumb botId={botId} file={viewing} full />
-            <button
-              type="button"
-              className="btn primary"
-              disabled={busy?.bot === botId && busy.name === viewing.name}
-              onClick={() => void download(viewing.name)}
-            >
-              {t('下載')}
-            </button>
-          </div>
+          <ZoomViewer botId={botId} file={viewing} />
         </Modal>
       ) : null}
     </section>
+  )
+}
+
+/** 預覽：點圖在「整張放進畫面」與「原尺寸、可捲動看細節」之間切換（使用者 2026-11-03：要點擊放大圖）。 */
+function ZoomViewer({ botId, file }: { botId: string; file: OutboxFile }) {
+  const t = useT()
+  const [zoom, setZoom] = useState(false)
+  return (
+    <div
+      className={`phone-outbox-viewer${zoom ? ' zoomed' : ''}`}
+      role="button"
+      tabIndex={0}
+      title={zoom ? t('點一下縮回整張') : t('點一下放大')}
+      onClick={() => setZoom((z) => !z)}
+      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setZoom((z) => !z))}
+    >
+      <OutboxThumb botId={botId} file={file} full />
+    </div>
   )
 }
 
