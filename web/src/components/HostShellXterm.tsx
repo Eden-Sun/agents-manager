@@ -8,6 +8,7 @@ import { copyText } from '../lib/copyText'
 import { t } from '../lib/i18n'
 import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from '../lib/shellFrame'
 import { fontSizeFor } from '../lib/shellFont'
+import { linksOnRow, type CellRow } from '../lib/xtermLinks'
 import { createInputBatcher } from '../lib/xtermInput'
 import type { ShellOp } from '../lib/xtermInput'
 import { useStore } from '../store/store'
@@ -131,6 +132,32 @@ export function HostShellXterm({
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    // 畫面上的網址可以點（codex 登入網址之類），折到下一列的長網址也接起來（`lib/xtermLinks`）；新分頁開，不帶 opener。
+    const linkProvider = term.registerLinkProvider({
+      provideLinks(line, done) {
+        const buf = term.buffer.active
+        const rowAt = (y: number): CellRow | undefined => {
+          const l = buf.getLine(y)
+          if (!l) return undefined
+          const row: CellRow = []
+          for (let x = 0; x < term.cols; x++) {
+            const c = l.getCell(x)
+            row.push(!c ? ' ' : c.getWidth() === 0 ? '' : c.getChars() || ' ')
+          }
+          return row
+        }
+        const found = linksOnRow(rowAt, line - 1)
+        done(
+          found.length === 0
+            ? undefined
+            : found.map((f) => ({
+                text: f.url,
+                range: { start: { x: f.start.x + 1, y: f.start.y + 1 }, end: { x: f.end.x + 1, y: f.end.y + 1 } },
+                activate: () => void window.open(f.url, '_blank', 'noopener,noreferrer'),
+              })),
+        )
+      },
+    })
     termRef.current = term
     term.open(el)
     // 先量一次面板：連線時送的第一個 size 就是面板實際大小（observe 模式用）。
@@ -459,6 +486,7 @@ export function HostShellXterm({
       ta?.removeEventListener('focus', onFocus)
       ta?.removeEventListener('blur', onBlur)
       dataSub.dispose()
+      linkProvider.dispose()
       term.dispose()
       termRef.current = null
     }
