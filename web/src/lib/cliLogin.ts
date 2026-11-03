@@ -66,6 +66,7 @@ export async function startCliLogin(botId: string): Promise<boolean> {
   if (!bot) return false
   const host = projectHostName(s, bot.project_id)
   if (bot.identity) return s.loginIdentity(host, bot.identity)
+  if (!(await s.confirmCodexLoginReplace(host, bot.kind, null))) return false
   const { opened } = await openFreshShellAndType(host, cliLoginCommand(bot.kind, {}))
   return opened
 }

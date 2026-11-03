@@ -63,6 +63,7 @@ export async function installKindOnHost(host: string, kind: BotKind): Promise<bo
 export async function loginKindOnHost(host: string, kind: BotKind, identity: string | null): Promise<boolean> {
   const s = useStore.getState()
   if (identity) return s.loginIdentity(host, identity)
+  if (!(await s.confirmCodexLoginReplace(host, kind, null))) return false
   const { opened } = await openFreshShellAndType(host, cliLoginCommand(kind, {}))
   return opened
 }

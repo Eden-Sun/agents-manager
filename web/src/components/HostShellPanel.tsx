@@ -19,6 +19,7 @@ import { linkifyTerm } from './termLinks'
 import { fitRules } from '../lib/termRules'
 import { splitAtCursor } from '../lib/termCursor'
 import { setTermWrap, useTermWrap } from './termWrap'
+import { isHeldLoginPane } from '../lib/loginPaneHold'
 import { readFitScreen, writeFitScreen } from './shellFitScreen'
 import './hostShellPanel.css'
 
@@ -231,7 +232,8 @@ export function HostShellPanel({
         if (e instanceof ApiError && e.status === 404) {
           // 點到已經不在的 pane（例如專案頁剛關掉）：講一聲，不是閃一下就沒了（review M3）。
           busy = false
-          if (alive) paneGone(host, paneId)
+          // 登入協助正在看的登入 pane：CLI 結束就收掉是預期的，結果由協助條顯示，面板不拆（`lib/loginPaneHold`）。
+          if (alive && !isHeldLoginPane(host, paneId)) paneGone(host, paneId)
           return
         }
         const denied = shellForbidden(e)
@@ -266,7 +268,7 @@ export function HostShellPanel({
         return
       }
       if (e instanceof ApiError && e.status === 404) {
-        paneGone(host, paneId)
+        if (!isHeldLoginPane(host, paneId)) paneGone(host, paneId)
         return
       }
       const denied = shellForbidden(e)
