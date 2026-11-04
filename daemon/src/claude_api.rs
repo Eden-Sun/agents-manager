@@ -389,6 +389,7 @@ pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest
     match outcome {
         Ok(reply) => {
             api.ledger.record(Row::new(req.use_case, &reply.model, elapsed_ms, None, reply.usage.as_ref(), reply.stop_reason.clone()));
+            api.record_spend(req.use_case, &reply.model, reply.usage.as_ref());
             Ok(reply)
         }
         Err((e, usage)) => {
@@ -419,11 +420,89 @@ pub async fn complete_recorded(
         }
     };
     api.ledger.record(Row::new(use_case, model.as_deref().unwrap_or(&req.model), elapsed_ms, error_kind, usage.as_ref(), stop_reason));
+    if error_kind.is_none() {
+        api.record_spend(use_case, model.as_deref().unwrap_or(&req.model), usage.as_ref());
+    }
     result
+}
+
+// ───────────── 計價與花費明細 ─────────────
+
+const SPEND_FILE: &str = "spend.jsonl";
+/// 檔超過這麼大就在寫入時裁成最近 90 天。
+const SPEND_TRIM_BYTES: u64 = 512 * 1024;
+const SPEND_KEEP_DAYS: i64 = 90;
+
+/// 每百萬 token 的美元：(輸入, 輸出)。快取寫入＝輸入 ×1.25（5 分鐘），快取讀＝輸入 ×0.1。
+/// 價格取自 Anthropic 一方 API 牌價（2026-10）；Haiku 5.5 是 ≤100K 輸入的價。
+/// 不認得的模型回 None，不猜一個數字。
+pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
+    let m = model.trim();
+    if m.starts_with("claude-haiku-5-5") {
+        Some((0.10, 0.50))
+    } else if m.starts_with("claude-sonnet-5") {
+        Some((2.0, 10.0))
+    } else if m.starts_with("claude-opus-5-5") {
+        Some((4.0, 20.0))
+    } else if m.starts_with("claude-fable-5") {
+        Some((10.0, 50.0))
+    } else {
+        None
+    }
+}
+
+/// 這次請求的微美元成本（四捨五入）；模型價格不明回 None。
+pub(crate) fn cost_microusd(model: &str, u: &Usage) -> Option<i64> {
+    let (inp, out) = price_per_mtok(model)?;
+    let n = |v: Option<i64>| v.unwrap_or(0).max(0) as f64;
+    // 每百萬 token 的美元 ＝ 每 token 的微美元，所以不必再除。
+    let total = n(u.input_tokens) * inp + n(u.output_tokens) * out + n(u.cache_creation_input_tokens) * inp * 1.25 + n(u.cache_read_input_tokens) * inp * 0.1;
+    Some(total.round() as i64)
+}
+
+pub(crate) fn cost_usd(model: &str, u: &Usage) -> Option<f64> {
+    cost_microusd(model, u).map(|m| m as f64 / 1e6)
+}
+
+fn append_spend(path: &std::path::Path, line: &Value) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(dir) = path.parent() {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    if std::fs::metadata(path).map(|m| m.len() > SPEND_TRIM_BYTES).unwrap_or(false) {
+        trim_spend(path);
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    writeln!(f, "{line}")
+}
+
+fn trim_spend(path: &std::path::Path) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(SPEND_KEEP_DAYS);
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let kept: String = text.lines().filter(|l| spend_line(l).is_some_and(|(at, _)| at >= cutoff)).map(|l| format!("{l}\n")).collect();
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, kept).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn spend_line(l: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {
+    let v: Value = serde_json::from_str(l).ok()?;
+    let at = chrono::DateTime::parse_from_rfc3339(v.get("at")?.as_str()?).ok()?.with_timezone(&chrono::Utc);
+    Some((at, v.get("microusd")?.as_i64()?))
+}
+
+/// 讀花費明細檔裡 `at >= since` 的 (時間字串, 微美元)；壞行與檔不存在都略過。
+pub(crate) fn read_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>) -> Vec<(String, i64)> {
+    let Ok(text) = std::fs::read_to_string(data_dir.join("claude-api").join(SPEND_FILE)) else { return Vec::new() };
+    text.lines().filter_map(spend_line).filter(|(at, _)| *at >= since).map(|(at, m)| (am_base::db::iso_at(at), m)).collect()
 }
 
 /// App 上的一份：可注入的 client、用量帳本、每個用途的保險絲。
 pub struct ClaudeApi {
+    /// 花費明細檔（`{data_dir}/claude-api/spend.jsonl`）；None＝不落檔（測試的預設）。
+    spend_file: Option<std::path::PathBuf>,
     client: Mutex<Arc<dyn MessagesClient>>,
     pub ledger: Ledger,
     sent: Mutex<HashMap<String, VecDeque<Instant>>>,
@@ -433,10 +512,26 @@ pub struct ClaudeApi {
 impl ClaudeApi {
     pub fn new() -> Self {
         Self {
+            spend_file: None,
             client: Mutex::new(Arc::new(AnthropicHttpClient)),
             ledger: Ledger::default(),
             sent: Mutex::new(HashMap::new()),
             balance_cache: Arc::new(crate::claude_api_balance::BalanceCache::new()),
+        }
+    }
+
+    /// 成功且金額可算的呼叫要落檔到 `{data_dir}/claude-api/spend.jsonl`，餘額（claude_api_balance）才扣得到。
+    pub fn with_data_dir(mut self, data_dir: &std::path::Path) -> Self {
+        self.spend_file = Some(data_dir.join("claude-api").join(SPEND_FILE));
+        self
+    }
+
+    /// 成功呼叫記一行花費；失敗只 warn，不影響回應。
+    fn record_spend(&self, use_case: &str, model: &str, usage: Option<&Usage>) {
+        let (Some(path), Some(u)) = (&self.spend_file, usage) else { return };
+        let Some(microusd) = cost_microusd(model, u) else { return };
+        if let Err(e) = append_spend(path, &json!({"at": crate::db::now(), "use_case": use_case, "model": model, "microusd": microusd})) {
+            tracing::warn!(error = %e, "claude api spend log write failed");
         }
     }
 
@@ -811,6 +906,26 @@ mod tests {
             stop_reason: Some("end_turn".into()),
             usage: Some(Usage { input_tokens: Some(input), output_tokens: Some(output), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
         })
+    }
+
+    #[test]
+    fn microusd_pricing_and_bad_spend_lines_are_skipped() {
+        let u = Usage { input_tokens: Some(1_000_000), output_tokens: Some(1_000_000), cache_creation_input_tokens: Some(1_000_000), cache_read_input_tokens: Some(1_000_000) };
+        assert_eq!(cost_microusd("claude-haiku-5-5", &u), Some(735_000));
+        assert_eq!(cost_microusd("claude-opus-5-5", &u), Some(29_400_000));
+        assert_eq!(cost_microusd("claude-fable-5-1", &u), Some(73_500_000));
+        assert_eq!(cost_microusd("gpt-x", &u), None);
+
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-spend-{}", crate::db::ulid())));
+        let f = dir.join("claude-api").join(SPEND_FILE);
+        append_spend(&f, &json!({"at": "2026-11-03T00:00:00.000Z", "use_case": "x", "model": "m", "microusd": 5})).unwrap();
+        append_spend(&f, &json!({"at": "2026-11-01T00:00:00.000Z", "use_case": "x", "model": "m", "microusd": 7})).unwrap();
+        use std::io::Write;
+        let mut h = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+        writeln!(h, "not json\n{{\"at\":\"bad\",\"microusd\":1}}\n{{\"at\":\"2026-11-03T00:00:00Z\"}}").unwrap();
+        let since = chrono::DateTime::parse_from_rfc3339("2026-11-02T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(read_spend_since(&dir, since).iter().map(|r| r.1).collect::<Vec<_>>(), vec![5]);
+        assert!(read_spend_since(&dir.join("nope"), since).is_empty());
     }
 
     async fn app_with_key() -> (Arc<App>, std::path::PathBuf) {

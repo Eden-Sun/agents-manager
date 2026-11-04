@@ -364,6 +364,7 @@ impl App {
         let (turn_bus, _) = broadcast::channel(1024);
         let (startup_ready_watch, _) = tokio::sync::watch::channel(true);
         let codex_resets = crate::codex_reset::load(&data_dir);
+        let claude_api = crate::claude_api::ClaudeApi::new().with_data_dir(&data_dir);
         Arc::new_cyclic(|self_weak| Self {
             self_weak: self_weak.clone(),
             boot_id: crate::db::ulid(),
@@ -427,7 +428,7 @@ impl App {
             host_baseline: Mutex::new(HashMap::new()),
             changelog: Default::default(),
             changelog_translate: crate::changelog_translate::Hub::new(),
-            claude_api: crate::claude_api::ClaudeApi::new(),
+            claude_api,
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
             submodules_cache: Mutex::new(HashMap::new()),
