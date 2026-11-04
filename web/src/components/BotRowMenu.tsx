@@ -12,7 +12,6 @@ import { useT } from '../lib/i18n'
 export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolean }) {
   const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
-  const project = useStore((s) => s.projects.find((p) => p.id === bot?.project_id))
   const active = useStore((s) => {
     const r = s.runs[botId]
     return r != null && r.state !== 'stopped' && r.state !== 'exited'
@@ -30,8 +29,6 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   const forkBot = useStore((s) => s.forkBot)
   const promoteBot = useStore((s) => s.promoteBot)
   const busyPromote = useStore((s) => Boolean(s.busy[`promote:${botId}`]))
-  const patchBot = useStore((s) => s.patchBot)
-  const busyPatch = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
   const removeBot = useStore((s) => s.removeBot)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
@@ -85,20 +82,6 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             onClick={() => setPromoteOpen(true)}
           >
             {t('升級成頂層…')}
-          </button>
-        ) : null}
-        {/* 專家專案中 executor / advisor / specialist 角色可切換是否允許管理者使用 */}
-        {project?.mode === 'expert' && (bot.role === 'executor' || bot.role === 'advisor' || bot.role === 'specialist') ? (
-          <button
-            type="button"
-            className="head-menu-item"
-            role="menuitemcheckbox"
-            aria-checked={bot.manager_use !== false}
-            disabled={busyPatch}
-            title={bot.manager_use === false ? t('開啟後管理者可派工、啟動或重啟此成員') : t('關閉後管理者不能派工給它、不能啟動或重啟它')}
-            onClick={() => void patchBot(botId, { manager_use: bot.manager_use === false })}
-          >
-            {bot.manager_use === false ? `☐ ${t('管理者可用')}` : `☑ ${t('管理者可用')}`}
           </button>
         ) : null}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>
