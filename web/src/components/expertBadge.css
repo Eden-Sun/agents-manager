@@ -48,7 +48,7 @@
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
-/* 側欄管理者可用勾選框容器與控制項（手機寬度觸控區至少 32px） */
+/* 側欄管理者可用勾選框。群集列沿用這組尺寸；成員列的緊湊樣式在下面 .expert-member。 */
 .bot-manager-use-wrap {
   display: inline-flex;
   align-items: center;
@@ -70,6 +70,107 @@
 .bot-manager-use-checkbox:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* 已勾的成員框是停用但要看得出勾著，不能跟請求中的半透明混在一起。 */
+.bot-manager-use-checkbox.is-locked:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+/* 專家成員列：兩行收成約 41px（原 bot 列 min-height 52px＋模型鈕 24px，約 54px）。
+   名稱維持 14px；chip 收到 18px。非專家列與精簡子列不帶 .expert-member。 */
+.bot-row.expert-member {
+  min-height: 40px;
+  gap: 4px;
+  padding: 2px 6px 2px 4px;
+}
+
+.bot-row.expert-member .bot-main {
+  gap: 1px;
+}
+
+.bot-row.expert-member .bot-name {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.bot-row.expert-member .bot-ident .bot-kind,
+.bot-row.expert-member .bot-ident .kind-tag {
+  height: 18px;
+  max-height: 18px;
+}
+
+.bot-row.expert-member .kind-tag.icon {
+  width: 18px;
+}
+
+.bot-row.expert-member .bot-sub {
+  height: 18px;
+  gap: 3px;
+}
+
+.bot-row.expert-member .bot-sub .model-tag,
+.bot-row.expert-member .bot-sub .identity-badge,
+.bot-row.expert-member .bot-sub .bot-track-tag,
+.bot-row.expert-member .bot-sub .bot-deputy-tag,
+.bot-row.expert-member .bot-sub .bot-quota-chip {
+  height: 18px;
+  max-height: 18px;
+  min-height: 0;
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 18px;
+}
+
+.bot-row.expert-member .bot-manager-use-wrap {
+  align-self: center;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.bot-row.expert-member .bot-manager-use-wrap:has(.is-locked) {
+  cursor: not-allowed;
+}
+
+.bot-row.expert-member .bot-manager-use-checkbox {
+  width: 14px;
+  height: 14px;
+}
+
+@media (width <= 640px) {
+  /* 手機：⋯ 已是 40px，列高跟著約 44px。chip 回到 20px，勾選框的 label 觸控區 36px（字形仍 16px）。 */
+  .bot-row.expert-member {
+    min-height: 44px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+
+  .bot-row.expert-member .bot-sub,
+  .bot-row.expert-member .bot-sub .model-tag,
+  .bot-row.expert-member .bot-sub .identity-badge,
+  .bot-row.expert-member .bot-sub .bot-track-tag,
+  .bot-row.expert-member .bot-sub .bot-deputy-tag,
+  .bot-row.expert-member .bot-sub .bot-quota-chip {
+    height: 20px;
+    max-height: 20px;
+    min-height: 20px;
+    font-size: 11px;
+    line-height: 20px;
+  }
+
+  .bot-row.expert-member .bot-manager-use-wrap {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .bot-row.expert-member .bot-manager-use-checkbox {
+    width: 16px;
+    height: 16px;
+  }
 }
 
 /* 停用成員名稱淡化 */
