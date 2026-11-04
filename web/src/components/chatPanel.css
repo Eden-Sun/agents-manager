@@ -1088,6 +1088,13 @@
   color: var(--text-faint);
   cursor: pointer;
 }
+/* 譯文下方的費用行：小字、不搶內容。 */
+.msg-translation-cost {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
 /* 未啟用：看得到功能在，但一眼知道還不能用；按了只提示去哪裡開。 */
 .msg-translate.off {
   opacity: 0.7;

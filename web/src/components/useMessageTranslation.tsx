@@ -7,7 +7,19 @@ import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
 
-type State = { status: 'idle' | 'loading' | 'error' } | { status: 'done'; text: string; show: boolean }
+type State = { status: 'idle' | 'loading' | 'error' } | { status: 'done'; text: string; show: boolean; cost: number | null; cached: boolean; model: string }
+
+/** 美元：不到一分錢多給位數，免得全寫成 $0.00。 */
+export function usd(n: number): string {
+  return n >= 0.01 ? `$${n.toFixed(3)}` : `$${n.toFixed(5)}`
+}
+
+/** 譯文下方那行：這次翻譯花多少（使用者 2026-11-04：即時算出該次翻譯價格）；快取命中標未扣費。 */
+function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; cached: boolean; model: string }): string {
+  const model = st.model.replace(/^claude-/, '')
+  if (st.cached) return st.cost === null ? t('{model} · 快取，這次未扣費', { model }) : t('{model} · 快取，這次未扣費（當初 {cost}）', { model, cost: usd(st.cost) })
+  return st.cost === null ? t('{model} · 費用不明', { model }) : t('{model} · 這次翻譯 {cost}', { model, cost: usd(st.cost) })
+}
 
 /**
  * assistant 訊息說英文時，meta 列的「翻譯」鈕＋原文下方的譯文（daemon 用 Claude API 翻成繁中，同一則有快取不重複扣費）。
@@ -24,7 +36,7 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
   const run = () => {
     setSt({ status: 'loading' })
     translateMessage(msg.id).then(
-      (r) => setSt({ status: 'done', text: r.translation, show: true }),
+      (r) => setSt({ status: 'done', text: r.translation, show: true, cost: r.costUsd, cached: r.cached, model: r.model }),
       (e: unknown) => {
         setSt({ status: 'error' })
         resetTranslateReady()
@@ -51,6 +63,7 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
       st.status === 'done' && st.show ? (
         <div className="bubble md msg-translation" lang="zh-Hant">
           <SafeMarkdown text={st.text} botId={msg.bot_id} />
+          <div className="msg-translation-cost">{costLine(t, st)}</div>
         </div>
       ) : null,
   }

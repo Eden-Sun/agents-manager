@@ -2710,7 +2710,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，受 `[claude_api]` 總開關管；這個用途沒寫設定時預設開，`[claude_api.uses.message_translate] enabled = false` 才關）。
 prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、指令、識別字、commit hash 原樣不翻，只回譯文。
-`200 {"translation", "model", "cached", "usage"?}`：快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
+`200 {"translation", "model", "cached", "cost_usd", "usage"?}`：`cost_usd` 是這次翻譯依牌價算的美元（Haiku 5.5 0.10／0.50、Sonnet 5.5 2／10、Opus 5.5 4／20 每百萬 token，快取寫 ×1.25、讀 ×0.1；不認得的模型為 null），快取命中時回當初那次的花費。快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
 錯誤：404 `not_found`（沒這則訊息）；400（不是 assistant 或空訊息）；422 `message_too_long`（超過 20000 字）；409 `claude_api_not_configured`（沒開或沒 key）；502（`translate_failed: …`，API 失敗、被限流、逾時）。
 
 ## 上游有新版可裝 `GET /api/upstream-updates`（SPEC §3.1「上游有新版」，issue #707）

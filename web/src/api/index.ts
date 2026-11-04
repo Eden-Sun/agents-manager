@@ -453,10 +453,12 @@ export async function rewindBot(
 }
 
 /** `POST /messages/:id/translate`：把一則 assistant 訊息翻成繁體中文；同一則翻過會回快取（`cached`，不扣費）。 */
-export async function translateMessage(messageId: string): Promise<{ translation: string; model: string; cached: boolean }> {
+/** `costUsd`：翻這次花的美元（daemon 依牌價算）；`cached` 時是當初那次的花費、這次沒有扣費。不明＝null。 */
+export async function translateMessage(messageId: string): Promise<{ translation: string; model: string; cached: boolean; costUsd: number | null }> {
   const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate`)
   const o = isRec(raw) ? raw : {}
-  return { translation: str(pick(o, 'translation')), model: str(pick(o, 'model')), cached: pick(o, 'cached') === true }
+  const cost = pick(o, 'cost_usd')
+  return { translation: str(pick(o, 'translation')), model: str(pick(o, 'model')), cached: pick(o, 'cached') === true, costUsd: typeof cost === 'number' ? cost : null }
 }
 
 /** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
