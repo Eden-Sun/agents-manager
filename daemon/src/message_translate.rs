@@ -39,31 +39,7 @@ struct CacheEntry {
     cost_usd: Option<f64>,
 }
 
-/// 每百萬 token 的美元：(輸入, 輸出)。快取寫入＝輸入 ×1.25（5 分鐘），快取讀＝輸入 ×0.1。
-/// 價格取自 Anthropic 一方 API 牌價（2026-10）；Haiku 5.5 是 ≤100K 輸入的價（翻譯一則訊息上限 20K 字，不會超過）。
-/// 不認得的模型回 None，前端不顯示金額，而不是猜一個數字。
-fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
-    let m = model.trim();
-    if m.starts_with("claude-haiku-5-5") {
-        Some((0.10, 0.50))
-    } else if m.starts_with("claude-sonnet-5-5") || m.starts_with("claude-sonnet-5") {
-        Some((2.0, 10.0))
-    } else if m.starts_with("claude-opus-5-5") {
-        Some((4.0, 20.0))
-    } else if m.starts_with("claude-fable-5") {
-        Some((10.0, 50.0))
-    } else {
-        None
-    }
-}
-
-/// 這次請求的美元成本；usage 或模型價格不明回 None。
-pub(crate) fn cost_usd(model: &str, u: &claude_api::Usage) -> Option<f64> {
-    let (inp, out) = price_per_mtok(model)?;
-    let n = |v: Option<i64>| v.unwrap_or(0).max(0) as f64;
-    let total = n(u.input_tokens) * inp + n(u.output_tokens) * out + n(u.cache_creation_input_tokens) * inp * 1.25 + n(u.cache_read_input_tokens) * inp * 0.1;
-    Some(total / 1_000_000.0)
-}
+pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     ClaudeRequest {
@@ -267,6 +243,26 @@ mod tests {
         let mode = std::fs::metadata(cache_path(&app.data_dir, &cache_key("m1", "hello world"))).unwrap();
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn successful_call_is_appended_to_spend_log_and_counts_in_local_attempts() {
+        let (app, dir) = app(true).await;
+        fake(&app);
+        translate(&app, "m1", "hello world").await.unwrap();
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let rows = crate::claude_api::read_spend_since(&dir, since);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].1 > 0);
+        let atts = crate::claude_api_balance::query_local_attempts_since(&app, &am_base::db::iso_at(since)).await.unwrap();
+        assert_eq!(atts.iter().map(|a| a.microusd).sum::<i64>(), rows[0].1, "餘額的本機帳含這筆");
+        use std::os::unix::fs::PermissionsExt;
+        let f = dir.join("claude-api/spend.jsonl");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(f.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        // 快取命中不重複記
+        translate(&app, "m1", "hello world").await.unwrap();
+        assert_eq!(crate::claude_api::read_spend_since(&dir, since).len(), 1);
     }
 
     #[tokio::test]

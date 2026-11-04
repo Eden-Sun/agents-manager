@@ -8,6 +8,8 @@
 //! 3. cost_report 尚未涵蓋的日子（通常是未結束的今天，或 cost_report 結束時間之後）：使用本機帳
 //!    `created_at >= report_through` 的 recorded + unknown 花費。
 //!
+//! 「本機帳」＝ `api_bot_attempts` ＋ `{data_dir}/claude-api/spend.jsonl`（其他用途：翻譯、changelog、分診）。
+//!
 //! remaining = B - total_spent。
 
 use std::sync::Arc;
@@ -295,7 +297,12 @@ pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> 
     .fetch_all(&app.db)
     .await?;
 
-    Ok(rows.into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd }).collect())
+    let mut out: Vec<AttemptSpent> = rows.into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd }).collect();
+    // 同一把 key 的其他用途（翻譯、changelog、分診）記在 spend.jsonl，不在 api_bot_attempts。
+    if let Ok(since) = parse_rfc3339(since_rfc3339) {
+        out.extend(crate::claude_api::read_spend_since(&app.data_dir, since).into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd }));
+    }
+    Ok(out)
 }
 
 /// GET /api/claude-api/balance 處理函式
