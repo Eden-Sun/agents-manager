@@ -89,7 +89,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const menuKeys = useMenuKeys(menu, menuRef, mainRef, () => setMenu(false))
 
   if (!restricted) return null
-  // 這個瀏覽器做不到「等網路再複製」（手機 http）：選單第一項改成可選取的連結，不給按了才失敗的複製鈕。
+  // 這個瀏覽器做不到「等網路再複製」（http）：只能用已預讀的連結在手勢裡同步複製；還沒讀到就只給可選取的連結。
   const selectOnly = !asyncCopyAvailable()
 
   const copy = (s: ShareState, done: string) => {
@@ -143,11 +143,16 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const onMain = () => {
     // 未分享：開啟並複製；分享中：開選單（第一項才是複製）。
     if (enabled) return toggleMenu()
-    void run(() => setShareEnabled(botId, true), t('已開啟分享並複製連結'), t('已開啟分享：連結在選單裡，長按選取後複製'))
+    void run(() => setShareEnabled(botId, true), t('已開啟分享並複製連結'), t('已開啟分享：連結在選單裡，按「複製連結」'))
   }
 
   const onCopyFromMenu = () => {
     setMenu(false)
+    // 非 https：等網路之後就不能寫剪貼簿，直接用已預讀、同一版（rev）的連結在這個手勢裡複製。
+    if (selectOnly) {
+      if (share?.enabled && share.url) copy(share, t('已複製分享連結'))
+      return
+    }
     // 複製是唯讀操作；重新讀取伺服器狀態，不能從過期的本機旗標重開分享。
     const requestRev = currentRev()
     const request = readAt(requestRev)
@@ -201,41 +206,22 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           onKeyDown={menuKeys}
           style={
             menuAt
-              ? // 可選取的連結比選單寬：手機上貼齊左右邊（各留 8px），不讓它從左邊跑出畫面。
-                selectOnly && window.innerWidth <= 640
-                ? { position: 'fixed', top: menuAt.top, left: 8, right: 8 }
-                : { position: 'fixed', top: menuAt.top, left: menuAt.left }
-              : undefined
+              ? { position: 'fixed', top: menuAt.top, left: menuAt.left }
+                : undefined
           }
         >
-          {selectOnly ? (
-            share?.enabled && share.url ? (
-              <textarea
-                className="share-link-url"
-                readOnly
-                rows={2}
-                value={share.url}
-                aria-label={t('分享連結：長按選取後複製')}
-                title={t('這個瀏覽器（非 https）不能直接寫剪貼簿：長按選取後複製')}
-                onFocus={(e) => e.currentTarget.select()}
-                onClick={(e) => e.currentTarget.select()}
-              />
-            ) : (
-              <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
-            )
+          {/* 完整網址自動換行、可選取；非 https 也照樣給「複製連結」：已預讀到的連結在點擊手勢裡同步複製（execCommand）。 */}
+          {share?.enabled && share.url ? (
+            <div className="share-link-url-text" aria-label={t('分享連結')}>
+              {share.url}
+            </div>
           ) : (
-            <>
-              {share?.enabled && share.url ? (
-                <div className="share-link-url-text" aria-label={t('分享連結')}>
-                  {share.url}
-                </div>
-              ) : (
-                <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
-              )}
-              <button type="button" role="menuitem" tabIndex={-1} className="share-link-copy" onClick={onCopyFromMenu}>
-                {t('複製連結')}
-              </button>
-            </>
+            <span className="share-link-url-note">{share ? noUrlText(share, t) : t('讀取連結中…')}</span>
+          )}
+          {selectOnly && !(share?.enabled && share.url) ? null : (
+            <button type="button" role="menuitem" tabIndex={-1} className="share-link-copy" onClick={onCopyFromMenu}>
+              {t('複製連結')}
+            </button>
           )}
           <button
             type="button"
@@ -274,7 +260,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           setConfirm(null)
-          void run(() => rotateShare(botId), t('已重產並複製新連結，舊連結已失效'), t('已重產連結，舊連結已失效：新連結在選單裡，長按選取後複製'))
+          void run(() => rotateShare(botId), t('已重產並複製新連結，舊連結已失效'), t('已重產連結，舊連結已失效：新連結在選單裡，按「複製連結」'))
         }}
       />
       <ConfirmDialog
