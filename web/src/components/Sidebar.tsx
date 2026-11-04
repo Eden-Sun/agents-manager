@@ -55,7 +55,7 @@ import { NO_WARM_TEXT } from '../lib/cacheClock'
 import { EnvShell } from './EnvSettings'
 import { HostBadge } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
-import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
+import { EMPTY_SHARE_FOLDER, shareCreateFields, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { HostDownState } from './HostOffline'
 import { useBotOfflineHost } from '../hooks/useHostOffline'
 import { BotNameField } from './BotNameField'
@@ -804,13 +804,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
           autostart: false,
           identity: apiKind ? null : identity || null,
           // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關；信任分享照一般 bot。
-          ...(apiKind
-            ? {}
-            : folderIn && 'value' in folderIn && shareProfile === 'restricted'
-            ? { share_profile: 'restricted' as const, share_folder: folderIn.value, auto_approve: false }
-            : folderIn && 'value' in folderIn && shareProfile === 'trusted'
-              ? { share_profile: 'trusted' as const, share_folder: folderIn.value, confirm_trusted: true, auto_approve: true }
-              : { auto_approve: true }),
+          ...(apiKind ? {} : shareCreateFields(shareProfile, folderIn)),
         }).then(async (id) => {
           setBusy(false)
           if (id) {

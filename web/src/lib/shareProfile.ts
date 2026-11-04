@@ -33,3 +33,20 @@ export function shareFolderInput(d: ShareFolderDraft, botName: string): { value:
   if (!FOLDER_NAME.test(name)) return { error: t('資料夾名稱只能用英數與 . _ -，英數開頭，最多 64 字') }
   return { value: { kind: 'new', name } }
 }
+
+/**
+ * 新增 bot 時跟分享有關的欄位（一般與專家模式的新增表單共用）：受限 bot 不帶 bypass permissions，`auto_approve` 一起關；
+ * 信任分享照一般 bot；沒選分享＝一般 bot（`auto_approve: true`）。
+ */
+export function shareCreateFields(
+  profile: ShareProfile | null,
+  folderIn: { value: ShareFolderIn } | { error: string } | null,
+):
+  | { share_profile: 'restricted'; share_folder: ShareFolderIn; auto_approve: false }
+  | { share_profile: 'trusted'; share_folder: ShareFolderIn; confirm_trusted: true; auto_approve: true }
+  | { auto_approve: true } {
+  if (folderIn && 'value' in folderIn && profile === 'restricted') return { share_profile: 'restricted', share_folder: folderIn.value, auto_approve: false }
+  if (folderIn && 'value' in folderIn && profile === 'trusted')
+    return { share_profile: 'trusted', share_folder: folderIn.value, confirm_trusted: true, auto_approve: true }
+  return { auto_approve: true }
+}
