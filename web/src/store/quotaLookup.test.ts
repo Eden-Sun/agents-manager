@@ -102,3 +102,12 @@ test('codex bot 身上掛 claude 的 cc1：那不是 codex 的帳號代號，一
   const cc1: Identity = { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '/x' }, args: [] }
   assert.equal(quotaBaseKey(quota, 'local', 'codex', 'cc1', [cc1]), 'codex')
 })
+
+test('側欄警示小標與頂端同一套小數規則：剩不到 10 留一位小數（頂端 1.6、側欄也是 1.6，不是 2）', () => {
+  const quota: QuotaMap = { agy: q(98.4) }
+  assert.equal(botQuotaWarning(quota, 'agy', null)?.pct, 1.6)
+  assert.equal(botQuotaLevel(quota, 'agy', null)?.pct, 1.6)
+  // 10 以上維持整數
+  const mid: QuotaMap = { agy: { five_hour: { used_pct: 85.4, low: true, critical: true, resets_at: null }, seven_day: null, fable: null } as unknown as KindQuota }
+  assert.equal(botQuotaWarning(mid, 'agy', null)?.pct, 15)
+})

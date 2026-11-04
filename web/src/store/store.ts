@@ -113,6 +113,7 @@ import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { pruneStoredIds } from '../lib/storedIds'
 import { msg, t, tr } from '../lib/i18n'
 import { apiBotStartReasonText } from '../lib/apiBotStartReason'
+import { leftPct } from '../lib/quotaLeft'
 
 /** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
 const messagePageGenerations = new Map<string, number>()
@@ -3462,10 +3463,10 @@ export function botQuotaWarning(
 ): QuotaWarning | null {
   const q = quotaForIdentity(quota, host, kind, identity, identities)
   if (!q) return null
-  const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
+  const five = q.five_hour?.critical ? { pct: leftPct(q.five_hour.used_pct), window: '5h' as const } : null
   const sevenWindow: QuotaWarningWindow = weeklyOnlyKind(kind) ? '週' : '7d' // i18n-ignore
   const seven = q.seven_day?.critical
-    ? { pct: Math.max(0, Math.round(100 - q.seven_day.used_pct)), window: sevenWindow }
+    ? { pct: leftPct(q.seven_day.used_pct), window: sevenWindow }
     : null
   if (!five && !seven) return null
   const worse = five && seven ? (five.pct <= seven.pct ? five : seven) : (five ?? seven)!
@@ -3500,7 +3501,7 @@ export function botQuotaLevel(
   const onFable = (model ?? '').toLowerCase().includes('fable')
   const pick = (w: { used_pct: number; low: boolean; critical: boolean } | null | undefined, name: string) =>
     w && (w.low || w.critical)
-      ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: Math.max(0, Math.round(100 - w.used_pct)), window: name }
+      ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: leftPct(w.used_pct), window: name }
       : null
   const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, weeklyOnlyKind(kind) ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter( // i18n-ignore
     (x): x is QuotaLevel => x !== null,
