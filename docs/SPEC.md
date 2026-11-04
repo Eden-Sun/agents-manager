@@ -3137,7 +3137,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 ### 6.9e 對話訊息翻譯
 
-對話裡「主要是英文」的 assistant 訊息有「翻譯」按鈕，`POST /api/messages/{id}/translate`（User-only）用 Claude API（用途 `message_translate`）翻成繁體中文，譯文快取在 `{data_dir}/message-translate/`，同一則訊息只扣一次費（`daemon/src/message_translate.rs`）。
+對話裡「主要是英文」的 assistant 訊息有「翻譯」按鈕，`POST /api/messages/{id}/translate`（User-only）用 Claude API（用途 `message_translate`）翻成繁體中文，譯文快取在 `{data_dir}/message-translate/`，同一則訊息只扣一次費（`daemon/src/message_translate.rs`）。這個用途預設開（使用者每次親手按才扣費），其他背景用途仍預設關（`ClaudeApiUseDef::default_on`）。
 
 ### 6.9d 更新框的翻譯（issue #1870）
 

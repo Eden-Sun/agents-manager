@@ -922,15 +922,18 @@ pub struct ClaudeApiUseDef {
     /// 這個用途的設定本來就在別的段（`[changelog_translate]`，#1870）：設定頁讀寫那一段，
     /// 不受 `[claude_api] enabled` 總開關管，舊設定檔照舊有效。
     pub legacy_section: Option<&'static str>,
+    /// 設定檔沒寫這個用途時的開關（仍受 `[claude_api] enabled` 總開關管）。使用者每次都要親手按的用途（訊息翻譯）預設開，
+    /// 背景自動跑的預設關（使用者 2026-11-04：按了翻譯卻回 not_configured）。
+    pub default_on: bool,
 }
 
 /// 已知用途。要加用途就加一行，設定頁、PUT 驗證、保險絲與帳本都從這張表走。
 /// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
-    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None },
-    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None },
-    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None },
-    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate") },
+    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false },
+    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None, default_on: false },
+    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true },
+    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5"];
@@ -980,10 +983,12 @@ impl ClaudeApiCfg {
     /// 有 `legacy_section` 的用途請用 [`ConfigFile::claude_use_state`]（它會讀舊的那一段）。
     pub fn use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
         let def = CLAUDE_API_USES.iter().find(|d| d.id == id)?;
-        let cfg = self.uses.get(id).cloned().unwrap_or_default();
+        let written = self.uses.get(id).cloned();
+        let enabled = written.as_ref().map_or(def.default_on, |c| c.enabled);
+        let cfg = written.unwrap_or_default();
         let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
         Some(ClaudeApiUseState {
-            enabled: cfg.enabled,
+            enabled,
             model: pick(&cfg.model, def.model),
             effort: pick(&cfg.effort, def.effort),
             max_per_hour: if cfg.max_per_hour == 0 { def.max_per_hour } else { cfg.max_per_hour },
@@ -2893,6 +2898,10 @@ mod supervisor_cfg_tests {
         assert_eq!((d.enabled, d.model.as_str(), d.effort.as_str(), d.max_per_hour), (false, "claude-sonnet-5-5", "medium", 30));
         assert_eq!(none.claude_use_state("changelog_translate").unwrap().model, "claude-haiku-5-5");
         assert_eq!(none.claude_api.use_state("nope"), None);
+        // 訊息翻譯是使用者親手按的：沒寫設定時預設開（仍受總開關管）；明寫 enabled=false 就關。
+        assert!(none.claude_api.use_state("message_translate").unwrap().enabled);
+        let off: ConfigFile = toml::from_str("[claude_api.uses.message_translate]\nenabled = false\n").unwrap();
+        assert!(!off.claude_api.use_state("message_translate").unwrap().enabled);
         let on: ConfigFile = toml::from_str("[claude_api]\nenabled = true\n[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
         let s = on.claude_api.use_state("changelog_review").unwrap();
         assert_eq!((s.enabled, s.model.as_str()), (true, "claude-sonnet-5-5"));

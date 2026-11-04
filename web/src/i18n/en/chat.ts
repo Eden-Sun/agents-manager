@@ -402,4 +402,5 @@ export default {
   '顯示譯文': 'Show translation',
   '用 Claude 翻成繁體中文': 'Translate to Traditional Chinese with Claude',
   '翻譯失敗：{reason}': 'Translation failed: {reason}',
+  '翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定': 'Translation is off: in Settings → Claude API, turn on the master switch and "Message translation", and check the API key',
 } satisfies Dict
