@@ -87,7 +87,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span className="unread-chip current" aria-hidden="true">
               <span className="unread-chip-name">bot</span>
             </span>
-            <span>{t('藍框＋粗體：你正在看的這顆（其他記號照它的狀態，例如藍色數字就是做完了還沒看）')}</span>
+            <span>{t('底端藍條＋粗體：你正在看的這顆（其他記號照它的狀態，例如藍色數字就是做完了還沒看）')}</span>
           </li>
           <li>
             <span className="unread-chip pin-more needs-reply" aria-hidden="true">

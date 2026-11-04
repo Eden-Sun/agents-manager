@@ -101,7 +101,7 @@ export default {
   '雪花：「不用保溫」（冰凍）；這一輪閒置不保溫，context 夠大時 cache 到期前自動壓縮一次；有新活動就恢復': 'Snowflake: "Frozen"; no keep warm for this idle cycle, auto-compresses once before cache expires if context is large; resumes on activity',
   '黃色旋轉外框＋分叉圖示：child 還在跑，父 Bot 等它完成': 'Yellow spinning border + fork icon: child still running, parent Bot waiting for completion',
   '黃色旋轉的整圈外框：還在執行': 'Yellow spinning border: running',
-  '藍框＋粗體：你正在看的這顆（其他記號照它的狀態，例如藍色數字就是做完了還沒看）': 'Blue border + bold: the Bot you are viewing (other indicators follow status, e.g. blue number = unread completed turns)',
+  '底端藍條＋粗體：你正在看的這顆（其他記號照它的狀態，例如藍色數字就是做完了還沒看）': 'Blue bottom bar + bold: the Bot you are viewing (other indicators follow status, e.g. blue number = unread completed turns)',
   '收起來的；顏色跟著裡面最急的那顆': 'Collapsed; color follows the most urgent Bot inside',
   '燈號': 'Status light',
   '藍、會擴散：執行中': 'Blue, pulsing: running',
