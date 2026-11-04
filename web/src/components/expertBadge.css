@@ -78,6 +78,46 @@
   cursor: not-allowed;
 }
 
+/* 群集列跟成員列同高（使用者 2026-11-04：狀態併進標題後，群集列也只剩兩行）。 */
+.bot-row.bot-cluster-row {
+  min-height: 40px;
+  padding: 2px 6px 2px 4px;
+}
+
+.bot-row.bot-cluster-row .bot-cluster-main {
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.bot-row.bot-cluster-row .bot-main {
+  gap: 1px;
+}
+
+.bot-row.bot-cluster-row .bot-cluster-name {
+  line-height: 1.2;
+}
+
+.bot-row.bot-cluster-row .kind-tag.icon {
+  width: 18px;
+}
+
+.bot-row.bot-cluster-row .bot-sub {
+  height: 18px;
+  gap: 3px;
+}
+
+.bot-row.bot-cluster-row .bot-sub .model-tag,
+.bot-row.bot-cluster-row .bot-sub .identity-badge {
+  height: 18px;
+  max-height: 18px;
+  min-height: 0;
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 18px;
+}
+
 /* 專家成員列：兩行收成約 41px（原 bot 列 min-height 52px＋模型鈕 24px，約 54px）。
    名稱維持 14px；chip 收到 18px。非專家列與精簡子列不帶 .expert-member。 */
 .bot-row.expert-member {
@@ -170,6 +210,20 @@
   .bot-row.expert-member .bot-manager-use-checkbox {
     width: 16px;
     height: 16px;
+  }
+
+  .bot-row.bot-cluster-row {
+    min-height: 44px;
+  }
+
+  .bot-row.bot-cluster-row .bot-sub,
+  .bot-row.bot-cluster-row .bot-sub .model-tag,
+  .bot-row.bot-cluster-row .bot-sub .identity-badge {
+    height: 20px;
+    max-height: 20px;
+    min-height: 20px;
+    font-size: 11px;
+    line-height: 20px;
   }
 
   .bot-cluster-row .bot-manager-use-wrap {
@@ -371,17 +425,29 @@
 
 .bot-cluster-count {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--text-dim);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-/* 第三行單獨一行、字小一號，不跟 chip 擠同一行，窄側欄也不截斷。 */
-.bot-cluster-stat {
-  display: block;
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--text-dim);
-  white-space: nowrap;
+.bot-cluster-stat-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 標題列上的小燈：比單顆列的燈小，執行中的脈衝圈不畫（一列好幾顆會太吵）。 */
+.lamp.bot-cluster-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.lamp.bot-cluster-dot::after {
+  display: none;
 }
 
 .bot-cluster-members {

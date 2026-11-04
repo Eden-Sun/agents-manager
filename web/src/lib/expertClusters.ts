@@ -76,6 +76,13 @@ export function clusterStatOf(lamp: Lamp): ClusterStat {
  * 例：`1 執行中 · 1 閒置 · 2 停止`。
  */
 export function clusterStatText(lamps: readonly Lamp[]): string {
+  return clusterStatCounts(lamps)
+    .map(({ stat, n }) => clusterStatLabel(stat, n))
+    .join(' · ')
+}
+
+/** 各狀態的數量（照固定順序，0 的不列）：群集列標題上的「●1 ○2」用它，加總＝成員數（使用者 2026-11-04：狀態與數量合併省空間）。 */
+export function clusterStatCounts(lamps: readonly Lamp[]): { stat: ClusterStat; n: number }[] {
   const counts = new Map<ClusterStat, number>()
   for (const lamp of lamps) {
     const stat = clusterStatOf(lamp)
@@ -83,6 +90,6 @@ export function clusterStatText(lamps: readonly Lamp[]): string {
   }
   return CLUSTER_STAT_ORDER.flatMap((stat) => {
     const n = counts.get(stat) ?? 0
-    return n > 0 ? [clusterStatLabel(stat, n)] : []
-  }).join(' · ')
+    return n > 0 ? [{ stat, n }] : []
+  })
 }

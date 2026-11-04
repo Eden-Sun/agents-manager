@@ -63,8 +63,11 @@ test('收合：一列群集、計數、成員不畫，單列照舊', async () =>
   const row = clusterRow()!
   assert.ok(row)
   assert.match(row.textContent ?? '', /haiku/)
-  assert.match(row.textContent ?? '', /×3/)
-  assert.match(row.textContent ?? '', /1 執行中 · 2 閒置/)
+  // 狀態與數量合併在標題上：燈號＋數字（1 執行中、2 閒置），完整文字在 aria-label／title，沒有另一行。
+  const count = row.querySelector('.bot-cluster-count')!
+  assert.equal(count.getAttribute('aria-label'), '共 3 顆：1 執行中 · 2 閒置')
+  assert.deepEqual([...count.querySelectorAll('.bot-cluster-stat-item')].map((e) => `${e.querySelector('.lamp')!.className.match(/lamp-(\w+)/)![1]}:${e.textContent}`), ['working:1', 'idle:2'])
+  assert.doesNotMatch(row.textContent ?? '', /執行中|閒置|×/)
   assert.ok(!rowIds().includes('h1'))
   assert.ok(rowIds().includes('solo'))
 })
@@ -87,7 +90,7 @@ test('收合列也顯示 kind 圖示、身份、模型與強度（取第一顆�
   const model = row.querySelector('.model-tag')
   assert.ok(model && /haiku/.test(model.textContent ?? ''), '模型 haiku')
   assert.ok(model && /Medium/.test(model.textContent ?? ''), '強度 Medium')
-  assert.match(row.textContent ?? '', /1 執行中 · 2 閒置/)
+  assert.equal(row.querySelector('.bot-cluster-count')!.getAttribute('title'), '共 3 顆：1 執行中 · 2 閒置')
 })
 
 test('展開：顯示成員且各自有勾選框，狀態記在 localStorage', async () => {
