@@ -20,6 +20,7 @@ import { fitRules } from '../lib/termRules'
 import { splitAtCursor } from '../lib/termCursor'
 import { setTermWrap, useTermWrap } from './termWrap'
 import { isHeldLoginPane } from '../lib/loginPaneHold'
+import { useLoginShellAutoClose } from './useLoginShellAutoClose'
 import { readFitScreen, writeFitScreen } from './shellFitScreen'
 import './hostShellPanel.css'
 
@@ -150,6 +151,7 @@ export function HostShellPanel({
   const [source, setSource] = useState<TerminalSource>('visible')
   const [lines, setLines] = useState(200)
   const wrap = useTermWrap()
+  useLoginShellAutoClose(host, paneId)
   const target = `${host}/${paneId}`
   // 未送出的指令跟對話輸入框同一套：存在 daemon、各瀏覽器共用（#758），切去看一眼對話也不會丟。
   const draftKey = shellDraftKey(host, paneId)
