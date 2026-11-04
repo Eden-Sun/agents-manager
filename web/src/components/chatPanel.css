@@ -1117,6 +1117,30 @@
   cursor: progress;
 }
 .msg-translation {
-  margin-top: 4px;
-  border-left: 2px solid var(--border-strong);
+  margin: 0;
+}
+
+/* 原文⇄譯文翻面：同一個泡泡裡換內容，換的那一下沿 X 軸翻過來。 */
+.msg-flip {
+  animation: msg-flip-in 0.28s ease-out;
+  transform-origin: center;
+  backface-visibility: hidden;
+}
+
+@keyframes msg-flip-in {
+  from {
+    opacity: 0.2;
+    transform: perspective(800px) rotateX(-70deg);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-flip {
+    animation: none;
+  }
 }

@@ -22,15 +22,16 @@ function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; cached:
 }
 
 /**
- * assistant 訊息說英文時，meta 列的「翻譯」鈕＋原文下方的譯文（daemon 用 Claude API 翻成繁中，同一則有快取不重複扣費）。
- * `button` 放 meta 列、`body` 放泡泡下面；不是英文就兩個都是 null。
+ * assistant 訊息說英文時，meta 列的「翻譯」鈕＋譯文（daemon 用 Claude API 翻成繁中，同一則有快取不重複扣費）。
+ * 譯文跟原文在**同一個泡泡**裡翻面切換（使用者 2026-11-04：不要在下面多一塊，要像翻面）：`content` 不是 null 時，
+ * 呼叫端用它取代泡泡裡的原文。`flip` 沒翻過是 null，翻過後是正在看的那一面（tr／orig），呼叫端拿來當 key 重播翻面動畫。不是英文就全是 null。
  */
-export function useMessageTranslation(msg: Message): { button: React.ReactNode; body: React.ReactNode } {
+export function useMessageTranslation(msg: Message): { button: React.ReactNode; content: React.ReactNode; flip: 'tr' | 'orig' | null } {
   const t = useT()
   const [st, setSt] = useState<State>({ status: 'idle' })
   const eligible = msg.role === 'assistant' && !msg.rewound_at && msg.source !== 'terminal_fallback' && isMostlyEnglish(msg.content)
   const ready = useTranslateReady(eligible)
-  if (!eligible) return { button: null, body: null }
+  if (!eligible) return { button: null, content: null, flip: null }
   const off = ready && !ready.ok ? ready : null
 
   const run = () => {
@@ -52,19 +53,21 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
   const onClick = off
     ? () => useStore.getState().notify('info', t.tr(off.reason))
     : st.status === 'done' ? () => setSt({ ...st, show: !st.show }) : st.status === 'loading' ? undefined : run
-  const label = off ? t('翻譯（未啟用）') : st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('隱藏譯文') : t('顯示譯文')) : t('翻譯')
+  // 翻好之後按鈕是「翻面」：正看譯文就寫「原文」，正看原文就寫「譯文」。
+  const label = off ? t('翻譯（未啟用）') : st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('⇄ 原文') : t('⇄ 譯文')) : t('翻譯')
   return {
     button: (
       <button type="button" className={`msg-translate${off ? ' off' : ''}`} disabled={st.status === 'loading'} onClick={onClick} title={off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')}>
         {label}
       </button>
     ),
-    body:
+    content:
       st.status === 'done' && st.show ? (
-        <div className="bubble md msg-translation" lang="zh-Hant">
+        <div className="msg-translation" lang="zh-Hant">
           <SafeMarkdown text={st.text} botId={msg.bot_id} />
           <div className="msg-translation-cost">{costLine(t, st)}</div>
         </div>
       ) : null,
+    flip: st.status !== 'done' ? null : st.show ? 'tr' : 'orig',
   }
 }
