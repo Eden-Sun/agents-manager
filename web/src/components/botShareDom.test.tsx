@@ -196,7 +196,7 @@ test('聊天區頂端分享鈕：一般 bot 沒有；未分享按下＝開啟並
   }
 })
 
-test('手機 http（非 secure context、沒有 clipboard）：開分享後直接打開選單給可選取的連結，不給複製鈕、不試著複製', async () => {
+test('手機 http（非 secure context、沒有 clipboard）：開分享後打開選單顯示完整連結；「複製連結」用已預讀的連結在點擊裡同步複製', async () => {
   const { mock, shared } = await setup()
   await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })
   const msgs: string[] = []
@@ -219,13 +219,18 @@ test('手機 http（非 secure context、沒有 clipboard）：開分享後直�
     await settle()
     const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }
     assert.equal(execCalls, 0, '預判做不到，不試著複製')
-    assert.match(msgs.at(-1)!, /長按選取後複製/)
+    assert.match(msgs.at(-1)!, /按「複製連結」/)
     assert.ok(!msgs.some((m) => m.includes('複製失敗')), '不會出現複製失敗')
-    const field = document.querySelector<HTMLInputElement>('.share-link-menu .share-link-url')
-    assert.ok(field, '選單第一項是可選取的連結')
-    assert.equal(field.value, g.url)
-    assert.equal(field.readOnly, true)
-    assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['重產連結', '關閉分享'], '沒有複製連結鈕')
+    await settle()
+    assert.equal(document.querySelector('.share-link-menu .share-link-url-text')?.textContent, g.url, '完整網址')
+    assert.deepEqual([...document.querySelectorAll('.share-link-menu [role="menuitem"]')].map((b) => b.textContent), ['複製連結', '重產連結', '關閉分享'])
+    document.execCommand = () => {
+      execCalls += 1
+      return true
+    }
+    await click(document.querySelector<HTMLElement>('.share-link-copy')!)
+    assert.equal(execCalls, 1, '點擊手勢裡同步複製已預讀的連結')
+    assert.equal(msgs.at(-1), '已複製分享連結')
   } finally {
     document.execCommand = origExec
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
