@@ -26,6 +26,7 @@ import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 import { useT } from './lib/i18n'
+import { drawerShouldClose } from './lib/drawerNav'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
 const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title)
@@ -33,14 +34,6 @@ const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : documen
   // 也剝掉 `screenTitle` 的「畫面 · 」前綴，免得一路疊上去。
   .split(' · ')
   .slice(-1)[0]
-
-/**
- * 選取沒變的點擊（再點回同一顆 bot）也要收抽屜。用 capture 是因為收合鍵與 `⋯` 會 stopPropagation；
- * 會在抽屜裡開對話框的按鈕要留著抽屜，否則 `inert` 會把對話框一起關掉。
- */
-const DRAWER_NAV = '.bot-row, .project-head'
-const DRAWER_STAY =
-  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions'
 
 /** 分頁標題的 `(N)`，以及視窗回到前景時把開著的對話標為已讀（切走再回來才看到回覆的常見情境）。 */
 function useUnread() {
@@ -229,8 +222,7 @@ export default function App() {
         inert={isMobile && !drawer}
         {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': t('側邊欄') } : {})}
         onClickCapture={(e) => {
-          if (!drawerOpen || !(e.target instanceof Element)) return
-          if (!e.target.closest(DRAWER_NAV) || e.target.closest(DRAWER_STAY)) return
+          if (!drawerOpen || !drawerShouldClose(e.target)) return
           setDrawer(false)
         }}
       >
