@@ -217,16 +217,15 @@ test('側欄勾選框：只在專家模式 advisor/executor/specialist 出現，
   assert.equal(execBox.checked, true, 'exec-1 manager_use 為 true')
   assert.equal(specBox.checked, true, 'spec-1 manager_use 為 true')
 
-  const enableTitle = '管理者可用：開啟後管理者可派工、啟動或重啟此成員'
-  const lockedTitle = '已開啟。要取消請用右側 ⋯ 選單的「管理者可用」'
-  assert.equal(advBox.disabled, false, '未勾可以點來勾上')
-  assert.equal(advBox.getAttribute('aria-label'), enableTitle)
-  assert.equal(advBox.getAttribute('title'), enableTitle)
-  assert.equal(execBox.disabled, true, '已勾不能在側欄直接取消')
-  assert.equal(execBox.classList.contains('is-locked'), true)
-  assert.equal(execBox.getAttribute('aria-label'), enableTitle)
-  assert.equal(execBox.getAttribute('title'), lockedTitle)
-  assert.equal(specBox.disabled, true)
+  const onTitle = '關閉後管理者不能派工給它、不能啟動或重啟它'
+  const offTitle = '開啟後管理者可派工、啟動或重啟此成員'
+  for (const box of [advBox, execBox, specBox]) {
+    assert.equal(box.disabled, false, '勾著或沒勾都能直接切')
+    assert.equal(box.getAttribute('aria-label'), '管理者可用')
+    assert.equal(box.classList.contains('is-locked'), false)
+  }
+  assert.equal(advBox.getAttribute('title'), offTitle)
+  assert.equal(execBox.getAttribute('title'), onTitle)
 
   // 勾選框在燈號左側（gutter 之前），不在列尾。
   const follows = (earlier: Element, later: Element) =>
@@ -250,7 +249,7 @@ test('側欄勾選框：只在專家模式 advisor/executor/specialist 出現，
   assert.equal(plainRow.classList.contains('expert-member'), false)
 })
 
-test('側欄勾選框：未勾可勾上並送 PATCH；已勾 disabled 不送；失敗還原', async () => {
+test('側欄勾選框：勾上送 true、取消送 false；失敗還原', async () => {
   await mount(<Sidebar />)
   await settle()
 
@@ -259,12 +258,13 @@ test('側欄勾選框：未勾可勾上並送 PATCH；已勾 disabled 不送；�
 
   const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
   const execBox = execRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.equal(execBox.disabled, true)
   await click(execBox)
   await settle()
-  assert.equal(patchedBots.length, 0, '已勾的框不能直接取消')
-  assert.equal(execBox.checked, true)
+  assert.equal(patchedBots.length, 1, '已勾的框直接取消')
+  assert.equal(patchedBots[0].id, 'b-exec')
+  assert.equal(patchedBots[0].input.manager_use, false)
   assert.equal(useStore.getState().selectedBotId, 'b-mgr', '點勾選框不應改變選取的 bot')
+  patchedBots.length = 0
 
   const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
   const advBox = advRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
@@ -276,7 +276,6 @@ test('側欄勾選框：未勾可勾上並送 PATCH；已勾 disabled 不送；�
   assert.equal(patchedBots[0].id, 'b-adv')
   assert.equal(patchedBots[0].input.manager_use, true)
   assert.equal(advBox.checked, true)
-  assert.equal(advBox.disabled, true)
 
   const origPatch = useStore.getState().patchBot
   useStore.setState({
@@ -301,45 +300,16 @@ test('側欄勾選框：未勾可勾上並送 PATCH；已勾 disabled 不送；�
   useStore.setState({ patchBot: origPatch })
 })
 
-test('bot 列 ⋯ 選單：切換「管理者可用」勾選送出 PATCH /api/bots/{id}', async () => {
+test('bot 列 ⋯ 選單不再有「管理者可用」：側欄勾選框直接切就好', async () => {
   await mount(<Sidebar />)
   await settle()
-
-  // exec-1 目前 manager_use=true，選單應有「☑ 管理者可用」
   const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
   const menuBtn = execRow.querySelector<HTMLButtonElement>('.bot-actions .head-menu-btn')!
   await click(menuBtn)
   await settle()
-
-  const disableBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('.head-menu-item')).find(
-    (b) => b.textContent?.includes('管理者可用'),
-  )
-  assert.ok(disableBtn, '應有「管理者可用」選項')
-  assert.match(disableBtn!.textContent ?? '', /☑/, '啟用中應顯示 ☑')
-  await click(disableBtn!)
-  await settle()
-
-  assert.equal(patchedBots.length, 1)
-  assert.equal(patchedBots[0].id, 'b-exec')
-  assert.equal(patchedBots[0].input.manager_use, false)
-
-  // adv-1 目前 manager_use=false，打開選單應有「☐ 管理者可用」
-  const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
-  const advMenuBtn = advRow.querySelector<HTMLButtonElement>('.bot-actions .head-menu-btn')!
-  await click(advMenuBtn)
-  await settle()
-
-  const enableBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('.head-menu-item')).find(
-    (b) => b.textContent?.includes('管理者可用'),
-  )
-  assert.ok(enableBtn, '應有「管理者可用」選項')
-  assert.match(enableBtn!.textContent ?? '', /☐/, '停用中應顯示 ☐')
-  await click(enableBtn!)
-  await settle()
-
-  assert.equal(patchedBots.length, 2)
-  assert.equal(patchedBots[1].id, 'b-adv')
-  assert.equal(patchedBots[1].input.manager_use, true)
+  const items = [...document.querySelectorAll<HTMLElement>('.head-menu-item')].map((e) => e.textContent ?? '')
+  assert.ok(items.length > 0, '選單有打開')
+  assert.ok(!items.some((x) => x.includes('管理者可用')), items.join('|'))
 })
 
 test('專案設定 ProjectExpertSettings：條目改上限後儲存，送出整份條目陣列', async () => {

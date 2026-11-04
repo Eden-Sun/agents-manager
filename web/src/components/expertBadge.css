@@ -73,10 +73,6 @@
 }
 
 /* 已勾的成員框是停用但要看得出勾著，不能跟請求中的半透明混在一起。 */
-.bot-manager-use-checkbox.is-locked:disabled {
-  opacity: 1;
-  cursor: not-allowed;
-}
 
 /* 群集列跟成員列同高（使用者 2026-11-04：狀態併進標題後，群集列也只剩兩行）。 */
 .bot-row.bot-cluster-row {
@@ -172,9 +168,6 @@
   cursor: pointer;
 }
 
-.bot-row.expert-member .bot-manager-use-wrap:has(.is-locked) {
-  cursor: not-allowed;
-}
 
 .bot-row.expert-member .bot-manager-use-checkbox {
   width: 14px;

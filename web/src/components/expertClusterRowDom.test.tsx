@@ -116,7 +116,6 @@ test('整組勾選在列的最左，跟成員列同一欄，已勾仍可取消',
   const box = wrap.querySelector('input')!
   assert.equal(box.checked, true)
   assert.equal(box.disabled, false, '群集框不鎖，全勾仍可關掉')
-  assert.equal(box.classList.contains('is-locked'), false)
 
   await click(row.querySelector('.bot-cluster-main')!)
   await settle()
