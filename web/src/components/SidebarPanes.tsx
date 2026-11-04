@@ -1,6 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
-import type { ProjectPane } from '../api'
+import type { CloseNeedsConfirm, ProjectPane } from '../api'
+import { ConfirmDialog } from './ConfirmDialog'
+import { ServicePaneNote } from './ServicePaneNote'
 import { unownedRows } from '../lib/paneLists'
 import type { UnownedTag } from '../lib/paneLists'
 import { paneHint, paneLabel } from '../lib/panes'
@@ -72,9 +74,16 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
       ? t('對不到任何專案、也不是 scratch：閒置太久會被自動關')
       : ''
   const tagText = tag === 'scratch' ? 'scratch' : tag === 'extra' ? t('多出來的') : ''
-  // 複製＝同一台、同一個目錄再開一顆新 shell（使用者 2026-11-04：選單就要能快速 clone）；服務 pane 不給。
-  const cloneBusy = useStore((s) => s.busy[`shell:${p.host}`] === true)
-  const canClone = !service && Boolean(p.cwd)
+  // 關閉鍵（使用者 2026-11-04：選單要能快速關 pane）：一鍵關；在 listen 的服務 pane／讀不到狀態的，daemon 擋下來才問一次。
+  const endHostShell = useStore((s) => s.endHostShell)
+  const refreshPanes = useStore((s) => s.refreshPanes)
+  const closing = useStore((s) => s.busy[`shell:${p.host}:${p.pane_id}`] === true)
+  const [needs, setNeeds] = useState<CloseNeedsConfirm | null>(null)
+  const close = (confirm: boolean) =>
+    void endHostShell(p.host, p.pane_id, confirm).then((n) => {
+      if (n) setNeeds(n)
+      else void refreshPanes()
+    })
 
   return (
     <div className="side-pane-wrap">
@@ -91,18 +100,28 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
       <span className="side-pane-label">{paneLabel(p)}</span>
       {tag ? <span className={`side-pane-tag ${tag}`}>{tagText}</span> : service ? <span className="side-pane-tag">{t('服務')}</span> : null}
     </button>
-    {canClone ? (
-      <button
-        type="button"
-        className="side-pane-clone"
-        disabled={cloneBusy}
-        title={t('在同一個目錄再開一個 shell：{cwd}', { cwd: p.cwd ?? '' })}
-        aria-label={t('複製這個 shell')}
-        onClick={() => void useStore.getState().openHostShell(p.host, p.cwd ?? undefined).then((ok) => ok && void useStore.getState().refreshPanes())}
-      >
-        ⧉
-      </button>
-    ) : null}
+    <button
+      type="button"
+      className="side-pane-close"
+      disabled={closing}
+      title={t('關閉這個 pane：{label}', { label: paneLabel(p) })}
+      aria-label={t('關閉這個 pane')}
+      onClick={() => close(false)}
+    >
+      ×
+    </button>
+    <ConfirmDialog
+      open={needs !== null}
+      title={t('這顆 pane 還在做事')}
+      body={<ServicePaneNote needs={needs} />}
+      confirmLabel={t('仍要關掉')}
+      danger
+      onCancel={() => setNeeds(null)}
+      onConfirm={() => {
+        setNeeds(null)
+        close(true)
+      }}
+    />
     </div>
   )
 }

@@ -535,6 +535,6 @@ export default {
   '{name} 的重置券：{from} → {to} 張': '{name} reset credits: {from} → {to}',
   "登入完成，{s} 秒後自動關閉這個 shell": "Signed in; closing this shell in {s}s",
   "保留": "Keep",
-  "在同一個目錄再開一個 shell：{cwd}": "Open another shell in the same folder: {cwd}",
-  "複製這個 shell": "Clone this shell",
+  "關閉這個 pane：{label}": "Close this pane: {label}",
+  "關閉這個 pane": "Close this pane",
 } satisfies Dict
