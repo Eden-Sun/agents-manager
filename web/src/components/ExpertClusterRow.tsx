@@ -91,6 +91,24 @@ export function ExpertClusterRow({
   return (
     <>
       <div className="bot-row bot-cluster-row" role="listitem" data-cluster={name}>
+        {/* 跟成員列同一欄：勾選框在最左。整組仍可全開或全關，不鎖。 */}
+        <span
+          className="bot-manager-use-wrap"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <input
+            ref={boxRef}
+            type="checkbox"
+            className="bot-manager-use-checkbox"
+            aria-label={title}
+            title={title}
+            checked={all}
+            disabled={busyPatch}
+            onChange={() => setAll(!all)}
+          />
+        </span>
         <button
           type="button"
           className="bot-cluster-main"
@@ -125,23 +143,6 @@ export function ExpertClusterRow({
             <span className="bot-cluster-stat">{clusterStatText(lamps)}</span>
           </span>
         </button>
-        <span
-          className="bot-manager-use-wrap"
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => e.stopPropagation()}
-        >
-          <input
-            ref={boxRef}
-            type="checkbox"
-            className="bot-manager-use-checkbox"
-            aria-label={title}
-            title={title}
-            checked={all}
-            disabled={busyPatch}
-            onChange={() => setAll(!all)}
-          />
-        </span>
       </div>
       {open ? (
         <div id={listId} className="bot-cluster-members" role="list">

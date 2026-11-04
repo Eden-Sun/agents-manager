@@ -171,6 +171,16 @@
     width: 16px;
     height: 16px;
   }
+
+  .bot-cluster-row .bot-manager-use-wrap {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .bot-cluster-row .bot-manager-use-checkbox {
+    width: 16px;
+    height: 16px;
+  }
 }
 
 /* 停用成員名稱淡化 */
@@ -291,12 +301,25 @@
   font-weight: 600;
 }
 
-/* 專家模式執行者群集列（ExpertClusterRow）：一列收一組同設定的執行者，成員展開縮排。 */
-.bot-cluster-row {
+/* 專家模式執行者群集列（ExpertClusterRow）：一列收一組同設定的執行者，成員展開縮排。
+   左欄跟 .expert-member 一樣：padding-left 4px、勾選框 26px（手機 36px），兩種列的框才在同一直線。 */
+.bot-row.bot-cluster-row {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding-right: 6px;
+  padding: 2px 6px 2px 4px;
+}
+
+.bot-cluster-row .bot-manager-use-wrap {
+  align-self: center;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+}
+
+.bot-cluster-row .bot-manager-use-checkbox {
+  width: 14px;
+  height: 14px;
 }
 
 .bot-cluster-main {
