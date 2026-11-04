@@ -355,6 +355,16 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 方案 A：有倒數的格子，百分比在 logo 列，顏色跟窗口等級（同第二行的規則）。 */
+
+.quota-head-pct.warn {
+  color: var(--warn);
+}
+
+.quota-head-pct.critical {
+  color: var(--danger);
+}
+
 .quota-hp.warn .quota-compact-pct {
   color: var(--warn);
 }
