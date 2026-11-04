@@ -297,6 +297,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/share` | User-only；Bot／Service principal（含 AGM role Bot）→ 403 `user_only` |
 | POST | `/api/bots/{id}/share/rotate` | User-only；Bot／Service principal（含 AGM role Bot）→ 403 `user_only` |
 | POST | `/api/bots/{id}/send-queued-now` | 集中 User-only policy＋handler `require_user`；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。它按 `ctrl+x ctrl+s` 打斷使用者的回合 |
+| POST | `/api/messages/{id}/translate` | 集中 User-only policy＋handler；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。會打付費 Claude API，只供使用者在對話裡按「翻譯」 |
 | POST | `/api/bots/{id}/suggestion/accept` | 集中 User-only policy＋handler `require_user`；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。它對使用者的輸入框按 Tab＋Enter，等於替使用者送訊息 |
 | POST | `/api/bots/{id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/build/remote/install-toolchain` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -2704,6 +2705,13 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - `completed` 帶 `summary`（3–5 點）、`sections`（只含實際送出的版本）與 `lang`（這次 prompt 的目標語言）。有省略或正文被截斷時 `coverage:"partial"`、`truncated_input:true` 只在正文被切斷時。失敗與中斷是 `failed`／`interrupted`，`error` 是短代碼（`timeout`、`rate_limited`、`http`、`missing_usage`、`schema`、`sections`、`summary`、`max_tokens`、`refusal`、`stop`、`ledger`、`restart`、`not_sent`、`in_flight`、`hourly`、`attempts`、`lang`），`error_kind` 是 `timeout`／`rate_limited`／`bad_format`／`budget`／`http`。不回上游內文。`lang` 這個錯誤是設定的語言不在允許表，沒有扣費。
 - `attempts[]` 每筆保留自己的 `usage`（`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`）。缺用量是 `null`，不是 0。`retry_after` 沒過之前，再 `POST` 只回原狀態、不再打。次數用盡（`error:"attempts"`，`error_kind:"budget"`）時，`GET` 與 `POST` 都回同一個 `retry_after`：最後一次送出結束起 1 小時，固定不往後延；過了才會再送。逾時用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 已廢棄（#1942）。
 - **權限**：User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。翻譯會打付費 API。`POST` 是使用者按鈕與退避到期的再試；`GET` 只讀、不送出。新版偵測的背景送出不經 HTTP（`changelog_translate::auto_kick`）。
+
+## 對話訊息翻譯 `POST /api/messages/{id}/translate`
+
+User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，要在設定頁 `[claude_api]` 打開總開關與這個用途）。
+prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、指令、識別字、commit hash 原樣不翻，只回譯文。
+`200 {"translation", "model", "cached", "usage"?}`：快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
+錯誤：404 `not_found`（沒這則訊息）；400（不是 assistant 或空訊息）；422 `message_too_long`（超過 20000 字）；409 `claude_api_not_configured`（沒開或沒 key）；502（`translate_failed: …`，API 失敗、被限流、逾時）。
 
 ## 上游有新版可裝 `GET /api/upstream-updates`（SPEC §3.1「上游有新版」，issue #707）
 

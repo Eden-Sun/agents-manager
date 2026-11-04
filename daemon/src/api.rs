@@ -359,6 +359,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/changelog/translation",
             get(crate::changelog_translate::get_translation).post(crate::changelog_translate::post_translation),
         )
+        .route("/messages/{id}/translate", post(crate::message_translate::post_translate))
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
@@ -1131,6 +1132,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/attachments", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/keys", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/send-queued-now", BotRoutePolicy::UserOnly),
+    ("POST", "/api/messages/{id}/translate", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/read", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/suggestion/accept", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/text", BotRoutePolicy::UserOnly),

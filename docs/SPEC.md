@@ -3135,6 +3135,10 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
 - 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔（手動「安裝」鈕的確認框寫明改 `~/.grok`／`~/.gemini` 的 hook；只有 grok／agy 且工具探測已登入時才顯示鈕；自動安裝沒有確認框，改以通知與 log 讓使用者看得到）。
 
+### 6.9e 對話訊息翻譯
+
+對話裡「主要是英文」的 assistant 訊息有「翻譯」按鈕，`POST /api/messages/{id}/translate`（User-only）用 Claude API（用途 `message_translate`）翻成繁體中文，譯文快取在 `{data_dir}/message-translate/`，同一則訊息只扣一次費（`daemon/src/message_translate.rs`）。
+
 ### 6.9d 更新框的翻譯（issue #1870）
 
 更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。

@@ -396,4 +396,10 @@ export default {
   '設定總花費上限（所有 claude-api bot 合計，從設定時起算）': 'Set total spend cap (sum of all claude-api bots, counted from when set)',
   '上限': 'Cap',
   '總花費上限：從 {since} 起算已花 ${spent}，上限 ${cap}': 'Total spend cap: spent ${spent} since {since}, cap ${cap}',
+  '翻譯': 'Translate',
+  '翻譯中…': 'Translating…',
+  '隱藏譯文': 'Hide translation',
+  '顯示譯文': 'Show translation',
+  '用 Claude 翻成繁體中文': 'Translate to Traditional Chinese with Claude',
+  '翻譯失敗：{reason}': 'Translation failed: {reason}',
 } satisfies Dict

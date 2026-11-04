@@ -929,6 +929,7 @@ pub struct ClaudeApiUseDef {
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
     ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None },
     ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None },
+    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None },
     ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate") },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
