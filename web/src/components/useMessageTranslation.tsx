@@ -1,13 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { translateMessage } from '../api'
 import type { Message } from '../api/types'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { useT } from '../lib/i18n'
+import { claimAutoTranslate, getTranslation, isWanted, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
 import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
-
-type State = { status: 'idle' | 'loading' | 'error' } | { status: 'done'; text: string; show: boolean; cost: number | null; cached: boolean; model: string }
 
 /** 美元：不到一分錢多給位數，免得全寫成 $0.00。 */
 export function usd(n: number): string {
@@ -28,19 +27,20 @@ function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; cached:
  */
 export function useMessageTranslation(msg: Message): { button: React.ReactNode; content: React.ReactNode; flip: 'tr' | 'orig' | null } {
   const t = useT()
-  const [st, setSt] = useState<State>({ status: 'idle' })
+  const st = useSyncExternalStore(subscribeTranslations, () => getTranslation(msg.id), () => getTranslation(msg.id))
   const eligible = msg.role === 'assistant' && !msg.rewound_at && msg.source !== 'terminal_fallback' && isMostlyEnglish(msg.content)
   const ready = useTranslateReady(eligible)
-  if (!eligible) return { button: null, content: null, flip: null }
   const off = ready && !ready.ok ? ready : null
 
-  const run = () => {
-    setSt({ status: 'loading' })
+  // 狀態在 store（以 msg.id 為鍵）：remount 不會掉回原文。auto＝重整後自動重抓，失敗不跳錯誤也不重試。
+  const run = (auto: boolean) => {
+    setTranslation(msg.id, { status: 'loading' })
     translateMessage(msg.id).then(
-      (r) => setSt({ status: 'done', text: r.translation, show: true, cost: r.costUsd, cached: r.cached, model: r.model }),
+      (r) => setTranslation(msg.id, { status: 'done', text: r.translation, show: !auto || isWanted(msg.id), cost: r.costUsd, cached: r.cached, model: r.model }),
       (e: unknown) => {
-        setSt({ status: 'error' })
+        setTranslation(msg.id, { status: 'error' })
         resetTranslateReady()
+        if (auto) return
         const reason = e instanceof Error ? e.message : String(e)
         // 未設定時直接講去哪裡開，不丟錯誤碼。
         useStore.getState().notify('error', reason.includes('claude_api_not_configured')
@@ -49,10 +49,22 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
       },
     )
   }
+  const flipFace = () => {
+    if (st.status !== 'done') return
+    setWanted(msg.id, !st.show)
+    setTranslation(msg.id, { ...st, show: !st.show })
+  }
+  // 以前選了看譯文（localStorage 有記）→ 掛載時自動翻一次；載入中顯示原文＋「翻譯中…」。
+  const auto = eligible && !off && st.status === 'idle' && isWanted(msg.id)
+  useEffect(() => {
+    if (auto && claimAutoTranslate(msg.id)) run(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, msg.id])
+  if (!eligible) return { button: null, content: null, flip: null }
   // 未啟用：按鈕照樣在（找得到這個功能），標「未啟用」，按了只提示去哪裡開，不打 API。
   const onClick = off
     ? () => useStore.getState().notify('info', t.tr(off.reason))
-    : st.status === 'done' ? () => setSt({ ...st, show: !st.show }) : st.status === 'loading' ? undefined : run
+    : st.status === 'done' ? flipFace : st.status === 'loading' ? undefined : () => { setWanted(msg.id, true); run(false) }
   // 翻好之後按鈕是「翻面」：正看譯文就寫「原文」，正看原文就寫「譯文」。
   const label = off ? t('翻譯（未啟用）') : st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('⇄ 原文') : t('⇄ 譯文')) : t('翻譯')
   return {
