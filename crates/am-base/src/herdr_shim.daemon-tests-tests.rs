@@ -1123,6 +1123,47 @@ esac"#, calls.display()));
         assert_eq!(out.iter().filter(|a| a.as_str() == effort).count(), 1, "{out:?}");
     }
 
+    /// 使用者 2026-11-04：bot 開的 codex 子 agent 直接 `--yolo`（workspace-write 擋網路、cache、`.git`）。
+    /// 呼叫者自己決定了沙箱就不補；`resume`／`fork` 之後照樣補，且不動 #1902 的 `-c` 搬運；人工 shell（沒有 AM_BOT_ID）與別的 kind 不補。
+    #[test]
+    fn a_codex_child_started_by_a_bot_gets_yolo_unless_the_caller_chose_a_sandbox() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1")];
+        let start = |env: &[(&str, &str)], kind: &str, extra: &[&str]| {
+            let mut args = vec!["agent", "start", "kid", "--kind", kind, "--pane", "w1:p9"];
+            if !extra.is_empty() {
+                args.push("--");
+                args.extend(extra);
+            }
+            let (out, err, rc) = s.run_full(env, &args);
+            assert_eq!(rc, 0, "{err}");
+            out
+        };
+        let yolo = |out: &[String]| out.iter().filter(|a| *a == "--yolo").count();
+        let out = start(&env, "codex", &[]);
+        assert_eq!(&out[7..], ["--", "--no-daemon", "--yolo"], "{out:?}");
+        // 有 `-m` 之類自己的參數、`resume`／`fork`：補在最後面，子命令前的 `-c` 照舊搬到子命令後。
+        let out = start(&env, "codex", &["-m", "o3"]);
+        assert_eq!(&out[7..], ["--", "-m", "o3", "--no-daemon", "--yolo"], "{out:?}");
+        let out = start(&env, "codex", &["-c", "model_reasoning_effort=medium", "fork", "--last"]);
+        assert_eq!(&out[7..], ["--", "-c", "model_reasoning_effort=medium", "fork", "-c", "model_reasoning_effort=medium", "--last", "--no-daemon", "--yolo"], "{out:?}");
+        let out = start(&env, "codex", &["resume", "sid-1"]);
+        assert_eq!(&out[7..], ["--", "resume", "sid-1", "--no-daemon", "--yolo"], "{out:?}");
+        // 呼叫者自己決定了沙箱／核准：不補（也不重複）。
+        for own in [&["--sandbox", "danger-full-access"][..], &["--sandbox=read-only"], &["-s", "read-only"], &["--yolo"], &["--dangerously-bypass-approvals-and-sandbox"], &["--full-auto"], &["-c", "sandbox_mode=\"read-only\""]] {
+            let out = start(&env, "codex", own);
+            assert_eq!(yolo(&out), usize::from(own[0] == "--yolo"), "{own:?} → {out:?}");
+            assert!(out.iter().any(|a| a == "--no-daemon"), "{out:?}");
+        }
+        // 沒有 AM_BOT_ID（人工 shell）、別的 kind：不補。
+        let out = start(&[("AM_AGENT_NAME", "p-1")], "codex", &[]);
+        assert_eq!(yolo(&out), 0, "{out:?}");
+        let out = start(&env, "claude", &[]);
+        assert_eq!(yolo(&out), 0, "{out:?}");
+        let out = start(&env, "grok", &[]);
+        assert_eq!(yolo(&out), 0, "{out:?}");
+    }
+
     /// §6.5i：子 agent 的指示跟母 bot 同一份（`AM_INSTRUCTIONS_FILE`），CLI 自己的指示檔不讀；呼叫者自己帶了就尊重。
     #[test]
     fn a_child_agent_gets_the_parents_instructions_file() {
