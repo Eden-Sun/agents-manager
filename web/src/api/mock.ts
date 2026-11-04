@@ -1338,7 +1338,7 @@ export class MockTransport implements Transport {
         if (method === 'DELETE') return this.stopPreview(botId)
       }
       if (method === 'GET' && action === 'terminal') {
-        return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40))
+        return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40), q.get('format') === 'ansi')
       }
       if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
@@ -4223,7 +4223,7 @@ export class MockTransport implements Transport {
     return {}
   }
 
-  private terminal(botId: string, source: string, lines: number) {
+  private terminal(botId: string, source: string, lines: number, ansi = false) {
     const bot = this.bot(botId)
     const run = this.activeRun(botId)
     const status = run?.agent_status ?? 'unknown'
@@ -4272,7 +4272,10 @@ export class MockTransport implements Transport {
           ? ['⏺ 正在思考…', '  ⎿  Read(src/api/transport.ts)', '  ⎿  Grep("X-AM-Token")', '', '  ✻ Thinking… (7s)']
           : ['⏺ 已完成上一個回合。', '', '> ', '  ? for shortcuts']
     const all = [...head, ...body, ...codexStatusLine]
-    const text = all.slice(Math.max(0, all.length - lines)).join('\n')
+    const shown = all.slice(Math.max(0, all.length - lines))
+    // `format=ansi`：像真的 herdr 帶 SGR 色碼——標題列粗體、`⏺` 行綠字；純文字版逐字不變。
+    const painted = ansi ? shown.map((l) => (l.startsWith('⏺') ? `\x1b[32m${l}\x1b[0m` : l.startsWith('$ ') || l.startsWith('  pane=') ? `\x1b[1m${l}\x1b[0m` : l)) : shown
+    const text = painted.join('\n')
     return {
       text,
       revision: this.seq,
@@ -4281,6 +4284,7 @@ export class MockTransport implements Transport {
       pane_id: run?.pane_id ?? null,
       columns: run ? this.paneColumns(run) : null,
       rows: run ? 27 : null,
+      ...(ansi ? { format: 'ansi' } : {}),
     }
   }
 

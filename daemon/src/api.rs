@@ -8494,22 +8494,41 @@ async fn get_terminal(
         return Err(LcError::Bad("bad source".into()));
     }
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
+    // `format=ansi` 讀的是帶 SGR 色碼的原樣；預設（沒帶或 `text`）維持純文字、回應形狀不變。
+    let ansi = match q.get("format").map(String::as_str) {
+        None | Some("text") => false,
+        Some("ansi") => true,
+        Some(_) => return Err(LcError::Bad("bad format".into())),
+    };
+    // herdr 的 `detection` 不管 format 都回純文字，標成 ansi 會騙人，所以直接拒絕。
+    if ansi && source == "detection" {
+        return Err(LcError::Bad("format=ansi 不支援 source=detection，請改用 visible／recent／recent_unwrapped".into()));
+    }
     let client = app
         .herdr_for_run(&run)
         .await
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))?;
-    let read = client.pane_read(&pane, &source, lines).await.map_err(any_err)?;
+    let read = if ansi {
+        client.pane_read_ansi(&pane, &source, lines).await
+    } else {
+        client.pane_read(&pane, &source, lines).await
+    }
+    .map_err(any_err)?;
     // Below ~60 columns TUI text is unrecoverably fragmented (seen on `w8:pK` at 31); lets the UI explain it.
     let (columns, rows) = match client.pane_size(&pane).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
     };
-    Ok(Json(json!({
+    let mut body = json!({
         "bot_id": id, "run_id": run.id, "pane_id": pane,
         "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
         "agent_status": run.agent_status,
         "columns": columns, "rows": rows,
-    })))
+    });
+    if ansi {
+        body["format"] = json!("ansi");
+    }
+    Ok(Json(body))
 }
 
 async fn ws_handler(
@@ -12297,6 +12316,35 @@ mod bot_config_tests {
         assert_eq!(stored(&e, &id).await, (Some("B".into()), Some("B".into())), "retry stamps A before committing B");
         let launch_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(launch_rev.as_deref(), Some(old_rev.as_str()), "retry must stamp the revision from config A before committing config B");
+    }
+
+    /// `GET /api/bots/{id}/terminal`：`format=ansi` 走 `pane.read` 的 ansi 並標 `format`；文字版形狀不變；`detection` 不接 ansi。
+    #[tokio::test]
+    async fn get_terminal_reads_ansi_only_when_asked_and_refuses_it_for_detection() {
+        let e = crate::testing::env().await;
+        crate::testing::seed_project_config(&e).await;
+        let id = add(&e, json!({"name": "term-fmt", "kind": "claude", "model": "claude-sonnet-4-5"})).await.unwrap();
+        tt::fake_run(&e.app, &id).await;
+        let pane = format!("pane-{id}");
+        e.herdr.set_screen(&pane, "\x1b[1mhi\x1b[0m plain");
+        let get = |pairs: &[(&str, &str)]| {
+            let q: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            get_terminal(State(e.app.clone()), Path(id.clone()), Query(q))
+        };
+
+        let text = get(&[("source", "visible")]).await.unwrap().0;
+        assert!(text.get("format").is_none(), "文字版不加欄位：{text}");
+        assert_eq!(text["text"], "\x1b[1mhi\x1b[0m plain", "fake herdr 原樣回傳");
+        assert!(e.herdr.calls_to("pane.read").last().unwrap().get("format").is_none(), "預設不送 format 給 herdr");
+
+        for source in ["visible", "recent", "recent_unwrapped"] {
+            let ansi = get(&[("source", source), ("format", "ansi")]).await.unwrap().0;
+            assert_eq!(ansi["format"], "ansi", "{source}: {ansi}");
+            assert_eq!(ansi["source"], source);
+            assert_eq!(e.herdr.calls_to("pane.read").last().unwrap()["format"], "ansi", "{source} 要向 herdr 要 ansi");
+        }
+        assert!(matches!(get(&[("format", "ansi"), ("source", "detection")]).await, Err(LcError::Bad(_))), "detection 不回假 ansi");
+        assert!(matches!(get(&[("format", "html")]).await, Err(LcError::Bad(_))));
     }
 
     #[tokio::test]

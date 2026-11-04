@@ -206,12 +206,15 @@ export async function fetchTerminal(
   botId: string,
   source: TerminalSource,
   lines: number,
+  format: TerminalFormat = 'text',
 ): Promise<TerminalSnapshot> {
+  const fmt = format === 'ansi' ? '&format=ansi' : ''
   const raw = await transport.request(
     'GET',
-    `/bots/${encodeURIComponent(botId)}/terminal?source=${source}&lines=${lines}`,
+    `/bots/${encodeURIComponent(botId)}/terminal?source=${source}&lines=${lines}${fmt}`,
   )
-  return toTerminal(raw, source)
+  const snap = toTerminal(raw, source)
+  return format === 'ansi' ? { ...snap, format: 'ansi' } : snap
 }
 
 /**
