@@ -21,11 +21,11 @@ const msg = (content: string, over: Partial<Message> = {}): Message => ({
 })
 
 function Probe({ m }: { m: Message }) {
-  const { button, body } = useMessageTranslation(m)
+  const { button, content } = useMessageTranslation(m)
   return (
     <div>
       <div className="meta">{button}</div>
-      {body}
+      <div className="bubble">{content ?? m.content}</div>
     </div>
   )
 }
@@ -46,18 +46,21 @@ test('英文訊息有「翻譯」鈕，中文與 user 訊息沒有', async () =>
   assert.equal(document.querySelector('.msg-translate'), null)
 })
 
-test('點了：打 POST /messages/:id/translate，譯文出現在下方，按鈕可切換隱藏／顯示', async () => {
+test('點了：打 POST /messages/:id/translate，譯文在同一個泡泡裡翻面取代原文，按鈕切回原文', async () => {
   const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
+  const bubble = () => document.querySelector('.bubble')!
   await click(document.querySelector('.msg-translate')!)
   await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
   assert.ok(reqs.some((r) => r.method === 'POST' && r.path.includes('/messages/m1/translate')))
-  assert.match(document.querySelector('.msg-translation')!.textContent ?? '', /我修好了解析器的 bug/)
+  assert.match(bubble().textContent ?? '', /我修好了解析器的 bug/)
+  assert.doesNotMatch(bubble().textContent ?? '', /parser/, '原文被譯文取代，不是疊在下面')
   assert.match(document.querySelector('.msg-translation-cost')!.textContent ?? '', /haiku-5-5 · 這次翻譯 \$0\.00042/)
-  assert.equal(document.querySelector('.msg-translate')?.textContent, '隱藏譯文')
+  assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
   await click(document.querySelector('.msg-translate')!)
   assert.equal(document.querySelector('.msg-translation'), null)
-  assert.equal(document.querySelector('.msg-translate')?.textContent, '顯示譯文')
+  assert.match(bubble().textContent ?? '', /parser/)
+  assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 譯文')
   const before = reqs.length
   await click(document.querySelector('.msg-translate')!)
   assert.ok(document.querySelector('.msg-translation'))

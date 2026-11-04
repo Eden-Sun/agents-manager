@@ -278,7 +278,10 @@ const PlainBubble = memo(function PlainBubble({
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>{t('（空白訊息）')}</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          <SafeMarkdown text={msg.content} botId={msg.bot_id} />
+          // 譯文與原文同一個泡泡翻面切換（`useMessageTranslation`）；key 換了就重播翻面動畫。
+          <div key={translation.flip ?? 'orig'} className={translation.flip ? 'msg-flip' : undefined}>
+            {translation.content ?? <SafeMarkdown text={msg.content} botId={msg.bot_id} />}
+          </div>
         ) : folded && preview ? (
           preview.text
         ) : (
@@ -287,7 +290,6 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
-      {translation.body}
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? t('收合') : t('展開全文')}
