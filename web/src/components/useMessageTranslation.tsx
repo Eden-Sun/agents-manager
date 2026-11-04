@@ -5,6 +5,7 @@ import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
+import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
 
 type State = { status: 'idle' | 'loading' | 'error' } | { status: 'done'; text: string; show: boolean }
 
@@ -16,7 +17,9 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
   const t = useT()
   const [st, setSt] = useState<State>({ status: 'idle' })
   const eligible = msg.role === 'assistant' && !msg.rewound_at && msg.source !== 'terminal_fallback' && isMostlyEnglish(msg.content)
+  const ready = useTranslateReady(eligible)
   if (!eligible) return { button: null, body: null }
+  const off = ready && !ready.ok ? ready : null
 
   const run = () => {
     setSt({ status: 'loading' })
@@ -24,6 +27,7 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
       (r) => setSt({ status: 'done', text: r.translation, show: true }),
       (e: unknown) => {
         setSt({ status: 'error' })
+        resetTranslateReady()
         const reason = e instanceof Error ? e.message : String(e)
         // 未設定時直接講去哪裡開，不丟錯誤碼。
         useStore.getState().notify('error', reason.includes('claude_api_not_configured')
@@ -32,12 +36,14 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
       },
     )
   }
-  const onClick =
-    st.status === 'done' ? () => setSt({ ...st, show: !st.show }) : st.status === 'loading' ? undefined : run
-  const label = st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('隱藏譯文') : t('顯示譯文')) : t('翻譯')
+  // 未啟用：按鈕照樣在（找得到這個功能），標「未啟用」，按了只提示去哪裡開，不打 API。
+  const onClick = off
+    ? () => useStore.getState().notify('info', t.tr(off.reason))
+    : st.status === 'done' ? () => setSt({ ...st, show: !st.show }) : st.status === 'loading' ? undefined : run
+  const label = off ? t('翻譯（未啟用）') : st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('隱藏譯文') : t('顯示譯文')) : t('翻譯')
   return {
     button: (
-      <button type="button" className="msg-translate" disabled={st.status === 'loading'} onClick={onClick} title={t('用 Claude 翻成繁體中文')}>
+      <button type="button" className={`msg-translate${off ? ' off' : ''}`} disabled={st.status === 'loading'} onClick={onClick} title={off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')}>
         {label}
       </button>
     ),
