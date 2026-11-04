@@ -148,7 +148,6 @@
 
 .bot-row.expert-member .bot-sub .model-tag,
 .bot-row.expert-member .bot-sub .identity-badge,
-.bot-row.expert-member .bot-sub .bot-track-tag,
 .bot-row.expert-member .bot-sub .bot-deputy-tag,
 .bot-row.expert-member .bot-sub .bot-quota-chip {
   height: 18px;
@@ -185,8 +184,7 @@
   .bot-row.expert-member .bot-sub,
   .bot-row.expert-member .bot-sub .model-tag,
   .bot-row.expert-member .bot-sub .identity-badge,
-  .bot-row.expert-member .bot-sub .bot-track-tag,
-  .bot-row.expert-member .bot-sub .bot-deputy-tag,
+    .bot-row.expert-member .bot-sub .bot-deputy-tag,
   .bot-row.expert-member .bot-sub .bot-quota-chip {
     height: 20px;
     max-height: 20px;
@@ -247,27 +245,6 @@
   background: color-mix(in srgb, var(--lamp-blue) 16%, var(--bg-panel));
   color: var(--accent-ink);
   border: 1px solid color-mix(in srgb, var(--lamp-blue) 34%, transparent);
-}
-
-/* 專家的 track：第二行（模型標籤前面）的一顆小標，高度與模型／身份標籤一致，不靠名字框寬度。 */
-.bot-sub .bot-track-tag {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  max-width: 9em;
-  padding: 0 6px;
-  box-sizing: border-box;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--lamp-blue) 34%, transparent);
-  background: color-mix(in srgb, var(--lamp-blue) 14%, var(--bg-panel));
-  color: var(--accent-ink);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .bot-role-tag.role-advisor {
