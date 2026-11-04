@@ -402,5 +402,9 @@ export default {
   '顯示譯文': 'Show translation',
   '用 Claude 翻成繁體中文': 'Translate to Traditional Chinese with Claude',
   '翻譯失敗：{reason}': 'Translation failed: {reason}',
+  '翻譯（未啟用）': 'Translate (off)',
+  'Claude API 總開關沒開：到「環境設定 → Claude API」打開': 'The Claude API master switch is off: turn it on in Settings → Claude API',
+  'Claude API key 還沒設定：到「環境設定 → Claude API」設定': 'No Claude API key yet: set it in Settings → Claude API',
+  '「對話訊息翻譯」被關掉了：到「環境設定 → Claude API」打開': '"Message translation" is turned off: turn it on in Settings → Claude API',
   '翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定': 'Translation is off: in Settings → Claude API, turn on the master switch and "Message translation", and check the API key',
 } satisfies Dict

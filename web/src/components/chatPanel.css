@@ -1088,6 +1088,11 @@
   color: var(--text-faint);
   cursor: pointer;
 }
+/* 未啟用：看得到功能在，但一眼知道還不能用；按了只提示去哪裡開。 */
+.msg-translate.off {
+  opacity: 0.7;
+  font-style: italic;
+}
 .msg-translate:hover:not(:disabled) {
   color: var(--text);
   text-decoration: underline;

@@ -6,9 +6,13 @@ import assert from 'node:assert/strict'
 import { click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { Message } from '../api/types'
 import { useMessageTranslation } from './useMessageTranslation'
+import { resetTranslateReady } from './useTranslateReady'
 
 before(setupDom)
-afterEach(unmountAll)
+afterEach(async () => {
+  await unmountAll()
+  resetTranslateReady()
+})
 after(teardownDom)
 
 const msg = (content: string, over: Partial<Message> = {}): Message => ({
@@ -26,9 +30,12 @@ function Probe({ m }: { m: Message }) {
   )
 }
 
+const SETTINGS_ON = { enabled: true, key_present: true, key_error: null, models: [], efforts: [], uses: [{ id: 'message_translate', enabled: true }] }
+
 const EN = 'I fixed the bug in the parser and added a regression test for it.'
 
 test('英文訊息有「翻譯」鈕，中文與 user 訊息沒有', async () => {
+  fakeApi((r) => (r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
   assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯')
   await unmountAll()
@@ -40,7 +47,7 @@ test('英文訊息有「翻譯」鈕，中文與 user 訊息沒有', async () =>
 })
 
 test('點了：打 POST /messages/:id/translate，譯文出現在下方，按鈕可切換隱藏／顯示', async () => {
-  const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false } : {}))
+  const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
   await click(document.querySelector('.msg-translate')!)
   await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
@@ -54,4 +61,14 @@ test('點了：打 POST /messages/:id/translate，譯文出現在下方，按鈕
   await click(document.querySelector('.msg-translate')!)
   assert.ok(document.querySelector('.msg-translation'))
   assert.equal(reqs.length, before, '切換不再打 API')
+})
+
+test('未啟用：按鈕事先標「翻譯（未啟用）」，按了只提示、不打翻譯 API', async () => {
+  const reqs = fakeApi((r) => (r.path.endsWith('/claude-api/settings') ? { ...SETTINGS_ON, uses: [{ id: 'message_translate', enabled: false }] } : {}))
+  await mount(<Probe m={msg(EN)} />)
+  await until(() => document.querySelector('.msg-translate.off') !== null, '標成未啟用')
+  assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯（未啟用）')
+  assert.match(document.querySelector('.msg-translate')?.getAttribute('title') ?? '', /對話訊息翻譯/)
+  await click(document.querySelector('.msg-translate')!)
+  assert.ok(!reqs.some((r) => r.path.includes('/translate')), '沒有打翻譯 API')
 })
