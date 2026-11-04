@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { TerminalSnapshot } from '../api/types'
 import { splitCodexTerminalFooter, type CodexTerminalFooter } from '../lib/codexTerminalFooter'
+import { stripAnsi } from '../lib/ansiSgr'
 import { useStore, type StoreState } from '../store/store'
 
 export function terminalFooterFor(s: StoreState, botId: string | null): CodexTerminalFooter | null {
@@ -17,7 +18,8 @@ export function useCodexTerminalFooter(botId: string, snap: TerminalSnapshot | n
   if (seen.snap !== snap) setSeen({ snap, runId })
   const current = snap?.run_id !== undefined ? snap.run_id === runId : seen.snap !== snap || seen.runId === runId
   const text = snap?.text ?? ''
-  const parsed = useMemo(() => kind === 'codex' ? splitCodexTerminalFooter(text) : { body: text, footer: null }, [kind, text])
+  // 快照可能帶 ANSI 色碼（終端分頁上色）：footer 用去色的文字認，畫面照樣拿原文。
+  const parsed = useMemo(() => ({ body: text, footer: kind === 'codex' ? splitCodexTerminalFooter(stripAnsi(text)).footer : null }), [kind, text])
   const footer = current ? parsed.footer : null
   useEffect(() => {
     const view = { botId, runId, footer }

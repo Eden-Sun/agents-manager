@@ -5,7 +5,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
-import { linkifyTerm } from './termLinks'
+import { AnsiTerm } from './AnsiTerm'
 import { setTermWrap, useTermWrap } from './termWrap'
 import './terminalTab.css'
 
@@ -20,7 +20,8 @@ const AUTO_REFRESH_WORKING_MS = 1000
 
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
-  return text.replace(/\n[ \t]*(?:\n[ \t]*)+/g, '\n\n')
+  // 只有空白（或只剩 SGR 色碼）的列都算空列：上色的快照裡空列常帶著重設碼。
+  return text.replace(/\n(?:[ \t]|\x1b\[[0-9;:]*m)*(?:\n(?:[ \t]|\x1b\[[0-9;:]*m)*)+/g, '\n\n')
 }
 
 /** SPEC §3.2: read-only `recent_unwrapped` snapshot, auto-refreshed every 3s plus a manual button (no xterm.js). */
@@ -54,7 +55,7 @@ export function TerminalTab({ botId }: { botId: string }) {
     inFlight.current = true
     if (!quiet) setLoading(true)
     try {
-      const next = await readTerminal(botId, 'recent_unwrapped', lines)
+      const next = await readTerminal(botId, 'recent_unwrapped', lines, 'ansi')
       if (mine !== gen.current) return
       setSnap(next)
       setErr(null)
@@ -159,7 +160,7 @@ export function TerminalTab({ botId }: { botId: string }) {
           {t('換行')}
         </label>
         <span className="spacer" />
-        <span className="hint term-bar-note">{t('唯讀快照，每 3 秒自動更新')}</span>
+        <span className="hint term-bar-note">{t('唯讀快照，工作中每秒、閒置每 3 秒自動更新')}</span>
       </div>
       {narrow ? (
         <div className="term-warn" role="status">
@@ -201,7 +202,7 @@ export function TerminalTab({ botId }: { botId: string }) {
         </div>
       ) : null}
       {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
-      <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
+      <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}><AnsiTerm text={body} columns={snap?.columns} /></pre>
     </div>
   )
 }

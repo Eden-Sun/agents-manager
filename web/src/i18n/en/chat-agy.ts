@@ -278,7 +278,7 @@ const dict: Dict = {
   "壓縮空行": "Collapse blank lines",
   "折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。": "With wrapping on, TUI borders and alignment break, but every line stays readable. With it off, lines stay as they are and you scroll sideways to see the right half.",
   "換行": "Wrap",
-  "唯讀快照，每 3 秒自動更新": "Read-only snapshot, refreshed automatically every 3 seconds",
+  "唯讀快照，工作中每秒、閒置每 3 秒自動更新": "Read-only snapshot, refreshed every second while working, every 3 seconds when idle",
   "這個 pane 只有 {cols} 欄，agent 的輸出在終端就被折成碎片，任何解析都還原不回來。同一個分頁裡的 pane 互搶寬度，把這個 bot 移到自己的分頁就能獨佔整個 workspace 的寬度（拉寬只是把窄的問題推給鄰居，放大也沒用——終端的字元格線是固定的）。hook 取得的回覆不受影響。": "This pane only has {cols} columns; agent output is fragmented in terminal beyond recovery. Panes in the same tab compete for width; moving this bot to its own tab lets it occupy full workspace width (resizing merely shifts constraints to neighbors, zoom doesn't change fixed terminal character grids). Responses retrieved via hooks are unaffected.",
   "移動中…": "Moving…",
   "移到自己的分頁": "Move to own tab",
