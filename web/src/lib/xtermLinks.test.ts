@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { linksOnRow, wrapWidth, type CellRow } from './xtermLinks'
+import { codesOnRow, linksOnRow, wrapWidth, type CellRow } from './xtermLinks'
 
 const cells = (s: string, cols: number): CellRow => [...s.padEnd(cols, ' ')].slice(0, cols)
 
@@ -64,4 +64,18 @@ test('畫面上沒有折行（最寬的列離右邊很遠）：行尾的網址�
   assert.equal(wrapWidth(rows, cols), null)
   const [l] = linksOnRow((i) => rows[i], 0, wrapWidth(rows, cols))
   assert.equal(l.url, 'https://a.example/abc')
+})
+
+test('一次性碼：抓得到起訖格子，日期／hash／純字母不算', () => {
+  const [c] = codesOnRow(cells('   WL4L-OTCJ9', 30), 3)
+  assert.deepEqual(c, { code: 'WL4L-OTCJ9', start: { x: 3, y: 3 }, end: { x: 12, y: 3 } })
+  assert.equal(codesOnRow(cells('code: ABCD-1234.', 30), 0)[0].code, 'ABCD-1234')
+  for (const s of ['2026-11-04', 'TODO-LIST', 'abcd-1234', 'X-ABCD-1234', 'b1ba475ce'])
+    assert.deepEqual(codesOnRow(cells(s, 30), 0), [], s)
+})
+
+test('一次性碼前面有寬字：格子位置照欄算', () => {
+  const row: CellRow = ['碼', '', '：', '', ...'MOCK-7K2Q']
+  const [c] = codesOnRow(row, 0)
+  assert.deepEqual([c.start.x, c.end.x], [4, 12])
 })

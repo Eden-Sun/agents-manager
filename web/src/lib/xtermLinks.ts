@@ -89,3 +89,33 @@ export function linksOnRow(rowAt: (y: number) => CellRow | undefined, y: number,
   }
   return out
 }
+
+export interface FoundCode {
+  code: string
+  start: CellPos
+  /** 含這一格。 */
+  end: CellPos
+}
+
+/**
+ * 登入用的一次性碼（codex 裝置碼 `WL4L-OTCJ9`、gh 的 `ABCD-1234` 之類）：兩段 4～5 個大寫英數字、中間一個 `-`，
+ * 前後不黏英數字或 `-`，且同時有字母和數字（排除 `TODO-LIST`、日期之類）。點了複製用。
+ */
+const CODE_RE = /(?<![A-Za-z0-9-])[A-Z0-9]{4,5}-[A-Z0-9]{4,5}(?![A-Za-z0-9-])/g
+
+export function codesOnRow(row: CellRow, y: number): FoundCode[] {
+  let text = ''
+  const xs: number[] = []
+  row.forEach((ch, x) => {
+    for (const c of ch) {
+      text += c
+      xs.push(x)
+    }
+  })
+  const out: FoundCode[] = []
+  for (const m of text.matchAll(CODE_RE)) {
+    if (!/[A-Z]/.test(m[0]) || !/[0-9]/.test(m[0])) continue
+    out.push({ code: m[0], start: { x: xs[m.index], y }, end: { x: xs[m.index + m[0].length - 1], y } })
+  }
+  return out
+}
