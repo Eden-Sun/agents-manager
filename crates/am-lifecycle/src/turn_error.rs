@@ -367,23 +367,23 @@ pub fn api_error_line(screen: &str) -> Option<String> {
 }
 
 /// 呼叫端要持有 bot lock。回合已被 hook 收掉後也要跑——斷線回合正是 hook 照常送 Stop 的那種。
-pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id: &str) -> Result<()> {
+pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id: &str) -> Result<bool> {
     let db = DbContext::new(app.db().clone());
-    let Some(run) = db::active_run(db.pool(), bot_id).await? else { return Ok(()) };
+    let Some(run) = db::active_run(db.pool(), bot_id).await? else { return Ok(false) };
     if run.id != expected_run_id {
-        return Ok(());
+        return Ok(false);
     }
-    let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
-    let Some(screen) = app.read_run_pane_recent_unwrapped(&run, pane_id, 200).await? else { return Ok(()) };
-    let Some(line) = api_error_line(&screen) else { return Ok(()) };
+    let Some(pane_id) = run.pane_id.as_deref() else { return Ok(false) };
+    let Some(screen) = app.read_run_pane_recent_unwrapped(&run, pane_id, 200).await? else { return Ok(false) };
+    let Some(line) = api_error_line(&screen) else { return Ok(false) };
     // 同一則錯誤只記一次；`arm_progress` 開下一回合時清掉。
     if run.turn_error.as_deref() == Some(line.as_str()) {
-        return Ok(());
+        return Ok(false);
     }
     // 上面那個「只記一次」的標記（`turn_error`）、釘在那一回合上的訊息、收掉在飛的回合，**同一個交易**寫；要讀的全部先讀
     // （#198 同類）。以前標記先寫、後面讀寫一失敗就回錯：下一次擷取被「只記一次」擋掉，訊息沒釘、回合不收（輸入框鎖著），
     // 再也不重來。撞限要記在哪個身份也在這裡讀。
-    let Some(bot) = db::bot(db.pool(), bot_id).await? else { return Ok(()) };
+    let Some(bot) = db::bot(db.pool(), bot_id).await? else { return Ok(false) };
     let conversation_id = db::conversation_id(db.pool(), bot_id).await?;
     let turn = last_turn(&db, &run.id).await?;
     // Codex 0.156 flushes an interrupted/failed stream into its terminal transcript. Keep that
@@ -477,7 +477,7 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
         app.turn_changed(&t).await?;
     }
     app.emit_bot_status(bot_id).await;
-    marked
+    marked.map(|()| true)
 }
 
 /// 新回合開始：上一回合的錯誤是舊的了。寫不進去回錯（#193），呼叫端（progress poller）之後再清：留著的話，這一回合

@@ -1592,8 +1592,10 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
             tracing::debug!(error = ?e, "codex notice capture failed");
         }
         // §4.3a: also classify ended vs cut off by the API, even when the Stop hook already completed it.
-        if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
-            tracing::debug!(error = ?e, "turn error capture failed");
+        match crate::turn_error::capture(&app2, &bot_id, &run_id).await {
+            Ok(true) => super::api_error_nudge::arm(&app2, &bot_id, &run_id).await,
+            Ok(false) => {}
+            Err(e) => tracing::debug!(error = ?e, "turn error capture failed"),
         }
         let mut timers = app2.fallback_timers().lock().await;
         if timers.get(&run_id) == Some(&generation) {

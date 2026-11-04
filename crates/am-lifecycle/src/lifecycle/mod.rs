@@ -106,6 +106,8 @@ pub mod resume_gate;
 pub mod claude_resume_menu;
 /// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
 pub mod resume_nudge;
+/// claude 回合被暫時性 API 錯誤（斷線、529、5xx）截斷時，daemon 補一句續行提示。
+pub mod api_error_nudge;
 /// daemon 自己排進佇列的通知：較短的重試上限、可以撤回（#562）。
 pub use crate::daemon_notice;
 pub use resume_nudge::poke as poke_resume_nudge;
@@ -178,6 +180,7 @@ pub fn retain_bot_state(live: &[String]) {
     interruption::retain_bots(live);
     owed_delivery::retain_bots(live);
     resume_nudge::retain_bots(live);
+    api_error_nudge::retain_bots(live);
     deferred_live::retain_bots(live);
 }
 
