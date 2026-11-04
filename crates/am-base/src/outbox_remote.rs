@@ -129,7 +129,13 @@ pub fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &st
   fd_pid=$(exec /bin/sh -c 'printf "%s\n" "$PPID"') || { exec 4<&-; return 1; }
   case "$fd_pid" in ''|*[!0-9]*) exec 4<&-; return 1 ;; esac
   lsof_out=$("$lsof_bin" -a -p "$fd_pid" -d 3,4 -FfDin 2>/dev/null) || { exec 4<&-; return 1; }
+  # LC_ALL=C 下 lsof 把非 ASCII 位元組印成 `\xNN`（中文檔名，2026-11-04 m4p 分享頁看不到檔案）：期望值也照這個寫法換一份來比。
   ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk -v expected="$expected" '
+    BEGIN {
+      for (i = 128; i < 256; i++) ord[sprintf("%c", i)] = i
+      esc = ""
+      for (i = 1; i <= length(expected); i++) { c = substr(expected, i, 1); esc = esc ((c in ord) ? sprintf("\\x%02x", ord[c]) : c) }
+    }
     /^f3$/ || /^f3[^0-9]/ { if (seen3++) bad=1; fd=3; next }
     /^f4$/ || /^f4[^0-9]/ { if (seen4++) bad=1; fd=4; next }
     /^f[0-9]/ { bad=1; fd=0; next }
@@ -140,7 +146,7 @@ pub fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &st
       if (seen3 == 1 && seen4 == 1 && !bad && seen_dev[3] == 1 && seen_ino[3] == 1 && seen_name[3] == 1 &&
           seen_dev[4] == 1 && seen_ino[4] == 1 && seen_name[4] == 1 &&
           dev[3] ~ /^0x[[:xdigit:]]+$/ && dev[4] ~ /^0x[[:xdigit:]]+$/ && ino[3] ~ /^[0-9]+$/ && ino[4] ~ /^[0-9]+$/ &&
-          dev[3] == dev[4] && ino[3] == ino[4] && name[3] == expected && name[4] == expected) print "same"
+          dev[3] == dev[4] && ino[3] == ino[4] && (name[3] == expected || name[3] == esc) && (name[4] == expected || name[4] == esc)) print "same"
       else exit 1
     }')
   ok=$?

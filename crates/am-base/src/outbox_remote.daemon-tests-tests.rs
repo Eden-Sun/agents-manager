@@ -858,6 +858,38 @@ exit 1
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// macOS 的 lsof 在 LC_ALL=C 下把中文檔名印成 `\xNN`（2026-11-04 m4p 分享頁看不到 `欣亞_….xlsx`）：照樣認得是同一個檔。
+    #[test]
+    fn macos_lsof_escaped_non_ascii_names_still_match() {
+        use std::os::unix::fs::MetadataExt;
+        let base = sandbox("lsof-escaped");
+        let d = base.join("outbox");
+        let name = "欣亞_T.xlsx";
+        std::fs::write(d.join(name), b"PK").unwrap();
+        let physical = std::fs::canonicalize(&d).unwrap();
+        let meta = std::fs::metadata(d.join(name)).unwrap();
+        let escaped: String = format!("{}/{name}", physical.to_string_lossy())
+            .bytes()
+            .map(|b| if b >= 0x80 { format!("\\x{b:02x}") } else { (b as char).to_string() })
+            .collect();
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("lsof");
+        let rec = format!("D0x{dev:x}\ni{ino}\nn{escaped}", dev = meta.dev(), ino = meta.ino());
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' p1 f3 '{rec}' f4 '{rec}'\n", rec = rec.replace('\n', "' '"))).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let helpers = file_identity_helpers_with_paths(&fake.to_string_lossy(), "/missing/fallback-lsof");
+        let script = format!(
+            "LC_ALL=C; export LC_ALL\nD={};\n{}\nam_enter_dir || exit 1\nF=./{name}; G=;\n{}\nexec 3< \"$F\"\nif am_same; then echo same; else echo unverified; fi\n",
+            sh_quote(&physical.to_string_lossy()),
+            directory_identity_helpers(),
+            helpers,
+        );
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "same", "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// 分享用 bot（#955、#850）的遠端 outbox 走保留政策：列表腳本**不刪任何檔**，其餘的列舉與擋法跟一般的一模一樣。
     #[test]
     fn the_share_bots_listing_script_never_deletes_while_the_normal_one_still_does() {
