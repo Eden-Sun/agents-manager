@@ -8,7 +8,8 @@
 //! - **停在等人的畫面不催**：`blocked`＝確認框、問卷、額度選單。那一步只有人能決定（#423：不准自動按），叫模型
 //!   「接著把原本的工作做完」等於替人做了那個決定。
 //! - **不是外力收掉的不催**：上一回合是被 API 錯誤收掉的（撞額度等，`runs.turn_error`）、或使用者剛從網頁中斷過
-//!   （`interrupt_grace` 記的接管時刻落在這個 run 裡）——那是有人或有原因叫它停的，不替它續做。
+//!   （`interrupt_grace` 記的接管時刻落在這個 run 裡）——那是有人或有原因叫它停的，不替它續做。暫時性斷線（`Connection lost`、529、5xx）
+//!   例外，由 `api_error_nudge` 在同一個 run 裡處理。
 //! - **尾巴要是被砍的工具**（[`ends_mid_tool`]）：要接回的 transcript 結尾是沒有結果的 `tool_use`（herdr 砍 pane），
 //!   或是 `tool_result`（daemon／SIGTERM，實測 exit 137）且其後沒有模型回覆。正常的模型回覆、使用者打的字（含
 //!   `[Request interrupted by user…]`）、空檔、讀不到的，都不補。檔案照這顆 bot 實際帳號的 `CLAUDE_CONFIG_DIR` 找

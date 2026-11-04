@@ -53,6 +53,7 @@ fn interrupt_holds() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
 
 /// 使用者剛從網頁按了 interrupt／強制中止：從現在起，這顆 bot 排著的派工要等它連續 idle 滿寬限才送。
 pub fn note_user_interrupt(bot_id: &str) {
+    super::api_error_nudge::cancel(bot_id);
     note_user_interrupt_at(bot_id, Utc::now());
 }
 

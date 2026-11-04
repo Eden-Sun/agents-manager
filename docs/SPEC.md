@@ -752,6 +752,13 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **清除**：下一回合開始（`arm_progress`）設回 NULL 並推 `bot_status`。寫不進去就由那一回合的輪詢器再清（#193）：留著的話，
   這一回合斷在同一句錯誤上會被「同一行只記一次」吞掉。
 - UI：側欄「⚠ 中斷」、標題列紅 chip，點開看原文與「重送上一則」（走既有 prompt API）。浮層是 `role="dialog"`：打開時焦點進浮層，Esc 或重送成功收起時焦點回到徽章鈕（#1590）。
+- **暫時性 API 錯誤自動續行**（`api_error_nudge.rs`，2026-11-04）：kind=claude（本機、遠端皆可，只靠畫面與 DB）的回合被**暫時性**錯誤截斷時，
+  `capture` 之後 daemon 在記憶體 arm 一個等待，30 秒後才確認。暫時性＝`Connection lost`／`connection error`／`Overloaded`／529／500／502／503／504／
+  `timeout`／`timed out`／`ECONNRESET`；額度撞限、模型滿載、資安過濾、任何 4xx（400／401／403／404／429、`invalid_request`）一律不補。
+  30 秒後仍是同一個 run、`running`、畫面 idle（不是 working／blocked）、`turn_error` 還在、沒有回合在飛、佇列空、被截斷的回合仍是這個 run 的最後一回合
+  （這段期間沒有新回合）、使用者沒有從網頁中斷過，才排一則 queued 回合（`relay_from = daemon`）：「[來自 AG Man daemon] 上一輪回應被 API 斷線截斷（原因摘要）。
+  請先確認最後一個工具的實際結果，再接著把原本的工作做完；如果已經做完，簡短回報即可。」`client_request_id = api-error-nudge:<turn_id>`。
+  同一個被截斷的回合只補一次；補出去的那一輪又被暫時性錯誤截斷時（被截斷回合的 crid 帶此前綴）不再補，避免無限循環。daemon 在等待期間重啟就不補。
 
 Codex 0.156 起，TUI 在回合失敗或被中斷時會把已收到的回答／計畫串流留在終端歷史裡（子代理完成事件也會先結清串流活動）。daemon 在 Codex
 錯誤或確認中斷時，若畫面仍有這一回合可辨識的部分內容，就先存成 `assistant` 訊息（`incomplete = 1`，UI 標「可能不完整」），再存失敗／中斷說明；
