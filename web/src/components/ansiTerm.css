@@ -1,0 +1,72 @@
+/* ANSI 顏色（AnsiTerm）：16 色走 --ansi-0…15，淺色與深色各一組，對比都夠看。
+   深色是 #0e1116（--term-bg）底，所以 0 號（黑）要提亮，不然整段黑字看不見。 */
+:root {
+  --ansi-0: #24272d;
+  --ansi-1: #c4302b;
+  --ansi-2: #2e7d32;
+  --ansi-3: #92600a;
+  --ansi-4: #2d6bd6;
+  --ansi-5: #8a3fb0;
+  --ansi-6: #0e7c84;
+  --ansi-7: #5e6a78;
+  --ansi-8: #6b7685;
+  --ansi-9: #e0443c;
+  --ansi-10: #2a9a4f;
+  --ansi-11: #b07a10;
+  --ansi-12: #3f83ee;
+  --ansi-13: #a65bc8;
+  --ansi-14: #169ba4;
+  --ansi-15: #1b2430;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ansi-0: #4c566a;
+    --ansi-1: #e06c75;
+    --ansi-2: #98c379;
+    --ansi-3: #e5c07b;
+    --ansi-4: #61afef;
+    --ansi-5: #c678dd;
+    --ansi-6: #56b6c2;
+    --ansi-7: #abb2bf;
+    --ansi-8: #7f8a9c;
+    --ansi-9: #f0857d;
+    --ansi-10: #a9d88a;
+    --ansi-11: #f0d28a;
+    --ansi-12: #7cc0ff;
+    --ansi-13: #d89be8;
+    --ansi-14: #78cdd8;
+    --ansi-15: #e5e9f0;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ansi-0: #4c566a;
+  --ansi-1: #e06c75;
+  --ansi-2: #98c379;
+  --ansi-3: #e5c07b;
+  --ansi-4: #61afef;
+  --ansi-5: #c678dd;
+  --ansi-6: #56b6c2;
+  --ansi-7: #abb2bf;
+  --ansi-8: #7f8a9c;
+  --ansi-9: #f0857d;
+  --ansi-10: #a9d88a;
+  --ansi-11: #f0d28a;
+  --ansi-12: #7cc0ff;
+  --ansi-13: #d89be8;
+  --ansi-14: #78cdd8;
+  --ansi-15: #e5e9f0;
+}
+
+.ansi-b { font-weight: 700; }
+.ansi-dim { opacity: 0.6; }
+.ansi-i { font-style: italic; }
+.ansi-u { text-decoration: underline; }
+.ansi-s { text-decoration: line-through; }
+.ansi-u.ansi-s { text-decoration: underline line-through; }
+
+/* 片段裡的網址仍是可點的連結：沿用外層顏色，不被 .term-link 的強調色蓋掉。 */
+.ansi-term .term-link {
+  color: inherit;
+}
