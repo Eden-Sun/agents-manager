@@ -426,9 +426,25 @@ function BotRowImpl({
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
             <KindTag kind={bot.kind} className="bot-kind" fast={fast} />
             <UpdateBadge botId={botId} variant="dot" />
-            {/* 精簡列：身份用小字放在 kind 圖示正下方（2026-10-04 使用者：「在 kind 下就好了」）。 */}
-            {compact && showIdentity ? (
-              <span className="kind-identity">
+          </span>
+          {/* 身份標籤放在 kind 圖示正右邊、名字前面（2026-11-04 使用者：「cc0 移到 kind 圖右邊」；一般列與精簡列相同）。
+              同 CLI 兩帳號靠它分辨；子 bot 用別的帳號時帶警示小字（identity-diverged）。 */}
+          {showIdentity ? (
+            divergedChildren ? (
+              <span
+                className="bot-id-tag identity-diverged"
+                title={t('底下有子 bot 用別的帳號（母 {parent}、子 {count}：{names}）——額度分開算，注意別把那個帳號用光', { parent: bot.identity ?? 'cc0', count: divergedChildren.identities, names: divergedChildren.names })}
+              >
+                <IdentityBadge
+                  name={runningIdentity === undefined ? bot.identity : runningIdentity}
+                  showDefault
+                  kind={bot.kind}
+                  unknown={identityUnknown}
+                />
+                <span className="identity-diverged-mark" aria-hidden="true">{divergedChildren.identities}</span>
+              </span>
+            ) : (
+              <span className="bot-id-tag">
                 <IdentityBadge
                   name={runningIdentity === undefined ? bot.identity : runningIdentity}
                   showDefault
@@ -436,8 +452,8 @@ function BotRowImpl({
                   unknown={identityUnknown}
                 />
               </span>
-            ) : null}
-          </span>
+            )
+          ) : null}
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {/* 分段標題已經寫了角色，列上不再重複小標；只有「待套用」時留著（黃點是要重啟的訊號）。 */}
@@ -474,28 +490,6 @@ function BotRowImpl({
           {isExpertProject && !compact && project?.deputy?.bot_id === bot.id ? <ExpertDeputyTag afterSec={project.deputy.after_sec} /> : null}
           {/* 專家的 track 放在這一行（名字那行被截，塞不下）。 */}
           {isExpertProject && !compact && bot.role === 'specialist' && bot.track ? <ExpertTrackTag track={bot.track} /> : null}
-          {/* 身份一定要標，同 CLI 兩帳號才分得出來。精簡列放在 kind 圖示正下方（上面 bot-kind-wrap），這裡不重複。 */}
-          {!showIdentity || compact ? null : divergedChildren ? (
-            <span
-              className="identity-diverged"
-              title={t('底下有子 bot 用別的帳號（母 {parent}、子 {count}：{names}）——額度分開算，注意別把那個帳號用光', { parent: bot.identity ?? 'cc0', count: divergedChildren.identities, names: divergedChildren.names })}
-            >
-              <IdentityBadge
-                name={runningIdentity === undefined ? bot.identity : runningIdentity}
-                showDefault
-                kind={bot.kind}
-                unknown={identityUnknown}
-              />
-              <span className="identity-diverged-mark" aria-hidden="true">{divergedChildren.identities}</span>
-            </span>
-          ) : (
-            <IdentityBadge
-              name={runningIdentity === undefined ? bot.identity : runningIdentity}
-              showDefault
-              kind={bot.kind}
-              unknown={identityUnknown}
-            />
-          )}
           <ModelTag botId={botId} short={compact} cache />
           {quotaWarning ? (
             <span
