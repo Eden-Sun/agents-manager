@@ -412,6 +412,15 @@ function weekLabel(kind: BotKind): '7d' | '週' { // i18n-ignore
   return kind === 'grok' ? '週' : '7d' // i18n-ignore
 }
 
+/** 手機有倒數的格子：百分比移到 logo 列的資料；沒倒數回 null（照舊寫在第二行）。 */
+function headPctOf(w: WindowBar | undefined, now: number, hit: boolean, t: ReturnType<typeof useT>) {
+  if (!w) return null
+  const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
+  if (!back) return null
+  const text = w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`
+  return { win: w, text, title: w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back }) }
+}
+
 function Gauge({
   entry,
   host,
@@ -504,6 +513,7 @@ function Gauge({
     const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
     return back && w.resetsAt ? [{ name: w.name, back, resetsAt: w.resetsAt, win: w }] : []
   })
+  const headPct = compact ? headPctOf(windows[0], now, hit, t) : null
   const resetLine = compact ? null : resetLineOf(countdownRows, t)
   const resetLineLevel = countdownRows.some((r) => r.win.critical) ? 'crit' : countdownRows.some((r) => r.win.low) ? 'warn' : ''
   const uncapped = !compact && noFiveHourCap(entry.kind, q)
@@ -550,6 +560,12 @@ function Gauge({
             {entry.identity ?? entry.kind}
           </span>
         )}
+        {headPct ? (
+          // 方案 A（2026-11-04 使用者）：有倒數的格子，百分比上移到 logo 列，第二行只剩「窗口＋倒數」，格子不再過寬。
+          <span className={`quota-compact-pct quota-head-pct ${levelOf(headPct.win)}`} title={headPct.title}>
+            {headPct.text}
+          </span>
+        ) : null}
         {entry.kind === 'codex' ? <CodexResetHint now={now} compact={compact} /> : null}
         {/* 開關放左欄名稱下方，整格不會因它變高。 */}
         <StripDisableToggle entry={entry} host={host} />
@@ -577,13 +593,10 @@ function Gauge({
                 {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               {back ? (
-                // 倒數時百分比也留著（2026-10-02 使用者：「雖然現在 7d 已經倒數，也要出現 %」），倒數在前。
-                <>
-                  <span className="quota-reset-at" title={w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back })}>
-                    {back}
-                  </span>
-                  <span className="quota-compact-pct">{w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`}</span>
-                </>
+                // 倒數時百分比也留著（2026-10-02 使用者），但放在 logo 列（headPct），這裡只寫倒數。
+                <span className="quota-reset-at" title={w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back })}>
+                  {back}
+                </span>
               ) : (
                 <span className="quota-compact-pct">{w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`}</span>
               )}

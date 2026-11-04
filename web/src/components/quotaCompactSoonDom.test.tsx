@@ -54,6 +54,10 @@ test('手機：5h 用完 40 分鐘後重置，只寫一次時間（窗口名維�
     assert.equal(win.querySelector('.quota-window-name')?.textContent, '5h', '窗口名不換成剩幾分')
     assert.match(win.querySelector('.quota-reset-at')?.textContent ?? '', /^0h(39|40)$/, '倒數寫一次')
     assert.doesNotMatch(win.textContent ?? '', /\d+m/, '不再出現「40m」')
+    // 方案 A：有倒數時百分比在 logo 列，第二行沒有 %。
+    const head = cellOf('cc0')!.querySelector<HTMLElement>('.quota-head')!
+    assert.match(head.querySelector('.quota-head-pct')?.textContent ?? '', /^(<1|\d+)%$/, '百分比在 logo 列')
+    assert.equal(win.querySelector('.quota-compact-pct'), null, '第二行不再寫百分比')
   } finally {
     restore()
   }
