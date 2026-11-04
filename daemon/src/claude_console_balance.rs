@@ -28,6 +28,11 @@ const TOTAL_BUDGET: Duration = Duration::from_secs(60);
 const CLOSE_BUDGET: Duration = Duration::from_secs(15);
 const POLL_EVERY: Duration = Duration::from_secs(3);
 const MAX_POLLS: usize = 8;
+/// agent-browser 0.x `close` 之後幾秒內，同 session 的下一個指令會因 socket 已刪、背景 daemon 還在收而失敗
+/// （`Failed to connect: No such file or directory`），所以預先 close 後要等一下。
+const POST_CLOSE_WAIT: Duration = Duration::from_secs(3);
+const OPEN_RETRY_EVERY: Duration = Duration::from_secs(2);
+const OPEN_RETRIES: usize = 2;
 
 /// 一筆促銷額度。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -416,6 +421,7 @@ pub async fn fetch_once<R: BrowserRunner>(r: &R, state_path: &Path) -> ConsoleSn
     let deadline = Instant::now() + TOTAL_BUDGET;
     // 前一輪若殘留 session（daemon 被砍），先收掉，不然 --state 不會重新載入。
     let _ = r.run(args(&["--session", SESSION, "close"]), CLOSE_BUDGET).await;
+    tokio::time::sleep(POST_CLOSE_WAIT.min(remaining(deadline))).await;
     let result = fetch_inner(r, state_path, deadline).await;
     if let Err(e) = r.run(args(&["--session", SESSION, "close"]), CLOSE_BUDGET).await {
         tracing::warn!("claude console balance: close failed: {e}");
@@ -431,7 +437,17 @@ pub async fn fetch_once<R: BrowserRunner>(r: &R, state_path: &Path) -> ConsoleSn
 
 async fn fetch_inner<R: BrowserRunner>(r: &R, state_path: &Path, deadline: Instant) -> Result<ParseOutcome, String> {
     let state = state_path.to_string_lossy().into_owned();
-    r.run(args(&["--session", SESSION, "--state", &state, "open", BILLING_URL]), remaining(deadline)).await?;
+    let mut attempt = 0;
+    loop {
+        match r.run(args(&["--session", SESSION, "--state", &state, "open", BILLING_URL]), remaining(deadline)).await {
+            Ok(_) => break,
+            Err(e) if attempt < OPEN_RETRIES && e.contains("Failed to connect") && Instant::now() < deadline => {
+                attempt += 1;
+                tokio::time::sleep(OPEN_RETRY_EVERY.min(remaining(deadline))).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let mut outcome = ParseOutcome::ParseFailed;
     for _ in 0..MAX_POLLS {
         if Instant::now() >= deadline {
