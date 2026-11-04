@@ -44,3 +44,23 @@ test('正開著的那一顆標 aria-current', async () => {
   const b = document.querySelector('.side-pane')!
   assert.equal(b.getAttribute('aria-current'), 'true')
 })
+
+test('shell 列有「複製」：同一台、同一個目錄新開一個；服務 pane、沒有 cwd 的沒有', async () => {
+  const calls: unknown[][] = []
+  const shellPane = { ...pane, cwd: '/home/u/proj' }
+  const svc = { ...pane, pane_id: 'w1:p2', cwd: '/home/u/proj', kind: 'service' as const, listen_ports: [3000] }
+  const bare = { ...pane, pane_id: 'w1:p3' }
+  useStore.setState({
+    sidePanes: { p1: [shellPane, svc, bare] },
+    shellView: null,
+    busy: {},
+    openHostShell: async (...a: unknown[]) => (calls.push(a), true),
+    refreshPanes: async () => {},
+  } as never)
+  await mount(<SidebarPanes projectId="p1" />)
+  const clones = document.querySelectorAll<HTMLButtonElement>('.side-pane-clone')
+  assert.equal(clones.length, 1)
+  clones[0].click()
+  await new Promise((r) => setTimeout(r, 0))
+  assert.deepEqual(calls, [['local', '/home/u/proj']])
+})
