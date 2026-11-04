@@ -2,6 +2,7 @@ import * as api from '../api'
 import { ApiError } from '../api/types'
 import { projectHostName, useStore } from '../store/store'
 import { t } from './i18n'
+import { watchLoginShell } from './loginShellWatch'
 import { cliLoginCommand } from './quotaLogin'
 
 /**
@@ -28,6 +29,8 @@ export async function openFreshShellAndType(host: string, command: string): Prom
       return { opened: false, typed: false }
     }
     // 不動 selectedBotId：shell 掛在目前 bot 標題列底下（同 `store.openHostShell`）。
+    // 呼叫端都是登入：登入成功後自動收掉這顆 pane（`useLoginShellAutoClose`）。
+    watchLoginShell(host, shell.pane_id)
     useStore.getState().viewHostShell(shell)
     try {
       await api.sendHostShellText(host, shell.pane_id, command, true)

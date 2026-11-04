@@ -533,4 +533,6 @@ export default {
   '登入狀態未知': 'Sign-in status unknown',
   '尚未定義任何身份。': 'No identities defined yet.',
   '{name} 的重置券：{from} → {to} 張': '{name} reset credits: {from} → {to}',
+  "登入完成，{s} 秒後自動關閉這個 shell": "Signed in; closing this shell in {s}s",
+  "保留": "Keep",
 } satisfies Dict
