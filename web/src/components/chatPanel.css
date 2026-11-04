@@ -1077,3 +1077,25 @@
 }
 
 .msg-cost { font-size: 11px; color: var(--muted, inherit); opacity: 0.8; margin-inline-start: 6px; }
+
+/* 英文訊息的「翻譯」鈕（TranslateButton）：跟時間同一排、低調的文字鈕。 */
+.msg-translate {
+  flex: none;
+  font-size: 11px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.msg-translate:hover:not(:disabled) {
+  color: var(--text);
+  text-decoration: underline;
+}
+.msg-translate:disabled {
+  cursor: progress;
+}
+.msg-translation {
+  margin-top: 4px;
+  border-left: 2px solid var(--border-strong);
+}

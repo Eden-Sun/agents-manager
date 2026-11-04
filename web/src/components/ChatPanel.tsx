@@ -88,6 +88,7 @@ import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { JevNoticeText } from './JevNoticeText'
 import { SafeMarkdown } from './SafeMarkdown'
+import { useMessageTranslation } from './useMessageTranslation'
 import { TerminalTab } from './TerminalTab'
 import { ApiBotUsageBar } from './ApiBotUsageBar'
 import { ApiBalanceInline } from './ApiBalanceInline'
@@ -209,6 +210,7 @@ const PlainBubble = memo(function PlainBubble({
   )
   // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
+  const translation = useMessageTranslation(msg)
   const [expanded, setExpanded] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
@@ -255,6 +257,7 @@ const PlainBubble = memo(function PlainBubble({
           {msg.rewound_at ? <RewoundTag at={msg.rewound_at} /> : null}
         </div>
         {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
+        {translation.button}
         {msg.role === 'assistant' && msg.bot_id ? <ApiTurnCostTag botId={msg.bot_id} turnId={msg.turn_id} /> : null}
         {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {system ? null : (
@@ -284,6 +287,7 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
+      {translation.body}
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? t('收合') : t('展開全文')}
