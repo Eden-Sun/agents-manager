@@ -45,7 +45,7 @@ import {
 import { ApiError } from '../api/types'
 import { DRAFT_REASON_TEXT, draftBlockFrom, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
-import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
+import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalFormat, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
@@ -582,7 +582,7 @@ export interface StoreState {
   agmDeleteAsk: AgmDeleteAsk | null
   cancelAgmDelete: () => void
   removeProject: (projectId: string) => Promise<void>
-  readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
+  readTerminal: (botId: string, source: TerminalSource, lines: number, format?: TerminalFormat) => ReturnType<typeof api.fetchTerminal>
 
   /** 已有活著的 shell 就接回最新那個，不再多開。false = 沒開起來（原因已跳通知）。 */
   openHostShell: (host: string, cwd?: string) => Promise<boolean>
@@ -2323,7 +2323,7 @@ export const useStore = create<StoreState>((set, get) => {
     })
   },
 
-  readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
+  readTerminal: (botId, source, lines, format) => api.fetchTerminal(botId, source, lines, format),
 
   // 主機 shell
   async openHostShell(host, cwd) {
