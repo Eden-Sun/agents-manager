@@ -326,6 +326,7 @@ pub async fn get_claude_api_balance(
             return Ok(json!({
                 "configured": false,
                 "as_of": as_of,
+                "console": crate::claude_console_balance::current_json(&app).await,
             }));
         }
     };
@@ -337,6 +338,7 @@ pub async fn get_claude_api_balance(
                 "configured": false,
                 "error": format!("invalid balance_anchor_at: {e}"),
                 "as_of": as_of,
+                "console": crate::claude_console_balance::current_json(&app).await,
             }));
         }
     };
@@ -407,6 +409,7 @@ pub async fn get_claude_api_balance(
         "local_since": calc.local_since,
         "breakdown": calc.breakdown,
         "as_of": as_of,
+        "console": crate::claude_console_balance::current_json(&app).await,
     });
 
     if let Some(err) = api_error {

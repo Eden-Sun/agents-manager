@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiBotSpendUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
-import { fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
+import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
+import { balanceTooltipLines } from './balanceTooltip'
 import { fetchClaudeApiCap, putClaudeApiCap, type ClaudeApiCap } from '../api/claudeApiCap'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -103,25 +104,8 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const pending = u.reserved + u.unknown
   const rate = usage.cache_hit_rate
 
-  let balanceTooltip = ''
-  if (balance?.configured && balance.anchor) {
-    const parts = [
-      t('錨點：${usd}（{at}）', { usd: balance.anchor.usd.toFixed(2), at: balance.anchor.at }),
-    ]
-    if (balance.spent_usd !== undefined) {
-      parts.push(t('錨點以來花費：${spent}', { spent: balance.spent_usd.toFixed(4) }))
-    }
-    if (balance.report_through) {
-      parts.push(t('官方報表涵蓋至：{dt}', { dt: balance.report_through }))
-    }
-    if (balance.local_since) {
-      parts.push(t('本機帳計算自：{dt}', { dt: balance.local_since }))
-    }
-    if (balance.error) {
-      parts.push(t('警告：{err}', { err: balance.error }))
-    }
-    balanceTooltip = parts.join('\n')
-  }
+  const bal = balanceView(balance)
+  const balanceTooltip = balanceTooltipLines(balance, bal, t).join('\n')
 
   const isCapExceededOrClose =
     cap?.cap_usd !== null &&
@@ -131,14 +115,18 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
 
   return (
     <span className="api-usage-bar" data-testid="api-usage-bar">
-      {balance?.configured && balance.remaining_usd !== undefined ? (
+      {bal.usd !== undefined || bal.loggedOut ? (
         <span
-          className="sl-item api-balance-chip readonly"
+          className={`sl-item api-balance-chip readonly${bal.expiringSoon || bal.loggedOut ? ' warn' : ''}`}
           data-k="balance"
+          data-source={bal.source}
           title={balanceTooltip}
         >
           <span className="sl-k">Balance</span>
-          <span className="sl-v">≈ ${balance.remaining_usd.toFixed(2)}</span>
+          <span className="sl-v">
+            {bal.usd === undefined ? '—' : `${bal.source === 'console' ? '' : '≈ '}$${bal.usd.toFixed(2)}`}
+            {bal.loggedOut ? ' ⚠' : ''}
+          </span>
         </span>
       ) : null}
 

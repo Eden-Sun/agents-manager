@@ -888,6 +888,15 @@ pub struct ClaudeApiCfg {
     /// 餘額錨點的時間點（RFC3339 字串）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance_anchor_at: Option<String>,
+    /// 定期用 agent-browser 讀 Console Billing 頁的實際餘額（使用者 2026-11-04 核准）。預設開；登入態檔不存在就不跑。
+    #[serde(default = "default_true")]
+    pub console_balance_enabled: bool,
+    /// 讀 Console 餘額的間隔（分鐘），預設 30，最小 5。
+    #[serde(default = "default_console_balance_interval_minutes")]
+    pub console_balance_interval_minutes: u64,
+    /// agent-browser `state save` 格式的登入態檔路徑（內含 cookie，是憑證，只准 0600）。
+    #[serde(default = "default_console_state_file")]
+    pub console_state_file: String,
     #[serde(default, skip_serializing_if = "api_bot::ApiBotCfg::is_default")]
     pub api_bot: api_bot::ApiBotCfg,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -948,6 +957,12 @@ fn default_claude_api_endpoint() -> String {
 fn default_claude_api_timeout_ms() -> u64 {
     60_000
 }
+fn default_console_balance_interval_minutes() -> u64 {
+    30
+}
+fn default_console_state_file() -> String {
+    "~/.config/agents-manager/claude-console-state.json".into()
+}
 
 impl Default for ClaudeApiCfg {
     fn default() -> Self {
@@ -959,6 +974,9 @@ impl Default for ClaudeApiCfg {
             admin_key_file: None,
             balance_anchor_usd: None,
             balance_anchor_at: None,
+            console_balance_enabled: true,
+            console_balance_interval_minutes: default_console_balance_interval_minutes(),
+            console_state_file: default_console_state_file(),
             api_bot: api_bot::ApiBotCfg::default(),
             uses: Default::default(),
         }
