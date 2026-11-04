@@ -1088,6 +1088,15 @@
   color: var(--text-faint);
   cursor: pointer;
 }
+/* 手機：字不變大，點擊範圍撐到 40px 高（觸控目標 ≥ 40px）；負 margin 抵掉，meta 列高度不變。 */
+@media (width <= 640px) {
+  .msg-translate {
+    min-height: 40px;
+    min-width: 44px;
+    padding: 0 10px;
+    margin: -12px 0;
+  }
+}
 /* 譯文下方的費用行：小字、不搶內容。 */
 .msg-translation-cost {
   margin-top: 6px;
