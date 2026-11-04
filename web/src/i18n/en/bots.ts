@@ -351,7 +351,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '例如 infra、ui': 'e.g. infra, ui',
   '負責任務（track）': 'Track',
   '專家必須填負責任務（track），空白不能儲存': 'A specialist needs a track; Save stays disabled while it is blank',
-  '負責任務：{track}': 'Track: {track}',
   '管理者在專案設定中指定': 'Managers are set in project settings',
   '待套用（需重啟）': 'Pending (restart required)',
   '角色設定': 'Role settings',

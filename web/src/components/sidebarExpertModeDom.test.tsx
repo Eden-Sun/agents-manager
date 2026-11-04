@@ -103,8 +103,8 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   for (const id of ['exp-mgr', 'exp-adv', 'exp-spec']) {
     assert.equal(expSection.querySelector(`[data-bot-id="${id}"] .bot-role-tag`), null, `${id} 不應有角色短標`)
   }
-  assert.equal(expSection.querySelector('[data-bot-id="exp-spec"] .bot-track-tag')?.textContent?.trim(), 'infra', '專家顯示 track')
-  assert.equal(expSection.querySelector('[data-bot-id="exp-adv"] .bot-track-tag'), null, '非專家不顯示 track')
+  // 側欄不顯示專家的 track（2026-11-04 使用者）
+  assert.equal(expSection.querySelector('.bot-track-tag'), null, '側欄不顯示 track')
 
   const execTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-exec"] .bot-role-tag')
   assert.ok(execTag, '執行者 bot 應有角色短標')

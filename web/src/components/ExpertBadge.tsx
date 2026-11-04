@@ -82,11 +82,6 @@ export function ExpertRoleTag({
   )
 }
 
-/** 專家（specialist）負責的軌道：名字旁的灰色小字。 */
-export function ExpertTrackTag({ track }: { track: string }) {
-  return <span className="bot-track-tag" title={t('負責任務：{track}', { track })}>{track}</span>
-}
-
 /** 副管理者：成員列第二行的小標。 */
 export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
   useT()

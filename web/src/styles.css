@@ -762,7 +762,7 @@ button:disabled {
 
 .bot-row.quota-critical .lamp,
 .bot-row.quota-critical .bot-kind,
-.bot-row.quota-critical .bot-id-tag,
+.bot-row.quota-critical .kind-identity,
 .bot-row.quota-critical .bot-actions {
   opacity: 0.5;
   filter: saturate(0.35);

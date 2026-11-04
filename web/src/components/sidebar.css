@@ -795,27 +795,41 @@ p.project-quota-hidden {
   margin-left: 0;
 }
 
-/* 身份標籤在 kind 圖示正右邊、名字前面（2026-11-04 使用者：「cc0 移到 kind 圖右邊」，取代 2026-10-04 的「kind 下」）。
-   小字、無框、不換行；名字那格照舊 ellipsis。一般列與子 agent 精簡列相同。 */
-.bot-id-tag {
-  flex: none;
+/* 身份標籤在 kind 圖示正下方（2026-11-04 使用者：「再改 cc0 放回 logo 圖下面」；一般列與子 agent 精簡列相同，
+   取代同日稍早的「kind 右邊」）。小字、無框、置中、不換行。 */
+.bot-kind-wrap {
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.kind-identity {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 2px;
+  line-height: 9px;
   white-space: nowrap;
 }
 
-.bot-id-tag .identity-badge {
+.kind-identity .identity-badge {
   display: inline;
   height: auto;
   max-height: none;
   padding: 0;
   border: 0;
   background: none;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 8.5px;
+  line-height: 9px;
   color: var(--text-dim);
   white-space: nowrap;
+}
+
+/* 精簡列：kind 18px＋身份 9px 要塞進 32px 列高，中段上下留白從 5px 收到 2px（更新記號仍凸得出去）。
+   `.compact.compact`：main 的 styles.css 比這支晚載入，同權重的舊規則會蓋過來。 */
+.bot-row.compact.compact .bot-main {
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 
 /* 第二行拿掉身份後沒有內容就不留空行。 */
