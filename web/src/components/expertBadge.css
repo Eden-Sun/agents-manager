@@ -447,3 +447,29 @@
   margin-left: 12px;
   border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
+
+/*
+ * 有滑鼠的裝置：勾選框平常不佔欄位，滑過（或鍵盤焦點進到）那一列才浮在燈號上方（使用者 2026-11-04：
+ * 「都用 checkbox 佔畫面，動作只要 hover 時 show」）。平常只看得到沒勾那幾列的「停用」標記。
+ * 觸控裝置沒有 hover，維持原本常駐的左欄。
+ */
+@media (hover: hover) {
+  .bot-row.expert-member > .bot-manager-use-wrap,
+  .bot-row.bot-cluster-row > .bot-manager-use-wrap {
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    z-index: 1;
+    transform: translateY(-50%);
+    border-radius: 4px;
+    background: inherit;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .bot-row.expert-member:is(:hover, :focus-within) > .bot-manager-use-wrap,
+  .bot-row.bot-cluster-row:is(:hover, :focus-within) > .bot-manager-use-wrap {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
