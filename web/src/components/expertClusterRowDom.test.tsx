@@ -101,6 +101,27 @@ test('展開：顯示成員且各自有勾選框，狀態記在 localStorage', a
   assert.equal(window.localStorage.getItem('agm.expertCluster.p1.haiku'), '1')
 })
 
+test('整組勾選在列的最左，跟成員列同一欄，已勾仍可取消', async () => {
+  seed()
+  await mount(<Sidebar />)
+  await settle()
+  const row = clusterRow()!
+  const wrap = row.querySelector('.bot-manager-use-wrap')!
+  const main = row.querySelector('.bot-cluster-main')!
+  assert.equal(row.firstElementChild, wrap, '勾選框是列的第一個子元素')
+  assert.ok((wrap.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)
+  const box = wrap.querySelector('input')!
+  assert.equal(box.checked, true)
+  assert.equal(box.disabled, false, '群集框不鎖，全勾仍可關掉')
+  assert.equal(box.classList.contains('is-locked'), false)
+
+  await click(row.querySelector('.bot-cluster-main')!)
+  await settle()
+  const member = document.querySelector<HTMLElement>('.bot-cluster-members .bot-row')!
+  const memberWrap = member.querySelector('.bot-manager-use-wrap')!
+  assert.equal(member.firstElementChild, memberWrap, '成員列的勾選框也在最左')
+})
+
 test('整組勾選：全勾 → 取消送 3 個 PATCH manager_use=false', async () => {
   seed()
   await mount(<Sidebar />)
