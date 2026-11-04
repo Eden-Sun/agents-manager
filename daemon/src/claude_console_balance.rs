@@ -342,11 +342,29 @@ impl RealRunner {
     }
 }
 
+/// agent-browser 常是 symlink 到 node 腳本（shebang `env node`），daemon 的 PATH 不一定有 node 所在目錄；
+/// 把執行檔 canonicalize 後的所在目錄放到子行程 PATH 最前面（原 PATH 接後面）。純函式，方便測。
+fn child_path(bin_dir: Option<&Path>, orig: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
+    let dir = bin_dir?;
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(o) = orig {
+        paths.extend(std::env::split_paths(o).filter(|p| p != dir));
+    }
+    std::env::join_paths(paths).ok()
+}
+
+fn exe_bin_dir(exe: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(exe).ok()?.parent().map(Path::to_path_buf)
+}
+
 impl BrowserRunner for RealRunner {
     fn run(&self, args: Vec<String>, timeout: Duration) -> impl Future<Output = Result<String, String>> + Send {
         let exe = self.exe.clone();
         async move {
-            let mut cmd = tokio::process::Command::new(exe);
+            let mut cmd = tokio::process::Command::new(&exe);
+            if let Some(p) = child_path(exe_bin_dir(&exe).as_deref(), std::env::var_os("PATH").as_deref()) {
+                cmd.env("PATH", p);
+            }
             cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
             let out = tokio::time::timeout(timeout, cmd.output()).await.map_err(|_| "agent-browser timed out".to_string())?.map_err(|e| format!("agent-browser spawn failed: {e}"))?;
             if !out.status.success() {

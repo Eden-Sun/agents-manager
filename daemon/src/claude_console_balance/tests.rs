@@ -224,3 +224,21 @@ async fn bad_saved_state_keeps_original_file() {
     assert_eq!(snap.status, Status::Ok);
     assert!(std::fs::read_to_string(&p).unwrap().contains("old"));
 }
+
+#[test]
+fn child_path_puts_exe_dir_first() {
+    let orig = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+    let p = child_path(Some(Path::new("/opt/node/bin")), Some(&orig)).unwrap();
+    let v: Vec<PathBuf> = std::env::split_paths(&p).collect();
+    assert_eq!(v, vec![PathBuf::from("/opt/node/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+}
+
+#[test]
+fn child_path_dedups_and_handles_missing() {
+    let orig = std::env::join_paths(["/usr/bin", "/opt/node/bin"]).unwrap();
+    let p = child_path(Some(Path::new("/opt/node/bin")), Some(&orig)).unwrap();
+    let v: Vec<PathBuf> = std::env::split_paths(&p).collect();
+    assert_eq!(v, vec![PathBuf::from("/opt/node/bin"), PathBuf::from("/usr/bin")]);
+    assert_eq!(std::env::split_paths(&child_path(Some(Path::new("/x")), None).unwrap()).count(), 1);
+    assert!(child_path(None, Some(&orig)).is_none());
+}
