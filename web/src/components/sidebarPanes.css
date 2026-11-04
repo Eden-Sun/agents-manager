@@ -8,8 +8,52 @@
   padding: 2px 8px 6px 26px;
 }
 
+.side-pane-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* 複製鍵：桌面滑過那一列才出現（不搶標籤的位置），觸控裝置沒有 hover，一直顯示。 */
+.side-pane-clone {
+  flex: none;
+  margin-left: 2px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.side-pane-wrap:hover .side-pane-clone,
+.side-pane-clone:focus-visible {
+  opacity: 1;
+}
+
+.side-pane-clone:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.side-pane-clone:disabled {
+  cursor: progress;
+}
+
+@media (hover: none) {
+  .side-pane-clone {
+    opacity: 1;
+    padding: 4px 8px;
+  }
+}
+
 .side-pane {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
   width: 100%;
