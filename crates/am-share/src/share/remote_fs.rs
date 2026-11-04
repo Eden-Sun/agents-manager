@@ -212,9 +212,14 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
 
 // ───────────────────── 純函式：腳本產生器與解析器 ─────────────────────
 
+/// 遠端分享腳本用的 lsof（macOS 的位置）。
+pub const SHARE_LSOF: &str = "/usr/sbin/lsof";
+
 pub fn script_common_header() -> String {
     let dir_helpers = am_base::outbox_remote::directory_identity_helpers();
-    let file_helpers = am_base::outbox_remote::file_identity_helpers("/usr/bin/lsof");
+    // macOS 的 lsof 在 /usr/sbin（/usr/bin 沒有）：寫錯的話 BSD 那條身份檢查每個檔都失敗，分享頁的檔案清單永遠是空的
+    // （2026-11-04 m4p 實測）。Linux 走 /proc，不用 lsof；`file_identity_helpers` 自己再退回 /usr/bin/lsof。
+    let file_helpers = am_base::outbox_remote::file_identity_helpers(SHARE_LSOF);
     format!(
         r#"umask 077
 LC_ALL=C; export LC_ALL
