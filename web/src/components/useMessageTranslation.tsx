@@ -24,7 +24,11 @@ export function useMessageTranslation(msg: Message): { button: React.ReactNode; 
       (r) => setSt({ status: 'done', text: r.translation, show: true }),
       (e: unknown) => {
         setSt({ status: 'error' })
-        useStore.getState().notify('error', t('翻譯失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) }))
+        const reason = e instanceof Error ? e.message : String(e)
+        // 未設定時直接講去哪裡開，不丟錯誤碼。
+        useStore.getState().notify('error', reason.includes('claude_api_not_configured')
+          ? t('翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定')
+          : t('翻譯失敗：{reason}', { reason }))
       },
     )
   }

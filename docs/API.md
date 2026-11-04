@@ -2708,7 +2708,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 ## 對話訊息翻譯 `POST /api/messages/{id}/translate`
 
-User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，要在設定頁 `[claude_api]` 打開總開關與這個用途）。
+User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，受 `[claude_api]` 總開關管；這個用途沒寫設定時預設開，`[claude_api.uses.message_translate] enabled = false` 才關）。
 prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、指令、識別字、commit hash 原樣不翻，只回譯文。
 `200 {"translation", "model", "cached", "usage"?}`：快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
 錯誤：404 `not_found`（沒這則訊息）；400（不是 assistant 或空訊息）；422 `message_too_long`（超過 20000 字）；409 `claude_api_not_configured`（沒開或沒 key）；502（`translate_failed: …`，API 失敗、被限流、逾時）。
