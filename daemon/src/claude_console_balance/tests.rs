@@ -111,12 +111,14 @@ struct FakeRunner {
     calls: StdMutex<Vec<Vec<String>>>,
     text: Result<String, String>,
     open_err: Option<String>,
+    /// 依序消耗：每次 open 先從這裡取一個錯誤回；空了才看 `open_err`。
+    open_errs_once: StdMutex<Vec<String>>,
     saved: Option<String>,
 }
 
 impl FakeRunner {
     fn new(text: Result<String, String>) -> Self {
-        Self { calls: StdMutex::new(Vec::new()), text, open_err: None, saved: Some(r#"{"cookies":[{"name":"fresh"}]}"#.into()) }
+        Self { calls: StdMutex::new(Vec::new()), text, open_err: None, open_errs_once: StdMutex::new(Vec::new()), saved: Some(r#"{"cookies":[{"name":"fresh"}]}"#.into()) }
     }
     fn count(&self, word: &str) -> usize {
         self.calls.lock().unwrap().iter().filter(|c| c.iter().any(|a| a == word)).count()
@@ -127,7 +129,11 @@ impl BrowserRunner for FakeRunner {
     fn run(&self, a: Vec<String>, _t: Duration) -> impl Future<Output = Result<String, String>> + Send {
         self.calls.lock().unwrap().push(a.clone());
         let res = if a.iter().any(|x| x == "open") {
-            self.open_err.clone().map_or(Ok(String::new()), Err)
+            let once = { let mut q = self.open_errs_once.lock().unwrap(); if q.is_empty() { None } else { Some(q.remove(0)) } };
+            match once {
+                Some(e) => Err(e),
+                None => self.open_err.clone().map_or(Ok(String::new()), Err),
+            }
         } else if a.iter().any(|x| x == "text") {
             self.text.clone()
         } else if a.iter().any(|x| x == "save") {
@@ -188,6 +194,40 @@ async fn open_failure_still_closes() {
     assert_eq!(snap.status, Status::Error);
     assert_eq!(snap.error.as_deref(), Some("boom"));
     assert_eq!(r.count("close"), 2);
+}
+
+const CONNECT_ERR: &str = "✗ Could not configure browser: Failed to connect: No such file or directory (os error 2)";
+
+#[tokio::test(start_paused = true)]
+async fn open_retries_on_failed_to_connect_then_succeeds() {
+    let (_d, p) = state_dir(r#"{"cookies":[{"name":"old"}]}"#);
+    let r = FakeRunner::new(Ok(EN_PAGE.into()));
+    r.open_errs_once.lock().unwrap().push(CONNECT_ERR.into());
+    let snap = fetch_once(&r, &p).await;
+    assert_eq!(snap.status, Status::Ok);
+    assert_eq!(r.count("open"), 2);
+    assert_eq!(r.count("close"), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_connect_failures_exhaust_retries_and_still_close() {
+    let (_d, p) = state_dir("{}");
+    let mut r = FakeRunner::new(Ok(EN_PAGE.into()));
+    r.open_err = Some(CONNECT_ERR.into());
+    let snap = fetch_once(&r, &p).await;
+    assert_eq!(snap.status, Status::Error);
+    assert!(snap.error.unwrap().contains("Failed to connect"));
+    assert_eq!(r.count("open"), 1 + OPEN_RETRIES);
+    assert_eq!(r.count("close"), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_non_connect_failure_is_not_retried() {
+    let (_d, p) = state_dir("{}");
+    let mut r = FakeRunner::new(Ok(String::new()));
+    r.open_err = Some("boom".into());
+    let _ = fetch_once(&r, &p).await;
+    assert_eq!(r.count("open"), 1);
 }
 
 #[tokio::test(start_paused = true)]
