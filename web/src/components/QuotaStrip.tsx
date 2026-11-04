@@ -1,4 +1,5 @@
 import { CodexResetHint } from './CodexResetHint'
+import { leftPct } from '../lib/quotaLeft'
 import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout'
 import type { QuotaFitState } from '../lib/quotaLayout'
 import { measureQuotaAvail, measureQuotaRow } from '../lib/quotaMeasure'
@@ -85,8 +86,7 @@ type Level = 'crit' | 'warn' | 'ok'
 /** 不到 10 留一位小數：快用完時 9.8 與 9.1 差一整回合（2026-09-08）。 */
 function remaining(w: QuotaWindow | null | undefined): number | null {
   if (!w) return null
-  const left = Math.max(0, 100 - w.used_pct)
-  return left < 10 ? Math.round(left * 10) / 10 : Math.round(left)
+  return leftPct(w.used_pct)
 }
 
 /**
