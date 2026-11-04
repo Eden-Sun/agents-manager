@@ -346,6 +346,19 @@
   height: 14px;
 }
 
+/* 手機：上面的 26px 在檔案後面，會蓋掉前面 @media 的 36px 觸控區（勾選框太小會點到旁邊的列）。 */
+@media (width <= 640px) {
+  .bot-cluster-row .bot-manager-use-wrap {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .bot-cluster-row .bot-manager-use-checkbox {
+    width: 16px;
+    height: 16px;
+  }
+}
+
 .bot-cluster-main {
   flex: 1;
   min-width: 0;
