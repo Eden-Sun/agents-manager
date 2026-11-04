@@ -14,8 +14,8 @@
   align-items: center;
 }
 
-/* 複製鍵：桌面滑過那一列才出現（不搶標籤的位置），觸控裝置沒有 hover，一直顯示。 */
-.side-pane-clone {
+/* 關閉鍵：桌面滑過那一列才出現（不搶標籤的位置），觸控裝置沒有 hover，一直顯示。 */
+.side-pane-close {
   flex: none;
   margin-left: 2px;
   padding: 1px 6px;
@@ -30,22 +30,22 @@
   opacity: 0;
 }
 
-.side-pane-wrap:hover .side-pane-clone,
-.side-pane-clone:focus-visible {
+.side-pane-wrap:hover .side-pane-close,
+.side-pane-close:focus-visible {
   opacity: 1;
 }
 
-.side-pane-clone:hover {
-  border-color: var(--border);
-  color: var(--text);
+.side-pane-close:hover {
+  border-color: var(--danger, var(--border));
+  color: var(--danger, var(--text));
 }
 
-.side-pane-clone:disabled {
+.side-pane-close:disabled {
   cursor: progress;
 }
 
 @media (hover: none) {
-  .side-pane-clone {
+  .side-pane-close {
     opacity: 1;
     padding: 4px 8px;
   }
