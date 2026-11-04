@@ -68,12 +68,12 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
   assert.equal(bar()!.getAttribute('aria-expanded'), 'true')
   assert.equal(document.querySelectorAll('.phone-outbox-thumb').length, 2, '兩張圖各一個縮圖，md 沒有')
   await until(() => document.querySelectorAll('img.phone-outbox-thumb-img').length === 2, '縮圖載入成 blob')
-  assert.equal(document.querySelectorAll('.phone-outbox-item').length, 3, '清單列出全部三個檔')
+  assert.equal(document.querySelectorAll('.phone-outbox-item').length, 1, '圖檔不列檔名，清單只剩 md')
   assert.equal(localStorage.getItem('am.phoneOutboxTray.open'), '1', '展開狀態記住')
 
   await click(document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!)
   await until(() => document.querySelector('.modal img.phone-outbox-full') !== null, '全螢幕預覽的圖')
-  assert.ok(document.querySelector('.modal')?.textContent?.includes('shot-1.png'), '預覽標題是檔名')
+  assert.ok(document.querySelector('.modal .phone-outbox-viewer'), '開了預覽')
 })
 
 test('沒有檔案：整條不畫', async () => {

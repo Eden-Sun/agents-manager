@@ -59,6 +59,7 @@ function PhoneOutboxTrayInner() {
 
   const fresh = open || seen.count === null ? 0 : files.length - seen.count
   const images = files.filter((f) => isPreviewableImage(f.name))
+  const others = files.filter((f) => !isPreviewableImage(f.name))
   const toggle = () => {
     const next = !open
     setOpen(next)
@@ -98,8 +99,10 @@ function PhoneOutboxTrayInner() {
               ))}
             </ul>
           ) : null}
+          {/* 圖檔只畫縮圖、不列檔名（使用者 2026-11-04：手機不需要 show 檔名）；清單只留點不出縮圖的其他檔。 */}
+          {others.length > 0 ? (
           <ul className="phone-outbox-list" role="list">
-            {files.map((f) => {
+            {others.map((f) => {
               const left = remainingNow(f, fetchedAt, now)
               const { dir: folder, base } = splitOutboxName(f.name)
               const isBusy = busy?.bot === botId && busy.name === f.name
@@ -128,10 +131,11 @@ function PhoneOutboxTrayInner() {
               )
             })}
           </ul>
+          ) : null}
         </div>
       ) : null}
       {viewing ? (
-        <Modal open title={splitOutboxName(viewing.name).base} width={960} onClose={() => setViewing(null)}>
+        <Modal open title={t('預覽')} width={960} onClose={() => setViewing(null)}>
           <ZoomViewer botId={botId} file={viewing} />
         </Modal>
       ) : null}
