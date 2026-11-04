@@ -15,6 +15,9 @@ const READABLE_COLUMNS = 60
 /** 自動刷新間隔（2026-09-28 使用者）。分頁在背景（`document.hidden`）時不抓。 */
 const AUTO_REFRESH_MS = 3000
 
+/** bot 正在工作（`agent_status=working`）時的自動刷新間隔：輸出在跑，3 秒太慢。閒置仍維持 `AUTO_REFRESH_MS`。 */
+const AUTO_REFRESH_WORKING_MS = 1000
+
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
   return text.replace(/\n[ \t]*(?:\n[ \t]*)+/g, '\n\n')
@@ -34,6 +37,8 @@ export function TerminalTab({ botId }: { botId: string }) {
   const [movedBot, setMovedBot] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
   const wrap = useTermWrap()
+  /** 自動刷新節奏看 store 的 run 狀態（daemon 推來的 `agent_status`），不看快照：快照回來前狀態就已經變了。 */
+  const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
 
   /** 一次只抓一份：上一趟還沒回來時，自動那趟就跳過，不疊請求。 */
   const inFlight = useRef(false)
@@ -74,13 +79,19 @@ export function TerminalTab({ botId }: { botId: string }) {
     setLoading(false)
   }
 
+  // 進分頁／換 bot／改行數時抓一次（非 quiet，會顯示「刷新中…」）。
   useEffect(() => {
     void refresh()
+  }, [refresh])
+
+  // 自動刷新：工作中 1 秒、閒置 3 秒；狀態切換時重排這個 interval（不重抓）。背景分頁不抓。
+  const autoMs = working ? AUTO_REFRESH_WORKING_MS : AUTO_REFRESH_MS
+  useEffect(() => {
     const id = window.setInterval(() => {
       if (!document.hidden) void refresh(true)
-    }, AUTO_REFRESH_MS)
+    }, autoMs)
     return () => window.clearInterval(id)
-  }, [refresh])
+  }, [refresh, autoMs])
 
   const move = useCallback(async () => {
     setMoving(true)
