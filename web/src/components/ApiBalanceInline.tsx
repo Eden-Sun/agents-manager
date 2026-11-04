@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
+import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
+import { balanceTooltipLines } from './balanceTooltip'
 import { useT } from '../lib/i18n'
 import './apiBotUsageBar.css'
 
@@ -19,10 +20,13 @@ export function ApiBalanceInline() {
       clearInterval(id)
     }
   }, [])
-  if (!balance?.configured || balance.remaining_usd === undefined) return null
+  const bal = balanceView(balance)
+  if (bal.usd === undefined && !bal.loggedOut) return null
+  const title = bal.source === 'console' || bal.loggedOut ? balanceTooltipLines(balance, bal, t).join('\n') : t('Anthropic 預付餘額（估計）')
   return (
-    <span className="mobile-bot-balance" title={t('Anthropic 預付餘額（估計）')}>
-      ≈ ${balance.remaining_usd.toFixed(2)}
+    <span className={`mobile-bot-balance${bal.expiringSoon || bal.loggedOut ? ' warn' : ''}`} title={title}>
+      {bal.usd === undefined ? '—' : `${bal.source === 'console' ? '' : '≈ '}$${bal.usd.toFixed(2)}`}
+      {bal.loggedOut ? ' ⚠' : ''}
     </span>
   )
 }

@@ -79,3 +79,7 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.mobile-bot-balance.warn {
+  color: var(--warn, #b26a00);
+  font-weight: 650;
+}

@@ -507,6 +507,8 @@ pub struct ClaudeApi {
     pub ledger: Ledger,
     sent: Mutex<HashMap<String, VecDeque<Instant>>>,
     pub balance_cache: Arc<crate::claude_api_balance::BalanceCache>,
+    /// 最近一次讀 Console Billing 頁的結果（`claude_console_balance`）；沒在跑就是 `None`。
+    pub console_balance: std::sync::Mutex<Option<crate::claude_console_balance::ConsoleSnapshot>>,
 }
 
 impl ClaudeApi {
@@ -517,6 +519,7 @@ impl ClaudeApi {
             ledger: Ledger::default(),
             sent: Mutex::new(HashMap::new()),
             balance_cache: Arc::new(crate::claude_api_balance::BalanceCache::new()),
+            console_balance: std::sync::Mutex::new(None),
         }
     }
 
