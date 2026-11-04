@@ -8,7 +8,7 @@ import { copyText } from '../lib/copyText'
 import { t } from '../lib/i18n'
 import { cursorSeq, planFrame, splitFrame, typedSpacesAfter } from '../lib/shellFrame'
 import { fontSizeFor } from '../lib/shellFont'
-import { linksOnRow, wrapWidth, type CellRow } from '../lib/xtermLinks'
+import { codesOnRow, linksOnRow, wrapWidth, type CellRow } from '../lib/xtermLinks'
 import { createInputBatcher } from '../lib/xtermInput'
 import type { ShellOp } from '../lib/xtermInput'
 import { useStore } from '../store/store'
@@ -163,15 +163,30 @@ export function HostShellXterm({
           wrapAt = wrapWidth(rows, term.cols)
         }
         const found = linksOnRow(rowAt, line - 1, wrapAt)
-        done(
-          found.length === 0
-            ? undefined
-            : found.map((f) => ({
-                text: f.url,
-                range: { start: { x: f.start.x + 1, y: f.start.y + 1 }, end: { x: f.end.x + 1, y: f.end.y + 1 } },
-                activate: () => void window.open(f.url, '_blank', 'noopener,noreferrer'),
-              })),
-        )
+        const range = (f: { start: { x: number; y: number }; end: { x: number; y: number } }) => ({
+          start: { x: f.start.x + 1, y: f.start.y + 1 },
+          end: { x: f.end.x + 1, y: f.end.y + 1 },
+        })
+        const links = found.map((f) => ({
+          text: f.url,
+          range: range(f),
+          activate: () => void window.open(f.url, '_blank', 'noopener,noreferrer'),
+        }))
+        // 網址下面的一次性碼（codex／gh 裝置碼登入）：點一下就複製，手機不用長按選字。
+        const row = rowAt(line - 1)
+        for (const c of row ? codesOnRow(row, line - 1) : []) {
+          links.push({
+            text: c.code,
+            range: range(c),
+            activate: () =>
+              void copyText(c.code).then((ok) =>
+                ok
+                  ? useStore.getState().notify('info', t('已複製一次性碼 {code}', { code: c.code }))
+                  : useStore.getState().notify('error', t('複製失敗，請手動選取')),
+              ),
+          })
+        }
+        done(links.length === 0 ? undefined : links)
       },
     })
     termRef.current = term

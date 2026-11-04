@@ -26,6 +26,8 @@ const dict: Dict = {
   "複製失敗，長按選取": "Copy failed; long press to select",
   "點一下複製整條網址": "Click to copy full URL",
   "複製失敗，請手動選取網址": "Copy failed; please select URL manually",
+  "複製失敗，請手動選取": "Copy failed; please select it manually",
+  "已複製一次性碼 {code}": "Copied one-time code {code}",
   "有 {size}，超過 {max} 上限": "Size is {size}, exceeding the {max} limit",
   "「{name}」上傳失敗：{msg}": "Upload failed for \"{name}\": {msg}",
   "找不到可接收檔案的 bot。": "No bot available to receive files.",
