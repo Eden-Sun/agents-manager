@@ -312,7 +312,7 @@ function BotRowImpl({
 
   return (
     <div
-      className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
+      className={`bot-row${compact ? ' compact' : ''}${isExpertMemberWithManagerUse && !compact ? ' expert-member' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
       }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}${isExpertMemberWithManagerUse && bot.manager_use === false ? ' manager-disabled' : ''}`}
       // 不用 listbox option：option 內不准有按鈕，螢幕閱讀器會吃掉。
@@ -369,6 +369,10 @@ function BotRowImpl({
         onDrag(null)
       }}
     >
+      {/* 專家成員的「管理者可用」放在燈號左側；已勾不能在這裡取消。 */}
+      {isExpertMemberWithManagerUse ? (
+        <ManagerUseCheckbox botId={botId} managerUse={bot.manager_use !== false} />
+      ) : null}
       {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
@@ -517,9 +521,6 @@ function BotRowImpl({
           </span>
         ) : null}
       </span>
-      {isExpertMemberWithManagerUse ? (
-        <ManagerUseCheckbox botId={botId} managerUse={bot.manager_use !== false} />
-      ) : null}
       <BotRowMenu botId={botId} compact={compact} />
 
     </div>

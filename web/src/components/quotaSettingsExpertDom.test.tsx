@@ -217,21 +217,40 @@ test('側欄勾選框：只在專家模式 advisor/executor/specialist 出現，
   assert.equal(execBox.checked, true, 'exec-1 manager_use 為 true')
   assert.equal(specBox.checked, true, 'spec-1 manager_use 為 true')
 
-  // aria-label 與 title
-  const expectedTitle = '管理者可用：開啟後管理者可派工、啟動或重啟此成員'
-  assert.equal(advBox.getAttribute('aria-label'), expectedTitle)
-  assert.equal(advBox.getAttribute('title'), expectedTitle)
+  const enableTitle = '管理者可用：開啟後管理者可派工、啟動或重啟此成員'
+  const lockedTitle = '已開啟。要取消請用右側 ⋯ 選單的「管理者可用」'
+  assert.equal(advBox.disabled, false, '未勾可以點來勾上')
+  assert.equal(advBox.getAttribute('aria-label'), enableTitle)
+  assert.equal(advBox.getAttribute('title'), enableTitle)
+  assert.equal(execBox.disabled, true, '已勾不能在側欄直接取消')
+  assert.equal(execBox.classList.contains('is-locked'), true)
+  assert.equal(execBox.getAttribute('aria-label'), enableTitle)
+  assert.equal(execBox.getAttribute('title'), lockedTitle)
+  assert.equal(specBox.disabled, true)
 
-  // 2. 管理者那一列不出現
+  // 勾選框在燈號左側（gutter 之前），不在列尾。
+  const follows = (earlier: Element, later: Element) =>
+    (earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+  const advWrap = advRow.querySelector('.bot-manager-use-wrap')!
+  assert.equal(advWrap.tagName, 'LABEL')
+  assert.ok(follows(advWrap, advRow.querySelector('.bot-gutter')!))
+  assert.ok(follows(advWrap, advRow.querySelector('.bot-main')!))
+  assert.ok(follows(advWrap, advRow.querySelector('.bot-actions')!))
+  assert.ok(advRow.classList.contains('expert-member'))
+  assert.ok(execRow.classList.contains('expert-member'))
+
+  // 2. 管理者那一列不出現，也不套用成員列的緊湊 class
   const mgrRow = document.querySelector<HTMLElement>('[data-bot-id="b-mgr"]')!
   assert.equal(mgrRow.querySelector('.bot-manager-use-checkbox'), null, '管理者列不應有勾選框')
+  assert.equal(mgrRow.classList.contains('expert-member'), false)
 
   // 3. 一般模式專案不出現
   const plainRow = document.querySelector<HTMLElement>('[data-bot-id="b-plain"]')!
   assert.equal(plainRow.querySelector('.bot-manager-use-checkbox'), null, '一般專案不應有勾選框')
+  assert.equal(plainRow.classList.contains('expert-member'), false)
 })
 
-test('側欄勾選框：點擊切換狀態並送出 PATCH，點擊不選取該 bot，失敗還原', async () => {
+test('側欄勾選框：未勾可勾上並送 PATCH；已勾 disabled 不送；失敗還原', async () => {
   await mount(<Sidebar />)
   await settle()
 
@@ -240,37 +259,45 @@ test('側欄勾選框：點擊切換狀態並送出 PATCH，點擊不選取該 b
 
   const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
   const execBox = execRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-
-  // 點擊勾選框
+  assert.equal(execBox.disabled, true)
   await click(execBox)
   await settle()
-
-  // 1. 不會選取該 bot
+  assert.equal(patchedBots.length, 0, '已勾的框不能直接取消')
+  assert.equal(execBox.checked, true)
   assert.equal(useStore.getState().selectedBotId, 'b-mgr', '點勾選框不應改變選取的 bot')
 
-  // 2. 送出 PATCH
-  assert.equal(patchedBots.length, 1)
-  assert.equal(patchedBots[0].id, 'b-exec')
-  assert.equal(patchedBots[0].input.manager_use, false)
+  const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
+  const advBox = advRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
+  await click(advBox)
+  await settle()
 
-  // 3. 測試失敗還原
+  assert.equal(useStore.getState().selectedBotId, 'b-mgr', '點勾選框不應改變選取的 bot')
+  assert.equal(patchedBots.length, 1)
+  assert.equal(patchedBots[0].id, 'b-adv')
+  assert.equal(patchedBots[0].input.manager_use, true)
+  assert.equal(advBox.checked, true)
+  assert.equal(advBox.disabled, true)
+
   const origPatch = useStore.getState().patchBot
   useStore.setState({
     patchBot: async () => {
       useStore.getState().notify('error', '網路錯誤')
       return null
     },
+    bots: useStore.getState().bots.map((b) => (b.id === 'b-spec' ? { ...b, manager_use: false } : b)),
   })
+  await settle()
 
   const specRow = document.querySelector<HTMLElement>('[data-bot-id="b-spec"]')!
   const specBox = specRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.equal(specBox.checked, true)
+  assert.equal(specBox.checked, false)
+  assert.equal(specBox.disabled, false)
 
   await click(specBox)
   await settle()
 
-  // 失敗後還原為 true
-  assert.equal(specBox.checked, true, 'PATCH 失敗應還原狀態')
+  assert.equal(specBox.checked, false, 'PATCH 失敗應還原為未勾')
+  assert.equal(specBox.disabled, false)
   useStore.setState({ patchBot: origPatch })
 })
 

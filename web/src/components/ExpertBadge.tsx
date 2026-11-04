@@ -15,7 +15,7 @@ export function ExpertBadge() {
   )
 }
 
-/** 專家模式側欄列上的管理者可用勾選框 */
+/** 專家模式側欄列上的管理者可用勾選框。已勾時停用，取消只走列尾 ⋯ 選單。 */
 export function ManagerUseCheckbox({
   botId,
   managerUse,
@@ -30,10 +30,13 @@ export function ManagerUseCheckbox({
   const [localOptimistic, setLocalOptimistic] = useState<boolean | null>(null)
 
   const effectiveChecked = localOptimistic !== null ? localOptimistic : managerUse
-  const title = t('管理者可用：開啟後管理者可派工、啟動或重啟此成員')
+  // 已勾就不能在這顆框上取消（含樂觀勾上、尚未寫回的那一下）。
+  const locked = effectiveChecked
+  const enableTitle = t('管理者可用：開啟後管理者可派工、啟動或重啟此成員')
+  const title = locked ? t('已開啟。要取消請用右側 ⋯ 選單的「管理者可用」') : enableTitle
 
   return (
-    <span
+    <label
       className="bot-manager-use-wrap"
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
@@ -41,27 +44,26 @@ export function ManagerUseCheckbox({
     >
       <input
         type="checkbox"
-        className="bot-manager-use-checkbox"
-        aria-label={title}
+        className={`bot-manager-use-checkbox${locked ? ' is-locked' : ''}`}
+        aria-label={enableTitle}
         title={title}
         checked={effectiveChecked}
-        disabled={disabled || isPatching}
+        disabled={disabled || isPatching || locked}
+        onClick={(e) => {
+          if (locked) e.preventDefault()
+        }}
         onChange={(e) => {
-          const nextVal = e.target.checked
-          setLocalOptimistic(nextVal)
+          if (!e.target.checked) return
+          setLocalOptimistic(true)
           const patch = useStore.getState().patchBot
-          void patch(botId, { manager_use: nextVal }).then((res) => {
-            if (!res) {
-              setLocalOptimistic(null)
-            } else {
-              setLocalOptimistic(null)
-            }
+          void patch(botId, { manager_use: true }).then(() => {
+            setLocalOptimistic(null)
           }).catch(() => {
             setLocalOptimistic(null)
           })
         }}
       />
-    </span>
+    </label>
   )
 }
 

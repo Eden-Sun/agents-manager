@@ -61,12 +61,12 @@
 
 ## 專家模式保護額度的兩個開關（2026-10-31，使用者；2026-11-01 常駐勾選框）
 
-- **可被管理者使用（`manager_use`）**：
-  - 專案模式為 expert 時，role 為 advisor、executor 或 specialist 的成員在側欄清單列上直接常駐顯示一個勾選框（不必 hover，手機寬度觸控區至少 32px）；管理者列與一般模式專案不顯示。
-  - 勾＝管理者可用、不勾＝停用；點擊立刻發送 `PATCH /api/bots/{id}` `{"manager_use": bool}`，請求中 disabled，失敗還原並顯示錯誤 toast，且點擊勾選框不觸發列本身的選取。
-  - 勾選框具備完整 a11y 屬性（`aria-label` 與 `title` 為「管理者可用：開啟後管理者可派工、啟動或重啟此成員」）。
+- **可被管理者使用（`manager_use`）**（2026-11-04：勾選框改到燈號左側，已勾不能在列上取消）：
+  - 專案模式為 expert 時，role 為 advisor、executor 或 specialist 的成員列直接常駐一個勾選框（不必 hover），放在燈號左側。這類非精簡列帶 `expert-member`：行距、chip（桌面 18px、手機 20px）與列 padding 收緊，桌面約 41px（原約 54px），手機約 44px（⋯ 為 40px）。名稱維持 14px。勾選框字形 14／16px，外層 label 當觸控區（桌面 26px、手機 36px）。管理者列、精簡子列與一般模式專案不套用這個緊湊樣式；管理者列與一般模式不顯示勾選框。
+  - 沒勾時點一下就勾上，立刻 `PATCH /api/bots/{id}` `{"manager_use": true}`。已勾時框保持勾選並 disabled，不能在側欄直接取消；`title` 為「已開啟。要取消請用右側 ⋯ 選單的「管理者可用」」。請求中 disabled，失敗還原並顯示錯誤 toast，點勾選框不觸發列本身的選取。
+  - 未勾時 `aria-label` 與 `title` 都是「管理者可用：開啟後管理者可派工、啟動或重啟此成員」；已勾時 `aria-label` 仍是這句，`title` 改指向 ⋯ 選單。
   - 當 `manager_use` 為 false 時，整列樣式顯著區隔：名稱淡化（opacity 0.75 / text-dim）＋保留灰色「停用」小標記（tooltip 提示「已停用：管理者不能使用此成員」），一眼看出停用狀態；使用者自己仍可正常對話與操作，但 manager 不能派工給它、不能啟動／重啟它。
-  - 尾端 `⋯` 選單中對應的選項改為勾選樣式（`☑ 管理者可用`／`☐ 管理者可用`），並涵蓋 advisor、executor 與 specialist。
+  - 取消只走尾端 `⋯` 的「管理者可用」（`☑`／`☐`，涵蓋 advisor、executor 與 specialist）。群集列的整組勾選框仍可一次全開或全關，不套用「已勾不能取消」。
 - **執行者池（`executor_pool`，條目制，2026-10-31 使用者）**：
   - 池是**條目清單**，不是 kind→數量。每條目：種類、模型、強度（可空＝預設）、context（可空＝模型預設；agy 不支援，灰掉並註明）、可增聘上限 1..10。條目最多 20 條；四元組（種類、模型、強度、context）相同不可重複。
   - 列表每條一列：`kind · model · effort · context · 已用/上限`（已用＝同專案 role=executor 且 `pool_entry` 指向該條目的 bot 數）；可改上限、刪除。舊資料 `{kind: n}` 顯示成 model 為空的「任何模型（舊資料）」條目，存檔後轉成陣列。
