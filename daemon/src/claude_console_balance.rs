@@ -342,19 +342,44 @@ impl RealRunner {
     }
 }
 
-/// agent-browser 常是 symlink 到 node 腳本（shebang `env node`），daemon 的 PATH 不一定有 node 所在目錄；
-/// 把執行檔 canonicalize 後的所在目錄放到子行程 PATH 最前面（原 PATH 接後面）。純函式，方便測。
-fn child_path(bin_dir: Option<&Path>, orig: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
-    let dir = bin_dir?;
-    let mut paths = vec![dir.to_path_buf()];
+/// agent-browser 常是 symlink 鏈（例如 ~/.local/bin → ~/.local/node/bin → node_modules/…），終點是 node 腳本（shebang `env node`），
+/// 而 daemon 的 PATH 不一定有 node 所在目錄（node 常在鏈中間那層）。把鏈上每個節點所在的目錄依序放到子行程 PATH 最前面（去重），原 PATH 接後面。純函式，方便測。
+fn child_path(chain_dirs: &[PathBuf], orig: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
+    if chain_dirs.is_empty() {
+        return None;
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for d in chain_dirs {
+        if !paths.contains(d) {
+            paths.push(d.clone());
+        }
+    }
     if let Some(o) = orig {
-        paths.extend(std::env::split_paths(o).filter(|p| p != dir));
+        for p in std::env::split_paths(o) {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
     }
     std::env::join_paths(paths).ok()
 }
 
-fn exe_bin_dir(exe: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(exe).ok()?.parent().map(Path::to_path_buf)
+/// 沿 symlink 鏈逐跳解析（相對 target 以該 link 所在目錄解析，最多 16 跳防迴圈），回傳鏈上每個節點（含起點、終點）所在目錄，去重、保持順序。
+fn exe_chain_dirs(exe: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut cur = exe.to_path_buf();
+    for _ in 0..=16 {
+        let Some(dir) = cur.parent().filter(|d| !d.as_os_str().is_empty()) else { break };
+        let dir = dir.to_path_buf();
+        if !dirs.contains(&dir) {
+            dirs.push(dir.clone());
+        }
+        match std::fs::read_link(&cur) {
+            Ok(t) => cur = if t.is_absolute() { t } else { dir.join(t) },
+            Err(_) => break,
+        }
+    }
+    dirs
 }
 
 impl BrowserRunner for RealRunner {
@@ -362,7 +387,7 @@ impl BrowserRunner for RealRunner {
         let exe = self.exe.clone();
         async move {
             let mut cmd = tokio::process::Command::new(&exe);
-            if let Some(p) = child_path(exe_bin_dir(&exe).as_deref(), std::env::var_os("PATH").as_deref()) {
+            if let Some(p) = child_path(&exe_chain_dirs(&exe), std::env::var_os("PATH").as_deref()) {
                 cmd.env("PATH", p);
             }
             cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
