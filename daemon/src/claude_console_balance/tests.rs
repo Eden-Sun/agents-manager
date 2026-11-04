@@ -226,19 +226,42 @@ async fn bad_saved_state_keeps_original_file() {
 }
 
 #[test]
-fn child_path_puts_exe_dir_first() {
+fn child_path_puts_chain_dirs_first() {
     let orig = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
-    let p = child_path(Some(Path::new("/opt/node/bin")), Some(&orig)).unwrap();
+    let chain = vec![PathBuf::from("/a/bin"), PathBuf::from("/opt/node/bin")];
+    let p = child_path(&chain, Some(&orig)).unwrap();
     let v: Vec<PathBuf> = std::env::split_paths(&p).collect();
-    assert_eq!(v, vec![PathBuf::from("/opt/node/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+    assert_eq!(v, vec![PathBuf::from("/a/bin"), PathBuf::from("/opt/node/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
 }
 
 #[test]
 fn child_path_dedups_and_handles_missing() {
     let orig = std::env::join_paths(["/usr/bin", "/opt/node/bin"]).unwrap();
-    let p = child_path(Some(Path::new("/opt/node/bin")), Some(&orig)).unwrap();
+    let chain = vec![PathBuf::from("/opt/node/bin"), PathBuf::from("/opt/node/bin")];
+    let p = child_path(&chain, Some(&orig)).unwrap();
     let v: Vec<PathBuf> = std::env::split_paths(&p).collect();
     assert_eq!(v, vec![PathBuf::from("/opt/node/bin"), PathBuf::from("/usr/bin")]);
-    assert_eq!(std::env::split_paths(&child_path(Some(Path::new("/x")), None).unwrap()).count(), 1);
-    assert!(child_path(None, Some(&orig)).is_none());
+    assert_eq!(std::env::split_paths(&child_path(&[PathBuf::from("/x")], None).unwrap()).count(), 1);
+    assert!(child_path(&[], Some(&orig)).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn exe_chain_dirs_follows_two_hop_symlink_chain() {
+    use std::os::unix::fs::symlink;
+    let root = crate::testing::scratch_dir("agm-chain");
+    let (local, node_bin, pkg) = (root.join("local/bin"), root.join("node/bin"), root.join("node/lib/pkg/bin"));
+    for d in [&local, &node_bin, &pkg] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(pkg.join("real"), "").unwrap();
+    // 第一跳用相對路徑、第二跳用絕對路徑，兩種都要涵蓋。
+    symlink("../lib/pkg/bin/real", node_bin.join("agent-browser")).unwrap();
+    symlink(node_bin.join("agent-browser"), local.join("agent-browser")).unwrap();
+    let dirs = exe_chain_dirs(&local.join("agent-browser"));
+    assert_eq!(dirs, vec![local.clone(), node_bin.clone(), node_bin.join("../lib/pkg/bin")]);
+    assert!(dirs.contains(&node_bin), "中間層（node 所在）必須在 PATH 內");
+    // 非 symlink、相對單檔名都不炸。
+    assert_eq!(exe_chain_dirs(&pkg.join("real")), vec![pkg.clone()]);
+    assert!(exe_chain_dirs(Path::new("agent-browser")).is_empty());
 }
