@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Lamp } from '../api/types.ts'
-import { clusterStatOf, clusterStatText } from './expertClusters.ts'
+import { clusterStatCounts, clusterStatOf, clusterStatText } from './expertClusters.ts'
 
 const ALL_LAMPS: Lamp[] = ['working', 'idle', 'blocked', 'starting', 'stopping', 'offline', 'disconnected', 'unknown']
 
@@ -36,4 +36,13 @@ test('clusterStatText：offline 與 stopping 歸「停止」，啟動中、等�
   assert.equal(clusterStatText(['stopping', 'offline']), '2 停止')
   assert.equal(clusterStatText(['starting', 'blocked', 'disconnected', 'unknown']), '1 等待回應 · 1 啟動中 · 1 連線中斷 · 1 狀態未知')
   assert.equal(clusterStatText(['starting']), '1 啟動中')
+})
+
+test('clusterStatCounts：照固定順序、0 的不列、加總＝成員數', () => {
+  assert.deepEqual(clusterStatCounts(['idle', 'working', 'offline', 'idle']), [
+    { stat: 'working', n: 1 },
+    { stat: 'idle', n: 2 },
+    { stat: 'stopped', n: 1 },
+  ])
+  assert.deepEqual(clusterStatCounts([]), [])
 })

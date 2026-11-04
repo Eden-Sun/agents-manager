@@ -4,7 +4,7 @@ import { LOCAL_HOST, type Bot } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { t, useT } from '../lib/i18n'
 import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
-import { clusterStatText } from '../lib/expertClusters'
+import { clusterStatCounts, clusterStatText } from '../lib/expertClusters'
 import { botLamp, identitiesOfHost, projectHostName, useStore } from '../store/store'
 import { IdentityBadge } from './IdentitiesPanel'
 import { KindTag } from './KindTag'
@@ -28,7 +28,7 @@ function writeOpen(key: string, open: boolean) {
   }
 }
 
-/** 一列「<name> 群集 ×N」，第三行列出各狀態的數量（加總等於成員數），可展開看成員；勾選框一次切整組。 */
+/** 一列「<name> 群集 ●1 ○2」：標題後面直接是各狀態的燈號＋數量（加總等於成員數，滑過看文字），可展開看成員；勾選框一次切整組。 */
 export function ExpertClusterRow({
   projectId,
   name,
@@ -127,7 +127,20 @@ export function ExpertClusterRow({
           <span className="bot-main">
             <span className="bot-cluster-head">
               <span className="bot-cluster-name">{t('{name} 群集', { name })}</span>
-              <span className="bot-cluster-count">×{members.length}</span>
+              {/* 狀態與數量合併（使用者 2026-11-04）：不再另起一行「1 執行中 · 2 閒置」，燈色同單顆列。 */}
+              <span
+                className="bot-cluster-count"
+                role="img"
+                aria-label={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
+                title={t('共 {n} 顆：{stat}', { n: members.length, stat: clusterStatText(lamps) })}
+              >
+                {clusterStatCounts(lamps).map(({ stat, n }) => (
+                  <span key={stat} className="bot-cluster-stat-item">
+                    <span className={`lamp lamp-${stat === 'stopped' ? 'offline' : stat} bot-cluster-dot`} aria-hidden="true" />
+                    {n}
+                  </span>
+                ))}
+              </span>
             </span>
             <span className="bot-sub">
               {first && showIdentity ? (
@@ -140,7 +153,6 @@ export function ExpertClusterRow({
               ) : null}
               {first ? <ModelTag botId={first.id} /> : null}
             </span>
-            <span className="bot-cluster-stat">{clusterStatText(lamps)}</span>
           </span>
         </button>
       </div>

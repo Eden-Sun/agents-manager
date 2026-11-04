@@ -400,4 +400,5 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   'daemon 無法確認這一則有沒有交給 Claude API（可能上一回合還沒結算，或 bot 正忙）；輸入已保留，請稍後再送，或先停止再啟動。': 'The daemon cannot confirm this message reached the Claude API (the previous turn may not be settled, or the bot is busy). Your text is kept; try again shortly, or stop and start the bot.',
   'daemon 無法確認 claude-api bot 的啟動狀態；請稍後再試。': 'The daemon cannot confirm the claude-api bot start state; try again shortly.',
   'bot 還有一個回合沒有結算，暫時無法停止；請稍後再試。': 'The bot still has an unsettled turn and cannot stop right now; try again shortly.',
+  "共 {n} 顆：{stat}": "{n} total: {stat}",
 } satisfies Dict
