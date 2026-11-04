@@ -19,6 +19,9 @@ import { ApiModelFields } from './ModelPicker'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
 import { pickSuggestedModel } from '../lib/executorPool'
+import type { ShareProfile } from '../api/types'
+import { ShareProfileField } from './ShareProfileField'
+import { EMPTY_SHARE_FOLDER, shareCreateFields, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 
 export type ExpertRoleChoice = 'manager' | 'advisor' | 'executor' | 'specialist'
 
@@ -76,6 +79,9 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // kind / model / effort / fast
   const [kind, setKind] = useState<BotKind>('claude')
+  // 分享（使用者 2026-11-04：專家模式也要能建共享的 bot）：跟一般新增表單同一個欄位與規則。
+  const [shareProfile, setShareProfile] = useState<ShareProfile | null>(null)
+  const [shareFolder, setShareFolder] = useState<ShareFolderDraft>(EMPTY_SHARE_FOLDER)
   const [model, setModel] = useState<string | null>(null)
   const [effort, setEffort] = useState<string | null>(null)
   const [fast, setFast] = useState(false)
@@ -224,7 +230,9 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const cliOk = Boolean(tools[kind]?.installed)
   const trackOk = role !== 'specialist' || Boolean(track.trim())
   const rangeError = customizeRuntime ? firstRangeError(runtimeDraft) : null
-  const canSubmit = nameOk && cliOk && trackOk && !rangeError && !busy
+  const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
+  const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
+  const canSubmit = nameOk && cliOk && trackOk && !rangeError && !busy && !(folderIn && 'error' in folderIn)
 
   // 送出
   const handleSubmit = async (e: React.FormEvent) => {
@@ -257,7 +265,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       persona: persona.trim() || null,
       autostart: false,
       identity: identity || null,
-      auto_approve: true,
+      ...shareCreateFields(shareProfile, folderIn),
     })
 
     if (!createdBotId) {
@@ -539,6 +547,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
       {/* 人設保留 */}
       <PersonaField value={persona} onChange={setPersona} collapsible />
+      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />
 
       {errorMsg ? <div className="hint warn" role="alert">{errorMsg}</div> : null}
 
