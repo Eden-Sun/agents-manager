@@ -443,6 +443,7 @@ am_agent_start() {
     _has_effort=0
     _has_instr=0
     _has_docs=0
+    _has_sandbox=0
     _has_profile=0
     _has_no_daemon=0
     _idset=0
@@ -528,6 +529,8 @@ am_agent_start() {
                 model_reasoning_effort=*) _has_effort=1 ;;
                 --append-system-prompt | --append-system-prompt=* | --append-system-prompt-file* | developer_instructions=* | --rules | --rules=*) _has_instr=1 ;;
                 project_doc_max_bytes=*) _has_docs=1 ;;
+                # 呼叫者自己決定了沙箱／核准模式：一律尊重，不補 `--yolo`。
+                -s | --sandbox | --sandbox=* | --yolo | --dangerously-bypass-approvals-and-sandbox | --full-auto | sandbox_mode=* | default_permissions=*) _has_sandbox=1 ;;
                 -p | --profile | --profile=*) _has_profile=1 ;;
                 --no-daemon) _has_no_daemon=1 ;;
             esac
@@ -658,6 +661,15 @@ am_agent_start() {
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
                 set -- "$@" --no-daemon
+            fi
+            # 使用者 2026-11-04 裁示：codex 子 agent 直接 `--yolo`。預設的 workspace-write 擋網路（cargo shim 連不到 daemon 的
+            # build scheduler）、擋 `~/.cache/agents-manager`、把 `.git` 疊成唯讀（worktree 的 gitdir 在主 repo 的 `.git/worktrees/<x>`），
+            # `writable_roots` 解不了 `.git`，細調不值得。只對 bot 開的 child（有 `AM_BOT_ID`；本機與遠端都一樣）補，人工 shell 照自己的習慣。
+            # 放在 argv 最後面＝`resume`／`fork` 子命令之後，codex 照樣認；它不是 `-c`，不受 #1902 影響。
+            if [ "$_has_sandbox" = 0 ] && [ -n "${AM_BOT_ID:-}" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" --yolo
             fi
             ;;
         grok)
