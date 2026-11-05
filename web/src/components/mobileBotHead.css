@@ -138,17 +138,21 @@
     height: 18px;
   }
 
-  /* git 鍵底下直接寫 context（2026-11-05 使用者：手機對話也要看得到 context，不是長按主力晶片）：圖示縮小、百分比疊在下面。 */
+  /* git 鍵直接寫 context（2026-11-05）。有 token：上已用（11px）、下百分比（10px），不放圖示——
+     32×32 再加圖示兩行會黏在一起。只有百分比或剛 resume 的「—」才維持圖示在上、數字在下。
+     寬鎖 32px（左邊距 4px），額度列 padding-left: 40px 不用再讓。 */
   .main-head.bot-head > .mobile-git-info.has-ctx {
     display: inline-flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 0;
-    width: auto;
+    width: 32px;
     min-width: 32px;
-    padding: 1px 2px;
+    max-width: 32px;
+    padding: 1px 0;
     line-height: 1;
+    overflow: hidden;
   }
 
   .main-head.bot-head > .mobile-git-info.has-ctx svg {
@@ -156,13 +160,46 @@
     height: 14px;
   }
 
+  .main-head.bot-head > .mobile-git-info.has-both {
+    padding: 2px 0;
+  }
+
+  /* 兩行數字貼滿 32px，角上的警告點改放到鈕外，不蓋住 k。 */
+  .main-head.bot-head > .mobile-git-info.has-both.warn {
+    overflow: visible;
+  }
+
+  .main-head.bot-head > .mobile-git-info.has-both.warn::after {
+    top: -2px;
+    right: -2px;
+  }
+
   .main-head.bot-head > .mobile-git-info .mobile-ctx {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     color: var(--text-dim);
     font-size: 11px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    line-height: 1.1;
+    line-height: 1;
     white-space: nowrap;
+  }
+
+  .main-head.bot-head > .mobile-git-info .mobile-ctx-k {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+  }
+
+  .main-head.bot-head > .mobile-git-info .mobile-ctx-pct {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
   }
 
   /* 常駐讓出 git 鍵欄（4 + 32px），不然 cc0 會滑到 git 鍵底下（2026-09-11 手機實拍）。 */

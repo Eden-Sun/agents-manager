@@ -146,10 +146,68 @@ test('手機：沒有帳號警告時 Git 鈕不帶 warn', async () => {
     )
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     assert.equal(gitBtn().classList.contains('warn'), false)
-    // context 直接寫在 Git 鈕底下（2026-11-05 使用者：手機對話也要看得到 context，不用長按主力晶片）。
+    // 只有百分比、沒有 token：圖示在上、百分比在下（不捏一個假的 k）。
     assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊 · context 12%')
     assert.equal(gitBtn().querySelector('.mobile-ctx')?.textContent, '12%')
+    assert.equal(gitBtn().querySelector('.mobile-ctx-k'), null)
+    assert.ok(gitBtn().querySelector('svg'))
     assert.ok(gitBtn().classList.contains('has-ctx'))
+    assert.equal(gitBtn().classList.contains('has-both'), false)
+  } finally {
+    restore()
+  }
+})
+
+test('手機：有 token 時 Git 鈕上排已用、下排百分比', async () => {
+  const restore = asPhone()
+  try {
+    const id = await running('am-claude')
+    const run = useStore.getState().runs[id]!
+    await act(() =>
+      useStore.setState({
+        selectedBotId: id,
+        runs: {
+          ...useStore.getState().runs,
+          [id]: {
+            ...run,
+            status: { ...statusWith(null), context_used_pct: 18, context_used_tokens: 91_000, context_size: 500_000 },
+          },
+        },
+      }),
+    )
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊 · context 91k · 18%')
+    assert.equal(gitBtn().querySelector('.mobile-ctx-k')?.textContent, '91k')
+    assert.equal(gitBtn().querySelector('.mobile-ctx-pct')?.textContent, '18%')
+    assert.equal(gitBtn().querySelector('svg'), null, '兩行數字不再加 Git 圖示')
+    assert.ok(gitBtn().classList.contains('has-both'))
+  } finally {
+    restore()
+  }
+})
+
+test('手機：剛 resume 的 context 仍是破折號', async () => {
+  const restore = asPhone()
+  try {
+    const id = await running('am-claude')
+    const run = useStore.getState().runs[id]!
+    await act(() =>
+      useStore.setState({
+        selectedBotId: id,
+        runs: {
+          ...useStore.getState().runs,
+          [id]: {
+            ...run,
+            status: { ...statusWith(null), context_used_pct: null, context_used_tokens: null, context_size: null, context_unknown: true },
+          },
+        },
+      }),
+    )
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    assert.equal(gitBtn().querySelector('.mobile-ctx')?.textContent, '—')
+    assert.ok(gitBtn().querySelector('svg'))
+    assert.equal(gitBtn().classList.contains('has-both'), false)
+    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊')
   } finally {
     restore()
   }
