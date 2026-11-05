@@ -138,6 +138,33 @@
     height: 18px;
   }
 
+  /* git 鍵底下直接寫 context（2026-11-05 使用者：手機對話也要看得到 context，不是長按主力晶片）：圖示縮小、百分比疊在下面。 */
+  .main-head.bot-head > .mobile-git-info.has-ctx {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    width: auto;
+    min-width: 32px;
+    padding: 1px 2px;
+    line-height: 1;
+  }
+
+  .main-head.bot-head > .mobile-git-info.has-ctx svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .main-head.bot-head > .mobile-git-info .mobile-ctx {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
+
   /* 常駐讓出 git 鍵欄（4 + 32px），不然 cc0 會滑到 git 鍵底下（2026-09-11 手機實拍）。 */
   .main-head.bot-head:has(> .mobile-git-info) .quota-open {
     position: relative;

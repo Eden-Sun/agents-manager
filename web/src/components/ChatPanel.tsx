@@ -1189,9 +1189,12 @@ function ContextBar({ issues, status, hasStatus, mobileOpen, onOpen, onClose }: 
   )
 }
 
-export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
+/**
+ * 這顆 bot 現在的 context 讀數（百分比、`91k/500k`、tooltip）。`StatusLineBar` 與手機標題列的 git 鍵共用（2026-11-05 使用者：
+ * 手機對話也要直接看得到 context，不是長按主力晶片才看得到）。
+ */
+function useContextReading(botId: string, status: StatusInfo | null, text: string | null) {
   const t = useT()
-  const phone = useMediaQuery(PHONE_QUERY)
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   // gpt-6.1-sol 的 context：有效模型（正在跑的優先，空白不算）＋實際 token，分母固定 500k，不沿用 CLI 的 475k 百分比。
   const effectiveModel = useStore((s) => {
@@ -1209,17 +1212,6 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
   // codex 的 footer 拆成欄位，欄位交給下面跟 claude 同一套 SlItem 畫（模型與 effort 在頂端的主力晶片，額度在頂端額度列，這裡不重複）。
   const fields = useMemo(() => (footer?.modelLine ? parseCodexModelLine(footer.modelLine) : null), [footer?.modelLine])
-  if (!status && !footer) {
-    if (!line && kind !== 'codex') return null
-    return (
-      <div className="statusline-bar" title={line || undefined}>
-        {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
-        {line ? <span className="statusline-text mono">{trimClippedTail(line)}</span> : null}
-        {kind === 'codex' ? <StatusCache botId={botId} status={null} contextAction /> : null}
-      </div>
-    )
-  }
-
   const solOn = solWindowApplies(kind, effectiveModel)
   // token 先取 daemon 的 prompt_cache（rollout 實際值），沒有才用 statusLine 的實際值；都沒有就不畫（不退回 CLI 的 `Context N% used`）。
   const solCtx = solOn ? sol500kContext(kind, effectiveModel, runPromptCache?.context_used_tokens ?? status?.context_used_tokens) : null
@@ -1242,6 +1234,24 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   const ctxTitle = limit !== null
     ? t('已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）', { detail: ctxDetail ?? '', limit: compactTokens(limit), window: windowSize !== null ? compactTokens(windowSize) : '—' })
     : ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined
+  return { kind, line, footer, fields, pct: ctxPct, detail: ctxDetail, title: ctxTitle, unknown: Boolean(status?.context_unknown) }
+}
+
+export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
+  const t = useT()
+  const phone = useMediaQuery(PHONE_QUERY)
+  const { kind, line, footer, fields, pct: ctxPct, detail: ctxDetail, title: ctxTitle } = useContextReading(botId, status, text)
+  if (!status && !footer) {
+    if (!line && kind !== 'codex') return null
+    return (
+      <div className="statusline-bar" title={line || undefined}>
+        {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
+        {line ? <span className="statusline-text mono">{trimClippedTail(line)}</span> : null}
+        {kind === 'codex' ? <StatusCache botId={botId} status={null} contextAction /> : null}
+      </div>
+    )
+  }
+
   const cwd = fields?.cwd ?? status?.cwd ?? null
   return (
     <div className="statusline-bar" title={line || footer?.modelLine || undefined}>
@@ -1395,6 +1405,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     return () => clearTimeout(t)
   }, [blockedUi.armed])
   const blockedFull = blockedUi.open
+  // 手機標題列的 git 鍵底下直接寫 context（2026-11-05 使用者）：完整讀數與壓縮鈕仍在點開的彈窗裡。
+  const phoneCtx = useContextReading(botId ?? '', statusInfo, run?.status_line ?? null)
 
   if (!botId || !bot) {
     return (
@@ -1525,14 +1537,20 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <>
             <button
               type="button"
-              className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}`}
+              className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}${phoneCtx.pct !== null || phoneCtx.unknown ? ' has-ctx' : ''}`}
               // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
-              aria-label={statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}
+              aria-label={`${statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}${phoneCtx.pct !== null ? ` · context ${pct(phoneCtx.pct)}` : ''}`}
+              title={phoneCtx.title}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}
             >
               <GitIcon />
+              {phoneCtx.pct !== null ? (
+                <span className="mobile-ctx" aria-hidden="true">{Math.round(phoneCtx.pct)}%</span>
+              ) : phoneCtx.unknown ? (
+                <span className="mobile-ctx" aria-hidden="true">—</span>
+              ) : null}
             </button>
             {/* 2026-09-11：暫時空著（`:empty` 藏起來）。 */}
             <div className="mobile-primary-row" />

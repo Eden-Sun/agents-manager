@@ -146,7 +146,10 @@ test('手機：沒有帳號警告時 Git 鈕不帶 warn', async () => {
     )
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     assert.equal(gitBtn().classList.contains('warn'), false)
-    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊')
+    // context 直接寫在 Git 鈕底下（2026-11-05 使用者：手機對話也要看得到 context，不用長按主力晶片）。
+    assert.equal(gitBtn().getAttribute('aria-label'), 'Git / 專案資訊 · context 12%')
+    assert.equal(gitBtn().querySelector('.mobile-ctx')?.textContent, '12%')
+    assert.ok(gitBtn().classList.contains('has-ctx'))
   } finally {
     restore()
   }
