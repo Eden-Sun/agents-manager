@@ -70,3 +70,20 @@
 .ansi-term .term-link {
   color: inherit;
 }
+
+/* 24-bit／256 色（AnsiTerm 的 `styleProps`）：CLI 照深色終端挑色。深色主題照原色；淺色主題把明度翻過來，
+   白字變深字、claude 使用者訊息的深灰底（55,55,55）變淺灰底。不支援 relative color／light-dark() 的瀏覽器退回原色。 */
+.ansi-fg-rgb {
+  color: var(--ansi-fg);
+  color: light-dark(hsl(from var(--ansi-fg) h s calc(100 - l)), var(--ansi-fg));
+}
+
+.ansi-bg-rgb {
+  background-color: var(--ansi-bg);
+  background-color: light-dark(hsl(from var(--ansi-bg) h s calc(100 - l / 2)), var(--ansi-bg));
+}
+
+/* 有底色的字段把上下行距也塗滿：行高 1.45 時 inline 背景只蓋字身，相鄰兩行的底色中間會留一條縫（2026-11-05 截圖）。 */
+.ansi-bg {
+  padding-block: 0.14em;
+}

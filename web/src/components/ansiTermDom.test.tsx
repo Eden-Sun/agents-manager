@@ -19,8 +19,20 @@ test('色段：每段一個 span，樣式與主題變數落在 inline style／cl
   assert.equal(spans[0].textContent, 'ERR')
   assert.equal((spans[0] as HTMLElement).style.color, 'var(--ansi-1)')
   const hot = [...el.querySelectorAll('span')].find((s) => s.textContent === 'hot') as HTMLElement
-  assert.equal(hot.style.color, '#ff0000')
+  // 24-bit／256 色交給 CSS 依主題調整（淺色翻明度），放在變數上。
+  assert.equal(hot.style.getPropertyValue('--ansi-fg'), '#ff0000')
+  assert.ok(hot.classList.contains('ansi-fg-rgb'))
   assert.equal(el.textContent, 'ERR ok\nhot')
+})
+
+test('claude 使用者訊息的深灰底（48;2;55;55;55）＋白字：底與字都交給主題，並補滿行距', async () => {
+  const el = await mount(<pre className="term"><AnsiTerm text={`${E}[38;2;255;255;255m${E}[48;2;55;55;55mhi${E}[0m${E}[48;2;55;55;55m   ${E}[0m`} /></pre>)
+  const hi = [...el.querySelectorAll('span')].find((s) => s.textContent === 'hi') as HTMLElement
+  assert.ok(hi.classList.contains('ansi-fg-rgb') && hi.classList.contains('ansi-bg-rgb') && hi.classList.contains('ansi-bg'))
+  assert.equal(hi.style.getPropertyValue('--ansi-bg'), '#373737')
+  assert.equal(hi.style.backgroundColor, '')
+  const pad = [...el.querySelectorAll('span')].find((s) => s.textContent === '   ') as HTMLElement
+  assert.ok(pad.classList.contains('ansi-bg-rgb'))
 })
 
 test('沒有原始跳脫字元或其他控制字元進到 DOM', async () => {
