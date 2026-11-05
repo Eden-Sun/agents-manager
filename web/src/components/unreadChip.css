@@ -22,14 +22,14 @@
 /* 桌機：★ 主力一組、其餘一組，各自換行各自裁切（2026-09-15 使用者；`lib/chipOverflow.ts`）。收合時主力最多三行（2026-09-23），
    其餘那組在主力也在時一行、只有它時兩行——整列一起裁的話，主力占滿就把沒釘的「要你回答」擠進 `+N`（review3 c4 L2）。
    裁切高度由 `UnreadChip.tsx` 量出來寫在 style 上（寫死 px 在晶片加了星號與徽章變高之後會切一半，541afe7）。
-   四周留 1px：`current` 的藍外框是 box-shadow，貼齊裁切邊會被切掉。 */
+   上下留 4px、左右 2px：`current` 的卡鉗（▼▲）往外凸 4px、外輪廓 1.5px，貼齊裁切邊會被切掉。 */
 .unread-group {
   display: flex;
   flex-basis: 100%;
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
-  padding: 1px;
+  padding: 4px 2px;
 }
 
 /* 主力與「進行中」之間一條虛線＋小標（2026-10-31 使用者：沒釘的在跑 bot 不該看起來像主力）。 */
@@ -195,11 +195,6 @@
   animation: unread-ring-turn 1.8s linear infinite;
 }
 
-/* 正在看的晶片是 6px 方角：黃圈跟著外緣走（焦點改用底端藍條，不再需要往內收）。 */
-.unread-chip.current .unread-chip-working-ring {
-  border-radius: 6px;
-}
-
 @keyframes unread-ring-turn {
   to { --chip-ring-angle: 360deg; }
 }
@@ -228,33 +223,69 @@
   }
 }
 
-/* 正在看的那顆＝**晶片底端 3px 藍條**（2026-11-04 使用者：「想個方式更好的表達 focus 的主力」，grok 同意見）。
-   外框與 ring 是狀態的通道（黃 working ring、紅 needs-reply），底色是快取倒數的通道；焦點改走「底端」這個沒人用的位置，
-   不再跟 working ring 同一種「沿邊一圈」的語彙（之前的藍外框＋左條在一排裡只是「另一顆有框的」）。
-   用 `background-color` 不用 `background` 簡寫：簡寫會清掉快取倒數的 `background-image`。 */
+/* 正在看的那顆＝**上下卡鉗**（2026-11-05 使用者從四輪方案選 agy-16）：晶片上方一個 ▼、下方一個 ▲ 夾住它，加 1.5px 外輪廓。
+   卡鉗在膠囊**外面**、永遠靜止；旁邊幾顆黃色 progress 圈在轉（甚至這顆自己在轉）時，焦點仍一眼看得出、不跟沿邊旋轉混在一起。
+   之前的虛線、左條、藍外框、底端藍條都是「也在邊框上」，輸給轉圈。用 `background-color` 不用簡寫：簡寫會清掉快取倒數的 `background-image`。
+   `::before`／`::after` 也是拖曳落點佔位（`.drop-before`／`.drop-after`），那時讓給落點。 */
 .unread-chip.current {
-  background-color: var(--bg-hover);
-  border-color: var(--border-strong);
+  border-color: var(--accent);
   color: var(--text);
-  border-radius: 6px;
-  box-shadow: inset 0 -3px 0 var(--accent);
   font-weight: 700;
 }
 
-/* 紅講「該做什麼」比「你在哪」重要：紅底紅框維持，底端藍條照樣疊上去。 */
-.unread-chip.current.needs-reply {
-  background-color: var(--danger-soft);
-  border-color: var(--danger);
-  color: var(--danger);
-  box-shadow: inset 0 -3px 0 var(--accent);
+.unread-chip.current:not(.dragging) {
+  box-shadow: 0 0 0 1.5px var(--accent);
 }
 
-/* 正在看＋等子 agent：顏色交給那顆黃點，框中性。 */
-.unread-chip.current.waits-kids {
-  background-color: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text);
-  box-shadow: inset 0 -3px 0 var(--accent);
+.unread-chip.current:not(.drop-before, .drop-after, .dragging)::before,
+.unread-chip.current:not(.drop-before, .drop-after, .dragging)::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  z-index: 2;
+  width: 12px;
+  height: 5px;
+  transform: translateX(-50%);
+  background-color: var(--accent);
+  pointer-events: none;
+}
+
+/* 往外凸 4px、壓邊框 1px；`.unread-group` 上下留 4px 才不會被裁切。 */
+.unread-chip.current:not(.drop-before, .drop-after, .dragging)::before {
+  top: -5px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.unread-chip.current:not(.drop-before, .drop-after, .dragging)::after {
+  bottom: -5px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+/* 正在看＋要你回答：紅底紅框，外輪廓與卡鉗一起換紅。 */
+.unread-chip.current.needs-reply {
+  border-color: var(--danger);
+  background-color: var(--danger-soft);
+  color: var(--danger);
+}
+
+.unread-chip.current.needs-reply:not(.dragging) {
+  box-shadow: 0 0 0 1.5px var(--danger);
+}
+
+.unread-chip.current.needs-reply:not(.drop-before, .drop-after, .dragging)::before,
+.unread-chip.current.needs-reply:not(.drop-before, .drop-after, .dragging)::after {
+  background-color: var(--danger);
+}
+
+/* 正在看＋模型滿載：紫。 */
+.unread-chip.current.at-capacity:not(.dragging) {
+  border-color: var(--capacity);
+  box-shadow: 0 0 0 1.5px var(--capacity);
+}
+
+.unread-chip.current.at-capacity:not(.drop-before, .drop-after, .dragging)::before,
+.unread-chip.current.at-capacity:not(.drop-before, .drop-after, .dragging)::after {
+  background-color: var(--capacity);
 }
 
 /* `needs-reply`（不叫 `blocked`：styles.css 裸的 `.blocked` 會把晶片撐成 44px）：紅框紅字紅點。放 `.working` 之後，紅要蓋過中性灰。 */
