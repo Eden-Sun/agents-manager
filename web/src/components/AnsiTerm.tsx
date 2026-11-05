@@ -49,14 +49,23 @@ function colorCss(c: string | undefined): string | undefined {
   return c.startsWith('ansi:') ? `var(--ansi-${c.slice(5)})` : c
 }
 
-/** 樣式 → className＋inline style。沒有任何樣式時回傳 undefined（直接放字串，不包 span）。 */
+/**
+ * 樣式 → className＋inline style。沒有任何樣式時回傳 undefined（直接放字串，不包 span）。
+ *
+ * 24-bit／256 色（不是 `ansi:` 那 16 色）是 CLI 照**深色終端**挑的（claude 的使用者訊息是 `48;2;55;55;55` 深灰底＋白字）：
+ * 不改直接畫在淺色主題上會變成一條條黑底。所以只放進 `--ansi-fg`／`--ansi-bg`，由 `ansiTerm.css` 依主題決定：
+ * 深色照原色，淺色把明度翻過來（白字→深字、深灰底→淺灰底）。16 色已經有淺深兩組調色盤，照舊直接給。
+ */
 function styleProps(style: AnsiStyle): { className?: string; style?: CSSProperties } | undefined {
   let fg = colorCss(style.fg)
   let bg = colorCss(style.bg)
+  let fgRaw = Boolean(style.fg && !style.fg.startsWith('ansi:'))
+  let bgRaw = Boolean(style.bg && !style.bg.startsWith('ansi:'))
   if (style.inverse) {
     const f = fg ?? 'var(--term-text)'
     fg = bg ?? 'var(--term-bg)'
     bg = f
+    ;[fgRaw, bgRaw] = [bgRaw, fgRaw]
   }
   const cls = [
     style.bold && 'ansi-b',
@@ -64,12 +73,15 @@ function styleProps(style: AnsiStyle): { className?: string; style?: CSSProperti
     style.italic && 'ansi-i',
     style.underline && 'ansi-u',
     style.strike && 'ansi-s',
+    fgRaw && 'ansi-fg-rgb',
+    bgRaw && 'ansi-bg-rgb',
+    bg && 'ansi-bg',
   ].filter(Boolean)
   if (!fg && !bg && cls.length === 0) return undefined
-  const css: CSSProperties = {}
-  if (fg) css.color = fg
-  if (bg) css.backgroundColor = bg
-  return { className: cls.length ? cls.join(' ') : undefined, style: fg || bg ? css : undefined }
+  const css: Record<string, string> = {}
+  if (fg) css[fgRaw ? '--ansi-fg' : 'color'] = fg
+  if (bg) css[bgRaw ? '--ansi-bg' : 'backgroundColor'] = bg
+  return { className: cls.length ? cls.join(' ') : undefined, style: fg || bg ? (css as CSSProperties) : undefined }
 }
 
 function renderRun(r: Run, url: string | null, key: number): ReactNode {
