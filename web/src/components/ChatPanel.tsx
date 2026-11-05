@@ -1095,6 +1095,14 @@ function pct(n: number): string {
   return `${Number.isInteger(r) ? r : r.toFixed(1)}%`
 }
 
+/** `91k/500k`（`compactTokens`）→ 已用那一側 `91k`。手機 Git 鈕只放得下這個。 */
+function contextUsedShort(detail: string | null): string | null {
+  if (!detail) return null
+  const slash = detail.indexOf('/')
+  const used = (slash === -1 ? detail : detail.slice(0, slash)).trim()
+  return used || null
+}
+
 function SlItem({ k, children, title, className }: { k: string; children: ReactNode; title?: string; className?: string }) {
   return (
     <span className={`sl-item${className ? ' ' + className : ''}`} title={title} data-k={k}>
@@ -1405,8 +1413,20 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     return () => clearTimeout(t)
   }, [blockedUi.armed])
   const blockedFull = blockedUi.open
-  // 手機標題列的 git 鍵底下直接寫 context（2026-11-05 使用者）：完整讀數與壓縮鈕仍在點開的彈窗裡。
+  // 手機標題列的 git 鍵直接寫 context（2026-11-05 使用者）：有 token 時上已用、下百分比；完整讀數與壓縮鈕仍在彈窗裡。
   const phoneCtx = useContextReading(botId ?? '', statusInfo, run?.status_line ?? null)
+  // 剛 resume 的 `—` 優先於殘留 token。有已用＋百分比才兩行（32px 再加圖示會擠）；否則維持圖示＋單一數字。
+  const phoneUsed = phoneCtx.unknown ? null : contextUsedShort(phoneCtx.detail)
+  const phonePctLabel = phoneCtx.pct !== null ? `${Math.round(phoneCtx.pct)}%` : null
+  const phoneBoth = phoneUsed !== null && phonePctLabel !== null
+  const phoneHasCtx = phonePctLabel !== null || phoneCtx.unknown || phoneUsed !== null
+  const phoneAriaCtx = phoneBoth
+    ? ` · context ${phoneUsed} · ${phonePctLabel}`
+    : phonePctLabel
+      ? ` · context ${pct(phoneCtx.pct!)}`
+      : phoneUsed
+        ? ` · context ${phoneUsed}`
+        : ''
 
   if (!botId || !bot) {
     return (
@@ -1537,20 +1557,31 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <>
             <button
               type="button"
-              className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}${phoneCtx.pct !== null || phoneCtx.unknown ? ' has-ctx' : ''}`}
+              className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}${phoneHasCtx ? ' has-ctx' : ''}${phoneBoth ? ' has-both' : ''}`}
               // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
-              aria-label={`${statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}${phoneCtx.pct !== null ? ` · context ${pct(phoneCtx.pct)}` : ''}`}
+              aria-label={`${statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}${phoneAriaCtx}`}
               title={phoneCtx.title}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
               onClick={() => setGitInfoBotId(botId)}
             >
-              <GitIcon />
-              {phoneCtx.pct !== null ? (
-                <span className="mobile-ctx" aria-hidden="true">{Math.round(phoneCtx.pct)}%</span>
-              ) : phoneCtx.unknown ? (
-                <span className="mobile-ctx" aria-hidden="true">—</span>
-              ) : null}
+              {phoneBoth ? (
+                <span className="mobile-ctx" aria-hidden="true">
+                  <span className="mobile-ctx-k">{phoneUsed}</span>
+                  <span className="mobile-ctx-pct">{phonePctLabel}</span>
+                </span>
+              ) : (
+                <>
+                  <GitIcon />
+                  {phonePctLabel ? (
+                    <span className="mobile-ctx" aria-hidden="true">{phonePctLabel}</span>
+                  ) : phoneUsed ? (
+                    <span className="mobile-ctx" aria-hidden="true">{phoneUsed}</span>
+                  ) : phoneCtx.unknown ? (
+                    <span className="mobile-ctx" aria-hidden="true">—</span>
+                  ) : null}
+                </>
+              )}
             </button>
             {/* 2026-09-11：暫時空著（`:empty` 藏起來）。 */}
             <div className="mobile-primary-row" />
