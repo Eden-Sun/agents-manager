@@ -1,12 +1,13 @@
 import { useT } from "../lib/i18n"
 import { useCodexTerminalFooter } from '../hooks/useCodexTerminalFooter'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { usePendingQuestion } from '../hooks/usePendingQuestion'
 import { pendingAtOnScreen, questionVisibleOnScreen } from '../lib/pendingQuestion'
 import { PendingQuestionCard } from './PendingQuestionCard'
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
+import { useStickToBottom } from '../hooks/useStickToBottom'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { isSurvey } from '../lib/choiceDraft'
 import { surveyDraftAllowed } from '../store/mobilePreview'
@@ -60,6 +61,9 @@ export function BlockedPanel({
   )
   const showTerm = (!menu && !dedicatedOptions) || extras
   const showKeys = !menu || extras
+  // 選項在畫面最下面：300px 截角的 `pre` 跟著捲到底，不停在頂端的工具輸出（`useStickToBottom`）。
+  const termRef = useRef<HTMLPreElement>(null)
+  const { onScroll: onTermScroll } = useStickToBottom(termRef, snap?.text, showTerm)
 
   return (
     <section className="blocked" aria-label={t("終端等待回應")}>
@@ -114,7 +118,7 @@ export function BlockedPanel({
         </button>
       ) : null}
       {showTerm ? (
-        <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
+        <pre ref={termRef} onScroll={onTermScroll} className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
       ) : null}
       {showKeys ? (
         <div className="keypad">

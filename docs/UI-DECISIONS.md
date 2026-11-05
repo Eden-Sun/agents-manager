@@ -850,6 +850,14 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **手機是全螢幕 sheet**：跟其他對話框一致（`.modal.blocked-modal` 的特異性原本蓋掉了通用 sheet 規則）。底部「鍵盤直通」的長說明在直通關著時講的是實體鍵盤，
   手機上藏起來；開關本身照舊常駐（#545）。
 - 回歸檢查：`node scripts/verify-blocked-mobile.mjs`（mock `__amMock.twoAsk()`，量 390×844／390×640／1440×900 第一個選項整列可見且點得到，並在手機上真的點完兩題＋送出）。
+
+## 「需要回應」只在真的有東西可以回答時才出現（2026-11-05 使用者）
+
+使用者：「修復這種誤判，只有內容沒有選擇，對用戶一點意義都沒有」。截圖：手機跳出「● lead 需要回應」，內容只是一段正在跑的 `Bash(…)` 工具呼叫與 JSON 輸出，沒有任何選項或確認框；底下卻是一排 Enter／Esc／y／n 按鍵和「鍵盤直通」。
+
+- **畫面上辨識不到任何可回答的提示，就不是「需要回應」**：不彈視窗、不畫紅色（標題列 chip、側欄燈、晶片一起），當 working／一般狀態。判斷在 daemon（`tui_prompts::screen_has_answerable_prompt`＋`observed_status::settle_false_blocked`，細節見 SPEC §2.2），前端只讀 `run.agent_status`，不自己再猜；寧可誤報也不能藏掉真的提示（畫面讀不到、有任何提示字樣都維持 blocked）。
+- 之後畫面真的出現提示、herdr 又沒再報時，daemon 把狀態改回 blocked，視窗與紅色隨之回來。
+- **面板顯示時，內容停在底部**：認不出選單而只能顯示終端原文時（`BlockedModal` 手機、`BlockedPanel`），每張新快照自動捲到底（選項／確認框都在畫面最下面）；使用者往上捲過就不搶捲軸，捲回底部附近恢復跟隨（`useStickToBottom`）。
   ![修正前](screenshots/blocked-mobile/before-phone-390x844.png) ![修正後](screenshots/blocked-mobile/after-phone-390x844.png) ![展開原題](screenshots/blocked-mobile/after-phone-390x844-expanded.png) ![第二題](screenshots/blocked-mobile/after-flow-q2.png) ![桌機](screenshots/blocked-mobile/after-desktop-1440x900.png)
 
 ## 更新框的「分析」：先攤已分診的結論，codex 也能請 AGM 解析（2026-09-25，issue #561）
