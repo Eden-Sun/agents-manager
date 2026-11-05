@@ -98,6 +98,13 @@ blocked、選單、舊快照、未知送達及讀取失敗不補標。回合結�
 
 Claude 的 live pane 有一般編號選單時，herdr cache 可能停在 done／idle，不論回合仍在進行或已結束（#2017）。沿用同一份補標所有權與 fence：只有最近 30 分鐘結束的最後一回合、最後一回合為 completed_fallback，或最後一回合仍在 in_flight 且 delivery 為 ok，才可將 idle／unknown 補成 blocked；完整輸入框與已有專責處理的對話框排除。每 60 秒輪轉掃描，單輪最多八次讀取，遠端序列讀且每次最多五秒，不保留畫面；失敗不加速。選單消失須連續兩次新鮮有效讀取，才以原狀態時間戳與世代 CAS 將自己的 blocked 改回 unknown，不叫醒 queue；讀取失敗或證據不足不還原。這是修正快取脫節，不是另一套 activity 權威，也不按鍵。
 
+**誤報的 blocked：畫面上沒有任何可回答的提示就不算「需要回應」（使用者 2026-11-05）**：herdr 的 `blocked` 是它自己的畫面規則猜的，會誤報，而且報了之後常一直停著不再報別的（robins-hub `lead`：畫面只是一段正在跑的 `Bash(herdr agent start …)` 與它的 JSON 輸出，沒有任何選項，網頁卻彈「需要回應」、側欄與晶片也紅，持續約 40 分鐘）。使用者：「只有內容沒有選擇，對用戶一點意義都沒有」。
+- 純函式 `tui_prompts::screen_has_answerable_prompt(screen)`：畫面上有沒有使用者能回答的提示。**寧可說有**——任何既有對話框辨識命中（編號選單、權限框、AskUserQuestion、Dangerous rm、問卷、Session paused、login／theme／model／auto mode、codex 的 model migration／rate limit／update 選單）、尾端 30 行有帶游標的編號選項、輸入列不是空的而且有 `(y/n)`／`Do you want to`／`Would you like to`／`Enter to select`／`Esc to cancel`／`shift+← to answer` 等提示字樣、或畫面讀不到內容，一律回 `true`；輸入列空著（真的框會佔用輸入列）時提示字樣與一般編號清單不算。只有尾端純粹是對話／工具輸出才回 `false`。
+- `observed_status::settle_false_blocked`（只看 claude，**一個鍵都不按**）：run 的 DB 狀態是 `blocked`、沒有別的 episode 擁有它（防誤刪、權限框、Session paused、codex 對話框、#2017 補標的選單）、visible 80 列讀得到時，**連續兩次讀取、相隔至少 1 秒**都沒有可回答的提示，就以 `agent_status_since` ＋ run 世代的 CAS 把 `blocked` 改成畫面實際的樣子：有 spinner→`working`；輸入框在、沒有 in-flight 回合→`idle`（並叫醒排隊的 flush）；其餘→`unknown`。寫 info log（run、pane、改成什麼）；第一次看到沒有提示寫 debug log。blocked 事件進來 600ms 後讀第一次、再 1.2 秒讀第二次（`events.rs`），10 秒巡邏（`runners/tui_prompts.rs`）每輪對 blocked 的 run 再做一次當備援。讀不到畫面、畫面有任何提示字樣、第二次讀取前提示出現都不改。改完同時清掉 `blocked_reason` 與 child_alerts 的記錄。
+- 改過之後留收據（`fblocked:<run>`，只存記憶體）：herdr 之後報**任何**狀態都以 herdr 為準（`agent_status_since` 變了收據就作廢）；herdr 沒再報、畫面卻出現可回答的提示時，`reblock_if_prompt` 在 10 秒巡邏以同一個 CAS 改回 `blocked`。收據在 run 結束時隨 `retain_menu_receipts` 清掉。
+- 側欄燈、標題列「● 需要回應」、晶片紅色、blocked 全畫面視窗與對話上方面板全部讀 `run.agent_status`，所以只要 DB 改掉就一起消失，前端不另判斷。codex 與其他 kind 不套這條（它們的對話框辨識分散在各自的 episode，誤藏的代價比誤報高）；純函式已涵蓋 codex 的 approve／y/N／model migration／rate limit／update 選單，之後要擴充只需放行 kind。
+- 面板顯示時（確實有提示，但認不出選單、只能顯示終端原文）內容跟著畫面底部：`web/src/hooks/useStickToBottom.ts`——每張新快照捲到底，使用者往上捲過就不再搶，捲回底部附近恢復。提示永遠在畫面最下面，捲軸停在頂端只會看到上面的工具輸出。
+
 ## 3. 架構
 
 ```

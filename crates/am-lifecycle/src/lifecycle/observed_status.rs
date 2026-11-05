@@ -307,8 +307,9 @@ fn reset_menu_clear_count(key: &str) {
 
 pub(super) fn retain_menu_receipts(active: &[String]) {
     owned().lock().unwrap_or_else(|e| e.into_inner()).retain(|key, _| {
-        key.strip_prefix("menu:").is_none_or(|run| active.iter().any(|id| id == run))
+        key.strip_prefix("menu:").or_else(|| key.strip_prefix("fblocked:")).is_none_or(|run| active.iter().any(|id| id == run))
     });
+    clears().lock().unwrap_or_else(|e| e.into_inner()).retain(|run, _| active.iter().any(|id| id == run));
 }
 
 fn other_menu_owner(screen: &str) -> bool {
@@ -448,6 +449,182 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
     drop(guard);
     if changed { app.emit_bot_status(&run.bot_id).await; }
     Ok(true)
+}
+
+// ───────────── 誤報的 blocked（2026-11-05）：畫面上沒有任何可以回答的提示 ─────────────
+//
+// herdr 的 `agent_status=blocked` 是它自己的畫面規則猜的，會誤報，而且誤報之後常常一直停在 blocked、不再報別的狀態。
+// 網頁看到 blocked 就彈「需要回應」、側欄與晶片也畫紅色要回答——畫面上卻沒有任何選項（robins-hub `lead`：只是一段正在跑的
+// `Bash(…)` 與它的 JSON 輸出），對使用者沒有意義。這裡讀畫面：連續兩次、相隔至少 [`FALSE_BLOCK_MIN_SPAN`] 都沒有可回答的提示
+// （[`crate::tui_prompts::screen_has_answerable_prompt`]），就把 DB 的狀態改成畫面實際的樣子（working／idle／unknown）。
+// 只看 claude；一個鍵都不按；讀不到畫面、畫面有任何提示字樣、或其他 episode（防誤刪、權限框、Session paused…）擁有這個 blocked 都不動。
+// 改過之後留收據（`fblocked:<run>`）：herdr 之後報任何狀態都以 herdr 為準（`agent_status_since` 變了收據就作廢）；herdr 沒再報、
+// 畫面卻出現提示時，[`reblock_if_prompt`] 以同一個 CAS 改回 blocked。
+
+/// 畫面「沒有提示」的判斷要連續成立至少這麼久、至少兩次讀取：畫面剛換、框還沒畫出來的一瞬間不算。
+const FALSE_BLOCK_MIN_SPAN: Duration = Duration::from_millis(1000);
+
+struct Clear {
+    since: Option<String>,
+    first: std::time::Instant,
+    reads: u32,
+}
+
+fn clears() -> &'static Mutex<HashMap<String, Clear>> {
+    static CLEARS: OnceLock<Mutex<HashMap<String, Clear>>> = OnceLock::new();
+    CLEARS.get_or_init(Default::default)
+}
+
+fn forget_clear(run: &str) {
+    clears().lock().unwrap_or_else(|e| e.into_inner()).remove(run);
+}
+
+fn false_key(run: &str) -> String { format!("fblocked:{run}") }
+
+/// 這個 run 的 blocked 是不是被我們判成誤報而改掉的（收據還在）。
+#[allow(dead_code)]
+pub(super) fn false_blocked_owned(run: &str) -> bool { receipt(&false_key(run)).is_some() }
+
+/// 讀一次 pane 畫面（visible 80 列）；讀不到／不是這個 pane 的／被截斷都回 `None`（讀不到不等於沒有提示）。
+async fn read_visible(app: &impl LcHost, run: &db::Run, pane: &str) -> Option<(RunClient, String)> {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let client = client_for_run(app, run).await.ok()?;
+        let read = client.pane_read(pane, "visible", 80).await.ok()?;
+        Some((client, read))
+    }).await;
+    match result {
+        Ok(Some((client, read))) if read.pane_id == pane && read.source == "visible" && matches!(read.format.as_str(), "text" | "ansi") && !read.truncated => {
+            Some((client, crate::composer_parse::strip_ansi(&read.text)))
+        }
+        _ => None,
+    }
+}
+
+/// 一個 blocked 的 claude run：畫面上沒有可回答的提示就改掉狀態。回傳 `true`＝這一次改了（呼叫端不必再做什麼，已推 `bot_status`）。
+/// 第一次看到沒有提示只記一筆 debug 日誌與計數，等下一次讀取確認。
+pub(super) async fn settle_false_blocked(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    if run.state != "running" || run.ended_at.is_some() || run.agent_status != "blocked" {
+        forget_clear(&run.id);
+        return Ok(false);
+    }
+    // 別的 episode 擁有這個 blocked（防誤刪框、權限框、Session paused、codex 對話框、#2017 補標的選單）：不動。
+    if menu_owned(&run.id) || crate::blocked_reason::of(&run.id).is_some() {
+        forget_clear(&run.id);
+        return Ok(false);
+    }
+    if !matches!(db::bot(app.db(), &run.bot_id).await?, Some(bot) if bot.kind == "claude") { return Ok(false) }
+    let Some(pane) = run.pane_id.as_deref().filter(|p| !p.trim().is_empty()) else { return Ok(false) };
+    let stamp = Stamp::capture(app, run).await?;
+    let Some((client, plain)) = read_visible(app, run, pane).await else {
+        forget_clear(&run.id);
+        return Ok(false);
+    };
+    if crate::tui_prompts::screen_has_answerable_prompt(&plain) {
+        forget_clear(&run.id);
+        return Ok(false);
+    }
+    {
+        let mut map = clears().lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(run.id.clone()).or_insert_with(|| Clear { since: run.agent_status_since.clone(), first: std::time::Instant::now(), reads: 0 });
+        if entry.since != run.agent_status_since {
+            *entry = Clear { since: run.agent_status_since.clone(), first: std::time::Instant::now(), reads: 0 };
+        }
+        entry.reads += 1;
+        if entry.reads == 1 {
+            tracing::debug!(run = %run.id, pane, "herdr says blocked but the pane shows nothing to answer; confirming on the next read");
+        }
+        if entry.reads < 2 || entry.first.elapsed() < FALSE_BLOCK_MIN_SPAN {
+            return Ok(false);
+        }
+    }
+    let busy = super::is_screen_busy(&plain) && crate::capture::claude::PARSER.still_busy(&plain);
+    let idle_ok = !busy
+        && (super::pane_awaits_input("claude", &plain) || crate::capture::claude::composer_visible(&plain))
+        && db::in_flight_turn(app.db(), &run.id).await?.is_none();
+    let target = if busy { "working" } else if idle_ok { "idle" } else { "unknown" };
+    let lock = app.bot_lock(&run.bot_id).await;
+    let Ok(guard) = lock.try_lock() else { return Ok(false) };
+    let applied = client.fence.run_current(Box::pin(async {
+        if db::bot_host(app.db(), &run.bot_id).await? != client.fence.conn().name { return Ok::<_, anyhow::Error>(None) }
+        let Some(fresh) = db::run(app.db(), &run.id).await? else { return Ok(None) };
+        if !stamp.matches(app, &fresh).await? || fresh.agent_status != "blocked" { return Ok(None) }
+        let mut tx = app.db().begin().await?;
+        let changed = sqlx::query(
+            "UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND ended_at IS NULL
+             AND agent_status='blocked' AND agent_status_since IS ? AND pane_id IS ? AND herdr_session IS ?
+             AND native_session_id IS ? AND terminal_id IS ? AND host IS ? AND host_generation IS ?
+             AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
+                        WHERE b.id=runs.bot_id AND b.kind='claude' AND b.deleted_at IS NULL AND p.host=?)
+             AND (?='working' OR ?='unknown' OR NOT EXISTS(SELECT 1 FROM turns WHERE run_id=runs.id AND status='in_flight'))")
+            .bind(target).bind(&fresh.id).bind(&fresh.agent_status_since).bind(&stamp.run.pane_id).bind(&stamp.run.herdr_session)
+            .bind(&stamp.run.native_session_id).bind(&stamp.run.terminal_id).bind(&stamp.host).bind(stamp.generation)
+            .bind(&client.fence.conn().name).bind(target).bind(target)
+            .execute(&mut *tx).await?.rows_affected() == 1;
+        let since: Option<String> = if changed {
+            sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id=?").bind(&fresh.id).fetch_one(&mut *tx).await?
+        } else { None };
+        tx.commit().await?;
+        if changed {
+            owned().lock().unwrap_or_else(|e| e.into_inner()).insert(false_key(&fresh.id), Owned {
+                stamp: stamp.clone(), turn: String::new(), since: since.clone(), authority: client.fence.authority_key(),
+            });
+        }
+        Ok(changed.then_some(()))
+    })).await.transpose()?.flatten().is_some();
+    drop(guard);
+    forget_clear(&run.id);
+    if applied {
+        tracing::info!(run = %run.id, pane, status = target, basis = "no answerable prompt on the pane", "herdr reported blocked but nothing on screen can be answered; settled the run status");
+        crate::blocked_reason::forget(&run.id);
+        crate::child_alerts::forget(&run.bot_id);
+        app.emit_bot_status(&run.bot_id).await;
+        if target == "idle" {
+            super::super::queue::schedule_flush_queued(app, &run.bot_id);
+        }
+    }
+    Ok(applied)
+}
+
+/// [`settle_false_blocked`] 改過狀態的 run：herdr 沒再報、畫面卻出現可回答的提示時，改回 blocked（不按鍵）。
+/// 收據的 `agent_status_since` 不吻合＝herdr（或別人）已經改過狀態，收據作廢、不動。回傳 `true`＝這一次改回了。
+pub(super) async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    let key = false_key(&run.id);
+    let Some(owner) = receipt(&key) else { return Ok(false) };
+    if run.state != "running" || run.ended_at.is_some() || run.agent_status == "blocked" || run.agent_status_since != owner.since {
+        forget(&key, &owner);
+        return Ok(false);
+    }
+    let Some(pane) = run.pane_id.as_deref().filter(|p| !p.trim().is_empty()) else { return Ok(false) };
+    let Some((client, plain)) = read_visible(app, run, pane).await else { return Ok(false) };
+    if !crate::tui_prompts::screen_has_answerable_prompt(&plain) { return Ok(false) }
+    let lock = app.bot_lock(&run.bot_id).await;
+    let Ok(guard) = lock.try_lock() else { return Ok(false) };
+    let applied = client.fence.run_current(Box::pin(async {
+        if db::bot_host(app.db(), &run.bot_id).await? != client.fence.conn().name { return Ok::<_, anyhow::Error>(false) }
+        let Some(fresh) = db::run(app.db(), &run.id).await? else { return Ok(false) };
+        if !owner.authority.matches(&client.fence) || !owner.stamp.matches(app, &fresh).await? || fresh.agent_status_since != owner.since {
+            forget(&key, &owner);
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "UPDATE runs SET agent_status='blocked' WHERE id=? AND state='running' AND ended_at IS NULL
+             AND agent_status IN ('working','idle','unknown') AND agent_status_since IS ? AND pane_id IS ? AND herdr_session IS ?
+             AND native_session_id IS ? AND terminal_id IS ? AND host IS ? AND host_generation IS ?
+             AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
+                        WHERE b.id=runs.bot_id AND b.kind='claude' AND b.deleted_at IS NULL AND p.host=?)")
+            .bind(&fresh.id).bind(&owner.since).bind(&owner.stamp.run.pane_id).bind(&owner.stamp.run.herdr_session)
+            .bind(&owner.stamp.run.native_session_id).bind(&owner.stamp.run.terminal_id).bind(&owner.stamp.host)
+            .bind(owner.stamp.generation).bind(&client.fence.conn().name)
+            .execute(app.db()).await?;
+        if result.rows_affected() == 1 { forget(&key, &owner); }
+        Ok(result.rows_affected() == 1)
+    })).await.transpose()?.unwrap_or(false);
+    drop(guard);
+    if applied {
+        tracing::info!(run = %run.id, pane, "a prompt appeared on a pane whose false blocked had been settled; restored blocked");
+        app.emit_bot_status(&run.bot_id).await;
+    }
+    Ok(applied)
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -1046,5 +1223,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status(&f).await, "idle");
+    }
+
+    // ───────────── 誤報的 blocked：畫面沒有可回答的提示 ─────────────
+
+    const TOOL_RUNNING: &str = include_str!("answerable_fixtures/claude-false-blocked-tool-running.txt");
+    const BASH_PERMISSION: &str = include_str!("fixtures/claude-2.1.287-bash-permission.txt");
+
+    async fn set_status(f: &Fixture, status: &str) {
+        sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(status).bind(&f.run.id)
+            .execute(f.env.app.db()).await.unwrap();
+    }
+
+    async fn fresh(f: &Fixture) -> db::Run {
+        db::run(f.env.app.db(), &f.run.id).await.unwrap().unwrap()
+    }
+
+    async fn settle_twice(f: &Fixture) -> bool {
+        assert!(!settle_false_blocked(&f.env.app, &fresh(f).await).await.unwrap(), "第一次只計數、等下一次讀取確認");
+        assert_eq!(status(f).await, "blocked");
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        settle_false_blocked(&f.env.app, &fresh(f).await).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_blocked_run_whose_pane_has_nothing_to_answer_is_settled_after_two_reads() {
+        let f = fixture().await;
+        set_status(&f, "blocked").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
+        assert!(settle_twice(&f).await);
+        // 畫面是正在跑的工具呼叫（有 spinner）→ working，不是 blocked。
+        assert_eq!(status(&f).await, "working");
+        assert!(false_blocked_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn a_real_prompt_keeps_the_run_blocked() {
+        let f = fixture().await;
+        set_status(&f, "blocked").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
+        assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
+        assert_eq!(status(&f).await, "blocked");
+        // 讀不到畫面也不動。
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "__READ_ERROR__");
+        settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap();
+        assert_eq!(status(&f).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_shows_up_between_the_two_reads_cancels_the_settle() {
+        let f = fixture().await;
+        set_status(&f, "blocked").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
+        assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
+        // 計數被提示打斷、重新開始：這一次又只是第一次。
+        assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
+        assert_eq!(status(&f).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_settled_run_goes_back_to_blocked_when_a_prompt_appears_and_herdr_stayed_silent() {
+        let f = fixture().await;
+        set_status(&f, "blocked").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
+        assert!(settle_twice(&f).await);
+        assert_eq!(status(&f).await, "working");
+        // 沒有提示：不動。
+        assert!(!reblock_if_prompt(&f.env.app, &fresh(&f).await).await.unwrap());
+        assert_eq!(status(&f).await, "working");
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
+        assert!(reblock_if_prompt(&f.env.app, &fresh(&f).await).await.unwrap());
+        assert_eq!(status(&f).await, "blocked");
+        assert!(!false_blocked_owned(&f.run.id));
+    }
+
+    #[tokio::test]
+    async fn a_herdr_status_after_the_settle_wins_over_the_receipt() {
+        let f = fixture().await;
+        set_status(&f, "blocked").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
+        assert!(settle_twice(&f).await);
+        // herdr 之後報了 idle（agent_status_since 動了）：收據作廢，畫面上有提示也不改回 blocked。
+        set_status(&f, "idle").await;
+        f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
+        assert!(!reblock_if_prompt(&f.env.app, &fresh(&f).await).await.unwrap());
+        assert_eq!(status(&f).await, "idle");
+        assert!(!false_blocked_owned(&f.run.id));
     }
 }

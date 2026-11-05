@@ -92,6 +92,10 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                     crate::session_paused::forget_ended(&app, &runs).await;
                     crate::dangerous_rm::forget_ended(&app, &runs).await;
                     for run in runs {
+                        // 之前判成誤報而改掉的 blocked：herdr 沒再報、畫面卻出現提示就改回去（不按鍵）。
+                        if run.agent_status != "blocked" {
+                            let _ = crate::lifecycle::poller::reblock_if_prompt(&app, &run).await;
+                        }
                         // 回合收了、herdr 也 idle，DB 卻還是 working 的卡死狀態：校正並 log。
                         if run.agent_status == "working" {
                             let _ = crate::lifecycle::poller::settle_stale_working(&app, &run).await;
@@ -122,6 +126,8 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                         if run.agent_status == "blocked" {
                             crate::blocked_reason::observe(&app, &run).await;
                             crate::runners::codex_async_question::observe(&app, &run).await;
+                            // herdr 判 blocked、畫面上卻沒有任何可回答的提示（誤報）：改掉狀態；事件那一刻沒趕上或誤報是後來才發生的由這裡補。
+                            let _ = crate::lifecycle::poller::settle_false_blocked(&app, &run).await;
                         }
                     }
                 }

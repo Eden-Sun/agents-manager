@@ -259,6 +259,66 @@ fn menu_tail(screen: &str) -> Option<Vec<&str>> {
     (!composer_is_idle(&tail) && menu_is_bottom_most(&tail)).then_some(tail)
 }
 
+/// 判斷 blocked 時畫面尾端要看幾個非空行：夠放下最高的問卷／權限框，又不會把更上面的對話輸出算進來。
+const ANSWERABLE_TAIL_LINES: usize = 30;
+
+/// 這一行（照 [`norm_line`] 壓過）有沒有「等人回答」的提示字樣：`(y/n)`、`Do you want to …`、`Enter to select`、`Esc to cancel`…
+fn has_prompt_cue(norm: &str) -> bool {
+    const CUES: [&str; 17] = [
+        "(y/n", "[y/n", "(yes/no", "[yes/no", "y/n)", "y/n]",
+        "do you want to", "would you like to", "do you trust",
+        "enter to select", "enter to confirm", "enter/esc", "press enter to", "enter to continue",
+        "esc to cancel", "esc to go back", "to navigate",
+    ];
+    CUES.iter().any(|c| norm.contains(c))
+}
+
+/// **畫面上有沒有一個使用者可以回答的提示**（選單、確認框、問卷、y/n 問句）。
+///
+/// herdr 的 `agent_status=blocked` 是它自己的畫面規則猜的，會誤報（2026-11-05 robins-hub `lead`：畫面只是一段正在跑的
+/// `Bash(…)` 工具呼叫與它的 JSON 輸出，沒有任何選項，網頁卻彈出「需要回應」、側欄也紅了；herdr 還一直停在 blocked 沒再報別的）。
+/// 沒有東西可以回答的 blocked 對使用者沒有意義，所以 blocked 的畫面要先過這一關（`observed_status::settle_false_blocked`）。
+///
+/// **寧可說有**：這個函式回 `false` 才會讓 blocked 被取消，所以任何一個既有的對話框辨識命中、畫面尾端有任何提示字樣、或畫面讀不到內容，
+/// 一律回 `true`（維持 blocked）。回 `false` 的唯一條件是上面都沒有，也就是畫面尾端只是一般的對話／工具輸出。
+///
+/// 輸入列空著（[`composer_is_idle`]）是結構性證據：真的確認框會佔用輸入列，所以那時**提示字樣不算數**——工具輸出裡寫著
+/// `Do you want to …`、`1. foo` 清單不是框；既有的對話框辨識（它們各自會擋引文）仍照算。
+pub fn screen_has_answerable_prompt(screen: &str) -> bool {
+    if screen.trim().is_empty() {
+        return true; // 讀不到內容不等於沒有提示。
+    }
+    if awaits_menu_choice(screen)
+        || permission_prompt(screen).is_some()
+        || dangerous_rm_prompt(screen).is_some()
+        || is_login_menu(screen)
+        || is_switch_model_dialog(screen)
+        || is_auto_mode_offer(screen)
+        || is_onboarding_theme(screen)
+        || cold_resume_choice(screen).is_some()
+        || is_session_paused_menu(screen)
+        || is_feedback_survey(screen)
+        || is_held_message_prompt(screen)
+        || is_codex_model_migration_prompt(screen)
+        || crate::codex_live::rate_limit_switch_prompt_open(screen)
+        || crate::codex_update::update_menu_open(screen)
+    {
+        return true;
+    }
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &raw[raw.len().saturating_sub(ANSWERABLE_TAIL_LINES)..];
+    // 帶游標的編號選項（`❯ 1. Yes`、`› 1. Try new model`）一定是選單，輸入列空著也一樣（問卷的游標選項不在輸入列上）。
+    if tail.iter().any(|l| menu_row(l).is_some_and(|(_, cursor)| cursor)) {
+        return true;
+    }
+    if composer_is_idle(tail) {
+        return false;
+    }
+    tail.iter().any(|l| menu_row(l).is_some() || has_prompt_cue(&norm_line(l)))
+        // codex 的非同步提問在輸入列上方排著 `? N question · shift+← to answer`。
+        || tail.iter().any(|l| { let n = norm_line(l); n.contains("to answer") && n.contains("shift+") })
+}
+
 /// claude 狀態列靠右的 `✔ Update installed · Restart to update`。回固定字而非整行：左半是每回合
 /// 都變的 statusLine，存 DB 會一直 emit。只看最底 [`TAIL_LINES`] 行：正文引文也會中（2026-09-08 實測）。
 pub fn update_notice(screen: &str) -> Option<String> {
@@ -2210,4 +2270,81 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 /// 各 run 的意見調查去重指紋。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait SurveyFingerprints: Send + Sync {
     fn survey_fingerprints(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, SurveyFingerprintState>>;
+}
+
+/// [`screen_has_answerable_prompt`] 的單元測試：兩種測試設定（有沒有 `daemon-test-harness`）都跑。
+#[cfg(test)]
+mod answerable_prompt_tests {
+    use super::screen_has_answerable_prompt as has;
+
+    /// 2026-11-05 使用者截圖：herdr 判 blocked，畫面只有 `Bash(…)` 工具呼叫與它的 JSON 輸出，沒有任何選項。
+    const TOOL_RUNNING: &str = include_str!("lifecycle/answerable_fixtures/claude-false-blocked-tool-running.txt");
+
+    #[test]
+    fn a_running_tool_call_with_json_output_has_nothing_to_answer() {
+        assert!(!has(TOOL_RUNNING));
+    }
+
+    #[test]
+    fn ordinary_idle_and_working_screens_have_nothing_to_answer() {
+        for (name, screen) in [
+            ("claude idle", include_str!("lifecycle/fixtures/claude-2.1.287-linux-idle.txt")),
+            ("claude finished", include_str!("lifecycle/fixtures/claude-2.1.287-linux-finished.txt")),
+            ("dangerous rm 自動拒絕後", include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-auto-denied.txt")),
+            ("feedback survey 被引用", include_str!("lifecycle/fixtures/claude-2.1.281-feedback-survey-quoted.txt")),
+            ("codex working", include_str!("lifecycle/fixtures/codex-0.155-working.txt")),
+            ("codex idle", include_str!("lifecycle/fixtures/codex-0.160-idle.txt")),
+        ] {
+            assert!(!has(screen), "{name}");
+        }
+    }
+
+    /// 輸入列空著時，工具輸出裡的提示字樣與編號清單都不是框。
+    #[test]
+    fn quoted_prompt_words_above_an_empty_composer_are_not_a_prompt() {
+        let screen = "⏺ 報告\n  Do you want to proceed? (y/n)\n  1. foo\n  2. bar\n  Enter to select · Esc to cancel\n\n──────────\n❯\n──────────\n  status\n";
+        assert!(!has(screen));
+    }
+
+    #[test]
+    fn claude_confirmation_menus_and_questionnaires_have_something_to_answer() {
+        for (name, screen) in [
+            ("bash 權限框", include_str!("lifecycle/fixtures/claude-2.1.287-bash-permission.txt")),
+            ("fetch 權限框", include_str!("lifecycle/fixtures/claude-2.1.287-fetch-permission.txt")),
+            ("Dangerous rm 確認框", include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt")),
+            ("Dangerous rm 單列", include_str!("lifecycle/fixtures/claude-2.1.286-dangerous-rm-one-row.txt")),
+            ("AskUserQuestion 單選", include_str!("lifecycle/answerable_fixtures/claude-2.1.290-askuserquestion-radio.txt")),
+            ("AskUserQuestion 多選", include_str!("lifecycle/answerable_fixtures/claude-2.1.281-askuserquestion-multiselect.txt")),
+            ("滿意度問卷", include_str!("lifecycle/fixtures/claude-2.1.281-feedback-survey.txt")),
+            ("Session paused", include_str!("lifecycle/fixtures/claude-2.1.281-session-paused.txt")),
+            ("onboarding 主題", include_str!("lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt")),
+        ] {
+            assert!(has(screen), "{name}");
+        }
+    }
+
+    #[test]
+    fn codex_approvals_and_dialogs_have_something_to_answer() {
+        for (name, screen) in [
+            ("codex approve 指令", include_str!("lifecycle/answerable_fixtures/codex-approval-command.txt")),
+            ("codex y/N 問句", include_str!("lifecycle/answerable_fixtures/codex-yn-approval-narrow.txt")),
+            ("codex 模型遷移", include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt")),
+            ("codex 額度換模型", include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt")),
+            ("codex 更新選單", include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt")),
+        ] {
+            assert!(has(screen), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_screen_that_could_not_be_read_keeps_blocked() {
+        assert!(has(""));
+        assert!(has("   \n\n"));
+    }
+
+    #[test]
+    fn a_cursor_numbered_menu_counts_even_with_an_empty_composer_line_elsewhere() {
+        assert!(has("設定\n❯ 1. 繼續\n  2. 取消\n"));
+        assert!(has("Proceed?\n[y/n]\n"));
+    }
 }

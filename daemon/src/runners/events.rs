@@ -649,6 +649,17 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
                         crate::blocked_reason::observe(&app2, &fresh).await;
                         // codex 的非同步提問（#1879）：題目從 rollout 讀，寫進 blocked_reason。
                         crate::runners::codex_async_question::observe(&app2, &fresh).await;
+                        // herdr 的 blocked 常常誤報（畫面上沒有任何可回答的提示）：讀兩次畫面確認，沒有就改掉狀態，
+                        // 網頁才不會彈「需要回應」、側欄也不紅（讀畫面、不按鍵；10 秒巡邏同一件事是備援）。
+                        if crate::lifecycle::poller::settle_false_blocked(&app2, &fresh).await.unwrap_or(false) {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                        if let Ok(Some(again)) = crate::db::run(&app2.db, &run2.id).await {
+                            if again.agent_status == "blocked" {
+                                let _ = crate::lifecycle::poller::settle_false_blocked(&app2, &again).await;
+                            }
+                        }
                     }
                 }
             });

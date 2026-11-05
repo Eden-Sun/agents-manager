@@ -14,6 +14,7 @@ import { reflowForPhone } from '../lib/termReflow'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { useStickToBottom } from '../hooks/useStickToBottom'
 import { useStore } from '../store/store'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { isSurvey } from '../lib/choiceDraft'
@@ -72,14 +73,8 @@ export function BlockedModal({
   // 桌機：照 pane 的欄數把字縮到一列放得下、不折行（2026-10-12 使用者截圖：213 欄折行後並排的選項與預覽框全碎）。
   // 縮到下限還放不下就橫捲。欄數未知時維持折行。
   const fit = !phone && snap?.columns != null && !err
-  // 題目與選項在畫面最下面：手機第一張快照到了先捲到底，之後不再動使用者的捲動位置。
-  const scrolledRef = useRef(false)
-  const hasText = Boolean(snap?.text)
-  useEffect(() => {
-    if (!phone || !hasText || scrolledRef.current || !termRef.current) return
-    scrolledRef.current = true
-    termRef.current.scrollTop = termRef.current.scrollHeight
-  }, [phone, hasText, showRaw])
+  // 題目與選項在畫面最下面：手機上每張快照都跟著捲到底，使用者往上捲過就不再動（`useStickToBottom`）。
+  const { onScroll: onTermScroll } = useStickToBottom(termRef, snap?.text, phone && showRaw)
 
   // handler 每次 render 都是新的；透過 ref 讀，listener 才不必重新註冊（同 Modal.tsx）。
   const onCloseRef = useRef(onClose)
@@ -203,6 +198,7 @@ export function BlockedModal({
             style={fit ? ({ '--term-cols': snap?.columns } as CSSProperties) : undefined}
             ref={termRef}
             tabIndex={0}
+            onScroll={onTermScroll}
           >
             {err ? t('讀取終端失敗：{err}', { err }) : snap?.text ? (reflow ? reflowForPhone(fitRules(terminal.body)) : fitRules(terminal.body)) : t('讀取中…')}
           </pre>

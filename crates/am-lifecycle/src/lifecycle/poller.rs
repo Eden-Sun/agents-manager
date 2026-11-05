@@ -25,6 +25,16 @@ pub async fn settle_stale_working(app: &impl LcHost, run: &db::Run) -> anyhow::R
     observed_status::settle_stale_working(app, run).await
 }
 
+/// herdr 報 blocked、畫面上卻沒有可回答的提示：改掉狀態（`observed_status::settle_false_blocked`）。回 `true`＝這次改了。
+pub async fn settle_false_blocked(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    observed_status::settle_false_blocked(app, run).await
+}
+
+/// 上一個的反向：之前判成誤報的 run，畫面出現提示就改回 blocked（`observed_status::reblock_if_prompt`）。
+pub async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyhow::Result<bool> {
+    observed_status::reblock_if_prompt(app, run).await
+}
+
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 

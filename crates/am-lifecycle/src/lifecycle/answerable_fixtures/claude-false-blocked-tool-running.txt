@@ -1,0 +1,24 @@
+⏺ Bash(herdr agent start robins-hub-bf3xq3-i199 --kind codex --pane wBVC:pA3 -- --model gpt-6-astra -c model_reasoning_effort=low 2>&1 | tail -2; for i in $(seq 1 20); do s=$(herdr agent get
+    robins-hub-bf3xq3-i199 2>/dev/null | grep -o '"agent_status":"[a-z]*"\|"pane_id":"[^"]*"' | tr '\n' ' '); echo "$s" | grep -q -E 'idle|ready' && break; sleep 3; done; echo "$s")
+  ⎿  {
+       "id": "cli:agent:start",
+       "result": {
+       "agent": {
+       "agent": "codex",
+       "agent_status": "idle",
+       "cwd": "/Users/me/project/example-agents/projects/rt",
+       "focused": false,
+       "foreground_cwd": "/Users/me/project/example-agents/projects/rt",
+       "pane_id": "wBVC:pA3",
+       "revision": 2
+       }
+       }
+     }
+
+✻ Running… (12s · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  hunta | robins-hub | Fable 5.1 M 21% | 5h:100%(rst 4h 38m) | 7d:14%(rst 14h 8m)
+  ⏵⏵ bypass permissions on · 1 shell
