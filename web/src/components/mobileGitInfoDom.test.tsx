@@ -186,6 +186,28 @@ test('手機：有 token 時 Git 鈕上排已用、下排百分比', async () =>
   }
 })
 
+test('手機：claude 沒有 statusLine 讀數時，退回 daemon 的 prompt_cache（297k · 30%）', async () => {
+  const restore = asPhone()
+  try {
+    const id = await running('am-claude')
+    const run = useStore.getState().runs[id]!
+    await act(() =>
+      useStore.setState({
+        selectedBotId: id,
+        runs: {
+          ...useStore.getState().runs,
+          [id]: { ...run, status: null, prompt_cache: { ...(run.prompt_cache ?? {}), context_used_tokens: 296_758, context_size: 1_000_000 } as never },
+        },
+      }),
+    )
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    assert.equal(gitBtn().querySelector('.mobile-ctx-k')?.textContent, '297k')
+    assert.equal(gitBtn().querySelector('.mobile-ctx-pct')?.textContent, '30%')
+  } finally {
+    restore()
+  }
+})
+
 test('手機：剛 resume 的 context 仍是破折號', async () => {
   const restore = asPhone()
   try {

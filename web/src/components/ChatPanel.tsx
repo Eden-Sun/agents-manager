@@ -1231,14 +1231,19 @@ function useContextReading(botId: string, status: StatusInfo | null, text: strin
     ? (usedTokens! / limit) * 100
     : solOn
       ? (solCtx?.pct ?? null)
-      : status?.context_unknown ? null : (fields?.contextUsedPct ?? status?.context_used_pct ?? null)
+      : status?.context_unknown
+        ? null
+        : (fields?.contextUsedPct ?? status?.context_used_pct ?? (usedTokens !== null && windowSize !== null && windowSize > 0 ? (usedTokens / windowSize) * 100 : null))
   const ctxDetail = limit !== null
     ? `${compactTokens(usedTokens!)}/${compactTokens(limit)}`
     : solOn
       ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
       : status && status.context_used_tokens !== null && status.context_size !== null
         ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
-        : null
+        // statusLine 沒帶 token（或還沒到）：退回 daemon 的 prompt_cache 讀數（手機 Git 鈕的 `91k` 靠它，2026-11-05 使用者：上版沒看到）。
+        : !status?.context_unknown && usedTokens !== null && windowSize !== null && windowSize > 0
+          ? `${compactTokens(usedTokens)}/${compactTokens(windowSize)}`
+          : null
   const ctxTitle = limit !== null
     ? t('已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）', { detail: ctxDetail ?? '', limit: compactTokens(limit), window: windowSize !== null ? compactTokens(windowSize) : '—' })
     : ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined
