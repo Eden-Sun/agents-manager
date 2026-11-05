@@ -644,9 +644,9 @@ mod tests {
     fn fake_observe(tag: &str, body: &str) -> String {
         let dir = crate::test_dirs::scratch_dir(&format!("shell-observe-{tag}"));
         let path = dir.join("observe.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 並行的別條測試在別的執行緒 fork 時會短暫繼承寫入 fd，這時 exec 回 ETXTBSY → observe 起不來 →
+        // 退回快照幀，第一幀就不是 raw（整批測試偶發紅的真正原因）。write_exec 寫完先 exec 探測到成功才回來。
+        crate::testing::write_exec(&path, format!("#!/bin/sh\n{body}\n"));
         path.display().to_string()
     }
 
