@@ -174,12 +174,23 @@ pub async fn start_one_if_needed(app: &Arc<App>, project_id: &str, cluster: &str
 
 /// 群集請求（還沒送出）現在該由誰接：第一個閒置成員（cache 最熱的優先）。沒有閒置成員回 `None`＝繼續等。
 /// 目標換人時以 CAS 改 `to_bot_id`（紀錄裡寫實際接手的 bot）；回傳最後的目標。
+///
+/// #2070：群集名是顯示用、會隨其他群集增減而變（`haiku` → `haiku-low`），所以不拿名稱找群集，
+/// 改找「目前含 `to_bot_id` 的群集」——`to_bot_id` 建立時就驗過是該群集成員、換人也只換成同群集成員，
+/// 而群集是以 kind/model/effort/identity 分的，名稱怎麼變它都在原群集裡。
+/// 原群集真的不在了（成員刪除、縮到剩一顆）就把請求標成 failed，交給 sweep 通知派工者，不無限等。
 pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, cluster: &str) -> anyhow::Result<Option<String>> {
-    let Some(bot) = db::bot(&app.db, project_bot).await? else { return Ok(None) };
+    let gone = |why: String| async move {
+        sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+            .bind(why).bind(request_id).execute(&app.db).await.map(|_| None)
+    };
+    let Some(bot) = db::bot(&app.db, project_bot).await? else { return Ok(gone(format!("cluster {cluster} no longer exists")).await?) };
     let clusters = project_clusters(app, &bot.project_id).await?;
-    let Some(c) = clusters.iter().find(|c| c.name == cluster) else { return Ok(None) };
+    let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) else {
+        return Ok(gone(format!("cluster {cluster} no longer exists")).await?)
+    };
     let Some(pick) = c.pick_idle() else {
-        start_one_if_needed(app, &bot.project_id, cluster).await;
+        start_one_if_needed(app, &bot.project_id, &c.name).await;
         return Ok(None)
     };
     if pick.id == project_bot { return Ok(Some(pick.id.clone())) }
@@ -294,6 +305,37 @@ mod tests {
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
         let to: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id='rq'").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(to, b.id);
+    }
+
+    /// #2070：建立 pending 後新增同模型不同 effort 的群集，原群集名從 `haiku` 變 `haiku-low`；
+    /// 原成員閒下來時請求仍要送到它。群集真的消失時請求要進 failed（sweep 會通知派工者），不能永久 pending。
+    #[tokio::test]
+    async fn pending_cluster_request_survives_rename_and_fails_when_cluster_vanishes() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let manager = expert_member(&env, "mgr", "manager", "idle").await;
+        let a = expert_member(&env, "w1", "executor", "working").await;
+        let b = expert_member(&env, "w2", "executor", "working").await;
+        sqlx::query("UPDATE bots SET effort='low' WHERE id IN (?,?)").bind(&a.id).bind(&b.id).execute(&env.app.db).await.unwrap();
+        assert_eq!(project_clusters(&env.app, &env.project_id).await.unwrap().iter().map(|c| c.name.clone()).collect::<Vec<_>>(), ["haiku"]);
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq',?,?,'k','p','[]','pending',?,'haiku')")
+            .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        for n in ["h1", "h2"] {
+            let h = expert_member(&env, n, "executor", "idle").await;
+            sqlx::query("UPDATE bots SET effort='high' WHERE id=?").bind(&h.id).execute(&env.app.db).await.unwrap();
+        }
+        assert_eq!(project_clusters(&env.app, &env.project_id).await.unwrap().iter().map(|c| c.name.clone()).collect::<Vec<_>>(), ["haiku-high", "haiku-low"]);
+        assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), None, "原群集全忙：繼續等，不能被 high 群集接走");
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
+        // 群集縮到剩一顆＝消失：請求進 failed，不永久 pending。
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq2',?,?,'k2','p','[]','pending',?,'haiku')")
+            .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&b.id).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq2", &a.id, "haiku").await.unwrap(), None);
+        let (state, error): (String, Option<String>) = sqlx::query_as("SELECT state,error FROM relay_requests WHERE id='rq2'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed");
+        assert!(error.unwrap_or_default().contains("no longer exists"));
     }
 
     #[tokio::test]
