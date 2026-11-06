@@ -454,8 +454,13 @@ check_changed() {
     if grep -qx ops <<<"$parts"; then check_ops "$files"; fi
     if grep -qx web <<<"$parts"; then check_web; fi
     if grep -qx daemon <<<"$parts"; then
-        local release_triage_submission_test=0 daemon_tests_will_run=0
+        local release_triage_submission_test=0 daemon_tests_will_run=0 am_base_crate_input=0
         filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+        # 只有 am-base crate 自己的測試會讀的非 Rust 檔（#2072）：下面的 crate 段補跑 am-base。
+        if grep -qx '__am_base_crate__' <<<"$filters"; then
+            am_base_crate_input=1
+            filters="$(printf '%s\n' "$filters" | grep -vx '__am_base_crate__' || true)"
+        fi
         if grep -Eq '^(__am_base|__daemon)_release_triage_submission__$' <<<"$filters"; then
             release_triage_submission_test=1
             filters="$(printf '%s\n' "$filters" | grep -Ev '^(__am_base|__daemon)_release_triage_submission__$' || true)"
@@ -503,7 +508,7 @@ check_changed() {
                 done
             else
                 has_am_base=0
-                for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+                for f in $( { printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p'; [ "$am_base_crate_input" = 0 ] || echo am-base; } | sort -u); do
                     if [ "$f" = "am-base" ]; then
                         has_am_base=1
                     fi
@@ -558,7 +563,7 @@ check_changed() {
                 # libtest 收多個位置過濾字串（[FILTERS...]），任一個符合就跑；一次跑完，只有全部加起來選到 0 條才拒絕（#1332）。
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
                 run_daemon_tests -- $filters || return $?
-            elif ! grep -qx '__all__' <<<"$filters" && [ "$release_triage_submission_test" = 0 ]; then
+            elif ! grep -qx '__all__' <<<"$filters" && [ "$release_triage_submission_test" = 0 ] && [ "$am_base_crate_input" = 0 ]; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
         fi
