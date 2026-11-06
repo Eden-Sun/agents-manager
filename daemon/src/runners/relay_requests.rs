@@ -60,7 +60,7 @@ pub(crate) async fn denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Opti
     match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
         Ok(()) => Ok(None),
         Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
-        Err(crate::relay_policy::RelayDenied::Denied(e)) => Ok(Some(Denial { reason: e, request: Some(id), notify: notify_list(&senders, &[], Some(&from)) })),
+        Err(crate::relay_policy::RelayDenied::Denied(e) | crate::relay_policy::RelayDenied::MemberDisabled(e)) => Ok(Some(Denial { reason: e, request: Some(id), notify: notify_list(&senders, &[], Some(&from)) })),
     }
 }
 
@@ -73,7 +73,7 @@ async fn basis_failures(app: &Arc<App>, senders: &[(String, String, Option<Strin
         if ok { continue }
         // 原因優先用政策當下的拒絕訊息（跟 NewRequest／Deliver 一致）；政策層放行（例如依據指向別的專案）才用依據的說明。
         let why = match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::Deliver).await {
-            Err(crate::relay_policy::RelayDenied::Denied(e)) => e,
+            Err(crate::relay_policy::RelayDenied::Denied(e) | crate::relay_policy::RelayDenied::MemberDisabled(e)) => e,
             _ => match auth.as_deref() {
                 None => "這則派工沒有記下派工依據（升級前排隊的專家派工）：沒有送出，請重送或改送管理者".to_string(),
                 Some(a) if !a.contains("specialist:") => "副管理者已不在代班中（或依據已失效）：這則派工沒有送出，請改送管理者".to_string(),
@@ -94,7 +94,7 @@ async fn plain_denial(app: &Arc<App>, senders: &[(String, String, Option<String>
         match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::Deliver).await {
             Ok(()) => {}
             Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
-            Err(crate::relay_policy::RelayDenied::Denied(e)) => {
+            Err(crate::relay_policy::RelayDenied::Denied(e) | crate::relay_policy::RelayDenied::MemberDisabled(e)) => {
                 let failed = vec![(from.clone(), to.clone(), e.clone())];
                 return Ok(Some(Denial { reason: e, request: None, notify: notify_list(senders, &failed, None) }));
             }
@@ -178,7 +178,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                 match crate::relay_policy::relay_prompt_basis(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
                     Ok(basis) => relay_auth = basis,
                     Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
-                    Err(crate::relay_policy::RelayDenied::Denied(e)) => {
+                    Err(crate::relay_policy::RelayDenied::Denied(e) | crate::relay_policy::RelayDenied::MemberDisabled(e)) => {
                         sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL").bind(e).bind(id).execute(&app.db).await?;
                         return Ok(())
                     }
@@ -257,7 +257,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
     match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::ResultNotice).await {
         Ok(()) => {},
         Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
-        Err(crate::relay_policy::RelayDenied::Denied(e)) => {
+        Err(crate::relay_policy::RelayDenied::Denied(e) | crate::relay_policy::RelayDenied::MemberDisabled(e)) => {
             let payload = serde_json::json!({"source":"daemon","reason":"relay_result_undeliverable","request_id":id,"subject":to});
             crate::supervisor_inbox::push_inbox(&app.db, &format!("relay_result_undeliverable:{id}"), "ops_alert", None, Some(&from), None, &payload).await?;
             sqlx::query("UPDATE relay_requests SET state='failed',error=?,alerted_at=? WHERE id=? AND state IN ('answered','failed')")

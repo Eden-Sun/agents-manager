@@ -262,7 +262,7 @@ mod tests {
         let fx = fixture().await;
         let app = &fx.env.app;
         sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&fx.exec.id).execute(&app.db).await.unwrap();
-        assert!(matches!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "member_disabled"));
+        assert!(matches!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await, Err(RelayDenied::MemberDisabled(message)) if message.contains(&fx.exec.name) && message.contains("manager_use=false")));
     }
 
     /// 兩顆執行者設成同一組（kind, model）成群集，回群集名稱（config 為真相，之後的投影不會把 model 洗掉）。

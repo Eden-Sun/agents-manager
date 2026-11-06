@@ -3149,3 +3149,5 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 `/relay/announce` 對涉及 expert 專案的普通 prompt 以驗證過的 pane／run 核對 `NewRequest` 授權（AGM 角色不受跨專案或角色限制），拒絕時回 403 與原因，狀態不可讀回 503。相同 `expect_result` 的 `client_request_id` 重送時直接回原請求狀態，不依目前 conversation 重新送出。
 
 已驗證 child 可對 `/relay/spawn/begin` 指定 `purpose=pane`，並以同一 child 憑證完成 `/relay/spawn/finish` 或 `/relay/spawn/abort`；daemon 使用憑證對應的 child 身分，不接受 child 建立 agent。`POST /api/pane-authorize` 也接受 child 憑證，僅允許自己的 pane 與非 agent pane。
+
+成員 `manager_use=false` 的 relay 拒絕維持 `403`、`reason: "member_disabled"`，並附 `message`：成員名稱、由使用者停用的原因及請使用者在 AG Man 側欄重新啟用的指示。

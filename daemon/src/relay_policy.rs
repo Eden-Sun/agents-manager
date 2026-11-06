@@ -3,7 +3,12 @@ use std::sync::Arc;
 use crate::state::App;
 
 #[derive(Debug)]
-pub enum RelayDenied { Denied(String), Unavailable(String) }
+pub enum RelayDenied { Denied(String), MemberDisabled(String), Unavailable(String) }
+
+/// Keep the machine-readable reason stable while explaining how the user can re-enable the member.
+pub fn member_disabled_body(message: &str) -> serde_json::Value {
+    serde_json::json!({"error":"forbidden", "reason":"member_disabled", "message":message})
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission { NewRequest, Deliver, ResultNotice }
@@ -34,7 +39,7 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
     // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
     let is_agm = crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some();
     if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) && to.manager_use == 0 {
-        return Err(RelayDenied::Denied("member_disabled".into()));
+        return Err(RelayDenied::MemberDisabled(format!("{} 已被使用者停用（側欄『停用』鈕／manager_use=false），管理者無法派工；請使用者在 AG Man 側欄重新啟用", to.name)));
     }
     if is_agm { return Ok(None); }
     // 跨專案（使用者 2026-10-31／11-02）：目標在 expert 專案 → 只准送到它的頂層 manager（對外窗口），送件者若在 expert 專案也必須是 manager；
@@ -171,7 +176,12 @@ mod agm_cross_project_tests {
         // manager_use=0 (member_disabled)
         sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
         // Plain bot / manager to disabled worker -> member_disabled
-        assert!(matches!(relay_prompt_allowed(&env.app, &manager.id, &worker.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "member_disabled"));
+        for kind in [Admission::NewRequest, Admission::Deliver] {
+            let Err(RelayDenied::MemberDisabled(message)) = relay_prompt_allowed(&env.app, &manager.id, &worker.id, kind).await else { panic!("disabled member must be denied") };
+            let body = member_disabled_body(&message);
+            assert_eq!(body["reason"], "member_disabled");
+            assert_eq!(body["message"], format!("{} 已被使用者停用（側欄『停用』鈕／manager_use=false），管理者無法派工；請使用者在 AG Man 側欄重新啟用", worker.name));
+        }
         // ResultNotice is unaffected
         assert!(relay_prompt_allowed(&env.app, &manager.id, &worker.id, Admission::ResultNotice).await.is_ok());
         // AGM is unaffected
