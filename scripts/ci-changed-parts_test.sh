@@ -58,6 +58,53 @@ for f in crates/am-base/src/db.rs crates/am-supervisor/src/supervisor/store.rs c
 done
 check "daemon" "daemon/src/api.rs"
 
+# #2072：am-base 讀的 web／ops／scripts 檔。baseline.toml 由 include_str! 編進 binary；outboxList.ts 是前後端預覽白名單比對；
+# codex-async-* 是 codex_async_question 的共用 fixture；project-cargo.sh、host-baseline-sync-mac-verify.sh 由 cargo_shim／host_baseline 測試讀。
+check "daemon ops" "ops/host-baseline/baseline.toml"
+check "daemon ops" "scripts/project-cargo.sh"
+check "daemon ops" "scripts/ops/host-baseline-sync-mac-verify.sh"
+check "web daemon" "web/src/lib/outboxList.ts"
+check "web daemon" "web/src/lib/__fixtures__/codex-async-screen-cases.json"
+check "web daemon" "web/src/lib/__fixtures__/codex-async-ordinary-menu.txt"
+# 同目錄的其他 fixture 仍只歸 web。
+check "web" "web/src/lib/__fixtures__/other.json"
+
+# 防再漏（#2072）：Rust 原始碼裡 include_str!("…")／env!("CARGO_MANIFEST_DIR")).join("…") 指到 web／ops／scripts／docs 的檔，
+# 改了都要跑 daemon。include_str! 相對於原始檔；CARGO_MANIFEST_DIR 是編它的 crate，#[path] 掛進 daemon 的檔要連 daemon/ 一起試。
+# 指到目錄（再 .join 檔名）的跳過：那種要逐條明列在上面。
+# 解析路徑用 python3（macOS 的 realpath 沒有 -m／--relative-to）。
+scanned=0
+while IFS=$'\t' read -r file p; do
+    scanned=$((scanned + 1))
+    got="$(printf '%s\n' "$p" | bash scripts/ci-changed-parts.sh)"
+    if ! grep -qx -e daemon -e full <<<"$got"; then
+        printf 'FAIL: %s 讀 %s，但只分到 [%s]（要含 daemon；補進 ci-changed-parts.sh 的跨界清單）\n' "$file" "$p" "$(echo $got)" >&2
+        fail=1
+    fi
+done < <(python3 -B - <<'PY'
+import os, re
+pat = re.compile(r'include_str!\("([^"]+)"\)|CARGO_MANIFEST_DIR"\)\)\.join\("([^"]+)"\)')
+for top in ("daemon", "crates"):
+    for d, _, names in os.walk(top):
+        for n in names:
+            if not n.endswith(".rs"):
+                continue
+            f = os.path.join(d, n)
+            crate = d
+            while not os.path.isfile(os.path.join(crate, "Cargo.toml")):
+                crate = os.path.dirname(crate)
+            for inc, joined in pat.findall(open(f, encoding="utf-8").read()):
+                for base in ([d] if inc else [crate, "daemon"]):
+                    p = os.path.relpath(os.path.normpath(os.path.join(base, inc or joined)))
+                    if os.path.isfile(p) and p.split(os.sep)[0] in ("web", "ops", "scripts", "docs"):
+                        print(f"{f}\t{p}")
+PY
+)
+if [ "$scanned" -lt 5 ]; then
+    echo "FAIL: 只掃到 ${scanned} 個跨界讀取，掃描規則大概壞了" >&2
+    fail=1
+fi
+
 # SPEC 的敘述不需要執行測試；API 等執行期契約文件仍按原分類。
 check "" "docs/SPEC.md"
 check "daemon" "docs/SPEC.md" "docs/API.md"

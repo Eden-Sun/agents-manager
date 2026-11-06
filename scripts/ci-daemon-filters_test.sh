@@ -94,6 +94,12 @@ check "claude_review::" "scripts/ops/codex-release-task.md"
 check "__daemon_release_triage_submission__" "scripts/ops/release-triage-task.md"
 check "supervisor::setup::" "scripts/ops/fixtures/patrol-runtime.json"
 check "supervisor::setup::" "scripts/agm.py"
+# #2072：am-base 讀的非 Rust 檔。測試掛在 daemon harness 的直接選；只在 am-base crate 裡的印 __am_base_crate__（check.sh 補跑 cargo test -p am-base）。
+check "runners::am_base_tests::outbox::" "web/src/lib/outboxList.ts"
+check "runners::am_base_tests::cargo_shim::" "scripts/project-cargo.sh"
+check "__am_base_crate__" "ops/host-baseline/baseline.toml"
+check "__am_base_crate__" "scripts/ops/host-baseline-sync-mac-verify.sh"
+check "__am_base_crate__" "web/src/lib/__fixtures__/codex-async-screen-cases.json"
 check "supervisor::persona:: supervisor::responder:: supervisor::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
 # docs/API.md：路由對照（api_doc_parity，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests）。#1170。
 check "api_route_methods_match_documented_inventory ws_event_docs_tests::" "docs/API.md"

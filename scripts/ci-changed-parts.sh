@@ -17,6 +17,10 @@ while IFS= read -r f; do
         #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）、
         #     scripts/ops/release-triage-task.md（am-base 的提交模板契約測試；#1185）。
         #   - daemon 的測試讀 docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
+        #   - am-base 讀 web／ops／scripts 底下的檔（#2072）：ops/host-baseline/baseline.toml（include_str! 編進 binary）、
+        #     web/src/lib/outboxList.ts（前後端預覽白名單比對）、web/src/lib/__fixtures__/codex-async-*、
+        #     scripts/project-cargo.sh（cargo_shim）、scripts/ops/host-baseline-sync-mac-verify.sh（host_baseline::apply）。
+        #     scripts/ci-changed-parts_test.sh 會掃 Rust 原始碼裡指到這些目錄的路徑，漏列就紅。
         # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
         crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
         crates/am-base/src/db.rs | crates/am-supervisor/src/supervisor/store.rs | crates/am-supervisor/src/supervisor/roles.rs | crates/am-supervisor/src/mission/store.rs) daemon=1; ops=1 ;;
@@ -24,6 +28,8 @@ while IFS= read -r f; do
         scripts/check.sh) web=1; daemon=1; ops=1; ob=1 ;;
         scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
         scripts/ops/release-triage-task.md) ops=1; daemon=1 ;;
+        ops/host-baseline/baseline.toml | scripts/project-cargo.sh | scripts/ops/host-baseline-sync-mac-verify.sh) ops=1; daemon=1 ;;
+        web/src/lib/outboxList.ts | web/src/lib/__fixtures__/codex-async-*) web=1; daemon=1 ;;
         # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀，README 內容也有測試釘住。
         scripts/*.md) ops=1 ;;
         # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
