@@ -651,6 +651,7 @@ async fn relay_announce(
     }
     if let Err(e) = crate::relay_policy::relay_prompt_allowed(&app, &body.bot_id, &target.bot_id, crate::relay_policy::Admission::NewRequest).await {
         return match e {
+            crate::relay_policy::RelayDenied::MemberDisabled(message) => (StatusCode::FORBIDDEN, Json(crate::relay_policy::member_disabled_body(&message))),
             crate::relay_policy::RelayDenied::Denied(reason) => (StatusCode::FORBIDDEN, Json(json!({"error":"forbidden","reason":reason}))),
             crate::relay_policy::RelayDenied::Unavailable(reason) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"authorization_unavailable","reason":reason}))),
         };
@@ -7774,18 +7775,19 @@ async fn resolve_relay_target(
         ).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
     }
     let mut rows = Vec::new();
-    let mut denied_reason: Option<String> = None;
+    let mut denied_reason: Option<serde_json::Value> = None;
     for candidate in candidates {
         match crate::relay_policy::relay_prompt_allowed(&app, &sender, &candidate.0, crate::relay_policy::Admission::NewRequest).await {
             Ok(()) => rows.push(candidate),
-            Err(crate::relay_policy::RelayDenied::Denied(reason)) => { denied_reason.get_or_insert(reason); },
+            Err(crate::relay_policy::RelayDenied::Denied(reason)) => { denied_reason.get_or_insert(json!({"error":"forbidden","reason":reason})); },
+            Err(crate::relay_policy::RelayDenied::MemberDisabled(message)) => { denied_reason.get_or_insert(crate::relay_policy::member_disabled_body(&message)); },
             Err(crate::relay_policy::RelayDenied::Unavailable(e)) => return Err(LcError::Upstream(e)),
         }
     }
     if rows.is_empty() {
         // 候選存在但全被政策擋掉：回 403 帶原因，不要吞成 404。
         return Err(match denied_reason {
-            Some(reason) => LcError::Forbidden(json!({"error":"forbidden","reason":reason})),
+            Some(body) => LcError::Forbidden(body),
             None => LcError::NotFound("relay target".into()),
         });
     }
@@ -7835,6 +7837,7 @@ async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), 
 async fn check_relay_basis(app: &Arc<App>, from: &str, to: &str) -> Result<Option<String>, LcError> {
     match crate::relay_policy::relay_prompt_basis(app, from, to, crate::relay_policy::Admission::NewRequest).await {
         Ok(basis) => Ok(basis),
+        Err(crate::relay_policy::RelayDenied::MemberDisabled(message)) => Err(LcError::Forbidden(crate::relay_policy::member_disabled_body(&message))),
         Err(crate::relay_policy::RelayDenied::Denied(reason)) => Err(LcError::Forbidden(json!({"error":"forbidden","reason":reason}))),
         Err(crate::relay_policy::RelayDenied::Unavailable(reason)) => Err(LcError::Upstream(reason)),
     }
