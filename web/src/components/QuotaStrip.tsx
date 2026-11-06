@@ -395,13 +395,6 @@ function windowBar(name: WindowName, pct: number | null, w: QuotaWindow | null |
   }
 }
 
-/** 手機一格只放一個數字：先比 daemon 旗標再比 pct；平手留現任，免得數字在窗口間跳。 */
-function moreUrgent(w: WindowBar, best: WindowBar): boolean {
-  const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
-  if (rank(w) !== rank(best)) return rank(w) > rank(best)
-  return (w.pct ?? 100) < (best.pct ?? 100)
-}
-
 /** 窗口名顯示字：grok 的「週」在英文介面寫 7d，其餘窗口名（5h／7d／F）本來就是英文。 */
 function windowText(name: WindowName, t: ReturnType<typeof useT>): string {
   return name === '週' ? t('週') : name // i18n-ignore
@@ -410,15 +403,6 @@ function windowText(name: WindowName, t: ReturnType<typeof useT>): string {
 /** grok reports a weekly-only window and labels it 週; agy shows its week as 7d like claude. */
 function weekLabel(kind: BotKind): '7d' | '週' { // i18n-ignore
   return kind === 'grok' ? '週' : '7d' // i18n-ignore
-}
-
-/** 手機有倒數的格子：百分比移到 logo 列的資料；沒倒數回 null（照舊寫在第二行）。 */
-function headPctOf(w: WindowBar | undefined, now: number, hit: boolean, t: ReturnType<typeof useT>) {
-  if (!w) return null
-  const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
-  if (!back) return null
-  const text = w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`
-  return { win: w, text, title: w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back }) }
 }
 
 function Gauge({
@@ -431,7 +415,7 @@ function Gauge({
 }: {
   entry: QuotaEntry
   host: string
-  /** 手機：條子縮成 chip，剩餘量用數字寫。 */
+  /** 手機：全部窗口直向排列，使用較窄量表。 */
   compact: boolean
   focused: boolean
   open: boolean
@@ -451,26 +435,7 @@ function Gauge({
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
-  // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
-  // 5h／F 被 daemon 標 low／critical 且更急時才取代，不並列；完整數字在 tooltip 與 sheet。
-  if (compact && seven !== null) {
-    const shown: WindowBar = windowBar(weekLabel(entry.kind), seven, q?.seven_day, q?.updated_at)
-    // 門檻見 docs/API.md §12.4。
-    const rivals: WindowBar[] = []
-    if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
-      rivals.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
-    }
-    if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
-      rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
-    }
-    windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (compact && seven === null && (five !== null || fable !== null)) {
-    // 7d 沒有值時手機仍只寫一個窗口：從 5h／F 取最急的那個（#1179：只有 Fable 有值時不能畫成「5h —」）。
-    const cands: WindowBar[] = []
-    if (five !== null) cands.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
-    if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
-    windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
-  } else if (five === null && seven === null && fable === null) {
+  if (five === null && seven === null && fable === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
   } else {
     windows = []
@@ -490,7 +455,7 @@ function Gauge({
     const mark = resetMark(w.resetsAt, span, now)
     const left = msUntil(w.resetsAt, now)
     // 那一列已經在底下那一行寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次。
-    const soon = countdown ? null : soonLabel(w.name, w.resetsAt, now)
+    const soon = compact || countdown ? null : soonLabel(w.name, w.resetsAt, now)
     return (
       <span key={w.name} className="quota-window">
         <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
@@ -503,7 +468,7 @@ function Gauge({
           critical={w.critical}
           mark={mark}
           markTitle={left === null ? undefined : t('{name} 還有 {back} 重置', { name: w.name, back: fmtLeft(left) })}
-          unit={countdown}
+          unit={compact || countdown}
           hit={hit}
         />
       </span>
@@ -513,8 +478,7 @@ function Gauge({
     const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
     return back && w.resetsAt ? [{ name: w.name, back, resetsAt: w.resetsAt, win: w }] : []
   })
-  const headPct = compact ? headPctOf(windows[0], now, hit, t) : null
-  const resetLine = compact ? null : resetLineOf(countdownRows, t)
+  const resetLine = resetLineOf(countdownRows, t)
   const resetLineLevel = countdownRows.some((r) => r.win.critical) ? 'crit' : countdownRows.some((r) => r.win.low) ? 'warn' : ''
   const uncapped = !compact && noFiveHourCap(entry.kind, q)
   const title = `${hostLabel(host, t)} · ${label(entry, q, loggedOut, now, t)}`
@@ -560,12 +524,6 @@ function Gauge({
             {entry.identity ?? entry.kind}
           </span>
         )}
-        {headPct ? (
-          // 方案 A（2026-11-04 使用者）：有倒數的格子，百分比上移到 logo 列，第二行只剩「窗口＋倒數」，格子不再過寬。
-          <span className={`quota-compact-pct quota-head-pct ${levelOf(headPct.win)}`} title={headPct.title}>
-            {headPct.text}
-          </span>
-        ) : null}
         {entry.kind === 'codex' ? <CodexResetHint now={now} compact={compact} /> : null}
         {/* 開關放左欄名稱下方，整格不會因它變高。 */}
         <StripDisableToggle entry={entry} host={host} />
@@ -578,34 +536,7 @@ function Gauge({
         aria-label={accessibleTitle}
         onClick={onOpen}
       >
-      {compact ? (
-        /* 手機風險不能只剩顏色（UI-DECISIONS：百分比始終保留），寫成數字。 */
-        <span className="quota-compact">
-          {windows.map((w) => {
-            // 快回來了就寫倒數（2026-09-14／09-17 使用者）：5h 用完且三小時內；週窗口剩不到 10% 且 24 小時內。
-            const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
-            // 已經寫倒數就別再把窗口名換成剩幾分（同桌機那邊）：手機上會變成「40m 0h40」同一個時間寫兩次（2026-10-16 使用者）。
-            const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
-            return (
-            <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
-              <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
-                {soon ?? windowText(w.name, t)}
-                {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
-              </span>
-              {back ? (
-                // 倒數時百分比也留著（2026-10-02 使用者），但放在 logo 列（headPct），這裡只寫倒數。
-                <span className="quota-reset-at" title={w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back })}>
-                  {back}
-                </span>
-              ) : (
-                <span className="quota-compact-pct">{w.pct === null ? t('無資料') : `${fmtPct(w.pct, hit)}%`}</span>
-              )}
-            </span>
-            )
-          })}
-        </span>
-      ) : (
-      <span className={`quota-bars${windows.length === 1 && !uncapped ? ' single' : ''}`}>
+      <span className={`quota-bars${compact ? ' quota-mobile-bars' : ''}${windows.length === 1 && !uncapped ? ' single' : ''}`}>
         {uncapped ? (
           <span className="quota-window">
             <span className="quota-window-name">5h</span>
@@ -621,7 +552,6 @@ function Gauge({
           </span>
         ) : null}
       </span>
-      )}
       </button>
     </span>
   )

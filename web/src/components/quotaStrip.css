@@ -313,66 +313,6 @@
 
 /* 手機 chip：窗口名＋剩餘 %，取代 38px 量表（QuotaStrip `compact`）。 */
 
-.quota-compact {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  white-space: nowrap;
-}
-
-.quota-compact .quota-window-name {
-  text-align: left;
-}
-
-/* 等級顏色掛在每個窗口上而非整格：5h 綠 7d 黃時整格一色就得說謊。 */
-
-.quota-compact-win {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-}
-
-.quota-compact-win + .quota-compact-win {
-  margin-left: 8px;
-}
-
-.quota-compact-win.warn .quota-compact-pct,
-.quota-compact-win.warn .quota-window-name {
-  color: var(--warn);
-}
-
-.quota-compact-win.critical .quota-compact-pct,
-.quota-compact-win.critical .quota-window-name {
-  color: var(--danger);
-}
-
-.quota-compact-pct {
-  font-size: 11px;
-  font-weight: 650;
-  line-height: 1;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 方案 A：有倒數的格子，百分比在 logo 列，顏色跟窗口等級（同第二行的規則）。 */
-
-.quota-head-pct.warn {
-  color: var(--warn);
-}
-
-.quota-head-pct.critical {
-  color: var(--danger);
-}
-
-.quota-hp.warn .quota-compact-pct {
-  color: var(--warn);
-}
-
-.quota-hp.crit .quota-compact-pct {
-  color: var(--danger);
-}
-
 /* 針要凸出條的上下緣，定位掛外層（條有 overflow: hidden）。 */
 
 .quota-bar-wrap {
@@ -664,33 +604,9 @@
   }
 }
 
-/* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
+/* 手機明細貼額度列正下方。 */
 
 @media (width <= 640px) {
-  .main-head .quota-compact .quota-window-name,
-  .main-head .quota-compact-pct {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  /* 一格只有一個窗口（compact：7d 常駐，更急的取代），單行；column 排法曾讓額度列長高，390px 塞不下五個帳號（2026-09-12）。 */
-
-  .main-head .quota-compact {
-    flex-wrap: nowrap;
-  }
-
-  /* 顏色跟每個窗口自己的等級，否則健康的也被染黃。 */
-
-  .main-head .quota-compact-win.warn .quota-compact-pct,
-  .main-head .quota-compact-win.warn .quota-window-name {
-    color: var(--warn);
-  }
-
-  .main-head .quota-compact-win.critical .quota-compact-pct,
-  .main-head .quota-compact-win.critical .quota-window-name {
-    color: var(--danger);
-  }
-
   /* 貼額度列正下方而非底部 sheet：底部要滑很遠且擋輸入框（2026-09-09 使用者）。 */
   /* 寬度等於視窗（2026-10-09 使用者：手機按額度的 pop up 要全螢幕寬）：左右貼齊、只讓出 safe-area（瀏海、圓角螢幕），
      不再留 8px 邊；`position: fixed` 直接對視窗定位，寬度由左右兩個 inset 決定，超過的內容在 max-height 內捲動。 */
@@ -714,7 +630,7 @@
     display: none;
   }
 
-  /* 手機 chip 是純文字，圖形版只在彈出層：條高一點、黑針粗一點。 */
+  /* 明細裡的量表更高，方便閱讀。 */
 
   .quota-pop .quota-pop-line {
     font-size: 13px;
@@ -847,8 +763,48 @@
     margin: 0;
   }
 
-  .main-head .quota-compact {
-    padding-left: 2px;
+  /* 固定窗口順序與欄寬，避免 5h／7d 因緊急程度換位。條與針沿用主題色。 */
+  .main-head .quota-mobile-bars {
+    row-gap: 3px;
+    min-height: 0;
+  }
+
+  .main-head .quota-mobile-bars .quota-window {
+    grid-template-columns: minmax(16px, auto) auto;
+    column-gap: 2px;
+    min-height: 11px;
+  }
+
+  .main-head .quota-mobile-bars .quota-window-name,
+  .main-head .quota-mobile-bars .quota-bar-pct {
+    color: var(--text-dim);
+  }
+
+  .main-head .quota-mobile-bars .quota-bar-pct.warn {
+    color: var(--warn);
+  }
+
+  .main-head .quota-mobile-bars .quota-bar-pct.crit {
+    color: var(--danger);
+  }
+
+  .main-head .quota-mobile-bars .quota-bar-wrap,
+  .main-head .quota-mobile-bars .quota-bar {
+    width: 28px;
+  }
+
+  .main-head .quota-mobile-bars .quota-bar-row {
+    min-width: 0;
+  }
+
+  .main-head .quota-mobile-bars .quota-bar-pct {
+    min-width: 3.2em;
+    text-align: right;
+  }
+
+  .main-head .quota-mobile-bars .quota-reset-line {
+    margin-top: 0;
+    padding-bottom: 1px;
   }
 }
 
