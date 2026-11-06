@@ -20,6 +20,14 @@ pub(crate) struct Denial { pub reason: String, request: Option<String>, plain_se
 pub(crate) async fn denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<Denial>> {
     let request: Option<(String,String,String,String)> = sqlx::query_as("SELECT r.id,r.from_bot_id,r.to_bot_id,r.state FROM relay_requests r JOIN turns t ON (r.to_turn_id=t.id OR t.client_request_id='relay-request:'||r.id) JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=r.to_bot_id WHERE t.id=?")
         .bind(turn_id).fetch_optional(&app.db).await?;
+    // 跟認領同一段條件（`lifecycle::relay_grant`）：記下的授權依據此刻不成立就擋，不因送件者搬專案、降級而略過重驗。
+    if let Some(reason) = basis_denial(app, turn_id).await? {
+        return Ok(Some(match request {
+            Some((id, _, _, state)) if matches!(state.as_str(), "pending" | "delivered") => Denial { reason, request: Some(id), plain_sender: None },
+            Some(_) => Denial { reason, request: None, plain_sender: None },
+            None => Denial { reason, request: None, plain_sender: plain_sender(app, turn_id).await? },
+        }));
+    }
     let Some((id, from, to, state)) = request else { return plain_denial(app, turn_id).await };
     if !matches!(state.as_str(), "pending" | "delivered") { return Ok(Some(Denial { reason: "relay request is already terminal".into(), request: None, plain_sender: None })) }
     match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
@@ -27,6 +35,29 @@ pub(crate) async fn denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Opti
         Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
         Err(crate::relay_policy::RelayDenied::Denied(e)) => Ok(Some(Denial { reason: e, request: Some(id), plain_sender: None })),
     }
+}
+
+/// 排隊 turn 裡有哪一則 bot 派工的授權依據（`messages.relay_auth`）此刻不成立：回原因。條件與 `claim_queued` 同一段 SQL。
+async fn basis_denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
+    let ok: bool = sqlx::query_scalar(&format!("SELECT {}", lifecycle::relay_grant::queued_turn_grants_ok_sql("?"))).bind(turn_id).fetch_one(&app.db).await?;
+    if ok { return Ok(None) }
+    // 原因優先用政策當下的拒絕訊息（跟 NewRequest／Deliver 一致）；政策層放行（例如依據指向別的專案）才用依據的說明。
+    if let Some((from, to)) = plain_sender(app, turn_id).await? {
+        if let Err(crate::relay_policy::RelayDenied::Denied(e)) = crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await { return Ok(Some(e)) }
+    }
+    let auth: Option<String> = sqlx::query_scalar("SELECT m.relay_auth FROM messages m WHERE m.turn_id=? AND m.role='user' AND m.relay_from IS NOT NULL AND m.relay_auth IS NOT NULL LIMIT 1")
+        .bind(turn_id).fetch_optional(&app.db).await?.flatten();
+    Ok(Some(match auth {
+        Some(a) if a.starts_with("deputy:") => "副管理者已不在代班中：這則派工沒有送出，請改送管理者".to_string(),
+        Some(_) => "專家對這顆執行者的授權已撤銷或已變更（角色、track、所屬專案）：這則派工沒有送出；請管理者授權（agm grant）或改送管理者".to_string(),
+        None => "這則派工需要管理者授權（agm grant）：沒有送出，請改送管理者".to_string(),
+    }))
+}
+
+/// 一般派工（沒有 durable 請求）被撤回時要通知的送件者：第一則已驗證的 bot 派工。
+async fn plain_sender(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<(String, String)>> {
+    Ok(sqlx::query_as("SELECT m.relay_from,c.bot_id FROM messages m JOIN turns t ON t.id=m.turn_id JOIN conversations c ON c.id=t.conversation_id JOIN bots b ON b.id=m.relay_from WHERE t.id=? AND t.queue_class='relay' AND m.role='user' AND m.relay_unverified=0 ORDER BY m.created_at LIMIT 1")
+        .bind(turn_id).fetch_optional(&app.db).await?)
 }
 
 /// 沒有 `relay_requests` 紀錄的排隊派工（`queue_if_busy`、不帶 `expect_result`）：只看 `turns.queue_class='relay'`
@@ -114,9 +145,10 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                     None => return Ok(()),
                 }
             }
+            let mut relay_auth: Option<String> = None;
             if existing.is_none() {
-                match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
-                    Ok(()) => {},
+                match crate::relay_policy::relay_prompt_basis(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
+                    Ok(basis) => relay_auth = basis,
                     Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
                     Err(crate::relay_policy::RelayDenied::Denied(e)) => {
                         sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL").bind(e).bind(id).execute(&app.db).await?;
@@ -125,7 +157,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                 }
             }
             turn = if existing.is_some() { existing } else if db::active_run(&app.db, &to).await?.is_some_and(|run| run.state == "running") {
-                match lifecycle::prompt_from_api_queue_if_busy(app, &to, &text, &key, &files, lifecycle::RelaySrc::trusted(Some(&from)), false, None).await {
+                match lifecycle::prompt_from_api_queue_if_busy(app, &to, &text, &key, &files, lifecycle::RelaySrc::trusted(Some(&from)).with_auth(relay_auth.as_deref()), false, None).await {
                     Ok(out) => Some(out.turn_id),
                     Err(lifecycle::LcError::Conflict(_)) => None,
                     Err(e) => {

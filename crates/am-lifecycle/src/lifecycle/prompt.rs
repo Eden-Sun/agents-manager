@@ -428,19 +428,28 @@ pub struct RelaySrc<'a> {
     pub from: Option<&'a str>,
     pub unverified: bool,
     pub queue_class: QueueClass,
+    /// 這則派工的可信授權依據（daemon `relay_policy::relay_prompt_basis`：`grant:<專案>`／`deputy:<專案>`），寫進
+    /// `messages.relay_auth`；turn 變成可送出的那一句依它正向確認（`relay_grant`）。原本就不靠授權的派工是 `None`。
+    pub auth: Option<&'a str>,
 }
 
 impl<'a> RelaySrc<'a> {
     pub fn trusted(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User } }
+        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User }, auth: None }
     }
 
     pub fn user(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::User }
+        Self { from, unverified: false, queue_class: QueueClass::User, auth: None }
     }
 
     pub fn daemon_notice(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice }
+        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice, auth: None }
+    }
+
+    /// 帶上授權依據（見 [`RelaySrc::auth`]）。
+    pub fn with_auth(mut self, auth: Option<&'a str>) -> Self {
+        self.auth = auth;
+        self
     }
 }
 
@@ -550,7 +559,7 @@ pub async fn prompt_relayed_queueable(
         text,
         client_request_id,
         &[],
-        RelaySrc { from: relay_from, unverified: false, queue_class },
+        RelaySrc { from: relay_from, unverified: false, queue_class, auth: None },
         true,
         false,
         Admission::Gated,
@@ -608,7 +617,7 @@ pub async fn queue_for_next_turn(
         return Err(queue_insert_error(bot_id, conv, e));
     }
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, relay_auth, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(conv)
@@ -616,6 +625,7 @@ pub async fn queue_for_next_turn(
     .bind(text)
     .bind(relay.from)
     .bind(relay.unverified)
+    .bind(relay.auth)
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -1232,7 +1242,7 @@ async fn prompt_inner(
                WHERE id = ? AND bot_id = ? AND state = 'running'
                  AND pane_id IS ? AND herdr_session IS ? AND native_session_id IS ?
           ) AND {}",
-        super::relay_grant::grant_allows_sql("?", "?")
+        super::relay_grant::relay_allowed_params_sql()
     ))
     .bind(&turn_id)
     .bind(&conv)
@@ -1247,12 +1257,13 @@ async fn prompt_inner(
     .bind(run.native_session_id.as_deref())
     .bind(relay.from)
     .bind(bot_id)
+    .bind(relay.auth)
     .execute(&mut *tx)
     .await
     .map_err(up)?;
     if inserted.rows_affected() == 0 {
-        let grant_ok: bool = sqlx::query_scalar(&format!("SELECT {}", super::relay_grant::grant_allows_sql("?", "?")))
-            .bind(relay.from).bind(bot_id).fetch_one(&mut *tx).await.map_err(up)?;
+        let grant_ok: bool = sqlx::query_scalar(&format!("SELECT {}", super::relay_grant::relay_allowed_params_sql()))
+            .bind(relay.from).bind(bot_id).bind(relay.auth).fetch_one(&mut *tx).await.map_err(up)?;
         tx.rollback().await.map_err(up)?;
         if !grant_ok {
             return Err(LcError::conflict(
@@ -1268,7 +1279,7 @@ async fn prompt_inner(
     let msg_id = db::ulid();
     // 真的要打斷一個進行中的回合才標「插隊」；閒著時按插隊就是一般送出。
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, relay_auth, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
@@ -1276,6 +1287,7 @@ async fn prompt_inner(
     .bind(text)
     .bind(relay.from)
     .bind(relay.unverified)
+    .bind(relay.auth)
     .bind(send_now_active.then_some("send_now"))
     .bind(db::now())
     .execute(&mut *tx)

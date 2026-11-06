@@ -367,8 +367,10 @@ mod tests {
         let turn = db::ulid();
         sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at) VALUES(?,?,'web',?,'pending',?,?,?)")
             .bind(&turn).bind(&conv).bind(status).bind(crid).bind(class).bind(db::now()).execute(&app.db).await.unwrap();
-        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES(?,?,?,'user','do it','web',?,?)")
-            .bind(db::ulid()).bind(&conv).bind(&turn).bind(&from.id).bind(db::now()).execute(&app.db).await.unwrap();
+        // 跟正式派工一樣記下核權當下的依據（`relay_prompt_basis`）；被擋的組合沒有依據。
+        let auth = if class == "relay" { crate::relay_policy::relay_prompt_basis(app, &from.id, &to.id, Admission::Deliver).await.ok().flatten() } else { None };
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,relay_auth,created_at) VALUES(?,?,?,'user','do it','web',?,?,?)")
+            .bind(db::ulid()).bind(&conv).bind(&turn).bind(&from.id).bind(auth).bind(db::now()).execute(&app.db).await.unwrap();
         turn
     }
 
@@ -607,11 +609,17 @@ mod tests {
 
     /// 直接送出（目標閒著）：真的走 lifecycle 建 in_flight turn 的那一句。
     async fn dispatch_now(fx: &Fx, crid: &str) -> Result<crate::lifecycle::PromptOut, LcError> {
+        let auth = crate::relay_policy::relay_prompt_basis(&fx.env.app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.ok().flatten();
+        dispatch_with(fx, crid, auth.as_deref()).await
+    }
+
+    /// 帶著指定的依據直接送出（模擬「核權時記下依據、之後狀態才變」）。
+    async fn dispatch_with(fx: &Fx, crid: &str, auth: Option<&str>) -> Result<crate::lifecycle::PromptOut, LcError> {
         // 會反應的假 pane：輸入框讀得到、是空的（建 turn 之前的檢查都會過）。
         fx.env.herdr.live_pane(&format!("pane-{}", fx.exec.id), crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
         // 沒掛 hook：不等 SessionStart 的 transcript（否則建 turn 之前就回 transcript_not_ready，走不到要測的那一句）。
         sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&fx.exec.id).execute(&fx.env.app.db).await.unwrap();
-        crate::lifecycle::prompt_from_api_queue_if_busy(&fx.env.app, &fx.exec.id, "do it", crid, &[], crate::lifecycle::RelaySrc::trusted(Some(&fx.spec.id)), false, None).await
+        crate::lifecycle::prompt_from_api_queue_if_busy(&fx.env.app, &fx.exec.id, "do it", crid, &[], crate::lifecycle::RelaySrc::trusted(Some(&fx.spec.id)).with_auth(auth), false, None).await
     }
 
     async fn claim(fx: &Fx, turn: &str) -> crate::lifecycle::turn_controller::Outcome {
@@ -735,5 +743,96 @@ mod tests {
         assert!(!crate::runners::relay_requests::withdraw_turn(app, &plain, &d).await.unwrap());
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests WHERE client_request_id=?").bind(format!("withdrawn:{plain}")).fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// 排隊 turn，訊息帶指定依據（核權當下記的），不重算。
+    async fn queued_with(fx: &Fx, crid: &str, auth: Option<&str>) -> String {
+        let app = &fx.env.app;
+        let conv = db::conversation_id(&app.db, &fx.exec.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at) VALUES(?,?,'web','queued','pending',?,'relay',?)")
+            .bind(&turn).bind(&conv).bind(crid).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,relay_auth,created_at) VALUES(?,?,?,'user','do it','web',?,?,?)")
+            .bind(db::ulid()).bind(&conv).bind(&turn).bind(&fx.spec.id).bind(auth).bind(db::now()).execute(&app.db).await.unwrap();
+        turn
+    }
+
+    async fn expect_blocked(fx: &Fx, label: &str, auth: Option<&str>) {
+        let r = dispatch_with(fx, &format!("{label}-now"), auth).await;
+        assert!(grant_changed(&r), "{label} 直送：{r:?}");
+        let q = queued_with(fx, &format!("{label}-q"), auth).await;
+        assert!(matches!(claim(fx, &q).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)), "{label} 認領不到");
+        assert!(crate::runners::relay_requests::queue_denial(&fx.env.app, &q).await.unwrap().is_some(), "{label} 重驗擋下（不因搬專案略過）");
+        assert_eq!(turn_status(fx, &q).await, "failed", "{label} 撤回");
+    }
+
+    /// Astra review4 A：依授權核權通過（記下 `grant:<專案>`）之後，專家被降級、變 child、搬專案：直送與排隊認領都正向確認失敗。
+    #[tokio::test]
+    async fn a_grant_basis_is_rechecked_positively_after_demotion_childing_or_moving() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let basis = crate::relay_policy::relay_prompt_basis(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.unwrap();
+        assert_eq!(basis.as_deref(), Some(format!("grant:{}", fx.env.project_id).as_str()));
+        let auth = basis.as_deref();
+        // 依據仍成立時照常：直送建 turn、排隊可認領。
+        assert!(!grant_changed(&dispatch_with(&fx, "ok-now", auth).await));
+        let ok_q = queued_with(&fx, "ok-q", auth).await;
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE client_request_id='ok-now'").bind(db::now()).execute(&app.db).await.unwrap();
+        assert_eq!(claim(&fx, &ok_q).await, crate::lifecycle::turn_controller::Outcome::Applied);
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(db::now()).bind(&ok_q).execute(&app.db).await.unwrap();
+        // 降級成 advisor（DB 現況；授權 JSON 原樣留著也不放行）。
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        expect_blocked(&fx, "demoted", auth).await;
+        sqlx::query("UPDATE bots SET role='specialist' WHERE id=?").bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        // 變成 child。
+        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&fx.manager.id).bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        expect_blocked(&fx, "childed", auth).await;
+        sqlx::query("UPDATE bots SET parent_bot_id=NULL WHERE id=?").bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        // 搬到別的專案（舊的 plain 重驗會因不再同專案而略過）。
+        sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&fx.other_mgr.project_id).bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        expect_blocked(&fx, "moved", auth).await;
+    }
+
+    /// Astra review4 A：沒有依據（核權時是 manager）、之後才被改成 specialist 的送件者，仍被負向條件擋。
+    #[tokio::test]
+    async fn no_basis_dispatch_from_a_sender_later_made_specialist_is_blocked() {
+        let fx = fixture().await;
+        expect_blocked(&fx, "no-basis", None).await;
+    }
+
+    /// Astra review4 B：被指定為副管理者 ≠ 代班中。指定但沒代班的專家，授權撤銷後直送與認領都擋；
+    /// 真的代班中（名下有改派來的未結請求）仍放行；代班結束後排隊的認領不到。
+    #[tokio::test]
+    async fn deputy_basis_requires_actually_acting() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&fx.spec.id).bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        // 指定為副管理者、靠授權派工；撤銷授權之後不因「是副管理者」就放行。
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&fx.spec.id).bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        let grant_auth = crate::relay_policy::relay_prompt_basis(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.unwrap();
+        assert!(grant_auth.as_deref().is_some_and(|a| a.starts_with("grant:")));
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_err(), "沒代班：核權就擋");
+        expect_blocked(&fx, "deputy-not-acting", grant_auth.as_deref()).await;
+        // 開始代班：管理者的請求改派給它。
+        let redirected = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,redirected_from) VALUES(?,?,?,'rd','p','[]','pending',?,?)")
+            .bind(&redirected).bind(&fx.exec2.id).bind(&fx.spec.id).bind(db::now()).bind(&fx.manager.id).execute(&app.db).await.unwrap();
+        let basis = crate::relay_policy::relay_prompt_basis(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.unwrap();
+        assert_eq!(basis.as_deref(), Some(format!("deputy:{}", fx.env.project_id).as_str()));
+        assert!(!grant_changed(&dispatch_with(&fx, "acting-now", basis.as_deref()).await), "真的代班中：直送放行");
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE client_request_id='acting-now'").bind(db::now()).execute(&app.db).await.unwrap();
+        let q = queued_with(&fx, "acting-q", basis.as_deref()).await;
+        assert_eq!(claim(&fx, &q).await, crate::lifecycle::turn_controller::Outcome::Applied, "代班中：認領放行");
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(db::now()).bind(&q).execute(&app.db).await.unwrap();
+        // 代班中排好的下一筆（每個對話只能有一筆排隊的 relay turn）。
+        let q_later = queued_with(&fx, "acting-q2", basis.as_deref()).await;
+        // 代班結束（改派的請求做完）：之前排的認領不到、直送也擋。
+        sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&redirected).execute(&app.db).await.unwrap();
+        assert!(matches!(claim(&fx, &q_later).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)), "代班結束後認領不到");
+        assert!(crate::runners::relay_requests::queue_denial(app, &q_later).await.unwrap().is_some());
+        assert!(grant_changed(&dispatch_with(&fx, "acting-over-now", basis.as_deref()).await));
     }
 }

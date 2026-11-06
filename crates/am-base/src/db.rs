@@ -592,6 +592,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (81, "791ac96276182d69"),
     // 專家模式執行者授權（2026-11-06）：`projects.executor_grants_json`（ALTER ADD）。
     (82, "c16167decdd32a1d"),
+    // 專家模式派工的授權依據（2026-11-06）：`messages.relay_auth`（ALTER ADD）。
+    (83, "cd92a0ee3855fbc4"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -883,6 +885,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("relay_requests", "cluster", "ALTER TABLE relay_requests ADD COLUMN cluster TEXT"),
         // 專家模式執行者授權：`ProjectCfg.executor_grants` 的投影（JSON 陣列）。
         ("projects", "executor_grants_json", "ALTER TABLE projects ADD COLUMN executor_grants_json TEXT NOT NULL DEFAULT '[]'"),
+        // 專家模式派工的授權依據（`grant:<專案>`／`deputy:<專案>`，NULL＝不靠授權）：turn 變成可送出時依它正向確認。
+        ("messages", "relay_auth", "ALTER TABLE messages ADD COLUMN relay_auth TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
