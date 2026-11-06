@@ -2,6 +2,9 @@
 use std::sync::Arc;
 use crate::{db, lifecycle, state::App};
 
+/// 撤回一般派工時記的 failed 請求所用的 `client_request_id` 前綴（daemon 保留，`POST /api/bots/{id}/prompt` 拒用）。
+pub const WITHDRAWN_PREFIX: &str = "withdrawn:";
+
 /// flush 認領前的重驗：被擋就**在這裡**撤回 turn（同一交易標 request failed，見 [`withdraw_turn`]），回傳原因；
 /// 呼叫端（lifecycle flush）之後的 `revoke_queued_turn` 會是 no-op。
 pub async fn queue_denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
@@ -54,8 +57,19 @@ pub(crate) async fn withdraw_turn(app: &Arc<App>, turn_id: &str, d: &Denial) -> 
             .bind(&d.reason).bind(id).execute(&mut *tx).await?;
     }
     if let Some((from, to)) = &d.plain_sender {
-        sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,error,created_at) VALUES(?,?,?,?,'','[]',?,'failed',?,?)")
-            .bind(db::ulid()).bind(from).bind(to).bind(format!("withdrawn:{turn_id}")).bind(turn_id).bind(&d.reason).bind(db::now()).execute(&mut *tx).await?;
+        // 撤回事件的身分是 turn（一筆 turn 只會被撤回一次）；`withdrawn:` 是 daemon 保留前綴，外部請求拒用（Astra review3 #3）。
+        // 同鍵已有紀錄時只接受它就是這次撤回（同一個 turn）；否則整個交易退回（turn 也不撤），不靜默漏掉通知。
+        let key = format!("{WITHDRAWN_PREFIX}{turn_id}");
+        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,error,created_at) VALUES(?,?,?,?,'','[]',?,'failed',?,?)")
+            .bind(db::ulid()).bind(from).bind(to).bind(&key).bind(turn_id).bind(&d.reason).bind(db::now()).execute(&mut *tx).await?.rows_affected();
+        if inserted == 0 {
+            let same: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=? AND to_turn_id=?)")
+                .bind(from).bind(to).bind(&key).bind(turn_id).fetch_one(&mut *tx).await?;
+            if !same {
+                tx.rollback().await?;
+                anyhow::bail!("withdrawal record {key} collides with an unrelated request; turn left queued");
+            }
+        }
     }
     tx.commit().await?;
     lifecycle::announce_revoked(app, turn_id, revoked).await;
@@ -100,8 +114,6 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                     None => return Ok(()),
                 }
             }
-            // 授權派工的序列化邊界：核對到建好 turn 之間握著讀鎖，撤銷（寫鎖）不會插在中間（見 executor_grants）。
-            let _gate = if existing.is_none() { crate::executor_grants::dispatch_gate(app, &from, &to).await } else { None };
             if existing.is_none() {
                 match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
                     Ok(()) => {},

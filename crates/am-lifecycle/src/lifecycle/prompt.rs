@@ -1223,15 +1223,17 @@ async fn prompt_inner(
     // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up)?;
-    let inserted = sqlx::query(
+    // 專家派工的授權跟建 turn 同一句核對（`relay_grant`）：核權之後才提交的撤銷，這裡寫不進去。
+    let inserted = sqlx::query(&format!(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          SELECT ?, ?, ?, 'web', 'in_flight', 'pending', ?, ?, ?, 0
           WHERE EXISTS (
               SELECT 1 FROM runs
                WHERE id = ? AND bot_id = ? AND state = 'running'
                  AND pane_id IS ? AND herdr_session IS ? AND native_session_id IS ?
-          )",
-    )
+          ) AND {}",
+        super::relay_grant::grant_allows_sql("?", "?")
+    ))
     .bind(&turn_id)
     .bind(&conv)
     .bind(interrupted.is_none().then_some(run.id.as_str()))
@@ -1243,11 +1245,21 @@ async fn prompt_inner(
     .bind(run.pane_id.as_deref())
     .bind(run.herdr_session.as_deref())
     .bind(run.native_session_id.as_deref())
+    .bind(relay.from)
+    .bind(bot_id)
     .execute(&mut *tx)
     .await
     .map_err(up)?;
     if inserted.rows_affected() == 0 {
+        let grant_ok: bool = sqlx::query_scalar(&format!("SELECT {}", super::relay_grant::grant_allows_sql("?", "?")))
+            .bind(relay.from).bind(bot_id).fetch_one(&mut *tx).await.map_err(up)?;
         tx.rollback().await.map_err(up)?;
+        if !grant_ok {
+            return Err(LcError::conflict(
+                "relay_grant_changed",
+                json!({ "retryable": true, "sent": false, "message": "專家對這顆執行者的授權已撤銷或已變更：沒有送出；請重新確認授權（agm grants）或改送管理者" }),
+            ));
+        }
         return Err(LcError::conflict(
             "run_ended",
             json!({ "run_id": run.id, "retryable": true, "sent": false }),

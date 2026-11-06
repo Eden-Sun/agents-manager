@@ -4,32 +4,16 @@
 //! `projects.executor_grants_json` 只是投影。派工時的核對在 `relay_policy::granted`；不合格的授權由
 //! `ProjectCfg::clear_invalid_grants` 在每次投影（含啟動、正式刪除）時清掉。授權只涵蓋派工，不給 start／restart／hire／stop／改角色／再授權。
 //!
-//! 撤銷與派工的序列化邊界（Astra review #1、review2 #3）：每個專案一把閘門（[`gate`]）。專家模式專案內部的派工從「核對授權」
-//! 到「建好 turn（排隊或已認領）」全程拿著那個專案的讀鎖（[`dispatch_gate`]）。**所有**可能讓授權失效的 config 變更
-//! （授權 PUT、改角色／track、刪除、離開 expert…）都走 `projection::update_and_project`／`delete_from_config`，它們在拿
-//! PROJECTION 鎖**之前**先拿「目前有授權的專案」的寫鎖（[`revocation_gates`]）、握到投影寫完為止；鎖順序固定為
-//! 閘門（依專案 id 排序）→ PROJECTION，投影鎖內不再反向拿閘門。等待有上限（[`GATE_WAIT`]）：呼叫端若握著派工要等的
-//! per-bot 鎖（例如刪除），逾時就照常寫入、記 warn，改由送達前重驗兜底。撤銷寫入之後，排隊中的派工在 flush 認領前
-//! 重驗（`relay_requests::queue_denial`），PUT 另外當場收回（[`withdraw_revoked`]）；兩者都跟認領搶同一個 queued→ 轉換，
-//! 認領成功＝已開始，不中止；撤回成功＝不送。
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+//! 撤銷與派工的序列化邊界（Astra review3）：不用鎖。turn 變成可送出的兩個寫入（直接送出的 in_flight INSERT、排隊認領
+//! `claim_queued`）在同一句 SQL 裡核對授權仍成立（`lifecycle::relay_grant`）。任何讓授權消失的投影（PUT、改角色／track、
+//! 刪除、離開 expert）跟這兩句都由 SQLite 序列化：撤銷先提交，直接送出回可重試的 409 `relay_grant_changed`、排隊的
+//! 認領不到並在 flush 重驗時撤回；那一句先提交＝已開始，不中止。PUT 另外當場收回排隊中失去授權的 turn（[`withdraw_revoked`]），
+//! 撤回跟認領搶同一個 queued→ 轉換。
+use std::sync::Arc;
 use axum::{extract::{Path, State}, http::HeaderMap, Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::{api::RequestPrincipal, config::ExecutorGrant, db, lifecycle::LcError, state::App};
-
-/// 撤銷端等派工讓出閘門的上限。
-pub(crate) const GATE_WAIT: Duration = Duration::from_secs(5);
-
-static GATES: LazyLock<Mutex<HashMap<String, Arc<RwLock<()>>>>> = LazyLock::new(Default::default);
-
-/// 專案的授權閘門（派工讀、撤銷寫）。
-fn gate(project_id: &str) -> Arc<RwLock<()>> {
-    GATES.lock().unwrap_or_else(|e| e.into_inner()).entry(project_id.to_string()).or_default().clone()
-}
 
 /// 這一對派工會不會受授權影響：目標與送件者都在同一個 expert 專案時回那個專案 id（跨專案、一般專案的派工不靠授權）。
 /// 查不到時當作會（fail closed），回空字串當鍵。
@@ -39,30 +23,6 @@ pub(crate) async fn expert_internal(app: &Arc<App>, from: &str, to: &str) -> Opt
         Ok(pid) => pid,
         Err(_) => Some(String::new()),
     }
-}
-
-/// 派工路徑在「核對授權」之前拿，握到 turn 建好（排隊或已認領）為止；跟授權無關的派工回 `None`、不排隊等鎖。
-pub(crate) async fn dispatch_gate(app: &Arc<App>, from: &str, to: &str) -> Option<OwnedRwLockReadGuard<()>> {
-    let pid = expert_internal(app, from, to).await?;
-    Some(gate(&pid).read_owned().await)
-}
-
-/// 投影（任何 config 變更）前拿：目前在 DB 上有授權的 expert 專案的寫鎖，依專案 id 排序、總等待不超過 [`GATE_WAIT`]。
-/// 只有已經有授權的專案會因這次變更失去授權，其他專案不擋。拿不到的記 warn、照常寫入（不死鎖）。
-pub(crate) async fn revocation_gates(pool: &sqlx::SqlitePool) -> Vec<OwnedRwLockWriteGuard<()>> {
-    let ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM projects WHERE deleted_at IS NULL AND mode='expert' AND executor_grants_json NOT IN ('','[]') ORDER BY id").fetch_all(pool).await {
-        Ok(ids) => ids,
-        Err(e) => { tracing::warn!(error = ?e, "讀不到有授權的專案：這次 config 變更不等授權派工的閘門"); return Vec::new() }
-    };
-    let deadline = tokio::time::Instant::now() + GATE_WAIT;
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        match tokio::time::timeout_at(deadline, gate(&id).write_owned()).await {
-            Ok(g) => out.push(g),
-            Err(_) => tracing::warn!(project_id = %id, "等授權派工讓出閘門逾時：照常寫入，排隊的派工由送達前重驗擋下"),
-        }
-    }
-    out
 }
 
 /// 授權組的版本（樂觀鎖，Astra review #5）：授權內容的 sha256 前 16 個 hex。GET（`/api/state`）與 PUT 回應都帶，PUT 帶舊值回 409。
@@ -160,7 +120,6 @@ pub(crate) async fn put_http(
     let inputs: Vec<(String, String)> = b.grants.iter().map(|g| (g.specialist.trim().to_string(), g.executor.trim().to_string())).collect();
     let now = db::now();
     let pid = id.clone();
-    // 授權閘門的寫鎖由 update_and_project 在拿 PROJECTION 之前取得（所有 config 變更共用同一條序列化，見模組說明）。
     #[cfg(test)]
     crate::lifecycle::race_point::hit("executor_grants_put_locked", &id).await;
     let out = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -460,31 +419,6 @@ mod tests {
         assert_eq!(state, "failed");
     }
 
-    /// 序列化邊界：派工握著讀鎖（已過 NewRequest、turn 還沒建）時，撤銷等它建好 turn 才生效，而且會把那筆排隊的收回。
-    #[tokio::test]
-    async fn revocation_waits_for_an_in_progress_dispatch_and_then_withdraws_it() {
-        let fx = fixture().await;
-        let app = fx.env.app.clone();
-        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
-        let gate = dispatch_gate(&app, &fx.spec.id, &fx.exec.id).await;
-        assert!(gate.is_some(), "專家模式內部的派工要拿閘門");
-        assert!(relay_prompt_allowed(&app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok());
-        let (app2, pid) = (app.clone(), fx.env.project_id.clone());
-        let revoke = tokio::spawn(async move {
-            put_http(State(app2), Path(pid), Extension(RequestPrincipal::User), HeaderMap::new(), Json(PutGrants { grants: vec![], revision: None })).await.map(|j| j.0)
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(!revoke.is_finished(), "派工還握著讀鎖：撤銷要等");
-        assert_eq!(stored(&fx).await.len(), 1);
-        let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, "racing", "queued").await;
-        drop(gate);
-        revoke.await.unwrap().unwrap();
-        assert!(stored(&fx).await.is_empty());
-        assert_eq!(turn_status(&fx, &turn).await, "failed", "撤銷前排進去的，撤銷時收回");
-        // 跟授權無關的派工（跨專案）不拿閘門。
-        assert!(dispatch_gate(&app, &fx.spec.id, &fx.outsider.id).await.is_none());
-    }
-
     /// Astra review #3：鎖外預檢通過後 manager 被撤職，鎖內重驗擋下，授權不變。
     #[tokio::test]
     async fn demoted_manager_cannot_finish_an_in_flight_put() {
@@ -671,36 +605,108 @@ mod tests {
         assert!(text.contains("請求未投遞"), "{text}");
     }
 
-    /// Astra review2 #3：track 變更（非 PUT 的授權失效來源）也等手上的授權派工：派工核權後暫停 → track 變更被擋住 →
-    /// 派工建好排隊 turn、放開 → track 變更完成、授權清掉 → 排隊的那筆在送達前被擋下撤回。
+    /// 直接送出（目標閒著）：真的走 lifecycle 建 in_flight turn 的那一句。
+    async fn dispatch_now(fx: &Fx, crid: &str) -> Result<crate::lifecycle::PromptOut, LcError> {
+        // 會反應的假 pane：輸入框讀得到、是空的（建 turn 之前的檢查都會過）。
+        fx.env.herdr.live_pane(&format!("pane-{}", fx.exec.id), crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        // 沒掛 hook：不等 SessionStart 的 transcript（否則建 turn 之前就回 transcript_not_ready，走不到要測的那一句）。
+        sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&fx.exec.id).execute(&fx.env.app.db).await.unwrap();
+        crate::lifecycle::prompt_from_api_queue_if_busy(&fx.env.app, &fx.exec.id, "do it", crid, &[], crate::lifecycle::RelaySrc::trusted(Some(&fx.spec.id)), false, None).await
+    }
+
+    async fn claim(fx: &Fx, turn: &str) -> crate::lifecycle::turn_controller::Outcome {
+        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&fx.exec.id).fetch_one(&fx.env.app.db).await.unwrap();
+        crate::lifecycle::turn_controller::claim_queued(&mut fx.env.app.db.acquire().await.unwrap(), turn, &run).await.unwrap()
+    }
+
+    fn grant_changed(r: &Result<crate::lifecycle::PromptOut, LcError>) -> bool {
+        matches!(r, Err(LcError::Conflict(b)) if b["reason"] == "relay_grant_changed" && b["retryable"] == true && b["sent"] == false)
+    }
+
+    /// Astra review3 #1：核權通過後暫停（不論多久、沒有鎖可逾時），期間撤銷（PUT）或換 track，恢復後：
+    /// 直接送出寫不進 in_flight（可重試 409、沒有 turn）；已排隊的認領不到，flush 重驗時撤回。不會「撤銷成功後才開始執行」。
     #[tokio::test]
-    async fn a_track_change_waits_for_an_in_progress_dispatch() {
+    async fn a_dispatch_checked_before_revocation_cannot_start_after_it() {
         let fx = fixture().await;
-        let app = fx.env.app.clone();
+        let app = &fx.env.app;
+        let turns = |crid: &'static str| { let db = app.db.clone(); let exec = fx.exec.id.clone(); async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?").bind(exec).bind(crid).fetch_one(&db).await.unwrap() } };
+        for revoke_by_track in [false, true] {
+            put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+            assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok(), "核權通過");
+            // 已經排好隊的一筆（核權通過、撤銷前建好）。
+            let queued = queued_turn_from(&fx, &fx.spec, &fx.exec, if revoke_by_track { "q-track" } else { "q-put" }, "queued").await;
+            // 暫停期間撤銷：完成、立即生效，不等任何人。
+            if revoke_by_track { set_role(&fx.env, &fx.spec, "specialist", Some("api")).await } else { put(&fx, RequestPrincipal::User, &[]).await.unwrap(); }
+            assert!(stored(&fx).await.is_empty());
+            // 恢復：直接送出被同一句 SQL 擋下。
+            let crid = if revoke_by_track { "now-track" } else { "now-put" };
+            let r = dispatch_now(&fx, crid).await;
+            assert!(grant_changed(&r), "{r:?}");
+            assert_eq!(turns(crid).await, 0, "沒有建 turn、沒有送出");
+            // 排隊的那筆：PUT 已當場收回；換 track 的情況認領不到，flush 重驗撤回。
+            if revoke_by_track {
+                assert!(matches!(claim(&fx, &queued).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)));
+                assert_eq!(turn_status(&fx, &queued).await, "queued");
+                assert!(crate::runners::relay_requests::queue_denial(app, &queued).await.unwrap().is_some());
+            }
+            assert_eq!(turn_status(&fx, &queued).await, "failed");
+            set_role(&fx.env, &fx.spec, "specialist", Some("db")).await;
+        }
+        // 授權有效時同一條路照常建 in_flight turn（條件只擋撤銷）。
         put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
-        let gate = dispatch_gate(&app, &fx.spec.id, &fx.exec.id).await.expect("專家模式內部派工拿閘門");
-        assert!(relay_prompt_allowed(&app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok());
-        let (env_app, sid) = (app.clone(), fx.spec.id.clone());
-        let change = tokio::spawn(async move {
-            crate::projection::update_and_project(&env_app.cfg, &env_app.db, move |cfg| {
-                for p in &mut cfg.projects { for b in &mut p.bots { if b.id.as_deref() == Some(sid.as_str()) { b.track = Some("api".into()); } } }
-                Ok(())
-            }).await
-        });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!change.is_finished(), "track 變更等派工讓出閘門");
-        assert_eq!(stored(&fx).await.len(), 1, "授權還在");
-        let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, "racing-track", "queued").await;
-        drop(gate);
-        change.await.unwrap().unwrap();
+        let r = dispatch_now(&fx, "now-ok").await;
+        assert!(!grant_changed(&r), "{r:?}");
+        assert_eq!(turns("now-ok").await, 1);
+        // manager 派工不受影響（沒有授權也能送）。
+        put(&fx, RequestPrincipal::User, &[]).await.unwrap();
+        let q = queued_turn_from(&fx, &fx.manager, &fx.exec2, "mgr-claim", "queued").await;
+        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=?").bind(&fx.exec2.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(crate::lifecycle::turn_controller::claim_queued(&mut app.db.acquire().await.unwrap(), &q, &run).await.unwrap(), crate::lifecycle::turn_controller::Outcome::Applied);
+    }
+
+    /// Astra review3 #2：空授權快照 → 新增授權 → 派工排隊 → 換 track 的交錯：沒有鎖集合可漏，認領那一句依當下授權判斷。
+    #[tokio::test]
+    async fn grant_added_then_dispatch_then_track_change_still_blocks_the_claim() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        assert!(stored(&fx).await.is_empty(), "起點：沒有授權");
+        assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_err());
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok());
+        let queued = queued_turn_from(&fx, &fx.spec, &fx.exec, "interleave", "queued").await;
+        set_role(&fx.env, &fx.spec, "specialist", Some("api")).await;
         assert!(stored(&fx).await.is_empty());
-        assert!(crate::runners::relay_requests::queue_denial(&app, &turn).await.unwrap().is_some());
-        assert_eq!(turn_status(&fx, &turn).await, "failed");
-        // 別的專案（沒有授權）的 config 變更不等這個專案的閘門。
-        let _held = dispatch_gate(&app, &fx.spec.id, &fx.exec.id).await;
-        let t0 = std::time::Instant::now();
-        crate::projection::update_and_project(&app.cfg, &app.db, |_| Ok(())).await.unwrap();
-        assert!(t0.elapsed() < GATE_WAIT, "本專案已沒有授權：不等閘門");
+        assert!(matches!(claim(&fx, &queued).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)), "認領不到");
+        assert!(grant_changed(&dispatch_now(&fx, "interleave-now").await));
+        // 再授權（新 track）之後同一筆排隊的又可以認領：條件看當下，不看歷史。
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        assert_eq!(claim(&fx, &queued).await, crate::lifecycle::turn_controller::Outcome::Applied);
+    }
+
+    /// Astra review3 #3：`withdrawn:` 是保留前綴（外部 prompt 拒用）；同鍵已有不相干的紀錄時撤回整筆退回（turn 留在佇列、不漏通知），
+    /// 同一個撤回事件重來則接受既有紀錄。
+    #[tokio::test]
+    async fn withdrawal_record_key_collisions_are_not_silently_ignored() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, "collide", "queued").await;
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,?,'unrelated','[]','pending',?)")
+            .bind(db::ulid()).bind(&fx.spec.id).bind(&fx.exec.id).bind(format!("withdrawn:{turn}")).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        let d = crate::runners::relay_requests::denial(app, &turn).await.unwrap().expect("授權沒了");
+        assert!(crate::runners::relay_requests::withdraw_turn(app, &turn, &d).await.is_err(), "碰撞：不靜默略過");
+        assert_eq!(turn_status(&fx, &turn).await, "queued", "整個交易退回，turn 沒被撤");
+        let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE client_request_id=?").bind(format!("withdrawn:{turn}")).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "pending", "不誤用既有請求");
+        // 同一個撤回事件（同 turn）已記過：接受。
+        let turn2 = queued_turn_from(&fx, &fx.spec, &fx.exec2, "same-event", "queued").await;
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,?,'','[]',?,'failed',?)")
+            .bind(db::ulid()).bind(&fx.spec.id).bind(&fx.exec2.id).bind(format!("withdrawn:{turn2}")).bind(&turn2).bind(db::now()).execute(&app.db).await.unwrap();
+        let d = crate::runners::relay_requests::denial(app, &turn2).await.unwrap().expect("沒有授權");
+        assert!(crate::runners::relay_requests::withdraw_turn(app, &turn2, &d).await.unwrap());
+        assert_eq!(turn_status(&fx, &turn2).await, "failed");
     }
 
     /// Astra review2 #4：flush 先認領（turn 已不是 queued），撤回輸掉 CAS：請求與結果追蹤不動、不記撤回、不通知。

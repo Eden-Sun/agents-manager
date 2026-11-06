@@ -122,8 +122,6 @@ pub fn delete_from_config<'a>(
 }
 
 async fn delete_from_config_at(at: &'static Location<'static>, store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
-    // 刪除會清掉相關授權：同 update_and_project，先拿授權閘門再拿 PROJECTION（呼叫端握著 per-bot 鎖時等待有上限）。
-    let _grant_gates = crate::executor_grants::revocation_gates(pool).await;
     let _g = PROJECTION.lock().await;
     // 臨界區內 DB 的 user bot／project 只有投影會改，所以這份快照在寫 config 之前都成立。
     let db_bots: Vec<db::Bot> =
@@ -383,8 +381,6 @@ async fn update_and_project_at<F, T>(at: &'static Location<'static>, store: &Con
 where
     F: FnOnce(&mut crate::config::ConfigFile) -> Result<T>,
 {
-    // 授權閘門在 PROJECTION 之前拿（鎖順序：閘門 → PROJECTION），握到投影寫完；見 `executor_grants` 模組說明。
-    let _grant_gates = crate::executor_grants::revocation_gates(pool).await;
     let _g = PROJECTION.lock().await;
     // 投影失敗要把這次寫進去的 TOML 退回。child 名字不在 config 裡，唯一約束會在寫檔之後才爆，
     // 不退的話這個檔之後每一次投影都 502（#654）。

@@ -7880,7 +7880,7 @@ async fn prompt_bot(
         None => None,
     };
     let crid = given_crid.clone().unwrap_or_else(db::ulid);
-    if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") {
+    if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") || crid.starts_with(crate::runners::relay_requests::WITHDRAWN_PREFIX) {
         return Err(LcError::Bad("client_request_id uses a reserved daemon prefix".into()));
     }
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
@@ -7901,9 +7901,6 @@ async fn prompt_bot(
             crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
         }
     };
-    // 專家模式授權派工的序列化邊界（Astra review #1）：從核對授權到 turn 建好（排隊或已認領）都握著讀鎖，
-    // 撤銷授權（寫鎖）只會落在「核對之前」或「turn 建好之後」；排隊中的由撤銷那端用 CAS 收回。
-    let _grant_gate = match &relay { Some(r) => crate::executor_grants::dispatch_gate(&app, &r.from, &id).await, None => None };
     if !b.expect_result {
         if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
 
@@ -18887,5 +18884,22 @@ mod hire_fork_api_tests {
         assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
         let err = hire(&env, &manager, json!({"name": "again2", "kind": "codex", "fork_from": source})).await.err().unwrap();
         assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
+    }
+}
+
+#[cfg(test)]
+mod reserved_request_prefix_tests {
+    use super::*;
+
+    /// `withdrawn:` 跟 `relay-request:`／`relay-result:` 一樣是 daemon 保留的 client_request_id 前綴（executor grant 撤回紀錄用）。
+    #[tokio::test]
+    async fn prompt_refuses_daemon_reserved_request_ids() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "reserved-prefix").await;
+        for crid in ["relay-request:x", "relay-result:x", "withdrawn:x"] {
+            let body: PromptIn = serde_json::from_value(json!({"text": "hi", "client_request_id": crid})).unwrap();
+            let r = prompt_bot(State(env.app.clone()), Path(bot.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await;
+            assert!(matches!(&r, Err(LcError::Bad(m)) if m.contains("reserved daemon prefix")), "{crid}: {:?}", r.err());
+        }
     }
 }
