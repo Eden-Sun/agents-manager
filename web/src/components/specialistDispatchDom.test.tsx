@@ -40,7 +40,7 @@ let patches: PatchProjectInput[] = []
 
 function setup(dispatch: boolean | undefined) {
   patches = []
-  const project = { id: 'p-expert', label: '專家', path: '/e', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', executor_pool: [], ...(dispatch === undefined ? {} : { specialist_dispatch: dispatch }) } as Project
+  const project = { id: 'p-expert', label: '專家', path: '/e', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', ...(dispatch === undefined ? {} : { specialist_dispatch: dispatch }) } as Project
   useStore.setState({
     models: {},
     modelsFailedAt: {},

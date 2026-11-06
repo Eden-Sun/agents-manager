@@ -11,7 +11,7 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-const project: Project = { id: 'p1', label: 'proj', path: '/p1', host: 'local', mode: 'expert', executor_pool: [], workspace_id: null, github: null, created_at: '' } as unknown as Project
+const project: Project = { id: 'p1', label: 'proj', path: '/p1', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '' } as unknown as Project
 
 const bot = (id: string, over: Partial<Bot> = {}): Bot =>
   ({

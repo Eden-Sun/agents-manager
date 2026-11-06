@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   BOT_KINDS,
   type BotKind,
-  type ExecutorPoolEntry,
+  type ModelInfo,
   type Project,
   type RuntimeSettings,
 } from '../api/types'
@@ -18,7 +18,6 @@ import { projectHostName, toolsOfHost, useStore } from '../store/store'
 import { ApiModelFields } from './ModelPicker'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
-import { pickSuggestedModel } from '../lib/executorPool'
 import type { ShareProfile } from '../api/types'
 import { ShareProfileField } from './ShareProfileField'
 import { EMPTY_SHARE_FOLDER, shareCreateFields, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
@@ -50,6 +49,25 @@ function computeDefaultName(r: ExpertRoleChoice, trk: string, pid: string, bots:
   return ''
 }
 
+function compareModelVersions(a: string, b: string): number {
+  const av = (a.match(/\d+/g) ?? []).map(Number)
+  const bv = (b.match(/\d+/g) ?? []).map(Number)
+  for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+    const delta = (av[i] ?? -1) - (bv[i] ?? -1)
+    if (delta !== 0) return delta
+  }
+  return 0
+}
+
+function pickLatestRoleModel(family: RegExp, list: readonly ModelInfo[]): ModelInfo | null {
+  let best: ModelInfo | null = null
+  for (const model of list) {
+    if (model.id.includes('[1m]') || (!family.test(model.id) && !family.test(model.display_name))) continue
+    if (!best || compareModelVersions(model.id, best.id) > 0) best = model
+  }
+  return best
+}
+
 export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFormProps) {
   const t = useT()
   const pid = project.id
@@ -70,12 +88,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // 專家 track
   const [track, setTrack] = useState('')
-
-  // 執行者池條目（'custom' 或 entry.id）
-  const poolEntries = project.executor_pool ?? []
-  const [selectedPoolEntryId, setSelectedPoolEntryId] = useState<string>(() => {
-    return poolEntries.length > 0 ? poolEntries[0].id : 'custom'
-  })
 
   // kind / model / effort / fast
   const [kind, setKind] = useState<BotKind>('claude')
@@ -117,44 +129,41 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // 挑選建議模型
   const pickRoleSuggested = (r: ExpertRoleChoice): { kind: BotKind; model: string | null; effort: string | null } => {
+    if (r === 'executor') {
+      const claudeKey = `claude@${host || 'local'}@`
+      const list = modelsCache[claudeKey] ?? []
+      const found = pickLatestRoleModel(/haiku/i, list)
+      return { kind: 'claude', model: found?.id ?? null, effort: 'low' }
+    }
     if (r === 'manager') {
       const claudeKey = `claude@${host || 'local'}@`
       const list = modelsCache[claudeKey] ?? []
-      const found = pickSuggestedModel({ kind: 'claude', family: /opus/i, effort: 'high', context_tokens: null, count: 1 }, list)
+      const found = pickLatestRoleModel(/opus/i, list)
       return { kind: 'claude', model: found ? found.id : null, effort: 'high' }
     }
     if (r === 'advisor') {
       const codexKey = `codex@${host || 'local'}@`
       const list = modelsCache[codexKey] ?? []
-      const found = pickSuggestedModel({ kind: 'codex', family: /astra/i, effort: 'high', context_tokens: null, count: 1 }, list)
+      const found = pickLatestRoleModel(/astra/i, list)
       return { kind: 'codex', model: found ? found.id : null, effort: 'high' }
     }
     if (r === 'specialist') {
       // claude sonnet medium 或 codex 最新 sol medium
       const claudeKey = `claude@${host || 'local'}@`
       const claudeList = modelsCache[claudeKey] ?? []
-      const foundSonnet = pickSuggestedModel({ kind: 'claude', family: /sonnet/i, effort: 'medium', context_tokens: null, count: 1 }, claudeList)
+      const foundSonnet = pickLatestRoleModel(/sonnet/i, claudeList)
       if (foundSonnet) {
         return { kind: 'claude', model: foundSonnet.id, effort: 'medium' }
       }
       const codexKey = `codex@${host || 'local'}@`
       const codexList = modelsCache[codexKey] ?? []
-      const foundSol = pickSuggestedModel({ kind: 'codex', family: /sol/i, effort: 'medium', context_tokens: null, count: 1 }, codexList)
+      const foundSol = pickLatestRoleModel(/sol/i, codexList)
       if (foundSol) {
         return { kind: 'codex', model: foundSol.id, effort: 'medium' }
       }
       return { kind: 'claude', model: null, effort: 'medium' }
     }
-    // executor default custom
     return { kind: 'claude', model: null, effort: null }
-  }
-
-  // 套用池條目
-  const applyPoolEntry = (entry: ExecutorPoolEntry) => {
-    setKind(entry.kind)
-    setModel(entry.model || null)
-    setEffort(entry.effort)
-    setFast(false)
   }
 
   // 當 role 切換時
@@ -166,41 +175,13 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     setRuntimeDraft({})
     effortTouched.current = false
 
-    if (r === 'executor') {
-      if (poolEntries.length > 0) {
-        setSelectedPoolEntryId(poolEntries[0].id)
-        applyPoolEntry(poolEntries[0])
-      } else {
-        setSelectedPoolEntryId('custom')
-        const sugg = pickRoleSuggested(r)
-        setKind(sugg.kind)
-        setModel(sugg.model)
-        setEffort(null)
-      }
-    } else {
-      setSelectedPoolEntryId('custom')
-      const sugg = pickRoleSuggested(r)
-      setKind(sugg.kind)
-      setModel(sugg.model)
-      setEffort(null)
-    }
+    const sugg = pickRoleSuggested(r)
+    setKind(sugg.kind)
+    setModel(sugg.model)
+    setEffort(null)
 
     if (!nameTouched.current) {
       setName(computeDefaultName(r, track, pid, bots))
-    }
-  }
-
-  // 選中池條目變更
-  const onSelectPoolEntry = (id: string) => {
-    setSelectedPoolEntryId(id)
-    if (id === 'custom') {
-      effortTouched.current = false
-      setEffort(null)
-    } else {
-      const found = poolEntries.find((e) => e.id === id)
-      if (found) {
-        applyPoolEntry(found)
-      }
     }
   }
 
@@ -214,16 +195,13 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   // 角色預設政策
   const rolePolicy = project.role_policy?.[role] ?? {}
 
-  const selectedPool = role === 'executor' && selectedPoolEntryId !== 'custom' ? poolEntries.find((e) => e.id === selectedPoolEntryId) : null
-  const isPoolLocked = Boolean(selectedPool)
-
   const suggestedEffort = useMemo(() => {
     if (role === 'manager') return 'high'
     if (role === 'advisor') return 'high'
     if (role === 'specialist') return 'medium'
-    if (role === 'executor') return selectedPool?.effort ?? null
+    if (role === 'executor') return 'low'
     return null
-  }, [role, selectedPool])
+  }, [role])
 
   // 驗證
   const nameOk = isValidBotName(name.trim())
@@ -304,6 +282,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const roleRecommendation = (r: ExpertRoleChoice): string | null => {
     if (r === 'manager') return 'Claude Opus (high)'
     if (r === 'advisor') return 'Codex Astra (high)'
+    if (r === 'executor') return 'Claude Haiku (low)'
     if (r === 'specialist') return 'Claude Sonnet (medium) / Codex Sol (medium)'
     return null
   }
@@ -369,49 +348,11 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </label>
       ) : null}
 
-      {/* 執行者模式專屬：執行者池條目 */}
-      {role === 'executor' ? (
-        <div className="field">
-          <span>{t('執行者池條目')}</span>
-          {poolEntries.length === 0 ? (
-            <div className="hint">{t('目前池是空的，直接走自訂設定。')}</div>
-          ) : (
-            <div className="opt-group" role="radiogroup" aria-label={t('執行者池條目')}>
-              {poolEntries.map((e) => {
-                const used = bots.filter((b) => b.role === 'executor' && b.pool_entry === e.id).length
-                const ctxText = e.kind === 'agy' ? t('不適用') : e.context_tokens ? formatContext(e.context_tokens) : t('預設')
-                return (
-                  <button
-                    key={e.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={selectedPoolEntryId === e.id}
-                    className={`opt${selectedPoolEntryId === e.id ? ' on' : ''}`}
-                    onClick={() => onSelectPoolEntry(e.id)}
-                  >
-                    {e.kind} · {e.model || t('任何模型')} · {e.effort ?? t('預設強度')} · {ctxText} · {used}/{e.count}
-                  </button>
-                )
-              })}
-              <button
-                type="button"
-                role="radio"
-                aria-checked={selectedPoolEntryId === 'custom'}
-                className={`opt${selectedPoolEntryId === 'custom' ? ' on' : ''}`}
-                onClick={() => onSelectPoolEntry('custom')}
-              >
-                {t('自訂')}
-              </button>
-            </div>
-          )}
-        </div>
-      ) : null}
-
       {/* 2. kind / 模型 / 強度 */}
       <div className="field">
         <span>
           kind
-          {roleRecommendation(role) && !isPoolLocked ? (
+          {roleRecommendation(role) ? (
             <span className="field-note">{t('建議：{rec}', { rec: roleRecommendation(role) ?? '' })}</span>
           ) : null}
         </span>
@@ -425,9 +366,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                   role="radio"
                   aria-checked={kind === k}
                   className={`opt${kind === k ? ' on' : ''}`}
-                  disabled={missing || isPoolLocked}
+                  disabled={missing}
                   onClick={() => {
-                    if (isPoolLocked) return
                     setKind(k)
                     setModel(null)
                     if (!effortTouched.current) {
@@ -444,26 +384,20 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </div>
       </div>
 
-      <div className={isPoolLocked ? 'fields-locked' : undefined}>
+      <div>
         <ApiModelFields
           kind={kind}
           host={host}
           identity={identity || null}
           model={model}
-          onModel={(m) => {
-            if (!isPoolLocked) setModel(m)
-          }}
+          onModel={setModel}
           effort={effort}
           onEffort={(ef) => {
-            if (!isPoolLocked) {
-              effortTouched.current = true
-              setEffort(ef)
-            }
+            effortTouched.current = true
+            setEffort(ef)
           }}
           fast={fast}
-          onFast={(f) => {
-            if (!isPoolLocked) setFast(f)
-          }}
+          onFast={setFast}
           suggestedEffort={suggestedEffort}
         />
       </div>

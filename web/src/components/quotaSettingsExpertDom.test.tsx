@@ -1,23 +1,19 @@
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { Sidebar } from './Sidebar'
-import { ProjectExpertSettings } from './ProjectExpertSettings'
-import type { PatchBotInput, PatchProjectInput } from '../api/types'
+import type { PatchBotInput } from '../api/types'
 
 afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
 let patchedBots: { id: string; input: PatchBotInput }[] = []
-let patchedProjects: { id: string; input: PatchProjectInput }[] = []
 
 beforeEach(() => {
   fakeApi()
   patchedBots = []
-  patchedProjects = []
-
   const mockPatchBot = async (id: string, input: PatchBotInput) => {
     patchedBots.push({ id, input })
     useStore.setState((s) => ({
@@ -26,17 +22,8 @@ beforeEach(() => {
     return { needsRestart: false, deferred: false, remappedModel: null }
   }
 
-  const mockPatchProject = async (id: string, input: PatchProjectInput) => {
-    patchedProjects.push({ id, input })
-    useStore.setState((s) => ({
-      projects: s.projects.map((p) => (p.id === id ? { ...p, ...input } : p)),
-    }))
-    return true
-  }
-
   useStore.setState({
     patchBot: mockPatchBot,
-    patchProject: mockPatchProject,
     projects: [
       {
         id: 'p-expert',
@@ -44,10 +31,6 @@ beforeEach(() => {
         path: '/expert',
         host: 'local',
         mode: 'expert',
-        executor_pool: [
-          { id: 'codex-luna-xhigh-256k', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 2 },
-          { id: 'claude-haiku-low-200k', kind: 'claude', model: 'haiku', effort: 'low', context_tokens: 200000, count: 1 },
-        ],
       },
       {
         id: 'p-plain',
@@ -310,35 +293,4 @@ test('bot 列 ⋯ 選單不再有「管理者可用」：側欄勾選框直接�
   const items = [...document.querySelectorAll<HTMLElement>('.head-menu-item')].map((e) => e.textContent ?? '')
   assert.ok(items.length > 0, '選單有打開')
   assert.ok(!items.some((x) => x.includes('管理者可用')), items.join('|'))
-})
-
-test('專案設定 ProjectExpertSettings：條目改上限後儲存，送出整份條目陣列', async () => {
-  fakeApi()
-  await mount(<ProjectExpertSettings projectId="p-expert" />)
-  await settle()
-
-  const rows = document.querySelectorAll<HTMLElement>('.executor-pool-entry')
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].dataset.poolId, 'codex-luna-xhigh-256k')
-  assert.match(rows[0].textContent ?? '', /codex/)
-  assert.match(rows[0].textContent ?? '', /256k/)
-
-  const countInput = rows[0].querySelector<HTMLInputElement>('input[type="number"]')!
-  assert.equal(countInput.value, '2')
-  await typeInto(countInput, '3')
-  await settle()
-
-  const saveBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
-    (b) => b.closest('.project-savebar') !== null && b.textContent?.trim() === '儲存',
-  )!
-  assert.equal(saveBtn.disabled, false)
-  await click(saveBtn)
-  await settle()
-
-  assert.equal(patchedProjects.length, 1)
-  assert.equal(patchedProjects[0].id, 'p-expert')
-  assert.deepEqual(patchedProjects[0].input.executor_pool, [
-    { id: 'codex-luna-xhigh-256k', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 3 },
-    { id: 'claude-haiku-low-200k', kind: 'claude', model: 'haiku', effort: 'low', context_tokens: 200000, count: 1 },
-  ])
 })

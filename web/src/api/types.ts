@@ -32,8 +32,6 @@ export interface Project {
   github: ProjectGithub | null
   /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
-  /** 專家模式專案的執行者池條目清單 */
-  executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（role -> policy；B 期才用，現在只讀），預設 {} */
   role_policy?: Record<string, RuntimeSettings> | null
   /** 專家模式副管理者；沒設＝null。管理者回合中太久時，排隊給它的請求改送這位。 */
@@ -48,15 +46,6 @@ export interface ProjectDeputy {
   bot_id: string
   /** 管理者忙（請求排隊）多久才改派，秒；下限 60；送出時不帶＝180。 */
   after_sec?: number | null
-}
-
-export interface ExecutorPoolEntry {
-  id: string
-  kind: BotKind
-  model: string
-  effort: string | null
-  context_tokens: number | null
-  count: number
 }
 
 export interface ProjectGithub {
@@ -322,8 +311,6 @@ export interface Bot {
   runtime_role_policy?: string | null
   /** 專家模式下是否可被管理者使用（預設 true） */
   manager_use?: boolean
-  /** 專家模式下增聘所綁定的池條目 id */
-  pool_entry?: string | null
   /** 專家模式執行者群集名（同設定、≥2 顆才有）；null＝不在群集內 */
   cluster?: string | null
   id: string
@@ -783,8 +770,6 @@ export interface PatchProjectInput {
   label?: string
   /** #708：字串＝移交，`null`＝收回。 */
   handed_off_to?: string | null
-  /** 專家模式專案的執行者池條目（覆蓋整份陣列） */
-  executor_pool?: ExecutorPoolEntry[]
   /** 專家模式角色政策（User 才能改；`null`＝清掉） */
   role_policy?: Record<string, RuntimeSettings> | null
   /** 副管理者（User 才能改；`null`＝清掉；`after_sec` 下限 60，不帶＝180） */

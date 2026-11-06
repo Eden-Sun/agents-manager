@@ -21,7 +21,6 @@ import type {
   Bot,
   BotKind,
   BotManagedBy,
-  ExecutorPoolEntry,
   HostShell,
   Host,
   HerdrVersion,
@@ -297,41 +296,6 @@ export function toProject(v: unknown): Project | null {
     role_policy: isRec(v.role_policy) ? (v.role_policy as Record<string, RuntimeSettings>) : {},
     specialist_dispatch: typeof pick(v, 'specialist_dispatch') === 'boolean' ? (pick(v, 'specialist_dispatch') as boolean) : undefined,
     deputy: isRec(v.deputy) && str(v.deputy.bot_id) ? { bot_id: str(v.deputy.bot_id), after_sec: numOrNull(v.deputy.after_sec) } : null,
-    executor_pool: (() => {
-      const ep = pick(v, 'executor_pool')
-      if (Array.isArray(ep)) {
-        return ep
-          .filter(isRec)
-          .map((entry) => {
-            const id = str(pick(entry, 'id'))
-            const kind = oneOf<BotKind>(pick(entry, 'kind'), BOT_KINDS, 'claude')
-            const model = str(pick(entry, 'model'))
-            const effort = optStr(pick(entry, 'effort'))
-            const context_tokens = numOrNull(pick(entry, 'context_tokens'))
-            const count = Math.max(1, Math.min(10, num(pick(entry, 'count'), 1)))
-            return { id, kind, model, effort, context_tokens, count }
-          })
-          .filter((entry) => entry.id)
-      }
-      if (isRec(ep)) {
-        // 向下相容：讀到舊的物件形狀 {kind: n}，轉成條目
-        const res: ExecutorPoolEntry[] = []
-        for (const [k, val] of Object.entries(ep)) {
-          if (BOT_KINDS.includes(k as BotKind) && typeof val === 'number' && Number.isFinite(val) && val > 0) {
-            res.push({
-              id: `${k}-legacy`,
-              kind: k as BotKind,
-              model: '',
-              effort: null,
-              context_tokens: null,
-              count: Math.max(1, Math.min(10, Math.floor(val))),
-            })
-          }
-        }
-        return res
-      }
-      return []
-    })(),
   }
 }
 
@@ -349,7 +313,6 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     runtime_override: isRec(v.runtime_override) ? (v.runtime_override as RuntimeSettings) : null,
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
     cluster: optStr(v.cluster),
-    pool_entry: optStr(pick(v, 'pool_entry')),
     role_pending: bool(v.role_pending),
     daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
