@@ -292,6 +292,7 @@ interface MockProject {
   handed_off_to?: string | null
   executor_pool?: ExecutorPoolEntry[]
   deputy?: { bot_id: string; after_sec: number } | null
+  executor_grants?: { specialist: string; executor: string; track: string; granted_by: string; granted_at: string }[]
   created_at: string
 }
 
@@ -1096,6 +1097,8 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.bots.push(specialist)
+    // 演示：expert-exec-2 已授權給專家 expert-spec-infra。
+    p.executor_grants = [{ specialist: specialist.id, executor: exec2.id, track: 'infra', granted_by: 'user', granted_at: now() }]
   }
 
   /** 專家模式執行者群集名（契約：同專案、role=executor、(kind,model,effort,identity) 相同、≥2 顆）；單顆回 null。 */
@@ -1313,6 +1316,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && rawPath === '/projects') return this.addProject(b)
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
     if (method === 'PATCH' && seg[0] === 'projects' && seg.length === 2) return this.patchProject(seg[1], b)
+    if (method === 'PUT' && seg[0] === 'projects' && seg[2] === 'executor-grants' && seg.length === 3) return this.putExecutorGrants(seg[1], b)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
@@ -2437,6 +2441,7 @@ export class MockTransport implements Transport {
         executor_pool: p.executor_pool ?? [],
         role_policy: p.role_policy ?? {},
         deputy: p.deputy ?? null,
+        executor_grants: this.validGrants(p),
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2573,6 +2578,43 @@ export class MockTransport implements Transport {
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }
+  }
+
+  /** 同 daemon 的 `clear_invalid_grants`：expert 專案、存活頂層 specialist（track 未變）→ 存活頂層 executor。 */
+  private validGrants(p: MockProject) {
+    if (p.mode !== 'expert') return []
+    const top = (id: string) => this.bots.find((x) => x.id === id && x.project_id === p.id && !x.parent_bot_id)
+    return (p.executor_grants ?? []).filter((g) => {
+      const s = top(g.specialist)
+      const e = top(g.executor)
+      return s?.role === 'specialist' && (s.track ?? '') === g.track && e?.role === 'executor'
+    })
+  }
+
+  /** `PUT /projects/{id}/executor-grants`：整組取代；沿用既有 grant 的 granted_at。 */
+  private putExecutorGrants(id: string, b: Rec) {
+    const p = this.projects.find((x) => x.id === id)
+    if (!p) throw new ApiError(404, { error: 'not_found' }, 'not found')
+    if (p.mode !== 'expert') throw new ApiError(400, { reason: 'project_not_expert' }, 'bad_request')
+    const list = Array.isArray(b.grants) ? (b.grants as Rec[]) : null
+    if (!list) throw new ApiError(400, { reason: 'grants_required' }, 'bad_request')
+    const prev = this.validGrants(p)
+    const seen = new Set<string>()
+    const next = list.map((g) => {
+      const specialist = String(g.specialist ?? '')
+      const executor = String(g.executor ?? '')
+      const s = this.bots.find((x) => x.id === specialist && x.project_id === id && !x.parent_bot_id)
+      const e = this.bots.find((x) => x.id === executor && x.project_id === id && !x.parent_bot_id)
+      if (s?.role !== 'specialist') throw new ApiError(400, { reason: 'specialist_invalid' }, 'bad_request')
+      if (e?.role !== 'executor') throw new ApiError(400, { reason: 'executor_invalid' }, 'bad_request')
+      if (seen.has(executor)) throw new ApiError(400, { reason: 'executor_already_granted' }, 'bad_request')
+      seen.add(executor)
+      const old = prev.find((x) => x.specialist === specialist && x.executor === executor)
+      return { specialist, executor, track: s.track ?? '', granted_by: 'user', granted_at: old?.granted_at ?? now() }
+    })
+    p.executor_grants = next
+    this.emit('project_changed', { project_id: id })
+    return { project_id: id, grants: next }
   }
 
   /** `GET /bots/{id}/api-usage`：演示用數字，每次有 assistant 回覆就多一筆（見 `apiUsageTurns`）。 */

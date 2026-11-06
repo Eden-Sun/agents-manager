@@ -38,6 +38,8 @@ export interface Project {
   role_policy?: Record<string, RuntimeSettings> | null
   /** 專家模式副管理者；沒設＝null。管理者回合中太久時，排隊給它的請求改送這位。 */
   deputy?: ProjectDeputy | null
+  /** 專家模式執行者授權：專家可直接派工給被授權的執行者（一顆執行者最多授權給一位專家）。舊 daemon 沒有此欄。 */
+  executor_grants?: ExecutorGrant[]
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
 }
@@ -46,6 +48,26 @@ export interface ProjectDeputy {
   bot_id: string
   /** 管理者忙（請求排隊）多久才改派，秒；下限 60；送出時不帶＝180。 */
   after_sec?: number | null
+}
+
+/** `GET /api/projects` 的 `executor_grants[]`：track／granted_by／granted_at 由 daemon 填。 */
+export interface ExecutorGrant {
+  /** 專家 bot id */
+  specialist: string
+  /** 執行者 bot id */
+  executor: string
+  /** 授權當時專家的 track */
+  track: string
+  /** `"user"` 或授權的管理者 bot id */
+  granted_by: string
+  /** RFC3339 UTC */
+  granted_at: string
+}
+
+/** `PUT /api/projects/:id/executor-grants` 的一筆（整組取代）。 */
+export interface ExecutorGrantInput {
+  specialist: string
+  executor: string
 }
 
 export interface ExecutorPoolEntry {
