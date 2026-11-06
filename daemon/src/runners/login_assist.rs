@@ -54,24 +54,46 @@ pub fn reserve(app: &Arc<App>, host: &str, identity: &str) -> LcResult<IdentityR
     let key = (host.to_string(), identity.to_string());
     let mut reservations = app.login_reservations.lock().unwrap_or_else(|e| e.into_inner());
     if reservations.contains(&key) {
-        return Err(identity_login_in_progress(host, identity));
+        return Err(identity_login_in_progress(host, identity, None));
     }
     let panes = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
-    let active = panes.iter().any(|((entry_host, _), entry)| {
+    let active = panes.iter().find(|((entry_host, _), entry)| {
         entry_host == host && entry.identity == identity && entry.opened.elapsed() < MAX_AGE
     });
-    if active {
-        return Err(identity_login_in_progress(host, identity));
+    if let Some(((_, pane_id), entry)) = active {
+        return Err(identity_login_in_progress(host, identity, Some((pane_id, &entry.kind))));
     }
     reservations.insert(key.clone());
     Ok(IdentityReservation { app: app.clone(), key, active: true })
 }
 
-fn identity_login_in_progress(host: &str, identity: &str) -> LcError {
-    LcError::conflict(
-        "identity_login_in_progress",
-        json!({"host": host, "identity": identity, "message": "這個身份已有登入程序；先完成或關閉原登入終端再重試"}),
-    )
+/// 409 `identity_login_in_progress`：已有登入 pane 時帶上 `pane_id`／`kind`，網頁據此把那顆既有登入終端的登入輔助面板重開
+/// （使用者關掉面板後找不到原終端、只能乾等逾時的死路）。還在 reservation 階段（pane 尚未登記）就沒有這兩欄。
+fn identity_login_in_progress(host: &str, identity: &str, pane: Option<(&str, &str)>) -> LcError {
+    let mut body = json!({"host": host, "identity": identity, "message": "這個身份已有登入程序；先完成或關閉原登入終端再重試"});
+    if let Some((pane_id, kind)) = pane {
+        body["pane_id"] = json!(pane_id);
+        body["kind"] = json!(kind);
+    }
+    LcError::conflict("identity_login_in_progress", body)
+}
+
+/// 開新登入之前先把這個 `(host, identity)` 帳上已死的登入 pane 清掉（shell 已被收掉、pane id 被重用都算死），
+/// 免得 `reserve` 被一顆早就不在的終端卡到逾時。
+pub async fn prune_dead(app: &Arc<App>, host: &str, identity: &str) {
+    let candidates: Vec<(String, String)> = {
+        let m = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+        m.iter()
+            .filter(|((h, _), e)| h == host && e.identity == identity && e.opened.elapsed() < MAX_AGE)
+            .map(|((_, pane_id), e)| (pane_id.clone(), e.shell_created_at.clone()))
+            .collect()
+    };
+    for (pane_id, created) in candidates {
+        let live = app.host_shells.lock().await.iter().any(|s| s.host == host && s.pane_id == pane_id && s.created_at == created);
+        if !live {
+            crate::login_assist::forget(app, host, &pane_id);
+        }
+    }
 }
 
 async fn read_screen(app: &Arc<App>, host: &str, pane_id: &str, kind: &str) -> LcResult<LoginScreen> {

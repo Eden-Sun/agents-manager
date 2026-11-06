@@ -749,6 +749,24 @@ test('身份登入 409 identity_login_unavailable：顯示 daemon 的人話 mess
   assert.doesNotMatch(texts[0], /identity_login_unavailable/)
 })
 
+test('身份登入 409 identity_login_in_progress 帶既有 pane_id：不報錯，把那顆登入終端重新打開；沒有 pane_id 照舊報錯', async () => {
+  seed()
+  routeDaemon(() =>
+    json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }, 409),
+  )
+  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), true)
+  const view = useStore.getState().shellView
+  assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'm4p', paneId: 'w9:p9' })
+  assert.equal(useStore.getState().notices.some((n) => n.kind === 'error'), false)
+
+  // 還在 reservation 階段（pane 尚未登記）：沒有 pane 可以重開，照舊顯示 daemon 的說明。
+  useStore.setState({ shellView: null, notices: [] })
+  routeDaemon(() => json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', message: '這個身份已有登入程序' }, 409))
+  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), false)
+  assert.equal(useStore.getState().shellView, null)
+  assert.equal(noticeTexts().length, 1)
+})
+
 test('啟動撞 409 default_session：顯示 daemon 的人話 message', async () => {
   seed()
   routeDaemon(() =>

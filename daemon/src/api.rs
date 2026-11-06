@@ -5034,6 +5034,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
     };
     // claude（貼 code）與 codex（裝置碼）的登入 pane 都登記，網頁才拿得到網址與碼。
     let login_reservation = if !logout && matches!(idn.kind.as_str(), "claude" | "codex") {
+        crate::runners::login_assist::prune_dead(&app, &name, &identity).await;
         Some(crate::runners::login_assist::reserve(&app, &name, &identity)?)
     } else {
         None
