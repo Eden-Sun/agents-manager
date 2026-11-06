@@ -710,8 +710,8 @@ mod tests {
         assert_eq!(state, "pending", "不誤用既有請求");
         // 同一個撤回事件（同 turn）已記過：接受。
         let turn2 = queued_turn_from(&fx, &fx.spec, &fx.exec2, "same-event", "queued").await;
-        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,?,'','[]',?,'failed',?)")
-            .bind(db::ulid()).bind(&fx.spec.id).bind(&fx.exec2.id).bind(format!("withdrawn:{turn2}")).bind(&turn2).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,?,'','[]','failed',?)")
+            .bind(db::ulid()).bind(&fx.spec.id).bind(&fx.exec2.id).bind(format!("withdrawn:{turn2}")).bind(db::now()).execute(&app.db).await.unwrap();
         let d = crate::runners::relay_requests::denial(app, &turn2).await.unwrap().expect("沒有授權");
         assert!(crate::runners::relay_requests::withdraw_turn(app, &turn2, &d).await.unwrap());
         assert_eq!(turn_status(&fx, &turn2).await, "failed");
@@ -834,5 +834,96 @@ mod tests {
         assert!(matches!(claim(&fx, &q_later).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)), "代班結束後認領不到");
         assert!(crate::runners::relay_requests::queue_denial(app, &q_later).await.unwrap().is_some());
         assert!(grant_changed(&dispatch_with(&fx, "acting-over-now", basis.as_deref()).await));
+    }
+
+    /// Astra review5 #1：同時有授權又在代班的專家，兩個依據都記；撤掉授權但仍在代班，直送與認領都照放行。
+    #[tokio::test]
+    async fn both_bases_are_kept_and_either_one_suffices() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&fx.spec.id).bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        let redirected = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,redirected_from) VALUES(?,?,?,'rd-both','p','[]','pending',?,?)")
+            .bind(&redirected).bind(&fx.exec2.id).bind(&fx.spec.id).bind(db::now()).bind(&fx.manager.id).execute(&app.db).await.unwrap();
+        let basis = crate::relay_policy::relay_prompt_basis(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.unwrap();
+        let pid = &fx.env.project_id;
+        assert_eq!(basis.as_deref(), Some(format!("grant:{pid},deputy:{pid}").as_str()));
+        let q = queued_with(&fx, "both-q", basis.as_deref()).await;
+        // 撤銷授權（仍在代班）。
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(pid).execute(&app.db).await.unwrap();
+        assert_eq!(crate::runners::relay_requests::queue_denial(app, &q).await.unwrap(), None, "仍在代班：重驗放行");
+        assert_eq!(claim(&fx, &q).await, crate::lifecycle::turn_controller::Outcome::Applied, "仍在代班：認領放行");
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?").bind(db::now()).bind(&q).execute(&app.db).await.unwrap();
+        assert!(!grant_changed(&dispatch_with(&fx, "both-now", basis.as_deref()).await), "仍在代班：直送放行");
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE client_request_id='both-now'").bind(db::now()).execute(&app.db).await.unwrap();
+        // 代班也結束：兩個依據都不成立才擋。
+        sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&redirected).execute(&app.db).await.unwrap();
+        assert!(grant_changed(&dispatch_with(&fx, "both-over", basis.as_deref()).await));
+        // 無法辨識的依據值一律不成立。
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        assert!(grant_changed(&dispatch_with(&fx, "bogus", Some("bogus:x")).await));
+    }
+
+    /// Astra review5 #3：外部請求夾帶 `relay_auth` 不生效——依據只由 daemon 的核權結果決定（body 沒有這個欄位，送進來的值被忽略）。
+    #[tokio::test]
+    async fn a_smuggled_relay_auth_in_the_prompt_body_is_ignored() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        fx.env.herdr.live_pane(&format!("pane-{}", fx.exec.id), crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&fx.exec.id).execute(&app.db).await.unwrap();
+        let pid = fx.env.project_id.clone();
+        let send = |crid: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-AM-Bot-Id", fx.spec.id.parse().unwrap());
+            headers.insert("X-AM-Bot-Token", fx.spec.hook_token.parse().unwrap());
+            let body = serde_json::from_value(json!({"text": "do it", "client_request_id": crid, "relay_auth": format!("grant:{pid},deputy:{pid}")})).unwrap();
+            crate::api::prompt_bot(State(app.clone()), Path(fx.exec.id.clone()), headers, Extension(RequestPrincipal::Bot(fx.spec.id.clone())), Json(body))
+        };
+        // 沒有授權：夾帶的依據不會讓核權放行。
+        let r = send("smuggle-1").await;
+        assert!(matches!(&r, Err(LcError::Forbidden(_))), "{:?}", r.as_ref().err());
+        // 有授權：存下來的依據是 daemon 判定的（只有 grant，沒有夾帶的 deputy）。
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&fx.exec.id).execute(&app.db).await.unwrap();
+        let _ = send("smuggle-2").await;
+        let stored_auth: Option<String> = sqlx::query_scalar("SELECT m.relay_auth FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.client_request_id='smuggle-2' AND m.role='user'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(stored_auth.as_deref(), Some(format!("grant:{pid}").as_str()));
+    }
+
+    /// Astra review5 #2：一筆排隊 turn 有兩位送件者，只有一位的依據失效：整筆撤回；失效的那位收到它自己的原因，
+    /// 另一位收到「整筆撤回、請重送」。
+    #[tokio::test]
+    async fn multi_sender_turn_notifies_the_failed_sender_with_its_reason_and_the_others_to_resend() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let q = queued_turn_from(&fx, &fx.spec, &fx.exec, "multi", "queued").await;
+        let conv = db::conversation_id(&app.db, &fx.exec.id).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES(?,?,?,'user','also','web',?,?)")
+            .bind(db::ulid()).bind(&conv).bind(&q).bind(&fx.manager.id).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        assert!(crate::runners::relay_requests::queue_denial(app, &q).await.unwrap().is_some());
+        assert_eq!(turn_status(&fx, &q).await, "failed");
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as("SELECT from_bot_id,error FROM relay_requests WHERE client_request_id=? ORDER BY from_bot_id").bind(format!("withdrawn:{q}")).fetch_all(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let why = |id: &str| rows.iter().find(|(f, _)| f == id).and_then(|(_, e)| e.clone()).unwrap_or_default();
+        assert!(why(&fx.spec.id).contains("只接受 manager 派工"), "失效的那位：{}", why(&fx.spec.id));
+        assert!(why(&fx.manager.id).contains("整筆撤回"), "另一位：{}", why(&fx.manager.id));
+    }
+
+    /// Astra review5 #3：82→83 升級前就排隊的專家派工沒有依據（`relay_auth` NULL）：即使授權仍有效也保守拒絕（認領不到、撤回並通知重送）。
+    #[tokio::test]
+    async fn pre_upgrade_queued_dispatch_without_a_basis_is_conservatively_refused() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let q = queued_with(&fx, "pre-upgrade", None).await;
+        assert!(matches!(claim(&fx, &q).await, crate::lifecycle::turn_controller::Outcome::Fenced(_)));
+        let why = crate::runners::relay_requests::queue_denial(app, &q).await.unwrap().expect("保守拒絕");
+        assert!(why.contains("需要管理者授權"), "{why}");
+        assert_eq!(turn_status(&fx, &q).await, "failed");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests WHERE client_request_id=? AND from_bot_id=?").bind(format!("withdrawn:{q}")).bind(&fx.spec.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1, "通知送件者重送");
     }
 }
