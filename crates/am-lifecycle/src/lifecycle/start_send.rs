@@ -190,7 +190,7 @@ async fn accept_locked(
         return Err(super::prompt::queue_insert_error(bot_id, &conv, e));
     }
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, relay_auth, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
@@ -198,6 +198,7 @@ async fn accept_locked(
     .bind(text)
     .bind(relay.from)
     .bind(relay.unverified)
+    .bind(relay.auth)
     .bind(db::now())
     .execute(&mut *tx)
     .await

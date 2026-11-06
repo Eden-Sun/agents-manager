@@ -7825,8 +7825,13 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
 }
 
 async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), LcError> {
-    match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::NewRequest).await {
-        Ok(()) => Ok(()),
+    check_relay_basis(app, from, to).await.map(|_| ())
+}
+
+/// 同 [`check_relay_policy`]，另回這次放行的授權依據（建 turn 時記進 `messages.relay_auth`，見 `relay_policy::relay_prompt_basis`）。
+async fn check_relay_basis(app: &Arc<App>, from: &str, to: &str) -> Result<Option<String>, LcError> {
+    match crate::relay_policy::relay_prompt_basis(app, from, to, crate::relay_policy::Admission::NewRequest).await {
+        Ok(basis) => Ok(basis),
         Err(crate::relay_policy::RelayDenied::Denied(reason)) => Err(LcError::Forbidden(json!({"error":"forbidden","reason":reason}))),
         Err(crate::relay_policy::RelayDenied::Unavailable(reason)) => Err(LcError::Upstream(reason)),
     }
@@ -7901,8 +7906,10 @@ async fn prompt_bot(
             crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
         }
     };
+    // 這次派工只靠什麼放行（授權／代班）；建 turn 的那一句依它正向確認仍成立（`lifecycle::relay_grant`）。
+    let mut relay_auth: Option<String> = None;
     if !b.expect_result {
-        if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
+        if let Some(r) = &relay { relay_auth = check_relay_basis(&app, &r.from, &id).await?; }
 
     }
     if b.expect_result {
@@ -7922,7 +7929,7 @@ async fn prompt_bot(
             if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
         }
-        check_relay_policy(&app, sender, &id).await?;
+        relay_auth = check_relay_basis(&app, sender, &id).await?;
         if let Some(name) = &cluster {
             let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
             let Some(scope) = crate::expert_cluster::sender_scope(&app, &from).await.map_err(any_err)? else {
@@ -7957,7 +7964,7 @@ async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
         }
         let delivery_key = format!("relay-request:{request_id}");
-        let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)), false, None).await {
+        let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)).with_auth(relay_auth.as_deref()), false, None).await {
             Ok(out) => out,
             Err(e) => {
                 tracing::warn!(request = %request_id, "relay request accepted for later reconciliation");
@@ -7987,7 +7994,7 @@ async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str()));
+    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str())).with_auth(relay_auth.as_deref());
     // 框裡的草稿只有使用者自己在畫面上處理：bot 轉送的 prompt 不能替人送出或清掉別人的字。
     if (b.clear_draft || b.submit_draft) && relay.is_some() {
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));

@@ -9,17 +9,24 @@ pub enum RelayDenied { Denied(String), Unavailable(String) }
 pub enum Admission { NewRequest, Deliver, ResultNotice }
 
 pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: &str, kind: Admission) -> Result<(), RelayDenied> {
+    relay_prompt_basis(app, from_bot_id, to_bot_id, kind).await.map(|_| ())
+}
+
+/// 同 [`relay_prompt_allowed`]，另回「這次只靠什麼放行」的可信依據，給建 turn 時記在 `messages.relay_auth`：
+/// `grant:<專案 id>`＝只因執行者授權放行；`deputy:<專案 id>`＝只因代班中的副管理者放行；其他原本就放行的組合
+/// （manager、advisor 目標、直屬 parent、AGM…）回 `None`。最終寫入（`lifecycle::relay_grant`）依這個依據正向確認仍成立。
+pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &str, kind: Admission) -> Result<Option<String>, RelayDenied> {
     if kind == Admission::ResultNotice {
         let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE id=? AND deleted_at IS NULL)")
             .bind(from_bot_id).fetch_one(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
-        return if live { Ok(()) } else { Err(RelayDenied::Denied("requester unavailable".into())) };
+        return if live { Ok(None) } else { Err(RelayDenied::Denied("requester unavailable".into())) };
     }
     if from_bot_id == to_bot_id { return Err(RelayDenied::Denied("relay_self".into())); }
     let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE id=? AND deleted_at IS NULL) AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL)")
         .bind(from_bot_id).bind(to_bot_id).fetch_one(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
     if !live { return Err(RelayDenied::Denied("relay participant or project unavailable".into())); }
     // 改派給副管理者的請求：原本送管理者時已通過 NewRequest，送達時不重驗副管理者（跨專案送件者本來進不了它）。
-    if kind == Admission::Deliver && crate::runners::relay_deputy::redirected_open(app, from_bot_id, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Ok(()); }
+    if kind == Admission::Deliver && crate::runners::relay_deputy::redirected_open(app, from_bot_id, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Ok(None); }
     let from = crate::db::bot(&app.db, from_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("source_missing".into()))?;
     let to = crate::db::bot(&app.db, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("target_missing".into()))?;
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
@@ -29,7 +36,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
     if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) && to.manager_use == 0 {
         return Err(RelayDenied::Denied("member_disabled".into()));
     }
-    if is_agm { return Ok(()); }
+    if is_agm { return Ok(None); }
     // 跨專案（使用者 2026-10-31／11-02）：目標在 expert 專案 → 只准送到它的頂層 manager（對外窗口），送件者若在 expert 專案也必須是 manager；
     // 目標在一般專案 → 寄件者是一般專案的 bot，或 expert 專案的頂層 manager（前台要能回覆外部 bot）。expert 的非管理者不能出專案。
     let from_is_front = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
@@ -45,7 +52,10 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
             let expected = format!("{}:{}:{}:{}", project.id, project.host, project.mode, from.role.as_deref().unwrap_or(""));
             if run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(expected.as_str()) { return Err(RelayDenied::Denied("role_not_applied".into())); }
         }
-        if !direct_family && !matches!(to.role.as_deref(), Some("manager" | "advisor")) && from.role.as_deref() != Some("manager") && !granted(&project, &from, &to) && !crate::runners::relay_deputy::acting(app, &from.id).await {
+        let base_allowed = direct_family || matches!(to.role.as_deref(), Some("manager" | "advisor")) || from.role.as_deref() == Some("manager");
+        if !base_allowed && granted(&project, &from, &to) { return Ok(Some(format!("grant:{}", project.id))); }
+        if !base_allowed && crate::runners::relay_deputy::acting(app, &from.id).await { return Ok(Some(format!("deputy:{}", project.id))); }
+        if !base_allowed {
             let manager: Option<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
             let manager = manager.as_deref().unwrap_or("（未指定）");
             let target_role = to.role.as_deref().unwrap_or("沒有角色的成員");
@@ -58,7 +68,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
             return Err(RelayDenied::Denied(format!("{target_role} 只接受 manager 派工，{hint}")));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// 專家模式執行者授權（`projects.executor_grants_json`）：送件者是同專案存活頂層 specialist、目標是同專案存活頂層 executor，
