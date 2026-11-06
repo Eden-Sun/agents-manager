@@ -45,12 +45,32 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
             let expected = format!("{}:{}:{}:{}", project.id, project.host, project.mode, from.role.as_deref().unwrap_or(""));
             if run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(expected.as_str()) { return Err(RelayDenied::Denied("role_not_applied".into())); }
         }
-        if !direct_family && !matches!(to.role.as_deref(), Some("manager" | "advisor")) && from.role.as_deref() != Some("manager") && !crate::runners::relay_deputy::acting(app, &from.id).await {
+        if !direct_family && !matches!(to.role.as_deref(), Some("manager" | "advisor")) && from.role.as_deref() != Some("manager") && !granted(&project, &from, &to) && !crate::runners::relay_deputy::acting(app, &from.id).await {
             let manager: Option<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
-            return Err(RelayDenied::Denied(format!("executor 只接受 manager 派工，請改送給管理者 {}", manager.as_deref().unwrap_or("（未指定）"))));
+            let manager = manager.as_deref().unwrap_or("（未指定）");
+            let target_role = to.role.as_deref().unwrap_or("沒有角色的成員");
+            // 授權只能讓專家派工給執行者：其他組合提示授權沒有意義。
+            let hint = if from.role.as_deref() == Some("specialist") && to.role.as_deref() == Some("executor") {
+                format!("請管理者授權（agm grant）或改送給管理者 {manager}")
+            } else {
+                format!("請改送給管理者 {manager}")
+            };
+            return Err(RelayDenied::Denied(format!("{target_role} 只接受 manager 派工，{hint}")));
         }
     }
     Ok(())
+}
+
+/// 專家模式執行者授權（`projects.executor_grants_json`）：送件者是同專案存活頂層 specialist、目標是同專案存活頂層 executor，
+/// 且有 grant(specialist=送件者, executor=目標)、送件者的 track 仍等於授權時的 track。config 變更時 `clear_invalid_grants`
+/// 已清掉不合格的授權；這裡再對 DB 現況核一次（child、刪除與角色都看當下）。
+fn granted(project: &crate::db::Project, from: &crate::db::Bot, to: &crate::db::Bot) -> bool {
+    project.mode == "expert"
+        && from.project_id == project.id && to.project_id == project.id
+        && from.parent_bot_id.is_none() && to.parent_bot_id.is_none()
+        && from.deleted_at.is_none() && to.deleted_at.is_none()
+        && from.role.as_deref() == Some("specialist") && to.role.as_deref() == Some("executor")
+        && project.executor_grants().iter().any(|g| g.specialist == from.id && g.executor == to.id && from.track.as_deref() == Some(g.track.as_str()))
 }
 
 #[cfg(test)]
