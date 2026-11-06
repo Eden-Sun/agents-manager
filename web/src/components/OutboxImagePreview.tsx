@@ -31,12 +31,15 @@ export function OutboxImagePreview({
 
   useEffect(() => {
     let alive = true
-    blobFor(botId, name, modified).then(
+    // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
+    const lease = blobFor(botId, name, modified)
+    lease.url.then(
       (url) => alive && setSrc({ key, url }),
       () => alive && setSrc({ key, url: null }),
     )
     return () => {
       alive = false
+      lease.release()
     }
   }, [botId, name, modified, key])
 

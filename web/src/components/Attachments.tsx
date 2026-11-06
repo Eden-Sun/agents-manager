@@ -10,6 +10,7 @@ import { failureHint, failureLabel, loadFailure } from '../lib/attachmentLoad'
 import type { AttachmentFailure } from '../lib/attachmentLoad'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
+import { createBlobUrlCache, type BlobLease } from '../lib/blobUrlCache'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import './attachments.css'
 
@@ -184,32 +185,17 @@ export function FileIcon() {
   )
 }
 
-/** Object URL per attachment id, shared across bubbles. */
-const urlCache = new Map<string, Promise<string>>()
-/** LRU 上限：每個 object URL 釘住最大 50 MB Blob；已解碼的 `<img>` 不受 revoke 影響。 */
-const URL_CACHE_MAX = 64
+/**
+ * Object URL per attachment id, shared across bubbles. 每個 object URL 釘住最大 50 MB Blob，
+ * 沒人用的最多留 64 個；還掛在畫面上的不 revoke（#2074：一次掛上超過 64 張圖時，舊寫法擠出就 revoke，
+ * 最早的縮圖在 commit 前 URL 就失效、破圖）。
+ */
+// 第一次用到才建：components 的模組層不能呼叫 lib 的函式（chunk 初始化順序，見 moduleInitOrder.test）。
+let urlCache: ReturnType<typeof createBlobUrlCache> | null = null
 
-function storedUrl(id: string): Promise<string> {
-  let p = urlCache.get(id)
-  if (p) {
-    // Map 照插入順序迭代：重新插入就是「最近用過」。
-    urlCache.delete(id)
-    urlCache.set(id, p)
-    return p
-  }
-  p = api.attachmentUrl(id).catch((e: unknown) => {
-    urlCache.delete(id)
-    throw e
-  })
-  urlCache.set(id, p)
-  while (urlCache.size > URL_CACHE_MAX) {
-    const oldest = urlCache.keys().next().value
-    if (oldest === undefined) break
-    const evicted = urlCache.get(oldest)
-    urlCache.delete(oldest)
-    void evicted?.then((u) => URL.revokeObjectURL(u)).catch(() => {})
-  }
-  return p
+function storedUrl(id: string): BlobLease {
+  urlCache ??= createBlobUrlCache(64)
+  return urlCache.acquire(id, () => api.attachmentUrl(id))
 }
 
 export function MessageAttachments({ items }: { items: Attachment[] }) {
@@ -270,7 +256,9 @@ function useStoredUrl(id: string | null): { url: string | null; failure: Attachm
   useEffect(() => {
     if (!id) return
     let live = true
-    storedUrl(id)
+    // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
+    const lease = storedUrl(id)
+    lease.url
       .then((u) => {
         if (live) setState({ url: u, failure: null })
       })
@@ -279,6 +267,7 @@ function useStoredUrl(id: string | null): { url: string | null; failure: Attachm
       })
     return () => {
       live = false
+      lease.release()
     }
   }, [id, attempt])
   return state
