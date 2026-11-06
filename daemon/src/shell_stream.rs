@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Notify};
 
@@ -278,20 +278,30 @@ fn fail(k: &Key, code: &'static str) {
     }
 }
 
-/// observe 的冷卻表：`(App 位址, host) → 冷卻到何時`。
-fn observe_cooldowns() -> &'static Mutex<HashMap<(usize, String), Instant>> {
-    static COOLDOWNS: OnceLock<Mutex<HashMap<(usize, String), Instant>>> = OnceLock::new();
+/// observe 的冷卻表：`(App 位址, host) → (那顆 App 的 Weak, 冷卻到何時)`。
+///
+/// 只用位址當鍵會撞：App 掉了以後同一塊記憶體會被下一個 App 拿到（測試每條一個 App，整批跑時很常見），
+/// 前一個 App 留下的 60 秒冷卻就套到新 App 上，observe 根本不試、直接走快照（shell_stream 的 observe 測試偶發收到
+/// `frame` 而不是 `raw`）。存一份 `Weak`：登記還在時那塊配置不會釋放，位址就不會被重用；查到 Weak 已失效的登記一律當作沒有並清掉。
+type Cooldowns = HashMap<(usize, String), (Weak<App>, Instant)>;
+
+fn observe_cooldowns() -> &'static Mutex<Cooldowns> {
+    static COOLDOWNS: OnceLock<Mutex<Cooldowns>> = OnceLock::new();
     COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn observe_is_cooling(app: &Arc<App>, host: &str) -> bool {
     let addr = Arc::as_ptr(app) as usize;
-    observe_cooldowns().lock().unwrap().get(&(addr, host.to_string())).is_some_and(|until| Instant::now() < *until)
+    let now = Instant::now();
+    let mut map = observe_cooldowns().lock().unwrap();
+    // 順手清掉已經掉了的 App 與過期的登記，讓它們的配置能釋放。
+    map.retain(|_, (w, until)| w.strong_count() > 0 && now < *until);
+    map.get(&(addr, host.to_string())).is_some_and(|(w, _)| std::ptr::eq(w.as_ptr(), Arc::as_ptr(app)))
 }
 
 fn start_observe_cooldown(app: &Arc<App>, host: &str) {
     let addr = Arc::as_ptr(app) as usize;
-    observe_cooldowns().lock().unwrap().insert((addr, host.to_string()), Instant::now() + OBSERVE_COOLDOWN);
+    observe_cooldowns().lock().unwrap().insert((addr, host.to_string()), (Arc::downgrade(app), Instant::now() + OBSERVE_COOLDOWN));
 }
 
 /// observe 一趟的結果。
@@ -862,6 +872,24 @@ exec sleep 30"#,
         assert!(matches!(&f.body, Body::Snapshot { text, .. } if text == "fallback"), "{:?}", f.body);
         assert_eq!(f.message()["type"], "frame");
         assert!(observe_is_cooling(app, "local"), "起不來要冷卻，之後不要每次都重試");
+    }
+
+    /// 冷卻只算在設下它的那顆 App：App 掉了，登記就失效並被清掉（不會因為位址被下一個 App 重用而套到它身上）。
+    #[tokio::test]
+    async fn a_cooldown_does_not_outlive_its_app() {
+        let old = crate::testing::env().await;
+        start_observe_cooldown(&old.app, "local");
+        assert!(observe_is_cooling(&old.app, "local"));
+        let addr = Arc::as_ptr(&old.app) as usize;
+        let weak = Arc::downgrade(&old.app);
+        drop(old);
+        assert_eq!(weak.strong_count(), 0, "測試環境掉了 App 就該掉");
+        let new = crate::testing::env().await;
+        assert!(!observe_is_cooling(&new.app, "local"), "新 App 不繼承舊 App 的冷卻");
+        assert!(
+            !observe_cooldowns().lock().unwrap().keys().any(|(a, _)| *a == addr),
+            "掉了的 App 的登記要清掉"
+        );
     }
 
     /// 回放：後來加入的觀看者先拿到完整幀，再拿到之後的差異（中途連上也畫得對）。
