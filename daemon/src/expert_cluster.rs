@@ -130,6 +130,45 @@ pub fn clusters_of(bots: &[db::Bot], runs: &std::collections::HashMap<String, db
     group(&members)
 }
 
+/// 誰能對群集派工、能挑哪些成員：管理者（或代班中的副管理者）不限；專家只能挑授權給自己的執行者（`executor_grants`），
+/// 而且不會為它自動啟動停著的成員（授權只涵蓋派工，不含 start）。其他人 `None`＝不能對群集派工。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope { All, Granted(std::collections::BTreeSet<String>) }
+
+impl Scope {
+    pub fn allows(&self, bot_id: &str) -> bool {
+        match self { Scope::All => true, Scope::Granted(ids) => ids.contains(bot_id) }
+    }
+    /// 可不可以替這個發送者自動啟動成員。
+    pub fn may_start(&self) -> bool { matches!(self, Scope::All) }
+}
+
+pub async fn sender_scope(app: &Arc<App>, sender: &db::Bot) -> anyhow::Result<Option<Scope>> {
+    if sender.deleted_at.is_some() { return Ok(None) }
+    if sender.role.as_deref() == Some("manager") && sender.parent_bot_id.is_none() { return Ok(Some(Scope::All)) }
+    if crate::runners::relay_deputy::acting(app, &sender.id).await { return Ok(Some(Scope::All)) }
+    if sender.role.as_deref() != Some("specialist") || sender.parent_bot_id.is_some() { return Ok(None) }
+    let Some(project) = db::project(&app.db, &sender.project_id).await? else { return Ok(None) };
+    if project.mode != "expert" { return Ok(None) }
+    Ok(Some(Scope::Granted(granted_to(&project, sender))))
+}
+
+/// 授權給這位專家的執行者 id（track 要等於專家現在的 track）。
+pub fn granted_to(project: &db::Project, specialist: &db::Bot) -> std::collections::BTreeSet<String> {
+    project.executor_grants().into_iter()
+        .filter(|g| g.specialist == specialist.id && specialist.track.as_deref() == Some(g.track.as_str()))
+        .map(|g| g.executor).collect()
+}
+
+impl Cluster {
+    /// 只留下 `scope` 允許的成員（名稱不變；`Scope::All` 原樣）。
+    pub fn restricted(&self, scope: &Scope) -> Cluster {
+        let mut c = self.clone();
+        c.members.retain(|m| scope.allows(&m.id));
+        c
+    }
+}
+
 /// 專案的群集（讀 DB）。
 pub async fn project_clusters(app: &Arc<App>, project_id: &str) -> anyhow::Result<Vec<Cluster>> {
     let bots = db::live_bots(&app.db).await?;
@@ -189,8 +228,18 @@ pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, c
     let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) else {
         return Ok(gone(format!("cluster {cluster} no longer exists")).await?)
     };
+    // 發起者是專家：只在授權給它的成員裡挑、也不替它啟動成員（不越界）。發起者已不能對群集派工就標 failed。
+    let from: Option<String> = sqlx::query_scalar("SELECT from_bot_id FROM relay_requests WHERE id=?").bind(request_id).fetch_optional(&app.db).await?;
+    let sender = match from { Some(f) => db::bot(&app.db, &f).await?, None => None };
+    // 非專家發起的（管理者／代班的副管理者）維持原行為不重驗；專家不再合格就當作沒有授權。
+    let scope = match &sender {
+        Some(s) if s.role.as_deref() == Some("specialist") => sender_scope(app, s).await?.unwrap_or(Scope::Granted(Default::default())),
+        _ => Scope::All,
+    };
+    let c = c.restricted(&scope);
+    if c.members.is_empty() { return Ok(gone(format!("cluster {cluster}: no member granted to the sender")).await?) }
     let Some(pick) = c.pick_idle() else {
-        start_one_if_needed(app, &bot.project_id, &c.name).await;
+        if scope.may_start() { start_one_if_needed(app, &bot.project_id, &c.name).await; }
         return Ok(None)
     };
     if pick.id == project_bot { return Ok(Some(pick.id.clone())) }
@@ -363,5 +412,78 @@ mod tests {
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq',?,?,'k','p','[]','pending',?,'haiku')")
             .bind(&manager.id).bind(ids.iter().find(|i| **i != first).unwrap()).bind(db::now()).execute(&env.app.db).await.unwrap();
         assert_eq!(claim_target(&env.app, "rq", ids.iter().find(|i| **i != first).unwrap(), "haiku").await.unwrap(), Some(first));
+    }
+}
+
+#[cfg(test)]
+mod granted_cluster_tests {
+    use super::*;
+
+    struct Fx { env: crate::testing::Env, mgr: String, spec: String, e1: String, e2: String }
+
+    /// 專家專案：管理者、專家（track db）、同設定的兩顆 haiku 執行者（成一個群集）；只把 e1 授權給專家。
+    async fn fx() -> Fx {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let mut ids = Vec::new();
+        for (name, role, track) in [("gc-mgr", "manager", None), ("gc-spec", "specialist", Some("db")), ("gc-e1", "executor", None), ("gc-e2", "executor", None)] {
+            let b = crate::testing::claude_bot(app, &env.project_id, name).await;
+            sqlx::query("UPDATE bots SET role=?, track=?, model='claude-haiku-5-5' WHERE id=?").bind(role).bind(track).bind(&b.id).execute(&app.db).await.unwrap();
+            let run = crate::testing::fake_run(app, &b.id).await;
+            sqlx::query("UPDATE runs SET state='running', agent_status='working', runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:{role}", env.project_id)).bind(run).execute(&app.db).await.unwrap();
+            ids.push(b.id);
+        }
+        let grants = json!([{"specialist": ids[1], "executor": ids[2], "track": "db", "granted_by": "user", "granted_at": "2026-11-06T00:00:00Z"}]).to_string();
+        sqlx::query("UPDATE projects SET executor_grants_json=? WHERE id=?").bind(grants).bind(&env.project_id).execute(&app.db).await.unwrap();
+        Fx { mgr: ids[0].clone(), spec: ids[1].clone(), e1: ids[2].clone(), e2: ids[3].clone(), env }
+    }
+
+    async fn status(f: &Fx, bot: &str, s: &str) {
+        sqlx::query("UPDATE runs SET agent_status=? WHERE bot_id=?").bind(s).bind(bot).execute(&f.env.app.db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_specialist_resolves_a_cluster_only_to_its_granted_member() {
+        let f = fx().await;
+        let app = &f.env.app;
+        // 未授權的 e2 閒著、e1 在忙：專家仍只會拿到 e1（不越界），管理者拿到閒著的 e2。
+        status(&f, &f.e2, "idle").await;
+        let spec = crate::api::resolve_cluster_target(app, &f.spec, "haiku").await.unwrap().0;
+        assert_eq!(spec["to_bot_id"], f.e1.as_str(), "{spec}");
+        assert_eq!(spec["cluster_idle"], false);
+        let mgr = crate::api::resolve_cluster_target(app, &f.mgr, "haiku").await.unwrap().0;
+        assert_eq!(mgr["to_bot_id"], f.e2.as_str(), "{mgr}");
+        // 撤銷後：群集裡沒有授權給它的成員 → 403 cluster_not_granted。
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&f.env.project_id).execute(&app.db).await.unwrap();
+        match crate::api::resolve_cluster_target(app, &f.spec, "haiku").await {
+            Err(crate::lifecycle::LcError::Forbidden(v)) => assert_eq!(v["reason"], "cluster_not_granted"),
+            other => panic!("{other:?}"),
+        }
+        // 執行者本身不能對群集派工。
+        assert!(matches!(crate::api::resolve_cluster_target(app, &f.e1, "haiku").await, Err(crate::lifecycle::LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn a_pending_specialist_cluster_request_is_never_moved_to_an_ungranted_member() {
+        let f = fx().await;
+        let app = &f.env.app;
+        let rid = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'gc-key','p','[]','pending',?,'haiku')")
+            .bind(&rid).bind(&f.spec).bind(&f.e1).bind(db::now()).execute(&app.db).await.unwrap();
+        // e2（未授權）閒下來：不改派，繼續等 e1。
+        status(&f, &f.e2, "idle").await;
+        assert_eq!(claim_target(app, &rid, &f.e1, "haiku").await.unwrap(), None);
+        let to: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(to, f.e1);
+        // e1 閒下來：交給它。
+        status(&f, &f.e1, "idle").await;
+        assert_eq!(claim_target(app, &rid, &f.e1, "haiku").await.unwrap(), Some(f.e1.clone()));
+        // 授權撤掉：請求標 failed，不改派給 e2。
+        status(&f, &f.e1, "working").await;
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&f.env.project_id).execute(&app.db).await.unwrap();
+        assert_eq!(claim_target(app, &rid, &f.e1, "haiku").await.unwrap(), None);
+        let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "failed");
     }
 }
