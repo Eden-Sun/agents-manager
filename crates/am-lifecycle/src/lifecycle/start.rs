@@ -133,6 +133,14 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。專案設定的「專家可直接派工給執行者」開關（預設開）開著時，專家可直接派工給本專案執行者並驗收；同一顆執行者被同時派工照佇列排隊。關掉就只有你（或代班中的副管理者）能派工給執行者。".to_string())
 }
 
+/// 顧問（advisor）的啟動指示：只給顧問本人，職責文字不含 bot 名稱或 id。
+pub(crate) fn advisor_role_section(role: Option<&str>) -> Option<String> {
+    if role != Some("advisor") {
+        return None;
+    }
+    Some("\n\n你是本專案的顧問：不實作、不改檔、不 commit；接受任何成員的諮詢，負責回答問題、審查方案或 diff、比較設計取捨並給建議；需要動手的工作回報管理者派給執行者或專家。".to_string())
+}
+
 /// 副管理者設定後的專屬段（只給管理者與副管理者本人，其他 bot 不變）：管理者知道摘要會回來，副管理者知道自己的邊界。
 pub(crate) fn deputy_role_section(bot_id: &str, role: Option<&str>, deputy_bot_id: Option<&str>) -> Option<String> {
     let deputy = deputy_bot_id?;
@@ -1408,6 +1416,9 @@ async fn start_inner_body(
         let role = bot.role.as_deref().unwrap_or("未分配");
         agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
         if let Some(extra) = manager_role_section(bot.role.as_deref()) {
+            agent_md.text.push_str(&extra);
+        }
+        if let Some(extra) = advisor_role_section(bot.role.as_deref()) {
             agent_md.text.push_str(&extra);
         }
         if let Some(extra) = deputy_role_section(&bot.id, bot.role.as_deref(), project.deputy_bot_id.as_deref()) {
@@ -6243,7 +6254,7 @@ mod account_file_tests {
 /// 專家（specialist）的範圍段只給 specialist、且一定帶 track（bot 專屬段，不進共用的 child_agent_rules）。
 #[cfg(test)]
 mod specialist_section_tests {
-    use super::{manager_role_section, specialist_role_section};
+    use super::{advisor_role_section, manager_role_section, specialist_role_section};
 
     #[test]
     fn only_a_specialist_with_a_track_gets_the_scope_section() {
@@ -6278,6 +6289,19 @@ mod specialist_section_tests {
         assert!(manager_role_section(Some("specialist")).is_none());
         assert!(manager_role_section(None).is_none());
         assert!(manager_role_section(Some("other")).is_none());
+    }
+
+    #[test]
+    fn advisor_role_section_only_present_for_advisor() {
+        let advisor_sec = advisor_role_section(Some("advisor")).expect("advisor 有啟動指示");
+        assert!(advisor_sec.contains("你是本專案的顧問：不實作、不改檔、不 commit；接受任何成員的諮詢，負責回答問題、審查方案或 diff、比較設計取捨並給建議；需要動手的工作回報管理者派給執行者或專家。"), "{advisor_sec}");
+        assert!(!advisor_sec.contains("bot ID") && !advisor_sec.contains("<id>"), "顧問指示不帶 bot 專屬名稱或 id：{advisor_sec}");
+
+        assert!(advisor_role_section(Some("manager")).is_none());
+        assert!(advisor_role_section(Some("executor")).is_none());
+        assert!(advisor_role_section(Some("specialist")).is_none());
+        assert!(advisor_role_section(None).is_none());
+        assert!(advisor_role_section(Some("other")).is_none());
     }
 }
 
