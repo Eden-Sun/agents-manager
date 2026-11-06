@@ -1,5 +1,5 @@
 import { MockTransport } from './mock'
-import { toHostBaselinePlan, toHostBaselineApplyResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toHostBaselinePlan, toHostBaselineApplyResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules, toExecutorGrants } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
@@ -34,6 +34,8 @@ import type {
   NewBotInput,
   NewProjectInput,
   PatchProjectInput,
+  ExecutorGrant,
+  ExecutorGrantInput,
   PatchBotInput,
   PatchBotResult,
   PromptResult,
@@ -292,6 +294,15 @@ export async function createProject(input: NewProjectInput): Promise<string> {
 /** API.md §3. Rename never blocked by a live run: label only affects the next start's slug. */
 export async function patchProject(projectId: string, input: PatchProjectInput): Promise<void> {
   await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
+}
+
+/**
+ * 專家模式執行者授權：整組取代（track／granted_by／granted_at 由 daemon 填）。允許使用者或該專案的管理者；違反排他等不變式回 400。
+ * `revision` 是畫面上那份授權的 `grants_revision`（樂觀鎖）：別人先改過就回 409 `grants_revision_conflict`。
+ */
+export async function setExecutorGrants(projectId: string, grants: ExecutorGrantInput[], revision?: string): Promise<ExecutorGrant[]> {
+  const raw = await transport.request('PUT', `/projects/${encodeURIComponent(projectId)}/executor-grants`, revision ? { grants, revision } : { grants })
+  return toExecutorGrants(isRec(raw) ? pick(raw, 'grants') ?? pick(raw, 'executor_grants') : raw)
 }
 
 /** 停用名單的鍵：身份是每台主機、每個 kind 各一份（cc1 在別台是別的帳號）。 */

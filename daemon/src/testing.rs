@@ -1616,7 +1616,7 @@ pub async fn seed_project_config(e: &Env) {
     e.app
         .cfg
         .update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: crate::config::LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         })
         .await

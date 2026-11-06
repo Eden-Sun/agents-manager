@@ -258,6 +258,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
+        // 專家模式執行者授權（整組取代；User 或該專案前台 manager，見 `executor_grants.rs`）。
+        .route("/projects/{id}/executor-grants", axum::routing::put(crate::executor_grants::put_http))
         // §6.5e：非 agent 的 shell／服務 pane。
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
@@ -1841,6 +1843,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
         }));
+        // 專家模式執行者授權（json! 巨集已到遞迴上限，所以在外面補）。
+        if let Some(last) = out.last_mut() {
+            let grants = p.executor_grants();
+            last["grants_revision"] = json!(crate::executor_grants::revision(&grants));
+            last["executor_grants"] = json!(grants);
+        }
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
@@ -1893,7 +1901,7 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
 /// 閘門擋下來時 config.toml **沒有**被動過，`config_written: false`：呼叫端改一下再送同一個請求就好，
 /// 不必先去 config.toml 補列（跟啟動投影／背景重投那類沒有伴隨 mutation 的 `project_config` 呼叫端不同，
 /// 那些仍是 `config_written: true`，見 `projection::guard_removals`）。
-fn projection_err(e: anyhow::Error) -> LcError {
+pub(crate) fn projection_err(e: anyhow::Error) -> LcError {
     match e.downcast_ref::<crate::projection::ProjectionRefused>() {
         Some(r) => LcError::conflict(
             "projection_refused",
@@ -2229,7 +2237,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
             anyhow::bail!("duplicate");
         }
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
             handed_off_to: None,
             id: Some(id.clone()),
             path: path.clone(),
@@ -5301,7 +5309,7 @@ mod identity_auth_error_tests {
             .unwrap();
         // 這台上放一個活著的專案。
         crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                 handed_off_to: None,
                 id: Some("01PROJZZ92".into()),
                 path: "/srv/work".into(),
@@ -5499,7 +5507,7 @@ mod identity_auth_error_tests {
                     herdr_session: "agents-manager".into(),
                     remote_path: String::new(),
                 });
-                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     id: Some("01CONFIGRACE".into()),
                     path: "/tmp/xreview-host-config-race".into(),
                     label: "config race".into(),
@@ -6009,7 +6017,7 @@ mod project_tests {
         // `testing::env` only seeds the db row; the rename edits config.toml.
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: e.repo.to_string_lossy().to_string(),
@@ -6135,7 +6143,7 @@ mod project_tests {
         let path = e.repo.to_string_lossy().to_string();
         app.cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     id: Some(pid.clone()),
                     path,
                     label: "proj".into(),
@@ -6190,7 +6198,7 @@ mod project_tests {
         // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: repo.clone(),
@@ -6702,7 +6710,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -6732,7 +6740,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer2", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -7669,7 +7677,7 @@ async fn move_bot_pane_to_tab(State(app): State<Arc<App>>, Path(id): Path<String
 }
 
 #[derive(Deserialize)]
-struct PromptIn {
+pub(crate) struct PromptIn {
     /// `submit_draft` 時不用帶（送的是框裡那段）；其他時候空字串照舊 400。
     #[serde(default)]
     text: String,
@@ -7785,23 +7793,27 @@ async fn resolve_relay_target(
     Ok(Json(json!({"to_bot_id":bot,"to_run_id":run,"to_agent":agent.as_ref().or(pane.as_ref())})))
 }
 
-/// `bot:cluster:<名稱>`：只有 manager（或代班中的副管理者）可對群集派工；挑同群集閒置、manager_use=1 的成員，
-/// 都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，等第一個閒下來的成員接手。
+/// `bot:cluster:<名稱>`：manager（或代班中的副管理者）可對群集派工；專家只能挑群集裡授權給自己的執行者（見 `expert_cluster::Scope`）。
+/// 挑閒置、manager_use=1 的成員，都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，
+/// 等第一個閒下來的成員接手。只有管理者側會順手啟動停著的成員；專家不會（授權不含 start）。
 pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &str) -> Result<Json<Value>, LcError> {
     let from = db::bot(&app.db, sender).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay sender".into()))?;
-    let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
-    if !is_manager && !crate::runners::relay_deputy::acting(app, &from.id).await {
+    let Some(scope) = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)? else {
         return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
-    }
+    };
     let clusters = crate::expert_cluster::project_clusters(app, &from.project_id).await.map_err(any_err)?;
-    let cluster = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
+    let full = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
+    let cluster = full.restricted(&scope);
+    if cluster.members.is_empty() {
+        return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_granted","message":"這個群集沒有授權給你的執行者：請管理者授權（agm grant）或改送管理者"})));
+    }
     let chosen = match cluster.pick_idle() {
         Some(m) => Some((m.id.clone(), true)),
         None => {
-            // 沒有閒置成員：先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
-            crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await;
+            // 沒有閒置成員：管理者側先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
+            if scope.may_start() { crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await; }
             cluster.members.iter().filter(|m| m.manager_use && (m.running || m.starting)).map(|m| m.id.clone()).next()
-                .or_else(|| cluster.pick_to_start().map(|m| m.id.clone()))
+                .or_else(|| if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use).map(|m| m.id.clone()).next())
                 .map(|id| (id, false))
         }
@@ -7813,8 +7825,13 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
 }
 
 async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), LcError> {
-    match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::NewRequest).await {
-        Ok(()) => Ok(()),
+    check_relay_basis(app, from, to).await.map(|_| ())
+}
+
+/// 同 [`check_relay_policy`]，另回這次放行的授權依據（建 turn 時記進 `messages.relay_auth`，見 `relay_policy::relay_prompt_basis`）。
+async fn check_relay_basis(app: &Arc<App>, from: &str, to: &str) -> Result<Option<String>, LcError> {
+    match crate::relay_policy::relay_prompt_basis(app, from, to, crate::relay_policy::Admission::NewRequest).await {
+        Ok(basis) => Ok(basis),
         Err(crate::relay_policy::RelayDenied::Denied(reason)) => Err(LcError::Forbidden(json!({"error":"forbidden","reason":reason}))),
         Err(crate::relay_policy::RelayDenied::Unavailable(reason)) => Err(LcError::Upstream(reason)),
     }
@@ -7836,7 +7853,7 @@ async fn list_relay_requests(
     })).collect::<Vec<_>>() })))
 }
 
-async fn prompt_bot(
+pub(crate) async fn prompt_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -7868,7 +7885,7 @@ async fn prompt_bot(
         None => None,
     };
     let crid = given_crid.clone().unwrap_or_else(db::ulid);
-    if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") {
+    if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") || crid.starts_with(crate::runners::relay_requests::WITHDRAWN_PREFIX) {
         return Err(LcError::Bad("client_request_id uses a reserved daemon prefix".into()));
     }
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
@@ -7889,8 +7906,10 @@ async fn prompt_bot(
             crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
         }
     };
+    // 這次派工只靠什麼放行（授權／代班）；建 turn 的那一句依它正向確認仍成立（`lifecycle::relay_grant`）。
+    let mut relay_auth: Option<String> = None;
     if !b.expect_result {
-        if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
+        if let Some(r) = &relay { relay_auth = check_relay_basis(&app, &r.from, &id).await?; }
 
     }
     if b.expect_result {
@@ -7910,15 +7929,16 @@ async fn prompt_bot(
             if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
         }
-        check_relay_policy(&app, sender, &id).await?;
+        relay_auth = check_relay_basis(&app, sender, &id).await?;
         if let Some(name) = &cluster {
             let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
-            let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
-            if !is_manager && !crate::runners::relay_deputy::acting(&app, &from.id).await {
+            let Some(scope) = crate::expert_cluster::sender_scope(&app, &from).await.map_err(any_err)? else {
                 return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
-            }
+            };
             let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
             if !clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id)) { return Err(LcError::Bad("target is not a member of that cluster".into())); }
+            // 專家：目標必須是授權給它的成員（check_relay_policy 已核過，這裡明確擋群集越界）。
+            if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_granted"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
         let request_id = db::ulid();
@@ -7944,7 +7964,7 @@ async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
         }
         let delivery_key = format!("relay-request:{request_id}");
-        let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)), false, None).await {
+        let out = match lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &delivery_key, &b.attachments, lifecycle::RelaySrc::trusted(Some(sender)).with_auth(relay_auth.as_deref()), false, None).await {
             Ok(out) => out,
             Err(e) => {
                 tracing::warn!(request = %request_id, "relay request accepted for later reconciliation");
@@ -7974,7 +7994,7 @@ async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str()));
+    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str())).with_auth(relay_auth.as_deref());
     // 框裡的草稿只有使用者自己在畫面上處理：bot 轉送的 prompt 不能替人送出或清掉別人的字。
     if (b.clear_draft || b.submit_draft) && relay.is_some() {
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));
@@ -9588,7 +9608,7 @@ mod delete_bot_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid),
                     path: repo,
@@ -13549,7 +13569,7 @@ mod per_principal_auth_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(project_id),
                     path: repo,
@@ -15364,7 +15384,7 @@ mod per_principal_auth_tests {
             .update(move |cfg| {
                 let mut bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted2}'\nname = 'AGM'\nkind = 'claude'\n")).unwrap();
                 bot.persona = Some("我是普通 bot".into());
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -15383,7 +15403,7 @@ mod per_principal_auth_tests {
         app.cfg
             .update(move |cfg| {
                 let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted_resp2}'\nname = 'AGM-responder'\nkind = 'claude'\n")).unwrap();
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -16222,7 +16242,7 @@ mod caller_audit_tests {
                     toml::from_str(&format!("id = '{bid}'\nname = '{bname}'\nkind = 'claude'\n")).unwrap();
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(entry),
-                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                         handed_off_to: None,
                         id: Some(pid),
                         path: repo,
@@ -18331,7 +18351,7 @@ mod manager_role_scope_tests {
         let env = crate::testing::env().await;
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18360,7 +18380,7 @@ mod expert_member_tests {
     async fn seed(env: &crate::testing::Env) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
     }
@@ -18555,7 +18575,7 @@ mod specialist_role_tests {
     async fn expert_project(env: &crate::testing::Env) -> (String, String) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18691,7 +18711,7 @@ mod runtime_policy_api_tests {
     async fn project_with_bot(env: &crate::testing::Env, kind: &str, model: &str) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let res = create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(json!({"name": "rp-bot", "kind": kind, "model": model})).unwrap())).await.unwrap();
@@ -18756,7 +18776,7 @@ mod hire_fork_api_tests {
     async fn expert_project(env: &crate::testing::Env) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let manager = add_bot(env, &env.project_id, "claude", false).await;
@@ -18871,5 +18891,22 @@ mod hire_fork_api_tests {
         assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
         let err = hire(&env, &manager, json!({"name": "again2", "kind": "codex", "fork_from": source})).await.err().unwrap();
         assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
+    }
+}
+
+#[cfg(test)]
+mod reserved_request_prefix_tests {
+    use super::*;
+
+    /// `withdrawn:` 跟 `relay-request:`／`relay-result:` 一樣是 daemon 保留的 client_request_id 前綴（executor grant 撤回紀錄用）。
+    #[tokio::test]
+    async fn prompt_refuses_daemon_reserved_request_ids() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "reserved-prefix").await;
+        for crid in ["relay-request:x", "relay-result:x", "withdrawn:x"] {
+            let body: PromptIn = serde_json::from_value(json!({"text": "hi", "client_request_id": crid})).unwrap();
+            let r = prompt_bot(State(env.app.clone()), Path(bot.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await;
+            assert!(matches!(&r, Err(LcError::Bad(m)) if m.contains("reserved daemon prefix")), "{crid}: {:?}", r.err());
+        }
     }
 }
