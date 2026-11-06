@@ -1552,6 +1552,16 @@ class ExpertBotCommandsTest(CliCase):
         self.assertEqual(FakeDaemon.seen[1]["path"], "/api/bots/b1/member")
         self.assertEqual(FakeDaemon.seen[1]["body"], {"role": "advisor", "effort": "high", "session_id": "s1"})
 
+    def test_hire_requires_kind_and_rejects_retired_pool_flag(self):
+        missing_kind = self.bad("hire", "w2")
+        self.assertEqual(missing_kind["error"], "bad_args")
+        self.assertIn("--kind", json.dumps(missing_kind, ensure_ascii=False))
+
+        retired_flag = self.bad("hire", "w2", "--kind", "codex", "--pool", "old-entry")
+        self.assertEqual(retired_flag["error"], "bad_args")
+        self.assertIn("--pool", json.dumps(retired_flag, ensure_ascii=False))
+        self.assertEqual(FakeDaemon.seen, [])
+
     def test_hire_fork_from_sends_the_source(self):
         FakeDaemon.routes["POST /api/projects/p1/members"] = (200, {"bot_id": "b-f1", "name": "f1", "role": "executor"})
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
@@ -1951,6 +1961,19 @@ class HelpTest(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("agm assign", text)
         self.assertIn("不要", text)
+
+    def test_hire_and_peers_help_describe_pool_free_commands(self):
+        for command in ("peers", "hire"):
+            code, out, err = CliCase().run_cli(command, "--help")
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("--pool", out)
+            self.assertNotIn("executor_pool", out)
+        code, hire_help, err = CliCase().run_cli("hire", "--help")
+        self.assertEqual(code, 0, err)
+        self.assertIn("--kind", hire_help)
+        code, root_help, err = CliCase().run_cli("--help")
+        self.assertEqual(code, 0, err)
+        self.assertIn("自行決定 kind／model／effort", root_help)
 
 
 class QuotaCommandTest(CliCase):

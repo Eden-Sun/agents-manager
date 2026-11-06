@@ -1809,10 +1809,10 @@ def cmd_hire(client: Client, cfg: dict, args) -> object:
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
         raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
-    if not args.kind and not args.pool_entry:
-        raise AgmError("bad_args", "hire 需要 --kind 或 --pool <條目 id>", 2)
+    if not getattr(args, "kind", None):
+        raise AgmError("bad_args", "hire 需要 --kind", 2)
     body = {"name": args.name}
-    for key in ("kind", "pool_entry", "model", "effort", "identity", "role", "track", "fork_from"):
+    for key in ("kind", "model", "effort", "identity", "role", "track", "fork_from"):
         if getattr(args, key, None):
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
@@ -2823,20 +2823,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
 
-    s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態（專家模式另回 executor_pool 條目與每條已用／上限）")
-    s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）；執行者池條目用 agm hire --pool <id> 增聘")
+    s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
+    s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
     s.set_defaults(func=cmd_peers)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／specialist／none）")
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "specialist", "none"])
     s.add_argument("--track", help="role specialist 時必填：專家負責的軌道")
     s.set_defaults(func=cmd_role)
-    s = sub.add_parser("hire", help="專家模式管理者：增聘同專案執行者（不自動啟動，之後 agm bot start）。--pool <條目 id> 套用執行者池條目（kind／model／effort／context 由條目決定）；只有一條符合 --kind 時可省略 --pool")
+    s = sub.add_parser("hire", help="專家模式管理者：增聘同專案成員，自行決定 kind／model／effort（不自動啟動，之後 agm bot start）")
     s.add_argument("name")
-    s.add_argument("--pool", dest="pool_entry", metavar="ENTRY_ID", help="執行者池條目 id（`agm peers` 列出）")
-    s.add_argument("--kind", choices=["claude", "codex", "grok", "agy"], help="未給 --pool 時必填；給了就必須與條目一致")
-    s.add_argument("--model", help="與條目不同會被拒絕（條目 model 空字串＝任何模型）")
-    s.add_argument("--effort", help="與條目不同會被拒絕")
+    s.add_argument("--kind", required=True, choices=["claude", "codex", "grok", "agy"], help="新成員使用的 CLI kind（必填）")
+    s.add_argument("--model", help="新成員使用的模型")
+    s.add_argument("--effort", help="新成員使用的推理強度")
     s.add_argument("--identity")
     s.add_argument("--role", choices=["executor", "specialist"], help="預設 executor；specialist 必須同時給 --track")
     s.add_argument("--track", help="專家負責的軌道（--role specialist 必填）")
