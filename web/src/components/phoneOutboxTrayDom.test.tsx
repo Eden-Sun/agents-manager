@@ -72,8 +72,8 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
   assert.equal(localStorage.getItem('am.phoneOutboxTray.open'), '1', '展開狀態記住')
 
   await click(document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!)
-  await until(() => document.querySelector('.modal img.phone-outbox-full') !== null, '全螢幕預覽的圖')
-  assert.ok(document.querySelector('.modal .phone-outbox-viewer'), '開了預覽')
+  await until(() => document.querySelector('.image-viewer img') !== null, '全螢幕預覽的圖')
+  assert.ok(document.querySelector('.image-viewer .image-viewer-stage'), '開了預覽')
 })
 
 test('沒有檔案：整條不畫', async () => {

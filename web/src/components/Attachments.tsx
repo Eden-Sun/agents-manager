@@ -13,6 +13,7 @@ import type { Attachment } from '../api/types'
 import { createBlobUrlCache, type BlobLease } from '../lib/blobUrlCache'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import './attachments.css'
+import { useImageViewer } from './useImageViewer'
 
 import { formatSize, sizeLabel, type Pending } from './attachmentsHelpers'
 import { progressLabel, uploadPercent } from './attachmentUpload'
@@ -215,14 +216,16 @@ export function MessageAttachments({ items }: { items: Attachment[] }) {
 
 function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void }) {
   const isImage = item.mime.startsWith('image/')
+  const { openImage, viewer } = useImageViewer()
   // 非圖片不去抓位元組：一個 CSV 的縮圖沒有意義，看的是檔名。
   const { url, failure } = useStoredUrl(isImage ? item.id : null)
   return (
-    <button
+    <><button
       type="button"
+      data-viewable-image={isImage || undefined}
       className={`msg-attachment${isImage ? '' : ' file'}${isImage && !url && !failure ? ' loading' : ''}${failure ? ' failed' : ''}`}
       title={`${item.name} · ${formatSize(item.size)}\n${item.path}${failure ? `\n${failureHint(failure)}` : ''}`}
-      onClick={onOpen}
+      onClick={(event) => { if (!isImage || !openImage(event)) onOpen() }}
     >
       {isImage ? (
         url ? (
@@ -239,7 +242,7 @@ function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void })
           <span className="msg-attachment-name">{item.name}</span>
         </>
       )}
-    </button>
+    </button>{viewer}</>
   )
 }
 
