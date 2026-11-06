@@ -40,8 +40,10 @@ pub(crate) async fn list(
     };
     let project = crate::db::project(&app.db, &project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|p| p.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("project".into()))?;
     // 專家視角（專家模式頂層 specialist 呼叫）：授權給它的執行者才可直接派，其他要經管理者。管理者與其他視角不變。
+    // 代班中的副管理者（advisor／specialist）有管理者的派工權限：給管理者視角，不套授權限制（同 `expert_cluster::sender_scope`）。
+    let acting = match &caller { Some(c) if c.parent_bot_id.is_none() && matches!(c.role.as_deref(), Some("advisor" | "specialist")) => crate::runners::relay_deputy::acting(&app, &c.id).await, _ => false };
     let granted: Option<std::collections::BTreeSet<String>> = caller.as_ref()
-        .filter(|c| project.mode == "expert" && c.role.as_deref() == Some("specialist") && c.parent_bot_id.is_none())
+        .filter(|c| !acting && project.mode == "expert" && c.role.as_deref() == Some("specialist") && c.parent_bot_id.is_none())
         .map(|c| crate::expert_cluster::granted_to(&project, c));
     let caller_id = caller.as_ref().map(|c| c.id.clone());
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -83,15 +85,21 @@ pub(crate) async fn list(
         let clusters: Vec<Value> = crate::expert_cluster::project_clusters(&app, &project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.iter().map(|c| c.to_json()).collect();
         let mut out = json!({"project_id":project_id,"peers":peers,"executor_pool":pool,"clusters":clusters});
         out["executor_grants"] = json!(project.executor_grants());
+        if acting { out["acting_deputy"] = json!(true); }
         return Ok(Json(out));
     };
 
     // Candidates evaluation for `for_track`
     // track 名稱只在專案內有意義：別的專案的同名 track 不算「進行中」（以收件 bot 的 project_id 劃範圍）。
+    // 專家視角：派給專家自己的那則（管理者交辦的統籌請求）與專家自己派出的子任務都不算衝突——專家在自己進行中的 track 內
+    // 可以把子任務分給多顆授權執行者；只有別人（管理者或其他專家）在同 track 交給其他成員的工作才擋。
+    let coordinator = granted.as_ref().and(caller_id.as_deref());
     let active_track_holder: Option<String> = sqlx::query_scalar(
         "SELECT r.to_bot_id FROM relay_requests r JOIN bots b ON b.id = r.to_bot_id \
-         WHERE r.track=? AND b.project_id=? AND r.state IN ('pending','delivered') ORDER BY r.created_at DESC LIMIT 1"
-    ).bind(for_track).bind(&project_id).fetch_optional(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+         WHERE r.track=? AND b.project_id=? AND r.state IN ('pending','delivered') \
+         AND (? IS NULL OR (r.to_bot_id<>? AND r.from_bot_id<>?)) ORDER BY r.created_at DESC LIMIT 1"
+    ).bind(for_track).bind(&project_id).bind(coordinator).bind(coordinator).bind(coordinator)
+        .fetch_optional(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
 
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.unwrap_or_default();
     let now = chrono::Utc::now();
@@ -121,8 +129,8 @@ pub(crate) async fn list(
         if is_specialist && bot.track.as_deref() != Some(for_track) {
             continue;
         }
-        // 專家視角不把自己列成候選。
-        if caller_id.as_deref() == Some(bot.id.as_str()) && granted.is_some() {
+        // 專家（含代班中的專家）不把自己列成候選；其他角色照舊。
+        if caller_id.as_deref() == Some(bot.id.as_str()) && caller.as_ref().is_some_and(|c| c.role.as_deref() == Some("specialist")) {
             continue;
         }
         let run = crate::db::active_run(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -308,7 +316,9 @@ pub(crate) async fn list(
         v
     }).collect();
 
-    Ok(Json(json!({"project_id":project_id,"candidates":cand_json,"fork_suggestion":fork_suggestion})))
+    let mut out = json!({"project_id":project_id,"candidates":cand_json,"fork_suggestion":fork_suggestion});
+    if acting { out["acting_deputy"] = json!(true); }
+    Ok(Json(out))
 }
 
 pub(crate) const EXPERT_NO_CHILD: &str = "專家模式沒有 child：用 agm peers 找同專案的頂層執行者／顧問，以 herdr agent prompt bot:<id> --expect-result 派工；管理者缺人手用 agm hire 增聘執行者。";
@@ -602,5 +612,102 @@ mod granted_peers_tests {
         sqlx::query("UPDATE bots SET track='ui' WHERE id=?").bind(spec).execute(&app.db).await.unwrap();
         let plain = call(spec, None).await.unwrap().0;
         assert!(plain["peers"].as_array().unwrap().iter().filter(|p| p["role"] == "executor").all(|p| p["granted"] == false), "{plain}");
+    }
+}
+
+/// Astra 第二輪 #5：管理者把 track 交給專家 → 專家查 `peers --for <track>` 能挑授權給它的執行者，
+/// 自己派出的子任務不互相衝突；別人在同 track 的工作照樣擋；代班中的專家拿管理者視角。
+#[cfg(test)]
+mod coordinator_peers_tests {
+    use super::*;
+
+    async fn member(env: &crate::testing::Env, name: &str, role: &str, track: Option<&str>) -> String {
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        sqlx::query("UPDATE bots SET role=?, track=? WHERE id=?").bind(role).bind(track).bind(&b.id).execute(&env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &b.id).await;
+        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:{role}", env.project_id)).bind(run).execute(&env.app.db).await.unwrap();
+        b.id
+    }
+
+    async fn relay(env: &crate::testing::Env, id: &str, from: &str, to: &str, track: &str) {
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track) VALUES(?,?,?,?,'p','[]','delivered',?,?)")
+            .bind(id).bind(from).bind(to).bind(id).bind(crate::db::now()).bind(track).execute(&env.app.db).await.unwrap();
+    }
+
+    fn cand(v: &Value, id: &str) -> Value {
+        v["candidates"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap_or_else(|| panic!("{id} 不在候選：{v}"))
+    }
+
+    fn has(c: &Value, reason: &str) -> bool { c["reasons"].as_array().unwrap().iter().any(|r| r.as_str().is_some_and(|r| r.starts_with(reason))) }
+
+    #[tokio::test]
+    async fn a_specialist_coordinating_its_track_can_pick_its_granted_executors() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let mgr = member(&env, "cp-mgr", "manager", None).await;
+        let spec = member(&env, "cp-spec", "specialist", Some("db")).await;
+        let e1 = member(&env, "cp-e1", "executor", None).await;
+        let e2 = member(&env, "cp-e2", "executor", None).await;
+        let e3 = member(&env, "cp-e3", "executor", None).await;
+        let grants = json!([
+            {"specialist": spec, "executor": e1, "track": "db", "granted_by": "user", "granted_at": "2026-11-06T00:00:00Z"},
+            {"specialist": spec, "executor": e2, "track": "db", "granted_by": "user", "granted_at": "2026-11-06T00:00:00Z"},
+        ]).to_string();
+        sqlx::query("UPDATE projects SET executor_grants_json=? WHERE id=?").bind(grants).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let peers = |who: &str| list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery { for_track: Some("db".into()) }), Extension(RequestPrincipal::Bot(who.to_string())));
+
+        // 管理者 --track db --expect-result 交給專家：active holder 是專家本人。
+        relay(&env, "cp-1", &mgr, &spec, "db").await;
+        let v = peers(&spec).await.unwrap().0;
+        for e in [&e1, &e2] {
+            let c = cand(&v, e);
+            assert_eq!((c["eligible"].as_bool(), c["granted"].as_bool()), (Some(true), Some(true)), "專家統籌自己的 track 時授權執行者可派：{c}");
+            assert!(!has(&c, "track 已由"), "{c}");
+        }
+        let c3 = cand(&v, &e3);
+        assert_eq!(c3["eligible"], false);
+        assert!(has(&c3, "未授權（需經管理者）"), "{c3}");
+        // 管理者視角不變：track 由專家進行中，其他執行者照舊被擋。
+        let m = peers(&mgr).await.unwrap().0;
+        assert!(has(&cand(&m, &e1), "track 已由 cp-spec 進行中"), "{m}");
+
+        // 專家把子任務派給 e1（同 track）：e2 仍可派，不因自己的子任務互相衝突。
+        relay(&env, "cp-2", &spec, &e1, "db").await;
+        let v = peers(&spec).await.unwrap().0;
+        assert_eq!(cand(&v, &e2)["eligible"], true, "{v}");
+        assert_eq!(cand(&v, &e1)["eligible"], true, "{v}");
+
+        // 別人（管理者）在同 track 把工作交給 e3：專家視角也要擋。
+        relay(&env, "cp-3", &mgr, &e3, "db").await;
+        let v = peers(&spec).await.unwrap().0;
+        for e in [&e1, &e2] { assert!(has(&cand(&v, e), "track 已由 cp-e3 進行中"), "{v}"); }
+    }
+
+    #[tokio::test]
+    async fn an_acting_deputy_specialist_gets_the_manager_view() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let mgr = member(&env, "ad-mgr", "manager", None).await;
+        let spec = member(&env, "ad-spec", "specialist", Some("db")).await;
+        let e1 = member(&env, "ad-e1", "executor", None).await;
+        let call = |track: Option<&str>| list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery { for_track: track.map(str::to_string) }), Extension(RequestPrincipal::Bot(spec.clone())));
+        // 不在代班：e1 沒授權 → 需經管理者。
+        let v = call(Some("db")).await.unwrap().0;
+        assert!(has(&cand(&v, &e1), "未授權（需經管理者）"), "{v}");
+        assert!(v.get("acting_deputy").is_none());
+        // 代班中（副管理者＋有改派來的未結請求）：管理者視角，不標授權、不擋未授權執行者，也不列自己。
+        sqlx::query("UPDATE projects SET deputy_bot_id=?, deputy_after_sec=60 WHERE id=?").bind(&spec).bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,redirected_from,redirected_at) VALUES('ad-r',?,?,'ad-r','q','[]','delivered',?,?,?)")
+            .bind(&e1).bind(&spec).bind(crate::db::now()).bind(&mgr).bind(crate::db::now()).execute(&app.db).await.unwrap();
+        let v = call(Some("db")).await.unwrap().0;
+        assert_eq!(v["acting_deputy"], true, "{v}");
+        let c = cand(&v, &e1);
+        assert!(c.get("granted").is_none() && !has(&c, "未授權"), "{c}");
+        assert!(v["candidates"].as_array().unwrap().iter().all(|c| c["id"] != spec.as_str()), "{v}");
+        let plain = call(None).await.unwrap().0;
+        assert_eq!(plain["acting_deputy"], true);
+        assert!(plain["peers"].as_array().unwrap().iter().all(|p| p.get("granted").is_none()), "{plain}");
     }
 }
