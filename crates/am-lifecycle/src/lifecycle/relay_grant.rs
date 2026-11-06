@@ -6,25 +6,30 @@
 //! SQLite 的寫入彼此序列化：撤銷若先提交，這一句就寫不進去（直接送出回可重試的 409、排隊的留在佇列等 flush 重驗撤回）；
 //! 這一句先提交，就是「已開始」，不中止。不靠鎖、沒有逾時，也就沒有 fail-open。
 //!
-//! 依據（`messages.relay_auth`，核權時由 daemon 記下，見 `RelaySrc::auth`）決定怎麼確認：
+//! 依據（`messages.relay_auth`，核權時由 daemon 記下，見 `RelaySrc::auth`；成立的依據都記、逗號分隔，**任一**仍成立就放行）決定怎麼確認：
 //! - `grant:<專案 id>`：**正向**確認送件者此刻仍是該專案存活頂層 specialist、目標仍是該專案存活頂層 executor、專案仍是
 //!   expert、這顆執行者的第一筆授權指向送件者且 track 相符。降級、變 child、搬專案、刪除、撤銷任何一項都不成立。
 //! - `deputy:<專案 id>`：正向確認送件者此刻仍「代班中」（同 daemon `relay_deputy::acting`：是該 expert 專案的副管理者，
 //!   且名下有改派來、還沒做完的請求）。只是被指定、沒在代班，不成立。
 //! - 沒有依據（原本就不靠授權放行的組合：manager、advisor 目標、直屬 parent…）：只擋「同一 expert 專案內頂層
 //!   specialist→頂層 executor」這一種需要授權的組合（核權後才被改成 specialist 的送件者），其他照舊放行。
-//! - 其他值一律不成立。
+//! - 清單裡沒有任何一項成立（含無法辨識的值）＝不成立。
+//! - 升級前（SCHEMA 82→83）已排隊的舊派工沒有依據，落在「沒有依據」那條：需要授權的組合保守拒絕（認領不到、flush 撤回並通知送件者重送）。
 
 /// 一段 SQL 布林式；`from`／`to`／`auth` 是 SQL 運算式（欄位名，可重複引用）。`from` 為 NULL（不是 bot 派工）時成立。
 pub fn relay_allowed_sql(from: &str, to: &str, auth: &str) -> String {
+    // `auth` 是逗號分隔的依據清單；某一項是否列在裡面：instr(',' || auth || ',', ',<項>,') > 0。
+    let has = |item: &str| format!("instr(',' || {auth} || ',', ',' || {item} || ',') > 0");
+    let has_grant = has("'grant:' || p.id");
+    let has_deputy = has("'deputy:' || p.id");
     format!(
         "(CASE
            WHEN {from} IS NULL THEN 1
            WHEN {auth} IS NULL THEN NOT EXISTS (SELECT 1 FROM bots s JOIN bots x ON x.project_id = s.project_id JOIN projects p ON p.id = s.project_id
                  WHERE s.id = {from} AND x.id = {to} AND p.mode = 'expert'
                    AND s.role = 'specialist' AND x.role = 'executor' AND s.parent_bot_id IS NULL AND x.parent_bot_id IS NULL)
-           WHEN {auth} LIKE 'grant:%' THEN EXISTS (SELECT 1 FROM bots s JOIN bots x ON x.project_id = s.project_id JOIN projects p ON p.id = s.project_id
-                 WHERE s.id = {from} AND x.id = {to} AND {auth} = 'grant:' || p.id
+           ELSE EXISTS (SELECT 1 FROM bots s JOIN bots x ON x.project_id = s.project_id JOIN projects p ON p.id = s.project_id
+                 WHERE s.id = {from} AND x.id = {to} AND {has_grant}
                    AND p.mode = 'expert' AND p.deleted_at IS NULL AND p.handed_off_to IS NULL
                    AND s.deleted_at IS NULL AND x.deleted_at IS NULL AND s.parent_bot_id IS NULL AND x.parent_bot_id IS NULL
                    AND s.role = 'specialist' AND x.role = 'executor'
@@ -32,12 +37,11 @@ pub fn relay_allowed_sql(from: &str, to: &str, auth: &str) -> String {
                                                 FROM json_each(p.executor_grants_json) g
                                                WHERE json_extract(g.value, '$.executor') = x.id ORDER BY CAST(g.key AS INTEGER) LIMIT 1) first
                                 WHERE first.sp = s.id AND first.tr = s.track))
-           WHEN {auth} LIKE 'deputy:%' THEN EXISTS (SELECT 1 FROM bots s JOIN projects p ON p.id = s.project_id JOIN bots x ON x.project_id = p.id
-                 WHERE s.id = {from} AND x.id = {to} AND {auth} = 'deputy:' || p.id
+             OR EXISTS (SELECT 1 FROM bots s JOIN projects p ON p.id = s.project_id JOIN bots x ON x.project_id = p.id
+                 WHERE s.id = {from} AND x.id = {to} AND {has_deputy}
                    AND p.mode = 'expert' AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.deputy_bot_id = s.id
                    AND s.deleted_at IS NULL AND x.deleted_at IS NULL
                    AND EXISTS (SELECT 1 FROM relay_requests r WHERE r.to_bot_id = s.id AND r.redirected_from IS NOT NULL AND r.state IN ('pending','delivered')))
-           ELSE 0
          END)"
     )
 }

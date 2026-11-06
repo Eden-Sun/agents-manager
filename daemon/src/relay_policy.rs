@@ -13,7 +13,7 @@ pub async fn relay_prompt_allowed(app: &Arc<App>, from_bot_id: &str, to_bot_id: 
 }
 
 /// 同 [`relay_prompt_allowed`]，另回「這次只靠什麼放行」的可信依據，給建 turn 時記在 `messages.relay_auth`：
-/// `grant:<專案 id>`＝只因執行者授權放行；`deputy:<專案 id>`＝只因代班中的副管理者放行；其他原本就放行的組合
+/// `grant:<專案 id>`＝因執行者授權放行；`deputy:<專案 id>`＝因代班中的副管理者放行；兩者都成立就都記（逗號分隔）；其他原本就放行的組合
 /// （manager、advisor 目標、直屬 parent、AGM…）回 `None`。最終寫入（`lifecycle::relay_grant`）依這個依據正向確認仍成立。
 pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &str, kind: Admission) -> Result<Option<String>, RelayDenied> {
     if kind == Admission::ResultNotice {
@@ -53,8 +53,13 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
             if run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(expected.as_str()) { return Err(RelayDenied::Denied("role_not_applied".into())); }
         }
         let base_allowed = direct_family || matches!(to.role.as_deref(), Some("manager" | "advisor")) || from.role.as_deref() == Some("manager");
-        if !base_allowed && granted(&project, &from, &to) { return Ok(Some(format!("grant:{}", project.id))); }
-        if !base_allowed && crate::runners::relay_deputy::acting(app, &from.id).await { return Ok(Some(format!("deputy:{}", project.id))); }
+        // 記下**所有**成立的依據（逗號分隔）：送達時任一仍成立就放行。同時有授權又在代班的專家，撤掉授權仍可代班派工（Astra review5 #1）。
+        if !base_allowed {
+            let mut bases = Vec::new();
+            if granted(&project, &from, &to) { bases.push(format!("grant:{}", project.id)); }
+            if crate::runners::relay_deputy::acting(app, &from.id).await { bases.push(format!("deputy:{}", project.id)); }
+            if !bases.is_empty() { return Ok(Some(bases.join(","))); }
+        }
         if !base_allowed {
             let manager: Option<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
             let manager = manager.as_deref().unwrap_or("（未指定）");

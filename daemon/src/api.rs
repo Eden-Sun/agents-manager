@@ -7677,7 +7677,7 @@ async fn move_bot_pane_to_tab(State(app): State<Arc<App>>, Path(id): Path<String
 }
 
 #[derive(Deserialize)]
-struct PromptIn {
+pub(crate) struct PromptIn {
     /// `submit_draft` 時不用帶（送的是框裡那段）；其他時候空字串照舊 400。
     #[serde(default)]
     text: String,
@@ -7853,7 +7853,7 @@ async fn list_relay_requests(
     })).collect::<Vec<_>>() })))
 }
 
-async fn prompt_bot(
+pub(crate) async fn prompt_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
