@@ -101,6 +101,7 @@ pub mod stuck_turns;
 pub mod unsent_draft;
 pub mod fence;
 pub mod turn_controller;
+pub mod relay_grant;
 pub mod interrupt_grace;
 pub mod resume_gate;
 pub mod claude_resume_menu;
