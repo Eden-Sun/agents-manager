@@ -5829,6 +5829,12 @@ expert 專案的 bot relay 收件規則（child 向自身 parent 回報不受收
 
 執行者授權（專家模式，使用者 2026-11-06 核定方案 c；實作 `daemon/src/executor_grants.rs`、`daemon/src/relay_policy.rs`）：管理者（或使用者）把特定執行者**授權**給特定專家，專家可在授權範圍內直接派工給那顆執行者、驗收結果，不必繞回管理者。設定在專案層（config.toml 的 `[[projects.executor_grants]] specialist, executor, track, granted_by, granted_at`，config 為真相，投影到 `projects.executor_grants_json`）。不變式：一顆執行者同時**最多授權給一位專家**（排他）；專家是同專案存活頂層 `specialist`、`track` 仍等於授權當時的 track；執行者是同專案存活頂層 `executor`；專案是 expert。任何 config 變更後（`update_and_project` → `ProjectCfg::clear_invalid_grants`）不符的授權當場清掉：刪掉專家或執行者、改角色、專家換 track、專案離開 expert 都會讓授權失效。派工時 relay 政策再以 DB 當下狀態核一次（NewRequest 與 Deliver 都核）；撤銷後尚未送出的請求在送達時擋下並標 `failed`、以 denied 結果通知送件者，已開始的回合不中止。授權**只涵蓋派工**：不給 start／restart／hire／stop／改角色／再授權，群集派工（`bot:cluster:`）仍限管理者。授權由 User 或該專案前台 manager 以 `PUT /api/projects/{id}/executor-grants` 整組設定（API.md）。副管理者的代班權限不受影響。被擋的訊息依目標角色寫（`executor 只接受 manager 派工…`／`specialist 只接受 manager 派工…`）；專家→執行者時提示「請管理者授權（agm grant）或改送給管理者」。
 
+執行者授權的工具與視角（B 部分）：
+- CLI：`agm grant <專家> <執行者>`、`agm revoke <專家> <執行者>`（名稱或 bot id 皆可，同名要用 id），`agm grants` 列出本專案授權（附名稱）。CLI 先讀 `/api/state` 該專案的 `executor_grants`，再整組 `PUT /api/projects/{id}/executor-grants`；執行者已授權給別的專家時 CLI 直接拒絕（`executor_already_granted`，提示先 revoke），不送出。
+- `agm peers`（`GET /api/projects/{id}/peers`）：回應多 `executor_grants`（本專案全部授權）。**專家視角**（呼叫者是 expert 專案的頂層 specialist）：沒給 `--for` 時每顆執行者帶 `granted`（true＝授權給你），未授權的另帶 `dispatch:"via_manager"`；給 `--for` 時不列自己，授權給你的執行者理由多「已授權給你」，其他候選（未授權的執行者、別的專家）一律 `eligible=false`、理由「未授權（需經管理者）」，候選帶 `granted`。授權只看 track 等於專家現在 track 的那幾筆。管理者與其他視角不變（沒有 `granted` 欄）。
+- 群集：專家可對群集派工（`bot:cluster:<名稱>`），但只在群集裡授權給自己的成員中挑（`expert_cluster::Scope`）；群集裡沒有授權給它的成員回 403 `cluster_not_granted`；不會為專家自動啟動停著的成員（授權不含 start）。pending 的群集請求由專家發起時，reconcile 改派也只換成授權給它的成員；授權撤掉或專家不再合格就把請求標 `failed`（通知送件者），不改派給別人。管理者／代班副管理者發起的群集派工照舊。`POST /api/bots/{id}/prompt` 帶 `cluster` 時，專家的目標也必須是授權給它的成員（否則 403 `cluster_not_granted`）。
+- 啟動 prompt：專家的專屬段加「管理者授權給你的執行者可直接派工並驗收；清單用 `agm grants`；沒授權的要經管理者；授權不含啟動／重啟／增聘」；管理者的專屬段加「可用 `agm grant/revoke` 把執行者授權給專家」。共用的 `child_agent_rules` 不動。
+
 expert 跨專案 relay 拒絕，例外：別的專案可送給 expert 專案的頂層 manager（對外窗口；送件者若在 expert 專案也須是其 manager）；expert 專案的頂層 manager 也可送給一般專案的 bot（回覆／聯絡外部），expert 的非管理者不能出專案；AGM 角色不受此限。`GET /relay/resolve` 候選存在但全被政策擋時回 403 `{error:forbidden,reason}`，真的找不到才 404；parent_child 保持既有 relay 規則。被拒時回覆原因與管理者名稱。
 
 新請求須驗證來源 run 已載入目前角色政策；排隊及重啟補投重新驗證目前專案與角色，不要求來源在線。結果通知僅確認原寄件者仍存在，離線時持續保留，不套角色收件規則。
