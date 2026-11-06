@@ -7901,14 +7901,16 @@ async fn prompt_bot(
             return Err(LcError::Bad("expect_result cannot be combined with interruption, startup, drafts or acknowledgement".into()));
         }
         let files = serde_json::to_string(&b.attachments).map_err(any_err)?;
-        let existing: Option<(String, String, String, String, Option<String>)> = sqlx::query_as("SELECT id,prompt_text,attachments_json,state,to_turn_id FROM relay_requests WHERE from_bot_id=? AND (to_bot_id=? OR redirected_from=?) AND client_request_id=?")
-            .bind(sender).bind(&id).bind(&id).bind(&crid).fetch_optional(&app.db).await.map_err(any_err)?;
+        let cluster = b.cluster.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+        // 冪等身分（#2069）：直接派工是（來源, 收件者, 鍵）；群集派工的 `to_bot_id` 會被 `claim_target` 改派給別的成員，
+        // 所以改用（來源, 群集, 鍵）認原請求，否則原呼叫端重送給原目標會再建一筆、重複派工。
+        let existing: Option<(String, String, String, String, Option<String>)> = sqlx::query_as("SELECT id,prompt_text,attachments_json,state,to_turn_id FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND (to_bot_id=? OR redirected_from=? OR (cluster IS NOT NULL AND cluster=?)) ORDER BY to_bot_id<>? LIMIT 1")
+            .bind(sender).bind(&crid).bind(&id).bind(&id).bind(&cluster).bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
         if let Some((request_id, text, stored_files, state, turn_id)) = existing {
             if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
         }
         check_relay_policy(&app, sender, &id).await?;
-        let cluster = b.cluster.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
         if let Some(name) = &cluster {
             let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
             let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
@@ -7922,12 +7924,14 @@ async fn prompt_bot(
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
-        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster) VALUES(?,?,?,?,?,?,'pending',?,?,?)")
-            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
+        // 群集請求：同（來源, 群集, 鍵）已有一筆（可能剛被改派走、唯一鍵擋不到）就不插，跟上面的查重同一個身分。
+        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster) SELECT ?,?,?,?,?,?,'pending',?,?,? WHERE ? IS NULL OR NOT EXISTS(SELECT 1 FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND cluster=?)")
+            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster)
+            .bind(&cluster).bind(sender).bind(&crid).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
         #[cfg(test)]
         crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
-        let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND to_bot_id=? AND client_request_id=?")
-            .bind(sender).bind(&id).bind(&crid).fetch_one(&app.db).await.map_err(any_err)?;
+        let (request_id, text, stored_files): (String, String, String) = sqlx::query_as("SELECT id,prompt_text,attachments_json FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND (to_bot_id=? OR (cluster IS NOT NULL AND cluster=?)) ORDER BY id<>?, to_bot_id<>? LIMIT 1")
+            .bind(sender).bind(&crid).bind(&id).bind(&cluster).bind(&request_id).bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
         if text != b.text || stored_files != files { return Err(LcError::conflict("client_request_id reused with different request", json!({}))); }
         let (request_state, stored_turn): (String,Option<String>) = sqlx::query_as("SELECT state,to_turn_id FROM relay_requests WHERE id=?")
             .bind(&request_id).fetch_one(&app.db).await.map_err(any_err)?;
@@ -18165,6 +18169,55 @@ mod relay_result_api_tests {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=?")
             .bind(&b.id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// #2069：群集請求被改派（`claim_target` 改 `to_bot_id`）之後，呼叫端照原樣重送給原目標，
+    /// 只能拿回原本那筆 request，不能再建一筆新的派工；不論它還在 pending 或已送達、已回覆。內容不符仍 409。
+    #[tokio::test]
+    async fn retrying_a_cluster_request_after_it_moved_returns_the_original() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let mut members = Vec::new();
+        for (name, role) in [("mgr", "manager"), ("w1", "executor"), ("w2", "executor")] {
+            let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+            sqlx::query("UPDATE bots SET role=?, model='claude-haiku-5-5' WHERE id=?").bind(role).bind(&bot.id).execute(&env.app.db).await.unwrap();
+            let run = crate::testing::fake_run(&env.app, &bot.id).await;
+            sqlx::query("UPDATE runs SET state='running', agent_status=?, runtime_role_policy=? WHERE id=?")
+                .bind(if role == "manager" { "idle" } else { "working" }).bind(format!("{}:local:expert:{role}", env.project_id)).bind(run).execute(&env.app.db).await.unwrap();
+            members.push(bot);
+        }
+        let (manager, a, b) = (&members[0], &members[1], &members[2]);
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", manager.id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+        let send = |text: &'static str| {
+            let (app, h, to, from) = (env.app.clone(), h.clone(), a.id.clone(), manager.id.clone());
+            async move {
+                let body = json!({"text":text,"client_request_id":"stable-key","expect_result":true,"cluster":"haiku"});
+                prompt_bot(State(app), Path(to), h, Extension(RequestPrincipal::Bot(from)), Json(serde_json::from_value(body).unwrap())).await
+            }
+        };
+        let first = send("work").await.unwrap();
+        let first: Value = serde_json::from_slice(&axum::body::to_bytes(first.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(first["delivery"], "pending", "{first}");
+        let request = first["request_id"].as_str().unwrap().to_string();
+        // b 先閒下來，群集把請求改派給它。
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+        assert_eq!(crate::expert_cluster::claim_target(&env.app, &request, &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+        for state in ["pending", "delivered", "answered"] {
+            sqlx::query("UPDATE relay_requests SET state=? WHERE id=?").bind(state).bind(&request).execute(&env.app.db).await.unwrap();
+            let again = send("work").await.unwrap();
+            let again: Value = serde_json::from_slice(&axum::body::to_bytes(again.into_body(), 65536).await.unwrap()).unwrap();
+            assert_eq!(again["request_id"], request, "{state}: {again}");
+            assert_eq!(again["state"], state, "{again}");
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests WHERE from_bot_id=?").bind(&manager.id).fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(n, 1, "{state}: an identical retry must not create a second request");
+        }
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id IN (?,?)")
+            .bind(&a.id).bind(&b.id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(turns, 0);
+        assert!(matches!(send("different").await, Err(LcError::Conflict(_))), "same key with different text stays a conflict");
     }
 }
 
