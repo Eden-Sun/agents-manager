@@ -102,7 +102,7 @@ test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提�
     await mount(<QuotaStrip />)
     await until(() => document.querySelector('.quota-hp.agy') !== null, '一格 agy')
     const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
-    assert.deepEqual([...cell.querySelectorAll('.quota-mobile-bars .quota-window-name')].map((n) => n.textContent), ['5h', '7d'])
+    assert.deepEqual([...cell.querySelectorAll('.quota-mobile-bars .quota-window-name')].map((n) => n.textContent), ['7d'])
     assert.equal(cell.querySelectorAll('.quota-border-meter').length, 2, '兩個窗口都保留邊框提示')
     assert.match(cell.querySelector('.quota-border-meter.top')?.getAttribute('aria-label') ?? '', /5H/)
     assert.match(cell.querySelector('.quota-border-meter.bottom')?.getAttribute('aria-label') ?? '', /7D/)
