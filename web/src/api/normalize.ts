@@ -21,6 +21,7 @@ import type {
   Bot,
   BotKind,
   BotManagedBy,
+  ExecutorGrant,
   ExecutorPoolEntry,
   HostShell,
   Host,
@@ -295,6 +296,8 @@ export function toProject(v: unknown): Project | null {
     })(),
     created_at: str(v.created_at),
     role_policy: isRec(v.role_policy) ? (v.role_policy as Record<string, RuntimeSettings>) : {},
+    executor_grants: Array.isArray(pick(v, 'executor_grants')) ? toExecutorGrants(pick(v, 'executor_grants')) : undefined,
+    grants_revision: optStr(pick(v, 'grants_revision')) ?? undefined,
     deputy: isRec(v.deputy) && str(v.deputy.bot_id) ? { bot_id: str(v.deputy.bot_id), after_sec: numOrNull(v.deputy.after_sec) } : null,
     executor_pool: (() => {
       const ep = pick(v, 'executor_pool')
@@ -1169,3 +1172,18 @@ export function toHostBaselineApplyResult(v: unknown): HostBaselineApplyResult |
   }
 }
 
+
+/** `executor_grants` 陣列：缺 specialist／executor 的項丟掉（舊 daemon 沒這欄時 normalizeProject 給 undefined）。 */
+export function toExecutorGrants(v: unknown): ExecutorGrant[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .filter(isRec)
+    .map((g) => ({
+      specialist: str(pick(g, 'specialist')),
+      executor: str(pick(g, 'executor')),
+      track: str(pick(g, 'track')),
+      granted_by: str(pick(g, 'granted_by')),
+      granted_at: str(pick(g, 'granted_at')),
+    }))
+    .filter((g) => g.specialist && g.executor)
+}

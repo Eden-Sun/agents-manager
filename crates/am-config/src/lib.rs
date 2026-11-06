@@ -336,6 +336,18 @@ pub const DEPUTY_MIN_AFTER_SEC: u32 = 60;
 pub const DEPUTY_DEFAULT_AFTER_SEC: u32 = 180;
 fn default_deputy_after_sec() -> u32 { DEPUTY_DEFAULT_AFTER_SEC }
 
+/// 專家模式執行者授權（使用者 2026-11-06 方案 c）：管理者（或使用者）把 `executor` 授權給 `specialist`，
+/// 專家就能直接對那顆執行者派工、驗收結果。只涵蓋派工，不給 start／restart／hire／stop／改角色／再授權。
+/// `track` 是授權當時專家的 track；專家換 track 就失效。`granted_by` 是 `"user"` 或管理者 bot id，`granted_at` 為 RFC3339 UTC。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutorGrant {
+    pub specialist: String,
+    pub executor: String,
+    pub track: String,
+    pub granted_by: String,
+    pub granted_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
     /// Missing on hand-written files; filled in (ULID) and written back on first load.
@@ -354,6 +366,9 @@ pub struct ProjectCfg {
     /// 專家模式副管理者（管理者忙太久時代收排隊中的請求，見 `daemon/src/runners/relay_deputy.rs`）；沒設＝不啟用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deputy: Option<DeputyCfg>,
+    /// 專家模式執行者授權（見 [`ExecutorGrant`]）；一顆執行者同時最多授權給一位專家。不合格的由 [`ProjectCfg::clear_invalid_grants`] 清掉。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_grants: Vec<ExecutorGrant>,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -373,6 +388,24 @@ impl ProjectCfg {
         if !ok { self.deputy = None; }
         !ok
     }
+
+    /// 清掉不再合格的執行者授權（同 `clear_invalid_deputy`，由 `update_and_project` 在每次 config 變更後呼叫）；回傳有沒有清。
+    /// 合格條件：專案是 expert；專家是本專案的頂層 bot、role=specialist、track 仍等於授權時的 track；
+    /// 執行者是本專案的頂層 bot、role=executor；同一顆執行者只留第一筆（排他）。config 的 `bots` 只有頂層 bot（child 不進 config）。
+    pub fn clear_invalid_grants(&mut self) -> bool {
+        if self.executor_grants.is_empty() { return false; }
+        let before = self.executor_grants.len();
+        let expert = self.mode == "expert";
+        let bots = &self.bots;
+        let find = |id: &str| bots.iter().find(|b| b.id.as_deref() == Some(id));
+        let mut seen = std::collections::BTreeSet::new();
+        self.executor_grants.retain(|g| {
+            let specialist_ok = find(&g.specialist).is_some_and(|b| b.role.as_deref() == Some("specialist") && b.track.as_deref() == Some(g.track.as_str()));
+            let executor_ok = find(&g.executor).is_some_and(|b| b.role.as_deref() == Some("executor"));
+            expert && specialist_ok && executor_ok && seen.insert(g.executor.clone())
+        });
+        self.executor_grants.len() != before
+    }
 }
 
 impl Default for ProjectCfg {
@@ -385,6 +418,7 @@ impl Default for ProjectCfg {
             executor_pool: Vec::new(),
             role_policy: std::collections::BTreeMap::new(),
             deputy: None,
+            executor_grants: Vec::new(),
             host: default_host(),
             bots: Vec::new(),
             handed_off_to: None,
@@ -526,6 +560,96 @@ pub fn warn_host_baseline_once(cfg: &ConfigFile) -> usize {
         }
     }
     logged
+}
+
+#[cfg(test)]
+mod executor_grant_cfg_tests {
+    use super::*;
+
+    const TEXT: &str = r#"
+[[projects]]
+id = "P1"
+path = "/tmp/p1"
+label = "p1"
+mode = "expert"
+
+[[projects.executor_grants]]
+specialist = "S1"
+executor = "E1"
+track = "db"
+granted_by = "user"
+granted_at = "2026-11-06T00:00:00Z"
+
+[[projects.bots]]
+id = "S1"
+name = "spec"
+kind = "claude"
+role = "specialist"
+track = "db"
+
+[[projects.bots]]
+id = "E1"
+name = "exec"
+kind = "codex"
+role = "executor"
+
+[[projects.bots]]
+id = "S2"
+name = "spec2"
+kind = "claude"
+role = "specialist"
+track = "ui"
+"#;
+
+    fn grant(specialist: &str, executor: &str, track: &str) -> ExecutorGrant {
+        ExecutorGrant { specialist: specialist.into(), executor: executor.into(), track: track.into(), granted_by: "user".into(), granted_at: "2026-11-06T00:00:00Z".into() }
+    }
+
+    #[test]
+    fn grants_round_trip_through_toml_and_are_omitted_when_empty() {
+        let (cfg, unknown) = parse_config(TEXT).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.projects[0].executor_grants, vec![grant("S1", "E1", "db")]);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[[projects.executor_grants]]"), "{text}");
+        let again: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(again.projects[0].executor_grants, cfg.projects[0].executor_grants);
+        let mut empty = cfg.clone();
+        empty.projects[0].executor_grants.clear();
+        assert!(!toml::to_string_pretty(&empty).unwrap().contains("executor_grants"));
+    }
+
+    #[test]
+    fn invalid_grants_are_cleared() {
+        let (cfg, _) = parse_config(TEXT).unwrap();
+        let base = cfg.projects[0].clone();
+        let mut p = base.clone();
+        assert!(!p.clear_invalid_grants(), "valid grant stays");
+        assert_eq!(p.executor_grants.len(), 1);
+
+        // 排他：同一顆執行者只留第一筆。
+        let mut p = base.clone();
+        p.executor_grants.push(grant("S2", "E1", "ui"));
+        assert!(p.clear_invalid_grants());
+        assert_eq!(p.executor_grants, vec![grant("S1", "E1", "db")]);
+
+        // 專家換 track、改角色、被刪；執行者改角色、被刪；專案離開 expert：都清掉。
+        let cases: Vec<Box<dyn Fn(&mut ProjectCfg)>> = vec![
+            Box::new(|p| p.bots[0].track = Some("ui".into())),
+            Box::new(|p| p.bots[0].role = Some("advisor".into())),
+            Box::new(|p| { p.bots.remove(0); }),
+            Box::new(|p| p.bots[1].role = Some("advisor".into())),
+            Box::new(|p| { p.bots.remove(1); }),
+            Box::new(|p| p.mode = "parent_child".into()),
+            Box::new(|p| p.executor_grants[0].executor = "S2".into()),
+        ];
+        for (i, mutate) in cases.iter().enumerate() {
+            let mut p = base.clone();
+            mutate(&mut p);
+            assert!(p.clear_invalid_grants(), "case {i}");
+            assert!(p.executor_grants.is_empty(), "case {i}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3103,7 +3227,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

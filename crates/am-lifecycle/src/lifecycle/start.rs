@@ -122,7 +122,7 @@ pub(crate) fn specialist_role_section(role: Option<&str>, track: Option<&str>) -
         return None;
     }
     let track = track.map(str::trim).filter(|t| !t.is_empty())?;
-    Some(format!("\n\n## 專家範圍\n你是本專案 {track} 的專家，範圍限於 {track}；超出範圍的工作回報管理者，不要自己做。"))
+    Some(format!("\n\n## 專家範圍\n你是本專案 {track} 的專家，範圍限於 {track}；超出範圍的工作回報管理者，不要自己做。\n管理者授權給你的執行者可以直接派工（`herdr agent prompt bot:<id> --expect-result …`）並驗收結果；授權清單用 `agm grants` 看（`agm peers` 也會標 `granted`）。沒授權給你的執行者要經管理者派工。授權只涵蓋派工，不含啟動／重啟／增聘。"))
 }
 
 /// 管理者（manager）的短回合／派工段：bot 專屬，接在「## 專家模式角色」後面；不改共用的 `child_agent_rules`。
@@ -130,7 +130,7 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     if role != Some("manager") {
         return None;
     }
-    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。".to_string())
+    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。可用 `agm grant <專家> <執行者>`／`agm revoke <專家> <執行者>` 把執行者授權給專家（一顆執行者同時只給一位專家），專家就能直接對它派工、驗收；`agm grants` 列出本專案授權。".to_string())
 }
 
 /// 副管理者設定後的專屬段（只給管理者與副管理者本人，其他 bot 不變）：管理者知道摘要會回來，副管理者知道自己的邊界。
@@ -6249,6 +6249,7 @@ mod specialist_section_tests {
     fn only_a_specialist_with_a_track_gets_the_scope_section() {
         let section = specialist_role_section(Some("specialist"), Some("infra")).expect("specialist 有範圍段");
         assert!(section.contains("你是本專案 infra 的專家，範圍限於 infra；超出範圍的工作回報管理者，不要自己做。"), "{section}");
+        assert!(section.contains("`agm grants`") && section.contains("沒授權給你的執行者要經管理者派工"), "{section}");
         assert!(specialist_role_section(Some("executor"), Some("infra")).is_none());
         assert!(specialist_role_section(None, Some("infra")).is_none());
         assert!(specialist_role_section(Some("specialist"), Some("  ")).is_none());
@@ -6270,6 +6271,7 @@ mod specialist_section_tests {
     fn manager_role_section_only_present_for_manager() {
         let manager_sec = manager_role_section(Some("manager")).expect("manager 有專屬段");
         assert!(manager_sec.contains("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。"), "{manager_sec}");
+        assert!(manager_sec.contains("`agm grant <專家> <執行者>`") && manager_sec.contains("`agm revoke"), "{manager_sec}");
 
         assert!(manager_role_section(Some("executor")).is_none());
         assert!(manager_role_section(Some("advisor")).is_none());

@@ -463,3 +463,16 @@
     pointer-events: auto;
   }
 }
+
+/* 執行者授權：被授權的執行者名稱旁「→ 專家名」，淡色小字、不是 chip；太長就省略。 */
+.bot-grant-mark {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}

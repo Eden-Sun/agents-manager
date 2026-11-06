@@ -141,8 +141,8 @@ pub(super) async fn queue_awaiting_idle(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at)
-         VALUES (?, ?, ?, 'user', ?, 'web', ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, relay_auth, created_at)
+         VALUES (?, ?, ?, 'user', ?, 'web', ?, ?, ?, ?)",
     )
     .bind(&message_id)
     .bind(conversation_id)
@@ -150,6 +150,7 @@ pub(super) async fn queue_awaiting_idle(
     .bind(text)
     .bind(relay.from)
     .bind(relay.unverified)
+    .bind(relay.auth)
     .bind(&now)
     .execute(&mut *tx)
     .await
