@@ -310,7 +310,7 @@ pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_
     // 掛的交辦此刻已經不要了也不認領（#159）：flush 讀完交辦到這一句之間才被取消的，同一句擋下。
     let withdrawn = super::queue::WITHDRAWN_ASSIGNMENT.map(|s| format!("'{s}'")).join(",");
     let schedule_allowed = super::queue::scheduled_turn_allowed_sql("turns.id");
-    // 專家派工的授權在認領的同一句核對（撤銷先提交就認領不到，留在佇列由 flush 重驗撤回），見 `relay_grant`。
+    // 專家派工的依據在認領的同一句核對（關閉開關等先提交就認領不到，留在佇列由 flush 重驗撤回），見 `relay_grant`。
     let grants_ok = super::relay_grant::queued_turn_grants_ok_sql("turns.id");
     let done = sqlx::query(&format!(
         "UPDATE turns SET status='in_flight', run_id=?, auto_resend=0, claimed_from_queue=1
@@ -326,7 +326,7 @@ pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_
     if done.rows_affected() > 0 {
         return Ok(Outcome::Applied);
     }
-    settled_or_fenced(&mut *conn, turn_id, "queued", "in_flight", "認領排隊", "要認領到的 run 已經不在跑、掛的交辦已經不要了，或專家派工的授權已撤銷").await
+    settled_or_fenced(&mut *conn, turn_id, "queued", "in_flight", "認領排隊", "要認領到的 run 已經不在跑、掛的交辦已經不要了，或專家派工的依據已失效").await
 }
 
 /// **認領過但沒打字，放回佇列**：`in_flight -> queued`，同一句拔掉 run、重試次數加一、排下一次嘗試。

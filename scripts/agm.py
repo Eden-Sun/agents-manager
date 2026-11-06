@@ -1825,95 +1825,6 @@ def _project_id() -> str:
     return project_id
 
 
-def _grant_context(client: Client, project_id: str) -> tuple[list, list, str | None]:
-    """回（本專案 bot 清單, 目前的授權, 授權版本）。bot 清單取自 peers（名稱解析用）；授權與 `grants_revision` 讀 /api/state，
-    舊 daemon 沒帶就退回 peers 的授權、版本為 None（PUT 不帶版本＝不檢查）。"""
-    peers = client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers")
-    bots = (peers or {}).get("peers") or [] if isinstance(peers, dict) else []
-    grants = None
-    revision = None
-    state = client.get("/api/state")
-    if isinstance(state, dict):
-        for p in state.get("projects") or []:
-            if isinstance(p, dict) and p.get("id") == project_id and isinstance(p.get("executor_grants"), list):
-                grants = p["executor_grants"]
-                revision = p.get("grants_revision") if isinstance(p.get("grants_revision"), str) else None
-    if grants is None:
-        grants = (peers or {}).get("executor_grants") if isinstance(peers, dict) else None
-    return bots, list(grants or []), revision
-
-
-def _resolve_member(bots: list, ref: str, what: str) -> dict:
-    """名稱或 id 都可：id 完全相同優先，其次名稱（同專案內要唯一）。"""
-    for b in bots:
-        if b.get("id") == ref:
-            return b
-    named = [b for b in bots if b.get("name") == ref]
-    if len(named) == 1:
-        return named[0]
-    if len(named) > 1:
-        raise AgmError("ambiguous_bot", f"{what} {ref} 有多顆同名 bot，請改用 bot id：{', '.join(b.get('id', '') for b in named)}", 2)
-    raise AgmError("bot_not_found", f"本專案找不到{what} {ref}", 2)
-
-
-def _put_grants(client: Client, project_id: str, pairs: list, revision: str | None = None) -> object:
-    """整組 PUT；帶讀到的 `grants_revision`（樂觀鎖）。讀完之後被別人改過，daemon 回 409 `grants_revision_conflict`：
-    不自動重送（可能是剛被撤銷的授權），改成明確錯誤請呼叫端重跑同一個指令。"""
-    body: dict = {"grants": [{"specialist": s, "executor": e} for s, e in pairs]}
-    if revision:
-        body["revision"] = revision
-    try:
-        return client.put("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/executor-grants", body)
-    except AgmError as e:
-        detail = e.extra.get("detail")
-        if e.extra.get("status") == 409 and isinstance(detail, dict) and detail.get("reason") == "grants_revision_conflict":
-            raise AgmError("grants_revision_conflict", "執行者授權在讀取之後已被他人修改，這次沒有寫入；請先 agm grants 確認現況，再重跑同一個指令", 4, status=409, detail=detail) from e
-        raise
-
-
-def _named_grants(grants: list, bots: list) -> list:
-    names = {b.get("id"): b.get("name") for b in bots}
-    return [dict(g, specialist_name=names.get(g.get("specialist")), executor_name=names.get(g.get("executor"))) for g in grants]
-
-
-def cmd_grant(client: Client, cfg: dict, args) -> object:
-    """專家模式管理者：把執行者授權給專家（專家可直接派工、驗收）。讀現有授權後整組送出。"""
-    project_id = _project_id()
-    bots, grants, revision = _grant_context(client, project_id)
-    spec = _resolve_member(bots, args.specialist, "專家")
-    exe = _resolve_member(bots, args.executor, "執行者")
-    pairs = [(g.get("specialist"), g.get("executor")) for g in grants]
-    for s, e in pairs:
-        if e == exe["id"] and s != spec["id"]:
-            holder = next((b.get("name") or s for b in bots if b.get("id") == s), s)
-            raise AgmError("executor_already_granted", f"執行者 {exe.get('name')} 已授權給 {holder}（一顆執行者只能給一位專家）；先 agm revoke {holder} {exe.get('name')}", 2)
-    if (spec["id"], exe["id"]) not in pairs:
-        pairs.append((spec["id"], exe["id"]))
-    out = _put_grants(client, project_id, pairs, revision)
-    return {"grants": _named_grants((out or {}).get("grants") or [], bots)} if isinstance(out, dict) else out
-
-
-def cmd_revoke(client: Client, cfg: dict, args) -> object:
-    """專家模式管理者：撤銷授權（還沒送出的派工在送達時會被擋下，已開始的不中止）。"""
-    project_id = _project_id()
-    bots, grants, revision = _grant_context(client, project_id)
-    spec = _resolve_member(bots, args.specialist, "專家")
-    exe = _resolve_member(bots, args.executor, "執行者")
-    pairs = [(g.get("specialist"), g.get("executor")) for g in grants]
-    if (spec["id"], exe["id"]) not in pairs:
-        raise AgmError("grant_not_found", f"{spec.get('name')} 沒有 {exe.get('name')} 的授權", 2)
-    pairs.remove((spec["id"], exe["id"]))
-    out = _put_grants(client, project_id, pairs, revision)
-    return {"grants": _named_grants((out or {}).get("grants") or [], bots)} if isinstance(out, dict) else out
-
-
-def cmd_grants(client: Client, cfg: dict, args) -> object:
-    """列出本專案的執行者授權（附名稱）。"""
-    project_id = _project_id()
-    bots, grants, revision = _grant_context(client, project_id)
-    return {"project_id": project_id, "grants": _named_grants(grants, bots), "revision": revision}
-
-
 def cmd_member(client: Client, cfg: dict, args) -> object:
     """把 expert 專案裡留下的 child 原地轉成成員（pane 與對話不動）。"""
     body = {key: getattr(args, key) for key in ("role", "effort", "session_id") if getattr(args, key)}
@@ -2931,16 +2842,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--track", help="專家負責的軌道（--role specialist 必填）")
     s.add_argument("--fork-from", dest="fork_from", metavar="BOT", help="從同專案同主機的 codex bot 分岔（新成員也必須是 codex；第一次啟動用 codex fork，之後走自己的 session）")
     s.set_defaults(func=cmd_hire)
-    s = sub.add_parser("grant", help="專家模式管理者：把執行者授權給專家（專家可直接派工給它、驗收結果；一顆執行者只能給一位專家；不含啟動／增聘）")
-    s.add_argument("specialist", help="專家的名稱或 bot id")
-    s.add_argument("executor", help="執行者的名稱或 bot id")
-    s.set_defaults(func=cmd_grant)
-    s = sub.add_parser("revoke", help="專家模式管理者：撤銷專家對執行者的授權（還沒送出的派工送達時會被擋下）")
-    s.add_argument("specialist", help="專家的名稱或 bot id")
-    s.add_argument("executor", help="執行者的名稱或 bot id")
-    s.set_defaults(func=cmd_revoke)
-    s = sub.add_parser("grants", help="專家模式：列出本專案的執行者授權（專家可直接派工的執行者）")
-    s.set_defaults(func=cmd_grants)
     s = sub.add_parser("member", help="專家模式：把留下的 child 原地轉成成員")
     s.add_argument("bot_id")
     s.add_argument("--role", choices=["executor", "advisor"])
@@ -3024,7 +2925,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member", "grant", "revoke", "grants") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

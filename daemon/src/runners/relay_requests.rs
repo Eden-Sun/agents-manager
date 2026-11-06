@@ -37,7 +37,7 @@ fn notify_list(senders: &[(String, String, Option<String>)], failed: &[(String, 
     }
     for (from, to, _) in senders {
         if Some(from.as_str()) != except && !out.iter().any(|(f, t, _)| f == from && t == to) {
-            out.push((from.clone(), to.clone(), "同一筆排隊 turn 裡另一則派工的授權已失效，整筆撤回：你的派工沒有送出，請重送".into()));
+            out.push((from.clone(), to.clone(), "同一筆排隊 turn 裡另一則派工的依據已失效，整筆撤回：你的派工沒有送出，請重送".into()));
         }
     }
     out
@@ -75,9 +75,9 @@ async fn basis_failures(app: &Arc<App>, senders: &[(String, String, Option<Strin
         let why = match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::Deliver).await {
             Err(crate::relay_policy::RelayDenied::Denied(e)) => e,
             _ => match auth.as_deref() {
-                None => "這則派工需要管理者授權（agm grant）：沒有送出，請改送管理者".to_string(),
-                Some(a) if !a.contains("grant:") => "副管理者已不在代班中：這則派工沒有送出，請改送管理者".to_string(),
-                Some(_) => "專家對這顆執行者的授權已撤銷或已變更（角色、track、所屬專案）：這則派工沒有送出；請管理者授權（agm grant）或改送管理者".to_string(),
+                None => "這則派工沒有記下派工依據（升級前排隊的專家派工）：沒有送出，請重送或改送管理者".to_string(),
+                Some(a) if !a.contains("specialist:") => "副管理者已不在代班中（或依據已失效）：這則派工沒有送出，請改送管理者".to_string(),
+                Some(_) => "專家派工的依據已失效（「專家可直接派工給執行者」開關已關、角色或所屬專案已變更）：這則派工沒有送出；請改送管理者".to_string(),
             },
         };
         out.push((from.clone(), to.clone(), why));
@@ -90,7 +90,7 @@ async fn basis_failures(app: &Arc<App>, senders: &[(String, String, Option<Strin
 /// 送件者與目標在同一個 expert 專案時照 Deliver 重驗。其他派工維持原行為。
 async fn plain_denial(app: &Arc<App>, senders: &[(String, String, Option<String>)]) -> anyhow::Result<Option<Denial>> {
     for (from, to, _) in senders {
-        if crate::executor_grants::expert_internal(app, from, to).await.is_none() { continue }
+        if crate::specialist_dispatch::expert_internal(app, from, to).await.is_none() { continue }
         match crate::relay_policy::relay_prompt_allowed(app, from, to, crate::relay_policy::Admission::Deliver).await {
             Ok(()) => {}
             Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
