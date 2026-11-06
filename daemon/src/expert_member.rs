@@ -75,7 +75,6 @@ pub(crate) async fn adopt(
         herdr_session: None,
         create_request_id: None,
         create_fingerprint: None,
-        pool_entry: None,
     };
     let pid = child.project_id.clone();
     crate::projection::update_and_project(&app.cfg, &app.db, move |c| {

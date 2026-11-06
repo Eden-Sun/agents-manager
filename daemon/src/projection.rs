@@ -553,13 +553,12 @@ async fn project_inner(
     let mut tx = db::begin_write(pool).await?;
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
-        let executor_pool_json = serde_json::to_string(&p.executor_pool)?;
         let role_policy_json = serde_json::to_string(&p.role_policy)?;
                 sqlx::query(
-            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, executor_pool_json, role_policy_json, deputy_bot_id, deputy_after_sec, specialist_dispatch, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, role_policy_json, deputy_bot_id, deputy_after_sec, specialist_dispatch, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
                host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, mode=excluded.mode,
-               executor_pool_json=excluded.executor_pool_json, role_policy_json=excluded.role_policy_json,
+               role_policy_json=excluded.role_policy_json,
                deputy_bot_id=excluded.deputy_bot_id, deputy_after_sec=excluded.deputy_after_sec, specialist_dispatch=excluded.specialist_dispatch, deleted_at=NULL",
         )
         .bind(&pid)
@@ -570,7 +569,6 @@ async fn project_inner(
         .bind(p_at as i64)
         .bind(p.handed_off_to.as_deref().map(str::trim))
         .bind(&p.mode)
-        .bind(&executor_pool_json)
         .bind(&role_policy_json)
         .bind(p.deputy.as_ref().map(|d| d.bot_id.as_str()))
         .bind(p.deputy.as_ref().map(|d| d.after_sec as i64))
@@ -971,11 +969,10 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
-                pool_entry: None,
-            }
+                }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
-            crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+            crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                 id: id.map(str::to_string),
                 path: "/tmp".into(),
                 label: label.into(),
@@ -1629,7 +1626,7 @@ mod tests {
         assert!(validate(&cfg).is_err(), "身份 args 也不可把 NUL 帶進啟動 argv");
 
         cfg.identities.clear();
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
             id: Some("p1".into()),
             path: "/tmp".into(),
             label: "demo".into(),
@@ -1651,8 +1648,7 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
-                pool_entry: None,
-            }],
+                }],
             handed_off_to: None,
         });
         assert!(validate(&cfg).is_err(), "BotCfg env 也必須套用 API 的保留鍵驗證");

@@ -1,5 +1,5 @@
 //! 執行期設定的純規則（B 期，lead 2026-11 定案）：角色 policy（`projects.role_policy_json`）與 bot 執行期覆寫
-//! （`bots.runtime_override_json`）同一個形狀，生效順序 **bot 覆寫 > 池條目 > 角色 policy > 預設**。
+//! （`bots.runtime_override_json`）同一個形狀，生效順序 **bot 覆寫 > 角色 policy > 預設**。
 //! 這裡只放形狀、合併與保溫參數換算；驗證（context 視窗、TTL 上限等要看 kind／model 的）在 daemon。
 //! 欄位 `null`＝這一層不管、往下一層找；全部 null＝預設（現有行為，不偷偷幫誰開保溫）。
 
@@ -36,14 +36,13 @@ pub struct Effective {
     pub hot_compact_min_pct: Option<i64>,
 }
 
-/// 四層合併。`pool_context` 只給 context（池條目只有 context_tokens；保溫欄位池條目不管）。
-/// 每個欄位取第一個有值的：bot 覆寫 → 池條目（僅 context）→ 角色 policy。
-pub fn effective(bot_override: Option<&RuntimeSettings>, pool_context: Option<u32>, role: Option<&RuntimeSettings>) -> Effective {
+/// 合併 bot 覆寫與角色 policy，每個欄位取第一個有值的。
+pub fn effective(bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSettings>) -> Effective {
     fn pick<T: Clone>(f: impl Fn(&RuntimeSettings) -> Option<T>, ov: Option<&RuntimeSettings>, role: Option<&RuntimeSettings>) -> Option<T> {
         ov.and_then(&f).or_else(|| role.and_then(&f))
     }
     Effective {
-        context_tokens: bot_override.and_then(|o| o.context_tokens).or(pool_context).or_else(|| role.and_then(|r| r.context_tokens)),
+        context_tokens: bot_override.and_then(|o| o.context_tokens).or_else(|| role.and_then(|r| r.context_tokens)),
         keep_warm: pick(|s| s.keep_warm, bot_override, role),
         keep_warm_after_min: pick(|s| s.keep_warm_after_min, bot_override, role),
         hot_compact_after_min: pick(|s| s.hot_compact_after_min, bot_override, role),
@@ -94,44 +93,39 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
-    /// 四層：bot 覆寫 > 池條目 > 角色 policy > 預設（全部 None）。
+    /// 三層：bot 覆寫 > 角色 policy > 預設（全部 None）。
     #[test]
-    fn four_layers_resolve_in_order() {
+    fn bot_override_then_role_policy_resolve_in_order() {
         let role = s(r#"{"context_tokens": 200000, "keep_warm": true, "keep_warm_after_min": 30}"#);
         let ov = s(r#"{"context_tokens": 512000, "keep_warm_after_min": 40}"#);
 
         // 0. 預設：什麼都沒設＝全 None，保溫用現有常數。
-        let none = effective(None, None, None);
+        let none = effective(None, None);
         assert_eq!(none, Effective::default());
         let t = none.keep_warm_tuning(58 * 60, 110 * 60, Some(30.0));
         assert_eq!((t.enabled, t.keep_warm_after_secs, t.warm_compact_after_secs, t.min_context_pct), (None, 58 * 60, 110 * 60, Some(30.0)));
 
         // 1. 只有角色 policy。
-        let r = effective(None, None, Some(&role));
+        let r = effective(None, Some(&role));
         assert_eq!((r.context_tokens, r.keep_warm, r.keep_warm_after_min), (Some(200_000), Some(true), Some(30)));
 
-        // 2. 池條目的 context 蓋過角色，但不蓋過保溫欄位。
-        let p = effective(None, Some(128_000), Some(&role));
-        assert_eq!(p.context_tokens, Some(128_000));
-        assert_eq!(p.keep_warm_after_min, Some(30));
-
-        // 3. bot 覆寫最大：context 與分鐘都以覆寫為準。
-        let o = effective(Some(&ov), Some(128_000), Some(&role));
+        // 2. bot 覆寫最大：context 與分鐘都以覆寫為準。
+        let o = effective(Some(&ov), Some(&role));
         assert_eq!((o.context_tokens, o.keep_warm, o.keep_warm_after_min), (Some(512_000), Some(true), Some(40)));
 
         // 覆寫沒寫的欄位往下找（keep_warm 來自角色）。
         let partial = s(r#"{"keep_warm": false}"#);
-        assert_eq!(effective(Some(&partial), None, Some(&role)).keep_warm, Some(false));
+        assert_eq!(effective(Some(&partial), Some(&role)).keep_warm, Some(false));
     }
 
     #[test]
     fn tuning_uses_effective_values_and_falls_back_when_inconsistent() {
-        let e = effective(None, None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 50, "hot_compact_min_pct": 60}"#)));
+        let e = effective(None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 50, "hot_compact_min_pct": 60}"#)));
         let t = e.keep_warm_tuning(58 * 60, 110 * 60, None);
         assert_eq!((t.keep_warm_after_secs, t.warm_compact_after_secs, t.min_context_pct), (30 * 60, 50 * 60, Some(60.0)));
 
         // 熱壓分鐘不大於保溫分鐘：退回預設（驗證擋掉，這裡保險）。
-        let bad = effective(None, None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 20}"#)));
+        let bad = effective(None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 20}"#)));
         assert_eq!(bad.keep_warm_tuning(58 * 60, 110 * 60, None).warm_compact_after_secs, 110 * 60);
     }
 
@@ -142,10 +136,10 @@ mod tests {
 
     #[test]
     fn policy_rev_changes_with_effective_values_only() {
-        let a = effective(None, None, Some(&s(r#"{"context_tokens": 200000}"#)));
-        let same = effective(None, Some(200_000), None);
+        let a = effective(None, Some(&s(r#"{"context_tokens": 200000}"#)));
+        let same = effective(Some(&s(r#"{"context_tokens": 200000}"#)), None);
         assert_eq!(policy_rev(&a), policy_rev(&same), "同樣的生效值指紋相同");
-        let b = effective(None, None, Some(&s(r#"{"context_tokens": 512000}"#)));
+        let b = effective(None, Some(&s(r#"{"context_tokens": 512000}"#)));
         assert_ne!(policy_rev(&a), policy_rev(&b));
     }
 }

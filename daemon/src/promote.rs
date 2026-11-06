@@ -431,7 +431,6 @@ pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Op
         herdr_session: None,
         create_request_id: None,
         create_fingerprint: None,
-        pool_entry: None,
     }
 }
 
@@ -749,7 +748,7 @@ mod tests {
                     env: [("CLAUDE_CONFIG_DIR".to_string(), d.clone())].into(),
                     args: vec![],
                 });
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await

@@ -2,9 +2,7 @@
 //! and is projected from TOML (see `projection.rs`).
 
 pub mod api_bot;
-pub mod executor_pool;
-
-pub use executor_pool::ExecutorPoolEntry;
+pub mod runtime_params;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -227,9 +225,6 @@ pub struct BotCfg {
     pub create_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_fingerprint: Option<String>,
-    /// 增聘時套用的執行者池條目 id（只寫 config，不進 DB）；用量＝同專案 executor 中此值相同的 bot 數。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool_entry: Option<String>,
     /// 增聘時 `--fork-from` 指定的來源 codex bot：這顆第一次啟動時用 `codex fork <來源的 session>` 分岔（之後走它自己的 session）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
@@ -259,7 +254,6 @@ impl Default for BotCfg {
             herdr_session: None,
             create_request_id: None,
             create_fingerprint: None,
-            pool_entry: None,
         }
     }
 }
@@ -347,9 +341,6 @@ pub struct ProjectCfg {
     pub label: String,
     #[serde(default = "default_project_mode")]
     pub mode: String,
-    /// 專家模式執行者池（條目陣列；舊版 `{kind: n}` 讀進來自動轉換，見 `executor_pool.rs`）。
-    #[serde(default, deserialize_with = "executor_pool::deserialize_pool", skip_serializing_if = "Vec::is_empty")]
-    pub executor_pool: Vec<ExecutorPoolEntry>,
     /// 專家模式角色政策（role -> policy，Phase B 用）
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub role_policy: std::collections::BTreeMap<String, serde_json::Value>,
@@ -389,7 +380,6 @@ impl Default for ProjectCfg {
             path: String::new(),
             label: String::new(),
             mode: default_project_mode(),
-            executor_pool: Vec::new(),
             role_policy: std::collections::BTreeMap::new(),
             deputy: None,
             specialist_dispatch: true,
@@ -546,6 +536,7 @@ id = "P1"
 path = "/tmp/p1"
 label = "p1"
 mode = "expert"
+executor_pool = { claude = 1 }
 
 [[projects.executor_grants]]
 specialist = "S1"
@@ -560,16 +551,20 @@ name = "spec"
 kind = "claude"
 role = "specialist"
 track = "db"
+pool_entry = "claude-legacy"
 "#;
 
     /// 預設開；開著時不寫進檔案，關掉才寫 `specialist_dispatch = false`；舊版逐對授權留下的鍵是退役鍵，忽略且不警告。
     #[test]
-    fn switch_defaults_on_and_leftover_grants_are_retired() {
+    fn specialist_switch_defaults_on_and_retired_keys_are_ignored() {
         let (cfg, unknown) = parse_config(TEXT).unwrap();
         assert!(cfg.projects[0].specialist_dispatch);
         assert!(!unknown.is_empty(), "舊授權鍵被 serde 忽略");
         assert!(unknown.iter().all(|k| is_retired_key(k)), "{unknown:?}");
+        assert!(unknown.iter().any(|k| k.contains(".executor_pool")), "{unknown:?}");
+        assert!(unknown.iter().any(|k| k.ends_with(".pool_entry")), "{unknown:?}");
         let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("executor_pool") && !text.contains("pool_entry"), "{text}");
         assert!(!text.contains("specialist_dispatch"), "{text}");
         let mut off = cfg.clone();
         off.projects[0].specialist_dispatch = false;
@@ -2183,12 +2178,17 @@ fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
 
 /// daemon 自己以前寫進 config.toml、後來移除的鍵（舊檔裡還留著）：照樣忽略，但不是「打錯字或新版欄位」，不必每次開機都警告。
 /// bot 層級的 `instruction_files`（2026-10-02 移除，見 `api.rs` 的 `a_leftover_instruction_files_key_in_config_toml_is_ignored`）、
-/// 專案層級的 `executor_grants`（2026-11-06 改成 `specialist_dispatch` 開關）。
+/// 專案層級的 `executor_grants`（2026-11-06 改成 `specialist_dispatch` 開關）、`executor_pool`（2026-11-06 退役）。
+/// bot 層級的 `pool_entry`（2026-11-06 隨執行者池退役）。
 fn is_retired_key(path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
         // 專家模式逐對執行者授權（2026-11-06 改成總開關 `specialist_dispatch`）。
         || matches!(parts.as_slice(), ["projects", i, "executor_grants", ..] if i.parse::<usize>().is_ok())
+        // 專家模式執行者池（2026-11-06 退役）。
+        || matches!(parts.as_slice(), ["projects", i, "executor_pool", ..] if i.parse::<usize>().is_ok())
+        // 執行者池條目指標（2026-11-06 隨執行者池退役）。
+        || matches!(parts.as_slice(), ["projects", i, "bots", j, "pool_entry"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
 }
 
 /// `exists()` follows symlinks, so it reports a dangling or looping link as absent even though
@@ -3159,7 +3159,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

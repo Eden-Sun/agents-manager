@@ -580,7 +580,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (75, "dab5e06d25106ac2"),
     // 專家模式 track（2026-10-31）：`relay_requests.track`。
     (76, "f00a57c2bd7cfbfa"),
-    // 專家模式保護額度（2026-10-31）：`bots.manager_use`、`projects.executor_pool_json`。
+    // 專家模式執行者池退役（2026-11-06）：保留既有 `projects.executor_pool_json` 欄位，不再使用。
     (77, "02d3beb36275b2dc"),
     // 專家模式專家（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`（A／B 合一版）。
     (78, "7191b39c27eab19f"),
@@ -872,7 +872,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("relay_requests", "track", "ALTER TABLE relay_requests ADD COLUMN track TEXT"),
         // 專家模式保護額度開關 A：bot manager_use
         ("bots", "manager_use", "ALTER TABLE bots ADD COLUMN manager_use INTEGER NOT NULL DEFAULT 1"),
-        // 專家模式保護額度開關 B：專案執行者池 JSON
+        // 已退役的執行者池 JSON 欄位；保留相容既有資料庫 schema，不再消費。
         ("projects", "executor_pool_json", "ALTER TABLE projects ADD COLUMN executor_pool_json TEXT NOT NULL DEFAULT '{}'"),
         // 專家模式專家（specialist）角色與政策（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`。
         ("bots", "track", "ALTER TABLE bots ADD COLUMN track TEXT"),
@@ -1431,7 +1431,8 @@ pub struct Project {
     /// #708：已移交給這台主機的 daemon；`None`＝這顆 daemon 管。
     pub handed_off_to: Option<String>,
     pub mode: String,
-    #[serde(default = "default_empty_json_object")]
+    /// 已退役執行者池欄位；保留供既有 schema 使用，不再投影或對外輸出。
+    #[serde(skip)]
     pub executor_pool_json: String,
     #[serde(default = "default_empty_json_object")]
     pub role_policy_json: String,
@@ -1458,11 +1459,6 @@ fn default_one() -> i64 {
 }
 
 impl Project {
-    /// 執行者池條目；舊的 `{kind: n}` 形狀讀進來自動轉成條目（見 `am_config::executor_pool`）。
-    pub fn executor_pool(&self) -> Vec<am_config::ExecutorPoolEntry> {
-        am_config::executor_pool::parse_pool_json(&self.executor_pool_json)
-    }
-
     pub fn role_policy(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
         serde_json::from_str(&self.role_policy_json).unwrap_or_default()
     }

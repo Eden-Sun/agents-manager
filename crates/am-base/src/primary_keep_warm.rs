@@ -690,7 +690,7 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
 }
 
 /// 這顆 bot 生效的執行期設定：bot 覆寫（`bots.runtime_override_json`）＋它角色在專案的 policy（`projects.role_policy_json`）。
-/// 池條目的 context 不影響保溫，所以這裡不傳。讀不懂的 JSON 一律當沒設（不因此誤開保溫）。
+/// 讀不懂的 JSON 一律當沒設（不因此誤開保溫）。
 pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> anyhow::Result<crate::runtime_policy::Effective> {
     use crate::runtime_policy::{effective, RuntimeSettings};
     let ov: Option<RuntimeSettings> = bot.runtime_override_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
@@ -698,7 +698,7 @@ pub async fn effective_runtime(db: &DbContext<SqlitePool>, bot: &db::Bot) -> any
         (Some(p), Some(role)) => p.role_policy().get(role).and_then(|v| serde_json::from_value(v.clone()).ok()),
         _ => None,
     };
-    Ok(effective(ov.as_ref(), None, role.as_ref()))
+    Ok(effective(ov.as_ref(), role.as_ref()))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
