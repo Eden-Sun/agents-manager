@@ -4,6 +4,7 @@ import * as api from '../api'
 import { readableImagePath } from '../lib/markdownUrl'
 import { fetchRemoteImageBlob, isRemoteHttpImage, remoteImageInfo } from '../lib/remoteImage'
 import './markdownImage.css'
+import { useImageViewer } from './useImageViewer'
 
 /** 網址型的圖片照常用 `<img>`；其他（`docs/x.png`、`/Users/…/x.png`、`file://…`）當成 bot 專案裡的檔案。 */
 function isRemote(src: string): boolean {
@@ -44,9 +45,7 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
   }, [])
   if (url) {
     return (
-      <a href={url} target="_blank" rel="noreferrer" className="md-image-link">
-        <img className="md-image" src={url} alt={alt || imageName(src)} />
-      </a>
+      <ViewableImage src={url} alt={alt || imageName(src)} />
     )
   }
   const host = info?.host ?? t('未知網域')
@@ -133,7 +132,7 @@ export function MarkdownImage({
   if (!local) {
     // key＝src：換了網址就整個重來，上一張的授權結果與 blob 不沿用，新網址要重新手動按「載入圖片」。
     if (isRemoteHttpImage(raw)) return <RemoteImage key={raw} src={raw} alt={alt} />
-    return <img className="md-image" src={raw} alt={alt || imageName(raw)} loading="lazy" />
+    return <ViewableImage src={raw} alt={alt || imageName(raw)} />
   }
   if (failed || !botId) {
     return (
@@ -145,8 +144,13 @@ export function MarkdownImage({
   }
   if (!url) return <span className="md-image-loading">🖼 {alt || raw}</span>
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="md-image-link">
-      <img className="md-image" src={url} alt={alt || imageName(raw)} />
-    </a>
+    <ViewableImage src={url} alt={alt || imageName(raw)} />
   )
+}
+
+export function ViewableImage({ src, alt }: { src: string; alt: string }) {
+  const { openImage, viewer } = useImageViewer()
+  return <><a href={src} target="_blank" rel="noreferrer" className="md-image-link" data-viewable-image onClick={openImage}>
+    <img className="md-image" src={src} alt={alt} loading="lazy" />
+  </a>{viewer}</>
 }

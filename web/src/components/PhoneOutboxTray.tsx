@@ -4,7 +4,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
 import { fileSize, isPreviewableImage, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { blobFor } from '../lib/outboxPreviewCache'
-import { Modal } from './Modal'
+import { useImageViewer } from './useImageViewer'
 import { useOutboxFiles } from './useOutboxFiles'
 import './phoneOutboxTray.css'
 
@@ -44,12 +44,11 @@ function PhoneOutboxTrayInner() {
   const t = useT()
   const { botId, files, fetchedAt, now, loadedFor, busy, openPreview } = useOutboxFiles()
   const [open, setOpen] = useState(readOpen)
-  const [viewing, setViewing] = useState<OutboxFile | null>(null)
+  const { openImage, viewer } = useImageViewer(botId)
   /** 看過幾個檔：之後多出來的在列上標「+N 新」。`null`＝這顆 bot 的清單還沒讀到；第一次讀到的那批不算新。 */
   const [seen, setSeen] = useState<{ bot: string | null; count: number | null }>({ bot: botId, count: null })
   if (seen.bot !== botId) {
     setSeen({ bot: botId, count: null })
-    setViewing(null)
   } else if (loadedFor === botId) {
     // 第一次讀到、展開著（進來的檔使用者看得到）、或檔案被清掉（數字往下走）：都把看過的數對齊目前清單。
     if (seen.count === null || (open && seen.count !== files.length) || seen.count > files.length) setSeen({ bot: botId, count: files.length })
@@ -91,7 +90,8 @@ function PhoneOutboxTrayInner() {
                     type="button"
                     className="phone-outbox-thumb"
                     aria-label={t('預覽 {name}', { name: f.name })}
-                    onClick={() => setViewing(f)}
+                    data-viewable-image
+                    onClick={openImage}
                   >
                     <OutboxThumb botId={botId} file={f} />
                   </button>
@@ -106,7 +106,6 @@ function PhoneOutboxTrayInner() {
               const left = remainingNow(f, fetchedAt, now)
               const { dir: folder, base } = splitOutboxName(f.name)
               const isBusy = busy?.bot === botId && busy.name === f.name
-              const image = isPreviewableImage(f.name)
               return (
                 <li key={f.name} className="phone-outbox-item">
                   <button
@@ -115,7 +114,7 @@ function PhoneOutboxTrayInner() {
                     disabled={isBusy}
                     // 手機不給下載（使用者 2026-11-03）：圖檔點名字開放大預覽，其他檔在新分頁打開。
                     title={t('預覽 {name}', { name: f.name })}
-                    onClick={() => (image ? setViewing(f) : void openPreview(f.name))}
+                    onClick={() => void openPreview(f.name)}
                   >
                     <span className="outbox-name">
                       {folder ? <span className="outbox-dir">{folder}</span> : null}
@@ -134,30 +133,8 @@ function PhoneOutboxTrayInner() {
           ) : null}
         </div>
       ) : null}
-      {viewing ? (
-        <Modal open title={t('預覽')} width={960} onClose={() => setViewing(null)}>
-          <ZoomViewer botId={botId} file={viewing} />
-        </Modal>
-      ) : null}
+      {viewer}
     </section>
-  )
-}
-
-/** 預覽：點圖在「整張放進畫面」與「原尺寸、可捲動看細節」之間切換（使用者 2026-11-03：要點擊放大圖）。 */
-function ZoomViewer({ botId, file }: { botId: string; file: OutboxFile }) {
-  const t = useT()
-  const [zoom, setZoom] = useState(false)
-  return (
-    <div
-      className={`phone-outbox-viewer${zoom ? ' zoomed' : ''}`}
-      role="button"
-      tabIndex={0}
-      title={zoom ? t('點一下縮回整張') : t('點一下放大')}
-      onClick={() => setZoom((z) => !z)}
-      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setZoom((z) => !z))}
-    >
-      <OutboxThumb botId={botId} file={file} full />
-    </div>
   )
 }
 

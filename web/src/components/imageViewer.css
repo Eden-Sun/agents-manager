@@ -1,0 +1,15 @@
+.image-viewer { position: fixed; inset: 0; z-index: 2000; display: flex; flex-direction: column; gap: 12px; padding: max(12px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom)); background: var(--bg-panel, #17191d); color: var(--text, #eee); }
+.image-viewer-bar { display: flex; align-items: center; gap: 16px; flex: none; font-size: 13px; }
+.image-viewer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-viewer button { color: inherit; background: transparent; border: 1px solid var(--border-strong, #777); border-radius: 8px; min-width: 44px; min-height: 44px; cursor: pointer; }
+.image-viewer :focus-visible { outline: 3px solid var(--accent, #639cff); outline-offset: 3px; }
+.image-viewer-stage { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; align-items: center; justify-content: center; touch-action: pinch-zoom; }
+.image-viewer .image-viewer-picture { border: 0; padding: 0; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; display: flex; cursor: zoom-in; }
+.image-viewer-picture img { display: block; width: auto; height: auto; max-width: calc(100vw - 32px); max-height: calc(100dvh - 200px); object-fit: contain; }
+.image-viewer-stage.zoomed { display: block; touch-action: pan-x pan-y pinch-zoom; }
+.image-viewer-stage.zoomed .image-viewer-picture { max-width: none; max-height: none; cursor: zoom-out; }
+.image-viewer-stage.zoomed img { max-width: none; max-height: none; }
+.image-viewer-nav { display: flex; justify-content: center; gap: 24px; }
+.image-viewer-hint { flex: 1; color: var(--text-dim, #aaa); }
+.image-viewer-bar a { color: inherit; text-underline-offset: 3px; }
+@media (max-width: 640px) { .image-viewer { padding-inline: 10px; gap: 8px; } .image-viewer-bar { gap: 10px; font-size: 12px; } }

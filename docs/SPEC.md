@@ -5849,3 +5849,5 @@ expert 跨專案 relay 拒絕，例外：別的專案可送給 expert 專案的�
 已驗證 child 可透過 spawn fence 建立 shell pane；daemon 以 child 憑證決定身分並僅接受 pane 用途，不允許 child 建立 agent。child 可操作自己的 pane 與非 agent pane，不能操作 parent 或其他 agent 的 pane。
 
 遠端 bot 的 `AM_DAEMON_URL` 預設使用該 host 既有 SSH 連線所回報 `SSH_CONNECTION` 的來源 IP 與 daemon port；IPv6 位址以中括號包住。`[[hosts]] daemon_url` 可選填，並優先覆寫自動推得的位址（例如 NAT 或反向代理）。SSH_CONNECTION 缺失或無效且未設定覆寫時不注入；遠端必須能連到 daemon 監聽的該網路介面及 port。
+
+- 對話圖片與手機 outbox 共用全螢幕檢視器：點圖切換整張／原尺寸可捲動，點背景、Esc、手機下滑或返回關閉；同則訊息／托盤的已載入圖片可左右切換，原圖與下載留在次要工具列，關閉恢復焦點與捲動位置。
