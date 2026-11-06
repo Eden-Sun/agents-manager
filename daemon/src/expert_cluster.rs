@@ -96,13 +96,17 @@ pub fn group(members: &[Member]) -> Vec<Cluster> {
             }
         }
     }
+    // 序號：同名的第一群保留原名，其餘補 -2、-3…；產生的名字也可能撞到別群的自然名稱（#2071），
+    // 所以先把所有現有名稱占住，每個候選都要確認沒被用過才採用。
     let snapshot = names.clone();
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut used: std::collections::BTreeSet<String> = snapshot.iter().cloned().collect();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for i in 0..names.len() {
-        if collides(&snapshot, i) {
-            let n = seen.entry(snapshot[i].clone()).or_insert(0);
-            *n += 1;
-            if *n > 1 { names[i] = format!("{}-{}", snapshot[i], n); }
+        if collides(&snapshot, i) && !seen.insert(snapshot[i].clone()) {
+            let mut n = 2;
+            while used.contains(&format!("{}-{}", snapshot[i], n)) { n += 1; }
+            names[i] = format!("{}-{}", snapshot[i], n);
+            used.insert(names[i].clone());
         }
     }
     for ((_, c), n) in groups.iter_mut().zip(names) { c.name = n; }
@@ -206,6 +210,21 @@ mod tests {
         assert_eq!(cs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["haiku-high", "haiku-low"]);
         let cs = group(&[m("a", "claude-haiku-4-5", "low", "x"), m("b", "claude-haiku-4-5", "low", "x"), m("c", "claude-haiku-4-5", "low", "y"), m("d", "claude-haiku-4-5", "low", "y")]);
         assert_eq!(cs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["haiku-low-x", "haiku-low-y"]);
+    }
+
+    #[test]
+    fn generated_number_suffix_never_collides_with_natural_name() {
+        // #2071：前兩群都叫 haiku-low-cc1，補序號的 -2 會撞到第三群原本就叫 haiku-low-cc1-2。
+        let cs = group(&[m("a", "claude-haiku-4-5", "low", "cc1"), m("b", "claude-haiku-4-5", "low", "cc1"),
+            m("c", "claude-haiku-5-5", "low", "cc1"), m("d", "claude-haiku-5-5", "low", "cc1"),
+            m("e", "claude-haiku-5-5", "low", "cc1-2"), m("f", "claude-haiku-5-5", "low", "cc1-2")]);
+        let names: Vec<&str> = cs.iter().map(|c| c.name.as_str()).collect();
+        let uniq: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(uniq.len(), cs.len(), "群集名必須唯一：{names:?}");
+        assert_eq!(names, ["haiku-low-cc1", "haiku-low-cc1-2", "haiku-low-cc1-3"]);
+        // 自然名稱 haiku-low-cc1-2 仍屬於 identity=cc1-2 那群；每群都能用名稱找到自己。
+        assert_eq!(cs.iter().find(|c| c.name == "haiku-low-cc1-2").unwrap().identity.as_deref(), Some("cc1-2"));
+        for c in &cs { assert!(std::ptr::eq(cs.iter().find(|x| x.name == c.name).unwrap(), c)); }
     }
 
     #[test]
