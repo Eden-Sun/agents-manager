@@ -168,12 +168,15 @@ function OutboxThumb({ botId, file, full = false }: { botId: string; file: Outbo
   const [src, setSrc] = useState<{ key: string; url: string | null }>({ key: '', url: null })
   useEffect(() => {
     let alive = true
-    blobFor(botId, file.name, file.modified).then(
+    // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
+    const lease = blobFor(botId, file.name, file.modified)
+    lease.url.then(
       (url) => alive && setSrc({ key, url }),
       () => alive && setSrc({ key, url: null }),
     )
     return () => {
       alive = false
+      lease.release()
     }
   }, [botId, file.name, file.modified, key])
   const cls = full ? 'phone-outbox-full' : 'phone-outbox-thumb-img'
