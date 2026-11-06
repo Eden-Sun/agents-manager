@@ -15,7 +15,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '專家模式': 'Expert mode',
   'parent-child 模式': 'Parent-child mode',
   '套用': 'Apply',
-  '建議：管理者用 Opus、執行者用 Haiku、顧問用 Astra。': 'Suggested: Opus for the manager, Haiku for executors, Astra for advisors.',
+  '建議：管理者用 Opus、執行者用 Haiku、顧問用 Astra。': 'Suggested: Opus for the manager, Haiku for workers, Astra for advisors.',
   '全部加入建議': 'Fill in all suggestions',
   '開啟「{name}」的專案設定\n{path}{drag}': 'Open project settings for {name}\n{path}{drag}',
   '1–32 個字，不可含 @ , : ; 與看不見的字元，空白只能單一個、夾在中間': '1–32 characters; no @ , : ; or invisible characters. Use at most one space, not at either end',
@@ -402,6 +402,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   "共 {n} 顆：{stat}": "{n} total: {stat}",
   // 專家派工總開關（專家模式，2026-11-06）
   '專家派工': 'Specialist dispatch',
-  '專家可直接派工給執行者': 'Specialists can dispatch to executors directly',
-  '開著時專家可直接派工給本專案的執行者並驗收結果（同時派給同一顆照佇列排隊）；關掉就只有管理者能派。': "When on, specialists can dispatch work to this project's executors directly and review the results (simultaneous dispatches to one executor queue up); when off, only the manager can dispatch.",
+  '專家可直接派工給執行者': 'Specialists can dispatch to workers directly',
+  '開著時專家可直接派工給本專案的執行者並驗收結果（同時派給同一顆照佇列排隊）；關掉就只有管理者能派。': "When on, specialists can dispatch work to this project's workers directly and review the results (simultaneous dispatches to one worker queue up); when off, only the manager can dispatch.",
 } satisfies Dict
