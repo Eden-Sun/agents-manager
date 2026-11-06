@@ -6,24 +6,6 @@
 .project-expert-settings-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .project-expert-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 
-.project-executor-pool-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-.project-executor-pool-section h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
-.executor-pool-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.executor-pool-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; }
-.executor-pool-kind { font-family: var(--font-mono); text-transform: capitalize; min-width: 50px; }
-.executor-pool-model { font-family: var(--font-mono); min-width: 0; overflow-wrap: anywhere; }
-.executor-pool-usage { font-variant-numeric: tabular-nums; color: var(--text-dim); }
-.executor-pool-remove { margin-left: auto; }
-.executor-pool-input { width: 54px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-input); color: var(--text); font-size: 13px; }
-.executor-pool-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.executor-pool-suggest, .executor-pool-form { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 4px; font-size: 13px; }
-.executor-pool-suggest-row { display: flex; align-items: center; gap: 6px; }
-.executor-pool-ctx-field { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-.executor-pool-ctx-field:disabled { opacity: 0.5; }
-.executor-pool-ctx-range { display: flex; align-items: center; gap: 8px; }
-.executor-pool-error { margin: 8px 0 0; color: var(--danger, #c0392b); font-size: 13px; }
-.project-executor-pool-actions { margin-top: 6px; }
-
 /* 手機：專案設定的標題列（固定 60px）塞不下額度條，額度條換到第二行、標題列依內容撐高，
    否則額度條會溢出到下面的未讀晶片列上（2026-11 使用者截圖）。對照 bot 對話頁的 `.bot-head`（grid，額度在第二列）。 */
 @media (width <= 640px) {

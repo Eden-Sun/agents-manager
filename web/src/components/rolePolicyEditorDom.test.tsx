@@ -20,7 +20,7 @@ after(async () => {
 })
 
 const expert = (role_policy: Project['role_policy'] = {}) =>
-  ({ id: 'p1', label: 'proj', path: '/p1', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', executor_pool: [], role_policy }) as unknown as Project
+  ({ id: 'p1', label: 'proj', path: '/p1', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', role_policy }) as unknown as Project
 
 const card = (label: string) => document.querySelector<HTMLElement>(`.role-policy-editor section[aria-label="${label}"]`)!
 const pill = (root: ParentNode, label: string) => [...root.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find((b) => b.textContent?.trim() === label)!

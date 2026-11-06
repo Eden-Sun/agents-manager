@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
-import { ExecutorPoolEditor } from './ExecutorPoolEditor'
 import { ProjectDeputyEditor } from './ProjectDeputyEditor'
 import { ProjectSpecialistDispatchEditor } from './ProjectSpecialistDispatchEditor'
 import { RolePolicyEditor } from './RolePolicyEditor'
@@ -15,7 +14,7 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   const patchProject = useStore((s) => s.patchProject)
   const [manager, setManager] = useState('')
   const [modeDraft, setModeDraft] = useState<'expert' | 'parent_child' | null>(null)
-  // 執行者池、副管理者、角色設定合併成一顆儲存：一次 PATCH 送出有變更的區塊。
+  // 副管理者與角色設定合併成一顆儲存：一次 PATCH 送出有變更的區塊。
   const group = useProjectSaveGroup((patch) => patchProject(projectId, patch))
 
   if (!project) return null
@@ -68,7 +67,6 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
 
         {isExpert ? (
           <SaveGroupProvider value={group.value}>
-            <ExecutorPoolEditor project={project} bots={bots} />
             <ProjectDeputyEditor project={project} bots={bots} />
             <ProjectSpecialistDispatchEditor project={project} />
             <RolePolicyEditor project={project} />

@@ -1214,7 +1214,7 @@ function useContextReading(botId: string, status: StatusInfo | null, text: strin
     return effectiveModelOf(r?.runtime_model, s.bots.find((b) => b.id === botId)?.model)
   })
   const runPromptCache = useStore((s) => s.runs[botId]?.prompt_cache ?? null)
-  // 設了自動壓縮門檻（角色／覆寫／池條目）：分母改用門檻，模型視窗放 tooltip（2026-11-01 使用者：「怎麼還是 /1M」）。
+  // 設了自動壓縮門檻（角色／覆寫）：分母改用門檻，模型視窗放 tooltip（2026-11-01 使用者：「怎麼還是 /1M」）。
   const threshold = useStore((s) => {
     const b = s.bots.find((x) => x.id === botId)
     return compactThreshold(b, b ? s.projects.find((p) => p.id === b.project_id) : undefined)

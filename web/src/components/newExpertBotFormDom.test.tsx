@@ -3,7 +3,7 @@
  * - 一般模式不變
  * - 專家模式角色必選
  * - 專家缺 track 不能送
- * - 執行者選池條目鎖欄位
+ * - 執行者提供依最新可用模型產生的建議預設
  * - 已有管理者灰掉
  * - 分享區隱藏
  */
@@ -11,20 +11,19 @@ import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
 import { useStore } from '../store/store'
-import type { Bot, ExecutorPoolEntry, Project } from '../api/types'
+import type { Bot, Project } from '../api/types'
 import { Sidebar } from './Sidebar'
 
 afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-const project = (id: string, mode: 'parent_child' | 'expert' = 'parent_child', executor_pool: ExecutorPoolEntry[] = []): Project => ({
+const project = (id: string, mode: 'parent_child' | 'expert' = 'parent_child'): Project => ({
   id,
   label: `proj-${id}`,
   path: `/${id}`,
   host: 'local',
   mode,
-  executor_pool,
   workspace_id: null,
   github: null,
   created_at: '',
@@ -195,15 +194,24 @@ test('專家模式：選專家時出現必填 track 欄位，沒填不能送出�
   assert.equal(patchBody.manager_use, true)
 })
 
-test('專家模式：選執行者時列出池條目，選條目鎖定 kind、model、effort', async () => {
-  const pool: ExecutorPoolEntry[] = [
-    { id: 'codex-pool-1', kind: 'codex', model: 'gpt-6-luna', effort: 'xhigh', context_tokens: 256000, count: 2 },
-  ]
+test('專家模式：執行者依模型清單建議最新 Haiku，kind、model、effort 仍可自訂', async () => {
   useStore.setState({
-    projects: [project('p-expert', 'expert', pool)],
+    projects: [project('p-expert', 'expert')],
     bots: [],
     selectedProjectId: 'p-expert',
     selectedBotId: null,
+    models: {
+      'claude@local@': [
+        {
+          id: 'claude-haiku-5-4', display_name: 'Claude Haiku 5.4', description: '', is_default: false,
+          default_effort: 'medium', account_default_effort: 'high', efforts: ['low', 'medium'], service_tiers: [],
+        },
+        {
+          id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5', description: '', is_default: false,
+          default_effort: 'medium', account_default_effort: 'high', efforts: ['low', 'medium'], service_tiers: [],
+        },
+      ],
+    },
   } as never)
 
   await openAddBot()
@@ -212,25 +220,23 @@ test('專家模式：選執行者時列出池條目，選條目鎖定 kind、mod
   await click(execCard)
   await settle()
 
-  // 應預選 pool 條目且鎖定 kind / model
-  const poolEntryOpt = [...document.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.includes('codex · gpt-6-luna'))
-  assert.ok(poolEntryOpt, '應列出執行者池條目')
-  assert.equal(poolEntryOpt.getAttribute('aria-checked'), 'true', '池條目應被預選')
+  assert.match(document.querySelector('.field-note')?.textContent ?? '', /Claude Haiku \(low\)/)
+  const modelGroup = document.querySelector('[role="radiogroup"][aria-label="模型"]')!
+  const modelBtns = [...modelGroup.querySelectorAll<HTMLButtonElement>('.opt')]
+  const latest = modelBtns.find((b) => b.title?.includes('claude-haiku-5-5'))!
+  assert.equal(latest.getAttribute('aria-checked'), 'true', '要預選模型清單中版本最新的 Haiku')
+  assert.equal(latest.disabled, false, '模型仍可由使用者調整')
 
-  // kind 按鈕應被 disabled
-  const kindBtns = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')]
-  for (const b of kindBtns) {
-    assert.equal(b.disabled, true, '選中池條目時 kind 按鈕應 disabled')
-  }
+  const codexBtn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.trim() === 'codex')!
+  assert.equal(codexBtn.disabled, false, 'kind 仍可由使用者調整')
 
-  // 切換到「自訂」
-  const customOpt = [...document.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.trim() === '自訂')!
-  await click(customOpt)
+  const effortGroup = document.querySelector('[role="radiogroup"][aria-label="強度"]')!
+  const lowBtn = [...effortGroup.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.includes('L'))!
+  const mediumBtn = [...effortGroup.querySelectorAll<HTMLButtonElement>('.opt')].find((b) => b.textContent?.includes('M'))!
+  assert.equal(lowBtn.getAttribute('aria-checked'), 'true', '預設強度應依執行者建議選 low')
+  await click(mediumBtn)
   await settle()
-
-  // kind 按鈕不再被 disabled
-  const claudeBtn = kindBtns.find((b) => b.textContent?.trim() === 'claude')!
-  assert.equal(claudeBtn.disabled, false, '切到自訂後 kind 按鈕可點選')
+  assert.equal(mediumBtn.getAttribute('aria-checked'), 'true', '強度仍可由使用者調整')
 })
 
 test('專家模式：管理者角色不顯示「可被管理者使用」勾選', async () => {

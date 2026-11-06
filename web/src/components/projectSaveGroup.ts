@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { PatchProjectInput } from '../api/types'
 
 /**
- * 專案設定的「一顆儲存」（2026-11-01 使用者：執行者池、副管理者、角色設定三顆儲存合成一顆）。
+ * 專案設定的「一顆儲存」（2026-11-01 使用者：副管理者與角色設定共用一顆儲存）。
  * 各區塊把草稿登記進來（dirty／valid＋取 patch 與清草稿的函式），底部儲存列合併成一次 PATCH。
  * 不在群組裡（單獨掛載、測試）時，各區塊照舊用自己的儲存鈕。
  */
