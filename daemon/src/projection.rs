@@ -397,7 +397,7 @@ where
             move |cfg| {
                 let snapshot = cfg.clone();
                 let out = f(cfg)?;
-                for p in &mut cfg.projects { p.clear_invalid_deputy(); }
+                for p in &mut cfg.projects { p.clear_invalid_deputy(); p.clear_invalid_grants(); }
                 Ok((snapshot, out))
             },
             |next| {
@@ -555,12 +555,13 @@ async fn project_inner(
         let pid = p.id.clone().unwrap();
         let executor_pool_json = serde_json::to_string(&p.executor_pool)?;
         let role_policy_json = serde_json::to_string(&p.role_policy)?;
+        let executor_grants_json = serde_json::to_string(&p.executor_grants)?;
         sqlx::query(
-            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, executor_pool_json, role_policy_json, deputy_bot_id, deputy_after_sec, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, handed_off_to, mode, executor_pool_json, role_policy_json, deputy_bot_id, deputy_after_sec, executor_grants_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
                host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, mode=excluded.mode,
                executor_pool_json=excluded.executor_pool_json, role_policy_json=excluded.role_policy_json,
-               deputy_bot_id=excluded.deputy_bot_id, deputy_after_sec=excluded.deputy_after_sec, deleted_at=NULL",
+               deputy_bot_id=excluded.deputy_bot_id, deputy_after_sec=excluded.deputy_after_sec, executor_grants_json=excluded.executor_grants_json, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
@@ -574,6 +575,7 @@ async fn project_inner(
         .bind(&role_policy_json)
         .bind(p.deputy.as_ref().map(|d| d.bot_id.as_str()))
         .bind(p.deputy.as_ref().map(|d| d.after_sec as i64))
+        .bind(&executor_grants_json)
         .bind(&now)
         .execute(&mut *tx)
         .await?;
@@ -974,7 +976,7 @@ mod tests {
             }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
-            crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+            crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                 id: id.map(str::to_string),
                 path: "/tmp".into(),
                 label: label.into(),
@@ -1628,7 +1630,7 @@ mod tests {
         assert!(validate(&cfg).is_err(), "身份 args 也不可把 NUL 帶進啟動 argv");
 
         cfg.identities.clear();
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
             id: Some("p1".into()),
             path: "/tmp".into(),
             label: "demo".into(),

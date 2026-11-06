@@ -590,6 +590,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (80, "f2044f7ae8a9f49a"),
     // 專家模式群集派工（2026-11）：`relay_requests.cluster`（ALTER ADD）。
     (81, "791ac96276182d69"),
+    // 專家模式執行者授權（2026-11-06）：`projects.executor_grants_json`（ALTER ADD）。
+    (82, "c16167decdd32a1d"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -879,6 +881,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("relay_requests", "digest_at", "ALTER TABLE relay_requests ADD COLUMN digest_at TEXT"),
         // 專家模式群集派工：請求是對哪個群集發的（NULL＝一般派工）；沒有閒置成員時 pending 等第一個閒下來的成員。
         ("relay_requests", "cluster", "ALTER TABLE relay_requests ADD COLUMN cluster TEXT"),
+        // 專家模式執行者授權：`ProjectCfg.executor_grants` 的投影（JSON 陣列）。
+        ("projects", "executor_grants_json", "ALTER TABLE projects ADD COLUMN executor_grants_json TEXT NOT NULL DEFAULT '[]'"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -1427,6 +1431,13 @@ pub struct Project {
     pub deputy_bot_id: Option<String>,
     #[serde(default)]
     pub deputy_after_sec: Option<i64>,
+    /// 專家模式執行者授權（`ProjectCfg.executor_grants` 的投影，JSON 陣列）。
+    #[serde(default = "default_empty_json_array")]
+    pub executor_grants_json: String,
+}
+
+fn default_empty_json_array() -> String {
+    "[]".into()
 }
 
 fn default_empty_json_object() -> String {
@@ -1445,6 +1456,11 @@ impl Project {
 
     pub fn role_policy(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
         serde_json::from_str(&self.role_policy_json).unwrap_or_default()
+    }
+
+    /// 專家模式執行者授權；壞掉的 JSON 當沒有授權。
+    pub fn executor_grants(&self) -> Vec<am_config::ExecutorGrant> {
+        serde_json::from_str(&self.executor_grants_json).unwrap_or_default()
     }
 }
 

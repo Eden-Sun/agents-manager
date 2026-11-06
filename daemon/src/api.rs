@@ -258,6 +258,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
+        // 專家模式執行者授權（整組取代；User 或該專案前台 manager，見 `executor_grants.rs`）。
+        .route("/projects/{id}/executor-grants", axum::routing::put(crate::executor_grants::put_http))
         // §6.5e：非 agent 的 shell／服務 pane。
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
@@ -1841,6 +1843,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
         }));
+        // 專家模式執行者授權（json! 巨集已到遞迴上限，所以在外面補）。
+        if let Some(last) = out.last_mut() { last["executor_grants"] = json!(p.executor_grants()); }
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
@@ -1893,7 +1897,7 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
 /// 閘門擋下來時 config.toml **沒有**被動過，`config_written: false`：呼叫端改一下再送同一個請求就好，
 /// 不必先去 config.toml 補列（跟啟動投影／背景重投那類沒有伴隨 mutation 的 `project_config` 呼叫端不同，
 /// 那些仍是 `config_written: true`，見 `projection::guard_removals`）。
-fn projection_err(e: anyhow::Error) -> LcError {
+pub(crate) fn projection_err(e: anyhow::Error) -> LcError {
     match e.downcast_ref::<crate::projection::ProjectionRefused>() {
         Some(r) => LcError::conflict(
             "projection_refused",
@@ -2229,7 +2233,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
             anyhow::bail!("duplicate");
         }
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
             handed_off_to: None,
             id: Some(id.clone()),
             path: path.clone(),
@@ -5301,7 +5305,7 @@ mod identity_auth_error_tests {
             .unwrap();
         // 這台上放一個活著的專案。
         crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                 handed_off_to: None,
                 id: Some("01PROJZZ92".into()),
                 path: "/srv/work".into(),
@@ -5499,7 +5503,7 @@ mod identity_auth_error_tests {
                     herdr_session: "agents-manager".into(),
                     remote_path: String::new(),
                 });
-                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     id: Some("01CONFIGRACE".into()),
                     path: "/tmp/xreview-host-config-race".into(),
                     label: "config race".into(),
@@ -6009,7 +6013,7 @@ mod project_tests {
         // `testing::env` only seeds the db row; the rename edits config.toml.
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: e.repo.to_string_lossy().to_string(),
@@ -6135,7 +6139,7 @@ mod project_tests {
         let path = e.repo.to_string_lossy().to_string();
         app.cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     id: Some(pid.clone()),
                     path,
                     label: "proj".into(),
@@ -6190,7 +6194,7 @@ mod project_tests {
         // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: repo.clone(),
@@ -6702,7 +6706,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -6732,7 +6736,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer2", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -9588,7 +9592,7 @@ mod delete_bot_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(pid),
                     path: repo,
@@ -13549,7 +13553,7 @@ mod per_principal_auth_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                     handed_off_to: None,
                     id: Some(project_id),
                     path: repo,
@@ -15364,7 +15368,7 @@ mod per_principal_auth_tests {
             .update(move |cfg| {
                 let mut bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted2}'\nname = 'AGM'\nkind = 'claude'\n")).unwrap();
                 bot.persona = Some("我是普通 bot".into());
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -15383,7 +15387,7 @@ mod per_principal_auth_tests {
         app.cfg
             .update(move |cfg| {
                 let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted_resp2}'\nname = 'AGM-responder'\nkind = 'claude'\n")).unwrap();
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -16222,7 +16226,7 @@ mod caller_audit_tests {
                     toml::from_str(&format!("id = '{bid}'\nname = '{bname}'\nkind = 'claude'\n")).unwrap();
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(entry),
-                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None,
+                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
                         handed_off_to: None,
                         id: Some(pid),
                         path: repo,
@@ -18331,7 +18335,7 @@ mod manager_role_scope_tests {
         let env = crate::testing::env().await;
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18360,7 +18364,7 @@ mod expert_member_tests {
     async fn seed(env: &crate::testing::Env) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
     }
@@ -18555,7 +18559,7 @@ mod specialist_role_tests {
     async fn expert_project(env: &crate::testing::Env) -> (String, String) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18691,7 +18695,7 @@ mod runtime_policy_api_tests {
     async fn project_with_bot(env: &crate::testing::Env, kind: &str, model: &str) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let res = create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(json!({"name": "rp-bot", "kind": kind, "model": model})).unwrap())).await.unwrap();
@@ -18756,7 +18760,7 @@ mod hire_fork_api_tests {
     async fn expert_project(env: &crate::testing::Env) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let manager = add_bot(env, &env.project_id, "claude", false).await;
