@@ -906,8 +906,9 @@ pub struct ClaudeApiCfg {
 /// 一個用途的設定。沒寫的欄位用 [`CLAUDE_API_USES`] 上的預設；`enabled` 預設關。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeApiUseCfg {
-    #[serde(default)]
-    pub enabled: bool,
+    /// 沒寫＝用該用途的預設（只改 `auto` 時不能順手把啟用關掉）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -915,6 +916,9 @@ pub struct ClaudeApiUseCfg {
     /// 一小時內最多送幾次（保險絲）；0＝用預設。
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_per_hour: u32,
+    /// 「自動」開關（目前只有 `message_translate`：英文訊息自動翻譯，使用者 2026-11-06）。沒寫＝用 [`ClaudeApiUseDef::auto_default`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<bool>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -934,15 +938,18 @@ pub struct ClaudeApiUseDef {
     /// 設定檔沒寫這個用途時的開關（仍受 `[claude_api] enabled` 總開關管）。使用者每次都要親手按的用途（訊息翻譯）預設開，
     /// 背景自動跑的預設關（使用者 2026-11-04：按了翻譯卻回 not_configured）。
     pub default_on: bool,
+    /// 這個用途有「自動」開關時的預設值；`None`＝這個用途沒有自動開關。
+    /// 訊息翻譯預設自動開（使用者 2026-11-06：英文訊息自動翻，不用手動按）。
+    pub auto_default: Option<bool>,
 }
 
 /// 已知用途。要加用途就加一行，設定頁、PUT 驗證、保險絲與帳本都從這張表走。
 /// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
-    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false },
-    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None, default_on: false },
-    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true },
-    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false },
+    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None, default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: Some(true) },
+    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false, auto_default: None },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5"];
@@ -990,6 +997,8 @@ pub struct ClaudeApiUseState {
     pub model: String,
     pub effort: String,
     pub max_per_hour: u32,
+    /// 自動開關的生效值；沒有自動開關的用途是 `None`。
+    pub auto: Option<bool>,
 }
 
 impl ClaudeApiCfg {
@@ -1002,7 +1011,7 @@ impl ClaudeApiCfg {
     pub fn use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
         let def = CLAUDE_API_USES.iter().find(|d| d.id == id)?;
         let written = self.uses.get(id).cloned();
-        let enabled = written.as_ref().map_or(def.default_on, |c| c.enabled);
+        let enabled = written.as_ref().and_then(|c| c.enabled).unwrap_or(def.default_on);
         let cfg = written.unwrap_or_default();
         let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
         Some(ClaudeApiUseState {
@@ -1010,6 +1019,7 @@ impl ClaudeApiCfg {
             model: pick(&cfg.model, def.model),
             effort: pick(&cfg.effort, def.effort),
             max_per_hour: if cfg.max_per_hour == 0 { def.max_per_hour } else { cfg.max_per_hour },
+            auto: def.auto_default.map(|d| cfg.auto.unwrap_or(d)),
         })
     }
 }
@@ -1020,7 +1030,7 @@ impl ConfigFile {
         match id {
             "changelog_translate" => {
                 let t = &self.changelog_translate;
-                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour })
+                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None })
             }
             _ => self.claude_api.use_state(id),
         }
@@ -2920,6 +2930,16 @@ mod supervisor_cfg_tests {
         assert!(none.claude_api.use_state("message_translate").unwrap().enabled);
         let off: ConfigFile = toml::from_str("[claude_api.uses.message_translate]\nenabled = false\n").unwrap();
         assert!(!off.claude_api.use_state("message_translate").unwrap().enabled);
+        // 自動翻譯英文訊息（使用者 2026-11-06）：訊息翻譯預設自動開，可明寫關掉；沒有自動開關的用途是 None；寫了會原樣存回。
+        assert_eq!(none.claude_api.use_state("message_translate").unwrap().auto, Some(true));
+        assert_eq!(none.claude_api.use_state("changelog_review").unwrap().auto, None);
+        assert_eq!(none.claude_use_state("changelog_translate").unwrap().auto, None);
+        let no_auto: ConfigFile = toml::from_str("[claude_api.uses.message_translate]\nauto = false\n").unwrap();
+        assert_eq!(no_auto.claude_api.use_state("message_translate").unwrap().auto, Some(false));
+        assert!(no_auto.claude_api.use_state("message_translate").unwrap().enabled, "只寫 auto 不影響啟用預設");
+        let back_auto: ConfigFile = toml::from_str(&toml::to_string_pretty(&no_auto).unwrap()).unwrap();
+        assert_eq!(no_auto, back_auto);
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("auto"), "沒寫就不吐出來");
         let on: ConfigFile = toml::from_str("[claude_api]\nenabled = true\n[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
         let s = on.claude_api.use_state("changelog_review").unwrap();
         assert_eq!((s.enabled, s.model.as_str()), (true, "claude-sonnet-5-5"));

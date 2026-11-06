@@ -1403,7 +1403,7 @@ mod tests {
             .update(move |c| {
                 c.claude_api.enabled = true;
                 c.claude_api.key_file = key;
-                c.claude_api.uses.insert("changelog_review".into(), crate::config::ClaudeApiUseCfg { enabled: true, ..Default::default() });
+                c.claude_api.uses.insert("changelog_review".into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), ..Default::default() });
                 Ok(())
             })
             .await

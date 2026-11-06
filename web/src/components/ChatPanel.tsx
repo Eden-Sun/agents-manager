@@ -88,7 +88,7 @@ import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { JevNoticeText } from './JevNoticeText'
 import { SafeMarkdown } from './SafeMarkdown'
-import { useMessageTranslation } from './useMessageTranslation'
+import { AUTO_TRANSLATE_RECENT, useMessageTranslation } from './useMessageTranslation'
 import { TerminalTab } from './TerminalTab'
 import { ApiBotUsageBar } from './ApiBotUsageBar'
 import { ApiBalanceInline } from './ApiBalanceInline'
@@ -175,6 +175,8 @@ interface BubbleProps {
   /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
   expandRelay?: boolean
+  /** 在對話最後 N 則內：英文訊息才會被自動翻譯（`useMessageTranslation`）。 */
+  recent?: boolean
 }
 
 /** 一則訊息。claude 的提問與使用者的回答（`ask:` 系統訊息）畫成「Claude 問／你答」卡，其餘照一般泡泡。 */
@@ -193,6 +195,7 @@ const PlainBubble = memo(function PlainBubble({
   kind,
   flash,
   expandRelay,
+  recent,
 }: BubbleProps) {
   const t = useT()
   const fallback = msg.source === 'terminal_fallback'
@@ -210,7 +213,7 @@ const PlainBubble = memo(function PlainBubble({
   )
   // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
-  const translation = useMessageTranslation(msg)
+  const translation = useMessageTranslation(msg, { recent })
   const [expanded, setExpanded] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
@@ -705,6 +708,7 @@ function MessageList({ botId }: { botId: string }) {
   const turnId = phone
     ? (!working && !inFlight && completedAnswered ? latestCompletedTurnId : null)
     : inFlightTurnId
+  const recentIds = useMemo(() => new Set((messages ?? []).slice(-AUTO_TRANSLATE_RECENT).map((m) => m.id)), [messages])
   const ask = turnId ? lastAskOf(list, turnId) : null
   const lastAsk = ask && !childNotice(ask) ? ask : null
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
@@ -749,7 +753,7 @@ function MessageList({ botId }: { botId: string }) {
           {loaded ? t('在下方輸入框寫下第一則訊息。') : t('載入訊息中…')}
         </EmptyState>
       ) : (
-        <ChildNoticeMessages messages={list} renderMessage={(m, expanded) => <Bubble msg={m} flash={m.id === flashId} expandRelay={expanded} />}
+        <ChildNoticeMessages messages={list} renderMessage={(m, expanded) => <Bubble msg={m} flash={m.id === flashId} expandRelay={expanded} recent={recentIds.has(m.id)} />}
           liveReply={<LiveReplyBubble botId={botId} abandon />} />
       )}
       {list.length === 0 ? <LiveReplyBubble botId={botId} abandon /> : null}

@@ -3,7 +3,7 @@ import { fetchClaudeApiSettings, type ClaudeApiSettings } from '../api/claudeApi
 import { msg } from '../lib/i18n'
 
 /** 翻譯能不能用；`null`＝還沒讀到（或讀不到），照常顯示按鈕、按了由 daemon 判斷。 */
-export type TranslateReady = { ok: true } | { ok: false; reason: string } | null
+export type TranslateReady = { ok: true; auto: boolean } | { ok: false; reason: string } | null
 
 export function translateReadyOf(s: ClaudeApiSettings | null): TranslateReady {
   if (!s) return null
@@ -11,7 +11,8 @@ export function translateReadyOf(s: ClaudeApiSettings | null): TranslateReady {
   if (!s.key_present) return { ok: false, reason: msg('Claude API key 還沒設定：到「環境設定 → Claude API」設定') }
   const use = s.uses.find((u) => u.id === 'message_translate')
   if (use && !use.enabled) return { ok: false, reason: msg('「對話訊息翻譯」被關掉了：到「環境設定 → Claude API」打開') }
-  return { ok: true }
+  // 沒帶 auto 欄位（舊 daemon）＝不自動：自動翻譯會花錢，不確定就別動。
+  return { ok: true, auto: use?.auto === true }
 }
 
 // 整頁共用一次讀取：每則英文訊息都掛這個 hook，不能各自打 API。60 秒後再用到才重讀（設定頁改了開關能跟上）。

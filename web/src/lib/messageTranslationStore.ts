@@ -11,13 +11,19 @@ export type TranslationEntry =
 
 const IDLE: TranslationEntry = { status: 'idle' }
 const KEY = 'am.msgTranslate.want'
+/** 使用者手動點回原文的 msg id（自動翻譯不再翻回去；使用者 2026-11-06）。 */
+const DECLINED_KEY = 'am.msgTranslate.declined'
 export const MAX_REMEMBERED = 500
+/** 自動翻譯連續失敗幾次後，這次頁面生命週期內停手（超過花費上限、API 掛了時不轟炸）。 */
+export const AUTO_FAIL_LIMIT = 3
 
 const entries = new Map<string, TranslationEntry>()
 const listeners = new Set<() => void>()
 /** 這次頁面生命週期已自動試過的 id：失敗不一直重試。 */
 const autoTried = new Set<string>()
 let wanted: string[] | null = null
+let declined: string[] | null = null
+let autoFailures = 0
 
 function emit() {
   for (const l of listeners) l()
@@ -75,6 +81,42 @@ export function setWanted(id: string, on: boolean) {
   saveWanted(on ? [...rest, id].slice(-MAX_REMEMBERED) : rest)
 }
 
+function loadDeclined(): string[] {
+  if (declined) return declined
+  let list: string[] = []
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(DECLINED_KEY) ?? '[]')
+    if (Array.isArray(v)) list = v.filter((x): x is string => typeof x === 'string').slice(-MAX_REMEMBERED)
+  } catch {
+    /* localStorage 不可用或壞資料：當空 */
+  }
+  declined = list
+  return list
+}
+
+/** 這則使用者手動點回過原文：自動翻譯不再翻它。 */
+export function isDeclined(id: string): boolean {
+  return loadDeclined().includes(id)
+}
+
+/** 記住／取消記住「這則使用者要看原文」；新加的放最後，超過上限丟最舊的。 */
+export function setDeclined(id: string, on: boolean) {
+  const cur = loadDeclined()
+  if (on === cur.includes(id)) return
+  const next = on ? [...cur, id].slice(-MAX_REMEMBERED) : cur.filter((x) => x !== id)
+  declined = next
+  try {
+    localStorage.setItem(DECLINED_KEY, JSON.stringify(next))
+  } catch {
+    /* 不可用時只當次有效 */
+  }
+}
+
+/** 自動翻譯失敗一次（累計到上限就停手，直到重整頁面）。 */
+export function noteAutoFailure() {
+  autoFailures += 1
+}
+
 /** 第一次自動翻這則回 true（之後回 false）。 */
 export function claimAutoTranslate(id: string): boolean {
   if (autoTried.has(id)) return false
@@ -82,10 +124,17 @@ export function claimAutoTranslate(id: string): boolean {
   return true
 }
 
+/** 自動翻譯（新訊息）是否還該動作：連續失敗太多次就不動，要翻請手動按。 */
+export function autoTranslateAllowed(): boolean {
+  return autoFailures < AUTO_FAIL_LIMIT
+}
+
 /** 給測試：清掉記憶體狀態（localStorage 由測試自己清）。 */
 export function resetTranslationStore() {
   entries.clear()
   autoTried.clear()
   wanted = null
+  declined = null
+  autoFailures = 0
   emit()
 }
