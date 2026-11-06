@@ -83,7 +83,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { ExpertClusterRow } from './ExpertClusterRow'
 import { groupClusterItems } from '../lib/expertClusters'
-import { ExpertBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ManagerUseCheckbox } from './ExpertBadge'
+import { ExpertBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertGrantMark, ExpertRoleTag, ExpertSectionHeader, ManagerUseCheckbox } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
@@ -195,6 +195,12 @@ function BotRowImpl({
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const project = useStore((s) => s.projects.find((p) => p.id === bot?.project_id))
   const isExpertProject = project?.mode === 'expert'
+  // 執行者授權：被授權給哪位專家（名稱旁小字）；selector 回字串，別的 bot 變動不重畫。
+  const grantedTo = useStore((s) => {
+    if (!isExpertProject || bot?.role !== 'executor') return null
+    const g = project?.executor_grants?.find((x) => x.executor === botId)
+    return g ? (s.bots.find((b) => b.id === g.specialist)?.name ?? null) : null
+  })
   const run = useStore((s) => s.runs[botId] ?? null)
   // 主力按了「不用保溫」（冰凍）：列名旁畫雪花（SPEC §6.5k）。
   const frozen = bot?.primary === true && run?.keep_warm_skip === true
@@ -459,6 +465,7 @@ function BotRowImpl({
             {/* 分段標題已經寫了角色，列上不再重複小標；只有「待套用」時留著（黃點是要重啟的訊號）。 */}
             {isExpertProject && !compact && bot.role_pending ? <ExpertRoleTag role={bot.role} rolePending /> : null}
             {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
+            {grantedTo ? <ExpertGrantMark specialistName={grantedTo} /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
