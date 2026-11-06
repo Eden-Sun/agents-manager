@@ -4,28 +4,65 @@
 //! `projects.executor_grants_json` 只是投影。派工時的核對在 `relay_policy::granted`；不合格的授權由
 //! `ProjectCfg::clear_invalid_grants` 在每次投影（含啟動、正式刪除）時清掉。授權只涵蓋派工，不給 start／restart／hire／stop／改角色／再授權。
 //!
-//! 撤銷與派工的序列化邊界（Astra review #1）：專家模式專案內部的派工從「核對授權」到「建好 turn（排隊或已認領）」
-//! 全程拿著 [`GATE`] 的讀鎖（[`dispatch_gate`]）；PUT 拿寫鎖改設定，並在放開前把已經排隊、送件者已失去授權的 turn
-//! 用 CAS 撤回（[`withdraw_revoked`]）。flush 認領前也會重驗（`relay_requests::queue_denial`），跟撤回搶同一個 queued→
-//! 狀態轉換，只會有一邊成功：認領成功＝已開始，不中止；撤回成功＝不送。
-use std::sync::{Arc, LazyLock};
+//! 撤銷與派工的序列化邊界（Astra review #1、review2 #3）：每個專案一把閘門（[`gate`]）。專家模式專案內部的派工從「核對授權」
+//! 到「建好 turn（排隊或已認領）」全程拿著那個專案的讀鎖（[`dispatch_gate`]）。**所有**可能讓授權失效的 config 變更
+//! （授權 PUT、改角色／track、刪除、離開 expert…）都走 `projection::update_and_project`／`delete_from_config`，它們在拿
+//! PROJECTION 鎖**之前**先拿「目前有授權的專案」的寫鎖（[`revocation_gates`]）、握到投影寫完為止；鎖順序固定為
+//! 閘門（依專案 id 排序）→ PROJECTION，投影鎖內不再反向拿閘門。等待有上限（[`GATE_WAIT`]）：呼叫端若握著派工要等的
+//! per-bot 鎖（例如刪除），逾時就照常寫入、記 warn，改由送達前重驗兜底。撤銷寫入之後，排隊中的派工在 flush 認領前
+//! 重驗（`relay_requests::queue_denial`），PUT 另外當場收回（[`withdraw_revoked`]）；兩者都跟認領搶同一個 queued→ 轉換，
+//! 認領成功＝已開始，不中止；撤回成功＝不送。
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 use axum::{extract::{Path, State}, http::HeaderMap, Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::{api::RequestPrincipal, config::ExecutorGrant, db, lifecycle::LcError, state::App};
 
-/// 授權派工與撤銷之間的閘門：派工拿讀鎖（彼此不互斥），撤銷拿寫鎖。
-static GATE: LazyLock<tokio::sync::RwLock<()>> = LazyLock::new(|| tokio::sync::RwLock::new(()));
+/// 撤銷端等派工讓出閘門的上限。
+pub(crate) const GATE_WAIT: Duration = Duration::from_secs(5);
 
-/// 這一對派工會不會受授權影響：目標與送件者都在同一個 expert 專案（跨專案、一般專案的派工不靠授權）。查不到時當作會（fail closed）。
-pub(crate) async fn expert_internal(app: &Arc<App>, from: &str, to: &str) -> bool {
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM bots f JOIN bots t ON t.project_id=f.project_id JOIN projects p ON p.id=t.project_id WHERE f.id=? AND t.id=? AND p.mode='expert')")
-        .bind(from).bind(to).fetch_one(&app.db).await.unwrap_or(true)
+static GATES: LazyLock<Mutex<HashMap<String, Arc<RwLock<()>>>>> = LazyLock::new(Default::default);
+
+/// 專案的授權閘門（派工讀、撤銷寫）。
+fn gate(project_id: &str) -> Arc<RwLock<()>> {
+    GATES.lock().unwrap_or_else(|e| e.into_inner()).entry(project_id.to_string()).or_default().clone()
+}
+
+/// 這一對派工會不會受授權影響：目標與送件者都在同一個 expert 專案時回那個專案 id（跨專案、一般專案的派工不靠授權）。
+/// 查不到時當作會（fail closed），回空字串當鍵。
+pub(crate) async fn expert_internal(app: &Arc<App>, from: &str, to: &str) -> Option<String> {
+    match sqlx::query_scalar::<_, String>("SELECT p.id FROM bots f JOIN bots t ON t.project_id=f.project_id JOIN projects p ON p.id=t.project_id WHERE f.id=? AND t.id=? AND p.mode='expert'")
+        .bind(from).bind(to).fetch_optional(&app.db).await {
+        Ok(pid) => pid,
+        Err(_) => Some(String::new()),
+    }
 }
 
 /// 派工路徑在「核對授權」之前拿，握到 turn 建好（排隊或已認領）為止；跟授權無關的派工回 `None`、不排隊等鎖。
-pub(crate) async fn dispatch_gate(app: &Arc<App>, from: &str, to: &str) -> Option<tokio::sync::RwLockReadGuard<'static, ()>> {
-    if expert_internal(app, from, to).await { Some(GATE.read().await) } else { None }
+pub(crate) async fn dispatch_gate(app: &Arc<App>, from: &str, to: &str) -> Option<OwnedRwLockReadGuard<()>> {
+    let pid = expert_internal(app, from, to).await?;
+    Some(gate(&pid).read_owned().await)
+}
+
+/// 投影（任何 config 變更）前拿：目前在 DB 上有授權的 expert 專案的寫鎖，依專案 id 排序、總等待不超過 [`GATE_WAIT`]。
+/// 只有已經有授權的專案會因這次變更失去授權，其他專案不擋。拿不到的記 warn、照常寫入（不死鎖）。
+pub(crate) async fn revocation_gates(pool: &sqlx::SqlitePool) -> Vec<OwnedRwLockWriteGuard<()>> {
+    let ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM projects WHERE deleted_at IS NULL AND mode='expert' AND executor_grants_json NOT IN ('','[]') ORDER BY id").fetch_all(pool).await {
+        Ok(ids) => ids,
+        Err(e) => { tracing::warn!(error = ?e, "讀不到有授權的專案：這次 config 變更不等授權派工的閘門"); return Vec::new() }
+    };
+    let deadline = tokio::time::Instant::now() + GATE_WAIT;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        match tokio::time::timeout_at(deadline, gate(&id).write_owned()).await {
+            Ok(g) => out.push(g),
+            Err(_) => tracing::warn!(project_id = %id, "等授權派工讓出閘門逾時：照常寫入，排隊的派工由送達前重驗擋下"),
+        }
+    }
+    out
 }
 
 /// 授權組的版本（樂觀鎖，Astra review #5）：授權內容的 sha256 前 16 個 hex。GET（`/api/state`）與 PUT 回應都帶，PUT 帶舊值回 409。
@@ -123,8 +160,7 @@ pub(crate) async fn put_http(
     let inputs: Vec<(String, String)> = b.grants.iter().map(|g| (g.specialist.trim().to_string(), g.executor.trim().to_string())).collect();
     let now = db::now();
     let pid = id.clone();
-    // 寫鎖：等手上正在「核對→建 turn」的授權派工做完；放開前把排隊中、已失去授權的 turn 撤回。
-    let _gate = GATE.write().await;
+    // 授權閘門的寫鎖由 update_and_project 在拿 PROJECTION 之前取得（所有 config 變更共用同一條序列化，見模組說明）。
     #[cfg(test)]
     crate::lifecycle::race_point::hit("executor_grants_put_locked", &id).await;
     let out = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -155,28 +191,27 @@ pub(crate) async fn put_http(
     let grants = db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|p| p.executor_grants()).unwrap_or_default();
     let revoked: Vec<ExecutorGrant> = before.into_iter().filter(|g| !grants.iter().any(|n| n.specialist == g.specialist && n.executor == g.executor)).collect();
     withdraw_revoked(&app, &revoked).await;
-    drop(_gate);
     tracing::info!(project_id = %id, grants = grants.len(), revoked = revoked.len(), http = %crate::config_audit::http_caller(), "executor grants replaced");
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok(Json(json!({"grants": grants, "revision": revision(&grants)})))
 }
 
-/// 撤銷後把「已排隊、還沒認領」且送件者是被撤專家、目標是被撤執行者的 turn 收回（CAS：被 flush 先認領的就算已開始，不中止）。
-/// 帶 `relay_requests` 的會一併標 failed（由 reconcile 通知送件者）；其他的另送一則 daemon 通知給送件者。
+/// 撤銷後把「已排隊、還沒認領」且送件者是被撤專家、目標是被撤執行者的派工 turn（`queue_class='relay'`）收回：
+/// 撤回 CAS 與請求狀態同一交易（`relay_requests::withdraw_turn`），被 flush 先認領的就算已開始，不中止、不標失敗。
 pub(crate) async fn withdraw_revoked(app: &Arc<App>, revoked: &[ExecutorGrant]) {
     for g in revoked {
-        let turns: Vec<String> = match sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='queued' AND EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from=?) ORDER BY t.created_at")
+        let turns: Vec<String> = match sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='queued' AND t.queue_class='relay' AND EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='user' AND m.relay_from=?) ORDER BY t.created_at")
             .bind(&g.executor).bind(&g.specialist).fetch_all(&app.db).await {
             Ok(t) => t,
             Err(e) => { tracing::warn!(error = ?e, executor = %g.executor, "撤銷授權：查排隊中的派工失敗；送達時仍會重驗"); continue; }
         };
         for turn in turns {
-            let why = match crate::runners::relay_requests::queue_denial(app, &turn).await {
-                Ok(Some(why)) => why,
+            let d = match crate::runners::relay_requests::denial(app, &turn).await {
+                Ok(Some(d)) => d,
                 Ok(None) => continue,
                 Err(e) => { tracing::warn!(error = ?e, turn = %turn, "撤銷授權：重驗排隊中的派工失敗；送達時仍會重驗"); continue; }
             };
-            match crate::lifecycle::revoke_queued_turn(app, &turn, &why).await {
+            match crate::runners::relay_requests::withdraw_turn(app, &turn, &d).await {
                 Ok(true) => tracing::info!(turn = %turn, specialist = %g.specialist, executor = %g.executor, "撤銷授權：收回排隊中的派工"),
                 Ok(false) => {}
                 Err(e) => tracing::warn!(error = ?e, turn = %turn, "撤銷授權：收回排隊中的派工失敗；送達時仍會重驗"),
@@ -363,11 +398,16 @@ mod tests {
     }
 
     async fn queued_turn_from(fx: &Fx, from: &db::Bot, to: &db::Bot, crid: &str, status: &str) -> String {
+        queued_turn_class(fx, from, to, crid, status, "relay").await
+    }
+
+    /// 跟 daemon 建 turn 一樣寫 `queue_class`（bot 派工＝relay、daemon 結果通知＝daemon）。
+    async fn queued_turn_class(fx: &Fx, from: &db::Bot, to: &db::Bot, crid: &str, status: &str, class: &str) -> String {
         let app = &fx.env.app;
         let conv = db::conversation_id(&app.db, &to.id).await.unwrap();
         let turn = db::ulid();
-        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,created_at) VALUES(?,?,'web',?,'pending',?,?)")
-            .bind(&turn).bind(&conv).bind(status).bind(crid).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at) VALUES(?,?,'web',?,'pending',?,?,?)")
+            .bind(&turn).bind(&conv).bind(status).bind(crid).bind(class).bind(db::now()).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES(?,?,?,'user','do it','web',?,?)")
             .bind(db::ulid()).bind(&conv).bind(&turn).bind(&from.id).bind(db::now()).execute(&app.db).await.unwrap();
         turn
@@ -397,8 +437,8 @@ mod tests {
         put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
         let later = queued_turn_from(&fx, &fx.spec, &fx.exec, "plain-q2", "queued").await;
         set_role(&fx.env, &fx.spec, "specialist", Some("api")).await;
-        let why = crate::runners::relay_requests::queue_denial(app, &later).await.unwrap().expect("track 變了：送達前擋下");
-        assert!(crate::lifecycle::revoke_queued_turn(app, &later, &why).await.unwrap());
+        assert!(crate::runners::relay_requests::queue_denial(app, &later).await.unwrap().is_some(), "track 變了：送達前擋下");
+        assert_eq!(turn_status(&fx, &later).await, "failed", "queue_denial 當場撤回");
         // manager 的排隊派工照舊不受影響。
         let from_mgr = queued_turn_from(&fx, &fx.manager, &fx.exec, "mgr-q", "queued").await;
         assert_eq!(crate::runners::relay_requests::queue_denial(app, &from_mgr).await.unwrap(), None);
@@ -552,27 +592,142 @@ mod tests {
         assert!(matches!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "member_disabled"));
     }
 
-    /// B 的專家群集派工：排隊中的群集 turn 撤銷時一樣收回；還沒認領成員的 pending 群集請求，下一輪 reconcile 標 failed、不改派。
+    /// 兩顆執行者設成同一組（kind, model）成群集，回群集名稱（config 為真相，之後的投影不會把 model 洗掉）。
+    async fn make_cluster(fx: &Fx) -> String {
+        let ids = [fx.exec.id.clone(), fx.exec2.id.clone()];
+        crate::projection::update_and_project(&fx.env.app.cfg, &fx.env.app.db, move |cfg| {
+            for p in &mut cfg.projects { for b in &mut p.bots { if ids.iter().any(|i| b.id.as_deref() == Some(i.as_str())) { b.model = Some("claude-haiku-5-5".into()); } } }
+            Ok(())
+        }).await.unwrap();
+        let clusters = crate::expert_cluster::project_clusters(&fx.env.app, &fx.env.project_id).await.unwrap();
+        let c = clusters.iter().find(|c| c.members.iter().any(|m| m.id == fx.exec.id) && c.members.iter().any(|m| m.id == fx.exec2.id)).expect("兩顆執行者成群集");
+        c.name.clone()
+    }
+
+    /// B 的專家群集派工：真實 resolve 只挑授權成員；排隊中的群集 turn 撤銷時收回（請求 failed、原因是授權）；
+    /// 還沒認領成員的 pending 群集請求，下一輪 reconcile 因「沒有授權給送件者的成員」標 failed、不改派。
     #[tokio::test]
     async fn revoking_withdraws_specialist_cluster_dispatches() {
         let fx = fixture().await;
         let app = &fx.env.app;
+        let name = make_cluster(&fx).await;
         put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let resolved = crate::api::resolve_cluster_target(app, &fx.spec.id, &name).await.unwrap().0;
+        assert_eq!(resolved["to_bot_id"], fx.exec.id.as_str(), "專家只拿到授權成員：{resolved}");
         let queued_req = db::ulid();
-        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-q','do it','[]','pending',?,'any')")
-            .bind(&queued_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-q','do it','[]','pending',?,?)")
+            .bind(&queued_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).bind(&name).execute(&app.db).await.unwrap();
         let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, &format!("relay-request:{queued_req}"), "queued").await;
         let pending_req = db::ulid();
-        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-p','do it','[]','pending',?,'any')")
-            .bind(&pending_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-p','do it','[]','pending',?,?)")
+            .bind(&pending_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).bind(&name).execute(&app.db).await.unwrap();
         put(&fx, RequestPrincipal::User, &[]).await.unwrap();
         assert_eq!(turn_status(&fx, &turn).await, "failed", "排隊中的群集派工被收回");
+        assert!(crate::expert_cluster::project_clusters(app, &fx.env.project_id).await.unwrap().iter().any(|c| c.name == name), "群集還在：失敗不是因為群集消失");
+        let db = fx.env.app.db.clone();
+        let row = |rid: String| { let db = db.clone(); async move { sqlx::query_as::<_, (String, String, Option<String>)>("SELECT state,to_bot_id,error FROM relay_requests WHERE id=?").bind(rid).fetch_one(&db).await.unwrap() } };
+        // 通知流程之後會改寫 error（送達確認等），所以在 sweep 前看撤銷當下寫的原因。
+        let (state, to, error) = row(queued_req.clone()).await;
+        assert_eq!((state.as_str(), to.as_str()), ("failed", fx.exec.id.as_str()));
+        assert!(error.as_deref().unwrap_or_default().contains("只接受 manager 派工"), "{error:?}");
+        // reconcile 的改派那一步：沒有授權給送件者的成員 → failed，不改派。
+        assert_eq!(crate::expert_cluster::claim_target(app, &pending_req, &fx.exec.id, &name).await.unwrap(), None);
+        let (state, to, error) = row(pending_req.clone()).await;
+        assert_eq!((state.as_str(), to.as_str()), ("failed", fx.exec.id.as_str()), "不改派給未授權的 exec2");
+        assert!(error.as_deref().unwrap_or_default().contains("no member granted"), "{error:?}");
         crate::runners::relay_requests::sweep(app).await;
-        for rid in [&queued_req, &pending_req] {
-            let (state, to): (String, String) = sqlx::query_as("SELECT state,to_bot_id FROM relay_requests WHERE id=?").bind(rid).fetch_one(&app.db).await.unwrap();
-            assert_eq!(state, "failed", "{rid}");
-            assert_eq!(to, fx.exec.id, "不改派給未授權的成員");
-        }
+        assert_eq!(row(pending_req.clone()).await.1, fx.exec.id, "sweep 之後也沒改派");
+    }
+
+    /// Astra review2 #1：專家忙碌時，執行者回來的 daemon 結果通知（queue_class=daemon，relay_from=執行者）先排隊，
+    /// 授權仍有效也好、撤銷後也好，都不被當成新派工撤回；撤回通知本身也不會再被撤回。
+    #[tokio::test]
+    async fn queued_daemon_notices_to_a_busy_specialist_are_not_rechecked_as_dispatches() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let notice = queued_turn_class(&fx, &fx.exec, &fx.spec, "relay-result:x:r0", "queued", "daemon").await;
+        assert_eq!(crate::runners::relay_requests::queue_denial(app, &notice).await.unwrap(), None, "授權有效：通知照送");
+        // 撤銷一筆排隊派工 → 產生撤回紀錄 → reconcile 給專家排一則 daemon 通知。
+        let dispatched = queued_turn_from(&fx, &fx.spec, &fx.exec, "to-withdraw", "queued").await;
+        put(&fx, RequestPrincipal::User, &[]).await.unwrap();
+        assert_eq!(turn_status(&fx, &dispatched).await, "failed");
+        assert_eq!(crate::runners::relay_requests::queue_denial(app, &notice).await.unwrap(), None, "撤銷後：結果通知仍不重驗");
+        assert_eq!(turn_status(&fx, &notice).await, "queued");
+        let (rid, state, error): (String, String, Option<String>) = sqlx::query_as("SELECT id,state,error FROM relay_requests WHERE client_request_id=?").bind(format!("withdrawn:{dispatched}")).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "failed", "一般派工的撤回記成 failed 請求，由 reconcile 通知送件者");
+        assert!(error.unwrap_or_default().contains("只接受 manager 派工"));
+        // 專家在跑但忙：撤回通知排進它的 daemon 佇列（佔用的那則先收掉，讓出 daemon 名額）。
+        assert!(crate::lifecycle::revoke_queued_turn(app, &notice, "test: 讓出 daemon 名額").await.unwrap());
+        sqlx::query("UPDATE runs SET state='running',agent_status='working' WHERE bot_id=?").bind(&fx.spec.id).execute(&app.db).await.unwrap();
+        crate::runners::relay_requests::sweep(app).await;
+        let withdrawal_notice: Option<String> = sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
+            .bind(&fx.spec.id).bind(format!("relay-result:{rid}:r0")).fetch_optional(&app.db).await.unwrap();
+        let t = withdrawal_notice.expect("撤回通知排進專家的 daemon 佇列");
+        assert_eq!(turn_status(&fx, &t).await, "queued");
+        assert_eq!(crate::runners::relay_requests::queue_denial(app, &t).await.unwrap(), None, "撤回通知不會再被撤回");
+        assert_eq!(turn_status(&fx, &t).await, "queued");
+        let text: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user'").bind(&t).fetch_one(&app.db).await.unwrap();
+        assert!(text.contains("請求未投遞"), "{text}");
+    }
+
+    /// Astra review2 #3：track 變更（非 PUT 的授權失效來源）也等手上的授權派工：派工核權後暫停 → track 變更被擋住 →
+    /// 派工建好排隊 turn、放開 → track 變更完成、授權清掉 → 排隊的那筆在送達前被擋下撤回。
+    #[tokio::test]
+    async fn a_track_change_waits_for_an_in_progress_dispatch() {
+        let fx = fixture().await;
+        let app = fx.env.app.clone();
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let gate = dispatch_gate(&app, &fx.spec.id, &fx.exec.id).await.expect("專家模式內部派工拿閘門");
+        assert!(relay_prompt_allowed(&app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok());
+        let (env_app, sid) = (app.clone(), fx.spec.id.clone());
+        let change = tokio::spawn(async move {
+            crate::projection::update_and_project(&env_app.cfg, &env_app.db, move |cfg| {
+                for p in &mut cfg.projects { for b in &mut p.bots { if b.id.as_deref() == Some(sid.as_str()) { b.track = Some("api".into()); } } }
+                Ok(())
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!change.is_finished(), "track 變更等派工讓出閘門");
+        assert_eq!(stored(&fx).await.len(), 1, "授權還在");
+        let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, "racing-track", "queued").await;
+        drop(gate);
+        change.await.unwrap().unwrap();
+        assert!(stored(&fx).await.is_empty());
+        assert!(crate::runners::relay_requests::queue_denial(&app, &turn).await.unwrap().is_some());
+        assert_eq!(turn_status(&fx, &turn).await, "failed");
+        // 別的專案（沒有授權）的 config 變更不等這個專案的閘門。
+        let _held = dispatch_gate(&app, &fx.spec.id, &fx.exec.id).await;
+        let t0 = std::time::Instant::now();
+        crate::projection::update_and_project(&app.cfg, &app.db, |_| Ok(())).await.unwrap();
+        assert!(t0.elapsed() < GATE_WAIT, "本專案已沒有授權：不等閘門");
+    }
+
+    /// Astra review2 #4：flush 先認領（turn 已不是 queued），撤回輸掉 CAS：請求與結果追蹤不動、不記撤回、不通知。
+    #[tokio::test]
+    async fn a_withdrawal_that_loses_to_the_claim_changes_nothing() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let rid = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,'claimed','do it','[]','pending',?)")
+            .bind(&rid).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).execute(&app.db).await.unwrap();
+        let durable = queued_turn_from(&fx, &fx.spec, &fx.exec, &format!("relay-request:{rid}"), "queued").await;
+        // 撤銷寫入後、撤回前，flush 搶先認領（race point 插在 PUT 投影之後的撤回之前不好掛，直接在判斷與撤回之間認領）。
+        sqlx::query("UPDATE projects SET executor_grants_json='[]' WHERE id=?").bind(&fx.env.project_id).execute(&app.db).await.unwrap();
+        let d = crate::runners::relay_requests::denial(app, &durable).await.unwrap().expect("授權沒了");
+        sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&durable).execute(&app.db).await.unwrap();
+        assert!(!crate::runners::relay_requests::withdraw_turn(app, &durable, &d).await.unwrap(), "CAS 輸了");
+        let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "pending", "已開始的不標失敗，結果照常追蹤");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'").bind(&durable).fetch_one(&app.db).await.unwrap();
+        assert_eq!(notes, 0);
+        // 一般派工同樣：輸掉 CAS 不記撤回紀錄。
+        let plain = queued_turn_from(&fx, &fx.spec, &fx.exec, "plain-claimed", "queued").await;
+        let d = crate::runners::relay_requests::denial(app, &plain).await.unwrap().expect("授權沒了");
+        sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&plain).execute(&app.db).await.unwrap();
+        assert!(!crate::runners::relay_requests::withdraw_turn(app, &plain, &d).await.unwrap());
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests WHERE client_request_id=?").bind(format!("withdrawn:{plain}")).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0);
     }
 }
-
