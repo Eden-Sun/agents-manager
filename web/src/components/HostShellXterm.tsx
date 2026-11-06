@@ -216,6 +216,9 @@ export function HostShellXterm({
       if (observe === on) return
       observe = on
       observeRef.current = on
+      // observe 期間 xterm 的內容由串流位元組決定，不再是 `prev` 記的列；換模式就讓增量基準失效，
+      // 下一張 frame 整屏重畫（不然跟舊 `prev` 相同的列會留著 observe 寫上去的內容，#2075）。
+      prev = []
       if (!alive) return
       // 回到快照模式才照「換行」勾選；observe 一律自動換行（不然折行的長輸出會被截掉）。
       term.write(on || cb.current.wrap ? AUTOWRAP_ON : AUTOWRAP_OFF)
