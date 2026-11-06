@@ -70,7 +70,8 @@ fn granted(project: &crate::db::Project, from: &crate::db::Bot, to: &crate::db::
         && from.parent_bot_id.is_none() && to.parent_bot_id.is_none()
         && from.deleted_at.is_none() && to.deleted_at.is_none()
         && from.role.as_deref() == Some("specialist") && to.role.as_deref() == Some("executor")
-        && project.executor_grants().iter().any(|g| g.specialist == from.id && g.executor == to.id && from.track.as_deref() == Some(g.track.as_str()))
+        // 排他：只認這顆執行者的第一筆授權（投影已清掉重複；DB 被手動塞重複時也不會兩位專家同時放行）。
+        && project.executor_grants().iter().find(|g| g.executor == to.id).is_some_and(|g| g.specialist == from.id && from.track.as_deref() == Some(g.track.as_str()))
 }
 
 #[cfg(test)]

@@ -563,7 +563,7 @@ export interface StoreState {
   patchBot: (botId: string, input: PatchBotInput) => Promise<PatchBotOutcome | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
   /** 專家模式執行者授權（整組取代）；成功回 true。 */
-  setExecutorGrants: (projectId: string, grants: ExecutorGrantInput[]) => Promise<boolean>
+  setExecutorGrants: (projectId: string, grants: ExecutorGrantInput[], revision?: string) => Promise<boolean>
   /** `resumeNative`：換身份後重啟要接回原對話（`?resume=native`），接不回自動退回不帶旗標重送一次。 */
   restartBot: (botId: string, resumeNative?: boolean) => Promise<boolean>
   /** SPEC §6.9：閒置的 claude bot 全部 exit + resume；忙的跳過。 */
@@ -710,11 +710,16 @@ const REASON_CODE_TEXT: Record<string, string> = {
   // 專家（specialist）：track 必填（400，`error` 欄位）；track 與 role 只有使用者能改（403 user_only）。
   track_required: msg('專家必須填負責任務（track），空白不能儲存'),
   user_only: msg('只有使用者能改這個設定'),
-  // 執行者授權（PUT /projects/:id/executor-grants）違反不變式的 400。
+  // 執行者授權（PUT /projects/:id/executor-grants）：reason 以 daemon `executor_grants.rs` 為準。
   executor_already_granted: msg('同一顆執行者只能授權給一位專家'),
-  specialist_invalid: msg('授權對象必須是這個專案的專家'),
-  executor_invalid: msg('只能授權這個專案的執行者'),
-  project_not_expert: msg('只有專家模式的專案能設定執行者授權'),
+  grant_specialist_not_found: msg('授權對象必須是這個專案的專家'),
+  grant_specialist_role_invalid: msg('授權對象必須是這個專案的專家'),
+  grant_specialist_track_missing: msg('這位專家還沒有 track，不能授權'),
+  grant_executor_not_found: msg('只能授權這個專案的執行者'),
+  grant_executor_role_invalid: msg('只能授權這個專案的執行者'),
+  grant_requires_expert_project: msg('只有專家模式的專案能設定執行者授權'),
+  grant_manager_only: msg('只有使用者或這個專案的管理者能設定執行者授權'),
+  grants_revision_conflict: msg('執行者授權已被他人修改，請重新整理'),
 }
 
 function reasonText(e: ApiError): string {
@@ -2149,9 +2154,9 @@ export const useStore = create<StoreState>((set, get) => {
     return ok
   },
 
-  async setExecutorGrants(projectId, grants) {
+  async setExecutorGrants(projectId, grants, revision) {
     try {
-      await api.setExecutorGrants(projectId, grants)
+      await api.setExecutorGrants(projectId, grants, revision)
       await get().refreshState()
       return true
     } catch (e) {

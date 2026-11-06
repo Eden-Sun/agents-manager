@@ -415,4 +415,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '授權對象必須是這個專案的專家': 'The grantee must be a specialist in this project',
   '只能授權這個專案的執行者': 'Only executors in this project can be granted',
   '只有專家模式的專案能設定執行者授權': 'Executor grants are only available in expert-mode projects',
+  '這位專家還沒有 track，不能授權': 'This specialist has no track yet and cannot be granted executors',
+  '只有使用者或這個專案的管理者能設定執行者授權': "Only the user or this project's manager can set executor grants",
+  '執行者授權已被他人修改，請重新整理': 'Executor grants were changed by someone else; refresh and try again',
 } satisfies Dict

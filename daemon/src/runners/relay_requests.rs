@@ -5,7 +5,7 @@ use crate::{db, lifecycle, state::App};
 pub async fn queue_denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
     let request: Option<(String,String,String,String)> = sqlx::query_as("SELECT r.id,r.from_bot_id,r.to_bot_id,r.state FROM relay_requests r JOIN turns t ON (r.to_turn_id=t.id OR t.client_request_id='relay-request:'||r.id) JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=r.to_bot_id WHERE t.id=?")
         .bind(turn_id).fetch_optional(&app.db).await?;
-    let Some((id, from, to, state)) = request else { return Ok(None) };
+    let Some((id, from, to, state)) = request else { return plain_queue_denial(app, turn_id).await };
     let reason = if !matches!(state.as_str(), "pending" | "delivered") { Some("relay request is already terminal".to_string()) } else {
         match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
             Ok(()) => None,
@@ -18,6 +18,32 @@ pub async fn queue_denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Optio
             .bind(reason).bind(id).execute(&app.db).await?;
     }
     Ok(reason)
+}
+
+/// 沒有 `relay_requests` 紀錄的排隊派工（`queue_if_busy`、不帶 `expect_result`）：送件者與目標在同一個 expert 專案時，
+/// 送達認領前照 Deliver 重驗（Astra review #1：撤銷授權後排隊的派工不能照送）。被擋時另送一則 daemon 通知給送件者
+/// （背景送，不在目標的 flush 裡拿送件者的鎖；冪等鍵 `grant-revoked:<turn>` 擋重複）。其他派工維持原行為、不重驗。
+async fn plain_queue_denial(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
+    let senders: Vec<(String, String)> = sqlx::query_as("SELECT DISTINCT m.relay_from,c.bot_id FROM messages m JOIN turns t ON t.id=m.turn_id JOIN conversations c ON c.id=t.conversation_id JOIN bots b ON b.id=m.relay_from WHERE t.id=? AND m.role='user' AND m.relay_unverified=0")
+        .bind(turn_id).fetch_all(&app.db).await?;
+    for (from, to) in senders {
+        if !crate::executor_grants::expert_internal(app, &from, &to).await { continue }
+        match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
+            Ok(()) => {}
+            Err(crate::relay_policy::RelayDenied::Unavailable(e)) => anyhow::bail!(e),
+            Err(crate::relay_policy::RelayDenied::Denied(e)) => {
+                let (app2, turn, notice) = (app.clone(), turn_id.to_string(), format!("[daemon 派工撤回通知，不是新請求] 你排在 {to} 佇列裡的派工（turn {turn_id}）沒有送出：{e}。\n\n{}", crate::child_alerts::NOTICE_END));
+                tokio::spawn(async move {
+                    if !db::active_run(&app2.db, &from).await.is_ok_and(|r| r.is_some_and(|run| run.state == "running")) { return }
+                    if let Err(e) = lifecycle::prompt_from_api_queue_if_busy(&app2, &from, &notice, &format!("grant-revoked:{turn}"), &[], lifecycle::RelaySrc::daemon_notice(Some(&to)), false, None).await {
+                        tracing::warn!(turn = %turn, error = ?e, "派工撤回通知沒有送到送件者");
+                    }
+                });
+                return Ok(Some(e));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub async fn sweep(app: &Arc<App>) {
@@ -58,6 +84,8 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                     None => return Ok(()),
                 }
             }
+            // 授權派工的序列化邊界：核對到建好 turn 之間握著讀鎖，撤銷（寫鎖）不會插在中間（見 executor_grants）。
+            let _gate = if existing.is_none() { crate::executor_grants::dispatch_gate(app, &from, &to).await } else { None };
             if existing.is_none() {
                 match crate::relay_policy::relay_prompt_allowed(app, &from, &to, crate::relay_policy::Admission::Deliver).await {
                     Ok(()) => {},

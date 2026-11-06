@@ -2442,6 +2442,7 @@ export class MockTransport implements Transport {
         role_policy: p.role_policy ?? {},
         deputy: p.deputy ?? null,
         executor_grants: this.validGrants(p),
+        grants_revision: this.grantsRevision(this.validGrants(p)),
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -2584,37 +2585,58 @@ export class MockTransport implements Transport {
   private validGrants(p: MockProject) {
     if (p.mode !== 'expert') return []
     const top = (id: string) => this.bots.find((x) => x.id === id && x.project_id === p.id && !x.parent_bot_id)
+    const seen = new Set<string>()
     return (p.executor_grants ?? []).filter((g) => {
       const s = top(g.specialist)
       const e = top(g.executor)
-      return s?.role === 'specialist' && (s.track ?? '') === g.track && e?.role === 'executor'
+      // 排他：同一顆執行者只留第一筆（同 daemon）。
+      return s?.role === 'specialist' && (s.track ?? '') === g.track && e?.role === 'executor' && !seen.has(g.executor) && (seen.add(g.executor), true)
     })
   }
 
-  /** `PUT /projects/{id}/executor-grants`：整組取代；沿用既有 grant 的 granted_at。 */
+  /** 同 daemon `executor_grants::revision` 的用途（內容不同、只求內容變了版本就變）。 */
+  private grantsRevision(grants: { specialist: string; executor: string; track: string; granted_by: string; granted_at: string }[]) {
+    let h = 0
+    for (const ch of JSON.stringify(grants)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0
+    return (h >>> 0).toString(16).padStart(8, '0')
+  }
+
+  /**
+   * `PUT /projects/{id}/executor-grants`：整組取代。reason 與語意照 daemon `executor_grants::apply`：
+   * 專家沒有 track 拒絕；同一對且 track 未變沿用整筆既有授權（granted_by／granted_at 都不改）；`revision` 過期回 409。
+   */
   private putExecutorGrants(id: string, b: Rec) {
     const p = this.projects.find((x) => x.id === id)
     if (!p) throw new ApiError(404, { error: 'not_found' }, 'not found')
-    if (p.mode !== 'expert') throw new ApiError(400, { reason: 'project_not_expert' }, 'bad_request')
+    const bad = (reason: string) => new ApiError(400, { error: 'bad_request', reason }, 'bad_request')
+    if (p.mode !== 'expert') throw bad('grant_requires_expert_project')
     const list = Array.isArray(b.grants) ? (b.grants as Rec[]) : null
-    if (!list) throw new ApiError(400, { reason: 'grants_required' }, 'bad_request')
+    if (!list) throw new ApiError(422, { error: 'bad_request' }, 'missing field `grants`')
     const prev = this.validGrants(p)
+    const current = this.grantsRevision(prev)
+    if (typeof b.revision === 'string' && b.revision && b.revision !== current) {
+      throw new ApiError(409, { error: 'conflict', reason: 'grants_revision_conflict', revision: current, grants: prev }, 'conflict')
+    }
     const seen = new Set<string>()
     const next = list.map((g) => {
-      const specialist = String(g.specialist ?? '')
-      const executor = String(g.executor ?? '')
+      const specialist = String(g.specialist ?? '').trim()
+      const executor = String(g.executor ?? '').trim()
       const s = this.bots.find((x) => x.id === specialist && x.project_id === id && !x.parent_bot_id)
       const e = this.bots.find((x) => x.id === executor && x.project_id === id && !x.parent_bot_id)
-      if (s?.role !== 'specialist') throw new ApiError(400, { reason: 'specialist_invalid' }, 'bad_request')
-      if (e?.role !== 'executor') throw new ApiError(400, { reason: 'executor_invalid' }, 'bad_request')
-      if (seen.has(executor)) throw new ApiError(400, { reason: 'executor_already_granted' }, 'bad_request')
+      if (!s) throw bad('grant_specialist_not_found')
+      if (s.role !== 'specialist') throw bad('grant_specialist_role_invalid')
+      const track = (s.track ?? '').trim() ? (s.track as string) : null
+      if (!track) throw bad('grant_specialist_track_missing')
+      if (!e) throw bad('grant_executor_not_found')
+      if (e.role !== 'executor') throw bad('grant_executor_role_invalid')
+      if (seen.has(executor)) throw bad('executor_already_granted')
       seen.add(executor)
-      const old = prev.find((x) => x.specialist === specialist && x.executor === executor)
-      return { specialist, executor, track: s.track ?? '', granted_by: 'user', granted_at: old?.granted_at ?? now() }
+      const old = prev.find((x) => x.specialist === specialist && x.executor === executor && x.track === track)
+      return old ?? { specialist, executor, track, granted_by: 'user', granted_at: now() }
     })
     p.executor_grants = next
     this.emit('project_changed', { project_id: id })
-    return { project_id: id, grants: next }
+    return { grants: next, revision: this.grantsRevision(next) }
   }
 
   /** `GET /bots/{id}/api-usage`：演示用數字，每次有 assistant 回覆就多一筆（見 `apiUsageTurns`）。 */
