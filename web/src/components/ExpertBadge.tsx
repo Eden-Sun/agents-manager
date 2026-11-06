@@ -82,6 +82,16 @@ export function ExpertRoleTag({
   )
 }
 
+/** 執行者授權：被授權的執行者列，名稱旁淡色小字「→ 專家名」（不搶眼，不是 chip）。 */
+export function ExpertGrantMark({ specialistName }: { specialistName: string }) {
+  useT()
+  return (
+    <span className="bot-grant-mark" title={t('已授權給專家 {name}：它可以直接派工給這顆執行者', { name: specialistName })}>
+      {t('→ {name}', { name: specialistName })}
+    </span>
+  )
+}
+
 /** 副管理者：成員列第二行的小標。 */
 export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
   useT()
