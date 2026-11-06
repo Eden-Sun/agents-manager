@@ -79,12 +79,8 @@ pub(crate) async fn list(
     let Some(for_track) = query.for_track.as_deref() else {
         // 沒給 --for：專家照一般排序但排在執行者之後（穩定排序，相對順序不動）。
         peers.sort_by_key(|p| p["role"].as_str() == Some("specialist"));
-        // 執行者池條目與每條的已用數（`agm hire --pool <id>` 用的 id 就從這裡看）。
-        let cfg = app.cfg.get().await;
-        let cfg_bots = cfg.projects.iter().find(|c| c.id.as_deref() == Some(project_id.as_str())).map(|c| c.bots.as_slice()).unwrap_or(&[]);
-        let pool = crate::executor_pool::list_json(&project.executor_pool(), cfg_bots);
         let clusters: Vec<Value> = crate::expert_cluster::project_clusters(&app, &project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?.iter().map(|c| c.to_json()).collect();
-        let mut out = json!({"project_id":project_id,"peers":peers,"executor_pool":pool,"clusters":clusters});
+        let mut out = json!({"project_id":project_id,"peers":peers,"clusters":clusters});
         out["specialist_dispatch"] = json!(project.specialist_dispatch);
         if acting { out["acting_deputy"] = json!(true); }
         return Ok(Json(out));
@@ -340,6 +336,7 @@ mod tests {
         let bot = crate::testing::claude_bot(&app, &env.project_id, "peer").await;
         let value = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(bot.id.clone()))).await.unwrap().0;
         assert!(value["peers"].as_array().unwrap().iter().any(|p| p["id"] == bot.id));
+        assert!(value.get("executor_pool").is_none());
         let other = crate::db::ulid();
         sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert!(matches!(list(State(app), Path(other), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(bot.id))).await, Err(LcError::Forbidden(_))));

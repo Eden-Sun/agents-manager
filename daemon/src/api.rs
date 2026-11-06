@@ -1748,15 +1748,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     for p in projects {
         let mut bl = Vec::new();
         let role_policy = p.role_policy();
-        let cfg_project = cfg.projects.iter().find(|c| c.id.as_deref() == Some(p.id.as_str()));
         // 專家模式群集（同設定的執行者）：用這份快照算，不另外查 DB。
         let cluster_names = if p.mode == "expert" { crate::expert_cluster::names_by_bot(&crate::expert_cluster::clusters_of(&bots, &runs, &p.id)) } else { Default::default() };
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
             let policy_drift = policy_revs.get(&b.id).is_some_and(|recorded| {
-                let pool_entry = cfg_project.and_then(|c| c.bots.iter().find(|x| x.id.as_deref() == Some(b.id.as_str()))).and_then(|x| x.pool_entry.as_deref());
-                let pool = cfg_project.map(|c| c.executor_pool.as_slice()).unwrap_or(&[]);
-                crate::lifecycle::runtime_overlay::policy_rev_now(b, &role_policy, pool, pool_entry) != *recorded
+                crate::lifecycle::runtime_overlay::policy_rev_now(b, &role_policy) != *recorded
             });
             let queued_turn = queued_turns.remove(&b.id);
             let shim_stale = if p.host == LOCAL_HOST {
@@ -1836,7 +1833,6 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "id": p.id, "path": p.path, "label": p.label, "host": p.host, "mode": p.mode,
             "workspace_id": p.workspace_id,
             "handed_off_to": p.handed_off_to,
-            "executor_pool": crate::executor_pool::list_json(&p.executor_pool(), cfg.projects.iter().find(|c| c.id.as_deref() == Some(p.id.as_str())).map(|c| c.bots.as_slice()).unwrap_or(&[])),
             "role_policy": p.role_policy(),
             "deputy": p.deputy_bot_id.as_ref().map(|bot_id| json!({"bot_id": bot_id, "after_sec": p.deputy_after_sec})),
             "specialist_dispatch": p.specialist_dispatch,
@@ -2231,7 +2227,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
             anyhow::bail!("duplicate");
         }
-        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
             handed_off_to: None,
             id: Some(id.clone()),
             path: path.clone(),
@@ -2338,9 +2334,6 @@ pub(crate) struct PatchProject {
     /// #708：字串＝移交給那台主機的 daemon，`null`＝收回，不帶＝不動。
     #[serde(default)]
     handed_off_to: Option<Value>,
-    /// 專家模式保護額度：執行者池條目陣列（整份覆蓋；驗證見 `executor_pool::parse_patch`）。
-    #[serde(default)]
-    executor_pool: Option<Value>,
     /// 專家模式角色政策（role -> policy 物件；B 期才用，現在只存、只讀）。`null`＝清掉，不帶＝不動。
     #[serde(default)]
     role_policy: Option<Value>,
@@ -2359,7 +2352,7 @@ pub(crate) async fn patch_project(
     Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<PatchProject>,
 ) -> Result<Response, LcError> {
-    if (b.mode.is_some() || b.manager_bot_id.is_some() || b.executor_pool.is_some() || b.role_policy.is_some() || b.deputy.is_some() || b.specialist_dispatch.is_some()) && principal != RequestPrincipal::User { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"}))); }
+    if (b.mode.is_some() || b.manager_bot_id.is_some() || b.role_policy.is_some() || b.deputy.is_some() || b.specialist_dispatch.is_some()) && principal != RequestPrincipal::User { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"user_only"}))); }
     let project_for_gate = if b.mode.is_some() {
         Some(db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?)
     } else { None };
@@ -2381,11 +2374,6 @@ pub(crate) async fn patch_project(
         Some(Value::Null) => Some(None),
         Some(Value::String(h)) if !h.trim().is_empty() => Some(Some(h.trim().to_string())),
         Some(_) => return Err(LcError::Bad("handed_off_to must be a non-empty host name or null".into())),
-    };
-    let parsed_executor_pool: Option<Vec<crate::config::ExecutorPoolEntry>> = match &b.executor_pool {
-        None => None,
-        Some(Value::Null) => Some(Vec::new()),
-        Some(raw) => Some(crate::executor_pool::parse_patch(raw)?),
     };
     // role_policy：key 只收 manager／executor／advisor／specialist，值一律是 JSON object；其他一律 400 `invalid_role_policy`。
     let parsed_role_policy: Option<BTreeMap<String, Value>> = match &b.role_policy {
@@ -2434,9 +2422,6 @@ pub(crate) async fn patch_project(
         }
         if let Some(h) = &handed_off_to {
             p.handed_off_to = h.clone();
-        }
-        if let Some(ep) = &parsed_executor_pool {
-            p.executor_pool = ep.clone();
         }
         if let Some(rp) = &parsed_role_policy {
             p.role_policy = rp.clone();
@@ -2945,7 +2930,6 @@ async fn create_bot(
             herdr_session: None,
             create_request_id: create_request_id.clone(),
             create_fingerprint: create_fingerprint.clone(),
-            pool_entry: None,
         });
         Ok(())
     })
@@ -3269,7 +3253,6 @@ fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bo
 #[derive(Deserialize)]
 struct HireMember {
     name: String,
-    /// 帶了 `pool_entry` 就由條目決定（帶了不同的值 → 400 pool_entry_mismatch）。
     #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
@@ -3278,9 +3261,6 @@ struct HireMember {
     effort: Option<String>,
     #[serde(default)]
     identity: Option<String>,
-    /// 執行者池條目 id（`agm hire --pool <id>`）。
-    #[serde(default)]
-    pool_entry: Option<String>,
     /// `executor`（預設）或 `specialist`（後者必帶 `track`）。
     #[serde(default)]
     role: Option<String>,
@@ -3340,35 +3320,15 @@ async fn hire_member(
     if role == "specialist" && track.is_none() {
         return Err(LcError::BadValue(json!({"error": "track_required"})));
     }
-    // 專家模式保護額度（條目規則見 `executor_pool.rs`）：manager 必須落在某一條；User 不受池限制、可選擇套用條目。
-    let manager = matches!(principal, RequestPrincipal::Bot(_));
-    let cfg = app.cfg.get().await;
-    let project_cfg = cfg.projects.iter().find(|c| c.id.as_deref() == Some(pid.as_str()));
-    let entries = project.executor_pool();
-    let entry = crate::executor_pool::resolve_hire(&entries, manager, b.kind.as_deref(), b.model.as_deref(), b.effort.as_deref(), b.pool_entry.as_deref())?;
-    // fork：先驗來源（同專案、同主機、codex、有 session），新 member 也得是 codex；再算條目容量。
-    let planned_kind = match entry {
-        Some(e) => e.kind.clone(),
-        None => b.kind.clone().unwrap_or_default(),
-    };
+    // fork：先驗來源（同專案、同主機、codex、有 session），新 member 也得是 codex。
+    let planned_kind = b.kind.as_deref().unwrap_or_default();
     if let Some(source) = b.fork_from.as_deref() {
-        validate_fork_source(&app, &project, source, &planned_kind).await?;
+        validate_fork_source(&app, &project, source, planned_kind).await?;
     }
-    let bots = project_cfg.map(|c| c.bots.as_slice()).unwrap_or(&[]);
-    if let (true, Some(entry)) = (manager, entry) {
-        crate::executor_pool::check_capacity(entry, bots)?;
-    }
-    let (kind, model, effort, args, env, pool_entry) = match entry {
-        Some(e) => {
-            let lp = crate::executor_pool::launch_params(e);
-            (e.kind.clone(), lp.model, e.effort.clone(), lp.args, lp.env, Some(e.id.clone()))
-        }
-        None => {
-            let kind = b.kind.clone().ok_or_else(|| LcError::Bad("kind is required".into()))?;
-            (kind, b.model.clone().filter(|m| !m.trim().is_empty()), b.effort.clone(), Vec::new(), BTreeMap::new(), None)
-        }
-    };
-    let new: NewBot = serde_json::from_value(json!({"name": b.name, "kind": kind, "model": model, "effort": effort, "identity": b.identity, "args": args}))
+    let kind = b.kind.clone().ok_or_else(|| LcError::Bad("kind is required".into()))?;
+    let model = b.model.clone().filter(|m| !m.trim().is_empty());
+    let effort = b.effort.clone().filter(|e| !e.trim().is_empty());
+    let new: NewBot = serde_json::from_value(json!({"name": b.name, "kind": kind, "model": model, "effort": effort, "identity": b.identity}))
         .map_err(|e| LcError::Bad(e.to_string()))?;
     let res = create_bot(State(app.clone()), Path(pid.clone()), Json(new)).await?;
     let (parts, body) = res.into_parts();
@@ -3377,15 +3337,13 @@ async fn hire_member(
     let Some(id) = created["bot_id"].as_str().map(str::to_string) else { return Ok(Response::from_parts(parts, axum::body::Body::from(bytes))) };
     let patch: PatchBot = serde_json::from_value(json!({"role": role, "track": track})).map_err(any_err)?;
     patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
-    // 條目與它的 context 啟動環境只寫進 config（pool_entry 不進 DB）。
-    if pool_entry.is_some() || !env.is_empty() || b.fork_from.is_some() {
+    // fork 來源只寫進 config，不進 DB。
+    if b.fork_from.is_some() {
         let bot_id = id.clone();
         let fork_from = b.fork_from.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
             let p = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).ok_or_else(|| anyhow::anyhow!("no-project"))?;
             if let Some(bot) = p.bots.iter_mut().find(|bot| bot.id.as_deref() == Some(bot_id.as_str())) {
-                bot.pool_entry = pool_entry.clone();
-                bot.env.extend(env.clone());
                 bot.fork_from = fork_from.clone();
             }
             Ok(())
@@ -4125,7 +4083,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             herdr_session: bot.herdr_session.clone(),
             create_request_id: None,
             create_fingerprint: None,
-            pool_entry: None,
         };
         let pid = bot.project_id.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -5313,7 +5270,7 @@ mod identity_auth_error_tests {
             .unwrap();
         // 這台上放一個活著的專案。
         crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                 handed_off_to: None,
                 id: Some("01PROJZZ92".into()),
                 path: "/srv/work".into(),
@@ -5511,7 +5468,7 @@ mod identity_auth_error_tests {
                     herdr_session: "agents-manager".into(),
                     remote_path: String::new(),
                 });
-                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     id: Some("01CONFIGRACE".into()),
                     path: "/tmp/xreview-host-config-race".into(),
                     label: "config race".into(),
@@ -6021,7 +5978,7 @@ mod project_tests {
         // `testing::env` only seeds the db row; the rename edits config.toml.
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: e.repo.to_string_lossy().to_string(),
@@ -6147,7 +6104,7 @@ mod project_tests {
         let path = e.repo.to_string_lossy().to_string();
         app.cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     id: Some(pid.clone()),
                     path,
                     label: "proj".into(),
@@ -6202,7 +6159,7 @@ mod project_tests {
         // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
         app.cfg
             .update(|cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     handed_off_to: None,
                     id: Some(pid.clone()),
                     path: repo.clone(),
@@ -6227,8 +6184,7 @@ mod project_tests {
                             herdr_session: None,
                             create_request_id: None,
                             create_fingerprint: None,
-                            pool_entry: None,
-                        })
+                                        })
                         .collect(),
                 });
                 Ok(())
@@ -6714,7 +6670,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -6744,7 +6700,7 @@ mod delete_identity_tests {
         app.cfg
             .update(move |c| {
                 c.identities.push(ident("racer2", "codex", None));
-                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -9614,7 +9570,7 @@ mod delete_bot_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                cfg.projects = vec![crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     handed_off_to: None,
                     id: Some(pid),
                     path: repo,
@@ -13568,14 +13524,13 @@ mod per_principal_auth_tests {
                 herdr_session: bot.herdr_session.clone(),
                 create_request_id: None,
                 create_fingerprint: None,
-                pool_entry: None,
-            })
+                })
             .collect();
         let (project_id, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                     handed_off_to: None,
                     id: Some(project_id),
                     path: repo,
@@ -15390,7 +15345,7 @@ mod per_principal_auth_tests {
             .update(move |cfg| {
                 let mut bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted2}'\nname = 'AGM'\nkind = 'claude'\n")).unwrap();
                 bot.persona = Some("我是普通 bot".into());
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -15409,7 +15364,7 @@ mod per_principal_auth_tests {
         app.cfg
             .update(move |cfg| {
                 let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted_resp2}'\nname = 'AGM-responder'\nkind = 'claude'\n")).unwrap();
-                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -16248,7 +16203,7 @@ mod caller_audit_tests {
                     toml::from_str(&format!("id = '{bid}'\nname = '{bname}'\nkind = 'claude'\n")).unwrap();
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(entry),
-                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                    None => cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                         handed_off_to: None,
                         id: Some(pid),
                         path: repo,
@@ -18357,7 +18312,7 @@ mod manager_role_scope_tests {
         let env = crate::testing::env().await;
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18386,7 +18341,7 @@ mod expert_member_tests {
     async fn seed(env: &crate::testing::Env) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
     }
@@ -18487,92 +18442,44 @@ mod expert_member_tests {
         assert_eq!(col().await.unwrap().1, Some(60));
         // 副管理者不能增聘（hire 只認管理者）。
         let hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(advisor.clone())),
-            Json(HireMember { name: "worker-x".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None })).await;
+            Json(HireMember { name: "worker-x".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, role: None, track: None, fork_from: None })).await;
         assert!(matches!(hire, Err(LcError::Forbidden(ref v)) if v["reason"] == "manager_role_scope"), "{hire:?}");
         patch(RequestPrincipal::User, json!({"deputy": null})).await.unwrap();
         assert_eq!(col().await.unwrap(), (None, None));
     }
 
     #[tokio::test]
-    async fn an_expert_manager_hires_executors_only_in_its_project() {
+    async fn expert_manager_hires_with_user_selected_settings_and_ignores_retired_pool_fields() {
         let env = crate::testing::env().await;
         seed(&env).await;
         let manager = add(&env, "hire-manager").await;
         let peer = add(&env, "hire-peer").await;
         let hire = |caller: &str| hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(caller.to_string())),
-            Json(HireMember { name: "worker-1".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None }));
+            Json(HireMember { name: "worker-1".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, role: None, track: None, fork_from: None }));
         assert!(hire(&manager).await.is_err(), "parent_child project");
         make_expert(&env, &manager).await;
         assert!(hire(&peer).await.is_err(), "non-manager");
-        // executor_pool 預設是空的：manager 不受池限制，增聘成功（role=executor）。
-        let empty_hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
-            Json(HireMember { name: "worker-empty".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None })).await.unwrap();
-        let empty_id = serde_json::from_slice::<Value>(&axum::body::to_bytes(empty_hire.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
-        assert_eq!(db::bot(&env.app.db, &empty_id).await.unwrap().unwrap().role.as_deref(), Some("executor"));
-        // 池有條目、kind 不在池內 → 403 kind_not_in_pool
-        let codex_only = PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: None, executor_pool: Some(json!([{"id": "codex-1", "kind": "codex", "model": "", "count": 1}])), ..Default::default() };
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(codex_only)).await.unwrap();
-        assert!(matches!(hire(&manager).await, Err(LcError::Forbidden(ref v)) if v["reason"] == "kind_not_in_pool"));
 
-        // User is unrestricted by pool
-        let user_hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User),
-            Json(HireMember { name: "worker-0".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, pool_entry: None, role: None, track: None, fork_from: None })).await.unwrap();
-        let bytes0 = axum::body::to_bytes(user_hire.into_body(), 1 << 20).await.unwrap();
-        let id0 = serde_json::from_slice::<Value>(&bytes0).unwrap()["bot_id"].as_str().unwrap().to_string();
-        assert!(!id0.is_empty());
-
-        // 條目 claude-1 只有 1 顆：用它 hire 一顆，第二顆就 409（user 手動加的 worker-0 不佔這一條）
-        let patch_p = PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: None, executor_pool: Some(json!([{"id": "claude-1", "kind": "claude", "model": "", "count": 1}])), ..Default::default() };
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch_p)).await.unwrap();
-        let one = hire(&manager).await.map_err(|e| format!("{e:?}")).unwrap();
-        let one_id = serde_json::from_slice::<Value>(&axum::body::to_bytes(one.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
-        assert_eq!(db::bot(&env.app.db, &one_id).await.unwrap().unwrap().role.as_deref(), Some("executor"));
-        assert!(matches!(hire(&manager).await, Err(LcError::Conflict(ref v)) if v["reason"] == "executor_pool_full" && v["current"] == 1 && v["max"] == 1));
-
-        // 再加一條 claude-2（count 2）：manager 不帶 pool_entry 會因為有兩條 claude 而要求指定
-        let patch_p2 = PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: None, executor_pool: Some(json!([
-            {"id": "claude-1", "kind": "claude", "model": "", "count": 1},
-            {"id": "claude-2", "kind": "claude", "model": "", "effort": "low", "count": 2}
-        ])), ..Default::default() };
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(patch_p2)).await.unwrap();
-        assert!(matches!(hire(&manager).await, Err(LcError::BadValue(ref v)) if v["reason"] == "pool_entry_required" && v["entries"].as_array().map(Vec::len) == Some(2)));
-        let res = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
-            Json(HireMember { name: "worker-2".into(), kind: None, model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None, fork_from: None })).await.map_err(|e| format!("{e:?}")).unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let request: HireMember = serde_json::from_value(json!({
+            "name": "worker-codex", "kind": "codex", "model": "gpt-6.1-sol", "effort": "high", "pool_entry": "retired-entry"
+        })).unwrap();
+        let response = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())), Json(request)).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
         let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
-        let worker = db::bot(&env.app.db, &id).await.unwrap().unwrap();
-        assert_eq!((worker.role.as_deref(), worker.parent_bot_id.as_deref(), worker.managed_by.as_str()), (Some("executor"), None, "user"));
-        let cfg_bot = env.app.cfg.get().await.projects.iter().find(|p| p.id.as_deref() == Some(env.project_id.as_str())).unwrap().bots.iter().find(|b| b.id.as_deref() == Some(id.as_str())).unwrap().clone();
-        assert_eq!(cfg_bot.pool_entry.as_deref(), Some("claude-2"));
-        // manager 帶了不一致的 effort／kind → mismatch
-        assert!(matches!(hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())),
-            Json(HireMember { name: "worker-3".into(), kind: Some("codex".into()), model: None, effort: None, identity: None, pool_entry: Some("claude-2".into()), role: None, track: None, fork_from: None })).await,
-            Err(LcError::BadValue(ref v)) if v["reason"] == "pool_entry_mismatch"));
-        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
-        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
-        assert!(manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/stop")).await, "managers retire executors");
-        assert!(manager_may_start(&env.app, &manager, "DELETE", &format!("/api/bots/{id}")).await);
-        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
-        assert!(!manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/stop")).await, "advisors stay");
-        assert!(manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/restart")).await);
+        let bot = db::bot(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!((bot.role.as_deref(), bot.kind.as_str(), bot.model.as_deref(), bot.effort.as_deref()), (Some("executor"), "codex", Some("gpt-6.1-sol"), Some("high")));
 
-        // When manager_use is false, manager cannot restart or stop it
-        sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
-        assert!(!manager_may_start(&env.app, &manager, "POST", &format!("/api/bots/{id}/restart")).await);
-
-        // Test PATCH permissions
-        let bot_caller = RequestPrincipal::Bot(manager.clone());
-        // Bot cannot PATCH manager_use
-        let patch_mu = PatchBot { role: None, model: None, effort: None, fast: None, persona: None, args: None, autostart: None, name: None, inject_hooks: None, auto_approve: None, is_primary: None, manager_use: Some(false), track: None, runtime_override: None, identity: None, env: None };
-        assert!(matches!(patch_bot(State(env.app.clone()), Path(id.clone()), Extension(bot_caller.clone()), Json(patch_mu)).await, Err(LcError::Forbidden(ref v)) if v["reason"] == "user_only"));
-
-        // Bot cannot PATCH executor_pool
-        let patch_pool = PatchProject { mode: None, manager_bot_id: None, label: None, handed_off_to: None, executor_pool: Some(json!([{"id": "claude-3", "kind": "claude", "model": "", "count": 3}])), ..Default::default() };
-        assert!(matches!(patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(bot_caller), Json(patch_pool)).await, Err(LcError::Forbidden(ref v)) if v["reason"] == "user_only"));
+        // The retired project key is accepted as an unknown field and has no effect.
+        let ignored: PatchProject = serde_json::from_value(json!({"executor_pool": "not a pool"})).unwrap();
+        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(ignored)).await.unwrap();
+        let state = state_json(&env.app.clone()).await.unwrap();
+        let project = state["projects"].as_array().unwrap().iter().find(|p| p["id"] == env.project_id.as_str()).unwrap();
+        assert!(project.get("executor_pool").is_none());
     }
+
 }
 
-/// 專家（specialist）的 API 約定：track 必填、只有使用者能改 track、role_policy 只有使用者能改、hire 受執行者池限制。
+/// 專家（specialist）的 API 約定：track 必填、只有使用者能改 track、role_policy 只有使用者能改；hire 由使用者或 manager 決定 kind／model／effort。
 #[cfg(test)]
 mod specialist_role_tests {
     use super::*;
@@ -18581,7 +18488,7 @@ mod specialist_role_tests {
     async fn expert_project(env: &crate::testing::Env) -> (String, String) {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let add = |name: &'static str| {
@@ -18659,26 +18566,21 @@ mod specialist_role_tests {
     }
 
     #[tokio::test]
-    async fn manager_hires_a_specialist_inside_the_executor_pool() {
+    async fn manager_hires_specialists_without_pool_limits() {
         let env = crate::testing::env().await;
         let (manager, _member) = expert_project(&env).await;
-        let pool = serde_json::from_value::<PatchProject>(json!({"executor_pool": [{"id": "claude-1", "kind": "claude", "model": "", "count": 1}]})).unwrap();
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(pool)).await.map_err(|e| format!("{e:?}")).unwrap();
         let hire = |v: Value| hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(manager.clone())), Json(serde_json::from_value::<HireMember>(v).unwrap()));
 
         let err = hire(json!({"name": "spec-a", "kind": "claude", "role": "specialist"})).await.err().unwrap();
         assert!(matches!(err, LcError::BadValue(ref v) if v["error"] == "track_required"), "{err:?}");
 
-        let res = hire(json!({"name": "spec-a", "kind": "claude", "role": "specialist", "track": "infra"})).await.map_err(|e| format!("{e:?}")).unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        assert_eq!(body["role"], "specialist");
-        let b = db::bot(&env.app.db, body["bot_id"].as_str().unwrap()).await.unwrap().unwrap();
-        assert_eq!((b.role.as_deref(), b.track.as_deref()), (Some("specialist"), Some("infra")));
-
-        // 專家與執行者共用同一個執行者池（條目 claude-1 只有 1 顆）：已被專家佔滿
-        let err = hire(json!({"name": "spec-b", "kind": "claude"})).await.err().unwrap();
-        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
+        for (name, track) in [("spec-a", "infra"), ("spec-b", "testing")] {
+            let response = hire(json!({"name": name, "kind": "claude", "role": "specialist", "track": track})).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&bytes).unwrap();
+            let bot = db::bot(&env.app.db, body["bot_id"].as_str().unwrap()).await.unwrap().unwrap();
+            assert_eq!((bot.role.as_deref(), bot.track.as_deref()), (Some("specialist"), Some(track)));
+        }
     }
 
     #[tokio::test]
@@ -18717,7 +18619,7 @@ mod runtime_policy_api_tests {
     async fn project_with_bot(env: &crate::testing::Env, kind: &str, model: &str) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let res = create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(json!({"name": "rp-bot", "kind": kind, "model": model})).unwrap())).await.unwrap();
@@ -18782,17 +18684,12 @@ mod hire_fork_api_tests {
     async fn expert_project(env: &crate::testing::Env) -> String {
         let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         env.app.cfg.update(move |cfg| {
-            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
             Ok(())
         }).await.unwrap();
         let manager = add_bot(env, &env.project_id, "claude", false).await;
         let set_manager = serde_json::from_value::<PatchBot>(json!({"role": "manager"})).unwrap();
         patch_bot(State(env.app.clone()), Path(manager.clone()), Extension(RequestPrincipal::User), Json(set_manager)).await.map_err(|e| format!("{e:?}")).unwrap();
-        let pool = serde_json::from_value::<PatchProject>(json!({"executor_pool": [
-            {"id": "claude-1", "kind": "claude", "model": "", "count": 5},
-            {"id": "codex-1", "kind": "codex", "model": "", "count": 5}
-        ]})).unwrap();
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(pool)).await.map_err(|e| format!("{e:?}")).unwrap();
         crate::projection::update_and_project(&env.app.cfg, &env.app.db, |cfg| {
             for p in cfg.projects.iter_mut() {
                 p.mode = "expert".into();
@@ -18875,28 +18772,19 @@ mod hire_fork_api_tests {
     }
 
     #[tokio::test]
-    async fn a_fork_member_counts_toward_the_executor_pool_and_remembers_its_source() {
+    async fn a_fork_member_remembers_its_source_and_manager_can_hire_another() {
         let env = crate::testing::env().await;
         let manager = expert_project(&env).await;
         let source = add_bot(&env, &env.project_id, "codex", true).await;
-        // 條目 codex-1 只有 1 顆：容量縮成 1。
-        let pool = serde_json::from_value::<PatchProject>(json!({"executor_pool": [
-            {"id": "claude-1", "kind": "claude", "model": "", "count": 5},
-            {"id": "codex-1", "kind": "codex", "model": "", "count": 1}
-        ]})).unwrap();
-        patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(pool)).await.map_err(|e| format!("{e:?}")).unwrap();
 
-        let res = hire(&env, &manager, json!({"name": "forked", "kind": "codex", "fork_from": source})).await.map_err(|e| format!("{e:?}")).unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let response = hire(&env, &manager, json!({"name": "forked", "kind": "codex", "fork_from": source})).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
         let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
         let cfg_bot = env.app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.id.as_deref() == Some(id.as_str())).cloned().unwrap();
-        assert_eq!((cfg_bot.pool_entry.as_deref(), cfg_bot.fork_from.as_deref()), (Some("codex-1"), Some(source.as_str())));
+        assert_eq!(cfg_bot.fork_from.as_deref(), Some(source.as_str()));
 
-        // 條目只有 1 顆：fork 出來的已經佔滿，第二次增聘（不論 fork 與否）都是 409。
-        let err = hire(&env, &manager, json!({"name": "again", "kind": "codex"})).await.err().unwrap();
-        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
-        let err = hire(&env, &manager, json!({"name": "again2", "kind": "codex", "fork_from": source})).await.err().unwrap();
-        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "executor_pool_full"), "{err:?}");
+        let another = hire(&env, &manager, json!({"name": "again", "kind": "codex", "model": "gpt-6.1-sol", "effort": "high"})).await.unwrap();
+        assert_eq!(another.status(), StatusCode::OK);
     }
 }
 

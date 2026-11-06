@@ -203,7 +203,7 @@ pub async fn ensure_env(
             let pidx = match pidx {
                 Some(i) => i,
                 None => {
-                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                         handed_off_to: None,
                         id: Some(fresh_project.clone()),
                         path: p2.clone(),
@@ -250,8 +250,7 @@ pub async fn ensure_env(
                         herdr_session: None,
                         create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER.into()),
                         create_fingerprint: None,
-                        pool_entry: None,
-                    });
+                                });
                     proj.bots.len() - 1
                 }
             };
@@ -1117,7 +1116,7 @@ mod tests {
     }
 
     fn cfg_project(id: &str, path: &std::path::Path, label: &str, bots: Vec<BotCfg>) -> ProjectCfg {
-        ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+        ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
             handed_off_to: None,
             id: Some(id.into()),
             path: crate::config::canonical_path(&path.to_string_lossy()).unwrap(),

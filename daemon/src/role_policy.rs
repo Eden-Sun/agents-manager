@@ -1,8 +1,8 @@
 //! 角色 policy（`projects.role_policy_json`）與 bot 執行期覆寫（`bots.runtime_override_json`）的驗證（B 期，User-only 寫入）。
-//! 形狀與合併規則在 `am_base::runtime_policy`；這裡只做看 kind／model 的部分：context 視窗（與池條目同一套規則）、
+//! 形狀與合併規則在 `am_base::runtime_policy`；這裡只做看 kind／model 的部分：context 視窗、
 //! 保溫分鐘要小於該 kind 的 TTL。錯誤碼：`invalid_runtime_policy`（帶 `field`），context 另有 `context_*`。
 
-use crate::executor_pool::{context_window, CLAUDE_BASE_WINDOW, CONTEXT_MIN};
+use am_config::runtime_params::{context_window, CLAUDE_BASE_WINDOW, CONTEXT_MIN};
 use crate::lifecycle::LcError;
 use am_base::runtime_policy::RuntimeSettings;
 use serde_json::{json, Value};
@@ -71,14 +71,14 @@ fn with_role(e: LcError, role: &str) -> LcError {
     }
 }
 
-/// bot 覆寫：看得到 kind／model，所以 context 用該 kind 的視窗規則（與池條目相同），保溫分鐘要小於該 kind 的 TTL。
+/// bot 覆寫：看得到 kind／model，所以 context 用該 kind 的視窗規則；保溫分鐘要小於該 kind 的 TTL。
 pub fn validate_bot(kind: &str, model: &str, v: &Value) -> Result<Value, LcError> {
     let s = parse(v)?;
     if let Some(t) = s.context_tokens {
         if kind == "agy" {
             return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "context_unsupported", "kind": "agy"})));
         }
-        let window = context_window(kind, model);
+    let window = context_window(kind);
         if t < CONTEXT_MIN || t > window {
             return Err(LcError::BadValue(json!({
                 "error": "bad_request", "reason": "context_out_of_range", "field": "context_tokens", "min": CONTEXT_MIN, "max": window, "got": t,

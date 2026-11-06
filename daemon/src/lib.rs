@@ -267,7 +267,6 @@ pub(crate) mod app_ports_p8;
 mod app_ports_r2a8;
 mod agy_live;
 mod grok_live;
-mod executor_pool;
 mod role_policy;
 mod fork;
 mod remote_perms;
