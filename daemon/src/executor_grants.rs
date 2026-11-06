@@ -551,4 +551,28 @@ mod tests {
         sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&fx.exec.id).execute(&app.db).await.unwrap();
         assert!(matches!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await, Err(RelayDenied::Denied(r)) if r == "member_disabled"));
     }
+
+    /// B 的專家群集派工：排隊中的群集 turn 撤銷時一樣收回；還沒認領成員的 pending 群集請求，下一輪 reconcile 標 failed、不改派。
+    #[tokio::test]
+    async fn revoking_withdraws_specialist_cluster_dispatches() {
+        let fx = fixture().await;
+        let app = &fx.env.app;
+        put(&fx, RequestPrincipal::User, &[(&fx.spec, &fx.exec)]).await.unwrap();
+        let queued_req = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-q','do it','[]','pending',?,'any')")
+            .bind(&queued_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).execute(&app.db).await.unwrap();
+        let turn = queued_turn_from(&fx, &fx.spec, &fx.exec, &format!("relay-request:{queued_req}"), "queued").await;
+        let pending_req = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'cl-p','do it','[]','pending',?,'any')")
+            .bind(&pending_req).bind(&fx.spec.id).bind(&fx.exec.id).bind(db::now()).execute(&app.db).await.unwrap();
+        put(&fx, RequestPrincipal::User, &[]).await.unwrap();
+        assert_eq!(turn_status(&fx, &turn).await, "failed", "排隊中的群集派工被收回");
+        crate::runners::relay_requests::sweep(app).await;
+        for rid in [&queued_req, &pending_req] {
+            let (state, to): (String, String) = sqlx::query_as("SELECT state,to_bot_id FROM relay_requests WHERE id=?").bind(rid).fetch_one(&app.db).await.unwrap();
+            assert_eq!(state, "failed", "{rid}");
+            assert_eq!(to, fx.exec.id, "不改派給未授權的成員");
+        }
+    }
 }
+
