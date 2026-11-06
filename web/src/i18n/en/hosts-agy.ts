@@ -129,6 +129,7 @@ const dict: Dict = {
   '上': 'top',
   '下': 'bottom',
   '{label} 剩餘額度（{edge}邊框）': '{label} remaining quota ({edge} border)',
+  '無資料': 'No data',
   '無上限': 'No limit',
   '暫時停用 {name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）': 'Temporarily disable {name} (bots below will be hidden from sidebar, automatically restored after quota resets)',
   '已停用': 'Disabled',

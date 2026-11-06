@@ -415,7 +415,7 @@ function Gauge({
 }: {
   entry: QuotaEntry
   host: string
-  /** 手機：全部窗口直向排列，使用較窄量表。 */
+  /** 手機：只顯示 7d，使用較窄量表。 */
   compact: boolean
   focused: boolean
   open: boolean
@@ -435,7 +435,9 @@ function Gauge({
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
-  if (five === null && seven === null && fable === null) {
+  if (compact) {
+    windows = [windowBar('7d', seven, q?.seven_day, q?.updated_at)]
+  } else if (five === null && seven === null && fable === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
   } else {
     windows = []
@@ -462,7 +464,9 @@ function Gauge({
           {soon ?? windowText(w.name, t)}
           {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
         </span>
-        <Bar
+        {compact && w.pct === null ? (
+          <span className="quota-bar-row"><span className="quota-bar-pct nodata">{t('無資料')}</span></span>
+        ) : <Bar
           pct={w.pct}
           low={w.low}
           critical={w.critical}
@@ -470,7 +474,7 @@ function Gauge({
           markTitle={left === null ? undefined : t('{name} 還有 {back} 重置', { name: w.name, back: fmtLeft(left) })}
           unit={compact || countdown}
           hit={hit}
-        />
+        />}
       </span>
     )
   }
