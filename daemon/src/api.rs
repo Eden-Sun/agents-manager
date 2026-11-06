@@ -7789,23 +7789,27 @@ async fn resolve_relay_target(
     Ok(Json(json!({"to_bot_id":bot,"to_run_id":run,"to_agent":agent.as_ref().or(pane.as_ref())})))
 }
 
-/// `bot:cluster:<名稱>`：只有 manager（或代班中的副管理者）可對群集派工；挑同群集閒置、manager_use=1 的成員，
-/// 都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，等第一個閒下來的成員接手。
+/// `bot:cluster:<名稱>`：manager（或代班中的副管理者）可對群集派工；專家只能挑群集裡授權給自己的執行者（見 `expert_cluster::Scope`）。
+/// 挑閒置、manager_use=1 的成員，都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，
+/// 等第一個閒下來的成員接手。只有管理者側會順手啟動停著的成員；專家不會（授權不含 start）。
 pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &str) -> Result<Json<Value>, LcError> {
     let from = db::bot(&app.db, sender).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay sender".into()))?;
-    let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
-    if !is_manager && !crate::runners::relay_deputy::acting(app, &from.id).await {
+    let Some(scope) = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)? else {
         return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
-    }
+    };
     let clusters = crate::expert_cluster::project_clusters(app, &from.project_id).await.map_err(any_err)?;
-    let cluster = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
+    let full = clusters.iter().find(|c| c.name == name).ok_or_else(|| LcError::NotFound("cluster".into()))?;
+    let cluster = full.restricted(&scope);
+    if cluster.members.is_empty() {
+        return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_granted","message":"這個群集沒有授權給你的執行者：請管理者授權（agm grant）或改送管理者"})));
+    }
     let chosen = match cluster.pick_idle() {
         Some(m) => Some((m.id.clone(), true)),
         None => {
-            // 沒有閒置成員：先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
-            crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await;
+            // 沒有閒置成員：管理者側先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
+            if scope.may_start() { crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await; }
             cluster.members.iter().filter(|m| m.manager_use && (m.running || m.starting)).map(|m| m.id.clone()).next()
-                .or_else(|| cluster.pick_to_start().map(|m| m.id.clone()))
+                .or_else(|| if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use).map(|m| m.id.clone()).next())
                 .map(|id| (id, false))
         }
@@ -7917,12 +7921,13 @@ async fn prompt_bot(
         check_relay_policy(&app, sender, &id).await?;
         if let Some(name) = &cluster {
             let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
-            let is_manager = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
-            if !is_manager && !crate::runners::relay_deputy::acting(&app, &from.id).await {
+            let Some(scope) = crate::expert_cluster::sender_scope(&app, &from).await.map_err(any_err)? else {
                 return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
-            }
+            };
             let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
             if !clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id)) { return Err(LcError::Bad("target is not a member of that cluster".into())); }
+            // 專家：目標必須是授權給它的成員（check_relay_policy 已核過，這裡明確擋群集越界）。
+            if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_granted"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
         let request_id = db::ulid();
