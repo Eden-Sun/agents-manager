@@ -79,3 +79,26 @@ test('一次性碼前面有寬字：格子位置照欄算', () => {
   const [c] = codesOnRow(row, 0)
   assert.deepEqual([c.start.x, c.end.x], [4, 12])
 })
+
+test('中文句子裡的網址：在全形標點前切開（#2073）', () => {
+  const wide = (s: string, cols: number): CellRow => {
+    const r: CellRow = []
+    for (const ch of s) {
+      r.push(ch)
+      if (ch.charCodeAt(0) > 0x2e80) r.push('')
+    }
+    while (r.length < cols) r.push(' ')
+    return r
+  }
+  for (const [line, url] of [
+    ['已修好，見 https://github.com/a/b/issues/1，已經合併。', 'https://github.com/a/b/issues/1'],
+    ['網址 https://x.example/login。', 'https://x.example/login'],
+    ['（https://x.example/a）、https://x.example/b！', 'https://x.example/a'],
+    ['「https://x.example/q?a=1」：好', 'https://x.example/q?a=1'],
+  ] as const) {
+    const row = wide(line, 100)
+    const [l] = linksOnRow((y) => (y === 0 ? row : undefined), 0)
+    assert.equal(l.url, url, line)
+    assert.equal(row.slice(l.start.x, l.end.x + 1).join(''), url, line)
+  }
+})

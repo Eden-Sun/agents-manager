@@ -46,9 +46,6 @@ const STREAM_RETRY_MS = 5_000
 const AUTOWRAP_ON = '\x1b[?7h'
 const AUTOWRAP_OFF = '\x1b[?7l'
 
-/** 同 `termLinks`：終端裡的 URL 點一下複製（多半是一次性登入連結）。 */
-const URL_RE = /https?:\/\/[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]+/g
-
 /** base64 → bytes（不轉成字串：UTF-8 多位元組字與 ANSI 控制序列交給 xterm 解）。 */
 function decodeBase64(s: string): Uint8Array {
   const bin = atob(s)
@@ -199,26 +196,6 @@ export function HostShellXterm({
     const onBlur = () => cb.current.onTyping(false)
     ta?.addEventListener('focus', onFocus)
     ta?.addEventListener('blur', onBlur)
-
-    term.registerLinkProvider({
-      provideLinks(y, callback) {
-        const line = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? ''
-        const links: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string; activate: () => void }[] = []
-        for (const m of line.matchAll(URL_RE)) {
-          const start = (m.index ?? 0) + 1
-          links.push({
-            range: { start: { x: start, y }, end: { x: start + m[0].length - 1, y } },
-            text: m[0],
-            activate: () => {
-              void copyText(m[0]).then((ok) => {
-                if (!ok) useStore.getState().notify('error', t('複製失敗，請手動選取網址'))
-              })
-            },
-          })
-        }
-        callback(links.length > 0 ? links : undefined)
-      },
-    })
 
     /** 最後收到的整張畫面（herdr 的文字）；尺寸變了就拿它重畫。 */
     let lastText = ''

@@ -23,7 +23,8 @@ export interface FoundLink {
 
 /** 往上下最多接幾列（避免整個畫面都是滿列時掃太遠）。 */
 const MAX_SPAN = 12
-const URL_RE = /https?:\/\/[^\s"'<>`]+/g
+// 跟 `termPieces` 同一組排除字元：中文句子裡網址後面常直接接全形標點或中文（`…/1，已經合併。`），那些不算網址（#2073）。
+const URL_RE = /https?:\/\/[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]+/g
 
 /** 這一列用到第幾格（含寬字的後半）；全空白是 0。 */
 function usedWidth(row: CellRow): number {
