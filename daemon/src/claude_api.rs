@@ -676,9 +676,9 @@ fn settings_json(cfg: &ConfigFile) -> Value {
     let uses: Vec<Value> = CLAUDE_API_USES
         .iter()
         .map(|d| {
-            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour });
+            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default });
             json!({
-                "id": d.id, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour,
+                "id": d.id, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
                 "default_model": d.model, "default_effort": d.effort, "default_max_per_hour": d.max_per_hour,
                 "legacy_section": d.legacy_section,
             })
@@ -704,6 +704,7 @@ pub(crate) struct UseBody {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub max_per_hour: Option<u32>,
+    pub auto: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -729,6 +730,9 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
             }
         }
         // changelog_translate 的 0＝不上限（#1948）；其他用途仍要求 1..=1000。
+        if u.auto.is_some() && CLAUDE_API_USES.iter().find(|d| d.id == id).is_some_and(|d| d.auto_default.is_none()) {
+            return Err(LcError::Bad(format!("{id} has no auto switch")));
+        }
         let floor = if id == "changelog_translate" { 0 } else { 1 };
         if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
             return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
@@ -760,8 +764,11 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
             continue;
         }
         let entry = cfg.claude_api.uses.entry(id.clone()).or_default();
+        if let Some(v) = u.auto {
+            entry.auto = Some(v);
+        }
         if let Some(v) = u.enabled {
-            entry.enabled = v;
+            entry.enabled = Some(v);
         }
         if let Some(v) = u.model.as_deref() {
             entry.model = v.trim().to_string();
@@ -1048,6 +1055,22 @@ mod tests {
         let fake = Fake::new(vec![ok("{}", 1, 1)]);
         app.claude_api.set_client(fake);
         complete(&app, req("changelog_translate")).await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn message_translate_auto_switch_defaults_on_and_persists() {
+        let (app, dir) = app_with_key().await;
+        let find = |v: &Value, id: &str| v["uses"].as_array().unwrap().iter().find(|u| u["id"] == id).unwrap().clone();
+        let first = get_settings(State(app.clone())).await.0;
+        assert_eq!(find(&first, "message_translate")["auto"], json!(true), "預設開");
+        assert_eq!(find(&first, "changelog_review")["auto"], Value::Null, "沒有自動開關的用途回 null");
+        let off = put(&app, json!({"token": "sk-ant-test-0006", "uses": {"message_translate": {"auto": false}}})).await.unwrap().0;
+        assert_eq!(find(&off, "message_translate")["auto"], json!(false));
+        assert_eq!(app.cfg.get().await.claude_api.uses["message_translate"].auto, Some(false));
+        let on = put(&app, json!({"uses": {"message_translate": {"auto": true}}})).await.unwrap().0;
+        assert_eq!(find(&on, "message_translate")["auto"], json!(true));
+        assert!(matches!(put(&app, json!({"uses": {"changelog_review": {"auto": true}}})).await, Err(LcError::Bad(_))));
         std::fs::remove_dir_all(&dir).ok();
     }
 

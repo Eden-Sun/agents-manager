@@ -1446,3 +1446,4 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **跨重整**：「選了看譯文」的 msg id 存 localStorage `am.msgTranslate.want`（最近 500 則，超過丟最舊；讀寫都 try/catch）。重整後這些訊息掛載時自動呼叫 `translateMessage`（daemon 有檔案快取，命中不扣費，費用行照常寫「快取，這次未扣費」）；載入中顯示原文＋按鈕「翻譯中…」。
 - **按「⇄ 原文」**：從清單移除並維持原文（重整後也是原文、按鈕寫「翻譯」），除非使用者再按。
 - **失敗不重試**：自動翻同一則在這次頁面生命週期只試一次，失敗不跳錯誤提示，按鈕回「翻譯」讓使用者自己按；手動按的失敗照舊跳提示。
+- **自動翻譯英文訊息（2026-11-06，使用者：「判斷是英文訊息時自動用 API 翻譯，我就不用手動按」）**：開關在 daemon 設定 `[claude_api.uses.message_translate] auto`（預設 true，各裝置一致，設定頁該用途旁有切換）；用途本身未啟用、沒 key、設定讀不到時不動作。只自動翻「新到的」與「對話最後 `AUTO_TRANSLATE_RECENT`（10）則」、非串流中（`!incomplete`）、符合原本 eligible 的 assistant 英文訊息，不回填整段歷史；同一則本頁只自動試一次（`claimAutoTranslate`），翻成後照手動一樣記進 `am.msgTranslate.want`。使用者手動點回原文的記進 localStorage `am.msgTranslate.declined`（最近 500 則），不再自動翻回去，再點「翻譯」才解除。自動翻失敗不跳錯誤、停在可手動重試的「翻譯」；累計失敗 3 次後本頁不再自動翻新的（超過花費上限時不轟炸）。

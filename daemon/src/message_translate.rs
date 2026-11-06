@@ -196,7 +196,7 @@ mod tests {
                 c.claude_api.key_file = key;
                 if enabled {
                     c.claude_api.enabled = true;
-                    c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: true, ..Default::default() });
+                    c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), ..Default::default() });
                 }
                 Ok(())
             })

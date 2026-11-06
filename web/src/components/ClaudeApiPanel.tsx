@@ -36,7 +36,8 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiUse): boolean {
     (draft.enabled ?? saved.enabled) !== saved.enabled ||
     (draft.model ?? saved.model) !== saved.model ||
     (draft.effort ?? saved.effort) !== saved.effort ||
-    (draft.max_per_hour ?? saved.max_per_hour) !== saved.max_per_hour
+    (draft.max_per_hour ?? saved.max_per_hour) !== saved.max_per_hour ||
+    (draft.auto ?? saved.auto) !== saved.auto
   )
 }
 
@@ -173,6 +174,12 @@ export function ClaudeApiPanel() {
                 <input type="checkbox" checked={on} disabled={!willHaveKey && !on} onChange={(e) => patchUse(u.id, { enabled: e.target.checked })} />
                 <span>{t('啟用')}</span>
               </label>
+              {u.auto !== null ? (
+                <label className="claude-api-switch" data-testid={`claude-api-auto-${u.id}`}>
+                  <input type="checkbox" checked={d.auto ?? u.auto} onChange={(e) => patchUse(u.id, { auto: e.target.checked })} />
+                  <span>{t('自動翻譯英文訊息（只翻新到的與對話最後 10 則，每則一次；各裝置共用）')}</span>
+                </label>
+              ) : null}
               <div className="claude-api-use-fields">
                 <label className="field">
                   <span>{t('模型')}</span>

@@ -190,3 +190,19 @@ test('已有呼叫記錄時保留帳表，不顯示空帳本診斷', async () =>
   assert.equal(root.querySelector('[data-testid=claude-api-empty-ledger]'), null)
   assert.equal(root.querySelectorAll('#api-book tbody tr').length, 1)
 })
+
+test('對話訊息翻譯有「自動翻譯英文訊息」切換（預設開）；關掉只送 auto，其他用途沒有這個切換', async () => {
+  const puts: unknown[] = []
+  const tr = { id: 'message_translate', label: '對話訊息翻譯', enabled: true, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: null, auto: true }
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: [...uses(false), tr] }), puts)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.equal(root.querySelector('fieldset[data-use=changelog_review] [data-testid^=claude-api-auto]'), null)
+  const box = root.querySelector<HTMLInputElement>('fieldset[data-use=message_translate] [data-testid=claude-api-auto-message_translate] input')!
+  assert.ok(box.checked, '預設開')
+  box.click()
+  await settle()
+  root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  await settle()
+  assert.deepEqual(puts, [{ enabled: true, uses: { message_translate: { auto: false } } }])
+})
