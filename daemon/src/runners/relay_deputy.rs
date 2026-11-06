@@ -308,6 +308,8 @@ mod tests {
         // 送達授權：asker（specialist）本來不能找 specialist／顧問以外，但這是改派來的。
         sqlx::query("UPDATE bots SET role='specialist', track='x' WHERE id=?").bind(&f.deputy).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE bot_id=?").bind(format!("{}:local:expert:specialist", f.env.project_id)).bind(&f.deputy).execute(&app.db).await.unwrap();
+        // 專家派工開關關掉：這裡只驗代班本身給的派工權限（開著時專家本來就能派給執行者）。
+        sqlx::query("UPDATE projects SET specialist_dispatch=0 WHERE id=?").bind(&f.env.project_id).execute(&app.db).await.unwrap();
         assert!(relay_prompt_allowed(app, &f.asker, &f.deputy, Admission::Deliver).await.is_ok());
         // 代班中：可對執行者派工。
         assert!(acting(app, &f.deputy).await);

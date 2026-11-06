@@ -3,7 +3,7 @@ import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { ExecutorPoolEditor } from './ExecutorPoolEditor'
 import { ProjectDeputyEditor } from './ProjectDeputyEditor'
-import { ProjectExecutorGrantsEditor } from './ProjectExecutorGrantsEditor'
+import { ProjectSpecialistDispatchEditor } from './ProjectSpecialistDispatchEditor'
 import { RolePolicyEditor } from './RolePolicyEditor'
 import { SaveGroupProvider, useProjectSaveGroup } from './projectSaveGroup'
 
@@ -15,7 +15,7 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   const patchProject = useStore((s) => s.patchProject)
   const [manager, setManager] = useState('')
   const [modeDraft, setModeDraft] = useState<'expert' | 'parent_child' | null>(null)
-  // 執行者池、副管理者、執行者授權、角色設定合併成一顆儲存：一次 PATCH 送出有變更的區塊，授權在 PATCH 之後打自己的 PUT。
+  // 執行者池、副管理者、角色設定合併成一顆儲存：一次 PATCH 送出有變更的區塊。
   const group = useProjectSaveGroup((patch) => patchProject(projectId, patch))
 
   if (!project) return null
@@ -70,7 +70,7 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
           <SaveGroupProvider value={group.value}>
             <ExecutorPoolEditor project={project} bots={bots} />
             <ProjectDeputyEditor project={project} bots={bots} />
-            <ProjectExecutorGrantsEditor project={project} bots={bots} />
+            <ProjectSpecialistDispatchEditor project={project} />
             <RolePolicyEditor project={project} />
             <div className="rp-savebar project-savebar">
               <span className="hint">

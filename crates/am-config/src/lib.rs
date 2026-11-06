@@ -336,17 +336,7 @@ pub const DEPUTY_MIN_AFTER_SEC: u32 = 60;
 pub const DEPUTY_DEFAULT_AFTER_SEC: u32 = 180;
 fn default_deputy_after_sec() -> u32 { DEPUTY_DEFAULT_AFTER_SEC }
 
-/// 專家模式執行者授權（使用者 2026-11-06 方案 c）：管理者（或使用者）把 `executor` 授權給 `specialist`，
-/// 專家就能直接對那顆執行者派工、驗收結果。只涵蓋派工，不給 start／restart／hire／stop／改角色／再授權。
-/// `track` 是授權當時專家的 track；專家換 track 就失效。`granted_by` 是 `"user"` 或管理者 bot id，`granted_at` 為 RFC3339 UTC。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutorGrant {
-    pub specialist: String,
-    pub executor: String,
-    pub track: String,
-    pub granted_by: String,
-    pub granted_at: String,
-}
+fn is_true(v: &bool) -> bool { *v }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
@@ -366,9 +356,11 @@ pub struct ProjectCfg {
     /// 專家模式副管理者（管理者忙太久時代收排隊中的請求，見 `daemon/src/runners/relay_deputy.rs`）；沒設＝不啟用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deputy: Option<DeputyCfg>,
-    /// 專家模式執行者授權（見 [`ExecutorGrant`]）；一顆執行者同時最多授權給一位專家。不合格的由 [`ProjectCfg::clear_invalid_grants`] 清掉。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub executor_grants: Vec<ExecutorGrant>,
+    /// 專家模式總開關（使用者 2026-11-06）：開著時，同一 expert 專案的存活頂層 specialist 可直接派工給任何存活頂層
+    /// executor（含群集）；關掉＝只有管理者／代班中的副管理者能派。預設開；開著時不寫進檔案。
+    /// 舊版逐對授權留下的 `[[projects.executor_grants]]` 當退役鍵忽略（見 `is_retired_key`）。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub specialist_dispatch: bool,
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -388,24 +380,6 @@ impl ProjectCfg {
         if !ok { self.deputy = None; }
         !ok
     }
-
-    /// 清掉不再合格的執行者授權（同 `clear_invalid_deputy`，由 `update_and_project` 在每次 config 變更後呼叫）；回傳有沒有清。
-    /// 合格條件：專案是 expert；專家是本專案的頂層 bot、role=specialist、track 仍等於授權時的 track；
-    /// 執行者是本專案的頂層 bot、role=executor；同一顆執行者只留第一筆（排他）。config 的 `bots` 只有頂層 bot（child 不進 config）。
-    pub fn clear_invalid_grants(&mut self) -> bool {
-        if self.executor_grants.is_empty() { return false; }
-        let before = self.executor_grants.len();
-        let expert = self.mode == "expert";
-        let bots = &self.bots;
-        let find = |id: &str| bots.iter().find(|b| b.id.as_deref() == Some(id));
-        let mut seen = std::collections::BTreeSet::new();
-        self.executor_grants.retain(|g| {
-            let specialist_ok = find(&g.specialist).is_some_and(|b| b.role.as_deref() == Some("specialist") && b.track.as_deref() == Some(g.track.as_str()));
-            let executor_ok = find(&g.executor).is_some_and(|b| b.role.as_deref() == Some("executor"));
-            expert && specialist_ok && executor_ok && seen.insert(g.executor.clone())
-        });
-        self.executor_grants.len() != before
-    }
 }
 
 impl Default for ProjectCfg {
@@ -418,7 +392,7 @@ impl Default for ProjectCfg {
             executor_pool: Vec::new(),
             role_policy: std::collections::BTreeMap::new(),
             deputy: None,
-            executor_grants: Vec::new(),
+            specialist_dispatch: true,
             host: default_host(),
             bots: Vec::new(),
             handed_off_to: None,
@@ -563,7 +537,7 @@ pub fn warn_host_baseline_once(cfg: &ConfigFile) -> usize {
 }
 
 #[cfg(test)]
-mod executor_grant_cfg_tests {
+mod specialist_dispatch_cfg_tests {
     use super::*;
 
     const TEXT: &str = r#"
@@ -586,69 +560,24 @@ name = "spec"
 kind = "claude"
 role = "specialist"
 track = "db"
-
-[[projects.bots]]
-id = "E1"
-name = "exec"
-kind = "codex"
-role = "executor"
-
-[[projects.bots]]
-id = "S2"
-name = "spec2"
-kind = "claude"
-role = "specialist"
-track = "ui"
 "#;
 
-    fn grant(specialist: &str, executor: &str, track: &str) -> ExecutorGrant {
-        ExecutorGrant { specialist: specialist.into(), executor: executor.into(), track: track.into(), granted_by: "user".into(), granted_at: "2026-11-06T00:00:00Z".into() }
-    }
-
+    /// 預設開；開著時不寫進檔案，關掉才寫 `specialist_dispatch = false`；舊版逐對授權留下的鍵是退役鍵，忽略且不警告。
     #[test]
-    fn grants_round_trip_through_toml_and_are_omitted_when_empty() {
+    fn switch_defaults_on_and_leftover_grants_are_retired() {
         let (cfg, unknown) = parse_config(TEXT).unwrap();
-        assert!(unknown.is_empty(), "{unknown:?}");
-        assert_eq!(cfg.projects[0].executor_grants, vec![grant("S1", "E1", "db")]);
+        assert!(cfg.projects[0].specialist_dispatch);
+        assert!(!unknown.is_empty(), "舊授權鍵被 serde 忽略");
+        assert!(unknown.iter().all(|k| is_retired_key(k)), "{unknown:?}");
         let text = toml::to_string_pretty(&cfg).unwrap();
-        assert!(text.contains("[[projects.executor_grants]]"), "{text}");
+        assert!(!text.contains("specialist_dispatch"), "{text}");
+        let mut off = cfg.clone();
+        off.projects[0].specialist_dispatch = false;
+        let text = toml::to_string_pretty(&off).unwrap();
+        assert!(text.contains("specialist_dispatch = false"), "{text}");
         let again: ConfigFile = toml::from_str(&text).unwrap();
-        assert_eq!(again.projects[0].executor_grants, cfg.projects[0].executor_grants);
-        let mut empty = cfg.clone();
-        empty.projects[0].executor_grants.clear();
-        assert!(!toml::to_string_pretty(&empty).unwrap().contains("executor_grants"));
-    }
-
-    #[test]
-    fn invalid_grants_are_cleared() {
-        let (cfg, _) = parse_config(TEXT).unwrap();
-        let base = cfg.projects[0].clone();
-        let mut p = base.clone();
-        assert!(!p.clear_invalid_grants(), "valid grant stays");
-        assert_eq!(p.executor_grants.len(), 1);
-
-        // 排他：同一顆執行者只留第一筆。
-        let mut p = base.clone();
-        p.executor_grants.push(grant("S2", "E1", "ui"));
-        assert!(p.clear_invalid_grants());
-        assert_eq!(p.executor_grants, vec![grant("S1", "E1", "db")]);
-
-        // 專家換 track、改角色、被刪；執行者改角色、被刪；專案離開 expert：都清掉。
-        let cases: Vec<Box<dyn Fn(&mut ProjectCfg)>> = vec![
-            Box::new(|p| p.bots[0].track = Some("ui".into())),
-            Box::new(|p| p.bots[0].role = Some("advisor".into())),
-            Box::new(|p| { p.bots.remove(0); }),
-            Box::new(|p| p.bots[1].role = Some("advisor".into())),
-            Box::new(|p| { p.bots.remove(1); }),
-            Box::new(|p| p.mode = "parent_child".into()),
-            Box::new(|p| p.executor_grants[0].executor = "S2".into()),
-        ];
-        for (i, mutate) in cases.iter().enumerate() {
-            let mut p = base.clone();
-            mutate(&mut p);
-            assert!(p.clear_invalid_grants(), "case {i}");
-            assert!(p.executor_grants.is_empty(), "case {i}");
-        }
+        assert!(!again.projects[0].specialist_dispatch);
+        assert!(ProjectCfg::default().specialist_dispatch);
     }
 }
 
@@ -2253,10 +2182,13 @@ fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
 }
 
 /// daemon 自己以前寫進 config.toml、後來移除的鍵（舊檔裡還留著）：照樣忽略，但不是「打錯字或新版欄位」，不必每次開機都警告。
-/// 目前只有 bot 層級的 `instruction_files`（2026-10-02 移除，見 `api.rs` 的 `a_leftover_instruction_files_key_in_config_toml_is_ignored`）。
+/// bot 層級的 `instruction_files`（2026-10-02 移除，見 `api.rs` 的 `a_leftover_instruction_files_key_in_config_toml_is_ignored`）、
+/// 專案層級的 `executor_grants`（2026-11-06 改成 `specialist_dispatch` 開關）。
 fn is_retired_key(path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
+        // 專家模式逐對執行者授權（2026-11-06 改成總開關 `specialist_dispatch`）。
+        || matches!(parts.as_slice(), ["projects", i, "executor_grants", ..] if i.parse::<usize>().is_ok())
 }
 
 /// `exists()` follows symlinks, so it reports a dangling or looping link as absent even though
@@ -3227,7 +3159,7 @@ model = "gpt-6"
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|c| {
-                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(), id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        c.projects.push(ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                         Ok(())
                     })
                     .await

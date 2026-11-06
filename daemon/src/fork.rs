@@ -370,7 +370,7 @@ mod tests {
                 .cfg
                 .update(move |cfg| {
                     if cfg.projects.is_empty() {
-                        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, executor_grants: Default::default(),
+                        cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), executor_pool: Default::default(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                             handed_off_to: None,
                             id: Some(pid),
                             path: repo,

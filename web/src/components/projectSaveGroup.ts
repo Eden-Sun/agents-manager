@@ -12,10 +12,7 @@ export interface SavePart {
   valid: boolean
 }
 interface SaveFns {
-  /** 併進那一次 PATCH 的欄位；不走 PATCH 的區塊（執行者授權打自己的 PUT）不給。 */
-  patch?: () => PatchProjectInput
-  /** 不走 PATCH 的區塊：PATCH 之後各自送出；回 false＝失敗，草稿留著。 */
-  commit?: () => Promise<boolean>
+  patch: () => PatchProjectInput
   reset: () => void
 }
 interface Group {
@@ -62,22 +59,10 @@ export function useProjectSaveGroup(onSave: (patch: PatchProjectInput) => Promis
   const save = async () => {
     if (!canSave) return
     const patch: PatchProjectInput = {}
-    const patchKeys = dirty.filter(([k]) => fns.current[k]?.patch).map(([k]) => k)
-    const commitKeys = dirty.filter(([k]) => fns.current[k]?.commit).map(([k]) => k)
-    for (const k of patchKeys) Object.assign(patch, fns.current[k]?.patch?.())
+    for (const [k] of dirty) Object.assign(patch, fns.current[k]?.patch())
     setSaving(true)
-    try {
-      if (patchKeys.length > 0) {
-        const ok = await onSave(patch)
-        if (!ok) return
-        for (const k of patchKeys) fns.current[k]?.reset()
-      }
-      for (const k of commitKeys) {
-        if (await fns.current[k]?.commit?.()) fns.current[k]?.reset()
-      }
-    } finally {
-      setSaving(false)
-    }
+    const ok = await onSave(patch).finally(() => setSaving(false))
+    if (ok) for (const [k] of dirty) fns.current[k]?.reset()
   }
   const revert = () => {
     for (const [k] of dirty) fns.current[k]?.reset()

@@ -1564,67 +1564,6 @@ class ExpertBotCommandsTest(CliCase):
             self.ok("hire", "s1", "--kind", "claude", "--role", "specialist", "--track", "infra")
         self.assertEqual(FakeDaemon.seen[-1]["body"], {"name": "s1", "kind": "claude", "role": "specialist", "track": "infra"})
 
-    def _grant_env(self):
-        return patch.dict(os.environ, {"AM_BOT_ID": "bot-m", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"})
-
-    def _grant_routes(self, grants):
-        peers = [{"id": "b-m", "name": "mgr", "role": "manager"}, {"id": "b-s1", "name": "spec-db", "role": "specialist"},
-                 {"id": "b-s2", "name": "spec-ui", "role": "specialist"}, {"id": "b-e1", "name": "exec-1", "role": "executor"},
-                 {"id": "b-e2", "name": "exec-2", "role": "executor"}]
-        FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": peers})
-        FakeDaemon.routes["GET /api/state"] = (200, {"projects": [{"id": "p0", "executor_grants": [], "grants_revision": "r0"}, {"id": "p1", "executor_grants": grants, "grants_revision": "rev-p1"}]})
-        FakeDaemon.routes["PUT /api/projects/p1/executor-grants"] = (200, {"grants": [{"specialist": "b-s1", "executor": "b-e1", "track": "db"}]})
-
-    def test_grant_reads_current_grants_and_puts_the_whole_set_by_name_or_id(self):
-        self._grant_routes([{"specialist": "b-s2", "executor": "b-e2", "track": "ui"}])
-        with self._grant_env():
-            out = self.ok("grant", "spec-db", "b-e1")
-        put = FakeDaemon.seen[-1]
-        self.assertEqual((put["method"], put["path"], put["bot_id"]), ("PUT", "/api/projects/p1/executor-grants", "bot-m"))
-        self.assertEqual(put["body"], {"grants": [{"specialist": "b-s2", "executor": "b-e2"}, {"specialist": "b-s1", "executor": "b-e1"}], "revision": "rev-p1"})
-        self.assertEqual(out["grants"][0]["specialist_name"], "spec-db")
-        self.assertEqual(out["grants"][0]["executor_name"], "exec-1")
-
-    def test_grant_refuses_an_executor_already_granted_to_another_specialist(self):
-        self._grant_routes([{"specialist": "b-s2", "executor": "b-e1", "track": "ui"}])
-        with self._grant_env():
-            err = self.bad("grant", "spec-db", "exec-1")
-        self.assertEqual(err["error"], "executor_already_granted")
-        self.assertIn("agm revoke spec-ui exec-1", err["message"])
-        self.assertFalse(any(r["method"] == "PUT" for r in FakeDaemon.seen))
-
-    def test_revoke_drops_only_that_pair_and_unknown_pairs_are_errors(self):
-        self._grant_routes([{"specialist": "b-s1", "executor": "b-e1", "track": "db"}, {"specialist": "b-s2", "executor": "b-e2", "track": "ui"}])
-        with self._grant_env():
-            self.ok("revoke", "b-s1", "exec-1")
-            self.assertEqual(FakeDaemon.seen[-1]["body"], {"grants": [{"specialist": "b-s2", "executor": "b-e2"}], "revision": "rev-p1"})
-            self.assertEqual(self.bad("revoke", "spec-db", "exec-2")["error"], "grant_not_found")
-            self.assertEqual(self.bad("revoke", "nobody", "exec-2")["error"], "bot_not_found")
-
-    def test_grant_reports_a_stale_revision_as_retryable_and_does_not_resend(self):
-        self._grant_routes([])
-        FakeDaemon.routes["PUT /api/projects/p1/executor-grants"] = (409, {"error": "conflict", "reason": "grants_revision_conflict", "revision": "rev-new", "grants": []})
-        with self._grant_env():
-            err = self.bad("grant", "spec-db", "exec-1")
-        self.assertEqual(err["error"], "grants_revision_conflict")
-        self.assertIn("重跑", err["message"])
-        self.assertEqual(sum(1 for r in FakeDaemon.seen if r["method"] == "PUT"), 1, "不自動重送")
-
-    def test_old_daemon_without_revision_puts_without_it(self):
-        self._grant_routes([])
-        FakeDaemon.routes["GET /api/state"] = (200, {"projects": [{"id": "p1", "executor_grants": []}]})
-        with self._grant_env():
-            self.ok("grant", "spec-db", "exec-1")
-        self.assertNotIn("revision", FakeDaemon.seen[-1]["body"])
-
-    def test_grants_lists_this_projects_grants_with_names(self):
-        self._grant_routes([{"specialist": "b-s1", "executor": "b-e1", "track": "db"}])
-        with self._grant_env():
-            out = self.ok("grants")
-        self.assertEqual(out["project_id"], "p1")
-        self.assertEqual([(g["specialist_name"], g["executor_name"]) for g in out["grants"]], [("spec-db", "exec-1")])
-        self.assertTrue(all(r["bot_id"] == "bot-m" and r["token"] is None for r in FakeDaemon.seen))
-
     def test_bot_remote_without_daemon_url_does_not_guess(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
             self.assertEqual(self.bad("peers")["error"], "no_daemon_url")

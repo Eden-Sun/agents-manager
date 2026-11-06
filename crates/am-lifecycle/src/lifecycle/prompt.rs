@@ -428,8 +428,8 @@ pub struct RelaySrc<'a> {
     pub from: Option<&'a str>,
     pub unverified: bool,
     pub queue_class: QueueClass,
-    /// 這則派工的可信授權依據（daemon `relay_policy::relay_prompt_basis`：`grant:<專案>`／`deputy:<專案>`），寫進
-    /// `messages.relay_auth`；turn 變成可送出的那一句依它正向確認（`relay_grant`）。原本就不靠授權的派工是 `None`。
+    /// 這則派工的可信依據（daemon `relay_policy::relay_prompt_basis`：`specialist:<專案>`／`deputy:<專案>`），寫進
+    /// `messages.relay_auth`；turn 變成可送出的那一句依它正向確認（`relay_grant`）。原本就不靠依據的派工是 `None`。
     pub auth: Option<&'a str>,
 }
 
@@ -1233,7 +1233,7 @@ async fn prompt_inner(
     // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up)?;
-    // 專家派工的授權跟建 turn 同一句核對（`relay_grant`）：核權之後才提交的撤銷，這裡寫不進去。
+    // 專家派工的依據跟建 turn 同一句核對（`relay_grant`）：核權之後才提交的關閉開關／降級，這裡寫不進去。
     let inserted = sqlx::query(&format!(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          SELECT ?, ?, ?, 'web', 'in_flight', 'pending', ?, ?, ?, 0
@@ -1267,8 +1267,8 @@ async fn prompt_inner(
         tx.rollback().await.map_err(up)?;
         if !grant_ok {
             return Err(LcError::conflict(
-                "relay_grant_changed",
-                json!({ "retryable": true, "sent": false, "message": "專家對這顆執行者的授權已撤銷或已變更：沒有送出；請重新確認授權（agm grants）或改送管理者" }),
+                "relay_dispatch_changed",
+                json!({ "retryable": true, "sent": false, "message": "專家派工的依據已失效（開關已關、角色或所屬專案已變更）：沒有送出；請改送管理者" }),
             ));
         }
         return Err(LcError::conflict(

@@ -7,7 +7,7 @@ mod expert_peers;
 pub mod expert_cluster;
 mod expert_member;
 pub mod relay_policy;
-mod executor_grants;
+mod specialist_dispatch;
 mod pane_authority;
 pub mod runners;
 pub mod codex_reset;
