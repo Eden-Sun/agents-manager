@@ -3,7 +3,7 @@
 
 use super::*;
 use std::sync::Arc;
-use crate::runners::login_assist::{reserve, status, submit_code};
+use crate::runners::login_assist::{prune_dead, reserve, status, submit_code};
 use crate::testing as tt;
 use serde_json::Value;
 
@@ -233,6 +233,51 @@ async fn identity_login_reservations_serialize_open_and_release_when_closed() {
 
     forget(&env.app, "local", "w1:p1");
     assert!(reserve(&env.app, "local", "cc9").is_ok(), "closing a pane releases the identity");
+}
+
+/// 使用者先前按登入開了終端、面板關掉後找不到它：409 要指出那顆 pane，網頁才能把面板重開。
+/// 還在 reservation 階段（pane 尚未登記）沒有 pane 可指，照舊。
+#[tokio::test]
+async fn the_conflict_names_the_existing_login_pane_so_the_page_can_reopen_it() {
+    let env = tt::env().await;
+    let first = reserve(&env.app, "local", "cc9").unwrap();
+    let body = conflict(reserve(&env.app, "local", "cc9").map(|_| json!(null)));
+    assert_eq!(body["reason"], "identity_login_in_progress");
+    assert!(body.get("pane_id").is_none(), "pane 還沒登記：沒有 pane_id");
+
+    let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
+    first.register(&shell.pane_id, &shell.created_at, "claude");
+    let body = conflict(reserve(&env.app, "local", "cc9").map(|_| json!(null)));
+    assert_eq!(body["pane_id"], json!(shell.pane_id));
+    assert_eq!((body["host"].as_str(), body["kind"].as_str()), (Some("local"), Some("claude")));
+
+    // 活著的 pane 不會被 prune_dead 清掉，仍然擋。
+    prune_dead(&env.app, "local", "cc9").await;
+    assert!(is_registered(&env.app, "local", &shell.pane_id));
+    assert!(reserve(&env.app, "local", "cc9").is_err());
+}
+
+/// 登入 pane 的 shell 已經不在帳上（被收掉、或 pane id 被別的 shell 重用）：不能再把這個身份卡到逾時。
+#[tokio::test]
+async fn a_dead_login_pane_does_not_block_a_new_login() {
+    let env = tt::env().await;
+    // 登記了、但帳上沒有這顆 shell。
+    reserve(&env.app, "local", "cc9").unwrap().register("w1:p1", "shell-gone", "claude");
+    assert!(reserve(&env.app, "local", "cc9").is_err(), "reserve 本身不問 herdr，帳上有就擋");
+    prune_dead(&env.app, "local", "cc9").await;
+    assert!(!is_registered(&env.app, "local", "w1:p1"), "死 pane 順手忘掉");
+    assert!(reserve(&env.app, "local", "cc9").is_ok());
+
+    // pane id 被別的 shell 重用（created_at 對不上）。
+    let plain = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
+    reserve(&env.app, "local", "cc8").unwrap().register(&plain.pane_id, "some-other-shell", "claude");
+    prune_dead(&env.app, "local", "cc8").await;
+    assert!(reserve(&env.app, "local", "cc8").is_ok());
+
+    // 別的身份、別的主機不受影響。
+    reserve(&env.app, "local", "cc7").unwrap().register("w2:p2", "shell-gone", "claude");
+    prune_dead(&env.app, "local", "cc6").await;
+    assert!(is_registered(&env.app, "local", "w2:p2"));
 }
 
 #[tokio::test]

@@ -228,6 +228,7 @@ export default {
   '開 shell 並送出': 'Open shell and send',
   // components/AuthLoginAction.tsx
   '預設帳號': 'Default account',
+  '這個身份已有登入終端，已重新打開；接著完成授權就好': 'This identity already has a login terminal; reopened it. Just finish the authorization there.',
   '已在{where}開終端替 {who} 跑 {kind} 登入，完成瀏覽器授權後回來按「登入好了，重試」': 'Opened a terminal on {where} to sign {who} in with {kind}. After finishing browser authorization, come back and press “Signed in, retry”.',
   '{who} 在{where}還是沒登入：先在登入終端完成授權': '{who} is still signed out on {where}. Finish authorization in the sign-in terminal first.',
   '已重新偵測；這個對話沒有可以重送的訊息': 'Re-checked. This conversation has no message to resend.',

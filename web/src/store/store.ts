@@ -2655,11 +2655,30 @@ async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<vo
   }
 }
 
+/** 409 `identity_login_in_progress` 帶著既有登入 pane 的 id 就回它；reservation 階段（還沒有 pane）或別種錯誤回 null。 */
+function existingLoginPane(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.body.reason !== 'identity_login_in_progress') return null
+  const id = e.body.pane_id
+  return typeof id === 'string' && id ? id : null
+}
+
 /** 登入與登出走同一段：都是開一個臨時 pane 看 CLI 跑完，差別只在打哪一行指令。 */
 async function identityAuth(set: SetFn, get: GetFn, host: string, identity: string, op: 'login' | 'logout') {
   let ok = false
   await guarded(set, get, `identity-${op}:${host}:${identity}`, async () => {
-    const shell = op === 'login' ? await api.loginIdentity(host, identity) : await api.logoutIdentity(host, identity)
+    let shell
+    try {
+      shell = op === 'login' ? await api.loginIdentity(host, identity) : await api.logoutIdentity(host, identity)
+    } catch (e) {
+      // 這個身份已有登入終端（使用者先前按過登入、面板關掉或換頁後找不到它）：不報錯，把那顆既有登入終端重新打開接著做。
+      const existing = op === 'login' ? existingLoginPane(e) : null
+      if (!existing) throw e
+      markUserNav()
+      set({ shellView: { host, paneId: existing, cwd: '' }, settingsBotId: null })
+      get().notify('info', t('這個身份已有登入終端，已重新打開；接著完成授權就好'))
+      ok = true
+      return
+    }
     set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
     ok = true
   })

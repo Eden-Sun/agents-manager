@@ -9,6 +9,8 @@ import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, Host, IdentityStatus, Project } from '../api/types'
 import { LoginPromptBanner } from './LoginPromptBanner'
 
+const realLoginIdentity = useStore.getState().loginIdentity
+
 afterEach(unmountAll)
 before(setupDom)
 after(() => {
@@ -93,4 +95,25 @@ test('沒有 bot 綁著這個身份、或主機連不上：不提示', async () 
     })
   })
   assert.equal(banner(), null)
+})
+
+test('按「立即登入」撞 409 identity_login_in_progress（帶既有登入 pane）：不報錯，直接重開那顆登入終端的面板', async () => {
+  seed(st({ logged_in: false }))
+  // 用真的 loginIdentity（seed 換成假的了）：daemon 回 409 並指出原本那顆登入 pane。
+  useStore.setState({ loginIdentity: realLoginIdentity })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }),
+      { status: 409 },
+    )) as typeof fetch
+  try {
+    await mount(<LoginPromptBanner />)
+    await click(document.querySelector<HTMLButtonElement>('.lpb-login')!)
+    const view = useStore.getState().shellView
+    assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'm4p', paneId: 'w9:p9' }, '打開既有登入終端')
+    assert.equal(useStore.getState().notices.some((n) => n.kind === 'error'), false, '不跳錯誤 toast')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
