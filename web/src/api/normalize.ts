@@ -297,6 +297,7 @@ export function toProject(v: unknown): Project | null {
     created_at: str(v.created_at),
     role_policy: isRec(v.role_policy) ? (v.role_policy as Record<string, RuntimeSettings>) : {},
     executor_grants: Array.isArray(pick(v, 'executor_grants')) ? toExecutorGrants(pick(v, 'executor_grants')) : undefined,
+    grants_revision: optStr(pick(v, 'grants_revision')) ?? undefined,
     deputy: isRec(v.deputy) && str(v.deputy.bot_id) ? { bot_id: str(v.deputy.bot_id), after_sec: numOrNull(v.deputy.after_sec) } : null,
     executor_pool: (() => {
       const ep = pick(v, 'executor_pool')

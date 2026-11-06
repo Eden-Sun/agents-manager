@@ -1844,7 +1844,11 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "bots": bl,
         }));
         // 專家模式執行者授權（json! 巨集已到遞迴上限，所以在外面補）。
-        if let Some(last) = out.last_mut() { last["executor_grants"] = json!(p.executor_grants()); }
+        if let Some(last) = out.last_mut() {
+            let grants = p.executor_grants();
+            last["grants_revision"] = json!(crate::executor_grants::revision(&grants));
+            last["executor_grants"] = json!(grants);
+        }
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
@@ -7893,6 +7897,9 @@ async fn prompt_bot(
             crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
         }
     };
+    // 專家模式授權派工的序列化邊界（Astra review #1）：從核對授權到 turn 建好（排隊或已認領）都握著讀鎖，
+    // 撤銷授權（寫鎖）只會落在「核對之前」或「turn 建好之後」；排隊中的由撤銷那端用 CAS 收回。
+    let _grant_gate = match &relay { Some(r) => crate::executor_grants::dispatch_gate(&app, &r.from, &id).await, None => None };
     if !b.expect_result {
         if let Some(r) = &relay { check_relay_policy(&app, &r.from, &id).await?; }
 

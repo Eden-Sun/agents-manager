@@ -40,6 +40,8 @@ export interface Project {
   deputy?: ProjectDeputy | null
   /** 專家模式執行者授權：專家可直接派工給被授權的執行者（一顆執行者最多授權給一位專家）。舊 daemon 沒有此欄。 */
   executor_grants?: ExecutorGrant[]
+  /** `executor_grants` 的版本（daemon 算）；PUT 帶回去，過期回 409。舊 daemon 沒有此欄。 */
+  grants_revision?: string
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
 }
@@ -50,7 +52,7 @@ export interface ProjectDeputy {
   after_sec?: number | null
 }
 
-/** `GET /api/projects` 的 `executor_grants[]`：track／granted_by／granted_at 由 daemon 填。 */
+/** `GET /api/state` 每個專案的 `executor_grants[]`：track／granted_by／granted_at 由 daemon 填。 */
 export interface ExecutorGrant {
   /** 專家 bot id */
   specialist: string

@@ -296,9 +296,12 @@ export async function patchProject(projectId: string, input: PatchProjectInput):
   await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
 }
 
-/** 專家模式執行者授權：整組取代（track／granted_by／granted_at 由 daemon 填）。允許使用者或該專案的管理者；違反排他等不變式回 400。 */
-export async function setExecutorGrants(projectId: string, grants: ExecutorGrantInput[]): Promise<ExecutorGrant[]> {
-  const raw = await transport.request('PUT', `/projects/${encodeURIComponent(projectId)}/executor-grants`, { grants })
+/**
+ * 專家模式執行者授權：整組取代（track／granted_by／granted_at 由 daemon 填）。允許使用者或該專案的管理者；違反排他等不變式回 400。
+ * `revision` 是畫面上那份授權的 `grants_revision`（樂觀鎖）：別人先改過就回 409 `grants_revision_conflict`。
+ */
+export async function setExecutorGrants(projectId: string, grants: ExecutorGrantInput[], revision?: string): Promise<ExecutorGrant[]> {
+  const raw = await transport.request('PUT', `/projects/${encodeURIComponent(projectId)}/executor-grants`, revision ? { grants, revision } : { grants })
   return toExecutorGrants(isRec(raw) ? pick(raw, 'grants') ?? pick(raw, 'executor_grants') : raw)
 }
 

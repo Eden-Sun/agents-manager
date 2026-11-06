@@ -499,6 +499,11 @@ async fn project_inner(
                             dirty = true;
                         }
                     }
+                    // 執行者授權在每一次投影前正規化（Astra review #2）：啟動載入、正式刪除（`delete_from_config`）
+                    // 都走這裡，失效或重複（同一顆執行者給兩位專家，只留第一筆）的授權不會原樣進 DB。
+                    if p.clear_invalid_grants() {
+                        dirty = true;
+                    }
                 }
                 Ok(dirty)
             },

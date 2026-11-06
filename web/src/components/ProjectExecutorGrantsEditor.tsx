@@ -45,7 +45,8 @@ export function ProjectExecutorGrantsEditor({ project, bots }: { project: Projec
   const current = draft ?? saved
   const dirty = supported && !sameMap(current, saved)
   const body = (): ExecutorGrantInput[] => Object.entries(current).map(([executor, specialist]) => ({ specialist, executor }))
-  const commit = () => setExecutorGrants(project.id, body())
+  // 帶著畫面上那份授權的版本：別人先改過，daemon 回 409、草稿留著（提示「已被他人修改，請重新整理」）。
+  const commit = () => setExecutorGrants(project.id, body(), project.grants_revision)
   const group = useSavePart('executor_grants', { label: t('執行者授權'), dirty, valid: true }, { commit, reset: () => setDraft(null) })
 
   const nameOf = (id: string) => bots.find((b) => b.id === id)?.name ?? id
