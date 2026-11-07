@@ -306,7 +306,7 @@ pub struct IssueRef {
     #[serde(default)]
     pub url: String,
     pub created_at: String,
-    /// true＝`duplicate_of`：只在既有 issue 留言，沒有開新的（不計入每日上限）。
+    /// true＝`duplicate_of`：只在既有 issue 留言，沒有開新的。
     #[serde(default)]
     pub comment: bool,
 }
@@ -614,18 +614,6 @@ pub async fn save_publish(pool: &SqlitePool, kind: &str, version: &str, issues: 
     }
     tx.commit().await?;
     Ok(r.rows_affected() == 1)
-}
-
-/// 最近 24 小時內**新開**的 issue 數（不含只留言／找到既有的），全部 kind、全部版本合計。
-pub async fn created_in_last_day(pool: &SqlitePool) -> Result<usize> {
-    created_in_last_day_at(pool, chrono::Utc::now()).await
-}
-
-/// `created_in_last_day` 的固定參考時間版本，供需要精確測試 24 小時邊界的呼叫端使用。
-pub async fn created_in_last_day_at(pool: &SqlitePool, now: chrono::DateTime<chrono::Utc>) -> Result<usize> {
-    let cutoff = (now - chrono::Duration::hours(24)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_triage_issue_creates WHERE created_at >= ?").bind(cutoff).fetch_one(pool).await?;
-    usize::try_from(count).map_err(|_| anyhow!("release-triage daily issue count is out of range"))
 }
 
 #[cfg(test)]

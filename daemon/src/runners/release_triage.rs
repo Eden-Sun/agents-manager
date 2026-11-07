@@ -284,7 +284,7 @@ mod tests {
     use crate::release_triage::{build_entries, source_sections, Bucket};
 
     #[tokio::test]
-    async fn the_daily_issue_count_ignores_large_invalid_historical_ledger_rows() {
+    async fn the_issue_summary_backfill_preserves_large_invalid_historical_ledger_rows() {
         let p = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         sqlx::query(
             "CREATE TABLE release_triage (
@@ -381,7 +381,8 @@ mod tests {
         .unwrap();
 
         crate::release_triage::ledger::migrate(&p).await.unwrap();
-        assert_eq!(crate::release_triage::ledger::created_in_last_day_at(&p, now).await.unwrap(), 1_001);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_triage_issue_creates").fetch_one(&p).await.unwrap();
+        assert_eq!(count, 3_002);
     }
 
     #[tokio::test]

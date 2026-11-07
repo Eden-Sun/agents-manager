@@ -1,6 +1,6 @@
 //! B：verdict 驗證、issue 渲染、gh publish（假 gh 腳本，絕不打真的 GitHub）。
 
-use super::issue::{self, Outcome, MAX_PER_DAY};
+use super::issue::{self, Outcome};
 use super::ledger::{self, Status};
 use super::verdict::{self, EntryVerdict, Proposal, StoredProposal, Submission, Verdict};
 use super::*;
@@ -274,7 +274,7 @@ async fn seed(p: &SqlitePool, props: &[(&str, &[usize], Option<i64>)]) -> Vec<En
     seed_version(p, "2.1.277", props).await
 }
 
-/// 同 [`seed`]，但可指定版本——24 小時上限是跨版本的，只種一版照不出 #440。
+/// 同 [`seed`]，但可指定版本，以驗證跨版本發布。
 async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], Option<i64>)]) -> Vec<Entry> {
     let es = entries277();
     ledger::insert_version(p, "claude", version, &es).await.unwrap();
@@ -297,7 +297,7 @@ async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], O
     es
 }
 
-/// Seed a different version with issues counted by the cross-version daily cap.
+/// Seed a different version with previously created issues.
 async fn seed_created_refs(p: &SqlitePool, version: &str, count: usize) {
     ledger::insert_version(p, "claude", version, &entries277()).await.unwrap();
     let verdicts = serde_json::json!({"verdicts": [], "issues": []});
@@ -474,7 +474,7 @@ async fn gh_failure_leaves_the_row_judged_and_the_retry_only_reruns_publish() {
 }
 
 #[tokio::test]
-async fn caps_guard_first_four_per_version_and_eight_per_day() {
+async fn caps_guard_first_four_per_version_without_a_daily_cap() {
     // 每版 4：五張 adopt＋一張 guard（排最後）→ guard 一定開出來，最後一張 adopt 被擋。
     let p = pool().await;
     let gh = FakeGh::new("cap");
@@ -488,18 +488,20 @@ async fn caps_guard_first_four_per_version_and_eight_per_day() {
     assert!(r.publish_error.unwrap().contains("每版上限"));
     assert_eq!(r.status, Status::Published);
 
-    // 每 24 小時 8：別的版本已經開了 8 張 → 這版留在 judged 待下一輪。
+    // 別的版本已開 8 張，舊的延後錯誤仍會在下一輪自動清除。
     let p = pool().await;
     let gh = FakeGh::new("day");
     seed(&p, &[("guard", &[0], None)]).await;
     seed_created_refs(&p, "2.1.270", 8).await;
+    ledger::save_publish(&p, "claude", "2.1.277", &[], Status::Judged, Some("24 小時內已開 8 張，留待下一輪")).await.unwrap();
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
-    assert!(matches!(o, Outcome::Deferred { .. }), "{o:?}");
-    assert_eq!((gh.count("issue create"), row(&p).await.status), (0, Status::Judged));
+    assert!(matches!(o, Outcome::Published { created: 1, .. }), "{o:?}");
+    assert_eq!((gh.count("issue create"), row(&p).await.status), (1, Status::Published));
+    assert!(row(&p).await.publish_error.is_none());
 }
 
 #[tokio::test]
-async fn a_create_recovered_after_ledger_failure_counts_toward_the_daily_cap() {
+async fn a_create_recovered_after_ledger_failure_does_not_block_the_next_create() {
     let p = pool().await;
     let gh = FakeGh::new("create-ledger-crash-day");
     let es = seed(&p, &[("guard", &[0], None), ("adopt", &[1], None)]).await;
@@ -522,10 +524,10 @@ async fn a_create_recovered_after_ledger_failure_counts_toward_the_daily_cap() {
 
     sqlx::query("DROP TRIGGER fail_publish_ledger").execute(&p).await.unwrap();
     let preview = issue::preflight(&p, &cfg, Some("claude"), Some("2.1.277")).await.unwrap();
-    assert_eq!((preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()), (Some(0), Some(1), Some(1)));
+    assert_eq!((preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()), (Some(1), Some(1), Some(0)));
     let retry = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
-    assert!(matches!(retry, Outcome::Deferred { .. }), "the ninth issue must be deferred: {retry:?}");
-    assert_eq!(gh.count("issue create"), 1, "retry recovers the remote issue and does not create a ninth");
+    assert!(matches!(retry, Outcome::Published { created: 1, .. }), "{retry:?}");
+    assert_eq!(gh.count("issue create"), 2, "retry recovers the remote issue and creates the next proposal");
     let intent_action: Option<String> = sqlx::query_scalar(
         "SELECT action FROM release_triage_publish_intents WHERE kind='claude' AND version='2.1.277' AND marker=?",
     )
@@ -535,10 +537,9 @@ async fn a_create_recovered_after_ledger_failure_counts_toward_the_daily_cap() {
     .unwrap();
     assert_eq!(intent_action.as_deref(), Some("create"), "the create intent survives the lost issue_numbers_json write");
     let r = row(&p).await;
-    assert_eq!(r.issues.len(), 1);
+    assert_eq!(r.issues.len(), 2);
     assert_eq!(r.issues[0].marker, recovered_marker);
     assert_eq!((r.issues[0].number, r.issues[0].comment), (101, false));
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY, "recovered own create counts as the eighth daily issue");
 }
 
 #[tokio::test]
@@ -568,22 +569,21 @@ async fn a_remote_create_with_a_lost_ledger_write_counts_before_a_different_vers
     let preview = issue::preflight(&p, &cfg, Some("claude"), Some("2.1.278")).await.unwrap();
     assert_eq!(
         (preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()),
-        (Some(0), Some(0), Some(1)),
-        "dry-run must include the recovered create from another version in the daily cap: {preview}"
+        (Some(1), Some(0), Some(0)),
+        "another version's recovered create must not block dry-run: {preview}"
     );
     let later = issue::publish_version(&p, &cfg, "claude", "2.1.278").await.unwrap();
-    assert!(matches!(later, Outcome::Deferred { .. }), "the ninth create must be deferred: {later:?}");
-    assert_eq!(gh.count("issue create"), 1, "another version must not open the ninth issue");
+    assert!(matches!(later, Outcome::Published { created: 1, .. }), "{later:?}");
+    assert_eq!(gh.count("issue create"), 2);
 
     let recovered = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
     assert_eq!(recovered.issues.len(), 1, "the cross-version check should reconcile the lost ledger row");
     assert_eq!(recovered.issues[0].marker, recovered_marker);
     assert_eq!((recovered.issues[0].number, recovered.issues[0].comment), (101, false));
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
 }
 
 #[tokio::test]
-async fn a_lost_create_beyond_the_label_list_limit_still_blocks_a_different_version() {
+async fn a_lost_create_beyond_the_label_list_limit_is_recovered_without_blocking_a_different_version() {
     let p = pool().await;
     let gh = FakeGh::new("create-ledger-crash-beyond-page");
     let es = seed(&p, &[("guard", &[0], None)]).await;
@@ -628,12 +628,11 @@ async fn a_lost_create_beyond_the_label_list_limit_still_blocks_a_different_vers
     .unwrap();
 
     let later = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.278").await.unwrap();
-    assert!(matches!(later, Outcome::Deferred { .. }), "the ninth create must be deferred: {later:?}");
-    assert_eq!(gh.count("issue create"), 0, "a recent create beyond the first 200 labelled issues still counts");
+    assert!(matches!(later, Outcome::Published { created: 1, .. }), "{later:?}");
+    assert_eq!(gh.count("issue create"), 1);
     let recovered = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
     assert_eq!(recovered.issues.len(), 1, "the displaced lost ledger row should be reconciled");
     assert_eq!(recovered.issues[0].marker, lost_marker);
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
 }
 
 #[tokio::test]
@@ -685,16 +684,15 @@ async fn a_lost_create_beyond_the_label_list_limit_is_found_after_its_marker_was
     let preview = issue::preflight(&p, &gh.cfg(true), Some("claude"), Some("2.1.278")).await.unwrap();
     assert_eq!(
         (preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()),
-        (Some(0), Some(0), Some(1)),
-        "dry-run also counts the marker-edited create outside the immediate label page: {preview}"
+        (Some(1), Some(0), Some(0)),
+        "a marker-edited create must not block another version: {preview}"
     );
     let later = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.278").await.unwrap();
-    assert!(matches!(later, Outcome::Deferred { .. }), "the ninth create must be deferred: {later:?}");
-    assert_eq!(gh.count("issue create"), 0, "an edited marker does not erase a confirmed recent create from the daily cap");
+    assert!(matches!(later, Outcome::Published { created: 1, .. }), "{later:?}");
+    assert_eq!(gh.count("issue create"), 1);
     let recovered = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
     assert_eq!(recovered.issues.len(), 1, "the displaced lost ledger row should be reconciled by its exact daemon title");
     assert_eq!((recovered.issues[0].number, recovered.issues[0].marker.as_str()), (102, lost_marker.as_str()));
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
 }
 
 #[tokio::test]
@@ -743,7 +741,6 @@ async fn a_create_recovered_after_ledger_failure_counts_toward_the_version_cap()
     assert_eq!(r.issues.len(), 4);
     let recovered = r.issues.iter().find(|i| i.marker == recovered_marker).unwrap();
     assert_eq!((recovered.number, recovered.comment), (101, false), "the recovered create keeps created provenance");
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), 4);
 }
 
 #[tokio::test]
@@ -775,7 +772,6 @@ async fn duplicate_of_only_comments_and_does_not_count_against_caps() {
     assert_eq!((gh.count("issue create"), gh.count("issue comment")), (0, 1));
     let args = std::fs::read_to_string(gh.dir.join("last_comment.txt")).unwrap();
     assert!(args.contains("102") && args.contains("--repo\no/r"));
-    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), 0);
     let r = row(&p).await;
     assert_eq!((r.issues[0].number, r.issues[0].comment), (102, true));
 }
@@ -1008,11 +1004,9 @@ async fn a_dry_run_and_the_real_publish_agree_on_the_per_version_cap() {
     assert_eq!((created, skipped.len()), (4, 1));
 }
 
-/// #440：24 小時上限是**跨版本**的。真跑每呼叫一次 `publish_version` 就重讀一次帳本，所以第 2 版
-/// 看得到第 1 版剛開的那幾張；乾跑若每版重開 `Caps`，3 版 × 4 張就會說 12 張、真跑第 9 張起 deferred。
-/// 只種一版照不出來（`preflight(None, None)` 看起來像涵蓋多版，其實帳本只有一版）。
+/// 跨版本沒有每日上限：乾跑與真跑都能一次處理超過 8 張。
 #[tokio::test]
-async fn a_dry_run_and_the_real_publish_agree_on_the_daily_cap_across_versions() {
+async fn a_dry_run_and_the_real_publish_have_no_daily_cap_across_versions() {
     let p = pool().await;
     let gh = FakeGh::new("equivday");
     let four: &[(&str, &[usize], Option<i64>)] = &[("guard", &[0], None), ("guard", &[1], None), ("guard", &[2], None), ("guard", &[3], None)];
@@ -1021,21 +1015,20 @@ async fn a_dry_run_and_the_real_publish_agree_on_the_daily_cap_across_versions()
     }
     let cfg = gh.cfg(true);
     let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
-    // 3 版 × 4 ＝ 12 個提案，但 24 小時只准 8 張。
+    // 3 版 × 4 ＝ 12 張，全部可發布。
     assert_eq!(dry["versions"].as_array().unwrap().len(), 3, "三版都要在乾跑裡");
-    assert_eq!(dry["would_create"], json!(MAX_PER_DAY), "乾跑不能說 12 張：{dry}");
+    assert_eq!(dry["would_create"], json!(12), "乾跑應預告 12 張：{dry}");
 
     // 真跑：照 ledger::list 的順序逐版開（同 post_publish）。
     let mut created_total = 0usize;
     for r in ledger::list(&p, None, None).await.unwrap().iter().filter(|r| r.status == Status::Judged) {
         match issue::publish_version(&p, &cfg, &r.kind, &r.version).await.unwrap() {
             Outcome::Published { created, .. } => created_total += created,
-            Outcome::Deferred { .. } => {}
             other => panic!("{other:?}"),
         }
     }
     assert_eq!(dry["would_create"], json!(created_total), "乾跑預告要等於逐版真跑的總和");
-    assert_eq!(gh.count("issue create"), MAX_PER_DAY, "真的只開 {MAX_PER_DAY} 張");
+    assert_eq!(gh.count("issue create"), 12, "三版共開 12 張");
 }
 
 /// 帳本已經有這個 entry 的 issue（上一輪開好了）→ 連 gh 都不必問。

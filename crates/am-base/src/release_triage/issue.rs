@@ -27,9 +27,7 @@ use crate::config::ReleaseTriageCfg;
 
 /// 每一版最多開幾張（超過的留在帳本，`guard` 優先）。
 pub const MAX_PER_VERSION: usize = 4;
-/// 每 24 小時最多開幾張（超過的留待下一輪）。
-pub const MAX_PER_DAY: usize = 8;
-/// 每一版最多留幾則言（`duplicate_of`）。留言不占上面兩個名額，但也不能無上限——號碼是模型挑的。
+/// 每一版最多留幾則言（`duplicate_of`）。留言不占新開 issue 的名額，但也不能無上限——號碼是模型挑的。
 pub const MAX_COMMENTS_PER_VERSION: usize = 4;
 const GH_TIMEOUT: Duration = Duration::from_secs(40);
 
@@ -254,8 +252,6 @@ pub enum Outcome {
     Disabled,
     /// 這一版的提案都處理完了。
     Published { created: usize, commented: usize, existing: usize, skipped: Vec<String> },
-    /// 24 小時上限擋下，留待下一輪。
-    Deferred { reason: String },
     /// gh／設定出錯，列停在 `judged`。
     Failed { error: String },
 }
@@ -279,16 +275,12 @@ fn already(p: &StoredProposal, issues: &[IssueRef]) -> bool {
     issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id)))
 }
 
-/// 每版／每日上限的即時計數。`publish_version` 與 [`preflight`] 共用，排序與上限的判斷只有一份。
+/// 每版上限的即時計數。`publish_version` 與 [`preflight`] 共用，排序與上限的判斷只有一份。
 struct Caps {
     /// 這一版已經**新開**幾張（`comment` 的不算，同 `publish_version` 原本的 `in_row`）。
     in_row: usize,
     /// 這一版已經貼了幾則留言（`duplicate_of`；`IssueRef` 的 `comment` 且沒有網址的那種）。
     comments: usize,
-    /// 24 小時內已新開幾張（全部 kind、全部版本）。
-    created_today: usize,
-    /// 已經撞到 24 小時上限：`publish_version` 撞到就 `break`，所以之後一律 deferred。
-    deferred_hit: bool,
 }
 
 /// 帳本裡這版已貼的留言數（有 `comment` 旗標、沒網址＝真的貼過的留言；「遠端本來就有」的 existing 有網址）。
@@ -304,18 +296,12 @@ impl Caps {
         if found.is_some() {
             return PlanAction::Existing;
         }
-        // `duplicate_of` 只留言，不佔每版／每日開 issue 的名額（留言自己有每版上限）。
+        // `duplicate_of` 只留言，不佔每版開 issue 的名額（留言自己有每版上限）。
         if p.duplicate_of.is_some() && dup_known {
             return if self.comments >= MAX_COMMENTS_PER_VERSION { PlanAction::SkippedVersionLimit } else { PlanAction::Comment };
         }
-        if self.deferred_hit {
-            return PlanAction::DeferredDailyLimit;
-        }
         if self.in_row >= MAX_PER_VERSION {
             return PlanAction::SkippedVersionLimit;
-        }
-        if self.created_today >= MAX_PER_DAY {
-            return PlanAction::DeferredDailyLimit;
         }
         PlanAction::Create
     }
@@ -324,23 +310,13 @@ impl Caps {
         match action {
             PlanAction::Create => self.note_created(),
             PlanAction::Comment => self.comments += 1,
-            PlanAction::DeferredDailyLimit => self.deferred_hit = true,
             _ => {}
         }
     }
 
-    /// Count a remote create recovered after its ledger write was lost. Version caps count it
-    /// regardless of age; the rolling daily cap only counts it when the original intent is recent.
+    /// Recovered creates still consume this version's slots.
     fn note_created(&mut self) {
         self.in_row += 1;
-        self.created_today += 1;
-    }
-
-    fn note_recovered_create(&mut self, count_daily: bool) {
-        self.in_row += 1;
-        if count_daily {
-            self.created_today += 1;
-        }
     }
 }
 
@@ -467,25 +443,19 @@ async fn find_unlogged_create_by_title(gh: &Gh, expected_title: &str) -> Result<
 }
 
 /// Restore the ledger side of a recent create when GitHub confirms its durable intent. This runs
-/// before another version can use the cross-version daily cap, so a lost write cannot make the
-/// ledger and the cap disagree until the original version happens to be retried.
-async fn reconcile_confirmed_creates(pool: &SqlitePool, gh: &Gh, remote: &Remote) -> Result<std::collections::HashSet<String>> {
-    let mut unreconciled = std::collections::HashSet::new();
+/// so a lost write is recovered even before the original version is retried.
+async fn reconcile_confirmed_creates(pool: &SqlitePool, gh: &Gh, remote: &Remote) -> Result<()> {
     for confirmed in confirmed_unlogged_creates(pool, gh, remote).await? {
         let Some(mut row) = ledger::get(pool, &confirmed.kind, &confirmed.version).await? else {
-            unreconciled.insert(confirmed.issue.marker);
             continue;
         };
         if row.status != Status::Judged || row.issues.iter().any(|i| i.marker == confirmed.issue.marker) {
-            unreconciled.insert(confirmed.issue.marker);
             continue;
         }
         row.issues.push(confirmed.issue);
-        if !ledger::save_publish(pool, &row.kind, &row.version, &row.issues, Status::Judged, row.publish_error.as_deref()).await? {
-            unreconciled.insert(row.issues.last().unwrap().marker.clone());
-        }
+        ledger::save_publish(pool, &row.kind, &row.version, &row.issues, Status::Judged, row.publish_error.as_deref()).await?;
     }
-    Ok(unreconciled)
+    Ok(())
 }
 
 /// issue 內文結尾隱藏標記的前綴；`Remote::find` 用它判斷「內文還有沒有標記」。
@@ -578,24 +548,18 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         Ok(r) => r,
         Err(e) => return record_err(&issues, e).await,
     };
-    let unreconciled_remote_markers = match reconcile_confirmed_creates(pool, &gh, &remote).await {
-        Ok(markers) => markers,
-        Err(e) => return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await,
-    };
+    if let Err(e) = reconcile_confirmed_creates(pool, &gh, &remote).await {
+        return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await;
+    }
     // Reconciliation may have recovered an issue from this version as well as older versions.
     // Refresh before calculating caps and checking which proposals are already handled.
     issues = ledger::get(pool, kind, version).await?.map(|r| r.issues).unwrap_or(issues);
 
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
     let mut skipped: Vec<String> = Vec::new();
-    let mut deferred: Option<String> = None;
-    // 上限用計數器而不是每輪重查：只有 `Create` 會增加「非 comment」的張數，跟原本每輪
-    // `issues.iter().filter(!comment).count()` ＋ `created_in_last_day` 等價，而且與乾跑共用同一份判斷。
     let mut caps = Caps {
         in_row: issues.iter().filter(|i| !i.comment).count(),
         comments: comments_in(&issues),
-        created_today: ledger::created_in_last_day(pool).await? + unreconciled_remote_markers.len(),
-        deferred_hit: false,
     };
     let known_numbers = ledger_issue_numbers(pool).await?;
     for p in &proposals {
@@ -615,9 +579,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         let action = caps.plan(p, found.as_ref(), dup_known);
         caps.note(action);
         if recovered_create {
-            caps.note_recovered_create(
-                intent.as_ref().is_some_and(|i| timestamp_is_recent(&i.created_at)) && !unreconciled_remote_markers.contains(&mk),
-            );
+            caps.note_created();
         }
         match action {
             PlanAction::Existing => {
@@ -649,10 +611,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             PlanAction::SkippedVersionLimit => {
                 skipped.push(mk);
                 continue;
-            }
-            PlanAction::DeferredDailyLimit => {
-                deferred = Some(format!("24 小時內已開 {MAX_PER_DAY} 張，{mk} 留待下一輪"));
-                break;
             }
             // `already` 在迴圈開頭擋掉了；`RemoteUnknown` 只有乾跑會用（這裡查不到就已經 record_err 回去）。
             PlanAction::AlreadyLogged | PlanAction::RemoteUnknown => continue,
@@ -686,10 +644,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
         created += 1;
     }
-    if let Some(reason) = deferred {
-        ledger::save_publish(pool, kind, version, &issues, Status::Judged, Some(&reason)).await?;
-        return Ok(Outcome::Deferred { reason });
-    }
     let note = (!skipped.is_empty()).then(|| format!("每版上限（開 {MAX_PER_VERSION} 張／留言 {MAX_COMMENTS_PER_VERSION} 則），未處理：{}", skipped.join("、")));
     ledger::save_publish(pool, kind, version, &issues, Status::Published, note.as_deref()).await?;
     Ok(Outcome::Published { created, commented, existing, skipped })
@@ -710,8 +664,6 @@ pub enum PlanAction {
     AlreadyLogged,
     /// 被每版 [`MAX_PER_VERSION`] 張擋下，之後也不會再開。
     SkippedVersionLimit,
-    /// 被 24 小時 [`MAX_PER_DAY`] 張擋下，留待下一輪。
-    DeferredDailyLimit,
     /// gh 檢查沒過，去重問不到遠端，所以只知道帳本裡還沒有。
     RemoteUnknown,
 }
@@ -724,7 +676,6 @@ impl PlanAction {
             PlanAction::Existing => "existing",
             PlanAction::AlreadyLogged => "already_logged",
             PlanAction::SkippedVersionLimit => "skipped_version_limit",
-            PlanAction::DeferredDailyLimit => "deferred_daily_limit",
             PlanAction::RemoteUnknown => "remote_unknown",
         }
     }
@@ -739,7 +690,7 @@ impl PlanAction {
 /// - `publish` 是不是 true 都跑（唯一在 `publish = false` 時碰 gh 的路徑，由人明確觸發）。
 /// - gh 檢查（auth／repo／標籤）過了才問遠端去重；沒過就照樣把 title／body 渲染出來，
 ///   讓人先看 verdict 品質，去重那欄記成 `remote_unknown`。
-/// - 每版 4 張、24 小時 8 張的上限用跟 [`publish_version`] 同一組常數與同一個順序模擬。
+/// - 每版 4 張的上限用跟 [`publish_version`] 同一組常數與同一個順序模擬。
 pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
     let gh = gh_for(cfg);
     let mut checks = readonly_checks(&gh).await;
@@ -751,12 +702,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
     // 才抓：全部提案都已經在帳本裡時一次 gh 都不叫（同 publish_version 的提早返回）。
     let mut remote: Option<Remote> = None;
     let mut remote_err: Option<String> = None;
-    let mut recovered_remote_markers = std::collections::HashSet::new();
-
-    // **24 小時上限是跨版本的**：真跑每呼叫一次 publish_version 就重讀一次帳本，所以第 2 版看得到第 1 版
-    // 剛開的那幾張。乾跑若每版都用同一個初始值重開 Caps，3 版以上就會說「每版都能開 4 張」（共 12），
-    // 真跑第 9 張起 deferred（#440）。所以 `created_today` 與 `deferred_hit` 跨版留著，只有 `in_row` 每版重置。
-    let mut caps = Caps { in_row: 0, comments: 0, created_today: ledger::created_in_last_day(pool).await?, deferred_hit: false };
+    let mut caps = Caps { in_row: 0, comments: 0 };
     let known_numbers = ledger_issue_numbers(pool).await?;
     let mut versions = Vec::new();
     let (mut n_create, mut n_comment, mut n_existing, mut n_blocked) = (0usize, 0usize, 0usize, 0usize);
@@ -783,16 +729,12 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             if can_ask && remote.is_none() && remote_err.is_none() && !already(p, &issues) {
                 match Remote::load(&gh).await {
                     Ok(r) => {
-                        let recovered = confirmed_unlogged_creates(pool, &gh, &r).await?;
-                        caps.created_today += recovered.len();
-                        recovered_remote_markers.extend(recovered.into_iter().map(|c| c.issue.marker));
                         remote = Some(r);
                     }
                     Err(e) => remote_err = Some(e),
                 }
             }
             let mut recovered_create = false;
-            let mut recovered_intent_recent = false;
             let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
             } else if !can_ask {
@@ -811,7 +753,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                         if found.is_some() {
                             let intent = ledger::publish_intent(pool, &row.kind, &row.version, &mk).await?;
                             recovered_create = intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
-                            recovered_intent_recent = intent.as_ref().is_some_and(|i| timestamp_is_recent(&i.created_at));
                         }
                         let dup_known = p.duplicate_of.is_some_and(|d| remote.has_number(d) || known_numbers.contains(&d));
                         let a = caps.plan(p, found.as_ref(), dup_known);
@@ -829,7 +770,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             };
             caps.note(action);
             if recovered_create {
-                caps.note_recovered_create(recovered_intent_recent && !recovered_remote_markers.contains(&mk));
+                caps.note_created();
             }
             // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
             if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
@@ -846,10 +787,10 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                 PlanAction::Create => n_create += 1,
                 PlanAction::Comment => n_comment += 1,
                 PlanAction::Existing => n_existing += 1,
-                PlanAction::SkippedVersionLimit | PlanAction::DeferredDailyLimit => n_blocked += 1,
+                PlanAction::SkippedVersionLimit => n_blocked += 1,
                 _ => {}
             }
-            // `duplicate_of` 只留言，不佔每版／每日的名額（同 publish_version）。
+            // `duplicate_of` 只留言，不佔每版的名額（同 publish_version）。
             plan["action"] = serde_json::json!(action.as_str());
             plan["writes"] = serde_json::json!(action.writes());
             // 真跑對 `comment` 貼的是留言（不是整張 issue、沒有標題與標籤）：預覽的就是那一段字。
