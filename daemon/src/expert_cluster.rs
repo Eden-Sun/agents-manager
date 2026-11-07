@@ -585,7 +585,7 @@ mod tests {
             updated_at: db::now(), source: "test".into(), account: None, host: "local".into(),
         };
         env.app.quotas.lock().await.insert(crate::quota::quota_key("local", "claude"), critical);
-        assert!(matches!(crate::api::resolve_cluster_target(&env.app, &manager.id, "haiku").await, Err(crate::lifecycle::LcError::NotFound(_))));
+        assert!(matches!(crate::api::resolve_cluster_target(&env.app, &manager.id, "haiku").await, Err(crate::lifecycle::LcError::Forbidden(v)) if v["error"] == "member_not_dispatchable"));
         assert!(project_executors(&env.app, &env.project_id).await.unwrap().iter().filter(|m| m.id == a.id || m.id == b.id).all(|m| m.quota_blocked));
     }
 
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(after_quota["to_bot_id"], infra_worker.id, "critical identity quota blocks the otherwise matching-track worker");
 
         sqlx::query("UPDATE bots SET identity='db-quota-test' WHERE id=?").bind(&infra_worker.id).execute(&env.app.db).await.unwrap();
-        assert!(matches!(crate::api::resolve_auto_target(&env.app, &manager.id, "cheap:db").await, Err(crate::lifecycle::LcError::NotFound(_))), "when every candidate is blocked, do not route to one as a pending placeholder");
+        assert!(matches!(crate::api::resolve_auto_target(&env.app, &manager.id, "cheap:db").await, Err(crate::lifecycle::LcError::Forbidden(v)) if v["error"] == "member_not_dispatchable"), "when every candidate is blocked, do not route to one as a pending placeholder");
     }
 
     #[tokio::test]

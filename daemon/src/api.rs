@@ -7777,14 +7777,13 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
         Some(m) => Some((m.id.clone(), true)),
         None => {
             // 沒有閒置成員：管理者側先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
-            if scope.may_start() { crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await; }
-            cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).map(|m| m.id.clone()).next()
-                .or_else(|| if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
+            (if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
+                .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).map(|m| m.id.clone()).next())
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked).map(|m| m.id.clone()).next())
                 .map(|id| (id, false))
         }
     };
-    let Some((bot_id, idle)) = chosen else { return Err(LcError::NotFound("cluster member".into())) };
+    let Some((bot_id, idle)) = chosen else { return Err(LcError::Forbidden(json!({"error":"member_not_dispatchable","message":"群集沒有可派工的成員：成員可能已停用或額度不足","sent":false}))) };
     check_relay_policy(app, sender, &bot_id).await?;
     let run = db::active_run(&app.db, &bot_id).await.map_err(any_err)?;
     Ok(Json(json!({"to_bot_id": bot_id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref()), "cluster": name, "cluster_idle": idle})))
@@ -7810,16 +7809,16 @@ pub(crate) async fn resolve_auto_target(app: &Arc<App>, sender: &str, selector: 
     let (bot_id, idle) = if let Some(chosen) = chosen {
         chosen
     } else {
-        let started = if scope.may_start() {
-            crate::expert_cluster::start_member_if_needed(app, &members).await
+        let candidate = if scope.may_start() {
+            crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone())
         } else {
             None
         };
-        let fallback = started
+        let fallback = candidate
             .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()))
             .or_else(|| if scope.may_start() { crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone()) } else { None })
             .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()));
-        let Some(id) = fallback else { return Err(LcError::NotFound("auto executor".into())) };
+        let Some(id) = fallback else { return Err(LcError::Forbidden(json!({"error":"member_not_dispatchable","message":"沒有可派工的成員：成員可能已停用或額度不足","sent":false}))) };
         (id, false)
     };
     check_relay_policy(app, sender, &bot_id).await?;
@@ -7856,6 +7855,56 @@ async fn list_relay_requests(
         "id":id,"from_bot_id":from,"to_bot_id":to,"to_run_id":run,"to_turn_id":turn,"state":state,
         "created_at":created,"answered_at":answered,"notified_at":notified,"notice_turn_id":notice_turn,"processed_at":processed,"attempts":attempts,"error":error,"redirected_from":redirected_from
     })).collect::<Vec<_>>() })))
+}
+
+/// Start a stopped expert member only for an authorized project manager or acting deputy.
+/// The start task outlives the HTTP wait: cancellation must not strand a half-created run.
+async fn ensure_relay_member_ready(app: &Arc<App>, sender: &str, target: &str) -> Result<(), LcError> {
+    let run = db::active_run(&app.db, target).await.map_err(any_err)?;
+    if run.as_ref().is_some_and(|r| r.state == "running") { return Ok(()); }
+    let to = db::bot(&app.db, target).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay target".into()))?;
+    let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
+    let stopped = |reason: &str| LcError::Conflict(json!({"error":"member_stopped", "message":format!("{} 未啟動，且無法自動啟動：{}", to.name, reason), "sent":false}));
+    if to.manager_use == 0 {
+        return Err(LcError::Forbidden(json!({"error":"member_not_dispatchable", "message":format!("{} 未啟動，且無法自動啟動：成員已停用（manager_use=false）", to.name), "sent":false})));
+    }
+    let project = db::project(&app.db, &from.project_id).await.map_err(any_err)?.ok_or_else(|| stopped("專案不存在"))?;
+    if from.project_id != to.project_id || project.mode != "expert" { return Err(stopped("不屬於同一個專家專案")); }
+    if to.parent_bot_id.is_some() || to.managed_by != "user" || !matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) {
+        return Err(stopped("目標不是可派工的頂層成員"));
+    }
+    if !crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)?.is_some_and(|scope| scope.may_start()) {
+        return Err(stopped("只有管理者或代班副管理者可自動啟動"));
+    }
+    if run.as_ref().is_some_and(|r| r.state != "starting" && r.state != "running") { return Err(stopped("成員正在停止")); }
+    let app2 = app.clone();
+    let id = target.to_string();
+    let name = to.name.clone();
+    let mut task = tokio::spawn(Box::pin(async move {
+        if db::active_run(&app2.db, &id).await.map_err(|e| e.to_string())?.is_none() {
+            if let Err(e) = Box::pin(lifecycle::start_bot(&app2, &id)).await {
+                // Another request can win the start lock while we wait for it.
+                if !db::active_run(&app2.db, &id).await.map_err(|e| e.to_string())?.is_some_and(|r| r.state == "starting" || r.state == "running") {
+                    return Err(format!("{:?}", e));
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if tokio::time::Instant::now() >= deadline { return Err("等待就緒逾時".to_string()); }
+            match db::active_run(&app2.db, &id).await.map_err(|e| e.to_string())? {
+                Some(r) if r.state == "running" && matches!(r.agent_status.as_str(), "idle" | "done") => return Ok(()),
+                Some(r) if r.state == "starting" || r.state == "running" => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                _ => return Err("啟動中的 run 已結束".to_string()),
+            }
+        }
+    }));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(25), &mut task).await;
+    match result {
+        Ok(Ok(Ok(()))) => { check_relay_policy(app, sender, target).await?; Ok(()) },
+        Ok(result) => Err(LcError::Unavailable(json!({"error":"member_start_failed", "message":format!("{} 無法自動啟動：{:?}", name, result), "sent":false}))),
+        Err(_) => Err(LcError::Unavailable(json!({"error":"member_start_timeout", "message":format!("{} 自動啟動等待就緒逾時；啟動可能仍在進行", name), "sent":false}))),
+    }
 }
 
 pub(crate) async fn prompt_bot(
@@ -7952,6 +8001,7 @@ pub(crate) async fn prompt_bot(
             if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
+        ensure_relay_member_ready(&app, sender, &id).await?;
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
@@ -8018,6 +8068,10 @@ pub(crate) async fn prompt_bot(
     } else {
         None
     };
+    if let Some(r) = &relay {
+        crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
+        ensure_relay_member_ready(&app, &r.from, &id).await?;
+    }
     let out = if b.submit_draft {
         if b.clear_draft || b.send_now || b.start_if_stopped || b.queue_if_busy || !b.attachments.is_empty() {
             return Err(LcError::Bad("submit_draft sends the composer's draft as it is; it takes no other options".into()));
@@ -18851,5 +18905,91 @@ mod reserved_request_prefix_tests {
             let r = prompt_bot(State(env.app.clone()), Path(bot.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await;
             assert!(matches!(&r, Err(LcError::Bad(m)) if m.contains("reserved daemon prefix")), "{crid}: {:?}", r.err());
         }
+    }
+}
+
+#[cfg(test)]
+mod relay_autostart_tests {
+    use super::*;
+
+    async fn fixture() -> (crate::testing::Env, String, String) {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "start-manager").await;
+        let worker = crate::testing::claude_bot(&env.app, &env.project_id, "start-worker").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
+        let run = crate::testing::fake_run(&env.app, &manager.id).await;
+        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:manager", env.project_id)).bind(run).execute(&env.app.db).await.unwrap();
+        (env, manager.id, worker.id)
+    }
+
+    #[tokio::test]
+    async fn stopped_disabled_member_has_explanatory_error() {
+        let (env, manager, worker) = fixture().await;
+        sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&worker).execute(&env.app.db).await.unwrap();
+        let err = ensure_relay_member_ready(&env.app, &manager, &worker).await.unwrap_err();
+        assert!(matches!(err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable" && v["message"].as_str().unwrap().contains("manager_use=false")));
+    }
+
+    #[tokio::test]
+    async fn stopped_member_is_not_started_by_a_specialist() {
+        let (env, manager, worker) = fixture().await;
+        sqlx::query("UPDATE bots SET role='specialist' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
+        let err = ensure_relay_member_ready(&env.app, &manager, &worker).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(v) if v["error"] == "member_stopped" && v["message"].as_str().unwrap().contains("管理者")));
+        assert!(db::active_run(&env.app.db, &worker).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn existing_start_is_waited_until_ready() {
+        let (env, manager, worker) = fixture().await;
+        let run = crate::testing::fake_run(&env.app, &worker).await;
+        sqlx::query("UPDATE runs SET state='starting', agent_status='unknown' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let app = env.app.clone();
+        let run2 = run.clone();
+        let update = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(run2).execute(&app.db).await.unwrap();
+        });
+        ensure_relay_member_ready(&env.app, &manager, &worker).await.unwrap();
+        update.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_member_is_started_and_relay_request_is_persisted() {
+        use tower::ServiceExt;
+        let (env, manager, worker) = fixture().await;
+        let req = axum::http::Request::builder().method("POST")
+            .uri(format!("/api/bots/{worker}/prompt"))
+            .header("host", "127.0.0.1:7799")
+            .header("X-AM-Bot-Id", &manager).header("X-AM-Bot-Token", "tok")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"text":"autostart work","client_request_id":"autostart-test","expect_result":true}"#)).unwrap();
+        let res = router(env.app.clone()).oneshot(req).await.unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(status.is_success(), "{status}: {value}");
+        let run = db::active_run(&env.app.db, &worker).await.unwrap().unwrap();
+        assert_eq!(run.state, "running");
+        // The test herdr creates a pane but does not simulate a composer until explicitly attached.
+        // Reconcile the durable request once that composer becomes available.
+        let pane = run.pane_id.as_deref().unwrap();
+        env.herdr.live_pane(pane, crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        crate::runners::relay_requests::sweep(&env.app).await;
+        let stored: (String, String, Option<String>) = sqlx::query_as("SELECT to_bot_id,prompt_text,to_turn_id FROM relay_requests WHERE id=?")
+            .bind(value["request_id"].as_str().unwrap()).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!((stored.0, stored.1), (worker, "autostart work".to_string()));
+        assert!(stored.2.is_some(), "reconcile 未建立投遞 turn：{value}");
+        assert!(env.herdr.pane(pane).unwrap().transcript.iter().any(|line| line.contains("autostart work")));
+    }
+
+    #[tokio::test]
+    async fn start_failure_is_returned_to_caller() {
+        let (env, manager, worker) = fixture().await;
+        sqlx::query("UPDATE bots SET identity='missing-autostart-test-identity' WHERE id=?").bind(&worker).execute(&env.app.db).await.unwrap();
+        let err = ensure_relay_member_ready(&env.app, &manager, &worker).await.unwrap_err();
+        assert!(matches!(err, LcError::Unavailable(v) if v["error"] == "member_start_failed" && v["message"].as_str().unwrap().contains("start-worker")));
     }
 }
