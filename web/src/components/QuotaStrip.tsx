@@ -22,6 +22,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
+import { creditRows, creditUrgent, fmtCreditDate, fmtCreditIn, nearestCreditLeft } from '../lib/resetCredits'
 import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, msUntil, resetBadge } from '../lib/quotaReset'
 import { CODEX_LOGIN_GUIDE, cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
@@ -554,8 +555,11 @@ function Gauge({
         </span>
       ))}
       <span className="quota-head">
-        <span className="quota-kind" aria-hidden="true">
-          <KindIcon kind={entry.kind} />
+        <span className="quota-kind">
+          <span aria-hidden="true" className="quota-kind-icon">
+            <KindIcon kind={entry.kind} />
+          </span>
+          {entry.kind === 'codex' ? <CreditBadge credits={q?.reset_credits} now={now} /> : null}
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
@@ -723,6 +727,25 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
   )
 }
 
+/**
+ * 額度晶片上的重置券徽章（2026-11-07 使用者）：疊在 codex logo 右上角的小數字＝可用張數，>0 才畫；
+ * 最近一張快到期（<48h）換警示色；tooltip 寫最近到期日。桌面與手機都畫。細節在彈窗。
+ */
+function CreditBadge({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
+  const t = useT()
+  if (!credits || credits.available <= 0) return null
+  const left = nearestCreditLeft(credits, now)
+  const title =
+    left === null
+      ? t('{n} 張重置券可用', { n: credits.available })
+      : t('{n} 張重置券可用，最近一張 {in}到期（{time}）', { n: credits.available, in: fmtCreditIn(left), time: fmtCreditDate(new Date(now + left).toISOString()) })
+  return (
+    <span className={`quota-credit-badge${creditUrgent(left) ? ' urgent' : ''}`} title={title} aria-label={title}>
+      {credits.available}
+    </span>
+  )
+}
+
 /** codex 額度重置券（2026-09-10 使用者）；daemon 只讀不用，要用在 codex `/status` → Reset usage。 */
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   const t = useT()
@@ -732,21 +755,34 @@ function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null |
   const tip = left === null
     ? t('{title}・在 codex 裡用 /status → Reset usage', { title: titleText })
     : t('{title}・{left}後過期・在 codex 裡用 /status → Reset usage', { title: titleText, left: fmtLeft(left) })
+  const rows = creditRows(credits, now)
   return (
-    <div className="quota-pop-line reset-credits">
-      <span className="quota-win">
-        <span className="quota-ico" aria-hidden="true">
-          ⟳
+    <>
+      <div className="quota-pop-line reset-credits">
+        <span className="quota-win">
+          <span className="quota-ico" aria-hidden="true">
+            ⟳
+          </span>
+          {t('重置券')}
         </span>
-        {t('重置券')}
-      </span>
-      <span className="quota-reset-credit" title={tip}>
-        {t.x('{n} 張可用', {
-          n: <strong>{credits.available}</strong>,
-        })}
-        {credits.title ? <span className="quota-reset-title">{credits.title}</span> : null}
-      </span>
-    </div>
+        <span className="quota-reset-credit" title={tip}>
+          {t.x('{n} 張可用', {
+            n: <strong>{credits.available}</strong>,
+          })}
+          {rows.length === 0 && credits.title ? <span className="quota-reset-title">{credits.title}</span> : null}
+        </span>
+      </div>
+      {/* 每張券的到期日＋倒數（2026-11-07 使用者）；不到 48 小時標警示色。舊 daemon 沒 credits 時沒有這幾列。 */}
+      {rows.map((r) => (
+        <div key={r.id || r.expiresAt || r.title} className={`quota-pop-line reset-credit-row${creditUrgent(r.left) ? ' urgent' : ''}`}>
+          <span className="quota-reset-title">{r.title ?? titleText}</span>
+          <span className="quota-credit-when" title={t('到期時刻 {time}', { time: fmtCreditDate(r.expiresAt) })}>
+            {r.expiresAt ? fmtCreditDate(r.expiresAt) : '—'}
+            {r.left !== null ? <span className="quota-credit-in">{fmtCreditIn(r.left)}</span> : null}
+          </span>
+        </div>
+      ))}
+    </>
   )
 }
 

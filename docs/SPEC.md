@@ -4922,6 +4922,11 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
 `supervisor_assignments.expects_review`（預設 1）。`expects_review=0`（API `kind:"notice"`、CLI `agm assign --notice`）：送達且回合 `completed`/`completed_fallback` → 直接 `completed`，
 inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失敗的通知**仍**進 `awaiting_review`。`assignment_stalled` 跳過停在 `awaiting_review` 的通知；`quota_blocked` 不算卡住。
 
+#### 18.8a2 codex 重置券到期前一天提示（2026-11-07 使用者）
+
+`rateLimitResetCredits.credits[]` 逐張收進 `Quota.reset_credits.credits`（`{id,title,status,granted_at,expires_at}`，只收 `available`／`redeeming`，依到期由早到晚），`expires_at`／`title` 取最早到期那張，不依供應商清單順序（API.md §12.4）。
+**提示不依賴網頁開著**：`runners/reset_credit_expiry.rs` 每 10 分鐘掃記憶體裡的 codex 額度讀數（跳過 stale），每張有 id、未過期、24 小時內到期的券推**一則** AGM inbox `ops_alert`（`source=daemon`，`reason=codex_reset_credit_expiring`，detail 例「codex 重置券『Full reset』12/01 03:56 (+8) 到期（約 17 小時後；co0 @m4p），在 codex 用 /status → Reset usage」）。去重靠 `supervisor_inbox.event_key = ops_alert:daemon:codex_reset_credit_expiring:<券 id>`（`INSERT OR IGNORE`）：重啟、同一張券出現在多個額度 key 都只推一次；24 小時外不推；沒有 id 的券不推。網頁開著時另外跳 toast（`store/resetCreditsNotice.ts`，localStorage 去重，不看 daemon 的紀錄）。daemon 只通知，不替使用者用券。
+
 #### 18.8b 撞到用量上限是「等」，不是「失敗」
 `quota.limit_hit` 記 CLI 印的上限橫幅（`You've hit your usage limit …`，可能帶 `try again at …`）。狀態 `quota_blocked`（未結案）：
 codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地時間：本機照 daemon 時區、遠端照 `tools::detect` 記下的 `date +%z` 偏移（`HostTools.utc_offset_secs`）；偏移讀不到（或讀不到 bot 在哪台主機）不猜，到期改用 app-server 的重置時間，沒有就撞限起 5 小時（#239）。

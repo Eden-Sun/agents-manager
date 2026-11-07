@@ -583,7 +583,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(five_reset.clone()) }),
             seven_day: Some(Window { observed_at: None, used_pct: 50.0, resets_at: Some(seven_reset.clone()) }),
             fable: None,
-            reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None }),
+            reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None, credits: vec![] }),
             limit_hit: None,
             plan: Some("plus".into()),
             updated_at: crate::db::now(),
@@ -1235,6 +1235,41 @@
         assert!(c.expires_at.unwrap().starts_with("2026-"));
     }
 
+    /// 2026-11-07 使用者：每張券逐張收（id／title／status／granted_at／expires_at），只收 available 與 redeeming；
+    /// `expires_at`／`title` 是**最早到期**那張，不依清單順序。
+    #[test]
+    fn codex_reset_credits_list_each_credit_and_pick_the_earliest_expiry() {
+        let r = json!({
+            "rateLimits": {"primary": {"usedPercent": 3, "windowDurationMins": 300}},
+            "rateLimitResetCredits": {
+                "availableCount": 3,
+                "credits": [
+                    {"id": "late", "status": "available", "title": "Late", "grantedAt": 1790000000, "expiresAt": 1793000000},
+                    {"id": "used", "status": "used", "title": "Used", "expiresAt": 1780000000},
+                    {"id": "early", "status": "redeeming", "title": "Early", "grantedAt": 1789000000, "expiresAt": 1791000000},
+                    {"id": "noexp", "status": "available", "title": "NoExp"},
+                    {"id": "expired", "status": "expired", "expiresAt": 1700000000}
+                ]
+            }
+        });
+        let c = quota_from_codex(&r).unwrap().reset_credits.unwrap();
+        assert_eq!(c.available, 3);
+        let ids: Vec<&str> = c.credits.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["early", "late", "noexp"], "used／expired 不收，依到期由早到晚、沒到期日的排最後");
+        assert_eq!(c.title.as_deref(), Some("Early"));
+        assert_eq!(c.expires_at, c.credits[0].expires_at);
+        assert_eq!(c.credits[0].status, "redeeming");
+        assert!(c.credits[0].granted_at.as_deref().unwrap().starts_with("2026-"));
+        assert!(c.credits[2].expires_at.is_none());
+    }
+
+    /// 舊資料（DB 快取、舊 daemon 的 payload）沒有 `credits` 欄也要讀得回來。
+    #[test]
+    fn reset_credits_without_a_credits_field_still_deserialize() {
+        let c: ResetCredits = serde_json::from_value(json!({"available": 1, "title": "x", "expires_at": null})).unwrap();
+        assert!(c.credits.is_empty());
+    }
+
     #[test]
     fn no_reset_credits_field_means_none() {
         let r = json!({"rateLimits": {"primary": {"usedPercent": 3, "windowDurationMins": 300}}});
@@ -1262,7 +1297,7 @@
     #[tokio::test]
     async fn codex_reset_credits_do_not_survive_a_plan_change() {
         let app = crate::testing::env().await.app.clone();
-        let credit = ResetCredits { available: 1, title: Some("Full reset".into()), expires_at: None };
+        let credit = ResetCredits { available: 1, title: Some("Full reset".into()), expires_at: None, credits: vec![] };
         let cases = [
             ("codex:same-plan", "codex-app-server", "plus", true),
             ("codex:plan-changed", "codex-app-server", "prolite", false),

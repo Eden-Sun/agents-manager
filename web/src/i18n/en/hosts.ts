@@ -534,6 +534,7 @@ export default {
   '登入狀態未知': 'Sign-in status unknown',
   '尚未定義任何身份。': 'No identities defined yet.',
   '{name} 的重置券：{from} → {to} 張': '{name} reset credits: {from} → {to}',
+  '{name} 的重置券『{title}』{time} 到期（24 小時內），在 codex 用 /status → Reset usage': '{name} reset credit "{title}" expires {time} (within 24 hours); in codex use /status → Reset usage',
   "登入完成，{s} 秒後自動關閉這個 shell": "Signed in; closing this shell in {s}s",
   "保留": "Keep",
   "關閉這個 pane：{label}": "Close this pane: {label}",

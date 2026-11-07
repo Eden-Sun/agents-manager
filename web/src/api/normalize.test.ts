@@ -136,3 +136,26 @@ test('specialist 角色與 track 不會在 normalize 時被丟掉（/api/state �
   assert.equal(b?.runtime_override, null)
   assert.equal(toBot({ id: 'b-x', role: 'bogus' })?.role, null, '不認得的角色仍當未分配')
 })
+
+test('重置券：credits 逐張解析，舊 daemon 沒有這欄就是空陣列', () => {
+  const base = { five_hour: null, seven_day: null, fable: null, limit_hit: null, plan: null, updated_at: '2026-11-07T10:00:00Z', host: 'local' }
+  const got = toKindQuota({
+    ...base,
+    reset_credits: {
+      available: 2,
+      title: 'Full reset',
+      expires_at: '2026-12-01T03:56:00.000Z',
+      credits: [
+        { id: 'c1', title: 'Full reset', status: 'available', granted_at: '2026-11-01T03:56:00.000Z', expires_at: '2026-12-01T03:56:00.000Z' },
+        { id: 'c2', title: null, status: 'redeeming', granted_at: null, expires_at: null },
+        'junk',
+      ],
+    },
+  })?.reset_credits
+  assert.equal(got?.credits.length, 2)
+  assert.deepEqual(got?.credits[0], { id: 'c1', title: 'Full reset', status: 'available', granted_at: '2026-11-01T03:56:00.000Z', expires_at: '2026-12-01T03:56:00.000Z' })
+  assert.deepEqual(got?.credits[1], { id: 'c2', title: null, status: 'redeeming', granted_at: null, expires_at: null })
+  const old = toKindQuota({ ...base, reset_credits: { available: 1, title: 'x', expires_at: '2026-12-01T03:56:00.000Z' } })?.reset_credits
+  assert.deepEqual(old?.credits, [])
+  assert.equal(old?.available, 1)
+})
