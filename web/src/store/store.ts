@@ -3890,11 +3890,12 @@ function newClientId(): string {
 }
 
 if (import.meta.hot) {
-  // HMR 熱替換後，若先前已經 bootstrap 成功（ready === true），重新連上 WebSocket 避免連線中斷
+  // HMR 熱替換後，若先前已經 bootstrap 成功（ready === true），重新連上 WebSocket 與啟動額度輪詢避免中斷
   if (prevStoreState && prevStoreState.ready) {
     if (boundSet && boundGet) {
       connectSocket(boundSet, boundGet)
     }
+    if (!quotaSweep) quotaSweep = setInterval(() => void useStore.getState().loadQuota(), QUOTA_SWEEP_MS)
   }
 
   import.meta.hot.dispose((data: Record<string, unknown>) => {
