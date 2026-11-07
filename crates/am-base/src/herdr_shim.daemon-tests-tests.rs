@@ -1164,6 +1164,29 @@ esac"#, calls.display()));
         assert_eq!(yolo(&out), 0, "{out:?}");
     }
 
+    /// 2026-11-07：agy 子 agent 沒帶核准旗標時每個指令都停下來要權限；bot 開的 child 補 `--dangerously-skip-permissions`。
+    #[test]
+    fn an_agy_child_skips_permission_prompts() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1")];
+        let skip = |out: &[String]| out.iter().filter(|a| *a == "--dangerously-skip-permissions").count();
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(&out[7..], ["--", "--model", "gemini-3.8-flash-low", "--dangerously-skip-permissions"], "{out:?}");
+        for own in [&["--dangerously-skip-permissions"][..], &["--mode", "plan"], &["--mode=accept-edits"], &["--sandbox"]] {
+            let mut args = vec!["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9", "--"];
+            args.extend(own);
+            let (out, err, rc) = s.run_full(&env, &args);
+            assert_eq!(rc, 0, "{err}");
+            assert_eq!(skip(&out), usize::from(own[0] == "--dangerously-skip-permissions"), "{own:?} → {out:?}");
+        }
+        // 人工 shell（沒有 AM_BOT_ID）、別的 kind：不補。
+        let (out, _, _) = s.run_full(&[("AM_AGENT_NAME", "p-1")], &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9"]);
+        assert_eq!(skip(&out), 0, "{out:?}");
+        let (out, _, _) = s.run_full(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert_eq!(skip(&out), 0, "{out:?}");
+    }
+
     /// §6.5i：子 agent 的指示跟母 bot 同一份（`AM_INSTRUCTIONS_FILE`），CLI 自己的指示檔不讀；呼叫者自己帶了就尊重。
     #[test]
     fn a_child_agent_gets_the_parents_instructions_file() {
