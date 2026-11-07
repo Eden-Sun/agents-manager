@@ -51,7 +51,15 @@ for (const [name, status, sentVia, supported, shown] of [
       messages: { bq: [{ id: 'm1', bot_id: 'bq', turn_id: 'tq', role: 'user', content: 'x', attachments: [], created_at: '2026-01-01T00:00:00Z', sent_via: sentVia }] },
     } as never)
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
-    const found = [...document.querySelectorAll('.msg-meta button, .msg button, .bubble button')].some((b) => b.textContent === '插隊')
-    assert.equal(found, shown)
+    const btn = document.querySelector<HTMLButtonElement>('.msg > .queued-jump')
+    assert.equal(Boolean(btn), shown)
+    if (btn) {
+      // 在泡泡下面、不在 meta 列裡（不撐高 meta）；可存取：有文字、aria-label、tooltip。
+      assert.equal(document.querySelector('.msg-meta .queued-jump'), null)
+      assert.equal(btn.previousElementSibling?.classList.contains('bubble'), true)
+      assert.equal(btn.textContent, '⤴插隊送出')
+      assert.match(btn.getAttribute('aria-label') ?? '', /插隊送出/)
+      assert.match(btn.title, /打斷目前這一輪/)
+    }
   })
 }

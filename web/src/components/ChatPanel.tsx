@@ -241,7 +241,6 @@ const PlainBubble = memo(function PlainBubble({
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title={t('daemon 自動通知，不是使用者直接輸入')}>{t('daemon 通知')}</span> : null}
           <SentViaTag msg={msg} />
-          <SupplementSendNow msg={msg} />
           {notice === 'warn' ? (
             <span className="src-tag fallback" title={t.tr(DELIVERY_WARN_TEXT)}>
               {t('未驗證送達')}
@@ -294,6 +293,7 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
+      <SupplementSendNow msg={msg} />
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? t('收合') : t('展開全文')}

@@ -58,9 +58,19 @@ export function SupplementSendNow({ msg: m }: { msg: Pick<Message, 'role' | 'sen
   const [gone, setGone] = useState(false)
   const { busy, click } = useSendQueuedNow(botId, () => setGone(true))
   if (!eligible || gone) return null
+  // 掛在泡泡下緣、靠右的小 pill（2026-11-07 使用者：優化插隊的按鈕位置與樣式）：它是對「這則」排隊補充的動作，
+  // 不放 meta 列（原本一顆大方框撐高 meta、跟小字不同系統）。視覺小、觸控範圍由 CSS 偽元素撐到 ≥32px。
   return (
-    <button type="button" className="mini-btn" disabled={busy} title={t('補充還排在終端佇列（CLI 正在跑工具）時，打斷目前這一輪、立刻送進去')} onClick={() => void click()}>
-      {t('插隊')}
+    <button
+      type="button"
+      className="queued-jump"
+      disabled={busy}
+      aria-label={t('插隊送出：打斷目前這一輪，立刻送出這則排隊中的補充')}
+      title={t('補充還排在終端佇列（CLI 正在跑工具）時，打斷目前這一輪、立刻送進去')}
+      onClick={() => void click()}
+    >
+      <span className="queued-jump-icon" aria-hidden="true">⤴</span>
+      {t('插隊送出')}
     </button>
   )
 }
