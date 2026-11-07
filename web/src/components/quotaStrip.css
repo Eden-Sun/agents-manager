@@ -1175,19 +1175,31 @@
   display: inline-flex;
 }
 
-/* logo 右下角的小字數字＝可用重置券張數（無底色，避免像未讀訊息數）；快到期（<48h）只換文字色。 */
+/* logo 左上角的「小票券圖示＋張數」＝可用重置券（無底色，避免像未讀訊息數；2026-11-07 使用者：右下會擋住下面文字，改左上）；
+   排在 logo 左邊、頂端對齊（logo 右移一點），不蓋 logo 與下方的 7d／倒數文字；手機額度列是捲動容器，絕對定位疊在上緣會被裁掉。
+   快到期（<48h）只換文字色。 */
 .quota-credit-badge {
-  position: absolute;
-  bottom: -4px;
-  right: -7px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin: -2px 2px 0 0;
   font-size: 9px;
   font-weight: 600;
   line-height: 1;
-  color: var(--text-faint);
+  color: currentColor; /* 跟 logo 同色（.quota-kind 的品牌色），降低不透明度讓它低調 */
+  opacity: 0.7;
   font-variant-numeric: tabular-nums;
   cursor: help;
 }
 
+.quota-credit-icon {
+  width: 9px;
+  height: 9px;
+  flex: none;
+}
+
 .quota-credit-badge.urgent {
   color: var(--warn);
+  opacity: 1;
 }

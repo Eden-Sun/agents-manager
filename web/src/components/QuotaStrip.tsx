@@ -556,10 +556,10 @@ function Gauge({
       ))}
       <span className="quota-head">
         <span className="quota-kind">
+          {entry.kind === 'codex' ? <CreditBadge credits={q?.reset_credits} now={now} /> : null}
           <span aria-hidden="true" className="quota-kind-icon">
             <KindIcon kind={entry.kind} />
           </span>
-          {entry.kind === 'codex' ? <CreditBadge credits={q?.reset_credits} now={now} /> : null}
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
@@ -728,7 +728,7 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
 }
 
 /**
- * 額度晶片上的重置券徽章（2026-11-07 使用者）：疊在 codex logo 右上角的小數字＝可用張數，>0 才畫；
+ * 額度晶片上的重置券徽章（2026-11-07 使用者）：排在 codex logo 左上角的「小票券圖示＋數字」＝可用張數（不用絕對定位：手機額度列是捲動容器，會裁掉超出上緣的東西），>0 才畫；
  * 最近一張快到期（<48h）換警示色；tooltip 寫最近到期日。桌面與手機都畫。細節在彈窗。
  */
 function CreditBadge({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
@@ -741,6 +741,10 @@ function CreditBadge({ credits, now }: { credits: QuotaResetCredits | null | und
       : t('{n} 張重置券可用，最近一張 {in}到期（{time}）', { n: credits.available, in: fmtCreditIn(left), time: fmtCreditDate(new Date(now + left).toISOString()) })
   return (
     <span className={`quota-credit-badge${creditUrgent(left) ? ' urgent' : ''}`} title={title} aria-label={title}>
+      <svg className="quota-credit-icon" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+        <path d="M1 3h10v2a1 1 0 0 0 0 2v2H1V7a1 1 0 0 0 0-2z" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+        <path d="M7.5 3.4v5.2" stroke="currentColor" strokeWidth="0.9" strokeDasharray="1 1" />
+      </svg>
       {credits.available}
     </span>
   )
