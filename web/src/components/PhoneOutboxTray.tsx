@@ -83,17 +83,28 @@ function PhoneOutboxTrayInner() {
       {open ? (
         <div className="phone-outbox-body">
           {images.length > 0 ? (
-            <ul className="phone-outbox-thumbs" role="list">
+            <ul className={`phone-outbox-thumbs${peek ? ' peeking' : ''}`} role="list">
               {images.map((f) => (
                 <li key={f.name}>
                   <button
                     type="button"
-                    className="phone-outbox-thumb"
+                    className={`phone-outbox-thumb${peek?.name === f.name ? ' peeking' : ''}`}
+                    data-outbox-name={f.name}
                     aria-label={t('按住預覽 {name}', { name: f.name })}
                     onPointerDown={(e) => {
                       // 滑鼠也要在別處放開時收得掉：把指標抓在這顆鈕上（觸控本來就是隱式抓取）。
                       e.currentTarget.setPointerCapture?.(e.pointerId)
                       setPeek(f)
+                    }}
+                    onPointerMove={(e) => {
+                      // 按住滑過其他縮圖就換成那張（使用者 2026-11-07：兩張以上，碰到哪張就換 focus）。
+                      // 指標抓在起點那顆鈕上，所以用座標找手指底下的縮圖；大圖層不吃指標，找得到底下的鈕。
+                      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-outbox-name]')
+                      const name = hit?.dataset.outboxName
+                      if (name && name !== peek?.name) {
+                        const next = images.find((x) => x.name === name)
+                        if (next) setPeek(next)
+                      }
                     }}
                     onPointerUp={() => setPeek(null)}
                     onPointerCancel={() => setPeek(null)}

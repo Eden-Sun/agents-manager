@@ -143,7 +143,7 @@
   inset: 0;
   z-index: 1000;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 12px;
   background: color-mix(in srgb, var(--bg) 82%, transparent);
@@ -152,7 +152,8 @@
 
 .phone-outbox-peek .phone-outbox-full {
   max-width: 100%;
-  max-height: calc(var(--vvh, 100dvh) - 24px);
+  /* 留出底下的縮圖列與輸入框，滑動換圖時手指下的縮圖不被大圖蓋住。 */
+  max-height: calc(var(--vvh, 100dvh) - 240px);
   box-shadow: 0 4px 24px rgb(0 0 0 / 35%);
 }
 
@@ -160,4 +161,15 @@
 .phone-outbox-thumb img {
   -webkit-touch-callout: none;
   -webkit-user-drag: none;
+}
+
+/* 按住時縮圖列浮在大圖層上面，手指滑到哪張看得到；目前那張加外框。 */
+.phone-outbox-thumbs.peeking {
+  position: relative;
+  z-index: 1001;
+}
+
+.phone-outbox-thumb.peeking {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
