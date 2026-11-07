@@ -414,6 +414,21 @@ impl Serialize for Window {
 pub struct ResetCredits {
     pub available: i64,
     pub title: Option<String>,
+    /// 所有 available／redeeming 券中**最早**到期的那張（不依清單順序）。
+    pub expires_at: Option<String>,
+    /// 每一張 available／redeeming 券（2026-11-07 使用者：要列出每張的到期日並在前一天提示）。
+    /// 舊資料沒有這欄就是空的。
+    #[serde(default)]
+    pub credits: Vec<ResetCredit>,
+}
+
+/// `rateLimitResetCredits.credits[]` 的一張券（只收 `available`／`redeeming`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResetCredit {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub granted_at: Option<String>,
     pub expires_at: Option<String>,
 }
 
@@ -666,18 +681,40 @@ pub fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// `credits[]` 可能含已用／過期的，標題與到期只取第一張 `available`。
+/// `credits[]` 可能含已用／過期的：只收 `available`／`redeeming`。`title`／`expires_at` 取**最早到期**那張
+/// （沒有到期日的排最後；同時間以清單順序為準），不依清單順序。
 fn reset_credits(result: &Value) -> Option<ResetCredits> {
     let rc = result.get("rateLimitResetCredits")?;
     let available = rc.get("availableCount").and_then(|x| x.as_i64()).unwrap_or(0);
-    let first = rc
+    let mut credits: Vec<ResetCredit> = rc
         .get("credits")
         .and_then(|x| x.as_array())
-        .and_then(|a| a.iter().find(|c| c.get("status").and_then(|s| s.as_str()) == Some("available")));
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    let status = c.get("status").and_then(|s| s.as_str())?;
+                    if status != "available" && status != "redeeming" {
+                        return None;
+                    }
+                    Some(ResetCredit {
+                        id: c.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                        title: c.get("title").and_then(|x| x.as_str()).map(String::from),
+                        status: status.to_string(),
+                        granted_at: unix_to_rfc3339(c.get("grantedAt")),
+                        expires_at: unix_to_rfc3339(c.get("expiresAt")),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // 穩定排序：有到期日的由早到晚，沒有的排最後。
+    credits.sort_by_key(|c| c.expires_at.as_deref().and_then(parse_utc).map_or(i64::MAX, |t| t.timestamp()));
+    let first = credits.first();
     Some(ResetCredits {
         available,
-        title: first.and_then(|c| c.get("title")).and_then(|x| x.as_str()).map(String::from),
-        expires_at: first.and_then(|c| unix_to_rfc3339(c.get("expiresAt"))),
+        title: first.and_then(|c| c.title.clone()),
+        expires_at: first.and_then(|c| c.expires_at.clone()),
+        credits,
     })
 }
 

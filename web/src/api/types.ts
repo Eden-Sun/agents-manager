@@ -1072,8 +1072,21 @@ export interface MessageHit {
 /** codex `rateLimitResetCredits`（TUI 的 `Reset usage`）：可立刻清空額度的券；其餘 kind 為 null。 */
 export interface QuotaResetCredits {
   available: number
-  /** 第一張可用券的名稱 */
+  /** 最早到期那張券的名稱 */
   title: string | null
+  /** ISO；所有可用券中最早到期的 */
+  expires_at: string | null
+  /** 每一張 available／redeeming 券（2026-11-07）；舊 daemon 沒這欄＝空陣列，畫面退回只看 title／expires_at。 */
+  credits: QuotaResetCredit[]
+}
+
+export interface QuotaResetCredit {
+  id: string
+  title: string | null
+  /** `available`｜`redeeming` */
+  status: string
+  /** ISO */
+  granted_at: string | null
   /** ISO */
   expires_at: string | null
 }

@@ -26,7 +26,20 @@ impl From<crate::quota::ResetCredits> for am_core::ResetCredits {
             available: rc.available,
             title: rc.title,
             expires_at: rc.expires_at,
+            credits: rc.credits.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+impl From<crate::quota::ResetCredit> for am_core::ResetCredit {
+    fn from(c: crate::quota::ResetCredit) -> Self {
+        Self { id: c.id, title: c.title, status: c.status, granted_at: c.granted_at, expires_at: c.expires_at }
+    }
+}
+
+impl From<am_core::ResetCredit> for crate::quota::ResetCredit {
+    fn from(c: am_core::ResetCredit) -> Self {
+        Self { id: c.id, title: c.title, status: c.status, granted_at: c.granted_at, expires_at: c.expires_at }
     }
 }
 
@@ -36,6 +49,7 @@ impl From<am_core::ResetCredits> for crate::quota::ResetCredits {
             available: rc.available,
             title: rc.title,
             expires_at: rc.expires_at,
+            credits: rc.credits.into_iter().map(Into::into).collect(),
         }
     }
 }

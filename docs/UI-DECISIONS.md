@@ -167,6 +167,8 @@
 
 ## 額度
 
+- **codex 重置券顯示每張的到期日，並在到期前一天提示（2026-11-07 使用者）**：額度彈窗的「重置券」下面每張券一列（標題、`MM/DD HH:mm`〔瀏覽器時區〕＋「N 天後／N 小時後」），依到期由早到晚；不到 48 小時整列用警示色。額度晶片（codex 才有，桌面與手機都畫）在 logo 右上角疊一個小數字徽章＝可用張數（>0 才畫；最近一張不到 48 小時換警示色；tooltip 寫最近到期日），細節留給彈窗，不搶量表與百分比。舊 daemon 沒有 `credits` 時彈窗照舊只寫張數，徽章照寫張數。每張券（以 id 去重）進入到期前 24 小時內提示一次：網頁開著跳 info 通知，記在 localStorage（`agm.resetCreditExpiry.v1`，7 天後清掉）；不依賴網頁的那一份由 daemon 推 AGM inbox（SPEC §16）。實作 `lib/resetCredits.ts`、`store/resetCreditsNotice.ts`。
+
 - **codex 重置券張數一變就跳通知（2026-11-01 使用者）**：每個額度 key 記住上次看到的 `reset_credits.available`（localStorage，重開頁面也比得出來），增或減都跳一則 info 通知「codex · co0 @m4p 的重置券：1 → 2 張」。第一次看到只當基準；讀不到或 stale 的讀數不算數，避免換方案暫缺欄或舊讀數誤報。實作 `store/resetCreditsNotice.ts`。
 
 - **Codex 重置消息（2026-10-13 使用者，A-leader 位置建議）**：全域事件只掛在各個 Codex 額度格，不在 strip 開頭對所有帳號顯示。只有未過期的正式預告才在 Codex 的 quota-head 名稱旁顯示「即將重置」來源連結；沿用 head 固定寬度，剩餘寬度不足改小點，不新增一列、不擠量表與個人倒數。手機只有 kind 圖示旁的小點。每個 Codex 帳號都標，非 Codex 格不標。Codex 明細底部固定提供「最近全域重置：MM/DD HH:mm · codex-reset.com ↗」；手機有正式預告時該行強調「即將重置（公告預告，個人額度以 /status 為準）」。無正式預告時 head／精簡列完全不畫；資料過期也只在明細變灰寫「資料過期」。預測機率與追蹤文字只在明細或 title，不上 head。每 30 分鐘刷新與一次性通知沿用，公告不覆蓋量表、個人重置倒數或 banked credits。

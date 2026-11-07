@@ -46,6 +46,16 @@ pub struct ResetCredits {
     pub available: i64,
     pub title: Option<String>,
     pub expires_at: Option<String>,
+    pub credits: Vec<ResetCredit>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetCredit {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

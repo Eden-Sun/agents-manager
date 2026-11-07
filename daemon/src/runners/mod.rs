@@ -60,6 +60,7 @@ pub mod rewind;
 pub mod shim_refresh;
 pub mod session_paused;
 pub mod share_admin;
+pub mod reset_credit_expiry;
 pub mod share_budget;
 pub(crate) mod s6_l;
 pub mod supervisor;

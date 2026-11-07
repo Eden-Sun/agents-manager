@@ -605,7 +605,15 @@ export class MockTransport implements Transport {
     codex: {
       five_hour: { used_pct: 63, resets_at: inHours(3.2) },
       seven_day: { used_pct: 88, resets_at: inHours(41) },
-      reset_credits: { available: 1, title: 'Full reset (Weekly + 5 hr)', expires_at: inHours(720) },
+      reset_credits: {
+        available: 2,
+        title: 'Full reset (Weekly + 5 hr)',
+        expires_at: inHours(30),
+        credits: [
+          { id: 'mock-credit-1', title: 'Full reset (Weekly + 5 hr)', status: 'available', granted_at: hoursAgo(690), expires_at: inHours(30) },
+          { id: 'mock-credit-2', title: 'Full reset (Weekly + 5 hr)', status: 'available', granted_at: hoursAgo(5), expires_at: inHours(715) },
+        ],
+      },
       plan: 'Plus',
       updated_at: now(),
       host: 'local',

@@ -359,6 +359,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
     share::portal::spawn_listener(&app, addr.port()).await;
     crate::runners::share_budget::spawn_ticker(&app);
+    crate::runners::reset_credit_expiry::spawn_ticker(&app);
     crate::claude_console_balance::spawn_ticker(&app);
     let _ = enable_shutdown.send(());
     {

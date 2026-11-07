@@ -36,6 +36,7 @@ import type {
   ModelInfo,
   QuotaMap,
   QuotaLimitHit,
+  QuotaResetCredit,
   QuotaResetCredits,
   ToolMap,
   ToolStatus,
@@ -909,7 +910,17 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
 function toResetCredits(v: unknown): QuotaResetCredits | null {
   if (!isRec(v)) return null
   const available = num(pick(v, 'available'), 0)
-  return { available, title: optStr(pick(v, 'title')), expires_at: optStr(pick(v, 'expires_at')) }
+  const raw = pick(v, 'credits')
+  const credits: QuotaResetCredit[] = Array.isArray(raw)
+    ? raw.filter(isRec).map((c) => ({
+        id: str(pick(c, 'id')),
+        title: optStr(pick(c, 'title')),
+        status: str(pick(c, 'status'), 'available'),
+        granted_at: optStr(pick(c, 'granted_at')),
+        expires_at: optStr(pick(c, 'expires_at')),
+      }))
+    : []
+  return { available, title: optStr(pick(v, 'title')), expires_at: optStr(pick(v, 'expires_at')), credits }
 }
 
 function toLimitHit(v: unknown): QuotaLimitHit | null {
