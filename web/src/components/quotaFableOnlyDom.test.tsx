@@ -116,11 +116,11 @@ it('手機：只有 Fable 有值時仍只寫一個窗口，寫出 F 的 %，並�
   const restore = phoneWidth()
   try {
     const cell = await openWith({ five: false, seven: false, fable: true })
-    const wins = [...cell.querySelectorAll<HTMLElement>('.quota-window')]
+    const wins = [...cell.querySelectorAll<HTMLElement>('.quota-compact-win')]
     assert.equal(wins.length, 1, `手機一格只寫一個窗口，實際 ${wins.length} 個`)
     assert.equal(wins[0].querySelector('.quota-window-name')?.textContent, 'F', '名稱是 F，不是 5h')
-    assert.ok((wins[0].querySelector('.quota-bar-pct')?.textContent ?? '').includes('2'), '數字寫出來')
-    assert.ok(wins[0].querySelector('.quota-bar')!.classList.contains('crit'), '顏色跟著 F 自己的 critical 旗標')
+    assert.ok((wins[0].querySelector('.quota-compact-pct')?.textContent ?? '').includes('2'), '數字寫出來')
+    assert.ok(wins[0].classList.contains('crit'), '顏色跟著 F 自己的 critical 旗標')
   } finally {
     restore()
   }

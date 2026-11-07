@@ -74,8 +74,9 @@ test('agy 顯示 Gemini 的 5h／7d，忽略舊 Claude/GPT key，popover 保留�
   assert.doesNotMatch(title, /Claude\+GPT|C\+G/)
   assert.match(title, /Individual quota reached for Gemini Pro/)
   assert.ok(cell.classList.contains('quota-blocked'), 'agy 撞限需要可見的被擋提示')
+  const collapsed = document.querySelector('.quota-open')?.classList.contains('collapsed')
   const names = [...cell.querySelectorAll('.quota-window-name')].map((n) => n.textContent)
-  assert.deepEqual(names, ['5h', '7d'], cell.innerHTML)
+  assert.deepEqual(names, collapsed ? ['5h'] : ['5h', '7d'], cell.innerHTML)
   assert.ok(cell.querySelector('.quota-cell-toggle'), '整格照 kind 可以停用')
 
   await click(cell.querySelector('.quota-bars-open')!)
@@ -102,7 +103,7 @@ test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提�
     await mount(<QuotaStrip />)
     await until(() => document.querySelector('.quota-hp.agy') !== null, '一格 agy')
     const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
-    assert.deepEqual([...cell.querySelectorAll('.quota-mobile-bars .quota-window-name')].map((n) => n.textContent), ['5h', '7d'])
+    assert.deepEqual([...cell.querySelectorAll('.quota-compact-win .quota-window-name')].map((n) => n.textContent), ['5h'])
     assert.equal(cell.querySelectorAll('.quota-border-meter').length, 2, '兩個窗口都保留邊框提示')
     assert.match(cell.querySelector('.quota-border-meter.top')?.getAttribute('aria-label') ?? '', /5H/)
     assert.match(cell.querySelector('.quota-border-meter.bottom')?.getAttribute('aria-label') ?? '', /7D/)
