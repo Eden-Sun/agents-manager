@@ -95,7 +95,6 @@ settle() { if [ -n "$ROUND_FAIL" ]; then bump_fail "$ROUND_FAIL"; else rm -f "$F
 
 # launchd 的預設 PATH 不含 Homebrew；缺依賴不能只靜默 exit 0，否則「已排程」但永遠不做（#66 留言）。
 command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），上游新版分診停住"; exit 0; }
-[ -f "$TASK" ] || { log "找不到 ${TASK}，跳過"; exit 0; }
 [ -x "$BIN" ] || { log "找不到 ${BIN}，跳過（需要先建好 release binary）"; bump_fail "找不到 ${BIN}（需要先建好 release binary）"; exit 0; }
 
 # 鎖：兩個執行者同時派會送出重複交辦。鎖裡寫 pid 與時間（抄 daemon-update-kick.sh 的格式）：
@@ -221,6 +220,12 @@ print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 ' "$DIR/runtime.json" 2>/dev/null)
 fi
 
+# 實作交辦交給能派 child 的協調者；release_bot_id 可能是禁止再派工的專用 child。
+ISSUE_BOT="${AGM_RELEASE_BOT:-}"
+if [ -z "$ISSUE_BOT" ] && [ -f "$DIR/runtime.json" ]; then
+  ISSUE_BOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("responder_bot_id") or "")' "$DIR/runtime.json" 2>/dev/null)
+fi
+
 prepare_claude_diff
 
 # 重試 gh 失敗、停在 judged 的版本（daemon 端刻意不做定時器，靠這裡每輪叫一次）。與有沒有 pending、額度夠不夠無關，
@@ -253,10 +258,12 @@ done
 
 # 開出去的 issue 交給 AGM 接手實作（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）。
 # 帳本裡每張**新開**的 issue（`comment`＝只在既有 issue 留言的不算）交辦一次：request-id `release-issue-<編號>` 由 daemon 去重，
-# 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。派給同一顆分診 bot（協調者／巡檢），由它照平常流程派 child。
+# 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。交給協調者 responder_bot_id（或明確覆寫），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
-for KIND in claude codex agy grok; do
+handoff_issues() {
+  local KIND
+for KIND in "$@"; do
   if ! SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null); then
     note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
     continue
@@ -300,8 +307,8 @@ for r in rows:
     continue
   fi
   [ -n "$TODO" ] || continue
-  if [ -z "$BOT" ]; then
-    note_fail "release-triage ${KIND} 有尚未交接的 issue，但找不到收件 bot（AGM_RELEASE_BOT／runtime.json）"
+  if [ -z "$ISSUE_BOT" ]; then
+    note_fail "release-triage ${KIND} 有尚未交接的 issue，但找不到收件 bot（AGM_RELEASE_BOT／runtime.json 的 responder_bot_id）"
     continue
   fi
   if [ ! -f "$ISSUE_TASK" ]; then
@@ -321,10 +328,10 @@ for r in rows:
     [ -n "$_num" ] || continue
     _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
     { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
-    if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$_body" \
+    if "$AGM" --compact assign --bot "$ISSUE_BOT" --review-by patrol --text-file "$_body" \
          --request-id "release-issue-${_num}" >> "$LOG" 2>&1; then
       if printf '%s\n' "$_num" >> "$HANDED"; then
-        log "${_kind} ${_ver}：issue #${_num} 已交給 ${BOT} 接手"
+        log "${_kind} ${_ver}：issue #${_num} 已交給 ${ISSUE_BOT} 接手"
       else
         note_fail "issue #${_num} 已送出但寫不了交接狀態 ${HANDED}，下一輪沿用同 request-id 對帳重試"
       fi
@@ -334,6 +341,8 @@ for r in rows:
     rm -f "$_body"
   done <<< "$TODO"
 done
+}
+handoff_issues claude codex agy grok
 
 # 額度閘門（issue #204 §3）：該 bot 身份的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
 # 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。
@@ -506,7 +515,11 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
 
   if [ "$BINARY_ONLY" -eq 0 ]; then
     api_triage; _api_rc=$?
-    if [ "$_api_rc" -eq 3 ]; then continue; fi
+    if [ "$_api_rc" -eq 3 ]; then
+      # accept_submission 已直接 gh publish；同輪把新票送去實作，不等下一個 30 分鐘 tick。
+      handoff_issues "$KIND"
+      continue
+    fi
   else
     # 只有 binary、缺 changelog 時也不可繞過 API 模式去派 AGM。
     _mode=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || continue
@@ -518,6 +531,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   fi
 
   [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
+  [ -f "$TASK" ] || { note_fail "找不到 ${TASK}，跳過 AGM 分診"; continue; }
   quota_gate || exit 0
 
   BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY"); TMPS_COUNT=$((TMPS_COUNT + 1))
