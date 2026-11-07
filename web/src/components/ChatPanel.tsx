@@ -1283,7 +1283,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
         <SlItem k="context" title={ctxTitle}>
           {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
-          {/* 手機改在長按主力晶片的狀態卡裡（BotStatusCard，觸控目標 ≥ 40px），這裡不重複。 */}
+          {/* 手機在 context popup（MobileContextPanel）與長按主力晶片的狀態卡裡，這裡不重複。 */}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : status?.context_unknown ? (

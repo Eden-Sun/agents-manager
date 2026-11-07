@@ -247,7 +247,8 @@ test('手機版：「不用保溫」在主力的狀態卡裡（長按主力晶�
   }
 })
 
-test('手機版：Git／專案資訊彈窗裡不再有「不用保溫」', async () => {
+// 2026-11-07 使用者：手機 context popup 也要能設定不保溫（之前只在長按主力晶片的狀態卡裡）。
+test('手機版：context popup 裡主力也有「不用保溫」', async () => {
   const restore = asPhone()
   try {
     const { id } = await running('am-claude')
@@ -255,8 +256,7 @@ test('手機版：Git／專案資訊彈窗裡不再有「不用保溫」', async
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     await click(document.querySelector<HTMLButtonElement>('.mobile-git-info')!)
     await until(() => document.querySelector('.mobile-context-panel') !== null, '彈窗開了')
-    assert.equal(document.querySelector('.mobile-keep-warm-row'), null)
-    assert.equal(document.querySelector('.keep-warm-skip-btn'), null, '入口只在狀態卡裡')
+    await until(() => document.querySelector('.mobile-context-panel .keep-warm-skip-btn') !== null, 'popup 裡有不用保溫')
   } finally {
     restore()
   }
