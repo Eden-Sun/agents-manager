@@ -981,7 +981,7 @@ am_agent_prompt() {
         _out=$(am_curl_bot --noproxy '*' --connect-timeout 2 --max-time "$_remaining" -sS -w '\n%{http_code}' -H 'Content-Type: application/json' --data-binary "$_body" "$_base/api/bots/$_target/prompt") || am_announce_refuse 75 "$_requested" "投遞結果未知；用 --request-id $_request_id 原樣重試"
         _code=$(printf '%s\n' "$_out" | tail -n 1)
         _reply=$(printf '%s\n' "$_out" | sed '$d')
-        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）" ;; *) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}；用 --request-id $_request_id 原樣重試" ;; esac
+        case "$_code" in 2??) : ;; 401|403) am_announce_refuse 77 "$_requested" "daemon 拒絕身份或授權（HTTP ${_code}）：$_reply" ;; 400) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}：$_reply" ;; *) am_announce_refuse 75 "$_requested" "daemon 回 HTTP ${_code}：${_reply}；用 --request-id $_request_id 原樣重試" ;; esac
         if [ -z "$_expect_result" ]; then
             printf '%s' "$_reply" | python3 -c 'import json,sys
 try:
