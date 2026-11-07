@@ -4749,7 +4749,7 @@ daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 g
 **publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、自動路徑（verdict 進來、kick 每輪的重試）**完全不啟動 gh**（例外只有下面人工觸發的乾跑）；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
 開之前帳本＋遠端雙重去重（**已關的不復活**）。遠端那一道用 `gh issue list --state all --label release-triage`（repo 的 issues 列表，對剛建立的 issue **立即一致**）抓一次、在本地比對隱藏標記；
 `--search` 只當補網（標籤被拿掉、或超過 `-L 200`），因為它走 GitHub 的**非同步**搜尋索引：`gh issue create` 逾時或行程在寫回帳本之前掛掉時，只靠搜尋會因為「還沒索引到」而重開一張（#456；`Gh::run` 也加了 `kill_on_drop`，逾時就不讓子行程在背景把 issue 開完）。
-內文被編輯、標記不見時改用**完全相同的標題**認（標題是 daemon 組的；只在那張內文完全沒有標記時採用，否則同版兩個提案標題撞在一起會吃掉該開的第二張）。每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪；跨版本統計也納入遠端已確認、帳本尚未回寫的 create）、`guard` 優先；
+內文被編輯、標記不見時改用**完全相同的標題**認（標題是 daemon 組的；只在那張內文完全沒有標記時採用，否則同版兩個提案標題撞在一起會吃掉該開的第二張）。每版 ≤4 張（超過的記在 `publish_error` 不再開），無每日或跨版本總量上限（舊版因每日上限留在 `judged` 的版本會在下一輪自動重試，成功後清除延後錯誤）、`guard` 優先；
 每開一張立刻寫回帳本。gh／設定失敗 → 停在 `judged`、錯誤進 `publish_error`，重試（`POST /api/release-triage/publish`）只重跑 publish，不重派模型、不重花額度。
 
 gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）：`gh auth status` 之外還查
@@ -4777,9 +4777,9 @@ kick 在 API 模式下任何 API／解析／傳輸失敗都不派 AGM；模式�
 
 **乾跑（`POST /api/release-triage/publish {dry_run:true}`／`agm release-triage publish --dry-run`）**：打開 `publish` 之前就要能證明「這一版會開哪幾張、內文長什麼樣、重跑會不會開第二張」，
 不必先拿正式 repo 試開一張。它是唯一在 `publish = false` 時也會啟動 gh 的路徑（由人明確觸發，kick 不跑它），且**只讀**：`auth status`／`repo view`／`label list`／`issue list`，
-一張 issue 都不開、帳本一個字都不寫。`action` 是 `comment` 的提案，`body` 是真跑會貼的**那則留言**（沒有 `title`／`labels`），不是整張 issue 的內文。每個提案回一個 `action`（`create`｜`comment`｜`existing`｜`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`）
+一張 issue 都不開、帳本一個字都不寫。`action` 是 `comment` 的提案，`body` 是真跑會貼的**那則留言**（沒有 `title`／`labels`），不是整張 issue 的內文。每個提案回一個 `action`（`create`｜`comment`｜`existing`｜`already_logged`｜`skipped_version_limit`｜`remote_unknown`）
 與渲染好的 title／body／labels。**乾跑與真跑共用同一份判斷**：去重（`find_existing`）、`already`、排序（guard 優先）、
-每版 4 張／24 小時 8 張（`Caps::plan`）都只有一份實作，兩邊各寫一遍就會分岔——乾跑的 `already` 也吃「這一輪已排定的」清單，
+每版新開 4 張／留言 4 則（`Caps::plan`）都只有一份實作，兩邊各寫一遍就會分岔——乾跑的 `already` 也吃「這一輪已排定的」清單，
 因為同一版兩個提案的 `entry_ids` 可以有交集（模型交來的 `issues` 沒有任何不重疊的保證，`already` 用 any/contains，交集就算），
 真跑開完第一張就會跳過第二個；乾跑若只看帳本原本的 issue 清單就會說 2 張、實際只開 1 張。乾跑說不會開第二張就真的不會。
 
