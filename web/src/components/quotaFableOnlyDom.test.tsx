@@ -1,5 +1,5 @@
 /**
- * #1179：額度只有 Fable 有值（5h、7d 都 null）時，條上要畫出 F 的 %，不能畫成「5h —」；手機只看 7d，沒有週窗時顯示無資料。
+ * #1179：額度只有 Fable 有值（5h、7d 都 null）時，條上要畫出 F 的 %，不能畫成「5h —」；手機（compact）也一樣。
  * 5h、7d、F 全部沒有值時，才保留「5h —」佔位。真的掛 `QuotaStrip` 進 happy-dom，額度來自 mock。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -111,16 +111,16 @@ it('桌機：只有 Fable 有值時畫出 F 的那一條，不畫「5h —」', 
   assert.ok(!cell.textContent?.includes('5h'), '不畫 5h 佔位')
 })
 
-it('手機：只有 Fable 有值時仍是 7d 無資料，不以 F 代替', async () => {
+it('手機：只有 Fable 有值時仍只寫一個窗口，寫出 F 的 %，並帶上 F 自己的危急顏色', async () => {
   resetStoreForTest()
   const restore = phoneWidth()
   try {
     const cell = await openWith({ five: false, seven: false, fable: true })
     const wins = [...cell.querySelectorAll<HTMLElement>('.quota-window')]
     assert.equal(wins.length, 1, `手機一格只寫一個窗口，實際 ${wins.length} 個`)
-    assert.equal(wins[0].querySelector('.quota-window-name')?.textContent, '7d')
-    assert.equal(wins[0].querySelector('.quota-bar-pct')?.textContent, '無資料')
-    assert.equal(wins[0].querySelector('.quota-bar'), null, '不畫 F 的量表')
+    assert.equal(wins[0].querySelector('.quota-window-name')?.textContent, 'F', '名稱是 F，不是 5h')
+    assert.ok((wins[0].querySelector('.quota-bar-pct')?.textContent ?? '').includes('2'), '數字寫出來')
+    assert.ok(wins[0].querySelector('.quota-bar')!.classList.contains('crit'), '顏色跟著 F 自己的 critical 旗標')
   } finally {
     restore()
   }
