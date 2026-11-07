@@ -834,8 +834,9 @@ pub struct ChangelogTranslateCfg {
     pub timeout_ms: Option<u64>,
     #[serde(default = "default_changelog_max_input_chars")]
     pub max_input_chars: u32,
-    #[serde(default = "default_changelog_max_tokens")]
-    pub max_tokens: u32,
+    /// Deprecated: ignored; translation uses the selected model maximum output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     #[serde(default = "default_changelog_max_in_flight")]
     pub max_in_flight: u32,
     #[serde(default = "default_changelog_max_queued")]
@@ -869,9 +870,6 @@ fn default_changelog_effort() -> String {
 fn default_changelog_max_input_chars() -> u32 {
     6000
 }
-fn default_changelog_max_tokens() -> u32 {
-    8000
-}
 fn default_changelog_max_in_flight() -> u32 {
     1
 }
@@ -899,7 +897,7 @@ impl Default for ChangelogTranslateCfg {
             effort: default_changelog_effort(),
             timeout_ms: None,
             max_input_chars: default_changelog_max_input_chars(),
-            max_tokens: default_changelog_max_tokens(),
+            max_tokens: None,
             max_in_flight: default_changelog_max_in_flight(),
             max_queued: default_changelog_max_queued(),
             max_per_hour: default_changelog_max_per_hour(),
@@ -3042,9 +3040,9 @@ mod supervisor_cfg_tests {
         assert_eq!((back.changelog_translate.max_per_hour, back.changelog_translate.max_attempts), (12, 3), "explicit caps survive a save");
         assert_eq!(on.changelog_translate.model, "claude-sonnet-5-5");
         assert_eq!(on.changelog_translate.effort, "low");
-        assert_eq!(on.changelog_translate.max_tokens, 8000);
+        assert_eq!(on.changelog_translate.max_tokens, None);
         let explicit: ConfigFile = toml::from_str("[changelog_translate]\nmax_tokens = 2000\n").unwrap();
-        assert_eq!(explicit.changelog_translate.max_tokens, 2000, "keep explicit local cap");
+        assert_eq!(explicit.changelog_translate.max_tokens, Some(2000), "preserve deprecated key on read");
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
         assert_eq!(on, back);
     }

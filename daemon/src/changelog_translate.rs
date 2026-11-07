@@ -17,12 +17,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::claude_api::{AnthropicHttpClient, ClientError, ClientOutcome, MessagesClient, Usage};
+use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, Usage};
+#[cfg(test)]
+use crate::claude_api::AnthropicHttpClient;
 use crate::config::ChangelogTranslateCfg;
 
 /// 翻譯用的請求就是共用的 Messages 請求（結構化輸出的 schema 由這裡帶）。
 pub(crate) type TranslateRequest = crate::claude_api::MessagesRequest;
 use crate::state::App;
+
+#[path = "changelog_translate_stream.rs"]
+mod stream;
 
 const PROMPT_VERSION: &str = "1";
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
@@ -31,7 +36,11 @@ const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 /// timeout 不在這裡：一律跟 `[claude_api] timeout_ms`（#1942）。舊鍵讀到就 WARN 一次，不生效。
 fn translate_cfg(full: &crate::config::ConfigFile) -> ChangelogTranslateCfg {
     static LEGACY_TIMEOUT_WARNED: std::sync::Once = std::sync::Once::new();
+    static LEGACY_TOKENS_WARNED: std::sync::Once = std::sync::Once::new();
     let mut cfg = full.changelog_translate.clone();
+    if cfg.max_tokens.is_some() {
+        LEGACY_TOKENS_WARNED.call_once(|| tracing::warn!("[changelog_translate] max_tokens is deprecated and ignored; using selected model maximum output"));
+    }
     cfg.key_file = full.changelog_translate_key_file();
     if cfg.timeout_ms.is_some() {
         LEGACY_TIMEOUT_WARNED.call_once(|| {
@@ -63,7 +72,7 @@ impl Hub {
     pub fn new() -> Self {
         Self {
             gate: tokio::sync::Mutex::new(()),
-            client: std::sync::Mutex::new(Arc::new(AnthropicHttpClient)),
+            client: std::sync::Mutex::new(Arc::new(stream::StreamingClient)),
             settled: AtomicBool::new(false),
             prune_pending: AtomicBool::new(false),
             retry_pending: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -838,6 +847,7 @@ fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits 
             l.to_string()
         }
     };
+    let max_tokens = stream::model_output_tokens(&model);
     Limits {
         model,
         lang,
@@ -845,7 +855,7 @@ fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits 
         endpoint: endpoint_of(cfg),
         timeout_ms: claude_api_timeout_ms.max(1),
         max_input_chars: cfg.max_input_chars.clamp(1, 12_000),
-        max_tokens: cfg.max_tokens.clamp(1, 8000),
+        max_tokens,
         max_in_flight: cfg.max_in_flight.max(1),
         max_per_hour: cfg.max_per_hour.min(1000),
         max_attempts: if cfg.max_attempts == 0 { 3 } else { cfg.max_attempts.min(8) },
@@ -2673,7 +2683,7 @@ mod tests {
     #[test]
     fn clamps_and_retry_after_are_bounded() {
         let mut cfg = ChangelogTranslateCfg::default();
-        cfg.max_tokens = 99_999;
+        cfg.max_tokens = Some(99_999);
         cfg.max_input_chars = 0;
         cfg.max_attempts = 0;
         cfg.max_in_flight = 0;
@@ -2682,7 +2692,7 @@ mod tests {
         cfg.model = "  ".into();
         let limits = limits_of(&cfg, 0);
         assert_eq!(limits.timeout_ms, 1);
-        assert_eq!(limits.max_tokens, 8000);
+        assert_eq!(limits.max_tokens, 128_000);
         assert_eq!(limits.max_input_chars, 1);
         assert_eq!(limits.max_attempts, 3, "legacy zero uses bounded retries");
         assert_eq!(limits.max_in_flight, 1);
@@ -3147,7 +3157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_agy_release_uses_8000_tokens_once_and_keeps_complete_output() {
+    async fn long_agy_release_uses_model_maximum_once_and_keeps_complete_output() {
         let body = "- 修復長版更新說明，保留終端狀態、設定路徑與完整的版本條目。\n".repeat(110);
         let text = json!({"summary": ["改善更新", "保留原文", "完整翻譯"],
             "sections": [{"version": "1.5.0", "body": body}]}).to_string();
@@ -3168,7 +3178,7 @@ mod tests {
         assert_eq!(completed["status"], "completed", "{completed}");
         assert_eq!(completed["coverage"], "full");
         assert_eq!(completed["sections"][0]["body"], body);
-        assert_eq!(fake.seen()[0].max_tokens, 8000);
+        assert_eq!(fake.seen()[0].max_tokens, 128_000);
         assert_eq!(fake.calls(), 1);
         assert!(fake.seen()[0].body.get("tools").is_none());
         let _ = post(&env.app, query()).await;
@@ -3418,7 +3428,7 @@ mod tests {
                 c.changelog_translate.effort = "ultra".into();
                 c.changelog_translate.timeout_ms = Some(1);
                 c.claude_api.timeout_ms = 4321;
-                c.changelog_translate.max_tokens = 9_999;
+                c.changelog_translate.max_tokens = Some(9_999);
                 Ok(())
             })
             .await
@@ -3431,7 +3441,7 @@ mod tests {
         assert_eq!(seen.effort, "low");
         // 舊的 [changelog_translate] timeout_ms 不生效，跟 [claude_api] timeout_ms 走。
         assert_eq!(seen.timeout_ms, 4321);
-        assert_eq!(seen.max_tokens, 8000);
+        assert_eq!(seen.max_tokens, 128_000);
         assert_eq!(done["requested_model"], "claude-sonnet-5-5");
         assert_eq!(done["model"], "claude-haiku-5-5");
     }
@@ -4276,5 +4286,62 @@ mod tests {
             assert!(job_path(&env.app.data_dir, fp).exists());
             assert_eq!(ops_err, 2); // 1 read + 1 failed save attempt
         }
+    }
+}
+
+/// Explicitly authorized paid probe only. No App, database, live ledger or retries.
+#[cfg(test)]
+mod live_probe {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "paid API: run only with explicit authorization and CHANGELOG_TRANSLATION_PAID_PROBE=1"]
+    async fn live_agy_translation_probe() {
+        assert_eq!(std::env::var("CHANGELOG_TRANSLATION_PAID_PROBE").as_deref(), Ok("1"));
+        let home = std::env::var("CHANGELOG_TRANSLATION_PROBE_HOME").expect("explicit real home required: test harness isolates HOME");
+        assert!(Path::new(&home).is_absolute());
+        let full: crate::config::ConfigFile = toml::from_str(&std::fs::read_to_string(format!("{home}/.config/agents-manager/config.toml")).unwrap()).unwrap();
+        let cfg = translate_cfg(&full);
+        let key_path = crate::config::expand_home(&full.claude_api.key_file, &home);
+        let key = crate::key_file::read_key(&key_path).unwrap();
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let md = client.get(crate::changelog::AGY_CHANGELOG_URL).send().await.unwrap().error_for_status().unwrap().text().await.unwrap();
+        let all = crate::changelog::parse_changelog(&md);
+        let result_dir = std::env::temp_dir().join(format!("agy-translation-probe-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&result_dir).unwrap();
+        let mut rows = Vec::new();
+        for version in ["1.5.0", "1.5.3"] {
+            let sections = crate::changelog::pick_sections(&all, None, version);
+            assert_eq!(sections.len(), 1);
+            let mut limits = limits_of(&cfg, full.claude_api.timeout_ms);
+            // The probe must translate the ENTIRE official release, never a 6000-char prefix.
+            limits.max_input_chars = u32::try_from(sections[0].body.chars().count()).unwrap();
+            let plan = plan_input("agy", &limits, &sections);
+            assert!(!plan.truncated_input && plan.omitted.is_empty());
+            let request = TranslateRequest { endpoint: DEFAULT_ENDPOINT.into(), key:key.clone(), model:limits.model.clone(),
+                effort:limits.effort, max_tokens:limits.max_tokens, timeout_ms:limits.timeout_ms,
+                system:None, format:Some(output_schema()), prompt:prompt_for(&plan).unwrap() };
+            let start = std::time::Instant::now();
+            let out = stream::StreamingClient.complete(&request).await.unwrap();
+            let seconds = start.elapsed().as_secs_f64();
+            let (summary, translated) = validate_model(&out.text, &[version.into()]).unwrap();
+            assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
+            let usage = out.usage.as_ref().unwrap();
+            assert!(usage.input_tokens.is_some() && usage.output_tokens.is_some());
+            let model = out.model.as_deref().unwrap_or(&request.model);
+            let source_bullets = sections[0].body.lines().filter(|l| l.trim_start().starts_with("- ")).count();
+            let translated_bullets = translated[0].body.lines().filter(|l| l.trim_start().starts_with("- ")).count();
+            let row = json!({"version":version,"model":model,"max_tokens":request.max_tokens,"input_chars":sections[0].body.chars().count(),
+                "source_bullets":source_bullets,"translated_bullets":translated_bullets,
+                "input_tokens":usage.input_tokens,"output_tokens":usage.output_tokens,"cache_write_tokens":usage.cache_creation_input_tokens,
+                "cache_read_tokens":usage.cache_read_input_tokens,"seconds":seconds,"cost_usd":crate::claude_api::cost_usd(model, usage),
+                "stop_reason":out.stop_reason,"coverage":"full"});
+            // Credentials never leave memory; payloads are isolated from the live daemon ledger.
+            std::fs::write(result_dir.join(format!("{version}.json")), serde_json::to_vec(&json!({"measurement":row,"summary":summary,"sections":translated})).unwrap()).unwrap();
+            println!("LIVE_TRANSLATION_MEASUREMENT {row}");
+            rows.push(row);
+        }
+        assert_eq!(rows.len(), 2);
+        std::fs::remove_dir_all(&result_dir).unwrap();
     }
 }
