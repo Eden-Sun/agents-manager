@@ -100,10 +100,11 @@ export function ExpertDisabledMark() {
   )
 }
 
-export function ExpertSectionHeader({ title }: { title: string }) {
+export function ExpertSectionHeader({ title, abbr }: { title: string; abbr?: string }) {
   return (
     <div className="expert-section-head" role="presentation" aria-hidden="true">
       <span className="expert-section-title">{title}</span>
+      {abbr && abbr !== title ? <span className="expert-section-abbr">{abbr}</span> : null}
     </div>
   )
 }

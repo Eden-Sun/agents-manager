@@ -303,6 +303,15 @@
   color: var(--text-dim);
 }
 
+/* 英文縮寫（Mgr／Spc／Adv／Wkr）：等寬小字、比標題再淡一階（2026-11-07 使用者）。 */
+.expert-section-abbr,
+.bot-switcher-expert-abbr {
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
 .bot-switcher-expert-count {
   font-size: 10px;
   font-family: var(--font-mono);

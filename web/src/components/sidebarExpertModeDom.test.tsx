@@ -96,8 +96,11 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   assert.equal(expSection.querySelectorAll('.project-expert-tag').length, 1, 'expert 專案標題應有專家標籤')
 
   // 分段標題驗證：順序 管理者 -> 顧問 -> 執行者 -> 未分配
-  const headers = [...expSection.querySelectorAll('.expert-section-head')].map((el) => el.textContent?.trim())
+  const headers = [...expSection.querySelectorAll('.expert-section-title')].map((el) => el.textContent?.trim())
   assert.deepEqual(headers, ['管理者', '專家', '顧問', '執行者', '未分配'], '專家分段標題順序正確（不帶人數）')
+  // 英文縮寫在標題旁（2026-11-07 使用者），未分配沒有。
+  const abbrs = [...expSection.querySelectorAll('.expert-section-head')].map((el) => el.querySelector('.expert-section-abbr')?.textContent ?? '')
+  assert.deepEqual(abbrs, ['Mgr', 'Spc', 'Adv', 'Wkr', ''])
 
   // 分段標題已寫角色：列上不再重複角色小標（2026-11-01 使用者），只有待套用的留著
   for (const id of ['exp-mgr', 'exp-adv', 'exp-spec']) {

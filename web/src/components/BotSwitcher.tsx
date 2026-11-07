@@ -151,6 +151,7 @@ export function BotSwitcherMenu({
                   <div key={sec.role} className="bot-switcher-section">
                     <div className="bot-switcher-expert-head" aria-hidden="true">
                       <span className="bot-switcher-expert-title">{sec.title}</span>
+                      {sec.abbr && sec.abbr !== sec.title ? <span className="bot-switcher-expert-abbr">{sec.abbr}</span> : null}
                     </div>
                     {sec.items.map((b) => (
                       <button
