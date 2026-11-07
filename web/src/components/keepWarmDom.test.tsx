@@ -254,7 +254,7 @@ test('手機版：Git／專案資訊彈窗裡不再有「不用保溫」', async
     await act(() => useStore.setState({ selectedBotId: id }))
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     await click(document.querySelector<HTMLButtonElement>('.mobile-git-info')!)
-    await until(() => document.querySelector('.context-bar') !== null, '彈窗開了')
+    await until(() => document.querySelector('.mobile-context-panel') !== null, '彈窗開了')
     assert.equal(document.querySelector('.mobile-keep-warm-row'), null)
     assert.equal(document.querySelector('.keep-warm-skip-btn'), null, '入口只在狀態卡裡')
   } finally {

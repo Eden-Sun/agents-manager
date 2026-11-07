@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, fakeApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { installManualClockTimers } from '../testing/manualClockTimers'
 import { GitBar } from './GitBar'
 
@@ -51,4 +51,18 @@ test('前景時掛上就抓一次，之後照 15 秒一輪', async () => {
   } finally {
     timers.restore()
   }
+})
+
+
+test('Git 動作預設保留，手機可只顯示分支與狀態', async () => {
+  fakeApi(() => ({ git: true, branch: 'main', upstream: 'origin/main', changed: 1, insertions: 0, deletions: 0, untracked: 8, ahead: 0, behind: 1 }))
+  setVisibility('visible')
+  await mount(<><GitBar projectId="desktop" /><GitBar projectId="phone" showBranch showActions={false} /></>)
+  await until(() => document.querySelectorAll('.git-bar').length === 2, '兩個 Git 狀態載入')
+  const [desktop, phone] = Array.from(document.querySelectorAll('.git-bar'))
+  assert.equal(desktop!.querySelectorAll('button').length, 3, '桌機預設保留 commit／push／pull')
+  assert.equal(phone!.querySelector('button'), null)
+  assert.equal(phone!.querySelector('.git-actions'), null)
+  assert.equal(phone!.querySelector('.git-branch')?.textContent, 'main')
+  assert.match(phone!.textContent ?? '', /main\+0−0\?8↓1/)
 })
