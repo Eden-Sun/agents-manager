@@ -1222,6 +1222,15 @@ export class MockTransport implements Transport {
     { const m = rawPath.match(/^\/bots\/([^/]+)\/api-usage$/); if (method === 'GET' && m) return this.apiUsage(decodeURIComponent(m[1])) }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // 全部被 trace 的 pane；`unowned=1` 只回對不到專案的，並標哪一顆是 scratch（§6.5e）。
+    if (method === 'PUT' && /^\/panes\/[^/]+\/alias$/.test(rawPath)) {
+      this.seedPanes()
+      const pane = decodeURIComponent(rawPath.split('/')[2])
+      const row = this.panes.find(p => p.pane_id === pane && p.host === (q.get('host') ?? 'local'))
+      if (!row) throw new ApiError(404, { error: 'not_found' }, 'pane not found')
+      row.alias = String((body as { alias?: string })?.alias ?? '').trim() || null
+      this.emit('panes_changed', { host: row.host })
+      return this.paneRow(row)
+    }
     if (method === 'GET' && rawPath === '/panes') return { panes: q.get('unowned') === '1' ? this.unownedPanes() : this.allPanes() }
     { const m = rawPath.match(/^\/panes\/([^/]+)\/(focus|close|adopt)$/); if (method === 'POST' && m) {
         const pane = decodeURIComponent(m[1])

@@ -5,13 +5,19 @@
 import type { ProjectPane } from '../api'
 import { t } from './i18n'
 
-/** 用途 > 前景程式 > cwd 的最後一段 > pane id。永遠回得出東西。 */
+/** 別名優先；預設指令加 listen port。永遠回得出東西。 */
 export function paneLabel(p: ProjectPane): string {
-  if (p.purpose?.trim()) return p.purpose.trim()
+  if (p.alias?.trim()) return p.alias.trim()
+  const label = paneCommand(p)
+  return p.listen_ports.length ? `${label} :${p.listen_ports.join(', :')}` : label
+}
+
+export function paneCommand(p: ProjectPane): string {
   if (p.foreground?.trim()) {
     const exe = p.foreground.trim().split(/\s+/)[0].split('/').pop()
     if (exe) return exe
   }
+  if (p.purpose?.trim()) return p.purpose.trim()
   const dir = (p.cwd ?? '').replace(/\/+$/, '').split('/').pop()
   return dir || p.pane_id
 }

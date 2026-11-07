@@ -26,7 +26,7 @@ pub async fn list_for_project(
     .fetch_all(&app.db)
     .await
     .map_err(sql)?;
-    let panes: Vec<Value> = rows.iter().map(row_json).collect();
+    let panes = crate::panes::with_aliases(&app.db, &rows).await.map_err(sql)?;
     Ok(Json(json!({"project_id": id, "host": project.host, "panes": panes})))
 }
 
@@ -50,7 +50,8 @@ pub async fn list_all(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
         sqlx::query("SELECT * FROM panes ORDER BY host, kind, pane_id").fetch_all(&app.db).await
     }
     .map_err(sql)?;
-    Ok(Json(json!({"panes": rows.iter().map(row_json).collect::<Vec<_>>()})))
+    let panes = crate::panes::with_aliases(&app.db, &rows).await.map_err(sql)?;
+    Ok(Json(json!({"panes": panes})))
 }
 
 /// `POST /api/panes/{id}/focus?host=local`：把 herdr 的焦點切到這顆 pane。只動焦點，不改內容。
@@ -268,4 +269,38 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AliasIn {
+    pub alias: String,
+}
+
+/// User-only display metadata; never renames herdr panes or changes ownership.
+pub async fn set_alias(
+    State(app): State<Arc<App>>,
+    Path(pane_id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<AliasIn>,
+) -> Result<Json<Value>, LcError> {
+    let alias = body.alias.trim();
+    if alias.chars().count() > 120 || alias.chars().any(char::is_control) {
+        return Err(LcError::Bad("alias must be at most 120 characters without control characters".into()));
+    }
+    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
+    let host = q.get("host").map(String::as_str).unwrap_or(crate::config::LOCAL_HOST);
+    let row = sqlx::query("SELECT * FROM panes WHERE host=? AND pane_id=?")
+        .bind(host).bind(&pane_id).fetch_optional(&app.db).await.map_err(sql)?
+        .ok_or_else(|| LcError::NotFound("pane".into()))?;
+    let mut pane = row_json(&row);
+    let key = crate::panes::alias_key(&pane);
+    if alias.is_empty() {
+        sqlx::query("DELETE FROM pane_aliases WHERE key=?").bind(&key).execute(&app.db).await.map_err(sql)?;
+    } else {
+        sqlx::query("INSERT INTO pane_aliases (key, alias, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET alias=excluded.alias, updated_at=excluded.updated_at")
+            .bind(&key).bind(alias).bind(crate::db::now()).execute(&app.db).await.map_err(sql)?;
+    }
+    pane["alias"] = if alias.is_empty() { Value::Null } else { json!(alias) };
+    app.emit("panes_changed", json!({"host": host})).await;
+    Ok(Json(pane))
 }

@@ -597,6 +597,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // 專家派工總開關（2026-11-06，取代逐對授權）：`projects.specialist_dispatch`（ALTER ADD，預設 1）。
     // `projects.executor_grants_json` 不再使用，欄位留著不 DROP。
     (84, "1f27b51cf6de802a"),
+    // 側欄 pane 別名持久化（2026-11-07）：`pane_aliases`（CREATE TABLE）。
+    (85, "e55cfce83db3cb81"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

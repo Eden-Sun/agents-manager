@@ -262,6 +262,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
         .route("/panes/{id}/close", post(crate::runners::panes::close))
+        .route("/panes/{id}/alias", axum::routing::put(crate::runners::panes::set_alias))
         .route("/panes/{id}/focus", post(crate::runners::panes::focus))
         .route("/panes", get(crate::runners::panes::list_all))
         .route("/identity-prefs", get(crate::identity_prefs::get_identity_prefs))
@@ -1145,6 +1146,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/panes/{id}/adopt", BotRoutePolicy::UserOnly),
     ("POST", "/api/panes/{id}/close", BotRoutePolicy::UserOnly),
     ("POST", "/api/panes/{id}/focus", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/panes/{id}/alias", BotRoutePolicy::UserOnly),
     ("PUT", "/api/drafts/{key}", BotRoutePolicy::UserOnly),
     ("GET", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),
     ("POST", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),

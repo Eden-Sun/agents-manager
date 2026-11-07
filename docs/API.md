@@ -332,6 +332,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/judge/collision-check` | Bot principal（驗過的 `X-AM-Bot-Id` 與 token）；只看呼叫端自己的專案，回 202，不等 Jev；專案已移交（`handed_off_to`）時靜默略過、不問不寫帳本（#1421）；一般 Bot 可用（#1330；body、錯誤碼見「撞限第二意見帳本」一節） |
 | POST | `/api/mem/processes/kill` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/order` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| PUT | `/api/panes/{id}/alias` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | POST | `/api/panes/{id}/adopt` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/panes/{id}/close` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/panes/{id}/focus` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1276,6 +1277,11 @@ herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的
 - `scratch: true`：這台那顆固定的 scratch（daemon 選的，規則見 SPEC §6.5e；前端不要自己重算）。其餘是「多出來的」。
 - `orphaned: true`：綁過的專案或擁有它的 bot 已經刪掉（推過 `pane_orphaned`），不會是 scratch。
 - `label`：herdr 上的 pane 名字；scratch 選中時會被改成 `[panes] scratch_name`（只是顯示，選哪一顆看 pane_id，不看名字）。
+
+### `PUT /api/panes/{id}/alias?host=local`
+User-only（Bot／AGM role 均 403）。Body：`{"alias":"witsper-ops"}`；回傳 pane（含 `alias`）。去除頭尾空白，空字串刪除別名；超過 120 字元或含控制字元回 400；pane 不存在回 404。
+別名存在 daemon SQLite `pane_aliases`，不改 herdr 標籤、歸屬或 GC。穩定 key 為 JSON tuple `[host,cwd,["port",最小 listen port]]`；無 port 時為 `[host,cwd,["command",foreground]]`。換 pane id／重啟服務仍保留；不同 host／cwd／port 隔離，同目錄同指令的無 port pane 共用別名。cwd、主要 port 或無 port 指令改變時視為不同服務。刪除 pane 不刪除別名。
+`GET /api/panes`、`GET /api/projects/{id}/panes` 列皆含 `alias: string|null`。更新發 `panes_changed` 讓各裝置重讀。側欄每列「⋯ → 設定別名」可編輯；別名為主標，原指令與 port 為副標，無別名時預設標題包含 port。
 
 ### `POST /api/panes/{id}/focus?host=local`
 把 herdr 的焦點切到那顆 pane，只動焦點。主機沒連上 502。

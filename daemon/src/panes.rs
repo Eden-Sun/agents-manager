@@ -105,6 +105,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pane_aliases (
+           key TEXT PRIMARY KEY,
+           alias TEXT NOT NULL,
+           updated_at TEXT NOT NULL
+         )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1032,6 +1041,28 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     })
 }
 
+/// Stable across pane recreation. Ports distinguish services in the same directory;
+/// without ports, identical commands in the same directory intentionally share an alias.
+pub fn alias_key(pane: &Value) -> String {
+    let mut ports: Vec<u64> = pane["listen_ports"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+    ports.sort_unstable();
+    let identity = match ports.first() {
+        Some(port) => json!(["port", port]),
+        None => json!(["command", pane["foreground"]]),
+    };
+    json!([pane["host"], pane["cwd"], identity]).to_string()
+}
+
+pub async fn with_aliases(pool: &SqlitePool, rows: &[sqlx::sqlite::SqliteRow]) -> Result<Vec<Value>, sqlx::Error> {
+    let aliases: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>("SELECT key, alias FROM pane_aliases")
+        .fetch_all(pool).await?.into_iter().collect();
+    Ok(rows.iter().map(|row| {
+        let mut pane = row_json(row);
+        pane["alias"] = aliases.get(&alias_key(&pane)).map(|a| json!(a)).unwrap_or(Value::Null);
+        pane
+    }).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,6 +1071,36 @@ mod tests {
     use crate::lc_error::LcError;
     use crate::runners::panes::{adopt, close, list_all, list_for_project, AdoptIn};
     use crate::state::App;
+
+    #[tokio::test]
+    async fn pane_alias_api_survives_recreation_and_can_clear() {
+        use crate::runners::panes::{set_alias, AliasIn};
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("INSERT INTO panes (pane_id,host,cwd,kind,foreground,listen_ports,last_output_at,first_seen,last_seen) VALUES ('old','local','/work/app','service','bun run dev','3200','t','t','t')").execute(&app.db).await.unwrap();
+        let save = |id: &str, alias: String| set_alias(State(app.clone()), Path(id.into()), Query(HashMap::new()), Json(AliasIn { alias }));
+        assert_eq!(save("old", "  witsper-ops  ".into()).await.unwrap().0["alias"], "witsper-ops");
+        sqlx::query("UPDATE panes SET pane_id='new', foreground='node next dev' WHERE pane_id='old'").execute(&app.db).await.unwrap();
+        let panes = list_all(State(app.clone()), Query(HashMap::new())).await.unwrap().0;
+        assert_eq!(panes["panes"][0]["alias"], "witsper-ops");
+        assert!(save("new", "x".repeat(121)).await.is_err());
+        assert!(save("new", "bad\nname".into()).await.is_err());
+        assert!(save("missing", "name".into()).await.is_err());
+        assert!(save("new", " ".into()).await.unwrap().0["alias"].is_null());
+        assert!(list_all(State(app.clone()), Query(HashMap::new())).await.unwrap().0["panes"][0]["alias"].is_null());
+    }
+
+    #[test]
+    fn pane_alias_identity_separates_hosts_directories_ports_and_commands() {
+        let base = json!({"host":"local", "cwd":"/a", "foreground":"bun run dev", "listen_ports":[3200]});
+        for (field, value) in [("host", json!("m4p")), ("cwd", json!("/b")), ("listen_ports", json!([3201]))] {
+            let mut other = base.clone(); other[field] = value;
+            assert_ne!(alias_key(&base), alias_key(&other));
+        }
+        let mut shell = base; shell["listen_ports"] = json!([]);
+        let mut other = shell.clone(); other["foreground"] = json!("zsh");
+        assert_ne!(alias_key(&shell), alias_key(&other));
+    }
 
     #[tokio::test]
     async fn a_close_refusal_keeps_an_idle_gc_pane_and_draft() {

@@ -112,3 +112,7 @@
   border-color: var(--warn);
   color: var(--warn);
 }
+
+.side-pane-detail { display: block; color: var(--text-faint); font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.side-pane-menu { position: absolute; right: 0; top: 100%; z-index: 10; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 4px; }
+.side-pane-menu button { color: var(--text); background: var(--bg); border: 0; padding: 6px; cursor: pointer; }

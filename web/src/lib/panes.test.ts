@@ -23,7 +23,7 @@ const pane = (over: Partial<ProjectPane> = {}): ProjectPane => ({
   ...over,
 })
 
-test('用途最優先，其次是前景程式的執行檔名', () => {
+test('預設使用前景程式的執行檔名，沒有指令才用用途', () => {
   assert.equal(paneLabel(pane({ purpose: 'build' })), 'build')
   assert.equal(paneLabel(pane({ purpose: '  ', foreground: '/opt/homebrew/bin/node next dev' })), 'node')
 })
@@ -39,4 +39,9 @@ test('提示講得出在哪、開了什麼 port、是不是自己開的', () => 
   assert.equal(paneHint(pane()), '/Users/me/project/agents-manager')
   assert.match(paneHint(pane({ listen_ports: [3010, 5432] })), /listen 3010、5432/)
   assert.match(paneHint(pane({ owned_by: 'user' })), /你自己開的/)
+})
+
+test('別名優先，預設標題帶 listen port', () => {
+  assert.equal(paneLabel(pane({ purpose: 'dev-server', foreground: 'bun run dev', listen_ports: [3200] })), 'bun :3200')
+  assert.equal(paneLabel(pane({ alias: 'witsper-ops', foreground: 'bun run dev', listen_ports: [3200] })), 'witsper-ops')
 })
