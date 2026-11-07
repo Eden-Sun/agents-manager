@@ -80,7 +80,6 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'components/BotRowMenu.tsx',
     'components/BotSettingsPanel.tsx',
     'components/BotShareSection.tsx',
-    'components/BotStatusCard.tsx',
     'components/BotSwitcher.tsx',
     'components/ChipLegend.tsx',
     'components/DirPicker.tsx',

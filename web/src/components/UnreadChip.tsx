@@ -36,7 +36,6 @@ import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import { chipCache, NO_WARM_TEXT, type CacheState } from '../lib/cacheClock'
 import { useCacheTick } from '../hooks/useCacheTick'
 import { ChipLegend } from './ChipLegend'
-import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import './unreadChip.css'
 import './cacheClock.css'
 import './keepWarmChip.css'
@@ -129,10 +128,6 @@ function ChipLamp({ id }: { id: string }) {
   return LAMP_SHOWN.has(lamp) || background > 0 || kids > 0 ? <StatusLamp lamp={lamp} background={background} kids={kids} /> : null
 }
 
-function chipHints(it: ChipItem): ChipHints {
-  return { current: it.current, unread: it.unread, needsReply: it.needsReply, atCapacity: it.atCapacity, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.codexUsageTitle ?? it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
-}
-
 function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
   const drag = it.pinned ? dnd : undefined
   const dragging = drag?.dragId != null && drag.dragId !== it.id
@@ -147,7 +142,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
     <button
       type="button"
       className={`${chipClass(it)}${cacheCls}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
-      // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）；狀態卡只剩手機長按。
+      // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）。
       title={[it.title, it.limitTitle, it.codexUsageTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
@@ -333,24 +328,8 @@ export function UnreadChip() {
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const [legend, setLegend] = useState(false)
-  // 主力 bot 狀態卡（2026-10-04 使用者）：手機長按一到就開（底部彈出；接著移動＝拖曳、收卡）。
-  // 電腦不再 hover 開卡（2026-10-08 使用者）；顏色說明改由晶片列尾端的「?」開。
-  const [peek, setPeek] = useState<{ id: string } | null>(null)
-  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek(id ? { id } : null))
-  const peekItem = peek ? pinnedItems.find((it) => it.id === peek.id) ?? null : null
-  const peekCard =
-    peek && peekItem ? (
-      <BotStatusCard
-        botId={peek.id}
-        hints={chipHints(peekItem)}
-        anchor={null}
-        onClose={() => setPeek(null)}
-        onLegend={() => {
-          setPeek(null)
-          setLegend(true)
-        }}
-      />
-    ) : null
+  // 手機長按晶片 350ms 後才進入拖曳重排；長按不動放開什麼都不做（2026-11-07 使用者：主力長按的狀態卡不需要了，context 與「不用保溫」在 context popup）。
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -376,9 +355,9 @@ export function UnreadChip() {
             if (done) savePinGridRows(n)
           }}
           resizable={!pinExpanded}
+          onHelp={() => setLegend(true)}
         />
         <ScrollRow items={otherItems} label={t("在跑或剛完成的 bot")} selectedBotId={selectedBotId} />
-        {peekCard}
         {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
       </>
     )
@@ -424,7 +403,6 @@ export function UnreadChip() {
       <button type="button" className="unread-bar-help" aria-label={t("顏色代表什麼？")} title={t("顏色代表什麼？")} onClick={() => setLegend(true)}>
         ?
       </button>
-      {peekCard}
       {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
     </div>
   )
@@ -441,6 +419,7 @@ function PinGrid({
   total = 0,
   onRows,
   resizable = false,
+  onHelp,
 }: {
   items: ChipItem[]
   dnd: PinnedDnd
@@ -456,6 +435,8 @@ function PinGrid({
   /** 拖動中即時回報（`done=false`），放開時 `done=true` 才記下來。 */
   onRows?: (n: number, done: boolean) => void
   resizable?: boolean
+  /** 右上角「?」：開顏色說明（手機沒有狀態卡之後的入口，同電腦版晶片列尾端的「?」）。 */
+  onHelp?: () => void
 }) {
   const t = useT()
   const gridRef = useRef<HTMLDivElement | null>(null)
@@ -496,6 +477,11 @@ function PinGrid({
           {dnd.announce}
         </span>
       </div>
+      {onHelp ? (
+        <button type="button" className="unread-bar-help pin-help" aria-label={t("顏色代表什麼？")} title={t("顏色代表什麼？")} onClick={onHelp}>
+          ?
+        </button>
+      ) : null}
       {canResize ? (
         <div
           className="pin-rows-handle"
@@ -553,7 +539,7 @@ function PinHint() {
 }
 
 function chipClass(it: ChipItem): string {
-  // 緊急度：需要回應 → 模型滿載（#1674，要使用者換模型）→ 完成待看（未讀）→ 等子 agent → 在跑（同 `BotStatusCard` 的 headline）。
+  // 緊急度：需要回應 → 模型滿載（#1674，要使用者換模型）→ 完成待看（未讀）→ 等子 agent → 在跑。
   const state = it.needsReply ? ' needs-reply' : it.atCapacity ? ' at-capacity' : it.unread > 0 ? ' unread' : it.waitsKids ? ' waits-kids' : it.working ? ' working' : ''
   return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
 }
