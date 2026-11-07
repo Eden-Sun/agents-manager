@@ -1,0 +1,51 @@
+/* 手機入口下方的小 popup；不套用全螢幕 modal 或桌面的橫列裁切。 */
+.mobile-context-panel {
+  position: fixed;
+  z-index: 910;
+  width: min(300px, calc(100vw - 16px));
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13px;
+}
+.mobile-context-panel:focus { outline: none; }
+.mobile-context-reading { font-weight: 600; font-variant-numeric: tabular-nums; }
+.mobile-context-panel progress {
+  display: block;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 7px 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  accent-color: var(--accent);
+}
+.mobile-context-panel progress::-webkit-progress-bar { background: var(--bg-sunken); }
+.mobile-context-panel progress::-webkit-progress-value { background: var(--accent); }
+.mobile-context-panel progress::-moz-progress-bar { background: var(--accent); }
+.mobile-context-cache { margin-bottom: 8px; color: var(--text-dim); font-size: 12px; }
+.mobile-context-panel .compact-btn { margin: 0 0 8px; padding: 0 12px; font-size: 13px; }
+.mobile-context-warning { margin-bottom: 8px; color: var(--danger); font-size: 12px; }
+.mobile-context-panel .git-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; font-size: 12px; }
+.mobile-context-panel .git-branch { min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
+.mobile-context-panel .issues-bar { display: block; padding: 0; border: 0; }
+.mobile-context-panel .issues-btn { width: 100%; justify-content: center; }
+.mobile-context-panel .issues-pop { position: static; width: 100%; min-width: 0; max-width: none; max-height: none; margin-top: 8px; box-shadow: none; }
+.mobile-context-panel .issues-tools { flex-wrap: wrap; }
+.mobile-context-panel .issues-tools input { min-width: 0; }
+.mobile-context-panel .compact-btn,
+.mobile-context-panel .issues-bar .issues-btn {
+  height: 36px;
+  min-height: 36px;
+  max-height: none;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}

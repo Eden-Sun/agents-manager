@@ -21,7 +21,7 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export function GitBar({ projectId }: { projectId: string }) {
+export function GitBar({ projectId, showBranch = false, showActions = true }: { projectId: string; showBranch?: boolean; showActions?: boolean }) {
   const t = useT()
   const notify = useStore((s) => s.notify)
   const [sum, setSum] = useState<GitSummary | null>(null)
@@ -95,6 +95,7 @@ export function GitBar({ projectId }: { projectId: string }) {
 
   return (
     <div className="git-bar" title={title}>
+      {showBranch ? <span className="git-branch">{sum.branch ?? t('分離的 HEAD')}</span> : null}
       <span className={`git-stat${dirty ? ' dirty' : ''}`}>
         <span className="git-ins">+{sum.insertions}</span>
         <span className="git-del">−{sum.deletions}</span>
@@ -107,7 +108,7 @@ export function GitBar({ projectId }: { projectId: string }) {
         </span>
       ) : null}
       {/* 桌面 hover 才彈出（2026-09-12 使用者）；打 commit 訊息時 `.open` 常駐。 */}
-      <span className={`git-actions${composing ? ' open' : ''}`}>
+      {showActions ? <span className={`git-actions${composing ? ' open' : ''}`}>
       {composing ? (
         <form
           className="git-commit-form"
@@ -166,7 +167,7 @@ export function GitBar({ projectId }: { projectId: string }) {
           </button>
         </>
       )}
-      </span>
+      </span> : null}
     </div>
   )
 }

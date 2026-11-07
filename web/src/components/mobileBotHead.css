@@ -124,12 +124,12 @@
     justify-self: start;
     position: relative;
     z-index: 1;
-    width: 32px;
-    height: 32px;
-    min-width: 32px;
-    min-height: 32px;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
     padding: 2px;
-    margin: 0 0 2px 4px;
+    margin: 0 0 2px;
     color: var(--text-faint);
   }
 
@@ -139,17 +139,17 @@
   }
 
   /* git 鍵直接寫 context（2026-11-05）。有 token：上已用（11px）、下百分比（10px），不放圖示——
-     32×32 再加圖示兩行會黏在一起。只有百分比或剛 resume 的「—」才維持圖示在上、數字在下。
-     寬鎖 32px（左邊距 4px），額度列 padding-left: 40px 不用再讓。 */
+     40×40 再加圖示兩行會黏在一起。只有百分比或剛 resume 的「—」才維持圖示在上、數字在下。
+     寬鎖 40px，額度列 padding-left: 40px 不用再讓。 */
   .main-head.bot-head > .mobile-git-info.has-ctx {
     display: inline-flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 0;
-    width: 32px;
-    min-width: 32px;
-    max-width: 32px;
+    width: 40px;
+    min-width: 40px;
+    max-width: 40px;
     padding: 1px 0;
     line-height: 1;
     overflow: hidden;
@@ -164,7 +164,7 @@
     padding: 2px 0;
   }
 
-  /* 兩行數字貼滿 32px，角上的警告點改放到鈕外，不蓋住 k。 */
+  /* 兩行數字貼滿按鈕，角上的警告點改放到鈕外，不蓋住 k。 */
   .main-head.bot-head > .mobile-git-info.has-both.warn {
     overflow: visible;
   }

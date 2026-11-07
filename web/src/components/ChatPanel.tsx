@@ -84,6 +84,7 @@ import { UnreadChip } from './UnreadChip'
 import { ComposerCostHint } from './ComposerCostHint'
 import { ModelCapacityNote } from './ModelCapacityNote'
 import { StatusCache } from './StatusCache'
+import { MobileContextPanel } from './MobileContextPanel'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { JevNoticeText } from './JevNoticeText'
@@ -1168,10 +1169,11 @@ function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, mobileOpen, onOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
+  mobileContent: ReactNode
   mobileOpen: boolean
   onOpen: () => void
   onClose: () => void
@@ -1179,18 +1181,8 @@ function ContextBar({ issues, status, hasStatus, mobileOpen, onOpen, onClose }: 
   const t = useT()
   const phone = useMediaQuery(PHONE_QUERY)
   if (!issues && !hasStatus) return null
-  if (phone && !mobileOpen) return null
-  const content = (
-    <div className="context-bar">
-      {issues}
-      {hasStatus ? status : null}
-    </div>
-  )
-  return phone ? (
-    <Modal open title={t('Git / 專案資訊')} onClose={onClose}>
-      {content}
-    </Modal>
-  ) : (
+  if (phone) return mobileOpen ? mobileContent : null
+  return (
     <>
       <div className="context-bar">
         {issues ? <button type="button" className="mini-btn desktop-git-info" aria-label={t('Git / 專案資訊')} aria-haspopup="dialog" aria-expanded={mobileOpen} onClick={onOpen}><GitIcon /> GitHub</button> : null}
@@ -1251,7 +1243,7 @@ function useContextReading(botId: string, status: StatusInfo | null, text: strin
   const ctxTitle = limit !== null
     ? t('已用 {detail} tokens；到 {limit} 自動壓縮（模型視窗 {window}）', { detail: ctxDetail ?? '', limit: compactTokens(limit), window: windowSize !== null ? compactTokens(windowSize) : '—' })
     : ctxDetail ? t('已用 {detail} tokens', { detail: ctxDetail }) : undefined
-  return { kind, line, footer, fields, pct: ctxPct, detail: ctxDetail, title: ctxTitle, unknown: Boolean(status?.context_unknown) }
+  return { kind, line, footer, fields, pct: status?.context_unknown ? null : ctxPct, detail: status?.context_unknown ? null : ctxDetail, title: ctxTitle, unknown: Boolean(status?.context_unknown) }
 }
 
 export function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
@@ -1348,6 +1340,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const startBot = useStore((s) => s.startBot)
   const busy = useStore((s) => s.busy)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const mobileContextAnchor = useRef<HTMLButtonElement>(null)
   const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
   const statusInfo = useStore(
     useShallow((s): StatusInfo | null => {
@@ -1566,13 +1559,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <>
             <button
               type="button"
+              ref={mobileContextAnchor}
               className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}${phoneHasCtx ? ' has-ctx' : ''}${phoneBoth ? ' has-both' : ''}`}
               // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
-              aria-label={`${statusInfo?.account_warning ? t('Git / 專案資訊（帳號警告）') : t('Git / 專案資訊')}${phoneAriaCtx}`}
+              aria-label={`${statusInfo?.account_warning ? t('Context 與專案（帳號警告）') : t('Context 與專案')}${phoneAriaCtx}`}
               title={phoneCtx.title}
               aria-haspopup="dialog"
               aria-expanded={gitInfoBotId === botId}
-              onClick={() => setGitInfoBotId(botId)}
+              onClick={() => setGitInfoBotId((open) => open === botId ? null : botId)}
             >
               {phoneBoth ? (
                 <span className="mobile-ctx" aria-hidden="true">
@@ -1667,6 +1661,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
       {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
       <ContextBar
+        mobileContent={<MobileContextPanel botId={botId} projectId={bot.project_id} status={statusInfo} reading={phoneCtx}
+          anchor={mobileContextAnchor} onClose={() => setGitInfoBotId(null)}
+          issues={<IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} onInserted={() => setGitInfoBotId(null)} />} />}
         mobileOpen={gitInfoBotId === botId}
         onOpen={() => setGitInfoBotId(botId)}
         onClose={() => setGitInfoBotId(null)}

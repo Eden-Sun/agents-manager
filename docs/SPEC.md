@@ -1010,6 +1010,9 @@ grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才�
 
 CLI 全零／無用量重繪只保留相同 session、模型及已知視窗相容的暫存測量；新 StatusLine 明示不同視窗（例如 1M→200k）或不同模型時，保留新回報並撤掉舊比例。SessionStart 換 session、壓縮完成、resume 驗證不符及視窗／模型不相容會在既有 `status_json` 留下 `_agm_context_invalidated`（session id）界線；後續空重繪與再次 resume 都保留界線，歷史回溯不可越過它，直到同 session 的有效新用量（包含有實際 input token 的四捨五入 0%）取代。fork 與全新 session 不繼承來源 context。暫存測量與失效界線不作為快取計時基準，也不提供給自動／冰凍壓縮的 context 門檻判斷。網頁讀到的失效界線（且沒有任何實際用量）顯示為「context —」，不顯示 0%；daemon 在 run JSON 的網頁副本遮成 `null` 並標 `_agm_context_unknown`（API.md），下一回合有真讀數就恢復正常。
 
+手機（≤640px）標題列的 context 按鈕在入口下方開約 300px 寬的小 popup，列 context／快取／壓縮、Git 分支與變更／同步狀態文字及 Issues 入口（手機沒有 Git 動作）；點外面、再點入口或 Esc 關閉。未知用量顯示「—」，帳號警告保留紅字，焦點落在 popup。桌機布局不變（UI-DECISIONS「手機 context 小 popup」）。
+
+
 **statusLine 校正 runtime_model（claude，#750）**：有掛 hook 的 claude run，statusLine 的 `model.id` 是「實際在跑」的權威。
 CLI 被 API 拒絕而 server 端 fallback（2.1.286：同級退回上一版）時，argv 與 `bots.model` 寫 A、實際在跑 B；`hookrecv` 的
 StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發現 `model.id` 跟 `runs.runtime_model` 不同就 CAS 改寫並推 `bot_status`，
