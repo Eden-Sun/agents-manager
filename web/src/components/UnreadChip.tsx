@@ -355,7 +355,6 @@ export function UnreadChip() {
             if (done) savePinGridRows(n)
           }}
           resizable={!pinExpanded}
-          onHelp={() => setLegend(true)}
         />
         <ScrollRow items={otherItems} label={t("在跑或剛完成的 bot")} selectedBotId={selectedBotId} />
         {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
@@ -419,7 +418,6 @@ function PinGrid({
   total = 0,
   onRows,
   resizable = false,
-  onHelp,
 }: {
   items: ChipItem[]
   dnd: PinnedDnd
@@ -435,8 +433,6 @@ function PinGrid({
   /** 拖動中即時回報（`done=false`），放開時 `done=true` 才記下來。 */
   onRows?: (n: number, done: boolean) => void
   resizable?: boolean
-  /** 右上角「?」：開顏色說明（手機沒有狀態卡之後的入口，同電腦版晶片列尾端的「?」）。 */
-  onHelp?: () => void
 }) {
   const t = useT()
   const gridRef = useRef<HTMLDivElement | null>(null)
@@ -477,11 +473,6 @@ function PinGrid({
           {dnd.announce}
         </span>
       </div>
-      {onHelp ? (
-        <button type="button" className="unread-bar-help pin-help" aria-label={t("顏色代表什麼？")} title={t("顏色代表什麼？")} onClick={onHelp}>
-          ?
-        </button>
-      ) : null}
       {canResize ? (
         <div
           className="pin-rows-handle"
