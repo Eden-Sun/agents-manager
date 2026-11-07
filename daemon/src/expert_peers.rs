@@ -70,6 +70,9 @@ pub(crate) async fn list(
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
         let mut peer = json!({"id":bot.id,"name":bot.name,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
+        if bot.role.as_deref() == Some("executor") {
+            peer["tier"] = json!(crate::expert_cluster::tier_of(&bot.kind, bot.model.as_deref()));
+        }
         // 專家視角：執行者標 `dispatch`（`direct`＝你可直接派；`via_manager`＝要經管理者，例如開關關著或是 child）。
         if let (Some(set), Some("executor")) = (&direct, bot.role.as_deref()) {
             peer["dispatch"] = json!(if set.contains(&bot.id) { "direct" } else { "via_manager" });
@@ -296,6 +299,8 @@ pub(crate) async fn list(
         }
     }
     let cand_json: Vec<Value> = candidates.into_iter().map(|c| {
+        let tier = (c.role.as_deref() == Some("executor"))
+            .then(|| crate::expert_cluster::tier_of(&c.kind, c.model.as_deref()));
         let mut v = json!({
             "id": c.bot_id,
             "name": c.name,
@@ -305,6 +310,7 @@ pub(crate) async fn list(
             "score": c.score,
             "reasons": c.reasons,
         });
+        if let Some(tier) = tier { v["tier"] = json!(tier); }
         if let Some(d) = c.direct { v["dispatch"] = json!(if d { "direct" } else { "via_manager" }); }
         v
     }).collect();
@@ -362,6 +368,7 @@ mod tests {
         ).await.unwrap().0;
         let p1 = list_res["peers"].as_array().unwrap().iter().find(|p| p["id"] == b1.id).unwrap();
         assert_eq!(p1["manager_use"], false);
+        assert_eq!(p1["tier"], "standard", "daemon provides tier data to agm peers");
 
         // 2. candidates evaluation with for_track
         let cand_res = list(
@@ -372,6 +379,7 @@ mod tests {
         ).await.unwrap().0;
         let c1 = cand_res["candidates"].as_array().unwrap().iter().find(|c| c["id"] == b1.id).unwrap();
         assert_eq!(c1["eligible"], false);
+        assert_eq!(c1["tier"], "standard");
         assert!(c1["reasons"].as_array().unwrap().iter().any(|r| r == "使用者已停用"));
     }
 
