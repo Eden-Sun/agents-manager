@@ -307,6 +307,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/bots/{id}/outbox/file", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/outbox/file", Expect::Forbidden, None),
         rule("POST", "/api/panes/{id}/focus", Expect::Forbidden, None),
+        rule("PUT", "/api/panes/{id}/alias", Expect::Forbidden, None),
         rule("POST", "/api/identities", Expect::UserOnly, None),
         rule("GET", "/api/projects/{id}/git", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/git", Expect::Forbidden, None),

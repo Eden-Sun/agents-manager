@@ -1,13 +1,18 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ProjectPane } from '../api'
-import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
-import { useStore } from '../store/store'
+import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
+import { resetStoreForTest, useStore } from '../store/store'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { SidebarPanes } from './SidebarPanes'
 
+virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
-after(teardownDom)
+after(async () => {
+  resetStoreForTest()
+  await teardownDom()
+})
 
 const pane: ProjectPane = {
   pane_id: 'w1:p1',
@@ -59,7 +64,7 @@ test('每一列都有「關閉」：一鍵關；daemon 要人再確認時才跳�
     refreshPanes: async () => {},
   } as never)
   await mount(<SidebarPanes projectId="p1" />)
-  const closes = document.querySelectorAll<HTMLButtonElement>('.side-pane-close')
+  const closes = document.querySelectorAll<HTMLButtonElement>('.side-pane-close:not(.side-pane-more)')
   assert.equal(closes.length, 2)
   closes[0].click()
   await new Promise((r) => setTimeout(r, 0))
@@ -68,4 +73,31 @@ test('每一列都有「關閉」：一鍵關；daemon 要人再確認時才跳�
   closes[1].click()
   await new Promise((r) => setTimeout(r, 10))
   assert.ok(document.body.textContent!.includes('3000'), '確認框講出 port')
+})
+
+test('別名選單可儲存與清空，列保留原指令及 port', async () => {
+  const requests = mockApi(sharedMock)
+  const { panes } = await sharedMock.request('GET', '/panes') as { panes: ProjectPane[] }
+  const svc = panes.find(p => p.listen_ports.length > 0)!
+  const refreshPanes = async () => {
+    const result = await sharedMock.request('GET', '/panes') as { panes: ProjectPane[] }
+    useStore.setState({ sidePanes: { p1: result.panes.filter(p => p.pane_id === svc.pane_id) } })
+  }
+  useStore.setState({ sidePanes: { p1: [svc] }, shellView: null, busy: {}, refreshPanes } as never)
+  await mount(<SidebarPanes projectId="p1" />)
+  const edit = async (value: string) => {
+    await click(document.querySelector('[aria-label="pane 選單"]')!)
+    await click(document.querySelector('.side-pane-menu button')!)
+    await typeInto(document.querySelector<HTMLInputElement>('input[aria-label="別名"]')!, value)
+    const save = Array.from(document.querySelectorAll('button')).find(b => b.textContent === '儲存')!
+    await click(save)
+    await until(() => !document.querySelector('input[aria-label="別名"]'), '儲存完成')
+  }
+  await edit('example-ops')
+  assert.match(document.querySelector('.side-pane-label')!.textContent!, /example-ops/)
+  assert.match(document.querySelector('.side-pane-detail')!.textContent!, /3010/)
+  await edit('')
+  assert.equal(document.querySelector('.side-pane-detail'), null)
+  assert.match(document.querySelector('.side-pane-label')!.textContent!, /:3010/)
+  assert.deepEqual(requests.filter(r => r.method === 'PUT' && r.path.includes('/alias')).map(r => r.body), [{ alias: 'example-ops' }, { alias: '' }])
 })

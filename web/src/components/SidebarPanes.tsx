@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
-import type { CloseNeedsConfirm, ProjectPane } from '../api'
+import { setPaneAlias, type CloseNeedsConfirm, type ProjectPane } from '../api'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ServicePaneNote } from './ServicePaneNote'
 import { unownedRows } from '../lib/paneLists'
 import type { UnownedTag } from '../lib/paneLists'
-import { paneHint, paneLabel } from '../lib/panes'
+import { paneHint, paneLabel, paneCommand } from '../lib/panes'
 import { paneReadOnly } from '../lib/shellAccess'
 import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
@@ -78,6 +78,24 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
   const endHostShell = useStore((s) => s.endHostShell)
   const refreshPanes = useStore((s) => s.refreshPanes)
   const closing = useStore((s) => s.busy[`shell:${p.host}:${p.pane_id}`] === true)
+  const [menu, setMenu] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [alias, setAlias] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const saveAlias = async () => {
+    setSaving(true)
+    setError('')
+    try {
+      await setPaneAlias(p.host, p.pane_id, alias)
+      await refreshPanes()
+      setEditing(false)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
   const [needs, setNeeds] = useState<CloseNeedsConfirm | null>(null)
   const close = (confirm: boolean) =>
     void endHostShell(p.host, p.pane_id, confirm).then((n) => {
@@ -97,7 +115,7 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
       <span className="side-pane-icon" aria-hidden="true">
         {service ? '⚙' : '›_'}
       </span>
-      <span className="side-pane-label">{paneLabel(p)}</span>
+      <span className="side-pane-label">{paneLabel(p)}{p.alias && <small className="side-pane-detail">{paneCommand(p)}{p.listen_ports.map(port => ` :${port}`).join(',')}</small>}</span>
       {tag ? <span className={`side-pane-tag ${tag}`}>{tagText}</span> : service ? <span className="side-pane-tag">{t('服務')}</span> : null}
     </button>
     <button
@@ -110,6 +128,19 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
     >
       ×
     </button>
+    <button type="button" className="side-pane-close side-pane-more" aria-label={t('pane 選單')} aria-expanded={menu} onClick={() => setMenu(!menu)}>⋯</button>
+    {menu && <div className="side-pane-menu">
+      <button type="button" onClick={() => { setAlias(p.alias ?? ''); setError(''); setEditing(true); setMenu(false) }}>{t('設定別名')}</button>
+    </div>}
+    {editing && <ConfirmDialog
+      open={editing}
+      title={t('設定別名')}
+      body={<><label>{t('別名（留空還原預設）')}<input aria-label={t('別名')} value={alias} maxLength={120} onChange={e => setAlias(e.target.value)} disabled={saving} /></label>{error && <p role="alert">{error}</p>}</>}
+      confirmLabel={t('儲存')}
+      confirmDisabled={saving}
+      onCancel={() => { if (!saving) setEditing(false) }}
+      onConfirm={() => void saveAlias()}
+    />}
     <ConfirmDialog
       open={needs !== null}
       title={t('這顆 pane 還在做事')}

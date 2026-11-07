@@ -94,6 +94,7 @@ export async function fetchMessages(
 
 /** SPEC §6.5e：專案底下的非 agent pane（shell／服務）。 */
 export interface ProjectPane {
+  alias?: string | null
   pane_id: string
   host: string
   workspace_id: string | null
@@ -130,6 +131,7 @@ function toPane(v: unknown): ProjectPane {
     owned_by: r.owned_by === 'bot' || r.owned_by === 'user' ? r.owned_by : 'none',
     owner_bot_id: opt(r.owner_bot_id),
     project_id: opt(r.project_id),
+    alias: opt(r.alias),
     purpose: opt(r.purpose),
     foreground: opt(r.foreground),
     listen_ports: Array.isArray(r.listen_ports) ? r.listen_ports.filter((p): p is number => typeof p === 'number') : [],
@@ -1275,3 +1277,7 @@ export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull
 // 群組任務：見 docs/API.md「群組任務」
 
 /** 同 `client_request_id` 回同一筆（冪等）；遠端專案 → 400 `remote_not_supported`。 */
+
+export async function setPaneAlias(host: string, paneId: string, alias: string): Promise<void> {
+  await transport.request('PUT', `/panes/${encodeURIComponent(paneId)}/alias?host=${encodeURIComponent(host)}`, { alias })
+}

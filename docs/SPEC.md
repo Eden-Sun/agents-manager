@@ -2271,6 +2271,9 @@ Child 的 `agent start` 經 daemon spawn 授權後取得一次性的 `AM_CHILD_S
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 
+側欄所有非 agent pane 可經「⋯ → 設定別名」編輯、留空還原。別名由 daemon 持久化並跨裝置同步，不影響歸屬／GC／herdr 標籤。以 host＋cwd＋主要 listen port 識別服務，無 port 則用 host＋cwd＋完整前景指令；同識別的 pane 共用別名，換 pane id 保留。別名主標下顯示原指令與 port；未設別名的預設標題也帶 port（API 詳見 `docs/API.md`）。
+
+
 **問題**：AG Man 只認 agent pane（§6.5.1「不採用普通 shell pane」）。實測 30 個 pane 有 5 個非 agent pane 完全在管理之外：
 一個是 wits-ops 起的 Next dev server（w168:p62，listen 3010，卻開在 agents-manager 的 workspace，wt 專案頁看不到），
 其餘四個是空 zsh，永遠留著。沒有歸屬（關掉會不會炸沒人知道）、放錯 workspace、沒有生命週期。
