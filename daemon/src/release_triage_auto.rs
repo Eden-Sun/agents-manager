@@ -398,6 +398,11 @@ async fn record_analysis(app: &App, kind: &str, version: &str, model: &str, erro
 }
 /// 分診 `versions`（都應該是帳本裡 `pending` 的版本）。回 `{results, notice}`；只會成功回應，失敗以 failed 落帳；只有模式關閉才回 fallback。
 pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versions: &[String], binary_diff: Option<&str>) -> Result<Value, LcError> {
+    run_auto_with_retry(app, model, kind, versions, binary_diff, true).await
+}
+
+/// Automatic update events never retry failed analysis; explicit retry may do so.
+pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versions: &[String], binary_diff: Option<&str>, retry_failed: bool) -> Result<Value, LcError> {
     if !crate::release_triage::rules::supported(kind) {
         return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex｜agy｜grok）")));
     }
@@ -409,6 +414,16 @@ pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versi
         }
     }
     norm.sort_by_key(|v| crate::changelog::parse_version(v));
+    // Retry intent belongs to this request, not to the status after waiting for another
+    // analysis. Two simultaneous first requests must not pay twice when the first fails.
+    let mut retry_versions = Vec::new();
+    if retry_failed {
+        for version in &norm {
+            if ledger::get(&app.db, kind, version).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_some_and(|r| r.status == Status::Failed) {
+                retry_versions.push(version.clone());
+            }
+        }
+    }
     let _guard = AUTO_LOCK.lock().await;
     let recent = recent_issue_lines(app).await;
     let mut results: Vec<VersionResult> = Vec::new();
@@ -430,7 +445,7 @@ pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versi
             }
         };
         let api_failed = row.status == Status::Failed && row.verdicts.as_ref().is_some_and(|v| v["analysis"]["source"] == "api");
-        if row.status != Status::Pending && !api_failed {
+        if row.status != Status::Pending && !(api_failed && retry_versions.contains(version)) {
             results.push(skipped(version, format!("狀態是 {}，不是 pending", row.status.as_str())));
             continue;
         }

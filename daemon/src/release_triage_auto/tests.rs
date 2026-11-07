@@ -365,3 +365,20 @@ esac
         assert_eq!(calls.lines().filter(|s| *s == "issue create").count(), if fail_first { 2 } else { 1 });
     }
 }
+
+/// A queued first request must not silently become a paid retry after its peer fails.
+#[tokio::test]
+async fn concurrent_first_requests_do_not_retry_each_others_failure() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    seed(&app, "2.1.277").await;
+    let model = Fake::new(vec![Ok("{}".into()), Ok("{}".into()), Ok("{}".into())]);
+    let versions = ["2.1.277".into()];
+    let (a, b) = tokio::join!(
+        run_auto(&app, &model, "claude", &versions, None),
+        run_auto(&app, &model, "claude", &versions, None)
+    );
+    a.unwrap(); b.unwrap();
+    assert_eq!(model.calls(), 3, "only the first analysis's validation attempts");
+    assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Failed);
+}

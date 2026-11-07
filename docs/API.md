@@ -1338,9 +1338,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
 GET 另回 `auto`：`[changelog_translate] enabled=true, auto=true` 且影響分析 API 模式就緒才為 true；GET 不排程、不扣費。更新框讀到 true 後，以 `POST {auto:true, kind, host, from, to}` 明確補送。背景新版偵測也走同一套分析入口。
 
 ### `POST /api/claude-update/review`
-`{kind?, host?, from?, to?, deep?, auto?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；API 模式下 `deep:true` 也不派協調者），
-唯讀——只建交辦，不 build、不重啟、不碰 CLI 的檔案。內容與 `scripts/ops/<kind>-release-task.md` 同一套規則，
-結論照那份任務的指示回到使用者入口。
+`{kind?, host?, from?, to?, deep?, auto?}`（預設 `kind=claude`、`host=local`、`to` 見上）。API 就緒時，claude／codex／agy／grok 啟動共用分診並依設定自動開票；herdr 啟動既有摘要。API 未就緒且無分診紀錄的手動請求保留協調者交辦。這些分析不 build、不重啟、不更動 CLI 安裝檔。以下交辦格式與派工規則適用於保留的協調者路徑；API 回應與分診規則另列於後。
 
 ```json
 {"kind":"claude","version":"2.1.277","from_version":"2.1.276","target_bot_id":"01…","target_bot_name":"AGM-responder",
@@ -1364,12 +1362,12 @@ GET 另回 `auto`：`[changelog_translate] enabled=true, auto=true` 且影響分
   不先查會撞上 `text_mismatch` 409；
 - 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
-- **自動影響分析**：`auto:true` 只在上述條件成立時執行，否則回 `{skipped:true}`，絕不退 AGM。自動、手動共用 gate 與指紋帳本：kind、(from,to]、原文、分析標準、prompt/schema、模型、effort、endpoint、timeout 與 key 路徑入鍵，host 不入鍵。`fp-<sha256>.json` 保存各組結果，原 `<kind>-<版>.json` 保留最近顯示狀態，GET 依範圍及現有設定讀相符的指紋；舊無指紋的可用帳本仍沿用。自動遇到既有 failed 或中斷紀錄不重送，使用者可按「重試」。每次 API 呼叫（含最多三次重試）沿用 `changelog_review.max_per_hour`（預設 30）的共用每小時上限。
-- **API 快速解析**（#1919，SPEC §4.3d／§18.5a）：`[claude_api] enabled` ＋ `[claude_api.uses.changelog_review] enabled` ＋ key 可讀時，
-  claude／codex／herdr 都不開 session、不派 bot：先占位（`changelog-review` 帳本 `pending`）、API 呼叫在背景跑，回應 `mode:"api"`、
-  `review.state:"pending"`，網頁收到 `supervisor_changed` 後重讀 GET 取結論。`review` 多兩個欄位：`source:"api"`、`model`；結論尾巴由 daemon 寫死「未實測」。
-  API 模式以總開關、用途開關與 key 可讀為界（`claude_review_api::ready`）。最多三次呼叫（首次＋兩次重試），schema／內容驗證錯誤回饋給下一次 API；保險絲、逾時、HTTP、驗證等失敗用盡重試後記 `failed`，絕不派協調者。GET 的 `review.state:"failed"` 與 `review.error` 顯示原因，使用者重新 POST 即重試；成功結果永久重用。缺 changelog／任務標準時直接記 `missing_analysis_input`，不呼叫 API。停用或缺 key 才保留協調者路徑。
-  API 模式下忽略 `deep:true` 的 bot 語意；更新框不提供自動派 bot 的深入驗證按鈕。開 issue 後的 `release-issue-task` 實作交辦不變。
+- **claude／codex／agy／grok 共用分診**：API 就緒改由 `[claude_api.uses.release_triage]` 判斷，開關、模型、effort、每小時額度均沿用分診用途。POST 回應仍為 `mode:"api"`、`duplicate`、`review`（`source:"api"`）；背景任務把各版本條目寫入既有分診帳本，再與 `/release-triage/auto` 共用鎖、逐條判斷及 `accept_submission`。同一 kind＋版本的既有判斷永久沿用，host、from 或 API 設定改變不再扣費；已派給 bot 的版本等待原派工，不另打 API。API 未就緒且沒有分診紀錄時仍保留既有手動派協調者路徑。
+  GET 優先從分診帳本唯讀投影 `review`，不再生成第二份摘要；分診尚未排程時為 `none`、處理中 `pending`、judged／published／empty 為 `done`、failed 為 `failed`。沒有分診紀錄時仍可讀既有 `changelog-review` 摘要，四種 CLI 不再寫該檔案。舊摘要缺少逐條 verdict 與提案，不會自行轉成可 publish 的判斷；後續明確觸發新分診時才建立結構化紀錄。
+  提案、已開 issue、開票失敗原因仍從 **既有** `GET /api/release-triage?kind=` 的 `rows[].verdicts.issues`、`rows[].issues`（`number`、`url`、`entry_ids`、`comment`）與 `rows[].publish_error` 取得，沒有新增欄位／路由。完成時發 `supervisor_changed`，更新框需同時重讀 review 與分診帳本。分析失敗的明確重試用既有 `/release-triage/auto`；開票失敗用 `/release-triage/publish {kind,version}`，不重跑模型。手動重按更新框也會只對已有判斷重試 publish。
+  guard／adopt 提案只有 `[release_triage] publish=true` 才自動開票，repo、上限、marker 去重、既有 issue 留言與持久意圖恢復均走原 publisher；成功後由既有 kick 掃帳本交接協調者，腳本不變。
+- **自動影響分析**：`auto:true` 只在自動翻譯兩層開關及該 kind 的 API 就緒時執行，否則回 `{skipped:true}`。四種 CLI 的自動事件不重送 failed；使用者可明確重試。模型回覆最多三次嘗試（含驗證修正），兩入口共用分診鎖與帳本，不額外呼叫摘要模型。
+- **herdr API 快速解析**：仍使用 `[claude_api.uses.changelog_review]`、`changelog-review` 指紋帳本與既有摘要 schema；kind、(from,to]、原文、標準及有效 API 設定入鍵。最多三次嘗試，失敗不退 bot；手動可重試、自動不重試，GET 依範圍及設定唯讀。API 關閉或缺 key 時沿用原手動協調者路徑；`deep:true` 在 API 模式不派 bot。成功仍寫 `herdr-update.last`。
 - 那台主機還讀不到版本、也沒給 `to` → 409 `no_version`（帶 `kind`）；
 - changelog 原文框成引用（反引號數比原文最長那串多一個）並註明是資料，上限 8000 字，超過截斷並註明；
   API 模式抓不到 changelog 記 failed；僅 API 模式關閉時才請協調者改用 diff binary。
