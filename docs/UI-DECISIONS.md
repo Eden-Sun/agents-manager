@@ -1123,6 +1123,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 **側欄不顯示專家的 track（2026-11-04 使用者）**：專家列不再畫 track 小標（`ExpertTrackTag` 已刪）；track 只在 Bot 設定表單的「負責任務（track）」欄位編輯與顯示。
 
 對話標題列模型旁的強度（桌機 model 標籤、手機第二行）同樣縮寫：L、M、H、XH、X、U（Medium=M、Max=X；2026-11-01 使用者）。模型／強度選單維持完整名稱——先前把縮寫放進選單是放錯位置，已撤回。只換顯示，存的強度值不變。
+Codex 的終端分頁讀到目前 bot／run 的 footer 強度時，標題列同步顯示該值；不認得的值與舊 run 的畫面不採用。離開終端後仍依既有執行狀態顯示，不把舊畫面當成新證據。
 
 **agy 的模型標籤（2026-10-17 使用者：「只要 3.8-flash 就好而 high 是 effort」）**：agy slug（`gemini-3.8-flash-high`）去掉 `gemini-`，尾巴的 `-low／-medium／-high` 當強度拆到強度那格（`3.8-flash-H`；一般列 `3.8-flash-High`），跟 codex 去掉 `gpt-` 同一個道理；完整 slug 留在 tooltip。statusLine 有報強度時以它為準。
 

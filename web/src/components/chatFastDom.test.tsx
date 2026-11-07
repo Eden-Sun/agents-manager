@@ -4,12 +4,13 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { toRun } from '../api/normalize'
-import type { Bot, Run } from '../api/types'
+import type { Bot, Run, TerminalSnapshot } from '../api/types'
 import { ChatPanel } from './ChatPanel'
+import codexFooterFixture from '../testing/fixtures/codex-1755-terminal-context.json'
 
 virtualMockTime()
 afterEach(async () => {
@@ -31,6 +32,22 @@ function stubPhone(phone: boolean): () => void {
   window.matchMedia = ((q: string) => ({ matches: phone && q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   return () => (window.matchMedia = original)
 }
+
+test('終端實際讀取 low 時，手機標題同步顯示 L', async () => {
+  const restore = stubPhone(true)
+  try {
+    const bot = await openWith('am-codex', { phone: true, botFast: false, statusJson: { context_window: { used_percentage: 26 } }, runtimeFast: 0 })
+    const runId = useStore.getState().runs[bot.id]!.id
+    await act(async () => {
+      useStore.setState({ rightTab: 'terminal', readTerminal: async () => ({ ...codexFooterFixture, bot_id: bot.id, run_id: runId } as TerminalSnapshot) })
+      await Promise.resolve()
+    })
+    await until(() => (document.querySelector('.mobile-bot-model')?.textContent ?? '').includes(' · L'), '終端 footer 的 low 反映在手機標題')
+    assert.match(document.querySelector('pre.term')?.textContent ?? '', /GPT-6\.1-Sol low/)
+  } finally {
+    restore()
+  }
+})
 
 /** 開聊天並把 bot 的設定與 run 換成這個測試要的樣子（run 經 `toRun` 正規化）。 */
 async function openWith(botName: string, opts: { phone: boolean; botFast: boolean; statusJson: unknown; runtimeFast: 0 | 1 }) {
@@ -63,6 +80,25 @@ async function openWith(botName: string, opts: { phone: boolean; botFast: boolea
 
 const modelExtra = () => document.querySelector<HTMLElement>('.model-tag-extra')?.textContent ?? ''
 const mobileBoltCodex = () => document.querySelector<HTMLElement>('.mobile-kind-icon.codex.fast')
+
+for (const phone of [false, true]) {
+  test(`codex：${phone ? '手機' : '桌機'}終端 footer 有 low 時標題顯示 L，舊 run 不沿用`, async () => {
+    const restore = stubPhone(phone)
+    try {
+      const bot = await openWith('am-codex', { phone, botFast: false, statusJson: { context_window: { used_percentage: 26 } }, runtimeFast: 0 })
+      const current = useStore.getState().runs[bot.id]!
+      await act(() => useStore.setState({ terminalFooter: { botId: bot.id, runId: current.id, footer: { modelLine: 'GPT-6.1-Sol low · ~/project/pt · Context 26% used · weekly 12% left', warnings: 1 } } }))
+      const text = () => phone ? document.querySelector('.mobile-bot-model')?.textContent ?? '' : modelExtra()
+      assert.match(text(), /(?:^|\s|·)L(?:$|\s)/, '可見的 low 應出現在標題列')
+      await act(() => useStore.setState({ terminalFooter: { botId: bot.id, runId: current.id, footer: { modelLine: 'GPT-6.1-Sol planning · ~/project/pt', warnings: null } } }))
+      assert.doesNotMatch(text(), /planning/, '不認識的內容不能當成強度')
+      await act(() => useStore.setState({ terminalFooter: { botId: bot.id, runId: 'old-run', footer: { modelLine: 'GPT-6.1-Sol low · ~/project/pt', warnings: null } } }))
+      assert.doesNotMatch(text(), /(?:^|\s|·)L(?:$|\s)/, '舊 run 的 footer 不可沿用')
+    } finally {
+      restore()
+    }
+  })
+}
 
 test('codex：status_json 只有 context_window、runtime_fast=1（設定是關）→ 標題列有 fast，手機 logo 有閃電', async () => {
   await openWith('am-codex', { phone: false, botFast: false, statusJson: { context_window: { used_percentage: 12 } }, runtimeFast: 1 })
