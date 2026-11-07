@@ -54,7 +54,7 @@ test('彈窗每張券一列：到期日＋倒數，最早的在前，不到 48 �
   assert.ok(!rows[1].classList.contains('urgent'))
 })
 
-test('logo 右上角的徽章寫可用張數，tooltip 寫最近到期日', async () => {
+test('logo 右下角的小字寫可用張數，tooltip 寫最近到期日', async () => {
   const cell = await mountCodex({ available: 2, title: 'x', expires_at: at(24 * 24), credits: [credit('a', 24 * 24), credit('b', 24 * 30)] })
   const badge = cell.querySelector('.quota-kind .quota-credit-badge')!
   assert.equal(badge.textContent, '2')
