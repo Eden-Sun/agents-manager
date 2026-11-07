@@ -11,11 +11,12 @@ export type TriageVerdict = 'guard' | 'adopt' | 'upgrade-arg' | 'none'
 export interface TriageRow {
   analysis?: { source: string; model: string; error: string }
   version: string
+  publishError?: string
   status: string
   entries: { id: string; text: string }[]
   verdicts: { entry_id: string; verdict: string; reason: string; module: string }[]
   proposals: { entry_ids: string[]; title: string; verdict: string; duplicate_of: number | null }[]
-  issues: { entry_ids: string[]; number: number | null; url: string | null }[]
+  issues: { entry_ids: string[]; number: number | null; url: string | null; comment?: boolean }[]
 }
 
 export interface TriageItem {
@@ -32,10 +33,12 @@ export interface TriageIssue {
   url: string | null
   /** 併進既有的 issue（只留言、不另開）。 */
   duplicate: boolean
+  published?: boolean
 }
 
 export interface TriageVersion {
   analysis?: { source: string; model: string; error: string }
+  publishError?: string
   version: string
   /** `judged`＝有結論（含已開 issue）；`empty`＝看過、沒有要處理的；`pending`＝排隊或分析中；`failed`；`missing`＝帳本沒有這一版。 */
   state: 'judged' | 'empty' | 'pending' | 'failed' | 'missing'
@@ -61,6 +64,7 @@ export function parseTriageRows(raw: unknown): { repo: string | null; rows: Tria
       version: str(r.version),
       analysis: isRec(v) && isRec(v.analysis) ? { source: str(v.analysis.source), model: str(v.analysis.model), error: str(v.analysis.error) } : undefined,
       status: str(r.status),
+      publishError: str(r.publish_error),
       entries: (Array.isArray(r.entries) ? r.entries : []).filter(isRec).map((e) => ({ id: str(e.id), text: str(e.text) })),
       verdicts: list.filter(isRec).map((x) => ({ entry_id: str(x.entry_id), verdict: str(x.verdict), reason: str(x.reason), module: str(x.module) })),
       proposals: props.filter(isRec).map((p) => ({
@@ -73,6 +77,7 @@ export function parseTriageRows(raw: unknown): { repo: string | null; rows: Tria
         entry_ids: strs(i.entry_ids),
         number: num(i.number),
         url: str(i.url) || null,
+        comment: i.comment === true,
       })),
     }
   })
@@ -116,7 +121,7 @@ function summarize(row: TriageRow, repo: string | null): TriageVersion {
       const opened = row.issues.find((i) => i.entry_ids.some((id) => p.entry_ids.includes(id)))
       const number = opened?.number ?? p.duplicate_of
       const url = opened?.url ?? (number !== null && repo ? `https://github.com/${repo}/issues/${number}` : null)
-      return { title: bareTitle(p.title), verdict: p.verdict as 'guard' | 'adopt', number, url, duplicate: !opened && p.duplicate_of !== null }
+      return { title: bareTitle(p.title), verdict: p.verdict as 'guard' | 'adopt', number, url, published: !!opened, duplicate: opened?.comment === true || p.duplicate_of !== null }
     })
   const state: TriageVersion['state'] =
     row.status === 'judged' || row.status === 'published'
@@ -126,7 +131,7 @@ function summarize(row: TriageRow, repo: string | null): TriageVersion {
         : row.status === 'failed'
           ? 'failed'
           : 'pending'
-  return { version: row.version, analysis: row.analysis, state, guard: pick('guard'), adopt: pick('adopt'), upgrade: pick('upgrade-arg'), issues }
+  return { version: row.version, publishError: row.publishError, analysis: row.analysis, state, guard: pick('guard'), adopt: pick('adopt'), upgrade: pick('upgrade-arg'), issues }
 }
 
 /**

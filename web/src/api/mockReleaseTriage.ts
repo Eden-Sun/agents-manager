@@ -75,7 +75,7 @@ function triageRows(kind: string): Rec[] {
   }
   return [
     {
-      kind, version: '0.157.0', status: 'judged',
+      kind, version: '0.157.0', status: 'judged', publish_error: 'GitHub 暫時無法連線',
       entries: [
         { id: 'x1', text: 'Enabled fullscreen transcripts by default and added Shift-click to extend text selections.' },
         { id: 'x2', text: 'Markdown lists now render with Unicode bullets (•).' },
@@ -105,6 +105,7 @@ function triageRows(kind: string): Rec[] {
 }
 
 export class MockReleaseTriage {
+  private published = new Set<string>()
   private off = new Set<string>()
   private reviews = new Map<string, Rec>()
   /** 同一 kind／from／to 只翻一次；host 不進這個鍵。 */
@@ -129,8 +130,13 @@ export class MockReleaseTriage {
     }
     if (method === 'GET' && rawPath === '/release-triage') {
       const kind = q.get('kind') ?? 'claude'
-      return { publish_enabled: false, repo: 'Eden-Sun/agents-manager', rows: this.off.has(kind) ? [] : triageRows(kind) }
+      return { publish_enabled: false, repo: 'Eden-Sun/agents-manager', rows: this.off.has(kind) ? [] : triageRows(kind).map((row) => this.published.has(kind + '@' + row.version) ? { ...row, status: 'published', publish_error: null, issues: (((row.verdicts as Rec)?.issues ?? []) as Rec[]).map((p, index) => ({ entry_ids: p.entry_ids, number: p.duplicate_of ?? 2000 + index, url: 'https://github.com/Eden-Sun/agents-manager/issues/' + (p.duplicate_of ?? 2000 + index), comment: !!p.duplicate_of })) } : row) }
     }
+    if (method === 'POST' && rawPath === '/release-triage/publish') {
+      this.published.add(String(b.kind) + '@' + b.version)
+      return { publish_enabled: true, results: [] }
+    }
+    if (method === 'POST' && rawPath === '/release-triage/auto') return { results: [] }
     if (rawPath === '/claude-update/review') {
       const kind = (method === 'GET' ? q.get('kind') : (b.kind as string | undefined)) ?? 'claude'
       const to = (method === 'GET' ? q.get('to') : (b.to as string | undefined)) || (kind === 'codex' ? '0.157.0' : DISK[kind])

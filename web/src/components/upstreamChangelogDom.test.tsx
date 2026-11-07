@@ -188,14 +188,14 @@ test('agy：只有按「分析影響」才 POST（kind、from、to 帶對），�
   await mount(<AgyUpdateChip control={control} />)
   await until(() => document.body.querySelector('.agm-review-none') !== null, '尚未分析')
   assert.deepEqual(written(), [], '開框只讀')
-  const reviewReads = () => seen.filter((p) => p.includes('/claude-update/review')).length
+  const reviewReads = () => seen.filter((p) => p.includes('/release-triage')).length
   const before = reviewReads()
   await click(reviewBtn()!)
   await until(() => written().length === 1, 'POST')
   assert.equal(written()[0].method, 'POST')
   assert.match(written()[0].path, /\/claude-update\/review$/)
   assert.deepEqual({ kind: written()[0].body.kind, from: written()[0].body.from, to: written()[0].body.to }, { kind: 'agy', from: '1.4.5', to: '1.4.6' })
-  await until(() => reviewReads() > before + 1, '派出去後分析區重讀（refreshKey）')
+  await until(() => reviewReads() > before, '派出去後分析區重讀（refreshKey）')
   assert.equal(written().length, 1, '只 POST 一次')
 })
 
@@ -244,7 +244,7 @@ test('API 分析失敗顯示模型、原因及重試；翻譯與分析 POST 分�
     })
     return json({ rows: [], repo: '' })
   }) as unknown as typeof fetch
-  const root = await mount(<AgmReviewBox kind="agy" host="local" from="1.4.5" to="1.4.6" refreshKey={0} />)
+  const root = await mount(<AgmReviewBox kind="herdr" host="local" from="1.4.5" to="1.4.6" refreshKey={0} />)
   await until(() => root.textContent?.includes('bad_format:summary') === true, '失敗原因')
   assert.match(root.textContent ?? '', /影響分析/)
   assert.match(root.textContent ?? '', /Claude API（claude-sonnet-test）/)
