@@ -1,6 +1,7 @@
 import test, { before, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, setupDom, teardownDom, unmountAll, until, click } from '../testing/domHarness'
+import { useStore } from '../store/store'
 import { AgmReviewBox } from './AgmReviewBox'
 
 before(setupDom)
@@ -58,4 +59,32 @@ test('輪詢刷新分診結果，卸載停止輪詢', { timeout: 30000 }, async 
   const count = reads
   await new Promise((resolve) => setTimeout(resolve, 5100))
   assert.equal(reads, count)
+})
+
+
+test('supervisor_changed 同時刷新 review 與 triage，已完成仍讀 publish 狀態', { timeout: 30000 }, async () => {
+  for (const kind of ['claude', 'codex', 'agy', 'grok', 'herdr']) {
+    useStore.setState({ supervisorRev: 0 })
+    let complete = false
+    const requests = fakeApi((req) => {
+      if (req.path.includes('/claude-update/review')) return {
+        version: '2.0', auto: false,
+        review: { state: 'done', source: 'api', mode: 'api', result: complete ? 'review refreshed' : 'review initial' },
+      }
+      return { rows: [{ version: '2.0', status: complete ? 'empty' : 'judged', entries: [] }] }
+    })
+    const root = await mount(<AgmReviewBox kind={kind} host="local" from="1.0" to="2.0" refreshKey={0} />)
+    await until(() => root.querySelector('.agm-review') !== null, '初始載入')
+    const before = requests.length
+    complete = true
+    useStore.setState({ supervisorRev: 1 })
+    await until(() => root.textContent?.includes('看過了，沒有要處理的') === true, '事件刷新分診', 4000)
+    const refreshed = requests.slice(before)
+    assert.ok(refreshed.some((r) => r.path.includes('/claude-update/review')))
+    assert.ok(refreshed.some((r) => r.path.includes('/release-triage')))
+    assert.ok(refreshed.every((r) => r.method === 'GET'))
+    assert.equal(root.textContent?.includes('review refreshed'), kind === 'herdr')
+    await unmountAll()
+  }
+  useStore.setState({ supervisorRev: 0 })
 })

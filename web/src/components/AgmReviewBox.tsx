@@ -63,26 +63,29 @@ export function AgmReviewBox({
     return () => { alive = false; clearInterval(timer) }
   }, [usesTriage, kind, from, key])
 
-  // AGM 給出結論（或接手）會推 `supervisor_changed`：還沒有結論時據此只重讀「影響分析」那一半（框不閃、分診帳本不重抓）。
+  // 分診／publish 與 herdr review 都共用 supervisor_changed；完成後仍需刷新 publish 結果。
   const rev = useStore((s) => s.supervisorRev)
-  const reviewState = loaded?.key === key ? loaded.review?.state : undefined
-  useEffect(
-    () =>
-      usesTriage ? () => {} : scheduleReviewRefresh({
-        rev,
-        state: usesTriage ? undefined : reviewState,
-        run: () => {
-          void api
-            .fetchUpdateReview({ kind, host, from, to })
-            .then((r) => {
-              // 讀失敗不蓋掉畫面上已有的；key 變了（換版本／重新派）就丟掉，那一輪有自己的讀取。
-              setLoaded((cur) => (cur && cur.key === key ? { ...cur, review: r?.review ?? cur.review } : cur))
-            })
-            .catch(() => {})
-        },
-      }),
-    [rev, reviewState, kind, host, from, to, key, usesTriage],
-  )
+  useEffect(() => {
+    let alive = true
+    const cancel = scheduleReviewRefresh({
+      rev,
+      state: undefined,
+      run: () => {
+        void Promise.all([
+          api.fetchUpdateReview({ kind, host, from, to }).catch(() => null),
+          api.fetchReleaseTriage(kind).catch(() => null),
+        ]).then(([r, triage]) => {
+          if (!alive) return
+          setLoaded((cur) => cur?.key === key ? {
+            ...cur,
+            review: usesTriage ? null : r?.review ?? cur.review,
+            triage: triage ? triageForRange(triage.rows, triage.repo, from, cur.version) : cur.triage,
+          } : cur)
+        })
+      },
+    })
+    return () => { alive = false; cancel() }
+  }, [rev, kind, host, from, to, key, usesTriage])
 
   const t = useT()
   const [retrying, setRetrying] = useState(false)
