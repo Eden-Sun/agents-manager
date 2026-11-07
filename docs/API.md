@@ -1317,7 +1317,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
 
 ### `GET /api/claude-update/review`
 只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 user_only`。這一版的影響分析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
-「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
+「結論會回到這裡」）。`?kind=`／`?host=`／`?from=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
 
 ```json
 {"kind":"claude","version":"2.1.277","review":{"state":"done","assignment_id":"01…","target_bot_name":"AGM-responder",
@@ -1335,8 +1335,10 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
 兩邊都沒有能用的 assignment，才退到收件匣事件那條路：`supervisor_inbox.notify_turn_id` → 那個回合的最後
 一則 assistant 訊息（派給 AGM 角色一律走交接佇列，不會有 assignment，2026-09-19 上線後實測踩過）。
 
+GET 另回 `auto`：`[changelog_translate] enabled=true, auto=true` 且影響分析 API 模式就緒才為 true；GET 不排程、不扣費。更新框讀到 true 後，以 `POST {auto:true, kind, host, from, to}` 明確補送。背景新版偵測也走同一套分析入口。
+
 ### `POST /api/claude-update/review`
-`{kind?, host?, from?, to?, deep?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；API 模式下 `deep:true` 也不派協調者），
+`{kind?, host?, from?, to?, deep?, auto?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；API 模式下 `deep:true` 也不派協調者），
 唯讀——只建交辦，不 build、不重啟、不碰 CLI 的檔案。內容與 `scripts/ops/<kind>-release-task.md` 同一套規則，
 結論照那份任務的指示回到使用者入口。
 
@@ -1362,6 +1364,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
   不先查會撞上 `text_mismatch` 409；
 - 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
+- **自動影響分析**：`auto:true` 只在上述條件成立時執行，否則回 `{skipped:true}`，絕不退 AGM。自動、手動共用 gate 與指紋帳本：kind、(from,to]、原文、分析標準、prompt/schema、模型、effort、endpoint、timeout 與 key 路徑入鍵，host 不入鍵。`fp-<sha256>.json` 保存各組結果，原 `<kind>-<版>.json` 保留最近顯示狀態，GET 依範圍及現有設定讀相符的指紋；舊無指紋的可用帳本仍沿用。自動遇到既有 failed 或中斷紀錄不重送，使用者可按「重試」。每次 API 呼叫（含最多三次重試）沿用 `changelog_review.max_per_hour`（預設 30）的共用每小時上限。
 - **API 快速解析**（#1919，SPEC §4.3d／§18.5a）：`[claude_api] enabled` ＋ `[claude_api.uses.changelog_review] enabled` ＋ key 可讀時，
   claude／codex／herdr 都不開 session、不派 bot：先占位（`changelog-review` 帳本 `pending`）、API 呼叫在背景跑，回應 `mode:"api"`、
   `review.state:"pending"`，網頁收到 `supervisor_changed` 後重讀 GET 取結論。`review` 多兩個欄位：`source:"api"`、`model`；結論尾巴由 daemon 寫死「未實測」。

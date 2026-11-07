@@ -864,18 +864,20 @@ function toReview(raw: unknown): UpdateReview {
 export async function fetchUpdateReview(input: {
   kind: string
   host?: string
+  from?: string | null
   to?: string | null
-}): Promise<{ version: string; review: UpdateReview }> {
+}): Promise<{ version: string; review: UpdateReview; auto?: boolean }> {
   const q = new URLSearchParams({ kind: input.kind })
   if (input.host) q.set('host', input.host)
+  if (input.from) q.set('from', input.from)
   if (input.to) q.set('to', input.to)
   const raw = await transport.request('GET', `/claude-update/review?${q}`)
   const o = isRec(raw) ? raw : {}
-  return { version: str(o.version), review: toReview(o.review) }
+  return { version: str(o.version), review: toReview(o.review), auto: o.auto === true }
 }
 
 /** 分析影響這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
-export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null; deep?: boolean }): Promise<{
+export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null; deep?: boolean; auto?: boolean }): Promise<{
   version: string
   target_bot_name: string
   source_name: string
@@ -887,6 +889,7 @@ export async function requestUpdateReview(input: { kind: string; host?: string; 
     from: input.from ?? undefined,
     to: input.to ?? undefined,
     deep: input.deep ? true : undefined,
+    auto: input.auto ? true : undefined,
   })
   const o = isRec(raw) ? raw : {}
   const review = toReview(o.review)

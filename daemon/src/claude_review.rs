@@ -32,6 +32,9 @@ use crate::state::App;
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewIn {
+    /// 開框／偵測補送：僅自動翻譯與 API 就緒時執行，不重試 failed。
+    #[serde(default)]
+    pub auto: bool,
     /// `claude`（預設）｜`codex`｜`herdr`。
     #[serde(default)]
     pub kind: Option<String>,
@@ -370,19 +373,21 @@ pub async fn review_state(app: &(impl crate::capabilities::Db + crate::capabilit
 }
 
 fn api_review_state(data_dir: &std::path::Path, kind: &str, to: &str) -> Option<ReviewState> {
-    crate::claude_review_api::load(data_dir, kind, to).and_then(|rec| {
-        let state = crate::claude_review_api::live_state(&rec, chrono::Utc::now()).unwrap_or("failed");
-        Some(ReviewState {
-            state,
-            asked_at: Some(rec.asked_at),
-            answered_at: rec.answered_at,
-            result: rec.result,
-            source: Some("api"),
-            model: rec.model,
-            error: rec.error_kind.or_else(|| (state == "failed").then(|| "interrupted".into())),
-            ..Default::default()
-        })
-    })
+    crate::claude_review_api::load(data_dir, kind, to).map(api_record_state)
+}
+
+fn api_record_state(rec: crate::claude_review_api::Record) -> ReviewState {
+    let state = crate::claude_review_api::live_state(&rec, chrono::Utc::now()).unwrap_or("failed");
+    ReviewState {
+        state,
+        asked_at: Some(rec.asked_at),
+        answered_at: rec.answered_at,
+        result: rec.result,
+        source: Some("api"),
+        model: rec.model,
+        error: rec.error_kind.or_else(|| (state == "failed").then(|| "interrupted".into())),
+        ..Default::default()
+    }
 }
 
 /// [`review_state`] 只看派 bot 的那一條路（assignment 與收件匣）。`deep` 重按用它判斷「bot 路徑派過沒」。
@@ -474,11 +479,15 @@ pub async fn get_review(State(app): State<Arc<App>>, axum::extract::Query(q): ax
         return Ok(Json(json!({"kind": kind, "version": null, "review": ReviewState { state: "none", ..Default::default() }})));
     }
     let state = if crate::claude_review_api::ready(&app).await {
-        api_review_state(&app.data_dir, kind, &to).unwrap_or(ReviewState { state: "none", ..Default::default() })
+        let reply = crate::changelog::lookup(&app, &host, kind, q.from.as_deref(), Some(&to)).await;
+        let found = Found { from_version: reply.from_version, body: changelog_body(&reply.sections), source_url: reply.source_url, sections: reply.sections.len() };
+        let job = api_job(&app, kind, &to, &found);
+        crate::claude_review_api::load_job(&app.data_dir, &job, &app.cfg.get().await).map(api_record_state)
+            .unwrap_or(ReviewState { state: "none", ..Default::default() })
     } else {
         review_state(&app, kind, &to).await?
     };
-    Ok(Json(json!({"kind": kind, "version": to, "review": state})))
+    Ok(Json(json!({"kind": kind, "version": to, "review": state, "auto": auto_ready(&app).await})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,12 +497,17 @@ pub struct ReviewQuery {
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
     pub to: Option<String>,
 }
 
 /// `POST /api/claude-update/review`
 pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -> Result<Json<Value>, LcError> {
     let kind = parse_kind(b.kind.as_deref())?;
+    if b.auto && !auto_ready(&app).await {
+        return Ok(Json(json!({"skipped": true})));
+    }
     let host = b.host.clone().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let to_hint = match b.to.as_deref().and_then(crate::changelog::version_string) {
         Some(v) => Some(v),
@@ -515,6 +529,9 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     // API 模式一經選定就不派 bot，deep 舊參數也遵守這個界線。
     let api_mode = crate::claude_review_api::applies_to(kind) && crate::claude_review_api::ready(&app).await;
 
+    if b.auto && !api_mode {
+        return Ok(Json(json!({"skipped": true})));
+    }
     let state = if api_mode {
         api_review_state(&app.data_dir, kind, &to).unwrap_or(ReviewState { state: "none", ..Default::default() })
     } else if b.deep.unwrap_or(false) {
@@ -522,7 +539,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     } else {
         review_state(&app, kind, &to).await?
     };
-    if state.state != "none" && state.state != "failed" {
+    if !api_mode && state.state != "none" && state.state != "failed" {
         return Ok(Json(json!({
             "kind": kind,
             "version": to,
@@ -533,9 +550,21 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         })));
     }
     if api_mode {
-        return api_review(&app, kind, &to, &found).await.map(Json);
+        return api_review(&app, kind, &to, &found, b.auto).await.map(Json);
     }
     Ok(Json(dispatch_to_bot(&app, kind, &to, &found).await?))
+}
+
+/// GET 只公開資格；真正扣費走 POST 或偵測事件的背景任務。
+async fn auto_ready(app: &App) -> bool {
+    let cfg = app.cfg.get().await;
+    cfg.changelog_translate.enabled && cfg.changelog_translate.auto && crate::claude_review_api::ready(app).await
+}
+
+pub async fn auto_kick(app: Arc<App>, kind: String, from: Option<String>, to: String) {
+    let _ = post_review(State(app), Json(ReviewIn {
+        auto: true, kind: Some(kind), host: None, from, to: Some(to), deep: None,
+    })).await;
 }
 
 /// 這一版要解析的 changelog 與來源。
@@ -558,13 +587,12 @@ fn binary_diff_for(app: &impl crate::capabilities::DataDir, kind: &str, from: Op
     (old.is_file() && new.is_file() && script.is_file()).then_some(crate::claude_review_api::BinaryDiff { script, old, new })
 }
 
-/// API 影響分析：占位後在背景執行；準備或儲存失敗也不派 bot。
-async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found) -> Result<Value, LcError> {
+fn api_job(app: &Arc<App>, kind: &str, to: &str, found: &Found) -> crate::claude_review_api::Job {
     use crate::claude_review_api as api;
     let task_md = task_head(app.as_ref(), kind).unwrap_or_default();
     let changelog = truncate(found.body.trim(), MAX_BODY_CHARS);
 
-    let job = api::Job {
+    api::Job {
         kind: kind.to_string(),
         to: to.to_string(),
         from: found.from_version.clone().filter(|f| f != to),
@@ -572,8 +600,15 @@ async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found)
         source_url: found.source_url.clone(),
         criteria: api::criteria_of(&task_md),
         binary_diff: binary_diff_for(app.as_ref(), kind, found.from_version.as_deref(), to),
-    };
-    let started = api::start(app, job).await;
+    }
+}
+
+/// API 影響分析：占位後在背景執行；準備或儲存失敗也不派 bot。
+async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found, auto: bool) -> Result<Value, LcError> {
+    use crate::claude_review_api as api;
+    let job = api_job(app, kind, to, found);
+    let fp = api::fingerprint(&job, &app.cfg.get().await);
+    let started = api::start(app, job, auto).await;
     let duplicate = match started {
         Ok(api::Started::Spawned) => false,
         Ok(api::Started::Existing) => true,
@@ -581,7 +616,8 @@ async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found)
             return Err(LcError::Upstream(format!("無法儲存 API 影響分析：{e}")));
         }
     };
-    let review = review_state(app.as_ref(), kind, to).await?;
+    let review = api::load_fingerprint(&app.data_dir, &fp).or_else(|| api::load(&app.data_dir, kind, to))
+        .map(api_record_state).unwrap_or_default();
     Ok(json!({
         "kind": kind,
         "version": to,
@@ -913,7 +949,7 @@ mod tests {
         crate::testing::make_table_unreadable(&app, "supervisor_assignments").await;
         let result = get_review(
             State(app.clone()),
-            axum::extract::Query(ReviewQuery { kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
+            axum::extract::Query(ReviewQuery { from: None, kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
         )
         .await;
         crate::testing::make_table_readable(&app, "supervisor_assignments").await;
@@ -928,7 +964,7 @@ mod tests {
         crate::testing::make_table_unreadable(&app, "supervisor_inbox").await;
         let result = get_review(
             State(app.clone()),
-            axum::extract::Query(ReviewQuery { kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
+            axum::extract::Query(ReviewQuery { from: None, kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
         )
         .await;
         crate::testing::make_table_readable(&app, "supervisor_inbox").await;
@@ -966,7 +1002,7 @@ mod tests {
     }
 
     fn post_body() -> ReviewIn {
-        ReviewIn { kind: Some("claude".into()), host: None, from: None, to: Some("2.1.282".into()), deep: None }
+        ReviewIn { auto: false, kind: Some("claude".into()), host: None, from: None, to: Some("2.1.282".into()), deep: None }
     }
 
     /// issue #609：這一版已經有活著的交辦，查它的時候 DB 讀失敗——POST 要回可重試的錯、什麼都不派；
@@ -1220,7 +1256,7 @@ mod tests {
     #[tokio::test]
     async fn herdr_is_dispatched_once_whether_the_kick_or_the_button_goes_first() {
         let herdr_md = "# Changelog\n\n## [0.9.3] - 2026-09-29\n\n- codex idle\n\n## [0.9.2] - 2026-09-24\n\n- events_lost\n";
-        let body = |from: &str| ReviewIn { kind: Some("herdr".into()), host: None, from: Some(from.into()), to: Some("0.9.3".into()), deep: None };
+        let body = |from: &str| ReviewIn { auto: false, kind: Some("herdr".into()), host: None, from: Some(from.into()), to: Some("0.9.3".into()), deep: None };
 
         // 1. kick 先派。
         let e = crate::testing::env().await;
@@ -1421,7 +1457,7 @@ mod tests {
     }
 
     fn body(kind: &str, to: &str, deep: Option<bool>) -> ReviewIn {
-        ReviewIn { kind: Some(kind.into()), host: None, from: None, to: Some(to.into()), deep }
+        ReviewIn { auto: false, kind: Some(kind.into()), host: None, from: None, to: Some(to.into()), deep }
     }
 
     /// API 成功：不派 bot（沒有 assignment／收件匣）、結論標未實測、重按與別路都是同一筆。
@@ -1577,7 +1613,7 @@ mod tests {
             let before = counts(&app).await;
             // 開框：只讀帳本，不打 API、不派 bot。
             for _ in 0..2 {
-                let Json(g) = get_review(State(app.clone()), axum::extract::Query(ReviewQuery { kind: Some(kind.into()), host: None, to: Some(version.into()) })).await.unwrap();
+                let Json(g) = get_review(State(app.clone()), axum::extract::Query(ReviewQuery { from: None, kind: Some(kind.into()), host: None, to: Some(version.into()) })).await.unwrap();
                 assert_eq!(g["review"]["state"], "none", "{g}");
             }
             assert!(fake.prompts.lock().unwrap().is_empty(), "{kind}：開框不能打 API");
@@ -1598,10 +1634,94 @@ mod tests {
             let Json(again) = post_review(State(app.clone()), Json(body(kind, version, None))).await.unwrap();
             assert_eq!(again["duplicate"], json!(true), "{again}");
             assert_eq!(fake.prompts.lock().unwrap().len(), 1, "{kind}：同一版不再打 API");
-            let Json(g) = get_review(State(app.clone()), axum::extract::Query(ReviewQuery { kind: Some(kind.into()), host: None, to: Some(version.into()) })).await.unwrap();
+            let Json(g) = get_review(State(app.clone()), axum::extract::Query(ReviewQuery { from: None, kind: Some(kind.into()), host: None, to: Some(version.into()) })).await.unwrap();
             assert_eq!(g["review"]["state"], "done");
             assert_eq!(fake.prompts.lock().unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_detection_and_open_share_the_manual_ledger_and_failed_stays_failed() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let fake = api_on(&app, vec![api_ok(GOOD), api_ok("{}"), api_ok("{}"), api_ok("{}"), api_ok(GOOD)]).await;
+        app.cfg.update(|c| { c.changelog_translate.enabled = true; c.changelog_translate.auto = true; Ok(()) }).await.unwrap();
+        let before = counts(&app).await;
+        // 真正的新版事件入口；翻譯另用不存在的 key，不能碰網路。
+        app.cfg.update(|c| { c.changelog_translate.key_file = "/nonexistent/autoreview-test-key".into(); Ok(()) }).await.unwrap();
+        crate::changelog_translate::kick_detected(&app, &json!({"notify":"update", "kind":"claude", "target_version":"2.1.282"}));
+        settle(&app, "claude", "2.1.282", "done").await;
+        auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()).await;
+        let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+        assert_eq!(fake.prompts.lock().unwrap().len(), 1);
+        // 設定變動形成另一個指紋，即使同一版本仍須分析一次。
+        app.cfg.update(|c| { c.claude_api.uses.get_mut("changelog_review").unwrap().effort = "low".into(); Ok(()) }).await.unwrap();
+        auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()).await;
+        settle(&app, "claude", "2.1.282", "failed").await;
+        auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()).await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 4, "失敗不能由自動補送重試");
+        let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+        settle(&app, "claude", "2.1.282", "done").await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 5);
+        app.cfg.update(|c| { c.claude_api.uses.get_mut("changelog_review").unwrap().effort = "medium".into(); Ok(()) }).await.unwrap();
+        auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()).await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 5, "切回舊設定沿用指紋歷史");
+        assert_eq!(counts(&app).await, before, "永不派 AGM");
+    }
+
+    #[tokio::test]
+    async fn automatic_review_is_quiet_without_both_switches_and_api_readiness() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let fake = api_on(&app, vec![]).await;
+        let before = counts(&app).await;
+        for (enabled, auto, api_enabled) in [(true, false, true), (false, true, true), (true, true, false)] {
+            app.cfg.update(move |c| { c.changelog_translate.enabled = enabled; c.changelog_translate.auto = auto; c.claude_api.enabled = api_enabled; Ok(()) }).await.unwrap();
+            auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()).await;
+        }
+        assert!(fake.prompts.lock().unwrap().is_empty());
+        assert_eq!(counts(&app).await, before);
+        assert!(crate::claude_review_api::load(&app.data_dir, "claude", "2.1.282").is_none());
+    }
+
+    #[tokio::test]
+    async fn automatic_and_manual_concurrent_requests_share_the_gate_and_hourly_cap() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let fake = api_on(&app, vec![api_ok(GOOD)]).await;
+        app.cfg.update(|c| { c.changelog_translate.enabled = true; c.changelog_translate.auto = true; c.claude_api.uses.get_mut("changelog_review").unwrap().max_per_hour = 1; Ok(()) }).await.unwrap();
+        let ((), manual) = tokio::join!(
+            auto_kick(app.clone(), "claude".into(), None, "2.1.282".into()),
+            post_review(State(app.clone()), Json(body("claude", "2.1.282", None)))
+        );
+        manual.unwrap();
+        settle(&app, "claude", "2.1.282", "done").await;
+        app.changelog.seed("claude", "## 2.1.283\n- next\n").await;
+        auto_kick(app.clone(), "claude".into(), None, "2.1.283".into()).await;
+        settle(&app, "claude", "2.1.283", "failed").await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 1, "共用每小時上限，不打第二次 API");
+    }
+
+    #[tokio::test]
+    async fn distinct_ranges_have_separate_records_and_get_reads_the_requested_range_without_spending() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let fake = api_on(&app, vec![api_ok(GOOD), api_ok(GOOD)]).await;
+        for from in ["2.1.280", "2.1.281", "2.1.280"] {
+            let mut b = body("claude", "2.1.282", None);
+            b.from = Some(from.into());
+            let _ = post_review(State(app.clone()), Json(b)).await.unwrap();
+            settle(&app, "claude", "2.1.282", "done").await;
+            let Json(read) = get_review(State(app.clone()), axum::extract::Query(ReviewQuery {
+                kind: Some("claude".into()), host: None, from: Some(from.into()), to: Some("2.1.282".into()),
+            })).await.unwrap();
+            assert_eq!(read["review"]["state"], "done", "{read}");
+        }
+        assert_eq!(fake.prompts.lock().unwrap().len(), 2, "範圍各一次，GET 與舊範圍重按不扣費");
     }
 
     fn criteria_of_task(task: &str) -> String {
