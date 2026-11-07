@@ -50,7 +50,7 @@ function save(v: Record<string, number>) {
   }
 }
 
-export function startResetCreditsNotice() {
+export function startResetCreditsNotice(): () => void {
   let seen = load()
   let last: QuotaMap | null = null
   const check = (quota: QuotaMap) => {
@@ -66,7 +66,10 @@ export function startResetCreditsNotice() {
     }
   }
   check(useStore.getState().quota)
-  useStore.subscribe((s) => check(s.quota))
+  const unsub = useStore.subscribe((s) => check(s.quota))
+  return () => {
+    unsub()
+  }
 }
 
 /**
@@ -122,8 +125,10 @@ function saveExpiry(v: Record<string, number>) {
   }
 }
 
+let expiryTimer: ReturnType<typeof setInterval> | null = null
+
 /** 先記再跳：存不了就不跳，免得每一輪都重複打擾；單一 toast 一張券。 */
-export function startResetCreditExpiryNotice(now: () => number = Date.now) {
+export function startResetCreditExpiryNotice(now: () => number = Date.now): () => void {
   let seen = loadExpiry()
   const check = () => {
     const { due, next } = resetCreditExpiries(seen, useStore.getState().quota, now())
@@ -134,11 +139,29 @@ export function startResetCreditExpiryNotice(now: () => number = Date.now) {
   }
   check()
   let last = useStore.getState().quota
-  useStore.subscribe((s) => {
+  const unsub = useStore.subscribe((s) => {
     if (s.quota === last) return
     last = s.quota
     check()
   })
   // 頁面一直開著時，券會從 24 小時外走進 24 小時內，額度沒變也要重看。
-  setInterval(check, 10 * 60_000)
+  if (expiryTimer) clearInterval(expiryTimer)
+  expiryTimer = setInterval(check, 10 * 60_000)
+
+  return () => {
+    unsub()
+    if (expiryTimer) {
+      clearInterval(expiryTimer)
+      expiryTimer = null
+    }
+  }
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (expiryTimer) {
+      clearInterval(expiryTimer)
+      expiryTimer = null
+    }
+  })
 }
