@@ -27,6 +27,14 @@ pub struct Member {
     pub since: Option<String>,
     pub quota_blocked: bool,
     pub context_pct: Option<f64>,
+    /// 側欄 menu 順序：該 bot 在 config.toml 所屬 project 的 `bots` 陣列索引（0 起算，越小越上面）。
+    /// `None`＝config 裡找不到（例如 child、剛建立還沒投影）；排在所有有位置的後面。
+    pub menu_pos: Option<usize>,
+}
+
+/// menu 位置的排序鍵：有位置的依索引由小到大，沒位置的排最後。
+fn menu_key(m: &Member) -> (bool, usize) {
+    (m.menu_pos.is_none(), m.menu_pos.unwrap_or(0))
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +64,7 @@ pub(crate) fn pick_best_member<'a>(members: &'a [Member], want_track: Option<&st
     members.iter().filter(|m| m.manager_use && m.running && m.idle && !m.quota_blocked).min_by(|a, b| {
         let track_rank = |m: &Member| if want_track.is_some_and(|t| m.track.as_deref() == Some(t)) { 0 } else { 1 };
         track_rank(a).cmp(&track_rank(b))
+            .then_with(|| menu_key(a).cmp(&menu_key(b)))
             .then_with(|| a.context_pct.unwrap_or(50.0).total_cmp(&b.context_pct.unwrap_or(50.0)))
             .then_with(|| b.since.cmp(&a.since))
             .then_with(|| a.id.cmp(&b.id))
@@ -119,6 +128,7 @@ fn member_of(bot: &db::Bot, run: Option<&db::Run>) -> Member {
         idle: running && run.is_some_and(|r| r.agent_status == "idle"),
         working: running && run.is_some_and(|r| r.agent_status == "working"),
         since: run.and_then(|r| r.agent_status_since.clone()), quota_blocked: false, context_pct: context_pct(run),
+        menu_pos: None,
     }
 }
 
@@ -254,8 +264,15 @@ pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Resu
     let mut members: Vec<Member> = bots.iter()
         .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none())
         .map(|b| member_of(b, runs.get(&b.id))).collect();
+    // 側欄 menu 順序：config.toml 裡這個 project 的 bots 陣列索引（拖曳排序寫的就是它）。
+    let cfg = app.cfg.get().await;
+    let menu: std::collections::HashMap<String, usize> = cfg.projects.iter()
+        .find(|p| p.id.as_deref() == Some(project_id))
+        .map(|p| p.bots.iter().enumerate().filter_map(|(i, b)| b.id.clone().map(|id| (id, i))).collect())
+        .unwrap_or_default();
     let now = chrono::Utc::now();
     for member in &mut members {
+        member.menu_pos = menu.get(&member.id).copied();
         let Some(bot) = bots.iter().find(|b| b.id == member.id) else { continue };
         let identity = crate::quota::identity_for_run(bot, runs.get(&bot.id));
         let base = crate::quota::quota_base_for_host(app, &project.host, &bot.kind, identity.as_deref()).await;
@@ -283,7 +300,7 @@ pub async fn member_idle(app: &Arc<App>, bot_id: &str) -> bool {
 }
 
 impl Cluster {
-    /// 沒有閒置成員時該啟動哪一顆：manager_use=1、完全沒有進行中 run 的成員（id 最小的）。
+    /// 沒有閒置成員時該啟動哪一顆：manager_use=1、完全沒有進行中 run 的成員（照 menu 位置最上面的）。
     /// 群集裡已有「啟動中」的成員就回 `None`（一次只啟動一顆）。
     pub fn pick_to_start(&self) -> Option<&Member> {
         pick_to_start_member(&self.members)
@@ -292,7 +309,8 @@ impl Cluster {
 
 pub(crate) fn pick_to_start_member(members: &[Member]) -> Option<&Member> {
     if members.iter().any(|m| m.starting) { return None }
-    members.iter().filter(|m| m.manager_use && !m.active && !m.quota_blocked).min_by(|a, b| a.id.cmp(&b.id))
+    members.iter().filter(|m| m.manager_use && !m.active && !m.quota_blocked)
+        .min_by(|a, b| menu_key(a).cmp(&menu_key(b)).then_with(|| a.id.cmp(&b.id)))
 }
 
 /// 群集沒有閒置成員時，啟動一顆停著的成員（走既有的 `lifecycle::start_bot`，脫離呼叫端執行）；請求留在 pending，
@@ -374,7 +392,7 @@ mod tests {
     fn m(id: &str, model: &str, effort: &str, identity: &str) -> Member {
         Member { id: id.into(), kind: "claude".into(), model: Some(model.into()), effort: if effort.is_empty() { None } else { Some(effort.into()) },
             identity: if identity.is_empty() { None } else { Some(identity.into()) }, track: None, manager_use: true, running: true, active: true, starting: false,
-            idle: false, working: false, since: None, quota_blocked: false, context_pct: None }
+            idle: false, working: false, since: None, quota_blocked: false, context_pct: None, menu_pos: None }
     }
 
     #[test]
@@ -463,6 +481,68 @@ mod tests {
         let mut w = m("w", "claude-haiku-4-5", "", ""); w.working = true;
         let cs = group(&[w.clone(), { let mut x = w; x.id = "x".into(); x }]);
         assert!(cs[0].pick_best(None).is_none());
+    }
+
+    #[test]
+    fn pick_best_follows_menu_order_before_context_and_cache() {
+        let mk = |id: &str, pos: Option<usize>, ctx: f64, since: &str| {
+            let mut x = m(id, "claude-haiku-4-5", "", ""); x.idle = true; x.menu_pos = pos;
+            x.context_pct = Some(ctx); x.since = Some(since.into()); x
+        };
+        let top = mk("top", Some(0), 90.0, "2026-11-02T01:00:00Z");
+        let second = mk("second", Some(1), 10.0, "2026-11-02T05:00:00Z");
+        assert_eq!(pick_best_member(&[second.clone(), top.clone()], None).map(|x| x.id.as_str()), Some("top"), "menu 上面的贏，即使 context 高、cache 冷");
+        let mut second_tracked = second.clone(); second_tracked.track = Some("db".into());
+        assert_eq!(pick_best_member(&[top.clone(), second_tracked], Some("db")).map(|x| x.id.as_str()), Some("second"), "track 相符仍勝過 menu 位置");
+        let unplaced = mk("unplaced", None, 1.0, "2026-11-02T06:00:00Z");
+        assert_eq!(pick_best_member(&[unplaced.clone(), second.clone()], None).map(|x| x.id.as_str()), Some("second"), "menu_pos=None 排在有位置的後面");
+        let a = mk("a", None, 30.0, "2026-11-02T01:00:00Z");
+        let b = mk("b", None, 20.0, "2026-11-02T01:00:00Z");
+        assert_eq!(pick_best_member(&[a, b], None).map(|x| x.id.as_str()), Some("b"), "menu 相同（都 None）退回 context");
+    }
+
+    #[test]
+    fn pick_to_start_follows_menu_order_not_id() {
+        let stopped = |id: &str, pos: Option<usize>| {
+            let mut x = m(id, "claude-haiku-4-5", "", ""); x.running = false; x.active = false; x.menu_pos = pos; x
+        };
+        let a = stopped("a", Some(1));
+        let mut b = stopped("b", Some(0));
+        assert_eq!(pick_to_start_member(&[a.clone(), b.clone()]).map(|x| x.id.as_str()), Some("b"), "menu 上面的先啟動，不是 id 最小");
+        b.quota_blocked = true;
+        assert_eq!(pick_to_start_member(&[a.clone(), b.clone()]).map(|x| x.id.as_str()), Some("a"), "quota_blocked 照常跳過");
+        b.quota_blocked = false; b.menu_pos = None;
+        assert_eq!(pick_to_start_member(&[b.clone(), a.clone()]).map(|x| x.id.as_str()), Some("a"), "沒位置的排最後");
+    }
+
+    #[tokio::test]
+    async fn project_executors_reads_menu_order_from_config_and_auto_picks_top() {
+        let env = crate::testing::env().await;
+        crate::testing::seed_project_config(&env).await;
+        let manager = expert_member(&env, "mgr-menu", "manager", "idle").await;
+        let a = expert_member(&env, "menu-a", "executor", "idle").await;
+        let b = expert_member(&env, "menu-b", "executor", "idle").await;
+        // b 在 menu 上面（bots 陣列 [b, a]），但 b 的 context 高、cache 冷；a 的 context 低、cache 熱。
+        // 不看 menu 時 a 會贏，所以 b 勝出就是 menu 位置生效。
+        sqlx::query("UPDATE runs SET status_json=?, agent_status_since=? WHERE bot_id=?")
+            .bind(r#"{"context_window":{"used_percentage":70}}"#).bind("2026-11-02T01:00:00Z").bind(&b.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET status_json=?, agent_status_since=? WHERE bot_id=?")
+            .bind(r#"{"context_window":{"used_percentage":5}}"#).bind("2026-11-02T05:00:00Z").bind(&a.id).execute(&env.app.db).await.unwrap();
+        let (pid, b_id, a_id) = (env.project_id.clone(), b.id.clone(), a.id.clone());
+        env.app.cfg.update(move |cfg| {
+            let p = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).expect("seeded project");
+            p.bots = vec![
+                crate::config::BotCfg { id: Some(b_id.clone()), name: "menu-b".into(), kind: "claude".into(), ..Default::default() },
+                crate::config::BotCfg { id: Some(a_id.clone()), name: "menu-a".into(), kind: "claude".into(), ..Default::default() },
+            ];
+            Ok(())
+        }).await.unwrap();
+        let members = project_executors(&env.app, &env.project_id).await.unwrap();
+        assert_eq!(members.iter().find(|m| m.id == b.id).unwrap().menu_pos, Some(0));
+        assert_eq!(members.iter().find(|m| m.id == a.id).unwrap().menu_pos, Some(1));
+        assert!(members.iter().find(|m| m.id == manager.id).is_none(), "管理者不是執行者");
+        let out = crate::api::resolve_auto_target(&env.app, &manager.id, "cheap").await.unwrap().0;
+        assert_eq!(out["to_bot_id"], b.id, "menu 上面的 b 勝過 context 較低、cache 較熱的 a");
     }
 
     async fn expert_member(env: &crate::testing::Env, name: &str, role: &str, status: &str) -> db::Bot {
