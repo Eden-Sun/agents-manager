@@ -20,7 +20,7 @@ fn counts(kind: &str, sections: &[Section], version: &str) -> (usize, usize, usi
 // ───────────────────────── 切段與規則 ─────────────────────────
 
 /// 規則層只決定「哪些條目要被認真看」：kept 才是 issue 候選，真正開幾張由模型的 guard／adopt verdict 決定，
-/// 而且每版 ≤`issue::MAX_PER_VERSION`（4）張。所以這裡斷言的是候選上限。
+/// 這裡斷言的是候選提案的分類。
 #[test]
 fn agy_rules_are_conservative_and_the_issue_candidates_are_few() {
     let all = source_sections("agy", AGY_MD);

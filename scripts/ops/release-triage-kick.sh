@@ -229,7 +229,7 @@ fi
 prepare_claude_diff
 
 # 重試 gh 失敗、停在 judged 的版本（daemon 端刻意不做定時器，靠這裡每輪叫一次）。與有沒有 pending、額度夠不夠無關，
-# 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled／deferred）時安靜，不寫 log。
+# 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled）時安靜，不寫 log。
 # 舊的 bin/agm 沒有 release-triage 子命令（argparse exit 2）：只講一次，用 state 檔記「已經講過」，不每 30 分鐘洗 log。
 NO_PUBLISH_NOTE="$DIR/release-triage-publish-unsupported"
 for KIND in claude codex agy grok; do
@@ -263,11 +263,9 @@ ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
 SKIPPED="$DIR/release-issue-skipped"
 GH="${GH_BIN:-gh}"
-HANDOFF_LEFT=5 # 全輪共用；兩次掃描與所有 kind 的交接嘗試合計最多五張。
 handoff_issues() {
   local KIND
 for KIND in "$@"; do
-  [ "$HANDOFF_LEFT" -gt 0 ] || return 0
   if ! SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null); then
     note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
     continue
@@ -318,7 +316,6 @@ for r in rows:
       continue
     fi
     [ -n "$_num" ] || continue
-    [ "$HANDOFF_LEFT" -gt 0 ] || break
     if [ "$_url" = "-" ]; then
       note_fail "issue #${_num} 缺網址與 repo，保留待重試"
       continue
@@ -338,7 +335,6 @@ for r in rows:
       OPEN) ;;
       *) note_fail "issue #${_num} 狀態不明，保留待重試"; continue ;;
     esac
-    HANDOFF_LEFT=$((HANDOFF_LEFT - 1))
     _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
     { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
     if "$AGM" --compact assign --bot "$ISSUE_BOT" --review-by patrol --text-file "$_body" \

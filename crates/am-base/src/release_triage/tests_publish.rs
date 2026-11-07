@@ -474,18 +474,18 @@ async fn gh_failure_leaves_the_row_judged_and_the_retry_only_reruns_publish() {
 }
 
 #[tokio::test]
-async fn caps_guard_first_four_per_version_without_a_daily_cap() {
-    // 每版 4：五張 adopt＋一張 guard（排最後）→ guard 一定開出來，最後一張 adopt 被擋。
+async fn all_proposals_publish_guard_first_without_quantity_caps() {
+    // 五張 adopt＋一張 guard（排最後）：guard 優先，六張全部發布。
     let p = pool().await;
     let gh = FakeGh::new("cap");
     seed(&p, &[("adopt", &[0], None), ("adopt", &[1], None), ("adopt", &[2], None), ("adopt", &[3], None), ("adopt", &[4], None), ("guard", &[5], None)]).await;
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
     let Outcome::Published { created, skipped, .. } = o else { panic!("{o:?}") };
-    assert_eq!((created, skipped.len()), (4, 2));
-    assert_eq!(gh.count("issue create"), 4);
+    assert_eq!((created, skipped.len()), (6, 0));
+    assert_eq!(gh.count("issue create"), 6);
     let r = row(&p).await;
     assert!(r.issues.iter().any(|i| i.entry_ids == [judged(&entries277())[5].id.clone()]), "guard 優先");
-    assert!(r.publish_error.unwrap().contains("每版上限"));
+    assert!(r.publish_error.is_none());
     assert_eq!(r.status, Status::Published);
 
     // 別的版本已開 8 張，舊的延後錯誤仍會在下一輪自動清除。
@@ -696,7 +696,7 @@ async fn a_lost_create_beyond_the_label_list_limit_is_found_after_its_marker_was
 }
 
 #[tokio::test]
-async fn a_create_recovered_after_ledger_failure_counts_toward_the_version_cap() {
+async fn a_recovered_create_does_not_block_further_proposals_in_the_version() {
     let p = pool().await;
     let gh = FakeGh::new("create-ledger-crash-version");
     let es = seed(&p, &[("guard", &[0], None), ("guard", &[1], None)]).await;
@@ -716,7 +716,6 @@ async fn a_create_recovered_after_ledger_failure_counts_toward_the_version_cap()
         .await
         .unwrap();
     let recovered_marker = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
-    let next_marker = issue::marker("claude", "2.1.277", &[judged(&es)[1].id.clone()]);
     sqlx::query(
         "CREATE TRIGGER fail_publish_ledger BEFORE UPDATE OF issue_numbers_json ON release_triage
          WHEN OLD.version = '2.1.277'
@@ -735,10 +734,10 @@ async fn a_create_recovered_after_ledger_failure_counts_toward_the_version_cap()
     sqlx::query("DROP TRIGGER fail_publish_ledger").execute(&p).await.unwrap();
     let retry = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
     let Outcome::Published { skipped, .. } = retry else { panic!("{retry:?}") };
-    assert_eq!(skipped, [next_marker], "the fifth issue must be blocked by the recovered fourth issue");
-    assert_eq!(gh.count("issue create"), 1, "retry recovers #4 and does not create #5");
+    assert!(skipped.is_empty());
+    assert_eq!(gh.count("issue create"), 2, "retry recovers #4 and creates #5");
     let r = row(&p).await;
-    assert_eq!(r.issues.len(), 4);
+    assert_eq!(r.issues.len(), 5);
     let recovered = r.issues.iter().find(|i| i.marker == recovered_marker).unwrap();
     assert_eq!((recovered.number, recovered.comment), (101, false), "the recovered create keeps created provenance");
 }
@@ -939,7 +938,7 @@ async fn a_dry_run_that_cannot_reach_github_says_so_instead_of_guessing() {
     assert_eq!(blocked["versions"][0]["proposals"][0]["writes"], false);
 }
 
-/// #204 review 抓到的分岔：乾跑與真跑各寫一遍上限／already，數字會對不上。
+/// #204 review 抓到的分岔：乾跑與真跑各寫一遍去重／already，數字會對不上。
 /// 同一版兩個提案的 `entry_ids` 有交集時（`already` 用 `.any(contains)`，交集就算，而 `proposals_of`
 /// 對重疊沒有任何保證），真跑第一個 create 之後就會跳過第二個——乾跑若讀的是不會長大的 `row.issues`，
 /// 就會說 2 張、實際只開 1 張。這條先乾跑再真跑，斷言兩邊逐項相等。
@@ -989,19 +988,19 @@ async fn a_dry_run_and_the_real_publish_agree_even_when_two_proposals_share_an_e
     assert_eq!(gh.count("issue create"), 1, "真的只開一張");
 }
 
-/// 上限也要對得上：5 個提案、每版上限 4 張——乾跑與真跑要同樣說 4 開 1 擋。
+/// 乾跑與真跑都發布超過四個提案。
 #[tokio::test]
-async fn a_dry_run_and_the_real_publish_agree_on_the_per_version_cap() {
+async fn a_dry_run_and_the_real_publish_have_no_per_version_cap() {
     let p = pool().await;
     let gh = FakeGh::new("equivcap");
     seed(&p, &[("guard", &[0], None), ("guard", &[1], None), ("guard", &[2], None), ("guard", &[3], None), ("guard", &[4], None)]).await;
     let cfg = gh.cfg(true);
     let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
-    assert_eq!(actions(&dry), ["create", "create", "create", "create", "skipped_version_limit"]);
+    assert_eq!(actions(&dry), ["create", "create", "create", "create", "create"]);
     let real = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
     let Outcome::Published { created, skipped, .. } = real else { panic!("{real:?}") };
     assert_eq!(dry["would_create"], json!(created), "乾跑說幾張就是幾張");
-    assert_eq!((created, skipped.len()), (4, 1));
+    assert_eq!((created, skipped.len()), (5, 0));
 }
 
 /// 跨版本沒有每日上限：乾跑與真跑都能一次處理超過 8 張。
@@ -1115,19 +1114,19 @@ async fn duplicate_of_pointing_at_an_unknown_issue_never_comments_on_it() {
     assert_eq!((gh.count("issue comment"), gh.count("issue create")), (0, 1));
 }
 
-/// 留言不占「開 issue」的名額，但也不能無上限：每版最多 4 則（跟開 issue 同一個數字）。
+/// 留言沒有每版數量上限。
 #[tokio::test]
-async fn comments_are_capped_per_version_like_creations() {
+async fn all_comments_publish_without_a_per_version_cap() {
     let p = pool().await;
     let gh = FakeGh::new("dup-cap");
     gh.known_issue(102);
     seed(&p, &[("adopt", &[0], Some(102)), ("adopt", &[1], Some(102)), ("adopt", &[2], Some(102)), ("adopt", &[3], Some(102)), ("adopt", &[4], Some(102)), ("adopt", &[5], Some(102))]).await;
     let dry = issue::preflight(&p, &gh.cfg(false), None, None).await.unwrap();
-    assert_eq!(dry["would_comment"], 4, "{dry}");
-    assert_eq!(dry["blocked_by_caps"], 2);
+    assert_eq!(dry["would_comment"], 6, "{dry}");
+    assert_eq!(dry["blocked_by_caps"], 0);
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
     let Outcome::Published { commented, skipped, .. } = o else { panic!("{o:?}") };
-    assert_eq!((commented, skipped.len()), (4, 2));
-    assert_eq!(gh.count("issue comment"), 4);
-    assert!(row(&p).await.publish_error.unwrap().contains("上限"));
+    assert_eq!((commented, skipped.len()), (6, 0));
+    assert_eq!(gh.count("issue comment"), 6);
+    assert!(row(&p).await.publish_error.is_none());
 }

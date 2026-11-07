@@ -925,7 +925,7 @@ bash "$SCRIPT"
 equals "已交接 issue 重跑不重派實作" "$(assigns)" "1"
 teardown
 
-# 前後兩次 handoff 與不同 kind 共用整輪五張額度，未交接者下輪續送。
+# 前後兩次 handoff 與不同 kind 的所有待交接票都在同輪送出。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -941,16 +941,16 @@ PYFIX
 echo CLOSED > "$AGM_DIR/gh-state-1000"
 export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.278","outcome":"judged","status":"published","quiet":false}]}'
 bash "$SCRIPT"
-equals "關閉票不占交接額度" "$(cat "$AGM_DIR/release-issue-skipped")" "1000"
-equals "所有 kind 與同輪第二次掃描合計最多五張" "$(assigns)" "5"
-check_no "額度用盡的新 API issue 留待下輪" "request-id release-issue-1006" "$AGM_DIR/calls.log"
+equals "關閉票持久略過" "$(cat "$AGM_DIR/release-issue-skipped")" "1000"
+equals "所有 kind 與同輪第二次掃描交接全部七張" "$(assigns)" "7"
+check "同輪交接新 API issue" "request-id release-issue-1006" "$AGM_DIR/calls.log"
 bash "$SCRIPT"
-equals "下一輪補送其餘兩張" "$(assigns)" "7"
+equals "下一輪不重送已交接的七張" "$(assigns)" "7"
 equals "跨前後掃描與下輪仍不重查關閉票" "$(grep -c 'issue view https://x/1000 ' "$AGM_DIR/gh-calls.log")" "1"
-check "下輪送 1006" "request-id release-issue-1006" "$AGM_DIR/calls.log"
+check "已送 1006" "request-id release-issue-1006" "$AGM_DIR/calls.log"
 teardown
 
-# 失敗的交接嘗試也占全輪額度；避免兩次掃描重試形成派工風暴。
+# 交辦失敗不截斷待交接清單，保留所有失敗項目供後續重試。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -960,7 +960,7 @@ json.dump({"rows":[{"kind":"claude","version":"2.1.278","issues":[{"number":n,"u
 PYFIX
 export STUB_ASSIGN_FAIL=1
 bash "$SCRIPT"
-equals "交辦失敗時也最多嘗試五張" "$(assigns)" "5"
+equals "交辦失敗仍嘗試全部七張" "$(assigns)" "7"
 equals "失敗的票不標記已交" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" ""
 teardown
 

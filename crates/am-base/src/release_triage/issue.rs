@@ -25,10 +25,6 @@ use super::verdict::StoredProposal;
 use super::Entry;
 use crate::config::ReleaseTriageCfg;
 
-/// 每一版最多開幾張（超過的留在帳本，`guard` 優先）。
-pub const MAX_PER_VERSION: usize = 4;
-/// 每一版最多留幾則言（`duplicate_of`）。留言不占新開 issue 的名額，但也不能無上限——號碼是模型挑的。
-pub const MAX_COMMENTS_PER_VERSION: usize = 4;
 const GH_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// 同一個行程裡同時只跑一個 publish：兩個請求同時進來，查標記與開 issue 之間不能交錯。
@@ -275,48 +271,14 @@ fn already(p: &StoredProposal, issues: &[IssueRef]) -> bool {
     issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id)))
 }
 
-/// 每版上限的即時計數。`publish_version` 與 [`preflight`] 共用，排序與上限的判斷只有一份。
-struct Caps {
-    /// 這一版已經**新開**幾張（`comment` 的不算，同 `publish_version` 原本的 `in_row`）。
-    in_row: usize,
-    /// 這一版已經貼了幾則留言（`duplicate_of`；`IssueRef` 的 `comment` 且沒有網址的那種）。
-    comments: usize,
-}
-
-/// 帳本裡這版已貼的留言數（有 `comment` 旗標、沒網址＝真的貼過的留言；「遠端本來就有」的 existing 有網址）。
-fn comments_in(issues: &[IssueRef]) -> usize {
-    issues.iter().filter(|i| i.comment && i.url.is_empty()).count()
-}
-
-impl Caps {
-    /// 遠端查完之後該做什麼。`already` 要在呼叫這裡**之前**先擋掉（那一步不必問 gh）。
-    /// `dup_known`：提案的 `duplicate_of` 是不是我們自己開過的 release-triage issue（遠端清單或帳本裡有）。
-    /// 模型挑的號碼對不上就當作沒有 `duplicate_of`——不能拿它在別人的 issue 底下留言。
-    fn plan(&self, p: &StoredProposal, found: Option<&(i64, String)>, dup_known: bool) -> PlanAction {
-        if found.is_some() {
-            return PlanAction::Existing;
-        }
-        // `duplicate_of` 只留言，不佔每版開 issue 的名額（留言自己有每版上限）。
-        if p.duplicate_of.is_some() && dup_known {
-            return if self.comments >= MAX_COMMENTS_PER_VERSION { PlanAction::SkippedVersionLimit } else { PlanAction::Comment };
-        }
-        if self.in_row >= MAX_PER_VERSION {
-            return PlanAction::SkippedVersionLimit;
-        }
+/// Publish and dry-run share remote deduplication and comment target validation.
+fn plan_action(p: &StoredProposal, found: Option<&(i64, String)>, dup_known: bool) -> PlanAction {
+    if found.is_some() {
+        PlanAction::Existing
+    } else if p.duplicate_of.is_some() && dup_known {
+        PlanAction::Comment
+    } else {
         PlanAction::Create
-    }
-
-    fn note(&mut self, action: PlanAction) {
-        match action {
-            PlanAction::Create => self.note_created(),
-            PlanAction::Comment => self.comments += 1,
-            _ => {}
-        }
-    }
-
-    /// Recovered creates still consume this version's slots.
-    fn note_created(&mut self) {
-        self.in_row += 1;
     }
 }
 
@@ -552,15 +514,10 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await;
     }
     // Reconciliation may have recovered an issue from this version as well as older versions.
-    // Refresh before calculating caps and checking which proposals are already handled.
+    // Refresh before checking which proposals are already handled.
     issues = ledger::get(pool, kind, version).await?.map(|r| r.issues).unwrap_or(issues);
 
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
-    let mut skipped: Vec<String> = Vec::new();
-    let mut caps = Caps {
-        in_row: issues.iter().filter(|i| !i.comment).count(),
-        comments: comments_in(&issues),
-    };
     let known_numbers = ledger_issue_numbers(pool).await?;
     for p in &proposals {
         if already(p, &issues) {
@@ -574,13 +531,9 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         };
         let intent = ledger::publish_intent(pool, kind, version, &mk).await?;
         let recovered_create = found.is_some() && intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
-        // 排序、上限、`duplicate_of` 不佔名額的判斷全在 `Caps::plan`，乾跑叫的是同一份。
+        // 乾跑與真跑共用遠端去重及留言目標判斷。
         let dup_known = p.duplicate_of.is_some_and(|d| remote.has_number(d) || known_numbers.contains(&d));
-        let action = caps.plan(p, found.as_ref(), dup_known);
-        caps.note(action);
-        if recovered_create {
-            caps.note_created();
-        }
+        let action = plan_action(p, found.as_ref(), dup_known);
         match action {
             PlanAction::Existing => {
                 let (number, url) = found.expect("Existing 就是查到了");
@@ -606,10 +559,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
                 issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number: dup, url: String::new(), created_at: ledger::now_ts(), comment: true });
                 ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
                 commented += 1;
-                continue;
-            }
-            PlanAction::SkippedVersionLimit => {
-                skipped.push(mk);
                 continue;
             }
             // `already` 在迴圈開頭擋掉了；`RemoteUnknown` 只有乾跑會用（這裡查不到就已經 record_err 回去）。
@@ -644,9 +593,8 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
         created += 1;
     }
-    let note = (!skipped.is_empty()).then(|| format!("每版上限（開 {MAX_PER_VERSION} 張／留言 {MAX_COMMENTS_PER_VERSION} 則），未處理：{}", skipped.join("、")));
-    ledger::save_publish(pool, kind, version, &issues, Status::Published, note.as_deref()).await?;
-    Ok(Outcome::Published { created, commented, existing, skipped })
+    ledger::save_publish(pool, kind, version, &issues, Status::Published, None).await?;
+    Ok(Outcome::Published { created, commented, existing, skipped: vec![] })
 }
 
 // ───────────────────────── 乾跑（preflight） ─────────────────────────
@@ -662,8 +610,6 @@ pub enum PlanAction {
     Existing,
     /// 帳本裡已經有這個 entry 的 issue，連 gh 都不會問。
     AlreadyLogged,
-    /// 被每版 [`MAX_PER_VERSION`] 張擋下，之後也不會再開。
-    SkippedVersionLimit,
     /// gh 檢查沒過，去重問不到遠端，所以只知道帳本裡還沒有。
     RemoteUnknown,
 }
@@ -675,7 +621,6 @@ impl PlanAction {
             PlanAction::Comment => "comment",
             PlanAction::Existing => "existing",
             PlanAction::AlreadyLogged => "already_logged",
-            PlanAction::SkippedVersionLimit => "skipped_version_limit",
             PlanAction::RemoteUnknown => "remote_unknown",
         }
     }
@@ -690,7 +635,6 @@ impl PlanAction {
 /// - `publish` 是不是 true 都跑（唯一在 `publish = false` 時碰 gh 的路徑，由人明確觸發）。
 /// - gh 檢查（auth／repo／標籤）過了才問遠端去重；沒過就照樣把 title／body 渲染出來，
 ///   讓人先看 verdict 品質，去重那欄記成 `remote_unknown`。
-/// - 每版 4 張的上限用跟 [`publish_version`] 同一組常數與同一個順序模擬。
 pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
     let gh = gh_for(cfg);
     let mut checks = readonly_checks(&gh).await;
@@ -702,19 +646,15 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
     // 才抓：全部提案都已經在帳本裡時一次 gh 都不叫（同 publish_version 的提早返回）。
     let mut remote: Option<Remote> = None;
     let mut remote_err: Option<String> = None;
-    let mut caps = Caps { in_row: 0, comments: 0 };
     let known_numbers = ledger_issue_numbers(pool).await?;
     let mut versions = Vec::new();
-    let (mut n_create, mut n_comment, mut n_existing, mut n_blocked) = (0usize, 0usize, 0usize, 0usize);
+    let (mut n_create, mut n_comment, mut n_existing) = (0usize, 0usize, 0usize);
     for row in ledger::list(pool, kind, version).await?.into_iter().filter(|r| r.status == Status::Judged) {
         let mut proposals = proposals_of(&row);
         proposals.sort_by_key(|p| p.triage != "guard");
         // **會長大的清單**（同 publish_version）：existing／comment／create 都要 push 進去，
         // 否則同一版兩個提案的 entry_ids 有交集時，真跑跳過第二個、乾跑兩個都算 create（#204 review）。
         let mut issues = row.issues.clone();
-        // 每版重置的只有「這一版開了幾張」。
-        caps.in_row = issues.iter().filter(|i| !i.comment).count();
-        caps.comments = comments_in(&issues);
         let mut plans = Vec::new();
         for p in &proposals {
             let mk = marker(&row.kind, &row.version, &p.entry_ids);
@@ -734,7 +674,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     Err(e) => remote_err = Some(e),
                 }
             }
-            let mut recovered_create = false;
             let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
             } else if !can_ask {
@@ -750,12 +689,8 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                         PlanAction::RemoteUnknown
                     }
                     Ok(found) => {
-                        if found.is_some() {
-                            let intent = ledger::publish_intent(pool, &row.kind, &row.version, &mk).await?;
-                            recovered_create = intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
-                        }
                         let dup_known = p.duplicate_of.is_some_and(|d| remote.has_number(d) || known_numbers.contains(&d));
-                        let a = caps.plan(p, found.as_ref(), dup_known);
+                        let a = plan_action(p, found.as_ref(), dup_known);
                         match (&a, &found) {
                             (PlanAction::Existing, Some((number, url))) => {
                                 plan["number"] = serde_json::json!(number);
@@ -768,10 +703,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     }
                 }
             };
-            caps.note(action);
-            if recovered_create {
-                caps.note_created();
-            }
             // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
             if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
                 issues.push(IssueRef {
@@ -780,17 +711,15 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     number: plan["number"].as_i64().unwrap_or(0),
                     url: String::new(),
                     created_at: ledger::now_ts(),
-                    comment: action != PlanAction::Create && !recovered_create,
+                    comment: action != PlanAction::Create,
                 });
             }
             match action {
                 PlanAction::Create => n_create += 1,
                 PlanAction::Comment => n_comment += 1,
                 PlanAction::Existing => n_existing += 1,
-                PlanAction::SkippedVersionLimit => n_blocked += 1,
                 _ => {}
             }
-            // `duplicate_of` 只留言，不佔每版的名額（同 publish_version）。
             plan["action"] = serde_json::json!(action.as_str());
             plan["writes"] = serde_json::json!(action.writes());
             // 真跑對 `comment` 貼的是留言（不是整張 issue、沒有標題與標籤）：預覽的就是那一段字。
@@ -815,7 +744,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
         "would_create": n_create,
         "would_comment": n_comment,
         "existing": n_existing,
-        "blocked_by_caps": n_blocked,
+        "blocked_by_caps": 0,
         "versions": versions,
     }))
 }
