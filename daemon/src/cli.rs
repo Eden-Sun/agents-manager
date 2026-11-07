@@ -73,12 +73,15 @@ pub enum Cmd {
     /// 契約 `{kind,from,to,pending:[{version,kept,unmatched,dropped_count}]}`）。抓不到 feed 時 exit 1，
     /// 這一輪不做（不當成沒有新版）。第一次跑只記磁碟版本當基準、不回 pending。
     ReleaseTriageCheck {
-        /// claude | codex
+        /// claude | codex | agy | grok
         #[arg(long)]
         kind: String,
         /// 補歷史：從這一版（不含）起算，忽略帳本裡的最大版本。
         #[arg(long)]
         since: Option<String>,
+        /// 已偵測目標版；未指定時從上游 npm／manifest／Releases／stable 查詢。
+        #[arg(long)]
+        to: Option<String>,
         /// 輸出 JSON（目前唯一格式，旗標留給 kick 腳本明示）。
         #[arg(long)]
         json: bool,
@@ -159,5 +162,15 @@ mod tests {
             ]),
             RemoteCargoEngine::Blaze
         );
+    }
+}
+
+#[cfg(test)]
+mod release_triage_target_tests {
+    use super::*;
+    #[test]
+    fn release_triage_check_accepts_an_independently_detected_target() {
+        let cli = Cli::try_parse_from(["agents-managerd", "release-triage-check", "--kind", "agy", "--to", "1.5.4", "--json"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::ReleaseTriageCheck { to: Some(to), .. } if to == "1.5.4"));
     }
 }

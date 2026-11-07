@@ -237,11 +237,15 @@ fn pending_out(version: &str, entries: &[Entry]) -> PendingVersion {
 ///   從此永遠不會再出現在 `pending` 裡——codex 0.155.0／0.155.1 卡了三天沒人分析就是這個洞：
 ///   `release-triage-check` 第一次成功抓到並插入，那一輪派工沒能完成，之後每一輪都因為這個邊界值把
 ///   它們濾掉，鎖與額度都正常、log 也不再報錯，帳本卻永遠停在 `pending`）。
-pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> Result<CheckReport> {
+/// `target` comes from independent upstream discovery, not the changelog maximum.
+pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>, target: &str) -> Result<CheckReport> {
     if !rules::supported(kind) {
         bail!("`{kind}` 沒有分診規則（目前只有 claude、codex、agy、grok）");
     }
-    let to = latest_version(all).ok_or_else(|| anyhow!("{kind} 的 feed 裡沒有任何版本段落"))?;
+    let to = changelog::version_string(target).ok_or_else(|| anyhow!("目標版本 `{target}` 看不出版本"))?;
+    if changelog::pick_sections(all, None, &to).is_empty() {
+        bail!("{kind} 的來源缺少目標版本 {to}，不以其他版本替代");
+    }
     let since_v = match since {
         Some(s) => Some(changelog::version_string(s).ok_or_else(|| anyhow!("--since `{s}` 看不出版本"))?),
         None => None,
@@ -309,9 +313,9 @@ async fn local_installed_version(kind: &str) -> Result<String> {
 
 /// 抓上游 feed（沒有 daemon 的記憶體快取：CLI 是獨立行程，30 分鐘才跑一次）。抓不到就回錯——
 /// 這一輪不做，不能當成「沒有新版」。
-async fn fetch_feed(kind: &str) -> Result<String> {
+async fn fetch_feed(kind: &str, src: &changelog::FeedSource) -> Result<String> {
     if matches!(kind, "agy" | "grok") {
-        return changelog::fetch_pinned_feed(kind, &changelog::FeedSource::official()).await;
+        return changelog::fetch_pinned_feed(kind, src).await;
     }
     let (url, is_codex) = changelog::feed_url(kind).ok_or_else(|| anyhow!("{kind} 沒有 changelog 來源"))?;
     let client = reqwest::Client::builder()
@@ -354,6 +358,7 @@ async fn open_ledger_db(path: &Path) -> Result<SqlitePool> {
 pub struct CheckArgs {
     pub kind: String,
     pub since: Option<String>,
+    pub target: Option<String>,
     pub installed: Option<String>,
     pub db: Option<std::path::PathBuf>,
     /// 測試用：不抓網路，直接讀這個檔案當 feed（claude＝CHANGELOG.md、codex＝`codex_releases_to_md` 的輸出、agy＝CHANGELOG.md、grok＝`.external.md`）。
@@ -362,11 +367,39 @@ pub struct CheckArgs {
 
 /// CLI 入口：成功印 JSON、回 0；失敗（抓不到 feed、DB 開不了…）回錯，呼叫端 exit 非零。
 pub async fn run_check(a: CheckArgs) -> Result<CheckReport> {
-    let md = match &a.feed_file {
-        Some(p) => std::fs::read_to_string(p).map_err(|e| anyhow!("讀不了 {}：{e}", p.display()))?,
-        None => fetch_feed(&a.kind).await?,
+    run_check_with_source(a, &changelog::FeedSource::official()).await
+}
+
+/// Same scheduler path with pinned loopback sources for deterministic integration tests.
+pub async fn run_check_with_source(a: CheckArgs, src: &changelog::FeedSource) -> Result<CheckReport> {
+    if a.target.is_none() && a.feed_file.is_none() {
+        bail!("線上分診必須先提供上游已偵測的目標版本");
+    }
+    let primary = match &a.feed_file {
+        Some(p) => std::fs::read_to_string(p).map_err(|e| anyhow!("讀不了 {}：{e}", p.display())),
+        None => fetch_feed(&a.kind, src).await,
     };
-    let all = source_sections(&a.kind, &md);
+    let (all, target) = match &a.target {
+        Some(target) => {
+            let target = changelog::version_string(target).ok_or_else(|| anyhow!("目標版本 `{target}` 看不出版本"))?;
+            let all = if a.feed_file.is_some() {
+                // --feed-file is strictly offline, even when --to is explicit.
+                let all = source_sections(&a.kind, &primary?);
+                if changelog::pick_sections(&all, None, &target).is_empty() {
+                    bail!("離線 feed 缺少目標版本 {target}");
+                }
+                all
+            } else {
+                changelog::target_sections(&a.kind, primary, src, &target).await?
+            };
+            (all, target)
+        }
+        None => {
+            let all = source_sections(&a.kind, &primary?);
+            let target = latest_version(&all).ok_or_else(|| anyhow!("{} 的 feed 裡沒有任何版本段落", a.kind))?;
+            (all, target)
+        }
+    };
     let db = match &a.db {
         Some(p) => p.clone(),
         None => default_db_path()?,
@@ -378,7 +411,7 @@ pub async fn run_check(a: CheckArgs) -> Result<CheckReport> {
         (None, None, None) => Some(local_installed_version(&a.kind).await?),
         _ => None,
     };
-    let report = check(&pool, &a.kind, &all, installed.as_deref(), a.since.as_deref()).await;
+    let report = check(&pool, &a.kind, &all, installed.as_deref(), a.since.as_deref(), &target).await;
     pool.close().await;
     report
 }
