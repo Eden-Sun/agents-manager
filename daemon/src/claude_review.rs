@@ -1,4 +1,4 @@
-//! 「請 AGM 解析這一版 changelog」——使用者在更新對話框裡按得到的那顆按鈕（使用者 2026-09-19）。
+//! 「分析影響這一版 changelog」——使用者在更新對話框裡按得到的那顆按鈕（使用者 2026-09-19）。
 //! claude 與 codex 走同一套（issue #561，2026-09-25 使用者：「要跟 claude 一樣分析」）：`kind` 只決定讀哪個
 //! changelog、哪份任務檔（`<kind>-release-task.md`）與識別碼前綴（`agm-<kind>-release-…`），派給誰、冪等、
 //! 結論回哪裡都是同一份程式。
@@ -18,7 +18,7 @@
 //!   （`post_assignment` 自己就是冪等的），回應會說這是既有的那筆；
 //! * 唯讀：這裡只建交辦，不 build、不重啟、不碰 claude 的檔案；
 //! * 設定裡開了 `changelog_review` 這個 Claude API 用途時（#1919），先走 [`crate::claude_review_api`] 的快速解析（不開 session、
-//!   標「未實測」），失敗才退回上面的派 bot；使用者要深入驗證就帶 `deep: true`，一律派 bot。
+//!   標「未實測」），API 模式的失敗落 failed、不退給 bot；只有用途停用或缺 key 才走原本 AGM 分析。
 
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ pub struct ReviewIn {
     /// 新版（省略＝磁碟上那一版）。
     #[serde(default)]
     pub to: Option<String>,
-    /// `true`＝不要 API 快速解析，照舊派 bot 做深入驗證（#1919；沒開 API 時本來就是派 bot）。
+    /// 舊版深入驗證參數：僅 API 模式關閉時選 bot 路徑；API 模式一律忽略。
     #[serde(default)]
     pub deep: Option<bool>,
 }
@@ -72,7 +72,7 @@ pub fn task_text(task_md: &str, to: &str, from: Option<&str>, changelog: &str, s
         }
         out.push_str(&format!("NEW={dir}/{to}\n"));
     }
-    out.push_str("觸發：使用者在更新提示上按了「請 AGM 解析」（不是排程）。唯讀：不要 build、不要重啟、不要改設定。\n\n");
+    out.push_str("觸發：使用者在更新提示上按了「分析影響」（不是排程）。唯讀：不要 build、不要重啟、不要改設定。\n\n");
     let body = truncate(changelog.trim(), MAX_BODY_CHARS);
     if body.is_empty() {
         // 抓不到就照樣派：協調者還能 diff 兩顆 binary（task 裡本來就寫了怎麼做）。
@@ -298,23 +298,21 @@ pub struct ReviewState {
     /// API 路徑用的模型。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 沿 `followup_assignment_id` 一路走到鏈尾（沒有 followup 的那一筆）。重試（換手、撞限接回）
 /// 都是同一個 `client_request_id` 建一筆新的、把舊的標成 `superseded` 並用這個欄位指過去
 /// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
-async fn latest_in_chain(
-    app: &impl crate::capabilities::Db,
-    a: app_ports_p13::Assignment,
-) -> Result<app_ports_p13::Assignment, LcError> {
+async fn latest_in_chain(app: &impl crate::capabilities::Db, a: app_ports_p13::Assignment) -> Result<app_ports_p13::Assignment, LcError> {
     let mut cur = a;
     // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
     for _ in 0..50 {
-        let Some(next_id) = cur.followup_assignment_id.clone() else { break };
-        match app_ports_p13::assignment(app.db(), &next_id)
-            .await
-            .map_err(|e| LcError::Upstream(e.to_string()))?
-        {
+        let Some(next_id) = cur.followup_assignment_id.clone() else {
+            break;
+        };
+        match app_ports_p13::assignment(app.db(), &next_id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
             Some(next) => cur = next,
             None => break,
         }
@@ -364,8 +362,16 @@ async fn state_from_assignment(app: &impl crate::capabilities::Db, a: &app_ports
 /// 才退回收件匣那條路：派給 AGM 角色的工作走交接佇列，沒有 assignment，結論在那個回合的訊息裡。
 pub async fn review_state(app: &(impl crate::capabilities::Db + crate::capabilities::DataDir), kind: &str, to: &str) -> Result<ReviewState, LcError> {
     let bot = bot_review_state(app, kind, to).await?;
-    let api = crate::claude_review_api::load(&app.data_dir(), kind, to).and_then(|rec| {
-        let state = crate::claude_review_api::live_state(&rec, chrono::Utc::now())?;
+    Ok(match api_review_state(&app.data_dir(), kind, to) {
+        Some(api) if api.state == "failed" && bot.state != "none" => bot,
+        Some(api) => api,
+        None => bot,
+    })
+}
+
+fn api_review_state(data_dir: &std::path::Path, kind: &str, to: &str) -> Option<ReviewState> {
+    crate::claude_review_api::load(data_dir, kind, to).and_then(|rec| {
+        let state = crate::claude_review_api::live_state(&rec, chrono::Utc::now()).unwrap_or("failed");
         Some(ReviewState {
             state,
             asked_at: Some(rec.asked_at),
@@ -373,16 +379,9 @@ pub async fn review_state(app: &(impl crate::capabilities::Db + crate::capabilit
             result: rec.result,
             source: Some("api"),
             model: rec.model,
+            error: rec.error_kind.or_else(|| (state == "failed").then(|| "interrupted".into())),
             ..Default::default()
         })
-    });
-    // 派 bot 做完的（深入驗證）蓋過 API 的快速解析；其次是 API 的結論；最後才是 bot 還在跑／都沒有。
-    Ok(match api {
-        _ if bot.state == "done" => bot,
-        Some(api) if api.state == "done" => api,
-        _ if bot.state != "none" => bot,
-        Some(api) => api,
-        None => bot,
     })
 }
 
@@ -474,7 +473,12 @@ pub async fn get_review(State(app): State<Arc<App>>, axum::extract::Query(q): ax
     if to.trim().is_empty() {
         return Ok(Json(json!({"kind": kind, "version": null, "review": ReviewState { state: "none", ..Default::default() }})));
     }
-    Ok(Json(json!({"kind": kind, "version": to, "review": review_state(&app, kind, &to).await?})))
+    let state = if crate::claude_review_api::ready(&app).await {
+        api_review_state(&app.data_dir, kind, &to).unwrap_or(ReviewState { state: "none", ..Default::default() })
+    } else {
+        review_state(&app, kind, &to).await?
+    };
+    Ok(Json(json!({"kind": kind, "version": to, "review": state})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,10 +504,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     };
     let reply = crate::changelog::lookup(&app, &host, kind, b.from.as_deref(), to_hint.as_deref()).await;
     let Some(to) = reply.installed_version.clone().or(to_hint) else {
-        return Err(LcError::conflict(
-            "this host does not report a version yet",
-            json!({"reason": "no_version", "kind": kind, "host": host, "error": reply.error}),
-        ));
+        return Err(LcError::conflict("this host does not report a version yet", json!({"reason": "no_version", "kind": kind, "host": host, "error": reply.error})));
     };
     let found = Found { from_version: reply.from_version.clone(), body: changelog_body(&reply.sections), source_url: reply.source_url.clone(), sections: reply.sections.len() };
     // 這一版已經有能用的交辦（自己派的、kick 派的，或 assignment 的 supersede 鏈上最新那一筆還活著／已完成），
@@ -511,10 +512,17 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     // （issue #394：原本各查各的，assignment 完成了視窗卻還在說「還沒派」）。全部都是 superseded／failed
     // （鏈走到死路）才重派——`post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆
     // 按鈕的正文本來就差一句觸發來源，不短路的話會變成錯誤而不是「已經派過」（協調者 2026-09-19）。
-    // `deep`（要深入驗證）只看 bot 那條路：API 的快速結論不該擋住使用者要的實測。
-    let deep = b.deep.unwrap_or(false);
-    let state = if deep { bot_review_state(&app, kind, &to).await? } else { review_state(&app, kind, &to).await? };
-    if state.state != "none" {
+    // API 模式一經選定就不派 bot，deep 舊參數也遵守這個界線。
+    let api_mode = crate::claude_review_api::applies_to(kind) && crate::claude_review_api::ready(&app).await;
+
+    let state = if api_mode {
+        api_review_state(&app.data_dir, kind, &to).unwrap_or(ReviewState { state: "none", ..Default::default() })
+    } else if b.deep.unwrap_or(false) {
+        bot_review_state(&app, kind, &to).await?
+    } else {
+        review_state(&app, kind, &to).await?
+    };
+    if state.state != "none" && state.state != "failed" {
         return Ok(Json(json!({
             "kind": kind,
             "version": to,
@@ -524,15 +532,13 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
             "sections": found.sections,
         })));
     }
-    if !deep && crate::claude_review_api::applies_to(kind) && crate::claude_review_api::ready(&app).await {
-        if let Some(v) = api_review(&app, kind, &to, &found).await {
-            return Ok(Json(v));
-        }
+    if api_mode {
+        return api_review(&app, kind, &to, &found).await.map(Json);
     }
     Ok(Json(dispatch_to_bot(&app, kind, &to, &found).await?))
 }
 
-/// 這一版要解析的材料（changelog 查詢結果裡用得到的部分；API 失敗退回派 bot 時還要再用一次，所以收成自己擁有的值）。
+/// 這一版要解析的 changelog 與來源。
 #[derive(Clone)]
 struct Found {
     from_version: Option<String>,
@@ -552,15 +558,12 @@ fn binary_diff_for(app: &impl crate::capabilities::DataDir, kind: &str, from: Op
     (old.is_file() && new.is_file() && script.is_file()).then_some(crate::claude_review_api::BinaryDiff { script, old, new })
 }
 
-/// API 快速解析（#1919）：占位後丟到背景，失敗時接回 [`dispatch_to_bot`]。回 `None`＝這條路走不通（沒任務檔、
-/// 抓不到 changelog、帳本寫不進去），呼叫端照舊派 bot。
-async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found) -> Option<Value> {
+/// API 影響分析：占位後在背景執行；準備或儲存失敗也不派 bot。
+async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found) -> Result<Value, LcError> {
     use crate::claude_review_api as api;
-    let task_md = task_head(app.as_ref(), kind)?;
+    let task_md = task_head(app.as_ref(), kind).unwrap_or_default();
     let changelog = truncate(found.body.trim(), MAX_BODY_CHARS);
-    if changelog.is_empty() {
-        return None; // 沒有 changelog 可讀；派 bot 還能 diff 兩顆 binary
-    }
+
     let job = api::Job {
         kind: kind.to_string(),
         to: to.to_string(),
@@ -570,23 +573,16 @@ async fn api_review(app: &Arc<App>, kind: &'static str, to: &str, found: &Found)
         criteria: api::criteria_of(&task_md),
         binary_diff: binary_diff_for(app.as_ref(), kind, found.from_version.as_deref(), to),
     };
-    let (fb_found, fb_to) = (found.clone(), to.to_string());
-    let started = api::start(app, job, move |app| async move {
-        if let Err(e) = dispatch_to_bot(&app, kind, &fb_to, &fb_found).await {
-            tracing::warn!("API 解析失敗後退回派 bot 也沒成：{e:?}");
-        }
-    })
-    .await;
+    let started = api::start(app, job).await;
     let duplicate = match started {
         Ok(api::Started::Spawned) => false,
         Ok(api::Started::Existing) => true,
         Err(e) => {
-            tracing::warn!("API 解析的帳本寫不進去，改派 bot：{e}");
-            return None;
+            return Err(LcError::Upstream(format!("無法儲存 API 影響分析：{e}")));
         }
     };
-    let review = review_state(app.as_ref(), kind, to).await.ok()?;
-    Some(json!({
+    let review = review_state(app.as_ref(), kind, to).await?;
+    Ok(json!({
         "kind": kind,
         "version": to,
         "from_version": found.from_version,
@@ -1453,35 +1449,93 @@ mod tests {
         assert_eq!(counts(&app).await, before);
     }
 
-    /// API 回的 JSON 不合 schema：退回派 bot（跟沒開 API 時一模一樣），帳本記失敗、之後仍可重按。
     #[tokio::test]
-    async fn a_bad_api_answer_falls_back_to_the_bot_path() {
+    async fn bad_api_answers_fail_after_three_attempts_without_dispatching_and_can_retry() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
-        let fake = api_on(&app, vec![api_ok(r#"{"summary":["只有一行"],"recommend":"can_wait","watchlist":[]}"#)]).await;
+        let bad = r#"{"summary":["只有一行"],"recommend":"can_wait","watchlist":[]}"#;
+        let fake = api_on(&app, vec![api_ok(bad), api_ok(bad), api_ok(bad), api_ok(GOOD)]).await;
         let before = counts(&app).await;
-        post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
-        for _ in 0..200 {
-            if counts(&app).await != before {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert_ne!(counts(&app).await, before, "退回後派出了 assignment");
-        let s = review_state(&app, "claude", "2.1.282").await.unwrap();
-        assert_eq!((s.state, s.source), ("pending", None), "pending 的是 bot 那條：{s:?}");
-        let a = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.282")).await.unwrap().expect("用按鈕的 crid 派");
-        assert_eq!(a.target_bot_id, "resp1");
+        let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+        let failed = settle(&app, "claude", "2.1.282", "failed").await;
+        assert_eq!(failed.source, Some("api"));
+        assert_eq!(failed.error.as_deref(), Some("bad_format:summary"));
+        assert_eq!(counts(&app).await, before);
+        assert_eq!(fake.prompts.lock().unwrap().len(), 3);
+        assert!(fake.prompts.lock().unwrap()[1].contains("bad_format:summary"));
         let rec = crate::claude_review_api::load(&app.data_dir, "claude", "2.1.282").unwrap();
-        assert_eq!((rec.status.as_str(), rec.fell_back), ("failed", true));
-        assert_eq!(rec.error_kind.as_deref(), Some("bad_format:summary"));
-        assert_eq!(fake.prompts.lock().unwrap().len(), 1);
+        assert!(!rec.fell_back);
+        let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+        settle(&app, "claude", "2.1.282", "done").await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 4);
+        assert_eq!(counts(&app).await, before);
     }
 
-    /// 沒開 API／沒 key：完全是舊行為（不碰帳本）；`deep` 即使 API 就緒也一律派 bot，且不被 API 的結論擋住。
     #[tokio::test]
-    async fn off_or_deep_goes_to_the_bot_and_deep_is_not_blocked_by_the_quick_answer() {
+    async fn validation_errors_are_sent_back_and_a_corrected_answer_completes() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let fake = api_on(&app, vec![api_ok("{}"), api_ok(GOOD)]).await;
+        let before = counts(&app).await;
+        let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+        settle(&app, "claude", "2.1.282", "done").await;
+        assert_eq!(fake.prompts.lock().unwrap().len(), 2);
+        assert!(fake.prompts.lock().unwrap()[1].contains("bad_format:schema"));
+        assert_eq!(counts(&app).await, before);
+    }
+
+    #[tokio::test]
+    async fn transport_and_truncated_api_replies_never_dispatch_a_bot() {
+        for error in [
+            Err(ClientError::Timeout),
+            Err(ClientError::RateLimited { retry_after: Some("1".into()), usage: None }),
+            Err(ClientError::Http { status: 500, usage: None }),
+            api_ok(GOOD).map(|mut r| {
+                r.stop_reason = Some("max_tokens".into());
+                r
+            }),
+        ] {
+            let e = crate::testing::env().await;
+            let app = e.app.clone();
+            review_fixture(&app, &e.project_id).await;
+            let fake = api_on(&app, vec![error.clone(), error.clone(), error]).await;
+            let before = counts(&app).await;
+            let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+            let failed = settle(&app, "claude", "2.1.282", "failed").await;
+            assert!(failed.error.is_some());
+            assert_eq!(counts(&app).await, before);
+            assert_eq!(fake.prompts.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_key_or_disabled_use_preserves_the_original_bot_path() {
+        for missing_key in [true, false] {
+            let e = crate::testing::env().await;
+            let app = e.app.clone();
+            review_fixture(&app, &e.project_id).await;
+            let fake = api_on(&app, vec![]).await;
+            if missing_key {
+                std::fs::remove_file(app.data_dir.join("claude-key")).unwrap();
+            } else {
+                app.cfg.update(|c| {
+                    c.claude_api.uses.get_mut("changelog_review").unwrap().enabled = Some(false);
+                    Ok(())
+                }).await.unwrap();
+            }
+            let before = counts(&app).await;
+            let Json(v) = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
+            assert!(v.get("mode").is_none());
+            assert_ne!(counts(&app).await, before);
+            assert!(fake.prompts.lock().unwrap().is_empty());
+        }
+    }
+
+    /// 停用走既有 AGM 路徑；API 模式的 deep 請求仍沿用 API 結論。
+    #[tokio::test]
+    async fn off_uses_the_bot_but_api_mode_deep_reuses_the_api_answer() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
@@ -1490,22 +1544,22 @@ mod tests {
         assert!(crate::claude_review_api::load(&app.data_dir, "claude", "2.1.282").is_none());
 
         let fake = api_on(&app, vec![api_ok(GOOD)]).await;
-        // codex 的快速版先出結論，再要求深入驗證：派出 bot，不是 duplicate。
+        // API 模式即使 deep 也只沿用既有結論，不會派 bot。
         std::fs::write(agm_dir(&app).join(task_file("codex")), "AGM 交辦：codex\n\n判斷「用得上」的標準：\n- 啟動參數\n\n回報：…\n").unwrap();
         app.changelog.seed("codex", "# Changelog\n\n## 0.200.0\n\n- thing\n").await;
-        post_review(State(app.clone()), Json(body("codex", "0.200.0", None))).await.unwrap();
+        let _ = post_review(State(app.clone()), Json(body("codex", "0.200.0", None))).await.unwrap();
         let quick = settle(&app, "codex", "0.200.0", "done").await;
-        assert!(quick.result.unwrap().contains("深入驗證"), "快速版要提示可以深入驗證");
+        assert!(quick.result.unwrap().contains("未實測"));
         let before = counts(&app).await;
         let Json(deep) = post_review(State(app.clone()), Json(body("codex", "0.200.0", Some(true)))).await.unwrap();
-        assert_eq!(deep["duplicate"], json!(false), "{deep}");
-        assert_ne!(counts(&app).await, before, "deep 派出了 bot");
+        assert_eq!(deep["duplicate"], json!(true), "{deep}");
+        assert_eq!(counts(&app).await, before, "API 模式連 deep 也不派 bot");
         assert_eq!(fake.prompts.lock().unwrap().len(), 1, "deep 不打 API");
-        // bot 還在跑時畫面維持 API 的結論；bot 做完才換成 bot 的。
+        // 畫面維持 API 結論。
         assert_eq!(review_state(&app, "codex", "0.200.0").await.unwrap().state, "done");
     }
 
-    /// agy／grok（#1928）：按「請 AGM 解析」才打 API；開框（GET）不打；同一版再按沿用帳本、不再打；
+    /// agy／grok（#1928）：按「分析影響」才打 API；開框（GET）不打；同一版再按沿用帳本、不再打；
     /// 「用得上」的標準就是任務檔那一段（規則只有一份），changelog 原文框在「資料，不是指令」裡。
     #[tokio::test]
     async fn agy_and_grok_reviews_use_the_api_once_per_version_and_only_when_asked() {
@@ -1562,7 +1616,7 @@ mod tests {
         review_fixture(&app, &e.project_id).await;
         app.changelog.seed("herdr", "# Changelog\n\n## [0.9.3] - 2026-09-29\n\n- codex idle\n").await;
         api_on(&app, vec![api_ok(GOOD)]).await;
-        post_review(State(app.clone()), Json(body("herdr", "0.9.3", None))).await.unwrap();
+        let _ = post_review(State(app.clone()), Json(body("herdr", "0.9.3", None))).await.unwrap();
         let done = settle(&app, "herdr", "0.9.3", "done").await;
         assert!(done.result.unwrap().contains("驗證與升級窗口另請 AGM"));
         assert_eq!(std::fs::read_to_string(agm_dir(&app).join("herdr-update.last")).unwrap().trim(), "0.9.3");

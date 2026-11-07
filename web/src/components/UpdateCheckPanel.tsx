@@ -36,7 +36,7 @@ export function UpdateCheckPanel() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [ask, setAsk] = useState<{ host: string; row: CheckRow; action: CheckAction } | null>(null)
-  // agy 的確認框有「請 AGM 解析」（#1928）；只有按下去才會花 API，開框只讀。
+  // agy 的確認框有「分析影響」（#1928）；只有按下去才會花 API，開框只讀。
   const agyAsk = ask?.action.kind === 'agy' ? { host: ask.host, from: changelogRange([{ host: ask.host, from: ask.row.current }]).from, target: ask.action.target } : null
   const agyReview = useReviewAsk('agy', agyAsk?.host ?? 'local', agyAsk?.from ?? null, agyAsk?.target ?? null)
 

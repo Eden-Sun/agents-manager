@@ -9,6 +9,7 @@
 export type TriageVerdict = 'guard' | 'adopt' | 'upgrade-arg' | 'none'
 
 export interface TriageRow {
+  analysis?: { source: string; model: string; error: string }
   version: string
   status: string
   entries: { id: string; text: string }[]
@@ -34,6 +35,7 @@ export interface TriageIssue {
 }
 
 export interface TriageVersion {
+  analysis?: { source: string; model: string; error: string }
   version: string
   /** `judged`＝有結論（含已開 issue）；`empty`＝看過、沒有要處理的；`pending`＝排隊或分析中；`failed`；`missing`＝帳本沒有這一版。 */
   state: 'judged' | 'empty' | 'pending' | 'failed' | 'missing'
@@ -57,6 +59,7 @@ export function parseTriageRows(raw: unknown): { repo: string | null; rows: Tria
     const props = isRec(v) && Array.isArray(v.issues) ? v.issues : []
     return {
       version: str(r.version),
+      analysis: isRec(v) && isRec(v.analysis) ? { source: str(v.analysis.source), model: str(v.analysis.model), error: str(v.analysis.error) } : undefined,
       status: str(r.status),
       entries: (Array.isArray(r.entries) ? r.entries : []).filter(isRec).map((e) => ({ id: str(e.id), text: str(e.text) })),
       verdicts: list.filter(isRec).map((x) => ({ entry_id: str(x.entry_id), verdict: str(x.verdict), reason: str(x.reason), module: str(x.module) })),
@@ -123,7 +126,7 @@ function summarize(row: TriageRow, repo: string | null): TriageVersion {
         : row.status === 'failed'
           ? 'failed'
           : 'pending'
-  return { version: row.version, state, guard: pick('guard'), adopt: pick('adopt'), upgrade: pick('upgrade-arg'), issues }
+  return { version: row.version, analysis: row.analysis, state, guard: pick('guard'), adopt: pick('adopt'), upgrade: pick('upgrade-arg'), issues }
 }
 
 /**
@@ -143,7 +146,7 @@ export function triageForRange(rows: TriageRow[], repo: string | null, from: str
   return out
 }
 
-/** 整個區間有沒有任何一版分析出結果（`judged`／`empty`）。沒有＝「尚未分析」，更新框要把「請 AGM 解析」推到前面。 */
+/** 整個區間有沒有任何一版分析出結果（`judged`／`empty`）。沒有＝「尚未分析」，更新框要把「分析影響」推到前面。 */
 export function anyAnalysed(vs: TriageVersion[]): boolean {
   return vs.some((v) => v.state === 'judged' || v.state === 'empty')
 }

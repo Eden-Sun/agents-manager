@@ -42,7 +42,7 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
 }
 
 function triageRows(kind: string): Rec[] {
-  // agy／grok 的帳本還是空的（新版剛出、kick 還沒跑）：更新框寫「尚未分析」，按「請 AGM 解析」才派。
+  // agy／grok 的帳本還是空的（新版剛出、kick 還沒跑）：更新框寫「尚未分析」，按「分析影響」才派。
   // daemon：herdr 還沒有分診規則，`GET /api/release-triage?kind=herdr` 回空的 rows（API.md）。
   if (kind === 'herdr' || kind === 'agy' || kind === 'grok') return []
   if (kind === 'claude') {

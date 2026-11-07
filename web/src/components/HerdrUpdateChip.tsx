@@ -22,7 +22,7 @@ import './herdrUpdate.css'
 
 /**
  * header 的「herdr 有新版」（SPEC §6.9，使用者 2026-10-01：「跟 claude/codex 一樣 header 出現徽章 → 確認框 → 一鍵更新」）。
- * 跟 codex／claude 那兩顆同一個樣子、同一種確認框（左 changelog、右 AGM 解析），但後果大得多：herdr server 整個重啟，
+ * 跟 codex／claude 那兩顆同一個樣子、同一種確認框（左 changelog、右 影響分析），但後果大得多：herdr server 整個重啟，
  * **所有 Bot 都會中斷**，子 agent 一律沒了。所以框裡最顯眼的是那句警告，下面列會接回的與會失去的。
  * 數字位置寫 `herdr` 而不是顆數：三顆並排時要一眼分得出這顆是哪一種。
  */
@@ -166,7 +166,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
         }
         confirmLabel={host ? t('更新並重啟 herdr') : t('無法從這裡更新')}
         confirmDisabled={!host}
-        secondaryLabel={asking ? t('派工中…') : t('請 AGM 解析')}
+        secondaryLabel={asking ? t('派工中…') : t('分析影響')}
         secondaryDisabled={asking}
         onSecondary={() => {
           setAsking(true)
@@ -177,8 +177,8 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
               notify(
                 'info',
                 r.duplicate
-                  ? t('herdr {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.target_bot_name || 'AGM' })
-                  : t('已請 {bot} 解析 herdr {version} 的 changelog，結論會回到這裡', { version: r.version, bot: r.target_bot_name }),
+                  ? t('herdr {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
+                  : t('已請 {bot} 解析 herdr {version} 的 changelog，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' }),
               )
             })
             .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))

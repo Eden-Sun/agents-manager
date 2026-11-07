@@ -170,7 +170,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             {confirming ? (
               <div className="update-split">
                 <UpdateChangelog kind={changelogKind} host={changelogHost} from={range.from} to={range.to} />
-                {/* 分析（上游分診＋AGM 解析）claude 與 codex 同一套（issue #561）。 */}
+                {/* 分析（上游分診＋影響分析）claude 與 codex 同一套（issue #561）。 */}
                 {canReview ? (
                   <AgmReviewBox kind={changelogKind} host={changelogHost} from={range.from} to={range.to} refreshKey={reviewKey} />
                 ) : null}
@@ -208,7 +208,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         // 批次框跟單顆框同一顆按鈕：更新的解析是**版本層級**的事，跟要重啟幾顆無關。
         // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
         // （使用者 2026-09-19：「還是沒見按鈕」）。claude 與 codex 同一套（issue #561）。
-        secondaryLabel={canReview ? (asking ? t('派工中…') : t('請 AGM 解析')) : undefined}
+        secondaryLabel={canReview ? (asking ? t('派工中…') : t('分析影響')) : undefined}
         secondaryDisabled={asking}
         onSecondary={canReview ? () => {
           setAsking(true)
@@ -220,8 +220,8 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
               notify(
                 'info',
                 r.duplicate
-                  ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: changelogKind, version: r.version, bot: r.target_bot_name || 'AGM' })
-                  : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { bot: r.target_bot_name, kind: changelogKind, version: r.version }),
+                  ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: changelogKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
+                  : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', kind: changelogKind, version: r.version }),
               )
             })
             .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))

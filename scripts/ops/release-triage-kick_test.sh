@@ -580,7 +580,7 @@ mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_OLD_AGM=1
 bash "$SCRIPT"; equals "舊 agm：exit 0" "$?" "0"
 equals "舊 agm：無法讀帳本時不派" "$(assigns)" "0"
-check "舊 agm：記錄帳本讀取失敗" "讀不到 claude 帳本目前代號" "$AGM_DIR/release-triage.log"
+check "舊 agm：記錄帳本讀取失敗" "查不到 API 模式" "$AGM_DIR/release-triage.log"
 bash "$SCRIPT"; bash "$SCRIPT"
 equals "舊 agm：說明只寫一次" "$(grep -c '不認得 release-triage' "$AGM_DIR/release-triage.log" | tr -d ' ')" "1"
 teardown
@@ -838,13 +838,11 @@ teardown
 # 9c. 部分退回：成功的版本不再進交辦，退回的照派，request-id 與 TO 用剩下的最後一版。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
-export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"fallback","reason":"驗證不過：缺 verdict","quiet":false}]}'
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"failed","reason":"驗證不過：缺 verdict","quiet":false}]}'
 bash "$SCRIPT"
-equals "部分退回：派一則" "$(assigns)" "1"
-check_no "已判完的版本不在交辦" "2.1.277-k0" "$AGM_DIR/assign-body.txt"
-check "退回的版本在交辦" "2.1.278-k0" "$AGM_DIR/assign-body.txt"
-check "dispatched 只標退回的" "dispatched --kind claude --version 2.1.278 --bot bot-resp" "$AGM_DIR/calls.log"
-check "退回原因進 log" "API 分診退回 2.1.278：驗證不過：缺 verdict" "$AGM_DIR/release-triage.log"
+equals "API 部分失敗：不派 bot" "$(assigns)" "0"
+check_no "API 失敗不標 dispatched" "dispatched --kind" "$AGM_DIR/calls.log"
+check "失敗原因進 log" "API 分診失敗 2.1.278：驗證不過：缺 verdict" "$AGM_DIR/release-triage.log"
 teardown
 
 # 9d. auto 本身失敗（舊 daemon 404／逾時）：照派協調者。
@@ -852,7 +850,7 @@ setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_AUTO_ENABLED=true STUB_AUTO_FAIL=1
 bash "$SCRIPT"
-equals "auto 失敗：照派協調者" "$(assigns)" "1"
+equals "auto 失敗：不派協調者" "$(assigns)" "0"
 check "auto 失敗有記 log" "release-triage auto --kind claude 失敗" "$AGM_DIR/release-triage.log"
 teardown
 
@@ -879,9 +877,9 @@ echo 2.1.278 > "$AGM_DIR/claude-release.last"
 echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
 export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.279","outcome":"judged","status":"judged","quiet":false}],"binary_used":false}'
 bash "$SCRIPT"
-equals "binary 沒進 API：派一則 binary-only" "$(assigns)" "1"
-check "binary-only 沿用舊通知 id 命名空間" "agm-claude-release-2.1.279-notice" "$AGM_DIR/assign-body.txt"
-check "binary-only 帶 binary diff 任務" "CLAUDE_BINARY_DIFF_MARKER" "$AGM_DIR/assign-body.txt"
+equals "API 模式 binary 沒進分析：不派 bot" "$(assigns)" "0"
+check_no "不標 dispatched" "dispatched --kind" "$AGM_DIR/calls.log"
+check_no "不查 bot 額度" " quota" "$AGM_DIR/calls.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"

@@ -48,7 +48,7 @@ test('未設定不畫翻譯鈕、也不畫錯誤', async () => {
   const root = await mount(
     <div>
       <UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />
-      <button type="button">請 AGM 解析</button>
+      <button type="button">分析影響</button>
       <button type="button">重啟套用</button>
     </div>,
   )
@@ -56,7 +56,7 @@ test('未設定不畫翻譯鈕、也不畫錯誤', async () => {
   assert.equal([...root.querySelectorAll('button')].some((b) => b.textContent === '翻譯成繁中'), false)
   assert.equal(root.textContent?.includes('翻譯沒有完成'), false)
   assert.ok(root.querySelector('a.update-changelog-src'))
-  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '請 AGM 解析')?.disabled, false)
+  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '分析影響')?.disabled, false)
   assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '重啟套用')?.disabled, false)
 })
 
@@ -154,7 +154,7 @@ test('失敗時原文還在，再試一次只 POST 一次；未來的 retry_afte
   const root = await mount(
     <div>
       <UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />
-      <button type="button">請 AGM 解析</button>
+      <button type="button">分析影響</button>
       <button type="button">重啟套用</button>
     </div>,
   )
@@ -165,7 +165,7 @@ test('失敗時原文還在，再試一次只 POST 一次；未來的 retry_afte
   if (retry) await click(retry)
   await settle(20)
   assert.equal(posts.length, 0)
-  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '請 AGM 解析')?.disabled, false)
+  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '分析影響')?.disabled, false)
   assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '重啟套用')?.disabled, false)
 })
 
@@ -289,13 +289,13 @@ test('翻譯連不上時留一行，原文與旁邊的按鈕都還在', async ()
   const root = await mount(
     <div>
       <UpdateChangelog kind="claude" host="local" from="2.1.3" to="2.1.5" />
-      <button type="button">請 AGM 解析</button>
+      <button type="button">分析影響</button>
       <button type="button">重啟套用</button>
     </div>,
   )
   await until(() => root.textContent?.includes('翻譯狀態暫時讀不到') === true, '連不上')
   assert.ok(root.textContent?.includes('Added widgets'))
-  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '請 AGM 解析')?.disabled, false)
+  assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '分析影響')?.disabled, false)
   assert.equal([...root.querySelectorAll('button')].find((b) => b.textContent === '重啟套用')?.disabled, false)
 })
 

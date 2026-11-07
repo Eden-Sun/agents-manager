@@ -1,5 +1,5 @@
 /**
- * 更新框要看的版本區間 `(from, to]`：changelog、分診結論與「請 AGM 解析」都用同一組（issue #561）。
+ * 更新框要看的版本區間 `(from, to]`：changelog、分診結論與「分析影響」都用同一組（issue #561）。
  *
  * - claude：新版已經下載到磁碟，`to` 留給 daemon 讀磁碟（`null`），`from` 是 statusLine 回報的跑著的版本。
  * - codex：新版**還沒安裝**，磁碟上是舊的，daemon 讀磁碟只會拿到舊版那一段；兩個版本都寫在

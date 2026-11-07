@@ -17,7 +17,7 @@ const INSTALL_CMD = 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON
 
 /**
  * header 的「codex 有新版、還沒裝」（SPEC §6.9，使用者 2026-09-25：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）。
- * 跟 claude 那顆同一個樣子（⌃⌃ N，警示色）、同一種確認框（左 changelog、右 AGM 解析、下面列會重啟／會跳過的），
+ * 跟 claude 那顆同一個樣子（⌃⌃ N，警示色）、同一種確認框（左 changelog、右 影響分析、下面列會重啟／會跳過的），
  * 確認後 daemon 在那台跑官方安裝指令 → 驗 `codex --version` → 接著一鍵重啟那台閒置的 codex。claude 也有更新時兩顆並排（UI-DECISIONS）。
  */
 export function CodexInstallChip({ control }: { control?: DialogControl } = {}) {
@@ -119,7 +119,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
           </>
         }
         confirmLabel={plan.ready.length > 0 ? t('安裝並重啟 {n} 顆', { n: plan.ready.length }) : t('只安裝')}
-        secondaryLabel={asking ? t('派工中…') : t('請 AGM 解析')}
+        secondaryLabel={asking ? t('派工中…') : t('分析影響')}
         secondaryDisabled={asking}
         onSecondary={() => {
           setAsking(true)
@@ -130,8 +130,8 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
               notify(
                 'info',
                 r.duplicate
-                  ? t('codex {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.target_bot_name || 'AGM' })
-                  : t('已請 {bot} 解析 codex {version} 的 changelog，結論會回到這裡', { bot: r.target_bot_name, version: r.version }),
+                  ? t('codex {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
+                  : t('已請 {bot} 解析 codex {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', version: r.version }),
               )
             })
             .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))

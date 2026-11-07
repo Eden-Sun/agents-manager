@@ -77,7 +77,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
   // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
   const range = updateRange(botKind, notice, runningVersion)
-  // 「請 AGM 解析」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
+  // 「分析影響」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
   const canReview = botKind === 'claude' || botKind === 'codex'
   // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
   const needsInstall = botKind !== 'claude' && !notice.includes('已安裝') // i18n-ignore：比對 daemon 通知原文
@@ -94,7 +94,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     })
   }
 
-  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 AGM 解析，結論回更新框。
+  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 影響分析，結論回更新框。
   // 唯讀，所以按完就關框，不擋重啟那條路（使用者 2026-09-19）。
   const askAgm = () => {
     setAsking(true)
@@ -107,8 +107,8 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           'info',
           // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
           r.duplicate
-            ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: botKind, version: r.version, bot: r.target_bot_name || 'AGM' })
-            : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { kind: botKind, version: r.version, bot: r.target_bot_name }),
+            ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: botKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
+            : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { kind: botKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' }),
         )
       })
       .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
@@ -273,7 +273,7 @@ function ConfirmRestart({
         </>
       }
       confirmLabel={needsInstall ? t('知道了') : t('重啟套用')}
-      secondaryLabel={onAskAgm ? (asking ? t('派工中…') : t('請 AGM 解析')) : undefined}
+      secondaryLabel={onAskAgm ? (asking ? t('派工中…') : t('分析影響')) : undefined}
       secondaryDisabled={asking}
       onSecondary={onAskAgm}
       danger={busy}

@@ -13,7 +13,7 @@ after(() => {
 })
 
 const uses = (enabled: boolean) => [
-  { id: 'changelog_review', label: 'AGM 解析 changelog', enabled, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null },
+  { id: 'changelog_review', label: '影響分析 changelog', enabled, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null },
   { id: 'changelog_translate', label: '更新框翻譯', enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, legacy_section: 'changelog_translate' },
 ]
 const settings = (over: Record<string, unknown>) => ({
@@ -54,7 +54,7 @@ test('沒有 key 時總開關與各用途都不能開，帳本顯示累計 token
   assert.ok(boxes.every((b) => b.disabled && !b.checked), '沒 key 全部不能勾')
   assert.match(root.textContent ?? '', /未設定（key file unreadable）/)
   assert.match(root.querySelector('[data-testid=claude-api-totals]')?.textContent ?? '', /共 3 次.*輸入 9,120.*輸出 1,480/)
-  assert.match(root.textContent ?? '', /AGM 解析 changelog/)
+  assert.match(root.textContent ?? '', /影響分析 changelog/)
 })
 
 test('貼 key 後可開；存檔只送 token、改過的用途，key 輸入框清空', async () => {
@@ -122,7 +122,7 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
 
   // 驗證帳本內容
   assert.match(bookPanel.textContent ?? '', /用量帳本/)
-  assert.match(bookPanel.textContent ?? '', /AGM 解析 changelog/)
+  assert.match(bookPanel.textContent ?? '', /影響分析 changelog/)
   const rows = bookPanel.querySelectorAll('tbody tr')
   assert.equal(rows.length, 1)
 
@@ -148,7 +148,7 @@ test('零呼叫說明重啟清空、CLI 排除及送出前被擋不記帳，啟�
   assert.match(text, /記憶體記錄，重啟後會清空/)
   assert.match(text, /不包含 Claude Code、Codex 或其他 CLI 聊天/)
   assert.match(text, /用途未啟用、key 無法使用或每小時額度已滿.*不會記入帳本/)
-  assert.match(text, /目前已啟用的用途：AGM 解析 changelog/)
+  assert.match(text, /目前已啟用的用途：影響分析 changelog/)
   assert.match(text, /啟用不會立即呼叫 API/)
   assert.match(text, /取得 changelog 失敗或沒有待處理版本/)
   assert.doesNotMatch(text, /共用 API key 尚未就緒|一切正常/)
@@ -171,7 +171,7 @@ test('空帳本的用途狀態尊重總開關，但翻譯仍按自己的開關�
   await settle()
   const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
   assert.match(text, /目前已啟用的用途：更新框翻譯/)
-  assert.doesNotMatch(text, /AGM 解析 changelog|目前沒有已啟用/)
+  assert.doesNotMatch(text, /影響分析 changelog|目前沒有已啟用/)
 })
 
 test('空帳本顯示已存的用途，未儲存的表單變更不假裝已生效', async () => {
@@ -180,7 +180,7 @@ test('空帳本顯示已存的用途，未儲存的表單變更不假裝已生�
   await settle()
   root.querySelector<HTMLInputElement>('.claude-api-panel > .claude-api-switch input')!.click()
   await settle()
-  assert.match(root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? '', /目前已啟用的用途：AGM 解析 changelog/)
+  assert.match(root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? '', /目前已啟用的用途：影響分析 changelog/)
 })
 
 test('已有呼叫記錄時保留帳表，不顯示空帳本診斷', async () => {

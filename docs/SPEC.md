@@ -817,12 +817,12 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 ### 4.3d Claude API key：一次性 LLM 工作不開 Claude Code session（`[claude_api]`，issue #1919）
 
-把「不需要工具、不需要 repo」的一次性 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic Messages API，不開 Claude Code session，不吃訂閱用量，改按 API 計費（`daemon/src/claude_api.rs`）。各用途自己組 prompt、自己決定失敗時退回哪條路（沒 key、關閉、逾時、被限流都退回原本的 Claude Code 路徑）；這個模組只管 client、開關、保險絲、帳本與設定。
+把「不需要工具、不需要 repo」的一次性 LLM 工作（例如請 影響分析 changelog）改走 Anthropic Messages API，不開 Claude Code session，不吃訂閱用量，改按 API 計費（`daemon/src/claude_api.rs`）。各用途自己組 prompt；影響分析在總開關與對應用途啟用且 key 可讀時只走 API，失敗有限重試後落 failed，不退給 Claude Code；停用或缺 key 才走既有 AGM 分析路徑；這個模組只管 client、開關、保險絲、帳本與設定。
 
 - **client 只有一份**：`MessagesClient`／`MessagesRequest`／`AnthropicHttpClient`（`POST https://api.anthropic.com/v1/messages`，`x-api-key`、`anthropic-version: 2023-06-01`；不跟隨 redirect、有逾時、`Debug` 與 log 不印 key）。#1870 的更新框翻譯（§6.9d）也走這一份，不另有第二套。**不送 `temperature`／`top_p`／`top_k`，也不送 `thinking`**（新模型拒收或預設自適應）；只送 `output_config.effort` 與選用的 `output_config.format`（結構化輸出）。回應只收 `text` 區塊，`stop_reason: refusal` 或沒有文字算 `bad_response`。
 - **入口 `claude_api::complete(app, ClaudeRequest{use_case, system, prompt, max_tokens, format})`**：模型與 effort 由設定決定、呼叫端不指定。**不重試**：一個請求一次送出，失敗就回錯，由用途決定退回哪條路。失敗分類（`ClaudeError::kind()`）：`disabled`／`no_key`／`budget`（這三種沒送出、不進帳本）、`auth`（401／403）、`rate_limited`（429，帶 `Retry-After` 秒數）、`server`（5xx 含 529）、`timeout`、`network`、`rejected`（其他 4xx）、`bad_response`。
 - **兩層開關＋保險絲**：`[claude_api] enabled` 總開關與 `[claude_api.uses.<用途>] enabled` 都要開才會呼叫（預設全關）；每個用途一小時最多 `max_per_hour` 次（先占名額再送，滿了回 `budget`）。沒有可用 key 時任何一層都不給開（409 `needs_key`）。
-- **已知用途**（`am_config::CLAUDE_API_USES`，要加用途就加一行）：`changelog_review`（AGM 解析 changelog，預設 `claude-sonnet-5-5`／effort `medium`／30 次每小時）、`release_triage`（上游新版逐條分診，§18.2c，預設 `claude-sonnet-5-5`／`medium`／20 次）、`changelog_translate`（更新框翻譯 §6.9d，預設 `claude-haiku-5-5`／`low`；次數以 `[changelog_translate]` 的 `max_per_hour` 為準，預設不上限，不走這裡的每小時名額）。預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet，不預設 Opus／Fable；模型欄可填任何 `claude-` 開頭的安全 id，設定頁下拉給最新的 Haiku／Sonnet。**`changelog_translate` 的設定仍存在 `[changelog_translate]`**（舊設定檔照舊有效；設定頁讀寫那一段），不受總開關管；它與 `[claude_api]` 讀同一個 key 檔，只有 `[changelog_translate] key_file` 被明確改成非預設路徑時才用舊路徑。逾時已改用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 廢棄（見 §6.9d）。
+- **已知用途**（`am_config::CLAUDE_API_USES`，要加用途就加一行）：`changelog_review`（影響分析 changelog，預設 `claude-sonnet-5-5`／effort `medium`／30 次每小時）、`release_triage`（上游新版逐條分診，§18.2c，預設 `claude-sonnet-5-5`／`medium`／20 次）、`changelog_translate`（更新框翻譯 §6.9d，預設 `claude-haiku-5-5`／`low`；次數以 `[changelog_translate]` 的 `max_per_hour` 為準，預設不上限，不走這裡的每小時名額）。預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet，不預設 Opus／Fable；模型欄可填任何 `claude-` 開頭的安全 id，設定頁下拉給最新的 Haiku／Sonnet。**`changelog_translate` 的設定仍存在 `[changelog_translate]`**（舊設定檔照舊有效；設定頁讀寫那一段），不受總開關管；它與 `[claude_api]` 讀同一個 key 檔，只有 `[changelog_translate] key_file` 被明確改成非預設路徑時才用舊路徑。逾時已改用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 廢棄（見 §6.9d）。
 - **key**：`[claude_api] key_file`（預設 `~/.config/agents-manager/anthropic-api-key`，與翻譯共用）只是路徑；key 由 daemon 寫成 600 的檔（`key_file` 模組，Jev 共用同一套讀寫），不進 `config.toml`、DB、log、帳本，任何 API 都不回 key，只回 `key_present`／`key_error`。檔案對 group／other 可讀就拒用。
 - **帳本**：記憶體（daemon 重啟歸零），最近 200 筆＋累計與每個用途的累計：用途、模型、input／output tokens、耗時、成功或錯誤分類、`stop_reason`；**不存 prompt 與回覆**。設定頁顯示累計 tokens 與最近幾筆，讓人看得到這些工作沒走訂閱額度。空狀態須說明重啟清空、CLI 聊天不列入，以及 `disabled`／`no_key`／`budget` 未送出便不記帳；依已儲存設定列出啟用用途與共用 key 未就緒提示，翻譯仍按獨立開關計算，不受總開關影響。啟用不代表立即呼叫或遠端權限已驗證；快取、沒有待處理版本或 changelog 抓取失敗也可能沒有新呼叫，不能將零筆宣稱為一切正常。
 - **設定入口**：網頁「環境設定 → Claude API」（或 `PUT /api/claude-api/settings`）：貼 key、總開關、每個用途的開關／模型／思考強度／每小時上限。存檔當下生效，不用重啟。User／AGM 可讀寫；一般 Bot 一律 403。
@@ -3033,7 +3033,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   現在會一起進批次；新版**還沒安裝**（notice 含「需安裝」）重啟換不到東西，改成「是候選但被跳過」而不是
   「整個不算」——一樣會出現在 header 與確認框的跳過名單裡，講清楚要先手動安裝，不會像以前那樣默默消失。
   **codex 需安裝（2026-09-25，使用者：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）**：header 在一般那顆旁邊另有一顆警示色的
-  ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`；每版內容是 release body 原文，保留它自己的 `## New Features` 等二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）、右 AGM 解析（`kind=codex`，同一版只派一次）、
+  ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`；每版內容是 release body 原文，保留它自己的 `## New Features` 等二級標題，`## Changelog` 之後的 PR 流水帳不帶，#1392）、右影響分析（`kind=codex`，同一版只派一次）、
   下面列出裝好後會重啟的那台閒置 codex 與會跳過的（在忙、子 agent）。確認框標題的版本取那台「需安裝」通知裡**最新的目標**；
   沒有任何 run 帶「需安裝」（沒有 codex 在跑）時改看上游快照：第一台落後的主機（本機優先）、目標取快照的 `target_version`，daemon 核對目標時只有成功查完且沒有 pending notice 才退回快照（那台要落後才算，`upstream_update::behind_target_for_host`，2026-09-29 使用者）；active-run、bot 或 bot-host DB 讀取失敗回可重試 503，不用快照代替，也不開始安裝；
   確認後 `POST /api/hosts/{name}/cli-update {kind:"codex",target_version}`（API §12.7a，`cli_update.rs`），daemon 綁定這一版（#569）：
@@ -3162,7 +3162,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 ### 6.9d 更新框的翻譯（issue #1870）
 
-更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「請 AGM 解析」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。
+更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「分析影響」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。
 
 - **預設關**。`[changelog_translate]` 沒寫或 `enabled = false`，以及 key 檔讀不到：安靜停用。`GET`／`POST /api/changelog/translation` 回 `unconfigured`，不打 API、畫面不顯示錯誤、不擋解析、安裝或重啟。key 只放在 `key_file` 指到的 0600 檔，不進 `config.toml`、不進帳本、不進回應；網頁「環境設定 → Claude API」（§4.3d）貼的 key 就寫到這個檔，翻譯與 `[claude_api]` 共用同一把、同一份 client。
 - **自動翻（#1948，使用者 2026-10-24「我要自動翻」，推翻原本「只有使用者按下去才扣費」）**。`[changelog_translate] auto`（預設 `true`；`false` 回到只有按鈕才送）。
@@ -4661,7 +4661,7 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    `runtime.json` 的 `herdr_update_bot_id`（專用 child，選用欄位）＞ `release_bot_id`（跟 Claude Code 換版通知同一顆分析型 child 也合理）＞
    `responder_bot_id`（協調者兜底）。**不能派給巡檢自己**（daemon 擋「總管對自己下交辦」）。查不到任何一個就跳過，不亂派給使用者的專案 bot。
 5. **同版不重派**：`herdr-update.last` 記上次真的派過工的版本，`should_notify` 比對這個字串；派工失敗不寫，下一輪重試同一版。
-   更新框的「請 AGM 解析」（`POST /api/claude-update/review` `kind=herdr`，2026-10-01）用**同一個** `agm-herdr-update-<版>`：
+   更新框的「分析影響」（`POST /api/claude-update/review` `kind=herdr`，2026-10-01）用**同一個** `agm-herdr-update-<版>`：
    使用者先按了，kick 再送會收到同 id、不同正文的 409（帶 `assignment_id`／`inbox_event_id`）——kick 把它當成已經派過、寫 state、不算失敗；
    kick 先派了，按鈕回 `duplicate:true`。兩條路合起來同一版只派一次。
    **鎖**（`herdr-update.lock`，#66 review 留言）：鎖裡寫 pid＋時間（同 `release-triage-kick.sh`）。另一個執行者還活著就安靜跳過（超過一小時才推 `runner_hung`，不搶鎖）；
@@ -4707,12 +4707,12 @@ claude、codex、agy、grok **每出一個新版**，自動把那一版的 chang
 - **去重**：帳本 `(kind, version)` 為主鍵，同一個 stable 只分診一次。stable 檔涵蓋的每一版各一列；錯過一個 stable 時中間缺的版本只記 log（`warn_grok_gap`），不補抓。
 - **規則**（`rules.toml` 的 `agy`／`grok`）只放能明確對應到我們模組的類別：`hook`、畫面判讀（`tui`）、`quota`、resume／fork（`session`）、`subagent`；沒有任何 drop 規則，其餘一律 `unmatched`（照樣送模型），先看 unmatched 比例再補規則。
 - **通知與交辦**：通知 request-id 同其他 kind（`agm-release-triage-<kind>-<新版號>-notice`）；kick 的 `for KIND` 迴圈、`release-issue-<編號>`、`upstream:<kind>` 標籤（`upstream:agy`、`upstream:grok` 要先建好）全部照舊。claude 專屬的 binary diff 不套用。
-  「請 AGM 解析」（§18.5a）也收 `agy`／`grok`：任務檔 `agy-release-task.md`／`grok-release-task.md`；Claude API 快速解析（`changelog_review`）同樣適用，「用得上」的標準取自任務檔、不另寫一份。agy、grok 的更新確認框（header 兩顆 chip、設定頁「更新檢查」的 agy 框）有「請 AGM 解析」鈕，開框只讀、按下去才會 POST 與花 API。
+  「分析影響」（§18.5a）也收 `agy`／`grok`：任務檔 `agy-release-task.md`／`grok-release-task.md`；Claude API 快速解析（`changelog_review`）同樣適用，「用得上」的標準取自任務檔、不另寫一份。agy、grok 的更新確認框（header 兩顆 chip、設定頁「更新檢查」的 agy 框）有「分析影響」鈕，開框只讀、按下去才會 POST 與花 API。
 
 **網頁看得到帳本**（issue #561）：更新確認框（單顆徽章與額度列的批次框）的「分析」區塊讀 `GET /api/release-triage?kind=`，
 把 `(跑著的版本, 新版]` 區間內每一版的結論攤開——提防／採用（已寫成提案的條目只列提案標題與 issue 連結，不逐條重複）、
 值得早升（`upgrade-arg`）、`empty`＝看過了沒有要處理的、還在排隊或派出＝分診中；帳本沒有新版那一列＝「尚未分析」，
-這時整塊指向框底的「請 AGM 解析」。issue 連結：已開的用帳本記的 `url`；只併進既有 issue（`duplicate_of`）的在
+這時整塊指向框底的「分析影響」。issue 連結：已開的用帳本記的 `url`；只併進既有 issue（`duplicate_of`）的在
 `[release_triage] repo` 有設時才組得出連結，沒設只顯示編號。claude 的新版是磁碟上那一版（`GET /api/claude-update/review` 回的 `version`），
 codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 
@@ -4757,13 +4757,13 @@ gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false
 `config.toml` 自 2026-10-03 起 `[release_triage] publish = true`、`repo = "Eden-Sun/agents-manager"`。
 
 **Claude API 分診（`[claude_api.uses.release_triage]`，issue #1919）**：`release-triage-kick.sh` 在額度閘門與派協調者**之前**，對這批 `pending` 先問 daemon 的 API 路徑有沒有開（`agm release-triage auto --kind K --check`），開了就 `agm release-triage auto --kind K --version V…`。
-daemon（`release_triage_auto.rs`）對每一版**單獨**打一次 Claude API（預設 `claude-sonnet-5-5`，結構化輸出）：prompt 帶該版 kept／unmatched 條目（規則已丟掉的不送；一版沒有任何要判的條目就不花 API）、帳本裡最近 30 張 release-triage issue（`#編號 完整標題`，`duplicate_of` 只能挑這份）與判斷規則（四類 verdict、模組對照表，跟 `release-triage-task.md` 同步，有測試對）；
+daemon（`release_triage_auto.rs`）對每一版**單獨**以至多三次呼叫（首次＋兩次重試）使用 Claude API（預設 `claude-sonnet-5-5`，結構化輸出）：prompt 帶該版 kept／unmatched 條目（規則已丟掉的不送；一版沒有任何要判的條目就不花 API）、帳本裡最近 30 張 release-triage issue（`#編號 完整標題`，`duplicate_of` 只能挑這份）與判斷規則（四類 verdict、模組對照表，跟 `release-triage-task.md` 同步，有測試對）；
 **第一版不做 grep 模組摘錄**，判斷只憑條目文字，所以通知會註明「未實測、未查程式碼」。外部文字（條目、issue 標題、binary diff）各放進比內容裡最長反引號串更長的圍欄，並明講是資料不是指令。
 API 回傳只當資料：交給 `runners::release_triage::accept_submission`——跟 bot 經 `submit` 交回的**同一個**驗證與落帳函式（每條都有 verdict、提案只引用 guard／adopt、`duplicate_of` 只認帳本、文字不得含去重標記、CAS 寫帳本、`publish = true` 時當場 publish），不走 HTTP bot principal，也不經 `dispatched`／`dispatch_gen`。
-**任何一步不成（沒開、沒 key、逾時、HTTP 錯、JSON 不合 schema、驗證不過）該版留在 `pending`**（`results[].outcome = "fallback"`；第一次失敗後同一次呼叫的後續版本也不再試），kick 照舊派協調者；沒開／沒 key 是 `quiet`，kick 不寫 log。
-API 判完的版本離開 `pending`，下一輪 `release-triage-check` 不會再回它，所以同一版不會重派 bot。kick 把判完的版本從這則交辦的 `pending` 拿掉，剩下的照舊走額度閘門與派工；API 全包就不查額度、不標 `dispatched`、不派。
+**模式判斷**：`ApiModel::enabled` 同時檢查 `[claude_api] enabled`、`uses.release_triage.enabled` 與 key 可讀。只有停用或缺 key 才回 `fallback`、保留 pending 與 AGM 分析路徑。API 模式下 schema／業務驗證錯誤（例如 issue title 空）回饋給下一次 API，所有錯誤最多三次後落 `failed`，既有 `verdicts_json.analysis` 保存 `source:"api"`、`model`、`error`，不改有效 verdict 或 issue。更新框顯示原因及「重試」，明確 POST `release-triage/auto` 可重試 API failed；排程只撿 pending，避免無限付費重試。成功版本仍永久重用、不重新開票。
+kick 在 API 模式下任何 API／解析／傳輸失敗都不派 AGM；模式查詢失敗時本輪跳過。只有明確停用或缺 key 才進額度閘門與 AGM 派工。API 模式的 binary-only 路徑也不派 bot。
 **結論由 daemon 直接出**：寫一則 inbox `release_triage_notice`（`event_key = agm-release-triage-<kind>-<新版號>-notice`，即原本協調者用的通知 request id，`push_inbox` 去重）給巡檢（使用者入口，`wake` 預設 true），三到五行：哪幾版、開了哪幾張 issue（或提案尚未開）、`upgrade-arg` 清單、`publish` 失敗留在帳本的原因；**不經協調者那一棒**。目前仍叫醒巡檢轉述；要完全不喚醒巡檢需要新的「純通知、不開回合」出口，另案。
-**Claude binary diff**：kick 先看 API 路徑有開，才跑 `bin/claude_binary_diff.py OLD NEW --timeout 120`（外部行程），報告交給 `auto --binary-diff-file`，只附在最後一版的 prompt，結論（`binary_notes`）併進同一則通知；回應 `binary_used = true` 時 kick 才推進 `claude-release.last`。報告沒產出、最後一版退回，或 changelog 早就分診完只剩 binary 時，binary 照舊由一則 binary-only 交辦（`agm-claude-release-<版本>-notice`）派協調者。
+**Claude binary diff**：kick 先看 API 路徑有開，才跑 `bin/claude_binary_diff.py OLD NEW --timeout 120`（外部行程），報告交給 `auto --binary-diff-file`，只附在最後一版的 prompt，結論（`binary_notes`）併進同一則通知；回應 `binary_used = true` 時 kick 才推進 `claude-release.last`。只有 API 模式關閉時，binary 才由一則 binary-only 交辦（`agm-claude-release-<版本>-notice`）派協調者。
 
 **乾跑（`POST /api/release-triage/publish {dry_run:true}`／`agm release-triage publish --dry-run`）**：打開 `publish` 之前就要能證明「這一版會開哪幾張、內文長什麼樣、重跑會不會開第二張」，
 不必先拿正式 repo 試開一張。它是唯一在 `publish = false` 時也會啟動 gh 的路徑（由人明確觸發，kick 不跑它），且**只讀**：`auth status`／`repo view`／`label list`／`issue list`，
@@ -4823,9 +4823,9 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
 
 既有 `com.agm.claude-release` 排程仍呼叫 `bin/claude-release-kick.sh`，該檔是 `release-triage-kick.sh` 的相容入口；排程 binary diff 現在由 §18.2c 的同一則分診交辦處理。
-更新框的「請 AGM 解析」可走 Claude API 快速解析（issue #1919，用途 `changelog_review`，`daemon/src/claude_review_api.rs`）：兩層開關與 key 都在時，daemon 直接把 changelog（≤8000 字；claude 另附 `scripts/ops/claude_binary_diff.py` 的決定性差集報告，以外部行程跑、逾時就略過；codex 另附分診帳本的非 `none` verdict；herdr 只有 changelog）連同任務檔的「用得上」標準丟給 Sonnet，要求 3–5 行結論＋建議（`upgrade_now｜can_wait｜hold｜unknown`）＋≤5 項提防清單。外部文字一律框在 `fence_for` 圍欄內並寫明是資料；回傳只當資料、驗證 schema 才落帳；結論尾巴（來源、模型、**未實測**）由 daemon 寫死，codex 另提示可按「深入驗證」，herdr 註明只解析、驗證與升級窗口另請 AGM。狀態是 `{data_dir}/changelog-review/<kind>-<版>.json` 帳本（0600）：`review_state` 先看 bot 做完的結論、其次帳本 `completed`、再來 bot 進行中／帳本 `pending`（>5 分鐘當中斷）；成功後同一版不再被按鈕派 bot，herdr 另把版本寫進排程 kick 的去重檔 `supervisor/AGM/herdr-update.last`，kick 不會再派一次。任何失敗（沒 key、關閉、保險絲、逾時、HTTP 錯、JSON 不合）都退回下面的派協調者；`deep:true` 一律派協調者（codex 的快速版之後要實測才按）。以下是派協調者的路徑：
+更新框的「分析影響」可走 Claude API 快速解析（issue #1919，用途 `changelog_review`，`daemon/src/claude_review_api.rs`）：兩層開關與 key 都在時，daemon 直接把 changelog（≤8000 字；claude 另附 `scripts/ops/claude_binary_diff.py` 的決定性差集報告，以外部行程跑、逾時就略過；codex 另附分診帳本的非 `none` verdict；herdr 只有 changelog）連同任務檔的「用得上」標準丟給 Sonnet，要求 3–5 行結論＋建議（`upgrade_now｜can_wait｜hold｜unknown`）＋≤5 項提防清單。外部文字一律框在 `fence_for` 圍欄內並寫明是資料；回傳只當資料、驗證 schema 才落帳；結論尾巴（來源、模型、**未實測**）由 daemon 寫死，codex 標明實測需另行安排，herdr 註明只解析、驗證與升級窗口另請 AGM。狀態是 `{data_dir}/changelog-review/<kind>-<版>.json` 帳本（0600）：`review_state` 優先顯示 API 帳本（completed／pending／failed；pending >15 分鐘顯示 interrupted），沒有 API 紀錄才看 bot；成功後同一版不再被按鈕派 bot，herdr 另把版本寫進排程 kick 的去重檔 `supervisor/AGM/herdr-update.last`，kick 不會再派一次。API 模式由 `claude_review_api::ready` 判斷（總開關＋changelog_review 用途＋key 可讀）；最多三次呼叫，驗證錯誤回饋給 API，仍失敗記 failed＋error，UI 顯示「重試」；缺原文或標準直接 failed、不花 API。API 模式下包含 `deep:true` 都不派協調者；API 完成或失敗發 supervisor_changed，前端重讀。只有停用或缺 key 才保留下面的派協調者路徑；release-issue-task 的後續實作派工不變。
 
-更新框的「請 AGM 解析」仍由 daemon 直接派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
+僅 API 模式關閉時，更新框的「分析影響」由 daemon 直接派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
 都沒有就跳過），`--review-by patrol`、request id `agm-claude-release-<版本>`，協調者解析完把通知交給巡檢，使用者才看得到。規則：
 
 - 巡檢目錄的 `runtime.json` 由 setup 寫 `responder_bot_id`（協調者之後才建立時，`responder setup` 會回頭補寫；單角色安裝是 `null`）。

@@ -1,14 +1,13 @@
-//! 更新框「請 AGM 解析」的 API 路徑（issue #1919，用途 `changelog_review`）。
+//! 更新框「分析影響」的 API 路徑（issue #1919，用途 `changelog_review`）。
 //!
 //! 使用者按下按鈕時，不開 Claude Code session、不派 bot，改用共用的 Claude API client（[`crate::claude_api`]）
 //! 讀 changelog（claude 另加 binary diff 的固定差集文字；codex、agy、grok 另加分診帳本）出三到五行結論。
-//! 只在使用者按「請 AGM 解析」時才打 API；開框（`GET /api/claude-update/review`）只讀帳本，不打。同一個 (kind, 版本) 的結果鍵是
-//! `changelog-review/<kind>-<版>.json`，`completed`（與 5 分鐘內的 `pending`）之後再按都沿用，不再打 API。
+//! 只在使用者按「分析影響」時才打 API；開框（`GET /api/claude-update/review`）只讀帳本，不打。同一個 (kind, 版本) 的結果鍵是
+//! `changelog-review/<kind>-<版>.json`，`completed`（與 15 分鐘內的 `pending`）之後再按都沿用，不再打 API。
 //! 一律「只解析、沒實測」：結論尾巴由 daemon 寫死標明未實測，不靠模型自己講。
 //!
 //! 界線：
-//! * 任何一步不順（沒 key／用途關閉／保險絲用完／逾時／HTTP 錯／JSON 不合 schema）都退回原本的派 bot 路徑
-//!   （[`crate::claude_review`] 的 `dispatch_to_bot`），這裡不重試；
+//! * 用途停用或缺 key 才走 bot；API 模式至多三次呼叫，驗證錯誤回饋後重試，仍失敗落 failed。
 //! * 外部文字（changelog、diff、分診條目）一律框成引用並註明是資料、不是指令；API 回傳只當資料，驗證過才落帳；
 //! * 狀態是自己的檔案帳本 `{data_dir}/changelog-review/<kind>-<版>.json`（0600），不進 SQLite：
 //!   `claude_review::review_state` 先看這份。成功（`completed`）之後同一版不會再被按鈕或 herdr kick 派 bot。
@@ -27,13 +26,13 @@ const LEDGER_DIR: &str = "changelog-review";
 /// 結論最多這麼多 token（3–5 行 ＋ 建議 ＋ 提防清單）。
 const MAX_TOKENS: u32 = 1500;
 /// `pending` 超過這麼久還沒收尾＝daemon 中途重啟或任務掛了：當作失敗，允許重按。
-const PENDING_STALE_SECS: i64 = 300;
+const PENDING_STALE_SECS: i64 = 900;
 const MAX_LINE_CHARS: usize = 600;
 /// 分診帳本貼進 prompt 的條目上限（kept＋unmatched 通常 ≤80，非 none 的只是其中一部分）。
 const MAX_TRIAGE_LINES: usize = 40;
 const MAX_DIFF_CHARS: usize = 12_000;
 
-/// 哪些 kind 走 API：claude／codex／herdr／agy／grok 都解析（agy、grok 的「用得上」標準取自各自的任務檔，#1928）；`deep`（使用者明講要深入驗證）才走 bot。
+/// 哪些 kind 走 API：claude／codex／herdr／agy／grok 都解析（agy、grok 的「用得上」標準取自各自的任務檔，#1928）；API 模式包含 deep 請求也不派 bot。
 pub fn applies_to(kind: &str) -> bool {
     matches!(kind, "claude" | "codex" | "herdr" | "agy" | "grok")
 }
@@ -54,7 +53,7 @@ pub struct Record {
     pub result: Option<String>,
     /// 失敗原因的短標籤（不含 key 與回覆內容）。
     pub error_kind: Option<String>,
-    /// API 失敗後已退回派 bot。
+    /// 舊版相容欄位；API 模式不再退給 bot，固定 false。
     #[serde(default)]
     pub fell_back: bool,
     pub input_tokens: Option<i64>,
@@ -207,7 +206,9 @@ If nothing in the data matters to the project, say so in one summary line and pa
 /// 「用得上的標準」那一段：任務檔從「判斷「用得上」的標準」那行起、到「回報」那行前。找不到就整份（規則仍只有一份）。
 pub fn criteria_of(task_md: &str) -> String {
     let lines: Vec<&str> = task_md.lines().collect();
-    let Some(start) = lines.iter().position(|l| l.contains("用得上") && l.contains("標準")) else { return task_md.trim().to_string() };
+    let Some(start) = lines.iter().position(|l| l.contains("用得上") && l.contains("標準")) else {
+        return task_md.trim().to_string();
+    };
     let end = lines[start + 1..].iter().position(|l| l.trim_start().starts_with("回報")).map_or(lines.len(), |p| start + 1 + p);
     lines[start..end].join("\n").trim().to_string()
 }
@@ -245,7 +246,7 @@ struct ModelOut {
     watchlist: Vec<String>,
 }
 
-/// 模型回的 JSON → 驗證 → 渲染成給使用者的結論。任何一處不合都回短代碼（走退回路徑）。
+/// 模型回的 JSON → 驗證 → 渲染成給使用者的結論。任何一處不合都回短代碼（回饋給下一次 API 重試）。
 /// 結論的尾巴（來源、模型、未實測）由這裡寫死，不收模型的版本。
 pub fn validate_and_render(text: &str, kind: &str, model: &str, with_diff: bool, with_triage: bool) -> Result<String, &'static str> {
     let out: ModelOut = serde_json::from_str(text.trim()).map_err(|_| "schema")?;
@@ -281,7 +282,7 @@ pub fn validate_and_render(text: &str, kind: &str, model: &str, with_diff: bool,
     if kind == "herdr" {
         r.push_str("只做解析；驗證與升級窗口另請 AGM 處理。");
     } else if kind == "codex" {
-        r.push_str("要深入驗證（裝新版實測）請按「深入驗證」。");
+        r.push_str("需要實測時另行安排。");
     } else if kind == "agy" || kind == "grok" {
         r.push_str("只做解析；升級由使用者在各主機自己執行，要實測再另請 AGM 處理。");
     }
@@ -343,12 +344,8 @@ pub enum Started {
     Existing,
 }
 
-/// 占位（`pending`）並把 API 呼叫丟到背景。`on_fallback` 在 API 失敗後被呼叫一次，讓呼叫端接回派 bot 的路徑。
-pub async fn start<F, Fut>(app: &Arc<App>, job: Job, on_fallback: F) -> std::io::Result<Started>
-where
-    F: FnOnce(Arc<App>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
+/// 占位並在背景分析；API 模式的錯誤只落 failed，不派 bot。
+pub async fn start(app: &Arc<App>, job: Job) -> std::io::Result<Started> {
     let _gate = GATE.lock().await;
     if let Some(rec) = load(&app.data_dir, &job.kind, &job.to) {
         if live_state(&rec, chrono::Utc::now()).is_some() {
@@ -362,7 +359,7 @@ where
         status: "pending".into(),
         asked_at: crate::db::now(),
         answered_at: None,
-        model: None,
+        model: app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.model),
         result: None,
         error_kind: None,
         fell_back: false,
@@ -372,22 +369,20 @@ where
     save(&app.data_dir, &rec)?;
     let worker = Arc::clone(app);
     app.background_tasks.spawn(Box::pin(async move {
-        let failed = run(&worker, &job).await.is_err();
-        if failed {
-            on_fallback(worker).await;
-        }
+        let _ = run(&worker, &job).await;
+        worker.emit("supervisor_changed", json!({"changelog_review": job.to} )).await;
     }));
     Ok(Started::Spawned)
 }
 
-/// 打一次 API 並把結果落帳。成功回 `Ok`；任何失敗都記進帳本（`failed`，`fell_back`）並回 `Err`，由呼叫端退回派 bot。
+/// 最多三次 API 呼叫，成功或 failed 都落帳；不退給 bot。
 async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
     let triage = triage_digest(app, &job.kind, &job.to).await;
     let diff = match &job.binary_diff {
         Some(d) => run_binary_diff(d).await,
         None => None,
     };
-    let prompt = build_prompt(&Inputs {
+    let mut prompt = build_prompt(&Inputs {
         kind: &job.kind,
         to: &job.to,
         from: job.from.as_deref(),
@@ -397,13 +392,28 @@ async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
         binary_diff: diff.as_deref(),
         triage: triage.as_deref(),
     });
-    let reply = claude_api::complete(app, ClaudeRequest { use_case: USE_CASE, system: Some(SYSTEM.into()), prompt, max_tokens: MAX_TOKENS, format: Some(output_schema()) }).await;
-    let outcome = match reply {
-        Ok(r) => validate_and_render(&r.text, &job.kind, &r.model, diff.is_some(), triage.is_some())
-            .map(|text| (text, r.model.clone(), r.usage.clone()))
-            .map_err(|code| format!("bad_format:{code}")),
-        Err(e) => Err(error_kind(&e)),
-    };
+    let mut outcome = Err("analysis_failed".to_string());
+    for attempt in 0..3 {
+        if job.changelog.trim().is_empty() || job.criteria.trim().is_empty() {
+            outcome = Err("missing_analysis_input".into());
+            break;
+        }
+        let reply = claude_api::complete(app, ClaudeRequest { use_case: USE_CASE, system: Some(SYSTEM.into()), prompt: prompt.clone(), max_tokens: MAX_TOKENS, format: Some(output_schema()) }).await;
+        outcome = match reply {
+            Ok(r) if r.stop_reason.as_deref() != Some("end_turn") => Err("incomplete_output".into()),
+            Ok(r) => {
+                validate_and_render(&r.text, &job.kind, &r.model, diff.is_some(), triage.is_some()).map(|text| (text, r.model.clone(), r.usage.clone())).map_err(|code| format!("bad_format:{code}"))
+            }
+            Err(e) => Err(error_kind(&e)),
+        };
+        match &outcome {
+            Ok(_) => break,
+            Err(error) if attempt < 2 => {
+                prompt.push_str(&format!("\nPrevious attempt failed validation or API processing: {error}. Correct the response and return the required JSON.\n"));
+            }
+            Err(_) => {}
+        }
+    }
     let _gate = GATE.lock().await;
     let mut rec = load(&app.data_dir, &job.kind, &job.to).unwrap_or_else(|| blank(job));
     rec.answered_at = Some(crate::db::now());
@@ -419,7 +429,7 @@ async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
         Err(kind) => {
             rec.status = "failed".into();
             rec.error_kind = Some(kind);
-            rec.fell_back = true;
+            rec.fell_back = false;
             false
         }
     };
@@ -520,7 +530,7 @@ mod tests {
         let h = validate_and_render(&ok_json(), "herdr", "m", false, false).unwrap();
         assert!(h.contains("驗證與升級窗口另請 AGM"), "{h}");
         let c = validate_and_render(&ok_json(), "codex", "m", false, true).unwrap();
-        assert!(c.contains("分診帳本") && c.contains("深入驗證"), "{c}");
+        assert!(c.contains("分診帳本") && c.contains("需要實測"), "{c}");
     }
 
     #[test]

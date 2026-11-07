@@ -1155,9 +1155,9 @@ export interface IssueDetail extends Issue {
   body: string
 }
 
-/** `GET/POST /api/claude-update/review?kind=` 的 `review` 欄位：這一版的 AGM 解析到哪了（claude／codex 同一套，issue #561）。 */
+/** `GET/POST /api/claude-update/review?kind=` 的 `review` 欄位：這一版的 影響分析到哪了（claude／codex 同一套，issue #561）。 */
 export interface UpdateReview {
-  state: 'none' | 'pending' | 'done'
+  state: 'none' | 'pending' | 'done' | 'failed'
   target_bot_name: string
   asked_at: string
   answered_at: string
@@ -1166,6 +1166,7 @@ export interface UpdateReview {
   /** `api`＝Claude API 快速解析（沒實測，#1919）；空字串＝派 bot 做的。 */
   source: '' | 'api'
   model: string
+  error?: string
 }
 
 export interface BackgroundTask {

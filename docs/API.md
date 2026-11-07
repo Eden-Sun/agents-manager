@@ -1299,7 +1299,7 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
-## 請 AGM 解析 claude／codex／agy／grok 新版（使用者 2026-09-19；codex 2026-09-25，issue #561；agy、grok 2026-10-23，issue #1928）
+## 分析影響 claude／codex／agy／grok 新版（使用者 2026-09-19；codex 2026-09-25，issue #561；agy、grok 2026-10-23，issue #1928）
 
 兩支都收 `kind`（`claude`｜`codex`｜`herdr`｜`agy`｜`grok`，省略＝`claude`，其他 400）。路徑保留 `claude-update` 是為了舊前端；
 codex 走**同一套**派工對象、冪等與結論回填，差別只在：讀 codex 的 releases、任務檔是 `codex-release-task.md`、
@@ -1316,7 +1316,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
 `GET /api/release-triage?kind=herdr` 回 200 空的 `rows`；`verdicts`／`dispatched`／`publish` 對 herdr 仍是 400。
 
 ### `GET /api/claude-update/review`
-只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 user_only`。這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
+只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 user_only`。這一版的影響分析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
 「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
 
 ```json
@@ -1324,7 +1324,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
  "asked_at":"…","answered_at":"…","result":"2.1.277 沒有值得跟進的東西…"}}
 ```
 
-`state`：`none`（還沒派，UI 顯示按鈕）｜`pending`（派了還沒結論）｜`done`（`result` 就是結論原文）。
+`state`：`none`（尚未分析）｜`pending`（分析中）｜`done`（`result` 是結論）｜`failed`（`error` 是原因；UI 顯示「重試」）。API 分析另外回 `source:"api"` 與 `model`；pending 超過 15 分鐘視為 interrupted，可重試。
 只有空白的回覆算 `pending`——對方還沒講東西不該顯示成有結論。
 
 **先看 assignment，沒有能用的才退回收件匣事件**（issue #394，2026-09-23）：目標若是一般 bot（不是走交接
@@ -1336,7 +1336,7 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
 一則 assistant 訊息（派給 AGM 角色一律走交接佇列，不會有 assignment，2026-09-19 上線後實測踩過）。
 
 ### `POST /api/claude-update/review`
-`{kind?, host?, from?, to?, deep?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；`deep:true` 一律派協調者），
+`{kind?, host?, from?, to?, deep?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**（`[claude_api]` 與 `changelog_review` 用途都開、key 可讀時改走下面的 API 快速解析；API 模式下 `deep:true` 也不派協調者），
 唯讀——只建交辦，不 build、不重啟、不碰 CLI 的檔案。內容與 `scripts/ops/<kind>-release-task.md` 同一套規則，
 結論照那份任務的指示回到使用者入口。
 
@@ -1364,12 +1364,12 @@ agy、grok 同 codex：新版還沒裝，沒給 `to` 時取帳本最新版；任
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
 - **API 快速解析**（#1919，SPEC §4.3d／§18.5a）：`[claude_api] enabled` ＋ `[claude_api.uses.changelog_review] enabled` ＋ key 可讀時，
   claude／codex／herdr 都不開 session、不派 bot：先占位（`changelog-review` 帳本 `pending`）、API 呼叫在背景跑，回應 `mode:"api"`、
-  `review.state:"pending"`，網頁輪詢 `GET` 取結論。`review` 多兩個欄位：`source:"api"`、`model`；結論尾巴由 daemon 寫死「未實測」。
-  API 任何一步不順（保險絲用完、逾時、HTTP 錯、JSON 不合 schema）→ 帳本記 `failed`、背景接回上面的派協調者；沒開 API 時行為與以前完全一樣。
-  `deep:true`（網頁 codex 的「深入驗證」）不走 API、只看 bot 那條路的冪等，不被 API 的快速結論擋住；bot 做完的結論蓋過 API 的。
+  `review.state:"pending"`，網頁收到 `supervisor_changed` 後重讀 GET 取結論。`review` 多兩個欄位：`source:"api"`、`model`；結論尾巴由 daemon 寫死「未實測」。
+  API 模式以總開關、用途開關與 key 可讀為界（`claude_review_api::ready`）。最多三次呼叫（首次＋兩次重試），schema／內容驗證錯誤回饋給下一次 API；保險絲、逾時、HTTP、驗證等失敗用盡重試後記 `failed`，絕不派協調者。GET 的 `review.state:"failed"` 與 `review.error` 顯示原因，使用者重新 POST 即重試；成功結果永久重用。缺 changelog／任務標準時直接記 `missing_analysis_input`，不呼叫 API。停用或缺 key 才保留協調者路徑。
+  API 模式下忽略 `deep:true` 的 bot 語意；更新框不提供自動派 bot 的深入驗證按鈕。開 issue 後的 `release-issue-task` 實作交辦不變。
 - 那台主機還讀不到版本、也沒給 `to` → 409 `no_version`（帶 `kind`）；
 - changelog 原文框成引用（反引號數比原文最長那串多一個）並註明是資料，上限 8000 字，超過截斷並註明；
-  抓不到 changelog 照樣派，正文請協調者改用 diff binary 的做法。
+  API 模式抓不到 changelog 記 failed；僅 API 模式關閉時才請協調者改用 diff binary。
 
 ## 外部 Cargo 主機（issue #104）
 
@@ -2765,7 +2765,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--si
 `{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
 
 - `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,assigned_bot_id,dispatch_gen,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。
-- `POST /api/release-triage/auto {kind, versions[], binary_diff?, check_only?}`（#1919）：daemon 自己用 Claude API（`[claude_api.uses.release_triage]`）分診這幾個 `pending` 版本，驗過就落帳（與 `verdicts` 同一個驗證／落帳函式）並寫一則 `release_triage_notice` 給巡檢。回 `{kind, results:[{version, outcome:judged|empty|fallback|skipped, status?, reason?, quiet}], notice:{event_key,to,text}|null, binary_used}`：`judged`／`empty` 已落帳（離開 `pending`）、`fallback` 沒成（沒開／沒 key／逾時／HTTP 錯／JSON 不合 schema／驗證不過，該版仍 `pending`，`quiet` 為真＝只是沒開或沒 key）、`skipped` 不是 `pending` 或帳本沒有；`binary_diff` 是 `claude_binary_diff.py` 的報告文字（附在最後一版的 prompt、結論併進通知，`binary_used` 為真表示最後一版判完且用到了）；`check_only: true` 只回 `{enabled}`（總開關與用途開關都開），不呼叫 API。同一時間只跑一個。CLI：`agm release-triage auto --kind K --version V… [--binary-diff-file F]`／`--check`。
+- `POST /api/release-triage/auto {kind, versions[], binary_diff?, check_only?}`（#1919）：daemon 自己用 Claude API（`[claude_api.uses.release_triage]`）分診這幾個 `pending` 版本，驗過就落帳（與 `verdicts` 同一個驗證／落帳函式）並寫一則 `release_triage_notice` 給巡檢。回 `{kind, results:[{version, outcome:judged|empty|failed|fallback|skipped, status?, reason?, quiet}], notice:{event_key,to,text}|null, binary_used}`：`judged`／`empty` 已落帳（離開 `pending`）、`fallback` 僅代表 API 模式關閉（停用／缺 key，仍 pending、quiet=true）；API 模式中每版最多三次，驗證錯誤回饋後重試，用盡次數記 `failed`，原因與模型存在 `verdicts.analysis:{source:"api",model,error}`。UI 的「重試」明確 POST 同一路由及版本，可重做 API failed；已成功的版本不再呼叫模型、`skipped` 不是 `pending` 或帳本沒有；`binary_diff` 是 `claude_binary_diff.py` 的報告文字（附在最後一版的 prompt、結論併進通知，`binary_used` 為真表示最後一版判完且用到了）；`check_only: true` 只回 `{enabled}`（總開關、用途開關都開且 key 可讀；`ApiModel::enabled`），不呼叫 API。同一時間只跑一個。CLI：`agm release-triage auto --kind K --version V… [--binary-diff-file F]`／`--check`。
 - `POST /api/release-triage/dispatched {kind, versions[], bot_id}` → `{kind, dispatched, bot_id}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）；記下收件 `bot_id`、`dispatch_gen`＋1（#801）。整批一筆交易（#1267）：有任何一版不是 `pending`（已派出、已判完、帳本沒有）→ `409 {reason:"not_pending", version, message}`，整批都不標、`dispatch_gen` 不動；同一請求裡重複的版本只算一次。`bot_id` 不是現存的 bot 就 400。
 - `POST /api/release-triage/verdicts {kind, version, verdicts:[{entry_id, verdict:guard|adopt|upgrade-arg|none, reason, module}], issues:[{entry_ids[], title, goal, suggestion, acceptance, verdict?, duplicate_of?}]}`。
   只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。 `duplicate_of` 只能是帳本裡（任何版本）已記錄的 release-triage issue 編號（publish 會直接對它 `gh issue comment`）；填了別的編號整份退回。

@@ -844,7 +844,7 @@ export async function installRemoteCargoToolchain(): Promise<{
 
 function toReview(raw: unknown): UpdateReview {
   const o = isRec(raw) ? raw : {}
-  const state = o.state === 'done' || o.state === 'pending' ? o.state : 'none'
+  const state = o.state === 'done' || o.state === 'pending' || o.state === 'failed' ? o.state : 'none'
   return {
     state,
     target_bot_name: str(o.target_bot_name),
@@ -853,11 +853,12 @@ function toReview(raw: unknown): UpdateReview {
     result: str(o.result),
     source: o.source === 'api' ? 'api' : '',
     model: str(o.model),
+    error: str(o.error),
   }
 }
 
 /**
- * 這一版的 AGM 解析到哪了（更新框一打開就讀，有結論就直接顯示）。`version` 是 daemon 實際查的那一版：
+ * 這一版的 影響分析到哪了（更新框一打開就讀，有結論就直接顯示）。`version` 是 daemon 實際查的那一版：
  * claude 沒給 `to` 時就是磁碟上那一版，更新框拿它當分診區間的終點。
  */
 export async function fetchUpdateReview(input: {
@@ -873,10 +874,11 @@ export async function fetchUpdateReview(input: {
   return { version: str(o.version), review: toReview(o.review) }
 }
 
-/** 請 AGM 解析這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
+/** 分析影響這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
 export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null; deep?: boolean }): Promise<{
   version: string
   target_bot_name: string
+  source_name: string
   duplicate: boolean
 }> {
   const raw = await transport.request('POST', '/claude-update/review', {
@@ -887,7 +889,11 @@ export async function requestUpdateReview(input: { kind: string; host?: string; 
     deep: input.deep ? true : undefined,
   })
   const o = isRec(raw) ? raw : {}
-  return { version: str(o.version), target_bot_name: str(o.target_bot_name), duplicate: o.duplicate === true }
+  const review = toReview(o.review)
+  const source_name = review.source === 'api'
+    ? (review.model ? t('Claude API（{model}）', { model: review.model }) : 'Claude API')
+    : str(o.target_bot_name)
+  return { version: str(o.version), target_bot_name: str(o.target_bot_name), source_name, duplicate: o.duplicate === true }
 }
 
 /** 上游新版分診帳本（SPEC §18.2c）：更新框顯示這幾版分析過了沒、結論是什麼（issue #561）。 */
@@ -1280,4 +1286,9 @@ export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull
 
 export async function setPaneAlias(host: string, paneId: string, alias: string): Promise<void> {
   await transport.request('PUT', `/panes/${encodeURIComponent(paneId)}/alias?host=${encodeURIComponent(host)}`, { alias })
+}
+
+/** 明確重試失敗的逐條影響分析；成功版本由 daemon 帳本去重。 */
+export async function retryReleaseTriage(kind: string, version: string): Promise<void> {
+  await transport.request('POST', '/release-triage/auto', { kind, versions: [version] })
 }

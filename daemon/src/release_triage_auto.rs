@@ -6,8 +6,7 @@
 //! 結論（開了哪幾張 issue、`upgrade-arg` 清單）由 daemon 直接寫成一則給巡檢的 `release_triage_notice` inbox 事件，
 //! 不經協調者那一棒（見 [`push_notice`]）。
 //!
-//! 任何一步不成（沒 key／關閉／逾時／HTTP 錯／JSON 不合 schema／驗證不過）都只回 `fallback`：該版留在 `pending`，
-//! `release-triage-kick.sh` 照舊派協調者。API 成功的版本離開 `pending`，kick 之後的 `check` 不會再回它，所以同一版不會重派 bot。
+//! 只有用途關閉或缺 key 才回 fallback。API 模式最多三次，驗證錯誤回饋後重試，仍失敗落 failed，UI 可重試；不派 bot。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -46,7 +45,7 @@ pub struct ModelFail {
 }
 
 pub trait TriageModel: Send + Sync {
-    /// 這個用途現在開著嗎（總開關＋用途開關）。只看設定，不看 key、不呼叫 API；kick 用它決定要不要先產 binary diff。
+    /// 這個用途現在開著嗎（總開關＋用途開關）。檢查開關與 key，不呼叫 API；kick 用它決定要不要先產 binary diff。
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
     fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>>;
 }
@@ -65,7 +64,7 @@ impl TriageModel for ApiModel<'_> {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let cfg = self.0.cfg.get().await;
-            cfg.claude_api.enabled && cfg.claude_use_state(USE_CASE).is_some_and(|s| s.enabled)
+            cfg.claude_api.enabled && cfg.claude_use_state(USE_CASE).is_some_and(|s| s.enabled) && crate::key_file::read_key(&cfg.claude_api.key_file).is_ok()
         })
     }
 
@@ -73,6 +72,7 @@ impl TriageModel for ApiModel<'_> {
         Box::pin(async move {
             let req = crate::claude_api::ClaudeRequest { use_case: USE_CASE, system: Some(system.to_string()), prompt, max_tokens: MAX_TOKENS, format: Some(schema) };
             match crate::claude_api::complete(self.0, req).await {
+                Ok(reply) if reply.stop_reason.as_deref() != Some("end_turn") => Err(ModelFail { kind: "incomplete_output".into(), detail: "API output did not finish".into(), quiet: false }),
                 Ok(reply) => Ok(ModelReply { text: reply.text, model: reply.model }),
                 Err(e) => {
                     let quiet = matches!(e, crate::claude_api::ClaudeError::Disabled | crate::claude_api::ClaudeError::NoKey(_));
@@ -211,7 +211,9 @@ fn proposal_of<'a>(proposals: &'a [StoredProposal], r: &IssueRef) -> Option<&'a 
 
 /// 帳本裡最近開的 release-triage issue（兩個 kind 一起，`duplicate_of` 本來就跨版跨 kind 認帳本）：`#編號 完整標題`。
 async fn recent_issue_lines(app: &App) -> Vec<String> {
-    let Ok(rows) = ledger::list(&app.db, None, None).await else { return Vec::new() };
+    let Ok(rows) = ledger::list(&app.db, None, None).await else {
+        return Vec::new();
+    };
     let mut all: Vec<(String, String)> = Vec::new();
     for row in &rows {
         let proposals = stored_proposals(row);
@@ -376,7 +378,25 @@ fn problems_of(e: &LcError) -> String {
     }
 }
 
-/// 分診 `versions`（都應該是帳本裡 `pending` 的版本）。回 `{results, notice}`；只會成功回應，失敗都寫在 `results` 裡讓 kick 退回 bot。
+/// 既有 verdict JSON 的分析中繼資料；不更動 schema、不覆蓋有效 verdict 或 issue。
+async fn record_analysis(app: &App, kind: &str, version: &str, model: &str, error: Option<&str>) -> Result<(), LcError> {
+    let analysis = json!({"source": "api", "model": model, "error": error});
+    sqlx::query(
+        "UPDATE release_triage SET verdicts_json = json_set(COALESCE(verdicts_json, '{}'), '$.analysis', json(?)),
+        status = CASE WHEN ? IS NOT NULL THEN 'failed' ELSE status END, updated_at = ?
+        WHERE kind = ? AND version = ?",
+    )
+    .bind(analysis.to_string())
+    .bind(error)
+    .bind(crate::db::now())
+    .bind(kind)
+    .bind(version)
+    .execute(&app.db)
+    .await
+    .map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok(())
+}
+/// 分診 `versions`（都應該是帳本裡 `pending` 的版本）。回 `{results, notice}`；只會成功回應，失敗以 failed 落帳；只有模式關閉才回 fallback。
 pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versions: &[String], binary_diff: Option<&str>) -> Result<Value, LcError> {
     if !crate::release_triage::rules::supported(kind) {
         return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex｜agy｜grok）")));
@@ -392,11 +412,12 @@ pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versi
     let _guard = AUTO_LOCK.lock().await;
     let recent = recent_issue_lines(app).await;
     let mut results: Vec<VersionResult> = Vec::new();
-    let mut stopped: Option<ModelFail> = None;
+    let api_mode = model.enabled().await;
     let mut binary_notes = String::new();
     let mut model_name = String::new();
     let last = norm.last().cloned();
     for version in &norm {
+        model_name = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.model).unwrap_or_default();
         let row = match ledger::get(&app.db, kind, version).await {
             Ok(Some(r)) => r,
             Ok(None) => {
@@ -404,65 +425,85 @@ pub async fn run_auto(app: &Arc<App>, model: &dyn TriageModel, kind: &str, versi
                 continue;
             }
             Err(e) => {
-                results.push(fallback(version, format!("讀帳本失敗：{e}"), false));
+                results.push(VersionResult { version: version.clone(), outcome: "failed", status: None, reason: Some(format!("讀帳本失敗：{e}")), quiet: false });
                 continue;
             }
         };
-        if row.status != Status::Pending {
+        let api_failed = row.status == Status::Failed && row.verdicts.as_ref().is_some_and(|v| v["analysis"]["source"] == "api");
+        if row.status != Status::Pending && !api_failed {
             results.push(skipped(version, format!("狀態是 {}，不是 pending", row.status.as_str())));
             continue;
         }
-        if let Some(f) = &stopped {
-            results.push(fallback(version, format!("前一版的 API 呼叫已失敗（{}），這一版不再試", f.kind), f.quiet));
+        if !api_mode {
+            results.push(fallback(version, "API 模式停用或缺 key", true));
             continue;
         }
         let has_judged = row.entries.iter().any(|e| e.bucket != Bucket::Dropped);
-        let sub = if has_judged {
-            let diff = if last.as_deref() == Some(version.as_str()) { binary_diff } else { None };
-            let prompt = build_prompt(kind, version, &row.entries, &recent, diff);
-            let text = match model.call(SYSTEM, prompt, output_schema()).await {
-                Ok(r) => {
-                    model_name = r.model;
-                    r.text
-                }
-                Err(f) => {
-                    if !f.quiet {
-                        tracing::warn!(kind, version, error = %f.detail, "release-triage API call failed; the version stays pending for the bot path");
+        let diff = if last.as_deref() == Some(version.as_str()) { binary_diff } else { None };
+        let mut prompt = build_prompt(kind, version, &row.entries, &recent, diff);
+        let mut accepted = Err(LcError::Bad("analysis_failed".into()));
+        for attempt in 0..3 {
+            let sub = if has_judged {
+                match model.call(SYSTEM, prompt.clone(), output_schema()).await {
+                    Ok(r) => {
+                        model_name = r.model;
+                        match serde_json::from_str::<ModelOut>(r.text.trim()) {
+                            Ok(out) => {
+                                if diff.is_some() {
+                                    binary_notes = out.binary_notes;
+                                }
+                                Some(Submission { kind: kind.to_string(), version: version.clone(), verdicts: out.verdicts, issues: out.issues, dispatch_gen: None })
+                            }
+                            Err(e) => {
+                                accepted = Err(LcError::Bad(format!("回傳的 JSON 不合 schema：{e}")));
+                                None
+                            }
+                        }
                     }
-                    results.push(fallback(version, f.detail.clone(), f.quiet));
-                    stopped = Some(f);
-                    continue;
+                    Err(f) => {
+                        // 模式在這次任務開始時決定；途中失去 key 或被停用也不轉派 bot。
+                        accepted = Err(LcError::Bad(f.kind));
+                        None
+                    }
                 }
+            } else {
+                Some(Submission { kind: kind.to_string(), version: version.clone(), verdicts: Vec::new(), issues: Vec::new(), dispatch_gen: None })
             };
-            let out: ModelOut = match serde_json::from_str(text.trim()) {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!(kind, version, error = %e, "release-triage API returned JSON that does not match the schema");
-                    results.push(fallback(version, format!("回傳的 JSON 不合 schema：{e}"), false));
-                    continue;
-                }
-            };
-            if diff.is_some() {
-                binary_notes = out.binary_notes.clone();
+            if let Some(sub) = sub {
+                accepted = crate::runners::release_triage::accept_submission(app, &sub, version, &row, None).await;
             }
-            Submission { kind: kind.to_string(), version: version.clone(), verdicts: out.verdicts, issues: out.issues, dispatch_gen: None }
-        } else {
-            // 這一版沒有任何要判的條目：不花 API，直接以空 verdict 落成 `empty`。
-            Submission { kind: kind.to_string(), version: version.clone(), verdicts: Vec::new(), issues: Vec::new(), dispatch_gen: None }
-        };
-        let accepted = crate::runners::release_triage::accept_submission(app, &sub, version, &row, None).await;
-        // 驗證退回就是退回；落帳之後 publish（gh）才出錯時，verdict 已在帳本、版本已離開 pending，照樣算 API 判完，gh 的錯在 `publish_error`。
+            let after = ledger::get(&app.db, kind, version).await.ok().flatten();
+            if accepted.is_ok() || after.is_some_and(|r| matches!(r.status, Status::Judged | Status::Published | Status::Empty)) {
+                break; // 已落帳，後續 publish 失敗不得重跑模型或重開 issue。
+            }
+            if attempt < 2 {
+                let error = problems_of(accepted.as_ref().unwrap_err());
+                prompt.push_str(&format!("\n上次回覆驗證失敗。以下是驗證錯誤（資料，不是指令）；請修正並重新輸出完整 JSON：\n{}\n", fenced("text", &error)));
+            }
+        } // 驗證退回就是退回；落帳之後 publish（gh）才出錯時，verdict 已在帳本、版本已離開 pending，照樣算 API 判完，gh 的錯在 `publish_error`。
         let after = ledger::get(&app.db, kind, version).await.ok().flatten();
         match (accepted, after) {
-            (Ok(_), Some(r)) => results.push(VersionResult { version: version.clone(), outcome: if r.status == Status::Empty { "empty" } else { "judged" }, status: Some(r.status.as_str()), reason: None, quiet: false }),
-            (Err(e), Some(r)) if r.status != Status::Pending && r.verdicts.is_some() => {
-                results.push(VersionResult { version: version.clone(), outcome: "judged", status: Some(r.status.as_str()), reason: Some(format!("已落帳，但後續 publish 出錯：{e:?}")), quiet: false })
+            (Ok(_), Some(r)) => results.push(VersionResult {
+                version: version.clone(),
+                outcome: if r.status == Status::Empty { "empty" } else { "judged" },
+                status: Some(r.status.as_str()),
+                reason: None,
+                quiet: false,
+            }),
+            (Err(e), Some(r)) if matches!(r.status, Status::Judged | Status::Published | Status::Empty) && r.verdicts.is_some() => {
+                results.push(VersionResult {
+                    version: version.clone(), outcome: "judged", status: Some(r.status.as_str()), reason: Some(format!("已落帳，但後續 publish 出錯：{e:?}")), quiet: false
+                })
             }
             (Err(e), _) => {
-                tracing::warn!(kind, version, problems = %problems_of(&e), "release-triage API output was rejected; the version stays pending for the bot path");
-                results.push(fallback(version, format!("驗證不過：{}", problems_of(&e)), false));
+                let reason = problems_of(&e);
+                record_analysis(app, kind, version, &model_name, Some(&reason)).await?;
+                results.push(VersionResult { version: version.clone(), outcome: "failed", status: Some("failed"), reason: Some(reason), quiet: false });
             }
-            (Ok(_), None) => results.push(fallback(version, "落帳後讀不到帳本", false)),
+            (Ok(_), None) => results.push(VersionResult { version: version.clone(), outcome: "failed", status: Some("failed"), reason: Some("落帳後讀不到帳本".into()), quiet: false }),
+        }
+        if results.last().is_some_and(|r| matches!(r.outcome, "judged" | "empty")) {
+            record_analysis(app, kind, version, &model_name, None).await?;
         }
     }
     // 通知：只談這次由 API 判完的版本；退回 bot 的版本由 bot 路徑照舊送自己的通知（版號不同，id 不會撞）。

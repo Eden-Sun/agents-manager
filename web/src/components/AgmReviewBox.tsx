@@ -4,9 +4,9 @@
  * 兩個來源，都只讀：
  * 1. **上游分診**（`/api/release-triage`，SPEC §18.2c）：帳本早就逐條分析過 claude／codex 每一版，這裡把
  *    `(from, to]` 區間內每一版的提防／採用／值得早升與提案 issue 攤出來。帳本沒有這一版就寫「尚未分析」（agy、grok 同 claude／codex，#1928）。
- * 2. **AGM 解析**（`/api/claude-update/review?kind=`）：使用者按「請 AGM 解析」派出去的那一筆，三種狀態：
+ * 2. **影響分析**（`/api/claude-update/review?kind=`）：使用者按「分析影響」派出去的那一筆，三種狀態：
  *    還沒派、派了還沒結論、有結論（**直接把結論印在框裡**）。
- * 兩邊都沒東西時整塊寫「尚未分析」，指向框底的「請 AGM 解析」。
+ * 兩邊都沒東西時整塊寫「尚未分析」，指向框底的「分析影響」。
  */
 import { useEffect, useState } from 'react'
 import * as api from '../api'
@@ -52,7 +52,7 @@ export function AgmReviewBox({
     }
   }, [kind, host, from, to, key])
 
-  // AGM 給出結論（或接手）會推 `supervisor_changed`：還沒有結論時據此只重讀「AGM 解析」那一半（框不閃、分診帳本不重抓）。
+  // AGM 給出結論（或接手）會推 `supervisor_changed`：還沒有結論時據此只重讀「影響分析」那一半（框不閃、分診帳本不重抓）。
   const rev = useStore((s) => s.supervisorRev)
   const reviewState = loaded?.key === key ? loaded.review?.state : undefined
   useEffect(
@@ -73,16 +73,22 @@ export function AgmReviewBox({
     [rev, reviewState, kind, host, to, key],
   )
 
-  // 深入驗證（#1919）：API 快速解析只讀 changelog；codex 要實測就再派一次 bot（`deep`）。
   const t = useT()
-  const [deepKey, setDeepKey] = useState<string | null>(null)
-  const [deepErr, setDeepErr] = useState('')
-  const askDeep = () => {
-    setDeepErr('')
-    api
-      .requestUpdateReview({ kind, host, from, to: to ?? loaded?.version ?? null, deep: true })
-      .then(() => setDeepKey(key))
-      .catch((e) => setDeepErr(e instanceof Error ? e.message : String(e)))
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState('')
+  const retry = async (version?: string) => {
+    setRetrying(true)
+    setRetryError('')
+    try {
+      if (version) await api.retryReleaseTriage(kind, version)
+      else await api.requestUpdateReview({ kind, host, from, to: to ?? loaded?.version ?? null })
+      const [r, triage] = await Promise.all([api.fetchUpdateReview({ kind, host, to }), api.fetchReleaseTriage(kind).catch(() => null)])
+      setLoaded((cur) => cur && cur.key === key ? { ...cur, review: r.review, triage: triage ? triageForRange(triage.rows, triage.repo, from, cur.version) : cur.triage } : cur)
+    } catch (e) {
+      setRetryError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRetrying(false)
+    }
   }
 
   const cur = loaded?.key === key ? loaded : null
@@ -93,58 +99,46 @@ export function AgmReviewBox({
   return (
     <section className="agm-review" aria-label={t('{kind} 新版分析', { kind })}>
       <div className="agm-review-head">
-        <strong>{t('分析')}</strong>
+        <strong>{t('影響分析')}</strong>
         <span className="agm-review-who">
           {kind} {from && cur.version && from !== cur.version ? `${from} → ${cur.version}` : cur.version}
         </span>
       </div>
       {!analysed ? (
-        <p className="agm-review-none">{t('尚未分析——按下方「請 AGM 解析」，結論會回到這裡。')}</p>
+        <p className="agm-review-none">{t('尚未分析——按下方「分析影響」，結論會回到這裡。')}</p>
       ) : null}
       {triage && triage.some((v) => v.state !== 'missing') ? (
         <div className="triage">
           {triage.map((v) => (
-            <TriageBlock key={v.version} v={v} />
+            <TriageBlock key={v.version} v={v} retry={() => void retry(v.version)} retrying={retrying} />
           ))}
         </div>
       ) : null}
       {review && review.state !== 'none' ? (
         <div className="agm-review-agm">
           <div className="agm-review-head">
-            <strong>{t('AGM 解析')}</strong>
+            <strong>{t('影響分析')}</strong>
             <span className="agm-review-who">
               {review.source === 'api'
-                ? review.state === 'done'
-                  ? (review.model
-                    ? t('Claude API 快速解析（{model}） · 未實測', { model: review.model })
-                    : t('Claude API 快速解析 · 未實測'))
-                  : t('Claude API 解析中…')
-                : review.state === 'done'
-                  ? `${review.target_bot_name || 'AGM'} · ${review.answered_at ? new Date(review.answered_at).toLocaleString() : ''}`
-                  : t('{name} 解析中…', { name: review.target_bot_name || 'AGM' })}
+                ? (review.model ? t('Claude API（{model}）', { model: review.model }) : 'Claude API')
+                : review.target_bot_name || 'AGM'}
+
             </span>
           </div>
           {review.state === 'done' ? (
             <pre className="agm-review-body">{review.result}</pre>
+          ) : review.state === 'failed' ? (
+            <p role="alert">
+              {t('影響分析失敗：{reason}', { reason: review.error || t('原因不明') })}{' '}
+              <button type="button" disabled={retrying} onClick={() => void retry()}>{t('重試')}</button>
+            </p>
           ) : (
-            <p className="hint">{t('派出去了，結論回來就會出現在這裡。')}</p>
+            <p className="hint">{t('分析中，結論回來就會出現在這裡。')}</p>
           )}
-          {review.source === 'api' && review.state === 'done' && kind === 'codex' ? (
-            deepKey === key ? (
-              <p className="hint">{t('已請 AGM 深入驗證（裝新版實測），做完會換成它的結論。')}</p>
-            ) : (
-              <p className="hint">
-                <button type="button" onClick={askDeep}>
-                  {t('深入驗證')}
-                </button>{' '}
-                {deepErr
-                  ? t('請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。 失敗：{reason}', { reason: deepErr })
-                  : t('請 AGM 裝新版到拋棄式目錄實測（會開 Claude Code session）。')}
-              </p>
-            )
-          ) : null}
+
         </div>
       ) : null}
+      {retryError ? <p role="alert">{retryError}</p> : null}
     </section>
   )
 }
@@ -153,11 +147,11 @@ const STATE_TEXT: Record<TriageVersion['state'], string> = {
   judged: '',
   empty: msg('看過了，沒有要處理的'),
   pending: msg('分診中…'),
-  failed: msg('分診失敗（逾時三次）'),
+  failed: msg('影響分析失敗'),
   missing: msg('尚未分析'),
 }
 
-function TriageBlock({ v }: { v: TriageVersion }) {
+function TriageBlock({ v, retry, retrying }: { v: TriageVersion; retry: () => void; retrying: boolean }) {
   const t = useT()
   const nothing = !v.guard.length && !v.adopt.length && !v.upgrade.length && !v.issues.length
   return (
@@ -167,6 +161,8 @@ function TriageBlock({ v }: { v: TriageVersion }) {
         {STATE_TEXT[v.state] ? <span className="triage-ver-state">{t.tr(STATE_TEXT[v.state])}</span> : null}
         {v.state === 'judged' && nothing ? <span className="triage-ver-state">{t('沒有要處理的')}</span> : null}
       </div>
+      {v.analysis?.source === 'api' ? <p className="hint">{v.analysis.model ? t('Claude API（{model}）', { model: v.analysis.model }) : 'Claude API'}</p> : null}
+      {v.state === 'failed' ? <p role="alert">{v.analysis?.error || t('原因不明')}{' '}<button type="button" disabled={retrying} onClick={retry}>{t('重試')}</button></p> : null}
       <Items label={t('提防')} tone="guard" items={v.guard} />
       <Items label={t('採用')} tone="adopt" items={v.adopt} />
       <Items label={t('值得早升')} tone="upgrade" items={v.upgrade} />
