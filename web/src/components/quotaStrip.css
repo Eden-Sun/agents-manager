@@ -1175,26 +1175,19 @@
   display: inline-flex;
 }
 
-/* logo 右上角的小數字徽章＝可用重置券張數；快到期（<48h）換警示色。 */
+/* logo 右下角的小字數字＝可用重置券張數（無底色，避免像未讀訊息數）；快到期（<48h）只換文字色。 */
 .quota-credit-badge {
   position: absolute;
-  top: -5px;
-  right: -9px;
-  min-width: 12px;
-  padding: 0 3px;
-  box-sizing: border-box;
-  border-radius: 6px;
-  background: var(--accent-ink);
-  color: var(--bg);
+  bottom: -4px;
+  right: -7px;
   font-size: 9px;
-  font-weight: 700;
-  line-height: 12px;
-  text-align: center;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-faint);
   font-variant-numeric: tabular-nums;
   cursor: help;
 }
 
 .quota-credit-badge.urgent {
-  background: var(--warn);
-  color: #1a1200;
+  color: var(--warn);
 }
