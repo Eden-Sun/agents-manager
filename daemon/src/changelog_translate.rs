@@ -3157,6 +3157,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_total_deadline_is_failed_retryable_and_does_not_overlap_or_resend() {
+        struct DeadlineClient;
+        impl MessagesClient for DeadlineClient {
+            fn complete<'a>(&'a self, req: &'a TranslateRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+                Box::pin(stream::complete_with_total(req, std::time::Duration::from_millis(200)))
+            }
+        }
+        let (env, _) = boot(vec![]).await;
+        enable(&env).await;
+        let (endpoint, entered, server) = stream::endless_ping_server().await;
+        env.app.cfg.update(|c| {
+            c.changelog_translate.endpoint = endpoint;
+            c.claude_api.timeout_ms = 1000;
+            Ok(())
+        }).await.unwrap();
+        env.app.changelog_translate.set_client(Arc::new(DeadlineClient));
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await.unwrap();
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let failed = until_status(&env.app, "2.1.5", "failed").await;
+        assert_eq!(failed["error"], "timeout");
+        assert_eq!(failed["attempts"].as_array().unwrap().len(), 1);
+        assert!(failed["retry_after"].is_string());
+        let again = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(again["status"], "failed");
+        assert_eq!(again["attempts"].as_array().unwrap().len(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn long_agy_release_uses_model_maximum_once_and_keeps_complete_output() {
         let body = "- 修復長版更新說明，保留終端狀態、設定路徑與完整的版本條目。\n".repeat(110);
         let text = json!({"summary": ["改善更新", "保留原文", "完整翻譯"],

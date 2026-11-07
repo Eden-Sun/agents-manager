@@ -1,8 +1,10 @@
 //! One tool-free Messages stream. The shared timeout bounds connection/idle time,
-//! not total generation time: pings keep long generations alive without resends.
+//! while a separate ten-minute deadline prevents endless pings from holding a slot.
 use super::{ClientError, ClientOutcome, MessagesClient, TranslateRequest, Usage};
 use serde_json::{json, Value};
 use std::{future::Future, pin::Pin, time::Duration};
+
+const MAX_STREAM_DURATION: Duration = Duration::from_secs(10 * 60);
 
 pub struct StreamingClient;
 
@@ -92,6 +94,16 @@ impl Events {
 }
 
 async fn complete(req: &TranslateRequest) -> Result<ClientOutcome, ClientError> {
+    complete_with_total(req, MAX_STREAM_DURATION).await
+}
+
+/// Dropping the timed-out future cancels its HTTP request before the hub releases the slot.
+/// No continuation or replacement request is issued here.
+pub(super) async fn complete_with_total(req: &TranslateRequest, total: Duration) -> Result<ClientOutcome, ClientError> {
+    tokio::time::timeout(total, complete_stream(req)).await.map_err(|_| ClientError::Timeout)?
+}
+
+async fn complete_stream(req: &TranslateRequest) -> Result<ClientOutcome, ClientError> {
     #[cfg(test)]
     if !crate::claude_api::test_endpoint_is_loopback(&req.endpoint)
         && std::env::var("CHANGELOG_TRANSLATION_PAID_PROBE").as_deref() != Ok("1") {
@@ -125,6 +137,33 @@ async fn complete(req: &TranslateRequest) -> Result<ClientOutcome, ClientError> 
 }
 
 #[cfg(test)]
+pub(super) async fn endless_ping_server() -> (String, std::sync::Arc<tokio::sync::Notify>, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/messages", listener.local_addr().unwrap());
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&buf[..n]);
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+        signal.notify_one();
+        while socket.write_all(b"data: {\"type\":\"ping\"}\n\n").await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // A replacement/overlapping request would already be queued on this listener.
+        assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+    });
+    (endpoint, entered, server)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -149,6 +188,17 @@ mod tests {
         assert!(Events::default().finish().is_err(), "EOF is not completion");
         assert!(Events::default().feed(b"data: {bad}\n").is_err());
         assert!(Events::default().feed(b"data: {\"type\":\"error\"}\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn endless_pings_hit_total_deadline_and_cancel_without_resending() {
+        assert_eq!(MAX_STREAM_DURATION, Duration::from_secs(600));
+        let (endpoint, _, server) = endless_ping_server().await;
+        let req = TranslateRequest { endpoint, key:"mock".into(), model:"claude-sonnet-5-5".into(), effort:"low".into(),
+            max_tokens:128_000, timeout_ms:1000, system:None, format:None, prompt:"mock".into() };
+        let result = tokio::time::timeout(Duration::from_secs(2), complete_with_total(&req, Duration::from_millis(200))).await.unwrap();
+        assert!(matches!(result, Err(ClientError::Timeout)));
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
     }
 
     #[test]

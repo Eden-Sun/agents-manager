@@ -59,6 +59,8 @@ check "state::limit_hit_tests:: testing::scratch_leak_guard::" "daemon/src/state
 check "api_bot::startup_recovery_tests::startup_abandonment_tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/startup_abandonment_tests.rs"
 # 一般 production 檔加選跨檔守門，_tests.rs 測試檔不加選跨檔守門（#1983）。
 check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate.rs"
+# Translation streaming is nested via #[path], not a top-level module.
+check "changelog_translate::stream:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate_stream.rs"
 check "testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/timestamp_compat_tests.rs"
 # 直接 `mod x_tests;` 宣告的不受影響。
 check "lifecycle::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
