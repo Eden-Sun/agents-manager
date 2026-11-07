@@ -11,7 +11,7 @@
 # 補的兩個 #66 留言的洞：殘留鎖永久停擺（鎖裡寫 pid＋時間，執行者不在就回收）、launchd PATH 找不到依賴
 # （開頭自補 PATH；缺依賴不靜默，log＋ops_alert）。
 #
-#   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
+#   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、GH_BIN、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
 #   AGM_LOCK_HUNG_SECS、AGM_LOCK_QUIET_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
 
@@ -261,14 +261,18 @@ done
 # 交辦成功才記進狀態檔，下一輪不再送；不以建立時間截斷，停機或缺前置條件再久都補送。交給協調者 responder_bot_id（或明確覆寫），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
+SKIPPED="$DIR/release-issue-skipped"
+GH="${GH_BIN:-gh}"
+HANDOFF_LEFT=5 # 全輪共用；兩次掃描與所有 kind 的交接嘗試合計最多五張。
 handoff_issues() {
   local KIND
 for KIND in "$@"; do
+  [ "$HANDOFF_LEFT" -gt 0 ] || return 0
   if ! SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null); then
     note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
     continue
   fi
-  TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" python3 -c '
+  TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" SKIPPED="$SKIPPED" python3 -c '
 import json, os, sys
 try:
     data = json.load(sys.stdin)
@@ -277,10 +281,12 @@ except (ValueError, TypeError):
 if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
     sys.exit(1)
 rows = data["rows"]
-try:
-    done = set(open(os.environ["HANDED"]).read().split())
-except OSError:
-    done = set()
+done = set()
+for key in ("HANDED", "SKIPPED"):
+    try:
+        done.update(open(os.environ[key]).read().split())
+    except OSError:
+        pass
 for r in rows:
     if not isinstance(r, dict) or not isinstance(r.get("issues", []), list):
         sys.exit(1)
@@ -289,7 +295,8 @@ for r in rows:
             sys.exit(1)
         if i.get("comment") or not i.get("number") or str(i["number"]) in done:
             continue
-        print("ready\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
+        ref = i.get("url") or ("https://github.com/%s/issues/%s" % (data["repo"], i["number"]) if data.get("repo") else "-")
+        print("ready\t%s\t%s\t%s\t%s" % (i["number"], ref, r.get("kind") or "", r.get("version") or ""))
 ' 2>/dev/null)
   if [ "$?" -ne 0 ]; then
     note_fail "release-triage show --kind ${KIND} 回傳資料無法解析，尚未交接的 issue 留待下一輪"
@@ -311,6 +318,27 @@ for r in rows:
       continue
     fi
     [ -n "$_num" ] || continue
+    [ "$HANDOFF_LEFT" -gt 0 ] || break
+    if [ "$_url" = "-" ]; then
+      note_fail "issue #${_num} 缺網址與 repo，保留待重試"
+      continue
+    fi
+    if ! _issue_state=$(python3 -c 'import subprocess,sys; subprocess.run(sys.argv[1:], check=True, timeout=40)' "$GH" issue view "$_url" --json state --jq .state 2>>"$LOG"); then
+      note_fail "查詢 issue #${_num} 狀態失敗，保留待重試"
+      continue
+    fi
+    case "$_issue_state" in
+      CLOSED)
+        if printf '%s\n' "$_num" >> "$SKIPPED"; then
+          log "issue #${_num} 已關閉，持久略過"
+        else
+          note_fail "issue #${_num} 已關閉但略過紀錄寫入失敗，保留待重試"
+        fi
+        continue ;;
+      OPEN) ;;
+      *) note_fail "issue #${_num} 狀態不明，保留待重試"; continue ;;
+    esac
+    HANDOFF_LEFT=$((HANDOFF_LEFT - 1))
     _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
     { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
     if "$AGM" --compact assign --bot "$ISSUE_BOT" --review-by patrol --text-file "$_body" \
