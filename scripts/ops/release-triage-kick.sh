@@ -258,7 +258,7 @@ done
 
 # 開出去的 issue 交給 AGM 接手實作（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）。
 # 帳本裡每張**新開**的 issue（`comment`＝只在既有 issue 留言的不算）交辦一次：request-id `release-issue-<編號>` 由 daemon 去重，
-# 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。交給協調者 responder_bot_id（或明確覆寫），由它照平常流程派 child。
+# 交辦成功才記進狀態檔，下一輪不再送；不以建立時間截斷，停機或缺前置條件再久都補送。交給協調者 responder_bot_id（或明確覆寫），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
 handoff_issues() {
@@ -269,7 +269,7 @@ for KIND in "$@"; do
     continue
   fi
   TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" python3 -c '
-import json, os, sys, datetime
+import json, os, sys
 try:
     data = json.load(sys.stdin)
 except (ValueError, TypeError):
@@ -281,7 +281,6 @@ try:
     done = set(open(os.environ["HANDED"]).read().split())
 except OSError:
     done = set()
-cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
 for r in rows:
     if not isinstance(r, dict) or not isinstance(r.get("issues", []), list):
         sys.exit(1)
@@ -289,16 +288,6 @@ for r in rows:
         if not isinstance(i, dict):
             sys.exit(1)
         if i.get("comment") or not i.get("number") or str(i["number"]) in done:
-            continue
-        try:
-            at = datetime.datetime.fromisoformat(str(i.get("created_at", "")).replace("Z", "+00:00"))
-        except ValueError:
-            print("invalid_timestamp\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
-            continue
-        if at.tzinfo is None or at.utcoffset() is None:
-            print("invalid_timestamp\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
-            continue
-        if at < cutoff:
             continue
         print("ready\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
 ' 2>/dev/null)
@@ -317,10 +306,6 @@ for r in rows:
   fi
   # 不接在管線後面：管線裡的 while 是 subshell，`note_fail` 設的 ROUND_FAIL 會丟掉。
   while IFS=$'\t' read -r _state _num _url _kind _ver; do
-    if [ "$_state" = invalid_timestamp ]; then
-      note_fail "issue #${_num} 的建立時間格式錯誤或沒有時區（${_kind} ${_ver}），留待修正後重試"
-      continue
-    fi
     if [ "$_state" != ready ]; then
       note_fail "release-triage show --kind ${KIND} 產生無法識別的交接列，留待下一輪"
       continue

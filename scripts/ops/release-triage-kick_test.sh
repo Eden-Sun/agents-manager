@@ -677,7 +677,7 @@ equals "下一輪 binary diff 重試成功後才前進" "$(cat "$AGM_DIR/claude-
 equals "binary diff assign 失敗後重試" "$(grep -c 'release-triage-claude-binary-2.1.279' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
-# 2026-10-03：分診開出的 issue 交給分診 bot 接手——新開的交一次、留言型與 14 天前的不交、交辦失敗下一輪再試。
+# 2026-10-03：分診開出的 issue 交給分診 bot 接手——未交接的交一次、留言型不交，久遠的漏交也補送；失敗下一輪再試。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -695,8 +695,8 @@ export STUB_ASSIGN_FAIL=""
 bash "$SCRIPT"
 equals "新開的 issue 交給分診 bot" "$(grep -c 'request-id release-issue-901' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 equals "只在既有 issue 留言的不交" "$(grep -c 'release-issue-902' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
-equals "14 天前開的不翻舊帳" "$(grep -c 'release-issue-903' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
-equals "交過的記在狀態檔" "$(cat "$AGM_DIR/release-issue-handed")" "901"
+equals "停機超過 14 天仍補交舊 issue" "$(grep -c 'release-issue-903' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "新舊 issue 都記在持久交接狀態" "$(paste -sd , "$AGM_DIR/release-issue-handed")" "901,903"
 check "交辦正文帶 issue 編號" "issue #901 https://x/901" "$AGM_DIR/assign-body.txt"
 check "交辦正文是接手 issue 的那份任務" "請接手把它做完" "$AGM_DIR/assign-body.txt"
 ISSUE_TASK="$HERE/release-issue-task.md"
@@ -707,9 +707,14 @@ check_no "交接不得指示 child 推 main" "push main" "$AGM_DIR/assign-body.t
 grep -q -- "--bot bot-resp .*release-issue-901\|release-issue-901.*--bot bot-resp\|--bot bot-release .*release-issue-901" "$AGM_DIR/calls.log" && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: 交給分診 bot"; grep release-issue "$AGM_DIR/calls.log"; }
 bash "$SCRIPT"
 equals "交過的下一輪不再送" "$(grep -c 'release-issue-901' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "舊 issue 補交後也不再送" "$(grep -c 'release-issue-903' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+rm "$AGM_DIR/release-issue-handed"
+bash "$SCRIPT"
+equals "交接檔遺失沿用相同 request-id 補送" "$(grep -c 'request-id release-issue-903$' "$AGM_DIR/calls.log" | tr -d ' ')" "3"
+equals "補送成功恢復持久交接記錄" "$(paste -sd , "$AGM_DIR/release-issue-handed")" "901,903"
 teardown
 
-# A malformed naive timestamp in one old row must not abort the whole handoff batch and starve later issues.
+# Timestamp validity is irrelevant to durable handoff eligibility.
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -717,12 +722,14 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat > "$AGM_DIR/show-claude.json" <<JSON
 {"rows":[{"kind":"claude","version":"2.1.288","issues":[
   {"number":904,"url":"https://x/904","created_at":"2026-10-02T12:00:00","comment":false},
-  {"number":905,"url":"https://x/905","created_at":"$NOW","comment":false}]}]}
+  {"number":905,"url":"https://x/905","created_at":"$NOW","comment":false},
+  {"number":907,"url":"https://x/907","comment":false}]}]}
 JSON
 bash "$SCRIPT"
-equals "naive 時間戳只略過該列" "$(grep -c 'request-id release-issue-904' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
+equals "無時區時間戳也不漏交" "$(grep -c 'request-id release-issue-904' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 equals "naive 時間戳不阻斷後續 issue 補送" "$(grep -c 'request-id release-issue-905' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
-equals "略過的畸形時間戳 issue 仍讓本輪可見為失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" "1"
+equals "缺建立時間也補送" "$(grep -c 'request-id release-issue-907' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+equals "時間戳不再影響交接成敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
 teardown
 
 # Missing handoff prerequisites must retain the new issue for retry and raise the normal failure status.
