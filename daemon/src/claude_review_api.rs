@@ -1,4 +1,5 @@
-//! 更新框「分析影響」的 API 路徑（issue #1919，用途 `changelog_review`）。
+//! herdr 更新框的 API 摘要與舊版摘要帳本相容讀取（用途 `changelog_review`）。
+//! claude／codex／agy／grok 新分析走 `claude_review::triage`，不再生成第二份摘要。
 //!
 //! 使用者按下按鈕時，不開 Claude Code session、不派 bot，改用共用的 Claude API client（[`crate::claude_api`]）
 //! 讀 changelog（claude 另加 binary diff 的固定差集文字；codex、agy、grok 另加分診帳本）出三到五行結論。
@@ -31,11 +32,6 @@ const MAX_LINE_CHARS: usize = 600;
 /// 分診帳本貼進 prompt 的條目上限（kept＋unmatched 通常 ≤80，非 none 的只是其中一部分）。
 const MAX_TRIAGE_LINES: usize = 40;
 const MAX_DIFF_CHARS: usize = 12_000;
-
-/// 哪些 kind 走 API：claude／codex／herdr／agy／grok 都解析（agy、grok 的「用得上」標準取自各自的任務檔，#1928）；API 模式包含 deep 請求也不派 bot。
-pub fn applies_to(kind: &str) -> bool {
-    matches!(kind, "claude" | "codex" | "herdr" | "agy" | "grok")
-}
 
 // ───────────── 帳本 ─────────────
 
@@ -344,7 +340,7 @@ const DIFF_TIMEOUT_SECS: u64 = 150;
 
 /// 跑固定的 binary diff 腳本，回純文字報告。任何失敗（沒 python、腳本壞、逾時、binary 不存在）回 `None`：
 /// 這一塊只是補充，沒有它仍可只靠 changelog 解析。daemon 行程不讀 binary——全在外部行程裡。
-async fn run_binary_diff(d: &BinaryDiff) -> Option<String> {
+pub(crate) async fn run_binary_diff(d: &BinaryDiff) -> Option<String> {
     let mut cmd = tokio::process::Command::new("python3");
     cmd.arg("-I").arg(&d.script).arg(&d.old).arg(&d.new)
         .args(["--timeout", "120", "--max-bytes", &MAX_DIFF_CHARS.to_string(), "--max-lines", "300"])
