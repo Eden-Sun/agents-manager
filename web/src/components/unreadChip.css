@@ -641,7 +641,9 @@
     position: absolute;
     right: 10px;
     bottom: -11px;
-    z-index: 5;
+    /* 手機 `.main-head` 是 sticky 並設了 z-index（styles.css，目前 5），自成 stacking context，裡面的額度浮層（z-index 80）出不來、只比得過同層的 5；
+       這顆鈕若也是同一個值，DOM 在 header 後面就贏過浮層、穿透畫在浮層裡（2026-11-07 使用者截圖）。它只要高過旁邊的晶片（2）就夠，所以取 3，必須低於 header。 */
+    z-index: 3;
     display: grid;
     place-items: center;
     width: 22px;
