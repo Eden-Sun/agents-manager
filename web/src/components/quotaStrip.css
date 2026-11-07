@@ -150,6 +150,11 @@
   color: var(--accent);
 }
 
+/* 帶黑針的那條不能裁切，否則針只剩 2px。 */
+.quota-border-meter.bottom {
+  overflow: visible;
+}
+
 .quota-border-meter.top {
   top: -1px;
 }
@@ -161,7 +166,20 @@
 .quota-border-fill {
   display: block;
   height: 100%;
+  border-radius: inherit;
   background: currentColor;
+}
+
+/* 7d／週邊框上的重置黑針（同桌機 `.quota-bar-mark`）：比 2px 的條高，才看得出是刻度不是填色。 */
+.quota-border-mark {
+  position: absolute;
+  bottom: -2px;
+  height: 6px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--bg-panel);
 }
 
 .quota-border-meter.warn {
