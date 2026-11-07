@@ -1295,3 +1295,8 @@ export async function setPaneAlias(host: string, paneId: string, alias: string):
 export async function retryReleaseTriage(kind: string, version: string): Promise<void> {
   await transport.request('POST', '/release-triage/auto', { kind, versions: [version] })
 }
+
+/** 重試帳本中已判完但尚未成功發布的提案，不重新分析。 */
+export async function publishReleaseTriage(kind: string, version: string): Promise<void> {
+  await transport.request('POST', '/release-triage/publish', { kind, version })
+}

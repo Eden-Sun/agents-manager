@@ -639,7 +639,7 @@ export class MockTransport implements Transport {
   private conversations = new Map<string, string>()
   private blobs = new Map<string, Blob>()
 
-  /** 更新框的 changelog／分診／影響分析（`mockReleaseTriage.ts`）。 */
+  /** 更新框的 changelog／分診與 publish 重試／herdr 影響分析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
   readonly shares = new MockShares(
     (id) => {

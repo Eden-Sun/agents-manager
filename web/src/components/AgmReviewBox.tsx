@@ -1,15 +1,7 @@
-/**
- * 更新框裡的「分析」區塊（使用者 2026-09-19：「解析結果直接在更新視窗 show 出」；2026-09-25 起 codex 也有，issue #561）。
- *
- * 兩個來源；GET 只讀，符合自動條件時開框另 POST 補分析：
- * 1. **上游分診**（`/api/release-triage`，SPEC §18.2c）：帳本早就逐條分析過 claude／codex 每一版，這裡把
- *    `(from, to]` 區間內每一版的提防／採用／值得早升與提案 issue 攤出來。帳本沒有這一版就寫「尚未分析」（agy、grok 同 claude／codex，#1928）。
- * 2. **影響分析**（`/api/claude-update/review?kind=`）：自動或使用者按「分析影響」送出的那一筆：
- *    還沒派、派了還沒結論、有結論（**直接把結論印在框裡**）。
- * 兩邊都沒東西時整塊寫「尚未分析」，指向框底的「分析影響」。
- */
+/** 四種 CLI 投影分診帳本；herdr 保留原影響分析路徑。 */
 import { useEffect, useState } from 'react'
 import * as api from '../api'
+import { fetchChangelog } from '../api/changelog'
 import type { UpdateReview } from '../api/types'
 import { anyAnalysed, triageForRange, type TriageItem, type TriageVersion } from '../lib/releaseTriage'
 import { loadReviewOnOpen } from '../lib/autoReview'
@@ -35,32 +27,50 @@ export function AgmReviewBox({
   to?: string | null
   refreshKey: number
 }) {
+  const usesTriage = kind !== 'herdr'
   const key = `${kind}|${host}|${from ?? ''}|${to ?? ''}|${refreshKey}`
   const [loaded, setLoaded] = useState<Loaded | null>(null)
 
   useEffect(() => {
     let alive = true
     // 任一支讀不到（舊 daemon 沒有那支 API）就只畫另一邊，不在更新框裡吵。
-    const review = loadReviewOnOpen({ kind, host, from, to }, api).catch(() => null)
+    const review = !usesTriage ? loadReviewOnOpen({ kind, host, from, to }, api).catch(() => null) : !to ? fetchChangelog(kind, host, from).then((r) => ({ version: r.installedVersion || '', review: null })) : Promise.resolve(null)
     const triage = api.fetchReleaseTriage(kind).catch(() => null)
     void Promise.all([review, triage]).then(([r, t]) => {
       if (!alive) return
       const version = to || r?.version || ''
-      setLoaded({ key, version, review: r?.review ?? null, triage: t ? triageForRange(t.rows, t.repo, from, version) : null })
+      setLoaded({ key, version, review: usesTriage ? null : r?.review ?? null, triage: t ? triageForRange(t.rows, t.repo, from, version) : null })
     })
     return () => {
       alive = false
     }
-  }, [kind, host, from, to, key])
+  }, [kind, host, from, to, key, usesTriage])
+
+  // 帳本目前沒有專用 SSE；開框期間輪詢，包含判完後 publish 的狀態變更。
+  useEffect(() => {
+    if (!usesTriage) return
+    let alive = true
+    let running = false
+    const timer = setInterval(async () => {
+      if (running) return
+      running = true
+      try {
+        const data = await api.fetchReleaseTriage(kind)
+        if (alive) setLoaded((cur) => cur?.key === key ? { ...cur, triage: triageForRange(data.rows, data.repo, from, cur.version) } : cur)
+      } catch { /* 保留上次成功結果，下輪再讀。 */ }
+      finally { running = false }
+    }, 5000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [usesTriage, kind, from, key])
 
   // AGM 給出結論（或接手）會推 `supervisor_changed`：還沒有結論時據此只重讀「影響分析」那一半（框不閃、分診帳本不重抓）。
   const rev = useStore((s) => s.supervisorRev)
   const reviewState = loaded?.key === key ? loaded.review?.state : undefined
   useEffect(
     () =>
-      scheduleReviewRefresh({
+      usesTriage ? () => {} : scheduleReviewRefresh({
         rev,
-        state: reviewState,
+        state: usesTriage ? undefined : reviewState,
         run: () => {
           void api
             .fetchUpdateReview({ kind, host, from, to })
@@ -71,20 +81,21 @@ export function AgmReviewBox({
             .catch(() => {})
         },
       }),
-    [rev, reviewState, kind, host, from, to, key],
+    [rev, reviewState, kind, host, from, to, key, usesTriage],
   )
 
   const t = useT()
   const [retrying, setRetrying] = useState(false)
   const [retryError, setRetryError] = useState('')
-  const retry = async (version?: string) => {
+  const retry = async (version?: string, publish = false) => {
     setRetrying(true)
     setRetryError('')
     try {
-      if (version) await api.retryReleaseTriage(kind, version)
+      if (version && publish) await api.publishReleaseTriage(kind, version)
+      else if (version) await api.retryReleaseTriage(kind, version)
       else await api.requestUpdateReview({ kind, host, from, to: to ?? loaded?.version ?? null })
-      const [r, triage] = await Promise.all([api.fetchUpdateReview({ kind, host, from, to }), api.fetchReleaseTriage(kind).catch(() => null)])
-      setLoaded((cur) => cur && cur.key === key ? { ...cur, review: r.review, triage: triage ? triageForRange(triage.rows, triage.repo, from, cur.version) : cur.triage } : cur)
+      const [r, triage] = await Promise.all([usesTriage ? Promise.resolve(null) : api.fetchUpdateReview({ kind, host, from, to }), api.fetchReleaseTriage(kind).catch(() => null)])
+      setLoaded((cur) => cur && cur.key === key ? { ...cur, review: r?.review ?? null, triage: triage ? triageForRange(triage.rows, triage.repo, from, cur.version) : cur.triage } : cur)
     } catch (e) {
       setRetryError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -111,7 +122,7 @@ export function AgmReviewBox({
       {triage && triage.some((v) => v.state !== 'missing') ? (
         <div className="triage">
           {triage.map((v) => (
-            <TriageBlock key={v.version} v={v} retry={() => void retry(v.version)} retrying={retrying} />
+            <TriageBlock key={v.version} v={v} retry={() => void retry(v.version)} publish={() => void retry(v.version, true)} retrying={retrying} />
           ))}
         </div>
       ) : null}
@@ -152,7 +163,7 @@ const STATE_TEXT: Record<TriageVersion['state'], string> = {
   missing: msg('尚未分析'),
 }
 
-function TriageBlock({ v, retry, retrying }: { v: TriageVersion; retry: () => void; retrying: boolean }) {
+function TriageBlock({ v, retry, publish, retrying }: { v: TriageVersion; retry: () => void; publish: () => void; retrying: boolean }) {
   const t = useT()
   const nothing = !v.guard.length && !v.adopt.length && !v.upgrade.length && !v.issues.length
   return (
@@ -164,6 +175,7 @@ function TriageBlock({ v, retry, retrying }: { v: TriageVersion; retry: () => vo
       </div>
       {v.analysis?.source === 'api' ? <p className="hint">{v.analysis.model ? t('Claude API（{model}）', { model: v.analysis.model }) : 'Claude API'}</p> : null}
       {v.state === 'failed' ? <p role="alert">{v.analysis?.error || t('原因不明')}{' '}<button type="button" disabled={retrying} onClick={retry}>{t('重試')}</button></p> : null}
+      {v.publishError ? <p role="alert">{t('發布失敗：{reason}', { reason: v.publishError })}{' '}<button type="button" disabled={retrying} onClick={publish}>{t('重試')}</button></p> : null}
       <Items label={t('提防')} tone="guard" items={v.guard} />
       <Items label={t('採用')} tone="adopt" items={v.adopt} />
       <Items label={t('值得早升')} tone="upgrade" items={v.upgrade} />
@@ -178,12 +190,12 @@ function TriageBlock({ v, retry, retrying }: { v: TriageVersion; retry: () => vo
                   {' '}
                   {safeHttpUrl(i.url) ? (
                     <a href={safeHttpUrl(i.url)} target="_blank" rel="noopener noreferrer">
-                      #{i.number}
+                      {i.duplicate ? (i.published ? t('留言於 #{number}', { number: i.number }) : t('待留言於 #{number}', { number: i.number })) : `#${i.number}`}
                     </a>
                   ) : (
                     <span title={t('帳本沒設 [release_triage] repo，連不出去')}>#{i.number}</span>
                   )}
-                  {i.duplicate ? <span className="triage-dup">{t('（併入既有）')}</span> : null}
+
                 </>
               ) : (
                 <span className="triage-dup">{t('（尚未開票）')}</span>
