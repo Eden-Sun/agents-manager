@@ -76,6 +76,21 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
   await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })))
   await until(() => document.querySelector('.phone-outbox-peek img') !== null, '按住時出現大圖')
   assert.equal(document.querySelector('.image-viewer'), null, '不開 modal')
+  // 滑到第二張就換成第二張。
+  const second = document.querySelectorAll<HTMLButtonElement>('.phone-outbox-thumb')[1]!
+  const firstAlt = document.querySelector('.phone-outbox-peek img')?.getAttribute('alt')
+  const origFromPoint = document.elementFromPoint
+  document.elementFromPoint = (() => second) as typeof document.elementFromPoint
+  try {
+    await act(() => thumb.dispatchEvent(new window.PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 10, clientY: 10 })))
+  } finally {
+    document.elementFromPoint = origFromPoint
+  }
+  await until(() => {
+    const alt = document.querySelector('.phone-outbox-peek img')?.getAttribute('alt')
+    return !!alt && alt !== firstAlt
+  }, '滑到第二張時大圖換掉')
+  assert.ok(second.classList.contains('peeking'), '第二張標成目前這張')
   await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, pointerId: 1 })))
   assert.equal(document.querySelector('.phone-outbox-peek'), null, '放開就收掉')
 })
