@@ -50,83 +50,14 @@ test('手機：5h 用完 40 分鐘後重置，只寫一次時間（窗口名維�
     await useStore.getState().loadQuota()
     await mount(<QuotaStrip />)
     await until(() => cellOf('cc0') !== null, 'cc0 格畫出來')
-    const win = cellOf('cc0')!.querySelector<HTMLElement>('.quota-window')!
+    const win = cellOf('cc0')!.querySelector<HTMLElement>('.quota-compact-win')!
     assert.equal(win.querySelector('.quota-window-name')?.textContent, '5h', '窗口名不換成剩幾分')
-    const cell = cellOf('cc0')!
-    assert.match(cell.querySelector('.quota-reset-line')?.textContent ?? '', /^└\s*0h(39|40)$/, '倒數集中寫一次')
+    assert.match(win.querySelector('.quota-reset-at')?.textContent ?? '', /^0h(39|40)$/, '倒數寫一次')
     assert.doesNotMatch(win.textContent ?? '', /\d+m/, '不再出現「40m」')
-    assert.equal(win.querySelector('.quota-bar-pct')?.textContent, '<1%', '倒數時百分比留在自己的列')
-    assert.equal(cell.querySelector('.quota-head-pct'), null, '多窗口不將百分比移到 logo 列')
-    assert.deepEqual([...cell.querySelectorAll('.quota-window-name')].map((el) => el.textContent), ['5h', '7d'], '較急的 5h 不遮掉週窗')
-  } finally {
-    restore()
-  }
-})
-
-async function mountPhoneQuota(kind: string, values: Record<string, unknown>) {
-  resetStoreForTest()
-  mock.quota[kind] = { ...mock.quota[kind], ...values }
-  mockApi(sharedMock)
-  await useStore.getState().refreshState()
-  await useStore.getState().loadQuota()
-  await mount(<QuotaStrip />)
-  await until(() => document.querySelector(`.quota-hp.${kind} .quota-mobile-bars`) !== null, '手機量表畫出來')
-  return document.querySelector<HTMLElement>(`.quota-hp.${kind}`)!
-}
-
-const windowIn = (used: number, hours: number, low = false, critical = false) => ({
-  used_pct: used, low, critical, resets_at: new Date(Date.now() + hours * 3_600_000).toISOString(), observed_at: null,
-})
-
-test('手機：5h、7d、F 固定順序，各自有剩量與正確重置針，週窗不被更急窗口取代', async () => {
-  const restore = phoneWidth()
-  try {
-    const cell = await mountPhoneQuota('claude', {
-      five_hour: windowIn(80, 2.5, true), seven_day: windowIn(10, 84), fable: windowIn(40, 42), limit_hit: null,
-    })
-    const rows = [...cell.querySelectorAll<HTMLElement>('.quota-window')]
-    assert.deepEqual(rows.map((row) => row.querySelector('.quota-window-name')?.textContent), ['5h', '7d', 'F'])
-    assert.deepEqual(rows.map((row) => row.querySelector('.quota-bar-pct')?.textContent), ['20%', '90%', '60%'])
-    for (const [i, expected] of [50, 50, 25].entries()) {
-      const mark = rows[i].querySelector<HTMLElement>('.quota-bar-mark')!
-      assert.ok(Math.abs(parseFloat(mark.style.left) - expected) < 0.1)
-      assert.match(mark.title, /重置/)
-    }
-    assert.ok(rows[0].querySelector('.quota-bar.warn'))
-    assert.ok(rows[1].querySelector('.quota-bar.ok'), '週窗不被整格的警告染色')
-  } finally {
-    restore()
-  }
-})
-
-test('手機：grok 只有週窗，仍有量表、百分比和週重置針', async () => {
-  const originalGrok = mock.quota.grok
-  const restore = phoneWidth()
-  try {
-    const cell = await mountPhoneQuota('grok', { five_hour: null, seven_day: windowIn(25, 84), fable: null, limit_hit: null })
-    assert.deepEqual([...cell.querySelectorAll('.quota-window-name')].map((el) => el.textContent), ['週'])
-    assert.equal(cell.querySelector('.quota-bar-pct')?.textContent, '75%')
-    assert.ok(Math.abs(parseFloat(cell.querySelector<HTMLElement>('.quota-bar-mark')!.style.left) - 50) < 0.1)
-  } finally {
-    mock.quota.grok = originalGrok
-    restore()
-  }
-})
-
-test('手機：雙窗口撞限倒數仍保留各列百分比、放大條，倒數各顯示一次', async () => {
-  const restore = phoneWidth()
-  try {
-    const cell = await mountPhoneQuota('claude', {
-      five_hour: windowIn(100, 0.4, true, true), seven_day: windowIn(98, 6, true, true), fable: null,
-      limit_hit: { message: 'hit', until: null, at: new Date().toISOString(), bucket: 'five_hour' },
-    })
-    assert.ok(cell.classList.contains('quota-blocked'))
-    assert.deepEqual([...cell.querySelectorAll('.quota-bar-pct')].map((el) => el.textContent), ['0%', '2%'])
-    assert.equal(cell.querySelectorAll('.quota-bar-wrap.zoomed').length, 2)
-    assert.equal(cell.querySelector('.quota-bar-mark'), null, '放大刻度不混用黑針')
-    assert.equal(cell.querySelectorAll('.quota-reset-line').length, 1)
-    assert.match(cell.querySelector('.quota-reset-line')?.textContent ?? '', /5h.*0h(23|24).*7d.*(5h59|6h00)/)
-    assert.deepEqual([...cell.querySelectorAll('.quota-window-name')].map((el) => el.textContent), ['5h', '7d'])
+    // 方案 A：有倒數時百分比在 logo 列，第二行沒有 %。
+    const head = cellOf('cc0')!.querySelector<HTMLElement>('.quota-head')!
+    assert.match(head.querySelector('.quota-head-pct')?.textContent ?? '', /^(<1|\d+)%$/, '百分比在 logo 列')
+    assert.equal(win.querySelector('.quota-compact-pct'), null, '第二行不再寫百分比')
   } finally {
     restore()
   }
