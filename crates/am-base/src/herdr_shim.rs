@@ -530,7 +530,7 @@ am_agent_start() {
                 --append-system-prompt | --append-system-prompt=* | --append-system-prompt-file* | developer_instructions=* | --rules | --rules=*) _has_instr=1 ;;
                 project_doc_max_bytes=*) _has_docs=1 ;;
                 # 呼叫者自己決定了沙箱／核准模式：一律尊重，不補 `--yolo`。
-                -s | --sandbox | --sandbox=* | --yolo | --dangerously-bypass-approvals-and-sandbox | --full-auto | sandbox_mode=* | default_permissions=*) _has_sandbox=1 ;;
+                -s | --sandbox | --sandbox=* | --yolo | --dangerously-bypass-approvals-and-sandbox | --full-auto | sandbox_mode=* | default_permissions=* | --dangerously-skip-permissions | --mode | --mode=*) _has_sandbox=1 ;;
                 -p | --profile | --profile=*) _has_profile=1 ;;
                 --no-daemon) _has_no_daemon=1 ;;
             esac
@@ -670,6 +670,16 @@ am_agent_start() {
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
                 set -- "$@" --yolo
+            fi
+            ;;
+        agy)
+            # agy 子 agent 跟 auto_approve 的 agy 主力一樣帶 `--dangerously-skip-permissions`：沒帶時每個指令都停下來要權限，
+            # 母 bot 得一個一個手動核准（2026-11-07 lead 的 hmr child）。只對 bot 開的 child（有 `AM_BOT_ID`）補；
+            # 呼叫者自己帶了 `--mode`／`--sandbox`／這個旗標就尊重。
+            if [ "$_has_sandbox" = 0 ] && [ -n "${AM_BOT_ID:-}" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" --dangerously-skip-permissions
             fi
             ;;
         grok)
