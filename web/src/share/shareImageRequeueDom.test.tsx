@@ -2,7 +2,7 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { ShareApp } from './ShareApp'
-import { SHARE_IMAGE_REQUEUE_MS } from './ShareImages'
+import { SHARE_IMAGE_REQUEUE_MS } from './shareImageConstants'
 import type { ShareClient } from './shareApi'
 import type { ShareFile } from './shareModel'
 

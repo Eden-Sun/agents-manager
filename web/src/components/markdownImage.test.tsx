@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import Markdown from 'react-markdown'
 import { MarkdownImage } from './MarkdownImage.tsx'
-import { markdownComponents } from '../lib/markdownComponents.tsx'
+import { markdownComponents } from '../lib/markdownComponents.ts'
 import { markdownUrlTransform } from '../lib/markdownUrl.ts'
 
 test('遠端圖片：只畫佔位（網域＋載入鈕），畫面上沒有任何 <img>，也沒有會自動發出請求的東西', () => {

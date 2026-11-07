@@ -9,9 +9,7 @@ import { useT } from './shareI18n'
 /** 檔案換了內容（同名覆寫）預覽要跟著換：版本變了就換網址（舊 daemon 沒有 version，退回時間＋大小）。 */
 const fileVersion = (f: ShareFile) => f.version ?? `${f.modified_at ?? ''}-${f.size}`
 
-export const SHARE_IMAGE_REQUEUE_MS = 1500
-/** 分享下載的上限（daemon `outbox::MAX_BYTES`，超過回 413 `too_large`）。這個大小以上的圖重試不會好，直接說太大了、不發請求。 */
-export const SHARE_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+import { SHARE_IMAGE_REQUEUE_MS, SHARE_IMAGE_MAX_BYTES, IMG_RETRIES, IMG_RETRY_MS } from './shareImageConstants'
 const tooBigFile = (f: ShareFile) => f.size > SHARE_IMAGE_MAX_BYTES
 
 function usePng(client: ShareClient, file: ShareFile, enabled: boolean): PngResult | 'loading' {
@@ -120,9 +118,7 @@ export function ShareButton({ file, client }: { file: ShareFile; client: ShareCl
   )
 }
 
-/** `<img>` 載入失敗（下載名額每個分享同時只有 2 個、滿了 429；或網路一閃）先自己重試，用完才算這一版載不出來。 */
-export const IMG_RETRIES = 3
-export const IMG_RETRY_MS = 1500
+
 
 function useImgRetry(version: string, retryMs = IMG_RETRY_MS) {
   const [st, setSt] = useState({ version, fails: 0, waiting: false })

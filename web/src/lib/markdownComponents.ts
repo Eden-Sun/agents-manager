@@ -1,4 +1,4 @@
-import type { ComponentProps } from 'react'
+import { createElement, type ComponentProps } from 'react'
 import { MarkdownImage } from '../components/MarkdownImage'
 import { safeHttpUrl } from './safeUrl'
 
@@ -32,15 +32,16 @@ export function markdownComponents(botId: string | null | undefined): MarkdownCo
     a: ({ href, children }: ComponentProps<'a'>) => {
       // urlTransform 仍放行相對路徑與 //host。相對的 /api/session 在這個 origin 開新分頁會拿到 UI token。
       const safe = safeHttpUrl(typeof href === 'string' ? href : undefined)
-      return safe ? (
-        <a href={safe} target="_blank" rel="noopener noreferrer">
-          {children}
-        </a>
-      ) : (
-        <span>{children}</span>
-      )
+      return safe
+        ? createElement('a', { href: safe, target: '_blank', rel: 'noopener noreferrer' }, children)
+        : createElement('span', null, children)
     },
-    img: (props: ComponentProps<'img'>) => <MarkdownImage botId={botId} src={typeof props.src === 'string' ? props.src : undefined} alt={props.alt} />,
+    img: (props: ComponentProps<'img'>) =>
+      createElement(MarkdownImage, {
+        botId,
+        src: typeof props.src === 'string' ? props.src : undefined,
+        alt: props.alt,
+      }),
   }
   cache.set(key, c)
   if (cache.size > MARKDOWN_COMPONENTS_CACHE_LIMIT) {

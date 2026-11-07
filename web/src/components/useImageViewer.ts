@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react'
+import { createElement, useState, type MouseEvent } from 'react'
 import { ImageViewer, type Picture } from './ImageViewer'
 
 /** Only collect already authorized, loaded thumbnails within this message/tray. */
@@ -18,6 +18,5 @@ export function useImageViewer(scope?: string | null) {
     setGallery({ scope, pictures: images.map((img) => ({ src: img.src, name: img.alt })), index: images.indexOf(image) })
     return true
   }
-  return { openImage, viewer: gallery && gallery.scope === scope ? <ImageViewer {...gallery} onClose={() => setGallery(null)} /> : null }
+  return { openImage, viewer: gallery && gallery.scope === scope ? createElement(ImageViewer, { ...gallery, onClose: () => setGallery(null) }) : null }
 }
-
