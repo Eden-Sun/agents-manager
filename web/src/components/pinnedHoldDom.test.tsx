@@ -1,6 +1,6 @@
 /**
- * 主力晶片長按（2026-10-04 使用者：「手機版主力長按說明顏色意義」）：長按一到就開狀態卡（onHold(id)），
- * 接著移動＝收卡改拖曳（onHold(null)）；不動放開＝卡片留著（使用者：「長按與 drag 相衝」）。
+ * 主力晶片觸控長按（2026-11-07 使用者：「主力長按的功能可以不需要了」，狀態卡拿掉）：
+ * 長按 350ms 後才進入拖曳（用來跟捲動分開）；長按不動放開＝什麼都不做，移動＝重排。
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,24 +22,12 @@ afterEach(async () => {
 })
 after(teardownDom)
 
-const holds: (string | null)[] = []
-function Strip({ onHold }: { onHold: (id: string | null) => void }) {
-  const dnd = usePinnedDrag(['a', 'b'], ['a', 'b'], { a: 'a', b: 'b' }, () => {}, onHold)
-  return (
-    <div className="unread-pin-grid">
-      {['a', 'b'].map((id) => (
-        <button key={id} type="button" className="unread-chip pinned" data-bot-id={id} onPointerDown={(e) => dnd.onPointerDown(e, id)}>
-          {id}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 // 記錄 commit 的版本：拖曳放開時新順序會經由 commit 寫回，用來斷言「別根手指放開」有沒有真的寫回。
 const commits: string[][] = []
-function StripCommit({ onHold }: { onHold: (id: string | null) => void }) {
-  const dnd = usePinnedDrag(['a', 'b'], ['a', 'b'], { a: 'a', b: 'b' }, (next) => commits.push(next), onHold)
+let consume: (() => boolean) | null = null
+function Strip() {
+  const dnd = usePinnedDrag(['a', 'b'], ['a', 'b'], { a: 'a', b: 'b' }, (next) => commits.push(next))
+  consume = dnd.consumeClick
   return (
     <div className="unread-pin-grid">
       {['a', 'b'].map((id) => (
@@ -55,33 +43,25 @@ const ptr = (type: string, x: number, y: number, pointerId = 1) =>
   new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType: 'touch', button: 0, pointerId })
 const wait = (ms: number) => timers.clock.advance(ms)
 
-test('觸控長按一到就開卡、不動放開卡片留著', async () => {
-  holds.length = 0
-  await mount(<Strip onHold={(id) => holds.push(id)} />)
+test('觸控長按不動放開：什麼都不做（不重排），且吞掉那下 click', async () => {
+  commits.length = 0
+  await mount(<Strip />)
   const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
   await act(async () => {
     chip.dispatchEvent(ptr('pointerdown', 10, 10))
     await wait(420)
   })
-  assert.deepEqual(holds, ['a'], '還按著就開卡')
+  assert.equal(consume?.(), true, '長按進入拖曳準備狀態，click 要吞掉')
+  assert.equal(document.querySelector('.bot-status-card'), null, '不再開狀態卡')
   await act(async () => {
     window.dispatchEvent(ptr('pointermove', 13, 11))
     window.dispatchEvent(ptr('pointerup', 13, 11))
   })
-  assert.deepEqual(holds, ['a'])
-})
-
-test('觸控長按後移動：收卡改拖曳', async () => {
-  holds.length = 0
-  await mount(<Strip onHold={(id) => holds.push(id)} />)
-  const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
+  assert.deepEqual(commits, [], '沒移動＝不重排')
   await act(async () => {
-    chip.dispatchEvent(ptr('pointerdown', 10, 10))
-    await wait(420)
-    window.dispatchEvent(ptr('pointermove', 60, 10))
-    window.dispatchEvent(ptr('pointerup', 60, 10))
+    await wait(5)
   })
-  assert.deepEqual(holds, ['a', null])
+  assert.equal(consume?.(), false, '下一個 task 放行')
 })
 
 // happy-dom 的晶片全是 0×0，排序算不出位置；這裡把 a、b 排成一列，讓落點有意義。
@@ -95,9 +75,8 @@ function placeChips() {
 }
 
 test('拖曳中別根手指放開不算：不 commit，也不結束這次拖曳', async () => {
-  holds.length = 0
   commits.length = 0
-  await mount(<StripCommit onHold={(id) => holds.push(id)} />)
+  await mount(<Strip />)
   placeChips()
   const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
   await act(async () => {
@@ -108,7 +87,6 @@ test('拖曳中別根手指放開不算：不 commit，也不結束這次拖曳'
     window.dispatchEvent(ptr('pointerup', 10, 10, 2))
   })
   assert.equal(commits.length, 0, '別根手指放開不 commit')
-  assert.deepEqual(holds, ['a', null], '拖曳還在，沒有因此收卡')
   await act(async () => {
     window.dispatchEvent(ptr('pointerup', 200, 10, 1))
   })
@@ -116,9 +94,8 @@ test('拖曳中別根手指放開不算：不 commit，也不結束這次拖曳'
 })
 
 test('拖曳中別根手指移動不改落點', async () => {
-  holds.length = 0
   commits.length = 0
-  await mount(<StripCommit onHold={(id) => holds.push(id)} />)
+  await mount(<Strip />)
   placeChips()
   const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
   await act(async () => {

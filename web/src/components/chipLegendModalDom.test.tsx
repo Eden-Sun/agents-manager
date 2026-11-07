@@ -1,6 +1,6 @@
 /**
- * #995：色票與手機狀態卡是蓋整個畫面的對話框，必須被 `dialogOpen()` 認出來，上一頁（routeSync 派的 Escape）才會先關框，
- * 桌機的 ⌥↑／Ctrl+數字 也才會讓路。認的條件是 aria-modal 屬性，所以兩個元件的 role="dialog" 都要帶它。
+ * #995：色票是蓋整個畫面的對話框，必須被 `dialogOpen()` 認出來，上一頁（routeSync 派的 Escape）才會先關框，
+ * 桌機的 ⌥↑／Ctrl+數字 也才會讓路。認的條件是 aria-modal 屬性，所以 role="dialog" 要帶它。
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,13 +8,10 @@ import { act, fakeApi, mount, setupDom, teardownDom, unmountAll } from '../testi
 import { useStore } from '../store/store'
 import { dialogOpen } from '../lib/dialogOpen'
 import { ChipLegend } from './ChipLegend'
-import { BotStatusCard, type ChipHints } from './BotStatusCard'
 
 afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
-
-const hints: ChipHints = { current: false, unread: 0, needsReply: false, waitsKids: false, kidsRunning: 0, cacheTitle: null }
 
 beforeEach(() => {
   fakeApi()
@@ -36,14 +33,6 @@ function popBack(): void {
 test('色票開著時 dialogOpen() 為真，上一頁派的 Escape 會關掉它', async () => {
   let closed = 0
   await mount(<ChipLegend onClose={() => closed++} />)
-  assert.equal(dialogOpen(), true)
-  await act(async () => popBack())
-  assert.equal(closed, 1)
-})
-
-test('手機狀態卡（anchor=null）也算對話框，上一頁會關掉它', async () => {
-  let closed = 0
-  await mount(<BotStatusCard botId="b1" hints={hints} anchor={null} onClose={() => closed++} onLegend={() => {}} />)
   assert.equal(dialogOpen(), true)
   await act(async () => popBack())
   assert.equal(closed, 1)

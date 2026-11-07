@@ -628,6 +628,19 @@
   }
 }
 
+/* 手機主力區的「?」（2026-11-07 使用者：主力長按的狀態卡拿掉，色票說明改從這顆開）：跟電腦版同一顆，
+   但主力區是 flex 列、右下角已有調排數的把手，所以排在格子右邊、貼頂端，不蓋住晶片。 */
+@media (max-width: 720px) {
+  .unread-bar-help.pin-help {
+    position: static;
+    flex: none;
+    align-self: flex-start;
+    width: 24px;
+    height: 24px;
+    margin: 6px 8px 0 0;
+  }
+}
+
 /* 手機主力區的把手（2026-10-03 使用者）：上下拖調整最多幾排。不佔版面——貼在右下角、凸出主力區下緣的一顆小鈕
    （使用者：「拖拉的位置在最右邊，凸出來的控制鈕，才不會佔用空間」）。 */
 @media (max-width: 720px) {

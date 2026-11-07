@@ -45,6 +45,21 @@ test('電腦版：滑鼠停在主力晶片上不開狀態卡；尾端「?」開�
   assert.ok(document.querySelector('[role="dialog"][aria-label="主力晶片的顏色說明"]'))
 })
 
+// 2026-11-07 使用者：主力長按的狀態卡拿掉；手機也要有「?」開顏色說明，長按不再開卡。
+test('手機版：主力區有「?」開顏色說明，長按晶片不開狀態卡', async () => {
+  const original = window.matchMedia
+  window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 720px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  try {
+    await mount(<UnreadChip />)
+    assert.ok(document.querySelector('.unread-pin-grid'), '手機版版面')
+    assert.equal(document.querySelector('.bot-status-card'), null)
+    await click(document.querySelector<HTMLElement>('.unread-bar-help.pin-help')!)
+    assert.ok(document.querySelector('[role="dialog"][aria-label="主力晶片的顏色說明"]'))
+  } finally {
+    window.matchMedia = original
+  }
+})
+
 test('點左邊 menu 的專案標題：選取並把那個專案捲到側欄頂端', async () => {
   const calls: { id: string | undefined; opts: unknown }[] = []
   const proto = Element.prototype as unknown as { scrollIntoView?: (o?: unknown) => void }

@@ -12,7 +12,7 @@ export function useCacheInput(botId: string): CacheInput {
       const bot = s.bots.find((b) => b.id === botId)
       return {
         kind: bot?.kind ?? null,
-        // 有效模型：正在跑的那一份優先（同 BotStatusCard），沒有才用設定值。
+        // 有效模型：正在跑的那一份優先，沒有才用設定值。
         model: effectiveModelOf(r?.runtime_model, bot?.model),
         promptCache: r?.prompt_cache ?? null,
         status: r?.status ?? null,

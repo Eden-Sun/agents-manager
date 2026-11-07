@@ -1,5 +1,5 @@
 /**
- * 晶片的顏色優先序＝緊急度（`UnreadChip` 檔頭、`BotStatusCard` 的 headline）：需要回應 → 完成待看（未讀）→ 等子 agent → 在跑。
+ * 晶片的顏色優先序＝緊急度（`UnreadChip` 檔頭）：需要回應 → 完成待看（未讀）→ 等子 agent → 在跑。
  * 父 bot 的子 agent 還在跑、同時父 bot 有一則做完還沒看的回合：要亮的是「完成待看」，不能被「等子 agent」的黃點蓋掉。
  */
 import test, { after, afterEach, before, beforeEach } from 'node:test'

@@ -9,7 +9,6 @@ import type { FakeRequest } from '../testing/domHarness'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
-import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import { ChatPanel } from './ChatPanel'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import { UnreadChip } from './UnreadChip'
@@ -219,34 +218,6 @@ function asPhone(): () => void {
   return () => (window.matchMedia = original)
 }
 
-const HINTS: ChipHints = { current: false, unread: 0, needsReply: false, waitsKids: false, kidsRunning: 0, cacheTitle: null }
-
-test('手機版：「不用保溫」在主力的狀態卡裡（長按主力晶片開），可切換', async () => {
-  const restore = asPhone()
-  try {
-    const { id, requests } = await running('am-claude')
-    await mount(<BotStatusCard botId={id} hints={HINTS} anchor={null} onClose={() => {}} onLegend={() => {}} />)
-    await until(() => btn() !== null, '狀態卡裡出現「不用保溫」')
-    assert.ok(document.querySelector('.bot-status-card')!.contains(btn()!), '在卡片裡面')
-    assert.equal(document.querySelectorAll('.keep-warm-skip-btn').length, 1)
-    assert.ok(btn()!.classList.contains('touch'), '觸控版（CSS 給 ≥ 40px）')
-    assert.equal(btn()!.textContent, '不用保溫')
-
-    await click(btn()!)
-    await until(() => btn()?.getAttribute('aria-pressed') === 'true', '開著')
-    assert.equal(btn()!.textContent, '不保溫中・取消')
-    assert.deepEqual(skipBodies(requests), [{ skip: true }])
-    assert.equal(useStore.getState().runs[id]?.keep_warm_skip, true)
-    assert.ok(document.querySelector('.bot-status-card'), '按了不關卡')
-
-    await click(btn()!)
-    await until(() => btn()?.getAttribute('aria-pressed') === 'false', '已取消')
-    assert.deepEqual(skipBodies(requests), [{ skip: true }, { skip: false }])
-  } finally {
-    restore()
-  }
-})
-
 // 2026-11-07 使用者：手機 context popup 也要能設定不保溫（之前只在長按主力晶片的狀態卡裡）。
 test('手機版：context popup 裡主力也有「不用保溫」', async () => {
   const restore = asPhone()
@@ -262,17 +233,3 @@ test('手機版：context popup 裡主力也有「不用保溫」', async () => 
   }
 })
 
-test('手機版：沒釘成主力，狀態卡裡沒有「不用保溫」', async () => {
-  const restore = asPhone()
-  try {
-    const { id } = await running('am-claude')
-    await mock.request('PATCH', `/bots/${id}`, { primary: false })
-    await useStore.getState().refreshState()
-    await mount(<BotStatusCard botId={id} hints={HINTS} anchor={null} onClose={() => {}} onLegend={() => {}} />)
-    assert.ok(document.querySelector('.bot-status-card'), '卡片照樣開')
-    assert.equal(btn(), null)
-    await mock.request('PATCH', `/bots/${id}`, { primary: true })
-  } finally {
-    restore()
-  }
-})

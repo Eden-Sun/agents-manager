@@ -9,9 +9,9 @@ import './modelCapacity.css'
 import { useT } from '../lib/i18n'
 
 /**
- * 主力晶片的顏色說明（2026-10-04 使用者：「手機版主力長按說明顏色意義；電腦版你自己想」）。
+ * 主力晶片的顏色說明（2026-10-04 使用者）。
  * 範例直接套晶片與燈號的真 class，顏色永遠跟晶片列一致，不另外寫一份色票。
- * 從主力 bot 狀態卡（`BotStatusCard`，手機長按）的「顏色代表什麼？」或電腦版晶片列尾端的「?」打開。
+ * 從晶片列尾端的「?」打開（電腦在列右下角，手機在主力區右上角；2026-11-07 起手機長按不再開狀態卡）。
  */
 export function ChipLegend({ onClose }: { onClose: () => void }) {
   const t = useT()
@@ -115,7 +115,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span>{t('灰：主機斷線、讀不到')}</span>
           </li>
         </ul>
-        <p className="chip-legend-tip">{t('手機：長按晶片會跳出它的狀態卡，手指不放直接拖就能排順序；主力的狀態卡裡可以設定「不用保溫」。')}</p>
+        <p className="chip-legend-tip">{t('手機：長按晶片後直接拖，就能排順序。')}</p>
       </div>
     </div>,
     document.body,
