@@ -14,6 +14,7 @@ pub struct Member {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub identity: Option<String>,
+    pub track: Option<String>,
     pub manager_use: bool,
     pub running: bool,
     /// 有任何進行中的 run（starting／running／stopping）；false＝停著。
@@ -24,6 +25,8 @@ pub struct Member {
     pub working: bool,
     /// agent_status 最後一次改變的時間（越晚＝越近閒下來＝cache 越熱）。
     pub since: Option<String>,
+    pub quota_blocked: bool,
+    pub context_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,9 +46,79 @@ impl Cluster {
         json!({"name": self.name, "kind": self.kind, "model": self.model, "effort": self.effort, "identity": self.identity,
             "members": self.members.iter().map(|m| &m.id).collect::<Vec<_>>(), "idle": self.idle(), "working": self.working()})
     }
-    /// 可接工作的閒置成員：manager_use=1、running、idle；多個時挑最近閒下來的（cache 最熱）。
-    pub fn pick_idle(&self) -> Option<&Member> {
-        self.members.iter().filter(|m| m.manager_use && m.running && m.idle).max_by(|a, b| a.since.cmp(&b.since).then_with(|| b.id.cmp(&a.id)))
+    /// 可接工作的閒置成員：manager_use=1、running、idle、額度未達 critical。
+    pub fn pick_best(&self, want_track: Option<&str>) -> Option<&Member> {
+        pick_best_member(&self.members, want_track)
+    }
+}
+
+pub(crate) fn pick_best_member<'a>(members: &'a [Member], want_track: Option<&str>) -> Option<&'a Member> {
+    members.iter().filter(|m| m.manager_use && m.running && m.idle && !m.quota_blocked).min_by(|a, b| {
+        let track_rank = |m: &Member| if want_track.is_some_and(|t| m.track.as_deref() == Some(t)) { 0 } else { 1 };
+        track_rank(a).cmp(&track_rank(b))
+            .then_with(|| a.context_pct.unwrap_or(50.0).total_cmp(&b.context_pct.unwrap_or(50.0)))
+            .then_with(|| b.since.cmp(&a.since))
+            .then_with(|| a.id.cmp(&b.id))
+    })
+}
+
+/// 將模型家族映射到 worker 的預算 tier。
+pub fn tier_of(kind: &str, model: Option<&str>) -> &'static str {
+    let kind = kind.to_ascii_lowercase();
+    let model = model.unwrap_or_default().to_ascii_lowercase();
+    if model.contains("haiku") || model.contains("luna")
+        || (model.contains("gemini") && (model.contains("flash-low") || model.contains("flash-medium")))
+    {
+        "cheap"
+    } else if model.contains("opus") || model.contains("fable") || model.contains("sol") || model.contains("astra") {
+        "strong"
+    } else if model.contains("sonnet") || model.contains("terra") || kind == "grok"
+        || (model.contains("gemini") && model.contains("flash-high"))
+        || (kind == "agy" && model.trim().is_empty())
+    {
+        "standard"
+    } else {
+        "standard"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoTarget {
+    pub tier: String,
+    pub track: Option<String>,
+}
+
+/// Parses the stored selector form `auto:<tier>[:<track>]`.
+pub fn parse_auto_target(selector: &str) -> Option<AutoTarget> {
+    let rest = selector.strip_prefix("auto:")?;
+    let mut parts = rest.splitn(3, ':');
+    let tier = parts.next()?;
+    if !matches!(tier, "cheap" | "standard" | "strong") { return None }
+    let track = parts.next().map(str::to_string);
+    if parts.next().is_some() || track.as_deref() == Some("") { return None }
+    Some(AutoTarget { tier: tier.to_string(), track })
+}
+
+fn context_pct(run: Option<&db::Run>) -> Option<f64> {
+    let status = serde_json::from_str::<Value>(run?.status_json.as_deref()?).ok()?;
+    let context = status.get("context_window")?;
+    let pct = context.get("used_percentage").and_then(Value::as_f64).or_else(|| {
+        let used = context.get("total_input_tokens").and_then(Value::as_f64)?;
+        let size = context.get("context_window_size").and_then(Value::as_f64)?;
+        (size > 0.0).then_some(used * 100.0 / size)
+    })?;
+    (pct.is_finite() && (0.0..=100.0).contains(&pct)).then_some(pct)
+}
+
+fn member_of(bot: &db::Bot, run: Option<&db::Run>) -> Member {
+    let running = run.is_some_and(|r| r.state == "running");
+    let starting = run.is_some_and(|r| r.state == "starting");
+    Member {
+        id: bot.id.clone(), kind: bot.kind.clone(), model: bot.model.clone(), effort: bot.effort.clone(), identity: bot.identity.clone(),
+        track: bot.track.clone(), manager_use: bot.manager_use == 1, running, active: run.is_some(), starting,
+        idle: running && run.is_some_and(|r| r.agent_status == "idle"),
+        working: running && run.is_some_and(|r| r.agent_status == "working"),
+        since: run.and_then(|r| r.agent_status_since.clone()), quota_blocked: false, context_pct: context_pct(run),
     }
 }
 
@@ -119,14 +192,7 @@ pub fn group(members: &[Member]) -> Vec<Cluster> {
 pub fn clusters_of(bots: &[db::Bot], runs: &std::collections::HashMap<String, db::Run>, project_id: &str) -> Vec<Cluster> {
     let members: Vec<Member> = bots.iter()
         .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none())
-        .map(|b| {
-            let r = runs.get(&b.id);
-            let running = r.is_some_and(|r| r.state == "running");
-            let starting = r.is_some_and(|r| r.state == "starting");
-            Member { id: b.id.clone(), kind: b.kind.clone(), model: b.model.clone(), effort: b.effort.clone(), identity: b.identity.clone(),
-                manager_use: b.manager_use == 1, running, active: r.is_some(), starting, idle: running && r.is_some_and(|r| r.agent_status == "idle"),
-                working: running && r.is_some_and(|r| r.agent_status == "working"), since: r.and_then(|r| r.agent_status_since.clone()) }
-        }).collect();
+        .map(|b| member_of(b, runs.get(&b.id))).collect();
     group(&members)
 }
 
@@ -177,9 +243,29 @@ impl Cluster {
 
 /// 專案的群集（讀 DB）。
 pub async fn project_clusters(app: &Arc<App>, project_id: &str) -> anyhow::Result<Vec<Cluster>> {
+    Ok(group(&project_executors(app, project_id).await?))
+}
+
+/// 存活的頂層執行者快照（包含不成群的單顆），並補上此專案主機的額度狀態。
+pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Result<Vec<Member>> {
+    let Some(project) = db::project(&app.db, project_id).await? else { return Ok(Vec::new()) };
     let bots = db::live_bots(&app.db).await?;
     let runs = db::active_runs_by_bot(&app.db).await?;
-    Ok(clusters_of(&bots, &runs, project_id))
+    let mut members: Vec<Member> = bots.iter()
+        .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none())
+        .map(|b| member_of(b, runs.get(&b.id))).collect();
+    let now = chrono::Utc::now();
+    for member in &mut members {
+        let Some(bot) = bots.iter().find(|b| b.id == member.id) else { continue };
+        let identity = crate::quota::identity_for_run(bot, runs.get(&bot.id));
+        let base = crate::quota::quota_base_for_host(app, &project.host, &bot.kind, identity.as_deref()).await;
+        let key = crate::quota::quota_key(&project.host, &base);
+        let quota = app.quotas.lock().await.get(&key).cloned();
+        member.quota_blocked = quota.is_some_and(|q| {
+            q.exhausted(crate::quota::Bucket::FiveHour, now) || q.exhausted(crate::quota::Bucket::SevenDay, now)
+        });
+    }
+    Ok(members)
 }
 
 /// bot id → 群集名。
@@ -190,17 +276,23 @@ pub fn names_by_bot(clusters: &[Cluster]) -> BTreeMap<String, String> {
 /// 這顆成員現在能不能直接接工作（manager_use=1、running、idle）。
 pub async fn member_idle(app: &Arc<App>, bot_id: &str) -> bool {
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
-    if bot.manager_use != 1 || bot.deleted_at.is_some() { return false }
-    db::active_run(&app.db, bot_id).await.ok().flatten().is_some_and(|r| r.state == "running" && r.agent_status == "idle")
+    if bot.deleted_at.is_some() { return false }
+    project_executors(app, &bot.project_id).await.ok().and_then(|members| {
+        members.into_iter().find(|m| m.id == bot_id)
+    }).is_some_and(|m| m.manager_use && m.running && m.idle && !m.quota_blocked)
 }
 
 impl Cluster {
     /// 沒有閒置成員時該啟動哪一顆：manager_use=1、完全沒有進行中 run 的成員（id 最小的）。
     /// 群集裡已有「啟動中」的成員就回 `None`（一次只啟動一顆）。
     pub fn pick_to_start(&self) -> Option<&Member> {
-        if self.members.iter().any(|m| m.starting) { return None }
-        self.members.iter().filter(|m| m.manager_use && !m.active).min_by(|a, b| a.id.cmp(&b.id))
+        pick_to_start_member(&self.members)
     }
+}
+
+pub(crate) fn pick_to_start_member(members: &[Member]) -> Option<&Member> {
+    if members.iter().any(|m| m.starting) { return None }
+    members.iter().filter(|m| m.manager_use && !m.active && !m.quota_blocked).min_by(|a, b| a.id.cmp(&b.id))
 }
 
 /// 群集沒有閒置成員時，啟動一顆停著的成員（走既有的 `lifecycle::start_bot`，脫離呼叫端執行）；請求留在 pending，
@@ -208,8 +300,12 @@ impl Cluster {
 pub async fn start_one_if_needed(app: &Arc<App>, project_id: &str, cluster: &str) -> Option<String> {
     let clusters = project_clusters(app, project_id).await.ok()?;
     let c = clusters.iter().find(|c| c.name == cluster)?;
-    if c.pick_idle().is_some() { return None }
-    let id = c.pick_to_start()?.id.clone();
+    if c.pick_best(None).is_some() { return None }
+    start_member_if_needed(app, &c.members).await
+}
+
+pub async fn start_member_if_needed(app: &Arc<App>, members: &[Member]) -> Option<String> {
+    let id = pick_to_start_member(members)?.id.clone();
     let (app, bot) = (app.clone(), id.clone());
     tokio::spawn(Box::pin(async move {
         if let Err(e) = crate::lifecycle::start_bot(&app, &bot).await { tracing::warn!(bot = %bot, error = ?e, "cluster auto-start failed"); }
@@ -230,20 +326,39 @@ pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, c
             .bind(why).bind(request_id).execute(&app.db).await.map(|_| None)
     };
     let Some(bot) = db::bot(&app.db, project_bot).await? else { return Ok(gone(format!("cluster {cluster} no longer exists")).await?) };
-    let clusters = project_clusters(app, &bot.project_id).await?;
-    let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) else {
-        return Ok(gone(format!("cluster {cluster} no longer exists")).await?)
+    let auto = parse_auto_target(cluster);
+    let mut members = if let Some(target) = &auto {
+        project_executors(app, &bot.project_id).await?.into_iter()
+            .filter(|m| tier_of(&m.kind, m.model.as_deref()) == target.tier)
+            .collect::<Vec<_>>()
+    } else {
+        let clusters = project_clusters(app, &bot.project_id).await?;
+        let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) else {
+            return Ok(gone(format!("cluster {cluster} no longer exists")).await?)
+        };
+        c.members.clone()
     };
     // 每次重選都用發起者「當下」的權限（不論角色）：管理者／代班中的副管理者不限；專家只在開關開著時、限本專案頂層執行者。
     // 發起者不存在、已刪、降級或代班結束（`sender_scope` 回 None）就終止請求——不預設 All，也不會先自動啟動成員。
-    let from: Option<String> = sqlx::query_scalar("SELECT from_bot_id FROM relay_requests WHERE id=?").bind(request_id).fetch_optional(&app.db).await?;
-    let sender = match from { Some(f) => db::bot(&app.db, &f).await?, None => None };
+    let request: Option<(String, Option<String>)> = sqlx::query_as("SELECT from_bot_id,track FROM relay_requests WHERE id=?").bind(request_id).fetch_optional(&app.db).await?;
+    let sender = match request.as_ref() { Some((f, _)) => db::bot(&app.db, f).await?, None => None };
     let scope = match &sender { Some(s) => sender_scope(app, s).await?, None => None };
     let Some(scope) = scope else { return Ok(gone(format!("cluster {cluster}: sender may no longer dispatch to clusters")).await?) };
-    let c = c.restricted(&scope);
-    if c.members.is_empty() { return Ok(gone(format!("cluster {cluster}: no member the sender may dispatch to")).await?) }
-    let Some(pick) = c.pick_idle() else {
-        if scope.may_start() { start_one_if_needed(app, &bot.project_id, &c.name).await; }
+    members.retain(|m| scope.allows(&m.id));
+    if members.is_empty() { return Ok(gone(format!("cluster {cluster}: no member the sender may dispatch to")).await?) }
+    let want_track = auto.as_ref().and_then(|t| t.track.as_deref()).or_else(|| request.as_ref().and_then(|(_, t)| t.as_deref()));
+    let Some(pick) = pick_best_member(&members, want_track) else {
+        if scope.may_start() {
+            if auto.is_some() {
+                start_member_if_needed(app, &members).await;
+            } else {
+                // A named cluster has at least two members; their current cluster name can still change while pending.
+                let clusters = project_clusters(app, &bot.project_id).await?;
+                if let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) {
+                    start_member_if_needed(app, &c.members).await;
+                }
+            }
+        }
         return Ok(None)
     };
     if pick.id == project_bot { return Ok(Some(pick.id.clone())) }
@@ -258,7 +373,27 @@ mod tests {
 
     fn m(id: &str, model: &str, effort: &str, identity: &str) -> Member {
         Member { id: id.into(), kind: "claude".into(), model: Some(model.into()), effort: if effort.is_empty() { None } else { Some(effort.into()) },
-            identity: if identity.is_empty() { None } else { Some(identity.into()) }, manager_use: true, running: true, active: true, starting: false, idle: false, working: false, since: None }
+            identity: if identity.is_empty() { None } else { Some(identity.into()) }, track: None, manager_use: true, running: true, active: true, starting: false,
+            idle: false, working: false, since: None, quota_blocked: false, context_pct: None }
+    }
+
+    #[test]
+    fn tier_classifies_model_families_and_auto_selectors() {
+        for (kind, model, tier) in [
+            ("claude", "claude-haiku-5-5", "cheap"), ("codex", "gpt-6-luna", "cheap"),
+            ("agy", "gemini-3.8-flash-low", "cheap"), ("agy", "gemini-3.8-flash-medium", "cheap"),
+            ("claude", "sonnet-5-5", "standard"), ("codex", "gpt-6-terra", "standard"),
+            ("grok", "", "standard"), ("agy", "", "standard"), ("agy", "gemini-3.8-flash-high", "standard"),
+            ("claude", "opus-5-5", "strong"), ("claude", "fable-5-1", "strong"),
+            ("codex", "gpt-6-sol", "strong"), ("codex", "gpt-6-astra", "strong"), ("other", "unknown", "standard"),
+        ] {
+            assert_eq!(tier_of(kind, (!model.is_empty()).then_some(model)), tier, "{kind}/{model}");
+        }
+        assert_eq!(parse_auto_target("auto:cheap:db"), Some(AutoTarget { tier: "cheap".into(), track: Some("db".into()) }));
+        assert_eq!(parse_auto_target("auto:strong"), Some(AutoTarget { tier: "strong".into(), track: None }));
+        assert!(parse_auto_target("auto:unknown").is_none());
+        assert!(parse_auto_target("auto:cheap:").is_none());
+        assert!(parse_auto_target("auto:cheap:a:b").is_none());
     }
 
     #[test]
@@ -300,20 +435,34 @@ mod tests {
         let cs = group(&[a.clone(), b.clone()]);
         assert_eq!((cs.len(), cs[0].name.as_str(), cs[0].members.len()), (1, "haiku", 2));
         assert_eq!(cs[0].pick_to_start().map(|x| x.id.as_str()), Some("a"));
+        a.quota_blocked = true;
+        assert_eq!(pick_to_start_member(&[a.clone(), b.clone()]).map(|x| x.id.as_str()), Some("b"), "blocked stopped member is skipped");
+        b.quota_blocked = true;
+        assert!(pick_to_start_member(&[a.clone(), b.clone()]).is_none(), "all blocked members are skipped");
         a.active = true; a.starting = true;
         assert!(group(&[a, b]).remove(0).pick_to_start().is_none(), "已有啟動中的就不再啟動");
     }
 
     #[test]
-    fn pick_idle_prefers_hottest_and_skips_manager_use_off() {
+    fn pick_best_prioritizes_track_then_context_then_cache_and_skips_blocked() {
         let mut a = m("a", "claude-haiku-4-5", "", ""); a.idle = true; a.since = Some("2026-11-02T01:00:00Z".into());
         let mut b = m("b", "claude-haiku-4-5", "", ""); b.idle = true; b.since = Some("2026-11-02T02:00:00Z".into());
         let mut c = m("c", "claude-haiku-4-5", "", ""); c.idle = true; c.since = Some("2026-11-02T03:00:00Z".into()); c.manager_use = false;
-        let cs = group(&[a, b, c]);
-        assert_eq!(cs[0].pick_idle().map(|x| x.id.as_str()), Some("b"));
+        a.context_pct = Some(90.0); a.track = Some("db".into());
+        b.context_pct = Some(20.0);
+        c.context_pct = Some(1.0);
+        let members = vec![a.clone(), b.clone(), c];
+        assert_eq!(pick_best_member(&members, Some("db")).map(|x| x.id.as_str()), Some("a"), "track priority beats context and cache");
+        a.quota_blocked = true;
+        let members = vec![a, b.clone(), { let mut x = b; x.id = "z".into(); x.since = Some("2026-11-02T03:00:00Z".into()); x.context_pct = Some(20.0); x }];
+        assert_eq!(pick_best_member(&members, None).map(|x| x.id.as_str()), Some("z"), "equal context uses latest idle edge");
+        let members = vec![members[1].clone(), { let mut x = members[2].clone(); x.context_pct = Some(40.0); x.since = Some("2026-11-02T04:00:00Z".into()); x }];
+        assert_eq!(pick_best_member(&members, None).map(|x| x.id.as_str()), Some("b"), "lower context beats a warmer cache");
+        let members = members.into_iter().map(|mut x| { x.quota_blocked = true; x }).collect::<Vec<_>>();
+        assert!(pick_best_member(&members, None).is_none(), "all critical members behave as no idle candidates");
         let mut w = m("w", "claude-haiku-4-5", "", ""); w.working = true;
         let cs = group(&[w.clone(), { let mut x = w; x.id = "x".into(); x }]);
-        assert!(cs[0].pick_idle().is_none());
+        assert!(cs[0].pick_best(None).is_none());
     }
 
     async fn expert_member(env: &crate::testing::Env, name: &str, role: &str, status: &str) -> db::Bot {
@@ -344,6 +493,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_named_cluster_with_only_quota_blocked_members_does_not_route_to_one() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let manager = expert_member(&env, "mgr-quota-cluster", "manager", "idle").await;
+        let a = expert_member(&env, "quota-cluster-a", "executor", "idle").await;
+        let b = expert_member(&env, "quota-cluster-b", "executor", "working").await;
+        let critical = crate::quota::Quota {
+            five_hour: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some("2999-01-01T00:00:00Z".into()), observed_at: Some(db::now()) }),
+            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            updated_at: db::now(), source: "test".into(), account: None, host: "local".into(),
+        };
+        env.app.quotas.lock().await.insert(crate::quota::quota_key("local", "claude"), critical);
+        assert!(matches!(crate::api::resolve_cluster_target(&env.app, &manager.id, "haiku").await, Err(crate::lifecycle::LcError::NotFound(_))));
+        assert!(project_executors(&env.app, &env.project_id).await.unwrap().iter().filter(|m| m.id == a.id || m.id == b.id).all(|m| m.quota_blocked));
+    }
+
+    #[tokio::test]
+    async fn auto_resolve_scores_singleton_executors_by_track_and_context() {
+        let env = crate::testing::env().await;
+        let manager = expert_member(&env, "mgr-auto", "manager", "idle").await;
+        let db_worker = expert_member(&env, "db-worker", "executor", "idle").await;
+        let infra_worker = expert_member(&env, "infra-worker", "executor", "idle").await;
+        sqlx::query("UPDATE bots SET identity='db-quota-test' WHERE id=?").bind(&db_worker.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET track='db' WHERE id=?").bind(&db_worker.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET model='gpt-6-luna', track='infra' WHERE id=?").bind(&infra_worker.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET status_json=? WHERE bot_id=?").bind(r#"{"context_window":{"used_percentage":82}}"#).bind(&db_worker.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET status_json=? WHERE bot_id=?").bind(r#"{"context_window":{"used_percentage":8}}"#).bind(&infra_worker.id).execute(&env.app.db).await.unwrap();
+
+        let by_track = crate::api::resolve_auto_target(&env.app, &manager.id, "cheap:db").await.unwrap().0;
+        assert_eq!(by_track["to_bot_id"], db_worker.id, "matching track wins before context");
+        assert_eq!(by_track["cluster"], "auto:cheap:db");
+        let by_context = crate::api::resolve_auto_target(&env.app, &manager.id, "cheap").await.unwrap().0;
+        assert_eq!(by_context["to_bot_id"], infra_worker.id, "singleton workers participate; lower context wins");
+
+        let critical = crate::quota::Quota {
+            five_hour: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some("2999-01-01T00:00:00Z".into()), observed_at: Some(db::now()) }),
+            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            updated_at: db::now(), source: "test".into(), account: None, host: "local".into(),
+        };
+        assert!(critical.exhausted(crate::quota::Bucket::FiveHour, chrono::Utc::now()), "fixture must be critical");
+        let db_bot = db::bot(&env.app.db, &db_worker.id).await.unwrap().unwrap();
+        let run = db::active_run(&env.app.db, &db_worker.id).await.unwrap();
+        let identity = crate::quota::identity_for_run(&db_bot, run.as_ref());
+        let base = crate::quota::quota_base_for_host(&env.app, "local", &db_bot.kind, identity.as_deref()).await;
+        let key = crate::quota::quota_key("local", &base);
+        env.app.quotas.lock().await.insert(key.clone(), critical);
+        let members = project_executors(&env.app, &env.project_id).await.unwrap();
+        let db_snapshot = members.iter().find(|m| m.id == db_worker.id).unwrap();
+        assert!(db_snapshot.quota_blocked, "quota key {key}, identity {identity:?}");
+        assert!(!members.iter().find(|m| m.id == infra_worker.id).unwrap().quota_blocked);
+        let after_quota = crate::api::resolve_auto_target(&env.app, &manager.id, "cheap:db").await.unwrap().0;
+        assert_eq!(after_quota["to_bot_id"], infra_worker.id, "critical identity quota blocks the otherwise matching-track worker");
+
+        sqlx::query("UPDATE bots SET identity='db-quota-test' WHERE id=?").bind(&infra_worker.id).execute(&env.app.db).await.unwrap();
+        assert!(matches!(crate::api::resolve_auto_target(&env.app, &manager.id, "cheap:db").await, Err(crate::lifecycle::LcError::NotFound(_))), "when every candidate is blocked, do not route to one as a pending placeholder");
+    }
+
+    #[tokio::test]
     async fn queued_request_goes_to_the_first_member_that_turns_idle() {
         let env = crate::testing::env().await;
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
@@ -358,6 +565,26 @@ mod tests {
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
         let to: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id='rq'").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(to, b.id);
+    }
+
+    #[tokio::test]
+    async fn auto_pending_request_reselects_across_executors_and_fails_without_a_tier_candidate() {
+        let env = crate::testing::env().await;
+        let manager = expert_member(&env, "mgr-auto-claim", "manager", "idle").await;
+        let a = expert_member(&env, "w-auto-a", "executor", "working").await;
+        let b = expert_member(&env, "w-auto-b", "executor", "idle").await;
+        sqlx::query("UPDATE bots SET model='gpt-6-luna' WHERE id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq-auto',?,?,'k-auto','p','[]','pending',?,'auto:cheap')")
+            .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq-auto", &a.id, "auto:cheap").await.unwrap(), Some(b.id.clone()));
+        let to: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id='rq-auto'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(to, b.id);
+
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq-auto-gone',?,?,'k-auto-gone','p','[]','pending',?,'auto:strong')")
+            .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq-auto-gone", &a.id, "auto:strong").await.unwrap(), None);
+        let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id='rq-auto-gone'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed", "tier without any live executor fails instead of waiting forever");
     }
 
     /// #2070：建立 pending 後新增同模型不同 effort 的群集，原群集名從 `haiku` 變 `haiku-low`；
@@ -574,6 +801,28 @@ mod sender_rescope_tests {
         let cluster: Option<String> = sqlx::query_scalar("SELECT cluster FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&f.env.app.db).await.unwrap();
         assert_eq!(cluster.as_deref(), Some("haiku"));
         (rid, to)
+    }
+
+    #[tokio::test]
+    async fn auto_selector_uses_relay_resolve_and_persists_its_cluster_for_pending_claims() {
+        let f = fx().await;
+        status(&f, &f.e2, "idle").await;
+        let (code, resolved) = http(&f, &f.mgr, "GET", "/api/relay/resolve?target=bot:auto:cheap", Value::Null).await;
+        assert_eq!(code, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["cluster"], "auto:cheap");
+        assert_eq!(resolved["to_bot_id"], f.e2);
+
+        status(&f, &f.e2, "working").await;
+        let body = json!({"text":"auto work","client_request_id":"auto-route-key","expect_result":true,"cluster":"auto:cheap"});
+        let (code, response) = http(&f, &f.mgr, "POST", &format!("/api/bots/{}/prompt", f.e2), body).await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{response}");
+        assert_eq!(response["delivery"], "pending");
+        let request_id = response["request_id"].as_str().unwrap();
+        let stored: Option<String> = sqlx::query_scalar("SELECT cluster FROM relay_requests WHERE id=?").bind(request_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(stored.as_deref(), Some("auto:cheap"));
+
+        status(&f, &f.e1, "idle").await;
+        assert_eq!(claim_target(&f.env.app, request_id, &f.e2, "auto:cheap").await.unwrap(), Some(f.e1.clone()));
     }
 
     async fn change(f: &Fx, who: &str, c: Change) {

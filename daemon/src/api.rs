@@ -7684,7 +7684,7 @@ pub(crate) struct PromptIn {
     share_reply_visible: bool,
     #[serde(default)]
     track: Option<String>,
-    /// 群集派工（shim 解析 `bot:cluster:<名稱>` 後帶來）：只對 `expect_result` 有意義。
+    /// 自動／群集派工（shim 解析 `bot:cluster:<名稱>` 或 `bot:auto:<tier>[:<track>]` 後帶來）：只對 `expect_result` 有意義。
     #[serde(default)]
     cluster: Option<String>,
 }
@@ -7709,6 +7709,9 @@ async fn resolve_relay_target(
     };
     if let Some(name) = q.target.strip_prefix("bot:cluster:") {
         return resolve_cluster_target(&app, &sender, name).await;
+    }
+    if let Some(selector) = q.target.strip_prefix("bot:auto:") {
+        return resolve_auto_target(&app, &sender, selector).await;
     }
     if let Some(id) = q.target.strip_prefix("bot:") {
         if id == sender { return Err(LcError::Bad("relay_self".into())); }
@@ -7770,14 +7773,14 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
     if cluster.members.is_empty() {
         return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable","message":"這個群集沒有你可以直接派工的執行者：請改送管理者"})));
     }
-    let chosen = match cluster.pick_idle() {
+    let chosen = match cluster.pick_best(None) {
         Some(m) => Some((m.id.clone(), true)),
         None => {
             // 沒有閒置成員：管理者側先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
             if scope.may_start() { crate::expert_cluster::start_one_if_needed(app, &from.project_id, name).await; }
-            cluster.members.iter().filter(|m| m.manager_use && (m.running || m.starting)).map(|m| m.id.clone()).next()
+            cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).map(|m| m.id.clone()).next()
                 .or_else(|| if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
-                .or_else(|| cluster.members.iter().filter(|m| m.manager_use).map(|m| m.id.clone()).next())
+                .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked).map(|m| m.id.clone()).next())
                 .map(|id| (id, false))
         }
     };
@@ -7785,6 +7788,44 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
     check_relay_policy(app, sender, &bot_id).await?;
     let run = db::active_run(&app.db, &bot_id).await.map_err(any_err)?;
     Ok(Json(json!({"to_bot_id": bot_id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref()), "cluster": name, "cluster_idle": idle})))
+}
+
+/// `bot:auto:<tier>[:<track>]`：依 tier 和共用成員評分挑選本專案 executor，包含不成群的單顆。
+pub(crate) async fn resolve_auto_target(app: &Arc<App>, sender: &str, selector: &str) -> Result<Json<Value>, LcError> {
+    let Some(target) = crate::expert_cluster::parse_auto_target(&format!("auto:{selector}")) else {
+        return Err(LcError::Bad("auto tier 必須是 cheap、standard 或 strong".into()));
+    };
+    let from = db::bot(&app.db, sender).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay sender".into()))?;
+    let Some(scope) = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)? else {
+        return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
+    };
+    let mut members: Vec<_> = crate::expert_cluster::project_executors(app, &from.project_id).await.map_err(any_err)?
+        .into_iter().filter(|m| crate::expert_cluster::tier_of(&m.kind, m.model.as_deref()) == target.tier)
+        .collect();
+    members.retain(|m| scope.allows(&m.id));
+    if members.is_empty() {
+        return Err(LcError::NotFound("auto executor".into()));
+    }
+    let chosen = crate::expert_cluster::pick_best_member(&members, target.track.as_deref()).map(|m| (m.id.clone(), true));
+    let (bot_id, idle) = if let Some(chosen) = chosen {
+        chosen
+    } else {
+        let started = if scope.may_start() {
+            crate::expert_cluster::start_member_if_needed(app, &members).await
+        } else {
+            None
+        };
+        let fallback = started
+            .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()))
+            .or_else(|| if scope.may_start() { crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone()) } else { None })
+            .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()));
+        let Some(id) = fallback else { return Err(LcError::NotFound("auto executor".into())) };
+        (id, false)
+    };
+    check_relay_policy(app, sender, &bot_id).await?;
+    let run = db::active_run(&app.db, &bot_id).await.map_err(any_err)?;
+    let cluster = format!("auto:{}{}", target.tier, target.track.as_deref().map(|t| format!(":{t}")).unwrap_or_default());
+    Ok(Json(json!({"to_bot_id": bot_id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref()), "cluster": cluster, "cluster_idle": idle})))
 }
 
 async fn check_relay_policy(app: &Arc<App>, from: &str, to: &str) -> Result<(), LcError> {
@@ -7899,8 +7940,14 @@ pub(crate) async fn prompt_bot(
             let Some(scope) = crate::expert_cluster::sender_scope(&app, &from).await.map_err(any_err)? else {
                 return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_manager_only"})));
             };
-            let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
-            if !clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id)) { return Err(LcError::Bad("target is not a member of that cluster".into())); }
+            let target_ok = if let Some(auto) = crate::expert_cluster::parse_auto_target(name) {
+                crate::expert_cluster::project_executors(&app, &from.project_id).await.map_err(any_err)?.iter()
+                    .any(|m| m.id == id && crate::expert_cluster::tier_of(&m.kind, m.model.as_deref()) == auto.tier)
+            } else {
+                let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
+                clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id))
+            };
+            if !target_ok { return Err(LcError::Bad("target is not a member of that cluster".into())); }
             // 專家：目標必須是它可直接派工的成員（check_relay_policy 已核過，這裡明確擋群集越界）。
             if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable"}))); }
         }
