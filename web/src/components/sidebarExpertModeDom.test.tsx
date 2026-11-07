@@ -66,6 +66,7 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
       bot('exp-exec', 'p-exp', 'executor', null, true), // role_pending
       bot('exp-none', 'p-exp', null),
       bot('exp-child', 'p-exp', null, 'exp-mgr'), // child
+      bot('exp-child-adv', 'p-exp', 'advisor', 'exp-mgr'), // 管理者設成顧問的 child
     ],
     runs: {},
     botOrder: {},
@@ -120,6 +121,11 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   const childRow = expSection.querySelector<HTMLElement>('[data-bot-id="exp-child"]')
   assert.ok(childRow, 'child 列存在')
   assert.ok(childRow.closest('.bot-kids'), 'child 列應掛在父列底下')
+  assert.equal(childRow.querySelector('.bot-role-tag'), null, '沒角色的 child 不標')
+  // 有角色的 child 不進分段，角色只能標在列上（2026-11-08 使用者：設了顧問 menu 看不出來）
+  const advChild = expSection.querySelector<HTMLElement>('[data-bot-id="exp-child-adv"]')
+  assert.ok(advChild?.closest('.bot-kids'), '顧問 child 仍掛在父列底下')
+  assert.equal(advChild?.querySelector('.bot-role-tag')?.textContent?.trim(), '顧', '顧問 child 列上有「顧」')
 })
 
 test('副管理者：只有專案設定的那位成員多一顆「副」小標；沒設副管理者的專案沒有', async () => {
