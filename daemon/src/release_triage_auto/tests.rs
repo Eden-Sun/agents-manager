@@ -311,3 +311,57 @@ async fn off_mode_returns_quiet_fallback_without_calling_the_model_or_changing_p
     assert_eq!(model.calls(), 0);
     assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn api_verdict_publishes_via_gh_without_an_agm_review_and_publish_retry_does_not_reanalyse() {
+    use std::os::unix::fs::PermissionsExt;
+    for fail_first in [false, true] {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let gh = app.data_dir.join("fake-triage-gh");
+        std::fs::write(&gh, r#"#!/bin/sh
+D=$(dirname "$0")
+echo "$1 $2" >> "$D/gh-calls"
+case "$1 $2" in
+  "auth status") exit 0 ;;
+  "issue list") echo '[]' ;;
+  "issue create")
+    [ ! -f "$D/fail-create" ] || exit 1
+    echo 'https://github.com/o/r/issues/991' ;;
+  *) echo "unexpected gh operation" >&2; exit 2 ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let gh_path = gh.to_string_lossy().into_owned();
+        app.cfg.update(move |c| {
+            c.release_triage.publish = true;
+            c.release_triage.repo = Some("o/r".into());
+            c.release_triage.gh_bin = Some(gh_path);
+            Ok(())
+        }).await.unwrap();
+        if fail_first { std::fs::write(app.data_dir.join("fail-create"), "").unwrap(); }
+        let entries = seed(&app, "2.1.277").await;
+        let model = Fake::new(vec![Ok(reply(&entries, None))]);
+        let versions = ["2.1.277".into()];
+        let result = run_auto(&app, &model, "claude", &versions, None).await.unwrap();
+        assert_eq!(result["results"][0]["outcome"], "judged");
+        let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+        assert!(row.assigned_bot_id.is_none(), "分析不用 AGM");
+        if fail_first {
+            assert_eq!(row.status, Status::Judged);
+            assert!(row.publish_error.is_some());
+            std::fs::remove_file(app.data_dir.join("fail-create")).unwrap();
+            let cfg = app.cfg.get().await.release_triage;
+            let outcome = issue::publish_version(&app.db, &cfg, "claude", "2.1.277").await.unwrap();
+            assert!(matches!(outcome, issue::Outcome::Published { .. }));
+        }
+        let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+        assert_eq!(row.status, Status::Published);
+        assert_eq!(row.issues[0].number, 991, "開票結果直接寫回帳本，供 kick 交辦實作");
+        run_auto(&app, &model, "claude", &versions, None).await.unwrap();
+        assert_eq!(model.calls(), 1, "開票重試與成功快取都不重新付費分析");
+        let calls = std::fs::read_to_string(app.data_dir.join("gh-calls")).unwrap();
+        assert_eq!(calls.lines().filter(|s| *s == "issue create").count(), if fail_first { 2 } else { 1 });
+    }
+}

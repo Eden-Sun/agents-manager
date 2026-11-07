@@ -35,6 +35,10 @@ case "$*" in
       *" auto "*)
         case "$*" in *" --check"*) printf '{"enabled":%s}' "${STUB_AUTO_ENABLED:-false}"; exit 0 ;; esac
         [ -n "${STUB_AUTO_FAIL:-}" ] && exit 1
+        if [ -f "$AGM_DIR/auto-published.json" ]; then
+          k=$(printf '%s' "$*" | sed -n 's/.*--kind \([a-z]*\).*/\1/p')
+          cp "$AGM_DIR/auto-published.json" "$AGM_DIR/show-$k.json"
+        fi
         for i in $(seq 1 $#); do
           eval "a=\${$i}"
           case "$a" in --binary-diff-file) eval "f=\${$((i+1))}"; cat "$f" > "$AGM_DIR/auto-diff.txt" ;; esac
@@ -880,6 +884,27 @@ bash "$SCRIPT"
 equals "API 模式 binary 沒進分析：不派 bot" "$(assigns)" "0"
 check_no "不標 dispatched" "dispatched --kind" "$AGM_DIR/calls.log"
 check_no "不查 bot 額度" " quota" "$AGM_DIR/calls.log"
+teardown
+
+# API -> gh publish -> 同輪 release-issue-task；不用另派 AGM 做分析或等下一輪。
+setup
+cp "$HERE/fixtures/herdr-update-runtime.json" "$AGM_DIR/runtime.json"
+rm "$AGM_DIR/release-triage-task.md" # API prompt 內建，不應要求舊 AGM 分診任務檔。
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"rows":[{"kind":"claude","version":"2.1.278","issues":[{"number":991,"url":"https://x/991","created_at":"%s","comment":false}]}]}' "$NOW" > "$AGM_DIR/auto-published.json"
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.278","outcome":"judged","status":"published","quiet":false}]}'
+bash "$SCRIPT"
+equals "API 新票同一輪交辦實作" "$(assigns)" "1"
+check "實作交給協調者而非分診 child" "assign --bot bot-resp .*request-id release-issue-991" "$AGM_DIR/calls.log"
+check_no "實作不派給 release_bot_id child" "assign --bot bot-release" "$AGM_DIR/calls.log"
+check "API 新票用實作 request-id" "request-id release-issue-991" "$AGM_DIR/calls.log"
+check "交接正文要求 child 實作" "照既有派工流程交給 child" "$AGM_DIR/assign-body.txt"
+check_no "API 模式不派 AGM 分析" "request-id release-triage-" "$AGM_DIR/calls.log"
+check_no "API 模式不走 bot verdict" " dispatched " "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+equals "已交接 issue 重跑不重派實作" "$(assigns)" "1"
 teardown
 
 echo "$PASS passed, $FAIL failed"
