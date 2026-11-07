@@ -7725,14 +7725,21 @@ async fn resolve_relay_target(
     let fallback = app.session_for_host(&host).await.ok_or_else(|| LcError::NotFound("host session".into()))?;
     let sender_run = db::active_run(&app.db, &sender).await.map_err(any_err)?;
     let session = sender_run.as_ref().and_then(|r| r.herdr_session.as_deref()).unwrap_or(&fallback);
-    let mut candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT b.id,r.id,r.agent_name,r.pane_id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
+    let mut candidates: Vec<(String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
     ).bind(&host).bind(&fallback).bind(session).bind(&q.target).bind(&q.target).bind(&q.target)
         .fetch_all(&app.db).await.map_err(any_err)?;
+    // Display names are project-scoped and remain usable when the member is stopped.
+    let members: Vec<(String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM bots b JOIN projects p ON p.id=b.project_id LEFT JOIN runs r ON r.bot_id=b.id AND r.state='running' WHERE b.project_id=(SELECT project_id FROM bots WHERE id=?) AND b.name=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL"
+    ).bind(&sender).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
+    for member in members {
+        if !candidates.iter().any(|candidate| candidate.0 == member.0) { candidates.push(member); }
+    }
     if candidates.is_empty() {
         // 跨主機：只用 agent 名稱（帶 $AM_AGENT_NAME 前綴，全域應唯一）找；pane id 與 bot 名稱各主機自己的，不做跨主機比對。
         candidates = sqlx::query_as(
-            "SELECT b.id,r.id,r.agent_name,r.pane_id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
+            "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
         ).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
     }
     let mut rows = Vec::new();
@@ -7753,9 +7760,9 @@ async fn resolve_relay_target(
         });
     }
     if rows.len() != 1 {
-        return Err(LcError::Conflict(json!({"error":"ambiguous_relay_target", "candidates":rows.iter().map(|r| &r.0).collect::<Vec<_>>() })));
+        return Err(LcError::Conflict(json!({"error":"ambiguous_relay_target", "candidates":rows.iter().map(|r| json!({"name":r.4,"bot_id":r.0})).collect::<Vec<_>>() })));
     }
-    let (bot, run, agent, pane) = &rows[0];
+    let (bot, run, agent, pane, _) = &rows[0];
     Ok(Json(json!({"to_bot_id":bot,"to_run_id":run,"to_agent":agent.as_ref().or(pane.as_ref())})))
 }
 
@@ -18081,6 +18088,26 @@ mod relay_result_api_tests {
         assert!(result["to_run_id"].is_null());
     }
 
+    #[tokio::test]
+    async fn stopped_project_member_names_resolve_and_duplicates_are_ambiguous() {
+        let env = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&env.app, &env.project_id, "name-sender").await;
+        let first = crate::testing::claude_bot(&env.app, &env.project_id, "api").await;
+        let resolve = || resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(sender.id.clone())), Query(RelayResolveQuery { target: "api".into() }));
+        let Json(result) = resolve().await.unwrap();
+        assert_eq!(result["to_bot_id"], first.id);
+        assert!(result["to_run_id"].is_null());
+        let second = crate::testing::claude_bot(&env.app, &env.project_id, "api-two").await;
+        // Exercise ambiguity even if a legacy database contains duplicate display names.
+        sqlx::query("DROP INDEX bots_name_project_live").execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET name='api' WHERE id=?").bind(&second.id).execute(&env.app.db).await.unwrap();
+        let LcError::Conflict(body) = resolve().await.unwrap_err() else { panic!("expected ambiguity") };
+        let candidates = body["candidates"].as_array().unwrap();
+        for id in [&first.id, &second.id] {
+            assert!(candidates.iter().any(|c| c["name"] == "api" && c["bot_id"] == *id));
+        }
+    }
+
     async fn insert_remote_run(app: &Arc<App>, name: &str, agent_name: &str, pane_id: &str) -> (String, String) {
         let project = db::ulid();
         sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','m4p',?)")
@@ -18138,7 +18165,7 @@ mod relay_result_api_tests {
         let LcError::Conflict(body) = error else { panic!("expected ambiguous conflict") };
         assert_eq!(body["error"], "ambiguous_relay_target");
         let candidates = body["candidates"].as_array().unwrap();
-        assert!(candidates.iter().any(|c| c == &first) && candidates.iter().any(|c| c == &second));
+        assert!(candidates.iter().any(|c| c["bot_id"] == first) && candidates.iter().any(|c| c["bot_id"] == second));
     }
 
     #[tokio::test]

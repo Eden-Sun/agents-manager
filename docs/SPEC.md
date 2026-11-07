@@ -2233,7 +2233,7 @@ relay 身份由 daemon 驗證，受管 bot 的 prompt 經 daemon 解析 bot ID �
 
 
 走 daemon 的派工（`POST /api/bots/{id}/prompt` 帶 `relay_from`、總管的 assignment）會寫 `messages.relay_from`，UI 畫成「X → 這顆 bot」。
-受管 bot 的 `herdr agent prompt` 先由 daemon 以 ID、名稱或 pane 解析目標並驗證目前權限，再由 `POST /api/bots/{id}/prompt` 投遞；名稱與 pane 僅在目前 host／session 解析。daemon 無法確認時拒絕，不呼叫 herdr。舊版 shim 已持久化的 `AmRelayAnnounce` spool 事件仍可對帳，但新版不再以 spool 授權或送字。
+受管 bot 的 `herdr agent prompt` 先由 daemon 以 ID、名稱或 pane 解析目標並驗證目前權限；同專案成員顯示名稱包含停止的 bot，同名候選列名稱與 ID；prompt 失敗顯示 daemon 回應，400 不提示重試，其他失敗保留 request-id 提示，再由 `POST /api/bots/{id}/prompt` 投遞；名稱與 pane 僅在目前 host／session 解析。daemon 無法確認時拒絕，不呼叫 herdr。舊版 shim 已持久化的 `AmRelayAnnounce` spool 事件仍可對帳，但新版不再以 spool 授權或送字。
 
 5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_run_id` 只在寄件 bot 所在的 host 與 herdr session 解析，並驗證收件 bot id；
    舊 run 沒記 session 時以該 host 的設定為準。只有明確 ID 對到 running run 才盯梢；顯示名稱與單獨 pane id 都不作身份對應。

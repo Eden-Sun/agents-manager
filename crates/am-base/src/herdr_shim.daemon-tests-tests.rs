@@ -1421,6 +1421,19 @@ esac"#, calls.display()));
     }
 
     #[test]
+    fn prompt_error_body_and_retry_guidance_are_visible() {
+        for (status, retry) in [(400, false), (403, false), (503, true)] {
+            let s = Sandbox::new();
+            s.install_fake_curl(&format!(r#"case "$*" in *relay/resolve*) printf '{{"to_bot_id":"target"}}\n200';; *) printf '{{"error":"example_code","message":"詳細原因"}}\n{}';; esac"#, status));
+            let env = [("AM_BOT_ID", "bot"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788")];
+            let (_, err, rc) = s.run_full(&env, &["agent", "prompt", "w1:p2", "--request-id", "test-id", "work"]);
+            assert_ne!(rc, 0);
+            assert!(err.contains("example_code") && err.contains("詳細原因"), "{err}");
+            assert_eq!(err.contains("--request-id test-id"), retry, "{err}");
+        }
+    }
+
+    #[test]
     fn macos_local_managed_child_start_never_calls_herdr_when_daemon_fails() {
         for script in ["exit 7", "printf 403", "printf 503", "exit 28"] {
             let s = Sandbox::new(); let log = s.dir.join("calls.log"); s.install_fake_curl(script);

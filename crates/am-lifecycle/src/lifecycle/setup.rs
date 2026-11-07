@@ -1801,7 +1801,7 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 /// upgrade brings its new text along.
 /// skill 檔一個身份一份，同身份的每顆 bot 與子 agent 都讀同一份：不能寫死某一顆的名字（#1121）。
 fn herdr_skill_doc(raw: &str) -> String {
-    let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n", child_agent_rules());
+    let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n\n受管 prompt 可用同專案成員顯示名稱（含停止的成員）；同名時改用 `bot:<id>`。daemon 錯誤會顯示回應內容，依錯誤原因處理；投遞結果不明時沿用提示的 request-id 對帳或重試。\n", child_agent_rules());
     let lines: Vec<&str> = raw.lines().collect();
     // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
     let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
