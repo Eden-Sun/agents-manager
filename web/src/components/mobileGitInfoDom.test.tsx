@@ -263,7 +263,7 @@ test('手機：小 popup 只留 context、快取、Git 與 Issues，焦點在面
     assert.equal(panel.querySelector('.mobile-context-reading')?.textContent, '67k / 1M · 7%')
     assert.equal(panel.querySelector('progress')?.getAttribute('value'), '7')
     assert.match(panel.querySelector('.mobile-context-cache')?.textContent ?? '', /熱.*分/)
-    assert.equal(panel.querySelectorAll('.compact-btn').length, 1)
+    assert.equal(panel.querySelectorAll('.compact-btn:not(.keep-warm-skip-btn)').length, 1)
     assert.doesNotMatch(panel.textContent ?? '', /long-account@example.com|剩餘|\$1.23|Opus/)
     assert.equal(panel.querySelector('.issues-pop'), null)
     assert.equal(document.activeElement, panel, '不把焦點給 Issues')
@@ -273,6 +273,25 @@ test('手機：小 popup 只留 context、快取、Git 與 Issues，焦點在面
     assert.match(panel.querySelector('.git-bar')?.textContent ?? '', /\+12−3\?1↓1/)
     await click(panel.querySelector<HTMLButtonElement>('.issues-btn')!)
     await until(() => panel.querySelector('.issues-pop') !== null, '點開 Issues 才顯示清單')
+  } finally { restore() }
+})
+
+test('手機：popup 裡主力的 claude 有「不用保溫」，非主力沒有（2026-11-07 使用者）', async () => {
+  const restore = asPhone()
+  try {
+    const id = await running('am-claude')
+    const bots = useStore.getState().bots
+    await act(() => useStore.setState({ selectedBotId: id, bots: bots.map((b) => (b.id === id ? { ...b, primary: true } : b)) }))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    await click(gitBtn())
+    await until(() => document.querySelector('.mobile-context-panel .keep-warm-skip-btn') !== null, '主力有不用保溫')
+    assert.match(document.querySelector('.mobile-context-panel .keep-warm-skip-btn')!.textContent ?? '', /不用保溫|保溫中|不保溫中/)
+    await unmountAll()
+    await act(() => useStore.setState({ bots: bots.map((b) => (b.id === id ? { ...b, primary: false } : b)) }))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    await click(gitBtn())
+    await until(() => document.querySelector('.mobile-context-panel') !== null, 'popup')
+    assert.equal(document.querySelector('.mobile-context-panel .keep-warm-skip-btn'), null, '非主力不畫')
   } finally { restore() }
 })
 
