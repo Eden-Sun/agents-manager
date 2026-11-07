@@ -66,13 +66,65 @@
   overflow-wrap: anywhere;
 }
 
+/* 手機（2026-11-07 使用者「優化排程設定頁手機版」）：狀態卡收緊、說明改一般字體、時間與時區並排、
+   底部動作列四顆擠一排（原本 2×2 佔了快 150px 的固定高度，蓋住表單）。 */
 @media (max-width: 480px) {
+  .schedule-editor .schedule-status {
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .schedule-editor .schedule-status p {
+    margin: 0;
+  }
+
+  .schedule-editor .hint {
+    font-family: inherit;
+    line-height: 1.4;
+  }
+
+  .schedule-editor .schedule-prompt-hint {
+    display: none;
+  }
+
   .schedule-editor .schedule-time-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
+
+  .schedule-editor .schedule-time-grid input,
+  .schedule-editor .schedule-time-grid select {
+    box-sizing: border-box;
+    height: 40px;
+  }
+
+  .schedule-editor .hint {
+    margin: -4px 0 0;
+  }
+
+  /* 模式、每幾分鐘、單次的日期時間這類寬欄位獨佔一行；「每天／每週」的時間與時區並排。 */
+  .schedule-editor .schedule-time-grid > .field:first-child,
+  .schedule-editor .schedule-time-grid > .field:has(input[type='number']),
+  .schedule-editor .schedule-time-grid > .field:has(input[type='datetime-local']) {
+    grid-column: 1 / -1;
+  }
+
+  .schedule-editor .schedule-bot-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .schedule-editor .schedule-bot-actions .btn {
     min-height: 40px;
+    padding: 0 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .schedule-editor .schedule-bot-actions .btn:only-child {
+    grid-column: 1 / -1;
   }
 
   .schedule-editor .schedule-prompt {
@@ -81,16 +133,17 @@
 
   .schedule-editor .form-actions {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
     background: var(--bg-panel);
-  }
-
-  .schedule-editor .form-actions .btn:only-child {
-    grid-column: 1 / -1;
   }
 
   .schedule-editor .form-actions .btn {
     min-height: 44px;
+    padding: 0 4px;
+    font-size: 14px;
+    white-space: nowrap;
   }
 }
