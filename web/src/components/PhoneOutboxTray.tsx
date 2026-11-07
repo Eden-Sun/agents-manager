@@ -4,7 +4,6 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
 import { fileSize, isPreviewableImage, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { blobFor } from '../lib/outboxPreviewCache'
-import { useImageViewer } from './useImageViewer'
 import { useOutboxFiles } from './useOutboxFiles'
 import './phoneOutboxTray.css'
 
@@ -44,7 +43,8 @@ function PhoneOutboxTrayInner() {
   const t = useT()
   const { botId, files, fetchedAt, now, loadedFor, busy, openPreview } = useOutboxFiles()
   const [open, setOpen] = useState(readOpen)
-  const { openImage, viewer } = useImageViewer(botId)
+  /** 按住縮圖時放大的那張（使用者 2026-11-07：不開 modal，按住看大圖、放開就回來）。 */
+  const [peek, setPeek] = useState<OutboxFile | null>(null)
   /** 看過幾個檔：之後多出來的在列上標「+N 新」。`null`＝這顆 bot 的清單還沒讀到；第一次讀到的那批不算新。 */
   const [seen, setSeen] = useState<{ bot: string | null; count: number | null }>({ bot: botId, count: null })
   if (seen.bot !== botId) {
@@ -89,9 +89,22 @@ function PhoneOutboxTrayInner() {
                   <button
                     type="button"
                     className="phone-outbox-thumb"
-                    aria-label={t('預覽 {name}', { name: f.name })}
-                    data-viewable-image
-                    onClick={openImage}
+                    aria-label={t('按住預覽 {name}', { name: f.name })}
+                    onPointerDown={(e) => {
+                      // 滑鼠也要在別處放開時收得掉：把指標抓在這顆鈕上（觸控本來就是隱式抓取）。
+                      e.currentTarget.setPointerCapture?.(e.pointerId)
+                      setPeek(f)
+                    }}
+                    onPointerUp={() => setPeek(null)}
+                    onPointerCancel={() => setPeek(null)}
+                    onLostPointerCapture={() => setPeek(null)}
+                    onKeyDown={(e) => {
+                      if (e.key === ' ' || e.key === 'Enter') setPeek(f)
+                    }}
+                    onKeyUp={() => setPeek(null)}
+                    onBlur={() => setPeek(null)}
+                    // 長按不要跳出系統的圖片選單。
+                    onContextMenu={(e) => e.preventDefault()}
                   >
                     <OutboxThumb botId={botId} file={f} />
                   </button>
@@ -133,7 +146,11 @@ function PhoneOutboxTrayInner() {
           ) : null}
         </div>
       ) : null}
-      {viewer}
+      {peek && botId ? (
+        <div className="phone-outbox-peek" aria-live="polite">
+          <OutboxThumb botId={botId} file={peek} full />
+        </div>
+      ) : null}
     </section>
   )
 }
