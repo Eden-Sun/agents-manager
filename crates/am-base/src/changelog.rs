@@ -16,7 +16,7 @@ const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/rele
 const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
 /// herdr 有真正的 CHANGELOG.md（Keep a Changelog 的 `## [x.y.z] - date`，[`parse_version`] 認得）。
 pub const HERDR_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md";
-/// agy（issue #1928）：官方 repo 的 CHANGELOG.md（`## x.y.z` ＋ `- ` 單行條目）；抓不到才退同 repo 的 GitHub releases。
+/// agy（issue #1928）：官方 repo 的 CHANGELOG.md（`## x.y.z` ＋ `- ` 單行條目）；抓不到、格式無法解析或缺目標版時退同 repo 的 GitHub releases。
 pub const AGY_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md";
 pub const AGY_RELEASES_API: &str = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases?per_page=100";
 const AGY_CHANGELOG_PAGE: &str = "https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md";
@@ -135,6 +135,9 @@ pub fn grok_sections(md: &str) -> Vec<Section> {
 /// `from`（不含）到 `to`（含）之間的段落，新的在前。`from` 不明就只給 `to` 那一段。
 pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Section> {
     let Some(to_v) = parse_version(to) else { return Vec::new() };
+    if !all.iter().any(|s| parse_version(&s.version).as_ref() == Some(&to_v) && !s.body.trim().is_empty()) {
+        return Vec::new();
+    }
     let from_v = from.and_then(parse_version);
     let mut picked: Vec<Section> = all
         .iter()
@@ -306,7 +309,7 @@ async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
-/// agy：raw 的 CHANGELOG.md，失敗才退 GitHub releases。grok：stable 指標 → 該版的 `.external.md`。
+/// agy：raw 的 CHANGELOG.md，抓取／解析失敗退 GitHub releases；lookup 另檢查目標版本。grok：stable 指標 → 該版的 `.external.md`。
 /// 逾時同 claude／codex（連線 10 秒、整體 20 秒）；轉址一律當失敗。
 pub async fn fetch_pinned_feed(kind: &str, src: &FeedSource) -> Result<String> {
     let c = reqwest::Client::builder()
@@ -318,8 +321,9 @@ pub async fn fetch_pinned_feed(kind: &str, src: &FeedSource) -> Result<String> {
         .map_err(|e| anyhow!("http client: {e}"))?;
     match kind {
         "agy" => match get_pinned(&c, src, &src.agy_changelog, MAX_FEED_BYTES, "agy CHANGELOG.md").await {
-            Ok(md) => Ok(md),
-            Err(first) => {
+            Ok(md) if !parse_changelog(&md).is_empty() => Ok(md),
+            result => {
+                let first = result.err().unwrap_or_else(|| anyhow!("agy CHANGELOG.md 格式無法解析"));
                 let json = get_pinned(&c, src, &src.agy_releases, MAX_FEED_BYTES, "agy releases")
                     .await
                     .map_err(|second| anyhow!("{first}；備援也失敗：{second}"))?;
@@ -367,6 +371,52 @@ pub async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: 
     Ok(text)
 }
 
+/// Only fixed, official repositories may supply a release fallback.
+fn releases_url(kind: &str) -> Option<&'static str> {
+    match kind {
+        "agy" => Some(AGY_RELEASES_API),
+        "claude" => Some("https://api.github.com/repos/anthropics/claude-code/releases?per_page=100"),
+        "herdr" => Some("https://api.github.com/repos/herdrdev/herdr/releases?per_page=100"),
+        // codex already uses Releases; grok publishes version files on its CDN.
+        _ => None,
+    }
+}
+
+async fn release_sections(src: &FeedSource, url: &str, to: &str) -> Result<Vec<Section>> {
+    let client = reqwest::Client::builder()
+        .user_agent("agents-manager")
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none()).build()?;
+    let raw = get_pinned(&client, src, url, MAX_FEED_BYTES, "GitHub Releases 備援").await?;
+    let md = codex_releases_to_md(&raw)?;
+    let all = crate::release_triage::codex_sections(&md);
+    if pick_sections(&all, None, to).is_empty() {
+        return Err(anyhow!("GitHub Releases 裡沒有 {to} 這一版的段落"));
+    }
+    Ok(all)
+}
+
+/// Resolve the exact target from a primary feed or its pinned official release fallback.
+pub async fn target_sections(kind: &str, primary: Result<String>, src: &FeedSource, to: &str) -> Result<Vec<Section>> {
+    let all = primary.as_ref().map(|md| {
+        if kind == "grok" { grok_sections(md) } else { crate::release_triage::source_sections(kind, md) }
+    }).unwrap_or_default();
+    if !pick_sections(&all, None, to).is_empty() {
+        return Ok(all);
+    }
+    if let Some(official_url) = releases_url(kind) {
+        let url = if kind == "agy" { src.agy_releases.as_str() } else { official_url };
+        let mut pinned = src.clone();
+        // Only the production constants extend the allowlist; never upstream response data.
+        if kind != "agy" { pinned.allowed.push(official_url.to_string()); }
+        return release_sections(&pinned, url, to).await
+            .map_err(|error| anyhow!("CHANGELOG 缺少 {to} 或抓取／解析失敗；備援也失敗：{error:#}"));
+    }
+    if let Err(error) = primary { return Err(error); }
+    Err(anyhow!("CHANGELOG 裡沒有 {to} 這一版的段落"))
+}
+
 /// 失敗都寫進回應不 panic。給了 `to` 就不探磁碟——codex 被問的當下新版還沒裝。
 pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts::HostsAccess), host: &str, kind: &str, from: Option<&str>, to: Option<&str>) -> ChangelogReply {
     let mut reply = ChangelogReply {
@@ -394,14 +444,14 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
         },
     };
     reply.installed_version = Some(installed.clone());
-    let md = match fetch_changelog(app, kind).await {
-        Ok(t) => t,
-        Err(e) => {
-            reply.error = Some(format!("{e:#}"));
+    let primary = fetch_changelog(app, kind).await;
+    let all = match target_sections(kind, primary, &FeedSource::official(), &installed).await {
+        Ok(all) => all,
+        Err(error) => {
+            reply.error = Some(format!("{error:#}"));
             return reply;
         }
     };
-    let all = if kind == "grok" { grok_sections(&md) } else { crate::release_triage::source_sections(kind, &md) };
     if kind == "grok" {
         // 抓到的是 stable 那一版的檔：它的版本就是 feed 裡最大的那一段。
         if let Some(newest) = all.iter().filter_map(|s| parse_version(&s.version).map(|v| (v, s.version.as_str()))).max() {
