@@ -358,6 +358,37 @@
     }
 
     #[tokio::test]
+    async fn missing_target_and_changed_markdown_format_use_exact_release_fallback() {
+        let releases = r###"[{"tag_name":"v1.5.0","body":"## Features\n- New long release","draft":false,"prerelease":false}]"###;
+        for md in ["## 1.4.9\n- older only", "# Release version 1.5.0\n- changed heading"] {
+            let (base, log) = serve(vec![route("/agy/releases", releases)]).await;
+            let all = target_sections("agy", Ok(md.into()), &source(&base), "1.5.0").await.unwrap();
+            assert_eq!(versions(&pick_sections(&all, Some("1.4.8"), "1.5.0")), ["1.5.0"]);
+            assert!(all[0].body.contains("New long release"));
+            assert_eq!(seen(&log), ["/agy/releases"]);
+        }
+        let (base, _) = serve(vec![route("/agy/releases", releases)]).await;
+        let error = target_sections("agy", Ok("## 1.4.9\n- older".into()), &source(&base), "1.5.1").await.unwrap_err();
+        assert!(error.to_string().contains("沒有 1.5.1"));
+        let (base, _) = serve(vec![]).await;
+        assert!(target_sections("agy", Err(anyhow!("primary failed")), &source(&base), "1.5.0").await.is_err());
+        // Every kind must reject an older range if the target is absent.
+        for kind in ["agy", "claude", "codex", "herdr", "grok"] {
+            let all = vec![Section { version: "1.4.9".into(), body: "- old".into() }];
+            assert!(pick_sections(&all, Some("1.4.8"), "1.5.0").is_empty(), "{kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unparseable_official_markdown_also_uses_releases() {
+        let releases = r#"[{"tag_name":"1.5.0","body":"- release body"}]"#;
+        let (base, log) = serve(vec![route("/agy/CHANGELOG.md", "# New format"), route("/agy/releases", releases)]).await;
+        let md = fetch_pinned_feed("agy", &source(&base)).await.unwrap();
+        assert_eq!(versions(&parse_changelog(&md)), ["1.5.0"]);
+        assert_eq!(seen(&log), ["/agy/CHANGELOG.md", "/agy/releases"]);
+    }
+
+    #[tokio::test]
     async fn grok_fetches_the_stable_pointer_then_exactly_that_versions_file() {
         let md_with_links = format!("{GROK_MD}\n- **Evil** see http://127.0.0.1:1/evil\n");
         let (base, log) = serve(vec![route("/grok/stable", "1.0.67\n"), route("/grok/changelogs/1.0.67.external.md", &md_with_links)]).await;

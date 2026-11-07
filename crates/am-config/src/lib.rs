@@ -843,7 +843,7 @@ pub struct ChangelogTranslateCfg {
     /// 一小時最多送幾次。`0`＝不上限（預設，#1948）；使用者寫正數才生效。
     #[serde(default = "default_changelog_max_per_hour")]
     pub max_per_hour: u32,
-    /// 同一份內容連續失敗最多送幾次，用盡後等一小時窗口。`0`＝不上限（預設，#1948）；退避（1 分→5 分→30 分→封頂 1 小時）照常。
+    /// 同一份內容連續失敗最多送幾次（預設 3，舊值 0 也採 3），用盡後等一小時窗口。退避照常。
     #[serde(default = "default_changelog_max_attempts")]
     pub max_attempts: u32,
 }
@@ -870,7 +870,7 @@ fn default_changelog_max_input_chars() -> u32 {
     6000
 }
 fn default_changelog_max_tokens() -> u32 {
-    2000
+    8000
 }
 fn default_changelog_max_in_flight() -> u32 {
     1
@@ -882,9 +882,9 @@ fn default_changelog_max_queued() -> u32 {
 fn default_changelog_max_per_hour() -> u32 {
     0
 }
-/// 0＝不上限（同上）；退避（retry_after）仍照常，連續失敗不會緊密迴圈。
+/// 每個失敗窗口最多三次；既有成功結果永久重用。
 fn default_changelog_max_attempts() -> u32 {
-    0
+    3
 }
 
 impl Default for ChangelogTranslateCfg {
@@ -3035,13 +3035,16 @@ mod supervisor_cfg_tests {
         let on: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
         assert!(on.changelog_translate.enabled);
         assert!(on.changelog_translate.auto, "auto defaults on");
-        assert_eq!((on.changelog_translate.max_per_hour, on.changelog_translate.max_attempts), (0, 0), "0 = unlimited by default");
+        assert_eq!((on.changelog_translate.max_per_hour, on.changelog_translate.max_attempts), (0, 3), "hourly unlimited; failures bounded by default");
         let capped: ConfigFile = toml::from_str("[changelog_translate]\nmax_per_hour = 12\nmax_attempts = 3\nauto = false\n").unwrap();
         assert_eq!((capped.changelog_translate.max_per_hour, capped.changelog_translate.max_attempts, capped.changelog_translate.auto), (12, 3, false));
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&capped).unwrap()).unwrap();
         assert_eq!((back.changelog_translate.max_per_hour, back.changelog_translate.max_attempts), (12, 3), "explicit caps survive a save");
         assert_eq!(on.changelog_translate.model, "claude-sonnet-5-5");
         assert_eq!(on.changelog_translate.effort, "low");
+        assert_eq!(on.changelog_translate.max_tokens, 8000);
+        let explicit: ConfigFile = toml::from_str("[changelog_translate]\nmax_tokens = 2000\n").unwrap();
+        assert_eq!(explicit.changelog_translate.max_tokens, 2000, "keep explicit local cap");
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
         assert_eq!(on, back);
     }

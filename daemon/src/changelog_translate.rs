@@ -845,10 +845,10 @@ fn limits_of(cfg: &ChangelogTranslateCfg, claude_api_timeout_ms: u64) -> Limits 
         endpoint: endpoint_of(cfg),
         timeout_ms: claude_api_timeout_ms.max(1),
         max_input_chars: cfg.max_input_chars.clamp(1, 12_000),
-        max_tokens: cfg.max_tokens.clamp(1, 4096),
+        max_tokens: cfg.max_tokens.clamp(1, 8000),
         max_in_flight: cfg.max_in_flight.max(1),
         max_per_hour: cfg.max_per_hour.min(1000),
-        max_attempts: cfg.max_attempts.min(8),
+        max_attempts: if cfg.max_attempts == 0 { 3 } else { cfg.max_attempts.min(8) },
     }
 }
 
@@ -1168,7 +1168,18 @@ fn save(path: &Path, job: &Job) -> std::io::Result<()> {
 fn load(path: &Path) -> Result<Job, LoadErr> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LoadErr::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Cold completed results remain reusable after hot-ledger retention.
+            if path.parent().and_then(Path::file_name).and_then(|s| s.to_str()) == Some(LEDGER_DIR) {
+                if let (Some(data_dir), Some(name)) = (path.parent().and_then(Path::parent), path.file_name()) {
+                    let job = load(&archive_dir(data_dir).join(name))?;
+                    if last_state(&job) == "completed" && !job.sections.is_empty() {
+                        return Ok(job);
+                    }
+                }
+            }
+            return Err(LoadErr::Missing);
+        },
         // 帳本目錄被一個檔案擋住時，這筆 json 根本不存在，不是壞掉的舊檔。
         // 交給 save 回 http/ledger，避免把寫不進去說成 bad_format。
         Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Err(LoadErr::Missing),
@@ -1195,10 +1206,18 @@ fn json_paths(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn ledger_jobs(dir: &Path) -> Vec<Job> {
-    json_paths(dir)
-        .iter()
-        .filter_map(|p| load(p).ok())
-        .collect()
+    let mut jobs: Vec<Job> = json_paths(dir).iter().filter_map(|p| load(p).ok()).collect();
+    if let Some(data_dir) = dir.parent() {
+        for path in json_paths(&archive_dir(data_dir)) {
+            if let Ok(job) = load(&path) {
+                if last_state(&job) == "completed" && !job.sections.is_empty()
+                    && !jobs.iter().any(|j| j.fingerprint == job.fingerprint) {
+                    jobs.push(job);
+                }
+            }
+        }
+    }
+    jobs
 }
 
 /// 保留政策（#1973）：
@@ -1471,7 +1490,7 @@ struct PruneBatchStats {
     removed: usize,
 }
 
-/// 把即將被清理的 completed job 轉為 usage 歷史存檔（去掉 summary/sections/source 大 payload）。
+/// 把即將離開熱帳本的 completed job 完整存檔，永久保留譯文供指紋重用。
 /// 若既有存檔存在，以 attempt.id 嚴格核對與合併：
 /// - 若同 id 內容完全一致則去重保留。
 /// - 若同 id 內容不一致則回報 Err（fail-closed，拒絕刪除熱 job），並嘗試將新 job 瘦身寫至 conflict 檔（命名包含 deterministic content hash）。
@@ -1496,11 +1515,7 @@ where
     let mut base_job = match load_for_prune(&a_path) {
         Ok(existing) => existing,
         Err(LoadErr::Missing) => {
-            let mut fresh = job.clone();
-            fresh.summary.clear();
-            fresh.sections.clear();
-            fresh.source.clear();
-            fresh
+            job.clone()
         }
         Err(LoadErr::Corrupt) => {
             tracing::warn!(path = %a_path.display(), "corrupted changelog usage archive; aborting archive to avoid data loss");
@@ -1508,6 +1523,11 @@ where
         }
     };
 
+    if base_job.sections.is_empty() {
+        base_job.summary = job.summary.clone();
+        base_job.sections = job.sections.clone();
+        base_job.source = job.source.clone();
+    }
     let mut has_conflict = false;
     for new_att in &job.attempts {
         if let Some(existing_att) = base_job.attempts.iter().find(|a| a.id == new_att.id) {
@@ -1559,9 +1579,6 @@ where
     }
 
     base_job.status = job.status.clone();
-    base_job.summary.clear();
-    base_job.sections.clear();
-    base_job.source.clear();
 
     *ops += 1; // 嘗試儲存 archive
     saver(&a_path, &base_job).map_err(|e| {
@@ -2491,8 +2508,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unlimited_defaults_keep_retrying_after_backoff_but_explicit_cap_stops() {
-        // 預設（0＝不上限）：連續失敗、每次退避過後都還能再送。
+    async fn defaults_bound_failures_to_three_and_explicit_cap_still_applies() {
+        // 預設最多三次；退避到期不能繞過失敗窗口，滿一小時才可再送。
         let (env, fake) = boot(vec![
             Step::Fail(ClientError::Timeout),
             Step::Fail(ClientError::Timeout),
@@ -2508,10 +2525,13 @@ mod tests {
             fp = failed["fingerprint"].as_str().unwrap().to_string();
             patch_retry_past(&env.app, &fp);
         }
-        let done = post(&env.app, q_to("2.1.5")).await;
+        let capped = post(&env.app, q_to("2.1.5")).await;
+        assert_eq!(capped["error"], "attempts");
+        assert_eq!(fake.calls(), 3, "default bounds consecutive failures");
+        age_last_sent(&env.app, &fp, 3601);
+        let _ = post(&env.app, q_to("2.1.5")).await;
         until_status(&env.app, "2.1.5", "completed").await;
-        assert_eq!(done["error_kind"], Value::Null);
-        assert_eq!(fake.calls(), 4, "default has no attempt cap");
+        assert_eq!(fake.calls(), 4, "a later window permits retry");
 
         // 使用者自己設 max_attempts＝2：兩次送出後就擋在一小時窗口。
         let (env, fake) = boot(vec![
@@ -2662,9 +2682,9 @@ mod tests {
         cfg.model = "  ".into();
         let limits = limits_of(&cfg, 0);
         assert_eq!(limits.timeout_ms, 1);
-        assert_eq!(limits.max_tokens, 4096);
+        assert_eq!(limits.max_tokens, 8000);
         assert_eq!(limits.max_input_chars, 1);
-        assert_eq!(limits.max_attempts, 0, "0 means unlimited");
+        assert_eq!(limits.max_attempts, 3, "legacy zero uses bounded retries");
         assert_eq!(limits.max_in_flight, 1);
         assert_eq!(limits.max_per_hour, 0, "0 means unlimited");
         assert_eq!(limits.effort, "low");
@@ -3127,6 +3147,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn long_agy_release_uses_8000_tokens_once_and_keeps_complete_output() {
+        let body = "- 修復長版更新說明，保留終端狀態、設定路徑與完整的版本條目。\n".repeat(110);
+        let text = json!({"summary": ["改善更新", "保留原文", "完整翻譯"],
+            "sections": [{"version": "1.5.0", "body": body}]}).to_string();
+        let (env, fake) = boot(vec![Step::Raw { text, usage: Some(Usage {
+            output_tokens: Some(3500), ..sample_usage()
+        }), model: None, stop_reason: Some("end_turn".into()) }]).await;
+        enable(&env).await;
+        env.app.changelog.seed("agy", include_str!("../../crates/am-base/src/release_triage/fixtures/agy_1.5.0_long.md")).await;
+        let query = || TranslationQuery { host: Some("local".into()), kind: Some("agy".into()),
+            from: None, to: Some("1.5.0".into()) };
+        let _ = tokio::join!(post(&env.app, query()), post(&env.app, query()), post(&env.app, query()));
+        let mut completed = Value::Null;
+        for _ in 0..200 {
+            completed = get(&env.app, query()).await;
+            if completed["status"] == "completed" { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(completed["status"], "completed", "{completed}");
+        assert_eq!(completed["coverage"], "full");
+        assert_eq!(completed["sections"][0]["body"], body);
+        assert_eq!(fake.seen()[0].max_tokens, 8000);
+        assert_eq!(fake.calls(), 1);
+        assert!(fake.seen()[0].body.get("tools").is_none());
+        let _ = post(&env.app, query()).await;
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
     async fn truncation_and_section_mismatch_and_max_tokens_are_not_silent_success() {
         let (env, fake) = boot(vec![ok_step()]).await;
         enable(&env).await;
@@ -3382,7 +3431,7 @@ mod tests {
         assert_eq!(seen.effort, "low");
         // 舊的 [changelog_translate] timeout_ms 不生效，跟 [claude_api] timeout_ms 走。
         assert_eq!(seen.timeout_ms, 4321);
-        assert_eq!(seen.max_tokens, 4096);
+        assert_eq!(seen.max_tokens, 8000);
         assert_eq!(done["requested_model"], "claude-sonnet-5-5");
         assert_eq!(done["model"], "claude-haiku-5-5");
     }
@@ -3771,16 +3820,19 @@ mod tests {
             assert!(!job_path(&env.app.data_dir, fp).exists());
             assert_eq!(before, env.app.claude_api.ledger.snapshot(20));
 
-            // archive 存在且 attempt 與原熱 job 完全相等（payload summary/sections/source 已清空）
+            let reused = post(&env.app, q_to("2.1.5")).await;
+            assert_eq!(reused["status"], "completed");
+            assert_eq!(fake.calls(), 1, "expired success must never be billed again");
+            // archive 保留譯文，attempt 與原熱 job 完全相等。
             let archived = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
             assert_eq!(archived.attempts.len(), expected_job.attempts.len());
             assert_eq!(
                 serde_json::to_value(&archived.attempts).unwrap(),
                 serde_json::to_value(&expected_job.attempts).unwrap()
             );
-            assert!(archived.summary.is_empty());
-            assert!(archived.sections.is_empty());
-            assert!(archived.source.is_empty());
+            assert!(!archived.summary.is_empty());
+            assert!(!archived.sections.is_empty());
+            assert!(!archived.source.is_empty());
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 std::fs::metadata(archive_path(&env.app.data_dir, fp))
@@ -4056,7 +4108,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn cold_usage_metadata_is_not_a_covered_translation() {
+        async fn cold_completed_results_remain_reusable_permanently() {
             let env = crate::testing::env().await;
             let plan = Plan {
                 kind: "claude".into(),
@@ -4077,7 +4129,8 @@ mod tests {
             archive_pruned_job(&env.app.data_dir, &archived, &mut operations).unwrap();
             assert!(archive_path(&env.app.data_dir, "cold-only").exists());
             assert!(!job_path(&env.app.data_dir, "cold-only").exists());
-            assert!(covered_view(&env.app.data_dir, &plan, "requested").is_none());
+            assert!(covered_view(&env.app.data_dir, &plan, "requested").is_some());
+            assert_eq!(load(&job_path(&env.app.data_dir, &archived.fingerprint)).unwrap().sections.len(), 1);
         }
 
         #[tokio::test]
