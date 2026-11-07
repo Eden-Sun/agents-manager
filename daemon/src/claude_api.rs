@@ -195,7 +195,7 @@ fn complete_http(
     })
 }
 
-fn parse_usage(value: &Value) -> Option<Usage> {
+pub(crate) fn parse_usage(value: &Value) -> Option<Usage> {
     let usage = value.get("usage")?;
     if !usage.is_object() {
         return None;
@@ -229,7 +229,7 @@ fn message_text(value: &Value) -> String {
 }
 
 #[cfg(test)]
-fn test_endpoint_is_loopback(endpoint: &str) -> bool {
+pub(crate) fn test_endpoint_is_loopback(endpoint: &str) -> bool {
     let Some(rest) = endpoint
         .strip_prefix("http://")
         .or_else(|| endpoint.strip_prefix("https://"))
