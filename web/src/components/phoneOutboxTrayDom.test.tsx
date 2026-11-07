@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { PhoneOutboxTray } from './PhoneOutboxTray'
@@ -71,9 +71,13 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
   assert.equal(document.querySelectorAll('.phone-outbox-item').length, 1, '圖檔不列檔名，清單只剩 md')
   assert.equal(localStorage.getItem('am.phoneOutboxTray.open'), '1', '展開狀態記住')
 
-  await click(document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!)
-  await until(() => document.querySelector('.image-viewer img') !== null, '全螢幕預覽的圖')
-  assert.ok(document.querySelector('.image-viewer .image-viewer-stage'), '開了預覽')
+  // 按住看大圖、放開就回來，不開 modal（2026-11-07 使用者）。
+  const thumb = document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!
+  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })))
+  await until(() => document.querySelector('.phone-outbox-peek img') !== null, '按住時出現大圖')
+  assert.equal(document.querySelector('.image-viewer'), null, '不開 modal')
+  await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, pointerId: 1 })))
+  assert.equal(document.querySelector('.phone-outbox-peek'), null, '放開就收掉')
 })
 
 test('沒有檔案：整條不畫', async () => {

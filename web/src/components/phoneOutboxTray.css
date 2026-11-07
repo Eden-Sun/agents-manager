@@ -58,6 +58,10 @@
 
 .phone-outbox-thumb {
   display: block;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -131,4 +135,29 @@
 .phone-outbox-full.note {
   padding: 40px 0;
   color: var(--text-faint);
+}
+
+/* 按住縮圖的大圖（2026-11-07 使用者：不開 modal，放開就回來）：蓋在畫面上、不吃指標，放開的事件仍回到縮圖。 */
+.phone-outbox-peek {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  pointer-events: none;
+}
+
+.phone-outbox-peek .phone-outbox-full {
+  max-width: 100%;
+  max-height: calc(var(--vvh, 100dvh) - 24px);
+  box-shadow: 0 4px 24px rgb(0 0 0 / 35%);
+}
+
+.phone-outbox-peek img,
+.phone-outbox-thumb img {
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
 }
