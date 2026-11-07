@@ -458,6 +458,8 @@ function BotRowImpl({
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {/* 分段標題已經寫了角色，列上不再重複小標；只有「待套用」時留著（黃點是要重啟的訊號）。 */}
             {isExpertProject && !compact && bot.role_pending ? <ExpertRoleTag role={bot.role} rolePending /> : null}
+            {/* 子 agent 不進角色分段，角色（管理者用 `agm role` 設的顧問等）只能在列上標，不然設了看不出來（2026-11-08 使用者）。 */}
+            {isExpertProject && compact && bot.parent_bot_id && bot.role ? <ExpertRoleTag role={bot.role} /> : null}
             {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
