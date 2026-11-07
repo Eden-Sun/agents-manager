@@ -77,8 +77,8 @@ function del(keys: string[]): Promise<void> {
 let started = false
 
 /** Idempotent. `shelf` defaults to the page's store; tests pass a second instance to play a second tab. */
-export function startShelfPersistence(shelf: typeof useShelf = useShelf): void {
-  if (started) return
+export function startShelfPersistence(shelf: typeof useShelf = useShelf): () => void {
+  if (started) return () => {}
   started = true
 
   void readAll().then((rows) => {
@@ -96,7 +96,7 @@ export function startShelfPersistence(shelf: typeof useShelf = useShelf): void {
   })
 
   let prev = shelf.getState().items
-  shelf.subscribe((s) => {
+  const unsub = shelf.subscribe((s) => {
     if (s.items === prev) return
     const before = new Set(prev.map((it) => it.key))
     const after = new Set(s.items.map((it) => it.key))
@@ -107,5 +107,26 @@ export function startShelfPersistence(shelf: typeof useShelf = useShelf): void {
     if (removed.length) void del(removed)
   })
 
-  setInterval(() => shelf.getState().expire(), SWEEP_MS)
+  if (sweepTimer) clearInterval(sweepTimer)
+  sweepTimer = setInterval(() => shelf.getState().expire(), SWEEP_MS)
+
+  return () => {
+    unsub()
+    if (sweepTimer) {
+      clearInterval(sweepTimer)
+      sweepTimer = null
+    }
+    started = false
+  }
+}
+
+let sweepTimer: ReturnType<typeof setInterval> | null = null
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (sweepTimer) {
+      clearInterval(sweepTimer)
+      sweepTimer = null
+    }
+  })
 }

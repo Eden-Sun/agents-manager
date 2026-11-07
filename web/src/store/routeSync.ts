@@ -213,8 +213,8 @@ function onPop() {
  * 從 `main.tsx` 叫一次。`?token=` 只在首次載入用，第一次 `replaceState` 會把它從網址拿掉——
  * 分享出去的連結不該帶憑證。
  */
-export function startRouteSync() {
-  if (started || typeof window === 'undefined') return
+export function startRouteSync(): () => void {
+  if (started || typeof window === 'undefined') return () => {}
   started = true
   const initial = parseRoute(location.pathname)
   lastRoute = initial
@@ -222,7 +222,7 @@ export function startRouteSync() {
   window.addEventListener('popstate', onPop)
 
   let pending: Route | null = initial
-  useStore.subscribe((s) => {
+  const unsub = useStore.subscribe((s) => {
     // 使用者導覽（點 bot、切分頁、關 shell…）才作廢還沒回來的套用，網址跟著新的選取走。
     // 還原／刷新直接寫選取不算：開機深連結在途時 localStorage 還原不會蓋掉它（#1808）。
     const nav = userNavCount()
@@ -257,6 +257,12 @@ export function startRouteSync() {
     }
     syncNow()
   })
+
+  return () => {
+    window.removeEventListener('popstate', onPop)
+    unsub()
+    started = false
+  }
 }
 
 /**

@@ -890,6 +890,16 @@ let boundGet: GetFn | null = null
 const seenScheduleNotices = new Set<string>()
 const seenHerdrRecoveryNotices = new Set<string>()
 
+const prevStoreState = import.meta.hot?.data?.storeState as Record<string, unknown> | undefined
+const initialStoreData: Record<string, unknown> = {}
+if (prevStoreState) {
+  for (const [k, v] of Object.entries(prevStoreState)) {
+    if (typeof v !== 'function') {
+      initialStoreData[k] = v
+    }
+  }
+}
+
 export const useStore = create<StoreState>((set, get) => {
   boundSet = set
   boundGet = get
@@ -2563,6 +2573,7 @@ export const useStore = create<StoreState>((set, get) => {
     return needs
   },
 
+  ...(initialStoreData as Partial<StoreState>),
 }
 })
 
@@ -3876,4 +3887,24 @@ export const draftSync = new DraftSync({
 function newClientId(): string {
   const c = typeof crypto !== 'undefined' ? crypto : undefined
   return c && typeof c.randomUUID === 'function' ? c.randomUUID() : `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+if (import.meta.hot) {
+  // HMR 熱替換後，若先前已經 bootstrap 成功（ready === true），重新連上 WebSocket 避免連線中斷
+  if (prevStoreState && prevStoreState.ready) {
+    if (boundSet && boundGet) {
+      connectSocket(boundSet, boundGet)
+    }
+  }
+
+  import.meta.hot.dispose((data: Record<string, unknown>) => {
+    data.storeState = useStore.getState()
+    disconnect?.()
+    disconnect = null
+    if (quotaSweep) {
+      clearInterval(quotaSweep)
+      quotaSweep = null
+    }
+    draftSync.dispose()
+  })
 }

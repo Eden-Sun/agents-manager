@@ -68,10 +68,12 @@ let seq = 0
  */
 const TAB = Math.random().toString(36).slice(2, 8)
 
+const initialShelfState = import.meta.hot?.data?.shelfState
+
 export const useShelf = create<ShelfState>((set, get) => ({
-  items: [],
-  sink: null,
-  handed: [],
+  items: initialShelfState?.items ?? [],
+  sink: initialShelfState?.sink ?? null,
+  handed: initialShelfState?.handed ?? [],
 
   add: (files) => {
     const result = { added: 0, tooBig: [] as string[], overflow: 0 }
@@ -166,4 +168,10 @@ export function shelfFilesFor(keys: string[]): File[] {
   const files = useShelf.getState().filesFor(keys)
   if (files.length) useShelf.getState().markHanded(keys)
   return files
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose((data: Record<string, unknown>) => {
+    data.shelfState = useShelf.getState()
+  })
 }
