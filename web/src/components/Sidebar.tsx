@@ -1494,7 +1494,7 @@ export function Sidebar() {
                 {p.mode === 'expert' ? (
                   groupExpertSections(list).map((sec) => (
                     <Fragment key={sec.role}>
-                      <ExpertSectionHeader title={sec.title} />
+                      <ExpertSectionHeader title={sec.title} abbr={sec.abbr} />
                       {(sec.role === 'executor' ? groupClusterItems(sec.items) : sec.items.map((item) => ({ kind: 'single' as const, item }))).map((entry) => {
                         const renderMember = (b: Bot) => {
                         const kids = descendantsOf(b.id)

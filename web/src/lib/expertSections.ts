@@ -7,10 +7,18 @@ export interface ExpertSection<T extends { role?: Bot['role'] }> {
   role: ExpertRole
   title: string
   shortLabel: string
+  /** 英文縮寫（不翻譯，中英文介面都一樣；未分配沒有）：menu／側欄段落標題旁的小字（2026-11-07 使用者）。 */
+  abbr: string
   items: T[]
 }
 
 export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'unassigned'] as const
+
+const ROLE_ABBR: Record<ExpertRole, string> = { manager: 'Mgr', specialist: 'Spc', advisor: 'Adv', executor: 'Wkr', unassigned: '' }
+
+export function roleAbbr(role: ExpertRole): string {
+  return ROLE_ABBR[role]
+}
 
 export function roleToExpertSection(role: Bot['role']): ExpertRole {
   if (role === 'manager') return 'manager'
@@ -62,6 +70,7 @@ export function groupExpertSections<T extends { role?: Bot['role'] }>(items: rea
         role: r,
         title: roleTitle(r),
         shortLabel: roleShortLabel(r),
+        abbr: roleAbbr(r),
         items: group,
       })
     }

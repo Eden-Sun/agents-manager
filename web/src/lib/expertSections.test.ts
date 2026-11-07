@@ -71,3 +71,8 @@ describe('expertSections pure functions', () => {
     assert.equal(canReorderInExpertMode('executor', null), false)
   })
 })
+
+test('段落標題帶英文縮寫：Mgr／Spc／Adv／Wkr，未分配沒有（2026-11-07 使用者）', () => {
+  const secs = groupExpertSections([{ role: 'manager' }, { role: 'specialist' }, { role: 'advisor' }, { role: 'executor' }, { role: null }] as never[])
+  assert.deepEqual(secs.map((s) => s.abbr), ['Mgr', 'Spc', 'Adv', 'Wkr', ''])
+})
