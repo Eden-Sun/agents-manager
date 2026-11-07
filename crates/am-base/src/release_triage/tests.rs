@@ -131,23 +131,23 @@ fn codex_body_is_cut_at_changelog_heading_and_headings_do_not_truncate_sections(
 async fn first_run_records_the_installed_baseline_and_returns_nothing_pending() {
     let p = pool().await;
     let all = claude_sections();
-    let r = check(&p, "claude", &all, Some("2.1.278 (Claude Code)"), None).await.unwrap();
+    let r = check_from_feed(&p, "claude", &all, Some("2.1.278 (Claude Code)"), None).await.unwrap();
     assert_eq!((r.from.as_str(), r.to.as_str()), ("2.1.278", "2.1.278"));
     assert!(r.pending.is_empty());
     let row = ledger::get(&p, "claude", "2.1.278").await.unwrap().unwrap();
     assert_eq!(row.status, ledger::Status::Empty);
     // 帳本已有基準：同一份 feed 再跑，沒有新版。
-    assert!(check(&p, "claude", &all, None, None).await.unwrap().pending.is_empty());
+    assert!(check_from_feed(&p, "claude", &all, None, None).await.unwrap().pending.is_empty());
     // 沒有基準又讀不到磁碟版本 → 明確報錯，不猜。
     let fresh = pool().await;
-    assert!(check(&fresh, "claude", &all, None, None).await.is_err());
+    assert!(check_from_feed(&fresh, "claude", &all, None, None).await.is_err());
 }
 
 #[tokio::test]
 async fn replay_2_1_275_to_278_gives_a_row_per_version_and_276_is_empty() {
     let p = pool().await;
     let all = claude_sections();
-    let r = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
+    let r = check_from_feed(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert_eq!((r.from.as_str(), r.to.as_str()), ("2.1.275", "2.1.278"));
     // 三版各一列；276 全被丟掉 → empty，不在 pending。
     assert_eq!(ledger::list(&p, Some("claude"), None).await.unwrap().len(), 3);
@@ -176,11 +176,11 @@ async fn replay_2_1_275_to_278_gives_a_row_per_version_and_276_is_empty() {
 async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     let p = pool().await;
     let all = claude_sections();
-    let first = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
+    let first = check_from_feed(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert_eq!(first.pending.len(), 2);
     // 還沒派工就重跑（沒有 `agm assign`／`release-triage dispatched` 介入）：
     // 兩版還是 pending，理應照樣列出，不能因為 `from` 已經追上這一版就消失。
-    let second = check(&p, "claude", &all, None, None).await.unwrap();
+    let second = check_from_feed(&p, "claude", &all, None, None).await.unwrap();
     assert_eq!(second.from, "2.1.278", "from＝帳本已分診的最大版本");
     assert_eq!(
         second.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
@@ -191,7 +191,7 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     let both = ["2.1.277".to_string(), "2.1.278".to_string()];
     assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 2);
     assert!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.is_err(), "CAS：已 dispatched 的不再接受重複派工");
-    let third = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
+    let third = check_from_feed(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert!(third.pending.is_empty(), "已經 dispatched，不再是 pending");
 }
 
@@ -199,8 +199,8 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
 async fn a_new_upstream_version_after_the_baseline_is_the_only_pending() {
     let p = pool().await;
     let old: Vec<Section> = claude_sections().into_iter().filter(|s| s.version != "2.1.278").collect();
-    check(&p, "claude", &old, Some("2.1.277"), None).await.unwrap();
-    let r = check(&p, "claude", &claude_sections(), None, None).await.unwrap();
+    check_from_feed(&p, "claude", &old, Some("2.1.277"), None).await.unwrap();
+    let r = check_from_feed(&p, "claude", &claude_sections(), None, None).await.unwrap();
     assert_eq!((r.from.as_str(), r.to.as_str()), ("2.1.277", "2.1.278"));
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["2.1.278"]);
     assert!(r.pending[0].kept.iter().any(|k| k.text.contains("Auto mode server")), "`/status` 那條要進 kept");
@@ -297,7 +297,7 @@ async fn ledger_max_version_compares_numerically() {
 #[tokio::test]
 async fn unsupported_kind_is_an_error() {
     let p = pool().await;
-    assert!(check(&p, "herdr", &claude_sections(), Some("1.0.0"), None).await.is_err());
+    assert!(check_from_feed(&p, "herdr", &claude_sections(), Some("1.0.0"), None).await.is_err());
 }
 
 /// 整段 CLI 流程（feed 檔＋DB 檔）：不碰網路、不碰正式 DB。
@@ -312,6 +312,7 @@ async fn run_check_reads_a_feed_file_and_a_private_db() {
     let mk = |since: Option<&str>| CheckArgs {
         kind: "claude".into(),
         since: since.map(String::from),
+        target: None,
         installed: Some("2.1.276".into()),
         db: Some(db.clone()),
         feed_file: Some(feed.clone()),
@@ -329,7 +330,7 @@ async fn pending_is_sorted_oldest_first_numerically() {
     let p = pool().await;
     let mk = |v: &str| Section { version: v.into(), body: "- Fixed `--resume` hanging".into() };
     let all: Vec<Section> = ["0.10.0", "0.9.1", "0.9.0", "0.2.5"].iter().map(|v| mk(v)).collect();
-    let r = check(&p, "claude", &all, None, Some("0.2.5")).await.unwrap();
+    let r = check_from_feed(&p, "claude", &all, None, Some("0.2.5")).await.unwrap();
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["0.9.0", "0.9.1", "0.10.0"]);
 }
 
@@ -348,4 +349,11 @@ fn cli_version_output_with_a_name_prefix_is_still_a_version() {
     ] {
         assert_eq!(changelog::cli_version_string(line).as_deref(), want, "{line}");
     }
+}
+
+// Offline fixtures explicitly choose their largest version; production must supply an upstream target.
+async fn check_from_feed(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> anyhow::Result<CheckReport> {
+    let target = all.iter().filter_map(|s| crate::changelog::parse_version(&s.version).map(|v| (v, s.version.clone())))
+        .max().map(|(_, v)| v).ok_or_else(|| anyhow::anyhow!("fixture has no version"))?;
+    crate::release_triage::check(pool, kind, all, installed, since, &target).await
 }

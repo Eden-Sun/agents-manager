@@ -379,6 +379,58 @@
         }
     }
 
+    /// Scheduler regression: the manifest has detected 1.5.4 while Markdown is still 1.5.3.
+    /// Exercise the real run_check path, including source fallback and pending ledger insertion.
+    #[tokio::test]
+    async fn scheduled_release_triage_uses_detected_target_and_releases_before_creating_pending() {
+        use crate::release_triage::{self, ledger};
+        let releases = r###"[{"tag_name":"1.5.5","body":"- Newer release must not replace the requested target"},
+            {"tag_name":"1.5.4","body":"## Features\n- Fixed hooks and session resume"},
+            {"tag_name":"1.5.3","body":"- Older release"}]"###;
+        for (primary, backup, succeeds) in [
+            (Some("## 1.5.3\n- Old Markdown"), Some(releases), true),
+            (Some("# New heading format\nrelease 1.5.4"), Some(releases), true),
+            (Some("## 1.5.4\n- Fixed hooks\n## 1.5.5\n- Newer"), None, true),
+            (Some("## 1.5.3\n- Old Markdown"), Some(r#"[{"tag_name":"1.5.5","body":"- Other version"}]"#), false),
+            (None, None, false),
+        ] {
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-rt-target-{}", crate::db::ulid())));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = dir.join("triage.sqlite3");
+            std::fs::write(&db, b"").unwrap();
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db.display())).await.unwrap();
+            ledger::migrate(&pool).await.unwrap();
+            ledger::insert_baseline(&pool, "agy", "1.5.3").await.unwrap();
+            pool.close().await;
+            let mut routes = Vec::new();
+            if let Some(body) = primary { routes.push(route("/agy/CHANGELOG.md", body)); }
+            if let Some(body) = backup { routes.push(route("/agy/releases", body)); }
+            let (base, log) = serve(routes).await;
+            let result = release_triage::run_check_with_source(release_triage::CheckArgs {
+                kind: "agy".into(), since: None, target: Some("1.5.4".into()),
+                installed: Some("1.5.3".into()), db: Some(db.clone()), feed_file: None,
+            }, &source(&base)).await;
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db.display())).await.unwrap();
+            let rows = ledger::list(&pool, Some("agy"), None).await.unwrap();
+            pool.close().await;
+            std::fs::remove_dir_all(&dir).unwrap();
+            if succeeds {
+                let report = result.unwrap();
+                assert_eq!(report.to, "1.5.4");
+                assert_eq!(report.pending.iter().map(|p| p.version.as_str()).collect::<Vec<_>>(), ["1.5.4"]);
+                assert!(report.pending[0].kept.iter().any(|entry| entry.text.contains("hooks")));
+                assert!(rows.iter().any(|r| r.version == "1.5.4" && r.status == ledger::Status::Pending));
+                assert!(!rows.iter().any(|r| r.version == "1.5.5"));
+                if backup.is_some() { assert!(seen(&log).iter().any(|p| p == "/agy/releases")); }
+                else { assert_eq!(seen(&log), ["/agy/CHANGELOG.md"]); }
+            } else {
+                assert!(result.is_err(), "missing target must not masquerade as success");
+                assert_eq!(rows.len(), 1, "failed sources must not advance the baseline or insert other releases");
+                assert_eq!(rows[0].version, "1.5.3");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn unparseable_official_markdown_also_uses_releases() {
         let releases = r#"[{"tag_name":"1.5.0","body":"- release body"}]"#;

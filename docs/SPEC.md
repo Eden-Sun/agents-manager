@@ -4734,6 +4734,7 @@ codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 另存 `entries_json`（逐條原文、桶、類別、規則名）、`verdicts_json`、`issue_numbers_json`、`attempts`、`publish_error`。
 **交辦綁定**（#801）：`dispatched` 時記下收件 bot（`assigned_bot_id`）與派工代數（`dispatch_gen`，每派一次＋1）。一般 Bot 只看得到派給它（或它底下的 child）的 `dispatched` 列，
 也只能交那一版、帶對代數的 verdict（不相干的 403 `not_assigned`，代數過期 409 `stale_assignment`）；User／AGM 的全域讀取與補交不綁。第一次跑（帳本空）只把磁碟上的版本記成 `empty` 基準；補歷史用 `--since`。
+排程 `release-triage-check` 先與 upstream watcher 共用官方最新版探測（agy＝參考平台 manifest；claude＝npm latest；codex＝Releases；grok＝stable），以已偵測目標版作 `to`，不把 changelog feed 最大版當最新版。可用 `--to <版本>` 傳入已知目標；只有明確 `--feed-file` 的離線 fixture 模式可由 feed 推導 `to`。分診入口與翻譯共用 `changelog::target_sections`：Markdown 抓到但缺目標版或解析格式失效，就用固定官方 Releases 備援（grok 無 GitHub 來源則報錯）；備援也缺版／失敗時回非零、不插入或推進帳本，不拿其他版本冒充。備援若含更高版本，仍只處理 `(from, 已偵測目標版]`；已存在基準 1.5.3、manifest 目標 1.5.4 時，舊 Markdown 停在 1.5.3 也會由 Releases 的 1.5.4 建立 pending，供後續分析／開票／交辦使用。
 `(from, to]` 每一版各自一列；`pending` 舊版在前（kick 截斷時 request-id 取該批最後一版）。
 
 **issue**：一項一張，沒有「一版一張報告」；「這一版看過了、逐條結論是什麼」放帳本（`GET /api/release-triage`）。模型不直接跑 `gh`，用 `bin/agm release-triage submit` 交回結構化結果，

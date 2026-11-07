@@ -55,18 +55,18 @@ fn grok_rules_are_conservative_and_the_issue_candidates_are_few() {
 async fn a_grok_stable_window_lands_one_row_per_version_and_is_triaged_once() {
     let p = pool().await;
     let all = source_sections("grok", GROK_MD);
-    let r = check(&p, "grok", &all, None, Some("1.0.62")).await.unwrap();
+    let r = check_from_feed(&p, "grok", &all, None, Some("1.0.62")).await.unwrap();
     assert_eq!((r.from.as_str(), r.to.as_str()), ("1.0.62", "1.0.67"));
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.0.63", "1.0.64", "1.0.65", "1.0.66", "1.0.67"]);
     assert_eq!(ledger::list(&p, Some("grok"), None).await.unwrap().len(), 5);
     // 同一份 stable 再跑：帳本最大版本已是 1.0.67，不再插入、列也不變。
-    let again = check(&p, "grok", &all, None, None).await.unwrap();
+    let again = check_from_feed(&p, "grok", &all, None, None).await.unwrap();
     assert_eq!((again.from.as_str(), again.to.as_str()), ("1.0.67", "1.0.67"));
     assert_eq!(ledger::list(&p, Some("grok"), None).await.unwrap().len(), 5);
     assert_eq!(again.pending.len(), 5, "還沒派工就仍是 pending，但沒有多出新的一列");
     // 錯過上一個 stable：最舊的段落跟 `from` 之間缺版 → 只記 log、不補抓，照常分診手上有的。
     let gap = pool().await;
-    let r = check(&gap, "grok", &all, None, Some("1.0.60")).await.unwrap();
+    let r = check_from_feed(&gap, "grok", &all, None, Some("1.0.60")).await.unwrap();
     assert_eq!(r.pending.len(), 5);
 }
 
@@ -74,12 +74,12 @@ async fn a_grok_stable_window_lands_one_row_per_version_and_is_triaged_once() {
 async fn agy_first_run_baseline_and_new_version_flow() {
     let p = pool().await;
     let all = source_sections("agy", AGY_MD);
-    let r = check(&p, "agy", &all, Some("1.4.4"), None).await.unwrap();
+    let r = check_from_feed(&p, "agy", &all, Some("1.4.4"), None).await.unwrap();
     assert!(r.pending.is_empty());
-    let r = check(&p, "agy", &all, None, None).await.unwrap();
+    let r = check_from_feed(&p, "agy", &all, None, None).await.unwrap();
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.4.5", "1.4.6"]);
     assert_eq!(r.pending[1].kept.len(), 3);
-    assert!(check(&p, "herdr", &all, None, None).await.is_err());
+    assert!(check_from_feed(&p, "herdr", &all, None, None).await.is_err());
 }
 
 #[test]
@@ -88,4 +88,26 @@ fn every_triage_kind_has_a_label() {
     for k in ["claude", "codex", "agy", "grok"] {
         assert!(labels.contains(&format!("upstream:{k}")), "{k}");
     }
+}
+
+#[tokio::test]
+async fn explicit_target_rejects_missing_versions_and_bounds_newer_feed_entries() {
+    let p = pool().await;
+    let all = source_sections("agy", "## 1.5.5\n- Fixed hooks in future\n## 1.5.3\n- Fixed old hooks");
+    assert!(crate::release_triage::check(&p, "agy", &all, Some("1.5.3"), None, "1.5.4").await.is_err());
+    assert!(ledger::list(&p, Some("agy"), None).await.unwrap().is_empty());
+    let all = source_sections("agy", "## 1.5.5\n- Fixed future hooks\n## 1.5.4\n- Fixed target hooks");
+    let report = crate::release_triage::check(&p, "agy", &all, None, Some("1.5.3"), "1.5.4").await.unwrap();
+    assert_eq!(report.to, "1.5.4");
+    assert_eq!(report.pending.iter().map(|row| row.version.as_str()).collect::<Vec<_>>(), ["1.5.4"]);
+    let missing = run_check(CheckArgs { kind:"agy".into(), since:None, target:None, installed:None, db:None, feed_file:None }).await;
+    assert!(missing.unwrap_err().to_string().contains("目標版本"));
+    p.close().await;
+}
+
+// Offline fixtures explicitly choose their largest version; production must supply an upstream target.
+async fn check_from_feed(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> anyhow::Result<CheckReport> {
+    let target = all.iter().filter_map(|s| crate::changelog::parse_version(&s.version).map(|v| (v, s.version.clone())))
+        .max().map(|(_, v)| v).ok_or_else(|| anyhow::anyhow!("fixture has no version"))?;
+    crate::release_triage::check(pool, kind, all, installed, since, &target).await
 }

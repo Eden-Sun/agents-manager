@@ -47,9 +47,16 @@ fn main() {
             );
             std::process::exit(0);
         }
-        Cmd::ReleaseTriageCheck { kind, since, json: _, installed, db, feed_file } => {
+        Cmd::ReleaseTriageCheck { kind, since, to, json: _, installed, db, feed_file } => {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            match rt.block_on(release_triage::run_check(release_triage::CheckArgs { kind, since, installed, db, feed_file })) {
+            match rt.block_on(async move {
+                let target = match (to, feed_file.is_some()) {
+                    (Some(to), _) => Some(to),
+                    (None, true) => None, // Explicit offline fixture mode only.
+                    (None, false) => Some(agents_managerd::runners::upstream_update::fetch_latest(&kind).await?),
+                };
+                release_triage::run_check(release_triage::CheckArgs { kind, since, target, installed, db, feed_file }).await
+            }) {
                 Ok(report) => {
                     println!("{}", serde_json::to_string(&report).expect("serialize CheckReport"));
                     std::process::exit(0);
