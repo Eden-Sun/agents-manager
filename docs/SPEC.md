@@ -4767,7 +4767,7 @@ gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false
 daemon（`release_triage_auto.rs`）對每一版**單獨**以至多三次呼叫（首次＋兩次重試）使用 Claude API（預設 `claude-sonnet-5-5`，結構化輸出）：prompt 帶該版 kept／unmatched 條目（規則已丟掉的不送；一版沒有任何要判的條目就不花 API）、帳本裡最近 30 張 release-triage issue（`#編號 完整標題`，`duplicate_of` 只能挑這份）與判斷規則（四類 verdict、模組對照表，跟 `release-triage-task.md` 同步，有測試對）；
 **第一版不做 grep 模組摘錄**，判斷只憑條目文字，所以通知會註明「未實測、未查程式碼」。外部文字（條目、issue 標題、binary diff）各放進比內容裡最長反引號串更長的圍欄，並明講是資料不是指令。
 API 回傳只當資料：交給 `runners::release_triage::accept_submission`——跟 bot 經 `submit` 交回的**同一個**驗證與落帳函式（每條都有 verdict、提案只引用 guard／adopt、`duplicate_of` 只認帳本、文字不得含去重標記、CAS 寫帳本、`publish = true` 時當場 publish），不走 HTTP bot principal，也不經 `dispatched`／`dispatch_gen`。
-更新框的影響分析對 claude／codex／agy／grok 僅投影 release-triage 帳本，不在開框時送出 changelog-review 分析；herdr 保留原路徑。每個提案顯示提防／採用、已開 issue 或已留言連結；尚未發布的 duplicate 顯示待留言。publish_error 顯示原因並可只重試 publish，不重新分析。帳本沒有專用前端事件，框開啟時每 5 秒 GET 刷新，卸載停止；這會捕捉分診完成及之後的 publish 變化。
+更新框的影響分析對 claude／codex／agy／grok 僅投影 release-triage 帳本，不在開框時送出 changelog-review 分析；herdr 保留原路徑。每個提案顯示提防／採用、已開 issue 或已留言連結；尚未發布的 duplicate 顯示待留言。publish_error 顯示原因並可只重試 publish，不重新分析。supervisor_changed 事件同時重讀 review 與分診帳本（合併一秒內的事件），包含完成後的 publish 變化；框開啟時另每 5 秒 GET 分診帳本作為漏事件的補查，卸載停止。
 
 **模式判斷**：`ApiModel::enabled` 同時檢查 `[claude_api] enabled`、`uses.release_triage.enabled` 與 key 可讀。只有停用或缺 key 才回 `fallback`、保留 pending 與 AGM 分析路徑。API 模式下 schema／業務驗證錯誤（例如 issue title 空）回饋給下一次 API，所有錯誤最多三次後落 `failed`，既有 `verdicts_json.analysis` 保存 `source:"api"`、`model`、`error`，不改有效 verdict 或 issue。更新框顯示原因及「重試」，明確 POST `release-triage/auto` 可重試 API failed；排程只撿 pending，避免無限付費重試。成功版本仍永久重用、不重新開票。
 kick 在 API 模式下任何 API／解析／傳輸失敗都不派 AGM；模式查詢失敗時本輪跳過。只有明確停用或缺 key 才進額度閘門與 AGM 派工。API 模式的 binary-only 路徑也不派 bot。
