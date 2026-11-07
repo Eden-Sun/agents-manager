@@ -443,12 +443,12 @@ function Gauge({
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   // 上下邊框量表只有手機畫（2026-09-11 使用者：桌機已有 bar），且每一格都畫（2026-09-13 使用者）。
+  const now = useMinuteNow()
   const borderWindows = compact ? [
-    { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
-    { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
+    { edge: 'top', label: '5H', window: q?.five_hour, pct: five, mark: null },
+    { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven, mark: resetMark(q?.seven_day?.resets_at, WINDOW_MS[weekLabel(entry.kind)], now) },
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
-  const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
   // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
@@ -549,6 +549,8 @@ function Gauge({
           aria-valuenow={Math.min(100, Math.max(0, w.pct!))}
         >
           <span className="quota-border-fill" style={{ width: `${Math.min(100, Math.max(0, w.pct!))}%` }} />
+          {/* 7d／週那條帶重置黑針（2026-11-07 使用者：原本的樣式加上時間標記）；位置＝剩餘時間 ÷ 一週，同桌機 Bar。 */}
+          {w.edge === 'bottom' && w.mark !== null ? <span className="quota-border-mark" style={{ left: `${w.mark}%` }} /> : null}
         </span>
       ))}
       <span className="quota-head">
