@@ -1144,3 +1144,44 @@
     animation: none;
   }
 }
+
+/* 排隊中補充的「插隊送出」：泡泡下緣靠右的小 pill，跟 .src-tag／meta 小字同一套（11px、淡邊框）。
+   視覺高約 20px，觸控範圍用偽元素撐到 32px 以上，不撐高任何列。 */
+.queued-jump {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  align-self: flex-end;
+  margin: 0 3px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.queued-jump::before {
+  content: "";
+  position: absolute;
+  inset: -8px -6px;
+}
+
+.queued-jump:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.queued-jump:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.queued-jump-icon {
+  font-size: 12px;
+  line-height: 1;
+}

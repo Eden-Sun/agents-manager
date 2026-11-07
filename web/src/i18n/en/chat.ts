@@ -175,6 +175,8 @@ export default {
   '倒回失敗：{reason}': 'Could not rewind: {reason}',
   // store/sendNowCopy.ts
   '插隊': 'Interrupt and send',
+  '插隊送出': 'Send now',
+  '插隊送出：打斷目前這一輪，立刻送出這則排隊中的補充': 'Send now: interrupt the current turn and send this queued note immediately',
   '打斷目前這一輪，改送這一句（需要 claude 2.1.275 以上）：{preview}': 'Interrupt the current turn and send this instead (claude 2.1.275 or later required): {preview}',
   '插入': 'Insert',
   '把這一句插進正在跑的這一輪：不打斷、不開新回合，codex 邊做邊看到（需要 codex 0.159 以上，且 daemon 設定 [codex] instant_interrupt 與 codex 自己的 instant_interrupt 都開；不合資格時會告訴你原因）：{preview}': 'Insert this into the current turn: codex sees it while working, without interruption or a new turn (requires codex 0.159 or later, with instant_interrupt enabled in both daemon and codex settings; otherwise you will be told why): {preview}',
