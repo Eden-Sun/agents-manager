@@ -1,27 +1,15 @@
-import { useEffect, useSyncExternalStore } from 'react'
+import { createElement, useEffect, useSyncExternalStore } from 'react'
 import { translateMessage } from '../api'
 import type { Message } from '../api/types'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { useT } from '../lib/i18n'
 import { autoTranslateAllowed, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
 import { useStore } from '../store/store'
-import { SafeMarkdown } from './SafeMarkdown'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
+import { MessageTranslationButton, MessageTranslationContent } from './MessageTranslation'
+import { AUTO_TRANSLATE_RECENT, usd } from './messageTranslationConstants'
 
-/** 自動翻譯只管對話最後這幾則（加上新到的）；更早的不回填，免得一開對話就把整段歷史丟去翻（使用者 2026-11-06）。 */
-export const AUTO_TRANSLATE_RECENT = 10
-
-/** 美元：不到一分錢多給位數，免得全寫成 $0.00。 */
-export function usd(n: number): string {
-  return n >= 0.01 ? `$${n.toFixed(3)}` : `$${n.toFixed(5)}`
-}
-
-/** 譯文下方那行：這次翻譯花多少（使用者 2026-11-04：即時算出該次翻譯價格）；快取命中標未扣費。 */
-function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; cached: boolean; model: string }): string {
-  const model = st.model.replace(/^claude-/, '')
-  if (st.cached) return st.cost === null ? t('{model} · 快取，這次未扣費', { model }) : t('{model} · 快取，這次未扣費（當初 {cost}）', { model, cost: usd(st.cost) })
-  return st.cost === null ? t('{model} · 費用不明', { model }) : t('{model} · 這次翻譯 {cost}', { model, cost: usd(st.cost) })
-}
+export { AUTO_TRANSLATE_RECENT, usd }
 
 /**
  * assistant 訊息說英文時，meta 列的「翻譯」鈕＋譯文（daemon 用 Claude API 翻成繁中，同一則有快取不重複扣費）。
@@ -83,25 +71,26 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, msg.id])
   if (!eligible) return { button: null, content: null, flip: null }
-  // 未啟用：按鈕照樣在（找得到這個功能），標「未啟用」，按了只提示去哪裡開，不打 API。
-  const onClick = off
-    ? () => useStore.getState().notify('info', t.tr(off.reason))
-    : st.status === 'done' ? flipFace : st.status === 'loading' ? undefined : () => { setWanted(msg.id, true); setDeclined(msg.id, false); run('manual') }
-  // 翻好之後按鈕是「翻面」：正看譯文就寫「原文」，正看原文就寫「譯文」。
-  const label = off ? t('翻譯（未啟用）') : st.status === 'loading' ? t('翻譯中…') : st.status === 'done' ? (st.show ? t('⇄ 原文') : t('⇄ 譯文')) : t('翻譯')
+
   return {
-    button: (
-      <button type="button" className={`msg-translate${off ? ' off' : ''}`} disabled={st.status === 'loading'} onClick={onClick} title={off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')}>
-        {label}
-      </button>
-    ),
+    button: createElement(MessageTranslationButton, {
+      eligible,
+      off,
+      status: st.status,
+      show: st.status === 'done' ? st.show : undefined,
+      onFlip: flipFace,
+      onManual: () => { setWanted(msg.id, true); setDeclined(msg.id, false); run('manual') },
+    }),
     content:
-      st.status === 'done' && st.show ? (
-        <div className="msg-translation" lang="zh-Hant">
-          <SafeMarkdown text={st.text} botId={msg.bot_id} />
-          <div className="msg-translation-cost">{costLine(t, st)}</div>
-        </div>
-      ) : null,
+      st.status === 'done' && st.show
+        ? createElement(MessageTranslationContent, {
+            text: st.text,
+            botId: msg.bot_id,
+            cost: st.cost,
+            cached: st.cached,
+            model: st.model,
+          })
+        : null,
     flip: st.status !== 'done' ? null : st.show ? 'tr' : 'orig',
   }
 }
