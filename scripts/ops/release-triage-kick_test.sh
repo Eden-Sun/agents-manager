@@ -67,6 +67,16 @@ case "$*" in
 esac
 STUB
   chmod +x "$AGM_DIR/bin/agm"
+  cat > "$AGM_DIR/bin/gh" <<'GH'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/gh-calls.log"
+[ "$1 $2" = "issue view" ] || exit 2
+n=${3##*/}
+[ ! -f "$AGM_DIR/gh-fail-$n" ] || exit 1
+if [ -f "$AGM_DIR/gh-state-$n" ]; then cat "$AGM_DIR/gh-state-$n"; else echo OPEN; fi
+GH
+  chmod +x "$AGM_DIR/bin/gh"
+  export GH_BIN="$AGM_DIR/bin/gh"
 
   # 假 agents-managerd：只認 `release-triage-check --kind <k> --json`，吐 $ROOT/triage/<k>.json；
   # 該檔不存在＝這個 kind 檢查失敗（exit 1）。
@@ -90,6 +100,7 @@ PYEOF
 }
 teardown() {
   rm -rf "$ROOT"
+  unset GH_BIN
   unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_LOCK_QUIET_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
   unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_PUBLISH_SLEEP STUB_OLD_AGM STUB_AUTO_ENABLED STUB_AUTO_FAIL STUB_AUTO_JSON
 }
@@ -912,6 +923,82 @@ check_no "API 模式不派 AGM 分析" "request-id release-triage-" "$AGM_DIR/ca
 check_no "API 模式不走 bot verdict" " dispatched " "$AGM_DIR/calls.log"
 bash "$SCRIPT"
 equals "已交接 issue 重跑不重派實作" "$(assigns)" "1"
+teardown
+
+# 前後兩次 handoff 與不同 kind 共用整輪五張額度，未交接者下輪續送。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+python3 - "$AGM_DIR" <<'PYFIX'
+import json,sys,pathlib
+d=pathlib.Path(sys.argv[1])
+def rows(kind, nums):
+    return {"rows":[{"kind":kind,"version":"2.1.278","issues":[{"number":n,"url":"https://x/%s"%n,"comment":False} for n in nums]}]}
+(d/"show-claude.json").write_text(json.dumps(rows("claude", [1000,1001,1002,1003,1004])))
+(d/"show-codex.json").write_text(json.dumps(rows("codex", [1005])))
+(d/"auto-published.json").write_text(json.dumps(rows("claude", [1000,1001,1002,1003,1004,1006,1007])))
+PYFIX
+echo CLOSED > "$AGM_DIR/gh-state-1000"
+export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.278","outcome":"judged","status":"published","quiet":false}]}'
+bash "$SCRIPT"
+equals "關閉票不占交接額度" "$(cat "$AGM_DIR/release-issue-skipped")" "1000"
+equals "所有 kind 與同輪第二次掃描合計最多五張" "$(assigns)" "5"
+check_no "額度用盡的新 API issue 留待下輪" "request-id release-issue-1006" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+equals "下一輪補送其餘兩張" "$(assigns)" "7"
+equals "跨前後掃描與下輪仍不重查關閉票" "$(grep -c 'issue view https://x/1000 ' "$AGM_DIR/gh-calls.log")" "1"
+check "下輪送 1006" "request-id release-issue-1006" "$AGM_DIR/calls.log"
+teardown
+
+# 失敗的交接嘗試也占全輪額度；避免兩次掃描重試形成派工風暴。
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+python3 - "$AGM_DIR/show-claude.json" <<'PYFIX'
+import json,sys
+json.dump({"rows":[{"kind":"claude","version":"2.1.278","issues":[{"number":n,"url":"https://x/%s"%n} for n in range(1101,1108)]}]},open(sys.argv[1],"w"))
+PYFIX
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+equals "交辦失敗時也最多嘗試五張" "$(assigns)" "5"
+equals "失敗的票不標記已交" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" ""
+teardown
+
+# CLOSED 持久略過；狀態查詢失敗不當作 OPEN，恢復後補送；缺 URL 可用帳本 repo。
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+printf '%s' '{"repo":"o/r","rows":[{"kind":"claude","version":"2.1.278","issues":[{"number":1201,"url":"https://x/1201"},{"number":1202,"url":"https://x/1202"},{"number":1203},{"number":1204,"url":"https://x/1204"}]}]}' > "$AGM_DIR/show-claude.json"
+echo CLOSED > "$AGM_DIR/gh-state-1201"
+touch "$AGM_DIR/gh-fail-1202"
+echo UNKNOWN > "$AGM_DIR/gh-state-1204"
+bash "$SCRIPT"
+check_no "未知狀態不交接" "request-id release-issue-1204" "$AGM_DIR/calls.log"
+equals "已關閉 issue 持久略過" "$(cat "$AGM_DIR/release-issue-skipped")" "1201"
+check_no "已關閉 issue 不交接" "request-id release-issue-1201" "$AGM_DIR/calls.log"
+check_no "查詢失敗不交接" "request-id release-issue-1202" "$AGM_DIR/calls.log"
+check "缺 URL 使用 repo 建立查詢網址" "issue view https://github.com/o/r/issues/1203" "$AGM_DIR/gh-calls.log"
+rm "$AGM_DIR/gh-fail-1202"
+echo OPEN > "$AGM_DIR/gh-state-1204"
+bash "$SCRIPT"
+check "未知狀態恢復 OPEN 後補送" "request-id release-issue-1204" "$AGM_DIR/calls.log"
+equals "已關閉 issue 下輪不再查詢" "$(grep -c 'issue view https://x/1201 ' "$AGM_DIR/gh-calls.log")" "1"
+check "查詢恢復後補送" "request-id release-issue-1202" "$AGM_DIR/calls.log"
+teardown
+
+# 已關閉但持久紀錄寫不進去：不交接、下輪重查並補寫。
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+printf '%s' '{"rows":[{"kind":"claude","version":"2.1.278","issues":[{"number":1301,"url":"https://x/1301"}]}]}' > "$AGM_DIR/show-claude.json"
+echo CLOSED > "$AGM_DIR/gh-state-1301"
+mkdir "$AGM_DIR/release-issue-skipped"
+bash "$SCRIPT"
+equals "略過紀錄寫入失敗仍不交接" "$(assigns)" "0"
+check "略過紀錄寫入失敗有原因" "略過紀錄寫入失敗" "$AGM_DIR/release-triage.log"
+rmdir "$AGM_DIR/release-issue-skipped"
+bash "$SCRIPT"
+equals "恢復寫入後補上略過紀錄" "$(cat "$AGM_DIR/release-issue-skipped")" "1301"
 teardown
 
 echo "$PASS passed, $FAIL failed"
