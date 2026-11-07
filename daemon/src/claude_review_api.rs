@@ -2,8 +2,8 @@
 //!
 //! 使用者按下按鈕時，不開 Claude Code session、不派 bot，改用共用的 Claude API client（[`crate::claude_api`]）
 //! 讀 changelog（claude 另加 binary diff 的固定差集文字；codex、agy、grok 另加分診帳本）出三到五行結論。
-//! 只在使用者按「分析影響」時才打 API；開框（`GET /api/claude-update/review`）只讀帳本，不打。同一個 (kind, 版本) 的結果鍵是
-//! `changelog-review/<kind>-<版>.json`，`completed`（與 15 分鐘內的 `pending`）之後再按都沿用，不再打 API。
+//! 自動翻譯啟用時，新版偵測與開框的明確 POST 也可補送；GET 只讀帳本、不打 API。最新版結果鍵是
+//! `changelog-review/<kind>-<版>.json`，各範圍與設定另存 fp 指紋帳本；自動請求不重試失敗，手動可以。
 //! 一律「只解析、沒實測」：結論尾巴由 daemon 寫死標明未實測，不靠模型自己講。
 //!
 //! 界線：
@@ -41,6 +41,8 @@ pub fn applies_to(kind: &str) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default)]
+    pub fingerprint: String,
     pub kind: String,
     pub version: String,
     pub from_version: Option<String>,
@@ -73,9 +75,29 @@ pub fn load(data_dir: &Path, kind: &str, version: &str) -> Option<Record> {
     serde_json::from_str(&txt).ok()
 }
 
+pub(super) fn load_fingerprint(data_dir: &Path, fp: &str) -> Option<Record> {
+    if fp.len() != 64 || !fp.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let text = std::fs::read_to_string(data_dir.join(LEDGER_DIR).join(format!("fp-{fp}.json"))).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub(super) fn load_job(data_dir: &Path, job: &Job, cfg: &crate::config::ConfigFile) -> Option<Record> {
+    load_fingerprint(data_dir, &fingerprint(job, cfg))
+        .or_else(|| load(data_dir, &job.kind, &job.to).filter(|r| r.fingerprint.is_empty()))
+}
+
 fn save(data_dir: &Path, rec: &Record) -> std::io::Result<()> {
+    if !rec.fingerprint.is_empty() && (rec.fingerprint.len() != 64 || !rec.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(std::io::Error::other("invalid review fingerprint"));
+    }
+    if !rec.fingerprint.is_empty() {
+        save_path(&data_dir.join(LEDGER_DIR).join(format!("fp-{}.json", rec.fingerprint)), rec)?;
+    }
+    save_path(&ledger_path(data_dir, &rec.kind, &rec.version), rec)
+}
+
+fn save_path(path: &Path, rec: &Record) -> std::io::Result<()> {
     use std::io::Write;
-    let path = ledger_path(data_dir, &rec.kind, &rec.version);
     let dir = path.parent().expect("ledger path has a parent");
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{}.tmp", crate::db::ulid()));
@@ -92,7 +114,8 @@ fn save(data_dir: &Path, rec: &Record) -> std::io::Result<()> {
     drop(f);
     std::fs::rename(&tmp, &path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
-    })
+    })?;
+    Ok(())
 }
 
 fn is_stale(rec: &Record, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -337,6 +360,16 @@ async fn run_binary_diff(d: &BinaryDiff) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// host 不入鍵；範圍、原文、標準、prompt 與實際模型設定變動才重新分析。
+pub(super) fn fingerprint(job: &Job, cfg: &crate::config::ConfigFile) -> String {
+    use sha2::{Digest, Sha256};
+    let state = cfg.claude_use_state(USE_CASE);
+    let input = json!([job.kind, job.from, job.to, job.changelog, job.criteria, SYSTEM,
+        state.as_ref().map(|s| &s.model), state.as_ref().map(|s| &s.effort), cfg.claude_api.endpoint,
+        cfg.claude_api.timeout_ms, cfg.claude_api.key_file, MAX_TOKENS, output_schema()]);
+    format!("{:x}", Sha256::digest(input.to_string().as_bytes()))
+}
+
 pub enum Started {
     /// 已占位並丟到背景去打 API。
     Spawned,
@@ -345,21 +378,33 @@ pub enum Started {
 }
 
 /// 占位並在背景分析；API 模式的錯誤只落 failed，不派 bot。
-pub async fn start(app: &Arc<App>, job: Job) -> std::io::Result<Started> {
+pub async fn start(app: &Arc<App>, job: Job, auto: bool) -> std::io::Result<Started> {
     let _gate = GATE.lock().await;
+    let cfg = app.cfg.get().await;
+    let fp = fingerprint(&job, &cfg);
+    let path = app.data_dir.join(LEDGER_DIR).join(format!("fp-{fp}.json"));
+    // 舊帳本（未有指紋）相容。新帳本以完整指紋判斷，範圍不同可各自占位。
     if let Some(rec) = load(&app.data_dir, &job.kind, &job.to) {
-        if live_state(&rec, chrono::Utc::now()).is_some() {
+        if rec.fingerprint.is_empty() && live_state(&rec, chrono::Utc::now()).is_some() {
+            return Ok(Started::Existing);
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let rec: Record = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+        if auto || live_state(&rec, chrono::Utc::now()).is_some() {
+            save(&app.data_dir, &rec)?;
             return Ok(Started::Existing);
         }
     }
     let rec = Record {
+        fingerprint: fp.clone(),
         kind: job.kind.clone(),
         version: job.to.clone(),
         from_version: job.from.clone(),
         status: "pending".into(),
         asked_at: crate::db::now(),
         answered_at: None,
-        model: app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.model),
+        model: cfg.claude_use_state(USE_CASE).map(|s| s.model),
         result: None,
         error_kind: None,
         fell_back: false,
@@ -369,14 +414,14 @@ pub async fn start(app: &Arc<App>, job: Job) -> std::io::Result<Started> {
     save(&app.data_dir, &rec)?;
     let worker = Arc::clone(app);
     app.background_tasks.spawn(Box::pin(async move {
-        let _ = run(&worker, &job).await;
+        let _ = run(&worker, &job, &fp, &cfg).await;
         worker.emit("supervisor_changed", json!({"changelog_review": job.to} )).await;
     }));
     Ok(Started::Spawned)
 }
 
 /// 最多三次 API 呼叫，成功或 failed 都落帳；不退給 bot。
-async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
+async fn run(app: &Arc<App>, job: &Job, fp: &str, cfg: &crate::config::ConfigFile) -> Result<(), ()> {
     let triage = triage_digest(app, &job.kind, &job.to).await;
     let diff = match &job.binary_diff {
         Some(d) => run_binary_diff(d).await,
@@ -398,7 +443,7 @@ async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
             outcome = Err("missing_analysis_input".into());
             break;
         }
-        let reply = claude_api::complete(app, ClaudeRequest { use_case: USE_CASE, system: Some(SYSTEM.into()), prompt: prompt.clone(), max_tokens: MAX_TOKENS, format: Some(output_schema()) }).await;
+        let reply = claude_api::complete_with(cfg, &app.claude_api, ClaudeRequest { use_case: USE_CASE, system: Some(SYSTEM.into()), prompt: prompt.clone(), max_tokens: MAX_TOKENS, format: Some(output_schema()) }).await;
         outcome = match reply {
             Ok(r) if r.stop_reason.as_deref() != Some("end_turn") => Err("incomplete_output".into()),
             Ok(r) => {
@@ -415,7 +460,8 @@ async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
         }
     }
     let _gate = GATE.lock().await;
-    let mut rec = load(&app.data_dir, &job.kind, &job.to).unwrap_or_else(|| blank(job));
+    let mut rec = load_fingerprint(&app.data_dir, fp).unwrap_or_else(|| blank(job));
+    rec.fingerprint = fp.to_string();
     rec.answered_at = Some(crate::db::now());
     let ok = match outcome {
         Ok((text, model, usage)) => {
@@ -446,6 +492,7 @@ async fn run(app: &Arc<App>, job: &Job) -> Result<(), ()> {
 
 fn blank(job: &Job) -> Record {
     Record {
+        fingerprint: String::new(),
         kind: job.kind.clone(),
         version: job.to.clone(),
         from_version: job.from.clone(),
@@ -551,6 +598,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-crapi-{}", crate::db::ulid())));
         let now = chrono::Utc::now();
         let mut rec = Record {
+            fingerprint: String::new(),
             kind: "claude".into(), version: "2.1.300".into(), from_version: None, status: "pending".into(),
             asked_at: crate::db::now(), answered_at: None, model: None, result: None, error_kind: None,
             fell_back: false, input_tokens: None, output_tokens: None,

@@ -1,10 +1,10 @@
 /**
  * 更新框裡的「分析」區塊（使用者 2026-09-19：「解析結果直接在更新視窗 show 出」；2026-09-25 起 codex 也有，issue #561）。
  *
- * 兩個來源，都只讀：
+ * 兩個來源；GET 只讀，符合自動條件時開框另 POST 補分析：
  * 1. **上游分診**（`/api/release-triage`，SPEC §18.2c）：帳本早就逐條分析過 claude／codex 每一版，這裡把
  *    `(from, to]` 區間內每一版的提防／採用／值得早升與提案 issue 攤出來。帳本沒有這一版就寫「尚未分析」（agy、grok 同 claude／codex，#1928）。
- * 2. **影響分析**（`/api/claude-update/review?kind=`）：使用者按「分析影響」派出去的那一筆，三種狀態：
+ * 2. **影響分析**（`/api/claude-update/review?kind=`）：自動或使用者按「分析影響」送出的那一筆：
  *    還沒派、派了還沒結論、有結論（**直接把結論印在框裡**）。
  * 兩邊都沒東西時整塊寫「尚未分析」，指向框底的「分析影響」。
  */
@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { UpdateReview } from '../api/types'
 import { anyAnalysed, triageForRange, type TriageItem, type TriageVersion } from '../lib/releaseTriage'
+import { loadReviewOnOpen } from '../lib/autoReview'
 import { scheduleReviewRefresh } from '../lib/reviewRefresh'
 import { useStore } from '../store/store'
 import './agmReviewBox.css'
@@ -40,7 +41,7 @@ export function AgmReviewBox({
   useEffect(() => {
     let alive = true
     // 任一支讀不到（舊 daemon 沒有那支 API）就只畫另一邊，不在更新框裡吵。
-    const review = api.fetchUpdateReview({ kind, host, to }).catch(() => null)
+    const review = loadReviewOnOpen({ kind, host, from, to }, api).catch(() => null)
     const triage = api.fetchReleaseTriage(kind).catch(() => null)
     void Promise.all([review, triage]).then(([r, t]) => {
       if (!alive) return
@@ -62,7 +63,7 @@ export function AgmReviewBox({
         state: reviewState,
         run: () => {
           void api
-            .fetchUpdateReview({ kind, host, to })
+            .fetchUpdateReview({ kind, host, from, to })
             .then((r) => {
               // 讀失敗不蓋掉畫面上已有的；key 變了（換版本／重新派）就丟掉，那一輪有自己的讀取。
               setLoaded((cur) => (cur && cur.key === key ? { ...cur, review: r?.review ?? cur.review } : cur))
@@ -70,7 +71,7 @@ export function AgmReviewBox({
             .catch(() => {})
         },
       }),
-    [rev, reviewState, kind, host, to, key],
+    [rev, reviewState, kind, host, from, to, key],
   )
 
   const t = useT()
@@ -82,7 +83,7 @@ export function AgmReviewBox({
     try {
       if (version) await api.retryReleaseTriage(kind, version)
       else await api.requestUpdateReview({ kind, host, from, to: to ?? loaded?.version ?? null })
-      const [r, triage] = await Promise.all([api.fetchUpdateReview({ kind, host, to }), api.fetchReleaseTriage(kind).catch(() => null)])
+      const [r, triage] = await Promise.all([api.fetchUpdateReview({ kind, host, from, to }), api.fetchReleaseTriage(kind).catch(() => null)])
       setLoaded((cur) => cur && cur.key === key ? { ...cur, review: r.review, triage: triage ? triageForRange(triage.rows, triage.repo, from, cur.version) : cur.triage } : cur)
     } catch (e) {
       setRetryError(e instanceof Error ? e.message : String(e))

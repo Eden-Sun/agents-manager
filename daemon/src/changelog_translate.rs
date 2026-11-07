@@ -253,6 +253,9 @@ pub fn kick_detected(app: &Arc<App>, ev: &Value) {
                 .min_by_key(|v| crate::changelog::parse_version(v))
         })
         .map(str::to_string);
+    app.background_tasks.spawn(Box::pin(crate::claude_review::auto_kick(
+        Arc::clone(app), kind.to_string(), from.clone(), to.to_string(),
+    )));
     let job = Box::pin(auto_kick(Arc::clone(app), kind.to_string(), from, to.to_string()));
     app.background_tasks.spawn(job);
 }
