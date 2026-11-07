@@ -4337,7 +4337,7 @@ mod live_probe {
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         let md = client.get(crate::changelog::AGY_CHANGELOG_URL).send().await.unwrap().error_for_status().unwrap().text().await.unwrap();
         let all = crate::changelog::parse_changelog(&md);
-        let result_dir = std::env::temp_dir().join(format!("agy-translation-probe-{}", crate::db::ulid()));
+        let result_dir = crate::testing::track(std::env::temp_dir().join(format!("agy-translation-probe-{}", crate::db::ulid())));
         std::fs::create_dir_all(&result_dir).unwrap();
         let mut rows = Vec::new();
         for version in ["1.5.0", "1.5.3"] {
