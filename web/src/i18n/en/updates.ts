@@ -123,7 +123,7 @@ export default {
   '更新並重啟 herdr': 'Update and restart herdr',
   '無法從這裡更新': 'Cannot update from here',
   '派工中…': 'Dispatching…',
-  '請 AGM 解析': 'Ask AGM to review',
+  '分析影響': 'Analyze impact',
   'herdr {version} 已經派給 {bot} 解析過了，結論會回到這裡': 'herdr {version} was already sent to {bot} for review; the conclusion will come back here',
   '已請 {bot} 解析 herdr {version} 的 changelog，結論會回到這裡': 'Asked {bot} to review the herdr {version} changelog; the conclusion will come back here',
   '派不出去：{reason}': 'Could not dispatch: {reason}',

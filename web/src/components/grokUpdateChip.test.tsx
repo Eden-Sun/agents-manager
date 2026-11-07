@@ -17,11 +17,11 @@ test('tooltip 寫新版、落後主機與指令；只提示、不說「安裝並
   assert.doesNotMatch(t, /安裝並重啟/)
 })
 
-test('「請 AGM 解析」：有新版才能按；沒有 plan（to＝null）時停用，不會 POST（#1928）', () => {
+test('「分析影響」：有新版才能按；沒有 plan（to＝null）時停用，不會 POST（#1928）', () => {
   function Probe({ to }: { to: string | null }) {
     const { dialog } = useReviewAsk('grok', 'local', null, to)
     return <button disabled={dialog.secondaryDisabled}>{dialog.secondaryLabel}</button>
   }
-  assert.equal(renderToStaticMarkup(<Probe to="1.0.67" />), '<button>請 AGM 解析</button>')
-  assert.equal(renderToStaticMarkup(<Probe to={null} />), '<button disabled="">請 AGM 解析</button>')
+  assert.equal(renderToStaticMarkup(<Probe to="1.0.67" />), '<button>分析影響</button>')
+  assert.equal(renderToStaticMarkup(<Probe to={null} />), '<button disabled="">分析影響</button>')
 })

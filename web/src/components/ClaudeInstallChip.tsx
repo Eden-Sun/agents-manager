@@ -99,7 +99,7 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
           </>
         }
         confirmLabel={toInstall.length > 0 ? t('安裝到 {n} 台', { n: toInstall.length }) : t('安裝中')}
-        secondaryLabel={asking ? t('派工中…') : t('請 AGM 解析')}
+        secondaryLabel={asking ? t('派工中…') : t('分析影響')}
         secondaryDisabled={asking || toInstall.length === 0}
         onSecondary={() => {
           setAsking(true)
@@ -107,8 +107,8 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
             .then((r) => {
               setReviewKey((n) => n + 1)
               notify('info', r.duplicate
-                ? t('claude {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.target_bot_name || 'AGM' })
-                : t('已請 {bot} 解析 claude {version} 的 changelog，結論會回到這裡', { bot: r.target_bot_name, version: r.version }))
+                ? t('claude {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
+                : t('已請 {bot} 解析 claude {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', version: r.version }))
             })
             .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
             .finally(() => setAsking(false))

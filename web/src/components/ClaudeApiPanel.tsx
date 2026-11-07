@@ -133,7 +133,7 @@ export function ClaudeApiPanel() {
       }}
     >
       <p className="hint">
-        {t('一次性、不需要工具與 repo 的 LLM 工作（例如請 AGM 解析 changelog）改走 Anthropic API key，不開 Claude Code session，不吃訂閱用量；改按 API 計費。每個用途可以各自開關、選模型；失敗或沒 key 時，用途會退回原本的 Claude Code 路徑。')}
+        {t('一次性、不需要工具與 repo 的 LLM 工作改走 Anthropic API key，按 API 計費。影響分析啟用且有 key 時只走 API，失敗可重試；停用或沒 key 才交給 AGM。')}
       </p>
       <label className="field">
         <span>

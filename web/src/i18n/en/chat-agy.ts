@@ -71,7 +71,7 @@ const dict: Dict = {
   "已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡": "Asked {bot} to review the {kind} {version} changelog; the conclusion will come back here",
   "派不出去：{reason}": "Could not dispatch: {reason}",
   "派工中…": "Dispatching…",
-  "請 AGM 解析": "Ask AGM to review",
+  "分析影響": "Analyze impact",
   "已複製問答": "Q&A copied",
   "複製失敗，請長按選取文字複製": "Could not copy. Select and copy the text manually.",
   "Claude 的提問與你的回答": "Claude's questions and your answers",

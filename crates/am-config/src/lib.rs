@@ -994,7 +994,7 @@ pub struct ClaudeApiUseDef {
 /// 已知用途。要加用途就加一行，設定頁、PUT 驗證、保險絲與帳本都從這張表走。
 /// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
-    ClaudeApiUseDef { id: "changelog_review", label: "AGM 解析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "changelog_review", label: "影響分析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
     ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None, default_on: false, auto_default: None },
     ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: Some(true) },
     ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false, auto_default: None },

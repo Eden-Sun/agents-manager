@@ -5,13 +5,14 @@ use crate::release_triage::{build_entries, source_sections};
 
 /// 照順序回預先準備好的結果；記下收到的 prompt。
 struct Fake {
+    enabled: bool,
     replies: Mutex<Vec<Result<String, ModelFail>>>,
     prompts: Mutex<Vec<String>>,
 }
 
 impl Fake {
     fn new(replies: Vec<Result<String, ModelFail>>) -> Self {
-        Self { replies: Mutex::new(replies), prompts: Mutex::new(Vec::new()) }
+        Self { enabled: true, replies: Mutex::new(replies), prompts: Mutex::new(Vec::new()) }
     }
     fn calls(&self) -> usize {
         self.prompts.lock().unwrap().len()
@@ -20,7 +21,7 @@ impl Fake {
 
 impl TriageModel for Fake {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async { true })
+        Box::pin(async move { self.enabled })
     }
     fn call<'a>(&'a self, _system: &'a str, prompt: String, _schema: Value) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
         Box::pin(async move {
@@ -111,13 +112,12 @@ async fn the_same_version_is_never_triaged_twice() {
 }
 
 #[tokio::test]
-async fn every_api_failure_leaves_the_version_pending_for_the_bot_path_and_says_nothing_to_the_user() {
+async fn every_api_failure_is_bounded_and_saved_as_failed_without_a_bot() {
     let env = crate::testing::env().await;
     let app = env.app.clone();
     let entries = seed(&app, "2.1.277").await;
     let j = judged(&entries);
     let cases: Vec<(&str, Result<String, ModelFail>)> = vec![
-        ("disabled", Err(fail("disabled", true))),
         ("timeout", Err(fail("timeout", false))),
         ("not json", Ok("sorry, I cannot".into())),
         ("schema mismatch", Ok(json!({"verdicts": "x"}).to_string())),
@@ -127,25 +127,29 @@ async fn every_api_failure_leaves_the_version_pending_for_the_bot_path_and_says_
         ("planted marker", Ok(reply(&entries, None).replace("hook 事件改名", "x <!-- release-triage: claude@1#a -->"))),
     ];
     for (name, r) in cases {
-        let model = Fake::new(vec![r]);
+        let model = Fake::new(vec![r.clone(), r.clone(), r]);
         let out = run_auto(&app, &model, "claude", &["2.1.277".into()], None).await.unwrap();
-        assert_eq!(out["results"][0]["outcome"], "fallback", "{name}: {out}");
-        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending, "{name}");
+        assert_eq!(out["results"][0]["outcome"], "failed", "{name}: {out}");
+        assert_eq!(model.calls(), 3);
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Failed, "{name}");
         assert!(notices(&app).await.is_empty(), "{name}: 沒成功就不通知");
     }
 }
 
 #[tokio::test]
-async fn a_failed_call_stops_the_rest_and_a_quiet_failure_is_marked_quiet() {
+async fn validation_feedback_repairs_an_empty_issue_title_without_a_bot() {
     let env = crate::testing::env().await;
     let app = env.app.clone();
-    seed(&app, "2.1.277").await;
-    seed(&app, "2.1.278").await;
-    let model = Fake::new(vec![Err(fail("no_key", true))]);
-    let out = run_auto(&app, &model, "claude", &["2.1.277".into(), "2.1.278".into()], None).await.unwrap();
-    assert_eq!(model.calls(), 1, "第一版就沒 key：後面的版本不再打");
-    let results = out["results"].as_array().unwrap();
-    assert!(results.iter().all(|r| r["outcome"] == "fallback" && r["quiet"] == true), "{out}");
+    let entries = seed(&app, "2.1.277").await;
+    let good = reply(&entries, None);
+    let bad = good.replace("hook 事件改名", "");
+    let model = Fake::new(vec![Ok(bad), Ok(good)]);
+    let out = run_auto(&app, &model, "claude", &["2.1.277".into()], None).await.unwrap();
+    assert_eq!(out["results"][0]["outcome"], "judged", "{out}");
+    assert_eq!(model.calls(), 2);
+    assert!(model.prompts.lock().unwrap()[1].contains("title"));
+    let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!(row.verdicts.unwrap()["analysis"]["model"], "claude-sonnet-5-5");
 }
 
 #[tokio::test]
@@ -227,4 +231,83 @@ fn the_notice_names_what_it_did_not_do_and_stays_within_five_lines() {
     let t = notice_text("claude", "m", &[one(json!([]), json!([]), json!("gh 掛了"))], "新增 --foo 旗標");
     assert!(t.contains("upgrade-arg：本次無") && t.contains("gh 掛了") && t.contains("binary diff：新增 --foo 旗標"), "{t}");
     assert!(t.lines().count() <= 5, "{t}");
+}
+
+#[tokio::test]
+async fn api_mode_requires_both_switches_and_a_readable_key() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    assert!(!ApiModel(&app).enabled().await);
+    let key = app.data_dir.join("triage-test-key");
+    let key_path = key.to_string_lossy().into_owned();
+    app.cfg
+        .update(move |c| {
+            c.claude_api.enabled = true;
+            c.claude_api.key_file = key_path;
+            c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), ..Default::default() });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!ApiModel(&app).enabled().await, "缺 key 仍是 AGM 模式");
+    std::fs::write(&key, "sk-ant-test-triage").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(ApiModel(&app).enabled().await);
+    app.cfg
+        .update(|c| {
+            c.claude_api.uses.get_mut(USE_CASE).unwrap().enabled = Some(false);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!ApiModel(&app).enabled().await);
+}
+
+#[tokio::test]
+async fn an_explicit_retry_repairs_a_failed_api_version_and_success_is_reused() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let entries = seed(&app, "2.1.277").await;
+    let model = Fake::new(vec![Err(fail("timeout", false)), Err(fail("timeout", false)), Err(fail("timeout", false)), Ok(reply(&entries, None))]);
+    let versions = ["2.1.277".into()];
+    assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "failed");
+    assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "judged");
+    assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "skipped");
+    assert_eq!(model.calls(), 4);
+    let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
+    assert!(row.assigned_bot_id.is_none());
+    assert!(row.verdicts.unwrap()["analysis"]["error"].is_null());
+}
+
+
+#[tokio::test]
+async fn api_mode_keeps_analysing_later_versions_after_one_version_fails() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    seed(&app, "2.1.277").await;
+    let next = seed(&app, "2.1.278").await;
+    let model = Fake::new(vec![Err(fail("timeout", false)), Err(fail("timeout", false)), Err(fail("timeout", false)), Ok(reply(&next, None))]);
+    let out = run_auto(&app, &model, "claude", &["2.1.277".into(), "2.1.278".into()], None).await.unwrap();
+    assert_eq!(out["results"][0]["outcome"], "failed");
+    assert_eq!(out["results"][1]["outcome"], "judged");
+    assert_eq!(model.calls(), 4);
+    assert_eq!(notices(&app).await.len(), 1);
+}
+
+#[tokio::test]
+async fn off_mode_returns_quiet_fallback_without_calling_the_model_or_changing_pending() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    seed(&app, "2.1.277").await;
+    let mut model = Fake::new(vec![]);
+    model.enabled = false;
+    let out = run_auto(&app, &model, "claude", &["2.1.277".into()], None).await.unwrap();
+    assert_eq!(out["results"][0]["outcome"], "fallback");
+    assert_eq!(out["results"][0]["quiet"], true);
+    assert_eq!(model.calls(), 0);
+    assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
 }

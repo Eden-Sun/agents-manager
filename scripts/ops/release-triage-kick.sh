@@ -373,19 +373,20 @@ except Exception:
 }
 
 # daemon 自己用 Claude API 分診（#1919）：這批 pending 先丟 `agm release-triage auto`，daemon 驗過就直接落帳並通知使用者入口，
-# 不派協調者。沒開／沒 key／API 失敗／驗證不過的版本留在 pending，照舊走下面派協調者的路徑（所以舊 daemon 的 404 也只是退回）。
+# 不派協調者。僅用途停用或缺 key 才走協調者；API 模式失敗由 daemon 記 failed，UI 重試。
 # 全域：KIND、PAYLOAD、TO、CLAUDE_DIFF_*。回傳 0＝還有東西要派 bot（PAYLOAD／TO 已改成剩下的）、3＝API 全包了。
 # API 成功分診完的版本離開 pending，下一輪 `release-triage-check` 不會再回它，同一版不會重派 bot。
 api_triage() {
-  _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || return 0
-  [ "$(printf '%s' "$_en" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' 2>/dev/null)" = 1 ] || return 0
+  _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || { log "查不到 API 模式，這輪不派協調者"; return 3; }
+  _enabled=$(printf '%s' "$_en" | python3 -c 'import json,sys; v=json.load(sys.stdin)["enabled"]; assert isinstance(v,bool); print(1 if v else 0)' 2>/dev/null) || return 3
+  [ "$_enabled" = 1 ] || return 0
   _vargs=(); _vcount=0
   while IFS= read -r _v; do
     [ -n "$_v" ] || continue
     _vargs+=(--version "$_v"); _vcount=$((_vcount + 1))
   done <<< "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
 for p in json.load(sys.stdin)["pending"]: print(p["version"])' 2>/dev/null)"
-  [ "$_vcount" -gt 0 ] || return 0
+  [ "$_vcount" -gt 0 ] || return 3
   _dargs=()
   if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ] && [ -f "$BINDIFF" ]; then
     _dfile=$(mktemp "${TMPDIR:-/tmp}/agm-binary-diff.XXXXXX"); TMPS+=("$_dfile"); TMPS_COUNT=$((TMPS_COUNT + 1))
@@ -396,8 +397,8 @@ for p in json.load(sys.stdin)["pending"]: print(p["version"])' 2>/dev/null)"
     fi
   fi
   _out=$("$AGM" --compact release-triage auto --kind "$KIND" "${_vargs[@]}" ${_dargs[@]+"${_dargs[@]}"} 2>>"$LOG") || {
-    log "release-triage auto --kind ${KIND} 失敗，改走派協調者的路徑"
-    return 0
+    log "release-triage auto --kind ${KIND} 失敗，API 模式不派協調者"
+    return 3
   }
   _rest=$(printf '%s' "$_out" | AUTO_OUT="$_out" PAYLOAD="$PAYLOAD" TO="$TO" python3 -c '
 import json, os, sys
@@ -409,8 +410,8 @@ except Exception as exc:
     sys.exit(1)
 done = {r["version"] for r in res if r.get("outcome") in ("judged", "empty")}
 for r in res:
-    if r.get("outcome") == "fallback" and not r.get("quiet"):
-        print("API 分診退回 %s：%s" % (r.get("version"), str(r.get("reason"))[:200]), file=sys.stderr)
+    if r.get("outcome") in ("fallback", "failed") and not r.get("quiet"):
+        print("API 分診失敗 %s：%s" % (r.get("version"), str(r.get("reason"))[:200]), file=sys.stderr)
     elif r.get("outcome") in ("judged", "empty"):
         print("API 分診完成 %s（%s）%s" % (r.get("version"), r.get("status"), "：" + str(r["reason"])[:200] if r.get("reason") else ""), file=sys.stderr)
 pend = [p for p in payload["pending"] if p["version"] not in done]
@@ -422,7 +423,7 @@ payload["to"] = to or payload.get("to")
 print("%d %d" % (len(pend), 1 if json.loads(os.environ["AUTO_OUT"]).get("binary_used") else 0))
 print(to)
 print(json.dumps(payload, ensure_ascii=False, indent=2))
-' 2>>"$LOG") || return 0
+' 2>>"$LOG") || return 3
   _head=$(printf '%s\n' "$_rest" | sed -n 1p)
   _left=${_head%% *}; _bin=${_head##* }
   if [ "$_bin" = 1 ]; then
@@ -436,7 +437,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
   if [ "$_left" = 0 ]; then return 3; fi
   TO=$(printf '%s\n' "$_rest" | sed -n 2p)
   PAYLOAD=$(printf '%s\n' "$_rest" | sed 1,2d)
-  return 0
+  return 3 # 這批開始時 API 模式已開；任何結果都不派協調者。
 }
 
 for KIND in claude codex agy grok; do
@@ -505,15 +506,14 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
 
   if [ "$BINARY_ONLY" -eq 0 ]; then
     api_triage; _api_rc=$?
-    if [ "$_api_rc" -eq 3 ]; then
-      if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
-        # changelog 都由 API 判完了，但 binary diff 沒併進去（腳本沒產出或這版退回）：只剩 binary，照舊派一則 binary-only 交辦。
-        BINARY_ONLY=1
-        TO="$CLAUDE_DIFF_NEW"
-        PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
-      else
-        continue
-      fi
+    if [ "$_api_rc" -eq 3 ]; then continue; fi
+  else
+    # 只有 binary、缺 changelog 時也不可繞過 API 模式去派 AGM。
+    _mode=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || continue
+    _enabled=$(printf '%s' "$_mode" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' 2>/dev/null) || continue
+    if [ "$_enabled" = 1 ]; then
+      log "API 模式缺 changelog，跳過 binary-only 協調者派工"
+      continue
     fi
   fi
 
