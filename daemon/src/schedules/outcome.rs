@@ -118,7 +118,7 @@ mod tests {
                 assert!(req.format.is_some());
                 assert!(!req.prompt.contains("synthetic-secret"));
                 let call = self.0.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { if call == 0 { Ok(ClientOutcome { text: r#"{"outcome":"refused"}"#.into(), model: Some("claude-haiku-5-5".into()), stop_reason: Some("end_turn".into()), usage: None }) } else { Err(ClientError::Timeout) } })
+                Box::pin(async move { if call == 0 { Ok(ClientOutcome { text: r#"{"outcome":"refused"}"#.into(), model: Some("claude-haiku-5-5".into()), stop_reason: Some("end_turn".into()), usage: None }) } else { Err(ClientError::Timeout { usage: None }) } })
             }
         }
         let e = crate::testing::env().await;
