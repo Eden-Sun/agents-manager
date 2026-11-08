@@ -184,25 +184,67 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                     }
                 }
             }
-            turn = if existing.is_some() { existing } else if db::active_run(&app.db, &to).await?.is_some_and(|run| run.state == "running") {
-                match lifecycle::prompt_from_api_queue_if_busy(app, &to, &text, &key, &files, lifecycle::RelaySrc::trusted(Some(&from)).with_auth(relay_auth.as_deref()), false, None).await {
-                    Ok(out) => Some(out.turn_id),
-                    Err(lifecycle::LcError::Conflict(_)) => None,
-                    Err(e) => {
-                        let created: Option<String> = sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
-                            .bind(&to).bind(&key).fetch_optional(&app.db).await?;
-                        if created.is_some() { return Ok(()) }
-                        let permanent = matches!(&e, lifecycle::LcError::Bad(_) | lifecycle::LcError::BadValue(_) | lifecycle::LcError::NotFound(_) | lifecycle::LcError::Forbidden(_));
-                        if permanent || attempts >= 3 {
-                            let payload = serde_json::json!({"source":"daemon","reason":"relay_request_undeliverable","request_id":id,"subject":to});
-                            crate::supervisor_inbox::push_inbox(&app.db, &format!("relay_request_undeliverable:{id}"), "ops_alert", None, Some(&from), None, &payload).await?;
-                            sqlx::query("UPDATE relay_requests SET state='failed',attempts=0,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
-                                .bind("request could not be delivered").bind(id).execute(&app.db).await?;
-                        } else {
-                            sqlx::query("UPDATE relay_requests SET attempts=attempts+1,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
-                                .bind("request delivery temporarily unavailable").bind(id).execute(&app.db).await?;
-                        }
+            let to_kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&to).fetch_optional(&app.db).await?;
+            let is_claude_api = to_kind.as_deref() == Some("claude-api");
+            if is_claude_api && existing.is_none() {
+                if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(app, 0).await {
+                    let cap_str = crate::claude_api_cap::format_usd_pretty(cap);
+                    let spent_str = crate::claude_api_cap::format_usd_pretty(spent);
+                    let err_msg = format!("api_total_cap_reached:cap={cap_str}:spent={spent_str}");
+                    sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                        .bind(&err_msg).bind(id).execute(&app.db).await?;
+                    return Ok(());
+                }
+            }
+            turn = if existing.is_some() {
+                existing
+            } else if db::active_run(&app.db, &to).await?.is_some_and(|run| run.state == "running") {
+                if is_claude_api {
+                    use crate::lifecycle::api_bot_port::ApiBotPort;
+                    let has_inflight: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='in_flight')")
+                        .bind(&to).fetch_one(&app.db).await?;
+                    if has_inflight {
                         None
+                    } else {
+                        match ApiBotPort::api_native_prompt(app, &to, &text, &key).await {
+                            Ok(out) => Some(out.turn_id),
+                            Err(_) => {
+                                let created: Option<String> = sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
+                                    .bind(&to).bind(&key).fetch_optional(&app.db).await?;
+                                if created.is_some() { return Ok(()); }
+                                if attempts >= 3 {
+                                    let payload = serde_json::json!({"source":"daemon","reason":"relay_request_undeliverable","request_id":id,"subject":to});
+                                    crate::supervisor_inbox::push_inbox(&app.db, &format!("relay_request_undeliverable:{id}"), "ops_alert", None, Some(&from), None, &payload).await?;
+                                    sqlx::query("UPDATE relay_requests SET state='failed',attempts=0,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                                        .bind("request could not be delivered").bind(id).execute(&app.db).await?;
+                                } else {
+                                    sqlx::query("UPDATE relay_requests SET attempts=attempts+1,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                                        .bind("request delivery temporarily unavailable").bind(id).execute(&app.db).await?;
+                                }
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    match lifecycle::prompt_from_api_queue_if_busy(app, &to, &text, &key, &files, lifecycle::RelaySrc::trusted(Some(&from)).with_auth(relay_auth.as_deref()), false, None).await {
+                        Ok(out) => Some(out.turn_id),
+                        Err(lifecycle::LcError::Conflict(_)) => None,
+                        Err(e) => {
+                            let created: Option<String> = sqlx::query_scalar("SELECT t.id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
+                                .bind(&to).bind(&key).fetch_optional(&app.db).await?;
+                            if created.is_some() { return Ok(()) }
+                            let permanent = matches!(&e, lifecycle::LcError::Bad(_) | lifecycle::LcError::BadValue(_) | lifecycle::LcError::NotFound(_) | lifecycle::LcError::Forbidden(_));
+                            if permanent || attempts >= 3 {
+                                let payload = serde_json::json!({"source":"daemon","reason":"relay_request_undeliverable","request_id":id,"subject":to});
+                                crate::supervisor_inbox::push_inbox(&app.db, &format!("relay_request_undeliverable:{id}"), "ops_alert", None, Some(&from), None, &payload).await?;
+                                sqlx::query("UPDATE relay_requests SET state='failed',attempts=0,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                                    .bind("request could not be delivered").bind(id).execute(&app.db).await?;
+                            } else {
+                                sqlx::query("UPDATE relay_requests SET attempts=attempts+1,error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                                    .bind("request delivery temporarily unavailable").bind(id).execute(&app.db).await?;
+                            }
+                            None
+                        }
                     }
                 }
             } else { None };

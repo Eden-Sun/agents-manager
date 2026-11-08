@@ -62,6 +62,7 @@ pub enum ApiFreshResult { Cleared }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApiFreshError { Busy, IdentityMismatch, Unresolved, Storage, Unconfirmed }
 
+#[derive(Debug)]
 pub enum ApiNativePromptError { Unconfirmed }
 pub enum ApiFreshAvailability { Available(ApiFreshTarget), None, Unavailable }
 pub enum ApiNativeStartMode { Resume { required: bool }, Fresh(ApiFreshTarget) }

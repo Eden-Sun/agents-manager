@@ -69,9 +69,14 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":bot.kind != "claude-api","host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
+        let is_api_advisor = bot.kind == "claude-api" && bot.role.as_deref() == Some("advisor");
+        let dispatchable = bot.kind != "claude-api" || is_api_advisor;
+        let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
         if bot.kind == "claude-api" {
-            peer["dispatch_reason"] = json!("純 API 模型，不能接受 bot 派工");
+            peer["billing"] = json!("api");
+            if !is_api_advisor {
+                peer["dispatch_reason"] = json!("純 API 模型，不能接受 bot 派工");
+            }
         }
         if bot.role.as_deref() == Some("executor") {
             peer["tier"] = json!(crate::expert_cluster::tier_of(&bot.kind, bot.model.as_deref()));
@@ -355,6 +360,28 @@ mod tests {
         let other = crate::db::ulid();
         sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert!(matches!(list(State(app), Path(other), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(bot.id))).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn claude_api_advisor_is_dispatchable_with_api_billing() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let adv = crate::testing::claude_bot(&app, &env.project_id, "api-adv").await;
+        sqlx::query("UPDATE bots SET kind='claude-api', role='advisor' WHERE id=?").bind(&adv.id).execute(&app.db).await.unwrap();
+        let exec = crate::testing::claude_bot(&app, &env.project_id, "api-exec").await;
+        sqlx::query("UPDATE bots SET kind='claude-api', role='executor' WHERE id=?").bind(&exec.id).execute(&app.db).await.unwrap();
+
+        let value = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(adv.id.clone()))).await.unwrap().0;
+        let peers = value["peers"].as_array().unwrap();
+        let p_adv = peers.iter().find(|p| p["id"] == adv.id).unwrap();
+        assert_eq!(p_adv["dispatchable"], true);
+        assert_eq!(p_adv["billing"], "api");
+        assert!(p_adv.get("dispatch_reason").is_none());
+
+        let p_exec = peers.iter().find(|p| p["id"] == exec.id).unwrap();
+        assert_eq!(p_exec["dispatchable"], false);
+        assert_eq!(p_exec["billing"], "api");
+        assert_eq!(p_exec["dispatch_reason"], "純 API 模型，不能接受 bot 派工");
     }
 
     #[tokio::test]
