@@ -31,6 +31,13 @@
 }
 
 .pending-q-src,
+.pending-q-tr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 2px 0 4px;
+}
+
 .pending-q-note {
   margin: 0;
   font-size: 11px;

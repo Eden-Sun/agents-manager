@@ -139,6 +139,220 @@ pub async fn post_translate(
     Ok(Json(translate(&app, &id, &content).await?))
 }
 
+// ── 待答問卷（codex／claude 的「需要回應」決策題）：一份問卷一次呼叫 ──────────────────────────
+//
+// 題目、標題、選項 label 與 description 結構化成 JSON 進、JSON 出，id 由 daemon 產生（`q{n}`、`q{n}-o{m}`）並逐一核對，
+// 對不上就不採用、不寫快取。用途、開關、帳本、快取目錄都跟對話訊息翻譯共用；快取鍵是 `pq-` 前綴＋整份內容的雜湊。
+
+const PQ_CACHE_PREFIX: &str = "pq-";
+const PQ_PROMPT_VERSION: &str = "1";
+/// 整份問卷的字元數上限（題目、標題、label、description 合計）：再長不翻，避免一次扣太多。
+const PQ_MAX_CHARS: usize = 12_000;
+const PQ_MAX_QUESTIONS: usize = 8;
+const PQ_MAX_OUT_TOKENS: u32 = 6_000;
+
+const PQ_SYSTEM: &str = "You are a translation engine. The user message is a JSON questionnaire that an AI coding agent asks its operator. \
+Translate every \"header\", \"question\", option \"label\" and option \"description\" into Traditional Chinese (zh-TW, Taiwan usage). \
+Keep every \"id\" exactly as given, and keep the same questions and options in the same order. \
+Do NOT translate code, identifiers, file paths, commands, URLs, environment variables, branch names, commit hashes or issue numbers: copy them verbatim. \
+Empty strings stay empty. Do not add explanations. Reply with JSON only, matching the schema.";
+
+#[derive(Deserialize)]
+pub struct PendingQuestionTranslateBody {
+    #[serde(default)]
+    questions: Vec<PqIn>,
+}
+
+#[derive(Deserialize)]
+struct PqIn {
+    #[serde(default)]
+    header: String,
+    #[serde(default)]
+    question: String,
+    #[serde(default)]
+    options: Vec<PqOptIn>,
+}
+
+#[derive(Deserialize)]
+struct PqOptIn {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PqCacheEntry {
+    questions: Value,
+    model: String,
+    prompt_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
+}
+
+fn pq_qid(qi: usize) -> String {
+    format!("q{qi}")
+}
+
+fn pq_oid(qi: usize, oi: usize) -> String {
+    format!("q{qi}-o{oi}")
+}
+
+fn pq_output_schema() -> Value {
+    let option = json!({
+        "type": "object", "additionalProperties": false, "required": ["id", "label", "description"],
+        "properties": { "id": {"type": "string"}, "label": {"type": "string"}, "description": {"type": "string"} }
+    });
+    json!({
+        "type": "object", "additionalProperties": false, "required": ["questions"],
+        "properties": { "questions": { "type": "array", "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "header", "question", "options"],
+            "properties": {
+                "id": {"type": "string"}, "header": {"type": "string"}, "question": {"type": "string"},
+                "options": { "type": "array", "items": option }
+            }
+        } } }
+    })
+}
+
+fn pq_payload(qs: &[PqIn]) -> Value {
+    let questions: Vec<Value> = qs
+        .iter()
+        .enumerate()
+        .map(|(qi, q)| {
+            let options: Vec<Value> = q
+                .options
+                .iter()
+                .enumerate()
+                .map(|(oi, o)| json!({"id": pq_oid(qi, oi), "label": o.label, "description": o.description}))
+                .collect();
+            json!({"id": pq_qid(qi), "header": q.header, "question": q.question, "options": options})
+        })
+        .collect();
+    json!({ "questions": questions })
+}
+
+fn pq_chars(qs: &[PqIn]) -> usize {
+    qs.iter()
+        .map(|q| q.header.chars().count() + q.question.chars().count() + q.options.iter().map(|o| o.label.chars().count() + o.description.chars().count()).sum::<usize>())
+        .sum()
+}
+
+/// 模型回的字串：沒有就不採用；原文有字而譯文空白也不採用。
+fn pq_str(o: &Value, key: &str, orig: &str) -> Result<String, String> {
+    let s = o.get(key).and_then(Value::as_str).ok_or_else(|| format!("missing {key}"))?.trim().to_string();
+    if s.is_empty() && !orig.trim().is_empty() {
+        return Err(format!("empty {key}"));
+    }
+    Ok(s)
+}
+
+/// 核對模型回的 JSON：題數、選項數、每個 id 都要跟送出去的一樣，順序也一樣。回傳整理過的 `questions` 陣列。
+fn pq_check(text: &str, qs: &[PqIn]) -> Result<Value, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("bad_json: {e}"))?;
+    let out = v.get("questions").and_then(Value::as_array).ok_or("missing questions")?;
+    if out.len() != qs.len() {
+        return Err("question count mismatch".into());
+    }
+    let mut res = Vec::with_capacity(qs.len());
+    for (qi, (q, o)) in qs.iter().zip(out).enumerate() {
+        if o.get("id") != Some(&json!(pq_qid(qi))) {
+            return Err("question id mismatch".into());
+        }
+        let header = pq_str(o, "header", &q.header)?;
+        let question = pq_str(o, "question", &q.question)?;
+        let opts_out = o.get("options").and_then(Value::as_array).ok_or("missing options")?;
+        if opts_out.len() != q.options.len() {
+            return Err("option count mismatch".into());
+        }
+        let mut opts = Vec::with_capacity(q.options.len());
+        for (oi, (po, oo)) in q.options.iter().zip(opts_out).enumerate() {
+            if oo.get("id") != Some(&json!(pq_oid(qi, oi))) {
+                return Err("option id mismatch".into());
+            }
+            opts.push(json!({
+                "id": pq_oid(qi, oi),
+                "label": pq_str(oo, "label", &po.label)?,
+                "description": pq_str(oo, "description", &po.description)?,
+            }));
+        }
+        res.push(json!({"id": pq_qid(qi), "header": header, "question": question, "options": opts}));
+    }
+    Ok(Value::Array(res))
+}
+
+fn load_pq(path: &Path) -> Option<PqCacheEntry> {
+    let e: PqCacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (e.prompt_version == PQ_PROMPT_VERSION && e.questions.is_array()).then_some(e)
+}
+
+fn save_pq(path: &Path, entry: &PqCacheEntry) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec(entry).map_err(std::io::Error::other)?;
+    am_base::atomic_file::write(path, &data, am_base::atomic_file::Mode::Exact(0o600))
+}
+
+fn pq_cache_path(data_dir: &Path, payload: &Value) -> PathBuf {
+    let mut h = Sha256::new();
+    h.update(PQ_PROMPT_VERSION.as_bytes());
+    h.update(b"\0");
+    h.update(payload.to_string().as_bytes());
+    let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    data_dir.join(CACHE_DIR).join(format!("{PQ_CACHE_PREFIX}{key}.json"))
+}
+
+/// 核心：查快取、沒有才一次打 API、核對後寫快取。回 `{questions, model, cached, cost_usd, usage?}`。
+pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value, LcError> {
+    let payload = pq_payload(qs);
+    let path = pq_cache_path(&app.data_dir, &payload);
+    if let Some(hit) = load_pq(&path) {
+        return Ok(json!({"questions": hit.questions, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+    }
+    let req = ClaudeRequest {
+        use_case: USE_CASE,
+        system: Some(PQ_SYSTEM.to_string()),
+        prompt: payload.to_string(),
+        max_tokens: PQ_MAX_OUT_TOKENS,
+        format: Some(pq_output_schema()),
+    };
+    let reply = claude_api::complete(app, req).await.map_err(error_of)?;
+    let questions = pq_check(&reply.text, qs).map_err(|e| LcError::Upstream(format!("translate_failed: {e}")))?;
+    let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
+    let entry = PqCacheEntry { questions: questions.clone(), model: reply.model.clone(), prompt_version: PQ_PROMPT_VERSION.into(), cost_usd: cost };
+    if let Err(e) = save_pq(&path, &entry) {
+        tracing::warn!("pending question translate cache write failed: {e}");
+    }
+    let mut body = json!({"questions": questions, "model": reply.model, "cached": false, "cost_usd": cost});
+    if let Some(u) = &reply.usage {
+        body["usage"] = usage_json(u);
+    }
+    Ok(body)
+}
+
+/// `POST /api/pending-questions/translate`：User-only。一份問卷一次呼叫。
+pub async fn post_pending_question_translate(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<crate::api::RequestPrincipal>,
+    Json(body): Json<PendingQuestionTranslateBody>,
+) -> Result<Json<Value>, LcError> {
+    if principal != crate::api::RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    if body.questions.is_empty() || body.questions.len() > PQ_MAX_QUESTIONS {
+        return Err(LcError::Bad(format!("questions must be 1..={PQ_MAX_QUESTIONS}")));
+    }
+    let chars = pq_chars(&body.questions);
+    if chars == 0 {
+        return Err(LcError::Bad("empty questionnaire".into()));
+    }
+    if chars > PQ_MAX_CHARS {
+        return Err(LcError::Unprocessable(json!({"error": "questionnaire_too_long", "max_chars": PQ_MAX_CHARS})));
+    }
+    Ok(Json(translate_questions(&app, &body.questions).await?))
+}
+
 #[cfg(test)]
 mod cost_tests {
     use super::*;
@@ -282,5 +496,112 @@ mod tests {
         assert!(matches!(call("nope").await.unwrap_err(), LcError::NotFound(_)));
         let bot = Extension(crate::api::RequestPrincipal::Bot("x".into()));
         assert!(matches!(post_translate(State(app.clone()), AxPath("nope".into()), bot).await.unwrap_err(), LcError::Forbidden(_)));
+    }
+
+    struct FakeText {
+        calls: AtomicUsize,
+        text: String,
+    }
+
+    impl MessagesClient for FakeText {
+        fn complete<'a>(&'a self, _req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = self.text.clone();
+            Box::pin(async move {
+                Ok(ClientOutcome {
+                    text,
+                    model: Some("claude-haiku-5-5".into()),
+                    stop_reason: Some("end_turn".into()),
+                    usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
+                })
+            })
+        }
+    }
+
+    fn fake_text(app: &Arc<App>, text: &str) -> Arc<FakeText> {
+        let f = Arc::new(FakeText { calls: AtomicUsize::new(0), text: text.into() });
+        app.claude_api.set_client(f.clone());
+        f
+    }
+
+    fn pq_body() -> PendingQuestionTranslateBody {
+        serde_json::from_value(json!({"questions": [
+            {"header": "Scope", "question": "Which project's advisors should review?", "options": [
+                {"label": "This project", "description": "Only this one"},
+                {"label": "All projects", "description": ""}
+            ]},
+            {"header": "Window", "question": "How far back should \"recent changes\" go?", "options": [
+                {"label": "Last 24 hours", "description": "`git log --since=1.day`"}
+            ]}
+        ]}))
+        .unwrap()
+    }
+
+    const PQ_REPLY: &str = r#"{"questions":[
+        {"id":"q0","header":"範圍","question":"哪個專案的顧問該審？","options":[
+            {"id":"q0-o0","label":"這個專案","description":"只看這個"},
+            {"id":"q0-o1","label":"所有專案","description":""}]},
+        {"id":"q1","header":"時間","question":"「最近的改動」要往回看多久？","options":[
+            {"id":"q1-o0","label":"最近 24 小時","description":"`git log --since=1.day`"}]}
+    ]}"#;
+
+    #[tokio::test]
+    async fn questionnaire_is_one_call_mapped_by_id_and_cached() {
+        let (app, _dir) = app(true).await;
+        let f = fake_text(&app, PQ_REPLY);
+        let a = translate_questions(&app, &pq_body().questions).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "整份問卷只打一次");
+        assert_eq!(a["cached"], json!(false));
+        assert_eq!(a["questions"][0]["id"], json!("q0"));
+        assert_eq!(a["questions"][0]["options"][1]["id"], json!("q0-o1"));
+        assert_eq!(a["questions"][0]["question"], json!("哪個專案的顧問該審？"));
+        assert_eq!(a["questions"][1]["options"][0]["label"], json!("最近 24 小時"));
+        assert_eq!(a["questions"][1]["options"][0]["description"], json!("`git log --since=1.day`"), "code 原樣");
+        let b = translate_questions(&app, &pq_body().questions).await.unwrap();
+        assert_eq!((b["cached"].clone(), b["questions"].clone()), (json!(true), a["questions"].clone()));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "同一份問卷命中快取不打 API");
+        let mut changed = pq_body();
+        changed.questions[0].question.push('!');
+        translate_questions(&app, &changed.questions).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "內容變了就重翻");
+    }
+
+    #[tokio::test]
+    async fn mismatched_ids_are_rejected_and_not_cached() {
+        let (app, _dir) = app(true).await;
+        let bad = PQ_REPLY.replace("q1-o0", "q1-o9");
+        let f = fake_text(&app, &bad);
+        let err = translate_questions(&app, &pq_body().questions).await.unwrap_err();
+        assert!(matches!(&err, LcError::Upstream(m) if m.contains("option id mismatch")), "{err:?}");
+        let again = translate_questions(&app, &pq_body().questions).await;
+        assert!(again.is_err());
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "壞的回覆不寫快取，下次還會打");
+    }
+
+    #[tokio::test]
+    async fn questionnaire_not_enabled_is_409_and_sends_nothing() {
+        let (app, _dir) = app(false).await;
+        let f = fake_text(&app, PQ_REPLY);
+        let err = translate_questions(&app, &pq_body().questions).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "claude_api_not_configured"), "{err:?}");
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_is_user_only_and_bounded() {
+        let (app, _dir) = app(true).await;
+        let f = fake_text(&app, PQ_REPLY);
+        let bot = Extension(crate::api::RequestPrincipal::Bot("x".into()));
+        let r = post_pending_question_translate(State(app.clone()), bot, Json(pq_body())).await;
+        assert!(matches!(r.unwrap_err(), LcError::Forbidden(_)));
+        let user = || Extension(crate::api::RequestPrincipal::User);
+        let empty: PendingQuestionTranslateBody = serde_json::from_value(json!({"questions": []})).unwrap();
+        assert!(matches!(post_pending_question_translate(State(app.clone()), user(), Json(empty)).await.unwrap_err(), LcError::Bad(_)));
+        let long: PendingQuestionTranslateBody = serde_json::from_value(json!({"questions": [{"question": "x".repeat(PQ_MAX_CHARS + 1)}]})).unwrap();
+        assert!(matches!(post_pending_question_translate(State(app.clone()), user(), Json(long)).await.unwrap_err(), LcError::Unprocessable(_)));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+        let ok = post_pending_question_translate(State(app.clone()), user(), Json(pq_body())).await.unwrap();
+        assert_eq!(ok.0["cached"], json!(false));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
     }
 }

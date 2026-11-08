@@ -2,6 +2,7 @@ import { useT } from '../lib/i18n'
 import { useState } from 'react'
 import { JEV_ASK_NOTE, type PendingQuestion } from '../lib/pendingQuestion'
 import { JevLabel } from './JevLabel'
+import { usePendingQuestionTranslation } from './usePendingQuestionTranslation'
 import './pendingQuestionCard.css'
 
 /**
@@ -28,7 +29,10 @@ export function PendingQuestionCard({
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const t = useT()
+  // 譯文只換顯示；作答對得上的是呼叫端原本的 `questions`（`current` 與送鍵都按原文）。
+  const tr = usePendingQuestionTranslation(questions)
   if (questions.length === 0) return null
+  const shown = tr.display
   // Jev 的選項建議（issue #1475）：只提示、不代答；沒有建議（沒開、失敗、分數太接近、多選題）就什麼都不顯示。
   const jevPicks = questions.filter((q) => q.jev)
   const anyJev = jevPicks.length > 0
@@ -47,9 +51,10 @@ export function PendingQuestionCard({
       </button>
       {open ? (
         <>
+          {tr.button ? <div className="pending-q-tr">{tr.button}</div> : null}
           <p className="pending-q-note">{answerWhere === 'above' ? t('只供閱讀；作答用上面的選項。') : t('只供閱讀；作答用下面的按鍵。')}</p>
           {anyJev ? <p className="pending-q-jev-note">{t.tr(JEV_ASK_NOTE)}</p> : null}
-          {questions.map((q, qi) => (
+          {shown.map((q, qi) => (
             <div key={`${qi}-${q.question}`} className={`pending-q-item${qi === current ? ' pending-q-current' : ''}`}>
               <p className="pending-q-meta">
                 {questions.length > 1 ? t('第 {n} 題', { n: qi + 1 }) : null}

@@ -298,6 +298,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/share/rotate` | User-only；Bot／Service principal（含 AGM role Bot）→ 403 `user_only` |
 | POST | `/api/bots/{id}/send-queued-now` | 集中 User-only policy＋handler `require_user`；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。它按 `ctrl+x ctrl+s` 打斷使用者的回合 |
 | POST | `/api/messages/{id}/translate` | 集中 User-only policy＋handler；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。會打付費 Claude API，只供使用者在對話裡按「翻譯」 |
+| POST | `/api/pending-questions/translate` | 集中 User-only policy＋handler；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。會打付費 Claude API（用途 `message_translate`），一份待答問卷一次呼叫，只供使用者按原題卡的「翻譯」或自動翻 |
 | POST | `/api/bots/{id}/suggestion/accept` | 集中 User-only policy＋handler `require_user`；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。它對使用者的輸入框按 Tab＋Enter，等於替使用者送訊息 |
 | POST | `/api/bots/{id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/build/remote/install-toolchain` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -2714,6 +2715,10 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - 翻譯每次只發一次無工具 API 呼叫，`max_tokens` 採所選模型的最大輸出（目前 Sonnet／Haiku 5.5 為 128000；未知模型 64000），不受舊設定 2000／8000 限制；`[changelog_translate] max_tokens` 已廢棄，讀到忽略並 WARN 一次。翻譯改用 `stream:true`，共用 timeout 對此路徑按連線／串流讀取閒置計時，持續有事件或 ping 的長輸出可以超過 60 秒，但整筆另有 10 分鐘總時長上限；到期取消當前請求並記 failed／timeout，退避期間不重疊重送；只在收到 message_stop 並驗證內容／usage 後完成，不續接或補發 API。`stop_reason:max_tokens` 一律 `failed`，含可重試時間，絕不回 completed。成功譯文（含冷存檔）永久按既有指紋重用；失敗最多預設 3 次後等一小時窗口（`max_attempts = 0` 也採 3），不派 AGM。來源抓取／解析失敗或缺目標版時，GitHub repo 型來源可用同 repo Releases 備援；所有 kind 缺目標版皆不以舊版代替。 自動分診的 `release-triage-check` 同樣先從 upstream／manifest 取得目標版，再共用精確版本備援；缺版時不推進帳本，備援包含較新版也不會越過目標。
 - `attempts[]` 每筆保留自己的 `usage`（`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`）。缺用量是 `null`，不是 0。`retry_after` 沒過之前，再 `POST` 只回原狀態、不再打。次數用盡（`error:"attempts"`，`error_kind:"budget"`）時，`GET` 與 `POST` 都回同一個 `retry_after`：最後一次送出結束起 1 小時，固定不往後延；過了才會再送。逾時用 `[claude_api] timeout_ms`，`[changelog_translate] timeout_ms` 已廢棄（#1942）。
 - **權限**：User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`。翻譯會打付費 API。`POST` 是使用者按鈕與退避到期的再試；`GET` 只讀、不送出。新版偵測的背景送出不經 HTTP（`changelog_translate::auto_kick`）。
+
+## 待答問卷翻譯 `POST /api/pending-questions/translate`
+
+User-only（Bot、AGM role、Service 皆 403 `user_only`）。body `{"questions":[{"header","question","options":[{"label","description"}]}]}`，最多 8 題、合計 12000 字元（超過 422 `questionnaire_too_long`）。整份問卷一次呼叫（用途 `message_translate`，開關與帳本同對話訊息翻譯；總開關或用途關閉回 409 `claude_api_not_configured`，不送出）。回 `{"questions":[{"id":"q0","header","question","options":[{"id":"q0-o0","label","description"}]}],"model","cached","cost_usd"}`；id 由 daemon 依位置產生，模型回的 id、題數、選項數對不上就 502 `translate_failed`，不寫快取。快取在 `message-translate/pq-<sha256>.json`。
 
 ## 對話訊息翻譯 `POST /api/messages/{id}/translate`
 

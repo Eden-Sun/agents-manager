@@ -361,6 +361,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(crate::changelog_translate::get_translation).post(crate::changelog_translate::post_translation),
         )
         .route("/messages/{id}/translate", post(crate::message_translate::post_translate))
+        .route("/pending-questions/translate", post(crate::message_translate::post_pending_question_translate))
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方

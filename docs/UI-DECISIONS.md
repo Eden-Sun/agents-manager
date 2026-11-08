@@ -1453,3 +1453,4 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **自動翻譯英文訊息（2026-11-06，使用者：「判斷是英文訊息時自動用 API 翻譯，我就不用手動按」）**：開關在 daemon 設定 `[claude_api.uses.message_translate] auto`（預設 true，各裝置一致，設定頁該用途旁有切換）；用途本身未啟用、沒 key、設定讀不到時不動作。只自動翻「新到的」與「對話最後 `AUTO_TRANSLATE_RECENT`（10）則」、非串流中（`!incomplete`）、符合原本 eligible 的 assistant 英文訊息，不回填整段歷史；同一則本頁只自動試一次（`claimAutoTranslate`），翻成後照手動一樣記進 `am.msgTranslate.want`。使用者手動點回原文的記進 localStorage `am.msgTranslate.declined`（最近 500 則），不再自動翻回去，再點「翻譯」才解除。自動翻失敗不跳錯誤、停在可手動重試的「翻譯」；累計失敗 3 次後本頁不再自動翻新的（超過花費上限時不轟炸）。
 
 - 對話圖片與手機 outbox 共用全螢幕檢視器：點圖切換整張／原尺寸可捲動，點背景、Esc、手機下滑或返回關閉；同則訊息／托盤的已載入圖片可左右切換，原圖與下載留在次要工具列，關閉恢復焦點與捲動位置。
+- **待答問卷自動翻譯（2026-11-08，使用者：「需要回應」的英文問卷沒翻譯）**：原題卡（`PendingQuestionCard`）的題目、標題、選項 label／description 主要是英文時，跟對話訊息同一套「翻譯」鈕與 `[claude_api.uses.message_translate] auto`：整份問卷 `POST /api/pending-questions/translate` 一次呼叫（JSON 進、JSON 出，id 由 daemon 產生並逐一核對，快取鍵是整份內容雜湊）。只換顯示；選項位置（數字鍵）、送回 CLI 的選項原值與作答流程都不動，手機排版沿用原卡。

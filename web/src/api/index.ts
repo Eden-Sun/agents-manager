@@ -466,6 +466,38 @@ export async function translateMessage(messageId: string): Promise<{ translation
   return { translation: str(pick(o, 'translation')), model: str(pick(o, 'model')), cached: pick(o, 'cached') === true, costUsd: typeof cost === 'number' ? cost : null }
 }
 
+/** `POST /pending-questions/translate`：整份待答問卷一次翻成繁中（只翻顯示；送回 CLI 的仍是原選項）。`id` 由 daemon 產生（`q{n}`、`q{n}-o{m}`）。 */
+export interface TranslatedPendingQuestions {
+  questions: { id: string; header: string; question: string; options: { id: string; label: string; description: string }[] }[]
+  model: string
+  cached: boolean
+  costUsd: number | null
+}
+
+export async function translatePendingQuestions(
+  questions: { header: string; question: string; options: { label: string; description: string }[] }[],
+): Promise<TranslatedPendingQuestions> {
+  const raw = await transport.request('POST', '/pending-questions/translate', { questions })
+  const o = isRec(raw) ? raw : {}
+  const cost = pick(o, 'cost_usd')
+  const qs = Array.isArray(pick(o, 'questions')) ? (pick(o, 'questions') as unknown[]) : []
+  return {
+    questions: qs.filter(isRec).map((q) => ({
+      id: str(pick(q, 'id')),
+      header: str(pick(q, 'header')),
+      question: str(pick(q, 'question')),
+      options: (Array.isArray(pick(q, 'options')) ? (pick(q, 'options') as unknown[]) : []).filter(isRec).map((op) => ({
+        id: str(pick(op, 'id')),
+        label: str(pick(op, 'label')),
+        description: str(pick(op, 'description')),
+      })),
+    })),
+    model: str(pick(o, 'model')),
+    cached: pick(o, 'cached') === true,
+    costUsd: typeof cost === 'number' ? cost : null,
+  }
+}
+
 /** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
 export async function restartIdleBots(): Promise<RestartPlan> {
   const raw = await transport.request('POST', '/bots/restart-idle')
