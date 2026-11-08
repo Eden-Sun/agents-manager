@@ -11,7 +11,7 @@ import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { quotaKey } from '../api/types'
-import { headerEffortLabel } from '../lib/headerEffort'
+import { codexHeaderEffort, headerEffortLabel } from '../lib/headerEffort'
 import { compactThreshold } from '../lib/contextLimit'
 import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
@@ -1159,9 +1159,7 @@ function derivedStatus(
 }
 
 /** `H · fast` — the model's settings, shown beside the model badge. */
-function modelExtraOf(status: StatusInfo | null, slugEffort: string | null, fast: boolean, observedEffort: string | null): string {
-  // `slugEffort`：agy 的強度寫在 slug 尾巴（`agyEffort`），statusLine 不報強度。
-  const effort = observedEffort ?? status?.effort ?? slugEffort
+function modelExtraOf(effort: string | null, fast: boolean): string {
   // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
   return [effort ? headerEffortLabel(effort) : null, fast ? 'fast' : null]
     .filter(Boolean)
@@ -1376,15 +1374,26 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   )
   const slugEffort = bot ? agyEffort(bot.kind, bot.model ?? statusInfo?.model_name ?? null) : null
   // Codex 的終端 footer 是目前 run 的實際顯示；不把不認識的文字或其他 run 的畫面當成強度。
-  const codexLine = bot?.kind === 'codex' && run?.state === 'running'
-    ? terminalFooter?.modelLine
+  // 終端 footer 沒掛（遠端、對話分頁）時退回 daemon 寫進 `run.status_line` 的同一行（#1755）。
+  const statusLineModelLine = bot?.kind === 'codex' && run?.state === 'running' && run.status_line
+    ? splitCodexTerminalFooter(run.status_line).footer?.modelLine ?? null
     : null
-  const footerEffort = codexLine ? parseCodexModelLine(codexLine).effort : null
-  const observedEffort = footerEffort && /^(?:none|minimal|low|medium|high|xhigh|max|ultra|default)$/i.test(footerEffort) ? footerEffort : null
-  const headerEffort = observedEffort ?? statusInfo?.effort ?? slugEffort
+  const codexRunning = bot?.kind === 'codex' && run?.state === 'running'
+  // 正在跑的強度：run 實際啟動值（有才用）→ bot 設定。
+  const runEffort = codexRunning ? (runtimeSettingsKnown(run) ? run!.runtime_effort : bot?.effort ?? null) : null
+  const headerEffort = codexRunning
+    ? codexHeaderEffort({
+        terminalModelLine: terminalFooter?.modelLine ?? null,
+        statusEffort: statusInfo?.effort ?? null,
+        statusLineModelLine,
+        runEffort,
+        slugEffort,
+        parse: parseCodexModelLine,
+      })
+    : (statusInfo?.effort ?? slugEffort)
   // 正在跑的 fast：CLI 回報 → `run.runtime_fast` → 設定（`runningFast`）；codex 的狀態列沒有 fast_mode，不能只看它。
   const fast = bot ? runningFast(bot, run) : false
-  const modelExtra = modelExtraOf(statusInfo, slugEffort, fast, observedEffort)
+  const modelExtra = modelExtraOf(headerEffort, fast)
   // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
   const codexFast = bot?.kind === 'codex' && runningFast(bot, run)
   const herdrId = herdrIdentity(run, bot?.agent_name)
