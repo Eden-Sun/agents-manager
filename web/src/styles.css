@@ -2168,6 +2168,27 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
+/* 手機＋只有選單（`is-menu`，終端原文收起）：底部 sheet，上方露出對話；高度跟內容走，最多 85% 可視高度，超過就捲 body。
+   背景照舊可點關閉。展開終端原文（不帶 `is-menu`）仍是上面的全螢幕，終端要空間（取代 #559 對問卷情境的全螢幕決定）。 */
+@media (width <= 640px) {
+  .modal.blocked-modal.is-menu {
+    align-self: flex-end;
+    height: auto;
+    min-height: 0;
+    max-height: calc(var(--vvh, 100dvh) * 0.85);
+    border: 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+
+  .modal.blocked-modal.is-menu > * {
+    flex: none;
+  }
+
+  .modal.blocked-modal.is-menu > .blocked-modal-body {
+    flex: 0 1 auto;
+  }
+}
+
 .term-pane .term {
   flex: 1;
   min-height: 0;
