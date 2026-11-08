@@ -17,11 +17,20 @@ export function translateReadyOf(s: ClaudeApiSettings | null): TranslateReady {
 
 // 整頁共用一次讀取：每則英文訊息都掛這個 hook，不能各自打 API。60 秒後再用到才重讀（設定頁改了開關能跟上）。
 let cache: { at: number; p: Promise<TranslateReady> } | null = null
+/** 最近讀到的結果：元件重掛時同步拿到，不必等下一輪非同步讀取（重掛太頻繁時會一直停在 null）。 */
+let lastReady: TranslateReady = null
 const TTL_MS = 60_000
 
 function load(): Promise<TranslateReady> {
   if (!cache || Date.now() - cache.at > TTL_MS) {
-    cache = { at: Date.now(), p: fetchClaudeApiSettings().then(translateReadyOf, () => null) }
+    const at = Date.now()
+    cache = {
+      at,
+      p: fetchClaudeApiSettings().then(
+        (s) => (lastReady = translateReadyOf(s)),
+        () => null,
+      ),
+    }
   }
   return cache.p
 }
@@ -29,11 +38,12 @@ function load(): Promise<TranslateReady> {
 /** 給測試：清掉共用快取。 */
 export function resetTranslateReady() {
   cache = null
+  lastReady = null
 }
 
 /** 翻譯按鈕事先知道「未啟用」：沒開時按鈕標「未啟用」並在 tooltip 說去哪裡開（使用者 2026-11-04）。 */
 export function useTranslateReady(active: boolean): TranslateReady {
-  const [ready, setReady] = useState<TranslateReady>(null)
+  const [ready, setReady] = useState<TranslateReady>(() => lastReady)
   useEffect(() => {
     if (!active) return
     let alive = true

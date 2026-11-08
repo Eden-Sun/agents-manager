@@ -1,4 +1,4 @@
-import { createElement, useEffect, useState } from 'react'
+import { createElement, useEffect, useSyncExternalStore } from 'react'
 import { translatePendingQuestions } from '../api'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { useT } from '../lib/i18n'
@@ -16,11 +16,31 @@ const declined = new Set<string>()
 export function resetPendingQuestionTranslation() {
   autoTried.clear()
   declined.clear()
+  entries.clear()
+  listeners.forEach((l) => l())
 }
 
 type Entry =
   | { status: 'idle' | 'loading' | 'error'; key: string }
   | { status: 'done'; key: string; items: PendingQuestion[]; show: boolean }
+
+/**
+ * 譯文狀態放在模組層級（以內容 key 為鍵），不放在元件裡：同一份問卷在畫面上可能因父層切換而重掛
+ * （例如 BlockedDraft 的 live 分支與直接的 BlockedChoices），重掛時翻譯還在飛的結果不能丟掉、也不能重打。
+ */
+const entries = new Map<string, Entry>()
+const listeners = new Set<() => void>()
+const IDLE: Entry = { status: 'idle', key: '' }
+function setEntry(key: string, e: Entry) {
+  entries.set(key, e)
+  listeners.forEach((l) => l())
+}
+function subscribe(l: () => void) {
+  listeners.add(l)
+  return () => {
+    listeners.delete(l)
+  }
+}
 
 /** 送去翻的內容：只含要翻的文字，順序與 index 跟 `questions` 一致，daemon 依位置產生 id。 */
 function payloadOf(questions: PendingQuestion[]) {
@@ -66,19 +86,19 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
   const eligible = questions.length > 0 && isMostlyEnglish(text)
   const ready = useTranslateReady(eligible)
   const off = ready && !ready.ok ? ready : null
-  const [entry, setEntry] = useState<Entry>({ status: 'idle', key })
-  // 內容變了（新題目）就當作還沒翻過；舊的結果不沿用。
-  const cur: Entry = entry.key === key ? entry : { status: 'idle', key }
+  // 內容變了（新題目）就是另一個 key，舊的結果不沿用。
+  const snap = () => entries.get(key) ?? IDLE
+  const cur = useSyncExternalStore(subscribe, snap, snap)
 
   const run = (kind: 'manual' | 'fresh') => {
-    setEntry({ status: 'loading', key })
+    setEntry(key, { status: 'loading', key })
     translatePendingQuestions(payload).then(
       (r) => {
         const show = kind === 'manual' || !declined.has(key)
-        setEntry({ status: 'done', key, items: applyTranslation(questions, r), show })
+        setEntry(key, { status: 'done', key, items: applyTranslation(questions, r), show })
       },
       (e: unknown) => {
-        setEntry({ status: 'error', key })
+        setEntry(key, { status: 'error', key })
         resetTranslateReady()
         if (kind !== 'manual') return
         const reason = e instanceof Error ? e.message : String(e)
@@ -102,7 +122,7 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
     if (cur.status !== 'done') return
     if (cur.show) declined.add(key)
     else declined.delete(key)
-    setEntry({ ...cur, show: !cur.show })
+    setEntry(key, { ...cur, show: !cur.show })
   }
 
   const button = eligible
