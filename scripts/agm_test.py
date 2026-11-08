@@ -1745,6 +1745,14 @@ class MiscCommandTest(CliCase):
         self.assertEqual([r["method"] for r in FakeDaemon.seen if r["path"] == "/api/bots/b9"], ["DELETE"])
         self.assertEqual(self.bad("bot", "delete")["error"], "bad_args")
 
+    def test_expert_manager_bot_delete_uses_bot_proof_and_daemon_url(self):
+        FakeDaemon.routes["DELETE /api/bots/bot-b"] = (200, {"removed_children": []})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_PROJECT_MODE": "expert", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.assertEqual(self.ok("bot", "delete", "bot-b"), {"removed_children": []})
+        self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
+        self.assertEqual(FakeDaemon.seen[-1]["method"], "DELETE")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/bot-b")
+
     def test_bot_delete_confirm_supervisor_goes_in_the_query_and_every_call_names_agm(self):
         FakeDaemon.routes["DELETE /api/bots/build"] = (200, {"removed_children": []})
         self.ok("bot", "delete", "build", "--confirm-supervisor")

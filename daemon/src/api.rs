@@ -1358,7 +1358,9 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
             }
         } else { false };
         // 專家模式的 manager 可以啟動／重啟它管的 bot（角色改了要重啟才套用；使用者 2026-10-31）。
-        let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && manager_may_start(&app, bot_id, method, path).await;
+        // 管理者刪成員不能帶 `?confirm=`（那是給 AGM／使用者確認刪 AGM 的 bot 用的），免得繞過 supervisor_owned 守衛。
+        let confirm_query = method == "DELETE" && uri.query().is_some_and(|q| q.split('&').any(|kv| kv.split('=').next() == Some("confirm")));
+        let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !confirm_query && manager_may_start(&app, bot_id, method, path).await;
         if policy == Some(BotRoutePolicy::UserOnly) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
             return bot_user_only().into_response();
         }
@@ -3248,7 +3250,9 @@ fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bo
     let sub = parts.get(3).map(|p| p.as_ref());
     match (method, parts.len(), sub) {
         ("POST", 4, Some("start" | "restart")) => true,
-        ("POST", 4, Some("stop")) | ("DELETE", 3, None) => matches!(target.role.as_deref(), Some("executor" | "specialist")),
+        ("POST", 4, Some("stop")) => matches!(target.role.as_deref(), Some("executor" | "specialist")),
+        // 刪除：只限自己專案的頂層執行者／專家（child 跟著母 bot 走，不另外刪）。
+        ("DELETE", 3, None) => target.parent_bot_id.is_none() && matches!(target.role.as_deref(), Some("executor" | "specialist")),
         _ => false,
     }
 }
@@ -18504,6 +18508,31 @@ mod manager_role_scope_tests {
         assert!(!manager_may_start(&env.app, &peer.id, "POST", &format!("/api/bots/{}/restart", manager.id)).await, "non-manager");
         assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/restart", outsider.id)).await, "other project");
         assert!(call(&manager.id, &manager.id, None).await.is_err(), "cannot change itself");
+    }
+
+    #[tokio::test]
+    async fn expert_manager_soft_deletes_only_top_level_members_of_its_project() {
+        let env = crate::testing::env().await;
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "del-manager").await;
+        let peer = crate::testing::claude_bot(&env.app, &env.project_id, "del-peer").await;
+        let child = crate::testing::claude_bot(&env.app, &env.project_id, "del-child").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&peer.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor',managed_by='child',parent_bot_id=? WHERE id=?").bind(&manager.id).bind(&child.id).execute(&env.app.db).await.unwrap();
+        let other_project = db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'other','local',?,'expert')")
+            .bind(&other_project).bind(format!("/tmp/{other_project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let outsider = crate::testing::claude_bot(&env.app, &other_project, "del-outsider").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&outsider.id).execute(&env.app.db).await.unwrap();
+        let path = |id: &str| format!("/api/bots/{id}");
+        let denied = |r: Result<(), LcError>| matches!(r, Err(LcError::Forbidden(_)));
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await), "parent_child project: no exception");
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        assert!(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await.is_ok(), "top-level executor in its project");
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&outsider.id)).await), "other project");
+        assert!(denied(authorize_bot_path(&env.app, &peer.id, "DELETE", &path(&manager.id)).await), "non-manager");
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&peer.id).execute(&env.app.db).await.unwrap();
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await), "advisor is not deleted by a manager");
     }
 
     #[tokio::test]
