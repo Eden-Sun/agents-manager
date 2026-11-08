@@ -94,6 +94,7 @@ export function ScheduleEditor({
   projectId,
   scheduleId,
   copyOf,
+  focusBot = false,
   onClose,
   onSelect,
 }: {
@@ -101,6 +102,7 @@ export function ScheduleEditor({
   scheduleId: string | null
   /** 複製只預填新建表單；狀態、執行紀錄與來源 id 都不帶入。 */
   copyOf?: Schedule
+  focusBot?: boolean
   onClose: () => void
   onSelect: (id: string) => void
 }) {
@@ -187,6 +189,13 @@ export function ScheduleEditor({
   )
 
   const [loading, setLoading] = useState(() => Boolean(scheduleId))
+  const botSelectRef = useRef<HTMLSelectElement>(null)
+  const focusedBotFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focusBot || loading || !scheduleId || detail?.id !== scheduleId || focusedBotFor.current === scheduleId) return
+    const frame = requestAnimationFrame(() => { botSelectRef.current?.focus(); focusedBotFor.current = scheduleId })
+    return () => cancelAnimationFrame(frame)
+  }, [focusBot, loading, scheduleId, detail?.id])
   const touchedRef = useRef<Set<keyof FormState>>(new Set())
 
   useEffect(() => {
@@ -213,8 +222,8 @@ export function ScheduleEditor({
     form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) ||
     JSON.stringify(specOf(form)) !== JSON.stringify(specOf(fromDetail(detail)))
   )
-  const botUnavailable = detail !== null && !eligible.some((b) => b.id === detail.bot_id)
-  const changingBotWithOpen = detail?.open != null && effectiveBotId !== detail.bot_id
+  const botUnavailable = detail !== null && (detail.bot_available === false || !eligible.some((b) => b.id === detail.bot_id))
+  const changingBotWithOpen = detail?.open != null && !(detail.open.status === 'pending' && detail.open.waiting_reason === 'bot_unavailable') && effectiveBotId !== detail.bot_id
   const openIsRunning = (liveStatus ?? detail?.open?.turn_status) === 'in_flight'
   const openForDisplay = detail?.open ? {
     ...detail.open,
@@ -393,7 +402,7 @@ export function ScheduleEditor({
 
       <label className="field">
         <span>{t('執行的 Bot')}</span>
-        <select value={effectiveBotId} disabled={loading} onChange={(e) => set('botId', e.target.value)}>
+        <select ref={botSelectRef} value={effectiveBotId} disabled={loading} onChange={(e) => set('botId', e.target.value)}>
           {effectiveBotId && !eligible.some((b) => b.id === effectiveBotId) ? <option value={effectiveBotId}>{botLabel(effectiveBotId)}</option> : null}
           {eligible.length === 0 ? <option value="">{t('（這個專案沒有可用的 Bot）')}</option> : null}
           {eligible.map((b) => (

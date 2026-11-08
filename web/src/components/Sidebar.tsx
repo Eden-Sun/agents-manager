@@ -1096,7 +1096,7 @@ export function Sidebar() {
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
-  const [scheduleEditor, setScheduleEditor] = useState<{ projectId: string; scheduleId: string | null } | null>(null)
+  const [scheduleEditor, setScheduleEditor] = useState<{ projectId: string; scheduleId: string | null; focusBot?: boolean } | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
@@ -1599,7 +1599,7 @@ export function Sidebar() {
                 </div>
               )}
               {/* 這個專案被 trace 的 shell／服務 pane（§6.5e）：點一下在這裡打開，不是任開任關。 */}
-              {projectShut ? null : <ProjectSchedules projectId={p.id} onOpen={(sid) => setScheduleEditor({ projectId: p.id, scheduleId: sid })} />}
+              {projectShut ? null : <ProjectSchedules projectId={p.id} onOpen={(sid, focusBot) => setScheduleEditor({ projectId: p.id, scheduleId: sid, focusBot })} />}
               {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
@@ -1665,6 +1665,7 @@ export function Sidebar() {
         <ScheduleEditor
           projectId={scheduleEditor.projectId}
           scheduleId={scheduleEditor.scheduleId}
+          focusBot={scheduleEditor.focusBot}
           onClose={() => setScheduleEditor(null)}
           onSelect={(id) => setScheduleEditor((cur) => (cur ? { ...cur, scheduleId: id } : cur))}
         />

@@ -14,6 +14,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { BotShareSection } from './BotShareSection'
 import { ApiBotControls } from './ApiBotControls'
 import { CopyChip } from './CopyChip'
+import { listSchedules, rebindSchedules, type Schedule } from '../api/schedules'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
@@ -238,6 +239,7 @@ export function IdentityOptions({
 export function BotSettingsPanel({ botId }: { botId: string }) {
   const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
+  const projectBots = useStore((s) => s.bots)
   const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === botId)?.project_id))
   const host = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null))
   const closeSettings = useStore((s) => s.closeSettings)
@@ -288,6 +290,22 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const child = bot ? isChildBot(bot) : false
   const restarting = restartingLocal || restartingShared
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteSchedules, setDeleteSchedules] = useState<Schedule[] | null>(null)
+  const [deleteScheduleError, setDeleteScheduleError] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState('')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  useEffect(() => {
+    if (!deleteOpen) return
+    let active = true
+    setDeleteSchedules(null)
+    setDeleteScheduleError(false)
+    setDeleteTarget('')
+    if (!bot?.project_id) { setDeleteSchedules([]); return }
+    void listSchedules(bot.project_id).then((rows) => {
+      if (active) setDeleteSchedules(rows.filter((s) => s.bot_id === botId))
+    }).catch(() => { if (active) setDeleteScheduleError(true) })
+    return () => { active = false }
+  }, [deleteOpen, bot?.project_id, botId])
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
   const [loginSent, setLoginSent] = useState(false)
@@ -854,15 +872,37 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         body={
           <>
             {t.x('確定刪除 {bot}{project}？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。', { bot: <strong>{bot.name}</strong>, project: project ? t.x('（專案 {name}）', { name: <strong>{project.label}</strong> }) : '' })}
+            {deleteScheduleError && <p role="alert">{t('無法載入排程，請關閉後重試。')}</p>}
+            {deleteSchedules === null && !deleteScheduleError && <p>{t('載入排程中…')}</p>}
+            {deleteSchedules && deleteSchedules.length > 0 && <div>
+              <p>{t('此 Bot 綁定的排程：')}</p>
+              <ul>{deleteSchedules.map((s) => <li key={s.id}>{s.name}</li>)}</ul>
+              <label>{t('刪除前改綁到 Bot（選填）')}
+                <select value={deleteTarget} onChange={(e) => setDeleteTarget(e.target.value)}>
+                  <option value="">{t('不改綁')}</option>
+                  {projectBots.filter((b) => b.id !== botId && b.project_id === bot.project_id && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </label>
+              {!deleteTarget && <p>{t('未改綁的排程將需要重新指定 Bot。')}</p>}
+            </div>}
           </>
         }
         confirmLabel={t('刪除')}
         danger
         width={360}
-        onCancel={() => setDeleteOpen(false)}
+        confirmDisabled={deleteSchedules === null || deleteScheduleError || deleteBusy}
+        onCancel={() => { if (!deleteBusy) setDeleteOpen(false) }}
         onConfirm={() => {
-          setDeleteOpen(false)
-          void removeBot(botId)
+          if (deleteBusy || !deleteSchedules) return
+          setDeleteBusy(true)
+          void (async () => {
+            try {
+              if (deleteTarget && bot.project_id) await rebindSchedules(bot.project_id, deleteSchedules.map((s) => s.id), deleteTarget)
+              setDeleteOpen(false)
+              await removeBot(botId)
+            } catch (e) { notify('error', String(e)) }
+            finally { setDeleteBusy(false) }
+          })()
         }}
       />
     </div>

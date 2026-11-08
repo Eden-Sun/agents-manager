@@ -253,6 +253,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
         // 專案排程（User-only，見 `schedules/api.rs`）。
         .route("/projects/{id}/schedules", get(crate::schedules::api::list_for_project).post(crate::schedules::api::create))
+        .route("/projects/{id}/schedules/rebind", post(crate::schedules::api::rebind))
         .route("/schedules/{id}", get(crate::schedules::api::get_one).patch(crate::schedules::api::patch).delete(crate::schedules::api::delete))
         .route("/schedules/{id}/run", post(crate::schedules::api::run_now))
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
@@ -1151,6 +1152,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("PUT", "/api/drafts/{key}", BotRoutePolicy::UserOnly),
     ("GET", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),
     ("POST", "/api/projects/{id}/schedules", BotRoutePolicy::UserOnly),
+    ("POST", "/api/projects/{id}/schedules/rebind", BotRoutePolicy::UserOnly),
     ("GET", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
     ("PATCH", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/schedules/{id}", BotRoutePolicy::UserOnly),
@@ -3981,7 +3983,23 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
     } else {
         crate::delete_intents::complete(&app, &intent).await;
     }
-    let mut out = json!({"removed_children": removed_children});
+    // 排程不跟著刪：告訴呼叫端哪些排程需要改綁，並通知已開著的列表重讀資格。
+    let affected_schedules: Result<Vec<(String, String)>, _> = sqlx::query_as(
+        "SELECT id, name FROM schedules WHERE bot_id = ? AND deleted_at IS NULL ORDER BY id",
+    ).bind(&id).fetch_all(&app.db).await;
+    let schedules = match affected_schedules {
+        Ok(rows) => {
+            for (schedule_id, _) in &rows {
+                app.emit("schedules_changed", json!({"project_id": bot.project_id, "id": schedule_id})).await;
+            }
+            Some(rows.into_iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "deleted bot schedules could not be listed");
+            None
+        }
+    };
+    let mut out = json!({"removed_children": removed_children, "affected_schedules": schedules});
     if !kept_dirs.is_empty() {
         out["kept_dirs"] = json!(kept_dirs);
     }

@@ -265,9 +265,10 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
     }
     // Bot 資格：同一個專案（排程建立時的專案）、未刪、一般 Bot。換到別的專案＝不合格。
     let Some(kind) = eligible_bot_tx(&mut tx, &occ.bot_id, Some(&sched.project_id)).await? else {
-        store::finish_open_tx(&mut tx, occurrence_id, "failed", "綁定的 Bot 已不存在、已移交、或不能接收排程", &now).await?;
+        let changed = sqlx::query("UPDATE schedule_occurrences SET waiting_reason = 'bot_unavailable', updated_at = ? WHERE id = ? AND status = 'pending' AND waiting_reason IS NOT 'bot_unavailable'")
+            .bind(&now).bind(occurrence_id).execute(&mut *tx).await?.rows_affected() > 0;
         tx.commit().await?;
-        notify_terminal(app, &sched, occurrence_id, "failed", Some("綁定的 Bot 不合格"), occ.attempt_no).await;
+        if changed { app.emit("schedules_changed", json!({"project_id": sched.project_id, "id": sched.id})).await; }
         return Ok(false);
     };
     let text = crate::lifecycle::pane_text::for_pane(&kind, &occ.prompt);
@@ -398,16 +399,22 @@ pub async fn withdraw_open_tx(
 }
 
 /// Bot 資格：未刪、同專案（指定時）、非 child／分享／受限，專案未刪未移交。回傳 Bot 種類。
-pub async fn eligible_bot_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_id: &str, project_id: Option<&str>) -> Result<Option<String>> {
-    let row: Option<(String, String)> = sqlx::query_as(
+const ELIGIBLE_BOT_SQL: &str =
         "SELECT b.kind, b.project_id FROM bots b JOIN projects p ON p.id = b.project_id
           WHERE b.id = ? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL
             AND b.managed_by = 'user' AND b.parent_bot_id IS NULL
             AND NOT EXISTS (SELECT 1 FROM bot_shares s WHERE s.bot_id = b.id)
-            AND NOT EXISTS (SELECT 1 FROM shared_bots s WHERE s.bot_id = b.id AND s.profile = 'restricted')",
-    )
+            AND NOT EXISTS (SELECT 1 FROM shared_bots s WHERE s.bot_id = b.id AND s.profile = 'restricted')";
+
+pub async fn eligible_bot_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_id: &str, project_id: Option<&str>) -> Result<Option<String>> {
+    let row: Option<(String, String)> = sqlx::query_as(ELIGIBLE_BOT_SQL)
     .bind(bot_id)
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.filter(|(_, p)| project_id.is_none_or(|want| want == p)).map(|(kind, _)| kind))
+}
+
+pub async fn eligible_bot(pool: &sqlx::SqlitePool, bot_id: &str, project_id: &str) -> Result<bool> {
+    let row: Option<(String, String)> = sqlx::query_as(ELIGIBLE_BOT_SQL).bind(bot_id).fetch_optional(pool).await?;
+    Ok(row.is_some_and(|(_, p)| p == project_id))
 }

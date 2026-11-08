@@ -5815,6 +5815,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **通知**：只靠 WS 事件（見 API.md）。狀態轉移由 `notified` 去重，不靠前端記數。
 - **未完成（待 lifecycle 補）**：maintenance 窗口的入口閘（`prompt::maintenance_refusal` 目前是 `pub(super)`，排程入口還沒接）；restart 後 `awaits_start` 的 kick 門檻依 lifecycle 的 claim gate 與 start admission 檢查。
 
+排程綁定的 Bot 不可用時保留一筆待處理 occurrence 並標記 `bot_unavailable`；批次改綁僅允許同專案合格 Bot，交易內檢查未完成執行，改綁後撤回這筆等待項並保留下一次時間。
+
 ### 排程的手動執行去重（2026-10-13 補）
 
 - `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。

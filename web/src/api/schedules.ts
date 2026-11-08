@@ -56,6 +56,8 @@ export interface Schedule {
   id: string
   project_id: string
   bot_id: string
+  /** daemon 判斷綁定 Bot 是否仍可接收此專案的排程；舊 daemon 不回此欄。 */
+  bot_available?: boolean
   name: string
   prompt: string
   mode: ScheduleMode
@@ -130,6 +132,10 @@ function asDetail(raw: unknown): ScheduleDetail {
 export async function listSchedules(projectId: string): Promise<Schedule[]> {
   const raw = (await rawTransport.request('GET', `/projects/${enc(projectId)}/schedules`)) as { schedules?: unknown }
   return Array.isArray(raw.schedules) ? raw.schedules.map(asSchedule) : []
+}
+
+export async function rebindSchedules(projectId: string, scheduleIds: string[], botId: string): Promise<void> {
+  await rawTransport.request('POST', `/projects/${enc(projectId)}/schedules/rebind`, { schedule_ids: scheduleIds, bot_id: botId })
 }
 
 export async function getSchedule(id: string): Promise<ScheduleDetail> {

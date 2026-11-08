@@ -9,6 +9,24 @@
   gap: 2px;
 }
 
+.project-schedules-wrap > .btn,
+.schedule-batch {
+  margin: 4px 16px 8px 22px;
+}
+
+.schedule-batch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schedule-batch label,
+.schedule-batch select {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .project-schedule-item {
   display: flex;
   align-items: center;
@@ -115,3 +133,5 @@
     flex: 1 1 auto;
   }
 }
+
+.project-schedule-status.needs-rebind { color: var(--danger, #b42318); }

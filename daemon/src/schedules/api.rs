@@ -96,6 +96,7 @@ fn schedule_json(s: &Schedule) -> Value {
 
 async fn with_open(pool: &sqlx::SqlitePool, s: &Schedule) -> Result<Value, LcError> {
     let mut v = schedule_json(s);
+    v["bot_available"] = json!(runner::eligible_bot(pool, &s.bot_id, &s.project_id).await.map_err(db_err)?);
     v["open"] = match store::open_occurrence(pool, &s.id).await.map_err(db_err)? {
         Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
         None => Value::Null,
@@ -160,6 +161,57 @@ pub async fn list_for_project(State(app): State<Arc<App>>, Path(project_id): Pat
         out.push(with_open(&app.db, s).await?);
     }
     Ok(Json(json!({"schedules": out})))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RebindIn {
+    pub schedule_ids: Vec<String>,
+    pub bot_id: String,
+}
+
+/// 原子地將同一專案的排程改綁；不改動已送出的執行，任一項不合格就整批拒絕。
+pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>, Json(b): Json<RebindIn>) -> Result<Json<Value>, LcError> {
+    let ids: std::collections::BTreeSet<_> = b.schedule_ids.iter().cloned().collect();
+    if ids.is_empty() || ids.len() != b.schedule_ids.len() || ids.len() > 100 {
+        return Err(LcError::Bad("請選擇 1 到 100 個不重複的排程".into()));
+    }
+    let mut heads = Vec::with_capacity(ids.len());
+    let mut bot_ids = std::collections::BTreeSet::from([b.bot_id.clone()]);
+    for id in &ids {
+        let s = store::get_schedule(&app.db, id).await.map_err(db_err)?
+            .filter(|s| s.deleted_at.is_none() && s.project_id == project_id)
+            .ok_or_else(|| LcError::NotFound("schedule".into()))?;
+        bot_ids.insert(s.bot_id.clone());
+        heads.push(s);
+    }
+    // 與刪除和單筆編輯共用 bot 鎖，依 id 固定順序取得，避免交叉改綁死鎖。
+    let mut locks = Vec::new();
+    for id in &bot_ids { locks.push(app.bot_lock(id).await); }
+    let mut guards = Vec::new();
+    for lock in &locks { guards.push(lock.lock().await); }
+    let mut tx = db::begin_write(&app.db).await.map_err(db_err)?;
+    if runner::eligible_bot_tx(&mut tx, &b.bot_id, Some(&project_id)).await.map_err(db_err)?.is_none() {
+        return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
+    }
+    let now = db::now();
+    for head in &heads {
+        let cur = store::get_schedule_tx(&mut tx, &head.id).await.map_err(db_err)?
+            .filter(|s| s.deleted_at.is_none() && s.project_id == project_id && s.bot_id == head.bot_id && s.generation == head.generation && s.updated_at == head.updated_at)
+            .ok_or_else(|| LcError::Conflict(json!({"error":"schedule_changed", "message":"排程已變更，請重新整理再試"})))?;
+        if cur.bot_id == b.bot_id { continue; }
+        if let Some(open) = store::open_occurrence_tx(&mut tx, &cur.id).await.map_err(db_err)? {
+            if open.status != "pending" || open.waiting_reason.as_deref() != Some("bot_unavailable") {
+                return Err(LcError::Conflict(json!({"error":"schedule_open", "message":"排程還有未結束的執行，換 Bot 前請先等它結束或停用"})));
+            }
+            runner::withdraw_open_tx(&mut tx, &cur.id, "排程已改綁 Bot", &now).await.map_err(db_err)?;
+        }
+        sqlx::query("UPDATE schedules SET bot_id = ?, generation = generation + 1, updated_at = ? WHERE id = ?")
+            .bind(&b.bot_id).bind(&now).bind(&cur.id).execute(&mut *tx).await.map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    drop(guards);
+    for id in &ids { announce(&app, &project_id, id).await; }
+    Ok(Json(json!({"ok": true, "schedule_ids": ids})))
 }
 
 /// `POST /api/projects/{id}/schedules`：只建立排程，不立即執行。同 `client_request_id` 重送回原筆。
@@ -267,7 +319,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let bot_id = b.bot_id.clone().unwrap_or_else(|| cur.bot_id.clone());
     let bot_changed = bot_id != cur.bot_id;
     if bot_changed {
-        if open.is_some() {
+        if open.as_ref().is_some_and(|o| !(o.status == "pending" && o.waiting_reason.as_deref() == Some("bot_unavailable"))) {
             return Err(LcError::Conflict(json!({"error": "schedule_open", "message": "排程還有未結束的執行，換 Bot 前請先等它結束或停用"})));
         }
         if runner::eligible_bot_tx(&mut tx, &bot_id, Some(&cur.project_id)).await.map_err(db_err)?.is_none() {

@@ -297,3 +297,13 @@ test('#1839：初次 GET 失敗要明確顯示錯誤且儲存鈕維持禁用（�
   assert.equal(saveBtn.disabled, true, '初次 GET 失敗後儲存按鈕必須禁用，避免錯存空白/預設表單')
 })
 
+
+test('不可用的 Bot 警告可直接聚焦編輯器的 Bot 欄位', async () => {
+  fakeApi((req) => req.method === 'GET' && req.path.endsWith('/schedules/s1') ? scheduleRow({ bot_available: false }) : undefined)
+  await mount(<ScheduleEditor projectId="p1" scheduleId="s1" focusBot onClose={() => {}} onSelect={() => {}} />)
+  await settle(50)
+  const label = [...document.querySelectorAll('label')].find((el) => el.textContent?.includes('Bot'))
+  const select = label?.querySelector('select')
+  assert.ok(select)
+  assert.equal(document.activeElement, select)
+})

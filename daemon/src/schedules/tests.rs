@@ -651,4 +651,46 @@ async fn a_retry_waiting_in_the_queue_cannot_be_claimed_past_its_deadline() {
     runner::expire_queued_retries(&e.app, &db::now()).await.unwrap();
     assert_eq!(turn_status(&e.app, &reduced).await, "failed");
 
+#[tokio::test]
+async fn unavailable_bot_waits_once_and_batch_rebind_withdraws_that_occurrence() {
+    let (e, bot) = setup().await;
+    let target = testing::claude_bot(&e.app, &e.project_id, "replacement").await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let occurrence = pending(&e.app, &s).await;
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&e.app.db).await.unwrap();
+    assert!(!runner::enqueue(&e.app, &occurrence).await.unwrap());
+    assert!(!runner::enqueue(&e.app, &occurrence).await.unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM schedule_occurrences WHERE schedule_id = ? AND status = 'pending' AND waiting_reason = 'bot_unavailable'").bind(&s.id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(count, 1);
+    let _ = api::rebind(State(e.app.clone()), Path(e.project_id.clone()), Json(api::RebindIn { schedule_ids: vec![s.id.clone()], bot_id: target.id.clone() })).await.unwrap();
+    let updated = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap();
+    assert_eq!(updated.bot_id, target.id);
+    assert_eq!(updated.next_due, s.next_due);
+    let status: String = sqlx::query_scalar("SELECT status FROM schedule_occurrences WHERE id = ?").bind(&occurrence).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(status, "cancelled");
+}
+
+#[tokio::test]
+async fn batch_rebind_is_atomic_when_any_schedule_has_an_open_execution() {
+    let (e, bot) = setup().await;
+    let target = testing::claude_bot(&e.app, &e.project_id, "replacement").await;
+    let first = schedule(&e.app, &e.project_id, &bot.id).await;
+    let second = schedule(&e.app, &e.project_id, &bot.id).await;
+    pending(&e.app, &second).await;
+    let result = api::rebind(State(e.app.clone()), Path(e.project_id.clone()), Json(api::RebindIn { schedule_ids: vec![first.id.clone(), second.id.clone()], bot_id: target.id })).await;
+    assert!(result.is_err());
+    for id in [&first.id, &second.id] {
+        assert_eq!(store::get_schedule(&e.app.db, id).await.unwrap().unwrap().bot_id, bot.id);
+    }
+}
+
+#[tokio::test]
+async fn batch_rebind_rejects_missing_target_without_mutating_schedules() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let result = api::rebind(State(e.app.clone()), Path(e.project_id.clone()), Json(api::RebindIn { schedule_ids: vec![s.id.clone()], bot_id: "missing-bot".into() })).await;
+    assert!(result.is_err());
+    let updated = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap();
+    assert_eq!(updated.bot_id, bot.id);
+    assert_eq!(updated.generation, s.generation);
 }
