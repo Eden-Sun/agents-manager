@@ -256,7 +256,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/schedules/{id}", get(crate::schedules::api::get_one).patch(crate::schedules::api::patch).delete(crate::schedules::api::delete))
         .route("/schedules/{id}/run", post(crate::schedules::api::run_now))
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
-        .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
+        .route("/projects/{id}", patch(patch_project).delete(delete_project_route))
         .route("/projects/{id}/bots", post(create_bot))
         // §6.5e：非 agent 的 shell／服務 pane。
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
@@ -275,7 +275,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/git/pull", post(git_pull))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
-        .route("/bots/{id}", patch(patch_bot).delete(delete_bot_http))
+        .route("/bots/{id}", patch(patch_bot).delete(delete_bot_route))
         .route("/bots/{id}/role", axum::routing::put(put_bot_role))
         .route("/bots/{id}/member", post(crate::expert_member::adopt))
         .route("/projects/{id}/members", post(hire_member))
@@ -1359,7 +1359,9 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         } else { false };
         // 專家模式的 manager 可以啟動／重啟它管的 bot（角色改了要重啟才套用；使用者 2026-10-31）。
         // 管理者刪成員不能帶 `?confirm=`（那是給 AGM／使用者確認刪 AGM 的 bot 用的），免得繞過 supervisor_owned 守衛。
-        let confirm_query = method == "DELETE" && uri.query().is_some_and(|q| q.split('&').any(|kv| kv.split('=').next() == Some("confirm")));
+        // 判斷要跟 handler 用同一個解碼器（`Query<DeleteQuery>`）：原始字串比對會被 `%63onfirm` 這類編碼繞過（review L2 #1）。
+        // 解碼失敗就當成有帶（fail closed）。
+        let confirm_query = method == "DELETE" && axum::extract::Query::<DeleteQuery>::try_from_uri(uri).map_or(true, |q| q.0.confirm.is_some());
         let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !confirm_query && manager_may_start(&app, bot_id, method, path).await;
         // 派工者撤回自己派出、還沒送的那一則：路由仍是 UserOnly，只對這個情境放行（見 withdraw_turn_route）。
         let sender_withdraw = method == "POST" && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 4 && p[0] == "api" && p[1] == "turns" && p[3] == "withdraw")
@@ -2502,6 +2504,54 @@ pub(crate) async fn delete_project_http(
 ) -> Result<Response, LcError> {
     crate::supervisor_owned::guard_project_delete(&app.db, &id, q.confirm.as_deref()).await?;
     delete_project(State(app), Path(id)).await
+}
+
+/// 路由用的刪除入口：中介層已依解碼後的 query 擋過一次；這裡再依 principal 驗：帶 `confirm` 只允許使用者、
+/// 服務、或 AGM 角色的 Bot（review L2 #1）。非 AGM 的 Bot（含 child）帶 `confirm` 一律 403，什麼都不動。
+async fn delete_bot_route(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+    principal: Option<Extension<RequestPrincipal>>,
+) -> Result<Response, LcError> {
+    require_confirm_principal(&app, principal.map(|Extension(p)| p), q.confirm.as_deref()).await?;
+    delete_bot_http(State(app), Path(id), Query(q)).await
+}
+
+async fn delete_project_route(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+    principal: Option<Extension<RequestPrincipal>>,
+) -> Result<Response, LcError> {
+    require_confirm_principal(&app, principal.map(|Extension(p)| p), q.confirm.as_deref()).await?;
+    delete_project_http(State(app), Path(id), Query(q)).await
+}
+
+#[cfg(test)]
+pub(crate) async fn delete_bot_route_for_test(
+    state: State<Arc<App>>,
+    path: Path<String>,
+    query: Query<DeleteQuery>,
+    principal: Option<Extension<RequestPrincipal>>,
+) -> Result<Response, LcError> {
+    delete_bot_route(state, path, query, principal).await
+}
+
+async fn require_confirm_principal(app: &Arc<App>, principal: Option<RequestPrincipal>, confirm: Option<&str>) -> Result<(), LcError> {
+    if confirm.is_none() {
+        return Ok(());
+    }
+    let denied = || LcError::Forbidden(json!({"error": "forbidden", "reason": "confirm_not_allowed"}));
+    match principal {
+        None | Some(RequestPrincipal::User) | Some(RequestPrincipal::Service(_)) => Ok(()),
+        Some(RequestPrincipal::Bot(bot_id)) => match crate::supervisor::roles::role_of_bot(&app.db, &bot_id).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(denied()),
+            Err(error) => Err(LcError::Upstream(format!("{error:#}"))),
+        },
+        Some(RequestPrincipal::Child { .. }) => Err(denied()),
+    }
 }
 
 pub(crate) async fn delete_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<DeleteQuery>) -> Result<Response, LcError> {
