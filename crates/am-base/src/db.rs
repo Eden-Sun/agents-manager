@@ -599,6 +599,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (84, "1f27b51cf6de802a"),
     // 側欄 pane 別名持久化（2026-11-07）：`pane_aliases`（CREATE TABLE）。
     (85, "e55cfce83db3cb81"),
+    // Bind named relay requests to their original cluster identity.
+    (86, "5cb62ec809c30f7a"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -888,6 +890,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("relay_requests", "digest_at", "ALTER TABLE relay_requests ADD COLUMN digest_at TEXT"),
         // 專家模式群集派工：請求是對哪個群集發的（NULL＝一般派工）；沒有閒置成員時 pending 等第一個閒下來的成員。
         ("relay_requests", "cluster", "ALTER TABLE relay_requests ADD COLUMN cluster TEXT"),
+        ("relay_requests", "cluster_key", "ALTER TABLE relay_requests ADD COLUMN cluster_key TEXT"),
         // 專家模式執行者授權：`ProjectCfg.executor_grants` 的投影（JSON 陣列）。
         ("projects", "executor_grants_json", "ALTER TABLE projects ADD COLUMN executor_grants_json TEXT NOT NULL DEFAULT '[]'"),
         // 專家模式派工的依據（`specialist:<專案>`／`deputy:<專案>`，SCHEMA 84 前為 `grant:<專案>`；NULL＝不靠依據）：turn 變成可送出時依它正向確認。
@@ -945,6 +948,15 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     .execute(&mut *tx)
     .await
     .context("re-arm queued prompt restamps left behind before issue #738")?;
+    // Capture identity exactly once for any named-cluster request inserted by legacy producers.
+    // Existing pending rows are deliberately not backfilled: the target may already have changed.
+    sync_trigger(&mut tx, "relay_named_cluster_key_on_insert", r#"CREATE TRIGGER relay_named_cluster_key_on_insert AFTER INSERT ON relay_requests
+        WHEN NEW.cluster IS NOT NULL AND substr(NEW.cluster,1,5) <> 'auto:' AND NEW.cluster_key IS NULL
+        BEGIN
+          UPDATE relay_requests SET cluster_key = (SELECT json_object('project_id', project_id, 'kind', kind,
+              'model', coalesce(model,''), 'effort', coalesce(effort,''), 'identity', coalesce(identity,'')) FROM bots WHERE id=NEW.to_bot_id)
+          WHERE id=NEW.id;
+        END"#).await.context("create named cluster key trigger")?;
     // issue #474：pre-v2 建的 `bot_previews` 沒有 `REFERENCES bots(id)`——`CREATE TABLE IF NOT EXISTS`
     // 對既有 DB 是 no-op，而外鍵用 `ALTER TABLE` 加不回去，所以那種資料庫到今天都還缺這個約束
     // （`pragma_table_info` 看不到 FK，#470 之前漂移核對也不比表的約束，所以一直沒人發現）。

@@ -8038,6 +8038,7 @@ pub(crate) async fn prompt_bot(
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":turn_id,"message_id":null,"delivery":state,"state":state}))).into_response());
         }
         relay_auth = check_relay_basis(&app, sender, &id).await?;
+        let mut cluster_key: Option<String> = None;
         if let Some(name) = &cluster {
             let from = db::bot(&app.db, sender).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("relay sender".into()))?;
             let Some(scope) = crate::expert_cluster::sender_scope(&app, &from).await.map_err(any_err)? else {
@@ -8048,7 +8049,11 @@ pub(crate) async fn prompt_bot(
                     .any(|m| m.id == id && crate::expert_cluster::tier_of(&m.kind, m.model.as_deref()) == auto.tier)
             } else {
                 let clusters = crate::expert_cluster::project_clusters(&app, &from.project_id).await.map_err(any_err)?;
-                clusters.iter().any(|c| &c.name == name && c.members.iter().any(|m| m.id == id))
+                let found = clusters.iter().find(|c| &c.name == name && c.members.iter().any(|m| m.id == id));
+                if let Some(c) = found {
+                    cluster_key = Some(serde_json::to_string(&crate::expert_cluster::ClusterKey::from_cluster(&from.project_id, c)).map_err(any_err)?);
+                }
+                found.is_some()
             };
             if !target_ok { return Err(LcError::Bad("target is not a member of that cluster".into())); }
             // 專家：目標必須是它可直接派工的成員（check_relay_policy 已核過，這裡明確擋群集越界）。
@@ -8062,8 +8067,8 @@ pub(crate) async fn prompt_bot(
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
         // 群集請求：同（來源, 群集, 鍵）已有一筆（可能剛被改派走、唯一鍵擋不到）就不插，跟上面的查重同一個身分。
-        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster) SELECT ?,?,?,?,?,?,'pending',?,?,? WHERE ? IS NULL OR NOT EXISTS(SELECT 1 FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND cluster=?)")
-            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster)
+        let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster,cluster_key) SELECT ?,?,?,?,?,?,'pending',?,?,?,? WHERE ? IS NULL OR NOT EXISTS(SELECT 1 FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND cluster=?)")
+            .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster).bind(&cluster_key)
             .bind(&cluster).bind(sender).bind(&crid).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
         #[cfg(test)]
         crate::lifecycle::race_point::hit("relay_request_after_insert", &crid).await;
@@ -8079,6 +8084,14 @@ pub(crate) async fn prompt_bot(
         // 由 relay_requests 的 reconcile 在第一個閒下來的成員身上送出，不在忙的成員後面排隊。
         if cluster.is_some() && !crate::expert_cluster::member_idle(&app, &id).await {
             return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
+        }
+        // Recheck the immutable named-cluster key before the immediate delivery path too.
+        // If selection moved, the normal pending reconciler delivers to the new member.
+        if cluster_key.is_some() {
+            let name = cluster.as_deref().expect("named key requires cluster");
+            if crate::expert_cluster::claim_target(&app, &request_id, &id, name).await.map_err(any_err)?.as_deref() != Some(id.as_str()) {
+                return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
+            }
         }
         let delivery_key = format!("relay-request:{request_id}");
         let is_target_claude_api = kind == Some("claude-api");

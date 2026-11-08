@@ -5835,6 +5835,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 專家（specialist）（使用者 2026-10-31，lead 定案；A 期）：角色 `specialist` 是「某條 track 的專家」，是頂層成員；增聘時與執行者一樣由使用者或 manager 自行決定 kind／model／effort（`agm hire --role specialist --track <t>`）。`track` 寫在 config.toml 的 bot 欄位（DB 只是投影），role=specialist 時必填，只有使用者能改。路由：`agm peers --for <track>` 時同 track 的專家排第一，其他 track 的專家不當候選（不搶別的 track）；沒給 `--for` 時專家照一般排序但排在執行者之後。啟動時 bot 專屬段注入「你是本專案 <track> 的專家，範圍限於 <track>；超出範圍的工作回報管理者，不要自己做」（不改共用的 `child_agent_rules`）。`bots.runtime_override_json`（bot 執行期覆蓋，NULL＝跟角色）與 `projects.role_policy_json`（`[projects.role_policy.<role>]`）提供執行期設定。
 
+具名群集請求建立時固定專案與 kind／model／effort／identity；等待重選只在該固定群組的現有合格成員中進行，原目標變更或刪除不改變群組。升級前缺少固定識別的待處理舊請求以明確錯誤停止，請派工者重送。
+
 管理者或代班副管理者對同專案啟用中的頂層成員派工時，停止的成員由 daemon 使用一般 bot start 啟動並等待就緒，再走既有持久佇列；失敗或逾時在 prompt API 同步回傳明確錯誤，錯誤碼見 API.md。群集與自動選人優先在跑且閒置的成員，沒有才選可啟動的停止成員；專家派工權限不包含啟動。
 
 群集派工（專家模式，使用者 2026-11-02 選定「合併列＋群集派工」；實作 `daemon/src/expert_cluster.rs`）：同專案 role=executor、存活頂層成員（不論有沒有在跑）中 `(kind, model, effort, identity)` 相同的 ≥2 顆成一個群集，名稱規則與 API 見 API.md。管理者用 `herdr agent prompt bot:cluster:<名稱> --expect-result …` 派工，shim 先 `relay/resolve` 解析出一顆成員（閒置優先、cache 最熱優先；`manager_use=0` 不挑）並在 prompt 帶 `cluster`；沒有閒置成員時解析選一顆 `manager_use=1` 停著的成員，送 prompt 時由 daemon 以 `lifecycle::start_bot` 啟動並等待就緒（群集已有 starting 的成員就不再啟動，一次一顆）；全忙或等啟動時請求以 `relay_requests.cluster` 記著、留在 pending（不排進任何忙成員的佇列），`runners::relay_requests::reconcile` 每輪呼叫 `claim_target`，第一個閒下來的成員接手（`to_bot_id` 改成它）。權限同一般派工：只有 manager／代班副管理者能對群集派工。管理者的專屬段（`manager_role_section`）提到這個用法。

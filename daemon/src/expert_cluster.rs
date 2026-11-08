@@ -47,6 +47,27 @@ pub struct Cluster {
     pub members: Vec<Member>,
 }
 
+/// Stable identity of a named cluster; display names and member IDs can change.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClusterKey {
+    pub project_id: String,
+    pub kind: String,
+    pub model: String,
+    pub effort: String,
+    pub identity: String,
+}
+impl ClusterKey {
+    pub fn from_cluster(project_id: &str, c: &Cluster) -> Self {
+        Self { project_id: project_id.into(), kind: c.kind.clone(), model: c.model.clone().unwrap_or_default(),
+            effort: c.effort.clone().unwrap_or_default(), identity: c.identity.clone().unwrap_or_default() }
+    }
+    fn matches(&self, m: &Member) -> bool {
+        self.kind == m.kind && self.model == m.model.as_deref().unwrap_or_default()
+            && self.effort == m.effort.as_deref().unwrap_or_default()
+            && self.identity == m.identity.as_deref().unwrap_or_default()
+    }
+}
+
 impl Cluster {
     pub fn idle(&self) -> usize { self.members.iter().filter(|m| m.idle).count() }
     pub fn working(&self) -> usize { self.members.iter().filter(|m| m.working).count() }
@@ -334,48 +355,41 @@ pub async fn start_member_if_needed(app: &Arc<App>, members: &[Member]) -> Optio
 /// 群集請求（還沒送出）現在該由誰接：第一個閒置成員（cache 最熱的優先）。沒有閒置成員回 `None`＝繼續等。
 /// 目標換人時以 CAS 改 `to_bot_id`（紀錄裡寫實際接手的 bot）；回傳最後的目標。
 ///
-/// #2070：群集名是顯示用、會隨其他群集增減而變（`haiku` → `haiku-low`），所以不拿名稱找群集，
-/// 改找「目前含 `to_bot_id` 的群集」——`to_bot_id` 建立時就驗過是該群集成員、換人也只換成同群集成員，
-/// 而群集是以 kind/model/effort/identity 分的，名稱怎麼變它都在原群集裡。
-/// 原群集真的不在了（成員刪除、縮到剩一顆）就把請求標成 failed，交給 sweep 通知派工者，不無限等。
+/// 群集名是顯示用，成員設定與名稱都可能變；具名請求使用建立時保存的固定鍵。
+/// 只要仍有符合鍵與目前權限的成員就繼續等待或投遞；舊請求缺少固定鍵則安全失敗。
 pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, cluster: &str) -> anyhow::Result<Option<String>> {
     let gone = |why: String| async move {
         sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
             .bind(why).bind(request_id).execute(&app.db).await.map(|_| None)
     };
-    let Some(bot) = db::bot(&app.db, project_bot).await? else { return Ok(gone(format!("cluster {cluster} no longer exists")).await?) };
     let auto = parse_auto_target(cluster);
+    let request: Option<(String, Option<String>, Option<String>)> = sqlx::query_as("SELECT from_bot_id,track,cluster_key FROM relay_requests WHERE id=?")
+        .bind(request_id).fetch_optional(&app.db).await?;
+    let sender = match request.as_ref() { Some((f, _, _)) => db::bot(&app.db, f).await?, None => None };
+    let Some(from) = sender.as_ref() else { return Ok(gone(format!("cluster {cluster}: sender not found")).await?) };
     let mut members = if let Some(target) = &auto {
-        project_executors(app, &bot.project_id).await?.into_iter()
-            .filter(|m| tier_of(&m.kind, m.model.as_deref()) == target.tier)
-            .collect::<Vec<_>>()
+        project_executors(app, &from.project_id).await?.into_iter()
+            .filter(|m| tier_of(&m.kind, m.model.as_deref()) == target.tier).collect::<Vec<_>>()
     } else {
-        let clusters = project_clusters(app, &bot.project_id).await?;
-        let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) else {
-            return Ok(gone(format!("cluster {cluster} no longer exists")).await?)
+        // Older pending requests lack an immutable identity. Never infer it from a bot
+        // that may already have changed model or identity; fail closed for retry.
+        let key = request.as_ref().and_then(|(_, _, k)| k.as_deref())
+            .and_then(|raw| serde_json::from_str::<ClusterKey>(raw).ok());
+        let Some(key) = key.filter(|k| k.project_id == from.project_id) else {
+            return Ok(gone(format!("cluster {cluster}: original cluster identity unavailable; please resubmit")).await?)
         };
-        c.members.clone()
+        project_executors(app, &key.project_id).await?.into_iter().filter(|m| key.matches(m)).collect::<Vec<_>>()
     };
     // 每次重選都用發起者「當下」的權限（不論角色）：管理者／代班中的副管理者不限；專家只在開關開著時、限本專案頂層執行者。
     // 發起者不存在、已刪、降級或代班結束（`sender_scope` 回 None）就終止請求——不預設 All，也不會先自動啟動成員。
-    let request: Option<(String, Option<String>)> = sqlx::query_as("SELECT from_bot_id,track FROM relay_requests WHERE id=?").bind(request_id).fetch_optional(&app.db).await?;
-    let sender = match request.as_ref() { Some((f, _)) => db::bot(&app.db, f).await?, None => None };
     let scope = match &sender { Some(s) => sender_scope(app, s).await?, None => None };
     let Some(scope) = scope else { return Ok(gone(format!("cluster {cluster}: sender may no longer dispatch to clusters")).await?) };
     members.retain(|m| scope.allows(&m.id));
     if members.is_empty() { return Ok(gone(format!("cluster {cluster}: no member the sender may dispatch to")).await?) }
-    let want_track = auto.as_ref().and_then(|t| t.track.as_deref()).or_else(|| request.as_ref().and_then(|(_, t)| t.as_deref()));
+    let want_track = auto.as_ref().and_then(|t| t.track.as_deref()).or_else(|| request.as_ref().and_then(|(_, t, _)| t.as_deref()));
     let Some(pick) = pick_best_member(&members, want_track) else {
         if scope.may_start() {
-            if auto.is_some() {
-                start_member_if_needed(app, &members).await;
-            } else {
-                // A named cluster has at least two members; their current cluster name can still change while pending.
-                let clusters = project_clusters(app, &bot.project_id).await?;
-                if let Some(c) = clusters.iter().find(|c| c.members.iter().any(|m| m.id == project_bot)) {
-                    start_member_if_needed(app, &c.members).await;
-                }
-            }
+            start_member_if_needed(app, &members).await;
         }
         return Ok(None)
     };
@@ -631,6 +645,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_named_cluster_stays_on_original_key_when_target_changes_or_is_deleted() {
+        for change in ["model", "effort", "identity", "deleted"] {
+            let env = crate::testing::env().await;
+            sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+            let manager = expert_member(&env, "mgr", "manager", "idle").await;
+            let a = expert_member(&env, "original", "executor", "working").await;
+            let b = expert_member(&env, "original-peer", "executor", "idle").await;
+            let c = expert_member(&env, "other", "executor", "idle").await;
+            sqlx::query("UPDATE bots SET model='claude-sonnet-5-5' WHERE id=?").bind(&c.id).execute(&env.app.db).await.unwrap();
+            sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('r',?,?,'key','fixture','[]','pending',?,'haiku')")
+                .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+            sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('r2',?,?,'key2','fixture','[]','pending',?,'haiku')")
+                .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+            let statement = match change {
+                "model" => "UPDATE bots SET model='claude-sonnet-5-5' WHERE id=?",
+                "effort" => "UPDATE bots SET effort='high' WHERE id=?",
+                "identity" => "UPDATE bots SET identity='other' WHERE id=?",
+                _ => "UPDATE bots SET deleted_at='2026-01-01T00:00:00Z' WHERE id=?",
+            };
+            sqlx::query(statement).bind(&a.id).execute(&env.app.db).await.unwrap();
+            sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&a.id).execute(&env.app.db).await.unwrap();
+            assert_eq!(claim_target(&env.app, "r", &a.id, "haiku").await.unwrap(), Some(b.id.clone()), "{change}");
+            let (to, key): (String, String) = sqlx::query_as("SELECT to_bot_id,cluster_key FROM relay_requests WHERE id='r'").fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(to, b.id, "{change}");
+            assert_eq!(serde_json::from_str::<ClusterKey>(&key).unwrap().model, "claude-haiku-5-5");
+            sqlx::query("UPDATE bots SET deleted_at='2026-01-01T00:00:00Z' WHERE id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+            assert_eq!(claim_target(&env.app, "r2", &a.id, "haiku").await.unwrap(), None, "{change}");
+            let (state, to): (String, String) = sqlx::query_as("SELECT state,to_bot_id FROM relay_requests WHERE id='r2'").fetch_one(&env.app.db).await.unwrap();
+            assert_eq!(state, "failed", "{change}");
+            assert_ne!(to, c.id, "must not dispatch to the different cluster");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_named_request_without_a_key_fails_closed() {
+        let env = crate::testing::env().await;
+        let manager = expert_member(&env, "mgr", "manager", "idle").await;
+        let a = expert_member(&env, "w1", "executor", "idle").await;
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('r',?,?,'key','fixture','[]','pending',?,'haiku')")
+            .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE relay_requests SET cluster_key=NULL WHERE id='r'").execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "r", &a.id, "haiku").await.unwrap(), None);
+        let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id='r'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed");
+    }
+
+    #[tokio::test]
     async fn queued_request_goes_to_the_first_member_that_turns_idle() {
         let env = crate::testing::env().await;
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
@@ -688,14 +749,16 @@ mod tests {
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), None, "原群集全忙：繼續等，不能被 high 群集接走");
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
-        // 群集縮到剩一顆＝消失：請求進 failed，不永久 pending。
+        // 原群集縮到一顆時仍保留身份；剩餘成員閒置後可以接手。
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq2',?,?,'k2','p','[]','pending',?,'haiku')")
             .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&b.id).execute(&env.app.db).await.unwrap();
         assert_eq!(claim_target(&env.app, "rq2", &a.id, "haiku").await.unwrap(), None);
         let (state, error): (String, Option<String>) = sqlx::query_as("SELECT state,error FROM relay_requests WHERE id='rq2'").fetch_one(&env.app.db).await.unwrap();
-        assert_eq!(state, "failed");
-        assert!(error.unwrap_or_default().contains("no longer exists"));
+        assert_eq!(state, "pending");
+        assert!(error.is_none());
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&a.id).execute(&env.app.db).await.unwrap();
+        assert_eq!(claim_target(&env.app, "rq2", &a.id, "haiku").await.unwrap(), Some(a.id.clone()));
     }
 
     #[tokio::test]
@@ -880,6 +943,10 @@ mod sender_rescope_tests {
         let rid = v["request_id"].as_str().unwrap().to_string();
         let cluster: Option<String> = sqlx::query_scalar("SELECT cluster FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&f.env.app.db).await.unwrap();
         assert_eq!(cluster.as_deref(), Some("haiku"));
+        let raw: String = sqlx::query_scalar("SELECT cluster_key FROM relay_requests WHERE id=?").bind(&rid).fetch_one(&f.env.app.db).await.unwrap();
+        let key: crate::expert_cluster::ClusterKey = serde_json::from_str(&raw).unwrap();
+        assert_eq!(key.project_id, f.env.project_id);
+        assert!(key.model.contains("haiku"));
         (rid, to)
     }
 

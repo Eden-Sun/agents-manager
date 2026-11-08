@@ -1671,3 +1671,23 @@
         let (status,body)=nr1944_http(crate::share::portal::router(e.app.clone()),"GET",&format!("/s/{token}/api/messages"),String::new()).await;
         assert_eq!(status,axum::http::StatusCode::OK);assert!(body.contains("PUBLIC-MESSAGE"));assert!(!body.contains(private));
     }
+
+    #[tokio::test]
+    async fn named_cluster_migration_does_not_guess_legacy_pending_identity() {
+        let (pool, _) = bare_wal_pool().await;
+        for stmt in SCHEMA.split(";\n") {
+            if !stmt.trim().is_empty() { sqlx::query(stmt.trim()).execute(&pool).await.unwrap(); }
+        }
+        sqlx::query("ALTER TABLE relay_requests ADD COLUMN cluster TEXT").execute(&pool).await.unwrap();
+        for sql in [
+            "INSERT INTO projects(id,path,label,created_at) VALUES ('p','/tmp/p','p','now')",
+            "INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES ('sender','p','sender','claude','fixture','now')",
+            "INSERT INTO bots(id,project_id,name,kind,model,hook_token,created_at) VALUES ('target','p','target','claude','new-model','fixture','now')",
+            "INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES ('r','sender','target','key','fixture','[]','pending','now','old-cluster')",
+        ] { sqlx::query(sql).execute(&pool).await.unwrap(); }
+        apply_migrations(&pool).await.unwrap();
+        let key: Option<String> = sqlx::query_scalar("SELECT cluster_key FROM relay_requests WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert!(key.is_none(), "the current target cannot prove the original key");
+        crate::runners::am_base_tests::check_drift(&pool).await.unwrap();
+        pool.close().await;
+    }
