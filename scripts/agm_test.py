@@ -1753,6 +1753,20 @@ class MiscCommandTest(CliCase):
         self.assertEqual(FakeDaemon.seen[-1]["method"], "DELETE")
         self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/bot-b")
 
+    def test_expert_manager_bot_set_uses_bot_proof_and_sends_model_effort_and_name(self):
+        FakeDaemon.routes["PATCH /api/bots/bot-b"] = (200, {"ok": True})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_PROJECT_MODE": "expert", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.ok("bot", "set", "bot-b", "--effort", "medium", "--model", "claude-haiku-5-5", "--name", "w2")
+        self.assertEqual(FakeDaemon.seen[-1]["bot_id"], "bot-a")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/bot-b")
+        self.assertEqual(FakeDaemon.seen[-1]["method"], "PATCH")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"effort": "medium", "model": "claude-haiku-5-5", "name": "w2"})
+
+    def test_bot_set_without_fields_is_bad_args_and_name_alone_is_enough(self):
+        FakeDaemon.routes["PATCH /api/bots/b9"] = (200, {"ok": True})
+        self.assertEqual(self.bad("bot", "set", "b9")["error"], "bad_args")
+        self.assertEqual(self.ok("bot", "set", "b9", "--name", "w9"), {"ok": True})
+
     def test_bot_delete_confirm_supervisor_goes_in_the_query_and_every_call_names_agm(self):
         FakeDaemon.routes["DELETE /api/bots/build"] = (200, {"removed_children": []})
         self.ok("bot", "delete", "build", "--confirm-supervisor")

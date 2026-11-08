@@ -2472,9 +2472,9 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
     if not args.bot_id:
         raise AgmError("bad_args", f"bot {args.op} 需要 bot id", 2)
     if args.op == "set":
-        body = {key: val for key, val in (("model", args.model), ("effort", args.effort), ("identity", args.identity)) if val is not None}
+        body = {key: val for key, val in (("model", args.model), ("effort", args.effort), ("identity", args.identity), ("name", args.name)) if val is not None}
         if not body:
-            raise AgmError("bad_args", "bot set 至少需要 --model、--effort 或 --identity 其中一個", 2)
+            raise AgmError("bad_args", "bot set 至少需要 --model、--effort、--name 或 --identity 其中一個", 2)
         return client.patch(f"/api/bots/{path_segment(args.bot_id)}", body)
     if args.op == "delete":
         # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
@@ -2890,7 +2890,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["start", "stop", "restart", "set", "create", "delete", "restore"])
     s.add_argument("bot_id", nargs="?", type=_id_arg, help="start/stop/restart/delete/restore 的目標（delete＝停 pane 並軟刪，子 agent 一起收；restore＝還原被軟刪的子 agent，不開 run）")
     s.add_argument("--project", help="create：所屬 project id")
-    s.add_argument("--name", help="create：bot 名稱")
+    s.add_argument("--name", help="create：bot 名稱；set：改名（管理者可改自己專案的成員）")
     s.add_argument("--kind", help="create：claude / codex / grok")
     s.add_argument("--model")
     s.add_argument("--effort")
@@ -2924,7 +2924,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

@@ -151,10 +151,13 @@ async fn digest(app: &Arc<App>, manager_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 代班中的副管理者可以 start／restart 同專案的成員（管理者本人與自己除外）；停止、刪除、設角色、hire 都不行。
+/// 代班中的副管理者可以 start／restart，也可以改同專案成員的模型／強度／快速／名稱（管理者本人與自己除外）；停止、刪除、設角色、hire 都不行。
 pub async fn may_restart(app: &Arc<App>, caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> bool {
     let sub = parts.get(3).map(|p| p.as_ref());
-    if !(method == "POST" && parts.len() == 4 && matches!(sub, Some("start" | "restart"))) { return false }
+    // 代班副管理者：跟管理者同層級，可啟動／重啟，也可改模型／強度／快速／名稱（PATCH 欄位範圍在 patch_bot 驗）。
+    let restart = method == "POST" && parts.len() == 4 && matches!(sub, Some("start" | "restart"));
+    let patch = method == "PATCH" && parts.len() == 3;
+    if !(restart || patch) { return false }
     if target.id == caller || target.deleted_at.is_some() || target.parent_bot_id.is_some() || target.manager_use == 0 || target.role.as_deref() == Some("manager") { return false }
     let Ok(Some(me)) = db::bot(&app.db, caller).await else { return false };
     me.project_id == target.project_id && me.deleted_at.is_none() && acting(app, caller).await

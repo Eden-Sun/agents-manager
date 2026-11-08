@@ -130,7 +130,7 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     if role != Some("manager") {
         return None;
     }
-    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。不確定給誰時用 `bot:auto:cheap|standard|strong`（可加 `:<track>`），由 daemon 依閒置、額度、context 挑人；只有要指定某顆時才點名。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。派工給停止的成員時會自動啟動。專案設定的「專家可直接派工給執行者」開關（預設開）開著時，專家可直接派工給本專案執行者並驗收；同一顆執行者被同時派工照佇列排隊。關掉就只有你（或代班中的副管理者）能派工給執行者。claude-api 顧問（`agm peers` 標 billing=api）用 API 額度：純問答、審稿、草稿這類不需要讀 repo 的，優先 `herdr agent prompt bot:<id> --expect-result` 問它；需要 repo 脈絡才找其他顧問。其他 claude-api 成員不能派工。".to_string())
+    Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。不確定給誰時用 `bot:auto:cheap|standard|strong`（可加 `:<track>`），由 daemon 依閒置、額度、context 挑人；只有要指定某顆時才點名。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。派工給停止的成員時會自動啟動。要調整成員的模型或強度用 `agm bot set <id> --model … --effort …`（改名用 `--name`）；改完要 `agm bot restart <id>` 才生效。專案設定的「專家可直接派工給執行者」開關（預設開）開著時，專家可直接派工給本專案執行者並驗收；同一顆執行者被同時派工照佇列排隊。關掉就只有你（或代班中的副管理者）能派工給執行者。claude-api 顧問（`agm peers` 標 billing=api）用 API 額度：純問答、審稿、草稿這類不需要讀 repo 的，優先 `herdr agent prompt bot:<id> --expect-result` 問它；需要 repo 脈絡才找其他顧問。其他 claude-api 成員不能派工。".to_string())
 }
 
 /// 顧問（advisor）的啟動指示：只給顧問本人，職責文字不含 bot 名稱或 id。

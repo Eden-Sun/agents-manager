@@ -483,6 +483,39 @@ pub struct WithdrawnPrompt {
     pub attachments: Vec<String>,
 }
 
+/// 派工的 bot 能撤回的只有它自己派出、經 token 驗證（`relay_unverified=0`）、還在佇列裡（`queued`）的那一則。
+/// 已送出（in_flight／done）的、別人派的、自稱沒驗過的都不行。
+pub async fn sender_may_withdraw(app: &impl LcHost, turn_id: &str, sender: &str) -> LcResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM turns t JOIN messages m ON m.turn_id = t.id AND m.role = 'user' \
+         WHERE t.id = ? AND t.status = 'queued' AND m.relay_from = ? AND m.relay_unverified = 0",
+    )
+    .bind(turn_id)
+    .bind(sender)
+    .fetch_one(app.db())
+    .await
+    .map_err(up)?;
+    Ok(n > 0)
+}
+
+/// 派工者自己撤回（見 [`sender_may_withdraw`]）。撤掉的這一則不會再送；原文不還給任何輸入框（不是使用者的訊息）。
+pub async fn withdraw_turn_by_sender(app: &impl LcHost, turn_id: &str, sender: &str) -> LcResult<()> {
+    let bot_id: String = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id=?")
+        .bind(turn_id)
+        .fetch_optional(app.db())
+        .await
+        .map_err(up)?
+        .ok_or_else(|| LcError::NotFound("turn".into()))?;
+    let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, &bot_id).await;
+    if !sender_may_withdraw(app, turn_id, sender).await? {
+        return Err(LcError::conflict("turn is not a queued relay from this bot", json!({"turn_id": turn_id})));
+    }
+    if !revoke_queued_turn(app, turn_id, "派工的 bot 撤回了這一則：還沒送出，不會再送。").await.map_err(up)? {
+        return Err(LcError::conflict("turn is not waiting in the queue", json!({"turn_id": turn_id})));
+    }
+    Ok(())
+}
+
 pub async fn withdraw_turn(app: &impl LcHost, turn_id: &str) -> LcResult<WithdrawnPrompt> {
     let bot_id: String = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id=?")
         .bind(turn_id)

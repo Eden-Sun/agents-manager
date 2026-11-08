@@ -219,7 +219,7 @@ pub async fn recover_live_apply_debts(app: &(impl s6_ports::LiveApplyDebtContext
 pub use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub use delivery::*;
 pub use start::*;
-pub use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_with_share_token, withdraw_turn};
+pub use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_with_share_token, sender_may_withdraw, withdraw_turn, withdraw_turn_by_sender};
 pub use composer_draft::submit as submit_composer_draft;
 pub use suggestion::accept as accept_prompt_suggestion;
 pub use queued_send_now::send_queued_now;

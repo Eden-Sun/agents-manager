@@ -326,7 +326,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/read", post(crate::read_marks::post))
         .route("/turns/{id}/abandon", post(abandon_turn))
-        .route("/turns/{id}/withdraw", post(withdraw_turn))
+        .route("/turns/{id}/withdraw", post(withdraw_turn_route))
         .route("/bots/{id}/abort", post(abort_bot))
         .route("/hosts", post(create_host))
         .route("/hosts/{name}", delete(delete_host))
@@ -1361,7 +1361,10 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         // 管理者刪成員不能帶 `?confirm=`（那是給 AGM／使用者確認刪 AGM 的 bot 用的），免得繞過 supervisor_owned 守衛。
         let confirm_query = method == "DELETE" && uri.query().is_some_and(|q| q.split('&').any(|kv| kv.split('=').next() == Some("confirm")));
         let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !confirm_query && manager_may_start(&app, bot_id, method, path).await;
-        if policy == Some(BotRoutePolicy::UserOnly) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
+        // 派工者撤回自己派出、還沒送的那一則：路由仍是 UserOnly，只對這個情境放行（見 withdraw_turn_route）。
+        let sender_withdraw = method == "POST" && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 4 && p[0] == "api" && p[1] == "turns" && p[3] == "withdraw")
+            && lifecycle::sender_may_withdraw(&app, &decoded_bot_path_segments(path).unwrap()[2], bot_id).await.unwrap_or(false);
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1544,6 +1547,10 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
             .map_err(any_err)?;
             if let Some(owner) = owner {
                 if bot_may_access_bot(app, caller, &owner).await? {
+                    return Ok(());
+                }
+                // 派工者撤回自己派出、還在佇列的那一則（見 withdraw_turn_route）。
+                if method == "POST" && parts.len() == 4 && parts[3] == "withdraw" && lifecycle::sender_may_withdraw(app, id, caller).await? {
                     return Ok(());
                 }
                 Some("turn")
@@ -3259,6 +3266,8 @@ fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bo
         ("POST", 4, Some("stop")) => matches!(target.role.as_deref(), Some("executor" | "specialist")),
         // 刪除：只限自己專案的頂層執行者／專家（child 跟著母 bot 走，不另外刪）。
         ("DELETE", 3, None) => target.parent_bot_id.is_none() && matches!(target.role.as_deref(), Some("executor" | "specialist")),
+        // 改模型／強度／快速／名稱：頂層、非管理者的成員；欄位範圍在 patch_bot 再驗（只收這四個）。
+        ("PATCH", 3, None) => target.parent_bot_id.is_none() && target.role.as_deref() != Some("manager"),
         _ => false,
     }
 }
@@ -3429,6 +3438,14 @@ async fn patch_bot(
 ) -> Result<Response, LcError> {
     if (b.identity.is_some() || b.env.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    // 專家管理者（非 AGM 角色的 Bot，含代班的副管理者）只能改 model／effort／fast／name（使用者 2026-11-08）。
+    if let RequestPrincipal::Bot(caller) = &principal {
+        if crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none()
+            && (b.persona.is_some() || b.args.is_some() || b.autostart.is_some() || b.inject_hooks.is_some() || b.auto_approve.is_some() || b.is_primary.is_some())
+        {
+            return Err(bot_user_only());
+        }
     }
     if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist") { return Err(LcError::Bad("invalid role".into())); } }
     // 專家（specialist）一定要有 track：合併改動後的結果（角色＋track）必須有 track，否則 400。
@@ -8340,6 +8357,15 @@ async fn accept_suggestion(
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
+/// 派工者可以撤回自己派出、還在佇列裡的那一則（[`lifecycle::sender_may_withdraw`]）；其他人照舊只有使用者能撤。
+async fn withdraw_turn_route(State(app): State<Arc<App>>, Path(id): Path<String>, principal: Option<Extension<RequestPrincipal>>) -> Result<Response, LcError> {
+    if let Some(Extension(RequestPrincipal::Bot(caller) | RequestPrincipal::Child { child_id: caller, .. })) = principal {
+        lifecycle::withdraw_turn_by_sender(&app, &id, &caller).await?;
+        return Ok((StatusCode::OK, Json(json!({"withdrawn": true}))).into_response());
+    }
+    withdraw_turn(State(app), Path(id)).await
+}
+
 /// issue #122／#733：撤回還在等 bot 起來或閒下來的訊息，回傳原文與附件供輸入框還原。已經送出去的撤不回來（409）。
 async fn withdraw_turn(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let restored = lifecycle::withdraw_turn(&app, &id).await?;
@@ -11116,6 +11142,42 @@ mod prompt_route_tests {
         assert_eq!(body["error"], "delivery_unprovable");
         assert_eq!(body["reason"], "prompt_too_long_to_prove");
         assert_eq!(body["sent"], false);
+    }
+
+    /// 派工者只能撤回自己派出、已驗證、還在佇列的那一則（使用者 2026-11-08 第 8 項）。
+    /// 每個情境一顆 bot：同一顆 bot 的 relay 佇列一次只排一則。
+    #[tokio::test]
+    async fn a_dispatcher_withdraws_only_its_own_verified_queued_turn() {
+        async fn busy_bot(app: &Arc<App>, project_id: &str, name: &str) -> (String, String) {
+            let bot = crate::testing::claude_bot(app, project_id, name).await;
+            let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+            let run = crate::testing::fake_run(app, &bot.id).await;
+            let sent = db::ulid();
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+                .bind(&sent).bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
+            (bot.id, sent)
+        }
+        let e = crate::testing::env().await;
+        let (mine_bot, sent) = busy_bot(&e.app, &e.project_id, "wd-mine").await;
+        let (theirs_bot, _) = busy_bot(&e.app, &e.project_id, "wd-theirs").await;
+        let (unverified_bot, _) = busy_bot(&e.app, &e.project_id, "wd-unverified").await;
+        let mine = lifecycle::prompt_relayed_queueable(&e.app, &mine_bot, "mine", "dispatch-a:internal", Some("sender-a"), lifecycle::QueueClass::Relay).await.unwrap().turn_id;
+        let theirs = lifecycle::prompt_relayed_queueable(&e.app, &theirs_bot, "theirs", "dispatch-b:internal", Some("sender-b"), lifecycle::QueueClass::Relay).await.unwrap().turn_id;
+        let unverified = lifecycle::prompt_relayed_queueable(&e.app, &unverified_bot, "unverified", "dispatch-c:internal", Some("sender-a"), lifecycle::QueueClass::Relay).await.unwrap().turn_id;
+        for (turn, flag) in [(&mine, 0), (&theirs, 0), (&unverified, 1)] {
+            sqlx::query("UPDATE messages SET relay_unverified=? WHERE turn_id=? AND role='user'").bind(flag).bind(turn).execute(&e.app.db).await.unwrap();
+        }
+        assert!(lifecycle::sender_may_withdraw(&e.app, &mine, "sender-a").await.unwrap(), "own verified queued turn");
+        assert!(!lifecycle::sender_may_withdraw(&e.app, &theirs, "sender-a").await.unwrap(), "someone else's turn");
+        assert!(!lifecycle::sender_may_withdraw(&e.app, &unverified, "sender-a").await.unwrap(), "self-reported relay_from is not proof");
+        assert!(!lifecycle::sender_may_withdraw(&e.app, &sent, "sender-a").await.unwrap(), "already sent (in flight)");
+        assert!(lifecycle::withdraw_turn_by_sender(&e.app, &theirs, "sender-a").await.is_err(), "someone else's turn");
+        assert!(lifecycle::withdraw_turn_by_sender(&e.app, &sent, "sender-a").await.is_err(), "sent turns stay put");
+        lifecycle::withdraw_turn_by_sender(&e.app, &mine, "sender-a").await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&mine).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(status, "queued", "withdrawn turn leaves the queue");
+        assert!(lifecycle::withdraw_turn_by_sender(&e.app, &mine, "sender-a").await.is_err(), "cannot withdraw twice");
+        assert!(lifecycle::sender_may_withdraw(&e.app, &theirs, "sender-b").await.unwrap(), "the other sender still owns its own");
     }
 
     #[tokio::test]
@@ -18496,7 +18558,9 @@ mod manager_role_scope_tests {
         assert!(denied(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&peer.id)).await), "parent_child project: no exception");
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
         assert!(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&peer.id)).await.is_ok());
-        assert!(denied(authorize_bot_path(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", peer.id)).await), "only the role route");
+        assert!(authorize_bot_path(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", peer.id)).await.is_ok(), "model／effort／fast／name are allowed");
+        let identity = patch_bot(State(env.app.clone()), Path(peer.id.clone()), Extension(RequestPrincipal::Bot(manager.id.clone())), Json(serde_json::from_value::<PatchBot>(json!({"identity": "x"})).unwrap())).await;
+        assert!(matches!(identity, Err(LcError::Forbidden(_))), "identity stays user only");
         assert!(denied(authorize_bot_path(&env.app, &manager.id, "PUT", &path(&outsider.id)).await), "other project");
         assert!(denied(authorize_bot_path(&env.app, &peer.id, "PUT", &path(&manager.id)).await), "non-manager");
         let call = |caller: &str, target: &str, role: Option<&str>| {
@@ -18540,6 +18604,81 @@ mod manager_role_scope_tests {
         assert!(denied(authorize_bot_path(&env.app, &peer.id, "DELETE", &path(&manager.id)).await), "non-manager");
         sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&peer.id).execute(&env.app.db).await.unwrap();
         assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await), "advisor is not deleted by a manager");
+    }
+
+    /// 管理者真的改成員的模型／強度（走 handler 與設定檔）：專家、顧問、執行者都行；改名也行。
+    #[tokio::test]
+    async fn expert_manager_changes_model_effort_and_name_through_the_handler() {
+        let env = crate::testing::env().await;
+        let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        env.app.cfg.update(move |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            Ok(())
+        }).await.unwrap();
+        let add = |name: &'static str| {
+            let app = env.app.clone();
+            let pid = env.project_id.clone();
+            async move {
+                let res = create_bot(State(app), Path(pid), Json(serde_json::from_value(json!({"name": name, "kind": "claude"})).unwrap())).await.unwrap();
+                let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string()
+            }
+        };
+        let manager = add("h-manager").await;
+        let specialist = add("h-specialist").await;
+        let advisor = add("h-advisor").await;
+        let peer = add("h-peer").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='specialist', track='shared-assistant' WHERE id=?").bind(&specialist).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&peer).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let patch = |target: &str, body: Value| {
+            patch_bot(State(env.app.clone()), Path(target.to_string()), Extension(RequestPrincipal::Bot(manager.clone())), Json(serde_json::from_value::<PatchBot>(body).unwrap()))
+        };
+        let res = patch(&specialist, json!({"model": "claude-opus-5-5", "effort": "medium"})).await;
+        assert!(res.is_ok(), "specialist model and effort: {:?}", res.err());
+        assert!(patch(&advisor, json!({"effort": "high"})).await.is_ok(), "advisor effort");
+        assert!(patch(&peer, json!({"model": "claude-haiku-5-5", "fast": false})).await.is_ok(), "executor model and fast");
+        assert!(patch(&peer, json!({"name": "h-renamed"})).await.is_ok(), "rename");
+        let effort: Option<String> = sqlx::query_scalar("SELECT effort FROM bots WHERE id=?").bind(&specialist).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test]
+    async fn expert_manager_patches_model_effort_fast_and_name_of_top_level_members_only() {
+        let env = crate::testing::env().await;
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "pat-manager").await;
+        let peer = crate::testing::claude_bot(&env.app, &env.project_id, "pat-peer").await;
+        let other_manager = crate::testing::claude_bot(&env.app, &env.project_id, "pat-other-mgr").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&peer.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&other_manager.id).execute(&env.app.db).await.unwrap();
+        let other_project = db::ulid();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'other','local',?,'expert')")
+            .bind(&other_project).bind(format!("/tmp/{other_project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let outsider = crate::testing::claude_bot(&env.app, &other_project, "pat-outsider").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&outsider.id).execute(&env.app.db).await.unwrap();
+        let patch = |caller: &str, target: &str, body: Value| {
+            patch_bot(State(env.app.clone()), Path(target.to_string()), Extension(RequestPrincipal::Bot(caller.to_string())), Json(serde_json::from_value::<PatchBot>(body).unwrap()))
+        };
+        assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", peer.id)).await, "parent_child project: no exception");
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        assert!(manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", peer.id)).await, "top-level executor in its project");
+        assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", outsider.id)).await, "other project");
+        assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", manager.id)).await, "cannot change itself");
+        assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", other_manager.id)).await, "another manager");
+        assert!(!manager_may_start(&env.app, &peer.id, "PATCH", &format!("/api/bots/{}", manager.id)).await, "non-manager");
+        // 顧問與專家也是成員：管理者能調模型／強度（wits lead 的實際需求：專家「OO共享助理」）。
+        let advisor = crate::testing::claude_bot(&env.app, &env.project_id, "pat-advisor").await;
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor.id).execute(&env.app.db).await.unwrap();
+        let specialist = crate::testing::claude_bot(&env.app, &env.project_id, "pat-specialist").await;
+        sqlx::query("UPDATE bots SET role='specialist', track='shared-assistant' WHERE id=?").bind(&specialist.id).execute(&env.app.db).await.unwrap();
+        assert!(manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", advisor.id)).await, "advisor");
+        assert!(manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", specialist.id)).await, "specialist");
+        assert!(matches!(patch(&manager.id, &peer.id, json!({"identity": "x"})).await, Err(LcError::Forbidden(_))), "identity stays user only");
+        assert!(matches!(patch(&manager.id, &peer.id, json!({"persona": "x"})).await, Err(LcError::Forbidden(_))), "persona is outside the manager scope");
+        assert!(matches!(patch(&manager.id, &peer.id, json!({"autostart": true})).await, Err(LcError::Forbidden(_))), "autostart is outside the manager scope");
     }
 
     #[tokio::test]
