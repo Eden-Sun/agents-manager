@@ -2,7 +2,7 @@
  * 終端畫面解析出來的問卷（即時選單、多分頁預載）也走原題卡同一套譯文：英文自動翻、可切回原文，
  * 送出的鍵與原文一致（譯文只換顯示）；多分頁預載完後整份只打一次翻譯。
  */
-import test, { after, afterEach, before } from 'node:test'
+import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { Run, TerminalSnapshot } from '../api/types.ts'
@@ -15,6 +15,10 @@ import { resetPendingQuestionTranslation } from './usePendingQuestionTranslation
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
 before(setupDom)
+beforeEach(() => {
+  resetTranslateReady()
+  resetPendingQuestionTranslation()
+})
 afterEach(async () => {
   await unmountAll()
   resetTranslateReady()
