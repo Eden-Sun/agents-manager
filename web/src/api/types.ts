@@ -1105,6 +1105,8 @@ export interface KindQuota {
   stale: boolean
   /** `local` 或 `hosts[].name` */
   host: string
+  /** 額度擋下了排著的 prompt、停工中的 bot 名稱（codex 格才有；舊 daemon 沒有就是 undefined）。 */
+  held_bots?: string[]
 }
 
 /** key 見 `quotaKey`（SPEC §14，按主機分開）；null = 沒有額度資訊。 */

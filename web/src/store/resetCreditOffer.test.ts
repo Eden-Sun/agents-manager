@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { KindQuota, QuotaMap } from '../api/types'
-import { exhaustionMarker, parseCreditKey, resetCreditOffers } from './resetCreditOffer.ts'
+import { exhaustionMarker, parseCreditKey, resetCreditOffers, resetCreditOfferText } from './resetCreditOffer.ts'
 
 const NOW = Date.parse('2026-11-08T06:30:00Z')
 const FUTURE = '2026-11-08T10:00:00Z'
@@ -53,11 +53,23 @@ test('同一次耗盡只問一次（不論用或不用都記下）；新的耗�
     available: 2,
     title: 'Full reset',
     expiresAt: '2026-11-30T00:00:00Z',
+    heldBots: [],
   })
   const again = resetCreditOffers(first.next, { 'm4p/codex:co0': hit }, NOW + 60_000)
   assert.deepEqual(again.offers, [], '同一次耗盡不重問')
   const newHit = q({ limit_hit: { message: 'x', until: FUTURE, at: 'B', bucket: null } as never })
   assert.equal(resetCreditOffers(again.next, { 'm4p/codex:co0': newHit }, NOW).offers.length, 1, '新的撞限紀錄＝新事件')
+})
+
+test('提示列出因額度停工的 bot 名稱（daemon 的 held_bots）', () => {
+  const hit = q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never, held_bots: ['alpha', 'beta'] })
+  const [offer] = resetCreditOffers({}, { 'm4p/codex:co0': hit }, NOW).offers
+  assert.deepEqual(offer.heldBots, ['alpha', 'beta'])
+  assert.match(resetCreditOfferText(offer), /停工的 bot：alpha、beta。/)
+  const none = q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never })
+  const [bare] = resetCreditOffers({}, { 'm4p/codex:co0': none }, NOW).offers
+  assert.deepEqual(bare.heldBots, [])
+  assert.doesNotMatch(resetCreditOfferText(bare), /停工的 bot/)
 })
 
 test('key 拆成主機與身份', () => {

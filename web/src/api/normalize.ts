@@ -943,7 +943,14 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     updated_at: str(pick(v, 'updated_at')),
     stale: bool(pick(v, 'stale'), false),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
+    held_bots: toHeldBots(pick(v, 'held_bots')),
   }
+}
+
+/** 停工 bot 的名稱清單；沒有或不是陣列就 `undefined`（舊 daemon 不送這欄）。 */
+function toHeldBots(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  return v.filter((x): x is string => typeof x === 'string')
 }
 
 export function toQuota(raw: unknown): QuotaMap {

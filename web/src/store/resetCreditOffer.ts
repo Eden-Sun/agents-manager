@@ -27,6 +27,8 @@ export interface ResetCreditOffer {
   available: number
   title: string | null
   expiresAt: string | null
+  /** 因為這個額度停工的 bot 名稱（daemon 的 `held_bots`）。 */
+  heldBots: string[]
 }
 
 /** 這個額度格現在是不是用完了；是就回傳事件標記（同一次耗盡標記不變）。 */
@@ -67,15 +69,26 @@ export function resetCreditOffers(
     next[id] = now
     const { host, identity } = parseCreditKey(key)
     const rc = q.reset_credits
-    offers.push({ id, key, host, identity, available: rc.available, title: rc.title, expiresAt: rc.expires_at })
+    offers.push({
+      id,
+      key,
+      host,
+      identity,
+      available: rc.available,
+      title: rc.title,
+      expiresAt: rc.expires_at,
+      heldBots: q.held_bots ?? [],
+    })
   }
   return { offers, next }
 }
 
 export function resetCreditOfferText(o: ResetCreditOffer): string {
   const soonest = o.expiresAt ? t('（最早 {time} 到期）', { time: fmtCreditDate(o.expiresAt) }) : ''
-  return t('{name} 額度用完了。還有 {n} 張重置券{soonest}，要用一張嗎？', {
+  const held = o.heldBots.length > 0 ? t('停工的 bot：{names}。', { names: o.heldBots.join('、') }) : ''
+  return t('{name} 額度用完了。{held}還有 {n} 張重置券{soonest}，要用一張嗎？', {
     name: creditKeyLabel(o.key),
+    held,
     n: o.available,
     soonest,
   })

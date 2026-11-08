@@ -6605,7 +6605,9 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
         });
         pending = !finished_within(QUOTA_REFRESH_WAIT, job).await;
     }
-    let mut resp = Json(crate::quota::snapshot(&app).await).into_response();
+    let mut snap = crate::quota::snapshot(&app).await;
+    crate::runners::reset_credit::annotate_held_bots(&app, &mut snap).await;
+    let mut resp = Json(snap).into_response();
     if pending {
         // body 是 quota key 的 map，不能塞旗標進去（前端會把它當成一格額度）：用 header 說「還有探測在背景跑」。
         resp.headers_mut().insert("x-am-quota-refresh", axum::http::HeaderValue::from_static("pending"));
