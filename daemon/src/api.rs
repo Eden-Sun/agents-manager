@@ -7902,7 +7902,7 @@ async fn resolve_relay_target(
 
 /// `bot:cluster:<名稱>`：manager（或代班中的副管理者）可對群集派工；專家在「專家可直接派工給執行者」開關開著時可挑群集裡本專案的頂層執行者（見 `expert_cluster::Scope`）。
 /// 挑閒置、manager_use=1 的成員，都忙就先挑一顆（讓請求照一般流程建立），並回 `cluster_idle=false`——送出時 daemon 會把請求留在 pending，
-/// 等第一個閒下來的成員接手。只有管理者側會順手啟動停著的成員；專家不會（開關只涵蓋派工，不含 start）。
+/// 等第一個閒下來的成員接手。停著的成員（範圍內）管理者與專家都會自動啟動。
 pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &str) -> Result<Json<Value>, LcError> {
     let from = db::bot(&app.db, sender).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("relay sender".into()))?;
     let Some(scope) = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)? else {
@@ -7917,8 +7917,8 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
     let chosen = match cluster.pick_best(None) {
         Some(m) => Some((m.id.clone(), true)),
         None => {
-            // 沒有閒置成員：管理者側先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
-            (if scope.may_start() { cluster.pick_to_start().map(|m| m.id.clone()) } else { None })
+            // 沒有閒置成員：先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
+            cluster.pick_to_start().map(|m| m.id.clone())
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).map(|m| m.id.clone()).next())
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked).map(|m| m.id.clone()).next())
                 .map(|id| (id, false))
@@ -7950,14 +7950,10 @@ pub(crate) async fn resolve_auto_target(app: &Arc<App>, sender: &str, selector: 
     let (bot_id, idle) = if let Some(chosen) = chosen {
         chosen
     } else {
-        let candidate = if scope.may_start() {
-            crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone())
-        } else {
-            None
-        };
+        let candidate = crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone());
         let fallback = candidate
             .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()))
-            .or_else(|| if scope.may_start() { crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone()) } else { None })
+            .or_else(|| crate::expert_cluster::pick_to_start_member(&members).map(|m| m.id.clone()))
             .or_else(|| members.iter().filter(|m| m.manager_use && !m.quota_blocked).min_by(|a, b| a.id.cmp(&b.id)).map(|m| m.id.clone()));
         let Some(id) = fallback else { return Err(LcError::Forbidden(json!({"error":"member_not_dispatchable","message":"沒有可派工的成員：成員可能已停用或額度不足","sent":false}))) };
         (id, false)
@@ -8014,8 +8010,10 @@ async fn ensure_relay_member_ready(app: &Arc<App>, sender: &str, target: &str) -
     if to.parent_bot_id.is_some() || to.managed_by != "user" || !matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) {
         return Err(stopped("目標不是可派工的頂層成員"));
     }
-    if !crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)?.is_some_and(|scope| scope.may_start()) {
-        return Err(stopped("只有管理者或代班副管理者可自動啟動"));
+    // 自動啟動的權限與派工範圍相同：管理者（或代班副管理者）不限；專家只限它可直接派工的頂層執行者（開關關著就沒有範圍）。
+    let scope = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)?;
+    if !scope.as_ref().is_some_and(|s| s.allows(target)) {
+        return Err(stopped("不在你可自動啟動的範圍內（管理者／代班副管理者，或專家派工開關開著時的本專案頂層執行者）"));
     }
     if run.as_ref().is_some_and(|r| r.state != "starting" && r.state != "running") { return Err(stopped("成員正在停止")); }
     let app2 = app.clone();
@@ -19386,13 +19384,40 @@ mod relay_autostart_tests {
         assert!(matches!(err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable" && v["message"].as_str().unwrap().contains("manager_use=false")));
     }
 
-    #[tokio::test]
-    async fn stopped_member_is_not_started_by_a_specialist() {
+    /// 專家的 `specialist` 送件者：`switch_on` 控制專家派工開關。
+    async fn specialist_fixture(switch_on: bool) -> (crate::testing::Env, String, String) {
         let (env, manager, worker) = fixture().await;
         sqlx::query("UPDATE bots SET role='specialist' WHERE id=?").bind(&manager).execute(&env.app.db).await.unwrap();
-        let err = ensure_relay_member_ready(&env.app, &manager, &worker).await.unwrap_err();
+        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE bot_id=?").bind(format!("{}:local:expert:specialist", env.project_id)).bind(&manager).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET specialist_dispatch=? WHERE id=?").bind(switch_on).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        (env, manager, worker)
+    }
+
+    #[tokio::test]
+    async fn stopped_member_is_started_for_a_specialist_when_dispatch_switch_is_on() {
+        let (env, specialist, worker) = specialist_fixture(true).await;
+        ensure_relay_member_ready(&env.app, &specialist, &worker).await.unwrap();
+        let run = db::active_run(&env.app.db, &worker).await.unwrap().unwrap();
+        assert_eq!(run.state, "running");
+    }
+
+    #[tokio::test]
+    async fn stopped_member_is_not_started_for_a_specialist_when_dispatch_switch_is_off() {
+        let (env, specialist, worker) = specialist_fixture(false).await;
+        let err = ensure_relay_member_ready(&env.app, &specialist, &worker).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(v) if v["error"] == "member_stopped" && v["message"].as_str().unwrap().contains("管理者")));
         assert!(db::active_run(&env.app.db, &worker).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stopped_member_outside_specialist_scope_is_not_started() {
+        let (env, specialist, _worker) = specialist_fixture(true).await;
+        // 頂層 advisor 不在專家可直接派工的範圍（只有執行者），即使開關開著也不能替它啟動。
+        let advisor = crate::testing::claude_bot(&env.app, &env.project_id, "scope-advisor").await;
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor.id).execute(&env.app.db).await.unwrap();
+        let err = ensure_relay_member_ready(&env.app, &specialist, &advisor.id).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(v) if v["error"] == "member_stopped"));
+        assert!(db::active_run(&env.app.db, &advisor.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

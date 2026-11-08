@@ -227,8 +227,8 @@ pub fn clusters_of(bots: &[db::Bot], runs: &std::collections::HashMap<String, db
     group(&members)
 }
 
-/// 誰能對群集派工、能挑哪些成員：管理者（或代班中的副管理者）不限；專家在專案的專家派工開關開著時可挑本專案存活頂層執行者，
-/// 而且不會為它自動啟動停著的成員（開關只涵蓋派工，不含 start）。其他人（含開關關著時的專家）`None`＝不能對群集派工。
+/// 誰能對群集派工、能挑哪些成員：管理者（或代班中的副管理者）不限；專家在專案的專家派工開關開著時可挑本專案存活頂層執行者。
+/// 停著的成員在範圍內都會自動啟動（管理者與專家一致；範圍之外的成員一律不碰）。其他人（含開關關著時的專家）`None`＝不能對群集派工。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope { All, Specialist(std::collections::BTreeSet<String>) }
 
@@ -236,8 +236,6 @@ impl Scope {
     pub fn allows(&self, bot_id: &str) -> bool {
         match self { Scope::All => true, Scope::Specialist(ids) => ids.contains(bot_id) }
     }
-    /// 可不可以替這個發送者自動啟動成員。
-    pub fn may_start(&self) -> bool { matches!(self, Scope::All) }
 }
 
 pub async fn sender_scope(app: &Arc<App>, sender: &db::Bot) -> anyhow::Result<Option<Scope>> {
@@ -388,9 +386,7 @@ pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, c
     if members.is_empty() { return Ok(gone(format!("cluster {cluster}: no member the sender may dispatch to")).await?) }
     let want_track = auto.as_ref().and_then(|t| t.track.as_deref()).or_else(|| request.as_ref().and_then(|(_, t, _)| t.as_deref()));
     let Some(pick) = pick_best_member(&members, want_track) else {
-        if scope.may_start() {
-            start_member_if_needed(app, &members).await;
-        }
+        start_member_if_needed(app, &members).await;
         return Ok(None)
     };
     if pick.id == project_bot { return Ok(Some(pick.id.clone())) }
@@ -1028,12 +1024,8 @@ mod sender_rescope_tests {
             change(&f, &from, Change::None).await;
             assert_eq!(claim_target(&f.env.app, &rid, &to, "haiku").await.unwrap(), None);
             assert_eq!(row(&f, &rid).await.0, "pending", "{sender:?}");
-            if matches!(sender, Sender::Specialist) {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                assert_eq!(e3_runs(&f).await, 0, "專家不替自己啟動成員");
-            } else {
-                assert!(crate::testing::eventually!(e3_runs(&f).await > 0), "{sender:?}: 有權限的發起者照舊自動啟動停著的成員");
-            }
+            // 專家的派工範圍內（本專案頂層執行者）的停著成員，與管理者一樣會被自動啟動。
+            assert!(crate::testing::eventually!(e3_runs(&f).await > 0), "{sender:?}: 有權限的發起者照舊自動啟動停著的成員");
         }
     }
 }
