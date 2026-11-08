@@ -489,7 +489,7 @@ function BotRowImpl({
           </span>
         ) : null}
         <span className="bot-sub">
-          {isExpertProject && !compact && project?.deputy?.bot_id === bot.id ? <ExpertDeputyTag afterSec={project.deputy.after_sec} /> : null}
+          {isExpertProject && project?.deputy?.bot_id === bot.id ? <ExpertDeputyTag afterSec={project.deputy.after_sec} /> : null}
           <ModelTag botId={botId} short={compact} cache />
           {quotaWarning ? (
             <span
@@ -1494,7 +1494,7 @@ export function Sidebar() {
                 // 子清單是父列的兄弟，靠 aria-owns 掛回，巢狀 list 才合法。
                 <div className="bot-list" role="list" aria-label={t('{name} 的 Bot', { name: p.label })}>
                 {p.mode === 'expert' ? (
-                  groupExpertSections(list).map((sec) => (
+                  groupExpertSections(list, p.deputy?.bot_id).map((sec) => (
                     <Fragment key={sec.role}>
                       <ExpertSectionHeader title={sec.title} abbr={sec.abbr} />
                       {(sec.role === 'executor' ? groupClusterItems(sec.items) : sec.items.map((item) => ({ kind: 'single' as const, item }))).map((entry) => {

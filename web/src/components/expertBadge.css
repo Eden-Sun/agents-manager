@@ -319,7 +319,8 @@
 }
 
 /* 副管理者小標：跟 track 標同高，用管理者的強調色系。 */
-.bot-sub .bot-deputy-tag {
+.bot-sub .bot-deputy-tag,
+.bot-switcher-item .bot-deputy-tag {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;

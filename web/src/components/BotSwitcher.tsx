@@ -8,7 +8,7 @@ import { botsOfProject, orderedProjects, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
-import { ExpertRoleTag } from './ExpertBadge'
+import { ExpertDeputyTag, ExpertRoleTag } from './ExpertBadge'
 import { groupExpertSections } from '../lib/expertSections'
 import './botSwitcher.css'
 import { t, useT } from '../lib/i18n'
@@ -147,7 +147,7 @@ export function BotSwitcherMenu({
           <div key={g.project.id} className="bot-switcher-group" role="group" aria-label={g.project.label}>
             <div className="bot-switcher-project" aria-hidden="true">⌗ {g.project.label}</div>
             {isExpert
-              ? groupExpertSections(g.bots).map((sec) => (
+              ? groupExpertSections(g.bots, g.project.deputy?.bot_id).map((sec) => (
                   <div key={sec.role} className="bot-switcher-section">
                     <div className="bot-switcher-expert-head" aria-hidden="true">
                       <span className="bot-switcher-expert-title">{sec.title}</span>
@@ -165,6 +165,7 @@ export function BotSwitcherMenu({
                       >
                         <RowLamp botId={b.id} />
                         <KindTag kind={b.kind} />
+                        {g.project.deputy?.bot_id === b.id ? <ExpertDeputyTag afterSec={g.project.deputy.after_sec} /> : null}
                         {b.role_pending ? <ExpertRoleTag role={b.role} rolePending /> : null}
                         <span className="bot-switcher-name">{b.name}</span>
                       </button>

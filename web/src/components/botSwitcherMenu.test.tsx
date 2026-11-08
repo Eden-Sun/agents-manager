@@ -16,3 +16,13 @@ test('換 bot 選單：menu＋menuitemradio，目前那顆 aria-checked，項目
   assert.doesNotMatch(html, /role="(listbox|option)"/)
   assert.equal((html.match(/tabindex="-1"/g) ?? []).length, 2)
 })
+
+test('專家模式：副管理者在管理者之後，且帶副標示', () => {
+  const expert = { ...project, mode: 'expert', deputy: { bot_id: 'b2', after_sec: 120 } } as Project
+  const members = [{ ...bots[1], role: 'advisor' }, { ...bots[0], role: 'manager' }, { id: 'b3', name: 'other', kind: 'claude', project_id: 'p1', role: 'advisor' }] as Bot[]
+  const html = renderToStaticMarkup(<BotSwitcherMenu groups={[{ project: expert, bots: members }]} onPick={() => {}} />)
+  assert.ok(html.indexOf('one') < html.indexOf('two'))
+  assert.ok(html.indexOf('two') < html.indexOf('顧問'))
+  assert.equal((html.match(/bot-deputy-tag/g) ?? []).length, 1)
+  assert.match(html, /副管理者.*120/)
+})

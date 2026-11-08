@@ -48,7 +48,7 @@ export function roleTitle(role: Bot['role'] | ExpertRole): string {
  * 在專家模式下，依固定順序（管理者 -> 專家 -> 顧問 -> 執行者 -> 未分配）將頂層項目分段；
  * 沒有項目的分段自動略過不畫。
  */
-export function groupExpertSections<T extends { role?: Bot['role'] }>(items: readonly T[]): ExpertSection<T>[] {
+export function groupExpertSections<T extends { id: string; role?: Bot['role'] }>(items: readonly T[], deputyBotId?: string | null): ExpertSection<T>[] {
   const buckets: Record<ExpertRole, T[]> = {
     manager: [],
     specialist: [],
@@ -57,10 +57,16 @@ export function groupExpertSections<T extends { role?: Bot['role'] }>(items: rea
     unassigned: [],
   }
 
+  let deputy: T | undefined
   for (const item of items) {
+    if (deputyBotId && item.id === deputyBotId) {
+      deputy = item
+      continue
+    }
     const bucket = roleToExpertSection(item.role)
     buckets[bucket].push(item)
   }
+  if (deputy) buckets.manager.push(deputy)
 
   const sections: ExpertSection<T>[] = []
   for (const r of EXPERT_ROLE_ORDER) {

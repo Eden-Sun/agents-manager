@@ -34,7 +34,7 @@ describe('expertSections pure functions', () => {
   })
 
   test('groupExpertSections: fixed order (manager -> specialist -> advisor -> executor -> unassigned)', () => {
-    const bots: Partial<Bot>[] = [
+    const bots: (Pick<Bot, 'id'> & Partial<Bot>)[] = [
       { id: 'b1', name: 'bot-exec-1', role: 'executor' },
       { id: 'b2', name: 'bot-unassigned', role: null },
       { id: 'b3', name: 'bot-mgr', role: 'manager' },
@@ -53,7 +53,7 @@ describe('expertSections pure functions', () => {
   })
 
   test('groupExpertSections: empty sections are skipped', () => {
-    const bots: Partial<Bot>[] = [
+    const bots: (Pick<Bot, 'id'> & Partial<Bot>)[] = [
       { id: 'b1', name: 'bot-exec', role: 'executor' },
       { id: 'b2', name: 'bot-mgr', role: 'manager' },
     ]
@@ -75,4 +75,20 @@ describe('expertSections pure functions', () => {
 test('段落標題帶英文縮寫：Mgr／Spc／Adv／Wkr，未分配沒有（2026-11-07 使用者）', () => {
   const secs = groupExpertSections([{ role: 'manager' }, { role: 'specialist' }, { role: 'advisor' }, { role: 'executor' }, { role: null }] as never[])
   assert.deepEqual(secs.map((s) => s.abbr), ['Mgr', 'Spc', 'Adv', 'Wkr', ''])
+})
+
+test('副管理者在管理者後，且不重複出現在原角色段', () => {
+  const bots: (Pick<Bot, 'id'> & Partial<Bot>)[] = [
+    { id: 'deputy', role: 'advisor' }, { id: 'manager', role: 'manager' },
+    { id: 'advisor', role: 'advisor' }, { id: 'specialist', role: 'specialist' },
+  ]
+  assert.deepEqual(groupExpertSections(bots, 'deputy').map((g) => [g.role, g.items.map((b) => b.id)]), [
+    ['manager', ['manager', 'deputy']], ['specialist', ['specialist']], ['advisor', ['advisor']],
+  ])
+  assert.deepEqual(groupExpertSections(bots, 'missing'), groupExpertSections(bots))
+  assert.deepEqual(groupExpertSections(bots, null), groupExpertSections(bots))
+  assert.deepEqual(groupExpertSections(bots, 'specialist').map((g) => [g.role, g.items.map((b) => b.id)]), [
+    ['manager', ['manager', 'specialist']], ['advisor', ['deputy', 'advisor']],
+  ])
+  assert.equal(canReorderInExpertMode('manager', 'advisor'), false)
 })

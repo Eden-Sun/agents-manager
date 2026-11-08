@@ -162,4 +162,25 @@ test('副管理者：只有專案設定的那位成員多一顆「副」小標�
   assert.equal(tag?.textContent?.trim(), '副')
   assert.match(tag?.getAttribute('title') ?? '', /120 秒/, 'tooltip 寫明門檻')
   assert.equal(document.querySelectorAll('.bot-deputy-tag').length, 1, '其他成員、其他專案都沒有')
+  const scope = document.querySelector('[data-project-id="p-dep"]')!
+  const manager = scope.querySelector('[data-bot-id="dep-mgr"]')!
+  const deputy = scope.querySelector('[data-bot-id="dep-adv"]')!
+  const advisorHeading = [...scope.querySelectorAll('.expert-section-head')].find((e) => e.textContent?.includes('顧問'))!
+  assert.ok(manager.compareDocumentPosition(deputy) & Node.DOCUMENT_POSITION_FOLLOWING, '副管理者排在管理者後')
+  assert.ok(deputy.compareDocumentPosition(advisorHeading) & Node.DOCUMENT_POSITION_FOLLOWING, '副管理者在顧問段之前')
+  assert.equal(scope.querySelectorAll('[data-bot-id="dep-adv"]').length, 1, '副管理者不重複')
+})
+
+test('compact 子列也保留副管理者標示', async () => {
+  useStore.setState({
+    projects: [{ ...project('p-compact', 'expert'), deputy: { bot_id: 'compact-dep', after_sec: 120 } } as Project],
+    bots: [bot('compact-mgr', 'p-compact', 'manager'), bot('compact-dep', 'p-compact', 'advisor', 'compact-mgr')],
+    runs: {}, botOrder: {}, projectOrder: [], botUnread: {}, connected: true, defaultConnected: true,
+    socket: 'open', selectedBotId: 'compact-mgr', selectedProjectId: null, sidePanes: {}, unownedPanes: [],
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const row = document.querySelector('[data-bot-id="compact-dep"]')!
+  assert.ok(row.classList.contains('compact'))
+  assert.equal(row.querySelector('.bot-deputy-tag')?.textContent, '副')
 })
