@@ -323,6 +323,46 @@ fn the_shape_log_carries_structure_and_never_the_screen_text() {
     assert!(shape.contains("sent_chars=7"), "{shape}");
     assert!(shape.contains("glyph_row=0") && shape.contains("from_bottom=3") && shape.contains("glyph_in_tail=true"), "{shape}");
     assert!(!shape.contains("Pasted") && !shape.contains("secret"), "不得含畫面文字：{shape}");
+    let styled = "\u{1b}[36m›\u{1b}[0m dispatch\n\nfooter\n";
+    assert!(box_shape("codex", styled, "dispatch", crate::composer_parse::BoxState::NonEmpty).contains("glyph_row=0"));
     let long = "x\n".repeat(5000);
     assert!(box_shape("codex", &long, "", crate::composer_parse::BoxState::Unready).chars().count() <= DIAGNOSE_MAX_CHARS);
+}
+
+#[tokio::test]
+async fn a_long_codex_dispatch_is_recovered_with_one_durable_enter() {
+    let rows: Vec<String> = (0..96).map(|i| if i == 31 { String::new() } else { format!("dispatch step {i}: preserve exact contents") }).collect();
+    let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let text = rows.join("\n");
+    let f = fixture(&refs, false).await;
+    sqlx::query("UPDATE turns SET prompt_text=? WHERE id=?").bind(&text).bind(&f.turn_id).execute(f.env.app.db()).await.unwrap();
+    sqlx::query("UPDATE messages SET content=? WHERE turn_id=? AND role='user'").bind(&text).bind(&f.turn_id).execute(f.env.app.db()).await.unwrap();
+    let t0 = Instant::now();
+    observe_at(&f.run_id, "idle", t0);
+    assert!(sweep(&f, t0, 6).await.is_empty());
+    assert_eq!(enters(&f), 1);
+    assert_eq!(resends(&f).await, 1);
+    assert!(f.env.herdr.pane(&f.pane).unwrap().composer.is_empty());
+    assert_eq!(turn(&f).await.status, "in_flight");
+}
+
+#[tokio::test]
+async fn an_unknown_turn_with_an_empty_composer_fails_and_releases_the_queued_turn() {
+    let f = fixture(&[], false).await;
+    let old = turn(&f).await;
+    let next = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,prompt_text,created_at) VALUES (?,?,?,'web','queued',?,?)")
+        .bind(&next).bind(&old.conversation_id).bind(&f.run_id).bind("next dispatch after recovery").bind(db::now()).execute(f.env.app.db()).await.unwrap();
+    insert_message(&f.env.app, &old.conversation_id, Some(&next), "user", "next dispatch after recovery", "web", false, None).await.unwrap();
+    let t0 = Instant::now();
+    observe_at(&f.run_id, "idle", t0);
+    assert_eq!(sweep(&f, t0, 6).await, vec![f.turn_id.clone()]);
+    assert_eq!(turn(&f).await.status, "failed");
+    assert_eq!(turn(&f).await.delivery, "unknown", "empty composer is not a delivery proof");
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&next).fetch_one(f.env.app.db()).await.unwrap();
+    assert_ne!(status, "queued", "the failed unknown turn must release the following dispatch");
+    assert_eq!(enters(&f), 1, "only the following prompt is submitted; the unknown prompt is never retyped");
+    assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), 1);
+    let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE '送出未確認%'").bind(&f.turn_id).fetch_one(f.env.app.db()).await.unwrap();
+    assert_eq!(notes, 1);
 }

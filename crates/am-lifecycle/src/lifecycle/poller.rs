@@ -766,17 +766,21 @@ pub use crate::composer_parse::{
 /// 逐列比字（#1669）：框裡讀回的列要是原文的一段，列內的字與空白逐字相同；列與列之間的接縫不計。
 /// 以前只比前 12 個字、用 `contains`，使用者改過尾段也會被當成我們那則、照樣按 Enter。
 pub fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
-    let Some(box_text) = composer_text(kind, screen) else { return false };
+    let Some(box_text) = crate::composer_parse::composer_text_whole_within(kind, screen, super::delivery::typed_tail(sent)) else { return false };
     if is_our_folded_paste(kind, &box_text, sent) {
         return true;
     }
-    composer_text_whole(kind, screen).is_some_and(|shown| rows_within(&shown, sent))
+    if kind == "codex" {
+        super::delivery::rows_spell_text(&box_text, sent)
+    } else {
+        rows_within(&box_text, sent)
+    }
 }
 
 /// 框裡是不是摺起來的「我們送的那一則」（#1915）。送出後的補按判斷（`delivery::composer_still_holds`）與
 /// 「字還在不在框裡」（`delivery::text_still_in_box`）共用這一個 helper，兩邊對摺疊的判斷不會分岔（#1984）。
 pub(crate) fn box_shows_our_folded_paste(kind: &str, screen: &str, sent: &str) -> bool {
-    composer_text(kind, screen).is_some_and(|box_text| is_our_folded_paste(kind, &box_text, sent))
+    crate::composer_parse::composer_text_whole_within(kind, screen, super::delivery::typed_tail(sent)).is_some_and(|box_text| is_our_folded_paste(kind, &box_text, sent))
 }
 
 /// 框的第一列前面可能掛著 claude 的 `[Image #N]`，那一段不是草稿的字。
@@ -3997,6 +4001,27 @@ mod issue_17_tests {
         let echo = screen.lines().find(|l| l.starts_with("❯ Reply")).expect("回音列在畫面上");
         assert!(echo.len() > "❯ ".len() + text.len() + 50, "回音列真的被補白了：{echo:?}");
         assert_eq!(count(&f, "pane.send_text"), 1, "只送一次");
+    }
+
+    #[tokio::test]
+    async fn a_long_codex_dispatch_retries_the_submit_key_without_retyping() {
+        use super::super::delivery::{execute_delivery, Plan, Submit};
+        for swallow in [false, true] {
+            let f = fixture("codex", "").await;
+            let rows: Vec<String> = (0..48).map(|i| if i == 17 { String::new() } else { format!("dispatch task step {i}") }).collect();
+            let text = rows.join("\n");
+            live(&f, tt::LivePane { codex: true, swallow_enter: swallow, ..wide() });
+            let app = f.env.app.clone();
+            let (run, bot) = run_and_bot(&f).await;
+            let client = client_for_run(&app, &run).await.unwrap();
+            let plan = Plan::Type { pane: "pane-17".into(), proof: Proof::Unverified, submit: Submit::Enter };
+            let result = execute_delivery(&app, &client, &run, &bot, &text, plan).await.unwrap();
+            assert_eq!(result, if swallow { Delivered::Unproven("still_in_box") } else { Delivered::Unverified });
+            assert_eq!(count(&f, "pane.send_keys"), if swallow { 2 } else { 1 }, "at most one additional Enter, even if swallowed again");
+            let pasted: String = f.env.herdr.calls_to("pane.send_text").iter()
+                .map(|call| call["text"].as_str().unwrap().to_owned()).collect();
+            assert_eq!(pasted, text, "paste chunks must spell the dispatch exactly once");
+        }
     }
 
     /// issue #1571：TUI 把長句折成多列，框裡還是同一則。`confirm_submitted` 的精確比對早退掉補按（不能只靠 `may_press_retry_submit` 的單元測試）。

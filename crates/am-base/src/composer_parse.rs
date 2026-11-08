@@ -425,11 +425,17 @@ fn undecorate_for(kind: &str, line: &str) -> String {
 }
 
 pub fn composer_text(kind: &str, screen: &str) -> Option<String> {
-    composer_text_rows(kind, screen, false)
+    composer_text_rows(kind, screen, false, None)
 }
 
 pub fn composer_text_whole(kind: &str, screen: &str) -> Option<String> {
-    composer_text_rows(kind, screen, kind == "claude")
+    composer_text_rows(kind, screen, kind == "claude", None)
+}
+
+/// Read a known pasted draft using the same bounded window as the delivery state check.
+/// Codex continuation rows keep their blank lines; an unindented footer is outside the draft.
+pub fn composer_text_whole_within(kind: &str, screen: &str, tail: usize) -> Option<String> {
+    composer_text_rows(kind, screen, matches!(kind, "claude" | "codex"), Some(tail))
 }
 
 /// 字頭行的字頭在第 0 欄（框的話是框線後第一格）。縮排的字頭是草稿的續行（`  ❯ npm test`），不是輸入列。
@@ -452,7 +458,7 @@ fn continuation_body(kind: &str, raw: &str, trimmed: String) -> String {
     t.strip_prefix("  ").unwrap_or(t.trim_start()).to_string()
 }
 
-fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option<String> {
+fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool, tail: Option<usize>) -> Option<String> {
     let plain = plain_without_hints(kind, screen);
     let screen = plain.as_str();
     let marker = prompt_echo_prefix(kind)?.trim_end();
@@ -460,7 +466,8 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
         return None;
     }
     let lines: Vec<&str> = screen.lines().collect();
-    let from = lines.len().saturating_sub(composer_tail(kind, &lines));
+    let window = tail.map_or_else(|| composer_tail(kind, &lines), |n| n.max(composer_tail(kind, &lines)).min(400));
+    let from = lines.len().saturating_sub(window);
     let tail = &lines[from..];
     let idx = tail.iter().rposition(|l| {
         let t = undecorate_for(kind, l);
@@ -468,6 +475,9 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option
     })?;
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {
+        if n > 0 && kind == "codex" && keep_blank_rows && !line.starts_with("  ") {
+            break;
+        }
         let row = undecorate_for(kind, line);
         let body = if n == 0 { row[marker.len()..].trim().to_string() } else { continuation_body(kind, line, row) };
         if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_box_rule(&body) || is_box_bottom(&body)) {
@@ -535,6 +545,17 @@ pub async fn read_styled(client: &HerdrClient, pane: &str, source: &str, lines: 
 #[cfg(test)]
 mod composer_draft_shape_tests {
     use super::*;
+
+    #[test]
+    fn a_known_codex_multiline_window_keeps_blank_rows_and_excludes_the_footer() {
+        let rows: Vec<String> = (0..48).map(|i| if i == 17 { String::new() } else { format!("dispatch {i}") }).collect();
+        let mut screen = format!("› {}\n", rows[0]);
+        for row in &rows[1..] { screen.push_str(&format!("  {row}\n")); }
+        screen.push_str("\ngpt-6.1-sol context 13%\n");
+        assert_eq!(composer_text_whole_within("codex", &screen, 72), Some(rows.join("\n")));
+        assert_eq!(composer_text_whole_within("codex", &screen, 24), None);
+        assert_eq!(composer_text_whole_within("codex", &screen.replace('›', " "), 72), None);
+    }
 
     /// 2.1.281 真畫面形狀（`claude-2.1.281-multiline-draft.ansi`）：`❯` 在第 0 欄、續行縮排兩格、框線是 `─`。
     #[test]

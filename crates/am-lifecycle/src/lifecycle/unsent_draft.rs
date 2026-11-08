@@ -164,7 +164,7 @@ fn box_shape(kind: &str, screen: &str, sent: &str, state: crate::composer_parse:
         "agy" => '>',
         _ => '❯',
     };
-    let glyph_row = lines.iter().rposition(|l| l.trim_start().starts_with(glyph));
+    let glyph_row = lines.iter().rposition(|l| crate::composer_parse::strip_ansi(l).trim_start().starts_with(glyph));
     let num = |n: Option<usize>| n.map_or_else(|| "none".to_string(), |n| n.to_string());
     let edge_col = glyph_row.and_then(|i| lines[i].chars().position(is_box_char));
     let edge_rows = lines[from..].iter().filter(|l| l.chars().any(is_box_char)).count();
@@ -211,7 +211,7 @@ pub(super) fn diagnose_box_once(episode: &str, kind: &str, screen: &str, sent: &
 async fn read_screen(app: &impl StuckTurnContext, run: &db::Run) -> anyhow::Result<String> {
     let pane = run.pane_id.as_deref().ok_or_else(|| anyhow::anyhow!("the run has no pane"))?;
     let client = client_for_run(app, run).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    super::delivery::read_styled(&client, pane, "visible", 80).await
+    super::delivery::read_composer(&client, pane).await
 }
 
 /// 字還在框裡：額度還在就補按一次 Enter；用掉了就收成 failed。
@@ -233,7 +233,7 @@ async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str
                     return anyhow::Ok(false);
                 }
                 // 讀不到＝無從確認字還是這一則；鍵還沒送，當成沒按（額度照退）。
-                let Ok(screen) = super::delivery::read_styled(&client, &pane, "visible", 80).await else {
+                let Ok(screen) = super::delivery::read_composer(&client, &pane).await else {
                     return anyhow::Ok(false);
                 };
                 if !sent.iter().any(|p| super::poller::composer_holds_prompt(kind, &screen, p)) {

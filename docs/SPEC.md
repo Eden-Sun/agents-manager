@@ -721,6 +721,7 @@ R-部署console-fork `01M2MG74HFY3PYD8FMBJKEJX8J` 是 AskUserQuestion 被中斷�
   回覆以 `source = transcript` 補進對話（已經有 assistant 訊息就不寫第二份）；證不出（遠端、grok、被中斷、只有 error）→ `completed_fallback`，
   並插一則 system 訊息寫明「閒置 N 分鐘仍 in_flight，由 reconcile 收尾」。**不標 `failed`**：回合多半做完了，只是結束沒被看見。
   讀不到主機或送了什麼（要拿去對 transcript）就這一輪不收、下一輪再看（#193），不當成「證不出」。
+- Codex 長多行派工的送出狀態與原文比對使用同一個 bounded composer 視窗（最多 400 列），保留續行縮排與空白行；完整內容仍對得上才最多補按一次送出鍵，不重貼原文。有正向送達證據、草稿被改過或讀不到 marker 時不補按。idle 收尾的補按同樣讀取最多 400 列，額度仍由既有持久 resend count 限制；idle／空框不當成已送達，未確認 turn 依既有失敗收尾與事件通知釋放後續 queued。
 - **送達證不出來的先看框**（#1897，`lifecycle/unsent_draft.rs`）：`delivery='unknown'` 且 `delivery_verified=0` 的回合（打過字、送出證不出來），
   idle 收尾前先讀一次畫面——stall watchdog、重送與 `late_proof` 都不處理「字還留在框裡」的 unknown，以前這種回合直接收成 `completed_fallback`，
   字在框裡留了 34 小時（a-ci優化 2026-10-21），之後的送達全被框裡的字擋住。

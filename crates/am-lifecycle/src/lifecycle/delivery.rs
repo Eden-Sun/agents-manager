@@ -938,12 +938,12 @@ fn may_press_retry_submit(
 /// 以前整個把空白拿掉再比（#1598），`send to ann a` 與 `send to anna` 也算同一則，補按的 Enter 把使用者剛改的字送出去（#1666）。
 fn composer_still_holds(kind: &str, screen: &str, text: &str) -> bool {
     super::poller::box_shows_our_folded_paste(kind, screen, text)
-        || crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| rows_spell_text(&shown, text))
+        || crate::composer_parse::composer_text_whole_within(kind, screen, typed_tail(text)).is_some_and(|shown| rows_spell_text(&shown, text))
 }
 
 /// `shown` 是 `composer_text_whole` 以 `\n` 接起來的列。空列要對上原文的空行（一個空列＝多一個換行），
 /// 接縫沒有任何字元時畫面不能多出縮排（原文沒有空白，那是加進去的）。
-fn rows_spell_text(shown: &str, text: &str) -> bool {
+pub(super) fn rows_spell_text(shown: &str, text: &str) -> bool {
     let mut rest = text.trim();
     let mut blank_rows = 0;
     for row in shown.split('\n') {
@@ -978,7 +978,7 @@ fn text_still_in_box(kind: &str, screen: &str, text: &str) -> bool {
         return true;
     }
     let needle = bare(&super::pane_text::for_pane(kind, text));
-    crate::composer_parse::composer_text_whole(kind, screen).is_some_and(|shown| bare(&shown).contains(&needle))
+    crate::composer_parse::composer_text_whole_within(kind, screen, typed_tail(text)).is_some_and(|shown| bare(&shown).contains(&needle))
 }
 
 /// 送出鍵按下去之後：先看送達證據，完整原文仍留在框裡才最多補按一次。
@@ -1058,7 +1058,7 @@ pub async fn confirm_submitted(
             }
             BoxState::Unready => {}
             BoxState::NonEmpty if may_press_retry_submit(&bot.kind, &now, text, false, pressed_again) => {
-                tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
+                tracing::warn!(run = %run.id, bot = %bot.name, ?submit, retry = 1, max_retries = 1, "prompt still in the composer after the submit key; pressing it again");
                 client.pane_send_keys(pane, submit.keys()).await?;
                 pressed_again = true;
             }
@@ -1427,6 +1427,22 @@ mod tests {
         assert!(!may_press_retry_submit("claude", &trailing, "abcde fghij", false, false), "後面多了字");
         let short = screen(&[], &["abcde"]);
         assert!(!may_press_retry_submit("claude", &short, "abcde fghij", false, false), "少了字");
+    }
+
+    #[test]
+    fn codex_long_multiline_draft_keeps_blank_rows_for_the_bounded_submit_retry() {
+        let rows: Vec<String> = (0..48).map(|i| if i == 17 { String::new() } else { format!("dispatch step {i}: preserve exact text") }).collect();
+        let text = rows.join("\n");
+        let mut screen = "old output\n".repeat(340);
+        screen.push_str(&format!("\u{1b}[36m›\u{1b}[0m {}\n", rows[0]));
+        for row in &rows[1..] { screen.push_str(&format!("  {row}\n")); }
+        screen.push_str("\ngpt-6.1-sol · context 13%\n");
+        assert!(super::may_press_retry_submit("codex", &screen, &text, false, false));
+        assert!(!super::may_press_retry_submit("codex", &screen, &text, false, true));
+        assert!(!super::may_press_retry_submit("codex", &screen, &text, true, false));
+        let changed = screen.replace("dispatch step 47:", "modified step 47:");
+        assert!(!super::may_press_retry_submit("codex", &changed, &text, false, false));
+        assert!(!super::may_press_retry_submit("codex", &screen.replace('›', " "), &text, false, false));
     }
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
