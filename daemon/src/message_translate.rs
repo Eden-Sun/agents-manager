@@ -303,6 +303,27 @@ fn pq_cache_path(data_dir: &Path, payload: &Value) -> PathBuf {
     data_dir.join(CACHE_DIR).join(format!("{PQ_CACHE_PREFIX}{key}.json"))
 }
 
+/// 同一份問卷（同一個快取鍵）同時只有一個上游呼叫：兩個分頁同時自動翻，後到的排隊、拿到先算好的快取（single-flight）。
+/// 鍵是快取檔路徑；沒有人在等的鎖會被收掉。
+static PQ_FLIGHT: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = std::sync::Mutex::new(None);
+
+fn pq_flight_slot(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut g = PQ_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(Default::default).entry(path.to_path_buf()).or_default().clone()
+}
+
+fn pq_flight_forget(path: &Path, slot: Arc<tokio::sync::Mutex<()>>) {
+    let mut g = PQ_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    // 表裡一份、我手上一份；多的就是還有人在排隊。
+    if Arc::strong_count(&slot) <= 2 {
+        if let Some(m) = g.as_mut() {
+            if m.get(path).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
+                m.remove(path);
+            }
+        }
+    }
+}
+
 /// 核心：查快取、沒有才一次打 API、核對後寫快取。回 `{questions, model, cached, cost_usd, usage?}`。
 pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value, LcError> {
     let payload = pq_payload(qs);
@@ -310,6 +331,21 @@ pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value,
     if let Some(hit) = load_pq(&path) {
         return Ok(json!({"questions": hit.questions, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
     }
+    let slot = pq_flight_slot(&path);
+    let guard = slot.lock().await;
+    // 等鎖期間別人可能已經寫好快取：拿到控制權後重查，命中就不打 API。
+    if let Some(hit) = load_pq(&path) {
+        drop(guard);
+        pq_flight_forget(&path, slot);
+        return Ok(json!({"questions": hit.questions, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+    }
+    let out = translate_questions_upstream(app, qs, &payload, &path).await;
+    drop(guard);
+    pq_flight_forget(&path, slot);
+    out
+}
+
+async fn translate_questions_upstream(app: &App, qs: &[PqIn], payload: &Value, path: &Path) -> Result<Value, LcError> {
     let req = ClaudeRequest {
         use_case: USE_CASE,
         system: Some(PQ_SYSTEM.to_string()),
@@ -321,7 +357,7 @@ pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value,
     let questions = pq_check(&reply.text, qs).map_err(|e| LcError::Upstream(format!("translate_failed: {e}")))?;
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
     let entry = PqCacheEntry { questions: questions.clone(), model: reply.model.clone(), prompt_version: PQ_PROMPT_VERSION.into(), cost_usd: cost };
-    if let Err(e) = save_pq(&path, &entry) {
+    if let Err(e) = save_pq(path, &entry) {
         tracing::warn!("pending question translate cache write failed: {e}");
     }
     let mut body = json!({"questions": questions, "model": reply.model, "cached": false, "cost_usd": cost});
@@ -564,6 +600,63 @@ mod tests {
         changed.questions[0].question.push('!');
         translate_questions(&app, &changed.questions).await.unwrap();
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "內容變了就重翻");
+    }
+
+    /// 上游會卡住，直到測試放行（模擬兩個分頁同時送同一份問卷）。
+    struct GatedText {
+        calls: AtomicUsize,
+        gate: Arc<tokio::sync::Semaphore>,
+        text: String,
+    }
+
+    impl MessagesClient for GatedText {
+        fn complete<'a>(&'a self, _req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = self.text.clone();
+            let gate = self.gate.clone();
+            Box::pin(async move {
+                let _permit = gate.acquire().await.expect("gate open");
+                Ok(ClientOutcome {
+                    text,
+                    model: Some("claude-haiku-5-5".into()),
+                    stop_reason: Some("end_turn".into()),
+                    usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn same_questionnaire_in_flight_makes_one_upstream_call() {
+        let (app, _dir) = app(true).await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let f = Arc::new(GatedText { calls: AtomicUsize::new(0), gate: gate.clone(), text: PQ_REPLY.into() });
+        app.claude_api.set_client(f.clone());
+        let qs = pq_body().questions;
+        let release = {
+            let gate = gate.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                gate.add_permits(1);
+            }
+        };
+        let (a, b, ()) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async { tokio::join!(translate_questions(&app, &qs), translate_questions(&app, &qs), release) },
+        )
+        .await
+        .expect("兩個請求都要完成（不能因為第二個也去打上游而卡住）");
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "同一份問卷同時只打一次上游");
+        assert_eq!(a["questions"], b["questions"], "兩份回應一致");
+        assert_eq!(usize::from(a["cached"] == json!(true)) + usize::from(b["cached"] == json!(true)), 1, "後到的那份拿到快取");
+        assert!(PQ_FLIGHT.lock().unwrap().as_ref().is_none_or(|m| m.is_empty()), "沒人等了，鎖表要收乾淨");
+        // 不同問卷照常各自打一次。
+        let mut other = pq_body();
+        other.questions[0].question.push('?');
+        gate.add_permits(1);
+        translate_questions(&app, &other.questions).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

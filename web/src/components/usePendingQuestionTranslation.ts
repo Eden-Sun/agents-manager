@@ -113,6 +113,8 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
   const fresh = eligible && !!ready?.ok && ready.auto && cur.status === 'idle' && !declined.has(key) && !autoTried.has(key)
   useEffect(() => {
     if (!fresh) return
+    // 執行時重查：同一輪渲染裡兩個元件都看到 `fresh=true`，先跑的已經標記、或已經在飛／已經有結果，後跑的就不再起一份。
+    if (autoTried.has(key) || declined.has(key) || (entries.get(key)?.status ?? 'idle') !== 'idle') return
     autoTried.add(key)
     run('fresh')
     // eslint-disable-next-line react-hooks/exhaustive-deps
