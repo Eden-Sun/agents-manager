@@ -85,6 +85,17 @@ const mockUses = (): ClaudeApiUse[] => [
 let mockStateValue: ClaudeApiSettings | null = null
 const initialMockState = (): ClaudeApiSettings => ({ enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, uses: mockUses() })
 const mockStateOf = (): ClaudeApiSettings => (mockStateValue ??= initialMockState())
+/** mock 用：打開訊息翻譯（總開關、用途、自動）。截圖與手動情境用，不影響預設。 */
+export function mockTranslateOn(auto = true): void {
+  const st = mockStateOf()
+  mockStateValue = {
+    ...st,
+    enabled: true,
+    key_present: true,
+    key_error: null,
+    uses: st.uses.map((u) => (u.id === 'message_translate' ? { ...u, enabled: true, auto } : u)),
+  }
+}
 const mockLedger: ClaudeApiLedger = {
   totals: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 },
   by_use: { changelog_review: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 } },

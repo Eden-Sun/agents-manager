@@ -121,7 +121,29 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?:
  *
  * `signal` 中止（持有者都放手了、或 bot 已不在 blocked）就立刻停、回 `null`，之後不再送鍵（issue #908）。
  */
-export async function preload(
+/**
+ * 預載一次只跑一份：同一個 module 裡的預載（背景預取與視窗各一份）共用同一條終端，導覽鍵會互相插隊，
+ * 兩邊都對不上、整份退回即時模式（真機與 mock 都看得到）。排隊；輪到自己時先重讀畫面當起點，不信排隊前的快照。
+ */
+let queue: Promise<unknown> = Promise.resolve()
+
+export function preload(
+  io: Io,
+  _start: TuiChoiceMenu,
+  onProgress?: (done: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<Draft | null> {
+  const run = queue.then(async () => {
+    if (signal?.aborted) return null
+    const fresh = await io.read().catch(() => null)
+    if (!fresh || signal?.aborted) return null
+    return preloadOnce(io, fresh, onProgress, signal)
+  })
+  queue = run.catch(() => null)
+  return run
+}
+
+async function preloadOnce(
   io: Io,
   start: TuiChoiceMenu,
   onProgress?: (done: number, total: number) => void,

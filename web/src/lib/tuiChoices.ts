@@ -505,8 +505,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   }
 
+  // 目前分頁：畫面是 Review／送出頁時就是 Submit 分頁（終端實心反白的是它，文字上只有這個線索）；
+  // 否則猜第一個還沒答的題（終端只用顏色標目前題，快照讀不到，猜錯只是跳到別題）。
+  const submitIdx = tabs.findIndex((t) => t.submit)
+  const onSubmitPage = review.length > 0 || choices.some((c) => /^submit answers$/i.test(c.title))
   const undone = tabs.findIndex((t) => !t.done && !t.submit)
-  const at = undone >= 0 ? undone : tabs.findIndex((t) => t.submit)
+  const at = onSubmitPage && submitIdx >= 0 ? submitIdx : undone >= 0 ? undone : submitIdx
 
   const submitAfter = submitLine < 0 ? -1 : rows.filter((r) => r.line < submitLine).length - 1
 

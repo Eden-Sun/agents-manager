@@ -134,3 +134,58 @@ export function twoAskKeys(s: TwoAskState, keys: string[]): { state: TwoAskState
   }
   return { state: st, outcome: null }
 }
+
+/**
+ * mock 的「英文多分頁問卷停在 Submit（Review）分頁」（issue：選擇不一致／tabAt）：分頁列三格（兩題＋Submit），
+ * Submit 是目前分頁（終端實心反白，文字上只有 Review 這個線索）；問題與選項是英文，好觸發自動翻譯。
+ */
+export const SURVEY_EN_PAGES = [
+  { label: 'Who', q: 'Who writes the articles?', opts: ['Non-engineers publish alone', 'Engineers edit Markdown'] },
+  { label: 'Features', q: 'Which features do you need?', opts: ['Site search, categories, tags', 'Newsletter subscription'] },
+]
+
+const SURVEY_EN_BAR = '←  ☒ Who  ☒ Features  ✔ Submit  →'
+
+/** 英文多分頁問卷第 `tab` 格（0、1 是題目頁，2 是 Review）：導覽鍵只動這個格子。 */
+export function surveyEnScreen(tab: number): string[] {
+  if (tab >= 2) return surveyEnReviewScreen()
+  const p = SURVEY_EN_PAGES[tab]
+  return ['─'.repeat(60), SURVEY_EN_BAR, '', p.q, '', ...p.opts.map((o, i) => `${i === 0 ? '❯ ' : '  '}${i + 1}. ${o}`), '', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']
+}
+
+export function surveyEnReviewScreen(): string[] {
+  return [
+    '─'.repeat(60),
+    SURVEY_EN_BAR,
+    '',
+    'Review your answers',
+    '',
+    ' ● Who writes the articles?',
+    '   → Engineers edit Markdown',
+    ' ● Which features do you need?',
+    '   → Newsletter subscription',
+    '',
+    'Ready to submit your answers?',
+    '',
+    '❯ 1. Submit answers',
+    '  2. Cancel',
+    '',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ]
+}
+
+/** mock 的翻譯 API：每個欄位前面加「〔譯〕」，好分辨顯示的是譯文；`id` 照請求的順序產生（同 daemon）。 */
+export function mockTranslateEcho(body: unknown) {
+  const qs = ((body as { questions?: { header: string; question: string; options: { label: string; description: string }[] }[] }).questions ?? [])
+  return {
+    questions: qs.map((q, qi) => ({
+      id: `q${qi}`,
+      header: q.header ? `〔譯〕${q.header}` : '',
+      question: `〔譯〕${q.question}`,
+      options: q.options.map((o, oi) => ({ id: `q${qi}-o${oi}`, label: `〔譯〕${o.label}`, description: o.description ? `〔譯〕${o.description}` : '' })),
+    })),
+    model: 'claude-haiku-5-5',
+    cached: false,
+    cost_usd: null,
+  }
+}

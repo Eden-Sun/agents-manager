@@ -865,3 +865,11 @@ test('#1818 單行答案行為不變：完整出現算數、只出現一部分�
   // 單行被裁切：照舊不算出現。
   assert.equal(customAnswerShown(cutOne, 'let editors publish posts'), false)
 })
+
+test('review 頁但分頁還有 ☐（終端實心反白的是 Submit）：tabAt 是 Submit，不是第一個 ☐', () => {
+  const screen = REVIEW.replace(/☒/g, '☐')
+  const menu = parseChoiceMenu(screen)
+  assert.ok(menu)
+  assert.equal(menu.tabs[0].done, false)
+  assert.equal(menu.tabAt, 2)
+})

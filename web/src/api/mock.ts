@@ -7,7 +7,9 @@ import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind, RuntimeSettings } from './types'
 import { abortError } from './transport'
-import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
+import { mockTranslateEcho, surveyEnScreen, TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
+import { mockTranslateOn } from './claudeApi'
+import { resetTranslateReady } from '../components/useTranslateReady'
 import { CODEX_ASYNC_QUESTIONS, codexAsyncKeys, codexAsyncScreen, codexAsyncStart, type CodexAsyncState } from './mockCodexAsync'
 import { MockReleaseTriage } from './mockReleaseTriage'
 import { MockShares } from './mockShare'
@@ -1199,6 +1201,7 @@ export class MockTransport implements Transport {
   async request(method: HttpMethod, path: string, body?: unknown): Promise<unknown> {
     // A little latency so loading states are visible.
     await sleep(60)
+    if (method === 'POST' && path === '/pending-questions/translate') return mockTranslateEcho(body)
     const fault = this.faults.findIndex((f) => f.method === method && f.pattern.test(path))
     if (fault >= 0) {
       const [f] = this.faults.splice(fault, 1)
@@ -3732,6 +3735,8 @@ export class MockTransport implements Transport {
   private twoAsk = new Map<string, TwoAskState>()
   private codexAsync = new Map<string, CodexAsyncState>()
   private bulletAsk = new Set<string>()
+  /** 英文多分頁問卷停在 Submit 分頁（`surveyEnReviewScreen`）。 */
+  private surveyEn = new Map<string, number>()
 
   /** 問句跟選項之間夾著條列說明的畫面（沒有 pending-question：這不是 AskUserQuestion）。回 bot id。 */
   enterBulletAsk(botId?: string): string | null {
@@ -3797,6 +3802,22 @@ export class MockTransport implements Transport {
     return id
   }
 
+  /** 英文多分頁問卷停在 Submit 分頁，並打開訊息翻譯（auto）。回 bot id。 */
+  enterSurveyEn(botId?: string): string | null {
+    const running =
+      botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
+    const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
+    if (toStart) this.start(toStart)
+    const id = running ?? toStart
+    if (!id) return null
+    mockTranslateOn(true)
+    // 設定讀取有 60 秒快取：開完要立刻生效，清掉開啟前讀到的「未啟用」。
+    resetTranslateReady()
+    this.surveyEn.set(id, 2)
+    later(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    return id
+  }
+
   enterBlocked(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -3812,6 +3833,17 @@ export class MockTransport implements Transport {
       throw new ApiError(409, { reason: 'expect_run_id 與目前 Run 不符', run_id: run.id }, 'conflict')
     }
     const keys = (Array.isArray(b.keys) ? b.keys : []).map(String)
+    const survey = run.agent_status === 'blocked' ? this.surveyEn.get(botId) : undefined
+    if (survey !== undefined) {
+      // 導覽鍵只動分頁；Enter 等作答鍵在這個情境不改狀態（截圖用，不會交卷）。
+      let tab = survey
+      for (const k of keys) {
+        if (k === 'left' || k === 'shift+tab') tab = Math.max(0, tab - 1)
+        if (k === 'right' || k === 'tab') tab = Math.min(2, tab + 1)
+      }
+      this.surveyEn.set(botId, tab)
+      return { ok: true, keys }
+    }
     const ask = run.agent_status === 'blocked' ? this.twoAsk.get(botId) : undefined
     if (ask) {
       const { state, outcome } = twoAskKeys(ask, keys)
@@ -4232,6 +4264,8 @@ export class MockTransport implements Transport {
     const body =
       status === 'blocked' && codexAsync
         ? codexAsyncScreen(codexAsync)
+        : status === 'blocked' && this.surveyEn.has(botId)
+        ? surveyEnScreen(this.surveyEn.get(botId) ?? 2)
         : status === 'blocked' && twoAsk
         ? twoAskScreen(twoAsk)
         : status === 'blocked' && this.tinyAsk.has(botId)
@@ -4380,6 +4414,8 @@ function installDevHelpers(mock: MockTransport) {
     codexAsync: (botIdOrName?: string) =>
       mock.enterCodexAsync(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     /** 兩題 AskUserQuestion、第二題可複選、分頁列與題目被裁掉（issue #559）。回 bot id。 */
+    /** 英文多分頁問卷停在 Submit（Review）分頁＋訊息翻譯 auto（桌機與手機截圖用）。回 bot id。 */
+    surveyEn: (botIdOrName?: string) => mock.enterSurveyEn(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     twoAsk: (botIdOrName?: string) => mock.enterTwoAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */
     bulletAsk: (botIdOrName?: string) =>

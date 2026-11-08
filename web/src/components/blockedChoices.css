@@ -617,7 +617,29 @@
   color: var(--text-dim);
 }
 
-/* 終端問卷的「翻譯」鈕（`useMenuTranslation`）：貼在題目下面，不搶選項的位置。 */
+/* 終端問卷的「翻譯」鈕（`useMenuTranslation`，同訊息翻譯的 `.msg-translate`）：要看得出是按鈕，不是小字。 */
 .bc-tr {
-  margin: 2px 0 6px;
+  display: flex;
+  margin: 4px 0 8px;
+}
+.bc-tr .msg-translate {
+  font-size: 12px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--text);
+}
+.bc-tr .msg-translate:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+}
+@media (width <= 640px) {
+  .bc-tr .msg-translate {
+    min-height: 40px;
+    margin: 0;
+    padding: 0 14px;
+  }
 }
