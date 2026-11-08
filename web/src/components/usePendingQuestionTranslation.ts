@@ -20,9 +20,16 @@ export function resetPendingQuestionTranslation() {
   listeners.forEach((l) => l())
 }
 
+/** 譯文字段（只存文字，不存 Jev／複選等 metadata：那些每次 render 都取目前的 `questions`）。 */
+interface TextSet {
+  header: string
+  question: string
+  options: { label: string; description: string }[]
+}
+
 type Entry =
   | { status: 'idle' | 'loading' | 'error'; key: string }
-  | { status: 'done'; key: string; items: PendingQuestion[]; show: boolean }
+  | { status: 'done'; key: string; texts: TextSet[]; show: boolean }
 
 /**
  * 譯文狀態放在模組層級（以內容 key 為鍵），不放在元件裡：同一份問卷在畫面上可能因父層切換而重掛
@@ -51,23 +58,40 @@ function payloadOf(questions: PendingQuestion[]) {
   }))
 }
 
-/** 把譯文套回題目：只換顯示的字；選項的位置（數字鍵）、label 原值（送回 CLI 的）都不動。 */
-function applyTranslation(orig: PendingQuestion[], tr: Awaited<ReturnType<typeof translatePendingQuestions>>): PendingQuestion[] {
+/** 從回應取出譯文字段（依位置對 `q{n}`／`q{n}-o{m}`）；缺的欄位是空字串，套用時退回原文。 */
+function textsOf(orig: PendingQuestion[], tr: Awaited<ReturnType<typeof translatePendingQuestions>>): TextSet[] {
   const byId = new Map(tr.questions.map((q) => [q.id, q]))
   return orig.map((q, qi) => {
     const t = byId.get(`q${qi}`)
+    const optById = new Map((t?.options ?? []).map((o) => [o.id, o]))
+    return {
+      header: t?.header ?? '',
+      question: t?.question ?? '',
+      options: q.options.map((_, oi) => {
+        const to = optById.get(`q${qi}-o${oi}`)
+        return { label: to?.label ?? '', description: to?.description ?? '' }
+      }),
+    }
+  })
+}
+
+/**
+ * 把譯文套到「目前」的題目上：只換顯示的字；選項位置（數字鍵）與 label 原值（送回 CLI 的）不動。
+ * Jev 建議、複選等 metadata 一律取目前的 `questions`，不跟著譯文快取凍結。
+ */
+function applyTexts(questions: PendingQuestion[], texts: TextSet[]): PendingQuestion[] {
+  return questions.map((q, qi) => {
+    const t = texts[qi]
     if (!t) return q
-    const optById = new Map(t.options.map((o) => [o.id, o]))
-    const options = q.options.map((o, oi) => {
-      const to = optById.get(`q${qi}-o${oi}`)
-      return { label: to?.label || o.label, description: to ? to.description : o.description }
-    })
+    const options = q.options.map((o, oi) => ({
+      label: t.options[oi]?.label || o.label,
+      description: t.options[oi]?.description || o.description,
+    }))
     return {
       ...q,
       header: t.header || q.header,
       question: t.question || q.question,
       options,
-      // Jev 的建議只顯示譯後的 label；`option` 是原位置，不變。
       jev: q.jev ? { ...q.jev, label: options[q.jev.option]?.label ?? q.jev.label } : q.jev,
     }
   })
@@ -95,7 +119,7 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
     translatePendingQuestions(payload).then(
       (r) => {
         const show = kind === 'manual' || !declined.has(key)
-        setEntry(key, { status: 'done', key, items: applyTranslation(questions, r), show })
+        setEntry(key, { status: 'done', key, texts: textsOf(questions, r), show })
       },
       (e: unknown) => {
         setEntry(key, { status: 'error', key })
@@ -140,6 +164,6 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
         },
       })
     : null
-  const display = cur.status === 'done' && cur.show ? cur.items : questions
+  const display = cur.status === 'done' && cur.show ? applyTexts(questions, cur.texts) : questions
   return { button, display }
 }
