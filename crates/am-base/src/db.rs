@@ -625,7 +625,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // 排程失敗重試與結果（P2，2026-11-08）：`schedules.retry_*`、`schedule_occurrences.outcome`／`attempt_no` 等（ALTER ADD）、`schedule_attempts`（CREATE TABLE）。
     (87, "1b910d09bc467d22"),
     // 試跑（P1）：source 加 dry_run，occurrence 表重建。
-    (88, "5519793621513450"),
+    (88, "70e406f78e62381f"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
