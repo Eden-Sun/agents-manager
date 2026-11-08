@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import { setPaneAlias, type CloseNeedsConfirm, type ProjectPane } from '../api'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -9,6 +9,7 @@ import { paneHint, paneLabel, paneCommand } from '../lib/panes'
 import { paneReadOnly } from '../lib/shellAccess'
 import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
+import { isImeEnter } from '../lib/ime'
 import './sidebarPanes.css'
 
 /** pane 清單跟專案頁同一份（store），每 30 秒重讀：pane 不是每秒在變的東西，daemon 那邊本來就每輪掃描。 */
@@ -74,6 +75,7 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
       ? t('對不到任何專案、也不是 scratch：閒置太久會被自動關')
       : ''
   const tagText = tag === 'scratch' ? 'scratch' : tag === 'extra' ? t('多出來的') : ''
+  const paneTitle = `${paneHint(p)}${hostNote}${readOnly ? t('（開著 port，只能看）') : ''}${tagTitle ? ` · ${tagTitle}` : ''}`
   // 關閉鍵（使用者 2026-11-04：選單要能快速關 pane）：一鍵關；在 listen 的服務 pane／讀不到狀態的，daemon 擋下來才問一次。
   const endHostShell = useStore((s) => s.endHostShell)
   const refreshPanes = useStore((s) => s.refreshPanes)
@@ -83,7 +85,24 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
   const [alias, setAlias] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const savingRef = useRef(false)
+  const cancelledRef = useRef(false)
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+  }, [editing])
+  const startEditing = () => {
+    cancelledRef.current = false
+    setAlias(p.alias || paneLabel(p))
+    setError('')
+    setEditing(true)
+  }
   const saveAlias = async () => {
+    if (savingRef.current || cancelledRef.current) return
+    savingRef.current = true
     setSaving(true)
     setError('')
     try {
@@ -93,6 +112,7 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
     } catch (e) {
       setError(String(e))
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
@@ -105,19 +125,32 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
 
   return (
     <div className="side-pane-wrap">
-    <button
-      type="button"
-      aria-current={here ? 'true' : undefined}
+    <div
       className={`side-pane${here ? ' current' : ''}${service ? ' service' : ''}`}
-      title={`${paneHint(p)}${hostNote}${readOnly ? t('（開著 port，只能看）') : ''}${tagTitle ? ` · ${tagTitle}` : ''}`}
+      title={paneTitle}
       onClick={() => viewPane(p)}
     >
+      <button type="button" className="side-pane-view" aria-label={paneLabel(p)} aria-current={here ? 'true' : undefined} title={paneTitle} />
       <span className="side-pane-icon" aria-hidden="true">
         {service ? '⚙' : '›_'}
       </span>
-      <span className="side-pane-label">{paneLabel(p)}{p.alias && <small className="side-pane-detail">{paneCommand(p)}{p.listen_ports.map(port => ` :${port}`).join(',')}</small>}</span>
+      <span className="side-pane-label">
+        {editing ? (
+          <input ref={inputRef} className="side-pane-alias-input" aria-label={t('別名')} value={alias} maxLength={120} disabled={saving}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setAlias(e.target.value)}
+            onBlur={() => void saveAlias()}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (isImeEnter(e.nativeEvent)) return
+              if (e.key === 'Enter') { e.preventDefault(); void saveAlias() }
+              if (e.key === 'Escape') { e.preventDefault(); cancelledRef.current = true; setEditing(false); setError('') }
+            }} />
+        ) : <button type="button" className="side-pane-name" aria-label={`${t('設定別名')}：${paneLabel(p)}`} title={t('設定別名')} onClick={(e) => { e.stopPropagation(); startEditing() }}>{paneLabel(p)}</button>}
+        {p.alias && <small className="side-pane-detail">{paneCommand(p)}{p.listen_ports.map(port => ` :${port}`).join(',')}</small>}
+      </span>
       {tag ? <span className={`side-pane-tag ${tag}`}>{tagText}</span> : service ? <span className="side-pane-tag">{t('服務')}</span> : null}
-    </button>
+    </div>
     <button
       type="button"
       className="side-pane-close"
@@ -130,17 +163,9 @@ function PaneRow({ pane: p, tag }: { pane: ProjectPane; tag: UnownedTag }) {
     </button>
     <button type="button" className="side-pane-close side-pane-more" aria-label={t('pane 選單')} aria-expanded={menu} onClick={() => setMenu(!menu)}>⋯</button>
     {menu && <div className="side-pane-menu">
-      <button type="button" onClick={() => { setAlias(p.alias ?? ''); setError(''); setEditing(true); setMenu(false) }}>{t('設定別名')}</button>
+      <button type="button" onClick={() => { setMenu(false); close(false) }}>{t('關閉這個 pane')}</button>
     </div>}
-    {editing && <ConfirmDialog
-      open={editing}
-      title={t('設定別名')}
-      body={<><label>{t('別名（留空還原預設）')}<input aria-label={t('別名')} value={alias} maxLength={120} onChange={e => setAlias(e.target.value)} disabled={saving} /></label>{error && <p role="alert">{error}</p>}</>}
-      confirmLabel={t('儲存')}
-      confirmDisabled={saving}
-      onCancel={() => { if (!saving) setEditing(false) }}
-      onConfirm={() => void saveAlias()}
-    />}
+    {error && <p className="side-pane-alias-error" role="alert">{error}</p>}
     <ConfirmDialog
       open={needs !== null}
       title={t('這顆 pane 還在做事')}

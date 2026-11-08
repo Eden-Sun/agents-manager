@@ -539,4 +539,6 @@ export default {
   "保留": "Keep",
   "關閉這個 pane：{label}": "Close this pane: {label}",
   "關閉這個 pane": "Close this pane",
+  '設定別名': 'Edit alias',
+  '別名': 'Alias',
 } satisfies Dict

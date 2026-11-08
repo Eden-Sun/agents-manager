@@ -530,7 +530,7 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 
 使用者：「這 shell pane 要在 menu 可點選進入」。專案頁已經有「其他 pane」區塊（看細節、聚焦、關閉），但它的「聚焦」是 herdr `pane.focus`——只動得了跑 daemon 那台機器的 TUI，手機上按了什麼都看不到。
 
-- **掛在側欄專案的 Bot 清單底下**，點一下在 app 裡打開（沿用主機 shell 面板，不另做一個看 pane 的畫面）。跟專案頁那塊分工：這裡只負責「進去」，細節與關閉留在專案頁。字比 Bot 列小一號、沒有燈號——它是交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。
+- **掛在側欄專案的 Bot 清單底下**，點名稱可直接編輯別名（Enter／失焦儲存、Esc 取消、清空還原預設），點列的其他部分在 app 裡打開 pane；失敗時保留輸入並顯示錯誤。字比 Bot 列小一號、沒有燈號——它是交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。
 - **名字**：用途 > 前景程式執行檔名 > cwd 最後一段 > pane id，永遠有字——空字串的按鈕點不到。路徑、port、是不是你手開的放在滑過去的提示。
 - **有 port 的 pane 只能看**：看 daemon 給的 `read_only`（舊 daemon 沒這欄時退回看 `listen_ports`），**不看 `kind`**——掃描一看到 vim／less／sudo 就把 pane 分成 service，照 kind 鎖會讓人卡在 vim 裡出不來。進去後輸入框鎖住、鍵盤同步不算數（localStorage 記著「開」也一樣）、按鍵列整列拿掉並寫明原因。送一個 Ctrl-C 給 dev server 就是把它關掉；讓人按下去才被 403 更糟。打到一半 daemon 才回 403（`read_only_pane`／`agent_pane`）時，面板當場鎖成唯讀、關掉同步，顯示 daemon 的說明。按鍵列用條件渲染而不是 `hidden`——`.keypad{display:flex}` 會把 `hidden` 蓋掉，按鈕照樣按得到（實走時抓到的）。
 - **側欄與專案頁是同一份清單**（store 的 `sidePanes`，`GET /api/panes` 一次讀完依 `project_id` 分，30 秒重讀）：專案頁關掉的，側欄同時不見；點到已經不在的 pane（面板讀到 404）收掉面板並講一聲「這顆 pane 已經關掉了」，不是閃一下就沒了。
