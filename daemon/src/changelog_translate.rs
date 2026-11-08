@@ -662,8 +662,8 @@ fn fill_attempt(
     attempt.finished_at = Some(crate::db::now());
     let backoff = crate::db::iso_in(backoff_secs(sent_n));
     match result {
-        Err(ClientError::Timeout) => {
-            fail(attempt, "timeout", "timeout", None, Some(backoff));
+        Err(ClientError::Timeout { usage }) => {
+            fail(attempt, "timeout", "timeout", taken_usage(usage), Some(backoff));
             None
         }
         Err(ClientError::RateLimited { retry_after, usage }) => {
@@ -2378,7 +2378,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_own_ledger_is_covered_by_a_finished_wider_translation() {
-        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout { usage: None }), ok_step()]).await;
         enable(&env).await;
         let _ = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         let mut failed = Value::Null;
@@ -2524,9 +2524,9 @@ mod tests {
     async fn defaults_bound_failures_to_three_and_explicit_cap_still_applies() {
         // 預設最多三次；退避到期不能繞過失敗窗口，滿一小時才可再送。
         let (env, fake) = boot(vec![
-            Step::Fail(ClientError::Timeout),
-            Step::Fail(ClientError::Timeout),
-            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout { usage: None }),
+            Step::Fail(ClientError::Timeout { usage: None }),
+            Step::Fail(ClientError::Timeout { usage: None }),
             ok_step(),
         ])
         .await;
@@ -2548,8 +2548,8 @@ mod tests {
 
         // 使用者自己設 max_attempts＝2：兩次送出後就擋在一小時窗口。
         let (env, fake) = boot(vec![
-            Step::Fail(ClientError::Timeout),
-            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout { usage: None }),
+            Step::Fail(ClientError::Timeout { usage: None }),
             ok_step(),
         ])
         .await;
@@ -2837,7 +2837,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_backs_off_without_another_call() {
-        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout { usage: None }), ok_step()]).await;
         enable(&env).await;
         let _ = post(&env.app, q_to("2.1.5")).await;
         let failed = until_status(&env.app, "2.1.5", "failed").await;
@@ -2997,8 +2997,8 @@ mod tests {
     #[tokio::test]
     async fn attempt_cap_waits_an_hour_from_the_last_send_and_retry_is_fixed() {
         let (env, fake) = boot(vec![
-            Step::Fail(ClientError::Timeout),
-            Step::Fail(ClientError::Timeout),
+            Step::Fail(ClientError::Timeout { usage: None }),
+            Step::Fail(ClientError::Timeout { usage: None }),
         ])
         .await;
         enable(&env).await;
@@ -3131,7 +3131,7 @@ mod tests {
 
     #[tokio::test]
     async fn translate_sends_with_claude_api_timeout_and_is_recorded_in_the_ledger() {
-        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout), ok_step()]).await;
+        let (env, fake) = boot(vec![Step::Fail(ClientError::Timeout { usage: None }), ok_step()]).await;
         enable(&env).await;
         env.app
             .cfg

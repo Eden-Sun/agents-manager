@@ -98,12 +98,18 @@ async fn complete(req: &TranslateRequest) -> Result<ClientOutcome, ClientError> 
 }
 
 /// Dropping the timed-out future cancels its HTTP request before the hub releases the slot.
-/// No continuation or replacement request is issued here.
+/// No continuation or replacement request is issued here. The stream state lives outside the
+/// timed future, so usage already received survives a total-deadline timeout as well.
 pub(super) async fn complete_with_total(req: &TranslateRequest, total: Duration) -> Result<ClientOutcome, ClientError> {
-    tokio::time::timeout(total, complete_stream(req)).await.map_err(|_| ClientError::Timeout)?
+    let mut events = Events::default();
+    let outcome = tokio::time::timeout(total, complete_stream(req, &mut events)).await;
+    match outcome {
+        Ok(result) => result,
+        Err(_) => Err(ClientError::Timeout { usage: events.usage.take() }),
+    }
 }
 
-async fn complete_stream(req: &TranslateRequest) -> Result<ClientOutcome, ClientError> {
+async fn complete_stream(req: &TranslateRequest, events: &mut Events) -> Result<ClientOutcome, ClientError> {
     #[cfg(test)]
     if !crate::claude_api::test_endpoint_is_loopback(&req.endpoint)
         && std::env::var("CHANGELOG_TRANSLATION_PAID_PROBE").as_deref() != Ok("1") {
@@ -117,7 +123,7 @@ async fn complete_stream(req: &TranslateRequest) -> Result<ClientOutcome, Client
     body["stream"] = json!(true);
     let mut response = tokio::time::timeout(idle, client.post(&req.endpoint)
         .header("x-api-key", &req.key).header("anthropic-version", "2023-06-01")
-        .json(&body).send()).await.map_err(|_| ClientError::Timeout)?
+        .json(&body).send()).await.map_err(|_| ClientError::Timeout { usage: None })?
         .map_err(|_| ClientError::Http { status: 0, usage: None })?;
     let status = response.status().as_u16();
     if status == 429 {
@@ -125,15 +131,15 @@ async fn complete_stream(req: &TranslateRequest) -> Result<ClientOutcome, Client
             .and_then(|v| v.to_str().ok()).map(str::to_owned), usage: None });
     }
     if !response.status().is_success() { return Err(ClientError::Http { status, usage: None }); }
-    let mut events = Events::default();
     loop {
-        let chunk = tokio::time::timeout(idle, response.chunk()).await.map_err(|_| ClientError::Timeout)?
+        let chunk = tokio::time::timeout(idle, response.chunk()).await
+            .map_err(|_| ClientError::Timeout { usage: events.usage.clone() })?
             .map_err(|_| events.failed())?;
         let Some(chunk) = chunk else { break };
         events.feed(&chunk)?;
         if events.done { break; }
     }
-    events.finish()
+    std::mem::take(events).finish()
 }
 
 #[cfg(test)]
@@ -197,8 +203,60 @@ mod tests {
         let req = TranslateRequest { endpoint, key:"mock".into(), model:"claude-sonnet-5-5".into(), effort:"low".into(),
             max_tokens:128_000, timeout_ms:1000, system:None, format:None, prompt:"mock".into() };
         let result = tokio::time::timeout(Duration::from_secs(2), complete_with_total(&req, Duration::from_millis(200))).await.unwrap();
-        assert!(matches!(result, Err(ClientError::Timeout)));
+        assert!(matches!(result, Err(ClientError::Timeout { usage: None })));
         tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
+
+    /// Accepts one connection, sends `partial`, then keeps the socket open and stalls.
+    /// Any replacement request would reach the listener during the stall; none may.
+    #[cfg(test)]
+    async fn stalled_stream_server(partial: String) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/messages", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+            socket.write_all(partial.as_bytes()).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err());
+            drop(socket);
+        });
+        (endpoint, server)
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_keeps_known_usage_on_idle_and_total_timeouts() {
+        let partial = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({"type":"message_start","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":123,"output_tokens":0,"cache_read_input_tokens":4}}}),
+            json!({"type":"message_delta","delta":{},"usage":{"output_tokens":77}}),
+        );
+        // Idle timeout fires first in the first case; the total deadline fires first in the second.
+        for (idle_ms, total) in [(150u64, Duration::from_secs(5)), (5_000, Duration::from_millis(200))] {
+            let (endpoint, server) = stalled_stream_server(partial.clone()).await;
+            let req = TranslateRequest { endpoint, key:"mock".into(), model:"claude-sonnet-5-5".into(), effort:"low".into(),
+                max_tokens:128_000, timeout_ms:idle_ms, system:None, format:None, prompt:"mock".into() };
+            let err = match complete_with_total(&req, total).await {
+                Err(e) => e,
+                Ok(_) => panic!("stalled stream must not complete"),
+            };
+            let usage = match err {
+                ClientError::Timeout { usage: Some(u) } => u,
+                other => panic!("expected timeout with usage, got {other:?}"),
+            };
+            assert_eq!(usage.input_tokens, Some(123));
+            assert_eq!(usage.output_tokens, Some(77));
+            assert_eq!(usage.cache_read_input_tokens, Some(4));
+            assert_eq!(usage.cache_creation_input_tokens, None, "unknown fields stay unknown");
+            server.await.unwrap();
+        }
     }
 
     #[test]

@@ -100,7 +100,7 @@ pub struct ClientOutcome {
 
 #[derive(Clone, Debug)]
 pub enum ClientError {
-    Timeout,
+    Timeout { usage: Option<Usage> },
     RateLimited {
         retry_after: Option<String>,
         usage: Option<Usage>,
@@ -151,7 +151,7 @@ fn complete_http(
             .await;
         let response = match response {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => return Err(ClientError::Timeout),
+            Err(e) if e.is_timeout() => return Err(ClientError::Timeout { usage: None }),
             Err(_) => {
                 return Err(ClientError::Http {
                     status: 0,
@@ -310,7 +310,7 @@ impl ClaudeError {
 
     fn from_client(e: ClientError) -> (Self, Option<Usage>) {
         match e {
-            ClientError::Timeout => (Self::Timeout, None),
+            ClientError::Timeout { usage } => (Self::Timeout, usage),
             ClientError::RateLimited { retry_after, usage } => {
                 (Self::RateLimited { retry_after_secs: retry_after.and_then(|v| v.trim().parse().ok()) }, usage)
             }
@@ -1003,7 +1003,7 @@ mod tests {
             Err(ClientError::Http { status: 401, usage: None }),
             Err(ClientError::RateLimited { retry_after: Some("7".into()), usage: None }),
             Err(ClientError::Http { status: 529, usage: None }),
-            Err(ClientError::Timeout),
+            Err(ClientError::Timeout { usage: None }),
         ];
         let fake = Fake::new(steps);
         app.claude_api.set_client(fake.clone());

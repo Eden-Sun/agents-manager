@@ -1553,7 +1553,7 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_and_transport_failures_never_dispatch_a_second_analysis() {
-        for reply in [Err(ClientError::Timeout), api_ok(GOOD).map(|mut r| {r.stop_reason=Some("max_tokens".into()); r})] {
+        for reply in [Err(ClientError::Timeout { usage: None }), api_ok(GOOD).map(|mut r| {r.stop_reason=Some("max_tokens".into()); r})] {
             let e = crate::testing::env().await;
             let app = e.app.clone();
             review_fixture(&app, &e.project_id).await;
