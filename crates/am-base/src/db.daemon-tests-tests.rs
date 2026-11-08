@@ -1431,7 +1431,7 @@
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE schedule_attempts").execute(&mut *tx).await.unwrap();
-        for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
+        for (table, col) in [("schedule_occurrences", "slot_label"), ("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
         }
         drop_dry_run_schema(&mut *tx).await;
@@ -1577,7 +1577,7 @@
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&pool).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE schedule_attempts").execute(&pool).await.unwrap();
-        for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
+        for (table, col) in [("schedule_occurrences", "slot_label"), ("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
         drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;

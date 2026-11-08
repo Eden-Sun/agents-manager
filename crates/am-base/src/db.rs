@@ -626,6 +626,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (87, "1b910d09bc467d22"),
     // 試跑（P1）：source 加 dry_run，occurrence 表重建。
     (88, "70e406f78e62381f"),
+    // 排程一天多時段（P3）：`schedule_occurrences.slot_label`（ALTER ADD）。
+    (89, "e5a94923aaa5bbbf"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -901,6 +903,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedules", "retry_count", "ALTER TABLE schedules ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5)"),
         ("schedules", "retry_interval_mins", "ALTER TABLE schedules ADD COLUMN retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440)"),
         ("schedules", "retry_deadline_mins", "ALTER TABLE schedules ADD COLUMN retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)"),
+        // 排程一天多時段（P3）：這筆 occurrence 是哪個時段觸發的（標籤，給 `{{slot}}` 與最近執行列用）；NULL＝沒有時段。
+        ("schedule_occurrences", "slot_label", "ALTER TABLE schedule_occurrences ADD COLUMN slot_label TEXT"),
         ("schedule_occurrences", "outcome", "ALTER TABLE schedule_occurrences ADD COLUMN outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown'))"),
         ("schedule_occurrences", "outcome_summary", "ALTER TABLE schedule_occurrences ADD COLUMN outcome_summary TEXT"),
         ("schedule_occurrences", "reply_message_id", "ALTER TABLE schedule_occurrences ADD COLUMN reply_message_id TEXT"),

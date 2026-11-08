@@ -5819,6 +5819,13 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 試跑以 `dry_run` source 和獨立冪等鍵記帳，daemon 加固定前言；已有未完成執行時拒絕混併，到期遇試跑則待其結束後處理。試跑失敗不發排程失敗通知，成功時依 `clear_after` 清對話。前言不是沙箱，不能保證 Bot 沒有實際操作。
 
+### 排程的多時段與 prompt 變數（P3，2026-11-08）
+
+- **多時段**：每天／每週可有多個時段 `slots: [{time, label}]`（最多 8 個，時間不重複，標籤最多 20 字）。每個時段各自觸發、各自一筆 occurrence，`schedule_occurrences.slot_label` 記下標籤。`time` 留作第一個時段，舊的單一 `time` spec 照讀。編輯器的「時間（所選時區）」欄可增刪時段；只有一個且沒標籤時仍送舊格式。
+- **prompt 變數**：`{{time}}`（HH:MM）、`{{date}}`（YYYY-MM-DD）、`{{weekday}}`（一～日）、`{{name}}`（排程名）、`{{slot}}`（時段標籤）。**送出時**（排進 Bot 佇列前）才以該次觸發時刻、排程時區展開；`occurrence.prompt` 留原樣。不認得的 `{{…}}` 原樣保留，編輯器會列出並提示。
+- **手動／試跑**：`{{time}}` 等用按下當下的時間；`{{slot}}` 用下一個排定時段的標籤（沒有就空白）。
+- 編輯器：任務內容下方有變數按鈕（點了插入游標處）與「預覽展開結果」（用現在的時間與第一個時段的標籤；實際送出用觸發時間）。
+
 ### 排程的手動執行去重（2026-10-13 補）
 
 - `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。

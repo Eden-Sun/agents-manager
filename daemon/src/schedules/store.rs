@@ -47,6 +47,8 @@ pub struct Occurrence {
     pub generation: i64,
     pub bot_id: String,
     pub prompt: String,
+    /// 觸發它的時段標籤（一天多時段才有；空白＝沒有時段）。
+    pub slot_label: Option<String>,
     pub client_request_id: Option<String>,
     pub status: String,
     pub waiting_reason: Option<String>,
@@ -187,8 +189,8 @@ pub async fn get_occurrence_tx(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Re
 
 pub async fn insert_occurrence_tx(tx: &mut Transaction<'_, Sqlite>, o: &Occurrence) -> Result<()> {
     sqlx::query(
-        "INSERT INTO schedule_occurrences (id, schedule_id, source, scheduled_for, generation, bot_id, prompt, client_request_id, status, merged_count, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,'pending',0,?,?)",
+        "INSERT INTO schedule_occurrences (id, schedule_id, source, scheduled_for, generation, bot_id, prompt, slot_label, client_request_id, status, merged_count, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,'pending',0,?,?)",
     )
     .bind(&o.id)
     .bind(&o.schedule_id)
@@ -197,6 +199,7 @@ pub async fn insert_occurrence_tx(tx: &mut Transaction<'_, Sqlite>, o: &Occurren
     .bind(o.generation)
     .bind(&o.bot_id)
     .bind(&o.prompt)
+    .bind(&o.slot_label)
     .bind(&o.client_request_id)
     .bind(&o.created_at)
     .bind(&o.updated_at)

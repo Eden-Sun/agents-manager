@@ -16,10 +16,12 @@ export interface ScheduleSpecIn {
   at?: string
   /** interval：秒（最少 60、最多一年） */
   every_secs?: number
-  /** daily／weekly：本地 `HH:MM` */
+  /** daily／weekly：本地 `HH:MM`（第一個時段；有 slots 時以 slots 為準） */
   time?: string
   /** weekly：0=週一 … 6=週日 */
   weekdays?: number[]
+  /** daily／weekly 的時段（一天多個），最多 8 個，時間不重複 */
+  slots?: { time: string; label: string }[]
 }
 
 export interface ScheduleOccurrence {
@@ -30,6 +32,8 @@ export interface ScheduleOccurrence {
   generation: number
   bot_id: string
   prompt: string
+  /** 觸發它的時段標籤（沒有時段＝null／空白） */
+  slot_label?: string | null
   status: OccurrenceStatus
   /** pending 時的等待原因：bot_busy／stopping／… */
   waiting_reason: string | null

@@ -32,6 +32,17 @@ pub struct SpecIn {
     pub every_secs: Option<i64>,
     pub time: Option<String>,
     pub weekdays: Option<Vec<u8>>,
+    /// 一天多時段（daily／weekly）；沒有就用 `time` 當單一時段。
+    pub slots: Option<Vec<time::Slot>>,
+}
+
+/// daily／weekly 的時段：`slots` 非空就用它，否則 `time` 是單一時段。回傳 (第一個時段的時間, 全部時段)。
+fn slots_of(input: &SpecIn) -> Result<(String, Vec<time::Slot>), LcError> {
+    let slots = match &input.slots {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => vec![time::Slot { time: input.time.clone().ok_or_else(|| LcError::Bad("每日／每週需要 time 或 slots".into()))?, label: String::new() }],
+    };
+    Ok((slots[0].time.clone(), slots))
 }
 
 fn build_spec(input: &SpecIn, now: DateTime<Utc>) -> Result<Spec, LcError> {
@@ -41,11 +52,14 @@ fn build_spec(input: &SpecIn, now: DateTime<Utc>) -> Result<Spec, LcError> {
             every_secs: input.every_secs.ok_or_else(|| LcError::Bad("固定間隔需要 every_secs".into()))?,
             anchor: now,
         },
-        "daily" => Spec::Daily { time: input.time.clone().ok_or_else(|| LcError::Bad("每日需要 time".into()))? },
-        "weekly" => Spec::Weekly {
-            time: input.time.clone().ok_or_else(|| LcError::Bad("每週需要 time".into()))?,
-            weekdays: input.weekdays.clone().unwrap_or_default(),
-        },
+        "daily" => {
+            let (time, slots) = slots_of(input)?;
+            Spec::Daily { time, slots }
+        }
+        "weekly" => {
+            let (time, slots) = slots_of(input)?;
+            Spec::Weekly { time, weekdays: input.weekdays.clone().unwrap_or_default(), slots }
+        }
         other => return Err(LcError::Bad(format!("mode 只能是 once／interval／daily／weekly，收到 {other}"))),
     })
 }
@@ -489,6 +503,12 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         generation: s.generation,
         bot_id: s.bot_id.clone(),
         prompt: if dry_run { format!("{}\n\n{}", DRY_RUN_PREFIX, s.prompt) } else { s.prompt.clone() },
+        // 手動／試跑：時間用按下當下；時段標籤用下一個排定時段（沒有就空白）。
+        slot_label: serde_json::from_str::<Spec>(&s.spec_json)
+            .ok()
+            .and_then(|sp| time::next_slot_after(&sp, &s.tz, DateTime::parse_from_rfc3339(now).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now())).ok().flatten())
+            .map(|(_, label)| label)
+            .filter(|l| !l.is_empty()),
         client_request_id: if dry_run { None } else { crid },
         status: "pending".into(),
         waiting_reason: None,

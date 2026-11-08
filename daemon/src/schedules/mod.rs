@@ -1,6 +1,7 @@
 //! 專案排程（使用者 2026-10-13）。
 //!
 //! - `time`：四種模式的時間計算（純函式）。
+//! - `template`：prompt 變數展開（送出時）。
 //! - `store`：schedules／schedule_occurrences 的 DB 操作。
 //! - `runner`：tick（到期→帳本→綁 turn），以及停用／編輯／刪除的撤回。
 //! - `api`：User-only HTTP。
@@ -11,6 +12,7 @@ pub mod api;
 mod outcome;
 pub mod runner;
 pub mod store;
+pub mod template;
 pub mod time;
 
 #[cfg(test)]

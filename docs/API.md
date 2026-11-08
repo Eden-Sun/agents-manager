@@ -3133,7 +3133,7 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 | POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
 | GET | `/api/schedules/{id}/history?limit=&offset=` | 分頁，`limit` 1–100（預設 20），`offset` ≥ 0 |
 
-`spec`：`{"mode":"once","at":"YYYY-MM-DDTHH:MM"}`（本地時間，不存在的 DST 時間拒絕，重複取較早）、`{"mode":"interval","every_secs":N}`（60 秒到一年，以建立時為錨點）、`{"mode":"daily","time":"HH:MM"}`、`{"mode":"weekly","time":"HH:MM","weekdays":[0..6]}`（0＝週一）。不做任意 cron。
+`spec`：`{"mode":"once","at":"YYYY-MM-DDTHH:MM"}`（本地時間，不存在的 DST 時間拒絕，重複取較早）、`{"mode":"interval","every_secs":N}`（60 秒到一年，以建立時為錨點）、`{"mode":"daily","time":"HH:MM"}`、`{"mode":"weekly","time":"HH:MM","weekdays":[0..6]}`（0＝週一）。daily／weekly 可加 `slots`：`[{"time":"HH:MM","label":"上班"}]`，一天最多 8 個、時間不重複、標籤最多 20 字；`time` 是第一個時段，沒有 `slots` 就是單一時段（舊格式照讀）。不做任意 cron。
 
 Bot 資格：同專案、`managed_by='user'`、非 child、非分享、非受限，專案未刪未移交。
 

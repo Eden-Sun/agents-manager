@@ -165,6 +165,7 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
     let due_dt = DateTime::parse_from_rfc3339(&due)?.with_timezone(&Utc);
     let after_due = due_dt.checked_add_signed(Duration::milliseconds(1)).unwrap_or(due_dt);
     let next = time::next_after(&spec, &s.tz, now_dt.max(after_due))?.map(fmt);
+    let slot_label = time::slot_label_at(&spec, &s.tz, due_dt)?.filter(|l| !l.is_empty());
     let mut tx = db::begin_write(pool).await?;
     // 交易內重讀：到期判斷與寫入之間可能被停用、編輯或刪除。
     let Some(cur) = store::get_schedule_tx(&mut tx, &s.id).await? else { return Ok(()) };
@@ -183,6 +184,7 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
                 generation: s.generation,
                 bot_id: s.bot_id.clone(),
                 prompt: s.prompt.clone(),
+                slot_label,
                 client_request_id: None,
                 status: "pending".into(),
                 waiting_reason: None,
@@ -272,8 +274,11 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
         if changed { app.emit("schedules_changed", json!({"project_id": sched.project_id, "id": sched.id})).await; }
         return Ok(false);
     };
-    let text = crate::lifecycle::pane_text::for_pane(&kind, &occ.prompt);
-    if crate::lifecycle::pane_text::nothing_left(&occ.prompt, &text) {
+    // 送出時才展開變數（時間用這次觸發的時刻、排程時區）；occ.prompt 留原樣。
+    let when = DateTime::parse_from_rfc3339(&occ.scheduled_for)?.with_timezone(&Utc);
+    let prompt = super::template::expand(&occ.prompt, &super::template::Ctx::new(sched.tz.parse().unwrap_or(chrono_tz::UTC), when, &sched.name, occ.slot_label.as_deref().unwrap_or("")));
+    let text = crate::lifecycle::pane_text::for_pane(&kind, &prompt);
+    if crate::lifecycle::pane_text::nothing_left(&prompt, &text) {
         store::finish_open_tx(&mut tx, occurrence_id, "failed", "排程的 prompt 清理後是空的", &now).await?;
         tx.commit().await?;
         notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的"), occ.attempt_no, occ.source == "dry_run").await;
@@ -315,7 +320,7 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
-    .bind(&occ.prompt)
+    .bind(&prompt)
     .bind(&now)
     .execute(&mut *tx)
     .await

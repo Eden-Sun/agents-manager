@@ -26,11 +26,31 @@ import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occ
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleResult } from './ScheduleResult'
 import { copyScheduleName } from './scheduleCopy'
+import { contextAt, expandPrompt, PROMPT_VARS, unknownPromptVars } from './promptVars'
 import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
 import './scheduleEditor.css'
 
 const WEEKDAYS = [msg('週一'), msg('週二'), msg('週三'), msg('週四'), msg('週五'), msg('週六'), msg('週日')]
+
+/** 一天內的一個時段：本地時間 `HH:MM` ＋ 標籤（例：「上班」）。 */
+interface ScheduleSlot {
+  time: string
+  label: string
+}
+
+const MAX_SLOTS = 8
+const MAX_SLOT_LABEL = 20
+
+/** 新增時段時預設的時間：第一個還沒用到的整點（09:00 起），都用了就 09:00。 */
+function nextFreeTime(slots: ScheduleSlot[]): string {
+  const used = new Set(slots.map((s) => s.time))
+  for (let h = 9; h < 24; h++) {
+    const hm = `${String(h).padStart(2, '0')}:00`
+    if (!used.has(hm)) return hm
+  }
+  return '09:00'
+}
 
 interface FormState {
   name: string
@@ -42,7 +62,8 @@ interface FormState {
   at: string
   /** 間隔的秒數：保留 API 收的精度（例如 61 秒）；分鐘欄只是顯示與改分鐘用，沒動就沿用原值。 */
   everySecs: number
-  time: string
+  /** daily／weekly 的時段（至少一個）。 */
+  slots: ScheduleSlot[]
   weekdays: number[]
   clearAfter: boolean
   retryCount: number
@@ -51,11 +72,11 @@ interface FormState {
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, time: '09:00', weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '' }], weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
 }
 
 function fromDetail(d: Schedule): FormState {
-  const spec = (d.spec ?? {}) as { at?: string; every_secs?: number; time?: string; weekdays?: number[] }
+  const spec = (d.spec ?? {}) as { at?: string; every_secs?: number; time?: string; weekdays?: number[]; slots?: ScheduleSlot[] }
   return {
     name: d.name,
     prompt: d.prompt,
@@ -65,7 +86,8 @@ function fromDetail(d: Schedule): FormState {
     mode: d.mode === 'weekly' && spec.weekdays?.length === 5 && [0, 1, 2, 3, 4].every((day) => spec.weekdays!.includes(day)) ? 'weekdays' : d.mode,
     at: spec.at ?? '',
     everySecs: spec.every_secs || 3600,
-    time: spec.time ?? '09:00',
+    // 舊排程只有單一 `time`，讀成沒有標籤的一個時段。
+    slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, label: s.label ?? '' })) : [{ time: spec.time ?? '09:00', label: '' }],
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
     retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3, retryDeadline: d.retry_deadline_mins ?? 15,
@@ -73,17 +95,20 @@ function fromDetail(d: Schedule): FormState {
 }
 
 function specOf(f: FormState): ScheduleSpecIn {
+  const slots = f.slots.map((s) => ({ time: s.time, label: s.label.trim() }))
+  // 單一、沒標籤的時段仍送舊格式（只有 time），跟既有排程的 spec 一致。
+  const extra = slots.length > 1 || slots.some((s) => s.label) ? { slots } : {}
   switch (f.mode) {
     case 'once':
       return { mode: 'once', at: f.at }
     case 'interval':
       return { mode: 'interval', every_secs: f.everySecs }
     case 'daily':
-      return { mode: 'daily', time: f.time }
+      return { mode: 'daily', time: slots[0]?.time ?? '', ...extra }
     case 'weekdays':
-      return { mode: 'weekly', time: f.time, weekdays: [0, 1, 2, 3, 4] }
+      return { mode: 'weekly', time: slots[0]?.time ?? '', weekdays: [0, 1, 2, 3, 4], ...extra }
     case 'weekly':
-      return { mode: 'weekly', time: f.time, weekdays: [...f.weekdays].sort((a, b) => a - b) }
+      return { mode: 'weekly', time: slots[0]?.time ?? '', weekdays: [...f.weekdays].sort((a, b) => a - b), ...extra }
   }
 }
 
@@ -258,10 +283,24 @@ export function ScheduleEditor({
     touchedRef.current.add(k)
     setForm((f) => ({ ...f, [k]: v }))
   }
+  const setSlot = (i: number, patch: Partial<ScheduleSlot>) => set('slots', form.slots.map((s, j) => (j === i ? { ...s, ...patch } : s)))
+  // 點變數：插在游標處（沒有游標就接在最後）。
+  const insertVar = (v: string) => {
+    const token = `{{${v}}}`
+    const el = promptRef.current
+    const start = el?.selectionStart ?? form.prompt.length
+    const end = el?.selectionEnd ?? start
+    set('prompt', form.prompt.slice(0, start) + token + form.prompt.slice(end))
+    requestAnimationFrame(() => {
+      el?.focus()
+      el?.setSelectionRange(start + token.length, start + token.length)
+    })
+  }
 
 
   // 任務內容框只在內容超出目前高度時長高（最少 8 行由 rows 決定，最多 60vh 由 CSS 限制）；使用者手動拉高的不會被縮回去。
   const promptRef = useRef<HTMLTextAreaElement>(null)
+  const [showPreview, setShowPreview] = useState(false)
   useLayoutEffect(() => {
     const el = promptRef.current
     if (!el || el.scrollHeight <= el.clientHeight) return
@@ -282,6 +321,12 @@ export function ScheduleEditor({
     if (!effectiveBotId) return setError(t('請選執行的 Bot（或建立專用 Bot）'))
     if (form.mode === 'once' && !form.at) return setError(t('單次需要日期與時間'))
     if (form.mode === 'weekly' && form.weekdays.length === 0) return setError(t('每週至少選一天'))
+    if (form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays') {
+      if (form.slots.length === 0 || form.slots.some((s) => !s.time)) return setError(t('時段需要時間'))
+      if (new Set(form.slots.map((s) => s.time)).size !== form.slots.length) return setError(t('時段時間不能重複'))
+      if (form.slots.length > MAX_SLOTS) return setError(t('時段最多 {n} 個', { n: MAX_SLOTS }))
+      if (form.slots.some((s) => [...s.label.trim()].length > MAX_SLOT_LABEL)) return setError(t('時段標籤不能超過 {n} 字', { n: MAX_SLOT_LABEL }))
+    }
     const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval, retry_deadline_mins: form.retryDeadline }
     const retryChanged = form.retryCount !== (detail?.retry_count ?? 0) || form.retryInterval !== (detail?.retry_interval_mins ?? 3) || form.retryDeadline !== (detail?.retry_deadline_mins ?? 15)
     setBusy(true)
@@ -384,12 +429,15 @@ export function ScheduleEditor({
   const sameSlot = (x: Schedule): boolean => {
     const mine = detail?.next_due ?? null
     if (mine && x.next_due) return Math.abs(Date.parse(mine) - Date.parse(x.next_due)) < 10 * 60_000
-    if (!x.next_due || !(form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays') || !/^\d{2}:\d{2}$/.test(form.time)) return false
-    const [h, m] = form.time.split(':').map(Number)
+    if (!x.next_due || !(form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays')) return false
     const theirs = minutesOfDayIn(x.next_due, form.tz)
     if (theirs === null) return false
-    const diff = Math.abs(theirs - (h * 60 + m))
-    return Math.min(diff, 1440 - diff) < 10
+    return form.slots.some((slot) => {
+      if (!/^\d{2}:\d{2}$/.test(slot.time)) return false
+      const [h, m] = slot.time.split(':').map(Number)
+      const diff = Math.abs(theirs - (h * 60 + m))
+      return Math.min(diff, 1440 - diff) < 10
+    })
   }
   const conflicts = otherSchedules.filter((x) => x.bot_id === effectiveBotId && sameSlot(x))
   const conflictNote = conflicts.length > 0 ? (
@@ -483,10 +531,17 @@ export function ScheduleEditor({
           </label>
         ) : null}
         {form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays' ? (
-          <label className="field">
-            <span>{t('時間（所選時區）')}</span>
-            <input type="time" value={form.time} disabled={loading} onChange={(e) => set('time', e.target.value)} />
-          </label>
+          <fieldset className="field schedule-slots">
+            <legend>{t('時間（所選時區）')}</legend>
+            {form.slots.map((slot, i) => (
+              <div key={i} className="schedule-slot-row">
+                <input type="time" aria-label={t('第 {n} 個時段的時間', { n: i + 1 })} value={slot.time} disabled={loading} onChange={(e) => setSlot(i, { time: e.target.value })} />
+                <input type="text" maxLength={MAX_SLOT_LABEL} placeholder={t('標籤（選填）')} aria-label={t('第 {n} 個時段的標籤', { n: i + 1 })} value={slot.label} disabled={loading} onChange={(e) => setSlot(i, { label: e.target.value })} />
+                <button type="button" className="schedule-link" disabled={loading || form.slots.length <= 1} onClick={() => set('slots', form.slots.filter((_, j) => j !== i))}>{t('刪除時段')}</button>
+              </div>
+            ))}
+            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), label: '' }])}>{t('新增時段')}</button>
+          </fieldset>
         ) : null}
         {form.mode === 'weekly' ? (
           <fieldset className="field">
@@ -562,6 +617,27 @@ export function ScheduleEditor({
           }}
         />
       </label>
+      <div className="schedule-vars">
+        <span className="hint">{t('變數（點了插入）')}</span>
+        <div className="schedule-var-chips">
+          {PROMPT_VARS.map((v) => (
+            <button type="button" key={v} className="schedule-var-chip" disabled={loading} onClick={() => insertVar(v)}>{`{{${v}}}`}</button>
+          ))}
+        </div>
+        {unknownPromptVars(form.prompt).length > 0 ? (
+          <p className="hint schedule-var-warn" role="alert">
+            {t('不認得的變數 {vars} 會原樣保留', { vars: unknownPromptVars(form.prompt).map((v) => `{{${v}}}`).join('、') })}
+          </p>
+        ) : null}
+        <button type="button" className="schedule-link" aria-expanded={showPreview} onClick={() => setShowPreview((v) => !v)}>{t('預覽展開結果')}</button>
+        {showPreview ? (
+          <p className="schedule-preview" aria-label={t('預覽展開結果')}>
+            {expandPrompt(form.prompt, contextAt(form.tz, new Date(), form.name, form.slots[0]?.label.trim() ?? ''))}
+          </p>
+        ) : null}
+        {showPreview ? <p className="hint">{t('預覽用現在的時間與第一個時段的標籤；實際送出時用該次觸發的時間。')}</p> : null}
+      </div>
+
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
@@ -597,7 +673,7 @@ export function ScheduleEditor({
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)}{o.slot_label ? ` · ${o.slot_label}` : ''} · {OCCURRENCE_LABEL[o.status]}
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                   {o.error ? t('（{error}）', { error: o.error }) : ''}
                   {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}

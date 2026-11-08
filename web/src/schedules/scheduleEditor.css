@@ -201,3 +201,86 @@
 @media (max-width: 600px) {
   .schedule-editor .schedule-time-grid { grid-template-columns: 1fr; }
 }
+
+/* 任務內容的變數：點了插入、可預覽展開結果；時段列表（時間＋標籤＋刪除）。手機寬度換行，不橫向捲動。 */
+.schedule-editor .schedule-vars {
+  display: grid;
+  gap: 6px;
+  margin: -4px 0 12px;
+  min-width: 0;
+}
+
+.schedule-editor .schedule-var-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-editor .schedule-var-chip {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  cursor: pointer;
+}
+
+.schedule-editor .schedule-var-warn {
+  color: var(--danger, #b45309);
+}
+
+.schedule-editor .schedule-link {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #2563eb);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.schedule-editor .schedule-preview {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.schedule-editor .schedule-slots {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schedule-editor .schedule-slot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 8rem) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.schedule-editor .schedule-slot-row input {
+  min-width: 0;
+  width: 100%;
+}
+
+@media (max-width: 600px) {
+  .schedule-editor .schedule-slot-row {
+    grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
+  }
+  .schedule-editor .schedule-slot-row .schedule-link {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+}
