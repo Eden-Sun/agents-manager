@@ -41,11 +41,13 @@ export interface DraftPage {
   hasSubmitRow: boolean
   review: TuiChoiceMenu['review']
   isSubmit: boolean
+  /** 終端上已經答過的那一項（單選，從 Review 的「→ 答案」對回來）；沒有是 `-1`。複選看 `choices[].checked`。 */
+  answered?: number
 }
 
 export interface Draft {
   pages: DraftPage[]
-  /** 預載開始（也是結束）的分頁。 */
+  /** 預載結束時停的分頁：第一個未答的題（全答完或分不出就是第一題）。 */
   startTab: number
   tabs: TuiChoiceMenu['tabs']
 }
@@ -127,19 +129,30 @@ export async function preload(
 ): Promise<Draft | null> {
   const tabs = start.tabs
   const n = tabs.length
-  const startTab = start.tabAt
-  if (n < MIN_TABS || startTab === null) return null
-
-  const startPage = pageOf(start, startTab, tabs[startTab].label)
-  if (tabs[startTab].submit || startPage.isSubmit) return null
+  if (n < MIN_TABS) return null
   // 送出頁一律在最後；只走到最後一題為止。
   let last = n - 1
   while (last > 0 && tabs[last].submit) last -= 1
-  if (startTab > last) return null
+  // Review 上「→ 答案」是終端已答的內容；先存下來，走離送出頁之後也還用得到。
+  const reviewNow = start.review
 
-  const pages: (DraftPage | undefined)[] = new Array<DraftPage | undefined>(n)
+  // 起點：畫面在送出頁時就是送出分頁（猜的 `tabAt` 不可靠）；否則用猜的目前分頁。
   let cur: TuiChoiceMenu = start
-  let at = startTab
+  const submitAt = tabs.findIndex((t) => t.submit)
+  let at = isSubmitMenu(start) ? (submitAt >= 0 ? submitAt : n - 1) : (start.tabAt ?? -1)
+  if (at < 0 || at >= n) return null
+  // 起點在送出頁（或更右）：先往左走到最後一題再預載（送出頁不讀、不當起點）。
+  while (at > last || isSubmitMenu(cur)) {
+    const next = await moveTab(io, -1, cur, signal)
+    if (!next) return null
+    at -= 1
+    cur = next
+  }
+  const startTab = at
+  if (startTab > last || startTab < 0) return null
+
+  const startPage = pageOf(cur, startTab, tabs[startTab].label)
+  const pages: (DraftPage | undefined)[] = new Array<DraftPage | undefined>(n)
   let done = 0
   const note = () => onProgress?.(++done, n)
 
@@ -164,7 +177,10 @@ export async function preload(
     }
   }
 
-  while (at > startTab) {
+  // 結束停在第一個未答的題：使用者從那裡開始作答，不必從第一頁找。
+  let target = tabs.findIndex((t, k) => k <= last && !t.submit && !t.done)
+  if (target < 0) target = 0
+  while (at > target) {
     const next = await moveTab(io, -1, cur, signal)
     if (!next) return null
     at -= 1
@@ -172,12 +188,27 @@ export async function preload(
   }
 
   const full = pages.filter((p): p is DraftPage => Boolean(p))
-  return full.length === n ? { pages: full, startTab, tabs } : null
+  if (full.length !== n) return null
+  return {
+    pages: full.map((p) => (p.isSubmit ? p : { ...p, answered: answeredIndex(p, reviewNow) })),
+    startTab: target,
+    tabs,
+  }
+}
+
+/** 單選：Review 上這題的「→ 答案」對回哪一項（對不上、Type something、複選都是 `-1`）。 */
+function answeredIndex(page: DraftPage, review: TuiChoiceMenu['review']): number {
+  if (page.multi || page.isSubmit || !page.question) return -1
+  const row = review.find((r) => squash(r.question) === squash(page.question ?? ''))
+  const got = squash(row?.answer ?? '')
+  if (!got) return -1
+  return page.choices.findIndex((c) => !isTypeSomething(c) && squash(c.title) === got)
 }
 
 /** 預設＝讀到當下的勾選；單選預設全沒選。 */
 export function wantOf(page: DraftPage): boolean[] {
-  if (!page.multi) return page.choices.map(() => false)
+  // 單選：終端上已經答過的那一項預設選中（從 Review 對回來的）；沒有就全沒選。
+  if (!page.multi) return page.choices.map((_, j) => j === page.answered)
   return page.choices.map((c) => c.checked === true)
 }
 
@@ -190,7 +221,8 @@ export function radioPick(want: boolean[] | undefined): number {
 
 export function pageNeedsCommit(page: DraftPage, want: boolean[] | undefined): boolean {
   if (page.isSubmit) return false
-  if (!page.multi) return radioPick(want) >= 0
+  // 單選：跟終端上已答的一樣就不必再送（同一項再按會跳題）。
+  if (!page.multi) return radioPick(want) >= 0 && radioPick(want) !== (page.answered ?? -1)
   return togglesFor(page.choices, want ?? wantOf(page)).length > 0
 }
 

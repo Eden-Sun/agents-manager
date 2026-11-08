@@ -253,13 +253,34 @@ test('預載不走進 Submit 頁：送出頁是合成的，終端從頭到尾沒
   assert.equal(tui.tab, 0)
 })
 
-test('起點就是 Submit 頁（被別的預載晾在那裡）時不預載，退回即時模式', async () => {
+test('起點在 Submit 頁（被別的預載晾在那裡）：先往左走到最後一題再預載，結束停在第一個未答題，已勾的帶入', async () => {
   const tui = new FakeTui()
   tui.tab = 2
+  tui.checked = [
+    [false, true, false],
+    [true, false, false],
+  ]
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
-  assert.equal(await preload(tui.io(), start), null)
-  assert.deepEqual(tui.sent, [], '一顆鍵都不送')
+  const d = await preload(tui.io(), start)
+  assert.ok(d, '不再退回即時模式')
+  assert.equal(d.startTab, 0, '沒有分頁被標 ☒，停在第一題')
+  assert.equal(tui.tab, 0, '終端也停在第一題')
+  assert.deepEqual(wantOf(d.pages[0]), [false, true, false, false], '終端上已勾的帶入（最後一列是 Type something）')
+  assert.deepEqual(wantOf(d.pages[1]), [true, false, false, false])
+  assert.ok(tui.sent.length > 0 && tui.sent.every((k) => ['left', 'right', 'tab', 'shift+tab'].includes(k)), '只送導覽鍵')
+})
+
+test('預載結束停在第一個未答題（已答的分頁跳過）', async () => {
+  const tui = new FakeTui()
+  tui.pageDone = [true, false]
+  tui.tab = 1
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const d = await preload(tui.io(), start)
+  assert.ok(d)
+  assert.equal(d.startTab, 1)
+  assert.equal(tui.tab, 1)
 })
 
 test('走不動就整個放棄，不留讀了一半的草稿', async () => {
@@ -1243,4 +1264,24 @@ test('#1818 commit：多行自訂答案貼上後只出現第一行（沒有裁�
   assert.equal(res.ok, false)
   assert.match(res.error ?? '', /沒有出現/)
   assert.equal(sent.includes('enter'), false)
+})
+
+test('單選：終端上已答的那一項預設選中；跟終端一樣就不需要再送', () => {
+  const page: DraftPage = {
+    tab: 0,
+    label: '編輯方式',
+    question: '文章是誰寫？',
+    choices: [
+      { number: 1, title: '非工程師', detail: '', current: false, checked: null, preview: '' },
+      { number: 2, title: '工程師', detail: '', current: false, checked: null, preview: '' },
+    ],
+    multi: false,
+    hasSubmitRow: false,
+    review: [],
+    isSubmit: false,
+    answered: 1,
+  }
+  assert.deepEqual(wantOf(page), [false, true])
+  assert.equal(pageNeedsCommit(page, wantOf(page)), false)
+  assert.equal(pageNeedsCommit(page, [true, false]), true, '改選才要送')
 })
