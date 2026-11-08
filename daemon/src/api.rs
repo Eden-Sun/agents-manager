@@ -19223,6 +19223,28 @@ mod hire_fork_api_tests {
         let another = hire(&env, &manager, json!({"name": "again", "kind": "codex", "model": "gpt-6.1-sol", "effort": "high"})).await.unwrap();
         assert_eq!(another.status(), StatusCode::OK);
     }
+
+    /// 2026-11-08（wits tr3）：fork hire 之後 /api/state 必須看得到這顆 bot（側欄與群集計數都從 state 來）。
+    #[tokio::test]
+    async fn a_forked_hire_shows_up_in_state() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        let source = add_bot(&env, &env.project_id, "codex", true).await;
+        let response = hire(&env, &manager, json!({"name": "tr3", "kind": "codex", "model": "gpt-6.1-terra", "fork_from": source})).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+
+        let state = state_json(&env.app).await.unwrap();
+        let mine = state["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|p| p["bots"].as_array().into_iter().flatten())
+            .find(|b| b["id"] == id.as_str())
+            .unwrap_or_else(|| panic!("forked bot missing from /api/state: {state}"));
+        assert_eq!(mine["role"], "executor");
+        assert_eq!(mine["name"], "tr3");
+    }
 }
 
 #[cfg(test)]
