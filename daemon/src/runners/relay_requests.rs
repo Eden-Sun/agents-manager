@@ -196,6 +196,26 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
+            if is_claude_api && existing.is_none() {
+                let active = db::active_run(&app.db, &to).await?;
+                let run_state = active.as_ref().map(|r| r.state.as_str());
+                if run_state != Some("running") {
+                    if run_state != Some("starting") {
+                        use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError, ApiNativeStartMode};
+                        if let Err(e) = ApiBotPort::api_native_start(app, &to, ApiNativeStartMode::Resume { required: false }).await {
+                            let err_msg = match e {
+                                ApiNativeStartError::Refused(reason) => format!("start_failed:{reason}"),
+                                ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
+                                ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
+                            };
+                            sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                                .bind(&err_msg).bind(id).execute(&app.db).await?;
+                            return Ok(());
+                        }
+                    }
+                    return Ok(());
+                }
+            }
             turn = if existing.is_some() {
                 existing
             } else if db::active_run(&app.db, &to).await?.is_some_and(|run| run.state == "running") {
@@ -541,5 +561,28 @@ mod tests {
         assert!(processed.is_some());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_requests").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn claude_api_advisor_stopped_reconcile_fails_request_on_start_refusal() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let a = crate::testing::claude_bot(&env.app, &env.project_id, "mgr-bot").await;
+        let b = crate::testing::claude_bot(&env.app, &env.project_id, "adv-bot").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&a.id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='claude-api', role='advisor', model='claude-opus-5-5' WHERE id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
+        let arun = crate::testing::fake_run(&env.app, &a.id).await;
+        sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:manager", env.project_id)).bind(&arun).execute(&env.app.db).await.unwrap();
+
+        let request = db::ulid();
+        sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at) VALUES(?,?,?,'c-reconcile-stopped','consult','[]','pending',?)")
+            .bind(&request).bind(&a.id).bind(&b.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+
+        // Advisor has no active run and api_bot is disabled, so ApiBotPort::api_native_start will return Refused("api_bot_disabled")
+        sweep(&env.app).await;
+
+        let (state, err_str): (String, Option<String>) = sqlx::query_as("SELECT state, error FROM relay_requests WHERE id=?").bind(&request).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed");
+        assert_eq!(err_str.as_deref(), Some("start_failed:api_bot_disabled"));
     }
 }

@@ -8027,7 +8027,9 @@ pub(crate) async fn prompt_bot(
             if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
-        ensure_relay_member_ready(&app, sender, &id).await?;
+        if kind != Some("claude-api") {
+            ensure_relay_member_ready(&app, sender, &id).await?;
+        }
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
@@ -8053,7 +8055,7 @@ pub(crate) async fn prompt_bot(
         let delivery_key = format!("relay-request:{request_id}");
         let is_target_claude_api = kind == Some("claude-api");
         let out = if is_target_claude_api {
-            use crate::lifecycle::api_bot_port::ApiBotPort;
+            use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError, ApiNativeStartMode};
             if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(&app, 0).await {
                 let cap_str = crate::claude_api_cap::format_usd_pretty(cap);
                 let spent_str = crate::claude_api_cap::format_usd_pretty(spent);
@@ -8062,12 +8064,31 @@ pub(crate) async fn prompt_bot(
                     .bind(&err_msg).bind(&request_id).execute(&app.db).await.map_err(any_err)?;
                 return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"failed","error":err_msg}))).into_response());
             }
-            let is_busy = {
-                let has_inflight: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='in_flight')")
-                    .bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
-                has_inflight || !db::active_run(&app.db, &id).await.map_err(any_err)?.is_some_and(|r| r.state == "running")
-            };
-            if is_busy {
+            let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
+            let run_state = active.as_ref().map(|r| r.state.as_str());
+            if run_state != Some("running") {
+                if run_state == Some("starting") {
+                    return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending"}))).into_response());
+                }
+                match ApiBotPort::api_native_start(&app, &id, ApiNativeStartMode::Resume { required: false }).await {
+                    Ok(_) => {
+                        return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending"}))).into_response());
+                    }
+                    Err(e) => {
+                        let err_msg = match e {
+                            ApiNativeStartError::Refused(reason) => format!("start_failed:{reason}"),
+                            ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
+                            ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
+                        };
+                        sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
+                            .bind(&err_msg).bind(&request_id).execute(&app.db).await.map_err(any_err)?;
+                        return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"failed","error":err_msg}))).into_response());
+                    }
+                }
+            }
+            let has_inflight: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='in_flight')")
+                .bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
+            if has_inflight {
                 return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending"}))).into_response());
             }
             match ApiBotPort::api_native_prompt(&app, &id, &b.text, &delivery_key).await {
@@ -19177,10 +19198,27 @@ mod claude_api_advisor_relay_tests {
         // Complete the in-flight turn to make advisor idle
         sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
             .bind(db::now()).bind(&in_flight_turn).execute(&env.app.db).await.unwrap();
+    }
 
-        // Total cap exceeded during reconciliation will mark request failed
-        // But here total cap is fine, simulate prompt execution via fake server or turn setup:
-        // When sweep runs, if native prompt fails or unconfirmed, it stays pending or delivered.
-        // Let's test that sweep sees it and attempts delivery.
+    #[tokio::test]
+    async fn claude_api_advisor_stopped_auto_starts_or_fails_request_on_start_error() {
+        let (env, manager, advisor) = expert_fixture().await;
+        // Advisor has no active run (stopped)
+        // Without enabling api_bot in config, ApiBotPort::api_native_start refuses with "api_bot_disabled"
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Id", manager.parse().unwrap());
+        headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+        let body: PromptIn = serde_json::from_value(json!({"text":"consult stopped advisor","client_request_id":"c-stopped","expect_result":true})).unwrap();
+
+        let res = prompt_bot(State(env.app.clone()), Path(advisor.clone()), headers, Extension(RequestPrincipal::Bot(manager)), Json(body)).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["delivery"], "failed");
+        assert_eq!(val["error"], "start_failed:api_bot_disabled");
+
+        let (state, err_str): (String, Option<String>) = sqlx::query_as("SELECT state, error FROM relay_requests WHERE id=?")
+            .bind(val["request_id"].as_str().unwrap()).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(state, "failed");
+        assert_eq!(err_str.as_deref(), Some("start_failed:api_bot_disabled"));
     }
 }

@@ -7397,4 +7397,98 @@ mod tests {
         assert_eq!(f.runner_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn claude_api_advisor_relay_end_to_end() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hit = Arc::new(Notify::new());
+        let (endpoint, shutdown, server) = fake_server(calls.clone(), hit.clone()).await;
+        enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+        let manager = crate::testing::claude_bot(&env.app, &env.project_id, "mgr-bot").await;
+        let advisor_id = crate::db::ulid();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,role,hook_token,created_at) VALUES(?,?,'api-adv-bot','claude-api','high','advisor','fixture',?)")
+            .bind(&advisor_id).bind(&env.project_id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        let advisor = crate::db::bot(&env.app.db, &advisor_id).await.unwrap().unwrap();
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+
+        // Start advisor natively
+        let adv_run = crate::lifecycle::start_bot(&env.app, &advisor.id).await.unwrap();
+        // Start manager
+        let mgr_run = crate::testing::fake_run(&env.app, &manager.id).await;
+        sqlx::query("UPDATE runs SET state='running', runtime_role_policy=? WHERE id=?")
+            .bind(format!("{}:local:expert:manager", env.project_id)).bind(&mgr_run).execute(&env.app.db).await.unwrap();
+
+        // Send expect_result relay prompt from manager to advisor
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-AM-Bot-Id", manager.id.parse().unwrap());
+        headers.insert("X-AM-Bot-Token", manager.hook_token.parse().unwrap());
+        let body: crate::api::PromptIn = serde_json::from_value(serde_json::json!({
+            "text": "What is the fixture answer?",
+            "client_request_id": "c-e2e-1",
+            "expect_result": true
+        })).unwrap();
+
+        let res = crate::api::prompt_bot(
+            axum::extract::State(env.app.clone()),
+            axum::extract::Path(advisor.id.clone()),
+            headers,
+            axum::Extension(crate::api::RequestPrincipal::Bot(manager.id.clone())),
+            axum::Json(body),
+        ).await.unwrap();
+
+        let bytes = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["delivery"], "ok", "{val}");
+        let request_id = val["request_id"].as_str().unwrap().to_string();
+        let target_turn_id = val["turn_id"].as_str().unwrap().to_string();
+
+        // Wait for native provider to be called and complete turn
+        tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("fake provider should be called");
+
+        // Wait for native turn to reach completed status in turns table
+        let turn_completed = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            loop {
+                let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                    .bind(&target_turn_id).fetch_optional(&env.app.db).await.unwrap();
+                if status.as_deref() == Some("completed") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        assert!(turn_completed.is_ok(), "turn did not reach completed in time");
+
+        // 發送者忙著：通知排進它的佇列（跟 relay_requests 既有測試同一個做法；假 run 沒有真 pane 可送）。
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&mgr_run).execute(&env.app.db).await.unwrap();
+        // Now run relay requests sweep so relay_requests transitions to answered and delivers notice
+        crate::runners::relay_requests::sweep(&env.app).await;
+
+        let (req_state, req_err): (String, Option<String>) = sqlx::query_as("SELECT state, error FROM relay_requests WHERE id=?")
+            .bind(&request_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(req_state, "answered", "error={req_err:?}");
+
+        // Verify notification turn queued for manager bot contains "fixture answer"
+        let mgr_conv = crate::db::conversation_id(&env.app.db, &manager.id).await.unwrap();
+        let notice_content: String = sqlx::query_scalar("SELECT m.content FROM turns t JOIN messages m ON m.turn_id=t.id AND m.role='user' WHERE t.conversation_id=? AND t.queue_class='daemon'")
+            .bind(&mgr_conv).fetch_one(&env.app.db).await.unwrap();
+        assert!(notice_content.contains("fixture answer"), "notice content must contain fixture answer: {notice_content}");
+
+        // Now verify transition to notified once notice delivery is verified
+        let notice_turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? AND queue_class='daemon'")
+            .bind(&mgr_conv).fetch_one(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight', delivery='ok', delivery_verified=1, run_id=? WHERE id=?")
+            .bind(&mgr_run).bind(&notice_turn).execute(&env.app.db).await.unwrap();
+
+        crate::runners::relay_requests::sweep(&env.app).await;
+
+        let final_state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id=?")
+            .bind(&request_id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(final_state, "notified");
+
+        shutdown.cancel();
+        server.await.unwrap();
+    }
 }
