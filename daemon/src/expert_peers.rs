@@ -69,7 +69,10 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        let mut peer = json!({"id":bot.id,"name":bot.name,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
+        let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":bot.kind != "claude-api","host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
+        if bot.kind == "claude-api" {
+            peer["dispatch_reason"] = json!("純 API 模型，不能接受 bot 派工");
+        }
         if bot.role.as_deref() == Some("executor") {
             peer["tier"] = json!(crate::expert_cluster::tier_of(&bot.kind, bot.model.as_deref()));
         }
@@ -149,6 +152,12 @@ pub(crate) async fn list(
 
         let mut eligible = true;
         let mut reasons = Vec::new();
+
+        // -1. claude-api（純 API 模型，不能接受 bot 派工）
+        if bot.kind == "claude-api" {
+            eligible = false;
+            reasons.push("純 API 模型，不能接受 bot 派工".to_string());
+        }
 
         // 0. manager_use 停用開關（SPEC quota protection）
         if bot.manager_use == 0 {

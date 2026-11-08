@@ -7921,9 +7921,20 @@ pub(crate) async fn prompt_bot(
     Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
-    let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|bot| bot.kind);
-    if kind.as_deref() == Some("claude-api") && (b.start_if_stopped || b.send_now || b.queue_if_busy || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.relay_from.is_some() || b.ack || b.reply_to.is_some() || matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. })) {
-        return Err(LcError::Bad("api_native_prompt_unsupported".into()));
+    let bot_record = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?;
+    let kind = bot_record.as_ref().map(|b| b.kind.as_str());
+    if kind == Some("claude-api") {
+        if matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. }) || b.relay_from.is_some() {
+            let name = bot_record.as_ref().map(|b| b.name.as_str()).unwrap_or(&id);
+            return Err(LcError::Forbidden(json!({
+                "error": "member_not_dispatchable",
+                "message": format!("{name} 是 claude-api（純 API 模型），不能接受 bot 派工"),
+                "sent": false
+            })));
+        }
+        if b.start_if_stopped || b.send_now || b.queue_if_busy || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.ack || b.reply_to.is_some() {
+            return Err(LcError::Bad("api_native_prompt_unsupported".into()));
+        }
     }
     // 把回覆公開到分享頁只有使用者（UI token）能決定：Bot／Service 帶旗標一律 403，且不送出（issue #855）。
     if b.share_reply_visible && principal != RequestPrincipal::User {

@@ -201,7 +201,7 @@ pub fn group(members: &[Member]) -> Vec<Cluster> {
 /// 專案的群集，從已讀好的 bots／runs 算（/api/state 一次讀完的快照直接用）。只算頂層、role=executor、未刪除的 bot。
 pub fn clusters_of(bots: &[db::Bot], runs: &std::collections::HashMap<String, db::Run>, project_id: &str) -> Vec<Cluster> {
     let members: Vec<Member> = bots.iter()
-        .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none())
+        .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none() && b.kind != "claude-api")
         .map(|b| member_of(b, runs.get(&b.id))).collect();
     group(&members)
 }
@@ -237,7 +237,7 @@ pub async fn dispatchable_executors(app: &Arc<App>, project: &db::Project, speci
         && specialist.project_id == project.id && specialist.deleted_at.is_none() && specialist.parent_bot_id.is_none()
         && specialist.role.as_deref() == Some("specialist");
     if !ok { return Ok(Default::default()) }
-    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM bots WHERE project_id=? AND role='executor' AND parent_bot_id IS NULL AND deleted_at IS NULL")
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM bots WHERE project_id=? AND role='executor' AND kind<>'claude-api' AND parent_bot_id IS NULL AND deleted_at IS NULL")
         .bind(&project.id).fetch_all(&app.db).await?;
     Ok(ids.into_iter().collect())
 }
@@ -262,7 +262,7 @@ pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Resu
     let bots = db::live_bots(&app.db).await?;
     let runs = db::active_runs_by_bot(&app.db).await?;
     let mut members: Vec<Member> = bots.iter()
-        .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none())
+        .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none() && b.kind != "claude-api")
         .map(|b| member_of(b, runs.get(&b.id))).collect();
     // 側欄 menu 順序：config.toml 裡這個 project 的 bots 陣列索引（拖曳排序寫的就是它）。
     let cfg = app.cfg.get().await;
