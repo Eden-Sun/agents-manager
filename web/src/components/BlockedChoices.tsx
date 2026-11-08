@@ -17,6 +17,7 @@ import {
   type WalkTarget,
 } from '../lib/tuiChoices'
 import { panelShows } from '../lib/codexAsyncQuestion'
+import { isSubmitMenu } from '../lib/choiceDraft'
 import { runPin, type RunPin } from '../lib/runPin'
 import { jevAskNote, jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
@@ -72,7 +73,13 @@ export function BlockedChoices({
   const [typeFor, setTypeFor] = useState<number | null>(null)
   // 目前分頁讀不出來（終端用顏色標），先猜第一個 ☐、之後自己記；猜錯只是跳到別題。
   const [tabAt, setTabAt] = useState<number | null>(null)
-  const atTab = tabAt ?? menu.tabAt
+  // 畫面上的題目對得上原題時，第幾題以它為準（問句比猜的可靠）：原題依序對應非送出分頁。
+  // 猜的目前分頁若落在「提交」、但畫面其實是某一題（例如全部題都 ☒、回頭看第一題），就不標提交。
+  const pageTabs = menu.tabs.flatMap((t, i) => (t.submit ? [] : [i]))
+  const screenTab = !isSubmitMenu(menu) && pendingAt && pendingAt.total === pageTabs.length ? (pageTabs[pendingAt.at] ?? null) : null
+  const guessTab = screenTab ?? menu.tabAt
+  const guessOnSubmit = guessTab !== null && Boolean(menu.tabs[guessTab]?.submit) && !isSubmitMenu(menu)
+  const atTab = tabAt ?? (guessOnSubmit ? null : guessTab)
   // 這一頁的譯文（只換顯示；比對、送鍵都用上面的原文 `menu`）。header 用分頁列的名字。
   const tr = useMenuTranslation([
     {
