@@ -21,6 +21,7 @@ import { runPin, type RunPin } from '../lib/runPin'
 import { jevAskNote, jevMatchesTitle, type PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
 import { JevLabel } from './JevLabel'
+import { useMenuTranslation } from './useMenuTranslation'
 import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
 
@@ -72,6 +73,16 @@ export function BlockedChoices({
   // 目前分頁讀不出來（終端用顏色標），先猜第一個 ☐、之後自己記；猜錯只是跳到別題。
   const [tabAt, setTabAt] = useState<number | null>(null)
   const atTab = tabAt ?? menu.tabAt
+  // 這一頁的譯文（只換顯示；比對、送鍵都用上面的原文 `menu`）。header 用分頁列的名字。
+  const tr = useMenuTranslation([
+    {
+      header: atTab === null ? '' : (menu.tabs[atTab]?.label ?? ''),
+      question: menu.question ?? pendingAt?.question ?? null,
+      multi: menu.multi,
+      choices: menu.choices.map((c) => ({ title: c.title, detail: c.detail })),
+    },
+  ])
+  const disp = tr.page(0)
 
   // 展開說明的項目，預設全收、換題清空（2026-09-12 第四輪：攤開要滑三四屏）。
   const [open, setOpen] = useState<number[]>([])
@@ -417,7 +428,7 @@ export function BlockedChoices({
                 onClick={() => void goTab(i)}
               >
                 <span aria-hidden="true">{tab.submit ? '✔' : tab.done ? '☑' : '☐'}</span>
-                {tab.label}
+                {i === atTab && disp?.header ? disp.header : tab.label}
               </button>
             ))}
             <button
@@ -472,12 +483,13 @@ export function BlockedChoices({
           </pre>
         ) : null}
         {menu.question ? (
-          <p className="bc-question">{menu.question}</p>
+          <p className="bc-question">{disp?.question ?? menu.question}</p>
         ) : pendingAt ? (
           <p className="bc-question" title={t('終端沒畫出題目，這是對話紀錄裡的原題')}>
-            {pendingAt.question}
+            {disp?.question ?? pendingAt.question}
           </p>
         ) : null}
+        {tr.button ? <div className="bc-tr">{tr.button}</div> : null}
         {/* 問句底下的條列說明（`Try the new fullscreen renderer?` 的三行 `·`），照畫面順序排在問句後面。 */}
         {menu.notes.length ? <pre className="bc-context bc-notes">{menu.notes.join('\n')}</pre> : null}
       </div>
@@ -545,14 +557,14 @@ export function BlockedChoices({
                     ? '●'
                     : '○'}
               </span>
-              <span className="bc-title">{c.title}</span>
+              <span className="bc-title">{disp?.titles[i] ?? c.title}</span>
               <span className="bc-mark">
                 {jev && jevMatchesTitle(jev.label, c.title) ? (
                   <JevLabel className="bc-jev" prob={jev.score} />
                 ) : null}
                 {busy?.kind === 'choice' && busy.key === String(i) ? t('送出中…') : c.current ? t('游標在此') : ''}
               </span>
-              {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}
+              {shown && c.detail ? <span className="bc-detail">{disp?.details[i] ?? c.detail}</span> : null}
             </button>
             {/* ▸ 是兄弟不是子元素：button 內不能再包 button。 */}
             <button

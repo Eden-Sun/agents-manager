@@ -9,6 +9,7 @@ import { acquirePreload, restartPreload } from '../lib/draftPreload'
 import { isTypeSomething, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
+import { useMenuTranslation } from './useMenuTranslation'
 import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
 
@@ -102,6 +103,12 @@ export function BlockedDraft({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [round])
 
+  // 全部分頁讀完（ready／sending）才整份一次送翻譯；譯文只換顯示，作答與送出差集都用原文 `draft`。
+  const pagesToTranslate = (phase === 'ready' || phase === 'sending') && draft ? draft.pages.filter((p) => !p.isSubmit) : []
+  const tr = useMenuTranslation(
+    pagesToTranslate.map((p) => ({ header: p.label, question: p.question, multi: p.multi, choices: p.choices.map((c) => ({ title: c.title, detail: c.detail })) })),
+  )
+
   if (phase === 'live') return <BlockedChoices botId={botId} menu={menu} onAnswered={onAnswered} />
 
   if (phase === 'loading' || !draft) {
@@ -116,6 +123,10 @@ export function BlockedDraft({
   }
 
   const dirty = draft.pages.some((p, i) => pageNeedsCommit(p, want[i]))
+  const dispOf = (tab: number) => {
+    const k = pagesToTranslate.findIndex((p) => p.tab === tab)
+    return k < 0 ? null : tr.page(k)
+  }
   const busy = phase === 'sending'
 
   const pick = (page: number, idx: number) => {
@@ -188,7 +199,7 @@ export function BlockedDraft({
               onClick={() => jump(p.tab)}
             >
               <span aria-hidden="true">{p.isSubmit ? '✔' : (want[p.tab] ?? []).some(Boolean) ? '☑' : '☐'}</span>
-              {p.label}
+              {dispOf(p.tab)?.header ?? p.label}
             </button>
           ))}
         </div>
@@ -197,6 +208,7 @@ export function BlockedDraft({
         </p>
       </div>
 
+      {tr.button ? <div className="bc-tr">{tr.button}</div> : null}
       <div ref={listRef} className="bc-pages">
         {draft.pages.map((page, i) =>
           page.isSubmit ? (
@@ -208,7 +220,7 @@ export function BlockedDraft({
                   .map((p) => (
                     <li key={p.tab}>
                       <button type="button" className="bc-rev" disabled={busy} onClick={() => jump(p.tab)}>
-                        <span className="bc-rev-q">{p.question ?? p.label}</span>
+                        <span className="bc-rev-q">{dispOf(p.tab)?.question ?? p.question ?? dispOf(p.tab)?.header ?? p.label}</span>
                         <span className="bc-rev-a">{answerOf(p.tab) || t('（還沒選）')}</span>
                       </button>
                     </li>
@@ -217,7 +229,7 @@ export function BlockedDraft({
             </section>
           ) : (
             <section key={page.tab} className="bc-page" data-tab={page.tab}>
-              <h4 className="bc-page-q">{page.question ?? page.label}</h4>
+              <h4 className="bc-page-q">{dispOf(page.tab)?.question ?? page.question ?? dispOf(page.tab)?.header ?? page.label}</h4>
               <ol
                 className={`bc-list${page.multi ? ' bc-list-multi' : ' bc-list-radio'}`}
                 role={page.multi ? 'group' : 'radiogroup'}
@@ -258,9 +270,9 @@ export function BlockedDraft({
                         <span className="bc-box" aria-hidden="true">
                           {action ? '' : page.multi ? (picked ? '☑' : '☐') : picked ? '●' : '○'}
                         </span>
-                        <span className="bc-title">{c.title}</span>
+                        <span className="bc-title">{dispOf(page.tab)?.titles[j] ?? c.title}</span>
                         <span className="bc-mark" />
-                        {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}
+                        {shown && c.detail ? <span className="bc-detail">{dispOf(page.tab)?.details[j] ?? c.detail}</span> : null}
                       </button>
                       <button
                         type="button"

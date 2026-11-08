@@ -1455,3 +1455,4 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 
 - 對話圖片與手機 outbox 共用全螢幕檢視器：點圖切換整張／原尺寸可捲動，點背景、Esc、手機下滑或返回關閉；同則訊息／托盤的已載入圖片可左右切換，原圖與下載留在次要工具列，關閉恢復焦點與捲動位置。
 - **待答問卷自動翻譯（2026-11-08，使用者：「需要回應」的英文問卷沒翻譯）**：原題卡（`PendingQuestionCard`）的題目、標題、選項 label／description 主要是英文時，跟對話訊息同一套「翻譯」鈕與 `[claude_api.uses.message_translate] auto`：整份問卷 `POST /api/pending-questions/translate` 一次呼叫（JSON 進、JSON 出，id 由 daemon 產生並逐一核對，快取鍵是整份內容雜湊）。只換顯示；選項位置（數字鍵）、送回 CLI 的選項原值與作答流程都不動，手機排版沿用原卡。
+- **終端畫出來的問卷也翻（2026-11-08，使用者：「這份問卷有 2 題」那種還是英文）**：即時選單（`BlockedChoices`）與多分頁預載（`BlockedDraft`，讀完後整份一次呼叫）從終端解析的題目、選項、說明、分頁名，套同一支 `usePendingQuestionTranslation`（同一支 API、同一套自動翻／切回原文／失敗重試）。只換顯示：送鍵、數字鍵、選項比對與送出差集一律用原文。內容一樣（header、題目、選項文字）時與原題卡共用 daemon 快取，不重複扣費。即時模式只翻目前看得到的那一頁；超過 8 題的多分頁不翻（daemon 上限）。測試：`web/src/components/menuTranslationDom.test.tsx`。

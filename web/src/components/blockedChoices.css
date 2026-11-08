@@ -616,3 +616,8 @@
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* 終端問卷的「翻譯」鈕（`useMenuTranslation`）：貼在題目下面，不搶選項的位置。 */
+.bc-tr {
+  margin: 2px 0 6px;
+}
