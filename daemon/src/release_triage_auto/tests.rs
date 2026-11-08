@@ -374,9 +374,17 @@ async fn concurrent_first_requests_do_not_retry_each_others_failure() {
     seed(&app, "2.1.277").await;
     let model = Fake::new(vec![Ok("{}".into()), Ok("{}".into()), Ok("{}".into())]);
     let versions = ["2.1.277".into()];
-    let (a, b) = tokio::join!(
+    // 兩個請求都要在「第一次分析失敗」之前讀完帳本（重試意圖在讀帳本時就定了）。
+    // 先持有分析鎖，讓任何人都還拿不到鎖、也就不會有失敗可讀；放開鎖前留一段時間給兩邊讀帳本。
+    // 沒有這段保護時，B 偶爾在 A 整輪跑完後才讀帳本，看到 failed 就合法地重試，模型多被呼叫一次。
+    let gate = AUTO_LOCK.lock().await;
+    let (a, b, ()) = tokio::join!(
         run_auto(&app, &model, "claude", &versions, None),
-        run_auto(&app, &model, "claude", &versions, None)
+        run_auto(&app, &model, "claude", &versions, None),
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(gate);
+        }
     );
     a.unwrap(); b.unwrap();
     assert_eq!(model.calls(), 3, "only the first analysis's validation attempts");
