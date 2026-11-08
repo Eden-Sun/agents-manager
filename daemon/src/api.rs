@@ -3398,9 +3398,19 @@ async fn hire_member(
         validate_fork_source(&app, &project, source, planned_kind).await?;
     }
     let kind = b.kind.clone().ok_or_else(|| LcError::Bad("kind is required".into()))?;
-    let model = b.model.clone().filter(|m| !m.trim().is_empty());
-    let effort = b.effort.clone().filter(|e| !e.trim().is_empty());
-    let new: NewBot = serde_json::from_value(json!({"name": b.name, "kind": kind, "model": model, "effort": effort, "identity": b.identity}))
+    // fork：沒給的 model／effort／identity 從來源 bot 繼承（2026-11-08：tr3 沒帶 --effort，落在獨立群集）。
+    // 逐欄判斷：呼叫端有給的一律照給，只補空的。
+    let source = match b.fork_from.as_deref() {
+        Some(src) => db::bot(&app.db, src).await.map_err(any_err)?,
+        None => None,
+    };
+    let fill = |own: Option<&str>, from: Option<String>| -> Option<String> {
+        own.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string).or_else(|| from.filter(|v| !v.trim().is_empty()))
+    };
+    let model = fill(b.model.as_deref(), source.as_ref().and_then(|s| s.model.clone()));
+    let effort = fill(b.effort.as_deref(), source.as_ref().and_then(|s| s.effort.clone()));
+    let identity = fill(b.identity.as_deref(), source.as_ref().and_then(|s| s.identity.clone()));
+    let new: NewBot = serde_json::from_value(json!({"name": b.name, "kind": kind, "model": model, "effort": effort, "identity": identity}))
         .map_err(|e| LcError::Bad(e.to_string()))?;
     let res = create_bot(State(app.clone()), Path(pid.clone()), Json(new)).await?;
     let (parts, body) = res.into_parts();
@@ -19225,6 +19235,48 @@ mod hire_fork_api_tests {
     }
 
     /// 2026-11-08（wits tr3）：fork hire 之後 /api/state 必須看得到這顆 bot（側欄與群集計數都從 state 來）。
+    /// fork hire 沒帶 model／effort／identity：從來源 bot 繼承；有帶的照給（不被來源蓋掉）。
+    #[tokio::test]
+    async fn a_fork_hire_inherits_model_effort_and_identity_it_was_not_given() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        env.app.cfg.update(|f| {
+            f.identities.push(crate::config::IdentityCfg { name: "co0".into(), kind: "codex".into(), host: None, env: Default::default(), args: vec![] });
+            Ok(())
+        }).await.unwrap();
+        // 來源要經由 create_bot 建（設定寫進 config.toml）：直接改 DB 會被之後的投影蓋回去。
+        let res = create_bot(
+            State(env.app.clone()),
+            Path(env.project_id.clone()),
+            Json(serde_json::from_value(json!({"name": "src-terra", "kind": "codex", "model": "gpt-6.1-terra", "effort": "medium", "identity": "co0"})).unwrap()),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let source = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-src','2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')")
+            .bind(db::ulid())
+            .bind(&source)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let inherited = hire(&env, &manager, json!({"name": "tr3", "kind": "codex", "fork_from": source})).await.unwrap();
+        let bytes = axum::body::to_bytes(inherited.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        let bot = db::bot(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!(bot.model.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(bot.effort.as_deref(), Some("medium"));
+        assert_eq!(bot.identity.as_deref(), Some("co0"));
+
+        let overridden = hire(&env, &manager, json!({"name": "tr4", "kind": "codex", "fork_from": source, "effort": "high"})).await.unwrap();
+        let bytes = axum::body::to_bytes(overridden.into_body(), 1 << 20).await.unwrap();
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string();
+        let bot = db::bot(&env.app.db, &id).await.unwrap().unwrap();
+        assert_eq!(bot.effort.as_deref(), Some("high"), "明確給的 effort 不被來源蓋掉");
+        assert_eq!(bot.model.as_deref(), Some("gpt-6.1-terra"), "沒給的 model 仍繼承");
+    }
+
     #[tokio::test]
     async fn a_forked_hire_shows_up_in_state() {
         let env = crate::testing::env().await;
