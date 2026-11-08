@@ -1490,6 +1490,12 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
             if method == "POST" && parts.get(3) == Some(&"prompt") {
                 return Ok(());
             }
+            // 專家管理者不能刪自己（樹狀存取規則會讓 bot 碰到自己，這裡先擋）；AGM 角色照舊能自刪。
+            if method == "DELETE" && parts.len() == 3 && id == caller
+                && crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none()
+            {
+                return Err(bot_scope_denied(caller));
+            }
             if let Some(target_bot) = db::bot(&app.db, id).await.map_err(any_err)? {
                 if bot_may_access_bot(app, caller, id).await? {
                     return Ok(());
@@ -18530,6 +18536,7 @@ mod manager_role_scope_tests {
         sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
         assert!(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await.is_ok(), "top-level executor in its project");
         assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&outsider.id)).await), "other project");
+        assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&manager.id)).await), "cannot delete itself");
         assert!(denied(authorize_bot_path(&env.app, &peer.id, "DELETE", &path(&manager.id)).await), "non-manager");
         sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&peer.id).execute(&env.app.db).await.unwrap();
         assert!(denied(authorize_bot_path(&env.app, &manager.id, "DELETE", &path(&peer.id)).await), "advisor is not deleted by a manager");
