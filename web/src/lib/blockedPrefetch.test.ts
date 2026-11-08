@@ -96,7 +96,7 @@ test('多分頁問卷在看得見的分頁才背景預載，而且同一份只�
   const shown = deps(TWO_QUESTIONS)
   const menu = await prefetchBlocked('b2', shown)
   assert.ok(menu)
-  assert.equal(draftKey('b2', menu), 'b2:編輯方式功能Submit')
+  assert.equal(draftKey('b2', menu), 'b2:編輯方式\x01功能\x01Submit')
   // 預載排隊、先重讀畫面才送第一顆鍵：等它真的開始（不再靠單一 tick）。
   for (let i = 0; i < 50 && shown.sent.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
   const first = shown.sent.length

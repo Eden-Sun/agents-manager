@@ -96,7 +96,8 @@ export function BlockedPanel({
       {pendingStatus === 'unavailable' ? <div role="status">{t("暫時無法確認待答題目，請參考終端畫面。")}</div> : null}
       {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
       {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
-      {menu ? (
+      {/* 全畫面視窗開著時面板不再掛問卷：兩邊各預載一份會搶同一條終端的導覽鍵（見 `lib/draftPreload`）。 */}
+      {menu && !paused ? (
         <>
           {surveyDraftAllowed(isSurvey(menu)) ? (
             <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />

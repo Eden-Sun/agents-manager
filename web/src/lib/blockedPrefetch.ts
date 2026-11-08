@@ -39,7 +39,7 @@ export function peekPrefetched(botId: string, source: string, lines: number, now
 
 /** 跟 `BlockedDraft` 的 key 一模一樣，否則視窗會另起一份預載。 */
 export function draftKey(botId: string, menu: TuiChoiceMenu): string {
-  return `${botId}:${menu.tabs.map((t) => t.label).join('')}`
+  return `${botId}:${menu.tabs.map((t) => t.label).join('\x01')}`
 }
 
 export interface PrefetchDeps {

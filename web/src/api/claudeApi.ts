@@ -93,7 +93,22 @@ export function mockTranslateOn(auto = true): void {
     enabled: true,
     key_present: true,
     key_error: null,
-    uses: st.uses.map((u) => (u.id === 'message_translate' ? { ...u, enabled: true, auto } : u)),
+    uses: [
+      ...st.uses.filter((u) => u.id !== 'message_translate'),
+      {
+        id: 'message_translate',
+        label: L('對話訊息翻譯', 'Message translation'),
+        enabled: true,
+        model: 'claude-haiku-5-5',
+        effort: 'low',
+        max_per_hour: 0,
+        default_model: 'claude-haiku-5-5',
+        default_effort: 'low',
+        default_max_per_hour: 0,
+        legacy_section: null,
+        auto,
+      },
+    ],
   }
 }
 const mockLedger: ClaudeApiLedger = {

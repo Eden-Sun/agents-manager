@@ -5,6 +5,8 @@ import type { Draft } from './choiceDraft.ts'
 
 const draft = { pages: [] } as unknown as Draft
 const tick = () => new Promise((r) => setTimeout(r, 1))
+/** 最後一位持有者放手後的寬限（`IN_FLIGHT_GRACE_MS`）加一點。 */
+const grace = () => new Promise((r) => setTimeout(r, 1600))
 
 /** 記下 start 被叫了幾次；resolve 由測試控制。 */
 function starter(result: Draft | null = draft) {
@@ -62,7 +64,7 @@ test('StrictMode 的 mount → cleanup → mount：放掉再馬上接回來不�
   assert.equal(s.calls, 1)
   assert.ok(hasPreload('b1:q'))
   b.release()
-  await tick()
+  await grace()
   assert.equal(hasPreload('b1:q'), false)
 })
 
@@ -72,10 +74,10 @@ test('最後一個視圖放掉之後才丟；一個放掉另一個還在就留�
   const b = acquirePreload('b1:q', s.start)
   a.release()
   a.release() // 重複放不會扣兩次
-  await tick()
+  await grace()
   assert.ok(hasPreload('b1:q'))
   b.release()
-  await tick()
+  await grace()
   assert.equal(hasPreload('b1:q'), false)
 })
 
@@ -115,7 +117,7 @@ test('「重新讀取」換一份新的；舊持有者放掉不會把新的丟�
   assert.notEqual(a.job, b.job)
   assert.equal(s2.calls, 1)
   a.release()
-  await tick()
+  await grace()
   assert.ok(hasPreload('b1:q'))
   // 之後接上來的人拿到新的那份。
   const c = acquirePreload('b1:q', s1.start)
@@ -140,7 +142,7 @@ test('#633：重新讀取後舊 prefetch 與新 modal 都放掉，下一份同 k
 
   prefetch.release()
   modal.release()
-  await tick()
+  await grace()
   assert.equal(hasPreload(key), false, 'released old and new handles must leave no entry behind')
 
   const next = starter(nextDraft)
@@ -159,13 +161,13 @@ test('不同 bot 或不同問卷各跑各的', () => {
   assert.equal(s.calls, 3)
 })
 
-test('#908 沒人持有了：下一拍中止預載的 signal', async () => {
+test('#908 沒人持有了：寬限過後中止預載的 signal', async () => {
   const s = starter()
   const h = acquirePreload('b1:q', s.start)
   assert.equal(s.signals[0].aborted, false)
   h.release()
   assert.equal(s.signals[0].aborted, false, '同一拍還不中止（StrictMode 要能再接上）')
-  await tick()
+  await grace()
   assert.equal(s.signals[0].aborted, true)
   assert.equal(hasPreload('b1:q'), false)
 })
@@ -179,7 +181,7 @@ test('#908 StrictMode：release 後同一拍再 acquire 不中止', async () => 
   assert.equal(s.calls, 1)
   assert.equal(s.signals[0].aborted, false)
   b.release()
-  await tick()
+  await grace()
   assert.equal(s.signals[0].aborted, true)
 })
 

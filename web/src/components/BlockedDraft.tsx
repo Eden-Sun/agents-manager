@@ -176,9 +176,12 @@ export function BlockedDraft({
     const idx = (want[page] ?? []).findIndex(Boolean)
     if (idx < 0) return ''
     if (!p.multi && typedAnswerHere(p, p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
+    // 譯文只換顯示：已選的答案用這一題的譯名；送鍵與比對仍用原文 `c.title`。
+    const d = dispOf(p.tab)
     return p.choices
-      .filter((_, j) => Boolean(want[page]?.[j]))
-      .map((c) => (isTypeSomething(c) && !c.checked ? (custom[p.tab] ?? '').trim() || c.title : c.title))
+      .map((c, j) => ({ c, j }))
+      .filter(({ j }) => Boolean(want[page]?.[j]))
+      .map(({ c, j }) => (isTypeSomething(c) && !c.checked ? (custom[p.tab] ?? '').trim() || c.title : (d?.titles[j] ?? c.title)))
       .join(t('、'))
   }
 
