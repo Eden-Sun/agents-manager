@@ -794,6 +794,8 @@ test('失敗重試設定帶預設值與範圍，儲存會送出三個欄位', as
   const body = post.body as Record<string, unknown>
   assert.deepEqual([body.retry_count, body.retry_interval_mins, body.retry_deadline_mins], [2, 4, 20])
   assert.ok(dialog.textContent?.includes('失敗、拒絕或結果不明時通知'))
+})
+
 test('不可用的 Bot 顯示警告，點擊要求直接聚焦 Bot 欄位', async () => {
   fakeApi((req) => req.method === 'GET' && req.path.includes('/projects/p1/schedules') ? { schedules: [{ id: 's1', project_id: 'p1', bot_id: 'gone', bot_available: false, name: 'test', mode: 'daily', tz: 'UTC', spec: {}, next_due: null, enabled: true, generation: 1, notify: 'failure', created_at: '', updated_at: '', open: null }] } : undefined)
   const opened: Array<[string, boolean | undefined]> = []
