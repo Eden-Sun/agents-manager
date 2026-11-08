@@ -365,6 +365,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/pending-questions/translate", post(crate::message_translate::post_pending_question_translate))
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
+        .route("/quota/reset-credit/use", post(use_reset_credit))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::runners::build_scheduler::get_status))
@@ -1225,6 +1226,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("DELETE", "/api/identities/{name}", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/quota/reset-credit/use", BotRoutePolicy::UserOnly),
     ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/dispatched", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/auto", BotRoutePolicy::UserOrAgm),
@@ -6630,6 +6632,30 @@ async fn probe_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String
             Err(LcError::conflict("claude_not_installed", json!({"host": host})))
         }
         Err(crate::runners::quota_claude::ForceProbeError::Failed(m)) => Err(LcError::Upstream(m)),
+    }
+}
+
+#[derive(Deserialize)]
+struct UseResetCreditBody {
+    host: Option<String>,
+    identity: Option<String>,
+    credit_id: Option<String>,
+}
+
+/// 花一張重置券（User-only：花錢的決定只給使用者；bot／AGM 角色一律 403 `user_only`）。
+/// 指定 `credit_id` 就用那張，沒指定挑最早到期的。`200 {outcome, key, resumed}`；沒券 `409 {reason: no_reset_credit}`。
+async fn use_reset_credit(State(app): State<Arc<App>>, Json(body): Json<UseResetCreditBody>) -> Result<Json<Value>, LcError> {
+    let host = body.host.filter(|h| !h.is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if app.hosts.get(&host).await.is_none() {
+        return Err(unknown_host(&host));
+    }
+    let identity = body.identity.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let credit_id = body.credit_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match crate::runners::reset_credit::redeem(&app, &host, identity, credit_id).await {
+        Ok(r) => Ok(Json(json!({"outcome": r.outcome.as_str(), "key": r.key, "resumed": r.resumed}))),
+        Err(crate::runners::reset_credit::RedeemError::NoCredit) => Err(LcError::conflict("no_reset_credit", json!({"host": host}))),
+        Err(crate::runners::reset_credit::RedeemError::UnknownCredit) => Err(LcError::NotFound("credit".into())),
+        Err(crate::runners::reset_credit::RedeemError::Rpc(e)) => Err(LcError::Upstream(format!("{e:#}"))),
     }
 }
 

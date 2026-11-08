@@ -169,6 +169,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         allow_rule("GET", "/api/capabilities", "Returns only the daemon's static capability names; no user, bot, or host state is exposed."),
+        rule("POST", "/api/quota/reset-credit/use", Expect::UserOnly, None),
         rule("POST", "/api/quota/probe", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),

@@ -931,6 +931,16 @@ export async function requestUpdateReview(input: { kind: string; host?: string; 
   return { version: str(o.version), target_bot_name: str(o.target_bot_name), source_name, duplicate: o.duplicate === true }
 }
 
+/** 花一張 codex 重置券（User-only；花錢的決定只給使用者）。`credit_id` 省略＝挑最早到期的那張。 */
+export async function redeemResetCredit(input: { host: string; identity: string | null }): Promise<{ outcome: string; resumed: string[] }> {
+  const raw = await transport.request('POST', '/quota/reset-credit/use', {
+    host: input.host,
+    identity: input.identity ?? undefined,
+  })
+  const o = isRec(raw) ? raw : {}
+  return { outcome: str(o.outcome), resumed: arr(o.resumed).map((x) => str(x)) }
+}
+
 /** 上游新版分診帳本（SPEC §18.2c）：更新框顯示這幾版分析過了沒、結論是什麼（issue #561）。 */
 export async function fetchReleaseTriage(kind: string): Promise<ReturnType<typeof parseTriageRows>> {
   return parseTriageRows(await transport.request('GET', `/release-triage?kind=${encodeURIComponent(kind)}`))

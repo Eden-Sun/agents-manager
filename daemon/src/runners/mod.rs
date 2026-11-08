@@ -48,6 +48,7 @@ pub mod primary_keep_warm;
 pub mod prompt_cache;
 pub mod prompt_suggestion;
 pub mod quota_agy;
+pub mod reset_credit;
 pub mod quota;
 pub mod quota_claude;
 pub mod quota_grok;

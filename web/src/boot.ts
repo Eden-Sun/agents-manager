@@ -4,11 +4,13 @@ import { applyTheme, loadTheme, themeFromStorageEvent } from './lib/theme'
 import { startRouteSync } from './store/routeSync'
 import { startShelfPersistence } from './store/shelfPersist'
 import { startResetCreditExpiryNotice, startResetCreditsNotice } from './store/resetCreditsNotice'
+import { startResetCreditOfferNotice } from './store/resetCreditOffer'
 
 let stopRouteSync: (() => void) | undefined
 let stopShelf: (() => void) | undefined
 let stopCredits: (() => void) | undefined
 let stopExpiry: (() => void) | undefined
+let stopOffer: (() => void) | undefined
 let onStorage: ((e: StorageEvent) => void) | undefined
 
 export function startAppServices(): void {
@@ -17,6 +19,7 @@ export function startAppServices(): void {
   stopRouteSync = startRouteSync()
   stopCredits = startResetCreditsNotice()
   stopExpiry = startResetCreditExpiryNotice()
+  stopOffer = startResetCreditOfferNotice()
 
   applyTheme(loadTheme())
   onStorage = (e: StorageEvent) => {
@@ -46,5 +49,6 @@ if (import.meta.hot) {
     stopShelf?.()
     stopCredits?.()
     stopExpiry?.()
+    stopOffer?.()
   })
 }

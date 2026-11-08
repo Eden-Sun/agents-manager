@@ -1,4 +1,5 @@
 import { AgmDeleteConfirm } from './components/AgmDeleteConfirm'
+import { ResetCreditOffer } from './components/ResetCreditOffer'
 import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from './api'
 import { useDialogFocus } from './hooks/useDialogFocus'
@@ -259,6 +260,7 @@ export default function App() {
       <PreviewColumn />
       <Notices />
       <AgmDeleteConfirm />
+      <ResetCreditOffer />
     </div>
   )
 }
