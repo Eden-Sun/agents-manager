@@ -5802,12 +5802,15 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **帳本**：`schedules` 是設定；`schedule_occurrences` 是每一次執行的帳本，凍結 prompt、bot、generation，綁定 `turn_id`／`conversation_id`。同一排程最多一筆未結束（pending／queued）；`scheduled_for` 在同排程內唯一。到期時若還有未結束的，只記 `merged_count`，不另開，不補跑風暴。
 - **綁定**：bot 鎖內，同一個 SQLite 交易裡寫 turn（`queued`，`awaits_idle=1`，沒有 run 或還在 starting 時 `awaits_start=1`）、message（`relay_from='daemon'`），並把 occurrence 設為 `queued` 綁 turn。commit 後放鎖，再叫既有 kick（沒有 run）與 flush。不 steer、不 interrupt、不覆蓋使用者已排的佇列（既有上限每個會話 1 筆 queued，已有人排著就等，`waiting_reason=bot_busy`）。Bot 停止中（`stopping`）不收不踢，`waiting_reason=stopping`。
 - **終態收斂**（tick 每 20 秒，啟動後 5 秒先跑一輪）：`completed`＋delivery ok → `done`；`completed_fallback`／`failed`＋delivery unknown → `unknown`（同交易暫停排程）；`failed` → `failed`；turn 不見了 → `cancelled`。`queued`／`in_flight` 繼續等，不提早取消已送出的執行。
+- **任務結果與重試**：回合終態與任務 outcome 分開；每次終態保存 `success／failed／refused／unknown`、最後 assistant 訊息 id，以及先遮罩疑似帳號、密碼、token 後最多 200 字的摘要，不另存全文。API 總開關、`schedule_outcome` 用途及 key 皆可用時走共用 API 小模型結構化分類（10 秒上限、失敗 unknown、不重試分類）；否則用保守文字規則。全文由已授權的 Bot 訊息讀取。failure 通知包含 failed、refused、unknown；只有 success 才允許完成後清空對話。
+- **失敗重試設定**：預設 0 次（0–5），間隔預設 3 分鐘（1–1440），截止距原 scheduled_for 預設 15 分鐘（1–10080）。只對明確 failed 排重試；refused、unknown 不重送。重試仍為同一 occurrence，`schedule_attempts` 保留各次 turn／reply／outcome／摘要，attempt_no 從 1 起，每次新建 turn；下一次重試占用原 occurrence 的 pending 槽。交易內確認設定仍啟用、generation 相同，預定重試及實際 enqueue 均不得超截止；DB 的 queued→in_flight trigger 再守認領時刻，逾期未送出由 tick 在 bot 鎖內撤回，已開始的回合不打斷；同排程到期仍合併，重啟後沿 durable next_retry_at 繼續。通知按 occurrence＋attempt 去重。重試可能重複外部副作用，UI 明示僅在任務可安全重做時啟用；送達結果不明仍暫停排程、不得因此自動重試。
+
 - **停用／編輯／刪除**：同 bot 鎖、同交易撤回未送出的排隊（`revoke_queued_turn_tx`），pending 直接取消；已送出的照跑。編輯與刪除在鎖內重讀，Bot 變了回 409。刪除是軟刪（保留關聯）。
 - **立即執行**使用已儲存的排程。編輯器有未儲存的變更或已綁定 Bot 不可用時，先顯示原因並停用立即執行；儲存可用設定後才可執行。
 - 排程編輯器將頻率、時間和時區歸組，時間欄標明依所選時區解讀；建立、儲存與排程操作保留於編輯區底部的可見操作列。
 - 編輯器顯示已儲存的 Bot 與未儲存狀態；有未結束的執行時換 Bot，說明先停用撤回未送出項目或等待已送出的回合結束。停用前要求確認，不自動撤回或重送。
 - 等待啟動的已排隊回合若有 `start_error`，排程狀態顯示相同原因並提供開啟綁定 Bot 對話；已進入執行或不再等待啟動時不顯示過期錯誤。
-- **跑完就清空對話**（issue #1779，`schedules.clear_after`，預設關）：終態收斂為 `done` 且勾了，就讓綁定的 Bot 開新對話（`StartOpts::default()`，同 `restart?resume=fresh`，之後的回合不會接回舊的 session）。背景做，不擋 tick。條件全成立才做，任一不成立就什麼都不動（留給使用者看）：Bot 正在跑（沒在跑不替它啟動）、沒有 `queued`／`in_flight` 的回合、沒有其他未結束的排程 occurrence、維護窗口沒開；重啟在 bot 鎖內再確認一次閒置（`require_idle`），不閒置回錯、不動。`failed`／`unknown`／`cancelled` 一律不清。它會清掉這顆 Bot 的對話記憶，所以網頁提示建議搭配專用 Bot。
+- **跑完就清空對話**（issue #1779，`schedules.clear_after`，預設關）：終態收斂為 `done`、任務 outcome 為 `success` 且勾了，就讓綁定的 Bot 開新對話（`StartOpts::default()`，同 `restart?resume=fresh`，之後的回合不會接回舊的 session）。背景做，不擋 tick。條件全成立才做，任一不成立就什麼都不動（留給使用者看）：Bot 正在跑（沒在跑不替它啟動）、沒有 `queued`／`in_flight` 的回合、沒有其他未結束的排程 occurrence、維護窗口沒開；重啟在 bot 鎖內再確認一次閒置（`require_idle`），不閒置回錯、不動。`failed`／`unknown`／`cancelled` 一律不清。它會清掉這顆 Bot 的對話記憶，所以網頁提示建議搭配專用 Bot。
 - **建立冪等**：`client_request_id` 加上 `(project_id)` 唯一；同內容回原筆、不同內容 409。手動執行同樣有 key 去重。
 - **通知**：只靠 WS 事件（見 API.md）。狀態轉移由 `notified` 去重，不靠前端記數。
 - **未完成（待 lifecycle 補）**：maintenance 窗口的入口閘（`prompt::maintenance_refusal` 目前是 `pub(super)`，排程入口還沒接）；restart 後 `awaits_start` 的 kick 門檻依 lifecycle 的 claim gate 與 start admission 檢查。

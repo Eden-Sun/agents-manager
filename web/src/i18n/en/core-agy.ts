@@ -93,7 +93,7 @@ const dict: Dict = {
   '星期': 'Weekdays',
   '時區': 'Time zone',
   '通知': 'Notify',
-  '只有失敗時通知': 'Only notify on failure',
+  '失敗、拒絕或結果不明時通知': 'Notify on failure, refusal, or unknown outcomes',
   '每次執行都通知': 'Notify on every run',
   '不通知': 'Do not notify',
   '跑完就清空對話（不留記憶、不佔 context）': 'Clear chat after run (no memory kept, frees context)',

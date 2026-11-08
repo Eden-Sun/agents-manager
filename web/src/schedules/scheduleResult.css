@@ -1,0 +1,9 @@
+.schedule-result { margin-block: 8px; min-width: 0; overflow-wrap: anywhere; }
+.schedule-result p { margin-block: 4px; }
+.schedule-result pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-width: 100%; }
+.schedule-outcome { display: inline-block; border: 1px solid currentColor; border-radius: 6px; padding: 1px 6px; }
+.schedule-outcome.failed, .schedule-outcome.refused { color: var(--danger); }
+.schedule-retry { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); }
+@media (max-width: 480px) {
+  .modal:has(.schedule-editor) .modal-body { padding-inline: 16px; }
+}

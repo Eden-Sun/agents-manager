@@ -52,7 +52,8 @@ const WAIT_LABEL: Record<string, string> = {
 }
 
 /** 未結束的 occurrence 要顯示什麼：依 pending 的等待原因、queued 綁定 turn 的真實狀態。 */
-export function occurrenceLine(o: { status: OccurrenceStatus; waiting_reason?: string | null; turn_status?: string | null; turn_awaits_start?: number | null; turn_start_error?: string | null }, liveTurnStatus?: string): string {
+export function occurrenceLine(o: { status: OccurrenceStatus; waiting_reason?: string | null; turn_status?: string | null; turn_awaits_start?: number | null; turn_start_error?: string | null; next_retry_at?: string | null; attempt_no?: number }, liveTurnStatus?: string): string {
+  if (o.status === 'pending' && o.next_retry_at) return t('等待重試（第 {n} 次執行）', { n: o.attempt_no ?? 1 })
   if (o.status === 'pending') return o.waiting_reason ? tr(WAIT_LABEL[o.waiting_reason] ?? msg('等待中')) : t('等待送出')
   if (o.status === 'queued') {
     // 即時狀態（store 的 turn_updated）優先；沒有就用列表回來的快照。

@@ -26,6 +26,9 @@ pub struct Schedule {
     pub notify: String,
     /// 跑完就清空對話（0／1）：這顆排程 done 之後，綁定的 Bot 開新對話。
     pub clear_after: i64,
+    pub retry_count: i64,
+    pub retry_interval_mins: i64,
+    pub retry_deadline_mins: i64,
     #[serde(skip)]
     pub create_crid: Option<String>,
     #[serde(skip)]
@@ -51,6 +54,11 @@ pub struct Occurrence {
     pub conversation_id: Option<String>,
     pub turn_id: Option<String>,
     pub error: Option<String>,
+    pub outcome: Option<String>,
+    pub outcome_summary: Option<String>,
+    pub reply_message_id: Option<String>,
+    pub attempt_no: i64,
+    pub next_retry_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -69,21 +77,23 @@ pub struct Transition {
     pub bot_id: String,
     /// 排程勾了「跑完就清空對話」。
     pub clear_after: bool,
+    pub outcome: String,
+    pub attempt_no: i64,
 }
 
 /// 這個終態要不要通知（依排程的 notify 設定）。
-pub fn wants_notice(notify: &str, status: &str) -> bool {
+pub fn wants_notice(notify: &str, outcome: &str) -> bool {
     match notify {
-        "all" => matches!(status, "done" | "failed" | "unknown"),
-        "failure" => matches!(status, "failed" | "unknown"),
+        "all" => matches!(outcome, "success" | "failed" | "refused" | "unknown"),
+        "failure" => matches!(outcome, "failed" | "refused" | "unknown"),
         _ => false,
     }
 }
 
 pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) -> Result<()> {
     sqlx::query(
-        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, create_crid, create_fp, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, retry_count, retry_interval_mins, retry_deadline_mins, create_crid, create_fp, created_at, updated_at, deleted_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
     )
     .bind(&s.id)
     .bind(&s.project_id)
@@ -98,6 +108,9 @@ pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) 
     .bind(s.generation)
     .bind(&s.notify)
     .bind(s.clear_after)
+    .bind(s.retry_count)
+    .bind(s.retry_interval_mins)
+    .bind(s.retry_deadline_mins)
     .bind(&s.create_crid)
     .bind(&s.create_fp)
     .bind(&s.created_at)
@@ -216,7 +229,7 @@ pub async fn set_next_due_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str
 /// 綁定 turn：與 turn／message 寫入同一個交易（呼叫端負責 begin／commit）。
 pub async fn bind_queued_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str, conversation_id: &str, turn_id: &str, now: &str) -> Result<()> {
     let done = sqlx::query(
-        "UPDATE schedule_occurrences SET status = 'queued', conversation_id = ?, turn_id = ?, waiting_reason = NULL, updated_at = ?
+        "UPDATE schedule_occurrences SET status = 'queued', conversation_id = ?, turn_id = ?, waiting_reason = NULL, next_retry_at = NULL, outcome = NULL, outcome_summary = NULL, reply_message_id = NULL, error = NULL, updated_at = ?
           WHERE id = ? AND status = 'pending'",
     )
     .bind(conversation_id)
@@ -243,9 +256,11 @@ pub async fn set_waiting_reason(pool: &SqlitePool, occurrence_id: &str, reason: 
 
 /// 把 pending／queued 的 occurrence 標成終態（例如 Bot 不合格、取消）。只動未結束的。
 pub async fn finish_open_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str, status: &str, why: &str, now: &str) -> Result<()> {
-    sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, updated_at = ? WHERE id = ? AND status IN ('pending','queued')")
+    sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, outcome = CASE WHEN ? = 'failed' THEN 'failed' ELSE 'unknown' END, outcome_summary = ?, updated_at = ? WHERE id = ? AND status IN ('pending','queued')")
         .bind(status)
         .bind(why)
+        .bind(status)
+        .bind(super::outcome::summary(why))
         .bind(now)
         .bind(occurrence_id)
         .execute(&mut **tx)
@@ -254,59 +269,72 @@ pub async fn finish_open_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &st
 }
 
 /// 終態同步：queued 的 occurrence 依綁定 turn 的狀態收斂（見檔頭）。回傳這次剛發生的終態轉移（每筆只一次，靠 notified 去重）。
+#[cfg(test)]
 pub async fn settle_queued(pool: &SqlitePool, now: &str) -> Result<Vec<Transition>> {
-    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, Option<String>, String, String, i64)> = sqlx::query_as(
-        "SELECT o.id, o.schedule_id, s.project_id, s.name, o.turn_id, t.status, t.delivery, o.bot_id, s.notify, s.clear_after
-           FROM schedule_occurrences o
-           JOIN schedules s ON s.id = o.schedule_id
-           LEFT JOIN turns t ON t.id = o.turn_id
-          WHERE o.status = 'queued'",
-    )
-    .fetch_all(pool)
-    .await?;
+    settle_with_model(pool, now, &super::outcome::Rules).await
+}
+
+/// Classify outside the write transaction; the exact turn/attempt is revalidated before settling.
+pub(super) fn settle_with_model<'a>(pool: &'a SqlitePool, now: &'a str, model: &'a impl super::outcome::Model) -> impl std::future::Future<Output = Result<Vec<Transition>>> + Send + 'a {
+    Box::pin(settle_body(pool, now, model))
+}
+
+async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::Model) -> Result<Vec<Transition>> {
+    let rows = sqlx::query_as::<_, Occurrence>("SELECT * FROM schedule_occurrences WHERE status = 'queued'").fetch_all(pool).await?;
     let mut out = Vec::new();
-    for (occ_id, schedule_id, project_id, schedule_name, turn_id, turn_status, delivery, bot_id, notify, clear_after) in rows {
-        let (next, error): (&str, Option<&str>) = match (turn_id.as_deref(), turn_status.as_deref()) {
-            (None, _) => ("cancelled", Some("綁定的 turn 已不存在")),
-            (Some(_), None) => ("cancelled", Some("綁定的 turn 已不存在")),
-            (Some(_), Some("completed")) if delivery.as_deref() == Some("ok") => ("done", None),
-            (Some(_), Some("completed")) => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
-            (Some(_), Some("completed_fallback")) if delivery.as_deref() == Some("ok") => ("done", None),
-            (Some(_), Some("completed_fallback")) => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
-            (Some(_), Some("failed")) if delivery.as_deref() == Some("unknown") => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
-            (Some(_), Some("failed")) => ("failed", Some("回合失敗或已撤回")),
-            // queued／in_flight：還沒結束，繼續等。
-            (Some(_), Some(_)) => continue,
+    for occ in rows {
+        let turn: Option<(String, String)> = match &occ.turn_id {
+            Some(id) => sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(id).fetch_optional(pool).await?,
+            None => None,
         };
-        // unknown：送出結果不明。同一個交易把排程暫停（enabled=0），避免下一次到期自動重跑同一任務；
-        // 使用者到 Bot 對話確認後，明確重新啟用才會排未來的執行（不重送這一筆）。
+        let (next, error) = match turn.as_ref().map(|t| (t.0.as_str(), t.1.as_str())) {
+            None => ("cancelled", Some("綁定的 turn 已不存在")),
+            Some(("completed" | "completed_fallback", "ok")) => ("done", None),
+            Some(("completed" | "completed_fallback", _)) | Some(("failed", "unknown")) => ("unknown", Some("送出結果不明，請人工確認；不會自動重送")),
+            Some(("failed", _)) => ("failed", Some("回合失敗或已撤回")),
+            _ => continue,
+        };
+        let reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' AND rewound_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1")
+            .bind(&occ.turn_id).fetch_optional(pool).await?;
+        let outcome = if next == "done" || (next == "failed" && reply.is_some()) { super::outcome::classify(model, reply.as_ref().map_or("", |r| r.1.as_str())).await }
+            else if next == "failed" { "failed".into() } else { "unknown".into() };
+        let summary = super::outcome::summary(reply.as_ref().map_or(error.unwrap_or(""), |r| r.1.as_str()));
         let mut tx = crate::db::begin_write(pool).await?;
-        let done = sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, notified = 1, updated_at = ? WHERE id = ? AND status = 'queued' AND notified = 0")
-            .bind(next)
-            .bind(error)
-            .bind(now)
-            .bind(&occ_id)
-            .execute(&mut *tx)
-            .await?;
-        if done.rows_affected() == 1 && next == "unknown" {
-            sqlx::query("UPDATE schedules SET enabled = 0, updated_at = ? WHERE id = ?").bind(now).bind(&schedule_id).execute(&mut *tx).await?;
-        }
+        let Some(cur) = get_occurrence_tx(&mut tx, &occ.id).await?.filter(|o| o.status == "queued" && o.turn_id == occ.turn_id && o.attempt_no == occ.attempt_no) else { continue };
+        let Some(sched) = get_schedule_tx(&mut tx, &occ.schedule_id).await? else { continue };
+        // Turn evidence may have changed while awaiting the classifier. Retry next tick, never guess.
+        let current: Option<(String, String)> = sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
+        if current != turn { continue; }
+        let current_reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' AND rewound_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
+        if current_reply != reply { continue; }
+        let last = reply.as_ref().map(|r| &r.0);
+        let retry = retry_at(&sched, &cur, &outcome, now);
+        sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at) VALUES (?,?,?,?,?,?,?)")
+            .bind(&occ.id).bind(occ.attempt_no).bind(&occ.turn_id).bind(&last).bind(&outcome).bind(&summary).bind(now).execute(&mut *tx).await?;
+        sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, notified = ?, outcome = ?, outcome_summary = ?, reply_message_id = ?, next_retry_at = ?, attempt_no = ?, turn_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE turn_id END, updated_at = ? WHERE id = ?")
+            .bind(if retry.is_some() { "pending" } else { next }).bind(error).bind(i64::from(retry.is_none())).bind(&outcome).bind(&summary).bind(if retry.is_some() { None } else { last })
+            .bind(&retry).bind(occ.attempt_no + i64::from(retry.is_some())).bind(&retry).bind(now).bind(&occ.id).execute(&mut *tx).await?;
+        if next == "unknown" { sqlx::query("UPDATE schedules SET enabled = 0, updated_at = ? WHERE id = ?").bind(now).bind(&sched.id).execute(&mut *tx).await?; }
         tx.commit().await?;
-        if done.rows_affected() == 1 {
-            out.push(Transition {
-                schedule_id,
-                schedule_name,
-                project_id,
-                occurrence_id: occ_id,
-                status: next.into(),
-                notify,
-                error: error.map(str::to_string),
-                bot_id,
-                clear_after: clear_after == 1,
-            });
-        }
+        out.push(Transition { schedule_id: sched.id, schedule_name: sched.name, project_id: sched.project_id, occurrence_id: occ.id,
+            status: next.into(), notify: sched.notify, error: error.map(str::to_owned), bot_id: occ.bot_id,
+            clear_after: sched.clear_after == 1 && retry.is_none(), outcome, attempt_no: occ.attempt_no });
     }
     Ok(out)
+}
+
+/// Only known failures retry. Deadline is measured from the original scheduled time, not each retry.
+pub(super) fn retry_at(s: &Schedule, o: &Occurrence, outcome: &str, now: &str) -> Option<String> {
+    use chrono::{DateTime, Duration, SecondsFormat};
+    if outcome != "failed" || s.enabled != 1 || s.deleted_at.is_some() || s.generation != o.generation || o.attempt_no > s.retry_count { return None; }
+    let due = DateTime::parse_from_rfc3339(&o.scheduled_for).ok()?;
+    let now = DateTime::parse_from_rfc3339(now).ok()?;
+    let retry = now.checked_add_signed(Duration::minutes(s.retry_interval_mins))?;
+    let deadline = due.checked_add_signed(Duration::minutes(s.retry_deadline_mins))?;
+    if retry.timestamp_millis() > deadline.timestamp_millis() {
+        return None;
+    }
+    Some(retry.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 /// 列表／詳情用：occurrence 加上綁定 turn 的真實狀態與 delivery，UI 才能分辨等待、執行中、需確認。
@@ -316,6 +344,9 @@ pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serd
         None => None,
     };
     let mut v = serde_json::to_value(occ)?;
+    let attempts: Vec<(i64, Option<String>, Option<String>, String, String)> = sqlx::query_as("SELECT attempt_no, turn_id, reply_message_id, outcome, outcome_summary FROM schedule_attempts WHERE occurrence_id = ? ORDER BY attempt_no")
+        .bind(&occ.id).fetch_all(pool).await?;
+    v["attempts"] = serde_json::json!(attempts.into_iter().map(|(attempt_no,turn_id,reply_message_id,outcome,outcome_summary)| serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary})).collect::<Vec<_>>());
     v["turn_status"] = serde_json::json!(turn.as_ref().map(|t| t.0.clone()));
     v["turn_delivery"] = serde_json::json!(turn.as_ref().map(|t| t.1.clone()));
     v["turn_start_error"] = serde_json::json!(turn.as_ref().and_then(|t| t.2.clone()));

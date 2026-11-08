@@ -5,6 +5,9 @@ import { t } from '../lib/i18n'
 
 export type ScheduleMode = 'once' | 'interval' | 'daily' | 'weekly'
 export type ScheduleNotify = 'failure' | 'all' | 'none'
+export type ScheduleOutcome = 'success' | 'failed' | 'refused' | 'unknown'
+export interface ScheduleAttempt { attempt_no: number; turn_id: string | null; reply_message_id: string | null; outcome: ScheduleOutcome; outcome_summary: string }
+
 export type OccurrenceStatus = 'pending' | 'queued' | 'done' | 'failed' | 'cancelled' | 'unknown'
 
 export interface ScheduleSpecIn {
@@ -39,6 +42,12 @@ export interface ScheduleOccurrence {
   conversation_id: string | null
   turn_id: string | null
   error: string | null
+  outcome?: ScheduleOutcome | null
+  outcome_summary?: string | null
+  reply_message_id?: string | null
+  attempt_no?: number
+  next_retry_at?: string | null
+  attempts?: ScheduleAttempt[]
   created_at: string
   updated_at: string
 }
@@ -57,6 +66,9 @@ export interface Schedule {
   generation: number
   notify: ScheduleNotify
   /** 跑完就清空對話：每次成功跑完讓綁定的 Bot 開新對話（daemon 只在 done 時清）。 */
+  retry_count?: number
+  retry_interval_mins?: number
+  retry_deadline_mins?: number
   clear_after: boolean
   created_at: string
   updated_at: string
@@ -77,6 +89,9 @@ export interface ScheduleCreateInput {
   tz: string
   spec: ScheduleSpecIn
   notify: ScheduleNotify
+  retry_count?: number
+  retry_interval_mins?: number
+  retry_deadline_mins?: number
   clear_after?: boolean
 }
 
@@ -87,6 +102,9 @@ export interface ScheduleEditInput {
   tz?: string
   spec?: ScheduleSpecIn
   notify?: ScheduleNotify
+  retry_count?: number
+  retry_interval_mins?: number
+  retry_deadline_mins?: number
   clear_after?: boolean
   enabled?: boolean
 }

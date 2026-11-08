@@ -25,6 +25,7 @@ fn daily(bot: &str, prompt: &str) -> CreateIn {
         spec: SpecIn { mode: "daily".into(), at: None, every_secs: None, time: Some("09:00".into()), weekdays: None },
         notify: "failure".into(),
         clear_after: false,
+        retry_count: 0, retry_interval_mins: 3, retry_deadline_mins: 15,
     }
 }
 
@@ -45,6 +46,7 @@ async fn schedule(app: &std::sync::Arc<crate::state::App>, project: &str, bot: &
         generation: 1,
         notify: "failure".into(),
         clear_after: 0,
+        retry_count: 0, retry_interval_mins: 3, retry_deadline_mins: 15,
         create_crid: None,
         create_fp: None,
         created_at: now.clone(),
@@ -75,6 +77,7 @@ async fn pending(app: &std::sync::Arc<crate::state::App>, s: &Schedule) -> Strin
         conversation_id: None,
         turn_id: None,
         error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -271,7 +274,7 @@ async fn disable_does_not_touch_a_turn_that_is_already_in_flight() {
         .await
         .unwrap();
     sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&inflight).bind(&conv).bind(&occ).execute(&e.app.db).await.unwrap();
-    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, enabled: Some(false) }))
+    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: Some(false) }))
         .await
         .unwrap();
     assert_eq!(turn_status(&e.app, &inflight).await, "in_flight", "已送出的回合照跑");
@@ -398,7 +401,7 @@ async fn manual_key_absorbed_by_a_scheduled_occurrence_with_no_key_replays_that_
 }
 
 fn patch_in() -> api::PatchIn {
-    api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, enabled: None }
+    api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: None }
 }
 
 #[tokio::test]
@@ -447,6 +450,8 @@ fn only_done_clears_the_bot_conversation() {
         error: None,
         bot_id: "b".into(),
         clear_after,
+        outcome: if status == "done" { "success" } else { "unknown" }.into(),
+        attempt_no: 1,
     };
     assert!(runner::should_clear_after(&t("done", true)));
     assert!(!runner::should_clear_after(&t("done", false)), "沒勾就不清");
@@ -468,6 +473,8 @@ async fn finished_occurrence(app: &std::sync::Arc<crate::state::App>, s: &Schedu
         .await
         .unwrap();
     sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&t).bind(&conv).bind(&occ).execute(&app.db).await.unwrap();
+    sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'assistant','已完成','transcript',?)")
+        .bind(db::ulid()).bind(&conv).bind(&t).bind(db::now()).execute(&app.db).await.unwrap();
     let mut transitions = store::settle_queued(&app.db, &db::now()).await.unwrap();
     assert_eq!(transitions.len(), 1);
     transitions.remove(0)
@@ -516,4 +523,132 @@ async fn clear_waits_when_the_bot_has_another_queued_turn_or_schedule() {
     let _other = pending(&e.app, &s).await;
     assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None);
     assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1);
+}
+
+#[test]
+fn task_outcomes_control_failure_notices() {
+    for outcome in ["failed", "refused", "unknown"] { assert!(store::wants_notice("failure", outcome)); }
+    assert!(!store::wants_notice("failure", "success"));
+    assert!(store::wants_notice("all", "success"));
+    assert!(!store::wants_notice("none", "failed"));
+}
+
+#[tokio::test]
+async fn retries_keep_attempt_evidence_obey_deadline_and_never_repeat_refusals() {
+    let (e, bot) = setup().await;
+    let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
+    s.retry_count = 2;
+    sqlx::query("UPDATE schedules SET retry_count=2 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    let occ_id = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let turn = db::ulid();
+    let reply = db::ulid();
+    let now = db::now();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','completed','ok',?)")
+        .bind(&turn).bind(&conv).bind(&now).execute(&e.app.db).await.unwrap();
+    sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,?,?,'assistant','操作失敗 password=synthetic-secret','transcript',?)")
+        .bind(&reply).bind(&conv).bind(&turn).bind(&now).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued',turn_id=?,conversation_id=? WHERE id=?")
+        .bind(&turn).bind(&conv).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    let ts = store::settle_queued(&e.app.db, &now).await.unwrap();
+    assert_eq!(ts.len(), 1);
+    assert_eq!(ts[0].outcome, "failed");
+    let mut occ = store::get_occurrence(&e.app.db, &occ_id).await.unwrap().unwrap();
+    assert_eq!((occ.status.as_str(), occ.attempt_no), ("pending", 2));
+    assert!(occ.next_retry_at.is_some());
+    assert!(!occ.outcome_summary.as_ref().unwrap().contains("synthetic-secret"));
+    assert!(!runner::enqueue(&e.app, &occ_id).await.unwrap(), "not due yet");
+    let view = store::occurrence_view(&e.app.db, &occ).await.unwrap();
+    assert_eq!(view["attempts"][0]["reply_message_id"], reply);
+    assert_eq!(view["attempts"][0]["turn_id"], turn);
+    assert!(store::settle_queued(&e.app.db, &now).await.unwrap().is_empty());
+    for outcome in ["refused", "unknown", "success"] { assert!(store::retry_at(&s, &occ, outcome, &now).is_none()); }
+    occ.attempt_no = 3;
+    assert!(store::retry_at(&s, &occ, "failed", &now).is_none());
+    occ.attempt_no = 1;
+    let due = chrono::DateTime::parse_from_rfc3339(&occ.scheduled_for).unwrap();
+    let at = |mins| (due + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert!(store::retry_at(&s, &occ, "failed", &at(12)).is_some());
+    assert!(store::retry_at(&s, &occ, "failed", &at(13)).is_none());
+    sqlx::query("UPDATE schedule_occurrences SET scheduled_for=?,next_retry_at=? WHERE id=?").bind(at(-20)).bind(at(-1)).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    assert!(!runner::enqueue(&e.app, &occ_id).await.unwrap());
+    assert_eq!(store::get_occurrence(&e.app.db, &occ_id).await.unwrap().unwrap().status, "failed");
+    assert_eq!(count(&e.app, "SELECT COUNT(*) FROM turns WHERE conversation_id=?", &conv).await, 1);
+}
+
+#[tokio::test]
+async fn refusal_is_persisted_without_retry_even_with_retry_enabled() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET retry_count=5 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    let occ = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let turn = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','completed','ok',?)")
+        .bind(&turn).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,?,?,'assistant','無法協助這個要求','transcript',?)")
+        .bind(db::ulid()).bind(&conv).bind(&turn).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued',turn_id=? WHERE id=?").bind(&turn).bind(&occ).execute(&e.app.db).await.unwrap();
+    let ts = store::settle_queued(&e.app.db, &db::now()).await.unwrap();
+    assert_eq!(ts[0].outcome, "refused");
+    let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+    assert_eq!(o.status, "done");
+    assert!(o.next_retry_at.is_none());
+    assert!(!runner::should_clear_after(&ts[0]));
+}
+
+#[tokio::test]
+async fn due_retry_binds_a_new_turn_and_keeps_the_prior_attempt_link() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let occ_id = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let old = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','failed','ok',?)")
+        .bind(&old).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued',turn_id=?,conversation_id=? WHERE id=?").bind(&old).bind(&conv).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedules SET retry_count=1 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    store::settle_queued(&e.app.db, &db::now()).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET next_retry_at=? WHERE id=?").bind(db::now()).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    assert!(runner::enqueue(&e.app, &occ_id).await.unwrap());
+    let o = store::get_occurrence(&e.app.db, &occ_id).await.unwrap().unwrap();
+    assert_ne!(o.turn_id.as_ref(), Some(&old));
+    assert_eq!(o.attempt_no, 2);
+    assert!(o.next_retry_at.is_none());
+    assert_eq!(turn_status(&e.app, &old).await, "failed");
+    let prior: String = sqlx::query_scalar("SELECT turn_id FROM schedule_attempts WHERE occurrence_id=? AND attempt_no=1").bind(&occ_id).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(prior, old);
+}
+
+#[tokio::test]
+async fn a_retry_waiting_in_the_queue_cannot_be_claimed_past_its_deadline() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET retry_count=1 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    let occ = pending(&e.app, &s).await;
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let turn = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','queued','pending',?)")
+        .bind(&turn).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued',attempt_no=2,turn_id=?,scheduled_for='2020-01-01T00:00:00.000Z' WHERE id=?")
+        .bind(&turn).bind(&occ).execute(&e.app.db).await.unwrap();
+    assert!(sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&turn).execute(&e.app.db).await.is_err());
+    assert_eq!(turn_status(&e.app, &turn).await, "queued");
+    runner::expire_queued_retries(&e.app, &db::now()).await.unwrap();
+    assert_eq!(turn_status(&e.app, &turn).await, "failed");
+    assert_eq!(store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap().status, "failed");
+    assert_eq!(store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap().outcome.as_deref(), Some("failed"));
+    let normal = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','queued','pending',?)")
+        .bind(&normal).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&normal).execute(&e.app.db).await.unwrap();
+    let reduced = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','queued','pending',?)")
+        .bind(&reduced).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedule_occurrences SET status='queued',turn_id=?,scheduled_for=? WHERE id=?").bind(&reduced).bind(db::now()).bind(&occ).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE schedules SET retry_count=0 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    assert!(sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&reduced).execute(&e.app.db).await.is_err());
+    runner::expire_queued_retries(&e.app, &db::now()).await.unwrap();
+    assert_eq!(turn_status(&e.app, &reduced).await, "failed");
+
 }

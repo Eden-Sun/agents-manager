@@ -89,6 +89,7 @@ fn schedule_json(s: &Schedule) -> Value {
         "id": s.id, "project_id": s.project_id, "bot_id": s.bot_id, "name": s.name, "prompt": s.prompt,
         "mode": s.mode, "tz": s.tz, "spec": serde_json::from_str::<Value>(&s.spec_json).unwrap_or(Value::Null),
         "next_due": s.next_due, "enabled": s.enabled == 1, "generation": s.generation, "notify": s.notify,
+        "retry_count": s.retry_count, "retry_interval_mins": s.retry_interval_mins, "retry_deadline_mins": s.retry_deadline_mins,
         "clear_after": s.clear_after == 1, "created_at": s.created_at, "updated_at": s.updated_at,
     })
 }
@@ -119,6 +120,19 @@ pub struct CreateIn {
     /// 跑完就清空對話（issue #1779）：缺省＝false。
     #[serde(default)]
     pub clear_after: bool,
+    #[serde(default)]
+    pub retry_count: i64,
+    #[serde(default = "default_retry_interval")]
+    pub retry_interval_mins: i64,
+    #[serde(default = "default_retry_deadline")]
+    pub retry_deadline_mins: i64,
+}
+
+fn default_retry_interval() -> i64 { 3 }
+fn default_retry_deadline() -> i64 { 15 }
+fn check_retry(count: i64, interval: i64, deadline: i64) -> Result<(), LcError> {
+    if (0..=5).contains(&count) && (1..=1440).contains(&interval) && (1..=10080).contains(&deadline) { Ok(()) }
+    else { Err(LcError::Bad("失敗重試次數需為 0–5、間隔為 1–1440 分鐘、截止為 1–10080 分鐘".into())) }
 }
 
 fn default_notify() -> String {
@@ -129,6 +143,9 @@ fn default_notify() -> String {
 /// `clear_after` 只在勾了的時候才進 fingerprint：沒勾的排程跟升版前建的 fingerprint 一樣，原樣重送仍回原筆。
 pub(super) fn create_fingerprint(b: &CreateIn) -> String {
     let mut v = json!({"name": b.name.trim(), "prompt": b.prompt, "bot_id": b.bot_id, "tz": b.tz, "spec": b.spec, "notify": b.notify});
+    if b.retry_count != 0 || b.retry_interval_mins != 3 || b.retry_deadline_mins != 15 {
+        v["retry"] = json!([b.retry_count, b.retry_interval_mins, b.retry_deadline_mins]);
+    }
     if b.clear_after {
         v["clear_after"] = json!(true);
     }
@@ -150,6 +167,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     check_crid(&b.client_request_id)?;
     check_text(&b.name, &b.prompt)?;
     check_notify(&b.notify)?;
+    check_retry(b.retry_count, b.retry_interval_mins, b.retry_deadline_mins)?;
     let fp = create_fingerprint(&b);
     let now = Utc::now();
     let mut tx = db::begin_write(&app.db).await.map_err(db_err)?;
@@ -179,6 +197,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         generation: 1,
         notify: b.notify.clone(),
         clear_after: i64::from(b.clear_after),
+        retry_count: b.retry_count, retry_interval_mins: b.retry_interval_mins, retry_deadline_mins: b.retry_deadline_mins,
         create_crid: Some(b.client_request_id.clone()),
         create_fp: Some(fp),
         created_at: stamp.clone(),
@@ -213,6 +232,9 @@ pub struct PatchIn {
     pub spec: Option<SpecIn>,
     pub notify: Option<String>,
     pub clear_after: Option<bool>,
+    pub retry_count: Option<i64>,
+    pub retry_interval_mins: Option<i64>,
+    pub retry_deadline_mins: Option<i64>,
     pub enabled: Option<bool>,
 }
 
@@ -236,6 +258,10 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let notify = b.notify.clone().unwrap_or_else(|| cur.notify.clone());
     // 只影響之後的 done；不算內容變動（不撤回已排的、不升 generation）。
     let clear_after = i64::from(b.clear_after.unwrap_or(cur.clear_after == 1));
+    let retry_count = b.retry_count.unwrap_or(cur.retry_count);
+    let retry_interval = b.retry_interval_mins.unwrap_or(cur.retry_interval_mins);
+    let retry_deadline = b.retry_deadline_mins.unwrap_or(cur.retry_deadline_mins);
+    check_retry(retry_count, retry_interval, retry_deadline)?;
     check_text(&name, &prompt)?;
     check_notify(&notify)?;
     let bot_id = b.bot_id.clone().unwrap_or_else(|| cur.bot_id.clone());
@@ -276,7 +302,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     };
     let generation = if content_changed { cur.generation + 1 } else { cur.generation };
     sqlx::query(
-        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, clear_after = ?, updated_at = ?
+        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, clear_after = ?, retry_count = ?, retry_interval_mins = ?, retry_deadline_mins = ?, updated_at = ?
           WHERE id = ?",
     )
     .bind(&name)
@@ -290,6 +316,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     .bind(generation)
     .bind(&notify)
     .bind(clear_after)
+    .bind(retry_count).bind(retry_interval).bind(retry_deadline)
     .bind(&now)
     .bind(&id)
     .execute(&mut *tx)
@@ -411,6 +438,7 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         conversation_id: None,
         turn_id: None,
         error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
         created_at: now.into(),
         updated_at: now.into(),
     };

@@ -82,7 +82,7 @@ for (const spec of modes) {
       const mode = [...dialog().querySelectorAll<HTMLSelectElement>('select')].find((el) => el.querySelector('option[value=weekdays]'))!
       assert.equal(mode.value, 'weekdays')
       assert.equal(mode.selectedOptions[0].textContent, '週一至週五')
-      assert.equal(dialog().querySelector('fieldset'), null)
+      assert.equal(dialog().querySelector('fieldset:has(input[type=checkbox])'), null, 'weekday mode has no weekday checkbox group; retry settings are a separate fieldset')
     }
     await typeInto(dialog().querySelector<HTMLInputElement>('input')!, '自行改的副本名')
     await click(submit())

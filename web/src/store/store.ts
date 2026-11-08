@@ -2948,14 +2948,17 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!isRec(data)) return
       const occ = str(pick(data, 'occurrence_id'))
       const status = str(pick(data, 'status'))
-      const key = `${occ}:${status}`
+      const key = `${occ}:${String(pick(data, 'attempt_no') ?? 1)}:${status}`
       if (!occ || seenScheduleNotices.has(key)) return
       seenScheduleNotices.add(key)
       if (seenScheduleNotices.size > 500) seenScheduleNotices.clear()
       const name = str(pick(data, 'schedule_name')) || t('排程')
       const error = str(pick(data, 'error'))
-      if (status === 'done') useStore.getState().notify('info', t('排程「{name}」已完成', { name }))
-      else if (status === 'unknown') useStore.getState().notify('error', t('排程「{name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用', { name }))
+      const outcome = str(pick(data, 'outcome'))
+      if (status === 'unknown') useStore.getState().notify('error', t('排程「{name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用', { name }))
+      else if (outcome && outcome !== 'success') {
+        useStore.getState().notify('error', t('排程「{name}」任務結果：{result}', { name, result: outcome === 'refused' ? t('拒絕執行') : outcome === 'failed' ? t('失敗') : t('結果不明，請查看回覆') }))
+      } else if (status === 'done') useStore.getState().notify('info', t('排程「{name}」已完成', { name }))
       else if (status === 'failed') useStore.getState().notify('error', error ? t('排程「{name}」失敗：{reason}', { name, reason: error }) : t('排程「{name}」失敗', { name }))
       return
     }

@@ -285,7 +285,11 @@ CREATE TABLE IF NOT EXISTS schedules (
   clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1)),
   -- 建立的冪等 key（同 project 內唯一）與內容 fingerprint：回應遺失後原樣重送，回原筆，不建第二顆。
   create_crid TEXT, create_fp TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT,
+  -- 失敗重試（P2）：放在表尾，跟 ALTER 補欄位的結果一致（指紋才對得上）。
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5),
+  retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440),
+  retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)
 );
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at);
 CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
@@ -303,8 +307,19 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
   notified INTEGER NOT NULL DEFAULT 0 CHECK (notified IN (0,1)),
   merged_count INTEGER NOT NULL DEFAULT 0,
   conversation_id TEXT, turn_id TEXT, error TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  -- 結果與重試（P2）：放在表尾，跟 ALTER 補欄位的結果一致。
+  outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown')),
+  outcome_summary TEXT, reply_message_id TEXT,
+  attempt_no INTEGER NOT NULL DEFAULT 1, next_retry_at TEXT
 );
+CREATE TABLE IF NOT EXISTS schedule_attempts (
+  occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id), attempt_no INTEGER NOT NULL,
+  turn_id TEXT, reply_message_id TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('success','failed','refused','unknown')),
+  outcome_summary TEXT NOT NULL, finished_at TEXT NOT NULL,
+  PRIMARY KEY (occurrence_id, attempt_no)
+);
+CREATE INDEX IF NOT EXISTS schedule_occ_turn ON schedule_occurrences(turn_id) WHERE turn_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_trigger_once ON schedule_occurrences(schedule_id, scheduled_for) WHERE source = 'scheduled';
 CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_one_open ON schedule_occurrences(schedule_id) WHERE status IN ('pending','queued');
 CREATE UNIQUE INDEX IF NOT EXISTS schedule_occ_request ON schedule_occurrences(schedule_id, client_request_id) WHERE client_request_id IS NOT NULL;
@@ -601,6 +616,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (85, "e55cfce83db3cb81"),
     // Bind named relay requests to their original cluster identity.
     (86, "5cb62ec809c30f7a"),
+    // 排程失敗重試與結果（P2，2026-11-08）：`schedules.retry_*`、`schedule_occurrences.outcome`／`attempt_no` 等（ALTER ADD）、`schedule_attempts`（CREATE TABLE）。
+    (87, "1b910d09bc467d22"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -872,6 +889,14 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
         // issue #1779：跑完就清空對話（排程勾了 clear_after）。
         ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
+        ("schedules", "retry_count", "ALTER TABLE schedules ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5)"),
+        ("schedules", "retry_interval_mins", "ALTER TABLE schedules ADD COLUMN retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440)"),
+        ("schedules", "retry_deadline_mins", "ALTER TABLE schedules ADD COLUMN retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)"),
+        ("schedule_occurrences", "outcome", "ALTER TABLE schedule_occurrences ADD COLUMN outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown'))"),
+        ("schedule_occurrences", "outcome_summary", "ALTER TABLE schedule_occurrences ADD COLUMN outcome_summary TEXT"),
+        ("schedule_occurrences", "reply_message_id", "ALTER TABLE schedule_occurrences ADD COLUMN reply_message_id TEXT"),
+        ("schedule_occurrences", "attempt_no", "ALTER TABLE schedule_occurrences ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1"),
+        ("schedule_occurrences", "next_retry_at", "ALTER TABLE schedule_occurrences ADD COLUMN next_retry_at TEXT"),
         // 專家模式 track（2026-10-31）：relay_requests 所屬的票號或模組。
         ("relay_requests", "track", "ALTER TABLE relay_requests ADD COLUMN track TEXT"),
         // 專家模式保護額度開關 A：bot manager_use
@@ -962,6 +987,14 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     // （`pragma_table_info` 看不到 FK，#470 之前漂移核對也不比表的約束，所以一直沒人發現）。
     // 唯一補得回來的做法是重建表。
     rebuild_bot_previews_fk(&mut tx).await?;
+    // Retry admission is checked at the final queued→in_flight CAS, after legacy columns exist.
+    sync_trigger(&mut tx, "schedule_retry_deadline", r#"CREATE TRIGGER IF NOT EXISTS schedule_retry_deadline BEFORE UPDATE OF status ON turns
+WHEN OLD.status = 'queued' AND NEW.status = 'in_flight' AND EXISTS (
+  SELECT 1 FROM schedule_occurrences o JOIN schedules s ON s.id = o.schedule_id
+  WHERE o.turn_id = NEW.id AND o.status = 'queued' AND o.attempt_no > 1
+    AND (o.attempt_no > s.retry_count + 1 OR julianday('now') > julianday(o.scheduled_for) + s.retry_deadline_mins / 1440.0)
+)
+BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
     // body 自己就帶了分號，切開來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
     // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：

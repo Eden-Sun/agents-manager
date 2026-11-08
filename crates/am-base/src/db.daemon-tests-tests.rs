@@ -1414,6 +1414,13 @@
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
+        // 排程結果（P2，v86）：舊版沒有這些表與欄位，夾具要還原成舊 schema 才對得上 pin。
+        sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP INDEX schedule_occ_turn").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE schedule_attempts").execute(&mut *tx).await.unwrap();
+        for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
+            sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
+        }
         if version == 67 {
             sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&mut *tx).await.unwrap();
         }
@@ -1553,6 +1560,12 @@
         sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
+        sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&pool).await.unwrap();
+        sqlx::query("DROP INDEX schedule_occ_turn").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE schedule_attempts").execute(&pool).await.unwrap();
+        for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
+            sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
+        }
         sqlx::query("PRAGMA user_version=69").execute(&pool).await.unwrap();
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&pool).await.unwrap()),pinned(69));
         let now=now();

@@ -752,3 +752,26 @@ test('「跑完就清空對話」勾選：建立送出 clear_after:true；編輯
   const patch = editRequests.find((r) => r.method === 'PATCH')!
   assert.equal((patch.body as { clear_after: boolean }).clear_after, false)
 })
+
+test('失敗重試設定帶預設值與範圍，儲存會送出三個欄位', async () => {
+  const requests = fakeApi(({ method }) => method === 'POST' ? { id: 'retry-created', project_id: 'p1' } : { schedules: [] })
+  await mount(<Sidebar />)
+  await settle()
+  await click(addButton('proj-p1'))
+  await click(menuItem('新增排程'))
+  const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
+  const inputs = [...dialog.querySelectorAll<HTMLInputElement>('.schedule-retry input')]
+  assert.deepEqual(inputs.map((i) => i.value), ['0', '3', '15'])
+  assert.equal(inputs[0].max, '5')
+  await typeInto(inputs[0], '2')
+  await typeInto(inputs[1], '4')
+  await typeInto(inputs[2], '20')
+  await typeInto(dialog.querySelector<HTMLInputElement>('input')!, 'synthetic retry')
+  await typeInto(dialog.querySelector<HTMLTextAreaElement>('textarea')!, 'synthetic task')
+  await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
+  const post = requests.find((r) => r.method === 'POST')!
+  assert.ok(post)
+  const body = post.body as Record<string, unknown>
+  assert.deepEqual([body.retry_count, body.retry_interval_mins, body.retry_deadline_mins], [2, 4, 20])
+  assert.ok(dialog.textContent?.includes('失敗、拒絕或結果不明時通知'))
+})

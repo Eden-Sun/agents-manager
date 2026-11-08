@@ -31,7 +31,8 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
             tracing::warn!(schedule = %s.id, error = ?e, "schedule materialize failed");
         }
     }
-    for t in store::settle_queued(&pool, &now).await? {
+    expire_queued_retries(app, &now).await?;
+    for t in store::settle_with_model(&pool, &now, &super::outcome::ApiModel(app)).await? {
         notify_transition(app, &t).await;
         if should_clear_after(&t) {
             spawn_clear_after(app, t.bot_id.clone());
@@ -64,9 +65,37 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
     Ok(())
 }
 
+/// The DB claim trigger blocks late dispatch; this sweep closes its still-unsent queue debt.
+pub(super) fn expire_queued_retries<'a>(app: &'a Arc<App>, now: &'a str) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
+    Box::pin(expire_queued_retries_body(app, now))
+}
+
+async fn expire_queued_retries_body(app: &Arc<App>, now: &str) -> Result<()> {
+    for head in store::open_occurrences(&app.db).await? {
+        if head.status != "queued" || head.attempt_no <= 1 { continue; }
+        let lock = app.bot_lock(&head.bot_id).await;
+        let guard = lock.lock().await;
+        let mut tx = db::begin_write(&app.db).await?;
+        let Some(o) = store::get_occurrence_tx(&mut tx, &head.id).await?.filter(|o| o.status == "queued" && o.attempt_no > 1) else { continue };
+        let Some(s) = store::get_schedule_tx(&mut tx, &o.schedule_id).await? else { continue };
+        let deadline = DateTime::parse_from_rfc3339(&o.scheduled_for)?.checked_add_signed(Duration::minutes(s.retry_deadline_mins));
+        let budget_removed = o.attempt_no > s.retry_count + 1;
+        if !budget_removed && deadline.is_some_and(|d| DateTime::parse_from_rfc3339(now).is_ok_and(|now| now <= d)) { continue; }
+        let Some(turn) = o.turn_id.as_deref() else { continue };
+        let why = if budget_removed { "失敗重試次數已縮減，尚未送出的排隊已撤回" } else { "失敗重試已超過截止時間，尚未送出的排隊已撤回" };
+        let Some(revoked) = lifecycle::revoke_queued_turn_tx(&mut tx, turn, why).await? else { continue };
+        store::finish_open_tx(&mut tx, &o.id, "failed", why, now).await?;
+        tx.commit().await?;
+        drop(guard);
+        lifecycle::announce_revoked(app, turn, revoked).await;
+        notify_terminal(app, &s, &o.id, "failed", Some(why), o.attempt_no).await;
+    }
+    Ok(())
+}
+
 /// 這次終態要不要做「跑完就清空對話」：只有 done 且排程勾了（failed／unknown／cancelled 留著，讓使用者看得出出了什麼事）。
 pub(crate) fn should_clear_after(t: &Transition) -> bool {
-    t.clear_after && t.status == "done"
+    t.clear_after && t.status == "done" && t.outcome == "success"
 }
 
 /// 跑完就清空對話：放到背景做，tick 不等它（重啟要拿 bot 鎖，可能要等一陣子）。
@@ -111,10 +140,10 @@ pub(crate) async fn clear_bot_after(app: &Arc<App>, bot_id: &str) -> Result<Opti
 /// 每筆終態只會出現一次（store 的 notified 去重），所以通知不會重送。
 async fn notify_transition(app: &Arc<App>, t: &Transition) {
     app.emit("schedules_changed", json!({"project_id": t.project_id, "id": t.schedule_id})).await;
-    if store::wants_notice(&t.notify, &t.status) {
+    if store::wants_notice(&t.notify, &t.outcome) {
         app.emit(
             "schedule_notice",
-            json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "error": t.error}),
+            json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "outcome": t.outcome, "attempt_no": t.attempt_no, "error": t.error}),
         )
         .await;
     }
@@ -160,6 +189,7 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
                 conversation_id: None,
                 turn_id: None,
                 error: None,
+                outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
                 created_at: now.into(),
                 updated_at: now.into(),
             };
@@ -179,6 +209,7 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
     if head.status != "pending" {
         return Ok(false);
     }
+    if head.next_retry_at.as_deref().is_some_and(|t| t > db::now().as_str()) { return Ok(false); }
     let lock = app.bot_lock(&head.bot_id).await;
     let _guard = lock.lock().await;
     let now = db::now();
@@ -215,18 +246,35 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
         return Ok(false);
     }
     let sched = sched.context("schedule vanished")?;
+    if occ.next_retry_at.is_some() {
+        if occ.attempt_no > sched.retry_count + 1 {
+            store::finish_open_tx(&mut tx, occurrence_id, "failed", "失敗重試次數已縮減", &now).await?;
+            tx.commit().await?;
+            changed(app, &sched.project_id, &sched.id).await;
+            return Ok(false);
+        }
+        let deadline = DateTime::parse_from_rfc3339(&occ.scheduled_for)?.checked_add_signed(Duration::minutes(sched.retry_deadline_mins));
+        let now_dt = DateTime::parse_from_rfc3339(&now)?;
+        if deadline.is_none_or(|d| now_dt > d) {
+            store::finish_open_tx(&mut tx, occurrence_id, "failed", "失敗重試已超過截止時間", &now).await?;
+            tx.commit().await?;
+            changed(app, &sched.project_id, &sched.id).await;
+            return Ok(false);
+        }
+        if occ.next_retry_at.as_deref().is_some_and(|t| db::cmp_ts(t, &now).is_gt()) { return Ok(false); }
+    }
     // Bot 資格：同一個專案（排程建立時的專案）、未刪、一般 Bot。換到別的專案＝不合格。
     let Some(kind) = eligible_bot_tx(&mut tx, &occ.bot_id, Some(&sched.project_id)).await? else {
         store::finish_open_tx(&mut tx, occurrence_id, "failed", "綁定的 Bot 已不存在、已移交、或不能接收排程", &now).await?;
         tx.commit().await?;
-        notify_terminal(app, &sched, occurrence_id, "failed", Some("綁定的 Bot 不合格")).await;
+        notify_terminal(app, &sched, occurrence_id, "failed", Some("綁定的 Bot 不合格"), occ.attempt_no).await;
         return Ok(false);
     };
     let text = crate::lifecycle::pane_text::for_pane(&kind, &occ.prompt);
     if crate::lifecycle::pane_text::nothing_left(&occ.prompt, &text) {
         store::finish_open_tx(&mut tx, occurrence_id, "failed", "排程的 prompt 清理後是空的", &now).await?;
         tx.commit().await?;
-        notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的")).await;
+        notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的"), occ.attempt_no).await;
         return Ok(false);
     }
     // 停止中：不收、不踢；等它停完再由 tick 重試。
@@ -302,7 +350,7 @@ async fn set_wait(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, reason:
     }
 }
 
-async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>) {
+async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64) {
     let t = Transition {
         schedule_id: sched.id.clone(),
         schedule_name: sched.name.clone(),
@@ -313,6 +361,8 @@ async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, 
         error: error.map(str::to_string),
         bot_id: sched.bot_id.clone(),
         clear_after: sched.clear_after == 1,
+        outcome: if status == "failed" { "failed" } else { "unknown" }.into(),
+        attempt_no,
     };
     notify_transition(app, &t).await;
 }

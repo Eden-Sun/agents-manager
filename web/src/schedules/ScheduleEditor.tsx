@@ -22,6 +22,7 @@ import { ApiError } from '../api/types'
 import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
+import { ScheduleResult } from './ScheduleResult'
 import { copyScheduleName } from './scheduleCopy'
 import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
@@ -42,10 +43,13 @@ interface FormState {
   time: string
   weekdays: number[]
   clearAfter: boolean
+  retryCount: number
+  retryInterval: number
+  retryDeadline: number
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, time: '09:00', weekdays: [0], clearAfter: false }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, time: '09:00', weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
 }
 
 function fromDetail(d: Schedule): FormState {
@@ -62,6 +66,7 @@ function fromDetail(d: Schedule): FormState {
     time: spec.time ?? '09:00',
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
+    retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3, retryDeadline: d.retry_deadline_mins ?? 15,
   }
 }
 
@@ -246,6 +251,8 @@ export function ScheduleEditor({
     if (!effectiveBotId) return setError(t('請選執行的 Bot（或建立專用 Bot）'))
     if (form.mode === 'once' && !form.at) return setError(t('單次需要日期與時間'))
     if (form.mode === 'weekly' && form.weekdays.length === 0) return setError(t('每週至少選一天'))
+    const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval, retry_deadline_mins: form.retryDeadline }
+    const retryChanged = form.retryCount !== (detail?.retry_count ?? 0) || form.retryInterval !== (detail?.retry_interval_mins ?? 3) || form.retryDeadline !== (detail?.retry_deadline_mins ?? 15)
     setBusy(true)
     try {
       if (!scheduleId) {
@@ -258,6 +265,7 @@ export function ScheduleEditor({
           spec: specOf(form),
           notify: form.notify,
           clear_after: form.clearAfter,
+          ...(retryChanged ? retrySettings : {}),
         })
         setNotice(t('已建立。排程不會立即執行，到時間才會排進 Bot。'))
         onSelect(s.id)
@@ -274,6 +282,7 @@ export function ScheduleEditor({
           ...(timingChanged ? { spec: timing.spec } : {}),
           notify: form.notify,
           clear_after: form.clearAfter,
+          ...(retryChanged ? retrySettings : {}),
         })
         if (timingChanged) setBaseline({ id: scheduleId, ...timing })
         // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
@@ -479,11 +488,21 @@ export function ScheduleEditor({
       <label className="field">
         <span>{t('通知')}</span>
         <select value={form.notify} disabled={loading} onChange={(e) => set('notify', e.target.value as ScheduleNotify)}>
-          <option value="failure">{t('只有失敗時通知')}</option>
+          <option value="failure">{t('失敗、拒絕或結果不明時通知')}</option>
           <option value="all">{t('每次執行都通知')}</option>
           <option value="none">{t('不通知')}</option>
         </select>
       </label>
+
+      <fieldset className="schedule-retry">
+        <legend>{t('失敗重試')}</legend>
+        <div className="schedule-time-grid">
+          <label className="field"><span>{t('重試次數（0 表示不重試）')}</span><input type="number" min={0} max={5} value={form.retryCount} disabled={loading} onChange={(e) => set('retryCount', Number(e.target.value))} /></label>
+          <label className="field"><span>{t('重試間隔（分鐘）')}</span><input type="number" min={1} max={1440} value={form.retryInterval} disabled={loading} onChange={(e) => set('retryInterval', Number(e.target.value))} /></label>
+          <label className="field"><span>{t('距排定時間的截止（分鐘）')}</span><input type="number" min={1} max={10080} value={form.retryDeadline} disabled={loading} onChange={(e) => set('retryDeadline', Number(e.target.value))} /></label>
+        </div>
+        <p className="hint">{t('只有明確失敗才重試；拒絕與結果不明不會重試。重試可能重複外部操作，請確認任務可安全重做。')}</p>
+      </fieldset>
 
       <label className="inline-check schedule-clear-after">
         <input type="checkbox" checked={form.clearAfter} disabled={loading} onChange={(e) => set('clearAfter', e.target.checked)} />
@@ -524,6 +543,7 @@ export function ScheduleEditor({
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
                   {o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                   {o.error ? t('（{error}）', { error: o.error }) : ''}
                   {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
                 </li>
