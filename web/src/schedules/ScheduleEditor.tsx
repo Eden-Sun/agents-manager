@@ -7,6 +7,7 @@ import {
   createSchedule,
   deleteSchedule,
   getSchedule,
+  listSchedules,
   patchSchedule,
   runScheduleNow,
   type Schedule,
@@ -16,6 +17,7 @@ import {
   type ScheduleSpecIn,
 } from '../api/schedules'
 import { useStore } from '../store/store'
+import { ScheduleBotPicker } from './ScheduleBotPicker'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId } from '../api'
 import { ApiError } from '../api/types'
@@ -82,6 +84,18 @@ function specOf(f: FormState): ScheduleSpecIn {
       return { mode: 'weekly', time: f.time, weekdays: [0, 1, 2, 3, 4] }
     case 'weekly':
       return { mode: 'weekly', time: f.time, weekdays: [...f.weekdays].sort((a, b) => a - b) }
+  }
+}
+
+/** 某時刻在指定時區的「一天中的分鐘數」；解析失敗回 null。 */
+function minutesOfDayIn(iso: string, tz: string): number | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(iso))
+    const h = Number(parts.find((p) => p.type === 'hour')?.value)
+    const m = Number(parts.find((p) => p.type === 'minute')?.value)
+    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
+  } catch {
+    return null
   }
 }
 
@@ -190,11 +204,18 @@ export function ScheduleEditor({
   )
 
   const [loading, setLoading] = useState(() => Boolean(scheduleId))
-  const botSelectRef = useRef<HTMLSelectElement>(null)
+  // 同專案的其他排程：挑 Bot 時看它已經被哪些排程用、有沒有時間衝突（只讀，不影響存檔）。
+  const [projectSchedules, setProjectSchedules] = useState<Schedule[]>([])
+  useEffect(() => {
+    let alive = true
+    listSchedules(projectId).then((list) => alive && setProjectSchedules(list), () => alive && setProjectSchedules([]))
+    return () => { alive = false }
+  }, [projectId, schedulesRev])
+  const botSelectRef = useRef<HTMLDivElement>(null)
   const focusedBotFor = useRef<string | null>(null)
   useEffect(() => {
     if (!focusBot || loading || !scheduleId || detail?.id !== scheduleId || focusedBotFor.current === scheduleId) return
-    const frame = requestAnimationFrame(() => { botSelectRef.current?.focus(); focusedBotFor.current = scheduleId })
+    const frame = requestAnimationFrame(() => { (botSelectRef.current?.querySelector<HTMLButtonElement>('.sched-bot-row.selected') ?? botSelectRef.current)?.focus(); focusedBotFor.current = scheduleId })
     return () => cancelAnimationFrame(frame)
   }, [focusBot, loading, scheduleId, detail?.id])
   const touchedRef = useRef<Set<keyof FormState>>(new Set())
@@ -358,6 +379,25 @@ export function ScheduleEditor({
     }
   }
 
+  const otherSchedules = projectSchedules.filter((x) => x.id !== scheduleId && x.enabled)
+  // 同一顆 Bot、同一時刻或相差 < 10 分：已有 next_due 就比絕對時間；新排程用表單的每天時刻比（週次只比時刻，較粗）。
+  const sameSlot = (x: Schedule): boolean => {
+    const mine = detail?.next_due ?? null
+    if (mine && x.next_due) return Math.abs(Date.parse(mine) - Date.parse(x.next_due)) < 10 * 60_000
+    if (!x.next_due || !(form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays') || !/^\d{2}:\d{2}$/.test(form.time)) return false
+    const [h, m] = form.time.split(':').map(Number)
+    const theirs = minutesOfDayIn(x.next_due, form.tz)
+    if (theirs === null) return false
+    const diff = Math.abs(theirs - (h * 60 + m))
+    return Math.min(diff, 1440 - diff) < 10
+  }
+  const conflicts = otherSchedules.filter((x) => x.bot_id === effectiveBotId && sameSlot(x))
+  const conflictNote = conflicts.length > 0 ? (
+    <p className="hint sched-conflict" role="status">
+      {t('同一顆 Bot 會依序執行：{name} 先跑完才輪到這個，可能延遲；共用同一段對話脈絡。建議換一顆 Bot 或錯開時間（不強制）。', { name: conflicts[0].name })}
+    </p>
+  ) : null
+
   const body = (
     <div className="form schedule-editor">
       {copyOf && !scheduleId ? <p className="hint">{t('已帶入「{name}」的設定。儲存後會建立並啟用新排程，與原排程各自執行。', { name: copyOf.name })}</p> : null}
@@ -383,36 +423,17 @@ export function ScheduleEditor({
       </label>
 
       <label className="field">
-        <span>
-          {t('任務內容')}<small className="hint schedule-prompt-hint">{t('⌘/Ctrl+Enter 儲存')}</small>
-        </span>
-        <textarea
-          ref={promptRef}
-          className="schedule-prompt"
-          rows={8}
-          value={form.prompt}
-          disabled={loading}
-          onChange={(e) => set('prompt', e.target.value)}
-          onKeyDown={(e) => {
-            // 跟「儲存」按鈕同一支函式；輸入法選字中的 Enter 不算。
-            if (busy || loading || e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || isImeEnter(e.nativeEvent)) return
-            e.preventDefault()
-            void save()
-          }}
-        />
-      </label>
-
-      <label className="field">
         <span>{t('執行的 Bot')}</span>
-        <select ref={botSelectRef} value={effectiveBotId} disabled={loading} onChange={(e) => set('botId', e.target.value)}>
-          {effectiveBotId && !eligible.some((b) => b.id === effectiveBotId) ? <option value={effectiveBotId}>{botLabel(effectiveBotId)}</option> : null}
-          {eligible.length === 0 ? <option value="">{t('（這個專案沒有可用的 Bot）')}</option> : null}
-          {eligible.map((b) => (
-            <option key={b.id} value={b.id}>
-              {botLabel(b.id)}
-            </option>
-          ))}
-        </select>
+        <div ref={botSelectRef} tabIndex={-1} className="schedule-bot-focus">
+        <ScheduleBotPicker
+          projectId={projectId}
+          bots={bots}
+          selectedId={effectiveBotId}
+          usageOf={(id) => otherSchedules.filter((x) => x.bot_id === id)}
+          onSelect={(id) => set('botId', id)}
+          disabled={loading}
+        />
+        </div>
       </label>
       <p className="hint">
         {t('排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。')}
@@ -437,6 +458,7 @@ export function ScheduleEditor({
         ) : null}
       </div>
 
+      {conflictNote}
       <div className="schedule-time-grid">
         <label className="field">
           <span>{t('模式')}</span>
@@ -520,6 +542,26 @@ export function ScheduleEditor({
         {t('跑完就清空對話（不留記憶、不佔 context）')}
       </label>
       <p className="hint">{t('每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。')}</p>
+
+      <label className="field schedule-prompt-field">
+        <span>
+          {t('任務內容')}<small className="hint schedule-prompt-hint">{t('⌘/Ctrl+Enter 儲存')}</small>
+        </span>
+        <textarea
+          ref={promptRef}
+          className="schedule-prompt"
+          rows={8}
+          value={form.prompt}
+          disabled={loading}
+          onChange={(e) => set('prompt', e.target.value)}
+          onKeyDown={(e) => {
+            // 跟「儲存」按鈕同一支函式；輸入法選字中的 Enter 不算。
+            if (busy || loading || e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || isImeEnter(e.nativeEvent)) return
+            e.preventDefault()
+            void save()
+          }}
+        />
+      </label>
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}

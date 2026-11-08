@@ -73,10 +73,14 @@ test('選單「新增排程」開編輯器，Bot 下拉只列同專案的一般 
   await settle()
   const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
   assert.ok(dialog, '要開出「新增排程」對話框')
-  const options = [...dialog.querySelectorAll<HTMLOptionElement>('select option')].map((o) => o.value)
+  const options = [...dialog.querySelectorAll<HTMLElement>('.sched-bot-row')].map((e) => e.dataset.botId ?? '')
   assert.ok(options.includes('b1') && options.includes('b2'), '同專案的一般 Bot 要列出')
-  assert.ok(!options.includes('b3'), '別的專案的 Bot 不列')
-  assert.ok(!options.includes('b4'), 'child Bot 不列')
+  // 別的專案、child 的 Bot 仍列出但灰掉、寫原因，不能選。
+  const row = (id: string) => dialog.querySelector<HTMLButtonElement>(`[data-bot-id="${id}"]`)!
+  assert.equal(row('b3').disabled, true, '別的專案的 Bot 灰掉')
+  assert.match(row('b3').textContent ?? '', /屬於其他專案/)
+  assert.equal(row('b4').disabled, true, 'child Bot 灰掉')
+  assert.match(row('b4').textContent ?? '', /子 agent/)
 })
 
 test('建立排程送出 client_request_id；後端 409（key 用在別的內容）時換新 key', async () => {
@@ -307,12 +311,8 @@ test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建
   let dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
   await typeInto(dialog.querySelector<HTMLInputElement>('input')!, '每日摘要')
   await typeInto(dialog.querySelector<HTMLTextAreaElement>('textarea')!, '請整理今天的進度')
-  const botSelect = dialog.querySelectorAll<HTMLSelectElement>('select')[0]
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(botSelect, 'b5')
-    botSelect.dispatchEvent(new Event('change', { bubbles: true }))
-  })
-  assert.equal(botSelect.value, 'b5', '要真的選到 am-codex')
+  await click(dialog.querySelector<HTMLElement>('[data-bot-id="b5"]')!)
+  assert.equal(dialog.querySelector('[data-bot-id="b5"]')?.getAttribute('aria-pressed'), 'true', '要真的選到 am-codex')
   await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
   await settle()
 
@@ -391,8 +391,7 @@ test('已刪除的綁定 Bot 與未儲存的新 Bot 不可立即執行，儲存�
     const run = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
     assert.equal(run().disabled, true)
     assert.match(dialog.textContent ?? '', /已綁定的 Bot 無法使用/)
-    const select = [...dialog.querySelectorAll<HTMLSelectElement>('select')].find((s) => [...s.options].some((o) => o.value === 'b2'))!
-    await act(async () => { select.value = 'b2'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    await click(dialog.querySelector<HTMLElement>('[data-bot-id="b2"]')!)
     assert.equal(run().disabled, true)
     assert.match(dialog.textContent ?? '', /請先儲存變更/)
     assert.deepEqual(ran, [])
@@ -447,8 +446,7 @@ test('排程有未結束執行時換 Bot 有說明；停用需確認，取消不
       const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
       assert.match(dialog.textContent ?? '', /已儲存的 Bot：bot-b1/)
       assert.match(dialog.textContent ?? '', /設定已儲存/)
-      const select = [...dialog.querySelectorAll<HTMLSelectElement>('select')].find((s) => [...s.options].some((o) => o.value === 'b2'))!
-      await act(async () => { select.value = 'b2'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+      await click(dialog.querySelector<HTMLElement>('[data-bot-id="b2"]')!)
       assert.match(dialog.textContent ?? '', /有未儲存的變更/)
       assert.match(dialog.textContent ?? '', phase === 'in_flight' ? /請等它結束/ : /先停用排程撤回/)
       const run = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
@@ -635,7 +633,7 @@ const scheduleRow = (over: Record<string, unknown> = {}) => ({
   next_due: '2030-01-01T00:00:00.000Z', enabled: true, generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', open: null, ...over,
 })
 
-test('編輯器：任務內容在名稱之後、Bot 選單之前，textarea 至少 8 行', async () => {
+test('編輯器：名稱 → Bot → 時間 → 任務內容最後，textarea 至少 8 行', async () => {
   fakeApi(() => ({ schedules: [] }))
   await mount(<Sidebar />)
   await settle()
@@ -645,10 +643,12 @@ test('編輯器：任務內容在名稱之後、Bot 選單之前，textarea 至�
   const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
   const name = dialog.querySelector<HTMLInputElement>('input')!
   const prompt = dialog.querySelector<HTMLTextAreaElement>('textarea')!
-  const bot = dialog.querySelector<HTMLSelectElement>('select')!
+  const bot = dialog.querySelector<HTMLElement>('.sched-bot-picker')!
+  const time = dialog.querySelector<HTMLElement>('.schedule-time-grid')!
   const follows = Node.DOCUMENT_POSITION_FOLLOWING
-  assert.ok(name.compareDocumentPosition(prompt) & follows, '任務內容要在名稱之後')
-  assert.ok(prompt.compareDocumentPosition(bot) & follows, '任務內容要在 Bot 選單之前')
+  assert.ok(name.compareDocumentPosition(bot) & follows, 'Bot 選單要在名稱之後')
+  assert.ok(bot.compareDocumentPosition(time) & follows, '時間要在 Bot 之後')
+  assert.ok(time.compareDocumentPosition(prompt) & follows, '任務內容最後')
   assert.equal(prompt.getAttribute('rows'), '8', '任務內容框最少 8 行')
   assert.match(dialog.textContent ?? '', /⌘\/Ctrl\+Enter 儲存/, 'label 旁要有快捷鍵提示')
   const timing = dialog.querySelector('.schedule-time-grid')!

@@ -147,3 +147,57 @@
     white-space: nowrap;
   }
 }
+
+/* 手機優先：儲存列固定在底部（安全區），不用捲到最下面才能存。 */
+.schedule-editor .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
+  background: var(--surface, #fff);
+  border-top: 1px solid var(--border, #ddd);
+}
+
+/* 任務內容放最後；高度可手動拉。 */
+.schedule-editor .schedule-prompt {
+  min-height: 8rem;
+  resize: vertical;
+}
+
+/* Bot 清單：大列、好掃。 */
+.sched-bot-picker { display: grid; gap: 6px; }
+.sched-bot-search { min-height: 44px; }
+.sched-bot-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.sched-bot-row {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  font: inherit;
+}
+.sched-bot-row.selected { border-color: var(--accent, #2563eb); box-shadow: inset 0 0 0 1px var(--accent, #2563eb); }
+.sched-bot-row.ineligible { opacity: 0.55; cursor: not-allowed; }
+.sched-bot-name { font-weight: 600; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.sched-bot-kind { font-weight: 400; font-size: 12px; color: var(--text-faint, #666); }
+.sched-bot-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.sched-bot-identity, .sched-bot-role {
+  padding: 0 6px; border-radius: 4px; background: var(--surface-2, #f1f5f9); font-size: 12px;
+}
+.sched-bot-state { display: flex; gap: 6px; align-items: center; font-size: 12px; flex-wrap: wrap; }
+.sched-bot-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint, #999); display: inline-block; }
+.sched-bot-dot[data-lamp='working'] { background: #16a34a; }
+.sched-bot-dot[data-lamp='idle'] { background: #94a3b8; }
+.sched-bot-dot[data-lamp='blocked'] { background: #f59e0b; }
+.sched-bot-dot[data-lamp='disconnected'], .sched-bot-dot[data-lamp='offline'] { background: #dc2626; }
+.sched-bot-used { margin-left: 6px; padding: 0 6px; border-radius: 4px; background: #fef3c7; color: #92400e; }
+.sched-bot-reason { font-size: 12px; color: #b91c1c; }
+.sched-conflict { border-left: 3px solid #f59e0b; padding-left: 8px; }
+
+@media (max-width: 600px) {
+  .schedule-editor .schedule-time-grid { grid-template-columns: 1fr; }
+}

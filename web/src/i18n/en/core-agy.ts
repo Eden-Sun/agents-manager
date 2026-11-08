@@ -77,7 +77,7 @@ const dict: Dict = {
   '任務內容': 'Prompt',
   '⌘/Ctrl+Enter 儲存': '⌘/Ctrl+Enter to save',
   '執行的 Bot': 'Runner Bot',
-  '（這個專案沒有可用的 Bot）': '(no usable Bot in this project)',
+  '（這個專案沒有 Bot）': '(no Bot in this project)',
   '排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。': 'Schedules queue into this Bot’s chat and queue, sharing turns with your manual messages. It uses this Bot’s model; create a dedicated Bot to specify a model.',
   '建立專用 Bot…': 'Create dedicated Bot…',
   '開啟 Bot 對話': 'Open Bot chat',

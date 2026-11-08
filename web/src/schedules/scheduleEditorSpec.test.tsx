@@ -148,7 +148,9 @@ test('詳情新 GET 先回時，較舊的排程回應不能覆蓋新狀態', asy
   let detailGets = 0
   let releaseOld: ((response: Response) => void) | null = null
   const response = (enabled: boolean) => new Response(JSON.stringify(scheduleRow({ enabled })), { status: 200 })
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (input: unknown) => {
+    // 編輯器另外會讀同專案的排程清單（挑 Bot 用），這裡只數詳情。
+    if (!String(input).endsWith('/schedules/s1')) return new Response(JSON.stringify({ schedules: [] }), { status: 200 })
     detailGets += 1
     if (detailGets === 1) return response(true)
     if (detailGets === 2) return await new Promise<Response>((resolve) => { releaseOld = resolve })
@@ -302,10 +304,10 @@ test('不可用的 Bot 警告可直接聚焦編輯器的 Bot 欄位', async () =
   fakeApi((req) => req.method === 'GET' && req.path.endsWith('/schedules/s1') ? scheduleRow({ bot_available: false }) : undefined)
   await mount(<ScheduleEditor projectId="p1" scheduleId="s1" focusBot onClose={() => {}} onSelect={() => {}} />)
   await settle(50)
-  const label = [...document.querySelectorAll('label')].find((el) => el.textContent?.includes('Bot'))
-  const select = label?.querySelector('select')
-  assert.ok(select)
-  assert.equal(document.activeElement, select)
+  // 焦點落在目前選的 Bot 那一列（清單元件裡的按鈕）。
+  const selected = document.querySelector('.sched-bot-row.selected') ?? document.querySelector('.schedule-bot-focus')
+  assert.ok(selected)
+  assert.equal(document.activeElement, selected)
 })
 
 test('試跑使用獨立請求並在歷史標示試跑', async () => {
