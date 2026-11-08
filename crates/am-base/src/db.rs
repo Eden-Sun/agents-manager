@@ -295,7 +295,7 @@ CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at
 CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
 CREATE TABLE IF NOT EXISTS schedule_occurrences (
   id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES schedules(id),
-  source TEXT NOT NULL CHECK (source IN ('scheduled','manual')),
+  source TEXT NOT NULL CHECK (source IN ('scheduled','manual','dry_run')),
   scheduled_for TEXT NOT NULL, generation INTEGER NOT NULL,
   bot_id TEXT NOT NULL, prompt TEXT NOT NULL,
   client_request_id TEXT,
@@ -330,6 +330,12 @@ CREATE TABLE IF NOT EXISTS schedule_manual_requests (
   client_request_id TEXT NOT NULL,
   occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id),
   created_at TEXT NOT NULL,
+  PRIMARY KEY (schedule_id, client_request_id)
+);
+-- 試跑的冪等鍵與正式手動執行分開；同一個鍵可安全用在兩種不同動作。
+CREATE TABLE IF NOT EXISTS schedule_dry_run_requests (
+  schedule_id TEXT NOT NULL REFERENCES schedules(id), client_request_id TEXT NOT NULL,
+  occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id), created_at TEXT NOT NULL,
   PRIMARY KEY (schedule_id, client_request_id)
 );
 -- 額度最後一次探測結果（issue #392）；daemon 重啟後先顯示這份，API 會標成 stale。
@@ -618,6 +624,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (86, "5cb62ec809c30f7a"),
     // 排程失敗重試與結果（P2，2026-11-08）：`schedules.retry_*`、`schedule_occurrences.outcome`／`attempt_no` 等（ALTER ADD）、`schedule_attempts`（CREATE TABLE）。
     (87, "1b910d09bc467d22"),
+    // 試跑（P1）：source 加 dry_run，occurrence 表重建。
+    (88, "5519793621513450"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -752,6 +760,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     }
     // issue #635: pane ids are allocated independently by each herdr host. v29 keyed this
     // table globally by pane_id; rebuild transactionally so same-id hints on different hosts coexist.
+    rebuild_schedule_occurrences_for_dry_run(&mut tx).await?;
     rebuild_spawn_hints_host_key(&mut tx, fail_after_spawn_hints_drop).await?;
     // v66: scope pane IDs to host sessions; backfill legacy claims from unambiguous active host sessions.
     if !has_column(&mut *tx, "spawn_claims", "parent_run_id").await? {
@@ -1120,6 +1129,45 @@ async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> 
     Ok(())
 }
 
+async fn rebuild_schedule_occurrences_for_dry_run(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    let ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_occurrences'")
+        .fetch_one(&mut *conn).await?;
+    if ddl.contains("'dry_run'") { return Ok(()); }
+    // Preserve both the request mappings and any explicit indexes/triggers, transactionally.
+    let extras: Vec<(String,)> = sqlx::query_as("SELECT sql FROM sqlite_master WHERE tbl_name IN ('schedule_occurrences','schedule_manual_requests','schedule_dry_run_requests') AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name")
+        .fetch_all(&mut *conn).await?;
+    let manual_ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_manual_requests'").fetch_one(&mut *conn).await?;
+    let dry_ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_dry_run_requests'").fetch_one(&mut *conn).await?;
+    let schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS schedule_occurrences (").nth(1).context("missing schedule schema")?
+        .split("\n);").next().context("unterminated schedule schema")?;
+    // 不用 RENAME：SQLite 改名後會把表名加上引號，指紋就跟全新 DB 對不上；這裡先備份資料、刪表、用原名重建。
+    let create = format!("CREATE TABLE schedule_occurrences ({}\n)", schema);
+    for sql in ["CREATE TEMP TABLE schedule_manual_backup AS SELECT * FROM schedule_manual_requests",
+                "CREATE TEMP TABLE schedule_dry_backup AS SELECT * FROM schedule_dry_run_requests",
+                "DROP TABLE schedule_manual_requests", "DROP TABLE schedule_dry_run_requests"] {
+        sqlx::query(sql).execute(&mut *conn).await?;
+    }
+    for sql in ["CREATE TEMP TABLE schedule_occ_backup AS SELECT * FROM schedule_occurrences",
+                "DROP TABLE schedule_occurrences"] {
+        sqlx::query(sql).execute(&mut *conn).await?;
+    }
+    sqlx::query(&create).execute(&mut *conn).await?;
+    // 只搬舊表有的欄位（P2 的結果欄位在升級路徑上由下面的 ALTER 補；這裡不能 SELECT * 對不上數）。
+    let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('schedule_occ_backup')").fetch_all(&mut *conn).await?;
+    let cols = cols.into_iter().map(|(c,)| c).collect::<Vec<_>>().join(",");
+    sqlx::query(&format!("INSERT INTO schedule_occurrences ({cols}) SELECT {cols} FROM schedule_occ_backup")).execute(&mut *conn).await?;
+    sqlx::query("DROP TABLE schedule_occ_backup").execute(&mut *conn).await?;
+    for sql in [&manual_ddl, &dry_ddl] { sqlx::query(sql).execute(&mut *conn).await?; }
+    for sql in ["INSERT INTO schedule_manual_requests SELECT * FROM schedule_manual_backup",
+                "INSERT INTO schedule_dry_run_requests SELECT * FROM schedule_dry_backup",
+                "DROP TABLE schedule_manual_backup", "DROP TABLE schedule_dry_backup"] {
+        sqlx::query(sql).execute(&mut *conn).await?;
+    }
+    for (sql,) in extras { sqlx::query(&sql).execute(&mut *conn).await?; }
+    Ok(())
+}
+
+/// 試跑（dry_run）：`schedule_occurrences.source` 加上 `dry_run`，要重建表（CHECK 不能用 ALTER 改）。
 /// issue #635：正式 v29 的 `spawn_hints` 已有 `host TEXT NOT NULL`，所以重建時照原值保留，無須補 host；
 /// 它只把 `pane_id` 設成全域主鍵，但 herdr 只保證每台 host 內唯一。重建為 `(host, pane_id)` 時，
 /// 若舊表有同一組鍵的重複列，留 `created_at` 最新的一列（時間相同取 rowid 較大的），其餘丟棄並記 warn。

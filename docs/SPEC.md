@@ -5817,6 +5817,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 排程綁定的 Bot 不可用時保留一筆待處理 occurrence 並標記 `bot_unavailable`；批次改綁僅允許同專案合格 Bot，交易內檢查未完成執行，改綁後撤回這筆等待項並保留下一次時間。
 
+試跑以 `dry_run` source 和獨立冪等鍵記帳，daemon 加固定前言；已有未完成執行時拒絕混併，到期遇試跑則待其結束後處理。試跑失敗不發排程失敗通知，成功時依 `clear_after` 清對話。前言不是沙箱，不能保證 Bot 沒有實際操作。
+
 ### 排程的手動執行去重（2026-10-13 補）
 
 - `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。

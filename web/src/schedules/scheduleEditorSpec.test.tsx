@@ -307,3 +307,23 @@ test('不可用的 Bot 警告可直接聚焦編輯器的 Bot 欄位', async () =
   assert.ok(select)
   assert.equal(document.activeElement, select)
 })
+
+test('試跑使用獨立請求並在歷史標示試跑', async () => {
+  useStore.setState({ bots: [{ id: 'b1', name: 'bot', project_id: 'p1', managed_by: 'user', parent_bot_id: null, share_profile: null }] } as never)
+  const recent = [{ id: 'd1', schedule_id: 's1', source: 'dry_run', scheduled_for: '2030-01-01T00:00:00Z', status: 'done', merged_count: 0, error: null }]
+  const row = scheduleRow({ recent })
+  const reqs = fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return row
+    if (req.method === 'POST' && req.path.endsWith('/schedules/s1/run')) return { occurrence: null }
+    return undefined
+  })
+  await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
+  await settle()
+  const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '試跑')!
+  assert.ok(button && !button.disabled)
+  await click(button)
+  await settle()
+  const request = reqs.find((r) => r.method === 'POST' && r.path.endsWith('/schedules/s1/run'))
+  assert.equal((request?.body as { dry_run?: boolean }).dry_run, true)
+  assert.match(document.querySelector('.schedule-history')?.textContent ?? '', /試跑/)
+})

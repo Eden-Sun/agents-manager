@@ -306,7 +306,7 @@ async fn create_refuses_a_bot_from_another_project() {
 async fn run_replay_with_the_same_key_returns_the_same_occurrence() {
     let (e, bot) = setup().await;
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
-    let run = || api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("run-1".into()) }));
+    let run = || api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("run-1".into()), dry_run: false }));
     let a = run().await.unwrap().0;
     let b = run().await.unwrap().0;
     assert_eq!(a["occurrence"]["id"], b["occurrence"]["id"]);
@@ -321,7 +321,7 @@ async fn run_now_refuses_a_disabled_schedule_and_a_bad_key() {
     let r = api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn::default())).await;
     assert!(matches!(r, Err(LcError::Conflict(_))));
     sqlx::query("UPDATE schedules SET enabled = 1 WHERE id = ?").bind(&s.id).execute(&e.app.db).await.unwrap();
-    let bad = api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("has space".into()) })).await;
+    let bad = api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("has space".into()), dry_run: false })).await;
     assert!(matches!(bad, Err(LcError::Bad(_))));
 }
 
@@ -352,7 +352,7 @@ async fn unknown_outcome_pauses_the_schedule_in_the_same_step() {
 }
 
 async fn run_with(app: &std::sync::Arc<crate::state::App>, sid: &str, crid: &str) -> String {
-    let v = api::run_now(State(app.clone()), Path(sid.into()), Json(RunIn { client_request_id: Some(crid.into()) })).await.unwrap().0;
+    let v = api::run_now(State(app.clone()), Path(sid.into()), Json(RunIn { client_request_id: Some(crid.into()), dry_run: false })).await.unwrap().0;
     v["occurrence"]["id"].as_str().expect("回應要有 occurrence.id").to_string()
 }
 
@@ -650,6 +650,7 @@ async fn a_retry_waiting_in_the_queue_cannot_be_claimed_past_its_deadline() {
     assert!(sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&reduced).execute(&e.app.db).await.is_err());
     runner::expire_queued_retries(&e.app, &db::now()).await.unwrap();
     assert_eq!(turn_status(&e.app, &reduced).await, "failed");
+}
 
 #[tokio::test]
 async fn unavailable_bot_waits_once_and_batch_rebind_withdraws_that_occurrence() {
@@ -693,4 +694,62 @@ async fn batch_rebind_rejects_missing_target_without_mutating_schedules() {
     let updated = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap();
     assert_eq!(updated.bot_id, bot.id);
     assert_eq!(updated.generation, s.generation);
+}
+
+#[tokio::test]
+async fn dry_run_has_distinct_source_key_and_never_merges_with_a_formal_run() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let run = |dry| api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("same".into()), dry_run: dry }));
+    let first = run(false).await.unwrap().0;
+    let formal = first["occurrence"]["id"].as_str().unwrap().to_string();
+    assert!(run(true).await.is_err(), "dry run must not merge with the formal open occurrence");
+    finish_turn(&e.app, &formal).await;
+    let dry = run(true).await.unwrap().0;
+    let dry_id = dry["occurrence"]["id"].as_str().unwrap().to_string();
+    assert_ne!(formal, dry_id);
+    assert_eq!(dry["occurrence"]["source"], "dry_run");
+    let occ = store::get_occurrence(&e.app.db, &dry_id).await.unwrap().unwrap();
+    assert!(occ.prompt.starts_with("試跑："));
+    assert!(occ.prompt.ends_with(&s.prompt));
+    assert_eq!(run(true).await.unwrap().0["occurrence"]["id"], dry_id);
+    // An already accepted formal key always replays its own occurrence, not the dry run.
+    assert_eq!(run(false).await.unwrap().0["occurrence"]["id"], formal);
+    let new_formal = api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("another".into()), dry_run: false })).await;
+    assert!(new_formal.is_err(), "formal run must not merge with the open dry run");
+    let turn = store::get_occurrence(&e.app.db, &dry_id).await.unwrap().unwrap().turn_id.unwrap();
+    sqlx::query("UPDATE turns SET status='failed', delivery='failed' WHERE id=?").bind(turn).execute(&e.app.db).await.unwrap();
+    let transitions = store::settle_queued(&e.app.db, &db::now()).await.unwrap();
+    let outcome = transitions.iter().find(|t| t.occurrence_id == dry_id).unwrap();
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.notify, "none", "dry failures do not emit schedule failure notices");
+}
+
+#[tokio::test]
+async fn scheduled_due_is_not_consumed_or_merged_while_a_dry_run_is_open() {
+    let (e, bot) = setup().await;
+    let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
+    let due = db::now();
+    sqlx::query("UPDATE schedules SET next_due=? WHERE id=?").bind(&due).bind(&s.id).execute(&e.app.db).await.unwrap();
+    s.next_due = Some(due.clone());
+    let o = pending(&e.app, &s).await;
+    sqlx::query("UPDATE schedule_occurrences SET source='dry_run' WHERE id=?").bind(&o).execute(&e.app.db).await.unwrap();
+    runner::materialize(&e.app.db, &s, &due).await.unwrap();
+    assert_eq!(store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap().next_due, Some(due));
+    assert_eq!(store::get_occurrence(&e.app.db, &o).await.unwrap().unwrap().merged_count, 0);
+}
+
+#[tokio::test]
+async fn dry_run_never_retries_and_never_sends_failure_notices() {
+    let (e, bot) = setup().await;
+    let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
+    s.retry_count = 5;
+    s.retry_deadline_mins = 60;
+    let occ_id = pending(&e.app, &s).await;
+    let mut o = store::get_occurrence(&e.app.db, &occ_id).await.unwrap().unwrap();
+    assert!(store::retry_at(&s, &o, "failed", &o.scheduled_for).is_some(), "正式執行會重試");
+    sqlx::query("UPDATE schedule_occurrences SET source='dry_run' WHERE id=?").bind(&occ_id).execute(&e.app.db).await.unwrap();
+    o = store::get_occurrence(&e.app.db, &occ_id).await.unwrap().unwrap();
+    assert!(store::retry_at(&s, &o, "failed", &o.scheduled_for).is_none(), "試跑不重試");
+    assert!(!store::wants_notice("none", "failed"), "試跑的 notify 是 none，不發失敗通知");
 }

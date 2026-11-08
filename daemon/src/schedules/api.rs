@@ -417,6 +417,8 @@ pub async fn delete(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
 pub struct RunIn {
     #[serde(default)]
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// `POST /api/schedules/{id}/run`：手動執行。交易內重讀排程（停用、刪除、換版都要擋）。
@@ -435,7 +437,7 @@ pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b
     let s = store::get_schedule_tx(&mut tx, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
     // 同一個 key 的重送：mapping 是權威，回原來那一筆（不論它現在是哪個狀態，也不論排程後來是否停用）。
     if let Some(c) = crid.as_deref() {
-        if let Some(prev) = store::find_request_tx(&mut tx, &id, c).await.map_err(db_err)? {
+        if let Some(prev) = store::find_request_kind_tx(&mut tx, &id, c, b.dry_run).await.map_err(db_err)? {
             tx.commit().await.map_err(db_err)?;
             return replay_response(&app, &s, &prev).await;
         }
@@ -445,11 +447,12 @@ pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b
     }
     // 新的 key：併進未結束的 occurrence（不論它是排程來的、還是手動來的），或新開一筆；不論哪一種都記下 key → 那一筆。
     let occ_id = match store::open_occurrence_tx(&mut tx, &id).await.map_err(db_err)? {
-        Some(open) => open.id,
-        None => insert_manual(&mut tx, &s, crid.clone(), &now).await?,
+        Some(open) if !b.dry_run && open.source != "dry_run" => open.id,
+        Some(_) => return Err(LcError::Conflict(json!({"error":"schedule_open", "message":"已有未結束的執行，試跑與正式執行不能合併；請先等它結束"}))),
+        None => insert_manual(&mut tx, &s, crid.clone(), &now, b.dry_run).await?,
     };
     if let Some(c) = crid.as_deref() {
-        store::bind_request_tx(&mut tx, &id, c, &occ_id, &now).await.map_err(db_err)?;
+        store::bind_request_kind_tx(&mut tx, &id, c, &occ_id, &now, b.dry_run).await.map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
     // 只對還是 pending 的叫 enqueue；它會自己重查有效性與鎖。
@@ -474,16 +477,19 @@ async fn replay_response(app: &Arc<App>, s: &Schedule, occ_id: &str) -> Result<J
     Ok(Json(json!({"occurrence": view})))
 }
 
-async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedule, crid: Option<String>, now: &str) -> Result<String, LcError> {
+/// 固定前言由 daemon 加入；這是操作指示，並非限制 Bot 實際能力的沙箱。
+const DRY_RUN_PREFIX: &str = "試跑：照步驟做到最後一個會產生實際效果的動作之前停下，不要按下、不要送出，回報你看到的畫面與將會執行的動作。";
+
+async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedule, crid: Option<String>, now: &str, dry_run: bool) -> Result<String, LcError> {
     let occ = store::Occurrence {
         id: db::ulid(),
         schedule_id: s.id.clone(),
-        source: "manual".into(),
+        source: if dry_run { "dry_run" } else { "manual" }.into(),
         scheduled_for: now.into(),
         generation: s.generation,
         bot_id: s.bot_id.clone(),
-        prompt: s.prompt.clone(),
-        client_request_id: crid,
+        prompt: if dry_run { format!("{}\n\n{}", DRY_RUN_PREFIX, s.prompt) } else { s.prompt.clone() },
+        client_request_id: if dry_run { None } else { crid },
         status: "pending".into(),
         waiting_reason: None,
         merged_count: 0,

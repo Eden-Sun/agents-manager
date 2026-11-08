@@ -25,7 +25,7 @@ export interface ScheduleSpecIn {
 export interface ScheduleOccurrence {
   id: string
   schedule_id: string
-  source: 'scheduled' | 'manual'
+  source: 'scheduled' | 'manual' | 'dry_run'
   scheduled_for: string
   generation: number
   bot_id: string
@@ -155,8 +155,8 @@ export async function deleteSchedule(id: string): Promise<void> {
 }
 
 /** 手動執行：只建立並排進既有佇列，不 steer、不 interrupt。 */
-export async function runScheduleNow(id: string, clientRequestId: string): Promise<{ occurrence: ScheduleOccurrence | null }> {
-  return (await rawTransport.request('POST', `/schedules/${enc(id)}/run`, { client_request_id: clientRequestId })) as {
+export async function runScheduleNow(id: string, clientRequestId: string, dryRun = false): Promise<{ occurrence: ScheduleOccurrence | null }> {
+  return (await rawTransport.request('POST', `/schedules/${enc(id)}/run`, { client_request_id: clientRequestId, ...(dryRun ? { dry_run: true } : {}) })) as {
     occurrence: ScheduleOccurrence | null
   }
 }

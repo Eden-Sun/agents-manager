@@ -298,6 +298,7 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
             .bind(&occ.turn_id).fetch_optional(pool).await?;
         let outcome = if next == "done" || (next == "failed" && reply.is_some()) { super::outcome::classify(model, reply.as_ref().map_or("", |r| r.1.as_str())).await }
             else if next == "failed" { "failed".into() } else { "unknown".into() };
+        let dry_run = occ.source == "dry_run";
         let summary = super::outcome::summary(reply.as_ref().map_or(error.unwrap_or(""), |r| r.1.as_str()));
         let mut tx = crate::db::begin_write(pool).await?;
         let Some(cur) = get_occurrence_tx(&mut tx, &occ.id).await?.filter(|o| o.status == "queued" && o.turn_id == occ.turn_id && o.attempt_no == occ.attempt_no) else { continue };
@@ -317,7 +318,7 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
         if next == "unknown" { sqlx::query("UPDATE schedules SET enabled = 0, updated_at = ? WHERE id = ?").bind(now).bind(&sched.id).execute(&mut *tx).await?; }
         tx.commit().await?;
         out.push(Transition { schedule_id: sched.id, schedule_name: sched.name, project_id: sched.project_id, occurrence_id: occ.id,
-            status: next.into(), notify: sched.notify, error: error.map(str::to_owned), bot_id: occ.bot_id,
+            status: next.into(), notify: if dry_run { "none".into() } else { sched.notify }, error: error.map(str::to_owned), bot_id: occ.bot_id,
             clear_after: sched.clear_after == 1 && retry.is_none(), outcome, attempt_no: occ.attempt_no });
     }
     Ok(out)
@@ -325,6 +326,8 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
 
 /// Only known failures retry. Deadline is measured from the original scheduled time, not each retry.
 pub(super) fn retry_at(s: &Schedule, o: &Occurrence, outcome: &str, now: &str) -> Option<String> {
+    // 試跑不重試：只回結果，不排下一次（P1 第 2 部分）。
+    if o.source == "dry_run" { return None; }
     use chrono::{DateTime, Duration, SecondsFormat};
     if outcome != "failed" || s.enabled != 1 || s.deleted_at.is_some() || s.generation != o.generation || o.attempt_no > s.retry_count { return None; }
     let due = DateTime::parse_from_rfc3339(&o.scheduled_for).ok()?;
@@ -385,5 +388,18 @@ pub async fn bind_request_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str
         .execute(&mut **tx)
         .await
         .context("bind manual request")?;
+    Ok(())
+}
+
+/// 試跑與正式手動執行分表，互不佔用冪等鍵。
+pub async fn find_request_kind_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str, crid: &str, dry: bool) -> Result<Option<String>> {
+    if !dry { return find_request_tx(tx, schedule_id, crid).await; }
+    Ok(sqlx::query_scalar("SELECT occurrence_id FROM schedule_dry_run_requests WHERE schedule_id = ? AND client_request_id = ?")
+        .bind(schedule_id).bind(crid).fetch_optional(&mut **tx).await?)
+}
+pub async fn bind_request_kind_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str, crid: &str, occurrence_id: &str, now: &str, dry: bool) -> Result<()> {
+    if !dry { return bind_request_tx(tx, schedule_id, crid, occurrence_id, now).await; }
+    sqlx::query("INSERT INTO schedule_dry_run_requests (schedule_id, client_request_id, occurrence_id, created_at) VALUES (?,?,?,?)")
+        .bind(schedule_id).bind(crid).bind(occurrence_id).bind(now).execute(&mut **tx).await?;
     Ok(())
 }

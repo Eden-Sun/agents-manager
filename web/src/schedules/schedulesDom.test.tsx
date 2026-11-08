@@ -43,6 +43,16 @@ beforeEach(() => {
 const addButton = (label: string) => document.querySelector<HTMLButtonElement>(`[aria-label="在 ${label} 新增"]`)!
 const menuItem = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.trim() === text)!
 const dialogs = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
+let confirmClock = Date.now()
+const confirmManualRun = async () => {
+  const d = [...document.querySelectorAll<HTMLElement>('[role="alertdialog"]')].find((x) => x.textContent?.includes('會真的執行這份任務'))!
+  assert.ok(d, '手動執行必須先確認')
+  const button = [...d.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
+  const now = Date.now
+  confirmClock += 1_000
+  Date.now = () => confirmClock
+  try { await click(button) } finally { Date.now = now }
+}
 
 test('專案「＋」展開成選單：新增 Bot／新增排程（不再直接開 Bot 表單）', async () => {
   fakeApi(() => ({ schedules: [] }))
@@ -391,6 +401,8 @@ test('已刪除的綁定 Bot 與未儲存的新 Bot 不可立即執行，儲存�
     await settle()
     assert.equal(run().disabled, false)
     await click(run())
+    assert.deepEqual(ran, [], '確認前不能送出')
+    await confirmManualRun()
     await settle()
     assert.deepEqual(ran, ['b2'])
   } finally { globalThis.fetch = realFetch }
@@ -493,14 +505,17 @@ test('手動執行：POST 已送達但回應遺失 → 重按用同一個 key，
     await settle()
     const runBtn = () => [...dialogs().find((d) => d.textContent?.includes('排程'))!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     assert.equal(runKeysSent.length, 2, '兩次送出都到了伺服器')
     assert.equal(runKeysSent[0], runKeysSent[1], '重按要用同一個 key')
     assert.equal(jobs, 1, '同一個 key 只產生一次執行')
     // 收到回應後，下一次按才換新的 key。
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     assert.notEqual(runKeysSent[2], runKeysSent[0], '成功收下回應後，下一次明確執行用新 key')
   } finally {
@@ -535,6 +550,7 @@ test('手動執行 key 存在共用 createRequestId：關掉編輯器再開（�
     await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
     await settle()
     await click(runIn())
+    await confirmManualRun()
     await settle()
     // 關掉編輯器（Escape），再從列表開回來（同一個分頁；sessionStorage 留著 key）。
     await act(async () => {
@@ -546,6 +562,7 @@ test('手動執行 key 存在共用 createRequestId：關掉編輯器再開（�
     await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
     await settle()
     await click(runIn())
+    await confirmManualRun()
     await settle()
     assert.equal(runKeysSent.length, 2)
     assert.equal(runKeysSent[0], runKeysSent[1], '關掉再開，手動執行仍用同一個 key')
@@ -592,10 +609,12 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
     await settle()
     const runBtn = () => [...dialogs().find((d) => d.textContent?.includes('排程'))!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '立即執行')!
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     assert.equal(keys.length, 1)
     assert.match(dialogs().find((d) => d.textContent?.includes('排程'))!.textContent ?? '', /503|unavailable|錯誤|error/i, '詳情 503 要讓使用者看到錯誤')
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     assert.equal(keys.length, 2, '再按一次要真的送出')
     assert.equal(keys[0], keys[1], '詳情 503 後再按，沿用同一個 key')
@@ -603,6 +622,7 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
     assert.equal(jobs, 1, '只產生一次執行')
     // 這次成功收下（含詳情）之後，下一次明確執行換新的 key。
     await click(runBtn())
+    await confirmManualRun()
     await settle()
     assert.notEqual(keys[2], keys[0], '成功之後下一次用新 key')
   } finally {

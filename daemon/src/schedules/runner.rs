@@ -88,7 +88,7 @@ async fn expire_queued_retries_body(app: &Arc<App>, now: &str) -> Result<()> {
         tx.commit().await?;
         drop(guard);
         lifecycle::announce_revoked(app, turn, revoked).await;
-        notify_terminal(app, &s, &o.id, "failed", Some(why), o.attempt_no).await;
+        notify_terminal(app, &s, &o.id, "failed", Some(why), o.attempt_no, o.source == "dry_run").await;
     }
     Ok(())
 }
@@ -172,6 +172,7 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
         return Ok(());
     }
     match store::open_occurrence_tx(&mut tx, &s.id).await? {
+        Some(open) if open.source == "dry_run" => return Ok(()),
         Some(open) => store::merge_into_open_tx(&mut tx, &open.id, now).await?,
         None => {
             let occ = Occurrence {
@@ -275,7 +276,7 @@ pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
     if crate::lifecycle::pane_text::nothing_left(&occ.prompt, &text) {
         store::finish_open_tx(&mut tx, occurrence_id, "failed", "排程的 prompt 清理後是空的", &now).await?;
         tx.commit().await?;
-        notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的"), occ.attempt_no).await;
+        notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的"), occ.attempt_no, occ.source == "dry_run").await;
         return Ok(false);
     }
     // 停止中：不收、不踢；等它停完再由 tick 重試。
@@ -351,14 +352,14 @@ async fn set_wait(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, reason:
     }
 }
 
-async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64) {
+async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64, dry_run: bool) {
     let t = Transition {
         schedule_id: sched.id.clone(),
         schedule_name: sched.name.clone(),
         project_id: sched.project_id.clone(),
         occurrence_id: occurrence_id.into(),
         status: status.into(),
-        notify: sched.notify.clone(),
+        notify: if dry_run { "none".into() } else { sched.notify.clone() },
         error: error.map(str::to_string),
         bot_id: sched.bot_id.clone(),
         clear_after: sched.clear_after == 1,

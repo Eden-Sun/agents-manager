@@ -37,7 +37,7 @@ interface MockSchedule {
 interface MockOcc {
   id: string
   schedule_id: string
-  source: 'scheduled' | 'manual'
+  source: 'scheduled' | 'manual' | 'dry_run'
   scheduled_for: string
   generation: number
   bot_id: string
@@ -74,7 +74,7 @@ export class MockServerSchedules {
 
   private view(s: MockSchedule): Rec {
     const { create_crid: _c, create_fp: _f, deleted_at: _d, ...rest } = s
-    return { ...rest, open: this.openOf(s.id) }
+    return { ...rest, bot_available: this.botOk(s.bot_id, s.project_id), open: this.openOf(s.id) }
   }
 
   private openOf(scheduleId: string): Rec | null {
@@ -104,6 +104,18 @@ export class MockServerSchedules {
   }
 
   handle(method: string, rawPath: string, b: Rec, emit: Emit): unknown {
+    const batch = rawPath.match(/^\/projects\/([^/]+)\/schedules\/rebind$/)
+    if (batch && method === 'POST') {
+      const projectId = decodeURIComponent(batch[1])
+      const ids = Array.isArray(b.schedule_ids) ? b.schedule_ids.map(String) : []
+      const target = String(b.bot_id ?? '')
+      if (!ids.length || ids.length > 100 || new Set(ids).size !== ids.length || !this.botOk(target, projectId)) fail(400, 'bad_request', '無效的排程或 Bot')
+      const rows = ids.map((id) => this.live(id))
+      if (rows.some((s) => s.project_id !== projectId)) fail(404, 'not_found', 'schedule')
+      if (rows.some((s) => s.bot_id !== target && this.openOf(s.id))) fail(409, 'schedule_open', '排程還有未結束的執行')
+      for (const s of rows) { if (s.bot_id !== target) { s.bot_id = target; s.generation++; s.updated_at = now(); emit('schedules_changed', { project_id: projectId, id: s.id }) } }
+      return { ok: true, schedule_ids: ids }
+    }
     const pm = rawPath.match(/^\/projects\/([^/]+)\/schedules$/)
     if (pm) {
       const projectId = decodeURIComponent(pm[1])
@@ -205,10 +217,13 @@ export class MockServerSchedules {
     if (!s.enabled) fail(409, 'schedule_disabled', '排程已停用，先啟用再手動執行')
     this.manualRunCalls += 1
     const crid = typeof b.client_request_id === 'string' ? b.client_request_id : null
-    const aliasKey = crid ? `${id}:${crid}` : null
+    const dry = b.dry_run === true
+    const aliasKey = crid ? `${id}:${dry ? 'dry:' : 'manual:'}${crid}` : null
     const known = aliasKey ? this.manualAlias.get(aliasKey) : undefined
     const open = this.openOf(id)
-    const occ = (known ? this.occs.get(known) : undefined) ?? (open ? this.occs.get(open.id as string) : undefined) ?? this.insertManual(s, crid)
+    const previous = known ? this.occs.get(known) : undefined
+    if (!previous && open && (dry || open.source === 'dry_run')) fail(409, 'schedule_open', '試跑與正式執行不能合併')
+    const occ = previous ?? (open ? this.occs.get(open.id as string) : undefined) ?? this.insertManual(s, crid, dry)
     // 不論合併進哪一筆，都記下這個 key → 實際那一筆（重試要回同一筆）。
     if (aliasKey) this.manualAlias.set(aliasKey, occ.id)
     if (occ.status === 'pending') {
@@ -223,24 +238,24 @@ export class MockServerSchedules {
         occ.turn_delivery = 'ok'
         occ.updated_at = now()
         emit('schedules_changed', { project_id: s.project_id, id })
-        emit('schedule_notice', { project_id: s.project_id, schedule_id: id, occurrence_id: occ.id, status: 'done' })
+        if (occ.source !== 'dry_run') emit('schedule_notice', { project_id: s.project_id, schedule_id: id, occurrence_id: occ.id, status: 'done' })
       }, 4000)
     }
     emit('schedules_changed', { project_id: s.project_id, id })
     return { occurrence: this.occView(occ) }
   }
 
-  private insertManual(s: MockSchedule, crid: string | null): MockOcc {
+  private insertManual(s: MockSchedule, crid: string | null, dry: boolean): MockOcc {
     const stamp = now()
     const o: MockOcc = {
       id: newId('occ_'),
       schedule_id: s.id,
-      source: 'manual',
+      source: dry ? 'dry_run' : 'manual',
       scheduled_for: stamp,
       generation: s.generation,
       bot_id: s.bot_id,
-      prompt: s.prompt,
-      client_request_id: crid,
+      prompt: dry ? `試跑：照步驟做到最後一個會產生實際效果的動作之前停下，不要按下、不要送出，回報你看到的畫面與將會執行的動作。\n\n${s.prompt}` : s.prompt,
+      client_request_id: dry ? null : crid,
       status: 'pending',
       waiting_reason: null,
       turn_status: null,

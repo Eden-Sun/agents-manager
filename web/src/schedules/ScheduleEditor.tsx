@@ -126,6 +126,7 @@ export function ScheduleEditor({
   const [botSheet, setBotSheet] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmPause, setConfirmPause] = useState(false)
+  const [confirmRun, setConfirmRun] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   // 建立的冪等 key：重送同一張表單用同一個；後端說 key 已用在別的內容上才換新的。
   const [createKey, setCreateKey] = useState(() => newClientRequestId())
@@ -311,20 +312,21 @@ export function ScheduleEditor({
   // 回應遺失、網路錯誤後再按，送的是同一個 key，伺服器回原來那一筆，不會再跑一次。
   // 伺服器收下（回應成功）才 settle，下一次明確的手動執行才換新的；明確的 4xx 拒絕也 settle（不能讓舊 key 重放舊結果）。
   const runKey = scheduleId ? `schedule-run:${scheduleId}` : null
-  const runNow = async () => {
-    if (!scheduleId || !runKey || unsaved || botUnavailable) return
+  const runNow = async (dryRun = false) => {
+    const key = dryRun && scheduleId ? `schedule-dry-run:${scheduleId}` : runKey
+    if (!scheduleId || !key || unsaved || botUnavailable) return
     setBusy(true)
     setError(null)
     // 伺服器收下（POST 成功）之後，key 仍保留到詳情也重抓成功才 settle：詳情 503 時再按，送的還是同一個 key，
     // 伺服器回同一筆 occurrence。只有 POST 本身的 4xx 拒絕才 settle（那次根本沒被收下）。
     let accepted = false
     try {
-      const r = await runScheduleNow(scheduleId, createRequestId(runKey))
+      const r = await runScheduleNow(scheduleId, createRequestId(key), dryRun)
       accepted = true
       setNotice(r.occurrence ? t('已排進 Bot：{line}', { line: occurrenceLine(r.occurrence) }) : t('已有未結束的執行，沿用它'))
-      if (await loadLatestDetail()) settleCreateRequest(runKey)
+      if (await loadLatestDetail()) settleCreateRequest(key)
     } catch (e) {
-      if (!accepted && e instanceof ApiError && e.status >= 400 && e.status < 500) settleCreateRequest(runKey)
+      if (!accepted && e instanceof ApiError && e.status >= 400 && e.status < 500) settleCreateRequest(key)
       setError(errText(e))
     } finally {
       setBusy(false)
@@ -530,9 +532,11 @@ export function ScheduleEditor({
         </button>
         {detail ? (
           <>
-            <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => void runNow()}>
+            <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => setConfirmRun(true)}>
               {t('立即執行')}
             </button>
+            <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => void runNow(true)}>{t('試跑')}</button>
+            <span className="hint">{t('試跑會要求 Bot 在實際操作前停下，但不能保證不會產生實際效果。')}</span>
             <button type="button" className="btn" disabled={busy || loading} onClick={() => detail.enabled ? setConfirmPause(true) : void toggle()}>
               {detail.enabled ? t('停用') : t('啟用')}
             </button>
@@ -551,7 +555,7 @@ export function ScheduleEditor({
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                   {o.error ? t('（{error}）', { error: o.error }) : ''}
                   {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
@@ -580,6 +584,14 @@ export function ScheduleEditor({
           onCreated={(id) => setForm((f) => ({ ...f, botId: id }))}
         />
       </Modal>
+      <ConfirmDialog
+        open={confirmRun}
+        title={t('立即執行')}
+        body={<>{t('會真的執行這份任務（跟到點執行一樣）。')}</>}
+        confirmLabel={t('立即執行')}
+        onConfirm={() => { setConfirmRun(false); void runNow() }}
+        onCancel={() => setConfirmRun(false)}
+      />
       <ConfirmDialog
         open={confirmPause}
         title={t('停用排程')}

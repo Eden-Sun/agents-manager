@@ -1392,6 +1392,19 @@
     /// - 68：保留它，舊 run 記 1，驗證升到 69 不會丟掉、也不會改寫它。
     /// 兩者都移除 #1944 B 的 api_bot 表，並把 `bots.kind` CHECK 還原成四種（agy 之前不含 claude-api）。
     /// 最後以該版本的歷史 pin 核對，確定真的是那個版本的 schema，而不只是版本號。
+    /// 試跑（v86）之前的排程表：去掉 `schedule_dry_run_requests`，`source` 的 CHECK 還原成沒有 'dry_run'。
+    async fn drop_dry_run_schema(conn: &mut sqlx::SqliteConnection) {
+        sqlx::query("DROP TABLE schedule_dry_run_requests").execute(&mut *conn).await.unwrap();
+        let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='schedule_occurrences'").fetch_one(&mut *conn).await.unwrap();
+        let old = sql.replace("CHECK (source IN ('scheduled','manual','dry_run'))", "CHECK (source IN ('scheduled','manual'))");
+        assert_ne!(sql, old);
+        sqlx::query("PRAGMA writable_schema=ON").execute(&mut *conn).await.unwrap();
+        sqlx::query("UPDATE sqlite_master SET sql=?WHERE name='schedule_occurrences'").bind(old).execute(&mut *conn).await.unwrap();
+        let schema_version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await.unwrap();
+        sqlx::query(&format!("PRAGMA schema_version={}", schema_version + 1)).execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA writable_schema=OFF").execute(&mut *conn).await.unwrap();
+    }
+
     async fn nr1944_fixture(path: &Path, version: i64) {
         use std::os::unix::fs::PermissionsExt;
         assert!(version == 67 || version == 68, "fixture 只造 67 或 68");
@@ -1421,6 +1434,7 @@
         for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
         }
+        drop_dry_run_schema(&mut *tx).await;
         if version == 67 {
             sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&mut *tx).await.unwrap();
         }
@@ -1566,6 +1580,7 @@
         for (table, col) in [("schedule_occurrences", "next_retry_at"), ("schedule_occurrences", "attempt_no"), ("schedule_occurrences", "reply_message_id"), ("schedule_occurrences", "outcome_summary"), ("schedule_occurrences", "outcome"), ("schedules", "retry_deadline_mins"), ("schedules", "retry_interval_mins"), ("schedules", "retry_count")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
+        drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;
         sqlx::query("PRAGMA user_version=69").execute(&pool).await.unwrap();
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&pool).await.unwrap()),pinned(69));
         let now=now();
@@ -1702,5 +1717,29 @@
         let key: Option<String> = sqlx::query_scalar("SELECT cluster_key FROM relay_requests WHERE id='r'").fetch_one(&pool).await.unwrap();
         assert!(key.is_none(), "the current target cannot prove the original key");
         crate::runners::am_base_tests::check_drift(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schedule_dry_run_migration_preserves_occurrences_and_manual_keys() {
+        let (pool, _) = bare_wal_pool().await;
+        let old = SCHEMA.replace("source IN ('scheduled','manual','dry_run')", "source IN ('scheduled','manual')");
+        for stmt in old.split(";\n") {
+            if !stmt.trim().is_empty() { sqlx::query(stmt.trim()).execute(&pool).await.unwrap(); }
+        }
+        for sql in [
+            "INSERT INTO projects(id,path,label,created_at) VALUES ('p','/tmp/p','p','now')",
+            "INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','fixture','now')",
+            "INSERT INTO schedules(id,project_id,bot_id,name,prompt,mode,tz,spec_json,created_at,updated_at) VALUES ('s','p','b','s','x','daily','UTC','{}','now','now')",
+            "INSERT INTO schedule_occurrences(id,schedule_id,source,scheduled_for,generation,bot_id,prompt,status,created_at,updated_at) VALUES ('o','s','manual','now',1,'b','x','done','now','now')",
+            "INSERT INTO schedule_manual_requests VALUES ('s','same-key','o','now')",
+        ] { sqlx::query(sql).execute(&pool).await.unwrap(); }
+        apply_migrations(&pool).await.unwrap();
+        apply_migrations(&pool).await.unwrap();
+        let mapped: String = sqlx::query_scalar("SELECT occurrence_id FROM schedule_manual_requests WHERE schedule_id='s' AND client_request_id='same-key'").fetch_one(&pool).await.unwrap();
+        assert_eq!(mapped, "o");
+        sqlx::query("INSERT INTO schedule_occurrences(id,schedule_id,source,scheduled_for,generation,bot_id,prompt,status,created_at,updated_at) VALUES ('d','s','dry_run','now',1,'b','x','done','now','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO schedule_dry_run_requests VALUES ('s','same-key','d','now')").execute(&pool).await.unwrap();
+        let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check").fetch_all(&pool).await.unwrap();
+        assert!(violations.is_empty());
         pool.close().await;
     }
