@@ -40,9 +40,17 @@ pub struct SpecIn {
 fn slots_of(input: &SpecIn) -> Result<(String, Vec<time::Slot>), LcError> {
     let slots = match &input.slots {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => vec![time::Slot { time: input.time.clone().ok_or_else(|| LcError::Bad("每日／每週需要 time 或 slots".into()))?, label: String::new() }],
+        _ => vec![time::Slot { time: input.time.clone().ok_or_else(|| LcError::Bad("每日／每週需要 time 或 slots".into()))?, label: String::new(), until: None }],
     };
     Ok((slots[0].time.clone(), slots))
+}
+
+/// 時間規格的錯誤：隨機區間的錯誤帶機器可讀的 code，其餘維持純訊息。
+fn time_err(e: anyhow::Error) -> LcError {
+    match e.downcast_ref::<time::RangeError>() {
+        Some(r) => LcError::BadValue(json!({"error": r.code, "message": r.message})),
+        None => LcError::Bad(e.to_string()),
+    }
 }
 
 fn build_spec(input: &SpecIn, now: DateTime<Utc>) -> Result<Spec, LcError> {
@@ -244,7 +252,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         return Ok(Json(schedule_json(&prev)));
     }
     let spec = build_spec(&b.spec, now)?;
-    let first = time::validate_and_first(&spec, &b.tz, now).map_err(|e| LcError::Bad(e.to_string()))?;
+    let first = time::validate_and_first(&spec, &b.tz, now).map_err(time_err)?;
     if runner::eligible_bot_tx(&mut tx, &b.bot_id, Some(&project_id)).await.map_err(db_err)?.is_none() {
         return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
     }
@@ -341,12 +349,12 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
         }
     }
     let now_t = Utc::now();
-    let (mode, spec_json, spec_changed) = match &b.spec {
+    let (mode, spec_json) = match &b.spec {
         Some(sp) => {
             let spec = build_spec(sp, now_t)?;
-            (sp.mode.clone(), serde_json::to_string(&spec).map_err(db_err)?, true)
+            (sp.mode.clone(), serde_json::to_string(&spec).map_err(db_err)?)
         }
-        None => (cur.mode.clone(), cur.spec_json.clone(), false),
+        None => (cur.mode.clone(), cur.spec_json.clone()),
     };
     let enabled = b.enabled.unwrap_or(cur.enabled == 1);
     let content_changed = name != cur.name || prompt != cur.prompt || tz != cur.tz || notify != cur.notify || spec_json != cur.spec_json || bot_changed;
@@ -358,8 +366,8 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let spec: Spec = serde_json::from_str(&spec_json).map_err(db_err)?;
     let next_due = if enabled {
         // 內容、時間變了，或從停用重新啟用：從現在重算；否則保留原本的下一次。
-        if content_changed || spec_changed || cur.enabled == 0 {
-            time::validate_and_first(&spec, &tz, now_t).map_err(|e| LcError::Bad(e.to_string()))?.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        if content_changed || cur.enabled == 0 {
+            time::validate_and_first(&spec, &tz, now_t).map_err(time_err)?.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         } else {
             cur.next_due.clone()
         }

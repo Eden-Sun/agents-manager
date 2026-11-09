@@ -22,7 +22,7 @@ import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId } from '../api'
 import { ApiError } from '../api/types'
 import { isImeEnter } from '../lib/ime'
-import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, timeZoneOptions } from './format'
+import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleResult } from './ScheduleResult'
 import { copyScheduleName } from './scheduleCopy'
@@ -37,10 +37,37 @@ const WEEKDAYS = [msg('週一'), msg('週二'), msg('週三'), msg('週四'), ms
 interface ScheduleSlot {
   time: string
   label: string
+  /** 隨機區間的結束時間 `HH:MM`；null＝固定時間（開關關著）。 */
+  until: string | null
 }
 
 const MAX_SLOTS = 8
 const MAX_SLOT_LABEL = 20
+const MAX_RANGE_MINUTES = 12 * 60
+
+/** `HH:MM[:SS]` 轉一天中的秒數；格式不對回 null。 */
+function secondsOfDay(v: string): number | null {
+  const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(v)
+  return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3] ?? 0) : null
+}
+
+/** 打開隨機區間時預設的結束時間：開始後 5 分鐘（不跨午夜）。 */
+function defaultUntil(time: string): string {
+  const start = secondsOfDay(time) ?? 9 * 3600
+  const end = Math.min(start + 300, 24 * 3600 - 60)
+  return `${String(Math.floor(end / 3600)).padStart(2, '0')}:${String(Math.floor((end % 3600) / 60)).padStart(2, '0')}`
+}
+
+/** 隨機區間的錯誤文字；沒問題回 null（對應 daemon 的 slot_range_* 驗證）。 */
+function rangeError(s: ScheduleSlot): string | null {
+  if (s.until == null) return null
+  const a = secondsOfDay(s.time)
+  const b = secondsOfDay(s.until)
+  if (b == null) return t('隨機區間需要結束時間')
+  if (a == null || b <= a) return t('結束時間要晚於開始時間（不可跨午夜）')
+  if (b - a > MAX_RANGE_MINUTES * 60) return t('隨機區間最長 12 小時')
+  return null
+}
 
 /** 新增時段時預設的時間：第一個還沒用到的整點（09:00 起），都用了就 09:00。 */
 function nextFreeTime(slots: ScheduleSlot[]): string {
@@ -72,11 +99,11 @@ interface FormState {
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '' }], weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '', until: null }], weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
 }
 
 function fromDetail(d: Schedule): FormState {
-  const spec = (d.spec ?? {}) as { at?: string; every_secs?: number; time?: string; weekdays?: number[]; slots?: ScheduleSlot[] }
+  const spec = (d.spec ?? {}) as { at?: string; every_secs?: number; time?: string; weekdays?: number[]; slots?: { time: string; label?: string; until?: string | null }[] }
   return {
     name: d.name,
     prompt: d.prompt,
@@ -87,7 +114,7 @@ function fromDetail(d: Schedule): FormState {
     at: spec.at ?? '',
     everySecs: spec.every_secs || 3600,
     // 舊排程只有單一 `time`，讀成沒有標籤的一個時段。
-    slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, label: s.label ?? '' })) : [{ time: spec.time ?? '09:00', label: '' }],
+    slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, label: s.label ?? '', until: s.until ?? null })) : [{ time: spec.time ?? '09:00', label: '', until: null }],
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
     retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3, retryDeadline: d.retry_deadline_mins ?? 15,
@@ -95,9 +122,9 @@ function fromDetail(d: Schedule): FormState {
 }
 
 function specOf(f: FormState): ScheduleSpecIn {
-  const slots = f.slots.map((s) => ({ time: s.time, label: s.label.trim() }))
-  // 單一、沒標籤的時段仍送舊格式（只有 time），跟既有排程的 spec 一致。
-  const extra = slots.length > 1 || slots.some((s) => s.label) ? { slots } : {}
+  const slots = f.slots.map((s) => ({ time: s.time, label: s.label.trim(), ...(s.until != null ? { until: s.until } : {}) }))
+  // 單一、沒標籤、沒隨機區間的時段仍送舊格式（只有 time），跟既有排程的 spec 一致。
+  const extra = slots.length > 1 || slots.some((s) => s.label || s.until) ? { slots } : {}
   switch (f.mode) {
     case 'once':
       return { mode: 'once', at: f.at }
@@ -325,6 +352,8 @@ export function ScheduleEditor({
       if (form.slots.length === 0 || form.slots.some((s) => !s.time)) return setError(t('時段需要時間'))
       if (new Set(form.slots.map((s) => s.time)).size !== form.slots.length) return setError(t('時段時間不能重複'))
       if (form.slots.length > MAX_SLOTS) return setError(t('時段最多 {n} 個', { n: MAX_SLOTS }))
+      const badRange = form.slots.map(rangeError).find((m) => m)
+      if (badRange) return setError(badRange)
       if (form.slots.some((s) => [...s.label.trim()].length > MAX_SLOT_LABEL)) return setError(t('時段標籤不能超過 {n} 字', { n: MAX_SLOT_LABEL }))
     }
     const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval, retry_deadline_mins: form.retryDeadline }
@@ -455,7 +484,8 @@ export function ScheduleEditor({
         <section className="schedule-status" aria-label={t('排程狀態')}>
           <p>{t('已儲存的 Bot：{bot}', { bot: botLabel(detail.bot_id) })}</p>
           <p className="schedule-save-state" role="status">{unsaved ? t('有未儲存的變更') : t('設定已儲存')}</p>
-          <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz) })}</p>
+          {randomSummary(detail.spec) ? <p className="schedule-random-summary">{randomSummary(detail.spec)}</p> : null}
+          <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz, randomSummary(detail.spec) !== '') })}</p>
           <p>{t('狀態：{status}', { status: detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用') })}</p>
           {openForDisplay?.waiting_reason ? <p className="hint">{occurrenceLine(openForDisplay, liveStatus)}</p> : null}
           {hasStartError && detail.open ? <button type="button" className="btn" onClick={() => { selectBot(detail.open!.bot_id); onClose() }}>{t('開啟綁定 Bot 的對話')}</button> : null}
@@ -538,9 +568,23 @@ export function ScheduleEditor({
                 <input type="time" aria-label={t('第 {n} 個時段的時間', { n: i + 1 })} value={slot.time} disabled={loading} onChange={(e) => setSlot(i, { time: e.target.value })} />
                 <input type="text" maxLength={MAX_SLOT_LABEL} placeholder={t('標籤（選填）')} aria-label={t('第 {n} 個時段的標籤', { n: i + 1 })} value={slot.label} disabled={loading} onChange={(e) => setSlot(i, { label: e.target.value })} />
                 <button type="button" className="schedule-link" disabled={loading || form.slots.length <= 1} onClick={() => set('slots', form.slots.filter((_, j) => j !== i))}>{t('刪除時段')}</button>
+                <div className="schedule-slot-range">
+                  <label className="schedule-slot-random">
+                    <input type="checkbox" role="switch" aria-label={t('第 {n} 個時段的隨機區間', { n: i + 1 })} checked={slot.until != null} disabled={loading} onChange={(e) => setSlot(i, { until: e.target.checked ? defaultUntil(slot.time) : null })} />
+                    <span>{t('隨機區間')}</span>
+                  </label>
+                  {slot.until != null ? (
+                    <label className="schedule-slot-until">
+                      <span>{t('結束時間')}</span>
+                      <input type="time" aria-label={t('第 {n} 個時段的結束時間', { n: i + 1 })} value={slot.until} disabled={loading} onChange={(e) => setSlot(i, { until: e.target.value })} />
+                    </label>
+                  ) : null}
+                  {slot.until != null && rangeError(slot) ? <p className="hint schedule-error" role="alert">{rangeError(slot)}</p> : null}
+                  {slot.until != null && !rangeError(slot) ? <p className="hint">{t('{range} 隨機', { range: `${slot.time}–${slot.until}` })}</p> : null}
+                </div>
               </div>
             ))}
-            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), label: '' }])}>{t('新增時段')}</button>
+            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), label: '', until: null }])}>{t('新增時段')}</button>
           </fieldset>
         ) : null}
         {form.mode === 'weekly' ? (

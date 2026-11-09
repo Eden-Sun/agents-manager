@@ -754,3 +754,49 @@ async fn dry_run_never_retries_and_never_sends_failure_notices() {
     assert!(store::retry_at(&s, &o, "failed", &o.scheduled_for).is_none(), "試跑不重試");
     assert!(!store::wants_notice("none", "failed"), "試跑的 notify 是 none，不發失敗通知");
 }
+
+/// 隨機區間：到期後下一次落在隔天，不會同一天再抽；抽到的時間存在 next_due，重算（materialize 以外）不變。
+#[tokio::test]
+async fn random_window_materializes_once_and_stores_the_next_draw_on_the_following_day() {
+    let (e, bot) = setup().await;
+    let now = chrono::Utc::now();
+    // 用 UTC 時區、窗口＝「現在往前 1 分鐘到往後 1 分鐘」，next_due 設成已到期的一秒（窗口內）。
+    let (lo, hi) = (now - chrono::Duration::minutes(1), now + chrono::Duration::minutes(1));
+    if lo.date_naive() != hi.date_naive() {
+        return; // 跨午夜的瞬間，窗口不成立；下次再跑就好
+    }
+    let (start, end) = (lo.format("%H:%M:%S").to_string(), hi.format("%H:%M:%S").to_string());
+    let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
+    s.spec_json = format!(r#"{{"mode":"daily","time":"{start}","slots":[{{"time":"{start}","label":"","until":"{end}"}}]}}"#);
+    let due = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE schedules SET spec_json = ?, next_due = ? WHERE id = ?").bind(&s.spec_json).bind(&due).bind(&s.id).execute(&e.app.db).await.unwrap();
+    s.next_due = Some(due);
+    runner::materialize(&e.app.db, &s, &db::now()).await.unwrap();
+    assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
+    let next = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap().next_due.unwrap();
+    let next = chrono::DateTime::parse_from_rfc3339(&next).unwrap();
+    // 下一次一定在窗口結束之後（隔天的窗口），不是同一天再抽。
+    assert!(next.with_timezone(&chrono::Utc) > now + chrono::Duration::hours(12), "{next}");
+}
+
+#[tokio::test]
+async fn random_window_create_rejects_bad_ranges_with_a_code_and_stores_the_draw() {
+    let (e, bot) = setup().await;
+    let mut bad = daily(&bot.id, "p");
+    bad.spec.slots = Some(vec![super::time::Slot { time: "09:00".into(), label: String::new(), until: Some("08:00".into()) }]);
+    match api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(bad)).await {
+        Err(LcError::BadValue(v)) => assert_eq!(v["error"], "slot_range_not_after_start"),
+        other => panic!("{other:?}"),
+    }
+    let mut ok = daily(&bot.id, "p");
+    ok.client_request_id = "crid-range".into();
+    ok.spec.slots = Some(vec![super::time::Slot { time: "09:00".into(), label: String::new(), until: Some("09:05".into()) }]);
+    let Json(v) = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(ok)).await.unwrap();
+    let due = chrono::DateTime::parse_from_rfc3339(v["next_due"].as_str().unwrap()).unwrap().with_timezone(&chrono::Utc);
+    let secs = chrono::Timelike::num_seconds_from_midnight(&due.time());
+    assert!((9 * 3600..=9 * 3600 + 300).contains(&secs), "{due}");
+    // 同一筆再讀：next_due 不變（存下後不重抽）。
+    let id = v["id"].as_str().unwrap().to_string();
+    let Json(again) = api::get_one(State(e.app.clone()), Path(id)).await.unwrap();
+    assert_eq!(again["next_due"], v["next_due"]);
+}

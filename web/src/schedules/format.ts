@@ -17,10 +17,10 @@ function zonedText(d: Date, tz: string, options: Intl.DateTimeFormatOptions): { 
 }
 
 /** 排程時區的時間字串，附上時區名（下次執行用）。無效日期原樣回傳。 */
-export function formatZoned(iso: string, tz: string): string {
+export function formatZoned(iso: string, tz: string, seconds = false): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  const { text, ok } = zonedText(d, tz, DUE_OPTIONS)
+  const { text, ok } = zonedText(d, tz, seconds ? { ...DUE_OPTIONS, second: '2-digit' } : DUE_OPTIONS)
   return ok ? t('{text}（{tz}）', { text, tz }) : text
 }
 
@@ -32,9 +32,21 @@ export function formatOccurrenceTime(iso: string, tz: string): string {
 }
 
 /** 下次執行時間，附上排程自己的時區名稱（不把 UTC 字串直接丟給使用者）。 */
-export function formatDue(iso: string | null, tz: string): string {
+export function formatDue(iso: string | null, tz: string, seconds = false): string {
   if (!iso) return t('沒有下一次（已完成或已停用）')
-  return formatZoned(iso, tz)
+  return formatZoned(iso, tz, seconds)
+}
+
+/** 每天／每週排程裡的隨機區間時段（有 `until` 的）。 */
+export function randomRanges(spec: unknown): { time: string; until: string }[] {
+  const slots = (spec as { slots?: { time?: string; until?: string | null }[] } | null)?.slots
+  return (slots ?? []).flatMap((s) => (s.time && s.until ? [{ time: s.time, until: s.until }] : []))
+}
+
+/** `08:55–09:00 隨機`（秒為 00 就不顯示）；多個區間用頓號接起來。沒有隨機區間回空字串。 */
+export function randomSummary(spec: unknown): string {
+  const hm = (v: string) => (v.length === 8 && v.endsWith(':00') ? v.slice(0, 5) : v)
+  return randomRanges(spec).map((r) => t('{range} 隨機', { range: `${hm(r.time)}–${hm(r.until)}` })).join('、')
 }
 
 export const OCCURRENCE_LABEL: Record<OccurrenceStatus, string> = {
@@ -72,18 +84,20 @@ export function scheduleStatusLine(s: Schedule, liveTurnStatus?: string): string
   if (s.enabled === false) return t('已停用')
   if (s.open) return occurrenceLine(s.open, liveTurnStatus)
   if (!s.next_due) return t('已完成')
-  return t('下次 {due}', { due: formatDue(s.next_due, s.tz) })
+  const range = randomSummary(s.spec)
+  const next = t('下次 {due}', { due: formatDue(s.next_due, s.tz, range !== '') })
+  return range ? `${range} · ${next}` : next
 }
 
 /** 側欄列的短時間：`11/02 08:33`；排程時區跟瀏覽器不同才補時區縮寫。完整字串放 title（`scheduleStatusLine`）。 */
-export function formatDueShort(iso: string, tz: string): string {
+export function formatDueShort(iso: string, tz: string, seconds = false): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   try {
-    const parts = new Intl.DateTimeFormat('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz, ...(tz === defaultTimeZone() ? {} : { timeZoneName: 'short' }) }).formatToParts(d)
+    const parts = new Intl.DateTimeFormat('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' as const } : {}), hourCycle: 'h23', timeZone: tz, ...(tz === defaultTimeZone() ? {} : { timeZoneName: 'short' }) }).formatToParts(d)
     const p = (type: string) => parts.find((x) => x.type === type)?.value ?? ''
     const zone = p('timeZoneName')
-    return `${p('month')}/${p('day')} ${p('hour')}:${p('minute')}${zone ? ` ${zone}` : ''}`
+    return `${p('month')}/${p('day')} ${p('hour')}:${p('minute')}${seconds ? `:${p('second')}` : ''}${zone ? ` ${zone}` : ''}`
   } catch (e) {
     if (!(e instanceof RangeError)) throw e
     return formatZoned(iso, tz)
@@ -95,7 +109,8 @@ export function scheduleStatusShort(s: Schedule, liveTurnStatus?: string): strin
   if (s.enabled === false) return t('已停用')
   if (s.open) return occurrenceLine(s.open, liveTurnStatus)
   if (!s.next_due) return t('已完成')
-  return formatDueShort(s.next_due, s.tz)
+  const range = randomSummary(s.spec)
+  return range ? `${range} · ${formatDueShort(s.next_due, s.tz, true)}` : formatDueShort(s.next_due, s.tz)
 }
 
 /** 用瀏覽器時區當預設；不支援 supportedValuesOf 時退回 UTC。 */

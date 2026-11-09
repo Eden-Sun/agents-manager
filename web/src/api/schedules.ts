@@ -21,7 +21,7 @@ export interface ScheduleSpecIn {
   /** weekly：0=週一 … 6=週日 */
   weekdays?: number[]
   /** daily／weekly 的時段（一天多個），最多 8 個，時間不重複 */
-  slots?: { time: string; label: string }[]
+  slots?: { time: string; label: string; /** 隨機區間的結束時間（HH:MM[:SS]）；有值就在 time–until 內隨機挑一秒觸發 */ until?: string }[]
 }
 
 export interface ScheduleOccurrence {

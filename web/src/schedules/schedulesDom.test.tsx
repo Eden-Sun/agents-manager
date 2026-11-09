@@ -743,7 +743,7 @@ test('「跑完就清空對話」勾選：建立送出 clear_after:true；編輯
   assert.match(dialog.textContent ?? '', /建議搭配專用 Bot/, '勾選框下要有說明')
   await typeInto(dialog.querySelector<HTMLInputElement>('input')!, '每日摘要')
   await typeInto(dialog.querySelector<HTMLTextAreaElement>('textarea')!, '請整理今天的進度')
-  const check = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+  const check = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]:not([role="switch"])')!
   assert.equal(check.checked, false, '預設不勾')
   await act(async () => check.click())
   await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
@@ -764,7 +764,7 @@ test('「跑完就清空對話」勾選：建立送出 clear_after:true；編輯
   await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
   await settle()
   const edit = dialogs().find((d) => d.textContent?.includes('排程'))!
-  const editCheck = edit.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+  const editCheck = edit.querySelector<HTMLInputElement>('input[type="checkbox"]:not([role="switch"])')!
   assert.equal(editCheck.checked, true, '編輯時要反映 clear_after')
   await act(async () => editCheck.click())
   await click([...edit.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!)

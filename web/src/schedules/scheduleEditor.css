@@ -284,3 +284,27 @@
     justify-self: end;
   }
 }
+
+.schedule-editor .schedule-slot-range {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.schedule-editor .schedule-slot-range label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-editor .schedule-slot-range input[type="time"] {
+  width: auto;
+}
+
+.schedule-editor .schedule-slot-range .hint {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

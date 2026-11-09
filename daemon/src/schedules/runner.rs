@@ -164,8 +164,11 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
     // due before calculating its successor.
     let due_dt = DateTime::parse_from_rfc3339(&due)?.with_timezone(&Utc);
     let after_due = due_dt.checked_add_signed(Duration::milliseconds(1)).unwrap_or(due_dt);
-    let next = time::next_after(&spec, &s.tz, now_dt.max(after_due))?.map(fmt);
-    let slot_label = time::slot_label_at(&spec, &s.tz, due_dt)?.filter(|l| !l.is_empty());
+    // 隨機區間：這次已在區間內抽過了，下一次要從區間結束之後找，同一天不會再抽第二次。
+    let slot = time::slot_at(&spec, &s.tz, due_dt)?;
+    let window_end = slot.as_ref().and_then(|(_, end)| end.checked_add_signed(Duration::milliseconds(1)));
+    let next = time::next_after(&spec, &s.tz, now_dt.max(after_due).max(window_end.unwrap_or(after_due)))?.map(fmt);
+    let slot_label = slot.map(|(l, _)| l).filter(|l| !l.is_empty());
     let mut tx = db::begin_write(pool).await?;
     // 交易內重讀：到期判斷與寫入之間可能被停用、編輯或刪除。
     let Some(cur) = store::get_schedule_tx(&mut tx, &s.id).await? else { return Ok(()) };
