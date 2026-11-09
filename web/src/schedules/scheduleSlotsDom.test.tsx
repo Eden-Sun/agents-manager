@@ -1,6 +1,6 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import type { ScheduleDetail } from '../api/schedules'
 import { useStore } from '../store/store'
 import { ProjectSchedules } from './ProjectSchedules'

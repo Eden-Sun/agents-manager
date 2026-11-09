@@ -203,6 +203,19 @@
 }
 
 /* 時段列表（時間＋刪除）。手機寬度換行，不橫向捲動。 */
+.schedule-editor .schedule-link {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #2563eb);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .schedule-editor .schedule-slots {
   display: grid;
   gap: 6px;
