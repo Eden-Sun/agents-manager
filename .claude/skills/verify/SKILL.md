@@ -19,6 +19,8 @@ scripts/check.sh changed
   不要為了「保險」跑整樹 daemon 測試、`scripts/flaky-sweep.sh`，也不要等 GitHub Actions。
 - 整樹測試是另一道、非同步的關卡：Ubuntu 背景的 `ubuntu-ci`（commit status）會依成功基準驗 main HEAD 的受影響部分，預設每 24 小時補整樹 `scripts/check.sh`，**不在 commit 的 critical path 上**，推完就做下一件事。
 
+- 被派工時回合結束就等於回報：check 若丟背景，結束碼要寫進 log（`echo CHECK_RC=$? >> LOG`），同一回合用 `scripts/wait-log.py LOG --exit-prefix CHECK_RC= --timeout 540` 等到有結果（逾時再等）才回報，不可先回「跑完再回報」就結束回合。
+
 ## 結果怎麼處理
 
 - **綠**：才可以 commit，回報時如實寫「`scripts/check.sh changed` 通過」。

@@ -44,6 +44,7 @@
 
 ## 驗證（收尾前必跑）
 - 等待背景 log 完成用 `scripts/wait-log.py`（用法見 `--help`）。
+- 被派工（尤其 `--expect-result`）時回合結束就等於回報：check／建置／測試不可丟背景就先回「跑完再回報」。背景跑時把結束碼寫進 log（`(… > LOG 2>&1; echo CHECK_RC=$? >> LOG) &`），同一回合用 `scripts/wait-log.py LOG --exit-prefix CHECK_RC= --timeout 540` 等，逾時再等，有結果才回報（shell 前景單次上限約 10 分鐘）。
 - 開始驗證前，必讀 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)；完整的負載閘、Mac 原生驗證、UI 真畫面與 CI 分工都在該檔，這裡不複製第二份。
 - 在自己的 worktree 跑 `CHECK_MAX_LOAD=40 scripts/check.sh changed`；共用基礎或大範圍改動才依細則擴大，不為保險另跑整樹或等待 GitHub Actions。
 - 修改 shell／行程／signal 或平台差異仍須 Mac 原生驗證；UI 改動仍須 agent-browser 真畫面驗證。不可把未執行或中斷的檢查報成通過。

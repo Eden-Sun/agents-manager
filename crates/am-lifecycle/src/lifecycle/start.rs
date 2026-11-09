@@ -133,6 +133,9 @@ pub(crate) fn manager_role_section(role: Option<&str>) -> Option<String> {
     Some("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。不確定給誰時用 `bot:auto:cheap|standard|strong`（可加 `:<track>`），由 daemon 依閒置、額度、context 挑人；只有要指定某顆時才點名。同設定的執行者會組成群集，派工可直接用 `bot:cluster:<名稱>`（例 `herdr agent prompt bot:cluster:haiku --expect-result …`），由 daemon 挑閒置成員、全忙就排隊等第一個閒下來的；群集名稱看 `agm peers`。派工給停止的成員時會自動啟動。要調整成員的模型或強度用 `agm bot set <id> --model … --effort …`（改名用 `--name`）；改完要 `agm bot restart <id>` 才生效。專案設定的「專家可直接派工給執行者」開關（預設開）開著時，專家可直接派工給本專案執行者並驗收；同一顆執行者被同時派工照佇列排隊。關掉就只有你（或代班中的副管理者）能派工給執行者。claude-api 顧問（`agm peers` 標 billing=api）用 API 額度：純問答、審稿、草稿這類不需要讀 repo 的，優先 `herdr agent prompt bot:<id> --expect-result` 問它；需要 repo 脈絡才找其他顧問。其他 claude-api 成員不能派工。".to_string())
 }
 
+/// 執行者／顧問收到派工後的收尾規則：回合結束就等於回報，長檢查不可丟背景就結束回合。
+pub(crate) const NO_BG_END_RULE: &str = "\n\n## 回合即回報\n收到派工（尤其 `--expect-result`）時，回合結束就等於回報：長時間的檢查、建置、測試不可以先回「跑完再回報」就結束回合。背景啟動時把結束碼寫進 log（例 `(scripts/check.sh changed > LOG 2>&1; echo CHECK_RC=$? >> LOG) &`），在同一回合用 `scripts/wait-log.py LOG --exit-prefix CHECK_RC= --timeout 540` 前景等，逾時就再等，直到有結果才寫最終回報並結束回合（shell 工具單次前景上限約 10 分鐘，check 常超過）。";
+
 /// 顧問（advisor）的啟動指示：只給顧問本人，職責文字不含 bot 名稱或 id。
 pub(crate) fn advisor_role_section(role: Option<&str>) -> Option<String> {
     if role != Some("advisor") {
@@ -1420,6 +1423,9 @@ async fn start_inner_body(
         }
         if let Some(extra) = advisor_role_section(bot.role.as_deref()) {
             agent_md.text.push_str(&extra);
+        }
+        if matches!(bot.role.as_deref(), Some("executor" | "advisor")) {
+            agent_md.text.push_str(NO_BG_END_RULE);
         }
         if let Some(extra) = deputy_role_section(&bot.id, bot.role.as_deref(), project.deputy_bot_id.as_deref()) {
             agent_md.text.push_str(&extra);
@@ -6292,6 +6298,12 @@ mod specialist_section_tests {
         assert!(manager_role_section(Some("specialist")).is_none());
         assert!(manager_role_section(None).is_none());
         assert!(manager_role_section(Some("other")).is_none());
+    }
+
+    #[test]
+    fn no_bg_end_rule_mentions_wait_log() {
+        assert!(super::NO_BG_END_RULE.contains("scripts/wait-log.py LOG --exit-prefix CHECK_RC= --timeout 540"));
+        assert!(super::NO_BG_END_RULE.contains("回合結束就等於回報"));
     }
 
     #[test]
