@@ -45,6 +45,7 @@ import { IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { ProjectAddMenu } from '../schedules/ProjectAddMenu'
+import { listSchedules } from '../api/schedules'
 import { ProjectSchedules } from '../schedules/ProjectSchedules'
 import { ScheduleEditor } from '../schedules/ScheduleEditor'
 import { RunElapsed } from './RunElapsed'
@@ -944,15 +945,20 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
   )
 }
 
-/** 專案底下可收合的「排程 bot」區（預設收合）：排程專屬 bot 不混在執行者／一般 bot 清單裡。搜尋中一律展開。 */
-function SchedulerBotSection({ count, forceOpen, projectLabel, children }: { count: number; forceOpen: boolean; projectLabel: string; children: ReactNode }) {
+/** 專案底下可收合的「排程 bot」區（預設展開，收合狀態 per 專案記在 `am.collapsedSchedBots`）。搜尋中一律展開。
+ *  收合時標題仍顯示數量；有 bot 卡住（blocked）或有未讀回合時露出紅色提示，點了展開。 */
+function SchedulerBotSection({ count, shut, forceOpen, attention, projectLabel, onToggle, children }: { count: number; shut: boolean; forceOpen: boolean; attention: 'blocked' | 'unread' | null; projectLabel: string; onToggle: () => void; children: ReactNode }) {
   const t = useT()
-  const [open, setOpen] = useState(false)
-  const shown = open || forceOpen
+  const shown = !shut || forceOpen
   return (
     <div className="scheduler-bots">
-      <button type="button" className="scheduler-bots-head" aria-expanded={shown} onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="scheduler-bots-head" aria-expanded={shown} onClick={onToggle}>
         <span aria-hidden="true">{shown ? '▾' : '▸'}</span> {t('排程 bot')} <span className="scheduler-bots-count">{count}</span>
+        {!shown && attention ? (
+          <span className={`scheduler-bots-attn ${attention}`} title={attention === 'blocked' ? t('有排程 bot 卡住了，點開看') : t('有排程 bot 的回合還沒看')}>
+            {attention === 'blocked' ? t('⚠ 需處理') : t('● 有未讀')}
+          </span>
+        ) : null}
       </button>
       {shown ? (
         <div className="bot-list" role="list" aria-label={t('{name} 的排程 bot', { name: projectLabel })}>
@@ -960,6 +966,48 @@ function SchedulerBotSection({ count, forceOpen, projectLabel, children }: { cou
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** 排程專屬 bot 服務哪些排程：bot id → 代號（S<n>，沒有代號用名稱）。 */
+function useBotScheduleCodes(projectId: string, enabled: boolean): Map<string, string[]> {
+  const rev = useStore((s) => s.schedulesRev)
+  const [map, setMap] = useState<Map<string, string[]>>(new Map())
+  useEffect(() => {
+    if (!enabled) return
+    let live = true
+    listSchedules(projectId)
+      .then((rows) => {
+        if (!live) return
+        const m = new Map<string, string[]>()
+        for (const r of rows) m.set(r.bot_id, [...(m.get(r.bot_id) ?? []), r.code || r.name])
+        setMap(m)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [projectId, enabled, rev])
+  return map
+}
+
+/** 排程 bot 區內容：每顆 bot 列下方標它服務的排程代號。 */
+function SchedulerBotRows({ projectId, bots, render }: { projectId: string; bots: Bot[]; render: (b: Bot) => ReactNode }) {
+  const t = useT()
+  const codes = useBotScheduleCodes(projectId, true)
+  return (
+    <>
+      {bots.map((b) => (
+        <Fragment key={b.id}>
+          {render(b)}
+          {codes.get(b.id)?.length ? (
+            <div className="scheduler-bot-codes" title={t('這顆 bot 服務的排程')}>
+              ⏱ {codes.get(b.id)!.join(' ')}
+            </div>
+          ) : null}
+        </Fragment>
+      ))}
+    </>
   )
 }
 
@@ -1192,6 +1240,26 @@ export function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedBotId, selectedBotProject])
   useBotScrollTop(setShutProjects, setCollapsed)
+  // 「排程 bot」區預設展開；收合的專案 id 記在 am.collapsedSchedBots（per 專案）。
+  const [shutSched, setShutSched] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('am.collapsedSchedBots')
+      return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set()
+    }
+  })
+  const toggleSched = (id: string) =>
+    setShutSched((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(id)) next.add(id)
+      try {
+        persistSetDiff('am.collapsedSchedBots', prev, next)
+      } catch {
+        /* 同上 */
+      }
+      return next
+    })
   const toggleProject = (id: string) =>
     setShutProjects((prev) => {
       const next = new Set(prev)
@@ -1628,21 +1696,29 @@ export function Sidebar() {
               {projectShut || schedBots.length === 0 ? null : (
                 <SchedulerBotSection
                   count={schedBots.length}
+                  shut={shutSched.has(p.id)}
                   forceOpen={Boolean(query)}
+                  attention={
+                    schedBots.some((b) => botLamp(lampState, b.id) === 'blocked') ? 'blocked' : schedBots.some((b) => (unreadMap[b.id] ?? 0) > 0) ? 'unread' : null
+                  }
                   projectLabel={p.label}
+                  onToggle={() => toggleSched(p.id)}
                 >
-                  {schedBots.map((b) => (
-                    <BotRow
-                      key={b.id}
-                      botId={b.id}
-                      hit={hits[b.id]}
-                      drag={drag}
-                      onDrag={setDrag}
-                      onDropAt={dropAt}
-                      onNudge={nudge}
-                      onStep={step}
-                    />
-                  ))}
+                  <SchedulerBotRows
+                    projectId={p.id}
+                    bots={schedBots}
+                    render={(b) => (
+                      <BotRow
+                        botId={b.id}
+                        hit={hits[b.id]}
+                        drag={drag}
+                        onDrag={setDrag}
+                        onDropAt={dropAt}
+                        onNudge={nudge}
+                        onStep={step}
+                      />
+                    )}
+                  />
                 </SchedulerBotSection>
               )}
               {projectShut ? null : <ProjectSchedules projectId={p.id} onOpen={(sid, focusBot) => setScheduleEditor({ projectId: p.id, scheduleId: sid, focusBot })} />}

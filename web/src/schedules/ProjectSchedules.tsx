@@ -10,6 +10,8 @@ import { t, useLang } from '../lib/i18n'
 
 function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }: { s: Schedule; onOpen: (id: string, focusBot?: boolean) => void; onTurnChange: () => void; selecting: boolean; selected: boolean; onSelect: (id: string) => void }) {
   const live = useLiveTurnStatus(s.open?.bot_id, s.open?.turn_id)
+  const botName = useStore((st) => st.bots.find((b) => b.id === s.bot_id)?.name)
+  const selectBot = useStore((st) => st.selectBot)
   useOnTurnChange(live, onTurnChange)
   return (
     <li className={`project-schedule-item${s.enabled === false ? ' off' : ''}`}>
@@ -21,6 +23,11 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
         <span className={`project-schedule-status${s.bot_available === false ? ' needs-rebind' : ''}`}>{s.bot_available === false ? t('⚠ 需要重新指定 Bot') : scheduleStatusShort(s, live)}</span>
         {s.bot_available !== false && s.bot_dedicated === false ? <span className="project-schedule-status needs-rebind" title={t('這個排程綁的不是排程專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot')}>{t('非專屬 bot')}</span> : null}
       </button>
+      {s.bot_available !== false && botName ? (
+        <button type="button" className="project-schedule-bot" title={t('跳到這個排程綁定的 Bot：{name}', { name: botName })} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
+          🤖 {botName}
+        </button>
+      ) : null}
       <ScheduleRowMenu schedule={s} onOpen={onOpen} />
     </li>
   )
