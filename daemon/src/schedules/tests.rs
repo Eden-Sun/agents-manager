@@ -6,7 +6,7 @@ use super::store::{self, Occurrence, Schedule};
 use crate::db;
 use crate::lifecycle::{self, LcError};
 use crate::testing;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 
 async fn setup() -> (testing::Env, db::Bot) {
@@ -55,6 +55,7 @@ async fn schedule(app: &std::sync::Arc<crate::state::App>, project: &str, bot: &
         notify: "failure".into(),
         clear_after: 0,
         from_base: 0,
+        code_no: 0,
         retry_count: 0, retry_interval_mins: 3, retry_deadline_mins: 15,
         create_crid: None,
         create_fp: None,
@@ -452,6 +453,7 @@ async fn clear_after_is_part_of_the_create_key_fingerprint() {
 fn only_done_clears_the_bot_conversation() {
     let t = |status: &str, clear_after: bool| store::Transition {
         schedule_id: "s".into(),
+        schedule_code: "S1".into(),
         schedule_name: "n".into(),
         project_id: "p".into(),
         occurrence_id: "o".into(),
@@ -1106,4 +1108,64 @@ async fn an_old_schedule_keeps_its_stored_values_and_its_old_deadline_still_appl
     // 舊排程（建立於舊預設 0／3／15）：讀回原值，不被新預設改寫。
     let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
     assert_eq!((v["retry_count"].as_i64(), v["retry_interval_mins"].as_i64(), v["retry_deadline_mins"].as_i64()), (Some(0), Some(3), Some(15)));
+}
+
+#[test]
+fn parse_code_accepts_only_s_plus_digits() {
+    assert_eq!(store::parse_code("S12"), Some(12));
+    assert_eq!(store::parse_code("s3"), Some(3));
+    for bad in ["S", "S0", "S-1", "S1a", "12", "01HZ", "SS1", "S1234567890"] {
+        assert_eq!(store::parse_code(bad), None, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn schedule_codes_increase_never_recycle_and_resolve_in_the_api() {
+    let (e, bot) = setup().await;
+    let pid = e.project_id.clone();
+    let mut a = daily(&bot.id, "一");
+    a.client_request_id = "crid-a".into();
+    let mut b = daily(&bot.id, "二");
+    b.client_request_id = "crid-b".into();
+    let first = api::create(State(e.app.clone()), Path(pid.clone()), Json(a)).await.unwrap().0;
+    let second = api::create(State(e.app.clone()), Path(pid.clone()), Json(b)).await.unwrap().0;
+    assert_eq!(first["code"], "S1");
+    assert_eq!(second["code"], "S2");
+    // 用代號查得到同一筆（含最近執行），小寫也行。
+    let got = api::get_one(State(e.app.clone()), Path("S2".into())).await.unwrap().0;
+    assert_eq!(got["id"], second["id"]);
+    assert!(got["recent"].is_array());
+    let got = api::get_one(State(e.app.clone()), Path("s1".into())).await.unwrap().0;
+    assert_eq!(got["id"], first["id"]);
+    let hist = api::history(State(e.app.clone()), Path("S1".into()), Query(api::HistoryQuery { limit: None, offset: None })).await;
+    assert!(hist.is_ok(), "history 也吃代號");
+    // 刪掉最大號：下一個不回收。
+    api::delete(State(e.app.clone()), Path("S2".into())).await.unwrap();
+    assert!(matches!(api::get_one(State(e.app.clone()), Path("S2".into())).await, Err(LcError::NotFound(_))));
+    let mut c = daily(&bot.id, "三");
+    c.client_request_id = "crid-c".into();
+    let third = api::create(State(e.app.clone()), Path(pid.clone()), Json(c)).await.unwrap().0;
+    assert_eq!(third["code"], "S3", "刪除不回收代號");
+    // 沒有的代號 → 404。
+    assert!(matches!(api::get_one(State(e.app.clone()), Path("S99".into())).await, Err(LcError::NotFound(_))));
+    // 通知用的 Transition 帶代號。
+    let s = store::get_schedule(&e.app.db, third["id"].as_str().unwrap()).await.unwrap().unwrap();
+    assert_eq!(s.code(), "S3");
+}
+
+#[tokio::test]
+async fn migrate_backfills_code_no_by_created_at_after_the_current_max() {
+    let (e, bot) = setup().await;
+    let pid = e.project_id.clone();
+    let mk = |id: &str, at: &str, code: i64| (id.to_string(), at.to_string(), code);
+    for (id, at, code) in [mk("sch-b", "2026-01-02T00:00:00.000Z", 0), mk("sch-a", "2026-01-01T00:00:00.000Z", 0), mk("sch-z", "2026-01-03T00:00:00.000Z", 5)] {
+        sqlx::query("INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, created_at, updated_at, code_no) VALUES (?,?,?,?,?,'daily','UTC','{}',?,?,?)")
+            .bind(&id).bind(&pid).bind(&bot.id).bind("n").bind("p").bind(&at).bind(&at).bind(code)
+            .execute(&e.app.db).await.unwrap();
+    }
+    db::migrate_for_test(&e.app.db, Default::default()).await.unwrap();
+    let code = |id: &'static str| { let db = e.app.db.clone(); async move { sqlx::query_scalar::<_, i64>("SELECT code_no FROM schedules WHERE id = ?").bind(id).fetch_one(&db).await.unwrap() } };
+    assert_eq!(code("sch-z").await, 5, "已有號碼不動");
+    assert_eq!(code("sch-a").await, 6, "較早建立的先排");
+    assert_eq!(code("sch-b").await, 7);
 }

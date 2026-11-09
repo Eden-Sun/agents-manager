@@ -31,6 +31,9 @@ pub struct Schedule {
     pub retry_deadline_mins: i64,
     /// 每次從基準快照開始（0／1）：runner 送出前先把 bot fork 重啟到基準 session（`schedules::base`）。
     pub from_base: i64,
+    /// 排程代號的數字（顯示為 `S<code_no>`，見 [`Schedule::code`]）；插入時由 DB 配號，建構時填 0。
+    #[serde(skip)]
+    pub code_no: i64,
     #[serde(skip)]
     pub create_crid: Option<String>,
     #[serde(skip)]
@@ -38,6 +41,33 @@ pub struct Schedule {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+}
+
+impl Schedule {
+    /// 排程代號（`S12`）：全域唯一、遞增、不變、刪除不回收。
+    pub fn code(&self) -> String {
+        code_of(self.code_no)
+    }
+}
+
+pub fn code_of(code_no: i64) -> String {
+    format!("S{code_no}")
+}
+
+/// 解析代號（`S12`／`s12`）→ 數字；不是代號格式回 None（呼叫端當 id 用）。
+pub fn parse_code(key: &str) -> Option<i64> {
+    let digits = key.strip_prefix(['S', 's'])?;
+    if digits.is_empty() || digits.len() > 9 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
+/// 路徑上的 `{id}` 可以是排程 id 或代號：代號換成真 id（查不到維持原字串，讓後面照常 404）。
+pub async fn resolve_key(pool: &SqlitePool, key: &str) -> Result<String> {
+    let Some(n) = parse_code(key) else { return Ok(key.to_string()) };
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM schedules WHERE code_no = ?").bind(n).fetch_optional(pool).await?;
+    Ok(id.unwrap_or_else(|| key.to_string()))
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -72,6 +102,8 @@ pub struct Occurrence {
 pub struct Transition {
     pub schedule_id: String,
     pub schedule_name: String,
+    /// 排程代號（`S12`）。
+    pub schedule_code: String,
     pub project_id: String,
     pub occurrence_id: String,
     pub status: String,
@@ -96,8 +128,8 @@ pub fn wants_notice(notify: &str, outcome: &str) -> bool {
 
 pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) -> Result<()> {
     sqlx::query(
-        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, retry_count, retry_interval_mins, retry_deadline_mins, from_base, create_crid, create_fp, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, retry_count, retry_interval_mins, retry_deadline_mins, from_base, create_crid, create_fp, created_at, updated_at, deleted_at, code_no)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,(SELECT COALESCE(MAX(code_no),0)+1 FROM schedules))",
     )
     .bind(&s.id)
     .bind(&s.project_id)
@@ -323,7 +355,7 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
             .bind(&retry).bind(occ.attempt_no + i64::from(retry.is_some())).bind(&retry).bind(now).bind(&occ.id).execute(&mut *tx).await?;
         if next == "unknown" { sqlx::query("UPDATE schedules SET enabled = 0, updated_at = ? WHERE id = ?").bind(now).bind(&sched.id).execute(&mut *tx).await?; }
         tx.commit().await?;
-        out.push(Transition { schedule_id: sched.id, schedule_name: sched.name, project_id: sched.project_id, occurrence_id: occ.id,
+        out.push(Transition { schedule_code: sched.code(), schedule_id: sched.id, schedule_name: sched.name, project_id: sched.project_id, occurrence_id: occ.id,
             status: next.into(), notify: if dry_run { "none".into() } else { sched.notify }, error: error.map(str::to_owned), bot_id: occ.bot_id,
             clear_after: sched.clear_after == 1 && retry.is_none(), outcome, attempt_no: occ.attempt_no });
     }

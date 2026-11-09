@@ -118,7 +118,7 @@ async fn require_dedicated_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_
 
 fn schedule_json(s: &Schedule) -> Value {
     json!({
-        "id": s.id, "project_id": s.project_id, "bot_id": s.bot_id, "name": s.name, "prompt": s.prompt,
+        "id": s.id, "code": s.code(), "project_id": s.project_id, "bot_id": s.bot_id, "name": s.name, "prompt": s.prompt,
         "mode": s.mode, "tz": s.tz, "spec": serde_json::from_str::<Value>(&s.spec_json).unwrap_or(Value::Null),
         "next_due": s.next_due, "enabled": s.enabled == 1, "generation": s.generation, "notify": s.notify,
         "retry_count": s.retry_count, "retry_interval_mins": s.retry_interval_mins, "retry_deadline_mins": s.retry_deadline_mins,
@@ -301,6 +301,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         notify: b.notify.clone(),
         clear_after: i64::from(b.clear_after),
         from_base: i64::from(b.from_base),
+        code_no: 0,
         retry_count: b.retry_count, retry_interval_mins: b.retry_interval_mins, retry_deadline_mins: b.retry_deadline_mins,
         create_crid: Some(b.client_request_id.clone()),
         create_fp: Some(fp),
@@ -309,6 +310,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         deleted_at: None,
     };
     store::insert_schedule_tx(&mut tx, &s).await.map_err(db_err)?;
+    let s = store::get_schedule_tx(&mut tx, &s.id).await.map_err(db_err)?.ok_or_else(|| LcError::Upstream("schedule vanished".into()))?;
     tx.commit().await.map_err(db_err)?;
     announce(&app, &project_id, &s.id).await;
     Ok(Json(schedule_json(&s)))
@@ -316,6 +318,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
 
 /// `GET /api/schedules/{id}`：排程本身、未結束的 occurrence（含綁定 turn 的真實狀態）、最近 10 筆歷史。
 pub async fn get_one(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     let s = store::get_schedule(&app.db, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
     let mut v = with_open(&app.db, &s).await?;
     let history = store::history(&app.db, &id, 10, 0).await.map_err(db_err)?;
@@ -346,6 +349,7 @@ pub struct PatchIn {
 /// `PATCH /api/schedules/{id}`。內容、Bot、時區或時間變動，或停用時：
 /// 同一個 bot 鎖與交易內撤回未送出的排隊（已送出的回合照跑），再升 generation。
 pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<PatchIn>) -> Result<Json<Value>, LcError> {
+    let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     let pool = app.db.clone();
     let head = store::get_schedule(&pool, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
     let lock = app.bot_lock(&head.bot_id).await;
@@ -445,6 +449,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
 
 /// `DELETE /api/schedules/{id}`：軟刪（保留關聯，不讓 NOT EXISTS 反向放行）。鎖內重讀，Bot 變了就 409。
 pub async fn delete(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     let pool = app.db.clone();
     let head = store::get_schedule(&pool, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
     let lock = app.bot_lock(&head.bot_id).await;
@@ -483,6 +488,7 @@ pub struct RunIn {
 /// `POST /api/schedules/{id}/run`：手動執行。交易內重讀排程（停用、刪除、換版都要擋）。
 /// 同一個 client_request_id 先查它自己的那筆（不管現在有沒有別的未結束），再看未結束的；不會拿舊 key 回新的。
 pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<RunIn>) -> Result<Json<Value>, LcError> {
+    let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     let pool = app.db.clone();
     let crid = match b.client_request_id {
         Some(c) => {
@@ -577,6 +583,7 @@ pub struct HistoryQuery {
 
 /// `GET /api/schedules/{id}/history?limit=&offset=`：分頁，limit 上限 100。
 pub async fn history(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<HistoryQuery>) -> Result<Json<Value>, LcError> {
+    let id = store::resolve_key(&app.db, &id).await.map_err(db_err)?;
     store::get_schedule(&app.db, &id).await.map_err(db_err)?.ok_or_else(|| LcError::NotFound("schedule".into()))?;
     let limit = q.limit.unwrap_or(20);
     let offset = q.offset.unwrap_or(0);

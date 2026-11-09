@@ -13,6 +13,7 @@ type Rec = Record<string, unknown>
 
 interface MockSchedule {
   id: string
+  code: string
   project_id: string
   bot_id: string
   name: string
@@ -60,6 +61,8 @@ const newId = (p: string) => `${p}${Date.now().toString(36)}${(seq++).toString(3
 export class MockServerSchedules {
   private schedules = new Map<string, MockSchedule>()
   private occs = new Map<string, MockOcc>()
+  /** 排程代號的計數器（遞增、不回收）。 */
+  private codeSeq = 0
   /** 手動執行的 key → 實際的 occurrence（與 daemon 的 schedule_manual_requests 同義：重放回同一筆）。 */
   private manualAlias = new Map<string, string>()
   /** 手動執行送進 fetch 的次數（測試用，看有沒有多跑）。 */
@@ -166,6 +169,7 @@ export class MockServerSchedules {
     const stamp = now()
     const s: MockSchedule = {
       id: newId('sch_'),
+      code: `S${++this.codeSeq}`,
       project_id: projectId,
       bot_id: String(b.bot_id),
       name: String(b.name ?? '').trim(),

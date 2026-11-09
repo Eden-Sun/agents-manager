@@ -2958,7 +2958,8 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!occ || seenScheduleNotices.has(key)) return
       seenScheduleNotices.add(key)
       if (seenScheduleNotices.size > 500) seenScheduleNotices.clear()
-      const name = str(pick(data, 'schedule_name')) || t('排程')
+      const code = str(pick(data, 'schedule_code'))
+      const name = `${code ? `${code} ` : ''}${str(pick(data, 'schedule_name')) || t('排程')}`
       const error = str(pick(data, 'error'))
       const outcome = str(pick(data, 'outcome'))
       if (status === 'unknown') useStore.getState().notify('error', t('排程「{name}」上次結果不明，請先到 Bot 對話確認；確認後可重新啟用', { name }))

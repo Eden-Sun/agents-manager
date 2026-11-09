@@ -726,7 +726,7 @@ export function ScheduleEditor({
 
       {detail ? (
         <details className="schedule-recent">
-          <summary>{t('最近執行（{count}）', { count: (detail.recent ?? []).length })}</summary>
+          <summary>{detail.code ? `${detail.code} ` : ''}{t('最近執行（{count}）', { count: (detail.recent ?? []).length })}</summary>
           {(detail.recent ?? []).length > 0 ? (
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
@@ -749,7 +749,7 @@ export function ScheduleEditor({
   // 掛到 body：側欄是 transform 容器，裡面的 fixed 遮罩會被它限在側欄寬度內（手機上彈窗被裁）。只這裡處理，不動全站 Modal。
   return createPortal(
     <>
-      <Modal open width={760} title={scheduleId ? t('排程') : copyOf ? t('複製排程') : t('新增排程')} onClose={onClose}>
+      <Modal open width={760} title={scheduleId ? (detail?.code ? `${t('排程')} ${detail.code}` : t('排程')) : copyOf ? t('複製排程') : t('新增排程')} onClose={onClose}>
         {body}
       </Modal>
       <Modal open={botSheet} title={t('建立排程專屬 bot')} onClose={() => setBotSheet(false)}>

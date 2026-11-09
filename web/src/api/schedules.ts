@@ -58,6 +58,8 @@ export interface ScheduleOccurrence {
 
 export interface Schedule {
   id: string
+  /** 排程代號（S1、S2…）：全域唯一、遞增、不變、刪除不回收；舊 daemon 不回此欄。 */
+  code?: string
   project_id: string
   bot_id: string
   /** daemon 判斷綁定 Bot 是否仍可接收此專案的排程；舊 daemon 不回此欄。 */

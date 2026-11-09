@@ -143,7 +143,7 @@ async fn notify_transition(app: &Arc<App>, t: &Transition) {
     if store::wants_notice(&t.notify, &t.outcome) {
         app.emit(
             "schedule_notice",
-            json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "outcome": t.outcome, "attempt_no": t.attempt_no, "error": t.error}),
+            json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_code": t.schedule_code, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "outcome": t.outcome, "attempt_no": t.attempt_no, "error": t.error}),
         )
         .await;
     }
@@ -376,6 +376,7 @@ async fn set_wait(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, reason:
 pub(super) async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64, dry_run: bool) {
     let t = Transition {
         schedule_id: sched.id.clone(),
+        schedule_code: sched.code(),
         schedule_name: sched.name.clone(),
         project_id: sched.project_id.clone(),
         occurrence_id: occurrence_id.into(),

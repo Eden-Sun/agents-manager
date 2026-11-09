@@ -1014,7 +1014,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
 | `draft_updated` | `{"key","text","rev","client_id","updated_at"}`：輸入框草稿被寫了（`PUT /api/drafts/{key}`），`text:""`＝刪除（含 bot／專案被刪）；見「輸入框草稿」 |
 | `schedules_changed` | `{"project_id","id"}`：專案排程或它的 occurrence 狀態變了（建立、編輯、停用、排進佇列、終態）。只帶 id，網頁自己重抓，prompt 不進全域 state。 |
-| `schedule_notice` | `{"project_id","schedule_id","schedule_name","occurrence_id","status","error"}`：排程終態且依 `notify` 該通知（`failure`＝failed／unknown；`all`＝另加 done）。每筆終態只推一次（`notified` 去重）。 |
+| `schedule_notice` | `{"project_id","schedule_id","schedule_code","schedule_name","occurrence_id","status","error"}`：排程終態且依 `notify` 該通知（`failure`＝failed／unknown；`all`＝另加 done）。每筆終態只推一次（`notified` 去重）。 |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
 | `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
@@ -3133,7 +3133,7 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 |---|---|---|
 | GET | `/api/projects/{id}/schedules` | 未軟刪的排程；每筆帶 `open`（未結束的 occurrence，含 `turn_status`／`turn_delivery`／`turn_start_error`／`turn_awaits_start`／`waiting_reason`）。後兩欄直接讀取已綁 turn 的 `start_error`、`awaits_start`，無 turn 時為 null。 |
 | POST | `/api/projects/{id}/schedules` | 建立。body：`client_request_id`（必填，1–128 個 `[A-Za-z0-9._:-]`）、`name`、`prompt`、`bot_id`、`tz`（IANA）、`spec`（見下）、`notify`（`failure`／`all`／`none`，預設 `failure`）、`clear_after`（bool，預設 `false`，跑完就清空對話，見 SPEC「專案排程」）、`from_base`（bool，預設 `false`，每次從基準快照開始；bot 須是 codex 且已鎖基準，否則 400 `base_snapshot_not_codex`／`base_snapshot_required`）。`bot_id` 一律要是**排程專屬 bot**（`role = scheduler`），否則 400 `schedule_bot_not_dedicated`（PATCH 換 Bot 與 `POST …/schedules/rebind` 同；既有排程綁的一般 Bot 照常執行，不自動改動）。同專案同 key 同內容回原筆；同 key 不同內容 → 409 `client_request_id_reused` |
-| GET | `/api/schedules/{id}` | 排程（含 `clear_after`、`from_base`、`bot_dedicated`＝綁的是不是排程專屬 bot，舊排程為 false 時 UI 提示轉成專屬或改綁）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
+| GET | `/api/schedules/{id}` | `{id}` 可以是排程 id，也可以是**排程代號**（`S12`，不分大小寫；`PATCH`／`DELETE`／`POST …/run`／`GET …/history` 同）。選路徑而不是 `?code=` 的理由：一條路由、不必另開列表查詢，且代號格式（`S` 加數字）與 ULID id 不會撞。排程物件都帶 `code`（`S<n>`：全域唯一、遞增、建立後不變、刪除不回收；既有排程依建立時間補號）。排程（含 `clear_after`、`from_base`、`bot_dedicated`＝綁的是不是排程專屬 bot，舊排程為 false 時 UI 提示轉成專屬或改綁）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
 | PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`from_base`、`enabled`）。`spec` 每次送出都會重新錨定間隔（`anchor` 取現在、升 generation），不改時間就不要帶（網頁只在時間欄位真的變了才送，#1807）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
 | DELETE | `/api/schedules/{id}` | 軟刪；同樣撤回未送出的排隊 |
 | POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
@@ -3145,7 +3145,7 @@ Bot 資格：同專案、`managed_by='user'`、非 child、非分享、非受限
 
 WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `schedules_changed {project_id, id}`：排程或 occurrence 的任何狀態變動（建立、編輯、停用、排進佇列、終態）。
-- `schedule_notice {project_id, schedule_id, occurrence_id, status, error}`：終態且依 `notify` 該通知（`failure`＝失敗或結果不明；`all`＝另加完成）。每筆終態只推一次（`notified` 去重）。
+- `schedule_notice {project_id, schedule_id, schedule_code, occurrence_id, status, error}`：終態且依 `notify` 該通知（`failure`＝失敗或結果不明；`all`＝另加完成）。每筆終態只推一次（`notified` 去重）。
 
 `occurrence.status`：`pending`（等待，`waiting_reason`：`bot_busy`／`stopping`）→ `queued`（已綁定 turn，等它進終態）→ `done`／`failed`／`cancelled`／`unknown`。`unknown`＝綁定的 turn 送出結果不明（delivery unknown），同交易把排程暫停（`enabled=false`），不會自動重跑；使用者到 Bot 對話確認後明確重新啟用，才會排未來的執行。
 

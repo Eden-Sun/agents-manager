@@ -291,7 +291,9 @@ CREATE TABLE IF NOT EXISTS schedules (
   retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440),
   retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080),
   -- 每次從基準快照開始：runner 送出前先把 bot 重啟成 `codex fork <基準 session>`（bot_base_snapshots）。
-  from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))
+  from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1)),
+  -- 排程代號 S<code_no>：全域遞增、建立後不變、刪除（soft delete）不回收；0＝尚未補號（migrate 依建立時間回填）。
+  code_no INTEGER NOT NULL DEFAULT 0
 );
 -- codex bot 的基準快照：使用者把某一刻的 context 鎖成基準（session id 與時間）；排程可選每次從它 fork。每顆 bot 至多一筆。
 CREATE TABLE IF NOT EXISTS bot_base_snapshots (
@@ -637,6 +639,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (89, "e5a94923aaa5bbbf"),
     // codex bot 基準快照（2026-11-09）：`bot_base_snapshots`（CREATE TABLE）、`schedules.from_base`（ALTER ADD）。
     (90, "af38ef82eaedb7b4"),
+    // 排程代號（2026-11-09）：`schedules.code_no`（ALTER ADD；既有排程依建立時間回填）。
+    (91, "f6d42636bb336366"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -915,6 +919,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 排程一天多時段（P3）：這筆 occurrence 是哪個時段觸發的（標籤，給 `{{slot}}` 與最近執行列用）；NULL＝沒有時段。
         // 排程「每次從基準快照開始」（bot_base_snapshots）。
         ("schedules", "from_base", "ALTER TABLE schedules ADD COLUMN from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))"),
+        ("schedules", "code_no", "ALTER TABLE schedules ADD COLUMN code_no INTEGER NOT NULL DEFAULT 0"),
         ("schedule_occurrences", "slot_label", "ALTER TABLE schedule_occurrences ADD COLUMN slot_label TEXT"),
         ("schedule_occurrences", "outcome", "ALTER TABLE schedule_occurrences ADD COLUMN outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown'))"),
         ("schedule_occurrences", "outcome_summary", "ALTER TABLE schedule_occurrences ADD COLUMN outcome_summary TEXT"),
@@ -949,6 +954,15 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
+        }
+    }
+    // 排程代號回填：只動還沒號碼的列（code_no = 0），依建立時間（同刻依 id）排號，接在現有最大號之後。
+    let unnumbered: Vec<String> = sqlx::query_scalar("SELECT id FROM schedules WHERE code_no = 0 ORDER BY created_at, id").fetch_all(&mut *tx).await.context("list unnumbered schedules")?;
+    if !unnumbered.is_empty() {
+        let mut next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(code_no),0) FROM schedules").fetch_one(&mut *tx).await.context("max schedules.code_no")?;
+        for id in unnumbered {
+            next += 1;
+            sqlx::query("UPDATE schedules SET code_no = ? WHERE id = ?").bind(next).bind(id).execute(&mut *tx).await.context("backfill schedules.code_no")?;
         }
     }
     if !had_queue_class {
