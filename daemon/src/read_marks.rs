@@ -129,7 +129,7 @@ macro_rules! unread_sql {
                  OR ((kt.client_request_id LIKE 'child-done:%' OR kt.client_request_id LIKE 'child-blocked:%')
                      AND NOT EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = kt.id AND um.role = 'user'
                                       AND um.content NOT LIKE '[daemon 自動通知，不是 bot_request]%'))))
-            AND NOT (EXISTS (SELECT 1 FROM bots eb JOIN projects ep ON ep.id = eb.project_id WHERE eb.id = c.bot_id AND ep.mode = 'expert')
+            AND NOT (EXISTS (SELECT 1 FROM bots eb JOIN projects ep ON ep.id = eb.project_id WHERE eb.id = c.bot_id AND ep.mode = 'expert' AND COALESCE(eb.role, '') <> 'manager')
                  AND EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = m.turn_id AND um.role = 'user' AND um.relay_from IS NOT NULL)
                  AND NOT EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = m.turn_id AND um.role = 'user' AND um.relay_from IS NULL))
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
@@ -382,6 +382,10 @@ mod tests {
         // 專家專案：t1～t3 使用者回合 + t5（有補話）＝4；t4 純 relay 不算。
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&4));
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 4);
+        // 管理者回覆 daemon 通知是在向使用者回報：照算。
+        sqlx::query("UPDATE bots SET role='manager' WHERE id='b'").execute(&pool).await.unwrap();
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&5));
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 5);
         std::fs::remove_dir_all(dir).ok();
     }
 

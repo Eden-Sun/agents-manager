@@ -319,6 +319,7 @@ test('專家專案：往來回合（user 都帶 relay_from）的回覆不算未�
 test('isExpertBot：只認 projects.mode=expert 的專案', () => {
   const projects = [{ id: 'p1', mode: 'expert' as const }, { id: 'p2', mode: 'parent_child' as const }, { id: 'p3' }]
   assert.equal(isExpertBot({ project_id: 'p1' }, projects), true)
+  assert.equal(isExpertBot({ project_id: 'p1', role: 'manager' }, projects), false, '管理者照算未讀')
   assert.equal(isExpertBot({ project_id: 'p2' }, projects), false)
   assert.equal(isExpertBot({ project_id: 'p3' }, projects), false)
   assert.equal(isExpertBot({ project_id: 'gone' }, projects), false)

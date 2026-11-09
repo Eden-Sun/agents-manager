@@ -154,8 +154,9 @@ export function relayTurnIds(messages: readonly Message[]): Set<string> {
 }
 
 /** 專家專案（`projects.mode='expert'`）的 bot。 */
-export function isExpertBot(bot: { project_id: string } | undefined, projects: readonly Pick<Project, 'id' | 'mode'>[]): boolean {
-  if (!bot) return false
+export function isExpertBot(bot: { project_id: string; role?: string | null } | undefined, projects: readonly Pick<Project, 'id' | 'mode'>[]): boolean {
+  // 管理者回覆 daemon 通知通常是在向使用者回報，照算未讀。
+  if (!bot || bot.role === 'manager') return false
   return projects.some((p) => p.id === bot.project_id && p.mode === 'expert')
 }
 
