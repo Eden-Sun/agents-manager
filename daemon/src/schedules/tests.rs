@@ -88,7 +88,7 @@ async fn pending(app: &std::sync::Arc<crate::state::App>, s: &Schedule) -> Strin
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -1168,4 +1168,50 @@ async fn migrate_backfills_code_no_by_created_at_after_the_current_max() {
     assert_eq!(code("sch-z").await, 5, "已有號碼不動");
     assert_eq!(code("sch-a").await, 6, "較早建立的先排");
     assert_eq!(code("sch-b").await, 7);
+}
+
+/// 總花費時間：各 attempt（開始→結束）加總，重試等待不算；進行中的 attempt 給 `running_since`。
+#[tokio::test]
+async fn duration_sums_attempts_and_reports_running_since() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET retry_count=1 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
+    let occ_id = pending(&e.app, &s).await;
+    let view = |id: String| { let app = e.app.clone(); async move { let o = store::get_occurrence(&app.db, &id).await.unwrap().unwrap(); store::occurrence_view(&app.db, &o).await.unwrap() } };
+    // 還沒開始：沒有花費時間。
+    let v = view(occ_id.clone()).await;
+    assert!(v["duration_ms"].is_null() && v["running_since"].is_null() && v["started_at"].is_null());
+    // 送出（綁 turn）才算開始。
+    assert!(runner::enqueue(&e.app, &occ_id).await.unwrap());
+    let v = view(occ_id.clone()).await;
+    assert!(v["started_at"].is_string());
+    assert!(v["running_since"].is_string(), "進行中：由畫面加上已進行時間");
+    assert_eq!(v["duration_ms"], 0);
+    // 第一次 attempt 在 T0 開始、60 秒後失敗 → 排重試。
+    let t0 = "2026-11-09T01:00:00.000Z";
+    sqlx::query("UPDATE schedule_occurrences SET first_started_at=?, attempt_started_at=? WHERE id=?").bind(t0).bind(t0).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    let turn1: String = sqlx::query_scalar("SELECT turn_id FROM schedule_occurrences WHERE id=?").bind(&occ_id).fetch_one(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE turns SET status='failed', delivery='ok' WHERE id=?").bind(&turn1).execute(&e.app.db).await.ok();
+    store::settle_queued(&e.app.db, "2026-11-09T01:01:00.000Z").await.unwrap();
+    let v = view(occ_id.clone()).await;
+    assert_eq!(v["attempts"][0]["duration_ms"], 60_000);
+    assert_eq!(v["duration_ms"], 60_000, "重試等待不算");
+    assert!(v["running_since"].is_null(), "等待重試中不在執行");
+    assert_eq!(v["started_at"], t0, "first_started_at 不被重試覆蓋");
+    // 第二次 attempt 開始後 30 秒完成 → 總共 90 秒、各 attempt 另列。
+    sqlx::query("UPDATE schedule_occurrences SET next_retry_at=? WHERE id=?").bind(db::now()).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    assert!(runner::enqueue(&e.app, &occ_id).await.unwrap());
+    let t1 = "2026-11-09T01:10:00.000Z";
+    sqlx::query("UPDATE schedule_occurrences SET attempt_started_at=? WHERE id=?").bind(t1).bind(&occ_id).execute(&e.app.db).await.unwrap();
+    let turn2: String = sqlx::query_scalar("SELECT turn_id FROM schedule_occurrences WHERE id=?").bind(&occ_id).fetch_one(&e.app.db).await.unwrap();
+    assert_ne!(turn1, turn2);
+    let v = view(occ_id.clone()).await;
+    assert_eq!(v["running_since"], t1);
+    assert_eq!(v["duration_ms"], 60_000, "進行中的 attempt 不計入 duration_ms");
+    sqlx::query("UPDATE turns SET status='failed', delivery='ok' WHERE id=?").bind(&turn2).execute(&e.app.db).await.ok();
+    store::settle_queued(&e.app.db, "2026-11-09T01:10:30.000Z").await.unwrap();
+    let v = view(occ_id.clone()).await;
+    assert_eq!(v["duration_ms"], 90_000);
+    assert_eq!(v["attempts"].as_array().unwrap().iter().map(|a| a["duration_ms"].as_i64().unwrap()).collect::<Vec<_>>(), vec![60_000, 30_000]);
+    assert!(v["running_since"].is_null());
 }

@@ -136,6 +136,11 @@ async fn with_open(pool: &sqlx::SqlitePool, s: &Schedule) -> Result<Value, LcErr
         Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
         None => Value::Null,
     };
+    // 上次執行（已結束的最近一筆，含總花費時間 `duration_ms`）：列表在「上次」旁顯示。
+    v["last"] = match store::last_finished(pool, &s.id).await.map_err(db_err)? {
+        Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
+        None => Value::Null,
+    };
     Ok(v)
 }
 
@@ -567,7 +572,7 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         conversation_id: None,
         turn_id: None,
         error: None,
-        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
         created_at: now.into(),
         updated_at: now.into(),
     };

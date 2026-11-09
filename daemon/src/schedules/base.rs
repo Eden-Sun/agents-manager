@@ -170,6 +170,8 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         return Ok(false);
     }
     let opts = StartOpts { fork_session: Some(snap.session_id.clone()), fork_source_bot: Some(bot.id.clone()), ..Default::default() };
+    // 重啟開始的時間：重啟真的成功才記成這次 attempt 的開始（等閒置、被擋的不算）。
+    let began = db::now();
     let started = if db::active_run(pool, &bot.id).await?.is_some() {
         // 鎖內再確認一次閒置（`require_idle`）；不閒置回 409 not_idle，等下一輪。
         Box::pin(lifecycle::restart_bot_with(app, &bot.id, StartOpts { require_idle: true, ..opts })).await
@@ -177,7 +179,7 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         Box::pin(lifecycle::start_bot_with(app, &bot.id, opts)).await
     };
     let run_id = match started {
-        Ok(r) => r,
+        Ok(r) => { store::mark_started(pool, occurrence_id, &began).await?; r }
         Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(Value::as_str), Some("not_idle" | "no_longer_idle")) => {
             wait_busy(app, &sched, occurrence_id).await;
             return Ok(false);
@@ -225,10 +227,10 @@ pub(super) async fn fail(app: &Arc<App>, sched: &Schedule, occ: &Occurrence, cod
     let Some(cur) = store::get_occurrence_tx(&mut tx, &occ.id).await?.filter(|o| o.status == "pending" && o.attempt_no == occ.attempt_no) else { return Ok(()) };
     let retry = if retryable { store::retry_at(sched, &cur, "failed", &now) } else { None };
     let summary = super::outcome::summary(&error);
-    sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at) VALUES (?,?,NULL,NULL,'failed',?,?)")
-        .bind(&cur.id).bind(cur.attempt_no).bind(&summary).bind(&now).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at) VALUES (?,?,NULL,NULL,'failed',?,?,?)")
+        .bind(&cur.id).bind(cur.attempt_no).bind(&summary).bind(&now).bind(&cur.attempt_started_at).execute(&mut *tx).await?;
     if let Some(at) = &retry {
-        sqlx::query("UPDATE schedule_occurrences SET error = ?, waiting_reason = NULL, outcome = 'failed', outcome_summary = ?, next_retry_at = ?, attempt_no = attempt_no + 1, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE schedule_occurrences SET error = ?, waiting_reason = NULL, outcome = 'failed', outcome_summary = ?, next_retry_at = ?, attempt_no = attempt_no + 1, attempt_started_at = NULL, updated_at = ? WHERE id = ?")
             .bind(&error).bind(&summary).bind(at).bind(&now).bind(&cur.id).execute(&mut *tx).await?;
     } else {
         store::finish_open_tx(&mut tx, &cur.id, "failed", &error, &now).await?;

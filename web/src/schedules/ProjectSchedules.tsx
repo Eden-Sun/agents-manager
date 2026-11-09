@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { listSchedules, rebindSchedules, type Schedule } from '../api/schedules'
 import { useStore } from '../store/store'
 import { scheduleStatusLine, scheduleStatusShort } from './format'
+import { formatDuration } from './duration'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleRowMenu } from './ScheduleRowMenu'
 import './schedules.css'
@@ -16,6 +17,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
       {/* 一行：名稱靠左、短狀態靠右；完整時間（含時區）放 title。 */}
       <button type="button" className="project-schedule-row" title={`${s.name} — ${scheduleStatusLine(s, live)}`} onClick={() => onOpen(s.id, s.bot_available === false)}>
         <span className="project-schedule-name">⏱ {s.code ? <span className="project-schedule-code">{s.code} </span> : null}{s.name}</span>
+        {s.last?.duration_ms != null ? <span className="project-schedule-last" title={t('上次執行總花費時間')}>{t('上次 {d}', { d: formatDuration(s.last.duration_ms) })}</span> : null}
         <span className={`project-schedule-status${s.bot_available === false ? ' needs-rebind' : ''}`}>{s.bot_available === false ? t('⚠ 需要重新指定 Bot') : scheduleStatusShort(s, live)}</span>
         {s.bot_available !== false && s.bot_dedicated === false ? <span className="project-schedule-status needs-rebind" title={t('這個排程綁的不是排程專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot')}>{t('非專屬 bot')}</span> : null}
       </button>

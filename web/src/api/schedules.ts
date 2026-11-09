@@ -6,7 +6,7 @@ import { t } from '../lib/i18n'
 export type ScheduleMode = 'once' | 'interval' | 'daily' | 'weekly'
 export type ScheduleNotify = 'failure' | 'all' | 'none'
 export type ScheduleOutcome = 'success' | 'failed' | 'refused' | 'unknown'
-export interface ScheduleAttempt { attempt_no: number; turn_id: string | null; reply_message_id: string | null; outcome: ScheduleOutcome; outcome_summary: string }
+export interface ScheduleAttempt { attempt_no: number; turn_id: string | null; reply_message_id: string | null; outcome: ScheduleOutcome; outcome_summary: string; started_at?: string | null; finished_at?: string | null; duration_ms?: number | null }
 
 export type OccurrenceStatus = 'pending' | 'queued' | 'done' | 'failed' | 'cancelled' | 'unknown'
 
@@ -52,6 +52,12 @@ export interface ScheduleOccurrence {
   attempt_no?: number
   next_retry_at?: string | null
   attempts?: ScheduleAttempt[]
+  /** 第一次開始執行的時間（turn 送出；fork 重啟則從重啟開始）；還沒開始＝null。 */
+  started_at?: string | null
+  /** 已結束的 attempt 耗時加總（毫秒，重試等待不算）；還沒開始＝null。 */
+  duration_ms?: number | null
+  /** 進行中的 attempt 開始時間；畫面用「現在 − running_since」加上 duration_ms 顯示已進行時間。 */
+  running_since?: string | null
   created_at: string
   updated_at: string
 }
@@ -85,6 +91,8 @@ export interface Schedule {
   updated_at: string
   /** 列表與詳情都帶：未結束的 occurrence（pending／queued），沒有就是 null。 */
   open?: ScheduleOccurrence | null
+  /** 上次執行：最近一筆已結束的 occurrence（含總花費時間 duration_ms）；沒有就是 null。 */
+  last?: ScheduleOccurrence | null
 }
 
 export interface ScheduleDetail extends Schedule {

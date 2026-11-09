@@ -320,12 +320,14 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
   -- 結果與重試（P2）：放在表尾，跟 ALTER 補欄位的結果一致。
   outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown')),
   outcome_summary TEXT, reply_message_id TEXT,
-  attempt_no INTEGER NOT NULL DEFAULT 1, next_retry_at TEXT
+  attempt_no INTEGER NOT NULL DEFAULT 1, next_retry_at TEXT,
+  -- 總花費時間（SCHEMA 91）：第一次開始執行（turn 送出；fork 重啟則從重啟開始）與目前這次 attempt 的開始時間。
+  first_started_at TEXT, attempt_started_at TEXT
 );
 CREATE TABLE IF NOT EXISTS schedule_attempts (
   occurrence_id TEXT NOT NULL REFERENCES schedule_occurrences(id), attempt_no INTEGER NOT NULL,
   turn_id TEXT, reply_message_id TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('success','failed','refused','unknown')),
-  outcome_summary TEXT NOT NULL, finished_at TEXT NOT NULL,
+  outcome_summary TEXT NOT NULL, finished_at TEXT NOT NULL, started_at TEXT,
   PRIMARY KEY (occurrence_id, attempt_no)
 );
 CREATE INDEX IF NOT EXISTS schedule_occ_turn ON schedule_occurrences(turn_id) WHERE turn_id IS NOT NULL;
@@ -641,6 +643,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (90, "af38ef82eaedb7b4"),
     // 排程代號（2026-11-09）：`schedules.code_no`（ALTER ADD；既有排程依建立時間回填）。
     (91, "f6d42636bb336366"),
+    // 排程總花費時間（2026-11-09）：`schedule_occurrences.first_started_at`／`attempt_started_at`、`schedule_attempts.started_at`（ALTER ADD）。
+    (92, "e31b0a1f55e8ed41"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -918,6 +922,9 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedules", "retry_deadline_mins", "ALTER TABLE schedules ADD COLUMN retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)"),
         // 排程一天多時段（P3）：這筆 occurrence 是哪個時段觸發的（標籤，給 `{{slot}}` 與最近執行列用）；NULL＝沒有時段。
         // 排程「每次從基準快照開始」（bot_base_snapshots）。
+        ("schedule_occurrences", "first_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN first_started_at TEXT"),
+        ("schedule_occurrences", "attempt_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN attempt_started_at TEXT"),
+        ("schedule_attempts", "started_at", "ALTER TABLE schedule_attempts ADD COLUMN started_at TEXT"),
         ("schedules", "from_base", "ALTER TABLE schedules ADD COLUMN from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))"),
         ("schedules", "code_no", "ALTER TABLE schedules ADD COLUMN code_no INTEGER NOT NULL DEFAULT 0"),
         ("schedule_occurrences", "slot_label", "ALTER TABLE schedule_occurrences ADD COLUMN slot_label TEXT"),

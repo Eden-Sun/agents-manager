@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { fetchMessages } from '../api'
 import type { ScheduleAttempt, ScheduleOccurrence, ScheduleOutcome } from '../api/schedules'
 import { t } from '../lib/i18n'
+import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import './scheduleResult.css'
 
 export function outcomeLabel(outcome: ScheduleOutcome): string {
@@ -24,7 +25,7 @@ function Attempt({ attempt, botId, onConversation }: { attempt: ScheduleAttempt;
     finally { setLoading(false) }
   }
   return <div className="schedule-result">
-    <span className={`schedule-outcome ${attempt.outcome}`}>{outcomeLabel(attempt.outcome)}</span> {t('第 {n} 次', { n: attempt.attempt_no })}
+    <span className={`schedule-outcome ${attempt.outcome}`}>{outcomeLabel(attempt.outcome)}</span> {t('第 {n} 次', { n: attempt.attempt_no })}{attempt.duration_ms != null ? <span className="schedule-attempt-duration"> · {t('耗時 {d}', { d: formatDuration(attempt.duration_ms) })}</span> : null}
     <p>{attempt.outcome_summary}</p>
     {attempt.reply_message_id && attempt.turn_id ? <details onToggle={(e) => { if (e.currentTarget.open) void load() }}>
       <summary>{t('查看該回合完整回覆')}</summary>
@@ -39,7 +40,10 @@ export function ScheduleResult({ occurrence: o, onConversation }: { occurrence: 
   const attempts: ScheduleAttempt[] = [...(o.attempts ?? [])]
   const outcome = o.status === 'cancelled' ? null : o.outcome ?? (['done', 'failed', 'unknown'].includes(o.status) ? 'unknown' : null)
   if (outcome && !attempts.some((a) => a.attempt_no === (o.attempt_no ?? 1)) && o.status !== 'pending' && o.status !== 'queued') attempts.push( { attempt_no: o.attempt_no ?? 1, turn_id: o.turn_id, reply_message_id: o.reply_message_id ?? null, outcome, outcome_summary: o.outcome_summary ?? '' })
+  const open = o.status === 'pending' || o.status === 'queued'
+  const total = totalDurationMs(o, useNowMs(open && !!o.running_since))
   return <>
+    {total !== null ? <p className="schedule-total-duration">{open ? t('已進行 {d}', { d: formatDuration(total) }) : t('總花費時間：{d}', { d: formatDuration(total) })}</p> : null}
     {o.status === 'pending' && o.next_retry_at ? <p>{t('等待重試（第 {n} 次執行）', { n: o.attempt_no ?? 1 })}</p> : null}
     {attempts.length === 0 ? <p>{o.status === 'cancelled' ? t('已取消，未產生任務結果') : t('等待任務結果')}</p> : null}
     {attempts.map((a) => <Attempt key={a.attempt_no} attempt={a} botId={o.bot_id} onConversation={onConversation} />)}

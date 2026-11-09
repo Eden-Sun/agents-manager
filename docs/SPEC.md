@@ -5830,6 +5830,12 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **prompt 變數**：`{{time}}`（HH:MM）、`{{date}}`（YYYY-MM-DD）、`{{weekday}}`（一～日）、`{{name}}`（排程名）、`{{slot}}`（時段標籤；2026-11-09 起網頁不再提供標籤欄，新排程為空白，舊資料的標籤仍照常展開）。**送出時**（排進 Bot 佇列前）才以該次觸發時刻、排程時區展開；`occurrence.prompt` 留原樣。不認得的 `{{…}}` 原樣保留。編輯器不再提供變數按鈕、提示與預覽（2026-11-09）；既有 prompt 含 `{{…}}` 照舊展開。
 - **手動／試跑**：`{{time}}` 等用按下當下的時間；`{{slot}}` 用下一個排定時段的標籤（沒有就空白）。
 
+### 排程的總花費時間（2026-11-09，SCHEMA 91）
+
+- 一次執行（occurrence）的總花費時間＝各 attempt「開始→結束」加總，重試的等待間隔不算。開始＝turn 綁定送出的那刻；勾 `from_base` 的從 fork 重啟成功那刻起算（重啟要等的時間算在內，因為那是這次執行的一部分；等 bot 閒置、被擋下的不算）。結束＝該 attempt 收斂成終態的時間（寫進 `schedule_attempts.finished_at`）。沒有 attempt 列就終結的（取消）用最後更新時間當結束。
+- 存放：`schedule_occurrences.first_started_at`（第一次開始，之後不變）、`attempt_started_at`（目前這次，重試時清空）、`schedule_attempts.started_at`（該次開始，結束時從 occurrence 複製）。三欄都是 ALTER ADD，舊資料為 NULL（舊 attempt 沒有耗時、不計入總和）。
+- API 回 `started_at`、`duration_ms`、`running_since`、`attempts[].duration_ms`、排程的 `last`（見 API.md）；畫面把進行中那次用 `running_since` 即時補上。顯示：最近執行列、結果詳情（總計＋各 attempt）、排程列表「上次」旁；格式「2 分 14 秒」。
+
 ### 排程的手動執行去重（2026-10-13 補）
 
 - `schedule_manual_requests(schedule_id, client_request_id, occurrence_id, created_at)`，主鍵 `(schedule_id, client_request_id)`：每個手動執行的 key 都記下它實際落在哪一筆 occurrence。這張表是重試的權威，不靠 `schedule_occurrences.client_request_id`（那一欄只留作稽核）。

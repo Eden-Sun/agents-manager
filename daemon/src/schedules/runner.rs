@@ -195,7 +195,7 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
                 conversation_id: None,
                 turn_id: None,
                 error: None,
-                outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None,
+                outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
                 created_at: now.into(),
                 updated_at: now.into(),
             };
@@ -341,6 +341,7 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
     .execute(&mut *tx)
     .await
     .context("insert scheduled message")?;
+    store::mark_started_tx(&mut tx, occurrence_id, &now).await?;
     store::bind_queued_tx(&mut tx, occurrence_id, &conv, &turn_id, &now).await?;
     tx.commit().await?;
     drop(_guard);

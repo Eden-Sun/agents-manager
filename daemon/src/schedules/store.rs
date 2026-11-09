@@ -93,6 +93,10 @@ pub struct Occurrence {
     pub reply_message_id: Option<String>,
     pub attempt_no: i64,
     pub next_retry_at: Option<String>,
+    /// 第一次開始執行（turn 送出；fork 重啟則從重啟開始）。NULL＝還沒開始。
+    pub first_started_at: Option<String>,
+    /// 目前這次 attempt 的開始時間；attempt 結束要重試時清空。
+    pub attempt_started_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -265,6 +269,20 @@ pub async fn set_next_due_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id: &str
 }
 
 /// 綁定 turn：與 turn／message 寫入同一個交易（呼叫端負責 begin／commit）。
+/// 這次 attempt 開始執行：只在還沒記過時寫（fork 重啟先記，之後綁 turn 不覆蓋）。第一次開始另存 `first_started_at`。
+pub async fn mark_started_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str, now: &str) -> Result<()> {
+    sqlx::query("UPDATE schedule_occurrences SET first_started_at = COALESCE(first_started_at, ?), attempt_started_at = COALESCE(attempt_started_at, ?) WHERE id = ? AND status = 'pending'")
+        .bind(now).bind(now).bind(occurrence_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+pub async fn mark_started(pool: &SqlitePool, occurrence_id: &str, now: &str) -> Result<()> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    mark_started_tx(&mut tx, occurrence_id, now).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn bind_queued_tx(tx: &mut Transaction<'_, Sqlite>, occurrence_id: &str, conversation_id: &str, turn_id: &str, now: &str) -> Result<()> {
     let done = sqlx::query(
         "UPDATE schedule_occurrences SET status = 'queued', conversation_id = ?, turn_id = ?, waiting_reason = NULL, next_retry_at = NULL, outcome = NULL, outcome_summary = NULL, reply_message_id = NULL, error = NULL, updated_at = ?
@@ -348,8 +366,9 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
         if current_reply != reply { continue; }
         let last = reply.as_ref().map(|r| &r.0);
         let retry = retry_at(&sched, &cur, &outcome, now);
-        sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at) VALUES (?,?,?,?,?,?,?)")
-            .bind(&occ.id).bind(occ.attempt_no).bind(&occ.turn_id).bind(&last).bind(&outcome).bind(&summary).bind(now).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO schedule_attempts (occurrence_id, attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at) VALUES (?,?,?,?,?,?,?,?)")
+            .bind(&occ.id).bind(occ.attempt_no).bind(&occ.turn_id).bind(&last).bind(&outcome).bind(&summary).bind(now).bind(&cur.attempt_started_at).execute(&mut *tx).await?;
+        if retry.is_some() { sqlx::query("UPDATE schedule_occurrences SET attempt_started_at = NULL WHERE id = ?").bind(&occ.id).execute(&mut *tx).await?; }
         sqlx::query("UPDATE schedule_occurrences SET status = ?, error = ?, waiting_reason = NULL, notified = ?, outcome = ?, outcome_summary = ?, reply_message_id = ?, next_retry_at = ?, attempt_no = ?, turn_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE turn_id END, updated_at = ? WHERE id = ?")
             .bind(if retry.is_some() { "pending" } else { next }).bind(error).bind(i64::from(retry.is_none())).bind(&outcome).bind(&summary).bind(if retry.is_some() { None } else { last })
             .bind(&retry).bind(occ.attempt_no + i64::from(retry.is_some())).bind(&retry).bind(now).bind(&occ.id).execute(&mut *tx).await?;
@@ -385,14 +404,40 @@ pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serd
         None => None,
     };
     let mut v = serde_json::to_value(occ)?;
-    let attempts: Vec<(i64, Option<String>, Option<String>, String, String)> = sqlx::query_as("SELECT attempt_no, turn_id, reply_message_id, outcome, outcome_summary FROM schedule_attempts WHERE occurrence_id = ? ORDER BY attempt_no")
+    let attempts: Vec<(i64, Option<String>, Option<String>, String, String, String, Option<String>)> = sqlx::query_as("SELECT attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at FROM schedule_attempts WHERE occurrence_id = ? ORDER BY attempt_no")
         .bind(&occ.id).fetch_all(pool).await?;
-    v["attempts"] = serde_json::json!(attempts.into_iter().map(|(attempt_no,turn_id,reply_message_id,outcome,outcome_summary)| serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary})).collect::<Vec<_>>());
+    let mut done_ms: Option<i64> = None;
+    let mut add = |ms: i64| done_ms = Some(done_ms.unwrap_or(0) + ms.max(0));
+    let mut has_current_row = false;
+    let list: Vec<serde_json::Value> = attempts.into_iter().map(|(attempt_no, turn_id, reply_message_id, outcome, outcome_summary, finished_at, started_at)| {
+        let ms = started_at.as_deref().and_then(|s| span_ms(s, &finished_at));
+        if let Some(ms) = ms { add(ms); }
+        has_current_row |= attempt_no == occ.attempt_no;
+        serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary,"started_at":started_at,"finished_at":finished_at,"duration_ms":ms})
+    }).collect();
+    v["attempts"] = serde_json::json!(list);
+    // 總花費時間＝各 attempt（開始→結束）加總；重試等待不算。還沒結束的這次 attempt 另給 `running_since`，由畫面加上已進行時間。
+    // 沒有 attempt 列就收成終態的（例如取消）：用最後更新時間當結束。
+    let open = matches!(occ.status.as_str(), "pending" | "queued");
+    let mut running_since: Option<String> = None;
+    if let Some(start) = occ.attempt_started_at.as_deref() {
+        if open { running_since = Some(start.to_owned()); }
+        else if !has_current_row { if let Some(ms) = span_ms(start, &occ.updated_at) { add(ms); } }
+    }
+    v["started_at"] = serde_json::json!(occ.first_started_at);
+    v["duration_ms"] = serde_json::json!(done_ms.or(if running_since.is_some() { Some(0) } else { None }));
+    v["running_since"] = serde_json::json!(running_since);
     v["turn_status"] = serde_json::json!(turn.as_ref().map(|t| t.0.clone()));
     v["turn_delivery"] = serde_json::json!(turn.as_ref().map(|t| t.1.clone()));
     v["turn_start_error"] = serde_json::json!(turn.as_ref().and_then(|t| t.2.clone()));
     v["turn_awaits_start"] = serde_json::json!(turn.as_ref().map(|t| t.3));
     Ok(v)
+}
+
+/// 最近一筆已結束（非 pending／queued）的 occurrence：列表「上次執行」用。
+pub async fn last_finished(pool: &SqlitePool, schedule_id: &str) -> Result<Option<Occurrence>> {
+    Ok(sqlx::query_as::<_, Occurrence>("SELECT * FROM schedule_occurrences WHERE schedule_id = ? AND status NOT IN ('pending','queued') ORDER BY created_at DESC, id DESC LIMIT 1")
+        .bind(schedule_id).fetch_optional(pool).await?)
 }
 
 pub async fn history(pool: &SqlitePool, schedule_id: &str, limit: i64, offset: i64) -> Result<Vec<Occurrence>> {
@@ -440,4 +485,11 @@ pub async fn bind_request_kind_tx(tx: &mut Transaction<'_, Sqlite>, schedule_id:
     sqlx::query("INSERT INTO schedule_dry_run_requests (schedule_id, client_request_id, occurrence_id, created_at) VALUES (?,?,?,?)")
         .bind(schedule_id).bind(crid).bind(occurrence_id).bind(now).execute(&mut **tx).await?;
     Ok(())
+}
+
+/// 兩個 RFC3339 時間相差的毫秒數（讀不出來回 None）。
+fn span_ms(from: &str, to: &str) -> Option<i64> {
+    let a = chrono::DateTime::parse_from_rfc3339(from).ok()?;
+    let b = chrono::DateTime::parse_from_rfc3339(to).ok()?;
+    Some((b - a).num_milliseconds().max(0))
 }

@@ -26,6 +26,7 @@ import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleResult } from './ScheduleResult'
+import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import { copyScheduleName } from './scheduleCopy'
 import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
@@ -181,6 +182,7 @@ export function ScheduleEditor({
   const schedulesRev = useStore((s) => s.schedulesRev)
   const selectBot = useStore((s) => s.selectBot)
   const [detail, setDetail] = useState<ScheduleDetail | null>(null)
+  const recentNow = useNowMs((detail?.recent ?? []).some((o) => !!o.running_since))
   // 綁定 turn 的即時狀態（queued→in_flight→終態）：變了就重抓詳情；排程自己的事件也重抓。
   const liveStatus = useLiveTurnStatus(detail?.open?.bot_id, detail?.open?.turn_id)
   const liveTurn = useStore((s) => detail?.open?.turn_id ? s.turns[detail.open.bot_id]?.[detail.open.turn_id] : undefined)
@@ -731,7 +733,7 @@ export function ScheduleEditor({
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
+                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}{(() => { const d = totalDurationMs(o, recentNow); return d === null ? '' : ` · ${o.status === 'pending' || o.status === 'queued' ? t('已進行 {d}', { d: formatDuration(d) }) : formatDuration(d)}` })()}
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                   {o.error ? t('（{error}）', { error: o.error }) : ''}
                   {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
