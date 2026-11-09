@@ -146,6 +146,8 @@ async fn notify_transition(app: &Arc<App>, t: &Transition) {
             json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_code": t.schedule_code, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "outcome": t.outcome, "attempt_no": t.attempt_no, "error": t.error}),
         )
         .await;
+        // 網頁推播（手機鎖屏也收得到）：背景送、失敗只記 warn，不影響排程。
+        crate::webpush::spawn_schedule_push(app, t);
     }
 }
 

@@ -27,6 +27,7 @@ import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 import { useT } from './lib/i18n'
+import { installPushClickBridge } from './lib/pushNotify'
 import { drawerShouldClose } from './lib/drawerNav'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
@@ -37,6 +38,11 @@ const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : documen
   .slice(-1)[0]
 
 /** 分頁標題的 `(N)`，以及視窗回到前景時把開著的對話標為已讀（切走再回來才看到回覆的常見情境）。 */
+/** 網頁推播：點通知時 service worker 通知已開啟的視窗開排程。 */
+function usePushClickBridge() {
+  useEffect(() => installPushClickBridge(), [])
+}
+
 function useUnread() {
   const total = useStore(titleUnread)
   const screen = useStore(screenTitle)
@@ -156,6 +162,7 @@ export default function App() {
   useBotSwitchKeys()
   useProjectJumpKeys()
   useUnread()
+  usePushClickBridge()
   useBlockedPrefetch()
   // 抽屜借一格歷史：開著時按上一頁是關抽屜，不是離開這個畫面。
   useDrawerRoute(drawerOpen, () => setDrawer(false))

@@ -1483,3 +1483,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 收合時標題仍顯示數量；區內有 bot 卡住（blocked）顯示紅色「⚠ 需處理」，有未讀回合顯示「● 有未讀」，點標題展開。
 - 排程列（⏱）在狀態旁多一顆「🤖 bot 名」小按鈕，點了選取該排程綁定的 bot（跳到對話）；綁定 bot 不可用時不畫。
 - 排程 bot 列下方一行小字「⏱ S1 S2」，列出它服務的排程代號（沒有代號用名稱）。
+
+## 網頁推播（Web Push，2026-11-09，使用者）：排程完成通知送到手機
+
+- 網址已是 HTTPS（tailscale serve），可註冊 service worker。iPhone 必須「加入主畫面」以 PWA（standalone）開啟才收得到；`web/public` 新增 `manifest.webmanifest`（name「AG Man」、display standalone、icon 192／512 PNG＋favicon.svg）、`apple-touch-icon.png`，`index.html` 連結並加 `apple-mobile-web-app-capable` 等 meta。
+- `web/public/sw.js` 只處理 `push` 與 `notificationclick`：**不做離線快取、不攔 fetch**，開發版與部署更新不受影響。只在使用者按「啟用推播」時才註冊。點通知：已有視窗就聚焦並 `postMessage`（網頁轉成 `agm:open-schedule`），沒有就開 `/?schedule=…&project=…&occurrence=…`；側欄開該排程的編輯器（含最近執行結果）並清掉網址參數。
+- 環境設定→顯示新增「推播通知」：狀態（檢查中／未啟用／已啟用／權限被封鎖／不支援），「啟用推播」（要求權限→訂閱→送到 daemon）、「送測試通知」、「停用推播」。不在 secure context、瀏覽器不支援、或 iPhone 沒從主畫面開啟時，不給啟用按鈕並顯示原因（iPhone：先「加入主畫面」）。
+- 通知內容：標題「S3 DON上班」，內文「✅ 08:58 完成（47 秒）」；失敗「❌ 失敗」、結果不明／拒絕「⚠ …」；時間用排程時區，有總花費時間才帶括號。與 toast 同一份 `notify` 過濾。

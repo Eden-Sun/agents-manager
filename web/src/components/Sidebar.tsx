@@ -46,6 +46,7 @@ import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { ProjectAddMenu } from '../schedules/ProjectAddMenu'
 import { listSchedules } from '../api/schedules'
+import { parseScheduleUrl } from '../lib/pushNotify'
 import { ProjectSchedules } from '../schedules/ProjectSchedules'
 import { ScheduleEditor } from '../schedules/ScheduleEditor'
 import { RunElapsed } from './RunElapsed'
@@ -1183,6 +1184,24 @@ export function Sidebar() {
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
   const [scheduleEditor, setScheduleEditor] = useState<{ projectId: string; scheduleId: string | null; focusBot?: boolean } | null>(null)
+  // 網頁推播的通知點擊：冷啟動帶 `?schedule=…&project=…`，已開啟的視窗收 `agm:open-schedule`；都開該排程的編輯器（含最近執行結果）。
+  useEffect(() => {
+    const open = (target: { projectId: string; scheduleId: string } | null) => {
+      if (target) setScheduleEditor({ projectId: target.projectId, scheduleId: target.scheduleId })
+    }
+    const initial = parseScheduleUrl(window.location.href)
+    if (initial) {
+      open(initial)
+      try {
+        window.history.replaceState(null, '', window.location.pathname)
+      } catch {
+        /* 沒有 history 權限就留著參數 */
+      }
+    }
+    const onOpen = (ev: Event) => open((ev as CustomEvent<{ projectId: string; scheduleId: string }>).detail)
+    window.addEventListener('agm:open-schedule', onOpen)
+    return () => window.removeEventListener('agm:open-schedule', onOpen)
+  }, [])
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)

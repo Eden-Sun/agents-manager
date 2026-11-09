@@ -3,6 +3,7 @@
 
 mod child_credentials;
 pub mod model_mode;
+pub mod webpush;
 mod expert_peers;
 pub mod expert_cluster;
 mod expert_member;

@@ -49,6 +49,9 @@ dirs = "5"
 libc = "0.2"
 # 分享入口把 SVG 引用的照片縮圖嵌成 data URI（share/compose.rs）。
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
 
 [dev-dependencies]
 am-base = { path = "../crates/am-base", features = ["test-hooks"] }

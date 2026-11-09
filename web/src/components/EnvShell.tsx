@@ -25,6 +25,7 @@ import { ClaudeApiPanel } from './ClaudeApiPanel'
 import { KindDisplayToggle } from './KindTag'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { LanguageToggle } from './LanguageToggle'
+import { PushSettings } from './PushSettings'
 import './envShell.css'
 
 export function EnvShell() {
@@ -259,6 +260,7 @@ export function EnvShell() {
           <LanguageToggle />
           <KindDisplayToggle />
           <KeepAwakeToggle />
+          <PushSettings />
         </section>
       </div>
     </div>
