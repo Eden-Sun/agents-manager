@@ -1,7 +1,7 @@
 import type { Bot } from '../api/types'
 import { t } from './i18n'
 
-export type ExpertRole = 'manager' | 'specialist' | 'advisor' | 'executor' | 'unassigned'
+export type ExpertRole = 'manager' | 'specialist' | 'advisor' | 'executor' | 'scheduler' | 'unassigned'
 
 export interface ExpertSection<T extends { role?: Bot['role'] }> {
   role: ExpertRole
@@ -12,9 +12,9 @@ export interface ExpertSection<T extends { role?: Bot['role'] }> {
   items: T[]
 }
 
-export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'unassigned'] as const
+export const EXPERT_ROLE_ORDER: readonly ExpertRole[] = ['manager', 'specialist', 'advisor', 'executor', 'scheduler', 'unassigned'] as const
 
-const ROLE_ABBR: Record<ExpertRole, string> = { manager: 'Mgr', specialist: 'Spc', advisor: 'Adv', executor: 'Wkr', unassigned: '' }
+const ROLE_ABBR: Record<ExpertRole, string> = { manager: 'Mgr', specialist: 'Spc', advisor: 'Adv', executor: 'Wkr', scheduler: '', unassigned: '' }
 
 export function roleAbbr(role: ExpertRole): string {
   return ROLE_ABBR[role]
@@ -25,6 +25,8 @@ export function roleToExpertSection(role: Bot['role']): ExpertRole {
   if (role === 'specialist') return 'specialist'
   if (role === 'advisor') return 'advisor'
   if (role === 'executor') return 'executor'
+  // 排程專屬 bot（排程編輯器建的）有自己的段落，不算未分配（2026-11-09 使用者）。
+  if (role === 'scheduler') return 'scheduler'
   return 'unassigned'
 }
 
@@ -41,11 +43,12 @@ export function roleTitle(role: Bot['role'] | ExpertRole): string {
   if (role === 'specialist') return t('專家')
   if (role === 'advisor') return t('顧問')
   if (role === 'executor') return t('執行者')
+  if (role === 'scheduler') return t('排程專用')
   return t('未分配')
 }
 
 /**
- * 在專家模式下，依固定順序（管理者 -> 專家 -> 顧問 -> 執行者 -> 未分配）將頂層項目分段；
+ * 在專家模式下，依固定順序（管理者 -> 專家 -> 顧問 -> 執行者 -> 排程專用 -> 未分配）將頂層項目分段；
  * 沒有項目的分段自動略過不畫。
  */
 export function groupExpertSections<T extends { id: string; role?: Bot['role'] }>(items: readonly T[], deputyBotId?: string | null): ExpertSection<T>[] {
@@ -54,6 +57,7 @@ export function groupExpertSections<T extends { id: string; role?: Bot['role'] }
     specialist: [],
     advisor: [],
     executor: [],
+    scheduler: [],
     unassigned: [],
   }
 

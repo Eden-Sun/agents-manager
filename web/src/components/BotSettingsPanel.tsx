@@ -254,7 +254,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
   /** 角色是表單的一欄：undefined＝沒動過（沿用 bot.role），否則是使用者選的值，跟其他欄位一起按「儲存」送出。 */
-  const [roleDraft, setRoleDraft] = useState<'manager' | 'executor' | 'advisor' | 'specialist' | null | undefined>(undefined)
+  const [roleDraft, setRoleDraft] = useState<'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null | undefined>(undefined)
   const [specTrack, setSpecTrack] = useState(bot?.track ?? '')
   const roleLabelId = useId()
   const trackHintId = useId()
@@ -625,6 +625,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <div className="field role-field">
               <span id={roleLabelId}>{t('角色')}</span>
               <div className="opt-group" role="radiogroup" aria-labelledby={roleLabelId}>
+                {bot.role === 'scheduler' ? <button type="button" role="radio" aria-checked={roleValue === 'scheduler'} className={`opt${roleValue === 'scheduler' ? ' on' : ''}`} onClick={() => setRoleDraft('scheduler')}>{t('排程專用')}</button> : null}
                 <button type="button" role="radio" aria-checked={roleValue === null} className={`opt${roleValue === null ? ' on' : ''}`} onClick={() => setRoleDraft(null)}>{t('未分配')}</button>
                 <button type="button" role="radio" aria-checked={roleValue === 'specialist'} className={`opt${roleValue === 'specialist' ? ' on' : ''}`} onClick={() => setRoleDraft('specialist')}>{t('專家')}</button>
                 <button type="button" role="radio" aria-checked={roleValue === 'advisor'} className={`opt${roleValue === 'advisor' ? ' on' : ''}`} onClick={() => setRoleDraft('advisor')}>{t('顧問')}</button>

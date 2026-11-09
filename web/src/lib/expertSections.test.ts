@@ -31,6 +31,12 @@ describe('expertSections pure functions', () => {
     assert.equal(roleTitle('executor'), '執行者')
     assert.equal(roleTitle('specialist'), '專家')
     assert.equal(roleTitle(null), '未分配')
+    assert.equal(roleTitle('scheduler'), '排程專用')
+  })
+
+  test('groupExpertSections: scheduler bots get their own section before unassigned', () => {
+    const secs = groupExpertSections([{ id: 'u', role: null }, { id: 's', role: 'scheduler' }, { id: 'e', role: 'executor' }])
+    assert.deepEqual(secs.map((x) => [x.role, x.title, x.items.map((i) => i.id)]), [['executor', '執行者', ['e']], ['scheduler', '排程專用', ['s']], ['unassigned', '未分配', ['u']]])
   })
 
   test('groupExpertSections: fixed order (manager -> specialist -> advisor -> executor -> unassigned)', () => {

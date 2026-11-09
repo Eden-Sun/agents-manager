@@ -344,6 +344,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '顧問': 'Advisor',
   '執行者': 'Worker',
   '未分配': 'Unassigned',
+  '排程專用': 'Scheduler',
   '管': 'Mgr',
   '顧': 'Adv',
   '執': 'Wkr',
