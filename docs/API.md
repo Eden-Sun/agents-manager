@@ -2088,6 +2088,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - **AGM 的 bot 要明講**（issue #406）：bot 是總管／角色本身、parent 是它們、或在總管／角色的專案裡，沒帶 `?confirm=supervisor` →
   `409 {"reason":"supervisor_owned","bot_id","name","role","message"}`（`role`：`AGM 總管（巡檢）`／`AGM 協調者`／`AGM 開出去的子 agent`／`AGM 專案裡的常駐工人`），什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
   `bin/agm bot delete <id> --confirm-supervisor` 帶這個參數；網頁收到這個 409 會跳第二次確認框（寫名稱與 `role`），按確認才帶參數重送。
+  **誰能帶 `confirm`**：只有使用者（UI token）、服務與已登記 AGM 角色的 Bot；其他 Bot（含專家管理者）與子 agent 帶了就 `403 {"error":"forbidden","reason":"confirm_not_allowed"}`，什麼都不動。中介層與 handler 用同一個解碼器判斷有沒有帶（`%63onfirm` 之類的編碼也算帶），解碼失敗當成有帶（fail closed）。`DELETE /api/projects/{id}` 同一條。
 - 呼叫端記進 daemon.log 與 delete intent 的 `requested_by`，格式
   `<method> <path> peer=… ua=… origin=… referer=… bot=… caller_self_reported=…`。**兩格身份要分清楚**：
   - `bot=<id>(<name>)` 是**驗過的**——請求帶了 `X-AM-Bot-Id` 而且 `X-AM-Bot-Token` 跟那顆 bot（活著的）的 hook token 對得上；對不上、沒帶、或那顆已軟刪一律 `bot=-`。
@@ -2724,7 +2725,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 ## 待答問卷翻譯 `POST /api/pending-questions/translate`
 
-User-only（Bot、AGM role、Service 皆 403 `user_only`）。body `{"questions":[{"header","question","options":[{"label","description"}]}]}`，最多 8 題、合計 12000 字元（超過 422 `questionnaire_too_long`）。整份問卷一次呼叫（用途 `message_translate`，開關與帳本同對話訊息翻譯；總開關或用途關閉回 409 `claude_api_not_configured`，不送出）。回 `{"questions":[{"id":"q0","header","question","options":[{"id":"q0-o0","label","description"}]}],"model","cached","cost_usd"}`；id 由 daemon 依位置產生，模型回的 id、題數、選項數對不上就 502 `translate_failed`，不寫快取。快取在 `message-translate/pq-<sha256>.json`。
+User-only（Bot、AGM role、Service 皆 403 `user_only`）。body `{"questions":[{"header","question","options":[{"label","description"}]}]}`，最多 8 題、合計 12000 字元（超過 422 `questionnaire_too_long`）。整份問卷一次呼叫（用途 `message_translate`，開關與帳本同對話訊息翻譯；總開關或用途關閉回 409 `claude_api_not_configured`，不送出）。回 `{"questions":[{"id":"q0","header","question","options":[{"id":"q0-o0","label","description"}]}],"model","cached","cost_usd"}`；id 由 daemon 依位置產生，模型回的 id、題數、選項數對不上就 502 `translate_failed`，不寫快取。快取在 `message-translate/pq-<sha256>.json`。同一份問卷（同一快取鍵）同時只有一個上游呼叫（single-flight）：並行的請求排隊等先到的那一個，拿到控制權後重查快取，命中就回 `cached:true`、不再打 API。網頁的自動翻譯在 effect 執行時也重查狀態，同一份問卷同時掛兩個元件只送一次；譯文快取只存文字，Jev 建議與複選等 metadata 一律取目前的題目。
 
 ## 對話訊息翻譯 `POST /api/messages/{id}/translate`
 

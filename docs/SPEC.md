@@ -72,7 +72,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
 Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
-專家模式專案（`projects.mode='expert'`）的 bot：往來回合（回合內 user 訊息全都帶 `relay_from`，即別的 bot／daemon 代發）的回覆不算未讀；回合裡有使用者補話（一則無 `relay_from` 的 user 訊息）照算。daemon `read_marks` 與網頁 `unread.ts` 同一規則。
+專家模式專案（`projects.mode='expert'`）的 bot：往來回合（回合內 user 訊息全都帶 `relay_from`，即別的 bot／daemon 代發）的回覆不算未讀；回合裡有使用者補話（一則無 `relay_from` 的 user 訊息）照算。**管理者（role=manager）不套用**：它回覆 daemon 結果通知通常是在向使用者回報，照算未讀。daemon `read_marks` 與網頁 `unread.ts`（`isExpertBot`）同一規則。
 `GET /api/state` 對 Bot principal 只列自己與後代 child，並移除 persona、args、identity、env、herdr session、未讀數、read marks，以及含全域部署阻擋者的 `deploy_wait`；若 caller 是 child，state 不揭露 tree 以外 parent 的 bot id。UI User principal 維持完整快照。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
@@ -3199,7 +3199,7 @@ max_input_chars={n}
 `body_byte_len` 是該段正文的位元組長度。prompt 版目前是 `1`。`lang` 空了當 `zh-Hant`。送進 prompt 的目標語言只從這張表取固定句子，不把設定原文貼進去：`zh-Hant`（Traditional Chinese）、`zh-Hans`（Simplified Chinese）、`en`（English）、`ja`（Japanese）、`ko`（Korean）。不在表上的值 `GET`／`POST` 都回 `failed`、`error:"lang"`、`error_kind:"bad_format"`，不打 API、不寫 attempt。不同 `lang` 是不同的快取鍵，不共用譯文；同一個 `lang` 仍去重。回應裡的 `lang` 就是這次驗證過、寫進 prompt 與快取鍵的標籤。
 
 - **每次送出各記一筆** `attempts[]`（狀態、模型、`usage`、`retry_after`）。後來的重試不覆蓋已經花過錢的那筆。`usage` 兩個 token 欄都有才算數；缺了是 `null`（未知），不寫成 0，也不當成完成。明確的 0 照記。沒有即時重試。送出失敗後一律等 `retry_after`，到期才由前端退避計時或使用者再送：429 用 `Retry-After` 的秒數（1–3600，空的或 HTTP-date 用 15 秒）；逾時與 5xx 依上面的連續失敗退避（1 分、5 分、30 分，封頂 1 小時）。次數上限預設 3（含第一次；舊設定 0 也採 3，正數最多 8）。次數用盡後，最後一次送出的嘗試結束起 1 小時內不再送（`budget`／`attempts`，`retry_after` 固定是這個時間，連續查詢不往後延）；過了 1 小時允許再送一次，那次之後同樣每次隔 1 小時。這個窗口只看次數上限，不看每小時名額。每小時已送出的次數預設 0＝不限；別的 fingerprint 佔滿同時上限（預設 1）時回 `failed`／`budget`／`in_flight`，不寫新 attempt，也不排隊。`max_queued` 這階段不拿來自動送。
-- **送出走共用 Claude API 路徑（#1942）**。逾時參數用 `[claude_api] timeout_ms`（預設 60 秒；串流翻譯按連線／讀取閒置計時，不限制總生成時間），不再用 `[changelog_translate] timeout_ms`；舊鍵**已廢棄、不生效**，設定檔裡讀到就記一次 WARN。每次送出（成功或失敗）都記進 `[claude_api]` 用量帳本，用途 `changelog_translate`（設定頁「帳本」看得到）。翻譯自己的 `max_per_hour`、`max_in_flight`、`max_attempts` 與 attempt 帳本照舊，不經過 `[claude_api]` 的每小時名額，所以同一次送出不會被兩邊各扣一次。
+- **送出走共用 Claude API 路徑（#1942）**。逾時參數用 `[claude_api] timeout_ms`（預設 60 秒；串流翻譯按連線／讀取閒置計時，另有 10 分鐘總期限 `MAX_STREAM_DURATION`），不再用 `[changelog_translate] timeout_ms`；舊鍵**已廢棄、不生效**，設定檔裡讀到就記一次 WARN。每次送出（成功或失敗）都記進 `[claude_api]` 用量帳本，用途 `changelog_translate`（設定頁「帳本」看得到）。閒置逾時或總期限逾時時，已從串流收到的 usage（`message_start`／`message_delta`）照記（`ClientError::Timeout { usage }`），沒收到的欄位維持未知；逾時不重送。翻譯自己的 `max_per_hour`、`max_in_flight`、`max_attempts` 與 attempt 帳本照舊，不經過 `[claude_api]` 的每小時名額，所以同一次送出不會被兩邊各扣一次。
 - **行程重啟不補送**。第一次 `GET` 或 `POST` 先把帳本裡的 `in_flight` 收成 `interrupted`（用量改未知、仍算已送出、`error:"restart"`），`reserved` 收成 `interrupted`（`sent:false`、`error:"not_sent"`，不算已送出）。壞掉的檔留著，不覆蓋、不扣費。
 - **帳本保留政策（#1973）**：目錄 `{data_dir}/changelog-translate/*.json` 只增不減會隨版本累積。清理機制放在首次 settle 完成後與每次翻譯 finish 寫入後的背景非同步排程（`background_tasks`，由 `prune_pending` 旗標合併；非 HTTP 同步掃描，但每批持鎖時與 GET/POST 共享 `gate` 互斥鎖，失敗僅記 WARN 不改主流程結果）。清理只針對 `completed` 狀態且無 active attempt、時間欄位均可解析且距今 > 1 小時、無未到期 `retry_after` 的合格（eligible）檔案： 時間門檻皆解析成 UTC 時刻後比較，秒與毫秒格式混存時仍按實際先後判斷（#1982）。
   1. 所有 attempt 開始與結束時間皆超過 30 天的過期 completed 檔可刪除。
