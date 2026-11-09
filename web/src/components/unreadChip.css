@@ -33,6 +33,21 @@
 }
 
 /* 主力與「進行中」之間一條虛線＋小標（2026-10-31 使用者：沒釘的在跑 bot 不該看起來像主力）。 */
+/* 電腦版主力列：一行還有空位時晶片自動加寬填滿，每顆最寬 100px（2026-11-09 使用者）。
+   flex-grow 在換行之後才分配，不影響裁切行數的量測；本來就超過 100px 的長名字維持原寬（名字上限 150px 再省略），不被壓短。 */
+@media (min-width: 721px) {
+  .unread-group[data-group='pinned'] > .unread-chip:not(.pin-more) {
+    flex: 1 0 auto;
+    justify-content: center;
+    max-width: 100px;
+    min-width: max-content;
+  }
+
+  .unread-group[data-group='pinned'] > .unread-chip:not(.pin-more) .unread-chip-name {
+    max-width: 150px;
+  }
+}
+
 .unread-group[data-group='pinned'] + .unread-group[data-group='others'] {
   border-top: 1px dashed var(--border-strong);
   padding-top: 6px;
