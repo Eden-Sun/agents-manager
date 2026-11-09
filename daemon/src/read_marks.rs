@@ -102,6 +102,8 @@ pub async fn marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
 
 /// 未讀回合數：標記之後的 assistant 訊息，依 `turn_id` 去重（沒 turn 的各算一則）。沒有標記＝全部未讀，
 /// 同前端（新 bot 本來就沒幾則）。時間戳相同時，標記訊息還在就按 rowid 比較；舊標記找不到原訊息時退回 id。
+/// 專家專案（`projects.mode='expert'`）的 bot：其他 bot／daemon 觸發的回合（user 訊息都帶 `relay_from`）不算未讀，
+/// 使用者補話（回合裡有一則無 `relay_from` 的 user 訊息）照算。
 pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(UNREAD_SQL).fetch_all(pool).await?;
     Ok(rows.into_iter().collect())
@@ -127,6 +129,9 @@ macro_rules! unread_sql {
                  OR ((kt.client_request_id LIKE 'child-done:%' OR kt.client_request_id LIKE 'child-blocked:%')
                      AND NOT EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = kt.id AND um.role = 'user'
                                       AND um.content NOT LIKE '[daemon 自動通知，不是 bot_request]%'))))
+            AND NOT (EXISTS (SELECT 1 FROM bots eb JOIN projects ep ON ep.id = eb.project_id WHERE eb.id = c.bot_id AND ep.mode = 'expert')
+                 AND EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = m.turn_id AND um.role = 'user' AND um.relay_from IS NOT NULL)
+                 AND NOT EXISTS (SELECT 1 FROM messages um WHERE um.turn_id = m.turn_id AND um.role = 'user' AND um.relay_from IS NULL))
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
                  CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY c.bot_id")
@@ -347,6 +352,36 @@ mod tests {
         assert_eq!(m.at, "2026-09-15T02:00:00.000Z", "較舊的標記不倒退");
         mark(&pool, "b", "2026-09-15T03:00:01.000Z", "").await.unwrap();
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 專家模式：bot 之間的往來（relay 回合，user 訊息都帶 `relay_from`）的回覆不算未讀；使用者補話（有一則無 `relay_from`
+    /// 的 user 訊息）照算。非專家專案的 relay 回合照算。
+    #[tokio::test]
+    async fn in_an_expert_project_relay_turns_are_not_unread_but_a_user_supplement_is() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
+        // t4：純 relay（daemon 通知）；t5：relay 回合裡使用者補話。
+        for (tid, at) in [("t4", "2026-09-15T04:00:00.000Z"), ("t5", "2026-09-15T05:00:00.000Z")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES (?,'c','web','completed',?,?)")
+                .bind(tid).bind(at).bind(at).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES (?,'c',?,'user','relay','web','daemon',?)")
+                .bind(format!("r-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c',?,'assistant','a','hook',?)")
+                .bind(format!("a0-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('s-t5','c','t5','user','補話','web','2026-09-15T05:00:00.000Z')")
+            .execute(&pool).await.unwrap();
+
+        // 非專家專案（預設 parent_child）：relay 回合照算，共 5。
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&5));
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 5);
+
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id='p'").execute(&pool).await.unwrap();
+        // 專家專案：t1～t3 使用者回合 + t5（有補話）＝4；t4 純 relay 不算。
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&4));
+        assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 4);
         std::fs::remove_dir_all(dir).ok();
     }
 

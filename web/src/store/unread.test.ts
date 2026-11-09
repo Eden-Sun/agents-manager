@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, prunePersistedMarks, projectUnread, pruneIdleEdges, recordReadMark, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isExpertBot, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, prunePersistedMarks, projectUnread, pruneIdleEdges, recordReadMark, relayTurnIds, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -296,4 +296,31 @@ test('修剪時死掉的 bot 不留在磁碟上', () => {
   const disk = JSON.parse(map.get('am.readMarks') ?? '{}')
   assert.equal(disk['bot:gone'], undefined)
   assert.ok(disk['bot:a'])
+})
+
+test('專家專案：往來回合（user 都帶 relay_from）的回覆不算未讀；使用者補話的回合照算；非專家照算', () => {
+  const relayed = (id: string, turn: string, at: string): Message => ({ ...msg(id, 'user', at, turn), relay_from: 'daemon' })
+  const ms = [
+    msg('h1', 'user', '2026-09-07T00:00:01Z', 't1'),
+    msg('a1', 'assistant', '2026-09-07T00:00:02Z', 't1'),
+    relayed('r2', 't2', '2026-09-07T00:00:03Z'),
+    msg('a2', 'assistant', '2026-09-07T00:00:04Z', 't2'),
+    relayed('r3', 't3', '2026-09-07T00:00:05Z'),
+    relayed('r3b', 't3', '2026-09-07T00:00:06Z'),
+    msg('h3', 'user', '2026-09-07T00:00:06Z', 't3'), // 使用者補話
+    msg('a3', 'assistant', '2026-09-07T00:00:07Z', 't3'),
+  ]
+  assert.deepEqual([...relayTurnIds(ms)], ['t2'], '只有全部 user 都 relay 的回合是往來')
+  assert.equal(countUnreadTurns(ms, undefined), 3, '非專家專案：relay 回合照算')
+  assert.equal(countUnreadTurns(ms, undefined, true), 2, '專家專案：t2 不算，t1 與補話的 t3 算')
+  assert.equal(countUnreadTurns(ms, { at: '2026-09-07T00:00:02Z', id: 'a1' }, true), 1, '標記之後只剩 t3（補話）')
+})
+
+test('isExpertBot：只認 projects.mode=expert 的專案', () => {
+  const projects = [{ id: 'p1', mode: 'expert' as const }, { id: 'p2', mode: 'parent_child' as const }, { id: 'p3' }]
+  assert.equal(isExpertBot({ project_id: 'p1' }, projects), true)
+  assert.equal(isExpertBot({ project_id: 'p2' }, projects), false)
+  assert.equal(isExpertBot({ project_id: 'p3' }, projects), false)
+  assert.equal(isExpertBot({ project_id: 'gone' }, projects), false)
+  assert.equal(isExpertBot(undefined, projects), false)
 })

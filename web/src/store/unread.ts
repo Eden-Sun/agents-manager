@@ -3,7 +3,7 @@
  * 數字與已讀標記都存：標記是真相，但重整後只有正在看的 bot 有訊息可重算，其他靠存下的數字。
  */
 
-import type { Message } from '../api/types'
+import type { Message, Project } from '../api/types'
 import { writeShared } from './mobilePreview'
 import { laterMark } from './sharedUnread'
 
@@ -137,11 +137,38 @@ export function isUnread(msg: Pick<Message, 'id' | 'created_at' | 'seq'>, mark: 
   return msg.id > mark.id
 }
 
-/** 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。 */
-export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | undefined): number {
+/**
+ * 「往來」回合：使用者訊息至少一則、且全都帶 `relay_from`（別的 bot／daemon 代發，不是使用者自己打的）。
+ * 有一則無 `relay_from` 的 user 訊息＝使用者補話，不算往來。與 daemon `read_marks` 的規則一致。
+ */
+export function relayTurnIds(messages: readonly Message[]): Set<string> {
+  const human = new Set<string>()
+  const relay = new Set<string>()
+  for (const m of messages) {
+    if (m.role !== 'user' || !m.turn_id) continue
+    if (m.relay_from == null) human.add(m.turn_id)
+    else relay.add(m.turn_id)
+  }
+  for (const id of human) relay.delete(id)
+  return relay
+}
+
+/** 專家專案（`projects.mode='expert'`）的 bot。 */
+export function isExpertBot(bot: { project_id: string } | undefined, projects: readonly Pick<Project, 'id' | 'mode'>[]): boolean {
+  if (!bot) return false
+  return projects.some((p) => p.id === bot.project_id && p.mode === 'expert')
+}
+
+/**
+ * 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。
+ * `expert` 為 true（專家專案的 bot）時，往來回合（見 `relayTurnIds`）的回覆不算未讀。
+ */
+export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | undefined, expert = false): number {
+  const relay = expert ? relayTurnIds(messages) : null
   const turns = new Set<string>()
   for (const m of messages) {
     if (!completesTurn(m) || !isUnread(m, mark)) continue
+    if (m.turn_id && relay?.has(m.turn_id)) continue
     turns.add(m.turn_id ?? `msg:${m.id}`)
   }
   return turns.size

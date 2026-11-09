@@ -90,6 +90,7 @@ import {
   completionKey,
   countUnreadTurns,
   idleEdgeCompletionKey,
+  isExpertBot,
   loadCounts,
   loadMarks,
   markHookCompletion,
@@ -98,6 +99,7 @@ import {
   pruneIdleEdges,
   prunePersistedMarks,
   pruneUnread,
+  relayTurnIds,
   saveCounts,
   recordReadMark,
   takeTurnCompletion,
@@ -1402,7 +1404,8 @@ export const useStore = create<StoreState>((set, get) => {
       return
     }
     const serverMark = s.bots.find((b) => b.id === botId)?.read_mark
-    const n = countUnreadTurns(s.messages[botId] ?? [], laterMark(readMarks[botKey(botId)], serverMark))
+    const expert = isExpertBot(s.bots.find((b) => b.id === botId), s.projects)
+    const n = countUnreadTurns(s.messages[botId] ?? [], laterMark(readMarks[botKey(botId)], serverMark), expert)
     if ((s.botUnread[botId] ?? 0) === n) return
     set((cur) => ({ botUnread: n > 0 ? { ...cur.botUnread, [botId]: n } : withoutKey(cur.botUnread, botId) }))
     persistUnread(get())
@@ -2851,6 +2854,9 @@ function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
     get().markBotRead(botId)
     return
   }
+  // 專家專案：bot 之間的往來（relay 回合）不亮未讀；使用者補話的回合照算（與 daemon 同規則）。
+  const s = get()
+  if (isExpertBot(s.bots.find((b) => b.id === botId), s.projects) && relayTurnIds(s.messages[botId] ?? []).has(turnId)) return
   if (!takeTurnCompletion(botId, turnId)) return
   set((s) => ({ botUnread: { ...s.botUnread, [botId]: (s.botUnread[botId] ?? 0) + 1 } }))
   persistUnread(get())
