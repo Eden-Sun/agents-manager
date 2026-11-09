@@ -166,16 +166,16 @@ pub(crate) struct OwnTurn { pub id: String, pub status: String, pub created_at: 
 pub(crate) async fn follow_scan(app: &Arc<App>, id: &str, from: &str, to: &str, turn: &str) -> anyhow::Result<FollowScan> {
     let created: Option<String> = sqlx::query_scalar("SELECT created_at FROM turns WHERE id=?").bind(turn).fetch_optional(&app.db).await?;
     let Some(created) = created else { return Ok(FollowScan { ended: true, own: vec![], noticed_through: None, notices: 0, last_notice_at: None }) };
-    let rows: Vec<(String,String,String,String,Option<String>,String,i64)> = sqlx::query_as("SELECT t.id,t.status,t.created_at,t.origin,t.client_request_id,t.queue_class,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='user') FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.id<>? AND t.created_at>=? ORDER BY t.created_at,t.rowid")
-        .bind(to).bind(turn).bind(&created).fetch_all(&app.db).await?;
+    let rows: Vec<(String,String,String,String,Option<String>,String,i64)> = sqlx::query_as(&format!("SELECT t.id,t.status,t.created_at,t.origin,t.client_request_id,t.queue_class,(SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='user') FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.id<>? AND {}>=? ORDER BY {},t.rowid", db::ts_sql("t.created_at"), db::ts_sql("t.created_at")))
+        .bind(to).bind(turn).bind(db::parse_ts(&created).map_or(created.clone(), |t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))).fetch_all(&app.db).await?;
     let mut ended = false;
     let mut own = Vec::new();
     for (tid, status, at, origin, crid, class, users) in rows {
-        if at == created { continue }
+        if db::same_instant(Some(&at), Some(&created)) { continue }
         if origin == "external" && crid.is_none() && class == "user" && users == 0 { own.push(OwnTurn { id: tid, status, created_at: at }) } else { ended = true; break }
     }
     let conv = db::conversation_id(&app.db, from).await?;
-    let notices: Vec<(String,String)> = sqlx::query_as("SELECT client_request_id,created_at FROM turns WHERE conversation_id=? AND client_request_id LIKE ? ORDER BY created_at")
+    let notices: Vec<(String,String)> = sqlx::query_as(&format!("SELECT client_request_id,created_at FROM turns WHERE conversation_id=? AND client_request_id LIKE ? ORDER BY {}", db::ts_sql("created_at")))
         .bind(&conv).bind(format!("relay-result:{id}:f:%")).fetch_all(&app.db).await?;
     let through = notices.last().and_then(|(k, _)| k.rsplit(':').next().map(str::to_string));
     Ok(FollowScan { ended, own, noticed_through: through, notices: notices.len() as i64, last_notice_at: notices.last().map(|(_, a)| a.clone()) })
@@ -197,7 +197,7 @@ pub(crate) async fn followup_view(app: &Arc<App>, id: &str, from: &str, to: &str
 
 pub(crate) async fn followup_sweep(app: &Arc<App>, cfg: &FollowCfg) {
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(cfg.window_sec)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM relay_requests WHERE state='notified' AND to_turn_id IS NOT NULL AND notified_at>? ORDER BY created_at").bind(cutoff).fetch_all(&app.db).await {
+    let ids: Vec<String> = match sqlx::query_scalar(&format!("SELECT id FROM relay_requests WHERE state='notified' AND to_turn_id IS NOT NULL AND {}>? ORDER BY created_at", db::ts_sql("notified_at"))).bind(cutoff).fetch_all(&app.db).await {
         Ok(ids) => ids,
         Err(e) => { tracing::warn!(error = ?e, "relay followup sweep failed"); return; }
     };
@@ -220,7 +220,7 @@ pub(crate) async fn followup(app: &Arc<App>, id: &str, cfg: &FollowCfg) -> anyho
         Some(t) => sqlx::query_scalar("SELECT created_at FROM turns WHERE id=?").bind(t).fetch_optional(&app.db).await?,
         None => None,
     };
-    let pending: Vec<&OwnTurn> = scan.own.iter().filter(|t| through_at.as_ref().is_none_or(|a| t.created_at > *a)).collect();
+    let pending: Vec<&OwnTurn> = scan.own.iter().filter(|t| through_at.as_deref().is_none_or(|a| db::cmp_ts(&t.created_at, a).is_gt())).collect();
     if pending.is_empty() || pending.iter().any(|t| matches!(t.status.as_str(), "queued" | "in_flight")) { return Ok(()) }
     if scan.last_notice_at.as_deref().and_then(|a| secs_since(a, now)).is_some_and(|s| s < cfg.merge_sec) { return Ok(()) }
     let last = pending[pending.len() - 1];
@@ -248,7 +248,7 @@ pub(crate) async fn followup(app: &Arc<App>, id: &str, cfg: &FollowCfg) -> anyho
         }
     }
     if answer.is_empty() { answer = format!("目標自行接續了 {} 個回合，但未擷取到回覆。", pending.len()) }
-    let until = (chrono::DateTime::parse_from_rfc3339(&notified_at)?.with_timezone(&chrono::Utc) + chrono::Duration::seconds(cfg.window_sec)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let until = (chrono::DateTime::parse_from_rfc3339(&notified_at)?.with_timezone(&chrono::Utc) + chrono::Duration::seconds(cfg.window_sec)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let notice = format!("[daemon 請求結果通知（後續，第 {seq} 則，最終：否），不是新請求] request_id={id}\n{answer}\n仍會追蹤目標接續的回合，直到目標開始新工作或 {until}。\n\n{}", crate::child_alerts::NOTICE_END);
     if lifecycle::prompt_from_api_queue_if_busy(app, &from, &notice, &key, &[], lifecycle::RelaySrc::daemon_notice(Some(&to)), false, None).await.is_err() {
         tracing::warn!(request = %id, "relay followup notice not accepted; retrying next sweep");
