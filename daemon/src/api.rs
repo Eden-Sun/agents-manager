@@ -8022,10 +8022,17 @@ async fn list_relay_requests(
         "SELECT id,from_bot_id,to_bot_id,to_run_id,to_turn_id,state,created_at,answered_at,notified_at,notice_turn_id,processed_at,attempts,error,redirected_from FROM relay_requests WHERE (? IS NULL OR from_bot_id=? OR to_bot_id=?) AND (? IS NULL OR from_bot_id=?) AND (? IS NULL OR to_bot_id=?) AND (?=0 OR state IN ('pending','delivered')) ORDER BY created_at DESC"
     ).bind(caller).bind(caller).bind(caller).bind(&q.from).bind(&q.from).bind(&q.to).bind(&q.to)
         .bind(i64::from(q.open.as_deref() == Some("1"))).fetch_all(&app.db).await.map_err(any_err)?;
-    Ok(Json(json!({"requests": rows.into_iter().map(|(id,from,to,run,turn,state,created,answered,notified,notice_turn,processed,attempts,error,redirected_from)| json!({
-        "id":id,"from_bot_id":from,"to_bot_id":to,"to_run_id":run,"to_turn_id":turn,"state":state,
-        "created_at":created,"answered_at":answered,"notified_at":notified,"notice_turn_id":notice_turn,"processed_at":processed,"attempts":attempts,"error":error,"redirected_from":redirected_from
-    })).collect::<Vec<_>>() })))
+    let cfg = crate::runners::relay_requests::FollowCfg::from_env();
+    let mut out = Vec::with_capacity(rows.len());
+    for (id,from,to,run,turn,state,created,answered,notified,notice_turn,processed,attempts,error,redirected_from) in rows {
+        let followup = if state == "notified" { crate::runners::relay_requests::followup_view(&app, &id, &from, &to, turn.as_deref(), notified.as_deref(), &cfg).await } else { None };
+        out.push(json!({
+            "id":id,"from_bot_id":from,"to_bot_id":to,"to_run_id":run,"to_turn_id":turn,"state":state,
+            "created_at":created,"answered_at":answered,"notified_at":notified,"notice_turn_id":notice_turn,"processed_at":processed,"attempts":attempts,"error":error,"redirected_from":redirected_from,
+            "followup":followup
+        }));
+    }
+    Ok(Json(json!({"requests": out })))
 }
 
 /// Start a stopped expert member only for an authorized project manager or acting deputy.
