@@ -630,6 +630,7 @@ export class MockTransport implements Transport {
   ]
   private projects: MockProject[] = []
   private bots: MockBot[] = []
+  private baseSnapshots = new Map<string, string>()
   /** 軟刪的 bot（daemon `bots.deleted_at`，#757）：`GET /bots/deleted` 列、`POST /bots/{id}/restore` 救回。 */
   private deletedBots: { bot: MockBot; deleted_at: string }[] = []
   private runs: MockRun[] = []
@@ -1212,6 +1213,13 @@ export class MockTransport implements Transport {
     const b = (body ?? {}) as Rec
     const seg = rawPath.split('/').filter(Boolean)
 
+    if (seg.length === 3 && seg[0] === 'bots' && seg[2] === 'base-snapshot') {
+      const id = decodeURIComponent(seg[1])
+      if (method === 'PUT') this.baseSnapshots.set(id, new Date().toISOString())
+      else if (method === 'DELETE') this.baseSnapshots.delete(id)
+      const at = this.baseSnapshots.get(id)
+      return at ? { locked: true, session_id: `mock-base-${id}`, locked_at: at } : { locked: false }
+    }
     if (method === 'GET' && rawPath === '/state') return this.state()
     if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }

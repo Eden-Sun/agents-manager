@@ -112,7 +112,7 @@ fn schedule_json(s: &Schedule) -> Value {
         "mode": s.mode, "tz": s.tz, "spec": serde_json::from_str::<Value>(&s.spec_json).unwrap_or(Value::Null),
         "next_due": s.next_due, "enabled": s.enabled == 1, "generation": s.generation, "notify": s.notify,
         "retry_count": s.retry_count, "retry_interval_mins": s.retry_interval_mins, "retry_deadline_mins": s.retry_deadline_mins,
-        "clear_after": s.clear_after == 1, "created_at": s.created_at, "updated_at": s.updated_at,
+        "clear_after": s.clear_after == 1, "from_base": s.from_base == 1, "created_at": s.created_at, "updated_at": s.updated_at,
     })
 }
 
@@ -143,6 +143,9 @@ pub struct CreateIn {
     /// 跑完就清空對話（issue #1779）：缺省＝false。
     #[serde(default)]
     pub clear_after: bool,
+    /// 每次從基準快照開始（bot 要是 codex 且已鎖基準）：缺省＝false。
+    #[serde(default)]
+    pub from_base: bool,
     #[serde(default)]
     pub retry_count: i64,
     #[serde(default = "default_retry_interval")]
@@ -171,6 +174,9 @@ pub(super) fn create_fingerprint(b: &CreateIn) -> String {
     }
     if b.clear_after {
         v["clear_after"] = json!(true);
+    }
+    if b.from_base {
+        v["from_base"] = json!(true);
     }
     v.to_string()
 }
@@ -221,6 +227,9 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
             .filter(|s| s.deleted_at.is_none() && s.project_id == project_id && s.bot_id == head.bot_id && s.generation == head.generation && s.updated_at == head.updated_at)
             .ok_or_else(|| LcError::Conflict(json!({"error":"schedule_changed", "message":"排程已變更，請重新整理再試"})))?;
         if cur.bot_id == b.bot_id { continue; }
+        if cur.from_base == 1 {
+            super::base::require_tx(&mut tx, &b.bot_id).await?;
+        }
         if let Some(open) = store::open_occurrence_tx(&mut tx, &cur.id).await.map_err(db_err)? {
             if open.status != "pending" || open.waiting_reason.as_deref() != Some("bot_unavailable") {
                 return Err(LcError::Conflict(json!({"error":"schedule_open", "message":"排程還有未結束的執行，換 Bot 前請先等它結束或停用"})));
@@ -256,6 +265,9 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     if runner::eligible_bot_tx(&mut tx, &b.bot_id, Some(&project_id)).await.map_err(db_err)?.is_none() {
         return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
     }
+    if b.from_base {
+        super::base::require_tx(&mut tx, &b.bot_id).await?;
+    }
     let stamp = db::now();
     let s = Schedule {
         id: db::ulid(),
@@ -271,6 +283,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         generation: 1,
         notify: b.notify.clone(),
         clear_after: i64::from(b.clear_after),
+        from_base: i64::from(b.from_base),
         retry_count: b.retry_count, retry_interval_mins: b.retry_interval_mins, retry_deadline_mins: b.retry_deadline_mins,
         create_crid: Some(b.client_request_id.clone()),
         create_fp: Some(fp),
@@ -306,6 +319,7 @@ pub struct PatchIn {
     pub spec: Option<SpecIn>,
     pub notify: Option<String>,
     pub clear_after: Option<bool>,
+    pub from_base: Option<bool>,
     pub retry_count: Option<i64>,
     pub retry_interval_mins: Option<i64>,
     pub retry_deadline_mins: Option<i64>,
@@ -332,6 +346,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let notify = b.notify.clone().unwrap_or_else(|| cur.notify.clone());
     // 只影響之後的 done；不算內容變動（不撤回已排的、不升 generation）。
     let clear_after = i64::from(b.clear_after.unwrap_or(cur.clear_after == 1));
+    let from_base = i64::from(b.from_base.unwrap_or(cur.from_base == 1));
     let retry_count = b.retry_count.unwrap_or(cur.retry_count);
     let retry_interval = b.retry_interval_mins.unwrap_or(cur.retry_interval_mins);
     let retry_deadline = b.retry_deadline_mins.unwrap_or(cur.retry_deadline_mins);
@@ -347,6 +362,9 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
         if runner::eligible_bot_tx(&mut tx, &bot_id, Some(&cur.project_id)).await.map_err(db_err)?.is_none() {
             return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
         }
+    }
+    if from_base == 1 && (bot_changed || b.from_base == Some(true)) {
+        super::base::require_tx(&mut tx, &bot_id).await?;
     }
     let now_t = Utc::now();
     let (mode, spec_json) = match &b.spec {
@@ -376,7 +394,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     };
     let generation = if content_changed { cur.generation + 1 } else { cur.generation };
     sqlx::query(
-        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, clear_after = ?, retry_count = ?, retry_interval_mins = ?, retry_deadline_mins = ?, updated_at = ?
+        "UPDATE schedules SET name = ?, prompt = ?, bot_id = ?, mode = ?, tz = ?, spec_json = ?, next_due = ?, enabled = ?, generation = ?, notify = ?, clear_after = ?, from_base = ?, retry_count = ?, retry_interval_mins = ?, retry_deadline_mins = ?, updated_at = ?
           WHERE id = ?",
     )
     .bind(&name)
@@ -390,6 +408,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     .bind(generation)
     .bind(&notify)
     .bind(clear_after)
+    .bind(from_base)
     .bind(retry_count).bind(retry_interval).bind(retry_deadline)
     .bind(&now)
     .bind(&id)

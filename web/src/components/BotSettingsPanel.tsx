@@ -13,6 +13,7 @@ import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { BotShareSection } from './BotShareSection'
 import { ApiBotControls } from './ApiBotControls'
+import { BaseSnapshotControls } from './BaseSnapshotControls'
 import { CopyChip } from './CopyChip'
 import { listSchedules, rebindSchedules, type Schedule } from '../api/schedules'
 import { KindTag } from './KindTag'
@@ -781,6 +782,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </form>
 
         {bot.kind === 'claude-api' ? <ApiBotControls botId={botId} name={bot.name} /> : null}
+        {bot.kind === 'codex' ? <BaseSnapshotControls botId={botId} name={bot.name} /> : null}
         <BotShareSection botId={botId} />
 
         {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}

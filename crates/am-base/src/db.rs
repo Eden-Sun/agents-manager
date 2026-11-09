@@ -289,7 +289,14 @@ CREATE TABLE IF NOT EXISTS schedules (
   -- 失敗重試（P2）：放在表尾，跟 ALTER 補欄位的結果一致（指紋才對得上）。
   retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5),
   retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440),
-  retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)
+  retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080),
+  -- 每次從基準快照開始：runner 送出前先把 bot 重啟成 `codex fork <基準 session>`（bot_base_snapshots）。
+  from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))
+);
+-- codex bot 的基準快照：使用者把某一刻的 context 鎖成基準（session id 與時間）；排程可選每次從它 fork。每顆 bot 至多一筆。
+CREATE TABLE IF NOT EXISTS bot_base_snapshots (
+  bot_id TEXT PRIMARY KEY REFERENCES bots(id), session_id TEXT NOT NULL, transcript_path TEXT,
+  locked_at TEXT NOT NULL, locked_by TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id, deleted_at);
 CREATE UNIQUE INDEX IF NOT EXISTS schedules_create_key ON schedules(project_id, create_crid) WHERE create_crid IS NOT NULL;
@@ -628,6 +635,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (88, "70e406f78e62381f"),
     // 排程一天多時段（P3）：`schedule_occurrences.slot_label`（ALTER ADD）。
     (89, "e5a94923aaa5bbbf"),
+    // codex bot 基準快照（2026-11-09）：`bot_base_snapshots`（CREATE TABLE）、`schedules.from_base`（ALTER ADD）。
+    (90, "af38ef82eaedb7b4"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -904,6 +913,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedules", "retry_interval_mins", "ALTER TABLE schedules ADD COLUMN retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440)"),
         ("schedules", "retry_deadline_mins", "ALTER TABLE schedules ADD COLUMN retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)"),
         // 排程一天多時段（P3）：這筆 occurrence 是哪個時段觸發的（標籤，給 `{{slot}}` 與最近執行列用）；NULL＝沒有時段。
+        // 排程「每次從基準快照開始」（bot_base_snapshots）。
+        ("schedules", "from_base", "ALTER TABLE schedules ADD COLUMN from_base INTEGER NOT NULL DEFAULT 0 CHECK (from_base IN (0,1))"),
         ("schedule_occurrences", "slot_label", "ALTER TABLE schedule_occurrences ADD COLUMN slot_label TEXT"),
         ("schedule_occurrences", "outcome", "ALTER TABLE schedule_occurrences ADD COLUMN outcome TEXT CHECK (outcome IN ('success','failed','refused','unknown'))"),
         ("schedule_occurrences", "outcome_summary", "ALTER TABLE schedule_occurrences ADD COLUMN outcome_summary TEXT"),

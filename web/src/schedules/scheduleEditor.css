@@ -308,3 +308,7 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+
+.schedule-editor .schedule-from-base {
+  align-items: flex-start;
+}

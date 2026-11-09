@@ -9,6 +9,7 @@
 //! 併發與鎖序見 `runner.rs` 開頭；occurrence 在綁定的 turn 終態前都算未結束。
 
 pub mod api;
+pub mod base;
 mod outcome;
 pub mod runner;
 pub mod store;

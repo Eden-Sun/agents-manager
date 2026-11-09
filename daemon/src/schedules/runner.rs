@@ -210,6 +210,19 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
 /// 把一筆 pending occurrence 綁成 queued turn。忙碌時照常排進既有佇列（不 steer、不 interrupt）。
 /// 回傳 `true` 代表已綁定；`false` 代表這次不送（等待中、已取消、Bot 不合格等，原因記在 waiting_reason 或 status）。
 pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
+    // 「每次從基準快照開始」：先 fork 重啟再綁 turn，放背景做（重啟要等幾秒）；回 false＝這次呼叫沒綁，結果看帳本。
+    if let Some(head) = store::get_occurrence(&app.db, occurrence_id).await? {
+        let due = head.next_retry_at.as_deref().is_none_or(|t| t <= db::now().as_str());
+        if head.status == "pending" && due && store::get_schedule(&app.db, &head.schedule_id).await?.is_some_and(|s| s.from_base == 1 && s.enabled == 1 && s.deleted_at.is_none() && s.generation == head.generation) {
+            super::base::spawn_dispatch(app, occurrence_id);
+            return Ok(false);
+        }
+    }
+    enqueue_now(app, occurrence_id).await
+}
+
+/// [`enqueue`] 的本體（不看 `from_base`）：fork 重啟完成後由 `base::dispatch` 呼叫。
+pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
     let pool = app.db.clone();
     let Some(head) = store::get_occurrence(&pool, occurrence_id).await? else { return Ok(false) };
     if head.status != "pending" {
@@ -360,7 +373,7 @@ async fn set_wait(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, reason:
     }
 }
 
-async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64, dry_run: bool) {
+pub(super) async fn notify_terminal(app: &Arc<App>, sched: &Schedule, occurrence_id: &str, status: &str, error: Option<&str>, attempt_no: i64, dry_run: bool) {
     let t = Transition {
         schedule_id: sched.id.clone(),
         schedule_name: sched.name.clone(),

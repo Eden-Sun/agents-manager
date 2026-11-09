@@ -25,6 +25,7 @@ fn daily(bot: &str, prompt: &str) -> CreateIn {
         spec: SpecIn { mode: "daily".into(), at: None, every_secs: None, time: Some("09:00".into()), weekdays: None, slots: None },
         notify: "failure".into(),
         clear_after: false,
+        from_base: false,
         retry_count: 0, retry_interval_mins: 3, retry_deadline_mins: 15,
     }
 }
@@ -46,6 +47,7 @@ async fn schedule(app: &std::sync::Arc<crate::state::App>, project: &str, bot: &
         generation: 1,
         notify: "failure".into(),
         clear_after: 0,
+        from_base: 0,
         retry_count: 0, retry_interval_mins: 3, retry_deadline_mins: 15,
         create_crid: None,
         create_fp: None,
@@ -275,7 +277,7 @@ async fn disable_does_not_touch_a_turn_that_is_already_in_flight() {
         .await
         .unwrap();
     sqlx::query("UPDATE schedule_occurrences SET status='queued', turn_id=?, conversation_id=? WHERE id=?").bind(&inflight).bind(&conv).bind(&occ).execute(&e.app.db).await.unwrap();
-    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: Some(false) }))
+    let _ = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, from_base: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: Some(false) }))
         .await
         .unwrap();
     assert_eq!(turn_status(&e.app, &inflight).await, "in_flight", "已送出的回合照跑");
@@ -402,7 +404,7 @@ async fn manual_key_absorbed_by_a_scheduled_occurrence_with_no_key_replays_that_
 }
 
 fn patch_in() -> api::PatchIn {
-    api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: None }
+    api::PatchIn { name: None, prompt: None, bot_id: None, tz: None, spec: None, notify: None, clear_after: None, from_base: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: None }
 }
 
 #[tokio::test]
@@ -799,4 +801,228 @@ async fn random_window_create_rejects_bad_ranges_with_a_code_and_stores_the_draw
     let id = v["id"].as_str().unwrap().to_string();
     let Json(again) = api::get_one(State(e.app.clone()), Path(id)).await.unwrap();
     assert_eq!(again["next_due"], v["next_due"]);
+}
+
+// ── 基準快照與「每次從基準快照開始」 ──────────────────────────────────────────
+
+mod from_base {
+    use super::*;
+    use crate::api::RequestPrincipal;
+    use crate::schedules::base;
+    use serde_json::{json, Value};
+
+    async fn codex_bot(e: &testing::Env, name: &str) -> db::Bot {
+        let bot = testing::claude_bot(&e.app, &e.project_id, name).await;
+        sqlx::query("UPDATE bots SET kind = 'codex' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
+    }
+
+    async fn ended_session(e: &testing::Env, bot: &str, sid: &str, transcript: Option<&str>) {
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at) VALUES (?,?,'stopped','idle',?,?,?,?)")
+            .bind(db::ulid()).bind(bot).bind(sid).bind(transcript).bind("2026-09-14T00:00:00Z").bind("2026-09-14T00:01:00Z")
+            .execute(&e.app.db).await.unwrap();
+    }
+
+    async fn call(e: &testing::Env, f: &str, bot: &str, who: RequestPrincipal) -> Result<Value, LcError> {
+        let (s, p, x) = (axum::extract::State(e.app.clone()), axum::extract::Path(bot.to_string()), axum::Extension(who));
+        let res = match f {
+            "get" => base::get_snapshot(s, p, x).await,
+            "lock" => base::lock(s, p, x).await,
+            _ => base::clear(s, p, x).await,
+        }?;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        Ok(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn started_args(e: &testing::Env) -> Vec<Vec<String>> {
+        e.herdr.calls.lock().unwrap().iter().filter(|(m, _)| m == "agent.start")
+            .filter_map(|(_, p)| p.get("args").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())).collect()
+    }
+
+    async fn from_base_schedule(e: &testing::Env, bot: &str, retry: i64) -> Schedule {
+        let s = schedule(&e.app, &e.project_id, bot).await;
+        sqlx::query("UPDATE schedules SET from_base = 1, retry_count = ? WHERE id = ?").bind(retry).bind(&s.id).execute(&e.app.db).await.unwrap();
+        store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap()
+    }
+
+    async fn status_and_error(e: &testing::Env, occ: &str) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, error FROM schedule_occurrences WHERE id = ?").bind(occ).fetch_one(&e.app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn lock_query_and_clear_round_trip() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        assert_eq!(call(&e, "get", &bot.id, RequestPrincipal::User).await.unwrap()["locked"], false);
+        let no_session = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap_err();
+        assert!(matches!(no_session, LcError::Conflict(ref v) if v["reason"] == "base_snapshot_no_session"), "{no_session:?}");
+        ended_session(&e, &bot.id, "sid-1", None).await;
+        let locked = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        assert_eq!((locked["locked"].as_bool(), locked["session_id"].as_str(), locked["locked_by"].as_str()), (Some(true), Some("sid-1"), Some("user")));
+        assert!(locked["locked_at"].is_string());
+        ended_session(&e, &bot.id, "sid-2", None).await;
+        assert_eq!(call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap()["session_id"], "sid-2", "再鎖一次換成目前的");
+        assert_eq!(call(&e, "clear", &bot.id, RequestPrincipal::User).await.unwrap()["locked"], false);
+        assert_eq!(call(&e, "get", &bot.id, RequestPrincipal::User).await.unwrap()["locked"], false);
+    }
+
+    #[tokio::test]
+    async fn only_codex_bots_can_lock() {
+        let e = testing::env().await;
+        let bot = testing::claude_bot(&e.app, &e.project_id, "cl").await;
+        ended_session(&e, &bot.id, "sid-1", None).await;
+        let err = call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap_err();
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_not_codex"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_user_and_the_expert_manager_may_use_it() {
+        let e = testing::env().await;
+        let target = codex_bot(&e, "cx").await;
+        ended_session(&e, &target.id, "sid-1", None).await;
+        let peer = testing::claude_bot(&e.app, &e.project_id, "peer").await;
+        for who in [peer.id.clone(), target.id.clone()] {
+            for f in ["get", "lock", "clear"] {
+                let err = call(&e, f, &target.id, RequestPrincipal::Bot(who.clone())).await.unwrap_err();
+                assert!(matches!(err, LcError::Forbidden(_)), "{f} by {who}: {err:?}");
+            }
+        }
+        // 同專案 expert 管理者可以；專案不是 expert 就不行。
+        sqlx::query("UPDATE bots SET role = 'manager' WHERE id = ?").bind(&peer.id).execute(&e.app.db).await.unwrap();
+        assert!(call(&e, "lock", &target.id, RequestPrincipal::Bot(peer.id.clone())).await.is_err(), "非 expert 專案的 manager 不行");
+        sqlx::query("UPDATE projects SET mode = 'expert' WHERE id = ?").bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        let ok = call(&e, "lock", &target.id, RequestPrincipal::Bot(peer.id.clone())).await.unwrap();
+        assert_eq!(ok["locked_by"], peer.id.as_str());
+        assert_eq!(call(&e, "clear", &target.id, RequestPrincipal::Bot(peer.id.clone())).await.unwrap()["locked"], false);
+    }
+
+    #[tokio::test]
+    async fn the_runner_forks_the_base_before_sending() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        ended_session(&e, &bot.id, "sid-base", None).await;
+        call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let before = started_args(&e).len();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(base::dispatch(&e.app, &occ).await.unwrap(), "fork 重啟後綁成 turn");
+        let args = started_args(&e);
+        assert_eq!(args.len(), before + 1, "多一次重啟");
+        assert_eq!(&args.last().unwrap()[..2], ["fork", "sid-base"], "{args:?}");
+        let run2 = db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id;
+        assert_ne!(run2, run1, "新的 run");
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!(o.status, "queued");
+        assert!(o.turn_id.is_some());
+        let snap = base::get(&e.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(snap.session_id, "sid-base", "基準本身不被改動");
+    }
+
+    #[tokio::test]
+    async fn a_busy_bot_waits_and_is_not_restarted() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        ended_session(&e, &bot.id, "sid-base", None).await;
+        call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','in_flight','pending',?)")
+            .bind(db::ulid()).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let before = started_args(&e).len();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        assert_eq!(started_args(&e).len(), before, "忙碌時不重啟");
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!((o.status.as_str(), o.waiting_reason.as_deref()), ("pending", Some("bot_busy")));
+    }
+
+    #[tokio::test]
+    async fn a_missing_base_fails_without_running_in_the_old_context() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        ended_session(&e, &bot.id, "sid-base", None).await;
+        let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let before = started_args(&e).len();
+        let s = from_base_schedule(&e, &bot.id, 3).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        let (status, error) = status_and_error(&e, &occ).await;
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().contains("base_snapshot_missing"));
+        assert_eq!(started_args(&e).len(), before, "不重啟、不在舊 context 送");
+        assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1);
+        assert_eq!(count(&e.app, "SELECT COUNT(*) FROM turns WHERE conversation_id IN (SELECT id FROM conversations WHERE bot_id = ?)", &bot.id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_rollout_file_fails_with_its_own_code() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        let gone = e.dir.join("rollout-gone.jsonl");
+        ended_session(&e, &bot.id, "sid-base", Some(gone.to_str().unwrap())).await;
+        call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        let s = from_base_schedule(&e, &bot.id, 0).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(!base::dispatch(&e.app, &occ).await.unwrap());
+        let (status, error) = status_and_error(&e, &occ).await;
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().contains("base_snapshot_rollout_missing"));
+        assert!(started_args(&e).iter().all(|a| a.first().map(String::as_str) != Some("fork")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_fork_restart_retries_while_the_schedule_allows_it() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        let s = from_base_schedule(&e, &bot.id, 1).await;
+        let occ = pending(&e.app, &s).await;
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        base::fail(&e.app, &s, &o, "base_fork_timeout", "等不到", true).await.unwrap();
+        let o = store::get_occurrence(&e.app.db, &occ).await.unwrap().unwrap();
+        assert_eq!((o.status.as_str(), o.attempt_no), ("pending", 2));
+        assert!(o.next_retry_at.is_some() && o.error.as_deref().unwrap().contains("base_fork_timeout"));
+        base::fail(&e.app, &s, &o, "base_fork_timeout", "等不到", true).await.unwrap();
+        let (status, error) = status_and_error(&e, &occ).await;
+        assert_eq!(status, "failed", "額度用完就收成 failed");
+        assert!(error.unwrap().contains("base_fork_timeout"));
+    }
+
+    #[tokio::test]
+    async fn without_the_option_nothing_forks() {
+        let e = testing::env().await;
+        let bot = codex_bot(&e, "cx").await;
+        ended_session(&e, &bot.id, "sid-base", None).await;
+        call(&e, "lock", &bot.id, RequestPrincipal::User).await.unwrap();
+        lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let before = started_args(&e).len();
+        let s = schedule(&e.app, &e.project_id, &bot.id).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(runner::enqueue(&e.app, &occ).await.unwrap(), "from_base=0：照舊直接綁 turn");
+        assert_eq!(started_args(&e).len(), before);
+    }
+
+    #[tokio::test]
+    async fn from_base_needs_a_locked_codex_bot_to_turn_on() {
+        let e = testing::env().await;
+        let cx = codex_bot(&e, "cx").await;
+        let mut body = daily(&cx.id, "x");
+        body.from_base = true;
+        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("沒鎖基準不能開");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_required"), "{err:?}");
+        ended_session(&e, &cx.id, "sid-1", None).await;
+        call(&e, "lock", &cx.id, RequestPrincipal::User).await.unwrap();
+        let mut body = daily(&cx.id, "x");
+        body.from_base = true;
+        let Json(created) = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+        assert_eq!(created["from_base"], true);
+        let cl = testing::claude_bot(&e.app, &e.project_id, "cl").await;
+        let mut body = daily(&cl.id, "x");
+        body.client_request_id = "crid-2".into();
+        body.from_base = true;
+        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("claude 不能開");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_not_codex"), "{err:?}");
+        let _ = json!(null);
+    }
 }

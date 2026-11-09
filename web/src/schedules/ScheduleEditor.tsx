@@ -21,6 +21,7 @@ import { ScheduleBotPicker } from './ScheduleBotPicker'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { newClientRequestId } from '../api'
 import { ApiError } from '../api/types'
+import { getBaseSnapshot } from '../api/baseSnapshot'
 import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
@@ -93,13 +94,14 @@ interface FormState {
   slots: ScheduleSlot[]
   weekdays: number[]
   clearAfter: boolean
+  fromBase: boolean
   retryCount: number
   retryInterval: number
   retryDeadline: number
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '', until: null }], weekdays: [0], clearAfter: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '', until: null }], weekdays: [0], clearAfter: false, fromBase: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
 }
 
 function fromDetail(d: Schedule): FormState {
@@ -117,6 +119,7 @@ function fromDetail(d: Schedule): FormState {
     slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, label: s.label ?? '', until: s.until ?? null })) : [{ time: spec.time ?? '09:00', label: '', until: null }],
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
+    fromBase: d.from_base === true,
     retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3, retryDeadline: d.retry_deadline_mins ?? 15,
   }
 }
@@ -290,10 +293,22 @@ export function ScheduleEditor({
 
   // 建立時預設第一顆可用 Bot（之後使用者可改）：推導出來，不用 effect 寫回表單。
   const effectiveBotId = form.botId || (scheduleId ? '' : (eligible[0]?.id ?? ''))
+  // 選到的 Bot 有基準快照才能開「每次從基準快照開始」。
+  const [baseLocked, setBaseLocked] = useState(false)
+  useEffect(() => {
+    let live = true
+    setBaseLocked(false)
+    if (effectiveBotId) {
+      getBaseSnapshot(effectiveBotId).then((s) => live && setBaseLocked(s.locked), () => undefined)
+    }
+    return () => {
+      live = false
+    }
+  }, [effectiveBotId])
   // 執行端只讀已存的排程；表單有變動時不得用舊 Bot 或舊內容執行。
   const unsaved = detail !== null && (
     form.name.trim() !== detail.name || form.prompt !== detail.prompt || effectiveBotId !== detail.bot_id ||
-    form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) ||
+    form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) || form.fromBase !== (detail.from_base === true) ||
     JSON.stringify(specOf(form)) !== JSON.stringify(specOf(fromDetail(detail)))
   )
   const botUnavailable = detail !== null && (detail.bot_available === false || !eligible.some((b) => b.id === detail.bot_id))
@@ -370,6 +385,7 @@ export function ScheduleEditor({
           spec: specOf(form),
           notify: form.notify,
           clear_after: form.clearAfter,
+          ...(form.fromBase ? { from_base: true } : {}),
           ...(retryChanged ? retrySettings : {}),
         })
         setNotice(t('已建立。排程不會立即執行，到時間才會排進 Bot。'))
@@ -387,6 +403,7 @@ export function ScheduleEditor({
           ...(timingChanged ? { spec: timing.spec } : {}),
           notify: form.notify,
           clear_after: form.clearAfter,
+          ...(form.fromBase !== (detail?.from_base === true) ? { from_base: form.fromBase } : {}),
           ...(retryChanged ? retrySettings : {}),
         })
         if (timingChanged) setBaseline({ id: scheduleId, ...timing })
@@ -641,6 +658,12 @@ export function ScheduleEditor({
         {t('跑完就清空對話（不留記憶、不佔 context）')}
       </label>
       <p className="hint">{t('每次跑完會讓這顆 Bot 開新對話；它跟你手動聊的內容也會一起清掉，建議搭配專用 Bot。')}</p>
+
+      <label className="inline-check schedule-from-base">
+        <input type="checkbox" checked={form.fromBase} disabled={loading || (!form.fromBase && !baseLocked)} onChange={(e) => set('fromBase', e.target.checked)} />
+        {t('每次從基準快照開始')}
+      </label>
+      <p className="hint">{baseLocked ? t('每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。') : t('只有已鎖定基準快照的 codex Bot 才能開啟：先到該 Bot 的設定按「鎖定目前 context 為基準」。')}</p>
 
       <label className="field schedule-prompt-field">
         <span>

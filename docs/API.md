@@ -195,6 +195,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/*` | 無 principal；前端靜態檔 fallback |
 | HEAD | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
+| HEAD | `/api/bots/{id}/base-snapshot` | 同 GET：其他 Bot 與 AGM role 均 → 403 `user_only`（只有狀態碼與標頭） |
 | HEAD | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/local-image` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -289,6 +290,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/restart` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/member` | User 或同專案 expert manager；把 expert 專案留下的 child 原地轉成成員（同 id 寫進 config.toml、清 parent），body `{role?: executor|advisor|specialist, effort?, session_id?, track?}`（`role=specialist` 必帶 `track`，缺 → 400 `track_required`；與 PATCH／PUT role 同一條規則）；pane 不重啟，回 `needs_restart:true` |
 | POST | `/api/projects/{id}/members` | User 或該 expert 專案的 manager；增聘頂層成員，body `{name, kind?, model?, effort?, identity?, role?, track?, fork_from?}`。kind／model／effort 由使用者或 manager 自行決定；`role` 為 `executor`（預設）或 `specialist`（後者必帶 `track`，缺 → 400 `track_required`），不自動啟動。舊 body 的 `pool_entry` 退役並忽略 |
+| GET | `/api/bots/{id}/base-snapshot` | codex bot 的基準快照：`{locked:false}` 或 `{locked:true, session_id, locked_at, locked_by}`。User 與該 bot 所在 expert 專案的 manager 可用；其他 Bot（含 bot 自己）與 AGM role 均 → 403 `user_only`（handler 內再驗：非 manager → 403 `manager_role_scope`） |
+| PUT | `/api/bots/{id}/base-snapshot` | 把 bot 目前最近的 codex native session（`runs.native_session_id`，同 `fork_from`）鎖成基準，連同 rollout 位置與時間；已有就換成現在這個。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`）。非 codex → 400 `base_snapshot_not_codex`；還沒有 session → 409 `base_snapshot_no_session` |
+| DELETE | `/api/bots/{id}/base-snapshot` | 清除基準（沒有也回 `{locked:false}`）。仍勾 `from_base` 的排程之後的執行會 failed（`base_snapshot_missing`）。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`） |
 | PUT | `/api/bots/{id}/role` | body `{role, track?}`。User 可設任何角色與 `track`；expert 專案的 manager 只能把同專案頂層 bot 或自己的 child 設為 executor／advisor／specialist／null；其他 Bot → 403 `manager_role_scope`。設 `specialist` 一律要帶 `track`（缺 → 400 `track_required`）；manager 只能在設 `specialist` 時一併帶 `track`，其他情況帶 `track` → 403 `user_only` |
 | POST | `/api/bots/{id}/restore` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/rewind` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -3127,9 +3131,9 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 | 方法 | 路徑 | 說明 |
 |---|---|---|
 | GET | `/api/projects/{id}/schedules` | 未軟刪的排程；每筆帶 `open`（未結束的 occurrence，含 `turn_status`／`turn_delivery`／`turn_start_error`／`turn_awaits_start`／`waiting_reason`）。後兩欄直接讀取已綁 turn 的 `start_error`、`awaits_start`，無 turn 時為 null。 |
-| POST | `/api/projects/{id}/schedules` | 建立。body：`client_request_id`（必填，1–128 個 `[A-Za-z0-9._:-]`）、`name`、`prompt`、`bot_id`、`tz`（IANA）、`spec`（見下）、`notify`（`failure`／`all`／`none`，預設 `failure`）、`clear_after`（bool，預設 `false`，跑完就清空對話，見 SPEC「專案排程」）。同專案同 key 同內容回原筆；同 key 不同內容 → 409 `client_request_id_reused` |
-| GET | `/api/schedules/{id}` | 排程（含 `clear_after`）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
-| PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`enabled`）。`spec` 每次送出都會重新錨定間隔（`anchor` 取現在、升 generation），不改時間就不要帶（網頁只在時間欄位真的變了才送，#1807）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
+| POST | `/api/projects/{id}/schedules` | 建立。body：`client_request_id`（必填，1–128 個 `[A-Za-z0-9._:-]`）、`name`、`prompt`、`bot_id`、`tz`（IANA）、`spec`（見下）、`notify`（`failure`／`all`／`none`，預設 `failure`）、`clear_after`（bool，預設 `false`，跑完就清空對話，見 SPEC「專案排程」）、`from_base`（bool，預設 `false`，每次從基準快照開始；bot 須是 codex 且已鎖基準，否則 400 `base_snapshot_not_codex`／`base_snapshot_required`）。同專案同 key 同內容回原筆；同 key 不同內容 → 409 `client_request_id_reused` |
+| GET | `/api/schedules/{id}` | 排程（含 `clear_after`、`from_base`）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
+| PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`from_base`、`enabled`）。`spec` 每次送出都會重新錨定間隔（`anchor` 取現在、升 generation），不改時間就不要帶（網頁只在時間欄位真的變了才送，#1807）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
 | DELETE | `/api/schedules/{id}` | 軟刪；同樣撤回未送出的排隊 |
 | POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
 | GET | `/api/schedules/{id}/history?limit=&offset=` | 分頁，`limit` 1–100（預設 20），`offset` ≥ 0 |

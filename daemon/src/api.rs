@@ -278,6 +278,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/issues/{number}", get(get_issue))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot_route))
         .route("/bots/{id}/role", axum::routing::put(put_bot_role))
+        .route("/bots/{id}/base-snapshot", get(crate::schedules::base::get_snapshot).put(crate::schedules::base::lock).delete(crate::schedules::base::clear))
         .route("/bots/{id}/member", post(crate::expert_member::adopt))
         .route("/projects/{id}/members", post(hire_member))
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
@@ -1107,6 +1108,10 @@ enum BotRoutePolicy {
 }
 
 const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
+    // 基準快照：User，加上同專案 expert 管理者（見 `manager_base_snapshot`）；其他 Bot（含自己）不行。
+    ("GET", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
+    ("DELETE", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
     ("GET", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("PUT", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/hosts/{name}/shells/{pane_id}", BotRoutePolicy::UserOnly),
@@ -1370,7 +1375,8 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         // 派工者撤回自己派出、還沒送的那一則：路由仍是 UserOnly，只對這個情境放行（見 withdraw_turn_route）。
         let sender_withdraw = method == "POST" && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 4 && p[0] == "api" && p[1] == "turns" && p[3] == "withdraw")
             && lifecycle::sender_may_withdraw(&app, &decoded_bot_path_segments(path).unwrap()[2], bot_id).await.unwrap_or(false);
-        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
+        let manager_base = policy == Some(BotRoutePolicy::UserOnly) && matches!(&principal, RequestPrincipal::Bot(_)) && manager_base_snapshot(&app, bot_id, path).await;
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1511,6 +1517,9 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 }
                 // 專家模式的管理者可以替同專案的頂層 bot 設執行者／顧問角色（使用者 2026-10-31）；handler 再驗一次並只收 role。
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
+                    return Ok(());
+                }
+                if parts.len() == 4 && parts[3] == "base-snapshot" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
                 if manager_lifecycle_op(method, &parts, &target_bot) && expert_manager_over(app, caller, &target_bot).await? {
@@ -3289,7 +3298,7 @@ async fn relabel_tab(app: &App, bot_id: &str) {
 }
 
 /// `caller` 是 expert 專案的 manager，`target` 是同專案、不是自己的存活頂層 bot，或自己開的 child。
-async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> Result<bool, LcError> {
+pub(crate) async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> Result<bool, LcError> {
     let own_child = target.managed_by == "child" && target.parent_bot_id.as_deref() == Some(caller);
     if target.id == caller || (target.parent_bot_id.is_some() && !own_child) || target.deleted_at.is_some() {
         return Ok(false);
@@ -3299,6 +3308,14 @@ async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &db::Bot) -> 
         return Ok(false);
     }
     Ok(db::project(&app.db, &me.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none() && p.mode == "expert"))
+}
+
+/// `GET|PUT|DELETE /api/bots/{id}/base-snapshot` by the expert manager of that bot's project.
+async fn manager_base_snapshot(app: &Arc<App>, caller: &str, path: &str) -> bool {
+    let Some(parts) = decoded_bot_path_segments(path) else { return false };
+    if parts.len() != 4 || parts[0] != "api" || parts[1] != "bots" || parts[3] != "base-snapshot" { return false }
+    let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
+    expert_manager_over(app, caller, &target).await.unwrap_or(false)
 }
 
 /// `POST /api/bots/{id}/start|restart` by an expert manager over that bot.

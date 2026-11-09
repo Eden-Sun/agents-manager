@@ -29,6 +29,8 @@ pub struct Schedule {
     pub retry_count: i64,
     pub retry_interval_mins: i64,
     pub retry_deadline_mins: i64,
+    /// 每次從基準快照開始（0／1）：runner 送出前先把 bot fork 重啟到基準 session（`schedules::base`）。
+    pub from_base: i64,
     #[serde(skip)]
     pub create_crid: Option<String>,
     #[serde(skip)]
@@ -94,8 +96,8 @@ pub fn wants_notice(notify: &str, outcome: &str) -> bool {
 
 pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) -> Result<()> {
     sqlx::query(
-        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, retry_count, retry_interval_mins, retry_deadline_mins, create_crid, create_fp, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO schedules (id, project_id, bot_id, name, prompt, mode, tz, spec_json, next_due, enabled, generation, notify, clear_after, retry_count, retry_interval_mins, retry_deadline_mins, from_base, create_crid, create_fp, created_at, updated_at, deleted_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
     )
     .bind(&s.id)
     .bind(&s.project_id)
@@ -113,6 +115,7 @@ pub async fn insert_schedule_tx(tx: &mut Transaction<'_, Sqlite>, s: &Schedule) 
     .bind(s.retry_count)
     .bind(s.retry_interval_mins)
     .bind(s.retry_deadline_mins)
+    .bind(s.from_base)
     .bind(&s.create_crid)
     .bind(&s.create_fp)
     .bind(&s.created_at)

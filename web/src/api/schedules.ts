@@ -76,6 +76,8 @@ export interface Schedule {
   retry_interval_mins?: number
   retry_deadline_mins?: number
   clear_after: boolean
+  /** 每次從基準快照開始（bot 的 codex 基準；`/bots/{id}/base-snapshot`）。 */
+  from_base?: boolean
   created_at: string
   updated_at: string
   /** 列表與詳情都帶：未結束的 occurrence（pending／queued），沒有就是 null。 */
@@ -99,6 +101,7 @@ export interface ScheduleCreateInput {
   retry_interval_mins?: number
   retry_deadline_mins?: number
   clear_after?: boolean
+  from_base?: boolean
 }
 
 export interface ScheduleEditInput {
@@ -112,6 +115,7 @@ export interface ScheduleEditInput {
   retry_interval_mins?: number
   retry_deadline_mins?: number
   clear_after?: boolean
+  from_base?: boolean
   enabled?: boolean
 }
 
@@ -123,7 +127,7 @@ function asSchedule(raw: unknown): Schedule {
   if (!r || typeof r !== 'object' || typeof r.id !== 'string' || typeof r.project_id !== 'string') {
     throw new Error(t('排程資料格式不對（缺 id 或 project_id）'))
   }
-  return { ...r, open: r.open ?? null, clear_after: r.clear_after === true } as Schedule
+  return { ...r, open: r.open ?? null, clear_after: r.clear_after === true, from_base: r.from_base === true } as Schedule
 }
 
 /** 詳情一定帶 `recent`（daemon 的 `get_one`）；缺的話當成空陣列，不讓畫面炸。 */
