@@ -511,11 +511,11 @@ fi
 # 其他非 200 一律當成送達線有問題，不換 binary。
 # 例外：自測對象根本沒有在跑（`no active run`，例如 Linux 主機上沒有桌面所以 offline 的 browser-gc child）——
 # 沒有東西可以送，不是送達線壞了；這一步略過（上面的 herdr 讀取仍然做了），不能讓每趟自動換版都卡在這。
-PROBE_SKIPPED=no
+PROBE_SKIPPED=no; PROBE_SKIP_WHY=""
 i=0
 # 沒有任何自測對象（runtime.json 讀不到）：跟「對象沒有 run」同一條路略過並計數，不是送達線壞了。
 if [ -z "$PROBE_BOT" ]; then
-    PROBE="no active run (沒有設定自測對象)"; PROBE_SKIPPED=yes; i="$PROBE_TRIES"; PROBE_BOT="（未設定）"
+    PROBE="no active run (沒有設定自測對象)"; PROBE_SKIPPED=yes; PROBE_SKIP_WHY="no active run"; i="$PROBE_TRIES"; PROBE_BOT="（未設定）"
 fi
 while [ "$i" -lt "$PROBE_TRIES" ]; do
     i=$((i + 1))
@@ -529,14 +529,28 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
                 PROBE_BOT="$PROBE_FALLBACK"; PROBE_FALLBACK=""; i=$((i - 1))
                 continue
             fi
-            PROBE_SKIPPED=yes; break ;;
+            PROBE_SKIPPED=yes; PROBE_SKIP_WHY="no active run"; break ;;
+        # 輸入框有未送出的字（409 draft，例如 Claude 滿意度問卷的「0」落進輸入框，2026-11-09 事故）：
+        # 不是送達線壞了，也不替別人清輸入框（可能是使用者打到一半）；改送 fallback，沒有就略過並計數。
+        409*'"draft'*)
+            if [ -n "$PROBE_FALLBACK" ] && [ "$PROBE_FALLBACK" != "$PROBE_BOT" ]; then
+                log "3b 自測對象 $PROBE_BOT 輸入框有未送出的字，改送 fallback $PROBE_FALLBACK"
+                PROBE_BOT="$PROBE_FALLBACK"; PROBE_FALLBACK=""; i=$((i - 1))
+                continue
+            fi
+            PROBE_SKIPPED=yes; PROBE_SKIP_WHY="輸入框有字"; break ;;
         *) log "ABORT: 自測 prompt 回 $(printf '%s' "$PROBE" | head -c 160)"; exit 3 ;;
     esac
 done
 case "$PROBE" in
-    200*) log "3b self probe ok: $(printf '%s' "$PROBE" | head -c 120)"; rm -f "$PROBE_SKIPS" ;;
+    200*) log "3b self probe ok: $(printf '%s' "$PROBE" | head -c 120)"; rm -f "$PROBE_SKIPS" "$PROBE_SKIPS.why" ;;
     *) if [ "$PROBE_SKIPPED" = yes ]; then
-           log "3b 自測略過：$PROBE_BOT 沒有在跑（no active run），沒有東西可以送"
+           if [ "$PROBE_SKIP_WHY" = "輸入框有字" ]; then
+               log "3b 自測略過：$PROBE_BOT 輸入框有未送出的字（draft），不自動清別人的輸入框"
+           else
+               log "3b 自測略過：$PROBE_BOT 沒有在跑（no active run），沒有東西可以送"
+           fi
+           printf '%s\n' "$PROBE_SKIP_WHY" > "$PROBE_SKIPS.why"
            _skips=$(cat "$PROBE_SKIPS" 2>/dev/null)
            case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
            echo $((_skips + 1)) > "$PROBE_SKIPS.tmp" && mv -f "$PROBE_SKIPS.tmp" "$PROBE_SKIPS"

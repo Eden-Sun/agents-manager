@@ -345,6 +345,8 @@ n=$(wc -l < "$AGM_DIR/probe.log" | tr -d ' ')
 if [ -n "$STUB_PROBE_FIRST_INFLIGHT" ] && [ "$n" = 1 ]; then
   printf '409 {"error":"conflict","reason":"a turn is already in flight"}'; exit 0
 fi
+case " $STUB_PROBE_DRAFT_BOTS " in *" $1 "*) printf '409 {"draft":"0","draft_actions":["submit","clear"],"draft_token":"t"}'; exit 0 ;; esac
+case " $STUB_PROBE_OTHER409_BOTS " in *" $1 "*) printf '409 {"error":"conflict","reason":"something else"}'; exit 0 ;; esac
 if [ -n "$STUB_PROBE_NO_RUN_BOT" ] && [ "$1" = "$STUB_PROBE_NO_RUN_BOT" ]; then
   printf '404 {"error":"not_found","reason":"no active run"}'; exit 0
 fi
@@ -1329,6 +1331,49 @@ check "先試協調者" "bot-responder" "$AGM_DIR/probe.log"
 check "再退回 manager_bot_id" "bot-agm-self" "$AGM_DIR/probe.log"
 check "log 講明改送誰" "改送 bot-agm-self" "$SWAP_LOG"
 check_file "退回後自測成功，不算略過" no "$AGM_DIR/daemon-swap.probe-skips"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+export STUB_PROBE_DRAFT_BOTS="bot-responder"
+rc=$(run)
+unset STUB_PROBE_DRAFT_BOTS
+check_eq "主對象輸入框有字：改送 fallback、照樣換版（rc=0）" "0" "$rc"
+check "先試協調者" "bot-responder" "$AGM_DIR/probe.log"
+check "再改送 manager_bot_id" "bot-agm-self" "$AGM_DIR/probe.log"
+check "log 講明是輸入框有字" "輸入框有未送出的字，改送 fallback bot-agm-self" "$SWAP_LOG"
+check_file "fallback 成功不算略過" no "$AGM_DIR/daemon-swap.probe-skips"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+export STUB_PROBE_DRAFT_BOTS="bot-responder bot-agm-self"
+rc=$(run)
+unset STUB_PROBE_DRAFT_BOTS
+check_eq "兩顆輸入框都有字：略過、不是 ABORT（rc=0）" "0" "$rc"
+check "log 寫輸入框有字，不是 no active run" "輸入框有未送出的字（draft）" "$SWAP_LOG"
+check_no "不誤報 no active run" "沒有在跑（no active run）" "$SWAP_LOG"
+check_no "不 ABORT" "ABORT" "$SWAP_LOG"
+check_file "略過要計數" yes "$AGM_DIR/daemon-swap.probe-skips"
+check "原因檔記輸入框有字" "輸入框有字" "$AGM_DIR/daemon-swap.probe-skips.why"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"swap_probe_bot_id": "bot-solo"}\n' > "$AGM_DIR/runtime.json"
+export STUB_PROBE_DRAFT_BOTS="bot-solo"
+rc=$(run)
+unset STUB_PROBE_DRAFT_BOTS
+check_eq "沒有 fallback 且有字：略過（rc=0）" "0" "$rc"
+check_file "有計數" yes "$AGM_DIR/daemon-swap.probe-skips"
+teardown
+setup 10 10
+unset SWAP_PROBE_BOT
+printf '{"responder_bot_id": "bot-responder", "manager_bot_id": "bot-agm-self"}\n' > "$AGM_DIR/runtime.json"
+export STUB_PROBE_OTHER409_BOTS="bot-responder"
+rc=$(run)
+unset STUB_PROBE_OTHER409_BOTS
+check_eq "非 draft 的 409 仍 ABORT（rc=3）" "3" "$rc"
+check "log 有 ABORT" "ABORT: 自測 prompt 回" "$SWAP_LOG"
 teardown
 setup 10 10
 unset SWAP_PROBE_BOT

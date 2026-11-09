@@ -380,7 +380,10 @@ is pinned by `daemon-swap_test.sh`:
   200k+ context, 2026-11-02) > `manager_bot_id` in the same file (the AGM supervisor itself; issue #882). If the responder has
   no active run, the step retries once against `manager_bot_id`. If the target has
   **no active run** (`no active run`) the step is skipped, logged and counted in `daemon-swap.probe-skips` (the kick reads
-  it to raise an alert) without blocking the deploy; any other non-200 aborts. With none of the three available, 3b is
+  it to raise an alert) without blocking the deploy. If the target's input box holds unsent text (409 with `draft`, e.g. the
+  Claude survey's "0" left in the box), the step retries once against `manager_bot_id`, otherwise it is skipped and counted
+  (reason recorded in `daemon-swap.probe-skips.why`, shown in the kick's alert); the script never clears someone else's input box.
+  Any other non-200 aborts. With none of the three available, 3b is
   skipped through the same path.
 - Before swapping, a non-empty `agm state` bot list must be readable; a failing command or an empty list exits 3 and
   hands back the restart lease.
