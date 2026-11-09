@@ -3284,6 +3284,18 @@ mod tests {
         .unwrap();
     }
 
+    /// `api_run_live` 在紀錄進 `Joined` 就回 false，但 `owner_exited` 是 owner task 收尾時才設的、晚一點點。
+    /// 修剪只認「owner 已退出且已 Joined」，所以要等 owner_exited，不然下一次 spawn 的修剪會漏掉這筆（負載高時偶發）。
+    async fn wait_until_owner_exited(app: &crate::state::App, key: &ApiTurnKey) {
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            while !app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(key)).is_some_and(|r| r.owner_exited) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     async fn wait_until_completed(app: &crate::state::App, key: &ApiTurnKey) {
         tokio::time::timeout(DEADLOCK_TIMEOUT, async {
             loop {
@@ -4676,6 +4688,7 @@ mod tests {
             .unwrap();
             assert_eq!(sessions, 1, "parallel spawn cannot create a second session");
             wait_until_joined(&env.app, &key).await;
+            wait_until_owner_exited(&env.app, &key).await;
             wait_until_completed(&env.app, &key).await;
             let checkpoint: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL")
                 .bind(&bot_id).fetch_one(&env.app.db).await.unwrap();
@@ -4698,15 +4711,10 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(terminal, ("stopped".into(), "completed".into()));
-            // 收尾（終端控制紀錄的修剪）跑在另一個 task，負載高時會比斷言慢：等它到位，而不是只看一瞬間。
-            let mut controls = env.app.api_bot_runtime.control_count_for_test();
-            for _ in 0..200 {
-                if controls <= 1 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                controls = env.app.api_bot_runtime.control_count_for_test();
-            }
+            // 修剪不是背景 task：只在 spawn／live／admission 這些入口順手跑。所以這裡不能只「看」數量等它變少，
+            // 要自己走一次會修剪的入口（`api_run_live`）；owner 已退出且 DB 終態都已確定，一次就該收乾淨。
+            let _ = env.app.api_run_live(&key).await;
+            let controls = env.app.api_bot_runtime.control_count_for_test();
             assert!(controls <= 1, "terminal control records pruned (have {controls})");
         }
         assert_eq!(
