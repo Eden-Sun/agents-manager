@@ -54,17 +54,8 @@ test('多時段：列出、增刪時段，送出帶 slots；變數點了插入�
   await click(buttonIn(rows()[1] as HTMLElement, '刪除時段'))
   assert.equal(rows().length, 2, '刪掉的是第二列（下班）')
 
-  const prompt = dialog().querySelector<HTMLTextAreaElement>('textarea')!
-  await click(buttonIn(dialog(), '{{weekday}}'))
-  assert.match(prompt.value, /\{\{weekday\}\}/, '點變數會插入 token')
-
-  await click(buttonIn(dialog(), '預覽展開結果'))
-  const preview = dialog().querySelector('.schedule-preview')!.textContent ?? ''
-  assert.doesNotMatch(preview, /\{\{/, '預覽已展開已知變數')
   assert.equal(dialog().querySelector('input[placeholder*="標籤"]'), null, '時段不再有標籤欄')
-
-  await typeInto(prompt, '{{slot}} {{foo}}')
-  assert.match(dialog().textContent ?? '', /不認得的變數 \{\{foo\}\} 會原樣保留/)
+  assert.equal(dialog().querySelector('.schedule-vars, .schedule-var-chip, .schedule-preview'), null, '編輯器不再有變數區塊與預覽')
 
   await click(buttonIn(dialog(), '建立排程'))
   await settle()

@@ -27,7 +27,6 @@ import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occ
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { ScheduleResult } from './ScheduleResult'
 import { copyScheduleName } from './scheduleCopy'
-import { contextAt, expandPrompt, PROMPT_VARS, unknownPromptVars } from './promptVars'
 import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
 import './scheduleEditor.css'
@@ -345,23 +344,9 @@ export function ScheduleEditor({
     setForm((f) => ({ ...f, [k]: v }))
   }
   const setSlot = (i: number, patch: Partial<ScheduleSlot>) => set('slots', form.slots.map((s, j) => (j === i ? { ...s, ...patch } : s)))
-  // 點變數：插在游標處（沒有游標就接在最後）。
-  const insertVar = (v: string) => {
-    const token = `{{${v}}}`
-    const el = promptRef.current
-    const start = el?.selectionStart ?? form.prompt.length
-    const end = el?.selectionEnd ?? start
-    set('prompt', form.prompt.slice(0, start) + token + form.prompt.slice(end))
-    requestAnimationFrame(() => {
-      el?.focus()
-      el?.setSelectionRange(start + token.length, start + token.length)
-    })
-  }
-
 
   // 任務內容框只在內容超出目前高度時長高（最少 8 行由 rows 決定，最多 60vh 由 CSS 限制）；使用者手動拉高的不會被縮回去。
   const promptRef = useRef<HTMLTextAreaElement>(null)
-  const [showPreview, setShowPreview] = useState(false)
   useLayoutEffect(() => {
     const el = promptRef.current
     if (!el || el.scrollHeight <= el.clientHeight) return
@@ -711,27 +696,6 @@ export function ScheduleEditor({
           }}
         />
       </label>
-      <div className="schedule-vars">
-        <span className="hint">{t('變數（點了插入）')}</span>
-        <div className="schedule-var-chips">
-          {PROMPT_VARS.map((v) => (
-            <button type="button" key={v} className="schedule-var-chip" disabled={loading} onClick={() => insertVar(v)}>{`{{${v}}}`}</button>
-          ))}
-        </div>
-        {unknownPromptVars(form.prompt).length > 0 ? (
-          <p className="hint schedule-var-warn" role="alert">
-            {t('不認得的變數 {vars} 會原樣保留', { vars: unknownPromptVars(form.prompt).map((v) => `{{${v}}}`).join('、') })}
-          </p>
-        ) : null}
-        <button type="button" className="schedule-link" aria-expanded={showPreview} onClick={() => setShowPreview((v) => !v)}>{t('預覽展開結果')}</button>
-        {showPreview ? (
-          <p className="schedule-preview" aria-label={t('預覽展開結果')}>
-            {expandPrompt(form.prompt, contextAt(form.tz, new Date(), form.name, ''))}
-          </p>
-        ) : null}
-        {showPreview ? <p className="hint">{t('預覽用現在的時間與第一個時段的標籤；實際送出時用該次觸發的時間。')}</p> : null}
-      </div>
-
 
       {error ? <p className="hint schedule-error" role="alert">{error}</p> : null}
       {notice ? <p className="hint" role="status">{notice}</p> : null}
