@@ -1754,6 +1754,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
     // 快取倒數（`cache_clock`）：每顆 bot 最近一筆送出去的回合，一次讀完。
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.map_err(any_err)?;
+    // 被排程綁著的 bot（沒有未刪除的排程＝不在內）：側欄把沒設角色的 bot 歸到「排程 bot」區用。
+    let scheduled_bots: std::collections::HashSet<String> = sqlx::query_scalar("SELECT DISTINCT bot_id FROM schedules WHERE deleted_at IS NULL").fetch_all(&app.db).await.map_err(any_err)?.into_iter().collect();
     // 建立時帶的冪等鍵（只在 config.toml，不在 DB）：前端用它把「建立中」佔位列對到真 bot，不靠名字（#1796）。
     let create_request_ids: std::collections::HashMap<&str, &str> = cfg
         .projects
@@ -1807,6 +1809,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "name": if b.managed_by == "child" { crate::config::short_child_name(&p.label, &b.name) } else { b.name.clone() },
                 "kind": b.kind,
                 "role": b.role,
+                "scheduled": scheduled_bots.contains(&b.id),
                 "runtime_role_policy": run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()),
                 "daemon_url_pending": p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0),
                 "role_pending": shim_stale || policy_drift || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref())),
@@ -2765,7 +2768,7 @@ struct NewBot {
     /// `"restricted"`＝分享用的受限 bot、`"trusted"`＝信任分享（一般 bot 的權限，SPEC §20.1）。只在建立時決定，之後不能切換。
     #[serde(default)]
     share_profile: Option<String>,
-    /// 只收 `"scheduler"`（排程專屬 bot，不算執行者）；其他值 400。缺省＝沒有角色。
+    /// 只收 `"scheduler"`（排程專屬 bot，不算執行者）；專家模式專案另收 `executor`／`advisor`，缺省＝執行者；其他值 400。非專家專案缺省＝沒有角色。
     #[serde(default)]
     role: Option<String>,
     /// 分享用 bot 的資料夾（`{"kind":"new","name"}`／`{"kind":"existing","path"}`）。受限：沒帶＝新資料夾、名字用 bot 名；
@@ -2837,10 +2840,14 @@ async fn create_bot(
     if !crate::config::valid_bot_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::bot_kinds_list())));
     }
+    // 專家模式專案的 bot 一定要有角色：沒帶就是執行者；可選執行者／顧問／排程專用（管理者、專家要另外指派）。
+    // 非專家專案維持舊規則：只收 `scheduler`。分享用 bot 不是專家成員，不補預設。
+    let expert_project = db::project(&app.db, &pid).await.map_err(any_err)?.is_some_and(|p| p.mode == "expert");
     let scheduler_role = match b.role.as_deref().map(str::trim) {
-        None | Some("") => None,
+        None | Some("") => (expert_project && b.share_profile.as_deref().map(str::trim).is_none_or(str::is_empty)).then(|| "executor".to_string()),
         Some("scheduler") => Some("scheduler".to_string()),
-        Some(_) => return Err(LcError::Bad("role on create only accepts `scheduler`".into())),
+        Some(r @ ("executor" | "advisor")) if expert_project => Some(r.to_string()),
+        Some(_) => return Err(LcError::Bad("role on create only accepts `scheduler` (expert projects also `executor`／`advisor`)".into())),
     };
     let api_bot = b.kind == crate::config::API_BOT_KIND;
     if api_bot {
@@ -19223,8 +19230,15 @@ mod hire_fork_api_tests {
         let env = crate::testing::env().await;
         let manager = expert_project(&env).await;
         let create = |body: Value| create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(body).unwrap()));
-        let err = create(json!({"name": "bad-role", "kind": "claude", "role": "executor"})).await.err().unwrap();
+        let err = create(json!({"name": "bad-role", "kind": "claude", "role": "manager"})).await.err().unwrap();
         assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        // 專家專案沒帶 role＝執行者；也可指定顧問。
+        let res = create(json!({"name": "no-role", "kind": "claude"})).await.unwrap();
+        let nr = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
+        assert_eq!(db::bot(&env.app.db, &nr).await.unwrap().unwrap().role.as_deref(), Some("executor"));
+        let res = create(json!({"name": "adv-new", "kind": "claude", "role": "advisor"})).await.unwrap();
+        let av = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
+        assert_eq!(db::bot(&env.app.db, &av).await.unwrap().unwrap().role.as_deref(), Some("advisor"));
         let res = create(json!({"name": "sched-a", "kind": "claude", "role": "scheduler"})).await.unwrap();
         let sched = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
         assert_eq!(db::bot(&env.app.db, &sched).await.unwrap().unwrap().role.as_deref(), Some("scheduler"));

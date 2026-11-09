@@ -473,3 +473,31 @@
     pointer-events: auto;
   }
 }
+
+.bot-unset-role-wrap { position: relative; flex: none; }
+.bot-unset-role {
+  padding: 0 4px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.bot-unset-role-menu {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 90px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
+}
+.bot-unset-role-menu button { padding: 5px 10px; border: 0; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }
+.bot-unset-role-menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }

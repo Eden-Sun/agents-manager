@@ -1,6 +1,6 @@
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { Sidebar } from './Sidebar'
 import type { Bot, Project } from '../api/types'
@@ -96,12 +96,12 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   assert.ok(expSection, 'p-exp 專案區塊存在')
   assert.equal(expSection.querySelectorAll('.project-expert-tag').length, 1, 'expert 專案標題應有專家標籤')
 
-  // 分段標題驗證：順序 管理者 -> 顧問 -> 執行者 -> 未分配
+  // 分段標題驗證：順序 管理者 -> 專家 -> 顧問 -> 執行者（role 為空的併入執行者，不再有未分配）
   const headers = [...expSection.querySelectorAll('.expert-section-title')].map((el) => el.textContent?.trim())
-  assert.deepEqual(headers, ['管理者', '專家', '顧問', '執行者', '未分配'], '專家分段標題順序正確（不帶人數）')
-  // 英文縮寫在標題旁（2026-11-07 使用者），未分配沒有。
+  assert.deepEqual(headers, ['管理者', '專家', '顧問', '執行者'], '專家分段標題順序正確（不帶人數）')
+  // 英文縮寫在標題旁（2026-11-07 使用者）。
   const abbrs = [...expSection.querySelectorAll('.expert-section-head')].map((el) => el.querySelector('.expert-section-abbr')?.textContent ?? '')
-  assert.deepEqual(abbrs, ['Mgr', 'Spc', 'Adv', 'Wkr', ''])
+  assert.deepEqual(abbrs, ['Mgr', 'Spc', 'Adv', 'Wkr'])
 
   // 分段標題已寫角色：列上不再重複角色小標（2026-11-01 使用者），只有待套用的留著
   for (const id of ['exp-mgr', 'exp-adv', 'exp-spec']) {
@@ -183,4 +183,43 @@ test('compact 子列也保留副管理者標示', async () => {
   const row = document.querySelector('[data-bot-id="compact-dep"]')!
   assert.ok(row.classList.contains('compact'))
   assert.equal(row.querySelector('.bot-deputy-tag')?.textContent, '副')
+})
+
+test('role 為空的 bot：沒有「未分配」；被排程綁的進排程區、其餘進執行者區標「未設角色」，點徽章選角色送 PATCH', async () => {
+  const requests = fakeApi((req) => (req.method === 'PATCH' && req.path.endsWith('/bots/u-none') ? { id: 'u-none', role: 'executor' } : undefined))
+  useStore.setState({
+    projects: [project('p-un', 'expert')],
+    bots: [
+      bot('u-mgr', 'p-un', 'manager'),
+      bot('u-none', 'p-un', null),
+      { ...bot('u-sched', 'p-un', null), scheduled: true } as Bot,
+    ],
+    runs: {},
+    botOrder: {},
+    projectOrder: [],
+    botUnread: {},
+    connected: true,
+    defaultConnected: true,
+    socket: 'open',
+    selectedBotId: 'u-mgr',
+    selectedProjectId: null,
+    sidePanes: {},
+    unownedPanes: [],
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  const sec = document.querySelector<HTMLElement>('[data-project-id="p-un"]')!
+  const headers = [...sec.querySelectorAll('.expert-section-title')].map((el) => el.textContent?.trim())
+  assert.deepEqual(headers, ['管理者', '執行者', '排程專用'], '沒有未分配')
+  assert.equal(sec.querySelector('[data-bot-id="u-none"] .bot-unset-role')?.textContent?.trim(), '未設角色')
+  assert.equal(sec.querySelector('[data-bot-id="u-sched"] .bot-unset-role'), null, '被排程綁的不標未設角色')
+  assert.equal(sec.querySelector('[data-bot-id="u-mgr"] .bot-unset-role'), null)
+  await click(sec.querySelector<HTMLElement>('[data-bot-id="u-none"] .bot-unset-role')!)
+  const items = [...sec.querySelectorAll('.bot-unset-role-menu button')].map((b) => b.textContent?.trim())
+  assert.deepEqual(items, ['執行者', '顧問', '排程專用'])
+  await click(sec.querySelector<HTMLElement>('.bot-unset-role-menu button')!)
+  await settle()
+  const patch = requests.find((r) => r.method === 'PATCH')
+  assert.ok(patch, '送出 PATCH')
+  assert.deepEqual((patch!.body as { role?: string }).role, 'executor')
 })

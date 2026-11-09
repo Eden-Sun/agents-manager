@@ -301,6 +301,8 @@ export interface RuntimeSettings {
 }
 
 export interface Bot {
+  /** 被未刪除的排程綁著（側欄把沒設角色的 bot 歸到排程區用；舊 daemon 不回＝false）。 */
+  scheduled?: boolean
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
   /** 專家（specialist）負責的軌道；role=specialist 時必填 */
   track?: string | null
@@ -809,8 +811,8 @@ export type ShareFolderIn = { kind: 'new'; name: string } | { kind: 'existing'; 
 
 export interface NewBotInput {
   name: string
-  /** 只收 `scheduler`：建成排程專屬 bot（不算執行者）。 */
-  role?: 'scheduler'
+  /** 專家模式專案可選 executor／advisor／scheduler（省略＝執行者）；其他專案只收 scheduler。 */
+  role?: 'scheduler' | 'executor' | 'advisor'
   /** 名稱撞到時 daemon 自動找 `<base>-<n>`；回應帶實際 `name`。 */
   name_auto?: boolean
   kind: BotKind

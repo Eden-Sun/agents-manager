@@ -108,3 +108,32 @@ export function ExpertSectionHeader({ title, abbr }: { title: string; abbr?: str
     </div>
   )
 }
+
+/**
+ * 專家模式下 role 為空的頂層 bot（歸在執行者區）的小徽章「未設角色」：點了直接選角色（執行者／顧問／排程專用），
+ * 走既有 `PATCH /api/bots/{id}` 的 role（權限同 bot 設定；管理者、專家要在 bot 設定裡指派，因為專家需要 track）。
+ */
+export function UnsetRoleBadge({ botId }: { botId: string }) {
+  useT()
+  const [open, setOpen] = useState(false)
+  const busy = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
+  const choose = (role: 'executor' | 'advisor' | 'scheduler') => {
+    setOpen(false)
+    void useStore.getState().patchBot(botId, { role })
+  }
+  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()
+  return (
+    <span className="bot-unset-role-wrap" onClick={stop} onMouseDown={stop} onKeyDown={stop}>
+      <button type="button" className="bot-unset-role" title={t('這顆 Bot 還沒有角色：點了選角色')} aria-haspopup="menu" aria-expanded={open} disabled={busy} onClick={() => setOpen((v) => !v)}>
+        {t('未設角色')}
+      </button>
+      {open ? (
+        <span className="bot-unset-role-menu" role="menu">
+          {(['executor', 'advisor', 'scheduler'] as const).map((r) => (
+            <button key={r} type="button" role="menuitem" onClick={() => choose(r)}>{roleTitle(r)}</button>
+          ))}
+        </span>
+      ) : null}
+    </span>
+  )
+}

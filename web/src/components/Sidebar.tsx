@@ -83,7 +83,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { ExpertClusterRow } from './ExpertClusterRow'
 import { groupClusterItems } from '../lib/expertClusters'
-import { ExpertBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ManagerUseCheckbox } from './ExpertBadge'
+import { ExpertBadge, UnsetRoleBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ManagerUseCheckbox } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
@@ -298,7 +298,7 @@ function BotRowImpl({
   const dragging = drag?.id === botId
   // 只在同專案內排序；專家模式只能在同角色段落內拖曳。
   const dragBot = drag ? useStore.getState().bots.find((b) => b.id === drag.id) : null
-  const canReorderWithDrag = !isExpertProject || !dragBot || canReorderInExpertMode(dragBot.role, bot.role)
+  const canReorderWithDrag = !isExpertProject || !dragBot || canReorderInExpertMode(dragBot, bot)
   const sameProject = drag?.projectId === bot.project_id && canReorderWithDrag
   const dropEdge = drag && sameProject && drag.id !== botId && drag.overId === botId ? drag.edge : null
 
@@ -458,6 +458,8 @@ function BotRowImpl({
           <BotNameField botId={botId} name={bot.name} variant="row" armed={false} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {/* 分段標題已經寫了角色，列上不再重複小標；只有「待套用」時留著（黃點是要重啟的訊號）。 */}
             {isExpertProject && !compact && bot.role_pending ? <ExpertRoleTag role={bot.role} rolePending /> : null}
+            {/* 沒設角色又沒被排程綁的頂層 bot 歸在執行者區：標「未設角色」，點了直接選角色。 */}
+            {isExpertProject && !compact && !bot.parent_bot_id && !bot.role && !bot.scheduled ? <UnsetRoleBadge botId={botId} /> : null}
             {/* 子 agent 不進角色分段，角色（管理者用 `agm role` 設的顧問等）只能在列上標，不然設了看不出來（2026-11-08 使用者）。 */}
             {isExpertProject && compact && bot.parent_bot_id && bot.role ? <ExpertRoleTag role={bot.role} /> : null}
             {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
@@ -1220,7 +1222,7 @@ export function Sidebar() {
     const dragItem = bots.find((b) => b.id === dragId)
     if (!bot || !dragItem) return
     const proj = useStore.getState().projects.find((p) => p.id === bot.project_id)
-    if (proj?.mode === 'expert' && !canReorderInExpertMode(dragItem.role, bot.role)) return
+    if (proj?.mode === 'expert' && !canReorderInExpertMode(dragItem, bot)) return
     const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
     const at = ids.indexOf(overId)
     if (at < 0) return
@@ -1237,7 +1239,7 @@ export function Sidebar() {
     const proj = useStore.getState().projects.find((p) => p.id === bot.project_id)
     const allParentBots = botsOfProject({ bots, botOrder }, bot.project_id).filter((b) => !b.parent_bot_id)
     const ids = (proj?.mode === 'expert'
-      ? allParentBots.filter((b) => canReorderInExpertMode(bot.role, b.role))
+      ? allParentBots.filter((b) => canReorderInExpertMode(bot, b))
       : allParentBots
     ).map((b) => b.id)
     const at = ids.indexOf(botId)

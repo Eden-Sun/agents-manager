@@ -134,7 +134,7 @@ test('specialist 角色與 track 不會在 normalize 時被丟掉（/api/state �
   assert.equal(b?.role, 'specialist')
   assert.equal(b?.track, 'infra')
   assert.equal(b?.runtime_override, null)
-  assert.equal(toBot({ id: 'b-x', role: 'bogus' })?.role, null, '不認得的角色仍當未分配')
+  assert.equal(toBot({ id: 'b-x', role: 'bogus' })?.role, null, '不認得的角色仍當沒設角色')
 })
 
 test('重置券：credits 逐張解析，舊 daemon 沒有這欄就是空陣列', () => {

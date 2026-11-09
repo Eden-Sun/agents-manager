@@ -15,8 +15,11 @@ describe('expertSections pure functions', () => {
     assert.equal(roleToExpertSection('advisor'), 'advisor')
     assert.equal(roleToExpertSection('executor'), 'executor')
     assert.equal(roleToExpertSection('specialist'), 'specialist')
-    assert.equal(roleToExpertSection(null), 'unassigned')
-    assert.equal(roleToExpertSection(undefined), 'unassigned')
+    // role 為空不再有「未分配」：被排程綁 → 排程區，否則歸執行者區。
+    assert.equal(roleToExpertSection(null), 'executor')
+    assert.equal(roleToExpertSection(undefined), 'executor')
+    assert.equal(roleToExpertSection(null, true), 'scheduler')
+    assert.equal(roleToExpertSection('executor', true), 'executor')
   })
 
   test('roleShortLabel and roleTitle match specifications', () => {
@@ -30,16 +33,17 @@ describe('expertSections pure functions', () => {
     assert.equal(roleTitle('advisor'), '顧問')
     assert.equal(roleTitle('executor'), '執行者')
     assert.equal(roleTitle('specialist'), '專家')
-    assert.equal(roleTitle(null), '未分配')
+    assert.equal(roleTitle(null), '')
     assert.equal(roleTitle('scheduler'), '排程專用')
   })
 
-  test('groupExpertSections: scheduler bots get their own section before unassigned', () => {
-    const secs = groupExpertSections([{ id: 'u', role: null }, { id: 's', role: 'scheduler' }, { id: 'e', role: 'executor' }])
-    assert.deepEqual(secs.map((x) => [x.role, x.title, x.items.map((i) => i.id)]), [['executor', '執行者', ['e']], ['scheduler', '排程專用', ['s']], ['unassigned', '未分配', ['u']]])
+  test('groupExpertSections: role-less bots join executors, or the scheduler section when a schedule binds them', () => {
+    const secs = groupExpertSections([{ id: 'u', role: null }, { id: 's', role: 'scheduler' }, { id: 'e', role: 'executor' }, { id: 'k', role: null, scheduled: true }])
+    assert.deepEqual(secs.map((x) => [x.role, x.title, x.items.map((i) => i.id)]), [['executor', '執行者', ['u', 'e']], ['scheduler', '排程專用', ['s', 'k']]])
+    assert.ok(!secs.some((x) => x.title === '未分配'))
   })
 
-  test('groupExpertSections: fixed order (manager -> specialist -> advisor -> executor -> unassigned)', () => {
+  test('groupExpertSections: fixed order (manager -> specialist -> advisor -> executor)', () => {
     const bots: (Pick<Bot, 'id'> & Partial<Bot>)[] = [
       { id: 'b1', name: 'bot-exec-1', role: 'executor' },
       { id: 'b2', name: 'bot-unassigned', role: null },
@@ -50,12 +54,11 @@ describe('expertSections pure functions', () => {
     ]
 
     const sections = groupExpertSections(bots)
-    assert.deepEqual(sections.map((s) => s.role), ['manager', 'specialist', 'advisor', 'executor', 'unassigned'])
+    assert.deepEqual(sections.map((s) => s.role), ['manager', 'specialist', 'advisor', 'executor'])
     assert.deepEqual(sections[0].items.map((b) => b.id), ['b3'])
     assert.deepEqual(sections[1].items.map((b) => b.id), ['b6'])
     assert.deepEqual(sections[2].items.map((b) => b.id), ['b4'])
-    assert.deepEqual(sections[3].items.map((b) => b.id), ['b1', 'b5'])
-    assert.deepEqual(sections[4].items.map((b) => b.id), ['b2'])
+    assert.deepEqual(sections[3].items.map((b) => b.id), ['b1', 'b2', 'b5'])
   })
 
   test('groupExpertSections: empty sections are skipped', () => {

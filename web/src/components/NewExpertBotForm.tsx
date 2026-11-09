@@ -84,7 +84,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     return bots.find((b) => b.project_id === pid && b.role === 'manager' && !b.parent_bot_id)
   }, [bots, pid])
 
-  const [role, setRole] = useState<ExpertRoleChoice>(() => (existingManager ? 'specialist' : 'manager'))
+  const [role, setRole] = useState<ExpertRoleChoice>('executor')
 
   // 專家 track
   const [track, setTrack] = useState('')
@@ -108,7 +108,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const [managerUse, setManagerUse] = useState(true)
 
   // 名稱
-  const [name, setName] = useState(() => computeDefaultName(existingManager ? 'specialist' : 'manager', '', pid, bots))
+  const [name, setName] = useState(() => computeDefaultName('executor', '', pid, bots))
   const nameTouched = useRef(false)
   const effortTouched = useRef(false)
   const [busy, setBusy] = useState(false)
