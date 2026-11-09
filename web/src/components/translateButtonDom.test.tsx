@@ -9,7 +9,12 @@ import { resetTranslationStore } from '../lib/messageTranslationStore'
 import { useMessageTranslation } from './useMessageTranslation'
 import { resetTranslateReady } from './useTranslateReady'
 
-before(setupDom)
+before(async () => {
+  await setupDom()
+  // 同一個程序裡前面的測試檔可能已經掛過英文訊息、把「未啟用」的讀取結果留在模組快取：從乾淨的開始。
+  resetTranslateReady()
+  resetTranslationStore()
+})
 afterEach(async () => {
   await unmountAll()
   resetTranslateReady()

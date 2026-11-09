@@ -112,6 +112,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | DELETE | `/api/hosts/{name}/shells/{pane_id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | DELETE | `/api/identities/{name}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | DELETE | `/api/projects/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| DELETE | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/*` | 無 principal；前端靜態檔 fallback |
 | GET | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
@@ -131,6 +132,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
+| POST | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -3146,10 +3149,7 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 | GET | `/api/schedules/{id}` | `{id}` 可以是排程 id，也可以是**排程代號**（`S12`，不分大小寫；`PATCH`／`DELETE`／`POST …/run`／`GET …/history` 同）。選路徑而不是 `?code=` 的理由：一條路由、不必另開列表查詢，且代號格式（`S` 加數字）與 ULID id 不會撞。排程物件都帶 `code`（`S<n>`：全域唯一、遞增、建立後不變、刪除不回收；既有排程依建立時間補號）。排程（含 `clear_after`、`from_base`、`bot_dedicated`＝綁的是不是排程專屬 bot，舊排程為 false 時 UI 提示轉成專屬或改綁）、`open`、`recent`（最近 10 筆，含 turn 狀態） |
 | PATCH | `/api/schedules/{id}` | 部分更新（`name`、`prompt`、`bot_id`、`tz`、`spec`、`notify`、`clear_after`、`from_base`、`enabled`）。`spec` 每次送出都會重新錨定間隔（`anchor` 取現在、升 generation），不改時間就不要帶（網頁只在時間欄位真的變了才送，#1807）。`clear_after` 只影響之後的 done，不撤回排隊、不升 generation。內容、Bot、時間或停用時：同一個 bot 鎖與交易內撤回尚未送出的排隊、升 generation；已送出的回合照跑。換 Bot 時有未結束執行 → 409 `schedule_open` |
 | DELETE | `/api/schedules/{id}` | 軟刪；同樣撤回未送出的排隊 |
-| DELETE | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | POST | `/api/schedules/{id}/run` | 手動執行。body 可帶 `client_request_id`；已有未結束的 occurrence 就回那一筆；停用中 → 409 |
-| POST | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
-| POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/schedules/{id}/history?limit=&offset=` | 分頁，`limit` 1–100（預設 20），`offset` ≥ 0 |
 
 `spec`：`{"mode":"once","at":"YYYY-MM-DDTHH:MM"}`（本地時間，不存在的 DST 時間拒絕，重複取較早）、`{"mode":"interval","every_secs":N}`（60 秒到一年，以建立時為錨點）、`{"mode":"daily","time":"HH:MM"}`、`{"mode":"weekly","time":"HH:MM","weekdays":[0..6]}`（0＝週一）。daily／weekly 可加 `slots`：`[{"time":"HH:MM","label":"上班"}]`，一天最多 8 個、時間不重複、標籤最多 20 字；`time` 是第一個時段，沒有 `slots` 就是單一時段（舊格式照讀）。每個時段可加 `until`（`HH:MM[:SS]`，隨機區間的結束時間）：`{"time":"08:55","until":"09:00"}` 在排程時區每次於 08:55:00–09:00:00 內均勻隨機挑一秒觸發；沒有 `until` 就是固定時間。`until` 必須晚於 `time`、不可跨午夜、區間最長 12 小時，錯誤回 400 `{"error":"slot_range_not_after_start"|"slot_range_too_long"|"slot_until_invalid","message"}`。抽到的時間存在 `next_due`（GET 讀得到），重啟與重算不重抽；該次觸發後才在隔天的區間重抽；`PATCH` 沒改時間規格不重抽。`POST …/run` 不受區間影響。不做任意 cron。
