@@ -2177,6 +2177,8 @@ Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 
 
 某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，請求本身不執行本機或遠端 CLI，但 daemon 會在背景排一趟刷新（#1890，見下段）。身份新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 
+**最後抓到的清單（`stale`／`fetched_at`）**：每次成功的 CLI 查詢（codex／grok／agy，來源不是 `static`）都把結果寫到 `{data_dir}/models-last/<host>-<kind>-<identity>.json`（0600，暫存檔＋rename；檔名片段只留 `[A-Za-z0-9._-]`，被改過的補雜湊，不同 identity 不互蓋）。之後查詢失敗（或 agy 退回寫死清單）時先回這份：body 多 `"stale": true`，`fetched_at` 是當初抓到的時間；成功的回應沒有 `stale` 欄位。daemon 重啟後第一次查詢失敗也適用。檔案不存在、壞掉或沒有模型時才回錯誤（agy 退回寫死的 3.8 Flash 三檔；claude 本來就是寫死清單，不存）。stale 回應不進 10 分鐘記憶體快取，下次請求會再試一次。
+
 **背景刷新（#1890）**：一般 Bot 的 `GET /api/models` 未命中或過期時，daemon 依同一格（host+kind+identity）排一趟刷新，跑的是 `refresh=1` 的同一條管線。請求本身仍回 503，不等刷新結果，Bot 不取得 `refresh` 權限。
 - 範圍：host 必須存在；`identity` 必須是這台 host 設定過、且 kind 相符的身份；不符合的格子不排程（回 `state:"none"`）。
 - single-flight：同一格排隊或執行中，重複的 miss 不另排。全域同時最多 2 趟，其餘排隊。

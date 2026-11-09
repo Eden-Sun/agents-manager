@@ -177,6 +177,54 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
     }))
 }
 
+/// 檔名片段：只留 `[A-Za-z0-9._-]`，其餘換成 `_`；有被換過的再補 FNV-1a 雜湊，避免 `a/b` 與 `a_b` 撞檔。
+fn safe_part(raw: &str) -> String {
+    let clean: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-') { c } else { '_' }).collect();
+    if clean == raw && !clean.is_empty() && clean != "." && clean != ".." {
+        return clean;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in raw.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+    }
+    format!("{}~{h:016x}", clean.trim_start_matches('.'))
+}
+
+fn last_known_path(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> std::path::PathBuf {
+    let name = format!("{}-{}-{}.json", safe_part(host), safe_part(kind), safe_part(identity.unwrap_or("")));
+    dir.join("models-last").join(name)
+}
+
+/// 成功查詢後寫「最後抓到」：0600、暫存檔＋rename。寫不成不影響回應。
+fn save_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>, v: &Value) {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = last_known_path(dir, host, kind, identity);
+    let Some(parent) = path.parent() else { return };
+    let _ = std::fs::create_dir_all(parent);
+    let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+    let res = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(v.to_string().as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// 讀「最後抓到」並標 `stale: true`；檔案不在、壞掉、沒有模型都當沒有。
+fn load_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
+    let text = std::fs::read_to_string(last_known_path(dir, host, kind, identity)).ok()?;
+    let mut v: Value = serde_json::from_str(&text).ok()?;
+    if !v.get("models").and_then(Value::as_array).is_some_and(|m| !m.is_empty()) {
+        return None;
+    }
+    v["stale"] = json!(true);
+    Some(v)
+}
+
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
@@ -187,7 +235,23 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
         }
     }
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    let v = fetch(app, host, kind, identity).await?;
+    let fetched = fetch(app, host, kind, identity).await;
+    // claude 沒有清單 API（永遠是寫死的），不存；agy 查不到會退回 "static"，也不存、並優先用上次抓到的。
+    let v = match fetched {
+        Ok(v) if v["source"] != "static" => {
+            save_last_known(&app.data_dir, host, kind, identity, &v);
+            v
+        }
+        Ok(v) if kind == "claude" => v,
+        Ok(v) => match load_last_known(&app.data_dir, host, kind, identity) {
+            Some(last) => return Ok(last),
+            None => v,
+        },
+        Err(e) => match load_last_known(&app.data_dir, host, kind, identity) {
+            Some(last) => return Ok(last),
+            None => return Err(e),
+        },
+    };
     let mut cache = app.models_cache.lock().await;
     if !app.hosts.is_current(&fence).await {
         bail!("host `{host}` was reconnected/reconfigured while listing {kind} models; stale result discarded");
@@ -259,6 +323,46 @@ mod tests {
         let mut keys: Vec<String> = app.models_cache.lock().await.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["local/agy/fresh".to_string()]);
+    }
+
+    #[test]
+    fn last_known_roundtrip_stale_and_isolation() {
+        let dir = crate::testing::scratch_dir("am-models-last");
+        let a = json!({"kind": "codex", "host": "local", "source": "codex-app-server", "fetched_at": "t1", "models": [{"id": "gpt-6.1-sol"}]});
+        let b = json!({"kind": "codex", "host": "local", "source": "codex-app-server", "fetched_at": "t2", "models": [{"id": "other"}]});
+        assert!(load_last_known(&dir, "local", "codex", None).is_none(), "沒有檔");
+        save_last_known(&dir, "local", "codex", None, &a);
+        save_last_known(&dir, "local", "codex", Some("work"), &b);
+        save_last_known(&dir, "local", "codex", Some("a/b"), &a);
+        save_last_known(&dir, "local", "codex", Some("a_b"), &b);
+        let got = load_last_known(&dir, "local", "codex", None).unwrap();
+        assert_eq!(got["stale"], json!(true));
+        assert_eq!(got["fetched_at"], json!("t1"));
+        assert_eq!(got["models"][0]["id"], json!("gpt-6.1-sol"));
+        assert_eq!(load_last_known(&dir, "local", "codex", Some("work")).unwrap()["models"][0]["id"], json!("other"), "不同 identity 不互蓋");
+        assert_ne!(load_last_known(&dir, "local", "codex", Some("a/b")).unwrap()["models"][0]["id"], load_last_known(&dir, "local", "codex", Some("a_b")).unwrap()["models"][0]["id"]);
+        let path = last_known_path(&dir, "local", "codex", None);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_dir(path.parent().unwrap()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".tmp")), "不留暫存檔");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_last_known(&dir, "local", "codex", None).is_none(), "壞檔當沒有");
+        std::fs::write(&path, r#"{"models": []}"#).unwrap();
+        assert!(load_last_known(&dir, "local", "codex", None).is_none(), "空清單當沒有");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 查詢失敗（未知 host 之外：codex 不存在的 kind 之類）時，有上次的就回 stale，沒有才回錯。
+    #[tokio::test]
+    async fn failed_fetch_serves_last_known_or_errors() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        // 未知 kind：fetch 必失敗。
+        assert!(list(app, "local", "nope", None, true).await.is_err());
+        let last = json!({"kind": "nope", "host": "local", "source": "x", "fetched_at": "t0", "models": [{"id": "m1"}]});
+        save_last_known(&app.data_dir, "local", "nope", None, &last);
+        let v = list(app, "local", "nope", None, true).await.unwrap();
+        assert_eq!(v["stale"], json!(true));
+        assert_eq!(v["models"][0]["id"], json!("m1"));
     }
 
     #[tokio::test]
