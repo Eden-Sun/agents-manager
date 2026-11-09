@@ -72,18 +72,19 @@ describe('expertSections pure functions', () => {
   })
 
   test('canReorderInExpertMode: only allows reordering within same role bucket', () => {
-    assert.equal(canReorderInExpertMode('manager', 'manager'), true)
-    assert.equal(canReorderInExpertMode('executor', 'executor'), true)
-    assert.equal(canReorderInExpertMode(null, undefined), true)
-    assert.equal(canReorderInExpertMode('manager', 'advisor'), false)
-    assert.equal(canReorderInExpertMode('advisor', 'executor'), false)
-    assert.equal(canReorderInExpertMode('executor', null), false)
+    assert.equal(canReorderInExpertMode({ role: 'manager' }, { role: 'manager' }), true)
+    assert.equal(canReorderInExpertMode({ role: 'executor' }, { role: 'executor' }), true)
+    assert.equal(canReorderInExpertMode({ role: null }, {}), true)
+    assert.equal(canReorderInExpertMode({ role: 'manager' }, { role: 'advisor' }), false)
+    assert.equal(canReorderInExpertMode({ role: 'advisor' }, { role: 'executor' }), false)
+    assert.equal(canReorderInExpertMode({ role: 'executor' }, { role: null }), true, '空角色併入執行者區')
+    assert.equal(canReorderInExpertMode({ role: 'executor' }, { role: null, scheduled: true }), false)
   })
 })
 
-test('段落標題帶英文縮寫：Mgr／Spc／Adv／Wkr，未分配沒有（2026-11-07 使用者）', () => {
+test('段落標題帶英文縮寫：Mgr／Spc／Adv／Wkr（2026-11-07 使用者）', () => {
   const secs = groupExpertSections([{ role: 'manager' }, { role: 'specialist' }, { role: 'advisor' }, { role: 'executor' }, { role: null }] as never[])
-  assert.deepEqual(secs.map((s) => s.abbr), ['Mgr', 'Spc', 'Adv', 'Wkr', ''])
+  assert.deepEqual(secs.map((s) => s.abbr), ['Mgr', 'Spc', 'Adv', 'Wkr'])
 })
 
 test('副管理者在管理者後，且不重複出現在原角色段', () => {
@@ -99,5 +100,5 @@ test('副管理者在管理者後，且不重複出現在原角色段', () => {
   assert.deepEqual(groupExpertSections(bots, 'specialist').map((g) => [g.role, g.items.map((b) => b.id)]), [
     ['manager', ['manager', 'specialist']], ['advisor', ['deputy', 'advisor']],
   ])
-  assert.equal(canReorderInExpertMode('manager', 'advisor'), false)
+  assert.equal(canReorderInExpertMode({ role: 'manager' }, { role: 'advisor' }), false)
 })

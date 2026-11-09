@@ -185,6 +185,14 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     }
   }
 
+  // 預設角色是執行者：開表單就套用它的建議 kind／模型（不必先點一下角色卡）。
+  useEffect(() => {
+    const sugg = pickRoleSuggested('executor')
+    setKind(sugg.kind)
+    setModel(sugg.model)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // 專家 track 切換時更新預設名稱
   useEffect(() => {
     if (role === 'specialist' && !nameTouched.current) {

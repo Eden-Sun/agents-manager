@@ -1809,7 +1809,6 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "name": if b.managed_by == "child" { crate::config::short_child_name(&p.label, &b.name) } else { b.name.clone() },
                 "kind": b.kind,
                 "role": b.role,
-                "scheduled": scheduled_bots.contains(&b.id),
                 "runtime_role_policy": run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()),
                 "daemon_url_pending": p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0),
                 "role_pending": shim_stale || policy_drift || (p.host != LOCAL_HOST && run.as_ref().is_some_and(|r| r.daemon_url_injected == 0)) || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref())),
@@ -1863,6 +1862,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             });
             // 專家模式群集名（同專案同設定執行者 ≥2 顆）；不在群集內＝null（json! 巨集已到遞迴上限，所以在外面補）。
             bot_v["cluster"] = json!(cluster_names.get(&b.id));
+            bot_v["scheduled"] = json!(scheduled_bots.contains(&b.id));
             bl.push(bot_v);
         }
         out.push(json!({
