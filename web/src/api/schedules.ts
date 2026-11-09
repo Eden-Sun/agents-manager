@@ -146,6 +146,15 @@ function asDetail(raw: unknown): ScheduleDetail {
   return { ...base, recent: Array.isArray(recent) ? (recent as ScheduleOccurrence[]) : [] }
 }
 
+/** 本分頁的排程異動：與 WS `schedules_changed` 同一個事件，列表與側欄代號列都聽它（沒有 project_id＝全部專案重抓）。 */
+function notifyChanged(projectId?: string): void {
+  try {
+    window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: projectId ? { project_id: projectId } : {} }))
+  } catch {
+    /* 非瀏覽器環境 */
+  }
+}
+
 export async function listSchedules(projectId: string): Promise<Schedule[]> {
   const raw = (await rawTransport.request('GET', `/projects/${enc(projectId)}/schedules`)) as { schedules?: unknown }
   return Array.isArray(raw.schedules) ? raw.schedules.map(asSchedule) : []
@@ -153,6 +162,7 @@ export async function listSchedules(projectId: string): Promise<Schedule[]> {
 
 export async function rebindSchedules(projectId: string, scheduleIds: string[], botId: string): Promise<void> {
   await rawTransport.request('POST', `/projects/${enc(projectId)}/schedules/rebind`, { schedule_ids: scheduleIds, bot_id: botId })
+  notifyChanged(projectId)
 }
 
 export async function getSchedule(id: string): Promise<ScheduleDetail> {
@@ -160,15 +170,20 @@ export async function getSchedule(id: string): Promise<ScheduleDetail> {
 }
 
 export async function createSchedule(projectId: string, body: ScheduleCreateInput): Promise<Schedule> {
-  return asSchedule(await rawTransport.request('POST', `/projects/${enc(projectId)}/schedules`, body))
+  const r = asSchedule(await rawTransport.request('POST', `/projects/${enc(projectId)}/schedules`, body))
+  notifyChanged(projectId)
+  return r
 }
 
 export async function patchSchedule(id: string, body: ScheduleEditInput): Promise<Schedule> {
-  return asSchedule(await rawTransport.request('PATCH', `/schedules/${enc(id)}`, body))
+  const r = asSchedule(await rawTransport.request('PATCH', `/schedules/${enc(id)}`, body))
+  notifyChanged()
+  return r
 }
 
 export async function deleteSchedule(id: string): Promise<void> {
   await rawTransport.request('DELETE', `/schedules/${enc(id)}`)
+  notifyChanged()
 }
 
 /** 手動執行：只建立並排進既有佇列，不 steer、不 interrupt。 */

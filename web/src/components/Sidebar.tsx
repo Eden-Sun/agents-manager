@@ -1,4 +1,4 @@
-import { Fragment, memo, type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { persistSetDiff } from '../store/sharedSet'
 import { renderProbe } from '../lib/renderProbe'
 import { useStableCallback } from '../hooks/useStableCallback'
@@ -972,22 +972,37 @@ function SchedulerBotSection({ count, shut, forceOpen, attention, projectLabel, 
 /** 排程專屬 bot 服務哪些排程：bot id → 代號（S<n>，沒有代號用名稱）。 */
 function useBotScheduleCodes(projectId: string, enabled: boolean): Map<string, string[]> {
   const rev = useStore((s) => s.schedulesRev)
+  const bots = useStore((s) => s.bots)
   const [map, setMap] = useState<Map<string, string[]>>(new Map())
-  useEffect(() => {
-    if (!enabled) return
-    let live = true
+  const seq = useRef(0)
+  const refresh = useCallback(() => {
+    const id = ++seq.current
     listSchedules(projectId)
       .then((rows) => {
-        if (!live) return
+        if (seq.current !== id) return
         const m = new Map<string, string[]>()
         for (const r of rows) m.set(r.bot_id, [...(m.get(r.bot_id) ?? []), r.code || r.name])
         setMap(m)
       })
       .catch(() => {})
+  }, [projectId])
+  // 與排程列表同一組觸發：store 的 rev／bots、本分頁與 WS 的 `agm:schedules_changed`（改綁、編輯、建立、刪除都會發）。
+  useEffect(() => {
+    if (!enabled) return
+    refresh()
     return () => {
-      live = false
+      seq.current += 1
     }
-  }, [projectId, enabled, rev])
+  }, [enabled, refresh, rev, bots])
+  useEffect(() => {
+    if (!enabled) return
+    const onChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ project_id?: string }>).detail
+      if (!detail?.project_id || detail.project_id === projectId) refresh()
+    }
+    window.addEventListener('agm:schedules_changed', onChanged)
+    return () => window.removeEventListener('agm:schedules_changed', onChanged)
+  }, [enabled, projectId, refresh])
   return map
 }
 

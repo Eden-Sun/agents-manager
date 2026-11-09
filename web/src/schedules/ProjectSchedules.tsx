@@ -73,7 +73,7 @@ export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onO
     // WS `schedules_changed` 只帶 id，這裡收到同專案的事件就重抓，不把 prompt 放進全域 state。
     const onChanged = (ev: Event) => {
       const detail = (ev as CustomEvent<{ project_id?: string }>).detail
-      if (detail?.project_id === projectId) refresh()
+      if (!detail?.project_id || detail.project_id === projectId) refresh()
     }
     window.addEventListener('agm:schedules_changed', onChanged)
     return () => window.removeEventListener('agm:schedules_changed', onChanged)

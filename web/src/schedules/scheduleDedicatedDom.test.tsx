@@ -127,3 +127,25 @@ test('側欄：排程列的 bot 按鈕跳到綁定的 bot', async () => {
   await click(document.querySelector<HTMLButtonElement>('.project-schedule-bot')!)
   assert.equal(useStore.getState().selectedBotId, 's2')
 })
+
+test('側欄：改綁後排程 bot 列的代號跟著移動（不靠 schedulesRev）', async () => {
+  let owner: Record<string, string> = { a: 's1', b: 's1' }
+  fakeApi((req) => {
+    if (req.method === 'POST' && req.path.endsWith('/schedules/rebind')) {
+      owner = { ...owner, ...Object.fromEntries((req.body as { schedule_ids: string[] }).schedule_ids.map((i) => [i, (req.body as { bot_id: string }).bot_id])) }
+      return {}
+    }
+    if (req.path.endsWith('/projects/p1/schedules')) return { schedules: [row({ id: 'a', bot_id: owner.a, code: 'S1' }), row({ id: 'b', bot_id: owner.b, code: 'S2' })] }
+    return { schedules: [] }
+  })
+  await mount(<Sidebar />)
+  await settle()
+  const codesOf = (id: string) => (() => { const n = document.querySelector(`[data-bot-id="${id}"]`)?.nextElementSibling; return n?.classList.contains('scheduler-bot-codes') ? (n.textContent ?? '') : '' })()
+  assert.match(codesOf('s1'), /S1 S2/)
+  const { rebindSchedules } = await import('../api/schedules')
+  await rebindSchedules('p1', ['b'], 's2')
+  await settle()
+  assert.doesNotMatch(codesOf('s1'), /S2/, '舊 bot 不再顯示 S2')
+  assert.match(codesOf('s1'), /S1/)
+  assert.match(codesOf('s2'), /S2/, '新 bot 顯示 S2')
+})
