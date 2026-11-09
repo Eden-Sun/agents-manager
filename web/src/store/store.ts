@@ -53,7 +53,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
-import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
+import { dropHostModels, modelsKey, saveLastModels, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -2219,6 +2219,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       const list = await api.fetchModels(kind, host, identity)
       if (!stillCurrent()) return get().models[key] ?? null
+      saveLastModels(key, list)
       set((s) => {
         const { [key]: _gone, ...failed } = s.modelsFailedAt
         return { models: { ...s.models, [key]: list }, modelsFailedAt: failed }

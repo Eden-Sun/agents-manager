@@ -31,3 +31,36 @@ test('dropHostModels removes only that host, keeps identity of untouched cache',
   assert.equal(dropHostModels(next, 'm4p'), next)
   assert.deepEqual(Object.keys(dropHostModels(cache, '')), ['claude@m4p@', 'codex@m4p@a', 'claude@other@'])
 })
+
+import { lastKnownModels, saveLastModels } from './modelsCache.ts'
+
+function fakeStorage(broken = false) {
+  const m = new Map<string, string>()
+  const st = {
+    get length() { return m.size },
+    key: (i: number) => [...m.keys()][i] ?? null,
+    getItem: (k: string) => { if (broken) throw new Error('blocked'); return m.get(k) ?? null },
+    setItem: (k: string, v: string) => { if (broken) throw new Error('blocked'); m.set(k, v) },
+  }
+  ;(globalThis as { localStorage?: unknown }).localStorage = st
+  return m
+}
+const info = (id: string) => ({ id, display_name: id, description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] }) as never
+
+test('lastKnownModels: 成功寫入後讀回；沒有同 key 就用同 kind 最新的一份', () => {
+  fakeStorage()
+  assert.equal(lastKnownModels('codex', 'codex@local@'), null)
+  saveLastModels('codex@local@', [info('gpt-6.1-luna')])
+  assert.deepEqual(lastKnownModels('codex', 'codex@local@')?.map((m) => m.id), ['gpt-6.1-luna'])
+  assert.deepEqual(lastKnownModels('codex', 'codex@m4p@')?.map((m) => m.id), ['gpt-6.1-luna'], '同 kind 任一份')
+  assert.equal(lastKnownModels('claude', 'claude@local@'), null, '不同 kind 不借用')
+})
+
+test('lastKnownModels: localStorage 壞掉或內容損毀不炸，當沒有', () => {
+  fakeStorage(true)
+  saveLastModels('codex@local@', [info('x')])
+  assert.equal(lastKnownModels('codex', 'codex@local@'), null)
+  const m = fakeStorage()
+  m.set('am.models.last:codex@local@', '{壞掉')
+  assert.equal(lastKnownModels('codex', 'codex@local@'), null)
+})

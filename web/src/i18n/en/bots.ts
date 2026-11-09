@@ -258,6 +258,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '模型': 'Model',
   '載入中…': 'Loading…',
   'API 不可用，使用內建清單': 'API unavailable; using the built-in list',
+  'API 不可用，使用上次取得的清單': 'API unavailable; using the last list fetched',
   '模型預設': 'Model default',
   '強度': 'Effort',
   '這個模型': 'this model',

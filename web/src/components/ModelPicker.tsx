@@ -9,6 +9,7 @@ import { modelSwitchPatch } from '../lib/modelSwitch'
 import { runningFast } from '../lib/runtimeDrift'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { lastKnownModels, modelsKey } from '../store/modelsCache'
 import { KindTag } from './KindTag'
 import './modelPicker.css'
 
@@ -99,7 +100,10 @@ export function ApiModelFields({
   }, [cached, kind, host, identity, loadModels])
 
   const loading = cached === undefined
-  const apiModels = apiModelList(kind, cached)
+  // 載入中／失敗：先用最後抓到的清單（它就是 API 給過的），都沒有才退回寫死的。
+  const last = Array.isArray(cached) ? null : lastKnownModels(kind, modelsKey(kind, host, identity))
+  const apiModels = apiModelList(kind, Array.isArray(cached) ? cached : last)
+  const usingLast = last !== null && apiModels.length > 0
   const fromApi = apiModels.length > 0
   const models = fromApi ? apiModels : staticModels(kind)
   const shownModels = sortModels(kind, visibleModels(models, model))
@@ -136,7 +140,7 @@ export function ApiModelFields({
       <div className="field">
         <span>
           {t('模型')}
-          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi ? null : <span className="field-note warn">{t('API 不可用，使用內建清單')}</span>}
+          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi && !(usingLast && cached === null) ? null : <span className="field-note warn">{usingLast ? t('API 不可用，使用上次取得的清單') : t('API 不可用，使用內建清單')}</span>}
           {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
@@ -356,7 +360,8 @@ export function ModelQuickPicker({
     }
   }, [open])
 
-  const apiModels = apiModelList(kind, cached)
+  const last = Array.isArray(cached) ? null : lastKnownModels(kind, modelsKey(kind, host, identity))
+  const apiModels = apiModelList(kind, Array.isArray(cached) ? cached : last)
   const fromApi = apiModels.length > 0
   const models = fromApi ? apiModels : staticModels(kind)
   const loading = open && cached === undefined
