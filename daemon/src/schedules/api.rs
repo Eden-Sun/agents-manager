@@ -106,6 +106,16 @@ fn db_err(e: impl std::fmt::Display) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// 新綁定的 Bot 一律要是「排程專屬 bot」（role = scheduler）；既有排程綁著的一般 Bot 照常跑，只是不能再被新綁。
+async fn require_dedicated_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_id: &str) -> Result<(), LcError> {
+    let role: Option<Option<String>> = sqlx::query_scalar("SELECT role FROM bots WHERE id = ?").bind(bot_id).fetch_optional(&mut **tx).await.map_err(db_err)?;
+    if role.flatten().as_deref() == Some("scheduler") {
+        Ok(())
+    } else {
+        Err(LcError::BadValue(json!({"error": "bad_request", "reason": "schedule_bot_not_dedicated", "bot_id": bot_id})))
+    }
+}
+
 fn schedule_json(s: &Schedule) -> Value {
     json!({
         "id": s.id, "project_id": s.project_id, "bot_id": s.bot_id, "name": s.name, "prompt": s.prompt,
@@ -119,6 +129,9 @@ fn schedule_json(s: &Schedule) -> Value {
 async fn with_open(pool: &sqlx::SqlitePool, s: &Schedule) -> Result<Value, LcError> {
     let mut v = schedule_json(s);
     v["bot_available"] = json!(runner::eligible_bot(pool, &s.bot_id, &s.project_id).await.map_err(db_err)?);
+    // 綁的不是排程專屬 bot（舊排程）：UI 提示「轉成專屬」或「改綁到新專屬 bot」。
+    let role: Option<Option<String>> = sqlx::query_scalar("SELECT role FROM bots WHERE id = ?").bind(&s.bot_id).fetch_optional(pool).await.map_err(db_err)?;
+    v["bot_dedicated"] = json!(role.flatten().as_deref() == Some("scheduler"));
     v["open"] = match store::open_occurrence(pool, &s.id).await.map_err(db_err)? {
         Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
         None => Value::Null,
@@ -221,6 +234,7 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     if runner::eligible_bot_tx(&mut tx, &b.bot_id, Some(&project_id)).await.map_err(db_err)?.is_none() {
         return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
     }
+    require_dedicated_tx(&mut tx, &b.bot_id).await?;
     let now = db::now();
     for head in &heads {
         let cur = store::get_schedule_tx(&mut tx, &head.id).await.map_err(db_err)?
@@ -265,6 +279,7 @@ pub async fn create(State(app): State<Arc<App>>, Path(project_id): Path<String>,
     if runner::eligible_bot_tx(&mut tx, &b.bot_id, Some(&project_id)).await.map_err(db_err)?.is_none() {
         return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
     }
+    require_dedicated_tx(&mut tx, &b.bot_id).await?;
     if b.from_base {
         super::base::require_tx(&mut tx, &b.bot_id).await?;
     }
@@ -362,6 +377,7 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
         if runner::eligible_bot_tx(&mut tx, &bot_id, Some(&cur.project_id)).await.map_err(db_err)?.is_none() {
             return Err(LcError::Bad("這顆 Bot 不能接收排程（需要是同專案的一般 Bot，不能是 child、分享或受限）".into()));
         }
+        require_dedicated_tx(&mut tx, &bot_id).await?;
     }
     if from_base == 1 && (bot_changed || b.from_base == Some(true)) {
         super::base::require_tx(&mut tx, &bot_id).await?;

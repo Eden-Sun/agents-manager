@@ -182,7 +182,7 @@ test('詳情新 GET 先回時，較舊的排程回應不能覆蓋新狀態', asy
 
 test('建立排程仍送 spec（create 路徑不走 baseline 比對）', async () => {
   const prevBots = useStore.getState().bots
-  useStore.setState({ bots: [{ id: 'b1', name: 'b', kind: 'claude', project_id: 'p1', managed_by: 'user', parent_bot_id: null, share_profile: null }] } as never)
+  useStore.setState({ bots: [{ id: 'b1', name: 'b', kind: 'claude', role: 'scheduler', project_id: 'p1', managed_by: 'user', parent_bot_id: null, share_profile: null }] } as never)
   try {
     const requests = fakeApi((req) => (req.method === 'POST' ? scheduleRow({ id: 's9' }) : undefined))
     await mount(<ScheduleEditor projectId="p1" scheduleId={null} onClose={() => {}} onSelect={() => {}} />)

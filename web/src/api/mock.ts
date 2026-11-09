@@ -243,7 +243,7 @@ interface MockBot {
   project_id: string
   name: string
   kind: BotKind
-  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
+  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
   track?: string | null
   runtime_override?: RuntimeSettings | null
   role_pending?: boolean
@@ -2621,6 +2621,7 @@ export class MockTransport implements Transport {
     }
     const bot: MockBot = {
       id: ulid('bot'),
+      role: b.role === 'scheduler' ? 'scheduler' : null,
       project_id: projectId,
       name,
       kind: toKind(b.kind),
@@ -2794,7 +2795,7 @@ export class MockTransport implements Transport {
     }
     if (b.role !== undefined) {
       bot.role =
-        b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' || b.role === 'specialist' ? b.role : null
+        b.role === 'manager' || b.role === 'executor' || b.role === 'advisor' || b.role === 'specialist' || b.role === 'scheduler' ? b.role : null
     }
     if (bot.role === 'specialist' && !bot.track) {
       throw new ApiError(400, { error: 'track_required' }, 'bad request')

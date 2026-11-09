@@ -16,7 +16,7 @@ export function ineligibleReason(b: Bot, projectId: string): string | null {
   return null
 }
 
-const ROLE_LABEL: Record<string, string> = { manager: msg('管'), executor: msg('執'), advisor: msg('顧'), specialist: msg('專') }
+const ROLE_LABEL: Record<string, string> = { manager: msg('管'), executor: msg('執'), advisor: msg('顧'), specialist: msg('專'), scheduler: msg('排') }
 
 /**
  * 執行的 Bot 清單（取代原生 select）：每列有名稱、kind、模型＋強度、身份、角色、狀態燈，

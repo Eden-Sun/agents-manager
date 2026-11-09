@@ -2765,6 +2765,9 @@ struct NewBot {
     /// `"restricted"`＝分享用的受限 bot、`"trusted"`＝信任分享（一般 bot 的權限，SPEC §20.1）。只在建立時決定，之後不能切換。
     #[serde(default)]
     share_profile: Option<String>,
+    /// 只收 `"scheduler"`（排程專屬 bot，不算執行者）；其他值 400。缺省＝沒有角色。
+    #[serde(default)]
+    role: Option<String>,
     /// 分享用 bot 的資料夾（`{"kind":"new","name"}`／`{"kind":"existing","path"}`）。受限：沒帶＝新資料夾、名字用 bot 名；
     /// 信任分享：只收既有資料夾，沒帶＝專案目錄。
     #[serde(default)]
@@ -2834,6 +2837,11 @@ async fn create_bot(
     if !crate::config::valid_bot_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::bot_kinds_list())));
     }
+    let scheduler_role = match b.role.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some("scheduler") => Some("scheduler".to_string()),
+        Some(_) => return Err(LcError::Bad("role on create only accepts `scheduler`".into())),
+    };
     let api_bot = b.kind == crate::config::API_BOT_KIND;
     if api_bot {
         check_api_bot_create(&b)?;
@@ -2943,6 +2951,7 @@ async fn create_bot(
             restricted,
             share_folder,
             share_profile,
+            scheduler_role,
         ])
         .to_string()
     });
@@ -2993,7 +3002,7 @@ async fn create_bot(
             b.name.clone()
         };
         *used_name.lock().unwrap() = name.clone();
-        p.bots.push(crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
+        p.bots.push(crate::config::BotCfg { role: scheduler_role.clone(), manager_use: true, track: None, runtime_override: None, fork_from: None,
             id: Some(id.clone()),
             name,
             kind: b.kind.clone(),
@@ -3407,7 +3416,8 @@ async fn hire_member(
     let role = match b.role.as_deref().map(str::trim) {
         None | Some("") | Some("executor") => "executor",
         Some("specialist") => "specialist",
-        Some(_) => return Err(LcError::Bad("role must be executor or specialist".into())),
+        Some("scheduler") => "scheduler",
+        Some(_) => return Err(LcError::Bad("role must be executor, specialist or scheduler".into())),
     };
     let track = b.track.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     if role == "specialist" && track.is_none() {
@@ -3528,7 +3538,7 @@ async fn patch_bot(
             return Err(bot_user_only());
         }
     }
-    if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist") { return Err(LcError::Bad("invalid role".into())); } }
+    if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist" | "scheduler") { return Err(LcError::Bad("invalid role".into())); } }
     // 專家（specialist）一定要有 track：合併改動後的結果（角色＋track）必須有 track，否則 400。
     if b.role.is_some() || b.track.is_some() {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -19205,6 +19215,36 @@ mod hire_fork_api_tests {
             Ok(())
         }).await.map_err(|e| format!("{e:?}")).unwrap();
         manager
+    }
+
+    /// 排程專屬 bot（role = scheduler）：建立時就帶角色、不進 peers／群集、不是派工目標。
+    #[tokio::test]
+    async fn a_scheduler_bot_is_not_a_peer_a_cluster_member_or_a_dispatch_target() {
+        let env = crate::testing::env().await;
+        let manager = expert_project(&env).await;
+        let create = |body: Value| create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(body).unwrap()));
+        let err = create(json!({"name": "bad-role", "kind": "claude", "role": "executor"})).await.err().unwrap();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        let res = create(json!({"name": "sched-a", "kind": "claude", "role": "scheduler"})).await.unwrap();
+        let sched = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
+        assert_eq!(db::bot(&env.app.db, &sched).await.unwrap().unwrap().role.as_deref(), Some("scheduler"));
+        // 管理者也能增聘專屬 bot（走既有 hire 權限）。
+        let res = hire(&env, &manager, json!({"name": "sched-b", "kind": "claude", "role": "scheduler"})).await.unwrap();
+        let hired = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
+        assert_eq!(db::bot(&env.app.db, &hired).await.unwrap().unwrap().role.as_deref(), Some("scheduler"));
+        // 也有一般的執行者作對照。
+        let worker = add_bot(&env, &env.project_id, "claude", false).await;
+        patch_bot(State(env.app.clone()), Path(worker.clone()), Extension(RequestPrincipal::User), Json(serde_json::from_value(json!({"role": "executor"})).unwrap())).await.map_err(|e| format!("{e:?}")).unwrap();
+
+        let Json(peers) = crate::expert_peers::list(State(env.app.clone()), Path(env.project_id.clone()), Query(crate::expert_peers::PeersQuery { for_track: None }), Extension(RequestPrincipal::Bot(manager.clone()))).await.unwrap();
+        let ids: Vec<&str> = peers["peers"].as_array().unwrap().iter().filter_map(|p| p["id"].as_str()).collect();
+        assert!(ids.contains(&worker.as_str()) && !ids.contains(&sched.as_str()) && !ids.contains(&hired.as_str()), "{ids:?}");
+        let clusters = crate::expert_cluster::project_clusters(&env.app, &env.project_id).await.unwrap();
+        assert!(clusters.iter().flat_map(|c| c.members.iter()).all(|m| m.id != sched && m.id != hired), "排程專屬不進群集");
+        for to in [&sched, &hired] {
+            let denied = crate::relay_policy::relay_prompt_allowed(&env.app, &manager, to, crate::relay_policy::Admission::NewRequest).await;
+            assert!(matches!(denied, Err(crate::relay_policy::RelayDenied::Denied(ref m)) if m == "schedule_bot_not_dispatchable"), "{denied:?}");
+        }
     }
 
     /// 建一顆 bot（名字唯一）；`session` 為真就給它一段已結束的 run 與 codex session。

@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { persistSetDiff } from '../store/sharedSet'
 import { renderProbe } from '../lib/renderProbe'
 import { useStableCallback } from '../hooks/useStableCallback'
@@ -657,7 +657,8 @@ function defaultKindForProject(projectId: string, tools: ReturnType<typeof tools
   return installed[0] ?? BOT_KINDS[0]
 }
 
-export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: () => void; initialProjectId?: string; onCreated?: (botId: string) => void }) {
+/** `scheduler`：建成排程專屬 bot（role = scheduler，不算執行者）；專家專案也走這張一般表單，不是執行者／專家那張。`defaultName`：預設名稱（排程名稱）。 */
+export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, defaultName }: { onDone: () => void; initialProjectId?: string; onCreated?: (botId: string) => void; scheduler?: boolean; defaultName?: string }) {
   const t = useT()
   const projects = useStore((s) => s.projects)
   const hosts = useStore((s) => s.hosts)
@@ -670,7 +671,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   const host = useStore((s) => projectHostName(s, pid || null))
   const tools = useStore((s) => toolsOfHost(s, host))
   const [kind, setKind] = useState<BotKind>(() => (pid ? defaultKindForProject(pid, tools, bots) : 'claude'))
-  const [name, setName] = useState(() => (pid ? uniqueBotName(kind, pid, bots) : ''))
+  const [name, setName] = useState(() => defaultName || (pid ? uniqueBotName(kind, pid, bots) : ''))
   const [model, setModel] = useState<string | null>(null)
   const [effort, setEffort] = useState<string | null>(null)
   const [fast, setFast] = useState(false)
@@ -680,7 +681,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   const [shareFolder, setShareFolder] = useState<ShareFolderDraft>(EMPTY_SHARE_FOLDER)
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
-  const nameTouched = useRef(false)
+  const nameTouched = useRef(Boolean(defaultName))
   const nameLabelId = useId()
   const nameHintId = useId()
 
@@ -729,7 +730,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
   }
 
   const selectedProj = projects.find((p) => p.id === pid)
-  if (selectedProj?.mode === 'expert') {
+  if (selectedProj?.mode === 'expert' && !scheduler) {
     return (
       <div className="new-bot-dialog-expert-wrapper">
         {initialProjectId ? null : (
@@ -797,6 +798,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
           fast: kind === 'codex' || apiKind ? fast : undefined,
           persona: apiKind ? null : persona.trim() || null,
           autostart: false,
+          ...(scheduler ? { role: 'scheduler' as const } : {}),
           identity: apiKind ? null : identity || null,
           // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關；信任分享照一般 bot。
           ...(apiKind ? {} : shareCreateFields(shareProfile, folderIn)),
@@ -927,7 +929,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         {!cliOk ? <span className="hint">{t('此 kind 的 CLI 尚未安裝，無法建立')}</span> : null}
       </label>
       {apiKind ? null : <PersonaField value={persona} onChange={setPersona} collapsible />}
-      {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />}
+      {apiKind || scheduler ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />}
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           {t('取消')}
@@ -937,6 +939,25 @@ export function NewBotForm({ onDone, initialProjectId, onCreated }: { onDone: ()
         </button>
       </div>
     </form>
+  )
+}
+
+/** 專案底下可收合的「排程 bot」區（預設收合）：排程專屬 bot 不混在執行者／一般 bot 清單裡。搜尋中一律展開。 */
+function SchedulerBotSection({ count, forceOpen, projectLabel, children }: { count: number; forceOpen: boolean; projectLabel: string; children: ReactNode }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const shown = open || forceOpen
+  return (
+    <div className="scheduler-bots">
+      <button type="button" className="scheduler-bots-head" aria-expanded={shown} onClick={() => setOpen((v) => !v)}>
+        <span aria-hidden="true">{shown ? '▾' : '▸'}</span> {t('排程 bot')} <span className="scheduler-bots-count">{count}</span>
+      </button>
+      {shown ? (
+        <div className="bot-list" role="list" aria-label={t('{name} 的排程 bot', { name: projectLabel })}>
+          {children}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -1377,7 +1398,10 @@ export function Sidebar() {
           const hiddenCount = all.length - shown.length
           // 父列不在這一份清單裡（被刪、被收起）的子 agent 沒有地方掛：照頂層列畫，不然整顆從側欄消失。
           const shownIds = new Set(shown.map((b) => b.id))
-          const list = shown.filter((b) => !b.parent_bot_id || !shownIds.has(b.parent_bot_id))
+          const topLevel = shown.filter((b) => !b.parent_bot_id || !shownIds.has(b.parent_bot_id))
+          // 排程專屬 bot 不混在執行者／一般清單裡：收進專案底下可收合的「排程 bot」區。
+          const list = topLevel.filter((b) => b.role !== 'scheduler')
+          const schedBots = topLevel.filter((b) => b.role === 'scheduler')
           const childrenOf = (id: string) => shown.filter((b) => b.parent_bot_id === id)
           // 孫代也要畫（SPEC §6.5a）：子列 → 它的子列 → 下一個子列，深度優先。
           const descendantsOf = (id: string, seen = new Set<string>()): Bot[] =>
@@ -1385,7 +1409,7 @@ export function Sidebar() {
           const projectSelected = selectedProjectId === p.id
           // 搜尋中一律展開。
           const projectShut = shutProjects.has(p.id) && !query
-          if (query && list.length === 0) return null
+          if (query && topLevel.length === 0) return null
           const pDragging = pdrag?.id === p.id
           const pDropEdge = pdrag && pdrag.id !== p.id && pdrag.overId === p.id ? pdrag.edge : null
           return (
@@ -1479,13 +1503,13 @@ export function Sidebar() {
                 <button type="button" className="project-folded" onClick={() => toggleProject(p.id)}>
                   {t('{n} 個 Bot·點一下展開', { n: all.length })}
                 </button>
-              ) : list.length === 0 && hiddenCount > 0 ? (
+              ) : topLevel.length === 0 && hiddenCount > 0 ? (
                 // 全被隱藏：同空專案版面，但標「已隱藏」讓人知道 bot 沒不見。
                 <div className="project-empty">
                   <span className="project-quota-hidden">{t('{n} 個 Bot 已隱藏（額度不足）', { n: hiddenCount })}</span>
                   <QuickAddBots projectId={p.id} />
                 </div>
-              ) : list.length === 0 ? (
+              ) : topLevel.length === 0 ? (
                 <div className="project-empty">
                   <span className="project-empty-title">{t('此專案尚無 Bot')}</span>
                   <QuickAddBots projectId={p.id} />
@@ -1599,6 +1623,26 @@ export function Sidebar() {
                 </div>
               )}
               {/* 這個專案被 trace 的 shell／服務 pane（§6.5e）：點一下在這裡打開，不是任開任關。 */}
+              {projectShut || schedBots.length === 0 ? null : (
+                <SchedulerBotSection
+                  count={schedBots.length}
+                  forceOpen={Boolean(query)}
+                  projectLabel={p.label}
+                >
+                  {schedBots.map((b) => (
+                    <BotRow
+                      key={b.id}
+                      botId={b.id}
+                      hit={hits[b.id]}
+                      drag={drag}
+                      onDrag={setDrag}
+                      onDropAt={dropAt}
+                      onNudge={nudge}
+                      onStep={step}
+                    />
+                  ))}
+                </SchedulerBotSection>
+              )}
               {projectShut ? null : <ProjectSchedules projectId={p.id} onOpen={(sid, focusBot) => setScheduleEditor({ projectId: p.id, scheduleId: sid, focusBot })} />}
               {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}

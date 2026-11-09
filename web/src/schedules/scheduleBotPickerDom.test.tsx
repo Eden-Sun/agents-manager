@@ -21,7 +21,7 @@ after(async () => {
 
 const bot = (id: string, over: Record<string, unknown> = {}) => ({
   id, name: `bot-${id}`, project_id: 'p1', kind: 'claude', identity: 'cc0', model: 'opus', effort: 'high', args: [], env: {},
-  autostart: false, inject_hooks: true, auto_approve: false, managed_by: 'user', parent_bot_id: null, role: 'executor',
+  autostart: false, inject_hooks: true, auto_approve: false, managed_by: 'user', parent_bot_id: null, role: 'scheduler',
   primary: false, primary_position: 0, cwd: null, share_profile: null, fast: false, persona: null, ...over,
 })
 
@@ -30,10 +30,11 @@ beforeEach(() => {
     projects: [{ id: 'p1', label: 'proj-p1', path: '/p1', host: 'local' }],
     bots: [
       bot('b1'),
-      bot('b2', { identity: 'cc1', role: 'advisor' }),
+      bot('b2', { identity: 'cc1' }),
       bot('b3', { project_id: 'p2' }),
       bot('b4', { kind: 'claude-api' }),
       bot('b5', { managed_by: 'child', parent_bot_id: 'b1' }),
+      bot('b6', { role: 'executor' }),
     ],
     runs: {}, botOrder: {}, projectOrder: [], botUnread: {}, connected: true, defaultConnected: true, socket: 'open',
     selectedBotId: 'b1', selectedProjectId: null, sidePanes: {}, unownedPanes: [],
@@ -55,19 +56,18 @@ async function openNew(others: Array<Record<string, unknown>>) {
   await settle()
 }
 
-test('Bot 清單：每列有 kind、身份、角色；同專案一般 Bot 可選，別專案與 claude-api、child 灰掉並寫原因', async () => {
+test('Bot 清單：只列本專案的排程專屬 bot（不列執行者、別專案、child）；claude-api 專屬 bot 灰掉寫原因', async () => {
   await openNew([])
+  const listed = [...document.querySelectorAll<HTMLElement>('.sched-bot-row')].map((e) => e.dataset.botId)
+  assert.deepEqual(listed.sort(), ['b1', 'b2', 'b4'], '執行者 b6、別專案 b3、child b5 都不列')
   assert.match(row('b1').textContent ?? '', /bot-b1/)
   assert.match(row('b1').textContent ?? '', /cc0/)
   assert.match(row('b2').textContent ?? '', /cc1/)
-  assert.match(row('b2').textContent ?? '', /顧/)
+  assert.match(row('b2').textContent ?? '', /排/)
   assert.equal(row('b1').getAttribute('aria-pressed'), 'true')
   assert.equal(row('b2').disabled, false)
-  assert.equal(row('b3').disabled, true)
-  assert.match(row('b3').textContent ?? '', /屬於其他專案/)
   assert.equal(row('b4').disabled, true)
   assert.match(row('b4').textContent ?? '', /claude-api 不能接排程/)
-  assert.match(row('b5').textContent ?? '', /子 agent 不能接排程/)
 })
 
 test('Bot 清單：目前選的置頂；已被其他排程用的標「已有 N 個排程」', async () => {

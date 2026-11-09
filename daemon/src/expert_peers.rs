@@ -50,7 +50,8 @@ pub(crate) async fn list(
     let caller_id = caller.as_ref().map(|c| c.id.clone());
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut peers = Vec::new();
-    for bot in bots.iter().filter(|b| b.project_id == project_id) {
+    // 排程專屬 bot 不是同事：不列、不派工。
+    for bot in bots.iter().filter(|b| b.project_id == project_id && b.role.as_deref() != Some("scheduler")) {
         let run = crate::db::active_run(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         // A successful RPC establishes when we observed herdr, but not the freshness of its
         // cached underlying agent state. Keep that uncertainty visible to the caller.

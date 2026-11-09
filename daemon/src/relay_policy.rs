@@ -42,6 +42,7 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
         return Err(RelayDenied::MemberDisabled(format!("{} 已被使用者停用（側欄『停用』鈕／manager_use=false），管理者無法派工；請使用者在 AG Man 側欄重新啟用", to.name)));
     }
     if is_agm { return Ok(None); }
+    if to.role.as_deref() == Some("scheduler") { return Err(RelayDenied::Denied("schedule_bot_not_dispatchable".into())); }
     // 跨專案（使用者 2026-10-31／11-02）：目標在 expert 專案 → 只准送到它的頂層 manager（對外窗口），送件者若在 expert 專案也必須是 manager；
     // 目標在一般專案 → 寄件者是一般專案的 bot，或 expert 專案的頂層 manager（前台要能回覆外部 bot）。expert 的非管理者不能出專案。
     let from_is_front = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();

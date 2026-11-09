@@ -26,7 +26,7 @@ after(async () => {
 
 const project = (id: string) => ({ id, label: `proj-${id}`, path: `/${id}`, host: 'local' })
 const bot = (id: string, projectId: string, managedBy = 'user') => ({
-  id, name: `bot-${id}`, project_id: projectId, kind: 'claude', identity: null, model: null, effort: null, args: [], env: {},
+  id, name: `bot-${id}`, project_id: projectId, kind: 'claude', role: 'scheduler', identity: null, model: null, effort: null, args: [], env: {},
   autostart: false, inject_hooks: true, auto_approve: false, managed_by: managedBy, parent_bot_id: managedBy === 'child' ? 'b1' : null,
   primary: false, primary_position: 0, cwd: null, share_profile: null,
 })
@@ -74,13 +74,9 @@ test('選單「新增排程」開編輯器，Bot 下拉只列同專案的一般 
   const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
   assert.ok(dialog, '要開出「新增排程」對話框')
   const options = [...dialog.querySelectorAll<HTMLElement>('.sched-bot-row')].map((e) => e.dataset.botId ?? '')
-  assert.ok(options.includes('b1') && options.includes('b2'), '同專案的一般 Bot 要列出')
-  // 別的專案、child 的 Bot 仍列出但灰掉、寫原因，不能選。
-  const row = (id: string) => dialog.querySelector<HTMLButtonElement>(`[data-bot-id="${id}"]`)!
-  assert.equal(row('b3').disabled, true, '別的專案的 Bot 灰掉')
-  assert.match(row('b3').textContent ?? '', /屬於其他專案/)
-  assert.equal(row('b4').disabled, true, 'child Bot 灰掉')
-  assert.match(row('b4').textContent ?? '', /子 agent/)
+  assert.ok(options.includes('b1') && options.includes('b2'), '同專案的排程專屬 Bot 要列出')
+  // 別的專案、child 的 Bot 不列（只列本專案的排程專屬 bot）。
+  assert.ok(!options.includes('b3') && !options.includes('b4'), '別專案與 child 不列')
 })
 
 test('建立排程送出 client_request_id；後端 409（key 用在別的內容）時換新 key', async () => {

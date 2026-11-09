@@ -11,8 +11,15 @@ use axum::Json;
 
 async fn setup() -> (testing::Env, db::Bot) {
     let e = testing::env().await;
-    let bot = testing::claude_bot(&e.app, &e.project_id, "sched-bot").await;
+    let bot = dedicated(&e, "sched-bot").await;
     (e, bot)
+}
+
+/// 排程專屬 bot（role = scheduler）：新綁定一律要這種。
+async fn dedicated(e: &testing::Env, name: &str) -> db::Bot {
+    let bot = testing::claude_bot(&e.app, &e.project_id, name).await;
+    sqlx::query("UPDATE bots SET role = 'scheduler' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+    db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
 }
 
 fn daily(bot: &str, prompt: &str) -> CreateIn {
@@ -658,7 +665,7 @@ async fn a_retry_waiting_in_the_queue_cannot_be_claimed_past_its_deadline() {
 #[tokio::test]
 async fn unavailable_bot_waits_once_and_batch_rebind_withdraws_that_occurrence() {
     let (e, bot) = setup().await;
-    let target = testing::claude_bot(&e.app, &e.project_id, "replacement").await;
+    let target = dedicated(&e, "replacement").await;
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
     let occurrence = pending(&e.app, &s).await;
     sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&e.app.db).await.unwrap();
@@ -677,7 +684,7 @@ async fn unavailable_bot_waits_once_and_batch_rebind_withdraws_that_occurrence()
 #[tokio::test]
 async fn batch_rebind_is_atomic_when_any_schedule_has_an_open_execution() {
     let (e, bot) = setup().await;
-    let target = testing::claude_bot(&e.app, &e.project_id, "replacement").await;
+    let target = dedicated(&e, "replacement").await;
     let first = schedule(&e.app, &e.project_id, &bot.id).await;
     let second = schedule(&e.app, &e.project_id, &bot.id).await;
     pending(&e.app, &second).await;
@@ -812,7 +819,7 @@ mod from_base {
     use serde_json::{json, Value};
 
     async fn codex_bot(e: &testing::Env, name: &str) -> db::Bot {
-        let bot = testing::claude_bot(&e.app, &e.project_id, name).await;
+        let bot = super::dedicated(e, name).await;
         sqlx::query("UPDATE bots SET kind = 'codex' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
         db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
     }
@@ -1017,12 +1024,62 @@ mod from_base {
         body.from_base = true;
         let Json(created) = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
         assert_eq!(created["from_base"], true);
-        let cl = testing::claude_bot(&e.app, &e.project_id, "cl").await;
+        let cl = super::dedicated(&e, "cl").await;
         let mut body = daily(&cl.id, "x");
         body.client_request_id = "crid-2".into();
         body.from_base = true;
         let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.err().expect("claude 不能開");
         assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "base_snapshot_not_codex"), "{err:?}");
         let _ = json!(null);
+    }
+}
+
+// ── 排程專屬 bot ─────────────────────────────────────────────────────────────
+
+mod dedicated_bot {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_bindings_must_be_dedicated_but_existing_ones_keep_running() {
+        let e = testing::env().await;
+        let plain = testing::claude_bot(&e.app, &e.project_id, "plain").await;
+        let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(daily(&plain.id, "x"))).await.err().expect("一般 bot 不能新綁");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "schedule_bot_not_dedicated"), "{err:?}");
+        // 舊排程綁一般 bot：照常落帳、綁 turn；詳情帶 bot_dedicated=false 供 UI 提示。
+        let s = schedule(&e.app, &e.project_id, &plain.id).await;
+        let occ = pending(&e.app, &s).await;
+        assert!(runner::enqueue(&e.app, &occ).await.unwrap(), "既有綁定照常執行");
+        let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
+        assert_eq!(v["bot_dedicated"], false);
+        // 轉成專屬（role = scheduler）後提示消失。
+        sqlx::query("UPDATE bots SET role = 'scheduler' WHERE id = ?").bind(&plain.id).execute(&e.app.db).await.unwrap();
+        let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
+        assert_eq!(v["bot_dedicated"], true);
+    }
+
+    #[tokio::test]
+    async fn rebinding_or_changing_the_bot_needs_a_dedicated_target() {
+        let e = testing::env().await;
+        let own = dedicated(&e, "own").await;
+        let plain = testing::claude_bot(&e.app, &e.project_id, "plain").await;
+        let s = schedule(&e.app, &e.project_id, &own.id).await;
+        let err = api::patch(State(e.app.clone()), Path(s.id.clone()), Json(api::PatchIn { name: None, prompt: None, bot_id: Some(plain.id.clone()), tz: None, spec: None, notify: None, clear_after: None, from_base: None, retry_count: None, retry_interval_mins: None, retry_deadline_mins: None, enabled: None })).await.err().expect("不能改綁一般 bot");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "schedule_bot_not_dedicated"), "{err:?}");
+        let err = api::rebind(State(e.app.clone()), Path(e.project_id.clone()), Json(api::RebindIn { schedule_ids: vec![s.id.clone()], bot_id: plain.id.clone() })).await.err().expect("批次改綁也不行");
+        assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "schedule_bot_not_dedicated"), "{err:?}");
+        let other = dedicated(&e, "other").await;
+        api::rebind(State(e.app.clone()), Path(e.project_id.clone()), Json(api::RebindIn { schedule_ids: vec![s.id.clone()], bot_id: other.id.clone() })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dedicated_bot_can_be_shared_by_several_schedules() {
+        let e = testing::env().await;
+        let own = dedicated(&e, "shared").await;
+        let mut a = daily(&own.id, "上班");
+        a.client_request_id = "crid-a".into();
+        let mut b = daily(&own.id, "下班");
+        b.client_request_id = "crid-b".into();
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(a)).await.unwrap();
+        api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(b)).await.unwrap();
     }
 }

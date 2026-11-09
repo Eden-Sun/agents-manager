@@ -78,6 +78,8 @@ export interface Schedule {
   clear_after: boolean
   /** 每次從基準快照開始（bot 的 codex 基準；`/bots/{id}/base-snapshot`）。 */
   from_base?: boolean
+  /** 綁的是排程專屬 bot（role = scheduler）；舊排程綁一般 bot 時為 false，UI 提示轉成專屬或改綁。 */
+  bot_dedicated?: boolean
   created_at: string
   updated_at: string
   /** 列表與詳情都帶：未結束的 occurrence（pending／queued），沒有就是 null。 */

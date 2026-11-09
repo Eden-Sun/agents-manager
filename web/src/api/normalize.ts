@@ -309,7 +309,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     id,
     project_id: str(pick(v, 'project_id'), projectId ?? ''),
     name: str(pick(v, 'name'), id),
-    role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' || v.role === 'specialist' ? v.role : null,
+    role: v.role === 'manager' || v.role === 'executor' || v.role === 'advisor' || v.role === 'specialist' || v.role === 'scheduler' ? v.role : null,
     track: optStr(v.track),
     runtime_override: isRec(v.runtime_override) ? (v.runtime_override as RuntimeSettings) : null,
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),

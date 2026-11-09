@@ -301,7 +301,7 @@ export interface RuntimeSettings {
 }
 
 export interface Bot {
-  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
+  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
   /** 專家（specialist）負責的軌道；role=specialist 時必填 */
   track?: string | null
   /** 執行期覆蓋（B 期才用）；null＝跟角色 */
@@ -809,6 +809,8 @@ export type ShareFolderIn = { kind: 'new'; name: string } | { kind: 'existing'; 
 
 export interface NewBotInput {
   name: string
+  /** 只收 `scheduler`：建成排程專屬 bot（不算執行者）。 */
+  role?: 'scheduler'
   /** 名稱撞到時 daemon 自動找 `<base>-<n>`；回應帶實際 `name`。 */
   name_auto?: boolean
   kind: BotKind
@@ -837,7 +839,7 @@ export interface NewBotInput {
 export interface PatchBotInput {
   /** 執行期覆寫（B 期，User-only）；`null`＝跟角色。 */
   runtime_override?: RuntimeSettings | null
-  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | null
+  role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
   /** 專家軌道（只有 User 能改）；`null`＝清掉 */
   track?: string | null
   manager_use?: boolean

@@ -19,7 +19,7 @@ import {
 import { useStore } from '../store/store'
 import { ScheduleBotPicker } from './ScheduleBotPicker'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
-import { newClientRequestId } from '../api'
+import { newClientRequestId, patchBot } from '../api'
 import { ApiError } from '../api/types'
 import { getBaseSnapshot } from '../api/baseSnapshot'
 import { isImeEnter } from '../lib/ime'
@@ -98,6 +98,11 @@ interface FormState {
   retryCount: number
   retryInterval: number
   retryDeadline: number
+}
+
+/** 預設的專屬 bot 名稱＝排程名稱（去掉 bot 名稱不收的字元、最長 32）；清完是空的就讓表單自己排。 */
+function botNameFrom(scheduleName: string): string {
+  return scheduleName.replace(/[@,:;]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 32).trim()
 }
 
 function emptyForm(botId: string): FormState {
@@ -257,6 +262,11 @@ export function ScheduleEditor({
     () => bots.filter((b) => b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
     [bots, projectId],
   )
+  // 一律用排程專屬 bot（role = scheduler）；只有既有排程綁著的一般 Bot 例外（照常執行，旁邊提示轉成專屬）。
+  const pickable = useMemo(
+    () => eligible.filter((b) => b.role === 'scheduler' || b.id === detail?.bot_id),
+    [eligible, detail?.bot_id],
+  )
 
   const [loading, setLoading] = useState(() => Boolean(scheduleId))
   // 同專案的其他排程：挑 Bot 時看它已經被哪些排程用、有沒有時間衝突（只讀，不影響存檔）。
@@ -292,7 +302,19 @@ export function ScheduleEditor({
   }, [loadLatestDetail, scheduleId])
 
   // 建立時預設第一顆可用 Bot（之後使用者可改）：推導出來，不用 effect 寫回表單。
-  const effectiveBotId = form.botId || (scheduleId ? '' : (eligible[0]?.id ?? ''))
+  const effectiveBotId = form.botId || (scheduleId ? '' : (pickable[0]?.id ?? ''))
+  // 既有排程綁的 Bot（可能是一般 Bot／執行者）：提示轉成專屬。
+  const boundBot = detail ? (bots.find((b) => b.id === detail.bot_id) ?? null) : null
+  const refreshState = useStore((s) => s.refreshState)
+  const convertToDedicated = async (botId: string) => {
+    try {
+      await patchBot(botId, { role: 'scheduler' })
+      await refreshState()
+      setNotice(t('已轉成排程專屬 bot。'))
+    } catch (e) {
+      setError(errText(e))
+    }
+  }
   // 選到的 Bot 有基準快照才能開「每次從基準快照開始」。
   const [baseLocked, setBaseLocked] = useState(false)
   useEffect(() => {
@@ -522,7 +544,7 @@ export function ScheduleEditor({
         <div ref={botSelectRef} tabIndex={-1} className="schedule-bot-focus">
         <ScheduleBotPicker
           projectId={projectId}
-          bots={bots}
+          bots={pickable}
           selectedId={effectiveBotId}
           usageOf={(id) => otherSchedules.filter((x) => x.bot_id === id)}
           onSelect={(id) => set('botId', id)}
@@ -531,12 +553,22 @@ export function ScheduleEditor({
         </div>
       </label>
       <p className="hint">
-        {t('排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。')}
+        {t('排程一律用「排程專屬 bot」：它不算執行者、不會被派工，側欄收在「排程 bot」區。排程會排進這顆 Bot 的對話與佇列；同一網站的上班／下班可共用一顆，預設建新的。')}
       </p>
+      {boundBot && boundBot.role !== 'scheduler' ? (
+        <p className="hint" role="status">
+          {t('這個排程綁的不是排程專屬 bot（{name}）：照常執行不受影響。可「轉成專屬」（把它標成排程專屬，之後不再當執行者），或「＋ 建立專屬 bot」改綁到新的。', { name: boundBot.name })}
+        </p>
+      ) : null}
       <div className="schedule-bot-actions">
         <button type="button" className="btn" disabled={loading} onClick={() => setBotSheet(true)}>
-          {t('建立專用 Bot…')}
+          {t('＋ 建立專屬 bot')}
         </button>
+        {boundBot && boundBot.role !== 'scheduler' && effectiveBotId === boundBot.id ? (
+          <button type="button" className="btn" disabled={loading} onClick={() => void convertToDedicated(boundBot.id)}>
+            {t('轉成專屬')}
+          </button>
+        ) : null}
         {effectiveBotId ? (
           <button
             type="button"
@@ -761,9 +793,11 @@ export function ScheduleEditor({
       <Modal open width={760} title={scheduleId ? t('排程') : copyOf ? t('複製排程') : t('新增排程')} onClose={onClose}>
         {body}
       </Modal>
-      <Modal open={botSheet} title={t('新增專用 Bot')} onClose={() => setBotSheet(false)}>
+      <Modal open={botSheet} title={t('建立排程專屬 bot')} onClose={() => setBotSheet(false)}>
         <NewBotForm
           key={projectId}
+          scheduler
+          defaultName={botNameFrom(form.name)}
           initialProjectId={projectId}
           onDone={() => setBotSheet(false)}
           onCreated={(id) => setForm((f) => ({ ...f, botId: id }))}

@@ -78,8 +78,6 @@ const dict: Dict = {
   '⌘/Ctrl+Enter 儲存': '⌘/Ctrl+Enter to save',
   '執行的 Bot': 'Runner Bot',
   '（這個專案沒有 Bot）': '(no Bot in this project)',
-  '排程會排進這顆 Bot 的對話與佇列，跟你手動送的訊息共用。沿用這顆 Bot 的模型；需要指定模型可建立專用 Bot。': 'Schedules queue into this Bot’s chat and queue, sharing turns with your manual messages. It uses this Bot’s model; create a dedicated Bot to specify a model.',
-  '建立專用 Bot…': 'Create dedicated Bot…',
   '開啟 Bot 對話': 'Open Bot chat',
   '模式': 'Mode',
   '單次': 'Once',
@@ -145,10 +143,19 @@ const dict: Dict = {
   '還沒有執行紀錄。': 'No run history yet.',
   '複製排程': 'Copy schedule',
   '新增排程': 'Add schedule',
-  '新增專用 Bot': 'Add dedicated Bot',
   '刪除排程': 'Delete schedule',
   '刪除後不會再排新的執行。已經排進 Bot 還沒送出的會被撤回；已經送出的回合照跑。': 'No new runs will be scheduled after deletion. Pending executions queued in Bot will be withdrawn; active turns will run to completion.',
 
+  '排程 bot': 'Schedule bots',
+  '{name} 的排程 bot': 'Schedule bots of {name}',
+  '非專屬 bot': 'Not a dedicated bot',
+  '這個排程綁的不是排程專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot': 'This schedule is not bound to a dedicated schedule bot: it keeps running; open it to convert the bot or rebind to a new dedicated bot',
+  '轉成專屬': 'Make dedicated',
+  '＋ 建立專屬 bot': '+ Create dedicated bot',
+  '建立排程專屬 bot': 'Create schedule bot',
+  '已轉成排程專屬 bot。': 'Converted to a dedicated schedule bot.',
+  '排程一律用「排程專屬 bot」：它不算執行者、不會被派工，側欄收在「排程 bot」區。排程會排進這顆 Bot 的對話與佇列；同一網站的上班／下班可共用一顆，預設建新的。': 'Schedules always use a dedicated schedule bot: it is not an executor and never receives dispatches; the sidebar keeps it under “Schedule bots”. Runs queue into this bot’s conversation; schedules for the same site (e.g. clock-in/out) may share one, but a new one is the default.',
+  '這個排程綁的不是排程專屬 bot（{name}）：照常執行不受影響。可「轉成專屬」（把它標成排程專屬，之後不再當執行者），或「＋ 建立專屬 bot」改綁到新的。': 'This schedule is not bound to a dedicated schedule bot ({name}); it keeps running as before. You can “Make dedicated” (it stops being an executor) or “+ Create dedicated bot” and rebind.',
 }
 
 export default dict

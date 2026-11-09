@@ -14,7 +14,7 @@ afterEach(unmountAll)
 beforeEach(() => {
   useStore.setState({
     projects: [{ id: 'p1', label: '專案', path: '/project', host: 'local' }],
-    bots: [{ id: 'b1', name: '原本的 Bot', project_id: 'p1', kind: 'claude', model: null, effort: null, managed_by: 'user', parent_bot_id: null, share_profile: null }],
+    bots: [{ id: 'b1', name: '原本的 Bot', project_id: 'p1', kind: 'claude', role: 'scheduler', model: null, effort: null, managed_by: 'user', parent_bot_id: null, share_profile: null }],
     runs: {}, notices: [], schedulesRev: 0,
   } as never)
 })

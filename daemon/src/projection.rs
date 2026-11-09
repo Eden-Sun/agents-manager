@@ -230,7 +230,7 @@ pub struct ConfigInvalid(pub String);
 fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
     for project in &cfg.projects {
         if !matches!(project.mode.as_str(), "parent_child" | "expert") { bail!("invalid project mode"); }
-        if project.bots.iter().any(|b| !matches!(b.role.as_deref(), None | Some("manager" | "executor" | "advisor" | "specialist"))) { bail!("invalid bot role"); }
+        if project.bots.iter().any(|b| !matches!(b.role.as_deref(), None | Some("manager" | "executor" | "advisor" | "specialist" | "scheduler"))) { bail!("invalid bot role"); }
         if project.bots.iter().any(|b| b.role.as_deref() == Some("specialist") && b.track.as_deref().map(str::trim).unwrap_or("").is_empty()) {
             bail!("track_required");
         }
