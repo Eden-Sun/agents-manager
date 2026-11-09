@@ -94,7 +94,7 @@ for (const spec of modes) {
     assert.match(String(client_request_id), /^[0-9a-f-]{36}$/)
     assert.deepEqual(body, {
       name: '自行改的副本名', prompt: '最新任務正文', bot_id: 'b1', tz: 'Asia/Taipei',
-      spec: spec.mode === 'weekly' ? { ...spec, weekdays: [...spec.weekdays!].sort((a, b) => a - b) } : spec, notify: 'all', clear_after: true,
+      spec: spec.mode === 'weekly' ? { ...spec, weekdays: [...spec.weekdays!].sort((a, b) => a - b) } : spec, notify: 'all', clear_after: true, retry_count: 0, retry_interval_mins: 3,
     }, '建立模式必須送出完整 spec，不能因 baseline 判成未改而省略；interval 另起新 anchor')
     assert.deepEqual(selected, ['copy'])
     assert.equal(document.querySelector('[role="dialog"]'), null)

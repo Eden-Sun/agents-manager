@@ -47,7 +47,7 @@ test('多時段：列出、增刪時段，送出帶 slots；變數點了插入�
 
   const rows = () => dialog().querySelectorAll('.schedule-slot-row')
   assert.equal(rows().length, 2, '兩個時段各一列')
-  assert.equal(rows()[1].querySelector<HTMLInputElement>('input[type=text]')!.value, '下班')
+  assert.equal(rows()[1].querySelector('input[type=text]'), null, '時段沒有標籤欄；舊資料的標籤保留在後端但不顯示')
 
   await click(buttonIn(dialog(), '新增時段'))
   assert.equal(rows().length, 3)
@@ -61,7 +61,7 @@ test('多時段：列出、增刪時段，送出帶 slots；變數點了插入�
   await click(buttonIn(dialog(), '預覽展開結果'))
   const preview = dialog().querySelector('.schedule-preview')!.textContent ?? ''
   assert.doesNotMatch(preview, /\{\{/, '預覽已展開已知變數')
-  assert.match(preview, /上班/, '預覽的時段標籤是第一個時段')
+  assert.equal(dialog().querySelector('input[placeholder*="標籤"]'), null, '時段不再有標籤欄')
 
   await typeInto(prompt, '{{slot}} {{foo}}')
   assert.match(dialog().textContent ?? '', /不認得的變數 \{\{foo\}\} 會原樣保留/)
@@ -73,6 +73,6 @@ test('多時段：列出、增刪時段，送出帶 slots；變數點了插入�
   const body = posts[0].body as { spec: unknown }
   assert.deepEqual(body.spec, {
     mode: 'daily', time: '08:30',
-    slots: [{ time: '08:30', label: '上班' }, { time: '09:00', label: '' }],
+    slots: [{ time: '08:30' }, { time: '09:00' }],
   })
 })

@@ -159,7 +159,7 @@ pub struct CreateIn {
     /// 每次從基準快照開始（bot 要是 codex 且已鎖基準）：缺省＝false。
     #[serde(default)]
     pub from_base: bool,
-    #[serde(default)]
+    #[serde(default = "default_retry_count")]
     pub retry_count: i64,
     #[serde(default = "default_retry_interval")]
     pub retry_interval_mins: i64,
@@ -167,8 +167,10 @@ pub struct CreateIn {
     pub retry_deadline_mins: i64,
 }
 
-fn default_retry_interval() -> i64 { 3 }
-fn default_retry_deadline() -> i64 { 15 }
+fn default_retry_count() -> i64 { 2 }
+fn default_retry_interval() -> i64 { 1 }
+/// 沒帶截止＝不設截止（只受次數限制）：存欄位允許的最大值 7 天（舊排程存的 15 分鐘照舊，見 SPEC）。
+fn default_retry_deadline() -> i64 { 10080 }
 fn check_retry(count: i64, interval: i64, deadline: i64) -> Result<(), LcError> {
     if (0..=5).contains(&count) && (1..=1440).contains(&interval) && (1..=10080).contains(&deadline) { Ok(()) }
     else { Err(LcError::Bad("失敗重試次數需為 0–5、間隔為 1–1440 分鐘、截止為 1–10080 分鐘".into())) }
@@ -182,7 +184,7 @@ fn default_notify() -> String {
 /// `clear_after` 只在勾了的時候才進 fingerprint：沒勾的排程跟升版前建的 fingerprint 一樣，原樣重送仍回原筆。
 pub(super) fn create_fingerprint(b: &CreateIn) -> String {
     let mut v = json!({"name": b.name.trim(), "prompt": b.prompt, "bot_id": b.bot_id, "tz": b.tz, "spec": b.spec, "notify": b.notify});
-    if b.retry_count != 0 || b.retry_interval_mins != 3 || b.retry_deadline_mins != 15 {
+    if b.retry_count != 2 || b.retry_interval_mins != 1 || b.retry_deadline_mins != 10080 {
         v["retry"] = json!([b.retry_count, b.retry_interval_mins, b.retry_deadline_mins]);
     }
     if b.clear_after {

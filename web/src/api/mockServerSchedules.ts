@@ -155,7 +155,7 @@ export class MockServerSchedules {
   private create(projectId: string, b: Rec, emit: Emit): Rec {
     const crid = String(b.client_request_id ?? '')
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(crid)) fail(400, 'bad', 'client_request_id 要是 1 到 128 個字元')
-    const fp = JSON.stringify({ name: String(b.name ?? '').trim(), prompt: b.prompt, bot_id: b.bot_id, tz: b.tz, spec: b.spec, notify: b.notify ?? 'failure', retry_count: b.retry_count ?? 0, retry_interval_mins: b.retry_interval_mins ?? 3, retry_deadline_mins: b.retry_deadline_mins ?? 15 })
+    const fp = JSON.stringify({ name: String(b.name ?? '').trim(), prompt: b.prompt, bot_id: b.bot_id, tz: b.tz, spec: b.spec, notify: b.notify ?? 'failure', retry_count: b.retry_count ?? 2, retry_interval_mins: b.retry_interval_mins ?? 1, retry_deadline_mins: b.retry_deadline_mins ?? 10080 })
     const prev = [...this.schedules.values()].find((s) => s.project_id === projectId && s.create_crid === crid)
     if (prev) {
       if (prev.create_fp !== fp) fail(409, 'client_request_id_reused', '同一個 client_request_id 已用在不同內容的排程上')
@@ -177,7 +177,7 @@ export class MockServerSchedules {
       enabled: true,
       generation: 1,
       notify: String(b.notify ?? 'failure'),
-      retry_count: Number(b.retry_count ?? 0), retry_interval_mins: Number(b.retry_interval_mins ?? 3), retry_deadline_mins: Number(b.retry_deadline_mins ?? 15),
+      retry_count: Number(b.retry_count ?? 2), retry_interval_mins: Number(b.retry_interval_mins ?? 1), retry_deadline_mins: Number(b.retry_deadline_mins ?? 10080),
       create_crid: crid,
       create_fp: fp,
       created_at: stamp,

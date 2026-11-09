@@ -34,16 +34,14 @@ import './scheduleEditor.css'
 
 const WEEKDAYS = [msg('週一'), msg('週二'), msg('週三'), msg('週四'), msg('週五'), msg('週六'), msg('週日')]
 
-/** 一天內的一個時段：本地時間 `HH:MM` ＋ 標籤（例：「上班」）。 */
+/** 一天內的一個時段：本地時間 `HH:MM`（不再有標籤，使用者 2026-11-09；後端 `slot_label` 欄位保留相容）。 */
 interface ScheduleSlot {
   time: string
-  label: string
   /** 隨機區間的結束時間 `HH:MM`；null＝固定時間（開關關著）。 */
   until: string | null
 }
 
 const MAX_SLOTS = 8
-const MAX_SLOT_LABEL = 20
 const MAX_RANGE_MINUTES = 12 * 60
 
 /** `HH:MM[:SS]` 轉一天中的秒數；格式不對回 null。 */
@@ -97,7 +95,6 @@ interface FormState {
   fromBase: boolean
   retryCount: number
   retryInterval: number
-  retryDeadline: number
 }
 
 /** 預設的專屬 bot 名稱＝排程名稱（去掉 bot 名稱不收的字元、最長 32）；清完是空的就讓表單自己排。 */
@@ -106,7 +103,7 @@ function botNameFrom(scheduleName: string): string {
 }
 
 function emptyForm(botId: string): FormState {
-  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', label: '', until: null }], weekdays: [0], clearAfter: false, fromBase: false, retryCount: 0, retryInterval: 3, retryDeadline: 15 }
+  return { name: '', prompt: '', botId, tz: defaultTimeZone(), notify: 'failure', mode: 'daily', at: '', everySecs: 3600, slots: [{ time: '09:00', until: null }], weekdays: [0], clearAfter: false, fromBase: false, retryCount: 2, retryInterval: 1 }
 }
 
 function fromDetail(d: Schedule): FormState {
@@ -121,18 +118,18 @@ function fromDetail(d: Schedule): FormState {
     at: spec.at ?? '',
     everySecs: spec.every_secs || 3600,
     // 舊排程只有單一 `time`，讀成沒有標籤的一個時段。
-    slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, label: s.label ?? '', until: s.until ?? null })) : [{ time: spec.time ?? '09:00', label: '', until: null }],
+    slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, until: s.until ?? null })) : [{ time: spec.time ?? '09:00', until: null }],
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
     fromBase: d.from_base === true,
-    retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3, retryDeadline: d.retry_deadline_mins ?? 15,
+    retryCount: d.retry_count ?? 0, retryInterval: d.retry_interval_mins ?? 3,
   }
 }
 
 function specOf(f: FormState): ScheduleSpecIn {
-  const slots = f.slots.map((s) => ({ time: s.time, label: s.label.trim(), ...(s.until != null ? { until: s.until } : {}) }))
+  const slots = f.slots.map((s) => ({ time: s.time, ...(s.until != null ? { until: s.until } : {}) }))
   // 單一、沒標籤、沒隨機區間的時段仍送舊格式（只有 time），跟既有排程的 spec 一致。
-  const extra = slots.length > 1 || slots.some((s) => s.label || s.until) ? { slots } : {}
+  const extra = slots.length > 1 || slots.some((s) => s.until) ? { slots } : {}
   switch (f.mode) {
     case 'once':
       return { mode: 'once', at: f.at }
@@ -391,10 +388,10 @@ export function ScheduleEditor({
       if (form.slots.length > MAX_SLOTS) return setError(t('時段最多 {n} 個', { n: MAX_SLOTS }))
       const badRange = form.slots.map(rangeError).find((m) => m)
       if (badRange) return setError(badRange)
-      if (form.slots.some((s) => [...s.label.trim()].length > MAX_SLOT_LABEL)) return setError(t('時段標籤不能超過 {n} 字', { n: MAX_SLOT_LABEL }))
     }
-    const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval, retry_deadline_mins: form.retryDeadline }
-    const retryChanged = form.retryCount !== (detail?.retry_count ?? 0) || form.retryInterval !== (detail?.retry_interval_mins ?? 3) || form.retryDeadline !== (detail?.retry_deadline_mins ?? 15)
+    const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval }
+    // 建立一律送（daemon 沒帶才用 2／1，這裡要把使用者選的 0 也帶過去）；編輯只在真的改了才送，不碰既有的截止值。
+    const retryChanged = !scheduleId || form.retryCount !== (detail?.retry_count ?? 0) || form.retryInterval !== (detail?.retry_interval_mins ?? 3)
     setBusy(true)
     try {
       if (!scheduleId) {
@@ -615,7 +612,6 @@ export function ScheduleEditor({
             {form.slots.map((slot, i) => (
               <div key={i} className="schedule-slot-row">
                 <input type="time" aria-label={t('第 {n} 個時段的時間', { n: i + 1 })} value={slot.time} disabled={loading} onChange={(e) => setSlot(i, { time: e.target.value })} />
-                <input type="text" maxLength={MAX_SLOT_LABEL} placeholder={t('標籤（選填）')} aria-label={t('第 {n} 個時段的標籤', { n: i + 1 })} value={slot.label} disabled={loading} onChange={(e) => setSlot(i, { label: e.target.value })} />
                 <button type="button" className="schedule-link" disabled={loading || form.slots.length <= 1} onClick={() => set('slots', form.slots.filter((_, j) => j !== i))}>{t('刪除時段')}</button>
                 <div className="schedule-slot-range">
                   <label className="schedule-slot-random">
@@ -633,7 +629,7 @@ export function ScheduleEditor({
                 </div>
               </div>
             ))}
-            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), label: '', until: null }])}>{t('新增時段')}</button>
+            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), until: null }])}>{t('新增時段')}</button>
           </fieldset>
         ) : null}
         {form.mode === 'weekly' ? (
@@ -680,7 +676,6 @@ export function ScheduleEditor({
         <div className="schedule-time-grid">
           <label className="field"><span>{t('重試次數（0 表示不重試）')}</span><input type="number" min={0} max={5} value={form.retryCount} disabled={loading} onChange={(e) => set('retryCount', Number(e.target.value))} /></label>
           <label className="field"><span>{t('重試間隔（分鐘）')}</span><input type="number" min={1} max={1440} value={form.retryInterval} disabled={loading} onChange={(e) => set('retryInterval', Number(e.target.value))} /></label>
-          <label className="field"><span>{t('距排定時間的截止（分鐘）')}</span><input type="number" min={1} max={10080} value={form.retryDeadline} disabled={loading} onChange={(e) => set('retryDeadline', Number(e.target.value))} /></label>
         </div>
         <p className="hint">{t('只有明確失敗才重試；拒絕與結果不明不會重試。重試可能重複外部操作，請確認任務可安全重做。')}</p>
       </fieldset>
@@ -731,7 +726,7 @@ export function ScheduleEditor({
         <button type="button" className="schedule-link" aria-expanded={showPreview} onClick={() => setShowPreview((v) => !v)}>{t('預覽展開結果')}</button>
         {showPreview ? (
           <p className="schedule-preview" aria-label={t('預覽展開結果')}>
-            {expandPrompt(form.prompt, contextAt(form.tz, new Date(), form.name, form.slots[0]?.label.trim() ?? ''))}
+            {expandPrompt(form.prompt, contextAt(form.tz, new Date(), form.name, ''))}
           </p>
         ) : null}
         {showPreview ? <p className="hint">{t('預覽用現在的時間與第一個時段的標籤；實際送出時用該次觸發的時間。')}</p> : null}
@@ -772,7 +767,7 @@ export function ScheduleEditor({
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
                 <li key={o.id}>
-                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)}{o.slot_label ? ` · ${o.slot_label}` : ''} · {OCCURRENCE_LABEL[o.status]}
+                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
                   {o.error ? t('（{error}）', { error: o.error }) : ''}
                   {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}

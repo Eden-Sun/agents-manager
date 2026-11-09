@@ -777,18 +777,17 @@ test('失敗重試設定帶預設值與範圍，儲存會送出三個欄位', as
   await click(menuItem('新增排程'))
   const dialog = dialogs().find((d) => d.textContent?.includes('新增排程'))!
   const inputs = [...dialog.querySelectorAll<HTMLInputElement>('.schedule-retry input')]
-  assert.deepEqual(inputs.map((i) => i.value), ['0', '3', '15'])
+  assert.deepEqual(inputs.map((i) => i.value), ['2', '1'], '預設重試 2 次、間隔 1 分鐘；沒有截止欄位')
   assert.equal(inputs[0].max, '5')
   await typeInto(inputs[0], '2')
   await typeInto(inputs[1], '4')
-  await typeInto(inputs[2], '20')
   await typeInto(dialog.querySelector<HTMLInputElement>('input')!, 'synthetic retry')
   await typeInto(dialog.querySelector<HTMLTextAreaElement>('textarea')!, 'synthetic task')
   await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
   const post = requests.find((r) => r.method === 'POST')!
   assert.ok(post)
   const body = post.body as Record<string, unknown>
-  assert.deepEqual([body.retry_count, body.retry_interval_mins, body.retry_deadline_mins], [2, 4, 20])
+  assert.deepEqual([body.retry_count, body.retry_interval_mins, 'retry_deadline_mins' in body], [2, 4, false], '前端不再送截止')
   assert.ok(dialog.textContent?.includes('失敗、拒絕或結果不明時通知'))
 })
 

@@ -3126,7 +3126,7 @@ OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id>
 
 排程是「到時間就排進既有 Bot 佇列」的工作；只建立、不立即執行（除非按「立即執行」）。實作見 `daemon/src/schedules/`。
 
-排程新增 `retry_count`（0–5，預設 0）、`retry_interval_mins`（1–1440，預設 3）、`retry_deadline_mins`（1–10080，預設 15），POST／PATCH 均可設定。重試設定僅影響未來的判定，不改 prompt 或 generation；停用、換版、超截止一律不重送。occurrence 回傳 `outcome`（success／failed／refused／unknown）、`outcome_summary`（遮罩後 ≤200 字）、`reply_message_id`、`attempt_no`、`next_retry_at` 及 `attempts`（各次 turn／reply id、outcome、摘要）。回合 done 不代表任務成功；failure 通知依 outcome，含拒絕與結果不明。全文沿既有 `/api/bots/{id}/messages?turn_id=...&role=assistant` 授權讀取，不另存副本。
+排程新增 `retry_count`（0–5，**預設 2**）、`retry_interval_mins`（1–1440，**預設 1**）、`retry_deadline_mins`（1–10080，**沒帶＝不設截止**：存 10080，即欄位上限 7 天，只受次數限制；網頁不再顯示也不再送），POST／PATCH 均可設定；既有排程存的值（舊預設 0／3／15）不動，舊的 15 分鐘截止照舊生效。時段 `slots[].label` 保留相容（可省略、舊資料照讀），網頁不再顯示也不再送。重試設定僅影響未來的判定，不改 prompt 或 generation；停用、換版、超截止一律不重送。occurrence 回傳 `outcome`（success／failed／refused／unknown）、`outcome_summary`（遮罩後 ≤200 字）、`reply_message_id`、`attempt_no`、`next_retry_at` 及 `attempts`（各次 turn／reply id、outcome、摘要）。回合 done 不代表任務成功；failure 通知依 outcome，含拒絕與結果不明。全文沿既有 `/api/bots/{id}/messages?turn_id=...&role=assistant` 授權讀取，不另存副本。
 
 
 | 方法 | 路徑 | 說明 |

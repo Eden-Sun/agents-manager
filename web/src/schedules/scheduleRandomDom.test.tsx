@@ -84,7 +84,7 @@ test('隨機區間：開關打開才出現結束時間，送出帶 until；關�
   await settle()
   const posts = requests.filter((r) => r.method === 'POST')
   assert.equal(posts.length, 1)
-  assert.deepEqual((posts[0].body as { spec: unknown }).spec, { mode: 'daily', time: '09:00', slots: [{ time: '09:00', label: '', until: '09:10' }] })
+  assert.deepEqual((posts[0].body as { spec: unknown }).spec, { mode: 'daily', time: '09:00', slots: [{ time: '09:00', until: '09:10' }] })
 })
 
 test('隨機區間：超過 12 小時擋下；關掉開關後 spec 不帶 until', async () => {

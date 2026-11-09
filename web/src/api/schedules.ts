@@ -21,7 +21,7 @@ export interface ScheduleSpecIn {
   /** weekly：0=週一 … 6=週日 */
   weekdays?: number[]
   /** daily／weekly 的時段（一天多個），最多 8 個，時間不重複 */
-  slots?: { time: string; label: string; /** 隨機區間的結束時間（HH:MM[:SS]）；有值就在 time–until 內隨機挑一秒觸發 */ until?: string }[]
+  slots?: { time: string; label?: string; /** 隨機區間的結束時間（HH:MM[:SS]）；有值就在 time–until 內隨機挑一秒觸發 */ until?: string }[]
 }
 
 export interface ScheduleOccurrence {
@@ -74,7 +74,6 @@ export interface Schedule {
   /** 跑完就清空對話：每次成功跑完讓綁定的 Bot 開新對話（daemon 只在 done 時清）。 */
   retry_count?: number
   retry_interval_mins?: number
-  retry_deadline_mins?: number
   clear_after: boolean
   /** 每次從基準快照開始（bot 的 codex 基準；`/bots/{id}/base-snapshot`）。 */
   from_base?: boolean
@@ -101,7 +100,6 @@ export interface ScheduleCreateInput {
   notify: ScheduleNotify
   retry_count?: number
   retry_interval_mins?: number
-  retry_deadline_mins?: number
   clear_after?: boolean
   from_base?: boolean
 }
@@ -115,7 +113,6 @@ export interface ScheduleEditInput {
   notify?: ScheduleNotify
   retry_count?: number
   retry_interval_mins?: number
-  retry_deadline_mins?: number
   clear_after?: boolean
   from_base?: boolean
   enabled?: boolean

@@ -1083,3 +1083,27 @@ mod dedicated_bot {
         api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(b)).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_create_without_retry_fields_defaults_to_two_retries_one_minute_and_no_deadline() {
+    let (e, bot) = setup().await;
+    let body: CreateIn = serde_json::from_value(serde_json::json!({
+        "client_request_id": "crid-d", "name": "預設", "prompt": "x", "bot_id": bot.id, "tz": "UTC",
+        "spec": {"mode": "daily", "slots": [{"time": "09:00"}, {"time": "18:00"}]},
+    })).unwrap();
+    let Json(v) = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
+    assert_eq!((v["retry_count"].as_i64(), v["retry_interval_mins"].as_i64()), (Some(2), Some(1)));
+    // 沒帶截止＝不設截止：存欄位允許的最大值（7 天），一分鐘間隔的 2 次重試永遠碰不到它。
+    assert_eq!(v["retry_deadline_mins"], 10080);
+    // 時段不帶標籤也收（標籤欄位保留相容，舊資料照讀）。
+    assert_eq!(v["spec"]["slots"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_old_schedule_keeps_its_stored_values_and_its_old_deadline_still_applies() {
+    let (e, bot) = setup().await;
+    let s = schedule(&e.app, &e.project_id, &bot.id).await;
+    // 舊排程（建立於舊預設 0／3／15）：讀回原值，不被新預設改寫。
+    let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
+    assert_eq!((v["retry_count"].as_i64(), v["retry_interval_mins"].as_i64(), v["retry_deadline_mins"].as_i64()), (Some(0), Some(3), Some(15)));
+}
