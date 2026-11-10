@@ -11,9 +11,9 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, updates: true, reset_credits: true })
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, updates: true, reset_credits: true })
   useEffect(() => {
-    getPushSettings().then(setOpts, () => {})
+    getPushSettings().then((s) => setOpts((o) => ({ ...o, ...s })), () => {})
   }, [])
   const toggle = (key: keyof PushSettingsValue, v: boolean) => {
     setOpts((o) => ({ ...o, [key]: v }))
@@ -89,6 +89,7 @@ export function PushSettings() {
       </div>
       {([
         ['main_bots', t('主力 bot 回覆完成／需要回應時推播')],
+        ['other_bots', t('其他 bot 需要回應時推播')],
         ['updates', t('偵測到更新（AG Man／CLI）時推播')],
         ['reset_credits', t('codex 額度用完且有重置券時推播（只通知，不自動使用）')],
       ] as const).map(([key, label]) => (

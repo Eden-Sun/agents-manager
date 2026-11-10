@@ -71,3 +71,28 @@ test('設定頁：支援且已訂閱時顯示「已啟用」，可送測試通�
     Object.defineProperty(nav, 'serviceWorker', { value: saved.sw, configurable: true })
   }
 })
+
+test('設定頁：主力 bot、其他 bot、更新與重置券推播開關', async () => {
+  const puts: unknown[] = []
+  fakeApi((req) => {
+    if (req.method === 'GET' && req.path.endsWith('/push/settings')) return { main_bots: true, other_bots: true, updates: true, reset_credits: true }
+    if (req.method === 'PUT' && req.path.endsWith('/push/settings')) {
+      puts.push(req.body)
+      return req.body
+    }
+    return {}
+  })
+  await mount(<PushSettings />)
+  await settle()
+  const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+  assert.equal(checkboxes.length, 4, '應有主力 bot、其他 bot、更新與重置券四個開關')
+  assert.equal(checkboxes[0].checked, true)
+  assert.equal(checkboxes[1].checked, true)
+  assert.equal(checkboxes[2].checked, true)
+  assert.equal(checkboxes[3].checked, true)
+  await click(checkboxes[1])
+  await settle()
+  assert.deepEqual(puts, [{ other_bots: false }])
+  assert.equal(checkboxes[1].checked, false)
+  await unmountAll()
+})

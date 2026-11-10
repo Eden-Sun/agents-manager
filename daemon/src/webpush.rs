@@ -376,7 +376,7 @@ fn settings_path(dir: &Path) -> PathBuf {
     dir.join("push-settings.json")
 }
 
-/// 推播開關（`main_bots`／`updates`／`reset_credits`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
+/// 推播開關（`main_bots`／`other_bots`／`updates`／`reset_credits`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
 pub(crate) fn setting_enabled(dir: &Path, key: &str) -> bool {
     std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[key].as_bool()).unwrap_or(true)
 }
@@ -385,8 +385,18 @@ pub(crate) fn main_bots_enabled(dir: &Path) -> bool {
     setting_enabled(dir, "main_bots")
 }
 
+/// 「其他 bot 需要回應時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+pub(crate) fn other_bots_enabled(dir: &Path) -> bool {
+    setting_enabled(dir, "other_bots")
+}
+
 fn settings_json(dir: &Path) -> Value {
-    json!({"main_bots": setting_enabled(dir, "main_bots"), "updates": setting_enabled(dir, "updates"), "reset_credits": setting_enabled(dir, "reset_credits")})
+    json!({
+        "main_bots": setting_enabled(dir, "main_bots"),
+        "other_bots": setting_enabled(dir, "other_bots"),
+        "updates": setting_enabled(dir, "updates"),
+        "reset_credits": setting_enabled(dir, "reset_credits")
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -575,6 +585,14 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
     send_main(app, n, &bot, MainKind::Done, turn_id, async { push_line(app, &mid, &text).await }).await;
 }
 
+fn is_other_top_level_bot(b: &crate::db::Bot) -> bool {
+    b.deleted_at.is_none()
+        && b.is_primary != 1
+        && b.managed_by != "child"
+        && b.parent_bot_id.as_deref().is_none_or(|p| p.trim().is_empty())
+        && b.role.as_deref() != Some("scheduler")
+}
+
 async fn blocked_line(app: &Arc<App>, bot_id: &str, run_id: &str) -> String {
     use axum::extract::Path;
     let mut text = String::new();
@@ -589,13 +607,25 @@ async fn blocked_line(app: &Arc<App>, bot_id: &str, run_id: &str) -> String {
     push_line(app, "push-blocked", &text).await
 }
 
+/// 需要回應推播的對象：主力 bot 受 `main_bots` 管；其他頂層 bot（非子 agent、非排程專屬）受 `other_bots` 管。
+fn blocked_notify_enabled(dir: &Path, b: &crate::db::Bot) -> bool {
+    if b.is_primary == 1 {
+        main_bots_enabled(dir)
+    } else {
+        is_other_top_level_bot(b) && other_bots_enabled(dir)
+    }
+}
+
 async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode: u64) {
     let settle = n.settle.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(BLOCKED_SETTLE);
     tokio::time::sleep(settle).await;
-    if !main_bots_enabled(&app.data_dir) || load_subs(&app.data_dir).is_empty() {
+    if load_subs(&app.data_dir).is_empty() {
         return;
     }
-    let Some(bot) = primary_bot(&app, &bot_id).await else { return };
+    let Some(bot) = crate::db::bot(&app.db, &bot_id).await.ok().flatten() else { return };
+    if !blocked_notify_enabled(&app.data_dir, &bot) {
+        return;
+    }
     let Some(run) = crate::db::active_run(&app.db, &bot_id).await.ok().flatten() else { return };
     if run.agent_status != "blocked" {
         return;
@@ -906,6 +936,8 @@ pub(crate) struct SettingsInput {
     #[serde(default)]
     main_bots: Option<bool>,
     #[serde(default)]
+    other_bots: Option<bool>,
+    #[serde(default)]
     updates: Option<bool>,
     #[serde(default)]
     reset_credits: Option<bool>,
@@ -915,7 +947,12 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
     user_only(&p)?;
     let _g = FILE_LOCK.lock().await;
     let mut cur = settings_json(&app.data_dir);
-    for (k, v) in [("main_bots", input.main_bots), ("updates", input.updates), ("reset_credits", input.reset_credits)] {
+    for (k, v) in [
+        ("main_bots", input.main_bots),
+        ("other_bots", input.other_bots),
+        ("updates", input.updates),
+        ("reset_credits", input.reset_credits),
+    ] {
         if let Some(v) = v {
             cur[k] = json!(v);
         }
@@ -1416,16 +1453,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn other_top_level_bot_blocked_pushes_and_filters_children_and_schedulers() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/o").0]).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_s: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+        let n = Arc::new(MainNotifier::default());
+        *n.settle.lock().unwrap() = Some(Duration::ZERO);
+
+        // 1. 一般頂層 bot（非主力）
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "頂層一般").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        let ev = |b: &str, st: &str| crate::state::WsEvent { seq: 1, kind: "bot_status".into(), data: json!({"bot_id": b, "run": {"agent_status": st}}) };
+        handle_event(&app, &n, &ev(&bot.id, "blocked")).await;
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("其他頂層 bot blocked 要推").unwrap();
+        assert_eq!(got["title"], "頂層一般");
+        assert!(got["body"].as_str().unwrap().starts_with("需要你回應"), "{got}");
+
+        // 2. 子 agent 不推
+        let child = crate::testing::claude_bot(&app, &env.project_id, "子代理").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', parent_bot_id = ? WHERE id = ?").bind(&bot.id).bind(&child.id).execute(&app.db).await.unwrap();
+        let child_run = crate::testing::fake_run(&app, &child.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&child_run).execute(&app.db).await.unwrap();
+        handle_event(&app, &n, &ev(&child.id, "blocked")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "子 agent blocked 絕不推播");
+
+        // 3. 排程專屬 bot 不推
+        let sched = crate::testing::claude_bot(&app, &env.project_id, "排程專屬").await;
+        sqlx::query("UPDATE bots SET role = 'scheduler' WHERE id = ?").bind(&sched.id).execute(&app.db).await.unwrap();
+        let sched_run = crate::testing::fake_run(&app, &sched.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&sched_run).execute(&app.db).await.unwrap();
+        handle_event(&app, &n, &ev(&sched.id, "blocked")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "排程專屬 bot blocked 絕不推播");
+
+        // 4. other_bots 開關關掉不推
+        let n2 = Arc::new(MainNotifier::default());
+        *n2.settle.lock().unwrap() = Some(Duration::ZERO);
+        write_private(&settings_path(&app.data_dir), br#"{"other_bots":false}"#).unwrap();
+        let bot2 = crate::testing::claude_bot(&app, &env.project_id, "頂層二號").await;
+        let run2 = crate::testing::fake_run(&app, &bot2.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run2).execute(&app.db).await.unwrap();
+        handle_event(&app, &n2, &ev(&bot2.id, "blocked")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "other_bots 關閉時不推");
+        write_private(&settings_path(&app.data_dir), br#"{"other_bots":true}"#).unwrap();
+
+        // 5. presence 抑制
+        record_presence("c", Presence { bot_id: Some(bot2.id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
+        let n3 = Arc::new(MainNotifier::default());
+        *n3.settle.lock().unwrap() = Some(Duration::ZERO);
+        handle_event(&app, &n3, &ev(&bot2.id, "blocked")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "正在看該其他 bot 時不推");
+        clear_presence();
+
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
     async fn settings_roundtrip_user_only() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let user = || Extension(RequestPrincipal::User);
-        assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], true, "預設開");
-        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), updates: None, reset_credits: None })).await.unwrap();
+        let s = get_settings(State(app.clone()), user()).await.unwrap().0;
+        assert_eq!(s["main_bots"], true, "預設開");
+        assert_eq!(s["other_bots"], true, "預設開");
+        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), other_bots: None, updates: None, reset_credits: None })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
-        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), updates: None, reset_credits: None })).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), other_bots: None, updates: None, reset_credits: None })).await, Err(LcError::Forbidden(_))));
         assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
     }
 
