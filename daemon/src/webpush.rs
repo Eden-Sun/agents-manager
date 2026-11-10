@@ -30,8 +30,12 @@ use crate::state::App;
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SUBSCRIPTIONS: usize = 50;
-/// VAPID `sub`：推送服務要求有聯絡方式（Apple 會檢查格式）；不放使用者資料。
-const VAPID_SUBJECT: &str = "mailto:noreply@agents-manager.invalid";
+/// VAPID `sub` 的最後退路：Apple 會檢查 `sub` 是否為合法的 https／mailto，`.invalid` 網域會被拒（403 BadJwtToken）。
+const FALLBACK_SUBJECT: &str = "mailto:noreply@example.com";
+/// VAPID JWT 有效期：Apple 上限 24 小時，保守取 1 小時。
+const VAPID_TTL_SECS: u64 = 3600;
+/// 記進 log／回給網頁的推送服務拒絕原因長度上限。
+const REASON_MAX: usize = 120;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Subscription {
@@ -40,6 +44,30 @@ pub struct Subscription {
     pub auth: String,
     #[serde(default)]
     pub created_at: String,
+    /// 訂閱當下網頁的 https origin（VAPID `sub` 的預設來源）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// 選 VAPID `sub`：config > 訂閱的 https origin > 內建 mailto。不合法的值（非 https／mailto、含 .invalid）一律略過。
+pub(crate) fn pick_subject(configured: Option<&str>, origin: Option<&str>) -> String {
+    let ok = |s: &str| {
+        let s = s.trim();
+        let valid = if let Some(rest) = s.strip_prefix("mailto:") {
+            rest.contains('@') && !rest.contains(char::is_whitespace)
+        } else {
+            reqwest::Url::parse(s).map(|u| u.scheme() == "https" && u.host_str().is_some()).unwrap_or(false)
+        };
+        valid && !s.to_ascii_lowercase().contains(".invalid")
+    };
+    [configured, origin].into_iter().flatten().map(str::trim).find(|s| ok(s)).map(String::from).unwrap_or_else(|| FALLBACK_SUBJECT.to_string())
+}
+
+/// 把推送服務回應 body 濃縮成一段短原因（優先 JSON 的 `reason`）；不含 endpoint 或金鑰。
+pub(crate) fn extract_reason(body: &str) -> String {
+    let from_json = serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+    let raw = from_json.unwrap_or_else(|| body.trim().to_string());
+    raw.chars().filter(|c| !c.is_control()).take(REASON_MAX).collect()
 }
 
 fn user_only(principal: &RequestPrincipal) -> Result<(), LcError> {
@@ -139,7 +167,7 @@ pub(crate) fn encrypt(ua_public: &[u8], auth: &[u8], plaintext: &[u8]) -> anyhow
     Ok(body)
 }
 
-fn vapid_header(sk: &SigningKey, endpoint: &str, now_secs: u64) -> anyhow::Result<String> {
+fn vapid_header(sk: &SigningKey, endpoint: &str, subject: &str, now_secs: u64) -> anyhow::Result<String> {
     let url = reqwest::Url::parse(endpoint)?;
     let aud = format!("{}://{}", url.scheme(), url.host_str().ok_or_else(|| anyhow::anyhow!("endpoint has no host"))?);
     let aud = match url.port() {
@@ -147,7 +175,7 @@ fn vapid_header(sk: &SigningKey, endpoint: &str, now_secs: u64) -> anyhow::Resul
         None => aud,
     };
     let head = B64.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
-    let claims = B64.encode(json!({"aud": aud, "exp": now_secs + 12 * 3600, "sub": VAPID_SUBJECT}).to_string());
+    let claims = B64.encode(json!({"aud": aud, "exp": now_secs + VAPID_TTL_SECS, "sub": subject}).to_string());
     let signing_input = format!("{head}.{claims}");
     let sig: Signature = sk.sign(signing_input.as_bytes());
     Ok(format!("vapid t={signing_input}.{}, k={}", B64.encode(sig.to_bytes()), public_key_b64(sk)))
@@ -177,11 +205,11 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-async fn send_http(client: &reqwest::Client, sk: &SigningKey, sub: &Subscription, payload: &[u8]) -> SendOutcome {
+async fn send_http(client: &reqwest::Client, sk: &SigningKey, configured_subject: Option<&str>, sub: &Subscription, payload: &[u8]) -> SendOutcome {
     let build = || -> anyhow::Result<(String, Vec<u8>)> {
         let ua = B64.decode(&sub.p256dh)?;
         let auth = B64.decode(&sub.auth)?;
-        Ok((vapid_header(sk, &sub.endpoint, now_secs())?, encrypt(&ua, &auth, payload)?))
+        Ok((vapid_header(sk, &sub.endpoint, &pick_subject(configured_subject, sub.origin.as_deref()), now_secs())?, encrypt(&ua, &auth, payload)?))
     };
     let (authz, body) = match build() {
         Ok(x) => x,
@@ -201,39 +229,52 @@ async fn send_http(client: &reqwest::Client, sk: &SigningKey, sub: &Subscription
     match res {
         Ok(r) if r.status().is_success() => SendOutcome::Sent,
         Ok(r) if matches!(r.status().as_u16(), 404 | 410) => SendOutcome::Gone,
-        Ok(r) => SendOutcome::Failed(format!("push service answered {}", r.status())),
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            let reason = extract_reason(&body);
+            SendOutcome::Failed(if reason.is_empty() { format!("push service answered {status}") } else { format!("push service answered {status}: {reason}") })
+        }
         Err(e) => SendOutcome::Failed(format!("{e}")),
     }
 }
 
 /// 對所有訂閱發同一則通知；404／410 的訂閱順手刪掉。回 `(sent, removed, failed)`。
-pub async fn broadcast(dir: &Path, payload: &Value) -> (usize, usize, usize) {
+pub async fn broadcast(dir: &Path, subject: Option<&str>, payload: &Value) -> (usize, usize, usize) {
+    let r = broadcast_detail(dir, subject, payload).await;
+    (r.0, r.1, r.2)
+}
+
+/// 同 `broadcast`，另回失敗原因（去重、已截短）。
+pub async fn broadcast_detail(dir: &Path, subject: Option<&str>, payload: &Value) -> (usize, usize, usize, Vec<String>) {
     let subs = { let _g = FILE_LOCK.lock().await; load_subs(dir) };
     if subs.is_empty() {
-        return (0, 0, 0);
+        return (0, 0, 0, Vec::new());
     }
     let sk = match { let _g = FILE_LOCK.lock().await; load_or_create_key(dir) } {
         Ok(sk) => sk,
         Err(e) => {
             tracing::warn!(error = %e, "web push: vapid key unavailable");
-            return (0, 0, subs.len());
+            return (0, 0, subs.len(), vec!["vapid key unavailable".into()]);
         }
     };
     let body = payload.to_string().into_bytes();
     let over = SENDER_OVERRIDE.lock().unwrap().clone();
     let client = reqwest::Client::new();
+    let subject = subject.map(String::from);
     let outcomes = futures::future::join_all(subs.iter().map(|sub| {
-        let (over, client, sk, body, sub) = (over.clone(), client.clone(), sk.clone(), body.clone(), sub.clone());
+        let (over, client, sk, body, sub, subject) = (over.clone(), client.clone(), sk.clone(), body.clone(), sub.clone(), subject.clone());
         async move {
             match over {
                 Some(f) => f(sub, body).await,
-                None => send_http(&client, &sk, &sub, &body).await,
+                None => send_http(&client, &sk, subject.as_deref(), &sub, &body).await,
             }
         }
     }))
     .await;
     let (mut sent, mut failed) = (0, 0);
     let mut gone = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     for (sub, out) in subs.iter().zip(outcomes) {
         match out {
             SendOutcome::Sent => sent += 1,
@@ -241,6 +282,9 @@ pub async fn broadcast(dir: &Path, payload: &Value) -> (usize, usize, usize) {
             SendOutcome::Failed(why) => {
                 failed += 1;
                 tracing::warn!(reason = %why, "web push send failed");
+                if !reasons.contains(&why) {
+                    reasons.push(why);
+                }
             }
         }
     }
@@ -252,7 +296,7 @@ pub async fn broadcast(dir: &Path, payload: &Value) -> (usize, usize, usize) {
             tracing::warn!(error = %e, "web push: could not prune subscriptions");
         }
     }
-    (sent, gone.len(), failed)
+    (sent, gone.len(), failed, reasons)
 }
 
 // ---------- 排程終態通知 ----------
@@ -305,12 +349,13 @@ pub(crate) fn spawn_schedule_push(app: &Arc<App>, t: &crate::schedules::store::T
         if load_subs(&app.data_dir).is_empty() {
             return;
         }
+        let subject = app.cfg.get().await.server.push_subject.clone();
         let tz: String = sqlx::query_scalar("SELECT tz FROM schedules WHERE id = ?").bind(&sid).fetch_optional(&app.db).await.ok().flatten().unwrap_or_default();
         let started: Option<String> = sqlx::query_scalar("SELECT first_started_at FROM schedule_occurrences WHERE id = ?").bind(&oid).fetch_optional(&app.db).await.ok().flatten().flatten();
         let now = chrono::Utc::now();
         let dur = started.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok()).map(|s| (now - s.with_timezone(&chrono::Utc)).num_milliseconds());
         let payload = schedule_payload(&code, &name, &outcome, &status, now, &tz, dur, &pid, &sid, &oid);
-        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, &payload)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
     });
 }
 
@@ -340,6 +385,9 @@ pub(crate) struct SubKeys {
 pub(crate) struct SubInput {
     endpoint: String,
     keys: SubKeys,
+    /// 訂閱當下網頁的 origin（`location.origin`），選填。
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 fn bad(reason: &str) -> LcError {
@@ -359,9 +407,10 @@ pub(crate) async fn subscribe(State(app): State<Arc<App>>, Extension(p): Extensi
     if B64.decode(input.keys.auth.trim_end_matches('=')).map(|a| a.len() != 16).unwrap_or(true) {
         return Err(bad("invalid_auth"));
     }
+    let origin = input.origin.as_deref().and_then(|o| reqwest::Url::parse(o).ok()).filter(|u| u.scheme() == "https" && u.host_str().is_some()).map(|u| u.origin().ascii_serialization());
     let _g = FILE_LOCK.lock().await;
     let mut subs = load_subs(&app.data_dir);
-    let sub = Subscription { endpoint: input.endpoint.clone(), p256dh: input.keys.p256dh.trim_end_matches('=').into(), auth: input.keys.auth.trim_end_matches('=').into(), created_at: crate::db::now() };
+    let sub = Subscription { endpoint: input.endpoint.clone(), p256dh: input.keys.p256dh.trim_end_matches('=').into(), auth: input.keys.auth.trim_end_matches('=').into(), created_at: crate::db::now(), origin };
     let existed = subs.iter().any(|s| s.endpoint == sub.endpoint);
     if let Some(slot) = subs.iter_mut().find(|s| s.endpoint == sub.endpoint) {
         *slot = sub; // 同 endpoint 去重：更新 keys
@@ -395,8 +444,9 @@ pub(crate) async fn unsubscribe(State(app): State<Arc<App>>, Extension(p): Exten
 pub(crate) async fn test_push(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     user_only(&p)?;
     let payload = json!({"title": "AG Man", "body": "測試通知：推播正常 ✅", "tag": "test", "url": "/"});
-    let (sent, removed, failed) = broadcast(&app.data_dir, &payload).await;
-    Ok(Json(json!({"sent": sent, "removed": removed, "failed": failed})))
+    let subject = app.cfg.get().await.server.push_subject.clone();
+    let (sent, removed, failed, reasons) = broadcast_detail(&app.data_dir, subject.as_deref(), &payload).await;
+    Ok(Json(json!({"sent": sent, "removed": removed, "failed": failed, "reasons": reasons})))
 }
 
 #[cfg(test)]
@@ -432,7 +482,7 @@ mod tests {
         let mut auth = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut auth);
         let pubkey = EncodedPoint::from(sk.public_key());
-        (Subscription { endpoint: endpoint.into(), p256dh: B64.encode(pubkey.as_bytes()), auth: B64.encode(auth), created_at: "t".into() }, sk, auth)
+        (Subscription { endpoint: endpoint.into(), p256dh: B64.encode(pubkey.as_bytes()), auth: B64.encode(auth), created_at: "t".into(), origin: None }, sk, auth)
     }
 
     #[test]
@@ -442,13 +492,19 @@ mod tests {
         assert_eq!(decrypt(&ua_sk, &auth, &body), "S3 DON上班 ✅".as_bytes());
         let dir = crate::testing::scratch_dir("am-webpush-vapid");
         let sk = load_or_create_key(&dir).unwrap();
-        let h = vapid_header(&sk, "https://push.example:8443/x/y", 1_000).unwrap();
+        let h = vapid_header(&sk, "https://push.example:8443/x/y", "https://agm.example.ts.net", 1_000).unwrap();
         let (t, k) = h.strip_prefix("vapid t=").unwrap().split_once(", k=").unwrap();
         assert_eq!(k, public_key_b64(&sk));
         let parts: Vec<&str> = t.split('.').collect();
         let claims: Value = serde_json::from_slice(&B64.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(claims["aud"], "https://push.example:8443");
-        assert_eq!(claims["exp"], 1_000 + 12 * 3600);
+        assert_eq!(claims["exp"], 1_000 + 3600);
+        assert_eq!(claims["sub"], "https://agm.example.ts.net");
+        assert_eq!(parts[0], B64.encode(br#"{"typ":"JWT","alg":"ES256"}"#));
+        assert_eq!(B64.decode(parts[2]).unwrap().len(), 64, "raw r||s");
+        assert_eq!(B64.decode(k).unwrap().len(), 65);
+        assert_eq!(B64.decode(k).unwrap()[0], 0x04);
+        assert!(!k.contains('=') && !parts[2].contains('='));
         use p256::ecdsa::signature::Verifier as _;
         let sig = Signature::from_slice(&B64.decode(parts[2]).unwrap()).unwrap();
         sk.verifying_key().verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).unwrap();
@@ -456,6 +512,23 @@ mod tests {
         assert_eq!(std::fs::metadata(vapid_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(public_key_b64(&load_or_create_key(&dir).unwrap()), k);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apple_aud_and_subject_and_reason() {
+        let sk = SigningKey::random(&mut rand::rngs::OsRng);
+        let h = vapid_header(&sk, "https://web.push.apple.com/QOabc", FALLBACK_SUBJECT, 5).unwrap();
+        let claims: Value = serde_json::from_slice(&B64.decode(h.strip_prefix("vapid t=").unwrap().split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!(claims["aud"], "https://web.push.apple.com");
+        assert_eq!(claims["sub"], "mailto:noreply@example.com");
+        assert!(claims["exp"].as_u64().unwrap() - 5 <= 3600);
+        assert_eq!(pick_subject(Some("https://cfg.example"), Some("https://o.example")), "https://cfg.example");
+        assert_eq!(pick_subject(None, Some("https://agm.example.ts.net")), "https://agm.example.ts.net");
+        assert_eq!(pick_subject(Some("mailto:noreply@agents-manager.invalid"), Some("http://insecure")), FALLBACK_SUBJECT);
+        assert_eq!(pick_subject(None, None), FALLBACK_SUBJECT);
+        assert_eq!(extract_reason(r#"{"reason":"BadJwtToken"}"#), "BadJwtToken");
+        assert_eq!(extract_reason("plain\nbody"), "plainbody");
+        assert!(extract_reason(&"x".repeat(500)).len() <= REASON_MAX);
     }
 
     #[test]
@@ -476,7 +549,7 @@ mod tests {
         let app = env.app.clone();
         let user = || Extension(RequestPrincipal::User);
         let (sub, _, _) = fresh_sub("https://push.example/a");
-        let input = || SubInput { endpoint: sub.endpoint.clone(), keys: SubKeys { p256dh: sub.p256dh.clone(), auth: sub.auth.clone() } };
+        let input = || SubInput { endpoint: sub.endpoint.clone(), keys: SubKeys { p256dh: sub.p256dh.clone(), auth: sub.auth.clone() }, origin: None };
         let r = subscribe(State(app.clone()), user(), Json(input())).await.unwrap().0;
         assert_eq!(r["created"], true);
         let r = subscribe(State(app.clone()), user(), Json(input())).await.unwrap().0;
@@ -486,9 +559,9 @@ mod tests {
         assert_eq!(listed["subscriptions"].as_array().unwrap().len(), 1);
         assert!(listed.to_string().find("p256dh").is_none(), "列表不回 keys");
         assert_eq!(std::fs::metadata(subs_path(&app.data_dir)).unwrap().permissions().mode() & 0o777, 0o600);
-        let bad_ep = SubInput { endpoint: "http://insecure/x".into(), keys: SubKeys { p256dh: sub.p256dh.clone(), auth: sub.auth.clone() } };
+        let bad_ep = SubInput { endpoint: "http://insecure/x".into(), keys: SubKeys { p256dh: sub.p256dh.clone(), auth: sub.auth.clone() }, origin: None };
         assert!(matches!(subscribe(State(app.clone()), user(), Json(bad_ep)).await, Err(LcError::BadValue(_))));
-        let bad_key = SubInput { endpoint: sub.endpoint.clone(), keys: SubKeys { p256dh: "AAAA".into(), auth: sub.auth.clone() } };
+        let bad_key = SubInput { endpoint: sub.endpoint.clone(), keys: SubKeys { p256dh: "AAAA".into(), auth: sub.auth.clone() }, origin: None };
         assert!(matches!(subscribe(State(app.clone()), user(), Json(bad_key)).await, Err(LcError::BadValue(_))));
         let r = unsubscribe(State(app.clone()), user(), Query(EndpointQuery { endpoint: sub.endpoint.clone() })).await.unwrap().0;
         assert_eq!(r["removed"], 1);
@@ -525,7 +598,7 @@ mod tests {
                 }
             })
         })));
-        let (sent, removed, failed) = broadcast(&dir, &json!({"title": "t"})).await;
+        let (sent, removed, failed) = broadcast(&dir, None, &json!({"title": "t"})).await;
         set_test_sender(None);
         assert_eq!((sent, removed, failed), (1, 1, 1));
         assert_eq!(seen.load(Ordering::SeqCst), 3);

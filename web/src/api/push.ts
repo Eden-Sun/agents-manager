@@ -12,7 +12,7 @@ export async function listPushEndpoints(): Promise<string[]> {
   return (r?.subscriptions ?? []).map((s) => s.endpoint ?? '').filter(Boolean)
 }
 
-export async function savePushSubscription(sub: { endpoint: string; keys: { p256dh: string; auth: string } }): Promise<void> {
+export async function savePushSubscription(sub: { endpoint: string; keys: { p256dh: string; auth: string }; origin?: string }): Promise<void> {
   await rawTransport.request('POST', '/push/subscriptions', sub)
 }
 
@@ -20,6 +20,6 @@ export async function deletePushSubscription(endpoint: string): Promise<void> {
   await rawTransport.request('DELETE', `/push/subscriptions?endpoint=${encodeURIComponent(endpoint)}`)
 }
 
-export async function sendTestPush(): Promise<{ sent: number; removed: number; failed: number }> {
-  return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number }
+export async function sendTestPush(): Promise<{ sent: number; removed: number; failed: number; reasons?: string[] }> {
+  return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number; reasons?: string[] }
 }

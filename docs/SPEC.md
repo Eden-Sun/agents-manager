@@ -1143,6 +1143,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 listen = "127.0.0.1:7788"
 herdr_session = "agents-manager"
 # data_dir = "/tmp/am-iso"          # 留空＝跟著這份設定檔所在的目錄；相對路徑也以它為準
+# push_subject = "https://agm.example.ts.net"  # 網頁推播 VAPID sub；留空＝用訂閱時網頁的 https origin，再沒有用內建 mailto
 
 [supervisor]
 notify_interval_secs = 600

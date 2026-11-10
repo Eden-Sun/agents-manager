@@ -70,7 +70,7 @@ export function PushSettings() {
         ) : null}
         {view.kind === 'on' ? (
           <>
-            <button type="button" className="btn" disabled={busy} onClick={() => void run(async () => { const r = await sendTestPush(); setMsg(r.sent > 0 ? t('已送出測試通知') : t('沒有送出（沒有可用的訂閱）')) })}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void run(async () => { const r = await sendTestPush(); setMsg(r.sent > 0 ? t('已送出測試通知') : r.failed > 0 ? t('沒有送出：推送服務拒絕') + (r.reasons?.length ? `（${r.reasons.join('；')}）` : '') : t('沒有送出（沒有可用的訂閱）')) })}>
               {t('送測試通知')}
             </button>
             <button type="button" className="btn" disabled={busy} onClick={() => void run(disablePush)}>

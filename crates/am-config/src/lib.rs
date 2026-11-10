@@ -49,11 +49,14 @@ pub struct ServerConfig {
     /// 相對路徑以設定檔所在目錄為準；`startup.rs` 負責解析。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// 網頁推播 VAPID `sub`（`https://…` 或 `mailto:…`）。留空＝用訂閱時網頁的 https origin，再沒有就用內建的合法 mailto。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_subject: Option<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { listen: default_listen(), herdr_session: default_session(), data_dir: None }
+        Self { listen: default_listen(), herdr_session: default_session(), data_dir: None, push_subject: None }
     }
 }
 

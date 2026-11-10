@@ -3168,9 +3168,10 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 
 - `GET /api/push/vapid-key` → `{public_key}`（base64url，65 bytes 未壓縮點）。VAPID 私鑰第一次需要時產生，存 `{data_dir}/vapid.json`（0600），不進 config／git／log，API 不回私鑰。
 - `GET /api/push/subscriptions` → `{subscriptions:[{endpoint, created_at}]}`（不回 keys）。
-- `POST /api/push/subscriptions` body `{endpoint, keys:{p256dh, auth}}`（瀏覽器 `PushSubscription.toJSON()`）→ `{ok, created, count}`。endpoint 必須是 https；`p256dh` 須為合法 P-256 點、`auth` 16 bytes，否則 400 `invalid_endpoint`／`invalid_p256dh`／`invalid_auth`；同 endpoint 去重（更新 keys，`created:false`）；上限 50 筆（400 `too_many_subscriptions`）。存於 `{data_dir}/push-subscriptions.json`（0600）。
+- `POST /api/push/subscriptions` body `{endpoint, keys:{p256dh, auth}, origin?}`（瀏覽器 `PushSubscription.toJSON()`；`origin`＝網頁 `location.origin`，只收 https，存起來當 VAPID `sub`）→ `{ok, created, count}`。endpoint 必須是 https；`p256dh` 須為合法 P-256 點、`auth` 16 bytes，否則 400 `invalid_endpoint`／`invalid_p256dh`／`invalid_auth`；同 endpoint 去重（更新 keys，`created:false`）；上限 50 筆（400 `too_many_subscriptions`）。存於 `{data_dir}/push-subscriptions.json`（0600）。
 - `DELETE /api/push/subscriptions?endpoint=<url>` → `{ok, removed}`。
-- `POST /api/push/test` → `{sent, removed, failed}`：對所有訂閱送「測試通知」。
+- `POST /api/push/test` → `{sent, removed, failed, reasons[]}`：對所有訂閱送「測試通知」；`reasons` 是推送服務拒絕的原因（回應 body 的 `reason`，已截短，不含 endpoint／金鑰），網頁顯示「沒有送出：推送服務拒絕（原因）」。
+- VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。
 - 推送服務回 404／410 的訂閱自動刪除；暫時性失敗保留並記 warn。
 - 排程終態（與 `schedule_notice` 同一處、同一份 `notify` 過濾）背景送出，逾時 60 秒，失敗不影響排程。內容：`{title:"S3 DON上班", body:"✅ 08:58 完成（47 秒）", tag, url}`；時間用排程時區；結果為 ✅／❌ 失敗／⚠ 結果不明／⚠ 拒絕執行；有 duration 才帶括號。點擊開 `url`（`/?schedule=<id>&project=<id>&occurrence=<id>`）。
 
