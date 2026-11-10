@@ -7,6 +7,7 @@
 //! * 送出一律背景、有逾時，失敗只記 warn，不影響排程。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -359,6 +360,218 @@ pub(crate) fn spawn_schedule_push(app: &Arc<App>, t: &crate::schedules::store::T
     });
 }
 
+// ---------- 主力 bot 推播（回合做完／需要回應） ----------
+
+/// 同 bot 同類通知的最短間隔：30 秒內多次合併（只送第一則）。
+const MAIN_THROTTLE: Duration = Duration::from_secs(30);
+/// blocked 要等畫面判斷（假 blocked 會被改回）才送。
+const BLOCKED_SETTLE: Duration = Duration::from_secs(3);
+/// presence 超過這麼久沒更新就視為失效（頁面關了或被凍結），照推。
+const PRESENCE_STALE: Duration = Duration::from_secs(90);
+/// 「正在看」要求最近這麼久內有互動。
+const PRESENCE_ACTIVE_SECS: u64 = 60;
+const BODY_MAX: usize = 80;
+
+fn settings_path(dir: &Path) -> PathBuf {
+    dir.join("push-settings.json")
+}
+
+/// 「主力 bot 回覆完成／需要回應時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+pub(crate) fn main_bots_enabled(dir: &Path) -> bool {
+    std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["main_bots"].as_bool()).unwrap_or(true)
+}
+
+#[derive(Clone, Debug)]
+struct Presence {
+    bot_id: Option<String>,
+    visible: bool,
+    /// 回報當下距離上次互動幾秒。
+    idle_secs: u64,
+    received: std::time::Instant,
+}
+
+static PRESENCE: std::sync::Mutex<Option<std::collections::HashMap<String, Presence>>> = std::sync::Mutex::new(None);
+
+fn record_presence(client: &str, p: Presence) {
+    let mut g = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(Default::default);
+    map.retain(|_, v| v.received.elapsed() < PRESENCE_STALE * 4);
+    if map.len() < 64 || map.contains_key(client) {
+        map.insert(client.to_string(), p);
+    }
+}
+
+/// 有任何一個網頁正看著這顆 bot（可見、選中、最近 60 秒有互動、回報沒過期）。
+fn user_is_watching(bot_id: &str) -> bool {
+    let g = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().is_some_and(|m| {
+        m.values().any(|p| {
+            p.visible && p.bot_id.as_deref() == Some(bot_id) && p.received.elapsed() < PRESENCE_STALE && p.idle_secs + p.received.elapsed().as_secs() <= PRESENCE_ACTIVE_SECS
+        })
+    })
+}
+
+#[cfg(test)]
+fn clear_presence() {
+    *PRESENCE.lock().unwrap() = None;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum MainKind {
+    Done,
+    Blocked,
+}
+
+/// 去重與節流的帳：同一個 key（回合 id／blocked 段落）只推一次，同 bot 同類 30 秒內只推一次。
+#[derive(Default)]
+pub(crate) struct MainNotifier {
+    last_key: std::sync::Mutex<std::collections::HashMap<(String, MainKind), String>>,
+    last_sent: std::sync::Mutex<std::collections::HashMap<(String, MainKind), std::time::Instant>>,
+    blocked_open: std::sync::Mutex<std::collections::HashSet<String>>,
+    episode: std::sync::atomic::AtomicU64,
+    /// 測試把它設 0；正式環境用 `BLOCKED_SETTLE`。
+    settle: std::sync::Mutex<Option<Duration>>,
+}
+
+impl MainNotifier {
+    /// 該不該送；順便把 key 記成「已處理」（被節流或被 presence 擋掉的也不補送）。
+    fn admit(&self, bot_id: &str, kind: MainKind, key: &str, watching: bool) -> bool {
+        let id = (bot_id.to_string(), kind);
+        {
+            let mut keys = self.last_key.lock().unwrap_or_else(|e| e.into_inner());
+            if keys.get(&id).is_some_and(|k| k == key) {
+                return false;
+            }
+            keys.insert(id.clone(), key.to_string());
+        }
+        if watching {
+            return false;
+        }
+        let mut sent = self.last_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if sent.get(&id).is_some_and(|t| t.elapsed() < MAIN_THROTTLE) {
+            return false;
+        }
+        sent.insert(id, std::time::Instant::now());
+        true
+    }
+}
+
+/// 第一個非空行，截 80 字（以字元計）。
+pub(crate) fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let mut out: String = line.chars().filter(|c| !c.is_control()).take(max).collect();
+    if line.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Value {
+    let body = match kind {
+        MainKind::Done => if line.is_empty() { "回覆完成".to_string() } else { line.to_string() },
+        MainKind::Blocked => if line.is_empty() { "需要你回應".to_string() } else { format!("需要你回應：{line}") },
+    };
+    let k = if kind == MainKind::Done { "done" } else { "blocked" };
+    json!({"title": bot_name, "body": body, "tag": format!("bot:{bot_id}:{k}"), "url": format!("/bots/{bot_id}")})
+}
+
+async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, line: String) {
+    if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id)) {
+        return;
+    }
+    let payload = main_payload(&bot.id, &bot.name, kind, &line);
+    let subject = app.cfg.get().await.server.push_subject.clone();
+    let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+}
+
+async fn primary_bot(app: &Arc<App>, bot_id: &str) -> Option<crate::db::Bot> {
+    crate::db::bot(&app.db, bot_id).await.ok().flatten().filter(|b| b.is_primary == 1)
+}
+
+async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &str) {
+    if !main_bots_enabled(&app.data_dir) || load_subs(&app.data_dir).is_empty() {
+        return;
+    }
+    let Some(bot) = primary_bot(app, bot_id).await else { return };
+    let reply: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten();
+    send_main(app, n, &bot, MainKind::Done, turn_id, first_line(&reply.unwrap_or_default(), BODY_MAX)).await;
+}
+
+async fn blocked_line(app: &Arc<App>, bot_id: &str, run_id: &str) -> String {
+    use axum::extract::Path;
+    if let Ok(Json(v)) = crate::runners::pending_question::get_pending_question(State(app.clone()), Path(bot_id.to_string())).await {
+        if let Some(q) = v["questions"][0]["question"].as_str() {
+            let l = first_line(q, BODY_MAX);
+            if !l.is_empty() {
+                return l;
+            }
+        }
+    }
+    crate::blocked_reason::of(run_id).map(|r| first_line(&r.text, BODY_MAX)).unwrap_or_default()
+}
+
+async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode: u64) {
+    let settle = n.settle.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(BLOCKED_SETTLE);
+    tokio::time::sleep(settle).await;
+    if !main_bots_enabled(&app.data_dir) || load_subs(&app.data_dir).is_empty() {
+        return;
+    }
+    let Some(bot) = primary_bot(&app, &bot_id).await else { return };
+    let Some(run) = crate::db::active_run(&app.db, &bot_id).await.ok().flatten() else { return };
+    if run.agent_status != "blocked" {
+        return;
+    }
+    let line = blocked_line(&app, &bot_id, &run.id).await;
+    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), line).await;
+}
+
+pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &crate::state::WsEvent) {
+    match ev.kind.as_str() {
+        "turn_updated" => {
+            let status = ev.data["turn"]["status"].as_str().unwrap_or("");
+            if !matches!(status, "completed" | "completed_fallback") {
+                return;
+            }
+            if let (Some(bot_id), Some(turn_id)) = (ev.data["bot_id"].as_str(), ev.data["turn"]["id"].as_str()) {
+                on_turn_done(app, n, bot_id, turn_id).await;
+            }
+        }
+        "bot_status" => {
+            let Some(bot_id) = ev.data["bot_id"].as_str() else { return };
+            if ev.data["run"]["agent_status"].as_str() == Some("blocked") {
+                let first = n.blocked_open.lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string());
+                if first {
+                    let episode = n.episode.fetch_add(1, Ordering::SeqCst) + 1;
+                    tokio::spawn(on_blocked(app.clone(), n.clone(), bot_id.to_string(), episode));
+                }
+            } else {
+                n.blocked_open.lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 啟動時呼叫一次：訂閱事件流，主力 bot 回合做完／需要回應就推播。
+pub fn spawn_main_notifier(app: Arc<App>) {
+    let mut rx = app.subscribe();
+    let n = Arc::new(MainNotifier::default());
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => handle_event(&app, &n, &ev).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 // ---------- API ----------
 
 pub(crate) async fn get_vapid_key(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
@@ -447,6 +660,44 @@ pub(crate) async fn test_push(State(app): State<Arc<App>>, Extension(p): Extensi
     let subject = app.cfg.get().await.server.push_subject.clone();
     let (sent, removed, failed, reasons) = broadcast_detail(&app.data_dir, subject.as_deref(), &payload).await;
     Ok(Json(json!({"sent": sent, "removed": removed, "failed": failed, "reasons": reasons})))
+}
+
+pub(crate) async fn get_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    user_only(&p)?;
+    Ok(Json(json!({"main_bots": main_bots_enabled(&app.data_dir)})))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SettingsInput {
+    main_bots: bool,
+}
+
+pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
+    user_only(&p)?;
+    let _g = FILE_LOCK.lock().await;
+    write_private(&settings_path(&app.data_dir), json!({"main_bots": input.main_bots}).to_string().as_bytes()).map_err(|e| LcError::Upstream(format!("{e}")))?;
+    Ok(Json(json!({"main_bots": input.main_bots})))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PresenceInput {
+    client_id: String,
+    #[serde(default)]
+    bot_id: Option<String>,
+    #[serde(default)]
+    visible: bool,
+    #[serde(default)]
+    idle_secs: u64,
+}
+
+/// 網頁回報「我正看著哪顆 bot」：只存記憶體，供推播抑制用。
+pub(crate) async fn post_presence(Extension(p): Extension<RequestPrincipal>, Json(input): Json<PresenceInput>) -> Result<Json<Value>, LcError> {
+    user_only(&p)?;
+    if input.client_id.is_empty() || input.client_id.len() > 64 {
+        return Err(bad("invalid_client_id"));
+    }
+    record_presence(&input.client_id, Presence { bot_id: input.bot_id, visible: input.visible, idle_secs: input.idle_secs, received: std::time::Instant::now() });
+    Ok(Json(json!({"ok": true})))
 }
 
 #[cfg(test)]
@@ -638,5 +889,125 @@ mod tests {
         assert_eq!(got["title"], "S3 DON上班");
         assert!(got["body"].as_str().unwrap().starts_with("✅ "), "{got}");
         assert!(got["url"].as_str().unwrap().contains("schedule=sch1"), "{got}");
+    }
+
+    #[test]
+    fn first_line_truncates_and_admit_dedups_throttles_and_respects_presence() {
+        assert_eq!(first_line("\n  hello world \nsecond", 80), "hello world");
+        let long = "字".repeat(100);
+        assert_eq!(first_line(&long, 80).chars().count(), 81, "80 字加省略號");
+        assert_eq!(first_line("", 80), "");
+        let n = MainNotifier::default();
+        assert!(n.admit("b", MainKind::Done, "t1", false));
+        assert!(!n.admit("b", MainKind::Done, "t1", false), "同一回合只推一次");
+        assert!(!n.admit("b", MainKind::Done, "t2", false), "30 秒內合併");
+        assert!(n.admit("b", MainKind::Blocked, "r1:1", false), "done 與 blocked 分開算");
+        assert!(n.admit("other", MainKind::Done, "t9", false), "別顆 bot 不受影響");
+        assert!(!n.admit("c", MainKind::Done, "t1", true), "正在看就不推");
+        assert!(!n.admit("c", MainKind::Done, "t1", false), "被 presence 擋掉的回合不補送");
+        let p = main_payload("b1", "foo", MainKind::Blocked, "要繼續嗎？");
+        assert_eq!((p["title"].as_str(), p["body"].as_str(), p["url"].as_str()), (Some("foo"), Some("需要你回應：要繼續嗎？"), Some("/bots/b1")));
+        assert_eq!(main_payload("b1", "foo", MainKind::Done, "")["body"], "回覆完成");
+    }
+
+    #[test]
+    fn presence_requires_visible_selected_and_recent() {
+        let _ = SENDER_TESTS.try_lock();
+        clear_presence();
+        let at = |bot: Option<&str>, visible, idle| Presence { bot_id: bot.map(String::from), visible, idle_secs: idle, received: std::time::Instant::now() };
+        record_presence("c1", at(Some("b1"), true, 5));
+        assert!(user_is_watching("b1"));
+        assert!(!user_is_watching("b2"), "選中別顆");
+        record_presence("c1", at(Some("b1"), false, 5));
+        assert!(!user_is_watching("b1"), "頁面不可見");
+        record_presence("c1", at(Some("b1"), true, 61));
+        assert!(!user_is_watching("b1"), "超過 60 秒沒互動");
+        clear_presence();
+    }
+
+    async fn primary_env() -> (crate::testing::Env, String, Arc<MainNotifier>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "主力一號").await;
+        sqlx::query("UPDATE bots SET is_primary = 1 WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        save_subs(&env.app.data_dir, &[fresh_sub("https://push.example/m").0]).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_s: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+        let n = Arc::new(MainNotifier::default());
+        *n.settle.lock().unwrap() = Some(Duration::ZERO);
+        (env, bot.id, n, rx)
+    }
+
+    fn turn_ev(bot_id: &str, turn: &str, status: &str) -> crate::state::WsEvent {
+        crate::state::WsEvent { seq: 1, kind: "turn_updated".into(), data: json!({"bot_id": bot_id, "turn": {"id": turn, "status": status}}) }
+    }
+
+    #[tokio::test]
+    async fn primary_turn_done_pushes_once_and_respects_switch_and_presence() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        handle_event(&app, &n, &turn_ev(&bot_id, "t1", "in_flight")).await;
+        assert!(rx.try_recv().is_err(), "還在跑不推");
+        handle_event(&app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        let got = rx.try_recv().expect("主力回合做完要推");
+        assert_eq!((got["title"].as_str(), got["url"].as_str()), (Some("主力一號"), Some(&*format!("/bots/{bot_id}"))));
+        handle_event(&app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        handle_event(&app, &n, &turn_ev(&bot_id, "t2", "completed")).await;
+        assert!(rx.try_recv().is_err(), "同回合與 30 秒內都不再推");
+        // 非主力不推。
+        let plain = crate::testing::claude_bot(&app, &env.project_id, "一般").await;
+        handle_event(&app, &n, &turn_ev(&plain.id, "t3", "completed")).await;
+        assert!(rx.try_recv().is_err(), "非主力不推");
+        // 開關關掉不推。
+        let n2 = Arc::new(MainNotifier::default());
+        write_private(&settings_path(&app.data_dir), br#"{"main_bots":false}"#).unwrap();
+        handle_event(&app, &n2, &turn_ev(&bot_id, "t4", "completed")).await;
+        assert!(rx.try_recv().is_err(), "開關關了不推");
+        write_private(&settings_path(&app.data_dir), br#"{"main_bots":true}"#).unwrap();
+        // presence：正在看就不推。
+        record_presence("c", Presence { bot_id: Some(bot_id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
+        handle_event(&app, &n2, &turn_ev(&bot_id, "t5", "completed")).await;
+        assert!(rx.try_recv().is_err(), "正在看不推");
+        clear_presence();
+        handle_event(&app, &n2, &turn_ev(&bot_id, "t6", "completed")).await;
+        assert!(rx.try_recv().is_ok(), "沒在看就推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn primary_blocked_pushes_once_per_episode() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        let run_id = crate::testing::fake_run(&app, &bot_id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        let ev = |st: &str| crate::state::WsEvent { seq: 1, kind: "bot_status".into(), data: json!({"bot_id": bot_id, "run": {"agent_status": st}}) };
+        handle_event(&app, &n, &ev("blocked")).await;
+        handle_event(&app, &n, &ev("blocked")).await;
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("blocked 要推").unwrap();
+        assert_eq!(got["title"], "主力一號");
+        assert!(got["body"].as_str().unwrap().starts_with("需要你回應"), "{got}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(rx.try_recv().is_err(), "同一段 blocked 只推一次");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn settings_roundtrip_user_only() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let user = || Extension(RequestPrincipal::User);
+        assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], true, "預設開");
+        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: false })).await.unwrap();
+        assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
+        let bot = || Extension(RequestPrincipal::Bot("b1".into()));
+        assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: true })).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
     }
 }

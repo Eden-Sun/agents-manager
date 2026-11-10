@@ -247,6 +247,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/push/vapid-key", get(crate::webpush::get_vapid_key))
         .route("/push/subscriptions", get(crate::webpush::list).post(crate::webpush::subscribe).delete(crate::webpush::unsubscribe))
         .route("/push/test", post(crate::webpush::test_push))
+        .route("/push/settings", get(crate::webpush::get_settings).put(crate::webpush::put_settings))
+        .route("/push/presence", post(crate::webpush::post_presence))
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
@@ -1122,6 +1124,9 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/push/subscriptions", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/push/subscriptions", BotRoutePolicy::UserOnly),
     ("POST", "/api/push/test", BotRoutePolicy::UserOnly),
+    ("GET", "/api/push/settings", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/push/settings", BotRoutePolicy::UserOnly),
+    ("POST", "/api/push/presence", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/hosts/{name}/shells/{pane_id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/attachments/{id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),

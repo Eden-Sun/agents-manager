@@ -1,5 +1,5 @@
 /** 網頁推播的瀏覽器端：支援度判斷、訂閱／取消、點通知開排程。service worker 在 `public/sw.js`（只處理 push 與 click）。 */
-import { deletePushSubscription, getVapidKey, savePushSubscription } from '../api/push'
+import { deletePushSubscription, getVapidKey, reportPresence, savePushSubscription } from '../api/push'
 
 export type PushSupport = { ok: true } | { ok: false; reason: 'insecure' | 'unsupported' | 'ios-home-screen' }
 
@@ -68,6 +68,16 @@ export function parseScheduleUrl(url: string): { projectId: string; scheduleId: 
   }
 }
 
+/** 通知的 url（`/bots/<id>`）→ bot id。 */
+export function parseBotUrl(url: string): string | null {
+  try {
+    const m = /^\/bots\/([^/]+)\/?$/.exec(new URL(url, 'http://x').pathname)
+    return m ? decodeURIComponent(m[1]) : null
+  } catch {
+    return null
+  }
+}
+
 /** service worker 在已開啟的視窗裡點通知時 postMessage：轉成 `agm:open-schedule`（側欄聽它）。 */
 export function installPushClickBridge(): () => void {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return () => {}
@@ -76,7 +86,42 @@ export function installPushClickBridge(): () => void {
     if (d?.type !== 'agm-open-url' || !d.url) return
     const target = parseScheduleUrl(d.url)
     if (target) window.dispatchEvent(new CustomEvent('agm:open-schedule', { detail: target }))
+    const botId = parseBotUrl(d.url)
+    if (botId) window.dispatchEvent(new CustomEvent('agm:open-bot', { detail: { botId } }))
   }
   navigator.serviceWorker.addEventListener('message', onMessage)
   return () => navigator.serviceWorker.removeEventListener('message', onMessage)
+}
+
+/**
+ * 把「這個視窗可見、選中哪顆 bot、距上次互動幾秒」定期回報給 daemon（主力 bot 推播據此不打擾正在看的人）。
+ * 沒有訂閱推播的瀏覽器也報，反正 daemon 只拿來抑制；失敗忽略（沒有 presence＝照推）。
+ */
+export function installPresenceReporter(getBotId: () => string | null): () => void {
+  if (typeof document === 'undefined') return () => {}
+  const id = (() => {
+    try {
+      const k = 'agm-presence-id'
+      return sessionStorage.getItem(k) ?? (sessionStorage.setItem(k, crypto.randomUUID()), sessionStorage.getItem(k)!)
+    } catch {
+      return Math.random().toString(36).slice(2)
+    }
+  })()
+  let lastInput = Date.now()
+  const touch = () => {
+    lastInput = Date.now()
+  }
+  const send = () => {
+    void reportPresence({ client_id: id, bot_id: getBotId(), visible: document.visibilityState === 'visible', idle_secs: Math.round((Date.now() - lastInput) / 1000) }).catch(() => {})
+  }
+  const evs = ['pointerdown', 'keydown', 'touchstart', 'wheel'] as const
+  evs.forEach((e) => window.addEventListener(e, touch, { passive: true }))
+  document.addEventListener('visibilitychange', send)
+  const timer = window.setInterval(send, 20_000)
+  send()
+  return () => {
+    evs.forEach((e) => window.removeEventListener(e, touch))
+    document.removeEventListener('visibilitychange', send)
+    window.clearInterval(timer)
+  }
 }

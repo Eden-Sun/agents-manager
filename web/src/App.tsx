@@ -27,7 +27,7 @@ import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 import { useT } from './lib/i18n'
-import { installPushClickBridge } from './lib/pushNotify'
+import { installPresenceReporter, installPushClickBridge } from './lib/pushNotify'
 import { drawerShouldClose } from './lib/drawerNav'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
@@ -41,6 +41,16 @@ const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : documen
 /** 網頁推播：點通知時 service worker 通知已開啟的視窗開排程。 */
 function usePushClickBridge() {
   useEffect(() => installPushClickBridge(), [])
+  // 點「主力 bot」通知：已開啟的視窗收 `agm:open-bot`，選到該 bot；並回報目前正看哪顆（daemon 不打擾正在看的人）。
+  useEffect(() => {
+    const onOpen = (ev: Event) => useStore.getState().selectBot((ev as CustomEvent<{ botId: string }>).detail.botId)
+    window.addEventListener('agm:open-bot', onOpen)
+    const stop = installPresenceReporter(() => useStore.getState().selectedBotId)
+    return () => {
+      window.removeEventListener('agm:open-bot', onOpen)
+      stop()
+    }
+  }, [])
 }
 
 function useUnread() {

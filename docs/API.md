@@ -137,6 +137,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| PUT | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| POST | `/api/push/presence` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/vapid-key` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
@@ -218,6 +221,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| HEAD | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/vapid-key` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -3172,6 +3176,9 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `DELETE /api/push/subscriptions?endpoint=<url>` → `{ok, removed}`。
 - `POST /api/push/test` → `{sent, removed, failed, reasons[]}`：對所有訂閱送「測試通知」；`reasons` 是推送服務拒絕的原因（回應 body 的 `reason`，已截短，不含 endpoint／金鑰），網頁顯示「沒有送出：推送服務拒絕（原因）」。
 - VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。
+- `GET|PUT /api/push/settings` `{main_bots}`：「主力 bot 回覆完成／需要回應時推播」開關（預設開），存 `{data_dir}/push-settings.json`。
+- `POST /api/push/presence` `{client_id, bot_id|null, visible, idle_secs}`：網頁每 20 秒與可見性變化時回報正看哪顆 bot，只存記憶體；`visible` 且 `bot_id` 吻合且（`idle_secs`＋回報後經過秒數）≤60 且回報 90 秒內，該 bot 就不推。沒有 presence 照推。
+- **主力 bot 推播**：daemon 訂閱事件流，對 `bots.is_primary=1` 的 bot（主力名單的唯一來源，網頁的 ★ 釘選就是 `PATCH /api/bots/{id} {primary}` 寫這欄）：回合 `completed`／`completed_fallback` → 標題 bot 名稱、內文回覆第一行（80 字）；`blocked`（等 3 秒讓假 blocked 被改回）→「需要你回應：<題目第一行>」（題目取 pending-question，沒有就用 `blocked_reason`）。同回合／同一段 blocked 只推一次；同 bot 同類 30 秒內合併。通知 `url` 為 `/bots/<id>`，點了開該 bot。
 - 推送服務回 404／410 的訂閱自動刪除；暫時性失敗保留並記 warn。
 - 排程終態（與 `schedule_notice` 同一處、同一份 `notify` 過濾）背景送出，逾時 60 秒，失敗不影響排程。內容：`{title:"S3 DON上班", body:"✅ 08:58 完成（47 秒）", tag, url}`；時間用排程時區；結果為 ✅／❌ 失敗／⚠ 結果不明／⚠ 拒絕執行；有 duration 才帶括號。點擊開 `url`（`/?schedule=<id>&project=<id>&occurrence=<id>`）。
 

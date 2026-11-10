@@ -323,6 +323,8 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::api_bot::spawn_retention_ticker(app.clone());
     // Agent titles have no herdr event, so they are polled.
     crate::runners::events::spawn_title_poller(app.clone());
+    // 主力 bot 回合做完／需要回應 → 網頁推播。
+    crate::webpush::spawn_main_notifier(app.clone());
     // 狀態寫不進 DB、重放也用完的 pane，靠這裡定時重讀 herdr 補回來（#1184）。
     crate::runners::events::spawn_status_repair(app.clone());
     runners::tui_prompts::spawn_survey_watcher(app.clone());

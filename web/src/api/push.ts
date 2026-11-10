@@ -23,3 +23,16 @@ export async function deletePushSubscription(endpoint: string): Promise<void> {
 export async function sendTestPush(): Promise<{ sent: number; removed: number; failed: number; reasons?: string[] }> {
   return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number; reasons?: string[] }
 }
+
+export async function getPushSettings(): Promise<{ main_bots: boolean }> {
+  return (await rawTransport.request('GET', '/push/settings')) as { main_bots: boolean }
+}
+
+export async function setPushSettings(s: { main_bots: boolean }): Promise<void> {
+  await rawTransport.request('PUT', '/push/settings', s)
+}
+
+/** 回報「這個視窗正看著哪顆 bot」：daemon 據此不對正在看的 bot 推播。 */
+export async function reportPresence(p: { client_id: string; bot_id: string | null; visible: boolean; idle_secs: number }): Promise<void> {
+  await rawTransport.request('POST', '/push/presence', p)
+}

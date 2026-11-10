@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { listPushEndpoints, sendTestPush } from '../api/push'
+import { getPushSettings, listPushEndpoints, sendTestPush, setPushSettings } from '../api/push'
 import { useT } from '../lib/i18n'
 import { currentSubscription, disablePush, enablePush, pushSupport, type PushSupport } from '../lib/pushNotify'
 
@@ -11,6 +11,10 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [mainBots, setMainBots] = useState(true)
+  useEffect(() => {
+    getPushSettings().then((s) => setMainBots(s.main_bots), () => {})
+  }, [])
 
   const refresh = useCallback(async () => {
     const support = pushSupport()
@@ -79,6 +83,18 @@ export function PushSettings() {
           </>
         ) : null}
       </div>
+      <label className="push-settings-note">
+        <input
+          type="checkbox"
+          checked={mainBots}
+          onChange={(e) => {
+            const v = e.target.checked
+            setMainBots(v)
+            setPushSettings({ main_bots: v }).catch(() => setMainBots(!v))
+          }}
+        />{' '}
+        {t('主力 bot 回覆完成／需要回應時推播')}
+      </label>
       {msg ? <p className="push-settings-note" role="alert">{msg}</p> : null}
     </div>
   )
