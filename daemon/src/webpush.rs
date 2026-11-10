@@ -541,11 +541,30 @@ async fn primary_bot(app: &Arc<App>, bot_id: &str) -> Option<crate::db::Bot> {
     crate::db::bot(&app.db, bot_id).await.ok().flatten().filter(|b| b.is_primary == 1)
 }
 
-async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &str) {
+/// 這一回合是使用者的訊息觸發的嗎：回合在一般佇列（不是 daemon 通知／別的 bot 轉來的），且帶著不是代發的 user 訊息。
+/// daemon 通知（請求結果、後續、子 agent 完成）、hook 喚醒與背景任務自續（沒有 user 訊息）都不算。
+async fn user_triggered(app: &Arc<App>, turn_id: &str) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM turns t WHERE t.id = ? AND t.queue_class = 'user' AND EXISTS(SELECT 1 FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' AND m.relay_from IS NULL))")
+        .bind(turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap_or(false)
+}
+
+async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &str, failed: bool) {
     if !main_bots_enabled(&app.data_dir) || load_subs(&app.data_dir).is_empty() {
         return;
     }
     let Some(bot) = primary_bot(app, bot_id).await else { return };
+    if failed {
+        // 回合失敗不論誰觸發都推。
+        send_main(app, n, &bot, MainKind::Done, turn_id, async { "回合失敗".to_string() }).await;
+        return;
+    }
+    // 系統觸發的回合（daemon 通知、hook 喚醒、背景任務自續）不推：使用者沒有在等它，每則都推太吵（2026-11-10）。
+    if !user_triggered(app, turn_id).await {
+        return;
+    }
     let reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1")
         .bind(turn_id)
         .fetch_optional(&app.db)
@@ -588,11 +607,11 @@ pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &cra
     match ev.kind.as_str() {
         "turn_updated" => {
             let status = ev.data["turn"]["status"].as_str().unwrap_or("");
-            if !matches!(status, "completed" | "completed_fallback") {
+            if !matches!(status, "completed" | "completed_fallback" | "failed") {
                 return;
             }
             if let (Some(bot_id), Some(turn_id)) = (ev.data["bot_id"].as_str(), ev.data["turn"]["id"].as_str()) {
-                on_turn_done(app, n, bot_id, turn_id).await;
+                on_turn_done(app, n, bot_id, turn_id, status == "failed").await;
             }
         }
         "bot_status" => {
@@ -1176,6 +1195,9 @@ mod tests {
         clear_presence();
         let (env, bot_id, n, mut rx) = primary_env().await;
         let app = env.app.clone();
+        for t in ["t1", "t2", "t4", "t5", "t6"] {
+            add_reply(&env, &bot_id, t, "ok").await;
+        }
         handle_event(&app, &n, &turn_ev(&bot_id, "t1", "in_flight")).await;
         assert!(rx.try_recv().is_err(), "還在跑不推");
         handle_event(&app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
@@ -1201,6 +1223,30 @@ mod tests {
         clear_presence();
         handle_event(&app, &n2, &turn_ev(&bot_id, "t6", "completed")).await;
         assert!(rx.try_recv().is_ok(), "沒在看就推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn system_triggered_turns_do_not_push_but_failures_do() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        add_turn(&env, &bot_id, "daemon", "ag2 這則是空的", "daemon", Some("daemon")).await;
+        add_turn(&env, &bot_id, "relay", "收到", "relay", Some("other-bot")).await;
+        add_turn(&env, &bot_id, "hook", "背景任務完成", "hook", None).await;
+        for t in ["daemon", "relay", "hook"] {
+            handle_event(&app, &n, &turn_ev(&bot_id, t, "completed")).await;
+        }
+        assert!(rx.try_recv().is_err(), "daemon 通知、別的 bot 轉來的、hook／背景自續回合都不推");
+        // 這些不吃掉使用者回合的節流名額。
+        add_turn(&env, &bot_id, "human", "好了", "user", None).await;
+        handle_event(&app, &n, &turn_ev(&bot_id, "human", "completed")).await;
+        assert_eq!(rx.try_recv().expect("使用者訊息觸發的回合照推")["body"], "好了");
+        // 失敗：不論誰觸發都推（另一個 key／同類節流以失敗回合 id 計）。
+        let n2 = Arc::new(MainNotifier::default());
+        handle_event(&app, &n2, &turn_ev(&bot_id, "hook", "failed")).await;
+        assert_eq!(rx.try_recv().expect("回合失敗照推")["body"], "回合失敗");
         set_test_sender(None);
     }
 
@@ -1272,9 +1318,20 @@ mod tests {
     }
 
     async fn add_reply(env: &crate::testing::Env, bot_id: &str, turn: &str, text: &str) {
+        add_turn(env, bot_id, turn, text, "user", None).await;
+    }
+
+    /// `class`＝佇列類別；`user_msg_from`＝user 訊息的 `relay_from`（None＝使用者本人）；class 為 "hook" 時不放 user 訊息（背景自續）。
+    async fn add_turn(env: &crate::testing::Env, bot_id: &str, turn: &str, text: &str, class: &str, user_msg_from: Option<&str>) {
+        let hook = class == "hook";
+        let class = if hook { "user" } else { class };
         let conv = crate::db::conversation_id(&env.app.db, bot_id).await.unwrap();
         let run: String = match sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(bot_id).fetch_optional(&env.app.db).await.unwrap() { Some(r) => r, None => crate::testing::fake_run(&env.app, bot_id).await };
-        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','completed','ok',?)").bind(turn).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,?,'completed','ok',?)").bind(turn).bind(&conv).bind(&run).bind(if hook { "external" } else { "web" }).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET queue_class=? WHERE id=?").bind(class).bind(turn).execute(&env.app.db).await.unwrap();
+        if !hook {
+            sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,created_at) VALUES(?,?,?,'user','hi','web',?,?)").bind(format!("u-{turn}")).bind(&conv).bind(turn).bind(user_msg_from).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        }
         sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'assistant',?,'hook',?)").bind(format!("m-{turn}")).bind(&conv).bind(turn).bind(text).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     }
 
