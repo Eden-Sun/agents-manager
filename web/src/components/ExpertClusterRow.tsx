@@ -28,7 +28,75 @@ function writeOpen(key: string, open: boolean) {
   }
 }
 
-/** 一列「<name> 群集 ●1 ○2」：標題後面直接是各狀態的燈號＋數量（加總等於成員數，滑過看文字），可展開看成員；勾選框一次切整組。 */
+/**
+ * 停派晶片＋選單：群集列上的整組操作（使用者 2026-11-10 改版）。
+ * 有成員停派時常駐顯示「停派 n/m」；全部可派時「可派 m/m」只在桌面滑過列時出現（觸控常駐）。
+ * 點開選單才動作，所以跟「展開群集」的按鈕分開；選單與晶片不冒泡，免得同時展開群集。
+ */
+function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[]; on: number; busy: boolean }) {
+  useT()
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const total = members.length
+  const off = total - on
+  const allOn = off === 0
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  // 只送差異成員的 PATCH；失敗的計數回報，全部成功不跳通知。
+  const setAll = (next: boolean) => {
+    setOpen(false)
+    const targets = members.filter((m) => (m.manager_use !== false) !== next)
+    if (targets.length === 0) return
+    const patch = useStore.getState().patchBot
+    void Promise.allSettled(targets.map((m) => patch(m.id, { manager_use: next }))).then((rs) => {
+      const fail = rs.filter((r) => r.status === 'rejected' || r.value === null).length
+      if (fail > 0) useStore.getState().notify('error', t('{ok} 顆已更新，{fail} 顆沒成功', { ok: targets.length - fail, fail }))
+    })
+  }
+
+  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()
+  return (
+    <span
+      ref={wrapRef}
+      className="bot-cluster-chip-wrap"
+      onClick={stop}
+      onMouseDown={stop}
+      onKeyDown={(e) => {
+        stop(e)
+        if (e.key === 'Escape') setOpen(false)
+      }}
+    >
+      <button
+        type="button"
+        className={`bot-cluster-chip${allOn ? ' is-all-on' : ''}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={t('整組停派或允許派工')}
+        disabled={busy}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {allOn ? t('可派 {n}/{total}', { n: on, total }) : t('停派 {n}/{total}', { n: off, total })}
+      </button>
+      {open ? (
+        <span className="bot-unset-role-menu bot-cluster-chip-menu" role="menu">
+          <button type="button" role="menuitem" disabled={allOn} onClick={() => setAll(true)}>{t('全部允許派工')}</button>
+          <button type="button" role="menuitem" disabled={on === 0} onClick={() => setAll(false)}>{t('全部停派')}</button>
+          <span className="bot-cluster-chip-note">{t('停派：管理者不能派工、啟動或重啟；Bot 本身不會停。')}</span>
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/** 一列「<name> 群集 ●1 ○2」：標題後面是各狀態的燈號＋數量，右邊是停派晶片；可展開看成員。 */
 export function ExpertClusterRow({
   projectId,
   name,
@@ -74,41 +142,13 @@ export function ExpertClusterRow({
   const fast = useStore((s) => first?.kind === 'codex' && runningFast(first, s.runs[firstId] ?? null))
 
   const on = members.filter((m) => m.manager_use !== false).length
-  const all = on === members.length
-  const some = on > 0 && !all
-  const boxRef = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    if (boxRef.current) boxRef.current.indeterminate = some
-  }, [some])
-
-  const title = t('管理者可用：開啟後管理者可派工、啟動或重啟此成員')
-  const setAll = (next: boolean) => {
-    const patch = useStore.getState().patchBot
-    for (const m of members) void patch(m.id, { manager_use: next }).catch(() => undefined)
-  }
   const listId = `bot-cluster-${projectId}-${name}`
 
   return (
     <>
       <div className="bot-row bot-cluster-row" role="listitem" data-cluster={name}>
-        {/* 跟成員列同一欄：勾選框在最左。整組仍可全開或全關，不鎖。 */}
-        <span
-          className="bot-manager-use-wrap"
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => e.stopPropagation()}
-        >
-          <input
-            ref={boxRef}
-            type="checkbox"
-            className="bot-manager-use-checkbox"
-            aria-label={title}
-            title={title}
-            checked={all}
-            disabled={busyPatch}
-            onChange={() => setAll(!all)}
-          />
-        </span>
+        {/* 左欄留空：跟成員列的勾選框同一欄，文字才對齊。整組操作在右邊的停派晶片。 */}
+        <span className="bot-cluster-gutter" aria-hidden="true" />
         <button
           type="button"
           className="bot-cluster-main"
@@ -155,6 +195,7 @@ export function ExpertClusterRow({
             </span>
           </span>
         </button>
+        <ClusterManagerUseChip members={members} on={on} busy={busyPatch} />
       </div>
       {open ? (
         <div id={listId} className="bot-cluster-members" role="list">

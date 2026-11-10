@@ -163,19 +163,20 @@ beforeEach(() => {
   } as never)
 })
 
-test('專家模式側欄：manager_use=false 的 bot 顯示「停用」小標記與列名淡化樣式', async () => {
+test('專家模式側欄：manager_use=false 的 bot 顯示「停派」按鈕，列名不淡化', async () => {
   await mount(<Sidebar />)
   await settle()
 
   const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
   assert.ok(advRow, '應找到 adv-1 的列')
   const tag = advRow.querySelector('.bot-manager-disabled-tag')
-  assert.ok(tag, '應有停用標記')
-  assert.equal(tag.textContent, '停用')
-  assert.ok(advRow.classList.contains('manager-disabled'), '停用的列應有 manager-disabled class')
+  assert.ok(tag, '應有停派按鈕')
+  assert.equal(tag.tagName, 'BUTTON')
+  assert.equal(tag.textContent, '停派')
+  assert.equal(advRow.classList.contains('manager-disabled'), false, '列名不淡化（不再有 manager-disabled class）')
 
   const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
-  assert.equal(execRow.querySelector('.bot-manager-disabled-tag'), null, 'exec-1 啟用中不應有停用標記')
+  assert.equal(execRow.querySelector('.bot-manager-disabled-tag'), null, 'exec-1 啟用中不應有停派按鈕')
   assert.equal(execRow.classList.contains('manager-disabled'), false, 'exec-1 啟用中不應有 manager-disabled class')
 })
 
@@ -204,7 +205,7 @@ test('側欄勾選框：只在專家模式 advisor/executor/specialist 出現，
   const offTitle = '開啟後管理者可派工、啟動或重啟此成員'
   for (const box of [advBox, execBox, specBox]) {
     assert.equal(box.disabled, false, '勾著或沒勾都能直接切')
-    assert.equal(box.getAttribute('aria-label'), '管理者可用')
+    assert.equal(box.getAttribute('aria-label'), '允許管理者派工')
     assert.equal(box.classList.contains('is-locked'), false)
   }
   assert.equal(advBox.getAttribute('title'), offTitle)

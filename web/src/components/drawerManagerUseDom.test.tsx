@@ -72,10 +72,10 @@ test('點勾選框外的 label（觸控範圍）：同樣不收抽屜', async ()
   assert.equal(useStore.getState().selectedBotId, 'm')
 })
 
-test('群集列的整組勾選框：不收抽屜', async () => {
+test('群集列的停派晶片：不收抽屜', async () => {
   await mount(<Shell />)
   await settle()
-  const box = document.querySelector<HTMLInputElement>('.bot-cluster-row .bot-manager-use-checkbox')!
+  const box = document.querySelector<HTMLButtonElement>('.bot-cluster-row .bot-cluster-chip')!
   assert.ok(box)
   await click(box)
   await settle()

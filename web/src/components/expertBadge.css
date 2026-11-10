@@ -29,7 +29,18 @@
   vertical-align: middle;
 }
 
-/* 已停用管理者使用小標記 */
+/* 停派標記（成員列）：可點，點了恢復派工。 */
+button.bot-manager-disabled-tag {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.bot-manager-disabled-tag:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .bot-manager-disabled-tag {
   display: inline-flex;
   align-items: center;
@@ -217,22 +228,13 @@
     line-height: 20px;
   }
 
-  .bot-cluster-row .bot-manager-use-wrap {
+  .bot-cluster-gutter {
     min-width: 36px;
     min-height: 36px;
   }
 
-  .bot-cluster-row .bot-manager-use-checkbox {
-    width: 16px;
-    height: 16px;
-  }
 }
 
-/* 停用成員名稱淡化 */
-.bot-row.manager-disabled .bot-name {
-  color: var(--text-dim);
-  opacity: 0.75;
-}
 
 /* 柔和色票（亮暗主題透過 CSS 變數或 color-mix 自然適應） */
 .bot-role-tag.role-manager {
@@ -344,29 +346,22 @@
   padding: 2px 6px 2px 4px;
 }
 
-.bot-cluster-row .bot-manager-use-wrap {
+.bot-cluster-gutter {
+  flex: none;
   align-self: center;
   min-width: 26px;
   min-height: 26px;
   padding: 0;
 }
 
-.bot-cluster-row .bot-manager-use-checkbox {
-  width: 14px;
-  height: 14px;
-}
 
 /* 手機：上面的 26px 在檔案後面，會蓋掉前面 @media 的 36px 觸控區（勾選框太小會點到旁邊的列）。 */
 @media (width <= 640px) {
-  .bot-cluster-row .bot-manager-use-wrap {
+  .bot-cluster-gutter {
     min-width: 36px;
     min-height: 36px;
   }
 
-  .bot-cluster-row .bot-manager-use-checkbox {
-    width: 16px;
-    height: 16px;
-  }
 }
 
 .bot-cluster-main {
@@ -454,8 +449,7 @@
  * 觸控裝置沒有 hover，維持原本常駐的左欄。
  */
 @media (hover: hover) {
-  .bot-row.expert-member > .bot-manager-use-wrap,
-  .bot-row.bot-cluster-row > .bot-manager-use-wrap {
+  .bot-row.expert-member > .bot-manager-use-wrap {
     position: absolute;
     top: 50%;
     left: 4px;
@@ -467,8 +461,7 @@
     pointer-events: none;
   }
 
-  .bot-row.expert-member:is(:hover, :focus-within) > .bot-manager-use-wrap,
-  .bot-row.bot-cluster-row:is(:hover, :focus-within) > .bot-manager-use-wrap {
+  .bot-row.expert-member:is(:hover, :focus-within) > .bot-manager-use-wrap {
     opacity: 1;
     pointer-events: auto;
   }
@@ -501,3 +494,70 @@
 }
 .bot-unset-role-menu button { padding: 5px 10px; border: 0; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }
 .bot-unset-role-menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }
+
+/* 群集停派晶片（ExpertClusterRow）：有停派時常駐「停派 n/m」；全部可派時「可派 m/m」只在桌面滑過列時出現，觸控常駐。 */
+.bot-cluster-chip-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.bot-cluster-chip {
+  height: 16px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bot-cluster-chip:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.bot-cluster-chip.is-all-on {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.bot-cluster-chip-menu {
+  left: auto;
+  right: 0;
+}
+
+.bot-cluster-chip-menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.bot-cluster-chip-note {
+  padding: 5px 10px;
+  max-width: 220px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+@media (hover: hover) {
+  .bot-row.bot-cluster-row .bot-cluster-chip.is-all-on {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .bot-row.bot-cluster-row:is(:hover, :focus-within) .bot-cluster-chip.is-all-on {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (pointer: coarse) {
+  .bot-cluster-chip {
+    min-height: 36px;
+    padding: 0 10px;
+  }
+}

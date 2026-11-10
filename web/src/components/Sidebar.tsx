@@ -316,7 +316,7 @@ function BotRowImpl({
     <div
       className={`bot-row${compact ? ' compact' : ''}${isExpertMemberWithManagerUse && !compact ? ' expert-member' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
-      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}${isExpertMemberWithManagerUse && bot.manager_use === false ? ' manager-disabled' : ''}`}
+      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
       // 不用 listbox option：option 內不准有按鈕，螢幕閱讀器會吃掉。
       role="listitem"
       aria-current={selected ? 'true' : undefined}
@@ -464,7 +464,7 @@ function BotRowImpl({
             {isExpertProject && !compact && !bot.parent_bot_id && !bot.role && !bot.scheduled ? <UnsetRoleBadge botId={botId} /> : null}
             {/* 子 agent 不進角色分段，角色（管理者用 `agm role` 設的顧問等）只能在列上標，不然設了看不出來（2026-11-08 使用者）。 */}
             {isExpertProject && compact && bot.parent_bot_id && bot.role ? <ExpertRoleTag role={bot.role} /> : null}
-            {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
+            {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark botId={botId} /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}

@@ -39,6 +39,7 @@ function seed(managerUse: boolean[] = [true, true, true]) {
     selectedProjectId: 'p1',
     selectedBotId: 'm',
     busy: {},
+    notices: [],
   } as never)
 }
 
@@ -104,51 +105,138 @@ test('展開：顯示成員且各自有勾選框，狀態記在 localStorage', a
   assert.equal(window.localStorage.getItem('agm.expertCluster.p1.haiku'), '1')
 })
 
-test('整組勾選在列的最左，跟成員列同一欄，已勾仍可取消', async () => {
+const chip = () => clusterRow()!.querySelector<HTMLButtonElement>('.bot-cluster-chip')!
+const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-cluster-chip-menu [role="menuitem"]')]
+const patchesOf = () => requests.filter((r) => r.method === 'PATCH')
+
+test('群集列沒有整組勾選框，左欄留空（跟成員列同寬）', async () => {
   seed()
   await mount(<Sidebar />)
   await settle()
   const row = clusterRow()!
-  const wrap = row.querySelector('.bot-manager-use-wrap')!
-  const main = row.querySelector('.bot-cluster-main')!
-  assert.equal(row.firstElementChild, wrap, '勾選框是列的第一個子元素')
-  assert.ok((wrap.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)
-  const box = wrap.querySelector('input')!
-  assert.equal(box.checked, true)
-  assert.equal(box.disabled, false, '群集框不鎖，全勾仍可關掉')
-
-  await click(row.querySelector('.bot-cluster-main')!)
-  await settle()
-  const member = document.querySelector<HTMLElement>('.bot-cluster-members .bot-row')!
-  const memberWrap = member.querySelector('.bot-manager-use-wrap')!
-  assert.equal(member.firstElementChild, memberWrap, '成員列的勾選框也在最左')
+  assert.equal(row.querySelector('.bot-manager-use-checkbox'), null)
+  assert.ok(row.firstElementChild?.classList.contains('bot-cluster-gutter'))
 })
 
-test('整組勾選：全勾 → 取消送 3 個 PATCH manager_use=false', async () => {
-  seed()
+test('全可用：晶片「可派 3/3」，全部可派時標 is-all-on（桌面只在 hover 顯示）', async () => {
+  seed([true, true, true])
   await mount(<Sidebar />)
   await settle()
-  const box = clusterRow()!.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.equal(box.checked, true)
-  assert.equal(box.indeterminate, false)
-  await click(box)
-  await settle()
-  const patches = requests.filter((r) => r.method === 'PATCH')
-  assert.equal(patches.length, 3)
-  assert.deepEqual(new Set(patches.map((r) => r.path.split('/').pop())), new Set(['h1', 'h2', 'h3']))
-  assert.ok(patches.every((r) => (r.body as { manager_use?: boolean }).manager_use === false))
+  assert.equal(chip().textContent, '可派 3/3')
+  assert.ok(chip().classList.contains('is-all-on'))
 })
 
-test('部分勾：indeterminate，點一下全勾（3 個 PATCH manager_use=true）', async () => {
+test('混合：晶片「停派 1/3」，不 hover 也在 DOM 且沒有 is-all-on', async () => {
+  seed([true, false, true])
+  await mount(<Sidebar />)
+  await settle()
+  assert.equal(chip().textContent, '停派 1/3')
+  assert.ok(!chip().classList.contains('is-all-on'))
+})
+
+test('全停派：晶片「停派 3/3」', async () => {
+  seed([false, false, false])
+  await mount(<Sidebar />)
+  await settle()
+  assert.equal(chip().textContent, '停派 3/3')
+})
+
+test('點晶片只開選單：不送 PATCH、不展開群集；Esc 關閉', async () => {
+  seed([true, false, true])
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  assert.equal(chip().getAttribute('aria-expanded'), 'true')
+  assert.equal(menuItems().length, 2)
+  assert.equal(patchesOf().length, 0)
+  assert.equal(clusterRow()!.querySelector('.bot-cluster-main')!.getAttribute('aria-expanded'), 'false')
+  chip().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  await settle()
+  assert.equal(document.querySelector('.bot-cluster-chip-menu'), null)
+})
+
+test('混合時「全部允許派工」只 PATCH 停派那幾顆（manager_use=true）', async () => {
   seed([true, false, false])
   await mount(<Sidebar />)
   await settle()
-  const box = clusterRow()!.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.equal(box.indeterminate, true)
-  assert.equal(box.checked, false)
-  await click(box)
+  await click(chip())
   await settle()
-  const patches = requests.filter((r) => r.method === 'PATCH')
-  assert.equal(patches.length, 3)
+  await click(menuItems()[0])
+  await settle()
+  const patches = patchesOf()
+  assert.deepEqual(new Set(patches.map((r) => r.path.split('/').pop())), new Set(['h2', 'h3']))
   assert.ok(patches.every((r) => (r.body as { manager_use?: boolean }).manager_use === true))
+})
+
+test('混合時「全部停派」只 PATCH 可派那幾顆（manager_use=false）', async () => {
+  seed([true, false, true])
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  await click(menuItems()[1])
+  await settle()
+  const patches = patchesOf()
+  assert.deepEqual(new Set(patches.map((r) => r.path.split('/').pop())), new Set(['h1', 'h3']))
+  assert.ok(patches.every((r) => (r.body as { manager_use?: boolean }).manager_use === false))
+})
+
+test('全可用時「全部允許派工」disabled', async () => {
+  seed([true, true, true])
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  assert.equal(menuItems()[0].disabled, true)
+  assert.equal(menuItems()[1].disabled, false)
+})
+
+test('全停派時「全部停派」disabled', async () => {
+  seed([false, false, false])
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  assert.equal(menuItems()[0].disabled, false)
+  assert.equal(menuItems()[1].disabled, true)
+})
+
+test('一顆 PATCH 失敗：跳錯誤「2 顆已更新，1 顆沒成功」；全成功不跳', async () => {
+  seed([false, false, false])
+  requests = fakeApi((req) => {
+    if (req.method !== 'PATCH') return undefined
+    if (req.path.endsWith('/h2')) throw new Error('boom')
+    return { needs_restart: false }
+  })
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  await click(menuItems()[0])
+  await settle()
+  await settle()
+  const notes = useStore.getState().notices ?? []
+  assert.ok(notes.some((n: { text?: string }) => n.text === '2 顆已更新，1 顆沒成功'), JSON.stringify(notes))
+})
+
+test('全成功不跳錯誤通知', async () => {
+  seed([false, false, false])
+  await mount(<Sidebar />)
+  await settle()
+  await click(chip())
+  await settle()
+  await click(menuItems()[0])
+  await settle()
+  await settle()
+  const notes = useStore.getState().notices ?? []
+  assert.ok(!notes.some((n: { text?: string }) => /沒成功/.test(n.text ?? '')))
+})
+
+test('patch 進行中晶片 disabled', async () => {
+  seed([true, true, true])
+  useStore.setState({ busy: { 'patch:h1': true } } as never)
+  await mount(<Sidebar />)
+  await settle()
+  assert.equal(chip().disabled, true)
 })
