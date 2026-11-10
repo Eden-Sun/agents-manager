@@ -972,7 +972,7 @@ p.project-quota-hidden {
 .scheduler-bots-attn { margin-left: auto; font-size: 11px; font-weight: 600; }
 .scheduler-bots-attn.blocked { color: var(--danger, #d33); }
 .scheduler-bots-attn.unread { color: var(--accent, #36c); }
-.scheduler-bot-codes { padding: 0 14px 4px 34px; font-size: 11px; opacity: 0.7; }
+.scheduler-bot-codes { padding: 0 14px 4px 34px; font-size: 11px; opacity: 0.7; display: flex; align-items: center; gap: 4px; }
 .project-schedule-bot { background: none; border: 0; padding: 2px 6px; font-size: 11px; color: var(--text-dim, inherit); cursor: pointer; text-decoration: underline dotted; min-height: 24px; }
 @media (max-width: 720px) { .project-schedule-bot { min-height: 32px; } }
 

@@ -32,7 +32,7 @@ import {
 import type { SocketStatus } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { projectUnread, unreadShown } from '../store/unread'
-import { GearIcon, TerminalIcon } from './Icons'
+import { ClockIcon, GearIcon, TerminalIcon } from './Icons'
 import { StatusLamp } from './StatusLamp'
 import { LAMP_LABEL } from './lampLabel'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -1018,7 +1018,7 @@ function SchedulerBotRows({ projectId, bots, render }: { projectId: string; bots
           {render(b)}
           {codes.get(b.id)?.length ? (
             <div className="scheduler-bot-codes" title={t('這顆 bot 服務的排程')}>
-              ⏱ {codes.get(b.id)!.join(' ')}
+              <ClockIcon /> {codes.get(b.id)!.join(' ')}
             </div>
           ) : null}
         </Fragment>

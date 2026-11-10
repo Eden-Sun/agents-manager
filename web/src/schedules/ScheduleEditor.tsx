@@ -357,12 +357,6 @@ export function ScheduleEditor({
     el.style.height = `${el.scrollHeight + (el.offsetHeight - el.clientHeight)}px`
   }, [form.prompt])
 
-  const botLabel = (id: string) => {
-    const b = bots.find((x) => x.id === id)
-    if (!b) return t('（找不到這顆 Bot）')
-    return `${b.name} · ${b.kind}${b.model ? ` · ${b.model}` : ''}${b.effort ? ` · ${b.effort}` : ''}`
-  }
-
   const save = async () => {
     setError(null)
     setNotice(null)
@@ -510,11 +504,11 @@ export function ScheduleEditor({
           <div className="schedule-glance">
             <p className="schedule-glance-next">
               <span className="schedule-glance-k">{t('下次觸發')}</span>
-              <span className="schedule-glance-value">{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz, randomSummary(detail.spec) !== '') })}</span>
+              <span className="schedule-glance-value">{formatDue(detail.next_due, detail.tz, randomSummary(detail.spec) !== '')}</span>
             </p>
             <p className="schedule-glance-state">
               <span className="schedule-glance-k">{t('狀態')}</span>
-              <span className="schedule-glance-value">{t('狀態：{status}', { status: detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用') })}</span>
+              <span className="schedule-glance-value">{detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用')}</span>
             </p>
             <p className="schedule-glance-last">
               <span className="schedule-glance-k">{t('上次結果')}</span>
@@ -528,7 +522,6 @@ export function ScheduleEditor({
               </span>
             </p>
           </div>
-          <p>{t('已儲存的 Bot：{bot}', { bot: botLabel(detail.bot_id) })}</p>
           <p className="schedule-save-state" role="status">{unsaved ? t('有未儲存的變更') : t('設定已儲存')}</p>
           {randomSummary(detail.spec) ? <p className="schedule-random-summary">{randomSummary(detail.spec)}</p> : null}
           {openForDisplay?.waiting_reason ? <p className="hint">{occurrenceLine(openForDisplay, liveStatus)}</p> : null}

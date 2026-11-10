@@ -318,7 +318,7 @@ test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建
   assert.ok(document.querySelector('.sidebar, nav, body'), '整頁不能空白')
   dialog = dialogs().find((d) => d.textContent?.includes('排程') && d.querySelector('input'))!
   assert.ok(dialog, '建立後排程 modal 還要在')
-  assert.match(dialog.textContent ?? '', /還沒有執行紀錄|狀態：/, '詳情區要渲染（不能因為缺 recent 炸掉）')
+  assert.match(dialog.textContent ?? '', /還沒有執行紀錄|啟用中|已停用/, '詳情區要渲染（不能因為缺 recent 炸掉）')
 
   // 3) 修改名稱並儲存。
   await typeInto(dialog.querySelector<HTMLInputElement>('input')!, '每日摘要 v2')
@@ -440,7 +440,8 @@ test('排程有未結束執行時換 Bot 有說明；停用需確認，取消不
       await click(document.querySelector<HTMLButtonElement>('.project-schedule-row')!)
       await settle()
       const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
-      assert.match(dialog.textContent ?? '', /已儲存的 Bot：bot-b1/)
+      assert.ok(dialog.querySelector('[data-bot-id="b1"]')?.classList.contains('selected'))
+      assert.match(dialog.textContent ?? '', /bot-b1/)
       assert.match(dialog.textContent ?? '', /設定已儲存/)
       await click(dialog.querySelector<HTMLElement>('[data-bot-id="b2"]')!)
       assert.match(dialog.textContent ?? '', /有未儲存的變更/)

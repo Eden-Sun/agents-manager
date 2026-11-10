@@ -37,6 +37,28 @@ export function MoreIcon() {
   )
 }
 
+/** 時鐘圖示：取代 emoji ⏱，避免 headless 環境缺字型顯示成 tofu 方塊。 */
+export function ClockIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 4.5v3.8l2.6 1.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/** Bot 機器人圖示：取代 emoji 🤖，避免 headless 環境缺字型顯示成 tofu 方塊。 */
+export function BotIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <rect x="2.5" y="4.5" width="11" height="8" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 2v2.5M1 8.5h1.5M13.5 8.5H15" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx="5.5" cy="8.5" r="1" fill="currentColor" />
+      <circle cx="10.5" cy="8.5" r="1" fill="currentColor" />
+    </svg>
+  )
+}
+
 /** 提示符加底線：終端的通用符號，跟其他 icon 同一套線寬。 */
 export function TerminalIcon() {
   return (

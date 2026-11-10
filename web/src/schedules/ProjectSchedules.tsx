@@ -6,6 +6,7 @@ import { formatDuration } from './duration'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { outcomeLabel } from './ScheduleResult'
 import { ScheduleRowMenu } from './ScheduleRowMenu'
+import { BotIcon, ClockIcon } from '../components/Icons'
 import './schedules.css'
 import { t, useLang } from '../lib/i18n'
 
@@ -20,7 +21,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
       {/* 卡片：代號與名稱在上，下次觸發與上次結果各佔一行；完整時間（含時區）放 title。 */}
       <button type="button" className="project-schedule-row" title={`${s.name} — ${scheduleStatusLine(s, live)}`} onClick={() => onOpen(s.id, s.bot_available === false)}>
         <span className="project-schedule-name">
-          <span className="project-schedule-mark" aria-hidden="true">⏱</span>
+          <span className="project-schedule-mark" aria-hidden="true"><ClockIcon /></span>
           {s.code ? <span className="project-schedule-code">{s.code}</span> : null}
           <span className="project-schedule-title">{s.name}</span>
         </span>
@@ -43,7 +44,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
       </button>
       {s.bot_available !== false && botName ? (
         <button type="button" className="project-schedule-bot" title={t('跳到這個排程綁定的 Bot：{name}', { name: botName })} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
-          🤖 {botName}
+          <BotIcon /> {botName}
         </button>
       ) : null}
       <ScheduleRowMenu schedule={s} onOpen={onOpen} />

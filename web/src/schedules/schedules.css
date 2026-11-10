@@ -53,6 +53,9 @@
   flex: 1 1 100%;
   margin: 0 4px 2px 8px;
   text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .project-schedule-row {
@@ -79,25 +82,20 @@
   outline: none;
 }
 
-.project-schedule-name,
-.project-schedule-status {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .project-schedule-name {
   display: flex;
   align-items: baseline;
   gap: 6px;
   flex: none;
   min-width: 0;
+  max-width: 100%;
   font-weight: 600;
 }
 
 .project-schedule-mark {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
 }
 
 .project-schedule-code {
@@ -145,6 +143,8 @@
   font-size: 13px;
   opacity: 1;
   font-variant-numeric: tabular-nums;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .project-schedule-item.off .project-schedule-name {
