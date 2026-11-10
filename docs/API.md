@@ -3178,7 +3178,12 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - **被登出推播**：當 bot 回合因授權失敗收尾（`login_prompt.rs:34 on_auth_failure`），以 `(host, kind, identity)` 去重並聚合同身份所有受影響 bot（例「codex co0 被登出：3 顆 bot」），不再每顆 bot 各推一則；回合成功恢復（`on_turn_ok`）或手動清除後重置。
 - **撞額度上限推播**：當 bot 撞到額度上限（`hookrecv.rs:233,1434`），以額度 key（`quota_key` + `bucket`）去重，一個重置窗只推一則；聚合同額度 key 底下所有受影響 bot 並附重置時間（例「cc1 額度用完：sn-wkr、hk-wkr… 共 7 顆停擺，11/12 11:00 重置」）。
 - VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。
-- `GET|PUT /api/push/settings` `{main_bots?, other_bots?, updates?, reset_credits?, auth?, quota?}`：六個推播開關（皆預設開）：主力 bot 回覆完成／需要回應、其他 bot 需要回應、偵測到更新、codex 額度用完且有重置券、被登出（`auth`）、撞額度上限（`quota`）。PUT 可只帶要改的鍵。存 `{data_dir}/push-settings.json`。
+- `GET|PUT /api/push/settings` `{main_bots?, hosts?, other_bots?, updates?, reset_credits?, auth?, quota?}`：七個推播開關（皆預設開）：遠端主機斷線與 bot 停止（`hosts`）、主力 bot 回覆完成／需要回應、其他 bot 需要回應、偵測到更新、codex 額度用完且有重置券、被登出（`auth`）、撞額度上限（`quota`）。PUT 可只帶要改的鍵。存 `{data_dir}/push-settings.json`。
+- 遠端主機斷線與 bot 異常停止（掛在 `incidents.rs` 的 incident 門檻）：
+  - 避免抖動：不監聽 raw `host_changed`，而是掛在經過 `host_disconnected_secs` / `bot_stopped_secs` 門檻確認後開立的 incident。
+  - 主機斷線：`title: "主機 <host>"`，`body: "<host> 已斷線（N 顆 bot 受影響）"`（無 bot 時為 `"<host> 已斷線"`），`tag: "host:<host>"`，`url: "/hosts"`。恢復時推 `"<host> 已恢復"`（同 incident 只推一次）。
+  - bot 異常停止（補開失敗）：排除子 agent（`managed_by == 'child'` 或有 parent），`title: "<bot_name>"`，`body: "<bot_name> 已停止（自動補開失敗）"`，`tag: "bot:<id>"`，`url: "/bots/<id>"`。恢復時推 `"<bot_name> 已恢復"`（同 incident 只推一次）。
+  - 去重與節流：同 incident ID 只開立推播一次；同一資源 30 秒節流；未推過 open 告警者不推恢復。可由 `push-settings.json` 的 `hosts` 欄位停用。
 - `POST /api/push/presence` `{client_id, bot_id|null, visible, idle_secs}`：網頁每 20 秒與可見性變化時回報正看哪顆 bot，只存記憶體；`visible` 且 `bot_id` 吻合且（`idle_secs`＋回報後經過秒數）≤60 且回報 90 秒內，該 bot 就不推。沒有 presence 照推。
 - **主力 bot 推播**：daemon 訂閱事件流，對 `bots.is_primary=1` 的 bot（主力名單的唯一來源，網頁的 ★ 釘選就是 `PATCH /api/bots/{id} {primary}` 寫這欄）：回合 `completed`／`completed_fallback`（**只有使用者訊息觸發的回合才推**：`queue_class=user` 且帶非代發的 user 訊息；daemon 通知、別的 bot 轉來的、hook 喚醒與背景任務自續的回合不推，使用者 2026-11-10 嫌太吵）；回合 `failed` 不論誰觸發都推「回合失敗」→ 標題 bot 名稱、內文是**一句短的話**（見下「推播內文」）；`blocked`（等 3 秒讓假 blocked 被改回）→「需要你回應：<題目第一行>」（題目取 pending-question，沒有就用 `blocked_reason`）。同回合／同一段 blocked 只推一次；同 bot 同類 30 秒內合併。通知 `url` 為 `/bots/<id>`，點了開該 bot。
 - **其他頂層 bot 推播**：非主力的頂層 bot（子 agent 除外、排程專屬 bot `role=scheduler` 除外）需要回應（`blocked`）時也推播，同樣等 3 秒確認、每段只推一次、30 秒節流與 presence 抑制；受 `other_bots` 開關控制（預設開）。

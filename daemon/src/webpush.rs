@@ -395,9 +395,14 @@ pub(crate) fn other_bots_enabled(dir: &Path) -> bool {
     setting_enabled(dir, "other_bots")
 }
 
+pub(crate) fn hosts_enabled(dir: &Path) -> bool {
+    setting_enabled(dir, "hosts")
+}
+
 fn settings_json(dir: &Path) -> Value {
     json!({
         "main_bots": setting_enabled(dir, "main_bots"),
+        "hosts": setting_enabled(dir, "hosts"),
         "other_bots": setting_enabled(dir, "other_bots"),
         "updates": setting_enabled(dir, "updates"),
         "reset_credits": setting_enabled(dir, "reset_credits"),
@@ -713,6 +718,182 @@ pub fn spawn_main_notifier(app: Arc<App>) {
         }
     });
 }
+
+// ---------- 系統異常推播（遠端主機斷線、bot 補開失敗） ----------
+
+const INCIDENT_THROTTLE: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+pub(crate) struct IncidentNotifier {
+    /// 已經推過「故障開立（open）」的 incident id，供 resolve 時判定是否補推「已恢復」（同 incident 只推一次）。
+    pushed_open: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// resource（主機名或 bot_id）上一次推播時間，用於合理節流（30 秒內不重複洗版）。
+    last_sent: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+impl IncidentNotifier {
+    /// 檢查是否可開立：如果此 incident_id 已經推過，或者該 resource 仍在節流窗口內，則略過。
+    fn admit_open(&self, incident_id: &str, resource: &str) -> bool {
+        let mut open = self.pushed_open.lock().unwrap_or_else(|e| e.into_inner());
+        if open.contains(incident_id) {
+            return false;
+        }
+        let mut sent = self.last_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if sent.get(resource).is_some_and(|t| t.elapsed() < INCIDENT_THROTTLE) {
+            return false;
+        }
+        open.insert(incident_id.to_string());
+        sent.insert(resource.to_string(), std::time::Instant::now());
+        true
+    }
+
+    /// 檢查是否可恢復：同 incident 只推一次，且先前必須確實有推過 open 告警。
+    fn admit_resolve(&self, incident_id: &str, resource: &str) -> bool {
+        let mut open = self.pushed_open.lock().unwrap_or_else(|e| e.into_inner());
+        if !open.remove(incident_id) {
+            return false;
+        }
+        let mut sent = self.last_sent.lock().unwrap_or_else(|e| e.into_inner());
+        sent.insert(resource.to_string(), std::time::Instant::now());
+        true
+    }
+}
+
+pub(crate) fn spawn_broadcast(app: &Arc<App>, payload: Value) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        if load_subs(&app.data_dir).is_empty() {
+            return;
+        }
+        let subject = app.cfg.get().await.server.push_subject.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+    });
+}
+
+pub(crate) async fn handle_incident(
+    app: &Arc<App>,
+    notifier: &Arc<IncidentNotifier>,
+    inc: &Value,
+) -> bool {
+    if !hosts_enabled(&app.data_dir) {
+        return false;
+    }
+    let Some(kind) = inc.get("kind").and_then(Value::as_str) else { return false };
+    let Some(resource) = inc.get("resource").and_then(Value::as_str) else { return false };
+    let Some(status) = inc.get("status").and_then(Value::as_str) else { return false };
+    let incident_id = inc.get("id").and_then(Value::as_str).unwrap_or(resource);
+
+    match kind {
+        "host_disconnected" => {
+            if status == "open" {
+                if user_is_present() {
+                    return false;
+                }
+                if !notifier.admit_open(incident_id, resource) {
+                    return false;
+                }
+                let affected = crate::db::live_bots_on_host(&app.db, resource)
+                    .await
+                    .unwrap_or_default()
+                    .len();
+                let body = if affected > 0 {
+                    format!("{resource} 已斷線（{affected} 顆 bot 受影響）")
+                } else {
+                    format!("{resource} 已斷線")
+                };
+                let payload = json!({
+                    "title": format!("主機 {resource}"),
+                    "body": body,
+                    "tag": format!("host:{resource}"),
+                    "url": "/hosts",
+                });
+                spawn_broadcast(app, payload);
+                true
+            } else if status == "resolved" {
+                if !notifier.admit_resolve(incident_id, resource) {
+                    return false;
+                }
+                let payload = json!({
+                    "title": format!("主機 {resource}"),
+                    "body": format!("{resource} 已恢復"),
+                    "tag": format!("host:{resource}"),
+                    "url": "/hosts",
+                });
+                spawn_broadcast(app, payload);
+                true
+            } else {
+                false
+            }
+        }
+        "bot_stopped" => {
+            // 子 agent 不推
+            if let Ok(Some(bot)) = crate::db::bot(&app.db, resource).await {
+                if bot.managed_by == "child" || bot.parent_bot_id.is_some() {
+                    return false;
+                }
+            }
+            if user_is_watching(resource) {
+                return false;
+            }
+            let name = inc.pointer("/detail/name")
+                .and_then(Value::as_str)
+                .unwrap_or(resource);
+            if status == "open" {
+                if !notifier.admit_open(incident_id, resource) {
+                    return false;
+                }
+                let payload = json!({
+                    "title": name,
+                    "body": format!("{name} 已停止（自動補開失敗）"),
+                    "tag": format!("bot:{resource}"),
+                    "url": format!("/bots/{resource}"),
+                });
+                spawn_broadcast(app, payload);
+                true
+            } else if status == "resolved" {
+                if !notifier.admit_resolve(incident_id, resource) {
+                    return false;
+                }
+                let payload = json!({
+                    "title": name,
+                    "body": format!("{name} 已恢復"),
+                    "tag": format!("bot:{resource}"),
+                    "url": format!("/bots/{resource}"),
+                });
+                spawn_broadcast(app, payload);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+pub(crate) async fn handle_incident_event(app: &Arc<App>, notifier: &Arc<IncidentNotifier>, ev: &crate::state::WsEvent) {
+    if ev.kind == "supervisor_changed" {
+        if let Some(inc) = ev.data.get("incident") {
+            handle_incident(app, notifier, inc).await;
+        }
+    }
+}
+
+/// 啟動時呼叫一次：訂閱事件流，監聽 incident 開立與恢復並送出推播。
+pub fn spawn_incident_notifier(app: Arc<App>) {
+    let mut rx = app.subscribe();
+    let notifier = Arc::new(IncidentNotifier::default());
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => handle_incident_event(&app, &notifier, &ev).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+
 
 // ---------- 更新與重置券推播 ----------
 
@@ -1313,6 +1494,8 @@ pub(crate) struct SettingsInput {
     #[serde(default)]
     pub main_bots: Option<bool>,
     #[serde(default)]
+    pub hosts: Option<bool>,
+    #[serde(default)]
     pub other_bots: Option<bool>,
     #[serde(default)]
     pub updates: Option<bool>,
@@ -1330,7 +1513,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
     let mut cur = settings_json(&app.data_dir);
     for (k, v) in [
         ("main_bots", input.main_bots),
-        ("main_bots", input.main_bots),
+        ("hosts", input.hosts),
         ("other_bots", input.other_bots),
         ("updates", input.updates),
         ("reset_credits", input.reset_credits),
@@ -1903,6 +2086,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_and_bot_incident_push_dedup_and_recovery() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/t").0]).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_sub: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+        let notifier = Arc::new(IncidentNotifier::default());
+
+        // 1. host_disconnected open
+        let host_inc = json!({
+            "id": "inc_host_h1",
+            "kind": "host_disconnected",
+            "resource": "h1",
+            "status": "open",
+            "detail": {}
+        });
+        assert!(handle_incident(&app, &notifier, &host_inc).await);
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("host open 應送推播").unwrap();
+        assert_eq!(got["title"], "主機 h1");
+        assert_eq!(got["body"], "h1 已斷線");
+        assert_eq!(got["url"], "/hosts");
+
+        // 重複 incident 或 30 秒節流窗口內不重複推
+        assert!(!handle_incident(&app, &notifier, &host_inc).await);
+        let host_inc_new_id = json!({
+            "id": "inc_host_h1_2",
+            "kind": "host_disconnected",
+            "resource": "h1",
+            "status": "open",
+            "detail": {}
+        });
+        assert!(!handle_incident(&app, &notifier, &host_inc_new_id).await);
+        assert!(rx.try_recv().is_err(), "節流期間不應送出");
+
+        // 2. host_disconnected resolved 補推「已恢復」
+        let host_resolved = json!({
+            "id": "inc_host_h1",
+            "kind": "host_disconnected",
+            "resource": "h1",
+            "status": "resolved",
+            "detail": {}
+        });
+        assert!(handle_incident(&app, &notifier, &host_resolved).await);
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("host resolved 應送推播").unwrap();
+        assert_eq!(got["title"], "主機 h1");
+        assert_eq!(got["body"], "h1 已恢復");
+
+        // 再次 resolved 不重複推（同 incident 只推一次）
+        assert!(!handle_incident(&app, &notifier, &host_resolved).await);
+        assert!(rx.try_recv().is_err(), "已恢復只推一次");
+
+        // 未曾 open 過的 incident 直接 resolved 不推
+        let ghost_resolved = json!({
+            "id": "inc_ghost",
+            "kind": "host_disconnected",
+            "resource": "h2",
+            "status": "resolved",
+            "detail": {}
+        });
+        assert!(!handle_incident(&app, &notifier, &ghost_resolved).await);
+        assert!(rx.try_recv().is_err(), "未 open 不推 resolved");
+
+        // 3. bot_stopped open
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "工作bot").await;
+        let bot_inc = json!({
+            "id": "inc_bot_b1",
+            "kind": "bot_stopped",
+            "resource": bot.id,
+            "status": "open",
+            "detail": {"bot_id": bot.id, "name": bot.name}
+        });
+        assert!(handle_incident(&app, &notifier, &bot_inc).await);
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("bot stopped 應送推播").unwrap();
+        assert_eq!(got["title"], bot.name);
+        assert_eq!(got["body"], format!("{} 已停止（自動補開失敗）", bot.name));
+        assert_eq!(got["url"], format!("/bots/{}", bot.id));
+
+        // 4. bot_stopped resolved
+        let bot_resolved = json!({
+            "id": "inc_bot_b1",
+            "kind": "bot_stopped",
+            "resource": bot.id,
+            "status": "resolved",
+            "detail": {"bot_id": bot.id, "name": bot.name}
+        });
+        assert!(handle_incident(&app, &notifier, &bot_resolved).await);
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("bot recovered 應送推播").unwrap();
+        assert_eq!(got["title"], bot.name);
+        assert_eq!(got["body"], format!("{} 已恢復", bot.name));
+
+        // 5. 子 agent 的 bot_stopped 不推
+        let child_bot = crate::testing::claude_bot(&app, &env.project_id, "子代理").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&child_bot.id).execute(&app.db).await.unwrap();
+        let child_inc = json!({
+            "id": "inc_child",
+            "kind": "bot_stopped",
+            "resource": child_bot.id,
+            "status": "open",
+            "detail": {"bot_id": child_bot.id, "name": child_bot.name}
+        });
+        assert!(!handle_incident(&app, &notifier, &child_inc).await);
+        assert!(rx.try_recv().is_err(), "子 agent 不推");
+
+        // 6. 開關關閉不推
+        let notifier2 = Arc::new(IncidentNotifier::default());
+        write_private(&settings_path(&app.data_dir), br#"{"hosts":false}"#).unwrap();
+        assert!(!handle_incident(&app, &notifier2, &host_inc).await);
+        assert!(rx.try_recv().is_err(), "開關關了不推");
+
+        set_test_sender(None);
+    }
+
+
+    #[tokio::test]
     async fn settings_roundtrip_user_only() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
@@ -1910,6 +2212,7 @@ mod tests {
         let s = get_settings(State(app.clone()), user()).await.unwrap().0;
         assert_eq!(s["main_bots"], true, "預設開");
         assert_eq!(s["other_bots"], true, "預設開");
+        assert_eq!(s["hosts"], true, "預設開");
         put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), ..Default::default() })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));

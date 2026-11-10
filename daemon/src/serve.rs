@@ -320,6 +320,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     supervisor::cli_refresh::refresh_on_startup(&app).await;
     crate::runners::supervisor::runtime::respawn(&app).await;
     crate::runners::supervisor::health::spawn(app.clone());
+    crate::webpush::spawn_incident_notifier(app.clone());
     crate::api_bot::spawn_retention_ticker(app.clone());
     // Agent titles have no herdr event, so they are polled.
     crate::runners::events::spawn_title_poller(app.clone());

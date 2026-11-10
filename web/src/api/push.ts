@@ -32,6 +32,7 @@ export async function getPushSettings(): Promise<PushSettingsValue> {
 
 export interface PushSettingsValue {
   main_bots: boolean
+  hosts: boolean
   other_bots: boolean
   updates: boolean
   reset_credits: boolean
