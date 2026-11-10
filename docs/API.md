@@ -136,6 +136,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -220,6 +221,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| HEAD | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/vapid-key` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -402,6 +404,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/claim` | Bot per-bot `X-AM-Bot-Token`；body `bot_id` 需和驗證憑證一致 |
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身份／permit 需和驗證憑證一致 |
 | PUT | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| PUT | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/schedules` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -3175,6 +3178,9 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `POST /api/push/subscriptions` body `{endpoint, keys:{p256dh, auth}, origin?}`（瀏覽器 `PushSubscription.toJSON()`；`origin`＝網頁 `location.origin`，只收 https，存起來當 VAPID `sub`）→ `{ok, created, count}`。endpoint 必須是 https；`p256dh` 須為合法 P-256 點、`auth` 16 bytes，否則 400 `invalid_endpoint`／`invalid_p256dh`／`invalid_auth`；同 endpoint 去重（更新 keys，`created:false`）；上限 50 筆（400 `too_many_subscriptions`）。存於 `{data_dir}/push-subscriptions.json`（0600）。
 - `DELETE /api/push/subscriptions?endpoint=<url>` → `{ok, removed}`。
 - `POST /api/push/test` → `{sent, removed, failed, reasons[]}`：對所有訂閱送「測試通知」；`reasons` 是推送服務拒絕的原因（回應 body 的 `reason`，已截短，不含 endpoint／金鑰），網頁顯示「沒有送出：推送服務拒絕（原因）」。
+- `GET|PUT /api/push/settings` `{auth?, quota?}`：推播開關設定（皆預設開），存於 `{data_dir}/push-settings.json`。
+- **被登出推播**：當 bot 回合因授權失敗收尾（`login_prompt.rs:34 on_auth_failure`），以 `(host, kind, identity)` 去重並聚合同身份所有受影響 bot（例「codex co0 被登出：3 顆 bot」），不再每顆 bot 各推一則；回合成功恢復（`on_turn_ok`）或手動清除後重置。
+- **撞額度上限推播**：當 bot 撞到額度上限（`hookrecv.rs:233,1434`），以額度 key（`quota_key` + `bucket`）去重，一個重置窗只推一則；聚合同額度 key 底下所有受影響 bot 並附重置時間（例「cc1 額度用完：sn-wkr、hk-wkr… 共 7 顆停擺，11/12 11:00 重置」）。
 - VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。
 - `GET|PUT /api/push/settings` `{main_bots, other_bots, updates, reset_credits}`：四個推播開關（預設全開）：主力 bot 回覆完成／需要回應、其他 bot 需要回應、偵測到更新、codex 額度用完且有重置券。PUT 可只帶要改的鍵。存 `{data_dir}/push-settings.json`。
 - `POST /api/push/presence` `{client_id, bot_id|null, visible, idle_secs}`：網頁每 20 秒與可見性變化時回報正看哪顆 bot，只存記憶體；`visible` 且 `bot_id` 吻合且（`idle_secs`＋回報後經過秒數）≤60 且回報 90 秒內，該 bot 就不推。沒有 presence 照推。

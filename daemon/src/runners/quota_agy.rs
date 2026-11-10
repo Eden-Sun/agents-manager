@@ -237,6 +237,9 @@ pub(crate) async fn set_logged_in_quiet(app: &Arc<App>, host: &str, fence: &crat
     match all.get_mut(host).and_then(|h| h.tools.get_mut("agy")) {
         Some(t) if t.installed && t.logged_in != Some(logged_in) => {
             t.logged_in = Some(logged_in);
+            if logged_in {
+                crate::webpush::clear_auth_push(host, "agy", "");
+            }
             true
         }
         _ => false,

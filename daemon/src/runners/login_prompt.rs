@@ -15,6 +15,7 @@ async fn push_host(app: &Arc<App>, host: &str) {
 pub async fn clear_and_push(app: &Arc<App>, host: &str, identity: &str) {
     if clear(app, host, identity) {
         push_host(app, host).await;
+        crate::webpush::clear_auth_push_all_kinds(host, identity);
     }
 }
 
@@ -63,6 +64,7 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
     if changed {
         tracing::info!(bot = %bot.name, %host, identity, "a turn failed on authentication; asking the user to log this identity in again");
         crate::app_ports_p13::emit_host_changed(app, fence).await;
+        crate::webpush::spawn_auth_push(app, &host, &bot.kind, identity);
     }
     let (app, host, identity, fence) = (app.clone(), host, identity.to_string(), fence.clone());
     tokio::spawn(async move {
@@ -86,6 +88,7 @@ pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot, admitted: Option<&crate::
     let changed = fence.run_current(async { clear(app, &host, &identity) }).await.unwrap_or(false);
     if changed {
         crate::app_ports_p13::emit_host_changed(app, fence).await;
+        crate::webpush::clear_auth_push(&host, &bot.kind, &identity);
     }
 }
 

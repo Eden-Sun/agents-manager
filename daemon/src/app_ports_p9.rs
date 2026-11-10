@@ -45,6 +45,15 @@ impl QuotaAccess for App {
                 None if !key.is_empty() => (crate::config::LOCAL_HOST, key.as_str()),
                 None => return Err(PortError::InvalidInput("quota key cannot be empty".into())),
             };
+            if let Some(ref hit) = snapshot.limit_hit {
+                crate::webpush::spawn_quota_push(
+                    &self.shared(),
+                    host,
+                    base,
+                    hit.bucket.as_deref(),
+                    hit.until.as_deref(),
+                );
+            }
             crate::quota::set(self, host, base, snapshot.into()).await;
             Ok(())
         }
@@ -76,6 +85,7 @@ impl QuotaAccess for App {
                 None => (crate::config::LOCAL_HOST, key.as_str()),
             };
             crate::quota::clear_limit_hit(self, host, base).await;
+            crate::webpush::clear_quota_push(key);
             Ok(())
         }
     }

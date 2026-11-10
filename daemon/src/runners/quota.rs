@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Duration;
 use anyhow::Result;
 use serde_json::json;
 
@@ -191,6 +190,7 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
     };
     let base = quota_base_for_host(&**app, &host, &bot.kind, identity.as_deref()).await;
     clear_limit_hit(app, &host, &base).await;
+    crate::webpush::clear_quota_push(&crate::quota::quota_key(&host, &base));
     crate::judge::note_cleared(&app.db, &bot.id).await;
 }
 
@@ -216,6 +216,7 @@ pub async fn clear_limit_hit_for_bot_if_older_than(app: &Arc<App>, bot: &crate::
     let base = quota_base_for_host(&**app, &host, &bot.kind, identity.as_deref()).await;
     let cleared = clear_limit_hit_if_older_than(app, &host, &base, success_at).await;
     if cleared {
+        crate::webpush::clear_quota_push(&crate::quota::quota_key(&host, &base));
         crate::judge::note_cleared(&app.db, &bot.id).await;
     }
     cleared
@@ -418,6 +419,7 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use crate::config::LOCAL_HOST;
     use crate::quota::{seed_limit_hit, set, Window};
 

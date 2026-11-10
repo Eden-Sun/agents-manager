@@ -11,9 +11,9 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, updates: true, reset_credits: true })
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, updates: true, reset_credits: true, auth: true, quota: true })
   useEffect(() => {
-    getPushSettings().then((s) => setOpts((o) => ({ ...o, ...s })), () => {})
+    getPushSettings().then((s) => setOpts((prev) => ({ ...prev, ...s })), () => {})
   }, [])
   const toggle = (key: keyof PushSettingsValue, v: boolean) => {
     setOpts((o) => ({ ...o, [key]: v }))
@@ -92,9 +92,11 @@ export function PushSettings() {
         ['other_bots', t('其他 bot 需要回應時推播')],
         ['updates', t('偵測到更新（AG Man／CLI）時推播')],
         ['reset_credits', t('codex 額度用完且有重置券時推播（只通知，不自動使用）')],
+        ['auth', t('被登出／憑證失效時推播')],
+        ['quota', t('撞額度上限時推播')],
       ] as const).map(([key, label]) => (
-        <label key={key} className="push-settings-note" style={{ display: 'block' }}>
-          <input type="checkbox" checked={opts[key]} onChange={(e) => toggle(key, e.target.checked)} /> {label}
+        <label key={key} className="push-settings-note" style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+          <input type="checkbox" checked={opts[key] ?? true} onChange={(e) => toggle(key, e.target.checked)} /> {label}
         </label>
       ))}
       {msg ? <p className="push-settings-note" role="alert">{msg}</p> : null}

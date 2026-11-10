@@ -162,6 +162,8 @@ const dict: Dict = {
   '沒有取得通知權限': 'Notification permission was not granted',
   '已送出測試通知': 'Test notification sent',
   '沒有送出（沒有可用的訂閱）': 'Nothing sent (no usable subscription)',
+  '被登出／憑證失效時推播': 'Push when logged out / auth fails',
+  '撞額度上限時推播': 'Push when quota limit reached',
   '排程 bot': 'Schedule bots',
   '{name} 的排程 bot': 'Schedule bots of {name}',
   '非專屬 bot': 'Not a dedicated bot',

@@ -372,6 +372,11 @@ const PRESENCE_STALE: Duration = Duration::from_secs(90);
 const PRESENCE_ACTIVE_SECS: u64 = 60;
 const BODY_MAX: usize = 80;
 
+// ---------- 被登出（Auth）與撞額度上限（Quota）推播 ----------
+
+const AUTH_THROTTLE: Duration = Duration::from_secs(3600);
+const QUOTA_THROTTLE: Duration = Duration::from_secs(3600);
+
 fn settings_path(dir: &Path) -> PathBuf {
     dir.join("push-settings.json")
 }
@@ -395,10 +400,29 @@ fn settings_json(dir: &Path) -> Value {
         "main_bots": setting_enabled(dir, "main_bots"),
         "other_bots": setting_enabled(dir, "other_bots"),
         "updates": setting_enabled(dir, "updates"),
-        "reset_credits": setting_enabled(dir, "reset_credits")
+        "reset_credits": setting_enabled(dir, "reset_credits"),
+        "auth": setting_enabled(dir, "auth"),
+        "quota": setting_enabled(dir, "quota")
     })
 }
 
+/// 「被登出／憑證失效時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+pub(crate) fn auth_enabled(dir: &Path) -> bool {
+    std::fs::read_to_string(settings_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["auth"].as_bool())
+        .unwrap_or(true)
+}
+
+/// 「撞額度上限時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+pub(crate) fn quota_enabled(dir: &Path) -> bool {
+    std::fs::read_to_string(settings_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["quota"].as_bool())
+        .unwrap_or(true)
+}
 #[derive(Clone, Debug)]
 struct Presence {
     bot_id: Option<String>,
@@ -690,7 +714,6 @@ pub fn spawn_main_notifier(app: Arc<App>) {
     });
 }
 
-
 // ---------- 更新與重置券推播 ----------
 
 /// 不是 bot 的通用通知：標題固定 AG Man 以外的短標題＋內文。
@@ -713,10 +736,10 @@ fn kind_label(kind: &str) -> String {
     }
 }
 
-/// 更新類事件 → 通知內容（沒有要通知就 `None`）。key 用來同版本只推一次。
+/// 更新類事件 → 通知內容（沒有要通知就 ）。key 用來同版本只推一次。
 pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)> {
     match kind {
-        // 上游偵測到新版：`notify == "update"` 本來就是「每個新版本一次」。
+        // 上游偵測到新版： 本來就是「每個新版本一次」。
         "upstream_update" if data["notify"] == "update" => {
             let k = data["kind"].as_str()?;
             let v = data["latest_version"].as_str()?;
@@ -730,6 +753,87 @@ pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)>
             Some((format!("installed:{h}:{k}:{v}"), plain_payload("已更新", &format!("{} 已更新到 {v}", kind_label(k)), &format!("updated:{k}"), "/")))
         }
         _ => None,
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AuthQuotaNotifier {
+    auth_sent: std::sync::Mutex<std::collections::HashMap<(String, String, String), std::time::Instant>>,
+    quota_sent: std::sync::Mutex<std::collections::HashMap<(String, Option<String>), (Option<String>, std::time::Instant)>>,
+}
+
+static NOTIFIER: std::sync::OnceLock<AuthQuotaNotifier> = std::sync::OnceLock::new();
+
+fn notifier() -> &'static AuthQuotaNotifier {
+    NOTIFIER.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_notifier() {
+    let n = notifier();
+    n.auth_sent.lock().unwrap().clear();
+    n.quota_sent.lock().unwrap().clear();
+}
+
+impl AuthQuotaNotifier {
+    fn admit_auth(&self, host: &str, kind: &str, identity: &str) -> bool {
+        let key = (host.to_string(), kind.to_string(), identity.to_string());
+        let mut g = self.auth_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = g.get(&key) {
+            if prev.elapsed() < AUTH_THROTTLE {
+                return false;
+            }
+        }
+        g.insert(key, std::time::Instant::now());
+        true
+    }
+
+    fn clear_auth(&self, host: &str, kind: &str, identity: &str) {
+        let key = (host.to_string(), kind.to_string(), identity.to_string());
+        let mut g = self.auth_sent.lock().unwrap_or_else(|e| e.into_inner());
+        g.remove(&key);
+    }
+
+    fn admit_quota(&self, quota_key: &str, bucket: Option<&str>, until: Option<&str>) -> bool {
+        let key = (quota_key.to_string(), bucket.map(String::from));
+        let mut g = self.quota_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((prev_until, prev_time)) = g.get(&key) {
+            if let Some(u) = until {
+                if prev_until.as_deref() == Some(u) && prev_time.elapsed() < QUOTA_THROTTLE {
+                    return false;
+                }
+            } else if prev_time.elapsed() < QUOTA_THROTTLE {
+                return false;
+            }
+        }
+        g.insert(key, (until.map(String::from), std::time::Instant::now()));
+        true
+    }
+
+    fn clear_quota(&self, quota_key: &str) {
+        let mut g = self.quota_sent.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|(k, _), _| k != quota_key);
+    }
+}
+
+pub(crate) fn clear_auth_push(host: &str, kind: &str, identity: &str) {
+    notifier().clear_auth(host, kind, identity);
+}
+
+pub(crate) fn clear_auth_push_all_kinds(host: &str, identity: &str) {
+    let mut g = notifier().auth_sent.lock().unwrap_or_else(|e| e.into_inner());
+    g.retain(|(h, _, i), _| h != host || i != identity);
+}
+
+pub(crate) fn clear_quota_push(quota_key: &str) {
+    notifier().clear_quota(quota_key);
+}
+
+fn model_of_bucket(bucket: &str) -> Option<&'static str> {
+    match bucket {
+        "fable" => Some("fable"),
+        "opus" => Some("opus"),
+        "sonnet" => Some("sonnet"),        _ => None,
     }
 }
 
@@ -836,6 +940,280 @@ pub fn spawn_extra_notifiers(app: Arc<App>) {
     });
 }
 
+pub(crate) async fn query_affected_bots(
+    db: &sqlx::SqlitePool,
+    host: &str,
+    kind: &str,
+    identity: Option<&str>,
+    bucket: Option<&str>,
+) -> Vec<(String, String)> {
+    let id_str = identity.unwrap_or("").trim();
+    let is_default = id_str.is_empty() || id_str == "cc0" || id_str == "co0";
+    let rows: Vec<(String, String, Option<String>)> = if is_default {
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT b.id, b.name, b.model FROM bots b
+             JOIN projects p ON p.id = b.project_id
+             WHERE b.deleted_at IS NULL
+               AND p.host = ?
+               AND b.kind = ?
+               AND (
+                 b.identity IS NULL OR TRIM(b.identity) = '' OR b.identity = 'cc0' OR b.identity = 'co0' OR b.identity = ?
+                 OR EXISTS (
+                   SELECT 1 FROM runs r
+                   WHERE r.bot_id = b.id
+                     AND r.state IN ('starting', 'running', 'stopping')
+                     AND (r.runtime_identity = ? OR (r.runtime_identity IS NULL AND (? = 'cc0' OR ? = 'co0' OR ? = '')))
+                 )
+               )
+             ORDER BY b.is_primary DESC, b.name ASC",
+        )
+        .bind(host)
+        .bind(kind)
+        .bind(id_str)
+        .bind(id_str)
+        .bind(id_str)
+        .bind(id_str)
+        .bind(id_str)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT b.id, b.name, b.model FROM bots b
+             JOIN projects p ON p.id = b.project_id
+             WHERE b.deleted_at IS NULL
+               AND p.host = ?
+               AND b.kind = ?
+               AND (
+                 b.identity = ?
+                 OR EXISTS (
+                   SELECT 1 FROM runs r
+                   WHERE r.bot_id = b.id
+                     AND r.state IN ('starting', 'running', 'stopping')
+                     AND r.runtime_identity = ?
+                 )
+               )
+             ORDER BY b.is_primary DESC, b.name ASC",
+        )
+        .bind(host)
+        .bind(kind)
+        .bind(id_str)
+        .bind(id_str)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+    };
+
+    if let Some(family) = bucket.and_then(model_of_bucket) {
+        let filtered: Vec<(String, String)> = rows
+            .iter()
+            .filter(|(_, _, m)| m.as_deref().map(|s| s.to_ascii_lowercase().contains(family)).unwrap_or(false))
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+        if !filtered.is_empty() {
+            return filtered;
+        }
+    }
+    rows.into_iter().map(|(id, name, _)| (id, name)).collect()
+}
+
+pub(crate) fn format_auth_payload(
+    host: &str,
+    kind: &str,
+    identity: &str,
+    bot_ids: &[String],
+    bot_names: &[String],
+) -> Value {
+    let identity = identity.trim();
+    let ident_label = if identity.is_empty() {
+        if host == crate::config::LOCAL_HOST {
+            kind.to_string()
+        } else {
+            format!("{kind}（{host}）")
+        }
+    } else {
+        if host == crate::config::LOCAL_HOST {
+            format!("{kind} {identity}")
+        } else {
+            format!("{kind} {identity}（{host}）")
+        }
+    };
+    let title = if ident_label.ends_with('）') {
+        format!("{ident_label}被登出")
+    } else {
+        format!("{ident_label} 被登出")
+    };
+    let count = bot_names.len();
+    let body = if count == 0 {
+        "需重新登入".to_string()
+    } else if count == 1 {
+        format!("{} 受影響，需重新登入", bot_names[0])
+    } else if count == 2 {
+        format!("{}、{} 共 2 顆 bot 受影響，需重新登入", bot_names[0], bot_names[1])
+    } else {
+        format!("{}… 共 {} 顆 bot 受影響，需重新登入", bot_names[..2].join("、"), count)
+    };
+    let url = if let Some(first_id) = bot_ids.first() {
+        format!("/bots/{first_id}")
+    } else if host != crate::config::LOCAL_HOST {
+        format!("/?host={host}")
+    } else {
+        "/".to_string()
+    };
+    let tag = format!("auth:{host}:{kind}:{identity}");
+    json!({
+        "title": title,
+        "body": body,
+        "tag": tag,
+        "url": url,
+    })
+}
+
+pub(crate) fn format_reset_time(until_iso: &str) -> Option<String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(until_iso).ok()?;
+    let local = dt.with_timezone(&chrono::Local);
+    let now = chrono::Local::now();
+    if local.date_naive() == now.date_naive() {
+        Some(format!("{} 重置", local.format("%H:%M")))
+    } else {
+        Some(format!("{} 重置", local.format("%m/%d %H:%M")))
+    }
+}
+
+pub(crate) fn format_quota_payload(
+    host: &str,
+    kind: &str,
+    identity: Option<&str>,
+    bucket: Option<&str>,
+    until: Option<&str>,
+    bot_ids: &[String],
+    bot_names: &[String],
+    quota_key: &str,
+) -> Value {
+    let id_str = identity.map(str::trim).unwrap_or("");
+    let base_label = if !id_str.is_empty() {
+        id_str.to_string()
+    } else {
+        kind.to_string()
+    };
+    let bucket_label = match bucket {
+        Some("five_hour") => " 5h",
+        Some("seven_day") => " 7d",
+        _ => "",
+    };
+    let host_label = if host != crate::config::LOCAL_HOST {
+        format!("（{host}）")
+    } else {
+        String::new()
+    };
+    let prefix = format!("{base_label}{bucket_label}{host_label}");
+    let title = if prefix.ends_with('）') {
+        format!("{prefix}額度用完")
+    } else {
+        format!("{prefix} 額度用完")
+    };
+
+    let count = bot_names.len();
+    let bot_part = if count == 0 {
+        "受影響 bot 停擺".to_string()
+    } else if count == 1 {
+        format!("{} 停擺", bot_names[0])
+    } else if count == 2 {
+        format!("{}、{} 共 2 顆停擺", bot_names[0], bot_names[1])
+    } else {
+        format!("{}… 共 {} 顆停擺", bot_names[..2].join("、"), count)
+    };
+
+    let reset_str = until.and_then(format_reset_time).unwrap_or_default();
+    let body = if !reset_str.is_empty() {
+        format!("{bot_part}，{reset_str}")
+    } else {
+        bot_part
+    };
+
+    let url = if let Some(first_id) = bot_ids.first() {
+        format!("/bots/{first_id}")
+    } else {
+        "/".to_string()
+    };
+    let tag = format!("quota:{quota_key}");
+    json!({
+        "title": title,
+        "body": body,
+        "tag": tag,
+        "url": url,
+    })
+}
+
+pub(crate) fn spawn_auth_push(app: &Arc<App>, host: &str, kind: &str, identity: &str) {
+    if !auth_enabled(&app.data_dir) {
+        return;
+    }
+    if !notifier().admit_auth(host, kind, identity) {
+        return;
+    }
+    let (app, host, kind, identity) = (app.clone(), host.to_string(), kind.to_string(), identity.to_string());
+    tokio::spawn(async move {
+        if load_subs(&app.data_dir).is_empty() {
+            return;
+        }
+        let rows = query_affected_bots(&app.db, &host, &kind, Some(&identity), None).await;
+        let bot_ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+        let bot_names: Vec<String> = rows.iter().map(|(_, name)| name.clone()).collect();
+        let payload = format_auth_payload(&host, &kind, &identity, &bot_ids, &bot_names);
+        let subject = app.cfg.get().await.server.push_subject.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+    });
+}
+
+pub(crate) fn spawn_quota_push(
+    app: &Arc<App>,
+    host: &str,
+    base: &str,
+    bucket: Option<&str>,
+    until: Option<&str>,
+) {
+    if !quota_enabled(&app.data_dir) {
+        return;
+    }
+    let quota_key = crate::quota::quota_key(host, base);
+    if !notifier().admit_quota(&quota_key, bucket, until) {
+        return;
+    }
+    let (kind, identity) = match base.split_once(':') {
+        Some((k, id)) => (k.to_string(), Some(id.to_string())),
+        None => (base.to_string(), None),
+    };
+    let (app, host, bucket, until, quota_key) = (
+        app.clone(),
+        host.to_string(),
+        bucket.map(String::from),
+        until.map(String::from),
+        quota_key,
+    );
+    tokio::spawn(async move {
+        if load_subs(&app.data_dir).is_empty() {
+            return;
+        }
+        let rows = query_affected_bots(&app.db, &host, &kind, identity.as_deref(), bucket.as_deref()).await;
+        let bot_ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+        let bot_names: Vec<String> = rows.iter().map(|(_, name)| name.clone()).collect();
+        let payload = format_quota_payload(
+            &host,
+            &kind,
+            identity.as_deref(),
+            bucket.as_deref(),
+            until.as_deref(),
+            &bot_ids,
+            &bot_names,
+            &quota_key,
+        );
+        let subject = app.cfg.get().await.server.push_subject.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+    });
+}
+
 // ---------- API ----------
 
 pub(crate) async fn get_vapid_key(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
@@ -931,16 +1309,20 @@ pub(crate) async fn get_settings(State(app): State<Arc<App>>, Extension(p): Exte
     Ok(Json(settings_json(&app.data_dir)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub(crate) struct SettingsInput {
     #[serde(default)]
-    main_bots: Option<bool>,
+    pub main_bots: Option<bool>,
     #[serde(default)]
-    other_bots: Option<bool>,
+    pub other_bots: Option<bool>,
     #[serde(default)]
-    updates: Option<bool>,
+    pub updates: Option<bool>,
     #[serde(default)]
-    reset_credits: Option<bool>,
+    pub reset_credits: Option<bool>,
+    #[serde(default)]
+    pub auth: Option<bool>,
+    #[serde(default)]
+    pub quota: Option<bool>,
 }
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
@@ -949,9 +1331,12 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
     let mut cur = settings_json(&app.data_dir);
     for (k, v) in [
         ("main_bots", input.main_bots),
+        ("main_bots", input.main_bots),
         ("other_bots", input.other_bots),
         ("updates", input.updates),
         ("reset_credits", input.reset_credits),
+        ("auth", input.auth),
+        ("quota", input.quota),
     ] {
         if let Some(v) = v {
             cur[k] = json!(v);
@@ -960,7 +1345,6 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
     write_private(&settings_path(&app.data_dir), cur.to_string().as_bytes()).map_err(|e| LcError::Upstream(format!("{e}")))?;
     Ok(Json(cur))
 }
-
 #[derive(Deserialize)]
 pub(crate) struct PresenceInput {
     client_id: String,
@@ -1527,11 +1911,11 @@ mod tests {
         let s = get_settings(State(app.clone()), user()).await.unwrap().0;
         assert_eq!(s["main_bots"], true, "預設開");
         assert_eq!(s["other_bots"], true, "預設開");
-        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), other_bots: None, updates: None, reset_credits: None })).await.unwrap();
+        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), ..Default::default() })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
-        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), other_bots: None, updates: None, reset_credits: None })).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
         assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
     }
 
@@ -1574,6 +1958,152 @@ mod tests {
         write_private(&settings_path(&app.data_dir), br#"{"updates":false}"#).unwrap();
         handle_event(&app, &n, &ev("0.132.0")).await;
         assert!(rx.try_recv().is_err(), "開關關了不推");
+    #[test]
+    fn format_auth_payload_formatting() {
+        // 1 bot, local host
+        let p1 = format_auth_payload("local", "codex", "co0", &["b1".into()], &["sn-wkr".into()]);
+        assert_eq!(p1["title"], "codex co0 被登出");
+        assert_eq!(p1["body"], "sn-wkr 受影響，需重新登入");
+        assert_eq!(p1["url"], "/bots/b1");
+        assert_eq!(p1["tag"], "auth:local:codex:co0");
+
+        // 2 bots
+        let p2 = format_auth_payload("local", "claude", "cc1", &["b1".into(), "b2".into()], &["sn-wkr".into(), "hk-wkr".into()]);
+        assert_eq!(p2["title"], "claude cc1 被登出");
+        assert_eq!(p2["body"], "sn-wkr、hk-wkr 共 2 顆 bot 受影響，需重新登入");
+
+        // 3 bots (aggregated)
+        let p3 = format_auth_payload("local", "codex", "co0", &["b1".into(), "b2".into(), "b3".into()], &["sn-wkr".into(), "hk-wkr".into(), "am-repo".into()]);
+        assert_eq!(p3["title"], "codex co0 被登出");
+        assert_eq!(p3["body"], "sn-wkr、hk-wkr… 共 3 顆 bot 受影響，需重新登入");
+
+        // remote host
+        let pr = format_auth_payload("ubuntu", "claude", "cc1", &["b1".into()], &["sn-wkr".into()]);
+        assert_eq!(pr["title"], "claude cc1（ubuntu）被登出");
+
+        // agy (empty identity)
+        let pa = format_auth_payload("local", "agy", "", &["b1".into()], &["agy-wkr".into()]);
+        assert_eq!(pa["title"], "agy 被登出");
+    }
+
+    #[test]
+    fn format_quota_payload_formatting() {
+        // cc1, 7 bots, future reset
+        let bots: Vec<String> = (1..=7).map(|i| format!("wkr-{i}")).collect();
+        let ids: Vec<String> = (1..=7).map(|i| format!("b{i}")).collect();
+        let until = "2026-11-12T11:00:00Z";
+        let p = format_quota_payload("local", "claude", Some("cc1"), None, Some(until), &ids, &bots, "local/claude:cc1");
+        assert_eq!(p["title"], "cc1 額度用完");
+        assert!(p["body"].as_str().unwrap().starts_with("wkr-1、wkr-2… 共 7 顆停擺，"));
+        assert!(p["body"].as_str().unwrap().ends_with("重置"));
+        assert_eq!(p["url"], "/bots/b1");
+        assert_eq!(p["tag"], "quota:local/claude:cc1");
+
+        // codex 5h bucket, 4 bots
+        let bots4: Vec<String> = (1..=4).map(|i| format!("b-{i}")).collect();
+        let ids4: Vec<String> = (1..=4).map(|i| format!("id-{i}")).collect();
+        let p4 = format_quota_payload("local", "codex", None, Some("five_hour"), None, &ids4, &bots4, "codex");
+        assert_eq!(p4["title"], "codex 5h 額度用完");
+        assert_eq!(p4["body"], "b-1、b-2… 共 4 顆停擺");
+
+        // remote host
+        let premote = format_quota_payload("ubuntu", "claude", Some("cc2"), Some("seven_day"), None, &ids4, &bots4, "ubuntu/claude:cc2");
+        assert_eq!(premote["title"], "cc2 7d（ubuntu）額度用完");
+    }
+
+    #[test]
+    fn notifier_admit_and_dedup() {
+        let n = AuthQuotaNotifier::default();
+        // auth dedup
+        assert!(n.admit_auth("local", "claude", "cc1"));
+        assert!(!n.admit_auth("local", "claude", "cc1"), "短期內不可重複推");
+        assert!(n.admit_auth("local", "claude", "cc2"), "不同身份可推");
+        n.clear_auth("local", "claude", "cc1");
+        assert!(n.admit_auth("local", "claude", "cc1"), "clear 後可重推");
+
+        // quota dedup
+        let u1 = "2026-11-12T11:00:00Z";
+        let u2 = "2026-11-12T16:00:00Z";
+        assert!(n.admit_quota("claude:cc1", Some("five_hour"), Some(u1)));
+        assert!(!n.admit_quota("claude:cc1", Some("five_hour"), Some(u1)), "同窗不可重複推");
+        assert!(n.admit_quota("claude:cc1", Some("five_hour"), Some(u2)), "新重置窗可推");
+        n.clear_quota("claude:cc1");
+        assert!(n.admit_quota("claude:cc1", Some("five_hour"), Some(u2)), "clear 後可重推");
+    }
+
+    #[tokio::test]
+    async fn push_settings_roundtrip_and_permissions() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let user = || Extension(RequestPrincipal::User);
+        let bot = || Extension(RequestPrincipal::Bot("b1".into()));
+
+        // 預設全開
+        let res = get_settings(State(app.clone()), user()).await.unwrap().0;
+        assert_eq!(res["auth"], true);
+        assert_eq!(res["quota"], true);
+
+        // 修改 auth 開關
+        let updated = put_settings(State(app.clone()), user(), Json(SettingsInput {
+            auth: Some(false),
+            ..Default::default()
+        })).await.unwrap().0;
+        assert_eq!(updated["auth"], false);
+        assert_eq!(updated["quota"], true);
+        assert_eq!(auth_enabled(&app.data_dir), false);
+        assert_eq!(quota_enabled(&app.data_dir), true);
+
+        // bot principal 403 Forbidden
+        assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { auth: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn auth_push_aggregates_bots_and_deduplicates() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_notifier();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/auth").0]).unwrap();
+
+        // 建立 3 顆 claude cc1 的 bot
+        let b1 = crate::testing::claude_bot(&app, &env.project_id, "b1-worker").await;
+        let b2 = crate::testing::claude_bot(&app, &env.project_id, "b2-worker").await;
+        let b3 = crate::testing::claude_bot(&app, &env.project_id, "b3-worker").await;
+        for b in [&b1, &b2, &b3] {
+            sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?").bind(&b.id).execute(&app.db).await.unwrap();
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_sub: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+
+        // 觸發推播
+        spawn_auth_push(&app, "local", "claude", "cc1");
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("應收到 auth 推播").unwrap();
+        assert_eq!(got["title"], "claude cc1 被登出");
+        assert!(got["body"].as_str().unwrap().contains("共 3 顆 bot 受影響，需重新登入"), "{got}");
+
+        // 同一身份再次觸發：去重，不發第二則
+        spawn_auth_push(&app, "local", "claude", "cc1");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "同身份去重不重複推");
+
+        // clear 後再次觸發：可送出
+        clear_auth_push("local", "claude", "cc1");
+        spawn_auth_push(&app, "local", "claude", "cc1");
+        let got2 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("clear 後應再次收到推播").unwrap();
+        assert_eq!(got2["title"], "claude cc1 被登出");
+
+        // 開關關閉時不推
+        write_private(&settings_path(&app.data_dir), br#"{"auth":false}"#).unwrap();
+        clear_auth_push("local", "claude", "cc1");
+        spawn_auth_push(&app, "local", "claude", "cc1");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "開關關閉不推");
+
         set_test_sender(None);
     }
 
@@ -1597,6 +2127,53 @@ mod tests {
         assert_eq!(scan_reset_credits(&app, &snap("T2"), now).await, 1, "新的一次停工再推");
         write_private(&settings_path(&app.data_dir), br#"{"reset_credits":false}"#).unwrap();
         assert_eq!(scan_reset_credits(&app, &snap("T3"), now).await, 0, "開關關了不推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn quota_push_aggregates_bots_and_deduplicates() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_notifier();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/quota").0]).unwrap();
+
+        // 建立 4 顆 codex co0 的 bot
+        for i in 1..=4 {
+            let b = crate::testing::claude_bot(&app, &env.project_id, &format!("codex-{i}")).await;
+            sqlx::query("UPDATE bots SET kind = 'codex', identity = 'co0' WHERE id = ?").bind(&b.id).execute(&app.db).await.unwrap();
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_sub: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+
+        let until1 = "2026-11-12T11:00:00Z";
+        spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some(until1));
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("應收到 quota 推播").unwrap();
+        assert_eq!(got["title"], "co0 5h 額度用完");
+        assert!(got["body"].as_str().unwrap().contains("共 4 顆停擺"), "{got}");
+        assert!(got["body"].as_str().unwrap().contains("重置"), "{got}");
+
+        // 同窗去重
+        spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some(until1));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "同窗不重複推");
+
+        // 新窗可推
+        let until2 = "2026-11-12T16:00:00Z";
+        spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some(until2));
+        let got2 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("新窗應收到推播").unwrap();
+        assert_eq!(got2["title"], "co0 5h 額度用完");
+
+        // 開關關閉不推
+        write_private(&settings_path(&app.data_dir), br#"{"quota":false}"#).unwrap();
+        spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some("2026-11-12T21:00:00Z"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "開關關閉不推");
+
         set_test_sender(None);
     }
 }

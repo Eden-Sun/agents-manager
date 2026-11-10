@@ -40,6 +40,7 @@ pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot, fence: &crate::
     // 不能放進 `run_if_current` 的 closure：`emit_host_changed` 自己也拿同一把圍籬的 gate。
     if changed {
         crate::state::emit_host_changed(app, &fence).await;
+        crate::webpush::spawn_auth_push(app, &host, "agy", "");
     }
     tracing::info!(bot = %bot.name, %host, "agy turn failed on authentication; marking agy logged out");
 }

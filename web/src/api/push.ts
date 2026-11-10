@@ -24,6 +24,16 @@ export async function sendTestPush(): Promise<{ sent: number; removed: number; f
   return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number; reasons?: string[] }
 }
 
+export interface PushSettingsValue {
+  main_bots?: boolean
+  updates?: boolean
+  reset_credits?: boolean
+  auth?: boolean
+  quota?: boolean
+}
+
+export type PushSettingsData = PushSettingsValue
+
 export async function getPushSettings(): Promise<PushSettingsValue> {
   return (await rawTransport.request('GET', '/push/settings')) as PushSettingsValue
 }
@@ -33,10 +43,12 @@ export interface PushSettingsValue {
   other_bots: boolean
   updates: boolean
   reset_credits: boolean
+  auth: boolean
+  quota: boolean
 }
 
-export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<void> {
-  await rawTransport.request('PUT', '/push/settings', s)
+export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<PushSettingsValue> {
+  return (await rawTransport.request('PUT', '/push/settings', s)) as PushSettingsValue
 }
 
 /** 回報「這個視窗正看著哪顆 bot」：daemon 據此不對正在看的 bot 推播。 */
