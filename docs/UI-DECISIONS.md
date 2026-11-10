@@ -1495,3 +1495,4 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 登出與撞限推播聚合：多顆 bot 因同一個帳號被登出或同一個額度 key 用盡而停擺時，以身份／額度 key 聚合成一則推播（例如「cc1 額度用完：sn-wkr、hk-wkr… 共 7 顆停擺，11/12 11:00 重置」「codex co0 被登出：3 顆 bot」），以避免多顆 bot 同時撞限洗版。點擊開該身份或受影響的第一顆 bot。
 - 推播細項開關（2026-11-10，使用者）：推播設定提供「遠端主機斷線與 bot 停止推播」勾選框（預設開，存 daemon 端 `push-settings.json` 的 `hosts` 鍵）。掛在 `incidents.rs` 門檻後的 incident，斷線與異常停止各推一則，同 incident 恢復時只補推一則「已恢復」，同 incident ID 去重、同資源 30 秒節流，避免網路或行程短暫抖動洗版。
 - **排程等不到 bot 推播**（2026-11-10，使用者）：排程等不到 bot（`waiting_reason='bot_unavailable'`）超過合理時間（例 5 分鐘，或已過排定時間＋隨機區間）時推播一則「S<n> <名稱>：綁定的 bot 不可用（原因）」，每個 occurrence 只推一次；受排程 `notify` 設定（`none` 不推）與推播設定（`schedules` 開關，預設開）控制。點擊同樣開該排程與 occurrence。
+- **系統警報推播**（2026-11-10，使用者）：新系統事件（換版失敗／回滾、立即部署連續失敗、磁碟不足、herdr 非預期重啟、多顆 agent 同時消失、巡檢停止）寫進 inbox 後推一則，去重沿用 inbox `event_key`；任一分頁正看著就不推（網頁已有提示）。推播設定加「系統異常時推播」勾選（`ops`，預設開）。實作 `webpush::spawn_system_alert`，白名單外的 ops_alert 不推。

@@ -258,6 +258,22 @@ pub async fn claim_ownership(pool: &SqlitePool, ids: &[String]) -> Result<String
     Ok(sqlx::query_scalar(CLAIM_OWNERSHIP).bind(serde_json::to_string(ids)?).fetch_one(pool).await?)
 }
 
+/// 新事件真的寫進 inbox（不是同 key 的重複）之後，通知外面一聲（daemon 用來推系統警報）。
+/// 參數：`(event_key, kind, payload)`。啟動時設一次；沒設就什麼都不做。
+pub type InboxObserver = Box<dyn Fn(&str, &str, &Value) + Send + Sync>;
+static INBOX_OBSERVER: std::sync::OnceLock<InboxObserver> = std::sync::OnceLock::new();
+
+/// 設定新事件觀察者（只有第一次有效）。
+pub fn set_inbox_observer(f: InboxObserver) {
+    let _ = INBOX_OBSERVER.set(f);
+}
+
+fn observe_new(event_key: &str, kind: &str, payload: &Value) {
+    if let Some(f) = INBOX_OBSERVER.get() {
+        f(event_key, kind, payload);
+    }
+}
+
 /// 同 [`push_inbox`]，但只在 `live_bots` 全部還在（沒刪、專案沒移交）時才寫。
 /// 條件跟寫入是同一句 SQL，所以刪除或移交不會插在「檢查」與「寫入」中間（#1626：撞題查詢等 Jev 期間 bot 可能被刪）。
 pub async fn push_inbox_if_live(
@@ -297,7 +313,11 @@ pub async fn push_inbox_if_live(
     .bind(ownership)
     .execute(pool)
     .await?;
-    Ok((res.rows_affected() > 0).then_some(id))
+    let inserted = (res.rows_affected() > 0).then_some(id);
+    if inserted.is_some() {
+        observe_new(event_key, kind, payload);
+    }
+    Ok(inserted)
 }
 
 pub async fn push_inbox(
@@ -328,7 +348,11 @@ pub async fn push_inbox(
     .bind(&now)
     .execute(pool)
     .await?;
-    Ok((res.rows_affected() > 0).then_some(id))
+    let inserted = (res.rows_affected() > 0).then_some(id);
+    if inserted.is_some() {
+        observe_new(event_key, kind, payload);
+    }
+    Ok(inserted)
 }
 
 /// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。

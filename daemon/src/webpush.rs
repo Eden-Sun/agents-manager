@@ -381,7 +381,7 @@ fn settings_path(dir: &Path) -> PathBuf {
     dir.join("push-settings.json")
 }
 
-/// 推播開關（`main_bots`／`other_bots`／`updates`／`reset_credits`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
+/// 推播開關（`main_bots`／`other_bots`／`updates`／`reset_credits`／`auth`／`quota`／`schedules`／`ops`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
 pub(crate) fn setting_enabled(dir: &Path, key: &str) -> bool {
     std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[key].as_bool()).unwrap_or(true)
 }
@@ -408,7 +408,8 @@ fn settings_json(dir: &Path) -> Value {
         "reset_credits": setting_enabled(dir, "reset_credits"),
         "auth": setting_enabled(dir, "auth"),
         "quota": setting_enabled(dir, "quota"),
-        "schedules": setting_enabled(dir, "schedules")
+        "schedules": setting_enabled(dir, "schedules"),
+        "ops": setting_enabled(dir, "ops")
     })
 }
 
@@ -461,6 +462,14 @@ fn user_is_watching(bot_id: &str) -> bool {
         m.values().any(|p| {
             p.visible && p.bot_id.as_deref() == Some(bot_id) && p.received.elapsed() < PRESENCE_STALE && p.idle_secs + p.received.elapsed().as_secs() <= PRESENCE_ACTIVE_SECS
         })
+    })
+}
+
+/// 任一個網頁分頁可見、最近 60 秒有互動（系統警報與主機推播用：有人正盯著網頁就不推，網頁本身已有提示）。
+fn user_is_present() -> bool {
+    let g = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().is_some_and(|m| {
+        m.values().any(|p| p.visible && p.received.elapsed() < PRESENCE_STALE && p.idle_secs + p.received.elapsed().as_secs() <= PRESENCE_ACTIVE_SECS)
     })
 }
 
@@ -1110,6 +1119,8 @@ pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono
 
 /// 啟動時呼叫：每分鐘看一次額度，用完且有重置券就推一次；另在 daemon 換版後推一次。
 pub fn spawn_extra_notifiers(app: Arc<App>) {
+    let observed = app.clone();
+    crate::supervisor_inbox::set_inbox_observer(Box::new(move |_key, kind, payload| spawn_system_alert(&observed, kind, payload)));
     if setting_enabled(&app.data_dir, "updates") && build_changed(&app.data_dir, crate::build_info::BUILD_SHA) {
         let app2 = app.clone();
         tokio::spawn(async move {
@@ -1400,6 +1411,67 @@ pub(crate) fn spawn_quota_push(
     });
 }
 
+// ---------- 系統警報推播（ops_alert 白名單） ----------
+
+/// 會打斷人的系統事件（`ops_alert` 的 `reason`，或獨立的 kind）。其他 ops_alert 只給巡檢，不推。
+const SYSTEM_ALERT_REASONS: [&str; 7] = [
+    "swap_rolled_back",
+    "swap_forward_fixed",
+    "now_failed",
+    "disk_low",
+    "herdr_unexpected_restart",
+    "agents_gone_burst",
+    "watchdog_gave_up",
+];
+
+/// 新事件的系統警報推播內容（不在白名單就 `None`）。tag 依 reason 合併，同類只留最新一則。
+pub(crate) fn system_alert_notice(kind: &str, payload: &Value) -> Option<Value> {
+    let reason = if kind == "ops_alert" { payload["reason"].as_str()? } else { kind };
+    if !SYSTEM_ALERT_REASONS.contains(&reason) {
+        return None;
+    }
+    let detail = first_line(payload["detail"].as_str().unwrap_or_default(), BODY_MAX);
+    let (title, body) = match reason {
+        "swap_rolled_back" => ("換版失敗，已回滾", "AG Man 換版失敗，線上仍是舊版；之後不再自動挑這顆".to_string()),
+        "swap_forward_fixed" => ("換版失敗，已往前修", "AG Man 換版失敗，已改用往前修復".to_string()),
+        "now_failed" => ("立即部署失敗", "立即部署連續失敗，已收掉這次請求".to_string()),
+        "disk_low" => ("磁碟不足", if detail.is_empty() { "磁碟剩餘空間偏低".to_string() } else { detail }),
+        "herdr_unexpected_restart" => (
+            "herdr 非預期重啟",
+            format!(
+                "已復原 {} 顆、失敗 {} 顆、遺失 {} 顆",
+                payload["resumed_count"].as_u64().unwrap_or(0),
+                payload["failed_count"].as_u64().unwrap_or(0),
+                payload["children_lost_count"].as_u64().unwrap_or(0),
+            ),
+        ),
+        "agents_gone_burst" => (
+            "多顆 agent 同時消失",
+            format!("{} 上 {} 顆 agent 同時不見", payload["host"].as_str().unwrap_or("某主機"), payload["count"].as_u64().unwrap_or(0)),
+        ),
+        _ => (
+            "巡檢停止，需手動重啟",
+            format!("自動重試 {} 次仍失敗；需執行 agm supervisor-start", payload["attempts"].as_u64().unwrap_or(0)),
+        ),
+    };
+    Some(plain_payload(title, &body, &format!("ops:{reason}"), "/"))
+}
+
+/// 系統警報要不要推：開關開、有訂閱、沒有任何分頁正看著。
+pub(crate) fn should_push_system_alert(enabled: bool, has_subs: bool, watching: bool) -> bool {
+    enabled && has_subs && !watching
+}
+
+/// 新事件寫進 inbox 後呼叫（am-base 的 observer）：不阻塞寫入端，去重已由 inbox 的 event_key 保證。
+pub(crate) fn spawn_system_alert(app: &Arc<App>, kind: &str, payload: &Value) {
+    let Some(notice) = system_alert_notice(kind, payload) else { return };
+    if !should_push_system_alert(setting_enabled(&app.data_dir, "ops"), !load_subs(&app.data_dir).is_empty(), user_is_present()) {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move { send_plain(&app, notice).await });
+}
+
 // ---------- API ----------
 
 pub(crate) async fn get_vapid_key(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
@@ -1513,6 +1585,8 @@ pub(crate) struct SettingsInput {
     pub quota: Option<bool>,
     #[serde(default)]
     pub schedules: Option<bool>,
+    #[serde(default)]
+    pub ops: Option<bool>,
 }
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
@@ -1528,6 +1602,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
         ("auth", input.auth),
         ("quota", input.quota),
         ("schedules", input.schedules),
+        ("ops", input.ops),
     ] {
         if let Some(v) = v {
             cur[k] = json!(v);
@@ -2342,12 +2417,54 @@ pub(crate) mod tests {
         assert_eq!(s["other_bots"], true, "預設開");
         assert_eq!(s["hosts"], true, "預設開");
         assert_eq!(s["schedules"], true, "預設開");
+        assert_eq!(s["ops"], true, "系統警報預設開");
         put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), ..Default::default() })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
         assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
         assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[test]
+    fn system_alerts_only_whitelisted_reasons_and_keep_their_tag() {
+        let swap = json!({"source": "daemon-update-kick", "reason": "swap_rolled_back", "detail": "換上 a1b2c3d 失敗、已回滾到 9f8e7d6"});
+        let p = system_alert_notice("ops_alert", &swap).unwrap();
+        assert_eq!(p["title"], "換版失敗，已回滾");
+        assert_eq!(p["tag"], "ops:swap_rolled_back");
+        assert_eq!(p["url"], "/");
+        // 白名單外的 ops_alert（例如腳本停住、CI 盯哨）只給巡檢，不推。
+        assert!(system_alert_notice("ops_alert", &json!({"reason": "check_failing", "detail": "x"})).is_none());
+        assert!(system_alert_notice("ops_alert", &json!({"detail": "no reason"})).is_none());
+        // 獨立 kind：巡檢放棄自動重試。
+        let gave_up = system_alert_notice("watchdog_gave_up", &json!({"attempts": 3, "why": "CLI 起來就死"})).unwrap();
+        assert!(gave_up["body"].as_str().unwrap().contains("3 次"));
+        assert!(system_alert_notice("turn_updated", &json!({})).is_none());
+        let disk = system_alert_notice("ops_alert", &json!({"reason": "disk_low", "detail": "ubuntu 磁碟剩 4 GB（96%）"})).unwrap();
+        assert_eq!(disk["body"], "ubuntu 磁碟剩 4 GB（96%）");
+        let herdr = system_alert_notice("ops_alert", &json!({"reason": "herdr_unexpected_restart", "resumed_count": 12, "failed_count": 2, "children_lost_count": 0})).unwrap();
+        assert_eq!(herdr["body"], "已復原 12 顆、失敗 2 顆、遺失 0 顆");
+    }
+
+    #[test]
+    fn system_alert_push_gate_respects_switch_subs_and_presence() {
+        assert!(should_push_system_alert(true, true, false));
+        assert!(!should_push_system_alert(false, true, false), "開關關掉");
+        assert!(!should_push_system_alert(true, false, false), "沒有訂閱");
+        assert!(!should_push_system_alert(true, true, true), "任一分頁正看著就不推");
+    }
+
+    #[test]
+    fn any_page_watching_counts_visible_recent_pages_only() {
+        clear_presence();
+        assert!(!user_is_present());
+        record_presence("c1", Presence { bot_id: None, visible: false, idle_secs: 0, received: std::time::Instant::now() });
+        assert!(!user_is_present(), "隱藏的分頁不算");
+        record_presence("c2", Presence { bot_id: None, visible: true, idle_secs: 600, received: std::time::Instant::now() });
+        assert!(!user_is_present(), "太久沒互動不算");
+        record_presence("c3", Presence { bot_id: Some("b9".into()), visible: true, idle_secs: 5, received: std::time::Instant::now() });
+        assert!(user_is_present());
+        clear_presence();
     }
 
     #[test]
