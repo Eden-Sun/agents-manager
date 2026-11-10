@@ -1210,7 +1210,6 @@ pub(crate) fn spawn_quota_push(
         );
         let subject = app.cfg.get().await.server.push_subject.clone();
         let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
-        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
     });
 }
 
@@ -1958,6 +1957,9 @@ mod tests {
         write_private(&settings_path(&app.data_dir), br#"{"updates":false}"#).unwrap();
         handle_event(&app, &n, &ev("0.132.0")).await;
         assert!(rx.try_recv().is_err(), "開關關了不推");
+        set_test_sender(None);
+    }
+
     #[test]
     fn format_auth_payload_formatting() {
         // 1 bot, local host
