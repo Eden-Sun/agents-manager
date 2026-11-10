@@ -485,13 +485,56 @@ fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Val
     json!({"title": bot_name, "body": body, "tag": format!("bot:{bot_id}:{k}"), "url": format!("/bots/{bot_id}")})
 }
 
-async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, line: String) {
+async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, line: impl std::future::Future<Output = String>) {
+    // 先去重／節流／presence，再等譯文或摘要：等的時候不會重複推，也不會因為等而漏推。
     if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id)) {
         return;
     }
-    let payload = main_payload(&bot.id, &bot.name, kind, &line);
+    let payload = main_payload(&bot.id, &bot.name, kind, &line.await);
     let subject = app.cfg.get().await.server.push_subject.clone();
     let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+}
+
+/// 等譯文、等摘要各自的上限（毫秒）；測試會縮短。
+static LINE_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(20_000);
+
+fn line_wait() -> Duration {
+    Duration::from_millis(LINE_WAIT_MS.load(Ordering::Relaxed))
+}
+
+/// 推播內文（使用者 2026-11-10）：會被系統自動翻譯的（英文、自動翻譯開著）等譯文（上限 `line_wait`，逾時用原文）；
+/// 之後一律是一句短的話：單行且 ≤ 40 字直接用，否則用同一個 claude_api 通道摘要成一句，失敗或功能關閉退回第一行截斷。
+/// `id`：譯文快取的鍵（回覆用訊息 id，與網頁共用快取）。
+async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
+    use crate::message_translate as mt;
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let (master, state) = {
+        let cfg = app.cfg.get().await;
+        (cfg.claude_api.enabled, cfg.claude_use_state("message_translate"))
+    };
+    let on = master && state.as_ref().is_some_and(|s| s.enabled);
+    let auto = on && state.as_ref().is_some_and(|s| s.auto == Some(true));
+    let mut work = text.to_string();
+    if auto && mt::is_mostly_english(text) && text.chars().count() <= mt::MAX_CHARS {
+        if let Ok(Ok(v)) = tokio::time::timeout(line_wait(), mt::translate(app, id, text)).await {
+            if let Some(t) = v["translation"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                work = t.to_string();
+            }
+        }
+    }
+    let nonblank = work.lines().filter(|l| !l.trim().is_empty()).count();
+    if nonblank <= 1 && work.chars().count() <= mt::SUMMARY_MAX_CHARS {
+        return first_line(&work, BODY_MAX);
+    }
+    if on {
+        if let Ok(Ok(s)) = tokio::time::timeout(line_wait(), mt::summarize(app, &work)).await {
+            return first_line(&s, BODY_MAX);
+        }
+    }
+    first_line(&work, BODY_MAX)
 }
 
 async fn primary_bot(app: &Arc<App>, bot_id: &str) -> Option<crate::db::Bot> {
@@ -503,26 +546,28 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
         return;
     }
     let Some(bot) = primary_bot(app, bot_id).await else { return };
-    let reply: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1")
+    let reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1")
         .bind(turn_id)
         .fetch_optional(&app.db)
         .await
         .ok()
         .flatten();
-    send_main(app, n, &bot, MainKind::Done, turn_id, first_line(&reply.unwrap_or_default(), BODY_MAX)).await;
+    let (mid, text) = reply.unwrap_or_default();
+    send_main(app, n, &bot, MainKind::Done, turn_id, async { push_line(app, &mid, &text).await }).await;
 }
 
 async fn blocked_line(app: &Arc<App>, bot_id: &str, run_id: &str) -> String {
     use axum::extract::Path;
+    let mut text = String::new();
     if let Ok(Json(v)) = crate::runners::pending_question::get_pending_question(State(app.clone()), Path(bot_id.to_string())).await {
         if let Some(q) = v["questions"][0]["question"].as_str() {
-            let l = first_line(q, BODY_MAX);
-            if !l.is_empty() {
-                return l;
-            }
+            text = q.to_string();
         }
     }
-    crate::blocked_reason::of(run_id).map(|r| first_line(&r.text, BODY_MAX)).unwrap_or_default()
+    if text.trim().is_empty() {
+        text = crate::blocked_reason::of(run_id).map(|r| r.text).unwrap_or_default();
+    }
+    push_line(app, "push-blocked", &text).await
 }
 
 async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode: u64) {
@@ -536,8 +581,7 @@ async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode
     if run.agent_status != "blocked" {
         return;
     }
-    let line = blocked_line(&app, &bot_id, &run.id).await;
-    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), line).await;
+    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), blocked_line(&app, &bot_id, &run.id)).await;
 }
 
 pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &crate::state::WsEvent) {
@@ -584,6 +628,11 @@ pub fn spawn_main_notifier(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
+                // 回合完成要等譯文／摘要（最久數十秒）：另開工作做，不卡住事件流。去重在 send_main 一開始就記帳。
+                Ok(ev) if ev.kind == "turn_updated" => {
+                    let (app, n) = (app.clone(), n.clone());
+                    tokio::spawn(async move { handle_event(&app, &n, &ev).await });
+                }
                 Ok(ev) => handle_event(&app, &n, &ev).await,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => break,
@@ -1172,6 +1221,141 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(rx.try_recv().is_err(), "同一段 blocked 只推一次");
         set_test_sender(None);
+    }
+
+    // ---- 推播內文：譯文／摘要 ----
+
+    struct PFake {
+        tr_calls: AtomicUsize,
+        sum_calls: AtomicUsize,
+        tr_delay_ms: u64,
+        sum_prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::claude_api::MessagesClient for PFake {
+        fn complete<'a>(&'a self, req: &'a crate::claude_api::MessagesRequest) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::claude_api::ClientOutcome, crate::claude_api::ClientError>> + Send + 'a>> {
+            let is_tr = req.system.as_deref().is_some_and(|s| s.contains("translation engine"));
+            let prompt = req.prompt.clone();
+            Box::pin(async move {
+                let text = if is_tr {
+                    self.tr_calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(self.tr_delay_ms)).await;
+                    "已部署完成，測試全數通過".to_string()
+                } else {
+                    self.sum_calls.fetch_add(1, Ordering::SeqCst);
+                    self.sum_prompts.lock().unwrap().push(prompt);
+                    "摘要：部署完成並通過測試".to_string()
+                };
+                Ok(crate::claude_api::ClientOutcome { text, model: Some("claude-haiku-5-5".into()), stop_reason: Some("end_turn".into()), usage: None })
+            })
+        }
+    }
+
+    async fn push_env(enabled: bool, auto: bool, tr_delay_ms: u64) -> (crate::testing::Env, String, Arc<MainNotifier>, tokio::sync::mpsc::UnboundedReceiver<Value>, Arc<PFake>) {
+        let (env, bot_id, n, rx) = primary_env().await;
+        let key = env.app.data_dir.join("key");
+        crate::key_file::stage_key(&key.to_string_lossy(), "sk-ant-test-push").unwrap().publish().unwrap();
+        let key = key.to_string_lossy().into_owned();
+        env.app
+            .cfg
+            .update(move |c| {
+                c.claude_api.key_file = key;
+                c.claude_api.enabled = enabled;
+                c.claude_api.uses.insert("message_translate".into(), crate::config::ClaudeApiUseCfg { enabled: Some(enabled), auto: Some(auto), ..Default::default() });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let f = Arc::new(PFake { tr_calls: AtomicUsize::new(0), sum_calls: AtomicUsize::new(0), tr_delay_ms, sum_prompts: Default::default() });
+        env.app.claude_api.set_client(f.clone());
+        (env, bot_id, n, rx, f)
+    }
+
+    async fn add_reply(env: &crate::testing::Env, bot_id: &str, turn: &str, text: &str) {
+        let conv = crate::db::conversation_id(&env.app.db, bot_id).await.unwrap();
+        let run: String = match sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(bot_id).fetch_optional(&env.app.db).await.unwrap() { Some(r) => r, None => crate::testing::fake_run(&env.app, bot_id).await };
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','completed','ok',?)").bind(turn).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'assistant',?,'hook',?)").bind(format!("m-{turn}")).bind(&conv).bind(turn).bind(text).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    }
+
+    const EN_SHORT: &str = "Deployed, all tests pass fine";
+    const EN_LONG: &str = "I finished the deployment of the new daemon build and all of the tests passed on the first try.";
+
+    #[tokio::test]
+    async fn english_reply_waits_for_translation_once_and_uses_it() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx, f) = push_env(true, true, 150).await;
+        add_reply(&env, &bot_id, "t1", EN_SHORT).await;
+        let ev = turn_ev(&bot_id, "t1", "completed");
+        tokio::join!(handle_event(&env.app, &n, &ev), handle_event(&env.app, &n, &ev));
+        let got = rx.try_recv().expect("等到譯文後要推");
+        assert_eq!(got["body"], "已部署完成，測試全數通過");
+        assert!(rx.try_recv().is_err(), "等譯文時重複事件不會重複推");
+        assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (1, 0), "短句不摘要");
+        // 譯文快取與網頁共用：同一則再翻是命中。
+        let again = crate::message_translate::translate(&env.app, "m-t1", EN_SHORT).await.unwrap();
+        assert_eq!(again["cached"], true);
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn translation_timeout_falls_back_to_the_original_text() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        LINE_WAIT_MS.store(60, Ordering::Relaxed);
+        let (env, bot_id, n, mut rx, f) = push_env(true, true, 2000).await;
+        add_reply(&env, &bot_id, "t1", EN_SHORT).await;
+        handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        LINE_WAIT_MS.store(20_000, Ordering::Relaxed);
+        let got = rx.try_recv().expect("逾時也要推，不漏推");
+        assert_eq!(got["body"], EN_SHORT, "逾時用原文（短句直接用）");
+        assert_eq!(f.tr_calls.load(Ordering::SeqCst), 1);
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn long_or_multiline_reply_is_summarized_to_one_sentence() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx, f) = push_env(true, false, 0).await;
+        let long_zh = "第一行說明目前的進度，已經完成部署\n第二行是更多細節：測試全部通過\n第三行列出檔案路徑 /tmp/a/b/c";
+        add_reply(&env, &bot_id, "t1", long_zh).await;
+        handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        let got = rx.try_recv().expect("要推");
+        assert_eq!(got["body"], "摘要：部署完成並通過測試");
+        assert_eq!(f.sum_prompts.lock().unwrap().as_slice(), [long_zh.to_string()]);
+        // auto 關：英文長句不翻，直接摘要原文。
+        let n2 = Arc::new(MainNotifier::default());
+        add_reply(&env, &bot_id, "t2", EN_LONG).await;
+        handle_event(&env.app, &n2, &turn_ev(&bot_id, "t2", "completed")).await;
+        assert_eq!(rx.try_recv().unwrap()["body"], "摘要：部署完成並通過測試");
+        assert_eq!(f.tr_calls.load(Ordering::SeqCst), 0, "auto 關著不自動翻譯");
+        assert_eq!(f.sum_prompts.lock().unwrap()[1], EN_LONG);
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn disabled_feature_falls_back_to_first_line_without_any_call() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx, f) = push_env(false, true, 0).await;
+        add_reply(&env, &bot_id, "t1", &format!("{EN_LONG}\nsecond line")).await;
+        handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        let got = rx.try_recv().expect("功能關閉也要推");
+        assert_eq!(got["body"], first_line(EN_LONG, BODY_MAX));
+        assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (0, 0));
+        set_test_sender(None);
+    }
+
+    #[test]
+    fn english_detection_matches_the_web_rule() {
+        use crate::message_translate::is_mostly_english;
+        assert!(is_mostly_english(EN_LONG));
+        assert!(!is_mostly_english("已經完成部署，測試全部通過，請放心 deployed ok"));
+        assert!(!is_mostly_english("short"), "拉丁字母不足 20");
+        assert!(!is_mostly_english("```\nlots of english code here and more and more\n```\n好"), "程式碼區塊不算");
+        assert!(!is_mostly_english("see https://example.com/a/very/long/path/name/here"), "網址不算");
     }
 
     #[tokio::test]

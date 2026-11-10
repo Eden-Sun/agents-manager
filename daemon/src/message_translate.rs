@@ -21,7 +21,7 @@ const USE_CASE: &str = "message_translate";
 const CACHE_DIR: &str = "message-translate";
 const PROMPT_VERSION: &str = "1";
 /// 訊息內容上限（字元）：再長的回覆不翻，避免一次扣太多。
-const MAX_CHARS: usize = 20_000;
+pub(crate) const MAX_CHARS: usize = 20_000;
 const MAX_OUT_TOKENS: u32 = 8_000;
 
 const SYSTEM: &str = "You are a translation engine. Translate the user's message into Traditional Chinese (zh-TW, Taiwan usage). \
@@ -137,6 +137,73 @@ pub async fn post_translate(
         return Err(LcError::Unprocessable(json!({"error": "message_too_long", "max_chars": MAX_CHARS})));
     }
     Ok(Json(translate(&app, &id, &content).await?))
+}
+
+// ── 推播內文：一句短摘要（webpush.rs 用）──────────────────────────────────────────
+//
+// 與對話翻譯同一個用途（`message_translate`）與開關；譯文本身直接用 [`translate`]（快取跟網頁共用），
+// 摘要只給推播用，快取在 `message-translate/ps-<sha256>.json`。
+
+const SUMMARY_VERSION: &str = "1";
+const SUMMARY_SYSTEM: &str = "You write one-line push notification text. Summarize the user's message as ONE short sentence in Traditional Chinese \
+(zh-TW, Taiwan usage), at most 40 characters. Say what happened or what is being asked. Do NOT include code, file paths, URLs, \
+commit hashes, keys or tokens. No quotes, no markdown, no preface. Reply with the sentence only.";
+pub(crate) const SUMMARY_MAX_CHARS: usize = 40;
+
+/// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過十分之一）。
+pub(crate) fn is_mostly_english(text: &str) -> bool {
+    let mut prose = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("```") {
+        prose.push_str(&rest[..i]);
+        prose.push(' ');
+        rest = match rest[i + 3..].find("```") { Some(j) => &rest[i + 3 + j + 3..], None => "" };
+    }
+    prose.push_str(rest);
+    let mut clean = String::new();
+    for line in prose.split_inclusive('\n') {
+        let mut in_code = false;
+        for tok in line.split('`') {
+            if !in_code { clean.push_str(tok) } else { clean.push(' ') }
+            in_code = !in_code;
+        }
+        if line.ends_with('\n') { clean.push('\n') }
+    }
+    let words: Vec<&str> = clean.split_whitespace().filter(|w| !w.starts_with("http://") && !w.starts_with("https://")).collect();
+    let (mut latin, mut cjk) = (0usize, 0usize);
+    for c in words.iter().flat_map(|w| w.chars()) {
+        if c.is_ascii_alphabetic() { latin += 1 }
+        else if matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') { cjk += 1 }
+    }
+    latin >= 20 && cjk * 10 <= latin
+}
+
+/// 推播用的一句摘要（≤ 40 字）。查快取、沒有才打 API。
+pub(crate) async fn summarize(app: &App, content: &str) -> Result<String, LcError> {
+    let mut h = Sha256::new();
+    h.update(SUMMARY_VERSION.as_bytes());
+    h.update(b"\0");
+    h.update(content.as_bytes());
+    let key = format!("ps-{}", h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let path = cache_path(&app.data_dir, &key);
+    if let Some(hit) = load(&path) {
+        return Ok(hit.translation);
+    }
+    let clipped: String = content.chars().take(MAX_CHARS).collect();
+    let req = ClaudeRequest { use_case: USE_CASE, system: Some(SUMMARY_SYSTEM.to_string()), prompt: clipped, max_tokens: 200, format: None };
+    let reply = claude_api::complete(app, req).await.map_err(error_of)?;
+    let line = reply.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.is_empty() {
+        return Err(LcError::Upstream("summary_empty".into()));
+    }
+    let mut out: String = line.chars().take(SUMMARY_MAX_CHARS).collect();
+    if line.chars().count() > SUMMARY_MAX_CHARS { out.push('…'); }
+    let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
+    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost };
+    if let Err(e) = save(&path, &entry) {
+        tracing::warn!("push summary cache write failed: {e}");
+    }
+    Ok(out)
 }
 
 // ── 待答問卷（codex／claude 的「需要回應」決策題）：一份問卷一次呼叫 ──────────────────────────
