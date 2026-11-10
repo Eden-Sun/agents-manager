@@ -24,14 +24,6 @@ export async function sendTestPush(): Promise<{ sent: number; removed: number; f
   return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number; reasons?: string[] }
 }
 
-export interface PushSettingsValue {
-  main_bots?: boolean
-  updates?: boolean
-  reset_credits?: boolean
-  auth?: boolean
-  quota?: boolean
-}
-
 export type PushSettingsData = PushSettingsValue
 
 export async function getPushSettings(): Promise<PushSettingsValue> {
