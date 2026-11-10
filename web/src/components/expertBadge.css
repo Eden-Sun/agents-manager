@@ -387,6 +387,23 @@ button.bot-manager-disabled-tag:disabled {
   font-size: 10px;
 }
 
+/*
+ * 有滑鼠的裝置（2026-11-10）：單顆執行者的勾選框是 hover 才浮出（不佔欄），左側只有燈號欄（26px）。
+ * 群集列若也留勾選欄＋箭頭欄，圖示會比上下的單顆列多縮進約 50px，看起來像子項。這裡收掉留白欄，
+ * 箭頭落在燈號欄的位置（寬 26、右邊負 5px），圖示與單顆列同一條線。觸控裝置維持常駐左欄，不動。
+ */
+@media (hover: hover) {
+  .bot-cluster-gutter {
+    display: none;
+  }
+
+  .bot-cluster-caret {
+    width: 26px;
+    margin-right: -5px;
+    text-align: center;
+  }
+}
+
 /* 第一行：群集名＋計數；第二行 `.bot-sub` 放身份與模型（同單顆列）；第三行是執行中／閒置。 */
 .bot-cluster-main .bot-main {
   flex: 1;

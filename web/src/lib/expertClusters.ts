@@ -1,7 +1,7 @@
 import type { Lamp } from '../api/types'
 import { t } from './i18n'
 
-/** 同群集的成員（cluster 相同、≥2 顆）收成一列；其餘維持單列。保留原順序，群集列落在第一個成員的位置。 */
+/** 同群集的成員（cluster 相同、≥2 顆）收成一列；其餘維持單列。群集列全部排在單顆執行者前面（各自保留原順序），群集不穿插在執行者之間，免得看起來像上一顆的子項（2026-11-10）。 */
 export type ExpertClusterItem<T extends { cluster?: string | null }> =
   | { kind: 'single'; item: T }
   | { kind: 'cluster'; name: string; members: T[] }
@@ -9,24 +9,22 @@ export type ExpertClusterItem<T extends { cluster?: string | null }> =
 export function groupClusterItems<T extends { cluster?: string | null }>(items: readonly T[]): ExpertClusterItem<T>[] {
   const count = new Map<string, number>()
   for (const b of items) if (b.cluster) count.set(b.cluster, (count.get(b.cluster) ?? 0) + 1)
-  const out: ExpertClusterItem<T>[] = []
-  const seen = new Map<string, T[]>()
+  const clusters = new Map<string, T[]>()
+  const singles: T[] = []
   for (const b of items) {
     const name = b.cluster
     if (!name || (count.get(name) ?? 0) < 2) {
-      out.push({ kind: 'single', item: b })
+      singles.push(b)
       continue
     }
-    const list = seen.get(name)
-    if (list) {
-      list.push(b)
-    } else {
-      const members = [b]
-      seen.set(name, members)
-      out.push({ kind: 'cluster', name, members })
-    }
+    const list = clusters.get(name)
+    if (list) list.push(b)
+    else clusters.set(name, [b])
   }
-  return out
+  return [
+    ...[...clusters].map(([name, members]): ExpertClusterItem<T> => ({ kind: 'cluster', name, members })),
+    ...singles.map((item): ExpertClusterItem<T> => ({ kind: 'single', item })),
+  ]
 }
 
 /** 群集列第三行的狀態分類（每顆成員的燈號只歸一類；offline 與 stopping 都算「停止」）。 */

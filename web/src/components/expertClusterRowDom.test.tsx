@@ -51,10 +51,38 @@ beforeEach(() => {
 const clusterRow = () => document.querySelector<HTMLElement>('.bot-cluster-row')
 const rowIds = () => [...document.querySelectorAll<HTMLElement>('.bot-row[data-bot-id]')].map((e) => e.dataset.botId)
 
-test('groupClusterItems：≥2 才成群，單顆與 null 維持單列，群集落在第一個成員的位置', () => {
-  const items = [bot('a', { cluster: 'x' }), bot('b'), bot('c', { cluster: 'x' }), bot('d', { cluster: 'y' })]
+test('groupClusterItems：≥2 才成群，單顆與 null 維持單列，群集全部排在單顆前面（各自保留原順序）', () => {
+  const items = [bot('a', { cluster: 'x' }), bot('b'), bot('c', { cluster: 'x' }), bot('d', { cluster: 'y' }), bot('e', { cluster: 'y' }), bot('f', { cluster: 'z' })]
   const g = groupClusterItems(items)
-  assert.deepEqual(g.map((e) => (e.kind === 'cluster' ? `c:${e.name}:${e.members.length}` : `s:${e.item.id}`)), ['c:x:2', 's:b', 's:d'])
+  assert.deepEqual(g.map((e) => (e.kind === 'cluster' ? `c:${e.name}:${e.members.length}` : `s:${e.item.id}`)), ['c:x:2', 'c:y:2', 's:b', 's:f'])
+})
+
+test('側欄：群集列不穿插在單顆執行者之間，也不縮排成子項', async () => {
+  seed()
+  useStore.setState({
+    bots: [
+      bot('m', { role: 'manager', cluster: null }),
+      bot('f1', { kind: 'codex', model: 'gpt', cluster: null }),
+      bot('h1', { cluster: 'haiku' }),
+      bot('g1', { kind: 'grok', model: null, cluster: null }),
+      bot('h2', { cluster: 'haiku' }),
+      bot('s1', { cluster: 'sonnet', model: 'sonnet' }),
+      bot('f2', { kind: 'codex', model: 'gpt', cluster: null }),
+      bot('s2', { cluster: 'sonnet', model: 'sonnet' }),
+    ],
+    runs: {},
+  } as never)
+  await mount(<Sidebar />)
+  await settle()
+  // 只看執行者段（manager 段在前，不計）。
+  const rows = [...document.querySelectorAll<HTMLElement>('.bot-list > [role="listitem"]')]
+    .map((e) => (e.dataset.cluster ? `c:${e.dataset.cluster}` : `s:${e.dataset.botId}`))
+    .filter((x) => x !== 's:m')
+  assert.deepEqual(rows, ['c:haiku', 'c:sonnet', 's:f1', 's:g1', 's:f2'])
+  // 群集列是頂層列，沒有掛在任何子 agent 清單底下（那會縮排）。
+  assert.equal(document.querySelectorAll('.bot-kids .bot-cluster-row, .bot-child .bot-cluster-row').length, 0)
+  // 成員只在展開後才出現，且只在自己群集的 members 容器裡。
+  assert.equal(document.querySelectorAll('.bot-cluster-members .bot-row[data-bot-id]').length, 0)
 })
 
 test('收合：一列群集、計數、成員不畫，單列照舊', async () => {
