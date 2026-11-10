@@ -27,7 +27,8 @@ import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 import { useT } from './lib/i18n'
-import { installPresenceReporter, installPushClickBridge } from './lib/pushNotify'
+import { installPresenceReporter, installPushClickBridge, parseResetOfferUrl } from './lib/pushNotify'
+import { reopenResetCreditOffer } from './store/resetCreditOffer'
 import { drawerShouldClose } from './lib/drawerNav'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
@@ -45,9 +46,22 @@ function usePushClickBridge() {
   useEffect(() => {
     const onOpen = (ev: Event) => useStore.getState().selectBot((ev as CustomEvent<{ botId: string }>).detail.botId)
     window.addEventListener('agm:open-bot', onOpen)
+    // 點「重置券」通知：已開的視窗收事件，冷啟動帶 `?reset_offer=<key>`；都把該帳號的耗盡提示再開一次。
+    const onOffer = (ev: Event) => reopenResetCreditOffer((ev as CustomEvent<{ key: string }>).detail.key)
+    window.addEventListener('agm:open-reset-offer', onOffer)
+    const initial = parseResetOfferUrl(window.location.href)
+    if (initial) {
+      reopenResetCreditOffer(initial)
+      try {
+        window.history.replaceState(window.history.state, '', window.location.pathname)
+      } catch {
+        /* 沒有 history 權限就留著參數 */
+      }
+    }
     const stop = installPresenceReporter(() => useStore.getState().selectedBotId)
     return () => {
       window.removeEventListener('agm:open-bot', onOpen)
+      window.removeEventListener('agm:open-reset-offer', onOffer)
       stop()
     }
   }, [])

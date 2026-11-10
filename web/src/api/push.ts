@@ -24,11 +24,17 @@ export async function sendTestPush(): Promise<{ sent: number; removed: number; f
   return (await rawTransport.request('POST', '/push/test')) as { sent: number; removed: number; failed: number; reasons?: string[] }
 }
 
-export async function getPushSettings(): Promise<{ main_bots: boolean }> {
-  return (await rawTransport.request('GET', '/push/settings')) as { main_bots: boolean }
+export async function getPushSettings(): Promise<PushSettingsValue> {
+  return (await rawTransport.request('GET', '/push/settings')) as PushSettingsValue
 }
 
-export async function setPushSettings(s: { main_bots: boolean }): Promise<void> {
+export interface PushSettingsValue {
+  main_bots: boolean
+  updates: boolean
+  reset_credits: boolean
+}
+
+export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<void> {
   await rawTransport.request('PUT', '/push/settings', s)
 }
 

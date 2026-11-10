@@ -376,9 +376,17 @@ fn settings_path(dir: &Path) -> PathBuf {
     dir.join("push-settings.json")
 }
 
-/// 「主力 bot 回覆完成／需要回應時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+/// 推播開關（`main_bots`／`updates`／`reset_credits`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
+pub(crate) fn setting_enabled(dir: &Path, key: &str) -> bool {
+    std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[key].as_bool()).unwrap_or(true)
+}
+
 pub(crate) fn main_bots_enabled(dir: &Path) -> bool {
-    std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["main_bots"].as_bool()).unwrap_or(true)
+    setting_enabled(dir, "main_bots")
+}
+
+fn settings_json(dir: &Path) -> Value {
+    json!({"main_bots": setting_enabled(dir, "main_bots"), "updates": setting_enabled(dir, "updates"), "reset_credits": setting_enabled(dir, "reset_credits")})
 }
 
 #[derive(Clone, Debug)]
@@ -429,6 +437,8 @@ pub(crate) struct MainNotifier {
     last_sent: std::sync::Mutex<std::collections::HashMap<(String, MainKind), std::time::Instant>>,
     blocked_open: std::sync::Mutex<std::collections::HashSet<String>>,
     episode: std::sync::atomic::AtomicU64,
+    /// 已推過的更新通知 key（同版本只推一次）。
+    updates_seen: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 測試把它設 0；正式環境用 `BLOCKED_SETTLE`。
     settle: std::sync::Mutex<Option<Duration>>,
 }
@@ -553,6 +563,16 @@ pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &cra
                 n.blocked_open.lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id);
             }
         }
+        "upstream_update" | "cli_update_done" => {
+            if !setting_enabled(&app.data_dir, "updates") {
+                return;
+            }
+            if let Some((key, payload)) = update_notice(&ev.kind, &ev.data) {
+                if n.updates_seen.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+                    send_plain(app, payload).await;
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -569,6 +589,152 @@ pub fn spawn_main_notifier(app: Arc<App>) {
                 Err(_) => break,
             }
         }
+    });
+}
+
+
+// ---------- 更新與重置券推播 ----------
+
+/// 不是 bot 的通用通知：標題固定 AG Man 以外的短標題＋內文。
+fn plain_payload(title: &str, body: &str, tag: &str, url: &str) -> Value {
+    json!({"title": title, "body": body, "tag": tag, "url": url})
+}
+
+async fn send_plain(app: &Arc<App>, payload: Value) {
+    if load_subs(&app.data_dir).is_empty() {
+        return;
+    }
+    let subject = app.cfg.get().await.server.push_subject.clone();
+    let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+}
+
+fn kind_label(kind: &str) -> String {
+    match kind {
+        "herdr" => "herdr".to_string(),
+        k => format!("{k} CLI"),
+    }
+}
+
+/// 更新類事件 → 通知內容（沒有要通知就 `None`）。key 用來同版本只推一次。
+pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)> {
+    match kind {
+        // 上游偵測到新版：`notify == "update"` 本來就是「每個新版本一次」。
+        "upstream_update" if data["notify"] == "update" => {
+            let k = data["kind"].as_str()?;
+            let v = data["latest_version"].as_str()?;
+            Some((format!("upstream:{k}:{v}"), plain_payload("有新版", &format!("{} 有新版 {v}", kind_label(k)), &format!("update:{k}"), "/")))
+        }
+        // 網頁上「已安裝」的結果：成功才通知。
+        "cli_update_done" if data["ok"] == true => {
+            let k = data["kind"].as_str()?;
+            let v = data["target_version"].as_str()?;
+            let h = data["host"].as_str().unwrap_or("local");
+            Some((format!("installed:{h}:{k}:{v}"), plain_payload("已更新", &format!("{} 已更新到 {v}", kind_label(k)), &format!("updated:{k}"), "/")))
+        }
+        _ => None,
+    }
+}
+
+/// daemon 換版：記下上次啟動的 build，不同就是剛換版（第一次沒有紀錄不推）。
+pub(crate) fn build_changed(dir: &Path, sha: &str) -> bool {
+    let path = dir.join("push-last-build");
+    let prev = std::fs::read_to_string(&path).ok().map(|t| t.trim().to_string());
+    if prev.as_deref() != Some(sha) {
+        let _ = write_private(&path, sha.as_bytes());
+    }
+    prev.is_some_and(|p| !p.is_empty() && p != sha)
+}
+
+/// 額度格是不是用完了（同前端 `exhaustionMarker`）：回事件標記，同一次耗盡不變。
+pub(crate) fn exhaustion_marker(cell: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let later = |t: &Value| t.as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).is_some_and(|d| d > now);
+    let hit = &cell["limit_hit"];
+    if hit.is_object() && (hit["until"].is_null() || later(&hit["until"])) {
+        return Some(format!("hit:{}", hit["at"].as_str().unwrap_or("")));
+    }
+    for name in ["five_hour", "seven_day"] {
+        let w = &cell[name];
+        let used_up = w["used_pct"].as_f64().is_some_and(|p| p > 99.9);
+        if used_up && later(&w["resets_at"]) {
+            return Some(format!("win:{name}:{}", w["resets_at"].as_str().unwrap_or("")));
+        }
+    }
+    None
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct ResetOffer {
+    pub id: String,
+    pub key: String,
+    pub available: i64,
+    pub held: Vec<String>,
+}
+
+/// 額度快照（`/api/quota` 的 `kinds`）→ 目前用完且有券的 codex 帳號。
+pub(crate) fn reset_offers(snap: &Value, now: chrono::DateTime<chrono::Utc>) -> Vec<ResetOffer> {
+    let mut out = Vec::new();
+    let Some(kinds) = snap["kinds"].as_object() else { return out };
+    for (key, cell) in kinds {
+        let kind = key.rsplit('/').next().unwrap_or("").split(':').next().unwrap_or("");
+        let available = cell["reset_credits"]["available"].as_i64().unwrap_or(0);
+        if kind != "codex" || cell["stale"] == true || available <= 0 {
+            continue;
+        }
+        let Some(marker) = exhaustion_marker(cell, now) else { continue };
+        let held = cell["held_bots"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        out.push(ResetOffer { id: format!("{key}|{marker}"), key: key.clone(), available, held });
+    }
+    out
+}
+
+fn reset_payload(o: &ResetOffer) -> Value {
+    let held = if o.held.is_empty() { String::new() } else { format!("（影響：{}）", o.held.join("、")) };
+    let key_enc: String = o.key.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    plain_payload("額度用完", &format!("codex 額度用完，有 {} 張重置券可用{held}", o.available), &format!("reset:{}", o.key), &format!("/?reset_offer={key_enc}"))
+}
+
+/// 已通知過的耗盡事件（持久化，7 天後清掉）。只通知，絕不兌換。
+fn load_reset_seen(dir: &Path) -> std::collections::HashMap<String, i64> {
+    std::fs::read_to_string(dir.join("push-reset-seen.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono::DateTime<chrono::Utc>) -> usize {
+    if !setting_enabled(&app.data_dir, "reset_credits") {
+        return 0;
+    }
+    let mut seen = load_reset_seen(&app.data_dir);
+    let ts = now.timestamp();
+    seen.retain(|_, at| ts - *at < 7 * 86400);
+    let fresh: Vec<ResetOffer> = reset_offers(snap, now).into_iter().filter(|o| !seen.contains_key(&o.id)).collect();
+    if fresh.is_empty() {
+        return 0;
+    }
+    for o in &fresh {
+        seen.insert(o.id.clone(), ts);
+    }
+    let _ = write_private(&app.data_dir.join("push-reset-seen.json"), serde_json::to_string(&seen).unwrap_or_default().as_bytes());
+    for o in &fresh {
+        send_plain(app, reset_payload(o)).await;
+    }
+    fresh.len()
+}
+
+/// 啟動時呼叫：每分鐘看一次額度，用完且有重置券就推一次；另在 daemon 換版後推一次。
+pub fn spawn_extra_notifiers(app: Arc<App>) {
+    if setting_enabled(&app.data_dir, "updates") && build_changed(&app.data_dir, crate::build_info::BUILD_SHA) {
+        let app2 = app.clone();
+        tokio::spawn(async move {
+            // 等訂閱與事件流起來再送。
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            send_plain(&app2, plain_payload("已更新", &format!("AG Man 已更新到 {}", crate::build_info::BUILD_SHA), "updated:agm", "/")).await;
+        });
+    } else {
+        let _ = build_changed(&app.data_dir, crate::build_info::BUILD_SHA);
+    }
+    crate::background_loop::spawn_periodic(&app, "reset credit push", Duration::from_secs(60), Duration::from_secs(30), |app| async move {
+        let mut snap = crate::quota::snapshot(&app).await;
+        crate::runners::reset_credit::annotate_held_bots(&app, &mut snap).await;
+        scan_reset_credits(&app, &snap, chrono::Utc::now()).await;
     });
 }
 
@@ -664,19 +830,30 @@ pub(crate) async fn test_push(State(app): State<Arc<App>>, Extension(p): Extensi
 
 pub(crate) async fn get_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     user_only(&p)?;
-    Ok(Json(json!({"main_bots": main_bots_enabled(&app.data_dir)})))
+    Ok(Json(settings_json(&app.data_dir)))
 }
 
 #[derive(Deserialize)]
 pub(crate) struct SettingsInput {
-    main_bots: bool,
+    #[serde(default)]
+    main_bots: Option<bool>,
+    #[serde(default)]
+    updates: Option<bool>,
+    #[serde(default)]
+    reset_credits: Option<bool>,
 }
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
     user_only(&p)?;
     let _g = FILE_LOCK.lock().await;
-    write_private(&settings_path(&app.data_dir), json!({"main_bots": input.main_bots}).to_string().as_bytes()).map_err(|e| LcError::Upstream(format!("{e}")))?;
-    Ok(Json(json!({"main_bots": input.main_bots})))
+    let mut cur = settings_json(&app.data_dir);
+    for (k, v) in [("main_bots", input.main_bots), ("updates", input.updates), ("reset_credits", input.reset_credits)] {
+        if let Some(v) = v {
+            cur[k] = json!(v);
+        }
+    }
+    write_private(&settings_path(&app.data_dir), cur.to_string().as_bytes()).map_err(|e| LcError::Upstream(format!("{e}")))?;
+    Ok(Json(cur))
 }
 
 #[derive(Deserialize)]
@@ -1003,11 +1180,76 @@ mod tests {
         let app = env.app.clone();
         let user = || Extension(RequestPrincipal::User);
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], true, "預設開");
-        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: false })).await.unwrap();
+        put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), updates: None, reset_credits: None })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
-        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: true })).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { main_bots: Some(true), updates: None, reset_credits: None })).await, Err(LcError::Forbidden(_))));
         assert!(matches!(post_presence(bot(), Json(PresenceInput { client_id: "c".into(), bot_id: None, visible: true, idle_secs: 0 })).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[test]
+    fn update_notices_and_build_change_and_exhaustion() {
+        let up = json!({"kind": "codex", "latest_version": "0.130.0", "notify": "update"});
+        let (key, p) = update_notice("upstream_update", &up).unwrap();
+        assert_eq!(key, "upstream:codex:0.130.0");
+        assert_eq!(p["body"], "codex CLI 有新版 0.130.0");
+        assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": null})).is_none());
+        assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": "error"})).is_none());
+        let done = json!({"ok": true, "kind": "claude", "host": "m4p", "target_version": "2.1.300"});
+        assert_eq!(update_notice("cli_update_done", &done).unwrap().1["body"], "claude CLI 已更新到 2.1.300");
+        assert!(update_notice("cli_update_done", &json!({"ok": false, "kind": "claude", "target_version": "2"})).is_none());
+        let dir = crate::testing::scratch_dir("am-webpush-build");
+        assert!(!build_changed(&dir, "aaa1111"), "第一次沒有紀錄不推");
+        assert!(!build_changed(&dir, "aaa1111"), "沒換版不推");
+        assert!(build_changed(&dir, "bbb2222"), "換版要推");
+        assert!(!build_changed(&dir, "bbb2222"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(exhaustion_marker(&json!({"limit_hit": {"at": "A", "until": "2026-11-10T05:00:00Z"}}), now).unwrap(), "hit:A");
+        assert!(exhaustion_marker(&json!({"limit_hit": {"at": "A", "until": "2026-11-09T05:00:00Z"}}), now).is_none(), "撞限已過期");
+        assert_eq!(exhaustion_marker(&json!({"five_hour": {"used_pct": 100, "resets_at": "2026-11-10T03:00:00Z"}}), now).unwrap(), "win:five_hour:2026-11-10T03:00:00Z");
+        assert!(exhaustion_marker(&json!({"five_hour": {"used_pct": 80, "resets_at": "2026-11-10T03:00:00Z"}}), now).is_none());
+    }
+
+    #[tokio::test]
+    async fn upstream_update_pushes_once_per_version_and_respects_switch() {
+        let _g = SENDER_TESTS.lock().await;
+        let (env, _bot, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        let ev = |v: &str| crate::state::WsEvent { seq: 1, kind: "upstream_update".into(), data: json!({"kind": "codex", "latest_version": v, "notify": "update"}) };
+        handle_event(&app, &n, &ev("0.130.0")).await;
+        assert_eq!(rx.try_recv().unwrap()["body"], "codex CLI 有新版 0.130.0");
+        handle_event(&app, &n, &ev("0.130.0")).await;
+        assert!(rx.try_recv().is_err(), "同版本只推一次");
+        handle_event(&app, &n, &ev("0.131.0")).await;
+        assert!(rx.try_recv().is_ok(), "新版本再推");
+        write_private(&settings_path(&app.data_dir), br#"{"updates":false}"#).unwrap();
+        handle_event(&app, &n, &ev("0.132.0")).await;
+        assert!(rx.try_recv().is_err(), "開關關了不推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn reset_credit_offer_pushes_once_per_exhaustion_and_never_redeems() {
+        let _g = SENDER_TESTS.lock().await;
+        let (env, _bot, _n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let snap = |at: &str| json!({"kinds": {
+            "m4p/codex:co0": {"limit_hit": {"at": at, "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 2}, "held_bots": ["a", "b"]},
+            "codex": {"limit_hit": {"at": at, "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 0}},
+            "claude": {"limit_hit": {"at": at}, "reset_credits": {"available": 3}},
+        }});
+        assert_eq!(scan_reset_credits(&app, &snap("T1"), now).await, 1, "只有 codex 且有券的帳號");
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got["body"], "codex 額度用完，有 2 張重置券可用（影響：a、b）");
+        assert_eq!(got["url"], "/?reset_offer=m4p%2Fcodex%3Aco0");
+        assert_eq!(scan_reset_credits(&app, &snap("T1"), now).await, 0, "同一次停工只推一次");
+        assert!(rx.try_recv().is_err());
+        assert_eq!(scan_reset_credits(&app, &snap("T2"), now).await, 1, "新的一次停工再推");
+        write_private(&settings_path(&app.data_dir), br#"{"reset_credits":false}"#).unwrap();
+        assert_eq!(scan_reset_credits(&app, &snap("T3"), now).await, 0, "開關關了不推");
+        set_test_sender(None);
     }
 }

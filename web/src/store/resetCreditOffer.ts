@@ -173,3 +173,21 @@ export async function answerResetCreditOffer(o: ResetCreditOffer, use: boolean):
     return false
   }
 }
+
+/** 點推播通知：把這個帳號目前的耗盡提示再開一次（不看「問過了」的紀錄）。額度資料還沒到就等它到。 */
+export function reopenResetCreditOffer(key: string, now: () => number = Date.now): void {
+  const tryOpen = (quota: QuotaMap): boolean => {
+    const q = quota[key]
+    if (!q) return false
+    const { offers } = resetCreditOffers({}, { [key]: q }, now())
+    if (offers.length === 0) return true
+    queue = [...offers, ...queue.filter((x) => x.key !== key)]
+    emit()
+    return true
+  }
+  if (tryOpen(useStore.getState().quota)) return
+  const unsub = useStore.subscribe((s) => {
+    if (tryOpen(s.quota)) unsub()
+  })
+  setTimeout(unsub, 30_000)
+}

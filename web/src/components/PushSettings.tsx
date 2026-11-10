@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getPushSettings, listPushEndpoints, sendTestPush, setPushSettings } from '../api/push'
+import { getPushSettings, listPushEndpoints, sendTestPush, setPushSettings, type PushSettingsValue } from '../api/push'
 import { useT } from '../lib/i18n'
 import { currentSubscription, disablePush, enablePush, pushSupport, type PushSupport } from '../lib/pushNotify'
 
@@ -11,10 +11,14 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [mainBots, setMainBots] = useState(true)
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, updates: true, reset_credits: true })
   useEffect(() => {
-    getPushSettings().then((s) => setMainBots(s.main_bots), () => {})
+    getPushSettings().then(setOpts, () => {})
   }, [])
+  const toggle = (key: keyof PushSettingsValue, v: boolean) => {
+    setOpts((o) => ({ ...o, [key]: v }))
+    setPushSettings({ [key]: v }).catch(() => setOpts((o) => ({ ...o, [key]: !v })))
+  }
 
   const refresh = useCallback(async () => {
     const support = pushSupport()
@@ -83,18 +87,15 @@ export function PushSettings() {
           </>
         ) : null}
       </div>
-      <label className="push-settings-note">
-        <input
-          type="checkbox"
-          checked={mainBots}
-          onChange={(e) => {
-            const v = e.target.checked
-            setMainBots(v)
-            setPushSettings({ main_bots: v }).catch(() => setMainBots(!v))
-          }}
-        />{' '}
-        {t('主力 bot 回覆完成／需要回應時推播')}
-      </label>
+      {([
+        ['main_bots', t('主力 bot 回覆完成／需要回應時推播')],
+        ['updates', t('偵測到更新（AG Man／CLI）時推播')],
+        ['reset_credits', t('codex 額度用完且有重置券時推播（只通知，不自動使用）')],
+      ] as const).map(([key, label]) => (
+        <label key={key} className="push-settings-note" style={{ display: 'block' }}>
+          <input type="checkbox" checked={opts[key]} onChange={(e) => toggle(key, e.target.checked)} /> {label}
+        </label>
+      ))}
       {msg ? <p className="push-settings-note" role="alert">{msg}</p> : null}
     </div>
   )

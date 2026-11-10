@@ -78,6 +78,15 @@ export function parseBotUrl(url: string): string | null {
   }
 }
 
+/** 通知的 url（`/?reset_offer=<額度 key>`）→ 額度 key。 */
+export function parseResetOfferUrl(url: string): string | null {
+  try {
+    return new URL(url, 'http://x').searchParams.get('reset_offer')
+  } catch {
+    return null
+  }
+}
+
 /** service worker 在已開啟的視窗裡點通知時 postMessage：轉成 `agm:open-schedule`（側欄聽它）。 */
 export function installPushClickBridge(): () => void {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return () => {}
@@ -86,6 +95,8 @@ export function installPushClickBridge(): () => void {
     if (d?.type !== 'agm-open-url' || !d.url) return
     const target = parseScheduleUrl(d.url)
     if (target) window.dispatchEvent(new CustomEvent('agm:open-schedule', { detail: target }))
+    const offer = parseResetOfferUrl(d.url)
+    if (offer) window.dispatchEvent(new CustomEvent('agm:open-reset-offer', { detail: { key: offer } }))
     const botId = parseBotUrl(d.url)
     if (botId) window.dispatchEvent(new CustomEvent('agm:open-bot', { detail: { botId } }))
   }
