@@ -93,16 +93,38 @@ fn error_of(e: ClaudeError) -> LcError {
     }
 }
 
+/// 自動翻譯（網頁的 `auto`，以及 daemon 的預先翻，見 `message_pretranslate`）是否開著：總開關、用途開關、`auto` 都要開。
+pub(crate) async fn auto_on(app: &App) -> bool {
+    let cfg = app.cfg.get().await;
+    cfg.claude_api.enabled && cfg.claude_use_state(USE_CASE).is_some_and(|s| s.enabled && s.auto == Some(true))
+}
+
 /// 核心：查快取、沒有才打 API、寫快取。回 `{translation, model, cached, usage?}`。
+/// 同一個快取鍵同時只有一個上游呼叫（single-flight）：預先翻跟網頁的手動／自動翻撞在一起，後到的等先到的，拿到快取，不重複扣費。
 pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Value, LcError> {
     let path = cache_path(&app.data_dir, &cache_key(id, content));
     if let Some(hit) = load(&path) {
         return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
     }
+    let slot = flight_slot(&path);
+    let guard = slot.lock().await;
+    // 等鎖期間別人可能已經寫好快取：拿到控制權後重查，命中就不打 API。
+    if let Some(hit) = load(&path) {
+        drop(guard);
+        flight_forget(&path, slot);
+        return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+    }
+    let out = translate_upstream(app, id, content, &path).await;
+    drop(guard);
+    flight_forget(&path, slot);
+    out
+}
+
+async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
     let reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
     let entry = CacheEntry { translation: reply.text.trim().to_string(), model: reply.model.clone(), prompt_version: PROMPT_VERSION.into(), cost_usd: cost };
-    if let Err(e) = save(&path, &entry) {
+    if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
     let mut body = json!({"translation": entry.translation, "model": entry.model, "cached": false, "cost_usd": cost});
@@ -370,17 +392,17 @@ fn pq_cache_path(data_dir: &Path, payload: &Value) -> PathBuf {
     data_dir.join(CACHE_DIR).join(format!("{PQ_CACHE_PREFIX}{key}.json"))
 }
 
-/// 同一份問卷（同一個快取鍵）同時只有一個上游呼叫：兩個分頁同時自動翻，後到的排隊、拿到先算好的快取（single-flight）。
+/// 同一個快取鍵同時只有一個上游呼叫（單句、對話訊息、問卷共用）：後到的排隊、拿到先算好的快取（single-flight）。
 /// 鍵是快取檔路徑；沒有人在等的鎖會被收掉。
-static PQ_FLIGHT: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = std::sync::Mutex::new(None);
+static FLIGHT: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = std::sync::Mutex::new(None);
 
-fn pq_flight_slot(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    let mut g = PQ_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+fn flight_slot(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut g = FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(Default::default).entry(path.to_path_buf()).or_default().clone()
 }
 
-fn pq_flight_forget(path: &Path, slot: Arc<tokio::sync::Mutex<()>>) {
-    let mut g = PQ_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+fn flight_forget(path: &Path, slot: Arc<tokio::sync::Mutex<()>>) {
+    let mut g = FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     // 表裡一份、我手上一份；多的就是還有人在排隊。
     if Arc::strong_count(&slot) <= 2 {
         if let Some(m) = g.as_mut() {
@@ -398,17 +420,17 @@ pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value,
     if let Some(hit) = load_pq(&path) {
         return Ok(json!({"questions": hit.questions, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
     }
-    let slot = pq_flight_slot(&path);
+    let slot = flight_slot(&path);
     let guard = slot.lock().await;
     // 等鎖期間別人可能已經寫好快取：拿到控制權後重查，命中就不打 API。
     if let Some(hit) = load_pq(&path) {
         drop(guard);
-        pq_flight_forget(&path, slot);
+        flight_forget(&path, slot);
         return Ok(json!({"questions": hit.questions, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
     }
     let out = translate_questions_upstream(app, qs, &payload, &path).await;
     drop(guard);
-    pq_flight_forget(&path, slot);
+    flight_forget(&path, slot);
     out
 }
 
@@ -717,7 +739,9 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 1, "同一份問卷同時只打一次上游");
         assert_eq!(a["questions"], b["questions"], "兩份回應一致");
         assert_eq!(usize::from(a["cached"] == json!(true)) + usize::from(b["cached"] == json!(true)), 1, "後到的那份拿到快取");
-        assert!(PQ_FLIGHT.lock().unwrap().as_ref().is_none_or(|m| m.is_empty()), "沒人等了，鎖表要收乾淨");
+        // 只看這份問卷的鍵：FLIGHT 是行程共用的，別的測試（預先翻）可能同時在飛。
+        let key = pq_cache_path(&app.data_dir, &pq_payload(&qs));
+        assert!(FLIGHT.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&key)), "沒人等了，鎖表要收乾淨");
         // 不同問卷照常各自打一次。
         let mut other = pq_body();
         other.questions[0].question.push('?');

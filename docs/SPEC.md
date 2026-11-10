@@ -3165,6 +3165,8 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 
 對話裡「主要是英文」的 assistant 訊息有「翻譯」按鈕，`POST /api/messages/{id}/translate`（User-only）用 Claude API（用途 `message_translate`）翻成繁體中文，譯文快取在 `{data_dir}/message-translate/`，同一則訊息只扣一次費（`daemon/src/message_translate.rs`）。這個用途預設開（使用者每次親手按才扣費），其他背景用途仍預設關（`ClaudeApiUseDef::default_on`）。`[claude_api.uses.message_translate] auto`（預設 true；`ClaudeApiUseDef::auto_default`，只有這個用途有）讓網頁對新到與最後 10 則已完整的英文訊息自動翻（使用者 2026-11-06），設定頁 `GET/PUT /api/claude-api/settings` 的 `uses[].auto`（沒有自動開關的用途為 null）。
 
+**預先翻（使用者 2026-11-10：「自動翻譯如果開啟，訊息發出就直接預先做好翻譯，而不是等 user 要看才做」）**：`auto` 開著（且總開關、用途開關都開）時，daemon 在每則 `message_added`（訊息落地，或同一 id 內容被換掉重推）當下，對符合網頁 eligible 條件的 assistant 英文訊息（未撤回、非 `terminal_fallback`、`incomplete=0`、非空、≤ 20000 字）呼叫同一個 `message_translate::translate`，寫進同一份快取（`daemon/src/message_pretranslate.rs`）。網頁開頁時自動翻、手動按都是快取命中（`cached:true`、不扣費）。同一個快取鍵 single-flight（`message_translate::translate` 內），預先翻跟網頁同時撞上只打一次 API。同時最多 2 則在飛；一次失敗後冷卻 120 秒，冷卻內落地的訊息不送（網頁開頁時照舊的規則）。系統觸發的回合不另外排除（網頁對所有符合條件的新訊息自動翻，這裡照同一條）。`auto` 關掉：不預先翻，行為跟以前一樣。推播譯文也改傳原文（含前後空白）給 `translate`，跟網頁共用同一把快取鍵。
+
 ### 6.9d 更新框的翻譯（issue #1870）
 
 更新確認框在原文旁邊多一層摘要與譯文（`daemon/src/changelog_translate.rs`）。預設目標語言是繁中（`zh-Hant`）；prompt 改走設定裡驗證過的 `lang`，不是只會翻繁中。原文、來源連結，以及既有的「分析影響」（`claude_review`）都不改。不碰分診、帳本判決、自動開 issue 或升級。全站介面語言不在這裡，也沒有語言選擇器。還沒翻時，按鈕跟這次回應的 `lang`：`zh-Hant` 寫「翻譯成繁中」、`zh-Hans`「翻譯成簡中」、`en`「翻譯成英文」、`ja`「翻譯成日文」、`ko`「翻譯成韓文」。沒有 `lang` 或不認得就只寫「翻譯」。摘要沒有固定的繁中標題。

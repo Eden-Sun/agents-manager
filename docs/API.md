@@ -2744,7 +2744,7 @@ User-only（Bot、AGM role、Service 皆 403 `user_only`）。body `{"questions"
 
 ## 對話訊息翻譯 `POST /api/messages/{id}/translate`
 
-User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，受 `[claude_api]` 總開關管；這個用途沒寫設定時預設開，`[claude_api.uses.message_translate] enabled = false` 才關）。`[claude_api.uses.message_translate] auto`（預設 true）決定網頁要不要對新到／最後 10 則英文訊息自動呼叫這個端點；`GET/PUT /api/claude-api/settings` 的 `uses[].auto` 讀寫它（其他用途為 null，PUT 帶 auto 會 400）。
+User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，受 `[claude_api]` 總開關管；這個用途沒寫設定時預設開，`[claude_api.uses.message_translate] enabled = false` 才關）。`[claude_api.uses.message_translate] auto`（預設 true）決定網頁要不要對新到／最後 10 則英文訊息自動呼叫這個端點；`GET/PUT /api/claude-api/settings` 的 `uses[].auto` 讀寫它（其他用途為 null，PUT 帶 auto 會 400）。`auto` 開著時 daemon 也會在訊息落地當下預先翻（2026-11-10，SPEC §6.9e），寫進同一份快取：之後這支端點對那則是 `cached:true`、不扣費；預先翻失敗冷卻 120 秒，不影響這支端點的手動呼叫。
 prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、指令、識別字、commit hash 原樣不翻，只回譯文。
 `200 {"translation", "model", "cached", "cost_usd", "usage"?}`：`cost_usd` 是這次翻譯依牌價算的美元（Haiku 5.5 0.10／0.50、Sonnet 5.5 2／10、Opus 5.5 4／20 每百萬 token，快取寫 ×1.25、讀 ×0.1；不認得的模型為 null），快取命中時回當初那次的花費。快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
 錯誤：404 `not_found`（沒這則訊息）；400（不是 assistant 或空訊息）；422 `message_too_long`（超過 20000 字）；409 `claude_api_not_configured`（沒開或沒 key）；502（`translate_failed: …`，API 失敗、被限流、逾時）。

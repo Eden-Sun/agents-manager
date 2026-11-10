@@ -561,6 +561,8 @@ fn line_wait() -> Duration {
 /// `id`：譯文快取的鍵（回覆用訊息 id，與網頁共用快取）。
 async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
     use crate::message_translate as mt;
+    // 譯文快取鍵是原文（含前後空白），跟網頁、預先翻用同一份內容，不能先 trim 掉。
+    let raw = text;
     let text = text.trim();
     if text.is_empty() {
         return String::new();
@@ -573,7 +575,7 @@ async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
     let auto = on && state.as_ref().is_some_and(|s| s.auto == Some(true));
     let mut work = text.to_string();
     if auto && mt::is_mostly_english(text) && text.chars().count() <= mt::MAX_CHARS {
-        if let Ok(Ok(v)) = tokio::time::timeout(line_wait(), mt::translate(app, id, text)).await {
+        if let Ok(Ok(v)) = tokio::time::timeout(line_wait(), mt::translate(app, id, raw)).await {
             if let Some(t) = v["translation"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
                 work = t.to_string();
             }

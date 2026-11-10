@@ -246,6 +246,7 @@ mod claude_review_api;
 pub mod release_triage_auto;
 pub mod changelog_translate;
 pub mod message_translate;
+pub mod message_pretranslate;
 pub mod claude_api;
 pub mod claude_api_balance;
 pub mod claude_console_balance;
