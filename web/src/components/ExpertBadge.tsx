@@ -3,6 +3,7 @@ import type { Bot } from '../api/types'
 import { roleShortLabel, roleTitle } from '../lib/expertSections'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { NoDispatchIcon } from './Icons'
 import './expertBadge.css'
 
 export function ExpertBadge() {
@@ -12,51 +13,6 @@ export function ExpertBadge() {
     <span className="project-expert-tag" title={t('專家模式專案')}>
       {t('專家模式').replace(/模式$| mode$/, '')}
     </span>
-  )
-}
-
-/** 專家模式側欄列上的管理者可用勾選框：直接勾、直接取消（使用者 2026-11-04：不用再開 ⋯ 選單）。 */
-export function ManagerUseCheckbox({
-  botId,
-  managerUse,
-  disabled,
-}: {
-  botId: string
-  managerUse: boolean
-  disabled?: boolean
-}) {
-  useT()
-  const isPatching = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
-  const [localOptimistic, setLocalOptimistic] = useState<boolean | null>(null)
-
-  const effectiveChecked = localOptimistic !== null ? localOptimistic : managerUse
-  const label = t('允許管理者派工')
-  const title = effectiveChecked ? t('關閉後管理者不能派工給它、不能啟動或重啟它') : t('開啟後管理者可派工、啟動或重啟此成員')
-
-  return (
-    <label
-      className="bot-manager-use-wrap"
-      onClick={(e) => e.stopPropagation()}
-      onMouseDown={(e) => e.stopPropagation()}
-      onKeyDown={(e) => e.stopPropagation()}
-    >
-      <input
-        type="checkbox"
-        className="bot-manager-use-checkbox"
-        aria-label={label}
-        title={title}
-        checked={effectiveChecked}
-        disabled={disabled || isPatching}
-        onChange={(e) => {
-          const next = e.target.checked
-          setLocalOptimistic(next)
-          void useStore
-            .getState()
-            .patchBot(botId, { manager_use: next })
-            .finally(() => setLocalOptimistic(null))
-        }}
-      />
-    </label>
   )
 }
 
@@ -91,26 +47,14 @@ export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
   return <span className="bot-deputy-tag" title={title}>{t('副')}</span>
 }
 
-/** 成員列上的「停派」：管理者不能派工、啟動或重啟它（Bot 本身沒停）。點一下送 `manager_use: true` 恢復。 */
-export function ExpertDisabledMark({ botId }: { botId: string }) {
+/** 停派狀態，不是開關。切換在列尾 `⋯`。 */
+export function ExpertDisabledMark() {
   useT()
-  const busy = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
-  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()
   return (
-    <button
-      type="button"
-      className="bot-manager-disabled-tag"
-      title={t('已停派：管理者不能派工、啟動或重啟它（Bot 本身沒停）。點一下恢復')}
-      disabled={busy}
-      onClick={(e) => {
-        stop(e)
-        void useStore.getState().patchBot(botId, { manager_use: true })
-      }}
-      onMouseDown={stop}
-      onKeyDown={stop}
-    >
-      {t('停派')}
-    </button>
+    <span className="bot-nodispatch bot-manager-disabled-tag" title={t('已停派：管理者不能派工、啟動或重啟它（Bot 本身沒停）。')}>
+      <NoDispatchIcon />
+      <span className="bot-nodispatch-label">{t('停派')}</span>
+    </span>
   )
 }
 

@@ -3,12 +3,12 @@
  * 用 capture 是因為收合鍵與 `⋯` 會 stopPropagation；會在抽屜裡開對話框的按鈕要留著抽屜，
  * 否則 `inert` 會把對話框一起關掉。
  *
- * 專家模式成員列左邊的「允許管理者派工」勾選框（`.bot-manager-use-wrap`）、群集列的停派晶片（`.bot-cluster-chip-wrap`）、
- * 成員列的「停派」按鈕（`.bot-manager-disabled-tag`）只切換派工權限，不是導覽，也要留在 STAY：否則點下去抽屜就收了（使用者 2026-11-04）。
+ * 群集列的整組停派選單（`.bot-cluster-chip-wrap`）不是導覽，要留在 STAY，否則點下去抽屜就收了。
+ * 成員的停派切換在列尾 `⋯`（`.bot-actions`，已在 STAY）。
  */
 export const DRAWER_NAV = '.bot-row, .project-head'
 export const DRAWER_STAY =
-  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions, .bot-manager-use-wrap, .bot-cluster-chip-wrap, .bot-manager-disabled-tag'
+  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions, .bot-cluster-chip-wrap'
 
 /** 這個點擊目標該不該收抽屜。 */
 export function drawerShouldClose(target: EventTarget | null): boolean {

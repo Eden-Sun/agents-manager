@@ -224,7 +224,7 @@ test('role 為空的 bot：沒有「未分配」；被排程綁的進排程區�
   assert.deepEqual((patch!.body as { role?: string }).role, 'executor')
 })
 
-test('停派成員：列上是可點的「停派」，點了送 manager_use=true 且不切換對話；沒有名稱淡化的 manager-disabled 樣式', async () => {
+test('停派成員：列淡化並標停派；恢復在 ⋯，不切換對話', async () => {
   const requests = fakeApi((req) => (req.method === 'PATCH' && req.path.endsWith('/bots/s1') ? { id: 's1', needs_restart: false } : undefined))
   useStore.setState({
     projects: [project('p-stop', 'expert')],
@@ -244,13 +244,16 @@ test('停派成員：列上是可點的「停派」，點了送 manager_use=true
   await mount(<Sidebar />)
   await settle()
   const row = document.querySelector<HTMLElement>('[data-bot-id="s1"]')!
-  const mark = row.querySelector<HTMLButtonElement>('button.bot-manager-disabled-tag')!
+  const mark = row.querySelector('.bot-manager-disabled-tag')!
+  assert.equal(mark.tagName, 'SPAN')
   assert.equal(mark.textContent?.trim(), '停派')
-  assert.equal(row.classList.contains('manager-disabled'), false)
-  await click(mark)
+  assert.ok(row.classList.contains('manager-disabled'))
+  await click(row.querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('.head-menu-item')].find((b) => b.textContent === '恢復派工')!)
   await settle()
   const patch = requests.find((r) => r.method === 'PATCH')
   assert.ok(patch, '送出 PATCH')
   assert.deepEqual(patch!.body, { manager_use: true })
-  assert.notEqual(useStore.getState().selectedBotId, 's1', '點停派不選取這一列')
+  assert.notEqual(useStore.getState().selectedBotId, 's1', '點選單不選取這一列')
 })

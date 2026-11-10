@@ -30,10 +30,14 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   const promoteBot = useStore((s) => s.promoteBot)
   const busyPromote = useStore((s) => Boolean(s.busy[`promote:${botId}`]))
   const removeBot = useStore((s) => s.removeBot)
+  const projectMode = useStore((s) => s.projects.find((p) => p.id === bot?.project_id)?.mode)
+  const busyPatch = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
   const [promoteOpen, setPromoteOpen] = useState(false)
   if (!bot) return null
+  const canPauseDispatch = projectMode === 'expert' && (bot.role === 'advisor' || bot.role === 'executor' || bot.role === 'specialist')
+  const paused = bot.manager_use === false
 
   return (
     <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
@@ -82,6 +86,18 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             onClick={() => setPromoteOpen(true)}
           >
             {t('升級成頂層…')}
+          </button>
+        ) : null}
+        {canPauseDispatch ? (
+          <button
+            type="button"
+            className="head-menu-item"
+            role="menuitem"
+            disabled={busyPatch}
+            title={paused ? t('恢復後管理者可派工、啟動或重啟此成員') : t('停派：管理者不能派工、啟動或重啟；Bot 本身不會停。')}
+            onClick={() => void useStore.getState().patchBot(botId, { manager_use: paused })}
+          >
+            {paused ? t('恢復派工') : t('停派')}
           </button>
         ) : null}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>

@@ -986,7 +986,7 @@ export class MockTransport implements Transport {
     // 群集示範：再加 2 顆同設定 haiku 執行者（連 exec1 共 3 顆）；其中一顆開著並在忙。
     const clusterIds = [exec1.id]
     for (const n of [2, 3]) {
-      const twin: MockBot = { ...exec1, id: ulid('bot'), name: `expert-haiku-${n}`, role_pending: false }
+      const twin: MockBot = { ...exec1, id: ulid('bot'), name: `expert-haiku-${n}`, role_pending: false, manager_use: false }
       this.bots.push(twin)
       clusterIds.push(twin.id)
     }

@@ -7,6 +7,7 @@ import { runningFast, runtimeIdentity } from '../lib/runtimeDrift'
 import { clusterStatCounts, clusterStatText } from '../lib/expertClusters'
 import { botLamp, identitiesOfHost, projectHostName, useStore } from '../store/store'
 import { IdentityBadge } from './IdentitiesPanel'
+import { MoreIcon, NoDispatchIcon } from './Icons'
 import { KindTag } from './KindTag'
 import { ModelTag } from './ModelTag'
 
@@ -29,9 +30,8 @@ function writeOpen(key: string, open: boolean) {
 }
 
 /**
- * 停派晶片＋選單：群集列上的整組操作（使用者 2026-11-10 改版）。
- * 有成員停派時常駐顯示「停派 n/m」；全部可派時「可派 m/m」只在桌面滑過列時出現（觸控常駐）。
- * 點開選單才動作，所以跟「展開群集」的按鈕分開；選單與晶片不冒泡，免得同時展開群集。
+ * 群集的停派計數是狀態，不是勾選框。整組切換在旁邊的 `⋯`。
+ * 有人停派才顯示「{n} 停派」；選單不冒泡，免得同時展開群集。
  */
 function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[]; on: number; busy: boolean }) {
   useT()
@@ -74,16 +74,26 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
         if (e.key === 'Escape') setOpen(false)
       }}
     >
+      {off > 0 ? (
+        <span
+          className="bot-cluster-pause"
+          title={t('{n} 顆停派，共 {total} 顆。管理者不能派工給它們；Bot 本身不會停。', { n: off, total })}
+        >
+          <NoDispatchIcon />
+          <span>{t('{n} 停派', { n: off })}</span>
+        </span>
+      ) : null}
       <button
         type="button"
-        className={`bot-cluster-chip${allOn ? ' is-all-on' : ''}`}
+        className="bot-cluster-menu"
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={t('整組停派或允許派工')}
         title={t('整組停派或允許派工')}
         disabled={busy}
         onClick={() => setOpen((v) => !v)}
       >
-        {allOn ? t('可派 {n}/{total}', { n: on, total }) : t('停派 {n}/{total}', { n: off, total })}
+        <MoreIcon />
       </button>
       {open ? (
         <span className="bot-unset-role-menu bot-cluster-chip-menu" role="menu">
@@ -146,9 +156,7 @@ export function ExpertClusterRow({
 
   return (
     <>
-      <div className="bot-row bot-cluster-row" role="listitem" data-cluster={name}>
-        {/* 左欄留空：跟成員列的勾選框同一欄，文字才對齊。整組操作在右邊的停派晶片。 */}
-        <span className="bot-cluster-gutter" aria-hidden="true" />
+      <div className={`bot-row bot-cluster-row${on === 0 && members.length > 0 ? ' manager-disabled' : ''}`} role="listitem" data-cluster={name}>
         <button
           type="button"
           className="bot-cluster-main"

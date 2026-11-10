@@ -29,61 +29,44 @@
   vertical-align: middle;
 }
 
-/* 停派標記（成員列）：可點，點了恢復派工。 */
-button.bot-manager-disabled-tag {
-  border: 0;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-button.bot-manager-disabled-tag:disabled {
-  cursor: progress;
-  opacity: 0.6;
-}
-
-.bot-manager-disabled-tag {
+/* 停派是狀態標記（icon＋字），不是開關。切換在 ⋯。 */
+.bot-nodispatch {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 2px;
   flex: none;
-  padding: 0 4px;
-  height: 16px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 500;
+  align-self: center;
+  height: 18px;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1;
+  white-space: nowrap;
   user-select: none;
-  vertical-align: middle;
-  background: color-mix(in srgb, var(--text-dim) 12%, var(--bg-panel));
-  color: var(--text-dim);
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
-/* 側欄管理者可用勾選框。群集列沿用這組尺寸；成員列的緊湊樣式在下面 .expert-member。 */
-.bot-manager-use-wrap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 0 2px;
+.bot-nodispatch svg {
+  width: 12px;
+  height: 12px;
 }
 
-.bot-manager-use-checkbox {
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.bot-manager-use-checkbox:disabled {
+/* 整列淡化，標記留在原色，避免跟可派的列掃在一起。 */
+.bot-row.manager-disabled .bot-gutter,
+.bot-row.manager-disabled .bot-kind-wrap,
+.bot-row.manager-disabled .bot-name,
+.bot-row.manager-disabled .bot-name-btn,
+.bot-row.manager-disabled .bot-sub,
+.bot-row.manager-disabled .bot-cluster-main {
   opacity: 0.5;
-  cursor: default;
 }
 
-/* 已勾的成員框是停用但要看得出勾著，不能跟請求中的半透明混在一起。 */
+.bot-row.manager-disabled {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
 
 /* 群集列跟成員列同高（使用者 2026-11-04：狀態併進標題後，群集列也只剩兩行）。 */
 .bot-row.bot-cluster-row {
@@ -170,22 +153,8 @@ button.bot-manager-disabled-tag:disabled {
   line-height: 18px;
 }
 
-.bot-row.expert-member .bot-manager-use-wrap {
-  align-self: center;
-  min-width: 26px;
-  min-height: 26px;
-  padding: 0;
-  cursor: pointer;
-}
-
-
-.bot-row.expert-member .bot-manager-use-checkbox {
-  width: 14px;
-  height: 14px;
-}
-
 @media (width <= 640px) {
-  /* 手機：⋯ 已是 40px，列高跟著約 44px。chip 回到 20px，勾選框的 label 觸控區 36px（字形仍 16px）。 */
+  /* 手機：⋯ 已是 40px，列高跟著約 44px。chip 回到 20px。 */
   .bot-row.expert-member {
     min-height: 44px;
     padding-top: 2px;
@@ -204,16 +173,6 @@ button.bot-manager-disabled-tag:disabled {
     line-height: 20px;
   }
 
-  .bot-row.expert-member .bot-manager-use-wrap {
-    min-width: 36px;
-    min-height: 36px;
-  }
-
-  .bot-row.expert-member .bot-manager-use-checkbox {
-    width: 16px;
-    height: 16px;
-  }
-
   .bot-row.bot-cluster-row {
     min-height: 44px;
   }
@@ -226,11 +185,6 @@ button.bot-manager-disabled-tag:disabled {
     min-height: 20px;
     font-size: 11px;
     line-height: 20px;
-  }
-
-  .bot-cluster-gutter {
-    min-width: 36px;
-    min-height: 36px;
   }
 
 }
@@ -337,31 +291,12 @@ button.bot-manager-disabled-tag:disabled {
   font-weight: 600;
 }
 
-/* 專家模式執行者群集列（ExpertClusterRow）：一列收一組同設定的執行者，成員展開縮排。
-   左欄跟 .expert-member 一樣：padding-left 4px、勾選框 26px（手機 36px），兩種列的框才在同一直線。 */
+/* 專家模式執行者群集列：不再留勾選欄，箭頭佔燈號欄，圖示跟單顆列同一條線。 */
 .bot-row.bot-cluster-row {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 2px 6px 2px 4px;
-}
-
-.bot-cluster-gutter {
-  flex: none;
-  align-self: center;
-  min-width: 26px;
-  min-height: 26px;
-  padding: 0;
-}
-
-
-/* 手機：上面的 26px 在檔案後面，會蓋掉前面 @media 的 36px 觸控區（勾選框太小會點到旁邊的列）。 */
-@media (width <= 640px) {
-  .bot-cluster-gutter {
-    min-width: 36px;
-    min-height: 36px;
-  }
-
 }
 
 .bot-cluster-main {
@@ -382,25 +317,16 @@ button.bot-manager-disabled-tag:disabled {
 
 .bot-cluster-caret {
   flex: none;
-  width: 10px;
+  width: 26px;
+  margin-right: -5px;
+  text-align: center;
   color: var(--text-faint);
   font-size: 10px;
 }
 
-/*
- * 有滑鼠的裝置（2026-11-10）：單顆執行者的勾選框是 hover 才浮出（不佔欄），左側只有燈號欄（26px）。
- * 群集列若也留勾選欄＋箭頭欄，圖示會比上下的單顆列多縮進約 50px，看起來像子項。這裡收掉留白欄，
- * 箭頭落在燈號欄的位置（寬 26、右邊負 5px），圖示與單顆列同一條線。觸控裝置維持常駐左欄，不動。
- */
-@media (hover: hover) {
-  .bot-cluster-gutter {
-    display: none;
-  }
-
+@media (width <= 640px) {
   .bot-cluster-caret {
-    width: 26px;
-    margin-right: -5px;
-    text-align: center;
+    width: 34px;
   }
 }
 
@@ -460,30 +386,6 @@ button.bot-manager-disabled-tag:disabled {
   border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
-/*
- * 有滑鼠的裝置：勾選框平常不佔欄位，滑過（或鍵盤焦點進到）那一列才浮在燈號上方（使用者 2026-11-04：
- * 「都用 checkbox 佔畫面，動作只要 hover 時 show」）。平常只看得到沒勾那幾列的「停用」標記。
- * 觸控裝置沒有 hover，維持原本常駐的左欄。
- */
-@media (hover: hover) {
-  .bot-row.expert-member > .bot-manager-use-wrap {
-    position: absolute;
-    top: 50%;
-    left: 4px;
-    z-index: 1;
-    transform: translateY(-50%);
-    border-radius: 4px;
-    background: inherit;
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .bot-row.expert-member:is(:hover, :focus-within) > .bot-manager-use-wrap {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-
 .bot-unset-role-wrap { position: relative; flex: none; }
 .bot-unset-role {
   padding: 0 4px;
@@ -512,35 +414,57 @@ button.bot-manager-disabled-tag:disabled {
 .bot-unset-role-menu button { padding: 5px 10px; border: 0; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }
 .bot-unset-role-menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }
 
-/* 群集停派晶片（ExpertClusterRow）：有停派時常駐「停派 n/m」；全部可派時「可派 m/m」只在桌面滑過列時出現，觸控常駐。 */
+/* 群集停派：計數是狀態；⋯ 才是整組切換，不蓋 kind 圖示。 */
 .bot-cluster-chip-wrap {
   position: relative;
   flex: none;
   display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
-.bot-cluster-chip {
-  height: 16px;
+.bot-cluster-pause {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
   padding: 0 6px;
-  border: 0;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
-  color: var(--text);
-  font-size: 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
+  color: var(--danger);
+  font-size: 11px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 1;
   white-space: nowrap;
+}
+
+.bot-cluster-pause svg {
+  width: 12px;
+  height: 12px;
+}
+
+.bot-cluster-menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
-.bot-cluster-chip:disabled {
-  opacity: 0.6;
-  cursor: progress;
+.bot-cluster-menu:hover,
+.bot-cluster-menu[aria-expanded='true'] {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
-.bot-cluster-chip.is-all-on {
-  background: transparent;
-  color: var(--text-dim);
+.bot-cluster-menu:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 .bot-cluster-chip-menu {
@@ -560,21 +484,9 @@ button.bot-manager-disabled-tag:disabled {
   color: var(--text-dim);
 }
 
-@media (hover: hover) {
-  .bot-row.bot-cluster-row .bot-cluster-chip.is-all-on {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .bot-row.bot-cluster-row:is(:hover, :focus-within) .bot-cluster-chip.is-all-on {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-
 @media (pointer: coarse) {
-  .bot-cluster-chip {
-    min-height: 36px;
-    padding: 0 10px;
+  .bot-cluster-menu {
+    width: 36px;
+    height: 36px;
   }
 }

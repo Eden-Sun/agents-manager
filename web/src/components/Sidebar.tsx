@@ -85,7 +85,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { ExpertClusterRow } from './ExpertClusterRow'
 import { groupClusterItems } from '../lib/expertClusters'
-import { ExpertBadge, UnsetRoleBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader, ManagerUseCheckbox } from './ExpertBadge'
+import { ExpertBadge, UnsetRoleBadge, ExpertDisabledMark, ExpertDeputyTag, ExpertRoleTag, ExpertSectionHeader } from './ExpertBadge'
 import { canReorderInExpertMode, groupExpertSections } from '../lib/expertSections'
 import { NewExpertBotForm } from './NewExpertBotForm'
 import { quotaIdentity, runningFast, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
@@ -316,7 +316,7 @@ function BotRowImpl({
     <div
       className={`bot-row${compact ? ' compact' : ''}${isExpertMemberWithManagerUse && !compact ? ' expert-member' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
-      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
+      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}${isExpertMemberWithManagerUse && bot.manager_use === false ? ' manager-disabled' : ''}`}
       // 不用 listbox option：option 內不准有按鈕，螢幕閱讀器會吃掉。
       role="listitem"
       aria-current={selected ? 'true' : undefined}
@@ -371,10 +371,6 @@ function BotRowImpl({
         onDrag(null)
       }}
     >
-      {/* 專家成員的「管理者可用」放在燈號左側；已勾不能在這裡取消。 */}
-      {isExpertMemberWithManagerUse ? (
-        <ManagerUseCheckbox botId={botId} managerUse={bot.manager_use !== false} />
-      ) : null}
       {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
@@ -464,7 +460,6 @@ function BotRowImpl({
             {isExpertProject && !compact && !bot.parent_bot_id && !bot.role && !bot.scheduled ? <UnsetRoleBadge botId={botId} /> : null}
             {/* 子 agent 不進角色分段，角色（管理者用 `agm role` 設的顧問等）只能在列上標，不然設了看不出來（2026-11-08 使用者）。 */}
             {isExpertProject && compact && bot.parent_bot_id && bot.role ? <ExpertRoleTag role={bot.role} /> : null}
-            {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark botId={botId} /> : null}
             {compact ? null : <PersonaMark persona={bot.persona} />}
             <ShareMark botId={botId} />
             {frozen ? <FrozenBadge title={NO_WARM_TEXT} /> : null}
@@ -485,6 +480,7 @@ function BotRowImpl({
               hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<BotStateText lamp={lamp} reason={blockedReason} compacting={compacting} />} />
             )}
           </BotNameField>
+          {isExpertProject && bot.manager_use === false ? <ExpertDisabledMark /> : null}
         </span>
         {hit ? (
           <span className="bot-hit" title={t('對話中有 {n} 則提到', { n: hit.hits })}>

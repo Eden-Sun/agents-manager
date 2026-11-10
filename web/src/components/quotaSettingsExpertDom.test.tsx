@@ -10,6 +10,7 @@ before(setupDom)
 after(teardownDom)
 
 let patchedBots: { id: string; input: PatchBotInput }[] = []
+const realPatchBot = useStore.getState().patchBot
 
 beforeEach(() => {
   fakeApi()
@@ -163,103 +164,73 @@ beforeEach(() => {
   } as never)
 })
 
-test('專家模式側欄：manager_use=false 的 bot 顯示「停派」按鈕，列名不淡化', async () => {
-  await mount(<Sidebar />)
-  await settle()
-
-  const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
-  assert.ok(advRow, '應找到 adv-1 的列')
-  const tag = advRow.querySelector('.bot-manager-disabled-tag')
-  assert.ok(tag, '應有停派按鈕')
-  assert.equal(tag.tagName, 'BUTTON')
-  assert.equal(tag.textContent, '停派')
-  assert.equal(advRow.classList.contains('manager-disabled'), false, '列名不淡化（不再有 manager-disabled class）')
-
-  const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
-  assert.equal(execRow.querySelector('.bot-manager-disabled-tag'), null, 'exec-1 啟用中不應有停派按鈕')
-  assert.equal(execRow.classList.contains('manager-disabled'), false, 'exec-1 啟用中不應有 manager-disabled class')
+afterEach(() => {
+  useStore.setState({ patchBot: realPatchBot })
 })
 
-test('側欄勾選框：只在專家模式 advisor/executor/specialist 出現，管理者與一般專案不出現', async () => {
+const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.head-menu-item')]
+
+test('專家模式側欄：manager_use=false 整列淡化，並有停派標記（不是按鈕、不蓋圖示）', async () => {
   await mount(<Sidebar />)
   await settle()
 
-  // 1. 專家模式的 advisor / executor / specialist 列應有勾選框
   const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
+  assert.ok(advRow.classList.contains('manager-disabled'))
+  const tag = advRow.querySelector('.bot-manager-disabled-tag')!
+  assert.equal(tag.tagName, 'SPAN')
+  assert.equal(tag.querySelector('.bot-nodispatch-label')?.textContent, '停派')
+  assert.ok(tag.querySelector('svg'), '停派標記要有禁用 icon')
+  assert.match(tag.getAttribute('title') ?? '', /管理者不能派工/)
+  assert.equal(advRow.querySelector('.bot-manager-use-checkbox'), null)
+  const kind = advRow.querySelector('.bot-kind-wrap')!
+  assert.equal((tag.compareDocumentPosition(kind) & Node.DOCUMENT_POSITION_PRECEDING) !== 0, true, '標記在 kind 圖示後面，不蓋住它')
+
   const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
-  const specRow = document.querySelector<HTMLElement>('[data-bot-id="b-spec"]')!
+  assert.equal(execRow.querySelector('.bot-manager-disabled-tag'), null)
+  assert.equal(execRow.classList.contains('manager-disabled'), false)
+})
 
-  const advBox = advRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')
-  const execBox = execRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')
-  const specBox = specRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')
+test('停派切換在 ⋯：advisor／executor／specialist 有，管理者與一般專案沒有', async () => {
+  await mount(<Sidebar />)
+  await settle()
+  assert.equal(document.querySelector('.bot-manager-use-checkbox'), null, '側欄不再有勾選框')
 
-  assert.ok(advBox, 'advisor 應有勾選框')
-  assert.ok(execBox, 'executor 應有勾選框')
-  assert.ok(specBox, 'specialist 應有勾選框')
-
-  assert.equal(advBox.checked, false, 'adv-1 manager_use 為 false')
-  assert.equal(execBox.checked, true, 'exec-1 manager_use 為 true')
-  assert.equal(specBox.checked, true, 'spec-1 manager_use 為 true')
-
-  const onTitle = '關閉後管理者不能派工給它、不能啟動或重啟它'
-  const offTitle = '開啟後管理者可派工、啟動或重啟此成員'
-  for (const box of [advBox, execBox, specBox]) {
-    assert.equal(box.disabled, false, '勾著或沒勾都能直接切')
-    assert.equal(box.getAttribute('aria-label'), '允許管理者派工')
-    assert.equal(box.classList.contains('is-locked'), false)
+  const open = async (id: string) => {
+    await click(document.querySelector<HTMLButtonElement>(`[data-bot-id="${id}"] .head-menu-btn`)!)
+    await settle()
+    return menuItems().map((e) => e.textContent ?? '')
   }
-  assert.equal(advBox.getAttribute('title'), offTitle)
-  assert.equal(execBox.getAttribute('title'), onTitle)
-
-  // 勾選框在燈號左側（gutter 之前），不在列尾。
-  const follows = (earlier: Element, later: Element) =>
-    (earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-  const advWrap = advRow.querySelector('.bot-manager-use-wrap')!
-  assert.equal(advWrap.tagName, 'LABEL')
-  assert.ok(follows(advWrap, advRow.querySelector('.bot-gutter')!))
-  assert.ok(follows(advWrap, advRow.querySelector('.bot-main')!))
-  assert.ok(follows(advWrap, advRow.querySelector('.bot-actions')!))
-  assert.ok(advRow.classList.contains('expert-member'))
-  assert.ok(execRow.classList.contains('expert-member'))
-
-  // 2. 管理者那一列不出現，也不套用成員列的緊湊 class
-  const mgrRow = document.querySelector<HTMLElement>('[data-bot-id="b-mgr"]')!
-  assert.equal(mgrRow.querySelector('.bot-manager-use-checkbox'), null, '管理者列不應有勾選框')
-  assert.equal(mgrRow.classList.contains('expert-member'), false)
-
-  // 3. 一般模式專案不出現
-  const plainRow = document.querySelector<HTMLElement>('[data-bot-id="b-plain"]')!
-  assert.equal(plainRow.querySelector('.bot-manager-use-checkbox'), null, '一般專案不應有勾選框')
-  assert.equal(plainRow.classList.contains('expert-member'), false)
+  assert.ok((await open('b-adv')).includes('恢復派工'))
+  assert.ok((await open('b-exec')).includes('停派'))
+  assert.ok((await open('b-spec')).includes('停派'))
+  assert.ok(!(await open('b-mgr')).some((x) => x === '停派' || x === '恢復派工'))
+  assert.ok(!(await open('b-plain')).some((x) => x === '停派' || x === '恢復派工'))
+  assert.ok(document.querySelector('[data-bot-id="b-exec"]')!.classList.contains('expert-member'))
+  assert.equal(document.querySelector('[data-bot-id="b-mgr"]')!.classList.contains('expert-member'), false)
 })
 
-test('側欄勾選框：勾上送 true、取消送 false；失敗還原', async () => {
+test('⋯ 的停派／恢復派工送 manager_use，不改選取；失敗不改狀態', async () => {
   await mount(<Sidebar />)
   await settle()
+  assert.equal(useStore.getState().selectedBotId, 'b-mgr')
 
-  const initialSelected = useStore.getState().selectedBotId
-  assert.equal(initialSelected, 'b-mgr')
-
-  const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
-  const execBox = execRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  await click(execBox)
+  await click(document.querySelector<HTMLButtonElement>('[data-bot-id="b-exec"] .head-menu-btn')!)
   await settle()
-  assert.equal(patchedBots.length, 1, '已勾的框直接取消')
+  await click(menuItems().find((b) => b.textContent === '停派')!)
+  await settle()
+  assert.equal(patchedBots.length, 1)
   assert.equal(patchedBots[0].id, 'b-exec')
   assert.equal(patchedBots[0].input.manager_use, false)
-  assert.equal(useStore.getState().selectedBotId, 'b-mgr', '點勾選框不應改變選取的 bot')
+  assert.equal(useStore.getState().selectedBotId, 'b-mgr')
   patchedBots.length = 0
 
-  const advRow = document.querySelector<HTMLElement>('[data-bot-id="b-adv"]')!
-  const advBox = advRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  await click(advBox)
+  await click(document.querySelector<HTMLButtonElement>('[data-bot-id="b-adv"] .head-menu-btn')!)
   await settle()
-
-  assert.equal(useStore.getState().selectedBotId, 'b-mgr', '點勾選框不應改變選取的 bot')
-  assert.equal(patchedBots.length, 1)
+  await click(menuItems().find((b) => b.textContent === '恢復派工')!)
+  await settle()
   assert.equal(patchedBots[0].id, 'b-adv')
   assert.equal(patchedBots[0].input.manager_use, true)
-  assert.equal(advBox.checked, true)
+  assert.equal(useStore.getState().selectedBotId, 'b-mgr')
 
   const origPatch = useStore.getState().patchBot
   useStore.setState({
@@ -270,28 +241,12 @@ test('側欄勾選框：勾上送 true、取消送 false；失敗還原', async 
     bots: useStore.getState().bots.map((b) => (b.id === 'b-spec' ? { ...b, manager_use: false } : b)),
   })
   await settle()
-
   const specRow = document.querySelector<HTMLElement>('[data-bot-id="b-spec"]')!
-  const specBox = specRow.querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.equal(specBox.checked, false)
-  assert.equal(specBox.disabled, false)
-
-  await click(specBox)
+  assert.ok(specRow.classList.contains('manager-disabled'))
+  await click(specRow.querySelector<HTMLButtonElement>('.head-menu-btn')!)
   await settle()
-
-  assert.equal(specBox.checked, false, 'PATCH 失敗應還原為未勾')
-  assert.equal(specBox.disabled, false)
+  await click(menuItems().find((b) => b.textContent === '恢復派工')!)
+  await settle()
+  assert.ok(specRow.classList.contains('manager-disabled'), 'PATCH 失敗，列維持停派')
   useStore.setState({ patchBot: origPatch })
-})
-
-test('bot 列 ⋯ 選單不再有「管理者可用」：側欄勾選框直接切就好', async () => {
-  await mount(<Sidebar />)
-  await settle()
-  const execRow = document.querySelector<HTMLElement>('[data-bot-id="b-exec"]')!
-  const menuBtn = execRow.querySelector<HTMLButtonElement>('.bot-actions .head-menu-btn')!
-  await click(menuBtn)
-  await settle()
-  const items = [...document.querySelectorAll<HTMLElement>('.head-menu-item')].map((e) => e.textContent ?? '')
-  assert.ok(items.length > 0, '選單有打開')
-  assert.ok(!items.some((x) => x.includes('管理者可用')), items.join('|'))
 })

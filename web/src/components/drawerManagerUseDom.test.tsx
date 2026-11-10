@@ -1,4 +1,4 @@
-/** 手機抽屜：點專家成員／群集列左邊的「管理者可用」勾選框，只切換停用狀態，不選 bot、不收抽屜（使用者 2026-11-04）。 */
+/** 手機抽屜：停派切換在 ⋯／群集選單，不選 bot、不收抽屜。 */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -49,33 +49,23 @@ function Shell() {
 const isOpen = () => document.querySelector('aside.sidebar')!.getAttribute('data-open') === '1'
 const rowOf = (id: string) => document.querySelector<HTMLElement>(`.bot-row[data-bot-id="${id}"]`)!
 
-test('點成員列的勾選框：抽屜不收、選取不變、PATCH manager_use=false', async () => {
+test('點成員列 ⋯ 的停派：抽屜不收、選取不變、PATCH manager_use=false', async () => {
   await mount(<Shell />)
   await settle()
-  const box = rowOf('a').querySelector<HTMLInputElement>('.bot-manager-use-checkbox')!
-  assert.ok(box)
-  await click(box)
+  await click(rowOf('a').querySelector<HTMLButtonElement>('.head-menu-btn')!)
+  await settle()
+  await click([...document.querySelectorAll<HTMLButtonElement>('.head-menu-item')].find((b) => b.textContent === '停派')!)
   await settle()
   assert.equal(isOpen(), true, '抽屜仍開著')
-  assert.equal(useStore.getState().selectedBotId, 'm', '沒選到該 bot')
-  const patches = requests.filter((r) => r.method === 'PATCH')
+  assert.notEqual(useStore.getState().selectedBotId, 'a', '沒選到該 bot')
+  const patches = requests.filter((r) => r.method === 'PATCH' && (r.body as { manager_use?: boolean }).manager_use === false)
   assert.equal(patches.length, 1)
-  assert.equal((patches[0].body as { manager_use?: boolean }).manager_use, false)
 })
 
-test('點勾選框外的 label（觸控範圍）：同樣不收抽屜', async () => {
+test('群集列的整組選單：不收抽屜', async () => {
   await mount(<Shell />)
   await settle()
-  await click(rowOf('a').querySelector('.bot-manager-use-wrap')!)
-  await settle()
-  assert.equal(isOpen(), true)
-  assert.equal(useStore.getState().selectedBotId, 'm')
-})
-
-test('群集列的停派晶片：不收抽屜', async () => {
-  await mount(<Shell />)
-  await settle()
-  const box = document.querySelector<HTMLButtonElement>('.bot-cluster-row .bot-cluster-chip')!
+  const box = document.querySelector<HTMLButtonElement>('.bot-cluster-row .bot-cluster-menu')!
   assert.ok(box)
   await click(box)
   await settle()

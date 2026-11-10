@@ -1,4 +1,4 @@
-/** 專家模式側欄執行者群集列：分組、計數、展開、整組勾選、半勾。 */
+/** 專家模式側欄執行者群集列：分組、計數、展開、整組停派。 */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
@@ -122,64 +122,73 @@ test('收合列也顯示 kind 圖示、身份、模型與強度（取第一顆�
   assert.equal(row.querySelector('.bot-cluster-count')!.getAttribute('title'), '共 3 顆：1 執行中 · 2 閒置')
 })
 
-test('展開：顯示成員且各自有勾選框，狀態記在 localStorage', async () => {
-  seed()
+test('展開：顯示成員，停派的有標記、沒有勾選框，狀態記在 localStorage', async () => {
+  seed([true, false, true])
   await mount(<Sidebar />)
   await settle()
   await click(clusterRow()!.querySelector('.bot-cluster-main')!)
   await settle()
   assert.deepEqual(['h1', 'h2', 'h3'].filter((id) => rowIds().includes(id)), ['h1', 'h2', 'h3'])
-  assert.equal(document.querySelectorAll('.bot-cluster-members .bot-manager-use-checkbox').length, 3)
+  assert.equal(document.querySelectorAll('.bot-cluster-members .bot-manager-use-checkbox').length, 0)
+  const paused = document.querySelector<HTMLElement>('.bot-cluster-members [data-bot-id="h2"]')!
+  assert.ok(paused.classList.contains('manager-disabled'))
+  assert.equal(paused.querySelector('.bot-nodispatch-label')?.textContent, '停派')
+  assert.equal(document.querySelector('.bot-cluster-members [data-bot-id="h1"] .bot-nodispatch'), null)
   assert.equal(window.localStorage.getItem('agm.expertCluster.p1.haiku'), '1')
 })
 
-const chip = () => clusterRow()!.querySelector<HTMLButtonElement>('.bot-cluster-chip')!
+const menuBtn = () => clusterRow()!.querySelector<HTMLButtonElement>('.bot-cluster-menu')!
 const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-cluster-chip-menu [role="menuitem"]')]
 const patchesOf = () => requests.filter((r) => r.method === 'PATCH')
 
-test('群集列沒有整組勾選框，左欄留空（跟成員列同寬）', async () => {
+test('群集列沒有勾選框，也沒有對齊用的空欄', async () => {
   seed()
   await mount(<Sidebar />)
   await settle()
   const row = clusterRow()!
   assert.equal(row.querySelector('.bot-manager-use-checkbox'), null)
-  assert.ok(row.firstElementChild?.classList.contains('bot-cluster-gutter'))
+  assert.equal(row.querySelector('.bot-cluster-gutter'), null)
+  assert.ok(row.querySelector('.bot-cluster-menu'))
 })
 
-test('全可用：晶片「可派 3/3」，全部可派時標 is-all-on（桌面只在 hover 顯示）', async () => {
+test('全可用：不顯示停派計數，整組選單仍在', async () => {
   seed([true, true, true])
   await mount(<Sidebar />)
   await settle()
-  assert.equal(chip().textContent, '可派 3/3')
-  assert.ok(chip().classList.contains('is-all-on'))
+  assert.equal(clusterRow()!.querySelector('.bot-cluster-pause'), null)
+  assert.equal(clusterRow()!.classList.contains('manager-disabled'), false)
+  assert.equal(menuBtn().getAttribute('aria-label'), '整組停派或允許派工')
 })
 
-test('混合：晶片「停派 1/3」，不 hover 也在 DOM 且沒有 is-all-on', async () => {
+test('混合：狀態「1 停派」，不是 n/m 勾選晶片', async () => {
   seed([true, false, true])
   await mount(<Sidebar />)
   await settle()
-  assert.equal(chip().textContent, '停派 1/3')
-  assert.ok(!chip().classList.contains('is-all-on'))
+  const pause = clusterRow()!.querySelector('.bot-cluster-pause')!
+  assert.equal(pause.textContent, '1 停派')
+  assert.match(pause.getAttribute('title') ?? '', /1 顆停派，共 3 顆/)
+  assert.equal(clusterRow()!.classList.contains('manager-disabled'), false)
 })
 
-test('全停派：晶片「停派 3/3」', async () => {
+test('全停派：狀態「3 停派」，整列淡化', async () => {
   seed([false, false, false])
   await mount(<Sidebar />)
   await settle()
-  assert.equal(chip().textContent, '停派 3/3')
+  assert.equal(clusterRow()!.querySelector('.bot-cluster-pause')!.textContent, '3 停派')
+  assert.ok(clusterRow()!.classList.contains('manager-disabled'))
 })
 
-test('點晶片只開選單：不送 PATCH、不展開群集；Esc 關閉', async () => {
+test('點整組選單只開選單：不送 PATCH、不展開群集；Esc 關閉', async () => {
   seed([true, false, true])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
-  assert.equal(chip().getAttribute('aria-expanded'), 'true')
+  assert.equal(menuBtn().getAttribute('aria-expanded'), 'true')
   assert.equal(menuItems().length, 2)
   assert.equal(patchesOf().length, 0)
   assert.equal(clusterRow()!.querySelector('.bot-cluster-main')!.getAttribute('aria-expanded'), 'false')
-  chip().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  menuBtn().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   await settle()
   assert.equal(document.querySelector('.bot-cluster-chip-menu'), null)
 })
@@ -188,7 +197,7 @@ test('混合時「全部允許派工」只 PATCH 停派那幾顆（manager_use=t
   seed([true, false, false])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   await click(menuItems()[0])
   await settle()
@@ -201,7 +210,7 @@ test('混合時「全部停派」只 PATCH 可派那幾顆（manager_use=false�
   seed([true, false, true])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   await click(menuItems()[1])
   await settle()
@@ -214,7 +223,7 @@ test('全可用時「全部允許派工」disabled', async () => {
   seed([true, true, true])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   assert.equal(menuItems()[0].disabled, true)
   assert.equal(menuItems()[1].disabled, false)
@@ -224,7 +233,7 @@ test('全停派時「全部停派」disabled', async () => {
   seed([false, false, false])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   assert.equal(menuItems()[0].disabled, false)
   assert.equal(menuItems()[1].disabled, true)
@@ -239,7 +248,7 @@ test('一顆 PATCH 失敗：跳錯誤「2 顆已更新，1 顆沒成功」；全
   })
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   await click(menuItems()[0])
   await settle()
@@ -252,7 +261,7 @@ test('全成功不跳錯誤通知', async () => {
   seed([false, false, false])
   await mount(<Sidebar />)
   await settle()
-  await click(chip())
+  await click(menuBtn())
   await settle()
   await click(menuItems()[0])
   await settle()
@@ -266,5 +275,5 @@ test('patch 進行中晶片 disabled', async () => {
   useStore.setState({ busy: { 'patch:h1': true } } as never)
   await mount(<Sidebar />)
   await settle()
-  assert.equal(chip().disabled, true)
+  assert.equal(menuBtn().disabled, true)
 })

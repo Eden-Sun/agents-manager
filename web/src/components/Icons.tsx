@@ -59,6 +59,16 @@ export function BotIcon() {
   )
 }
 
+/** 禁止派工：圓圈加斜線，跟其他 icon 同一套線寬。 */
+export function NoDispatchIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M4.3 11.7l7.4-7.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 /** 提示符加底線：終端的通用符號，跟其他 icon 同一套線寬。 */
 export function TerminalIcon() {
   return (
