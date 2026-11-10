@@ -19,6 +19,8 @@
 //!   不收自己，而且 watchdog 反正會把它們拉回來；
 //! * 主力 bot（`bots.is_primary`，側欄打星號的那幾顆）——2026-09-18 使用者：「主力 bot 超時也不先 kill」。
 //!   主力是使用者隨時會切回去的那幾顆，叫醒要等 `--resume` 起來，比省下的 RAM 更貴。
+//! * 專家模式的顧問（`bots.role = 'advisor'` 且所在專案 `mode = 'expert'`）——2026-11-10 使用者：「顧問（advisor）
+//!   該常駐，用完不關閉」。顧問是專案裡被問事情、隨時會來問的那顆，收起來等於每次都要重新叫醒，跟主力一樣不收。
 //! * 分享用（受限）bot（`shared_bots` 有一列，SPEC §20）——2026-10-04 使用者：「let AGM 不清除這類 bot」。
 //!   它是給外部 end user 隨時來用的，對方不知道它被收起來，也沒有人在旁邊按啟動。
 //! * 它開的子 agent 還在跑——父 bot 分完工就結束回合等回報，看起來是閒著，但子 agent 做完要
@@ -68,6 +70,8 @@ pub struct Cand {
     pub is_primary: bool,
     /// 分享用（受限）bot（`shared_bots` 有一列）：永遠不收。
     pub is_share_bot: bool,
+    /// 專家模式的顧問（`bots.role = 'advisor'` 且所在專案 `mode = 'expert'`）：永遠不收（2026-11-10 使用者裁示：顧問常駐，用完不關閉）。
+    pub is_expert_advisor: bool,
     /// `runs.state`。
     pub state: String,
     /// `runs.agent_status`：`idle` / `working` / `blocked` / `unknown`。
@@ -97,6 +101,7 @@ pub enum Skip {
     Supervisor,
     ShareBot,
     Primary,
+    ExpertAdvisor,
     TeamMember,
     Child,
     NotRunning,
@@ -118,6 +123,7 @@ impl Skip {
             Skip::Supervisor => "supervisor",
             Skip::ShareBot => "share_bot",
             Skip::Primary => "primary",
+            Skip::ExpertAdvisor => "expert_advisor",
             Skip::TeamMember => "team_member",
             Skip::Child => "child",
             Skip::NotRunning => "not_running",
@@ -146,6 +152,9 @@ pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     }
     if c.is_primary {
         return Err(Skip::Primary);
+    }
+    if c.is_expert_advisor {
+        return Err(Skip::ExpertAdvisor);
     }
     match c.managed_by.as_str() {
         "team" => return Err(Skip::TeamMember),
@@ -291,6 +300,9 @@ async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports
     }
     let host = db::bot_host(app.db(), &bot.id).await?;
     let seen = last_activity(app.db(), &bot.id, run).await?;
+    // 讀不到所在專案就回 Err（issue #123）：漏認的顧問會被當成一般 worker 收掉。
+    let is_expert_advisor = bot.role.as_deref() == Some("advisor")
+        && db::project(app.db(), &bot.project_id).await?.is_some_and(|p| p.mode == "expert");
     Ok(Some(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -299,6 +311,7 @@ async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports
         is_primary: bot.is_primary != 0,
         // 讀不到就回 Err（issue #123）：漏認的分享用 bot 會被當成一般 worker 收掉。
         is_share_bot: app.is_share_bot(&bot.id).await?,
+        is_expert_advisor,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(app.db(), &run.id).await?.is_some(),
@@ -941,6 +954,7 @@ mod tests {
             is_supervisor: false,
             is_primary: false,
             is_share_bot: false,
+            is_expert_advisor: false,
             state: "running".into(),
             agent_status: "idle".into(),
             turn_in_flight: false,
@@ -1023,6 +1037,42 @@ mod tests {
         sweep(&app, 90).await;
         assert!(db::active_run(&app.db, &b.id).await.unwrap().is_some(), "分享用 bot 的 run 不能被收掉");
         assert!(all_asleep(&app).await.get(&b.id).is_none(), "也不能被記成睡著");
+    }
+
+    /// 專家模式的顧問常駐（使用者 2026-11-10「顧問（advisor）該常駐，用完不關閉」）：不論閒多久都不收；
+    /// 同樣閒置的 executor 照收。
+    #[test]
+    fn an_expert_advisor_stays_resident_and_an_executor_does_not() {
+        let advisor = Cand { is_expert_advisor: true, idle_minutes: 600, ..cand() };
+        assert_eq!(decide(&advisor, 90), Err(Skip::ExpertAdvisor));
+        assert_eq!(Skip::ExpertAdvisor.code(), "expert_advisor");
+        let executor = Cand { idle_minutes: 600, ..cand() };
+        assert_eq!(decide(&executor, 90), Ok(()));
+    }
+
+    /// 整輪 sweep：專家模式的顧問（role=advisor）留著 run、不記睡著；同一專案裡閒置的 executor 照收。
+    #[tokio::test]
+    async fn the_sweep_keeps_an_expert_advisor_awake_and_still_collects_an_idle_executor() {
+        let _g = SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let (advisor, _) = idle_bot(&env, "fb-scan").await;
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor).execute(&app.db).await.unwrap();
+        let (executor, _) = idle_bot(&env, "fb-work").await;
+        sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&executor).execute(&app.db).await.unwrap();
+        let _shell = provably_no_background_work(&env, &executor);
+
+        let cands = candidates(&app).await.unwrap();
+        let a = cands.iter().find(|c| c.bot_id == advisor).expect("顧問在名單裡");
+        assert!(a.is_expert_advisor);
+        assert_eq!(decide(a, 90), Err(Skip::ExpertAdvisor));
+        let e = cands.iter().find(|c| c.bot_id == executor).expect("executor 在名單裡");
+        assert!(!e.is_expert_advisor);
+
+        sweep(&app, 90).await;
+        assert_left_running(&app, &advisor, "專家顧問常駐").await;
+        assert!(asleep(&app, &executor).await.is_some(), "閒置的 executor 照收");
     }
 
     /// 回合結束不等於工作結束：pane 底下還有背景 shell／建置在跑就不收。

@@ -3265,6 +3265,7 @@ max_input_chars={n}
   | 是總管自己那幾顆（`supervisors.bot_id` 或 `supervisor_roles` 的 patrol／responder） | `supervisor` | 巡邏的人不收自己，watchdog 反正會把它們拉回來 |
   | 分享用 bot（受限或信任分享，`shared_bots` 有一列，§20） | `share_bot` | 2026-10-04 使用者：「let AGM 不清除這類 bot」。外部 end user 隨時會來，不知道它被收起來、旁邊也沒人按啟動 |
   | 主力 bot（`bots.is_primary`，側欄打星號的） | `primary` | 2026-09-18 使用者：「主力 bot 超時也不先 kill」。主力是隨時會切回去的那幾顆，叫醒要等 `--resume`，比省下的 RAM 更貴 |
+  | 專家模式的顧問（`bots.role = 'advisor'` 且所在專案 `mode = 'expert'`） | `expert_advisor` | 2026-11-10 使用者：「顧問（advisor）該常駐，用完不關閉」。顧問是專案裡隨時會來問的那顆，收起來等於每次都要重新叫醒。executor 等其他 role 照常依下面的條件收 |
   | `managed_by = 'team'` | `team_member` | 成員的 run 由 team 排程記著 |
   | `managed_by = 'child'` | `child` | pane 是父 agent 開的，daemon 起不回來（§6.5a），收掉就真的沒了 |
   | `runs.state != 'running'` | `not_running` | 還在啟動或關閉中 |
