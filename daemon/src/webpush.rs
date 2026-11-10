@@ -130,7 +130,7 @@ fn load_subs(dir: &Path) -> Vec<Subscription> {
     std::fs::read_to_string(subs_path(dir)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
-fn save_subs(dir: &Path, subs: &[Subscription]) -> std::io::Result<()> {
+pub(crate) fn save_subs(dir: &Path, subs: &[Subscription]) -> std::io::Result<()> {
     write_private(&subs_path(dir), serde_json::to_string(subs)?.as_bytes())
 }
 
@@ -407,8 +407,14 @@ fn settings_json(dir: &Path) -> Value {
         "updates": setting_enabled(dir, "updates"),
         "reset_credits": setting_enabled(dir, "reset_credits"),
         "auth": setting_enabled(dir, "auth"),
-        "quota": setting_enabled(dir, "quota")
+        "quota": setting_enabled(dir, "quota"),
+        "schedules": setting_enabled(dir, "schedules")
     })
+}
+
+/// 「排程等不到 bot 超時推播」開關；沒有檔案或讀不懂＝開（預設開）。
+pub(crate) fn schedules_enabled(dir: &Path) -> bool {
+    setting_enabled(dir, "schedules")
 }
 
 /// 「被登出／憑證失效時推播」開關；沒有檔案或讀不懂＝開（預設開）。
@@ -1505,6 +1511,8 @@ pub(crate) struct SettingsInput {
     pub auth: Option<bool>,
     #[serde(default)]
     pub quota: Option<bool>,
+    #[serde(default)]
+    pub schedules: Option<bool>,
 }
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
@@ -1519,6 +1527,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
         ("reset_credits", input.reset_credits),
         ("auth", input.auth),
         ("quota", input.quota),
+        ("schedules", input.schedules),
     ] {
         if let Some(v) = v {
             cur[k] = json!(v);
@@ -1548,8 +1557,78 @@ pub(crate) async fn post_presence(Extension(p): Extension<RequestPrincipal>, Jso
     Ok(Json(json!({"ok": true})))
 }
 
+// ---------- 排程等不到 bot 通知 ----------
+
+static SCHED_WAIT_NOTIFIED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(test)]
-mod tests {
+pub(crate) fn clear_sched_wait_notified() {
+    let mut g = SCHED_WAIT_NOTIFIED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(set) = g.as_mut() {
+        set.clear();
+    }
+}
+
+/// 排程等不到 bot 通知內容：「S<n> <名稱>：綁定的 bot 不可用（原因）」。
+pub(crate) fn schedule_bot_unavailable_payload(
+    code: &str,
+    name: &str,
+    reason: &str,
+    project_id: &str,
+    schedule_id: &str,
+    occurrence_id: &str,
+) -> Value {
+    let title = [code, name].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    json!({
+        "title": title,
+        "body": format!("綁定的 bot 不可用（{reason}）"),
+        "tag": format!("schedule:{occurrence_id}"),
+        "url": format!("/?schedule={schedule_id}&project={project_id}&occurrence={occurrence_id}"),
+    })
+}
+
+/// 排程等待超過合理時間且 bot 不可用時觸發：每個 occurrence 只推一次、尊重推播開關。
+pub(crate) fn spawn_schedule_bot_unavailable_push(
+    app: &Arc<App>,
+    code: &str,
+    name: &str,
+    reason: &str,
+    project_id: &str,
+    schedule_id: &str,
+    occurrence_id: &str,
+) {
+    {
+        let mut g = SCHED_WAIT_NOTIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        let set = g.get_or_insert_with(Default::default);
+        if set.contains(occurrence_id) {
+            return;
+        }
+        set.insert(occurrence_id.to_string());
+    }
+
+    if !schedules_enabled(&app.data_dir) {
+        return;
+    }
+
+    let app = app.clone();
+    let payload = schedule_bot_unavailable_payload(code, name, reason, project_id, schedule_id, occurrence_id);
+    tokio::spawn(async move {
+        if load_subs(&app.data_dir).is_empty() {
+            return;
+        }
+        let subject = app.cfg.get().await.server.push_subject.clone();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(60),
+            broadcast(&app.data_dir, subject.as_deref(), &payload),
+        )
+        .await;
+    });
+}
+
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1576,7 +1655,7 @@ mod tests {
         pt
     }
 
-    fn fresh_sub(endpoint: &str) -> (Subscription, p256::SecretKey, [u8; 16]) {
+    pub(crate) fn fresh_sub(endpoint: &str) -> (Subscription, p256::SecretKey, [u8; 16]) {
         let sk = p256::SecretKey::random(&mut rand::rngs::OsRng);
         let mut auth = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut auth);
@@ -2085,6 +2164,55 @@ mod tests {
         set_test_sender(None);
     }
 
+    #[test]
+    fn schedule_bot_unavailable_payload_format() {
+        let p = schedule_bot_unavailable_payload("S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ1");
+        assert_eq!(p["title"], "S5 每日報告");
+        assert_eq!(p["body"], "綁定的 bot 不可用（bot 已刪除）");
+        assert_eq!(p["tag"], "schedule:occ1");
+        assert_eq!(p["url"], "/?schedule=sch1&project=p1&occurrence=occ1");
+    }
+
+    #[tokio::test]
+    async fn schedule_bot_unavailable_pushes_once_and_respects_switch() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_sched_wait_notified();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/t").0]).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_sub: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+
+        // 第一次呼叫：正常推播
+        spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ1");
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("應收到推播").unwrap();
+        assert_eq!(got["title"], "S5 每日報告");
+        assert_eq!(got["body"], "綁定的 bot 不可用（bot 已刪除）");
+
+        // 同 occurrence_id 第二次呼叫：去重，不重複推播
+        spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ1");
+        assert!(rx.try_recv().is_err(), "同 occurrence 不重複推播");
+
+        // 另一個 occurrence_id 但開關關閉：不推播
+        write_private(&settings_path(&app.data_dir), br#"{"schedules":false}"#).unwrap();
+        spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ2");
+        assert!(rx.try_recv().is_err(), "開關關閉不推播");
+
+        // 開關開啟：新 occurrence 推播
+        write_private(&settings_path(&app.data_dir), br#"{"schedules":true}"#).unwrap();
+        spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ3");
+        let got3 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("開關開啟應收到推播").unwrap();
+        assert_eq!(got3["title"], "S5 每日報告");
+        assert_eq!(got3["body"], "綁定的 bot 不可用（bot 已刪除）");
+
+        set_test_sender(None);
+        clear_sched_wait_notified();
+    }
+
+
     #[tokio::test]
     async fn host_and_bot_incident_push_dedup_and_recovery() {
         let _g = SENDER_TESTS.lock().await;
@@ -2213,6 +2341,7 @@ mod tests {
         assert_eq!(s["main_bots"], true, "預設開");
         assert_eq!(s["other_bots"], true, "預設開");
         assert_eq!(s["hosts"], true, "預設開");
+        assert_eq!(s["schedules"], true, "預設開");
         put_settings(State(app.clone()), user(), Json(SettingsInput { main_bots: Some(false), ..Default::default() })).await.unwrap();
         assert_eq!(get_settings(State(app.clone()), user()).await.unwrap().0["main_bots"], false);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));

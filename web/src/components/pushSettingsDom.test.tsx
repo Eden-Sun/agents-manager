@@ -75,7 +75,7 @@ test('設定頁：支援且已訂閱時顯示「已啟用」，可送測試通�
 test('設定頁：主力 bot、其他 bot、更新、重置券、被登出與撞額度推播開關', async () => {
   const puts: unknown[] = []
   fakeApi((req) => {
-    if (req.method === 'GET' && req.path.endsWith('/push/settings')) return { main_bots: true, other_bots: true, updates: true, reset_credits: true, auth: true, quota: true }
+    if (req.method === 'GET' && req.path.endsWith('/push/settings')) return { main_bots: true, other_bots: true, updates: true, reset_credits: true, auth: true, quota: true, hosts: true, schedules: true }
     if (req.method === 'PUT' && req.path.endsWith('/push/settings')) {
       puts.push(req.body)
       return req.body
@@ -85,13 +85,15 @@ test('設定頁：主力 bot、其他 bot、更新、重置券、被登出與撞
   await mount(<PushSettings />)
   await settle()
   const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
-  assert.equal(checkboxes.length, 6, '應有六個推播開關')
+  assert.equal(checkboxes.length, 8, '應有八個推播開關')
   assert.equal(checkboxes[0].checked, true)
   assert.equal(checkboxes[1].checked, true)
   assert.equal(checkboxes[2].checked, true)
   assert.equal(checkboxes[3].checked, true)
   assert.equal(checkboxes[4].checked, true)
   assert.equal(checkboxes[5].checked, true)
+  assert.equal(checkboxes[6].checked, true)
+  assert.equal(checkboxes[7].checked, true)
   await click(checkboxes[1])
   await settle()
   assert.deepEqual(puts, [{ other_bots: false }])

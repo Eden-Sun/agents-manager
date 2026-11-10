@@ -38,6 +38,7 @@ export interface PushSettingsValue {
   reset_credits: boolean
   auth: boolean
   quota: boolean
+  schedules: boolean
 }
 
 export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<PushSettingsValue> {

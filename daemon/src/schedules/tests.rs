@@ -1215,3 +1215,205 @@ async fn duration_sums_attempts_and_reports_running_since() {
     assert_eq!(v["attempts"].as_array().unwrap().iter().map(|a| a["duration_ms"].as_i64().unwrap()).collect::<Vec<_>>(), vec![60_000, 30_000]);
     assert!(v["running_since"].is_null());
 }
+
+#[test]
+fn is_bot_unavailable_overdue_checks_5_mins_and_slot_range() {
+    // 1. 固定時間排程（無隨機區間）：等 5 分鐘
+    let fixed_spec = r#"{"mode":"daily","time":"09:00","slots":[]}"#;
+    let sched_at = "2026-11-10T09:00:00Z";
+    // 4 分鐘後：未逾時
+    assert!(!runner::is_bot_unavailable_overdue(sched_at, fixed_spec, "UTC", "2026-11-10T09:04:59Z"));
+    // 5 分鐘後：逾時
+    assert!(runner::is_bot_unavailable_overdue(sched_at, fixed_spec, "UTC", "2026-11-10T09:05:00Z"));
+
+    // 2. 隨機區間排程（08:00–09:00，抽到 08:10）：區間在 09:00 結束
+    let range_spec = r#"{"mode":"daily","time":"08:00","slots":[{"time":"08:00","label":"早班","until":"09:00"}]}"#;
+    let drawn_at = "2026-11-10T08:10:00Z";
+    // 08:15（滿 5 分鐘但區間未過）：未逾時
+    assert!(!runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T08:15:00Z"));
+    // 08:59（區間未過）：未逾時
+    assert!(!runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T08:59:59Z"));
+    // 09:00（過區間且已超過 5 分鐘）：逾時
+    assert!(runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T09:00:00Z"));
+
+    // 3. 隨機區間排程（08:58–09:00，抽到 08:59）：區間 09:00 結束，但 5 分鐘要等到 09:04
+    let range_short = r#"{"mode":"daily","time":"08:58","slots":[{"time":"08:58","label":"短區間","until":"09:00"}]}"#;
+    let drawn_short = "2026-11-10T08:59:00Z";
+    // 09:01（區間過了，但未滿 5 分鐘）：未逾時
+    assert!(!runner::is_bot_unavailable_overdue(drawn_short, range_short, "UTC", "2026-11-10T09:01:00Z"));
+    // 09:04（滿 5 分鐘且過區間）：逾時
+    assert!(runner::is_bot_unavailable_overdue(drawn_short, range_short, "UTC", "2026-11-10T09:04:00Z"));
+}
+
+#[tokio::test]
+async fn bot_unavailable_reason_diagnostics() {
+    let (e, bot) = setup().await;
+    // 正常狀態（但不是執行專案下的 bot）
+    assert_eq!(runner::bot_unavailable_reason(&e.app.db, &bot.id, "non-existent-proj").await, "bot 已換專案");
+
+    // 不存在的 bot
+    assert_eq!(runner::bot_unavailable_reason(&e.app.db, "fake-bot-id", &e.project_id).await, "bot 不存在");
+
+    // 已刪除的 bot
+    let deleted_bot = testing::claude_bot(&e.app, &e.project_id, "del-bot").await;
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&deleted_bot.id).execute(&e.app.db).await.unwrap();
+    assert_eq!(runner::bot_unavailable_reason(&e.app.db, &deleted_bot.id, &e.project_id).await, "bot 已刪除");
+
+    // 子代理
+    let child_bot = testing::claude_bot(&e.app, &e.project_id, "child-bot").await;
+    sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&bot.id).bind(&child_bot.id).execute(&e.app.db).await.unwrap();
+    assert_eq!(runner::bot_unavailable_reason(&e.app.db, &child_bot.id, &e.project_id).await, "bot 為子代理");
+}
+
+async fn insert_occ(pool: &sqlx::SqlitePool, occ: &Occurrence) {
+    let mut tx = db::begin_write(pool).await.unwrap();
+    store::insert_occurrence_tx(&mut tx, occ).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
+    crate::webpush::clear_sched_wait_notified();
+    let (e, bot) = setup().await;
+    let app = e.app.clone();
+    crate::webpush::save_subs(&app.data_dir, &[crate::webpush::tests::fresh_sub("https://push.example/t").0]).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    crate::webpush::set_test_sender(Some(std::sync::Arc::new(move |_sub: crate::webpush::Subscription, body: Vec<u8>| {
+        let _ = tx.send(serde_json::from_slice(&body).unwrap());
+        Box::pin(async { crate::webpush::SendOutcome::Sent })
+    })));
+
+    // 把 bot 標記為已刪除，使 eligible_bot_tx 回傳 None
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
+
+    // 1. 未逾時的 occurrence（scheduled_for 是 10 分鐘後）：enqueue 回傳 false，不推播
+    let s_future = schedule(&app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_future.id).execute(&app.db).await.unwrap();
+    let future_occ_id = db::ulid();
+    let future_time = db::iso_in(600);
+    let future_occ = Occurrence {
+        id: future_occ_id.clone(),
+        schedule_id: s_future.id.clone(),
+        source: "scheduled".into(),
+        scheduled_for: future_time.clone(),
+        generation: s_future.generation,
+        bot_id: bot.id.clone(),
+        prompt: s_future.prompt.clone(),
+        slot_label: None,
+        client_request_id: None,
+        status: "pending".into(),
+        waiting_reason: None,
+        merged_count: 0,
+        conversation_id: None,
+        turn_id: None,
+        error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        created_at: future_time.clone(),
+        updated_at: future_time,
+    };
+    insert_occ(&app.db, &future_occ).await;
+
+    assert!(!runner::enqueue(&app, &future_occ_id).await.unwrap());
+    assert!(rx.try_recv().is_err(), "未逾時不推播");
+
+    // 2. 逾時的 occurrence（scheduled_for 是 10 分鐘前）：推播一次
+    let s_overdue = schedule(&app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_overdue.id).execute(&app.db).await.unwrap();
+    let s_overdue = store::get_schedule(&app.db, &s_overdue.id).await.unwrap().unwrap();
+    let overdue_occ_id = db::ulid();
+    let past_time = db::iso_in(-600);
+    let overdue_occ = Occurrence {
+        id: overdue_occ_id.clone(),
+        schedule_id: s_overdue.id.clone(),
+        source: "scheduled".into(),
+        scheduled_for: past_time.clone(),
+        generation: s_overdue.generation,
+        bot_id: bot.id.clone(),
+        prompt: s_overdue.prompt.clone(),
+        slot_label: None,
+        client_request_id: None,
+        status: "pending".into(),
+        waiting_reason: None,
+        merged_count: 0,
+        conversation_id: None,
+        turn_id: None,
+        error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        created_at: past_time.clone(),
+        updated_at: past_time,
+    };
+    insert_occ(&app.db, &overdue_occ).await;
+
+    assert!(!runner::enqueue(&app, &overdue_occ_id).await.unwrap());
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.expect("逾時應收到推播").unwrap();
+    assert_eq!(got["title"], format!("{} 排程", s_overdue.code()));
+    assert_eq!(got["body"], "綁定的 bot 不可用（bot 已刪除）");
+    assert_eq!(got["tag"], format!("schedule:{overdue_occ_id}"));
+
+    // 同一筆 occurrence 再次 enqueue（模擬下一輪 tick）：去重，不重複推播
+    assert!(!runner::enqueue(&app, &overdue_occ_id).await.unwrap());
+    assert!(rx.try_recv().is_err(), "同 occurrence 不重複推播");
+
+    // 3. 測試 notify == 'none' 的排程：即使逾時也不推播
+    let s_none = schedule(&app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET notify = 'none' WHERE id = ?").bind(&s_none.id).execute(&app.db).await.unwrap();
+    let none_occ_id = db::ulid();
+    let past_none = db::iso_in(-600);
+    let none_occ = Occurrence {
+        id: none_occ_id.clone(),
+        schedule_id: s_none.id.clone(),
+        source: "scheduled".into(),
+        scheduled_for: past_none.clone(),
+        generation: s_none.generation,
+        bot_id: bot.id.clone(),
+        prompt: s_none.prompt.clone(),
+        slot_label: None,
+        client_request_id: None,
+        status: "pending".into(),
+        waiting_reason: None,
+        merged_count: 0,
+        conversation_id: None,
+        turn_id: None,
+        error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        created_at: past_none.clone(),
+        updated_at: past_none,
+    };
+    insert_occ(&app.db, &none_occ).await;
+
+    assert!(!runner::enqueue(&app, &none_occ_id).await.unwrap());
+    assert!(rx.try_recv().is_err(), "notify 為 none 時不推播");
+
+    // 4. 測試 dry_run source：即使逾時也不推播
+    let s_dry = schedule(&app, &e.project_id, &bot.id).await;
+    sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_dry.id).execute(&app.db).await.unwrap();
+    let dry_occ_id = db::ulid();
+    let past_dry = db::iso_in(-600);
+    let dry_occ = Occurrence {
+        id: dry_occ_id.clone(),
+        schedule_id: s_dry.id.clone(),
+        source: "dry_run".into(),
+        scheduled_for: past_dry.clone(),
+        generation: s_dry.generation,
+        bot_id: bot.id.clone(),
+        prompt: s_dry.prompt.clone(),
+        slot_label: None,
+        client_request_id: None,
+        status: "pending".into(),
+        waiting_reason: None,
+        merged_count: 0,
+        conversation_id: None,
+        turn_id: None,
+        error: None,
+        outcome: None, outcome_summary: None, reply_message_id: None, attempt_no: 1, next_retry_at: None, first_started_at: None, attempt_started_at: None,
+        created_at: past_dry.clone(),
+        updated_at: past_dry,
+    };
+    insert_occ(&app.db, &dry_occ).await;
+
+    assert!(!runner::enqueue(&app, &dry_occ_id).await.unwrap());
+    assert!(rx.try_recv().is_err(), "dry_run 不推播");
+
+    crate::webpush::set_test_sender(None);
+    crate::webpush::clear_sched_wait_notified();
+}

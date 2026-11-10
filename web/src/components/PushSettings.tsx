@@ -11,7 +11,7 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true })
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true, schedules: true })
   useEffect(() => {
     getPushSettings().then((s) => setOpts((prev) => ({ ...prev, ...s })), () => {})
   }, [])
@@ -95,6 +95,7 @@ export function PushSettings() {
         ['auth', t('被登出／憑證失效時推播')],
         ['quota', t('撞額度上限時推播')],
         ['hosts', t('遠端主機斷線與 bot 停止推播')],
+        ['schedules', t('排程等不到 bot 超時推播')],
       ] as const).map(([key, label]) => (
         <label key={key} className="push-settings-note" style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
           <input type="checkbox" checked={opts[key] ?? true} onChange={(e) => toggle(key, e.target.checked)} /> {label}

@@ -5824,7 +5824,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - **通知**：只靠 WS 事件（見 API.md）。狀態轉移由 `notified` 去重，不靠前端記數。
 - **未完成（待 lifecycle 補）**：maintenance 窗口的入口閘（`prompt::maintenance_refusal` 目前是 `pub(super)`，排程入口還沒接）；restart 後 `awaits_start` 的 kick 門檻依 lifecycle 的 claim gate 與 start admission 檢查。
 
-排程綁定的 Bot 不可用時保留一筆待處理 occurrence 並標記 `bot_unavailable`；批次改綁僅允許同專案合格 Bot，交易內檢查未完成執行，改綁後撤回這筆等待項並保留下一次時間。
+排程綁定的 Bot 不可用時保留一筆待處理 occurrence 並標記 `bot_unavailable`；等待超過合理時間（例 5 分鐘，或已過排定時間＋隨機區間）就推播一則「S<n> <名稱>：綁定的 bot 不可用（原因）」，每個 occurrence 只推一次；尊重該排程的 notify 設定（none 不推）與推播設定（`schedules` 開關，預設開）。批次改綁僅允許同專案合格 Bot，交易內檢查未完成執行，改綁後撤回這筆等待項並保留下一次時間。
 
 試跑以 `dry_run` source 和獨立冪等鍵記帳，daemon 加固定前言；已有未完成執行時拒絕混併，到期遇試跑則待其結束後處理。試跑失敗不發排程失敗通知，成功時依 `clear_after` 清對話。前言不是沙箱，不能保證 Bot 沒有實際操作。
 

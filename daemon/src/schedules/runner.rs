@@ -290,6 +290,22 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
             .bind(&now).bind(occurrence_id).execute(&mut *tx).await?.rows_affected() > 0;
         tx.commit().await?;
         if changed { app.emit("schedules_changed", json!({"project_id": sched.project_id, "id": sched.id})).await; }
+
+        if occ.source != "dry_run" && sched.notify != "none" {
+            if is_bot_unavailable_overdue(&occ.scheduled_for, &sched.spec_json, &sched.tz, &now) {
+                let reason = bot_unavailable_reason(&app.db, &occ.bot_id, &sched.project_id).await;
+                crate::webpush::spawn_schedule_bot_unavailable_push(
+                    app,
+                    &sched.code(),
+                    &sched.name,
+                    &reason,
+                    &sched.project_id,
+                    &sched.id,
+                    occurrence_id,
+                );
+            }
+        }
+
         return Ok(false);
     };
     // 送出時才展開變數（時間用這次觸發的時刻、排程時區）；occ.prompt 留原樣。
@@ -443,4 +459,103 @@ pub async fn eligible_bot_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, bot_i
 pub async fn eligible_bot(pool: &sqlx::SqlitePool, bot_id: &str, project_id: &str) -> Result<bool> {
     let row: Option<(String, String)> = sqlx::query_as(ELIGIBLE_BOT_SQL).bind(bot_id).fetch_optional(pool).await?;
     Ok(row.is_some_and(|(_, p)| p == project_id))
+}
+
+/// 判斷排程等待 bot 是否超過合理時間（例 5 分鐘，或已過排定時間＋隨機區間）。
+pub(crate) fn is_bot_unavailable_overdue(
+    scheduled_for: &str,
+    spec_json: &str,
+    tz: &str,
+    now: &str,
+) -> bool {
+    let Ok(sched_dt) = DateTime::parse_from_rfc3339(scheduled_for).map(|t| t.with_timezone(&Utc)) else {
+        return false;
+    };
+    let Ok(now_dt) = DateTime::parse_from_rfc3339(now).map(|t| t.with_timezone(&Utc)) else {
+        return false;
+    };
+
+    let five_mins = sched_dt + Duration::minutes(5);
+    let window_end = serde_json::from_str::<super::time::Spec>(spec_json)
+        .ok()
+        .and_then(|spec| super::time::slot_at(&spec, tz, sched_dt).ok().flatten())
+        .map(|(_, end)| end);
+
+    let wait_limit = match window_end {
+        Some(hi) => five_mins.max(hi),
+        None => five_mins,
+    };
+
+    now_dt >= wait_limit
+}
+
+/// 診斷排程綁定 Bot 不可用的具體原因，供推播通知使用。
+pub async fn bot_unavailable_reason(
+    pool: &sqlx::SqlitePool,
+    bot_id: &str,
+    project_id: &str,
+) -> String {
+    let bot_row: Option<(Option<String>, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT deleted_at, project_id, managed_by, parent_bot_id FROM bots WHERE id = ?",
+    )
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((deleted_at, b_proj, managed_by, parent_bot_id)) = bot_row else {
+        return "bot 不存在".into();
+    };
+    if deleted_at.is_some() {
+        return "bot 已刪除".into();
+    }
+    if b_proj != project_id {
+        return "bot 已換專案".into();
+    }
+    if parent_bot_id.is_some() {
+        return "bot 為子代理".into();
+    }
+    if managed_by != "user" {
+        return "bot 非使用者管理".into();
+    }
+
+    let proj_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT deleted_at, handed_off_to FROM projects WHERE id = ?",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((p_del, handed_off)) = proj_row {
+        if p_del.is_some() {
+            return "專案已刪除".into();
+        }
+        if handed_off.is_some() {
+            return "專案已移交".into();
+        }
+    } else {
+        return "專案不存在".into();
+    }
+
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM bot_shares WHERE bot_id = ?
+            UNION
+            SELECT 1 FROM shared_bots WHERE bot_id = ? AND profile = 'restricted'
+        )",
+    )
+    .bind(bot_id)
+    .bind(bot_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if restricted {
+        return "bot 屬性受限或已分享".into();
+    }
+
+    "bot 不符合執行資格".into()
 }

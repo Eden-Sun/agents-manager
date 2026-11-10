@@ -3178,7 +3178,8 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - **被登出推播**：當 bot 回合因授權失敗收尾（`login_prompt.rs:34 on_auth_failure`），以 `(host, kind, identity)` 去重並聚合同身份所有受影響 bot（例「codex co0 被登出：3 顆 bot」），不再每顆 bot 各推一則；回合成功恢復（`on_turn_ok`）或手動清除後重置。
 - **撞額度上限推播**：當 bot 撞到額度上限（`hookrecv.rs:233,1434`），以額度 key（`quota_key` + `bucket`）去重，一個重置窗只推一則；聚合同額度 key 底下所有受影響 bot 並附重置時間（例「cc1 額度用完：sn-wkr、hk-wkr… 共 7 顆停擺，11/12 11:00 重置」）。
 - VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。
-- `GET|PUT /api/push/settings` `{main_bots?, hosts?, other_bots?, updates?, reset_credits?, auth?, quota?}`：七個推播開關（皆預設開）：遠端主機斷線與 bot 停止（`hosts`）、主力 bot 回覆完成／需要回應、其他 bot 需要回應、偵測到更新、codex 額度用完且有重置券、被登出（`auth`）、撞額度上限（`quota`）。PUT 可只帶要改的鍵。存 `{data_dir}/push-settings.json`。
+- `GET|PUT /api/push/settings` `{main_bots?, hosts?, other_bots?, updates?, reset_credits?, auth?, quota?, schedules?}`：八個推播開關（皆預設開）：遠端主機斷線與 bot 停止（`hosts`）、主力 bot 回覆完成／需要回應、其他 bot 需要回應、偵測到更新、codex 額度用完且有重置券、被登出（`auth`）、撞額度上限（`quota`）、排程等不到 bot（`schedules`）。PUT 可只帶要改的鍵。存 `{data_dir}/push-settings.json`。
+- 排程等不到 bot 通知（`waiting_reason = 'bot_unavailable'`）：等待超過合理時間（5 分鐘或已過排定時間＋隨機區間）背景送出，內容：`{title:"S<n> <名稱>", body:"綁定的 bot 不可用（<原因>）", tag, url}`；每個 occurrence 只推一次；受排程 `notify`（`none` 不推）與推播設定（`schedules` 開關）控制。點擊開 `url`。
 - 遠端主機斷線與 bot 異常停止（掛在 `incidents.rs` 的 incident 門檻）：
   - 避免抖動：不監聽 raw `host_changed`，而是掛在經過 `host_disconnected_secs` / `bot_stopped_secs` 門檻確認後開立的 incident。
   - 主機斷線：`title: "主機 <host>"`，`body: "<host> 已斷線（N 顆 bot 受影響）"`（無 bot 時為 `"<host> 已斷線"`），`tag: "host:<host>"`，`url: "/hosts"`。恢復時推 `"<host> 已恢復"`（同 incident 只推一次）。
