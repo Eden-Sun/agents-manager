@@ -25,7 +25,7 @@ import { getBaseSnapshot } from '../api/baseSnapshot'
 import { isImeEnter } from '../lib/ime'
 import { defaultTimeZone, formatDue, formatOccurrenceTime, OCCURRENCE_LABEL, occurrenceLine, randomSummary, timeZoneOptions } from './format'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
-import { ScheduleResult } from './ScheduleResult'
+import { outcomeLabel, ScheduleResult } from './ScheduleResult'
 import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import { copyScheduleName } from './scheduleCopy'
 import { msg, t, useT } from '../lib/i18n'
@@ -340,6 +340,8 @@ export function ScheduleEditor({
     turn_awaits_start: liveTurn ? Number(liveTurn.awaitsStart) : detail.open.turn_awaits_start,
   } : null
   const hasStartError = openForDisplay?.status === 'queued' && (liveStatus ?? openForDisplay.turn_status) === 'queued' && openForDisplay.turn_awaits_start === 1 && Boolean(openForDisplay.turn_start_error)
+  // `last` 是已結束的最近一筆；舊回應沒有這個欄位時，用 recent 裡第一筆已結束的，畫面才跟紀錄一致。
+  const lastDone = detail?.last ?? (detail?.recent ?? []).find((o) => o.status !== 'pending' && o.status !== 'queued') ?? null
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     touchedRef.current.add(k)
@@ -505,11 +507,30 @@ export function ScheduleEditor({
       {loadError ? <p className="hint schedule-error">{t('讀取失敗：{reason}', { reason: loadError })}</p> : null}
       {detail ? (
         <section className="schedule-status" aria-label={t('排程狀態')}>
+          <div className="schedule-glance">
+            <p className="schedule-glance-next">
+              <span className="schedule-glance-k">{t('下次觸發')}</span>
+              <span className="schedule-glance-value">{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz, randomSummary(detail.spec) !== '') })}</span>
+            </p>
+            <p className="schedule-glance-state">
+              <span className="schedule-glance-k">{t('狀態')}</span>
+              <span className="schedule-glance-value">{t('狀態：{status}', { status: detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用') })}</span>
+            </p>
+            <p className="schedule-glance-last">
+              <span className="schedule-glance-k">{t('上次結果')}</span>
+              <span className="schedule-glance-value">
+                {lastDone ? (
+                  <>
+                    {lastDone.outcome ? <span className={`schedule-outcome ${lastDone.outcome}`}>{outcomeLabel(lastDone.outcome)}</span> : null}
+                    {lastDone.duration_ms != null ? t('上次 {d}', { d: formatDuration(lastDone.duration_ms) }) : t('沒有花費時間')}
+                  </>
+                ) : t('還沒有執行紀錄')}
+              </span>
+            </p>
+          </div>
           <p>{t('已儲存的 Bot：{bot}', { bot: botLabel(detail.bot_id) })}</p>
           <p className="schedule-save-state" role="status">{unsaved ? t('有未儲存的變更') : t('設定已儲存')}</p>
           {randomSummary(detail.spec) ? <p className="schedule-random-summary">{randomSummary(detail.spec)}</p> : null}
-          <p>{t('下次：{time}', { time: formatDue(detail.next_due, detail.tz, randomSummary(detail.spec) !== '') })}</p>
-          <p>{t('狀態：{status}', { status: detail.enabled ? (openForDisplay ? occurrenceLine(openForDisplay, liveStatus) : t('啟用中')) : t('已停用') })}</p>
           {openForDisplay?.waiting_reason ? <p className="hint">{occurrenceLine(openForDisplay, liveStatus)}</p> : null}
           {hasStartError && detail.open ? <button type="button" className="btn" onClick={() => { selectBot(detail.open!.bot_id); onClose() }}>{t('開啟綁定 Bot 的對話')}</button> : null}
           {changingBotWithOpen ? <p className="schedule-change-help" role="status">{openIsRunning
@@ -523,6 +544,7 @@ export function ScheduleEditor({
         <input value={form.name} maxLength={80} disabled={loading} onChange={(e) => set('name', e.target.value)} />
       </label>
 
+      <p className="schedule-section-title">{t('誰來執行')}</p>
       <label className="field">
         <span>{t('執行的 Bot')}</span>
         <div ref={botSelectRef} tabIndex={-1} className="schedule-bot-focus">
@@ -570,6 +592,7 @@ export function ScheduleEditor({
       </div>
 
       {conflictNote}
+      <p className="schedule-section-title">{t('何時執行')}</p>
       <div className="schedule-time-grid">
         <label className="field">
           <span>{t('模式')}</span>
@@ -649,6 +672,7 @@ export function ScheduleEditor({
 
       </div>
 
+      <p className="schedule-section-title">{t('通知、重試與每次怎麼開始')}</p>
       <label className="field">
         <span>{t('通知')}</span>
         <select value={form.notify} disabled={loading} onChange={(e) => set('notify', e.target.value as ScheduleNotify)}>
@@ -657,6 +681,7 @@ export function ScheduleEditor({
           <option value="none">{t('不通知')}</option>
         </select>
       </label>
+      <p className="hint">{t('推播跟這項一起走：每次執行都通知時，成功也會推到手機；只在失敗時通知，就只推失敗、拒絕與結果不明。不通知則不推。全站開關在環境設定的推播。')}</p>
 
       <fieldset className="schedule-retry">
         <legend>{t('失敗重試')}</legend>
@@ -714,7 +739,7 @@ export function ScheduleEditor({
               {t('立即執行')}
             </button>
             <button type="button" className="btn" disabled={busy || loading || !detail.enabled || unsaved || botUnavailable} onClick={() => void runNow(true)}>{t('試跑')}</button>
-            <span className="hint">{t('試跑會要求 Bot 在實際操作前停下，但不能保證不會產生實際效果。')}</span>
+            <span className="hint schedule-action-note">{t('試跑會要求 Bot 在實際操作前停下，但不能保證不會產生實際效果。')}</span>
             <button type="button" className="btn" disabled={busy || loading} onClick={() => detail.enabled ? setConfirmPause(true) : void toggle()}>
               {detail.enabled ? t('停用') : t('啟用')}
             </button>
@@ -728,15 +753,21 @@ export function ScheduleEditor({
 
       {detail ? (
         <details className="schedule-recent">
-          <summary>{detail.code ? `${detail.code} ` : ''}{t('最近執行（{count}）', { count: (detail.recent ?? []).length })}</summary>
+          <summary>
+            <span>{detail.code ? `${detail.code} ` : ''}{t('最近執行（{count}）', { count: (detail.recent ?? []).length })}</span>
+            {lastDone?.outcome ? <span className={`schedule-outcome ${lastDone.outcome}`}>{outcomeLabel(lastDone.outcome)}</span> : null}
+            {lastDone?.duration_ms != null ? <span className="schedule-recent-duration">{t('上次 {d}', { d: formatDuration(lastDone.duration_ms) })}</span> : null}
+          </summary>
           {(detail.recent ?? []).length > 0 ? (
             <ul className="schedule-history" aria-label={t('最近執行')}>
               {(detail.recent ?? []).map((o) => (
-                <li key={o.id}>
-                  {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}{(() => { const d = totalDurationMs(o, recentNow); return d === null ? '' : ` · ${o.status === 'pending' || o.status === 'queued' ? t('已進行 {d}', { d: formatDuration(d) }) : formatDuration(d)}` })()}
+                <li key={o.id} className="schedule-history-item">
+                  <p className="schedule-history-meta">
+                    {o.source === 'dry_run' ? t('試跑') : o.source === 'manual' ? t('手動') : t('排程')} · {formatOccurrenceTime(o.scheduled_for, detail.tz)} · {OCCURRENCE_LABEL[o.status]}{(() => { const d = totalDurationMs(o, recentNow); return d === null ? '' : ` · ${o.status === 'pending' || o.status === 'queued' ? t('已進行 {d}', { d: formatDuration(d) }) : formatDuration(d)}` })()}
+                    {o.error ? t('（{error}）', { error: o.error }) : ''}
+                    {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
+                  </p>
                   <ScheduleResult occurrence={o} onConversation={() => { selectBot(o.bot_id); onClose() }} />
-                  {o.error ? t('（{error}）', { error: o.error }) : ''}
-                  {o.merged_count > 0 ? t(' · 合併 {count} 次', { count: o.merged_count }) : ''}
                 </li>
               ))}
             </ul>

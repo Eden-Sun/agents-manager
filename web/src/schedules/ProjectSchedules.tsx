@@ -4,6 +4,7 @@ import { useStore } from '../store/store'
 import { scheduleStatusLine, scheduleStatusShort } from './format'
 import { formatDuration } from './duration'
 import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
+import { outcomeLabel } from './ScheduleResult'
 import { ScheduleRowMenu } from './ScheduleRowMenu'
 import './schedules.css'
 import { t, useLang } from '../lib/i18n'
@@ -16,12 +17,29 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
   return (
     <li className={`project-schedule-item${s.enabled === false ? ' off' : ''}`}>
       {selecting ? <input type="checkbox" aria-label={t('選取排程 {name}', { name: s.name })} checked={selected} onChange={() => onSelect(s.id)} /> : null}
-      {/* 一行：名稱靠左、短狀態靠右；完整時間（含時區）放 title。 */}
+      {/* 卡片：代號與名稱在上，下次觸發與上次結果各佔一行；完整時間（含時區）放 title。 */}
       <button type="button" className="project-schedule-row" title={`${s.name} — ${scheduleStatusLine(s, live)}`} onClick={() => onOpen(s.id, s.bot_available === false)}>
-        <span className="project-schedule-name">⏱ {s.code ? <span className="project-schedule-code">{s.code} </span> : null}{s.name}</span>
-        {s.last?.duration_ms != null ? <span className="project-schedule-last" title={t('上次執行總花費時間')}>{t('上次 {d}', { d: formatDuration(s.last.duration_ms) })}</span> : null}
-        <span className={`project-schedule-status${s.bot_available === false ? ' needs-rebind' : ''}`}>{s.bot_available === false ? t('⚠ 需要重新指定 Bot') : scheduleStatusShort(s, live)}</span>
-        {s.bot_available !== false && s.bot_dedicated === false ? <span className="project-schedule-status needs-rebind" title={t('這個排程綁的不是排程專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot')}>{t('非專屬 bot')}</span> : null}
+        <span className="project-schedule-name">
+          <span className="project-schedule-mark" aria-hidden="true">⏱</span>
+          {s.code ? <span className="project-schedule-code">{s.code}</span> : null}
+          <span className="project-schedule-title">{s.name}</span>
+        </span>
+        <span className="project-schedule-facts">
+          <span className="project-schedule-fact">
+            <span className="project-schedule-k">{t('下次')}</span>
+            <span className={`project-schedule-status${s.bot_available === false ? ' needs-rebind' : ''}`}>{s.bot_available === false ? t('⚠ 需要重新指定 Bot') : scheduleStatusShort(s, live)}</span>
+          </span>
+          {s.last ? (
+            <span className="project-schedule-fact">
+              <span className="project-schedule-k">{t('上次')}</span>
+              <span className="project-schedule-last" title={t('上次執行的結果與總花費時間')}>
+                {s.last.outcome ? <span className={`schedule-outcome ${s.last.outcome}`}>{outcomeLabel(s.last.outcome)}</span> : null}
+                {s.last.duration_ms != null ? t('上次 {d}', { d: formatDuration(s.last.duration_ms) }) : t('沒有花費時間')}
+              </span>
+            </span>
+          ) : null}
+          {s.bot_available !== false && s.bot_dedicated === false ? <span className="project-schedule-status needs-rebind" title={t('這個排程綁的不是排程專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot')}>{t('非專屬 bot')}</span> : null}
+        </span>
       </button>
       {s.bot_available !== false && botName ? (
         <button type="button" className="project-schedule-bot" title={t('跳到這個排程綁定的 Bot：{name}', { name: botName })} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
