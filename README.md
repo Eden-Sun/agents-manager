@@ -1,231 +1,219 @@
-# agents-manager
+# AG Man（agents-manager）
 
-**English** | [繁體中文](README.zh-TW.md)
+繁體中文 · [English summary](#english-summary)
 
-Manage coding agents on your local machine and on SSH hosts from one web UI. agents-manager turns every **Claude Code**, **Codex**, **Grok** and **Antigravity (agy)** CLI session running in a [herdr](https://herdr.dev) pane into a "bot", so you can follow conversations, answer prompts, watch quota and coordinate several bots from your desktop or phone. It is not an IDE and it does not spawn agents itself: herdr owns the terminals, the daemon talks to herdr and to the CLIs' hooks.
+AG Man 是一個跑在你自己機器上的網頁介面，用來管理多個 coding agent CLI：**Claude Code（`claude`）、Codex（`codex`）、Grok（`grok`）與 Antigravity（`agy`）**。每個在 [herdr](https://herdr.dev) pane 裡跑的 CLI 工作階段，都會變成網頁上的一個 **bot**：你可以在瀏覽器或手機上看對話、回覆提問、看額度，並讓多個 bot 互相協作。
 
-![Desktop dark theme: project tree with a child agent, quota chips for each CLI, chat and scratch tray](docs/screenshots/readme/en/desktop-dark.png)
+AG Man 不是 IDE，也不自己啟動 agent。終端機由 herdr 管理；daemon（`agents-managerd`）負責和 herdr 溝通，並透過各 CLI 的 hook 接收回覆。
 
-Screenshots use the built-in mock backend (`VITE_MOCK=1`); accounts, bots and messages are demo data. The UI supports Traditional Chinese and English: it follows the browser language by default, and Settings → Display switches it. The Traditional Chinese screenshots are in [`docs/screenshots/readme/zh-TW/`](docs/screenshots/readme/zh-TW/).
+> 截圖使用內建的假資料後端（`VITE_MOCK=1`），帳號、bot 與訊息都是示範資料。
 
-## Key features
+![手機淺色主題：對話、額度晶片與 bot 切換](docs/screenshots/readme/en/mobile-light.png)
 
-**Chat with agents instead of watching terminals**
-- One bot per CLI session, grouped by project directory. Send messages from the browser, queue them while a turn runs, interrupt or force-stop.
-- Replies come from the CLIs' own hooks or native transcripts. When the daemon has to fall back to a terminal snapshot, the reply is marked as possibly incomplete.
-- Confirmations and multiple-choice questions become clickable cards. Rewind a conversation, fork a bot to continue its context, resume a bot that was put to sleep.
+## 主要功能
 
-**Coordinate many bots**
-- `@bot` / `@all` group chat per project.
-- Child agents started through herdr appear under their parent bot. The parent is notified when a child finishes or gets stuck.
-- Group tasks (missions) with plan / execute / review / verify / deliver cards, driven by the optional AGM supervisor.
+**用對話取代盯終端機**
+- 每個 CLI 工作階段對應一個 bot，依專案目錄分組。可在瀏覽器送訊息、回合執行中排隊、中斷或強制停止。
+- 回覆來自 CLI 的 hook 或原生 transcript。若 daemon 必須退回讀取終端快照，該則回覆會標示「可能不完整」。
+- 確認與多選題會變成可點選的卡片。可以倒回對話（rewind）、fork bot 接續脈絡，也能喚醒閒置被收起來的 bot。
 
-**Hosts, accounts and quota**
-- Projects on other machines run over SSH against that host's herdr: remote bots, host shells, CLI login, and moving a project to another daemon.
-- Claude identities (`cc0`–`cc6`) are discovered from shell aliases, per host, with one-click login and disable.
-- Quota and reset times per host and identity, with low-quota warnings, using whatever each provider exposes (Claude, Codex, Grok; agy reports its Gemini bucket only).
-- Model, effort and fast mode can be changed live where the CLI supports it.
+**協調多個 bot**
+- **專家模式**（專案層級）：指定一位頂層管理者，其他成員為執行者（executor）、顧問（advisor）、排程者（scheduler）或專家（specialist）。專家模式下不開子 agent，改由管理者派工給同專案成員。
+- **群集派工**：同專案內 kind、model、effort、identity 相同的執行者會合併成一個群集，可一次派給群集。
+- **子 agent**：透過 herdr 啟動的子 agent 會掛在父 bot 底下；子 agent 完成或卡住時，父 bot 會收到通知。
+- **總管（AGM）**：選用的協調者 bot，負責巡檢、派工、收起閒置 bot 與部署。見 [SPEC §18](docs/SPEC.md)。
 
-**Automation**
-- Project schedules: one-off, interval, daily and weekly runs queued into an existing bot, with a run ledger.
-- Update checks for herdr, agent CLIs and hook integrations on every host, with one-click updates.
-- Idle bots are put to sleep after a configurable period, keeping only what is needed to resume them.
+**排程與推播**
+- 專案排程：單次、固定間隔、每日、每週，以及多時段；排程會送進專屬的排程 bot，並保留執行紀錄。
+- 網頁推播（Web Push）：回合完成、需要回應、排程終態、有新版或額度重置時通知。可在設定中分別開關；若使用者已在任一裝置讀過該訊息，就不再推播。
 
-**Workspace and guard rails**
-- Preview a bot's local dev server next to the chat.
-- A cross-bot scratch tray and downloadable bot outputs (outbox).
-- A memory view of the herdr process tree, and a hook that blocks broad `pkill`/`kill` commands that would take down other agents.
+**遠端主機與帳號額度**
+- 專案可以放在 SSH 主機上，透過該主機的 herdr 運作：遠端 bot、主機 shell、CLI 登入、額度，也能把專案移交到另一台 daemon。
+- Claude 身份 `cc0`–`cc6` 會從 shell alias 自動探索（每台主機各一份），可一鍵登入或停用。
+- 額度與重置時間依主機與身份顯示；低額度會警示。提供的資訊依各家 CLI 而定（Claude、Codex、Grok 較完整；agy 只顯示 Gemini 額度）。
+- 模型、effort、fast mode 在 CLI 支援時可直接在網頁切換。
 
-Details and limits live in [`docs/SPEC.md`](docs/SPEC.md).
+**更新與維運**
+- 「更新檢查」頁列出每台主機的 herdr、各 agent CLI 與 hook 整合版本，可一鍵更新。
+- 閒置 bot 在設定的時間後會被收起，只保留恢復所需的資訊。
 
-![Mobile light theme: chat with quota chips and bot switcher](docs/screenshots/readme/en/mobile-light.png)
+**工作區與防護**
+- 可在對話旁預覽 bot 的本機 dev server。
+- 檔案架（跨 bot 暫存）與 outbox（bot 產出的可下載檔案）。
+- 記憶體檢視：查看 herdr 行程樹。
+- 內建 hook 會攔截會殺掉其他 agent 的廣域 `pkill`／`kill` 指令。
 
-## Compared with Orca
+**中英文介面**：預設跟隨瀏覽器語言，可在「設定 → Display」切換。
 
-[Orca](https://github.com/stablyai/orca) (stablyai) also manages several coding agents at once. The two tools have different centres: Orca is a desktop agent development environment built around git worktrees, terminals, an editor and diff review; agents-manager is a daemon plus web UI built around bot conversations, multi-host state and agent-to-agent delegation. The table compares shapes, not quality. Orca facts come from its README and docs as read on 2026-10-23; Orca ships daily, so check its changelog.
+更多細節與限制見 [`docs/SPEC.md`](docs/SPEC.md)。
 
-| | agents-manager | Orca |
-|---|---|---|
-| Shape | Rust daemon + web UI, single binary; herdr runs the CLIs | Electron desktop app with built-in terminals, editor, browser and diff view |
-| Platforms | Daemon on macOS and Linux (no Windows daemon); UI in any browser | Desktop app for macOS, Windows and Linux |
-| Phone | Same web UI, reachable over LAN or Tailscale; no native app | iOS and Android companion apps paired with the desktop app |
-| Agent CLIs | 4 kinds with hook integration: Claude Code, Codex, Grok, Antigravity | Any terminal CLI; 27 preconfigured, including Claude Code, Codex, Grok, Gemini, Cursor, Copilot, OpenCode, Pi |
-| Reply capture | CLI hooks and native transcripts, terminal snapshot as a marked fallback; remote hooks via spool files | Terminal view plus agent status hooks (working / waiting / done), notifications and unread state |
-| Git worktrees | Not managed by the product; agents create their own per repo conventions | Core feature: one isolated worktree per task, fan one prompt out to several agents, compare and merge |
-| Diff / PR review | Not provided (explicit non-goal) | Diff annotations sent back to the agent, GitHub and Linear integration |
-| Remote hosts | Whole projects on SSH hosts via that host's herdr; host shells, CLI login, per-host quota; project hand-off between daemons | SSH worktrees with remote terminals, files, git, auto-reconnect and port forwarding |
-| Accounts and quota | Claude `cc0`–`cc6` identities per host; quota windows for Claude, Codex, Grok and agy (Gemini bucket) | Account switcher and usage tracking for Claude, Codex, Gemini, Antigravity, OpenCode, Kimi, MiniMax and others |
-| Multi-agent work | Child agents tracked under parents with stuck / done notices; `@bot` group chat; mission cards; AGM supervisor | Experimental Orchestration: runs, tasks, dispatches, supervised workers, decision gates, workers on other hosts |
-| Idle agents | Supervisor sleeps idle bots (default 90 min, configurable) and keeps resume info | Experimental hibernation (off by default, 30 min) that relaunches the CLI with resume flags |
-| Scheduling | One-off / interval / daily / weekly schedules into a bot's queue | Not described in its docs |
-| Tooling updates | Version overview and one-click update of herdr, CLIs and hooks per host; upstream changelog triage | Not described in its docs |
-| Editor and preview | No editor; embedded preview of a bot's local dev server | VS Code editor, Design Mode, Markdown / PDF / image previews |
-| Scripting | HTTP / WebSocket API ([`docs/API.md`](docs/API.md)), `bin/agm` | `orca` CLI (worktree create, snapshot, click, fill) |
-| UI language | Traditional Chinese and English (follows the browser, switchable in Settings) | English, with translated READMEs |
-| License | MIT | MIT |
+**不做的事**：程式碼編輯器、diff／PR 審查、git worktree 管理（由 agent 依各 repo 慣例自行處理）。
 
-Pick Orca when you want an IDE that opens ten worktrees and reviews their diffs. Pick agents-manager when your agents already run in terminals, possibly on other machines, and you want to steer them from a browser, let them delegate to each other, and keep an eye on quota and schedules. They can coexist.
+## 支援平台
 
-Orca sources: [README](https://github.com/stablyai/orca/blob/d9dc87b2fb08ba52930378941ff470b69d23523d/README.md), [onorca.dev](https://onorca.dev), [worktrees](https://www.onorca.dev/docs/model/worktrees), [SSH](https://www.onorca.dev/docs/ssh), [mobile](https://www.onorca.dev/docs/mobile), [usage tracking](https://www.onorca.dev/docs/agents/usage-tracking), [hooks](https://www.onorca.dev/docs/agents/hooks-memory), [hibernation](https://www.onorca.dev/docs/agents/hibernation), [orchestration](https://www.onorca.dev/docs/cli/orchestration). "Not described" means the public docs did not mention it, not that it is absent.
-
-## Quick start
-
-**Requirements.** macOS (arm64) or Linux (x86_64 / arm64), [herdr](https://herdr.dev), and at least one agent CLI (`claude`, `codex`, `grok` or `agy`) that you have already logged in to. herdr is a terminal workspace manager with a socket API; the daemon uses it to open panes, start agents, send text and read the screen, and never spawns agents itself.
-
-**1. Install with Homebrew** (also installs herdr):
-
-```bash
-brew install eden-sun/tap/agents-manager
-```
-
-**2. Run the production daemon** as a background service, so it survives logout and restarts with your machine:
-
-```bash
-brew services start agents-manager    # stop: brew services stop agents-manager
-```
-
-To run it in the foreground instead (Ctrl-C to stop): `agents-managerd serve`. Logs go to `$(brew --prefix)/var/log/agents-manager.log`. The service sees Homebrew's `bin` and `~/.local/bin`; if your agent CLIs live elsewhere, run it in the foreground from your shell.
-
-**3. Open the UI** at http://127.0.0.1:7788. Opening it from `127.0.0.1` signs you in automatically; from another device, paste the token in `~/.config/agents-manager/ui-token`. Then follow [First steps](#first-steps).
-
-**Without Homebrew: prebuilt binary** (the web UI is embedded). Download the archive for your platform from [Releases](https://github.com/Eden-Sun/agents-manager/releases/latest): `linux-x86_64`, `linux-arm64` or `macos-arm64`.
-
-```bash
-VERSION=v0.1.0          # pick the latest tag from the Releases page
-ASSET=linux-x86_64      # or linux-arm64 / macos-arm64
-curl -fLO "https://github.com/Eden-Sun/agents-manager/releases/download/$VERSION/agents-managerd-$VERSION-$ASSET.tar.gz"
-tar -xzf "agents-managerd-$VERSION-$ASSET.tar.gz"
-install -m 755 "agents-managerd-$VERSION-$ASSET/agents-managerd" ~/.local/bin/
-agents-managerd serve   # production daemon with the embedded UI: http://127.0.0.1:7788
-```
-
-Each archive has a `.sha256` file next to it. On macOS, a downloaded binary may need `xattr -d com.apple.quarantine ~/.local/bin/agents-managerd` once. To keep the daemon running, start it from launchd, systemd or a herdr pane. Scripts under `scripts/` (such as `agm`) are not in the archive; clone the repo if you need them.
-
-Config and data live in `~/.config/agents-manager/` (override with `AM_DATA_DIR`): `config.toml`, the SQLite database and `ui-token`. Never commit them. The daemon binds every interface so a phone on your LAN or Tailscale can open the same UI; the packaged macOS app binds loopback only (`AM_DEV_LAN=0` / `1` overrides either). Building from source is covered in [Build from source](#build-from-source).
-
-## First steps
-
-1. **Start the daemon**: `brew services start agents-manager` (or `agents-managerd serve` in the foreground), then open http://127.0.0.1:7788. If no herdr server is running, the daemon starts one in the background.
-2. **Add a project**: click 「新增 Project」 (Add project) at the bottom of the sidebar, choose a directory on this machine or on an SSH host, and give it a label.
-3. **Add a bot**: open the project's `＋` menu and choose 「新增 Bot」 (Add bot). Pick the kind (`claude`, `codex`, `grok` or `agy`) and, optionally, an identity and model. The daemon opens a herdr pane and starts the CLI there with hooks attached.
-4. **Chat**: type in the chat box and send. Messages sent during a running turn are queued; a confirmation or multiple-choice question shows up as a card you can click; the stop button interrupts the turn. The terminal tab shows the live pane when you need it.
-5. **Let bots delegate**: a bot that runs `herdr agent start …` gets its children listed under it, and it is notified when they finish or get stuck.
-6. **Automate**: the same `＋` menu has 「新增排程」 (Add schedule) for one-off, interval, daily or weekly prompts to a bot. Quota, model lists, update checks and hosts live in 環境設定 (Settings).
-7. **Use it from your phone**: open `http://<this machine>:7788` over your LAN or Tailscale and paste the token from `~/.config/agents-manager/ui-token`.
-
-## Supported agent CLIs
-
-Each CLI gets a hook injected at launch, so replies arrive as structured events rather than scraped text.
-
-| Kind | Reply source | Notes |
-|---|---|---|
-| **claude** | `--settings` hooks (`SessionStart` / `Stop`) | Identities `cc0`–`cc6`; live model / effort apply |
-| **codex** | `notify` hook per launch | Live model / effort / Fast apply |
-| **grok** | hook file in `GROK_HOME` | Model applies live, effort needs a restart; [SPEC §12](docs/SPEC.md) |
-| **agy** | named hooks in the Antigravity CLI settings | Update prompt in the header; [SPEC §12a](docs/SPEC.md) |
-
-Hook details are in [`docs/HOOK.md`](docs/HOOK.md).
-
-## Advanced features
-
-These are optional and off until configured.
-
-- **AGM supervisor** — a coordinator bot that patrols the fleet, dispatches work, sleeps idle bots and handles deploys. [SPEC §18](docs/SPEC.md).
-- **Jev suggestions** — a judge layer that scores the options of a blocked question and marks them as "Jev suggestion"; it never answers for you. [SPEC §4.3c](docs/SPEC.md).
-- **Claude API key** — lets one-off LLM jobs (update triage, changelog translation) skip a full Claude Code session. [SPEC §4.3d](docs/SPEC.md).
-- **Share bots** — restricted or trusted bots exposed through a separate share entry point. [SPEC §20](docs/SPEC.md).
-- **Update checks** — one settings tab lists herdr, agent CLIs and hook integrations per host. [SPEC §6.9c](docs/SPEC.md).
-
-![Settings, update check: CLI and herdr integration versions per host](docs/screenshots/readme/en/settings-updates.png)
-
-## How it works
-
-```mermaid
-flowchart LR
-    web["React front end (Vite)"]
-    subgraph daemon["Rust daemon (axum)"]
-        direction TB
-        d1["herdr client"]
-        d2["registry + state"]
-        d3["conversation store"]
-        d4["hook receiver"]
-    end
-    store[("SQLite + config.toml<br/>~/.config/agents-manager/")]
-    subgraph herdr["herdr headless server"]
-        direction TB
-        panes["panes: claude / codex / grok / agy"]
-    end
-
-    web <-- "REST + WebSocket" --> daemon
-    daemon <-- "Unix socket (JSON lines)" --> herdr
-    panes -- "hook / notify HTTP" --> d4
-    daemon --- store
-```
-
-- **web** (`web/`) — React + Zustand, a pure projection of daemon state.
-- **daemon** (`daemon/`, binary `agents-managerd`) — reconciles with herdr, injects hooks, matches turns, projects `config.toml` into SQLite, serves HTTP / WebSocket.
-- **herdr** — owns the real pane and agent lifecycle, sends prompts, reads the screen.
-
-`config.toml` is the source of truth for desired projects and bots; SQLite holds runtime state (runs, turns, messages).
-
-## Build from source
-
-For development or unsupported platforms. Needs Rust (`cargo`) and [Bun](https://bun.sh) in addition to herdr.
-
-
-Rust development builds default to [Blaze](https://github.com/indexable-inc/blaze) through `scripts/project-cargo.sh` (Linux x86-64/ARM64 and Apple silicon). Install it once per Linux host (the current nightly lacks memory-budget support, so use the pinned source build):
-
-```bash
-scripts/install-blaze.sh --source
-AGM_RUST_ENGINE=blaze scripts/project-cargo.sh build -p agents-managerd
-scripts/project-cargo.sh test -p xtask
-```
-
-Linux and Apple silicon macOS default to Blaze for build/run (`AGM_RUST_ENGINE=blaze`); managed panes route ordinary `cargo build/run` through this entrypoint after a daemon update; `cargo dev` uses it for the daemon build. Missing or unsupported Blaze fails by default. Set `AGM_RUST_ENGINE=cargo` to explicitly use Cargo; `AGM_RUST_ENGINE=auto` explicitly enables fallback when Blaze is unavailable. Release/custom profiles, cross targets, `check`, Clippy, formatting and `scripts/check.sh`/CI use native Cargo. Tests always retain native Cargo and the configured remote worker route (r7); even `AGM_RUST_ENGINE=blaze` does not change this. The shared project daemon uses an 8 GiB soft worker budget and a 600-second idle timeout. A three-worktree daemon build measured 23.33 GiB peak and 20.76 GiB steady background RSS, so the 8 GiB budget must not be treated as a hard limit. Set `AGM_RUST_ENGINE=cargo` to opt out. First builds load the project; only compatible warm edits avoid recompilation/linking. See [build engines and cache](docs/BUILD-CACHE.md) for toolchain, memory and troubleshooting.
-
-**Development mode** (daemon on `0.0.0.0:7788`, Vite dev server on `0.0.0.0:5173`):
-
-```bash
-git clone git@github.com:Eden-Sun/agents-manager.git
-cd agents-manager
-cargo dev     # start both
-cargo down    # stop both
-```
-
-**Build the release binary yourself.** The UI is embedded in the daemon binary, so build the front end first:
-
-```bash
-cd web && bun install && bun run build && cd ..   # produces web/dist
-cargo build --release -p agents-managerd
-./target/release/agents-managerd serve            # http://127.0.0.1:7788
-```
-
-**Front end only, without herdr** against an in-memory fake backend:
-
-```bash
-cd web
-bun install
-VITE_MOCK=1 bun run dev
-```
-
-## Documentation and development
-
-| Document | Contents |
+| 平台 | 狀態 |
 |---|---|
-| [`docs/SPEC.md`](docs/SPEC.md) | Specification of current behavior: data model, hooks, reconcile, remote hosts, quota, identities, AGM, group tasks |
-| [`docs/API.md`](docs/API.md) | HTTP / WebSocket contract, including bot auth scopes |
-| [`docs/FRONTEND.md`](docs/FRONTEND.md) | Front-end structure, commands and non-obvious conventions |
-| [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | Settled UI trade-offs |
-| [`docs/HOOK.md`](docs/HOOK.md) | Hook subcommand contract and timing tests |
-| [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | Verification and CI workflow for contributors and agents |
-| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze development builds and sccache dependency cache |
-| [`docs/PACKAGING.md`](docs/PACKAGING.md) | Packaging the macOS `.dmg` |
-| [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Evaluation of Claude-native messaging versus herdr |
-| [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | Optional ChatGPT web consult worker |
-| [`web/README.md`](web/README.md) | Front-end quick commands |
+| macOS（arm64） | 支援 daemon 與網頁介面 |
+| Linux（x86_64、arm64） | 支援 daemon 與網頁介面 |
+| Windows | 不支援原生 Windows daemon。請在 **WSL2**（Linux 發行版）內安裝與執行，網頁從 Windows 瀏覽器開啟即可 |
 
-Before pushing, run `scripts/check.sh changed`; see [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md). Docs describe the current state only; history lives in git.
+網頁介面可在任何現代瀏覽器使用，桌機與手機皆可。
 
-## License
+## 需求與安裝
+
+**必要**
+
+| 工具 | 用途 |
+|---|---|
+| [herdr](https://herdr.dev) | 終端工作區管理器。daemon 透過它的 Unix socket 開 pane、啟動 agent、送字、讀畫面。安裝後用 `herdr --version` 確認；設定頁的「更新檢查」會比對版本。 |
+| 至少一個 agent CLI：`claude`、`codex`、`grok` 或 `agy` | 你要管理的 agent。請先在本機登入一次。 |
+| Rust 工具鏈（`cargo`） | 從原始碼建置 daemon。 |
+| [Bun](https://bun.sh) | 建置網頁前端。 |
+
+**建議安裝**（主機環境檢查會列出，缺少時會提示）
+
+| 工具 | 用途 |
+|---|---|
+| `rtk` | token 壓縮代理；Claude 的 hook 會把一般指令改寫成它。 |
+| `zsh`、`jq` | 主機 shell 與 hook 腳本使用。 |
+| `gh` | 顯示 GitHub CLI 登入狀態。 |
+
+**選用**：Blaze 建置引擎可加快開發建置，見 [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md)。Claude API key 與 Jev 判斷層都是選用功能，預設關閉。
+
+## 快速開始
+
+以下以原始碼建置為例。把 `<repo-url>` 換成你的 clone 網址：
+
+```bash
+git clone <repo-url> agents-manager
+cd agents-manager
+
+# 1. 建置網頁前端（會被嵌入 daemon）
+(cd web && bun install && bun run build)
+
+# 2. 建置 daemon
+cargo build --release -p agents-managerd
+
+# 3. 啟動（前景執行，Ctrl-C 停止）
+./target/release/agents-managerd serve
+```
+
+然後在瀏覽器開啟 **http://127.0.0.1:7788**。從 `127.0.0.1` 開啟會自動登入；其他裝置請貼上 `~/.config/agents-manager/ui-token` 的內容。
+
+想先看介面、不需要 herdr 或 daemon，可以用假資料後端：
+
+```bash
+cd web && bun install && VITE_MOCK=1 bun run dev
+```
+
+若要長期執行，可以用 systemd user unit、launchd，或放在一個 herdr pane 裡。Linux 主機的排程細節見 [SPEC §18.2e](docs/SPEC.md)。
+
+## 第一次使用
+
+1. **新增專案**：在側欄底部按「新增 Project」，選擇本機或 SSH 主機上的目錄，並取一個標籤。
+2. **新增 bot**：打開專案的「＋」選單，選「新增 Bot」，選擇 kind（`claude`、`codex`、`grok` 或 `agy`），可選擇身份與模型。daemon 會開一個 herdr pane，在裡面啟動 CLI 並掛上 hook。
+3. **對話**：在輸入框送出訊息。回合執行中送出的訊息會排隊；確認與多選題會以卡片顯示；停止按鈕可中斷回合。需要看原始畫面時切到「終端」分頁。
+4. **讓 bot 互相委派**：bot 若執行 `herdr agent start …`，子 agent 會列在它底下，並在完成或卡住時通知它。
+5. **自動化**：同一個「＋」選單有「新增排程」。帳號額度、模型清單、更新檢查與主機都在「環境設定」（Settings）裡。
+6. **用手機開啟**：在同一個網路（LAN 或 Tailscale）上，用 `http://<本機位址>:7788` 開啟，並貼上 `ui-token`。
+
+## 支援的 agent CLI
+
+每個 CLI 在啟動時會被注入 hook，因此回覆是結構化事件，而不是從畫面抓文字。
+
+| kind | 回覆來源 | 備註 |
+|---|---|---|
+| `claude` | `--settings` 的 hook（`SessionStart`／`Stop`） | 身份 `cc0`–`cc6`；模型與 effort 可即時切換 |
+| `codex` | 每次啟動的 `notify` hook | 模型、effort、Fast 可即時切換 |
+| `grok` | `GROK_HOME` 內的 hook 檔 | 模型可即時切換；effort 需重啟，見 [SPEC §12](docs/SPEC.md) |
+| `agy` | Antigravity CLI 設定中的具名 hook | 更新提示顯示在標題列；見 [SPEC §12a](docs/SPEC.md) |
+
+hook 細節見 [`docs/HOOK.md`](docs/HOOK.md)。
+
+## 設定與資料位置
+
+預設位置：`~/.config/agents-manager/`（可用環境變數 `AM_DATA_DIR` 覆寫）。
+
+| 檔案 | 內容 |
+|---|---|
+| `config.toml` | 期望狀態：專案、bot、主機、設定。是事實來源。 |
+| SQLite 資料庫 | 執行期狀態：回合、訊息、排程紀錄等。 |
+| `ui-token` | 網頁登入用的 token，權限為 0600。 |
+
+設定範例（數值與路徑皆為示意）：
+
+```toml
+[server]
+listen = "127.0.0.1:7788"
+herdr_session = "agents-manager"
+
+[[projects]]
+id = "01EXAMPLE000000000000000000"
+path = "/home/example/project/foo"
+label = "foo"
+
+  [[projects.bots]]
+  id = "01EXAMPLE000000000000000001"
+  name = "foo-claude"
+  kind = "claude"
+```
+
+- 設定檔在哪，資料就在哪：用 `--config` 指向其他路徑時，資料庫與 `ui-token` 會跟著該目錄（或 `[server] data_dir`），兩者必須一致。
+- 寫回 `config.toml` 時會保留你的註解與排版。
+- 設定頁（Settings）的分頁：Setup、Hosts、Update check、Identities、Recently deleted、Jev suggestions、Claude API、Display。
+
+完整欄位見 [SPEC §5](docs/SPEC.md)。
+
+## 安全注意
+
+- **網路綁定**：打包好的 macOS app 只綁 `127.0.0.1`。其他情況下（包含直接執行 `agents-managerd serve`），daemon 預設會綁定所有介面，讓同一網路的手機也能連上。若只想給本機用，請設定 `AM_DEV_LAN=0`。
+- **ui-token**：擁有它就等於擁有完整的網頁權限，包括啟動與停止 bot。請勿提交到 git、請勿貼到公開場合。共用 token 的 LAN 風險是有意保留的設計取捨，見 [API.md §0](docs/API.md)。
+- **資料只在本機**：對話、設定與資料庫都存在你的機器上。遠端主機的專案則透過 SSH 存取該主機上的資料。
+- **第三方服務預設關閉**：Claude API（一次性 LLM 工作、changelog 分診、訊息翻譯）、Jev 判斷層（外部 API key）與分享入口都需要你明確開啟。翻譯按鈕是點擊才會扣費。簡體中文轉繁體則在本機完成，不送 API。
+- **網頁推播**：推播內容會經過瀏覽器的推播服務（由各瀏覽器供應商提供）送達，內容加密，但推播服務會知道推送的時間與對象。可在設定中關閉。
+- **分享 bot**：分享連結可讓受限或受信任的 bot 被其他人使用，屬於獨立的入口，見 [SPEC §20](docs/SPEC.md)。
+- **廣域 kill 防護**：hook 會攔截可能殺掉其他 agent 的 `pkill`／`kill` 指令。請不要為了繞過它而改用別的寫法。
+
+## 開發與驗證
+
+```bash
+scripts/check.sh changed    # 只驗證與 origin/main 相比有改到的部分（提交前執行）
+scripts/check.sh web        # TypeScript、lint、前端測試與建置
+scripts/check.sh daemon     # daemon、xtask 與 crates 的 cargo 測試
+scripts/check.sh ops        # shell 腳本的 lint 與隔離測試
+```
+
+- 開發模式：`cargo dev` 同時啟動 daemon（`0.0.0.0:7788`）與 Vite dev server（`0.0.0.0:5173`），`cargo down` 停止。
+- 前端的指令與慣例見 [`docs/FRONTEND.md`](docs/FRONTEND.md) 與 [`web/README.md`](web/README.md)。
+- 驗證與 CI 流程見 [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md)。
+
+## 文件索引
+
+| 文件 | 內容 |
+|---|---|
+| [`docs/SPEC.md`](docs/SPEC.md) | 目前行為的規格：資料模型、hook、對帳、遠端主機、額度、身份、總管、群集、排程 |
+| [`docs/API.md`](docs/API.md) | HTTP／WebSocket 契約，包含 bot 與服務身份的授權範圍 |
+| [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的介面取捨 |
+| [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、指令與慣例 |
+| [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令的契約與計時測試 |
+| [`docs/AGENT-VERIFY.md`](docs/AGENT-VERIFY.md) | 驗證與 CI 工作流程 |
+| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | Blaze 開發建置與 sccache 快取 |
+| [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包 macOS `.dmg` |
+| [`docs/CLAUDE-NATIVE-TRANSPORT.md`](docs/CLAUDE-NATIVE-TRANSPORT.md) | Claude 原生傳輸與 herdr 的比較評估 |
+| [`docs/CHATGPT-CONSULT.md`](docs/CHATGPT-CONSULT.md) | 選用的 ChatGPT 網頁諮詢 worker |
+| [`web/README.md`](web/README.md) | 前端快速指令 |
+
+## English summary
+
+AG Man (agents-manager) is a self-hosted web UI for managing several coding-agent CLIs (Claude Code, Codex, Grok and Antigravity `agy`) running in [herdr](https://herdr.dev) panes. Each CLI session becomes a "bot": you can read conversations, answer prompts, watch quota, run expert-mode teams (manager / executor / advisor / scheduler / specialist), schedule prompts, receive Web Push notifications and work with bots on SSH hosts. The daemon (`agents-managerd`, Rust) talks to herdr and receives replies through each CLI's hooks; the web UI is React.
+
+- **Platforms**: macOS (arm64) and Linux (x86_64, arm64) for the daemon. On Windows, run it inside WSL2. Native Windows is not supported.
+- **Requirements**: herdr, at least one logged-in agent CLI, Rust and Bun for building from source.
+- **Quick start**: build the web UI (`cd web && bun install && bun run build`), build the daemon (`cargo build --release -p agents-managerd`), run `./target/release/agents-managerd serve`, then open http://127.0.0.1:7788.
+- **Data**: `~/.config/agents-manager/` (`config.toml`, SQLite, `ui-token`); override with `AM_DATA_DIR`.
+- **Security**: keep `ui-token` private. The packaged macOS app binds loopback only; other runs bind all interfaces unless `AM_DEV_LAN=0`. Third-party services (Claude API, Jev judge, sharing) are off by default.
+- **Verify**: `scripts/check.sh changed` before pushing. Full docs are in `docs/`, starting with `docs/SPEC.md`.
+
+## 授權
 
 [MIT](LICENSE)
