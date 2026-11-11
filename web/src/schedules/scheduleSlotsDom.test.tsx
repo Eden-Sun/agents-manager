@@ -49,9 +49,9 @@ test('多時段：列出、增刪時段，送出帶 slots；變數點了插入�
   assert.equal(rows().length, 2, '兩個時段各一列')
   assert.equal(rows()[1].querySelector('input[type=text]'), null, '時段沒有標籤欄；舊資料的標籤保留在後端但不顯示')
 
-  await click(buttonIn(dialog(), '新增時段'))
+  await click(buttonIn(dialog(), '＋ 新增時段'))
   assert.equal(rows().length, 3)
-  await click(buttonIn(rows()[1] as HTMLElement, '刪除時段'))
+  await click(buttonIn(rows()[1] as HTMLElement, '刪除'))
   assert.equal(rows().length, 2, '刪掉的是第二列（下班）')
 
   assert.equal(dialog().querySelector('input[placeholder*="標籤"]'), null, '時段不再有標籤欄')

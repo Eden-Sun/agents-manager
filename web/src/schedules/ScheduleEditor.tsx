@@ -28,6 +28,7 @@ import { useLiveTurnStatus, useOnTurnChange } from './liveTurn'
 import { outcomeLabel, ScheduleResult } from './ScheduleResult'
 import { formatDuration, totalDurationMs, useNowMs } from './duration'
 import { copyScheduleName } from './scheduleCopy'
+import { ScheduleWhenSlots } from './ScheduleWhenSlots'
 import { msg, t, useT } from '../lib/i18n'
 import './schedules.css'
 import './scheduleEditor.css'
@@ -587,16 +588,28 @@ export function ScheduleEditor({
       {conflictNote}
       <p className="schedule-section-title">{t('何時執行')}</p>
       <div className="schedule-time-grid">
-        <label className="field">
-          <span>{t('模式')}</span>
-          <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as FormState['mode'])}>
-            <option value="once">{t('單次')}</option>
-            <option value="interval">{t('固定間隔')}</option>
-            <option value="daily">{t('每天')}</option>
-            <option value="weekdays">{t('週一至週五')}</option>
-            <option value="weekly">{t('每週')}</option>
-          </select>
-        </label>
+        <div className="schedule-when-context">
+          <label className="field">
+            <span>{t('模式')}</span>
+            <select value={form.mode} disabled={loading} onChange={(e) => set('mode', e.target.value as FormState['mode'])}>
+              <option value="once">{t('單次')}</option>
+              <option value="interval">{t('固定間隔')}</option>
+              <option value="daily">{t('每天')}</option>
+              <option value="weekdays">{t('週一至週五')}</option>
+              <option value="weekly">{t('每週')}</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>{t('時區')}</span>
+            <select value={form.tz} disabled={loading} onChange={(e) => set('tz', e.target.value)}>
+              {timeZoneOptions(form.tz).map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         {form.mode === 'once' ? (
           <label className="field">
             <span>{t('時間（所選時區）')}</span>
@@ -610,30 +623,18 @@ export function ScheduleEditor({
           </label>
         ) : null}
         {form.mode === 'daily' || form.mode === 'weekly' || form.mode === 'weekdays' ? (
-          <fieldset className="field schedule-slots">
-            <legend>{t('時間（所選時區）')}</legend>
-            {form.slots.map((slot, i) => (
-              <div key={i} className="schedule-slot-row">
-                <input type="time" aria-label={t('第 {n} 個時段的時間', { n: i + 1 })} value={slot.time} disabled={loading} onChange={(e) => setSlot(i, { time: e.target.value })} />
-                <button type="button" className="schedule-link" disabled={loading || form.slots.length <= 1} onClick={() => set('slots', form.slots.filter((_, j) => j !== i))}>{t('刪除時段')}</button>
-                <div className="schedule-slot-range">
-                  <label className="schedule-slot-random">
-                    <input type="checkbox" role="switch" aria-label={t('第 {n} 個時段的隨機區間', { n: i + 1 })} checked={slot.until != null} disabled={loading} onChange={(e) => setSlot(i, { until: e.target.checked ? defaultUntil(slot.time) : null })} />
-                    <span>{t('隨機區間')}</span>
-                  </label>
-                  {slot.until != null ? (
-                    <label className="schedule-slot-until">
-                      <span>{t('結束時間')}</span>
-                      <input type="time" aria-label={t('第 {n} 個時段的結束時間', { n: i + 1 })} value={slot.until} disabled={loading} onChange={(e) => setSlot(i, { until: e.target.value })} />
-                    </label>
-                  ) : null}
-                  {slot.until != null && rangeError(slot) ? <p className="hint schedule-error" role="alert">{rangeError(slot)}</p> : null}
-                  {slot.until != null && !rangeError(slot) ? <p className="hint">{t('{range} 隨機', { range: `${slot.time}–${slot.until}` })}</p> : null}
-                </div>
-              </div>
-            ))}
-            <button type="button" className="btn" disabled={loading || form.slots.length >= MAX_SLOTS} onClick={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), until: null }])}>{t('新增時段')}</button>
-          </fieldset>
+          <ScheduleWhenSlots
+            slots={form.slots}
+            tz={form.tz}
+            modeLabel={form.mode === 'daily' ? t('每天') : form.mode === 'weekdays' ? t('週一至週五') : t('每週')}
+            loading={loading}
+            maxSlots={MAX_SLOTS}
+            errorOf={rangeError}
+            onChange={setSlot}
+            onToggle={(i) => setSlot(i, { until: form.slots[i].until != null ? null : defaultUntil(form.slots[i].time) })}
+            onRemove={(i) => set('slots', form.slots.filter((_, j) => j !== i))}
+            onAdd={() => set('slots', [...form.slots, { time: nextFreeTime(form.slots), until: null }])}
+          />
         ) : null}
         {form.mode === 'weekly' ? (
           <fieldset className="field">
@@ -651,17 +652,6 @@ export function ScheduleEditor({
             ))}
           </fieldset>
         ) : null}
-
-        <label className="field">
-          <span>{t('時區')}</span>
-          <select value={form.tz} disabled={loading} onChange={(e) => set('tz', e.target.value)}>
-            {timeZoneOptions(form.tz).map((z) => (
-              <option key={z} value={z}>
-                {z}
-              </option>
-            ))}
-          </select>
-        </label>
 
       </div>
 

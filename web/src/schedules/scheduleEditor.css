@@ -266,71 +266,209 @@
   .schedule-editor .schedule-time-grid { grid-template-columns: 1fr; }
 }
 
-/* 時段列表（時間＋刪除）。手機寬度換行，不橫向捲動。 */
-.schedule-editor .schedule-link {
-  justify-self: start;
-  min-height: 32px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent, #2563eb);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  text-decoration: underline;
+/* 何時執行：模式與時區同一塊；時段是一行區間（2026-11-11，B 案）。 */
+.schedule-editor .schedule-when-context {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg-sunken);
+  border-radius: 10px;
+}
+
+.schedule-editor .schedule-when-context select {
+  background: var(--bg-panel);
 }
 
 .schedule-editor .schedule-slots {
+  grid-column: 1 / -1;
   display: grid;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
 .schedule-editor .schedule-slot-row {
-  display: grid;
-  grid-template-columns: minmax(0, 8rem) minmax(0, 1fr) auto;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
-}
-
-.schedule-editor .schedule-slot-row input {
-  min-width: 0;
-  width: 100%;
-}
-
-@media (max-width: 600px) {
-  .schedule-editor .schedule-slot-row {
-    grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
-  }
-  .schedule-editor .schedule-slot-row .schedule-link {
-    grid-column: 1 / -1;
-    justify-self: end;
-  }
-}
-
-.schedule-editor .schedule-slot-range {
-  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
+  gap: 6px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+}
+
+.schedule-editor .schedule-slot-row.is-random {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.schedule-editor .schedule-slot-times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 100%;
   min-width: 0;
 }
 
-.schedule-editor .schedule-slot-range label {
+/* 開始與結束是一組：窄螢幕兩個輸入等分縮小，不再被擠成「08:2」；整組不夠寬時按鈕換到下一行。 */
+.schedule-editor .schedule-slot-row input[type="time"] {
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
+  height: 40px;
+  padding: 0 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  font-size: 15px;
+}
+
+.schedule-editor .schedule-slot-row input[type="time"]::-webkit-calendar-picker-indicator {
+  margin: 0;
+}
+
+.schedule-editor .schedule-slot-tilde {
+  color: var(--text-dim);
+  font-weight: 700;
+  flex: none;
+}
+
+.schedule-editor .schedule-slot-mode,
+.schedule-editor .schedule-slot-delete,
+.schedule-editor .schedule-add-slot {
+  font: inherit;
+  cursor: pointer;
+}
+
+.schedule-editor .schedule-slot-mode {
+  margin-left: auto;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  flex: none;
+}
+
+.schedule-editor .schedule-slot-mode.is-random {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.schedule-editor .schedule-slot-mode:not(.is-random) {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+.schedule-editor .schedule-slot-delete {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 650;
+  flex: none;
 }
 
-.schedule-editor .schedule-slot-range input[type="time"] {
-  width: auto;
+.schedule-editor .schedule-slot-delete svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
-.schedule-editor .schedule-slot-range .hint {
+.schedule-editor .schedule-slot-delete:disabled,
+.schedule-editor .schedule-slot-mode:disabled,
+.schedule-editor .schedule-add-slot:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.schedule-editor .schedule-slot-error {
+  flex: 1 0 100%;
   margin: 0;
-  overflow-wrap: anywhere;
+}
+
+.schedule-editor .schedule-when-preview {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.schedule-editor .schedule-when-preview-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-ink);
+}
+
+.schedule-editor .schedule-when-meta {
+  margin: 0 0 2px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.schedule-editor .schedule-when-sum {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+.schedule-editor .schedule-add-slot {
+  min-height: 40px;
+  width: 100%;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--accent-ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.schedule-editor .schedule-slot-mode:focus-visible,
+.schedule-editor .schedule-slot-delete:focus-visible,
+.schedule-editor .schedule-add-slot:focus-visible {
+  outline: 2px solid var(--ring, #2a63cd);
+  outline-offset: 2px;
+}
+
+@media (min-width: 641px) {
+  .schedule-editor .schedule-when-context {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+  }
+
+  .schedule-editor .schedule-slot-times {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .schedule-editor .schedule-slot-row input[type="time"] {
+    flex: 0 0 11rem;
+    width: 11rem;
+    min-width: 11rem;
+    max-width: none;
+  }
+
+  .schedule-editor .schedule-add-slot {
+    width: auto;
+    justify-self: start;
+  }
 }
 
 .schedule-editor .schedule-from-base {

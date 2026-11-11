@@ -649,8 +649,10 @@ test('編輯器：名稱 → Bot → 時間 → 任務內容最後，textarea �
   assert.equal(prompt.getAttribute('rows'), '8', '任務內容框最少 8 行')
   assert.match(dialog.textContent ?? '', /⌘\/Ctrl\+Enter 儲存/, 'label 旁要有快捷鍵提示')
   const timing = dialog.querySelector('.schedule-time-grid')!
-  assert.ok(timing.textContent?.includes('時間（所選時區）'), '時間標明依所選時區')
+  const context = timing.querySelector('.schedule-when-context')!
+  assert.equal(context.querySelectorAll('select').length, 2, '模式與時區在同一塊')
   assert.ok(timing.textContent?.includes('時區'), '時區與時間在同一組')
+  assert.match(timing.querySelector('.schedule-when-preview')?.textContent ?? '', /執行預覽/)
   assert.equal(dialog.querySelectorAll('.schedule-bot-actions button').length, 2, 'Bot 輔助動作並列')
   assert.ok(dialog.querySelector('.schedule-editor .form-actions .primary'), '主要操作保留在表單中')
 })

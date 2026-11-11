@@ -63,18 +63,19 @@ test('隨機區間：開關打開才出現結束時間，送出帶 until；關�
     if (r.method === 'POST') return { ...fixedSource, ...(r.body as object), id: 'copy' }
   })
   await openCopy(requests)
-  const toggle = () => dialog().querySelector<HTMLInputElement>('input[role=switch]')!
-  assert.equal(toggle().checked, false)
+  const toggle = () => dialog().querySelector<HTMLButtonElement>('.schedule-slot-mode')!
+  assert.equal(toggle().getAttribute('aria-pressed'), 'false')
+  assert.ok(toggle().getAttribute('aria-label'))
   assert.equal(dialog().querySelector('.schedule-slot-until'), null, '關著時沒有結束時間欄')
 
   await click(toggle())
-  assert.equal(toggle().checked, true)
-  const until = () => dialog().querySelector<HTMLInputElement>('.schedule-slot-until input[type=time]')!
+  assert.equal(toggle().getAttribute('aria-pressed'), 'true')
+  const until = () => dialog().querySelector<HTMLInputElement>('input.schedule-slot-until')!
   assert.equal(until().value, '09:05', '預設結束＝開始＋5 分鐘')
-  assert.match(dialog().querySelector('.schedule-slot-range')!.textContent ?? '', /09:00–09:05 隨機/)
+  assert.match(dialog().querySelector('.schedule-when-preview')!.textContent ?? '', /09:00–09:05 隨機/)
 
   await typeInto(until(), '08:00')
-  assert.match(dialog().querySelector('.schedule-slot-range [role=alert]')?.textContent ?? '', /結束時間要晚於開始時間/)
+  assert.match(dialog().querySelector('.schedule-slot-row [role=alert]')?.textContent ?? '', /結束時間要晚於開始時間/)
   await click(buttonIn(dialog(), '建立排程'))
   await settle()
   assert.equal(requests.filter((r) => r.method === 'POST').length, 0, '結束早於開始不送出')
@@ -94,11 +95,11 @@ test('隨機區間：超過 12 小時擋下；關掉開關後 spec 不帶 until'
     if (r.method === 'POST') return { ...source(), ...(r.body as object), id: 'copy' }
   })
   await openCopy(requests)
-  const toggle = () => dialog().querySelector<HTMLInputElement>('input[role=switch]')!
-  assert.equal(toggle().checked, true, '既有區間讀進來是打開的')
-  assert.equal(dialog().querySelector<HTMLInputElement>('.schedule-slot-until input')!.value, '09:00')
-  await typeInto(dialog().querySelector<HTMLInputElement>('.schedule-slot-until input')!, '23:00')
-  assert.match(dialog().querySelector('.schedule-slot-range [role=alert]')?.textContent ?? '', /最長 12 小時/)
+  const toggle = () => dialog().querySelector<HTMLButtonElement>('.schedule-slot-mode')!
+  assert.equal(toggle().getAttribute('aria-pressed'), 'true', '既有區間讀進來是打開的')
+  assert.equal(dialog().querySelector<HTMLInputElement>('input.schedule-slot-until')!.value, '09:00')
+  await typeInto(dialog().querySelector<HTMLInputElement>('input.schedule-slot-until')!, '23:00')
+  assert.match(dialog().querySelector('.schedule-slot-row [role=alert]')?.textContent ?? '', /最長 12 小時/)
 
   await click(toggle())
   assert.equal(dialog().querySelector('.schedule-slot-until'), null)
@@ -107,4 +108,37 @@ test('隨機區間：超過 12 小時擋下；關掉開關後 spec 不帶 until'
   const posts = requests.filter((r) => r.method === 'POST')
   assert.equal(posts.length, 1)
   assert.deepEqual((posts[0].body as { spec: unknown }).spec, { mode: 'daily', time: '08:55' })
+})
+
+test('一行區間：隨機與固定同列、預覽整句、滿 8 個不能再加', async () => {
+  const detail = source([{ time: '08:25', until: '08:29' }, { time: '18:00' }])
+  detail.tz = 'Asia/Taipei'
+  const requests = fakeApi((r) => {
+    if (r.path.endsWith('/projects/p1/schedules') && r.method === 'GET') return { schedules: [detail] }
+    if (r.path.endsWith('/schedules/source')) return detail
+    if (r.method === 'POST') return { ...detail, ...(r.body as object), id: 'copy' }
+  })
+  await openCopy(requests)
+  const rows = () => [...dialog().querySelectorAll<HTMLElement>('.schedule-slot-row')]
+  assert.equal(rows().length, 2)
+  const randomBtn = rows()[0].querySelector<HTMLButtonElement>('.schedule-slot-mode')!
+  const fixedBtn = rows()[1].querySelector<HTMLButtonElement>('.schedule-slot-mode')!
+  assert.equal(randomBtn.getAttribute('aria-pressed'), 'true')
+  assert.equal(randomBtn.textContent?.trim(), '隨機')
+  assert.ok(randomBtn.getAttribute('aria-label'))
+  assert.equal(rows()[0].querySelectorAll('input[type=time]').length, 2)
+  assert.equal(fixedBtn.getAttribute('aria-pressed'), 'false')
+  assert.equal(fixedBtn.textContent?.trim(), '固定')
+  assert.equal(rows()[1].querySelector('input.schedule-slot-until'), null)
+  assert.equal(rows()[1].querySelector('.schedule-slot-delete')?.tagName, 'BUTTON')
+  assert.equal(dialog().querySelector('.schedule-link, input[role=switch]'), null, '不再用連結或 checkbox 開關')
+  assert.equal(dialog().querySelectorAll('.schedule-when-context select').length, 2, '模式與時區同一塊')
+  const preview = dialog().querySelector('.schedule-when-preview')!
+  assert.match(preview.textContent ?? '', /每天 · Asia\/Taipei/)
+  assert.match(preview.textContent ?? '', /08:25–08:29 隨機、18:00 固定/)
+
+  const add = () => buttonIn(dialog(), '＋ 新增時段')
+  for (let i = 0; i < 6; i++) await click(add())
+  assert.equal(rows().length, 8)
+  assert.equal(add().disabled, true, '時段最多 8 個')
 })
