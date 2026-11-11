@@ -371,6 +371,31 @@ const PRESENCE_STALE: Duration = Duration::from_secs(90);
 /// 「正在看」要求最近這麼久內有互動。
 const PRESENCE_ACTIVE_SECS: u64 = 60;
 const BODY_MAX: usize = 80;
+/// 訊息類推播（回合完成／需要回應）送出前等這麼久再判斷一次「已讀」：期間在任一端讀了就不送（使用者 2026-11-11）。
+/// 可設常數；測試會設成 0（`READ_DELAY_MS`）。
+static READ_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(20_000);
+
+/// 訊息類推播的「已讀」對象。
+#[derive(Clone, Debug)]
+pub(crate) enum ReadTarget {
+    /// 回合完成／失敗：這個回合最新的一則訊息（沒有＝無從判斷，照推）。已讀＝跟 `read_marks` 的標記比，同前端 `isUnread`。
+    Message(Option<String>),
+    /// 需要回應：這個時刻之後，這顆 bot 在任一端被打開過（`POST /read`）才算已讀。
+    Since(std::time::Instant),
+}
+
+/// 最近一次 `POST /api/bots/{id}/read`（任一端）。只給 `ReadTarget::Since` 用；不寫 DB，重啟清空。
+static LAST_READ: std::sync::Mutex<Option<std::collections::HashMap<String, std::time::Instant>>> = std::sync::Mutex::new(None);
+
+/// 已送出、還可能在別的裝置上被讀掉的訊息類推播。每 (bot, 類別) 只留最新一則：同 tag 的通知在裝置上會互相覆蓋。
+struct SentPush {
+    seq: u64,
+    tag: String,
+    read: ReadTarget,
+}
+
+static SENT: std::sync::Mutex<Option<std::collections::HashMap<(String, MainKind), SentPush>>> = std::sync::Mutex::new(None);
+static SENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ---------- 被登出（Auth）與撞額度上限（Quota）推播 ----------
 
@@ -539,14 +564,83 @@ fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Val
     json!({"title": bot_name, "body": body, "tag": format!("bot:{bot_id}:{k}"), "url": format!("/bots/{bot_id}")})
 }
 
-async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, line: impl std::future::Future<Output = String>) {
+async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, read: ReadTarget, line: impl std::future::Future<Output = String>) {
     // 先去重／節流／presence，再等譯文或摘要：等的時候不會重複推，也不會因為等而漏推。
     if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id)) {
         return;
     }
+    // 已讀就不推：先等一段（期間在任一端讀了就取消），譯文／摘要等完後再判斷一次。
+    tokio::time::sleep(Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed))).await;
+    if is_read(app, &bot.id, &read).await {
+        return;
+    }
     let payload = main_payload(&bot.id, &bot.name, kind, &line.await);
+    if is_read(app, &bot.id, &read).await {
+        return;
+    }
+    let seq = SENT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let tag = payload["tag"].as_str().unwrap_or_default().to_string();
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((bot.id.clone(), kind), SentPush { seq, tag, read: read.clone() });
     let subject = app.cfg.get().await.server.push_subject.clone();
     let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+    // 送的途中已經在某端讀了：補發關閉（不然它會留在別的裝置上）。
+    if is_read(app, &bot.id, &read).await {
+        close_sent(app, &bot.id, kind, seq).await;
+    }
+}
+
+/// 已讀判斷：`Message` 看 `read_marks` 的標記是否已涵蓋那則訊息；`Since` 看這之後有沒有任何一端打開過這顆 bot。
+async fn is_read(app: &Arc<App>, bot_id: &str, read: &ReadTarget) -> bool {
+    match read {
+        ReadTarget::Message(None) => false,
+        ReadTarget::Message(Some(mid)) => crate::read_marks::covers(&app.db, bot_id, mid).await.unwrap_or(false),
+        ReadTarget::Since(at) => LAST_READ.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(bot_id)).is_some_and(|t| t >= at),
+    }
+}
+
+/// 把仍是「最新」的那則已送出推播關掉（同 tag，裝置上的通知會被關）。`seq` 不符＝已被更新的一則取代，不動它。
+async fn close_sent(app: &Arc<App>, bot_id: &str, kind: MainKind, seq: u64) {
+    let tag = {
+        let mut g = SENT.lock().unwrap_or_else(|e| e.into_inner());
+        let map = g.get_or_insert_with(Default::default);
+        match map.get(&(bot_id.to_string(), kind)) {
+            Some(s) if s.seq == seq => {
+                let tag = s.tag.clone();
+                map.remove(&(bot_id.to_string(), kind));
+                tag
+            }
+            _ => return,
+        }
+    };
+    let subject = app.cfg.get().await.server.push_subject.clone();
+    let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &json!({"tag": tag, "close": true}))).await;
+}
+
+/// `POST /api/bots/{id}/read` 收到（任一端讀了）：記下時間，並在背景檢查已送出的推播，已讀的就關掉。
+pub(crate) fn on_bot_read(app: &Arc<App>, bot_id: &str) {
+    LAST_READ.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(bot_id.to_string(), std::time::Instant::now());
+    let pending: Vec<(MainKind, u64, ReadTarget)> = SENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|m| m.iter().filter(|((b, _), _)| b == bot_id).map(|((_, k), s)| (*k, s.seq, s.read.clone())).collect())
+        .unwrap_or_default();
+    if pending.is_empty() {
+        return;
+    }
+    let (app, bot_id) = (app.clone(), bot_id.to_string());
+    tokio::spawn(async move {
+        for (kind, seq, read) in pending {
+            if is_read(&app, &bot_id, &read).await {
+                close_sent(&app, &bot_id, kind, seq).await;
+            }
+        }
+    });
+}
+
+/// 回合最新的一則訊息（回覆；失敗回合沒有回覆時就是使用者那則）。
+async fn newest_in_turn(app: &Arc<App>, turn_id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT id FROM messages WHERE turn_id = ? ORDER BY rowid DESC LIMIT 1").bind(turn_id).fetch_optional(&app.db).await.ok().flatten()
 }
 
 /// 等譯文、等摘要各自的上限（毫秒）；測試會縮短。
@@ -614,7 +708,8 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
     let Some(bot) = primary_bot(app, bot_id).await else { return };
     if failed {
         // 回合失敗不論誰觸發都推。
-        send_main(app, n, &bot, MainKind::Done, turn_id, async { "回合失敗".to_string() }).await;
+        let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
+        send_main(app, n, &bot, MainKind::Done, turn_id, read, async { "回合失敗".to_string() }).await;
         return;
     }
     // 系統觸發的回合（daemon 通知、hook 喚醒、背景任務自續）不推：使用者沒有在等它，每則都推太吵（2026-11-10）。
@@ -628,7 +723,8 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
         .ok()
         .flatten();
     let (mid, text) = reply.unwrap_or_default();
-    send_main(app, n, &bot, MainKind::Done, turn_id, async { push_line(app, &mid, &text).await }).await;
+    let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
+    send_main(app, n, &bot, MainKind::Done, turn_id, read, async { push_line(app, &mid, &text).await }).await;
 }
 
 fn is_other_top_level_bot(b: &crate::db::Bot) -> bool {
@@ -662,7 +758,7 @@ fn blocked_notify_enabled(dir: &Path, b: &crate::db::Bot) -> bool {
     }
 }
 
-async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode: u64) {
+async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode: u64, opened: std::time::Instant) {
     let settle = n.settle.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(BLOCKED_SETTLE);
     tokio::time::sleep(settle).await;
     if load_subs(&app.data_dir).is_empty() {
@@ -676,7 +772,7 @@ async fn on_blocked(app: Arc<App>, n: Arc<MainNotifier>, bot_id: String, episode
     if run.agent_status != "blocked" {
         return;
     }
-    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), blocked_line(&app, &bot_id, &run.id)).await;
+    send_main(&app, &n, &bot, MainKind::Blocked, &format!("{}:{episode}", run.id), ReadTarget::Since(opened), blocked_line(&app, &bot_id, &run.id)).await;
 }
 
 pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &crate::state::WsEvent) {
@@ -696,7 +792,7 @@ pub(crate) async fn handle_event(app: &Arc<App>, n: &Arc<MainNotifier>, ev: &cra
                 let first = n.blocked_open.lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string());
                 if first {
                     let episode = n.episode.fetch_add(1, Ordering::SeqCst) + 1;
-                    tokio::spawn(on_blocked(app.clone(), n.clone(), bot_id.to_string(), episode));
+                    tokio::spawn(on_blocked(app.clone(), n.clone(), bot_id.to_string(), episode, std::time::Instant::now()));
                 }
             } else {
                 n.blocked_open.lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id);
@@ -1941,7 +2037,78 @@ pub(crate) mod tests {
         })));
         let n = Arc::new(MainNotifier::default());
         *n.settle.lock().unwrap() = Some(Duration::ZERO);
+        READ_DELAY_MS.store(0, Ordering::Relaxed);
         (env, bot.id, n, rx)
+    }
+
+    async fn created_at_of(app: &Arc<App>, msg_id: &str) -> String {
+        sqlx::query_scalar("SELECT created_at FROM messages WHERE id = ?").bind(msg_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reply_already_read_on_any_device_is_not_pushed() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        add_reply(&env, &bot_id, "r1", "ok").await;
+        let at = created_at_of(&app, "m-r1").await;
+        crate::read_marks::mark(&app.db, &bot_id, &at, "m-r1").await.unwrap();
+        handle_event(&app, &n, &turn_ev(&bot_id, "r1", "completed")).await;
+        assert!(rx.try_recv().is_err(), "別的裝置已經讀到這則回覆：不推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn a_read_during_the_delay_cancels_the_push() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        add_reply(&env, &bot_id, "r2", "ok").await;
+        let at = created_at_of(&app, "m-r2").await;
+        READ_DELAY_MS.store(300, Ordering::Relaxed);
+        let reader = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            crate::read_marks::mark(&app.db, &bot_id, &at, "m-r2").await.unwrap();
+        };
+        let ev = turn_ev(&bot_id, "r2", "completed");
+        tokio::join!(handle_event(&app, &n, &ev), reader);
+        READ_DELAY_MS.store(0, Ordering::Relaxed);
+        assert!(rx.try_recv().is_err(), "等的期間在任一端讀了就取消");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn a_pushed_reply_is_closed_when_any_device_reads_it() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        add_reply(&env, &bot_id, "r3", "ok").await;
+        handle_event(&app, &n, &turn_ev(&bot_id, "r3", "completed")).await;
+        let pushed = rx.try_recv().expect("沒讀過，照推");
+        let at = created_at_of(&app, "m-r3").await;
+        crate::read_marks::mark(&app.db, &bot_id, &at, "m-r3").await.unwrap();
+        crate::webpush::on_bot_read(&app, &bot_id);
+        let closed = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("要送關閉指令").unwrap();
+        assert_eq!(closed["tag"], pushed["tag"], "關掉的是同一個 tag");
+        assert_eq!(closed["close"], true);
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_push_is_read_only_by_a_read_after_it_opened() {
+        let _g = SENDER_TESTS.lock().await;
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bx = "bot-read-since";
+        crate::webpush::on_bot_read(&app, bx);
+        std::thread::sleep(Duration::from_millis(2));
+        let opened = std::time::Instant::now();
+        assert!(!is_read(&app, bx, &ReadTarget::Since(opened)).await, "開始之前的讀取不算");
+        crate::webpush::on_bot_read(&app, bx);
+        assert!(is_read(&app, bx, &ReadTarget::Since(opened)).await, "開始之後有人打開過就算已讀");
     }
 
     fn turn_ev(bot_id: &str, turn: &str, status: &str) -> crate::state::WsEvent {

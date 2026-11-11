@@ -3175,6 +3175,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `POST /api/push/subscriptions` body `{endpoint, keys:{p256dh, auth}, origin?}`（瀏覽器 `PushSubscription.toJSON()`；`origin`＝網頁 `location.origin`，只收 https，存起來當 VAPID `sub`）→ `{ok, created, count}`。endpoint 必須是 https；`p256dh` 須為合法 P-256 點、`auth` 16 bytes，否則 400 `invalid_endpoint`／`invalid_p256dh`／`invalid_auth`；同 endpoint 去重（更新 keys，`created:false`）；上限 50 筆（400 `too_many_subscriptions`）。存於 `{data_dir}/push-subscriptions.json`（0600）。
 - `DELETE /api/push/subscriptions?endpoint=<url>` → `{ok, removed}`。
 - `POST /api/push/test` → `{sent, removed, failed, reasons[]}`：對所有訂閱送「測試通知」；`reasons` 是推送服務拒絕的原因（回應 body 的 `reason`，已截短，不含 endpoint／金鑰），網頁顯示「沒有送出：推送服務拒絕（原因）」。
+- **已讀抑制**（2026-11-11）：`POST /api/bots/{id}/read` 收到後，daemon 會檢查已送出的訊息類推播（回合完成／需要回應），已讀者以同 tag 送一則 `{tag, close:true}` 推播，網頁 sw 據此關掉裝置上的通知。回應格式不變；標記未前進時仍照常回應，只是不廣播 `bot_read`（#899）。
 - **被登出推播**：當 bot 回合因授權失敗收尾（`login_prompt.rs:34 on_auth_failure`），以 `(host, kind, identity)` 去重並聚合同身份所有受影響 bot（例「codex co0 被登出：3 顆 bot」），不再每顆 bot 各推一則；回合成功恢復（`on_turn_ok`）或手動清除後重置。
 - **撞額度上限推播**：當 bot 撞到額度上限（`hookrecv.rs:233,1434`），以額度 key（`quota_key` + `bucket`）去重，一個重置窗只推一則；聚合同額度 key 底下所有受影響 bot 並附重置時間（例「cc1 額度用完：sn-wkr、hk-wkr… 共 7 顆停擺，11/12 11:00 重置」）。
 - VAPID JWT：header `{typ:JWT,alg:ES256}`、`aud`＝endpoint 的 origin、`exp`＝現在＋1 小時、`sub` 取 `[server] push_subject` > 訂閱的 https origin > `mailto:noreply@example.com`（`.invalid` 等不合法值略過；Apple 會以 403 BadJwtToken 拒絕）。送出帶 `TTL`、`Urgency`。

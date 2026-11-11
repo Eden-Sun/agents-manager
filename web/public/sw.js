@@ -9,6 +9,17 @@ self.addEventListener('push', (event) => {
   } catch {
     data = { body: event.data ? event.data.text() : '' }
   }
+  if (data.close && data.tag) {
+    // 關閉指令（別的裝置已讀）：Chrome 要求每則 push 都顯示通知，所以先用同 tag 覆蓋成無聲空白，再把這個 tag 全部關掉。
+    event.waitUntil(
+      (async () => {
+        await self.registration.showNotification(' ', { tag: data.tag, silent: true, icon: '/icon-192.png' })
+        const list = await self.registration.getNotifications({ tag: data.tag })
+        list.forEach((n) => n.close())
+      })(),
+    )
+    return
+  }
   const title = data.title || 'AG Man'
   event.waitUntil(
     self.registration.showNotification(title, {

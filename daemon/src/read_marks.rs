@@ -215,6 +215,28 @@ fn mark_at(raw: Option<String>, message_at: Option<&str>, now: &str) -> Result<S
     }
 }
 
+/// 這顆 bot 的標記是否已涵蓋這則訊息（標記時間晚於它，或同時間且順序不早於它）。與前端 `isUnread` 同一個判斷。
+/// 訊息不在這顆 bot 底下＝false。
+pub async fn covers(pool: &SqlitePool, bot_id: &str, message_id: &str) -> Result<bool> {
+    let Some(m) = marks(pool).await?.remove(bot_id) else { return Ok(false) };
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT m.created_at, m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ? AND c.bot_id = ?",
+    )
+    .bind(message_id)
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((created_at, rowid)) = row else { return Ok(false) };
+    Ok(match m.at.as_str().cmp(created_at.as_str()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => match m.seq {
+            Some(s) => rowid <= s,
+            None => message_id <= m.message_id.as_str(),
+        },
+    })
+}
+
 #[derive(Deserialize, Default)]
 pub struct MarkIn {
     /// 讀到的最後一則訊息的 `created_at`；有 `message_id` 時省略會取該訊息時間，沒有 id 才取現在。
@@ -252,6 +274,8 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
     let (m, advanced) = mark(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let unread = unread_count_for(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let out = json!({"bot_id": id, "read_mark": json_value(&m), "unread": unread});
+    // 任一端讀了：已送出的訊息推播若已讀就在各裝置關掉（不看 advanced：重複的讀取也算「有人在看」）。
+    crate::webpush::on_bot_read(&app, &id);
     // 標記沒前進（重複送、或較舊的標記被擋下）：其他分頁什麼都沒變，不廣播（#899）。
     if advanced {
         app.emit("bot_read", out.clone()).await;
