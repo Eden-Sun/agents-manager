@@ -2,6 +2,7 @@ import { createElement, useEffect, useSyncExternalStore } from 'react'
 import { translateMessage } from '../api'
 import type { Message } from '../api/types'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
+import { isMostlySimplified } from '../lib/zhSimplified'
 import { useT } from '../lib/i18n'
 import { autoTranslateAllowed, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
 import { useStore } from '../store/store'
@@ -22,7 +23,7 @@ export { AUTO_TRANSLATE_RECENT, usd }
 export function useMessageTranslation(msg: Message, opts: { recent?: boolean } = {}): { button: React.ReactNode; content: React.ReactNode; flip: 'tr' | 'orig' | null } {
   const t = useT()
   const st = useSyncExternalStore(subscribeTranslations, () => getTranslation(msg.id), () => getTranslation(msg.id))
-  const eligible = msg.role === 'assistant' && !msg.rewound_at && msg.source !== 'terminal_fallback' && isMostlyEnglish(msg.content)
+  const eligible = msg.role === 'assistant' && !msg.rewound_at && msg.source !== 'terminal_fallback' && (isMostlyEnglish(msg.content) || isMostlySimplified(msg.content))
   const ready = useTranslateReady(eligible)
   const off = ready && !ready.ok ? ready : null
 

@@ -4,7 +4,7 @@
 //! 符合條件的 assistant 英文訊息就呼叫 [`crate::message_translate::translate`]，寫進**同一份**快取（`message-translate/`）。
 //! 之後網頁開頁、手動按，都是快取命中（`cached: true`、不扣費）；預先翻跟網頁同時撞上，single-flight 只打一次 API。
 //!
-//! - 條件跟網頁 `useMessageTranslation` 的 eligible／fresh 一致：assistant、未撤回、非 `terminal_fallback`、主要是英文、
+//! - 條件跟網頁 `useMessageTranslation` 的 eligible／fresh 一致：assistant、未撤回、非 `terminal_fallback`、主要是英文或簡體中文（2026-11-11，本地轉繁，不送 API）、
 //!   `incomplete = 0`、非空、不超過 [`crate::message_translate::MAX_CHARS`]。網頁的「最近 N 則」是顯示規則，預先翻不看它。
 //! - 系統觸發的回合不另外排除：網頁本來就對所有符合條件的新訊息自動翻，這裡照同一條規則。
 //! - 失敗：一次失敗後 [`FAILURE_COOLDOWN`] 內不再預先翻（落地的訊息直接略過，網頁開頁時仍照舊的自動翻規則、失敗停手）。
@@ -57,7 +57,7 @@ pub(crate) fn eligible(role: &str, content: &str, incomplete: bool, rewound: boo
         && source != "terminal_fallback"
         && !content.trim().is_empty()
         && content.chars().count() <= mt::MAX_CHARS
-        && mt::is_mostly_english(content)
+        && (mt::is_mostly_english(content) || crate::zh_convert::local_applies(content))
 }
 
 fn cooling_down() -> bool {
@@ -178,6 +178,19 @@ mod tests {
         assert!(!eligible("assistant", EN, false, false, "terminal_fallback"), "備援抓的不翻");
         assert!(!eligible("assistant", "這是中文的回覆，不需要翻譯喔。", false, false, "hook"), "主要是中文不翻");
         assert!(!eligible("assistant", "   ", false, false, "hook"), "空白不翻");
+        assert!(eligible("assistant", "这个问题我们需要修复一下，修复之后请再运行测试，确认没有问题了再告诉我们。", false, false, "hook"), "簡體走本地轉繁，也預先做");
+    }
+
+    #[tokio::test]
+    async fn landed_simplified_reply_is_converted_locally_and_costs_nothing() {
+        let _g = TEST_LOCK.lock().await;
+        let (env, bot_id, f) = setup(true, 0).await;
+        let simp = "这个问题我们需要修复一下，修复之后请再运行测试，确认没有问题了再告诉我们。";
+        insert(&env, &bot_id, "m-pre-simp", "assistant", simp, 0, false, "transcript").await;
+        pretranslate(&env.app, "m-pre-simp").await;
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0, "簡體不送 API");
+        let shown = mt::translate(&env.app, "m-pre-simp", simp).await.unwrap();
+        assert_eq!((shown["cached"].clone(), shown["translation"].clone()), (serde_json::json!(true), serde_json::json!("這個問題我們需要修復一下，修復之後請再執行測試，確認沒有問題了再告訴我們。")));
     }
 
     #[tokio::test]

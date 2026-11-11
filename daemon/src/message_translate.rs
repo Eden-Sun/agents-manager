@@ -100,11 +100,15 @@ pub(crate) async fn auto_on(app: &App) -> bool {
 }
 
 /// 核心：查快取、沒有才打 API、寫快取。回 `{translation, model, cached, usage?}`。
+/// 簡體中文（[`crate::zh_convert::local_applies`]）不打 API：本地 OpenCC 轉成台灣繁體，寫同一份快取（model `opencc-s2twp`、費用 0）。
 /// 同一個快取鍵同時只有一個上游呼叫（single-flight）：預先翻跟網頁的手動／自動翻撞在一起，後到的等先到的，拿到快取，不重複扣費。
 pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Value, LcError> {
     let path = cache_path(&app.data_dir, &cache_key(id, content));
     if let Some(hit) = load(&path) {
         return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+    }
+    if crate::zh_convert::local_applies(content) {
+        return Ok(local_convert(content, &path));
     }
     let slot = flight_slot(&path);
     let guard = slot.lock().await;
@@ -118,6 +122,16 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
     drop(guard);
     flight_forget(&path, slot);
     out
+}
+
+/// 簡體 → 台灣繁體（本地，不呼叫 API）。結果寫進同一份快取，之後命中即 `cached:true`。
+fn local_convert(content: &str, path: &Path) -> Value {
+    let translation = crate::zh_convert::to_traditional(content);
+    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0) };
+    if let Err(e) = save(path, &entry) {
+        tracing::warn!("message translate cache write failed: {e}");
+    }
+    json!({"translation": translation, "model": crate::zh_convert::MODEL, "cached": false, "cost_usd": 0.0})
 }
 
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
@@ -611,6 +625,27 @@ mod tests {
         let err = translate(&app, "m1", "hello").await.unwrap_err();
         assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "claude_api_not_configured"), "{err:?}");
         assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn simplified_chinese_is_converted_locally_without_an_api_call() {
+        let (app, _dir) = app(true).await;
+        let f = fake(&app);
+        let simp = "这个问题我们需要修复一下，修复之后请再运行测试，确认没有问题了再告诉我们。";
+        let a = translate(&app, "m-simp", simp).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0, "簡體不打 API");
+        assert_eq!((a["translation"].clone(), a["model"].clone(), a["cached"].clone(), a["cost_usd"].clone()), (
+            json!("這個問題我們需要修復一下，修復之後請再執行測試，確認沒有問題了再告訴我們。"),
+            json!("opencc-s2twp"),
+            json!(false),
+            json!(0.0),
+        ));
+        let b = translate(&app, "m-simp", simp).await.unwrap();
+        assert_eq!((b["cached"].clone(), b["translation"].clone()), (json!(true), a["translation"].clone()), "同一份快取");
+        // 繁體與日文照舊：不是簡體，也不是英文，這支端點仍會照舊送 LLM（前端只對英文與簡體出按鈕）。
+        let trad = translate(&app, "m-trad", "這個問題我們需要修復一下，修復之後請再執行測試。").await.unwrap();
+        assert_eq!(trad["model"], json!("claude-haiku-5-5"));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

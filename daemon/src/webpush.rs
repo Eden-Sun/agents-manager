@@ -668,7 +668,7 @@ async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
     let on = master && state.as_ref().is_some_and(|s| s.enabled);
     let auto = on && state.as_ref().is_some_and(|s| s.auto == Some(true));
     let mut work = text.to_string();
-    if auto && mt::is_mostly_english(text) && text.chars().count() <= mt::MAX_CHARS {
+    if auto && (mt::is_mostly_english(text) || crate::zh_convert::local_applies(text)) && text.chars().count() <= mt::MAX_CHARS {
         if let Ok(Ok(v)) = tokio::time::timeout(line_wait(), mt::translate(app, id, raw)).await {
             if let Some(t) = v["translation"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
                 work = t.to_string();
