@@ -41,8 +41,8 @@ async function open() {
 }
 
 async function fillAndSubmit(name: string, ssh: string) {
-  await typeInto(input('m4p'), name)
-  await typeInto(input('m4p@100.64.0.2'), ssh)
+  await typeInto(input('my-server'), name)
+  await typeInto(input('user@my-server'), ssh)
   await click(buttonByText(document.body, '新增並連線'))
 }
 
@@ -54,14 +54,14 @@ for (const [label, ssh] of [
   it(`新增主機：${label}前端先擋，畫面有原因、不送請求、表單留著、清單不變`, async () => {
     const requests = await open()
     const before = hostNames()
-    await typeInto(input('m4p'), 'evil1')
-    await typeInto(input('m4p@100.64.0.2'), ssh)
+    await typeInto(input('my-server'), 'evil1')
+    await typeInto(input('user@my-server'), ssh)
     assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /ssh 目標要是主機/, '畫面說原因')
     assert.equal(buttonByText(document.body, '新增並連線').disabled, true, '按鈕鎖住')
     assert.equal(posts(requests).length, 0, '一個請求都沒送')
     assert.deepEqual(hostNames(), before, '沒有多出主機')
-    assert.equal(input('m4p').value, 'evil1', '名稱還在，讓人改')
-    assert.equal(input('m4p@100.64.0.2').value, ssh, 'ssh 欄位還在，讓人改')
+    assert.equal(input('my-server').value, 'evil1', '名稱還在，讓人改')
+    assert.equal(input('user@my-server').value, ssh, 'ssh 欄位還在，讓人改')
   })
 }
 
@@ -70,8 +70,8 @@ it('新增主機：非法 herdr_session（含 /）、打錯的 port 前端先擋
   await click(buttonByText(document.body, '進階'))
   const inputs = () => [...document.querySelectorAll<HTMLInputElement>('.hosts-panel form input')]
   await typeInto(inputs().find((i) => i.value === 'agents-manager')!, '../../etc')
-  await typeInto(input('m4p'), 'evil2')
-  await typeInto(input('m4p@100.64.0.2'), 'build-box')
+  await typeInto(input('my-server'), 'evil2')
+  await typeInto(input('user@my-server'), 'build-box')
   assert.equal(buttonByText(document.body, '新增並連線').disabled, true)
   assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /herdr_session 要是/)
   await typeInto(inputs().find((i) => i.value === '../../etc')!, 'agents-manager')
@@ -86,8 +86,8 @@ it('新增主機：進階欄位打錯後收起「進階」，按鈕鎖住的原�
   const requests = await open()
   await click(buttonByText(document.body, '進階'))
   const inputs = () => [...document.querySelectorAll<HTMLInputElement>('.hosts-panel form input')]
-  await typeInto(input('m4p'), 'evil3')
-  await typeInto(input('m4p@100.64.0.2'), 'build-box')
+  await typeInto(input('my-server'), 'evil3')
+  await typeInto(input('user@my-server'), 'build-box')
   await typeInto(inputs().find((i) => i.value === '22')!, '2222x')
   await click(buttonByText(document.body, '進階'))
   assert.equal(buttonByText(document.body, '新增並連線').disabled, true, '打錯的 port 鎖住送出')
@@ -101,7 +101,7 @@ it('新增主機：合法就出現在清單、表單清空、顯示就緒；刪�
   await until(() => hostNames().includes('dom3ok'), '主機出現在 store')
   await until(() => document.querySelector('.hosts-panel > .host-result.ok') !== null, '就緒結果條')
   assert.match(document.querySelector('.hosts-panel > .host-result.ok')!.textContent ?? '', /dom3ok.*就緒/)
-  assert.equal(input('m4p').value, '', '成功後表單清空')
+  assert.equal(input('my-server').value, '', '成功後表單清空')
   assert.ok([...document.querySelectorAll('.host-row .host-name')].some((e) => e.textContent?.includes('dom3ok')))
 
   const row = [...document.querySelectorAll('.host-row')].find((r) => r.textContent?.includes('dom3ok'))!

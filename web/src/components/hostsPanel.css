@@ -317,3 +317,54 @@ details.env-fold summary {
 .host-baseline-apply-wrap > .host-baseline-apply-err {
   color: var(--danger);
 }
+
+/* 缺工具引導（ToolInstallGuide）：指令可複製、說明一行、官方連結＋重新檢查。 */
+.tool-install-guide {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.tool-install-step,
+.tool-install-cmd {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-install-step {
+  margin-top: 2px;
+}
+
+.tool-install-os {
+  min-width: 48px;
+  color: var(--text-dim);
+}
+
+.tool-install-cmd code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.tool-install-note {
+  display: block;
+  margin-top: 4px;
+}
+
+.tool-install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.host-baseline-why {
+  display: block;
+  margin-top: 1px;
+  color: var(--text-dim);
+}

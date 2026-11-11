@@ -1523,3 +1523,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **編輯器頂部三格**：下次觸發、狀態、上次結果（含花費時間）。格內只留值，不重複「下次：」「狀態：」標籤。頂部摘要不重複「已儲存的 Bot」資訊，統一由表單內的「誰來執行」／`ScheduleBotPicker` 呈現。未存變更、隨機區間摘要留在三格下面。最近執行仍是表單最後、預設收合的 `<details>`；摘要列帶上次結果與花費時間，展開後每一筆是一張卡片（來源、時間、狀態、花費、逐次結果），不再是 160px 的縮排清單。
 - **表單分段**（順序不變：名稱 → 誰來執行 → 何時執行 → 通知／重試／清空／基準快照 → 任務內容）：通知下多一行說明推播跟 `notify` 走（all 成功也推、failure 只推失敗／拒絕／結果不明、none 不推），全站開關仍在環境設定。重試仍是次數預設 2、間隔預設 1 分鐘，沒有截止欄。
 - **iPhone 底部動作**：儲存獨佔一列（44px），立即執行／試跑、停用／刪除兩兩一列。2026-11-07 把五顆擠成一排，在 390px 上字被截、不好點；這次改回來是為了拇指目標，說明句佔滿寬。桌機仍是同一列換行。
+
+## 主機缺工具引導與 placeholder 通用化（2026-11-11，派工 am-repo-jvj3bt）
+
+- 一致性區塊的「缺工具 X（登入 shell 的 PATH 找不到）」與 gh 狀態列的「gh 未安裝」，嚴重項下方內嵌引導（`ToolInstallGuide`）：依 `hosts[].baseline.os`（`Darwin`／`Linux`，不明就兩套都列）給**可複製**的安裝指令、官方連結、「重新檢查」按鈕（`refreshTools`，gh 另外重讀 gh 狀態）。
+- **只給指令，不自動執行**。`claude`／`codex` 的「安裝」鈕走既有的 bot 流程，`rtk`／`bun`／`gh`／`jq`／`zsh`／`herdr` 沒有可核對的一鍵安裝機制，所以不新增自動安裝。`rtk` 目前沒有經過核對的官方來源：不猜指令、不給連結，只說明請依它的安裝說明裝。
+- 每個引導都寫明：要裝到**登入 shell** 的 PATH 上才找得到（brew 的 bin 目錄或 `~/.local/bin`，並確認 `~/.zprofile`／`~/.profile` 有加進 PATH），裝完按「重新檢查」。
+- 黃字提醒（`codex.config.toml`、`codex.hooks.json`、`codex.config.toml:<鍵>`、`grok.config.toml`、`herdr.config.toml`）各附一句說明：這代表什麼、要不要處理（有「可自動補」就用補齊，「需手動」照提示自己加；grok／herdr 的 config 只有要用或要自訂時才需要）。映射在 `web/src/lib/toolInstall.ts` 的 `baselineWarnWhy`。
+- 主機新增表單的 placeholder 改成通用範例（名稱 `my-server`、ssh 目標 `user@my-server`），不再帶擁有者的私人主機名與 IP。

@@ -4,6 +4,7 @@ import type { CloseNeedsConfirm } from '../api'
 import type { HerdrVersion, HostBaseline, HostResult, HostShell, RemoteCargoSettings } from '../api/types'
 import { herdrVersionView } from '../lib/herdrVersion'
 import { hostBaselineView } from '../lib/hostBaseline'
+import { baselineWarnWhy } from '../lib/toolInstall'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { nestableBusy } from '../lib/nestableBusy'
 import { DEFAULT_REMOTE_ROOT, remoteCargoProblems, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
@@ -16,6 +17,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
 import { HostBaselineApply } from './HostBaselineApply'
 import { ServicePaneNote } from './ServicePaneNote'
+import { ToolInstallGuide } from './ToolInstallGuide'
 import { ToolBadges } from './Tools'
 import './hostsPanel.css'
 
@@ -188,6 +190,8 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
 
   const criticalItems = v.items.filter((i) => i.severity === 'critical')
   const warnItems = v.items.filter((i) => i.severity !== 'critical')
+  const recheckTools = () => useStore.getState().refreshTools(host === 'local' ? '' : host)
+  const osOf = baseline?.os ?? null
 
   return (
     <span className={`host-baseline ${v.level}`}>
@@ -201,6 +205,7 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
             <li key={i.id} className={i.severity} title={i.id}>
               {i.message}
               <BaselineFix fix={i.fix} />
+              {i.id.startsWith('tool.') ? <ToolInstallGuide tool={i.id.slice('tool.'.length)} os={osOf} onRecheck={recheckTools} /> : null}
             </li>
           ))}
         </ul>
@@ -213,6 +218,7 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
               <li key={i.id} className={i.severity} title={i.id}>
                 {i.message}
                 <BaselineFix fix={i.fix} />
+                {baselineWarnWhy(i.id) ? <span className="host-baseline-why">{baselineWarnWhy(i.id)}</span> : null}
               </li>
             ))}
           </ul>
@@ -380,7 +386,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
         <input
           type="text"
           value={name}
-          placeholder="m4p"
+          placeholder="my-server"
           spellCheck={false}
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
@@ -393,7 +399,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
         <input
           type="text"
           value={ssh}
-          placeholder="m4p@100.64.0.2"
+          placeholder="user@my-server"
           spellCheck={false}
           onChange={(e) => setSsh(e.target.value)}
         />

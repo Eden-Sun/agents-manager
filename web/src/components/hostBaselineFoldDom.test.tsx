@@ -128,10 +128,11 @@ it('#719 階段 2：每項尾端標「可自動補／需手動」；沒有 fixab
   await mount(<BaselineLine baseline={baseline} />)
   const crit = document.querySelector('ul.host-baseline-items li')!
   assert.equal(crit.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix manual')
-  assert.equal(crit.textContent, '缺工具 rtk（需手動）')
+  // 缺工具項內嵌安裝引導（ToolInstallGuide），所以只比對開頭的說明文字。
+  assert.ok(crit.textContent?.startsWith('缺工具 rtk（需手動）'), crit.textContent ?? '')
   const warn = document.querySelector('details.env-fold li')!
   assert.equal(warn.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix auto')
-  assert.equal(warn.textContent, 'codex：config.toml 沒有 features.hooks（可自動補）')
+  assert.ok(warn.textContent?.startsWith('codex：config.toml 沒有 features.hooks（可自動補）'), warn.textContent ?? '')
   await unmountAll()
 
   await mount(<BaselineLine baseline={{ ...baseline, fixable: undefined }} />)

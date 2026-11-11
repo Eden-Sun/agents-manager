@@ -5,6 +5,7 @@ import type { GhPending, GhStatus } from '../api/types'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { CopyChip } from './CopyChip'
+import { ToolInstallGuide } from './ToolInstallGuide'
 import { hostLabel } from './toolsHelpers'
 import './ghAuth.css'
 
@@ -63,6 +64,7 @@ export function GhHostStatus({ host }: { host: string }) {
   const notify = useStore((s) => s.notify)
   const [st, setSt] = useState<GhStatus | null>(null)
   const [busy, setBusy] = useState(false)
+  const osOfHost = useStore((s) => (host === 'local' ? s.localBaseline : s.hosts.find((h) => h.name === host)?.baseline)?.os ?? null)
 
   const refresh = useCallback(() => {
     void api
@@ -91,6 +93,10 @@ export function GhHostStatus({ host }: { host: string }) {
   }
 
   if (!st) return null
+  const recheckGh = async () => {
+    await useStore.getState().refreshTools(host === 'local' ? '' : host)
+    refresh()
+  }
   const label = !st.installed
     ? t('gh 未安裝')
     : st.logged_in === true
@@ -103,6 +109,7 @@ export function GhHostStatus({ host }: { host: string }) {
   const authState = !st.installed ? 'missing' : st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'
   return (
     <span className={`gh-auth ${authState}`}>
+      {!st.installed ? <ToolInstallGuide tool="gh" os={osOfHost} onRecheck={recheckGh} /> : null}
       <span
         className="gh-auth-label"
         title={st.logged_in === null ? t('登入狀態無法確認；按登入會改用裝置碼，不會複製本機憑證') : st.path ?? 'gh'}
