@@ -133,6 +133,8 @@ while IFS= read -r f; do
         daemon/src/remote_cargo_hosts.rs) printf 'remote_cargo::hosts::\n' ;;
         daemon/src/changelog_translate_stream.rs) printf 'changelog_translate::stream::\n' ;;
         daemon/src/state_limit_hit_tests.rs) printf 'state::limit_hit_tests::\n' ;;
+        # runtime.rs 以 #[path] 把 runtime_tests.rs 掛成 runtime::tests；照檔名推會選到零個。
+        daemon/src/api_bot/runtime_tests.rs) printf 'api_bot::runtime::tests::\n' ;;
         # This sibling file is mounted inside startup_recovery_tests with #[path].
         daemon/src/api_bot/startup_abandonment_tests.rs) printf 'api_bot::startup_recovery_tests::startup_abandonment_tests::\n' ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
