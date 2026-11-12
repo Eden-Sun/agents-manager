@@ -67,6 +67,9 @@ check "api_bot::runtime:: testing::scratch_leak_guard:: timestamp_compat_tests::
 # hookrecv.rs 把 hookrecv_tests/<名>.rs 以 #[path] 掛成 hookrecv::<名>：改測試檔與改 hookrecv.rs 都要跑到。
 check "hookrecv::classify_tests::" "crates/am-lifecycle/src/hookrecv_tests/classify_tests.rs"
 check "hookrecv::agy_tests::" "crates/am-lifecycle/src/hookrecv_tests/agy_tests.rs"
+# api.rs 的測試 mod 搬到 daemon/src/api/<mod>_tests.rs（`#[cfg(test)] mod x_tests;`，模組路徑不變）：改測試檔與改 api.rs 都要跑到這批。
+check "api::prompt_route_tests:: testing::scratch_leak_guard::" "daemon/src/api/prompt_route_tests.rs"
+check "api:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api.rs"
 # 一般 production 檔加選跨檔守門，_tests.rs 測試檔不加選跨檔守門（#1983）。
 check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate.rs"
 # Translation streaming is nested via #[path], not a top-level module.
