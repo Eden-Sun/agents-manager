@@ -124,5 +124,21 @@ equals "起不來：systemd-run 叫了一次" "$(wc -l < "$FIX/sr.log" | tr -d '
 check "喊 boot_start_failed" "ops-alert --source daemon-boot --reason boot_start_failed" "$FIX/agm.log"
 teardown
 
+# 5. kick-common.sh 缺席：daemon-boot 不啟動 daemon、寫 log、有 agm 就推 kick_common_missing，exit 1。
+setup
+CDIR="$ROOT/bin"; mkdir -p "$CDIR"; cp "$SCRIPT" "$CDIR/daemon-boot.sh"
+equals "缺 kick-common：exit 1" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" AGM_REPO="$REPO" DAEMON_LOG="$DLOG" AGM_START_PY="$STARTPY" SYSTEMD_RUN_BIN="$BIN/systemd-run" CURL_BIN="$BIN/curl" AGM_BIN="$BIN/agm" DAEMON_BOOT_LOG="$BLOG" bash "$CDIR/daemon-boot.sh" >/dev/null 2>&1; echo $?)" "1"
+equals "缺 kick-common：不呼叫 systemd-run" "$(wc -c < "$FIX/sr.log" | tr -d ' ')" "0"
+check "缺 kick-common：log 記下" "ALERT kick_common_missing" "$BLOG"
+check "缺 kick-common：推 kick_common_missing" "ops-alert --source daemon-boot --reason kick_common_missing" "$FIX/agm.log"
+teardown
+
+# 6. 有 kick-common：共用 alert 帶的 --source 是 daemon-boot（binary 不在時喊 binary_missing）。
+setup
+rm -f "$REPO/target/release/agents-managerd"
+equals "binary 不在：exit 1" "$(run)" "1"
+check "共用 alert 的 --source 是 daemon-boot" "ops-alert --source daemon-boot --reason binary_missing" "$FIX/agm.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

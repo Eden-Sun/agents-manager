@@ -9,6 +9,7 @@
 # 讓 daemon 是 nice 0 的獨立行程，unit 結束不會連它一起殺。重複啟動沒有風險：已經有人聽 7788 就直接結束，
 # 而且 daemon 自己有 daemon.lock 獨佔鎖，後來的一顆會在碰 DB 前退出。
 #
+# 依賴 kick-common.sh（與其他 kick 同一個 bin/ 目錄）。
 # 可覆寫（測試用）：AGM_REPO、AM_DATA_DIR、DAEMON_LOG、AM_PORT_CHECK、AGM_START_PY、DAEMON_BOOT_WAIT_SECS、
 # SYSTEMD_RUN_BIN、CURL_BIN、AGM_BIN。
 set -u
@@ -27,15 +28,14 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-# 喊人：agm 找不到（或 daemon 本來就沒起來、推不出去）就只留 log。
-alert() { # alert <reason> <detail>
-  log "ALERT ${1}：${2}"
-  if [ -x "$AGM" ] || command -v "$AGM" >/dev/null 2>&1; then
-    "$AGM" --compact ops-alert --source daemon-boot --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
-      log "推 ops-alert 失敗（daemon 不在或 CLI 太舊），只留在這份 log"
-  else
-    log "找不到 agm（${AGM}），只留在這份 log"
-  fi
+# 喊人：共用的 alert() 在 kick-common.sh（--source 由 OWNER 決定）。缺了就照其他 kick 的做法：寫 log、
+# 盡量推一則 kick_common_missing，然後 exit 1。
+OWNER=daemon-boot
+. "$(dirname "$0")/kick-common.sh" 2>/dev/null || {
+  _m="找不到 $(dirname "$0")/kick-common.sh，daemon-boot.sh 停擺（它要和 kick 一起裝進 bin/）"
+  log "ALERT kick_common_missing：${_m}"
+  [ -x "$AGM" ] && "$AGM" --compact ops-alert --source daemon-boot --reason kick_common_missing --detail "$_m" >> "$LOG" 2>&1
+  exit 1
 }
 
 # 活著＝/api/session 有回應；沒帶 token 的 401 也算（有人在聽就夠了，不必知道 token）。
