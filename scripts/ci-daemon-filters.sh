@@ -130,6 +130,8 @@ while IFS= read -r f; do
         daemon/src/shell.rs) printf 'api::shell::\n' ;;
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
         daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
+        # remote_cargo.rs 以 #[path] 把 remote_cargo_tests/<名>.rs 掛成 remote_cargo::<名>；照檔名推會選到零個。
+        daemon/src/remote_cargo_tests/*.rs) printf 'remote_cargo::%s::\n' "$(basename "$f" .rs)" ;;
         daemon/src/remote_cargo_hosts.rs) printf 'remote_cargo::hosts::\n' ;;
         daemon/src/changelog_translate_stream.rs) printf 'changelog_translate::stream::\n' ;;
         daemon/src/state_limit_hit_tests.rs) printf 'state::limit_hit_tests::\n' ;;

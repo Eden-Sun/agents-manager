@@ -58,6 +58,8 @@ check "cli:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src
 check "api::shell:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/shell.rs"
 check "api::bot_scope_matrix:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/bot_scope_matrix.rs"
 check "runners::s6_l::app_ports_p4sess:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/app_ports_p4sess.rs"
+check "remote_cargo::tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/remote_cargo_tests/tests.rs"
+check "remote_cargo::guard_tests:: testing::scratch_leak_guard::" "daemon/src/remote_cargo_tests/guard_tests.rs"
 check "remote_cargo::hosts:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/remote_cargo_hosts.rs"
 check "state::limit_hit_tests:: testing::scratch_leak_guard::" "daemon/src/state_limit_hit_tests.rs"
 check "api_bot::startup_recovery_tests::startup_abandonment_tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/startup_abandonment_tests.rs"
