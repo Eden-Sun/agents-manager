@@ -33,6 +33,10 @@ check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/
 check "lifecycle::suggestion::tests::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
 check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
+# poller.rs 把 poller_<mod>_tests.rs 以 #[path] 掛成 poller::<mod>_tests：改測試檔與改 poller.rs 都要跑到這批。
+check "lifecycle::poller::issue_17_tests::" "crates/am-lifecycle/src/lifecycle/poller_issue_17_tests.rs"
+check "lifecycle::poller::folded_paste_tests::" "crates/am-lifecycle/src/lifecycle/poller_folded_paste_tests.rs"
+check "lifecycle::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
 check "lifecycle::claude_resume_menu::tests::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"

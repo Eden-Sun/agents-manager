@@ -148,6 +148,11 @@ while IFS= read -r f; do
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;
+        # poller.rs 以 #[path] 把 poller_<mod>_tests.rs 掛成 poller::<mod>_tests（模組路徑不變）；照檔名推會選到零個。
+        crates/am-lifecycle/src/lifecycle/poller_*_tests.rs)
+            mod="${f##*/poller_}"
+            printf 'lifecycle::poller::%s::\n' "${mod%.rs}"
+            ;;
         crates/am-share/src/share/trusted_tests.rs) printf 'share::tests::trusted::\n' ;;
         crates/am-share/src/share/portal_upload_tests.rs) printf 'share::portal::upload_tests::\n' ;;
         daemon/src/*)
