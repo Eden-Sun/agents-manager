@@ -64,6 +64,9 @@ check "api_bot::startup_recovery_tests::startup_abandonment_tests:: testing::scr
 # runtime.rs 把 runtime_tests.rs 以 #[path] 掛成 runtime::tests：改測試檔與改 runtime.rs 都要跑到這批。
 check "api_bot::runtime::tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/runtime_tests.rs"
 check "api_bot::runtime:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api_bot/runtime.rs"
+# hookrecv.rs 把 hookrecv_tests/<名>.rs 以 #[path] 掛成 hookrecv::<名>：改測試檔與改 hookrecv.rs 都要跑到。
+check "hookrecv::classify_tests::" "crates/am-lifecycle/src/hookrecv_tests/classify_tests.rs"
+check "hookrecv::agy_tests::" "crates/am-lifecycle/src/hookrecv_tests/agy_tests.rs"
 # 一般 production 檔加選跨檔守門，_tests.rs 測試檔不加選跨檔守門（#1983）。
 check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate.rs"
 # Translation streaming is nested via #[path], not a top-level module.

@@ -137,6 +137,11 @@ while IFS= read -r f; do
         daemon/src/api_bot/runtime_tests.rs) printf 'api_bot::runtime::tests::\n' ;;
         # This sibling file is mounted inside startup_recovery_tests with #[path].
         daemon/src/api_bot/startup_abandonment_tests.rs) printf 'api_bot::startup_recovery_tests::startup_abandonment_tests::\n' ;;
+        # hookrecv.rs 以 #[path] 把 hookrecv_tests/<名>.rs 掛成 hookrecv::<名>；照檔名推會選到零個。
+        crates/am-lifecycle/src/hookrecv_tests/*.rs)
+            mod="${f##*/}"
+            printf 'hookrecv::%s::\n' "${mod%.rs}"
+            ;;
         crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs | crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs \
             | crates/am-lifecycle/src/lifecycle/suggestion_tests.rs | crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs \
             | crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs | crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs)
