@@ -128,6 +128,8 @@ check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/sr
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
+check "lifecycle::start::tab_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/tab_tests.rs"
+check "lifecycle::start::resume_args_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/resume_args_tests.rs"
 check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"
 check "share::budget_remote_tests::" "crates/am-share/src/share/budget_remote_tests.rs"
 # Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.

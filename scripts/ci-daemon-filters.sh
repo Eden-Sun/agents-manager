@@ -149,6 +149,11 @@ while IFS= read -r f; do
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
             ;;
+        # start.rs 以 #[path] 把 start_tests/<mod>.rs 掛成 lifecycle::start::<mod>；照檔名推會選到零個。
+        crates/am-lifecycle/src/lifecycle/start_tests/*.rs)
+            mod="${f##*/}"
+            printf 'lifecycle::start::%s::\n' "${mod%.rs}"
+            ;;
         crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs) printf 'lifecycle::codex_rollout::turn_boundary::\n' ;;
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
