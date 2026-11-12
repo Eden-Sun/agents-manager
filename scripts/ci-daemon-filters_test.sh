@@ -131,6 +131,9 @@ check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/sr
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
+# store.rs 的 harness 測試掛在 store_tests/tests.rs；crate-only 的 store_tests/tests_crate_only.rs 不進 daemon 篩選。
+check "supervisor::store::tests::" "crates/am-supervisor/src/supervisor/store_tests/tests.rs"
+check "" "crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs"
 check "lifecycle::start::tab_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/tab_tests.rs"
 check "lifecycle::start::resume_args_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/resume_args_tests.rs"
 check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"

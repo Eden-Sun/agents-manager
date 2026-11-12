@@ -205,6 +205,11 @@ while IFS= read -r f; do
                 *) printf '__all__\n' ;;
             esac
             ;;
+        # store.rs 以 #[path] 把 store_tests/*.rs 掛成 supervisor::store::tests／persona_migration_tests；crate-only 那批由 emit_mod 的 owned 判斷略過。
+        crates/am-supervisor/src/supervisor/store_tests/*.rs)
+            if python3 -B scripts/ci-crate-only-tests.py "$f"; then continue; fi
+            printf 'supervisor::store::tests::\n'
+            ;;
         crates/am-supervisor/src/*)
             rel="${f#crates/am-supervisor/src/}"
             case "$rel" in
