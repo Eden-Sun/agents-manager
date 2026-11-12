@@ -63,6 +63,10 @@
             if at == "db.rs" {
                 continue; // 格式就是在這裡定義的
             }
+            // 從主檔搬出去、用 `#[cfg(test)] #[path = …] mod …;` 掛回的測試檔（`<名>_tests.rs`、`<名>_tests/…`）整檔都是測試。
+            if f.strip_prefix(&root).unwrap().components().any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with("_tests") || s.ends_with("_tests.rs"))) {
+                continue;
+            }
             let src = std::fs::read_to_string(&f).unwrap();
             // 測試區塊以後不管：測試要造舊格式的列才測得到混存。
             let prod = src.split("#[cfg(test)]").next().unwrap_or("");
