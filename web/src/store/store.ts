@@ -114,6 +114,7 @@ import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
 import { pruneStoredIds } from '../lib/storedIds'
 import { msg, t, tr } from '../lib/i18n'
+import { isLegacyDaemonError, plainErrMsg } from '../lib/errText'
 import { apiBotStartReasonText } from '../lib/apiBotStartReason'
 import { leftPct } from '../lib/quotaLeft'
 
@@ -650,7 +651,7 @@ const noticeTimers = new Map<number, ReturnType<typeof setTimeout>>()
  */
 function forkErrText(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
+    if (isLegacyDaemonError(e)) {
       return t('fork 失敗：正在跑的 daemon 還沒有 fork 功能，要重新 build 並重啟 daemon 後才能用。')
     }
     if (typeof e.body.message === 'string' && e.body.message) return t('fork 失敗：{message}', { message: e.body.message })
@@ -671,7 +672,7 @@ const PROMOTE_REASON_TEXT: Record<string, string> = {
 
 function promoteErrText(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
+    if (isLegacyDaemonError(e)) {
       return t('升級失敗：正在跑的 daemon 還沒有這個功能，要重新 build 並重啟 daemon 後才能用。')
     }
     const why = typeof e.body.reason === 'string' ? PROMOTE_REASON_TEXT[e.body.reason] : undefined
@@ -755,8 +756,7 @@ function errText(e: unknown): string {
     if (gw) return gw
     return t('{reason}（HTTP {status}）', { reason: reasonText(e), status: e.status })
   }
-  if (e instanceof Error) return e.message
-  return String(e)
+  return plainErrMsg(e)
 }
 
 /**

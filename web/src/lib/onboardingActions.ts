@@ -6,10 +6,11 @@ import { openFreshShellAndType } from './cliLogin'
 import { cliLoginCommand } from './quotaLogin'
 import { hostLabel } from '../components/toolsHelpers'
 import { t } from './i18n'
+import { plainErrMsg } from './errText'
 
 function errText(e: unknown): string {
   if (e instanceof ApiError && typeof e.body.message === 'string') return e.body.message
-  return e instanceof Error ? e.message : String(e)
+  return plainErrMsg(e)
 }
 
 const installs = new Map<string, string>()

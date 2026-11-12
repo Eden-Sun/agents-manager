@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
 import { labelStyle } from '../lib/labelStyle'
 import { formatGithubIssuePrompt } from '../lib/githubIssuePrompt'
+import { plainErrMsg } from '../lib/errText'
 import { GhLoginButton } from './GhAuth'
 import { isGhAuthError } from './ghAuthError'
 import { ISSUE_PAGE_LIMIT, openCountFromPage } from '../lib/issueCount'
@@ -39,7 +40,7 @@ function errorText(e: unknown): string {
     if (e.status === 502) return t('gh 無法使用：{message}', { message: e.message })
     return t('{message}（HTTP {status}）', { message: e.message, status: e.status })
   }
-  return e instanceof Error ? e.message : String(e)
+  return plainErrMsg(e)
 }
 
 export function IssuesBar({

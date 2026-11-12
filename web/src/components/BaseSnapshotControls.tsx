@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { clearBaseSnapshot, getBaseSnapshot, lockBaseSnapshot, type BaseSnapshot } from '../api/baseSnapshot'
 import { useT } from '../lib/i18n'
+import { plainErrMsg, reasonTextBySubstring, BASE_SNAPSHOT_REASON_TEXT } from '../lib/errText'
 import { useStore } from '../store/store'
 
 /** codex bot 的基準快照：把目前的 context 鎖成基準，排程可選「每次從基準快照開始」（桌面、手機共用）。 */
@@ -10,10 +11,8 @@ export function BaseSnapshotControls({ botId, name }: { botId: string; name: str
   const [snap, setSnap] = useState<BaseSnapshot | null>(null)
   const [busy, setBusy] = useState(false)
   const errText = (e: unknown) => {
-    const raw = e instanceof Error ? e.message : String(e)
-    if (raw.includes('base_snapshot_no_session')) return t('這顆 Bot 還沒有對話可鎖定，請先跟它對話')
-    if (raw.includes('base_snapshot_not_codex')) return t('基準快照只支援 codex Bot')
-    return raw
+    const raw = plainErrMsg(e)
+    return reasonTextBySubstring(raw, BASE_SNAPSHOT_REASON_TEXT) ?? raw
   }
   const load = useCallback(async () => {
     try {

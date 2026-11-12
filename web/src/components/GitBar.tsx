@@ -5,6 +5,7 @@ import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
 import './gitBar.css'
 import { t, useT } from '../lib/i18n'
+import { plainErrMsg } from '../lib/errText'
 
 /**
  * 專案 checkout 的 git 一眼看（2026-09-08）：行數差、upstream 差，與 commit / push / pull 快捷鍵。
@@ -18,7 +19,7 @@ function errText(e: unknown): string {
     if (e.body.reason === 'nothing_to_commit') return t('沒有可以 commit 的變更')
     return out || e.message
   }
-  return e instanceof Error ? e.message : String(e)
+  return plainErrMsg(e)
 }
 
 export function GitBar({ projectId, showBranch = false, showActions = true }: { projectId: string; showBranch?: boolean; showActions?: boolean }) {

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import * as api from '../api'
 import { retireApiSession } from '../api/apiBotSession'
 import { useT } from '../lib/i18n'
+import { plainErrMsg, reasonTextBySubstring, RETIRE_REASON_TEXT } from '../lib/errText'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 
@@ -16,14 +17,10 @@ export function ApiBotControls({ botId, name }: { botId: string; name: string })
   })
   const [busy, setBusy] = useState<'stop' | 'retire' | null>(null)
   const [confirm, setConfirm] = useState(false)
-  const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+  const errText = plainErrMsg
   const retireErrText = (e: unknown) => {
     const raw = errText(e)
-    if (raw.includes('api_retire_busy')) return t('bot 仍有進行中的回合或關閉尚未完成，請稍後再試')
-    if (raw.includes('api_retire_unresolved')) return t('對話還有未結清的紀錄，暫時無法清除')
-    if (raw.includes('api_retire_unconfirmed')) return t('無法確認清除結果，請重新整理後再確認')
-    if (raw.includes('api_retire_storage')) return t('資料庫暫時無法寫入，請稍後再試')
-    return raw
+    return reasonTextBySubstring(raw, RETIRE_REASON_TEXT) ?? raw
   }
 
   const stop = async () => {

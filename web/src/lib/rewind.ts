@@ -1,5 +1,6 @@
 import { ApiError, type Bot, type Message, type Run } from '../api/types'
 import { t } from './i18n'
+import { humanMessage, plainErrMsg } from './errText'
 
 /**
  * 對話倒回（SPEC §6.13）的前端規則。daemon 才是權威（它會再查一次、不行就 409）；這裡只決定按鈕要不要出現、能不能按，
@@ -58,8 +59,8 @@ export function rewindErrText(e: unknown): string {
     if (e.status === 404 && e.body.what === 'bot') return t('找不到這顆 bot。')
     // 舊 daemon：POST 掉進只收 GET 的前端 catch-all（405），或路由不存在（404）。
     if (e.status === 404 || e.status === 405) return t('這顆 daemon 還沒有倒回功能（HTTP {status}），要重建並重啟 daemon。', { status: e.status })
-    const human = e.body.message
-    if (typeof human === 'string' && human.trim()) return human.trim()
+    const human = humanMessage(e)
+    if (human) return human
   }
-  return e instanceof Error ? e.message : String(e)
+  return plainErrMsg(e)
 }
