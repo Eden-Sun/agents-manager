@@ -32,6 +32,9 @@ pub struct BaselineIssue {
     /// `critical` | `warn`
     pub severity: &'static str,
     pub message: String,
+    /// 宣告檔寫的用途說明（選用工具缺了時 UI 顯示「選用：…」）；沒寫＝省略這欄。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -327,7 +330,7 @@ pub fn spawn_poller<H: crate::tools::ToolsEnv>(app: std::sync::Arc<H>) {
 }
 
 fn issue(id: String, severity: &'static str, message: String) -> BaselineIssue {
-    BaselineIssue { id, severity, message }
+    BaselineIssue { id, severity, message, note: None }
 }
 
 /// 宣告檔裡的嚴重度；探測印出宣告檔沒列的名稱（舊腳本）時當提醒。
@@ -346,6 +349,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
     let m = manifest::shipped().ok()?;
     let mac = os_of(out).as_deref() == Some("Darwin");
     let mut issues = Vec::new();
+    // 探測印出來有絕對路徑的工具＝已安裝（`only_if_tool` 用；整份輸出先掃一遍，不靠行的順序）。
+    let installed: std::collections::HashSet<&str> = out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.trim_end().splitn(5, ' ').collect();
+            (f.len() >= 4 && f[0] == "AM_BL" && f[1] == "tool" && !f[3].is_empty()).then(|| f[2])
+        })
+        .collect();
     // 目前這個 claude 身份的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
     let mut claude_settings = true;
     let mut codex_config = true;
@@ -359,7 +370,8 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
             "tool" if f.len() >= 3 => {
                 if f.get(3).map_or(true, |p| p.is_empty()) {
                     if let Some(sev) = manifest::severity_of(&m.tools, f[2]) {
-                        issues.push(issue(format!("tool.{}", f[2]), sev, format!("缺工具 {}（登入 shell 的 PATH 找不到）", f[2])));
+                        let note = m.tools.iter().find(|t| t.name == f[2]).and_then(|t| t.note.clone());
+                        issues.push(BaselineIssue { note, ..issue(format!("tool.{}", f[2]), sev, format!("缺工具 {}（登入 shell 的 PATH 找不到）", f[2])) });
                     }
                 }
             }
@@ -368,12 +380,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 if f[3] == "settings.json" {
                     claude_settings = present;
                 }
-                if !present {
-                    issues.push(issue(
-                        format!("claude.{}.{}", f[2], f[3]),
-                        severity_of(&m.claude_files, f[3]),
-                        format!("claude 身份 {}：缺 {}", f[2], f[3]),
-                    ));
+                let item = m.claude_files.iter().find(|i| i.name == f[3]);
+                // `only_if_tool`：那個工具沒裝就不算缺（例如沒裝 rtk 就不檢查 RTK.md）。
+                let skipped = item.and_then(|i| i.only_if_tool.as_deref()).is_some_and(|t| !installed.contains(t));
+                if !present && !skipped {
+                    issues.push(BaselineIssue {
+                        note: item.and_then(|i| i.note.clone()),
+                        ..issue(format!("claude.{}.{}", f[2], f[3]), severity_of(&m.claude_files, f[3]), format!("claude 身份 {}：缺 {}", f[2], f[3]))
+                    });
                 }
             }
             "claude-key" if f.len() >= 5 => {

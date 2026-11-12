@@ -218,7 +218,9 @@ export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: st
               <li key={i.id} className={i.severity} title={i.id}>
                 {i.message}
                 <BaselineFix fix={i.fix} />
+                {i.note ? <span className="host-baseline-why">{t('選用：{note}', { note: i.note })}</span> : null}
                 {baselineWarnWhy(i.id) ? <span className="host-baseline-why">{baselineWarnWhy(i.id)}</span> : null}
+                {i.id.startsWith('tool.') ? <ToolInstallGuide tool={i.id.slice('tool.'.length)} os={osOf} onRecheck={recheckTools} /> : null}
               </li>
             ))}
           </ul>

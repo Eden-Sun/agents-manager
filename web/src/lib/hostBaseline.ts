@@ -12,7 +12,7 @@ export interface HostBaselineView {
    * 嚴重的排前面；沒有就是空陣列。`fix`：dry-run 計畫說可以自動補（在 `fixable` 裡）＝auto，其餘 manual；
    * daemon 沒給 `fixable`（舊版）＝null，不標——不知道就不說需手動。
    */
-  items: { id: string; severity: 'critical' | 'warn'; message: string; fix: 'auto' | 'manual' | null }[]
+  items: { id: string; severity: 'critical' | 'warn'; message: string; note?: string; fix: 'auto' | 'manual' | null }[]
 }
 
 /** 跟 daemon 的 `RECHECK_EVERY + STALE_GRACE`（6 小時 + 15 分）同一條線：超過就算太久沒量。 */

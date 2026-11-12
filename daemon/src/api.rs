@@ -4787,8 +4787,8 @@ mod baseline_plan_route_tests {
         assert_eq!((st, body["reason"].as_str()), (StatusCode::CONFLICT, Some("baseline_unknown")), "probe cut short: {body}");
 
         let issues = vec![
-            BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into() },
-            BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into() },
+            BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into(), note: None },
+            BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into(), note: None },
         ];
         e.app.host_baseline.lock().await.insert(local.into(), report(Some(issues.clone()), crate::db::now(), false));
         let (st, body) = call(&e.app, local, RequestPrincipal::User).await;
@@ -4836,8 +4836,8 @@ mod baseline_apply_route_tests {
         BaselineReport {
             os: Some("Linux".into()),
             issues: Some(vec![
-                BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into() },
-                BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into() },
+                BaselineIssue { id: "codex.config.toml:features.hooks".into(), severity: "warn", message: "m".into(), note: None },
+                BaselineIssue { id: "tool.rtk".into(), severity: "critical", message: "m".into(), note: None },
             ]),
             checked_at: crate::db::now(),
             failed_at: None,

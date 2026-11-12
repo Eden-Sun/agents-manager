@@ -16,6 +16,10 @@ pub struct Item {
     /// 工具名或相對路徑。
     pub name: String,
     pub severity: &'static str,
+    /// 用途說明（選填）：缺這項時 UI 黃字寫「選用：…」。
+    pub note: Option<String>,
+    /// 只在這個工具已安裝時才檢查（選填；只給 claude 檔案用，例如 `RTK.md` 只在有 rtk 時才算）。
+    pub only_if_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +80,8 @@ struct Raw {
 struct RawTool {
     name: String,
     severity: String,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +89,10 @@ struct RawTool {
 struct RawFile {
     path: String,
     severity: String,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    only_if_tool: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -147,6 +157,15 @@ fn severity(s: &str, at: &str) -> Result<&'static str, String> {
     }
 }
 
+/// 用途說明：一行、不空、≤ 200 字元（會原樣顯示在 UI，不進 sh）。
+fn note(n: Option<String>, at: &str) -> Result<Option<String>, String> {
+    match n {
+        None => Ok(None),
+        Some(n) if n.trim().is_empty() || n.chars().count() > 200 || n.contains('\n') => Err(format!("{at}: note must be one non-empty line of at most 200 chars")),
+        Some(n) => Ok(Some(n.trim().to_string())),
+    }
+}
+
 /// 工具名、plugin 名、claude key 的 `name`：會進 sh 的 `for` 清單與 issue id。
 fn name(s: &str, at: &str) -> Result<String, String> {
     if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) || s.starts_with(['-', '.']) {
@@ -189,7 +208,8 @@ fn files(raw: Vec<RawFile>, at: &str) -> Result<Vec<Item>, String> {
         if out.iter().any(|i| i.name == path) {
             return Err(format!("{at}: `{path}` is listed twice"));
         }
-        out.push(Item { severity: severity(&f.severity, at)?, name: path });
+        let only_if_tool = f.only_if_tool.as_deref().map(|t| name(t, at)).transpose()?;
+        out.push(Item { severity: severity(&f.severity, at)?, name: path, note: note(f.note, at)?, only_if_tool });
     }
     Ok(out)
 }
@@ -253,7 +273,7 @@ impl Manifest {
             if tools.iter().any(|i| i.name == n) {
                 return Err(format!("tools: `{n}` is listed twice"));
             }
-            tools.push(Item { severity: severity(&t.severity, "tools")?, name: n });
+            tools.push(Item { severity: severity(&t.severity, "tools")?, name: n, note: note(t.note, "tools")?, only_if_tool: None });
         }
         let claude_files = files(raw.claude.files, "claude.files")?;
         let mut claude_keys: Vec<ClaudeKey> = Vec::new();
@@ -305,6 +325,9 @@ impl Manifest {
                 values.codex.insert(k.key.clone(), v);
             }
             codex_keys.push(CodexKey { key: k.key, check, severity: severity(&k.severity, "codex.keys")? });
+        }
+        if let Some(f) = claude_files.iter().find(|f| f.only_if_tool.as_ref().is_some_and(|t| !tools.iter().any(|x| &x.name == t))) {
+            return Err(format!("claude.files: `{}` only_if_tool names a tool that is not in tools", f.name));
         }
         let grok_files = files(raw.grok.files, "grok.files")?;
         let herdr_files = files(raw.herdr.files, "herdr.files")?;
@@ -360,7 +383,7 @@ mod tests {
         let pairs = |v: &[Item]| v.iter().map(|i| (i.name.clone(), i.severity)).collect::<Vec<_>>();
         let own = |v: &[(&str, &'static str)]| v.iter().map(|(n, s)| (n.to_string(), *s)).collect::<Vec<_>>();
         let (c, w) = (super::super::CRITICAL, super::super::WARN);
-        assert_eq!(pairs(&m.tools), own(&[("herdr", c), ("rtk", c), ("zsh", c), ("bun", c), ("jq", c), ("gh", c)]));
+        assert_eq!(pairs(&m.tools), own(&[("herdr", c), ("rtk", w), ("zsh", w), ("bun", w), ("jq", w), ("gh", w)]));
         assert_eq!(pairs(&m.claude_files), own(&[("settings.json", c), ("statusline-command.sh", c), ("CLAUDE.md", w), ("RTK.md", w)]));
         assert_eq!(
             m.claude_keys.iter().map(|k| (k.name.as_str(), k.key.as_str(), k.severity)).collect::<Vec<_>>(),
@@ -374,6 +397,24 @@ mod tests {
         );
         assert_eq!(pairs(&m.grok_files), own(&[("config.toml", w)]));
         assert_eq!(pairs(&m.herdr_files), own(&[("config.toml", w)]));
+    }
+
+    #[test]
+    fn note_and_only_if_tool_are_validated() {
+        assert!(err("[[tools]]\nname = \"x\"\nseverity = \"warn\"\nnote = \"a\\nb\"\n").contains("note"));
+        assert!(err("[[tools]]\nname = \"x\"\nseverity = \"warn\"\nnote = \" \"\n").contains("note"));
+        assert!(err("[[claude.files]]\npath = \"a\"\nseverity = \"warn\"\nonly_if_tool = \"nope\"\n").contains("only_if_tool"));
+        Manifest::parse(&format!("{MIN}[[claude.files]]\npath = \"a\"\nseverity = \"warn\"\nonly_if_tool = \"jq\"\nnote = \"ok\"\n")).unwrap();
+    }
+
+    #[test]
+    fn shipped_optional_tools_have_notes() {
+        let m = shipped().unwrap();
+        for t in &m.tools {
+            assert_eq!(t.note.is_some(), t.severity == super::super::WARN, "{}", t.name);
+        }
+        let rtk_md = m.claude_files.iter().find(|f| f.name == "RTK.md").unwrap();
+        assert_eq!(rtk_md.only_if_tool.as_deref(), Some("rtk"));
     }
 
     const MIN: &str = "version = 1\n[[tools]]\nname = \"jq\"\nseverity = \"critical\"\n";
@@ -491,7 +532,7 @@ mod tests {
         std::fs::write(h.join(".claude/settings.json"), "{}").unwrap();
         std::fs::write(h.join(".codex/config.toml"), "").unwrap();
         let bad = |tag: &str| format!("x';touch {tag}';'$(touch {tag}2)`touch {tag}3`\"; touch {tag}4 \"");
-        let item = |tag: &str| Item { name: bad(tag), severity: super::super::WARN };
+        let item = |tag: &str| Item { name: bad(tag), severity: super::super::WARN, note: None, only_if_tool: None };
         let m = Manifest {
             tools: vec![item("T")],
             claude_files: vec![item("CF")],

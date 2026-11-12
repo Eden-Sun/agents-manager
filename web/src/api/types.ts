@@ -81,6 +81,8 @@ export interface BaselineIssue {
   id: string
   severity: 'critical' | 'warn'
   message: string
+  /** 宣告檔寫的用途說明（選用工具缺了時黃字顯示「選用：…」）；舊 daemon／沒寫＝省略。 */
+  note?: string
 }
 
 /**

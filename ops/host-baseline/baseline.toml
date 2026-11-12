@@ -7,35 +7,43 @@
 # - 路徑一律相對於各自的根目錄（claude 身份目錄、`$CODEX_HOME`、`$GROK_HOME`、`$XDG_CONFIG_HOME/herdr`），
 #   不寫絕對路徑、不寫 `..`、不寫 `$HOME`／`~`。
 # - codex 的 model／model_reasoning_effort／service_tier 一律不列（使用者規定不動），解析時直接拒絕。
-# - severity：`critical`（缺了就不能好好用）或 `warn`（提醒）。
+# - severity：`critical`（缺了就不能好好用）或 `warn`（提醒）。選用／開發者工具一律 warn，並寫 `note` 說明用途。
+# - `only_if_tool`（claude.files 選填）：該工具已安裝才檢查這個檔。
 
 version = 1
 
 # 每台主機都該有的工具（登入 shell 的 PATH 找得到絕對路徑才算有）。
 # claude／codex／grok 本身要不要裝由各主機決定，看 `hosts[].tools`，不在這裡。
+# 工具嚴重度：只有缺了就不能用的（herdr）算 critical；其餘是開發者／選用工具，缺了只提醒（warn）。
+# `note`：用途說明，缺這項時 UI 黃字寫「選用：<note>」。agent CLI（claude／codex／grok）本身不在這裡，看 `hosts[].tools`。
 [[tools]]
 name = "herdr"
 severity = "critical"
 
 [[tools]]
 name = "rtk"
-severity = "critical"
+severity = "warn"
+note = "token 壓縮工具，沒裝照常運作，只是指令輸出不會被壓縮"
 
 [[tools]]
 name = "zsh"
-severity = "critical"
+severity = "warn"
+note = "部分腳本與登入 shell 設定用 zsh，沒裝時多數功能照常"
 
 [[tools]]
 name = "bun"
-severity = "critical"
+severity = "warn"
+note = "只有從原始碼建置網頁介面才需要，用現成安裝包不用裝"
 
 [[tools]]
 name = "jq"
-severity = "critical"
+severity = "warn"
+note = "讀 JSON 設定的小工具，沒裝時 claude settings.json 的鍵無法檢查"
 
 [[tools]]
 name = "gh"
-severity = "critical"
+severity = "warn"
+note = "只有 GitHub 相關功能（PR、issue、CI 狀態）才需要"
 
 # 每個 claude 身份的設定目錄（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`、alias cc0–cc6）。
 [[claude.files]]
@@ -53,6 +61,8 @@ severity = "warn"
 [[claude.files]]
 path = "RTK.md"
 severity = "warn"
+only_if_tool = "rtk"
+note = "rtk 的使用說明檔，只在這台已裝 rtk 時才檢查"
 
 # `settings.json` 該有的鍵。`name` 是 issue id 的尾巴，`key` 是點號路徑（每一段都要是物件裡的鍵）。
 [[claude.keys]]

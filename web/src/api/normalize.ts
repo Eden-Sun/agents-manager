@@ -177,7 +177,8 @@ export function toHostBaseline(v: unknown): HostBaseline | null {
         if (!isRec(i)) return []
         const id = str(pick(i, 'id'))
         if (!id) return []
-        return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')) }]
+        const note = optStr(pick(i, 'note'))
+        return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')), ...(note ? { note } : {}) }]
       })
     : null
   // `fixable`（#719 階段 2）：沒有（舊 daemon）或型別不對＝空陣列，不讓整份主機資料解析失敗。

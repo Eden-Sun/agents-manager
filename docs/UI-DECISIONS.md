@@ -1538,4 +1538,5 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **只給指令，不自動執行**。`claude`／`codex` 的「安裝」鈕走既有的 bot 流程，`rtk`／`bun`／`gh`／`jq`／`zsh`／`herdr` 沒有可核對的一鍵安裝機制，所以不新增自動安裝。`rtk` 目前沒有經過核對的官方來源：不猜指令、不給連結，只說明請依它的安裝說明裝。
 - 每個引導都寫明：要裝到**登入 shell** 的 PATH 上才找得到（brew 的 bin 目錄或 `~/.local/bin`，並確認 `~/.zprofile`／`~/.profile` 有加進 PATH），裝完按「重新檢查」。
 - 黃字提醒（`codex.config.toml`、`codex.hooks.json`、`codex.config.toml:<鍵>`、`grok.config.toml`、`herdr.config.toml`）各附一句說明：這代表什麼、要不要處理（有「可自動補」就用補齊，「需手動」照提示自己加；grok／herdr 的 config 只有要用或要自訂時才需要）。映射在 `web/src/lib/toolInstall.ts` 的 `baselineWarnWhy`。
+- **選用工具降級為黃字**（2026-11-12，使用者裁示）：一般使用者不需要 rtk／bun／gh／jq／zsh，只有 `herdr` 維持紅字（嚴重）。黃字項（收在「列出 N 項」展開區）寫「選用：<用途>」（daemon 的 `issue.note`，來自 `baseline.toml` 的 `note`），缺工具的黃字項照樣內嵌 `ToolInstallGuide`（安裝指令、官方連結、重新檢查），展開後即可用。沒裝 rtk 的主機不再要求 `RTK.md`。
 - 主機新增表單的 placeholder 改成通用範例（名稱 `my-server`、ssh 目標 `user@my-server`），不再帶擁有者的私人主機名與 IP。

@@ -91,3 +91,25 @@ it('HostsPanel 新增主機欄位的 placeholder 是通用範例，不是私人�
   assert.ok(phs.includes('user@my-server'))
   assert.equal(phs.some((p) => p.includes('m4p') || p.includes('100.64.0.2')), false)
 })
+
+it('選用工具（warn）：展開提醒後寫「選用：用途」，並仍有安裝引導與重新檢查；critical 工具沒有選用字樣', async () => {
+  const baseline: HostBaseline = {
+    issues: [
+      { id: 'tool.herdr', severity: 'critical', message: '缺工具 herdr（登入 shell 的 PATH 找不到）' },
+      { id: 'tool.bun', severity: 'warn', message: '缺工具 bun（登入 shell 的 PATH 找不到）', note: '只有從原始碼建置網頁介面才需要' },
+    ],
+    checked_at: new Date().toISOString(),
+    os: 'Linux',
+    stale: false,
+    error: null,
+  }
+  await mount(<BaselineLine baseline={baseline} />)
+  const crit = document.querySelector('ul.host-baseline-items li')!
+  assert.doesNotMatch(crit.textContent ?? '', /選用：/)
+  const fold = document.querySelector<HTMLDetailsElement>('details.env-fold')!
+  assert.ok(fold, 'warn 項收在可展開的區塊')
+  const li = fold.querySelector('li.warn')!
+  assert.match(li.querySelector('.host-baseline-why')?.textContent ?? '', /^選用：只有從原始碼建置網頁介面才需要$/)
+  assert.ok(li.querySelector('.tool-install-guide'), 'warn 等級的工具也有安裝引導')
+  assert.ok([...li.querySelectorAll('button')].some((b) => b.textContent?.includes('重新檢查')))
+})

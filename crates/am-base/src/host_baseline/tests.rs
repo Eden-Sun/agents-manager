@@ -48,10 +48,35 @@ fn a_probe_cut_short_is_unknown_not_everything_missing() {
 }
 
 #[test]
-fn a_missing_tool_is_critical_and_named() {
+fn a_missing_tool_is_named_and_only_herdr_is_critical() {
+    // rtk 沒裝時 RTK.md 也不查（only_if_tool），所以只剩 tool.rtk 一條。
     let out = GOOD.replace("AM_BL tool rtk /u/rtk", "AM_BL tool rtk ");
     assert_eq!(ids(&out), vec!["tool.rtk"]);
-    assert_eq!(sev(&out, "tool.rtk"), CRITICAL);
+    assert_eq!(sev(&out, "tool.rtk"), WARN);
+    assert_eq!(sev(&GOOD.replace("AM_BL tool herdr /u/herdr", "AM_BL tool herdr "), "tool.herdr"), CRITICAL);
+    for t in ["rtk", "zsh", "bun", "jq", "gh"] {
+        let out = GOOD.replace(&format!("AM_BL tool {t} /u/{t}"), &format!("AM_BL tool {t} "));
+        assert_eq!(sev(&out, &format!("tool.{t}")), WARN, "{t}");
+    }
+}
+
+#[test]
+fn optional_tools_carry_a_purpose_note_and_herdr_does_not() {
+    let note_of = |out: &str, id: &str| evaluate(out).unwrap().into_iter().find(|i| i.id == id).unwrap().note;
+    for t in ["rtk", "zsh", "bun", "jq", "gh"] {
+        let out = GOOD.replace(&format!("AM_BL tool {t} /u/{t}"), &format!("AM_BL tool {t} "));
+        assert!(note_of(&out, &format!("tool.{t}")).is_some_and(|n| !n.is_empty()), "{t}");
+    }
+    assert_eq!(note_of(&GOOD.replace("AM_BL tool herdr /u/herdr", "AM_BL tool herdr "), "tool.herdr"), None);
+}
+
+#[test]
+fn rtk_md_is_only_checked_when_rtk_is_installed() {
+    let no_md = GOOD.replace("claude-file default RTK.md 1", "claude-file default RTK.md 0");
+    assert_eq!(ids(&no_md), vec!["claude.default.RTK.md"]);
+    assert_eq!(sev(&no_md, "claude.default.RTK.md"), WARN);
+    let no_rtk = no_md.replace("AM_BL tool rtk /u/rtk", "AM_BL tool rtk ");
+    assert_eq!(ids(&no_rtk), vec!["tool.rtk"]);
 }
 
 fn without_jq_probe(key_line: &str) -> String {
@@ -549,7 +574,7 @@ fn report(issues: Option<Vec<BaselineIssue>>) -> BaselineReport {
 }
 
 fn bi(id: &str, severity: &'static str) -> BaselineIssue {
-    BaselineIssue { id: id.into(), severity, message: format!("{id} message") }
+    BaselineIssue { id: id.into(), severity, message: format!("{id} message"), note: None }
 }
 
 #[test]

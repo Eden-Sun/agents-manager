@@ -159,7 +159,7 @@ mod tests {
     use super::*;
 
     fn issue(id: &str, severity: &'static str) -> BaselineIssue {
-        BaselineIssue { id: id.into(), severity, message: format!("msg {id}") }
+        BaselineIssue { id: id.into(), severity, message: format!("msg {id}"), note: None }
     }
 
     fn shipped() -> (&'static Manifest, &'static Values) {
