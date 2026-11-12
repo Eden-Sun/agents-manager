@@ -340,14 +340,14 @@ happened.
 
 ```sh
 # Install this matched pair in the same maintenance operation (AGM approval required).
-install -m 755 scripts/ops/build-web-bundle.py scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 755 scripts/ops/build-web-bundle.py scripts/ops/kick-common.sh scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
 The manifest maps `scripts/ops/build-web-bundle.py` to `bin/build-web-bundle.py` and
 `scripts/ops/daemon-update-kick.sh` to `bin/daemon-update-kick.sh`. Run `ops-install.sh --dry-run` first, install both
 files together, then `agm ops-sync --check`. The automatic installer only updates already installed files, so it cannot
 perform the helper's first installation. The helper is loaded from the executing kick's directory, not the selected
-historical target checkout. Never install just one member of the pair.
+historical target checkout. Never install just one member of the pair. `kick-common.sh` (shared `alert`/`lock_age`/`note_fail`, sourced from the kick's own directory) must be installed alongside every `*-kick.sh` that sources it (`ci-watch`, `daemon-update`, `herdr-update`, `release-triage`, `browser-gc`).
 
 `daemon-swap.sh` and `daemon-start.py` are not installed: the kick runs them from the dedicated checkout (the sha being
 swapped in).
@@ -564,6 +564,7 @@ Production install (**needs AGM approval, and the daemon-side `release-triage-ch
 subcommand the script only logs "check failed" every round):
 
 ```sh
+install -m 755 scripts/ops/kick-common.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 755 scripts/ops/release-triage-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/release-triage-task.md ~/.config/agents-manager/supervisor/AGM/
 install -m 644 scripts/ops/release-issue-task.md ~/.config/agents-manager/supervisor/AGM/
@@ -641,6 +642,7 @@ stale and live locks, repeated failures raising an alert; also runs under the sy
 Install (**needs AGM approval**; do not `launchctl bootstrap` on your own):
 
 ```sh
+install -m 755 scripts/ops/kick-common.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 755 scripts/ops/herdr-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 755 scripts/ops/herdr-lan-check.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
@@ -746,6 +748,7 @@ and live locks, `gh` failures, and a lost state file). It never calls the real `
 Production install (**needs AGM approval**):
 
 ```sh
+install -m 755 scripts/ops/kick-common.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 755 scripts/ops/ci-watch-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/ci-watch-task.md ~/.config/agents-manager/supervisor/AGM/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist

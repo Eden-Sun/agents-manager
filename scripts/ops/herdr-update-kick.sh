@@ -44,6 +44,7 @@ platform() {
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-2}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
 
 # 狀態檔一律先寫暫存檔再 rename（同一目錄＝同一檔案系統）：`echo > $STATE` 被中斷（斷電、SIGKILL）會留下空檔，
 # 空的狀態檔在這裡等於「第一次執行」，會漏掉一次該派的工。寫不成功就保留舊檔並回非 0。
@@ -56,11 +57,6 @@ write_state() { # write_state <內容>
 
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
-alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
-  log "ALERT ${1}：${2}"
-  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
-    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
-}
 
 # 這一輪沒能完成檢查。一次網路抖動不吵人，但連續 FAIL_ALERT_AFTER 輪（每天一輪＝隔天還是不行）就推 ops_alert，
 # 不能永遠只有 local log。收尾（trap）照跑。
@@ -86,18 +82,6 @@ command -v curl >/dev/null 2>&1 || { alert missing_dependency "找不到 curl（
 LOCK="$DIR/herdr-update.lock"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時（含舊版腳本留下、沒有 owner 檔的鎖），超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
-lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
-  _born=$(python3 -c '
-import os,sys
-try:
-    print(int(os.path.getmtime(sys.argv[1])))
-except OSError:
-    print(0)
-' "$LOCK" 2>/dev/null) || _born=0
-  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
-  [ "$_born" = 0 ] && { echo 0; return; }
-  echo $(( $(date +%s) - _born ))
-}
 TMPS=()
 TMPS_COUNT=0
 # bash 3.2 expands an empty array's length as an unbound variable under set -u.

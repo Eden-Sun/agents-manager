@@ -14,6 +14,7 @@ scripts/ops/disk-gc.sh              bin/disk-gc.sh              linux
 scripts/ops/remote-cargo-prewarm.sh  bin/remote-cargo-prewarm.sh  linux
 scripts/ops/dev-server-kick.ts      bin/dev-server-kick.ts
 scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
+scripts/ops/kick-common.sh          bin/kick-common.sh
 scripts/ops/herdr-lan-check.sh      bin/herdr-lan-check.sh
 scripts/ops/herdr-full-restart.sh   bin/herdr-full-restart.sh
 scripts/ops/outbox-gc.sh            bin/outbox-gc.sh

@@ -9,6 +9,7 @@ BOT=01M248GA4H1TAHJCZRKVR73S3C
 LOG="$DIR/browser-gc.log"
 cd "$DIR" || exit 1
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
 echo "== $(date '+%F %T') kick" >> "$LOG"
 
 # 鎖（issue #490）：這一支會殺 Chrome、`rm -rf` profile、關 pane、派工，卻是 kick 家族裡唯一沒有鎖的。
@@ -18,18 +19,6 @@ echo "== $(date '+%F %T') kick" >> "$LOG"
 LOCK="$DIR/browser-gc.lock"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：記一行醒目的
-lock_age() {
-  _born=$(python3 -c '
-import os,sys
-try:
-    print(int(os.path.getmtime(sys.argv[1])))
-except OSError:
-    print(0)
-' "$LOCK" 2>/dev/null) || _born=0
-  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
-  [ "$_born" = 0 ] && { echo 0; return; }
-  echo $(( $(date +%s) - _born ))
-}
 cleanup() { rm -rf "$LOCK" 2>/dev/null || true; true; }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then

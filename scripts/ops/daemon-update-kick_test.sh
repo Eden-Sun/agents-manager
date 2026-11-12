@@ -741,6 +741,7 @@ teardown
 setup
 ci "$C3" success
 cp "$HERE/daemon-update-kick.sh" "$AGM_DIR/bin/daemon-update-kick.sh"
+cp "$HERE/kick-common.sh" "$AGM_DIR/bin/kick-common.sh"
 cp "$HERE/build-web-bundle.py" "$AGM_DIR/bin/build-web-bundle.py"
 SOURCE_SCRIPT="$SCRIPT"
 SCRIPT="$AGM_DIR/bin/daemon-update-kick.sh"
@@ -755,6 +756,7 @@ teardown
 setup
 ci "$C3" success
 cp "$HERE/daemon-update-kick.sh" "$AGM_DIR/bin/daemon-update-kick.sh"
+cp "$HERE/kick-common.sh" "$AGM_DIR/bin/kick-common.sh"
 SCRIPT="$AGM_DIR/bin/daemon-update-kick.sh"
 rc=$(run)
 check_eq "missing helper is handled" "0" "$rc"

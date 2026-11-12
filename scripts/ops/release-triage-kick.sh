@@ -39,15 +39,11 @@ FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-4}   # 每 30 分鐘一輪＝連續約 
 ROUND_FAIL=""                                 # 這一輪有沒有出過「沒能完成」的事（收尾時統一結算）
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
 
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
 # 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
-alert() { # alert <reason> <detail>
-  log "ALERT ${1}：${2}"
-  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
-    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
-}
 
 # Claude binary diff 曾由 claude-release-kick 獨立派工。現在只由這支 kick 把它附進 changelog
 # 分診交辦；版本狀態仍沿用 claude-release.last，派工成功後才推進。
@@ -90,7 +86,6 @@ bump_fail() { # bump_fail <訊息>
   [ "$_n" -ge "$FAIL_ALERT_AFTER" ] && alert check_failing "上游新版分診連續 ${_n} 輪沒能完成：${1}"
   return 0
 }
-note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }   # 記 log，並讓收尾把這一輪算成失敗
 settle() { if [ -n "$ROUND_FAIL" ]; then bump_fail "$ROUND_FAIL"; else rm -f "$FAILS" 2>/dev/null; fi; }
 
 # launchd 的預設 PATH 不含 Homebrew；缺依賴不能只靜默 exit 0，否則「已排程」但永遠不做（#66 留言）。
@@ -107,18 +102,6 @@ LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這�
 # claude-release-kick.sh 的 com.agm.claude-release 兩個 timer，exec 進同一支腳本）：正常重疊，照擋不派，不寫 log
 # （原本每個 tick 都洗一行「已有執行者（0 秒）」）。超過這個時間還在跑才記，卡太久仍照舊喊人。
 LOCK_QUIET_SECS=${AGM_LOCK_QUIET_SECS:-60}
-lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
-  _born=$(python3 -c '
-import os,sys
-try:
-    print(int(os.path.getmtime(sys.argv[1])))
-except OSError:
-    print(0)
-' "$LOCK" 2>/dev/null) || _born=0
-  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
-  [ "$_born" = 0 ] && { echo 0; return; }
-  echo $(( $(date +%s) - _born ))
-}
 is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
   _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
   RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '

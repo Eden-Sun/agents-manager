@@ -29,14 +29,10 @@ ERROR_ALERT_AFTER=${AGM_ERROR_ALERT_AFTER:-3}
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}   # 每 10 分鐘一輪＝連續約 1 小時
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
 
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
-alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
-  log "ALERT ${1}：${2}"
-  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
-    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
-}
 
 # 這一輪沒能完成檢查（gh 被 rate limit／登入過期／網路斷）。一次抖動不吵人，但連續 FAIL_ALERT_AFTER 輪就推 ops_alert：
 # 以前只寫 local log，gh 登入過期後盯哨永遠安靜，等於 #211（CI 連紅好幾天沒人發現）換一種方式重演。
@@ -61,18 +57,6 @@ command -v gh >/dev/null 2>&1 || { alert missing_dependency "找不到 gh（PATH
 LOCK="$DIR/ci-watch.lock"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}
-lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
-  _born=$(python3 -c '
-import os,sys
-try:
-    print(int(os.path.getmtime(sys.argv[1])))
-except OSError:
-    print(0)
-' "$LOCK" 2>/dev/null) || _born=0
-  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
-  [ "$_born" = 0 ] && { echo 0; return; }
-  echo $(( $(date +%s) - _born ))
-}
 WORK=""
 cleanup() { rm -rf "$LOCK" 2>/dev/null || true; [ -n "$WORK" ] && rm -rf "$WORK" 2>/dev/null; true; }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }

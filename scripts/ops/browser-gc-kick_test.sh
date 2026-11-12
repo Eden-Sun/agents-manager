@@ -35,6 +35,7 @@ setup() {
     echo 'sleep() { :; }'
     tail -n +2 "$HERE/browser-gc-kick.sh" | sed "s#/tmp/am-#$TMPD/am-#g"
   } > "$ROOT/agm/bin/browser-gc-kick.sh"
+  cp "$HERE/kick-common.sh" "$ROOT/agm/bin/kick-common.sh"
   echo '#!/bin/bash
 echo "pane-gc called" >> "$FIX/kills.log"' > "$ROOT/agm/bin/pane-gc.sh"
   echo "TASK-BODY-MARKER" > "$ROOT/agm/browser-gc-task.md"

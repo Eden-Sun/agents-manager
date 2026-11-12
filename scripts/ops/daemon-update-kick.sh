@@ -52,18 +52,10 @@ SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"   # 從要換上�
 NICE="${NICE_BIN:-nice}"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
 
 # 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
 # 只寫 log 的話，正式 daemon 從此不再自動換版而沒有任何人知道。
-alert() { # alert <reason> <detail>
-  log "ALERT ${1}：${2}"
-  if [ -x "$AGM" ]; then
-    "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
-      log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
-  else
-    log "agm CLI 不在 ${AGM}，ops-alert 只留在這份 log"
-  fi
-}
 
 # ── ops 腳本自動換新（旗標，預設關；見檔頭 7）──
 OPS_AUTO_FLAG="$DIR/ops-auto-install.enabled"
@@ -146,18 +138,6 @@ except OSError as e:
     sys.exit(1 if e.errno in (errno.EACCES, errno.EAGAIN) else 2)
 ' >/dev/null 2>&1
 }
-lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
-  _born=$(python3 -c '
-import os,sys
-try:
-    print(int(os.path.getmtime(sys.argv[1])))
-except OSError:
-    print(0)
-' "$LOCK" 2>/dev/null) || _born=0
-  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
-  [ "$_born" = 0 ] && { echo 0; return; }
-  echo $(( $(date +%s) - _born ))
-}
 is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
   _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
   RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '
@@ -176,7 +156,6 @@ sys.exit(0 if os.path.normpath(argv[1]) == os.environ["RUNNER_SCRIPT"] else 1)
 FAILS="$DIR/daemon-update.fails"
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}
 ROUND_FAIL=""
-note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }
 settle() {
   if [ -n "$ROUND_FAIL" ]; then
     _n=$(cat "$FAILS" 2>/dev/null)
