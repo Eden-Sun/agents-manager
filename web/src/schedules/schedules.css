@@ -28,6 +28,7 @@
 }
 
 .project-schedule-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 4px;
@@ -48,14 +49,19 @@
   min-height: 16px;
 }
 
-/* 右欄與第1行對齊：綁定 Bot 小晶片（可省略）＋ ⋯ */
+/* 晶片＋⋯ 絕對定位在第1行右側；第1行名稱讓出 .with-side 的右側空間，第2、3行用整張卡片寬度。 */
 .project-schedule-side {
-  flex: none;
+  position: absolute;
+  top: 5px;
+  right: 5px;
   display: flex;
   align-items: center;
   gap: 2px;
-  max-width: 50%;
   min-width: 0;
+}
+
+.project-schedule-head.with-side {
+  padding-right: 12em;
 }
 
 .project-schedule-actions {

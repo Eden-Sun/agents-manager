@@ -24,7 +24,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
       {selecting ? <input type="checkbox" aria-label={t('選取排程 {name}', { name: s.name })} checked={selected} onChange={() => onSelect(s.id)} /> : null}
       {/* 固定三行：名稱（狀態點）／下次或現在／上次。每行不換行，過長省略號，完整文字放 title。 */}
       <button type="button" className="project-schedule-row" title={s.name} onClick={() => onOpen(s.id, s.bot_available === false)}>
-        <span className="project-schedule-head">
+        <span className="project-schedule-head with-side">
           <span className={`project-schedule-dot ${dot}`} aria-hidden="true" />
           {s.code ? <span className="project-schedule-code">{s.code}</span> : null}
           <span className="project-schedule-name">{s.name}</span>
@@ -38,6 +38,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
           <span className="project-schedule-v">{last.text}</span>
         </span>
       </button>
+      {/* 晶片與 ⋯ 絕對定位在第1行右側，不佔第2、3行寬度。 */}
       <div className="project-schedule-side">
         {s.bot_available !== false && botName ? (
           <button type="button" className={`project-schedule-bot${s.bot_dedicated === false ? ' warn' : ''}`} title={dedicatedNote ? `${t('執行這個排程的 Bot')}\n${dedicatedNote}` : t('執行這個排程的 Bot')} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
