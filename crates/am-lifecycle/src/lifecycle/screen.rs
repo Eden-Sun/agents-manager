@@ -1045,7 +1045,8 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
         return None;
     }
-    let lines: Vec<&str> = text.lines().collect();
+    let text_without_survey = if kind == "claude" { without_feedback_survey(text) } else { std::borrow::Cow::Borrowed(text) };
+    let lines: Vec<&str> = text_without_survey.lines().collect();
     let start = reply_start(kind, &lines);
     let tool_rows = codex_tool_cell_mask(kind, &lines);
     let banner_at = if kind == "codex" { codex_inline_banner(&lines).map(|b| b.start) } else { None };
@@ -1147,13 +1148,23 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     }
 }
 
+/// 開著的 claude 滿意度問卷（`● How is Claude doing…` ＋ `1: Bad …` 選項）不是回覆：整段從畫面上拿掉，
+/// 問卷以上與以下的內容照舊。引文（回覆裡照抄的問卷）不會被認成開著的問卷，所以不會被拿掉。
+fn without_feedback_survey(text: &str) -> std::borrow::Cow<'_, str> {
+    let Some((from, to)) = crate::tui_prompts::feedback_survey_span(text) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| *i < from || *i > to).map(|(_, l)| l).collect();
+    std::borrow::Cow::Owned(kept.join("\n"))
+}
+
 /// Provider-specific reply extraction. grok has no reply marker (appendix F): always `clean_screen`.
 pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
         return None;
     }
     if kind == "claude" {
-        return crate::capture::claude::PARSER.extract_reply(text);
+        return crate::capture::claude::PARSER.extract_reply(&without_feedback_survey(text));
     }
     let marker = match kind {
         "codex" => "• ",
@@ -3140,5 +3151,45 @@ mod sent_echo_window_tests {
         let fp = fingerprint("機密內容 secret reply");
         assert_eq!(fp.len(), 8);
         assert!(!fp.contains("機密"));
+    }
+}
+
+/// 滿意度問卷不是回覆（終端備援會把它當成 assistant 訊息存進對話）。
+#[cfg(test)]
+mod feedback_survey_reply_tests {
+    use super::*;
+
+    const SURVEY_ONLY: &str = include_str!("fixtures/claude-2.1.281-feedback-survey.txt");
+    /// 引文（回覆裡照抄的問卷）不能被砍：底下隔著 `✻ … · done`，不是開著的問卷。
+    const SURVEY_QUOTED: &str = include_str!("fixtures/claude-2.1.281-feedback-survey-quoted.txt");
+
+    /// 回覆在上、問卷在下（問卷底下是空輸入列）→ 只留回覆。
+    fn reply_above_survey() -> String {
+        let survey = SURVEY_ONLY.lines().skip_while(|l| !l.contains("How is Claude doing")).take(2).collect::<Vec<_>>().join("\n");
+        format!(
+            "❯ 做個調查\n⏺ 這是回覆的內容。\n\n✻ Worked for 3s · done 5:08 PM\n\n{survey}\n\n───────────\n❯ \n───────────\n  ⏵⏵ accept edits on\n"
+        )
+    }
+
+    #[test]
+    fn a_survey_alone_stores_no_reply() {
+        assert_eq!(extract_reply("claude", SURVEY_ONLY), None);
+        assert_eq!(clean_screen("claude", SURVEY_ONLY), None);
+        assert_eq!(screen_reply("claude", SURVEY_ONLY, &["做個調查".to_string()]), None);
+    }
+
+    #[test]
+    fn a_reply_above_the_survey_keeps_only_the_reply() {
+        let screen = reply_above_survey();
+        assert!(crate::tui_prompts::is_feedback_survey(&screen), "fixture sanity: the survey is open");
+        assert_eq!(extract_reply("claude", &screen).as_deref(), Some("這是回覆的內容。"));
+        assert_eq!(screen_reply("claude", &screen, &["做個調查".to_string()]).as_deref(), Some("這是回覆的內容。"));
+    }
+
+    #[test]
+    fn a_quoted_survey_inside_a_reply_is_kept() {
+        assert!(!crate::tui_prompts::is_feedback_survey(SURVEY_QUOTED));
+        let got = extract_reply("claude", SURVEY_QUOTED).expect("引文是回覆的一部分");
+        assert!(got.contains("How is Claude doing this session?"), "{got}");
     }
 }

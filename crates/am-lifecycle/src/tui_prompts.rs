@@ -150,15 +150,26 @@ mod mode_row_tests {
 }
 
 pub fn is_feedback_survey(screen: &str) -> bool {
+    feedback_survey_span(screen).is_some()
+}
+
+/// 開著的問卷在畫面上佔哪幾行：`(問句那一行, 最後一列選項那一行)`，都是 `screen.lines()` 的索引（含頭尾）。
+/// 沒有開著的問卷就是 `None`。[`is_feedback_survey`] 只問有沒有；要把問卷從回覆裡切掉的人要知道位置。
+pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
     // 原文與壓平後的版本一起留著：兩個 tail 要對齊同一批行——`composer_is_idle` 要看原文
     // （`❯` 會被 `flatten` 留著，但框線得先去掉），問句與選項看壓平後的。
-    let kept: Vec<(&str, String)> = screen.lines().map(|l| (l, flatten(l))).filter(|(_, f)| !f.is_empty()).collect();
+    let kept: Vec<(usize, &str, String)> = screen
+        .lines()
+        .enumerate()
+        .map(|(n, l)| (n, l, flatten(l)))
+        .filter(|(_, _, f)| !f.is_empty())
+        .collect();
     let from = kept.len().saturating_sub(SURVEY_TAIL_LINES);
     // **不能**套其他偵測的「輸入列空著就不是框」（[`composer_is_idle`]）：2.1.281 的真問卷底下就是一個空的
     // 輸入列（`claude-2.1.281-feedback-survey.txt`），那道守衛會把真的問卷全部擋掉。分辨引文改看
     // 問卷正下方是什麼（[`sits_on_empty_composer`]）。
-    let raw_tail: Vec<&str> = kept[from..].iter().map(|(l, _)| *l).collect();
-    let tail: Vec<String> = kept[from..].iter().map(|(_, f)| f.clone()).collect();
+    let raw_tail: Vec<&str> = kept[from..].iter().map(|(_, l, _)| *l).collect();
+    let tail: Vec<String> = kept[from..].iter().map(|(_, _, f)| f.clone()).collect();
     let tail = &tail[..];
     let question = "how is claude doing";
 
@@ -177,14 +188,16 @@ pub fn is_feedback_survey(screen: &str) -> bool {
                 }
                 last_row = Some(i);
             }
-            if found.into_iter().filter(|present| *present).count() >= 3
-                && last_row.is_some_and(|i| sits_on_empty_composer(&raw_tail[i + 1..]))
-            {
-                return true;
+            if found.into_iter().filter(|present| *present).count() >= 3 {
+                if let Some(last) = last_row.filter(|&i| sits_on_empty_composer(&raw_tail[i + 1..])) {
+                    // 視窗可能從問句上面幾行就開始：要切的是問句實際開始的那一行（能容下整句問句的最晚起點）。
+                    let question_row = (start..end).rev().find(|&j| tail[j..end].join(" ").contains(question)).unwrap_or(start);
+                    return Some((kept[from + question_row].0, kept[from + last].0));
+                }
             }
         }
     }
-    false
+    None
 }
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
