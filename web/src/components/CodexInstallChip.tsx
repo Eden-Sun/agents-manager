@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import * as api from '../api'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { codexInstallPlan } from '../lib/updateBatch'
-import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
 import { CLI_UPDATE_PHASE_LABEL } from '../store/cliUpdate'
 import { useT } from '../lib/i18n'
@@ -29,13 +28,14 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
   })
   const cliKey = useStore((s) => JSON.stringify(s.cliUpdates.filter((item) => item.kind === 'codex')))
   const install = useStore((s) => s.installCodexUpdate)
-  const notify = useStore((s) => s.notify)
   const [localOpen, setLocalOpen] = useState(false)
   // 手機合成的那顆（`MergedUpdateChip`）代為開框時，這裡只畫確認框。
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
-  const [asking, setAsking] = useState(false)
-  const [reviewKey, setReviewKey] = useState(0)
+
+  const planForReview = planKey ? (JSON.parse(planKey) as NonNullable<ReturnType<typeof codexInstallPlan>>) : null
+  const reviewRange = updateRange('codex', planForReview?.notice, null)
+  const review = useReviewAsk('codex', planForReview?.host ?? 'local', reviewRange.from, reviewRange.to, false)
 
   const cli = (JSON.parse(cliKey) as import('../store/cliUpdate').CliUpdate[])[0]
   if (cli && !control) {
@@ -80,7 +80,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
             {confirming ? (
               <div className="update-split">
                 <UpdateChangelog kind="codex" host={plan.host} from={range.from} to={range.to} />
-                <AgmReviewBox kind="codex" host={plan.host} from={range.from} to={range.to} refreshKey={reviewKey} />
+                <AgmReviewBox kind="codex" host={plan.host} from={range.from} to={range.to} refreshKey={review.reviewKey} />
               </div>
             ) : null}
             <p>
@@ -119,24 +119,9 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
           </>
         }
         confirmLabel={plan.ready.length > 0 ? t('安裝並重啟 {n} 顆', { n: plan.ready.length }) : t('只安裝')}
-        secondaryLabel={asking ? t('派工中…') : t('分析影響')}
-        secondaryDisabled={asking}
-        onSecondary={() => {
-          setAsking(true)
-          void api
-            .requestUpdateReview({ kind: 'codex', host: plan.host, from: range.from, to: range.to })
-            .then((r) => {
-              setReviewKey((n) => n + 1)
-              notify(
-                'info',
-                r.duplicate
-                  ? t('codex {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
-                  : t('已請 {bot} 解析 codex {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', version: r.version }),
-              )
-            })
-            .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
-            .finally(() => setAsking(false))
-        }}
+        secondaryLabel={review.asking ? t('派工中…') : t('分析影響')}
+        secondaryDisabled={review.asking}
+        onSecondary={review.ask}
         width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {

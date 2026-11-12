@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import * as api from '../api'
 import { claudeInstallPlan } from '../lib/updateBatch'
-import { reviewErrText } from '../lib/claudeReviewErr'
 import { CLI_UPDATE_PHASE_LABEL } from '../store/cliUpdate'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -20,12 +19,19 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
   })
   const activeKey = useStore((s) => JSON.stringify(s.cliUpdates.filter((item) => item.kind === 'claude')))
   const install = useStore((s) => s.installClaudeUpdates)
-  const notify = useStore((s) => s.notify)
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
   const setConfirming = (open: boolean) => (control ? !open && control.close() : setLocalOpen(open))
-  const [asking, setAsking] = useState(false)
-  const [reviewKey, setReviewKey] = useState(0)
+
+  const planForReview = planKey ? (JSON.parse(planKey) as NonNullable<ReturnType<typeof claudeInstallPlan>>) : null
+  const hostForReview = planForReview ? (planForReview.installHosts[0] ?? planForReview.hosts[0]?.host ?? 'local') : 'local'
+  const review = useReviewAsk(
+    'claude',
+    hostForReview,
+    planForReview?.hosts.find((host) => host.host === hostForReview)?.installedVersion ?? null,
+    planForReview?.target ?? null,
+    false,
+  )
 
   const active = JSON.parse(activeKey) as { id: string; host: string; phase: keyof typeof CLI_UPDATE_PHASE_LABEL; from: string | null; to: string | null }[]
   if (!planKey) {
@@ -83,7 +89,7 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
             {confirming ? (
               <div className="update-split">
                 <UpdateChangelog kind="claude" host={hostForDetails} from={from} to={plan.target} autoTranslate />
-                <AgmReviewBox kind="claude" host={hostForDetails} from={from} to={plan.target} refreshKey={reviewKey} />
+                <AgmReviewBox kind="claude" host={hostForDetails} from={from} to={plan.target} refreshKey={review.reviewKey} />
               </div>
             ) : null}
             <p>{t.x('按下確認後，才會在以下落後或讀不到版本的主機執行 {cmd}。每台都會安裝同一個目標版；安裝完成後只顯示「已安裝，重啟套用」，不會自動重啟。', { cmd: <code>claude install {plan.target}</code> })}</p>
@@ -99,20 +105,9 @@ export function ClaudeInstallChip({ control }: { control?: DialogControl } = {})
           </>
         }
         confirmLabel={toInstall.length > 0 ? t('安裝到 {n} 台', { n: toInstall.length }) : t('安裝中')}
-        secondaryLabel={asking ? t('派工中…') : t('分析影響')}
-        secondaryDisabled={asking || toInstall.length === 0}
-        onSecondary={() => {
-          setAsking(true)
-          void api.requestUpdateReview({ kind: 'claude', host: hostForDetails, from, to: plan.target })
-            .then((r) => {
-              setReviewKey((n) => n + 1)
-              notify('info', r.duplicate
-                ? t('claude {version} 已經派給 {bot} 解析過了，結論會回到這裡', { version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
-                : t('已請 {bot} 解析 claude {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', version: r.version }))
-            })
-            .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
-            .finally(() => setAsking(false))
-        }}
+        secondaryLabel={review.asking ? t('派工中…') : t('分析影響')}
+        secondaryDisabled={review.asking || toInstall.length === 0}
+        onSecondary={review.ask}
         width={480}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {

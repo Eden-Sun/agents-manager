@@ -21,3 +21,11 @@ test('「分析影響」：有新版才能按；沒有 plan（to＝null）時停
   assert.equal(renderToStaticMarkup(<Probe to="1.4.6" />), '<button>分析影響</button>')
   assert.equal(renderToStaticMarkup(<Probe to={null} />), '<button disabled="">分析影響</button>')
 })
+
+test('useReviewAsk requireTo=false：to＝null 也能按（codex 範圍沒有終點時照舊送出）', () => {
+  function Probe({ to }: { to: string | null }) {
+    const { dialog } = useReviewAsk('codex', 'local', null, to, false)
+    return <button disabled={dialog.secondaryDisabled}>{dialog.secondaryLabel}</button>
+  }
+  assert.equal(renderToStaticMarkup(<Probe to={null} />), '<button>分析影響</button>')
+})

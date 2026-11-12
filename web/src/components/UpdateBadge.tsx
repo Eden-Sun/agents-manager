@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from 'react'
-import * as api from '../api'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { reviewErrText } from '../lib/claudeReviewErr'
 import { useT } from '../lib/i18n'
 import { updateRange } from '../lib/updateRange'
 import { isChildBot, passiveUpdateHint, updateBatchCounts } from '../lib/updateBatch'
@@ -31,8 +30,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
   const restarting = restartingLocal || restartingShared
   const [confirming, setConfirming] = useState(false)
-  const [asking, setAsking] = useState(false)
-  const [reviewKey, setReviewKey] = useState(0)
 
   // selector 回純布林：`updateBatchCounts` 每次回新陣列，連 `useShallow` 都擋不住（見 `UpdateQuotaChip.tsx`）。
   // 忙碌的也算：額度列的 chip 把它列在「在忙」那組，照樣畫著；再畫一顆就是同一個 ⌃⌃ 兩次（2026-09-19 使用者：「logo 重工了」）。
@@ -53,6 +50,9 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     return bot ? isChildBot(bot) : false
   })
   const notice = run?.update_notice ?? null
+  // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
+  const range = updateRange(botKind, notice, runningVersion)
+  const review = useReviewAsk(botKind, host, range.from, range.to, false)
   if (!notice) return null
   if (isChild) {
     const hint = passiveHint ?? t('由父 Bot 安排重啟')
@@ -75,8 +75,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   }
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
-  // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
-  const range = updateRange(botKind, notice, runningVersion)
   // 「分析影響」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
   const canReview = botKind === 'claude' || botKind === 'codex'
   // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
@@ -96,24 +94,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
 
   // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 影響分析，結論回更新框。
   // 唯讀，所以按完就關框，不擋重啟那條路（使用者 2026-09-19）。
-  const askAgm = () => {
-    setAsking(true)
-    void api
-      .requestUpdateReview({ kind: botKind, host, from: range.from, to: range.to })
-      .then((r) => {
-        // 不關框：結論就顯示在框裡（使用者 2026-09-19）。派完先刷新一次，之後打開也會再讀。
-        setReviewKey((n) => n + 1)
-        notify(
-          'info',
-          // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
-          r.duplicate
-            ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: botKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
-            : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { kind: botKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' }),
-        )
-      })
-      .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
-      .finally(() => setAsking(false))
-  }
 
   const confirmDialog = (
     <ConfirmRestart
@@ -123,18 +103,18 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       needsInstall={needsInstall}
       name={botName}
       busy={busy}
-      asking={asking}
+      asking={review.asking}
       changelog={
         confirming ? (
           <div className="update-split">
             <UpdateChangelog kind={botKind} host={host} from={range.from} to={range.to} />
-            {canReview ? <AgmReviewBox kind={botKind} host={host} from={range.from} to={range.to} refreshKey={reviewKey} /> : null}
+            {canReview ? <AgmReviewBox kind={botKind} host={host} from={range.from} to={range.to} refreshKey={review.reviewKey} /> : null}
           </div>
         ) : null
       }
       onCancel={() => setConfirming(false)}
       onConfirm={restart}
-      onAskAgm={canReview ? askAgm : undefined}
+      onAskAgm={canReview ? review.ask : undefined}
     />
   )
 

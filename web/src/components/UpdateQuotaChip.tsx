@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import * as api from '../api'
+import { useReviewAsk } from '../hooks/useReviewAsk'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { readyLabel, updateBatchCounts } from '../lib/updateBatch'
-import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -90,9 +89,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
-  const [asking, setAsking] = useState(false)
-  const [reviewKey, setReviewKey] = useState(0)
-  const notify = useStore((s) => s.notify)
   // changelog 用第一顆等著套用的 bot 所在主機、kind 與它跑著的版本；同一台同 kind 都是同一份。
   const changelogHost = useStore((s) => {
     const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
@@ -113,6 +109,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   // codex 的版本區間從通知讀（磁碟已裝好的那種通知也寫著兩個版本），claude 照舊（issue #561）。
   const range = updateRange(changelogKind, changelogNotice, changelogFrom)
   const canReview = changelogKind === 'claude' || changelogKind === 'codex'
+  const review = useReviewAsk(changelogKind, changelogHost, range.from, range.to, false)
 
   if (batch && !control) {
     const { total, done, ok, failed, finished } = batch
@@ -172,7 +169,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                 <UpdateChangelog kind={changelogKind} host={changelogHost} from={range.from} to={range.to} />
                 {/* 分析（上游分診＋影響分析）claude 與 codex 同一套（issue #561）。 */}
                 {canReview ? (
-                  <AgmReviewBox kind={changelogKind} host={changelogHost} from={range.from} to={range.to} refreshKey={reviewKey} />
+                  <AgmReviewBox kind={changelogKind} host={changelogHost} from={range.from} to={range.to} refreshKey={review.reviewKey} />
                 ) : null}
               </div>
             ) : null}
@@ -208,25 +205,9 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         // 批次框跟單顆框同一顆按鈕：更新的解析是**版本層級**的事，跟要重啟幾顆無關。
         // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
         // （使用者 2026-09-19：「還是沒見按鈕」）。claude 與 codex 同一套（issue #561）。
-        secondaryLabel={canReview ? (asking ? t('派工中…') : t('分析影響')) : undefined}
-        secondaryDisabled={asking}
-        onSecondary={canReview ? () => {
-          setAsking(true)
-          void api
-            .requestUpdateReview({ kind: changelogKind, host: changelogHost, from: range.from, to: range.to })
-            .then((r) => {
-              // 框留著：結論直接顯示在裡面。
-              setReviewKey((n) => n + 1)
-              notify(
-                'info',
-                r.duplicate
-                  ? t('{kind} {version} 已經派給 {bot} 解析過了，結論會回到這裡', { kind: changelogKind, version: r.version, bot: r.source_name || r.target_bot_name || 'AGM' })
-                  : t('已請 {bot} 解析 {kind} {version} 的 changelog，結論會回到這裡', { bot: r.source_name || r.target_bot_name || 'AGM', kind: changelogKind, version: r.version }),
-              )
-            })
-            .catch((e: unknown) => notify('error', t('派不出去：{reason}', { reason: reviewErrText(e) })))
-            .finally(() => setAsking(false))
-        } : undefined}
+        secondaryLabel={canReview ? (review.asking ? t('派工中…') : t('分析影響')) : undefined}
+        secondaryDisabled={review.asking}
+        onSecondary={canReview ? review.ask : undefined}
         width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
