@@ -573,7 +573,7 @@ mod tests {
         let r = crate::db::run(&app.db, &run).await.unwrap().unwrap();
         assert_eq!(
             r.status_line.as_deref(),
-            Some("GPT-6.1-Sol high · ~/project/example-agents/projects/rt · Context 17% used · weekly 100% left")
+            Some("GPT-6.1-Sol high · ~/project/sample-agents/projects/rt · Context 17% used · weekly 100% left")
         );
         assert!(r.status_json.unwrap().contains("\"used_percentage\":17"));
     }

@@ -43,5 +43,5 @@ test('提示講得出在哪、開了什麼 port、是不是自己開的', () => 
 
 test('別名優先，預設標題帶 listen port', () => {
   assert.equal(paneLabel(pane({ purpose: 'dev-server', foreground: 'bun run dev', listen_ports: [3200] })), 'bun :3200')
-  assert.equal(paneLabel(pane({ alias: 'example-ops', foreground: 'bun run dev', listen_ports: [3200] })), 'example-ops')
+  assert.equal(paneLabel(pane({ alias: 'litware-ops', foreground: 'bun run dev', listen_ports: [3200] })), 'litware-ops')
 })

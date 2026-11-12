@@ -220,7 +220,7 @@ mod tests {
     /// m4p 真畫面（10 欄寬的 pane，2026-10-16）：橫幅折成好幾行，框底整個被截掉。
     #[test]
     fn a_banner_wrapped_by_a_narrow_pane_still_reads() {
-        let narrow = "% agy --da\nngerously-\n\n      ▄▀▀▄\n  Antigrav\nity CLI 1.\n4.0\n kimciou8@\ngmail.com\n(Google AI\n Pro)\n  Gemini 3\n.8 Flash (\nHigh)\n─────────\n> 你負責第\n";
+        let narrow = "% agy --da\nngerously-\n\n      ▄▀▀▄\n  Antigrav\nity CLI 1.\n4.0\n me@\nexample.com\n(Google AI\n Pro)\n  Gemini 3\n.8 Flash (\nHigh)\n─────────\n> 你負責第\n";
         assert_eq!(parse_banner(narrow).as_deref(), Some("gemini-3.8-flash-high"));
         let wide = "      ▄▀▀▄        Antigravity CLI 1.3.5\n     ▀▀▀▀▀▀       me@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Low)\n";
         assert_eq!(parse_banner(wide).as_deref(), Some("gemini-3.8-flash-low"));

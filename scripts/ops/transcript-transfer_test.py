@@ -13,7 +13,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "transcript-transfer")
 SRC_PROJ = "/Users/me/project/am"
-DST_PROJ = "/home/ubuntu/project/am"
+DST_PROJ = "/home/user/project/am"
 WT = SRC_PROJ + "/.claude/worktrees/am-x1"
 
 

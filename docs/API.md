@@ -1181,7 +1181,7 @@ bot 或 active Run 不存在 404。
  "source": "spawned | attached", "pid": null, "command": "bun run dev", "kind": "vite", "lan": false,
  "candidates": ["/path/to/web", "/path/to/apps/site"],
  "candidate_info": [{"dir": "/path/to/web", "command": "bunx vite --host 127.0.0.1 --port 5180 --strictPort"}],
- "others": [{"port": 3200, "dir": "/path/wt/example-ops", "pid": 44112, "kind": "next", "relation": "same_dir", "repo": "wt"}]}
+ "others": [{"port": 3200, "dir": "/path/wt/litware-ops", "pid": 44112, "kind": "next", "relation": "same_dir", "repo": "wt"}]}
 ```
 
 - `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 server（沒有 pane，`pid` 是那顆行程）。
@@ -1297,7 +1297,7 @@ herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的
 - `label`：herdr 上的 pane 名字；scratch 選中時會被改成 `[panes] scratch_name`（只是顯示，選哪一顆看 pane_id，不看名字）。
 
 ### `PUT /api/panes/{id}/alias?host=local`
-User-only（Bot／AGM role 均 403）。Body：`{"alias":"example-ops"}`；回傳 pane（含 `alias`）。去除頭尾空白，空字串刪除別名；超過 120 字元或含控制字元回 400；pane 不存在回 404。
+User-only（Bot／AGM role 均 403）。Body：`{"alias":"litware-ops"}`；回傳 pane（含 `alias`）。去除頭尾空白，空字串刪除別名；超過 120 字元或含控制字元回 400；pane 不存在回 404。
 別名存在 daemon SQLite `pane_aliases`，不改 herdr 標籤、歸屬或 GC。穩定 key 為 JSON tuple `[host,cwd,["port",最小 listen port]]`；無 port 時為 `[host,cwd,["command",foreground]]`。換 pane id／重啟服務仍保留；不同 host／cwd／port 隔離，同目錄同指令的無 port pane 共用別名。cwd、主要 port 或無 port 指令改變時視為不同服務。刪除 pane 不刪除別名。
 `GET /api/panes`、`GET /api/projects/{id}/panes` 列皆含 `alias: string|null`。更新發 `panes_changed` 讓各裝置重讀。側欄每列「⋯ → 設定別名」可編輯；別名為主標，原指令與 port 為副標，無別名時預設標題包含 port。
 
@@ -1504,7 +1504,7 @@ max_concurrent = 1
 連上去看一眼：
 
 ```json
-{"ok":true,"output":"OS=Linux\nARCH=x86_64\nCARGO=/home/ubuntu/.cargo/bin/cargo\ncargo 1.90.0",
+{"ok":true,"output":"OS=Linux\nARCH=x86_64\nCARGO=/home/user/.cargo/bin/cargo\ncargo 1.90.0",
  "password_auth":true,"os":"Linux","arch":"x86_64","cargo_path":"…","cargo_version":"cargo 1.90.0","cargo_missing":false}
 ```
 

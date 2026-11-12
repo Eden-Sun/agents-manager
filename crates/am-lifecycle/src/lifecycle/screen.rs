@@ -1315,7 +1315,7 @@ mod extract_tests {
     const NOT_LOGGED_IN: &str = "\
  ▐▛███▛█   Claude Code v2.1.261
 ▝▜██████▀  Haiku 4.5 · API Usage Billing
-  ▝▝ ▝▝    ~/project/example-agents/projects/pt
+  ▝▝ ▝▝    ~/project/sample-agents/projects/pt
 
  ⚠ AGENTS.md is over the 40.0k-char limit (57.0k chars) · /memory to free up context
 
@@ -1414,7 +1414,7 @@ mod extract_tests {
 │ >_ OpenAI Codex (v0.153.4)                  │
 │                                            │
 │ model:        gpt-5.6-luna max  fast   /model to change
-│ directory:    ~/project/example-agents/projects/pt
+│ directory:    ~/project/sample-agents/projects/pt
 │ permissions:  YOLO mode
 ╰────────────────────────────────────────────╯
 
@@ -1424,7 +1424,7 @@ mod extract_tests {
 
 › Ask Codex to do anything
 
-gpt-5.6-luna max fast · ~/project/example-agents/projects/pt · Context 0% used · 5h 100% left
+gpt-5.6-luna max fast · ~/project/sample-agents/projects/pt · Context 0% used · 5h 100% left
 ";
 
     #[test]
@@ -3033,7 +3033,7 @@ mod issue_1664_screenshot_tests {
 
     #[test]
     fn exact_screenshot_footer_is_not_a_reply() {
-        let screenshot = "› Ask Codex to do anything\n\nGPT-6-Astra high · ~/project/example-agents/projects/rt · Context 72% used · weekly 74% left\n  ? for shortcuts\n⚠ 1 warning · f2 to view";
+        let screenshot = "› Ask Codex to do anything\n\nGPT-6-Astra high · ~/project/sample-agents/projects/rt · Context 72% used · weekly 74% left\n  ? for shortcuts\n⚠ 1 warning · f2 to view";
         assert_eq!(clean_screen("codex", screenshot), None);
         assert_eq!(crate::lifecycle::poller::live_reply("codex", screenshot), None);
         let reply = format!("› fix\n• 修復完成。\n\n{screenshot}");

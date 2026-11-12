@@ -14,9 +14,9 @@ const REPO_MULTI = [
   '❯ 1. [ ] northwinds-fabrik-web',
   '         fabrik 前台（接 console 報價、評價）',
   '  2. [ ] vehicleapi',
-  '         車籍查詢 API',
+  '         範例內容 API',
   '  3. [ ] carmakerapi',
-  '         車廠代碼 API',
+  '         範例內容 API',
   '  4. [ ] Type something.',
   '     Submit',
   '────────────────────────────────────────────────────────────',
@@ -35,7 +35,7 @@ test('#1887 上輪回覆的表格不應讓重讀選單變成預覽標題', async
   assert.ok(now)
   assert.equal(samePage(draft.pages[0], now), true)
   assert.deepEqual(now.choices, menu.choices)
-  assert.equal(now.choices[1].detail, '車籍查詢 API')
+  assert.equal(now.choices[1].detail, '範例內容 API')
   assert.equal(now.choices[1].title, 'vehicleapi')
 })
 
@@ -45,8 +45,8 @@ test('#1887 多選說明分開存放，面板預載與送出重讀仍是同一�
   assert.equal(menu.multi, true)
   assert.deepEqual(menu.choices.map(({ title, detail }) => ({ title, detail })), [
     { title: 'northwinds-fabrik-web', detail: 'fabrik 前台（接 console 報價、評價）' },
-    { title: 'vehicleapi', detail: '車籍查詢 API' },
-    { title: 'carmakerapi', detail: '車廠代碼 API' },
+    { title: 'vehicleapi', detail: '範例內容 API' },
+    { title: 'carmakerapi', detail: '範例內容 API' },
     { title: 'Type something.', detail: '' },
     { title: 'Chat about this', detail: '' },
   ])

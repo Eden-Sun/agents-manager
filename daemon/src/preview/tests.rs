@@ -248,7 +248,7 @@ fn dev_servers_are_recognised_by_command_line() {
 fn a_listener_counts_by_command_or_by_living_under_a_project() {
     let roots = vec!["/home/wt".to_string()];
     assert_eq!(classify_listener("next-server (v16)", "/elsewhere", &roots), Some("next"));
-    assert_eq!(classify_listener("node server.js", "/home/wt/example-ops", &roots), Some("unknown"));
+    assert_eq!(classify_listener("node server.js", "/home/wt/litware-ops", &roots), Some("unknown"));
     assert_eq!(classify_listener("node server.js", "/home/wt", &roots), Some("unknown"));
     assert_eq!(classify_listener("node server.js", "/home/wt-other/x", &roots), None, "前綴相同不算底下");
     assert_eq!(classify_listener("node server.js", "/elsewhere", &roots), None);
@@ -262,7 +262,7 @@ fn a_listener_counts_by_command_or_by_living_under_a_project() {
 fn join_servers_filters_and_labels_listeners() {
     let ports: HashMap<i32, Vec<u16>> = [(1, vec![3200]), (2, vec![7788]), (3, vec![22]), (4, vec![9999]), (5, vec![5173, 5174])].into();
     let cwds: HashMap<i32, String> = [
-        (1, "/home/wt/example-ops".to_string()),
+        (1, "/home/wt/litware-ops".to_string()),
         (2, "/home/wt/agents-manager".to_string()),
         (3, "/home/wt".to_string()),
         (4, "/unrelated".to_string()),
@@ -1285,7 +1285,7 @@ fn relation_and_repo_name() {
     assert_eq!(relation_of(&p("/am-main/web"), &cands, Some(&mine), None), Relation::Other, "判不出來退成 other");
     assert_eq!(relation_of(&p("/am-main/web"), &cands, None, Some(&mine)), Relation::Other);
     assert!(Relation::SameDir < Relation::SameRepo && Relation::SameRepo < Relation::Other);
-    assert_eq!(repo_name(Some(&k("/x/example-agents/.git", None)), "/x/example-agents/wt/web"), "example-agents");
+    assert_eq!(repo_name(Some(&k("/x/sample-agents/.git", None)), "/x/sample-agents/wt/web"), "sample-agents");
     assert_eq!(repo_name(Some(&k("/x/bare.git", None)), "/d"), "bare.git");
     assert_eq!(repo_name(None, "/x/not-git/web/"), "web");
 }
@@ -1302,7 +1302,7 @@ async fn others_lists_every_local_vite_with_its_relation() {
     r.fake.vite(2, 5174, "/x/am-clone/web"); // 另一份 clone，origin 一樣
     r.fake.repo("/x/am-clone/web", "/git/clone/.git", Some("git@h:me/am.git"));
     r.fake.vite(3, 3001, "/x/hermes/apps/web"); // 別的 repo
-    r.fake.repo("/x/hermes/apps/web", "/git/example-agents/.git", Some("git@h:me/hermes.git"));
+    r.fake.repo("/x/hermes/apps/web", "/git/sample-agents/.git", Some("git@h:me/hermes.git"));
     r.fake.vite(4, 3002, "/x/not-git/web"); // 判不出來
     let bot = running_bot(&r, "alfa").await;
     let off = get(&r.e.app, &bot).await.unwrap();
@@ -1318,7 +1318,7 @@ async fn others_lists_every_local_vite_with_its_relation() {
             (5299, "same_dir", "am"),
             (5173, "same_repo", "am"),
             (5174, "same_repo", "clone"),
-            (3001, "other", "example-agents"),
+            (3001, "other", "sample-agents"),
             (3002, "other", "web"),
         ]
     );

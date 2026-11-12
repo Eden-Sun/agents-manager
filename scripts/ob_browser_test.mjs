@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const script = readFileSync(new URL('./chatgpt-consult.mjs', import.meta.url), 'utf8');
-const pid = '01M1Y7BNVP843V9MFEDJ2KW9NQ';
+const pid = '01M1Y7BNVPQHSFAY3KYBR922Z6';
 const key = '1234567890abcdef1234567890abcdef';
 const url = 'https://chatgpt.com/c/project-a';
 const marker = `[OB request=${key}]`;

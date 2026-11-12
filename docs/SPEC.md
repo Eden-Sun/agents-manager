@@ -3801,7 +3801,7 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
 ### 11.9a 專案改在接手那台本機跑：原生對話搬家（#717，使用者 2026-09-28）
 
 使用者決定 `Agents Manager` 專案的 bot 直接在 agm-host（ubuntu）本機跑，不經 `m4p`。這時專案在 B 上是 `host = local`、path 是 B 自己的 checkout
-（`/Users/me/project/agents-manager` → `/home/ubuntu/project/agents-manager`），原生對話檔也要在 B 上，`start?resume=native` 才接得回：
+（`/Users/me/project/agents-manager` → `/home/user/project/agents-manager`），原生對話檔也要在 B 上，`start?resume=native` 才接得回：
 B 接回前 `native_resume_plan` 會看 `runs.transcript_path` 在不在（`stage_cross_identity_transcript_local`），不在就退回開新對話——
 所以 bundle 裡來源機器的路徑不能原樣帶過去。
 
@@ -3823,14 +3823,14 @@ B 接回前 `native_resume_plan` 會看 `runs.transcript_path` 在不在（`stag
 只碰 `.claude*/projects`、`.codex/(archived_)sessions`、`.grok/sessions` 底下的檔，`auth.json`／`.credentials.json` 一律拒絕。
 B 已有同一個檔：內容一樣跳過（重跑冪等），不一樣＝B 那邊已接著寫過，不蓋、列在 `conflicts`（確定要蓋才 `--overwrite`）。
 
-**import**：`project-transfer import --host local --path-map /Users/me/project/agents-manager=/home/ubuntu/project/agents-manager`
+**import**：`project-transfer import --host local --path-map /Users/me/project/agents-manager=/home/user/project/agents-manager`
 把專案 path、bot 的 cwd（worktree 在底下的一起換）、附件的 `agent_path` 換成 B 上的路徑，config 寫 `host = "local"`；
 `--host local` 沒有一條 map 換得到專案 path 就拒絕。`--host local` 時專案的 `workspace_id` 清成 NULL：那是來源那台 herdr 的短 id（`w1`、`wV`…），帶到 B 上可能剛好是別的 workspace，daemon 的 `workspace_get` 看到存在就會把 bot 開在不相干的地方；B 第一次啟動自己建。還有 transcript 不在 B 上的段落列在 warnings（提醒先跑 transcript-transfer）。
 附件位元組照 §11.9 放 B 資料目錄的副本；`agent_path` 換過之後 B 的 checkout 裡不一定有那個檔（`.agents-manager/attachments` 不進 git），舊對話裡的附件 agent 讀不到——**刻意不複製進 B 的 checkout**（使用者 2026-09-28 決定維持現狀）。
 
 **runbook** 跟 §11.9 同樣先停 A 的 bot、設 `handed_off_to`，差別在第 3、4 步：
 3. A：`project-transfer export … --out am.json.gz`，接著
-   `scripts/ops/transcript-transfer --bundle am.json.gz --out am-moved.json.gz --target ubuntu@agm-host --map /Users/me/project/agents-manager=/home/ubuntu/project/agents-manager`
+   `scripts/ops/transcript-transfer --bundle am.json.gz --out am-moved.json.gz --target ubuntu@agm-host --map /Users/me/project/agents-manager=/home/user/project/agents-manager`
    （先 `--dry-run`；結束碼 2＝有 missing／refused／conflicts，看報告再決定）。把 `am-moved.json.gz` 傳到 B、刪 A 上兩份 bundle。
 4. B：停 B 的 daemon；`project-transfer import --bundle am-moved.json.gz --host local --path-map …`（先 `--dry-run`，warnings 不該有 transcript 那條）。
    身份用 B 自己的（B 上 cc0／cc1／cc2 是 `~/.claude`、`~/.claude-cc1`、`~/.claude-cc2`，跟 A 同名同位置）。之後照 §11.9 第 5 步接回，只是現在是 B 本機。
@@ -3863,7 +3863,7 @@ AGM-DM-GRUP 專案（AGM、AGM-responder 等 bot）搬到 agm-host 本機跑時�
 `handoff.md`（manager 自己維護；DB 的 `summary` 與 `handoff` notes 另有權威副本）與 `AGM-responder/reports/` 手動帶過去，裡面的 `/Users/me` 換成目標路徑。
 log、`bin/agm.bak-*`、`.lease-*.json`、`daemon-update.rejected`／lease token、`*.bak` 不帶；`*-task.md` 與排程走 #675 的 systemd 安裝。
 
-**runbook** 接 §11.9a：第 3 步 export 加 `--with-supervisor`（`--path-map` 要涵蓋 `/Users/me/.config/agents-manager`，例如直接 `/Users/me=/home/ubuntu`）；
+**runbook** 接 §11.9a：第 3 步 export 加 `--with-supervisor`（`--path-map` 要涵蓋 `/Users/me/.config/agents-manager`，例如直接 `/Users/me=/home/user`）；
 第 4 步 import 加 `--with-supervisor`，先 `--dry-run` 看 `supervisor` 那一段（`singletons`、`inbox_parked`、`skipped_unique`）；
 import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 `handoff.md` 放進去；接回 AGM 與 responder 之後才打開 `desired_running`／autostart。
 
@@ -3890,7 +3890,7 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 | `hand-off` | Mac | 兩個專案 `PATCH handed_off_to = "agm-host"`：Mac daemon 萬一被拉起來也不會動它們（§6.5h） |
 | `stop-src` | Mac | 7788 的 listener 是 `agents-managerd` 才 `kill`，等 `daemon.lock` 放開 |
 | `export` | Mac | `project-transfer export`，協調者專案加 `--with-supervisor`；host-state snapshot 完整設定、UI token、outbox 與 identity 路徑清單 |
-| `transcripts` | Mac→目標 | `transcript-transfer --target ubuntu@agm-host`，map：repo（`/Users/me/project/agents-manager`→`/home/ubuntu/project/agents-manager`）與資料目錄（`~/.config/agents-manager`→`/home/ubuntu/.config/agents-manager`，AGM-DM-GRUP 的 path 與協調者 cwd 在這底下）；`rsync` supervisor 目錄（不帶 `*.lease-token.*`、`*.lock`）。結束碼 2 時只擋 conflicts／refused 與「在跑名單裡的 bot 最後一段對話找不到」；更早的舊 session 在 Mac 上已經沒有檔（例：協調者專案 3 段）的只警告、記下個數給 import 的閘門 |
+| `transcripts` | Mac→目標 | `transcript-transfer --target ubuntu@agm-host`，map：repo（`/Users/me/project/agents-manager`→`/home/user/project/agents-manager`）與資料目錄（`~/.config/agents-manager`→`/home/user/.config/agents-manager`，AGM-DM-GRUP 的 path 與協調者 cwd 在這底下）；`rsync` supervisor 目錄（不帶 `*.lease-token.*`、`*.lock`）。結束碼 2 時只擋 conflicts／refused 與「在跑名單裡的 bot 最後一段對話找不到」；更早的舊 session 在 Mac 上已經沒有檔（例：協調者專案 3 段）的只警告、記下個數給 import 的閘門 |
 | `ship` | Mac→目標 | 改好路徑的 project bundle、host-state bundle（含 UI token）、工具、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700）；所有傳輸成功後才刪 Mac 上兩種 bundle，失敗可用相同狀態目錄重跑；host-state bundle 只留目標安全狀態目錄供 verify／rollback 使用 |
 | `stop-dst` | 目標 | 7788 的 listener（`ss`）是 `agents-managerd` 才殺，等 `daemon.lock` 放開。hub 專案在這之後到 `start-dst` 之間也暫停 |
 | `import` | 目標 | 所有 project bundle 先 `--dry-run`：transcript 不在的段數多於上一步記下的舊 session 數就停（對話沒搬到）；再先套用 host-state（來源非 project config、UI token、無衝突 outbox），最後正式 `import --host local --path-map …`（協調者專案加 `--with-supervisor`）。摘要與 `*.pre-transfer-*`／host-state 備份留在狀態目錄 |

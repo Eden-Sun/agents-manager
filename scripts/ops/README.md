@@ -89,6 +89,10 @@ before the flag has anything to act on.
 
 `scripts/ops/launchd/com.agm.*.plist` are the source files for the 8 jobs on the dev Mac, and `install-manifest.tsv`
 lists them (destination `LaunchAgents/…`, which `ops-sync --check` resolves to `~/Library/LaunchAgents/`).
+The files are **templates**: the home directory is the placeholder `@HOME@`, not a real path. Install them with
+`scripts/ops/render-launchd.sh <template> ~/Library/LaunchAgents/<name>.plist` (it replaces `@HOME@` with `$HOME`, XML-escaped).
+`ops-install.sh` does not install schedule rows (see above), so that step is manual. `ops-sync --check` renders the
+template the same way before comparing, so a file installed that way reads as in sync.
 
 The comparison uses the `plistlib`-parsed dict (**key order is irrelevant**) and compares **everything except
 `EnvironmentVariables`**, including `StandardOutPath`, `StandardErrorPath` and `WorkingDirectory`.

@@ -434,7 +434,7 @@ async fn claude_child_in(env: tt::Env, config_dir: Option<&PathBuf>, host: Optio
 }
 
 fn write_log(config_dir: &std::path::Path, sid: &str, text: &str) -> PathBuf {
-    let dir = config_dir.join("projects").join("-Users-m4p-project-wt");
+    let dir = config_dir.join("projects").join("-Users-me-project-wt");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{sid}.jsonl"));
     std::fs::write(&path, text).unwrap();
@@ -580,7 +580,7 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
         .await;
     conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     *conn.remote_home.lock().await = Some("/Users/me".into());
-    let transcript = format!("/Users/me/.claude/projects/-Users-m4p-project-wt/{SID}.jsonl");
+    let transcript = format!("/Users/me/.claude/projects/-Users-me-project-wt/{SID}.jsonl");
     let body = two_exchanges();
     let seen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     {
@@ -663,7 +663,7 @@ async fn pending_tail_uses_live_herdr_session() {
         crate::hosts::set_ssh_fake(&host, move |script| {
             seen.lock().unwrap().push(script.to_string());
             let (sid, question) = if script.contains("sess-new") { ("sess-new", "Q-new") } else { ("sess-old", "Q-old") };
-            Ok(format!("{LOG_MARK}\n/Users/me/.claude/projects/-Users-m4p-project-wt/{sid}.jsonl\n{question}"))
+            Ok(format!("{LOG_MARK}\n/Users/me/.claude/projects/-Users-me-project-wt/{sid}.jsonl\n{question}"))
         });
     }
 
@@ -674,7 +674,7 @@ async fn pending_tail_uses_live_herdr_session() {
         a["agent_session"]["value"] = json!("sess-old");
     });
     sqlx::query("UPDATE runs SET native_session_id = 'sess-old', transcript_path = ? WHERE id = ?")
-        .bind("/Users/me/.claude/projects/-Users-m4p-project-wt/sess-old.jsonl")
+        .bind("/Users/me/.claude/projects/-Users-me-project-wt/sess-old.jsonl")
         .bind(&c.run_id)
         .execute(&c.env.app.db)
         .await

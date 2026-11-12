@@ -178,7 +178,7 @@
 
 • Ran rtk proxy ps -axo pid,etime,command | rg 'cargo test|agents-managerd.*test' | head -12
   └ 95250       02:42 rtk proxy cargo test -p agents-managerd identity_login_commands_use_the_kind_and_identity_env --lib
-    95252       02:42 /bin/sh /Users/me/.config/agents-manager/bots/01M34Q618YJXKFYWQVGDXRJW1X/bin/cargo test -p agents-managerd identity_login_commands_use_the_kind_and_identity_env --lib
+    95252       02:42 /bin/sh /Users/me/.config/agents-manager/bots/01M34Q618YEXGM0G8VGF0XYXZN/bin/cargo test -p agents-managerd identity_login_commands_use_the_kind_and_identity_env --lib
     … +2 lines (ctrl + t to view transcript)
     96853       00:00 /bin/zsh -c rtk proxy ps -axo pid,etime,command | rg 'cargo test|agents-managerd.*test' | head -12
     96855       00:00 rg cargo test|agents-managerd.*test

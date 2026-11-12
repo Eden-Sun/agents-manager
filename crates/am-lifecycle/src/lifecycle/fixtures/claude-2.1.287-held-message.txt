@@ -1,6 +1,6 @@
  ▐▛███▛█   Claude Code v2.1.287
 ▝▜██████▀  Opus 5.5 · Claude Max
- ▝▝   ▝▝   /…/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
+ ▝▝   ▝▝   /…/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
 
 
 ❯ Call the WebSearch tool exactly once with the query: claude code changelog. Nothing else.

@@ -4,7 +4,7 @@
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const CWD: &str = "/home/ubuntu/zz-proj";
+    const CWD: &str = "/home/user/zz-proj";
 
     fn run_sh(script: &str) -> Result<String> {
         let mut child = std::process::Command::new("/bin/sh")

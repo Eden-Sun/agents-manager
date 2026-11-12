@@ -1,7 +1,7 @@
 
  ▐▛███▛█   Claude Code v2.1.289
 ▝▜██████▀  Opus 5.5 · API Usage Billing
- ▝▝   ▝▝   /tmp/claude-1000/-home-ubuntu-project-agents-manager/9baba64e-afe8-4cbd-bb3b-119dfcbb55e6/scratchpad/fake/work
+ ▝▝   ▝▝   /tmp/claude-1000/-home-user-project-agents-manager/9baba64e-afe8-4cbd-bb3b-119dfcbb55e6/scratchpad/fake/work
 
 
 ❯ go

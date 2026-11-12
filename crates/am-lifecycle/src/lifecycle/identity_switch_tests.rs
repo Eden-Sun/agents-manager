@@ -14,7 +14,7 @@ use super::*;
 use crate::testing as tt;
 
 const S: &str = "sess-continuous";
-const CWD_KEY: &str = "-Users-m4p-project-quota";
+const CWD_KEY: &str = "-Users-me-project-quota";
 
 async fn add_identity(app: &Arc<App>, name: &str, dir: &std::path::Path) {
     let (name, dir) = (name.to_string(), dir.to_string_lossy().into_owned());

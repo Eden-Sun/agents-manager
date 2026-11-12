@@ -15,7 +15,7 @@
 
 ✻ Crunched for 19s · done 12:01 PM
 
-⏺ Background command "scripts/check.sh daemon > /private/tmp/claude-501/-Users-m4p-project-agents-manager/7ec66b7e-1ca6-42d0-818b-fdc8d18d1f00/scratchpad/checkd4.log 2>&1; echo exit=$?" completed (exit code 0)
+⏺ Background command "scripts/check.sh daemon > /private/tmp/claude-501/-Users-me-project-agents-manager/7ec66b7e-1ca6-42d0-818b-fdc8d18d1f00/scratchpad/checkd4.log 2>&1; echo exit=$?" completed (exit code 0)
 
   Ran 1 shell command
 

@@ -1829,7 +1829,7 @@ mod tests {
     async fn a_status_line_without_fast_corrects_a_stale_runtime_fast() {
         let env = crate::testing::env().await;
         let run = run_with_runtime(&env, 1).await;
-        let screen = "› Ask Codex\n\n  gpt-5.6-luna max · ~/project/example-agents · Context 43% used · 5h 12% left\n";
+        let screen = "› Ask Codex\n\n  gpt-5.6-luna max · ~/project/sample-agents · Context 43% used · 5h 12% left\n";
         assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
         assert_eq!(fast_of(&env, &run).await, Some(0));
     }
@@ -2760,7 +2760,7 @@ mod tests {
         v["text"].as_str().unwrap().to_string()
     }
 
-    const MODEL_ROW_1671: &str = "GPT-6.1-Sol high · ~/project/example-agents/projects/rt · Context 17% used · weekly 100% left";
+    const MODEL_ROW_1671: &str = "GPT-6.1-Sol high · ~/project/sample-agents/projects/rt · Context 17% used · weekly 100% left";
 
     #[test]
     fn the_footer_model_row_loses_its_right_aligned_warning_and_keeps_the_context_percent() {

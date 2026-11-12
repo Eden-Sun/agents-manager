@@ -18,13 +18,13 @@ before(setupDom)
 afterEach(async () => { await unmountAll(); resetStoreForTest() })
 after(teardownDom)
 
-const CONTEXT_LINE = 'GPT-6.1-Sol low · ~/project/example-agents/projects/rt · Context 18% used · weekly 78% left'
+const CONTEXT_LINE = 'GPT-6.1-Sol low · ~/project/sample-agents/projects/rt · Context 18% used · weekly 78% left'
 const SHORTCUTS_LINE = 'GPT-6.1-Sol low · ~/project/agm-lx1685 · 接手並完成 issue #1685'
 
 const status = {
   account_email: null, account_warning: null, model_name: 'GPT-6.1-Sol', model_id: 'gpt-6.1-sol', effort: 'low', thinking: false, fast_mode: false,
   context_used_pct: 18, context_used_tokens: null, context_size: null, five_hour_pct: null, five_hour_resets_at: null,
-  seven_day_pct: null, seven_day_resets_at: null, cost_usd: null, cwd: '/home/ubuntu/project/example-agents/projects/rt', version: null, session_name: null,
+  seven_day_pct: null, seven_day_resets_at: null, cost_usd: null, cwd: '/home/user/project/sample-agents/projects/rt', version: null, session_name: null,
 } as StatusInfo
 
 function phoneWidth(on: boolean) {
@@ -71,7 +71,7 @@ test('對話分頁沒掛終端：codex 跟 claude 同一種欄位（目錄、con
   assert.ok(!(bar.textContent ?? '').includes('weekly'), bar.textContent ?? '')
   const got = items()
   assert.deepEqual(got.slice(0, 2).map((x) => x.k), ['目錄', 'context'])
-  assert.equal(got[0].v, '~/project/example-agents/projects/rt', '目錄用 pane 上那個寫法')
+  assert.equal(got[0].v, '~/project/sample-agents/projects/rt', '目錄用 pane 上那個寫法')
   assert.ok(got[1].v.startsWith('18%'), got[1].v)
   for (const it of got) assert.ok(it.v.trim() !== '', `${it.k} 不能是空值（孤零零的標籤）`)
   assert.equal(bar.getAttribute('title'), CONTEXT_LINE, '原文留在 title')

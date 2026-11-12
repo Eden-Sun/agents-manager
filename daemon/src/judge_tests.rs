@@ -33,8 +33,8 @@
         assert_eq!(m("DB_PASSWORD=hunter2"), format!("DB_PASSWORD={REDACTED}"));
         assert_eq!(m("mail someone@example.com now"), format!("mail {REDACTED} now"));
         assert_eq!(m("  gpt-5.6-luna xhigh · /Users/me/project/agents-manager"), "  gpt-5.6-luna xhigh · ~/project/agents-manager");
-        assert_eq!(m("  gpt-6-luna max · /home/ubuntu/project/agents-manager"), "  gpt-6-luna max · ~/project/agents-manager");
-        assert_eq!(m("cd:/home/ubuntu"), "cd:~");
+        assert_eq!(m("  gpt-6-luna max · /home/user/project/agents-manager"), "  gpt-6-luna max · ~/project/agents-manager");
+        assert_eq!(m("cd:/home/user"), "cd:~");
         assert_eq!(m("see https://example.com/home/feed"), "see https://example.com/home/feed", "網址的 /home/ 不是家目錄");
         assert_eq!(m("token 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"), format!("token {REDACTED}"));
         assert_eq!(m("a\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----\nz"), format!("a\n{REDACTED}\nz"));

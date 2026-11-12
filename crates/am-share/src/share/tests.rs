@@ -361,7 +361,7 @@ async fn the_history_only_shows_the_end_user_and_the_bot() {
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;
     let token = shared(&e.app, &b.id).await;
     add_message(&e.app, &b.id, "user", "主人自己打的後台交代", None).await;
-    add_message(&e.app, &b.id, "system", "agent md 有問題：/home/ubuntu/secret", None).await;
+    add_message(&e.app, &b.id, "system", "agent md 有問題：/home/user/secret", None).await;
     add_message(&e.app, &b.id, "user", &format!("{}看這個\n\n{}\n- inbox/01ARZ3NDEKTSV4RRFFQ69G5FAV-報表.csv", portal::SHARE_PREFIX, portal::ATTACH_MARK), Some(SHARE_SENDER)).await;
     add_message(&e.app, &b.id, "assistant", &format!("好的，你說「{}看這個」{}", portal::SHARE_PREFIX, portal::ATTACH_MARK), None).await;
     add_message(&e.app, &b.id, "user", "AGM 派來的", Some("01OTHERBOTID")).await;
@@ -380,7 +380,7 @@ async fn the_history_only_shows_the_end_user_and_the_bot() {
     let mut scrubbed = v.clone();
     for m in scrubbed["messages"].as_array_mut().unwrap() { m.as_object_mut().unwrap().remove("id"); }
     let text = scrubbed.to_string();
-    for leak in ["SECRET-SNAPSHOT", "/home/ubuntu", "01OTHERBOTID", "conversation_id", "turn_id", "主人", "AGM", "倒回", "owner", "分享使用者"] {
+    for leak in ["SECRET-SNAPSHOT", "/home/user", "01OTHERBOTID", "conversation_id", "turn_id", "主人", "AGM", "倒回", "owner", "分享使用者"] {
         assert!(!text.contains(leak), "{leak} 漏出去了：{text}");
     }
     assert_eq!(msgs[0]["by"], "share");

@@ -83,7 +83,7 @@ test('舊版 spinner（`⠦ Thinking… 52s`，沒有括號）是雜訊，同 da
 test('issue 1664 screenshot chrome never becomes a live reply', () => {
   const screenshot = `› Ask Codex to do anything
 
-GPT-6-Astra high · ~/project/example-agents/projects/rt · Context 72% used · weekly 74% left
+GPT-6-Astra high · ~/project/sample-agents/projects/rt · Context 72% used · weekly 74% left
   ? for shortcuts
 ⚠ 1 warning · f2 to view`
   assert.equal(cleanLiveText(screenshot), null)

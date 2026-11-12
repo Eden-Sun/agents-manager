@@ -432,7 +432,7 @@ mod tests {
     }
 
     /// 裝 cwd 目錄名；真的 transcript 在 `<CLAUDE_CONFIG_DIR>/projects/<這個>/<session>.jsonl`。
-    const CWD_KEY: &str = "-Users-m4p-project-x";
+    const CWD_KEY: &str = "-Users-me-project-x";
 
     fn write_transcript(config_dir: &std::path::Path, bot_id: &str, body: &str) -> std::path::PathBuf {
         let dir = config_dir.join("projects").join(CWD_KEY);

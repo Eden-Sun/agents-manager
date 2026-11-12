@@ -9,7 +9,7 @@ const FRESH: &str = include_str!("fixtures/grok-1.0.46-chat_history.jsonl");
 const COMPACTED: &str = include_str!("fixtures/grok-1.0.46-chat_history-compacted.jsonl");
 const WELCOME: &str = include_str!("fixtures/grok-1.0.46-welcome.txt");
 /// grok 1.0.70 真畫面：1.0.69 起 Resume session 排在 New worktree 上面。取法（2026-10-24，grok 1.0.70 (f50904eaee6c) [stable]）：
-/// `tmux new-session -d -s <名> -x 80 -y 40 -c /home/ubuntu/project/agents-manager "grok; sleep 600"`，等 8 秒，
+/// `tmux new-session -d -s <名> -x 80 -y 40 -c /home/user/project/agents-manager "grok; sleep 600"`，等 8 秒，
 /// `tmux capture-pane -p -t <名>`，再去掉每行尾端空白。80 欄＝選單是裸的兩欄。
 const WELCOME_80: &str = include_str!("fixtures/grok-1.0.70-welcome-80col.txt");
 /// 同上，`-x 120 -y 45`：寬 pane 把選單框在 `│` 裡，label 前面還有吉祥物的點陣字。
@@ -90,7 +90,7 @@ fn a_bordered_table_with_one_menu_pair_is_not_the_startup_screen() {
 fn slash_commands_are_not_conversation() {
     assert!(is_slash_command("/effort high"));
     assert!(is_slash_command(" /model grok-4.7 "));
-    assert!(!is_slash_command("/home/ubuntu/x 看一下這個檔"));
+    assert!(!is_slash_command("/home/user/x 看一下這個檔"));
     assert!(!is_slash_command("/effort high\n然後繼續"));
     assert!(!is_slash_command("請跑 /verify"));
 }

@@ -645,7 +645,7 @@ mod tests {
 ■ {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}
 
 ›
-  gpt-6.1-sol medium · ~/project/example-agents/projects/rt · 5h 90% left · weekly 98% left
+  gpt-6.1-sol medium · ~/project/sample-agents/projects/rt · 5h 90% left · weekly 98% left
 ";
         let line = api_error_line(screen).expect("400 的 JSON 橫幅要命中");
         assert_eq!(

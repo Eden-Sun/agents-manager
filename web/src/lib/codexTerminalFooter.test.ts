@@ -7,7 +7,7 @@ import context1755 from '../testing/fixtures/codex-1755-terminal-context.json'
 import shortcuts1755 from '../testing/fixtures/codex-1755-terminal-shortcuts.json'
 
 test('真實 pane、獨立 warning 行及 Context/weekly 新段均只切出尾端 footer', () => {
-  const model = 'GPT-6-Astra high · ~/project/example-agents/projects/rt · Context 72% used · weekly 74% left'
+  const model = 'GPT-6-Astra high · ~/project/sample-agents/projects/rt · Context 72% used · weekly 74% left'
   for (const footer of [
     `${model}\n  ? for shortcuts\n⚠ 2 warnings · f2 to view`,
     `${model}\n  ? for shortcuts           ⚠ 2 warnings · f2 to view`,
@@ -33,7 +33,7 @@ test('保留正文、輸入列和不在尾端的 warning；沒有 warning 時不
 test('#1671 真實快照：warning 直接接在模型列右側（沒有 ? for shortcuts 行）也切進狀態列', () => {
   const split = splitCodexTerminalFooter(fixture1671.text)
   assert.deepEqual(split.footer, {
-    modelLine: 'GPT-6.1-Sol high · ~/project/example-agents/projects/rt · Context 17% used · weekly 100% left',
+    modelLine: 'GPT-6.1-Sol high · ~/project/sample-agents/projects/rt · Context 17% used · weekly 100% left',
     warnings: 1,
   })
   assert.equal(split.body, fixture1671.text)
@@ -57,7 +57,7 @@ test('只有 `? for shortcuts` 這行（沒有模型列、沒有 warning）不�
 test('#1755 模型列拆成欄位：模型、effort、fast、目錄、context、額度，其餘是主題', () => {
   const ctx = splitCodexTerminalFooter(context1755.text).footer!.modelLine!
   assert.deepEqual(parseCodexModelLine(ctx), {
-    model: 'GPT-6.1-Sol', effort: 'low', fast: false, cwd: '~/project/example-agents/projects/rt',
+    model: 'GPT-6.1-Sol', effort: 'low', fast: false, cwd: '~/project/sample-agents/projects/rt',
     contextUsedPct: 18, limits: [{ label: 'weekly', leftPct: 78 }], title: null,
   })
   const topic = splitCodexTerminalFooter(shortcuts1755.text).footer!.modelLine!

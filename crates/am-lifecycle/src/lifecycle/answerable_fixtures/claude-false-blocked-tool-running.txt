@@ -6,9 +6,9 @@
        "agent": {
        "agent": "codex",
        "agent_status": "idle",
-       "cwd": "/Users/me/project/example-agents/projects/rt",
+       "cwd": "/Users/me/project/sample-agents/projects/rt",
        "focused": false,
-       "foreground_cwd": "/Users/me/project/example-agents/projects/rt",
+       "foreground_cwd": "/Users/me/project/sample-agents/projects/rt",
        "pane_id": "wBVC:pA3",
        "revision": 2
        }

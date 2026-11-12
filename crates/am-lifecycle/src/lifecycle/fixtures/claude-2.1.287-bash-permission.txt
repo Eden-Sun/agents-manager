@@ -1,6 +1,6 @@
  ▐▛███▛█   Claude Code v2.1.287
 ▝▜██████▀  Opus 5.5 · Claude Max
- ▝▝   ▝▝   /…/-home-ubuntu-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
+ ▝▝   ▝▝   /…/-home-user-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
 
 
 ❯ Run exactly one Bash command: touch perm-test.txt && echo hi. Nothing else.
@@ -18,7 +18,7 @@
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, and always allow access to
-      /tmp/claude-1000/-home-ubuntu-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
+      /tmp/claude-1000/-home-user-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
       from this project
    3. Yes, and switch to auto mode · auto mode handles these prompts for you
    4. No

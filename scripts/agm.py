@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import html
 import http.client
 import json
 import os
@@ -1504,6 +1505,17 @@ def _git_bytes(repo: Path, ref: str, source: str) -> bytes:
     return subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{source}"], capture_output=True, check=True).stdout
 
 
+#: launchd 樣板的家目錄佔位（scripts/ops/launchd/*.plist）；安裝時由 `render-launchd.sh` 換成這台的 $HOME。
+HOME_PLACEHOLDER = b"@HOME@"
+
+
+def _render_home(raw: bytes) -> bytes:
+    """樣板的 `@HOME@` 換成這台的家目錄（XML 轉義，與 render-launchd.sh 同一套），沒有佔位就原樣。"""
+    if HOME_PLACEHOLDER not in raw:
+        return raw
+    return raw.replace(HOME_PLACEHOLDER, html.escape(str(Path.home()), quote=False).encode("utf-8"))
+
+
 def _plist_semantics(raw: bytes) -> dict:
     """parse 過的 plist，除了 [`PLIST_IGNORED_KEYS`] 的**值**以外全部保留（issue #499）。
 
@@ -1511,7 +1523,7 @@ def _plist_semantics(raw: bytes) -> dict:
     （job 於是少了 `PATH`）不該報成同步。讀不懂就回一個帶錯誤的 dict，讓結果是 drift 而不是靜靜當成相同。
     """
     try:
-        d = plistlib.loads(raw)
+        d = plistlib.loads(_render_home(raw))
     except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
         return {"_error": f"{type(e).__name__}: {e}"}
     # 合法的 plist 根也可以是 array／string 等；沒有鍵值表就沒有語意可比，當成讀不懂（#1717）。

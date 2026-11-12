@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn the_cwd_directory_name_is_every_non_alphanumeric_turned_into_a_dash() {
-        assert_eq!(cwd_key("/Users/me/.config/agents-manager"), "-Users-m4p--config-agents-manager");
+        assert_eq!(cwd_key("/Users/me/.config/agents-manager"), "-Users-me--config-agents-manager");
     }
 
     /// 完整一趟：session 從 pane 行程找到 → transcript 複製到專案路徑的 projects 目錄（來源還在）→ child 停掉 →

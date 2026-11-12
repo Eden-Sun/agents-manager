@@ -177,7 +177,7 @@ function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
 function claudeStatusJson(cwd: string): Record<string, unknown> {
   const inHours = (h: number) => Math.floor(Date.now() / 1000) + h * 3600
   return {
-    account_email: 'tony.lin@northwinds.com.tw',
+    account_email: 'someone@example.com',
     model: { id: 'claude-opus-5', display_name: 'Opus 5' },
     effort: { level: 'high' },
     thinking: { enabled: true },
@@ -2271,7 +2271,7 @@ export class MockTransport implements Transport {
       h.tools.grok = { ...TOOLS_ALL_OK.grok }
       this.emit('quota_updated', { kind: 'grok', host, quota: withQuotaFlags(this.quota[`${host}/grok`]) })
     }
-    const path = `/Users/me/project/example-agents/${host}-hub`
+    const path = `/Users/me/project/sample-agents/${host}-hub`
     const pid = this.projects.find((p) => p.path === path)?.id
       ?? ((await this.request('POST', '/projects', { path, host, label: '智選hub' })) as { project_id: string }).project_id
     const name = `${host}-ops`
@@ -3177,8 +3177,8 @@ export class MockTransport implements Transport {
         { port: 5556, dir: `${root}/apps/admin-bff-hono`, pid: 4104, relation: 'same_dir', kind: 'unknown', repo: 'agents-manager' },
         { port: 4000, dir: `${root}/apps/ffi-server`, pid: 4105, relation: 'same_dir', kind: 'unknown', repo: 'agents-manager' },
         { port: 5173, dir: '/Users/me/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', kind: 'vite', repo: 'agents-manager' },
-        { port: 3001, dir: '/Users/me/project/example-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', kind: 'vite', repo: 'example-agents' },
-        { port: 3200, dir: '/Users/me/project/example-agents/projects/wt/example-ops', pid: 44112, relation: 'other', kind: 'next', repo: 'example-ops' },
+        { port: 3001, dir: '/Users/me/project/sample-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', kind: 'vite', repo: 'sample-agents' },
+        { port: 3200, dir: '/Users/me/project/sample-agents/projects/wt/litware-ops', pid: 44112, relation: 'other', kind: 'next', repo: 'litware-ops' },
       ],
     }
   }

@@ -20,7 +20,7 @@ import ob
 import ob_operator as operator
 from ob_store import OBError, Store, exclusive
 
-A = "01M1Y7BNVP843V9MFEDJ2KW9NQ"
+A = "01M1Y7BNVPQHSFAY3KYBR922Z6"
 B = "01M1Y75JS1G8PZ4EHF6Y98AFB1"
 C = "01M1Y7BNVP843V9MFEDJ2KW9NR"
 UA = "https://chatgpt.com/c/project-a"
@@ -86,7 +86,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(len(self.s.list()), 1)
 
     def test_labels_are_rejected_as_project_ids(self):
-        for pid in ("agents-manager", "../../oops", "", "01M1Y7BNVP843V9MFEDJ2KW9NQ-prefix"):
+        for pid in ("agents-manager", "../../oops", "", "01M1Y7BNVPQHSFAY3KYBR922Z6-prefix"):
             with self.assertRaises(OBError):
                 self.ask(pid)
 

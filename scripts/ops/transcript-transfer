@@ -3,7 +3,7 @@
 
   transcript-transfer --bundle <project-transfer 匯出的 bundle> --out <新 bundle> \
       (--target <user@host> | --target-dir <本機目錄，當成目標的 $HOME；測試用>) \
-      --map /Users/me/project/agents-manager=/home/ubuntu/project/agents-manager [--map …] \
+      --map /Users/me/project/agents-manager=/home/user/project/agents-manager [--map …] \
       [--source-home <預設 ~>] [--overwrite] [--dry-run]
 
 跑在來源機器（對話檔所在的那台）。流程接在 `project-transfer export` 之後、`import` 之前：

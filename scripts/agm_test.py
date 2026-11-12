@@ -2239,6 +2239,33 @@ class OpsSyncTest(CliCase):
             self.install(f"bin/{n}.sh", "a v3\n" if n == "a" else f"{n} v1\n")
         self.install("t.md", "task\n")
 
+    def test_home_placeholder_in_the_template_matches_the_installed_home(self):
+        """樣板的 `@HOME@` 比對前換成這台的家目錄：裝出來的檔（真的家目錄）與樣板同步，不是落差。"""
+        self.with_plists()
+        self.put("scripts/ops/launchd/com.agm.x.plist", self.plist("com.agm.x", 1800, program="@HOME@/bin/x.sh"))
+        self.git("add", "-A")
+        self.git("commit", "-qam", "樣板化")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.agents / "com.agm.x.plist").write_text(
+            self.plist("com.agm.x", 1800, program=f"{Path.home()}/bin/x.sh"), encoding="utf-8")
+        r = self.ok("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertTrue(r["in_sync"], r)
+
+    def test_home_placeholder_renders_xml_escaped_home(self):
+        """`_render_home` 與 render-launchd.sh 同一套：家目錄含 & 與 < 時要轉義，否則 plist 會壞。"""
+        with patch.dict(os.environ, {"HOME": "/tmp/a&b<c"}):
+            out = agm._render_home(b"<string>@HOME@/x</string>")
+        self.assertEqual(out, b"<string>/tmp/a&amp;b&lt;c/x</string>")
+        self.assertEqual(agm._render_home(b"<string>/no/placeholder</string>"), b"<string>/no/placeholder</string>")
+
+    def test_launchd_templates_carry_no_personal_home(self):
+        """樣板不寫死任何人的家目錄：只能有 `@HOME@` 佔位。"""
+        root = Path(__file__).resolve().parent / "ops" / "launchd"
+        for f in sorted(root.glob("*.plist")):
+            text = f.read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"/(Users|home)/[A-Za-z0-9_.-]+", f.name)
+            self.assertIn("@HOME@", text, f.name)
+
     def test_key_order_and_env_var_values_are_not_drift(self):
         """鍵的順序不影響；`EnvironmentVariables` 的**值**每台機器不同，忽略（但鍵要在，見下一條）。"""
         self.with_plists()
@@ -2676,7 +2703,7 @@ class SystemdParityTest(unittest.TestCase):
 
     @staticmethod
     def home_relative(arg: str) -> str:
-        return re.sub(r"^/Users/[^/]+/", "%h/", arg)
+        return re.sub(r"^(?:/Users/[^/]+|@HOME@)/", "%h/", arg)
 
     def units(self, name: str) -> tuple[dict, dict]:
         d = self.REPO / "scripts/ops/systemd"
@@ -2747,7 +2774,7 @@ class SystemdParityTest(unittest.TestCase):
 
         plist = plistlib.loads((self.REPO / "scripts/ops/launchd/com.agm.daemon-update.plist").read_bytes())
         launchd_path = plist["EnvironmentVariables"]["PATH"].split(":")
-        for directory in ("/Users/me/.cargo/bin", "/Users/me/.bun/bin", "/Users/me/.local/bin"):
+        for directory in ("@HOME@/.cargo/bin", "@HOME@/.bun/bin", "@HOME@/.local/bin"):
             with self.subTest(platform="launchd", directory=directory):
                 self.assertIn(directory, launchd_path)
 

@@ -29,7 +29,7 @@ const TYPE_TYPED = readFileSync(new URL('./__fixtures__/type-something-typed.txt
 const TYPE_REVIEW = readFileSync(new URL('./__fixtures__/type-something-review.txt', import.meta.url), 'utf8')
 
 /** 2026-09-12 真機快照（bot `fabrik`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
-const CARBIS = [
+const FABRIK = [
   '     9 OPEN [astro] .env.example 與實際用到的環境變數不同步',
   '────────────────────────────────────────────────────────────',
   ' ☐ 下一步',
@@ -54,7 +54,7 @@ const CARBIS = [
 ].join('\n')
 
 test('讀得出真機那份選單：問題、六個選項、游標在第一項', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.ok(menu)
   assert.equal(menu.question, 'northwinds-fabrik-web 要先推進哪一塊？')
   assert.equal(menu.choices.length, 6)
@@ -66,14 +66,14 @@ test('讀得出真機那份選單：問題、六個選項、游標在第一項',
 })
 
 test('說明行被終端折掉的地方接回同一段（中文之間不補空白）', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.ok(menu)
   assert.ok(menu.choices[0].detail.includes('主題 commit，push 到feat/astro-migration。'))
   assert.equal(menu.choices[5].detail, '')
 })
 
 test('分隔線夾在選項中間不算選單結束（真機 5 與 6 之間就有一條）', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.deepEqual(
     menu?.choices.map((c) => c.number),
     [1, 2, 3, 4, 5, 6],
@@ -212,7 +212,7 @@ test('多選那份的腳註是 Tab/Arrow keys，照樣算腳註', () => {
 })
 
 test('上一輪的單選那份沒有退步：沒有分頁、沒有方框、沒有 Submit 列', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.ok(menu)
   assert.equal(menu.multi, false)
   assert.deepEqual(menu.tabs, [])
@@ -258,7 +258,7 @@ test('一般選項頁沒有 review 那段，tabAt 是第一個還沒答的', () 
 })
 
 test('沒有分頁的單選：tabAt 是 null、review 空的（沒有退步）', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.ok(menu)
   assert.equal(menu.tabAt, null)
   assert.deepEqual(menu.review, [])
@@ -444,7 +444,7 @@ test('行首的 · 是 transcript（spinner／工具輸出），不是條列：�
 
 test('既有畫面（AskUserQuestion、權限框、多分頁、review）沒有 notes，題目不變', () => {
   const cases: [string, string, string | null][] = [
-    ['CARBIS', CARBIS, 'northwinds-fabrik-web 要先推進哪一塊？'],
+    ['FABRIK', FABRIK, 'northwinds-fabrik-web 要先推進哪一塊？'],
     ['MULTI', MULTI, '除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）'],
     ['REVIEW', REVIEW, 'Ready to submit your answers?'],
     ['BASH_PERMISSION', BASH_PERMISSION, 'Do you want to proceed?'],
@@ -595,9 +595,9 @@ test('#1887 每個多選選項都有說明；各種方框與上輪表格不改�
       '────────────────────────────',
       '下一個要 review 哪個 repo？',
       `❯ 1. [${box}] vehicleapi`,
-      '         車籍查詢 API',
+      '         範例內容 API',
       `  2. [${box}] carmakerapi`,
-      '         車廠代碼 API',
+      '         範例內容 API',
       '',
       '     Submit',
       '',
@@ -606,8 +606,8 @@ test('#1887 每個多選選項都有說明；各種方框與上輪表格不改�
     assert.ok(menu)
     assert.equal(menu.multi, true)
     assert.deepEqual(menu.choices.map((c) => [c.title, c.detail, c.checked, c.preview]), [
-      ['vehicleapi', '車籍查詢 API', checked, ''],
-      ['carmakerapi', '車廠代碼 API', checked, ''],
+      ['vehicleapi', '範例內容 API', checked, ''],
+      ['carmakerapi', '範例內容 API', checked, ''],
     ])
   }
 })
@@ -741,7 +741,7 @@ test('並排預覽：游標在第 2 項時預覽掛在第 2 項，keysToSelect �
 })
 
 test('沒有預覽框的既有選單：preview 一律是空字串', () => {
-  const menu = parseChoiceMenu(CARBIS)
+  const menu = parseChoiceMenu(FABRIK)
   assert.ok(menu)
   assert.ok(menu.choices.every((c) => c.preview === ''))
 })

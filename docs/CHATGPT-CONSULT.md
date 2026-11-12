@@ -29,7 +29,7 @@
 ## bot 怎麼問
 
 ```sh
-python3 scripts/ob.py ask --project-id 01M1Y7BNVP843V9MFEDJ2KW9NQ \
+python3 scripts/ob.py ask --project-id 01M1Y7BNVPQHSFAY3KYBR922Z6 \
   --request-id design-review-001 --wait 600 "背景、選項、代價與需要第二意見的問題"
 python3 scripts/ob.py ask --project-id <project-id> --request-id <stable-id> -f question.md
 python3 scripts/ob.py status <回傳的id>

@@ -6,9 +6,9 @@ import { orderRows, shortPath, showRepo } from './previewList'
 const o = (port: number, dir: string, kind = 'vite'): PreviewOther => ({ port, dir, pid: null, relation: 'other', kind, repo: null })
 
 test('shortPath: 專案底下相對於根、根本身取最後一段、專案外最後兩段', () => {
-  const root = '/Users/m/example-agents/projects/wt'
-  assert.equal(shortPath('/Users/m/example-agents/projects/wt/webui/apps/web', root), 'webui/apps/web')
-  assert.equal(shortPath('/Users/m/example-agents/projects/wt', root), 'wt')
+  const root = '/Users/m/sample-agents/projects/wt'
+  assert.equal(shortPath('/Users/m/sample-agents/projects/wt/webui/apps/web', root), 'webui/apps/web')
+  assert.equal(shortPath('/Users/m/sample-agents/projects/wt', root), 'wt')
   assert.equal(shortPath('/Users/m/project/agents-manager-main/web', root), 'agents-manager-main/web')
   assert.equal(shortPath('/Users/m/project/agents-manager-main/web', null), 'agents-manager-main/web')
   assert.equal(shortPath('/a/wtx/y', '/a/wt'), 'wtx/y')

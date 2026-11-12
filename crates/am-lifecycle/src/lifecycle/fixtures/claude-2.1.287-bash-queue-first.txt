@@ -1,6 +1,6 @@
  ▐▛███▛█   Claude Code v2.1.287
 ▝▜██████▀  Opus 5.5 · Claude Max
- ▝▝   ▝▝   /…/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
+ ▝▝   ▝▝   /…/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
 
 
 ❯ In a single message, make 3 parallel Bash tool calls, each a separate call: touch q1.txt, touch q2.txt, touch q3.txt.
@@ -25,7 +25,7 @@
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, and always allow access to
-      /tmp/claude-1000/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
+      /tmp/claude-1000/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-work
       from this project
    3. Yes, and switch to auto mode · auto mode handles these prompts for you
    4. No

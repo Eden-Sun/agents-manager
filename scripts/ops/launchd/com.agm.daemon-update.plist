@@ -5,19 +5,19 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/me/.local/bin:/Users/me/.bun/bin:/Users/me/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>@HOME@/.local/bin:@HOME@/.bun/bin:@HOME@/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>Label</key>
 	<string>com.agm.daemon-update</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/me/.config/agents-manager/supervisor/AGM/bin/daemon-update-kick.sh</string>
+		<string>@HOME@/.config/agents-manager/supervisor/AGM/bin/daemon-update-kick.sh</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>/Users/me/.config/agents-manager/supervisor/AGM/daemon-update.launchd.log</string>
+	<string>@HOME@/.config/agents-manager/supervisor/AGM/daemon-update.launchd.log</string>
 	<key>StandardOutPath</key>
-	<string>/Users/me/.config/agents-manager/supervisor/AGM/daemon-update.launchd.log</string>
+	<string>@HOME@/.config/agents-manager/supervisor/AGM/daemon-update.launchd.log</string>
 	<key>StartInterval</key>
 	<integer>300</integer>
 </dict>

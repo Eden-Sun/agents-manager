@@ -114,7 +114,7 @@ mod tests {
 ";
     const TRUST: &str = "\
  Accessing workspace:
- /home/ubuntu/project
+ /home/user/project
 
  Do you trust the contents of this project?
 
@@ -125,7 +125,7 @@ mod tests {
     const MAIN: &str = "\
  Antigravity CLI 1.2.16
  Gemini 3.1 Pro (Low)
- /home/ubuntu/project
+ /home/user/project
 ────────────────────────────────────────────
  >
 ────────────────────────────────────────────

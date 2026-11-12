@@ -127,7 +127,7 @@ mod under_temp_tests {
         assert!(under(&link.join("folders/not-yet/y"), &real), "symlink 的路徑（還不存在）在 canonical root 底下");
         assert!(!under(&base.join("elsewhere"), &link), "root 外的不算");
         // 反例：還不存在、帶 `..` 的路徑會被 canonical_prefix 退回原字串，前綴卻是暫存目錄；必須判在外面。
-        assert!(!under(&base.join("nope/../../home/ubuntu"), &base), "帶 .. 的路徑不能靠字串前綴繞過守門");
+        assert!(!under(&base.join("nope/../../home/user"), &base), "帶 .. 的路徑不能靠字串前綴繞過守門");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

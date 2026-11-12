@@ -12,12 +12,12 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/me/.config/agents-manager/supervisor/AGM/bin/ci-watch-kick.sh</string>
+		<string>@HOME@/.config/agents-manager/supervisor/AGM/bin/ci-watch-kick.sh</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>/Users/me/.config/agents-manager/supervisor/AGM/ci-watch.launchd.log</string>
+	<string>@HOME@/.config/agents-manager/supervisor/AGM/ci-watch.launchd.log</string>
 	<key>StandardOutPath</key>
-	<string>/Users/me/.config/agents-manager/supervisor/AGM/ci-watch.launchd.log</string>
+	<string>@HOME@/.config/agents-manager/supervisor/AGM/ci-watch.launchd.log</string>
 	<key>StartInterval</key>
 	<integer>600</integer>
 </dict>

@@ -20,19 +20,19 @@
   directory, using absolute paths. Do nothing else.
 
 ● Reading 3 files… (ctrl+o to expand)
-  ⎿  /tmp/claude-1000/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outside/
+  ⎿  /tmp/claude-1000/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outside/
      o3.txt
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  Read file                                                                                                       1 of 3
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- Read(/tmp/claude-1000/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outsid
+ Read(/tmp/claude-1000/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outsid
  e/o1.txt)
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, allow reading from
-      /tmp/claude-1000/-home-ubuntu-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outside
+      /tmp/claude-1000/-home-user-project-agents-manager/d70cbb62-4545-48ae-920b-fad0735f2e69/scratchpad/cc775-outside
       during this session
    3. No
 

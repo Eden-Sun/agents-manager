@@ -1079,10 +1079,10 @@ mod tests {
         let app = env.app.clone();
         sqlx::query("INSERT INTO panes (pane_id,host,cwd,kind,foreground,listen_ports,last_output_at,first_seen,last_seen) VALUES ('old','local','/work/app','service','bun run dev','3200','t','t','t')").execute(&app.db).await.unwrap();
         let save = |id: &str, alias: String| set_alias(State(app.clone()), Path(id.into()), Query(HashMap::new()), Json(AliasIn { alias }));
-        assert_eq!(save("old", "  example-ops  ".into()).await.unwrap().0["alias"], "example-ops");
+        assert_eq!(save("old", "  litware-ops  ".into()).await.unwrap().0["alias"], "litware-ops");
         sqlx::query("UPDATE panes SET pane_id='new', foreground='node next dev' WHERE pane_id='old'").execute(&app.db).await.unwrap();
         let panes = list_all(State(app.clone()), Query(HashMap::new())).await.unwrap().0;
-        assert_eq!(panes["panes"][0]["alias"], "example-ops");
+        assert_eq!(panes["panes"][0]["alias"], "litware-ops");
         assert!(save("new", "x".repeat(121)).await.is_err());
         assert!(save("new", "bad\nname".into()).await.is_err());
         assert!(save("missing", "name".into()).await.is_err());
@@ -2291,7 +2291,7 @@ mod tests {
         let dump = "\
   9413     1  48000 /opt/homebrew/bin/herdr --session agents-manager server
  35092  9413   3000 -zsh
-  3822 35092   5000 sudo make -C example-ops dev
+  3822 35092   5000 sudo make -C litware-ops dev
  70323  9413   3000 -zsh
 ---AM-ENV---
  35092 -zsh
@@ -2299,7 +2299,7 @@ mod tests {
 ";
         let sudo = facts_from(&herdr_shell(Some(35092), &[]), dump, "w168:p6C").expect("樹裡有這顆 shell");
         assert!(!sudo.shell_only, "root 的子行程也算：{sudo:?}");
-        assert_eq!(sudo.foreground.as_deref(), Some("sudo make -C example-ops dev"));
+        assert_eq!(sudo.foreground.as_deref(), Some("sudo make -C litware-ops dev"));
         assert_eq!(classify(sudo.foreground.as_deref(), &[]), "service");
 
         // 閒著的 shell：herdr 把 shell 自己列成前景，那不算。

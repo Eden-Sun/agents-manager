@@ -3897,8 +3897,8 @@ mod tests {
         assert!(cargo.is_none(), "{cargo:?}");
         assert!(ver.is_none());
 
-        let (_, _, cargo, ver) = parse_probe("OS=Linux\nARCH=x86_64\nCARGO=/home/ubuntu/.cargo/bin/cargo\ncargo 1.90.0 (abc 2026-08-01)\n");
-        assert_eq!(cargo.as_deref(), Some("/home/ubuntu/.cargo/bin/cargo"));
+        let (_, _, cargo, ver) = parse_probe("OS=Linux\nARCH=x86_64\nCARGO=/home/user/.cargo/bin/cargo\ncargo 1.90.0 (abc 2026-08-01)\n");
+        assert_eq!(cargo.as_deref(), Some("/home/user/.cargo/bin/cargo"));
         assert_eq!(ver.as_deref(), Some("cargo 1.90.0 (abc 2026-08-01)"));
     }
 

@@ -7,7 +7,7 @@ import { DEV_ALLOWED_HOSTS, devHostAllowed } from './devHosts.ts'
 // vite.config.ts 在 `/ws` 的 `bypass` 用這支函式補上同一條規則。
 
 test('使用者平常的連法都放行：IP、localhost、tailnet 名字、短名', () => {
-  for (const h of ['192.168.1.46:5173', '100.64.0.1:5173', '127.0.0.1:5173', 'localhost:5173', '[::1]:5173', '[fd7a:115c:a1e0::1]:5173', 'agm:5173', 'agm.example.ts.net:5173', 'AGM.TAIL161AAE.TS.NET']) {
+  for (const h of ['192.168.1.46:5173', '100.64.0.1:5173', '127.0.0.1:5173', 'localhost:5173', '[::1]:5173', '[fd7a:115c:a1e0::1]:5173', 'agm:5173', 'agm.example.ts.net:5173', 'AGM.EXAMPLE.TS.NET']) {
     assert.equal(devHostAllowed(h, DEV_ALLOWED_HOSTS), true, h)
   }
 })

@@ -3666,7 +3666,7 @@ mod resume_args_tests {
             let pm = claude_bot(&e.app, &e.project_id, "pm").await;
 
             let old_dir = e.dir.join("cc-old");
-            let transcript = write_jsonl(&old_dir, "-Users-m4p-project-x", "sid-same");
+            let transcript = write_jsonl(&old_dir, "-Users-me-project-x", "sid-same");
 
             // 新身份：自己的目錄下 `projects` 是指到舊身份那份 `projects` 的 symlink（同一份東西）。
             let new_dir = e.dir.join("cc-symlinked");
@@ -3693,9 +3693,9 @@ mod resume_args_tests {
             assert!(args.windows(2).any(|w| w == ["--resume", "sid-same"]));
 
             // 沒有另外複製出一份：透過 symlink 看到的還是原本那個 inode。
-            let via_new = new_dir.join("projects").join("-Users-m4p-project-x").join("sid-same.jsonl");
+            let via_new = new_dir.join("projects").join("-Users-me-project-x").join("sid-same.jsonl");
             assert_eq!(std::fs::metadata(&via_new).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino());
-            assert_eq!(std::fs::read_dir(old_dir.join("projects").join("-Users-m4p-project-x")).unwrap().count(), 1, "沒有多出檔案");
+            assert_eq!(std::fs::read_dir(old_dir.join("projects").join("-Users-me-project-x")).unwrap().count(), 1, "沒有多出檔案");
         }
 
         /// (b) 新舊身份的 `projects/` 是不相干的兩個目錄 → 接回前先把 jsonl 複製過去，複製出的是獨立的檔案。
@@ -3705,7 +3705,7 @@ mod resume_args_tests {
             let pm = claude_bot(&e.app, &e.project_id, "pm").await;
 
             let old_dir = e.dir.join("cc-old2");
-            let transcript = write_jsonl(&old_dir, "-Users-m4p-project-y", "sid-move");
+            let transcript = write_jsonl(&old_dir, "-Users-me-project-y", "sid-move");
 
             let new_dir = e.dir.join("cc2-new");
             set_identity_dir(&e.app, "cc2", &new_dir).await;
@@ -3728,7 +3728,7 @@ mod resume_args_tests {
             assert_eq!(sid, "sid-move");
             assert!(args.windows(2).any(|w| w == ["--resume", "sid-move"]));
 
-            let dest = new_dir.join("projects").join("-Users-m4p-project-y").join("sid-move.jsonl");
+            let dest = new_dir.join("projects").join("-Users-me-project-y").join("sid-move.jsonl");
             assert!(dest.exists(), "jsonl 沒有被複製到新身份的 projects 目錄");
             assert_eq!(std::fs::read_to_string(&dest).unwrap(), std::fs::read_to_string(&transcript).unwrap());
             assert_ne!(std::fs::metadata(&dest).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino(), "應該是獨立複製出的檔案，不是同一個 inode");
@@ -3743,7 +3743,7 @@ mod resume_args_tests {
             set_identity_dir(&e.app, "cc3", &new_dir).await;
             sqlx::query("UPDATE bots SET identity='cc3' WHERE id=?").bind(&pm.id).execute(e.app.db()).await.unwrap();
 
-            let gone = e.dir.join("cc-old3/projects/-Users-m4p-project-z/sid-gone.jsonl");
+            let gone = e.dir.join("cc-old3/projects/-Users-me-project-z/sid-gone.jsonl");
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
                  VALUES (?,?,'stopped','idle','sid-gone',?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
@@ -4619,7 +4619,7 @@ esac
         #[test]
         fn a_project_dir_whose_name_starts_with_a_dash_is_still_staged() {
             let base = tmp();
-            let cwd = "-Users-m4p-project";
+            let cwd = "-Users-me-project";
             let old = base.join("old-projects");
             std::fs::create_dir_all(old.join(cwd)).unwrap();
             std::fs::write(old.join(cwd).join("sid.jsonl"), "hello").unwrap();

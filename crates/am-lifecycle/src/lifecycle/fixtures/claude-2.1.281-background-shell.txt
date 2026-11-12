@@ -10,14 +10,14 @@
 
 ⏺ #709 有 6 處指到 §11.9（config.rs、shared_host.rs、API.md 兩處、SPEC 兩處），連同 commit 訊息一起改成 §11.10；scripts/ops/README.md 那處是 #710 的，維持不動：
 
-⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
+⏺ Bash(SP=/private/tmp/claude-501/-Users-me-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
       python3 - <<'EOF'…)
   ⎿  daemon/src/config.rs:262:    /// #709：另一顆 daemon 也在用這台的 `herdr_session`（SPEC §11.10）。開著時這顆 daemon 在這台只碰自己的
      daemon/src/shared_host.rs:1://! 共用 herdr session 的遠端主機（#709，SPEC §11.10）：`[[hosts]] shared_session = true`＝另一顆 daemon 也在用這個
      docs/API.md:1022:- `hosts[].shared_session`（#709，SPEC §11.10）：這台的 herdr session 也被另一顆 daemon 用著；讀當下的設定（改了不必重連）。`local` 一律 `false`。
      … +6 lines (ctrl+o to expand)
 
-⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
+⏺ Bash(SP=/private/tmp/claude-501/-Users-me-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
       git show c374bfa1 --stat | grep -E "db|schema" ; gi…)
   ⎿  10:POST /api/hosts keeps it when omitted). On such a host (SPEC §11.10):
      Successfully rebased and updated refs/heads/feat/708-709-rebased.
@@ -30,13 +30,13 @@
 
 ⏺ 名額腳本已不在；派工者說外部編譯主機是空的，依序跑一份。build → clippy → 相關測試 → 整樹 check.sh daemon，全部串在一個背景工作：
 
-⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad; L=$SP/v708.log; : > $L
+⏺ Bash(SP=/private/tmp/claude-501/-Users-me-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad; L=$SP/v708.log; : > $L
       E="env -u AM_MODEL -u AM_EF…)
   ⎿  Running in the background (↓ to manage)
 
 ⏺ 同時在本機跑 check.sh web（#708 動了 web，main 這段期間也改過 web；不佔編譯名額）：
 
-⏺ Bash(scripts/check.sh web > /private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad/v708-web.log 2>&1; echo rc=$?;…)
+⏺ Bash(scripts/check.sh web > /private/tmp/claude-501/-Users-me-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad/v708-web.log 2>&1; echo rc=$?;…)
   ⎿  rc=0
       0 fail
      Ran 716 tests across 128 files. [9.14s]

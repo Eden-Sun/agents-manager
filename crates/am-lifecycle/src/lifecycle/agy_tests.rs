@@ -305,7 +305,7 @@ ubuntu@ubuntu:~/project/x$ agy --dangerously-skip-permissions --model gemini-3.8
       ▄▀▀▄        Antigravity CLI 1.2.16\n\
      ▀▀▀▀▀▀       me@example.com (Google AI Plus)\n\
     ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Medium)\n\
-   ▄▀▀    ▀▀▄     /home/ubuntu/project/x\n\
+   ▄▀▀    ▀▀▄     /home/user/project/x\n\
   ▄▀▀      ▀▀▄\n\n";
         let echo = if with_echo { format!("{RULE}\n> 你是 agents-manager 的子 agent。請修好 foo\n  第二行的說明\n\n") } else { String::new() };
         format!(
