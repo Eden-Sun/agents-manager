@@ -913,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_m4p_status_invalid_active_plus_valid_inactive() {
+    fn parse_mac_builder_status_invalid_active_plus_valid_inactive() {
         let raw = r#"{
           "hosts": {
             "github.com": [
@@ -965,7 +965,7 @@ mod tests {
     fn malformed_status_is_unknown_instead_of_logged_out() {
         let st = parse_probe("AM_PATH /usr/bin/gh\nAM_JSON_BEGIN\n\nAM_JSON_END\n");
         assert_eq!(st.login_status, None);
-        assert_eq!(st.to_json("m4p", None, None, None)["logged_in"], Value::Null);
+        assert_eq!(st.to_json("mac_builder", None, None, None)["logged_in"], Value::Null);
     }
 
     #[test]
@@ -977,8 +977,8 @@ mod tests {
 
     #[test]
     fn auto_copy_requires_a_known_remote_status() {
-        assert!(!should_auto_copy("m4p", false, true));
-        assert!(should_auto_copy("m4p", true, true));
+        assert!(!should_auto_copy("mac_builder", false, true));
+        assert!(should_auto_copy("mac_builder", true, true));
         assert!(!should_auto_copy(LOCAL_HOST, true, true));
     }
 

@@ -13,7 +13,7 @@ function settle(s: QuotaFitState, avail: number, contentAt: (l: number) => numbe
   throw new Error('量測沒有收斂（兩個階段來回跳）')
 }
 
-// 2026-09-28 使用者截圖（遠端 m4p、標題列約 1036px）：五格完整量表約 590px、名牌 44px，額度區只拿得到 612。
+// 2026-09-28 使用者截圖（遠端 mac_builder、標題列約 1036px）：五格完整量表約 590px、名牌 44px，額度區只拿得到 612。
 const remote = (l: number) => (l === 0 ? 634 : l === 1 ? 590 : 420)
 
 test('遠端五格放不下名牌：先收名牌，量表照舊完整', () => {

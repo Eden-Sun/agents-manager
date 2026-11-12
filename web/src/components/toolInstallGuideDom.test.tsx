@@ -89,7 +89,7 @@ it('HostsPanel 新增主機欄位的 placeholder 是通用範例，不是私人�
   const phs = [...document.querySelectorAll<HTMLInputElement>('.hosts-panel input')].map((i) => i.placeholder)
   assert.ok(phs.includes('my-server'))
   assert.ok(phs.includes('user@my-server'))
-  assert.equal(phs.some((p) => p.includes('m4p') || p.includes('100.64.0.2')), false)
+  assert.equal(phs.some((p) => p.includes('mac_builder') || p.includes('100.64.0.2')), false)
 })
 
 it('選用工具（warn）：展開提醒後寫「選用：用途」，並仍有安裝引導與重新檢查；critical 工具沒有選用字樣', async () => {

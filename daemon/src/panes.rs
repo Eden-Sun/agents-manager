@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn pane_alias_identity_separates_hosts_directories_ports_and_commands() {
         let base = json!({"host":"local", "cwd":"/a", "foreground":"bun run dev", "listen_ports":[3200]});
-        for (field, value) in [("host", json!("m4p")), ("cwd", json!("/b")), ("listen_ports", json!([3201]))] {
+        for (field, value) in [("host", json!("mac_builder")), ("cwd", json!("/b")), ("listen_ports", json!([3201]))] {
             let mut other = base.clone(); other[field] = value;
             assert_ne!(alias_key(&base), alias_key(&other));
         }

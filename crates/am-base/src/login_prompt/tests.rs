@@ -92,7 +92,7 @@ async fn the_snapshot_carries_login_needed_only_for_marked_identities() {
     assert!(n["since"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(json_of(&env.app, "cc2").await.get("login_needed").is_none(), "別的身份不受影響");
     // 別台主機同名的身份不共用。
-    assert_eq!(get(&env.app, "m4p", "cc1"), None);
+    assert_eq!(get(&env.app, "mac_builder", "cc1"), None);
     assert!(clear(&env.app, HOST, "cc1"));
     assert!(!clear(&env.app, HOST, "cc1"));
 }
@@ -237,12 +237,12 @@ async fn a_stale_success_does_not_clear_the_repointed_host_identity_marker() {
 #[tokio::test]
 async fn forgetting_a_host_drops_only_that_hosts_markers() {
     let env = tt::env().await;
-    assert!(mark(&env.app, "m4p", "cc1", VIA_TURN));
+    assert!(mark(&env.app, "mac_builder", "cc1", VIA_TURN));
     assert!(mark(&env.app, HOST, "cc1", VIA_TURN));
-    assert!(forget_host(&env.app, "m4p"));
-    assert_eq!(get(&env.app, "m4p", "cc1"), None, "改指後不能留著舊機器的記號");
+    assert!(forget_host(&env.app, "mac_builder"));
+    assert_eq!(get(&env.app, "mac_builder", "cc1"), None, "改指後不能留著舊機器的記號");
     assert!(get(&env.app, HOST, "cc1").is_some(), "別台不受影響");
-    assert!(!forget_host(&env.app, "m4p"), "已經沒有：回 false");
+    assert!(!forget_host(&env.app, "mac_builder"), "已經沒有：回 false");
 }
 
 /// codex 的整則授權失敗才算；引用、夾在敘述裡、多行、或別的錯誤都不算。

@@ -244,7 +244,7 @@ AM_USAGE_DONE=0
         assert!(!skip_usage_probe(false, true));
     }
 
-    /// 2026-09-25 使用者：「m4p 的 cc1 一直被登出」。安靜的帳號（狀態列不新）以前每 60 秒就開一個
+    /// 2026-09-25 使用者：「mac_builder 的 cc1 一直被登出」。安靜的帳號（狀態列不新）以前每 60 秒就開一個
     /// `claude -p`，跟同 config dir 的 bot 搶 OAuth refresh；現在跟有講話的帳號一樣十分鐘一次。
     #[test]
     fn a_quiet_account_is_not_probed_every_poll() {
@@ -461,7 +461,7 @@ AM_USAGE_DONE=0
         assert!(split_probe_output(&screen).is_none(), "截斷的 JSON 不是答案");
     }
 
-    /// m4p's `cc1` right after a daemon restart: no statusLine yet, but a live run is proof enough.
+    /// mac_builder's `cc1` right after a daemon restart: no statusLine yet, but a live run is proof enough.
     #[test]
     fn a_live_bot_run_beats_the_login_answer() {
         let e = ProbeEvidence { cli_says_logged_out: true, has_live_run: true, ..Default::default() };
@@ -751,7 +751,7 @@ AM_USAGE_DONE=0
         assert!(should_probe_identity(ProbeEvidence { cooling_down: false, ..Default::default() }));
     }
 
-    /// m4p's `cc2`: a genuinely logged-out account costs one probe per half hour.
+    /// mac_builder's `cc2`: a genuinely logged-out account costs one probe per half hour.
     #[test]
     fn backoff_is_longer_when_the_cli_also_says_logged_out() {
         let out = ProbeEvidence { cli_says_logged_out: true, ..Default::default() };
@@ -788,7 +788,7 @@ AM_USAGE_DONE=0
     /// #892：移除／改指主機要把那台的探測退避與 usage_seen 清掉，其他主機與本機不受影響。
     #[test]
     fn forgetting_a_host_drops_only_its_backoff_and_usage_seen() {
-        let host = format!("m4p-{}", crate::db::ulid());
+        let host = format!("mac-builder-{}", crate::db::ulid());
         let other = format!("other-{}", crate::db::ulid());
         let mine = format!("{host}/claude:cc1");
         let mine_bare = format!("{host}/claude");
@@ -806,7 +806,7 @@ AM_USAGE_DONE=0
         assert!(cooling_down(&theirs, false, false), "別台不動");
         assert!(usage_fresh(&theirs));
         assert!(cooling_down(&local, false, false), "本機不動");
-        // 主機名是別台的前綴也不誤清（`m4` 不能清 `m4p/…`）。
+        // 主機名是別台的前綴也不誤清（`m4` 不能清 `mac_builder/…`）。
         let short = &host[..2];
         forget_host(short);
         park(&mine, true);

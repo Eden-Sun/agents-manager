@@ -55,9 +55,9 @@ test('共用預設帳號的身份讀裸 key，啟動時殘留的分開那格不�
 })
 
 test('額度按主機分（SPEC §14）：遠端只看它自己那台的數字', () => {
-  const quota: QuotaMap = { claude: q(97), 'm4p/claude': q(10) }
-  assert.equal(quotaForIdentity(quota, 'm4p', 'claude', 'cc0', [idn('cc0')]), quota['m4p/claude'])
-  assert.equal(botQuotaLevel(quota, 'claude', 'cc0', 'm4p', null, [idn('cc0')]), null)
+  const quota: QuotaMap = { claude: q(97), 'mac_builder/claude': q(10) }
+  assert.equal(quotaForIdentity(quota, 'mac_builder', 'claude', 'cc0', [idn('cc0')]), quota['mac_builder/claude'])
+  assert.equal(botQuotaLevel(quota, 'claude', 'cc0', 'mac_builder', null, [idn('cc0')]), null)
 })
 
 test('身份清單還沒到時保底沿用 cc0 這條字面規則', () => {

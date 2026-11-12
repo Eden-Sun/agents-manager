@@ -1104,7 +1104,7 @@ mod tests {
         assert!(landed, "寫入失敗的狀態事件要重放到寫進去為止");
     }
 
-    /// m4p 每 39 秒被完整對帳一輪（十幾顆 bot × 好幾個 ssh RPC）：原因是 grok 額度探測（每 30 秒）開的 workspace 一偵測到
+    /// mac_builder 每 39 秒被完整對帳一輪（十幾顆 bot × 好幾個 ssh RPC）：原因是 grok 額度探測（每 30 秒）開的 workspace 一偵測到
     /// agent 就觸發 `pane.agent_detected` → 兩秒後對整台主機對帳。探測登記過的 workspace 不排；別的照舊排。
     #[tokio::test]
     async fn an_agent_detected_in_a_quota_probe_workspace_does_not_schedule_a_reconcile() {

@@ -1124,7 +1124,7 @@ async fn the_local_sh_fake_survives_a_script_that_exits_before_reading_stdin() {
     assert_eq!(out, "done");
 }
 
-/// macOS 的 lsof 在 /usr/sbin：分享腳本的身份檢查要先找那裡（2026-11-04 m4p 分享頁看不到檔案）。
+/// macOS 的 lsof 在 /usr/sbin：分享腳本的身份檢查要先找那裡（2026-11-04 mac_builder 分享頁看不到檔案）。
 #[test]
 fn share_scripts_look_for_lsof_where_macos_keeps_it() {
     let script = crate::share::remote_fs::outbox_list_script("/Users/u/.config/agents-manager/outbox/B1");

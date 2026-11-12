@@ -307,7 +307,7 @@ test('claudeInstallPlan：有一台落後時一次涵蓋所有已安裝主機，
     hasUpdate: true,
     hosts: [
       { host: 'local', installedVersion: '2.1.284', error: null, behind: false },
-      { host: 'm4p', installedVersion: '2.1.281', error: null, behind: true },
+      { host: 'mac_builder', installedVersion: '2.1.281', error: null, behind: true },
       { host: 'unreadable', installedVersion: null, error: 'timeout', behind: false },
     ],
     notify: null,
@@ -316,8 +316,8 @@ test('claudeInstallPlan：有一台落後時一次涵蓋所有已安裝主機，
   const p = claudeInstallPlan(item)
   assert.ok(p)
   assert.equal(p.target, '2.1.284')
-  assert.deepEqual(p.hosts.map((h) => h.host), ['local', 'm4p', 'unreadable'])
-  assert.deepEqual(p.installHosts, ['m4p', 'unreadable'])
+  assert.deepEqual(p.hosts.map((h) => h.host), ['local', 'mac_builder', 'unreadable'])
+  assert.deepEqual(p.installHosts, ['mac_builder', 'unreadable'])
 })
 
 test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本機優先，通知照 daemon 格式）', () => {
@@ -327,7 +327,7 @@ test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本
     target: '0.159.0',
     hasUpdate: true,
     hosts: [
-      { host: 'm4p', installedVersion: '0.157.1', error: null, behind: true },
+      { host: 'mac_builder', installedVersion: '0.157.1', error: null, behind: true },
       { host: 'local', installedVersion: '0.158.0', error: null, behind: true },
     ],
     notify: null,

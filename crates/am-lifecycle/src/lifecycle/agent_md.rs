@@ -459,11 +459,11 @@ mod tests {
 
     #[test]
     fn source_fingerprints_identify_the_loaded_snapshot_without_volatile_timestamps() {
-        let text = source_document("~/repo/AGENTS.md", "m4p", "rules v1".into());
-        assert!(text.contains("主機 m4p；檔案 ~/repo/AGENTS.md；SHA256 "));
+        let text = source_document("~/repo/AGENTS.md", "mac_builder", "rules v1".into());
+        assert!(text.contains("主機 mac_builder；檔案 ~/repo/AGENTS.md；SHA256 "));
         assert!(text.ends_with("\n\nrules v1"));
-        assert_eq!(text, source_document("~/repo/AGENTS.md", "m4p", "rules v1".into()));
-        assert_ne!(text, source_document("~/repo/AGENTS.md", "m4p", "rules v2".into()));
+        assert_eq!(text, source_document("~/repo/AGENTS.md", "mac_builder", "rules v1".into()));
+        assert_ne!(text, source_document("~/repo/AGENTS.md", "mac_builder", "rules v2".into()));
         assert!(text.contains("不代表這次 session 已重新載入"));
     }
 

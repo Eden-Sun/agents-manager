@@ -116,11 +116,11 @@ test('新資料夾：在目前這一層建好就直接選取成 Project 路徑�
 })
 
 test('新資料夾：遠端主機要帶 host', async () => {
-  const d = await openNew('m4p')
+  const d = await openNew('mac_builder')
   await typeInto(d.input, 'remote-proj')
   await d.submit()
   const post = d.requests.find((r) => r.method === 'POST')!
-  assert.deepEqual(post.body, { parent: '/home/u', name: 'remote-proj', host: 'm4p' })
+  assert.deepEqual(post.body, { parent: '/home/u', name: 'remote-proj', host: 'mac_builder' })
   assert.deepEqual(d.picked, ['/home/u/remote-proj'])
 })
 

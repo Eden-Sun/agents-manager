@@ -1,4 +1,4 @@
-m4p@m4p rmexp % env -u AM_BOT_ID -u AM_RUN_ID -u AM_HOOK_TOKEN -u AM_AGENT_NAME -u AM_PROJECT_ID claude --dangerously-skip-permissions --model haiku
+mac_builder@mac_builder rmexp % env -u AM_BOT_ID -u AM_RUN_ID -u AM_HOOK_TOKEN -u AM_AGENT_NAME -u AM_PROJECT_ID claude --dangerously-skip-permissions --model haiku
  ▐▛███▛█   Claude Code v2.1.281
 ▝▜██████▀  Haiku 4.5 · Claude Max
   ▝▝ ▝▝    /private/tmp/claude-501/-Users-me-project-agents-manager/a0f491f8-2654-4201-a7f2-1525137063c6/scratchpad/rmexp

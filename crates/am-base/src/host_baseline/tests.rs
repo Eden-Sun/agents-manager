@@ -588,7 +588,7 @@ fn the_same_difference_has_the_same_key_whatever_the_order_and_a_changed_one_doe
     let a = alert_for("ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL), bi("claude.cc2.settings.json", CRITICAL)]))).unwrap();
     let b = alert_for("ubuntu", &report(Some(vec![bi("claude.cc2.settings.json", CRITICAL), bi("tool.rtk", CRITICAL)]))).unwrap();
     let c = alert_for("ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL)]))).unwrap();
-    let other_host = alert_for("m4p", &report(Some(vec![bi("tool.rtk", CRITICAL)]))).unwrap();
+    let other_host = alert_for("mac_builder", &report(Some(vec![bi("tool.rtk", CRITICAL)]))).unwrap();
     assert_eq!(a.0, b.0);
     assert_ne!(a.0, c.0);
     assert_ne!(c.0, other_host.0, "each host is its own difference");

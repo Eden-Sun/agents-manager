@@ -22,7 +22,7 @@ use std::time::Duration;
 
 /// 官方 manifest 的位置（SPEC 附錄 G.1）。
 pub const MANIFEST_BASE: &str = am_base::upstream_update::AGY_MANIFEST_BASE;
-/// 「官方最新版」只問這兩個平台（本機與 m4p 常見的 Linux x64、macOS arm64）：升級時每台仍讀自己平台的 manifest，這裡只決定要不要提示。
+/// 「官方最新版」只問這兩個平台（本機與 mac_builder 常見的 Linux x64、macOS arm64）：升級時每台仍讀自己平台的 manifest，這裡只決定要不要提示。
 const REFERENCE_PLATFORMS: [&str; 2] = ["linux_amd64", "darwin_arm64"];
 /// tarball 只收官方的儲存桶：manifest 被換掉也不能叫主機去抓別處。
 const DOWNLOAD_PREFIX: &str = "https://storage.googleapis.com/antigravity-public/antigravity-cli/";

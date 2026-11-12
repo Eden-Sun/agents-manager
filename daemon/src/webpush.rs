@@ -2644,7 +2644,7 @@ pub(crate) mod tests {
         assert_eq!(p["body"], "codex CLI 有新版 0.130.0");
         assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": null})).is_none());
         assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": "error"})).is_none());
-        let done = json!({"ok": true, "kind": "claude", "host": "m4p", "target_version": "2.1.300"});
+        let done = json!({"ok": true, "kind": "claude", "host": "mac_builder", "target_version": "2.1.300"});
         assert_eq!(update_notice("cli_update_done", &done).unwrap().1["body"], "claude CLI 已更新到 2.1.300");
         assert!(update_notice("cli_update_done", &json!({"ok": false, "kind": "claude", "target_version": "2"})).is_none());
         let dir = crate::testing::scratch_dir("am-webpush-build");
@@ -2834,14 +2834,14 @@ pub(crate) mod tests {
         let app = env.app.clone();
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
         let snap = |at: &str| json!({"kinds": {
-            "m4p/codex:co0": {"limit_hit": {"at": at, "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 2}, "held_bots": ["a", "b"]},
+            "mac_builder/codex:co0": {"limit_hit": {"at": at, "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 2}, "held_bots": ["a", "b"]},
             "codex": {"limit_hit": {"at": at, "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 0}},
             "claude": {"limit_hit": {"at": at}, "reset_credits": {"available": 3}},
         }});
         assert_eq!(scan_reset_credits(&app, &snap("T1"), now).await, 1, "只有 codex 且有券的帳號");
         let got = rx.try_recv().unwrap();
         assert_eq!(got["body"], "codex 額度用完，有 2 張重置券可用（影響：a、b）");
-        assert_eq!(got["url"], "/?reset_offer=m4p%2Fcodex%3Aco0");
+        assert_eq!(got["url"], "/?reset_offer=mac_builder%2Fcodex%3Aco0");
         assert_eq!(scan_reset_credits(&app, &snap("T1"), now).await, 0, "同一次停工只推一次");
         assert!(rx.try_recv().is_err());
         assert_eq!(scan_reset_credits(&app, &snap("T2"), now).await, 1, "新的一次停工再推");

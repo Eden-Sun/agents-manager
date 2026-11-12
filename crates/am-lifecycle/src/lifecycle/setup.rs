@@ -1748,7 +1748,7 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 \n\
 - **只准殺自己記下的 PID 或 port**：自己啟動的行程，啟動時就記下 PID（`$!`），收尾 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。\
 **禁止** `pkill`／`pkill -f`／`killall` 比對寬鬆的字串（`node`、`next`、`1`、agent 名稱…），也**禁止** `kill -9 -1`／`kill 0`。\
-同一台機器上有別的 bot 的 claude／codex／grok，字串比對錯一點就全部陪葬（2026-10-21 m4p 一條 `pkill -f \"next-server\" -P 1` 殺光整台機器的 agent）。\n\
+同一台機器上有別的 bot 的 claude／codex／grok，字串比對錯一點就全部陪葬（2026-10-21 mac_builder 一條 `pkill -f \"next-server\" -P 1` 殺光整台機器的 agent）。\n\
 - macOS／BSD 的 `pkill` 遇到第一個非選項參數就停止解析選項，之後的 `-P 1` 會被當成**要殺的字串**：選項**必須全部寫在比對字串之前**\
 （`pkill -P 1 -f next-server`，不是 `pkill -f next-server -P 1`）。這台的 bot 有 hook 會擋下廣域的 kill 並告訴你原因，被擋就照訊息改用 PID 或 port，**禁止**換個寫法繞過。\n\
 \n\

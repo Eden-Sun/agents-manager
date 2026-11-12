@@ -15,8 +15,8 @@ after(async () => {
 })
 
 const fakeHost: Host = {
-  name: 'm4p',
-  ssh: 'm4p@host',
+  name: 'mac_builder',
+  ssh: 'mac_builder@host',
   ssh_port: 22,
   herdr_session: 'test',
   remote_path: '',
@@ -28,7 +28,7 @@ const fakeHost: Host = {
 
 const identities: Identity[] = [
   { name: 'work', kind: 'claude', env: {}, args: [], host: null },
-  { name: 'cc1', kind: 'claude', env: {}, args: [], host: 'm4p' },
+  { name: 'cc1', kind: 'claude', env: {}, args: [], host: 'mac_builder' },
 ]
 
 test('本機：第一顆照舊', async () => {
@@ -50,10 +50,10 @@ test('遠端：寫那台主機', async () => {
     hosts: [fakeHost],
     disabledIdentities: [],
   })
-  await mount(<IdentityOptions kind="claude" host="m4p" value="" onChange={(v) => { picked = v }} />)
+  await mount(<IdentityOptions kind="claude" host="mac_builder" value="" onChange={(v) => { picked = v }} />)
   const buttons = document.querySelectorAll('[role="radiogroup"] button')
   assert.ok(buttons.length > 0)
-  assert.equal(buttons[0].textContent?.trim(), '不指定身份（m4p 的預設帳號）')
+  assert.equal(buttons[0].textContent?.trim(), '不指定身份（mac_builder 的預設帳號）')
 
   await click(buttons[0])
   assert.equal(picked, '')

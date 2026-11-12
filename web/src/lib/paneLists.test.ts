@@ -42,7 +42,7 @@ test('側欄底部：daemon 有標 scratch 就排第一、其他標「多出來�
 })
 
 test('關掉一顆：兩份清單一起拿掉，空掉的專案整組消失', () => {
-  const lists = { sidePanes: { p1: [pane('w1:p1')], p2: [pane('w1:p2', { project_id: 'p2' })] }, unownedPanes: [pane('w1:p1', { host: 'm4p' })] }
+  const lists = { sidePanes: { p1: [pane('w1:p1')], p2: [pane('w1:p2', { project_id: 'p2' })] }, unownedPanes: [pane('w1:p1', { host: 'mac_builder' })] }
   const next = withoutPane(lists, 'local', 'w1:p1')
   assert.equal(next.sidePanes.p1, undefined)
   assert.equal(next.sidePanes.p2.length, 1)

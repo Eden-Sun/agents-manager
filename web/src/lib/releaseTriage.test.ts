@@ -58,13 +58,13 @@ test('帳本沒有 to 那一版：補一列「尚未分析」，整個區間算�
 
 test('提案帶標題與連結；已寫成提案的條目不再逐條重複，值得早升另列', () => {
   const { rows } = parseTriageRows(RAW)
-  const [v] = triageForRange(rows, 'Eden-Sun/agents-manager', null, '0.157.0')
+  const [v] = triageForRange(rows, 'example-dev/agents-manager', null, '0.157.0')
   assert.ok(v)
   assert.deepEqual(v.issues.map((i) => [i.title, i.verdict, i.number, i.duplicate]), [
     ['全螢幕 transcript 預設開', 'guard', 549, true],
     ['清單改用 •，回覆被截斷', 'guard', null, false],
   ])
-  assert.equal(v.issues[0]?.url, 'https://github.com/Eden-Sun/agents-manager/issues/549')
+  assert.equal(v.issues[0]?.url, 'https://github.com/example-dev/agents-manager/issues/549')
   assert.deepEqual(v.guard, [], '兩條提防都已經寫成提案')
   assert.deepEqual(v.upgrade.map((i) => i.reason), ['用量可以直接讀'])
 })

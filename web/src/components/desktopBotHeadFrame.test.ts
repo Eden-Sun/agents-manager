@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 const head = await readFile(new URL('./desktopBotHead.css', import.meta.url), 'utf8')
 
 /**
- * 桌機（>1024px）標題列的名字區：#1269 之前是固定 18em，名字與 ★⚙ 之間、@m4p 與額度之間都是它吃掉的空白。
+ * 桌機（>1024px）標題列的名字區：#1269 之前是固定 18em，名字與 ★⚙ 之間、@mac_builder 與額度之間都是它吃掉的空白。
  * 檔案裡同一條規則有好幾段（後面的覆寫前面的），生效的是最後一段，所以取 lastIndexOf。
  */
 const desktopMain = (() => {

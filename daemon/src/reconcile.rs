@@ -482,7 +482,7 @@ fn matches_run(run: &db::Run, agent: &crate::herdr::AgentInfo, child: bool) -> b
     match (run.native_session_id.as_deref(), crate::lifecycle::dead_panes::herdr_session_id(agent)) {
         (Some(expected), Some(observed)) => !expected.is_empty() && expected == observed,
         // herdr 沒把 CLI session 綁上（grok 一律如此）：沒有反證，就以同 host／session 的 pane_id 當身份。
-        // 以前子 agent 走這裡一律 false，daemon 重啟後 grok 子 agent 再也接不回、狀態不再追蹤（2026-10-19 m4p）。
+        // 以前子 agent 走這裡一律 false，daemon 重啟後 grok 子 agent 再也接不回、狀態不再追蹤（2026-10-19 mac_builder）。
         (Some(_), None) => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         (None, _) if !child => run.pane_id.as_deref() == Some(agent.pane_id.as_str()),
         (None, _) => {
@@ -1616,9 +1616,9 @@ mod autostart_tests {
     async fn autostart_runs_once_per_host_and_only_after_a_successful_reconcile() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        assert!(!super::autostart_after_reconcile(app, "m4p", false).await, "對帳失敗不跑");
-        assert!(super::autostart_after_reconcile(app, "m4p", true).await, "失敗那次不算數：下次連上照跑");
-        assert!(!super::autostart_after_reconcile(app, "m4p", true).await, "重連不再跑");
+        assert!(!super::autostart_after_reconcile(app, "mac_builder", false).await, "對帳失敗不跑");
+        assert!(super::autostart_after_reconcile(app, "mac_builder", true).await, "失敗那次不算數：下次連上照跑");
+        assert!(!super::autostart_after_reconcile(app, "mac_builder", true).await, "重連不再跑");
         assert!(super::autostart_after_reconcile(app, "local", true).await, "每台主機各算各的");
     }
 
@@ -4477,7 +4477,7 @@ mod compat_tests {
         assert_eq!(n, 3, "重跑一次不該重複建立");
     }
 
-    /// 2026-10-19 m4p：子 agent 出現時那輪對帳還沒有線索（遠端 hook 走 spool 晚到），之後沒有別的事件叫對帳。
+    /// 2026-10-19 mac_builder：子 agent 出現時那輪對帳還沒有線索（遠端 hook 走 spool 晚到），之後沒有別的事件叫對帳。
     /// 線索的 hook 一到就要自己排一輪對帳把它認領起來，不能等到下一個不相干的 pane 事件。
     #[tokio::test]
     async fn a_spawn_hint_that_arrives_after_the_pass_still_gets_the_child_adopted() {
@@ -4726,7 +4726,7 @@ mod compat_tests {
         assert!(env.app.pane_watchers.lock().await.is_empty());
     }
 
-    /// 2026-10-19 m4p：daemon 重啟後，herdr 沒綁 CLI session 的子 agent（grok）要靠 pane_id 接回來、繼續追蹤狀態；
+    /// 2026-10-19 mac_builder：daemon 重啟後，herdr 沒綁 CLI session 的子 agent（grok）要靠 pane_id 接回來、繼續追蹤狀態；
     /// 以前只認 native session，接不回，子 agent 的進度從此看不到。
     #[tokio::test]
     async fn a_child_without_a_herdr_session_is_kept_by_its_pane_after_a_restart() {
@@ -5258,7 +5258,7 @@ mod compat_tests {
     }
 
     /// A run whose agent herdr no longer lists still exits, tab or not.
-    /// issue #1790（2026-10-16 m4p）：fork 出來的 `ops-交貨` 開的子 agent 被名字前綴掛到原 bot `ops` 底下。shim 登記了
+    /// issue #1790（2026-10-16 mac_builder）：fork 出來的 `ops-交貨` 開的子 agent 被名字前綴掛到原 bot `ops` 底下。shim 登記了
     /// 「這顆 pane 是 B 開的」（claim）選 parent；child 之後改名時以 native session 確認同一個 instance，
     /// 還是同一顆 child、同一個 parent（不被收掉、也不被名字前綴重新認給 A）。
     #[tokio::test]

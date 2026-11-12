@@ -140,7 +140,7 @@
         assert_eq!(lines.next().unwrap(), "true -p /usage --output-format json");
     }
 
-    /// macOS 的 agy 憑證在 Keychain、沒有檔案（m4p 實測）：用假 `security`（PATH 前面）跑真的 sh，確認「有 Keychain 項目」算已登入、
+    /// macOS 的 agy 憑證在 Keychain、沒有檔案（mac_builder 實測）：用假 `security`（PATH 前面）跑真的 sh，確認「有 Keychain 項目」算已登入、
     /// 登出會刪它；沒有 `security`（Linux）時只看檔案。假 HOME 底下沒有憑證檔。
     #[test]
     fn a_keychain_item_counts_as_logged_in_and_logout_deletes_it() {

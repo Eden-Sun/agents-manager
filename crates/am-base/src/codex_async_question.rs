@@ -269,7 +269,7 @@ mod tests {
         .to_string()
     }
 
-    // #1896：m4p codex 0.163.0 真實測試 rollout 的去敏片段（顏色／水果／城市）。
+    // #1896：mac_builder codex 0.163.0 真實測試 rollout 的去敏片段（顏色／水果／城市）。
     // 原行號 1、2、8、14、62、64、65、70、112、114、115、120、170–174、179；
     // 只留相關事件，移除路徑／帳號等 metadata，turn/call id 改成別名，沒有捏造 resume 事件。
     const STALE_TURNS: &str = r#"{"timestamp":"2026-10-22T07:58:00.782Z","type":"session_meta","payload":{"cli_version":"0.163.0","source":"cli"}}

@@ -1368,7 +1368,7 @@ mod tests {
             "\
   400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
   800     1 180000 ./target/release/{exe} serve
-  801   800  12000 ssh -N -M -S /tmp/x.ctl m4p@host
+  801   800  12000 ssh -N -M -S /tmp/x.ctl mac_builder@host
   802   800  20000 /bin/sh -c ps -Awwo pid=
 ---AM-START---
   400 Wed Sep 24 10:00:00 2026

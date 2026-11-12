@@ -23,9 +23,9 @@ const CLAUDE = {
   notify: 'update',
   hosts: [
     { host: 'local', installed_version: '2.1.284', error: null, behind: false },
-    { host: 'm4p', installed_version: '2.1.281', error: null, behind: true },
+    { host: 'mac_builder', installed_version: '2.1.281', error: null, behind: true },
   ],
-  text: 'claude 需安裝 2.1.284（local：2.1.284 → 2.1.284；m4p：2.1.281 → 2.1.284）',
+  text: 'claude 需安裝 2.1.284（local：2.1.284 → 2.1.284；mac_builder：2.1.281 → 2.1.284）',
 }
 
 function recorder() {
@@ -50,7 +50,7 @@ test('target 與 fleet 主機快照會解析，且開機讀取可以更新持續
   assert.equal(parsed?.target, '2.1.284')
   assert.deepEqual(parsed?.hosts.map((host) => [host.host, host.installedVersion, host.behind]), [
     ['local', '2.1.284', false],
-    ['m4p', '2.1.281', true],
+    ['mac_builder', '2.1.281', true],
   ])
   const saved: string[] = []
   await loadUpstreamUpdates(() => Promise.resolve({ items: [CLAUDE] }), () => {}, (item) => saved.push(item.kind))

@@ -1,4 +1,4 @@
-m4p@m4p tmp % claude
+mac_builder@mac_builder tmp % claude
  ▐▛███▛█   Claude Code v2.1.270
 ▝▜██████▀  Opus 5 · Claude Max
   ▝▝ ▝▝    /private/tmp

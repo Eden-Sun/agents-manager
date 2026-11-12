@@ -451,7 +451,7 @@ pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
 
 #[cfg(test)]
 mod tests {
-    /// m4p 實機的 `sysctl -n hw.memsize` + `vm_stat`（2026-09-12）：16 GiB，可回收約 5.5 GiB。
+    /// mac_builder 實機的 `sysctl -n hw.memsize` + `vm_stat`（2026-09-12）：16 GiB，可回收約 5.5 GiB。
     #[test]
     fn macos_machine_memory_comes_from_memsize_and_vm_stat() {
         let out = "17179869184\n\

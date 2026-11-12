@@ -1,6 +1,6 @@
 /**
  * mock 的 herdr 一鍵更新（SPEC §6.9，API `POST /api/hosts/{name}/herdr-update`）：只演示進度、結果與上游快照，不碰任何 herdr。
- * `__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local 與 m4p 都落後；m4p 是遠端，按鈕那台只會是 local），header 就會出現徽章；
+ * `__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local 與 mac_builder 都落後；mac_builder 是遠端，按鈕那台只會是 local），header 就會出現徽章；
  * `__amMock.herdrUpdate({ failOne: true })` 演一顆沒接回，`{ reason: 'busy_timeout' }` 演整次沒做、`{ reason: 'restart_failed' }` 演換回舊版（多一步 `rolling_back`，bot 照樣接回）。
  */
 import { later } from './mockClock'
@@ -61,7 +61,7 @@ export class MockHerdrUpdate {
   private item(localInstalled: string): Rec {
     const hosts = [
       { host: 'local', installed_version: localInstalled, error: null, behind: localInstalled !== this.target },
-      { host: 'm4p', installed_version: this.installed, error: null, behind: true },
+      { host: 'mac_builder', installed_version: this.installed, error: null, behind: true },
     ]
     const behind = hosts.filter((h) => h.behind)
     return {

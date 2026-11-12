@@ -4,7 +4,7 @@ import { botStatusConnTarget } from './botStatusConn.ts'
 
 test('no connected field → touches nothing', () => {
   assert.deepEqual(botStatusConnTarget({ connected: undefined, host: 'local', defaultSession: false }), { kind: 'none' })
-  assert.deepEqual(botStatusConnTarget({ connected: undefined, host: 'm4p', defaultSession: false }), { kind: 'none' })
+  assert.deepEqual(botStatusConnTarget({ connected: undefined, host: 'mac_builder', defaultSession: false }), { kind: 'none' })
 })
 
 test('local manager-session bot writes the global flag', () => {
@@ -18,6 +18,6 @@ test('local default-session bot writes defaultConnected only', () => {
 })
 
 test('remote bot never touches the global flag, regardless of session (#20)', () => {
-  assert.deepEqual(botStatusConnTarget({ connected: false, host: 'm4p', defaultSession: false }), { kind: 'host', host: 'm4p', connected: false })
-  assert.deepEqual(botStatusConnTarget({ connected: true, host: 'm4p', defaultSession: true }), { kind: 'host', host: 'm4p', connected: true })
+  assert.deepEqual(botStatusConnTarget({ connected: false, host: 'mac_builder', defaultSession: false }), { kind: 'host', host: 'mac_builder', connected: false })
+  assert.deepEqual(botStatusConnTarget({ connected: true, host: 'mac_builder', defaultSession: true }), { kind: 'host', host: 'mac_builder', connected: true })
 })

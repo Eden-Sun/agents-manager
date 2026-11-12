@@ -1391,7 +1391,7 @@ mod tests {
         assert!(fake.restarts.lock().unwrap().is_empty() && !window_open(&env.app).await);
     }
 
-    /// m4p 手動升級的教訓：Homebrew formula 被 `brew pin` 住時 `brew upgrade` 會直接拒絕，手動指令要 unpin → upgrade → pin。
+    /// mac_builder 手動升級的教訓：Homebrew formula 被 `brew pin` 住時 `brew upgrade` 會直接拒絕，手動指令要 unpin → upgrade → pin。
     #[test]
     fn the_manual_command_unpins_upgrades_and_repins_a_homebrew_formula() {
         let cmd = manual_upgrade_command();
@@ -1547,16 +1547,16 @@ mod tests {
         };
         app.hosts.insert_remote_for_test(cfg("build1", false)).await;
         assert!(matches!(call(HeaderMap::new(), "build1", Some("0.9.2"), Some("0.9.3")).await, LcError::Conflict(v) if v["reason"] == "stale_target"));
-        app.hosts.insert_remote_for_test(cfg("m4p", true)).await;
-        let m4p = cfg("m4p", true);
+        app.hosts.insert_remote_for_test(cfg("mac_builder", true)).await;
+        let mac_builder = cfg("mac_builder", true);
         app.cfg
             .update(move |c| {
-                c.hosts.push(m4p);
+                c.hosts.push(mac_builder);
                 Ok(())
             })
             .await
             .unwrap();
-        assert!(matches!(call(HeaderMap::new(), "m4p", Some("0.9.3"), Some("0.9.3")).await, LcError::Conflict(v) if v["reason"] == "shared_session"));
+        assert!(matches!(call(HeaderMap::new(), "mac_builder", Some("0.9.3"), Some("0.9.3")).await, LcError::Conflict(v) if v["reason"] == "shared_session"));
         let stale = call(HeaderMap::new(), "local", Some("0.9.2"), Some("0.9.3")).await;
         assert!(matches!(&stale, LcError::Conflict(v) if v["reason"] == "stale_target" && v["current_target"] == "0.9.3"), "{stale:?}");
         let gone = call(HeaderMap::new(), "local", Some("0.9.3"), None).await;

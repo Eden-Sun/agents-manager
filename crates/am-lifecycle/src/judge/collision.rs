@@ -1203,13 +1203,13 @@ mod tests {
         assert_eq!(inbox(&app).await.len(), hints.len());
     }
 
-    /// #1467：專案在遠端主機（m4p）時，派工與認領兩個入口跟本機專案一樣問、一樣記帳本、一樣推提示——daemon 這一側
+    /// #1467：專案在遠端主機（mac_builder）時，派工與認領兩個入口跟本機專案一樣問、一樣記帳本、一樣推提示——daemon 這一側
     /// 不看主機。（`agm issue claim` 從遠端 pane 送不進這支路由是另一回事：遠端沒有 `AM_PORT`，見 SPEC §4.3c。）
     #[tokio::test]
     async fn a_remote_hosts_project_is_compared_by_assignment_and_by_claim_like_a_local_one() {
         let rig = stand(Mode::Noul(0.8), true, true).await;
         let app = rig.env.app.clone();
-        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
         let bot = tt::claude_bot(&app, &rig.env.project_id, "ops-web").await;
         let other = tt::claude_bot(&app, &rig.env.project_id, "ops-master").await;
         crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動 #1467", &[], None, true).await.unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
     async fn a_remote_claim_spool_event_reaches_the_collision_check_for_its_project() {
         let rig = stand(Mode::Noul(0.8), true, true).await;
         let app = rig.env.app.clone();
-        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&rig.env.project_id).execute(&app.db).await.unwrap();
         let caller = tt::claude_bot(&app, &rig.env.project_id, "remote-claimer").await;
         let existing = tt::claude_bot(&app, &rig.env.project_id, "remote-top-level").await;
         let run = tt::fake_run(&app, &existing.id).await;

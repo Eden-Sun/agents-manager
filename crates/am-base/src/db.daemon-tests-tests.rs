@@ -1263,7 +1263,7 @@
     async fn live_identities_are_per_host_and_only_count_active_runs() {
         let dir = tmp_dir();
         let pool = open(&dir.join("live.sqlite3")).await.unwrap();
-        for (id, host) in [("pl", "local"), ("pm", "m4p")] {
+        for (id, host) in [("pl", "local"), ("pm", "mac_builder")] {
             sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)")
                 .bind(id).bind(format!("/tmp/{id}")).bind(id).bind(host).bind(now())
                 .execute(&pool).await.unwrap();
@@ -1286,12 +1286,12 @@
                 .bind(format!("r{b}")).bind(b).bind(state).bind(now())
                 .execute(&pool).await.unwrap();
         }
-        let live = live_identities_on_host(&pool, "m4p").await.unwrap();
+        let live = live_identities_on_host(&pool, "mac_builder").await.unwrap();
         assert_eq!(live, ["cc1".to_string(), "cc4".to_string()].into_iter().collect());
         assert_eq!(live_identities_on_host(&pool, "local").await.unwrap(), ["cc3".to_string()].into_iter().collect());
 
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b1'").bind(now()).execute(&pool).await.unwrap();
-        assert_eq!(live_identities_on_host(&pool, "m4p").await.unwrap(), ["cc4".to_string()].into_iter().collect());
+        assert_eq!(live_identities_on_host(&pool, "mac_builder").await.unwrap(), ["cc4".to_string()].into_iter().collect());
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -1358,7 +1358,7 @@
                 .unwrap();
         }
         let gen = 16_777_216_i64;
-        for (id, bot, state, host) in [("act", "b", "running", "m4p"), ("done", "b", "exited", "m4p"), ("other", "c", "running", "other")] {
+        for (id, bot, state, host) in [("act", "b", "running", "mac_builder"), ("done", "b", "exited", "mac_builder"), ("other", "c", "running", "other")] {
             sqlx::query("INSERT INTO runs (id,bot_id,state,started_at,host,host_generation) VALUES (?,?,?,?,?,?)")
                 .bind(id)
                 .bind(bot)
@@ -1371,7 +1371,7 @@
                 .unwrap();
         }
 
-        assert_eq!(rebase_active_run_host_epoch(&pool, "m4p", 42).await.unwrap(), 1);
+        assert_eq!(rebase_active_run_host_epoch(&pool, "mac_builder", 42).await.unwrap(), 1);
         assert_eq!(run_host_generation(&pool, "act").await.unwrap(), Some(42));
         assert_eq!(run_host_generation(&pool, "done").await.unwrap(), Some(gen), "結束了的 run 不改");
         assert_eq!(run_host_generation(&pool, "other").await.unwrap(), Some(gen), "別台主機的 run 不改");

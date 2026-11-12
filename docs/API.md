@@ -582,7 +582,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
+| POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"mac_builder"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label"?:"新名字","handed_off_to"?:"agm-host"\|null}` | `200 {"project_id","needs_restart":false}`；label trim 後為空 400。不擋 active run（agent 身份取自 bot id，label 只影響**下次啟動**的 `agent_name` slug）。`handed_off_to`（#708，SPEC §6.5h）：字串＝移交給那台主機的 daemon（trim 後寫進 config.toml），`null`＝收回（當場排一輪對帳接手），不帶＝不動；空字串或非字串 400。設定當下不停、不關任何 pane |
 | POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok"\|"agy","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效）。**排程專屬 bot**：body 可帶 `role:"scheduler"`建成排程專屬 bot（非專家專案只收這個值；專家專案另收 `executor`／`advisor`，沒帶＝`executor`；其他 400）（`bots.role = scheduler`，不算執行者，見 SPEC「專案排程」）；權限同本路由（User）；專家專案的 manager 用 `POST /api/projects/{id}/members` 的 `role:"scheduler"` 增聘 |
@@ -1081,7 +1081,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 目錄選擇器的「新資料夾」：在目前瀏覽的上層目錄底下建一個資料夾，UI 建好後直接把回傳的 `path` 當成 Project 路徑。本機與遠端主機（`host`，ssh）同一份規則。
 
 ```json
-{"host":"m4p","parent":"/Users/me/work","name":"new-proj"}
+{"host":"mac_builder","parent":"/Users/me/work","name":"new-proj"}
 → 200 {"path":"/Users/me/work/new-proj","name":"new-proj","parent":"/Users/me/work"}
 ```
 
@@ -1595,7 +1595,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
  "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,"total_bytes":1610612736,"processes":5,"error":null,
            "browsers":[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}],
            "machine":{"total_bytes":17179869184,"available_bytes":5536579584}},
-          {"host":"m4p","herdr_bytes":0,"agents_bytes":0,"total_bytes":0,"processes":0,"error":"未連線","browsers":[],"machine":null}]}
+          {"host":"mac_builder","herdr_bytes":0,"agents_bytes":0,"total_bytes":0,"processes":0,"error":"未連線","browsers":[],"machine":null}]}
 ```
 
 - `browsers`：同一份 `ps` 裡的 Chromium 系瀏覽器依 app bundle 分組（`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`），`tabs` = `--type=renderer` 數。不算進 `total_bytes`；前端總分頁 ≥ 30 時標紅。
@@ -1646,11 +1646,11 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 {
   "hosts": [
     {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager","remote_path":null,"connected":true,"error":null},
-    {"name":"m4p","ssh":"m4p@100.64.0.2","ssh_port":22,"ssh_opts":[],"herdr_session":"agents-manager",
+    {"name":"mac_builder","ssh":"mac_builder@100.64.0.2","ssh_port":22,"ssh_opts":[],"herdr_session":"agents-manager",
      "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","connected":false,"error":"ssh master exited immediately (exit status: 255)",
      "disconnected_since":"2026-10-02T03:14:07.512Z"}
   ],
-  "projects": [ {"id":"01M1...","path":"/Users/me/work/foo","label":"foo@m4p","host":"m4p","workspace_id":null,"bots":[ ... ]} ]
+  "projects": [ {"id":"01M1...","path":"/Users/me/work/foo","label":"foo@mac_builder","host":"mac_builder","workspace_id":null,"bots":[ ... ]} ]
 }
 ```
 
@@ -1667,7 +1667,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 只接受 User principal（UI token）；Bot／service principal 回 `403 user_only`。
 
 ```json
-{ "name": "m4p", "ssh": "m4p@100.64.0.2", "ssh_port": 22, "herdr_session": "agents-manager", "remote_path": "/opt/homebrew/bin:$HOME/.local/bin", "ssh_opts": ["-i", "/path/to/key"] }
+{ "name": "mac_builder", "ssh": "mac_builder@100.64.0.2", "ssh_port": 22, "herdr_session": "agents-manager", "remote_path": "/opt/homebrew/bin:$HOME/.local/bin", "ssh_opts": ["-i", "/path/to/key"] }
 ```
 
 | 欄位 | 必填 | 預設 |
@@ -1711,7 +1711,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 `GET /api/hosts/{name}/gh` → 該主機 `gh` 的登入狀態（issue 列表靠它）：
 
 ```json
-{ "name": "m4p", "installed": true, "path": "/opt/homebrew/bin/gh", "logged_in": false, "account": "eddysun-alt",
+{ "name": "mac_builder", "installed": true, "path": "/opt/homebrew/bin/gh", "logged_in": false, "account": "eddysun-alt",
   "accounts": [ {"login": "eddysun-alt", "active": true, "ok": false}, {"login": "Eden-Sun", "active": false, "ok": true} ],
   "mode": null, "pending": null, "error": null }
 ```
@@ -1801,7 +1801,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 [[identities]]
 name = "cc1"                         # [a-z][a-z0-9_-]{0,31}
 kind = "claude"                      # claude | codex | grok | agy
-# host = "m4p"                       # 選填；省略＝只適用本機。鍵是 (host, name)：
+# host = "mac_builder"                       # 選填；省略＝只適用本機。鍵是 (host, name)：
                                      # 同名的 cc1 在別台是別的帳號（SPEC §16.2）
 args = []
 [identities.env]
@@ -1824,7 +1824,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 {
   "identities": [ {"name":"cc1","kind":"claude","host":null,"env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]} ],
   "hosts": [ {
-    "name": "m4p",
+    "name": "mac_builder",
     "shell_identities": [ {"name": "cc0", "kind": "claude", "env": {}, "args": []} ],
     "identities": {
       "cc0": {"name":"cc0","kind":"claude","logged_in":true,"account":"me@example.com","plan":"max","source":"shell"},
@@ -1838,7 +1838,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
 - `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
   **`login_needed`**（#838 補充，2026-10-04，沒有就不帶）：`{"since": ISO, "via": "turn_auth_failure"}`＝daemon 記下「這個身份要重新登入」——綁著它的 claude bot 的回合因授權失敗收尾（hook `StopFailure` 分類成 Auth，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`）；codex bot 的回合整則是授權失效的錯誤（refresh token 失效、401，見 SPEC §16.3a）也記。
-  **遠端 claude 的探測一律問不出「未登入」**（ssh 沒有 GUI session、讀不到 Keychain，探測的 false 被丟掉），所以這是 m4p 之類遠端主機被登出時唯一的訊號；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。標記時 daemon 立刻重探該身份並推 `host_changed`（`GET /api/state`、`host_changed`、`POST …/tools/refresh` 都帶）。
+  **遠端 claude 的探測一律問不出「未登入」**（ssh 沒有 GUI session、讀不到 Keychain，探測的 false 被丟掉），所以這是 mac_builder 之類遠端主機被登出時唯一的訊號；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。標記時 daemon 立刻重探該身份並推 `host_changed`（`GET /api/state`、`host_changed`、`POST …/tools/refresh` 都帶）。
   `since` 是這一次的識別（同一次不會變；清掉後再發生是新的一次），網頁拿它判斷「關掉過的是同一次」。清掉的時機：該身份被探測成已登入（從非已登入變過來）、登入 watcher 收尾時重驗已登入、登入協助貼完 code 且 CLI 沒報失敗（`finished`）、綁著它的 bot 又正常答完一回合。沒綁身份的 bot 不處理；記憶體帳，daemon 重啟後由探測與下一次授權失敗補回。
 - 同名時的優先序（`tools::merge_identities`）：明寫這一台的 config → 本機才有：沒寫 host 的 config → 那台的 shell `ccN` → 遠端才有：沒寫 host 的 config（名字是 `ccN` 時等那台偵測過才給）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
 - 每個 bot 都有 `identity`（`string|null`）與 `env`（預設 `{}`）。
@@ -1900,7 +1900,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 | 這顆 pane 已送過 code（包含並行或重送的 POST） | `409 {"reason":"code_already_sent","sent":false,"message"}`，不讀畫面、不再送字；關閉終端後重新登入 |
 | 通過 | `pane.send_text`（code 一次整段）＋另送 `enter`，等 CLI 反應最多 8 秒：畫面出現 `Login failed` → `outcome:"failed"`＋`message`（pane 隨後會被收掉，網頁來不及再讀）；提示消失或 pane 已收掉 → `finished`（成功與否看身份列的重驗，這裡不猜）；還在等 → `pending` |
 
-**網址與 code 不進 daemon log 或事件**：網址與 codex 一次性碼只在 `GET …/login` 的回應裡（`no-store`），code 只經過 `…/login/code` 的 body 到 `pane.send_text`；沒有任何 tracing 帶它們、不推 WS、網頁也不存。CLI 結束後的重驗、關 pane 仍是既有的登入 watcher（SPEC §16.3a），完成後推 `host_changed` 讓身份列更新。本機與遠端主機（例如 m4p）同一條路。
+**網址與 code 不進 daemon log 或事件**：網址與 codex 一次性碼只在 `GET …/login` 的回應裡（`no-store`），code 只經過 `…/login/code` 的 body 到 `pane.send_text`；沒有任何 tracing 帶它們、不推 WS、網頁也不存。CLI 結束後的重驗、關 pane 仍是既有的登入 watcher（SPEC §16.3a），完成後推 `host_changed` 讓身份列更新。本機與遠端主機（例如 mac_builder）同一條路。
 
 ### `POST /api/hosts/{name}/identities/{identity}/logout`
 同一條路、同一組 env，只是指令換成 `claude auth logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
@@ -2180,11 +2180,11 @@ agy 的 `payload` 是 stdin JSON（camelCase：`conversationId`、`transcriptPat
 
 ### 12.1 `GET /api/models?kind=claude|codex|grok|agy&host=<name>&identity=<name>&refresh=1`
 
-AGM CLI：`bin/agm models --kind codex --host m4p --refresh`，指定身份加 `--identity <name>`。沿用 CLI 的角色認證與 timeout，不將 token 放在 argv；一般 Bot 的 403／503 原樣回報，不換憑證或自動重試。省略 `--refresh` 為查詢，省略 `--host` 為 local。
+AGM CLI：`bin/agm models --kind codex --host mac_builder --refresh`，指定身份加 `--identity <name>`。沿用 CLI 的角色認證與 timeout，不將 token 放在 argv；一般 Bot 的 403／503 原樣回報，不換憑證或自動重試。省略 `--refresh` 為查詢，省略 `--host` 為 local。
 
 Bot 呼叫此路由時，連線目的地是 daemon，`host` 則是要執行 CLI 的主機，兩者不可混用。本機 Bot 以注入的 `AM_PORT` 連 loopback；遠端 Bot 沒有 `AM_PORT`（§11.4 的設計），使用部署共用指引提供的 daemon 入口，不能猜目前主機的 localhost 或自行補設 `AM_PORT`。使用 `X-AM-Bot-Id` 與 `X-AM-Bot-Token`，不是 Bearer，也不取共用 UI token；不跟隨 HTTP redirect。
 
-例如 child 在 m4p，查 `?kind=codex&host=m4p`，指定身份再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身份；503 `model_cache_miss` 不需要找 AGM：daemon 已排程背景刷新，依 body 的 `refresh` 等待後重試；`refresh.state` 為 `failed` 時才回報 AGM，不改用歷史模型、也不要求使用者重答已指定的模型。
+例如 child 在 mac_builder，查 `?kind=codex&host=mac_builder`，指定身份再加 `identity`，並確認回應的 `host`／`kind`。省略 host 會查 local，不能把這份清單視為遠端結果。連線失敗核對入口；401／403 核對 Bot 身份；503 `model_cache_miss` 不需要找 AGM：daemon 已排程背景刷新，依 body 的 `refresh` 等待後重試；`refresh.state` 為 `failed` 時才回報 AGM，不改用歷史模型、也不要求使用者重答已指定的模型。
 
 某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，請求本身不執行本機或遠端 CLI，但 daemon 會在背景排一趟刷新（#1890，見下段）。身份新增或刪除時，該名字（任何主機）的清單快取作廢，下一次讀取重抓（#1349）。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 
@@ -2256,7 +2256,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
       "fable": {"used_pct": 39.0, "resets_at": "…", "low": false, "critical": false},
       "reset_credits": null, "plan": null, "updated_at": "…", "stale": false, "source": "statusline", "account": null, "host": "local" },
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
-    "m4p/claude": { "…": "m4p 上讀到的同一組欄位，host = \"m4p\"" },
+    "mac_builder/claude": { "…": "mac_builder 上讀到的同一組欄位，host = \"mac_builder\"" },
     "grok": { "five_hour": null, "seven_day": {"used_pct": 14.0, "resets_at": "…", "low": false, "critical": false}, "plan": "SuperGrok", "updated_at": "…", "source": "grok-usage", "host": "local" },
     "agy": { "five_hour": {"used_pct": 77.0, "resets_at": "…", "low": true, "critical": false}, "seven_day": {"used_pct": 2.0, "resets_at": "…", "low": false, "critical": false}, "plan": null, "updated_at": "…", "source": "agy-usage", "host": "local" }
 } }
@@ -2309,7 +2309,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
 ### 12.5 WS `quota_updated`
 
 ```json
-{"seq":57,"type":"quota_updated","data":{"kind":"m4p/claude","host":"m4p","quota":{ "five_hour":{…},"seven_day":{…},"fable":null,"plan":null,"updated_at":"…","stale":false,"source":"statusline","account":null,"host":"m4p" }}}
+{"seq":57,"type":"quota_updated","data":{"kind":"mac_builder/claude","host":"mac_builder","quota":{ "five_hour":{…},"seven_day":{…},"fable":null,"plan":null,"updated_at":"…","stale":false,"source":"statusline","account":null,"host":"mac_builder" }}}
 ```
 
 `kind` 是完整 key；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
@@ -2352,7 +2352,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
 issue #719 階段 2，SPEC §16.7。**只讀**：只由 daemon 快取的 `hosts[].baseline` 差異與嵌進 binary 的基準宣告檔（`ops/host-baseline/baseline.toml`）推算，不連主機、不讀主機上的檔、不寫任何東西。只給使用者（Bot、AGM role → 403 `user_only`）。
 
 ```json
-{ "host": "m4p", "checked_at": "2026-10-24T08:00:00.000Z", "stale": false, "plan_rev": "9f3c…",
+{ "host": "mac_builder", "checked_at": "2026-10-24T08:00:00.000Z", "stale": false, "plan_rev": "9f3c…",
   "actions": [
     { "id": "codex.config.toml:features.hooks", "action": "merge_key", "severity": "warn",
       "target": "codex/config.toml", "key": "features.hooks", "value": true },
@@ -2373,7 +2373,7 @@ issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 
 **apply** `POST /api/hosts/{name}/baseline/apply`，body `{"plan_rev": "9f3c…", "ids": ["codex.config.toml:features.hooks"]}`（`ids` 省略＝計畫裡全部 `merge_key`）：
 
 ```json
-{ "host": "m4p", "plan_rev": "9f3c…", "backup_id": "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", "error": null,
+{ "host": "mac_builder", "plan_rev": "9f3c…", "backup_id": "20261024T120000Z-0f8b2c1e-3a4d-4b5c-8d6e-7f8091a2b3c4", "error": null,
   "results": [ { "id": "codex.config.toml:features.hooks", "result": "applied" } ] }
 ```
 
@@ -2387,7 +2387,7 @@ issue #719 階段 3a，SPEC §16.7。**會寫主機上的檔**：只做 dry-run 
 **restore** `POST /api/hosts/{name}/baseline/restore`，body `{"backup_id": "20261024T120000Z-…"}`：
 
 ```json
-{ "host": "m4p", "backup_id": "20261024T120000Z-…", "files": [ { "file": "codex/config.toml", "result": "restored" } ] }
+{ "host": "mac_builder", "backup_id": "20261024T120000Z-…", "files": [ { "file": "codex/config.toml", "result": "restored" } ] }
 ```
 
 - sync 是 off 也能用。`backup_id` 不是固定格式 → 400 `invalid_backup_id`（不連主機）；404 不認得的主機，或 `{"reason":"backup_not_found"}`；同一個 HostFence，換代 409 `host_superseded`。
@@ -2435,7 +2435,7 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 ```json
 {"update_id":"01M4…","host":"local","kind":"codex","ok":true,"from":"0.155.1","to":"0.157.0","notices_updated":2,
  "restart":{"batch_id":"01M2…","total":2,"planned":[…],"skipped":[…]}}
-{"update_id":"01M5…","host":"m4p","kind":"claude","ok":true,"from":"2.1.281","to":"2.1.284","notices_updated":1,"restart":null,"restart_required":true,"restart_status":"manual"}
+{"update_id":"01M5…","host":"mac_builder","kind":"claude","ok":true,"from":"2.1.281","to":"2.1.284","notices_updated":1,"restart":null,"restart_required":true,"restart_status":"manual"}
 {"update_id":"01M4…","host":"local","kind":"codex","ok":false,"reason":"install_failed","error":"安裝指令失敗（exit status: 6）：curl: (6) …","from":"0.155.1"}
 ```
 - 安裝前版本已符合目標：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知；Claude 回 `restart:null`、`restart_required:true`，Codex 開該主機 scoped restart。兩者 `ok:true` 都帶 `already_installed:true`（`from`＝`to`）。Claude 磁碟版若高於快照目標，也走這條而不降版，並用實際版更新 Claude fleet 快照。
@@ -2768,8 +2768,8 @@ prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、�
 ```json
 { "items": [{ "kind": "claude", "latest_version": "2.1.283", "target_version": "2.1.284", "source_url": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
   "checked_at": "2026-09-28T02:00:00.000Z", "error": null, "has_update": true, "notified_version": "2.1.283",
-  "hosts": [{ "host": "local", "installed_version": "2.1.284", "error": null, "behind": false }, { "host": "m4p", "installed_version": "2.1.281", "error": null, "behind": true }],
-  "text": "claude 需安裝 2.1.284（local：2.1.284 → 2.1.284；m4p：2.1.281 → 2.1.284）：需安裝到共同版本…" }] }
+  "hosts": [{ "host": "local", "installed_version": "2.1.284", "error": null, "behind": false }, { "host": "mac_builder", "installed_version": "2.1.281", "error": null, "behind": true }],
+  "text": "claude 需安裝 2.1.284（local：2.1.284 → 2.1.284；mac_builder：2.1.281 → 2.1.284）：需安裝到共同版本…" }] }
 ```
 
 WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 item ＋ `notify`：`"update"`（這個上游版本第一次發現有主機落後；同一版只推一次，npm `latest` 退回舊版再推回來不重報）、`"error"`（從抓得到變成抓不到的那一輪；持續抓不到不重推）或 `null`（只是快照變了，例如磁碟追上了）。
@@ -3113,7 +3113,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex|agy|grok> [--si
 `issue`（`claim`／`release <n>`，見下）；輸出一律 JSON。
 
 **錯誤契約**：成功＝JSON 進 stdout、exit 0；任何失敗＝一個 JSON 物件 `{error, message, …}` 進 stderr、非 0 離開（含**用法錯誤**：缺參數、未知子命令、`--limit abc` 都是 `bad_args`／exit 2，不是 argparse 的說明文字；`--help` 照舊印說明、exit 0）。離開碼：2 參數／設定錯、3 取不到 token 或認領被占、4 daemon 回非 2xx（`http_error`，帶 `status`、`detail`）或 2xx 卻不是 JSON（`bad_response`，多半是別的服務佔了埠；不會把那頁 HTML 當成功印出去）、5 逾時／送出後斷線（mutation 是「送達未知」，不自動重試）、6 連不上 daemon。`detail` 最多 2000 字（前面擋了一頁 HTML 也不會整頁灌進輸出）。token 只在執行期向 `/api/session` 取（必須是單一段 `[A-Za-z0-9._~+/=-]`、≤512 字，否則 `no_token`），不進 argv、輸出或錯誤訊息。
-**參數驗證**：`--timeout` 要在 0～3600 秒之間（NaN、0、負數、inf 一律拒絕）；`--limit` 要在 1～1000；`bot_id`／`assignment_id`／`event_id` 不能是空的、含控制字元或超過 200 字——都在本機擋下、不打到 daemon。預設逾時 30 秒；daemon 這一側本來就跑很久的 `release-triage publish`（一串 gh 呼叫）預設放寬到 300 秒（`--timeout` 明講的照它）。`agm.py` 要能在 Python 3.9 跑（m4p 只有 3.9）：不用 `match`、執行期的 `X | Y`、`pairwise` 等 3.10+ 語法與 API，`agm_test.py` 的 `PythonThreeNineTest` 守著。
+**參數驗證**：`--timeout` 要在 0～3600 秒之間（NaN、0、負數、inf 一律拒絕）；`--limit` 要在 1～1000；`bot_id`／`assignment_id`／`event_id` 不能是空的、含控制字元或超過 200 字——都在本機擋下、不打到 daemon。預設逾時 30 秒；daemon 這一側本來就跑很久的 `release-triage publish`（一串 gh 呼叫）預設放寬到 300 秒（`--timeout` 明講的照它）。`agm.py` 要能在 Python 3.9 跑（mac_builder 只有 3.9）：不用 `match`、執行期的 `X | Y`、`pairwise` 等 3.10+ 語法與 API，`agm_test.py` 的 `PythonThreeNineTest` 守著。
 
 `agm issue claim <n> [--repo owner/name] [--bot 名] [--child 名] [--child-bot-id ID] [--worktree p] [--branch b]`（issue #425、#1980）**不經 daemon、不讀 `runtime.json`**，只呼叫 `gh`：
 在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的認領標記 `<!-- agm:issue-claim {"bot","claim_id","child","worktree","branch","at"} -->`。留言寫入後會用 REST 讀回全部留言確認結果；讀回失敗不回報成功，會追加指向本次標記的交回留言。認領與交回也會重讀留言，讓 `wip` label 對應有效認領；若持續競爭而 3 輪仍無法同步，回 `issue_claim_state_raced`／exit 1、`retryable:true`。有 `wip` 但沒有有效認領標記時，claim 會以 `issue_claim_state_unknown`／exit 3 停下；用 release 明確清理後才能重新派工。接手過期認領時不先補遺失的 label，避免這次修復更新 issue 時間、反而把舊認領刷新成有效。

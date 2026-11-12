@@ -1,5 +1,5 @@
 //! 共用 herdr session 的遠端主機（#709，SPEC §11.10）：`[[hosts]] shared_session = true`＝另一顆 daemon 也在用這個
-//! session（典型：agm-host 的 daemon 以遠端主機 `m4p` 接手 Mac 上的專案，而 Mac 自己的 daemon 本機就開著同一個
+//! session（典型：agm-host 的 daemon 以遠端主機 `mac_builder` 接手 Mac 上的專案，而 Mac 自己的 daemon 本機就開著同一個
 //! `agents-manager` session）。這台上這顆 daemon **只碰自己的東西**：
 //!
 //! - 「自己的」＝本 daemon 專案（沒移交出去的，#708）在這台的 workspace、它們 bot 活著的 run 的 workspace／tab／pane、

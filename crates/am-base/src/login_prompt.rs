@@ -4,7 +4,7 @@
 //! * **身份探測**（`identities[].logged_in === false`）——原本就在 host 快照裡，網頁自己看得到，這裡不重複。
 //! * **回合授權失敗**（這個模組）：claude 的 `StopFailure` 被分類成 `FailureReason::Auth`（或 `Stop` 的最後一句只剩
 //!   `Not logged in · Please run /login`）＝某個綁著身份的 bot 剛因為登入失效而失敗。**遠端 claude 的探測一律問不出「未登入」**
-//!   （ssh 沒有 GUI session、讀不到 Keychain，[`crate::tools::login_answer_to_cache`] 刻意丟掉），m4p 的 cc1 被登出時探測永遠不會說，
+//!   （ssh 沒有 GUI session、讀不到 Keychain，[`crate::tools::login_answer_to_cache`] 刻意丟掉），mac_builder 的 cc1 被登出時探測永遠不會說，
 //!   所以這條回合訊號是遠端唯一的來源；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。
 //!
 //! 記錄是記憶體帳 `(host, identity) → {since, via}`（不存 DB：daemon 重啟後身份探測與下一次授權失敗會補回來），

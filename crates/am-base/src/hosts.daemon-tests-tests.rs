@@ -473,8 +473,8 @@
     fn cfg() -> HostCfg {
         HostCfg { daemon_url: None,
             shared_session: false,
-            name: "m4p".into(),
-            ssh: "m4p@100.64.0.2".into(),
+            name: "mac_builder".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: 22,
             ssh_opts: vec![],
             herdr_session: "agents-manager".into(),
@@ -855,8 +855,8 @@
     fn target_epoch_follows_the_machine_not_the_settings() {
         let base = HostCfg { daemon_url: None,
             shared_session: false,
-            name: "m4p".into(),
-            ssh: "m4p@100.64.0.2".into(),
+            name: "mac_builder".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: 22,
             ssh_opts: vec![],
             herdr_session: "agents-manager".into(),
@@ -868,7 +868,7 @@
         assert_eq!(target_epoch(&HostCfg { daemon_url: None, remote_path: "/opt/bin".into(), ..base.clone() }), e, "remote_path 不換機器");
         assert_eq!(target_epoch(&HostCfg { daemon_url: None, ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()], ..base.clone() }), e, "ssh_opts 不換機器");
         assert_eq!(target_epoch(&HostCfg { daemon_url: None, shared_session: true, ..base.clone() }), e, "shared_session 不換機器");
-        assert_ne!(target_epoch(&HostCfg { daemon_url: None, ssh: "m4p@10.0.0.9".into(), ..base.clone() }), e, "ssh 目標換了就是另一台");
+        assert_ne!(target_epoch(&HostCfg { daemon_url: None, ssh: "mac_builder@10.0.0.9".into(), ..base.clone() }), e, "ssh 目標換了就是另一台");
         assert_ne!(target_epoch(&HostCfg { daemon_url: None, ssh_port: 2222, ..base.clone() }), e);
         assert_ne!(target_epoch(&HostCfg { daemon_url: None, herdr_session: "other".into(), ..base.clone() }), e);
     }

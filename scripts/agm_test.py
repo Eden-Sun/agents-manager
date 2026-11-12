@@ -1582,13 +1582,13 @@ class ExpertBotCommandsTest(CliCase):
 class ModelsCommandTest(CliCase):
     @patch.dict(os.environ, {"AM_BOT_ID": "bot-agm", "AM_BOT_TOKEN": "model-test-proof"})
     def test_remote_refresh_preserves_host_identity_and_bot_auth(self):
-        FakeDaemon.routes["GET /api/models"] = (200, {"host": "m4p", "models": [{"id": "test-model"}]})
-        out = self.ok("models", "--kind", "codex", "--host", "m4p", "--identity", "cc & 1", "--refresh")
-        self.assertEqual(out["host"], "m4p")
+        FakeDaemon.routes["GET /api/models"] = (200, {"host": "mac_builder", "models": [{"id": "test-model"}]})
+        out = self.ok("models", "--kind", "codex", "--host", "mac_builder", "--identity", "cc & 1", "--refresh")
+        self.assertEqual(out["host"], "mac_builder")
         self.assertEqual(len(FakeDaemon.seen), 1, "Bot must not bootstrap a User credential")
         req = FakeDaemon.seen[0]
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(req["path"]).query),
-                         {"kind": ["codex"], "host": ["m4p"], "identity": ["cc & 1"], "refresh": ["1"]})
+                         {"kind": ["codex"], "host": ["mac_builder"], "identity": ["cc & 1"], "refresh": ["1"]})
         self.assertEqual(req["bot_token"], "model-test-proof")
 
     def test_plain_read_does_not_request_refresh(self):
@@ -1604,7 +1604,7 @@ class ModelsCommandTest(CliCase):
             with self.subTest(status=status):
                 FakeDaemon.seen = []
                 FakeDaemon.routes["GET /api/models"] = (status, {"error": error})
-                err = self.bad("models", "--kind", "codex", "--host", "m4p", "--refresh")
+                err = self.bad("models", "--kind", "codex", "--host", "mac_builder", "--refresh")
                 self.assertEqual(err["status"], status)
                 self.assertEqual(err["detail"]["error"], error)
                 self.assertEqual(len(FakeDaemon.seen), 1)
@@ -2009,13 +2009,13 @@ class QuotaCommandTest(CliCase):
         FakeDaemon.routes["POST /api/quota/probe"] = (200, {"key": "claude", "quota": {"source": "claude-usage"}})
         out = self.ok("quota", "--probe", "--account", "cc0")
         self.assertEqual(out["quota"]["source"], "claude-usage")
-        self.ok("quota", "--probe", "--account", "cc1", "--host", "m4p")
+        self.ok("quota", "--probe", "--account", "cc1", "--host", "mac_builder")
         posts = [r for r in FakeDaemon.seen if r["method"] == "POST"]
         self.assertEqual(len(posts), 2)
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(posts[0]["path"]).query), {"kind": ["claude"], "account": ["cc0"]})
         self.assertEqual(
             urllib.parse.parse_qs(urllib.parse.urlsplit(posts[1]["path"]).query),
-            {"kind": ["claude"], "account": ["cc1"], "host": ["m4p"]},
+            {"kind": ["claude"], "account": ["cc1"], "host": ["mac_builder"]},
         )
         self.assertEqual(posts[0]["token"], TOKEN)
 
@@ -3832,7 +3832,7 @@ class CliHardeningTest(CliCase):
 
 
 class PythonThreeNineTest(unittest.TestCase):
-    """m4p 只有 Python 3.9：agm.py 不能用 3.10+ 的語法或 API（`match`、執行期的 `X | Y`、`pairwise`…）。"""
+    """mac_builder 只有 Python 3.9：agm.py 不能用 3.10+ 的語法或 API（`match`、執行期的 `X | Y`、`pairwise`…）。"""
 
     SRC = Path(agm.__file__).read_text(encoding="utf-8")
 

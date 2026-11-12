@@ -3773,12 +3773,12 @@ mod issue_17_tests {
         seen
     }
 
-    /// 把 fixture 的專案放到遠端主機 `m4p`（同一個假 herdr 當那台的 socket）。
+    /// 把 fixture 的專案放到遠端主機 `mac_builder`（同一個假 herdr 當那台的 socket）。
     async fn on_remote_host(f: &Fixture) {
         let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
-            name: "m4p".into(),
-            ssh: "m4p@100.64.0.2".into(),
+            name: "mac_builder".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: 22,
             ssh_opts: vec![],
             herdr_session: "test".into(),
@@ -3786,7 +3786,7 @@ mod issue_17_tests {
         };
         let sock = f.env.dir.join("data").join("herdr.sock");
         f.env.app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(sock)).await;
-        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&f.env.project_id).execute(&f.env.app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&f.env.project_id).execute(&f.env.app.db).await.unwrap();
     }
 
     async fn limit_hit_rows(app: &Arc<crate::state::App>) -> Vec<(String, Option<f64>, Option<String>)> {
@@ -3796,7 +3796,7 @@ mod issue_17_tests {
     /// #1467：終端備援把「畫面上的撞限橫幅」收成失敗回合時，也要把這次命中交給 Jev 做第二意見——跟
     /// `capture_codex_usage_notices` 同一個命中、同一個閘門。以前備援先下手：它寫了訊息、標了額度，之後
     /// `capture_codex_usage_notices` 看到的是「已寫過、回合也不在飛」，直接跳過，帳本一筆都沒有
-    /// （2026-10-03～10-10 的 12 則橫幅，本機與 m4p 都一樣，只有 1 筆 `limit_hit`）。遠端專案走同一條路。
+    /// （2026-10-03～10-10 的 12 則橫幅，本機與 mac_builder 都一樣，只有 1 筆 `limit_hit`）。遠端專案走同一條路。
     #[tokio::test]
     async fn a_banner_the_fallback_closes_a_remote_turn_on_is_put_to_jev_once() {
         let banner = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026 6:43 PM.";

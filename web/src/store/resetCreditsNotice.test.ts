@@ -7,11 +7,11 @@ const q = (available: number | null, stale = false) =>
   ({ reset_credits: available == null ? null : { available, title: null, expires_at: null, credits: [] }, stale }) as unknown as KindQuota
 
 test('第一次看到只當基準；張數變了才回報（增減都算）', () => {
-  const a = resetCreditChanges({}, { codex: q(1), 'm4p/codex:co0': q(2) })
+  const a = resetCreditChanges({}, { codex: q(1), 'mac_builder/codex:co0': q(2) })
   assert.deepEqual(a.changes, [])
-  assert.deepEqual(a.next, { codex: 1, 'm4p/codex:co0': 2 })
-  const b = resetCreditChanges(a.next, { codex: q(0), 'm4p/codex:co0': q(3) })
-  assert.deepEqual(b.changes, [{ key: 'codex', from: 1, to: 0 }, { key: 'm4p/codex:co0', from: 2, to: 3 }])
+  assert.deepEqual(a.next, { codex: 1, 'mac_builder/codex:co0': 2 })
+  const b = resetCreditChanges(a.next, { codex: q(0), 'mac_builder/codex:co0': q(3) })
+  assert.deepEqual(b.changes, [{ key: 'codex', from: 1, to: 0 }, { key: 'mac_builder/codex:co0', from: 2, to: 3 }])
   assert.deepEqual(resetCreditChanges(b.next, { codex: q(0) }).changes, [])
 })
 
@@ -25,7 +25,7 @@ test('讀不到、舊讀數、非 codex 不算數，也不覆蓋基準', () => {
 test('key 轉成人看得懂的名稱', () => {
   assert.equal(creditKeyLabel('codex'), 'codex')
   assert.equal(creditKeyLabel('codex:co0'), 'codex · co0')
-  assert.equal(creditKeyLabel('m4p/codex:co0'), 'codex · co0 @m4p')
+  assert.equal(creditKeyLabel('mac_builder/codex:co0'), 'codex · co0 @mac_builder')
 })
 
 const HOUR = 3600_000
@@ -48,7 +48,7 @@ const withCredits = (credits: { id: string; status?: string; hours: number | nul
   }) as unknown as KindQuota
 
 test('到期前 24 小時內才提示，24 小時外、已過期、沒到期日、已用掉的都不提示', () => {
-  const quota = { 'm4p/codex:co0': withCredits([
+  const quota = { 'mac_builder/codex:co0': withCredits([
     { id: 'soon', hours: 23 },
     { id: 'later', hours: 25 },
     { id: 'gone', hours: -1 },
@@ -57,7 +57,7 @@ test('到期前 24 小時內才提示，24 小時外、已過期、沒到期日�
   ]) }
   const { due } = resetCreditExpiries({}, quota, NOW)
   assert.deepEqual(due.map((d) => d.id), ['soon'])
-  assert.match(creditExpiryText(due[0]), /codex · co0 @m4p 的重置券『Full reset』.*到期.*Reset usage/)
+  assert.match(creditExpiryText(due[0]), /codex · co0 @mac_builder 的重置券『Full reset』.*到期.*Reset usage/)
 })
 
 test('同一張券（同 id）只提示一次：已記的不再提示，進入窗口才提示', () => {

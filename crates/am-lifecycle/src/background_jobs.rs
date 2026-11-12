@@ -13,7 +13,7 @@
 //!
 //! **常駐服務不算**（2026-09-29 使用者：wits-ops 起了 dev server 就一直標「背景執行中」）：claude 的背景 shell
 //! 子樹裡有程序在 listen TCP port，就是 bot 起的服務（`next dev`、`vite`…），工作其實做完了。畫面數到 N > 0 時才去
-//! 那台主機看 pane 的行程樹（本機直接讀、遠端走既有 ssh；m4p 真機：`zsh -c source …/shell-snapshots/snapshot-zsh-…`
+//! 那台主機看 pane 的行程樹（本機直接讀、遠端走既有 ssh；mac_builder 真機：`zsh -c source …/shell-snapshots/snapshot-zsh-…`
 //! 底下的 node listen `*:3200`），扣掉這種 shell。讀不到就不扣（寧可多標，不要把真的在跑的工作藏起來）。
 //!
 //! **跑了多久**（issue #774）：claude 2.1.288 起，終端 session 的背景指令不再有時間上限，卡住或忘了收的背景 shell 會讓
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_background_shell_serving_a_port_is_a_service_not_a_job() {
-        // m4p 真機的形狀（pid 改小）：pane zsh → claude → 兩個背景 shell，一個底下的 node listen 3200、一個在跑 check。
+        // mac_builder 真機的形狀（pid 改小）：pane zsh → claude → 兩個背景 shell，一個底下的 node listen 3200、一個在跑 check。
         let ps = "\
   10     1 -zsh
   11    10 claude --dangerously-skip-permissions

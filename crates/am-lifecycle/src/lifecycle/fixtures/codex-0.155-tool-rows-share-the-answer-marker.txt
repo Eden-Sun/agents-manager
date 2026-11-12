@@ -113,7 +113,7 @@
 
 • Ran rtk proxy herdr pane read w168:pG9 --source recent --lines 20 --format text
   └ env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
-    m4p@m4p agents-manager % env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
+    mac_builder@mac_builder agents-manager % env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
     … +5 lines (ctrl + t to view transcript)
     de_challenge_method=S256&state=Vyyk08DiSMY5g7BA8oI5xNDQnjV2BlGfpm8huTriPlQ
     Paste code here if prompted >
@@ -129,7 +129,7 @@
 
 • Ran rtk proxy herdr pane read w168:pG9 --source recent --lines 8 --format text
   └ env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
-    m4p@m4p agents-manager % env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
+    mac_builder@mac_builder agents-manager % env CLAUDE_CONFIG_DIR=/Users/me/.claude-cc1 claude auth login
     … +5 lines (ctrl + t to view transcript)
     de_challenge_method=S256&state=Vyyk08DiSMY5g7BA8oI5xNDQnjV2BlGfpm8huTriPlQ
     Paste code here if prompted >

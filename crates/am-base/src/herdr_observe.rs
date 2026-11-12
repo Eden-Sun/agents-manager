@@ -180,9 +180,9 @@ mod tests {
     #[test]
     fn remote_argv_runs_the_same_cli_over_ssh_with_the_remote_socket() {
         let script = remote_script("export PATH='/opt/bin':\"$PATH\"; ", "/home/u/.config/herdr/herdr.sock", "w2:p1", 80, 24);
-        let c = remote_cmd(&["-S".into(), "/tmp/ctl".into()], "m4p", &script);
+        let c = remote_cmd(&["-S".into(), "/tmp/ctl".into()], "mac_builder", &script);
         assert_eq!(c.program, "ssh");
-        assert_eq!(&c.args[..4], &["-T", "-S", "/tmp/ctl", "m4p"]);
+        assert_eq!(&c.args[..4], &["-T", "-S", "/tmp/ctl", "mac_builder"]);
         assert!(c.args[4].contains("HERDR_SOCKET_PATH='/home/u/.config/herdr/herdr.sock' herdr terminal session observe 'w2:p1' --cols 80 --rows 24"), "{}", c.args[4]);
         assert!(c.env.is_empty());
     }

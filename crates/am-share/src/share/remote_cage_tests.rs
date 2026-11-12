@@ -425,10 +425,10 @@ async fn creating_a_remote_share_bot_over_http_refuses_unknown_and_unreachable_h
 #[test]
 fn the_remote_cage_path_expands_home_and_has_no_shim_dir() {
     assert_eq!(
-        cage::remote_cage_path("$HOME/.local/bin:/opt/x", "/home/me"),
-        "/home/me/.local/bin:/opt/x:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        cage::remote_cage_path("$HOME/.local/bin:/opt/x", "/home/mac_builder"),
+        "/home/mac_builder/.local/bin:/opt/x:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     );
-    assert_eq!(cage::remote_cage_path("", "/home/me"), "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    assert_eq!(cage::remote_cage_path("", "/home/mac_builder"), "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 }
 
 /// 遠端分享 bot 建立失敗回滾時，只清理遠端資料夾，絕不遞迴刪除本機同路徑的資料夾（#982）。

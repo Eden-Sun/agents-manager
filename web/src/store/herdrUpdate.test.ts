@@ -64,14 +64,14 @@ const bot = (id: string, project_id: string, parent_bot_id: string | null = null
 const run = { state: 'running' } as Run
 
 test('計畫：本機落後才可按；遠端、shared 停用並講原因；名單只算那台在跑的', () => {
-  const bots = [bot('top', 'p-local'), bot('kid', 'p-local', 'top'), bot('idle', 'p-local'), bot('far', 'p-m4p')]
+  const bots = [bot('top', 'p-local'), bot('kid', 'p-local', 'top'), bot('idle', 'p-local'), bot('far', 'p-mac_builder')]
   const runs = { top: run, kid: run, idle: null, far: run }
-  const hostOf = (b: Bot) => (b.project_id === 'p-m4p' ? 'm4p' : 'local')
+  const hostOf = (b: Bot) => (b.project_id === 'p-mac_builder' ? 'mac_builder' : 'local')
   const both = item([
     { host: 'local', installedVersion: '0.9.1', error: null, behind: true },
-    { host: 'm4p', installedVersion: '0.9.1', error: null, behind: true },
+    { host: 'mac_builder', installedVersion: '0.9.1', error: null, behind: true },
   ])
-  const p = herdrUpdatePlan(both, new Set(['m4p']), bots, runs, hostOf)!
+  const p = herdrUpdatePlan(both, new Set(['mac_builder']), bots, runs, hostOf)!
   assert.deepEqual([p.host, p.from, p.blockedWhy], ['local', '0.9.1', null])
   assert.deepEqual(p.willResume.map((b) => b.name), ['top'])
   assert.deepEqual(p.childrenLost, [{ botId: 'kid', name: 'kid', parentName: 'top' }])
@@ -81,18 +81,18 @@ test('計畫：本機落後才可按；遠端、shared 停用並講原因；名�
   const remoteOnly = herdrUpdatePlan(
     item([
       { host: 'local', installedVersion: '0.9.3', error: null, behind: false },
-      { host: 'm4p', installedVersion: '0.9.1', error: null, behind: true },
+      { host: 'mac_builder', installedVersion: '0.9.1', error: null, behind: true },
     ]),
     new Set(),
     bots,
     runs,
     hostOf,
   )!
-  assert.deepEqual([remoteOnly.host, remoteOnly.from, remoteOnly.blockedWhy], ['m4p', '0.9.1', null])
+  assert.deepEqual([remoteOnly.host, remoteOnly.from, remoteOnly.blockedWhy], ['mac_builder', '0.9.1', null])
   assert.deepEqual(remoteOnly.willResume.map((b) => b.name), ['far'], '名單算那台在跑的頂層 Bot')
   const sharedOnly = herdrUpdatePlan(
-    item([{ host: 'm4p', installedVersion: '0.9.1', error: null, behind: true }]),
-    new Set(['m4p']),
+    item([{ host: 'mac_builder', installedVersion: '0.9.1', error: null, behind: true }]),
+    new Set(['mac_builder']),
     bots,
     runs,
     hostOf,

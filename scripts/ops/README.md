@@ -959,7 +959,7 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 
 ## project-transfer (issue #710)
 
-Hands a single project over from one daemon to another (e.g. Mac → agm-host, taken over by the remote host `m4p`). Not
+Hands a single project over from one daemon to another (e.g. Mac → agm-host, taken over by the remote host `mac_builder`). Not
 installed; run it from a checkout. The flow, rewrite rules and rejection conditions are in SPEC §11.9. `export` reads the
 source DB read-only (it takes a backup snapshot first and deletes it after reading). `import` needs the **target daemon
 stopped** (it takes the same `daemon.lock`); run `--dry-run` first to see the summary. For a project that will run on the

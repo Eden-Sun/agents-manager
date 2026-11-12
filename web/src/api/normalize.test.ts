@@ -86,7 +86,7 @@ test('#699：同名但不同 host 的 identities 都保留', () => {
   const identities = toState({
     identities: [
       { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-1' } },
-      { name: 'cc1', kind: 'claude', host: 'm4p', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
+      { name: 'cc1', kind: 'claude', host: 'mac_builder', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
     ],
   }).identities
 
@@ -94,7 +94,7 @@ test('#699：同名但不同 host 的 identities 都保留', () => {
     identities.map(({ name, host, env }) => ({ name, host, env })),
     [
       { name: 'cc1', host: null, env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-1' } },
-      { name: 'cc1', host: 'm4p', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
+      { name: 'cc1', host: 'mac_builder', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
     ],
   )
 })

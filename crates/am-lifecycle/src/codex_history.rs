@@ -906,17 +906,17 @@ done
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, run) = codex_bot_and_run(&env, Some("thread-1")).await;
-        sqlx::query("UPDATE projects SET host = 'm4p' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host = 'mac_builder' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
 
         app.codex_history.set(Some(Arc::new(StubSource::local_only())));
         assert!(eligible(&app, &bot, &run).await.is_none(), "只支援本機的 source 不碰遠端 bot");
-        assert!(!AppServerSource.supports("m4p"));
+        assert!(!AppServerSource.supports("mac_builder"));
         assert!(AppServerSource.supports(LOCAL_HOST));
 
         let stub = StubSource::new();
         app.codex_history.set(Some(Arc::new(stub.clone())));
         let (_, b) = eligible(&app, &bot, &run).await.unwrap();
-        assert_eq!((b.host.as_str(), b.codex_home.as_ref(), b.thread_id.as_str()), ("m4p", None, "thread-1"));
+        assert_eq!((b.host.as_str(), b.codex_home.as_ref(), b.thread_id.as_str()), ("mac_builder", None, "thread-1"));
         // 同名 thread 在本機（另一個 CODEX_HOME）的歷史不會跑到遠端這份。
         let local = Binding { host: LOCAL_HOST.into(), codex_home: Some(PathBuf::from("/srv/codex-a")), thread_id: "thread-1".into() };
         stub.push_user(&local, "t1", "u-local", "same text");

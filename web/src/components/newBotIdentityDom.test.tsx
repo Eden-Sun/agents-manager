@@ -164,7 +164,7 @@ test('claude-api：只剩名稱／強度／fast，送出的 body 不帶身份與
 })
 
 test('claude-api 本機與遠端專案都能建：遠端專案那顆 kind 按鈕可按', async () => {
-  useStore.setState({ projects: [{ ...project('p1'), host: 'm4p' }], hosts: [{ name: 'm4p', connected: true }], localTools: toolsWithCodex(true) } as never)
+  useStore.setState({ projects: [{ ...project('p1'), host: 'mac_builder' }], hosts: [{ name: 'mac_builder', connected: true }], localTools: toolsWithCodex(true) } as never)
   await mount(<Sidebar />)
   await settle()
   await click([...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!)

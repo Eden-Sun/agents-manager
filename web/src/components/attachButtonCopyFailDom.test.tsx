@@ -40,7 +40,7 @@ test('複製失敗：彈出的說明不寫「已複製到剪貼簿」，按鈕�
   doc.execCommand = () => false
   try {
     await withCopyTimer(async () => {
-      await mount(<AttachButton command="herdr --remote m4p --session agents-manager" />)
+      await mount(<AttachButton command="herdr --remote mac_builder --session agents-manager" />)
       await click(document.querySelector<HTMLButtonElement>('.attach-btn')!)
       await pump()
       const pop = document.querySelector<HTMLElement>('.attach-pop')
@@ -62,7 +62,7 @@ test('複製成功：說明照寫「已複製到剪貼簿」', async () => {
   doc.execCommand = () => true
   try {
     await withCopyTimer(async () => {
-      await mount(<AttachButton command="herdr --remote m4p --session agents-manager" />)
+      await mount(<AttachButton command="herdr --remote mac_builder --session agents-manager" />)
       await click(document.querySelector<HTMLButtonElement>('.attach-btn')!)
       await pump()
       const hint = document.querySelector('.attach-pop .attach-hint')?.textContent ?? ''

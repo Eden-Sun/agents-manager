@@ -16,9 +16,9 @@ test('被終端折行的 URL：每一段都指向接回來的完整 URL', () => 
 })
 
 test('沒塞滿寬度就不接，下一行的提示字元不會被吃掉', () => {
-  const rows = termPieces('see https://a.example/x\nm4p@m4p %', 80)
+  const rows = termPieces('see https://a.example/x\nmac_builder@mac_builder %', 80)
   assert.deepEqual(urlsOf(rows), [['https://a.example/x', 'https://a.example/x']])
-  assert.equal(rows[1][0].text, 'm4p@m4p %')
+  assert.equal(rows[1][0].text, 'mac_builder@mac_builder %')
 })
 
 test('連續折兩行，最後一段沒塞滿就停', () => {
@@ -67,7 +67,7 @@ test('登入畫面：URL 在 93 欄折成 5 行，同一份快照裡另有 618 �
   assert.deepEqual(chunks.map((c) => c.length), [93, 93, 93, 93, 78], '這條測資本來就要折成 5 行')
   const lines = [
     // `recent_unwrapped` 把 shell 指令接回原長，比 URL 的折行寬度長得多。
-    `m4p@m4p rt % claude --dangerously-skip-permissions --settings ${'x'.repeat(556)}`,
+    `mac_builder@mac_builder rt % claude --dangerously-skip-permissions --settings ${'x'.repeat(540)}`,
     '',
     " Browser didn't open? Use the url below to sign in (c to copy)",
     '',
@@ -89,12 +89,12 @@ test('登入畫面：URL 在 93 欄折成 5 行，同一份快照裡另有 618 �
 
 test('已知 columns：最長但沒滿欄的 URL 不把下一行提示字元接進去', () => {
   const rows = termPieces(
-    'm4p@m4p % git push\nremote: Create a pull request: https://github.com/o/r/pull/new/feature-x\nm4p@m4p % ',
+    'mac_builder@mac_builder % git push\nremote: Create a pull request: https://github.com/o/r/pull/new/feature-x\nmac_builder@mac_builder % ',
     120,
   )
   assert.deepEqual(urlsOf(rows), [['https://github.com/o/r/pull/new/feature-x', 'https://github.com/o/r/pull/new/feature-x']])
   assert.equal(rows[2][0].url, null)
-  assert.match(rows[2][0].text, /^m4p@m4p/)
+  assert.match(rows[2][0].text, /^mac_builder@mac_builder/)
 })
 
 test('句尾標點與不成對的括號混在一起：一起剝掉，不留下句點', () => {
@@ -117,9 +117,9 @@ test('URL 剛好在行尾結束、下一行是新的一行：不接（不是每�
   // 下一行也不是同寬的續行 → 不能黏。
   const l1 = 'open https://a.example/' + 'q'.repeat(37)
   assert.equal(l1.length, 60)
-  const rows = termPieces(['x'.repeat(185), l1, 'm4p@m4p %'].join('\n'), 185)
+  const rows = termPieces(['x'.repeat(185), l1, 'mac_builder@mac_builder %'].join('\n'), 185)
   assert.deepEqual(urlsOf(rows), [[l1.slice(5), l1.slice(5)]])
-  assert.equal(rows[2][0].text, 'm4p@m4p %')
+  assert.equal(rows[2][0].text, 'mac_builder@mac_builder %')
 })
 
 /** 2026-10-05 實測：agy 登入的 OAuth 網址（213 欄 pane 折在 212），續列開頭是 agy 的 1 格邊界。`herdr pane read --source visible` 原樣。 */

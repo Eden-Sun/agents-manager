@@ -19,7 +19,7 @@ const missing = new Set<string>()
 const onMissing = (key: string) => missing.add(key)
 
 type NodeVars = Readonly<Record<string, ReactNode>>
-/** 句子裡塞元件：`t.x('已連線到 {host}', { host: <code>m4p</code> })`。`vars` 的值可以是任何 React 節點。 */
+/** 句子裡塞元件：`t.x('已連線到 {host}', { host: <code>mac_builder</code> })`。`vars` 的值可以是任何 React 節點。 */
 const nodes = (lang: Lang, key: string, vars: NodeVars): ReactNode =>
   createElement(Fragment, null, ...translateParts(lang, EN, key, vars, onMissing).map((p, i) => createElement(Fragment, { key: i }, p)))
 

@@ -156,8 +156,8 @@ def seed_supervisor(conn):
     x(note, ("n-handoff", "AGM", "handoff", "交接", T0))
     x(note, ("n-retire", B1, "child_retirement_hold", "{}", T0))
     inc = "INSERT INTO supervisor_incidents (id, supervisor_id, kind, resource, status, first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?)"
-    x(inc, ("ic-open", "AGM", "host_disconnected", "m4p", "open", T0, T0))
-    x(inc, ("ic-done", "AGM", "host_disconnected", "m4p", "resolved", T0, T0))
+    x(inc, ("ic-open", "AGM", "host_disconnected", "mac_builder", "open", T0, T0))
+    x(inc, ("ic-done", "AGM", "host_disconnected", "mac_builder", "resolved", T0, T0))
     apv = "INSERT INTO supervisor_approvals (id, supervisor_id, requester, purpose, scope, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)"
     for aid, st in (("ap-pending", "pending"), ("ap-approved", "approved"), ("ap-consumed", "consumed"), ("ap-denied", "denied")):
         x(apv, (aid, "AGM", "fixer", "rebuild", "daemon", st, T0, T0))
@@ -184,8 +184,8 @@ TARGET_CONFIG = """[server]
 listen = "127.0.0.1:7788"
 
 [[hosts]]
-name = "m4p"
-ssh = "m4p"
+name = "mac_builder"
+ssh = "mac_builder"
 
 [[projects]]
 id = "01TARGETPROJ00000000000R01"
@@ -259,7 +259,7 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(os.stat(self.bundle).st_mode & 0o777, 0o600)
 
     def imp(self, *extra, check=True):
-        return run("import", "--bundle", self.bundle, "--host", "m4p", "--config", self.cfg, *extra, env=self.env, check=check)
+        return run("import", "--bundle", self.bundle, "--host", "mac_builder", "--config", self.cfg, *extra, env=self.env, check=check)
 
     def tgt(self):
         c = sqlite3.connect(self.tgt_path)
@@ -296,7 +296,7 @@ class ProjectTransferTest(unittest.TestCase):
         c.execute("PRAGMA foreign_keys = ON")
         self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
         p = c.execute("SELECT * FROM projects WHERE id = ?", (PID,)).fetchone()
-        self.assertEqual((p["host"], p["path"], p["label"]), ("m4p", "/Users/me/project/hub", "智選hub"))
+        self.assertEqual((p["host"], p["path"], p["label"]), ("mac_builder", "/Users/me/project/hub", "智選hub"))
         src = sqlite3.connect(self.src_path)
         for bid in (B1, C1):
             old = src.execute("SELECT hook_token FROM bots WHERE id = ?", (bid,)).fetchone()[0]
@@ -318,7 +318,7 @@ class ProjectTransferTest(unittest.TestCase):
         turns = dict(c.execute("SELECT id, status FROM turns").fetchall())
         self.assertEqual(turns, {"t-done": "completed", "t-fly": "failed", "t-queue": "failed"})
         a = c.execute("SELECT * FROM attachments WHERE id = 'a-ok'").fetchone()
-        self.assertEqual(a["host"], "m4p")
+        self.assertEqual(a["host"], "mac_builder")
         self.assertEqual(a["agent_path"], self.att, "agent 讀的仍是來源機器上的路徑")
         self.assertEqual(a["local_path"], os.path.join(self.tgt_dir, "attachments", B1, "shot.png"))
         self.assertEqual(slurp(a["local_path"]), b"\x89PNG")
@@ -333,7 +333,7 @@ class ProjectTransferTest(unittest.TestCase):
         projs = {p["id"]: p for p in cfg["projects"]}
         self.assertEqual(set(projs), {"01TARGETPROJ00000000000R01", PID})
         hub = projs[PID]
-        self.assertEqual((hub["host"], hub["path"], hub["label"]), ("m4p", "/Users/me/project/hub", "智選hub"))
+        self.assertEqual((hub["host"], hub["path"], hub["label"]), ("mac_builder", "/Users/me/project/hub", "智選hub"))
         self.assertEqual([b["id"] for b in hub["bots"]], [B1], "只寫 user bot；child 只在 DB")
         b = hub["bots"][0]
         self.assertEqual((b["name"], b["kind"], b["model"], b["identity"], b["autostart"]),
@@ -360,7 +360,7 @@ class ProjectTransferTest(unittest.TestCase):
         """Import resets projects.handed_off_to; a pre-existing config row must not restore the old owner on restart."""
         self.export()
         put(self.cfg, TARGET_CONFIG + (
-            '\n[[projects]]\nid = "%s"\npath = "/Users/me/project/hub"\nlabel = "智選hub"\nhost = "m4p"\n'
+            '\n[[projects]]\nid = "%s"\npath = "/Users/me/project/hub"\nlabel = "智選hub"\nhost = "mac_builder"\n'
             'handed_off_to = "previous-owner"\n\n[[projects.bots]]\nid = "%s"\nname = "hub-main"\nkind = "claude"\n'
         ) % (PID, B1))
 
@@ -402,7 +402,7 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertIn("[[hosts]]", p.stderr)
         c = self.tgt()
         c.execute("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)",
-                  ("01TARGETPROJ00000000000X01", "/Users/me/project/hub", "dup", "m4p", T0))
+                  ("01TARGETPROJ00000000000X01", "/Users/me/project/hub", "dup", "mac_builder", T0))
         c.commit()
         c.close()
         db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
@@ -459,7 +459,7 @@ class ProjectTransferTest(unittest.TestCase):
         做不到就整批拒絕——DB 一個字不動。"""
         self.export()
         put(self.cfg, slurp(self.cfg, "r") + (
-            '\n[[projects]]\nid = "%s"\npath = "/Users/me/project/hub"\nlabel = "智選hub"\nhost = "m4p"\n' % PID))
+            '\n[[projects]]\nid = "%s"\npath = "/Users/me/project/hub"\nlabel = "智選hub"\nhost = "mac_builder"\n' % PID))
         db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
         p = self.imp(check=False)
         self.assertNotEqual(p.returncode, 0, p.stdout)
@@ -469,7 +469,7 @@ class ProjectTransferTest(unittest.TestCase):
     def test_workspace_id_follows_the_host_it_was_made_on(self):
         """herdr 的 workspace id 是各台機器自己的短 id（`w1`、`wV`…）：帶到另一台 herdr 上可能剛好是**別的**
         workspace，daemon 的 `workspace_get` 看到「存在」就把這個專案的 bot 開在不相干的 workspace 裡。
-        專案改在目標本機跑（`--host local`）就要清掉；`--host m4p`（來源機器仍是那台）原樣保留。"""
+        專案改在目標本機跑（`--host local`）就要清掉；`--host mac_builder`（來源機器仍是那台）原樣保留。"""
         self.local_import(transcripts_here=True)
         c = self.tgt()
         self.assertIsNone(c.execute("SELECT workspace_id FROM projects WHERE id = ?", (PID,)).fetchone()[0],
@@ -634,7 +634,7 @@ class ProjectTransferTest(unittest.TestCase):
 
     def test_config_with_daemon_empty_projects_array(self):
         # daemon 在專案清單為空時寫的是頂層 `projects = []`；直接 append `[[projects]]` 是 duplicate key（智選hub 實測）。
-        put(self.cfg, "projects = []\n\n[server]\nlisten = \"127.0.0.1:7788\"\n\n[[hosts]]\nname = \"m4p\"\nssh = \"m4p\"\n\n[panes]\nidle_close_secs = 600\n")
+        put(self.cfg, "projects = []\n\n[server]\nlisten = \"127.0.0.1:7788\"\n\n[[hosts]]\nname = \"mac_builder\"\nssh = \"mac_builder\"\n\n[panes]\nidle_close_secs = 600\n")
         self.export()
         cfg0 = digest(self.cfg)
         self.assertEqual(json.loads(self.imp("--dry-run").stdout)["config"], "would append")
@@ -645,12 +645,12 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual([p["id"] for p in cfg["projects"]], [PID])
         self.assertNotIn("projects = []", text)
         self.assertEqual((cfg["server"], cfg["panes"], [h["name"] for h in cfg["hosts"]]),
-                         ({"listen": "127.0.0.1:7788"}, {"idle_close_secs": 600}, ["m4p"]))
+                         ({"listen": "127.0.0.1:7788"}, {"idle_close_secs": 600}, ["mac_builder"]))
         self.assertEqual(json.loads(self.imp().stdout)["config"], "already present")
         self.assertEqual(slurp(self.cfg, "r"), text)
 
     def test_refuses_config_whose_projects_cannot_take_an_append(self):
-        hosts = '\n[[hosts]]\nname = "m4p"\nssh = "m4p"\n'
+        hosts = '\n[[hosts]]\nname = "mac_builder"\nssh = "mac_builder"\n'
         cases = {
             # inline 陣列：append `[[projects]]` 直接 duplicate key，解析不了。
             "inline": 'projects = [{ id = "01TARGETPROJ00000000000R01", path = "/home/u/r", label = "r" }]\n' + hosts,

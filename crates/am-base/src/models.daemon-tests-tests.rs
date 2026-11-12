@@ -412,7 +412,7 @@ gemini-4-argon\n";
         assert_eq!(grok_effort_from_screen(screen).as_deref(), Some("high"));
     }
 
-    /// Real `settings.json` shapes seen on this machine and on m4p. 「廠推薦」（`default_effort`）只看模型、不看帳號；
+    /// Real `settings.json` shapes seen on this machine and on mac_builder. 「廠推薦」（`default_effort`）只看模型、不看帳號；
     /// 帳號 settings.json 記住的值另放 `account_default_effort`，且只在跟內建不同時才有（#1679）。
     #[test]
     fn claude_vendor_default_ignores_the_account_and_the_account_value_is_its_own_field() {
@@ -437,7 +437,7 @@ gemini-4-argon\n";
         let m = claude_static_models(only_global.0.as_deref(), &only_global.1, None);
         assert_eq!(field(&m, "opus", "account_default_effort"), Value::Null);
 
-        // m4p：沒有頂層 `effortLevel`，只有 fable 的列。
+        // mac_builder：沒有頂層 `effortLevel`，只有 fable 的列。
         let (global2, per_model2) =
             parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
         assert_eq!(global2, None);

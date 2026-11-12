@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn shell_keys_take_host_and_pane_and_nothing_else() {
         assert_eq!(shell_key("local", "w1:p9"), "shell:local/w1:p9");
-        assert!(valid_key(&shell_key("m4p", "ws-0:p1")));
+        assert!(valid_key(&shell_key("mac_builder", "ws-0:p1")));
         assert!(valid_key("shell:build.host_1/w1:p2"));
         for bad in ["shell:", "shell:local", "shell:/w1:p1", "shell:local/", "shell:a/b/c", "shell:a b/c", "shell:é/c", &format!("shell:h/{}", "p".repeat(200))] {
             assert!(!valid_key(bad), "{bad:?}");

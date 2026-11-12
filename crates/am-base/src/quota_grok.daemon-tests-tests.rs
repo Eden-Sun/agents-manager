@@ -260,7 +260,7 @@
     /// #892：移除／改指主機要把那台的 grok 探測退避清掉，其他主機與本機不受影響。
     #[test]
     fn forgetting_a_host_drops_only_its_grok_backoff() {
-        let host = format!("m4p-{}", crate::db::ulid());
+        let host = format!("mac-builder-{}", crate::db::ulid());
         let other = format!("other-{}", crate::db::ulid());
         let mine = format!("{host}/grok");
         let theirs = format!("{other}/grok");

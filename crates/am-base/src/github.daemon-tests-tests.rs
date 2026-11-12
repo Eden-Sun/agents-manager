@@ -113,7 +113,7 @@
         let first = registry.claim(Path::new("/app-a"), "local").unwrap();
 
         assert!(registry.claim(Path::new("/app-a"), "local").is_none(), "one host scan per app may be in flight");
-        let other_host = registry.claim(Path::new("/app-a"), "m4p").expect("different host can scan");
+        let other_host = registry.claim(Path::new("/app-a"), "mac_builder").expect("different host can scan");
         let other_app = registry.claim(Path::new("/app-b"), "local").expect("different app can scan");
 
         drop(first);

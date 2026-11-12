@@ -28,9 +28,9 @@ function seed(status: IdentityStatus) {
   resetStoreForTest()
   calls.length = 0
   useStore.setState({
-    projects: [{ id: 'p1', label: 'p', path: '/p', host: 'm4p' } as Project],
+    projects: [{ id: 'p1', label: 'p', path: '/p', host: 'mac_builder' } as Project],
     bots: [{ id: 'b1', name: 'ops', project_id: 'p1', kind: 'claude', identity: 'cc1' } as Bot],
-    hosts: [{ name: 'm4p', connected: true, identity_status: { cc1: status } } as unknown as Host],
+    hosts: [{ name: 'mac_builder', connected: true, identity_status: { cc1: status } } as unknown as Host],
     connected: true,
     loginIdentity: async (host: string, identity: string) => {
       calls.push([host, identity])
@@ -42,7 +42,7 @@ function seed(status: IdentityStatus) {
 const banner = () => document.querySelector<HTMLElement>('.login-prompt-banner')
 const setStatus = (status: IdentityStatus) =>
   act(async () => {
-    useStore.setState({ hosts: [{ name: 'm4p', connected: true, identity_status: { cc1: status } } as unknown as Host] })
+    useStore.setState({ hosts: [{ name: 'mac_builder', connected: true, identity_status: { cc1: status } } as unknown as Host] })
   })
 
 test('已登入：沒有提示條', async () => {
@@ -51,14 +51,14 @@ test('已登入：沒有提示條', async () => {
   assert.equal(banner(), null)
 })
 
-test('遠端探測問不出未登入、但回合授權失敗：出現「cc1（m4p）已登出」，點「立即登入」打開那個身份的登入', async () => {
+test('遠端探測問不出未登入、但回合授權失敗：出現「cc1（mac_builder）已登出」，點「立即登入」打開那個身份的登入', async () => {
   seed(st({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } }))
   await mount(<LoginPromptBanner />)
   assert.ok(banner(), '出現提示條')
-  assert.match(banner()!.textContent ?? '', /cc1（m4p）已登出/)
+  assert.match(banner()!.textContent ?? '', /cc1（mac_builder）已登出/)
   assert.match(banner()!.textContent ?? '', /1 顆 bot/)
   await click(document.querySelector<HTMLButtonElement>('.lpb-login')!)
-  assert.deepEqual(calls, [['m4p', 'cc1']])
+  assert.deepEqual(calls, [['mac_builder', 'cc1']])
 })
 
 test('先關掉：同一次登出不再出現；登入成功後提示消失，下一次被登出又會提示', async () => {
@@ -91,7 +91,7 @@ test('沒有 bot 綁著這個身份、或主機連不上：不提示', async () 
   await act(async () => {
     useStore.setState({
       bots: [{ id: 'b1', name: 'ops', project_id: 'p1', kind: 'claude', identity: 'cc1' } as Bot],
-      hosts: [{ name: 'm4p', connected: false, identity_status: { cc1: st({ logged_in: false }) } } as unknown as Host],
+      hosts: [{ name: 'mac_builder', connected: false, identity_status: { cc1: st({ logged_in: false }) } } as unknown as Host],
     })
   })
   assert.equal(banner(), null)
@@ -104,14 +104,14 @@ test('按「立即登入」撞 409 identity_login_in_progress（帶既有登入 
   const realFetch = globalThis.fetch
   globalThis.fetch = (async () =>
     new Response(
-      JSON.stringify({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }),
+      JSON.stringify({ error: 'conflict', reason: 'identity_login_in_progress', host: 'mac_builder', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }),
       { status: 409 },
     )) as typeof fetch
   try {
     await mount(<LoginPromptBanner />)
     await click(document.querySelector<HTMLButtonElement>('.lpb-login')!)
     const view = useStore.getState().shellView
-    assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'm4p', paneId: 'w9:p9' }, '打開既有登入終端')
+    assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'mac_builder', paneId: 'w9:p9' }, '打開既有登入終端')
     assert.equal(useStore.getState().notices.some((n) => n.kind === 'error'), false, '不跳錯誤 toast')
   } finally {
     globalThis.fetch = realFetch

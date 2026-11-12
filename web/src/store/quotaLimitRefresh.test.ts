@@ -61,25 +61,25 @@ test('沒有先前快取的 key：第一次收到就算有撞限也不重抓', a
 
 test('整包 {kinds} 裡只有一筆撞限變了：只重抓一次；遠端 key 用完整的 <host>/ 前綴比對', async () => {
   seed(quota(40))
-  useStore.setState({ quota: { ...useStore.getState().quota, 'm4p/codex': quota(10) as never } })
+  useStore.setState({ quota: { ...useStore.getState().quota, 'mac_builder/codex': quota(10) as never } })
   dispatchFrameForTest({
     type: 'quota_updated',
     data: {
       kinds: {
         codex: quota(45),
-        'm4p/codex': quota(12, hit('2026-10-29T11:24:00Z')),
+        'mac_builder/codex': quota(12, hit('2026-10-29T11:24:00Z')),
       },
     },
   })
   await settle()
-  assert.equal(stateFetches(), 1, '只有 m4p/codex 變了，只重抓一次')
+  assert.equal(stateFetches(), 1, '只有 mac_builder/codex 變了，只重抓一次')
 })
 
-test('遠端 key 不會因為短 kind 相同而誤判：只看 m4p/codex 的前綴，local codex 沒變就不重抓', async () => {
+test('遠端 key 不會因為短 kind 相同而誤判：只看 mac_builder/codex 的前綴，local codex 沒變就不重抓', async () => {
   seed(quota(40, hit('2026-10-29T11:24:00Z')))
-  useStore.setState({ quota: { ...useStore.getState().quota, 'm4p/codex': quota(10) as never } })
+  useStore.setState({ quota: { ...useStore.getState().quota, 'mac_builder/codex': quota(10) as never } })
   // 只更新遠端那把，且撞限沒變：不該因為 local 的 codex 有撞限就重抓。
-  dispatchFrameForTest({ type: 'quota_updated', data: { kind: 'm4p/codex', host: 'm4p', quota: quota(11) } })
+  dispatchFrameForTest({ type: 'quota_updated', data: { kind: 'mac_builder/codex', host: 'mac_builder', quota: quota(11) } })
   await settle()
   assert.equal(stateFetches(), 0)
 })

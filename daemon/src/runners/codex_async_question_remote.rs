@@ -300,9 +300,9 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
         run.runtime_identity = Some(String::new());
         run.launch_rev = Some(crate::launch_rev::of(&bot));
         bot.identity = Some("new-identity".into());
-        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("~/.codex"));
+        assert_eq!(home_setting(&env.app, &bot, &run, "mac-builder-test").await.as_deref(), Some("~/.codex"));
         run.launch_rev = None;
-        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await, None);
+        assert_eq!(home_setting(&env.app, &bot, &run, "mac-builder-test").await, None);
     }
 
     #[tokio::test]
@@ -316,17 +316,17 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
         run.launch_rev = Some(crate::launch_rev::of(&bot));
         env.app.cfg.update(|c| {
             c.identities = vec![crate::config::IdentityCfg {
-                name: "cx-test".into(), kind: "codex".into(), host: Some("m4p-test".into()),
+                name: "cx-test".into(), kind: "codex".into(), host: Some("mac-builder-test".into()),
                 env: [("CODEX_HOME".into(), "$HOME/.codex-remote".into())].into(), args: vec![],
             }];
             Ok(())
         }).await.unwrap();
-        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("$HOME/.codex-remote"));
+        assert_eq!(home_setting(&env.app, &bot, &run, "mac-builder-test").await.as_deref(), Some("$HOME/.codex-remote"));
         assert_eq!(home_setting(&env.app, &bot, &run, "another-host").await, None);
         bot.env_json = r#"{"CODEX_HOME":"~/bot override's home"}"#.into();
-        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await, None, "changed env has no proven launch snapshot");
+        assert_eq!(home_setting(&env.app, &bot, &run, "mac-builder-test").await, None, "changed env has no proven launch snapshot");
         run.launch_rev = Some(crate::launch_rev::of(&bot));
-        assert_eq!(home_setting(&env.app, &bot, &run, "m4p-test").await.as_deref(), Some("~/bot override's home"));
+        assert_eq!(home_setting(&env.app, &bot, &run, "mac-builder-test").await.as_deref(), Some("~/bot override's home"));
         assert!(script("~/bot override's home", "safe-session").contains("'\\''"));
     }
 }

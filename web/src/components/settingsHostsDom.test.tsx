@@ -148,20 +148,20 @@ it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', asy
 
 // #1220：每一列的按鈕名稱要帶主機名，讀屏與語音控制才分得出是哪一台。
 async function seedTwoHosts() {
-  await mock.request('POST', '/hosts', { name: 'm4p', ssh: 'me@m4p' })
+  await mock.request('POST', '/hosts', { name: 'mac_builder', ssh: 'me@mac_builder' })
   await mock.request('POST', '/hosts', { name: 'box2', ssh: 'me@box2' })
   await useStore.getState().refreshState()
-  await until(() => hostNames().includes('box2') && hostNames().includes('m4p'), '兩台主機出現')
+  await until(() => hostNames().includes('box2') && hostNames().includes('mac_builder'), '兩台主機出現')
 }
 async function dropTwoHosts() {
-  await mock.request('DELETE', '/hosts/m4p')
+  await mock.request('DELETE', '/hosts/mac_builder')
   await mock.request('DELETE', '/hosts/box2')
 }
 
 it('每一台的刪除鈕名稱帶主機名：不會出現好幾顆同名的「刪除主機」（#1220）', async () => {
   await open()
   await seedTwoHosts()
-  await until(() => document.querySelector('button[aria-label="刪除主機 m4p"]') !== null, 'm4p 的刪除鈕')
+  await until(() => document.querySelector('button[aria-label="刪除主機 mac_builder"]') !== null, 'mac_builder 的刪除鈕')
   assert.ok(document.querySelector('button[aria-label="刪除主機 box2"]'))
   assert.equal(document.querySelector('button[aria-label="刪除主機"]'), null, '沒有不帶名字的刪除鈕')
   await dropTwoHosts()
@@ -170,8 +170,8 @@ it('每一台的刪除鈕名稱帶主機名：不會出現好幾顆同名的「�
 it('重連鈕名稱帶主機名（畫面文字不變）；本機那列的開 shell 名稱說明是本機（#1220）', async () => {
   await open()
   await seedTwoHosts()
-  await until(() => document.querySelector('button[aria-label="重連 m4p"]') !== null, 'm4p 的重連鈕')
-  assert.equal(document.querySelector('button[aria-label="重連 m4p"]')!.textContent?.trim(), '重連')
+  await until(() => document.querySelector('button[aria-label="重連 mac_builder"]') !== null, 'mac_builder 的重連鈕')
+  assert.equal(document.querySelector('button[aria-label="重連 mac_builder"]')!.textContent?.trim(), '重連')
   assert.ok(document.querySelector('button[aria-label="重連 box2"]'))
   assert.ok(document.querySelector('button[aria-label="在本機開 shell"]'), '本機那列的開 shell')
   await dropTwoHosts()
@@ -180,12 +180,12 @@ it('重連鈕名稱帶主機名（畫面文字不變）；本機那列的開 she
 it('結束 shell 的名稱帶 cwd 與 pane：同一台主機開好幾顆 shell 也分得出來（#1220）', async () => {
   mockApi(mock)
   await seedTwoHosts()
-  const sh = (await mock.request('POST', '/hosts/m4p/shells', { cwd: '/home/u/proj' })) as { pane_id: string }
+  const sh = (await mock.request('POST', '/hosts/mac_builder/shells', { cwd: '/home/u/proj' })) as { pane_id: string }
   await useStore.getState().refreshState()
   await mount(<HostsPanel />)
   const label = `結束 shell /home/u/proj（pane ${sh.pane_id}）`
   await until(() => document.querySelector(`button[aria-label="${label}"]`) !== null, '結束 shell 鈕帶 cwd 與 pane')
   assert.equal(document.querySelector('button[aria-label="結束這個 shell"]'), null, '沒有不帶名字的結束鈕')
-  await api.closeHostShell('m4p', sh.pane_id, true)
+  await api.closeHostShell('mac_builder', sh.pane_id, true)
   await dropTwoHosts()
 })

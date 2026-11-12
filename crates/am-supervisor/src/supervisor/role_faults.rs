@@ -409,7 +409,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         configure(&app, RESPONDER).await;
-        sqlx::query("UPDATE projects SET host='m4p' WHERE id='p'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id='p'").execute(&app.db).await.unwrap();
         let bot = crate::db::bot(&app.db, "bot-responder").await.unwrap().unwrap();
 
         crate::testing::make_table_unreadable(&app, "projects").await;

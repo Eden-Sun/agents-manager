@@ -869,7 +869,7 @@ def main():
     i = sub.add_parser("import", help="寫進停著的目標 daemon（config.toml＋SQLite）")
     i.add_argument("--bundle", required=True)
     i.add_argument("--host", required=True,
-                   help="目標 daemon 上代表來源機器的 [[hosts]] 名（例：m4p）；專案改在目標本機跑就寫 local，並給 --path-map")
+                   help="目標 daemon 上代表來源機器的 [[hosts]] 名（例：mac_builder）；專案改在目標本機跑就寫 local，並給 --path-map")
     i.add_argument("--path-map", action="append", default=[],
                    help="/來源路徑=/目標路徑（可重複）：改寫專案 path、bot cwd、附件 agent_path")
     i.add_argument("--config", default="~/.config/agents-manager/config.toml", help="目標 daemon 的 config.toml")

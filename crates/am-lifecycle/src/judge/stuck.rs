@@ -286,26 +286,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #1467：遠端主機（m4p）上的專案走同一輪背景掃描：候選的 SQL 不分主機，畫面從那台主機自己的 herdr 讀
+    /// #1467：遠端主機（mac_builder）上的專案走同一輪背景掃描：候選的 SQL 不分主機，畫面從那台主機自己的 herdr 讀
     /// （`herdr_for_run`），不是本機那顆；一樣問一次、推一則通知、不按鍵。
     #[tokio::test]
     async fn a_remote_projects_queued_prompt_is_read_from_that_hosts_own_herdr() {
         let (env, s, seen, dir) = setup(0.93, true).await;
         let app = env.app.clone();
-        let sock = env.dir.join("data").join("herdr-m4p.sock");
+        let sock = env.dir.join("data").join("herdr-mac_builder.sock");
         let remote = tt::MockHerdr::start(sock.clone());
         remote.set_screen(&s.pane_id, crate::tui_prompts::screens::AUTO_MODE);
         let cfg = crate::config::HostCfg { daemon_url: None,
             shared_session: false,
-            name: "m4p".into(),
-            ssh: "m4p@100.64.0.2".into(),
+            name: "mac_builder".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: 22,
             ssh_opts: vec![],
             herdr_session: "test".into(),
             remote_path: String::new(),
         };
         app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(sock)).await;
-        sqlx::query("UPDATE projects SET host='m4p' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
 
         sweep_once(&app).await;
 

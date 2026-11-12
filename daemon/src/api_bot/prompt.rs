@@ -147,8 +147,8 @@ mod tests {
     #[test]
     fn remote_prompt_describes_an_unsandboxed_ssh_account_and_drops_bwrap_facts() {
         let bot = test_bot("api-remote", Some("你是遠端助手。"));
-        let prompt = compose_api_bot_system_prompt(&bot, "api-remote", "/Users/u/proj/", Some("m4p"), Some("# 專案說明"));
-        assert!(prompt.contains("主機 `m4p`"));
+        let prompt = compose_api_bot_system_prompt(&bot, "api-remote", "/Users/u/proj/", Some("mac_builder"), Some("# 專案說明"));
+        assert!(prompt.contains("主機 `mac_builder`"));
         assert!(prompt.contains("沒有沙箱"));
         assert!(prompt.contains("cwd 是專案目錄 `/Users/u/proj`"));
         assert!(prompt.contains("`/workspace` 也代表它"));

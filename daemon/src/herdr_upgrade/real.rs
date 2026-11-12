@@ -721,7 +721,7 @@ esac"#,
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "regular file");
     }
 
-    /// m4p：launchd 跑 `/opt/homebrew/bin/herdr`，login shell 解析到 `~/.local/bin/herdr`——不同檔要找得出來，
+    /// mac_builder：launchd 跑 `/opt/homebrew/bin/herdr`，login shell 解析到 `~/.local/bin/herdr`——不同檔要找得出來，
     /// 同一檔（含 symlink 指到同一檔）不重複，套件管理器的 symlink 拒絕。
     #[tokio::test]
     async fn the_cli_binary_is_found_when_it_is_a_different_file_from_the_server_binary() {

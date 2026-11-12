@@ -367,13 +367,13 @@ async fn a_remote_agy_start_survives_a_broken_hooks_file() {
 /// 主機沒裝 agy 時啟動（preflight）要講清楚去哪裡裝，不是只說「請先安裝」（SPEC §12a.12）。
 #[test]
 fn starting_on_a_host_without_agy_points_at_the_install_prompt() {
-    let msg = crate::kind_probe::verdict("m4p", "agy", Some(String::new())).unwrap_err();
-    assert!(msg.contains("主機 m4p") && msg.contains("尚未安裝 agy") && msg.contains("安裝 agy") && msg.contains("sha512"), "{msg}");
+    let msg = crate::kind_probe::verdict("mac_builder", "agy", Some(String::new())).unwrap_err();
+    assert!(msg.contains("主機 mac_builder") && msg.contains("尚未安裝 agy") && msg.contains("安裝 agy") && msg.contains("sha512"), "{msg}");
     assert!(!msg.contains("remote_path"), "agy 不是靠 PATH 補丁解的");
     // 其他 kind 的訊息不變；查不了＝放行。
-    assert!(crate::kind_probe::verdict("m4p", "codex", Some(String::new())).unwrap_err().contains("請先在該主機安裝 codex"));
-    assert!(crate::kind_probe::verdict("m4p", "agy", None).is_ok());
-    assert!(crate::kind_probe::verdict("m4p", "agy", Some("/Users/me/.local/bin/agy".into())).is_ok());
+    assert!(crate::kind_probe::verdict("mac_builder", "codex", Some(String::new())).unwrap_err().contains("請先在該主機安裝 codex"));
+    assert!(crate::kind_probe::verdict("mac_builder", "agy", None).is_ok());
+    assert!(crate::kind_probe::verdict("mac_builder", "agy", Some("/Users/me/.local/bin/agy".into())).is_ok());
     // 本機。
     assert!(crate::kind_probe::verdict(crate::config::LOCAL_HOST, "agy", Some(String::new())).unwrap_err().starts_with("本機尚未安裝 agy"));
 }

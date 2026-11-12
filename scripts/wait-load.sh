@@ -15,7 +15,7 @@
 #
 # 負載來源：Linux 的 /proc/loadavg，macOS 的 `sysctl -n vm.loadavg`。`WAIT_LOAD_FILE` 指到一個檔案時改讀它的第一欄（測試用）。
 # 記憶體來源：Linux 的 /proc/meminfo（MemAvailable/MemTotal），macOS 的 `memory_pressure -Q`（free percentage）加
-# `sysctl -n kern.memorystatus_vm_pressure_level`（1=normal、2=warn、4=critical；critical 不放行。warn 在 m4p 是常態
+# `sysctl -n kern.memorystatus_vm_pressure_level`（1=normal、2=warn、4=critical；critical 不放行。warn 在 mac_builder 是常態
 # （可用 39% 仍長駐 2，2026-10-31 使用者同意放寬），只要 free% 過門檻就放行；編譯中升到 critical 由 check.sh 看門狗中止）。
 # `WAIT_MEM_FILE` 指到一個檔案時改讀它第一行：第一欄 free%、第二欄壓力等級（可省）（測試用）。
 set -euo pipefail

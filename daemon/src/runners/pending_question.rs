@@ -535,7 +535,7 @@ mod remote_tests {
     async fn rig_with(recorded_path: Option<&str>, live: Option<&str>, reply: impl Fn() -> anyhow::Result<String> + Send + Sync + 'static) -> Rig {
         let env = tt::env().await;
         let app = env.app.clone();
-        let host = format!("m4p-pq-{}", db::ulid());
+        let host = format!("mac-builder-pq-{}", db::ulid());
         // 遠端的 herdr 接到同一顆 mock：#1503 起遠端讀取要先問 live session（herdr），所以 host 的 client 得真的能問。
         let conn = app
             .hosts

@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(kind_of("API Error: Connection lost mid-response."), "api_error");
     }
 
-    /// #1675：m4p 的 codex 子 agent 連上舊版共用 app-server，OpenAI 回 400 `invalid_request_error`，
+    /// #1675：mac_builder 的 codex 子 agent 連上舊版共用 app-server，OpenAI 回 400 `invalid_request_error`，
     /// codex 把整段 JSON 原樣印成 `■` 橫幅。回合要記成錯誤，原因寫出狀態碼與訊息，不能收成「完成」。
     #[test]
     fn a_codex_json_error_banner_is_a_turn_error_with_the_reason() {

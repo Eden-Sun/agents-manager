@@ -343,7 +343,7 @@
         assert_eq!(notice_count(&f).await, 1, "once the child stops, the sweep reports it");
     }
 
-    /// 2026-10-30 m4p：child 回合 completed_fallback 卻沒有任何 assistant 訊息，parent 不能被靜默略過。
+    /// 2026-10-30 mac_builder：child 回合 completed_fallback 卻沒有任何 assistant 訊息，parent 不能被靜默略過。
     #[tokio::test]
     async fn a_completed_turn_with_no_captured_reply_still_notifies_the_parent() {
         let f = fixture("terminal_fallback", "completed_fallback").await;

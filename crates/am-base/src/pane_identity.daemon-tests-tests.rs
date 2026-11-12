@@ -61,7 +61,7 @@
         assert_eq!(identity_named(&ids, "codex", "CODEX_HOME", "/Users/me", "/Users/me/.claude-cc2"), None);
     }
 
-    /// m4p 2026-09-11: children of a pane exporting `CLAUDE_CONFIG_DIR=~/.claude` showed `cc1`, not `cc0`.
+    /// mac_builder 2026-09-11: children of a pane exporting `CLAUDE_CONFIG_DIR=~/.claude` showed `cc1`, not `cc0`.
     #[test]
     fn the_default_account_directory_or_no_variable_is_the_empty_env_identity() {
         let var = "CLAUDE_CONFIG_DIR";

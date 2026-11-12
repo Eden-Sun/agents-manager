@@ -11,7 +11,7 @@ import type { Bot, Project } from '../api/types'
 import { BotSwitcher } from './BotSwitcher'
 
 /** b3 的帳號（identity）停用：收起來的走真的額度停用投影，不直接寫 `hiddenBotIds`（那會被 quotaHide 的 subscribe 蓋掉）。 */
-const HIDE_KEY = quotaDisableKey('m4p', 'claude', 'acct3')
+const HIDE_KEY = quotaDisableKey('mac_builder', 'claude', 'acct3')
 
 afterEach(async () => {
   setQuotaDisabled(HIDE_KEY, false, null)
@@ -29,8 +29,8 @@ function seed() {
   useStore.setState({
     // daemon 回來的原始順序是 P1 在前；使用者把 P2 拖到最上面。
     projects: [
-      { id: 'P1', label: 'P1', path: '/p1', host: 'm4p' } as Project,
-      { id: 'P2', label: 'P2', path: '/p2', host: 'm4p' } as Project,
+      { id: 'P1', label: 'P1', path: '/p1', host: 'mac_builder' } as Project,
+      { id: 'P2', label: 'P2', path: '/p2', host: 'mac_builder' } as Project,
     ],
     bots: [
       { id: 'b1', name: 'b1', project_id: 'P1', kind: 'claude', identity: null } as Bot,

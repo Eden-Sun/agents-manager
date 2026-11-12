@@ -16,17 +16,17 @@ test('進度照階段走，版本沿用前一則', () => {
 
 test('多台 Claude 安裝各自保留進度，done 只移除對應主機', () => {
   let cur = cliUpdateProgressMany([], { update_id: 'u-local', host: 'local', kind: 'claude', phase: 'installing', from: '2.1.281' })
-  cur = cliUpdateProgressMany(cur, { update_id: 'u-m4p', host: 'm4p', kind: 'claude', phase: 'checking' })
-  assert.deepEqual(cur.map((item) => [item.id, item.host, item.phase]), [['u-local', 'local', 'installing'], ['u-m4p', 'm4p', 'checking']])
+  cur = cliUpdateProgressMany(cur, { update_id: 'u-mac_builder', host: 'mac_builder', kind: 'claude', phase: 'checking' })
+  assert.deepEqual(cur.map((item) => [item.id, item.host, item.phase]), [['u-local', 'local', 'installing'], ['u-mac_builder', 'mac_builder', 'checking']])
   assert.deepEqual(cliUpdateDoneMany(cur, { update_id: 'u-local', kind: 'claude', ok: true, restart_required: true }), [cur[1]])
-  assert.deepEqual(reconcileCliUpdates(cur, [{ update_id: 'u-m4p', host: 'm4p' }]), [cur[1]])
+  assert.deepEqual(reconcileCliUpdates(cur, [{ update_id: 'u-mac_builder', host: 'mac_builder' }]), [cur[1]])
 })
 
 test('Claude 安裝完成只提示另行確認重啟', () => {
-  const r = cliUpdateDone({ update_id: 'u-claude', host: 'm4p', kind: 'claude', ok: true, from: '2.1.281', to: '2.1.284', restart: null, restart_required: true })
+  const r = cliUpdateDone({ update_id: 'u-claude', host: 'mac_builder', kind: 'claude', ok: true, from: '2.1.281', to: '2.1.284', restart: null, restart_required: true })
   assert.equal(r.batch, null)
   assert.equal(r.joinBatchId, null)
-  assert.match(r.message, /m4p 的 claude 已升到 2\.1\.281 → 2\.1\.284/)
+  assert.match(r.message, /mac_builder 的 claude 已升到 2\.1\.281 → 2\.1\.284/)
   assert.match(r.message, /確認後再重啟/)
 })
 
@@ -55,7 +55,7 @@ test('失敗：不開批次，訊息講原因與錯誤', () => {
 
 test('Claude 失敗原因使用 Claude 名稱，不誤報成 Codex', () => {
   for (const reason of ['version_unreadable', 'verify_failed']) {
-    const r = cliUpdateDone({ update_id: 'u-claude', host: 'm4p', kind: 'claude', ok: false, reason })
+    const r = cliUpdateDone({ update_id: 'u-claude', host: 'mac_builder', kind: 'claude', ok: false, reason })
     assert.match(r.message, /claude/)
     assert.doesNotMatch(r.message, /codex/)
   }

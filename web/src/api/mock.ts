@@ -301,7 +301,7 @@ const issues = (): Rec[] => [
   { number: 42, title: L('群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', 'Group chat: history of deleted bots no longer appears in the merged timeline'), state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: L('重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。', 'Steps to reproduce:\n1. Send `@all` in the group view\n2. Delete one of the bots\n3. Refresh\n\nExpected: history stays; actual: only messages from live bots remain.\n\nRelated: `GET /projects/:id/messages` only merges existing bots.') },
   { number: 41, title: L('即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', 'Live output\'s first few frames are TUI noise (✢ Improvising…)'), state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: L('`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。', 'The first 1–2 frames of `turn_progress` carry Claude Code\'s spinner text; the daemon should filter them.') },
   { number: 40, title: L('Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', 'Bot settings: take codex model / effort / fast from `GET /api/models`'), state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: L('目前是靜態清單。改為 API 驅動，失敗退回靜態清單。', 'It is a static list today. Make it API-driven and fall back to the static list on failure.') },
-  { number: 39, title: L('主機面板顯示三個 kind 的工具偵測徽章', 'Host panel shows tool-detection badges for the three kinds'), state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: L('已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。', 'Installed ✓ / not installed ✗ / not logged in !, with an "Install" button.') },
+  { number: 39, title: L('主機面板顯示三個 kind 的工具偵測徽章', 'Host panel shows tool-detection badges for the three kinds'), state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'mac-builder-bot', updated_at: inHours(-30), body: L('已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。', 'Installed ✓ / not installed ✗ / not logged in !, with an "Install" button.') },
   { number: 38, title: L('額度徽章：低於 20% 用警示色', 'Quota badge: warning color below 20%'), state: 'open', labels: [{ name: 'web', color: '5319e7' }, { name: 'good first issue', color: '7057ff' }], author: 'edansun', updated_at: inHours(-50), body: L('剩餘 = 100 − used_pct。', 'Remaining = 100 − used_pct.') },
   { number: 37, title: L('長訊息不要預先收合', 'Don\'t pre-collapse long messages'), state: 'closed', labels: [{ name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-60), body: L('已在 v3.9 UI polish 移除 isLong / clamped。', 'Removed isLong / clamped in the v3.9 UI polish.') },
   { number: 35, title: L('hash 式 herdr agent name', 'hash-style herdr agent name'), state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }], author: 'edansun', updated_at: inHours(-100), body: L('`<project slug>-<bot id 尾 6 碼>`。', '`<project slug>-<last 6 chars of bot id>`.') },
@@ -364,14 +364,14 @@ function mockGhLoggedIn(): MockGh {
     installed: true,
     path: '/opt/homebrew/bin/gh',
     logged_in: true,
-    account: 'Eden-Sun',
-    accounts: [{ login: 'Eden-Sun', active: true, ok: true }],
+    account: 'example-dev',
+    accounts: [{ login: 'example-dev', active: true, ok: true }],
     pending: null,
     error: null,
   }
 }
 
-/** m4p 實測形狀：作用中 token 失效，另有一個有效但非 active 的帳號。 */
+/** mac_builder 實測形狀：作用中 token 失效，另有一個有效但非 active 的帳號。 */
 function mockGhNeedsSwitch(): MockGh {
   return {
     installed: true,
@@ -380,7 +380,7 @@ function mockGhNeedsSwitch(): MockGh {
     account: 'eddysun-alt',
     accounts: [
       { login: 'eddysun-alt', active: true, ok: false },
-      { login: 'Eden-Sun', active: false, ok: true },
+      { login: 'example-dev', active: false, ok: true },
     ],
     pending: null,
     error: null,
@@ -697,7 +697,7 @@ export class MockTransport implements Transport {
   private tracedScreens = new Map<string, MockShell>()
   private shellSeq = 0
 
-  /** 新遠端主機預設同 m4p 實測：active token 失效、另有可切帳號。 */
+  /** 新遠端主機預設同 mac_builder 實測：active token 失效、另有可切帳號。 */
   private gh = new Map<string, MockGh>()
 
   /** 預設分頁裡非 bot 的 pane 數；預設夠擠以演窄 pane 警示（`__amMock.paneSqueeze(n)` 調整）。 */
@@ -2263,7 +2263,7 @@ export class MockTransport implements Transport {
   }
 
   /** 截圖用：遠端主機＋專案＋一顆在跑的 bot，額度五格都有（cc0／cc1／cc2／codex／grok），重現遠端標題列最擠的情況。回 bot id。 */
-  async remoteDemo(host = 'm4p'): Promise<string> {
+  async remoteDemo(host = 'mac_builder'): Promise<string> {
     if (!this.hosts.some((h) => h.name === host)) await this.request('POST', '/hosts', { name: host, ssh: `me@${host}` })
     const h = this.hosts.find((x) => x.name === host)
     if (h) {
@@ -4213,7 +4213,7 @@ export class MockTransport implements Transport {
       this.agyLoginPane = null
       this.finishAgyLogin(host)
     } else if (cmd === 'gh auth status') {
-      s.lines.push('github.com', '  ✓ Logged in to github.com account Eden-Sun (keyring)', '  - Active account: true')
+      s.lines.push('github.com', '  ✓ Logged in to github.com account example-dev (keyring)', '  - Active account: true')
     } else {
       s.lines.push(`zsh: command not found: ${cmd.split(/\s+/)[0]}`)
     }
@@ -4392,7 +4392,7 @@ export class MockTransport implements Transport {
   /** 截圖用：Claude 上游已更新且 fleet 版本不一致，展示持續提示與逐台版本。 */
   emitClaudeFleetUpdate(target = '2.1.284', hosts: { host: string; installed_version: string | null; error: string | null; behind: boolean }[] = [
     { host: 'local', installed_version: target, error: null, behind: false },
-    { host: 'm4p', installed_version: '2.1.281', error: null, behind: true },
+    { host: 'mac_builder', installed_version: '2.1.281', error: null, behind: true },
     { host: 'buildbox', installed_version: null, error: 'timeout', behind: true },
   ]) {
     const item = {

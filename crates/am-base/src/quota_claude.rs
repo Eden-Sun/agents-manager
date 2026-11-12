@@ -654,7 +654,7 @@ pub fn usage_fresh_at(key: &str, now: std::time::Instant) -> bool {
 /// 有 bot 在講話的帳號，5h/7d 由狀態列即時補；安靜的帳號額度本來就不太動，十分鐘一次夠用。
 /// 以前安靜帳號每 [`CLAUDE_POLL`]（60 秒）就開一個 `claude -p`：每一個都是完整 session，會跟同一個
 /// config dir 裡的 bot 搶著換 OAuth token（refresh token 只能用一次，慢的那個會被登出），`/usage`
-/// 背後的端點也很快就 429（2026-09-25 使用者：「m4p 的 cc1 一直被登出」）。
+/// 背後的端點也很快就 429（2026-09-25 使用者：「mac_builder 的 cc1 一直被登出」）。
 pub fn skip_usage_probe(login_known: bool, usage_fresh: bool) -> bool {
     login_known && usage_fresh
 }
@@ -679,7 +679,7 @@ pub struct ProbeEvidence {
 /// 以前「狀態列有在更新／有 run 在跑」直接無視退避：`/usage` 一壞（CLI 改格式、pane 卡住），一直有 bot
 /// 在講話的帳號每 60 秒就開一個 pane、佔住 `probe_lock` 40 秒，grok 輪詢與 `?refresh=1` 一直排隊
 /// （review 2026-09-16 M4）。證據的用處改成「把沒登入的 30 分鐘縮成 5 分鐘」，不是完全不退避——
-/// 過時的「沒登入」一樣不會把帳號永遠停掉（m4p 的 cc1／cc2 當年就是這樣丟了額度）。
+/// 過時的「沒登入」一樣不會把帳號永遠停掉（mac_builder 的 cc1／cc2 當年就是這樣丟了額度）。
 pub fn should_probe_identity(e: ProbeEvidence) -> bool {
     !e.cooling_down
 }

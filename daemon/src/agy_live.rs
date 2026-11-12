@@ -56,7 +56,7 @@ const BANNER_TRIES: u32 = 20;
 static BANNER_TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::LazyLock::new(Default::default);
 
 /// 框底被窄 pane 截掉時的備援：捲動紀錄裡**最後一個**啟動橫幅（`Antigravity CLI 1.4.0` 底下兩行的 `Gemini 3.8 Flash (High)`）。
-/// 窄 pane 會把它折成 `  Gemini 3` / `.8 Flash (` / `High)`（m4p 真畫面，10 欄寬，2026-10-16），所以先把每行去掉頭尾空白接起來再找；
+/// 窄 pane 會把它折成 `  Gemini 3` / `.8 Flash (` / `High)`（mac_builder 真畫面，10 欄寬，2026-10-16），所以先把每行去掉頭尾空白接起來再找；
 /// 折在空白上的字會黏在一起，解析時在數字與字母交界補回分隔。只在橫幅後面 300 字內找 `Gemini`，換出的 slug 要是 agy 收的模型。
 pub fn parse_banner(scrollback: &str) -> Option<String> {
     let joined: String = scrollback.lines().map(str::trim).collect();
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(parse_footer(&screen("  Gemini 3.8 Flash · 高")), None);
     }
 
-    /// m4p 真畫面（10 欄寬的 pane，2026-10-16）：橫幅折成好幾行，框底整個被截掉。
+    /// mac_builder 真畫面（10 欄寬的 pane，2026-10-16）：橫幅折成好幾行，框底整個被截掉。
     #[test]
     fn a_banner_wrapped_by_a_narrow_pane_still_reads() {
         let narrow = "% agy --da\nngerously-\n\n      ▄▀▀▄\n  Antigrav\nity CLI 1.\n4.0\n me@\nexample.com\n(Google AI\n Pro)\n  Gemini 3\n.8 Flash (\nHigh)\n─────────\n> 你負責第\n";

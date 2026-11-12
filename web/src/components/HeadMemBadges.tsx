@@ -5,7 +5,7 @@ import { LOCAL_HOST } from '../api/types'
 import { MemBadge } from './MemBadge'
 
 /**
- * 左上角 RAM 格（2026-09-28 使用者）：本機之外，`/api/mem` 量到的每台遠端（例：m4p）各一顆，
+ * 左上角 RAM 格（2026-09-28 使用者）：本機之外，`/api/mem` 量到的每台遠端（例：mac_builder）各一顆，
  * 不必切到那台的專案才看得到它還剩多少。一顆只講一台，不加總（SPEC §15）。有遠端時改成上下疊（`.multi`）。
  * 手機 menu 另在每顆前面放那台的 pane 數（2026-09-28 使用者）；桌機的 pane 總數在左邊，這格不重複。
  */

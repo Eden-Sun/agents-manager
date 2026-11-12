@@ -113,24 +113,24 @@ test('agy（#1908）：官方 manifest 版本比對——落後給「更新」�
 
 test('遠端 herdr 不給按鈕、講原因；查不到上游、讀不到版本都是「查不到」而不是「最新」', () => {
   const c = buildHostCheck({
-    host: 'm4p',
+    host: 'mac_builder',
     tools: tools(),
     herdr: herdr('herdr 0.9.4', '0.9.4'),
     upstream: {
-      herdr: item('herdr', '0.9.5', [{ ...up('herdr 0.9.4', true), host: 'm4p' }]),
+      herdr: item('herdr', '0.9.5', [{ ...up('herdr 0.9.4', true), host: 'mac_builder' }]),
       claude: item('claude', null, []),
-      codex: item('codex', '0.158.0', [{ ...up(null, false, 'ssh timeout'), host: 'm4p' }]),
+      codex: item('codex', '0.158.0', [{ ...up(null, false, 'ssh timeout'), host: 'mac_builder' }]),
     },
     integration: null,
     herdrBlocked: '遠端主機：這版只支援更新本機的 herdr，請到那台手動更新',
   })
   const by = Object.fromEntries(c.rows.map((r) => [r.id, r]))
-  assert.equal(by['m4p:herdr-cli'].status, 'update')
-  assert.equal(by['m4p:herdr-cli'].action, null)
-  assert.match(by['m4p:herdr-cli'].note ?? '', /遠端主機/)
-  assert.equal(by['m4p:cli-claude'].status, 'unknown')
-  assert.equal(by['m4p:cli-codex'].status, 'unknown')
-  assert.match(by['m4p:cli-codex'].note ?? '', /ssh timeout/)
+  assert.equal(by['mac_builder:herdr-cli'].status, 'update')
+  assert.equal(by['mac_builder:herdr-cli'].action, null)
+  assert.match(by['mac_builder:herdr-cli'].note ?? '', /遠端主機/)
+  assert.equal(by['mac_builder:cli-claude'].status, 'unknown')
+  assert.equal(by['mac_builder:cli-codex'].status, 'unknown')
+  assert.match(by['mac_builder:cli-codex'].note ?? '', /ssh timeout/)
   assert.equal(c.integrationPending, true)
   assert.equal(c.rows.some((r) => r.group === 'integration'), false)
 })

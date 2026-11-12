@@ -6,7 +6,7 @@ import { useStore } from '../store/store'
 import './hostOffline.css'
 
 /**
- * 遠端主機離線要一眼看得到（2026-10-02 使用者：「m4p offline，要更明顯一點」）：
+ * 遠端主機離線要一眼看得到（2026-10-02 使用者：「mac_builder offline，要更明顯一點」）：
  * 主畫面頂端的紅色警示條、聊天區頂端的橫幅、側欄整組反灰。判斷都在 `lib/hostOffline.ts`。
  */
 

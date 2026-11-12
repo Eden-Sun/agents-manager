@@ -5,7 +5,7 @@ import { useStore } from './store'
 
 /**
  * codex 重置券（`reset_credits.available`）數量一變就跳通知（2026-11-01 使用者）。
- * 每個額度 key（`codex`、`codex:co0`、`m4p/codex:co0`）記住上次看到的張數（localStorage，重開頁面照樣比得出來）；
+ * 每個額度 key（`codex`、`codex:co0`、`mac_builder/codex:co0`）記住上次看到的張數（localStorage，重開頁面照樣比得出來）；
  * 第一次看到只當基準不通知；讀不到（null／stale）不算數，避免換方案暫缺欄或舊讀數誤報。
  */
 const STORE_KEY = 'agm.resetCredits.v1'
@@ -25,7 +25,7 @@ export function resetCreditChanges(seen: Record<string, number>, quota: QuotaMap
   return { changes, next }
 }
 
-/** `m4p/codex:co0` → `codex · co0 @m4p`。 */
+/** `mac_builder/codex:co0` → `codex · co0 @mac_builder`。 */
 export function creditKeyLabel(key: string): string {
   const slash = key.indexOf('/')
   const host = slash >= 0 ? key.slice(0, slash) : ''

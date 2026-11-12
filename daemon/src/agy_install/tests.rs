@@ -464,7 +464,7 @@ async fn unknown_and_disconnected_hosts_are_refused_before_any_command() {
     assert!(env.ran().is_empty());
 }
 
-// ── 遠端登入偵測（m4p 這類遠端：憑證檔出現後 watcher 翻成已登入並探測額度）─────────────────────────
+// ── 遠端登入偵測（mac_builder 這類遠端：憑證檔出現後 watcher 翻成已登入並探測額度）─────────────────────────
 
 #[tokio::test]
 async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_the_quota() {

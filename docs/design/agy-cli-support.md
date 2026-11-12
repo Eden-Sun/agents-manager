@@ -8,7 +8,7 @@
 >
 > 調查對象：`agy` **1.2.16**（2026-10-04 install.sh 的 stable manifest；Go 單一執行檔，linux amd64／arm64／musl、darwin arm64／amd64、android）。
 > 來源三種，標示如下：
-> - **［實測］**：install.sh 只讀不執行；binary 下載到拋棄式目錄，用假 `HOME`、**未登入**（另有一次假 `GEMINI_API_KEY`，不是真 key）在 m4p（macOS arm64）的獨立 herdr session 裡跑 TUI。真實 HOME 沒有被碰（`~/.gemini` 不存在），測完 session、pane、暫存全部刪除。
+> - **［實測］**：install.sh 只讀不執行；binary 下載到拋棄式目錄，用假 `HOME`、**未登入**（另有一次假 `GEMINI_API_KEY`，不是真 key）在 mac_builder（macOS arm64）的獨立 herdr session 裡跑 TUI。真實 HOME 沒有被碰（`~/.gemini` 不存在），測完 session、pane、暫存全部刪除。
 > - **［官方］**：binary 啟動時自己展開到 `~/.gemini/antigravity-cli/builtin/skills/` 的內建文件（`hooks.md`、`plugins.md`、`rules.md`、`json_configs.md`）、`google-antigravity/antigravity-cli` 的 README／CHANGELOG／`examples/`、`antigravity.google/docs/cli/*`。
 > - **［二手］**：教學站與第三方 issue（computingforgeeks、continuumcode、entireio/cli PR #1287、claude-remember #563、automatis-tools #177）。與官方或實測衝突時以前兩者為準，已逐項標明。
 >
@@ -22,7 +22,7 @@
      title 指令的輸出會成為 OSC 視窗標題，herdr 的 `terminal_title` 讀得到［實測：標題變成我們腳本印的字］。這等於免費拿到「畫面判讀」缺的那一半，也是 herdr 判 idle 不可信時的主訊號。
   3. **信任框可預寫**：接受後寫進 `~/.gemini/antigravity-cli/settings.json` 的 `trustedWorkspaces`（絕對路徑陣列）［實測］，不必代按鍵。
 - **最大的坑（照風險排序見 §4）**：
-  - **agm-host 這顆 CPU 跑不起來 agy**：glibc 與 musl 兩個 build 都在啟動時 `FATAL ERROR: This binary was compiled with pclmul enabled, but this feature is not available on this processor`［實測；agm-host 是 QEMU Virtual CPU 2.5+，沒有 pclmulqdq］。要嘛 VM 改 `cpu=host`，要嘛先只在 m4p 做。
+  - **agm-host 這顆 CPU 跑不起來 agy**：glibc 與 musl 兩個 build 都在啟動時 `FATAL ERROR: This binary was compiled with pclmul enabled, but this feature is not available on this processor`［實測；agm-host 是 QEMU Virtual CPU 2.5+，沒有 pclmulqdq］。要嘛 VM 改 `cpu=host`，要嘛先只在 mac_builder 做。
   - **設定目錄只認 `$HOME`**［實測：`XDG_*`、`ANTIGRAVITY_EXECUTABLE_DATA_DIR` 都無效，檔案全落在 `$HOME/.gemini/`］。身份隔離只能換整個 HOME，會連帶換掉 git／ssh／gh 設定；憑證放 OS keyring（macOS 走 Keychain，service 名未知，推測不隨 HOME 隔離；Linux 無 D-Bus 才落檔），多帳號能不能成立要登入後才知道。
   - 登入框、首次啟動的色彩／條款頁、信任框，herdr 全判 `idle`（含 `interactive_ready:true`）［實測］，跟 gemini 同一種坑；而且 herdr 內建的 agy 偵測規則是 2026-06-24 的舊版，1.2.16 的權限框文案已改（見 §1 A.8），**阻塞狀態可能整個漏掉**。
   - agy **預設背景自我更新**；官方 install.sh 還會跑 `agy install` 改 shell profile（含「alias purging」）。
@@ -167,7 +167,7 @@
 ## 3. 分階段計畫
 
 ### 3.1 MVP：建立／啟動／送 prompt／讀回覆／狀態判讀（單機單身份）
-0. **前置（人工）**：①挑一台能跑 agy 的主機（m4p，或把 agm-host 的 VM CPU model 改成含 pclmul／SSE4.2 的）；②登入 spike（§5 第 1 題＋§6 的取樣清單）。
+0. **前置（人工）**：①挑一台能跑 agy 的主機（mac_builder，或把 agm-host 的 VM CPU model 改成含 pclmul／SSE4.2 的）；②登入 spike（§5 第 1 題＋§6 的取樣清單）。
 1. **kind 註冊**：`KINDS`、DB CHECK 重建＋升 `SCHEMA_VERSION`、mission／web 列舉、`efforts_for_kind=[]`、模型清單來源。
 2. **啟動參數與 pane env**：`--dangerously-skip-permissions`（auto_approve）、`--model`；env：`AGY_CLI_DISABLE_AUTO_UPDATE=true`、（身份的）`HOME`；preflight：找得到 `agy`、能執行（先 `agy --version` 擋掉 SIGILL 主機）、已有憑證（API key 或登入過），否則拒絕啟動並指向登入流程（不要讓 bot 停在登入框）。
 3. **settings.json 預寫（merge、原子）**：`trustedWorkspaces`、`statusLine`、`title`；`cache/onboarding.json`（首次條款／色彩頁：**不由 AG Man 代答條款**——見 §5 第 4 題，由使用者在登入 spike 時自己做一次，新身份資料夾複製 `cache/onboarding.json` 與必要設定）。
@@ -216,7 +216,7 @@
    - (b) GCP 專案／ADC（企業路徑）；
    - (c) `GEMINI_API_KEY`（已驗證不用登入即可跑；按量計費；只有 Gemini 模型；無 keyring 問題，最適合無人值守，但要把 key 放進身份 env／config）。
    建議：MVP 先 (a) 單帳號並做登入 spike；若不想動 OAuth，(c) 是最快能全自動的路。
-2. **裝在哪台**：agm-host 目前跑不起來（缺 pclmul）。選項：只裝 m4p；或把 agm-host 的 VM CPU model 改成 `host`（你能改 hypervisor 嗎？）。建議先 m4p。
+2. **裝在哪台**：agm-host 目前跑不起來（缺 pclmul）。選項：只裝 mac_builder；或把 agm-host 的 VM CPU model 改成 `host`（你能改 hypervisor 嗎？）。建議先 mac_builder。
 3. **預設身份要不要動真 HOME 的 `~/.gemini`**：AG Man 要寫 `hooks.json`、`settings.json`（trust／statusLine／title）。選項：①只支援 per-bot 身份（獨立 HOME，真 HOME 不碰）——最乾淨，但 git／ssh 要靠 symlink 補；②預設身份也寫真 HOME（自癒 merge，與使用者手動用的 agy／Gemini CLI 共用同一個 `~/.gemini`）。建議①。
 4. **條款頁**：首次啟動預設勾選「允許 Google 使用我的 Interactions 資料」。AG Man bot 會處理這個 repo 與可能的客戶資料——要同意、關掉（`enableTelemetry:false` 與條款頁取消勾選），還是只在不含敏感內容的專案用 agy？AG Man 不會代你回答這頁。
 5. **撞限行為**：額度用完要停下來等，還是自動換身份／換模型？`useG1Credits`（付費續跑）是否一律禁止？（建議一律禁止。）
@@ -245,6 +245,6 @@
 
 ## 附錄：實測摘要（2026-10-04）
 
-- 主機：agm-host（Ubuntu，QEMU Virtual CPU 2.5+，無 pclmulqdq）→ `agy --version` 兩種 build 都 SIGILL；m4p（macOS 27.0.1 arm64）→ 1.2.16 正常。
-- m4p 上用獨立 herdr session（測完 `server stop`＋`session delete`，AG Man 既有 session 未動）：`herdr agent start … --kind agy` 成功；未登入畫面 `agent_status:idle`、`interactive_ready:true`；API key 模式走完色彩／條款／信任後進主畫面，`statusLine`／`title` 指令每次狀態變化被呼叫（`agent_state` 依序 `authenticating`→`initializing`→`idle`→`working`→`idle`），herdr 的 `terminal_title` 變成 title 指令的輸出；送一句話後 `SessionStart`／`PreInvocation`／`Stop` 三個 hook 收到上述 payload；`--model gemini-3.1-pro-high`、`--mode plan`、`-c`、離開時的 resume 提示皆如上。
-- 清理：m4p 的 pane／workspace／herdr session／拋棄式目錄／`/tmp` 暫存全部刪除；`~/.gemini` 在 m4p 與 agm-host 都不存在；沒有使用瀏覽器。
+- 主機：agm-host（Ubuntu，QEMU Virtual CPU 2.5+，無 pclmulqdq）→ `agy --version` 兩種 build 都 SIGILL；mac_builder（macOS 27.0.1 arm64）→ 1.2.16 正常。
+- mac_builder 上用獨立 herdr session（測完 `server stop`＋`session delete`，AG Man 既有 session 未動）：`herdr agent start … --kind agy` 成功；未登入畫面 `agent_status:idle`、`interactive_ready:true`；API key 模式走完色彩／條款／信任後進主畫面，`statusLine`／`title` 指令每次狀態變化被呼叫（`agent_state` 依序 `authenticating`→`initializing`→`idle`→`working`→`idle`），herdr 的 `terminal_title` 變成 title 指令的輸出；送一句話後 `SessionStart`／`PreInvocation`／`Stop` 三個 hook 收到上述 payload；`--model gemini-3.1-pro-high`、`--mode plan`、`-c`、離開時的 resume 提示皆如上。
+- 清理：mac_builder 的 pane／workspace／herdr session／拋棄式目錄／`/tmp` 暫存全部刪除；`~/.gemini` 在 mac_builder 與 agm-host 都不存在；沒有使用瀏覽器。

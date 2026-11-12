@@ -210,7 +210,7 @@ export type IdentityStatusMap = Record<string, IdentityStatus>
 /** `hosts[]` 第一筆一定是它，但 `normalize.toState()` 會濾掉：store 的 `hosts` 只含遠端，本機看 `connected`。 */
 export const LOCAL_HOST = 'local'
 
-/** SPEC §14：本機是裸 key（`claude:cc1`），遠端加前綴（`m4p/claude`）；須與 daemon 同規則。 */
+/** SPEC §14：本機是裸 key（`claude:cc1`），遠端加前綴（`mac_builder/claude`）；須與 daemon 同規則。 */
 export function quotaKey(host: string, base: string): string {
   return !host || host === LOCAL_HOST ? base : `${host}/${base}`
 }

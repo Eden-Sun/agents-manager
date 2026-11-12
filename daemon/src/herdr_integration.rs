@@ -569,18 +569,18 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
     async fn sweep_records_each_host_keeps_old_items_on_failure_and_drops_removed_hosts() {
         let watch = Watch::default();
         let fake = Fake::new("local", SAMPLE);
-        sweep(&watch, &fake, &[("local".into(), true), ("m4p".into(), false), ("gone".into(), true)]).await;
+        sweep(&watch, &fake, &[("local".into(), true), ("mac_builder".into(), false), ("gone".into(), true)]).await;
         let snap = watch.snapshot();
         let by = |h: &str| snap.iter().find(|s| s["host"] == h).cloned().unwrap();
         assert_eq!(by("local")["items"].as_array().unwrap().len(), 4);
         assert!(by("local")["error"].is_null());
-        assert_eq!(by("m4p")["error"], "主機未連線");
-        assert_eq!(by("m4p")["items"].as_array().unwrap().len(), 0);
+        assert_eq!(by("mac_builder")["error"], "主機未連線");
+        assert_eq!(by("mac_builder")["items"].as_array().unwrap().len(), 0);
         assert_eq!(by("gone")["error"], "ssh 逾時", "讀取失敗是錯誤，不是「沒有 integration」");
 
         // 第二輪：local 讀失敗，上一次的 items 還在、只多一個 error；gone 已不在主機清單就整筆丟掉。
         fake.status.lock().unwrap().clear();
-        sweep(&watch, &fake, &[("local".into(), true), ("m4p".into(), false)]).await;
+        sweep(&watch, &fake, &[("local".into(), true), ("mac_builder".into(), false)]).await;
         let snap = watch.snapshot();
         assert_eq!(snap.len(), 2);
         let local = snap.iter().find(|s| s["host"] == "local").unwrap();
@@ -683,12 +683,12 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
     async fn auto_install_without_a_login_or_a_fresh_status_or_a_connection_runs_nothing() {
         let watch = Watch::default();
         let fake = Fake::new("local", SAMPLE);
-        let hosts = [("local".to_string(), true), ("m4p".to_string(), false)];
+        let hosts = [("local".to_string(), true), ("mac_builder".to_string(), false)];
         sweep(&watch, &fake, &hosts).await;
         // 沒登入（或探測問不到）。
         assert!(auto_install(&watch, &fake, &hosts, &who(&[])).await.is_empty());
         // 主機沒連線：就算探測快取留著登入也不裝。
-        assert!(auto_install(&watch, &fake, &hosts, &who(&[("m4p", "grok")])).await.is_empty());
+        assert!(auto_install(&watch, &fake, &hosts, &who(&[("mac_builder", "grok")])).await.is_empty());
         // 這一輪讀狀態失敗（items 是上次的）：不拿舊資料決定。
         fake.status.lock().unwrap().clear();
         sweep(&watch, &fake, &[("local".to_string(), true)]).await;
@@ -751,7 +751,7 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         assert_eq!(v["logged_in"], false);
         assert!(v["message"].as_str().unwrap().contains("沒有登入"), "{v}");
         // 別台登入不算這台。
-        conflict(install(&watch, &fake, "local", "antigravity-cli", &who(&[("m4p", "agy")])).await);
+        conflict(install(&watch, &fake, "local", "antigravity-cli", &who(&[("mac_builder", "agy")])).await);
         assert!(fake.installs.lock().unwrap().is_empty());
 
         // 已登入：可以裝，回的是裝完重讀的實際狀態，也沿用同一把互斥。

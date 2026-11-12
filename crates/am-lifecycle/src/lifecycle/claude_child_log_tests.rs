@@ -36,7 +36,7 @@ fn log(lines: &[String]) -> String {
     lines.join("\n") + "\n"
 }
 
-/// 2026-10-07 m4p midplat：第一輪「我先讀那份 brief。」是帶 tool_use 的旁白，最後的 end_turn 才是回覆。
+/// 2026-10-07 mac_builder midplat：第一輪「我先讀那份 brief。」是帶 tool_use 的旁白，最後的 end_turn 才是回覆。
 #[test]
 fn the_reply_is_the_end_turn_text_not_the_narration_before_a_tool() {
     let text = log(&[
@@ -554,14 +554,14 @@ async fn the_unfinished_exchange_is_reported_as_pending() {
     assert!(messages(&app, &c.conv).await.is_empty());
 }
 
-/// 遠端（m4p）：對話檔在那台機器上，走 ssh 讀；腳本只列該主機的 root，session 來自 herdr。
+/// 遠端（mac_builder）：對話檔在那台機器上，走 ssh 讀；腳本只列該主機的 root，session 來自 herdr。
 #[tokio::test]
 async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
     let e = tt::env().await;
     let sock = tt::track(std::env::temp_dir().join(format!("am-claude-remote-{}", db::ulid())));
     std::fs::create_dir_all(&sock).unwrap();
     let herdr = tt::MockHerdr::start(sock.join("herdr.sock"));
-    let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
+    let host = format!("mac-builder-{}", db::ulid().to_ascii_lowercase());
     let conn = e
         .app
         .hosts
@@ -615,20 +615,20 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
 /// /clear 或 resume 已讓 pane 換成新 session、DB 尚未同步時，pending-question 只讀 herdr 回報的 live session。
 #[tokio::test]
 async fn pending_tail_uses_live_herdr_session() {
-    let old_key = crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "host-id", 1, "sess-old");
+    let old_key = crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "mac_builder", "host-id", 1, "sess-old");
     assert_ne!(
         old_key,
-        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "host-id", 1, "sess-new"),
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "mac_builder", "host-id", 1, "sess-new"),
         "cache identity must include the live session"
     );
     assert_ne!(
         old_key,
-        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "m4p", "other-host-id", 2, "sess-old"),
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-1", Some("pane-1"), "mac_builder", "other-host-id", 2, "sess-old"),
         "cache identity must include the host connection generation"
     );
     assert_ne!(
         old_key,
-        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-2", Some("pane-2"), "m4p", "host-id", 1, "sess-old"),
+        crate::runners::pending_question_remote::cache_key_parts("run-1", "started-2", Some("pane-2"), "mac_builder", "host-id", 1, "sess-old"),
         "cache identity must include the run generation"
     );
 
@@ -637,7 +637,7 @@ async fn pending_tail_uses_live_herdr_session() {
     let sock = tt::track(std::path::PathBuf::from("/tmp").join(format!("am-claude-live-pending-{}", db::ulid())));
     std::fs::create_dir_all(&sock).unwrap();
     let herdr = tt::MockHerdr::start(sock.join("herdr.sock"));
-    let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
+    let host = format!("mac-builder-{}", db::ulid().to_ascii_lowercase());
     let conn = e
         .app
         .hosts

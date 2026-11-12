@@ -1,4 +1,4 @@
-m4p@m4p agents-manager % cd /tmp && env -u AM_BOT_ID -u AM_AGENT_NAME -u AM_HOOK_TOKEN codex
+mac_builder@mac_builder agents-manager % cd /tmp && env -u AM_BOT_ID -u AM_AGENT_NAME -u AM_HOOK_TOKEN codex
 [0m[2m╭────────────────────────────────────────────────────╮[0m
 [0m[2m│ >_ [0m[1mOpenAI Codex[0m[2m (v0.154.0)                         │[0m
 [0m[2m│                                                    │[0m

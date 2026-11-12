@@ -63,7 +63,7 @@ STUB
   cat > "$ROOT/fakebin/lsof" <<'STUB'
 #!/bin/bash
 p=${2#-iTCP:}
-if [ -e "$FIX/estab.$p" ]; then echo "chrome 1 m4p 20u IPv4 TCP 127.0.0.1:$p->127.0.0.1:5555 (ESTABLISHED)"; exit 0; fi
+if [ -e "$FIX/estab.$p" ]; then echo "chrome 1 mac_builder 20u IPv4 TCP 127.0.0.1:$p->127.0.0.1:5555 (ESTABLISHED)"; exit 0; fi
 case "$(cat "$FIX/lsof.mode" 2>/dev/null)" in
   missing) echo "lsof: command not found" >&2; exit 127 ;;
   fail) echo "lsof: can't open socket: Operation not permitted" >&2; exit 1 ;;

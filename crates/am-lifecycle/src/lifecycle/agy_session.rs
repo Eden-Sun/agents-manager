@@ -362,14 +362,14 @@ mod tests {
         assert_eq!(sync_locked(&c.env.app, &c.run_id).await.unwrap(), Synced::Unavailable, "有 hook 的 bot 由 hook 收，不重複記");
     }
 
-    /// 遠端（m4p）的 agy 子 agent（issue #1788）：pane 裡的行程開著兩段對話，只有一段有紀錄檔 → 綁到有紀錄檔那段；
+    /// 遠端（mac_builder）的 agy 子 agent（issue #1788）：pane 裡的行程開著兩段對話，只有一段有紀錄檔 → 綁到有紀錄檔那段；
     /// `/proc` 換成那台的 `lsof`，紀錄檔的時間與尾巴都經 ssh 從那台讀，路徑是那台家目錄底下的。
     #[tokio::test]
     async fn a_remote_agy_child_binds_the_open_conversation_that_has_a_transcript_over_ssh() {
         let e = tt::env().await;
         let sock = tt::track(std::env::temp_dir().join(format!("am-agy-remote-{}", db::ulid())));
         std::fs::create_dir_all(&sock).unwrap();
-        let host = format!("m4p-{}", db::ulid().to_ascii_lowercase());
+        let host = format!("mac-builder-{}", db::ulid().to_ascii_lowercase());
         let conn = e
             .app
             .hosts

@@ -858,7 +858,7 @@ exit 1
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// macOS 的 lsof 在 LC_ALL=C 下把中文檔名印成 `\xNN`（2026-11-04 m4p 分享頁看不到 `欣亞_….xlsx`）：照樣認得是同一個檔。
+    /// macOS 的 lsof 在 LC_ALL=C 下把中文檔名印成 `\xNN`（2026-11-04 mac_builder 分享頁看不到 `欣亞_….xlsx`）：照樣認得是同一個檔。
     #[test]
     fn macos_lsof_escaped_non_ascii_names_still_match() {
         use std::os::unix::fs::MetadataExt;

@@ -18,18 +18,18 @@ const st = (over: Partial<IdentityStatus> = {}): IdentityStatus => ({
 })
 
 const base = (over: Partial<LoginPromptInput> = {}): LoginPromptInput => ({
-  bots: [{ id: 'b1', name: 'ops', project_id: 'p-m4p', identity: 'cc1', kind: 'claude' }],
+  bots: [{ id: 'b1', name: 'ops', project_id: 'p-mac_builder', identity: 'cc1', kind: 'claude' }],
   projects: [
-    { id: 'p-m4p', host: 'm4p' },
+    { id: 'p-mac_builder', host: 'mac_builder' },
     { id: 'p-local', host: 'local' },
   ],
-  hosts: [{ name: 'm4p', connected: true, identity_status: { cc1: st() } }],
+  hosts: [{ name: 'mac_builder', connected: true, identity_status: { cc1: st() } }],
   localIdentityStatus: {},
   localConnected: true,
   ...over,
 })
 
-const down = (over: Partial<IdentityStatus>) => base({ hosts: [{ name: 'm4p', connected: true, identity_status: { cc1: st(over) } }] })
+const down = (over: Partial<IdentityStatus>) => base({ hosts: [{ name: 'mac_builder', connected: true, identity_status: { cc1: st(over) } }] })
 
 test('normalize：daemon 的 login_needed 讀進來；沒有／形狀不對都是 null（舊 daemon）', () => {
   const m = toIdentityStatusMap({
@@ -49,7 +49,7 @@ test('已登入、沒有記號：不提示', () => {
 test('探測說未登入、有 bot 綁著：提示（episode＝probe）', () => {
   const p = pendingLogins(down({ logged_in: false }))
   assert.equal(p.length, 1)
-  assert.deepEqual({ host: p[0].host, identity: p[0].identity, episode: p[0].episode, via: p[0].via }, { host: 'm4p', identity: 'cc1', episode: 'probe', via: 'probe' })
+  assert.deepEqual({ host: p[0].host, identity: p[0].identity, episode: p[0].episode, via: p[0].via }, { host: 'mac_builder', identity: 'cc1', episode: 'probe', via: 'probe' })
   assert.deepEqual(p[0].bots, [{ id: 'b1', name: 'ops' }])
 })
 
@@ -63,14 +63,14 @@ test('遠端 claude 探測問不出未登入（null），但 daemon 記了回合
 test('沒有 bot 綁著它（或綁在別台主機）：不提示', () => {
   assert.deepEqual(pendingLogins({ ...down({ logged_in: false }), bots: [] }), [])
   const other = { ...down({ logged_in: false }), bots: [{ id: 'b2', name: 'x', project_id: 'p-local', identity: 'cc1', kind: 'claude' as const }] }
-  assert.deepEqual(pendingLogins(other), [], 'cc1 在本機有 bot、但登出的是 m4p 的 cc1')
-  const wrongKind = { ...down({ logged_in: false }), bots: [{ id: 'b3', name: 'x', project_id: 'p-m4p', identity: 'cc1', kind: 'codex' as const }] }
+  assert.deepEqual(pendingLogins(other), [], 'cc1 在本機有 bot、但登出的是 mac_builder 的 cc1')
+  const wrongKind = { ...down({ logged_in: false }), bots: [{ id: 'b3', name: 'x', project_id: 'p-mac_builder', identity: 'cc1', kind: 'codex' as const }] }
   assert.deepEqual(pendingLogins(wrongKind), [])
 })
 
 test('只提示 claude 身份；主機連不上就不提示（登入也開不了 pane，離線條已經在講）', () => {
   assert.deepEqual(pendingLogins(down({ logged_in: false, kind: 'codex' })), [])
-  assert.deepEqual(pendingLogins({ ...down({ logged_in: false }), hosts: [{ name: 'm4p', connected: false, identity_status: { cc1: st({ logged_in: false }) } }] }), [])
+  assert.deepEqual(pendingLogins({ ...down({ logged_in: false }), hosts: [{ name: 'mac_builder', connected: false, identity_status: { cc1: st({ logged_in: false }) } }] }), [])
   const local = base({ bots: [{ id: 'b', name: 'l', project_id: 'p-local', identity: 'cc1', kind: 'claude' }], hosts: [], localIdentityStatus: { cc1: st({ logged_in: false }) } })
   assert.equal(pendingLogins(local)[0].host, 'local')
   assert.deepEqual(pendingLogins({ ...local, localConnected: false }), [], '本機與 herdr 斷線')
@@ -78,7 +78,7 @@ test('只提示 claude 身份；主機連不上就不提示（登入也開不了
 
 test('關掉只對同一次登出有效；換一次或登入成功後再被登出又會提示', () => {
   const first = pendingLogins(down({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } }))
-  const dismissed = { [dismissKey('m4p', 'cc1')]: 'T1' }
+  const dismissed = { [dismissKey('mac_builder', 'cc1')]: 'T1' }
   assert.deepEqual(visibleLogins(first, dismissed), [], '同一次：不重複洗版')
   const second = pendingLogins(down({ logged_in: null, login_needed: { since: 'T2', via: 'turn_auth_failure' } }))
   assert.equal(visibleLogins(second, dismissed).length, 1, '新的一次登出：再提示')
@@ -91,8 +91,8 @@ test('關掉只對同一次登出有效；換一次或登入成功後再被登�
 })
 
 test('主機暫時斷線不算登入成功：關掉的紀錄保留，重連後同一次登出不再提示', () => {
-  const dismissed = { [dismissKey('m4p', 'cc1')]: 'T1' }
-  const offline = base({ hosts: [{ name: 'm4p', connected: false, identity_status: {} }] })
+  const dismissed = { [dismissKey('mac_builder', 'cc1')]: 'T1' }
+  const offline = base({ hosts: [{ name: 'mac_builder', connected: false, identity_status: {} }] })
   const kept = pruneDismissed(dismissed, pendingForPrune(offline, pendingLogins(offline), dismissed))
   assert.deepEqual(kept, dismissed, '斷線期間不清掉')
   const back = down({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } })
@@ -106,14 +106,14 @@ test('本機 WebSocket 斷線同理：本機的關掉紀錄保留', () => {
 })
 
 test('來源連著、但已不需要登入：關掉的紀錄照樣清掉（登入成功）', () => {
-  const dismissed = { [dismissKey('m4p', 'cc1')]: 'T1' }
+  const dismissed = { [dismissKey('mac_builder', 'cc1')]: 'T1' }
   const ok = down({ logged_in: true, login_needed: null })
   assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(ok, pendingLogins(ok), dismissed)), {})
 })
 
 test('提示文字：說清楚哪個身份、哪台主機、幾顆 bot、怎麼發現的', () => {
   const [turn] = pendingLogins(down({ logged_in: null, login_needed: { since: 'T', via: 'turn_auth_failure' } }))
-  assert.equal(loginPromptText(turn).title, 'cc1（m4p）已登出')
+  assert.equal(loginPromptText(turn).title, 'cc1（mac_builder）已登出')
   assert.match(loginPromptText(turn).detail, /1 顆 bot.*回合.*失敗/)
   const [probe] = pendingLogins(down({ logged_in: false }))
   assert.match(loginPromptText(probe).detail, /偵測到已登出/)
@@ -122,22 +122,22 @@ test('提示文字：說清楚哪個身份、哪台主機、幾顆 bot、怎麼�
 })
 
 test('codex：探測說未登入、有 codex bot 綁著：提示；綁的是 claude bot 不算（kind 要對）', () => {
-  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-mac_builder', identity: 'cx1', kind: 'codex' as const }
   const codexDown = (over: Partial<IdentityStatus>) =>
-    base({ bots: [codexBot], hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', ...over }) } }] })
+    base({ bots: [codexBot], hosts: [{ name: 'mac_builder', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', ...over }) } }] })
   const p = pendingLogins(codexDown({ logged_in: false }))
   assert.equal(p.length, 1)
   assert.deepEqual({ identity: p[0].identity, via: p[0].via, bots: p[0].bots }, { identity: 'cx1', via: 'probe', bots: [{ id: 'bx', name: 'cx-ops' }] })
   // 同名身份但綁的是 claude bot：codex 身份不靠它提示。
-  const mismatch = base({ hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: false }) } }] })
+  const mismatch = base({ hosts: [{ name: 'mac_builder', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: false }) } }] })
   assert.deepEqual(pendingLogins(mismatch), [])
 })
 
 test('codex：回合整則 401／refresh token 失效被記下（login_needed）→ 提示，episode＝since，文字說是回合失敗', () => {
-  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-mac_builder', identity: 'cx1', kind: 'codex' as const }
   const turn = base({
     bots: [codexBot],
-    hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: null, login_needed: { since: 'TX', via: 'turn_auth_failure' } }) } }],
+    hosts: [{ name: 'mac_builder', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: null, login_needed: { since: 'TX', via: 'turn_auth_failure' } }) } }],
   })
   const [p] = pendingLogins(turn)
   assert.equal(p.episode, 'TX')
@@ -146,11 +146,11 @@ test('codex：回合整則 401／refresh token 失效被記下（login_needed）
 })
 
 test('codex 身份登入成功（探測回已登入、記號清掉）：不再提示，關掉的紀錄清掉', () => {
-  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-m4p', identity: 'cx1', kind: 'codex' as const }
-  const dismissed = { [dismissKey('m4p', 'cx1')]: 'TX' }
+  const codexBot = { id: 'bx', name: 'cx-ops', project_id: 'p-mac_builder', identity: 'cx1', kind: 'codex' as const }
+  const dismissed = { [dismissKey('mac_builder', 'cx1')]: 'TX' }
   const ok = base({
     bots: [codexBot],
-    hosts: [{ name: 'm4p', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: true, login_needed: null }) } }],
+    hosts: [{ name: 'mac_builder', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: true, login_needed: null }) } }],
   })
   assert.deepEqual(pendingLogins(ok), [])
   assert.deepEqual(pruneDismissed(dismissed, pendingForPrune(ok, pendingLogins(ok), dismissed)), {})

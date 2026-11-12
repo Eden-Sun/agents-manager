@@ -19,7 +19,7 @@ after(() => {
 function seed() {
   resetStoreForTest()
   useStore.setState({
-    projects: [{ id: 'p1', label: 'proj', path: '/p', host: 'm4p' } as Project],
+    projects: [{ id: 'p1', label: 'proj', path: '/p', host: 'mac_builder' } as Project],
     bots: [
       { id: 'b1', name: 'one', project_id: 'p1', kind: 'claude' } as Bot,
       { id: 'b2', name: 'two', project_id: 'p1', kind: 'codex' } as Bot,

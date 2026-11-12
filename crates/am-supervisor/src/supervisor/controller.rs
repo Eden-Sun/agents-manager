@@ -3339,7 +3339,7 @@ mod quota_restart_tests {
     #[tokio::test]
     async fn a_backfill_that_cannot_read_a_bots_host_skips_it_and_runs_again() {
         let app = app().await;
-        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p-remote','/tmp','r','m4p',?)")
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p-remote','/tmp','r','mac_builder',?)")
             .bind(crate::db::now())
             .execute(&app.db)
             .await

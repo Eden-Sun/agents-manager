@@ -328,11 +328,11 @@ mod tests {
 
     #[test]
     fn remote_root_follows_the_remote_home_only_for_tilde_paths() {
-        assert_eq!(remote_root(None, "/home/me"), "/home/me/shared-bots");
-        assert_eq!(remote_root(Some("~/kefu"), "/home/me"), "/home/me/kefu");
-        assert_eq!(remote_root(Some("  ~/kefu/  "), "/home/me/"), "/home/me/kefu/");
+        assert_eq!(remote_root(None, "/home/mac_builder"), "/home/mac_builder/shared-bots");
+        assert_eq!(remote_root(Some("~/kefu"), "/home/mac_builder"), "/home/mac_builder/kefu");
+        assert_eq!(remote_root(Some("  ~/kefu/  "), "/home/mac_builder/"), "/home/mac_builder/kefu/");
         // 這台的絕對路徑不能拿去遠端用：改回遠端的 ~/shared-bots。
-        assert_eq!(remote_root(Some("/Users/me/shared-bots"), "/home/me"), "/home/me/shared-bots");
+        assert_eq!(remote_root(Some("/Users/me/shared-bots"), "/home/mac_builder"), "/home/mac_builder/shared-bots");
         assert_eq!(remote_root(Some(""), "/"), "/shared-bots");
     }
 

@@ -57,7 +57,7 @@ test('變動的列超過三分之一（全螢幕重繪）→ 整屏重畫，不�
 })
 
 test('cursorSeq：zsh 退格留下的行尾空白不算字尾，使用者自己打的空白才補回', () => {
-  assert.equal(cursorSeq(['m4p@m4p wt % fe      ', '']), '\x1b[1;16H\x1b[?25h')
+  assert.equal(cursorSeq(['mac_builder@mac_builder wt % fe      ', '']), '\x1b[1;32H\x1b[?25h')
   assert.equal(cursorSeq(['$ echo ', ''], 1), '\x1b[1;8H\x1b[?25h')
   assert.equal(cursorSeq(['$ echo', ''], 3), '\x1b[1;7H\x1b[?25h', '畫面上沒有空白就不補')
 })

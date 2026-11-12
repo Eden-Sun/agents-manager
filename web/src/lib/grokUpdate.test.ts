@@ -10,7 +10,7 @@ const item = (over: Partial<UpstreamItem> = {}): UpstreamItem => ({
   hasUpdate: true,
   hosts: [
     { host: 'local', installedVersion: '1.0.46', error: null, behind: true },
-    { host: 'm4p', installedVersion: '1.0.47', error: null, behind: false },
+    { host: 'mac_builder', installedVersion: '1.0.47', error: null, behind: false },
   ],
   notify: null,
   text: 'grok 上游有新版 1.0.47',
@@ -35,6 +35,6 @@ test('沒有更新、不是 grok、抓不到上游、沒有落後主機：不畫
 })
 
 test('讀不到版本的主機也列（from 是 null），不能因此整顆提示消失', () => {
-  const p = grokUpdatePlan(item({ hosts: [{ host: 'm4p', installedVersion: null, error: 'timeout', behind: true }] }))
-  assert.deepEqual(p?.hosts, [{ host: 'm4p', from: null }])
+  const p = grokUpdatePlan(item({ hosts: [{ host: 'mac_builder', installedVersion: null, error: 'timeout', behind: true }] }))
+  assert.deepEqual(p?.hosts, [{ host: 'mac_builder', from: null }])
 })

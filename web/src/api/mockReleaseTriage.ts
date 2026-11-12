@@ -60,7 +60,7 @@ function triageRows(kind: string): Rec[] {
           ],
           issues: [{ entry_ids: ['c1'], title: '接回時帶 --resume-ask，停在提問的 bot 直接重現選單（採用）', triage: 'adopt' }],
         },
-        issues: [{ marker: 'm', entry_ids: ['c1'], number: 571, url: 'https://github.com/Eden-Sun/agents-manager/issues/571' }],
+        issues: [{ marker: 'm', entry_ids: ['c1'], number: 571, url: 'https://github.com/example-dev/agents-manager/issues/571' }],
       },
       {
         kind, version: '2.1.281', status: 'judged',
@@ -130,7 +130,7 @@ export class MockReleaseTriage {
     }
     if (method === 'GET' && rawPath === '/release-triage') {
       const kind = q.get('kind') ?? 'claude'
-      return { publish_enabled: false, repo: 'Eden-Sun/agents-manager', rows: this.off.has(kind) ? [] : triageRows(kind).map((row) => this.published.has(kind + '@' + row.version) ? { ...row, status: 'published', publish_error: null, issues: (((row.verdicts as Rec)?.issues ?? []) as Rec[]).map((p, index) => ({ entry_ids: p.entry_ids, number: p.duplicate_of ?? 2000 + index, url: 'https://github.com/Eden-Sun/agents-manager/issues/' + (p.duplicate_of ?? 2000 + index), comment: !!p.duplicate_of })) } : row) }
+      return { publish_enabled: false, repo: 'example-dev/agents-manager', rows: this.off.has(kind) ? [] : triageRows(kind).map((row) => this.published.has(kind + '@' + row.version) ? { ...row, status: 'published', publish_error: null, issues: (((row.verdicts as Rec)?.issues ?? []) as Rec[]).map((p, index) => ({ entry_ids: p.entry_ids, number: p.duplicate_of ?? 2000 + index, url: 'https://github.com/example-dev/agents-manager/issues/' + (p.duplicate_of ?? 2000 + index), comment: !!p.duplicate_of })) } : row) }
     }
     if (method === 'POST' && rawPath === '/release-triage/publish') {
       this.published.add(String(b.kind) + '@' + b.version)

@@ -691,7 +691,7 @@
         set(&app, LOCAL_HOST, "claude:cc0", reading(1.0)).await;
         set(&app, LOCAL_HOST, "claude:cc1", reading(40.0)).await;
         set(&app, LOCAL_HOST, "claude:nobody", reading(50.0)).await;
-        set(&app, "m4p", "claude:cc0", reading(60.0)).await;
+        set(&app, "mac_builder", "claude:cc0", reading(60.0)).await;
 
         let ident = |name: &str, pairs: &[(&str, &str)]| crate::config::IdentityCfg {
             name: name.into(),
@@ -717,7 +717,7 @@
         assert_eq!(q.get("claude").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(25.0));
         assert!(q.get("claude:cc1").is_some(), "有自己帳號目錄的照舊分開");
         assert!(q.get("claude:nobody").is_some(), "查不到的身份寧可保留");
-        assert!(q.get(&quota_key("m4p", "claude:cc0")).is_some(), "別台主機的不受影響");
+        assert!(q.get(&quota_key("mac_builder", "claude:cc0")).is_some(), "別台主機的不受影響");
     }
 
     #[tokio::test]
@@ -844,7 +844,7 @@
     async fn hosts_are_polled_at_the_same_time() {
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let run = for_each_host(vec!["local".into(), "m4p".into()], |_host| {
+        let run = for_each_host(vec!["local".into(), "mac_builder".into()], |_host| {
             let (barrier, done) = (barrier.clone(), done.clone());
             async move {
                 barrier.wait().await;
@@ -1321,10 +1321,10 @@
     fn keys_are_host_scoped() {
         assert_eq!(quota_key("local", "claude"), "claude");
         assert_eq!(quota_key("local", "claude:cc1"), "claude:cc1");
-        assert_eq!(quota_key("m4p", "claude:cc1"), "m4p/claude:cc1");
-        let hosts = vec!["local".to_string(), "m4p".to_string()];
+        assert_eq!(quota_key("mac_builder", "claude:cc1"), "mac_builder/claude:cc1");
+        let hosts = vec!["local".to_string(), "mac_builder".to_string()];
         assert_eq!(host_of_key("claude", &hosts), ("local", "claude"));
-        assert_eq!(host_of_key("m4p/claude:cc1", &hosts), ("m4p", "claude:cc1"));
+        assert_eq!(host_of_key("mac_builder/claude:cc1", &hosts), ("mac_builder", "claude:cc1"));
         assert_eq!(host_of_key("gone/claude", &hosts), ("local", "gone/claude"));
     }
 
@@ -1551,7 +1551,7 @@
     #[tokio::test]
     async fn authoritative_codex_week_only_reading_replaces_cached_windows_and_hits() {
         let app = crate::testing::env().await.app.clone();
-        for host in [LOCAL_HOST, "m4p"] {
+        for host in [LOCAL_HOST, "mac_builder"] {
             for bucket in [None, Some("five_hour"), Some("seven_day")] {
                 let hit = LimitHit { message: "usage limit".into(), until: None,
                     at: "2026-10-12T13:48:00Z".into(), bucket: bucket.map(String::from) };
@@ -1675,11 +1675,11 @@
         set(&app, LOCAL_HOST, "grok", seed(&hit)).await;
         assert!(app.quotas.lock().await[&quota_key(LOCAL_HOST, "grok")].limit_hit.is_some(), "前提：撞限記下了");
 
-        set(&app, "m4p", "grok", reading()).await;
+        set(&app, "mac_builder", "grok", reading()).await;
         set(&app, LOCAL_HOST, "grok:other", reading()).await;
         {
             let quotas = app.quotas.lock().await;
-            for key in [quota_key("m4p", "grok"), quota_key(LOCAL_HOST, "grok:other")] {
+            for key in [quota_key("mac_builder", "grok"), quota_key(LOCAL_HOST, "grok:other")] {
                 let written = quotas.get(&key).unwrap_or_else(|| panic!("前提：{key} 的讀數真的寫進去了"));
                 assert_eq!(written.seven_day.as_ref().unwrap().used_pct, 55.0, "{key}");
                 assert!(written.limit_hit.is_none(), "{key}：自己沒有撞限");

@@ -52,7 +52,7 @@ pub fn due_credits(quotas: &std::collections::BTreeMap<String, Quota>, stale: &B
     out
 }
 
-/// `m4p/codex:co0` → `co0 @m4p`；`codex` → `codex`。
+/// `mac_builder/codex:co0` → `co0 @mac_builder`；`codex` → `codex`。
 fn label(key: &str) -> String {
     let (host, rest) = key.split_once('/').map_or(("", key), |(h, r)| (h, r));
     let identity = rest.split_once(':').map(|(_, i)| i);
@@ -164,7 +164,7 @@ mod tests {
         let now = chrono::Utc::now();
         let mut m = std::collections::BTreeMap::new();
         m.insert(
-            "m4p/codex:co0".to_string(),
+            "mac_builder/codex:co0".to_string(),
             quota(vec![
                 credit("soon", "available", Some(at(23))),
                 credit("later", "available", Some(at(25))),
@@ -196,16 +196,16 @@ mod tests {
     #[test]
     fn message_names_the_credit_identity_and_how_to_use_it() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-12-01T10:00:00Z").unwrap().with_timezone(&chrono::Utc);
-        let d = Due { key: "m4p/codex:co0".into(), id: "x".into(), title: Some("Full reset".into()), expires_at: now + chrono::Duration::hours(17) };
+        let d = Due { key: "mac_builder/codex:co0".into(), id: "x".into(), title: Some("Full reset".into()), expires_at: now + chrono::Duration::hours(17) };
         let m = message(&d, now);
         assert!(m.contains("『Full reset』12/02 11:00 (+8) 到期"), "{m}");
-        assert!(m.contains("co0 @m4p") && m.contains("/status → Reset usage"), "{m}");
+        assert!(m.contains("co0 @mac_builder") && m.contains("/status → Reset usage"), "{m}");
     }
 
     #[tokio::test]
     async fn each_credit_is_pushed_once_even_across_ticks() {
         let e = crate::testing::env().await;
-        e.app.quotas.lock().await.insert("m4p/codex:co0".into(), quota(vec![credit("c1", "available", Some(at(20))), credit("c2", "available", Some(at(60)))]));
+        e.app.quotas.lock().await.insert("mac_builder/codex:co0".into(), quota(vec![credit("c1", "available", Some(at(20))), credit("c2", "available", Some(at(60)))]));
         assert_eq!(tick(&e.app).await, 1);
         assert_eq!(tick(&e.app).await, 0, "同一張不再推");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key = ?")

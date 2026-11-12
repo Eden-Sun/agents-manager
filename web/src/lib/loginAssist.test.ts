@@ -4,7 +4,7 @@ import type { LoginStatus } from '../api'
 import { canSubmitCode, loginHint, loginPhase, validLoginCode } from './loginAssist.ts'
 
 const base: LoginStatus = {
-  host: 'm4p',
+  host: 'mac_builder',
   pane_id: 'w1:p2',
   identity: 'cc1',
   url: 'https://claude.com/oauth/authorize?a=b',

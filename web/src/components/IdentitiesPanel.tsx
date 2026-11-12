@@ -406,7 +406,7 @@ function ShellIdentities() {
   const collect = (host: string, label: string, map: IdentityStatusMap) => {
     for (const st of Object.values(map)) {
       if (st.source !== 'shell') continue
-      // 只有同一台的 config 才蓋得掉：本機的 `cc1` 不能把 m4p 認出來的 `cc1`（別的帳號）藏起來。
+      // 只有同一台的 config 才蓋得掉：本機的 `cc1` 不能把 mac_builder 認出來的 `cc1`（別的帳號）藏起來。
       if (shadowedByConfig(configured, host, st.name)) continue
       rows.push({ host, label, st })
     }

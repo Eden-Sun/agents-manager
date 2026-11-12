@@ -3,14 +3,14 @@ import assert from 'node:assert/strict'
 import { portProblem, sessionProblem, sshTargetProblem } from './hostForm.ts'
 
 test('ssh 目標：跟 daemon 同一條規則（開頭 -、@ 後面以 - 開頭、空白與控制字元都不行）', () => {
-  for (const ok of ['m4p', 'me@10.0.0.2', 'user@host.example', 'ssh-alias_1']) assert.equal(sshTargetProblem(ok), null, ok)
+  for (const ok of ['mac_builder', 'me@10.0.0.2', 'user@host.example', 'ssh-alias_1']) assert.equal(sshTargetProblem(ok), null, ok)
   for (const bad of ['', '-oProxyCommand=true', 'me@-oProxyCommand=x', 'a b', 'a\tb', 'a\nb']) assert.ok(sshTargetProblem(bad), JSON.stringify(bad))
 })
 
 test('ssh 目標含 C1 控制字元（U+0080–U+009F，例如 U+0085 NEL）：跟 daemon 一樣拒絕', () => {
-  assert.notEqual(sshTargetProblem('m4p\u0085'), null)
-  assert.notEqual(sshTargetProblem('m4p\u009f'), null)
-  assert.equal(sshTargetProblem('user@m4p.local'), null)
+  assert.notEqual(sshTargetProblem('mac_builder\u0085'), null)
+  assert.notEqual(sshTargetProblem('mac_builder\u009f'), null)
+  assert.equal(sshTargetProblem('user@mac_builder.local'), null)
 })
 
 test('herdr_session：1–64 字、英數開頭、只有英數 . _ -', () => {

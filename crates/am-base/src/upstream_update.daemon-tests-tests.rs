@@ -56,7 +56,7 @@
     fn claude_host_version_mismatch_uses_one_fleet_target_and_lists_every_host() {
         let disks = [
             disk("local", "2.1.284"),
-            disk("m4p", "2.1.281"),
+            disk("mac_builder", "2.1.281"),
             ("offline".into(), Err("timeout".into())),
         ];
         let s = build_status("claude", &ok("2.1.283"), &disks, None);
@@ -73,7 +73,7 @@
         );
         let text = notice_text(&s);
         assert!(text.contains("local：2.1.284 → 2.1.284"), "{text}");
-        assert!(text.contains("m4p：2.1.281 → 2.1.284"), "{text}");
+        assert!(text.contains("mac_builder：2.1.281 → 2.1.284"), "{text}");
         assert!(text.contains("offline：timeout → 2.1.284"), "{text}");
         assert!(text.contains("claude install 2.1.284"), "{text}");
     }
@@ -152,13 +152,13 @@
     /// herdr 的磁碟版本是 `herdr 0.9.1` 這種形狀；目標就是上游最新版，落後的主機列在通知裡，並講明會重啟 herdr server。
     #[test]
     fn herdr_behind_upstream_names_the_host_and_warns_about_the_restart() {
-        let s = build_status("herdr", &ok("0.9.3"), &[disk("local", "herdr 0.9.1"), disk("m4p", "herdr 0.9.3")], None);
+        let s = build_status("herdr", &ok("0.9.3"), &[disk("local", "herdr 0.9.1"), disk("mac_builder", "herdr 0.9.3")], None);
         assert!(s.has_update && s.hosts[0].behind && !s.hosts[1].behind);
         assert_eq!(s.target_version.as_deref(), Some("0.9.3"));
         assert_eq!(s.hosts[0].installed_version.as_deref(), Some("0.9.1"));
         assert_eq!(s.source_url, "https://github.com/herdrdev/herdr/releases");
         let t = notice_text(&s);
-        assert!(t.contains("herdr 上游有新版 0.9.3") && t.contains("local 是 0.9.1") && !t.contains("m4p") && t.contains("重啟 herdr server"), "{t}");
+        assert!(t.contains("herdr 上游有新版 0.9.3") && t.contains("local 是 0.9.1") && !t.contains("mac_builder") && t.contains("重啟 herdr server"), "{t}");
         let same = build_status("herdr", &ok("0.9.3"), &[disk("local", "herdr 0.9.3")], None);
         assert!(!same.has_update && !should_notify(&same, None));
         let err = build_status("herdr", &Err("GitHub releases 回 HTTP 403".into()), &[disk("local", "herdr 0.9.1")], None);
@@ -264,12 +264,12 @@
 
     #[test]
     fn a_grok_host_behind_the_stable_release_is_an_update_with_the_official_command() {
-        let s = build_status("grok", &ok("1.0.47"), &[disk("local", "grok 1.0.46 (2765805b9442)"), disk("m4p", "grok 1.0.47 (abcdef012345)")], None);
+        let s = build_status("grok", &ok("1.0.47"), &[disk("local", "grok 1.0.46 (2765805b9442)"), disk("mac_builder", "grok 1.0.47 (abcdef012345)")], None);
         assert!(s.has_update && s.hosts[0].behind && !s.hosts[1].behind);
         assert_eq!(s.hosts[0].installed_version.as_deref(), Some("1.0.46"), "`(commit)` 後綴不是版本的一部分");
         assert_eq!(s.target_version.as_deref(), Some("1.0.47"));
         let t = notice_text(&s);
-        assert!(t.contains("grok") && t.contains("1.0.47") && t.contains("local 磁碟上是 1.0.46") && !t.contains("m4p"), "{t}");
+        assert!(t.contains("grok") && t.contains("1.0.47") && t.contains("local 磁碟上是 1.0.46") && !t.contains("mac_builder"), "{t}");
         assert!(t.contains("grok update"), "官方的升級指令要寫出來（只提示，不一鍵安裝）：{t}");
         let up_to_date = build_status("grok", &ok("1.0.46"), &[disk("local", "grok 1.0.46 (2765805b9442)")], None);
         assert!(!up_to_date.has_update && !should_notify(&up_to_date, None));
@@ -301,13 +301,13 @@
 
     #[test]
     fn an_agy_host_behind_the_manifest_is_an_update_and_an_equal_one_is_latest() {
-        let s = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("m4p", "1.4.2")], None);
+        let s = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("mac_builder", "1.4.2")], None);
         assert!(s.has_update && !s.hosts[0].behind && s.hosts[1].behind);
         assert_eq!(s.target_version.as_deref(), Some("1.4.5"));
         let t = notice_text(&s);
-        assert!(t.contains("agy 上游有新版 1.4.5") && t.contains("m4p 磁碟上是 1.4.2") && !t.contains("local"), "{t}");
+        assert!(t.contains("agy 上游有新版 1.4.5") && t.contains("mac_builder 磁碟上是 1.4.2") && !t.contains("local"), "{t}");
         assert!(t.contains("更新檢查") && !t.contains("agy update") && !t.contains("agy install"), "只指向設定頁的更新，不叫人跑官方指令：{t}");
-        let latest = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("m4p", "1.4.5")], None);
+        let latest = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("mac_builder", "1.4.5")], None);
         assert!(!latest.has_update && !should_notify(&latest, None), "2026-10-23 兩台都在 1.4.5：已是最新");
         // 磁碟比 manifest 新（別的平台還沒發）：不叫人降版。
         let newer = build_status("agy", &ok("1.4.4"), &[disk("local", "1.4.5")], None);

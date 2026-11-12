@@ -35,7 +35,7 @@ test('撞限橫幅（還沒過期）或窗口 100% 且重置還在後面＝用�
 test('有券才問；沒券、stale、非 codex 都不問', () => {
   const quota: QuotaMap = {
     codex: q({ available: 0, limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never }),
-    'm4p/codex:co0': q({ stale: true, limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never }),
+    'mac_builder/codex:co0': q({ stale: true, limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never }),
     claude: q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never }),
   }
   assert.deepEqual(resetCreditOffers({}, quota, NOW).offers, [])
@@ -43,31 +43,31 @@ test('有券才問；沒券、stale、非 codex 都不問', () => {
 
 test('同一次耗盡只問一次（不論用或不用都記下）；新的耗盡事件才再問', () => {
   const hit = q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never })
-  const first = resetCreditOffers({}, { 'm4p/codex:co0': hit }, NOW)
+  const first = resetCreditOffers({}, { 'mac_builder/codex:co0': hit }, NOW)
   assert.equal(first.offers.length, 1)
   assert.deepEqual(first.offers[0], {
-    id: 'm4p/codex:co0|hit:A',
-    key: 'm4p/codex:co0',
-    host: 'm4p',
+    id: 'mac_builder/codex:co0|hit:A',
+    key: 'mac_builder/codex:co0',
+    host: 'mac_builder',
     identity: 'co0',
     available: 2,
     title: 'Full reset',
     expiresAt: '2026-11-30T00:00:00Z',
     heldBots: [],
   })
-  const again = resetCreditOffers(first.next, { 'm4p/codex:co0': hit }, NOW + 60_000)
+  const again = resetCreditOffers(first.next, { 'mac_builder/codex:co0': hit }, NOW + 60_000)
   assert.deepEqual(again.offers, [], '同一次耗盡不重問')
   const newHit = q({ limit_hit: { message: 'x', until: FUTURE, at: 'B', bucket: null } as never })
-  assert.equal(resetCreditOffers(again.next, { 'm4p/codex:co0': newHit }, NOW).offers.length, 1, '新的撞限紀錄＝新事件')
+  assert.equal(resetCreditOffers(again.next, { 'mac_builder/codex:co0': newHit }, NOW).offers.length, 1, '新的撞限紀錄＝新事件')
 })
 
 test('提示列出因額度停工的 bot 名稱（daemon 的 held_bots）', () => {
   const hit = q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never, held_bots: ['alpha', 'beta'] })
-  const [offer] = resetCreditOffers({}, { 'm4p/codex:co0': hit }, NOW).offers
+  const [offer] = resetCreditOffers({}, { 'mac_builder/codex:co0': hit }, NOW).offers
   assert.deepEqual(offer.heldBots, ['alpha', 'beta'])
   assert.match(resetCreditOfferText(offer), /停工的 bot：alpha、beta。/)
   const none = q({ limit_hit: { message: 'x', until: FUTURE, at: 'A', bucket: null } as never })
-  const [bare] = resetCreditOffers({}, { 'm4p/codex:co0': none }, NOW).offers
+  const [bare] = resetCreditOffers({}, { 'mac_builder/codex:co0': none }, NOW).offers
   assert.deepEqual(bare.heldBots, [])
   assert.doesNotMatch(resetCreditOfferText(bare), /停工的 bot/)
 })
@@ -75,6 +75,6 @@ test('提示列出因額度停工的 bot 名稱（daemon 的 held_bots）', () =
 test('key 拆成主機與身份', () => {
   assert.deepEqual(parseCreditKey('codex'), { host: 'local', identity: null })
   assert.deepEqual(parseCreditKey('codex:co0'), { host: 'local', identity: 'co0' })
-  assert.deepEqual(parseCreditKey('m4p/codex'), { host: 'm4p', identity: null })
-  assert.deepEqual(parseCreditKey('m4p/codex:co0'), { host: 'm4p', identity: 'co0' })
+  assert.deepEqual(parseCreditKey('mac_builder/codex'), { host: 'mac_builder', identity: null })
+  assert.deepEqual(parseCreditKey('mac_builder/codex:co0'), { host: 'mac_builder', identity: 'co0' })
 })

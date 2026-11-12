@@ -598,17 +598,17 @@ mod host_baseline_cfg_tests {
     /// 沒寫這段＝每台 off，存回去也不會多出 `[host_baseline]`；寫了照讀、照存。
     #[test]
     fn an_absent_table_is_off_everywhere_and_is_never_written_out() {
-        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n").unwrap();
+        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n").unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
         assert!(cfg.host_baseline.is_default());
-        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Off);
+        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Off);
         assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off);
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("host_baseline"), "{text}");
 
-        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n\n[host_baseline.sync]\nm4p = 'ask'\n").unwrap();
+        let (cfg, unknown) = parse_config("[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n\n[host_baseline.sync]\nmac_builder = 'ask'\n").unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
-        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Ask);
+        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Ask);
         assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Off, "a host that is not listed is off");
         let again: ConfigFile = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(again.host_baseline, cfg.host_baseline);
@@ -617,11 +617,11 @@ mod host_baseline_cfg_tests {
     /// 鍵對不上主機、`auto`、寫錯的值：設定檔照樣載入，各自只當 off／ask，並且各記一則 WARN（同一則只記一次）。
     #[test]
     fn unknown_keys_auto_and_bad_values_load_with_one_warning_each() {
-        let text = "[[hosts]]\nname = 'm4p'\nssh = 'm4p'\n\n[[hosts]]\nname = 'box2'\nssh = 'b'\n\n[host_baseline.sync]\nlocal = 'auto'\nm4p = 'yes'\ngone-host = 'ask'\nbox2 = 'off'\n";
+        let text = "[[hosts]]\nname = 'mac_builder'\nssh = 'mac_builder'\n\n[[hosts]]\nname = 'box2'\nssh = 'b'\n\n[host_baseline.sync]\nlocal = 'auto'\nmac_builder = 'yes'\ngone-host = 'ask'\nbox2 = 'off'\n";
         let (cfg, unknown) = parse_config(text).expect("a bad [host_baseline.sync] must not fail the config load");
         assert!(unknown.is_empty(), "{unknown:?}");
         assert_eq!(cfg.host_baseline_sync(LOCAL_HOST), HostBaselineSyncMode::Ask, "auto is ask in 3a");
-        assert_eq!(cfg.host_baseline_sync("m4p"), HostBaselineSyncMode::Off, "an unreadable value is off");
+        assert_eq!(cfg.host_baseline_sync("mac_builder"), HostBaselineSyncMode::Off, "an unreadable value is off");
         assert_eq!(cfg.host_baseline_sync("gone-host"), HostBaselineSyncMode::Off, "a key that names no host is ignored");
         assert_eq!(cfg.host_baseline_sync("box2"), HostBaselineSyncMode::Off);
         assert_eq!(cfg.host_baseline_orphan_sync_keys(), vec!["gone-host".to_string()]);
@@ -629,7 +629,7 @@ mod host_baseline_cfg_tests {
         assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(warnings.iter().any(|w| w.contains("`gone-host`")), "{warnings:?}");
         assert!(warnings.iter().any(|w| w.contains("`local`") && w.contains("auto")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("`m4p`")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("`mac_builder`")), "{warnings:?}");
         assert_eq!(warn_host_baseline_once(&cfg), 3);
         assert_eq!(warn_host_baseline_once(&cfg), 0, "the same warning is logged once per process");
         let mut more = cfg.clone();
@@ -2465,8 +2465,8 @@ mod v40_tests {
     fn host(port: u16) -> HostCfg {
         HostCfg { daemon_url: None,
             shared_session: false,
-            name: "m4p".into(),
-            ssh: "m4p@100.64.0.2".into(),
+            name: "mac_builder".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: port,
             ssh_opts: vec![],
             herdr_session: "agents-manager".into(),
@@ -2477,10 +2477,10 @@ mod v40_tests {
     #[test]
     fn attach_commands() {
         assert_eq!(attach_command(None, "am-v40"), "herdr --session am-v40");
-        assert_eq!(attach_command(Some(&host(22)), "x"), "herdr --remote m4p@100.64.0.2 --session agents-manager");
+        assert_eq!(attach_command(Some(&host(22)), "x"), "herdr --remote mac_builder@100.64.0.2 --session agents-manager");
         assert_eq!(
             attach_command(Some(&host(2222)), "x"),
-            "herdr --remote ssh://m4p@100.64.0.2:2222 --session agents-manager"
+            "herdr --remote ssh://mac_builder@100.64.0.2:2222 --session agents-manager"
         );
     }
 

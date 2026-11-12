@@ -86,7 +86,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         tracing::warn!(host, error = %e, "skipping Claude quota probe because the host HOME is unreadable");
         e
     })?;
-    // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
+    // `ccN` are per host (SPEC §16): cc1 on mac_builder is a different account than here.
     let identities = crate::tools::identities_for_host(app, host).await;
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     // DB-backed so a daemon restart doesn't lose the proof.

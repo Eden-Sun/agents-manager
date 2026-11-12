@@ -218,7 +218,7 @@ pub const SHARE_LSOF: &str = "/usr/sbin/lsof";
 pub fn script_common_header() -> String {
     let dir_helpers = am_base::outbox_remote::directory_identity_helpers();
     // macOS 的 lsof 在 /usr/sbin（/usr/bin 沒有）：寫錯的話 BSD 那條身份檢查每個檔都失敗，分享頁的檔案清單永遠是空的
-    // （2026-11-04 m4p 實測）。Linux 走 /proc，不用 lsof；`file_identity_helpers` 自己再退回 /usr/bin/lsof。
+    // （2026-11-04 mac_builder 實測）。Linux 走 /proc，不用 lsof；`file_identity_helpers` 自己再退回 /usr/bin/lsof。
     let file_helpers = am_base::outbox_remote::file_identity_helpers(SHARE_LSOF);
     format!(
         r#"umask 077

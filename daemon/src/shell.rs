@@ -678,7 +678,7 @@ mod tests {
                 created_at: "2026-09-07T00:00:00Z".into(),
             },
             HostShell {
-                host: "m4p".into(),
+                host: "mac_builder".into(),
                 herdr_session: "agents-manager".into(),
                 workspace_id: "w3".into(),
                 tab_id: "w3:t1".into(),
@@ -690,9 +690,9 @@ mod tests {
         let found = |host: &str, pane: &str| rows.iter().any(|s| s.host == host && s.pane_id == pane);
 
         assert!(found("local", "w1:p2"));
-        assert!(found("m4p", "w3:p1"));
+        assert!(found("mac_builder", "w3:p1"));
         // The same pane_id on the wrong host must not match…
-        assert!(!found("m4p", "w1:p2"));
+        assert!(!found("mac_builder", "w1:p2"));
         // …and neither must a pane the daemon never opened, which is every bot pane.
         assert!(!found("local", "w1:p1"));
     }
@@ -733,7 +733,7 @@ mod tests {
         // 沒被 trace 的 pane 仍然是陌生人。
         assert!(matches!(registered(&app, "local", "w1:pX", Access::View).await, Err(LcError::NotFound(_))));
         // 主機不對也不算（pane id 只在單一主機內唯一）。
-        assert!(matches!(registered(&app, "m4p", "w1:pS", Access::View).await, Err(LcError::NotFound(_))));
+        assert!(matches!(registered(&app, "mac_builder", "w1:pS", Access::View).await, Err(LcError::NotFound(_))));
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 

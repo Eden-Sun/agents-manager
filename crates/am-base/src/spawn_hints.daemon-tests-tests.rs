@@ -341,7 +341,7 @@
 
     #[tokio::test]
     async fn nr_claim_review_v65_backfill_preserves_local_and_remote_children() {
-        for host in ["local", "m4p"] {
+        for host in ["local", "mac_builder"] {
             let env = crate::testing::env().await;
             let bot = crate::testing::claude_bot(&env.app, &env.project_id, "parent").await;
             // A different bot's active run supplies the host session even while the parent sleeps.

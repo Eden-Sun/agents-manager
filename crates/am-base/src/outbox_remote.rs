@@ -129,7 +129,7 @@ pub fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &st
   fd_pid=$(exec /bin/sh -c 'printf "%s\n" "$PPID"') || { exec 4<&-; return 1; }
   case "$fd_pid" in ''|*[!0-9]*) exec 4<&-; return 1 ;; esac
   lsof_out=$("$lsof_bin" -a -p "$fd_pid" -d 3,4 -FfDin 2>/dev/null) || { exec 4<&-; return 1; }
-  # LC_ALL=C 下 lsof 把非 ASCII 位元組印成 `\xNN`（中文檔名，2026-11-04 m4p 分享頁看不到檔案）：期望值也照這個寫法換一份來比。
+  # LC_ALL=C 下 lsof 把非 ASCII 位元組印成 `\xNN`（中文檔名，2026-11-04 mac_builder 分享頁看不到檔案）：期望值也照這個寫法換一份來比。
   ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk -v expected="$expected" '
     BEGIN {
       for (i = 128; i < 256; i++) ord[sprintf("%c", i)] = i

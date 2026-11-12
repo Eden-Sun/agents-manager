@@ -4,8 +4,8 @@ import { dropHostModels, MODELS_RETRY_MS, modelsKey, modelsKeyHost, shouldFetchM
 
 test('modelsKey / modelsKeyHost round-trip, empty host means local', () => {
   assert.equal(modelsKey('claude', '', null), 'claude@local@')
-  assert.equal(modelsKey('codex', 'm4p', 'work'), 'codex@m4p@work')
-  assert.equal(modelsKeyHost('codex@m4p@work'), 'm4p')
+  assert.equal(modelsKey('codex', 'mac_builder', 'work'), 'codex@mac_builder@work')
+  assert.equal(modelsKeyHost('codex@mac_builder@work'), 'mac_builder')
   assert.equal(modelsKeyHost('claude@local@'), 'local')
 })
 
@@ -25,11 +25,11 @@ test('shouldFetchModels: a failure is retried only after the cooldown (issue #26
 })
 
 test('dropHostModels removes only that host, keeps identity of untouched cache', () => {
-  const cache = { 'claude@m4p@': null, 'codex@m4p@a': [], 'claude@local@': [], 'claude@other@': null }
-  const next = dropHostModels(cache, 'm4p')
+  const cache = { 'claude@mac_builder@': null, 'codex@mac_builder@a': [], 'claude@local@': [], 'claude@other@': null }
+  const next = dropHostModels(cache, 'mac_builder')
   assert.deepEqual(Object.keys(next).sort(), ['claude@local@', 'claude@other@'])
-  assert.equal(dropHostModels(next, 'm4p'), next)
-  assert.deepEqual(Object.keys(dropHostModels(cache, '')), ['claude@m4p@', 'codex@m4p@a', 'claude@other@'])
+  assert.equal(dropHostModels(next, 'mac_builder'), next)
+  assert.deepEqual(Object.keys(dropHostModels(cache, '')), ['claude@mac_builder@', 'codex@mac_builder@a', 'claude@other@'])
 })
 
 import { lastKnownModels, saveLastModels } from './modelsCache.ts'
@@ -52,7 +52,7 @@ test('lastKnownModels: 成功寫入後讀回；沒有同 key 就用同 kind 最�
   assert.equal(lastKnownModels('codex', 'codex@local@'), null)
   saveLastModels('codex@local@', [info('gpt-6.1-luna')])
   assert.deepEqual(lastKnownModels('codex', 'codex@local@')?.map((m) => m.id), ['gpt-6.1-luna'])
-  assert.deepEqual(lastKnownModels('codex', 'codex@m4p@')?.map((m) => m.id), ['gpt-6.1-luna'], '同 kind 任一份')
+  assert.deepEqual(lastKnownModels('codex', 'codex@mac_builder@')?.map((m) => m.id), ['gpt-6.1-luna'], '同 kind 任一份')
   assert.equal(lastKnownModels('claude', 'claude@local@'), null, '不同 kind 不借用')
 })
 

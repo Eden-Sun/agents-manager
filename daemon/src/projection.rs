@@ -332,7 +332,7 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
                 // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
                 // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
                 // owns those, so an unknown name is only an error outside that set.
-                // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 m4p 的 `work`（codex）可以並存，
+                // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 mac_builder 的 `work`（codex）可以並存，
                 // 只看名字會拿到第一筆同名的、判成 kind 不符。規則跟 API 的 `tools::identity_for_host`
                 // 同一份（`merge_identities`）。這裡拿不到那台偵測到的 `ccN`，所以傳 `None`：沒寫 host 的
                 // `ccN` 在遠端先不給，落到「shell alias 本來就合法」那條。
@@ -921,25 +921,25 @@ mod tests {
         };
         let with = |hosts: Vec<HostCfg>| ConfigFile { hosts, ..Default::default() };
         // serde 的 `default` 只在缺 key 時生效：手寫一個空字串照樣進得來。
-        let blank_session = |s: &str| HostCfg { daemon_url: None, herdr_session: s.into(), ..host("m4p", "me@10.0.0.2") };
+        let blank_session = |s: &str| HostCfg { daemon_url: None, herdr_session: s.into(), ..host("mac_builder", "me@10.0.0.2") };
 
-        validate(&with(vec![host("m4p", "me@10.0.0.2")])).expect("一台正常的遠端要過");
+        validate(&with(vec![host("mac_builder", "me@10.0.0.2")])).expect("一台正常的遠端要過");
         // 前後空白交給 `project_inner` trim 掉寫回，不在這裡擋開機。
-        validate(&with(vec![host("m4p", " me@10.0.0.2 ")])).expect("空白是正規化的事，不是拒絕的事");
+        validate(&with(vec![host("mac_builder", " me@10.0.0.2 ")])).expect("空白是正規化的事，不是拒絕的事");
 
         for (what, cfg, needle) in [
             ("保留字 local", with(vec![host("local", "me@10.0.0.2")]), "reserved"),
-            ("名字不合 slug", with(vec![host("M4P", "me@10.0.0.2")]), "invalid host name"),
+            ("名字不合 slug", with(vec![host("MAC_BUILDER", "me@10.0.0.2")]), "invalid host name"),
             ("名字帶斜線（會進檔名與 launchd label）", with(vec![host("a/b", "me@10.0.0.2")]), "invalid host name"),
-            ("空的 ssh", with(vec![host("m4p", "   ")]), "empty ssh target"),
-            ("同名兩列", with(vec![host("m4p", "a@1"), host("m4p", "b@2")]), "duplicate"),
+            ("空的 ssh", with(vec![host("mac_builder", "   ")]), "empty ssh target"),
+            ("同名兩列", with(vec![host("mac_builder", "a@1"), host("mac_builder", "b@2")]), "duplicate"),
             ("空的 herdr_session", with(vec![blank_session("")]), "empty herdr_session"),
             ("herdr_session 只有空白", with(vec![blank_session("  ")]), "empty herdr_session"),
-            ("ssh 以 - 開頭（會被 ssh 當成選項）", with(vec![host("m4p", "-oProxyCommand=true")]), "ssh target"),
-            ("ssh 帶空白", with(vec![host("m4p", "me@host extra")]), "ssh target"),
+            ("ssh 以 - 開頭（會被 ssh 當成選項）", with(vec![host("mac_builder", "-oProxyCommand=true")]), "ssh target"),
+            ("ssh 帶空白", with(vec![host("mac_builder", "me@host extra")]), "ssh target"),
             ("herdr_session 帶斜線（會進遠端路徑）", with(vec![blank_session("../../x")]), "herdr_session"),
             ("herdr_session 帶引號（會進 plist）", with(vec![blank_session("a\"b")]), "herdr_session"),
-            ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { daemon_url: None, ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("m4p", "me@10.0.0.2") }]), "ssh_opts"),
+            ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { daemon_url: None, ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("mac_builder", "me@10.0.0.2") }]), "ssh_opts"),
         ] {
             let err = validate(&cfg).expect_err(what).to_string();
             assert!(err.contains(needle), "{what}: {err}");
@@ -1036,7 +1036,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-opt-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '-oProxyCommand=true'\n";
+        let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'mac_builder'\nssh = '-oProxyCommand=true'\n";
         std::fs::write(&path, text).unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '  me@10.0.0.2  '\nherdr_session = '  '\n",
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'mac_builder'\nssh = '  me@10.0.0.2  '\nherdr_session = '  '\n",
         )
         .unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
@@ -1116,17 +1116,17 @@ mod tests {
             format!(
                 "[server]\nlisten = '127.0.0.1:7788'\n\n\
                  [[identities]]\nname = 'work'\nkind = 'claude'\n\n\
-                 [[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n\n\
-                 [[projects]]\nid = 'p1'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n\n\
+                 [[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'mac_builder'\n\n\
+                 [[projects]]\nid = 'p1'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'mac_builder'\n\n\
                  [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = '{bot_kind}'\nidentity = 'work'\n"
             )
         };
         std::fs::write(&path, text("codex")).unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
-        project_config(&store, &pool).await.expect("m4p 的 work 是 codex，跟 bot 一致");
+        project_config(&store, &pool).await.expect("mac_builder 的 work 是 codex，跟 bot 一致");
 
-        // 在 m4p 上綁 claude：那台的 work 是 codex，照樣擋（不會去拿本機那份 claude 放行）。
+        // 在 mac_builder 上綁 claude：那台的 work 是 codex，照樣擋（不會去拿本機那份 claude 放行）。
         std::fs::write(&path, text("claude")).unwrap();
         let err = project_config(&store, &pool).await.unwrap_err().to_string();
         assert!(err.contains("is for codex"), "{err}");

@@ -1882,7 +1882,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             ask_answers::record_in_flight(app, &bot.id, &conv, vec![rec]).await?;
             Ok(())
         }
-        // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
+        // 2026-09-30 使用者：console-rpa（mac_builder）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
         // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
         HookKind::RelayAnnounce { to_bot_id, to_run_id, delivery_id, text } => {
             // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
@@ -3805,7 +3805,7 @@ mod external_claim_tests {
                 "hook_event_name": "Stop",
                 "session_id": sid,
                 "prompt_id": db::ulid(),
-                // m4p 的路徑：agm-host 讀不到。
+                // mac_builder 的路徑：agm-host 讀不到。
                 "transcript_path": "/Users/me/.claude/projects/x/s.jsonl",
                 "last_assistant_message": "已經交給 memleak 排查，先看這幾點",
             });
@@ -4135,7 +4135,7 @@ mod external_claim_tests {
         assert_eq!(replies, vec![(reply.to_string(), "hook".to_string())]);
     }
 
-    /// issue #1773：遠端 run 在 m4p 上跑著，之後只改了 `remote_path`（同一台機器，連線換了一條、世代變了），或單純重連，
+    /// issue #1773：遠端 run 在 mac_builder 上跑著，之後只改了 `remote_path`（同一台機器，連線換了一條、世代變了），或單純重連，
     /// 這個 run 的 Stop 照常收成回合與原文。舊版拿連線世代比，這兩步一做，之後每一則 Stop 都被丟，回合只好由終端備援收尾（incomplete）。
     #[tokio::test]
     async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
@@ -4145,7 +4145,7 @@ mod external_claim_tests {
         let host_cfg = |remote_path: &str| crate::config::HostCfg { daemon_url: None,
             shared_session: false,
             name: host.clone(),
-            ssh: "m4p@100.64.0.2".into(),
+            ssh: "mac_builder@100.64.0.2".into(),
             ssh_port: 22,
             ssh_opts: vec![],
             herdr_session: "test".into(),
@@ -4173,7 +4173,7 @@ mod external_claim_tests {
         let run = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, host, host_generation)
-             VALUES (?,?,'running','working','pane-m4p','s-m4p',?,?,?)",
+             VALUES (?,?,'running','working','pane-mac_builder','s-mac_builder',?,?,?)",
         )
         .bind(&run)
         .bind(&bot_id)
@@ -4190,14 +4190,14 @@ mod external_claim_tests {
             .await;
         let first = db::ulid();
         insert_in_flight_turn(&app.db, &first, &conv, &run, "第一句").await;
-        process(&app, &stop_hook(&bot_id, "s-m4p", "p-1", "第一則的回覆")).await.unwrap();
+        process(&app, &stop_hook(&bot_id, "s-mac_builder", "p-1", "第一則的回覆")).await.unwrap();
         assert_hook_completed(&app.db, &first, "第一則的回覆").await;
 
         // 2. 重連：同一條設定，世代再加一。
         app.hosts.bump_generation_for_test(&host).await;
         let second = db::ulid();
         insert_in_flight_turn(&app.db, &second, &conv, &run, "第二句").await;
-        process(&app, &stop_hook(&bot_id, "s-m4p", "p-2", "第二則的回覆")).await.unwrap();
+        process(&app, &stop_hook(&bot_id, "s-mac_builder", "p-2", "第二則的回覆")).await.unwrap();
         assert_hook_completed(&app.db, &second, "第二則的回覆").await;
     }
 
@@ -8323,7 +8323,7 @@ pub trait HookHost:
     fn local_transcript_allowed<'a>(&'a self, bot: &'a db::Bot, path: &'a str) -> impl std::future::Future<Output = bool> + Send + 'a;
 }
 
-/// 線索晚到（2026-10-19 m4p `hub-5j3cjh-draft`）：遠端 hook 走 spool，比 `pane_agent_detected` 觸發的那輪對帳晚 20～50 秒，
+/// 線索晚到（2026-10-19 mac_builder `hub-5j3cjh-draft`）：遠端 hook 走 spool，比 `pane_agent_detected` 觸發的那輪對帳晚 20～50 秒，
 /// 那輪沒有線索就不認領，之後要等不相干的事件才再對帳——子 agent 在側欄消失了 9 分鐘。線索一記下就排一輪延後對帳。
 async fn reconcile_after_spawn_hint<H: HookHost>(app: &H, bot_id: &str) {
     match db::bot_host(app.db(), bot_id).await {

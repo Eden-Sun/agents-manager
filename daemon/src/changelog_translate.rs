@@ -2435,7 +2435,7 @@ mod tests {
             "notify": "update",
             "latest_version": "2.1.5",
             "target_version": "2.1.5",
-            "hosts": [{"host": "local", "installed_version": "2.1.3"}, {"host": "m4p", "installed_version": "2.1.4"}],
+            "hosts": [{"host": "local", "installed_version": "2.1.3"}, {"host": "mac_builder", "installed_version": "2.1.4"}],
         });
         kick_detected(&env.app, &ev);
         until_status(&env.app, "2.1.5", "completed").await;

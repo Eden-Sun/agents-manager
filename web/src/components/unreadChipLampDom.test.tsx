@@ -78,9 +78,9 @@ test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現�
 })
 
 test('主機斷線：那台 bot 最後的 blocked 不亮「要你回答」；連回來才亮（正對照）', async () => {
-  const host = { name: 'm4p', ssh: 'm4p', ssh_port: 22, herdr_session: 'agents-manager', remote_path: '/r', connected: false, error: null, disconnected_since: null }
+  const host = { name: 'mac_builder', ssh: 'mac_builder', ssh_port: 22, herdr_session: 'agents-manager', remote_path: '/r', connected: false, error: null, disconnected_since: null }
   useStore.setState({
-    projects: [project('p1'), project('p3', 'm4p')],
+    projects: [project('p1'), project('p3', 'mac_builder')],
     bots: [bot('b1', 'p1', true), bot('r', 'p3', true)],
     hosts: [host],
     runs: { b1: run('b1', 'running', 'idle'), r: run('r', 'running', 'blocked') },

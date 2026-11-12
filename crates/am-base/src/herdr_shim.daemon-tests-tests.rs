@@ -1882,7 +1882,7 @@ esac"#, calls.display()));
         assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("/relay/spawn/claim"), "遠端不打 curl");
     }
 
-    /// herdr 回 timeout（agent 還沒起好、之後才起來）也要登記：2026-10-16 m4p ro-ocr 開 cifable 就是這樣漏登記。
+    /// herdr 回 timeout（agent 還沒起好、之後才起來）也要登記：2026-10-16 mac_builder ro-ocr 開 cifable 就是這樣漏登記。
     #[test]
     fn a_timed_out_agent_start_still_spools_a_spawn_claim() {
         let s = Sandbox::new();

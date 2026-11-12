@@ -814,7 +814,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
   - **讀取次數**（#1505）：有效性檢查不拿輪詢快取來證明「提問還在」。GET 的檔尾若是這一次現讀的，它同時替讀建議前的檢查作證、不再另讀；檔尾是快取的，讀建議前另讀一次新鮮的。背景問 Jev 時，投 Jev 前的幾道閘共用一次新鮮讀取、投 Jev 後的幾道閘共用一次，段與段之間一定重讀（投 Jev 等待中被答掉要擋得住）。所以一個提問在遠端的讀取是：首次 GET 一次，加背景問 Jev 兩次；之後每次 GET 最多一次。
   - **範圍**：claude bot，本機與遠端主機都有（遠端的 `pending-question` 讀法見 §12.5b 末段，issue #1476：同一條 `sh`／ssh、只讀檔尾、有逾時與節流）；非 claude 的 bot 沒有。遠端讀不到（斷線、逾時、檔案不在）時 `jev_options` 同樣是 `null`。
 - **Jev 來源標記（issue #1912，2026-10-23）**：使用者說「感覺不到他的存在」，所以凡是 Jev 給的東西、呈現給人的地方都要一眼看出來源。daemon 這側：(1) 三種 inbox 通知（`judge_stuck_screen`、`judge_same_work`、`judge_report_evidence`）的 payload 一律帶 `suggested_by:"jev"`、`source_label:"Jev 建議"`、`suggestion_only:true`（單一機率的帶 `probability_pct`），`action` 文案以「🤖 Jev 建議（TypeSafe 型別判斷，機率 N%，只是建議，不會自動動作）：」開頭；(2) 完成回報在父 bot 聊天室留的系統訊息以「🤖 Jev 建議」開頭；(3) `GET /api/bots/{id}/pending-question` 的 `jev_options` 與 `GET /api/judge/shadow` 的最外層帶同一組標記（`jev_options` 另有 `note` 文案）。字樣統一用「Jev 建議」，機率一律寫成百分比。標示只是呈現：不改任何判斷門檻、也不新增任何自動動作。撞限第二意見（第一個場景）只寫帳本、不推給人，所以只在帳本 API 的最外層標示。
-- **遠端主機的專案（#1467）**：四個場景的觸發點都不看主機，遠端專案跟本機專案同一條路——卡畫面掃描經 `herdr_for_run` 從那台主機自己的 herdr 讀畫面，派工撞題與完成回報只看 bot 與專案，撞限橫幅經 `read_run_pane`（run 所在主機）讀。終端備援（`try_fallback`）把畫面上的撞限橫幅收成失敗回合時，也走同一個閘門把這次命中交給 Jev（備援先下手時 `capture_codex_usage_notices` 會因「已寫過、回合不在飛」跳過，所以備援自己要交）。**限制與候選範圍**：(1) 認領撞題提示不是即時 HTTP：沒有 `runtime.json` 時 `agm` 把 `AmClaimCollisionCheck` 寫入該 bot 的 `hook-spool.d/`，等 daemon 收 spool 後交給 durable hook worker 執行撞題檢查（#1468），不開反向埠；本機 pane 使用 daemon 保留的 `AM_DATA_DIR` 寫入該資料目錄下的 bot spool，遠端 pane 沒有此變數時照遠端 daemon 的資料目錄：讀 `~/.config/agents-manager/config.toml` 的 `[server] data_dir`（`~` 展開，相對路徑接在設定檔目錄後面）；沒有就 `~/.config/agents-manager`，隔離實例（`AM_INSTANCE`）再加 `instances/<AM_INSTANCE>`（#1497）。HTTP 2xx 確認收件後不重複 spool；runtime 不在、連線未建立／中斷、逾時或 5xx 時寫入同一 `claim:<claim_id>` 候選身份的 spool，daemon 重放時同一候選只評分一次；4xx 等不可重試回應不 spool，`agm` 在 stderr 留下狀態與原因。(2) 撞限這個場景只看 codex／grok 的畫面橫幅，claude bot 不問（額度走 statusLine 的數字）；(3) 撞題候選包含同專案目前有 running run 的頂層 bot 標題與分支；閒置頂層 bot 的歷史標題不納入，未結案交辦仍只問要驗收且尚會開始的工作；完成回報只問 hook 回報的 `completed`，通知型交辦（`expects_review=0`）照樣問。「帳本沒有遠端列」要先分辨是這三條還是單純沒有觸發事件（2026-10-12 的帳本：m4p 最後一筆 AGM 派工是 09-22，早於撞題與完成回報上線）。
+- **遠端主機的專案（#1467）**：四個場景的觸發點都不看主機，遠端專案跟本機專案同一條路——卡畫面掃描經 `herdr_for_run` 從那台主機自己的 herdr 讀畫面，派工撞題與完成回報只看 bot 與專案，撞限橫幅經 `read_run_pane`（run 所在主機）讀。終端備援（`try_fallback`）把畫面上的撞限橫幅收成失敗回合時，也走同一個閘門把這次命中交給 Jev（備援先下手時 `capture_codex_usage_notices` 會因「已寫過、回合不在飛」跳過，所以備援自己要交）。**限制與候選範圍**：(1) 認領撞題提示不是即時 HTTP：沒有 `runtime.json` 時 `agm` 把 `AmClaimCollisionCheck` 寫入該 bot 的 `hook-spool.d/`，等 daemon 收 spool 後交給 durable hook worker 執行撞題檢查（#1468），不開反向埠；本機 pane 使用 daemon 保留的 `AM_DATA_DIR` 寫入該資料目錄下的 bot spool，遠端 pane 沒有此變數時照遠端 daemon 的資料目錄：讀 `~/.config/agents-manager/config.toml` 的 `[server] data_dir`（`~` 展開，相對路徑接在設定檔目錄後面）；沒有就 `~/.config/agents-manager`，隔離實例（`AM_INSTANCE`）再加 `instances/<AM_INSTANCE>`（#1497）。HTTP 2xx 確認收件後不重複 spool；runtime 不在、連線未建立／中斷、逾時或 5xx 時寫入同一 `claim:<claim_id>` 候選身份的 spool，daemon 重放時同一候選只評分一次；4xx 等不可重試回應不 spool，`agm` 在 stderr 留下狀態與原因。(2) 撞限這個場景只看 codex／grok 的畫面橫幅，claude bot 不問（額度走 statusLine 的數字）；(3) 撞題候選包含同專案目前有 running run 的頂層 bot 標題與分支；閒置頂層 bot 的歷史標題不納入，未結案交辦仍只問要驗收且尚會開始的工作；完成回報只問 hook 回報的 `completed`，通知型交辦（`expects_review=0`）照樣問。「帳本沒有遠端列」要先分辨是這三條還是單純沒有觸發事件（2026-10-12 的帳本：mac_builder 最後一筆 AGM 派工是 09-22，早於撞題與完成回報上線）。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
 ### 4.3d Claude API key：一次性 LLM 工作不開 Claude Code session（`[claude_api]`，issue #1919）
@@ -905,7 +905,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 ### 4.4c 廣域 kill 守門（PreToolUse，issue #1884）
 
-事故：m4p 上一顆子 bot 跑 `pkill -f "next-server" -P 1`。macOS／BSD 的 `pkill` 遇到第一個非選項參數就停止解析選項，`-P 1` 被當成**額外的比對字串**，
+事故：mac_builder 上一顆子 bot 跑 `pkill -f "next-server" -P 1`。macOS／BSD 的 `pkill` 遇到第一個非選項參數就停止解析選項，`-P 1` 被當成**額外的比對字串**，
 結果殺掉所有命令列含「1」的行程——整台機器的 claude／codex／grok 與 Chrome 全滅。防範有兩層：共用規則（`child_agent_rules` 的「終止行程」：只准殺自己記下的 PID 或 port，
 `pkill` 選項必須寫在比對字串之前）與這個 hook。
 
@@ -1205,8 +1205,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
   恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），前綴原樣比對、不 trim，且底下沒有續行；Grok 的回音行先移除 TUI 加在行尾的
   右對齊時鐘與 `█` 捲軸符號再比對。**列尾的空白不算內容**（issue #1479）：claude 2.1.296 把回音畫成整列寬的灰底，herdr 的 styled
-  讀取把列尾補成背景色空白（m4p 實測 `❯ <text>` 後面接 143～189 個空白），逐字相等永遠不成立——遠端 claude 的證據只有這一列，
-  以前每則都 `not_proven_submitted`（2026-09-28 起 log 裡 262 筆 m4p 全是這個原因）。只放過列尾補白：marker 後多一個空白、多一字、少一字照樣不算。
+  讀取把列尾補成背景色空白（mac_builder 實測 `❯ <text>` 後面接 143～189 個空白），逐字相等永遠不成立——遠端 claude 的證據只有這一列，
+  以前每則都 `not_proven_submitted`（2026-09-28 起 log 裡 262 筆 mac_builder 全是這個原因）。只放過列尾補白：marker 後多一個空白、多一字、少一字照樣不算。
 
 兩種 session log 都是：打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要多一筆與送出文字**逐位元組
 相同**的 user 訊息；同時 run 仍須指向同一個 session（claude 另比對路徑），途中換了就是 `Unproven("session_changed")`；
@@ -1706,7 +1706,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    **codex 子 agent 預設 `--yolo`（使用者 2026-11-04「先把 codex 沙箱修好」→ 裁示直接 `--yolo`）**：herdr 開的 codex 子 agent 以前沒帶 sandbox 參數，專案在 `~/.codex/config.toml` 是 trusted 時跑 workspace-write，擋住：① 網路（cargo shim 連不到 daemon 的 build scheduler，`curl 結束碼 7`，`scripts/check.sh` exit 75）；② 寫 `~/.cache/agents-manager`（Read-only file system）；③ `.git` 唯讀——git worktree 的 gitdir 在主 repo 的 `.git/worktrees/<x>`，`git add`／`commit` 全擋。codex 0.166 拋棄式目錄實測：`sandbox_workspace_write.network_access` 解 ①、`writable_roots` 解 ②，但 `writable_roots` 解不了 ③（codex 對工作目錄的 `.git` 與 worktree gitdir 一律疊唯讀 bind mount；只有 `permissions` profile 明寫精確的 `.git/worktrees/<x>` 蓋得過去，內容隨 cwd 變），所以不細調。shim 現在對**有 `AM_BOT_ID` 的 bot 開的 codex 子 agent**（本機與遠端一樣；人工 shell 與別的 kind 不補）在 argv 最後面補 `--yolo`；它是一般旗標不是 `-c`，放在 `resume`／`fork` 子命令之後 codex 照樣認，不影響上段 #1902 的 `-c` 搬運。呼叫者已自己決定沙箱／核准（`-s`／`--sandbox`／`--sandbox=`、`--yolo`、`--dangerously-bypass-approvals-and-sandbox`、`--full-auto`、`-c sandbox_mode=…`、`-c default_permissions=…`）就不補、不重複。取捨：子 agent 不再受 codex 沙箱限制（跟 `auto_approve` 開啟的 daemon 管 bot 一致，`permission_args("codex", true)`）；要受限就在 `agent start … --` 後面自己帶 `-s workspace-write`。daemon 自己啟動的 codex bot 不受這條影響，仍照 `auto_approve` 決定。
    **`-c` 在 `resume`／`fork` 前後（#1902）**：codex 0.163 的子命令自己帶了任何 `-c` 時，子命令前面所有 `-c` 整批被丟掉（實測：`codex -c model_reasoning_effort=medium resume <id> -c project_doc_max_bytes=0` 狀態列是 `default`，拿掉後面那個 `-c` 或把 effort 也寫在 `resume` 後面才是 `medium`；`--model`／`--sandbox`／`--ask-for-approval`／`-p`／`--no-daemon` 不受影響）。shim 會追加 `-c project_doc_max_bytes=0`，所以 codex 子 agent 的 argv 若有 `resume`／`fork`，shim 把子命令前的 `-c`（含 `--config=`）在子命令 token 後面原樣再補一份；呼叫者自己寫在子命令後的 `-c` 排在補的那份之後，同 key 仍以它為準。daemon 自己開的 codex pane 本來就把 `-c` 全放在 `resume <id>` 之後，不受影響。
    Codex 啟動（包含 resume／fork 與子 agent 原地重啟）在 `bot.args` 後固定加 `--no-daemon --no-alt-screen -c tui.show_tooltips=false`：0.157 的 `--no-daemon` 不會連上或啟動共用背景 server，該 pane 使用自己的 embedded server；`--no-alt-screen` 強制終端 transcript 模式，即使 Codex 預設開啟 fullscreen transcript 也保留一般可讀畫面與 scrollback。這讓每個 pane 的 `AM_*`／hook 環境留在自己的 Codex 執行個體。`-c tui.show_tooltips=false` 關掉 0.158 起回合中（超過 30 秒）與回合後（第三回合起）插入的隨機 tip，免得畫面備援擷取把它當成回覆結尾（issue #728）。
-   **`-c allow_login_shell=false`（#1675）**：codex 的 shell 工具預設用 `$SHELL -lc` 跑每一條指令，login shell 的 profile 會重建 `PATH`（macOS 的 `path_helper`＋`brew shellenv`、`~/.local/bin` 前置），把 pane env 裡排最前面的 herdr／cargo shim 擠到真 herdr 後面（m4p 實測：`zsh -lc 'which -a herdr'` 第一個是 `~/.local/bin/herdr`、shim 排最後）。bot 打 `herdr agent start` 因此繞過 shim：不補 `--no-daemon`、`-p`，2026-10-13 m4p 的 codex 子 agent 就這樣連上 0.158.0 的共用 app-server，`gpt-6.1-sol` 被 400 拒絕。關掉 login shell 後工具的 shell 直接繼承 pane 的 `PATH`（shim 在最前面）；`--no-daemon` 放在 `fork`／`resume` 的位置參數之後 codex 照樣認（0.162.1 實測：三種擺法都不起共用 daemon）。
+   **`-c allow_login_shell=false`（#1675）**：codex 的 shell 工具預設用 `$SHELL -lc` 跑每一條指令，login shell 的 profile 會重建 `PATH`（macOS 的 `path_helper`＋`brew shellenv`、`~/.local/bin` 前置），把 pane env 裡排最前面的 herdr／cargo shim 擠到真 herdr 後面（mac_builder 實測：`zsh -lc 'which -a herdr'` 第一個是 `~/.local/bin/herdr`、shim 排最後）。bot 打 `herdr agent start` 因此繞過 shim：不補 `--no-daemon`、`-p`，2026-10-13 mac_builder 的 codex 子 agent 就這樣連上 0.158.0 的共用 app-server，`gpt-6.1-sol` 被 400 拒絕。關掉 login shell 後工具的 shell 直接繼承 pane 的 `PATH`（shim 在最前面）；`--no-daemon` 放在 `fork`／`resume` 的位置參數之後 codex 照樣認（0.162.1 實測：三種擺法都不起共用 daemon）。
 6. 開該 pane 的狀態訂閱。
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`（codex 改成每 500ms 輪詢折過的 `agent.get`、到 `launch_pending` 結束才算，#732）：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
@@ -2041,7 +2041,7 @@ claim 與 hint 衝突時以 claim 為準。它們只證明 parent，不證明同
 **daemon 重啟接回（#1892）**：認領 child 時保存 herdr `terminal_id`。既有 active child 的 native session ID 尚未取得時，只能以同 host／herdr session／pane 與非空且相同的已存 terminal ID 接回，重建狀態訂閱與完成回合擷取；不能以名字、parent claim 或 pane ID 單獨補認。native session 有衝突仍拒絕，成功接回後可補入 herdr 後來提供的 native ID。herdr server 自身 stop/start 會換 terminal ID，即使 pane ID 相同也拒絕 terminal fallback；這只保證 daemon 重啟的恢復，不保證 herdr 重建後恢復。舊列沒有 native 與 terminal 證據時保持未知，log 記 `instance_identity_unverified`，run 投影附 `identity_recovery_reason=missing_instance_identity`（純診斷，不改狀態）；parent 需手動讀報告、驗收，完成後正常收 pane 再建立新 child，不直接回填 DB。
 新 pane 的明確 ownership 可以認領新 child，但名稱相似不能證明舊 child 被刻意替換；replacement 判斷只接受明確 ownership，且舊 pane 已確認不存在。
 
-spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。線索（spawn hint／遠端 spawn claim／本機 shim 的 `POST /relay/spawn/claim`）一記下就排一輪延後對帳（15 秒）：遠端 hook 走 spool，常比子 agent 出現時那輪對帳晚到，不排的話要等下一個不相干的 pane 事件才認領（2026-10-19 m4p 實例晚了 9 分鐘；本機 grok 起得慢，shim 的 claim 晚於偵測那輪，#1867）。
+spawn hint 仍由 hook 的 Bash 工具輸出抽取 `herdr pane split`／`agent start` 的 pane ID，驗證清單上確有該 agent 後才採用。線索（spawn hint／遠端 spawn claim／本機 shim 的 `POST /relay/spawn/claim`）一記下就排一輪延後對帳（15 秒）：遠端 hook 走 spool，常比子 agent 出現時那輪對帳晚到，不排的話要等下一個不相干的 pane 事件才認領（2026-10-19 mac_builder 實例晚了 9 分鐘；本機 grok 起得慢，shim 的 claim 晚於偵測那輪，#1867）。
 讀取 claim/hint 失敗時這一輪一顆都不認領、不改名，排延後補跑；讀到空集合也不退回名字／tab 猜測。
 共用 session 的主機（§11.10）只收自己 workspace／tab／pane 裡有明確 ownership 的 agent；已移交專案（§6.5h）的 agent 不認領，其 bot 不當父候選。
 認領記 `managed_by='child'`、`parent_bot_id` 與 `adopted=1` 的 run；可取得時一併保存 native session ID 與 terminal ID。
@@ -2805,7 +2805,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。
 - **讀不到不擋啟動，而且不關 CLI 自己的指示檔（#769，採方案 A，派工者決定 2026-10-08）**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
   其中**讀不到**的（遠端主機睡著、ssh／tailscale 斷線、檔案不在；空檔不算）只要有任何一份：這次啟動**不**設 `CLAUDE_CODE_DISABLE_CLAUDE_MDS`、
-  codex 不帶 `-c project_doc_max_bytes=0`，CLI 自己讀 repo 的 CLAUDE.md／AGENTS.md，讀得到的那幾份 agent md 照常注入——避免遠端專案在 m4p 睡著的那一刻開出一顆兩邊都沒有規則的 bot。
+  codex 不帶 `-c project_doc_max_bytes=0`，CLI 自己讀 repo 的 CLAUDE.md／AGENTS.md，讀得到的那幾份 agent md 照常注入——避免遠端專案在 mac_builder 睡著的那一刻開出一顆兩邊都沒有規則的 bot。
   pane env 另帶 `AM_KEEP_CLI_DOCS=1`（shim 的保留清單），子 agent 的 shim 看到它也不補 codex 的 `project_doc_max_bytes=0`（claude 子 agent 本來就繼承母 bot 的 env，沒有那個變數就會自己讀）。
   同時推一則 `ops_alert`（`source=daemon`、`reason=agent_md_unreadable`，帶 bot 與讀不到的檔）進 AGM inbox：去重鍵含 bot、問題內容與小時，同一個問題一小時內只推一則。
   每一份都讀到才照舊關掉。對話裡那則 system 訊息會寫明「這次不關 CLI 自己的指示檔」。修好檔案後重啟 bot 才會帶上。
@@ -2987,7 +2987,7 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 
 ### 6.7a claude 的提問與使用者的回答記進對話（2026-10-02 使用者）
 
-claude 用 `AskUserQuestion` 問、使用者答完（網頁或終端答的都一樣）之後，對話裡要留下每題的題目與答案；以前整段不見，對話讀起來不完整（wits-pro，m4p，三題問答完全看不到）。
+claude 用 `AskUserQuestion` 問、使用者答完（網頁或終端答的都一樣）之後，對話裡要留下每題的題目與答案；以前整段不見，對話讀起來不完整（wits-pro，mac_builder，三題問答完全看不到）。
 
 - **一則 `role=system`、`source=system` 的訊息**，`content` 是 JSON：`{"type":"ask_answers","tool_use_id":…,"answered":bool,"items":[{"header"?,"question","answer"|null,"notes"?}]}`。
   `answer: null`＝沒有回答（整組取消、或多題裡沒答這一題）；`answered` 是「至少一題有答案」；自訂文字照原文。`messages.source` 有 CHECK，新增來源值要重建整張表，不值得，所以靠 `content.type` 認。
@@ -3151,7 +3151,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   - **只在既有的 10 分鐘巡檢那一輪觸發**（`sweep` 之後；開機後約 1 分鐘第一輪，工具探測還沒好就等下一輪），沒有另開迴圈。每台主機每一家每個 daemon 行程**最多試一次**：成功失敗都記在記憶體，**失敗不重試、不循環**，
     再試靠設定頁的「安裝」鈕（手動，見上）或重啟 daemon。那台正被別的安裝佔著（`install_in_progress`）不算試過，下一輪再來。
   - **沿用既有路徑**：同一個 `run_install`（本機 `/bin/sh -c`、遠端走該主機既有的 ssh 連線，逾時 60 秒）與同一把 `install_in_progress` 互斥；裝完立刻重讀狀態，回報實際結果（`current` 才算成功，否則記「裝完狀態是 …」；重讀失敗時 `state:null`、記「裝完重讀狀態失敗：原因」，不拿裝之前的舊資料）；設定頁不管該列現在是什麼狀態（`not_installed`／`outdated`／`unknown`）都顯示自動安裝失敗的原因與「不重試」。
-  - **不靜默**：每次自動安裝寫 `daemon.log`（成功 info、失敗 warn，帶主機與名稱），並推 WS `herdr_integration_auto_install {host,name,ok,state,error}`，網頁跳 toast（成功「已在 m4p 自動安裝 herdr grok integration」、失敗另一則帶原因；同一台同一家重播不重複）；
+  - **不靜默**：每次自動安裝寫 `daemon.log`（成功 info、失敗 warn，帶主機與名稱），並推 WS `herdr_integration_auto_install {host,name,ok,state,error}`，網頁跳 toast（成功「已在 mac_builder 自動安裝 herdr grok integration」、失敗另一則帶原因；同一台同一家重播不重複）；
     結果也放在 `GET /api/integration-updates` 該列的 `auto_install {ok,state,error,at}`，設定頁「更新檢查」該列顯示（失敗寫「自動安裝失敗：…；不重試，可按「安裝」再試，或重啟 daemon」）。
   - 測試只用假的 `Ops`／主機狀態，不真的跑 `herdr integration install`，更不寫 `~/.grok`、`~/.gemini`。
 - **設定頁（環境設定 →「更新檢查」）每台主機一張表**，列：herdr CLI、herdr server、Claude／Codex／Grok／Antigravity（agy）CLI、四家 integration；
@@ -3568,16 +3568,16 @@ Project 可以在另一台機器：那台有自己的 herdr，agent 在那台的
 ### 11.2 設定
 ```toml
 [[hosts]]
-name = "m4p"                       # [a-z][a-z0-9_-]{0,31}；"local" 保留給本機
-ssh = "m4p@100.64.0.2"         # 可用 ssh_config 別名
+name = "mac_builder"                       # [a-z][a-z0-9_-]{0,31}；"local" 保留給本機
+ssh = "mac_builder@100.64.0.2"         # 可用 ssh_config 別名
 ssh_port = 22
 herdr_session = "agents-manager"   # 遠端 named session（絕不用遠端 default session）
 remote_path = "/opt/homebrew/bin:$HOME/.local/bin"   # 非互動 ssh shell 缺的 PATH，前置；bot pane 的 PATH 也接它（shim 之後、系統目錄之前）
 
 [[projects]]
-host = "m4p"                       # 缺省 = 本機
+host = "mac_builder"                       # 缺省 = 本機
 path = "/Users/me/work/foo"
-label = "foo@m4p"
+label = "foo@mac_builder"
 ```
 - 只用使用者現有的 ssh key / agent / ssh_config，一律 `BatchMode=yes`，絕不互動輸入密碼。認證失敗 → host `disconnected`，UI 顯示錯誤字串。
 
@@ -3753,7 +3753,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 **除錯資訊等級（issue #1859）**：workspace `Cargo.toml` 的 `[profile.dev]` 設 `debug = "line-tables-only"`（dev 與 test 共用，只留行號表），`[profile.dev.package."*"]` 設 `debug = false`（依賴套件不留）。workspace 自己的程式碼的 backtrace 仍有檔名與行號（外部依賴的 frame 不保證有）；代價是 debugger 無法看區域變數與型別細節；要完整除錯資訊時改 `debug` 設定再編（未經 cargo shim 驗證的環境變數不列為做法）。release 不受影響。
 
 ### 11.9 專案移交到另一顆 daemon（issue #710，#678 的單一專案子集）
-一個專案從 A 機的 daemon（例：Mac，專案 `host = local`）交給 B 機的 daemon（例：agm-host），B 以遠端主機（例：`m4p`）接手；
+一個專案從 A 機的 daemon（例：Mac，專案 `host = local`）交給 B 機的 daemon（例：agm-host），B 以遠端主機（例：`mac_builder`）接手；
 專案的 `path` 不變，檔案與 agent 仍在 A 機上。工具是 `scripts/ops/project-transfer`（python 3.11+，只用標準函式庫）。
 
 **為什麼 import 要停 B 的 daemon**：B 沒有匯入對話歷史的 API，而 Project／Bot 的權威是 config.toml（§3.1）——只寫 DB 的專案會被下一次投影軟刪，
@@ -3790,8 +3790,8 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
 2. A：在該專案設 `handed_off_to = "agm-host"`，A 從此不再對帳、送 prompt、收 hook、也不會替它 autostart。
 3. A：`scripts/ops/project-transfer export --db ~/.config/agents-manager/agents-manager.sqlite3 --project <id> --out hub.json.gz`，
    把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
-4. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
-   `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`（`handed_off_to` 在 B 上清成 NULL，由 B 管）。
+4. B：確認 config 有 `[[hosts]] name = "mac_builder"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
+   `scripts/ops/project-transfer import --bundle hub.json.gz --host mac_builder`（`handed_off_to` 在 B 上清成 NULL，由 B 管）。
    B 的 config.toml 已經有同 id 的專案時（重跑）不再追加或改動既有欄位，只清掉 `handed_off_to`；bundle 裡的 user bot 必須本來就在那個專案底下；缺的話整批拒絕（DB 回滾），
    不然只有 DB 有那些 bot，下次開機投影就把它們當「不在 config」軟刪。
 5. B：起 B 的 daemon，逐顆 `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`），
@@ -3800,7 +3800,7 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
 
 ### 11.9a 專案改在接手那台本機跑：原生對話搬家（#717，使用者 2026-09-28）
 
-使用者決定 `Agents Manager` 專案的 bot 直接在 agm-host（ubuntu）本機跑，不經 `m4p`。這時專案在 B 上是 `host = local`、path 是 B 自己的 checkout
+使用者決定 `Agents Manager` 專案的 bot 直接在 agm-host（ubuntu）本機跑，不經 `mac_builder`。這時專案在 B 上是 `host = local`、path 是 B 自己的 checkout
 （`/Users/me/project/agents-manager` → `/home/user/project/agents-manager`），原生對話檔也要在 B 上，`start?resume=native` 才接得回：
 B 接回前 `native_resume_plan` 會看 `runs.transcript_path` 在不在（`stage_cross_identity_transcript_local`），不在就退回開新對話——
 所以 bundle 裡來源機器的路徑不能原樣帶過去。
@@ -3869,7 +3869,7 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 
 ### 11.9c 整套切到 agm-host：切換腳本與 runbook（#721，#675 的最後一段，使用者 2026-09-28）
 
-剩下的 `Agents Manager` 與 `AGM-DM-GRUP` 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開；已移交的 hub 專案（§11.9，`host = "m4p"`）不動，
+剩下的 `Agents Manager` 與 `AGM-DM-GRUP` 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開；已移交的 hub 專案（§11.9，`host = "mac_builder"`）不動，
 它們的 agent 仍在 Mac 的 herdr（`dev.agents-manager.herdr-*` launchd job）裡跑，所以那幾個 herdr job 不停。
 工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來；`host-state-transfer.py` 隨 cutover 在兩邊執行，補上專案 bundle 以外的主機狀態。
 `cutover-helper.py` 只接受 loopback API 位址，忽略環境 proxy、不跟隨轉址，並在印出回應前遮蔽 UI token。
@@ -3930,7 +3930,7 @@ import 進複本、`cutover-helper.py drill-verify` 直接讀複本（專案 hos
 ### 11.10 共用 herdr session 的主機（#709，使用者 2026-09-28）
 
 移交（§6.5h）時，接手的 daemon 以遠端主機連回原機器，`herdr_session` 用的是原機器 daemon **自己的本機 session**（例：
-agm-host 的 daemon 以 `m4p` 接手 Mac 的專案，session 都是 `agents-manager`）。兩顆 daemon 看得到同一批 pane，所以要在接手那顆的
+agm-host 的 daemon 以 `mac_builder` 接手 Mac 的專案，session 都是 `agents-manager`）。兩顆 daemon 看得到同一批 pane，所以要在接手那顆的
 `[[hosts]]` 明確寫 `shared_session = true`（預設 `false`；不自動推導——設定裡沒有任何東西認得出對方 daemon）。旗標讀**當下的設定**，
 改了不重連就生效（`cfg_differs` 不看它）；`POST /api/hosts` 沒帶這個欄位就沿用舊值，不因為一次只改 ssh 的更新悄悄關掉。
 
@@ -4050,7 +4050,7 @@ bot 用 `herdr agent start` 開的 claude 子 agent（本機或遠端）沒有 h
 - **等人回答的提問（`GET /api/bots/{id}/pending-question`，issue #1476）**：遠端 claude bot 的「還沒被回答的 `AskUserQuestion`」也從同一個對話檔讀：`claude_child_log::pending_tail` 用上面同一條 `sh`（遠端走 ssh）、只讀最後 512 KiB（本機的 `pending_question::TAIL_BYTES`）、**不寫 DB**。
   路徑防護：檔案由這顆 bot 的 root（`CLAUDE_CONFIG_DIR`、身份在該主機的目錄、`~/.claude`）與 herdr 當下回報的 live session id 定位；只有 live session 通過驗證才讀，不用 run 裡可能過期的 `native_session_id` 或 `transcript_path` 決定 session。記錄路徑在這些 root 內且檔名符合 live session 時精確讀取；否則 discovery 必須在所有 root 合計只有一份候選；路徑無效、沒有檔或多份候選都不讀。
   遠端讀取最多 5 秒（含查 `$HOME`），逾時或失敗當沒讀到；同一個 run generation、host connection 與 live session 4 秒內重複請求用上一次的結果（失敗也算），同時進來的共用一次讀取（`runners::pending_question_remote`）。讀取前後確認 run、host fence 與 live session 仍一致；Jev 的有效性檢查不拿這個快取來證明提問還在（見 §4.3c 第五個場景，#1505）。讀到之後走跟本機同一個 `pending_ask_entry`，只接受主線事件並略過 `isSidechain: true` 的旁支問題與結果，Jev 的選項建議（§4.3c 第五個場景）一併生效。
-- **session 來源的必要條件：各身分 config 目錄的 herdr claude hook**（`daemon/src/claude_session_watch.rs`；使用者 2026-10-30 裁示「一律必要、要自動補裝」）：herdr 是靠 claude 的 SessionStart hook（`<CLAUDE_CONFIG_DIR>/settings.json` 的 `herdr-agent-state.sh session`）綁 session 的；hook 只裝在預設 `~/.claude`、某個身分自己的 config 目錄（`~/.claude-cc1`）沒裝時，那個身分的子 agent 永遠沒有 session（`runs.native_session_id` 空），每個回合都是 `completed_fallback`（2026-10-30 m4p 的 cc1 子 agent 就是這樣；跟重啟、`--resume` 無關）。三道保證：
+- **session 來源的必要條件：各身分 config 目錄的 herdr claude hook**（`daemon/src/claude_session_watch.rs`；使用者 2026-10-30 裁示「一律必要、要自動補裝」）：herdr 是靠 claude 的 SessionStart hook（`<CLAUDE_CONFIG_DIR>/settings.json` 的 `herdr-agent-state.sh session`）綁 session 的；hook 只裝在預設 `~/.claude`、某個身分自己的 config 目錄（`~/.claude-cc1`）沒裝時，那個身分的子 agent 永遠沒有 session（`runs.native_session_id` 空），每個回合都是 `completed_fallback`（2026-10-30 mac_builder 的 cc1 子 agent 就是這樣；跟重啟、`--resume` 無關）。三道保證：
   1. **背景巡檢**：每 5 分鐘（開機後約 90 秒第一輪），對每台連得上的主機（本機＋遠端）、**daemon 偵測到的每個 claude 身分**（`tools::identities_for_host` 的 shell alias／設定檔身分，加預設 `~/.claude`；不掃 `~/.claude-*`，非身分目錄不碰）的 config 目錄讀 `settings.json`：缺 SessionStart hook 就補裝 `CLAUDE_CONFIG_DIR=<dir> herdr integration install claude`（herdr 只把 SessionStart 併進既有設定、不改其他鍵；daemon 先把原檔備份一次為 `settings.json.am-bak-herdr`，已有備份不覆蓋），裝完重讀驗證。目錄不存在（還沒登入過的身分）或讀不到（斷線）不算缺、不動。補裝失敗（或回報成功但驗證沒過）log warn＋`ops_alert`（reason `claude_identity_hook_install_failed`，同主機同目錄只推一次），1 小時內不重試；成功只 log。
   2. **啟動前**：daemon 啟動 claude bot 前（`lifecycle::start` 1c，`ShimInstallPort::claude_hook_preflight`）同樣確保該身分目錄的 hook；補不上就在啟動回應（對話裡的 system 訊息）與 log 明講「這顆不會有 session」，仍照常啟動。bot 開 claude child 時（`herdr agent start --kind claude`）由 herdr shim 的 `am_ensure_claude_hook` 在那台主機上做同一件事（身分目錄取 `--identity` 的 `CLAUDE_CONFIG_DIR`，沒給用環境／`~/.claude`），補不上在 stderr 明講。
   3. **事後偵測**：`state='running'`、`adopted=1`、`inject_hooks=0` 的 claude run 起來超過 180 秒仍沒有 `native_session_id`，log warn＋`ops_alert`（reason `claude_child_no_session`，key 含 run id），內容指名它的身分目錄是剛補裝（要重開才會綁上 session）、補裝失敗或 hook 本來就在（查 herdr 版本／`agent_session`）。
@@ -4180,10 +4180,10 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **不做**：換身份（agy 沒有身份、HOME 不換）、跨 HOME 搬對話檔。
 
 ### 12a.11 遠端主機：安裝、登入、額度（`agy_install.rs`，2026-10-06）
-遠端主機（第一個目標 m4p：macOS arm64）的 agy 分四件事，**安裝、登入偵測、額度探測、啟動 bot 都做了**（啟動見 §12a.12）：
+遠端主機（第一個目標 mac_builder：macOS arm64）的 agy 分四件事，**安裝、登入偵測、額度探測、啟動 bot 都做了**（啟動見 §12a.12）：
 - **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒裝也要能裝，所以獨立一個小模組（新版通知走上游巡邏，見下「版本管理」）。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
 - **版本管理（#1908，與 claude／codex 同一套政策：通知＋使用者確認，daemon 不背景自動升級）**：agy pane 仍設 `AGY_CLI_DISABLE_AUTO_UPDATE=true`，版本由 AG Man 管——上游巡邏（§3.1「上游有新版」，`upstream_update` 的 `agy` 一列）每 10 分鐘讀官方 manifest（`linux_amd64`、`darwin_arm64` 取較小版本，一個失敗用另一個）對每台有裝 agy 的主機（本機＋遠端）的 `agy --version`；落後的主機同一個上游版本通知一次（toast），設定頁「更新檢查」的 agy 列標「可更新」並給更新鈕（確認框寫明從官方下載、驗 sha512、不跑 `install.sh`／`agy install`／`agy update`），按下去走上面的 `agy/install`（manifest＋sha512＋`mv`）。沒有 `cli_update` 的 per-run 通知與「重啟套用」：換版是 `mv` 蓋過檔案，正在跑的 agy pane 繼續用舊行程、**不被打斷**，bot 下次重啟才換版。成功後上游快照立刻跟上。
-- **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證出現後（Linux 是檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`；**macOS 是 login Keychain 項目 `security find-generic-password -s gemini -a antigravity`，沒有那個檔**——只看檔案會讓 m4p 登入完仍顯示未登入，2026-10-06），`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）**先探測 `/usage`，成功才翻成已登入**（憑證檔只證明有一份 credential，過期或被撤銷時檔案還在，#870）：明確 auth 失敗維持未登入並記 5 分鐘冷卻；網路、逾時、pane 這類其他失敗旗標保持現值、只記 `quota_error`，進 15 分鐘失敗冷卻（不會每 20 秒起一次探測）。
+- **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證出現後（Linux 是檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`；**macOS 是 login Keychain 項目 `security find-generic-password -s gemini -a antigravity`，沒有那個檔**——只看檔案會讓 mac_builder 登入完仍顯示未登入，2026-10-06），`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）**先探測 `/usage`，成功才翻成已登入**（憑證檔只證明有一份 credential，過期或被撤銷時檔案還在，#870）：明確 auth 失敗維持未登入並記 5 分鐘冷卻；網路、逾時、pane 這類其他失敗旗標保持現值、只記 `quota_error`，進 15 分鐘失敗冷卻（不會每 20 秒起一次探測）。
 - **額度**：`refresh_agy` 對遠端在那台 herdr 的 pane 裡跑同一段 `agy -p /usage`（不走 ssh，見 §12a.7），讀數記在 `<host>/agy`；探測失敗的原因在 `hosts[].tools.agy.quota_error`。
 - **網頁**：沒裝 agy 的主機（tools 探測已知 `installed:false`），額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，入口是「安裝 agy 並登入」：使用者在確認框按確認才安裝，成功後才開 shell 登入（不再開 shell 打 `agy` 得到 `command not found`）；新 bot 的 kind 選單、缺少 CLI 提示與主機徽章的 agy 安裝鈕同樣先問再裝（細節見 UI-DECISIONS）。
 
@@ -4211,7 +4211,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 **額度屬於它被讀到的那台主機**。標題列一次只顯示一台：預設本機，點進 ssh 主機上的 bot 或專案時換成那台（使用者決定：切換，不並列）。
 
 ### 14.1 Key 與資料形狀
-- map key：本機裸的 `claude` / `claude:cc1` / `codex` / `grok`；遠端加前綴 `m4p/claude`、`m4p/claude:cc1`…（與 `GET /api/models` 的 `host/kind` 快取同形；host 名不含 `/`、`:`，拆得回來）。
+- map key：本機裸的 `claude` / `claude:cc1` / `codex` / `grok`；遠端加前綴 `mac_builder/claude`、`mac_builder/claude:cc1`…（與 `GET /api/models` 的 `host/kind` 快取同形；host 名不含 `/`、`:`，拆得回來）。
 - 每筆多 `host` 欄位。`quota::set(app, host, base_key, q)` 統一蓋章：呼叫端只給裸 key，沒有路徑能把遠端讀數存進本機那列。
 - 刪主機連同它的額度列；`GET /api/quota` 丟掉不屬於現存主機的 `<host>/…` key。
 - **重啟先顯示上一輪**（issue #392）：每次 `quota::set` 收到新的讀數，都把完整 `Quota` JSON、key 與 `updated_at` 寫進 DB 的 `quota_cache`。daemon 開機先載入仍存在的列到 `App.quotas`，但只標顯示用的 `stale = true`；第一次新的探測成功後才清除 stale 並覆寫快取。**執行中同樣會陳舊**（對抗式審查 2026-10-02）：`quota::snapshot` 另外把超過 `STALE_AFTER`（30 分鐘）沒人更新的讀數標 `stale`；協調者的 `quota_state` 只有新鮮的讀數才能回 `Available`（陳舊的是 `Unknown`，見底的照舊 `Blocked`）。**讀數出口**（`quota::set`）把百分比夾進 0–100，不是有限數的那一桶整格丟掉（沿用上一份），避免 `(100 − NaN)` 把身份判成見底。開機載入時照 `limit_hit_expired` 清掉已過 `until` 的舊撞限，不把舊讀數當成新的派工證據。
@@ -4262,7 +4262,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線遠端各跑一次（使用者決定：持續輪詢，不只在檢視時），同輪各主機併發（`JoinSet`，一次探測數十秒）。
 斷線主機跳過。`probe_lock` per host；同一台的多個 identity 一個一個探（共用 pane）。`GET /api/quota?refresh=1` 同樣各主機併發（同一台三個 kind 也併發），最多等 20 秒就回當下的快照，沒跑完的留在背景、跑完推 `quota_updated`（回應 header `X-AM-Quota-Refresh: pending`）。
 
-- claude 跳過條件：該身份的 `logged_in` 已知（登入答案搭同一次探測回來，還沒答案的仍值得探一次），**而且**上一次成功的 `/usage` 不到 10 分鐘（`USAGE_REFRESH`）。**不看 statusLine 新不新**：以前多一條「60 秒內剛被 statusLine 更新過」，結果安靜的帳號每 60 秒就開一個 `claude -p`，每個都是完整 session，會跟同 config dir 的 bot 搶著換 OAuth token（refresh token 只能用一次，慢的那個被登出），`/usage` 背後的端點也很快 429（2026-09-25 使用者：「m4p 的 cc1 一直被登出」）。有 bot 講話的帳號 5h/7d 仍由 statusLine 即時補。十分鐘這條是必要的：statusLine **永遠不含 Fable 週窗與方案名**，而 cc0 這種一直有 bot 在講話的帳號狀態列每 30 秒就刷一次，少了它就每一輪都被跳過——daemon 重啟後那格的 `fable` 再也填不回來（2026-09-16 使用者：「怎麼不 show fable 用量了」；重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`）。記在記憶體，重啟就當沒問過。
+- claude 跳過條件：該身份的 `logged_in` 已知（登入答案搭同一次探測回來，還沒答案的仍值得探一次），**而且**上一次成功的 `/usage` 不到 10 分鐘（`USAGE_REFRESH`）。**不看 statusLine 新不新**：以前多一條「60 秒內剛被 statusLine 更新過」，結果安靜的帳號每 60 秒就開一個 `claude -p`，每個都是完整 session，會跟同 config dir 的 bot 搶著換 OAuth token（refresh token 只能用一次，慢的那個被登出），`/usage` 背後的端點也很快 429（2026-09-25 使用者：「mac_builder 的 cc1 一直被登出」）。有 bot 講話的帳號 5h/7d 仍由 statusLine 即時補。十分鐘這條是必要的：statusLine **永遠不含 Fable 週窗與方案名**，而 cc0 這種一直有 bot 在講話的帳號狀態列每 30 秒就刷一次，少了它就每一輪都被跳過——daemon 重啟後那格的 `fable` 再也填不回來（2026-09-16 使用者：「怎麼不 show fable 用量了」；重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`）。記在記憶體，重啟就當沒問過。
 - grok 同理：沒登入不探；探測失敗後該主機停 5 分鐘再試。`refresh=1` 不受節流，永遠真的探。
 
 ### 14.4 API / WS
@@ -4272,7 +4272,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 ### 14.5 UI
 - 桌機（>640px）額度列在完整／收合狀態均填滿標題列剩餘寬；啟用格等寬、量表隨格增長，停用格與更新 chip 維持內容寬。完整需求按「當下最寬啟用格 × 格數」加其他內容與間距量出，放不下才收合；資料與字型更新也重量。兩種狀態都以量到的最寬內容為每格下限，不能擠壓文字；收合仍逐列顯示全部窗口（條至少 24px、字級 9.5px），真的放不下的尾巴裁掉，點格看明細。
 - 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、專案設定用該 Project 的，都沒選是本機。
-- 條上不掛主機名牌（標題列左邊的 `@host` 已經說了，2026-09-29 使用者）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
+- 條上不掛主機名牌（標題列左邊的 `@host` 已經說了，2026-09-29 使用者）；tooltip 以主機名開頭，popover 標題「本機額度」/「mac_builder 的額度」。
 - popover 的帳號列可點列內空白處切換暫時停用；按鈕等控制項保留自身操作。登入確認框以 portal 顯示，點確認框內容不會切換背後的帳號列。
 - 未登入列有命名身份時，一律呼叫 `POST /api/hosts/{host}/identities/{identity}/login`，由 daemon 依該主機展開 env；不把 config 原文拼進 shell 指令。預設帳號才走 shell／TUI：codex 開 shell 跑 `codex login --device-auth`，claude 開 shell 跑 `claude auth login`，grok 有同 host 的執行中 bot 就送 `/login`，否則開 shell 跑 `grok login`。
 - 側欄 bot 的 critical 警告讀該 bot 所在主機的列。
@@ -4291,7 +4291,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 - macOS：`sysctl -n hw.memsize`；可用 = `vm_stat` 的 free + inactive + speculative + purgeable × page size（inactive／purgeable 是可回收快取）。
 
 `available` 不是 `total − 我們用掉的`（還有瀏覽器與系統）。認不出輸出就回 `null`，UI 只顯示已用量——不猜。
-UI：左上格「已用 · 剩 N」，本機與每台遠端各一顆（`@m4p`）；剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
+UI：左上格「已用 · 剩 N」，本機與每台遠端各一顆（`@mac_builder`）；剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
 
 ### 15.1b 每個專案佔多少（2026-09-15）
 
@@ -4356,7 +4356,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
   ① config 裡**明寫這一台**的；② 本機：沒寫 host 的 config 身份；③ 那台自己的 shell `ccN`；④ 遠端：沒寫 host 的 config 身份——名字是 `ccN` 時要等那台的 alias 偵測過才給。
 - **`[[identities]]` 有 host 維度**（AGM 裁示 2026-09-16）：鍵是 `(host, name)`；`host` 省略＝**本機優先、遠端讓位給那台同名的身份**；只要本機就寫 `host = "local"`。
   Web 解析 `/api/state` 時也以 `(host, name)` 去重；同名的本機與遠端身份都保留為不同列，供列表、選擇與刪除使用。
-  以前沒有這一欄，一個全域設定會靜默遮蔽掉每一台機器上同名的 `ccN`：使用者寫一筆 `cc1` 想固定本機的帳號，m4p 上所有選 `cc1` 的 bot 就被注入一個那台根本不存在的設定目錄，
+  以前沒有這一欄，一個全域設定會靜默遮蔽掉每一台機器上同名的 `ccN`：使用者寫一筆 `cc1` 想固定本機的帳號，mac_builder 上所有選 `cc1` 的 bot 就被注入一個那台根本不存在的設定目錄，
   claude 以未登入狀態開一個空的設定目錄，額度探測也去問那個空目錄——UI 上兩者名字一模一樣，沒有任何地方會提示它們不是同一個帳號（review 2026-09-16）。
   **現行 config.toml（不寫 host）在本機的行為一個字都沒變**，有測試釘住；在遠端它不再蓋掉那台的 `ccN`。
   **遷移**（review 2026-09-16）：中間有一版把「省略」做成**只適用本機**，但 shell 只認得 claude 的 `ccN`，codex 的 `CODEX_HOME`、grok 的 `GROK_HOME` 身份只可能寫在 config 裡——
@@ -4376,16 +4376,16 @@ claude 用子命令而不是 `claude /login`：後者起一整個 REPL、登完�
 codex 用 `--device-auth`（2026-11-03 本機 0.166.0 實測，拋棄式 `CODEX_HOME`）：預設的 `codex login` 在那台主機的 localhost:1455 等回呼，遠端或手機操作時登不進去；裝置碼流程印出固定網址 `https://auth.openai.com/codex/device` 與一次性碼（`Enter this one-time code` 的下一行），任何裝置開網址輸入碼即可，CLI 自己輪詢完成。預設帳號（沒綁身份）開 shell 打的也是這一行。
 pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件（codex 的一次性碼與網址只在登入協助的 `GET …/login` 回應裡，`no-store`）。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
-**被登出時主動提示**（#838 補充，使用者 2026-10-04：「應該要偵測到有被登出就提示我登入，而不是去身份裡面點」；`login_prompt.rs`、網頁 `lib/loginPrompt.ts`）：網頁在主畫面最上面放一條「cc1（m4p）已登出 → 立即登入」，來源有兩個——
+**被登出時主動提示**（#838 補充，使用者 2026-10-04：「應該要偵測到有被登出就提示我登入，而不是去身份裡面點」；`login_prompt.rs`、網頁 `lib/loginPrompt.ts`）：網頁在主畫面最上面放一條「cc1（mac_builder）已登出 → 立即登入」，來源有兩個——
 ① 身份探測（`identities[].logged_in === false`，host 快照原本就有，網頁自己看）；② daemon 記的 `login_needed`：綁著身份的 claude bot 回合授權失敗（hook `StopFailure` 分類成 `FailureReason::Auth`，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`，引用那句話的回報不算）。
 **codex**（2026-11-03）：探測說未登入、或綁著身份的 codex bot 回合整則是授權失效的錯誤（`is_codex_auth_failure_line`：開頭是 `Your access token could not be refreshed …`／`refresh token …` 且含 already used／expired／revoked／invalid／sign in again，或開頭 `unexpected status 401`／`401 unauthorized`；只認整則、單行、不超過 300 字）同樣提示，「立即登入」走同一條身份登入（裝置碼）。codex 的 hook 只有 `agent-turn-complete`（沒有 `StopFailure`），所以授權失效只能從回合的最後回覆認；這些字樣是 codex 的 refresh 失敗訊息，**尚未在真的失效帳號上實測**（不為此弄壞真帳號），之後 codex 改字要跟著改。
-**② 是遠端 claude 唯一的來源**：遠端 claude 的探測問不出「未登入」（`tools::login_answer_to_cache` 刻意丟掉 false），m4p 的 cc1 被登出時只有回合會說。標記時立刻 `recheck_identity_login` 重探該身份（不等探測週期）並推 `host_changed`；記憶體帳 `App.login_needed`，`(host, identity) → {since, via}`，隨 `hosts[].identities.<name>.login_needed` 出去（API.md §8）。
+**② 是遠端 claude 唯一的來源**：遠端 claude 的探測問不出「未登入」（`tools::login_answer_to_cache` 刻意丟掉 false），mac_builder 的 cc1 被登出時只有回合會說。標記時立刻 `recheck_identity_login` 重探該身份（不等探測週期）並推 `host_changed`；記憶體帳 `App.login_needed`，`(host, identity) → {since, via}`，隨 `hosts[].identities.<name>.login_needed` 出去（API.md §8）。
 只提示**有 bot 綁著它**（同一台主機、同 kind：claude 或 codex）、而且那台主機連得上的身份；沒綁身份的 bot（用預設帳號）沒有「哪個身份」可講，不處理。清掉的時機：探測把它從非已登入變成已登入、登入 watcher 收尾重驗已登入、登入協助貼完 code 且 CLI 沒報失敗、綁著它的 bot 又正常答完一回合。
 「立即登入」＝`loginIdentity`（打開上面的登入協助面板；codex 開的是裝置碼版本）。「先關掉」只存**這一頁的記憶體**（不存 daemon、不用 localStorage——關掉是「這個畫面先別吵我」，不是跨裝置的事實；兩台裝置各自關各自的），以 `since`（探測來源用固定字 `probe`）比對「同一次登出」：同一次不重複洗版，登入成功後記錄清掉，下一次被登出（或新的一次授權失敗）會再提示。沒有新增 API 路由。
 
 **首次啟動的環境準備**（issue #1931，使用者 2026-10-23；網頁 `lib/onboarding.ts`、`OnboardingChecklist`）：一個 CLI 都沒裝／沒登入時，網頁主畫面放「環境準備」清單——herdr 是否連得上、claude／codex／grok／agy 各一列（已安裝／已登入／`logged_in === null` 的「問不到」），旁邊「安裝」「登入」鈕，就緒後引導新增 Project → 新增 Bot。出現條件：沒有 Project、本機沒有可用 kind（已安裝且已登入或問不到；有已登入的命名身份算已登入）、或 herdr 連不上；都好了自動收起，環境設定的「環境準備」分頁仍可看。安裝：claude／codex／grok 打 `POST /api/hosts/{name}/tools/install` 且**不帶** `via_bot_id`（daemon 開臨時 host-shell pane 跑官方安裝指令，回 `{"pane_id","mode":"shell","install_id"}`，結束後重新偵測並推 `host_changed`，再推 `tool_install_done`：網頁只解除對應 `install_id` 的「安裝中…」；換代回 `outcome:superseded` 且不帶舊 pane ID，正常完成事件與清理受原 fence 保護；逾時一律保留 pane 並回 `installed:false`，UI 優先講逾時，不因完成事件重新開舊 pane）；agy 沿用 `POST …/agy/install`。登入沿用既有流程（命名身份 `…/identities/{identity}/login`；預設帳號開新 shell 打 `<cli> login`，agy 打 `agy`；QuickAddBots 登入後提供「登入好了，重新偵測」，重驗成功才按更新後狀態新增 Bot）。已登出橫幅的條件不變，沒有 bot 綁著的已登出身份不提示，「一個 kind 都沒登入」由這份清單提示。
 
-**手機版登入協助**（#838，使用者 2026-10-04：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 m4p 的 cc1 驗證」；`login_assist.rs`）：同一 `(host, identity)` 同時只開一條 Claude 登入流程；在記憶體先 reservation，pane 開好後轉成 `(host, pane_id) → identity`（連同 shell 的 `created_at`，pane id 被重用時對不上；pane 關閉或 host 改指時清）。重複請求在開 pane 前回 `409 identity_login_in_progress`。
+**手機版登入協助**（#838，使用者 2026-10-04：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 mac_builder 的 cc1 驗證」；`login_assist.rs`）：同一 `(host, identity)` 同時只開一條 Claude 登入流程；在記憶體先 reservation，pane 開好後轉成 `(host, pane_id) → identity`（連同 shell 的 `created_at`，pane id 被重用時對不上；pane 關閉或 host 改指時清）。重複請求在開 pane 前回 `409 identity_login_in_progress`。
 網頁用 `GET …/shells/{pane_id}/login` 取出從畫面讀到的 OAuth 網址（`recent_unwrapped`；只交 claude 的 https authorize 網址）與「是否正在等 code」，用 `POST …/login/code` 把 code 打進**那顆登入 pane** 並按 Enter（兩段式：先只打字，再複查同一顆 claude 行程還在才按 Enter；不在就送 ctrl+u 清掉命令列、回 `not_awaiting_code`、code 視為已送過。複查到 Enter 之間的殘餘窗口要靠 herdr 條件式輸入，#787）。守衛：只服務登記過的登入 pane；送前現讀畫面，**最後一個非空行必須正好是 `Paste code here if prompted >`**
 （2.1.289 真畫面：CLI 收到錯 code 會在同一行接 `Login failed: Request failed with status code 400` 然後退出，所以提示後面有字＝不在等）、前景程序必須還是 `claude`，對不上 409 `not_awaiting_code`、一個字都不送；code 只收 OAuth code 的字元集。網址與 code 不進 log／事件（同上一段 pane 快照的規則）。
 
@@ -4948,7 +4948,7 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 #### 18.8a2 codex 重置券到期前一天提示（2026-11-07 使用者）
 
 `rateLimitResetCredits.credits[]` 逐張收進 `Quota.reset_credits.credits`（`{id,title,status,granted_at,expires_at}`，只收 `available`／`redeeming`，依到期由早到晚），`expires_at`／`title` 取最早到期那張，不依供應商清單順序（API.md §12.4）。
-**提示不依賴網頁開著**：`runners/reset_credit_expiry.rs` 每 10 分鐘掃記憶體裡的 codex 額度讀數（跳過 stale），每張有 id、未過期、24 小時內到期的券推**一則** AGM inbox `ops_alert`（`source=daemon`，`reason=codex_reset_credit_expiring`，detail 例「codex 重置券『Full reset』12/01 03:56 (+8) 到期（約 17 小時後；co0 @m4p），在 codex 用 /status → Reset usage」）。去重靠 `supervisor_inbox.event_key = ops_alert:daemon:codex_reset_credit_expiring:<券 id>`（`INSERT OR IGNORE`）：重啟、同一張券出現在多個額度 key 都只推一次；24 小時外不推；沒有 id 的券不推。網頁開著時另外跳 toast（`store/resetCreditsNotice.ts`，localStorage 去重，不看 daemon 的紀錄）。daemon 只通知，不替使用者用券。
+**提示不依賴網頁開著**：`runners/reset_credit_expiry.rs` 每 10 分鐘掃記憶體裡的 codex 額度讀數（跳過 stale），每張有 id、未過期、24 小時內到期的券推**一則** AGM inbox `ops_alert`（`source=daemon`，`reason=codex_reset_credit_expiring`，detail 例「codex 重置券『Full reset』12/01 03:56 (+8) 到期（約 17 小時後；co0 @mac_builder），在 codex 用 /status → Reset usage」）。去重靠 `supervisor_inbox.event_key = ops_alert:daemon:codex_reset_credit_expiring:<券 id>`（`INSERT OR IGNORE`）：重啟、同一張券出現在多個額度 key 都只推一次；24 小時外不推；沒有 id 的券不推。網頁開著時另外跳 toast（`store/resetCreditsNotice.ts`，localStorage 去重，不看 daemon 的紀錄）。daemon 只通知，不替使用者用券。
 
 #### 18.8b 撞到用量上限是「等」，不是「失敗」
 `quota.limit_hit` 記 CLI 印的上限橫幅（`You've hit your usage limit …`，可能帶 `try again at …`）。狀態 `quota_blocked`（未結案）：

@@ -3,7 +3,7 @@
  * 哪些 claude 身份現在該提示、關掉的狀態怎麼比。全是純函式；顯示在 `components/LoginPromptBanner.tsx`。
  *
  * 一個身份要提示，需要同時：① 在那台主機上要重新登入——探測說 `logged_in === false`，或 daemon 記了 `login_needed`
- * （綁著它的 bot 回合授權失敗；遠端 claude 的探測問不出「未登入」，m4p 的 cc1 只有這條）；② 有 bot 綁著它（同一台主機）；
+ * （綁著它的 bot 回合授權失敗；遠端 claude 的探測問不出「未登入」，mac_builder 的 cc1 只有這條）；② 有 bot 綁著它（同一台主機）；
  * ③ 那台主機連得上（連不上時登入也開不了 pane，離線警示條已經在講）。
  */
 import type { Bot, Host, IdentityStatusMap, Project } from '../api/types'

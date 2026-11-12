@@ -740,9 +740,9 @@ test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出
 test('身份登入 409 identity_login_unavailable：顯示 daemon 的人話 message，不是機器代碼', async () => {
   seed()
   routeDaemon(() =>
-    json({ error: 'conflict', reason: 'identity_login_unavailable', host: 'm4p', identity: 'cc1', kind: 'claude', message: 'CLI 不在 PATH，無法登入' }, 409),
+    json({ error: 'conflict', reason: 'identity_login_unavailable', host: 'mac_builder', identity: 'cc1', kind: 'claude', message: 'CLI 不在 PATH，無法登入' }, 409),
   )
-  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), false)
+  assert.equal(await useStore.getState().loginIdentity('mac_builder', 'cc1'), false)
   const texts = noticeTexts()
   assert.equal(texts.length, 1)
   assert.match(texts[0], /CLI 不在 PATH/)
@@ -752,17 +752,17 @@ test('身份登入 409 identity_login_unavailable：顯示 daemon 的人話 mess
 test('身份登入 409 identity_login_in_progress 帶既有 pane_id：不報錯，把那顆登入終端重新打開；沒有 pane_id 照舊報錯', async () => {
   seed()
   routeDaemon(() =>
-    json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }, 409),
+    json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'mac_builder', identity: 'cc1', pane_id: 'w9:p9', kind: 'claude', message: '這個身份已有登入程序' }, 409),
   )
-  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), true)
+  assert.equal(await useStore.getState().loginIdentity('mac_builder', 'cc1'), true)
   const view = useStore.getState().shellView
-  assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'm4p', paneId: 'w9:p9' })
+  assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'mac_builder', paneId: 'w9:p9' })
   assert.equal(useStore.getState().notices.some((n) => n.kind === 'error'), false)
 
   // 還在 reservation 階段（pane 尚未登記）：沒有 pane 可以重開，照舊顯示 daemon 的說明。
   useStore.setState({ shellView: null, notices: [] })
-  routeDaemon(() => json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'm4p', identity: 'cc1', message: '這個身份已有登入程序' }, 409))
-  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), false)
+  routeDaemon(() => json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'mac_builder', identity: 'cc1', message: '這個身份已有登入程序' }, 409))
+  assert.equal(await useStore.getState().loginIdentity('mac_builder', 'cc1'), false)
   assert.equal(useStore.getState().shellView, null)
   assert.equal(noticeTexts().length, 1)
 })

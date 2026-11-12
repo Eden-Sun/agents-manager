@@ -24,7 +24,7 @@ export class MockIntegrationUpdates {
       items: [row('claude', 'outdated', 8, 11), row('codex', 'outdated', 8, 10), row('antigravity-cli', 'not_installed', null, null), row('grok', 'not_installed', null, null)],
     },
     {
-      host: 'm4p',
+      host: 'mac_builder',
       checked_at: '2026-10-14T12:00:00.000Z',
       error: null,
       items: [row('claude', 'current', 11, 11), row('codex', 'outdated', 9, 10), row('antigravity-cli', 'not_installed', null, null), row('grok', 'current', 3, 3)],

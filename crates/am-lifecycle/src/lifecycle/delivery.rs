@@ -2418,7 +2418,7 @@ mod api_tests {
         // 別的 home、別的 host 也一樣。
         let other_home = crate::codex_history::Binding { codex_home: Some(std::path::PathBuf::from("/elsewhere")), ..b.clone() };
         stub.arrive_on_open(2, &other_home, "t1", "u2", "第一行\n第二行");
-        let other_host = crate::codex_history::Binding { host: "m4p".into(), ..b.clone() };
+        let other_host = crate::codex_history::Binding { host: "mac_builder".into(), ..b.clone() };
         stub.arrive_on_open(2, &other_host, "t1", "u3", "第一行\n第二行");
         app.codex_history.set(Some(Arc::new(stub.clone())));
         let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-other").await.unwrap();

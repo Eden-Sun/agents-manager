@@ -5283,12 +5283,12 @@ mod refresh_tool_error_tests {
 
     #[test]
     fn a_superseded_tool_detection_is_a_retryable_409_not_a_502() {
-        let e = anyhow::Error::new(crate::tools::Superseded { host: "m4p".into() });
-        let LcError::Conflict(v) = detect_error("m4p", e) else { panic!("要是 409") };
+        let e = anyhow::Error::new(crate::tools::Superseded { host: "mac_builder".into() });
+        let LcError::Conflict(v) = detect_error("mac_builder", e) else { panic!("要是 409") };
         assert_eq!(v["reason"], "host_superseded");
         assert_eq!(v["retryable"], true);
-        assert_eq!(v["host"], "m4p");
-        assert!(matches!(detect_error("m4p", anyhow::anyhow!("ssh: connect timed out")), LcError::Upstream(_)), "其餘照舊 502");
+        assert_eq!(v["host"], "mac_builder");
+        assert!(matches!(detect_error("mac_builder", anyhow::anyhow!("ssh: connect timed out")), LcError::Upstream(_)), "其餘照舊 502");
     }
 }
 
@@ -6201,7 +6201,7 @@ mod project_tests {
         assert_eq!(flag(app.clone()).await, json!(false));
     }
 
-    /// #1752：`POST /api/hosts` 更新既有主機時沒帶的選填欄位沿用舊值（`remote_path` 被清成空字串，m4p 的 PATH 就找不到 herdr）；
+    /// #1752：`POST /api/hosts` 更新既有主機時沒帶的選填欄位沿用舊值（`remote_path` 被清成空字串，mac_builder 的 PATH 就找不到 herdr）；
     /// 明確帶了才改（包含明確帶空字串清掉）。
     #[tokio::test]
     async fn a_host_update_that_omits_optional_fields_keeps_the_stored_values() {
@@ -6720,14 +6720,14 @@ mod delete_identity_tests {
     #[test]
     fn a_hostless_identity_is_in_effect_on_a_remote_host_unless_that_host_has_its_own() {
         let hostless = vec![ident("work", "codex", None)];
-        assert!(hostless_identity_in_effect(&hostless, "m4p", None, "work"));
-        let shadowed = vec![ident("work", "codex", None), ident("work", "codex", Some("m4p"))];
-        assert!(!hostless_identity_in_effect(&shadowed, "m4p", None, "work"), "那台有明寫的");
+        assert!(hostless_identity_in_effect(&hostless, "mac_builder", None, "work"));
+        let shadowed = vec![ident("work", "codex", None), ident("work", "codex", Some("mac_builder"))];
+        assert!(!hostless_identity_in_effect(&shadowed, "mac_builder", None, "work"), "那台有明寫的");
         let cc = vec![ident("cc1", "claude", None)];
-        let m4p_shell = vec![ident("cc1", "claude", None)];
-        assert!(!hostless_identity_in_effect(&cc, "m4p", Some(&m4p_shell), "cc1"), "那台 shell 自己有 cc1");
-        assert!(hostless_identity_in_effect(&cc, "m4p", Some(&[]), "cc1"), "那台偵測過、沒有 cc1");
-        assert!(hostless_identity_in_effect(&cc, "m4p", None, "cc1"), "還沒偵測：照最保守的算");
+        let mac_builder_shell = vec![ident("cc1", "claude", None)];
+        assert!(!hostless_identity_in_effect(&cc, "mac_builder", Some(&mac_builder_shell), "cc1"), "那台 shell 自己有 cc1");
+        assert!(hostless_identity_in_effect(&cc, "mac_builder", Some(&[]), "cc1"), "那台偵測過、沒有 cc1");
+        assert!(hostless_identity_in_effect(&cc, "mac_builder", None, "cc1"), "還沒偵測：照最保守的算");
     }
 
     async fn cache_put(app: &Arc<App>, key: &str) {
@@ -6745,12 +6745,12 @@ mod delete_identity_tests {
         let app = &env.app;
         crate::testing::seed_project_config(&env).await;
         cache_put(app, "local/codex/work").await;
-        cache_put(app, "m4p/codex/work").await;
+        cache_put(app, "mac_builder/codex/work").await;
         cache_put(app, "local/codex/other").await;
         let new = NewIdentity { name: "work".into(), kind: "codex".into(), env: Default::default(), args: vec![], host: None };
         create_identity(State(app.clone()), Json(new)).await.unwrap();
         assert!(!cache_has(app, "local/codex/work").await, "重建同名身份：舊家目錄的清單不能留著");
-        assert!(!cache_has(app, "m4p/codex/work").await, "同名的別台那格一起作廢（不逐台判斷）");
+        assert!(!cache_has(app, "mac_builder/codex/work").await, "同名的別台那格一起作廢（不逐台判斷）");
         assert!(cache_has(app, "local/codex/other").await, "別的身份不動");
 
         cache_put(app, "local/codex/work").await;
@@ -6811,7 +6811,7 @@ mod delete_identity_tests {
         assert!(app.quotas.lock().await.contains_key("claude:cc1"), "shell 的 cc1 還在用這把 key");
     }
 
-    /// 刪掉沒寫 host 的 `work`：m4p 上的 bot 正在用它（那台沒有自己的 `work`）→ 409，不能只看本機的 bot。
+    /// 刪掉沒寫 host 的 `work`：mac_builder 上的 bot 正在用它（那台沒有自己的 `work`）→ 409，不能只看本機的 bot。
     #[tokio::test]
     async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it() {
         let env = crate::testing::env().await;
@@ -6819,7 +6819,7 @@ mod delete_identity_tests {
         let text = |own: &str| {
             format!(
                 "[server]\nlisten = '127.0.0.1:7788'\n\n[[identities]]\nname = 'work'\nkind = 'codex'\n{own}\n\
-                 [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n\n\
+                 [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'mac_builder'\n\n\
                  [[projects.bots]]\nid = 'b9'\nname = 'worker'\nkind = 'codex'\nidentity = 'work'\n"
             )
         };
@@ -6829,18 +6829,18 @@ mod delete_identity_tests {
 
         let del = || delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }));
         match del().await {
-            Err(LcError::Conflict(body)) => assert_eq!((body["bot_id"].as_str(), body["host"].as_str()), (Some("b9"), Some("m4p"))),
+            Err(LcError::Conflict(body)) => assert_eq!((body["bot_id"].as_str(), body["host"].as_str()), (Some("b9"), Some("mac_builder"))),
             other => panic!("遠端 bot 還靠它：{:?}", other.map(|r| r.status())),
         }
         assert_eq!(app.cfg.get().await.identities.len(), 1, "什麼都沒刪");
 
-        // m4p 有自己的 work：刪沒寫 host 的那筆不影響那台的 bot。
-        std::fs::write(&app.cfg.path, text("\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n")).unwrap();
+        // mac_builder 有自己的 work：刪沒寫 host 的那筆不影響那台的 bot。
+        std::fs::write(&app.cfg.path, text("\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'mac_builder'\n")).unwrap();
         app.cfg.update(|_| Ok(())).await.unwrap();
         crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
         del().await.expect("那台用的是自己的 work");
         let left = app.cfg.get().await.identities;
-        assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("m4p")));
+        assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("mac_builder")));
     }
 
     /// 並行：`create_bot` 驗過身份存在之後、寫進 config 之前，那個身份被刪掉。`projection::validate` 在 config 鎖裡重驗，
@@ -6898,21 +6898,21 @@ mod delete_identity_tests {
         assert!(app.cfg.get().await.identities.iter().any(|i| i.name == "racer2"), "身份還在");
     }
 
-    /// 刪 m4p 那一台的 `work`：本機另有一筆自己的 `work`，它的快取列不能跟著消失（快取只在下次偵測才會補回來）。
+    /// 刪 mac_builder 那一台的 `work`：本機另有一筆自己的 `work`，它的快取列不能跟著消失（快取只在下次偵測才會補回來）。
     #[tokio::test]
     async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
         let env = crate::testing::env().await;
         let app = &env.app;
         std::fs::write(
             &app.cfg.path,
-            "[server]\nlisten = '127.0.0.1:7788'\n\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n\n\
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'mac_builder'\n\n\
              [[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'local'\n\n\
-             [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n",
+             [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'mac_builder'\n",
         )
         .unwrap();
         app.cfg.update(|_| Ok(())).await.unwrap();
         crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
-        for host in ["local", "m4p"] {
+        for host in ["local", "mac_builder"] {
             let mut ht = crate::tools::HostTools {
                 tools: Default::default(),
                 identities: Default::default(),
@@ -6924,11 +6924,11 @@ mod delete_identity_tests {
             ht.identities.insert("work".into(), crate::tools::IdentityInfo::shell("work", "codex", None));
             app.tools.lock().await.insert(host.into(), ht);
         }
-        delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: Some("m4p".into()) }))
+        delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: Some("mac_builder".into()) }))
             .await
             .expect("沒有 bot 在用");
         let tools = app.tools.lock().await;
-        assert!(!tools["m4p"].identities.contains_key("work"), "被刪的那一台的快取列要拿掉");
+        assert!(!tools["mac_builder"].identities.contains_key("work"), "被刪的那一台的快取列要拿掉");
         assert!(tools["local"].identities.contains_key("work"), "本機自己的 work 沒被刪，快取列不能一起消失");
     }
 }
@@ -17700,7 +17700,7 @@ mod lan_exposure_tests {
         for (method, path) in [
             ("GET", "/api/state"), ("GET", "/api/supervisor/state/"), ("POST", "/api/bots/x/prompt"), ("POST", "/api/bots/x/keys"),
             ("GET", "/api/panes/"), ("POST", "/api/services/daemon-swap/restart-window"), ("POST", "/api/services/herdr-upgrade/resume/a/b"),
-            ("GET", "/api/capabilities?x=1/../state"), ("DELETE", "/api/hosts/m4p"), ("PUT", "/api/drafts/k"),
+            ("GET", "/api/capabilities?x=1/../state"), ("DELETE", "/api/hosts/mac_builder"), ("PUT", "/api/drafts/k"),
         ] {
             let resp = raw(app.clone(), &format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: svc-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")).await;
             let allowed_listed = path.starts_with("/api/capabilities");
@@ -18062,7 +18062,7 @@ mod host_target_tests {
     /// `POST /api/hosts` 的 `ssh` 是 ssh 的一個 argv、`herdr_session` 會進遠端路徑與 plist：形狀不對一律 400，不寫進 config。
     #[test]
     fn a_host_target_cannot_smuggle_an_ssh_option_or_a_path() {
-        for ok in ["m4p@100.64.0.2", "build-box", "ssh-alias", "user@host.example.com", "[::1]", "10.0.0.5"] {
+        for ok in ["mac_builder@100.64.0.2", "build-box", "ssh-alias", "user@host.example.com", "[::1]", "10.0.0.5"] {
             assert_eq!(host_target_problem(ok, "agents-manager"), None, "{ok}");
         }
         for bad in ["-oProxyCommand=touch /tmp/pwned", "-F/tmp/evil", "host name", "host\nname", "ho\tst", "a\u{0}b", ""] {
@@ -18392,7 +18392,7 @@ mod relay_result_api_tests {
         let env = crate::testing::env().await;
         let a = crate::testing::claude_bot(&env.app, &env.project_id, "resolve-a").await;
         let project = db::ulid();
-        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','m4p',?)")
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','mac_builder',?)")
             .bind(&project).bind(format!("/remote/{project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
         let b = crate::testing::claude_bot(&env.app, &project, "resolve-b").await;
         let Json(result) = resolve_relay_target(State(env.app.clone()), Extension(RequestPrincipal::Bot(a.id)), Query(RelayResolveQuery { target: format!("bot:{}", b.id) })).await.unwrap();
@@ -18422,7 +18422,7 @@ mod relay_result_api_tests {
 
     async fn insert_remote_run(app: &Arc<App>, name: &str, agent_name: &str, pane_id: &str) -> (String, String) {
         let project = db::ulid();
-        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','m4p',?)")
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES(?,?,'remote','mac_builder',?)")
             .bind(&project).bind(format!("/remote/{project}")).bind(db::now()).execute(&app.db).await.unwrap();
         let bot = crate::testing::claude_bot(app, &project, name).await;
         let run = db::ulid();
@@ -19348,7 +19348,7 @@ mod hire_fork_api_tests {
         let _manager = expert_project(&env).await;
         let source = add_bot(&env, &env.project_id, "codex", true).await;
         let mut project = db::project(&env.app.db, &env.project_id).await.unwrap().unwrap();
-        project.host = "m4p".into();
+        project.host = "mac_builder".into();
         let err = validate_fork_source(&env.app, &project, &source, "codex").await.err().unwrap();
         assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_other_host"), "{err:?}");
     }

@@ -2,7 +2,7 @@
     use crate::app_ports_p3::install_via_bot;
     use crate::state::App;
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
-    /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
+    /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 mac_builder 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
     /// 也不能因此讓遠端用不到它：codex／grok 身份只可能寫在 config 裡（review 2026-09-16 M6）。
     #[tokio::test]
     async fn a_config_identity_without_a_host_applies_everywhere_but_yields_to_that_hosts_own() {
@@ -32,34 +32,34 @@
         assert_eq!(dir_of(local, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
         // 遠端還沒偵測：codex 身份馬上能用（那台不可能有同名 shell 身份）；`ccN` 要等那台的 alias 讀過。
-        assert_eq!(dir_of(identity_for_host(app, "m4p", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身份只能寫在 config 裡，遠端要用得到");
-        assert!(identity_for_host(app, "m4p", "cc1").await.is_none(), "還不知道 m4p 有沒有自己的 cc1");
+        assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身份只能寫在 config 裡，遠端要用得到");
+        assert!(identity_for_host(app, "mac_builder", "cc1").await.is_none(), "還不知道 mac_builder 有沒有自己的 cc1");
 
-        // m4p 偵測到自己的 cc1：那台的說了算，不被本機那筆遮蔽。
+        // mac_builder 偵測到自己的 cc1：那台的說了算，不被本機那筆遮蔽。
         let shell = |dir: Option<&str>| crate::tools::HostTools {
             tools: Default::default(),
             identities: Default::default(),
             shell_identities: dir.map(|d| vec![cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", d)]).unwrap_or_default(),
             utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
         };
-        app.tools.lock().await.insert("m4p".into(), shell(Some("$HOME/.claude-ccompany")));
-        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
-        // m4p 偵測完、沒有自己的 cc1：沒寫 host 的那筆就適用。
-        app.tools.lock().await.insert("m4p".into(), shell(None));
-        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
+        app.tools.lock().await.insert("mac_builder".into(), shell(Some("$HOME/.claude-ccompany")));
+        assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
+        // mac_builder 偵測完、沒有自己的 cc1：沒寫 host 的那筆就適用。
+        app.tools.lock().await.insert("mac_builder".into(), shell(None));
+        assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
         // 明寫 host 的最優先，而且只給那一台；`host = "local"` 就是只要本機。
         app.cfg
             .update(|c| {
-                c.identities.push(cfg("cc1", "claude", Some("m4p"), "CLAUDE_CONFIG_DIR", "/home/me/.claude-ccompany"));
+                c.identities.push(cfg("cc1", "claude", Some("mac_builder"), "CLAUDE_CONFIG_DIR", "/home/mac_builder/.claude-ccompany"));
                 c.identities.push(cfg("solo", "claude", Some("local"), "CLAUDE_CONFIG_DIR", "/home/me/.claude-solo"));
                 Ok(())
             })
             .await
             .unwrap();
-        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-ccompany"));
+        assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/mac_builder/.claude-ccompany"));
         assert_eq!(dir_of(identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
-        assert!(identity_for_host(app, "m4p", "solo").await.is_none(), "寫了 host = local 就只給本機");
+        assert!(identity_for_host(app, "mac_builder", "solo").await.is_none(), "寫了 host = local 就只給本機");
         assert!(identity_for_host(app, crate::config::LOCAL_HOST, "solo").await.is_some());
     }
 
@@ -67,11 +67,11 @@
     #[test]
     fn detection_and_start_share_one_precedence() {
         let c = |name: &str, host: Option<&str>| crate::config::IdentityCfg { name: name.into(), kind: "claude".into(), host: host.map(String::from), env: Default::default(), args: vec![] };
-        let config = vec![c("cc1", None), c("far", Some("m4p"))];
+        let config = vec![c("cc1", None), c("far", Some("mac_builder"))];
         let shell = vec![c("cc1", None), c("cc2", None)];
         let local = merge_identities(&config, crate::config::LOCAL_HOST, Some(&shell));
-        assert_eq!(local.iter().map(|(i, s)| (i.name.as_str(), *s)).collect::<Vec<_>>(), [("cc1", SOURCE_CONFIG), ("cc2", SOURCE_SHELL)], "明寫給 m4p 的不出現在本機");
-        let remote = merge_identities(&config, "m4p", Some(&shell));
+        assert_eq!(local.iter().map(|(i, s)| (i.name.as_str(), *s)).collect::<Vec<_>>(), [("cc1", SOURCE_CONFIG), ("cc2", SOURCE_SHELL)], "明寫給 mac_builder 的不出現在本機");
+        let remote = merge_identities(&config, "mac_builder", Some(&shell));
         assert_eq!(remote.iter().map(|(i, s)| (i.name.as_str(), *s)).collect::<Vec<_>>(), [("far", SOURCE_CONFIG), ("cc1", SOURCE_SHELL), ("cc2", SOURCE_SHELL)]);
     }
 
@@ -118,7 +118,7 @@
 
     use super::*;
 
-    /// Real `alias` output from both machines (2026-09-06); m4p keys cc1 to `~/.claude-ccompany`.
+    /// Real `alias` output from both machines (2026-09-06); mac_builder keys cc1 to `~/.claude-ccompany`.
     #[test]
     fn reads_ccn_aliases_off_the_shell() {
         let out = r#"
@@ -210,8 +210,8 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     #[test]
     fn claude_is_probed_locally_and_left_to_the_pane_when_remote() {
         assert_eq!(login_probe_args("claude", LOCAL_HOST), Some(CLAUDE_LOGIN_ARGS));
-        assert_eq!(login_probe_args("claude", "m4p"), None);
-        assert_eq!(login_probe_args("codex", "m4p"), Some(&["login", "status"][..]));
+        assert_eq!(login_probe_args("claude", "mac_builder"), None);
+        assert_eq!(login_probe_args("codex", "mac_builder"), Some(&["login", "status"][..]));
         // 腳本要用帶進來的 args，不是 kind 的預設（claude 的預設是 None，會整段被略過）。
         let mut it = probe("cc1", "claude", &[("CLAUDE_CONFIG_DIR", "/Users/me/.claude-ccompany")]);
         it.args = Some(CLAUDE_LOGIN_ARGS.to_vec());

@@ -305,7 +305,7 @@ pub fn tools_json(host: &str, tools: &std::collections::BTreeMap<String, crate::
 }
 
 /// agy 的登入憑證（Google OAuth token）：Linux（agm-host 實測）是這個檔（600）；**macOS 沒有檔，放 login Keychain**
-/// （service `gemini`、account `antigravity`，agy log 寫 `authenticated via keyring`；2026-10-06 在 m4p 實測）。`agy` 沒有 `logout` 子命令，TUI 的 `/logout` 做的也是清憑證。
+/// （service `gemini`、account `antigravity`，agy log 寫 `authenticated via keyring`；2026-10-06 在 mac_builder 實測）。`agy` 沒有 `logout` 子命令，TUI 的 `/logout` 做的也是清憑證。
 pub const TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
 
 /// 遠端同一件事：只刪憑證（檔案、macOS 的 Keychain 項目）、不跑 agy。`AM_REMOVED`＝刪掉了，`AM_ABSENT`＝本來就沒有，`AM_FAILED`＝想刪沒刪成。

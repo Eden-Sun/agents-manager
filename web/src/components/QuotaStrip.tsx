@@ -43,7 +43,7 @@ const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok', 'agy']
 
 type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
 
-/** `m4p/claude:cc1` → `claude:cc1`，只留屬於 `host` 的。 */
+/** `mac_builder/claude:cc1` → `claude:cc1`，只留屬於 `host` 的。 */
 function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
   const out: QuotaMap = {}
   const prefix = `${host}/`

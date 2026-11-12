@@ -18,7 +18,7 @@ after(teardownDom)
 const NOW = Date.parse('2026-11-08T06:30:00Z')
 const quotaWithHit = (at: string): QuotaMap =>
   ({
-    'm4p/codex:co0': {
+    'mac_builder/codex:co0': {
       five_hour: null,
       seven_day: null,
       fable: null,
@@ -28,7 +28,7 @@ const quotaWithHit = (at: string): QuotaMap =>
       updated_at: '',
       source: 'codex-app-server',
       account: null,
-      host: 'm4p',
+      host: 'mac_builder',
       stale: false,
     },
   }) as unknown as QuotaMap
@@ -60,7 +60,7 @@ test('「使用一張」：打 User-only 端點（不帶 credit_id），成功�
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined })
-    return new Response(JSON.stringify({ outcome: 'reset', key: 'm4p/codex:co0', resumed: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ outcome: 'reset', key: 'mac_builder/codex:co0', resumed: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
   try {
     const stop = startResetCreditOfferNotice(() => NOW)
@@ -71,7 +71,7 @@ test('「使用一張」：打 User-only 端點（不帶 credit_id），成功�
     await flush()
     const hit = calls.find((c) => c.url.includes('/quota/reset-credit/use'))
     assert.ok(hit, `expected the use endpoint, got ${calls.map((c) => c.url).join(', ')}`)
-    assert.deepEqual(hit.body, { host: 'm4p', identity: 'co0' })
+    assert.deepEqual(hit.body, { host: 'mac_builder', identity: 'co0' })
     assert.equal(document.querySelector('[role=alertdialog]'), null)
     stop()
   } finally {

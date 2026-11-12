@@ -14,7 +14,7 @@ pub enum LcError {
     /// A 404 whose body is machine-readable (`{"error":"not_found","reason":…}`) instead of a bare `what`.
     NotFoundValue(Value),
     /// A 400 whose body is machine-readable rather than a message, e.g.
-    /// `{"error":"remote_not_supported","host":"m4p"}`.
+    /// `{"error":"remote_not_supported","host":"mac_builder"}`.
     BadValue(Value),
     /// 422: the request is well-formed and allowed, but this one can never be carried out as asked
     /// (e.g. a prompt too long to prove delivered). Machine-readable body; callers treat it as final.

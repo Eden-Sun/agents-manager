@@ -46,7 +46,7 @@ test('host_changed 帶 baseline：本機與遠端都更新；沒帶＝沒變；i
   useStore.setState({
     hosts: [
       {
-        name: 'm4p', ssh: 'm4p', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
+        name: 'mac_builder', ssh: 'mac_builder', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
         disconnected_since: null, attach_command: '', herdr: useStore.getState().localHerdr, tools: useStore.getState().localTools,
         baseline: null, identity_status: {},
       },
@@ -60,10 +60,10 @@ test('host_changed 帶 baseline：本機與遠端都更新；沒帶＝沒變；i
   dispatchFrameForTest({ type: 'host_changed', data: { name: 'local', connected: true } })
   assert.equal(useStore.getState().localBaseline?.issues?.length, 1, '沒帶 baseline 不能把已知的差異洗掉')
 
-  dispatchFrameForTest({ type: 'host_changed', data: { name: 'm4p', connected: true, baseline: { ...base, issues: null } } })
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'mac_builder', connected: true, baseline: { ...base, issues: null } } })
   assert.equal(useStore.getState().hosts[0].baseline?.issues, null, '探測沒跑完＝未知')
 
-  dispatchFrameForTest({ type: 'host_changed', data: { name: 'm4p', connected: true, baseline: { ...base, issues: [] } } })
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'mac_builder', connected: true, baseline: { ...base, issues: [] } } })
   assert.deepEqual(useStore.getState().hosts[0].baseline?.issues, [])
 })
 
@@ -72,14 +72,14 @@ test('host_changed 帶同一份 baseline：不換 hosts 陣列也不換 baseline
   useStore.setState({
     hosts: [
       {
-        name: 'm4p', ssh: 'm4p', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
+        name: 'mac_builder', ssh: 'mac_builder', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
         disconnected_since: null, attach_command: '', herdr: useStore.getState().localHerdr, tools: useStore.getState().localTools,
         baseline: null, identity_status: {},
       },
     ],
   })
   const data = () => ({
-    name: 'm4p',
+    name: 'mac_builder',
     connected: true,
     baseline: { checked_at: '2026-10-02T00:00:00Z', os: 'Linux', issues: [{ id: 'tool.rtk', severity: 'critical', message: '缺工具 rtk' }] },
   })

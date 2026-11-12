@@ -254,7 +254,7 @@ async fn start_bot_locked_with_host_fence_body(
             return Err(host_superseded(bot_id, &project.host));
         }
     }
-    // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
+    // An unknown identity would silently run as the host's default login (mac_builder: `cc1` bot answered
     // as cc0). Refuse; a confirmed-logged-out explicit identity fails closed the same way instead of
     // falling back to the host's default account (GH #83: it used to just warn and start anyway,
     // which quietly billed usage to the wrong account).
@@ -684,7 +684,7 @@ am_missing() {{ printf 'AM_MISSING\n'; exit 0; }}
 am_mkdir_failed() {{ printf 'AM_MKDIR_FAILED\n'; exit 0; }}
 am_copy_failed() {{ printf 'AM_COPY_FAILED\n'; exit 0; }}
 # 第二個參數是 `/dev/fd/N`（已開啟的檔案）時，BSD（macOS）的 `stat` 回的是 devfs 的裝置編號、不是檔案所在的磁碟，
-# 跟路徑那邊永遠對不上——2026-10-04 m4p 十顆 claude bot 更新 Claude 重啟時全部被當成「紀錄檔不見」、開了新對話。
+# 跟路徑那邊永遠對不上——2026-10-04 mac_builder 十顆 claude bot 更新 Claude 重啟時全部被當成「紀錄檔不見」、開了新對話。
 # 所以 fd 一律用 `fstat` 讀（python3，跟下面附屬目錄複製同一個相依）；GNU 的 `/dev/fd/N` 是指向真檔的連結，`-ef` 照舊。
 am_fd_is() {{
   python3 - "$@" <<'AM_FD_PY'
@@ -715,7 +715,7 @@ am_size() {{
 case "$K" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in *.jsonl) ;; *) am_missing;; esac
-# 兩個身份共用同一個 projects（一邊是指向另一邊的 symlink；m4p 的 `~/.claude-cc1/projects` → `~/.claude/projects`）：
+# 兩個身份共用同一個 projects（一邊是指向另一邊的 symlink；mac_builder 的 `~/.claude-cc1/projects` → `~/.claude/projects`）：
 # 檔案本來就在新身份讀得到的位置，不用搬。2026-10-13 ops-web 從 cc1 換回 cc0，來源那邊是 symlink，被下面
 # 「來源不能是 symlink」擋成 AM_MISSING、開了新對話；反方向（目的是 symlink）一直都回 AM_SAME。
 # 只在兩邊解析後是同一個目錄時才放行，而且那個檔本身仍然不能是 symlink——沒有任何東西被複製。
@@ -4413,7 +4413,7 @@ mod resume_args_tests {
         }
 
         /// 假的 BSD `stat`：不認 `-c`（逼腳本走 macOS 那條路），`-f` 照 macOS 的行為——對 `/dev/fd/N` 回 devfs 的裝置編號
-        /// （2026-10-04 m4p 實測：檔案 dev 16777234、`/dev/fd/3` dev 1318745794，inode 相同）。
+        /// （2026-10-04 mac_builder 實測：檔案 dev 16777234、`/dev/fd/3` dev 1318745794，inode 相同）。
         fn bsd_stat_dir() -> std::path::PathBuf {
             let dir = tmp().join("bsd-bin");
             std::fs::create_dir_all(&dir).unwrap();
@@ -4459,7 +4459,7 @@ esac
             let _ = std::fs::remove_dir_all(&base);
         }
 
-        /// 2026-10-13 ops-web（m4p）：`~/.claude-cc1/projects` 是指向 `~/.claude/projects` 的 symlink。從 cc1 換回 cc0 時
+        /// 2026-10-13 ops-web（mac_builder）：`~/.claude-cc1/projects` 是指向 `~/.claude/projects` 的 symlink。從 cc1 換回 cc0 時
         /// 來源那邊是 symlink，以前回 AM_MISSING、開新對話。兩個方向都要回 AM_SAME，而且不留下任何暫存檔。
         #[test]
         fn identities_sharing_one_projects_dir_through_a_symlink_are_the_same_place_both_ways() {

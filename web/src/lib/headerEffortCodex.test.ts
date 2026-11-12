@@ -1,6 +1,6 @@
 /**
  * 標題列的 codex 強度不能顯示成「—」：遠端 run（沒有終端 footer）只剩 daemon 寫進 status_line 的那一行，
- * 也要讀得出 low（pt-hub／m4p SOL 實例：DB 有 runtime_effort=low，標題列卻沒有）。
+ * 也要讀得出 low（pt-hub／mac_builder SOL 實例：DB 有 runtime_effort=low，標題列卻沒有）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'

@@ -42,7 +42,7 @@ export function exhaustionMarker(q: KindQuota, now: number): string | null {
   return null
 }
 
-/** `m4p/codex:co0` → host `m4p`、identity `co0`；本機 `codex` → host `local`、identity null。 */
+/** `mac_builder/codex:co0` → host `mac_builder`、identity `co0`；本機 `codex` → host `local`、identity null。 */
 export function parseCreditKey(key: string): { host: string; identity: string | null } {
   const slash = key.indexOf('/')
   const host = slash >= 0 ? key.slice(0, slash) : 'local'

@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn only_a_session_start_hook_naming_the_herdr_script_counts() {
         assert_eq!(settings_hook_state(Some(WITH_HOOK)), HookState::Present);
-        assert_eq!(settings_hook_state(Some(RTK_ONLY)), HookState::Missing, "m4p 的 .claude-cc1 就是這個形狀");
+        assert_eq!(settings_hook_state(Some(RTK_ONLY)), HookState::Missing, "mac_builder 的 .claude-cc1 就是這個形狀");
         assert_eq!(settings_hook_state(None), HookState::Missing);
         assert_eq!(settings_hook_state(Some("not json")), HookState::Missing);
         let wrong_event = WITH_HOOK.replace("SessionStart", "Stop");
@@ -402,8 +402,8 @@ mod tests {
         ConfigDir { identities: ids.iter().map(|s| s.to_string()).collect(), dir: d.into() }
     }
 
-    /// 現在 m4p 的樣子：cc0＝預設 `~/.claude`（有 hook）、cc1＝`~/.claude-cc1`（只有 rtk）。另一個目錄讀不到（ssh 斷）。
-    fn m4p_like(install_ok: bool, lies: bool) -> Fake {
+    /// 現在 mac_builder 的樣子：cc0＝預設 `~/.claude`（有 hook）、cc1＝`~/.claude-cc1`（只有 rtk）。另一個目錄讀不到（ssh 斷）。
+    fn mac_builder_like(install_ok: bool, lies: bool) -> Fake {
         Fake {
             dirs: vec![cd(&["", "cc0"], "/Users/me/.claude"), cd(&["cc1"], "/Users/me/.claude-cc1"), cd(&["cc3"], "/Users/me/.claude-cc3")],
             files: Mutex::new(HashMap::from([
@@ -419,22 +419,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_hook_is_installed_and_verified_while_present_and_unreadable_dirs_are_left_alone() {
-        let fake = m4p_like(true, false);
-        let handled = ensure_host(&fake, &Attempts::default(), "m4p").await;
+        let fake = mac_builder_like(true, false);
+        let handled = ensure_host(&fake, &Attempts::default(), "mac_builder").await;
         assert_eq!(handled.len(), 1, "{handled:?}");
         assert_eq!((handled[0].dir.dir.as_str(), &handled[0].outcome), ("/Users/me/.claude-cc1", &Outcome::Installed));
         assert_eq!(*fake.installed.lock().unwrap(), vec!["/Users/me/.claude-cc1".to_string()], "只動缺的那個，不碰已有 hook 的與不存在的目錄");
-        assert!(ensure_host(&fake, &Attempts::default(), "m4p").await.is_empty(), "冪等：裝好後第二輪什麼都不做");
+        assert!(ensure_host(&fake, &Attempts::default(), "mac_builder").await.is_empty(), "冪等：裝好後第二輪什麼都不做");
         assert_eq!(fake.installed.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn an_install_that_claims_success_but_leaves_no_hook_is_a_failure_and_is_not_retried_within_the_backoff() {
-        let fake = m4p_like(true, true);
+        let fake = mac_builder_like(true, true);
         let attempts = Attempts::default();
-        let handled = ensure_host(&fake, &attempts, "m4p").await;
+        let handled = ensure_host(&fake, &attempts, "mac_builder").await;
         assert!(matches!(&handled[0].outcome, Outcome::Failed(w) if w.contains("仍沒有")), "{handled:?}");
-        let again = ensure_host(&fake, &attempts, "m4p").await;
+        let again = ensure_host(&fake, &attempts, "mac_builder").await;
         assert!(matches!(again[0].outcome, Outcome::Failed(_)), "仍回報失敗");
         assert_eq!(fake.installed.lock().unwrap().len(), 1, "退避期內不重跑安裝");
     }
@@ -443,7 +443,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-claude-session-watch-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
-        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES('p1','/x','x','m4p','t')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES('p1','/x','x','mac_builder','t')").execute(&pool).await.unwrap();
         // (bot, identity, inject_hooks, session, adopted)
         for (id, ident, inject, session, adopted) in [
             ("b-cc1", "cc1", 0, "", 1),
@@ -466,8 +466,8 @@ mod tests {
     #[tokio::test]
     async fn a_failed_install_and_the_stuck_child_behind_it_each_raise_one_ops_alert_naming_the_dir() {
         let (dir, pool) = pool_with_runs().await;
-        let hosts = vec![("m4p".to_string(), true)];
-        let (fake, attempts) = (m4p_like(false, false), Attempts::default());
+        let hosts = vec![("mac_builder".to_string(), true)];
+        let (fake, attempts) = (mac_builder_like(false, false), Attempts::default());
         sweep(&pool, &fake, &attempts, &hosts, "2026-10-30T06:05:00.000Z").await;
         sweep(&pool, &fake, &attempts, &hosts, "2026-10-30T06:05:00.000Z").await;
         let a = alerts(&pool).await;
@@ -484,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn a_successful_install_raises_no_install_alert_but_still_tells_the_stuck_child_to_restart() {
         let (dir, pool) = pool_with_runs().await;
-        sweep(&pool, &m4p_like(true, false), &Attempts::default(), &[("m4p".to_string(), true)], "2026-10-30T06:05:00.000Z").await;
+        sweep(&pool, &mac_builder_like(true, false), &Attempts::default(), &[("mac_builder".to_string(), true)], "2026-10-30T06:05:00.000Z").await;
         let a = alerts(&pool).await;
         assert!(!a.iter().any(|p| p.contains("hook_install_failed")), "{a:?}");
         let run_alert = a.iter().find(|p| p.contains("claude_child_no_session")).expect("run alert");
@@ -496,7 +496,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_younger_than_the_threshold_is_not_flagged() {
         let (dir, pool) = pool_with_runs().await;
-        sweep(&pool, &m4p_like(true, false), &Attempts::default(), &[("m4p".to_string(), true)], "2026-10-30T05:59:00.000Z").await;
+        sweep(&pool, &mac_builder_like(true, false), &Attempts::default(), &[("mac_builder".to_string(), true)], "2026-10-30T05:59:00.000Z").await;
         assert!(!alerts(&pool).await.iter().any(|p| p.contains("claude_child_no_session")));
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
@@ -504,10 +504,10 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_is_silent_when_the_identity_is_fine_or_gets_fixed_and_warns_when_it_cannot() {
-        assert_eq!(preflight(&m4p_like(true, false), "m4p", Some("cc0")).await, None, "cc0 與預設是同一個目錄，本來就有");
-        assert_eq!(preflight(&m4p_like(true, false), "m4p", Some("cc1")).await, None, "缺但補上了");
-        let warn = preflight(&m4p_like(false, false), "m4p", Some("cc1")).await.expect("補不上要警告");
+        assert_eq!(preflight(&mac_builder_like(true, false), "mac_builder", Some("cc0")).await, None, "cc0 與預設是同一個目錄，本來就有");
+        assert_eq!(preflight(&mac_builder_like(true, false), "mac_builder", Some("cc1")).await, None, "缺但補上了");
+        let warn = preflight(&mac_builder_like(false, false), "mac_builder", Some("cc1")).await.expect("補不上要警告");
         assert!(warn.contains("/Users/me/.claude-cc1") && warn.contains("不會有 session"), "{warn}");
-        assert_eq!(preflight(&m4p_like(false, false), "m4p", Some("nope")).await, None, "不認得的身分不在這裡報");
+        assert_eq!(preflight(&mac_builder_like(false, false), "mac_builder", Some("nope")).await, None, "不認得的身分不在這裡報");
     }
 }

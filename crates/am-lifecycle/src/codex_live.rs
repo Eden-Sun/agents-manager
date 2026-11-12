@@ -2754,7 +2754,7 @@ mod tests {
         assert!(busy_fast_blocked(migration, working), "選擇畫面開著");
         assert!(busy_fast_blocked(working, "gpt-6-luna max · /tmp · Context 1% used\n"), "讀不出輸入框：不打");
     }
-    /// #1671 真實快照（m4p、gpt-6.1-sol、213×55）：沒有 `? for shortcuts` 行，warning 接在模型列右側。
+    /// #1671 真實快照（mac_builder、gpt-6.1-sol、213×55）：沒有 `? for shortcuts` 行，warning 接在模型列右側。
     fn fixture_1671() -> String {
         let v: serde_json::Value = serde_json::from_str(include_str!("lifecycle/fixtures/codex-1671-model-row-with-warning.json")).unwrap();
         v["text"].as_str().unwrap().to_string()

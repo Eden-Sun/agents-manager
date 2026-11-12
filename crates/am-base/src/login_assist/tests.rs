@@ -10,11 +10,11 @@ use serde_json::Value;
 const UNWRAPPED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-unwrapped.txt");
 const WRAPPED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-wrapped.txt");
 const FAILED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-failed.txt");
-const M4P_RAW: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-m4p.ansi");
+const MAC_BUILDER_RAW: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.289-auth-login-mac_builder.ansi");
 
 const URL: &str = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload+user%3Aplugins&code_challenge=FAKEchallengeFAKEchallengeFAKEchallenge0000&code_challenge_method=S256&state=FAKEstateFAKEstateFAKEstateFAKEstate0000000";
 
-/// 終端畫出來的字：拿掉 OSC（超連結 `ESC ] 8 ; ; url BEL`）與 CSI（顏色）。m4p 的真輸出是帶這些的原始位元組。
+/// 終端畫出來的字：拿掉 OSC（超連結 `ESC ] 8 ; ; url BEL`）與 CSI（顏色）。mac_builder 的真輸出是帶這些的原始位元組。
 fn rendered(raw: &str) -> String {
     let mut out = String::new();
     let mut it = raw.chars().peekable();
@@ -44,7 +44,7 @@ fn rendered(raw: &str) -> String {
 
 #[test]
 fn the_real_screens_give_the_url_and_the_prompt() {
-    for (name, screen) in [("unwrapped", UNWRAPPED.to_string()), ("wrapped", WRAPPED.to_string()), ("m4p", rendered(M4P_RAW))] {
+    for (name, screen) in [("unwrapped", UNWRAPPED.to_string()), ("wrapped", WRAPPED.to_string()), ("mac_builder", rendered(MAC_BUILDER_RAW))] {
         let s = parse_screen(&screen);
         assert_eq!(s.url.as_deref(), Some(URL), "{name}");
         assert!(s.awaiting_code, "{name}: 最後一行是 Paste code 提示");

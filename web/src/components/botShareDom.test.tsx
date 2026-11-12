@@ -283,19 +283,19 @@ test('遠端專案也能建分享用 bot：表單不灰掉，新資料夾標在�
   assert.equal(shareProfileBlocked('claude'), null)
   const { ShareProfileField } = await import('./ShareProfileField')
   let folder = { mode: 'new' as 'new' | 'existing', name: '', path: '' }
-  await mount(<ShareProfileField kind="claude" host="m4p" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
+  await mount(<ShareProfileField kind="claude" host="mac_builder" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
   const radios = [...document.querySelectorAll<HTMLInputElement>('input[name="share-profile"]')]
   assert.equal(radios[1].disabled, false, '遠端不灰掉受限')
   assert.equal(radios[2].disabled, false, '遠端不灰掉信任分享')
-  assert.equal(document.querySelector('.share-folder-prefix')!.textContent, 'm4p：~/shared-bots/')
+  assert.equal(document.querySelector('.share-folder-prefix')!.textContent, 'mac_builder：~/shared-bots/')
   await unmountAll()
 
-  const requests = fakeApi(() => ({ path: '/home/me/site', parent: '/home/me', home: '/home/me', entries: [] }))
-  folder = { mode: 'existing', name: '', path: '/home/me/site' }
-  await mount(<ShareProfileField kind="claude" host="m4p" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
+  const requests = fakeApi(() => ({ path: '/home/mac_builder/site', parent: '/home/mac_builder', home: '/home/mac_builder', entries: [] }))
+  folder = { mode: 'existing', name: '', path: '/home/mac_builder/site' }
+  await mount(<ShareProfileField kind="claude" host="mac_builder" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f)} />)
   const browse = [...document.querySelectorAll<HTMLButtonElement>('.share-folder button')].find((b) => b.textContent === '瀏覽…')!
   await click(browse)
-  await until(() => requests.some((r) => r.path.includes('/fs/dirs') && r.path.includes('host=m4p')), '瀏覽遠端資料夾要帶 host=m4p')
+  await until(() => requests.some((r) => r.path.includes('/fs/dirs') && r.path.includes('host=mac_builder')), '瀏覽遠端資料夾要帶 host=mac_builder')
 })
 
 test('建 bot 表單的資料夾：新資料夾預設 bot 名、既有資料夾要絕對路徑並警告 .env 讀得到', async () => {
