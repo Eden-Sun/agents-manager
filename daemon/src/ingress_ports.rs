@@ -205,11 +205,12 @@ mod tests {
         let adapter = include_str!("app_ports_p8.rs");
         let lifecycle_adapter = include_str!("../../crates/am-lifecycle/src/ports_impl.rs");
         let mut pats = feature_calls();
-        pats.retain(|p| p != "SUPERVISOR_ID" && p != "lifecycle::start_send::resume_after_boot(");
+        // `supervisor::store::push_inbox(` 只留在禁止清單（防有人走回舊路徑）：0fe179937 之後 adapter 改走 `supervisor_inbox::push_inbox(`。
+        pats.retain(|p| p != "SUPERVISOR_ID" && p != "lifecycle::start_send::resume_after_boot(" && p != "supervisor::store::push_inbox(");
         for p in pats.iter().map(String::as_str).chain(TO_RECONCILE.iter().copied()).chain(TO_INGRESS.iter().copied()) {
             assert!(adapter_covers_call(&[adapter, lifecycle_adapter], p), "P8 adapter 不再含 {p} 或同家族的呼叫");
         }
-        assert!(adapter.contains("SUPERVISOR_ID") && adapter.contains("resume_after_boot("));
+        assert!(adapter.contains("SUPERVISOR_ID") && adapter.contains("resume_after_boot(") && adapter.contains("supervisor_inbox::push_inbox("));
     }
 
     #[test]
