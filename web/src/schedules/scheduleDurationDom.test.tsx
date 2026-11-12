@@ -52,7 +52,7 @@ test('結果詳情：還沒開始不顯示花費時間', async () => {
   assert.ok(!document.body.querySelector('.schedule-total-duration'))
 })
 
-test('排程列表：「上次」旁顯示上次執行的總花費時間', async () => {
+test('排程列表：上次那行附上次執行的總花費時間', async () => {
   const base = { project_id: 'p1', bot_id: 'b1', prompt: 'x', tz: 'UTC', mode: 'daily', spec: { mode: 'daily', time: '09:00' }, next_due: '2026-11-10T09:00:00.000Z', enabled: true, generation: 1, notify: 'failure', created_at: '', updated_at: '', open: null }
   fakeApi(() => ({ schedules: [
     { ...base, id: 's1', name: '有紀錄', last: occ({ duration_ms: 134_000 }) },
@@ -61,6 +61,7 @@ test('排程列表：「上次」旁顯示上次執行的總花費時間', async
   await mount(<ProjectSchedules projectId="p1" onOpen={() => {}} />)
   await settle()
   const rows = document.querySelectorAll('.project-schedule-item')
-  assert.match(rows[0].textContent ?? '', /上次 2 分 14 秒/)
-  assert.ok(!(rows[1].textContent ?? '').includes('上次'))
+  assert.match(rows[0].textContent ?? '', /花 2 分 14 秒/)
+  assert.match(rows[1].textContent ?? '', /還沒執行過/)
+  assert.ok(!(rows[1].textContent ?? '').includes('花'))
 })

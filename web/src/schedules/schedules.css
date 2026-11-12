@@ -29,9 +29,8 @@
 
 .project-schedule-item {
   display: flex;
-  flex-wrap: wrap;
   align-items: flex-start;
-  gap: 2px 4px;
+  gap: 4px;
   min-width: 0;
   padding: 6px 4px 6px 6px;
   border: 1px solid var(--border);
@@ -39,10 +38,24 @@
   background: var(--bg-sunken);
 }
 
+.project-schedule-item.off {
+  opacity: 0.55;
+}
+
 .project-schedule-item > input[type='checkbox'] {
-  margin: 10px 2px 0 2px;
+  margin: 4px 2px 0 2px;
   min-width: 16px;
   min-height: 16px;
+}
+
+/* 右欄與第1行對齊：綁定 Bot 小晶片（可省略）＋ ⋯ */
+.project-schedule-side {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 50%;
+  min-width: 0;
 }
 
 .project-schedule-actions {
@@ -50,21 +63,31 @@
 }
 
 .project-schedules .project-schedule-bot {
-  flex: 1 1 100%;
-  margin: 0 4px 2px 8px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 10em;
+  margin: 0;
+  padding: 1px 4px;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
+.project-schedules .project-schedule-bot.warn {
+  color: var(--warn, #b7791f);
+}
+
 .project-schedule-row {
-  flex: 1 1 140px;
+  flex: 1 1 0;
   width: auto;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
+  gap: 2px;
   padding: 2px 6px;
   border: 0;
   border-radius: 6px;
@@ -82,20 +105,35 @@
   outline: none;
 }
 
-.project-schedule-name {
+.project-schedule-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  flex: none;
   min-width: 0;
-  max-width: 100%;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-.project-schedule-mark {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
+.project-schedule-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim, #8a8f98);
+}
+
+.project-schedule-dot.ok {
+  background: var(--ok, #2f855a);
+}
+
+.project-schedule-dot.fail {
+  background: var(--danger, #b42318);
+}
+
+.project-schedule-dot.off {
+  background: transparent;
+  border: 1.5px solid var(--text-dim, #8a8f98);
+  box-sizing: border-box;
 }
 
 .project-schedule-code {
@@ -109,46 +147,40 @@
   font-variant-numeric: tabular-nums;
 }
 
-.project-schedule-title {
+.project-schedule-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.project-schedule-facts {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
+/* 第2、3行：左欄是標籤（現在／下次／上次），右欄是值；值一律不換行。 */
 .project-schedule-fact {
   display: grid;
   grid-template-columns: 2.5em minmax(0, 1fr);
   gap: 6px;
   align-items: baseline;
   min-width: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 
 .project-schedule-k {
   color: var(--text-dim);
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-.project-schedule-status {
-  flex: none;
-  max-width: 100%;
-  margin-left: 0;
-  font-size: 13px;
-  opacity: 1;
-  font-variant-numeric: tabular-nums;
-  white-space: normal;
-  overflow-wrap: anywhere;
+.project-schedule-v {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.project-schedule-item.off .project-schedule-name {
-  opacity: 0.5;
+.project-schedule-fact.needs-rebind .project-schedule-v {
+  color: var(--danger, #b42318);
 }
 
 .schedule-editor .field {
@@ -213,7 +245,6 @@
   }
 }
 
-.project-schedule-status.needs-rebind { color: var(--danger, #b42318); }
 
 .project-schedule-last {
   display: flex;

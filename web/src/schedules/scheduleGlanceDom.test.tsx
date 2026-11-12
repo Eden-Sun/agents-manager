@@ -18,7 +18,7 @@ const base = {
   clear_after: false, from_base: false, created_at: '', updated_at: '', open: null,
 }
 
-test('清單卡片：下次與上次各一行，沒有上次就不出現「上次」，圖示為 SVG', async () => {
+test('清單卡片：固定三行（名稱／下次／上次），沒有上次顯示還沒執行過，不再有時鐘圖示', async () => {
   fakeApi(() => ({ schedules: [
     { ...base, id: 's1', code: 'S1', name: '示範一', last: { id: 'o1', bot_id: 'b1', status: 'done', outcome: 'success', duration_ms: 134_000 } },
     { ...base, id: 's2', code: 'S2', name: '示範二', last: null },
@@ -27,12 +27,13 @@ test('清單卡片：下次與上次各一行，沒有上次就不出現「上�
   await settle()
   const rows = [...document.querySelectorAll('.project-schedule-item')]
   assert.match(rows[0].textContent ?? '', /下次/)
-  assert.match(rows[0].textContent ?? '', /任務成功/)
-  assert.match(rows[0].textContent ?? '', /上次 2 分 14 秒/)
-  assert.ok(rows[0].querySelector('.project-schedule-mark svg'), '排程代號前圖示需為 SVG，不可為 emoji')
-  assert.doesNotMatch(rows[0].querySelector('.project-schedule-mark')?.textContent ?? '', /⏱/)
+  assert.match(rows[0].textContent ?? '', /✓ 成功/)
+  assert.match(rows[0].textContent ?? '', /花 2 分 14 秒/)
+  assert.ok(rows[0].querySelector('.project-schedule-dot.ok'), '上次成功＝綠點')
+  assert.equal(rows[0].querySelector('.project-schedule-mark'), null, '不再畫時鐘圖示')
   assert.match(rows[1].textContent ?? '', /下次/)
-  assert.ok(!(rows[1].textContent ?? '').includes('上次'))
+  assert.match(rows[1].textContent ?? '', /還沒執行過/)
+  assert.ok(rows[1].querySelector('.project-schedule-dot.never'), '從未執行＝灰點')
 })
 
 test('編輯器三格：下次、狀態、上次花費時間，格內只留值不重複標籤，不重複已儲存 Bot', async () => {
