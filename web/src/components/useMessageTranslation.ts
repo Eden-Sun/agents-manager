@@ -88,7 +88,6 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
             text: st.text,
             botId: msg.bot_id,
             cost: st.cost,
-            cached: st.cached,
             model: st.model,
           })
         : null,

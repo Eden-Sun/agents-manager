@@ -50,7 +50,7 @@ test('auto 開、最後 N 則內、已完整的英文訊息：不用按就自動
   await until(() => document.querySelector('.msg-translation') !== null, '自動翻出譯文')
   assert.equal(translateCalls(reqs), 1)
   assert.match(document.querySelector('.bubble')!.textContent ?? '', /我修好了解析器的 bug/)
-  assert.match(document.querySelector('.msg-translation-cost')!.textContent ?? '', /這次翻譯 \$0\.00042/)
+  assert.equal(document.querySelector('.msg-translation-cost')!.textContent, '(by Haiku $0.00042)')
   assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
   await settle(30)
   assert.equal(translateCalls(reqs), 1, '同一則只打一次')

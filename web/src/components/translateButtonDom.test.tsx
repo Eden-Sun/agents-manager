@@ -63,7 +63,7 @@ test('點了：打 POST /messages/:id/translate，譯文在同一個泡泡裡翻
   assert.ok(reqs.some((r) => r.method === 'POST' && r.path.includes('/messages/m1/translate')))
   assert.match(bubble().textContent ?? '', /我修好了解析器的 bug/)
   assert.doesNotMatch(bubble().textContent ?? '', /parser/, '原文被譯文取代，不是疊在下面')
-  assert.match(document.querySelector('.msg-translation-cost')!.textContent ?? '', /haiku-5-5 · 這次翻譯 \$0\.00042/)
+  assert.equal(document.querySelector('.msg-translation-cost')!.textContent, '(by Haiku $0.00042)')
   assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
   await click(document.querySelector('.msg-translate')!)
   assert.equal(document.querySelector('.msg-translation'), null)
@@ -101,14 +101,24 @@ test('點翻譯 → unmount → 重新 mount 仍是譯文，沒有第二次 API 
   assert.equal(translateCalls(reqs), 1)
 })
 
-test('localStorage 有記錄時 mount 自動翻（載入中顯示原文＋翻譯中…），命中快取顯示未扣費', async () => {
+test('localStorage 有記錄時 mount 自動翻（載入中顯示原文＋翻譯中…），快取命中仍顯示原本金額、不寫未扣費', async () => {
   localStorage.setItem('am.msgTranslate.want', JSON.stringify(['m1']))
   resetTranslationStore()
-  const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: true, cost_usd: null } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: true, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
   await until(() => document.querySelector('.msg-translation') !== null, '自動翻出譯文')
   assert.equal(translateCalls(reqs), 1)
-  assert.match(document.querySelector('.msg-translation-cost')!.textContent ?? '', /快取，這次未扣費/)
+  assert.equal(document.querySelector('.msg-translation-cost')!.textContent, '(by Haiku $0.00042)')
+  assert.doesNotMatch(document.querySelector('.msg-translation')!.textContent ?? '', /未扣費|快取/)
+})
+
+test('簡體轉繁（opencc-s2twp）標示 (by OpenCC)，不帶金額', async () => {
+  localStorage.setItem('am.msgTranslate.want', JSON.stringify(['m1']))
+  resetTranslationStore()
+  fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'opencc-s2twp', cached: false, cost_usd: 0 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  await mount(<Probe m={msg(EN)} />)
+  await until(() => document.querySelector('.msg-translation') !== null, '自動翻出譯文')
+  assert.equal(document.querySelector('.msg-translation-cost')!.textContent, '(by OpenCC)')
 })
 
 test('自動翻失敗：不跳錯誤、同一頁面生命週期不重試，按鈕回「翻譯」', async () => {

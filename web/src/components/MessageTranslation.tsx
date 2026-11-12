@@ -1,13 +1,16 @@
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
-import { usd } from './messageTranslationConstants'
+import { isLocalTranslation, translationModelName, usd } from './messageTranslationConstants'
 
-/** 譯文下方那行：這次翻譯花多少（使用者 2026-11-04：即時算出該次翻譯價格）；快取命中標未扣費。 */
-function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; cached: boolean; model: string }): string {
-  const model = st.model.replace(/^claude-/, '')
-  if (st.cached) return st.cost === null ? t('{model} · 快取，這次未扣費', { model }) : t('{model} · 快取，這次未扣費（當初 {cost}）', { model, cost: usd(st.cost) })
-  return st.cost === null ? t('{model} · 費用不明', { model }) : t('{model} · 這次翻譯 {cost}', { model, cost: usd(st.cost) })
+/**
+ * 譯文下方那行：`(by <模型短名> $<金額>)`（使用者 2026-11-12 裁示）。快取命中也照樣顯示原本的金額，
+ * 不另標「未扣費」；OpenCC 只寫 `(by OpenCC)`；金額不明時只寫模型名。
+ */
+function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; model: string }): string {
+  const model = translationModelName(st.model)
+  if (isLocalTranslation(st.model) || st.cost === null) return t('(by {model})', { model })
+  return t('(by {model} {cost})', { model, cost: usd(st.cost) })
 }
 
 /**
@@ -46,20 +49,18 @@ export function MessageTranslationContent({
   text,
   botId,
   cost,
-  cached,
   model,
 }: {
   text: string
   botId?: string | null
   cost: number | null
-  cached: boolean
   model: string
 }) {
   const t = useT()
   return (
     <div className="msg-translation" lang="zh-Hant">
       <SafeMarkdown text={text} botId={botId} />
-      <div className="msg-translation-cost">{costLine(t, { cost, cached, model })}</div>
+      <div className="msg-translation-cost">{costLine(t, { cost, model })}</div>
     </div>
   )
 }
