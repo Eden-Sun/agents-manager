@@ -1417,7 +1417,7 @@ async fn start_inner_body(
     let child_base_text = agent_md.text.clone();
     if restricted.is_none() && project.mode == "expert" {
         let role = bot.role.as_deref().unwrap_or("未分配");
-        agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。", bot.id, role));
+        agent_md.text.push_str(&format!("\n\n## 專家模式角色\n你是 bot ID {}，角色：{}。專家模式沒有 child：任何角色都不能開 child。管理者把工作派給同專案的頂層執行者、向顧問請教；執行者與顧問需要人手時向管理者請求；管理者可用 `agm hire <名稱> --kind codex|claude` 增聘執行者、`agm bot start|stop <id>` 啟動或收掉執行者，顧問由使用者建立。用 `agm peers` 查同專案同事；要對方給結果時用 `herdr agent prompt bot:<id> --expect-result \"…\"`；結果會以「請求結果通知」送回；查進度用 `agm requests --open`。查程式碼先用 `codegraph_explore`，再用 grep／Read 補細節。", bot.id, role));
         if let Some(extra) = manager_role_section(bot.role.as_deref()) {
             agent_md.text.push_str(&extra);
         }

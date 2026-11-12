@@ -11,6 +11,8 @@ scripts/ops/build-web-bundle.py    bin/build-web-bundle.py
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
 scripts/ops/daemon-boot.sh          bin/daemon-boot.sh          linux
 scripts/ops/disk-gc.sh              bin/disk-gc.sh              linux
+scripts/ops/codegraph-lag-kick.sh  bin/codegraph-lag-kick.sh  linux
+scripts/ops/codegraph-lag.py        bin/codegraph-lag.py        linux
 scripts/ops/remote-cargo-prewarm.sh  bin/remote-cargo-prewarm.sh  linux
 scripts/ops/dev-server-kick.ts      bin/dev-server-kick.ts
 scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
@@ -59,6 +61,8 @@ scripts/ops/systemd/com.agm.daemon-update.timer     systemd/com.agm.daemon-updat
 scripts/ops/systemd/com.agm.daemon-boot.service     systemd/com.agm.daemon-boot.service     linux
 scripts/ops/systemd/com.agm.disk-gc.service         systemd/com.agm.disk-gc.service         linux
 scripts/ops/systemd/com.agm.disk-gc.timer           systemd/com.agm.disk-gc.timer           linux
+scripts/ops/systemd/com.agm.codegraph-lag.service  systemd/com.agm.codegraph-lag.service  linux
+scripts/ops/systemd/com.agm.codegraph-lag.timer    systemd/com.agm.codegraph-lag.timer    linux
 scripts/ops/systemd/com.agm.remote-cargo-prewarm.service  systemd/com.agm.remote-cargo-prewarm.service  linux
 scripts/ops/systemd/com.agm.remote-cargo-prewarm.timer    systemd/com.agm.remote-cargo-prewarm.timer    linux
 scripts/ops/systemd/com.agm.dev-server.service      systemd/com.agm.dev-server.service      linux

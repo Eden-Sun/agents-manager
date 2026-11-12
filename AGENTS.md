@@ -90,7 +90,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 
 ## CodeGraph（程式碼圖譜，使用者 2026-10-31）
 - **推行中（使用者 2026-11-04）**：要看懂一塊功能、追呼叫鏈（誰呼叫、會影響誰）、改函式前看影響範圍，**一律先用 CodeGraph**：MCP 工具 `codegraph_explore`（claude 由 `.mcp.json` 常駐載入，不用先 ToolSearch；codex 由 `.codex/config.toml` 載入），或 shell `codegraph explore "<符號或問題>"`、`codegraph callers <符號>`、`codegraph impact <符號>`。一次就拿到原始碼＋呼叫關係，不要再 grep＋sed 一段段讀。
-- 只有找固定字串（錯誤訊息、i18n key、設定鍵）或只看一個已知檔案的幾行時，才直接 grep／sed。用量：`python3 scripts/codegraph-usage.py [--days N]`。
+- 先 `codegraph_explore` 拿結構與原始碼，再用 grep／Read 補細節（固定字串、特定幾行）。用量：`python3 scripts/codegraph-usage.py [--days N]`（依 kind 與 bot 統計）。索引落後由 `scripts/ops/codegraph-lag.py` 檢查，週期告警見 `codegraph-lag-kick.sh`。
 - 索引只建在主樹的 `.codegraph/`（不進 git）；worktree 裡查到的是主樹那份，會提示「來自不同的 worktree」，只在你自己分支新增的符號查不到，改用 grep。**禁止在 worktree 跑 `codegraph init`**（一份索引約 180 MB）。查不到明顯該有的符號時，在主樹跑 `codegraph sync` 補索引。
 
 ## 最小完整改動（取自 Ponytail，https://github.com/DietrichGebert/ponytail，使用者 2026-10-31）

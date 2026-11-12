@@ -1,0 +1,9 @@
+[Unit]
+Description=AGM codegraph 索引落後告警：主 checkout 索引落後 HEAD 超過門檻就 ops-alert（唯讀）
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/codegraph-lag-kick.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/codegraph-lag.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/codegraph-lag.systemd.log

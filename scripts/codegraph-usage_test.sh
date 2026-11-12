@@ -19,6 +19,10 @@ cases = [
     ('Edit', '{}', None),
 ]
 bad = [(t, x, want, m.classify(t, x)) for t, x, want in cases if m.classify(t, x) != want]
+bots = [('/home/ubuntu/project/agents-manager', 'main'),
+        ('/home/ubuntu/project/agents-manager/.claude/worktrees/hkc0c-codegraph', 'hkc0c-codegraph'),
+        ('/home/ubuntu/project/am-wt-dur', 'am-wt-dur'), ('', '?')]
+bad += [(c, '', w, m.bot_of(c)) for c, w in bots if m.bot_of(c) != w]
 for b in bad:
     print('FAIL: classify%r want %r got %r' % (b[:2], b[2], b[3]))
 sys.exit(1 if bad else 0)
