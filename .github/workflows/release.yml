@@ -35,7 +35,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build daemon
-        run: cargo build --release --locked -p agents-managerd --target ${{ matrix.target }}
+        run: |
+          export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
+          cargo build --release --locked -p agents-managerd --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
