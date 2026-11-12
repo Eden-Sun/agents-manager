@@ -17,7 +17,7 @@
   完成寫 `↳ child <名字> 回報完成`，blocked 寫 `↳ child <名字> 在等人回答`；相鄰通知合併，名字去重、括號保留回合數，混合狀態分別寫清楚。
   點一次看通知全文；桌機與手機一致。長名字單行截斷、完整標題留在 tooltip。parent 的回覆（含串流）是對使用者的回報，一般顯示、算未讀、
   觸發完成提示；使用者訊息與同回合補充照舊顯示；通知不出現「這回合的提問」浮窗。
-  ![桌機](screenshots/child-notice-fold/reply-visible-desktop.png)
+  （截圖已移除：桌機）
 - **紅色只代表「要你本人動手」**（blocked、回合被中斷、需要回應）；黃＝在等（子 agent、額度）；綠＝好消息（有新版、目前使用中外框）；
   藍（accent）＝未讀／可操作（**2026-10-11 起：未讀改黃，藍只剩「你正在看」，見檔尾**）。狀態不能只靠顏色：一律還有文字、形狀或記號。
 - 燈號說「現在在做什麼」，徽章說「還沒看過幾個回合」——兩個獨立記號，不互相染色。
@@ -178,7 +178,7 @@
   `lib/quotaMeasure.ts` 暫時解除格子的 flex basis、grow、shrink 和上次量到的下限，量每格的自然內容寬；啟用格需求是「最寬格 × 格數」，另外加停用格、chip、margin、內距與 gap，不能用不等寬格的加總當成等寬需求。量完完整還原 inline style，將當前狀態的最寬格設為 `--quota-cell-min`，格子不能縮到比內容窄；收合仍放不下時裁掉尾巴。
   `nextQuotaFit` 比完整等寬需求與「標題列扣掉實際可見兄弟元素、內距與 gap」的剩餘寬，真的放不下才收合。收合中每次重量現在的完整需求（`withFreshNeed`，#1777），變寬就恢復完整。額度資料更新與字型載入完成也會重量，不只等 ResizeObserver：等寬格的已分配尺寸可能沒變，內容下限卻已變。
   額度主機名牌與標題列遠端記憶體徽章已於 2026-09-29 拿掉；主機看左邊 `@host`、RAM 看側欄。若有其他可見徽章，仍扣掉其實際寬度，不憑主機類型預留或忽略空間。
-  ![修正前](screenshots/quota-fill/before.png) ![修正後](screenshots/quota-fill/after.png)
+  （截圖已移除：修正前） （截圖已移除：修正後）
 - 按主機看；焦點那格桌機只加 1px accent 外框。格與格之間不用 gap，改 1px 細線；條與數字之間保留內距（使用者指定不能黏在一起）。
 - 斷點量的是標題列寬（`ResizeObserver` 量父節點），不是視窗寬。身份名欄固定寬，五格的 bar 起點對齊。
 - 「claude 有更新」在額度列最左邊，綠色裸 chevron。
@@ -356,7 +356,7 @@
   取消勾選等於清掉人設。
 - **標題列**：只寫 bot 名稱＋可複製的 pane 識別籤，不再帶專案名；內文的「識別」整列拿掉。
 
-截圖 `docs/screenshots/bot-settings/compact-1600.png`。
+截圖 （截圖已移除：含個人資訊）。
 
 ### Bot 設定：拿掉 claude 的「專案指示檔」（issue #213 撤回，2026-10-02）
 
@@ -645,7 +645,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
 - **protocol 不在實測清單**：同樣警告色，寫「未驗證」。
 - **讀不到**（主機沒連上、舊 daemon 沒這欄位）：寫「herdr 版本：未知」，不用別的欄位去猜。
 - 不放狀態列：版本是低頻資訊，狀態列每個字都要跟額度、context 搶位置；hosts 面板就是使用者驗收升級會去看的地方。
-- 文字組合在 `lib/herdrVersion.ts`（有單元測試）。截圖：`docs/screenshots/herdr-version/`。
+- 文字組合在 `lib/herdrVersion.ts`（有單元測試）。截圖：（截圖已移除：含個人資訊）。
 
 ## 主機工作環境一致性顯示在 hosts 面板（2026-10-02，issue #719）
 
@@ -655,7 +655,7 @@ claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，
 - **未知不是全缺**：還沒量過（剛連上、舊 daemon）寫「尚未檢查」；探測沒跑完（`issues: null`）寫「未知」並在 tooltip 說明——一次 ssh 逾時不能在每台主機喊一排缺漏。兩者都不上色。
 - 只報告，面板上沒有「修復」按鈕：自動安裝／同步要使用者另行同意。Mac 專用項在 Linux 主機根本不會出現（daemon 端就不列）。
 - 文字組合在 `lib/hostBaseline.ts`（有單元測試）。
-- **可自動補／需手動**（2026-10-24，#719 階段 2）：每項差異文字尾端接一個括號標記——在 `baseline.fixable` 裡的寫「（可自動補）」，其餘「（需手動）」，跟著那一項的顏色、不另上色。只是 dry-run 的說明，仍然沒有按鈕。daemon 沒給 `fixable`（或型別不對）時正規化成空陣列＝全部「需手動」（協調者裁示；網頁嵌在 daemon 同一個 binary，正式環境不會遇到舊 daemon）。截圖：`docs/screenshots/host-baseline-plan/`。
+- **可自動補／需手動**（2026-10-24，#719 階段 2）：每項差異文字尾端接一個括號標記——在 `baseline.fixable` 裡的寫「（可自動補）」，其餘「（需手動）」，跟著那一項的顏色、不另上色。只是 dry-run 的說明，仍然沒有按鈕。daemon 沒給 `fixable`（或型別不對）時正規化成空陣列＝全部「需手動」（協調者裁示；網頁嵌在 daemon 同一個 binary，正式環境不會遇到舊 daemon）。截圖：（截圖已移除：含個人資訊）。
 - **補齊先只有 API、預設關**（2026-10-24，#719 階段 3a，協調者核准）：apply／restore 兩條 API 先上，面板上**還沒有**按鈕。開關放 `config.toml` 頂層 `[host_baseline.sync]` 獨立表，不加在 `[[hosts]]` 上——`HostCfg` 全樹有上百處 struct literal，加欄位會牽動其他工作樹；代價是主機改名或刪掉後會留下孤兒鍵（一律當 off，`GET /api/state` 的 `host_baseline_orphan_sync_keys` 列給之後的 UI 提示清理）。沒列＝off；`auto` 在 3a 當 `ask`（只開放使用者手動觸發）。還原刻意不看開關：關掉之後也要能把上一次的修改換回來。備份只留在那台主機、API 不回內容，所以之後的 UI 只能顯示備份 id 與「還原了哪個檔」，不能預覽備份內容。
 - **一鍵補齊與二次確認對話框**（2026-10-25，#719 階段 3b，協調者核准）：只在 `GET /api/state` 的 `host_baseline_sync` 那台是 `"ask"`（daemon 已把 `auto` 輸出成 `ask`）且有 `fixable` 項目時顯示「補齊 N 項」鈕；`off`、缺這欄（舊 daemon、bot 視圖）一律不畫——缺值不准預設可寫。模式存在 store 的 `hostBaselineSync`、只隨整份快照更新（沒有 WS 事件；掛在 baseline 物件上會被 `host_changed` 重建洗掉）。點擊跳出二次確認框，明列主機名、每項 id 與目標檔、「會先備份、只補不蓋」；預設 focus 在「取消」（Enter 不直接送出）。409 `plan_outdated` 重抓計畫、提示「計畫已更新，請重新確認」，不自動重送。結果顯示備份 ID 與各項狀態，提示「可用這個備份 ID 還原（還原按鈕另案）」；錯誤與不認得的結果一律固定文案，不顯示主機內容或後端字串。截圖：`docs/screenshots/host-baseline-apply/`（mock）。
 
@@ -873,7 +873,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 
 ![codex 有分析](screenshots/codex-update-review/codex-analysed-1440.png) ![codex 尚未分析](screenshots/codex-update-review/codex-not-analysed-1440.png)
 ![claude 有分析](screenshots/codex-update-review/claude-analysed-1440.png) ![claude 尚未分析](screenshots/codex-update-review/claude-not-analysed-1440.png)
-![手機](screenshots/codex-update-review/claude-not-analysed-390.png) ![真 daemon（唯讀）](screenshots/codex-update-review/codex-real-daemon-1440.png)
+![手機](screenshots/codex-update-review/claude-not-analysed-390.png) （截圖已移除：真 daemon（唯讀））
 
 ## Claude fleet 安裝提示持續留在 header（issue #725）
 
@@ -885,9 +885,9 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **每個新版本每個瀏覽器一次**：daemon 只推一次（跨重啟也記得）；推的當下沒開網頁會錯過，開機再讀快照補上，看過的版本記在 localStorage。
   抓不到上游的錯誤通知只在 daemon 推的那一次跳，重整不重跳。
 - **手機**：重啟、Codex 安裝、Claude fleet 安裝有兩項以上同時出現時合成單一 ⌃⌃ 圖示選單；選單每項仍各自打開原本的確認框。
-- 驗證：mock 提供 `latest_version`、`target_version` 與多台 `hosts`；截圖在 `screenshots/claude-install/`。
+- 驗證：mock 提供 `latest_version`、`target_version` 與多台 `hosts`；截圖在 （截圖已移除：含個人資訊）。
 
-![Claude fleet 安裝提示桌機](screenshots/claude-install/desktop-1440.png) ![Claude fleet 安裝確認手機](screenshots/claude-install/phone-390.png)
+（截圖已移除：Claude fleet 安裝提示桌機） （截圖已移除：Claude fleet 安裝確認手機）
 
 ## header 的 herdr 一鍵更新：同一個樣子，但警告擺最前面（2026-10-01）
 
@@ -910,8 +910,8 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 驗證：`VITE_MOCK=1` 下 `__amMock.herdrUpdate()`（`{failOne: true}` 演一顆沒接回、`{reason: 'busy_timeout'}` 演整次沒做、`{reason: 'restart_failed'}` 演換回舊版、`{hold: 'waiting_idle'}` 停在那一步）。
   失敗的說明用 daemon 的 `detail`；按鈕被 409 擋下時直接顯示 daemon 寫好的 `message`。herdr 沒有分診帳本，分析區塊只有「AGM 解析」那一段（沒派過就寫尚未分析）。
 
-![桌機徽章](screenshots/herdr-update/desktop.png) ![確認框](screenshots/herdr-update/desktop-dialog.png) ![確認框（亮）](screenshots/herdr-update/desktop-dialog-light.png)
-![更新中](screenshots/herdr-update/desktop-progress.png) ![結果](screenshots/herdr-update/desktop-result.png) ![換回舊版](screenshots/herdr-update/desktop-rollback-result.png)
+（截圖已移除：桌機徽章） （截圖已移除：確認框） （截圖已移除：確認框（亮））
+（截圖已移除：更新中） ![結果](screenshots/herdr-update/desktop-result.png) ![換回舊版](screenshots/herdr-update/desktop-rollback-result.png)
 ![手機選單](screenshots/herdr-update/phone-menu.png) ![手機確認框](screenshots/herdr-update/phone-dialog.png) ![手機結果（一顆沒接回）](screenshots/herdr-update/phone-result.png)
 
 ## 環境設定「更新檢查」：每台主機一張表，總覽、不是新的入口（2026-10-14，issue #1772）
@@ -929,7 +929,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **手機**（≤640px）：欄位表頭拿掉、每列變一張小卡（名稱＋徽章一行，目前／最新各一行，動作最後），不橫向捲動。
 - 驗證：`VITE_MOCK=1`，截圖在 `docs/screenshots/upgrade-check/`。
 
-![桌機](screenshots/upgrade-check/desktop.png) ![手機](screenshots/upgrade-check/phone.png)
+（截圖已移除：桌機） ![手機](screenshots/upgrade-check/phone.png)
 
 ## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）
 
