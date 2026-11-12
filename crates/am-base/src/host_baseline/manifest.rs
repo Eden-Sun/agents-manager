@@ -29,6 +29,8 @@ pub struct ClaudeKey {
     /// `settings.json` 裡的點號路徑。
     pub key: String,
     pub severity: &'static str,
+    /// 選填：一行說明（warn 的鍵用來說明「為什麼是選用」）。
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,8 @@ struct RawClaudeKey {
     name: String,
     key: String,
     severity: String,
+    #[serde(default)]
+    note: Option<String>,
     #[serde(default)]
     value: Option<toml::Value>,
 }
@@ -286,7 +290,8 @@ impl Manifest {
             if let Some(v) = k.value {
                 values.claude.insert(n.clone(), value(v, "claude.keys")?);
             }
-            claude_keys.push(ClaudeKey { name: n, key: k.key, severity: severity(&k.severity, "claude.keys")? });
+            let sev = severity(&k.severity, "claude.keys")?;
+            claude_keys.push(ClaudeKey { name: n, key: k.key, severity: sev, note: note(k.note, "claude.keys")? });
         }
         let mut mac_only_plugins = Vec::new();
         for p in raw.claude.plugins {
@@ -384,10 +389,10 @@ mod tests {
         let own = |v: &[(&str, &'static str)]| v.iter().map(|(n, s)| (n.to_string(), *s)).collect::<Vec<_>>();
         let (c, w) = (super::super::CRITICAL, super::super::WARN);
         assert_eq!(pairs(&m.tools), own(&[("herdr", c), ("rtk", w), ("zsh", w), ("bun", w), ("jq", w), ("gh", w)]));
-        assert_eq!(pairs(&m.claude_files), own(&[("settings.json", c), ("statusline-command.sh", c), ("CLAUDE.md", w), ("RTK.md", w)]));
+        assert_eq!(pairs(&m.claude_files), own(&[("settings.json", c), ("statusline-command.sh", w), ("CLAUDE.md", w), ("RTK.md", w)]));
         assert_eq!(
             m.claude_keys.iter().map(|k| (k.name.as_str(), k.key.as_str(), k.severity)).collect::<Vec<_>>(),
-            vec![("statusLine", "statusLine", c), ("hooks", "hooks", c), ("permissions", "permissions", w), ("defaultMode", "permissions.defaultMode", w)]
+            vec![("statusLine", "statusLine", w), ("hooks", "hooks", c), ("permissions", "permissions", w), ("defaultMode", "permissions.defaultMode", w)]
         );
         assert_eq!(m.mac_only_plugins, vec!["imessage", "discord"]);
         assert_eq!(pairs(&m.codex_files), own(&[("config.toml", w), ("hooks.json", w)]));
@@ -413,6 +418,8 @@ mod tests {
         for t in &m.tools {
             assert_eq!(t.note.is_some(), t.severity == super::super::WARN, "{}", t.name);
         }
+        let sl = m.claude_files.iter().find(|f| f.name == "statusline-command.sh").unwrap();
+        assert_eq!(sl.note.as_deref(), Some("選用：狀態列顯示額度與 context"));
         let rtk_md = m.claude_files.iter().find(|f| f.name == "RTK.md").unwrap();
         assert_eq!(rtk_md.only_if_tool.as_deref(), Some("rtk"));
     }
@@ -536,7 +543,7 @@ mod tests {
         let m = Manifest {
             tools: vec![item("T")],
             claude_files: vec![item("CF")],
-            claude_keys: vec![ClaudeKey { name: bad("CKN"), key: bad("CKK"), severity: super::super::WARN }],
+            claude_keys: vec![ClaudeKey { name: bad("CKN"), key: bad("CKK"), severity: super::super::WARN, note: None }],
             mac_only_plugins: vec![bad("PL")],
             codex_files: vec![item("XF")],
             codex_keys: vec![CodexKey { key: bad("XK"), check: CodexCheck::Present, severity: super::super::WARN }],

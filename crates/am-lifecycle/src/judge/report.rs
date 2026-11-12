@@ -9,7 +9,7 @@
 //! 都不標旗。帳本列帶 `assignment_id`，之後拿 `supervisor_assignments.result` 對這兩個機率。
 //!
 //! 呼叫走 [`crate::judge::post_systemone`]，不另寫 HTTP 客戶端。題目原文是
-//! `reports/jev-spike/report-evidence/build_cases.py` 量過的那兩題；state 只放遮罩後的回報，
+//! 離線 spike 量過的那兩題（題目檔已移出 repo）；state 只放遮罩後的回報，
 //! 不放交辦原文、bot id、專案 id。
 
 use std::time::Instant;

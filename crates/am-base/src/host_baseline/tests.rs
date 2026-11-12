@@ -117,8 +117,11 @@ AM_BL codex-file config.toml 1",
         ids(&out),
         vec!["claude.cc1.statusline-command.sh", "claude.cc1.RTK.md", "claude.cc1.settings.json:statusLine"]
     );
-    assert_eq!(sev(&out, "claude.cc1.statusline-command.sh"), CRITICAL);
-    assert_eq!(sev(&out, "claude.cc1.settings.json:statusLine"), CRITICAL);
+    assert_eq!(sev(&out, "claude.cc1.statusline-command.sh"), WARN);
+    assert_eq!(sev(&out, "claude.cc1.settings.json:statusLine"), WARN);
+    let note_of = |id: &str| evaluate(&out).unwrap().into_iter().find(|i| i.id == id).unwrap().note;
+    assert_eq!(note_of("claude.cc1.settings.json:statusLine").as_deref(), Some("選用：狀態列顯示額度與 context"));
+    assert_eq!(note_of("claude.cc1.statusline-command.sh").as_deref(), Some("選用：狀態列顯示額度與 context"));
     assert_eq!(sev(&out, "claude.cc1.RTK.md"), WARN);
 }
 

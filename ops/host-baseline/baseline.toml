@@ -52,7 +52,8 @@ severity = "critical"
 
 [[claude.files]]
 path = "statusline-command.sh"
-severity = "critical"
+severity = "warn"
+note = "選用：狀態列顯示額度與 context"
 
 [[claude.files]]
 path = "CLAUDE.md"
@@ -68,7 +69,8 @@ note = "rtk 的使用說明檔，只在這台已裝 rtk 時才檢查"
 [[claude.keys]]
 name = "statusLine"
 key = "statusLine"
-severity = "critical"
+severity = "warn"
+note = "選用：狀態列顯示額度與 context"
 
 [[claude.keys]]
 name = "hooks"

@@ -401,7 +401,7 @@ async fn ask(cfg: &JudgeCfg, key: &str, body: &Value) -> Result<Answer> {
     Ok(Answer { is_live_ui: a.value, model: a.model, input_tokens: a.input_tokens })
 }
 
-/// 題目照 spike（`reports/jev-spike/build_cases_b.py`）量過的那一版，多一個 `composer_idle`。用真的 Jev 重跑
+/// 題目照離線 spike（題目檔已移出 repo）量過的那一版，多一個 `composer_idle`。用真的 Jev 重跑
 /// 同一批 26 題：25 對、真撞限 5 題都 ≥0.75。答錯的仍是「確認框留在上方、輸入列已空」那一題（0.90）——
 /// 給了 `composer_idle` 它也不看，所以這個欄位主要是留在帳本裡給事後分組用，不是指望 Jev 用它。
 fn request_body(model: &str, kind: &str, matched: &str, screen: &str, composer_idle: bool) -> Value {

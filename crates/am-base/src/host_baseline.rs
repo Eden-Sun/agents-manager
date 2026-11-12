@@ -399,11 +399,20 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                         format!("claude 身份 {}：settings.json 不是合法 JSON，裡面有沒有那些鍵看不出來", f[2]),
                     ));
                 } else if claude_settings && f.get(4).copied() != Some("?") && !present(f.get(4)) {
-                    issues.push(issue(
-                        format!("claude.{}.settings.json:{}", f[2], f[3]),
-                        m.claude_keys.iter().find(|k| k.name == f[3]).map_or(WARN, |k| k.severity),
-                        format!("claude 身份 {}：settings.json 沒有 {}", f[2], f[3]),
-                    ));
+                    let key = m.claude_keys.iter().find(|k| k.name == f[3]);
+                    issues.push(BaselineIssue {
+                        note: key.and_then(|k| k.note.clone()),
+                        ..issue(
+                            format!("claude.{}.settings.json:{}", f[2], f[3]),
+                            key.map_or(WARN, |k| k.severity),
+                            format!("claude 身份 {}：settings.json 沒有 {}", f[2], f[3]),
+                        )
+                    });
+                    if let Some(k) = m.claude_keys.iter().find(|k| k.name == f[3]) {
+                        if let Some(last) = issues.last_mut() {
+                            last.note = k.note.clone();
+                        }
+                    }
                 }
             }
             "claude-plugin" if f.len() >= 5 => {

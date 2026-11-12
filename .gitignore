@@ -21,3 +21,5 @@ docs/screenshots/goal/cdp-profile*/
 
 # CodeGraph 索引（每台機器本地，只建在主樹；worktree 會沿用主樹的索引）
 /.codegraph/
+# 離線 spike 題目與結果已移出 repo（本機 archive：~/.config/agents-manager/archive/jev-spike/）
+reports/jev-spike/
