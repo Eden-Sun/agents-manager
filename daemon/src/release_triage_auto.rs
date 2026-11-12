@@ -332,7 +332,7 @@ async fn push_notice(app: &Arc<App>, kind: &str, to: &str, text: &str, payload_e
     if let (Some(base), Some(extra)) = (payload.as_object_mut(), payload_extra.as_object()) {
         base.extend(extra.clone());
     }
-    match crate::supervisor::store::push_inbox(&app.db, &key, "release_triage_notice", None, None, None, &payload).await {
+    match crate::supervisor_inbox::push_inbox(&app.db, &key, "release_triage_notice", None, None, None, &payload).await {
         Ok(Some(_)) => {
             app.emit("supervisor_changed", json!({"release_triage_notice": key})).await;
             Some(key)

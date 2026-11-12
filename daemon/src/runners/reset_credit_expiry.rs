@@ -90,14 +90,14 @@ pub async fn tick(app: &Arc<App>) -> usize {
     let mut pushed = 0;
     for d in due {
         let text = message(&d, now);
-        let payload = serde_json::json!({
-            "source": "daemon",
-            "reason": "codex_reset_credit_expiring",
-            "subject": d.key,
-            "detail": text,
-            "action": "只是通知（每張券只推一次）：請把這句話轉告使用者；daemon 不會替使用者用掉重置券。",
-        });
-        match crate::supervisor::store::push_inbox(&app.db, &event_key(&d.id), "ops_alert", None, None, None, &payload).await {
+        let payload = crate::supervisor_inbox::ops_alert_payload(
+            "codex_reset_credit_expiring",
+            &d.key,
+            serde_json::json!({}),
+            text,
+            "只是通知（每張券只推一次）：請把這句話轉告使用者；daemon 不會替使用者用掉重置券。",
+        );
+        match crate::supervisor_inbox::push_ops_alert(&app.db, &event_key(&d.id), None, &payload).await {
             Ok(Some(_)) => pushed += 1,
             Ok(None) => {}
             Err(e) => tracing::warn!(key = %d.key, credit = %d.id, error = %e, "could not queue the codex_reset_credit_expiring ops_alert"),

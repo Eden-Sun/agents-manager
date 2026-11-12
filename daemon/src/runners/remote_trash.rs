@@ -173,14 +173,14 @@ async fn clear_backoff(app: &Arc<App>, host: &str, id: &str) {
 /// 補還原連續失敗到上限（#1427）：備份留著、不再自動重試，發一則 `ops_alert` 等人工處理。同一顆同一台只發一次（key 不帶日期）。
 async fn give_up_alert(app: &Arc<App>, host: &str, id: &str, attempts: i64) {
     let key = format!("ops_alert:daemon:remote_restore_gave_up:{host}:{id}");
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": "remote_restore_gave_up",
-        "subject": id,
-        "detail": format!("{host} 上的 bot {id} 補還原連續失敗 {attempts} 次，已停止自動重試；它的備份留在遠端 bots-trash，沒有過期、也不計入總量。"),
-        "action": "修好遠端的 bots/ 權限或那一段路徑後，手動還原或清掉這份備份。daemon 沒有刪任何檔。",
-    });
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(id), None, &payload).await {
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        "remote_restore_gave_up",
+        id,
+        serde_json::json!({}),
+        format!("{host} 上的 bot {id} 補還原連續失敗 {attempts} 次，已停止自動重試；它的備份留在遠端 bots-trash，沒有過期、也不計入總量。"),
+        "修好遠端的 bots/ 權限或那一段路徑後，手動還原或清掉這份備份。daemon 沒有刪任何檔。",
+    );
+    if let Err(e) = crate::supervisor_inbox::push_ops_alert(&app.db, &key, Some(id), &payload).await {
         tracing::warn!(host, bot = %id, error = %e, "could not queue the remote_restore_gave_up ops_alert");
     }
 }

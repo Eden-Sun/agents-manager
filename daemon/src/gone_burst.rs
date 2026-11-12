@@ -430,24 +430,25 @@ async fn push(app: &Arc<App>, host: &str, wave: &[Gone]) -> anyhow::Result<()> {
         wave.len(),
         names.join("、"),
     );
-    let payload = json!({
-        "source": "daemon",
-        "reason": "agents_gone_burst",
-        "subject": host,
-        "host": host,
-        "count": wave.len(),
-        "bots": bots,
-        "bot_names": names,
-        "window_secs": WINDOW.as_secs(),
-        "first_gone_at": first,
-        "last_gone_at": last,
-        "detail": detail,
-        "action": "不是 daemon 的 stop／restart、也不是計畫中的 herdr 維護：查那台 host 上有沒有範圍過大的 pkill／killall／kill -9 -1、OOM 或整台重啟，也可能是使用者一次手動關了多個 pane（daemon.log 搜 `agent gone`／`pane exited`）；autostart 的 bot 照原本規則補開，其餘要人手 `start?resume=native`。",
-    });
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        "agents_gone_burst",
+        host,
+        json!({
+            "host": host,
+            "count": wave.len(),
+            "bots": bots,
+            "bot_names": names,
+            "window_secs": WINDOW.as_secs(),
+            "first_gone_at": first,
+            "last_gone_at": last,
+        }),
+        detail,
+        "不是 daemon 的 stop／restart、也不是計畫中的 herdr 維護：查那台 host 上有沒有範圍過大的 pkill／killall／kill -9 -1、OOM 或整台重啟，也可能是使用者一次手動關了多個 pane（daemon.log 搜 `agent gone`／`pane exited`）；autostart 的 bot 照原本規則補開，其餘要人手 `start?resume=native`。",
+    );
     // key 帶窗內最早那顆 run：daemon 重啟後同一波重推也會被 INSERT OR IGNORE 吞掉。
     let first_run = wave.first().map(|g| g.run_id.as_str()).unwrap_or_default();
     let key = format!("ops_alert:daemon:agents_gone_burst:{host}:{first_run}");
-    if crate::supervisor_inbox::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await?.is_some() {
+    if crate::supervisor_inbox::push_ops_alert(&app.db, &key, None, &payload).await?.is_some() {
         tracing::warn!(host, count = wave.len(), "several agents vanished at once; ops_alert queued");
         app.emit("supervisor_changed", json!({"ops_alert": key})).await;
     }

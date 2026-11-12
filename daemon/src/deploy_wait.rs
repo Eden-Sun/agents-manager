@@ -551,7 +551,7 @@ async fn flush(app: &(impl crate::capabilities::DataDir + crate::capabilities::D
                 return;
             }
         };
-        if let Err(e) = crate::supervisor::store::push_inbox(app.db(), &key, "deploy_waiting", None, None, None, &payload).await {
+        if let Err(e) = crate::supervisor_inbox::push_inbox(app.db(), &key, "deploy_waiting", None, None, None, &payload).await {
             tracing::warn!(error = %e, event_key = %key, "could not tell AGM about the deploy wait; will retry");
             return;
         }

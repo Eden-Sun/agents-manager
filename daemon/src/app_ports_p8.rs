@@ -179,7 +179,7 @@ impl PaneRuntime for App {
         event: &'a str,
         payload: &'a Value,
     ) -> impl Future<Output = Result<Option<String>>> + Send + 'a {
-        crate::supervisor::store::push_inbox(&self.db, key, event, None, None, None, payload)
+        crate::supervisor_inbox::push_inbox(&self.db, key, event, None, None, None, payload)
     }
 }
 
@@ -216,7 +216,7 @@ impl SupervisorRepo for App {
         turn_id: Option<&str>,
         payload: &Value,
     ) -> Result<Option<String>> {
-        crate::supervisor::store::push_inbox(&self.db, event_key, kind, assignment_id, bot_id, turn_id, payload).await
+        crate::supervisor_inbox::push_inbox(&self.db, event_key, kind, assignment_id, bot_id, turn_id, payload).await
     }
 
     async fn load_owned(&self) -> Result<crate::projection::Owned> {

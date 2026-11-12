@@ -42,14 +42,14 @@ pub async fn alert(pool: &SqlitePool, reason: &str, subject: &str, detail: &str)
     let hour = db::now().get(..13).unwrap_or_default().to_string();
     let subject: String = subject.chars().filter(|c| !c.is_control() && *c != ':').take(80).collect();
     let key = format!("ops_alert:daemon:{reason}:{subject}:{hour}");
-    let payload = json!({
-        "source": "daemon",
-        "reason": reason,
-        "subject": subject,
-        "detail": detail,
-        "action": "有東西要刪 AGM 的 bot，daemon 已擋下、什麼都沒刪：查 detail 裡的呼叫端與 config.toml 寫入紀錄（daemon.log 搜 `config.toml written`），確認是不是該刪；真的要刪就 `agm bot delete <id> --confirm-supervisor`",
-    });
-    match crate::supervisor_inbox::push_inbox(pool, &key, "ops_alert", None, None, None, &payload).await {
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        reason,
+        &subject,
+        json!({}),
+        detail,
+        "有東西要刪 AGM 的 bot，daemon 已擋下、什麼都沒刪：查 detail 裡的呼叫端與 config.toml 寫入紀錄（daemon.log 搜 `config.toml written`），確認是不是該刪；真的要刪就 `agm bot delete <id> --confirm-supervisor`",
+    );
+    match crate::supervisor_inbox::push_ops_alert(pool, &key, None, &payload).await {
         Ok(_) => tracing::warn!(reason, subject, detail, "refused to delete an AGM bot; ops_alert queued"),
         Err(e) => tracing::error!(reason, subject, detail, error = %e, "refused to delete an AGM bot; ops_alert could not be queued"),
     }

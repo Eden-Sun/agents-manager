@@ -184,7 +184,7 @@ pub async fn stuck_runs(pool: &SqlitePool, started_before: &str) -> sqlx::Result
 }
 
 async fn alert(pool: &SqlitePool, key: &str, bot_id: Option<&str>, payload: Value) {
-    if let Err(e) = crate::supervisor::store::push_inbox(pool, key, "ops_alert", None, bot_id, None, &payload).await {
+    if let Err(e) = crate::supervisor_inbox::push_inbox(pool, key, "ops_alert", None, bot_id, None, &payload).await {
         tracing::warn!(key, error = %e, "could not queue the claude session ops_alert");
     }
 }

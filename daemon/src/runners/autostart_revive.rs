@@ -211,7 +211,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         "reason": crate::autostart_revive::reason_slug(exit_reason.as_deref().unwrap_or(crate::autostart_revive::LOST_REASON)),
         "outcome": outcome, "error": error,
     });
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "bot_lost", None, Some(&bot.id), None, &payload).await {
+    if let Err(e) = crate::supervisor_inbox::push_inbox(&app.db, &key, "bot_lost", None, Some(&bot.id), None, &payload).await {
         tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
     }
     Ok(())

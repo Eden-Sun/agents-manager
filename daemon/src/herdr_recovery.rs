@@ -124,28 +124,21 @@ pub(crate) async fn publish_recovery_report(app: &Arc<App>, report: &RecoveryRep
         "ops_alert:daemon:herdr_unexpected_restart:{}",
         report.recovery_id
     );
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": "herdr_unexpected_restart",
-        "subject": "local herdr",
-        "recovery_id": report.recovery_id,
-        "resumed_count": report.resumed.len(),
-        "failed_count": report.failed.len(),
-        "children_lost_count": report.children_lost.len(),
-        "limited": report.limited,
-        "skipped": report.skipped,
-        "detail": detail,
-        "action": "請檢查 herdr 與 bot 狀態；遺失的 child pane 不會由 daemon 重建。",
-    });
-    match crate::supervisor::store::push_inbox(
-        &app.db,
-        &event_key,
-        "ops_alert",
-        None,
-        None,
-        None,
-        &payload,
-    )
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        "herdr_unexpected_restart",
+        "local herdr",
+        serde_json::json!({
+            "recovery_id": report.recovery_id,
+            "resumed_count": report.resumed.len(),
+            "failed_count": report.failed.len(),
+            "children_lost_count": report.children_lost.len(),
+            "limited": report.limited,
+            "skipped": report.skipped,
+        }),
+        detail,
+        "請檢查 herdr 與 bot 狀態；遺失的 child pane 不會由 daemon 重建。",
+    );
+    match crate::supervisor_inbox::push_ops_alert(&app.db, &event_key, None, &payload)
     .await
     {
         Ok(Some(_)) => {

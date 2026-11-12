@@ -481,7 +481,7 @@ async fn run_batch_with_authority(
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
                 settle_failed_restart(app, &bot_id).await;
                 // Own kind, not `health_changed`, so the supervisor can tell it from background noise.
-                let _ = crate::runners::app_ports_p11::push_inbox(
+                let _ = crate::supervisor_inbox::push_inbox(
                     &app.db,
                     &format!("bot_restart_failed:{batch_id}:{bot_id}"),
                     "bot_restart_failed",
@@ -660,7 +660,7 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
         Err(e) => (false, Some(format!("{e:#}"))),
     };
     tracing::info!(bot = %name, ok, ?error, "supervisor restart retry finished");
-    let _ = crate::runners::app_ports_p11::push_inbox(
+    let _ = crate::supervisor_inbox::push_inbox(
         &app.db,
         &format!("supervisor_restart_retry:{batch_id}"),
         "supervisor_restart_retry",

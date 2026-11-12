@@ -381,7 +381,7 @@ mod tests {
         autostart_done(&env.app);
         // Restore the durable history a fresh daemon would see after a restart; its process-local map starts empty.
         for attempt in 0..super::MAX_RESTARTS {
-            crate::supervisor::store::push_inbox(
+            crate::supervisor_inbox::push_inbox(
                 &env.app.db,
                 &format!("bot_lost:{}:prior-{attempt}", bot.id),
                 "bot_lost",
@@ -606,7 +606,7 @@ mod tests {
         crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
         autostart_done(&env.app);
         for attempt in 0..super::MAX_RESTARTS {
-            crate::supervisor::store::push_inbox(
+            crate::supervisor_inbox::push_inbox(
                 &env.app.db,
                 &format!("bot_lost:{}:prior-{attempt}", bot.id),
                 "bot_lost",
@@ -645,7 +645,7 @@ mod tests {
         crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
         autostart_done(&env.app);
         for attempt in 0..super::MAX_RESTARTS {
-            crate::supervisor::store::push_inbox(
+            crate::supervisor_inbox::push_inbox(
                 &env.app.db,
                 &format!("bot_lost:{}:prior-{attempt}", bot.id),
                 "bot_lost",

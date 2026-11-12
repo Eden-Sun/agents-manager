@@ -213,7 +213,7 @@ impl crate::host_baseline::BaselineEnv for App {
     fn push_ops_alert(&self, key: &str, payload: &Value) -> impl Future<Output = anyhow::Result<bool>> + Send {
         let key = key.to_string();
         let payload = payload.clone();
-        async move { Ok(crate::supervisor::store::push_inbox(&self.db, &key, "ops_alert", None, None, None, &payload).await?.is_some()) }
+        async move { Ok(crate::supervisor_inbox::push_inbox(&self.db, &key, "ops_alert", None, None, None, &payload).await?.is_some()) }
     }
 }
 

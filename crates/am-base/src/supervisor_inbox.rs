@@ -355,6 +355,27 @@ pub async fn push_inbox(
     Ok(inserted)
 }
 
+/// `ops_alert` 的 payload 建構（daemon 自己推的那幾種共用）：`source`／`reason`／`subject`／`detail`／`action`
+/// 五個固定欄位，`extra` 是各告警自己的額外欄位（必須是 JSON object）。去重 key 不在這裡：
+/// 每種告警的 key 組成規則不同，由呼叫端自己 `format!`，改了就會讓去重失效。
+pub fn ops_alert_payload(reason: &str, subject: &str, extra: Value, detail: impl Into<Value>, action: impl Into<Value>) -> Value {
+    let mut m = match extra {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    m.insert("source".into(), "daemon".into());
+    m.insert("reason".into(), reason.into());
+    m.insert("subject".into(), subject.into());
+    m.insert("detail".into(), detail.into());
+    m.insert("action".into(), action.into());
+    Value::Object(m)
+}
+
+/// 推一則 `ops_alert`（kind 固定 `ops_alert`）；`bot_id` 有就掛在事件上。回傳同 [`push_inbox`]。
+pub async fn push_ops_alert(pool: &SqlitePool, key: &str, bot_id: Option<&str>, payload: &Value) -> Result<Option<String>> {
+    push_inbox(pool, key, "ops_alert", None, bot_id, None, payload).await
+}
+
 /// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。
 pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<String> {
     let mut conn = pool.acquire().await?;
@@ -396,5 +417,32 @@ mod tests {
     fn test_sql_list() {
         assert_eq!(sql_list(&["a", "b", "c"]), "'a','b','c'");
         assert_eq!(sql_list(&[]), "");
+    }
+
+    /// `ops_alert_payload` 要產出跟各告警原本手寫的 `json!` 完全相同的內容（去重之外，巡檢讀這些欄位）。
+    #[test]
+    fn ops_alert_payload_matches_the_old_hand_written_shapes() {
+        use serde_json::json;
+        // share_storage_full / remote_restore_gave_up / codex_reset_credit_expiring 這類只有五個固定欄位。
+        assert_eq!(
+            ops_alert_payload("share_storage_full", "b1", json!({}), "d", "a"),
+            json!({"source": "daemon", "reason": "share_storage_full", "subject": "b1", "detail": "d", "action": "a"})
+        );
+        // agents_gone_burst：額外欄位在 subject 與 detail 之間。
+        assert_eq!(
+            ops_alert_payload("agents_gone_burst", "h", json!({"host": "h", "count": 2, "bots": ["x"], "bot_names": ["n"], "window_secs": 60, "first_gone_at": "f", "last_gone_at": "l"}), "d", "a"),
+            json!({"source": "daemon", "reason": "agents_gone_burst", "subject": "h", "host": "h", "count": 2, "bots": ["x"], "bot_names": ["n"],
+                   "window_secs": 60, "first_gone_at": "f", "last_gone_at": "l", "detail": "d", "action": "a"})
+        );
+        // herdr_unexpected_restart
+        assert_eq!(
+            ops_alert_payload("herdr_unexpected_restart", "local herdr", json!({"recovery_id": "r", "resumed_count": 1, "failed_count": 0, "children_lost_count": 0, "limited": false, "skipped": 0}), "d", "a"),
+            json!({"source": "daemon", "reason": "herdr_unexpected_restart", "subject": "local herdr", "recovery_id": "r", "resumed_count": 1,
+                   "failed_count": 0, "children_lost_count": 0, "limited": false, "skipped": 0, "detail": "d", "action": "a"})
+        );
+        // 序列化後的字串也一樣（payload_json 存的是這串；serde_json 的 Map 依 key 排序，不受插入順序影響）。
+        let built = ops_alert_payload("r", "s", json!({"x": 1}), "d", "a").to_string();
+        let old = json!({"source": "daemon", "reason": "r", "subject": "s", "x": 1, "detail": "d", "action": "a"}).to_string();
+        assert_eq!(built, old);
     }
 }

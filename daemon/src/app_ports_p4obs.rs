@@ -110,20 +110,17 @@ pub async fn push_codex_security_banner_alert(app: &(impl crate::capabilities::D
     };
     let subject = if name.is_empty() { run.bot_id.as_str() } else { name.as_str() };
     let key = format!("ops_alert:daemon:{reason}:{}:{}", run.id, db::ulid());
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": reason,
-        "subject": subject,
-        "bot_id": run.bot_id,
-        "bot_name": name,
-        "run_id": run.id,
-        "detail": format!(
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        reason,
+        subject,
+        serde_json::json!({"bot_id": run.bot_id, "bot_name": name, "run_id": run.id}),
+        format!(
             "codex bot `{name}`（{}）畫面上有帳號安全提醒橫幅（`Press a number to choose`）：橫幅開著時打字，開頭的數字會被當成選項吃掉，daemon 已擋下派送（一個字都沒打）",
             run.bot_id
         ),
-        "action": "請人到這顆 bot 的「終端」pane 處理橫幅（選一個選項，或按 Esc 關掉），再重送；排隊的訊息會在橫幅關掉後自動重試。daemon 不會替你按 Esc 或任何鍵。同一次橫幅只推這一則，關掉後又出現才再推。",
-    });
-    match crate::supervisor::store::push_inbox(app.db(), &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
+        "請人到這顆 bot 的「終端」pane 處理橫幅（選一個選項，或按 Esc 關掉），再重送；排隊的訊息會在橫幅關掉後自動重試。daemon 不會替你按 Esc 或任何鍵。同一次橫幅只推這一則，關掉後又出現才再推。",
+    );
+    match crate::supervisor_inbox::push_ops_alert(app.db(), &key, Some(&run.bot_id), &payload).await {
         Ok(Some(_)) => app.emit("supervisor_changed", serde_json::json!({ "ops_alert": key })).await,
         Ok(None) => {}
         Err(e) => tracing::warn!(run = %run.id, error = %e, "could not queue the codex security banner ops_alert"),

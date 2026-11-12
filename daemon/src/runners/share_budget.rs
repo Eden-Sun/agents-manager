@@ -74,14 +74,14 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
     // 同一顆一天最多推一則 ops_alert（key 帶日期）。
     let day = chrono::Utc::now().format("%Y-%m-%d");
     let key = format!("ops_alert:daemon:share_storage_full:{bot_id}:{day}");
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": "share_storage_full",
-        "subject": bot_id,
-        "detail": text,
-        "action": "只是通知，daemon 沒有刪任何檔：請擁有者整理這顆分享 bot 的工作目錄或 outbox。",
-    });
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await {
+    let payload = crate::supervisor_inbox::ops_alert_payload(
+        "share_storage_full",
+        &bot_id,
+        serde_json::json!({}),
+        text,
+        "只是通知，daemon 沒有刪任何檔：請擁有者整理這顆分享 bot 的工作目錄或 outbox。",
+    );
+    if let Err(e) = crate::supervisor_inbox::push_ops_alert(&app.db, &key, None, &payload).await {
         tracing::warn!(bot = %bot_id, error = %e, "could not queue the share_storage_full ops_alert");
     }
 }

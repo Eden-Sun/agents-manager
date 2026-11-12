@@ -211,38 +211,68 @@ pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
 /// event per give-up episode. `status_detail`, the log line and the SSE event are best-effort and
 /// ride along with the tick that actually inserts the event.
 async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), why: &str) {
-    let _ = store::mark_watchdog_gave_up(app.db(), why).await;
-    // The key comes from the persisted marker, never from a degraded read: no marker or an
-    // unreadable row means "try again next tick", not an empty-key event.
-    let Some(at) = store::get_or_init(app.db()).await.ok().and_then(|s| s.watchdog_gave_up_at) else { return };
-    // One durable event per give-up. The key is the moment it happened, so a later outage
-    // (after a recovery clears the marker) is a new event rather than a silenced duplicate.
-    let pushed = store::push_inbox(
-        app.db(),
-        &format!("watchdog:gave_up:{at}"),
-        "watchdog_gave_up",
-        None,
-        None,
-        None,
-        &serde_json::json!({
-            "attempts": MAX_ATTEMPTS,
-            "why": why,
-            "gave_up_at": at,
-            "action": "手動 `bin/agm supervisor-start`；自動重試不會再發生，直到有人重新啟動它",
-        }),
-    )
-    .await;
+    report_gave_up_as(app, GaveUpWho::Manager, why).await;
+}
+
+/// Whose watchdog gave up: the supervisor (manager) or the AGM responder. Both run the same
+/// mark → key-from-marker → inbox event → best-effort extras sequence; only the strings and the
+/// store they touch differ. The event keys / kinds / payloads below are dedupe contracts: keep them.
+#[derive(Clone, Copy)]
+pub(super) enum GaveUpWho {
+    Manager,
+    Responder,
+}
+
+pub(super) async fn report_gave_up_as(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), who: GaveUpWho, why: &str) {
+    use super::roles::{self, Role};
+    // The marker means "owed a notification", not "notified" (#251). The key comes from the persisted
+    // marker, never from a degraded read: no marker / unreadable row = retry next tick.
+    let at = match who {
+        GaveUpWho::Manager => {
+            let _ = store::mark_watchdog_gave_up(app.db(), why).await;
+            store::get_or_init(app.db()).await.ok().and_then(|s| s.watchdog_gave_up_at)
+        }
+        GaveUpWho::Responder => {
+            let _ = roles::mark_watchdog_gave_up(app.db(), Role::Responder, why).await;
+            roles::get(app.db(), Role::Responder).await.ok().and_then(|r| r.watchdog_gave_up_at)
+        }
+    };
+    let Some(at) = at else { return };
+    let (key, kind, payload) = match who {
+        GaveUpWho::Manager => (
+            format!("watchdog:gave_up:{at}"),
+            "watchdog_gave_up",
+            serde_json::json!({
+                "attempts": MAX_ATTEMPTS,
+                "why": why,
+                "gave_up_at": at,
+                "action": "手動 `bin/agm supervisor-start`；自動重試不會再發生，直到有人重新啟動它",
+            }),
+        ),
+        GaveUpWho::Responder => (
+            format!("responder_watchdog:gave_up:{at}"),
+            "responder_watchdog_gave_up",
+            serde_json::json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
+        ),
+    };
     // Err = not durable yet, retry next tick; Ok(None) = already delivered on an earlier tick.
-    let Ok(Some(_)) = pushed else { return };
-    tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
-    let _ = store::set_status_detail(
-        app.db(),
-        Some(&format!(
-            "watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}"
-        )),
-    )
-    .await;
-    app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
+    let Ok(Some(_)) = store::push_inbox(app.db(), &key, kind, None, None, None, &payload).await else { return };
+    match who {
+        GaveUpWho::Manager => {
+            tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
+            let _ = store::set_status_detail(
+                app.db(),
+                Some(&format!("watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}")),
+            )
+            .await;
+            app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
+        }
+        GaveUpWho::Responder => {
+            tracing::error!(why, "AGM responder watchdog gave up");
+            let _ = roles::set_status_detail(app.db(), Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
+            app.emit("supervisor_changed", serde_json::json!({"responder": "watchdog_gave_up"})).await;
+        }
+    }
 }
 
 async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + Send + Sync + 'static), bot_id: &str, failures: i64) {
@@ -452,6 +482,27 @@ mod tests {
         let keys: Vec<String> =
             sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_all(&app.db).await.unwrap();
         assert_eq!(keys, vec![format!("watchdog:gave_up:{}", s.watchdog_gave_up_at.unwrap())]);
+    }
+
+    /// 去重 key／kind／payload 是合約（改了去重就失效、巡檢讀的欄位也變）：快照。
+    #[tokio::test]
+    async fn gave_up_event_key_kind_and_payload_snapshot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        store::get_or_init(&app.db).await.unwrap();
+        report_gave_up(&app, "boom").await;
+        let at = store::get_or_init(&app.db).await.unwrap().watchdog_gave_up_at.unwrap();
+        let (key, kind, payload): (String, String, String) =
+            sqlx::query_as("SELECT event_key, kind, payload_json FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(key, format!("watchdog:gave_up:{at}"));
+        assert_eq!(kind, "watchdog_gave_up");
+        let want = serde_json::json!({
+            "attempts": MAX_ATTEMPTS,
+            "why": "boom",
+            "gave_up_at": at,
+            "action": "手動 `bin/agm supervisor-start`；自動重試不會再發生，直到有人重新啟動它",
+        });
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap(), want);
     }
 }
 

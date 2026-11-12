@@ -580,24 +580,7 @@ async fn report_missing(db: &SqlitePool, bot_id: &str) {
 
 /// 協調者的故障交給**巡檢**：它就是負責發現「有東西倒了」的那一個，而倒下的正是協調者自己。
 async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), why: &str) {
-    // 標記＝「欠一則通知」，不是「已通知」（#251）：每個 GaveUp tick 都補一次，事件以標記時間為 key、
-    // INSERT OR IGNORE，所以補到成功為止、每一輪放棄只會有一則。
-    let _ = roles::mark_watchdog_gave_up(app.db(), Role::Responder, why).await;
-    let Some(at) = roles::get(app.db(), Role::Responder).await.ok().and_then(|r| r.watchdog_gave_up_at) else { return };
-    let pushed = store::push_inbox(
-        app.db(),
-        &format!("responder_watchdog:gave_up:{at}"),
-        "responder_watchdog_gave_up",
-        None,
-        None,
-        None,
-        &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
-    )
-    .await;
-    let Ok(Some(_)) = pushed else { return };
-    tracing::error!(why, "AGM responder watchdog gave up");
-    let _ = roles::set_status_detail(app.db(), Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
-    app.emit("supervisor_changed", json!({"responder": "watchdog_gave_up"})).await;
+    watchdog::report_gave_up_as(app, watchdog::GaveUpWho::Responder, why).await;
 }
 
 // ---------------------------------------------------------------- notify
@@ -1974,6 +1957,22 @@ mod gave_up_report_tests {
             .await
             .unwrap();
         assert_eq!(keys, vec![format!("responder_watchdog:gave_up:{at}")]);
+    }
+
+    /// 去重 key／kind／payload 是合約：快照。
+    #[tokio::test]
+    async fn responder_gave_up_event_key_kind_and_payload_snapshot() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        roles::get(&app.db, Role::Responder).await.unwrap();
+        report_gave_up(&app, "boom").await;
+        let at = roles::get(&app.db, Role::Responder).await.unwrap().watchdog_gave_up_at.unwrap();
+        let (key, kind, payload): (String, String, String) =
+            sqlx::query_as("SELECT event_key, kind, payload_json FROM supervisor_inbox WHERE kind='responder_watchdog_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(key, format!("responder_watchdog:gave_up:{at}"));
+        assert_eq!(kind, "responder_watchdog_gave_up");
+        let want = json!({"why": "boom", "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"});
+        assert_eq!(serde_json::from_str::<Value>(&payload).unwrap(), want);
     }
 
     /// 協調者目錄的檔案要換新 inode（原子寫），不能原地截斷：用 hard link 分辨兩者。

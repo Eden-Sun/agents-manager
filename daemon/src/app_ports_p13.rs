@@ -185,7 +185,7 @@ pub async fn supervisor_push_inbox(
     to: Option<&str>,
     payload: &serde_json::Value,
 ) -> anyhow::Result<Option<String>> {
-    crate::supervisor::store::push_inbox(pool, event_key, kind, bot_id, from, to, payload).await
+    crate::supervisor_inbox::push_inbox(pool, event_key, kind, bot_id, from, to, payload).await
 }
 
 #[cfg(test)]

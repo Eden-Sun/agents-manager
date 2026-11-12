@@ -126,30 +126,6 @@ pub async fn supervisor_lock() -> crate::supervisor::OpGuard {
     crate::supervisor::lock().await
 }
 
-pub async fn push_inbox(
-    pool: &sqlx::SqlitePool,
-    key: &str,
-    event: &str,
-    assignment_id: Option<&str>,
-    bot_id: Option<&str>,
-    run_id: Option<&str>,
-    payload: &Value,
-) -> anyhow::Result<Option<String>> {
-    crate::supervisor::store::push_inbox(pool, key, event, assignment_id, bot_id, run_id, payload).await
-}
-
-pub async fn push_inbox_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    key: &str,
-    event: &str,
-    assignment_id: Option<&str>,
-    bot_id: Option<&str>,
-    run_id: Option<&str>,
-    payload: &Value,
-) -> anyhow::Result<Option<String>> {
-    crate::supervisor::store::push_inbox_tx(tx, key, event, assignment_id, bot_id, run_id, payload).await
-}
-
 impl crate::intents::IntentFailureInbox for sqlx::SqlitePool {
     fn push_failed<'a>(
         &'a self,
@@ -158,7 +134,7 @@ impl crate::intents::IntentFailureInbox for sqlx::SqlitePool {
         err: &'a str,
     ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a {
         async move {
-            push_inbox_tx(
+            crate::supervisor_inbox::push_inbox_tx(
                 tx,
                 &format!("intent_failed:{}", intent.id),
                 "intent_failed",
