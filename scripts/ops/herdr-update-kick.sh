@@ -44,7 +44,14 @@ platform() {
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-2}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
+# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
+. "${0%/*}/kick-common.sh" 2>/dev/null || {
+  _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
+  echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
+  _a="${AGM:-$DIR/bin/agm}"
+  [ -x "$_a" ] && "$_a" --compact ops-alert --source "${OWNER:-${0##*/}}" --reason kick_common_missing --detail "$_m" >> "$LOG" 2>&1
+  exit 1
+}
 
 # 狀態檔一律先寫暫存檔再 rename（同一目錄＝同一檔案系統）：`echo > $STATE` 被中斷（斷電、SIGKILL）會留下空檔，
 # 空的狀態檔在這裡等於「第一次執行」，會漏掉一次該派的工。寫不成功就保留舊檔並回非 0。

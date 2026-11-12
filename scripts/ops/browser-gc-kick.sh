@@ -9,7 +9,14 @@ BOT=01M248GA4H1TAHJCZRKVR73S3C
 LOG="$DIR/browser-gc.log"
 cd "$DIR" || exit 1
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-. "${0%/*}/kick-common.sh" 2>/dev/null || { echo "找不到 kick-common.sh（要和這支 kick 一起裝進 bin/）" >&2; exit 0; }
+# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
+. "${0%/*}/kick-common.sh" 2>/dev/null || {
+  _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
+  echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
+  _a="${AGM:-$DIR/bin/agm}"
+  [ -x "$_a" ] && "$_a" --compact ops-alert --source "${OWNER:-${0##*/}}" --reason kick_common_missing --detail "$_m" >> "$LOG" 2>&1
+  exit 1
+}
 echo "== $(date '+%F %T') kick" >> "$LOG"
 
 # 鎖（issue #490）：這一支會殺 Chrome、`rm -rf` profile、關 pane、派工，卻是 kick 家族裡唯一沒有鎖的。

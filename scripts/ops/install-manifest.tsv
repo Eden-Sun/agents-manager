@@ -1,6 +1,6 @@
 # 已安裝的 ops 檔對照表（issue #418、#487、#677）：「repo 來源」與「安裝位置（相對 AGM 目錄，
 # ~/.config/agents-manager/supervisor/AGM）」兩欄，空白分隔；可選的第三欄 `darwin`／`linux` 表示只在那個平台裝，
-# 省略＝兩邊都裝。`agm ops-sync --check` 讀這一份比對，另一個平台的列報成 `skipped`、不算落差；
+# 省略＝兩邊都裝。尾端可再加 `shared`（可與平台並用，順序不拘）＝被別的檔 source 的共用檔：ops-install 在安裝端沒有時也會裝，而且先於其他列裝（依賴它的 kick 換新前它已就位）；沒標的新檔仍報 not-installed。`agm ops-sync --check` 讀這一份比對，另一個平台的列報成 `skipped`、不算落差；
 # 新增／移除要安裝的檔就改這裡，照 README.md install。bin/agm 由 daemon 部署，不在這裡。
 scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh      darwin
 scripts/ops/browser_gc_linux.py     bin/browser_gc_linux.py     linux
@@ -14,7 +14,7 @@ scripts/ops/disk-gc.sh              bin/disk-gc.sh              linux
 scripts/ops/remote-cargo-prewarm.sh  bin/remote-cargo-prewarm.sh  linux
 scripts/ops/dev-server-kick.ts      bin/dev-server-kick.ts
 scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
-scripts/ops/kick-common.sh          bin/kick-common.sh
+scripts/ops/kick-common.sh          bin/kick-common.sh          shared
 scripts/ops/herdr-lan-check.sh      bin/herdr-lan-check.sh
 scripts/ops/herdr-full-restart.sh   bin/herdr-full-restart.sh
 scripts/ops/outbox-gc.sh            bin/outbox-gc.sh

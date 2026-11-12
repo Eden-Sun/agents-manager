@@ -9,6 +9,7 @@
 # 規則（刻意窄）：
 #   - 只看 `scripts/ops/install-manifest.tsv`（在 --ref 那版）列的檔、這個平台的列；來源用 `git show <ref>:<path>` 讀，不需要 checkout。
 #   - 只換「安裝端已經有、內容跟 repo 不同」的檔。安裝端沒有的＝新檔，報 `not-installed`，第一次要人（或 AGM）手動裝。
+#     例外：清單列尾標 `shared`（被 kick source 的共用檔，如 kick-common.sh）安裝端沒有時也裝，且所有 shared 列先於其他列處理。
 #   - 安裝位置是 symlink 的不碰（`mv` 會把連結換成拷貝），報 `skipped`；對照表的安裝位置跑出 --dir（絕對路徑、`..`）報 `failed`、不寫。
 #   - 排程 unit（`systemd/`、`LaunchAgents/`）不碰：換了還要 daemon-reload／launchctl，不是這支的事，報 `skipped`。
 #   - 每支：新版先寫到同目錄暫存檔、**在暫存檔上自檢**（.sh → `bash -n`、.py → 語法編譯、.ts → 有 bun 就 `bun build`），
@@ -97,6 +98,11 @@ BACKUP="$DIR/ops-install-backups/$STAMP"
 _n=1; while [ -e "$BACKUP" ]; do _n=$((_n + 1)); BACKUP="$DIR/ops-install-backups/$STAMP-$_n"; done
 changes=0; failed=0
 
+# 自檢前拍下的狀態之後目的地有沒有變（fresh＝當時沒有檔，現在有了或變成 symlink 就算變）。
+dest_changed() {
+  if [ "$fresh" = 1 ]; then [ -e "$dest" ] || [ -L "$dest" ]; else [ -L "$dest" ] || ! cmp -s "$snapshot" "$dest"; fi
+}
+
 # 自檢（在暫存檔上做，種類看安裝位置的副檔名）。不在安裝目錄產生任何東西（py 不用 py_compile，它會寫 __pycache__）。
 selfcheck() { # selfcheck <安裝位置> <要檢查的檔案>
   case "$1" in
@@ -149,6 +155,12 @@ has_symlink_parent() { # has_symlink_parent <relative target> → 0 是 symlink�
   return 1
 }
 
+# 清單列尾：[darwin|linux] [shared]，順序不拘 → 設 plat、shared(0|1)。
+parse_flags() {
+  plat=""; shared=0; shift 2
+  for _t in "$@"; do case "$_t" in shared) shared=1 ;; *) plat="$_t" ;; esac; done
+}
+
 # 上一次被 SIGKILL（EXIT trap 沒跑）會把 `<安裝位置>.new.<pid>` 留在安裝端；pid 已經不在的就是孤兒，清掉。
 # 只看清單裡的安裝位置、名字必須是 `.new.<純數字>`、pid 還活著的不碰（別人正在裝）；--dry-run 不清。
 if [ "$DRY" = 0 ]; then
@@ -158,7 +170,7 @@ if [ "$DRY" = 0 ]; then
     # shellcheck disable=SC2086
     set -- $line
     [ $# -ge 2 ] || continue
-    tgt="$2"; plat="${3:-}"
+    tgt="$2"; parse_flags "$@"
     [ -z "$plat" ] || [ "$plat" = "$PLATFORM" ] || continue
     case "$tgt" in systemd/*|LaunchAgents/*|/*|..|../*|*/..|*/../*) continue ;; esac
     has_symlink_parent "$tgt" && continue
@@ -174,12 +186,15 @@ if [ "$DRY" = 0 ]; then
   [ "${_cleaned:-0}" -eq 0 ] || echo "cleaned ${_cleaned}（被中斷的上一次留下的暫存檔：$(tr '\n' ' ' < "$TMP/clean" | sed "s#$DIR/##g")）"
 fi
 
+run_pass() { # run_pass <1=只處理 shared 列｜0=其餘列>
+PASS="$1"
 printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in ''|'#'*) continue ;; esac
   # shellcheck disable=SC2086
   set -- $line
   [ $# -ge 2 ] || continue
-  src="$1"; tgt="$2"; plat="${3:-}"
+  src="$1"; tgt="$2"; parse_flags "$@"
+  [ "$shared" = "$PASS" ] || continue
   [ -z "$plat" ] || [ "$plat" = "$PLATFORM" ] || continue
   case "$tgt" in
     systemd/*|LaunchAgents/*) echo "skipped ${tgt}（排程 unit 要 daemon-reload／launchctl，不自動換）"; continue ;;
@@ -194,23 +209,27 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   dest="$DIR/$tgt"
   # symlink：使用者連到別處的（例如連到 repo 的腳本）。`mv` 會把連結換成一份拷貝、斷掉那條連結，所以不碰。
   if [ -L "$dest" ]; then echo "skipped ${tgt}（是 symlink，不換；連結指到哪就是哪版）"; continue; fi
-  if [ ! -f "$dest" ]; then echo "not-installed ${tgt}（新檔，第一次要手動裝）"; continue; fi
+  fresh=0
+  if [ ! -f "$dest" ]; then
+    if [ "$shared" = 1 ]; then fresh=1; else echo "not-installed ${tgt}（新檔，第一次要手動裝）"; continue; fi
+  fi
   new="$TMP/new"
   if ! "$GIT" -C "$REPO" show "${COMMIT}:${src}" > "$new" 2>/dev/null; then
     echo "failed ${tgt}（${REF} 裡讀不到 ${src}）"; echo F >> "$TMP/results"; continue
   fi
   snapshot="$TMP/original"
-  if ! cp "$dest" "$snapshot"; then
+  if [ "$fresh" = 0 ] && ! cp "$dest" "$snapshot"; then
     echo "failed ${tgt}（讀不了安裝端的舊檔，沒動它）"; echo F >> "$TMP/results"; continue
   fi
-  if cmp -s "$new" "$snapshot"; then echo "unchanged $tgt"; continue; fi
-  if [ "$FORCE" != 1 ] && ! known_version "$src" "$snapshot"; then
+  if [ "$fresh" = 0 ] && cmp -s "$new" "$snapshot"; then echo "unchanged $tgt"; continue; fi
+  if [ "$fresh" = 0 ] && [ "$FORCE" != 1 ] && ! known_version "$src" "$snapshot"; then
     echo "drifted ${tgt}（安裝端的檔不是 repo 任何一版，有人手改過；沒動它。要換就先看差在哪，或加 --force，舊檔照樣會備份）"
     echo D >> "$TMP/results"; continue
   fi
   echo C >> "$TMP/results"
   if [ "$DRY" = 1 ]; then echo "would-install $tgt"; continue; fi
   mode=$(stat -c %a "$dest" 2>/dev/null || stat -f %Lp "$dest" 2>/dev/null || echo 644)
+  [ "$fresh" = 1 ] && mkdir -p "${dest%/*}"
   stage="$dest.new.$$"
   if ! { cp "$new" "$stage" && chmod "$mode" "$stage"; }; then
     rm -f "$stage"; echo "failed ${tgt}（寫不進去，沒動它）"; echo F >> "$TMP/results"; continue
@@ -236,15 +255,15 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     echo F >> "$TMP/results"; continue
   fi
   # 自檢可能跑很久（例如 bun build）；期間若有人手改、刪掉或換成 symlink，不覆蓋那個新狀態。
-  if has_symlink_parent "$tgt" || [ -L "$dest" ] || ! cmp -s "$snapshot" "$dest"; then
+  if has_symlink_parent "$tgt" || dest_changed; then
     rm -f "$stage"
     echo "drifted ${tgt}（安裝期間目的地改變，保留現況）"
     echo D >> "$TMP/results"; continue
   fi
-  mkdir -p "$BACKUP/$(dirname "$tgt")"
-  if ! cp -p "$dest" "$BACKUP/$tgt"; then rm -f "$stage"; echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi
+  if [ "$fresh" = 0 ]; then mkdir -p "$BACKUP/$(dirname "$tgt")"; fi
+  if [ "$fresh" = 0 ] && ! cp -p "$dest" "$BACKUP/$tgt"; then rm -f "$stage"; echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi
   # 備份也可能跨過一次人工編輯；mv 前再確認仍是自檢前拍下的同一份內容。
-  if has_symlink_parent "$tgt" || [ -L "$dest" ] || ! cmp -s "$snapshot" "$dest"; then
+  if has_symlink_parent "$tgt" || dest_changed; then
     rm -f "$stage"
     echo "drifted ${tgt}（備份期間目的地改變，保留現況）"
     echo D >> "$TMP/results"; continue
@@ -252,8 +271,12 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   if ! mv -f "$stage" "$dest"; then
     rm -f "$stage"; echo "failed ${tgt}（換不進去，沒動它）"; echo F >> "$TMP/results"; continue
   fi
-  echo "installed ${tgt}（舊檔備份在 ${BACKUP}/${tgt}）"
-done > "$TMP/lines"
+  if [ "$fresh" = 1 ]; then echo "installed ${tgt}（新檔：被 kick source 的共用檔，安裝端沒有就先裝）"
+  else echo "installed ${tgt}（舊檔備份在 ${BACKUP}/${tgt}）"; fi
+done
+}
+PASS=0
+{ run_pass 1; run_pass 0; } > "$TMP/lines"
 
 cat "$TMP/lines"
 changes=$(grep -c '^C$' "$TMP/results" 2>/dev/null || true)

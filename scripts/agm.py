@@ -1374,7 +1374,7 @@ def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split()
-                if len(parts) in (2, 3):
+                if len(parts) >= 2:
                     mapping[parts[1]] = parts[0]
             manifest_cache[rev] = mapping
         return manifest_cache[rev].get(target)
@@ -1549,9 +1549,12 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) not in (2, 3) or (len(parts) == 3 and parts[2] not in OPS_PLATFORMS):
-            raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置 [darwin|linux]」）：{line}", 2)
-        only = parts[2] if len(parts) == 3 else None
+        # 列尾旗標：[darwin|linux] [shared]（shared＝被 kick source 的共用檔，ops-install 缺了也會裝；這裡只比對，不影響）
+        flags = parts[2:]
+        platforms = [t for t in flags if t != "shared"]
+        if len(parts) < 2 or len(platforms) > 1 or flags.count("shared") > 1 or any(t not in OPS_PLATFORMS for t in platforms):
+            raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置 [darwin|linux] [shared]」）：{line}", 2)
+        only = platforms[0] if platforms else None
         # 排程列標錯平台（plist 標 linux、unit 沒標）不是「這台不裝」而是對照表寫錯：一律拒絕，
         # 否則 Linux 上會去 `~/Library/LaunchAgents` 找 plist、報一堆 missing（issue #677）。
         for prefix, want in _PREFIX_PLATFORM.items():

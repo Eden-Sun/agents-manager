@@ -51,7 +51,9 @@ scripts/ops/ops-install.sh --repo <git dir> --ref <rev> --dir <AGM dir> [--platf
 
 - Reads only the rows of `install-manifest.tsv` (at `--ref`) for this platform; sources come from `git show <ref>:<path>`.
 - **Updates only files that are already installed and differ from the repo.** A file absent from the install directory is
-  reported `not-installed` (the first install is manual); schedule units (`systemd/`, `LaunchAgents/`) are reported
+  reported `not-installed` (the first install is manual), **except** rows marked `shared` in the manifest (a common file
+  that installed kicks `source`, e.g. `kick-common.sh`): those are installed even when absent, and all `shared` rows are
+  processed before the others so the library is in place before any kick that depends on it is replaced; schedule units (`systemd/`, `LaunchAgents/`) are reported
   `skipped` and left alone (they also need `daemon-reload`/`launchctl`); files outside the manifest are never touched.
 - Each file is first written to a temp file in the same directory and **self-checked there** (`.sh` → `bash -n`,
   `.py` → byte-compile, `.ts` → `bun build` if bun is present). A failure discards the temp file, reports `failed`, leaves
@@ -347,7 +349,7 @@ The manifest maps `scripts/ops/build-web-bundle.py` to `bin/build-web-bundle.py`
 `scripts/ops/daemon-update-kick.sh` to `bin/daemon-update-kick.sh`. Run `ops-install.sh --dry-run` first, install both
 files together, then `agm ops-sync --check`. The automatic installer only updates already installed files, so it cannot
 perform the helper's first installation. The helper is loaded from the executing kick's directory, not the selected
-historical target checkout. Never install just one member of the pair. `kick-common.sh` (shared `alert`/`lock_age`/`note_fail`, sourced from the kick's own directory) must be installed alongside every `*-kick.sh` that sources it (`ci-watch`, `daemon-update`, `herdr-update`, `release-triage`, `browser-gc`).
+historical target checkout. Never install just one member of the pair. `kick-common.sh` (shared `alert`/`lock_age`/`note_fail`, sourced from the kick's own directory) is a `shared` manifest row, so `ops-install.sh` installs it before replacing any kick. If a kick finds it missing it logs, pushes `ops_alert` `kick_common_missing` directly via `agm` (log only if `agm` is absent) and exits 1.
 
 `daemon-swap.sh` and `daemon-start.py` are not installed: the kick runs them from the dedicated checkout (the sha being
 swapped in).

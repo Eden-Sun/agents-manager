@@ -502,5 +502,26 @@ equals "bash 舊檔原封不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
 equals "zsh 舊檔原封不動" "$(sed -n 2p "$DIR/bin/z-bad.sh")" "echo z-v1"
 teardown
 
+# 20. shared 列（被 kick source 的共用檔）：安裝端沒有 lib、有舊 kick → 跑完 lib 與新 kick 都在，lib 先於 kick；
+#     沒標 shared 的新檔仍報 not-installed；--dry-run 列 would-install 但不寫；跑第二次 unchanged。
+setup
+printf 'scripts/ops/lib-common.sh  bin/lib-common.sh  shared\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf 'echo lib\n' > "$REPO/scripts/ops/lib-common.sh"
+bump a-kick.sh $'#!/bin/bash\n. "${0%/*}/lib-common.sh"\necho a-v2\n'
+equals "dry-run exit 0" "$(run --dry-run)" "0"
+check "dry-run 列 lib would-install" "would-install bin/lib-common.sh" "$OUT"
+gone "dry-run 沒寫 lib" "$DIR/bin/lib-common.sh"
+equals "shared 安裝 exit 0" "$(run)" "0"
+check "lib 裝了" "installed bin/lib-common.sh" "$OUT"
+check "新 kick 也裝了" "installed bin/a-kick.sh" "$OUT"
+[ "$(grep -n 'bin/lib-common.sh' "$OUT" | head -1 | cut -d: -f1)" -lt "$(grep -n 'installed bin/a-kick.sh' "$OUT" | head -1 | cut -d: -f1)" ] && { echo "ok   - lib 先於 kick"; PASS=$((PASS + 1)); } || { echo "FAIL - lib 沒有先於 kick"; FAIL=$((FAIL + 1)); }
+equals "lib 內容" "$(cat "$DIR/bin/lib-common.sh")" "echo lib"
+equals "kick 跑得起來（lib 在旁邊）" "$(bash "$DIR/bin/a-kick.sh" | tail -1)" "a-v2"
+check "沒標 shared 的新檔仍 not-installed" "not-installed bin/new-one.sh" "$OUT"
+gone "new-one 沒被裝" "$DIR/bin/new-one.sh"
+equals "再跑一次 exit 0" "$(run)" "0"
+check "lib 已在就 unchanged" "unchanged bin/lib-common.sh" "$OUT"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
