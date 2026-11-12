@@ -144,6 +144,7 @@ equals "check.sh：沒設 CHECK_MAX_LOAD 就不看負載" "${rc}" 2
 changed_repo="${ROOT}/changed-repo"
 mkdir -p "${changed_repo}/scripts" "${changed_repo}/bin"
 cp "${HERE}/check.sh" "${HERE}/wait-load.sh" "${HERE}/ci-changed-parts.sh" "${changed_repo}/scripts/"
+cp "${HERE}/ci-rules.tsv" "${changed_repo}/scripts/"
 cat >"${changed_repo}/bin/git" <<'SH'
 #!/usr/bin/env bash
 case "$*" in

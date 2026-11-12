@@ -27,7 +27,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-pipe-grep.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT
 fx="$tmp/repo"
 mkdir -p "$fx/scripts" "$fx/web" "$fx/bin"
-cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$ROOT/scripts/ci-daemon-filters.sh" "$fx/scripts/"
+cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$ROOT/scripts/ci-daemon-filters.sh" "$ROOT/scripts/ci-rules.tsv" "$fx/scripts/"
 seq -f 'daemon/src/gen/m%05g.rs' 1 20000 >"$tmp/changed"
 
 cat >"$fx/bin/git" <<'SH'

@@ -5,6 +5,7 @@ tmp=$(mktemp -d)
 trap '/bin/rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/bin"
 cp "$repo/scripts/ci-changed-parts.sh" "$tmp/scripts/"
+cp "$repo/scripts/ci-rules.tsv" "$tmp/scripts/"
 cat > "$tmp/bin/git" <<'SH'
 #!/bin/bash
 case "$1" in

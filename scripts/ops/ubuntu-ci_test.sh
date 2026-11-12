@@ -32,6 +32,7 @@ setup() {
   git clone -q "$ROOT/origin.git" "$ROOT/work" 2>/dev/null
   mkdir -p "$ROOT/work/scripts"
   cp "$HERE/../ci-changed-parts.sh" "$ROOT/work/scripts/ci-changed-parts.sh"
+  cp "$HERE/../ci-rules.tsv" "$ROOT/work/scripts/ci-rules.tsv"
   # 假 check.sh：每段看 $FIX/rc.<段> 決定 rc，預設 0；$FIX/hang.<段> 存在就忽略 TERM 睡很久。
   cat > "$ROOT/work/scripts/check.sh" <<'CK'
 #!/bin/bash

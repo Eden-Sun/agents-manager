@@ -46,6 +46,7 @@ done
 cp "$ROOT/scripts/check.sh" "$fixture/scripts/check.sh"
 cp "$ROOT/scripts/ci-changed-parts.sh" "$fixture/scripts/ci-changed-parts.sh"
 cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
+cp "$ROOT/scripts/ci-rules.tsv" "$fixture/scripts/ci-rules.tsv"
 cp "$ROOT/scripts/web-test-shards.sh" "$fixture/scripts/web-test-shards.sh"
 # Rust test mount check stand-in: record ordering alongside cargo and support a deterministic failure.
 cat >"$fixture/scripts/rust_test_mount_test.sh" <<'SH'

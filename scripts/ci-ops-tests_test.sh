@@ -36,7 +36,7 @@ grep -qx __all__ <<<"$deleted_entry"
 # Run check.sh's real dispatch against harmless suites, not just the selector in isolation.
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/bin"
-cp scripts/check.sh scripts/ci-ops-tests.py "$fx/scripts/"
+cp scripts/check.sh scripts/ci-ops-tests.py scripts/ci-rules.tsv "$fx/scripts/"
 cp scripts/ops/ops-jobs.sh "$fx/scripts/ops/"
 printf '#!/bin/bash\necho ops\n' > "$fx/scripts/ci-changed-parts.sh"
 printf '#!/bin/bash\ntrue\n' > "$fx/scripts/ops/lint-shell-vars.sh"

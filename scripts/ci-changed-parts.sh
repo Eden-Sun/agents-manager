@@ -2,54 +2,32 @@
 # 讀 stdin 的改動檔案清單（一行一個 repo 相對路徑），印出 `scripts/check.sh changed` 要跑的部分
 # （web／daemon／ops／ob，一行一個、去重、照這個順序）。認不得的路徑一律印 `full`，寧可多跑。
 # issue #716：小修改不必每次跑完整 CI；完整驗證交給 ubuntu 的背景 CI（scripts/ops/ubuntu-ci.sh）。
+# 路徑規則（含跨界讀取的緣由）全在 scripts/ci-rules.tsv 的第 2 欄；ci-daemon-filters.sh、ci-ops-tests.py 讀同一份。
 set -euo pipefail
+
+rules="${CI_RULES_FILE:-$(dirname "${BASH_SOURCE[0]}")/ci-rules.tsv}"
+pats=() partsv=()
+while IFS='|' read -r pat parts _; do
+    case "$pat" in '' | '#'*) continue ;; esac
+    pats+=("$pat") partsv+=("$parts")
+done <"$rules"
 
 web=0 daemon=0 ops=0 ob=0 full=0
 while IFS= read -r f; do
     [ -n "$f" ] || continue
-    case "$f" in
-        # project skill（例如 verify）是 .md 但會被 Claude 當指令執行：要先於下面的文件規則，歸 ops（scripts/verify_skill_test.sh 驗契約）。
-        .claude/skills/*) ops=1 ;;
-        # 跨界的讀取（2026-10-02 閘門審查）：下面這些不在自己那一塊的檔案，另一塊的測試會在執行期讀它，改了兩邊都要跑。
-        #   - web 的測試讀 am-lifecycle crate 的 fixtures（codexUpdatePrompt／blockedKeys／tuiChoices；#863）。
-        #   - ops 的 project-transfer 測試從 am-base schema 原始碼（db.rs）與 supervisor／mission store 抽欄位。
-        #   - daemon 的測試讀 scripts/check.sh（cargo_shim）、scripts/ops/lint-shell-vars.sh（herdr_shim）、
-        #     scripts/ops/fixtures/*（supervisor::setup）、scripts/ops/{claude,codex}-release-task.md（claude_review）、
-        #     scripts/ops/release-triage-task.md（am-base 的提交模板契約測試；#1185）。
-        #   - daemon 的測試讀 docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
-        #   - am-base 讀 web／ops／scripts 底下的檔（#2072）：ops/host-baseline/baseline.toml（include_str! 編進 binary）、
-        #     web/src/lib/outboxList.ts（前後端預覽白名單比對）、web/src/lib/__fixtures__/codex-async-*、
-        #     scripts/project-cargo.sh（cargo_shim）、scripts/ops/host-baseline-sync-mac-verify.sh（host_baseline::apply）。
-        #     scripts/ci-changed-parts_test.sh 會掃 Rust 原始碼裡指到這些目錄的路徑，漏列就紅。
-        # 要先於下面的 daemon/*、scripts/*、*.md 規則。對應的 daemon 測試子集見 scripts/ci-daemon-filters.sh（兩邊要一起改）。
-        crates/am-lifecycle/src/lifecycle/fixtures/*) daemon=1; web=1 ;;
-        crates/am-base/src/db.rs | crates/am-supervisor/src/supervisor/store.rs | crates/am-supervisor/src/supervisor/roles.rs | crates/am-supervisor/src/mission/store.rs) daemon=1; ops=1 ;;
-        # check.sh 定義 web、ob、ops、daemon 的驗證入口；改它會使四段舊成功基準都失效。
-        scripts/check.sh) web=1; daemon=1; ops=1; ob=1 ;;
-        scripts/ops/lint-shell-vars.sh | scripts/ops/fixtures/* | scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) ops=1; daemon=1 ;;
-        scripts/ops/release-triage-task.md) ops=1; daemon=1 ;;
-        ops/host-baseline/baseline.toml | scripts/project-cargo.sh | scripts/ops/host-baseline-sync-mac-verify.sh) ops=1; daemon=1 ;;
-        web/src/lib/outboxList.ts | web/src/lib/__fixtures__/codex-async-*) web=1; daemon=1 ;;
-        # scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀，README 內容也有測試釘住。
-        scripts/*.md) ops=1 ;;
-        # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
-        # .md fixture 不是「只有文件」：改名、刪掉會編不過，也要先於下面的文件規則。
-        docs/goals/agm-supervisor-persona.md | docs/goals/agm-responder-persona.md | docs/API.md | daemon/*) daemon=1 ;;
-        # AGENTS.md 也有測試釘住內容（scripts/lint_scope_test.sh 要求 clippy 指令涵蓋 workspace，#1077）：歸 ops。
-        AGENTS.md) ops=1 ;;
-        # crates 底下的 .md 也可能是測試 fixture（release_triage 的 claude_2.1.276-278.md 由 daemon 測試 include_str! 編進去）：不是「只有文件」，要先於下面的 *.md（#1699）。
-        crates/*.md) daemon=1 ;;
-        docs/* | *.md | LICENSE | .gitignore | .github/ISSUE_TEMPLATE/*) ;;
-        web/*) web=1 ;;
-        daemon/* | crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;
-        # agm.py 與 herdr shim 等腳本由 daemon include_str! 編進去，改了兩邊都要看。
-        scripts/agm.py | scripts/agm_test.py) ops=1; daemon=1 ;;
-        # chatgpt-consult.sh 同時是 scripts/ 底下的 shell：變數寫法 lint 與 canary 在 ops。
-        scripts/chatgpt-consult*.sh) ob=1; ops=1 ;;
-        scripts/ob* | scripts/chatgpt-consult*) ob=1 ;;
-        scripts/* | bin/* | ops/*) ops=1 ;;
-        .github/workflows/*) ops=1 ;;
-        *) full=1 ;;
+    parts=FULL
+    for i in "${!pats[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ "$f" == ${pats[i]} ]]; then parts="${partsv[i]}"; break; fi
+    done
+    case ",$parts," in
+        *,FULL,*) full=1 ;;
+        *)
+            case ",$parts," in *,web,*) web=1 ;; esac
+            case ",$parts," in *,daemon,*) daemon=1 ;; esac
+            case ",$parts," in *,ops,*) ops=1 ;; esac
+            case ",$parts," in *,ob,*) ob=1 ;; esac
+            ;;
     esac
 done
 

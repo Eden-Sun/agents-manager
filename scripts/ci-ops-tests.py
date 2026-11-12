@@ -4,43 +4,34 @@
 Output (stdout): the suites to run, one per line, or `__all__`. When `__all__` is chosen, the
 triggering path and the reason are printed to stderr so check.sh can show why the full suite ran.
 """
+import fnmatch
+import os
 import sys
 from pathlib import Path
 
-# Independent entrypoints with a known isolated suite. Shared helpers, manifests, CI machinery,
-# fixtures and new/unknown scripts deliberately do not appear here: they require the full suite.
-ENTRYPOINTS = {
-    "scripts/dev-sshd.sh": "scripts/dev-sshd_test.sh",
-    **{f"scripts/ops/{name}.{ext}": f"scripts/ops/{name}_test.sh" for name, ext in [
-        ("browser-gc-kick", "sh"), ("ci-watch-kick", "sh"), ("claude-release-kick", "sh"),
-        ("daemon-boot", "sh"), ("daemon-update-kick", "sh"), ("dev-server-kick", "ts"),
-        ("disk-gc", "sh"), ("herdr-full-restart", "sh"), ("herdr-lan-check", "sh"),
-        ("herdr-update-kick", "sh"), ("outbox-gc", "sh"), ("pane-gc", "sh"),
-        ("release-triage-kick", "sh"), ("ubuntu-ci", "sh"),
-    ]},
-    "scripts/ops/browser_gc_linux.py": "scripts/ops/browser-gc-linux_test.sh",
-    "scripts/ops/claude_binary_diff.py": "scripts/ops/claude_binary_diff_test.sh",
-    # AGENTS.md：scripts/lint_scope_test.sh 釘住它的 clippy 指令（#1077）；只跑那支，不必全跑。
-    "AGENTS.md": "scripts/lint_scope_test.sh",
-    # agm.py 由 daemon include_str! 編進去，但它的契約測試就是 scripts/agm_test.py。
-    "scripts/agm.py": "scripts/agm_test.py",
-    # host-state-transfer 的測試是 .py，由 cutover-to-host_test.sh 呼叫（test_discovery_test.sh 也釘著這對應）。
-    "scripts/ops/host-state-transfer.py": "scripts/ops/cutover-to-host_test.sh",
-    "scripts/ops/host-state-transfer_test.py": "scripts/ops/cutover-to-host_test.sh",
-    "scripts/ops/browser_gc_linux_test.py": "scripts/ops/browser-gc-linux_test.sh",
-    # canary 基線棘輪由 destructive-canary_test.sh 讀。
-    "scripts/ops/canary-baseline.tsv": "scripts/ops/destructive-canary_test.sh",
-}
-# 分派器與全域基礎設施：改了它們，整條 ops 路徑的選擇或護欄都可能變，一律全跑。
-DISPATCHERS = {
-    "scripts/check.sh", "scripts/ci-changed-parts.sh", "scripts/ci-ops-tests.py", "scripts/ci-daemon-filters.sh",
-    "scripts/ci-am-base-filters.py", "scripts/ci-crate-only-tests.py", "scripts/ci-pr-parts.py",
-    "scripts/ops/destructive-canary.sh",
-}
-CROSS_INPUTS = {
-    "crates/am-base/src/db.rs", "crates/am-supervisor/src/supervisor/store.rs",
-    "crates/am-supervisor/src/supervisor/roles.rs", "crates/am-supervisor/src/mission/store.rs",
-}
+# 路徑 → ops 測試的規則在 scripts/ci-rules.tsv 第 4 欄（跟 ci-changed-parts.sh、ci-daemon-filters.sh 同一份）：
+#   <suite> 該路徑獨立的測試檔；__all__ 分派器／護欄／跨 crate 輸入，改了要全跑；@default 走下面的預設推導。
+# Shared helpers, manifests, CI machinery, fixtures and new/unknown scripts deliberately have no entry: they require the full suite.
+RULES_FILE = Path(os.environ.get("CI_RULES_FILE") or Path(__file__).resolve().parent / "ci-rules.tsv")
+
+
+def load_rules() -> list[tuple[str, str]]:
+    rules = []
+    for line in RULES_FILE.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        pat, _parts, _daemon, ops = line.split("|", 3)
+        rules.append((pat, ops))
+    return rules
+
+
+def rule_for(rules: list[tuple[str, str]], path: str) -> str:
+    for pat, ops in rules:
+        if fnmatch.fnmatchcase(path, pat):
+            return ops
+    return "@default"
+
+
 ALWAYS = {"scripts/test_discovery_test.sh", "scripts/rust_test_mount_test.sh", "scripts/db_filename_test.sh"}
 
 
@@ -49,7 +40,7 @@ def sibling_suite(path: str):
     p = Path(path)
     if p.parent not in {Path("scripts"), Path("scripts/ops")} or p.suffix not in {".sh", ".py", ".ts"}:
         return None
-    if p.stem.endswith("_test") or path in DISPATCHERS:
+    if p.stem.endswith("_test"):
         return None
     for stem in {p.stem, p.stem.replace("-", "_"), p.stem.replace("_", "-")}:
         cand = p.parent / f"{stem}_test.sh"
@@ -59,6 +50,7 @@ def sibling_suite(path: str):
 
 
 def select(paths: list[str]) -> list[str]:
+    rules = load_rules()
     selected = set(ALWAYS)
     saw_ops = False
 
@@ -67,15 +59,15 @@ def select(paths: list[str]) -> list[str]:
         return ["__all__"]
 
     for path in paths:
-        if path in CROSS_INPUTS:
-            return full(path, "跨 crate 輸入")
-        if not path.startswith(("scripts/", "bin/", "ops/", ".github/", ".claude/")) and path != "AGENTS.md":
+        rule = rule_for(rules, path)
+        in_ops = path.startswith(("scripts/", "bin/", "ops/", ".github/", ".claude/")) or path == "AGENTS.md"
+        if rule == "__all__":
+            return full(path, "分派器／護欄，改了要全跑" if in_ops else "跨 crate 輸入")
+        if not in_ops:
             continue  # Other changed parts (web/Rust/docs) have their own checks.
         saw_ops = True
-        if path in DISPATCHERS:
-            return full(path, "分派器／護欄，改了要全跑")
-        if path in ENTRYPOINTS:
-            suite = ENTRYPOINTS[path]
+        if rule != "@default":
+            suite = rule
         elif path.endswith("_test.sh") and Path(path).parent in {Path("scripts"), Path("scripts/ops")}:
             suite = path
         elif path == "scripts/agm_test.py":

@@ -1,0 +1,89 @@
+# CI 挑選規則的單一對照表（第一個符合的列生效；樣式是 shell glob，`*` 可跨 `/`）。
+# 三支讀它：ci-changed-parts.sh（第 2 欄）、ci-daemon-filters.sh（第 3 欄）、ci-ops-tests.py（第 4 欄）；
+# 對拍測試 scripts/ci-rules_test.sh。要加規則只改這裡，三邊一起生效。欄位以 `|` 分隔，不可留空：
+#   1 樣式
+#   2 parts：`web,daemon,ops,ob` 任選（逗號分隔）；`-` 只有文件、不跑任何部分；`FULL` 認不得、跑全部（印 `full`）。
+#   3 daemon 測試過濾字串（逗號分隔；`-` 沒有；`@rust` 照 ci-daemon-filters.sh 內的 Rust 模組推導）。
+#   4 ops 測試：`<suite>` 指定測試檔；`__all__` 全跑；`@default` 照 ci-ops-tests.py 的預設推導（`_test.sh`／同名 sibling／其餘全跑）。
+# 跨界讀取的緣由（2026-10-02 閘門審查）：不在自己那一塊的檔案，另一塊的測試會在執行期讀它，改了兩邊都要跑。
+#   - web 的測試讀 am-lifecycle crate 的 fixtures（codexUpdatePrompt／blockedKeys／tuiChoices；#863）。
+#   - ops 的 project-transfer 測試從 am-base schema 原始碼（db.rs）與 supervisor／mission store 抽欄位。
+#   - daemon 的測試讀 scripts/check.sh（cargo_shim）、lint-shell-vars.sh（herdr_shim）、ops/fixtures/*（supervisor::setup）、
+#     {claude,codex}-release-task.md（claude_review）、release-triage-task.md（#1185）、docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
+#   - am-base 讀 web／ops／scripts 底下的檔（#2072）：host-baseline/baseline.toml、web/src/lib/outboxList.ts、codex-async-* fixtures、
+#     scripts/project-cargo.sh、host-baseline-sync-mac-verify.sh。ci-changed-parts_test.sh 會掃 Rust 原始碼裡指到這些目錄的路徑，漏列就紅。
+# 列的順序有意義：特例要先於一般規則（例如 scripts/*.md 先於 *.md，daemon/* 先於 docs）。
+.claude/skills/*|ops|-|@default
+crates/am-lifecycle/src/lifecycle/fixtures/*|web,daemon|@rust|@default
+crates/am-base/src/db.rs|daemon,ops|@rust|__all__
+crates/am-supervisor/src/supervisor/store.rs|daemon,ops|@rust|__all__
+crates/am-supervisor/src/supervisor/roles.rs|daemon,ops|@rust|__all__
+crates/am-supervisor/src/mission/store.rs|daemon,ops|@rust|__all__
+scripts/check.sh|web,daemon,ops,ob|cargo_shim::|__all__
+scripts/ops/lint-shell-vars.sh|daemon,ops|herdr_shim::|@default
+scripts/ops/fixtures/*|daemon,ops|supervisor::setup::|@default
+scripts/ops/claude-release-task.md|daemon,ops|claude_review::|@default
+scripts/ops/codex-release-task.md|daemon,ops|claude_review::|@default
+scripts/ops/release-triage-task.md|daemon,ops|__daemon_release_triage_submission__|@default
+ops/host-baseline/baseline.toml|daemon,ops|__am_base_crate__|@default
+scripts/project-cargo.sh|daemon,ops|runners::am_base_tests::cargo_shim::|@default
+scripts/ops/host-baseline-sync-mac-verify.sh|daemon,ops|__am_base_crate__|@default
+web/src/lib/outboxList.ts|web,daemon|runners::am_base_tests::outbox::|@default
+web/src/lib/__fixtures__/codex-async-*|web,daemon|__am_base_crate__|@default
+scripts/*.md|ops|-|@default
+docs/goals/agm-supervisor-persona.md|daemon|supervisor::persona::,supervisor::setup::|@default
+docs/goals/agm-responder-persona.md|daemon|supervisor::persona::,supervisor::responder::|@default
+docs/API.md|daemon|api_route_methods_match_documented_inventory,ws_event_docs_tests::|@default
+daemon/*|daemon|@rust|@default
+AGENTS.md|ops|-|scripts/lint_scope_test.sh
+crates/*.md|daemon|@rust|@default
+docs/*|-|-|@default
+*.md|-|-|@default
+LICENSE|-|-|@default
+.gitignore|-|-|@default
+.github/ISSUE_TEMPLATE/*|-|-|@default
+web/*|web|-|@default
+crates/*|daemon|@rust|@default
+Cargo.toml|daemon|@rust|@default
+Cargo.lock|daemon|@rust|@default
+rust-toolchain*|daemon|@rust|@default
+.cargo/*|daemon|@rust|@default
+scripts/agm.py|daemon,ops|supervisor::setup::|scripts/agm_test.py
+scripts/agm_test.py|daemon,ops|-|@default
+scripts/chatgpt-consult*.sh|ob,ops|-|@default
+scripts/ob*|ob|-|@default
+scripts/chatgpt-consult*|ob|-|@default
+scripts/dev-sshd.sh|ops|-|scripts/dev-sshd_test.sh
+scripts/ops/browser-gc-kick.sh|ops|-|scripts/ops/browser-gc-kick_test.sh
+scripts/ops/ci-watch-kick.sh|ops|-|scripts/ops/ci-watch-kick_test.sh
+scripts/ops/claude-release-kick.sh|ops|-|scripts/ops/claude-release-kick_test.sh
+scripts/ops/daemon-boot.sh|ops|-|scripts/ops/daemon-boot_test.sh
+scripts/ops/daemon-update-kick.sh|ops|-|scripts/ops/daemon-update-kick_test.sh
+scripts/ops/dev-server-kick.ts|ops|-|scripts/ops/dev-server-kick_test.sh
+scripts/ops/disk-gc.sh|ops|-|scripts/ops/disk-gc_test.sh
+scripts/ops/herdr-full-restart.sh|ops|-|scripts/ops/herdr-full-restart_test.sh
+scripts/ops/herdr-lan-check.sh|ops|-|scripts/ops/herdr-lan-check_test.sh
+scripts/ops/herdr-update-kick.sh|ops|-|scripts/ops/herdr-update-kick_test.sh
+scripts/ops/outbox-gc.sh|ops|-|scripts/ops/outbox-gc_test.sh
+scripts/ops/pane-gc.sh|ops|-|scripts/ops/pane-gc_test.sh
+scripts/ops/release-triage-kick.sh|ops|-|scripts/ops/release-triage-kick_test.sh
+scripts/ops/ubuntu-ci.sh|ops|-|scripts/ops/ubuntu-ci_test.sh
+scripts/ops/browser_gc_linux.py|ops|-|scripts/ops/browser-gc-linux_test.sh
+scripts/ops/claude_binary_diff.py|ops|-|scripts/ops/claude_binary_diff_test.sh
+scripts/ops/host-state-transfer.py|ops|-|scripts/ops/cutover-to-host_test.sh
+scripts/ops/host-state-transfer_test.py|ops|-|scripts/ops/cutover-to-host_test.sh
+scripts/ops/browser_gc_linux_test.py|ops|-|scripts/ops/browser-gc-linux_test.sh
+scripts/ops/canary-baseline.tsv|ops|-|scripts/ops/destructive-canary_test.sh
+scripts/ci-changed-parts.sh|ops|-|__all__
+scripts/ci-ops-tests.py|ops|-|__all__
+scripts/ci-daemon-filters.sh|ops|-|__all__
+scripts/ci-rules.tsv|ops|-|__all__
+scripts/ci-am-base-filters.py|ops|-|__all__
+scripts/ci-crate-only-tests.py|ops|-|__all__
+scripts/ci-pr-parts.py|ops|-|__all__
+scripts/ops/destructive-canary.sh|ops|-|__all__
+scripts/*|ops|-|@default
+bin/*|ops|-|@default
+ops/*|ops|-|@default
+.github/workflows/*|ops|-|@default
+*|FULL|-|@default

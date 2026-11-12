@@ -7,13 +7,22 @@
 #   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；am-base Rust 模組 → daemon composition harness；am-lifecycle／am-share Rust 模組沿用原 daemon 路徑（share/…→`share::…::`）。
 #   - build scripts、crate wiring、共用測試 helper、被嵌入的非 Rust 資料與 daemon/tests 變更，回報 `__all__` 跑全套。
 #     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle／am-share／am-supervisor 的 lib.rs 也是 `__all__`（不能當成一般模組）。
-#   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（跟 ci-changed-parts.sh 同一份清單，兩邊要一起改）：
+#   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（清單在 scripts/ci-rules.tsv 第 3 欄，跟 ci-changed-parts.sh、ci-ops-tests.py 同一份）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
 #     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）、docs/API.md（api_doc_parity、ws_event_docs_tests）、
 #     outboxList.ts → am_base_tests::outbox、project-cargo.sh → am_base_tests::cargo_shim（#2072）。
 #   - 讀它的測試只在 am-base crate 自己的 target（沒掛進 daemon）時印 `__am_base_crate__`：check.sh 據此跑 `cargo test -p am-base`（#2072）。
 # 這是「合理子集」不是全量：跨模組的連帶影響（改了被很多模組用的型別）抓不到，完整的交給 ubuntu-ci（scripts/ops/ubuntu-ci.sh）。
 set -euo pipefail
+
+# 非 Rust 模組的跨界輸入（check.sh、release-task.md、docs/API.md…）對應的過濾字串在 scripts/ci-rules.tsv 第 3 欄（跟另兩支同一份）；
+# `@rust` 或沒有對應列的路徑才走下面的 Rust 模組推導。
+rules="${CI_RULES_FILE:-$(dirname "${BASH_SOURCE[0]}")/ci-rules.tsv}"
+rule_pats=() rule_daemon=()
+while IFS='|' read -r pat _ dfilt _; do
+    case "$pat" in '' | '#'*) continue ;; esac
+    rule_pats+=("$pat") rule_daemon+=("$dfilt")
+done <"$rules"
 
 # 模組自己（含子目錄）沒有任何測試時，照檔名推的過濾字串一定選到 0 條，check.sh changed 會以「沒有選到任何測試」拒絕放行（#1338）。
 # 這時退到上一層模組（share/store.rs → share::，share 底下有測試）；一路退到頂層都沒有測試就不出過濾字串（check.sh 會印「沒有可挑的測試子集」）。
@@ -89,6 +98,16 @@ emit_guard_rules() { # emit_guard_rules <repo 相對路徑>
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     emit_guard_rules "$f"
+    dfilt='@rust'
+    for i in "${!rule_pats[@]}"; do
+        # shellcheck disable=SC2053
+        if [[ "$f" == ${rule_pats[i]} ]]; then dfilt="${rule_daemon[i]}"; break; fi
+    done
+    case "$dfilt" in
+        -) continue ;;
+        @rust) ;;
+        *) tr ',' '\n' <<<"$dfilt"; continue ;;
+    esac
     case "$f" in
         # Build inputs, crate wiring, and shared test setup can invalidate tests across modules.
         # Return an all-suite sentinel: cargo check alone does not exercise those behaviors.
@@ -179,22 +198,5 @@ while IFS= read -r f; do
             mod="${mod%/mod}"
             emit_mod "$f" "$mod"
             ;;
-        scripts/check.sh) echo 'cargo_shim::' ;;
-        scripts/ops/lint-shell-vars.sh) echo 'herdr_shim::' ;;
-        scripts/ops/claude-release-task.md | scripts/ops/codex-release-task.md) echo 'claude_review::' ;;
-        scripts/ops/fixtures/*) echo 'supervisor::setup::' ;;
-        # The test is mounted under the daemon harness because it also uses daemon-only test support.
-        scripts/ops/release-triage-task.md) echo '__daemon_release_triage_submission__' ;;
-        scripts/agm.py) echo 'supervisor::setup::' ;;
-        # #2072：am-base 讀的非 Rust 檔。outbox／cargo_shim 的測試掛在 daemon harness；manifest.rs、apply.rs、
-        # codex_async_question.rs 的測試只在 am-base crate 裡（daemon 的 host_baseline 只掛 host_baseline/tests.rs）。
-        web/src/lib/outboxList.ts) echo 'runners::am_base_tests::outbox::' ;;
-        scripts/project-cargo.sh) echo 'runners::am_base_tests::cargo_shim::' ;;
-        ops/host-baseline/baseline.toml | scripts/ops/host-baseline-sync-mac-verify.sh | web/src/lib/__fixtures__/codex-async-*)
-            echo '__am_base_crate__' ;;
-        docs/goals/agm-supervisor-persona.md) echo 'supervisor::persona::'; echo 'supervisor::setup::' ;;
-        docs/goals/agm-responder-persona.md) echo 'supervisor::persona::'; echo 'supervisor::responder::' ;;
-        # docs/API.md：路由對照（daemon/tests/api_doc_parity.rs，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests，#907）。#1170。
-        docs/API.md) echo 'api_route_methods_match_documented_inventory'; echo 'ws_event_docs_tests::' ;;
     esac
 done | LC_ALL=C sort -u
