@@ -327,6 +327,12 @@ check_ops() {
         if [ "$selected" != __all__ ] && ! grep -qxF -- "$t" <<<"$selected"; then continue; fi
         tests+=("$t")
     done
+    # 選擇結果一定印出來（changed 模式下才會有 selected 的差別）：__all__ 要明顯標示，上面 ci-ops-tests 的 stderr 已寫出觸發檔案。
+    if [ "$selected" = __all__ ]; then
+        echo "ops 測試：__all__（全部 ${#tests[@]} 支）"
+    else
+        echo "ops 測試：選中 ${#tests[@]} 支：${tests[*]:-}"
+    fi
     # 平行跑（2026-10-23 診斷：68 支序列跑 565 秒，前十名 495 秒，彼此各用 mktemp、沒有共用埠）：
     # CHECK_OPS_JOBS 個一起跑，每支輸出各寫一個暫存檔、跑完照清單順序印出，紅的最後點名。
     # CHECK_OPS_JOBS=1 退回序列（排查跨測試干擾時用）。
@@ -456,6 +462,7 @@ check_changed() {
     if grep -qx daemon <<<"$parts"; then
         local release_triage_submission_test=0 daemon_tests_will_run=0 am_base_crate_input=0
         filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+        echo "daemon 測試 filter：$(tr '\n' ' ' <<<"$filters")"
         # 只有 am-base crate 自己的測試會讀的非 Rust 檔（#2072）：下面的 crate 段補跑 am-base。
         if grep -qx '__am_base_crate__' <<<"$filters"; then
             am_base_crate_input=1
