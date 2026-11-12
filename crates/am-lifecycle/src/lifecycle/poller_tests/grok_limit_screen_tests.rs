@@ -17,7 +17,7 @@ Enter:submit
 Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
 ";
 /// 6d5e74ab 用的 w168:pB7 真畫面（帶 402 那一句與縮排）。
-const PB7_SCREEN: &str = include_str!("fixtures/grok_limit_hit.txt");
+const PB7_SCREEN: &str = include_str!("../fixtures/grok_limit_hit.txt");
 
 async fn grok_turn(screen: &str) -> (tt::Env, db::Bot, String, String) {
     let env = tt::env().await;

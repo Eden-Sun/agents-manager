@@ -153,20 +153,17 @@ while IFS= read -r f; do
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
             ;;
-        # start.rs 以 #[path] 把 start_tests/<mod>.rs 掛成 lifecycle::start::<mod>；照檔名推會選到零個。
-        crates/am-lifecycle/src/lifecycle/start_tests/*.rs)
+        # start.rs／poller.rs 以 #[path] 把 <檔名>_tests/<mod>.rs 掛成 lifecycle::<檔名>::<mod>；照檔名推會選到零個。
+        crates/am-lifecycle/src/lifecycle/*_tests/*.rs)
             mod="${f##*/}"
-            printf 'lifecycle::start::%s::\n' "${mod%.rs}"
+            dir="${f%/*}"
+            dir="${dir##*/}"
+            printf 'lifecycle::%s::%s::\n' "${dir%_tests}" "${mod%.rs}"
             ;;
         crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs) printf 'lifecycle::codex_rollout::turn_boundary::\n' ;;
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;
-        # poller.rs 以 #[path] 把 poller_<mod>_tests.rs 掛成 poller::<mod>_tests（模組路徑不變）；照檔名推會選到零個。
-        crates/am-lifecycle/src/lifecycle/poller_*_tests.rs)
-            mod="${f##*/poller_}"
-            printf 'lifecycle::poller::%s::\n' "${mod%.rs}"
-            ;;
         crates/am-share/src/share/trusted_tests.rs) printf 'share::tests::trusted::\n' ;;
         crates/am-share/src/share/portal_upload_tests.rs) printf 'share::portal::upload_tests::\n' ;;
         daemon/src/*)

@@ -2,9 +2,9 @@
 use super::*;
 use crate::testing as tt;
 
-const WORKING: &str = include_str!("fixtures/codex-0.155-working.txt");
-const WORKING_SUMMARY: &str = include_str!("fixtures/codex-0.155-working-summary.txt");
-const FINISHED: &str = include_str!("fixtures/codex-0.155-finished.txt");
+const WORKING: &str = include_str!("../fixtures/codex-0.155-working.txt");
+const WORKING_SUMMARY: &str = include_str!("../fixtures/codex-0.155-working-summary.txt");
+const FINISHED: &str = include_str!("../fixtures/codex-0.155-finished.txt");
 
 async fn codex_turn(screen: &str, prompt: &str) -> (tt::Env, String, String) {
     let env = tt::env().await;

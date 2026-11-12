@@ -516,7 +516,7 @@ async fn a_draft_identical_to_the_placeholder_is_left_alone() {
 /// #789：AGM inbox 也收到一則 `ops_alert`（帶 bot id、名稱、原因與處理方式），跟對話通知同樣去重。
 #[tokio::test]
 async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
-    let screen = include_str!("fixtures/codex-0.159.3-security-setup-banner.ansi");
+    let screen = include_str!("../fixtures/codex-0.159.3-security-setup-banner.ansi");
     let f = fixture("codex", screen).await;
     let app = f.env.app.clone();
     db::set_pane_typed(&app.db, &f.run_id).await.unwrap();

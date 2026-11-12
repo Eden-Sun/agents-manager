@@ -712,7 +712,7 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
 
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_nbsp_composer_tests.rs"]
+#[path = "poller_tests/nbsp_composer_tests.rs"]
 mod nbsp_composer_tests;
 
 const STALL_SECS: u64 = 12;
@@ -839,7 +839,7 @@ fn folded_codex_chars(box_text: &str) -> Option<usize> {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_folded_paste_tests.rs"]
+#[path = "poller_tests/folded_paste_tests.rs"]
 pub(crate) mod folded_paste_tests;
 
 /// Early check after delivery: enough for the box to draw, short of the full stall deadline.
@@ -2139,52 +2139,52 @@ fn truncate_hookless_reply(reply: String) -> String {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_abandon_tests.rs"]
+#[path = "poller_tests/abandon_tests.rs"]
 mod abandon_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_hookless_capture_tests.rs"]
+#[path = "poller_tests/hookless_capture_tests.rs"]
 mod hookless_capture_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_issue_17_tests.rs"]
+#[path = "poller_tests/issue_17_tests.rs"]
 mod issue_17_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_progress_poll_tests.rs"]
+#[path = "poller_tests/progress_poll_tests.rs"]
 mod progress_poll_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_codex_limit_fallback_tests.rs"]
+#[path = "poller_tests/codex_limit_fallback_tests.rs"]
 mod codex_limit_fallback_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_codex_0155_fallback_tests.rs"]
+#[path = "poller_tests/codex_0155_fallback_tests.rs"]
 mod codex_0155_fallback_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_menu_fallback_tests.rs"]
+#[path = "poller_tests/menu_fallback_tests.rs"]
 mod menu_fallback_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_progress_rate_tests.rs"]
+#[path = "poller_tests/progress_rate_tests.rs"]
 mod progress_rate_tests;
 
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_lost_prompt_tests.rs"]
+#[path = "poller_tests/lost_prompt_tests.rs"]
 mod lost_prompt_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_fallback_binding_tests.rs"]
+#[path = "poller_tests/fallback_binding_tests.rs"]
 mod fallback_binding_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_grok_limit_screen_tests.rs"]
+#[path = "poller_tests/grok_limit_screen_tests.rs"]
 mod grok_limit_screen_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_codex_limit_quote_tests.rs"]
+#[path = "poller_tests/codex_limit_quote_tests.rs"]
 mod codex_limit_quote_tests;
 
 /// 每個 run 的進度輪詢任務。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
@@ -2209,5 +2209,5 @@ pub trait FallbackTimers: Send + Sync {
 }
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_reply_window_tests.rs"]
+#[path = "poller_tests/reply_window_tests.rs"]
 mod reply_window_tests;
