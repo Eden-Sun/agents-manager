@@ -737,7 +737,7 @@ am_agent_start() {
     _start_out=$(am_herdr agent start "$@")
     _rc=$?
     # 失敗也登記：上面已確認 `--pane` 是空的、是這顆 bot 要用的 pane。herdr 等不到 agent 起好就回 `timeout`，
-    # 但 agent 常常隨後才起來、被 reconcile 收編（2026-10-16 m4p ro-ocr 開 cifable：start 回 timeout，沒有登記，
+    # 但 agent 常常隨後才起來、被 reconcile 收編（2026-10-16 某遠端主機上的 ro-ocr 開 cifable：start 回 timeout，沒有登記，
     # 歸屬又退回名字推斷）。真的沒起來的 pane 關掉後，claim 會被 reconcile 清掉。
     am_spawn_claim "$_pane"
     if [ "$_rc" -ne 0 ]; then

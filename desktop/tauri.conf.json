@@ -3,7 +3,7 @@
   "productName": "AgentsManager",
   "mainBinaryName": "AgentsManager",
   "version": "0.1.0",
-  "identifier": "com.example.agents-manager",
+  "identifier": "dev.agentsmanager.desktop",
   "build": {
     "frontendDist": "./splash"
   },

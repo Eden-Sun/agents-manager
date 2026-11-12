@@ -47,7 +47,10 @@ fi
 
 # ---------------------------------------------------------------- 2. daemon
 step "daemon (agents-managerd, $TARGET)"
-cargo build --release -p agents-managerd --target "$TARGET"
+# 發佈版執行檔不帶建置機的絕對路徑（repo、家目錄、cargo／rustup）：panic 與 backtrace 的檔名仍在，只是前綴換成中性的。
+# 只套在這支 release 建置；debug／test 不經過這裡。
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home" \
+  cargo build --release -p agents-managerd --target "$TARGET"
 # 嵌進去的前端必須是剛建好的 web/dist（#1071）：前端單獨重建時 cargo 有沒有重編，不能只靠它的判斷，這裡比對一次，不一致就不出包。
 scripts/verify-embedded-ui.sh "target/$TARGET/release/agents-managerd" web/dist
 
