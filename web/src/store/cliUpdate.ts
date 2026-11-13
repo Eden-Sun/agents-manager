@@ -129,12 +129,12 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
   // 磁碟上本來就是那一版（#569）：沒有跑安裝指令，只改通知、開重啟。
   const verb = pick(data, 'already_installed') === true ? t('本來就是') : t('已升到')
   if (kind === 'claude' && pick(data, 'restart_required') === true) {
-    return { id, ok: true, message: t('{host} 的 claude {verb} {up}；請按 header 的 ⌃⌃「重啟套用」確認後再重啟', { host, verb, up }), batch: null, joinBatchId: null }
+    return { id, ok: true, message: t('{host} 的 claude {verb} {up}；請按 header 的更新按鈕，在確認框按「重啟套用」', { host, verb, up }), batch: null, joinBatchId: null }
   }
   if (!plan) {
     const why = str(pick(data, 'restart_error'))
     const whyText = why ? t('：{why}', { why }) : ''
-    return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}，但重啟沒排起來{why}；再按一次 ⌃⌃ 重啟', { host, kind, verb, up, why: whyText }), batch: null, joinBatchId: null }
+    return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}，但重啟沒排起來{why}；請再按一次 header 的更新按鈕', { host, kind, verb, up, why: whyText }), batch: null, joinBatchId: null }
   }
   // #566：有一批在跑不等於 codex 被排進去了——daemon 用 `restart_status` 講清楚是哪一種。
   const status = str(pick(data, 'restart_status'))
@@ -145,9 +145,9 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
     return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}；正在跑的那批重啟已經排著這台的 codex', { host, kind, verb, up }), batch: null, joinBatchId: plan.batch_id }
   }
   if (plan.already_running) {
-    return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex', { host, kind, verb, up }), batch: null, joinBatchId: plan.batch_id }
+    return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}；已經有一批重啟在跑，跑完後再按 header 的更新按鈕重啟 codex', { host, kind, verb, up }), batch: null, joinBatchId: plan.batch_id }
   }
-  const tail = plan.total > 0 ? t('，重啟 {n} 顆閒置的 {kind}', { n: plan.total, kind }) : t('；沒有閒置的 {kind} 可以重啟（在忙的之後再按 ⌃⌃）', { kind })
+  const tail = plan.total > 0 ? t('，重啟 {n} 顆閒置的 {kind}', { n: plan.total, kind }) : t('；沒有閒置的 {kind} 可以重啟（在忙的等閒下來，再按 header 的更新按鈕）', { kind })
   return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}{tail}', { host, kind, verb, up, tail }), batch: batchFromPlan(plan), joinBatchId: null }
 }
 

@@ -94,7 +94,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
                     n: <strong>{plan.ready.length}</strong>,
                     resume: <code>--resume</code>,
                   })
-                : t('目前沒有閒置的 codex 可以重啟（裝好後它們閒下來再按 ⌃⌃）。')}
+                : t('目前沒有閒置的 codex 可以重啟（裝好後等它們閒下來，再按 header 的更新按鈕）。')}
             </p>
             {plan.ready.length > 0 ? (
               <ul className="confirm-list">
@@ -105,7 +105,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
             ) : null}
             {plan.busy.length > 0 ? (
               <>
-                <p className="confirm-note">{t('另外 {n} 顆會先跳過（新版照樣裝好，之後再按 ⌃⌃ 重啟）：', { n: plan.busy.length })}</p>
+                <p className="confirm-note">{t('另外 {n} 顆會先跳過（新版照樣裝好，之後再按 header 的更新按鈕重啟）：', { n: plan.busy.length })}</p>
                 <ul className="confirm-list dim">
                   {plan.busy.map((b) => (
                     <li key={b.botId}>

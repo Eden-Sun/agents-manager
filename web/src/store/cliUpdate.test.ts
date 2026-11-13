@@ -27,7 +27,7 @@ test('Claude 安裝完成只提示另行確認重啟', () => {
   assert.equal(r.batch, null)
   assert.equal(r.joinBatchId, null)
   assert.match(r.message, /mac_builder 的 claude 已升到 2\.1\.281 → 2\.1\.284/)
-  assert.match(r.message, /確認後再重啟/)
+  assert.match(r.message, /在確認框按「重啟套用」/)
 })
 
 test('別的分頁按的也收；另一個 id 的舊事件不蓋掉手上這一個', () => {
