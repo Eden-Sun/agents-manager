@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { OutboxFile } from '../api'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
@@ -167,25 +167,67 @@ function PhoneOutboxTrayInner() {
 }
 
 /** 縮圖與全螢幕預覽都走 `blobFor`：同一張圖只抓一次（token 帶不進 `<img src>`）。 */
+/** 失敗後自動重試的等待（毫秒）；用完還失敗才顯示 ✕，按 ✕ 可再試。 */
+const RETRY_DELAYS = [1500, 4000]
+
 function OutboxThumb({ botId, file, full = false }: { botId: string; file: OutboxFile; full?: boolean }) {
   const t = useT()
   const key = `${botId}/${file.name}/${file.modified}`
   const [src, setSrc] = useState<{ key: string; url: string | null }>({ key: '', url: null })
+  /** 縮圖進可視範圍才開始抓（全螢幕大圖一定要抓）：幾十張圖不再一展開就全部發請求。 */
+  const holder = useRef<HTMLSpanElement>(null)
+  const [visible, setVisible] = useState(full || typeof IntersectionObserver === 'undefined')
+  /** 失敗重試的次數；改它就重新拿租約。 */
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
+    if (visible) return
+    const el = holder.current
+    if (!el) return
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setVisible(true)
+        io.disconnect()
+      }
+    }, { rootMargin: '120px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [visible])
+  useEffect(() => {
+    if (!visible) return
     let alive = true
+    let retry: ReturnType<typeof setTimeout> | null = null
     // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
     const lease = blobFor(botId, file.name, file.modified)
     lease.url.then(
       (url) => alive && setSrc({ key, url }),
-      () => alive && setSrc({ key, url: null }),
+      () => {
+        if (!alive) return
+        const wait = RETRY_DELAYS[attempt]
+        if (wait === undefined) setSrc({ key, url: null })
+        else retry = setTimeout(() => alive && setAttempt((n) => n + 1), wait)
+      },
     )
     return () => {
       alive = false
+      if (retry) clearTimeout(retry)
       lease.release()
     }
-  }, [botId, file.name, file.modified, key])
+  }, [botId, file.name, file.modified, key, visible, attempt])
   const cls = full ? 'phone-outbox-full' : 'phone-outbox-thumb-img'
-  if (src.key !== key) return <span className={`${cls} note`}>{full ? t('載入預覽…') : '…'}</span>
-  if (!src.url) return <span className={`${cls} note`}>{full ? t('預覽載不出來') : '✕'}</span>
+  if (src.key !== key) return <span ref={holder} className={`${cls} note`}>{full ? t('載入預覽…') : '…'}</span>
+  if (!src.url)
+    return (
+      <span
+        className={`${cls} note`}
+        role="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          setSrc({ key: '', url: null })
+          setAttempt(0)
+        }}
+      >
+        {full ? t('預覽載不出來') : '✕'}
+      </span>
+    )
   return <img className={cls} src={src.url} alt={file.name} />
 }

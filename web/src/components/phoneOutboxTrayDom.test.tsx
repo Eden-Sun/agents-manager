@@ -16,14 +16,36 @@ let phone = true
 /** 每顆 bot 的 outbox 清單。 */
 const served: Record<string, { name: string; size: number; modified: number; remaining_secs: number }[]> = {}
 
+/** 可控的 IntersectionObserver：預設一觀察就算進可視範圍；`holdVisible` 時留著，測試手動放行。 */
+let holdVisible = false
+const pending: Array<() => void> = []
+const realIO = (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver
+let fileFetches: string[] = []
+class FakeIO {
+  private cb: (e: Array<{ isIntersecting: boolean }>) => void
+  constructor(cb: (e: Array<{ isIntersecting: boolean }>) => void) {
+    this.cb = cb
+  }
+  observe() {
+    const fire = () => this.cb([{ isIntersecting: true }])
+    if (holdVisible) pending.push(fire)
+    else queueMicrotask(fire)
+  }
+  disconnect() {}
+  unobserve() {}
+}
+
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 
 before(async () => {
   await setupDom()
+  ;(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeIO
+  ;(window as unknown as { IntersectionObserver?: unknown }).IntersectionObserver = FakeIO
   realMatchMedia = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: phone && q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   globalThis.fetch = ((input: string) => {
     const url = String(input)
+    if (url.includes('/outbox/file')) fileFetches.push(url)
     if (url.includes('/outbox/file')) return Promise.resolve(new Response(new Blob(['png'], { type: 'image/png' }), { status: 200 }))
     const bot = /\/bots\/(\w+)\/outbox/.exec(url)?.[1] ?? ''
     return Promise.resolve(json({ dir: '/x', reason: null, ttl_secs: 3600, kept: false, files: served[bot] ?? [] }))
@@ -32,6 +54,9 @@ before(async () => {
 })
 
 afterEach(async () => {
+  holdVisible = false
+  pending.length = 0
+  fileFetches = []
   await unmountAll()
   await settle()
   clearOutboxPreviews()
@@ -43,6 +68,7 @@ afterEach(async () => {
 })
 
 after(async () => {
+  ;(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = realIO
   globalThis.fetch = realFetch
   URL.createObjectURL = realCreate
   window.matchMedia = realMatchMedia
@@ -112,4 +138,19 @@ test('桌面：不掛（outbox 在右側欄托盤）', async () => {
   await settle()
   await settle()
   assert.equal(document.querySelector('.phone-outbox'), null)
+})
+
+test('多張圖：沒進可視範圍的縮圖不抓檔，進來才抓', async () => {
+  holdVisible = true
+  served.a = Array.from({ length: 30 }, (_, i) => file(`p-${i}.png`))
+  useStore.setState({ selectedProjectId: null, selectedBotId: 'a', bots } as never)
+  await mount(<PhoneOutboxTray />)
+  await until(() => bar() !== null, '收合列出現')
+  await click(bar()!)
+  await until(() => document.querySelectorAll('.phone-outbox-thumb').length === 30, '30 個縮圖位置')
+  await settle()
+  assert.equal(fileFetches.length, 0, '都還沒進可視範圍：一張都不抓')
+  await act(() => pending.splice(0, 5).forEach((fire) => fire()))
+  await until(() => document.querySelectorAll('img.phone-outbox-thumb-img').length === 5, '進來的 5 張才載入')
+  assert.equal(fileFetches.length, 5)
 })

@@ -24,6 +24,21 @@ use crate::outbox::{content_is_withheld, content_disposition, mime_of, withheld_
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// 每台遠端主機同時進行的 outbox 取檔 ssh 數。網頁一次要幾十張縮圖時，不限的話每張各開一條 ssh session，
+/// 超過 sshd／ControlMaster 的 MaxSessions（預設 10）就被拒絕，整批變成 `outbox_remote_unreachable`。超過的排隊等。
+pub const FILE_SLOTS: usize = 4;
+
+static FILE_SEMS: std::sync::Mutex<Option<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>> =
+    std::sync::Mutex::new(None);
+
+fn file_slot(host: &str) -> Arc<tokio::sync::Semaphore> {
+    let mut g = FILE_SEMS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(Default::default)
+        .entry(host.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(FILE_SLOTS)))
+        .clone()
+}
+
 /// 遠端那台上這顆 bot 的 outbox（絕對路徑）。bot id 只收英數（ULID），跟本機 [`crate::outbox::dir_for`] 同一條。
 pub fn remote_dir(home: &str, instance: Option<&str>, bot_id: &str) -> Option<String> {
     if bot_id.is_empty()
@@ -463,6 +478,8 @@ pub async fn file(t: Target, requested: &str, inline: bool) -> Result<Response, 
     }
     let not_found = || LcError::NotFound("file".into());
     let name = safe_name(&t.dir, requested).ok_or_else(not_found)?;
+    // 名額在逾時之前拿：排隊的時間不算進 FILE_TIMEOUT。
+    let _permit = file_slot(&t.conn.name).acquire_owned().await.ok();
     let out = t
         .conn
         .ssh_exec_timeout(&file_script(&t.dir, name), FILE_TIMEOUT)
@@ -507,4 +524,21 @@ pub async fn file(t: Target, requested: &str, inline: bool) -> Result<Response, 
         );
     }
     Ok(resp)
+}
+
+#[cfg(test)]
+mod file_slot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn same_host_shares_a_bounded_pool() {
+        let a = file_slot("slot-test-host");
+        let b = file_slot("slot-test-host");
+        assert!(Arc::ptr_eq(&a, &b));
+        let held: Vec<_> = (0..FILE_SLOTS).map(|_| a.clone().try_acquire_owned().unwrap()).collect();
+        assert!(b.clone().try_acquire_owned().is_err(), "第 FILE_SLOTS+1 個要排隊");
+        drop(held);
+        assert!(b.try_acquire_owned().is_ok());
+        assert!(!Arc::ptr_eq(&a, &file_slot("slot-test-other")));
+    }
 }

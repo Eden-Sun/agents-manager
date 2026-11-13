@@ -78,3 +78,31 @@ test('一次掛上超過 12 張：每一張拿到的 URL 在畫出來之前都�
   assert.deepEqual(revoked.sort(), ['blob:shot-1.png', 'blob:shot-2.png', 'blob:shot-3.png'])
   clearOutboxPreviews()
 })
+
+test('限流：同時在飛的取檔數不超過上限，完成一個才放下一個；失敗不卡住佇列', async () => {
+  const { createLimiter } = await import('./outboxPreviewCache.ts')
+  const limited = createLimiter(3)
+  let running = 0
+  let peak = 0
+  const gates: Array<(ok: boolean) => void> = []
+  const task = () =>
+    new Promise<string>((resolve, reject) => {
+      running++
+      peak = Math.max(peak, running)
+      gates.push((ok) => {
+        running--
+        ok ? resolve('x') : reject(new Error('boom'))
+      })
+    })
+  const all = Array.from({ length: 40 }, () => limited(task).catch(() => 'failed'))
+  await flush()
+  assert.equal(gates.length, 3, '一開始只送出 3 個')
+  for (let i = 0; i < 40; i++) {
+    while (gates.length <= i) await flush()
+    gates[i](i % 5 !== 0)
+    await flush()
+  }
+  await Promise.all(all)
+  assert.equal(peak, 3)
+  assert.equal(gates.length, 40, '40 個全部都跑過（失敗的不卡住後面）')
+})
