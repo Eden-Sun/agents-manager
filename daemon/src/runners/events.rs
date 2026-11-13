@@ -698,8 +698,12 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     // 建議下一句只在 idle 有意義：回合開始（或停在對話框）就忘掉；回到 idle 的前幾秒補讀（claude 另外算出來的，Stop 當下還沒畫）。
     if status != "idle" {
         crate::prompt_suggestion::forget(&run.id);
+        // 卡在輸入框的草稿：不再 idle＝不是「卡住的草稿」了（只推 `composer_draft present:false`，不讀畫面）。
+        crate::runners::composer_draft_watch::on_not_idle(&app, &run);
     } else if prev != "idle" {
         app.prompt_suggestion_on_idle(&run);
+        // idle 邊讀一次輸入框，有草稿就推 `composer_draft`（網頁收到才 GET，不輪詢）。
+        crate::runners::composer_draft_watch::on_idle(&app, &run);
     }
 
     // §4.3: working -> idle arms the terminal fallback.

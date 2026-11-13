@@ -83,6 +83,10 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
             app.schedule_flush_queued(&run.bot_id);
+            // 選單關掉、還原成 idle（不是 herdr 的 idle 邊）：選了「Edit prompt and retry」的話，CLI 這時把上一則放回輸入框。
+            if prev == "idle" {
+                crate::runners::composer_draft_watch::on_idle(app, run);
+            }
             if let Some(turn) = paused_turn {
                 close_paused_turn_later(app, &run.id, &turn.id);
             }
@@ -148,6 +152,38 @@ mod tests {
 
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者選：{m}");
+        }
+    }
+
+    /// 選了「Edit prompt and retry」：選單關掉、還原成 idle 之後，CLI 把上一則放回輸入框——daemon 讀一次框、推 `composer_draft`
+    /// （網頁收到才去 GET；這條路不經 herdr 的 idle 事件，所以要在還原那裡接）。一個鍵都不按。
+    #[tokio::test]
+    async fn closing_the_menu_announces_the_prompt_the_cli_put_back_in_the_box() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "paused-draft").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        e.herdr.live_pane(&format!("pane-{}", bot.id), tt::LivePane { width: Some(120), boxed: true, composer: vec!["上一則 prompt".into()], ..Default::default() });
+        let mut rx = app.subscribe();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, SESSION_PAUSED).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, IDLE_CLAUDE).await;
+
+        let seen = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let ev = rx.recv().await.unwrap();
+                if ev.kind == "composer_draft" {
+                    break ev;
+                }
+            }
+        })
+        .await
+        .expect("選單關掉後要推 composer_draft");
+        assert_eq!(seen.data["present"], true);
+        assert_eq!(seen.data["run_id"], run_id.as_str());
+        for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
+            assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按：{m}");
         }
     }
 

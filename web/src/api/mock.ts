@@ -3949,6 +3949,12 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
+  /** 框裡卡著草稿：照 daemon，idle 邊讀到就推 `composer_draft`（網頁收到才 GET）。 */
+  setComposerDraft(botId: string, text: string | null) {
+    this.composerDrafts.set(botId, text)
+    this.emit('composer_draft', { bot_id: botId, run_id: this.activeRun(botId)?.id ?? null, present: Boolean(text) })
+  }
+
   setPromptSuggestion(botId: string, text: string | null) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -4445,7 +4451,7 @@ function installDevHelpers(mock: MockTransport) {
     // claude 輸入框裡的灰字建議下一句：`__amMock.suggestion('am-claude', '跑完整測試')`（`null` 清掉；bot 要是 idle 才看得到）
     suggestion: (botIdOrName: string, text: string | null) => mock.setPromptSuggestion(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // bot 的輸入框卡著一段沒送出的字：之後送 prompt 回 409 composer_busy（`null` 清掉）
-    composerDraft: (botIdOrName: string, text: string | null) => mock.composerDrafts.set(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
+    composerDraft: (botIdOrName: string, text: string | null) => mock.setComposerDraft(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
     // 假裝別的瀏覽器改了輸入框草稿：`__amMock.remoteDraft('bot:<id>', '手機上打的')`（空字串＝對方送出清空）

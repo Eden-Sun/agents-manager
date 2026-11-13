@@ -628,6 +628,8 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
   之後那一條顯示「已放進輸入框：改完按送出…」，輸入框的送出（Enter／送出鈕）改走 `clear_draft`＋token＋改過的字，不併 `queue_if_busy`。
 - **Session paused 選「Edit prompt and retry…」**：選單上點了那一項（使用者點的、不替他按任何鍵），網頁隨後最多等數秒讀框，草稿一出現就自動進入編輯；點「Switch to …」不動。
   讀框只在這兩個時機發生，不輪詢 pane。
+- **主動顯示**（2026-11-13）：bot 閒置、終端輸入框有一段沒送出的字時，不必等使用者先送一則被 409，輸入列上方就自己出現同一條草稿列（三個動作：編輯後送出／送出框裡那段／清掉再送我這則；取消只收掉這一條）。
+  由 daemon 在 idle 邊讀框後推 `composer_draft` 事件觸發（SPEC §4.4a）；草稿不見了（回合開始、終端清掉）就自動收掉，輸入框裡打的字不動。
 - 截圖：`docs/screenshots/composer-draft/`（mock：`__amMock.composerDraft('<bot>', '<字>')`）。
 
 ## claude 的「建議下一句」：輸入列上方一行，點一下 Tab＋Enter 送出（2026-10-03，使用者：「加入 claude 的建議下一步的 prompt，要一模一樣 tab + enter 送出」）

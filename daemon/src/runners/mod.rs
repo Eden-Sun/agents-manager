@@ -46,6 +46,7 @@ pub mod pending_question;
 pub mod pending_question_remote;
 pub mod primary_keep_warm;
 pub mod prompt_cache;
+pub mod composer_draft_watch;
 pub mod prompt_suggestion;
 pub mod quota_agy;
 pub mod reset_credit;

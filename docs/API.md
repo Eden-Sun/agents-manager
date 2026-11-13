@@ -810,6 +810,8 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | `draft_clear_while_busy` | 插隊送出（`send_now`）時有回合在跑：清框鍵會打斷它，不按。 |
 | `draft_clear_unsupported` | 這個 kind 沒驗過清框鍵。 |
 
+**主動通知（2026-11-13）**：不必等使用者先送一則被 409。bot 回到 idle 時 daemon 讀一次輸入框（之後最多再讀兩次，不輪詢），有字推 WS `composer_draft {present:true}`、字不見了（回合開始或探測讀到空框）推 `present:false`；只有 claude／codex／grok（有 `draft_actions` 的 kind）會探測。使用者在終端自己清掉而 bot 一直閒置，要等下一個 idle 邊或網頁動作回 `draft_gone` 才會知道。
+
 **唯讀看框（2026-11-13）**：`GET /api/bots/{id}/composer-draft`（權限同 `GET /bots/{id}/terminal`，不按任何鍵）。回
 `{"bot_id","run_id","state":"draft"|"empty"|"unready","busy","draft","draft_truncated":false,"draft_token","draft_actions"}`：
 `draft` 是**完整**草稿（不像 409 截到 500 字），`draft_token` 跟同一刻 409 給的相同、可直接用在上面兩個動作；`state:"empty"` 時
@@ -1030,6 +1032,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
 | `pending_question_hint` | `{"bot_id","run_id","tool_use_id"}`：Jev 對這顆 bot 正在等的 `AskUserQuestion` 的選項建議答案落帳了（issue #1475）；網頁收到就重讀 `GET /api/bots/{id}/pending-question` 的 `jev_options`。只在答案可用時發（含分數接近、偏低而 `suggested:null`）；問失敗、沒開、沒問不發 |
+| `composer_draft` | `{"bot_id","run_id","present"}`：閒置 bot 的輸入框卡著一段沒送出的字（`present:true`；claude「Session paused」選了「Edit prompt and retry」後 CLI 放回上一則最常見）或那段不見了（`present:false`：回合開始、或之後的探測讀到空框）。daemon 只在 idle 邊（herdr 事件、Session paused 選單還原）之後讀幾次畫面才推，**不輪詢、不按任何鍵、事件不帶草稿內容**；網頁收到 `true` 才呼叫 `GET /api/bots/{id}/composer-draft` 取完整草稿並顯示草稿列。見「輸入框卡著草稿」 |
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
 | `draft_updated` | `{"key","text","rev","client_id","updated_at"}`：輸入框草稿被寫了（`PUT /api/drafts/{key}`），`text:""`＝刪除（含 bot／專案被刪）；見「輸入框草稿」 |
 | `schedules_changed` | `{"project_id","id"}`：專案排程或它的 occurrence 狀態變了（建立、編輯、停用、排進佇列、終態）。只帶 id，網頁自己重抓，prompt 不進全域 state。 |

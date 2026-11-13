@@ -12,7 +12,7 @@ import { flush } from '../testing/flush'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import type { Run, TerminalSnapshot } from '../api/types.ts'
 import { parseChoiceMenu } from '../lib/tuiChoices.ts'
-import { resetStoreForTest, useStore } from '../store/store'
+import { dispatchFrameForTest, resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 import { BlockedChoices } from './BlockedChoices.tsx'
 
@@ -140,5 +140,28 @@ test('editNow：草稿一出現就自動放進輸入框（不必再按一次）'
   await until(() => textarea().value === '上一則 prompt', '自動帶進輸入框')
   assert.equal(useStore.getState().composerDrafts[bot.id]?.editing, true)
   assert.equal(useStore.getState().composerDrafts[bot.id]?.editNow, false)
+  mock.composerDrafts.set(bot.id, null)
+})
+
+test('composer_draft 事件：present:true 才去 GET 並掛上那一條；present:false 收掉；不輪詢', { timeout: 30_000 }, async () => {
+  const { requests, bot } = await openChat('am-claude')
+  const gets = () => requests.filter((r) => r.method === 'GET' && r.path.endsWith(`/bots/${bot.id}/composer-draft`))
+  const before = gets().length
+  // 事件沒來之前，網頁不會自己去讀框。
+  mock.composerDrafts.set(bot.id, '終端那段')
+  await flush()
+  assert.equal(gets().length, before)
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined)
+  // 事件來了才讀，而且只讀一次。
+  await act(async () => dispatchFrameForTest({ type: 'composer_draft', data: { bot_id: bot.id, run_id: 'r', present: true } }))
+  await until(() => useStore.getState().composerDrafts[bot.id]?.draft === '終端那段', '掛上草稿列')
+  assert.equal(gets().length, before + 1)
+  await until(() => byText('編輯後送出') !== undefined, '三個動作出現')
+  // 草稿不見了：收掉，輸入框裡使用者打的字不動。
+  await act(async () => useStore.getState().setDraft(`bot:${bot.id}`, '我打的字'))
+  await act(async () => dispatchFrameForTest({ type: 'composer_draft', data: { bot_id: bot.id, run_id: 'r', present: false } }))
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined)
+  assert.equal(useStore.getState().drafts[`bot:${bot.id}`], '我打的字')
+  assert.equal(gets().length, before + 1, 'present:false 不再讀')
   mock.composerDrafts.set(bot.id, null)
 })

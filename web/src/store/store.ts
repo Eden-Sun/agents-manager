@@ -3412,6 +3412,18 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'bot_changed':
       void get().refreshState()
       return
+    case 'composer_draft': {
+      // 閒置 bot 的輸入框有一段沒送出的字（daemon 在 idle 邊讀一次畫面才推，不輪詢）：收到才去 GET 完整草稿並掛上那一條；
+      // 草稿不見了（回合開始、終端清掉）＝那一條沒東西可處理，收掉（輸入框裡你打的字不動，之後照一般送出）。
+      const botId = isRec(data) ? str(pick(data, 'bot_id')) : ''
+      if (!botId) return
+      if (isRec(data) && bool(pick(data, 'present'), false)) {
+        void get().loadComposerDraft(botId)
+      } else if (get().composerDrafts[botId]) {
+        set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+      }
+      return
+    }
     default:
       return
   }
