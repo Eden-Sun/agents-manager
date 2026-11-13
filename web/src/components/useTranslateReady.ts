@@ -19,15 +19,22 @@ export function translateReadyOf(s: ClaudeApiSettings | null): TranslateReady {
 let cache: { at: number; p: Promise<TranslateReady> } | null = null
 /** 最近讀到的結果：元件重掛時同步拿到，不必等下一輪非同步讀取（重掛太頻繁時會一直停在 null）。 */
 let lastReady: TranslateReady = null
+/** 每次 `resetTranslateReady` 加一：清掉之前發出去、還沒回來的讀取，晚回的結果不得寫回新的狀態（測試檔之間會漏）。 */
+let generation = 0
 const TTL_MS = 60_000
 
 function load(): Promise<TranslateReady> {
   if (!cache || Date.now() - cache.at > TTL_MS) {
     const at = Date.now()
+    const gen = generation
     cache = {
       at,
       p: fetchClaudeApiSettings().then(
-        (s) => (lastReady = translateReadyOf(s)),
+        (s) => {
+          const r = translateReadyOf(s)
+          if (gen === generation) lastReady = r
+          return r
+        },
         () => null,
       ),
     }
@@ -35,8 +42,9 @@ function load(): Promise<TranslateReady> {
   return cache.p
 }
 
-/** 給測試：清掉共用快取。 */
+/** 清掉共用快取與最近結果；給測試（每個 DOM 測試檔開始前）與換帳號時用。 */
 export function resetTranslateReady() {
+  generation++
   cache = null
   lastReady = null
 }

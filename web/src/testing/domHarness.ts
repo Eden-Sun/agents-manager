@@ -6,6 +6,7 @@
  * （實測：不拆的話 15 個無關測試失敗）。事件都在 `act` 裡發，React 的更新照真的流程跑完才回來。
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { resetTranslateReady } from '../components/useTranslateReady'
 import { currentTestScope, endCurrentTest, endedTestScope } from './testScope'
 import type { TestScope } from './testScope'
 import type { ReactElement } from 'react'
@@ -192,6 +193,8 @@ export async function setupDom(): Promise<void> {
   domLeaseTail = new Promise<void>((resolve) => { release = resolve })
   await previous
   releaseDomLease = release
+  // 模組層級的共用快取（翻譯設定）前一個測試檔留下的，會讓這個檔的第一則翻譯看到舊結果（全套件才紅）。
+  resetTranslateReady()
   try {
     registerDom()
   } catch (error) {
