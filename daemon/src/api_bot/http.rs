@@ -109,6 +109,7 @@ pub async fn complete(
         }
         let parsed: Response =
             serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
+        if parsed.model != req.options.model { return Err(Error::InvalidResponse); }
         parsed.tools().map_err(|_| Error::InvalidResponse)?;
         Ok(parsed)
     };

@@ -2424,12 +2424,12 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
     Ok(Some(name))
 }
 
-/// claude-api bot 沒有 CLI、沒有 pane、沒有帳號身份：本機與遠端專案都收（遠端不隔離，見 SPEC），模型只能是價目表核准的那一個，
+/// claude-api bot 沒有 CLI、沒有 pane、沒有帳號身份：本機與遠端專案都收（遠端不隔離，見 SPEC），模型只能是價目表核准的清單，
 /// 其餘只對 CLI 有意義的欄位一律 400（不默默忽略，免得使用者以為生效）。
 fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
     let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
     if let Some(m) = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        if m != crate::config::API_BOT_MODEL {
+        if !crate::config::api_bot_model_supported(m) {
             return Err(bad("api_bot_model_unsupported"));
         }
     }
@@ -2532,7 +2532,7 @@ async fn create_bot(
     let share_bot = share_profile.is_some();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
-    let (model, remapped) = if api_bot { (Some(crate::config::API_BOT_MODEL.to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
+    let (model, remapped) = if api_bot { (Some(b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::API_BOT_MODEL).to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
     // 受限 bot 沒指定模型：用 `/api/models` 當下列出的最新 Opus（使用者 2026-10-03：不寫死，CLI 的帳號預設會跑到舊版）。
     let model = match (restricted, model) {
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
@@ -3216,6 +3216,14 @@ async fn patch_bot(
     }
     if let Some(Some(m)) = &b.model {
         crate::bot_input::check_model(m)?;
+    }
+    if b.model.is_some() {
+        let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        if current.kind == crate::config::API_BOT_KIND {
+            let model = b.model.as_ref().and_then(|m| m.as_deref()).unwrap_or(crate::config::API_BOT_MODEL).trim();
+            if !crate::config::api_bot_model_supported(model) { return Err(LcError::BadValue(json!({"error":"bad_request","reason":"api_bot_model_unsupported"}))); }
+            b.model = Some(Some(model.to_owned()));
+        }
     }
     if let Some(env) = &b.env {
         crate::bot_input::check_env(env)?;
@@ -4732,15 +4740,13 @@ async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQue
 mod changelog_route_tests;
 
 fn api_bot_models() -> Value {
-    json!({
-        "kind": crate::config::API_BOT_KIND, "host": LOCAL_HOST, "source": "static", "fetched_at": db::now(),
-        "models": [{
-            "id": crate::config::API_BOT_MODEL, "display_name": "Claude Opus 5.5", "description": "", "is_default": true,
-            "default_effort": crate::config::API_BOT_DEFAULT_EFFORT,
-            "efforts": crate::config::efforts_for_kind(crate::config::API_BOT_KIND),
-            "service_tiers": [{"id": "fast", "name": "fast", "description": "speed=fast（單價 2 倍）"}],
-        }],
-    })
+    let models: Vec<_> = [crate::config::API_BOT_MODEL, crate::config::API_BOT_FABLE_MODEL].into_iter().map(|model| json!({
+        "id": model, "display_name": if model == crate::config::API_BOT_MODEL { "Claude Opus 5.5" } else { "Claude Fable 5.2" }, "description": "", "is_default": model == crate::config::API_BOT_MODEL,
+        "default_effort": crate::config::API_BOT_DEFAULT_EFFORT,
+        "efforts": crate::config::efforts_for_kind(crate::config::API_BOT_KIND),
+        "service_tiers": [{"id":"fast", "name":"fast", "description":"speed=fast（單價 2 倍）"}],
+    })).collect();
+    json!({"kind":crate::config::API_BOT_KIND,"host":LOCAL_HOST,"source":"static","fetched_at":db::now(),"models":models})
 }
 
 async fn get_models(

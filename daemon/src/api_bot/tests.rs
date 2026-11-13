@@ -20,6 +20,7 @@ fn response(content: Vec<Value>, reason: &str) -> Value {
 }
 fn options() -> Options {
     Options {
+        model: crate::config::API_BOT_MODEL.into(),
         effort: "medium".into(),
         fast: true,
         max_tokens: 4096,
@@ -584,4 +585,21 @@ async fn journal_failure_on_final_response_also_poisons_in_memory_reuse() {
         Err(runner::Error::PendingUnknown)
     );
     assert_eq!(f.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fable_requests_use_the_selected_model_and_reject_a_different_response_model() {
+    let mut fable_response = response(vec![json!({"type":"text","text":"fixture"})], "end_turn");
+    fable_response["model"] = json!(crate::config::API_BOT_FABLE_MODEL);
+    let f = fixture(200, vec![fable_response, response(vec![json!({"type":"text","text":"wrong model"})], "end_turn")]).await;
+    let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), ..options() };
+    let messages = initial().messages;
+    let system = json!("fixture");
+    let req = http::FullMessagesRequest { endpoint: &f.endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(2), max_response_bytes: 64 * 1024 };
+    let r = http::complete(&req, &CancellationToken::new()).await.unwrap();
+    assert_eq!(r.model, crate::config::API_BOT_FABLE_MODEL);
+    assert!(matches!(http::complete(&req, &CancellationToken::new()).await, Err(http::Error::InvalidResponse)));
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen.iter().all(|v| v["model"] == crate::config::API_BOT_FABLE_MODEL && v["thinking"]["type"] == "adaptive"));
 }

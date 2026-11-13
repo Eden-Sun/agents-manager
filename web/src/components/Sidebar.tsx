@@ -792,8 +792,8 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
         void addBot(pid, {
           name: name.trim(),
           kind,
-          // claude-api：模型由 daemon 固定、不送；effort 沒選＝預設 high；fast＝speed:"fast"（單價 2 倍）。
-          model: apiKind ? null : model,
+          // claude-api：保留使用者選的核准模型；未選時由 daemon 補 Opus，effort 預設 high。
+          model,
           effort,
           fast: kind === 'codex' || apiKind ? fast : undefined,
           persona: apiKind ? null : persona.trim() || null,

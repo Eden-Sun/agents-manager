@@ -489,6 +489,7 @@ impl ApiBotRuntime {
         };
         let effort = bot.effort.clone().ok_or(ApiBotError::Upstream)?;
         let options = super::protocol::Options {
+            model: bot.model.clone().unwrap_or_else(|| crate::config::API_BOT_MODEL.into()),
             effort,
             fast: bot.fast != 0,
             max_tokens: limits.max_output_tokens,
@@ -1556,7 +1557,7 @@ async fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, 
         Arc::new(super::tools::RemoteTools::new(conn, root, tool_limits).map_err(|_| ApiBotError::Upstream)?)
     };
     let key_source = Arc::new(ConfigKeySource(Arc::downgrade(&app.shared())));
-    Ok(ApiBotDependencies { endpoint: "https://api.anthropic.com/v1/messages".into(), key_source, quote: Arc::new(super::pricing::Opus55Global), tools, shutdown_join_timeout: None })
+    Ok(ApiBotDependencies { endpoint: "https://api.anthropic.com/v1/messages".into(), key_source, quote: Arc::new(super::pricing::DirectGlobal), tools, shutdown_join_timeout: None })
 }
 
 fn api_http_config(

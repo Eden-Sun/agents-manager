@@ -467,6 +467,7 @@ const models = (): Record<BotKind, Rec[]> => ({
   ],
   'claude-api': [
     { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', description: '', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [{ id: 'fast', name: 'fast', description: L('speed=fast（單價 2 倍）', 'speed=fast (2x price)') }] },
+    { id: 'claude-fable-5-2', display_name: 'Claude Fable 5.2', description: '', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [{ id: 'fast', name: 'fast', description: L('speed=fast（單價 2 倍）', 'speed=fast (2x price)') }] },
   ],
 })
 
@@ -2615,6 +2616,7 @@ export class MockTransport implements Transport {
       throw new ApiError(404, { reason: 'project not found' }, 'not found')
     }
     if (b.kind === 'claude-api') {
+      if (typeof b.model === 'string' && b.model.trim() && !['claude-opus-5-5', 'claude-fable-5-2'].includes(b.model.trim())) throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_model_unsupported' }, 'bad request')
       // 照 daemon：CLI 欄位一律 400（本機與遠端專案都能建）。
       if (b.identity || b.autostart || b.share_profile || (Array.isArray(b.args) && b.args.length) || (b.env && Object.keys(b.env as Rec).length)) {
         throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_cli_fields_unsupported' }, 'bad request')
@@ -2626,7 +2628,7 @@ export class MockTransport implements Transport {
       project_id: projectId,
       name,
       kind: toKind(b.kind),
-      model: b.kind === 'claude-api' ? 'claude-opus-5-5' : typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
+      model: b.kind === 'claude-api' ? (typeof b.model === 'string' && b.model.trim() ? b.model.trim() : 'claude-opus-5-5') : typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
       effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : b.kind === 'claude-api' ? 'high' : null,
       fast: b.fast === true ? 1 : 0,
       persona: typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null,
@@ -2761,6 +2763,7 @@ export class MockTransport implements Transport {
   private patchBot(id: string, b: Rec) {
     const bot = this.bot(id)
     const run = this.activeRun(id)
+    if (bot.kind === 'claude-api' && typeof b.model === 'string' && !['claude-opus-5-5', 'claude-fable-5-2'].includes(b.model.trim())) throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_model_unsupported' }, 'bad request')
     if (b.name !== undefined && run) {
       throw new ApiError(
         409,

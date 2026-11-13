@@ -144,7 +144,7 @@ test('預設帳號的登入狀態是 null（問不到）或 true：不顯示', a
   }
 })
 
-test('claude-api：只剩名稱／強度／fast，送出的 body 不帶身份與模型，預設強度 high 由 daemon 補', async () => {
+test('claude-api：不帶身份，未選模型時保留 daemon 預設，預設強度 high 由 daemon 補', async () => {
   useStore.setState({ localTools: toolsWithCodex(true) } as never)
   await openNewBotWithKind('claude-api')
   const text = document.querySelector('form.form')?.textContent ?? ''
@@ -171,4 +171,16 @@ test('claude-api 本機與遠端專案都能建：遠端專案那顆 kind 按鈕
   await settle()
   const btn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.querySelector('.opt-label')?.textContent?.trim() === 'claude-api')!
   assert.equal(btn.disabled, false)
+})
+
+
+test('claude-api：選 Fable 5.2 時 POST 保留完整模型 id', async () => {
+  await openNewBotWithKind('claude-api')
+  const option = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('fable-5-2'))
+  assert.ok(option, '模型選擇包含 Fable 5.2')
+  await click(option)
+  await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!)
+  await settle(50)
+  const post = requests.find((r) => r.method === 'POST' && /\/projects\/p1\/bots$/.test(r.path))
+  assert.equal((post?.body as Record<string, unknown>).model, 'claude-fable-5-2')
 })

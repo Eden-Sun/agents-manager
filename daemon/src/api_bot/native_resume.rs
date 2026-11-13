@@ -37,7 +37,9 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ApiBotError::Unconfirmed)?;
     let checkpoint = Checkpoint::new(&value).map_err(|_| ApiBotError::Unconfirmed)?;
     let state: super::runner::State = serde_json::from_value(checkpoint.value()).map_err(|_| ApiBotError::Unconfirmed)?;
-    if !startup_context_settled(&state) { return Err(ApiBotError::Unconfirmed); }
+    let model: Option<String> = sqlx::query_scalar("SELECT model FROM bots WHERE id=?")
+        .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ApiBotError::Unconfirmed)?;
+    if !super::adapter::checkpoint_matches_model(&state, model.as_deref().unwrap_or(am_config::API_BOT_MODEL)) || !startup_context_settled(&state) { return Err(ApiBotError::Unconfirmed); }
     Ok(ResumeHandoffProof { identity: AdapterIdentity { session_id: session, bot_id: bot.to_owned(), run_id: old_run.to_owned(), turn_id: turn, generation }, revision })
 }
 
@@ -63,6 +65,13 @@ mod tests {
         tx.rollback().await.unwrap();
         sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)").bind(&new).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
         assert!(prove(&env.app.db, &bot, &new, &old).await.is_ok());
+        let opus_history = serde_json::json!({"messages":[],"responses":[{"id":"prior","model":"claude-opus-5-5","content":[],"stop_reason":"end_turn","usage":{}}],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]});
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(opus_history.to_string()).bind(&session).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET model='claude-fable-5-2' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        assert!(prove(&env.app.db, &bot, &new, &old).await.is_err(), "restart cannot pass an Opus checkpoint to Fable");
+        sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        assert!(prove(&env.app.db, &bot, &new, &old).await.is_ok());
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(checkpoint).bind(&session).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(r#"{"messages":[],"responses":[],"api_pending":true,"tool_pending":null,"completed_tool_ids":[]}"#).bind(&session).execute(&env.app.db).await.unwrap();
         assert!(prove(&env.app.db, &bot, &new, &old).await.is_err());
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(r#"{"messages":[],"responses":[],"api_pending":false,"tool_pending":"fixture","completed_tool_ids":[]}"#).bind(&session).execute(&env.app.db).await.unwrap();

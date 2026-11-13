@@ -904,8 +904,8 @@ export const AGY_DEFAULT_MODEL = 'gemini-3.8-flash-medium'
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
-  // claude-api：harness 只送這一個模型（daemon `API_BOT_MODEL`，價目表也只核准它）。
-  'claude-api': ['claude-opus-5-5'],
+  // claude-api：與 daemon 的核准模型／價格清單一致，Opus 仍是預設。
+  'claude-api': ['claude-opus-5-5', 'claude-fable-5-2'],
   // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）

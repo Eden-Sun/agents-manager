@@ -46,6 +46,24 @@ fn the_claude_api_model_list_is_static() {
     assert_eq!(v["models"][0]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
 }
 
+#[tokio::test]
+async fn a_fable_api_bot_keeps_its_model_in_config_and_database() {
+    let e = env().await;
+    crate::testing::seed_project_config(&e).await;
+    let out = create(&e, json!({"name":"fable-api","kind":"claude-api","model":"claude-fable-5-2"})).await.unwrap();
+    let id = out["bot_id"].as_str().unwrap();
+    assert_eq!(db::bot(&e.app.db,id).await.unwrap().unwrap().model.as_deref(), Some("claude-fable-5-2"));
+    assert_eq!(e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.name=="fable-api").unwrap().model.as_deref(), Some("claude-fable-5-2"));
+    assert!(api_bot_models()["models"].as_array().unwrap().iter().any(|m| m["id"]=="claude-fable-5-2" && m["is_default"]==false));
+    let invalid = patch_bot(State(e.app.clone()), Path(id.into()), Extension(RequestPrincipal::User), Json(serde_json::from_value(json!({"model":"unapproved"})).unwrap())).await;
+    assert!(matches!(invalid, Err(LcError::BadValue(_))));
+    assert_eq!(db::bot(&e.app.db,id).await.unwrap().unwrap().model.as_deref(), Some("claude-fable-5-2"));
+    for model in ["claude-opus-5-5", "claude-fable-5-2"] {
+        assert!(patch_bot(State(e.app.clone()), Path(id.into()), Extension(RequestPrincipal::User), Json(serde_json::from_value(json!({"model":model})).unwrap())).await.is_ok());
+        assert_eq!(db::bot(&e.app.db,id).await.unwrap().unwrap().model.as_deref(), Some(model));
+    }
+}
+
 /// #654：child 占著 `review` 時，再建同名要 409，config 不能先寫進去。
 #[tokio::test]
 async fn creating_a_bot_with_a_childs_name_conflicts_and_the_next_create_still_works() {

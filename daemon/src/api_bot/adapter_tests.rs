@@ -262,6 +262,7 @@ mod tests {
 
     fn test_options() -> Options {
         Options {
+            model: crate::config::API_BOT_MODEL.into(),
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
@@ -903,6 +904,31 @@ mod tests {
             turn_id: "t2".into(),
             generation: 2, // generation advances to old + 1
         };
+
+        // Thinking/checkpoint history cannot cross model generations.
+        let previous: State = serde_json::from_value(serde_json::json!({
+            "messages": [], "responses": [{"id":"prior","model":"claude-opus-5-5","content":[],"stop_reason":"end_turn","usage":{}}],
+            "api_pending":false,"tool_pending":null,"completed_tool_ids":[]
+        })).unwrap();
+        assert!(!super::super::adapter::checkpoint_matches_model(&previous, am_config::API_BOT_FABLE_MODEL));
+        assert!(super::super::adapter::checkpoint_matches_model(&previous, am_config::API_BOT_MODEL));
+
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?")
+            .bind(serde_json::to_string(&previous).unwrap()).bind(&old_identity.session_id).execute(&pool).await.unwrap();
+        let mut fable_options = test_options();
+        fable_options.model = am_config::API_BOT_FABLE_MODEL.into();
+        let mismatch = ApiBotAdapter::rebind(pool.clone(), &old_identity, settled_rev,
+            new_identity.clone(), fable_options, serde_json::json!("System"), test_limits(),
+            Arc::new(TestQuoteProvider { reserved_amount:10_000, estimated_amount:5_000 }),
+            AdapterHttpConfig { endpoint:server.endpoint.clone(),
+                key_source:Arc::new(super::super::adapter::FixedTestKey("synthetic".into())),
+                timeout:std::time::Duration::from_secs(5), max_response_bytes:1024*1024 }, None).await;
+        assert!(matches!(mismatch, Err(crate::api_bot::http::Error::InvalidRequest)));
+        let owner: (String,i64,i64) = sqlx::query_as("SELECT owner_turn_id,generation,revision FROM api_bot_sessions WHERE id=?")
+            .bind(&old_identity.session_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(owner, (turn1.clone(), old_identity.generation, settled_rev));
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?")
+            .bind(serde_json::to_string(&state).unwrap()).bind(&old_identity.session_id).execute(&pool).await.unwrap();
 
         // Rebind constructor for turn 2 succeeds cleanly
         let rebind_res = ApiBotAdapter::rebind(

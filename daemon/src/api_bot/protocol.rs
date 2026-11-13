@@ -19,6 +19,7 @@ pub struct Response {
 
 #[derive(Clone, Debug)]
 pub struct Options {
+    pub model: String,
     pub effort: String,
     pub fast: bool,
     pub max_tokens: u32,
@@ -26,6 +27,7 @@ pub struct Options {
 
 impl Options {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if !crate::config::api_bot_model_supported(&self.model) { return Err("unsupported model"); }
         if !matches!(
             self.effort.as_str(),
             "low" | "medium" | "high" | "xhigh" | "max"
@@ -79,7 +81,7 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
         })
         .collect();
     let mut body = json!({
-        "model": "claude-opus-5-5", "max_tokens": options.max_tokens,
+        "model": options.model, "max_tokens": options.max_tokens,
         "output_config": {"effort": options.effort},
         "system": system, "messages": messages,
         "tools": [
@@ -87,6 +89,9 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
             {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}
         ], "tool_choice": {"type": "auto"}
     });
+    if options.model == crate::config::API_BOT_FABLE_MODEL {
+        body["thinking"] = json!({"type":"adaptive"});
+    }
     if options.fast {
         body["speed"] = json!("fast");
     }
@@ -103,7 +108,7 @@ pub struct ToolCall {
 impl Response {
     /// Validate the whole response before executing any tool, including later blocks.
     pub fn tools(&self) -> Result<Vec<ToolCall>, &'static str> {
-        if self.id.is_empty() || self.model != "claude-opus-5-5" || !self.usage.is_object() {
+        if self.id.is_empty() || !crate::config::api_bot_model_supported(&self.model) || !self.usage.is_object() {
             return Err("invalid response metadata");
         }
         let mut calls = Vec::new();

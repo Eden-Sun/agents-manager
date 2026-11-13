@@ -117,6 +117,11 @@ struct ActiveAttempt {
     key: Option<Secret>,
 }
 
+pub(super) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
+    !state.responses.iter().any(|r| r.model != model)
+        && !(state.responses.is_empty() && state.messages.iter().any(|m| m.content.as_array().is_some_and(|blocks| blocks.iter().any(|b| matches!(b.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking"))))))
+}
+
 impl ApiBotAdapter {
     fn refuse(&self, reason: impl Into<String>) {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.into());
@@ -226,6 +231,20 @@ impl ApiBotAdapter {
             generation: old_fence.generation,
             revision: old_revision,
         };
+
+        // Thinking signatures belong to their originating model. Reject before changing durable owner/revision.
+        // The prior turn is already terminal; load() requires a live turn and cannot be used here.
+        // Rebind below revalidates this exact revision before changing ownership.
+        let expiry = am_base::db::ts_sql("expires_at");
+        let previous: Option<String> = sqlx::query_scalar(&format!("SELECT checkpoint_json FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND revision=? AND retired_at IS NULL AND {expiry}>? AND length(CAST(checkpoint_json AS BLOB))<=?"))
+            .bind(old_fence.session_id.as_str()).bind(old_fence.bot_id.as_str())
+            .bind(old_fence.run_id.as_str()).bind(old_fence.turn_id.as_str())
+            .bind(old_fence.generation).bind(old_revision).bind(am_base::db::now())
+            .bind(am_base::db::api_bot::MAX_CHECKPOINT_BYTES as i64)
+            .fetch_optional(&pool).await.map_err(|_| http::Error::InvalidRequest)?;
+        let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
+            .map_err(|_| http::Error::InvalidRequest)?;
+        if !checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
 
         let new_rev = db_api::rebind(
             &pool,

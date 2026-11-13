@@ -1624,8 +1624,12 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
 /// 要 herdr pane、要探測安裝／額度」的那四種，`tools`／`quota`／`kind_probe`／`agent.start` 都會對它逐一迴圈。
 /// 建立與設定檔驗證改用 [`valid_bot_kind`]。
 pub const API_BOT_KIND: &str = "claude-api";
-/// harness 線上請求寫死的模型（`api_bot/protocol.rs`），價目表也只核准這一個；bot 的 `model` 欄位只能是它。
+/// 未指定模型時保留 Opus 預設；可用模型必須有對應的 harness 與價格 snapshot。
 pub const API_BOT_MODEL: &str = "claude-opus-5-5";
+pub const API_BOT_FABLE_MODEL: &str = "claude-fable-5-2";
+pub fn api_bot_model_supported(model: &str) -> bool {
+    matches!(model, API_BOT_MODEL | API_BOT_FABLE_MODEL)
+}
 /// 建立時沒指定 effort 的預設（bot 的 effort 必填，runtime 讀到 NULL 會拒絕）。
 pub const API_BOT_DEFAULT_EFFORT: &str = "high";
 
