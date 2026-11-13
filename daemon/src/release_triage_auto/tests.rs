@@ -130,7 +130,7 @@ async fn every_api_failure_is_bounded_and_saved_as_failed_without_a_bot() {
         let model = Fake::new(vec![r.clone(), r.clone(), r]);
         let out = run_auto(&app, &model, "claude", &["2.1.277".into()], None).await.unwrap();
         assert_eq!(out["results"][0]["outcome"], "failed", "{name}: {out}");
-        assert_eq!(model.calls(), 3);
+        assert_eq!(model.calls(), if name == "timeout" { 1 } else { 3 }, "{name}: timeout 不重試，驗證退回才重試");
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Failed, "{name}");
         assert!(notices(&app).await.is_empty(), "{name}: 沒成功就不通知");
     }
@@ -272,12 +272,12 @@ async fn an_explicit_retry_repairs_a_failed_api_version_and_success_is_reused() 
     let env = crate::testing::env().await;
     let app = env.app.clone();
     let entries = seed(&app, "2.1.277").await;
-    let model = Fake::new(vec![Err(fail("timeout", false)), Err(fail("timeout", false)), Err(fail("timeout", false)), Ok(reply(&entries, None))]);
+    let model = Fake::new(vec![Err(fail("timeout", false)), Ok(reply(&entries, None))]);
     let versions = ["2.1.277".into()];
     assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "failed");
     assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "judged");
     assert_eq!(run_auto(&app, &model, "claude", &versions, None).await.unwrap()["results"][0]["outcome"], "skipped");
-    assert_eq!(model.calls(), 4);
+    assert_eq!(model.calls(), 2);
     let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
     assert!(row.assigned_bot_id.is_none());
     assert!(row.verdicts.unwrap()["analysis"]["error"].is_null());
@@ -290,11 +290,11 @@ async fn api_mode_keeps_analysing_later_versions_after_one_version_fails() {
     let app = env.app.clone();
     seed(&app, "2.1.277").await;
     let next = seed(&app, "2.1.278").await;
-    let model = Fake::new(vec![Err(fail("timeout", false)), Err(fail("timeout", false)), Err(fail("timeout", false)), Ok(reply(&next, None))]);
+    let model = Fake::new(vec![Err(fail("timeout", false)), Ok(reply(&next, None))]);
     let out = run_auto(&app, &model, "claude", &["2.1.277".into(), "2.1.278".into()], None).await.unwrap();
     assert_eq!(out["results"][0]["outcome"], "failed");
     assert_eq!(out["results"][1]["outcome"], "judged");
-    assert_eq!(model.calls(), 4);
+    assert_eq!(model.calls(), 2);
     assert_eq!(notices(&app).await.len(), 1);
 }
 

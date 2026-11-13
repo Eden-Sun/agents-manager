@@ -384,6 +384,7 @@ except Exception:
 # 不派協調者。僅用途停用或缺 key 才走協調者；API 模式失敗由 daemon 記 failed，UI 重試。
 # 全域：KIND、PAYLOAD、TO、CLAUDE_DIFF_*。回傳 0＝還有東西要派 bot（PAYLOAD／TO 已改成剩下的）、3＝API 全包了。
 # API 成功分診完的版本離開 pending，下一輪 `release-triage-check` 不會再回它，同一版不會重派 bot。
+# 注意：`agm release-triage auto` 不帶 --timeout 時 CLI 等最多 3600 秒（AUTO_TIMEOUT），涵蓋 daemon 單次 15 分鐘＋驗證重試＋排鎖。
 api_triage() {
   _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || { log "查不到 API 模式，這輪不派協調者"; return 3; }
   _enabled=$(printf '%s' "$_en" | python3 -c 'import json,sys; v=json.load(sys.stdin)["enabled"]; assert isinstance(v,bool); print(1 if v else 0)' 2>/dev/null) || return 3

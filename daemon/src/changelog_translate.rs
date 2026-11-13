@@ -29,6 +29,11 @@ use crate::state::App;
 #[path = "changelog_translate_stream.rs"]
 mod stream;
 
+/// 同步 Messages 請求的輸出 token 上限（給別的用途夾 `max_tokens` 用）。
+pub fn model_output_tokens(model: &str) -> u32 {
+    stream::model_output_tokens(model)
+}
+
 const PROMPT_VERSION: &str = "1";
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";

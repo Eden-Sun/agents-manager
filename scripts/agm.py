@@ -44,6 +44,9 @@ DEFAULT_TIMEOUT = 30.0
 # daemon 這一側本來就會跑很久的操作（`release-triage publish`：一串 gh 呼叫、每個最久 40 秒）：
 # 沿用 30 秒的話 CLI 先逾時、daemon 卻繼續做完，呼叫端以為失敗。只有沒用 `--timeout` 明講時才放寬。
 SLOW_TIMEOUT = 300.0
+# `release-triage auto`：daemon 單次呼叫最久 15 分鐘（驗證退回最多再 2 次），還可能先排在 AUTO_LOCK 後面，
+# 一次最壞遠超過 300 秒；CLI 先逾時會讓 kick 以為失敗卻繼續跑。直接放到上限。
+AUTO_TIMEOUT = 3600.0
 MAX_TIMEOUT = 3600.0
 # 一頁最多幾筆：daemon 自己也會夾，但 0／負數／天文數字在這裡就擋，不要原樣送出去。
 MAX_LIMIT = 1000
@@ -2955,7 +2958,7 @@ def main(argv: list[str] | None = None) -> int:
                 client = Client(daemon_url(cfg), timeout, bot_auth_headers(cfg))
             # 沒用 --timeout 明講、而且是 daemon 這一側本來就跑得久的操作：放寬預設（見 SLOW_TIMEOUT）。
             if args.timeout is None and _is_slow_command(args):
-                client.timeout = SLOW_TIMEOUT
+                client.timeout = AUTO_TIMEOUT if getattr(args, "op", None) == "auto" else SLOW_TIMEOUT
         out = args.func(client, cfg, args)
     except AgmError as e:
         json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=indent)

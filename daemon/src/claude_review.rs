@@ -1557,10 +1557,12 @@ mod tests {
             let e = crate::testing::env().await;
             let app = e.app.clone();
             review_fixture(&app, &e.project_id).await;
+            let reply_kind = reply.clone();
             let fake = api_on(&app, vec![reply.clone(), reply.clone(), reply]).await;
             let _ = post_review(State(app.clone()), Json(body("claude", "2.1.282", None))).await.unwrap();
             settle(&app, "claude", "2.1.282", "failed").await;
-            assert_eq!(fake.prompts.lock().unwrap().len(), 3);
+            let timed_out = matches!(reply_kind, Err(ClientError::Timeout { .. }));
+            assert_eq!(fake.prompts.lock().unwrap().len(), if timed_out { 1 } else { 3 }, "timeout 不重送，截斷才重試");
             assert_eq!(counts(&app).await.0, 0);
         }
     }

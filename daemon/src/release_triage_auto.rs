@@ -88,13 +88,21 @@ impl TriageModel for ApiModel<'_> {
     fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value, entries: usize) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
         Box::pin(async move {
             let (max_tokens, timeout_ms) = budget_for(entries);
+            let cfg = self.0.cfg.get().await;
+            // 非串流請求不能要超過模型的輸出上限（否則 4xx rejected）；沒設定模型時照預設保守夾。
+            let model_cap = cfg.claude_use_state(USE_CASE).map(|s| crate::changelog_translate::model_output_tokens(&s.model)).unwrap_or(MAX_TOKENS_CAP);
+            let max_tokens = max_tokens.min(model_cap);
+            let effective_ms = cfg.claude_api.timeout_ms.max(timeout_ms);
+            drop(cfg);
             let req = crate::claude_api::ClaudeRequest { use_case: USE_CASE, system: Some(system.to_string()), prompt, max_tokens, format: Some(schema) };
             match crate::claude_api::complete_at_least(self.0, req, timeout_ms).await {
                 Ok(reply) if reply.stop_reason.as_deref() != Some("end_turn") => Err(ModelFail { kind: "incomplete_output".into(), detail: "API output did not finish".into(), quiet: false }),
                 Ok(reply) => Ok(ModelReply { text: reply.text, model: reply.model }),
                 Err(e) => {
                     let quiet = matches!(e, crate::claude_api::ClaudeError::Disabled | crate::claude_api::ClaudeError::NoKey(_));
-                    Err(ModelFail { kind: e.kind().to_string(), detail: e.to_string(), quiet })
+                    // timeout 的 detail 放實際套用的秒數（max(設定, 預算)），訊息才不會報錯數字。
+                    let detail = if matches!(e, crate::claude_api::ClaudeError::Timeout) { (effective_ms / 1000).to_string() } else { e.to_string() };
+                    Err(ModelFail { kind: e.kind().to_string(), detail, quiet })
                 }
             }
         })
@@ -478,6 +486,7 @@ pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel,
         let mut prompt = build_prompt(kind, version, &row.entries, &recent, diff);
         let mut accepted = Err(LcError::Bad("analysis_failed".into()));
         for attempt in 0..3 {
+            let mut timed_out = false;
             let sub = if has_judged {
                 match model.call(SYSTEM, prompt.clone(), output_schema(), judged_count).await {
                     Ok(r) => {
@@ -497,8 +506,9 @@ pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel,
                     }
                     Err(f) => {
                         // 模式在這次任務開始時決定；途中失去 key 或被停用也不轉派 bot。
-                        accepted = Err(LcError::Bad(if f.kind == "timeout" {
-                            format!("timeout：{} 秒內沒回完（{judged_count} 條待判）", budget_for(judged_count).1 / 1000)
+                        timed_out = f.kind == "timeout";
+                        accepted = Err(LcError::Bad(if timed_out {
+                            format!("timeout：{} 秒內沒回完（{judged_count} 條待判）", f.detail)
                         } else {
                             f.kind
                         }));
@@ -514,6 +524,9 @@ pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel,
             let after = ledger::get(&app.db, kind, version).await.ok().flatten();
             if accepted.is_ok() || after.is_some_and(|r| matches!(r.status, Status::Judged | Status::Published | Status::Empty)) {
                 break; // 已落帳，後續 publish 失敗不得重跑模型或重開 issue。
+            }
+            if timed_out {
+                break; // 逾時不重送同一份 prompt：只會再吃一次額度、再握鎖十幾分鐘。重試只留給驗證退回。
             }
             if attempt < 2 {
                 let error = problems_of(accepted.as_ref().unwrap_err());

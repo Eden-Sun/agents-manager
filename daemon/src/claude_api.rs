@@ -900,12 +900,13 @@ mod tests {
     struct Fake {
         calls: AtomicUsize,
         seen: Mutex<Vec<Value>>,
+        timeouts: Mutex<Vec<u64>>,
         next: Mutex<VecDeque<Result<ClientOutcome, ClientError>>>,
     }
 
     impl Fake {
         fn new(steps: Vec<Result<ClientOutcome, ClientError>>) -> Arc<Self> {
-            Arc::new(Self { calls: AtomicUsize::new(0), seen: Mutex::new(Vec::new()), next: Mutex::new(steps.into()) })
+            Arc::new(Self { calls: AtomicUsize::new(0), seen: Mutex::new(Vec::new()), timeouts: Mutex::new(Vec::new()), next: Mutex::new(steps.into()) })
         }
     }
 
@@ -915,6 +916,7 @@ mod tests {
             let mut body = req.request_json();
             body["_key_seen"] = json!(req.key);
             self.seen.lock().unwrap().push(body);
+            self.timeouts.lock().unwrap().push(req.timeout_ms);
             let step = self.next.lock().unwrap().pop_front().expect("unexpected extra call");
             Box::pin(async move { step })
         }
@@ -1035,6 +1037,20 @@ mod tests {
         let snap = app.claude_api.ledger.snapshot(10);
         assert_eq!((snap["totals"]["calls"].clone(), snap["totals"]["errors"].clone()), (json!(4), json!(4)));
         assert_eq!(snap["rows"][0]["error_kind"], "timeout");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn complete_at_least_applies_the_larger_timeout_but_never_shrinks_the_configured_one() {
+        let (app, dir) = app_with_key().await;
+        put(&app, json!({"enabled": true, "token": "sk-ant-test-0009", "uses": {"changelog_review": {"enabled": true}}})).await.unwrap();
+        let cfg_ms = app.cfg.get().await.claude_api.timeout_ms;
+        let fake = Fake::new(vec![ok("a", 1, 1), ok("b", 1, 1), ok("c", 1, 1)]);
+        app.claude_api.set_client(fake.clone());
+        complete(&app, req("changelog_review")).await.unwrap();
+        complete_at_least(&app, req("changelog_review"), cfg_ms + 500_000).await.unwrap();
+        complete_at_least(&app, req("changelog_review"), 1).await.unwrap();
+        assert_eq!(*fake.timeouts.lock().unwrap(), vec![cfg_ms, cfg_ms + 500_000, cfg_ms]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
