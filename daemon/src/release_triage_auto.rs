@@ -24,8 +24,24 @@ use crate::state::App;
 
 /// `[claude_api.uses.release_triage]` 的用途名。
 pub const USE_CASE: &str = "release_triage";
-/// 一版最多 80 條 kept＋unmatched（kick 的 `MAX_ENTRIES`），每條 verdict 約 60 token，加上 issue 提案。
+/// 輸出上限的下限。每條 verdict 約 60 token，加上 issue 提案；條目多時照 [`budget_for`] 往上加。
 const MAX_TOKENS: u32 = 12_000;
+/// 輸出上限的上限（模型允許的範圍內，留給一版上百條的大版本）。
+const MAX_TOKENS_CAP: u32 = 48_000;
+/// 每條待判條目預留的輸出 token（verdict＋理由＋模組，外加 issue 提案的攤提）。
+const TOKENS_PER_ENTRY: u32 = 90;
+/// 逾時：固定 60 秒，再加每條 1.5 秒，最多 15 分鐘。2.1.323 一版 232 條，60 秒內寫不完、三次都逾時（2026-11-13）。
+const TIMEOUT_BASE_MS: u64 = 60_000;
+const TIMEOUT_PER_ENTRY_MS: u64 = 1_500;
+const TIMEOUT_CAP_MS: u64 = 900_000;
+
+/// 依待判條目數（kept＋unmatched）算這次呼叫的輸出上限與逾時。
+pub fn budget_for(entries: usize) -> (u32, u64) {
+    let n = entries as u64;
+    let tokens = (2_000 + TOKENS_PER_ENTRY as u64 * n).clamp(MAX_TOKENS as u64, MAX_TOKENS_CAP as u64) as u32;
+    let timeout = (TIMEOUT_BASE_MS + TIMEOUT_PER_ENTRY_MS * n).min(TIMEOUT_CAP_MS);
+    (tokens, timeout)
+}
 /// 帶進 prompt 的最近 issue 標題張數（跟任務檔的 `gh issue list -L 30` 同數）。
 const RECENT_ISSUES: usize = 30;
 /// 通知裡 `upgrade-arg` 最多列幾條；其餘只說「另有 N 條」。
@@ -47,7 +63,8 @@ pub struct ModelFail {
 pub trait TriageModel: Send + Sync {
     /// 這個用途現在開著嗎（總開關＋用途開關）。檢查開關與 key，不呼叫 API；kick 用它決定要不要先產 binary diff。
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
-    fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>>;
+    /// `entries`＝這次要判的條目數（kept＋unmatched），決定輸出上限與逾時（[`budget_for`]）。
+    fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value, entries: usize) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>>;
 }
 
 /// 模型回的文字與實際用的模型 id（通知要寫）。
@@ -68,10 +85,11 @@ impl TriageModel for ApiModel<'_> {
         })
     }
 
-    fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
+    fn call<'a>(&'a self, system: &'a str, prompt: String, schema: Value, entries: usize) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
         Box::pin(async move {
-            let req = crate::claude_api::ClaudeRequest { use_case: USE_CASE, system: Some(system.to_string()), prompt, max_tokens: MAX_TOKENS, format: Some(schema) };
-            match crate::claude_api::complete(self.0, req).await {
+            let (max_tokens, timeout_ms) = budget_for(entries);
+            let req = crate::claude_api::ClaudeRequest { use_case: USE_CASE, system: Some(system.to_string()), prompt, max_tokens, format: Some(schema) };
+            match crate::claude_api::complete_at_least(self.0, req, timeout_ms).await {
                 Ok(reply) if reply.stop_reason.as_deref() != Some("end_turn") => Err(ModelFail { kind: "incomplete_output".into(), detail: "API output did not finish".into(), quiet: false }),
                 Ok(reply) => Ok(ModelReply { text: reply.text, model: reply.model }),
                 Err(e) => {
@@ -374,6 +392,7 @@ fn problems_of(e: &LcError) -> String {
             let list: Vec<String> = body["problems"].as_array().into_iter().flatten().filter_map(Value::as_str).take(3).map(str::to_string).collect();
             if list.is_empty() { body.to_string() } else { list.join("；") }
         }
+        LcError::Bad(msg) => msg.clone(),
         other => format!("{other:?}"),
     }
 }
@@ -453,13 +472,14 @@ pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel,
             results.push(fallback(version, "API 模式停用或缺 key", true));
             continue;
         }
-        let has_judged = row.entries.iter().any(|e| e.bucket != Bucket::Dropped);
+        let judged_count = row.entries.iter().filter(|e| e.bucket != Bucket::Dropped).count();
+        let has_judged = judged_count > 0;
         let diff = if last.as_deref() == Some(version.as_str()) { binary_diff } else { None };
         let mut prompt = build_prompt(kind, version, &row.entries, &recent, diff);
         let mut accepted = Err(LcError::Bad("analysis_failed".into()));
         for attempt in 0..3 {
             let sub = if has_judged {
-                match model.call(SYSTEM, prompt.clone(), output_schema()).await {
+                match model.call(SYSTEM, prompt.clone(), output_schema(), judged_count).await {
                     Ok(r) => {
                         model_name = r.model;
                         match serde_json::from_str::<ModelOut>(r.text.trim()) {
@@ -477,7 +497,11 @@ pub(crate) async fn run_auto_with_retry(app: &Arc<App>, model: &dyn TriageModel,
                     }
                     Err(f) => {
                         // 模式在這次任務開始時決定；途中失去 key 或被停用也不轉派 bot。
-                        accepted = Err(LcError::Bad(f.kind));
+                        accepted = Err(LcError::Bad(if f.kind == "timeout" {
+                            format!("timeout：{} 秒內沒回完（{judged_count} 條待判）", budget_for(judged_count).1 / 1000)
+                        } else {
+                            f.kind
+                        }));
                         None
                     }
                 }

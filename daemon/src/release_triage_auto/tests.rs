@@ -23,7 +23,7 @@ impl TriageModel for Fake {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { self.enabled })
     }
-    fn call<'a>(&'a self, _system: &'a str, prompt: String, _schema: Value) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
+    fn call<'a>(&'a self, _system: &'a str, prompt: String, _schema: Value, _entries: usize) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelFail>> + Send + 'a>> {
         Box::pin(async move {
             self.prompts.lock().unwrap().push(prompt);
             let next = self.replies.lock().unwrap().remove(0);
@@ -389,4 +389,14 @@ async fn concurrent_first_requests_do_not_retry_each_others_failure() {
     a.unwrap(); b.unwrap();
     assert_eq!(model.calls(), 3, "only the first analysis's validation attempts");
     assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Failed);
+}
+
+#[test]
+fn budget_grows_with_entries_and_is_capped() {
+    let (t0, ms0) = budget_for(0);
+    assert_eq!((t0, ms0), (12_000, 60_000), "small versions keep the old floor");
+    let (t, ms) = budget_for(232);
+    assert!(t >= 232 * 60, "232 verdicts need room: {t}");
+    assert!(ms >= 300_000, "a 232-entry version must get several minutes, not 60 s: {ms}");
+    assert_eq!(budget_for(10_000), (48_000, 900_000), "both are capped");
 }
