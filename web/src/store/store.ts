@@ -43,7 +43,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import { DRAFT_REASON_TEXT, draftBlockFrom, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
+import { DRAFT_REASON_TEXT, draftBlockFrom, draftBlockFromSnapshot, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalFormat, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
@@ -529,6 +529,13 @@ export interface StoreState {
   /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
   composerDrafts: Record<string, ComposerDraftBlock>
   dismissComposerDraft: (botId: string) => void
+  /**
+   * 主動讀一次 bot 輸入框（`GET /bots/:id/composer-draft`，完整草稿）：有字就掛上那一條；`editNow` 讓它一出現就把整段放進輸入框編輯。
+   * `tries`／`delayMs`：剛按完鍵時 CLI 還沒把字放回框，多看幾次。回有掛上的那一條，沒有字或讀不到回 `null`（不跳通知）。
+   */
+  loadComposerDraft: (botId: string, opts?: { editNow?: boolean; tries?: number; delayMs?: number }) => Promise<ComposerDraftBlock | null>
+  /** 「編輯後送出」：標記這條已進編輯（下一次送出走 `clear_draft`），或取消自動進編輯的旗標。 */
+  setComposerEditing: (botId: string, flags: { editing?: boolean; editNow?: boolean }) => void
   /**
    * 「被登出」提示關掉過的記錄：`host/identity` → 那一次登出的識別（`lib/loginPrompt`）。只存這一頁的記憶體：
    * 關掉是「這個畫面先別吵我」，不是跨裝置的事實；重整或換一台裝置會再看到（身份真的還登出著的話）。不用 localStorage、也不存 daemon。
@@ -1675,6 +1682,38 @@ export const useStore = create<StoreState>((set, get) => {
 
   dismissComposerDraft(botId) {
     set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+  },
+
+  async loadComposerDraft(botId, opts = {}) {
+    const tries = Math.max(1, opts.tries ?? 1)
+    for (let i = 0; i < tries; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, opts.delayMs ?? 500))
+      try {
+        const snap = await api.fetchComposerDraft(botId)
+        // 回合還在跑時框裡的字不是「卡住的草稿」，也不能清：不掛。
+        if (snap.busy) return null
+        const block = draftBlockFromSnapshot(snap, opts.editNow)
+        if (block) {
+          // 使用者已經在編輯同一段（token 相同）就別重置 editing。
+          set((s) => {
+            const cur = s.composerDrafts[botId]
+            return { composerDrafts: { ...s.composerDrafts, [botId]: cur && cur.token === block.token ? { ...block, editing: cur.editing, editNow: cur.editNow ?? block.editNow } : block } }
+          })
+          return block
+        }
+      } catch {
+        return null
+      }
+    }
+    return null
+  },
+
+  setComposerEditing(botId, flags) {
+    set((s) => {
+      const cur = s.composerDrafts[botId]
+      if (!cur) return {}
+      return { composerDrafts: { ...s.composerDrafts, [botId]: { ...cur, ...flags } } }
+    })
   },
 
   dismissLoginPrompt(host, identity, episode) {

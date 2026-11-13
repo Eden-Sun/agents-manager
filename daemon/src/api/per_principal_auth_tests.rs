@@ -446,7 +446,7 @@ async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
         ("POST", "/api/bots/{bot}/interrupt"), ("POST", "/api/bots/{bot}/login"),
         ("POST", "/api/bots/{bot}/pane/move-to-tab"), ("POST", "/api/bots/{bot}/attachments"),
         ("POST", "/api/bots/{bot}/keys"), ("POST", "/api/bots/{bot}/text"),
-        ("GET", "/api/bots/{bot}/messages"), ("GET", "/api/bots/{bot}/terminal"),
+        ("GET", "/api/bots/{bot}/messages"), ("GET", "/api/bots/{bot}/terminal"), ("GET", "/api/bots/{bot}/composer-draft"),
         ("GET", "/api/bots/{bot}/pending-question"), ("GET", "/api/bots/{bot}/local-image?path=x.png"),
         ("GET", "/api/bots/{bot}/outbox"), ("GET", "/api/bots/{bot}/outbox/file?path=x.txt"),
         ("GET", "/api/bots/{bot}/scratchpad"), ("GET", "/api/bots/{bot}/scratchpad/file?path=x.txt"),

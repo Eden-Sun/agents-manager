@@ -48,6 +48,9 @@ const WALK_TRIES = 3
 
 type Busy = { kind: 'choice' | 'submit' | 'tab'; key: string } | null
 
+/** claude「Session paused」選單的第二項：`Edit prompt and retry with <模型>`。 */
+const EDIT_PROMPT_CHOICE = /^Edit prompt and retry\b/i
+
 export function BlockedChoices({
   botId,
   menu,
@@ -67,6 +70,7 @@ export function BlockedChoices({
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
   const sendText = useStore((s) => s.sendText)
+  const loadComposerDraft = useStore((s) => s.loadComposerDraft)
   const [busy, setBusy] = useState<Busy>(null)
   const [note, setNote] = useState<string | null>(null)
   const [typeText, setTypeText] = useState('')
@@ -277,6 +281,9 @@ export function BlockedChoices({
       const now = await read()
       if (!stillHere(now)) return t('畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。')
       await sendKeys(botId, keysToSelect(now, i))
+      // Session paused 的「Edit prompt and retry…」：CLI 把上一則 prompt 放回輸入框；等它出現就把整段帶進網頁輸入框編輯
+      // （只讀、不按任何鍵；使用者點的就是這一項）。
+      if (EDIT_PROMPT_CHOICE.test(menu.choices[i]?.title ?? '')) void loadComposerDraft(botId, { editNow: true, tries: 8, delayMs: 500 })
       return null
     })
 

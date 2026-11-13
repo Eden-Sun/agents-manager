@@ -1338,6 +1338,7 @@ export class MockTransport implements Transport {
       if (method === 'GET' && action === 'terminal') {
         return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40), q.get('format') === 'ansi')
       }
+      if (method === 'GET' && action === 'composer-draft') return this.composerDrafts.snapshot(botId)
       if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
         // 專案已移交給另一台主機的 daemon（#708）：開、關、重啟與 pane RPC 一律 409 `handed_off`（`daemon/src/handoff.rs::refuse`）。

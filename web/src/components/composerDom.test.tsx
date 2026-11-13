@@ -344,7 +344,7 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
   })
 
   // 1. attachmentsBlocked="uploading"
-  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="uploading" onSent={() => {}} />)
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="uploading" onSent={() => {}} onEdit={() => {}} />)
   let clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
   let submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
   assert.equal(clearBtn.disabled, true)
@@ -353,7 +353,7 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
 
   // 2. attachmentsBlocked="failed"
   await unmountAll()
-  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="failed" onSent={() => {}} />)
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="failed" onSent={() => {}} onEdit={() => {}} />)
   clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
   submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
   assert.equal(clearBtn.disabled, true)
@@ -362,7 +362,7 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
 
   // 3. attachmentsBlocked={null}
   await unmountAll()
-  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked={null} onSent={() => {}} />)
+  await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked={null} onSent={() => {}} onEdit={() => {}} />)
   clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
   submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
   assert.equal(clearBtn.disabled, false)

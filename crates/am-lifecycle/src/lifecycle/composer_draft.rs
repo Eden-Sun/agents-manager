@@ -84,6 +84,35 @@ fn draft_fields(kind: &str, run: &db::Run, draft: Option<&str>) -> Value {
     }
 }
 
+/// `GET /bots/:id/composer-draft` 用的欄位：**完整**草稿（不截）＋綁完整草稿的 `draft_token`。
+/// 網頁的「編輯後送出」要把整段放進輸入框，截過的 500 字不夠；token 與 409 給的是同一種，後續 `clear_draft`／`submit_draft` 通用。
+fn full_fields(kind: &str, run: &db::Run, draft: &str) -> Value {
+    let token = pane_of(run).map(|pane| draft_token(&run.id, &pane, draft));
+    let available = token.is_some();
+    json!({"draft": draft, "draft_truncated": false, "draft_token": token,
+        "draft_actions": if available { actions(kind) } else { Vec::new() }})
+}
+
+/// 唯讀：這一刻 pane 輸入框裡有沒有一段沒送出的字（不按任何鍵）。`state`：`draft`＝有字（帶完整 `draft`／`draft_token`／`draft_actions`）、
+/// `empty`＝空框、`unready`＝框還沒畫好（畫面不是輸入框）；`busy`＝這個 run 正在跑回合（那時框裡的字多半是別的東西，也不能清）。
+/// 讀不到畫面回 409 `composer_unreadable`，沒有 pane 回 404。
+pub async fn snapshot(client: &HerdrClient, run: &db::Run, bot: &db::Bot) -> LcResult<Value> {
+    let Some(pane) = pane_of(run) else { return Err(LcError::NotFound("pane".into())) };
+    let (state, draft, _) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let (label, fields) = match (state, draft.as_deref()) {
+        (BoxState::NonEmpty, Some(d)) => ("draft", full_fields(&bot.kind, run, d)),
+        (BoxState::Unready, _) => ("unready", draft_fields(&bot.kind, run, None)),
+        (BoxState::Empty, _) => ("empty", draft_fields(&bot.kind, run, None)),
+        // 框判成有字、卻解不出內容：不給動作（沒有可綁的 token）。
+        (BoxState::NonEmpty, None) => ("unready", draft_fields(&bot.kind, run, None)),
+    };
+    let mut body = json!({"bot_id": bot.id, "run_id": run.id, "state": label, "busy": run.agent_status == "working"});
+    if let (Some(o), Some(f)) = (body.as_object_mut(), fields.as_object()) {
+        o.extend(f.clone());
+    }
+    Ok(body)
+}
+
 pub(super) fn pane_of(run: &db::Run) -> Option<String> {
     run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string)
 }

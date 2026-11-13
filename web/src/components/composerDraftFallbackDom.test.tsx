@@ -14,7 +14,7 @@ test('讀不到草稿時常駐提示，取消不會送出或清除', async () =>
     composerDrafts: { b1: { draft: '', token: '', truncated: false, actions: [] } },
     sendPrompt: async () => { sends++; return false },
   } as never)
-  await mount(<ComposerDraftBar botId="b1" text="保留的訊息" attachments={[]} onSent={() => { throw new Error('unexpected') }} />)
+  await mount(<ComposerDraftBar botId="b1" text="保留的訊息" attachments={[]} onSent={() => { throw new Error('unexpected') }} onEdit={() => {}} />)
   const bar = document.querySelector<HTMLElement>('.composer-draft')!
   assert.match(bar.textContent ?? '', /讀不到終端內容.*目前訊息保留/)
   const buttons = [...bar.querySelectorAll('button')]

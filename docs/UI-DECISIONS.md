@@ -624,6 +624,10 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
 - **三個動作**：「送出框裡那段」（主按鈕；daemon 對 pane 按 Enter、照一般 prompt 開回合，自己輸入框裡的字不動，之後照常送）、「清掉再送我這則」（輸入框裡沒有自己的字時停用）、「取消」（只收起這一條，框裡的字不動）。daemon 沒給的動作不顯示（沒驗過的 kind、讀不出字）；一個都沒有時說明要到「終端」分頁處理。
 - **按下去之後**：按鈕鎖住、主按鈕顯示「送出中…」／「清除中…」。框裡換了字（`draft_changed`）＝這一條換成新的內容並說一聲、等使用者再確認，不會替使用者送出或清掉沒看過的字；清不掉（`draft_uncleared`）＝這一條留著剩下的字、通知指向終端；框已經空了（`draft_gone`）＝收掉這一條。
 - 草稿動作遇到 `503 delivery_state_uncommitted` 時也要解鎖：`sent:false` 保留草稿列並清掉 busy，`sent:true`／`null` 則收掉草稿列，避免使用者對已送出或送達不明的字再按一次。
+- **編輯後送出**（2026-11-13，第四個動作，主按鈕旁）：把**完整**草稿（若 409 給的是截短版，先 `GET /bots/:id/composer-draft` 取完整的）放進網頁輸入框，輸入框原本有字就接在草稿後面；
+  之後那一條顯示「已放進輸入框：改完按送出…」，輸入框的送出（Enter／送出鈕）改走 `clear_draft`＋token＋改過的字，不併 `queue_if_busy`。
+- **Session paused 選「Edit prompt and retry…」**：選單上點了那一項（使用者點的、不替他按任何鍵），網頁隨後最多等數秒讀框，草稿一出現就自動進入編輯；點「Switch to …」不動。
+  讀框只在這兩個時機發生，不輪詢 pane。
 - 截圖：`docs/screenshots/composer-draft/`（mock：`__amMock.composerDraft('<bot>', '<字>')`）。
 
 ## claude 的「建議下一句」：輸入列上方一行，點一下 Tab＋Enter 送出（2026-10-03，使用者：「加入 claude 的建議下一步的 prompt，要一模一樣 tab + enter 送出」）

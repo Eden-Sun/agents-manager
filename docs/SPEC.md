@@ -1363,6 +1363,12 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、
   grok 1.0.41 的單行、多行與 claude 的十四列長段，一次就清空（fixtures `*-draft.ansi`／`*-cleared.ansi`）。框本來就空不按（空框的 `ctrl+c` 是
   「再按一次離開」）；有回合在跑不按（`ctrl+c` 會打斷它，插隊送出時回 `draft_clear_while_busy`）。
+- **編輯後送出**（2026-11-13，Session paused 選了「Edit prompt and retry」之後 CLI 把上一則放回框裡，網頁看不到也改不了）：
+  網頁把**完整**草稿放進自己的輸入框，改完送出＝`clear_draft:true`＋`expect_draft_token`＋改過的 `text`（先清終端那段、確認框空了才打字，不新增動作）。
+  409 只給截短的 `draft`，所以另有唯讀 `GET /api/bots/:id/composer-draft`（`composer_draft::snapshot`，權限比照 `GET /bots/:id/terminal`）：
+  讀一次畫面回完整 `draft` 與同一種 `draft_token`（綁完整草稿、run、pane），**不按任何鍵**；有回合在跑時帶 `busy:true`，網頁不掛那一條。
+  網頁只在兩個時機讀它，不輪詢：使用者按「編輯後送出」而 409 給的是截短版，以及使用者在網頁的 Session paused 選單點了「Edit prompt and retry…」
+  （按鍵是使用者點的；之後最多等數秒讓 CLI 放回字，字一出現就自動放進輸入框）。草稿在中間被改走既有 `draft_changed`。
 409 給網頁顯示的 `draft` 最多 500 字；動作要回傳同一個 body 裡的 `draft_token`（`expect_draft_token`）。token 是完整正規化草稿的 SHA-256，並綁定當時的 run 與 pane，因此隱藏後綴改變或 token 從另一個 run/pane 搬用都會 409 `draft_changed`，不送出、不清掉使用者沒看過的字。清草稿時若框已空或 run 沒有 pane，回 409 `draft_gone`（`sent:false`），不把「清掉再送」降成一般送出。按 Enter 或 Ctrl+C 前會重讀 composer，要求完整 token、pane id/source/format、未截斷的完整草稿（herdr `pane.read` 回的 `truncated` 只代表框上面還有更舊的歷史，長時間跑的 pane 幾乎都是，不看；框頂與框底都要在讀取範圍內才算完整草稿）與 composer 框線／列位置都未改變，並重驗 active run/session；submit 在 turn/message 寫入後才發現改變時會先撤回未送出的回合。pane-wide revision（包含非零）不作為草稿證據：它可能只反映背景輸出，或恆為 0。spinner、計時、statusline 等 composer 外的內容不納入比對；框線幾何與位置仍納入，Grok 框底內嵌的額度／模型標籤只取邊界幾何。`submit_gates` 不強制 idle（無在飛回合的 working 可能通過），中斷後清框也可能仍有計時；有在飛回合時 submit 拒絕，clear 的 busy/send-now 守門照舊，suggestion 額外要求 idle，relay watch 遇 working/blocked 直接停手。Herdr `pane.send_keys` 尚無條件 revision/CAS 參數，最後重讀與按鍵實際送達之間仍有短暫非原子窗口。不要把完整長草稿送到網頁只為了做比對。
 只給使用者自己的 prompt，bot 轉送的不收。讀草稿時 grok 框底那一列（`╰── Grok 4.7 (high) · … ─╯`，寫著字）是框的下緣，不算草稿。
 

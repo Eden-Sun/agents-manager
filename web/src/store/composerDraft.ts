@@ -26,6 +26,10 @@ export interface ComposerDraftBlock {
   actions: DraftAction[]
   /** 正在做哪一個動作（按鈕先鎖住）。 */
   busy?: DraftAction
+  /** 使用者按了「編輯後送出」：這段已放進輸入框，下一次送出走 `clear_draft`＋這個 token（改過的 `text`）。 */
+  editing?: boolean
+  /** 一出現就自動進編輯（Session paused 選了「Edit prompt and retry」）；放進輸入框後由輸入列清掉。 */
+  editNow?: boolean
 }
 
 const ACTIONS: readonly DraftAction[] = ['submit', 'clear']
@@ -43,6 +47,15 @@ export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
   const actions = ACTIONS.filter((a) => raw.includes(a))
   const token = typeof e.body.draft_token === 'string' ? e.body.draft_token : ''
   return { draft, token, truncated: e.body.draft_truncated === true, actions: token ? actions : [] }
+}
+
+/** 從 `GET /composer-draft` 的結果做一條（`state` 不是有字、或沒有可用的動作就回 `null`）。 */
+export function draftBlockFromSnapshot(
+  snap: { state: string; draft: string; token: string; actions: DraftAction[] },
+  editNow = false,
+): ComposerDraftBlock | null {
+  if (snap.state !== 'draft' || !snap.draft.trim()) return null
+  return { draft: snap.draft, token: snap.token, truncated: false, actions: snap.token ? snap.actions : [], ...(editNow ? { editNow: true } : {}) }
 }
 
 /** 草稿動作失敗時的說明（沒列到的走一般錯誤文字）。 */

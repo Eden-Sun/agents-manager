@@ -129,6 +129,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/{id}/scratchpad` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/bots/{id}/composer-draft` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
@@ -215,6 +216,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/bots/{id}/scratchpad` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/scratchpad/file` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| HEAD | `/api/bots/{id}/composer-draft` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
@@ -807,6 +809,12 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | `draft_gone` | `submit_draft` 時框已經空了，沒有東西可以送；`retryable:false`。 |
 | `draft_clear_while_busy` | 插隊送出（`send_now`）時有回合在跑：清框鍵會打斷它，不按。 |
 | `draft_clear_unsupported` | 這個 kind 沒驗過清框鍵。 |
+
+**唯讀看框（2026-11-13）**：`GET /api/bots/{id}/composer-draft`（權限同 `GET /bots/{id}/terminal`，不按任何鍵）。回
+`{"bot_id","run_id","state":"draft"|"empty"|"unready","busy","draft","draft_truncated":false,"draft_token","draft_actions"}`：
+`draft` 是**完整**草稿（不像 409 截到 500 字），`draft_token` 跟同一刻 409 給的相同、可直接用在上面兩個動作；`state:"empty"` 時
+`draft`／`draft_token` 為 `null`、`draft_actions` 為 `[]`；`busy:true`＝這個 run 正在跑回合（那時不該當成卡住的草稿，清框也會被拒）。
+沒有 active run／pane 回 404，畫面讀不到回 409 `composer_unreadable`。網頁「編輯後送出」用它取完整草稿，改完以 `clear_draft`＋`expect_draft_token`＋新 `text` 送出。
 
 herdr 沒收下 Enter、框裡還是那一段：撤回那一筆回合，回 502（不留一筆 `unknown` 擋住之後每一則）。
 

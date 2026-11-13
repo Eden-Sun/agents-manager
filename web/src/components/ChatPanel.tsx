@@ -861,7 +861,10 @@ function Composer({
     const sent = files.ids
     const edits = trackDraftEdits(draftKey)
     // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
-    void sendPrompt(botId, body, sent, false, Boolean(state.autoStart), undefined, true).then((ok) => {
+    // 「編輯後送出」：框裡那段已放進輸入框改過，先清掉終端那段（token 綁原本的完整草稿）再送改過的字。
+    const editing = useStore.getState().composerDrafts[botId]
+    const editRequest = editing?.editing && editing.token && editing.actions.includes('clear') ? ({ action: 'clear', token: editing.token } as const) : undefined
+    void sendPrompt(botId, body, sent, false, editRequest ? false : Boolean(state.autoStart), editRequest, editRequest ? false : true).then((ok) => {
       setSending(false)
       if (ok) {
         if (edits.untouched()) setText('')
@@ -938,6 +941,12 @@ function Composer({
         onSent={(textUntouched) => {
           if (textUntouched) setText('')
           files.clear()
+        }}
+        onEdit={(draft) => {
+          const cur = useStore.getState().drafts[draftKey] ?? ''
+          setText(cur.trim() ? `${draft}\n${cur}` : draft)
+          setDraftCursor(draftKey, draft.length)
+          ref.current?.focus()
         }}
       />
       <SuggestionBar botId={botId} attachments={files.ids.length} />

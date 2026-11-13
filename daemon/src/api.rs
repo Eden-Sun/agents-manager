@@ -250,6 +250,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/suggestion/accept", post(accept_suggestion))
         .route("/bots/{id}/messages", get(get_messages_with_relay_names))
         .route("/bots/{id}/terminal", get(get_terminal))
+        .route("/bots/{id}/composer-draft", get(get_composer_draft))
         .route("/bots/{id}/pending-question", get(crate::runners::pending_question::get_pending_question))
         .route("/bots/{id}/local-image", get(crate::app_ports_p10::get))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
@@ -6899,6 +6900,18 @@ async fn get_terminal(
         body["format"] = json!("ansi");
     }
     Ok(Json(body))
+}
+
+/// `GET /api/bots/:id/composer-draft` — 唯讀看一眼 pane 輸入框有沒有一段沒送出的字（完整、不截），不按任何鍵。
+/// 權限比照 `GET /bots/:id/terminal`；沒有 active run／pane 回 404。
+async fn get_composer_draft(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    let run = db::active_run(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let client = app
+        .herdr_for_run(&run)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))?;
+    Ok(Json(crate::lifecycle::composer_draft::snapshot(&client, &run, &bot).await?))
 }
 
 async fn ws_handler(

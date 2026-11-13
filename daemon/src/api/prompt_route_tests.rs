@@ -434,3 +434,61 @@ async fn a_busy_composer_is_http_409_and_retryable() {
     let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
     assert_eq!(turns, 0);
 }
+
+async fn get_draft(e: &crate::testing::Env, bot: &str) -> (StatusCode, Value) {
+    let resp = match get_composer_draft(State(e.app.clone()), Path(bot.to_string())).await {
+        Ok(Json(v)) => Json(v).into_response(),
+        Err(err) => err.into_response(),
+    };
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// `GET /bots/:id/composer-draft`：長草稿**完整**回給網頁（不像 409 截到 500 字），token 跟同一刻 409 給的一樣，後續動作通用。
+#[tokio::test]
+async fn composer_draft_read_returns_the_full_draft_with_the_same_token_as_the_409() {
+    let e = crate::testing::env().await;
+    let bot = typed_bot(&e, "grok").await;
+    let long = format!("{}尾", "長".repeat(700));
+    e.herdr.live_pane(
+        "pane-route",
+        crate::testing::LivePane { width: Some(120), boxed: true, composer: vec![long.clone()], ..Default::default() },
+    );
+    let (status, body) = get_draft(&e, &bot).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "draft");
+    assert_eq!(body["draft_truncated"], false);
+    let full = body["draft"].as_str().unwrap();
+    assert!(full.chars().count() > crate::lifecycle::composer_draft::DRAFT_SHOWN_CHARS, "完整、沒有截到 500 字");
+    assert!(full.ends_with('尾'));
+    assert_eq!(body["draft_actions"], json!(["submit", "clear"]));
+    let (status409, conflict) = call(&e, &bot, "hi".into(), "full-draft-409").await;
+    assert_eq!(status409, StatusCode::CONFLICT);
+    assert_eq!(conflict["draft_truncated"], true);
+    assert_eq!(conflict["draft_token"], body["draft_token"], "token 綁完整草稿，兩個入口給的相同");
+}
+
+/// 空輸入框：`state:"empty"`、沒有草稿、沒有動作；唯讀、不建 turn。
+#[tokio::test]
+async fn composer_draft_read_reports_an_empty_box_and_never_creates_a_turn() {
+    let e = crate::testing::env().await;
+    let bot = typed_bot(&e, "grok").await;
+    e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+    let (status, body) = get_draft(&e, &bot).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "empty");
+    assert!(body["draft"].is_null());
+    assert_eq!(body["draft_actions"], json!([]));
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(turns, 0);
+}
+
+/// 沒有 active run 就是 404（跟 `GET /terminal` 一樣）。
+#[tokio::test]
+async fn composer_draft_read_without_a_run_is_404() {
+    let e = crate::testing::env().await;
+    let bot = crate::testing::claude_bot(&e.app, &e.project_id, "no-run-bot").await;
+    let (status, _) = get_draft(&e, &bot.id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

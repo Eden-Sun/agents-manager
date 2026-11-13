@@ -204,6 +204,29 @@ export async function fetchPendingQuestion(botId: string): Promise<unknown> {
   }
 }
 
+/** `GET /bots/:id/composer-draft`：輸入框現在有沒有一段沒送出的字（完整、不截；`token` 綁完整草稿，之後的 `clear`／`submit` 通用）。 */
+export interface ComposerDraftSnapshot {
+  state: 'draft' | 'empty' | 'unready'
+  busy: boolean
+  draft: string
+  token: string
+  actions: Array<'submit' | 'clear'>
+}
+
+export async function fetchComposerDraft(botId: string): Promise<ComposerDraftSnapshot> {
+  const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/composer-draft`)
+  const o = isRec(raw) ? raw : {}
+  const state = pick(o, 'state')
+  const actions = Array.isArray(pick(o, 'draft_actions')) ? (pick(o, 'draft_actions') as unknown[]) : []
+  return {
+    state: state === 'draft' || state === 'unready' ? state : 'empty',
+    busy: pick(o, 'busy') === true,
+    draft: str(pick(o, 'draft')),
+    token: str(pick(o, 'draft_token')),
+    actions: (['submit', 'clear'] as const).filter((x) => actions.includes(x)),
+  }
+}
+
 export async function fetchTerminal(
   botId: string,
   source: TerminalSource,

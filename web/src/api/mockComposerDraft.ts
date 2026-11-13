@@ -34,6 +34,13 @@ export class MockComposerDrafts {
     return this.drafts.has(botId)
   }
 
+  /** `GET /bots/:id/composer-draft`：完整草稿（不截）＋token。 */
+  snapshot(botId: string): Rec {
+    const draft = this.drafts.get(botId)
+    if (!draft) return { bot_id: botId, state: 'empty', busy: false, draft: null, draft_truncated: false, draft_token: null, draft_actions: [] }
+    return { bot_id: botId, state: 'draft', busy: false, draft, draft_truncated: false, draft_token: draftToken(botId, draft), draft_actions: ['submit', 'clear'] }
+  }
+
   set(botId: string, text: string | null) {
     if (text) this.drafts.set(botId, text)
     else this.drafts.delete(botId)
