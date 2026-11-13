@@ -28,6 +28,13 @@ function refuse(reason: string, botId: string, draft: string | null): never {
 
 export class MockComposerDrafts {
   private drafts = new Map<string, string>()
+  private busy = new Set<string>()
+
+  /** 測試用：假裝這顆 bot 的回合還在跑（`GET /composer-draft` 回 `busy:true`）。 */
+  setBusy(botId: string, on: boolean) {
+    if (on) this.busy.add(botId)
+    else this.busy.delete(botId)
+  }
 
   /** 框裡有沒有字（#712：回合中切 fast 有草稿就不打，排到回合結束）。 */
   has(botId: string): boolean {
@@ -37,8 +44,8 @@ export class MockComposerDrafts {
   /** `GET /bots/:id/composer-draft`：完整草稿（不截）＋token。 */
   snapshot(botId: string): Rec {
     const draft = this.drafts.get(botId)
-    if (!draft) return { bot_id: botId, state: 'empty', busy: false, draft: null, draft_truncated: false, draft_token: null, draft_actions: [] }
-    return { bot_id: botId, state: 'draft', busy: false, draft, draft_truncated: false, draft_token: draftToken(botId, draft), draft_actions: ['submit', 'clear'] }
+    if (!draft) return { bot_id: botId, state: 'empty', busy: this.busy.has(botId), draft: null, draft_truncated: false, draft_token: null, draft_actions: [] }
+    return { bot_id: botId, state: 'draft', busy: this.busy.has(botId), draft, draft_truncated: false, draft_token: draftToken(botId, draft), draft_actions: ['submit', 'clear'] }
   }
 
   set(botId: string, text: string | null) {

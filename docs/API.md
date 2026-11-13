@@ -810,7 +810,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | `draft_clear_while_busy` | 插隊送出（`send_now`）時有回合在跑：清框鍵會打斷它，不按。 |
 | `draft_clear_unsupported` | 這個 kind 沒驗過清框鍵。 |
 
-**主動通知（2026-11-13）**：不必等使用者先送一則被 409。bot 回到 idle 時 daemon 讀一次輸入框（之後最多再讀兩次，不輪詢），有字推 WS `composer_draft {present:true}`、字不見了（回合開始或探測讀到空框）推 `present:false`；只有 claude／codex／grok（有 `draft_actions` 的 kind）會探測。使用者在終端自己清掉而 bot 一直閒置，要等下一個 idle 邊或網頁動作回 `draft_gone` 才會知道。
+**主動通知（2026-11-13）**：不必等使用者先送一則被 409。bot 回到 idle 時 daemon 讀一次輸入框（之後最多再讀兩次，不輪詢），有字推 WS `composer_draft {present:true}`、字不見了（回合開始或探測讀到空框）推 `present:false`；只有 claude／codex／grok（有 `draft_actions` 的 kind）會探測。這顆 bot 有 `queued`／`in_flight` 回合（送字進行中）時跳過探測，不會把 daemon 正在打進框的字當成草稿。`GET composer-draft` 的回應另帶 `run_id`（那份快照讀的是哪個 run）。使用者在終端自己清掉而 bot 一直閒置，要等下一個 idle 邊或網頁動作回 `draft_gone` 才會知道。
 
 **唯讀看框（2026-11-13）**：`GET /api/bots/{id}/composer-draft`（權限同 `GET /bots/{id}/terminal`，不按任何鍵）。回
 `{"bot_id","run_id","state":"draft"|"empty"|"unready","busy","draft","draft_truncated":false,"draft_token","draft_actions"}`：

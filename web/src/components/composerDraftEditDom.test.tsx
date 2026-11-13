@@ -219,3 +219,61 @@ test('選取補洞：連續呼叫只打一次（進行中不重複），沒有 r
   await flush()
   assert.equal(gets(), base + 1)
 })
+
+const idleBot = async (name: string) => {
+  const o = await openChat(name)
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[o.bot.id]?.agent_status === 'idle'
+  }, 'bot 回到 idle')
+  return o
+}
+
+test('GET 回 empty：清掉既有的草稿列（讀不到不算空）', { timeout: 30_000 }, async () => {
+  const { bot } = await idleBot('am-claude')
+  mock.composerDrafts.set(bot.id, '先有一段')
+  await act(async () => void (await useStore.getState().loadComposerDraft(bot.id)))
+  assert.equal(useStore.getState().composerDrafts[bot.id]?.draft, '先有一段')
+  mock.composerDrafts.set(bot.id, null)
+  await act(async () => void (await useStore.getState().loadComposerDraft(bot.id)))
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined, '終端那段沒了：列收掉')
+})
+
+test('晚回來的 GET 不會在 present:false 之後把列掛回去；讀的是別的 run 也丟掉', { timeout: 30_000 }, async () => {
+  const { bot } = await idleBot('am-claude')
+  mock.composerDrafts.set(bot.id, '會晚到的草稿')
+  await act(async () => {
+    const pending = useStore.getState().loadComposerDraft(bot.id)
+    dispatchFrameForTest({ type: 'composer_draft', data: { bot_id: bot.id, run_id: 'r', present: false } })
+    assert.equal(await pending, null)
+  })
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined, 'present:false 之後不被掛回')
+  // 結果回來時 run 已經換了（快照讀的是舊 run）。
+  const realRun = useStore.getState().runs[bot.id]
+  await act(async () => {
+    const pending = useStore.getState().loadComposerDraft(bot.id)
+    useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: { ...realRun, id: 'another-run' } } }) as never)
+    assert.equal(await pending, null)
+  })
+  useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: realRun } }) as never)
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined, '別的 run 的快照不掛')
+  mock.composerDrafts.set(bot.id, null)
+})
+
+test('busy 也繼續重試到上限：回合剛結束的那一下不放棄', { timeout: 30_000 }, async () => {
+  const { requests, bot } = await idleBot('am-claude')
+  const gets = () => requests.filter((r) => r.method === 'GET' && r.path.endsWith(`/bots/${bot.id}/composer-draft`)).length
+  mock.composerDrafts.set(bot.id, '剛放回框裡的字')
+  mock.composerDrafts.setBusy(bot.id, true)
+  const base = gets()
+  const got: { block: unknown } = { block: undefined }
+  await act(async () => {
+    const pending = useStore.getState().loadComposerDraft(bot.id, { editNow: true, tries: 4, delayMs: 10 })
+    // 前兩次還在 busy，之後放開。
+    setTimeout(() => mock.composerDrafts.setBusy(bot.id, false), 25)
+    got.block = await pending
+  })
+  assert.ok(got.block, 'busy 之後有重試，最後掛上')
+  assert.ok(gets() - base >= 2, '不是第一次 busy 就放棄')
+  mock.composerDrafts.set(bot.id, null)
+})

@@ -1683,17 +1683,28 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   dismissComposerDraft(botId) {
+    bumpDraftEpoch(botId)
     set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
   },
 
   async loadComposerDraft(botId, opts = {}) {
     const tries = Math.max(1, opts.tries ?? 1)
+    const epoch = draftEpoch(botId)
     for (let i = 0; i < tries; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, opts.delayMs ?? 500))
       try {
         const snap = await api.fetchComposerDraft(botId)
-        // 回合還在跑時框裡的字不是「卡住的草稿」，也不能清：不掛。
-        if (snap.busy) return null
+        // 等 GET 的時候草稿已經被收掉（`composer_draft present:false`、取消），或這份讀的是別的 run：晚回來的結果不能把列掛回去。
+        if (draftEpoch(botId) !== epoch) return null
+        const runId = get().runs[botId]?.id
+        if (snap.runId && runId && snap.runId !== runId) return null
+        // 回合還在跑時框裡的字不是「卡住的草稿」、也不能清：不掛；但它可能只是剛送完還沒閒下來，有重試次數就再看。
+        if (snap.busy) continue
+        // 確定是空框：既有的草稿列已經沒有東西可處理，收掉（`unready`／讀不到不算，那不等於空）。
+        if (snap.state === 'empty') {
+          if (get().composerDrafts[botId]) set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+          return null
+        }
         const block = draftBlockFromSnapshot(snap, opts.editNow)
         if (block) {
           // 使用者已經在編輯同一段（token 相同）就別重置 editing。
@@ -2804,6 +2815,14 @@ function reloadUpstreamUpdates(set: SetFn, get: GetFn) {
   })
 }
 
+/**
+ * 每顆 bot 的草稿列「世代」：收到 `composer_draft present:false`、或使用者取消時加一。`loadComposerDraft` 發 GET 前記下世代，
+ * 回來時世代變了（中間草稿已被收掉）就丟掉結果，晚回來的 GET 不會把列掛回去。
+ */
+const draftEpochs = new Map<string, number>()
+const draftEpoch = (botId: string) => draftEpochs.get(botId) ?? 0
+const bumpDraftEpoch = (botId: string) => draftEpochs.set(botId, draftEpoch(botId) + 1)
+
 /** 輸入框草稿的「補洞」探測正在進行的 bot：同一顆同時只打一次 GET。 */
 const draftProbing = new Set<string>()
 
@@ -3445,8 +3464,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (!botId) return
       if (isRec(data) && bool(pick(data, 'present'), false)) {
         void get().loadComposerDraft(botId)
-      } else if (get().composerDrafts[botId]) {
-        set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+      } else {
+        bumpDraftEpoch(botId)
+        if (get().composerDrafts[botId]) set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
       }
       return
     }

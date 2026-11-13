@@ -41,11 +41,26 @@ async fn announce(app: &Arc<App>, run: &db::Run, present: bool) {
     app.emit("composer_draft", json!({"bot_id": run.bot_id, "run_id": run.id, "present": present})).await;
 }
 
+/// AG Man／使用者的送字正在進行：這顆 bot 有 `queued`（等著排進框）或 `in_flight`（已建好、正在打或等回覆）的回合。
+/// idle 邊同時會 `schedule_flush_queued`，daemon 剛打進框、還沒按 Enter 的字不是「卡住的草稿」，這時讀到的不能推；
+/// 查不到（DB 出錯）當成有，不探測。
+async fn delivery_in_progress(app: &Arc<App>, bot_id: &str) -> bool {
+    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return true };
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status IN ('queued','in_flight')")
+        .bind(conv)
+        .fetch_one(&app.db)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(true)
+}
+
 /// 這個 run 回到 idle（herdr 事件，或 Session paused 選單還原成 idle）：背景探測，不擋呼叫端。
+/// 送字進行中的那幾次跳過（不算探測次數）；沒推過、讀到空框最多再讀一次就停，省 pane 讀取。
 pub fn on_idle(app: &Arc<App>, run: &db::Run) {
     let (app, run_id) = (app.clone(), run.id.clone());
     tokio::spawn(async move {
         let mut waited = 0;
+        let mut empties = 0;
         for at in PROBES {
             tokio::time::sleep(Duration::from_millis(at - waited)).await;
             waited = at;
@@ -58,27 +73,27 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
             if run.agent_status != "idle" {
                 return; // 不再 idle：`on_not_idle` 負責收尾
             }
-            let was = announced().lock().unwrap().contains(&run_id);
+            if delivery_in_progress(&app, &run.bot_id).await {
+                continue;
+            }
             match probe(&app, &run).await {
                 Some(true) => {
-                    if !was {
-                        {
-                            let mut a = announced().lock().unwrap();
-                            if a.len() >= ANNOUNCED_MAX {
-                                a.clear();
-                            }
-                            a.insert(run_id.clone());
-                        }
+                    if mark_announced(&run_id) {
                         announce(&app, &run, true).await;
                     }
                     return;
                 }
-                Some(false) if was => {
-                    forget(&run_id);
-                    announce(&app, &run, false).await;
-                    return;
+                Some(false) => {
+                    if forget(&run_id) {
+                        announce(&app, &run, false).await;
+                        return;
+                    }
+                    empties += 1;
+                    if empties >= 2 {
+                        return;
+                    }
                 }
-                _ => {}
+                None => {}
             }
         }
     });
@@ -91,6 +106,15 @@ pub fn on_not_idle(app: &Arc<App>, run: &db::Run) {
     }
     let (app, run) = (app.clone(), run.clone());
     tokio::spawn(async move { announce(&app, &run, false).await });
+}
+
+/// 記下這個 run 推過 `present:true`（容量檢查與寫入同一把鎖）；回是不是第一次記（第一次才推）。
+fn mark_announced(run_id: &str) -> bool {
+    let mut a = announced().lock().unwrap();
+    if a.len() >= ANNOUNCED_MAX && !a.contains(run_id) {
+        a.clear();
+    }
+    a.insert(run_id.to_string())
 }
 
 /// 忘掉這個 run 的推送記錄；回之前有沒有推過。
@@ -197,5 +221,61 @@ mod tests {
         let mut rx = e.app.subscribe();
         on_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert!(drain(&mut rx, 300).await.is_empty());
+    }
+
+    async fn insert_turn(app: &Arc<App>, bot_id: &str, run_id: &str, status: &str) -> String {
+        let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+        let id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web',?,'pending',?)")
+            .bind(&id)
+            .bind(&conv)
+            .bind(run_id)
+            .bind(status)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// AG Man／使用者的送字進行中（queued 或 in_flight 的回合）：idle 邊同時排佇列，框裡可能是 daemon 剛打進去、還沒按 Enter 的字，
+    /// 不能推成「卡住的草稿」（使用者一按清除就動到正在送的訊息）。回合結束後的下一個 idle 邊才照常探測。
+    #[tokio::test]
+    async fn a_delivery_in_progress_is_never_announced_as_a_stuck_draft() {
+        for status in ["queued", "in_flight"] {
+            let e = tt::env().await;
+            let bot = tt::claude_bot(&e.app, &e.project_id, &format!("draft-watch-{status}")).await;
+            let run_id = tt::fake_run(&e.app, &bot.id).await;
+            let pane_id = format!("pane-{}", bot.id);
+            e.herdr.live_pane(&pane_id, pane(vec!["daemon 正在打的字".into()]));
+            let turn = insert_turn(&e.app, &bot.id, &run_id, status).await;
+            let mut rx = e.app.subscribe();
+            on_idle(&e.app, &run_of(&e.app, &run_id).await);
+            assert!(drain(&mut rx, 300).await.is_empty(), "{status}：送字中不推");
+            assert_eq!(e.herdr.pane(&pane_id).unwrap().reads, 0, "{status}：送字中不讀 pane");
+            // 回合結束後再來一個 idle 邊：那段字還在框裡，這時才是卡住的草稿。
+            sqlx::query("UPDATE turns SET status=? WHERE id=?").bind(if status == "queued" { "failed" } else { "completed" }).bind(&turn).execute(&e.app.db).await.unwrap();
+            on_idle(&e.app, &run_of(&e.app, &run_id).await);
+            assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![true], "{status}");
+        }
+    }
+
+    /// 空框、之前沒推過：最多讀兩次就停（不把三個探測點都讀完）。
+    #[tokio::test]
+    async fn an_empty_box_is_read_at_most_twice() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "draft-watch-reads").await;
+        let run_id = tt::fake_run(&e.app, &bot.id).await;
+        let pane_id = format!("pane-{}", bot.id);
+        e.herdr.live_pane(&pane_id, pane(vec![]));
+        // 一次探測花幾次 pane 讀取。
+        let before = e.herdr.pane(&pane_id).unwrap().reads;
+        assert_eq!(probe(&e.app, &run_of(&e.app, &run_id).await).await, Some(false));
+        let per_probe = e.herdr.pane(&pane_id).unwrap().reads - before;
+        assert!(per_probe > 0);
+        let base = e.herdr.pane(&pane_id).unwrap().reads;
+        on_idle(&e.app, &run_of(&e.app, &run_id).await);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(e.herdr.pane(&pane_id).unwrap().reads - base, per_probe * 2, "空框讀兩次就停");
     }
 }

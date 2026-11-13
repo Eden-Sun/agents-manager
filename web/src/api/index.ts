@@ -207,6 +207,8 @@ export async function fetchPendingQuestion(botId: string): Promise<unknown> {
 /** `GET /bots/:id/composer-draft`：輸入框現在有沒有一段沒送出的字（完整、不截；`token` 綁完整草稿，之後的 `clear`／`submit` 通用）。 */
 export interface ComposerDraftSnapshot {
   state: 'draft' | 'empty' | 'unready'
+  /** 這份快照讀的是哪個 run（晚回來的 GET 要跟現在的 run 對得上才算數）。 */
+  runId: string
   busy: boolean
   draft: string
   token: string
@@ -220,6 +222,7 @@ export async function fetchComposerDraft(botId: string): Promise<ComposerDraftSn
   const actions = Array.isArray(pick(o, 'draft_actions')) ? (pick(o, 'draft_actions') as unknown[]) : []
   return {
     state: state === 'draft' || state === 'unready' ? state : 'empty',
+    runId: str(pick(o, 'run_id')),
     busy: pick(o, 'busy') === true,
     draft: str(pick(o, 'draft')),
     token: str(pick(o, 'draft_token')),
