@@ -71,6 +71,7 @@ pub async fn complete(
             .post(url)
             .header("x-api-key", req.key)
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", protocol::THINKING_BINDING_BETA)
             .json(&protocol::request(req.options, req.system, req.messages))
             .send()
             .await

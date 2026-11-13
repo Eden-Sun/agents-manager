@@ -66,6 +66,9 @@ fn mark_last_block(content: &Value) -> Value {
     }
 }
 
+/// `thinking.block_binding` 需要的 beta header 值。
+pub const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
 pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value {
     let system = mark_last_block(system);
     let last = messages.len().saturating_sub(1);
@@ -89,9 +92,10 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
             {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}
         ], "tool_choice": {"type": "auto"}
     });
-    if options.model == crate::config::API_BOT_FABLE_MODEL {
-        body["thinking"] = json!({"type":"adaptive"});
-    }
+    // Opus 5.5／Fable 5.2 的 thinking 區塊綁定產生它的那段對話（system＋前文）。system 每回合重組
+    // （agent md 從設定檔、遠端主機重讀），只要一個位元組不同，下一回合整段歷史就被 API 以 400 拒絕、bot 從此卡死。
+    // drop_block：前綴對不上的 thinking 區塊由 API 丟掉、對話照常進行（需 `THINKING_BINDING_BETA` header）。
+    body["thinking"] = json!({"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}});
     if options.fast {
         body["speed"] = json!("fast");
     }

@@ -62,7 +62,7 @@ async fn fixture(status: u16, replies: Vec<Value>) -> Fixture {
                 async move {
                     assert_eq!(headers["x-api-key"], "fixture-not-a-real-key");
                     assert_eq!(headers["anthropic-version"], "2023-06-01");
-                    assert!(!headers.contains_key("anthropic-beta"));
+                    assert_eq!(headers["anthropic-beta"], super::protocol::THINKING_BINDING_BETA, "只帶 thinking 綁定那一個 beta");
                     seen.lock().unwrap().push(body);
                     let value = queue.lock().unwrap().pop_front().unwrap_or(Value::Null);
                     (
@@ -165,7 +165,7 @@ async fn full_http_loop_preserves_thinking_and_pairs_all_tools_before_next_reque
     assert_eq!(seen[0]["model"], "claude-opus-5-5");
     assert_eq!(seen[0]["speed"], "fast");
     assert_eq!(seen[0]["output_config"]["effort"], "medium");
-    assert!(seen[0].get("thinking").is_none());
+    assert_eq!(seen[0]["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block", "前綴對不上的 thinking 區塊丟掉，不讓整段對話 400");
     assert!(seen[0]["tools"][0].get("input_schema").is_none());
     assert_eq!(seen[1]["messages"][1]["content"][0], thinking);
     assert_eq!(seen[1]["messages"][2]["content"][0]["tool_use_id"], "t1");
