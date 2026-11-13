@@ -587,7 +587,7 @@ export interface StoreState {
   installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
   installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
-  /** 軟刪復原（刪除通知與環境設定的「最近刪除」共用）；成功回 true，失敗已 notify。 */
+  /** 軟刪復原（刪除通知的「復原」）；成功回 true，失敗已 notify。 */
   restoreBot: (botId: string) => Promise<boolean>
   /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
   agmDeleteAsk: AgmDeleteAsk | null

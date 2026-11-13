@@ -1,7 +1,7 @@
 /**
  * 附件縮圖抓不到時怎麼辦：以前 `.catch` 只把 url 設回 null，縮圖永遠停在「…」、燈箱永遠「載入中…」——
  * 看起來像還在載入。bot 刪掉超過保留期（`bot_trash::KEEP_DAYS`）之後，附件檔被清掉，daemon 對那個附件回 404，
- * 從「最近刪除」復原的對話裡每一張圖都會卡在那裡。404／410＝檔案已清除，其他（斷線、5xx）是暫時的。
+ * 從刪除通知復原的對話裡每一張圖都會卡在那裡。404／410＝檔案已清除，其他（斷線、5xx）是暫時的。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'

@@ -632,7 +632,7 @@ export class MockTransport implements Transport {
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private baseSnapshots = new Map<string, string>()
-  /** 軟刪的 bot（daemon `bots.deleted_at`，#757）：`GET /bots/deleted` 列、`POST /bots/{id}/restore` 救回。 */
+  /** 軟刪的 bot（daemon `bots.deleted_at`）：刪除通知的「復原」走 `POST /bots/{id}/restore` 救回。 */
   private deletedBots: { bot: MockBot; deleted_at: string }[] = []
   private runs: MockRun[] = []
   private upstreamItems: Rec[] = []
@@ -843,7 +843,7 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
-    // 「最近刪除」清單的示範資料（#757）。
+    // 軟刪 bot 的示範資料（供刪除通知的「復原」用）。
     for (const [name, kind, ago] of [['am-old-review', 'codex', 3_600_000], ['scratch-claude', 'claude', 86_400_000 * 2]] as const) {
       this.deletedBots.push({
         bot: {
@@ -1321,7 +1321,6 @@ export class MockTransport implements Transport {
       return this.restartIdle()
     }
 
-    if (method === 'GET' && seg[0] === 'bots' && seg[1] === 'deleted' && seg.length === 2) return this.deletedList()
     if (method === 'POST' && seg[0] === 'bots' && seg[2] === 'restore' && seg.length === 3) return this.restoreBot(seg[1])
 
     if (seg[0] === 'bots' && seg.length >= 2) {
@@ -3045,18 +3044,6 @@ export class MockTransport implements Transport {
     // 對話歷史刻意保留。
     this.emit('bot_changed', { bot_id: id, deleted: true })
     return {}
-  }
-
-  private deletedList() {
-    const last = (id: string) => this.messages.filter((m) => m.bot_id === id).map((m) => m.created_at).sort().pop() ?? null
-    const bots = this.deletedBots
-      .filter((d) => this.projects.some((p) => p.id === d.bot.project_id))
-      .map((d) => ({
-        id: d.bot.id, name: d.bot.name, kind: d.bot.kind, project_id: d.bot.project_id,
-        project_label: this.projects.find((p) => p.id === d.bot.project_id)?.label ?? '',
-        deleted_at: d.deleted_at, last_message_at: last(d.bot.id),
-      }))
-    return { bots }
   }
 
   private restoreBot(id: string) {

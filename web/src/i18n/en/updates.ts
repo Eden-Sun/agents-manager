@@ -35,12 +35,10 @@ export default {
   '{n} 待處理': '{n} to do',
   '{n} 未連線': '{n} offline',
   '{n} 可更新': { one: '{n} update', other: '{n} updates' },
-  '{n} 個': { one: '{n} item', other: '{n} items' },
   '環境設定分類': 'Settings sections',
   '主機': 'Hosts',
   '更新檢查': 'Update check',
   '身份': 'Identities',
-  '最近刪除': 'Recently deleted',
   'Jev 建議': 'Jev suggestions',
   '顯示': 'Display',
   // 主題、保持亮著、語言

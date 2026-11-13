@@ -385,7 +385,6 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::herdr_integration::routes())
         .merge(crate::runners::judge::routes())
         .merge(crate::claude_api::routes())
-        .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
@@ -842,7 +841,6 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/push/presence", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/hosts/{name}/shells/{pane_id}", BotRoutePolicy::UserOnly),
     ("GET", "/api/attachments/{id}", BotRoutePolicy::UserOnly),
-    ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/local-image", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/api_fresh_target", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/api-session/retire", BotRoutePolicy::UserOnly),

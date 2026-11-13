@@ -152,7 +152,7 @@ t.x('或改用 {cmd} 開發', { cmd: <code>VITE_MOCK=1</code> })   // 句子裡�
 | 更新／部署 | update／deploy | | 離線／已連線 | offline／Connected |
 | 安裝／登入／未登入 | install／sign in／signed out | | 未讀 | unread |
 | 預覽／排程 | Preview／Schedule | | 審查／監督 | Review／Supervisor |
-| Jev 建議 | Jev suggestions | | 最近刪除 | Recently deleted |
+| Jev 建議 | Jev suggestions | |  |  |
 
 不譯：agent、herdr、pane、shell、CLI、token、commit、issue、PR、AGM／AG Man、Jev、MOCK。文字風格：按鈕與標題用 Sentence case（`Add Bot`、`Re-check`）、句子結尾有句號才留；`…` 沿用；欄位分隔 `・` 改 ` · `。
 

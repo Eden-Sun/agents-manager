@@ -16,19 +16,13 @@ beforeEach(() => {
 test('七個分頁順序與名稱符合規格', () => {
   assert.deepEqual(
     ENV_TABS.map((t) => t.id),
-    ['setup', 'hosts', 'updates', 'identities', 'deleted', 'judge', 'claude-api', 'display'],
+    ['setup', 'hosts', 'updates', 'identities', 'judge', 'claude-api', 'display'],
   )
 })
 
 test('第一次打開（無 remembered）：都沒有紅黃狀態字時停主機', () => {
   const badges: EnvTabBadges = {}
   assert.equal(resolveInitialEnvTab(badges, null), 'hosts')
-
-  // 最近刪除只有 dim（N 個）不算紅／黃
-  const badgesWithDim: EnvTabBadges = {
-    deleted: { text: '3 個', tone: 'dim' },
-  }
-  assert.equal(resolveInitialEnvTab(badgesWithDim, null), 'hosts')
 })
 
 test('第一次打開（無 remembered）：依導覽順序挑第一個有紅或黃狀態字的分頁', () => {

@@ -213,7 +213,6 @@ mod child_retire;
 pub mod due_actions;
 mod panes;
 mod supervisor_owned;
-mod deleted_bots;
 mod app_ports_p6;
 #[cfg(test)]
 use am_base::test_dirs;

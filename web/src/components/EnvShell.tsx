@@ -8,7 +8,6 @@ import {
   type EnvTabBadges,
   type EnvTabId,
 } from '../lib/envTabs'
-import * as api from '../api'
 import { buildHostCheck, updatableCount } from '../store/updateCheck'
 import { fetchIntegrationUpdates, type IntegrationHost } from '../api/integrationUpdates'
 import { herdrHostBlocked } from '../store/herdrUpdate'
@@ -19,7 +18,6 @@ import { useOnboarding } from '../lib/useOnboarding'
 import { HostsPanel } from './HostsPanel'
 import { UpdateCheckPanel } from './UpdateCheckPanel'
 import { IdentitiesPanel } from './IdentitiesPanel'
-import { DeletedBotsPanel } from './DeletedBotsPanel'
 import { JudgePanel } from './JudgePanel'
 import { ClaudeApiPanel } from './ClaudeApiPanel'
 import { KindDisplayToggle } from './KindTag'
@@ -34,13 +32,11 @@ export function EnvShell() {
   const localTools = useStore((s) => s.localTools)
   const localHerdr = useStore((s) => s.localHerdr)
   const upstream = useStore((s) => s.upstreamUpdates)
-  const bots = useStore((s) => s.bots)
 
   const onboarding = useOnboarding()
 
   // 狀態字收集
   const [integrationSnap, setIntegrationSnap] = useState<IntegrationHost[] | null>(null)
-  const [deletedCount, setDeletedCount] = useState<number | null>(null)
 
   // 1. 主機未連線數（與側欄同一式）
   const hostsDown = hosts.filter((h) => !h.connected).length
@@ -85,28 +81,11 @@ export function EnvShell() {
     }
   }
 
-  // 3. 最近刪除數
-  useEffect(() => {
-    let live = true
-    api
-      .fetchDeletedBots()
-      .then((r) => {
-        if (live) setDeletedCount(r.length)
-      })
-      .catch(() => {
-        if (live) setDeletedCount(null)
-      })
-    return () => {
-      live = false
-    }
-  }, [bots])
-
   // 整理 badges
   const badges: EnvTabBadges = {
     setup: onboarding.needed && onboarding.pending > 0 ? { text: t('{n} 待處理', { n: onboarding.pending }), tone: 'warn' } : null,
     hosts: hostsDown > 0 ? { text: t('{n} 未連線', { n: hostsDown }), tone: 'bad' } : null,
     updates: updatesCount > 0 ? { text: t('{n} 可更新', { n: updatesCount }), tone: 'warn' } : null,
-    deleted: deletedCount !== null && deletedCount > 0 ? { text: t('{n} 個', { n: deletedCount }), tone: 'dim' } : null,
   }
 
   // 決定當前分頁（初次載入由 resolveInitialEnvTab 計算）
@@ -214,17 +193,6 @@ export function EnvShell() {
         >
           <h2 className="page-title">{t('身份')}</h2>
           <IdentitiesPanel />
-        </section>
-
-        <section
-          role="tabpanel"
-          id="env-panel-deleted"
-          aria-labelledby="env-tab-deleted"
-          className="env-tabpanel"
-          hidden={activeTab !== 'deleted'}
-        >
-          <h2 className="page-title">{t('最近刪除')}</h2>
-          <DeletedBotsPanel />
         </section>
 
         <section

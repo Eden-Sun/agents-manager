@@ -106,19 +106,6 @@ const dict: Dict = {
   '按 1 更新前先看新版的 release notes。': 'View release notes before pressing 1 to update.',
   '目前沒有對應的互動選單，只能查看新版 release notes。': 'No interactive menu currently available; view release notes only.',
 
-  // components/DeletedBotsPanel.tsx
-  '剛剛': 'just now',
-  '{n} 分鐘前': { one: '{n} minute ago', other: '{n} minutes ago' },
-  '{n} 小時前': { one: '{n} hour ago', other: '{n} hours ago' },
-  '{n} 天前': { one: '{n} day ago', other: '{n} days ago' },
-  '讀不到已刪除的清單，稍後再開一次。': 'Cannot load deleted list; try opening again later.',
-  '載入中…': 'Loading…',
-  '沒有已刪除的 Bot。': 'No deleted Bots.',
-  '刪除是軟的：設定與對話都還在，按「復原」就回到原本的專案。': 'Deletion is soft: settings and messages remain. Click Restore to return to the original Project.',
-  '{project} · 刪除於 {ago}': '{project} · deleted {ago}',
-  ' · 最後對話 {ago}': ' · last active {ago}',
-  '復原': 'Undo',
-
   // lib/agyUpdate.ts
   '更新 Antigravity（agy）CLI 到 {target}？': 'Update Antigravity (agy) CLI to {target}?',
   'agy 有新版 {target}（{hosts}）· 點一下更新：從官方下載、驗 sha512 後換掉 ~/.local/bin/agy；跑著的 agy bot 重啟後才換版':

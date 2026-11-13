@@ -174,7 +174,6 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'components/ClaudeInstallChip.tsx',
     'components/CodexInstallChip.tsx',
     'components/CodexUpdateHint.tsx',
-    'components/DeletedBotsPanel.tsx',
     'components/DeployNowBadge.tsx',
     'components/DeployWaitChip.tsx',
     'components/EnvShell.tsx',

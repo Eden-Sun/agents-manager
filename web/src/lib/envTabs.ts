@@ -1,6 +1,6 @@
 import { msg } from './i18n'
 
-export type EnvTabId = 'setup' | 'hosts' | 'updates' | 'identities' | 'deleted' | 'judge' | 'claude-api' | 'display'
+export type EnvTabId = 'setup' | 'hosts' | 'updates' | 'identities' | 'judge' | 'claude-api' | 'display'
 
 export interface EnvTabMeta {
   id: EnvTabId
@@ -13,7 +13,6 @@ export const ENV_TABS: readonly EnvTabMeta[] = [
   { id: 'hosts', label: msg('主機'), panelTitle: msg('主機') },
   { id: 'updates', label: msg('更新檢查'), panelTitle: msg('更新檢查') },
   { id: 'identities', label: msg('身份'), panelTitle: msg('身份') },
-  { id: 'deleted', label: msg('最近刪除'), panelTitle: msg('最近刪除') },
   { id: 'judge', label: msg('Jev 建議'), panelTitle: msg('Jev 建議') },
   { id: 'claude-api', label: msg('Claude API'), panelTitle: msg('Claude API') },
   { id: 'display', label: msg('顯示'), panelTitle: msg('顯示') },

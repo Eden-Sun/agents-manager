@@ -101,8 +101,6 @@ async fn registered_agm_roles_are_still_denied_on_browser_state_routes() {
     let rpc_calls_before = e.herdr.methods();
     let headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", patrol.id, patrol.hook_token);
     let requests = [
-        ("GET", "/api/bots/deleted", ""),
-        ("HEAD", "/api/bots/deleted", ""),
         ("GET", "/api/intents", ""),
         ("GET", "/api/mem", ""),
         ("HEAD", "/api/mem", ""),

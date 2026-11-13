@@ -39,7 +39,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
 | B | `POST /projects/{id}/git/commit`、`/git/pull` | 只有網頁 | UI token；pull 固定 `--rebase --no-autostash` | 本機 git 歷史 | 維持 |
 | B | `POST /deploy/now` | 只有網頁（確認框之後） | User token；有效 Bot principal 回 403 `ui_only`，無效 Bot 身份由全域中介層回 401；已有部署在跑 409、kick 沒裝或太舊 503（什麼都不寫） | 以使用者名義核准 rebuild（kick 同輪開並核准 restart）→ 重建並重啟正式 daemon；沒人 working 才換、租約、`.bak`、回滾照舊 | 維持（網頁已有確認框） |
-| C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | User UI token；一般 Bot → 403 `user_only`；已登記 AGM 角色可呼叫，AGM 自己的 bot／專案另要 `?confirm=supervisor`（`supervisor_owned`）；已移交專案 → 409 `handed_off` | 軟刪，`POST /bots/{id}/restore` 救得回 | 維持 |
+| C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | User UI token；一般 Bot → 403 `user_only`；已登記 AGM 角色可呼叫，AGM 自己的 bot／專案另要 `?confirm=supervisor`（`supervisor_owned`）；已移交專案 → 409 `handed_off` | 軟刪，`POST /bots/{id}/restore` 救得回（網頁只在刪除通知的「復原」按鈕上提供） | 維持 |
 | C | `POST /hosts`（新增／更新）、`DELETE /hosts/{name}` | 網頁 | User principal；Bot／service principal 403 `user_only`；還有專案在用時改 SSH 目標或 `ssh_opts` 要 `?confirm=repoint`、刪除 409 | 改 config.toml 或改現有 run 的連線權威 | 維持 |
 | C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
 | C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`／`shell:<host>/<pane id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
@@ -83,7 +83,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | `/api/search/messages`、敏感的 `/api/supervisor…` GET | GET | User／AGM 角色 | 這些跨 bot 或內含管理狀態的讀取只限 User 與已登記 AGM 角色；一般 Bot 回 403 `role_required`，Service 仍受明列 path scope 限制。 |
 | `/api/supervisor/assignments/{id}`、`/review` | GET；POST | 只限授權交辦 | 一般 Bot 的 GET 由 AGM gate 拒絕；User 與已登記 AGM 角色可讀。`/review` 仍需既有 AGM 角色閘。 |
 | `/api/state` | GET | User 或 Bot principal | User 取得完整狀態；Bot 只取得自己與 descendants 所在的 projects/bots，並移除全域 hosts／identities／updates／deploy wait／default session 資訊及 Bot 設定秘密、已讀狀態。 |
-| `/api/bots/deleted`、`/api/drafts[/{key}]`、read-mark、memory/process（`POST /api/mem/processes/kill` 例外：已登記 AGM 角色可呼叫，見完整表）、`/api/intents`、`/api/build-slots` | GET／PUT／POST | 僅 User | 跨 bot／主機診斷、recovery journal、build 佇列、草稿、read marks 與 pane preview 是 UI 狀態；Bot（含 AGM 角色）一律 `403 user_only`。 |
+| `/api/drafts[/{key}]`、read-mark、memory/process（`POST /api/mem/processes/kill` 例外：已登記 AGM 角色可呼叫，見完整表）、`/api/intents`、`/api/build-slots` | GET／PUT／POST | 僅 User | 跨 bot／主機診斷、recovery journal、build 佇列、草稿、read marks 與 pane preview 是 UI 狀態；Bot（含 AGM 角色）一律 `403 user_only`。 |
 | `/api/attachments/{id}`、bot attachments/local-image/outbox、bot keys/text、pane inventory/actions、host shells | 該路由註冊的方法 | 僅 User | 使用者檔案、終端輸入與人用 pane 資料不授權給 Bot token；Bot（含 AGM 角色）一律 `403 user_only`。 |
 | API.md 其餘標 User-only 的管理操作 | 該路由註冊的方法 | 一般 Bot 不允許 | 中央 Bot route policy 回 `403 user_only`；只有標明 User-only even for AGM 的路徑會連 AGM 角色一併拒絕。 |
 | `/api/services/daemon-swap/probe/{bot_id}`、`/api/services/herdr-upgrade/resume/{bot_id}` | POST | 不適用 | 只接受各自列明的 Service principal；Bot principal 維持 403。 |
@@ -115,7 +115,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | DELETE | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/*` | 無 principal；前端靜態檔 fallback |
 | GET | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/api-session/retire` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -202,7 +201,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/ws` | query token；TCP loopback、Host 與 Origin 守衛 |
 | HEAD | `/*` | 無 principal；前端靜態檔 fallback |
 | HEAD | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| HEAD | `/api/bots/deleted` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | HEAD | `/api/bots/{id}/base-snapshot` | 同 GET：其他 Bot 與 AGM role 均 → 403 `user_only`（只有狀態碼與標頭） |
 | HEAD | `/api/bots/{id}/api_fresh_target` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/bots/{id}/api-usage` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -2118,12 +2116,6 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
 - 找不到 404。
 - daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄與受限分享工作區殘留目錄搬進 `bots-trash/`。
-
-### 10.4b `GET /api/bots/deleted`
-嚴格 User-only；一般 Bot 與 AGM role Bot 都在 auth middleware 回 `403 user_only`。這是 UI 的軟刪 **user bot** 清單（#757），讓「復原」不只活在刪除當下那個分頁 15 秒的通知：`200 {"bots": [{id, name, kind, project_id, project_label, deleted_at, last_message_at}]}`，
-`deleted_at` 新到舊，最多 200 筆；`last_message_at` 是它對話最後一則訊息的時間，沒對話為 `null`。
-不列 child（`managed_by != 'user'`，由父 bot／AGM 走 `restore` 自己復原）與所屬專案已刪的 bot（還原不回去）。不含重複同名檢查——撞名由 `restore` 回 409。
-復原仍是 §10.4a 同一支；復原與刪除都推 `bot_changed`，網頁據此重抓清單。
 
 ### 10.4a `POST /api/bots/{id}/restore`
 軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
