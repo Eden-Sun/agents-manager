@@ -350,7 +350,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(result.unwrap_err().contains("node"));
+        assert_eq!(result.unwrap_err(), am_base::kill_guard::PKILL_DENY);
     }
 }
 
