@@ -750,8 +750,8 @@ fn source_manifest_only_narrows_safe_regular_file_changes() {
     );
     assert_eq!(
         source_invalidation(root, Some(&before), &directory_changed),
-        SourceInvalidation::Workspace,
-        "directory changes are structural"
+        SourceInvalidation::Files(vec![PathBuf::from("src")]),
+        "an added empty directory needs no touch; removed files touch their surviving parent"
     );
     assert_eq!(
         source_invalidation(root, Some(&before), &type_changed),
@@ -782,7 +782,42 @@ fn source_manifest_only_narrows_safe_regular_file_changes() {
     assert_eq!(
         report.fallback["file added"].count,
         1,
-        "a new Rust module candidate can affect old dep-info inputs"
+        "a new Rust module candidate with no owning package cannot be narrowed"
+    );
+
+    // With an owning package, the new module candidate touches that crate's roots only.
+    let in_crate = |extra: &[(&'static str, u8, &'static [u8], u32)]| {
+        let mut entries = vec![
+            ("crates/core", b'D', &b""[..], 0o755),
+            ("crates/core/Cargo.toml", b'F', &b"[package]"[..], 0o644),
+            ("crates/core/src", b'D', &b""[..], 0o755),
+            ("crates/core/src/lib.rs", b'F', &b"mod foo;"[..], 0o644),
+            ("crates/core/src/foo", b'D', &b""[..], 0o755),
+            ("crates/core/src/foo/mod.rs", b'F', &b""[..], 0o644),
+            ("crates/other", b'D', &b""[..], 0o755),
+            ("crates/other/Cargo.toml", b'F', &b"[package]"[..], 0o644),
+            ("crates/other/src", b'D', &b""[..], 0o755),
+            ("crates/other/src/main.rs", b'F', &b""[..], 0o644),
+        ];
+        entries.extend_from_slice(extra);
+        source_manifest(&entries)
+    };
+    let report = source_invalidation_report(root, Some(&in_crate(&[])), &in_crate(&[("crates/core/src/foo.rs", b'F', b"", 0o644)]));
+    assert_eq!(
+        report.action,
+        SourceInvalidation::Files(vec![PathBuf::from("crates/core/src/foo.rs"), PathBuf::from("crates/core/src/lib.rs")]),
+        "only the owning crate recompiles; crates/other is untouched"
+    );
+    assert_eq!(report.targeted["Rust source added"], 1);
+    let report = source_invalidation_report(
+        root,
+        Some(&in_crate(&[])),
+        &in_crate(&[("crates/core/tests", b'D', b"", 0o755), ("crates/core/tests/new_case.rs", b'F', b"", 0o644)]),
+    );
+    assert_eq!(
+        report.action,
+        SourceInvalidation::Files(vec![PathBuf::from("crates/core/src/lib.rs"), PathBuf::from("crates/core/tests/new_case.rs")]),
+        "a new directory with a new test file stays narrowed to its crate"
     );
 }
 
@@ -819,11 +854,13 @@ fn source_manifest_report_contains_only_categories_and_counts() {
     let report = source_invalidation_report(root, Some(&before), &after);
     assert_eq!(report.action, SourceInvalidation::Workspace);
     assert_eq!(report.safe_file_count, 1);
-    assert_eq!(report.fallback["added directory"].count, 1);
+    assert_eq!(report.targeted["directory added"], 1);
+    assert!(!report.fallback.contains_key("added directory"));
     assert_eq!(report.fallback["removed directory"].count, 1);
     assert_eq!(report.fallback["Cargo control input changed"].count, 1);
     let diagnostic = report.diagnostic().unwrap();
-    assert!(diagnostic.contains("added directory (1)"));
+    assert!(diagnostic.contains("removed directory (1)"));
+    assert!(diagnostic.contains("targeted categories: directory added (1)"));
     assert!(diagnostic.contains("1 safe regular-file changes"));
     assert!(!diagnostic.contains("src/lib.rs"));
     assert!(!diagnostic.contains("Cargo.toml"));
@@ -1059,7 +1096,7 @@ fn web_dist_changes_do_not_mask_other_structural_control_symlink_or_unsafe_chang
     let web_add = ("web/dist/assets/new-hash.js", b'F', b"asset".as_slice(), 0o644);
 
     for (path, kind, value, mode) in [
-        ("crates/other", b'D', b"".as_slice(), 0o755),
+        ("crates/other.txt", b'F', b"asset".as_slice(), 0o644),
         ("Cargo.lock", b'F', b"lock".as_slice(), 0o644),
         ("web/dist/../outside", b'F', b"unsafe".as_slice(), 0o644),
     ] {

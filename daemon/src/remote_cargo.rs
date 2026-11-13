@@ -2577,16 +2577,27 @@ fn source_invalidation_report(
                 report.touch_paths.insert(anchor.clone());
                 continue;
             }
-            // Compiler dep-info may list only existing files discovered by a proc macro.
-            // New inputs (with any extension, including assets) can change its expansion
-            // without a tracked directory, so no file addition is safe to narrow.
-            let cause = match now.kind {
-                b'D' => "added directory",
-                b'L' => "symlink added",
-                b'F' => "file added",
-                _ => "added non-file path",
-            };
-            report.record_fallback(cause);
+            // Compiler dep-info may list only existing files discovered by a proc macro, so a new
+            // asset (any extension) can change an expansion without a tracked directory: those still
+            // fall back. Two additions are narrowed. A new Rust source under a package's src/, tests/,
+            // benches/ or examples/ is a module or target file, not a scanned asset: touch it and the
+            // package's crate roots, so only that package recompiles (this also surfaces a new
+            // `foo.rs` colliding with `foo/mod.rs`). A new directory adds nothing by itself; any file
+            // inside it is classified on its own entry.
+            match now.kind {
+                b'F' => match safe_source_path(bytes).and_then(|path| added_rust_source_roots(current, &path).map(|roots| (path, roots))) {
+                    Some((path, roots)) => {
+                        report.record_targeted("Rust source added");
+                        report.touch_paths.extend(roots);
+                        report.touch_paths.insert(path);
+                    }
+                    None => report.record_fallback("file added"),
+                },
+                b'D' if safe_source_path(bytes).is_some() => report.record_targeted("directory added"),
+                b'D' => report.record_fallback("added directory"),
+                b'L' => report.record_fallback("symlink added"),
+                _ => report.record_fallback("added non-file path"),
+            }
             continue;
         };
         if before == now {
@@ -2655,7 +2666,7 @@ fn source_invalidation_report(
         report.record_fallback("non-web regular files removed with embedded UI structure change");
     }
 
-    if report.fallback.is_empty() && report.touch_paths.is_empty() {
+    if report.fallback.is_empty() && report.touch_paths.is_empty() && report.targeted.is_empty() {
         report.record_fallback("unclassified manifest difference");
     }
     report.action = if report.fallback.is_empty() {
@@ -2736,6 +2747,35 @@ fn safe_source_path(bytes: &[u8]) -> Option<PathBuf> {
     } else {
         Some(path)
     }
+}
+
+/// For a new `.rs` file under `<package>/{src,tests,benches,examples}/`, the existing crate-root
+/// sources (`src/lib.rs`, `src/main.rs`, `build.rs`) of the nearest package with a `Cargo.toml` in
+/// the manifest. Touching them recompiles that package's targets. `None` when the path is not such
+/// a Rust source or the package has no root to touch.
+fn added_rust_source_roots(manifest: &SourceManifest, path: &Path) -> Option<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if path.extension().is_none_or(|ext| ext != "rs") {
+        return None;
+    }
+    let is_file = |p: &Path| manifest.entries.get(p.as_os_str().as_bytes()).is_some_and(|e| e.kind == b'F');
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if is_file(&d.join("Cargo.toml")) {
+            let first = path.strip_prefix(d).ok()?.components().next()?;
+            if !matches!(first.as_os_str().to_str(), Some("src" | "tests" | "benches" | "examples")) {
+                return None;
+            }
+            let roots: Vec<PathBuf> = ["src/lib.rs", "src/main.rs", "build.rs"]
+                .iter()
+                .map(|r| d.join(r))
+                .filter(|p| is_file(p))
+                .collect();
+            return (!roots.is_empty()).then_some(roots);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 fn source_parent(path: &Path) -> PathBuf {
