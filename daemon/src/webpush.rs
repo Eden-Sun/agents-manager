@@ -701,11 +701,43 @@ async fn user_triggered(app: &Arc<App>, turn_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// CLI 內建、不產生實質工作的斜線指令（claude／codex／grok 共通或常見）：壓縮、清空、換設定、看狀態、登入登出…。
+/// 使用者自己下的這類指令結束時沒有「回覆」可讀，不推播（2026-11-13）。技能與自訂指令（`/review`、`/simplify`、`/init`…）
+/// 會交給模型做事，不在這份名單裡，照舊通知。
+const BUILTIN_SLASH: &[&str] = &[
+    "compact", "clear", "reset", "new", "context", "cost", "usage", "stats", "status", "help", "model", "effort", "fast", "login", "logout", "config", "settings", "doctor",
+    "memory", "resume", "continue", "rewind", "theme", "vim", "permissions", "mcp", "agents", "hooks", "ide", "export", "copy", "rename", "color", "add-dir", "statusline",
+    "terminal-setup", "release-notes", "bug", "feedback", "exit", "quit", "keybindings", "output-style", "privacy-settings", "upgrade", "plan", "diff", "mention", "approvals",
+    "skills", "plugin", "plugins", "apps", "title", "personality", "experimental",
+];
+
+/// `text` 是不是 CLI 內建指令（`/compact`、`/compact 保留 X`、`/clear`）。路徑（`/home/x`）與技能名不算。
+pub(crate) fn is_builtin_slash(text: &str) -> bool {
+    let t = text.trim();
+    let Some(rest) = t.strip_prefix('/') else { return false };
+    let word = rest.split_whitespace().next().unwrap_or("");
+    !word.is_empty() && BUILTIN_SLASH.contains(&word.to_ascii_lowercase().as_str())
+}
+
+/// 這一回合是「CLI 內建指令／壓縮」造成的嗎：使用者本人那則 user 訊息是內建指令，或回合裡有壓縮說明（自動壓縮、閒置壓縮收掉的空回合）。
+/// 這種回合結束（含沒收到 Stop 被備援標失敗）都不推播。
+async fn builtin_command_turn(app: &Arc<App>, turn_id: &str) -> bool {
+    let users: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NULL").bind(turn_id).fetch_all(&app.db).await.unwrap_or_default();
+    if users.iter().any(|c| is_builtin_slash(c)) {
+        return true;
+    }
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'system' AND {})", am_base::cache_clock::any_compact_note_sql("content"));
+    sqlx::query_scalar::<_, bool>(&sql).bind(turn_id).fetch_one(&app.db).await.unwrap_or(false)
+}
+
 async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &str, failed: bool) {
     if !main_bots_enabled(&app.data_dir) || load_subs(&app.data_dir).is_empty() {
         return;
     }
     let Some(bot) = primary_bot(app, bot_id).await else { return };
+    if builtin_command_turn(app, turn_id).await {
+        return;
+    }
     if failed {
         // 回合失敗不論誰觸發都推。
         let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
@@ -2173,6 +2205,52 @@ pub(crate) mod tests {
         let n2 = Arc::new(MainNotifier::default());
         handle_event(&app, &n2, &turn_ev(&bot_id, "hook", "failed")).await;
         assert_eq!(rx.try_recv().expect("回合失敗照推")["body"], "回合失敗");
+        set_test_sender(None);
+    }
+
+    #[test]
+    fn builtin_slash_commands_are_recognised_but_skills_and_paths_are_not() {
+        for t in ["/compact", " /compact  ", "/compact keep the plan", "/clear", "/CLEAR", "/model opus", "/effort max", "/context", "/login"] {
+            assert!(is_builtin_slash(t), "{t}");
+        }
+        for t in ["", "compact", "/", "/review", "/simplify the diff", "/init", "/home/me/x.log is broken", "please /compact", "//compact"] {
+            assert!(!is_builtin_slash(t), "{t}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_users_builtin_slash_turn_and_compaction_turns_do_not_push_even_when_they_fail() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        let conv = crate::db::conversation_id(&app.db, &bot_id).await.unwrap();
+        // 網頁送的 /compact：user 訊息是 /compact，完成與失敗都不推。
+        for (t, cmd) in [("c1", "/compact"), ("c2", "/clear"), ("c3", "/compact 保留計畫")] {
+            add_reply(&env, &bot_id, t, "ok").await;
+            sqlx::query("UPDATE messages SET content=? WHERE id=?").bind(cmd).bind(format!("u-{t}")).execute(&app.db).await.unwrap();
+        }
+        for t in ["c1", "c2", "c3"] {
+            handle_event(&app, &n, &turn_ev(&bot_id, t, "completed")).await;
+        }
+        handle_event(&app, &Arc::new(MainNotifier::default()), &turn_ev(&bot_id, "c1", "failed")).await;
+        assert!(rx.try_recv().is_err(), "使用者的 /compact、/clear 不推（含失敗）");
+        // 自動壓縮收掉的空回合：只有壓縮說明、沒有 user 訊息；就算被標失敗也不推。
+        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('auto',?,?,'external','failed','ok',?)").bind(&conv).bind(&run).bind(crate::db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES('n-auto',?,'auto','system',?,'system',?)")
+            .bind(&conv).bind(am_base::cache_clock::COMPACT_NOTE_PREFIXES[1]).bind(crate::db::now()).execute(&app.db).await.unwrap();
+        handle_event(&app, &Arc::new(MainNotifier::default()), &turn_ev(&bot_id, "auto", "failed")).await;
+        assert!(rx.try_recv().is_err(), "自動壓縮不推");
+        // 真正的工作回合照舊通知：一般 prompt、技能指令。
+        add_reply(&env, &bot_id, "w1", "做完了").await;
+        handle_event(&app, &n, &turn_ev(&bot_id, "w1", "completed")).await;
+        assert_eq!(rx.try_recv().expect("一般工作回合照推")["body"], "做完了");
+        let n2 = Arc::new(MainNotifier::default());
+        add_reply(&env, &bot_id, "w2", "review 好了").await;
+        sqlx::query("UPDATE messages SET content='/review 這個 PR' WHERE id='u-w2'").execute(&app.db).await.unwrap();
+        handle_event(&app, &n2, &turn_ev(&bot_id, "w2", "completed")).await;
+        assert_eq!(rx.try_recv().expect("技能指令是工作，照推")["body"], "review 好了");
         set_test_sender(None);
     }
 
