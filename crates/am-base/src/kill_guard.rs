@@ -6,13 +6,13 @@
 //! 全部是**靜態判斷**：只看指令字串，不跑任何外部指令（不 `pgrep`、不 `ps`），所以不會慢、不會卡住、不會因環境不同而結果不同。
 //! 判不出來（解析不了、動態展開的 PID）一律放行——這個 hook 絕不能因為自己的錯擋掉正常指令。門檻與保護名單見 SPEC「廣域 kill 守門」。
 //!
-//! 只擋**確定廣域**的：
-//! * `pkill` 的選項寫在 pattern 之後（BSD 當成 pattern，GNU 當成選項，兩邊語意不同）；
-//! * `pkill`／`killall` 的 pattern 命中受保護的行程名（claude／codex／grok／herdr／agents-managerd／agy…）或短到幾乎什麼都命中；
-//! * 沒有 pattern 的 `pkill -u …`／`-P 1`、沒有名字的 `killall -u …`；
-//! * `kill -1`／`kill -9 -1`／`kill -- -1`／`kill 0`（所有行程／整個行程群組）。
+//! 政策（使用者 2026-11 裁示，全域硬規則）：
+//! * `pkill`、`killall` 一律擋（不論選項、比對字串，`pkill -f 'scripts/check.sh changed'` 這種窄的也會命中自己的 shell；`pgrep … | xargs kill` 同樣）；
+//! * `kill` 只放行明確 PID：數字（可多個）與 `$!`；其他目標（變數、`$(…)`、`%1`）判不出是哪一個行程，擋；
+//! * `xargs kill` 只准緊接在 `lsof -ti :PORT` 後面（`lsof -ti :PORT | xargs kill`）；
+//! * `kill -1`／`kill -9 -1`／`kill 0`（所有行程／整個行程群組）一律擋。
 //!
-//! `kill <明確 PID>`、`lsof -ti :PORT | xargs kill`、`pkill -f "next-server"` 這類窄的一律放行。
+//! 全部是**靜態判斷**：只看指令字串，不跑任何外部指令。判不出來（解析不了）一律放行——這個 hook 絕不能因為自己的錯擋掉正常指令。SPEC「廣域 kill 守門」是權威來源。
 
 use serde_json::{json, Value};
 
@@ -54,6 +54,11 @@ pub const MAX_REGEX_PATTERNS: usize = 16;
 /// 命中 `node` 時多講的一段：agent 最常被這個擋到，而且看不出為什麼（`pkill -x node` 看起來很窄）。
 pub const NODE_NOTE: &str = "；`node` 也是 claude／codex（npm 安裝版）的行程名，殺掉同名行程會連 agent 自己一起殺掉。要停自己的 node 服務，請改用自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <PID>`";
 
+/// 政策（一律擋）的訊息：寫明正確做法（啟動時記 PID、收尾 `kill <PID>`；dev server 用 port）。
+pub const PKILL_DENY: &str = "擋下 pkill：pkill 一律不准用（不論 -f、-P、-x 或比對字串；窄的比對也會命中自己的 shell、或別的 agent）。\
+正確做法：啟動時把 PID 記下來（`cmd & echo $!`，或 `$!` 緊接著用），收尾時 `kill $!` 或 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。";
+pub const KILLALL_DENY: &str = "擋下 killall：killall 一律不准用（會殺掉同名的全部行程，包含其他 agent）。\
+正確做法：啟動時把 PID 記下來（`cmd & echo $!`），收尾時 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。";
 pub const HOW_TO: &str = "只殺自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <自己啟動時記下的 PID>`。不要用 pkill／killall 比對寬鬆的字串。";
 
 /// 一次判斷的共用狀態：「判不出來所以放行」的原因（給 hook 寫 stderr）。
@@ -81,6 +86,26 @@ pub fn check_command_logged(cmd: &str) -> (Verdict, Vec<String>) {
     (v, ctx.notes)
 }
 
+/// `xargs … kill`（kill 的 PID 從管線或標準輸入來）：只准緊接在 `lsof -t… :PORT` 後面（`lsof -ti :PORT | xargs kill`）。
+/// 其他（`pgrep … | xargs kill`、`ps … | xargs kill`…）一律擋。解析只看相鄰的指令，不分 `|` 與 `;`（判斷從嚴：`;` 也要求 lsof 在前）。
+fn check_xargs_kill(cmds: &[Simple]) -> Verdict {
+    for (i, simple) in cmds.iter().enumerate() {
+        let Some(w) = unwrap_wrappers(&simple.words) else { continue };
+        let Some(head) = w.first() else { continue };
+        let is_xargs = simple.words.iter().find(|x| !is_assignment(x)).is_some_and(|x| basename(x) == "xargs");
+        if !(is_xargs && basename(head) == "kill") {
+            continue;
+        }
+        let from_lsof = i > 0
+            && cmds[i - 1].words.first().is_some_and(|h| basename(h) == "lsof")
+            && cmds[i - 1].words.iter().skip(1).any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('t') && a.contains('i') || a.starts_with(':'));
+        if !from_lsof {
+            return Verdict::Deny(format!("擋下 kill：`xargs kill` 的 PID 只准來自 `lsof -ti :PORT`（`lsof -ti :PORT | xargs kill`）；pgrep、ps 等比對出來的 PID 一律不准。{HOW_TO}"));
+        }
+    }
+    Verdict::Allow
+}
+
 fn check_depth(cmd: &str, depth: u32, ctx: &mut Ctx) -> Verdict {
     if depth > MAX_DEPTH {
         ctx.note("指令巢狀（$()／bash -c／eval）超過上限，放行");
@@ -94,6 +119,9 @@ fn check_depth(cmd: &str, depth: u32, ctx: &mut Ctx) -> Verdict {
         if let Verdict::Deny(r) = check_depth(sub, depth + 1, ctx) {
             return Verdict::Deny(r);
         }
+    }
+    if let Verdict::Deny(r) = check_xargs_kill(&script.cmds) {
+        return Verdict::Deny(r);
     }
     for simple in &script.cmds {
         if let Verdict::Deny(r) = check_simple(simple, depth, ctx) {
@@ -721,6 +749,11 @@ fn is_signal_spec(a: &str) -> bool {
     !rest.is_empty() && (rest.chars().all(|c| c.is_ascii_digit()) || rest.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
 }
 
+/// 明確的 PID：數字（含多個），或 `$!`／`${!}`（上一個背景行程）。
+fn is_explicit_pid(t: &str) -> bool {
+    t == "$!" || t == "${!}" || (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn check_kill(args: &[String]) -> Verdict {
     let mut targets: Vec<&str> = Vec::new();
     let (mut signal, mut dashdash, mut i) = (false, false, 0);
@@ -750,6 +783,10 @@ fn check_kill(args: &[String]) -> Verdict {
     if let Some(t) = targets.iter().find(|t| **t == "-1" || **t == "0") {
         let what = if *t == "0" { "0（呼叫端整個行程群組，包含 agent 自己和上層的 shell）" } else { "-1（這個使用者的所有行程）" };
         return Verdict::Deny(format!("擋下廣域 kill：目標是 pid {what}。{HOW_TO}"));
+    }
+    // 只放行數字 PID 與 `$!`（上一個背景行程的 PID）。其他（變數、`$(…)`、`%1`…）判不出是哪一個行程，一律擋。
+    if let Some(t) = targets.iter().find(|t| !is_explicit_pid(t)) {
+        return Verdict::Deny(format!("擋下 kill：目標 `{t}` 不是數字 PID。只准 `kill <數字PID>`（多個也行）或 `kill $!`；要殺的行程請在啟動時就把 PID 記下來（`cmd & echo $!`）。{HOW_TO}"));
     }
     Verdict::Allow
 }
@@ -846,66 +883,14 @@ fn misordered_options(args: &[String]) -> Vec<String> {
     bsd.patterns.iter().filter(|p| p.starts_with('-') && p.len() > 1 && !after_dd.contains(p)).cloned().collect()
 }
 
-fn check_pkill(args: &[String], ctx: &mut Ctx) -> Verdict {
-    let bad = misordered_options(args);
-    if !bad.is_empty() {
-        return Verdict::Deny(format!(
-            "擋下 pkill：選項 {} 寫在比對字串之後。macOS／BSD 的 pkill 遇到第一個非選項參數就停止解析選項，它們會被當成**額外的比對字串**\
-             （`pkill -f x -P 1` 會變成殺掉所有命令列含「1」的行程，2026-10-21 #1884 因此殺光整台機器的 agent）；Linux 的 pkill 卻當選項，兩邊行為不同。\
-             選項一律寫在 pattern 之前（`pkill -P 1 -f x`）。{HOW_TO}",
-            bad.join(" ")
-        ));
-    }
-    let p = parse_pkill(args, true);
-    let (full, exact, icase) = (p.has("f") || p.has("full"), p.has("x") || p.has("exact"), p.has("i") || p.has("ignore-case"));
-    if p.patterns.is_empty() {
-        let by_owner = p.value(&["u", "U", "G", "g", "s", "t", "euid", "uid", "group", "pgroup", "session", "terminal"]).is_some();
-        let by_init = p.value(&["P", "parent"]).is_some_and(|v| v == "0" || v == "1");
-        if by_owner || by_init {
-            return Verdict::Deny(format!("擋下 pkill：沒有比對字串，只用 -u／-g／-s／-t／-P 1 這類條件，會殺掉一整批行程（含其他 agent）。{HOW_TO}"));
-        }
-        return Verdict::Allow;
-    }
-    for (i, pat) in p.patterns.iter().enumerate() {
-        if let Some(why) = broad_pattern(pat, full, exact, icase, i < MAX_REGEX_PATTERNS, ctx) {
-            return Verdict::Deny(format!("擋下 pkill：比對字串 `{pat}` {why}。{HOW_TO}"));
-        }
-    }
-    Verdict::Allow
+fn check_pkill(_args: &[String], _ctx: &mut Ctx) -> Verdict {
+    // 政策（使用者 2026-11 裁示）：pkill 一律擋，不論選項與比對字串（窄的 `pkill -f 'scripts/check.sh changed'` 也會命中自己的 shell）。
+    Verdict::Deny(PKILL_DENY.to_string())
 }
 
-fn check_killall(args: &[String], ctx: &mut Ctx) -> Verdict {
-    // killall 的 `-s`：Linux 是帶訊號的選項、BSD 是「只顯示」旗標；後面接得像訊號才當帶值。
-    let mut fixed: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "-s" && args.get(i + 1).is_some_and(|n| is_signal_spec(&format!("-{n}"))) {
-            i += 2;
-            continue;
-        }
-        fixed.push(args[i].clone());
-        i += 1;
-    }
-    let p = parse_args(&fixed, false, |c| "uoyZtc".contains(c), &["user", "older-than", "younger-than", "context"]);
-    // `-r`（Linux／psmisc）與 `-m`（BSD）都是「把名稱當 regex」。
-    let (regex, icase) = (p.has("r") || p.has("m") || p.has("regexp"), p.has("I") || p.has("ignore-case"));
-    if p.patterns.is_empty() {
-        if p.value(&["u", "user", "t", "c"]).is_some() {
-            return Verdict::Deny(format!("擋下 killall：沒有行程名稱、只用 -u／-t／-c 條件，會殺掉那個使用者／終端的所有行程（含其他 agent）。{HOW_TO}"));
-        }
-        return Verdict::Allow;
-    }
-    for (i, name) in p.patterns.iter().enumerate() {
-        let hit = if regex {
-            broad_pattern(name, false, false, icase, i < MAX_REGEX_PATTERNS, ctx)
-        } else {
-            PROTECTED_NAMES.iter().find(|n| eq(n, name, icase)).map(|n| format!("就是受保護的行程名 `{n}`（killall 會殺掉同名的全部行程，包含其他 agent 與使用者的 session）{}", if *n == "node" { NODE_NOTE } else { "" }))
-        };
-        if let Some(why) = hit {
-            return Verdict::Deny(format!("擋下 killall：`{name}` {why}。{HOW_TO}"));
-        }
-    }
-    Verdict::Allow
+fn check_killall(_args: &[String], _ctx: &mut Ctx) -> Verdict {
+    // 政策同 pkill：killall 一律擋。
+    Verdict::Deny(KILLALL_DENY.to_string())
 }
 
 fn eq(a: &str, b: &str, icase: bool) -> bool {

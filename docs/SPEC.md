@@ -919,11 +919,13 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 | 規則 | 擋 | 放行 |
 |---|---|---|
-| `pkill` 選項在 pattern 之後（BSD 當 pattern、GNU 當選項，兩邊語意不同；兩種解析都實作） | `pkill -f next-server -P 1`、`pkill x -9` | `pkill -P 1 -f next-server`、`pkill -f -- -weird` |
-| `pkill`／`killall` 的 pattern 會命中受保護行程 | `pkill -f claude`、`pkill -f 'cla.de'`、`killall node`、`pkill -f bots/01M` | `pkill -f next-server`、`pkill -x vite`、`killall vite` |
-| pattern 太短（非 `-x` 少於 3 字元）或空字串 | `pkill -f 1`、`pkill ''` | `pkill -x ab` |
-| 沒有 pattern、只靠 `-u`／`-U`／`-G`／`-g`／`-s`／`-t`／`-P 0`｜`-P 1`（`killall -u`／`-t`／`-c`）；`sudo`／`env`／`timeout` 包起來也一樣 | `pkill -u me`、`pkill -P 1`、`killall -u me` | `pkill -P 4242` |
-| `kill` 的目標是 `-1`、`0`（含 `kill -1`、`kill -- -1`、`kill -s KILL -1`） | `kill -9 -1`、`kill 0` | `kill 12345`、`kill -1 4242`、`lsof -ti :3917 \| xargs kill`、`kill -l` |
+| `pkill` 一律擋（不論 `-f`、`-x`、`-P`、`-u`、比對字串）。窄的比對也會命中自己的 shell 或別的 agent（2026-11 兩次違規都是窄比對） | `pkill -f claude`、`pkill -f 'scripts/check.sh changed'`、`pkill -P 1 -f next-server`、`pkill -P 4242`、`pkill -u me`、`pkill` | （無） |
+| `killall` 一律擋 | `killall vite`、`killall -9 chromedriver`、`killall node` | （無） |
+| `pgrep … \| xargs kill`、`ps … \| xargs kill`；`xargs kill` 只准緊接在 `lsof -ti :PORT` 後面 | `pgrep -f claude \| xargs kill`、`ps aux \| xargs kill` | `lsof -ti :3917 \| xargs kill`、`lsof -ti :3917 \| xargs -r kill -9` |
+| `kill` 目標只准數字 PID（可多個）或 `$!`；其他（變數、`$(…)`、`%1`）擋 | `kill $PID`、`kill $(lsof -ti :3917)`、`kill %1` | `kill 12345`、`kill -9 111 222`、`kill $!`、`sleep 30 & kill $!` |
+| `kill` 的目標是 `-1`、`0`（含 `kill -1`、`kill -- -1`、`kill -s KILL -1`） | `kill -9 -1`、`kill 0` | `kill -1 4242`（明確 pid 送 SIGHUP） |
+
+被擋時的訊息都寫明正確做法：啟動時把 PID 記下來（`cmd & echo $!`），收尾時 `kill $!` 或 `kill <PID>`；dev server 用 port：`lsof -ti :PORT | xargs kill`。
 
 受保護名單（`PROTECTED_NAMES`，不加 `-f` 時比對行程名）：`claude codex grok herdr agents-managerd agy antigravity node sh bash zsh sshd`（`node`：claude／codex 的 npm 安裝版行程名就是 node；shell：herdr pane 的 shell）。
 `-f` 時比對整條命令列，拿 `PROTECTED_CMDLINES` 的樣本試（claude 帶 bot 的 `--settings …/bots/<id>/…`、npm 版 `node …/claude-code/cli.js`、codex、grok、`herdr server`、`agents-managerd serve`、agy）。
@@ -943,10 +945,10 @@ PreToolUse 呼叫**不送 daemon、不 spool**；`hook` 子命令依 payload 的
 
 | CLI | 本機 bot | 子 agent | 遠端 bot |
 |---|---|---|---|
-| claude | ✅ 啟動時的 `--settings` 檔多一組 `PreToolUse`（`matcher: "Bash"`，同一支 hook 指令） | ❌ 子 pane 是 `herdr agent start` 開的，沒有 `--settings`；herdr shim 目前不注入 | ❌ 遠端 `hook.sh` 是 POSIX sh，沒有判斷邏輯 |
+| claude | ✅ 啟動時的 `--settings` 檔多一組 `PreToolUse`（`matcher: "Bash"`，同一支 hook 指令）。**既有 bot 要重啟才會拿到新的 `--settings`**（`kill` 規則本身在 hook binary，換 daemon 版本就生效） | ❌ 子 pane 是 `herdr agent start` 開的，沒有 `--settings`；`kill -9 -1`／`kill 0` 沒有守門，`pkill`／`killall` 由 shim 補 | ❌ 遠端 `hook.sh` 是 POSIX sh，沒有判斷邏輯；`pkill`／`killall` 由 shim 補，`kill` 內建沒有守門 |
 | agy | ✅ 全域 `~/.gemini/config/hooks.json` 的具名項多一個 `PreToolUse`（包 `{matcher:"*",hooks}`，指向 dispatcher；dispatcher 對 PreToolUse 原樣轉出 hook 的決策 JSON） | ✅ 全域檔、dispatcher 靠 pane env（子 pane 繼承 `AM_BOT_ID`）判斷歸屬 | ❌ 同上 |
-| grok | ❌ 本版未接（grok 的 `PreToolUse` 可 deny，全域 `~/.grok/hooks/*.json`；要改 `grok_hook.rs` 的事件表與合併邏輯） | （同本機） | ❌ |
-| codex | ❌ codex 0.163 的 hooks 在 `~/.codex/hooks.json`／`config.toml`，**需要使用者在 `/hooks` 審核信任**（改了內容就要重審），不是 per-launch 旗標；本版不去改使用者的 `~/.codex` | ❌ | ❌ |
+| grok | ✅ 本機 grok 的全域 hook 檔（`~/.grok/hooks/agents-manager[-<實例>].json`）多一個 `PreToolUse`（不帶 matcher，guard 只看 shell 指令）；`hooks_json_merged_local`。**既有 grok session 要重啟才會載入新檔** | （同本機，pane env 繼承） | ❌ 遠端 dispatcher 會把每個 PreToolUse 轉去 `hook.sh` spool，所以不帶；shim 補 `pkill`／`killall` |
+| codex | ❌ codex 0.163 的 hooks 在 `~/.codex/hooks.json`／`config.toml`，**需要使用者在 `/hooks` 審核信任**（改了內容就要重審），不是 per-launch 旗標；本版不去改使用者的 `~/.codex`。目前只有 PATH 上的 shim 補 `pkill`／`killall`，`kill -9 -1`、`kill 0` 沒有守門 | ❌ | ❌ |
 
 沒被 hook 蓋到的路徑（子 claude、遠端、codex、grok）由 **PATH 上的 `pkill`／`killall` shim** 補（`crates/am-base/src/kill_shim.rs`）：子 pane 繼承 PATH、遠端也有，argv 已經被 shell 切好，不必解析指令字串。
 

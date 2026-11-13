@@ -71,38 +71,43 @@
         let mut v: Vec<(&str, Vec<&str>, bool)> = Vec::new();
         let mut add = |tool: &'static str, args: &[&'static str], deny: bool| v.push((tool, args.to_vec(), deny));
         // ── 正常用法：放行 ──
-        add("pkill", &["-f", "next start -p 3917"], false);
-        add("pkill", &["-f", "next-server"], false);
-        add("pkill", &["-TERM", "-f", "vite --port 5173"], false);
-        add("pkill", &["-9", "-f", "next-server"], false);
-        add("pkill", &["-P", "1", "-f", "next-server"], false);
-        add("pkill", &["-U", "1000", "-f", "next-server"], false);
-        add("pkill", &["-f", "--", "-weird-name"], false);
-        add("pkill", &["-f", "vite --port 5173"], false);
-        add("pkill", &["-x", "vite"], false);
-        add("pkill", &["-x", "ab"], false);
-        add("pkill", &["-P", "4242"], false);
-        add("pkill", &["-f", "python3 -m http.server 8000"], false);
-        add("pkill", &["-f", "(.*)*Z"], false);
+        add("pkill", &["-f", "next start -p 3917"], true);
+        add("pkill", &["-f", "next-server"], true);
+        add("pkill", &["-TERM", "-f", "vite --port 5173"], true);
+        add("pkill", &["-9", "-f", "next-server"], true);
+        add("pkill", &["-P", "1", "-f", "next-server"], true);
+        add("pkill", &["-U", "1000", "-f", "next-server"], true);
+        add("pkill", &["-f", "--", "-weird-name"], true);
+        // 沒有比對字串：不知道要殺誰，擋；`-P <明確 PID>` 範圍已定，放行。
+        add("pkill", &[], true);
+        add("pkill", &["-f"], true);
+        add("pkill", &["-x"], true);
+        add("pkill", &["-P", "4242"], true);
+        add("killall", &[], true);
+        add("killall", &["-9"], true);
+        add("pkill", &["-f", "vite --port 5173"], true);
+        add("pkill", &["-x", "vite"], true);
+        add("pkill", &["-x", "ab"], true);
+        add("pkill", &["-P", "4242"], true);
+        add("pkill", &["-f", "python3 -m http.server 8000"], true);
+        add("pkill", &["-f", "(.*)*Z"], true);
         // 可判斷語法以外（shim 的 grep 與 Rust 的迷你 ERE 語意不同的地方）：兩邊一律「判不出來」→ 放行。
         for pat in ["claude**", "claude{0}", "claude{", "claude}", "claude|", "|claude", "(claude", "claude)", "()claude", "[claude", "claude]", "*claude", "+claude", "^*claude", "claude$x", "x^claude", "cla\\dde", "cla\\bde", "cl[a-c]ude", "cl[[:alpha:]]ude", "cl[]a]ude", "cl[a-]ude", "cl[^]ude", "cla\\ude", "cla\\", "cla\tde", "ééé", "claude\n"] {
-            add("pkill", &["-f", pat], false);
-            add("pkill", &[pat], false);
-            add("killall", &["-r", pat], false);
+            add("pkill", &["-f", pat], true);
+            add("pkill", &[pat], true);
+            add("killall", &["-r", pat], true);
         }
-        add("pkill", &["-f", nine_deep], false);
-        add("pkill", &["-f", too_long_regex], false);
+        add("pkill", &["-f", nine_deep], true);
+        add("pkill", &["-f", too_long_regex], true);
         add("pkill", &["é"], true); // 位元組數不到 3：兩邊都當太短
-        add("pkill", &["-x", "ééé"], false);
-        add("pkill", &["-f", long_pattern], false);
-        add("pkill", &[], false);
-        add("killall", &["Chrome"], false);
-        add("killall", &["vite"], false);
-        add("killall", &["-s", "TERM", "next-server"], false);
-        add("killall", &["-9", "chromedriver"], false);
-        add("killall", &["-m", "next-server"], false);
-        add("killall", &["-m", "vite.*"], false);
-        add("killall", &[], false);
+        add("pkill", &["-x", "ééé"], true);
+        add("pkill", &["-f", long_pattern], true);
+        add("killall", &["Chrome"], true);
+        add("killall", &["vite"], true);
+        add("killall", &["-s", "TERM", "next-server"], true);
+        add("killall", &["-9", "chromedriver"], true);
+        add("killall", &["-m", "next-server"], true);
+        add("killall", &["-m", "vite.*"], true);
         // ── 確定廣域：擋 ──
         add("pkill", &["-f", "next-server", "-P", "1"], true); // 事故那行（-P 1 在 BSD 是 pattern）
         add("pkill", &["next-server", "-P", "1"], true);
@@ -125,11 +130,11 @@
         }
         add("pkill", &["claude$"], true);
         add("pkill", &["(codex|grok)$"], true);
-        add("pkill", &["-f", "claude$"], false); // -f 比整條命令列，樣本沒有以 claude 結尾的
+        add("pkill", &["-f", "claude$"], true); // -f 比整條命令列，樣本沒有以 claude 結尾的
         add("pkill", &["-x", "cla.de"], true);
         add("pkill", &["-ix", "CLAUDE"], true);
-        add("pkill", &["-f", "zzz.*claude"], false);
-        add("pkill", &["-f", "cla(ud)+x"], false);
+        add("pkill", &["-f", "zzz.*claude"], true);
+        add("pkill", &["-f", "cla(ud)+x"], true);
         add("killall", &["-r", "cl[a-z]ude"], true);
         add("killall", &["-r", "^claude$"], true);
         add("killall", &["-r", "^(codex|grok)$"], true);
@@ -167,7 +172,7 @@
         let mut early = vec!["-f", "claude"];
         early.extend(benign.iter().copied());
         let early: &'static [&'static str] = Box::leak(early.into_boxed_slice());
-        add("pkill", late, false);
+        add("pkill", late, true);
         add("pkill", early, true);
         v
     }
@@ -197,12 +202,12 @@
     }
 
     #[test]
-    fn the_1884_incident_line_is_denied_with_the_bsd_explanation() {
+    fn the_1884_incident_line_is_denied_and_says_what_to_do_instead() {
         let env = Env::new();
         let (code, out, err) = env.run("sh", "pkill", &["-f", "next-server", "-P", "1"]);
         assert_eq!(code, DENIED_EXIT);
         assert!(out.is_empty());
-        assert!(err.contains("-P") && err.contains("BSD") && err.contains("#1884") && err.contains("kill <自己啟動時記下的 PID>"), "{err}");
+        assert!(err.contains("pkill 一律") && err.contains("lsof -ti :PORT") && err.contains("kill <自己啟動時記下的 PID>"), "{err}");
     }
 
     #[test]
@@ -217,15 +222,17 @@
         let old = env.root.join("bots/01OLD/bin");
         write_exec(&old.join("pkill"), "#!/bin/sh\necho OLD-SHIM\n");
         let path = format!("{}:{}:{}:{}:/usr/bin:/bin", old.display(), other.display(), env.root.join("shim").display(), env.root.join("real").display());
+        // 政策：pkill 一律擋（不論有沒有真的 pkill 可以走）；這裡只確認擋下、不跑任何一支 pkill。
         let out = Command::new("sh").arg(env.root.join("shim/pkill")).args(["-f", "next-server"]).env("PATH", path).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "-f\nnext-server\n", "要走到 real/pkill，不是舊 shim 或別顆 bot 的 shim");
+        assert_eq!(out.status.code(), Some(DENIED_EXIT), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.stdout.is_empty(), "擋下時不能呼叫真的或舊的 pkill");
         // marker 認得出不在 bot 目錄的另一份拷貝。
         let copy = env.root.join("elsewhere");
         write_exec(&copy.join("pkill"), shim_sh());
         let path = format!("{}:{}:{}:/usr/bin:/bin", copy.display(), env.root.join("shim").display(), env.root.join("real").display());
         let out = Command::new("/bin/sh").arg(env.root.join("shim/pkill")).args(["-x", "vite"]).env("PATH", path).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "-x\nvite\n");
+        assert_eq!(out.status.code(), Some(DENIED_EXIT));
+        assert!(out.stdout.is_empty());
     }
 
     #[test]
@@ -245,24 +252,20 @@
         let _ = path;
     }
 
-    /// `pkill -x node`／`pkill -f node`／`killall node` 被擋時，訊息要說明原因（node 也是 claude／codex 的行程名）並直接給替代寫法。
+    /// 政策一律擋：訊息都要給替代寫法（記下 PID、port）。
     #[test]
-    fn denying_node_explains_why_and_gives_the_alternative() {
+    fn denying_always_gives_the_alternative() {
         let env = Env::new();
-        for (tool, args) in [("pkill", vec!["-x", "node"]), ("pkill", vec!["-f", "node"]), ("killall", vec!["node"]), ("killall", vec!["-r", "^node$"])] {
+        for (tool, args) in [("pkill", vec!["-x", "node"]), ("pkill", vec!["-f", "claude"]), ("killall", vec!["node"]), ("killall", vec!["-r", "^node$"])] {
             let (code, out, err) = env.run("sh", tool, &args);
             assert_eq!(code, DENIED_EXIT, "{tool} {args:?}");
             assert!(out.is_empty());
-            assert!(err.contains("也是 claude／codex") && err.contains("行程名"), "原因：{tool} {args:?}\n{err}");
-            assert!(err.contains("lsof -ti :PORT | xargs kill") && err.contains("kill <PID>"), "替代寫法：{tool} {args:?}\n{err}");
+            assert!(err.contains("lsof -ti :PORT") && err.contains("kill <自己啟動時記下的 PID>"), "替代寫法：{tool} {args:?}\n{err}");
             // Rust hook 同一段話。
             let cmd = std::iter::once(tool.to_string()).chain(args.iter().map(|a| am_base::hosts::sh_quote(a))).collect::<Vec<_>>().join(" ");
             let Verdict::Deny(r) = check_command(&cmd) else { panic!("{cmd}") };
-            assert!(r.contains("也是 claude／codex") && r.contains("lsof -ti :PORT | xargs kill") && r.contains("kill <PID>"), "{r}");
+            assert!(r.contains("lsof -ti :PORT") && r.contains("kill <"), "{r}");
         }
-        // 別的名字不帶這段。
-        let (_, _, err) = env.run("sh", "pkill", &["claude"]);
-        assert!(!err.contains("也是 claude／codex"), "{err}");
     }
 
     #[test]
@@ -270,10 +273,9 @@
         let env = Env::new();
         let args = ["-f", "--", "next start -p 3917", "a b", "$HOME", "`x`", "zz-no-such", "it's"];
         let (code, out, err) = env.run("sh", "pkill", &args);
-        // `-- a b …` 之後全是 pattern、`a b` 等都不是受保護名單：放行。
-        assert_eq!(code, 0, "{err}");
-        let want: String = args.iter().map(|a| format!("{a}\n")).collect();
-        assert_eq!(out, want);
+        // 政策：pkill 一律擋，參數再怎麼特殊都一樣；不能有任何輸出（沒有真的 pkill 被呼叫）。
+        assert_eq!(code, DENIED_EXIT, "{err}");
+        assert!(out.is_empty(), "{out}");
     }
 
     #[test]

@@ -322,6 +322,7 @@ am_broad() {
 
 # ── pkill ─────────────────────────────────────────────────────────────
 am_check_pkill() {
+    am_deny "pkill 一律不准用（不論 -f、-P、-x 或比對字串；窄的比對也會命中自己的 shell 或別的 agent）。"
     _pk_short='PUugGstTFJjMN'
     _pk_long='parent euid uid pgroup group session terminal signal pidfile runstates ns nslist older newer'
     am_parse gnu "$_pk_short" "$_pk_long" "$@"
@@ -375,8 +376,10 @@ am_check_pkill() {
             case $VAL in
                 0 | 1) am_deny "沒有比對字串，只用 -u／-g／-s／-t／-P 1 這類條件，會殺掉一整批行程（含其他 agent）。" ;;
             esac
+            # `-P 4242`：明確父行程，放行。
+            return 0
         fi
-        return 0
+        am_deny "沒有比對字串，不知道要殺哪些行程（裸 \`pkill\`、\`pkill -f\` 都是這種）。要殺誰就把名字或完整命令列寫進 pattern。"
     fi
     _i=1
     while [ "$_i" -le "$P_N" ]; do
@@ -402,6 +405,7 @@ am_signalish() {
 }
 
 am_check_killall() {
+    am_deny "killall 一律不准用（會殺掉同名的全部行程，包含其他 agent）。"
     # `-s`：Linux 是帶訊號的選項、BSD 是「只顯示」旗標；後面接得像訊號才當帶值。
     _n=$#
     while [ "$_n" -gt 0 ]; do
@@ -424,7 +428,7 @@ am_check_killall() {
         if am_val s:u l:user s:t s:c; then
             am_deny "沒有行程名稱、只用 -u／-t／-c 條件，會殺掉那個使用者／終端的所有行程（含其他 agent）。"
         fi
-        return 0
+        am_deny "沒有行程名稱，不知道要殺哪些行程。要殺誰就把名字寫在後面（例：\`killall vite\`）；要殺自己的 PID 請用 \`kill <PID>\`。"
     fi
     _i=1
     while [ "$_i" -le "$P_N" ]; do

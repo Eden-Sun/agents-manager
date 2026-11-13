@@ -14,6 +14,9 @@ use serde_json::{json, Value};
 use super::setup::{grok_hooks_file, grok_home, local_grok_dispatch_sh, GROK_DISPATCH_SH};
 
 const EVENTS: [&str; 2] = ["SessionStart", "Stop"];
+/// 本機版多訂 `PreToolUse`（廣域 kill 守門，#1884）：hook 只在要擋時印決策 JSON，放行不送 daemon、不 spool。
+/// 遠端的 dispatcher 會把每一個 PreToolUse 轉進 `hook.sh` 去 spool，所以遠端不帶（見 [`hooks_json_merged`]）。
+const LOCAL_EVENTS: [&str; 3] = ["SessionStart", "Stop", "PreToolUse"];
 
 fn is_ours(command: &str, dispatcher: &str, proven_legacy: &std::collections::HashSet<String>) -> bool {
     let command = command.trim();
@@ -26,15 +29,20 @@ fn our_hook(dispatcher: &str) -> Value {
 
 /// 既有的 hook 檔內容（沒有或讀不懂就是 `None`）合併進我們這顆 daemon 的 dispatcher，回要寫的 JSON 文字。
 pub fn hooks_json_merged(existing: Option<&str>, dispatcher: &str) -> String {
-    hooks_json_merged_with_legacy(existing, dispatcher, &std::collections::HashSet::new())
+    hooks_json_merged_with_legacy(existing, dispatcher, &std::collections::HashSet::new(), &EVENTS)
 }
 
-fn hooks_json_merged_with_legacy(existing: Option<&str>, dispatcher: &str, proven_legacy: &std::collections::HashSet<String>) -> String {
+/// 本機 grok：同 [`hooks_json_merged`]，外加 `PreToolUse`（廣域 kill 守門）。
+pub fn hooks_json_merged_local(existing: Option<&str>, dispatcher: &str) -> String {
+    hooks_json_merged_with_legacy(existing, dispatcher, &std::collections::HashSet::new(), &LOCAL_EVENTS)
+}
+
+fn hooks_json_merged_with_legacy(existing: Option<&str>, dispatcher: &str, proven_legacy: &std::collections::HashSet<String>, events: &[&str]) -> String {
     let mut root: Value = existing.and_then(|t| serde_json::from_str(t).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
     if !root.get("hooks").is_some_and(Value::is_object) {
         root["hooks"] = json!({});
     }
-    for event in EVENTS {
+    for &event in events {
         let groups = root["hooks"][event].take();
         let mut groups: Vec<Value> = groups.as_array().cloned().unwrap_or_default();
         let mut have_exact = false;
@@ -178,7 +186,7 @@ fn ensure(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePat
     let existing = read_hook_file(hooks_path)?;
     let dispatcher = dispatcher.to_string_lossy().into_owned();
     let legacy = proven_legacy_dispatchers(existing.as_deref(), &dispatcher);
-    let merged = hooks_json_merged_with_legacy(existing.as_deref(), &dispatcher, &legacy);
+    let merged = hooks_json_merged_with_legacy(existing.as_deref(), &dispatcher, &legacy, &LOCAL_EVENTS);
     let same = existing.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()) == serde_json::from_str::<Value>(&merged).ok();
     let mut changed = !script_ok;
     if !same {

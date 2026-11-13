@@ -11,24 +11,23 @@
     }
 
     #[test]
-    fn the_1884_incident_command_is_denied_with_the_bsd_explanation() {
+    fn the_1884_incident_command_is_denied_and_says_what_to_do_instead() {
         let cmd = r#"agent-browser --session x close; pkill -f "next start -p 3917"; pkill -f "next-server" -P 1 2>/dev/null; true"#;
         let r = reason(cmd);
-        assert!(r.contains("-P") && r.contains("BSD") && r.contains("lsof -ti :PORT"), "{r}");
+        assert!(r.contains("pkill 一律") && r.contains("lsof -ti :PORT") && r.contains("kill $!"), "{r}");
         assert!(denied(r#"pkill -f "next-server" -P 1"#));
     }
 
     #[test]
-    fn options_after_the_pattern_are_misordered_but_before_it_is_fine_on_both_parsers() {
-        // GNU（Linux）永遠把 `-P 1` 當選項、BSD（macOS）當 pattern：寫在 pattern 之前兩邊語意才一致。
+    fn every_pkill_form_is_denied_whatever_the_options_and_pattern() {
         assert!(denied("pkill next-server -P 1"));
         assert!(denied("pkill -f next-server -9"));
         assert!(denied("pkill -f next-server -u eddie"));
-        assert!(!denied("pkill -P 1 -f next-server"));
-        assert!(!denied("pkill -9 -f next-server"));
-        assert!(!denied("pkill -f next-server"));
-        assert!(!denied("pkill -f -- -weird-name"), "`--` 之後的 `-` 開頭字是 pattern，兩邊一致");
-        assert!(!denied("pkill -f 'vite --port 5173'"), "引號裡的 `--port` 是 pattern 的一部分");
+        assert!(denied("pkill -P 1 -f next-server"));
+        assert!(denied("pkill -9 -f next-server"));
+        assert!(denied("pkill -f next-server"));
+        assert!(denied("pkill -f -- -weird-name"));
+        assert!(denied("pkill -f 'vite --port 5173'"));
     }
 
     #[test]
@@ -47,11 +46,13 @@
         assert!(!denied("kill -9 12345 67890"));
         assert!(!denied("kill -TERM 4242"));
         assert!(!denied("kill -1 4242"), "對明確 pid 送 SIGHUP（reload）不是廣域");
+        assert!(!denied("kill 111 222 333"), "多個數字 PID");
+        assert!(!denied("sleep 9 & kill $!"), "$! 是上一個背景行程");
         assert!(!denied("kill -l"));
         assert!(!denied("lsof -ti :3917 | xargs kill"));
         assert!(!denied("lsof -ti :3917 | xargs kill -9"));
-        assert!(!denied("kill $(lsof -ti :3917)"));
-        assert!(!denied("kill -9 $(pgrep -f next-server)"), "動態展開的 PID 判不出來，放行");
+        assert!(denied("kill -9 $(pgrep -f next-server)"), "只准數字 PID 與 $!");
+        assert!(denied("kill $(lsof -ti :3917)"));
         assert!(!denied("echo hello && ls -la"));
         assert!(!denied(""));
     }
@@ -83,17 +84,17 @@
     }
 
     #[test]
-    fn narrow_patterns_pass() {
-        assert!(!denied("pkill -f next-server"));
-        assert!(!denied("pkill -f 'next start -p 3917'"));
-        assert!(!denied("pkill -f 'vite --port 5173'"));
-        assert!(!denied("pkill -f 'bun run dev'"));
-        assert!(!denied("pkill -x vite"));
-        assert!(!denied("pkill -P 4242"));
-        assert!(!denied("pkill -f 'python3 -m http.server 8000'"));
-        assert!(!denied("killall vite"));
-        assert!(!denied("killall -s TERM next-server"));
-        assert!(!denied("killall -9 chromedriver"));
+    fn narrow_pkill_and_killall_are_denied_too() {
+        assert!(denied("pkill -f next-server"));
+        assert!(denied("pkill -f 'next start -p 3917'"));
+        assert!(denied("pkill -f 'vite --port 5173'"));
+        assert!(denied("pkill -f 'bun run dev'"));
+        assert!(denied("pkill -x vite"));
+        assert!(denied("pkill -P 4242"));
+        assert!(denied("pkill -f 'python3 -m http.server 8000'"));
+        assert!(denied("killall vite"));
+        assert!(denied("killall -s TERM next-server"));
+        assert!(denied("killall -9 chromedriver"));
         assert!(!denied("pgrep -f claude"), "pgrep 只列不殺");
     }
 
@@ -105,7 +106,7 @@
         assert!(denied("pkill -u eddie"));
         assert!(denied("pkill -P 1"));
         assert!(denied("killall -u eddie"));
-        assert!(!denied("pkill -x ab"), "-x 是整串相等，短也只命中同名");
+        assert!(denied("pkill -x ab"));
     }
 
     #[test]
@@ -130,9 +131,9 @@
         assert!(denied("if true; then pkill -f claude; fi"));
         assert!(denied("{ pkill -f claude; }"));
         // 重導向不是 pattern：`2>&1`、`> /dev/null` 不會讓窄的指令變成「太短」。
-        assert!(!denied("pkill -f next-server 2>&1"));
-        assert!(!denied("pkill -f next-server >/dev/null 2>&1 &"));
-        assert!(!denied("pkill -f next-server > /dev/null"));
+        assert!(denied("pkill -f next-server 2>&1"));
+        assert!(denied("pkill -f next-server >/dev/null 2>&1 &"));
+        assert!(denied("pkill -f next-server > /dev/null"));
         assert!(denied("pkill -f claude 2>/dev/null"));
     }
 
@@ -230,31 +231,28 @@
     fn hostile_regexes_are_bounded_and_let_through_with_a_log() {
         let started = std::time::Instant::now();
         // 災難性回溯的寫法：NFA 線性時間，照常判斷（沒命中就放行，不需要記 log）。
+        // pkill 一律擋，所以這裡只驗證判斷很快（不回溯），不管是擋還是放行。
         for cmd in ["pkill -f '(.*)*Z'", "pkill -f '(a*)*(b*)*(c*)*Z'", "pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)Z'"] {
-            let v = check_command_logged(cmd);
-            assert_eq!(v.0, Verdict::Allow, "{cmd}");
+            assert!(denied(cmd), "{cmd}");
         }
         // 會命中的也照擋（不會因為「太複雜」而漏掉）。
         assert!(denied("pkill -f '(.*)*claude'"));
         assert!(denied("pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.).*claude'"));
         // 兩萬層括號：長度上限，直接放行並記 log（不 stack overflow）。
+        // pkill 一律擋，所以超長 pattern 不再需要判斷語法；這裡只驗證判斷不會 stack overflow、很快回來。
         let deep = format!("pkill -f '{}x{}'", "(".repeat(20_000), ")".repeat(20_000));
-        let v = check_command_logged(&deep);
-        assert_eq!(v.0, Verdict::Allow);
-        assert!(v.1.iter().any(|n| n.contains("可判斷")), "{:?}", v.1);
+        assert!(denied(&deep));
+        let deep_kill = format!("kill 4242 # '{}'", "(".repeat(20_000));
+        assert!(!denied(&deep_kill));
         // 長度在上限內、但巢狀超過 8 層：放行並記 log。
+        // pkill 一律擋：巢狀深度與 pattern 數不影響結論（判斷仍必須快、不 stack overflow）。
         for n in [9, 40] {
             let nested = format!("pkill -f '{}claude{}'", "(".repeat(n), ")".repeat(n));
-            let v = check_command_logged(&nested);
-            assert_eq!(v.0, Verdict::Allow, "{n} 層");
-            assert!(v.1.iter().any(|x| x.contains("可判斷")), "{:?}", v.1);
+            assert!(denied(&nested), "{n} 層");
         }
-        assert!(denied("pkill -f '((((((((claude))))))))'"), "8 層還在範圍內");
-        // 超過一條指令最多比對的 pattern 數：多出來的不比對、放行並記 log。
+        assert!(denied("pkill -f '((((((((claude))))))))'"));
         let many = format!("pkill -f {} claude", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "));
-        let v = check_command_logged(&many);
-        assert_eq!(v.0, Verdict::Allow);
-        assert!(v.1.iter().any(|n| n.contains("最多比對")), "{:?}", v.1);
+        assert!(denied(&many));
         assert!(denied(&format!("pkill -f claude {}", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "))));
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "hook 不能慢：{:?}", started.elapsed());
         assert!(denied("pkill -f 'cla(u|a)de'"));
@@ -304,7 +302,7 @@
         assert!(denied("env FOO=1 pkill -U 1000"));
         assert!(denied("timeout 5 pkill -U 1000"));
         assert!(denied("nohup pkill -G staff &"));
-        assert!(!denied("pkill -U 1000 -f next-server"), "有窄 pattern 的不擋");
+        assert!(denied("pkill -U 1000 -f next-server"), "有窄 pattern 的不擋");
         assert!(denied("pkill -f next-server -U 1000"), "選項寫在 pattern 之後");
     }
 
@@ -314,8 +312,8 @@
         assert!(denied("killall -m 'cla.de'"));
         assert!(denied("killall -r '.*'"));
         assert!(denied("sudo killall -m node"));
-        assert!(!denied("killall -m 'next-server'"));
-        assert!(!denied("killall -m 'vite.*'"));
+        assert!(denied("killall -m 'next-server'"));
+        assert!(denied("killall -m 'vite.*'"));
     }
 
     #[test]
@@ -327,8 +325,8 @@
         assert!(!denied(r#"echo '$(pkill -f claude)'"#), "單引號裡不展開");
         assert!(!denied(r#"echo "\$(pkill -f claude)""#), "跳脫的 `$` 不展開");
         assert!(!denied(r#"echo "$(echo ')')""#), "引號裡的 `)` 不結束 `$(`");
-        assert!(!denied("kill $(cat /tmp/pid)"));
-        assert!(!denied("pkill -f $(cat /tmp/name)"), "動態 pattern 判不出來，放行");
+        assert!(denied("kill $(cat /tmp/pid)"), "只准數字 PID 與 $!");
+        assert!(denied("pkill -f $(cat /tmp/name)"), "動態 pattern 判不出來，放行");
     }
 
     #[test]
@@ -341,9 +339,9 @@
         assert!(denied(r#"env --split-string 'killall node'"#));
         assert!(denied(r#"sudo env -S "kill -9 -1""#));
         assert!(denied(r#"env -S "env -S 'pkill -f claude'""#));
-        assert!(!denied(r#"env -S "pkill -f next-server""#));
+        assert!(denied(r#"env -S "pkill -f next-server""#));
         assert!(!denied(r#"env -S "echo pkill -f claude""#));
-        assert!(!denied("env -u FOO pkill -f next-server"));
+        assert!(denied("env -u FOO pkill -f next-server"));
         assert!(denied("env -u FOO pkill -f claude"));
     }
 
@@ -373,11 +371,11 @@
         assert_eq!(g, Guard::Pass);
         assert!(l.iter().any(|x| x.contains("解析失敗")), "{l:?}");
         // 乾淨的放行不寫 log。
-        let ok = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pkill -f next-server"}}"#;
+        let ok = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"kill 4242"}}"#;
         let (g, l) = logged("claude", "", ok);
         assert_eq!(g, Guard::Pass);
         assert!(l.is_empty(), "{l:?}");
-        assert!(notes("pkill -f next-server").is_empty());
+        assert!(notes("kill 4242").is_empty());
     }
 
     #[test]
@@ -464,4 +462,20 @@
         // `-c` 之後的字是 `$0`／參數，不是選項。
         assert!(!denied("bash -n -c 'pkill -f claude' +n"));
         assert!(denied("bash -c 'echo no' ; bash <<'EOF'\npkill -f claude\nEOF"));
+    }
+
+    #[test]
+    fn every_pkill_and_killall_is_denied_and_kill_only_takes_numeric_pids_or_dollar_bang() {
+        for cmd in ["pkill", "pkill -f", "pkill -x", "pkill -9", "pkill -P 4242", "killall", "killall -9", "killall -s TERM", "pgrep -f claude | xargs kill", "kill $PID", "kill %1"] {
+            assert!(denied(cmd), "應該擋：{cmd}");
+        }
+        assert!(reason("pkill -f claude").contains("一律"));
+        assert!(reason("kill $PID").contains("數字 PID"));
+        assert!(!denied("kill 4242"));
+        assert!(!denied("kill -9 4242 4243"));
+        assert!(!denied("sleep 30 & kill $!"));
+        assert!(!denied("lsof -ti :3917 | xargs kill"));
+        assert!(!denied("lsof -ti :3917 | xargs -r kill -9"));
+        assert!(denied("ps aux | grep next | xargs kill"), "xargs kill 只准來自 lsof");
+        assert!(denied("lsof -ti :3917 | xargs pkill"));
     }

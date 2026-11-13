@@ -194,7 +194,7 @@ Full field reference: [SPEC §5](docs/SPEC.md).
 - **Third-party services are off by default**: the Claude API (one-off LLM jobs, changelog triage, message translation), the Jev judge layer (external API key) and the sharing entry point must each be turned on explicitly. The translate button only spends money when you click it. Simplified-to-Traditional Chinese conversion happens locally and does not call any API.
 - **Web Push**: notifications are delivered through the browser vendor's push service. The content is encrypted, but the push service can see when and to whom notifications are sent. You can turn them off in settings.
 - **Shared bots**: sharing links let restricted or trusted bots be used by other people through a separate entry point; see [SPEC §20](docs/SPEC.md).
-- **Broad-kill guard**: a hook blocks `pkill`/`kill` commands that could terminate other agents. Do not work around it by writing the same command differently.
+- **Broad-kill guard**: a PreToolUse hook (claude, local grok) and a PATH shim for `pkill`/`killall` block broad kills that could terminate other agents: target-less `pkill`/`killall`, patterns matching agent process names, option order that BSD `pkill` misreads, `kill -1`/`kill 0`. Explicit PIDs and `lsof -ti :PORT | xargs kill` pass. Do not work around it by writing the same command differently. See SPEC §4.4c for coverage per CLI.
 
 ## Development and verification
 
