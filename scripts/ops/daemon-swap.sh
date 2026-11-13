@@ -41,7 +41,8 @@ HERDR="${HERDR_BIN:-herdr}"
 # 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 同檔的 responder_bot_id（協調者：常駐、haiku，便宜）
 # ＞ 同檔的 manager_bot_id（巡檢 AGM 本人）。自測是真的送一則 prompt 驗送達線，每趟換版一次（一天可達數十次）：
 # 以前直接落到 manager_bot_id，等於每趟都叫醒 sonnet 的巡檢、背著它 20 多萬 token 的 context（使用者 2026-11-02 裁示改送協調者）。
-# 協調者沒有在跑（no active run）時，退回 manager_bot_id 再試一次，送達自測不因此少做。
+# 協調者沒有在跑（no active run）、或暫時不能收 prompt（409 agent is blocked／busy／needs permission／run is not running）時，
+# 退回 manager_bot_id 再試一次，送達自測不因此少做；全部都不能收就略過並計數（不 ABORT：協調者卡在權限提示，會讓每趟換版都白跑，2026-11-13 連 35 輪）。
 # 以前最後一順位是寫死的 browser-gc child id（issue #882）：那顆早就不跑，自測連續略過上百次（使用者 2026-10-12 裁示改指 AGM）。
 # 都拿不到就留空，3b 照「對象沒有 run」的既有路徑略過並計數。
 PROBE_BOT="${SWAP_PROBE_BOT:-}"
@@ -511,7 +512,7 @@ fi
 # 其他非 200 一律當成送達線有問題，不換 binary。
 # 例外：自測對象根本沒有在跑（`no active run`，例如 Linux 主機上沒有桌面所以 offline 的 browser-gc child）——
 # 沒有東西可以送，不是送達線壞了；這一步略過（上面的 herdr 讀取仍然做了），不能讓每趟自動換版都卡在這。
-PROBE_SKIPPED=no; PROBE_SKIP_WHY=""
+PROBE_SKIPPED=no; PROBE_SKIP_WHY=""; PROBE_BLOCKED_REPLY=""
 i=0
 # 沒有任何自測對象（runtime.json 讀不到）：跟「對象沒有 run」同一條路略過並計數，不是送達線壞了。
 if [ -z "$PROBE_BOT" ]; then
@@ -539,6 +540,15 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
                 continue
             fi
             PROBE_SKIPPED=yes; PROBE_SKIP_WHY="輸入框有字"; break ;;
+        # 目標暫時不能收 prompt（卡在權限／選擇提示 blocked、busy、needs permission、run 還沒進 running）：跟 draft 同一條路，
+        # 不是送達線壞了；改送 fallback，沒有就略過並計數。其他 409 與錯誤仍 ABORT。
+        409*"agent is blocked"*|409*"agent is busy"*|409*"agent_busy"*|409*"needs permission"*|409*"needs_permission"*|409*"run is not running"*)
+            if [ -n "$PROBE_FALLBACK" ] && [ "$PROBE_FALLBACK" != "$PROBE_BOT" ]; then
+                log "3b 自測對象 $PROBE_BOT 暫時不能收 prompt（$(printf '%s' "$PROBE" | head -c 120)），改送 fallback $PROBE_FALLBACK"
+                PROBE_BOT="$PROBE_FALLBACK"; PROBE_FALLBACK=""; i=$((i - 1))
+                continue
+            fi
+            PROBE_SKIPPED=yes; PROBE_SKIP_WHY="目標不能收 prompt"; PROBE_BLOCKED_REPLY=$(printf '%s' "$PROBE" | head -c 120); break ;;
         *) log "ABORT: 自測 prompt 回 $(printf '%s' "$PROBE" | head -c 160)"; exit 3 ;;
     esac
 done
@@ -547,6 +557,8 @@ case "$PROBE" in
     *) if [ "$PROBE_SKIPPED" = yes ]; then
            if [ "$PROBE_SKIP_WHY" = "輸入框有字" ]; then
                log "3b 自測略過：$PROBE_BOT 輸入框有未送出的字（draft），不自動清別人的輸入框"
+           elif [ "$PROBE_SKIP_WHY" = "目標不能收 prompt" ]; then
+               log "3b 自測略過：$PROBE_BOT 暫時不能收 prompt（blocked／busy／needs permission：${PROBE_BLOCKED_REPLY:-?}），沒有可退回的對象"
            else
                log "3b 自測略過：$PROBE_BOT 沒有在跑（no active run），沒有東西可以送"
            fi

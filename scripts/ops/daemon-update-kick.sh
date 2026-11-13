@@ -472,8 +472,10 @@ esac
 _skips=$(cat "$DIR/daemon-swap.probe-skips" 2>/dev/null)
 case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
 if [ "$_skips" -ge 3 ]; then
-  _why=$(cat "$DIR/daemon-swap.probe-skips.why" 2>/dev/null); [ "$_why" = "輸入框有字" ] || _why="對象沒有 run"
-  if [ "$_why" = "輸入框有字" ]; then
+  _why=$(cat "$DIR/daemon-swap.probe-skips.why" 2>/dev/null); case "$_why" in "輸入框有字"|"目標不能收 prompt") ;; *) _why="對象沒有 run" ;; esac
+  if [ "$_why" = "目標不能收 prompt" ]; then
+    alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（自測對象卡在 blocked／busy／等權限回應，退回的對象也不能收）：到自測對象的 pane 回應它卡住的提示，或在 ${DIR}/runtime.json 設 swap_probe_bot_id 改指一顆常駐、會回 ok 的 bot"
+  elif [ "$_why" = "輸入框有字" ]; then
     alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（自測對象的輸入框有未送出的字，腳本不會替人清）：到那顆 bot 的 pane 清掉輸入框殘字（例如 Claude 滿意度問卷落進去的「0」），或在 ${DIR}/runtime.json 設 swap_probe_bot_id 改指別顆"
   else
     alert swap_probe_skipped "換版前的送達自測已連續 ${_skips} 次略過（${_why}）：在 ${DIR}/runtime.json 設 swap_probe_bot_id 指到一顆常駐、會回 ok 的 bot（沒設時依序用 responder_bot_id、manager_bot_id）"

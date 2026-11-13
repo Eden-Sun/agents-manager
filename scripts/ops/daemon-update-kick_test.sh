@@ -450,6 +450,16 @@ run >/dev/null
 check_no "略過 2 次不推" "swap_probe_skipped" "$AGM_DIR/alerts.log"
 teardown
 
+setup
+ci "$C3" success
+echo 3 > "$AGM_DIR/daemon-swap.probe-skips"
+echo "目標不能收 prompt" > "$AGM_DIR/daemon-swap.probe-skips.why"
+export STUB_SWAP_RC=0
+run >/dev/null
+check "blocked 略過 3 次推 swap_probe_skipped" "swap_probe_skipped" "$AGM_DIR/alerts.log"
+check "alert 內容講卡在 blocked／busy" "卡在 blocked／busy" "$(LOG)"
+teardown
+
 # 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
 setup
 ci "$C3" success
