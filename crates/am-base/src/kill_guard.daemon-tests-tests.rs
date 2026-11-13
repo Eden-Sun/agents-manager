@@ -31,16 +31,6 @@
     }
 
     #[test]
-    fn bsd_stops_at_the_first_non_option_but_gnu_permutes() {
-        let a: Vec<String> = ["-f", "x", "-P", "1"].iter().map(|s| s.to_string()).collect();
-        let bsd = parse_pkill(&a, true);
-        let gnu = parse_pkill(&a, false);
-        assert_eq!(bsd.patterns, ["x", "-P", "1"], "BSD：第一個非選項之後全是 pattern");
-        assert_eq!(gnu.patterns, ["x"], "GNU：-P 1 是選項");
-        assert_eq!(gnu.value(&["P"]), Some("1"));
-    }
-
-    #[test]
     fn explicit_pids_and_port_based_kills_pass() {
         assert!(!denied("kill 12345"));
         assert!(!denied("kill -9 12345 67890"));
@@ -55,6 +45,53 @@
         assert!(denied("kill $(lsof -ti :3917)"));
         assert!(!denied("echo hello && ls -la"));
         assert!(!denied(""));
+    }
+
+    #[test]
+    fn xargs_kill_only_follows_lsof_with_an_explicit_port() {
+        for cmd in [
+            "lsof -ti :3000 | xargs kill",
+            "lsof -ti:3000 | xargs kill",
+            "lsof -t -i:3000 | xargs kill",
+            "lsof -t -i :3000 | xargs kill -9",
+            "lsof -i :3000 -t | xargs kill",
+            "lsof -i:3000 -t | xargs -r kill",
+            "lsof -t -i tcp:3000 | xargs kill",
+            "lsof -nP -t -iTCP:3000 | xargs kill",
+            "lsof -tiTCP@localhost:3000 | xargs kill",
+            "lsof -ti :3000 -i :4000 | xargs kill",
+            "sudo lsof -ti :3000 | xargs kill",
+        ] {
+            assert!(!denied(cmd), "{cmd}");
+        }
+        for cmd in [
+            "lsof -ti | xargs kill",
+            "lsof -t -i | xargs kill",
+            "lsof -ti 3000 | xargs kill",
+            "lsof -ti :abc | xargs kill",
+            "lsof -ti: | xargs kill",
+            "lsof -i :3000 | xargs kill",
+            "lsof -ti :3000 -i | xargs kill",
+            "lsof -ti :3000 -u root | xargs kill",
+            "lsof -ti :3000 /tmp | xargs kill",
+            "lsof -t -p 1 | xargs kill",
+            "lsof -t | xargs kill",
+            "lsof -t :3000 | xargs kill",
+            "echo 1 | xargs kill",
+            "xargs kill",
+        ] {
+            assert!(denied(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn kill_signal_zero_is_only_a_probe() {
+        for cmd in ["kill -0 \"$pid\"", "kill -0 $PID", "kill -s 0 \"$pid\"", "kill -n 0 $x", "kill -0 -- $pid", "kill -0 123", "if kill -0 \"$pid\" 2>/dev/null; then echo up; fi"] {
+            assert!(!denied(cmd), "{cmd}");
+        }
+        for cmd in ["kill \"$pid\"", "kill -9 \"$pid\"", "kill -s 9 $pid", "kill -1 $pid", "kill $pid -0", "kill -s TERM -1"] {
+            assert!(denied(cmd), "{cmd}");
+        }
     }
 
     #[test]
@@ -137,24 +174,6 @@
         assert!(denied("pkill -f claude 2>/dev/null"));
     }
 
-    #[test]
-    fn the_mini_regex_agrees_with_ere_on_what_matters() {
-        assert!(regex_match("cla.de", "claude --x", false, false));
-        assert!(regex_match("^claude", "claude --x", false, false));
-        assert!(!regex_match("^claude", "node claude", false, false));
-        assert!(regex_match("(codex|grok)$", "grok", false, false));
-        assert!(regex_match("cl[a-z]ude+", "claudeee", false, false));
-        assert!(regex_match("CLAUDE", "claude", true, false));
-        assert!(!regex_match("CLAUDE", "claude", false, false));
-        assert!(regex_match("claude", "claude", false, true));
-        assert!(!regex_match("claud", "claude", false, true), "-x 要整串相等");
-        assert!(regex_match("a*b", "xaab", false, false));
-        // 可判斷語法以外（壞語法、`{n,m}`、`\d`、`[a-c]`…）是「判不出來」，不是「不命中」，也不退回子字串。
-        for bad in ["(", "claude**", "claude{0}", "cla\\dde", "cl[a-c]ude", "[[:alpha:]]", "claude|", "a$b", "x^y", "éé"] {
-            assert!(regex_match_limited(bad, "claude", false, false).is_err(), "{bad}");
-        }
-    }
-
     fn deny_json(provider: &str, event: &str, text: &str) -> Option<Value> {
         match guard(provider, event, text) {
             Guard::Deny(out) => Some(serde_json::from_str(&out).unwrap()),
@@ -228,7 +247,7 @@
     }
 
     #[test]
-    fn hostile_regexes_are_bounded_and_let_through_with_a_log() {
+    fn hostile_patterns_are_judged_fast_and_never_overflow() {
         let started = std::time::Instant::now();
         // 災難性回溯的寫法：NFA 線性時間，照常判斷（沒命中就放行，不需要記 log）。
         // pkill 一律擋，所以這裡只驗證判斷很快（不回溯），不管是擋還是放行。
@@ -251,13 +270,8 @@
             assert!(denied(&nested), "{n} 層");
         }
         assert!(denied("pkill -f '((((((((claude))))))))'"));
-        let many = format!("pkill -f {} claude", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "));
-        assert!(denied(&many));
-        assert!(denied(&format!("pkill -f claude {}", (0..MAX_REGEX_PATTERNS).map(|i| format!("zz{i}x")).collect::<Vec<_>>().join(" "))));
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "hook 不能慢：{:?}", started.elapsed());
         assert!(denied("pkill -f 'cla(u|a)de'"));
-        assert!(regex_match_limited("(.*)*Z", "claude --settings /x/y/z", false, false) == Ok(false));
-        assert_eq!(regex_match_limited("cla.de", "claude", false, false), Ok(true));
     }
 
     #[test]

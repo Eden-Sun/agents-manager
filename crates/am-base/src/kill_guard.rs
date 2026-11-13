@@ -4,15 +4,14 @@
 //! 結果殺掉命令列含「1」的全部行程（同一台機器上所有 claude／codex／grok 與 Chrome）。
 //!
 //! 全部是**靜態判斷**：只看指令字串，不跑任何外部指令（不 `pgrep`、不 `ps`），所以不會慢、不會卡住、不會因環境不同而結果不同。
-//! 判不出來（解析不了、動態展開的 PID）一律放行——這個 hook 絕不能因為自己的錯擋掉正常指令。門檻與保護名單見 SPEC「廣域 kill 守門」。
+//! 指令本身解析不了（引號沒閉合、巢狀超過上限、`env -S` 展開過多）就放行並記 log——這個 hook 絕不能因為自己的錯擋掉正常指令；
+//! 但解析得了的 `kill`／`xargs kill`，目標判不出是哪一個行程就擋。SPEC「廣域 kill 守門」是權威來源。
 //!
 //! 政策（使用者 2026-11 裁示，全域硬規則）：
 //! * `pkill`、`killall` 一律擋（不論選項、比對字串，`pkill -f 'scripts/check.sh changed'` 這種窄的也會命中自己的 shell；`pgrep … | xargs kill` 同樣）；
-//! * `kill` 只放行明確 PID：數字（可多個）與 `$!`；其他目標（變數、`$(…)`、`%1`）判不出是哪一個行程，擋；
-//! * `xargs kill` 只准緊接在 `lsof -ti :PORT` 後面（`lsof -ti :PORT | xargs kill`）；
+//! * `kill` 只放行明確 PID：數字（可多個）與 `$!`；其他目標（變數、`$(…)`、`%1`）判不出是哪一個行程，擋；訊號 0（`kill -0 "$pid"`，只探測、不送訊號）不受此限；
+//! * `xargs kill` 只准緊接在 `lsof -t… -i:PORT` 後面（`lsof -ti :PORT | xargs kill`）：必須解析出每個 `-i` 都帶 `:<數字>` 的 port，沒有 port 的 `lsof -ti` 會列出所有持有 socket 的行程；
 //! * `kill -1`／`kill -9 -1`／`kill 0`（所有行程／整個行程群組）一律擋。
-//!
-//! 全部是**靜態判斷**：只看指令字串，不跑任何外部指令。判不出來（解析不了）一律放行——這個 hook 絕不能因為自己的錯擋掉正常指令。SPEC「廣域 kill 守門」是權威來源。
 
 use serde_json::{json, Value};
 
@@ -23,36 +22,7 @@ pub enum Verdict {
     Deny(String),
 }
 
-/// 不論是否 `-f`，pattern 只要可能命中這些行程名就擋。`node` 在：claude／codex 的 npm 安裝版行程名就是 node。
-pub const PROTECTED_NAMES: &[&str] = &["claude", "codex", "grok", "herdr", "agents-managerd", "agy", "antigravity", "node", "sh", "bash", "zsh", "sshd"];
-
-/// `pkill -f` 比對的是整條命令列：用各 agent 實際長相的樣本去試 pattern 會不會命中。
-pub const PROTECTED_CMDLINES: &[&str] = &[
-    "claude --settings /home/u/.config/agents-manager/bots/01MXXXXXXXXXXXXXXXXXXXXXXX/claude-settings.json --verbose",
-    "/home/u/.local/bin/claude --dangerously-skip-permissions",
-    "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
-    "codex -c notify=[\"agents-managerd\",\"hook\",\"codex\"]",
-    "node /usr/lib/node_modules/@openai/codex/bin/codex.js",
-    "grok --always-approve",
-    "herdr server",
-    "agents-managerd serve",
-    "agy --dangerously-skip-permissions",
-    "antigravity",
-];
-
-/// 非 `-x` 的 pattern 少於這個字元數就視為太寬（`pkill -f 1` 命中所有命令列含「1」的行程）。
-pub const MIN_PATTERN_CHARS: usize = 3;
-
 const MAX_DEPTH: u32 = 4;
-
-/// pattern（ERE）可判斷語法的長度與群組巢狀上限（見「迷你 ERE」）；超過就放行並記 log。
-pub const MAX_PATTERN_CHARS: usize = 256;
-pub const MAX_GROUP_DEPTH: u32 = 8;
-/// 一條指令最多對幾個 pattern 做 regex 比對（每個都要跑一輪 NFA；多出來的不比對、放行並記 log）。**shim 同一個數字。**
-pub const MAX_REGEX_PATTERNS: usize = 16;
-
-/// 命中 `node` 時多講的一段：agent 最常被這個擋到，而且看不出為什麼（`pkill -x node` 看起來很窄）。
-pub const NODE_NOTE: &str = "；`node` 也是 claude／codex（npm 安裝版）的行程名，殺掉同名行程會連 agent 自己一起殺掉。要停自己的 node 服務，請改用自己記下的 PID 或 port：`lsof -ti :PORT | xargs kill`，或 `kill <PID>`";
 
 /// 政策（一律擋）的訊息：寫明正確做法（啟動時記 PID、收尾 `kill <PID>`；dev server 用 port）。
 pub const PKILL_DENY: &str = "擋下 pkill：pkill 一律不准用（不論 -f、-P、-x 或比對字串；窄的比對也會命中自己的 shell、或別的 agent）。\
@@ -86,7 +56,47 @@ pub fn check_command_logged(cmd: &str) -> (Verdict, Vec<String>) {
     (v, ctx.notes)
 }
 
-/// `xargs … kill`（kill 的 PID 從管線或標準輸入來）：只准緊接在 `lsof -t… :PORT` 後面（`lsof -ti :PORT | xargs kill`）。
+/// `lsof` 的參數是不是「只列出某幾個 port 的行程 PID」：要有 `-t`，每個 `-i` 都帶 `:<數字>`（`-i:3000`、`-ti:3000`、`-i :3000`、`-i tcp:3000`），
+/// 其餘只准 `-n`／`-P`／`-a` 這類不擴大範圍的旗標。沒有 port 的 `-i`、`-p`／`-u`／`-c` 條件、檔名參數（lsof 預設是 OR，會多列出別的行程）一律不算。
+fn lsof_port_only(args: &[String]) -> bool {
+    let (mut t, mut ports, mut i) = (false, 0, 0);
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty() && !c.starts_with('-')) else { return false };
+        for (k, ch) in cluster.char_indices() {
+            match ch {
+                't' => t = true,
+                'n' | 'P' | 'a' => {}
+                'i' => {
+                    let rest = &cluster[k + 1..];
+                    let spec = if rest.is_empty() {
+                        let next = args.get(i).map(String::as_str).unwrap_or("");
+                        i += 1;
+                        next
+                    } else {
+                        rest
+                    };
+                    if !is_port_spec(spec) {
+                        return false;
+                    }
+                    ports += 1;
+                    break; // `-i` 的值吃掉這個旗標叢的其餘字元
+                }
+                _ => return false,
+            }
+        }
+    }
+    t && ports > 0
+}
+
+/// `:3000`、`tcp:3000`、`TCP@localhost:3000`、`4:3000`：最後一個 `:` 後面必須是純數字。
+fn is_port_spec(s: &str) -> bool {
+    let Some((host, port)) = s.rsplit_once(':') else { return false };
+    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && host.chars().all(|c| c.is_ascii_alphanumeric() || "@.-[]".contains(c))
+}
+
+/// `xargs … kill`（kill 的 PID 從管線或標準輸入來）：只准緊接在 `lsof -t… -i:PORT` 後面（`lsof -ti :PORT | xargs kill`）。
 /// 其他（`pgrep … | xargs kill`、`ps … | xargs kill`…）一律擋。解析只看相鄰的指令，不分 `|` 與 `;`（判斷從嚴：`;` 也要求 lsof 在前）。
 fn check_xargs_kill(cmds: &[Simple]) -> Verdict {
     for (i, simple) in cmds.iter().enumerate() {
@@ -96,9 +106,7 @@ fn check_xargs_kill(cmds: &[Simple]) -> Verdict {
         if !(is_xargs && basename(head) == "kill") {
             continue;
         }
-        let from_lsof = i > 0
-            && cmds[i - 1].words.first().is_some_and(|h| basename(h) == "lsof")
-            && cmds[i - 1].words.iter().skip(1).any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('t') && a.contains('i') || a.starts_with(':'));
+        let from_lsof = i > 0 && unwrap_wrappers(&cmds[i - 1].words).is_some_and(|w| w.first().is_some_and(|h| basename(h) == "lsof") && lsof_port_only(&w[1..]));
         if !from_lsof {
             return Verdict::Deny(format!("擋下 kill：`xargs kill` 的 PID 只准來自 `lsof -ti :PORT`（`lsof -ti :PORT | xargs kill`）；pgrep、ps 等比對出來的 PID 一律不准。{HOW_TO}"));
         }
@@ -146,8 +154,8 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     let mut shell: Option<ShellOpts> = None;
     let verdict = match name {
         "kill" => check_kill(args),
-        "pkill" => check_pkill(args, ctx),
-        "killall" => check_killall(args, ctx),
+        "pkill" => check_pkill(),
+        "killall" => check_killall(),
         n if is_shell(n) => {
             let o = shell_opts(args);
             let verdict = match o.command.and_then(|i| args.get(i)) {
@@ -756,7 +764,7 @@ fn is_explicit_pid(t: &str) -> bool {
 
 fn check_kill(args: &[String]) -> Verdict {
     let mut targets: Vec<&str> = Vec::new();
-    let (mut signal, mut dashdash, mut i) = (false, false, 0);
+    let (mut signal, mut dashdash, mut sig0, mut i) = (false, false, false, 0);
     while i < args.len() {
         let a = args[i].as_str();
         if dashdash {
@@ -765,15 +773,21 @@ fn check_kill(args: &[String]) -> Verdict {
             dashdash = true;
         } else if a == "-l" || a == "-L" || a == "-t" {
             return Verdict::Allow; // 列出訊號名，不殺任何東西
-        } else if a == "-s" || a == "-n" {
+        } else if (a == "-s" || a == "-n") && targets.is_empty() {
             signal = true;
+            sig0 = args.get(i + 1).is_some_and(|v| v == "0");
             i += 1;
-        } else if !signal && is_signal_spec(a) {
+        } else if !signal && targets.is_empty() && is_signal_spec(a) {
             signal = true;
+            sig0 = a == "-0";
         } else {
             targets.push(a);
         }
         i += 1;
+    }
+    // 訊號 0（`kill -0 "$pid"`）不送任何訊號，只探測行程在不在：目標是什麼都不會殺到誰，放行。
+    if sig0 {
+        return Verdict::Allow;
     }
     // `kill -1`：只有 `-1` 一個參數（沒有目標），照清單一起擋；`kill -1 1234` 不是。
     if args.len() == 1 && args[0] == "-1" {
@@ -793,493 +807,14 @@ fn check_kill(args: &[String]) -> Verdict {
 
 // ───────────────────────── pkill／killall ─────────────────────────
 
-#[doc(hidden)]
-#[derive(Default, Debug)]
-pub struct Parsed {
-    /// 短旗標字元（不含帶值的）與長旗標名。
-    pub flags: Vec<String>,
-    /// 帶值的選項（短的存字元、長的存名字）。
-    pub values: Vec<(String, String)>,
-    pub patterns: Vec<String>,
-}
-
-impl Parsed {
-    pub fn has(&self, f: &str) -> bool {
-        self.flags.iter().any(|x| x == f)
-    }
-    pub fn value(&self, names: &[&str]) -> Option<&str> {
-        self.values.iter().find(|(k, _)| names.contains(&k.as_str())).map(|(_, v)| v.as_str())
-    }
-}
-
-pub const SIGNAL_NAMES: &[&str] = &["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "ALRM", "TSTP", "PIPE", "ABRT"];
-
-fn pkill_valued_short(c: char) -> bool {
-    "PUugGstTFJjMN".contains(c)
-}
-
-/// `bsd=true`：第一個非選項參數起全是 pattern（BSD getopt）；`false`：GNU 式，選項可以夾在 pattern 之間。
-#[doc(hidden)]
-pub fn parse_pkill(args: &[String], bsd: bool) -> Parsed {
-    parse_args(args, bsd, pkill_valued_short, &["parent", "euid", "uid", "pgroup", "group", "session", "terminal", "signal", "pidfile", "runstates", "ns", "nslist", "older", "newer"])
-}
-
-fn parse_args(args: &[String], bsd: bool, valued_short: fn(char) -> bool, valued_long: &[&str]) -> Parsed {
-    let mut p = Parsed::default();
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "--" {
-            p.patterns.extend(args[i + 1..].iter().cloned());
-            break;
-        }
-        if !(a.starts_with('-') && a.len() > 1) {
-            if bsd {
-                p.patterns.extend(args[i..].iter().cloned());
-                break;
-            }
-            p.patterns.push(a.to_string());
-        } else if a.strip_prefix('-').is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()) || SIGNAL_NAMES.contains(&s.strip_prefix("SIG").unwrap_or(s))) {
-            // 訊號：`-9`、`-TERM`、`-SIGKILL`
-        } else if let Some(long) = a.strip_prefix("--") {
-            match long.split_once('=') {
-                Some((k, v)) => p.values.push((k.to_string(), v.to_string())),
-                None if valued_long.contains(&long) && i + 1 < args.len() => {
-                    p.values.push((long.to_string(), args[i + 1].clone()));
-                    i += 1;
-                }
-                None => p.flags.push(long.to_string()),
-            }
-        } else {
-            let cluster: Vec<char> = a[1..].chars().collect();
-            for (k, &ch) in cluster.iter().enumerate() {
-                if valued_short(ch) {
-                    let rest: String = cluster[k + 1..].iter().collect();
-                    if !rest.is_empty() {
-                        p.values.push((ch.to_string(), rest));
-                    } else if i + 1 < args.len() {
-                        p.values.push((ch.to_string(), args[i + 1].clone()));
-                        i += 1;
-                    }
-                    break;
-                }
-                p.flags.push(ch.to_string());
-            }
-        }
-        i += 1;
-    }
-    p
-}
-
-/// BSD 的 getopt 在第一個非選項參數就停：它之後、`--` 之前所有以 `-` 開頭的字都會被當成 pattern。
-fn misordered_options(args: &[String]) -> Vec<String> {
-    let bsd = parse_pkill(args, true);
-    let gnu = parse_pkill(args, false);
-    // GNU 當選項、BSD 當 pattern 的那幾個字：BSD 的 patterns 裡以 `-` 開頭、而且不在 `--` 之後的。
-    let after_dd = args.iter().position(|a| a == "--").map_or(&[][..], |i| &args[i + 1..]);
-    if bsd.patterns.len() == gnu.patterns.len() {
-        return Vec::new();
-    }
-    bsd.patterns.iter().filter(|p| p.starts_with('-') && p.len() > 1 && !after_dd.contains(p)).cloned().collect()
-}
-
-fn check_pkill(_args: &[String], _ctx: &mut Ctx) -> Verdict {
+fn check_pkill() -> Verdict {
     // 政策（使用者 2026-11 裁示）：pkill 一律擋，不論選項與比對字串（窄的 `pkill -f 'scripts/check.sh changed'` 也會命中自己的 shell）。
     Verdict::Deny(PKILL_DENY.to_string())
 }
 
-fn check_killall(_args: &[String], _ctx: &mut Ctx) -> Verdict {
+fn check_killall() -> Verdict {
     // 政策同 pkill：killall 一律擋。
     Verdict::Deny(KILLALL_DENY.to_string())
-}
-
-fn eq(a: &str, b: &str, icase: bool) -> bool {
-    if icase { a.eq_ignore_ascii_case(b) } else { a == b }
-}
-
-/// pattern 命中受保護行程、或太短，回原因。
-fn broad_pattern(pat: &str, full: bool, exact: bool, icase: bool, regex_ok: bool, ctx: &mut Ctx) -> Option<String> {
-    // 以位元組計：shim 的 `${#pat}` 在 C locale 也是位元組，兩邊同一個數字（非 ASCII 的 pattern 反正在可判斷語法之外）。
-    if !exact && pat.len() < MIN_PATTERN_CHARS {
-        return Some(format!("只有 {} 個字元，會命中大量不相干的行程（例如命令列含該字串的所有 agent）", pat.len()));
-    }
-    let shown = || pat.chars().take(40).collect::<String>();
-    if !regex_ok {
-        ctx.note(format!("pattern `{}` 超過一條指令最多比對 {MAX_REGEX_PATTERNS} 個 pattern 的上限，放行", shown()));
-        return None;
-    }
-    let compiled = match compile_pattern(pat) {
-        Ok(c) => c,
-        Err(why) => {
-            // 判不出來不是「不命中」：放行，並留下原因。
-            ctx.note(format!("pattern `{}` {why}，放行", shown()));
-            return None;
-        }
-    };
-    let subjects: &[&str] = if full { PROTECTED_CMDLINES } else { PROTECTED_NAMES };
-    let hit = subjects.iter().copied().find(|s| compiled.is_match(s, icase, exact))?;
-    let name = if full { hit.split_whitespace().next().map(basename).unwrap_or(hit) } else { hit };
-    let note = if name == "node" { NODE_NOTE } else { "" };
-    Some(format!("會命中受保護的 agent 行程（`{name}`）{note}"))
-}
-
-// ───────────────────────── 迷你 ERE ─────────────────────────
-// pkill 的 pattern 是 ERE，agent 隨手寫、不能信任。**只在「可判斷語法」裡比對**（[`in_common_subset`]）：
-// 這個子集合在 Rust 這邊與 PATH 上 shim 的 `grep -E`（POSIX ERE，GNU 與 BSD 都一樣）語意完全相同，
-// 所以兩邊對同一條指令給同一個答案；子集合以外（壞語法、`{n,m}`、`\d`、反向參照、`[[:alpha:]]`、過深的巢狀、非 ASCII…）
-// 兩邊都**判不出來**：放行，並記 log。判不出來不是「不命中」——寧可放行，不擋掉正常指令。
-//
-// 比對本身是 Thompson NFA 模擬（時間 O(pattern × 文字)，沒有回溯），所以不需要步數預算：子集合裡的任何 pattern 都在固定上限內跑完。
-//
-// 可判斷語法（`alt := seq ('|' seq)*`、`seq := item+`、`item := atom quant?`）：
-// * atom：可印 ASCII 字面字元（`. * + ? | ( ) [ ] ^ $ { } \` 以外）、`.`、`\` 加上述任一個 metachar（字面字元）、
-//   括號群組（巢狀 ≤ [`MAX_GROUP_DEPTH`]，不可空）、字元集 `[abc0-9_]`／`[^…]`（內容只有英數底線空白 `. / : , @ =`，
-//   範圍只准 `0-9`、`a-z`、`A-Z`，至少一項）；
-// * quant：`*`、`+`、`?` 各一個，只接在 atom 後面，不可疊（`a**`）、不可接在開頭／`(`／`|` 後面；
-// * `^` 只在最外層、某個 seq 的最前面；`$` 只在最外層、某個 seq 的最後面；
-// * 沒有空的 seq（`a|`、`()`、`(|a)`）、括號必須成對、長度 ≤ [`MAX_PATTERN_CHARS`]。
-
-#[derive(Debug, Clone)]
-enum Atom {
-    Lit(char),
-    Any,
-    Class(Vec<(char, char)>, bool),
-    Group(Vec<Vec<Item>>),
-    Bol,
-    Eol,
-}
-
-#[derive(Debug, Clone)]
-struct Item {
-    atom: Atom,
-    min: usize,
-    max: usize,
-}
-
-/// 這個 pattern 在不在「可判斷語法」裡。**sh shim 的 `am_in_subset` 是同一條規則的 sh 版**，兩邊靠 parity 測試保持一致。
-pub fn in_common_subset(pat: &str) -> bool {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Prev {
-        SeqStart,
-        Atom,
-        Quant,
-        Bol,
-        Eol,
-    }
-    let c: Vec<char> = pat.chars().collect();
-    if c.is_empty() || c.len() > MAX_PATTERN_CHARS {
-        return false;
-    }
-    let (mut i, mut depth, mut prev) = (0usize, 0u32, Prev::SeqStart);
-    const META: &str = ".*+?|()[]^${}\\";
-    while i < c.len() {
-        let ch = c[i];
-        if prev == Prev::Eol && ch != '|' && ch != ')' {
-            return false;
-        }
-        match ch {
-            '\\' => {
-                match c.get(i + 1) {
-                    Some(n) if META.contains(*n) => i += 1,
-                    _ => return false,
-                }
-                prev = Prev::Atom;
-            }
-            '[' => {
-                i += 1;
-                if c.get(i) == Some(&'^') {
-                    i += 1;
-                }
-                let mut tokens = 0;
-                loop {
-                    let Some(&x) = c.get(i) else { return false };
-                    if x == ']' {
-                        break;
-                    }
-                    let is_range = matches!((x, c.get(i + 1), c.get(i + 2)), ('0', Some('-'), Some('9')) | ('a', Some('-'), Some('z')) | ('A', Some('-'), Some('Z')));
-                    if is_range {
-                        i += 3;
-                    } else if x.is_ascii_alphanumeric() || " _./:,@=".contains(x) {
-                        i += 1;
-                    } else {
-                        return false;
-                    }
-                    tokens += 1;
-                }
-                if tokens == 0 {
-                    return false;
-                }
-                prev = Prev::Atom;
-            }
-            '(' => {
-                depth += 1;
-                if depth > MAX_GROUP_DEPTH {
-                    return false;
-                }
-                prev = Prev::SeqStart;
-            }
-            ')' => {
-                if depth == 0 || !matches!(prev, Prev::Atom | Prev::Quant) {
-                    return false;
-                }
-                depth -= 1;
-                prev = Prev::Atom;
-            }
-            '|' => {
-                if !matches!(prev, Prev::Atom | Prev::Quant | Prev::Eol) {
-                    return false;
-                }
-                prev = Prev::SeqStart;
-            }
-            '*' | '+' | '?' => {
-                if prev != Prev::Atom {
-                    return false;
-                }
-                prev = Prev::Quant;
-            }
-            '^' => {
-                if depth != 0 || prev != Prev::SeqStart {
-                    return false;
-                }
-                prev = Prev::Bol;
-            }
-            '$' => {
-                if depth != 0 || !matches!(prev, Prev::Atom | Prev::Quant | Prev::Bol) {
-                    return false;
-                }
-                prev = Prev::Eol;
-            }
-            '{' | '}' | ']' => return false,
-            '.' => prev = Prev::Atom,
-            x if (' '..='~').contains(&x) => prev = Prev::Atom,
-            _ => return false,
-        }
-        i += 1;
-    }
-    depth == 0 && matches!(prev, Prev::Atom | Prev::Quant | Prev::Eol)
-}
-
-fn parse_alt(c: &[char], i: &mut usize, nested: u32) -> Option<Vec<Vec<Item>>> {
-    let mut alts = vec![Vec::new()];
-    while *i < c.len() {
-        let ch = c[*i];
-        *i += 1;
-        let atom = match ch {
-            '|' => {
-                alts.push(Vec::new());
-                continue;
-            }
-            ')' if nested > 0 => return Some(alts),
-            '(' => Atom::Group(parse_alt(c, i, nested + 1)?),
-            '.' => Atom::Any,
-            '^' => Atom::Bol,
-            '$' => Atom::Eol,
-            '\\' => {
-                let e = *c.get(*i)?;
-                *i += 1;
-                Atom::Lit(e)
-            }
-            '[' => {
-                let neg = c.get(*i) == Some(&'^');
-                if neg {
-                    *i += 1;
-                }
-                let mut ranges = Vec::new();
-                loop {
-                    let x = *c.get(*i)?;
-                    *i += 1;
-                    if x == ']' {
-                        break;
-                    }
-                    if c.get(*i) == Some(&'-') && c.get(*i + 1).is_some_and(|&y| y != ']') {
-                        ranges.push((x, c[*i + 1]));
-                        *i += 2;
-                    } else {
-                        ranges.push((x, x));
-                    }
-                }
-                Atom::Class(ranges, neg)
-            }
-            '*' | '+' | '?' => return None,
-            other => Atom::Lit(other),
-        };
-        let (min, max) = match c.get(*i) {
-            Some('*') => (0, usize::MAX),
-            Some('+') => (1, usize::MAX),
-            Some('?') => (0, 1),
-            _ => (1, 1),
-        };
-        if (min, max) != (1, 1) {
-            *i += 1;
-        }
-        alts.last_mut()?.push(Item { atom, min, max });
-    }
-    if nested > 0 { None } else { Some(alts) }
-}
-
-fn atom_one(a: &Atom, ch: char, icase: bool) -> bool {
-    let f = |x: char| if icase { x.to_ascii_lowercase() } else { x };
-    match a {
-        Atom::Lit(l) => f(*l) == f(ch),
-        Atom::Any => true,
-        Atom::Class(r, neg) => r.iter().any(|&(lo, hi)| (f(lo)..=f(hi)).contains(&f(ch))) != *neg,
-        _ => false,
-    }
-}
-
-enum Inst {
-    Atom(Atom),
-    Split(usize, usize),
-    Jmp(usize),
-    Bol,
-    Eol,
-    Match,
-}
-
-fn emit_alts(prog: &mut Vec<Inst>, alts: &[Vec<Item>]) {
-    let mut jmps = Vec::new();
-    for (i, alt) in alts.iter().enumerate() {
-        if i + 1 < alts.len() {
-            let split = prog.len();
-            prog.push(Inst::Split(split + 1, 0));
-            alt.iter().for_each(|it| emit_item(prog, it));
-            jmps.push(prog.len());
-            prog.push(Inst::Jmp(0));
-            let next = prog.len();
-            prog[split] = Inst::Split(split + 1, next);
-        } else {
-            alt.iter().for_each(|it| emit_item(prog, it));
-        }
-    }
-    let end = prog.len();
-    for j in jmps {
-        prog[j] = Inst::Jmp(end);
-    }
-}
-
-fn emit_atom(prog: &mut Vec<Inst>, atom: &Atom) {
-    match atom {
-        Atom::Group(alts) => emit_alts(prog, alts),
-        Atom::Bol => prog.push(Inst::Bol),
-        Atom::Eol => prog.push(Inst::Eol),
-        a => prog.push(Inst::Atom(a.clone())),
-    }
-}
-
-fn emit_item(prog: &mut Vec<Inst>, item: &Item) {
-    match (item.min, item.max) {
-        (0, 1) => {
-            let s = prog.len();
-            prog.push(Inst::Split(s + 1, 0));
-            emit_atom(prog, &item.atom);
-            let e = prog.len();
-            prog[s] = Inst::Split(s + 1, e);
-        }
-        (0, usize::MAX) => {
-            let s = prog.len();
-            prog.push(Inst::Split(s + 1, 0));
-            emit_atom(prog, &item.atom);
-            prog.push(Inst::Jmp(s));
-            let e = prog.len();
-            prog[s] = Inst::Split(s + 1, e);
-        }
-        (1, usize::MAX) => {
-            let s = prog.len();
-            emit_atom(prog, &item.atom);
-            let sp = prog.len();
-            prog.push(Inst::Split(s, sp + 1));
-        }
-        _ => emit_atom(prog, &item.atom),
-    }
-}
-
-/// 編好的 pattern。`Err`＝在可判斷語法之外（呼叫端放行並記 log）。
-pub struct Compiled(Vec<Inst>);
-
-pub fn compile_pattern(pat: &str) -> Result<Compiled, &'static str> {
-    if !in_common_subset(pat) {
-        return Err("超出可判斷的 regex 語法範圍");
-    }
-    let chars: Vec<char> = pat.chars().collect();
-    let mut i = 0;
-    let Some(alts) = parse_alt(&chars, &mut i, 0) else { return Err("超出可判斷的 regex 語法範圍") };
-    let mut prog = Vec::new();
-    emit_alts(&mut prog, &alts);
-    prog.push(Inst::Match);
-    Ok(Compiled(prog))
-}
-
-/// 把 `pc` 的 ε 閉包（含 `^`、`$` 在這個位置成不成立）加進 `set`；`mark[pc] == gen` 表示這一輪已經加過。
-fn add_state(prog: &[Inst], mark: &mut [usize], gen: usize, set: &mut Vec<usize>, pc: usize, pos: usize, len: usize) {
-    let mut stack = vec![pc];
-    while let Some(pc) = stack.pop() {
-        if mark[pc] == gen {
-            continue;
-        }
-        mark[pc] = gen;
-        match &prog[pc] {
-            Inst::Jmp(t) => stack.push(*t),
-            Inst::Split(a, b) => {
-                stack.push(*b);
-                stack.push(*a);
-            }
-            Inst::Bol => {
-                if pos == 0 {
-                    stack.push(pc + 1)
-                }
-            }
-            Inst::Eol => {
-                if pos == len {
-                    stack.push(pc + 1)
-                }
-            }
-            Inst::Atom(_) | Inst::Match => set.push(pc),
-        }
-    }
-}
-
-impl Compiled {
-    /// `exact`＝`pkill -x`（整串都要符合）；否則是子字串搜尋（`pkill`／`pgrep` 的預設）。
-    pub fn is_match(&self, text: &str, icase: bool, exact: bool) -> bool {
-        let prog = &self.0;
-        let t: Vec<char> = text.chars().collect();
-        let mut mark = vec![usize::MAX; prog.len()];
-        let (mut cur, mut next): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
-        add_state(prog, &mut mark, 0, &mut cur, 0, 0, t.len());
-        for pos in 0..=t.len() {
-            if pos > 0 && !exact {
-                add_state(prog, &mut mark, pos, &mut cur, 0, pos, t.len());
-            }
-            if cur.iter().any(|&pc| matches!(prog[pc], Inst::Match)) && (!exact || pos == t.len()) {
-                return true;
-            }
-            if pos == t.len() {
-                break;
-            }
-            next.clear();
-            for &pc in &cur {
-                if let Inst::Atom(a) = &prog[pc] {
-                    if atom_one(a, t[pos], icase) {
-                        add_state(prog, &mut mark, pos + 1, &mut next, pc + 1, pos + 1, t.len());
-                    }
-                }
-            }
-            std::mem::swap(&mut cur, &mut next);
-        }
-        false
-    }
-}
-
-/// 獨立一次比對（測試用）：超出可判斷語法當作「不命中」。
-#[doc(hidden)]
-pub fn regex_match(pat: &str, text: &str, icase: bool, exact: bool) -> bool {
-    compile_pattern(pat).map(|c| c.is_match(text, icase, exact)).unwrap_or(false)
-}
-
-/// 同 [`regex_match`]，但把「判不出來」跟「不命中」分開（測試用）。
-#[doc(hidden)]
-pub fn regex_match_limited(pat: &str, text: &str, icase: bool, exact: bool) -> Result<bool, &'static str> {
-    compile_pattern(pat).map(|c| c.is_match(text, icase, exact))
 }
 
 // ───────────────────────── hook 接線 ─────────────────────────
