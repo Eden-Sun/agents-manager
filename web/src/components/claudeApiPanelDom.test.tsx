@@ -16,6 +16,10 @@ const uses = (enabled: boolean) => [
   { id: 'changelog_review', label: '影響分析 changelog', enabled, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null },
   { id: 'changelog_translate', label: '更新框翻譯', enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, legacy_section: 'changelog_translate' },
 ]
+const groups = (enabled: boolean) => [
+  { id: 'changelog_analysis', label: '影響分析 changelog', uses: ['changelog_review', 'release_triage'], enabled, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, auto: null },
+  { id: 'translate', label: '更新框翻譯', uses: ['message_translate', 'changelog_translate'], enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 12, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 12, auto: null },
+]
 const settings = (over: Record<string, unknown>) => ({
   enabled: false,
   key_present: false,
@@ -23,6 +27,7 @@ const settings = (over: Record<string, unknown>) => ({
   models: ['claude-haiku-5-5', 'claude-sonnet-5-5'],
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   uses: uses(false),
+  groups: groups(false),
   ...over,
 })
 const ledger = {
@@ -38,7 +43,7 @@ function stub(state: Record<string, unknown>, puts: unknown[], book: typeof ledg
     if (path === '/claude-api/ledger') return new Response(JSON.stringify(book), { status: 200 })
     if (path === '/claude-api/settings' && init?.method === 'PUT') {
       puts.push(JSON.parse(String(init.body)))
-      return new Response(JSON.stringify(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) })), { status: 200 })
+      return new Response(JSON.stringify(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: groups(true) })), { status: 200 })
     }
     if (path === '/claude-api/settings') return new Response(JSON.stringify(state), { status: 200 })
     return new Response('{}', { status: 404 })
@@ -74,14 +79,14 @@ test('貼 key 後可開；存檔只送 token、改過的用途，key 輸入框�
   assert.equal(master.disabled, false, '貼了 key 就能開')
   master.click()
   await settle()
-  const review = root.querySelector<HTMLFieldSetElement>('fieldset[data-use=changelog_review]')!
+  const review = root.querySelector<HTMLFieldSetElement>('fieldset[data-use=changelog_analysis]')!
   review.querySelector<HTMLInputElement>('input[type=checkbox]')!.click()
   await settle()
   setValue(review.querySelector<HTMLSelectElement>('select')!, 'claude-haiku-5-5')
   await settle()
   root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await settle()
-  assert.deepEqual(puts, [{ enabled: true, uses: { changelog_review: { enabled: true, model: 'claude-haiku-5-5' } }, token: 'sk-ant-test' }])
+  assert.deepEqual(puts, [{ enabled: true, groups: { changelog_analysis: { enabled: true, model: 'claude-haiku-5-5' } }, token: 'sk-ant-test' }])
   assert.equal(root.querySelector<HTMLInputElement>('input[type=password]')!.value, '')
   assert.match(root.textContent ?? '', /已儲存/)
 })
@@ -141,7 +146,7 @@ const emptyLedger = {
 }
 
 test('零呼叫說明重啟清空、CLI 排除及送出前被擋不記帳，啟用不等於已呼叫', async () => {
-  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [], emptyLedger)
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: groups(true) }), [], emptyLedger)
   const root = await mount(<ClaudeApiPanel />)
   await settle()
   const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
@@ -164,9 +169,9 @@ test('空帳本顯示共用 key 未就緒與沒有啟用用途，避免只顯示
 })
 
 test('空帳本的用途狀態尊重總開關，但翻譯仍按自己的開關計算', async () => {
-  const configured = uses(true)
+  const configured = groups(true)
   configured[1].enabled = true
-  stub(settings({ enabled: false, key_present: true, key_error: null, uses: configured }), [], emptyLedger)
+  stub(settings({ enabled: false, key_present: true, key_error: null, groups: configured }), [], emptyLedger)
   const root = await mount(<ClaudeApiPanel />)
   await settle()
   const text = root.querySelector('[data-testid=claude-api-empty-ledger]')?.textContent ?? ''
@@ -175,7 +180,7 @@ test('空帳本的用途狀態尊重總開關，但翻譯仍按自己的開關�
 })
 
 test('空帳本顯示已存的用途，未儲存的表單變更不假裝已生效', async () => {
-  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [], emptyLedger)
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: groups(true) }), [], emptyLedger)
   const root = await mount(<ClaudeApiPanel />)
   await settle()
   root.querySelector<HTMLInputElement>('.claude-api-panel > .claude-api-switch input')!.click()
@@ -184,7 +189,7 @@ test('空帳本顯示已存的用途，未儲存的表單變更不假裝已生�
 })
 
 test('已有呼叫記錄時保留帳表，不顯示空帳本診斷', async () => {
-  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true) }), [])
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: groups(true) }), [])
   const root = await mount(<ClaudeApiPanel />)
   await settle()
   assert.equal(root.querySelector('[data-testid=claude-api-empty-ledger]'), null)
@@ -194,15 +199,39 @@ test('已有呼叫記錄時保留帳表，不顯示空帳本診斷', async () =>
 test('對話訊息翻譯有「自動翻譯英文訊息」切換（預設開）；關掉只送 auto，其他用途沒有這個切換', async () => {
   const puts: unknown[] = []
   const tr = { id: 'message_translate', label: '對話訊息翻譯', enabled: true, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: null, auto: true }
-  stub(settings({ enabled: true, key_present: true, key_error: null, uses: [...uses(false), tr] }), puts)
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: [...uses(false), tr], groups: [groups(false)[0], { ...groups(false)[1], label: '翻譯', enabled: true, auto: true, max_per_hour: 120 }] }), puts)
   const root = await mount(<ClaudeApiPanel />)
   await settle()
-  assert.equal(root.querySelector('fieldset[data-use=changelog_review] [data-testid^=claude-api-auto]'), null)
-  const box = root.querySelector<HTMLInputElement>('fieldset[data-use=message_translate] [data-testid=claude-api-auto-message_translate] input')!
+  assert.equal(root.querySelector('fieldset[data-use=changelog_analysis] [data-testid^=claude-api-auto]'), null)
+  const box = root.querySelector<HTMLInputElement>('fieldset[data-use=translate] [data-testid=claude-api-auto-translate] input')!
   assert.ok(box.checked, '預設開')
   box.click()
   await settle()
   root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await settle()
-  assert.deepEqual(puts, [{ enabled: true, uses: { message_translate: { auto: false } } }])
+  assert.deepEqual(puts, [{ enabled: true, groups: { translate: { auto: false } } }])
+})
+
+test('同組的用途只顯示一列，列上寫出含哪些用途；每列開關對應一組', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: groups(true) }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.equal(root.querySelectorAll('fieldset.claude-api-use').length, 2, '兩組＝兩列')
+  assert.equal(root.querySelector('fieldset[data-use=changelog_review]'), null)
+  assert.match(root.querySelector('fieldset[data-use=changelog_analysis]')?.textContent ?? '', /含：影響分析 changelog、release_triage/)
+})
+
+test('舊 daemon（沒有 groups）：一個用途一列，存檔走逐用途寫法', async () => {
+  const puts: unknown[] = []
+  const old = settings({ enabled: true, key_present: true, key_error: null })
+  delete (old as Record<string, unknown>).groups
+  stub(old, puts)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.ok(root.querySelector('fieldset[data-use=changelog_review]'))
+  root.querySelector<HTMLInputElement>('fieldset[data-use=changelog_review] input[type=checkbox]')!.click()
+  await settle()
+  root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  await settle()
+  assert.deepEqual(puts, [{ enabled: true, uses: { changelog_review: { enabled: true } } }])
 })

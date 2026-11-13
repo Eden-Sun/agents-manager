@@ -25,13 +25,35 @@ export interface ClaudeApiUse {
   auto: boolean | null
 }
 
+/** 設定頁的一列＝一組用途（同組共用模型／effort／開關／每小時上限；呼叫端與帳本仍按用途 id）。 */
+export interface ClaudeApiGroup {
+  id: string
+  label: string
+  /** 這組包含的用途 id。 */
+  uses: string[]
+  enabled: boolean
+  model: string
+  effort: string
+  max_per_hour: number
+  default_model: string
+  default_effort: string
+  default_max_per_hour: number
+  /** 「自動」開關（翻譯組：英文訊息自動翻）；這組沒有就是 null。 */
+  auto: boolean | null
+}
+
 export interface ClaudeApiSettings {
   enabled: boolean
   key_present: boolean
   key_error: string | null
   models: string[]
   efforts: string[]
+  /** 以組為單位的設定（新 daemon）。舊 daemon 沒有時，由 `uses` 一個用途一組合成。 */
+  groups: ClaudeApiGroup[]
+  /** 逐用途（相容欄位）：值是所屬組的生效值；帳本的用途名稱從這裡查。 */
   uses: ClaudeApiUse[]
+  /** daemon 有沒有回 `groups`；沒有就用逐用途寫法存檔。 */
+  groupsApi: boolean
 }
 
 export interface ClaudeApiUsePatch {
@@ -45,6 +67,7 @@ export interface ClaudeApiUsePatch {
 export interface ClaudeApiPatch {
   enabled?: boolean
   uses?: Record<string, ClaudeApiUsePatch>
+  groups?: Record<string, ClaudeApiUsePatch>
   /** 空字串＝不動現有的 key。 */
   token?: string
 }
@@ -75,40 +98,32 @@ export interface ClaudeApiLedger {
   rows: ClaudeApiLedgerRow[]
 }
 
-const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5']
+const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const mockUses = (): ClaudeApiUse[] => [
-  { id: 'changelog_review', label: L('影響分析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-sonnet-5-5', effort: 'medium', max_per_hour: 30, default_model: 'claude-sonnet-5-5', default_effort: 'medium', default_max_per_hour: 30, legacy_section: null, auto: null }, // i18n-ignore：假資料
-  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 0, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 0, legacy_section: 'changelog_translate', auto: null }, // i18n-ignore：假資料
+  { id: 'changelog_review', label: L('影響分析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null }, // i18n-ignore：假資料
+  { id: 'release_triage', label: L('上游新版分診', 'Upstream release triage'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null }, // i18n-ignore：假資料
+  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: 'changelog_translate', auto: null }, // i18n-ignore：假資料
+]
+const mockGroups = (): ClaudeApiGroup[] => [
+  { id: 'changelog_analysis', label: L('changelog 影響分析', 'Changelog analysis'), uses: ['changelog_review', 'release_triage'], enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, auto: null }, // i18n-ignore：假資料
+  { id: 'translate', label: L('翻譯', 'Translation'), uses: ['message_translate', 'changelog_translate'], enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, auto: true }, // i18n-ignore：假資料
 ]
 /** 延後建立：示範文字依語言，要等 `?lang=` 套用後才取。 */
 let mockStateValue: ClaudeApiSettings | null = null
-const initialMockState = (): ClaudeApiSettings => ({ enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, uses: mockUses() })
+const initialMockState = (): ClaudeApiSettings => ({ enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, groups: mockGroups(), uses: mockUses(), groupsApi: true })
 const mockStateOf = (): ClaudeApiSettings => (mockStateValue ??= initialMockState())
 /** mock 用：打開訊息翻譯（總開關、用途、自動）。截圖與手動情境用，不影響預設。 */
 export function mockTranslateOn(auto = true): void {
   const st = mockStateOf()
+  const msg: ClaudeApiUse = { id: 'message_translate', label: L('對話訊息翻譯', 'Message translation'), enabled: true, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: null, auto }
   mockStateValue = {
     ...st,
     enabled: true,
     key_present: true,
     key_error: null,
-    uses: [
-      ...st.uses.filter((u) => u.id !== 'message_translate'),
-      {
-        id: 'message_translate',
-        label: L('對話訊息翻譯', 'Message translation'),
-        enabled: true,
-        model: 'claude-haiku-5-5',
-        effort: 'low',
-        max_per_hour: 0,
-        default_model: 'claude-haiku-5-5',
-        default_effort: 'low',
-        default_max_per_hour: 0,
-        legacy_section: null,
-        auto,
-      },
-    ],
+    groups: st.groups.map((g) => (g.id === 'translate' ? { ...g, enabled: true, auto } : g)),
+    uses: [...st.uses.filter((u) => u.id !== 'message_translate'), msg],
   }
 }
 const mockLedger: ClaudeApiLedger = {
@@ -142,18 +157,47 @@ function parseUse(raw: unknown): ClaudeApiUse | null {
   }
 }
 
+function parseGroup(raw: unknown): ClaudeApiGroup | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  if (typeof o.id !== 'string') return null
+  const s = (v: unknown, d = '') => (typeof v === 'string' ? v : d)
+  const n = (v: unknown, d = 0) => (typeof v === 'number' ? v : d)
+  return {
+    id: o.id,
+    label: s(o.label, o.id),
+    uses: Array.isArray(o.uses) ? o.uses.filter((x): x is string => typeof x === 'string') : [],
+    enabled: o.enabled === true,
+    model: s(o.model),
+    effort: s(o.effort),
+    max_per_hour: n(o.max_per_hour),
+    default_model: s(o.default_model),
+    default_effort: s(o.default_effort),
+    default_max_per_hour: n(o.default_max_per_hour),
+    auto: typeof o.auto === 'boolean' ? o.auto : null,
+  }
+}
+
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
 
 function parse(raw: unknown): ClaudeApiSettings | null {
   if (typeof raw !== 'object' || raw === null) return null
   const o = raw as Record<string, unknown>
+  const uses = Array.isArray(o.uses) ? o.uses.map(parseUse).filter((u): u is ClaudeApiUse => u !== null) : []
+  const groupsApi = Array.isArray(o.groups)
+  // 舊 daemon 沒有 groups：一個用途當一組，存檔改走逐用途寫法。
+  const groups = groupsApi
+    ? (o.groups as unknown[]).map(parseGroup).filter((g): g is ClaudeApiGroup => g !== null)
+    : uses.map((u): ClaudeApiGroup => ({ id: u.id, label: u.label, uses: [u.id], enabled: u.enabled, model: u.model, effort: u.effort, max_per_hour: u.max_per_hour, default_model: u.default_model, default_effort: u.default_effort, default_max_per_hour: u.default_max_per_hour, auto: u.auto }))
   return {
     enabled: o.enabled === true,
     key_present: o.key_present === true,
     key_error: typeof o.key_error === 'string' ? o.key_error : null,
     models: strings(o.models),
     efforts: strings(o.efforts),
-    uses: Array.isArray(o.uses) ? o.uses.map(parseUse).filter((u): u is ClaudeApiUse => u !== null) : [],
+    groups,
+    uses,
+    groupsApi,
   }
 }
 
@@ -213,10 +257,14 @@ export async function saveClaudeApiSettings(patch: ClaudeApiPatch): Promise<Clau
   if (rawTransport.mock) {
     const mockState = mockStateOf()
     const hasKey = mockState.key_present || !!patch.token?.trim()
-    const uses = mockState.uses.map((u) => ({ ...u, ...(patch.uses?.[u.id] ?? {}) }))
-    const turningOn = (patch.enabled === true && !mockState.enabled) || uses.some((u, i) => u.enabled && !mockState.uses[i]?.enabled)
+    const groups = mockState.groups.map((g) => ({ ...g, ...(patch.groups?.[g.id] ?? {}) }))
+    const uses = mockState.uses.map((u) => {
+      const g = groups.find((x) => x.uses.includes(u.id))
+      return g ? { ...u, enabled: g.enabled, model: g.model, effort: g.effort, max_per_hour: g.max_per_hour, ...(g.auto !== null && u.auto !== null ? { auto: g.auto } : {}) } : u
+    })
+    const turningOn = (patch.enabled === true && !mockState.enabled) || groups.some((g, i) => g.enabled && !mockState.groups[i]?.enabled)
     if (turningOn && !hasKey) return { ok: false, message: t('還沒有可用的 API key，先貼上 key 再開。') }
-    mockStateValue = { ...mockState, enabled: patch.enabled ?? mockState.enabled, key_present: hasKey, key_error: hasKey ? null : mockState.key_error, uses }
+    mockStateValue = { ...mockState, enabled: patch.enabled ?? mockState.enabled, key_present: hasKey, key_error: hasKey ? null : mockState.key_error, groups, uses }
     return { ok: true, settings: mockStateValue }
   }
   try {

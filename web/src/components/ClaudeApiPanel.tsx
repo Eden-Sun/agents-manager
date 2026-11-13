@@ -10,7 +10,7 @@ import {
   saveClaudeApiSettings,
   type ClaudeApiLedger,
   type ClaudeApiSettings,
-  type ClaudeApiUse,
+  type ClaudeApiGroup,
   type ClaudeApiUsePatch,
 } from '../api/claudeApi'
 import { msg, useT } from '../lib/i18n'
@@ -31,7 +31,7 @@ const ERROR_LABEL: Record<string, string> = {
 }
 
 /** 這個用途現在表單上的值與已存的值是否不同。 */
-function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiUse): boolean {
+function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
   return (
     (draft.enabled ?? saved.enabled) !== saved.enabled ||
     (draft.model ?? saved.model) !== saved.model ||
@@ -100,7 +100,7 @@ export function ClaudeApiPanel() {
 
   const willHaveKey = settings.key_present || token.trim() !== ''
   const patchUse = (id: string, p: ClaudeApiUsePatch) => setDrafts((cur) => ({ ...cur, [id]: { ...cur[id], ...p } }))
-  const dirtyUses = settings.uses.filter((u) => isUseDirty(drafts[u.id] ?? {}, u))
+  const dirtyUses = settings.groups.filter((u) => isUseDirty(drafts[u.id] ?? {}, u))
   const dirty = enabled !== settings.enabled || token.trim() !== '' || dirtyUses.length > 0
 
   const save = () => {
@@ -108,7 +108,7 @@ export function ClaudeApiPanel() {
     setNote(null)
     const uses: Record<string, ClaudeApiUsePatch> = {}
     for (const u of dirtyUses) uses[u.id] = drafts[u.id] ?? {}
-    void saveClaudeApiSettings({ enabled, uses, token: token.trim() || undefined })
+    void saveClaudeApiSettings({ enabled, ...(settings.groupsApi ? { groups: uses } : { uses }), token: token.trim() || undefined })
       .then((r) => {
         if (r.ok) {
           adopt(r.settings)
@@ -161,15 +161,16 @@ export function ClaudeApiPanel() {
         <span>{t('總開關（關掉時下面各用途都不會呼叫 API；「更新框翻譯」沿用舊設定，不受總開關管）')}</span>
       </label>
       <div className="claude-api-uses">
-        {settings.uses.map((u) => {
+        {settings.groups.map((u) => {
           const d = drafts[u.id] ?? {}
           const on = d.enabled ?? u.enabled
           const model = d.model ?? u.model
           const effort = d.effort ?? u.effort
           const perHour = d.max_per_hour ?? u.max_per_hour
           return (
-            <fieldset key={u.id} className="claude-api-use" data-use={u.id} disabled={!u.legacy_section && !enabled}>
+            <fieldset key={u.id} className="claude-api-use" data-use={u.id} disabled={!u.uses.includes('changelog_translate') && !enabled}>
               <legend>{u.label}</legend>
+              {u.uses.length > 1 ? <span className="hint">{t('含：{names}', { names: u.uses.map((id) => settings.uses.find((x) => x.id === id)?.label ?? id).join('、') })}</span> : null}
               <label className="claude-api-switch">
                 <input type="checkbox" checked={on} disabled={!willHaveKey && !on} onChange={(e) => patchUse(u.id, { enabled: e.target.checked })} />
                 <span>{t('啟用')}</span>
@@ -206,7 +207,7 @@ export function ClaudeApiPanel() {
                   <span>{t('每小時上限')}</span>
                   <input
                     type="number"
-                    min={u.id === 'changelog_translate' ? 0 : 1}
+                    min={1}
                     max={1000}
                     value={perHour}
                     onChange={(e) => {
@@ -214,10 +215,9 @@ export function ClaudeApiPanel() {
                       if (Number.isFinite(n)) patchUse(u.id, { max_per_hour: n })
                     }}
                   />
-                  {u.id === 'changelog_translate' ? <small>{t('0＝不限')}</small> : null}
                 </label>
               </div>
-              {u.legacy_section ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: u.legacy_section })}</span> : null}
+              {u.uses.includes('changelog_translate') ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: 'changelog_translate' })}</span> : null}
             </fieldset>
           )
         })}
@@ -259,9 +259,9 @@ export function ClaudeApiPanel() {
               <p>{t('用途未啟用、key 無法使用或每小時額度已滿時，不會送出請求，也不會記入帳本。')}</p>
               {!settings.key_present && <p>{t('共用 API key 尚未就緒，請到「設定」查看原因。')}</p>}
               <p>
-                {settings.uses.some((u) => u.enabled && (u.legacy_section !== null || settings.enabled))
+                {settings.groups.some((u) => u.enabled && (u.uses.includes('changelog_translate') || settings.enabled))
                   ? t('目前已啟用的用途：{uses}。啟用不會立即呼叫 API，仍須觸發對應工作；既有快取可能不需再次呼叫。', {
-                    uses: settings.uses.filter((u) => u.enabled && (u.legacy_section !== null || settings.enabled)).map((u) => u.label).join('、'),
+                    uses: settings.groups.filter((u) => u.enabled && (u.uses.includes('changelog_translate') || settings.enabled)).map((u) => u.label).join('、'),
                   })
                   : t('目前沒有已啟用的 API 用途（更新框翻譯依自己的開關計算）。')}
               </p>

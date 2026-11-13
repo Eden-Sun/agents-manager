@@ -948,8 +948,13 @@ pub struct ClaudeApiCfg {
     pub console_state_file: String,
     #[serde(default, skip_serializing_if = "api_bot::ApiBotCfg::is_default")]
     pub api_bot: api_bot::ApiBotCfg,
+    /// 舊的逐用途設定（`[claude_api.uses.<id>]`）。仍照讀（沒有組設定時投影成組的值），新寫入走 `groups`。
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub uses: std::collections::BTreeMap<String, ClaudeApiUseCfg>,
+    /// 用途分組設定（`[claude_api.groups.<組>]`，見 [`CLAUDE_API_GROUPS`]）：同組的用途共用模型／effort／開關／每小時上限。
+    /// 寫了某組就整組以這份為準（`uses.*` 與 `[changelog_translate]` 的對應欄位不再影響生效值）。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub groups: std::collections::BTreeMap<String, ClaudeApiUseCfg>,
 }
 
 /// 一個用途的設定。沒寫的欄位用 [`CLAUDE_API_USES`] 上的預設；`enabled` 預設關。
@@ -977,6 +982,8 @@ fn is_zero_u32(n: &u32) -> bool {
 /// 一個用途的預設值（不含開關）。
 pub struct ClaudeApiUseDef {
     pub id: &'static str,
+    /// 所屬的組（[`CLAUDE_API_GROUPS`] 的 id）。呼叫端仍用用途 id，設定解析到這個組。
+    pub group: &'static str,
     pub label: &'static str,
     pub model: &'static str,
     pub effort: &'static str,
@@ -995,14 +1002,31 @@ pub struct ClaudeApiUseDef {
 /// 已知用途。要加用途就加一行，設定頁、PUT 驗證、保險絲與帳本都從這張表走。
 /// 預設模型：純摘要／翻譯用 Haiku，需要判斷的用 Sonnet；不預設 Opus／Fable。
 pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
-    ClaudeApiUseDef { id: "schedule_outcome", label: "排程結果分類", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: None },
-    ClaudeApiUseDef { id: "changelog_review", label: "影響分析 changelog", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
-    ClaudeApiUseDef { id: "release_triage", label: "上游新版分診", model: "claude-sonnet-5-5", effort: "medium", max_per_hour: 20, legacy_section: None, default_on: false, auto_default: None },
-    ClaudeApiUseDef { id: "message_translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: Some(true) },
-    ClaudeApiUseDef { id: "changelog_translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "schedule_outcome", group: "schedule_outcome", label: "排程結果分類", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: None },
+    ClaudeApiUseDef { id: "changelog_review", group: "changelog_analysis", label: "影響分析 changelog", model: "claude-opus-5-5", effort: "low", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "release_triage", group: "changelog_analysis", label: "上游新版分診", model: "claude-opus-5-5", effort: "low", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
+    ClaudeApiUseDef { id: "message_translate", group: "translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: Some(true) },
+    ClaudeApiUseDef { id: "changelog_translate", group: "translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false, auto_default: None },
 ];
-/// 設定頁下拉的候選模型（最新 Haiku／Sonnet）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
-pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5"];
+/// 設定頁一列＝一組。同組的用途共用一份設定（開關、模型、effort、每小時上限、自動）；呼叫端與帳本仍按用途 id。
+/// 每小時上限：一個值，**每個用途各自計數**（同組兩個用途各有一桶，不互相佔額度）；`changelog_translate` 照舊不走每小時名額（#1948）。
+pub struct ClaudeApiGroupDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub members: &'static [&'static str],
+    pub model: &'static str,
+    pub effort: &'static str,
+    pub max_per_hour: u32,
+    pub default_on: bool,
+    pub auto_default: Option<bool>,
+}
+pub const CLAUDE_API_GROUPS: &[ClaudeApiGroupDef] = &[
+    ClaudeApiGroupDef { id: "schedule_outcome", label: "排程結果分類", members: &["schedule_outcome"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: None },
+    ClaudeApiGroupDef { id: "changelog_analysis", label: "changelog 影響分析", members: &["changelog_review", "release_triage"], model: "claude-opus-5-5", effort: "low", max_per_hour: 30, default_on: false, auto_default: None },
+    ClaudeApiGroupDef { id: "translate", label: "翻譯", members: &["message_translate", "changelog_translate"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: Some(true) },
+];
+/// 設定頁下拉的候選模型（最新 Haiku／Sonnet／Opus）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
+pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 pub const CLAUDE_API_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 fn default_claude_api_key_file() -> String {
@@ -1036,6 +1060,7 @@ impl Default for ClaudeApiCfg {
             console_state_file: default_console_state_file(),
             api_bot: api_bot::ApiBotCfg::default(),
             uses: Default::default(),
+            groups: Default::default(),
         }
     }
 }
@@ -1075,8 +1100,14 @@ impl ClaudeApiCfg {
 }
 
 impl ConfigFile {
-    /// 用途的生效值：`changelog_translate` 讀 `[changelog_translate]`，其餘讀 `[claude_api.uses.*]`。
+    /// 用途的生效值。這個用途所屬的組有寫 `[claude_api.groups.<組>]` 就用組的設定；沒寫就照舊：
+    /// `changelog_translate` 讀 `[changelog_translate]`，其餘讀 `[claude_api.uses.*]`（舊設定檔照舊有效）。
     pub fn claude_use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
+        if let Some(def) = CLAUDE_API_USES.iter().find(|d| d.id == id) {
+            if let (Some(g), Some(gd)) = (self.claude_api.groups.get(def.group), CLAUDE_API_GROUPS.iter().find(|g| g.id == def.group)) {
+                return Some(group_overlay(gd, g));
+            }
+        }
         match id {
             "changelog_translate" => {
                 let t = &self.changelog_translate;
@@ -1086,6 +1117,45 @@ impl ConfigFile {
         }
     }
 
+    /// 一組的生效值（設定頁的一列）。有寫組設定就用它；沒寫就把舊的逐用途設定投影過來：
+    /// 開關＝任一成員開著；模型／effort／上限／自動＝依成員順序第一個有寫的，都沒寫用組預設。
+    pub fn claude_group_state(&self, gid: &str) -> Option<ClaudeApiUseState> {
+        let gd = CLAUDE_API_GROUPS.iter().find(|g| g.id == gid)?;
+        if let Some(g) = self.claude_api.groups.get(gid) {
+            return Some(group_overlay(gd, g));
+        }
+        let written = |id: &str| -> ClaudeApiUseCfg {
+            if id == "changelog_translate" && !self.changelog_translate.is_default() {
+                let t = &self.changelog_translate;
+                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None };
+            }
+            self.claude_api.uses.get(id).cloned().unwrap_or_default()
+        };
+        let mut st = group_overlay(gd, &ClaudeApiUseCfg::default());
+        st.enabled = gd.members.iter().any(|m| self.claude_use_state(m).is_some_and(|s| s.enabled));
+        for m in gd.members {
+            let w = written(m);
+            if !w.model.trim().is_empty() {
+                st.model = w.model.trim().to_string();
+                break;
+            }
+        }
+        for m in gd.members {
+            let w = written(m);
+            if !w.effort.trim().is_empty() {
+                st.effort = w.effort.trim().to_string();
+                break;
+            }
+        }
+        if let Some(w) = gd.members.iter().map(|m| written(m)).find(|w| w.max_per_hour != 0) {
+            st.max_per_hour = w.max_per_hour;
+        }
+        if let Some(a) = gd.members.iter().find_map(|m| self.claude_api.uses.get(*m).and_then(|u| u.auto)) {
+            st.auto = gd.auto_default.map(|_| a);
+        }
+        Some(st)
+    }
+
     /// 這個用途實際用哪個 key 檔：`[changelog_translate] key_file` 被明確改過就用它（舊設定檔），否則是 `[claude_api] key_file`。
     pub fn changelog_translate_key_file(&self) -> String {
         if self.changelog_translate.key_file != default_changelog_key_file() {
@@ -1093,6 +1163,17 @@ impl ConfigFile {
         } else {
             self.claude_api.key_file.clone()
         }
+    }
+}
+
+fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseState {
+    let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
+    ClaudeApiUseState {
+        enabled: g.enabled.unwrap_or(gd.default_on),
+        model: pick(&g.model, gd.model),
+        effort: pick(&g.effort, gd.effort),
+        max_per_hour: if g.max_per_hour == 0 { gd.max_per_hour } else { g.max_per_hour },
+        auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
     }
 }
 
@@ -2985,7 +3066,7 @@ mod supervisor_cfg_tests {
         assert!(!none.claude_api.enabled);
         assert!(!toml::to_string_pretty(&none).unwrap().contains("claude_api"));
         let d = none.claude_api.use_state("changelog_review").unwrap();
-        assert_eq!((d.enabled, d.model.as_str(), d.effort.as_str(), d.max_per_hour), (false, "claude-sonnet-5-5", "medium", 30));
+        assert_eq!((d.enabled, d.model.as_str(), d.effort.as_str(), d.max_per_hour), (false, "claude-opus-5-5", "low", 30));
         assert_eq!(none.claude_use_state("changelog_translate").unwrap().model, "claude-haiku-5-5");
         assert_eq!(none.claude_api.use_state("nope"), None);
         // 訊息翻譯是使用者親手按的：沒寫設定時預設開（仍受總開關管）；明寫 enabled=false 就關。
@@ -3007,7 +3088,7 @@ mod supervisor_cfg_tests {
         assert_eq!((s.enabled, s.model.as_str()), (true, "claude-sonnet-5-5"));
         let h: ConfigFile = toml::from_str("[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-haiku-5-5\"\nmax_per_hour = 5\n").unwrap();
         let hs = h.claude_api.use_state("changelog_review").unwrap();
-        assert_eq!((hs.model.as_str(), hs.effort.as_str(), hs.max_per_hour), ("claude-haiku-5-5", "medium", 5));
+        assert_eq!((hs.model.as_str(), hs.effort.as_str(), hs.max_per_hour), ("claude-haiku-5-5", "low", 5));
         // 舊設定檔：翻譯仍讀 [changelog_translate]；key 檔沿用被改過的那個。
         let legacy: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nkey_file = \"/k/old\"\n").unwrap();
         assert!(legacy.claude_use_state("changelog_translate").unwrap().enabled);
@@ -3016,6 +3097,42 @@ mod supervisor_cfg_tests {
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
         assert_eq!(on, back);
         assert!(claude_model_id_ok("claude-haiku-5-5") && !claude_model_id_ok("gpt-4") && !claude_model_id_ok("claude-x y"));
+    }
+
+    #[test]
+    fn claude_api_groups_resolve_use_to_group_and_project_legacy_config() {
+        // 預設：分析組 Opus 5.5／low；翻譯組 Haiku 5.5／low；同組的用途拿到同一份。
+        let none = ConfigFile::default();
+        let a = none.claude_group_state("changelog_analysis").unwrap();
+        assert_eq!((a.model.as_str(), a.effort.as_str(), a.enabled), ("claude-opus-5-5", "low", false));
+        assert_eq!(none.claude_use_state("changelog_review"), none.claude_use_state("release_triage"));
+        let t = none.claude_group_state("translate").unwrap();
+        assert_eq!((t.model.as_str(), t.effort.as_str(), t.enabled, t.auto), ("claude-haiku-5-5", "low", true, Some(true)));
+        assert!(none.claude_group_state("nope").is_none());
+        assert!(CLAUDE_API_MODELS.contains(&"claude-opus-5-5"));
+        // 每個用途都屬於某組，組的成員表與用途表一致。
+        for d in CLAUDE_API_USES {
+            assert!(CLAUDE_API_GROUPS.iter().any(|g| g.id == d.group && g.members.contains(&d.id)), "{}", d.id);
+        }
+        // 舊設定檔（只有 uses.*）：開機投影成組的值，沒寫組設定前每個用途照舊各讀各的。
+        let old: ConfigFile = toml::from_str("[claude_api.uses.release_triage]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\neffort = \"high\"\nmax_per_hour = 7\n").unwrap();
+        let g = old.claude_group_state("changelog_analysis").unwrap();
+        assert_eq!((g.enabled, g.model.as_str(), g.effort.as_str(), g.max_per_hour), (true, "claude-sonnet-5-5", "high", 7));
+        assert_eq!(old.claude_use_state("release_triage").unwrap().model, "claude-sonnet-5-5");
+        assert_eq!(old.claude_use_state("changelog_review").unwrap().model, "claude-opus-5-5", "沒寫的成員用新預設");
+        // 舊的 [changelog_translate] 開著、訊息翻譯被關：翻譯組仍算開著（不讓更新框翻譯失效）。
+        let legacy: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n[claude_api.uses.message_translate]\nenabled = false\n").unwrap();
+        let lg = legacy.claude_group_state("translate").unwrap();
+        assert!(lg.enabled);
+        assert_eq!(lg.model, "claude-sonnet-5-5");
+        // 寫了組設定：整組以它為準，兩個用途一起變。
+        let grouped: ConfigFile = toml::from_str("[claude_api.groups.translate]\nenabled = false\nmodel = \"claude-sonnet-5-5\"\n[claude_api.uses.message_translate]\nenabled = true\n").unwrap();
+        for u in ["message_translate", "changelog_translate"] {
+            let s = grouped.claude_use_state(u).unwrap();
+            assert_eq!((s.enabled, s.model.as_str()), (false, "claude-sonnet-5-5"), "{u}");
+        }
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&grouped).unwrap()).unwrap();
+        assert_eq!(grouped, back);
     }
 
     #[test]

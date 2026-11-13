@@ -16,7 +16,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{claude_model_id_ok, ClaudeApiUseState, ConfigFile, CLAUDE_API_EFFORTS, CLAUDE_API_MODELS, CLAUDE_API_USES};
+use crate::config::{claude_model_id_ok, ClaudeApiUseState, ConfigFile, CLAUDE_API_EFFORTS, CLAUDE_API_GROUPS, CLAUDE_API_MODELS, CLAUDE_API_USES};
 use crate::key_file::{key_status, read_key, stage_key};
 use crate::lc_error::LcError;
 use crate::state::App;
@@ -455,6 +455,9 @@ pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
         Some((2.0, 10.0))
     } else if m.starts_with("claude-opus-5-5") {
         Some((4.0, 20.0))
+    } else if m.starts_with("claude-fable-5-2") {
+        // Fable 5.2 官方牌價 $8/$40（fable 5／5.1 仍是 $10/$50）。
+        Some((8.0, 40.0))
     } else if m.starts_with("claude-fable-5") {
         Some((10.0, 50.0))
     } else {
@@ -689,9 +692,19 @@ fn settings_json(cfg: &ConfigFile) -> Value {
         .map(|d| {
             let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default });
             json!({
-                "id": d.id, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
+                "id": d.id, "group": d.group, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
                 "default_model": d.model, "default_effort": d.effort, "default_max_per_hour": d.max_per_hour,
                 "legacy_section": d.legacy_section,
+            })
+        })
+        .collect();
+    let groups: Vec<Value> = CLAUDE_API_GROUPS
+        .iter()
+        .map(|g| {
+            let s = cfg.claude_group_state(g.id).unwrap_or(ClaudeApiUseState { enabled: false, model: g.model.into(), effort: g.effort.into(), max_per_hour: g.max_per_hour, auto: g.auto_default });
+            json!({
+                "id": g.id, "label": g.label, "uses": g.members, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
+                "default_model": g.model, "default_effort": g.effort, "default_max_per_hour": g.max_per_hour,
             })
         })
         .collect();
@@ -701,6 +714,8 @@ fn settings_json(cfg: &ConfigFile) -> Value {
         "key_error": key.err(),
         "models": CLAUDE_API_MODELS,
         "efforts": CLAUDE_API_EFFORTS,
+        "groups": groups,
+        // 舊欄位（相容讀取）：每個用途一列，值是它所屬組的生效值。
         "uses": uses,
     })
 }
@@ -721,15 +736,29 @@ pub(crate) struct UseBody {
 #[derive(Deserialize)]
 pub(crate) struct SettingsBody {
     pub enabled: Option<bool>,
+    /// 舊：逐用途。對應到所屬組後套用（同組多個用途的欄位依序合併，後者蓋前者）。
     pub uses: Option<BTreeMap<String, UseBody>>,
+    /// 新：逐組。同一次 PUT 兩者都有時，`groups` 後套用、優先。
+    pub groups: Option<BTreeMap<String, UseBody>>,
     pub token: Option<String>,
 }
 
 fn validate(body: &SettingsBody) -> Result<(), LcError> {
+    for (id, u) in body.groups.iter().flatten() {
+        let Some(g) = CLAUDE_API_GROUPS.iter().find(|g| g.id == id) else { return Err(LcError::Bad(format!("unknown group: {id}"))) };
+        validate_body(id, u, g.auto_default.is_some(), 1)?;
+    }
     for (id, u) in body.uses.iter().flatten() {
-        if !CLAUDE_API_USES.iter().any(|d| d.id == id) {
-            return Err(LcError::Bad(format!("unknown use: {id}")));
-        }
+        let Some(d) = CLAUDE_API_USES.iter().find(|d| d.id == id) else { return Err(LcError::Bad(format!("unknown use: {id}"))) };
+        let has_auto = CLAUDE_API_GROUPS.iter().find(|g| g.id == d.group).is_some_and(|g| g.auto_default.is_some());
+        // changelog_translate 的 0＝不上限（#1948）；其他用途仍要求 1..=1000。
+        validate_body(id, u, has_auto && d.auto_default.is_some(), if id == "changelog_translate" { 0 } else { 1 })?;
+    }
+    Ok(())
+}
+
+fn validate_body(id: &str, u: &UseBody, has_auto: bool, floor: u32) -> Result<(), LcError> {
+    {
         if let Some(m) = u.model.as_deref() {
             if !claude_model_id_ok(m.trim()) {
                 return Err(LcError::Bad(format!("bad model id: {m}")));
@@ -740,11 +769,9 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
                 return Err(LcError::Bad(format!("bad effort: {e}")));
             }
         }
-        // changelog_translate 的 0＝不上限（#1948）；其他用途仍要求 1..=1000。
-        if u.auto.is_some() && CLAUDE_API_USES.iter().find(|d| d.id == id).is_some_and(|d| d.auto_default.is_none()) {
+        if u.auto.is_some() && !has_auto {
             return Err(LcError::Bad(format!("{id} has no auto switch")));
         }
-        let floor = if id == "changelog_translate" { 0 } else { 1 };
         if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
             return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
         }
@@ -753,42 +780,48 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
 }
 
 /// 把 body 套到設定上（讀寫都走這一個，所以「要不要開」的判斷與實際寫入不會不一致）。
+/// 以組為單位：先取該組目前的生效值（舊設定檔會被投影過來），疊上這次的欄位，整組寫進 `[claude_api.groups.<組>]`。
 fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
     if let Some(enabled) = body.enabled {
         cfg.claude_api.enabled = enabled;
     }
+    // 舊的逐用途 PUT 先映射到組，再讓 `groups` 蓋在後面。
+    let mut patches: Vec<(&'static str, &UseBody)> = Vec::new();
     for (id, u) in body.uses.iter().flatten() {
-        if id == "changelog_translate" {
-            let t = &mut cfg.changelog_translate;
-            if let Some(v) = u.enabled {
-                t.enabled = v;
-            }
-            if let Some(v) = u.model.as_deref() {
-                t.model = v.trim().to_string();
-            }
-            if let Some(v) = u.effort.as_deref() {
-                t.effort = v.trim().to_string();
-            }
-            if let Some(v) = u.max_per_hour {
-                t.max_per_hour = v;
-            }
-            continue;
+        if let Some(d) = CLAUDE_API_USES.iter().find(|d| d.id == id) {
+            // 「自動」只屬於 message_translate；其他成員帶 auto 不處理（validate 已擋）。
+            patches.push((d.group, u));
         }
-        let entry = cfg.claude_api.uses.entry(id.clone()).or_default();
-        if let Some(v) = u.auto {
-            entry.auto = Some(v);
+    }
+    for (id, u) in body.groups.iter().flatten() {
+        if let Some(g) = CLAUDE_API_GROUPS.iter().find(|g| g.id == id) {
+            patches.push((g.id, u));
         }
+    }
+    for (gid, u) in patches {
+        let Some(mut st) = cfg.claude_group_state(gid) else { continue };
         if let Some(v) = u.enabled {
-            entry.enabled = Some(v);
+            st.enabled = v;
         }
         if let Some(v) = u.model.as_deref() {
-            entry.model = v.trim().to_string();
+            st.model = v.trim().to_string();
         }
         if let Some(v) = u.effort.as_deref() {
-            entry.effort = v.trim().to_string();
+            st.effort = v.trim().to_string();
         }
         if let Some(v) = u.max_per_hour {
-            entry.max_per_hour = v;
+            st.max_per_hour = v;
+        }
+        if let Some(v) = u.auto {
+            st.auto = Some(v);
+        }
+        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: st.max_per_hour, auto: st.auto });
+        // 更新框翻譯的功能本身讀 `[changelog_translate]`：把共用的開關／模型／effort 同步過去（每小時上限它自己管，不動）。
+        if gid == "translate" {
+            let t = &mut cfg.changelog_translate;
+            t.enabled = st.enabled;
+            t.model = st.model;
+            t.effort = st.effort;
         }
     }
 }
@@ -993,8 +1026,8 @@ mod tests {
         let reply = complete(&app, req("changelog_review")).await.unwrap();
         assert_eq!((reply.text.as_str(), reply.model.as_str()), ("hi", "claude-sonnet-5-5"));
         let seen = fake.seen.lock().unwrap()[0].clone();
-        assert_eq!(seen["model"], "claude-sonnet-5-5");
-        assert_eq!(seen["output_config"]["effort"], "medium");
+        assert_eq!(seen["model"], "claude-opus-5-5");
+        assert_eq!(seen["output_config"]["effort"], "low");
         assert_eq!(seen["system"], "sys");
         assert_eq!(seen["_key_seen"], "sk-ant-test-0001");
         assert!(seen.get("temperature").is_none() && seen.get("tools").is_none());
@@ -1074,7 +1107,8 @@ mod tests {
         let cfg = app.cfg.get().await;
         assert!(cfg.changelog_translate.enabled && !cfg.claude_api.enabled);
         assert_eq!(cfg.changelog_translate.model, "claude-sonnet-5-5");
-        assert!(cfg.claude_api.uses.is_empty(), "舊用途不寫進 [claude_api.uses]");
+        assert!(cfg.claude_api.uses.is_empty(), "不寫逐用途的 [claude_api.uses]，改寫組");
+        assert_eq!(cfg.claude_api.groups["translate"].model, "claude-sonnet-5-5");
         let t = saved["uses"].as_array().unwrap().iter().find(|u| u["id"] == "changelog_translate").unwrap().clone();
         assert_eq!((t["enabled"].clone(), t["model"].clone(), t["legacy_section"].clone()), (json!(true), json!("claude-sonnet-5-5"), json!("changelog_translate")));
         // 兩條路讀同一個 key 檔。
@@ -1094,10 +1128,65 @@ mod tests {
         assert_eq!(find(&first, "changelog_review")["auto"], Value::Null, "沒有自動開關的用途回 null");
         let off = put(&app, json!({"token": "sk-ant-test-0006", "uses": {"message_translate": {"auto": false}}})).await.unwrap().0;
         assert_eq!(find(&off, "message_translate")["auto"], json!(false));
-        assert_eq!(app.cfg.get().await.claude_api.uses["message_translate"].auto, Some(false));
+        assert_eq!(app.cfg.get().await.claude_api.groups["translate"].auto, Some(false));
         let on = put(&app, json!({"uses": {"message_translate": {"auto": true}}})).await.unwrap().0;
         assert_eq!(find(&on, "message_translate")["auto"], json!(true));
         assert!(matches!(put(&app, json!({"uses": {"changelog_review": {"auto": true}}})).await, Err(LcError::Bad(_))));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fable_5_2_is_priced_8_40_and_older_fable_stays_10_50() {
+        assert_eq!(price_per_mtok("claude-fable-5-2"), Some((8.0, 40.0)));
+        assert_eq!(price_per_mtok("claude-fable-5-2-20261101"), Some((8.0, 40.0)));
+        assert_eq!(price_per_mtok("claude-fable-5"), Some((10.0, 50.0)));
+        assert_eq!(price_per_mtok("claude-fable-5-1"), Some((10.0, 50.0)));
+        assert_eq!(price_per_mtok("claude-opus-5-5"), Some((4.0, 20.0)));
+    }
+
+    #[tokio::test]
+    async fn settings_are_per_group_and_the_old_per_use_fields_still_read_and_write() {
+        let (app, dir) = app_with_key().await;
+        let group = |v: &Value, id: &str| v["groups"].as_array().unwrap().iter().find(|g| g["id"] == id).unwrap().clone();
+        let first = get_settings(State(app.clone())).await.0;
+        assert_eq!(first["groups"].as_array().unwrap().len(), 3, "排程／分析／翻譯各一列");
+        assert!(first["models"].as_array().unwrap().contains(&json!("claude-opus-5-5")));
+        let a = group(&first, "changelog_analysis");
+        assert_eq!((a["model"].clone(), a["effort"].clone(), a["uses"].clone()), (json!("claude-opus-5-5"), json!("low"), json!(["changelog_review", "release_triage"])));
+        assert_eq!(group(&first, "translate")["model"], json!("claude-haiku-5-5"));
+        // 以組寫：兩個用途一起變；帳本仍按用途（用途 id 不變）。
+        let saved = put(&app, json!({"token": "sk-ant-test-0007", "enabled": true, "groups": {"changelog_analysis": {"enabled": true, "model": "claude-sonnet-5-5", "effort": "high", "max_per_hour": 9}}})).await.unwrap().0;
+        let g = group(&saved, "changelog_analysis");
+        assert_eq!((g["enabled"].clone(), g["model"].clone(), g["effort"].clone(), g["max_per_hour"].clone()), (json!(true), json!("claude-sonnet-5-5"), json!("high"), json!(9)));
+        let cfg = app.cfg.get().await;
+        for u in ["changelog_review", "release_triage"] {
+            let s = cfg.claude_use_state(u).unwrap();
+            assert_eq!((s.enabled, s.model.as_str(), s.effort.as_str(), s.max_per_hour), (true, "claude-sonnet-5-5", "high", 9), "{u}");
+        }
+        assert!(saved["uses"].as_array().unwrap().iter().any(|u| u["id"] == "release_triage" && u["group"] == "changelog_analysis" && u["model"] == "claude-sonnet-5-5"), "舊 uses[] 欄位仍回、值是所屬組的");
+        // 舊寫法（逐用途）對應到所屬組，且不動到別組。
+        let old = put(&app, json!({"uses": {"release_triage": {"effort": "medium"}}})).await.unwrap().0;
+        assert_eq!(group(&old, "changelog_analysis")["effort"], json!("medium"));
+        assert_eq!(app.cfg.get().await.claude_use_state("changelog_review").unwrap().effort, "medium");
+        assert_eq!(group(&old, "translate")["model"], json!("claude-haiku-5-5"));
+        // 翻譯組的開關／模型同步到更新框翻譯那一段，不動它的上限。
+        put(&app, json!({"groups": {"translate": {"model": "claude-sonnet-5-5"}}})).await.unwrap();
+        let cfg = app.cfg.get().await;
+        assert_eq!(cfg.changelog_translate.model, "claude-sonnet-5-5");
+        assert_eq!(cfg.changelog_translate.max_per_hour, 0);
+        // 驗證：不認得的組、auto 只屬於翻譯組、上限範圍。
+        assert!(matches!(put(&app, json!({"groups": {"nope": {"enabled": true}}})).await, Err(LcError::Bad(_))));
+        assert!(matches!(put(&app, json!({"groups": {"changelog_analysis": {"auto": true}}})).await, Err(LcError::Bad(_))));
+        assert!(matches!(put(&app, json!({"groups": {"translate": {"max_per_hour": 5000}}})).await, Err(LcError::Bad(_))));
+        assert!(put(&app, json!({"groups": {"translate": {"auto": false}}})).await.is_ok());
+        // 呼叫端仍用原用途 id，帳本照用途分。
+        let fake = Fake::new(vec![ok("a", 1, 1), ok("b", 1, 1)]);
+        app.claude_api.set_client(fake);
+        complete(&app, req("changelog_review")).await.unwrap();
+        complete(&app, req("release_triage")).await.unwrap();
+        let snap = app.claude_api.ledger.snapshot(10);
+        assert_eq!(snap["by_use"]["changelog_review"]["calls"], 1);
+        assert_eq!(snap["by_use"]["release_triage"]["calls"], 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
