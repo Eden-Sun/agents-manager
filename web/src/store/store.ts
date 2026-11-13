@@ -1182,6 +1182,8 @@ export const useStore = create<StoreState>((set, get) => {
     // 視窗在前景才算看到（程式化選取可能發生在背景分頁）。
     if (botId && windowActive()) get().markBotRead(botId)
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
+    // 每次選到一顆 bot 看一眼它的輸入框有沒有卡住的草稿（錯過 `composer_draft` 事件的補洞；一次，不輪詢）。
+    if (botId) probeComposerDraftOnce(get, botId)
   },
 
   selectAdjacentBot: (dir) => {
@@ -2802,6 +2804,26 @@ function reloadUpstreamUpdates(set: SetFn, get: GetFn) {
   })
 }
 
+/** 輸入框草稿的「補洞」探測正在進行的 bot：同一顆同時只打一次 GET。 */
+const draftProbing = new Set<string>()
+
+/**
+ * 網頁打開／重連、或選到一顆 bot 時：它在跑、idle、而且這個 kind 有草稿動作（claude／codex／grok），就打一次
+ * `GET /bots/:id/composer-draft`，有字就掛上草稿列。daemon 只在 idle 邊推 `composer_draft`，之後才開的分頁或斷線期間漏掉的事件靠這一次補上；
+ * 不輪詢：每次選取、每次 socket 連上各最多一次。草稿列已經在（409 或事件帶來的）就不再讀；run 不是 idle 時 daemon 也會回 `busy`，不掛。
+ */
+export function probeComposerDraftOnce(get: GetFn, botId: string): void {
+  if (botId.startsWith('pending:') || draftProbing.has(botId)) return
+  const s = get()
+  const bot = s.bots.find((b) => b.id === botId)
+  const run = s.runs[botId]
+  if (!bot || !run || run.state !== 'running' || run.agent_status !== 'idle') return
+  if (!['claude', 'codex', 'grok'].includes(bot.kind)) return
+  if (s.composerDrafts[botId]) return
+  draftProbing.add(botId)
+  void get().loadComposerDraft(botId).finally(() => draftProbing.delete(botId))
+}
+
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
   disconnect = api.openSocket({
@@ -2812,7 +2834,11 @@ function connectSocket(set: SetFn, get: GetFn) {
         seenSeq = 0
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
-        void get().refreshState()
+        // 打開／重連之後（狀態是剛拉回來的那份）看一眼選取中那顆 bot 的輸入框草稿。
+        void get().refreshState().then(() => {
+          const selected = get().selectedBotId
+          if (selected) probeComposerDraftOnce(get, selected)
+        })
         const openedBefore = openedOnce
         if (openedOnce) void reloadLoadedConversations(get)
         openedOnce = true

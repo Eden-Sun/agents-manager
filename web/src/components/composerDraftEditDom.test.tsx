@@ -165,3 +165,57 @@ test('composer_draft 事件：present:true 才去 GET 並掛上那一條；prese
   assert.equal(gets().length, before + 1, 'present:false 不再讀')
   mock.composerDrafts.set(bot.id, null)
 })
+
+test('選到 idle 的 bot：打一次 GET 補上錯過的草稿；每次選取一次、已有草稿列或不是 idle 就不打', { timeout: 30_000 }, async () => {
+  const { requests, bot } = await openChat('am-claude')
+  // 前面的測試送過 prompt：等 mock 把回合跑完回到 idle。
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[bot.id]?.agent_status === 'idle'
+  }, 'bot 回到 idle')
+  const gets = () => requests.filter((r) => r.method === 'GET' && r.path.endsWith(`/bots/${bot.id}/composer-draft`)).length
+  const other = useStore.getState().bots.find((b) => b.id !== bot.id)!
+  const reselect = async () => {
+    await act(async () => useStore.getState().selectBot(other.id))
+    await flush()
+    await act(async () => useStore.getState().selectBot(bot.id))
+    await flush()
+  }
+  mock.composerDrafts.set(bot.id, '錯過事件的草稿')
+  const base = gets()
+  await reselect()
+  await until(() => useStore.getState().composerDrafts[bot.id]?.draft === '錯過事件的草稿', '選取時補上草稿列')
+  assert.equal(gets(), base + 1, '每次選取一次')
+  // 草稿列已經在：再選一次不重讀。
+  await reselect()
+  assert.equal(gets(), base + 1, '已有草稿列不再讀')
+  // 沒有草稿：每次選取仍只讀一次，不掛。
+  await act(async () => useStore.getState().dismissComposerDraft(bot.id))
+  mock.composerDrafts.set(bot.id, null)
+  await reselect()
+  assert.equal(gets(), base + 2)
+  assert.equal(useStore.getState().composerDrafts[bot.id], undefined)
+  // 不是 idle（回合在跑）就不打。
+  useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: { ...s.runs[bot.id], agent_status: 'working' } } }) as never)
+  await reselect()
+  assert.equal(gets(), base + 2, '不是 idle 不讀')
+  useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: { ...s.runs[bot.id], agent_status: 'idle' } } }) as never)
+})
+
+test('選取補洞：連續呼叫只打一次（進行中不重複），沒有 run 或 pending bot 不打', { timeout: 30_000 }, async () => {
+  const { requests, bot } = await openChat('am-claude')
+  await until(async () => {
+    await useStore.getState().refreshState()
+    return useStore.getState().runs[bot.id]?.agent_status === 'idle'
+  }, 'bot 回到 idle')
+  const gets = () => requests.filter((r) => r.method === 'GET' && r.path.endsWith('/composer-draft')).length
+  const base = gets()
+  const { probeComposerDraftOnce } = await import('../store/store')
+  await act(async () => {
+    probeComposerDraftOnce(useStore.getState as never, bot.id)
+    probeComposerDraftOnce(useStore.getState as never, bot.id)
+    probeComposerDraftOnce(useStore.getState as never, 'pending:x')
+  })
+  await flush()
+  assert.equal(gets(), base + 1)
+})
