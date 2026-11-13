@@ -978,7 +978,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 刪除當下 15 秒的「復原」通知保留，但它只活在那個分頁：過了、重整、換裝置就沒了。軟刪的 bot 與對話其實都還在，所以**環境設定裡加一區「最近刪除」**（`DeletedBotsPanel`），
   列 `GET /api/bots/deleted`：名稱、kind、專案、刪除於幾天前、最後對話時間，每列一顆「復原」。放在環境設定而不是側欄：它是低頻的救援入口，不該佔側欄的位置。
 - 復原走 store 的 `restoreBot`（通知上的「復原」與這份清單共用）：成功後重抓 state；失敗（撞名 409 等）用錯誤通知顯示 daemon 的說法。清單在 `bots` 變動時重抓，所以別的分頁刪／復原也會同步。
-- 只列 user bot 與專案還活著的；child 由父 bot／AGM 管。真畫面（mock；CJK 用補裝字型）：「環境設定 → 最近刪除」列出已刪的 bot（各附「復原」鈕），按下後回到原專案；兩張截圖含第三方產品名標籤，已移除，改文字說明。
+- 只列 user bot 與專案還活著的；child 由父 bot／AGM 管。真畫面（mock；CJK 用補裝字型）：![最近刪除](screenshots/bot-restore/1-recent-deleted-list.png) ![復原後](screenshots/bot-restore/2-after-restore.png)
 
 ## 重啟一律接回原對話（2026-10-02 使用者）
 
