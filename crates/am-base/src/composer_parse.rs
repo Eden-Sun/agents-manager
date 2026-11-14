@@ -248,17 +248,28 @@ pub fn box_state(kind: &str, screen: &str) -> BoxState {
     box_state_within(kind, screen, composer_tail(kind, &lines))
 }
 
+pub fn is_agy_placeholder(text: &str) -> bool {
+    let t = text.trim();
+    t.ends_with("(shift+tab to cycle)") && t.to_ascii_lowercase().contains("mode:")
+}
+
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
+    if kind == "agy" {
+        let has_top_rule = lines[..c.idx].iter().rev().take(6).any(|r| is_rule_row(strip_ansi(r).trim()));
+        if !has_top_rule {
+            return BoxState::Unready;
+        }
+    }
     let content = marker_row_content(kind, &c, particles);
-    let skip = if content.is_empty() {
-        0
+    let (skip, has_content) = if content.is_empty() {
+        (0, false)
     } else {
-        match hint_rows(&c, &content, &lines, particles) {
-            Some(n) => n,
-            None => return BoxState::NonEmpty,
+        match hint_rows(kind, &c, &content, &lines, particles) {
+            Some(n) => (n, false),
+            None => (0, true),
         }
     };
     let rest: Vec<String> = lines[c.idx + 1 + skip..]
@@ -267,12 +278,12 @@ pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
         .collect();
     let edge = match (kind, c.boxed) {
         (_, true) => rest.iter().take(tail).position(|r| is_box_bottom(r)),
-        ("claude" | "agy", false) => rest.iter().take(tail).position(|r| is_rule_row(r)),
+        ("claude" | "agy", false) => rest.iter().take(tail).position(|r| is_rule_row(r.trim())),
         ("codex", false) => Some(rest.iter().position(|r| r.trim().is_empty() || !r.starts_with("  ")).unwrap_or(rest.len())),
         _ => None,
     };
     match edge {
-        Some(0) => BoxState::Empty,
+        Some(0) => if has_content { BoxState::NonEmpty } else { BoxState::Empty },
         Some(_) => BoxState::NonEmpty,
         None => BoxState::Unready,
     }
@@ -291,9 +302,11 @@ pub(crate) fn marker_row_content(kind: &str, c: &ComposerRow, particles: bool) -
     content
 }
 
-pub(crate) fn hint_rows(c: &ComposerRow, content: &[(char, bool)], lines: &[&str], particles: bool) -> Option<usize> {
+pub(crate) fn hint_rows(kind: &str, c: &ComposerRow, content: &[(char, bool)], lines: &[&str], particles: bool) -> Option<usize> {
+    let text: String = content.iter().map(|(ch, _)| *ch).collect();
+    let text_is_placeholder = kind == "agy" && is_agy_placeholder(&text);
     let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, hint)| *hint).collect();
-    if visible.is_empty() || !visible.iter().all(|hint| *hint) {
+    if visible.is_empty() || (!visible.iter().all(|hint| *hint) && !text_is_placeholder) {
         return None;
     }
     let more = lines[c.idx + 1..]
@@ -320,12 +333,17 @@ pub fn plain_without_hints(kind: &str, screen: &str) -> String {
     let mut plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
     if let Some(c) = locate_composer(kind, &lines, particles, composer_tail(kind, &lines)) {
         let content = marker_row_content(kind, &c, particles);
-        if let Some(n) = hint_rows(&c, &content, &lines, particles) {
+        if let Some(n) = hint_rows(kind, &c, &content, &lines, particles) {
             let cells = blank_particles(styled_cells(lines[c.idx]), particles);
             let glyph = composer_glyph(kind);
             let at = cells.iter().position(|x| Some(x.ch) == glyph).unwrap_or(0);
-            let row: String =
-                cells.iter().enumerate().map(|(i, x)| if i > at && is_hint_cell(x, c.marker.as_ref()) { ' ' } else { x.ch }).collect();
+            let text: String = content.iter().map(|(ch, _)| *ch).collect();
+            let is_ph = kind == "agy" && is_agy_placeholder(&text);
+            let row: String = cells
+                .iter()
+                .enumerate()
+                .map(|(i, x)| if i > at && (is_hint_cell(x, c.marker.as_ref()) || is_ph) { ' ' } else { x.ch })
+                .collect();
             plain[c.idx] = if c.boxed { row } else { row.trim_end().to_string() };
             plain.drain(c.idx + 1..c.idx + 1 + n);
         }
@@ -342,7 +360,7 @@ pub fn prompt_suggestion(kind: &str, screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     let c = locate_composer(kind, &lines, false, composer_tail(kind, &lines))?;
     let content = marker_row_content(kind, &c, false);
-    let more = hint_rows(&c, &content, &lines, false)?;
+    let more = hint_rows(kind, &c, &content, &lines, false)?;
     let mut text: String = content.iter().map(|(ch, _)| *ch).collect::<String>().trim().to_string();
     for row in &lines[c.idx + 1..c.idx + 1 + more] {
         let cells: String = styled_cells(row).into_iter().map(|x| x.ch).filter(|ch| *ch != '│').collect();

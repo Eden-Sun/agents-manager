@@ -599,14 +599,28 @@ pub async fn plan_delivery(
     };
     // Nothing has been typed yet: a pane that cannot be read is "try again later", never a 502
     // and never an unknown delivery (sol review round ten #1).
-    let screen = match read_composer(client, &pane).await {
+    let mut screen = match read_composer(client, &pane).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(run = %run.id, error = %e, "could not read the pane before typing");
             return Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
         }
     };
-    Ok(composer_ready(app, run, &bot.kind, &screen).await.map(|()| Plan::Type { pane, proof, submit: Submit::Enter }))
+    let mut ready = composer_ready(app, run, &bot.kind, &screen).await;
+    if matches!(ready, Err(Delivered::NotAttempted { reason: "composer_unreadable", .. })) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1600);
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Ok(refreshed) = read_composer(client, &pane).await {
+                screen = refreshed;
+                ready = composer_ready(app, run, &bot.kind, &screen).await;
+                if !matches!(ready, Err(Delivered::NotAttempted { reason: "composer_unreadable", .. })) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(ready.map(|()| Plan::Type { pane, proof, submit: Submit::Enter }))
 }
 
 /// Current evidence count for `proof`.

@@ -189,6 +189,7 @@ fn the_dispatcher_only_serves_its_own_daemon_instance() {
 }
 
 mod delivery_and_screen {
+    use crate::composer_parse::strip_ansi;
     use crate::lifecycle::delivery::{box_state, choose_proof, log_hits_since, BoxState, LogFormat, Proof, ProofInputs};
     use crate::testing as tt;
 
@@ -259,6 +260,56 @@ mod delivery_and_screen {
         let ansi = "Accessing workspace:\n/home/user/project\n\n\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\x1b[36m> Yes, I trust this folder\x1b[0m\n\x1b[2m  No, exit\x1b[0m\n";
         assert_eq!(box_state("agy", plain), BoxState::Unready);
         assert_eq!(box_state("agy", ansi), BoxState::Unready);
+    }
+
+    const AGY_159_STARTUP: &str = include_str!("fixtures/agy-1.5.9-startup-automode.ansi");
+
+    #[test]
+    fn agy_159_startup_automode_placeholder_is_an_empty_box() {
+        assert_eq!(box_state("agy", AGY_159_STARTUP), BoxState::Empty);
+        let plain: String = AGY_159_STARTUP.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+        assert_eq!(box_state("agy", &plain), BoxState::Empty);
+
+        let typed = AGY_159_STARTUP.replace("Auto mode: edits & safe commands auto-approved (shift+tab to cycle)", "my draft text");
+        assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
+
+        // 下框線尚未畫出（例如輸出只到輸入列）：未穩定回傳 Unready
+        let lines: Vec<&str> = AGY_159_STARTUP.lines().collect();
+        let incomplete = lines[..9].join("\n"); // 到輸入列，不含下框線
+        assert_eq!(box_state("agy", &incomplete), BoxState::Unready);
+
+        // 上框線尚未畫出：未成框回傳 Unready
+        let no_top = {
+            let mut removed = false;
+            lines
+                .iter()
+                .filter(|l| {
+                    if !removed && l.contains("─────") {
+                        removed = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(box_state("agy", &no_top), BoxState::Unready);
+    }
+
+    #[test]
+    fn agy_other_mode_placeholders_are_empty_boxes() {
+        for mode in [
+            "Plan mode: research & plan only (shift+tab to cycle)",
+            "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+            "Best-of-N mode: fork into parallel arms and pick a winner (shift+tab to cycle)",
+        ] {
+            let screen = AGY_159_STARTUP.replace("Auto mode: edits & safe commands auto-approved (shift+tab to cycle)", mode);
+            assert_eq!(box_state("agy", &screen), BoxState::Empty, "mode: {mode}");
+            let plain: String = screen.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+            assert_eq!(box_state("agy", &plain), BoxState::Empty, "plain mode: {mode}");
+        }
     }
 }
 
