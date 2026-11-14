@@ -15,6 +15,8 @@ pub fn config_dir_var(kind: &str) -> Option<&'static str> {
         "claude" => Some("CLAUDE_CONFIG_DIR"),
         "codex" => Some("CODEX_HOME"),
         "grok" => Some("GROK_HOME"),
+        // agy 的狀態在 `$HOME/.gemini`，沒有專用變數（XDG_* 無效，2026-11-14 實測）：身份靠換 `HOME`（見 `tools::agy_shadow_home_sh`）。
+        "agy" => Some("HOME"),
         _ => None,
     }
 }
@@ -74,6 +76,7 @@ fn default_dir(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" => Some("~/.claude"),
         "codex" => Some("~/.codex"),
+        "agy" => Some("~"),
         _ => None,
     }
 }

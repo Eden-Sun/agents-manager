@@ -1874,6 +1874,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 ### `POST /api/identities` / `DELETE /api/identities/{name}?host=`
 - POST `{name, kind, env, args, host?}` → `200 {"name"}`；名稱或 kind 不合法 400；`env` 與 bot 相同：key 必須是合法環境變數名稱且 `AM_*` 保留給 daemon，value 不含控制字元、最多 8 KiB、最多 128 個；`args` 原樣附加、只擋 NUL；未知的 host `409 {"reason":"unknown host","host"}`；
   **同一台**重複 `409 {"reason":"identity name already in use","name"}`——鍵是 `(host, name)`，同名在別台是另一筆（SPEC §16.2）。`host` 省略＝不寫 host：鍵算本機，本機優先、遠端讓位給那台同名的身份；只要本機傳 `"local"`。
+  **kind=agy**：agy 沒有設定目錄變數，身份＝換 `HOME`（SPEC §16.8）。`env` 必須且只能是 `HOME=<目錄>`（不可省略、不可指回真家目錄 `~`／`$HOME`／`${HOME}`，否則 400）；建立成功後 daemon 在那台建好影子家目錄。登入（`POST /api/hosts/{host}/identities/{name}/login`）在該 `HOME` 下不帶參數啟動 `agy`（TUI 引導，登完離開）；登出刪該 HOME 底下的 OAuth token。登入狀態以 `agy models` 判斷（未登入 exit 1）。
 - DELETE `?host=`（省略＝本機）→ `200 {}`；仍有**同一台**的 bot 綁著 `409 {"reason":"identity still used by bots","bot_id","host"}`。查完之後、刪除之前才有 bot 開始用它也是 409（檢查與刪除在 config 鎖裡由 `projection::validate` 把關，不會留下孤兒身份；只存 DB 的 child bot 不在 config 裡，這一步看不到它們）。`POST /projects/{id}/bots` 帶的身份在驗過之後被刪掉回 `404 identity`。
   刪的是**沒寫 host** 的那筆時，遠端的 bot 也算：那台沒有自己同名的身份（config 明寫、或 shell 偵測到的 `ccN`；還沒偵測過照「沒有」算）就是在用這一筆，同樣 409。
   刪除成功時同時清掉該身份的額度讀數（記憶體與 `quota_cache`，key＝`<kind>:<name>`，遠端加 `<host>/` 前綴），並推 `quota_updated {kind, host, quota:null}`；同名的 shell alias（`ccN`）仍在用的那把 key 不清（#1350）。

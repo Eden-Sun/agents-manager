@@ -1599,6 +1599,12 @@ pub async fn pane_env_for_fence(
             for (k, v) in &id.env {
                 env.insert(k.clone(), json!(crate::config::expand_home(v, &home)));
             }
+            // agy 身份＝換 `HOME`：影子家目錄先補齊（只補缺的連結），不然 git／ssh／PATH 在那個 HOME 底下找不到東西。
+            if bot.kind == "agy" {
+                if let Err(e) = crate::tools::ensure_agy_shadow_home(fence, &id.env, &home).await {
+                    tracing::warn!(host, identity = idn, error = %e, "agy shadow HOME could not be prepared");
+                }
+            }
         }
     }
     // issue #1775：這台看得到的身份清單，母 pane 的 herdr shim 查 `agent start --identity <名>` 用（只給母 pane，子 pane 不往下傳）。

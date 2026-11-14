@@ -208,3 +208,25 @@ async function mount_with_identities() {
   const { identities } = useStore.getState()
   await act(() => useStore.setState({ identities: [...identities, { name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] }] }))
 }
+
+it('新增身份表單選 agy：預填 HOME=$HOME/.agy-、說明副作用，送出的是 kind agy＋HOME', async () => {
+  const requests = await open()
+  const form = () => document.querySelector('.identities-panel form, form')!
+  const select = form().querySelector<HTMLSelectElement>('select')!
+  assert.ok([...select.options].some((o) => o.value === 'agy'), 'kind 選單有 agy')
+  assert.equal(form().querySelector('[data-k="agy-home-hint"]'), null, '其他 kind 不顯示 agy 說明')
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, 'agy')
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  const envBox = form().querySelector<HTMLTextAreaElement>('textarea')!
+  assert.equal(envBox.value, 'HOME=$HOME/.agy-')
+  assert.match(form().querySelector('[data-k="agy-home-hint"]')?.textContent ?? '', /HOME.*\.gemini.*未登入/)
+  const nameInput = [...form().querySelectorAll<HTMLInputElement>('input[type=text]')].find((i) => i.placeholder === 'cc1')!
+  await typeInto(nameInput, 'agb')
+  await typeInto(envBox, 'HOME=$HOME/.agy-agb')
+  await click([...form().querySelectorAll('button')].find((b) => b.textContent === '新增身份')!)
+  await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/identities'), '送出新增身份')
+  const post = requests.find((r) => r.method === 'POST' && r.path === '/api/identities')!
+  assert.deepEqual(post.body, { name: 'agb', kind: 'agy', env: { HOME: '$HOME/.agy-agb' } })
+})

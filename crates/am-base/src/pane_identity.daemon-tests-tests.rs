@@ -336,3 +336,16 @@
         let env = parse_ps_env(&String::from_utf8_lossy(&out.stdout));
         assert_eq!(env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/u/.claude-cc2"), "{}", String::from_utf8_lossy(&out.stdout));
     }
+
+    /// agy 沒有設定目錄變數：身份是換 `HOME`；沒換（HOME＝真家目錄）等於預設帳號那個沒有 HOME 的身份。
+    #[test]
+    fn an_agy_child_is_matched_by_its_home() {
+        let ids = vec![
+            crate::config::IdentityCfg { name: "ag0".into(), kind: "agy".into(), host: None, env: Default::default(), args: vec![] },
+            crate::config::IdentityCfg { name: "ag2".into(), kind: "agy".into(), host: None, env: [("HOME".to_string(), "$HOME/.agy-ag2".to_string())].into(), args: vec![] },
+        ];
+        assert_eq!(config_dir_var("agy"), Some("HOME"));
+        assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/home/u/.agy-ag2")).as_deref(), Some("ag2"));
+        assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/home/u")).as_deref(), Some("ag0"), "真家目錄＝預設帳號");
+        assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/elsewhere")), None);
+    }

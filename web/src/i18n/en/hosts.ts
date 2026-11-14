@@ -549,6 +549,7 @@ export default {
   ' 目前沒有 Bot 在用它。': ' No bot is using it.',
   '名稱（例如 cc1）': 'Name (for example cc1)',
   '小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字。': 'Start with a lowercase letter; then lowercase letters, digits, - or _ are allowed, up to 32 characters.',
+  'agy 沒有設定目錄變數，所以這個身份是換一個 {home}：daemon 會建那個目錄，{gemini} 與 agy 的憑證各自獨立（建好是未登入，登入請按身份列上的「登入」），其餘（git／ssh／PATH 等）用連結指回真家目錄。副作用：用這個身份的 agy 看到的 {homeVar} 是那個目錄。': 'agy has no config-dir variable, so this identity is a separate {home}: the daemon creates that directory, {gemini} and agy credentials are independent (it starts signed out; use Log in on the identity row), and everything else (git/ssh/PATH…) is linked back to the real home. Side effect: agy under this identity sees {homeVar} as that directory.',
   'env（每行 KEY=VALUE；{home} 與開頭 {tilde} 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）': 'env (one KEY=VALUE per line; {home} and a leading {tilde} expand to the home directory on that host; claude uses CLAUDE_CONFIG_DIR, grok uses GROK_HOME)',
   '新增身份': 'Add identity',
   '以下是從各主機登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改就改那台主機的 alias。「停用」只是把它從身份選單與自動挑選裡拿掉（alias 還在），已經在用它的 Bot 不受影響。': 'Identities recognized from the {alias} aliases in each host’s login shell ({rc} etc.). You can assign them directly to a bot. To change them, change the alias on that host. “Disable” only removes one from the identity menu and auto-selection (the alias stays); bots already using it are not affected.',

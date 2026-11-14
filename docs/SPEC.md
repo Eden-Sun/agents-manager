@@ -4425,6 +4425,15 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 額度也不再探測它（`quota_claude::refresh_claude` 跳過），**除非它還有 run 在跑**——停用是「別再挑它」，不是把正在用的額度弄瞎。共用預設帳號的身份（cc0）也一樣：指到裸 `claude` 的身份全都停用、都沒有 run、也沒有不帶身份的 claude bot 在跑，才跳過裸 `claude` 的探測。
 主機上的 alias 不動、登入狀態不動，隨時可以按「啟用」放回來。偵測到但不打算用的 `ccN`（例如只是 zshrc 裡留著）就用這個標掉。
 
+### 16.8 agy 多身份（使用者 2026-11-14；2026-11-14 實測）
+agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`（macOS 是 Keychain 項目 `gemini`/`antigravity`），另有 `$HOME/.config/antigravity/credential-user-scope`。**沒有專用的設定目錄環境變數**：實測 `XDG_CONFIG_HOME`／`XDG_DATA_HOME`／`XDG_STATE_HOME`／`XDG_CACHE_HOME` 全指到別處，`agy models` 仍讀到原本的登入（`~/.gemini` 寫死在 `$HOME`）；只有 `HOME=<別的目錄>` 有效（`agy models` 回 `Please sign in…`、exit 1，原本的檔案沒被動到）。
+所以 **agy 身份＝換 `HOME`**，`[[identities]] kind = "agy"` 的 `env` 只能是 `HOME = "$HOME/.agy-<名>"`（`pane_identity::config_dir_var("agy")` 是 `HOME`，沒換 HOME＝預設帳號的那個空 env 身份）。
+- **影子家目錄**（`tools::agy_shadow_home_sh`）：換 HOME 會讓 git／ssh／npm／cargo／PATH 一起找不到東西，所以那個目錄裡只有 `.gemini` 與 `.config/antigravity` 是各身份獨立的（一開始是空的＝未登入），真家目錄的其餘每一項都用 symlink 指回去。建立身份、登入／登出、bot 啟動時補齊（只補缺的連結，不動已存在的檔案，可重複執行）；本機與遠端（ssh）一樣。
+- **狀態**：`agy models`（stderr 併進 stdout，因為「Please sign in」印在 stderr）；已登入＝輸出有模型列，未登入＝`Please sign in`，其餘＝未知。
+- **登入／登出**：登入在該 HOME 下不帶參數啟動 `agy`，由它的 TUI 引導（沒有不開瀏覽器的獨立子命令；登完離開，watcher 重驗）；登出＝刪該 HOME 的 token 檔（agy 沒有登出子命令；macOS Keychain 項目是全機共用，不動）。
+- **子 agent**：`herdr agent start --kind agy --identity <名>` 由 shim 帶該身份的 `HOME`；`AM_IDENTITIES` 只有 agy 身份才列 `HOME`。收編的 agy 子 agent 以 pane 行程的 `HOME` 對身份（等於真家目錄＝預設帳號）。
+- **限制**：用這個身份的 agy 看到的 `$HOME` 就是影子目錄；agy 的額度（quota）探測仍只讀預設帳號；在該身份底下新增的 dotfile 不會回寫到真家目錄。
+
 ### 16.5 alias 定期重讀
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
 還沒做過第一次偵測的主機不在此列。

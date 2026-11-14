@@ -308,13 +308,13 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
   )
 }
 
-/** 各 kind 的設定目錄變數（SPEC §16／§12）：claude 用 CLAUDE_CONFIG_DIR、codex 用 CODEX_HOME、grok 用 GROK_HOME。 */
+/** 各 kind 的設定目錄變數（SPEC §16／§12）：claude 用 CLAUDE_CONFIG_DIR、codex 用 CODEX_HOME、grok 用 GROK_HOME；agy 沒有，換 `HOME`。 */
 const ENV_PREFILL: Record<BotKind, string> = {
   claude: 'CLAUDE_CONFIG_DIR=$HOME/.claude-',
   codex: 'CODEX_HOME=$HOME/.codex-',
   grok: 'GROK_HOME=$HOME/.grok-',
-  // agy 的設定目錄只認 `$HOME`、沒有環境變數可換（第一階段單一身份，這個表單不提供 agy）。
-  agy: '',
+  // agy 的狀態在 `$HOME/.gemini`，沒有專用變數、XDG_* 也無效（2026-11-14 實測）：身份＝換一個 HOME（daemon 會建影子家目錄）。
+  agy: 'HOME=$HOME/.agy-',
   'claude-api': '',
 }
 
@@ -374,7 +374,13 @@ function NewIdentityForm() {
           <option value="claude">claude</option>
           <option value="codex">codex</option>
           <option value="grok">grok</option>
+          <option value="agy">agy</option>
         </select>
+        {kind === 'agy' ? (
+          <span className="hint" data-k="agy-home-hint">
+            {t.x('agy 沒有設定目錄變數，所以這個身份是換一個 {home}：daemon 會建那個目錄，{gemini} 與 agy 的憑證各自獨立（建好是未登入，登入請按身份列上的「登入」），其餘（git／ssh／PATH 等）用連結指回真家目錄。副作用：用這個身份的 agy 看到的 {homeVar} 是那個目錄。', { home: 'HOME', gemini: '.gemini', homeVar: '$HOME' })}
+          </span>
+        ) : null}
       </label>
       <label className="field">
         <span>{t.x('env（每行 KEY=VALUE；{home} 與開頭 {tilde} 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）', { home: '$HOME', tilde: '~' })}</span>

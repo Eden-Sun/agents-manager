@@ -22,7 +22,7 @@ fn identity_entry(i: &IdentityCfg, home: &str) -> Option<String> {
         return None;
     }
     let mut kvs = Vec::new();
-    for key in ACCOUNT_KEYS {
+    for key in ACCOUNT_KEYS.into_iter().chain((i.kind == "agy").then_some("HOME")) {
         let Some(raw) = i.env.get(key) else { continue };
         let value = expand_home(raw, home);
         if value.is_empty() {
@@ -89,6 +89,13 @@ mod tests {
     }
 
     /// 呼叫端（`pane_env_for_fence`）會拿這台 `identities_for_host` 的結果；沒有任何身份時是空字串，shim 就回「沒有這個身份」。
+    /// agy 的身份是換 `HOME`：只有 agy 身份把 HOME 列進清單（別的 kind 的 HOME 不是帳號目錄）。
+    #[test]
+    fn only_agy_identities_list_home() {
+        let line = identities_env(&[ident("ag2", "agy", &[("HOME", "$HOME/.agy-ag2")]), ident("cc9", "claude", &[("HOME", "/x")])], "/home/u");
+        assert_eq!(line, "agy/ag2:HOME=/home/u/.agy-ag2;claude/cc9");
+    }
+
     #[test]
     fn no_identities_gives_an_empty_list() {
         assert_eq!(identities_env(&[], "/h"), "");

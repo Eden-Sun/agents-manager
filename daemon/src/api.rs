@@ -4508,6 +4508,12 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         .filter(|(k, _)| crate::tools::valid_env_name(k))
         .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
         .collect::<BTreeMap<_, _>>();
+    if idn.kind == "agy" {
+        // 登入／登出都在那個身份的 HOME 底下跑：先補齊影子家目錄。
+        if let Err(e) = crate::tools::ensure_agy_shadow_home(&fence, &idn.env, &home).await {
+            tracing::warn!(host = %name, identity = %identity, error = %e, "agy shadow HOME could not be prepared");
+        }
+    }
     let command = if logout {
         crate::tools::identity_logout_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登出指令", idn.kind)))?
@@ -5126,6 +5132,16 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
+    if b.kind == "agy" {
+        // agy 沒有設定目錄變數，身份＝換 `HOME`（影子家目錄）；沒帶、或指回真家目錄＝其實是預設帳號，擋掉免得兩個身份共用一份登入。
+        let home = crate::tools::agy_identity_home(&b.env);
+        if home.is_none() || matches!(home, Some("~" | "$HOME" | "${HOME}")) {
+            return Err(LcError::Bad("agy identity needs HOME=<directory> in env (e.g. HOME=$HOME/.agy-b); agy has no config-dir variable, so an identity is a separate HOME".into()));
+        }
+        if let Some(bad) = b.env.keys().find(|k| k.as_str() != "HOME") {
+            return Err(LcError::Bad(format!("agy identity env only supports HOME (got `{bad}`)")));
+        }
+    }
     let host = b.host.clone().map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
     if let Some(h) = host.as_deref().filter(|h| *h != crate::config::LOCAL_HOST) {
         let known = app.hosts.list().await.iter().any(|c| c.name == h);
@@ -5151,6 +5167,17 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
         Err(e) => return Err(projection_err(e)),
     }
     forget_identity_models(&app, &b.name).await;
+    if b.kind == "agy" {
+        // 先把影子家目錄建好（只補缺的連結）：登入／探測／啟動 bot 都從這個目錄走。其他主機在第一次用到時補。
+        let host_name = b.host.clone().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+        if let Some(fence) = app.hosts.fence(&host_name).await {
+            if let Ok(home) = crate::hosts::home_for_fence(&fence).await {
+                if let Err(e) = crate::tools::ensure_agy_shadow_home(&fence, &b.env, &home).await {
+                    tracing::warn!(host = %host_name, identity = %b.name, error = %e, "agy shadow HOME could not be prepared");
+                }
+            }
+        }
+    }
     app.emit("identities_changed", json!({})).await;
     for c in app.hosts.list().await {
         crate::tools::spawn_detect(app.clone(), c.name.clone());

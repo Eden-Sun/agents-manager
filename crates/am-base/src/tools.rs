@@ -391,7 +391,18 @@ pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
         "codex" => Some(&["login", "status"]),
         "grok" => Some(&["models"]),
+        // agy 沒有 status 子命令：`models` 未登入時 exit 1 並印「Please sign in」（2026-11-14 實測）。
+        "agy" => Some(&["models"]),
         _ => None,
+    }
+}
+
+/// 登入狀態探測要怎麼處理 stderr：agy 把「Please sign in」印在 stderr（未登入時 stdout 是空的），要併進來才讀得到。
+pub fn login_probe_stderr(kind: &str) -> &'static str {
+    if kind == "agy" {
+        "2>&1"
+    } else {
+        "2>/dev/null"
     }
 }
 
@@ -414,6 +425,8 @@ pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Opt
         "claude" => "claude auth login",
         "codex" => "codex login --device-auth",
         "grok" => "grok login",
+        // agy 的登入只有互動式：不帶參數啟動，在 TUI 裡走登入；登完離開（Ctrl+C）後 watcher 重驗。
+        "agy" => "agy",
         _ => return None,
     };
     Some(with_identity_env(login, env))
@@ -426,6 +439,8 @@ pub fn identity_logout_command(kind: &str, env: &BTreeMap<String, String>) -> Op
         "claude" => "claude auth logout",
         "codex" => "codex logout",
         "grok" => "grok logout",
+        // agy 沒有登出子命令：刪掉這個身份 HOME 底下的 OAuth token（Linux 是檔案；macOS 的 Keychain 項目是全機共用的，不動）。
+        "agy" => "sh -c 'rm -f \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"'",
         _ => return None,
     };
     Some(with_identity_env(logout, env))
@@ -555,7 +570,7 @@ pub async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str
             script.push_str(&format!("export {k}={}\n", sh_quote(&crate::config::expand_home(v, &home))));
         }
     }
-    script.push_str(&format!("{} {} 2>/dev/null </dev/null", sh_quote(&bin), args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ")));
+    script.push_str(&format!("{} {} {} </dev/null", sh_quote(&bin), args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" "), login_probe_stderr(&idn.kind)));
     let out = if host == LOCAL_HOST {
         run_local(&script, Duration::from_secs(20)).await.ok()?
     } else {
@@ -703,7 +718,8 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
             s.push(' ');
             s.push_str(&sh_quote(a));
         }
-        s.push_str(" 2>/dev/null </dev/null ); __AM_IDENT_RC=$?; printf '%s\\n' \"$__AM_IDENT_BODY\" | sed 's/^/AM_IDENT_OUT /'; printf '\\nAM_IDENT_RC %s %s\\n' ");
+        s.push_str(&format!(" {} </dev/null ); __AM_IDENT_RC=$?;", login_probe_stderr(&it.kind)));
+        s.push_str(" printf '%s\\n' \"$__AM_IDENT_BODY\" | sed 's/^/AM_IDENT_OUT /'; printf '\\nAM_IDENT_RC %s %s\\n' ");
         s.push_str(&format!("{} \"$__AM_IDENT_RC\" )\n", sh_quote(&it.name)));
         // The leading newline keeps the fence on its own line when the CLI ends without one.
         s.push_str(&format!("printf '\\nAM_IDENT_END %s\\n' {}\n", sh_quote(&it.name)));
@@ -751,7 +767,69 @@ pub fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String
             }
             (None, None, None)
         }
+        "agy" => {
+            let low = text.to_ascii_lowercase();
+            if low.contains("please sign in") || low.contains("sign in to") {
+                return (Some(false), None, None);
+            }
+            // 已登入時 `agy models` 列出「<slug>\t<名稱>」每行一個模型。
+            if text.lines().any(|l| l.contains('\t')) {
+                return (Some(true), None, None);
+            }
+            (None, None, None)
+        }
         _ => (None, None, None),
+    }
+}
+
+/// 身份 env 裡 agy 的家目錄（`HOME`）；沒有就是這顆身份沒指到別的目錄（等於預設帳號）。
+pub fn agy_identity_home(env: &BTreeMap<String, String>) -> Option<&str> {
+    env.get("HOME").map(String::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// 建立／補齊 agy 身份的「影子家目錄」`dir`：agy 只認 `$HOME/.gemini`（與 `$HOME/.config/antigravity`），沒有環境變數可換，
+/// 所以身份＝換一個 `HOME`。為了不讓 git／ssh／npm／cargo／PATH 一起跟著壞，影子家目錄裡除了 `.gemini` 與
+/// `.config/antigravity`（各身份獨立、一開始是空的＝未登入）之外，真家目錄的每一項都用 symlink 指回去。
+/// 可重複執行（只補沒有的連結，不動已存在的檔案）；`dir` 等於真家目錄時什麼都不做。
+pub fn agy_shadow_home_sh(dir: &str, real_home: &str) -> String {
+    format!(
+        r#"real={real}; dir={dir}
+[ -n "$real" ] && [ -n "$dir" ] && [ "$dir" != "$real" ] || exit 0
+mkdir -p "$dir/.gemini" "$dir/.config" || exit 1
+for p in "$real"/.[!.]* "$real"/..?* "$real"/*; do
+  [ -e "$p" ] || [ -L "$p" ] || continue
+  [ "$p" != "$dir" ] || continue
+  n=${{p##*/}}
+  case "$n" in .gemini|.config) continue ;; esac
+  [ -e "$dir/$n" ] || [ -L "$dir/$n" ] || ln -s "$p" "$dir/$n"
+done
+for p in "$real"/.config/* "$real"/.config/.[!.]*; do
+  [ -e "$p" ] || [ -L "$p" ] || continue
+  n=${{p##*/}}
+  [ "$n" != antigravity ] || continue
+  [ -e "$dir/.config/$n" ] || [ -L "$dir/.config/$n" ] || ln -s "$p" "$dir/.config/$n"
+done
+exit 0
+"#,
+        real = sh_quote(real_home),
+        dir = sh_quote(dir),
+    )
+}
+
+/// agy 身份的影子家目錄補齊（本機直接跑，遠端走 ssh）。身份沒帶 `HOME`、或 `HOME` 就是真家目錄＝什麼都不做。
+/// 失敗只回錯誤給呼叫端記 log：目錄沒建好的話 agy 自己會建出空的 `.gemini`（＝未登入），不會用到別人的登入資料。
+pub async fn ensure_agy_shadow_home(fence: &crate::hosts::HostFence, env: &BTreeMap<String, String>, real_home: &str) -> Result<()> {
+    let Some(raw) = agy_identity_home(env) else { return Ok(()) };
+    let dir = crate::config::expand_home(raw, real_home);
+    if dir == real_home {
+        return Ok(());
+    }
+    let script = agy_shadow_home_sh(&dir, real_home);
+    let conn = fence.conn();
+    if conn.is_local() {
+        run_local(&script, Duration::from_secs(20)).await.map(|_| ())
+    } else {
+        conn.ssh_exec(&script).await.map(|_| ())
     }
 }
 

@@ -23,7 +23,7 @@ export function weeklyOnlyKind(kind: BotKind): boolean {
 export const DEFAULT_IDENTITY = 'cc0'
 
 /** 每個 kind 用哪個環境變數指到自己的帳號目錄（daemon `pane_identity::config_dir_var`）。 */
-const HOME_VAR: Partial<Record<BotKind, string>> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', grok: 'GROK_HOME' }
+const HOME_VAR: Partial<Record<BotKind, string>> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', grok: 'GROK_HOME', agy: 'HOME' }
 
 /**
  * 共用預設帳號：它的 statusline 數字落在裸的 `<kind>` key 上。**跟 daemon `quota::identity_shares_default`

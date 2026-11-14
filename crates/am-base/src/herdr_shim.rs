@@ -581,6 +581,7 @@ am_agent_start() {
             claude) _idacct=CLAUDE_CONFIG_DIR ;;
             codex) _idacct=CODEX_HOME ;;
             grok) _idacct=GROK_HOME ;;
+            agy) _idacct=HOME ;;
         esac
         _idkv=$(am_identity_find "$_ik" "$_idn") || {
             _names=$(am_identity_names "$_ik")

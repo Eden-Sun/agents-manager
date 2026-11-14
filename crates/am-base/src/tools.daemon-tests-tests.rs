@@ -866,3 +866,59 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(identities["cx1"].account.as_deref(), Some("recovered@example.test"));
         assert!(calls.lock().unwrap().last().unwrap().contains("/home/remote-codex/.codex-cx1"), "recovered auth probe expands env against remote HOME");
     }
+
+    /// agy 多身份（2026-11-14 實測）：沒有設定目錄變數、XDG_* 無效，只有換 `HOME` 有效；狀態用 `agy models`
+    /// （未登入時 exit 1、在 **stderr** 印 Please sign in），所以探測要把 stderr 併進來。
+    #[test]
+    fn agy_identity_reads_models_output_and_merges_stderr() {
+        assert_eq!(login_status_args("agy"), Some(&["models"][..]));
+        assert_eq!(login_probe_stderr("agy"), "2>&1");
+        assert_eq!(login_probe_stderr("codex"), "2>/dev/null");
+        let signed_out = "Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.";
+        assert_eq!(read_login_answer("agy", signed_out).0, Some(false));
+        let signed_in = "Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\n";
+        assert_eq!(read_login_answer("agy", signed_in).0, Some(true));
+        assert_eq!(read_login_answer("agy", "boom").0, None, "看不懂就是不知道，不是未登入");
+        let probe = identity_probe_sh(&[IdentityProbe { name: "ag2".into(), kind: "agy".into(), bin: "/bin/agy".into(), env: [("HOME".to_string(), "/h/.agy-ag2".to_string())].into(), args: None }]);
+        assert!(probe.contains("HOME='/h/.agy-ag2'") && probe.contains("'models' 2>&1 </dev/null"), "{probe}");
+    }
+
+    #[test]
+    fn agy_login_runs_the_tui_under_the_identity_home_and_logout_removes_that_homes_token() {
+        let env: BTreeMap<String, String> = [("HOME".to_string(), "/h/.agy ag2".to_string())].into();
+        assert_eq!(identity_login_command("agy", &env).as_deref(), Some("env HOME='/h/.agy ag2' agy"));
+        let out = identity_logout_command("agy", &env).unwrap();
+        assert!(out.starts_with("env HOME='/h/.agy ag2' sh -c ") && out.contains(".gemini/antigravity-cli/antigravity-oauth-token"), "{out}");
+        assert_eq!(agy_identity_home(&env), Some("/h/.agy ag2"));
+        assert_eq!(agy_identity_home(&BTreeMap::new()), None);
+    }
+
+    /// 影子家目錄：`.gemini` 與 `.config/antigravity` 各身份獨立（空的＝未登入），其餘全部連回真家目錄；重跑不壞東西。
+    #[test]
+    fn the_shadow_home_shares_everything_but_the_agy_state() {
+        let root = crate::testing::scratch_dir("am-agy-shadow");
+        let real = root.join("home");
+        std::fs::create_dir_all(real.join(".gemini")).unwrap();
+        std::fs::create_dir_all(real.join(".config/antigravity")).unwrap();
+        std::fs::create_dir_all(real.join(".config/gh")).unwrap();
+        std::fs::create_dir_all(real.join(".ssh")).unwrap();
+        std::fs::write(real.join(".gitconfig"), "x").unwrap();
+        std::fs::write(real.join(".gemini/mine"), "real login").unwrap();
+        let dir = real.join(".agy-b");
+        let sh = agy_shadow_home_sh(dir.to_str().unwrap(), real.to_str().unwrap());
+        for _ in 0..2 {
+            let ok = std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap();
+            assert!(ok.success());
+        }
+        assert!(dir.join(".gemini").is_dir() && !dir.join(".gemini").is_symlink(), ".gemini 獨立");
+        assert!(!dir.join(".gemini/mine").exists(), "不帶真登入資料");
+        assert!(dir.join(".config").is_dir() && !dir.join(".config").is_symlink());
+        assert!(!dir.join(".config/antigravity").exists(), "antigravity 憑證範圍獨立");
+        assert!(dir.join(".config/gh").is_symlink(), ".config 其餘連回去");
+        assert!(dir.join(".gitconfig").is_symlink() && dir.join(".ssh").is_symlink(), "git／ssh 設定照常可用");
+        assert!(!dir.join(".agy-b").exists(), "不把自己連進自己");
+        // 家目錄就是真家目錄：什麼都不做。
+        let same = agy_shadow_home_sh(real.to_str().unwrap(), real.to_str().unwrap());
+        assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());
+        let _ = std::fs::remove_dir_all(&root);
+    }
