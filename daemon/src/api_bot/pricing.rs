@@ -181,14 +181,17 @@ impl QuoteProvider for DirectGlobal {
         { return Err(QuoteError::UntrustedUsage); }
         let actual_speed = match speed { "standard" => "standard", "fast" => "fast", _ => return Err(QuoteError::UntrustedUsage) };
         // 頂層 input/output 不含壓縮那一輪；壓縮 iteration 的用量要另外加進費用（官方：加總 iterations 才是實際計費）。
-        let (mut comp_in, mut comp_out) = (0_u64, 0_u64);
+        let (mut comp_in, mut comp_out, mut comp_read, mut comp_write) = (0_u64, 0_u64, 0_u64, 0_u64);
         if let Some(Value::Array(items)) = usage.get("iterations") {
             for it in items.iter().filter(|it| it.get("type").and_then(Value::as_str) == Some("compaction")) {
                 comp_in = comp_in.checked_add(it.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
                 comp_out = comp_out.checked_add(it.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
+                for (key, acc) in [("cache_read_input_tokens", &mut comp_read), ("cache_creation_input_tokens", &mut comp_write)] {
+                    if let Some(n) = it.get(key).and_then(Value::as_u64) { *acc = acc.checked_add(n).ok_or(QuoteError::UntrustedUsage)?; }
+                }
             }
         }
-        let tenths = [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output), (comp_in, rates.write_5m), (comp_out, rates.output)]
+        let tenths = [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output), (comp_in, rates.input), (comp_read, rates.read), (comp_write, rates.write_5m), (comp_out, rates.output)]
             .into_iter()
             .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))
             .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
@@ -440,6 +443,8 @@ mod tests {
                 {
                     "type": "compaction",
                     "input_tokens": 4000,
+                    "cache_read_input_tokens": 1000,
+                    "cache_creation_input_tokens": 500,
                     "output_tokens": 300
                 },
                 {
@@ -456,7 +461,8 @@ mod tests {
 
         // Settle accepts the compaction usage shape
         let settled = DirectGlobal.settle(&req, &compact_resp).unwrap();
-        assert!(settled.estimated_microusd > 0);
+        // 頂層 100×40+50×200，壓縮 iteration 4000×40(input)+1000×4(read)+500×50(write)+300×200(output)，單位 0.1 µUSD。
+        assert_eq!(settled.estimated_microusd, (14_000 + 160_000 + 4_000 + 25_000 + 60_000 + 9) / 10);
 
         // 2. Next turn's reserve: previous response had compaction, so prefix no longer applies
         req.set_previous_response(Some(compact_resp));
