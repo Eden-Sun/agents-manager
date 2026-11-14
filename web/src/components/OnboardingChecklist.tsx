@@ -88,19 +88,21 @@ export function OnboardingChecklist() {
         <button type="button" className="btn" disabled={toolsBusy} title={t('重新問本機的 CLI 現在裝了什麼、登入了誰')} onClick={() => void refreshTools('local')}>
           {toolsBusy ? t('偵測中…') : t('重新偵測')}
         </button>
-        <ol className="onb-steps" aria-label={t('接下來')}>
-          <li className={m.anyReady ? 'is-done' : 'is-now'}>{t('安裝並登入至少一種 CLI')}</li>
-          <li className={projects.length > 0 ? 'is-done' : m.anyReady ? 'is-now' : ''}>
-            <button type="button" className="btn" disabled={!m.anyReady} onClick={() => window.dispatchEvent(new Event(ADD_PROJECT_EVENT))}>
-              {t('新增 Project')}
-            </button>
-          </li>
-          <li className={projects.length > 0 && m.anyReady ? 'is-now' : ''}>
-            <button type="button" className="btn primary" disabled={!m.anyReady || projects.length === 0} onClick={() => requestOpenBotSheet(projects[0].id)}>
-              {t('新增 Bot')}
-            </button>
-          </li>
-        </ol>
+        {m.needed ? (
+          <ol className="onb-steps" aria-label={t('接下來')}>
+            <li className={m.anyReady ? 'is-done' : 'is-now'}>{t('安裝並登入至少一種 CLI')}</li>
+            <li className={projects.length > 0 ? 'is-done' : m.anyReady ? 'is-now' : ''}>
+              <button type="button" className="btn" disabled={!m.anyReady} onClick={() => window.dispatchEvent(new Event(ADD_PROJECT_EVENT))}>
+                {t('新增 Project')}
+              </button>
+            </li>
+            <li className={projects.length > 0 && m.anyReady ? 'is-now' : ''}>
+              <button type="button" className="btn primary" disabled={!m.anyReady || projects.length === 0} onClick={() => requestOpenBotSheet(projects[0].id)}>
+                {t('新增 Bot')}
+              </button>
+            </li>
+          </ol>
+        ) : null}
       </div>
       {m.needed ? null : <p className="onb-all hint">{t('環境已就緒。')}</p>}
     </div>

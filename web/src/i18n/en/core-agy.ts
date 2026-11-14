@@ -2,6 +2,9 @@
 import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
+  // src/components/Sidebar.tsx
+  '所屬主機': 'Host',
+
   // src/components/IssuesBar.tsx
   'gh 無法使用：{message}': 'gh unavailable: {message}',
   '{message}（HTTP {status}）': '{message} (HTTP {status})',
@@ -187,6 +190,124 @@ const dict: Dict = {
   '已轉成排程專屬 bot。': 'Converted to a dedicated schedule bot.',
   '排程一律用「排程專屬 bot」：它不算執行者、不會被派工，側欄收在「排程 bot」區。排程會排進這顆 Bot 的對話與佇列；同一網站的上班／下班可共用一顆，預設建新的。': 'Schedules always use a dedicated schedule bot: it is not an executor and never receives dispatches; the sidebar keeps it under “Schedule bots”. Runs queue into this bot’s conversation; schedules for the same site (e.g. clock-in/out) may share one, but a new one is the default.',
   '這個排程綁的不是排程專屬 bot（{name}）：照常執行不受影響。可「轉成專屬」（把它標成排程專屬，之後不再當執行者），或「＋ 建立專屬 bot」改綁到新的。': 'This schedule is not bound to a dedicated schedule bot ({name}); it keeps running as before. You can “Make dedicated” (it stops being an executor) or “+ Create dedicated bot” and rebind.',
+
+  // src/components/PhoneOutboxTray.tsx
+  '按住預覽 {name}': 'Hold to preview {name}',
+
+  // src/components/NewExpertBotForm.tsx
+  '角色設定失敗，Bot 已保留，請於設定選單中補設：{err}': 'Failed to configure role; Bot preserved. Please configure in settings: {err}',
+  '專案整體規劃、任務指派與進度管理（全專案僅一位）': 'Project-wide planning, task assignment, and progress management (only one per project)',
+  '提供專業決策建議、架構評估與深度審查': 'Provides professional architectural evaluation, decision advice, and in-depth review',
+  '依指派任務執行具體工作、回報成果': 'Executes specific tasks as assigned and reports outcomes',
+  '專職負責特定領域或任務軌道（需指定 track）': 'Dedicated to a specific domain or task track (track required)',
+  '已有管理者 {name}': 'Manager {name} already exists',
+  '負責範圍（track）': 'Scope (track)',
+  '例如：billing、CI': 'e.g. billing, CI',
+  '專家的負責範圍（track）為必填': 'Specialist track is required',
+  '建議：{rec}': 'Suggested: {rec}',
+  '預設政策（{role}）：': 'Default policy ({role}):',
+  '永快取': 'Permanent cache',
+  '保溫開': 'Keep-warm on',
+  '保溫關': 'Keep-warm off',
+  '保溫跟預設': 'Keep-warm follows default',
+  '收起自訂': 'Hide customization',
+  '自訂': 'Customize',
+  '可被管理者使用': 'Available to manager',
+
+  // src/components/PushSettings.tsx
+  '沒有送出：推送服務拒絕': 'Not sent: Push service rejected',
+  '主力 bot 回覆完成／需要回應時推播': 'Push when primary Bot finishes reply or needs response',
+  '其他 bot 需要回應時推播': 'Push when other Bots need response',
+  '偵測到更新（AG Man／CLI）時推播': 'Push when updates are detected (AG Man / CLI)',
+  'codex 額度用完且有重置券時推播（只通知，不自動使用）': 'Push when Codex quota is exhausted and reset credits are available (notify only, not auto-used)',
+  '遠端主機斷線與 bot 停止推播': 'Push when remote host disconnects or Bot stops',
+  '排程等不到 bot 超時推播': 'Push when schedule times out waiting for Bot',
+  '系統異常時推播：換版失敗／回滾、磁碟不足、herdr 非預期重啟、多顆 agent 同時消失、巡檢停止': 'Push on system anomaly: upgrade failure/rollback, low disk space, unexpected herdr restart, multiple agents vanishing, patrol stopped',
+
+  // src/components/ImageViewer.tsx
+  '圖片': 'Image',
+  '上一張': 'Previous',
+  '下一張': 'Next',
+  '點圖放大 · 點背景或下滑關閉': 'Click to enlarge · Click background or swipe down to close',
+  '原圖': 'Original',
+  '下載': 'Download',
+
+  // src/components/ToolInstallGuide.tsx
+  '這個工具沒有可自動核對的安裝指令，請依它的安裝說明裝。': 'This tool does not have an automated verification install command; install per official documentation.',
+  '裝到登入 shell 的 PATH 上才找得到（例如 brew 的 bin 目錄或 ~/.local/bin，並確認 ~/.zprofile 或 ~/.profile 有加進 PATH）。': 'Install on login shell PATH to be detected (e.g. brew bin directory or ~/.local/bin; verify ~/.zprofile or ~/.profile exports PATH).',
+  '官方說明': 'Official documentation',
+  '重新檢查': 'Check again',
+  '複製': 'Copy',
+
+  // src/components/BaseSnapshotControls.tsx
+  '基準快照': 'Baseline snapshot',
+  '已把 {name} 目前的 context 鎖成基準': 'Locked current context of {name} as baseline',
+  '鎖定目前 context 為基準': 'Lock current context as baseline',
+  '已清除 {name} 的基準': 'Cleared baseline for {name}',
+  '清除基準': 'Clear baseline',
+  '已鎖定於 {time}': 'Locked at {time}',
+  '尚未鎖定基準': 'No baseline locked',
+  '排程可選「每次從基準快照開始」：每次觸發都從這個基準 fork 一份新對話執行。鎖定後請先別再跟這顆 Bot 手動對話，否則基準會跟著變長。': 'Schedules can opt to "Start from baseline snapshot each time": each trigger forks a fresh chat from this baseline. Avoid chatting manually with this Bot after locking so the baseline is not extended.',
+
+  // src/components/ResetCreditOffer.tsx
+  'codex 額度用完了': 'Codex quota exhausted',
+  '{who} 的額度用完了，停工的 codex bot 會因此卡住。': '{who} has exhausted quota; suspended Codex Bots will be blocked.',
+  '還有 {n} 張重置券': { one: '{n} reset credit remaining', other: '{n} reset credits remaining' },
+  '（最早 {time} 到期）': ' (earliest expires at {time})',
+  '。要用一張嗎？': '. Would you like to use one?',
+  '使用一張': 'Use one',
+  '不用': 'Not now',
+
+  // src/components/ProjectSettingsPanel.tsx
+  '找不到 Project': 'Project not found',
+
+  // src/schedules/format.ts
+  '等待重試（第 {n} 次執行）': 'Waiting for retry (run #{n})',
+
+  // src/schedules/ScheduleBotPicker.tsx
+  '屬於其他專案': 'Belongs to another project',
+  'claude-api 不能接排程': 'claude-api cannot take schedules',
+  '子 agent 不能接排程': 'Sub-agents cannot take schedules',
+  '分享用 Bot 不能接排程': 'Shared Bots cannot take schedules',
+  '搜尋 Bot 名稱或身份': 'Search Bot name or identity',
+  '搜尋 Bot': 'Search Bot',
+  '已有 {n} 個排程': { one: '{n} schedule already exists', other: '{n} schedules already exist' },
+
+  // src/schedules/ScheduleResult.tsx
+  '任務成功': 'Task succeeded',
+  '任務失敗': 'Task failed',
+  '拒絕執行': 'Execution declined',
+  '任務結果不明': 'Task outcome unknown',
+  '第 {n} 次': 'Run #{n}',
+  '查看該回合完整回覆': 'View full turn reply',
+  '回覆無法讀取，請開啟 Bot 對話。': 'Reply unreadable; please open Bot chat.',
+  '已取消，未產生任務結果': 'Cancelled, no task outcome produced',
+  '等待任務結果': 'Waiting for task outcome',
+
+  // src/schedules/ScheduleEditor.tsx
+  '每次從基準快照開始': 'Start from baseline snapshot each time',
+  '同一顆 Bot 會依序執行：{name} 先跑完才輪到這個，可能延遲；共用同一段對話脈絡。建議換一顆 Bot 或錯開時間（不強制）。': 'Runs sequentially on the same Bot: {name} finishes first, which may cause delays; shares the same conversation context. Consider choosing another Bot or staggering schedules (optional).',
+  '失敗重試': 'Retry on failure',
+  '重試次數（0 表示不重試）': 'Retry count (0 for no retry)',
+  '重試間隔（分鐘）': 'Retry interval (minutes)',
+  '只有明確失敗才重試；拒絕與結果不明不會重試。重試可能重複外部操作，請確認任務可安全重做。': 'Retries only on explicit failure; declined or unknown outcomes will not retry. Retrying may repeat external actions; ensure the task is idempotent.',
+  '每次觸發前，Bot 會先重啟成「基準快照」的一份新對話再執行；基準本身不會被改動，基準不見了這次就會失敗。': 'Before each trigger, the Bot restarts into a fresh chat from the "baseline snapshot"; the baseline itself is unaltered, and failure occurs if the baseline is missing.',
+  '只有已鎖定基準快照的 codex Bot 才能開啟：先到該 Bot 的設定按「鎖定目前 context 為基準」。': 'Only available to codex Bots with a locked baseline snapshot: go to Bot Settings and click "Lock current context as baseline" first.',
+
+  // src/store/*
+  '停工的 bot：{names}。': 'Suspended Bots: {names}.',
+  '{name} 額度用完了。{held}還有 {n} 張重置券{soonest}，要用一張嗎？': { one: '{name} quota exhausted. {held}There is {n} reset credit available{soonest}. Would you like to use one?', other: '{name} quota exhausted. {held}There are {n} reset credits available{soonest}. Would you like to use one?' },
+  '{name} 已使用一張重置券，額度重置了。': '{name} used a reset credit; quota has been reset.',
+  '已通知 {n} 顆停工的 bot 繼續工作。': { one: 'Notified {n} suspended Bot to resume work.', other: 'Notified {n} suspended Bots to resume work.' },
+  '這張重置券剛才已經用過了。': 'This reset credit was just used.',
+  '這次沒有需要重置的額度（{outcome}）。': 'No quota needed resetting this time ({outcome}).',
+  '使用重置券失敗：{msg}': 'Failed to use reset credit: {msg}',
+  '排程「{name}」任務結果：{result}': 'Schedule "{name}" task outcome: {result}',
+  '結果不明，請查看回覆': 'Outcome unclear, check reply',
+
+  // src/lib/errText.ts
+  '這顆 Bot 還沒有對話可鎖定，請先跟它對話': 'This Bot has no conversation to lock; please chat with it first',
+  '基準快照只支援 codex Bot': 'Baseline snapshots only support Codex Bots',
 }
 
 export default dict

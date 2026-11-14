@@ -26,6 +26,25 @@
   padding: 0 !important;
 }
 
+.env-guide-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 6px);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.env-guide-text {
+  flex: 1;
+  min-width: 0;
+}
+
 h2.page-title {
   margin: 0 0 10px;
   font-size: 13px;

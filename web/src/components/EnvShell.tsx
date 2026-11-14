@@ -90,6 +90,22 @@ export function EnvShell() {
 
   // 決定當前分頁（初次載入由 resolveInitialEnvTab 計算）
   const [activeTab, setActiveTab] = useState<EnvTabId>(() => resolveInitialEnvTab(badges, getRememberedTab()))
+  const [guideDismissed, setGuideDismissed] = useState(() => {
+    try {
+      return localStorage.getItem('am:env-guide-dismissed') === '1'
+    } catch {
+      return false
+    }
+  })
+
+  const dismissGuide = () => {
+    setGuideDismissed(true)
+    try {
+      localStorage.setItem('am:env-guide-dismissed', '1')
+    } catch {
+      // 忽略
+    }
+  }
 
   const selectTab = (id: EnvTabId) => {
     setActiveTab(id)
@@ -151,6 +167,14 @@ export function EnvShell() {
       </div>
 
       <div className="env-main">
+        {!guideDismissed ? (
+          <div className="env-guide-banner" role="status">
+            <span className="env-guide-text">{t('點選分頁可切換環境準備、主機、更新檢查、身份與各項服務設定。')}</span>
+            <button type="button" className="btn btn-sm" onClick={dismissGuide}>
+              {t('我知道了')}
+            </button>
+          </div>
+        ) : null}
         <section
           role="tabpanel"
           id="env-panel-setup"

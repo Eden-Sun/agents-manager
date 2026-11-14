@@ -2,6 +2,19 @@
 import type { Dict } from '../../lib/i18n/types'
 
 export default {
+  // src/components/NewExpertBotForm.tsx
+  '限顧問': 'Advisors only',
+  'Context 與保溫': 'Context and keep-warm',
+
+  // src/components/BotSettingsPanel.tsx
+  '未分配': 'Unassigned',
+
+  // src/components/SidebarPanes.tsx
+  'pane 選單': 'Pane menu',
+
+  // src/schedules/ScheduleBotPicker.tsx
+  '排': 'Sch',
+
   'daemon 還沒有預覽功能（二進位比前端舊），需要重建＋重啟 daemon。': 'The daemon does not support preview yet (binary is older than frontend). Rebuild and restart the daemon.',
   '那個 port': 'that port',
   '只有頂層 bot 能開預覽。': 'Only top-level Bots can start a preview.',

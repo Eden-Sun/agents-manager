@@ -112,6 +112,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const [name, setName] = useState(() => computeDefaultName('executor', '', pid, bots))
   const nameTouched = useRef(false)
   const effortTouched = useRef(false)
+  const modelTouched = useRef(false)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -134,19 +135,19 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       const claudeKey = `claude@${host || 'local'}@`
       const list = modelsCache[claudeKey] ?? []
       const found = pickLatestRoleModel(/haiku/i, list)
-      return { kind: 'claude', model: found?.id ?? null, effort: 'low' }
+      return { kind: 'claude', model: found?.id ?? 'haiku', effort: 'low' }
     }
     if (r === 'manager') {
       const claudeKey = `claude@${host || 'local'}@`
       const list = modelsCache[claudeKey] ?? []
       const found = pickLatestRoleModel(/opus/i, list)
-      return { kind: 'claude', model: found ? found.id : null, effort: 'high' }
+      return { kind: 'claude', model: found ? found.id : 'claude-opus-5-5', effort: 'high' }
     }
     if (r === 'advisor') {
       const codexKey = `codex@${host || 'local'}@`
       const list = modelsCache[codexKey] ?? []
       const found = pickLatestRoleModel(/astra/i, list)
-      return { kind: 'codex', model: found ? found.id : null, effort: 'high' }
+      return { kind: 'codex', model: found ? found.id : 'astra', effort: 'high' }
     }
     if (r === 'specialist') {
       // claude sonnet medium 或 codex 最新 sol medium
@@ -162,7 +163,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       if (foundSol) {
         return { kind: 'codex', model: foundSol.id, effort: 'medium' }
       }
-      return { kind: 'claude', model: null, effort: 'medium' }
+      return { kind: 'claude', model: 'sonnet', effort: 'medium' }
     }
     return { kind: 'claude', model: null, effort: null }
   }
@@ -175,6 +176,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     setCustomizeRuntime(false)
     setRuntimeDraft({})
     effortTouched.current = false
+    modelTouched.current = false
 
     const sugg = pickRoleSuggested(r)
     setKind(sugg.kind)
@@ -188,11 +190,13 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // 預設角色是執行者：開表單就套用它的建議 kind／模型（不必先點一下角色卡）。
   useEffect(() => {
-    const sugg = pickRoleSuggested('executor')
-    setKind(sugg.kind)
-    setModel(sugg.model)
+    if (!modelTouched.current) {
+      const sugg = pickRoleSuggested(role)
+      setKind(sugg.kind)
+      if (sugg.model) setModel(sugg.model)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [modelsCache, host])
 
   // 專家 track 切換時更新預設名稱
   useEffect(() => {
@@ -363,7 +367,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       {/* 2. kind / 模型 / 強度 */}
       <div className="field">
         <span>
-          kind
+          Kind
           {roleRecommendation(role) ? (
             <span className="field-note">{t('建議：{rec}', { rec: roleRecommendation(role) ?? '' })}</span>
           ) : null}
@@ -374,7 +378,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
             const missing = isApi ? false : !tools[k]?.installed
             // claude-api 只能當顧問：不能接派工、不能用終端工具，其他角色顯示但不能選。
             const roleBlocked = isApi && role !== 'advisor'
-            const title = roleBlocked ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : k
+            const title = roleBlocked ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -398,6 +402,11 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                   <KindTag kind={k} />
                   <span className="opt-label">{k}</span>
                 </button>
+                {roleBlocked ? (
+                  <span className="kind-missing-reason">{t('限顧問')}</span>
+                ) : missing ? (
+                  <span className="kind-missing-reason">{t('未安裝')}</span>
+                ) : null}
               </span>
             )
           })}
@@ -410,7 +419,10 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
           host={host}
           identity={identity || null}
           model={model}
-          onModel={setModel}
+          onModel={(m) => {
+            modelTouched.current = true
+            setModel(m)
+          }}
           effort={effort}
           onEffort={(ef) => {
             effortTouched.current = true
@@ -426,7 +438,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
       {/* 3. context 與保溫（claude-api 沒有，BotSettingsPanel 也不出） */}
       {apiKind ? null : <div className="field">
-        <span>{t('context 與保溫')}</span>
+        <span>{t('Context 與保溫')}</span>
         <div className="expert-runtime-summary">
           <div className="expert-runtime-summary-row">
             <span>

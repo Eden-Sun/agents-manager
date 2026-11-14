@@ -3186,19 +3186,43 @@ button.model-tag:hover:not(:disabled) {
 }
 
 .identity-login {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
   font-weight: 500;
   line-height: 1.6;
   padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 6px;
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
   color: var(--text-dim);
   white-space: nowrap;
 }
 
+.identity-login::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+.identity-login.is-ok::before {
+  background: var(--lamp-green);
+}
+
+.identity-login.is-out::before {
+  background: var(--warn);
+}
+
+.identity-login.is-unknown::before {
+  background: var(--text-faint);
+}
+
 .identity-login.is-out {
   color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   font-weight: 600;
 }
 

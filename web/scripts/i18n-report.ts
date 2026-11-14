@@ -23,10 +23,12 @@ const args = process.argv.slice(2)
 const files = walk('src').filter(isUiSource)
 if (args[0] === '--missing') {
   const { EN } = await import('../src/i18n/en')
+  const { SHARE_EN } = await import('../src/share/shareI18n')
   const seen = new Set<string>()
   for (const f of files) {
+    const dict = f.startsWith('src/share/') ? SHARE_EN : EN
     for (const u of scanKeys(f, readFileSync(f, 'utf8')).uses) {
-      if (!Object.hasOwn(EN, u.key) && !seen.has(u.key)) {
+      if (!Object.hasOwn(dict, u.key) && !seen.has(u.key)) {
         seen.add(u.key)
         console.log(`${f}:${u.line}  ${u.key}`)
       }

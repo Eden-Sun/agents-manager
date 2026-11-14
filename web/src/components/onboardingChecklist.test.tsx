@@ -112,6 +112,7 @@ it('有 Project 且有就緒的 CLI：主畫面自動收起；環境設定用的
   await mount(<OnboardingChecklist />)
   assert.equal(row('claude').getAttribute('data-state'), 'ok')
   assert.match(document.body.textContent ?? '', /環境已就緒/)
+  assert.equal(document.querySelector('.onb-steps'), null, '環境就緒時不顯示矛盾的引導步驟')
 })
 
 it('新增 Bot 快速鈕：未登入的 kind 可點、點了開登入終端（不是新增 Bot）', async () => {

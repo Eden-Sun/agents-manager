@@ -136,7 +136,7 @@ export function JudgePanel() {
             {t('Jev（TypeSafe 型別判斷）給的判斷，畫面上一律標「Jev 建議」與機率。')}
           </p>
           <p className="hint">
-            {t('畫面比對判定 codex／grok 撞限時，另外問 TypeSafe 的 Jev「這一行是介面畫的，還是 bot 印出來的內容」。只記錄、不改任何行為。')}
+            {t('Jev 用於兩項判斷：畫面比對判定 codex／grok 撞限時判定介面字串，以及對話訊息翻譯時檢查繁體中文忠實度。只記錄、不阻斷正常功能。')}
           </p>
           <label className="field">
             <span>
@@ -161,7 +161,7 @@ export function JudgePanel() {
           </label>
           <label className="judge-switch">
             <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            <span>{t('啟用（會把下面專案的撞限畫面最後 60 行，遮罩 token／密碼後送到 TypeSafe）')}</span>
+            <span>{t('啟用（會把下面專案的撞限畫面與翻譯譯文，遮罩 token／密碼後送到 TypeSafe）')}</span>
           </label>
           <fieldset className="judge-projects" disabled={!enabled}>
             <legend>{t('適用的專案（沒勾＝不送）')}</legend>

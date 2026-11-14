@@ -1,6 +1,19 @@
 /* components/IdentitiesPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 /* identities */
 
+.identity-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.identity-section-title {
+  margin: 14px 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
 .identity-badge {
   display: inline-block;
   font-size: 11px;

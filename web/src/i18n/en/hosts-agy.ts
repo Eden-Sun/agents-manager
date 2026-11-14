@@ -2,6 +2,23 @@
 import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
+  // src/components/HostShellPanel.tsx
+  '{host} shell': '{host} shell',
+  'pane {id}': 'pane {id}',
+
+  // src/components/ClaudeApiPanel.tsx
+  '排程結果分類': 'Schedule outcome classification',
+  'changelog 影響分析': 'Changelog impact analysis',
+  '影響分析 changelog': 'Changelog impact analysis',
+  '上游新版分診': 'Upstream release triage',
+  '對話訊息翻譯': 'Chat message translation',
+  '更新框翻譯': 'Changelog box translation',
+
+  // src/components/IdentitiesPanel.tsx
+  '未知（尚未偵測）': 'Unknown (not probed)',
+  '自訂身份': 'Custom identities',
+  'Shell 偵測身份': 'Shell detected identities',
+
   // HostsPanel.tsx
   '遠端主機 {host}（已連線）': 'Remote host {host} (connected)',
   '遠端主機 {host}（未連線）': 'Remote host {host} (not connected)',

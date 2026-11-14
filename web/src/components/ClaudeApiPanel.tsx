@@ -32,6 +32,15 @@ const ERROR_LABEL: Record<string, string> = {
   bad_response: msg('回應不能用'),
 }
 
+const USE_LABELS: Record<string, string> = {
+  schedule_outcome: msg('排程結果分類'),
+  changelog_impact: msg('changelog 影響分析'),
+  changelog_impact_alt: msg('影響分析 changelog'),
+  upstream_triage: msg('上游新版分診'),
+  chat_translate: msg('對話訊息翻譯'),
+  changelog_translate: msg('更新框翻譯'),
+}
+
 /** 這個用途現在表單上的值與已存的值是否不同。 */
 function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
   return (
@@ -178,8 +187,8 @@ export function ClaudeApiPanel() {
           const perHour = d.max_per_hour ?? u.max_per_hour
           return (
             <fieldset key={u.id} className="claude-api-use" data-use={u.id} disabled={!u.uses.includes('changelog_translate') && !enabled}>
-              <legend>{u.label}</legend>
-              {u.uses.length > 1 ? <span className="hint">{t('含：{names}', { names: u.uses.map((id) => settings.uses.find((x) => x.id === id)?.label ?? id).join('、') })}</span> : null}
+              <legend>{t.tr(USE_LABELS[u.id] ?? u.label)}</legend>
+              {u.uses.length > 1 ? <span className="hint">{t('含：{names}', { names: u.uses.map((id) => t.tr(USE_LABELS[id] ?? settings.uses.find((x) => x.id === id)?.label ?? id)).join(t('、')) })}</span> : null}
               <label className="claude-api-switch">
                 <input type="checkbox" checked={on} disabled={!willHaveKey && !on} onChange={(e) => patchUse(u.id, { enabled: e.target.checked })} />
                 <span>{t('啟用')}</span>
@@ -281,7 +290,7 @@ export function ClaudeApiPanel() {
               <p>
                 {settings.groups.some((u) => u.enabled && (u.uses.includes('changelog_translate') || settings.enabled))
                   ? t('目前已啟用的用途：{uses}。啟用不會立即呼叫 API，仍須觸發對應工作；既有快取可能不需再次呼叫。', {
-                    uses: settings.groups.filter((u) => u.enabled && (u.uses.includes('changelog_translate') || settings.enabled)).map((u) => u.label).join('、'),
+                    uses: settings.groups.filter((u) => u.enabled && (u.uses.includes('changelog_translate') || settings.enabled)).map((u) => t.tr(u.label)).join(t('、')),
                   })
                   : t('目前沒有已啟用的 API 用途（更新框翻譯依自己的開關計算）。')}
               </p>

@@ -2,6 +2,16 @@
 import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
+  // src/components/EnvShell.tsx
+  '點選分頁可切換環境準備、主機、更新檢查、身份與各項服務設定。': 'Switch tabs above for Setup, Hosts, Updates, Identities, and services.',
+  '我知道了': 'Got it',
+
+  // store/herdrUpdate.ts
+  '準備更新': 'Preparing update',
+
+  // lib/envTabs.ts
+  'Claude API': 'Claude API',
+
   // toolsHelpers.ts & MergedUpdateChip.tsx & AgyUpdateChip.tsx
   '讀取失敗': 'Could not load',
   '更新': 'Update',

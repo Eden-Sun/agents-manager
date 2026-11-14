@@ -1,15 +1,15 @@
 /**
  * 英文字典與原始碼的對帳（issue #1932）。並行抽字串時各區塊各改各的檔，這支擋住的是：
  * ① 字典有 key 但原始碼沒有（改了原句忘了改字典、或抽錯 key）② `t()` 的 key 不是字面字串、或插值名稱和呼叫對不上
- * ③ 英文的 `{name}` 跟 key 不一致 ④ 兩個區塊對同一句寫了不同英文 ⑤ 複數少一邊。
- * 缺英文**不是**錯（退回繁中）；列出缺了哪些用 `bun scripts/i18n-report.ts --missing`。
+ * ③ 英文的 `{name}` 跟 key 不一致 ④ 兩個區塊對同一句寫了不同英文 ⑤ 複數少一邊
+ * ⑥ 所有 UI 呼叫的 CJK 句子都必須有英文（防漏）。列出缺了哪些用 `bun scripts/i18n-report.ts --missing`。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EN_CONFLICTS, EN_PARTS } from '../../i18n/en'
+import { EN, EN_CONFLICTS, EN_PARTS } from '../../i18n/en'
 import { AREA_IDS, AREA_FILES } from './areas'
 import { isUiSource, placeholderNames, scanKeys } from './i18nScan'
 import { entryStrings } from './translate'
@@ -42,6 +42,17 @@ test('t()／msg() 的 key 都是字面字串，插值名稱和呼叫對得上', 
 test('字典的每個 key 都真的出現在原始碼（t／msg 的第一個參數）', () => {
   const unused = Object.entries(EN_PARTS).flatMap(([area, dict]) => Object.keys(dict).filter((k) => !usedKeys.has(k)).map((k) => `${area}: ${k}`))
   assert.deepEqual(unused, [])
+})
+
+test('所有 UI 使用的 CJK 句子都已在英文字典提供翻譯（防漏）', () => {
+  const missing: string[] = []
+  for (const u of uses) {
+    if (u.file.startsWith('src/share/')) continue // 分享頁走獨立字典，由 shareI18n.test.ts 守護
+    if (/[㐀-鿿＀-￯　-〿]/.test(u.key) && !Object.hasOwn(EN, u.key)) {
+      missing.push(`${u.file}:${u.line} ${u.key}`)
+    }
+  }
+  assert.deepEqual(missing, [])
 })
 
 test('英文的插值名稱和 key 一致，複數兩邊都有', () => {

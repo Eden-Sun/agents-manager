@@ -532,6 +532,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   useT()
   const addProject = useStore((s) => s.addProject)
   const hosts = useStore((s) => s.hosts)
+  const projects = useStore((s) => s.projects)
   const [path, setPath] = useState('')
   const [label, setLabel] = useState('')
   const [host, setHost] = useState('local')
@@ -543,6 +544,12 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   // A host removed while the form is open falls back to local.
   const hostOk = host === 'local' || hosts.some((h) => h.name === host)
   const effectiveHost = hostOk ? host : 'local'
+
+  const linuxLike = useMemo(() => {
+    if (projects.some((p) => p.path.startsWith('/home/'))) return true
+    if (typeof navigator !== 'undefined' && /linux|x11/i.test(navigator.userAgent) && !/mac/i.test(navigator.userAgent)) return true
+    return false
+  }, [projects])
 
   if (browsing) {
     return (
@@ -579,7 +586,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
       }}
     >
       <label className="field">
-        <span>{t('主機')}</span>
+        <span>{t('所屬主機')}</span>
         <select
           value={effectiveHost}
           onChange={(e) => {
@@ -606,7 +613,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
           <input
             type="text"
             value={path}
-            placeholder="/Users/me/project/foo"
+            placeholder={linuxLike ? '/home/me/project/foo' : '/Users/me/project/foo'}
             spellCheck={false}
             onChange={(e) => setPath(e.target.value)}
           />
@@ -858,7 +865,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
         </div>
       )}
       <div className="field">
-        <span>kind</span>
+        <span>Kind</span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {CREATABLE_KINDS.map((k) => {
             // claude-api 沒有 CLI 要裝；本機與遠端專案都能建（遠端不隔離，經 ssh 執行）。

@@ -373,6 +373,7 @@ test('專家模式：claude-api 只在顧問可選；其他角色 disabled 並�
   assert.ok(apiBtn(), 'claude-api 要列出來')
   assert.equal(apiBtn().disabled, true)
   assert.match(apiBtn().title, /只能當顧問/)
+  assert.ok(apiBtn().closest('.opt-wrap')?.querySelector('.kind-missing-reason')?.textContent?.includes('限顧問'), '要有可見的限顧問原因標籤')
   for (const label of ['管理者', '專家']) {
     await click(card(label))
     await settle()

@@ -74,7 +74,7 @@ function IdentityHostLogins({ name, kind, only }: { name: string; kind?: string;
   return (
     <span className="identity-logins">
       {rows.map((r) => {
-        const text = r.state === true ? t('已登入') : r.state === false ? t('未登入') : t('未知')
+        const text = r.state === true ? t('已登入') : r.state === false ? t('未登入') : t('未知（尚未偵測）')
         const title =
           r.state === true
             ? r.account
@@ -415,7 +415,8 @@ function ShellIdentities() {
   for (const h of hosts) collect(h.name, h.name, h.identity_status)
   if (rows.length === 0) return null
   return (
-    <div className="identity-shell-block">
+    <div className="identity-section identity-shell-block">
+      <h3 className="identity-section-title">{t('Shell 偵測身份')}</h3>
       <p className="hint">
         {t.x('以下是從各主機登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改就改那台主機的 alias。「停用」只是把它從身份選單與自動挑選裡拿掉（alias 還在），已經在用它的 Bot 不受影響。', {
           alias: <code>ccN</code>,
@@ -439,9 +440,9 @@ function ShellIdentities() {
               <span className="identity-login-wrap">
                 <span
                   className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
-                  title={st.logged_in === null ? st.reason ?? t('登入狀態未知') : st.account ?? undefined}
+                  title={st.logged_in === null ? (st.reason ?? t('登入狀態未知')) : (st.account ?? undefined)}
                 >
-                  {label} {st.logged_in === true ? t('已登入') : st.logged_in === false ? t('未登入') : t('未知')}
+                  {label} {st.logged_in === true ? t('已登入') : st.logged_in === false ? t('未登入') : t('未知（尚未偵測）')}
                 </span>
                 <IdentityLoginButton host={host} identity={st.name} loggedIn={st.logged_in === true} />
                 {st.logged_in === true ? <IdentityLogoutButton host={host} identity={st.name} /> : null}
@@ -460,12 +461,18 @@ export function IdentitiesPanel() {
   const identities = useStore((s) => s.identities)
   return (
     <div className="hosts-panel identities-panel">
-      {identities.length === 0 ? <p className="hint">{t('尚未定義任何身份。')}</p> : null}
-      {identities.map((i) => (
-        <IdentityRow key={identityRowKey(i)} host={identityHost(i)} name={i.name} />
-      ))}
+      <div className="identity-section">
+        <h3 className="identity-section-title">{t('自訂身份')}</h3>
+        {identities.length === 0 ? <p className="hint">{t('尚未定義任何身份。')}</p> : null}
+        {identities.map((i) => (
+          <IdentityRow key={identityRowKey(i)} host={identityHost(i)} name={i.name} />
+        ))}
+      </div>
       <ShellIdentities />
-      <NewIdentityForm />
+      <div className="identity-section">
+        <h3 className="identity-section-title">{t('新增身份')}</h3>
+        <NewIdentityForm />
+      </div>
     </div>
   )
 }
