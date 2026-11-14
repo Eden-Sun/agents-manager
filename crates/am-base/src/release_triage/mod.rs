@@ -324,7 +324,7 @@ async fn fetch_feed(kind: &str, src: &changelog::FeedSource) -> Result<String> {
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
-    let resp = client.get(url).send().await.map_err(|e| anyhow!("抓 CHANGELOG 失敗：{e}"))?;
+    let resp = changelog::send_get_with_retry(&client, url, "CHANGELOG", &changelog::HTTP_RETRY_DELAYS).await?;
     if !resp.status().is_success() {
         bail!("抓 CHANGELOG 失敗：HTTP {}", resp.status());
     }

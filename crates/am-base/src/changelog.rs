@@ -12,13 +12,13 @@ use crate::config::LOCAL_HOST;
 
 pub const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
 /// codex 沒有真正的 CHANGELOG.md，改抓 releases；它在 TUI 當場問更新、新版未進磁碟，`to` 由呼叫端帶。
-const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/releases?per_page=100";
-const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
+pub const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/releases?per_page=30";
+pub const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
 /// herdr 有真正的 CHANGELOG.md（Keep a Changelog 的 `## [x.y.z] - date`，[`parse_version`] 認得）。
 pub const HERDR_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md";
 /// agy（issue #1928）：官方 repo 的 CHANGELOG.md（`## x.y.z` ＋ `- ` 單行條目）；抓不到、格式無法解析或缺目標版時退同 repo 的 GitHub releases。
 pub const AGY_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md";
-pub const AGY_RELEASES_API: &str = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases?per_page=100";
+pub const AGY_RELEASES_API: &str = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases?per_page=30";
 const AGY_CHANGELOG_PAGE: &str = "https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md";
 /// grok：CDN 的 `<版>.external.md`（`# x.y.z — 日期` 一段一版，stable 的檔涵蓋上一個 stable 之後的所有版本）。
 /// 版本只能取自 stable 指標（[`crate::upstream_update::GROK_STABLE_URL`]），見 [`grok_feed_url`]。
@@ -26,16 +26,60 @@ pub const GROK_CHANGELOG_BASE: &str = "https://storage.googleapis.com/grok-build
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 連續失敗超過此次數才通知使用者（超過 3 次，即第 4 次失敗開始回報錯誤）。
+pub const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// 連續失敗超過此時間才通知使用者（6 小時）。
+pub const MAX_FAILURE_DURATION: Duration = Duration::from_secs(6 * 3600);
+/// 遇到 5xx 或逾時的退避重試延遲（預設重試 2 次：500ms、1000ms）。
+pub const HTTP_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1000)];
+
+#[derive(Clone, Debug)]
+pub struct ChangelogEntry {
+    pub text: String,
+    pub fetched_at: Instant,
+    pub last_success_at: Instant,
+    pub consecutive_failures: u32,
+}
+
 #[derive(Default)]
 pub struct ChangelogCache {
-    inner: Mutex<std::collections::HashMap<String, (Instant, String)>>,
+    inner: Mutex<std::collections::HashMap<String, ChangelogEntry>>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl ChangelogCache {
     /// 測試直接塞一份 CHANGELOG 進快取，不上網。
     pub async fn seed(&self, kind: &str, text: &str) {
-        self.inner.lock().await.insert(kind.to_string(), (Instant::now(), text.to_string()));
+        let now = Instant::now();
+        self.inner.lock().await.insert(
+            kind.to_string(),
+            ChangelogEntry {
+                text: text.to_string(),
+                fetched_at: now,
+                last_success_at: now,
+                consecutive_failures: 0,
+            },
+        );
+    }
+
+    /// 測試設定過期快取與既有失敗次數。
+    pub async fn seed_stale(&self, kind: &str, text: &str, age: Duration, failures: u32) {
+        let now = Instant::now();
+        let fetched_at = now - age;
+        self.inner.lock().await.insert(
+            kind.to_string(),
+            ChangelogEntry {
+                text: text.to_string(),
+                fetched_at,
+                last_success_at: fetched_at,
+                consecutive_failures: failures,
+            },
+        );
+    }
+
+    /// 取得目前的連續失敗次數。
+    pub async fn consecutive_failures(&self, kind: &str) -> u32 {
+        self.inner.lock().await.get(kind).map(|e| e.consecutive_failures).unwrap_or(0)
     }
 }
 
@@ -287,11 +331,63 @@ pub fn is_official_feed_url(url: &str) -> bool {
     ALLOWED_FEED_PREFIXES.iter().any(|p| url.starts_with(p))
 }
 
-async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize, what: &str) -> Result<String> {
+/// 遇到 5xx 或逾時就退避重試 1–2 次。
+pub async fn send_get_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    what: &str,
+    delays: &[Duration],
+) -> Result<reqwest::Response> {
+    let mut attempt = 0;
+    loop {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_server_error() => {
+                if attempt < delays.len() {
+                    let delay = delays[attempt];
+                    tracing::warn!(
+                        url,
+                        status = %resp.status(),
+                        attempt = attempt + 1,
+                        retry_delay_ms = delay.as_millis(),
+                        "抓 {what} 回 5xx，準備重試"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(anyhow!("抓 {what} 失敗：HTTP {}", resp.status()));
+            }
+            Ok(resp) => return Ok(resp),
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < delays.len() => {
+                let delay = delays[attempt];
+                tracing::warn!(
+                    url,
+                    error = %e,
+                    attempt = attempt + 1,
+                    retry_delay_ms = delay.as_millis(),
+                    "抓 {what} 逾時或連線失敗，準備重試"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            Err(e) => return Err(anyhow!("抓 {what} 失敗：{e}")),
+        }
+    }
+}
+
+async fn get_pinned_with_delays(
+    c: &reqwest::Client,
+    src: &FeedSource,
+    url: &str,
+    max: usize,
+    what: &str,
+    delays: &[Duration],
+) -> Result<String> {
     if !src.allowed.iter().any(|p| url.starts_with(p.as_str())) {
         return Err(anyhow!("{what}：{url} 不在允許的來源清單裡"));
     }
-    let mut resp = c.get(url).send().await.map_err(|e| anyhow!("抓 {what} 失敗：{e}"))?;
+    let mut resp = send_get_with_retry(c, url, what, delays).await?;
     if !resp.status().is_success() {
         return Err(anyhow!("抓 {what} 失敗：HTTP {}", resp.status()));
     }
@@ -309,9 +405,17 @@ async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
+async fn get_pinned(c: &reqwest::Client, src: &FeedSource, url: &str, max: usize, what: &str) -> Result<String> {
+    get_pinned_with_delays(c, src, url, max, what, &HTTP_RETRY_DELAYS).await
+}
+
 /// agy：raw 的 CHANGELOG.md，抓取／解析失敗退 GitHub releases；lookup 另檢查目標版本。grok：stable 指標 → 該版的 `.external.md`。
 /// 逾時同 claude／codex（連線 10 秒、整體 20 秒）；轉址一律當失敗。
 pub async fn fetch_pinned_feed(kind: &str, src: &FeedSource) -> Result<String> {
+    fetch_pinned_feed_with_delays(kind, src, &HTTP_RETRY_DELAYS).await
+}
+
+pub async fn fetch_pinned_feed_with_delays(kind: &str, src: &FeedSource, delays: &[Duration]) -> Result<String> {
     let c = reqwest::Client::builder()
         .user_agent("agents-manager")
         .connect_timeout(Duration::from_secs(10))
@@ -320,40 +424,52 @@ pub async fn fetch_pinned_feed(kind: &str, src: &FeedSource) -> Result<String> {
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
     match kind {
-        "agy" => match get_pinned(&c, src, &src.agy_changelog, MAX_FEED_BYTES, "agy CHANGELOG.md").await {
+        "agy" => match get_pinned_with_delays(&c, src, &src.agy_changelog, MAX_FEED_BYTES, "agy CHANGELOG.md", delays).await {
             Ok(md) if !parse_changelog(&md).is_empty() => Ok(md),
             result => {
                 let first = result.err().unwrap_or_else(|| anyhow!("agy CHANGELOG.md 格式無法解析"));
-                let json = get_pinned(&c, src, &src.agy_releases, MAX_FEED_BYTES, "agy releases")
+                let json = get_pinned_with_delays(&c, src, &src.agy_releases, MAX_FEED_BYTES, "agy releases", delays)
                     .await
                     .map_err(|second| anyhow!("{first}；備援也失敗：{second}"))?;
                 codex_releases_to_md(&json)
             }
         },
         "grok" => {
-            let pointer = get_pinned(&c, src, &src.grok_stable, MAX_POINTER_BYTES, "grok stable 指標").await?;
+            let pointer = get_pinned_with_delays(&c, src, &src.grok_stable, MAX_POINTER_BYTES, "grok stable 指標", delays).await?;
             let version = crate::upstream_update::grok_latest(&pointer)?;
             let url = grok_feed_url(&src.grok_base, &version)?;
-            get_pinned(&c, src, &url, MAX_FEED_BYTES, "grok changelog").await
+            get_pinned_with_delays(&c, src, &url, MAX_FEED_BYTES, "grok changelog", delays).await
         }
         other => Err(anyhow!("{other} 不走這個抓取路徑")),
     }
 }
 
 pub async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: &str) -> Result<String> {
+    fetch_changelog_with_delays(app, kind, &HTTP_RETRY_DELAYS).await
+}
+
+pub async fn fetch_changelog_with_delays(
+    app: &impl crate::changelog::ChangelogState,
+    kind: &str,
+    delays: &[Duration],
+) -> Result<String> {
     {
         let g = app.changelog().inner.lock().await;
-        if let Some((at, text)) = g.get(kind) {
-            if at.elapsed() < CACHE_TTL {
-                return Ok(text.clone());
+        if let Some(entry) = g.get(kind) {
+            if entry.fetched_at.elapsed() < CACHE_TTL && entry.consecutive_failures == 0 {
+                return Ok(entry.text.clone());
             }
         }
     }
-    if matches!(kind, "agy" | "grok") {
-        let text = fetch_pinned_feed(kind, &FeedSource::official()).await?;
-        app.changelog().inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
-        return Ok(text);
-    }
+    let fetch_result = if matches!(kind, "agy" | "grok") {
+        fetch_pinned_feed_with_delays(kind, &FeedSource::official(), delays).await
+    } else {
+        do_fetch_feed(kind, delays).await
+    };
+    handle_fetch_result(app, kind, fetch_result).await
+}
+
+async fn do_fetch_feed(kind: &str, delays: &[Duration]) -> Result<String> {
     let client = reqwest::Client::builder()
         .user_agent("agents-manager")
         .connect_timeout(Duration::from_secs(10))
@@ -361,22 +477,69 @@ pub async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: 
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
     let (url, is_codex) = feed_url(kind).ok_or_else(|| anyhow!("{kind} 沒有 changelog 來源"))?;
-    let resp = client.get(url).send().await.map_err(|e| anyhow!("抓 CHANGELOG 失敗：{e}"))?;
+    let resp = send_get_with_retry(&client, url, "CHANGELOG", delays).await?;
     if !resp.status().is_success() {
         return Err(anyhow!("抓 CHANGELOG 失敗：HTTP {}", resp.status()));
     }
     let raw = resp.text().await.map_err(|e| anyhow!("讀 CHANGELOG 失敗：{e}"))?;
-    let text = if is_codex { codex_releases_to_md(&raw)? } else { raw };
-    app.changelog().inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
-    Ok(text)
+    if is_codex { codex_releases_to_md(&raw) } else { Ok(raw) }
+}
+
+pub async fn handle_fetch_result(
+    app: &impl crate::changelog::ChangelogState,
+    kind: &str,
+    res: Result<String>,
+) -> Result<String> {
+    let mut g = app.changelog().inner.lock().await;
+    match res {
+        Ok(text) => {
+            let now = Instant::now();
+            g.insert(
+                kind.to_string(),
+                ChangelogEntry {
+                    text: text.clone(),
+                    fetched_at: now,
+                    last_success_at: now,
+                    consecutive_failures: 0,
+                },
+            );
+            Ok(text)
+        }
+        Err(e) => {
+            if let Some(entry) = g.get_mut(kind) {
+                entry.consecutive_failures += 1;
+                entry.fetched_at = Instant::now();
+                if entry.consecutive_failures <= MAX_CONSECUTIVE_FAILURES
+                    && entry.last_success_at.elapsed() <= MAX_FAILURE_DURATION
+                {
+                    tracing::warn!(
+                        kind,
+                        error = %e,
+                        consecutive = entry.consecutive_failures,
+                        last_success_secs = entry.last_success_at.elapsed().as_secs(),
+                        "抓 CHANGELOG 暫時性失敗，沿用上次成功快取"
+                    );
+                    return Ok(entry.text.clone());
+                }
+                tracing::error!(
+                    kind,
+                    error = %e,
+                    consecutive = entry.consecutive_failures,
+                    last_success_secs = entry.last_success_at.elapsed().as_secs(),
+                    "抓 CHANGELOG 連續失敗超過門檻，通知使用者"
+                );
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Only fixed, official repositories may supply a release fallback.
-fn releases_url(kind: &str) -> Option<&'static str> {
+pub fn releases_url(kind: &str) -> Option<&'static str> {
     match kind {
         "agy" => Some(AGY_RELEASES_API),
-        "claude" => Some("https://api.github.com/repos/anthropics/claude-code/releases?per_page=100"),
-        "herdr" => Some("https://api.github.com/repos/herdrdev/herdr/releases?per_page=100"),
+        "claude" => Some("https://api.github.com/repos/anthropics/claude-code/releases?per_page=30"),
+        "herdr" => Some("https://api.github.com/repos/herdrdev/herdr/releases?per_page=30"),
         // codex already uses Releases; grok publishes version files on its CDN.
         _ => None,
     }

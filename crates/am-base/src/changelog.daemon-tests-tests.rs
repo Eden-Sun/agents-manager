@@ -526,3 +526,119 @@
         assert!(r.source_url.ends_with("/changelogs/1.0.67.external.md"), "{}", r.source_url);
     }
 
+    // ───────────────────────── 504 退避重試與快取容錯測試 ─────────────────────────
+
+    #[test]
+    fn releases_per_page_is_reduced_to_thirty() {
+        assert!(CODEX_RELEASES_API.contains("per_page=30"), "{CODEX_RELEASES_API}");
+        assert!(!CODEX_RELEASES_API.contains("per_page=100"), "{CODEX_RELEASES_API}");
+        assert!(AGY_RELEASES_API.contains("per_page=30"), "{AGY_RELEASES_API}");
+        assert!(!AGY_RELEASES_API.contains("per_page=100"), "{AGY_RELEASES_API}");
+        assert!(releases_url("claude").unwrap().contains("per_page=30"));
+        assert!(releases_url("herdr").unwrap().contains("per_page=30"));
+        assert!(crate::upstream_update::HERDR_RELEASES_API.contains("per_page=30"));
+    }
+
+    async fn serve_status_sequence(statuses: Vec<u16>, body: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(16).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_cl = count.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let count = count_cl.clone();
+                let statuses = statuses.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let idx = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let status = statuses.get(idx).copied().unwrap_or(200);
+                    let resp = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (base, count)
+    }
+
+    #[tokio::test]
+    async fn http_retry_backs_off_and_succeeds_on_transient_5xx() {
+        let (base, count) = serve_status_sequence(vec![504, 200], "ok response").await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let delays = [Duration::from_millis(5), Duration::from_millis(10)];
+        let resp = send_get_with_retry(&client, &format!("{base}/releases"), "releases", &delays).await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(resp.text().await.unwrap(), "ok response");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2, "第 1 次 504、第 2 次重試成功");
+    }
+
+    #[tokio::test]
+    async fn http_retry_exhausts_and_fails_on_persistent_5xx() {
+        let (base, count) = serve_status_sequence(vec![504, 504, 504], "gateway timeout").await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let delays = [Duration::from_millis(5), Duration::from_millis(10)];
+        let err = send_get_with_retry(&client, &format!("{base}/releases"), "releases", &delays).await.unwrap_err();
+        assert!(err.to_string().contains("HTTP 504"), "{err}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3, "初試加重試 2 次共 3 次請求");
+    }
+
+    #[tokio::test]
+    async fn transient_failure_reuses_cached_changelog_without_error() {
+        let e = crate::testing::env().await;
+        e.app.changelog.seed("codex", "## 0.155.0\n- existing feature\n").await;
+
+        // 連續 3 次暫時性失敗：皆回傳上次成功的快取
+        for failure_num in 1..=3 {
+            let res = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504 Gateway Timeout"))).await;
+            assert!(res.is_ok(), "第 {failure_num} 次暫時性失敗應沿用快取，不該回報錯誤");
+            let text = res.unwrap();
+            assert!(text.contains("0.155.0"));
+            assert_eq!(e.app.changelog.consecutive_failures("codex").await, failure_num);
+        }
+
+        // 第 4 次失敗（超過 3 次門檻）：回報錯誤
+        let fourth = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504 Gateway Timeout"))).await;
+        assert!(fourth.is_err(), "超過 3 次門檻必須回報錯誤通知使用者");
+        let err_str = fourth.unwrap_err().to_string();
+        assert!(err_str.contains("504"), "{err_str}");
+    }
+
+    #[tokio::test]
+    async fn stale_cache_older_than_max_duration_returns_error() {
+        let e = crate::testing::env().await;
+        // 上次成功時間超過 6 小時（6 小時 10 分鐘前）
+        e.app.changelog.seed_stale("codex", "## 0.154.0\n- very old\n", Duration::from_secs(6 * 3600 + 600), 0).await;
+
+        let res = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504 Gateway Timeout"))).await;
+        assert!(res.is_err(), "超過 6 小時沒成功，即使是第 1 次失敗也必須通知使用者");
+    }
+
+    #[tokio::test]
+    async fn success_resets_consecutive_failure_count() {
+        let e = crate::testing::env().await;
+        e.app.changelog.seed("codex", "## 0.155.0\n- v0.155\n").await;
+
+        // 兩次失敗
+        let _ = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504"))).await.unwrap();
+        let _ = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504"))).await.unwrap();
+        assert_eq!(e.app.changelog.consecutive_failures("codex").await, 2);
+
+        // 成功抓到新版
+        let ok_res = handle_fetch_result(&e.app, "codex", Ok("## 0.156.0\n- v0.156\n".into())).await.unwrap();
+        assert!(ok_res.contains("0.156.0"));
+        assert_eq!(e.app.changelog.consecutive_failures("codex").await, 0, "成功後失敗計數歸零");
+    }
+
+    #[tokio::test]
+    async fn no_cache_fails_immediately() {
+        let e = crate::testing::env().await;
+        // 沒有任何既有快取時，第 1 次失敗就必須報錯（無快取可沿用）
+        let res = handle_fetch_result(&e.app, "codex", Err(anyhow!("HTTP 504 Gateway Timeout"))).await;
+        assert!(res.is_err(), "沒有快取時無法沿用，必須報錯");
+    }
+
+

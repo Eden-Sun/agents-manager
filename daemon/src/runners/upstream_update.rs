@@ -32,7 +32,7 @@ pub async fn fetch_latest(kind: &str) -> Result<String> {
     let client = reqwest::Client::builder().user_agent("agents-manager")
         .connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(20))
         .build().map_err(|e| anyhow!("http client: {e}"))?;
-    let response = client.get(url).send().await.map_err(|e| anyhow!("讀 {kind} 上游版本失敗：{e}"))?;
+    let response = changelog::send_get_with_retry(&client, url, &format!("{kind} 上游版本"), &changelog::HTTP_RETRY_DELAYS).await?;
     if !response.status().is_success() { return Err(anyhow!("{kind} 上游版本回 HTTP {}", response.status())); }
     let raw = response.text().await.map_err(|e| anyhow!("讀 {kind} 上游版本回應失敗：{e}"))?;
     match kind {
