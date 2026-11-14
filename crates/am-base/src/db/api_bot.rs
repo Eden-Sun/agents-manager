@@ -7,6 +7,16 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 pub const RETENTION_SECS: i64 = 7 * 24 * 3600;
 pub const MAX_CHECKPOINT_BYTES: usize = 8 * 1024 * 1024;
 
+/// 「這份 checkpoint 還有沒有未結算的東西」的**唯一規則**（startup gate／restore、native resume 證明、db rebind 共用）。
+///
+/// - `tool_pending`：工具可能已經做過副作用，永遠不可重放 → 一律未結算。
+/// - `api_pending`：一次沒有存下回應的模型呼叫，除了費用沒有別的副作用（費用由 `unknown` attempt 保留預留額，保守計）。
+///   只有擁有它的 turn 已經是終態 `failed`（receipt 已 applied）才算結算：下一回合把同一批 messages 連同新訊息重送。
+///   owner 還在 `in_flight`（或 completed 卻留著 api_pending）時不放寬。
+pub fn pending_settled_after_failed_owner(api_pending: bool, tool_pending: bool, owner_failed: bool) -> bool {
+    !tool_pending && (!api_pending || owner_failed)
+}
+
 /// Deliberately no derived Debug/Serialize: a checkpoint contains full private conversation data.
 pub struct Checkpoint(String);
 impl std::fmt::Debug for Checkpoint {
@@ -56,6 +66,10 @@ impl Checkpoint {
     fn pending(&self) -> bool {
         let v = self.value();
         v["api_pending"] == true || !v["tool_pending"].is_null()
+    }
+    fn settled_after_failed_owner(&self, owner_failed: bool) -> bool {
+        let v = self.value();
+        pending_settled_after_failed_owner(v["api_pending"] == true, !v["tool_pending"].is_null(), owner_failed)
     }
 }
 #[derive(Clone, Debug)]
@@ -523,14 +537,23 @@ pub async fn rebind(
             && row.owner_turn_id.as_deref() == Some(old.turn),
         "stale handover fence"
     );
-    let checkpoint = Checkpoint::new(&serde_json::from_str(&row.checkpoint_json)?)?;
+    let mut checkpoint = Checkpoint::new(&serde_json::from_str(&row.checkpoint_json)?)?;
+    // 舊 owner turn 已是 failed 且 receipt 已 applied：沒存下回應的模型呼叫（api_pending）視為結算，交接時一併清掉旗標，
+    // 之後的 reserve／adapter cursor 都從「沒有未結算」開始。attempt 列照舊維持 `unknown`＋預留額。
+    let owner_failed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN api_bot_join_receipts j ON j.turn_id=t.id AND j.session_id=? AND j.bot_id=? AND j.run_id=t.run_id AND j.state='applied' AND j.outcome='failed' WHERE t.id=? AND t.run_id=? AND t.status='failed')")
+        .bind(old.session).bind(old.bot).bind(old.turn).bind(old.run).fetch_one(&mut *tx).await?;
     ensure!(
-        !checkpoint.pending(),
+        checkpoint.settled_after_failed_owner(owner_failed),
         "unresolved session cannot be handed over"
     );
+    if checkpoint.pending() {
+        let mut value = checkpoint.value();
+        value["api_pending"] = Value::Bool(false);
+        checkpoint = Checkpoint::new(&value)?;
+    }
     let revision = old.revision.checked_add(1).context("revision overflow")?;
-    sqlx::query("UPDATE api_bot_sessions SET owner_run_id=?,owner_turn_id=?,generation=?,revision=? WHERE id=?")
-        .bind(new_run).bind(new_turn).bind(new_generation).bind(revision).bind(old.session).execute(&mut *tx).await?;
+    sqlx::query("UPDATE api_bot_sessions SET owner_run_id=?,owner_turn_id=?,generation=?,revision=?,checkpoint_json=? WHERE id=?")
+        .bind(new_run).bind(new_turn).bind(new_generation).bind(revision).bind(&checkpoint.0).bind(old.session).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(revision)
 }

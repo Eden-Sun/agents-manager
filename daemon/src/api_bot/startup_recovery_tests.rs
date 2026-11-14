@@ -638,3 +638,42 @@ async fn completed_tool_history_is_preserved_without_replaying_tools() {
 
 #[path = "startup_abandonment_tests.rs"]
 mod startup_abandonment_tests;
+
+/// owner turn 終態 failed 時，沒存下回應的模型呼叫（api_pending、無 tool_pending）算結算；其他組合維持未結算。
+#[tokio::test]
+async fn failed_owner_settles_api_pending_but_never_tool_pending_or_a_live_owner() {
+    use super::runtime::{startup_checkpoint_on, StartupCheckpoint};
+    let f = fixture(false).await; // owner turn completed、receipt applied，revision 已推進。
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?").bind(&f.identity.session_id).fetch_one(&f.env.app.db).await.unwrap();
+    // 測試直接改 status 來湊情境，繞過合法轉移的 trigger（只動這個測試的 DB）。
+    sqlx::query("DROP TRIGGER turns_status_transition").execute(&f.env.app.db).await.unwrap();
+    let set = |status: &'static str, api_pending: bool, tool: Option<&'static str>| {
+        let db = f.env.app.db.clone();
+        let identity = f.identity.clone();
+        async move {
+            sqlx::query("UPDATE turns SET status=? WHERE id=?").bind(status).bind(&identity.turn_id).execute(&db).await.unwrap();
+            let value = json!({"messages":[{"role":"user","content":"prompt"}],"responses":[],"api_pending":api_pending,"tool_pending":tool,"completed_tool_ids":[]});
+            sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(value.to_string()).bind(&identity.session_id).execute(&db).await.unwrap();
+        }
+    };
+    let check = || async {
+        let mut conn = f.env.app.db.acquire().await.unwrap();
+        startup_checkpoint_on(&mut conn, &f.identity, revision).await.ok().unwrap()
+    };
+    // failed + api_pending（沒 tool_pending）→ Safe（startup gate 放行、restore 也成立）。
+    set("failed", true, None).await;
+    assert!(matches!(check().await, StartupCheckpoint::Safe), "failed owner + api_pending");
+    // failed + tool_pending → 永遠 Unresolved（工具可能已有副作用）。
+    set("failed", false, Some("toolu_1")).await;
+    assert!(matches!(check().await, StartupCheckpoint::Unresolved), "failed owner + tool_pending");
+    set("failed", true, Some("toolu_1")).await;
+    assert!(matches!(check().await, StartupCheckpoint::Unresolved), "failed owner + api_pending + tool_pending");
+    // owner 還在 in_flight（或 completed）時 api_pending 不放寬。
+    set("in_flight", true, None).await;
+    assert!(matches!(check().await, StartupCheckpoint::Unresolved), "in_flight owner + api_pending");
+    set("completed", true, None).await;
+    assert!(matches!(check().await, StartupCheckpoint::Unresolved), "completed owner + api_pending");
+    // 乾淨的 checkpoint 照舊 Safe。
+    set("completed", false, None).await;
+    assert!(matches!(check().await, StartupCheckpoint::Safe));
+}

@@ -6331,3 +6331,70 @@ async fn api_bot_streamed_turn_publishes_progress_and_stores_the_same_message() 
     shutdown.cancel();
     server.await.unwrap();
 }
+
+/// 第一次呼叫在串流中途 error（attempt 留 `unknown`、checkpoint 留 api_pending）：turn 終態 failed 後，下一回合要能照常送出並完成，
+/// 同一批 messages 連同新問題重送；unknown 那筆維持 unknown（保守計費），新的一次是 recorded。
+#[tokio::test]
+async fn api_bot_next_turn_after_a_mid_stream_abort_resends_and_completes() {
+    let env = crate::testing::env().await;
+    let requests: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    #[derive(Clone)]
+    struct S(Arc<std::sync::Mutex<Vec<Value>>>, Arc<std::sync::atomic::AtomicUsize>);
+    async fn complete(axum::extract::State(s): axum::extract::State<S>, Json(body): Json<Value>) -> axum::response::Response {
+        s.0.lock().unwrap().push(body);
+        let n = s.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            let sse = format!(
+                "event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n",
+                json!({"type":"message_start","message":{"id":"msg_a","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}),
+                json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}),
+            );
+            axum::response::Response::builder().header("content-type", "text/event-stream").body(axum::body::Body::from(sse)).unwrap()
+        } else {
+            let json = json!({"id":"msg_b","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"recovered"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}});
+            axum::response::Response::builder().header("content-type", "application/json").body(axum::body::Body::from(json.to_string())).unwrap()
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let app = Router::new().route("/v1/messages", post(complete)).with_state(S(requests.clone(), calls));
+    let shutdown = CancellationToken::new();
+    let st = shutdown.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, app).with_graceful_shutdown(async move { st.cancelled().await }).await.unwrap(); });
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let (bot, run, turn1, turn2, conv) = (crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid());
+    insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "first question").await;
+    let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
+    env.app.api_turn_spawn(&key1).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let st: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn1).fetch_optional(&env.app.db).await.unwrap();
+            if st.as_deref() == Some("failed") { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let pending: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&pending).unwrap()["api_pending"], true, "中途 error：checkpoint 留著 api_pending");
+
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second question',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
+    spawn_retrying_busy(&env.app, &key2).await;
+    wait_until_completed(&env.app, &key2).await;
+
+    // 第二次請求帶著第一個（沒答完的）問題與新問題。
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let sent: Vec<String> = reqs[1]["messages"].as_array().unwrap().iter().map(|m| m.to_string()).collect();
+    assert!(sent.iter().any(|m| m.contains("first question")) && sent.iter().any(|m| m.contains("second question")), "{sent:?}");
+    drop(reqs);
+    let states: Vec<String> = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE bot_id=? ORDER BY created_at").bind(&bot).fetch_all(&env.app.db).await.unwrap();
+    assert_eq!(states, ["unknown", "recorded"], "中途 error 那筆維持 unknown（保守計費），新的一次 recorded");
+    let after: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&after).unwrap()["api_pending"], false);
+
+    shutdown.cancel();
+    server.await.unwrap();
+}

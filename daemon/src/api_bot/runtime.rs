@@ -2153,22 +2153,22 @@ impl ApiBotRuntime {
     }
 }
 
-async fn startup_checkpoint_on(
+pub(super) async fn startup_checkpoint_on(
     conn: &mut sqlx::SqliteConnection,
     identity: &super::adapter::AdapterIdentity,
     revision: i64,
 ) -> Result<StartupCheckpoint, StartupError> {
     use am_base::db::api_bot::{Checkpoint, MAX_CHECKPOINT_BYTES};
-    let live = super::receipt::owner_on(conn, identity, revision, "in_flight")
+    let in_flight = super::receipt::owner_on(conn, identity, revision, "in_flight")
         .await
-        .map_err(|_| StartupError::Storage)?
-        || super::receipt::owner_on(conn, identity, revision, "completed")
-            .await
-            .map_err(|_| StartupError::Storage)?
-        || super::receipt::owner_on(conn, identity, revision, "failed")
-            .await
-            .map_err(|_| StartupError::Storage)?;
-    if !live {
+        .map_err(|_| StartupError::Storage)?;
+    let completed = super::receipt::owner_on(conn, identity, revision, "completed")
+        .await
+        .map_err(|_| StartupError::Storage)?;
+    let owner_failed = super::receipt::owner_on(conn, identity, revision, "failed")
+        .await
+        .map_err(|_| StartupError::Storage)?;
+    if !(in_flight || completed || owner_failed) {
         return Ok(StartupCheckpoint::Fenced);
     }
     let row:Option<(i64,Option<String>)>=sqlx::query_as("SELECT format_version,CASE WHEN length(CAST(checkpoint_json AS BLOB))<=? THEN checkpoint_json ELSE NULL END FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND revision=?")
@@ -2181,7 +2181,7 @@ async fn startup_checkpoint_on(
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
         let checkpoint = Checkpoint::new(&value).ok()?;
         let state: super::runner::State = serde_json::from_value(checkpoint.value()).ok()?;
-        Some(startup_context_settled(&state))
+        Some(startup_context_settled(&state, owner_failed))
     })()
     .unwrap_or(false);
     Ok(if safe {
@@ -2190,8 +2190,10 @@ async fn startup_checkpoint_on(
         StartupCheckpoint::Unresolved
     })
 }
-pub(super) fn startup_context_settled(state: &super::runner::State) -> bool {
-    if state.api_pending || state.tool_pending.is_some() {
+/// `owner_failed`：擁有這份 checkpoint 的 turn 已是終態 failed（且 receipt applied）。規則見
+/// `am_base::db::api_bot::pending_settled_after_failed_owner`：只有它能放寬 `api_pending`，`tool_pending` 永遠不放寬。
+pub(super) fn startup_context_settled(state: &super::runner::State, owner_failed: bool) -> bool {
+    if !am_base::db::api_bot::pending_settled_after_failed_owner(state.api_pending, state.tool_pending.is_some(), owner_failed) {
         return false;
     }
     let mut declared = std::collections::HashSet::new();
