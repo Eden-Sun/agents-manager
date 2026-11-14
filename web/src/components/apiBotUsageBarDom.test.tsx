@@ -214,10 +214,13 @@ test('ApiBotUsageBar 的「回合」晶片：顯示每回合時間／呼叫上�
     await settleUi()
     const chip = document.querySelector<HTMLButtonElement>('[data-k="turn-limits"]')!
     assert.ok(chip, '回合晶片要在')
-    assert.equal(chip.querySelector('.sl-v')!.textContent, '30m / 20')
+    assert.equal(chip.querySelector('.sl-v')!.textContent, '30m · 20 calls')
     await act(async () => { chip.click() })
     const form = document.querySelector('[data-k="turn-limits-form"]')!
     assert.equal(form.querySelector<HTMLInputElement>('#turn-timeout-input')!.value, '1800')
+    assert.match(form.textContent ?? '', /回合時間（秒，1–3600）/)
+    assert.match(form.textContent ?? '', /呼叫次數（1–64）/)
+    assert.match(form.textContent ?? '', /下一回合起生效/)
     // 超出範圍：不送出。
     await type(form.querySelector<HTMLInputElement>('#turn-timeout-input')!, '5000')
     await submit()
@@ -235,8 +238,73 @@ test('ApiBotUsageBar 的「回合」晶片：顯示每回合時間／呼叫上�
     await submit()
     await settleUi()
     assert.deepEqual(puts[1], { turn_timeout_secs: 2400, max_api_calls_per_turn: 30 })
-    assert.equal(document.querySelector('[data-k="turn-limits"] .sl-v')!.textContent, '40m / 30')
+    assert.equal(document.querySelector('[data-k="turn-limits"] .sl-v')!.textContent, '40m · 30 calls')
   } finally {
     rawTransport.request = orig
+  }
+})
+
+test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提供展開/收合按鈕並可編輯上限', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const origMatch = window.matchMedia
+  window.matchMedia = ((q: string) => ({
+    matches: q.includes('max-width: 640px'),
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  })) as unknown as typeof window.matchMedia
+
+  const origReq = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 5, recorded: 5, reserved: 0, unknown: 0, failed: 0 },
+        cost_microusd: { recorded: 2000000, reserved: 0, unknown: 0 },
+        tokens: { input: 100, output: 50, cache_read: 20, cache_creation: 10 },
+        cache_hit_rate: 0.5,
+        last: { speed: 'fast' },
+        turns: [],
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') {
+      return { cap_usd: 15, since: '2026-11-14T00:00:00Z', spent_usd: 2.0, turn_timeout_secs: 1800, max_api_calls_per_turn: 20 }
+    }
+    return origReq(method as any, path, body)
+  }) as typeof rawTransport.request
+
+  const settleUi = () => act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await settleUi()
+
+    // 手機預設：有 Cap、Turn、Spent 與展開鈕 ▾；Cache、Speed、Calls 收合
+    assert.ok(document.querySelector('[data-k="cap"]'), 'Cap 晶片要在')
+    assert.ok(document.querySelector('[data-k="turn-limits"]'), '回合晶片要在')
+    assert.ok(document.querySelector('[data-k="cost"]'), '累計花費要在')
+    assert.equal(document.querySelector('[data-k="cache"]'), null, '快取晶片預設收合')
+    assert.equal(document.querySelector('[data-k="speed"]'), null, 'speed 晶片預設收合')
+
+    const expandBtn = document.querySelector<HTMLButtonElement>('.api-usage-expand-btn')!
+    assert.ok(expandBtn, '手機展開按鈕要在')
+    assert.equal(expandBtn.textContent, '▾')
+
+    // 點擊展開
+    await act(async () => { expandBtn.click() })
+    await settleUi()
+
+    assert.ok(document.querySelector('[data-k="cache"]'), '展開後快取晶片要在')
+    assert.ok(document.querySelector('[data-k="speed"]'), '展開後 speed 晶片要在')
+    assert.ok(document.querySelector('[data-k="calls"]'), '展開後 requests 晶片要在')
+    assert.equal(expandBtn.textContent, '▴')
+
+    // 點擊收合
+    await act(async () => { expandBtn.click() })
+    await settleUi()
+    assert.equal(document.querySelector('[data-k="cache"]'), null, '收合後快取晶片隱藏')
+  } finally {
+    window.matchMedia = origMatch
+    rawTransport.request = origReq
   }
 })

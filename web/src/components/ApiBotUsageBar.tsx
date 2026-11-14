@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { apiBotSpendUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
 import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 import { balanceTooltipLines } from './balanceTooltip'
@@ -17,6 +18,8 @@ const POLL_MS = 10_000
  */
 export function ApiBotUsageBar({ botId }: { botId: string }) {
   const t = useT()
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [mobileExpanded, setMobileExpanded] = useState(false)
   const [usage, setUsage] = useState<ApiBotUsage | null>(null)
   const [balance, setBalance] = useState<ClaudeApiBalance | null>(null)
   const [cap, setCap] = useState<ClaudeApiCap | null>(null)
@@ -145,9 +148,11 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
     cap.cap_usd > 0 &&
     cap.spent_usd >= cap.cap_usd * 0.9
 
+  const showFullDetails = !phone || mobileExpanded || editingCap || editingLimits
+
   return (
     <span className="api-usage-bar" data-testid="api-usage-bar">
-      {bal.usd !== undefined || bal.loggedOut ? (
+      {showFullDetails && (bal.usd !== undefined || bal.loggedOut) ? (
         <span
           className={`sl-item api-balance-chip readonly${bal.expiringSoon || bal.loggedOut ? ' warn' : ''}`}
           data-k="balance"
@@ -231,10 +236,11 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
       {cap && cap.turn_timeout_secs !== null && cap.max_api_calls_per_turn !== null ? (
         editingLimits ? (
           <form className="api-balance-form" data-k="turn-limits-form" onSubmit={(e) => void handleSaveLimits(e)}>
-            <label className="sl-k" htmlFor="turn-timeout-input">{t('回合時間（秒）')}</label>
+            <label className="sl-k" htmlFor="turn-timeout-input">{t('回合時間（秒，1–3600）')}</label>
             <input id="turn-timeout-input" className="api-balance-input" type="number" min="1" max="3600" step="1" autoFocus value={newTimeout} disabled={savingLimits} onChange={(e) => setNewTimeout(e.target.value)} />
-            <label className="sl-k" htmlFor="turn-calls-input">{t('呼叫次數')}</label>
+            <label className="sl-k" htmlFor="turn-calls-input">{t('呼叫次數（1–64）')}</label>
             <input id="turn-calls-input" className="api-balance-input" type="number" min="1" max="64" step="1" value={newCalls} disabled={savingLimits} onChange={(e) => setNewCalls(e.target.value)} />
+            <span className="api-limits-hint" title={t('下一回合起生效；時間到會先請模型收尾寫摘要，不是直接中止')}>{t('下一回合起生效')}</span>
             <button className="api-balance-btn" type="submit" disabled={savingLimits}>{t('儲存')}</button>
             <button className="api-balance-btn cancel" type="button" disabled={savingLimits} onClick={() => setEditingLimits(false)}>{t('取消')}</button>
             {limitsError ? <span className="sl-v warn" role="alert">{limitsError}</span> : null}
@@ -248,7 +254,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
             onClick={handleStartEditLimits}
           >
             <span className="sl-k">{t('回合')}</span>
-            <span className="sl-v">{Math.round(cap.turn_timeout_secs / 60)}m / {cap.max_api_calls_per_turn}</span>
+            <span className="sl-v">{Math.round(cap.turn_timeout_secs / 60)}m · {cap.max_api_calls_per_turn} calls</span>
           </button>
         )
       ) : null}
@@ -258,18 +264,33 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         <span className="sl-v">${spend.toFixed(2)}</span>
         {pending > 0 ? <span className="api-usage-hold">{t('含預留')}</span> : null}
       </span>
-      <span className="sl-item" data-k="cache" title={t('快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合')}>
-        <span className="sl-k">{t('快取命中')}</span>
-        <span className="sl-v">{rate === null ? '—' : `${Math.round(rate * 100)}%`}</span>
-      </span>
-      <span className={`sl-item${usage.last?.speed === 'fast' ? ' api-usage-fast' : ''}`} data-k="speed" title={t('上一次呼叫實際用的 speed（不是目前設定；speed 設定改了要下一回合才生效）')}>
-        <span className="sl-k">{t('上一次 speed')}</span>
-        <span className="sl-v">{usage.last?.speed ?? '—'}</span>
-      </span>
-      <span className="sl-item" data-k="calls" title={t('已結算 {rec} 次、預留中 {res} 次、結果不明 {unk} 次、失敗 {fail} 次', { rec: usage.attempts.recorded, res: usage.attempts.reserved, unk: usage.attempts.unknown, fail: usage.attempts.failed })}>
-        <span className="sl-k">{t('請求')}</span>
-        <span className="sl-v">{usage.attempts.total}</span>
-      </span>
+      {showFullDetails ? (
+        <>
+          <span className="sl-item" data-k="cache" title={t('快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合')}>
+            <span className="sl-k">{t('快取命中')}</span>
+            <span className="sl-v">{rate === null ? '—' : `${Math.round(rate * 100)}%`}</span>
+          </span>
+          <span className={`sl-item${usage.last?.speed === 'fast' ? ' api-usage-fast' : ''}`} data-k="speed" title={t('上一次呼叫實際用的 speed（不是目前設定；speed 設定改了要下一回合才生效）')}>
+            <span className="sl-k">{t('上一次 speed')}</span>
+            <span className="sl-v">{usage.last?.speed ?? '—'}</span>
+          </span>
+          <span className="sl-item" data-k="calls" title={t('已結算 {rec} 次、預留中 {res} 次、結果不明 {unk} 次、失敗 {fail} 次', { rec: usage.attempts.recorded, res: usage.attempts.reserved, unk: usage.attempts.unknown, fail: usage.attempts.failed })}>
+            <span className="sl-k">{t('請求')}</span>
+            <span className="sl-v">{usage.attempts.total}</span>
+          </span>
+        </>
+      ) : null}
+      {phone ? (
+        <button
+          type="button"
+          className="sl-item api-usage-expand-btn"
+          aria-label={mobileExpanded ? t('收合用量') : t('展開用量')}
+          title={mobileExpanded ? t('收合用量') : t('展開用量')}
+          onClick={() => setMobileExpanded((v) => !v)}
+        >
+          {mobileExpanded ? '▴' : '▾'}
+        </button>
+      ) : null}
     </span>
   )
 }

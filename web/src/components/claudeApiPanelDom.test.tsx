@@ -126,7 +126,9 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(bookPanel.hasAttribute('hidden'), false, 'bookPanel should be visible')
 
   // 驗證帳本內容
-  assert.match(bookPanel.textContent ?? '', /用量帳本/)
+  assert.match(bookPanel.textContent ?? '', /一次性用途（翻譯／changelog 等）用量帳本/)
+  assert.ok(bookPanel.querySelector('[data-testid=claude-api-ledger-notice]'))
+  assert.match(bookPanel.textContent ?? '', /claude-api bot 的用量記錄在資料庫/)
   assert.match(bookPanel.textContent ?? '', /影響分析 changelog/)
   const rows = bookPanel.querySelectorAll('tbody tr')
   assert.equal(rows.length, 1)
@@ -137,6 +139,7 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
   assert.equal(formPanel.hasAttribute('hidden'), false)
   assert.equal(bookPanel.hasAttribute('hidden'), true)
+  assert.match(formPanel.textContent ?? '', /Claude API Bot（用量與上限）/)
 })
 
 const emptyLedger = {

@@ -73,6 +73,50 @@
   border-color: transparent;
   color: var(--text-dim, #888);
 }
+.api-limits-hint {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+}
+.api-usage-expand-btn {
+  background: none;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-dim, inherit);
+  cursor: pointer;
+  line-height: 1;
+}
+.api-usage-expand-btn:hover {
+  background: var(--bg-btn-hover, #eee);
+  color: var(--text, inherit);
+}
+
+/* 手機版用量列（390px 友善排版，收成可展開的一行） */
+.mobile-api-context-bar {
+  padding: 4px 8px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+}
+@media (max-width: 640px) {
+  .api-usage-bar {
+    width: 100%;
+    gap: 4px 8px;
+    font-size: 11px;
+  }
+  .api-balance-form {
+    flex-wrap: wrap;
+    width: 100%;
+    padding: 4px 6px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border, #ccc);
+    border-radius: 4px;
+    margin: 2px 0;
+  }
+}
 
 /* 手機標題第二行的餘額（ApiBalanceInline） */
 .mobile-bot-balance {

@@ -13,6 +13,7 @@ import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { BotShareSection } from './BotShareSection'
 import { ApiBotControls } from './ApiBotControls'
+import { ClaudeApiBotLimits } from './ClaudeApiBotLimits'
 import { BaseSnapshotControls } from './BaseSnapshotControls'
 import { CopyChip } from './CopyChip'
 import { listSchedules, rebindSchedules, type Schedule } from '../api/schedules'
@@ -782,7 +783,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : null}
         </form>
 
-        {bot.kind === 'claude-api' ? <ApiBotControls botId={botId} name={bot.name} /> : null}
+        {bot.kind === 'claude-api' ? (
+          <>
+            <ClaudeApiBotLimits botId={botId} />
+            <ApiBotControls botId={botId} name={bot.name} />
+          </>
+        ) : null}
         {bot.kind === 'codex' ? <BaseSnapshotControls botId={botId} name={bot.name} /> : null}
         <BotShareSection botId={botId} />
 

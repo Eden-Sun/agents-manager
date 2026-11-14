@@ -64,6 +64,17 @@
   margin-top: 12px;
   min-width: 0;
 }
+.claude-api-ledger-notice {
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 8px 0 12px;
+}
+.claude-api-ledger-notice p {
+  margin: 3px 0;
+  line-height: 1.4;
+}
 .claude-api-ledger h4 {
   margin: 8px 0 4px;
 }

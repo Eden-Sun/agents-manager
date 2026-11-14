@@ -1,0 +1,130 @@
+/* components/ClaudeApiBotLimits.tsx：claude-api bot 的總花費上限與每回合上限設定（共用於 Settings 與 BotSettingsPanel） */
+.claude-api-bot-limits {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 6px 0;
+}
+.claude-api-bot-limits legend,
+.claude-api-bot-limits-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.claude-api-bot-limits-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0;
+  line-height: 1.4;
+}
+.claude-api-bot-limits-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.claude-api-bot-limits-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 13px;
+}
+.claude-api-bot-limits-row .k {
+  color: var(--text-dim);
+}
+.claude-api-bot-limits-row .v {
+  font-weight: 550;
+}
+.claude-api-bot-limits-row.warn .v {
+  color: var(--warn, #b26a00);
+}
+.claude-api-bot-limits-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-top: 2px;
+}
+.claude-api-bot-limits-form label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.claude-api-bot-limits-form input {
+  width: 80px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-input, #fff);
+  color: var(--text, inherit);
+}
+.claude-api-bot-limits-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-btn);
+  color: var(--text, inherit);
+  cursor: pointer;
+}
+.claude-api-bot-limits-btn:hover:not(:disabled) {
+  background: var(--bg-btn-hover);
+}
+.claude-api-bot-limits-btn.cancel {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+.claude-api-bot-limits-btn.clear {
+  color: var(--danger, #c00);
+}
+.claude-api-bot-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 2px;
+}
+.claude-api-bot-links .bot-link-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+.claude-api-bot-links .bot-link-btn:hover {
+  border-color: var(--accent);
+}
+.claude-api-bot-usage-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.claude-api-bot-usage-stats .stat-item {
+  display: inline-flex;
+  gap: 4px;
+}
+.claude-api-bot-usage-stats .stat-k {
+  color: var(--text-dim);
+}
+.claude-api-bot-usage-stats .stat-v {
+  font-weight: 550;
+}

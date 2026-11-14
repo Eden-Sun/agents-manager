@@ -1182,7 +1182,7 @@ function modelExtraOf(effort: string | null, fast: boolean): string {
 }
 
 /** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
-function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOpen, onClose }: {
+function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOpen, onClose, mobileStatus }: {
   issues: ReactNode
   status: ReactNode
   hasStatus: boolean
@@ -1190,11 +1190,19 @@ function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOp
   mobileOpen: boolean
   onOpen: () => void
   onClose: () => void
+  mobileStatus?: boolean
 }) {
   const t = useT()
   const phone = useMediaQuery(PHONE_QUERY)
   if (!issues && !hasStatus) return null
-  if (phone) return mobileOpen ? mobileContent : null
+  if (phone) {
+    return (
+      <>
+        {mobileOpen ? mobileContent : null}
+        {mobileStatus && hasStatus ? <div className="context-bar mobile-api-context-bar">{status}</div> : null}
+      </>
+    )
+  }
   return (
     <>
       <div className="context-bar">
@@ -1692,6 +1700,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
       {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
       <ContextBar
+        mobileStatus={apiBot}
         mobileContent={<MobileContextPanel botId={botId} projectId={bot.project_id} status={statusInfo} reading={phoneCtx}
           anchor={mobileContextAnchor} onClose={() => setGitInfoBotId(null)}
           issues={<IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} onInserted={() => setGitInfoBotId(null)} />} />}

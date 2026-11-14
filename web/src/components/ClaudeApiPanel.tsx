@@ -13,9 +13,11 @@ import {
   type ClaudeApiGroup,
   type ClaudeApiUsePatch,
 } from '../api/claudeApi'
+import { fetchClaudeApiCap, type ClaudeApiCap } from '../api/claudeApiCap'
 import { msg, useT } from '../lib/i18n'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel'
+import { ClaudeApiBotLimits } from './ClaudeApiBotLimits'
 import './claudeApiPanel.css'
 
 const nf = new Intl.NumberFormat('en-US')
@@ -53,6 +55,7 @@ export function ClaudeApiPanel() {
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [ledger, setLedger] = useState<ClaudeApiLedger | null>(null)
+  const [cap, setCap] = useState<ClaudeApiCap | null>(null)
 
   const adopt = (s: ClaudeApiSettings) => {
     setSettings(s)
@@ -77,6 +80,11 @@ export function ClaudeApiPanel() {
       .catch((e: unknown) => {
         if (alive) setLoadError(e instanceof Error ? e.message : String(e))
       })
+    void fetchClaudeApiCap()
+      .then((c) => {
+        if (alive) setCap(c)
+      })
+      .catch(() => {})
     loadLedger()
     return () => {
       alive = false
@@ -156,6 +164,7 @@ export function ClaudeApiPanel() {
         />
         <span className="hint">{t('只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。')}</span>
       </label>
+      <ClaudeApiBotLimits />
       <label className="claude-api-switch">
         <input type="checkbox" checked={enabled} disabled={!willHaveKey && !enabled} onChange={(e) => setEnabled(e.target.checked)} />
         <span>{t('總開關（關掉時下面各用途都不會呼叫 API；「更新框翻譯」沿用舊設定，不受總開關管）')}</span>
@@ -234,11 +243,22 @@ export function ClaudeApiPanel() {
   const ledgerContent = (
     <div className="claude-api-ledger">
       <h3 className="page-title">
-        {t('用量帳本')}{' '}
+        {t('一次性用途（翻譯／changelog 等）用量帳本')}{' '}
         <button type="button" className="btn" onClick={loadLedger}>
           {t('重新整理')}
         </button>
       </h3>
+      <div className="claude-api-ledger-notice" data-testid="claude-api-ledger-notice">
+        <p className="hint">
+          <strong>{t('說明：')}</strong>
+          {t('本帳本僅記錄翻譯、changelog 分析等 daemon 內部一次性工作（存於記憶體，daemon 重啟或換版會清空；不包含 claude-api bot 與 CLI 聊天）。')}
+        </p>
+        <p className="hint">
+          {t('claude-api bot 的用量記錄在資料庫（持久保存），所有 bot 累計已花 ${spent}。查看 bot 統計請至各 bot 的狀態列或「設定」分頁中的 claude-api bot 區塊。', {
+            spent: cap ? cap.spent_usd.toFixed(2) : '0.00',
+          })}
+        </p>
+      </div>
       {ledger === null ? (
         <p className="hint">{t('讀不到帳本。')}</p>
       ) : (
