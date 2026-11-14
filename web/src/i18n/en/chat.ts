@@ -411,6 +411,7 @@ export default {
   '⇄ 原文': '⇄ Original',
   '⇄ 譯文': '⇄ Translation',
   '用 Claude 翻成繁體中文': 'Translate to Traditional Chinese with Claude',
+  '這則沒有自動翻譯（品質檢查未通過），可以手動再試': 'Not auto-translated (quality check failed); you can retry manually',
   '翻譯失敗：{reason}': 'Translation failed: {reason}',
   '翻譯（未啟用）': 'Translate (off)',
   '(by {model} {cost})': '(by {model} {cost})',

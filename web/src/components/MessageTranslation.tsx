@@ -27,7 +27,7 @@ export function MessageTranslationButton({
 }: {
   eligible: boolean
   off: { reason: string } | null
-  status: 'idle' | 'loading' | 'done' | 'error'
+  status: 'idle' | 'loading' | 'done' | 'error' | 'rejected'
   show?: boolean
   onFlip: () => void
   onManual: () => void
@@ -38,10 +38,17 @@ export function MessageTranslationButton({
     ? () => useStore.getState().notify('info', t.tr(off.reason))
     : status === 'done' ? onFlip : status === 'loading' ? undefined : onManual
   const label = off ? t('翻譯（未啟用）') : status === 'loading' ? t('翻譯中…') : status === 'done' ? (show ? t('⇄ 原文') : t('⇄ 譯文')) : t('翻譯')
-  return (
+  const button = (
     <button type="button" className={`msg-translate${off ? ' off' : ''}`} disabled={status === 'loading'} onClick={onClick} title={off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')}>
       {label}
     </button>
+  )
+  if (off || status !== 'rejected') return button
+  return (
+    <>
+      {button}
+      <span className="msg-translate-hint">{t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}</span>
+    </>
   )
 }
 

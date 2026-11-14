@@ -55,7 +55,7 @@ test('英文訊息有「翻譯」鈕，中文與 user 訊息沒有', async () =>
 })
 
 test('點了：打 POST /messages/:id/translate，譯文在同一個泡泡裡翻面取代原文，按鈕切回原文', async () => {
-  const reqs = fakeApi((r) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  const reqs = fakeApi((r) => (r.path.split('?')[0].endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
   const bubble = () => document.querySelector('.bubble')!
   await click(document.querySelector('.msg-translate')!)

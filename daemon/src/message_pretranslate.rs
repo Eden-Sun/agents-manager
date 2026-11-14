@@ -7,7 +7,8 @@
 //! - 條件跟網頁 `useMessageTranslation` 的 eligible／fresh 一致：assistant、未撤回、非 `terminal_fallback`、主要是英文或簡體中文（2026-11-11，本地轉繁，不送 API）、
 //!   `incomplete = 0`、非空、不超過 [`crate::message_translate::MAX_CHARS`]。網頁的「最近 N 則」是顯示規則，預先翻不看它。
 //! - 系統觸發的回合不另外排除：網頁本來就對所有符合條件的新訊息自動翻，這裡照同一條規則。
-//! - 失敗：一次失敗後 [`FAILURE_COOLDOWN`] 內不再預先翻（落地的訊息直接略過，網頁開頁時仍照舊的自動翻規則、失敗停手）。
+//! - 失敗：一次失敗（網路、5xx、設定、預算）後 [`FAILURE_COOLDOWN`] 內不再預先翻（落地的訊息直接略過，網頁開頁時仍照舊的自動翻規則、失敗停手）。
+//!   品質檢查沒過（422 `translate_rejected`，只是這則翻不好）不算失敗、不冷卻。
 //!   同時最多 [`MAX_IN_FLIGHT`] 則在飛。
 //! - 「關」：auto、總開關、用途開關任一關掉，這裡什麼都不做，行為跟原來一樣。
 
@@ -85,9 +86,16 @@ pub(crate) async fn pretranslate(app: &App, id: &str) {
     if cooling_down() || !mt::auto_on(app).await {
         return;
     }
-    if let Err(e) = mt::translate(app, id, &content).await {
-        COOLDOWN_UNTIL_MS.store(chrono::Utc::now().timestamp_millis() + FAILURE_COOLDOWN.as_millis() as i64, Ordering::Relaxed);
-        tracing::warn!(message = %id, error = ?e, "message pretranslate failed; pausing auto pretranslate");
+    match mt::translate(app, id, &content).await {
+        Ok(_) => {}
+        // 這則品質檢查沒過（已寫負面標記）：服務是好的，不冷卻，後面的訊息照翻。
+        Err(e) if mt::is_quality_rejection(&e) => {
+            tracing::info!(message = %id, "message pretranslate rejected by quality check; not cooling down");
+        }
+        Err(e) => {
+            COOLDOWN_UNTIL_MS.store(chrono::Utc::now().timestamp_millis() + FAILURE_COOLDOWN.as_millis() as i64, Ordering::Relaxed);
+            tracing::warn!(message = %id, error = ?e, "message pretranslate failed; pausing auto pretranslate");
+        }
     }
 }
 
@@ -106,6 +114,8 @@ mod tests {
         calls: AtomicUsize,
         fail: std::sync::atomic::AtomicBool,
         delay_ms: u64,
+        /// 非空時回這個文字（模擬沒翻成中文）。
+        text: std::sync::Mutex<Option<String>>,
     }
 
     impl MessagesClient for Fake {
@@ -113,13 +123,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let fail = self.fail.load(Ordering::SeqCst);
             let delay = self.delay_ms;
+            let text = self.text.lock().unwrap().clone().unwrap_or_else(|| "你好世界".into());
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 if fail {
                     return Err(ClientError::Http { status: 500, usage: None });
                 }
                 Ok(ClientOutcome {
-                    text: "你好世界".into(),
+                    text,
                     model: Some("claude-haiku-5-5".into()),
                     stop_reason: Some("end_turn".into()),
                     usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
@@ -147,7 +158,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let f = Arc::new(Fake { calls: AtomicUsize::new(0), fail: std::sync::atomic::AtomicBool::new(false), delay_ms });
+        let f = Arc::new(Fake { calls: AtomicUsize::new(0), fail: std::sync::atomic::AtomicBool::new(false), delay_ms, text: std::sync::Mutex::new(None) });
         env.app.claude_api.set_client(f.clone());
         (env, bot.id, f)
     }
@@ -255,5 +266,27 @@ mod tests {
         f.fail.store(false, Ordering::SeqCst);
         pretranslate(&env.app, "m-f2").await;
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "冷卻過了就照常翻");
+    }
+
+    #[tokio::test]
+    async fn quality_rejection_does_not_cool_down_but_a_500_does() {
+        let _g = TEST_LOCK.lock().await;
+        let (env, bot_id, f) = setup(true, 0).await;
+        // 模型回英文原文＝品質沒過（重試後仍英文）。
+        *f.text.lock().unwrap() = Some(EN.to_string());
+        insert(&env, &bot_id, "m-q1", "assistant", EN, 0, false, "transcript").await;
+        let en2 = "Rolled back the migration because the schema check reported a mismatch in two tables.";
+        insert(&env, &bot_id, "m-q2", "assistant", en2, 0, false, "transcript").await;
+        pretranslate(&env.app, "m-q1").await;
+        assert_eq!(COOLDOWN_UNTIL_MS.load(Ordering::Relaxed), 0, "品質沒過不進冷卻");
+        let before = f.calls.load(Ordering::SeqCst);
+        pretranslate(&env.app, "m-q2").await;
+        assert!(f.calls.load(Ordering::SeqCst) > before, "後面的訊息照翻");
+        // 真的失敗（500）才冷卻。
+        *f.text.lock().unwrap() = None;
+        f.fail.store(true, Ordering::SeqCst);
+        insert(&env, &bot_id, "m-q3", "assistant", "Merged the branch and then deleted the stale worktrees that were left behind.", 0, false, "transcript").await;
+        pretranslate(&env.app, "m-q3").await;
+        assert!(COOLDOWN_UNTIL_MS.load(Ordering::Relaxed) > 0, "500 進冷卻");
     }
 }

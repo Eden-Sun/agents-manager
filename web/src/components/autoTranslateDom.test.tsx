@@ -188,3 +188,58 @@ test('自動翻失敗：不跳錯誤、不重試，停在可手動重試的「�
   assert.equal(translateCalls(reqs), before, '到上限後不再自動')
   assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯', '仍可手動')
 })
+
+/** 把 fakeApi 的 fetch 包一層：`/translate` 依 `mode()` 回 422 品質沒過、500 真失敗，或交給原本的 route（成功）。 */
+function fakeTranslateModes(mode: () => 'ok' | 'reject' | 'fail') {
+  const reqs = fakeApi(route())
+  const base = globalThis.fetch
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    const m = mode()
+    if (String(input).includes('/translate') && m !== 'ok') {
+      reqs.push({ method: init?.method ?? 'GET', path: String(input), body: undefined })
+      return m === 'reject'
+        ? new Response(JSON.stringify({ error: 'translate_rejected', reason: 'untranslated' }), { status: 422 })
+        : new Response(JSON.stringify({ error: 'upstream', message: 'boom' }), { status: 500 })
+    }
+    return base(input, init as never)
+  }) as unknown as typeof fetch
+  return reqs
+}
+
+test('品質檢查沒過（422 translate_rejected）連續多次：不累計失敗，新訊息照常自動翻；顯示小提示，手動鈕可用', async () => {
+  let m: 'ok' | 'reject' | 'fail' = 'reject'
+  const reqs = fakeTranslateModes(() => m)
+  for (let i = 0; i < AUTO_FAIL_LIMIT + 1; i++) {
+    await unmountAll()
+    await mount(<Probe m={msg(EN, { id: `q${i}` })} />)
+    await until(() => document.querySelector('.msg-translate-hint') !== null, '顯示品質檢查提示')
+  }
+  assert.equal(translateCalls(reqs), AUTO_FAIL_LIMIT + 1, '每則都有自動試，沒有被停手')
+  assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯', '手動鈕仍在')
+  m = 'ok'
+  await unmountAll()
+  await mount(<Probe m={msg(EN, { id: 'q-ok' })} />)
+  await until(() => document.querySelector('.msg-translation') !== null, '之後的新訊息照常自動翻')
+})
+
+test('真失敗連續到上限仍停手；中間成功一次就歸零', async () => {
+  let m: 'ok' | 'reject' | 'fail' = 'fail'
+  const reqs = fakeTranslateModes(() => m)
+  const run = async (id: string) => {
+    await unmountAll()
+    await mount(<Probe m={msg(EN, { id })} />)
+    await settle(40)
+  }
+  for (let i = 0; i < AUTO_FAIL_LIMIT - 1; i++) await run(`a${i}`)
+  m = 'ok'
+  await run('good')
+  await until(() => document.querySelector('.msg-translation') !== null, '成功翻出')
+  m = 'fail'
+  for (let i = 0; i < AUTO_FAIL_LIMIT - 1; i++) await run(`b${i}`)
+  const n = translateCalls(reqs)
+  await run('still-allowed')
+  assert.equal(translateCalls(reqs), n + 1, '成功後計數歸零，再失敗兩次仍沒到上限')
+  const n2 = translateCalls(reqs)
+  await run('blocked')
+  assert.equal(translateCalls(reqs), n2, '連續真失敗到上限就停手')
+})

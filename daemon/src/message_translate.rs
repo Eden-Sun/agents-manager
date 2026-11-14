@@ -30,7 +30,7 @@ Preserve the markdown structure exactly (headings, lists, tables, emphasis, link
 Do NOT translate fenced code blocks, inline code, file paths, shell commands, URLs, identifiers, environment variables, \
 commit hashes or issue numbers: copy them verbatim. Do not add explanations, notes or quotes. Reply with the translation only.";
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct CacheEntry {
     translation: String,
     model: String,
@@ -41,6 +41,12 @@ struct CacheEntry {
     /// Jev 判定為忠實台灣繁體中文翻譯的機率（SPEC §4.3c 第六個場景）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     jev_prob: Option<f64>,
+    /// 負面標記（品質檢查沒過）：`translation` 為空，`rejected` 是原因（`untranslated`／`low_fidelity`）。
+    /// 同一則訊息＋內容不再自動重翻重扣；手動重試（`force`）會略過它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected_at: Option<String>,
 }
 
 pub(crate) use crate::claude_api::cost_usd;
@@ -96,6 +102,21 @@ fn load(path: &Path) -> Option<CacheEntry> {
         })
 }
 
+/// 讀負面標記；沒有或不是標記回 None。
+fn load_rejection(path: &Path) -> Option<String> {
+    let e: CacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    e.rejected.filter(|_| e.translation.trim().is_empty())
+}
+
+/// 這個錯誤是「這則翻不好（品質檢查沒過）」，不是服務壞掉。
+pub(crate) fn is_quality_rejection(e: &LcError) -> bool {
+    matches!(e, LcError::Unprocessable(v) if v["error"] == "translate_rejected")
+}
+
+fn rejection_error(reason: &str) -> LcError {
+    LcError::Unprocessable(json!({"error": "translate_rejected", "reason": reason}))
+}
+
 fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -130,12 +151,22 @@ pub(crate) async fn auto_on(app: &App) -> bool {
 /// 簡體中文（[`crate::zh_convert::local_applies`]）不打 API：本地 OpenCC 轉成台灣繁體，寫同一份快取（model `opencc-s2twp`、費用 0）。
 /// 同一個快取鍵同時只有一個上游呼叫（single-flight）：預先翻跟網頁的手動／自動翻撞在一起，後到的等先到的，拿到快取，不重複扣費。
 pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Value, LcError> {
+    translate_with(app, id, content, false).await
+}
+
+/// `force`：略過負面標記，重新打 API（使用者手動重試）。品質沒過回 422 `translate_rejected`（`reason`：`untranslated`／`low_fidelity`），並寫負面標記。
+pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bool) -> Result<Value, LcError> {
     let path = cache_path(&app.data_dir, &cache_key(id, content));
     if let Some(hit) = load(&path) {
         return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
     }
     if crate::zh_convert::local_applies(content) {
         return Ok(local_convert(content, &path));
+    }
+    if !force {
+        if let Some(reason) = load_rejection(&path) {
+            return Err(rejection_error(&reason));
+        }
     }
     let slot = flight_slot(&path);
     let guard = slot.lock().await;
@@ -144,6 +175,13 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
         drop(guard);
         flight_forget(&path, slot);
         return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+    }
+    if !force {
+        if let Some(reason) = load_rejection(&path) {
+            drop(guard);
+            flight_forget(&path, slot);
+            return Err(rejection_error(&reason));
+        }
     }
     let out = translate_upstream(app, id, content, &path).await;
     drop(guard);
@@ -154,7 +192,7 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
 /// 簡體 → 台灣繁體（本地，不呼叫 API）。結果寫進同一份快取，之後命中即 `cached:true`。
 fn local_convert(content: &str, path: &Path) -> Value {
     let translation = crate::zh_convert::to_traditional(content);
-    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0), jev_prob: None };
+    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0), jev_prob: None, ..Default::default() };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
@@ -257,6 +295,20 @@ async fn check_jev(app: &App, id: &str, source: &str, translation: &str) -> Opti
     }
 }
 
+/// 品質沒過：寫負面標記（覆蓋同鍵的舊檔），回 422。
+fn mark_rejected(path: &Path, reason: &str) -> LcError {
+    let entry = CacheEntry {
+        prompt_version: PROMPT_VERSION.into(),
+        rejected: Some(reason.into()),
+        rejected_at: Some(crate::db::now()),
+        ..Default::default()
+    };
+    if let Err(e) = save(path, &entry) {
+        tracing::warn!("message translate rejection marker write failed: {e}");
+    }
+    rejection_error(reason)
+}
+
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
     let mut reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
     let mut translation = clean_reply(&reply.text);
@@ -279,15 +331,15 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
         translation = clean_reply(&reply.text);
 
         if is_mostly_english(content) && is_mostly_english(&translation) {
-            return Err(LcError::Upstream("translate_untranslated".into()));
+            return Err(mark_rejected(path, "untranslated"));
         }
         if !has_japanese_kana(content) && has_japanese_kana(&translation) {
-            return Err(LcError::Upstream("translate_rejected".into()));
+            return Err(mark_rejected(path, "low_fidelity"));
         }
 
         let p = check_jev(app, id, content, &translation).await;
         if p.is_some_and(|v| v < min_prob) {
-            return Err(LcError::Upstream("translate_rejected".into()));
+            return Err(mark_rejected(path, "low_fidelity"));
         }
         jev_prob = p;
     }
@@ -299,6 +351,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
         prompt_version: PROMPT_VERSION.into(),
         cost_usd: cost,
         jev_prob,
+        ..Default::default()
     };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
@@ -314,6 +367,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
 pub async fn post_translate(
     State(app): State<Arc<App>>,
     AxPath(id): AxPath<String>,
+    axum::extract::Query(q): axum::extract::Query<TranslateQuery>,
     Extension(principal): Extension<crate::api::RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     if principal != crate::api::RequestPrincipal::User {
@@ -334,7 +388,13 @@ pub async fn post_translate(
     if content.chars().count() > MAX_CHARS {
         return Err(LcError::Unprocessable(json!({"error": "message_too_long", "max_chars": MAX_CHARS})));
     }
-    Ok(Json(translate(&app, &id, &content).await?))
+    Ok(Json(translate_with(&app, &id, &content, q.force.unwrap_or(false)).await?))
+}
+
+#[derive(Deserialize, Default)]
+pub struct TranslateQuery {
+    /// 手動重試：略過品質沒過的負面標記。
+    force: Option<bool>,
 }
 
 // ── 推播內文：一句短摘要（webpush.rs 用）──────────────────────────────────────────
@@ -409,7 +469,7 @@ pub(crate) async fn summarize(app: &App, content: &str) -> Result<String, LcErro
     let mut out: String = line.chars().take(SUMMARY_MAX_CHARS).collect();
     if line.chars().count() > SUMMARY_MAX_CHARS { out.push('…'); }
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost, jev_prob: None };
+    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost, jev_prob: None, ..Default::default() };
     if let Err(e) = save(&path, &entry) {
         tracing::warn!("push summary cache write failed: {e}");
     }
@@ -820,9 +880,18 @@ mod tests {
         let f = fake_seq(&app, replies);
         let err = translate(&app, "m_fail", content).await.unwrap_err();
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "重試一次後失敗，共打兩次");
-        assert!(matches!(&err, LcError::Upstream(msg) if msg == "translate_untranslated"), "錯誤訊息必須是 translate_untranslated: {err:?}");
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "untranslated"), "品質沒過回 422 untranslated: {err:?}");
         let key = cache_key("m_fail", content);
-        assert!(!cache_path(&app.data_dir, &key).exists(), "失敗不寫入快取檔案");
+        let path = cache_path(&app.data_dir, &key);
+        assert_eq!(load_rejection(&path).as_deref(), Some("untranslated"), "寫入負面標記");
+        assert!(load(&path).is_none(), "標記不是譯文");
+        // 第二次同一則：直接回標記，不打 API。
+        let err2 = translate(&app, "m_fail", content).await.unwrap_err();
+        assert!(matches!(&err2, LcError::Unprocessable(v) if v["reason"] == "untranslated"));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中負面標記不調用 API");
+        // 手動重試（force）才會再打。
+        let _ = translate_with(&app, "m_fail", content, true).await;
+        assert_eq!(f.calls.load(Ordering::SeqCst), 3, "force 略過標記");
     }
 
     #[tokio::test]
@@ -838,6 +907,7 @@ mod tests {
             prompt_version: PROMPT_VERSION.into(),
             cost_usd: Some(0.000193),
             jev_prob: None,
+            ..Default::default()
         };
         save(&path, &bad_entry).unwrap();
         assert!(path.exists(), "壞快取已寫入磁碟");
@@ -888,6 +958,7 @@ mod tests {
             prompt_version: PROMPT_VERSION.into(),
             cost_usd: Some(0.000193),
             jev_prob: None,
+            ..Default::default()
         };
         save(&path, &bad_entry).unwrap();
         assert!(path.exists(), "壞日文快取已寫入磁碟");
@@ -992,11 +1063,12 @@ mod tests {
 
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "Haiku 打兩次");
         assert_eq!(jev_calls.load(Ordering::SeqCst), 2, "Jev 問兩次");
-        assert!(matches!(&err, LcError::Upstream(msg) if msg == "translate_rejected"), "兩次低機率回傳 translate_rejected: {err:?}");
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "low_fidelity"), "兩次低機率回 422 low_fidelity: {err:?}");
 
         let key = cache_key("m_jev_fail", content);
         let path = cache_path(&app.data_dir, &key);
-        assert!(!path.exists(), "Jev 兩次未通過不寫入快取");
+        assert_eq!(load_rejection(&path).as_deref(), Some("low_fidelity"), "Jev 兩次未通過寫負面標記");
+        assert!(load(&path).is_none());
     }
 
     #[tokio::test]
@@ -1099,10 +1171,10 @@ mod tests {
     async fn route_rejects_non_assistant_and_unknown_messages() {
         let (app, _dir) = app(true).await;
         fake(&app);
-        let call = |id: &str| post_translate(State(app.clone()), AxPath(id.into()), Extension(crate::api::RequestPrincipal::User));
+        let call = |id: &str| post_translate(State(app.clone()), AxPath(id.into()), axum::extract::Query(TranslateQuery::default()), Extension(crate::api::RequestPrincipal::User));
         assert!(matches!(call("nope").await.unwrap_err(), LcError::NotFound(_)));
         let bot = Extension(crate::api::RequestPrincipal::Bot("x".into()));
-        assert!(matches!(post_translate(State(app.clone()), AxPath("nope".into()), bot).await.unwrap_err(), LcError::Forbidden(_)));
+        assert!(matches!(post_translate(State(app.clone()), AxPath("nope".into()), axum::extract::Query(TranslateQuery::default()), bot).await.unwrap_err(), LcError::Forbidden(_)));
     }
 
     struct FakeText {

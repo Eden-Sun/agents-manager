@@ -1,10 +1,11 @@
 import { createElement, useEffect, useSyncExternalStore } from 'react'
 import { translateMessage } from '../api'
+import { ApiError } from '../api/types'
 import type { Message } from '../api/types'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { isMostlySimplified } from '../lib/zhSimplified'
 import { useT } from '../lib/i18n'
-import { autoTranslateAllowed, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
+import { autoTranslateAllowed, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, noteTranslationSuccess, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
 import { useStore } from '../store/store'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
 import { MessageTranslationButton, MessageTranslationContent } from './MessageTranslation'
@@ -31,14 +32,21 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
   // manual＝使用者按的；restore＝重整後重抓以前選過看譯文的；fresh＝自動翻譯新訊息。後兩者失敗不跳錯誤也不重試。
   const run = (kind: 'manual' | 'restore' | 'fresh') => {
     setTranslation(msg.id, { status: 'loading' })
-    translateMessage(msg.id).then(
+    translateMessage(msg.id, kind === 'manual').then(
       (r) => {
+        noteTranslationSuccess()
         const show = kind === 'manual' || (kind === 'restore' ? isWanted(msg.id) : !isDeclined(msg.id))
         // 自動翻出來並顯示的，跟手動點過一樣記著：之後滑出最後 N 則、重整，都維持譯文。
         if (kind === 'fresh' && show) setWanted(msg.id, true)
         setTranslation(msg.id, { status: 'done', text: r.translation, show, cost: r.costUsd, cached: r.cached, model: r.model })
       },
       (e: unknown) => {
+        // 品質檢查沒過：服務是好的，只是這則翻不好。不算失敗（不累計、不重置就緒狀態），顯示原文＋小提示。
+        if (e instanceof ApiError && e.status === 422 && e.body.error === 'translate_rejected') {
+          setTranslation(msg.id, { status: 'rejected' })
+          if (kind === 'manual') useStore.getState().notify('info', t('這則沒有自動翻譯（品質檢查未通過），可以手動再試'))
+          return
+        }
         setTranslation(msg.id, { status: 'error' })
         resetTranslateReady()
         if (kind !== 'manual') {

@@ -7,6 +7,8 @@
 
 export type TranslationEntry =
   | { status: 'idle' | 'loading' | 'error' }
+  /** 品質檢查沒過（daemon 422 translate_rejected）：這則翻不好，不是服務壞掉；顯示原文＋小提示，手動鈕照常。 */
+  | { status: 'rejected' }
   | { status: 'done'; text: string; show: boolean; cost: number | null; cached: boolean; model: string }
 
 const IDLE: TranslationEntry = { status: 'idle' }
@@ -112,9 +114,14 @@ export function setDeclined(id: string, on: boolean) {
   }
 }
 
-/** 自動翻譯失敗一次（累計到上限就停手，直到重整頁面）。 */
+/** 自動翻譯「真的」失敗一次（網路、5xx、設定、預算；累計到上限就停手，成功一次就歸零）。品質檢查沒過不算，不要呼叫這個。 */
 export function noteAutoFailure() {
   autoFailures += 1
+}
+
+/** 任何一次翻譯成功：連續失敗計數歸零（偶發失敗不該累積到整頁停手）。 */
+export function noteTranslationSuccess() {
+  autoFailures = 0
 }
 
 /** 第一次自動翻這則回 true（之後回 false）。 */
