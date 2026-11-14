@@ -6479,3 +6479,84 @@ async fn api_bot_force_interrupt_ends_the_turn_keeps_the_run_and_the_next_prompt
     assert_eq!(reply, "after interrupt");
     server.abort();
 }
+
+struct SlowTools(Arc<Notify>);
+impl super::super::runner::Tools for SlowTools {
+    fn execute<'a>(&'a self, _: &'a crate::api_bot::protocol::ToolCall, cancel: &'a CancellationToken) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        self.0.notify_one();
+        Box::pin(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err("cancelled".into()),
+                _ = tokio::time::sleep(Duration::from_secs(60)) => Ok("finished".into()),
+            }
+        })
+    }
+}
+
+/// 強制中斷發生在工具執行中：工具收到取消後回來，它的結果（真實輸出＋`[interrupted by user]`、is_error）與同一批
+/// 還沒開始的呼叫（`not executed: interrupted by user`）都寫進對話，tool_pending 收掉；下一則 prompt 能送出並完成，
+/// 送給模型的對話含這些被中斷的 tool_result。
+#[tokio::test]
+async fn api_bot_force_interrupt_during_a_tool_settles_the_batch_and_the_next_prompt_works() {
+    let env = crate::testing::env().await;
+    let requests: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    #[derive(Clone)]
+    struct S(Arc<std::sync::Mutex<Vec<Value>>>);
+    async fn complete(axum::extract::State(s): axum::extract::State<S>, Json(body): Json<Value>) -> Json<Value> {
+        let n = { let mut g = s.0.lock().unwrap(); g.push(body); g.len() };
+        if n == 1 {
+            Json(json!({"id":"m1","model":"claude-opus-5-5","content":[
+                {"type":"tool_use","id":"toolu_a","name":"bash","input":{"command":"sleep 100"}},
+                {"type":"tool_use","id":"toolu_b","name":"bash","input":{"command":"echo never"}}],
+                "stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}))
+        } else {
+            Json(json!({"id":"m2","model":"claude-opus-5-5","content":[{"type":"text","text":"after tool interrupt"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let app = Router::new().route("/v1/messages", post(complete)).with_state(S(requests.clone()));
+    let server = tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+    enable_fake_runtime(&env.app, endpoint.clone(), DEADLOCK_TIMEOUT).await;
+    let entered = Arc::new(Notify::new());
+    env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
+        endpoint,
+        key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-only".into())),
+        quote: Arc::new(Quote),
+        tools: Arc::new(SlowTools(entered.clone())),
+        shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
+    });
+
+    let (bot, run, turn1, turn2, conv) = (crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid());
+    insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "run the tools").await;
+    let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
+    env.app.api_turn_spawn(&key1).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, entered.notified()).await.unwrap();
+
+    crate::lifecycle::interrupt_turn(&env.app, &bot, Some(&turn1)).await.expect("interrupt during a tool");
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn1).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(status, "failed");
+    let chk: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    let chk: Value = serde_json::from_str(&chk).unwrap();
+    assert!(chk["tool_pending"].is_null(), "工具已回來並記下結果：tool_pending 收掉 {chk}");
+    assert_eq!(chk["api_pending"], false);
+
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','continue please',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
+    spawn_retrying_busy(&env.app, &key2).await;
+    wait_until_completed(&env.app, &key2).await;
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let results: Vec<Value> = reqs[1]["messages"].as_array().unwrap().iter()
+        .filter_map(|m| m["content"].as_array()).flatten().filter(|b| b["type"] == "tool_result").cloned().collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    let a = results.iter().find(|r| r["tool_use_id"] == "toolu_a").unwrap();
+    let b = results.iter().find(|r| r["tool_use_id"] == "toolu_b").unwrap();
+    assert_eq!(a["is_error"], true);
+    assert!(a["content"].as_str().unwrap().contains("cancelled") && a["content"].as_str().unwrap().contains("[interrupted by user]"), "{a}");
+    assert_eq!(b["is_error"], true);
+    assert_eq!(b["content"], "not executed: interrupted by user");
+    server.abort();
+}

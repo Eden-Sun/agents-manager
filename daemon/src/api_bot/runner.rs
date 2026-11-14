@@ -79,6 +79,48 @@ pub async fn run(
     cancel: &CancellationToken,
     max_calls: usize,
 ) -> Result<Halt, Error> {
+    run_interruptible(model, tools, journal, state, cancel, max_calls, &|| false).await
+}
+
+/// 使用者強制中斷時（不是 run 停止、不是當機），把取消當下進行中的工具批次結清：
+/// 已經回來的那一個工具寫真實輸出（加註 `[interrupted by user]`、is_error），這一批還沒開始的每一個寫
+/// `not executed: interrupted by user`，全部標完成、`tool_pending=None` 後存 checkpoint，下一回合才送得出去。
+/// 只有「工具真的回來了」才會走到這裡；沒有記下結果就不放寬 `tool_pending`。
+fn settle_interrupted_batch(
+    state: &mut State,
+    results: &mut Vec<Value>,
+    pushed: bool,
+    finished: Option<(&str, String)>,
+    rest: &[crate::api_bot::protocol::ToolCall],
+) {
+    if let Some((id, output)) = finished {
+        results.push(json!({"type":"tool_result","tool_use_id":id,"content":format!("{output}\n[interrupted by user]"),"is_error":true}));
+        state.completed_tool_ids.insert(id.to_string());
+    }
+    for call in rest {
+        results.push(json!({"type":"tool_result","tool_use_id":call.id,"content":"not executed: interrupted by user","is_error":true}));
+        state.completed_tool_ids.insert(call.id.clone());
+    }
+    if results.is_empty() {
+        return;
+    }
+    if pushed {
+        state.messages.last_mut().expect("tool result batch exists").content = json!(results);
+    } else {
+        state.messages.push(Message { role: "user".into(), content: json!(results) });
+    }
+    state.tool_pending = None;
+}
+
+pub async fn run_interruptible(
+    model: &impl Model,
+    tools: &impl Tools,
+    journal: &impl Journal,
+    state: &mut State,
+    cancel: &CancellationToken,
+    max_calls: usize,
+    user_interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<Halt, Error> {
     if state.api_pending || state.tool_pending.is_some() {
         return Err(Error::PendingUnknown);
     }
@@ -123,14 +165,29 @@ pub async fn run(
             });
         }
         let mut results: Vec<Value> = Vec::new();
-        for call in calls {
+        for (idx, call) in calls.iter().enumerate() {
             if cancel.is_cancelled() {
+                // 前一個工具已經回來並記下結果（tool_pending 只是批次還沒收尾）；使用者中斷就把剩下的結清。
+                if user_interrupted() {
+                    let pushed = !results.is_empty();
+                    settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..]);
+                    checkpoint(journal, state).await?;
+                }
                 return Err(Error::Cancelled);
             }
             state.tool_pending = Some(call.id.clone());
             checkpoint(journal, state).await?;
-            let result = tools.execute(&call, cancel).await;
+            let result = tools.execute(call, cancel).await;
             if cancel.is_cancelled() {
+                if user_interrupted() {
+                    let output = match result {
+                        Ok(s) => s,
+                        Err(e) => e,
+                    };
+                    let pushed = !results.is_empty();
+                    settle_interrupted_batch(state, &mut results, pushed, Some((&call.id, output)), &calls[idx + 1..]);
+                    checkpoint(journal, state).await?;
+                }
                 return Err(Error::Cancelled);
             }
             let (content, is_error) = match result {
@@ -138,7 +195,7 @@ pub async fn run(
                 Err(e) => (e, true),
             };
             results.push(json!({"type":"tool_result", "tool_use_id":call.id,"content":content,"is_error":is_error}));
-            state.completed_tool_ids.insert(call.id);
+            state.completed_tool_ids.insert(call.id.clone());
             // Keep partial results in the transcript too, so a durable checkpoint cannot lose
             // the output of a side effect. Only the final batch is submitted to the model.
             if results.len() == 1 {

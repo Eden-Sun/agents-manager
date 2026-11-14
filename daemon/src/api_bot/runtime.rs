@@ -654,13 +654,19 @@ impl ApiBotRuntime {
                 crate::lifecycle::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
                 let responses_before = state.responses.len();
-                let execution = super::runner::run(
+                // 使用者強制中斷（不是 run 停止）時，runner 會把進行中的工具批次結清，下一回合才送得出去。
+                let interrupted = {
+                    let (inner, key) = (fail_inner.clone(), fail_key.clone());
+                    move || inner.user_interrupts.lock().expect("interrupt mutex poisoned").contains(&key)
+                };
+                let execution = super::runner::run_interruptible(
                     adapter.as_ref(),
                     &tools,
                     adapter.as_ref(),
                     &mut state,
                     &cancel,
                     max_calls,
+                    &interrupted,
                 );
                 let (result, deadline_elapsed) =
                     await_runner_deadline(execution, &cancel, turn_timeout).await;
