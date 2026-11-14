@@ -1741,6 +1741,7 @@ fn map_runner_result(
                     request_id.as_deref(),
                 )
             }
+            H::StreamAborted { kind, message } => super::completion::format_stream_abort_reason(kind.as_deref(), message.as_deref()),
             H::Timeout => "api_timeout".into(),
             H::TransportUnknown => "api_transport_unknown".into(),
             H::TooLarge | H::InvalidResponse => "api_invalid_response".into(),

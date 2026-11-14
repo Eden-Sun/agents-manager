@@ -695,6 +695,71 @@ mod tests {
         }
     }
 
+    /// 回 200 的 SSE：message_start 之後直接送 `error` 事件（模型可能已產生並計費）。
+    async fn spawn_mid_stream_error_server(kind: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || async move {
+                let body = format!(
+                    "event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n",
+                    serde_json::json!({"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}),
+                    serde_json::json!({"type":"error","error":{"type":kind,"message":"mid-stream"}}),
+                );
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://127.0.0.1:{port}/v1/messages"), handle)
+    }
+
+    /// 串流中途的 `error`（含 overloaded_error／rate_limit_error）發生在 HTTP 200 之後，模型可能已計費：
+    /// 不能套用 4xx／429／529 的「確定沒處理、$0」，維持 `unknown`＋api_pending。
+    #[tokio::test]
+    async fn test_mid_stream_error_event_leaves_the_attempt_unknown_and_pending() {
+        for kind in ["overloaded_error", "rate_limit_error", "invalid_request_error"] {
+            let (endpoint, server) = spawn_mid_stream_error_server(kind).await;
+            let (pool, bot, run, turn, session) = setup_test_db().await;
+            let adapter = ApiBotAdapter::new(
+                pool.clone(),
+                AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 },
+                test_options(),
+                serde_json::json!("System"),
+                test_limits(),
+                Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+                AdapterHttpConfig {
+                    endpoint,
+                    key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                    timeout: std::time::Duration::from_secs(5),
+                    max_response_bytes: 1024 * 1024,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+            let cancel = CancellationToken::new();
+            let mut state = State::default();
+            state.messages = vec![Message { role: "user".into(), content: serde_json::json!("stream then abort") }];
+            let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 2).await;
+            assert!(matches!(res, Err(runner::Error::Model(crate::api_bot::http::Error::StreamAborted { .. }))), "{kind}: {res:?}");
+
+            let row: (String, Option<i64>, i64) = sqlx::query_as("SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?")
+                .bind(&turn).fetch_one(&pool).await.unwrap();
+            assert_eq!((row.0.as_str(), row.1, row.2), ("unknown", None, 10_000), "{kind}");
+            let raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&pool).await.unwrap();
+            let checkpoint: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(checkpoint["api_pending"], true, "{kind}");
+            server.abort();
+        }
+    }
+
     #[test]
     fn definitive_rejection_covers_4xx_429_529_but_not_timeouts_or_5xx() {
         use super::super::adapter::definitive_rejection;
@@ -705,6 +770,7 @@ mod tests {
         assert!(definitive_rejection(&crate::api_bot::http::Error::RateLimited { retry_after_secs: None }));
         assert!(!definitive_rejection(&http(408)));
         assert!(!definitive_rejection(&http(500)));
+        assert!(!definitive_rejection(&crate::api_bot::http::Error::StreamAborted { kind: Some("overloaded_error".into()), message: None }));
         assert!(!definitive_rejection(&crate::api_bot::http::Error::Timeout));
         assert!(!definitive_rejection(&crate::api_bot::http::Error::TransportUnknown));
         assert!(!definitive_rejection(&crate::api_bot::http::Error::InvalidResponse));

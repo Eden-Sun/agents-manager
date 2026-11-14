@@ -463,12 +463,29 @@ pub(super) fn format_http_failure_reason(
     }
 }
 
+/// 串流中途的 `error` 事件：HTTP 已回 200，模型可能已產生並計費，原因另開前綴，不混進 `api_http_<status>`。
+pub(super) fn format_stream_abort_reason(kind: Option<&str>, message: Option<&str>) -> String {
+    if kind.is_none() && message.is_none() {
+        "api_stream_aborted".into()
+    } else {
+        format!("api_stream_aborted:{}", serde_json::json!({"type": kind, "message": message}))
+    }
+}
+
 /// 失敗原因的人話；若為 HTTP 錯誤且帶有詳細資訊則帶出 type/message/request-id。
 pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str> {
     if let Some(rest) = reason.strip_prefix("api_total_cap_reached:cap=") {
         if let Some((cap, spent)) = rest.split_once(":spent=") {
             return format!("已達總花費上限 ${cap}（已花 ${spent}）").into();
         }
+    }
+    if let Some(rest) = reason.strip_prefix("api_stream_aborted") {
+        let detail = rest.strip_prefix(':').and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+        let field = |k: &str| detail.as_ref().and_then(|d| d.get(k)).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(str::to_string);
+        let mut out = String::from("Anthropic API 在串流中途回報錯誤，這一次請求可能已部分產生並計費");
+        if let Some(kind) = field("type") { out.push_str(&format!("（{kind}"));  out.push_str(&field("message").map(|m| format!("：{m}）")).unwrap_or_else(|| "）".into())); }
+        out.push('。');
+        return out.into();
     }
     if let Some(rest) = reason.strip_prefix("api_http_") {
         let (status_str, json_str) = match rest.split_once(':') {

@@ -28,6 +28,9 @@ pub enum Error {
         message: Option<String>,
         request_id: Option<String>,
     },
+    /// HTTP 200 之後，串流中途收到 `error` 事件：模型可能已經產生並計費，所以**不是**確定沒處理的拒絕
+    /// （不可當成 4xx／429／529 記 $0；附帶的 `kind`／`message` 只給使用者看原因）。
+    StreamAborted { kind: Option<String>, message: Option<String> },
     TooLarge,
     InvalidResponse,
 }
@@ -35,29 +38,15 @@ pub enum Error {
 /// 串流進度回呼的最短間隔。
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// 串流中的 `error` 事件對應回與非串流 HTTP 錯誤相同的 `Error` 種類。
+/// 串流中的 `error` 事件（已是 HTTP 200 之後）→ `StreamAborted`，不套用 HTTP 狀態碼的「確定沒處理」語意。
 fn stream_error(e: StreamError) -> Error {
     match e {
         StreamError::Invalid => Error::InvalidResponse,
         StreamError::Api { kind, message } => {
-            if kind == "rate_limit_error" {
-                return Error::RateLimited { retry_after_secs: None };
-            }
-            let status = match kind.as_str() {
-                "invalid_request_error" => 400,
-                "authentication_error" => 401,
-                "billing_error" => 402,
-                "permission_error" => 403,
-                "not_found_error" => 404,
-                "request_too_large" => 413,
-                "timeout_error" => 504,
-                "overloaded_error" => 529,
-                _ => 500,
-            };
             let kind = Some(kind.trim().to_string()).filter(|k| !k.is_empty());
             let message = Some(crate::judge::mask(&message).chars().take(500).collect::<String>()).filter(|m| !m.is_empty());
-            tracing::warn!(status, kind = ?kind, message = ?message, "api bot stream error event");
-            Error::Http { status, kind, message, request_id: None }
+            tracing::warn!(kind = ?kind, message = ?message, "api bot stream error event");
+            Error::StreamAborted { kind, message }
         }
     }
 }

@@ -1065,7 +1065,7 @@ async fn streamed_response_equals_the_nonstreaming_response() {
 }
 
 #[tokio::test]
-async fn stream_error_event_maps_to_the_same_http_error_kinds() {
+async fn mid_stream_error_event_is_stream_aborted_not_an_http_status() {
     let mut body = sse_body(&[json!({"type":"text","text":"partial"})], "end_turn");
     // 把結尾的 message_delta／message_stop 換成 error 事件。
     let text = String::from_utf8(body.clone()).unwrap();
@@ -1078,13 +1078,13 @@ async fn stream_error_event_maps_to_the_same_http_error_kinds() {
     let system = json!("fixture");
     let req = http::FullMessagesRequest { endpoint: &endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(5), max_response_bytes: 64 * 1024 };
     let err = http::complete(&req, &CancellationToken::new()).await.unwrap_err();
-    assert_eq!(err, http::Error::Http { status: 529, kind: Some("overloaded_error".into()), message: Some("Overloaded".into()), request_id: None });
+    assert_eq!(err, http::Error::StreamAborted { kind: Some("overloaded_error".into()), message: Some("Overloaded".into()) });
     shutdown.cancel();
 
     let rl = String::from_utf8(body).unwrap().replace("overloaded_error", "rate_limit_error");
     let (endpoint, _seen, shutdown) = sse_fixture(vec![rl.into_bytes()], Duration::from_millis(0)).await;
     let req = http::FullMessagesRequest { endpoint: &endpoint, ..req };
-    assert_eq!(http::complete(&req, &CancellationToken::new()).await.unwrap_err(), http::Error::RateLimited { retry_after_secs: None });
+    assert_eq!(http::complete(&req, &CancellationToken::new()).await.unwrap_err(), http::Error::StreamAborted { kind: Some("rate_limit_error".into()), message: Some("Overloaded".into()) });
     shutdown.cancel();
 }
 
@@ -1108,4 +1108,14 @@ async fn truncated_stream_is_an_invalid_response_and_progress_is_throttled() {
     assert_eq!(reports.len(), 1);
     assert!(reports[0].text_tail.contains("live"));
     shutdown.cancel();
+}
+
+#[test]
+fn stream_abort_reason_is_distinct_from_http_status_and_explained() {
+    let reason = super::completion::format_stream_abort_reason(Some("overloaded_error"), Some("Overloaded"));
+    assert!(reason.starts_with("api_stream_aborted:"), "{reason}");
+    assert!(!reason.starts_with("api_http_"));
+    let expl = super::completion::failure_explanation(&reason);
+    assert!(expl.contains("串流中途") && expl.contains("overloaded_error") && expl.contains("Overloaded") && expl.contains("計費"), "{expl}");
+    assert!(super::completion::failure_explanation("api_stream_aborted").contains("串流中途"));
 }
