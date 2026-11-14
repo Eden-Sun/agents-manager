@@ -52,9 +52,14 @@ fn norm(line: &str) -> String {
     t.trim().to_lowercase()
 }
 
-/// 輸入列：單獨一個 `>`（框線不算）。對話框裡的選項列是 `> 1. …`／`> [x] …`，後面還有字，不會誤中。
+/// 輸入列：單獨一個 `>` 或 agy 的空框 placeholder（框線不算）。對話框裡的選項列是 `> 1. …`／`> [x] …`，後面還有字，不會誤中。
 fn is_composer_row(line: &str) -> bool {
     let cleaned = crate::composer_parse::strip_ansi(line);
+    let t = cleaned.trim();
+    if let Some(rest) = t.strip_prefix('>') {
+        let after = rest.trim();
+        return after.is_empty() || crate::composer_parse::is_agy_placeholder(after);
+    }
     let mut chars = cleaned.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
     chars.next() == Some('>') && chars.next().is_none()
 }

@@ -489,7 +489,11 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool, tail: Opt
     let tail = &lines[from..];
     let idx = tail.iter().rposition(|l| {
         let t = undecorate_for(kind, l);
-        at_marker_column(l, marker) && t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
+        if !(at_marker_column(l, marker) && t.starts_with(marker)) {
+            return false;
+        }
+        let content = t[marker.len()..].trim();
+        !content.is_empty() && !(kind == "agy" && is_agy_placeholder(content))
     })?;
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {

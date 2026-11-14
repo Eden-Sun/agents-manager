@@ -2005,7 +2005,71 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(box_state("claude", THINKING_ONLY), BoxState::Empty);
         // claude 現行：兩條全寬框線中間的輸入列，裡面是使用者真的打的字 → 非空。
         assert_eq!(box_state("claude", CLAUDE_UNSENT_PROMPT), BoxState::NonEmpty);
+        // agy 1.5.9：純文字或 ANSI 讀取下，模式循環提示（如 Auto mode）與預設空輸入框都是空框。
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_AUTO), BoxState::Empty);
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_AUTO_ANSI), BoxState::Empty);
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_ACCEPT_EDITS), BoxState::Empty);
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_PLAN), BoxState::Empty);
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_BEST_OF_N), BoxState::Empty);
+        assert_eq!(box_state("agy", AGY_IDLE_SPLASH_DEFAULT), BoxState::Empty);
+        assert_eq!(composer_text("agy", AGY_IDLE_SPLASH_AUTO), None);
+        assert_eq!(composer_text("agy", AGY_IDLE_SPLASH_AUTO_ANSI), None);
+        assert_eq!(composer_text_whole("agy", AGY_IDLE_SPLASH_AUTO), None);
     }
+
+    /// agy 1.5.9 啟動畫面（純文字快照）：Auto mode 預設 prompt。
+    const AGY_IDLE_SPLASH_AUTO: &str = "\
+      ▄▀▀▄        Antigravity CLI 1.5.9
+     ▀▀▀▀▀▀       kimciou8@gmail.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)
+   ▄▀▀    ▀▀▄     ~/project/agents-manager
+  ▄▀▀      ▀▀▄
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                 Gemini 3.8 Flash · high
+";
+
+    /// agy 1.5.9 啟動畫面（ANSI 快照）：Auto mode 預設 prompt。
+    const AGY_IDLE_SPLASH_AUTO_ANSI: &str = "\
+\u{1b}[0m\u{1b}[38;5;8m───────────────────────────────────────────────────────────────────────────────────────────────────────\u{1b}[0m\r
+\u{1b}[0m\u{1b}[38;5;12m> \u{1b}[0m\u{1b}[38;5;8mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[0m\r
+\u{1b}[0m\u{1b}[38;5;8m───────────────────────────────────────────────────────────────────────────────────────────────────────\u{1b}[0m\r
+\u{1b}[0m\u{1b}[38;5;8m? for shortcuts                                                                 \u{1b}[0m\u{1b}[2mGemini 3.8 Flash · high\u{1b}[0m\
+";
+
+    /// agy 1.5.9 啟動畫面：Accept-edits mode。
+    const AGY_IDLE_SPLASH_ACCEPT_EDITS: &str = "\
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+> Accept-edits mode: file edits auto-approved (shift+tab to cycle)
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                  accept-edits · Gemini 3.8 Flash · high
+";
+
+    /// agy 1.5.9 啟動畫面：Plan mode。
+    const AGY_IDLE_SPLASH_PLAN: &str = "\
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+> Plan mode: research & plan only (shift+tab to cycle)
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                          plan · Gemini 3.8 Flash · high
+";
+
+    /// agy 1.5.9 啟動畫面：Best-of-N mode。
+    const AGY_IDLE_SPLASH_BEST_OF_N: &str = "\
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+> Best-of-N mode: fork into parallel arms and pick a winner (shift+tab to cycle)
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                     best-of-n · Gemini 3.8 Flash · high
+";
+
+    /// agy 1.5.9 空輸入列（無提示字）。
+    const AGY_IDLE_SPLASH_DEFAULT: &str = "\
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+───────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                 Gemini 3.8 Flash · high
+";
 
     /// w168:p3E（codex 0.154，2026-09-14）用 `pane.read format=ansi` 讀到的輸入列原樣。
     const CODEX_PLACEHOLDER_ANSI: &str = "\u{1b}[0m\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[48;2;59;64;76m \u{1b}[0m\u{1b}[2m\u{1b}[48;2;59;64;76mAsk Codex to do anything\u{1b}[0m\u{1b}[48;2;59;64;76m   \u{1b}[0m";
@@ -2033,6 +2097,32 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(box_state("codex", &codex_typed), BoxState::NonEmpty, "佔位字多一個字就是使用者的字");
         let codex_space = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", "›  ", 1);
         assert_eq!(box_state("codex", &codex_space), BoxState::NonEmpty, "marker 後多打一格");
+        // agy：真的打字（包含多打字、加字在 placeholder 後面）就是非空，草稿能如實讀出。
+        let agy_typed = AGY_IDLE_SPLASH_AUTO.replace(
+            "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+            "> test draft from user",
+        );
+        assert_eq!(box_state("agy", &agy_typed), BoxState::NonEmpty);
+        assert_eq!(composer_text("agy", &agy_typed).as_deref(), Some("test draft from user"));
+        assert_eq!(composer_text_whole("agy", &agy_typed).as_deref(), Some("test draft from user"));
+
+        let agy_typed_extra = AGY_IDLE_SPLASH_AUTO.replace(
+            "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+            "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle) extra",
+        );
+        assert_eq!(box_state("agy", &agy_typed_extra), BoxState::NonEmpty);
+        assert_eq!(
+            composer_text("agy", &agy_typed_extra).as_deref(),
+            Some("Auto mode: edits & safe commands auto-approved (shift+tab to cycle) extra")
+        );
+
+        let agy_typed_ansi = "\
+───────────────────────────────────────────────────────────────────────────────────────────────────────\r
+\u{1b}[0m\u{1b}[38;5;12m> \u{1b}[0mtest draft from user\r
+───────────────────────────────────────────────────────────────────────────────────────────────────────\r
+                                                                                \u{1b}[0m\u{1b}[2mGemini 3.8 Flash · high\u{1b}[0m";
+        assert_eq!(box_state("agy", agy_typed_ansi), BoxState::NonEmpty);
+        assert_eq!(composer_text("agy", agy_typed_ansi).as_deref(), Some("test draft from user"));
     }
 
     #[test]
