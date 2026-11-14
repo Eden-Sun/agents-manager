@@ -13,6 +13,10 @@ use std::time::Duration;
 
 /// `Ok(false)` = grok is not installed there (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
+    // kind 停用（使用者 2026-11-14：grok 不訂閱）：不探測。
+    if crate::identity_prefs::kind_disabled(&app.db, host, "grok").await {
+        return Ok(false);
+    }
     let _guard = crate::quota::probe_lock(host).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let cwd = crate::hosts::home_for_fence(&fence).await?;

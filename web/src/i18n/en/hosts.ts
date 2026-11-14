@@ -2,6 +2,9 @@ import type { Dict } from '../../lib/i18n/types'
 
 // 區塊：hosts（額度、身份、主機、登入、Jev／監督面板）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
+  'CLI 種類（本機）': 'CLI kinds (local)',
+  '沒有訂閱的種類就停用：新 Bot 不再挑它，額度也不再探測；已經在跑的 Bot 不受影響，但重啟會被擋下。': 'Disable a kind you do not subscribe to: new bots stop picking it and its quota is no longer probed. Running bots are not affected, but restarts are refused.',
+  '已停用': 'Disabled',
   // lib/supervisorLabels.ts（AGM 面板標籤）
   '待送出': 'Queued',
   '已送達': 'Delivered',
@@ -548,8 +551,8 @@ export default {
   '目前有 {n} 顆 Bot 用這個身份': { one: '{n} bot is using this identity', other: '{n} bots are using this identity' },
   '：正在跑的不受影響，但之後重新啟動會停在登入畫面。': ': bots already running are not affected, but after a restart they will stop at the sign-in screen.',
   '重新啟用：{name} 會再出現在{host}的身份選單裡': 'Re-enable: {name} will appear again in the identity menu on {host}',
-  '標為停用：{name} 不再出現在{host}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響': 'Disable: {name} no longer appears in the identity menu or auto-selection on {host}; bots already using it are not affected',
   '停用': 'Disable',
+  '標為停用：{name} 不再出現在{host}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響': 'Disable: {name} no longer appears in the identity menu or auto-selection on {host}; bots already using it are not affected',
   '{name} 已停用：挑身份時不會出現，已經在用它的 Bot 不受影響': '{name} is disabled: it will not appear when picking an identity; bots already using it are not affected',
   '{n} 個 Bot': { one: '{n} bot', other: '{n} bots' },
   '未使用': 'Unused',

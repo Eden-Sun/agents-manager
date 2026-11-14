@@ -337,6 +337,22 @@ export async function fetchDisabledIdentities(): Promise<string[]> {
     .map((r) => identityPrefKey(str(pick(r, 'host')), str(pick(r, 'kind')), str(pick(r, 'identity'))))
 }
 
+/** 停用中的 kind（`host|kind`）。kind 停用＝那台主機不挑、不派、不啟動、不探測這個 kind。 */
+export async function fetchDisabledKinds(): Promise<string[]> {
+  const raw = await transport.request('GET', '/kind-prefs')
+  const rows = isRec(raw) ? pick(raw, 'disabled') : null
+  if (!Array.isArray(rows)) return []
+  return rows.filter(isRec).map((r) => kindPrefKey(str(pick(r, 'host')), str(pick(r, 'kind'))))
+}
+
+export function kindPrefKey(host: string, kind: string): string {
+  return `${host || 'local'}|${kind}`
+}
+
+export async function setKindDisabled(host: string, kind: string, disabled: boolean): Promise<void> {
+  await transport.request('PUT', `/kinds/${encodeURIComponent(kind)}/disabled`, { host: host || 'local', disabled })
+}
+
 export async function setIdentityDisabled(host: string, kind: string, name: string, disabled: boolean): Promise<void> {
   await transport.request('PUT', `/identities/${encodeURIComponent(name)}/disabled`, {
     kind,

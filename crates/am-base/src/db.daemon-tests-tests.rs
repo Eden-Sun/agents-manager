@@ -1399,6 +1399,8 @@
     /// 試跑（v86）之前的排程表：去掉 `schedule_dry_run_requests`，`source` 的 CHECK 還原成沒有 'dry_run'。
     async fn drop_dry_run_schema(conn: &mut sqlx::SqliteConnection) {
         sqlx::query("DROP TABLE schedule_dry_run_requests").execute(&mut *conn).await.unwrap();
+        // kind 啟用開關（v93）是之後才加的表，舊版 fixture 不該有它。
+        sqlx::query("DROP TABLE IF EXISTS kind_prefs").execute(&mut *conn).await.unwrap();
         let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='schedule_occurrences'").fetch_one(&mut *conn).await.unwrap();
         let old = sql.replace("CHECK (source IN ('scheduled','manual','dry_run'))", "CHECK (source IN ('scheduled','manual'))");
         assert_ne!(sql, old);

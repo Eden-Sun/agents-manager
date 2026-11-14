@@ -416,6 +416,9 @@ export interface StoreState {
   localIdentityStatus: IdentityStatusMap
   /** 被標為停用的身份，鍵是 `api.identityPrefKey(host, kind, name)`（daemon 端的設定，不是瀏覽器記的）。 */
   disabledIdentities: string[]
+  /** 停用中的 kind（`api.kindPrefKey`）。 */
+  disabledKinds: string[]
+  setKindDisabled: (host: string, kind: string, disabled: boolean) => Promise<void>
   /** SPEC §15；null = 還沒讀到。 */
   mem: MemSnapshot | null
   /** key = kind or `kind:identity`. */
@@ -946,6 +949,7 @@ export const useStore = create<StoreState>((set, get) => {
   hostBaselineSync: {},
   localIdentityStatus: {},
   disabledIdentities: [],
+  disabledKinds: [],
   quota: {},
   mem: null,
   models: {},
@@ -2553,12 +2557,23 @@ export const useStore = create<StoreState>((set, get) => {
         if (seq !== identityPrefsLoadSeq) return
         if (epoch !== identityPrefsEpoch) continue
         set({ disabledIdentities: list })
+        api.fetchDisabledKinds().then((kinds) => set({ disabledKinds: kinds })).catch(() => {})
       } catch {
         // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。下一次快照刷新再問一次。
         if (seq === identityPrefsLoadSeq) identityPrefsAsked = false
       }
       return
     }
+  },
+
+  async setKindDisabled(host, kind, disabled) {
+    const key = api.kindPrefKey(host, kind)
+    await guarded(set, get, `kind-disabled:${key}`, async () => {
+      await api.setKindDisabled(host, kind, disabled)
+      set((s) => ({
+        disabledKinds: disabled ? (s.disabledKinds.includes(key) ? s.disabledKinds : [...s.disabledKinds, key]) : s.disabledKinds.filter((k) => k !== key),
+      }))
+    })
   },
 
   async setIdentityDisabled(host, kind, name, disabled) {
@@ -3152,6 +3167,15 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'herdr_integration_auto_install': {
       const n = autoInstallNotice(data)
       if (n) get().notify(n.kind, n.text)
+      return
+    }
+    case 'kind_prefs_changed': {
+      if (!isRec(data)) return
+      const key = api.kindPrefKey(str(pick(data, 'host')), str(pick(data, 'kind')))
+      const on = bool(pick(data, 'disabled'), false)
+      set((s) => ({
+        disabledKinds: on ? (s.disabledKinds.includes(key) ? s.disabledKinds : [...s.disabledKinds, key]) : s.disabledKinds.filter((k) => k !== key),
+      }))
       return
     }
     case 'identity_prefs_changed': {
@@ -3999,6 +4023,10 @@ export function quotaClaimants(state: StoreState, host: string): Identity[] {
 }
 
 /** 這個身份在這台主機上被停用了嗎（停用是 host＋kind＋name 一組）。 */
+export function kindDisabled(state: StoreState, host: string, kind: string): boolean {
+  return state.disabledKinds.includes(api.kindPrefKey(host, kind))
+}
+
 export function identityDisabled(state: StoreState, host: string, kind: string, name: string): boolean {
   return state.disabledIdentities.includes(api.identityPrefKey(host, kind, name))
 }

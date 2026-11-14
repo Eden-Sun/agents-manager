@@ -417,6 +417,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | PUT | `/api/identities/{name}/disabled` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| GET | `/api/kind-prefs` | User 或 Bot principal；回 `{disabled:[{host,kind}]}`，kind 停用（kind × host）。 |
+| HEAD | `/api/kind-prefs` | User 或 Bot principal；同 GET |
+| PUT | `/api/kinds/{kind}/disabled` | User-only；Bot 與 AGM role 均 → 403 `user_only`。body `{host?, disabled}`，kind 只收 claude／codex／grok／agy（`claude-api` 不在此）。停用後：`POST /api/projects/{id}/bots` 回 409 `kind_disabled`；`start`（含重啟、resume、派工觸發的啟動）回 409 `kind_disabled`，已在跑的 Run 不殺；grok 額度不再探測。回 `{host,kind,disabled}` 並推 `kind_prefs_changed`。 |
 | PUT | `/api/judge/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/claude-api/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/supervisor/handoff` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -1056,6 +1059,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `upstream_update` | 上游有新版的快照有變或要通知：上游一筆 item ＋ `notify`；見「上游有新版可裝」 |
 | `identities_changed` | `{}`：帳號身份（identities）有變，重拉 state（「身份 identities」一節） |
 | `identity_prefs_changed` | `{"host","kind","identity","disabled"}`：某個身份被停用／恢復（`PUT /api/identities/{name}/disabled`） |
+| `kind_prefs_changed` | `{"host","kind","disabled"}`：某個 CLI 種類在某台主機被停用／啟用（`PUT /api/kinds/{kind}/disabled`） |
 | `hook_fenced` | `{"bot_id","provider","run_id","prior_run_id","session_id","why"}`：上一代 run 的 hook 被世代圍籬丟棄（不改任何狀態，SPEC §4.1）；純診斷，前端可忽略 |
 | `resync` | 見上面：補不齊或 seq 倒退時送，收到就重拉 state 與訊息 |
 

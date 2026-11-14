@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useT } from '../lib/i18n'
 import { identityDisabled, useStore } from '../store/store'
+import * as api from '../api'
 import { DEFAULT_ACCOUNT, defaultAccountUseCount, findIdentity, hostLabel, identityHost, identityRowKey, identityUseCount, shadowedByConfig } from '../store/identityRows'
 import { loginKindOnHost } from '../lib/onboardingActions'
 import { BOT_KINDS } from '../api/types'
@@ -604,11 +605,45 @@ function DefaultAccounts() {
   )
 }
 
+const SWITCHABLE_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
+
+/** kind 啟用開關（本機）：停用＝不挑、不派、不啟動、不探測；已經在跑的 Bot 不殺。 */
+function KindSwitches() {
+  const t = useT()
+  const disabledKinds = useStore((s) => s.disabledKinds)
+  const setKindDisabled = useStore((s) => s.setKindDisabled)
+  const busy = useStore((s) => Object.keys(s.busy).some((k) => k.startsWith('kind-disabled:')))
+  return (
+    <div className="identity-section">
+      <h3 className="identity-section-title">{t('CLI 種類（本機）')}</h3>
+      <p className="hint">{t('沒有訂閱的種類就停用：新 Bot 不再挑它，額度也不再探測；已經在跑的 Bot 不受影響，但重啟會被擋下。')}</p>
+      {SWITCHABLE_KINDS.map((kind) => {
+        const off = disabledKinds.includes(api.kindPrefKey('local', kind))
+        return (
+          <div key={kind} className="identity-row">
+            <KindTag kind={kind} />
+            {off ? <span className="identity-disabled-chip">{t('已停用')}</span> : null}
+            <button
+              type="button"
+              className={`mini-btn identity-login-btn${off ? ' is-off' : ''}`}
+              disabled={busy}
+              onClick={() => void setKindDisabled('local', kind, !off)}
+            >
+              {off ? t('啟用') : t('停用')}
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function IdentitiesPanel() {
   const t = useT()
   const identities = useStore((s) => s.identities)
   return (
     <div className="hosts-panel identities-panel">
+      <KindSwitches />
       <div className="identity-section">
         <h3 className="identity-section-title">{t('自訂身份')}</h3>
         {identities.length === 0 ? <p className="hint">{t('尚未定義任何身份。')}</p> : null}

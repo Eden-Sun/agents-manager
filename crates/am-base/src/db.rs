@@ -645,6 +645,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (91, "f6d42636bb336366"),
     // 排程總花費時間（2026-11-09）：`schedule_occurrences.first_started_at`／`attempt_started_at`、`schedule_attempts.started_at`（ALTER ADD）。
     (92, "e31b0a1f55e8ed41"),
+    // kind 啟用開關（2026-11-14）：`kind_prefs`（CREATE TABLE IF NOT EXISTS，identity_prefs 的 migrate 裡建）。
+    (93, "7f4b8aaaa990df4d"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

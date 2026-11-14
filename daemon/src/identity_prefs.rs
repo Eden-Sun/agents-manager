@@ -24,6 +24,18 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(&mut *tx)
     .await?;
+    // kind × host 啟用開關（使用者 2026-11-14：grok 不訂閱）。停用＝不挑、不派、不啟動、不探測。
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS kind_prefs (
+          host TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          disabled INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (host, kind)
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DROP TABLE IF EXISTS mission_events")
         .execute(&mut *tx)
         .await?;
@@ -111,6 +123,66 @@ pub async fn get_identity_prefs(State(app): State<Arc<App>>) -> Result<Json<Valu
     Ok(Json(
         json!({"disabled": rows.iter().map(|(h, k, i)| json!({"host": h, "kind": k, "identity": i})).collect::<Vec<_>>()}),
     ))
+}
+
+
+/// `kind` 在 `host` 上是否被停用（沒有列＝啟用）。讀失敗當作啟用，由呼叫端自己決定要不要擋。
+pub async fn kind_disabled(pool: &SqlitePool, host: &str, kind: &str) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT disabled FROM kind_prefs WHERE host=? AND kind=?")
+        .bind(host)
+        .bind(kind)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        != 0
+}
+
+#[derive(Deserialize)]
+pub struct KindDisableIn {
+    host: Option<String>,
+    disabled: bool,
+}
+
+/// `GET /api/kind-prefs`：停用中的 `{host, kind}`。
+pub async fn get_kind_prefs(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT host, kind FROM kind_prefs WHERE disabled = 1 ORDER BY host, kind")
+        .fetch_all(&app.db)
+        .await
+        .map_err(up)?;
+    Ok(Json(json!({"disabled": rows.iter().map(|(h, k)| json!({"host": h, "kind": k})).collect::<Vec<_>>()})))
+}
+
+/// `PUT /api/kinds/{kind}/disabled {host?, disabled}`：停用／啟用一個 kind 在某台主機上。跑著的 bot 不殺。
+pub async fn put_kind_disabled(
+    State(app): State<Arc<App>>,
+    Path(kind): Path<String>,
+    Json(b): Json<KindDisableIn>,
+) -> Result<Json<Value>, LcError> {
+    if !crate::config::valid_bot_kind(&kind) || kind == crate::config::API_BOT_KIND {
+        return Err(LcError::Bad("kind must be claude | codex | grok | agy".into()));
+    }
+    let host = b
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or(crate::config::LOCAL_HOST)
+        .to_string();
+    sqlx::query(
+        "INSERT INTO kind_prefs (host, kind, disabled, updated_at) VALUES (?,?,?,?)
+         ON CONFLICT(host, kind) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at",
+    )
+    .bind(&host)
+    .bind(&kind)
+    .bind(b.disabled as i64)
+    .bind(crate::db::now())
+    .execute(&app.db)
+    .await
+    .map_err(up)?;
+    app.emit("kind_prefs_changed", json!({"host": host, "kind": kind, "disabled": b.disabled})).await;
+    Ok(Json(json!({"host": host, "kind": kind, "disabled": b.disabled})))
 }
 
 #[cfg(test)]
@@ -221,5 +293,22 @@ mod tests {
                 "{name} must be disabled on local: {rows:?}"
             );
         }
+    }
+
+    /// kind 停用是 kind × host：停用 grok@local 不影響 grok@m4p，且 API 只收合法 kind。
+    #[tokio::test]
+    async fn kind_disable_is_per_host_and_rejects_bad_kinds() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(_) = put_kind_disabled(State(app.clone()), Path("grok".into()), Json(KindDisableIn { host: Some("local".into()), disabled: true })).await.unwrap();
+        assert!(kind_disabled(&app.db, "local", "grok").await);
+        assert!(!kind_disabled(&app.db, "m4p", "grok").await);
+        assert!(!kind_disabled(&app.db, "local", "codex").await);
+        let Json(prefs) = get_kind_prefs(State(app.clone())).await.unwrap();
+        assert_eq!(prefs["disabled"].as_array().unwrap().len(), 1);
+        let Json(_) = put_kind_disabled(State(app.clone()), Path("grok".into()), Json(KindDisableIn { host: None, disabled: false })).await.unwrap();
+        assert!(!kind_disabled(&app.db, "local", "grok").await);
+        assert!(put_kind_disabled(State(app.clone()), Path("claude-api".into()), Json(KindDisableIn { host: None, disabled: true })).await.is_err());
+        assert!(put_kind_disabled(State(app.clone()), Path("nope".into()), Json(KindDisableIn { host: None, disabled: true })).await.is_err());
     }
 }

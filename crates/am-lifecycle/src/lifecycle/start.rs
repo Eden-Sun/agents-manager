@@ -170,6 +170,25 @@ pub async fn start_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String
 
 pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
+    // kind 在這台主機被停用（使用者 2026-11-14）：不啟動；已經在跑的不殺，這裡只擋新的啟動。
+    let host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
+        .bind(bot_id)
+        .fetch_optional(app.db())
+        .await
+        .ok()
+        .flatten();
+    if let Some(host) = host {
+        let disabled: Option<i64> = sqlx::query_scalar("SELECT disabled FROM kind_prefs WHERE host=? AND kind=?")
+            .bind(&host)
+            .bind(&kind)
+            .fetch_optional(app.db())
+            .await
+            .ok()
+            .flatten();
+        if disabled.unwrap_or(0) != 0 {
+            return Err(LcError::conflict("kind_disabled", json!({"reason": "kind_disabled", "host": host, "kind": kind})));
+        }
+    }
     if kind == "claude-api" {
         if opts.fork_session.is_some() || opts.fork_source_bot.is_some() || opts.resume_session.is_some() || opts.require_idle || opts.refuse_background_jobs {
             return Err(LcError::Upstream("api_native_start_unconfirmed".into()));

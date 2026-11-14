@@ -199,6 +199,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/panes", get(crate::runners::panes::list_all))
         .route("/identity-prefs", get(crate::identity_prefs::get_identity_prefs))
         .route("/identities/{name}/disabled", axum::routing::put(crate::identity_prefs::put_identity_disabled))
+        .route("/kind-prefs", get(crate::identity_prefs::get_kind_prefs))
+        .route("/kinds/{kind}/disabled", axum::routing::put(crate::identity_prefs::put_kind_disabled))
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/submodules", get(get_submodules))
         .route("/projects/{id}/git", get(get_git))
@@ -956,6 +958,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/identities", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/identities/{name}", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/kinds/{kind}/disabled", BotRoutePolicy::UserOnly),
     ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/quota/reset-credit/use", BotRoutePolicy::UserOnly),
     ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
@@ -2516,6 +2519,9 @@ async fn create_bot(
         .map_err(any_err)?
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    if crate::identity_prefs::kind_disabled(&app.db, &host, &b.kind).await {
+        return Err(LcError::conflict("kind_disabled", json!({"reason": "kind_disabled", "host": host, "kind": b.kind})));
+    }
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
     // 分享用 bot：專案在本機，或設定裡有這台主機（不認得＝409 `unsupported_host`）。
     let host_known = host == crate::config::LOCAL_HOST || app.hosts.get(&host).await.is_some();

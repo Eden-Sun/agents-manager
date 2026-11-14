@@ -4453,6 +4453,9 @@ agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-to
 - **預設帳號登出的收尾**：pane 的 CLI 結束後 daemon 重做一次那台主機的偵測，`tools.<kind>.logged_in` 才會跟著變。
 - **「隱藏」的作用範圍**：額度條（`QuotaStrip` 不列該 kind 的預設帳號那格）與設定頁。沒做：Bot 設定／新增 Bot 的「不指定身份」選項仍可選（標示該 kind 預設帳號的選項不會被偷偷拿掉，避免 bot 靜默換帳號）；自動挑選（claude `ccN`）本來就只看停用的具名身份。
 
+### 16.3c kind 啟用開關（使用者 2026-11-14：grok 不訂閱）
+kind × host 一格：`kind_prefs` 表（`identity_prefs` 同一個 migration）。停用後不挑、不派、不啟動、不探測；已在跑的 Bot 不殺，重啟與 resume 擋下並回 409 `kind_disabled`。網頁在身份頁的「CLI 種類（本機）」切換。還沒做：新增 Bot 的 kind 選單與自動挑選不隱藏該 kind（目前靠 409 擋），狀態列與總計額度不隱藏，停用後標「kind 已停用」徽章。
+
 ### 16.5 alias 定期重讀
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
 還沒做過第一次偵測的主機不在此列。
