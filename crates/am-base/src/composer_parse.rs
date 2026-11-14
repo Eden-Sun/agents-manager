@@ -601,3 +601,65 @@ mod composer_draft_shape_tests {
         assert_eq!(composer_text_whole("claude", screen).as_deref(), Some("call me at  10:30 PM"));
     }
 }
+
+#[cfg(test)]
+mod agy_placeholder_tests {
+    use super::*;
+
+    const RULE: &str = "────────────────────────────────────────";
+    /// agy 1.5.9 真機（tmux 讀出的 ANSI，2026-11-14）：輸入列、上下分隔線與頁尾。
+    /// `placeholder` 是 `>` 後面的內容（原樣含 SGR）。
+    fn real(placeholder: &str, footer_right: &str) -> String {
+        format!(
+            "      \u{1b}[38;5;75m▄▀▀▄\u{1b}[39m        Antigravity CLI 1.5.9\n\u{1b}[90m{RULE}\u{1b}[39m\n\u{1b}[94m>\u{1b}[39m{placeholder}\n\u{1b}[90m{RULE}\u{1b}[39m\n\u{1b}[90m? for shortcuts\u{1b}[39m    {footer_right}\n"
+        )
+    }
+
+    /// herdr 讀同一個畫面時把亮黑（SGR 90）標準化成 `38;5;8`（頁尾與分隔線在真機讀出來就是這個樣子）。
+    fn real_herdr(placeholder: &str) -> String {
+        format!(
+            "      Antigravity CLI 1.5.9\n\u{1b}[0m\u{1b}[38;5;8m{RULE}\u{1b}[0m\n\u{1b}[0m\u{1b}[38;5;12m>\u{1b}[0m{placeholder}\n\u{1b}[0m\u{1b}[38;5;8m{RULE}\u{1b}[0m\n\u{1b}[0m\u{1b}[38;5;8m? for shortcuts\u{1b}[0m\n"
+        )
+    }
+
+    /// 2026-11-14 m4p：agy child 在非預設模式下啟動，輸入列的佔位字是「Auto mode: …」，被當成草稿回了 409 `composer_busy`。
+    #[test]
+    fn the_real_mode_placeholders_are_empty_on_a_styled_read() {
+        for text in [
+            "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+            "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+            "Plan mode: research & plan only (shift+tab to cycle)",
+        ] {
+            let sgr90 = real(&format!(" \u{1b}[90m{text}\u{1b}[39m"), "\u{1b}[32maccept-edits\u{1b}[39m · Gemini 3.8 Flash · high");
+            assert_eq!(box_state("agy", &sgr90), BoxState::Empty, "SGR 90：{text}");
+            let herdr = real_herdr(&format!(" \u{1b}[38;5;8m{text}\u{1b}[0m"));
+            assert_eq!(box_state("agy", &herdr), BoxState::Empty, "38;5;8：{text}");
+        }
+    }
+
+    #[test]
+    fn the_idle_screen_and_a_typed_prompt_are_unchanged() {
+        assert_eq!(box_state("agy", &real("", "Gemini 3.8 Flash · high")), BoxState::Empty);
+        assert_eq!(box_state("agy", &real(" hello world", "Gemini 3.8 Flash · high")), BoxState::NonEmpty, "打的字是預設前景色");
+        assert_eq!(box_state("agy", &real_herdr(" hello world")), BoxState::NonEmpty);
+        // 使用者真的打了字、又在非預設模式：灰的佔位字不見了，剩下打的字。
+        assert_eq!(box_state("agy", &real(" x", "\u{1b}[32maccept-edits\u{1b}[39m · Gemini 3.8 Flash · high")), BoxState::NonEmpty);
+    }
+
+    /// 灰字只放過佔位字：打的字旁邊還有灰字（混著）仍然是有字；其他 kind 的灰字不受影響。
+    #[test]
+    fn typed_text_next_to_gray_text_still_counts_and_other_kinds_are_unchanged() {
+        let mixed = real(" typed \u{1b}[90mgray\u{1b}[39m", "");
+        assert_eq!(box_state("agy", &mixed), BoxState::NonEmpty);
+        let claude = format!("\u{1b}[90m{RULE}\u{1b}[39m\n❯ \u{1b}[90mAuto mode text\u{1b}[39m\n\u{1b}[90m{RULE}\u{1b}[39m\n");
+        assert_eq!(box_state("claude", &claude), BoxState::NonEmpty, "claude 的灰字不當提示（它的提示是 dim）");
+    }
+
+    #[test]
+    fn plain_without_hints_drops_the_agy_placeholder_row_text() {
+        let s = real(" \u{1b}[90mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[39m", "");
+        let plain = plain_without_hints("agy", &s);
+        assert!(!plain.contains("Auto mode"), "{plain}");
+        assert!(plain.contains(">"), "{plain}");
+    }
+}

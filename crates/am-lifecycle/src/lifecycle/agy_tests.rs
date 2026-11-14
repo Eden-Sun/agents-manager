@@ -254,6 +254,19 @@ mod delivery_and_screen {
         assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
     }
 
+    /// 2026-11-14 m4p：agy 在非預設模式下，輸入列的佔位字是灰色（亮黑 SGR 90／herdr 讀成 38;5;8，不是 dim）的
+    /// 「Auto mode: … (shift+tab to cycle)」。以前被當成草稿，派工一律 409 `composer_busy`。打的字是預設前景色，照擋。
+    #[test]
+    fn a_gray_mode_placeholder_in_the_agy_composer_is_empty_but_typed_text_is_not() {
+        let mode = "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+        for gray in ["\u{1b}[90m", "\u{1b}[38;5;8m"] {
+            let row = ["\u{1b}[94m>\u{1b}[39m ", gray, mode, "\u{1b}[39m"].concat();
+            assert_eq!(box_state("agy", &screen(&row)), BoxState::Empty, "{gray:?}");
+        }
+        let typed = screen("\u{1b}[94m>\u{1b}[39m write the report");
+        assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
+    }
+
     #[test]
     fn agy_trust_dialog_is_unready_in_box_state() {
         let plain = "Accessing workspace:\n/home/user/project\n\nDo you trust the contents of this project?\n\n> Yes, I trust this folder\n  No, exit\n";
