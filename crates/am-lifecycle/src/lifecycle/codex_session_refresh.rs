@@ -7,14 +7,43 @@ pub(super) async fn refresh(app: &impl LcHost, run: &db::Run, bot: &db::Bot, tur
     if bot.kind != "codex" || run.native_session_id.is_some() {
         return None;
     }
-    let result = refresh_inner(app, run, turn).await;
+    let result = refresh_inner(app, run, Some(turn)).await;
     let reason = match &result { Ok(Some(_)) => "bound", Ok(None) => "not_proven", Err(_) => "read_or_write_failed" };
     let basis = if matches!(&result, Ok(Some(_))) { "same_host_session_pane_terminal" } else { "not_proven" };
     tracing::info!(run = %run.id, turn, adopted = run.adopted, reason, basis, "codex native session refresh");
     result.ok().flatten()
 }
 
-async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: &str) -> anyhow::Result<Option<db::Run>> {
+/// 兩次補綁嘗試之間至少隔這麼久（每 run）；成功、沒證據、失敗都算一次，遠端主機不會被每輪巡邏打 ssh。
+const IDLE_BIND_EVERY: Duration = Duration::from_secs(30);
+
+fn idle_bind_due(run_id: &str, now: std::time::Instant) -> bool {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+    let mut m = LAST.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if m.get(run_id).is_some_and(|at| now.duration_since(*at) < IDLE_BIND_EVERY) {
+        return false;
+    }
+    if m.len() > 512 {
+        m.retain(|_, at| now.duration_since(*at) < IDLE_BIND_EVERY);
+    }
+    m.insert(run_id.to_string(), now);
+    true
+}
+
+/// 沒有回合也補綁：run 的 `native_session_id` 還是 NULL 時問 herdr 這個 pane 的 `agent_session`（讀 rollout 的 context 用量要靠它）。
+/// 保護規則與回合路徑完全相同（同主機 fence、pane＋terminal＋herdr_session＋host＋generation 都對得上才寫，沒有同 bot 的別的 active run）；
+/// 只少了「有在途回合」這一條。比對不到就不綁。每 run 至少隔 [`IDLE_BIND_EVERY`] 才嘗試，單次查詢 5 秒逾時。
+pub(super) async fn refresh_idle(app: &impl LcHost, run: &db::Run) -> Option<db::Run> {
+    if run.native_session_id.is_some() || !matches!(run.state.as_str(), "starting" | "running") || !idle_bind_due(&run.id, std::time::Instant::now()) {
+        return None;
+    }
+    let result = refresh_inner(app, run, None).await;
+    let reason = match &result { Ok(Some(_)) => "bound", Ok(None) => "not_proven", Err(_) => "read_or_write_failed" };
+    tracing::info!(run = %run.id, reason, "codex native session idle bind");
+    result.ok().flatten()
+}
+
+async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: Option<&str>) -> anyhow::Result<Option<db::Run>> {
     let Some(pane) = run.pane_id.as_deref().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
     let Some(session) = run.herdr_session.as_deref().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
     let Some(terminal) = run.terminal_id.as_deref().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
@@ -41,11 +70,11 @@ async fn refresh_inner(app: &impl LcHost, run: &db::Run, turn: &str) -> anyhow::
              AND pane_id=? AND herdr_session=? AND terminal_id=? AND host IS ? AND host_generation IS ?
              AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id
                         WHERE b.id=runs.bot_id AND b.kind='codex' AND b.deleted_at IS NULL AND p.host=?)
-             AND EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id AND t.status='in_flight' AND t.delivery='ok')
+             AND (? IS NULL OR EXISTS(SELECT 1 FROM turns t WHERE t.id=? AND t.run_id=runs.id AND t.status='in_flight' AND t.delivery='ok'))
              AND NOT EXISTS(SELECT 1 FROM runs other WHERE other.bot_id=runs.bot_id AND other.id<>runs.id
                             AND other.state IN ('starting','running','stopping') AND other.ended_at IS NULL)"
         ).bind(&native).bind(&run.id).bind(&run.bot_id).bind(run.adopted).bind(pane).bind(session).bind(terminal)
-            .bind(&host).bind(generation).bind(&client.fence.conn().name).bind(turn)
+            .bind(&host).bind(generation).bind(&client.fence.conn().name).bind(turn).bind(turn)
             .execute(app.db()).await?.rows_affected();
         if changed != 1 { return Ok(None) }
         db::run(app.db(), &run.id).await
@@ -233,4 +262,42 @@ mod tests {
         }
     }
 
+
+    async fn native_of(env: &tt::Env, run: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(run).fetch_one(&env.app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn idle_bind_without_turn_binds_remote_and_local() {
+        for remote in [false, true] {
+            let (env, run, _turn, _m) = fixture(remote).await;
+            sqlx::query("DELETE FROM turns WHERE run_id=?").bind(&run).execute(&env.app.db).await.unwrap();
+            let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
+            let bound = super::refresh_idle(&env.app, &r).await.expect("bound without in-flight turn");
+            assert_eq!(bound.native_session_id.as_deref(), Some(SESSION));
+            assert_eq!(native_of(&env, &run).await.as_deref(), Some(SESSION));
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_bind_refuses_when_terminal_or_pane_does_not_match() {
+        let (env, run, _turn, _m) = fixture(false).await;
+        sqlx::query("UPDATE runs SET terminal_id='some-other-terminal' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert!(super::refresh_idle(&env.app, &r).await.is_none());
+        assert_eq!(native_of(&env, &run).await, None, "terminal mismatch must not bind");
+    }
+
+    #[tokio::test]
+    async fn idle_bind_is_throttled_per_run() {
+        let (env, run, _turn, _m) = fixture(false).await;
+        sqlx::query("UPDATE runs SET terminal_id='some-other-terminal' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+        let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert!(super::refresh_idle(&env.app, &r).await.is_none());
+        // 證據補齊後馬上再試：還在節流窗內，不打 herdr。
+        sqlx::query("UPDATE runs SET terminal_id=? WHERE id=?").bind(TERMINAL).bind(&run).execute(&env.app.db).await.unwrap();
+        let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert!(super::refresh_idle(&env.app, &r).await.is_none());
+        assert_eq!(native_of(&env, &run).await, None);
+    }
 }

@@ -38,6 +38,11 @@ pub async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyhow::Resu
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 
+/// codex run 還沒綁 native session 時（沒有回合也一樣）向 herdr 補綁；綁到回新的 run，沒綁到／節流中回 `None`。
+pub async fn bind_codex_session_if_missing(app: &impl LcHost, run: &db::Run) -> Option<db::Run> {
+    codex_session_refresh::refresh_idle(app, run).await
+}
+
 
 /// Unchanged polls at an empty composer before we complete the Turn ourselves (~14s; a slow hook still wins).
 pub const IDLE_POLLS: u32 = 20;
