@@ -532,6 +532,7 @@ pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str
         "pending_unknown" => "上一次請求的送達與計費無法確認，為了避免重複計費已停止；請退役這個對話後再試。".into(),
         "journal" => "對話狀態無法寫入，已停止。".into(),
         "invalid_response" | "api_invalid_response" => "收到無法驗證的回應（用量或內容不合規則），已停止。".into(),
+        "user_interrupted" => "使用者強制中斷（這一回合已停止送出 API 請求）。".into(),
         "api_rate_limited" => "Anthropic API 回報請求過於頻繁（429）。".into(),
         "api_timeout" => "Anthropic API 請求逾時。".into(),
         "api_transport_unknown" => "與 Anthropic API 的連線中斷，無法確認請求是否送達。".into(),

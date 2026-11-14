@@ -1002,8 +1002,14 @@ function Composer({
             </button>
           ) : null}
           {state.inFlightTurnId ? (
-            <button type="button" className="mini-btn" title={t('送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動')} onClick={() => void interruptBot(botId)}>
-              {t('ESC 中斷')}
+            // claude-api 沒有終端可按 Esc：這一鍵直接取消正在進行的 API 請求（daemon 立刻停止串流、不再計費增加），Bot 仍保持啟動。
+            <button
+              type="button"
+              className="mini-btn"
+              title={botKind === 'claude-api' ? t('立刻中止進行中的 API 請求並結束這一回合（不再繼續花費），Bot 仍保持啟動') : t('送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動')}
+              onClick={() => void interruptBot(botId)}
+            >
+              {botKind === 'claude-api' ? t('強制中斷') : t('ESC 中斷')}
             </button>
           ) : null}
           {state.inFlightTurnId && pending.trim() && (isClaude || sendNowSupported) && sendNowButton(botKind, pending) ? (

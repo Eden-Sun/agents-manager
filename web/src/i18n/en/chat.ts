@@ -271,6 +271,8 @@ export default {
   '放棄該回合': 'Abandon turn',
   '送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動': 'Send Esc to interrupt the current reply. The Bot will stay running.',
   'ESC 中斷': 'Interrupt with Esc',
+  '強制中斷': 'Force interrupt',
+  '立刻中止進行中的 API 請求並結束這一回合（不再繼續花費），Bot 仍保持啟動': 'Stops the in-flight API request immediately and ends this turn (no further spend); the bot stays running',
   '補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。': 'Add a note to the current turn without starting a new one. It is typed into the terminal while the Bot is working, saved in the conversation as a supplement, and included in the current reply.',
   '補充': 'Supplement',
   '送出排隊的補充': 'Send queued note now',

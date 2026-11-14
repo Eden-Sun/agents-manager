@@ -88,6 +88,9 @@ pub trait ApiBotPort: Send + Sync {
         &self,
         key: &ApiTurnKey,
     ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send;
+    /// 強制中斷這一筆 in-flight 的 API 回合，不停 run：取消 runner、等它 join、等失敗結算落地。
+    /// 這一筆已不在飛（或不是 running run 上的 in_flight）→ `IdentityMismatch`。
+    fn api_turn_interrupt(&self, _key: &ApiTurnKey) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send { async { Err(ApiBotError::Upstream) } }
     fn api_run_stop_proof(
         &self,
         key: &ApiRunKey,

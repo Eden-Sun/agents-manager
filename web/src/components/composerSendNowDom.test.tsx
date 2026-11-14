@@ -40,3 +40,23 @@ for (const [name, kind, supported, label] of [
     }
   })
 }
+
+test('claude-api 的中斷鈕寫「強制中斷」，tooltip 說明會立刻中止 API 請求；其他 kind 維持「ESC 中斷」', async () => {
+  for (const [kind, label, tip] of [['claude-api', '強制中斷', /API 請求/], ['claude', 'ESC 中斷', /Esc/]] as const) {
+    fakeApi(() => undefined)
+    useStore.setState({
+      connected: true, defaultConnected: true, selectedBotId: 'bi1',
+      bots: [{ id: 'bi1', name: 'bi', kind, project_id: 'pi1', herdr_session: 'default' }],
+      projects: [{ id: 'pi1', path: '/tmp/interrupt', host: 'local' }],
+      runs: { bi1: toRun({ id: 'ri1', bot_id: 'bi1', state: 'running', agent_status: 'working' }) },
+      turns: { bi1: { ti1: { id: 'ti1', run_id: 'ri1', status: 'in_flight', delivery: 'ok' } } },
+      drafts: {}, messages: { bi1: [] },
+    } as never)
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+    const btn = [...document.querySelectorAll<HTMLButtonElement>('.composer-lock button')].find((b) => b.textContent === label)
+    assert.ok(btn, `${kind} 應顯示「${label}」`)
+    assert.match(btn!.title, tip)
+    await unmountAll()
+    resetStoreForTest()
+  }
+})

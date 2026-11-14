@@ -1396,6 +1396,13 @@ mod arc_port_api_bot {
             <T as ApiBotPort>::api_run_cancel_and_join(self.as_ref(), key)
         }
 
+        fn api_turn_interrupt(
+            &self,
+            key: &ApiTurnKey,
+        ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send {
+            <T as ApiBotPort>::api_turn_interrupt(self.as_ref(), key)
+        }
+
         fn api_run_stop_proof(
             &self,
             key: &ApiRunKey,

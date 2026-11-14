@@ -6398,3 +6398,84 @@ async fn api_bot_next_turn_after_a_mid_stream_abort_resends_and_completes() {
     shutdown.cancel();
     server.await.unwrap();
 }
+
+/// 第一個請求：回 message_start 後停住不動（模擬模型正在長時間串流）；之後的請求照常回完整訊息。
+async fn stalling_stream_server(hit: Arc<Notify>) -> (String, tokio::task::JoinHandle<()>) {
+    #[derive(Clone)]
+    struct S(Arc<Notify>, Arc<std::sync::atomic::AtomicUsize>);
+    async fn complete(axum::extract::State(s): axum::extract::State<S>, Json(_body): Json<Value>) -> axum::response::Response {
+        let n = s.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        s.0.notify_one();
+        if n == 0 {
+            let start = format!("event: message_start\ndata: {}\n\n", json!({"type":"message_start","message":{"id":"msg_stall","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}));
+            let stream = futures::stream::unfold(0usize, move |i| {
+                let start = start.clone();
+                async move {
+                    if i == 0 { Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(start)), 1)) } else { futures::future::pending().await }
+                }
+            });
+            axum::response::Response::builder().header("content-type", "text/event-stream").body(axum::body::Body::from_stream(stream)).unwrap()
+        } else {
+            let json = json!({"id":"msg_ok","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"after interrupt"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}});
+            axum::response::Response::builder().header("content-type", "application/json").body(axum::body::Body::from(json.to_string())).unwrap()
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let app = Router::new().route("/v1/messages", post(complete)).with_state(S(hit, Arc::new(std::sync::atomic::AtomicUsize::new(0))));
+    let task = tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+    (endpoint, task)
+}
+
+/// 強制中斷：串流停在 message_start 時，回合在 1 秒內收成 failed（系統訊息說明），run 仍 running，
+/// 中斷的那次呼叫維持 unknown（保守計費），緊接著的下一則 prompt 能送出並完成；沒有在飛的回合時回 409。
+#[tokio::test]
+async fn api_bot_force_interrupt_ends_the_turn_keeps_the_run_and_the_next_prompt_works() {
+    let env = crate::testing::env().await;
+    let hit = Arc::new(Notify::new());
+    let (endpoint, server) = stalling_stream_server(hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let (bot, run, turn1, turn2, conv) = (crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid());
+    insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "long answer please").await;
+    let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
+    env.app.api_turn_spawn(&key1).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await; // 讓串流真的卡在 message_start 之後
+
+    let started = std::time::Instant::now();
+    crate::lifecycle::interrupt_turn(&env.app, &bot, Some(&turn1)).await.expect("interrupt");
+    assert!(started.elapsed() < Duration::from_secs(1), "interrupt took {:?}", started.elapsed());
+
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn1).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(status, "failed");
+    let run_state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(run_state, "running", "只中斷回合，不停 run");
+    // 失敗通知在回合收成 failed 之後才寫（獨立的一筆），等它落地。
+    let notice = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let found: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn1).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(n) = found { break n; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert!(notice.contains("使用者強制中斷"), "{notice}");
+    let attempt: String = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE turn_id=?").bind(&turn1).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(attempt, "unknown", "串流被中斷：不知道已產生多少，保留預留額");
+
+    // 已經不在飛：409 turn_not_in_flight（帶指名與不指名兩種）。
+    for expect in [Some(turn1.as_str()), None] {
+        let err = crate::lifecycle::interrupt_turn(&env.app, &bot, expect).await.unwrap_err();
+        assert!(format!("{err:?}").contains("turn_not_in_flight"), "{err:?}");
+    }
+
+    // 緊接著的下一則 prompt：同一個 run 送出並完成。
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','next question',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
+    spawn_retrying_busy(&env.app, &key2).await;
+    wait_until_completed(&env.app, &key2).await;
+    let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn2).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(reply, "after interrupt");
+    server.abort();
+}

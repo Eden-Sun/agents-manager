@@ -96,6 +96,9 @@ struct RuntimeInner {
     cap_reached: Mutex<HashMap<FullKey, usize>>,
     /// 對話壓縮的提示訊息（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
     compaction_notes: Mutex<HashMap<FullKey, String>>,
+    /// 使用者強制中斷的回合：取消後 runner 回報的 Cancelled 要改記成 `user_interrupted` 的失敗，
+    /// 這樣 join 是 `Failed`（同 run 的下一則可接續），不是只有 run 停止才有的 `Cancelled`。
+    user_interrupts: Mutex<std::collections::HashSet<FullKey>>,
 }
 
 /// Runtime storage is initialized without tasks, sockets, or database work.
@@ -127,6 +130,7 @@ impl ApiBotRuntime {
                 fail_reasons: Mutex::new(HashMap::new()),
                 cap_reached: Mutex::new(HashMap::new()),
                 compaction_notes: Mutex::new(HashMap::new()),
+                user_interrupts: Mutex::new(std::collections::HashSet::new()),
             }),
             dependencies: Mutex::new(None),
         }
@@ -698,8 +702,16 @@ impl ApiBotRuntime {
                             .expect("cap reached mutex poisoned")
                             .insert(fail_key.clone(), max_calls);
                     }
-                    map_runner_result(result, &cancel, refusal)
+                    let mapped = map_runner_result(result, &cancel, refusal);
+                    if matches!(mapped, TurnOutcome::Cancelled)
+                        && fail_inner.user_interrupts.lock().expect("interrupt mutex poisoned").remove(&fail_key)
+                    {
+                        TurnOutcome::Failed("user_interrupted".into())
+                    } else {
+                        mapped
+                    }
                 };
+                fail_inner.user_interrupts.lock().expect("interrupt mutex poisoned").remove(&fail_key);
                 if let TurnOutcome::Failed(reason) = &outcome {
                     fail_inner.fail_reasons.lock().expect("fail reason mutex poisoned").insert(fail_key.clone(), reason.clone());
                 }
@@ -971,6 +983,54 @@ impl ApiBotRuntime {
         }
     }
 
+    /// 使用者強制中斷這一筆 in-flight 的回合（不停 run）：取消 runner、等它真的 join，再等這一回合的失敗結算寫進 DB。
+    /// 只認「run 還在 running、這一筆 turn 還是 in_flight」；其他回 `IdentityMismatch`（呼叫端轉成 409 turn_not_in_flight）。
+    /// 回 `Failed`＝已中斷並結算；`Completed`＝取消前它剛好完成（呼叫端同樣視為已不在飛）。
+    pub(super) async fn interrupt_turn(
+        &self,
+        app: &crate::state::App,
+        key: &ApiTurnKey,
+    ) -> Result<ApiRunCompletion, ApiBotError> {
+        let full = FullKey::from(key);
+        let bot_admission = self.bot_gate(&key.bot_id).await;
+        let admission = self.spawn_gate(key).await;
+        let (cancel, mut joined) = {
+            let controls = self.inner.controls.lock().expect("control mutex poisoned");
+            let Some(record) = controls.get(&full) else { return Err(ApiBotError::IdentityMismatch) };
+            (record.cancel.clone(), record.joined.clone())
+        };
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM runs r JOIN turns t ON t.run_id=r.id WHERE r.id=? AND r.bot_id=? AND t.id=? AND r.state='running' AND t.status='in_flight')",
+        )
+        .bind(&key.run_id).bind(&key.bot_id).bind(&key.turn_id)
+        .fetch_one(&app.db).await.map_err(|_| ApiBotError::Upstream)?;
+        if !live || !matches!(*joined.borrow(), JoinState::Pending) {
+            return Err(ApiBotError::IdentityMismatch);
+        }
+        self.inner.user_interrupts.lock().expect("interrupt mutex poisoned").insert(full.clone());
+        drop(admission);
+        drop(bot_admission);
+        cancel.cancel();
+        let receipt = wait_join(&mut joined).await?;
+        let completion = match receipt {
+            Ok(Completion::Completed) => ApiRunCompletion::Completed,
+            Ok(Completion::Cancelled) => ApiRunCompletion::Cancelled,
+            Ok(Completion::Failed) => ApiRunCompletion::Failed,
+            Err(JoinError::Unconfirmed) => return Err(ApiBotError::Unconfirmed),
+            Err(JoinError::IdentityMismatch) => return Err(ApiBotError::IdentityMismatch),
+        };
+        self.inner.user_interrupts.lock().expect("interrupt mutex poisoned").remove(&full);
+        // join 只證明 runner 停了；回合的終態（failed＋系統訊息）由 completion owner 隨後寫入，等它落地才算中斷完成。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=? AND run_id=?")
+                .bind(&key.turn_id).bind(&key.run_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?;
+            if status.as_deref().is_some_and(|s| s != "in_flight") { return Ok(completion); }
+            if tokio::time::Instant::now() >= deadline { return Err(ApiBotError::Unconfirmed); }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     #[cfg(test)]
     #[doc(hidden)]
     pub(super) fn control_count_for_test(&self) -> usize {
@@ -1055,6 +1115,13 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
         key: &ApiTurnKey,
     ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send {
         async move { self.api_bot_runtime.cancel_and_join(self, key).await }
+    }
+
+    fn api_turn_interrupt(
+        &self,
+        key: &ApiTurnKey,
+    ) -> impl Future<Output = Result<ApiRunCompletion, ApiBotError>> + Send {
+        async move { self.api_bot_runtime.interrupt_turn(self, key).await }
     }
 
     fn api_run_stop_proof(

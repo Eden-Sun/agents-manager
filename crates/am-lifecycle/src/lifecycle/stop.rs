@@ -863,6 +863,10 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    // claude-api 沒有 pane：直接取消這一筆的 API 請求（不停 run），不碰 herdr／Esc。
+    if bot.kind == crate::config::API_BOT_KIND {
+        return interrupt_api_turn(app, bot_id, &run, expect_turn, seen.as_ref()).await;
+    }
     // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。
     let owed = super::interruption::owed_turn(bot_id);
     let settled = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await;
@@ -947,6 +951,47 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     }
     clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
     Ok(())
+}
+
+/// claude-api 的強制中斷：只打這一筆 in-flight 的回合（`expect_turn`／到達當下看到的那一筆，語意同 Esc 路徑），
+/// 它已經不在飛就回 409 `turn_not_in_flight`。成功＝runner 已 join、回合已收成 failed（系統訊息「使用者強制中斷…」），run 仍 running。
+async fn interrupt_api_turn(
+    app: &impl StopContext,
+    bot_id: &str,
+    run: &db::Run,
+    expect_turn: Option<&str>,
+    seen: Option<&Option<String>>,
+) -> LcResult<()> {
+    let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
+    let gone = |want: Option<&str>| {
+        LcError::conflict(
+            "turn_not_in_flight",
+            json!({"turn_id": want, "in_flight_turn_id": in_flight.as_ref().map(|t| t.id.clone()), "esc_sent": false}),
+        )
+    };
+    let Some(turn) = in_flight.as_ref() else { return Err(gone(expect_turn)) };
+    if let Some(want) = expect_turn {
+        if want != turn.id {
+            return Err(gone(Some(want)));
+        }
+    }
+    if let Some(Some(seen)) = seen {
+        if *seen != turn.id {
+            return Err(gone(Some(seen)));
+        }
+    }
+    let key = crate::lifecycle::api_bot_port::ApiTurnKey { bot_id: bot_id.to_string(), run_id: run.id.clone(), turn_id: turn.id.clone() };
+    use crate::lifecycle::api_bot_port::ApiBotError as E;
+    match crate::lifecycle::api_bot_port::ApiBotPort::api_turn_interrupt(app, &key).await {
+        Ok(crate::lifecycle::api_bot_port::ApiRunCompletion::Completed) => Err(gone(Some(&turn.id))),
+        Ok(_) => Ok(()),
+        Err(E::IdentityMismatch) => Err(gone(Some(&turn.id))),
+        Err(e) => {
+            let code = match e { E::Busy => "busy", E::Unconfirmed => "unconfirmed", E::Upstream => "upstream", E::IdentityMismatch => "identity_mismatch" };
+            tracing::warn!(bot = bot_id, run = %run.id, turn = %turn.id, error_code = code, "API bot interrupt did not confirm");
+            Err(LcError::Upstream(format!("api_bot_interrupt_unconfirmed:{code}")))
+        }
+    }
 }
 
 /// 打斷的請求到達那一刻，這顆 bot 在飛的是哪一筆（沒指名 `turn_id` 時用）。讀取失敗會回 503、不送 Esc。
