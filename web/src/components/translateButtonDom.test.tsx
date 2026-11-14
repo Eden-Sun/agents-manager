@@ -75,6 +75,23 @@ test('點了：打 POST /messages/:id/translate，譯文在同一個泡泡裡翻
   assert.equal(reqs.length, before, '切換不再打 API')
 })
 
+test('低分譯文（low_confidence）照顯示譯文，旁邊標「品質分數偏低（Jev 0.42）」', async () => {
+  fakeApi((r) => (r.path.split('?')[0].endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042, low_confidence: true, jev_prob: 0.42 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  await mount(<Probe m={msg(EN)} />)
+  await click(document.querySelector('.msg-translate')!)
+  await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
+  assert.match(document.querySelector('.bubble')?.textContent ?? '', /我修好了解析器的 bug/, '低分仍顯示譯文')
+  assert.equal(document.querySelector('.msg-translation-lowconf')?.textContent, '品質分數偏低（Jev 0.42）')
+})
+
+test('一般譯文沒有低分標籤', async () => {
+  fakeApi(TR_ROUTE)
+  await mount(<Probe m={msg(EN)} />)
+  await click(document.querySelector('.msg-translate')!)
+  await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
+  assert.equal(document.querySelector('.msg-translation-lowconf'), null)
+})
+
 test('未啟用：按鈕事先標「翻譯（未啟用）」，按了只提示、不打翻譯 API', async () => {
   const reqs = fakeApi((r) => (r.path.endsWith('/claude-api/settings') ? { ...SETTINGS_ON, uses: [{ id: 'message_translate', enabled: false }] } : {}))
   await mount(<Probe m={msg(EN)} />)

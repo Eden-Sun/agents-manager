@@ -57,17 +57,24 @@ export function MessageTranslationContent({
   botId,
   cost,
   model,
+  lowConfidence,
+  jevProb,
 }: {
   text: string
   botId?: string | null
   cost: number | null
   model: string
+  lowConfidence?: boolean
+  jevProb?: number | null
 }) {
   const t = useT()
   return (
     <div className="msg-translation" lang="zh-Hant">
       <SafeMarkdown text={text} botId={botId} />
       <div className="msg-translation-cost">{costLine(t, { cost, model })}</div>
+      {lowConfidence && jevProb != null ? (
+        <div className="msg-translation-lowconf">{t('品質分數偏低（Jev {score}）', { score: jevProb.toFixed(2) })}</div>
+      ) : null}
     </div>
   )
 }

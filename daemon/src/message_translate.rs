@@ -29,7 +29,8 @@ const SYSTEM: &str = "You are a translation engine. Translate the user's message
 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。 \
 Preserve the markdown structure exactly (headings, lists, tables, emphasis, links). \
 Do NOT translate fenced code blocks, inline code, file paths, shell commands, URLs, identifiers, environment variables, \
-commit hashes or issue numbers: copy them verbatim. Do not add explanations, notes or quotes. Reply with the translation only.";
+commit hashes or issue numbers: copy them verbatim. Company names, product or system names and abbreviations (for example CTBC, MIA02, UAT, PR) \
+stay exactly as written in the source, like identifiers. Do not add explanations, notes or quotes. Reply with the translation only.";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct CacheEntry {
@@ -42,7 +43,10 @@ struct CacheEntry {
     /// Jev 判定為忠實台灣繁體中文翻譯的機率（SPEC §4.3c 第六個場景）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     jev_prob: Option<f64>,
-    /// 負面標記（品質檢查沒過）：`translation` 為空，`rejected` 是原因（`untranslated`／`low_fidelity`）。
+    /// 兩次嘗試都低於 `translate_min_probability` 時仍顯示的譯文：true，網頁標「品質分數偏低」。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    low_confidence: bool,
+    /// 負面標記（品質檢查沒過）：`translation` 為空，`rejected` 是原因（`untranslated`／`japanese_output`；舊的 `low_fidelity` 已不擋）。
     /// 同一則訊息＋內容不再自動重翻重扣；手動重試（`force`）會略過它。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejected: Option<String>,
@@ -57,7 +61,7 @@ pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
-        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>\n現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"
+        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Company names, product/system names and abbreviations (e.g. CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. 公司名、產品／系統名與縮寫（如 CTBC、MIA02、UAT、PR）照原文保留，不翻。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>\n現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"
     );
     ClaudeRequest {
         use_case: USE_CASE,
@@ -109,7 +113,20 @@ fn load(path: &Path) -> Option<CacheEntry> {
 /// 讀負面標記；沒有或不是標記回 None。
 fn load_rejection(path: &Path) -> Option<String> {
     let e: CacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    e.rejected.filter(|_| e.translation.trim().is_empty())
+    // `low_fidelity` 是舊版 Jev 門檻下的標記；現在低分也照顯示（`low_confidence`），舊標記不再擋，會自動重翻。
+    e.rejected.filter(|r| r.as_str() != "low_fidelity" && e.translation.trim().is_empty())
+}
+
+/// 命中快取的回傳內容。
+fn hit_body(hit: &CacheEntry) -> Value {
+    json!({
+        "translation": hit.translation,
+        "model": hit.model,
+        "cached": true,
+        "cost_usd": hit.cost_usd,
+        "low_confidence": hit.low_confidence,
+        "jev_prob": hit.jev_prob,
+    })
 }
 
 /// 這個錯誤是「這則翻不好（品質檢查沒過）」，不是服務壞掉。
@@ -162,7 +179,7 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
 pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bool) -> Result<Value, LcError> {
     let path = cache_path(&app.data_dir, &cache_key(id, content));
     if let Some(hit) = load(&path) {
-        return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+        return Ok(hit_body(&hit));
     }
     if crate::zh_convert::local_applies(content) {
         return Ok(local_convert(content, &path));
@@ -178,7 +195,7 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
     if let Some(hit) = load(&path) {
         drop(guard);
         flight_forget(&path, slot);
-        return Ok(json!({"translation": hit.translation, "model": hit.model, "cached": true, "cost_usd": hit.cost_usd}));
+        return Ok(hit_body(&hit));
     }
     if !force {
         if let Some(reason) = load_rejection(&path) {
@@ -205,7 +222,7 @@ fn local_convert(content: &str, path: &Path) -> Value {
 
 const JEV_CHARS: usize = 6_000;
 const JEV_QUESTION: &str = "is_faithful";
-const JEV_PROMPT: &str = "Is the TRANSLATION a faithful Traditional Chinese (Taiwan) translation of the SOURCE, in Traditional Chinese, with nothing missing or added?";
+const JEV_PROMPT: &str = "Does the TRANSLATION convey the same meaning as the SOURCE, written in Traditional Chinese (Taiwan)? Minor wording choices, translated or kept proper nouns, and omitted English glosses are acceptable; missing or added content is not.";
 
 fn jev_request_body(model: &str, source: &str, translation: &str) -> Value {
     json!({
@@ -323,64 +340,94 @@ pub(crate) fn next_effort(current: &str) -> &'static str {
     ladder[(idx + 1).min(ladder.len() - 1)]
 }
 
-async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
-    let mut reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
-    let mut translation = clean_reply(&reply.text);
+/// 一次翻譯嘗試：譯文、本地檢查結果、Jev 分數（只有過本地檢查才問 Jev）。
+struct Attempt {
+    translation: String,
+    model: String,
+    usage: Option<claude_api::Usage>,
+    cost: Option<f64>,
+    /// 重試時用的 effort；第一次照設定的，沒有。
+    effort: Option<String>,
+    /// 本地檢查沒過的原因；過了就是 None。
+    reason: Option<&'static str>,
+    jev: Option<f64>,
+}
 
-    let min_prob = app.cfg.get().await.judge.translate_min_probability;
-    let mut jev_prob = None;
-
-    let mut rejected = local_rejected(content, &translation);
-    if !rejected {
-        let p = check_jev(app, id, content, &translation).await;
-        if p.is_some_and(|v| v < min_prob) {
-            rejected = true;
-        } else {
-            jev_prob = p;
-        }
+async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>) -> Result<Attempt, LcError> {
+    let req = build_request(content);
+    let reply = match effort {
+        Some(e) => claude_api::complete_with_effort(app, req, e).await,
+        None => claude_api::complete(app, req).await,
     }
-
-    let mut effort = None;
-    if rejected {
-        // 品質沒過：只重試一次，且 effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
-        let configured = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
-        let next = next_effort(&configured);
-        reply = claude_api::complete_with_effort(app, build_request(content), next).await.map_err(error_of)?;
-        effort = Some(next.to_string());
-        translation = clean_reply(&reply.text);
-
-        if is_mostly_english(content) && is_mostly_english(&translation) {
-            return Err(mark_rejected(path, "untranslated"));
-        }
-        if !has_japanese_kana(content) && has_japanese_kana(&translation) {
-            return Err(mark_rejected(path, "low_fidelity"));
-        }
-
-        let p = check_jev(app, id, content, &translation).await;
-        if p.is_some_and(|v| v < min_prob) {
-            return Err(mark_rejected(path, "low_fidelity"));
-        }
-        jev_prob = p;
-    }
-
-    let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry {
+    .map_err(error_of)?;
+    let translation = clean_reply(&reply.text);
+    let reason = local_reason(content, &translation);
+    let jev = if reason.is_none() { check_jev(app, id, content, &translation).await } else { None };
+    Ok(Attempt {
+        cost: reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u)),
+        model: reply.model,
+        usage: reply.usage,
+        effort: effort.map(str::to_string),
         translation,
-        model: reply.model.clone(),
+        reason,
+        jev,
+    })
+}
+
+/// 要不要重試：本地檢查沒過，或 Jev 分數低於門檻。
+fn needs_retry(a: &Attempt, min_prob: f64) -> bool {
+    a.reason.is_some() || a.jev.is_some_and(|p| p < min_prob)
+}
+
+/// 挑選用的分數：Jev 不可用（None）視為通過（1.0）。
+fn score(p: Option<f64>) -> f64 {
+    p.unwrap_or(1.0)
+}
+
+async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
+    let min_prob = app.cfg.get().await.judge.translate_min_probability;
+    let mut attempts = vec![attempt(app, id, content, None).await?];
+    if needs_retry(&attempts[0], min_prob) {
+        // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
+        let configured = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
+        attempts.push(attempt(app, id, content, Some(next_effort(&configured))).await?);
+    }
+
+    // 通過本地檢查的嘗試裡，挑 Jev 分數最高的（同分取後一次）。都沒過本地檢查＝這則翻不好，回 422。
+    let Some(best) = attempts.iter().filter(|a| a.reason.is_none()).max_by(|a, b| score(a.jev).total_cmp(&score(b.jev))) else {
+        let reason = attempts.last().and_then(|a| a.reason).unwrap_or("untranslated");
+        return Err(mark_rejected(path, reason));
+    };
+
+    // 費用是兩次嘗試的合計（重試也是真的扣費）。
+    let costs: Vec<f64> = attempts.iter().filter_map(|a| a.cost).collect();
+    let cost = (!costs.is_empty()).then(|| costs.iter().sum::<f64>());
+    let low = best.jev.is_some_and(|p| p < min_prob);
+    let entry = CacheEntry {
+        translation: best.translation.clone(),
+        model: best.model.clone(),
         prompt_version: PROMPT_VERSION.into(),
         cost_usd: cost,
-        jev_prob,
-        effort,
+        jev_prob: best.jev,
+        low_confidence: low,
+        effort: best.effort.clone(),
         ..Default::default()
     };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
-    let mut body = json!({"translation": entry.translation, "model": entry.model, "cached": false, "cost_usd": cost});
+    let mut body = json!({
+        "translation": entry.translation,
+        "model": entry.model,
+        "cached": false,
+        "cost_usd": cost,
+        "low_confidence": low,
+        "jev_prob": best.jev,
+    });
     if let Some(e) = &entry.effort {
         body["effort"] = json!(e);
     }
-    if let Some(u) = &reply.usage {
+    if let Some(u) = &best.usage {
         body["usage"] = usage_json(u);
     }
     Ok(body)
@@ -437,10 +484,15 @@ pub(crate) fn has_japanese_kana(text: &str) -> bool {
     text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}'))
 }
 
-/// 本地廉價檢查：日文假名（原文沒有但譯文有）或主要為英文（原文為英文且譯文未翻譯）。
-pub(crate) fn local_rejected(source: &str, reply: &str) -> bool {
-    (!has_japanese_kana(source) && has_japanese_kana(reply))
-        || (is_mostly_english(source) && is_mostly_english(reply))
+/// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`。都沒有回 None。
+pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
+    if !has_japanese_kana(source) && has_japanese_kana(reply) {
+        return Some("japanese_output");
+    }
+    if is_mostly_english(source) && is_mostly_english(reply) {
+        return Some("untranslated");
+    }
+    None
 }
 
 /// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過十分之一）。
@@ -838,6 +890,16 @@ mod tests {
     }
 
     #[test]
+    fn prompt_keeps_company_and_product_abbreviations() {
+        let r = build_request("Ticket CTBC on MIA02 for UAT.");
+        let sys = r.system.unwrap();
+        assert!(sys.contains("CTBC") && sys.contains("MIA02") && sys.contains("UAT") && sys.contains("PR"));
+        assert!(sys.contains("stay exactly as written in the source"));
+        assert!(r.prompt.contains("stay exactly as written in the source"));
+        assert!(r.prompt.contains("CTBC、MIA02、UAT、PR"));
+    }
+
+    #[test]
     fn clean_reply_strips_source_tags() {
         assert_eq!(clean_reply("<source>你好，這是測試。</source>"), "你好，這是測試。");
         assert_eq!(clean_reply("  <source>\n你好，這是測試。\n</source>  "), "你好，這是測試。");
@@ -1128,7 +1190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jev_low_twice_returns_error_and_no_cache() {
+    async fn jev_low_twice_shows_better_attempt_as_low_confidence() {
         let (app, dir) = app(true).await;
         let (endpoint, jev_calls) = fake_jev_server(vec![0.2, 0.3]).await;
         enable_jev(&app, &dir, endpoint).await;
@@ -1139,16 +1201,57 @@ mod tests {
             "伺服器逾時。".to_string(),
         ];
         let f = fake_seq(&app, replies);
-        let err = translate(&app, "m_jev_fail", content).await.unwrap_err();
+        let res = translate(&app, "m_jev_low", content).await.unwrap();
 
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "Haiku 打兩次");
         assert_eq!(jev_calls.load(Ordering::SeqCst), 2, "Jev 問兩次");
-        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "low_fidelity"), "兩次低機率回 422 low_fidelity: {err:?}");
+        assert_eq!(res["translation"], json!("伺服器逾時。"), "取 Jev 分數較高的那次（0.3）");
+        assert_eq!(res["low_confidence"], json!(true));
+        assert_eq!(res["jev_prob"], json!(0.3));
+        assert_eq!(res["cached"], json!(false));
 
-        let key = cache_key("m_jev_fail", content);
-        let path = cache_path(&app.data_dir, &key);
-        assert_eq!(load_rejection(&path).as_deref(), Some("low_fidelity"), "Jev 兩次未通過寫負面標記");
+        let path = cache_path(&app.data_dir, &cache_key("m_jev_low", content));
+        let hit = load(&path).expect("低分譯文仍存入快取");
+        assert!(hit.low_confidence);
+        assert_eq!(hit.jev_prob, Some(0.3));
+        assert_eq!(load_rejection(&path), None, "低分不寫負面標記");
+
+        let again = translate(&app, "m_jev_low", content).await.unwrap();
+        assert_eq!(again["cached"], json!(true));
+        assert_eq!(again["low_confidence"], json!(true));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中快取不重打");
+    }
+
+    #[tokio::test]
+    async fn japanese_output_twice_is_rejected_as_japanese_output() {
+        let (app, _dir) = app(true).await;
+        let content = "The system has encountered an unexpected condition.";
+        let f = fake_seq(&app, vec!["システムで予期しない状態が発生しました。".into(), "システムエラーです。".into()]);
+        let err = translate(&app, "m_ja_twice", content).await.unwrap_err();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "兩次都有假名");
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "japanese_output"), "{err:?}");
+        let path = cache_path(&app.data_dir, &cache_key("m_ja_twice", content));
+        assert_eq!(load_rejection(&path).as_deref(), Some("japanese_output"));
         assert!(load(&path).is_none());
+    }
+
+    #[tokio::test]
+    async fn old_low_fidelity_marker_is_ignored_and_retranslated() {
+        let (app, _dir) = app(true).await;
+        let content = "The server returned 504 Gateway Timeout.";
+        let path = cache_path(&app.data_dir, &cache_key("m_old_marker", content));
+        save(
+            &path,
+            &CacheEntry { rejected: Some("low_fidelity".into()), rejected_at: Some(crate::db::now()), prompt_version: PROMPT_VERSION.into(), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(load_rejection(&path), None, "舊的 low_fidelity 標記不擋");
+
+        let f = fake_seq(&app, vec!["伺服器回傳了 504 閘道超時。".into()]);
+        let res = translate(&app, "m_old_marker", content).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "舊標記被忽略，重新打 API");
+        assert_eq!(res["translation"], json!("伺服器回傳了 504 閘道超時。"));
+        assert_eq!(res["cached"], json!(false));
     }
 
     #[tokio::test]

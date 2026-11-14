@@ -419,6 +419,7 @@ export default {
   '翻譯（未啟用）': 'Translate (off)',
   '(by {model} {cost})': '(by {model} {cost})',
   '(by {model})': '(by {model})',
+  '品質分數偏低（Jev {score}）': 'Low quality score (Jev {score})',
   'Claude API 總開關沒開：到「環境設定 → Claude API」打開': 'The Claude API master switch is off: turn it on in Settings → Claude API',
   'Claude API key 還沒設定：到「環境設定 → Claude API」設定': 'No Claude API key yet: set it in Settings → Claude API',
   '「對話訊息翻譯」被關掉了：到「環境設定 → Claude API」打開': '"Message translation" is turned off: turn it on in Settings → Claude API',

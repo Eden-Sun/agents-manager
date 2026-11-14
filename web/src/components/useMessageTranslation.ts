@@ -38,7 +38,7 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
         const show = kind === 'manual' || (kind === 'restore' ? isWanted(msg.id) : !isDeclined(msg.id))
         // 自動翻出來並顯示的，跟手動點過一樣記著：之後滑出最後 N 則、重整，都維持譯文。
         if (kind === 'fresh' && show) setWanted(msg.id, true)
-        setTranslation(msg.id, { status: 'done', text: r.translation, show, cost: r.costUsd, cached: r.cached, model: r.model })
+        setTranslation(msg.id, { status: 'done', text: r.translation, show, cost: r.costUsd, cached: r.cached, model: r.model, lowConfidence: r.lowConfidence, jevProb: r.jevProb })
       },
       (e: unknown) => {
         // 品質檢查沒過：服務是好的，只是這則翻不好。不算失敗（不累計、不重置就緒狀態），顯示原文＋小提示。
@@ -97,6 +97,8 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
             botId: msg.bot_id,
             cost: st.cost,
             model: st.model,
+            lowConfidence: st.lowConfidence,
+            jevProb: st.jevProb,
           })
         : null,
     flip: st.status !== 'done' ? null : st.show ? 'tr' : 'orig',

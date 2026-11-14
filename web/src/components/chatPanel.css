@@ -1104,6 +1104,12 @@
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+/* 低分譯文的小標：跟費用行一樣淡，不搶譯文。 */
+.msg-translation-lowconf {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
 /* 未啟用：看得到功能在，但一眼知道還不能用；按了只提示去哪裡開。 */
 .msg-translate.off {
   opacity: 0.7;

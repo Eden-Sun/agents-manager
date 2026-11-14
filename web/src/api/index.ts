@@ -486,11 +486,23 @@ export async function rewindBot(
 /** `POST /messages/:id/translate`：把一則 assistant 訊息翻成繁體中文；同一則翻過會回快取（`cached`，不扣費）。 */
 /** `force`：手動重試，略過 daemon 對「品質檢查沒過」的負面標記（422 `translate_rejected`）。
 /** `costUsd`：翻這次花的美元（daemon 依牌價算）；`cached` 時是當初那次的花費、這次沒有扣費。不明＝null。 */
-export async function translateMessage(messageId: string, force = false): Promise<{ translation: string; model: string; cached: boolean; costUsd: number | null }> {
+export async function translateMessage(
+  messageId: string,
+  force = false,
+): Promise<{ translation: string; model: string; cached: boolean; costUsd: number | null; lowConfidence: boolean; jevProb: number | null }> {
   const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate${force ? '?force=true' : ''}`)
   const o = isRec(raw) ? raw : {}
   const cost = pick(o, 'cost_usd')
-  return { translation: str(pick(o, 'translation')), model: str(pick(o, 'model')), cached: pick(o, 'cached') === true, costUsd: typeof cost === 'number' ? cost : null }
+  const jev = pick(o, 'jev_prob')
+  return {
+    translation: str(pick(o, 'translation')),
+    model: str(pick(o, 'model')),
+    cached: pick(o, 'cached') === true,
+    costUsd: typeof cost === 'number' ? cost : null,
+    /** 兩次嘗試的 Jev 分數都低於門檻，仍顯示這份譯文（網頁標「品質分數偏低」）。 */
+    lowConfidence: pick(o, 'low_confidence') === true,
+    jevProb: typeof jev === 'number' ? jev : null,
+  }
 }
 
 /** `POST /pending-questions/translate`：整份待答問卷一次翻成繁中（只翻顯示；送回 CLI 的仍是原選項）。`id` 由 daemon 產生（`q{n}`、`q{n}-o{m}`）。 */
