@@ -350,6 +350,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                         if let Err(e) = ApiBotPort::api_native_start(app, &to, ApiNativeStartMode::Resume { required: false }).await {
                             let err_msg = match e {
                                 ApiNativeStartError::Refused(reason) => format!("start_failed:{reason}"),
+                                ApiNativeStartError::ModelChanged { .. } => "start_failed:api_model_changed".to_string(),
                                 ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
                                 ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
                             };

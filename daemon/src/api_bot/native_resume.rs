@@ -20,26 +20,75 @@ async fn prove_body(pool: &sqlx::SqlitePool, bot: &str, new_run: &str, old_run: 
     Ok(proof)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ResumeProofError {
+    ModelChanged { from: String, to: String },
+    ContextUnsettled,
+    SessionExpired,
+    CheckpointTooLarge,
+    ReceiptUnsettled,
+    Unconfirmed,
+}
+
+impl From<ResumeProofError> for ApiBotError {
+    fn from(_: ResumeProofError) -> Self {
+        ApiBotError::Unconfirmed
+    }
+}
+
 pub(super) enum ProofMode<'a> { StartBeforeRun, RuntimeBeforeRebind(&'a str) }
 
-pub(super) fn prove_on<'a>(conn: &'a mut sqlx::SqliteConnection, bot: &'a str, old_run: &'a str, mode: ProofMode<'a>) -> impl Future<Output = Result<ResumeHandoffProof, ApiBotError>> + Send + 'a {
+pub(super) fn prove_on<'a>(conn: &'a mut sqlx::SqliteConnection, bot: &'a str, old_run: &'a str, mode: ProofMode<'a>) -> impl Future<Output = Result<ResumeHandoffProof, ResumeProofError>> + Send + 'a {
     Box::pin(prove_on_inner(conn, bot, old_run, mode))
 }
-async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &str, mode: ProofMode<'_>) -> Result<ResumeHandoffProof, ApiBotError> {
+async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &str, mode: ProofMode<'_>) -> Result<ResumeHandoffProof, ResumeProofError> {
     use am_base::db::api_bot::{Checkpoint, MAX_CHECKPOINT_BYTES};
     let expiry = crate::db::ts_sql("s.expires_at");
     let sql = format!("SELECT s.id,s.owner_turn_id,s.generation,s.revision,s.format_version, CASE WHEN length(CAST(s.checkpoint_json AS BLOB))<=? THEN s.checkpoint_json END, t.status FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id JOIN projects p ON p.id=b.project_id JOIN runs old ON old.id=s.owner_run_id AND old.bot_id=b.id JOIN turns t ON t.id=s.owner_turn_id AND t.run_id=old.id JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id JOIN api_bot_join_receipts j ON j.session_id=s.id AND j.bot_id=b.id AND j.run_id=old.id AND j.turn_id=t.id AND j.generation=s.generation AND j.revision=s.revision WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND s.retired_at IS NULL AND {expiry}>? AND old.id=? AND old.state IN ('stopped','exited') AND t.delivery='ok' AND j.state='applied' AND ((t.status='completed' AND j.outcome='completed' AND j.final_text IS NOT NULL AND (SELECT count(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant')=1 AND EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.conversation_id=c.id AND m.role='assistant' AND m.source='transcript' AND m.incomplete=0 AND m.rewound_at IS NULL AND m.content=j.final_text)) OR (t.status='failed' AND j.outcome='failed' AND j.final_text IS NULL AND (SELECT count(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant')=0)) AND NOT EXISTS(SELECT 1 FROM api_bot_join_receipts x WHERE x.session_id=s.id AND (x.state!='applied' OR (x.turn_id!=t.id AND x.revision>=s.revision))) AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM runs n WHERE n.bot_id=b.id AND n.state IN ('starting','running','stopping'))) OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM runs n WHERE n.id=? AND n.bot_id=b.id AND n.state='running') AND NOT EXISTS(SELECT 1 FROM runs n WHERE n.bot_id=b.id AND n.id!=? AND n.state IN ('starting','running','stopping'))))");
     let new_run = match mode { ProofMode::StartBeforeRun => None, ProofMode::RuntimeBeforeRebind(run) => Some(run) };
     let row: Option<(String,String,i64,i64,i64,Option<String>,String)> = sqlx::query_as(&sql)
         .bind(MAX_CHECKPOINT_BYTES as i64).bind(bot).bind(crate::db::now()).bind(old_run).bind(new_run).bind(new_run).bind(new_run).bind(new_run)
-        .fetch_optional(&mut *conn).await.map_err(|_| ApiBotError::Unconfirmed)?;
-    let Some((session, turn, generation, revision, 1, Some(raw), owner_status)) = row else { return Err(ApiBotError::Unconfirmed); };
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ApiBotError::Unconfirmed)?;
-    let checkpoint = Checkpoint::new(&value).map_err(|_| ApiBotError::Unconfirmed)?;
-    let state: super::runner::State = serde_json::from_value(checkpoint.value()).map_err(|_| ApiBotError::Unconfirmed)?;
+        .fetch_optional(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
+    let Some((session, turn, generation, revision, 1, Some(raw), owner_status)) = row else {
+        // 診斷具體失敗原因，避免回傳無說明的 502：
+        let diag_sql = format!(
+            "SELECT ({expiry} <= ?), (length(CAST(s.checkpoint_json AS BLOB)) > ?) \
+             FROM api_bot_sessions s WHERE s.bot_id = ? AND s.owner_run_id = ? AND s.retired_at IS NULL"
+        );
+        let diag: Option<(bool, bool)> = sqlx::query_as(&diag_sql)
+        .bind(crate::db::now())
+        .bind(MAX_CHECKPOINT_BYTES as i64)
+        .bind(bot)
+        .bind(old_run)
+        .fetch_optional(&mut *conn)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some((expired, too_large)) = diag {
+            if expired {
+                return Err(ResumeProofError::SessionExpired);
+            }
+            if too_large {
+                return Err(ResumeProofError::CheckpointTooLarge);
+            }
+            return Err(ResumeProofError::ReceiptUnsettled);
+        }
+        return Err(ResumeProofError::Unconfirmed);
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ResumeProofError::Unconfirmed)?;
+    let checkpoint = Checkpoint::new(&value).map_err(|_| ResumeProofError::Unconfirmed)?;
+    let state: super::runner::State = serde_json::from_value(checkpoint.value()).map_err(|_| ResumeProofError::Unconfirmed)?;
     let model: Option<String> = sqlx::query_scalar("SELECT model FROM bots WHERE id=?")
-        .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ApiBotError::Unconfirmed)?;
-    if !super::adapter::checkpoint_matches_model(&state, model.as_deref().unwrap_or(am_config::API_BOT_MODEL)) || !startup_context_settled(&state, owner_status == "failed") { return Err(ApiBotError::Unconfirmed); }
+        .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
+    let target_model = model.as_deref().unwrap_or(am_config::API_BOT_MODEL);
+    if !super::adapter::checkpoint_matches_model(&state, target_model) {
+        let from = state.responses.last().map(|r| r.model.clone()).unwrap_or_default();
+        return Err(ResumeProofError::ModelChanged { from, to: target_model.to_string() });
+    }
+    if !startup_context_settled(&state, owner_status == "failed") {
+        return Err(ResumeProofError::ContextUnsettled);
+    }
     Ok(ResumeHandoffProof { identity: AdapterIdentity { session_id: session, bot_id: bot.to_owned(), run_id: old_run.to_owned(), turn_id: turn, generation }, revision })
 }
 
@@ -68,7 +117,12 @@ mod tests {
         let opus_history = serde_json::json!({"messages":[],"responses":[{"id":"prior","model":"claude-opus-5-5","content":[],"stop_reason":"end_turn","usage":{}}],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]});
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(opus_history.to_string()).bind(&session).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE bots SET model='claude-fable-5-2' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
-        assert!(prove(&env.app.db, &bot, &new, &old).await.is_err(), "restart cannot pass an Opus checkpoint to Fable");
+        assert!(prove(&env.app.db, &bot, &new, &old).await.is_ok(), "restart allows transition between supported models");
+        sqlx::query("UPDATE bots SET model='unsupported-model' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+        let mut tx = crate::db::begin_write(&env.app.db).await.unwrap();
+        let err = prove_on(&mut tx, &bot, &old, ProofMode::RuntimeBeforeRebind(&new)).await.err().unwrap();
+        assert_eq!(err, ResumeProofError::ModelChanged { from: "claude-opus-5-5".into(), to: "unsupported-model".into() });
+        drop(tx);
         sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
         assert!(prove(&env.app.db, &bot, &new, &old).await.is_ok());
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(checkpoint).bind(&session).execute(&env.app.db).await.unwrap();

@@ -16,6 +16,11 @@ const TEXT: Record<string, string> = {
   api_native_start_unconfirmed: msg('daemon 無法確認 claude-api bot 的啟動狀態；請稍後再試。'),
   'api_bot_stop_unconfirmed:busy': msg('bot 還有一個回合沒有結算，暫時無法停止；請稍後再試。'),
   api_bot_host_offline: msg('這顆 claude-api bot 的專案在遠端主機，但那台主機目前沒有連線：等主機連上線再啟動。'),
+  api_model_changed: msg('Bot 目前的模型與上一段對話產生的模型不相容：可換回原模型接續，或清除對話以新模型開始。'),
+  api_context_unsettled: msg('上一回合對話狀態尚未完全結算（有未完成的請求或工具呼叫），無法安全接續；請稍後再試。'),
+  api_session_expired: msg('上一段對話 session 已過期，無法接續；請清除對話後重新開始。'),
+  api_checkpoint_too_large: msg('對話記錄已超出上限大小，無法載入；請清除對話後重新開始。'),
+  api_receipt_unsettled: msg('對話結算憑證尚未就緒，無法確認狀態；請稍後再試。'),
 }
 
 export function apiBotStartReasonText(reason: unknown): string | null {

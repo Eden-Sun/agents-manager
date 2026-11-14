@@ -875,6 +875,8 @@ export interface PatchBotResult {
   live_apply?: { applied: boolean; deferred: boolean; /** 這次按了 Esc 停下回合（回合中改 codex 的 model／effort，#1681）。 */ interrupted: boolean; reason: string | null }
   /** 送進去的 model 是停用別名、daemon 換成別的才有；沒換就是 `null`（issue #539）。 */
   remapped_model: ModelRemap | null
+  /** daemon 給使用者的提示訊息（例如 claude-api 換模型接續對話）。 */
+  message?: string | null
 }
 
 /** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */

@@ -68,8 +68,13 @@ pub enum ApiFreshAvailability { Available(ApiFreshTarget), None, Unavailable }
 pub enum ApiNativeStartMode { Resume { required: bool }, Fresh(ApiFreshTarget) }
 pub struct ApiNativeStartResult { pub run_id: String, pub resumed: bool }
 /// `Refused`：確定沒有任何副作用就拒絕的前置檢查，帶穩定 reason；`Unconfirmed` 才是真的無法確認。
-#[derive(Debug)]
-pub enum ApiNativeStartError { Unconfirmed, ClearedButStartUnconfirmed, Refused(&'static str) }
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApiNativeStartError {
+    Unconfirmed,
+    ClearedButStartUnconfirmed,
+    Refused(&'static str),
+    ModelChanged { from: String, to: String },
+}
 
 pub trait ApiBotPort: Send + Sync {
     fn api_native_start(&self, _bot_id: &str, _mode: ApiNativeStartMode) -> impl Future<Output = Result<ApiNativeStartResult, ApiNativeStartError>> + Send { async { Err(ApiNativeStartError::Unconfirmed) } }

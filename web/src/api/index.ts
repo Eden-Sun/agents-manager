@@ -418,6 +418,7 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
     needs_restart: o.needs_restart === true || o.restart_required === true,
     ...(la ? { live_apply: { applied: la.applied === true, deferred: la.deferred === true, interrupted: la.interrupted === true, reason: typeof la.reason === 'string' ? la.reason : null } } : {}),
     remapped_model: toModelRemap(o.remapped),
+    message: optStr(pick(o, 'message')),
   }
 }
 

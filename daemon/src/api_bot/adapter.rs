@@ -124,8 +124,26 @@ struct ActiveAttempt {
 }
 
 pub(super) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
-    !state.responses.iter().any(|r| r.model != model)
-        && !(state.responses.is_empty() && state.messages.iter().any(|m| m.content.as_array().is_some_and(|blocks| blocks.iter().any(|b| matches!(b.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking"))))))
+    // 兩邊都必須是支援的 claude-api 模型（如 claude-opus-5-5、claude-fable-5-2）。
+    // 請求已帶 thinking.block_binding.prefix_mismatch_behavior = "drop_block"，
+    // 支援模型之間的 checkpoint 可安全接續。
+    if !am_config::api_bot_model_supported(model) {
+        return false;
+    }
+    if state.responses.iter().any(|r| !am_config::api_bot_model_supported(&r.model)) {
+        return false;
+    }
+    !(state.responses.is_empty()
+        && state.messages.iter().any(|m| {
+            m.content.as_array().is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    matches!(
+                        b.get("type").and_then(Value::as_str),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                })
+            })
+        }))
 }
 
 /// API 明確拒絕、確定沒有處理（也不計費）的錯誤：4xx（408 逾時除外）、429、529 過載。

@@ -18,6 +18,7 @@ import { UNKNOWN_SENT_NOTICE, unknownLock } from './deliveryUnknown'
 import { create } from 'zustand'
 import { markUserNav } from './userNav'
 import * as api from '../api'
+import { retireApiSession } from '../api/apiBotSession'
 import {
   frameBotId,
   hostArray,
@@ -79,6 +80,13 @@ export interface PatchBotOutcome {
   needsRestart: boolean
   deferred: boolean
   remappedModel: ModelRemap | null
+  message?: string | null
+}
+
+export interface ApiModelConflict {
+  botId: string
+  checkpointModel: string
+  currentModel: string
 }
 import { laterMark, serverUnread } from './sharedUnread'
 import { isKeepWarmRequestId } from '../lib/keepWarm'
@@ -550,6 +558,10 @@ export interface StoreState {
   confirmCodexLoginReplace: (host: string, kind: BotKind, identity: string | null) => Promise<boolean>
   answerCodexLoginAsk: (ok: boolean) => void
   pruneLoginPromptDismissed: (pending: PendingLogin[]) => void
+  /** claude-api 換模型與舊對話衝突（409 api_model_changed）時的確認對話狀態。 */
+  apiModelConflict: ApiModelConflict | null
+  setApiModelConflict: (conflict: ApiModelConflict | null) => void
+  resolveApiModelConflict: (action: 'revert' | 'clear') => Promise<void>
   /** 一鍵送出 claude 的建議下一句（`run.prompt_suggestion`）：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣。`true`＝送出了；失敗已跳通知。 */
   acceptSuggestion: (botId: string) => Promise<boolean>
   /** `pinRunId`：作答流程固定的 Run（`lib/runPin.ts`）；帶了就只送給這個 Run，不符直接失敗，不走 fresh-run 重試。 */
@@ -958,6 +970,7 @@ export const useStore = create<StoreState>((set, get) => {
   composerDrafts: {},
   loginPromptDismissed: {},
   codexLoginAsk: null,
+  apiModelConflict: null,
 
   selectedProjectId: initialSelection.projectId,
 
@@ -1431,6 +1444,12 @@ export const useStore = create<StoreState>((set, get) => {
         try {
           await api.startBot(botId)
         } catch (e) {
+          if (e instanceof ApiError && e.status === 409 && (e.body?.reason === 'api_model_changed' || e.body?.error === 'api_model_changed')) {
+            const checkpointModel = typeof e.body.checkpoint_model === 'string' ? e.body.checkpoint_model : ''
+            const currentModel = typeof e.body.current_model === 'string' ? e.body.current_model : ''
+            set({ apiModelConflict: { botId, checkpointModel, currentModel } })
+            return
+          }
           // 503：agent 已經起來；409 已有 run：側欄還沒跟上。都不是「沒啟動」。
           if (isRunStateUncommitted(e, 'start')) {
             get().notify('error', runStateUncommittedText(e))
@@ -1560,7 +1579,13 @@ export const useStore = create<StoreState>((set, get) => {
         try {
           await api.startBot(botId)
         } catch (e) {
-          get().notify('error', t('啟動失敗：{reason}', { reason: errText(e) }))
+          if (e instanceof ApiError && e.status === 409 && (e.body?.reason === 'api_model_changed' || e.body?.error === 'api_model_changed')) {
+            const checkpointModel = typeof e.body.checkpoint_model === 'string' ? e.body.checkpoint_model : ''
+            const currentModel = typeof e.body.current_model === 'string' ? e.body.current_model : ''
+            set({ apiModelConflict: { botId, checkpointModel, currentModel } })
+            return false
+          }
+          get().notify('error', t('啟動失敗：{reason}', { reason: startErrText(e) }))
           return false
         }
       }
@@ -2041,11 +2066,13 @@ export const useStore = create<StoreState>((set, get) => {
     let out: PatchBotOutcome | null = null
     await guarded(set, get, `patch:${botId}`, async () => {
       const res = await api.patchBot(botId, input)
-      out = { needsRestart: res.needs_restart, deferred: res.live_apply?.deferred === true, remappedModel: res.remapped_model }
+      out = { needsRestart: res.needs_restart, deferred: res.live_apply?.deferred === true, remappedModel: res.remapped_model, ...(res.message ? { message: res.message } : {}) }
       // 停用的模型別名會被 daemon 換掉再存（API.md「停用模型的回應」）：不講的話，使用者以為自己選的生效了，
       // 而畫面上那一欄還停在他送出的值（issue #539）。三個送出入口共用這一句。
       if (res.remapped_model) {
         get().notify('info', t('「{from}」已停用，這顆 bot 改用「{to}」', { from: res.remapped_model.from, to: res.remapped_model.to }))
+      } else if (res.message) {
+        get().notify('info', res.message)
       }
       await get().refreshState()
     })
@@ -2430,6 +2457,35 @@ export const useStore = create<StoreState>((set, get) => {
     const ask = get().codexLoginAsk
     set({ codexLoginAsk: null })
     ask?.resolve(ok)
+  },
+
+  setApiModelConflict(conflict) {
+    set({ apiModelConflict: conflict })
+  },
+
+  async resolveApiModelConflict(action) {
+    const conflict = get().apiModelConflict
+    if (!conflict) return
+    set({ apiModelConflict: null })
+    const { botId, checkpointModel } = conflict
+    if (action === 'revert') {
+      try {
+        await api.patchBot(botId, { model: checkpointModel })
+        get().notify('info', t('已換回原模型 {model}', { model: checkpointModel }))
+        await get().startBot(botId)
+      } catch (e) {
+        get().notify('error', t('換回模型失敗：{reason}', { reason: errText(e) }))
+      }
+    } else if (action === 'clear') {
+      try {
+        await retireApiSession(botId)
+        get().notify('info', t('已清除對話，下一則從新模型開始'))
+        await get().startBot(botId)
+      } catch (e) {
+        get().notify('error', t('清除對話失敗：{reason}', { reason: errText(e) }))
+      }
+    }
+    await get().refreshState()
   },
 
   async logoutIdentity(host, identity) {

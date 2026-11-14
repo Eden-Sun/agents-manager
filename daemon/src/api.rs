@@ -3521,8 +3521,15 @@ async fn patch_bot(
             _ => true,
         }
     } else { false };
-    let mut out = json!({"needs_restart": needs_restart || role_needs_restart});
+    let mut out = json!({"needs_restart": if kind == "claude-api" { false } else { needs_restart || role_needs_restart }});
     if let Some(value) = remapped { out["remapped"] = value; }
+    if kind == "claude-api" && b.model.is_some() {
+        let has_session: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL)")
+            .bind(&id).fetch_one(&app.db).await.unwrap_or(false);
+        if has_session {
+            out["message"] = json!("下一回合起用新模型接續同一段對話");
+        }
+    }
     if let Some(outcome) = live {
         let (applied, pending_bookkeeping, reason) = match outcome {
             lifecycle::LiveApplyOutcome::Applied { .. } => (true, false, None),
@@ -5440,6 +5447,11 @@ async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Que
             ApiNativeStartError::Unconfirmed => LcError::Upstream("api_native_start_unconfirmed".into()),
             ApiNativeStartError::ClearedButStartUnconfirmed => LcError::Upstream("api_fresh_cleared_start_unconfirmed".into()),
             ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
+            ApiNativeStartError::ModelChanged { from, to } => LcError::conflict("api_model_changed", json!({
+                "reason": "api_model_changed",
+                "checkpoint_model": from,
+                "current_model": to,
+            })),
         })?;
         return Ok((StatusCode::OK, Json(json!({"run_id":result.run_id,"resumed":result.resumed}))).into_response());
     }
@@ -6416,6 +6428,7 @@ pub(crate) async fn prompt_bot(
                     Err(e) => {
                         let err_msg = match e {
                             ApiNativeStartError::Refused(reason) => format!("start_failed:{reason}"),
+                            ApiNativeStartError::ModelChanged { .. } => "start_failed:api_model_changed".to_string(),
                             ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
                             ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
                         };

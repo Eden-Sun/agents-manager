@@ -98,6 +98,8 @@ struct RuntimeInner {
     time_limited: Mutex<HashMap<FullKey, u64>>,
     /// 對話壓縮的提示訊息（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
     compaction_notes: Mutex<HashMap<FullKey, String>>,
+    /// 換模型接續對話的提示訊息（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
+    model_switch_notes: Mutex<HashMap<FullKey, String>>,
     /// 使用者強制中斷的回合：取消後 runner 回報的 Cancelled 要改記成 `user_interrupted` 的失敗，
     /// 這樣 join 是 `Failed`（同 run 的下一則可接續），不是只有 run 停止才有的 `Cancelled`。
     user_interrupts: Mutex<std::collections::HashSet<FullKey>>,
@@ -133,6 +135,7 @@ impl ApiBotRuntime {
                 cap_reached: Mutex::new(HashMap::new()),
                 time_limited: Mutex::new(HashMap::new()),
                 compaction_notes: Mutex::new(HashMap::new()),
+                model_switch_notes: Mutex::new(HashMap::new()),
                 user_interrupts: Mutex::new(std::collections::HashSet::new()),
             }),
             dependencies: Mutex::new(None),
@@ -579,6 +582,21 @@ impl ApiBotRuntime {
             return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
         }
 
+        let model_switch_note = if expected_cursor.is_some() {
+            let prev_model = state.responses.last().map(|r| r.model.as_str());
+            if let Some(prev) = prev_model {
+                if prev != options.model.as_str() {
+                    Some(format!("已從 {prev} 換成 {}，之前的推理區塊可能不會帶入", options.model))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let needs_instruction_update = match &state.system {
             Some(stored) => {
                 stored != &fresh_system_text
@@ -703,6 +721,13 @@ impl ApiBotRuntime {
                         .compaction_notes
                         .lock()
                         .expect("compaction note mutex poisoned")
+                        .insert(fail_key.clone(), note);
+                }
+                if let Some(note) = model_switch_note {
+                    fail_inner
+                        .model_switch_notes
+                        .lock()
+                        .expect("model switch note mutex poisoned")
                         .insert(fail_key.clone(), note);
                 }
                 let outcome = if deadline_elapsed {
@@ -1230,6 +1255,7 @@ async fn own_ticket_inner(
             let cap_reached = owner.app.api_bot_runtime.inner.cap_reached.lock().expect("cap reached mutex poisoned").remove(&FullKey::from(&owner.key));
             let time_limited = owner.app.api_bot_runtime.inner.time_limited.lock().expect("time limited mutex poisoned").remove(&FullKey::from(&owner.key));
             let compaction_note = owner.app.api_bot_runtime.inner.compaction_notes.lock().expect("compaction note mutex poisoned").remove(&FullKey::from(&owner.key));
+            let model_switch_note = owner.app.api_bot_runtime.inner.model_switch_notes.lock().expect("model switch note mutex poisoned").remove(&FullKey::from(&owner.key));
             if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
             ).await {
@@ -1237,6 +1263,9 @@ async fn own_ticket_inner(
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
                 if let Some(note) = compaction_note {
                     super::completion::post_compaction_notice(&owner.app, &owner.key, &note).await;
+                }
+                if let Some(note) = model_switch_note {
+                    super::completion::post_model_switch_notice(&owner.app, &owner.key, &note).await;
                 }
                 if joined == Completion::Failed {
                     super::completion::post_failure_notice(&owner.app, &owner.key, fail_reason.as_deref().unwrap_or("unknown")).await;

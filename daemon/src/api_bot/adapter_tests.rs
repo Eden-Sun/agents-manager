@@ -1048,20 +1048,21 @@ mod tests {
             generation: 2, // generation advances to old + 1
         };
 
-        // Thinking/checkpoint history cannot cross model generations.
+        // Supported models can cross-resume; unsupported models cannot.
         let previous: State = serde_json::from_value(serde_json::json!({
             "messages": [], "responses": [{"id":"prior","model":"claude-opus-5-5","content":[],"stop_reason":"end_turn","usage":{}}],
             "api_pending":false,"tool_pending":null,"completed_tool_ids":[]
         })).unwrap();
-        assert!(!super::super::adapter::checkpoint_matches_model(&previous, am_config::API_BOT_FABLE_MODEL));
+        assert!(super::super::adapter::checkpoint_matches_model(&previous, am_config::API_BOT_FABLE_MODEL));
         assert!(super::super::adapter::checkpoint_matches_model(&previous, am_config::API_BOT_MODEL));
+        assert!(!super::super::adapter::checkpoint_matches_model(&previous, "unsupported-model"));
 
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?")
             .bind(serde_json::to_string(&previous).unwrap()).bind(&old_identity.session_id).execute(&pool).await.unwrap();
-        let mut fable_options = test_options();
-        fable_options.model = am_config::API_BOT_FABLE_MODEL.into();
+        let mut unsupported_options = test_options();
+        unsupported_options.model = "unsupported-model".into();
         let mismatch = ApiBotAdapter::rebind(pool.clone(), &old_identity, settled_rev,
-            new_identity.clone(), fable_options, serde_json::json!("System"), test_limits(),
+            new_identity.clone(), unsupported_options, serde_json::json!("System"), test_limits(),
             Arc::new(TestQuoteProvider { reserved_amount:10_000, estimated_amount:5_000 }),
             AdapterHttpConfig { endpoint:server.endpoint.clone(),
                 key_source:Arc::new(super::super::adapter::FixedTestKey("synthetic".into())),
