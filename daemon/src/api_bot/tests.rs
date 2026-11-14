@@ -300,9 +300,33 @@ async fn refusal_token_limit_unknown_reason_and_round_budget_are_distinct() {
             1
         )
         .await,
-        Err(runner::Error::Budget)
+        Ok(runner::Halt::MaxCallsReached)
     );
     assert_eq!(f.seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        runner::run(
+            &HttpModel(&f),
+            &FakeTools::default(),
+            &MemoryJournal::default(),
+            &mut initial(),
+            &CancellationToken::new(),
+            0
+        )
+        .await,
+        Err(runner::Error::Budget)
+    );
+    assert_eq!(
+        runner::run(
+            &HttpModel(&f),
+            &FakeTools::default(),
+            &MemoryJournal::default(),
+            &mut initial(),
+            &CancellationToken::new(),
+            65
+        )
+        .await,
+        Err(runner::Error::Budget)
+    );
 }
 #[tokio::test]
 async fn duplicate_and_malformed_tools_execute_nothing() {
@@ -762,5 +786,106 @@ async fn http_error_truncates_long_message_and_masks_secrets() {
             assert!(msg.contains("‹redacted›"), "secret must be replaced with redacted marker");
         }
         other => panic!("expected Http, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn warning_block_appears_exactly_when_two_calls_remain() {
+    let warn_text = "[AG Man] You have 2 API calls left in this turn. Stop starting new work: write a progress summary (what is done, findings so far, what remains and how to continue) as your reply.";
+    let f = fixture(
+        200,
+        vec![
+            response(
+                vec![json!({"type":"tool_use","id":"t1","name":"bash","input":{"command":"echo 1"}})],
+                "tool_use",
+            ),
+            response(
+                vec![json!({"type":"tool_use","id":"t2","name":"bash","input":{"command":"echo 2"}})],
+                "tool_use",
+            ),
+            response(
+                vec![json!({"type":"text","text":"summary of progress"})],
+                "end_turn",
+            ),
+        ],
+    )
+    .await;
+    let mut state = initial();
+    let tools = FakeTools::default();
+    let journal = MemoryJournal::default();
+    let result = runner::run(
+        &HttpModel(&f),
+        &tools,
+        &journal,
+        &mut state,
+        &CancellationToken::new(),
+        4,
+    )
+    .await;
+    assert_eq!(result, Ok(runner::Halt::EndTurn));
+
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    let has_warn = |req: &Value| -> bool {
+        if let Some(msgs) = req.get("messages").and_then(Value::as_array) {
+            for m in msgs {
+                if let Some(blocks) = m.get("content").and_then(Value::as_array) {
+                    for b in blocks {
+                        if b.get("text").and_then(Value::as_str) == Some(warn_text) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    };
+    assert!(!has_warn(&seen[0]), "Call 1 must not have warning block");
+    assert!(!has_warn(&seen[1]), "Call 2 must not have warning block");
+    assert!(has_warn(&seen[2]), "Call 3 (2 calls remain) MUST have warning block");
+
+    let last_content = seen[2]["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap();
+    assert!(last_content.iter().any(|b| b["type"] == "text" && b["text"] == warn_text));
+}
+
+#[tokio::test]
+async fn turn_that_ends_early_never_sees_the_warning() {
+    let warn_text = "[AG Man] You have 2 API calls left in this turn";
+    let f = fixture(
+        200,
+        vec![
+            response(
+                vec![json!({"type":"tool_use","id":"t1","name":"bash","input":{"command":"echo 1"}})],
+                "tool_use",
+            ),
+            response(
+                vec![json!({"type":"text","text":"all done early"})],
+                "end_turn",
+            ),
+        ],
+    )
+    .await;
+    let mut state = initial();
+    let tools = FakeTools::default();
+    let journal = MemoryJournal::default();
+    let result = runner::run(
+        &HttpModel(&f),
+        &tools,
+        &journal,
+        &mut state,
+        &CancellationToken::new(),
+        5,
+    )
+    .await;
+    assert_eq!(result, Ok(runner::Halt::EndTurn));
+
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    for (i, req) in seen.iter().enumerate() {
+        let serialized = serde_json::to_string(req).unwrap();
+        assert!(
+            !serialized.contains(warn_text),
+            "Request {i} must never see the warning when ending early"
+        );
     }
 }

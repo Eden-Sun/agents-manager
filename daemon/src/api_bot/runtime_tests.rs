@@ -5303,3 +5303,211 @@ async fn claude_api_advisor_relay_end_to_end() {
     shutdown.cancel();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
+    struct TestTools;
+    impl super::super::runner::Tools for TestTools {
+        fn execute<'a>(
+            &'a self,
+            _: &'a crate::api_bot::protocol::ToolCall,
+            _: &'a CancellationToken,
+        ) -> futures::future::BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Ok("tool ok".into()) })
+        }
+    }
+
+    async fn complete(
+        axum::extract::State(calls): axum::extract::State<Arc<AtomicUsize>>,
+        Json(_): Json<Value>,
+    ) -> Json<Value> {
+        let n = calls.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Json(json!({
+                "id": "t1",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "bash", "input": {"command": "pwd"}}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })),
+            1 => Json(json!({
+                "id": "t2",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "tool_use", "id": "call_2", "name": "bash", "input": {"command": "pwd"}}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })),
+            2 => Json(json!({
+                "id": "t3",
+                "model": "claude-opus-5-5",
+                "content": [
+                    {"type": "text", "text": "Progress summary: scanned 50% of the codebase, remaining tasks: finish tests."},
+                    {"type": "tool_use", "id": "call_3", "name": "bash", "input": {"command": "pwd"}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })),
+            _ => Json(json!({
+                "id": "t4",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Resumed and finished remaining tasks."}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })),
+        }
+    }
+
+    let env = crate::testing::env().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/messages", post(complete))
+        .with_state(calls.clone());
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move { stop.cancelled().await })
+            .await
+            .unwrap()
+    });
+
+    enable_fake_runtime(&env.app, format!("http://{addr}/v1/messages"), DEADLOCK_TIMEOUT).await;
+    let mut deps = env.app.api_bot_runtime.test_dependencies().unwrap();
+    deps.tools = Arc::new(TestTools);
+    env.app.api_bot_runtime.set_test_dependencies(deps);
+
+    env.app
+        .cfg
+        .update(|c| {
+            c.claude_api.api_bot.max_api_calls_per_turn = 3;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let first = crate::db::ulid();
+    let second = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "start scan").await;
+    let one = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: first.clone(),
+    };
+    env.app.api_turn_spawn(&one).await.unwrap();
+    wait_until_completed(&env.app, &one).await;
+
+    // 1. Verify turn 1 ended as COMPLETED (not failed)
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+        .bind(&first)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed", "Cap reached turn must end as completed, not failed");
+
+    // 2. Verify assistant reply is the last assistant text
+    let assistant_msg: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE turn_id=? AND role='assistant'",
+    )
+    .bind(&first)
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        assistant_msg,
+        "Progress summary: scanned 50% of the codebase, remaining tasks: finish tests."
+    );
+
+    // 3. Verify system note exists with exact expected text
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
+                .bind(&first).fetch_one(&env.app.db).await.unwrap();
+            if n > 0 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let system_msg: String =
+        sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&first)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        system_msg,
+        "已達本回合 API 呼叫上限（3 次），回覆 continue 可接著做。"
+    );
+
+    // 4. Verify no failure notice was posted
+    let fail_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE turn_id=? AND content LIKE '%這一回合失敗%'",
+    )
+    .bind(&first)
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!(fail_count, 0);
+
+    // 5. Verify join receipt is applied and completed
+    let receipt_outcome: String =
+        sqlx::query_scalar("SELECT outcome FROM api_bot_join_receipts WHERE turn_id=?")
+            .bind(&first)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+    assert_eq!(receipt_outcome, "completed");
+
+    // 6. Resume: wait for turn 1 finalized proof to be set
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot).cloned();
+            let finalized = env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&one)).is_some_and(|r| r.finalized.is_some());
+            if cursor.is_some_and(|c| c.identity.turn_id == first) && finalized { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+
+    // 7. Spawn second turn ("continue") in the same session
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','continue',?)")
+        .bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let two = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: second.clone(),
+    };
+    env.app.api_turn_spawn(&two).await.unwrap();
+    wait_until_completed(&env.app, &two).await;
+
+    // 8. Verify second turn completed successfully
+    let status2: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+        .bind(&second)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status2, "completed");
+
+    let assistant_msg2: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE turn_id=? AND role='assistant'",
+    )
+    .bind(&second)
+    .fetch_one(&env.app.db)
+    .await
+    .unwrap();
+    assert_eq!(assistant_msg2, "Resumed and finished remaining tasks.");
+
+    let session_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM api_bot_sessions WHERE bot_id=?")
+            .bind(&bot)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+    assert_eq!(session_count, 1, "Must resume in the same session");
+
+    shutdown.cancel();
+    server.await.unwrap();
+}

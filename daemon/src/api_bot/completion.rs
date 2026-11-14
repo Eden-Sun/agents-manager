@@ -554,3 +554,22 @@ pub(super) async fn post_failure_notice(app: &Arc<App>, key: &ApiTurnKey, reason
         Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot failure notice could not be stored"),
     }
 }
+
+/// 達到 API 呼叫上限時在對話中留一則可見的系統訊息，通知使用者可回覆 continue 接著做。
+pub(super) async fn post_cap_notice(app: &Arc<App>, key: &ApiTurnKey, max_calls: usize) {
+    let text = format!("已達本回合 API 呼叫上限（{max_calls} 次），回覆 continue 可接著做。");
+    let posted: Result<Option<crate::db::Message>> = async {
+        let mut tx = crate::db::begin_write(&app.db).await?;
+        let conversation: Option<String> = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=? AND run_id=?")
+            .bind(&key.turn_id).bind(&key.run_id).fetch_optional(&mut *tx).await?;
+        let Some(conversation) = conversation else { return Ok(None) };
+        let message = crate::lifecycle::insert_message_tx(&mut tx, &conversation, Some(&key.turn_id), "system", &text, "system", false, None).await?;
+        tx.commit().await?;
+        Ok(Some(message))
+    }.await;
+    match posted {
+        Ok(Some(message)) => crate::lifecycle::emit_message_added(app, &key.bot_id, message).await,
+        Ok(None) => {}
+        Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot cap notice could not be stored"),
+    }
+}

@@ -38,6 +38,7 @@ pub enum Halt {
     EndTurn,
     Refusal,
     MaxTokens,
+    MaxCallsReached,
     Other(String),
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -82,7 +83,7 @@ pub async fn run(
     if !(1..=64).contains(&max_calls) || state.messages.is_empty() {
         return Err(Error::Budget);
     }
-    for _ in 0..max_calls {
+    for call_idx in 0..max_calls {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -152,10 +153,22 @@ pub async fn run(
             }
             checkpoint(journal, state).await?;
         }
+        let remaining_calls = max_calls - (call_idx + 1);
+        if remaining_calls == 2 {
+            results.push(json!({
+                "type": "text",
+                "text": "[AG Man] You have 2 API calls left in this turn. Stop starting new work: write a progress summary (what is done, findings so far, what remains and how to continue) as your reply."
+            }));
+            state
+                .messages
+                .last_mut()
+                .expect("tool result batch exists")
+                .content = json!(results);
+        }
         state.tool_pending = None;
         checkpoint(journal, state).await?;
     }
-    Err(Error::Budget)
+    Ok(Halt::MaxCallsReached)
 }
 
 async fn checkpoint(journal: &impl Journal, state: &mut State) -> Result<(), Error> {

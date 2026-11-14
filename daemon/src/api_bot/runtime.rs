@@ -92,6 +92,8 @@ struct RuntimeInner {
     explicit_quarantine: Mutex<HashMap<String, Arc<()>>>,
     /// 失敗 turn 的固定原因代碼（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
     fail_reasons: Mutex<HashMap<FullKey, String>>,
+    /// 達到 API 呼叫上限的回合（記錄該回合的上限值 N，由 completion owner 取走後寫進系統提示）。
+    cap_reached: Mutex<HashMap<FullKey, usize>>,
 }
 
 /// Runtime storage is initialized without tasks, sockets, or database work.
@@ -121,6 +123,7 @@ impl ApiBotRuntime {
                 bot_admission: AsyncMutex::new(HashMap::new()),
                 explicit_quarantine: Mutex::new(HashMap::new()),
                 fail_reasons: Mutex::new(HashMap::new()),
+                cap_reached: Mutex::new(HashMap::new()),
             }),
             dependencies: Mutex::new(None),
         }
@@ -624,13 +627,26 @@ impl ApiBotRuntime {
                 let outcome = if deadline_elapsed {
                     TurnOutcome::Failed("turn_timeout".into())
                 } else {
+                    if matches!(&result, Ok(super::runner::Halt::MaxCallsReached)) {
+                        fail_inner
+                            .cap_reached
+                            .lock()
+                            .expect("cap reached mutex poisoned")
+                            .insert(fail_key.clone(), max_calls);
+                    }
                     map_runner_result(result, &cancel, refusal)
                 };
                 if let TurnOutcome::Failed(reason) = &outcome {
                     fail_inner.fail_reasons.lock().expect("fail reason mutex poisoned").insert(fail_key.clone(), reason.clone());
                 }
                 if matches!(&outcome, TurnOutcome::Completed) {
-                    if let Some(response) = state.responses.last() {
+                    let last_response_with_text = state
+                        .responses
+                        .iter()
+                        .rev()
+                        .find(|r| !super::runner::final_text(r).trim().is_empty())
+                        .or_else(|| state.responses.last());
+                    if let Some(response) = last_response_with_text {
                         let _ = final_text_tx.send(super::completion::FinalText::from_response(response));
                     }
                 }
@@ -1060,6 +1076,7 @@ async fn own_ticket_inner(
                 (&mut owner.final_text).await.ok()
             } else { None };
             let fail_reason = owner.app.api_bot_runtime.inner.fail_reasons.lock().expect("fail reason mutex poisoned").remove(&FullKey::from(&owner.key));
+            let cap_reached = owner.app.api_bot_runtime.inner.cap_reached.lock().expect("cap reached mutex poisoned").remove(&FullKey::from(&owner.key));
             if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
             ).await {
@@ -1067,6 +1084,8 @@ async fn own_ticket_inner(
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
                 if joined == Completion::Failed {
                     super::completion::post_failure_notice(&owner.app, &owner.key, fail_reason.as_deref().unwrap_or("unknown")).await;
+                } else if let Some(n) = cap_reached {
+                    super::completion::post_cap_notice(&owner.app, &owner.key, n).await;
                 }
                 // 乾淨地結束（完成，或失敗但 checkpoint 已由 receipt 結清）才算 same-run 可接續；失敗後的下一則由 checkpoint 決定能不能繼續
                 // （有 unknown 的送出會在 rebind 時以 pending_unknown 明確失敗），不再卡在 in_flight/pending。
@@ -1620,7 +1639,11 @@ fn map_runner_result(
 ) -> TurnOutcome {
     use super::http::Error as H;
     match result {
-        Ok(super::runner::Halt::EndTurn | super::runner::Halt::Refusal) => TurnOutcome::Completed,
+        Ok(
+            super::runner::Halt::EndTurn
+            | super::runner::Halt::Refusal
+            | super::runner::Halt::MaxCallsReached,
+        ) => TurnOutcome::Completed,
         Ok(super::runner::Halt::MaxTokens) => TurnOutcome::Failed("max_tokens".into()),
         Ok(super::runner::Halt::Other(_)) => TurnOutcome::Failed("unknown_stop".into()),
         Err(super::runner::Error::Cancelled) => TurnOutcome::Cancelled,
