@@ -775,6 +775,9 @@ pub struct JudgeCfg {
     /// 保險絲：一小時內問過這麼多次就不再問。
     #[serde(default = "default_judge_max_per_hour")]
     pub max_per_hour: u32,
+    /// 訊息翻譯品質檢查門檻（預設 0.5）：Jev 的 is_faithful 機率低於此值則視為未通過。
+    #[serde(default = "default_judge_translate_min_probability")]
+    pub translate_min_probability: f64,
 }
 
 fn default_judge_key_file() -> String {
@@ -792,6 +795,9 @@ fn default_judge_timeout_ms() -> u64 {
 fn default_judge_max_per_hour() -> u32 {
     60
 }
+fn default_judge_translate_min_probability() -> f64 {
+    0.5
+}
 
 impl Default for JudgeCfg {
     fn default() -> Self {
@@ -803,6 +809,7 @@ impl Default for JudgeCfg {
             model: default_judge_model(),
             timeout_ms: default_judge_timeout_ms(),
             max_per_hour: default_judge_max_per_hour(),
+            translate_min_probability: default_judge_translate_min_probability(),
         }
     }
 }

@@ -25,6 +25,7 @@ pub(crate) const MAX_CHARS: usize = 20_000;
 const MAX_OUT_TOKENS: u32 = 8_000;
 
 const SYSTEM: &str = "You are a translation engine. Translate the user's message into Traditional Chinese (zh-TW, Taiwan usage). \
+請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。 \
 Preserve the markdown structure exactly (headings, lists, tables, emphasis, links). \
 Do NOT translate fenced code blocks, inline code, file paths, shell commands, URLs, identifiers, environment variables, \
 commit hashes or issue numbers: copy them verbatim. Do not add explanations, notes or quotes. Reply with the translation only.";
@@ -37,13 +38,16 @@ struct CacheEntry {
     /// 翻這次實際花的美元（依 [`cost_usd`]）；舊快取沒有。快取命中時照樣回傳，前端標「快取，未扣費」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cost_usd: Option<f64>,
+    /// Jev 判定為忠實台灣繁體中文翻譯的機率（SPEC §4.3c 第六個場景）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jev_prob: Option<f64>,
 }
 
 pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
-        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>"
+        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>"
     );
     ClaudeRequest {
         use_case: USE_CASE,
@@ -85,7 +89,11 @@ fn cache_path(data_dir: &Path, key: &str) -> PathBuf {
 fn load(path: &Path) -> Option<CacheEntry> {
     serde_json::from_slice(&std::fs::read(path).ok()?)
         .ok()
-        .filter(|e: &CacheEntry| !e.translation.trim().is_empty() && !is_mostly_english(&e.translation))
+        .filter(|e: &CacheEntry| {
+            !e.translation.trim().is_empty()
+                && !is_mostly_english(&e.translation)
+                && !has_japanese_kana(&e.translation)
+        })
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
@@ -146,25 +154,152 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
 /// 簡體 → 台灣繁體（本地，不呼叫 API）。結果寫進同一份快取，之後命中即 `cached:true`。
 fn local_convert(content: &str, path: &Path) -> Value {
     let translation = crate::zh_convert::to_traditional(content);
-    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0) };
+    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0), jev_prob: None };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
     json!({"translation": translation, "model": crate::zh_convert::MODEL, "cached": false, "cost_usd": 0.0})
 }
 
+const JEV_CHARS: usize = 6_000;
+const JEV_QUESTION: &str = "is_faithful";
+const JEV_PROMPT: &str = "Is the TRANSLATION a faithful Traditional Chinese (Taiwan) translation of the SOURCE, in Traditional Chinese, with nothing missing or added?";
+
+fn jev_request_body(model: &str, source: &str, translation: &str) -> Value {
+    json!({
+        "model": model,
+        "state": {
+            "source": source,
+            "translation": translation,
+        },
+        "questions": {
+            JEV_QUESTION: {
+                "type": "noul",
+                "instructions": {
+                    "question": JEV_PROMPT,
+                },
+            }
+        }
+    })
+}
+
+/// 透過 Jev 檢查譯文是否為忠實的台灣繁體中文翻譯（SPEC §4.3c 第六個場景）。
+/// 若 Jev 未啟用、未設定 key、保險絲用盡、逾時或發生錯誤，則 fail-open 記 debug log 並回傳 `None`。
+async fn check_jev(app: &App, id: &str, source: &str, translation: &str) -> Option<f64> {
+    let cfg = app.cfg.get().await.judge;
+    if !cfg.enabled {
+        return None;
+    }
+    let (bot_id, project_id, project_label, kind) = match sqlx::query_as::<_, (String, String, Option<String>, String)>(
+        "SELECT b.id, b.project_id, p.label, b.kind FROM messages m \
+         JOIN conversations c ON c.id = m.conversation_id \
+         JOIN bots b ON b.id = c.bot_id \
+         LEFT JOIN projects p ON p.id = b.project_id \
+         WHERE m.id = ?"
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await
+    {
+        Ok(Some((b_id, p_id, p_label, kind))) => (b_id, p_id, p_label.unwrap_or_default(), kind),
+        _ => (String::new(), "*".to_string(), String::new(), "claude".to_string()),
+    };
+
+    if crate::judge::gate(&cfg, &project_id, &project_label, 0).is_some() {
+        return None;
+    }
+
+    let masked_source: String = crate::judge::mask(source).chars().take(JEV_CHARS).collect();
+    let masked_translation: String = crate::judge::mask(translation).chars().take(JEV_CHARS).collect();
+    let matched_line: String = masked_translation.chars().take(500).collect();
+
+    let slot = match crate::judge::reserve_slot(
+        app,
+        &cfg,
+        &project_id,
+        &project_label,
+        &bot_id,
+        id,
+        &kind,
+        &matched_line,
+        false,
+        "translate_fidelity",
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("check_jev reserve_slot skipped or failed: {e}");
+            return None;
+        }
+    };
+
+    let body = jev_request_body(&cfg.model, &masked_source, &masked_translation);
+    let started = std::time::Instant::now();
+    let answer = match crate::judge::read_key(&cfg.key_file) {
+        Ok(key) => crate::judge::ask_noul(&cfg, &key, &body, JEV_QUESTION).await,
+        Err(e) => Err(e),
+    };
+    let ms = started.elapsed().as_millis() as i64;
+    let (p, model, tokens, error) = match &answer {
+        Ok(a) => (Some(a.value), a.model.clone(), a.input_tokens, None),
+        Err(e) => (None, None, None, Some(e.to_string())),
+    };
+    if let Err(e) = crate::judge::settle_slot(app, &slot, p, model, ms, tokens, error).await {
+        tracing::debug!("check_jev settle_slot failed: {e}");
+    }
+    match answer {
+        Ok(a) => Some(a.value),
+        Err(e) => {
+            tracing::debug!("check_jev ask_noul failed, fail open: {e}");
+            None
+        }
+    }
+}
+
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
     let mut reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
     let mut translation = clean_reply(&reply.text);
-    if is_mostly_english(content) && is_mostly_english(&translation) {
-        reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
-        translation = clean_reply(&reply.text);
-        if is_mostly_english(&translation) {
-            return Err(LcError::Upstream("translate_untranslated".into()));
+
+    let min_prob = app.cfg.get().await.judge.translate_min_probability;
+    let mut jev_prob = None;
+
+    let mut rejected = local_rejected(content, &translation);
+    if !rejected {
+        let p = check_jev(app, id, content, &translation).await;
+        if p.is_some_and(|v| v < min_prob) {
+            rejected = true;
+        } else {
+            jev_prob = p;
         }
     }
+
+    if rejected {
+        reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
+        translation = clean_reply(&reply.text);
+
+        if is_mostly_english(content) && is_mostly_english(&translation) {
+            return Err(LcError::Upstream("translate_untranslated".into()));
+        }
+        if !has_japanese_kana(content) && has_japanese_kana(&translation) {
+            return Err(LcError::Upstream("translate_rejected".into()));
+        }
+
+        let p = check_jev(app, id, content, &translation).await;
+        if p.is_some_and(|v| v < min_prob) {
+            return Err(LcError::Upstream("translate_rejected".into()));
+        }
+        jev_prob = p;
+    }
+
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry { translation, model: reply.model.clone(), prompt_version: PROMPT_VERSION.into(), cost_usd: cost };
+    let entry = CacheEntry {
+        translation,
+        model: reply.model.clone(),
+        prompt_version: PROMPT_VERSION.into(),
+        cost_usd: cost,
+        jev_prob,
+    };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
@@ -209,9 +344,21 @@ pub async fn post_translate(
 
 const SUMMARY_VERSION: &str = "1";
 const SUMMARY_SYSTEM: &str = "You write one-line push notification text. Summarize the user's message as ONE short sentence in Traditional Chinese \
-(zh-TW, Taiwan usage), at most 40 characters. Say what happened or what is being asked. Do NOT include code, file paths, URLs, \
+(zh-TW, Taiwan usage), at most 40 characters. 請寫成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。 \
+Say what happened or what is being asked. Do NOT include code, file paths, URLs, \
 commit hashes, keys or tokens. No quotes, no markdown, no preface. Reply with the sentence only.";
 pub(crate) const SUMMARY_MAX_CHARS: usize = 40;
+
+/// 判斷文字是否含有日文假名（平假名 U+3040–U+309F 或片假名 U+30A0–U+30FF）。
+pub(crate) fn has_japanese_kana(text: &str) -> bool {
+    text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}'))
+}
+
+/// 本地廉價檢查：日文假名（原文沒有但譯文有）或主要為英文（原文為英文且譯文未翻譯）。
+pub(crate) fn local_rejected(source: &str, reply: &str) -> bool {
+    (!has_japanese_kana(source) && has_japanese_kana(reply))
+        || (is_mostly_english(source) && is_mostly_english(reply))
+}
 
 /// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過十分之一）。
 pub(crate) fn is_mostly_english(text: &str) -> bool {
@@ -262,7 +409,7 @@ pub(crate) async fn summarize(app: &App, content: &str) -> Result<String, LcErro
     let mut out: String = line.chars().take(SUMMARY_MAX_CHARS).collect();
     if line.chars().count() > SUMMARY_MAX_CHARS { out.push('…'); }
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost };
+    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost, jev_prob: None };
     if let Err(e) = save(&path, &entry) {
         tracing::warn!("push summary cache write failed: {e}");
     }
@@ -600,6 +747,9 @@ mod tests {
         assert!(sys.contains("Traditional Chinese") && sys.contains("fenced code blocks") && sys.contains("commit hashes") && sys.contains("translation only"));
         assert!(r.prompt.contains("<source>\nRun `cargo test` in /tmp\n</source>"));
         assert!(r.prompt.contains("Traditional Chinese (zh-TW"));
+        assert!(r.prompt.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
+        assert!(sys.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
+        assert!(SUMMARY_SYSTEM.contains("請寫成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
     }
 
     #[test]
@@ -687,6 +837,7 @@ mod tests {
             model: "claude-haiku-5-5".into(),
             prompt_version: PROMPT_VERSION.into(),
             cost_usd: Some(0.000193),
+            jev_prob: None,
         };
         save(&path, &bad_entry).unwrap();
         assert!(path.exists(), "壞快取已寫入磁碟");
@@ -700,6 +851,174 @@ mod tests {
         assert_eq!(res["translation"], json!("504 錯誤來自 GitHub，已重新翻譯為繁體中文。"));
         let hit = load(&path).expect("繁體中文快取被正確存檔且可被 load");
         assert_eq!(hit.translation, "504 錯誤來自 GitHub，已重新翻譯為繁體中文。");
+    }
+
+    #[tokio::test]
+    async fn japanese_output_retries_and_caches_good() {
+        let (app, _dir) = app(true).await;
+        let content = "The system has encountered an unexpected condition.";
+        let replies = vec![
+            "システムで予期しない状態が発生しました。".to_string(),
+            "系統遇到了非預期的狀況。".to_string(),
+        ];
+        let f = fake_seq(&app, replies);
+        let a = translate(&app, "m_ja", content).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "日文假名觸發重試，共打兩次");
+        assert_eq!(a["cached"], json!(false));
+        assert_eq!(a["translation"], json!("系統遇到了非預期的狀況。"));
+        let key = cache_key("m_ja", content);
+        assert!(cache_path(&app.data_dir, &key).exists(), "第二次成功的繁中譯文被存入快取");
+
+        let b = translate(&app, "m_ja", content).await.unwrap();
+        assert_eq!(b["cached"], json!(true));
+        assert_eq!(b["translation"], json!("系統遇到了非預期的狀況。"));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中快取不重複調用 API");
+    }
+
+    #[tokio::test]
+    async fn cached_japanese_entry_is_treated_as_miss() {
+        let (app, _dir) = app(true).await;
+        let content = "The system has encountered an unexpected condition.";
+        let key = cache_key("m_bad_ja", content);
+        let path = cache_path(&app.data_dir, &key);
+
+        let bad_entry = CacheEntry {
+            translation: "システムで予期しない状態が発生しました。".to_string(),
+            model: "claude-haiku-5-5".into(),
+            prompt_version: PROMPT_VERSION.into(),
+            cost_usd: Some(0.000193),
+            jev_prob: None,
+        };
+        save(&path, &bad_entry).unwrap();
+        assert!(path.exists(), "壞日文快取已寫入磁碟");
+        assert!(load(&path).is_none(), "load() 必須將含假名的快取視為 miss");
+
+        let replies = vec!["系統遇到了非預期的狀況。".to_string()];
+        let f = fake_seq(&app, replies);
+        let res = translate(&app, "m_bad_ja", content).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "日文快取被當成 miss，重新打 API");
+        assert_eq!(res["cached"], json!(false));
+        assert_eq!(res["translation"], json!("系統遇到了非預期的狀況。"));
+        let hit = load(&path).expect("繁體中文快取被正確存檔且可被 load");
+        assert_eq!(hit.translation, "系統遇到了非預期的狀況。");
+    }
+
+    async fn fake_jev_server(probs: Vec<f64>) -> (String, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cl = calls.clone();
+        let probs = Arc::new(Mutex::new(probs));
+        let app = axum::Router::new().route("/", axum::routing::post(move || {
+            let calls = calls_cl.clone();
+            let probs = probs.clone();
+            async move {
+                let idx = calls.fetch_add(1, Ordering::SeqCst);
+                let p = probs.lock().unwrap().get(idx).copied().unwrap_or(1.0);
+                axum::Json(json!({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "is_faithful": {
+                            "noul": p,
+                        }
+                    },
+                    "usage": {"input_tokens": 42}
+                }))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}"), calls)
+    }
+
+    async fn enable_jev(app: &Arc<App>, dir: &Path, endpoint: String) {
+        let key_file = dir.join("jev_key");
+        std::fs::write(&key_file, "secret-jev-key\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let key_str = key_file.to_string_lossy().into_owned();
+        app.cfg.update(move |c| {
+            c.judge.enabled = true;
+            c.judge.endpoint = endpoint;
+            c.judge.key_file = key_str;
+            c.judge.projects = vec!["*".into()];
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn jev_low_then_high_caches_second_translation() {
+        let (app, dir) = app(true).await;
+        let (endpoint, jev_calls) = fake_jev_server(vec![0.2, 0.9]).await;
+        enable_jev(&app, &dir, endpoint).await;
+
+        let content = "The server returned 504 Gateway Timeout.";
+        let replies = vec![
+            "伺服器回傳了 504 閘道超時。".to_string(),
+            "伺服器回應 504 Gateway Timeout（閘道逾時）。".to_string(),
+        ];
+        let f = fake_seq(&app, replies);
+        let res = translate(&app, "m_jev_low_high", content).await.unwrap();
+
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "Haiku 打兩次");
+        assert_eq!(jev_calls.load(Ordering::SeqCst), 2, "Jev 問兩次");
+        assert_eq!(res["translation"], json!("伺服器回應 504 Gateway Timeout（閘道逾時）。"));
+        assert_eq!(res["cached"], json!(false));
+
+        let key = cache_key("m_jev_low_high", content);
+        let path = cache_path(&app.data_dir, &key);
+        let hit = load(&path).expect("第二次成功結果入快取");
+        assert_eq!(hit.translation, "伺服器回應 504 Gateway Timeout（閘道逾時）。");
+        assert_eq!(hit.jev_prob, Some(0.9), "快取內存入通過的 Jev 機率");
+    }
+
+    #[tokio::test]
+    async fn jev_low_twice_returns_error_and_no_cache() {
+        let (app, dir) = app(true).await;
+        let (endpoint, jev_calls) = fake_jev_server(vec![0.2, 0.3]).await;
+        enable_jev(&app, &dir, endpoint).await;
+
+        let content = "The server returned 504 Gateway Timeout.";
+        let replies = vec![
+            "伺服器回傳了 504。".to_string(),
+            "伺服器逾時。".to_string(),
+        ];
+        let f = fake_seq(&app, replies);
+        let err = translate(&app, "m_jev_fail", content).await.unwrap_err();
+
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "Haiku 打兩次");
+        assert_eq!(jev_calls.load(Ordering::SeqCst), 2, "Jev 問兩次");
+        assert!(matches!(&err, LcError::Upstream(msg) if msg == "translate_rejected"), "兩次低機率回傳 translate_rejected: {err:?}");
+
+        let key = cache_key("m_jev_fail", content);
+        let path = cache_path(&app.data_dir, &key);
+        assert!(!path.exists(), "Jev 兩次未通過不寫入快取");
+    }
+
+    #[tokio::test]
+    async fn jev_unavailable_accepts_translation() {
+        let (app, _dir) = app(true).await;
+        // Jev 預設是 disabled (app.cfg.get().judge.enabled == false)
+        assert!(!app.cfg.get().await.judge.enabled);
+
+        let content = "The operation completed successfully.";
+        let replies = vec!["操作已成功完成。".to_string()];
+        let f = fake_seq(&app, replies);
+        let res = translate(&app, "m_jev_unavail", content).await.unwrap();
+
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "只打一次 Haiku");
+        assert_eq!(res["translation"], json!("操作已成功完成。"));
+        assert_eq!(res["cached"], json!(false));
+
+        let key = cache_key("m_jev_unavail", content);
+        let path = cache_path(&app.data_dir, &key);
+        let hit = load(&path).expect("Jev 不可用時 fail-open 寫入快取");
+        assert_eq!(hit.translation, "操作已成功完成。");
+        assert_eq!(hit.jev_prob, None, "Jev 未執行時 jev_prob 為 None");
     }
 
     #[test]
