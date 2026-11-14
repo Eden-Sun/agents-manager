@@ -996,6 +996,12 @@ async fn prompt_inner(
         return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt(app, bot_id, text, client_request_id)
             .await.map_err(|error| match error {
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
+                crate::lifecycle::api_bot_port::ApiNativePromptError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
+                crate::lifecycle::api_bot_port::ApiNativePromptError::ModelChanged { from, to } => LcError::conflict("api_model_changed", json!({
+                    "reason": "api_model_changed",
+                    "checkpoint_model": from,
+                    "current_model": to,
+                })),
             });
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]

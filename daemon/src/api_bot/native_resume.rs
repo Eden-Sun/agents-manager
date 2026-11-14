@@ -36,6 +36,18 @@ impl From<ResumeProofError> for ApiBotError {
     }
 }
 
+/// 證明失敗時對外的穩定 reason（`None`＝真的無法確認，才是 Unconfirmed）。start 與 prompt 共用。
+pub(super) fn stable_reason(e: &ResumeProofError) -> Option<&'static str> {
+    match e {
+        ResumeProofError::ModelChanged { .. } => Some("api_model_changed"),
+        ResumeProofError::ContextUnsettled => Some("api_context_unsettled"),
+        ResumeProofError::SessionExpired => Some("api_session_expired"),
+        ResumeProofError::CheckpointTooLarge => Some("api_checkpoint_too_large"),
+        ResumeProofError::ReceiptUnsettled => Some("api_receipt_unsettled"),
+        ResumeProofError::Unconfirmed => None,
+    }
+}
+
 pub(super) enum ProofMode<'a> { StartBeforeRun, RuntimeBeforeRebind(&'a str) }
 
 pub(super) fn prove_on<'a>(conn: &'a mut sqlx::SqliteConnection, bot: &'a str, old_run: &'a str, mode: ProofMode<'a>) -> impl Future<Output = Result<ResumeHandoffProof, ResumeProofError>> + Send + 'a {

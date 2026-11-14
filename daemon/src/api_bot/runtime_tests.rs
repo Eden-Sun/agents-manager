@@ -6560,3 +6560,184 @@ async fn api_bot_force_interrupt_during_a_tool_settles_the_batch_and_the_next_pr
     assert_eq!(b["content"], "not executed: interrupted by user");
     server.abort();
 }
+
+/// 同 [`fake_server`]，但把每一則請求的 JSON 存下來，給換模型測試檢查 `model`。
+async fn recording_bodies_server(
+    calls: Arc<AtomicUsize>,
+    hit: Arc<Notify>,
+    bodies: Arc<std::sync::Mutex<Vec<Value>>>,
+) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    async fn complete(
+        axum::extract::State((calls, hit, bodies)): axum::extract::State<(Arc<AtomicUsize>, Arc<Notify>, Arc<std::sync::Mutex<Vec<Value>>>)>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        bodies.lock().unwrap().push(body);
+        calls.fetch_add(1, Ordering::SeqCst);
+        hit.notify_one();
+        // 真的 API 回的就是請求的模型；echo 回去，不然 adapter 會當成模型不符。
+        let model = bodies.lock().unwrap().last().and_then(|b| b["model"].as_str().map(str::to_owned)).unwrap_or_default();
+        Json(json!({
+            "id":"fixture-message",
+            "type":"message",
+            "role":"assistant",
+            "model":model,
+            "content":[{"type":"text","text":"fixture answer"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }))
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route("/v1/messages", post(complete)).with_state((calls, hit, bodies));
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(async move { shutdown_task.cancelled().await }).await.unwrap();
+    });
+    (format!("http://{address}/v1/messages"), shutdown, task)
+}
+
+/// 用 opus 完成第一回合、停掉 bot、重啟 app，停在「可以 resume」的狀態。回傳 (bot, 舊 run)。
+async fn opus_session_then_restart(
+    env: &crate::testing::Env,
+    endpoint: String,
+    hit: &Arc<Notify>,
+) -> (String, String, Arc<crate::state::App>) {
+    enable_fake_runtime(&env.app, endpoint.clone(), DEADLOCK_TIMEOUT).await;
+    let bot = crate::db::ulid();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,effort,hook_token,created_at) VALUES(?,?,?,'claude-api','high','fixture',?)")
+        .bind(&bot).bind(&env.project_id).bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+    let first = crate::lifecycle::prompt(&env.app, &bot, "first", &crate::db::ulid()).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: first.turn_id };
+    wait_until_completed(&env.app, &key).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+    crate::lifecycle::stop_bot(&env.app, &bot).await.unwrap();
+    env.app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+    let app = crate::testing::restart_app(env).await;
+    app.set_startup_ready(false);
+    super::super::startup_gate::barrier(&app).await;
+    app.set_startup_ready(true);
+    enable_fake_runtime(&app, endpoint, DEADLOCK_TIMEOUT).await;
+    (bot, run, app)
+}
+
+/// 換模型後舊 opus 對話接續：請求用新模型、對話寫入系統提示；不支援的模型在送出前就明確拒絕（不寫 pending 回合）。
+#[tokio::test]
+async fn native_model_switch_resumes_on_fable_and_writes_notice() {
+    let env = crate::testing::env().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hit = Arc::new(Notify::new());
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let (endpoint, shutdown, server) = recording_bodies_server(calls.clone(), hit.clone(), bodies.clone()).await;
+    let (bot, _old_run, app) = opus_session_then_restart(&env, endpoint, &hit).await;
+    sqlx::query("UPDATE bots SET model='claude-fable-5-2' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+    let run2 = crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap();
+    let second = crate::lifecycle::prompt(&app, &bot, "second", &crate::db::ulid()).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run2, turn_id: second.turn_id };
+    wait_until_completed(&app, &key2).await;
+    app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, app.background_tasks.wait()).await.unwrap();
+    let seen = bodies.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "one request per turn");
+    assert_eq!(seen[0]["model"], am_config::API_BOT_MODEL);
+    assert_eq!(seen[1]["model"], "claude-fable-5-2", "the resumed turn must use the bot's new model");
+    let notice: Vec<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='system'")
+        .bind(&bot).fetch_all(&app.db).await.unwrap();
+    assert!(
+        notice.iter().any(|c| c.contains("已從 claude-opus-5-5 換成 claude-fable-5-2")),
+        "system notice must record the switch: {notice:?}"
+    );
+    shutdown.cancel();
+    server.await.unwrap();
+}
+
+/// 送 prompt 時才發現不能接續（模型改成不支援的）：回 409 `api_model_changed`，而且沒有建立任何回合。
+#[tokio::test]
+async fn native_prompt_refuses_unsupported_model_with_409_before_any_turn() {
+    let env = crate::testing::env().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hit = Arc::new(Notify::new());
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let (endpoint, shutdown, server) = recording_bodies_server(calls.clone(), hit.clone(), bodies.clone()).await;
+    let (bot, _old_run, app) = opus_session_then_restart(&env, endpoint, &hit).await;
+    crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap();
+    sqlx::query("UPDATE bots SET model='unsupported-model' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+    let crid = crate::db::ulid();
+    let err = crate::lifecycle::prompt(&app, &bot, "second", &crid).await.unwrap_err();
+    match err {
+        crate::lifecycle::LcError::Conflict(v) => {
+            assert_eq!(v["reason"], "api_model_changed");
+            assert_eq!(v["checkpoint_model"], am_config::API_BOT_MODEL);
+            assert_eq!(v["current_model"], "unsupported-model");
+        }
+        other => panic!("expected 409 api_model_changed, got {other:?}"),
+    }
+    let turns: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE client_request_id=?").bind(&crid).fetch_one(&app.db).await.unwrap();
+    assert_eq!(turns, 0, "a refused continuity must not leave a pending turn behind");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "no provider request for the refused turn");
+    app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, app.background_tasks.wait()).await.unwrap();
+    shutdown.cancel();
+    server.await.unwrap();
+}
+
+/// HTTP 層：不支援的模型在 start 與 prompt 都回 409 `api_model_changed`（同一個 reason，網頁據此跳確認框）。
+#[tokio::test]
+async fn native_model_switch_refusals_are_http_409_with_stable_reason() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn request(addr: std::net::SocketAddr, method: &str, path: &str, token: &str, body: &str) -> (String, Value) {
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response framing");
+            (headers.lines().next().unwrap().to_owned(), serde_json::from_str(body).unwrap_or(Value::Null))
+        })
+        .await
+        .expect("router HTTP request timed out")
+    }
+    let env = crate::testing::env().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hit = Arc::new(Notify::new());
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let (endpoint, provider_stop, provider) = recording_bodies_server(calls.clone(), hit.clone(), bodies.clone()).await;
+    let (bot, _old_run, app) = opus_session_then_restart(&env, endpoint, &hit).await;
+    sqlx::query("UPDATE bots SET model='unsupported-model' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router_stop = CancellationToken::new();
+    let stop = router_stop.clone();
+    let router = crate::api::router(app.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .with_graceful_shutdown(async move { stop.cancelled().await })
+            .await
+            .unwrap()
+    });
+    let token = app.ui_token.clone();
+    let (status, body) = request(addr, "POST", &format!("/api/bots/{bot}/start"), &token, "").await;
+    assert!(status.contains(" 409 "), "start status: {status}");
+    assert_eq!(body["reason"], "api_model_changed");
+    assert_eq!(body["current_model"], "unsupported-model");
+    // 送 prompt 要在 run 還在跑時才會走到 continuity 檢查：先用 opus 重新啟動，再把模型換成不支援的。
+    sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(am_config::API_BOT_MODEL).bind(&bot).execute(&app.db).await.unwrap();
+    crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap();
+    sqlx::query("UPDATE bots SET model='unsupported-model' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+    let crid = crate::db::ulid();
+    let (status, body) = request(addr, "POST", &format!("/api/bots/{bot}/prompt"), &token, &json!({"text":"second","client_request_id":crid}).to_string()).await;
+    assert!(status.contains(" 409 "), "prompt status: {status}");
+    assert_eq!(body["reason"], "api_model_changed");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a refused turn never reaches the provider");
+    app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, app.background_tasks.wait()).await.unwrap();
+    router_stop.cancel();
+    provider_stop.cancel();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, server).await.unwrap().unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, provider).await.unwrap().unwrap();
+}

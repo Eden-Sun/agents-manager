@@ -1682,6 +1682,11 @@ export const useStore = create<StoreState>((set, get) => {
         return false
       }
       if (draft) set((s) => (draftIsGone(e) ? { composerDrafts: withoutKey(s.composerDrafts, botId) } : markDraftBusy(s, botId, undefined)))
+      // 換模型後舊對話接續不了（送出前就擋，沒有建立回合）：跳同一個確認框，讓使用者選換回或清除。
+      if (e instanceof ApiError && e.status === 409 && e.body.reason === 'api_model_changed') {
+        set({ apiModelConflict: { botId, checkpointModel: str(e.body.checkpoint_model), currentModel: str(e.body.current_model) } })
+        return false
+      }
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
         get().notify('error', typeof e.body.message === 'string' ? e.body.message : t('這個 claude 還沒登入，先到「終端」分頁完成登入。'))

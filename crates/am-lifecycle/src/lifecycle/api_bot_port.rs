@@ -62,8 +62,9 @@ pub enum ApiFreshResult { Cleared }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApiFreshError { Busy, IdentityMismatch, Unresolved, Storage, Unconfirmed }
 
-#[derive(Debug)]
-pub enum ApiNativePromptError { Unconfirmed }
+/// `Refused`／`ModelChanged`：確定沒有建立回合、沒有任何副作用就拒絕，帶穩定 reason（同 `ApiNativeStartError`）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApiNativePromptError { Unconfirmed, Refused(&'static str), ModelChanged { from: String, to: String } }
 pub enum ApiFreshAvailability { Available(ApiFreshTarget), None, Unavailable }
 pub enum ApiNativeStartMode { Resume { required: bool }, Fresh(ApiFreshTarget) }
 pub struct ApiNativeStartResult { pub run_id: String, pub resumed: bool }
