@@ -453,9 +453,13 @@ function ShellIdentities() {
               <span className="identity-login-wrap">
                 <span
                   className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
-                  title={st.logged_in === null ? (st.reason ?? t('登入狀態未知')) : (st.account ?? undefined)}
+                  title={[st.basis ?? st.reason ?? (st.logged_in === null ? t('登入狀態未知') : null), st.account ? `${t('帳號')}: ${st.account}` : null, `${t('上次檢查')}: ${checkedAtText(st.checked_at, t)}`].filter(Boolean).join('\n')}
                 >
-                  {label} {st.logged_in === true ? t('已登入') : st.logged_in === false ? t('未登入') : t('未知（尚未偵測）')}
+                  {label} {st.logged_in === true ? t('已登入') : st.logged_in === false ? t('未登入') : t('未知（無法判定）')}
+                </span>
+                <span className="identity-detail" title={st.basis ?? st.reason ?? undefined}>
+                  {t('上次檢查')} {checkedAtText(st.checked_at, t)}
+                  {st.logged_in === null && (st.reason ?? st.basis) ? ` · ${st.reason ?? st.basis}` : ''}
                 </span>
                 <IdentityLoginButton host={host} identity={st.name} loggedIn={st.logged_in === true} />
                 {st.logged_in === true ? <IdentityLogoutButton host={host} identity={st.name} /> : null}
@@ -636,6 +640,15 @@ function KindSwitches() {
       })}
     </div>
   )
+}
+
+/** 上次檢查時間（UTC+8 顯示，daemon 給的是 UTC）。沒問過就說沒問過。 */
+function checkedAtText(iso: string | null | undefined, t: ReturnType<typeof useT>): string {
+  if (!iso) return t('尚未檢查')
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const s = d.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return `${s} (+8)`
 }
 
 export function IdentitiesPanel() {

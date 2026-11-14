@@ -1850,7 +1850,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 ```
 
 - 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
-- `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
+- `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`checked_at`（最後一次問到的時間，沒問過不給）與 `basis`（判定依據，人話）；問不到時沿用上次的 `logged_in`，`checked_at` 保留上次的時間、`basis` 寫明「沿用 … 的結果；本次：…」；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
   **`login_needed`**（#838 補充，2026-10-04，沒有就不帶）：`{"since": ISO, "via": "turn_auth_failure"}`＝daemon 記下「這個身份要重新登入」——綁著它的 claude bot 的回合因授權失敗收尾（hook `StopFailure` 分類成 Auth，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`）；codex bot 的回合整則是授權失效的錯誤（refresh token 失效、401，見 SPEC §16.3a）也記。
   **遠端 claude 的探測一律問不出「未登入」**（ssh 沒有 GUI session、讀不到 Keychain，探測的 false 被丟掉），所以這是 mac_builder 之類遠端主機被登出時唯一的訊號；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。標記時 daemon 立刻重探該身份並推 `host_changed`（`GET /api/state`、`host_changed`、`POST …/tools/refresh` 都帶）。
   `since` 是這一次的識別（同一次不會變；清掉後再發生是新的一次），網頁拿它判斷「關掉過的是同一次」。清掉的時機：該身份被探測成已登入（從非已登入變過來）、登入 watcher 收尾時重驗已登入、登入協助貼完 code 且 CLI 沒報失敗（`finished`）、綁著它的 bot 又正常答完一回合。沒綁身份的 bot 不處理；記憶體帳，daemon 重啟後由探測與下一次授權失敗補回。

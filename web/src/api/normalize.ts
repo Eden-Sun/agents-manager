@@ -224,6 +224,8 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
       kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
       logged_in: typeof li === 'boolean' ? li : null,
       reason: optStr(pick(v, 'reason')),
+      checked_at: optStr(pick(v, 'checked_at')),
+      basis: optStr(pick(v, 'basis')),
       account: optStr(pick(v, 'account')),
       plan: optStr(pick(v, 'plan')),
       source: str(pick(v, 'source')) === 'shell' ? 'shell' : 'config',

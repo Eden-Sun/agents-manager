@@ -233,6 +233,8 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             plan: Some("team".into()),
             source: SOURCE_SHELL,
             config_dir: Some("/Users/me/.claude-ccompany".into()),
+            checked_at: None,
+            basis: None,
         };
         let mut unknown = IdentityInfo::unknown("cc1", "claude", SOURCE_SHELL, None);
         unknown.reason = Some("auth status 尚未取得結果".into());

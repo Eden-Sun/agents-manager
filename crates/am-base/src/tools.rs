@@ -54,6 +54,12 @@ pub struct IdentityInfo {
     pub logged_in: Option<bool>,
     /// Explicit so a failed probe cannot look like a successful (or empty) status in the UI.
     pub reason: Option<String>,
+    /// 這個身份最後一次被問到的時間（`db::now()`）；沒問過＝None。沿用上次結果時保留當時的時間。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    /// 判定依據（人話）：為什麼是這個狀態。`logged_in` 有值時也寫（例如「auth status 回報未登入」）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +89,8 @@ impl IdentityInfo {
             plan: None,
             source,
             config_dir,
+            checked_at: None,
+            basis: None,
         }
     }
 }
@@ -483,6 +491,8 @@ pub async fn record_identity_login_fenced<H: ToolsEnv>(
     let before = (info.logged_in, info.account.clone(), info.plan.clone());
     if logged_in.is_some() {
         info.logged_in = logged_in;
+        info.checked_at = Some(crate::db::now());
+        info.basis = Some("登入後重新驗證".into());
     }
     if account.is_some() {
         info.account = account;
@@ -530,6 +540,8 @@ async fn record_identity_logged_out<H: ToolsEnv>(app: &Arc<H>, host: &str, name:
     info.account = None;
     info.plan = None;
     info.reason = Some(reason.to_string());
+    info.checked_at = Some(crate::db::now());
+    info.basis = Some(reason.to_string());
     before != (info.logged_in, info.account.clone(), info.plan.clone())
 }
 
@@ -894,6 +906,12 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
             } else {
                 None
             };
+            let basis = match (&reason, logged_in) {
+                (Some(r), _) => Some(r.clone()),
+                (None, Some(true)) => Some("auth status 回報已登入".into()),
+                (None, Some(false)) => Some("auth status 回報未登入".into()),
+                (None, None) => None,
+            };
             // `source` / `config_dir` are filled in by the caller.
             m.insert(
                 open.clone(),
@@ -906,6 +924,8 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
                     plan,
                     source: SOURCE_CONFIG,
                     config_dir: None,
+                    checked_at: Some(crate::db::now()),
+                    basis,
                 },
             );
             continue;
@@ -1051,8 +1071,13 @@ pub async fn detect_identities<H: ToolsEnv>(
 pub fn carry_over(info: &mut IdentityInfo, prev: Option<&IdentityInfo>) {
     let Some(prev) = prev else { return };
     if info.logged_in.is_none() && prev.logged_in.is_some() {
+        // 這次問不到：狀態沿用上次，時間也保留上次的，並說明這次為什麼沒問到，UI 才看得出是舊的。
+        let now_basis = info.reason.clone().unwrap_or_else(|| "本次檢查沒有結果".into());
         info.logged_in = prev.logged_in;
         info.reason = prev.reason.clone().or_else(|| info.reason.clone());
+        let when = prev.checked_at.clone().unwrap_or_else(|| "時間不明".into());
+        info.checked_at = prev.checked_at.clone();
+        info.basis = Some(format!("沿用 {when} 的結果；本次：{now_basis}"));
     }
     if info.account.is_none() {
         info.account = prev.account.clone();

@@ -10,6 +10,8 @@ fn identity(name: &str, account: &str) -> crate::tools::IdentityInfo {
         plan: None,
         source: crate::tools::SOURCE_CONFIG,
         config_dir: None,
+        checked_at: None,
+        basis: None,
     }
 }
 

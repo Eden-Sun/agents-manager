@@ -189,6 +189,10 @@ export interface IdentityStatus {
   logged_in: boolean | null
   /** `logged_in: null` 的原因 */
   reason: string | null
+  /** 這個身份最後一次被問到的時間（ISO，daemon 的 db::now）。沒問過＝null。 */
+  checked_at?: string | null
+  /** 判定依據（人話）：為什麼是這個狀態。 */
+  basis?: string | null
   /** claude 是 e-mail、codex 是 `ChatGPT`、grok 是 `grok.com` */
   account: string | null
   /** claude 的 `subscriptionType` */

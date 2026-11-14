@@ -17,6 +17,8 @@ fn identity(name: &str, logged_in: Option<bool>) -> crate::tools::IdentityInfo {
         plan: None,
         source: crate::tools::SOURCE_CONFIG,
         config_dir: None,
+        checked_at: None,
+        basis: None,
     }
 }
 

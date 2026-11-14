@@ -2,6 +2,11 @@ import type { Dict } from '../../lib/i18n/types'
 
 // 區塊：hosts（額度、身份、主機、登入、Jev／監督面板）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
+  '未知（無法判定）': 'Unknown (could not tell)',
+  '尚未檢查': 'Not checked yet',
+  '上次檢查': 'Last checked',
+  '帳號': 'Account',
+
   'CLI 種類（本機）': 'CLI kinds (local)',
   '沒有訂閱的種類就停用：新 Bot 不再挑它，額度也不再探測；已經在跑的 Bot 不受影響，但重啟會被擋下。': 'Disable a kind you do not subscribe to: new bots stop picking it and its quota is no longer probed. Running bots are not affected, but restarts are refused.',
   '已停用': 'Disabled',

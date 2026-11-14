@@ -6,7 +6,7 @@ import { measureQuotaAvail, measureQuotaRow } from '../lib/quotaMeasure'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
-import { identityPrefKey } from '../api'
+import { identityPrefKey, kindPrefKey } from '../api'
 import { identitiesOfHost, identityStatusOfHost, quotaClaimantsOf, toolsOfHost, useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -1016,6 +1016,7 @@ export function QuotaStrip({
   }, [phone, focusKind, focusIdentity])
 
   const disabledIdentities = useStore((s) => s.disabledIdentities)
+  const disabledKinds = useStore((s) => s.disabledKinds)
   // 停用的身份不上額度條：連它自己那把 `claude:<name>` 孤兒 key 也不列（使用者 2026-09-16）。
   const ordered = useMemo(() => {
     // 落點的認領清單跟側欄同一支（`quotaClaimantsOf`）。
@@ -1023,8 +1024,9 @@ export function QuotaStrip({
     return collectEntries(quota, live, host).filter(
       // 沒有身份名的是該 kind 的預設帳號那格：預設帳號被隱藏（設定 → 身份 → 預設帳號）就不列（使用者 2026-11-14：grok 已不訂閱）。
       (e) => !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity || DEFAULT_ACCOUNT)),
-    )
-  }, [quota, configured, idStatus, host, disabledIdentities])
+    // kind 整個停用（grok 不訂閱，使用者 2026-11-14）：額度條與總計都不列，歷史用量留在後端。
+    ).filter((e) => !disabledKinds.includes(kindPrefKey(host, e.kind)))
+  }, [quota, configured, idStatus, host, disabledIdentities, disabledKinds])
 
   const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
   const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START

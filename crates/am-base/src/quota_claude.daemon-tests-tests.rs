@@ -589,6 +589,8 @@ AM_USAGE_DONE=0
             plan: Some("B plan".into()),
             source: crate::tools::SOURCE_CONFIG,
             config_dir: None,
+            checked_at: None,
+            basis: None,
         };
         app.tools.lock().await.insert(
             host.into(),

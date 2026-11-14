@@ -40,6 +40,8 @@ async fn identity_with_recheck_answer(app: &Arc<App>, dir: &std::path::Path, nam
                     plan: None,
                     source: SOURCE_CONFIG,
                     config_dir: None,
+                    checked_at: None,
+                    basis: None,
                 },
             )]
             .into(),
