@@ -54,15 +54,53 @@ pub(super) fn input_token_bound(request: &RequestEnvelope) -> Result<u64, QuoteE
     Ok(bound)
 }
 
-/// 預留：整段輸入都按「快取寫入」最貴的價算（最壞情況），輸出按 max_tokens。
-fn reserve_microusd(input_bound: u64, max_tokens: u32, speed: &str, rates: &Rates) -> Result<i64, QuoteError> {
+fn previous_usage_prefix(response: &Response) -> Option<u64> {
+    let usage = response.usage.as_object()?;
+    let input = usage.get("input_tokens").and_then(Value::as_u64)?;
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let cache_creation = count("cache_creation_input_tokens");
+    let cache_read = count("cache_read_input_tokens");
+    input.checked_add(cache_creation)?.checked_add(cache_read)
+}
+
+/// 預留：無前次回覆用量時，整段輸入按「快取寫入」算；有前次回覆用量時，前次 prefix 按快取讀取、新 tail 按寫入＋20% 餘裕。輸出按 max_tokens。
+fn reserve_microusd(
+    input_bound: u64,
+    max_tokens: u32,
+    speed: &str,
+    rates: &Rates,
+    previous_prefix: Option<u64>,
+) -> Result<i64, QuoteError> {
     let factor = speed_factor(speed)?;
-    let input = i64::try_from(input_bound).map_err(|_| QuoteError::InvalidRequest)?;
-    input.checked_mul(rates.write_5m)
-        .and_then(|n| i64::from(max_tokens).checked_mul(rates.output).and_then(|m| n.checked_add(m)))
-        .and_then(|n| n.checked_mul(factor))
-        .map(to_micro)
-        .ok_or(QuoteError::InvalidRequest)
+    let input_tenths = if let Some(prefix) = previous_prefix {
+        let prefix_tokens = prefix.min(input_bound);
+        let tail_tokens = input_bound.saturating_sub(prefix);
+        let prefix_cost = i64::try_from(prefix_tokens)
+            .map_err(|_| QuoteError::InvalidRequest)?
+            .checked_mul(rates.read)
+            .ok_or(QuoteError::InvalidRequest)?;
+        let tail_cost = i64::try_from(tail_tokens)
+            .map_err(|_| QuoteError::InvalidRequest)?
+            .checked_mul(rates.write_5m)
+            .ok_or(QuoteError::InvalidRequest)?;
+        let input_base = prefix_cost
+            .checked_add(tail_cost)
+            .ok_or(QuoteError::InvalidRequest)?;
+        (input_base.checked_mul(120).ok_or(QuoteError::InvalidRequest)? + 99) / 100
+    } else {
+        let input = i64::try_from(input_bound).map_err(|_| QuoteError::InvalidRequest)?;
+        input.checked_mul(rates.write_5m).ok_or(QuoteError::InvalidRequest)?
+    };
+    let output_tenths = i64::from(max_tokens)
+        .checked_mul(rates.output)
+        .ok_or(QuoteError::InvalidRequest)?;
+    let total_tenths = input_tenths
+        .checked_add(output_tenths)
+        .ok_or(QuoteError::InvalidRequest)?;
+    let total_with_factor = total_tenths
+        .checked_mul(factor)
+        .ok_or(QuoteError::InvalidRequest)?;
+    Ok(to_micro(total_with_factor))
 }
 
 impl QuoteProvider for DirectGlobal {
@@ -72,8 +110,15 @@ impl QuoteProvider for DirectGlobal {
             return Err(QuoteError::InvalidRequest);
         }
         let rates = rates(&request.options().model)?;
+        let prev_prefix = request.previous_response().and_then(previous_usage_prefix);
         Ok(ReservationQuote {
-            reserved_microusd: reserve_microusd(input_token_bound(request)?, request.options().max_tokens, request.speed(), &rates)?,
+            reserved_microusd: reserve_microusd(
+                input_token_bound(request)?,
+                request.options().max_tokens,
+                request.speed(),
+                &rates,
+                prev_prefix,
+            )?,
             pricing_version: rates.version.into(),
         })
     }
@@ -256,6 +301,106 @@ mod tests {
             resp.model = crate::config::API_BOT_MODEL.into();
             assert!(DirectGlobal.settle(&req, &resp).is_err(), "never price a mismatched model");
         }
+    }
+
+    #[test]
+    fn first_turn_without_previous_usage_uses_legacy_formula() {
+        let req = request(false, json!("fixture"));
+        let bound = input_token_bound(&req).unwrap() as i64;
+        let expected_legacy = (bound * 50 + 1024 * 200 + 9) / 10;
+        let quote = DirectGlobal.reserve(&req).unwrap();
+        assert_eq!(quote.reserved_microusd, expected_legacy);
+
+        // Previous response without valid usage (no input_tokens) also falls back to legacy formula
+        let mut invalid_prev_req = request(false, json!("fixture"));
+        invalid_prev_req.set_previous_response(Some(response(json!({"invalid": true}))));
+        let quote2 = DirectGlobal.reserve(&invalid_prev_req).unwrap();
+        assert_eq!(quote2.reserved_microusd, expected_legacy);
+    }
+
+    #[test]
+    fn turn_with_previous_usage_reserves_with_prefix_and_settles_cleanly() {
+        let mut req = request(false, json!("fixture"));
+        let prev = response(json!({
+            "input_tokens": 2000,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 500,
+            "output_tokens": 200,
+            "speed": "standard"
+        }));
+        req.set_previous_response(Some(prev));
+
+        let bound = input_token_bound(&req).unwrap() as i64;
+        let prefix = 3500_i64; // 2000 + 1000 + 500
+        assert!(bound > prefix);
+        let prefix_tokens = prefix;
+        let tail_tokens = bound - prefix;
+        let prefix_cost = prefix_tokens * 4; // claude-opus-5-5 read rate = 4
+        let tail_cost = tail_tokens * 50;   // claude-opus-5-5 write_5m rate = 50
+        let input_base = prefix_cost + tail_cost;
+        let input_with_margin = (input_base * 120 + 99) / 100;
+        let expected_reserve = (input_with_margin + 1024 * 200 + 9) / 10;
+
+        let quote = DirectGlobal.reserve(&req).unwrap();
+        assert_eq!(quote.reserved_microusd, expected_reserve);
+
+        // Actual usage for this turn is well below reserve:
+        let actual = response(json!({
+            "input_tokens": 100,
+            "cache_read_input_tokens": 3500,
+            "cache_creation_input_tokens": 100,
+            "output_tokens": 150,
+            "speed": "standard",
+            "service_tier": "standard",
+            "inference_geo": "global"
+        }));
+        let settled = DirectGlobal.settle(&req, &actual).unwrap();
+        assert!(settled.estimated_microusd < quote.reserved_microusd);
+    }
+
+    #[test]
+    fn long_session_reserve_is_much_lower_than_legacy_formula() {
+        // In a long session, large conversation prefix was cached in previous turn
+        let long_messages = vec![
+            Message { role: "user".into(), content: json!("x".repeat(60_000)) },
+            Message { role: "assistant".into(), content: json!("reply") },
+            Message { role: "user".into(), content: json!("next question") },
+        ];
+        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024 };
+        let mut req = RequestEnvelope::new(options, json!("system"), long_messages).unwrap();
+
+        let bound = input_token_bound(&req).unwrap() as i64;
+        assert!(bound > 60_000);
+
+        // Previous response usage recorded 60,000 prefix tokens
+        let prev = response(json!({
+            "input_tokens": 1000,
+            "cache_read_input_tokens": 59_000,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 100,
+            "speed": "standard"
+        }));
+        req.set_previous_response(Some(prev));
+
+        let legacy_reserve = (bound * 50 + 1024 * 200 + 9) / 10;
+        let new_reserve = DirectGlobal.reserve(&req).unwrap().reserved_microusd;
+
+        // Legacy formula priced all 60k+ tokens at write_5m (50); new formula prices 60k at read (4).
+        // 60k * 4 = 240k vs 60k * 50 = 3000k. Even with 20% margin, new reserve is less than half the old.
+        assert!(new_reserve < legacy_reserve / 2, "new_reserve ({new_reserve}) should be much lower than legacy ({legacy_reserve})");
+
+        // And normal actual usage settles well under the new reserve
+        let actual = response(json!({
+            "input_tokens": 500,
+            "cache_read_input_tokens": 60_000,
+            "cache_creation_input_tokens": 500,
+            "output_tokens": 200,
+            "speed": "standard",
+            "service_tier": "standard",
+            "inference_geo": "global"
+        }));
+        let settled = DirectGlobal.settle(&req, &actual).unwrap();
+        assert!(settled.estimated_microusd < new_reserve);
     }
 
 }

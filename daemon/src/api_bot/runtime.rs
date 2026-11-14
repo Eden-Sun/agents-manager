@@ -1632,7 +1632,14 @@ fn map_runner_result(
         Err(super::runner::Error::InvalidResponse) => TurnOutcome::Failed("invalid_response".into()),
         Err(super::runner::Error::Model(e)) => TurnOutcome::Failed(match e {
             H::RateLimited { .. } => "api_rate_limited".into(),
-            H::Http(status) => format!("api_http_{status}"),
+            H::Http { status, kind, message, request_id } => {
+                super::completion::format_http_failure_reason(
+                    status,
+                    kind.as_deref(),
+                    message.as_deref(),
+                    request_id.as_deref(),
+                )
+            }
             H::Timeout => "api_timeout".into(),
             H::TransportUnknown => "api_transport_unknown".into(),
             H::TooLarge | H::InvalidResponse => "api_invalid_response".into(),

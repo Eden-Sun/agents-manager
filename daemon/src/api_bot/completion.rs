@@ -445,12 +445,62 @@ async fn assistant_count(conn: &mut sqlx::SqliteConnection, turn: &str) -> Resul
         .map_err(|_| StoreError::Retryable)
 }
 
-/// 失敗原因的人話；只含固定代碼，不含任何 provider 回應或請求內容。
-fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str> {
+pub(super) fn format_http_failure_reason(
+    status: u16,
+    kind: Option<&str>,
+    message: Option<&str>,
+    request_id: Option<&str>,
+) -> String {
+    if kind.is_none() && message.is_none() && request_id.is_none() {
+        format!("api_http_{status}")
+    } else {
+        let payload = serde_json::json!({
+            "type": kind,
+            "message": message,
+            "request_id": request_id,
+        });
+        format!("api_http_{status}:{payload}")
+    }
+}
+
+/// 失敗原因的人話；若為 HTTP 錯誤且帶有詳細資訊則帶出 type/message/request-id。
+pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str> {
     if let Some(rest) = reason.strip_prefix("api_total_cap_reached:cap=") {
         if let Some((cap, spent)) = rest.split_once(":spent=") {
             return format!("已達總花費上限 ${cap}（已花 ${spent}）").into();
         }
+    }
+    if let Some(rest) = reason.strip_prefix("api_http_") {
+        let (status_str, json_str) = match rest.split_once(':') {
+            Some((s, j)) => (s, Some(j)),
+            None => (rest, None),
+        };
+        let status = status_str.parse::<u16>().ok();
+        if let Some(json_str) = json_str {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                let kind = v.get("type").and_then(serde_json::Value::as_str);
+                let message = v.get("message").and_then(serde_json::Value::as_str);
+                let request_id = v.get("request_id").and_then(serde_json::Value::as_str);
+                let mut parts = Vec::new();
+                if let Some(k) = kind {
+                    parts.push(k.to_string());
+                }
+                if let Some(m) = message {
+                    parts.push(m.to_string());
+                }
+                if let Some(rid) = request_id {
+                    parts.push(format!("request-id: {rid}"));
+                }
+                if !parts.is_empty() {
+                    let st = status.map(|s| format!("（HTTP {s}）")).unwrap_or_default();
+                    return format!("Anthropic API 回了錯誤狀態碼{st}：{}。", parts.join(" - ")).into();
+                }
+            }
+        }
+        if let Some(s) = status {
+            return format!("Anthropic API 回了錯誤狀態碼（HTTP {s}）。").into();
+        }
+        return "Anthropic API 回了錯誤狀態碼。".into();
     }
     match reason {
         "api_total_cap_reached" => "已達總花費上限。".into(),
@@ -483,6 +533,9 @@ pub(super) async fn post_failure_notice(app: &Arc<App>, key: &ApiTurnKey, reason
         } else {
             format!("⚠ 這一回合失敗（api_total_cap_reached）：{}", failure_explanation(reason))
         }
+    } else if let Some(rest) = reason.strip_prefix("api_http_") {
+        let status = rest.split(':').next().unwrap_or(rest);
+        format!("⚠ 這一回合失敗（api_http_{status}）：{}", failure_explanation(reason))
     } else {
         format!("⚠ 這一回合失敗（{reason}）：{}", failure_explanation(reason))
     };

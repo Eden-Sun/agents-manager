@@ -21,7 +21,12 @@ pub enum Error {
     Timeout,
     TransportUnknown,
     RateLimited { retry_after_secs: Option<u64> },
-    Http(u16),
+    Http {
+        status: u16,
+        kind: Option<String>,
+        message: Option<String>,
+        request_id: Option<String>,
+    },
     TooLarge,
     InvalidResponse,
 }
@@ -93,7 +98,49 @@ pub async fn complete(
             });
         }
         if !(200..300).contains(&status) {
-            return Err(Error::Http(status));
+            let request_id = response
+                .headers()
+                .get("request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let mut bytes = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                let remaining = 4096_usize.saturating_sub(bytes.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = chunk.len().min(remaining);
+                bytes.extend_from_slice(&chunk[..take]);
+                if bytes.len() >= 4096 {
+                    break;
+                }
+            }
+            let (kind, message) = if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                let (raw_kind, raw_message) = if let Some(err) = val.get("error").and_then(Value::as_object) {
+                    (
+                        err.get("type").and_then(Value::as_str),
+                        err.get("message").and_then(Value::as_str),
+                    )
+                } else {
+                    (None, None)
+                };
+                let kind = raw_kind.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+                let message = raw_message.map(|m| {
+                    let masked = crate::judge::mask(m);
+                    masked.chars().take(500).collect::<String>()
+                }).filter(|m| !m.is_empty());
+                (kind, message)
+            } else {
+                (None, None)
+            };
+            tracing::warn!(status, kind = ?kind, message = ?message, request_id = ?request_id, "api bot http error response");
+            return Err(Error::Http {
+                status,
+                kind,
+                message,
+                request_id,
+            });
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|e| {

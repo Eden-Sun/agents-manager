@@ -19,7 +19,7 @@ use am_base::db::api_bot::{self as db_api, Checkpoint, Fence};
 use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
 use super::quote::{QuoteProvider, RequestEnvelope};
-use super::runner::{self, Journal, Model, State, Tools};
+use super::runner::{Journal, Model, State, Tools};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AdapterIdentity {
@@ -333,7 +333,7 @@ impl Model for ApiBotAdapter {
                 let key = active.key.take().ok_or(http::Error::InvalidRequest)?;
                 active.permit_available = false;
 
-                (reconstructed, active.id.clone(), key)
+                (active.envelope.clone(), active.id.clone(), key)
             };
 
             let req = http::FullMessagesRequest {
@@ -481,12 +481,15 @@ impl Journal for ApiBotAdapter {
                     Ok(())
                 }
                 (false, true) => {
-                    let envelope = RequestEnvelope::new(
+                    let mut envelope = RequestEnvelope::new(
                         self.options.clone(),
                         self.system.clone(),
                         state.messages.clone(),
                     )
                     .map_err(|_| ())?;
+                    if let Some(prev) = state.responses.last() {
+                        envelope.set_previous_response(Some(prev.clone()));
+                    }
                     let key = self.http_cfg.key_source.snapshot().await.map_err(|_| {
                         tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable");
                         self.refuse("api_bot_key_unavailable");

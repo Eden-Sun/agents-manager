@@ -6,11 +6,13 @@ use sha2::{Digest, Sha256};
 
 /// Owns every input to the sole wire builder. Accessors cannot mutate quoted inputs.
 /// Deliberately no Debug or Serialize implementation: requests contain private content.
+#[derive(Clone)]
 pub(crate) struct RequestEnvelope {
     options: Options,
     system: Value,
     messages: Vec<Message>,
     hash: String,
+    previous_response: Option<Response>,
 }
 impl RequestEnvelope {
     pub(crate) fn new(
@@ -32,6 +34,7 @@ impl RequestEnvelope {
             system,
             messages,
             hash,
+            previous_response: None,
         })
     }
     pub(crate) fn hash(&self) -> &str {
@@ -55,6 +58,16 @@ impl RequestEnvelope {
     }
     pub(crate) fn body(&self) -> Value {
         protocol::request(&self.options, &self.system, &self.messages)
+    }
+    pub(crate) fn previous_response(&self) -> Option<&Response> {
+        self.previous_response.as_ref()
+    }
+    pub(crate) fn set_previous_response(&mut self, prev: Option<Response>) {
+        self.previous_response = prev;
+    }
+    pub(crate) fn with_previous_response(mut self, prev: Option<Response>) -> Self {
+        self.previous_response = prev;
+        self
     }
 }
 fn canonicalize(value: &Value) -> Value {

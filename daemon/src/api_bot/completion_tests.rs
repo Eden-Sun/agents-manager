@@ -434,3 +434,36 @@ async fn pending_receipt_with_preexisting_assistant_cannot_insert_a_second_messa
         "pending"
     );
 }
+
+#[tokio::test]
+async fn post_failure_notice_shows_http_error_details_or_falls_back_to_status() {
+    let f = fixture(false).await;
+    // 1. Detailed 400 error
+    let reason = completion::format_http_failure_reason(
+        400,
+        Some("invalid_request_error"),
+        Some("prompt is too long"),
+        Some("req_123xyz"),
+    );
+    completion::post_failure_notice(&f.env.app, &f.key, &reason).await;
+    let msg: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? ORDER BY created_at DESC LIMIT 1")
+        .bind(&f.key.turn_id)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+    assert!(msg.contains("api_http_400"));
+    assert!(msg.contains("invalid_request_error"));
+    assert!(msg.contains("prompt is too long"));
+    assert!(msg.contains("req_123xyz"));
+
+    // 2. Status only error (non-JSON fallback)
+    let f2 = fixture(false).await;
+    let reason2 = completion::format_http_failure_reason(502, None, None, None);
+    completion::post_failure_notice(&f2.env.app, &f2.key, &reason2).await;
+    let msg2: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? ORDER BY created_at DESC LIMIT 1")
+        .bind(&f2.key.turn_id)
+        .fetch_one(&f2.env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(msg2, "⚠ 這一回合失敗（api_http_502）：Anthropic API 回了錯誤狀態碼（HTTP 502）。");
+}

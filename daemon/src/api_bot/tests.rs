@@ -335,8 +335,24 @@ async fn http_rate_limit_size_errors_and_cancel_do_not_retry_or_leak_response_bo
                 retry_after_secs: Some(3),
             },
         ),
-        (401, http::Error::Http(401)),
-        (302, http::Error::Http(302)),
+        (
+            401,
+            http::Error::Http {
+                status: 401,
+                kind: None,
+                message: None,
+                request_id: None,
+            },
+        ),
+        (
+            302,
+            http::Error::Http {
+                status: 302,
+                kind: None,
+                message: None,
+                request_id: None,
+            },
+        ),
     ] {
         let f = fixture(status, vec![json!({"secret":"must not escape"})]).await;
         let result = HttpModel(&f)
@@ -602,4 +618,149 @@ async fn fable_requests_use_the_selected_model_and_reject_a_different_response_m
     let seen = f.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert!(seen.iter().all(|v| v["model"] == crate::config::API_BOT_FABLE_MODEL && v["thinking"]["type"] == "adaptive"));
+}
+
+async fn raw_http_fixture(status: u16, headers: Vec<(&'static str, &'static str)>, body: String) -> Fixture {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let route = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move || {
+            let headers = headers.clone();
+            let body = body.clone();
+            async move {
+                let mut header_map = axum::http::HeaderMap::new();
+                for (k, v) in headers {
+                    header_map.insert(axum::http::header::HeaderName::from_static(k), v.parse().unwrap());
+                }
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    header_map,
+                    body,
+                )
+            }
+        }),
+    );
+    let shutdown = CancellationToken::new();
+    let signal = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, route)
+            .with_graceful_shutdown(signal.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    Fixture {
+        endpoint,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        shutdown,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn http_400_with_invalid_request_body_carries_type_message_and_request_id() {
+    let error_body = json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long"
+        }
+    }).to_string();
+    let f = raw_http_fixture(400, vec![("request-id", "req_test_400_xyz")], error_body).await;
+    let options = options();
+    let system = json!("fixture");
+    let messages = initial().messages;
+    let req = http::FullMessagesRequest {
+        endpoint: &f.endpoint,
+        key: "fixture-not-a-real-key",
+        options: &options,
+        system: &system,
+        messages: &messages,
+        timeout: Duration::from_secs(2),
+        max_response_bytes: 64 * 1024,
+    };
+    let err = http::complete(&req, &CancellationToken::new()).await.unwrap_err();
+    assert_eq!(
+        err,
+        http::Error::Http {
+            status: 400,
+            kind: Some("invalid_request_error".into()),
+            message: Some("prompt is too long".into()),
+            request_id: Some("req_test_400_xyz".into()),
+        }
+    );
+    let reason = super::completion::format_http_failure_reason(400, Some("invalid_request_error"), Some("prompt is too long"), Some("req_test_400_xyz"));
+    let expl = super::completion::failure_explanation(&reason);
+    assert!(expl.contains("invalid_request_error"));
+    assert!(expl.contains("prompt is too long"));
+    assert!(expl.contains("req_test_400_xyz"));
+}
+
+#[tokio::test]
+async fn http_non_json_body_falls_back_to_status_only() {
+    let html_body = "<html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>".to_string();
+    let f = raw_http_fixture(502, vec![], html_body).await;
+    let options = options();
+    let system = json!("fixture");
+    let messages = initial().messages;
+    let req = http::FullMessagesRequest {
+        endpoint: &f.endpoint,
+        key: "fixture-not-a-real-key",
+        options: &options,
+        system: &system,
+        messages: &messages,
+        timeout: Duration::from_secs(2),
+        max_response_bytes: 64 * 1024,
+    };
+    let err = http::complete(&req, &CancellationToken::new()).await.unwrap_err();
+    assert_eq!(
+        err,
+        http::Error::Http {
+            status: 502,
+            kind: None,
+            message: None,
+            request_id: None,
+        }
+    );
+    let reason = super::completion::format_http_failure_reason(502, None, None, None);
+    let expl = super::completion::failure_explanation(&reason);
+    assert_eq!(expl, "Anthropic API 回了錯誤狀態碼（HTTP 502）。");
+}
+
+#[tokio::test]
+async fn http_error_truncates_long_message_and_masks_secrets() {
+    let long_str = "a".repeat(800);
+    let error_body = json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": format!("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.doNotLeakThisJwt {long_str}")
+        }
+    }).to_string();
+    let f = raw_http_fixture(400, vec![("request-id", "req_long_abc")], error_body).await;
+    let options = options();
+    let system = json!("fixture");
+    let messages = initial().messages;
+    let req = http::FullMessagesRequest {
+        endpoint: &f.endpoint,
+        key: "fixture-not-a-real-key",
+        options: &options,
+        system: &system,
+        messages: &messages,
+        timeout: Duration::from_secs(2),
+        max_response_bytes: 64 * 1024,
+    };
+    let err = http::complete(&req, &CancellationToken::new()).await.unwrap_err();
+    match err {
+        http::Error::Http { status, kind, message, request_id } => {
+            assert_eq!(status, 400);
+            assert_eq!(kind.as_deref(), Some("invalid_request_error"));
+            assert_eq!(request_id.as_deref(), Some("req_long_abc"));
+            let msg = message.unwrap();
+            assert_eq!(msg.chars().count(), 500, "message must be truncated to 500 chars");
+            assert!(!msg.contains("eyJhbGciOiJIUzI1NiJ9"), "secret JWT must be masked");
+            assert!(msg.contains("‹redacted›"), "secret must be replaced with redacted marker");
+        }
+        other => panic!("expected Http, got {other:?}"),
+    }
 }
