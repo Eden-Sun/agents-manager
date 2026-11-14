@@ -42,13 +42,30 @@ struct CacheEntry {
 pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
+    let prompt = format!(
+        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>"
+    );
     ClaudeRequest {
         use_case: USE_CASE,
         system: Some(SYSTEM.to_string()),
-        prompt: content.to_string(),
+        prompt,
         max_tokens: MAX_OUT_TOKENS,
         format: None,
     }
+}
+
+pub(crate) fn clean_reply(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some(inner) = trimmed.strip_prefix("<source>").and_then(|s| s.strip_suffix("</source>")) {
+        return inner.trim().to_string();
+    }
+    if let (Some(start), Some(end)) = (trimmed.find("<source>"), trimmed.rfind("</source>")) {
+        if start < end {
+            let inner = &trimmed[start + "<source>".len()..end];
+            return inner.trim().to_string();
+        }
+    }
+    trimmed.replace("<source>", "").replace("</source>", "").trim().to_string()
 }
 
 fn cache_key(id: &str, content: &str) -> String {
@@ -66,7 +83,9 @@ fn cache_path(data_dir: &Path, key: &str) -> PathBuf {
 }
 
 fn load(path: &Path) -> Option<CacheEntry> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok().filter(|e: &CacheEntry| !e.translation.trim().is_empty())
+    serde_json::from_slice(&std::fs::read(path).ok()?)
+        .ok()
+        .filter(|e: &CacheEntry| !e.translation.trim().is_empty() && !is_mostly_english(&e.translation))
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
@@ -135,9 +154,17 @@ fn local_convert(content: &str, path: &Path) -> Value {
 }
 
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
-    let reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
+    let mut reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
+    let mut translation = clean_reply(&reply.text);
+    if is_mostly_english(content) && is_mostly_english(&translation) {
+        reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
+        translation = clean_reply(&reply.text);
+        if is_mostly_english(&translation) {
+            return Err(LcError::Upstream("translate_untranslated".into()));
+        }
+    }
     let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry { translation: reply.text.trim().to_string(), model: reply.model.clone(), prompt_version: PROMPT_VERSION.into(), cost_usd: cost };
+    let entry = CacheEntry { translation, model: reply.model.clone(), prompt_version: PROMPT_VERSION.into(), cost_usd: cost };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
@@ -571,7 +598,108 @@ mod tests {
         assert_eq!(r.use_case, "message_translate");
         let sys = r.system.unwrap();
         assert!(sys.contains("Traditional Chinese") && sys.contains("fenced code blocks") && sys.contains("commit hashes") && sys.contains("translation only"));
-        assert_eq!(r.prompt, "Run `cargo test` in /tmp");
+        assert!(r.prompt.contains("<source>\nRun `cargo test` in /tmp\n</source>"));
+        assert!(r.prompt.contains("Traditional Chinese (zh-TW"));
+    }
+
+    #[test]
+    fn clean_reply_strips_source_tags() {
+        assert_eq!(clean_reply("<source>你好，這是測試。</source>"), "你好，這是測試。");
+        assert_eq!(clean_reply("  <source>\n你好，這是測試。\n</source>  "), "你好，這是測試。");
+        assert_eq!(clean_reply("翻譯如下：\n<source>你好</source>"), "你好");
+        assert_eq!(clean_reply("你好，這是正常的翻譯。"), "你好，這是正常的翻譯。");
+    }
+
+    struct FakeSequence {
+        calls: AtomicUsize,
+        replies: Mutex<Vec<String>>,
+    }
+
+    impl MessagesClient for FakeSequence {
+        fn complete<'a>(&'a self, _req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            let replies = self.replies.lock().unwrap();
+            let text = replies.get(idx).cloned().unwrap_or_else(|| "fallback".to_string());
+            Box::pin(async move {
+                Ok(ClientOutcome {
+                    text,
+                    model: Some("claude-haiku-5-5".into()),
+                    stop_reason: Some("end_turn".into()),
+                    usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
+                })
+            })
+        }
+    }
+
+    fn fake_seq(app: &Arc<App>, replies: Vec<String>) -> Arc<FakeSequence> {
+        let f = Arc::new(FakeSequence { calls: AtomicUsize::new(0), replies: Mutex::new(replies) });
+        app.claude_api.set_client(f.clone());
+        f
+    }
+
+    #[tokio::test]
+    async fn echo_then_good_caches_good_result() {
+        let (app, _dir) = app(true).await;
+        let content = "The 504 comes from GitHub, not AG Man's own server. The check for new codex versions asks GitHub for the latest 100 codex releases.";
+        let replies = vec![
+            content.to_string(),
+            "504 錯誤來自 GitHub，而不是 AG Man 自己的伺服器。".to_string(),
+        ];
+        let f = fake_seq(&app, replies);
+        let a = translate(&app, "m_retry", content).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "echo 後重試，共打兩次");
+        assert_eq!(a["cached"], json!(false));
+        assert_eq!(a["translation"], json!("504 錯誤來自 GitHub，而不是 AG Man 自己的伺服器。"));
+        let key = cache_key("m_retry", content);
+        assert!(cache_path(&app.data_dir, &key).exists(), "第二次成功的繁中譯文被存入快取");
+
+        let b = translate(&app, "m_retry", content).await.unwrap();
+        assert_eq!(b["cached"], json!(true));
+        assert_eq!(b["translation"], json!("504 錯誤來自 GitHub，而不是 AG Man 自己的伺服器。"));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中快取不調用 API");
+    }
+
+    #[tokio::test]
+    async fn echo_twice_fails_and_does_not_cache() {
+        let (app, _dir) = app(true).await;
+        let content = "The 504 comes from GitHub, not AG Man's own server. The check for new codex versions asks GitHub for the latest 100 codex releases.";
+        let replies = vec![
+            content.to_string(),
+            content.to_string(),
+        ];
+        let f = fake_seq(&app, replies);
+        let err = translate(&app, "m_fail", content).await.unwrap_err();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "重試一次後失敗，共打兩次");
+        assert!(matches!(&err, LcError::Upstream(msg) if msg == "translate_untranslated"), "錯誤訊息必須是 translate_untranslated: {err:?}");
+        let key = cache_key("m_fail", content);
+        assert!(!cache_path(&app.data_dir, &key).exists(), "失敗不寫入快取檔案");
+    }
+
+    #[tokio::test]
+    async fn cached_english_entry_is_treated_as_miss() {
+        let (app, _dir) = app(true).await;
+        let content = "The 504 comes from GitHub, not AG Man's own server. The check for new codex versions asks GitHub for the latest 100 codex releases.";
+        let key = cache_key("m_bad", content);
+        let path = cache_path(&app.data_dir, &key);
+
+        let bad_entry = CacheEntry {
+            translation: content.to_string(),
+            model: "claude-haiku-5-5".into(),
+            prompt_version: PROMPT_VERSION.into(),
+            cost_usd: Some(0.000193),
+        };
+        save(&path, &bad_entry).unwrap();
+        assert!(path.exists(), "壞快取已寫入磁碟");
+        assert!(load(&path).is_none(), "load() 必須將 translation 為英文的快取視為 miss");
+
+        let replies = vec!["504 錯誤來自 GitHub，已重新翻譯為繁體中文。".to_string()];
+        let f = fake_seq(&app, replies);
+        let res = translate(&app, "m_bad", content).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "壞快取被當成 miss，因此重新打 API");
+        assert_eq!(res["cached"], json!(false));
+        assert_eq!(res["translation"], json!("504 錯誤來自 GitHub，已重新翻譯為繁體中文。"));
+        let hit = load(&path).expect("繁體中文快取被正確存檔且可被 load");
+        assert_eq!(hit.translation, "504 錯誤來自 GitHub，已重新翻譯為繁體中文。");
     }
 
     #[test]
