@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiBotSpendUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
 import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 import { balanceTooltipLines } from './balanceTooltip'
-import { fetchClaudeApiCap, putClaudeApiCap, type ClaudeApiCap } from '../api/claudeApiCap'
+import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import './apiBotUsageBar.css'
@@ -24,6 +24,11 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const [editingCap, setEditingCap] = useState(false)
   const [newCapVal, setNewCapVal] = useState('')
   const [savingCap, setSavingCap] = useState(false)
+  const [editingLimits, setEditingLimits] = useState(false)
+  const [newTimeout, setNewTimeout] = useState('')
+  const [newCalls, setNewCalls] = useState('')
+  const [savingLimits, setSavingLimits] = useState(false)
+  const [limitsError, setLimitsError] = useState('')
 
   // 最後一個回合的狀態改變（in_flight → completed）＝該重抓了。
   const turnSig = useStore((s) => {
@@ -82,6 +87,33 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
       // 保持編輯狀態讓使用者重試或取消
     } finally {
       setSavingCap(false)
+    }
+  }
+
+  const handleStartEditLimits = () => {
+    setNewTimeout(String(cap?.turn_timeout_secs ?? ''))
+    setNewCalls(String(cap?.max_api_calls_per_turn ?? ''))
+    setLimitsError('')
+    setEditingLimits(true)
+  }
+
+  const handleSaveLimits = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const secs = Number.parseInt(newTimeout, 10)
+    const calls = Number.parseInt(newCalls, 10)
+    if (!Number.isInteger(secs) || secs < 1 || secs > 3600 || !Number.isInteger(calls) || calls < 1 || calls > 64) {
+      setLimitsError(t('時間要在 1–3600 秒，呼叫次數要在 1–64'))
+      return
+    }
+    setSavingLimits(true)
+    try {
+      setCap(await putClaudeApiTurnLimits({ turn_timeout_secs: secs, max_api_calls_per_turn: calls }))
+      setEditingLimits(false)
+    } catch (err) {
+      // 保持編輯狀態讓使用者改正（例如時間小於單一指令逾時）
+      setLimitsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingLimits(false)
     }
   }
 
@@ -192,6 +224,31 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
           >
             <span className="sl-k">{t('上限')}</span>
             <span className="sl-v">${cap.spent_usd.toFixed(2)} / ${cap.cap_usd.toFixed(2)}</span>
+          </button>
+        )
+      ) : null}
+
+      {cap && cap.turn_timeout_secs !== null && cap.max_api_calls_per_turn !== null ? (
+        editingLimits ? (
+          <form className="api-balance-form" data-k="turn-limits-form" onSubmit={(e) => void handleSaveLimits(e)}>
+            <label className="sl-k" htmlFor="turn-timeout-input">{t('回合時間（秒）')}</label>
+            <input id="turn-timeout-input" className="api-balance-input" type="number" min="1" max="3600" step="1" autoFocus value={newTimeout} disabled={savingLimits} onChange={(e) => setNewTimeout(e.target.value)} />
+            <label className="sl-k" htmlFor="turn-calls-input">{t('呼叫次數')}</label>
+            <input id="turn-calls-input" className="api-balance-input" type="number" min="1" max="64" step="1" value={newCalls} disabled={savingLimits} onChange={(e) => setNewCalls(e.target.value)} />
+            <button className="api-balance-btn" type="submit" disabled={savingLimits}>{t('儲存')}</button>
+            <button className="api-balance-btn cancel" type="button" disabled={savingLimits} onClick={() => setEditingLimits(false)}>{t('取消')}</button>
+            {limitsError ? <span className="sl-v warn" role="alert">{limitsError}</span> : null}
+          </form>
+        ) : (
+          <button
+            type="button"
+            className="sl-item api-balance-chip"
+            data-k="turn-limits"
+            title={t('每回合上限：時間 {secs} 秒、API 呼叫 {calls} 次。時間到會先請模型收尾寫摘要，不是直接中止；點擊可修改（下一回合起生效）', { secs: cap.turn_timeout_secs, calls: cap.max_api_calls_per_turn })}
+            onClick={handleStartEditLimits}
+          >
+            <span className="sl-k">{t('回合')}</span>
+            <span className="sl-v">{Math.round(cap.turn_timeout_secs / 60)}m / {cap.max_api_calls_per_turn}</span>
           </button>
         )
       ) : null}

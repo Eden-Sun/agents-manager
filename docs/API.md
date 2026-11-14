@@ -1995,9 +1995,9 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 `PUT /api/claude-api/balance-anchor`（User-only）：更新 Anthropic 預付餘額錨點。body `{usd: number, at?: string}`（`at` 預設為目前 UTC 時間）。更新 `[claude_api]` 配置並持久化至 config。回傳更新後的 `GET /api/claude-api/balance` 內容。
 
-`GET /api/claude-api/cap`（User-only，唯讀）：所有 claude-api bot 合計的總花費上限狀態。回 `{cap_usd: number|null, since: string|null, spent_usd: number}`。花費從 `since` 起算（`created_at >= since` 的 recorded + reserved + unknown）。
+`GET /api/claude-api/cap`（User-only，唯讀）：所有 claude-api bot 合計的總花費上限狀態。回 `{cap_usd: number|null, since: string|null, spent_usd: number, turn_timeout_secs: number, max_api_calls_per_turn: number}`（後兩個是 `[claude_api.api_bot]` 的每回合上限）。花費從 `since` 起算（`created_at >= since` 的 recorded + reserved + unknown）。
 
-`PUT /api/claude-api/cap`（User-only）：設定或清除所有 claude-api bot 合計的總花費上限。body `{cap_usd: number|null}`。設定時 `since` 自動記錄為當前 UTC 時間；傳入 `null` 則清除上限與 since。持久化至 `[claude_api.api_bot]`。回傳更新後的 `{cap_usd, since, spent_usd}`。
+`PUT /api/claude-api/cap`（User-only）：設定或清除所有 claude-api bot 合計的總花費上限。body 三個欄位都可省略：`cap_usd: number|null`（沒帶＝不動；`null`＝清除上限與 since；數字＝設定，`since` 記為當前 UTC 時間）、`turn_timeout_secs`（每回合時間上限，1..=3600 秒，不得小於 `command_timeout_secs`）、`max_api_calls_per_turn`（1..=64）。超出範圍或時間小於指令逾時 → 422 `bad_request`（`reason`：`invalid_cap_usd`／`invalid_turn_timeout_secs`／`turn_timeout_below_command_timeout`／`invalid_max_api_calls_per_turn`），整筆不套用。持久化至 `[claude_api.api_bot]`，下一回合起生效。回傳更新後的 `{cap_usd, since, spent_usd, turn_timeout_secs, max_api_calls_per_turn}`。
 
 `GET /api/bots/{id}/api_fresh_target` 僅 User 可用；Bot、AGM bot 與 Service 為 403。回應 `availability` 為 `available` 時附 `session_id` 與 `generation`；`none` 表示沒有 session，`unavailable` 表示無法安全確認（含過期或隔離），不附 target。這是快照，刪除時仍重新驗證。
 

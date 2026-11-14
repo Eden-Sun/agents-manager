@@ -93,38 +93,83 @@ pub async fn get_claude_api_cap(app: Arc<App>) -> Result<Value, LcError> {
         "cap_usd": cap_usd,
         "since": since,
         "spent_usd": spent_usd,
+        "turn_timeout_secs": cfg.claude_api.api_bot.turn_timeout_secs,
+        "max_api_calls_per_turn": cfg.claude_api.api_bot.max_api_calls_per_turn,
     }))
 }
 
 /// PUT /api/claude-api/cap 請求 body
 #[derive(Debug, Deserialize)]
 pub struct PutCapRequest {
-    pub cap_usd: Option<f64>,
+    /// 沒帶＝不動總上限；帶 `null`＝清除；帶數字＝設定。
+    #[serde(default, deserialize_with = "present")]
+    pub cap_usd: Option<Option<f64>>,
+    /// 每回合時間上限（秒，1..=3600，且不得小於 `command_timeout_secs`）。沒帶＝不動。
+    #[serde(default)]
+    pub turn_timeout_secs: Option<u64>,
+    /// 每回合 API 呼叫次數上限（1..=64）。沒帶＝不動。
+    #[serde(default)]
+    pub max_api_calls_per_turn: Option<u32>,
+}
+
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// PUT /api/claude-api/cap
 pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Value, LcError> {
-    let (new_cap, new_since) = match body.cap_usd {
-        Some(cap) => {
-            if cap < 0.0 || !cap.is_finite() {
-                return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_cap_usd"})));
-            }
-            (Some(cap), Some(am_base::db::now()))
+    let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
+    if let Some(Some(cap)) = body.cap_usd {
+        if cap < 0.0 || !cap.is_finite() {
+            return Err(bad("invalid_cap_usd"));
         }
-        None => (None, None),
-    };
+    }
+    let current = app.cfg.get().await.claude_api.api_bot.clone();
+    if let Some(t) = body.turn_timeout_secs {
+        if !(1..=3600).contains(&t) {
+            return Err(bad("invalid_turn_timeout_secs"));
+        }
+        if current.command_timeout_secs > t {
+            return Err(bad("turn_timeout_below_command_timeout"));
+        }
+    }
+    if body.max_api_calls_per_turn.is_some_and(|n| !(1..=64).contains(&n)) {
+        return Err(bad("invalid_max_api_calls_per_turn"));
+    }
 
-    let cap_val = new_cap;
-    let since_val = new_since.clone();
-
+    let cap_change = body.cap_usd;
+    let (timeout, calls) = (body.turn_timeout_secs, body.max_api_calls_per_turn);
+    let now = am_base::db::now();
     app.cfg
         .update(move |cfg| {
-            cfg.claude_api.api_bot.total_cap_usd = cap_val;
-            cfg.claude_api.api_bot.total_cap_since = since_val;
+            let b = &mut cfg.claude_api.api_bot;
+            match cap_change {
+                Some(Some(cap)) => {
+                    b.total_cap_usd = Some(cap);
+                    b.total_cap_since = Some(now);
+                }
+                Some(None) => {
+                    b.total_cap_usd = None;
+                    b.total_cap_since = None;
+                }
+                None => {}
+            }
+            if let Some(t) = timeout {
+                b.turn_timeout_secs = t;
+            }
+            if let Some(n) = calls {
+                b.max_api_calls_per_turn = n;
+            }
             Ok(())
         })
         .await
         .map_err(crate::api::cfg_err)?;
+    let after = app.cfg.get().await.claude_api.api_bot.clone();
+    let (new_cap, new_since) = (after.total_cap_usd, after.total_cap_since.clone());
 
     let spent_usd = if let Some(ref s) = new_since {
         let microusd = query_total_cap_spent_microusd(&app, s)
@@ -139,5 +184,53 @@ pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Va
         "cap_usd": new_cap,
         "since": new_since,
         "spent_usd": spent_usd,
+        "turn_timeout_secs": after.turn_timeout_secs,
+        "max_api_calls_per_turn": after.max_api_calls_per_turn,
     }))
+}
+
+#[cfg(test)]
+mod turn_limit_tests {
+    use super::*;
+
+    fn req(v: Value) -> PutCapRequest {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn cap_field_distinguishes_absent_null_and_number() {
+        assert_eq!(req(json!({})).cap_usd, None, "沒帶＝不動");
+        assert_eq!(req(json!({"cap_usd": null})).cap_usd, Some(None), "null＝清除");
+        assert_eq!(req(json!({"cap_usd": 5.0})).cap_usd, Some(Some(5.0)));
+    }
+
+    #[tokio::test]
+    async fn put_changes_turn_limits_without_touching_the_cap_and_get_shows_them() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        put_claude_api_cap(app.clone(), req(json!({"cap_usd": 7.5}))).await.unwrap();
+        let out = put_claude_api_cap(app.clone(), req(json!({"turn_timeout_secs": 2400, "max_api_calls_per_turn": 30}))).await.unwrap();
+        assert_eq!(out["turn_timeout_secs"], json!(2400));
+        assert_eq!(out["max_api_calls_per_turn"], json!(30));
+        assert_eq!(out["cap_usd"], json!(7.5), "沒帶 cap_usd 不動總上限");
+        let got = get_claude_api_cap(app.clone()).await.unwrap();
+        assert_eq!((got["turn_timeout_secs"].clone(), got["max_api_calls_per_turn"].clone()), (json!(2400), json!(30)));
+        // 舊用法：只帶 cap_usd:null 照樣清除。
+        let cleared = put_claude_api_cap(app.clone(), req(json!({"cap_usd": null}))).await.unwrap();
+        assert_eq!(cleared["cap_usd"], Value::Null);
+        assert_eq!(cleared["turn_timeout_secs"], json!(2400));
+    }
+
+    #[tokio::test]
+    async fn put_rejects_out_of_range_and_below_command_timeout() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        for body in [json!({"turn_timeout_secs": 0}), json!({"turn_timeout_secs": 3601}), json!({"max_api_calls_per_turn": 0}), json!({"max_api_calls_per_turn": 65})] {
+            assert!(matches!(put_claude_api_cap(app.clone(), req(body)).await, Err(LcError::BadValue(_))));
+        }
+        let cmd = app.cfg.get().await.claude_api.api_bot.command_timeout_secs;
+        let r = put_claude_api_cap(app.clone(), req(json!({"turn_timeout_secs": cmd - 1}))).await;
+        assert!(matches!(r, Err(LcError::BadValue(v)) if v["reason"] == "turn_timeout_below_command_timeout"));
+        assert_eq!(app.cfg.get().await.claude_api.api_bot.turn_timeout_secs, am_config::api_bot::default_turn_timeout_secs(), "被拒絕不改設定");
+    }
 }

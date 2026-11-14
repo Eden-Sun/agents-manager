@@ -526,7 +526,11 @@ pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str
         "api_bot_key_unavailable" => "讀不到 API key（[claude_api] key_file），所以沒有送出請求。".into(),
         "api_bot_quote_refused" => "請求無法估價（超過上下文上限或含未核准的欄位），所以沒有送出請求。".into(),
         "api_bot_max_calls_reached" => "這一回合的 API 呼叫次數已達上限（max_api_calls_per_turn）。".into(),
-        "turn_timeout" => "這一回合超過時間上限（turn_timeout_secs）。".into(),
+        "turn_timeout" => "這一回合超過時間上限，連收尾都沒做完，已中止。時間上限可在 claude-api 設定（狀態列的「回合時間」）調整。".into(),
+        r if r.starts_with("turn_timeout:") => {
+            let secs = r.trim_start_matches("turn_timeout:");
+            format!("這一回合超過時間上限 {secs} 秒，連收尾都沒做完，已中止。時間上限可在 claude-api 設定（狀態列的「回合時間」）調整。").into()
+        }
         "max_tokens" => "回覆在輸出 token 上限被截斷。".into(),
         "unknown_stop" => "模型以未知的原因停止。".into(),
         "pending_unknown" => "上一次請求的送達與計費無法確認，為了避免重複計費已停止；請退役這個對話後再試。".into(),
@@ -589,6 +593,25 @@ pub(super) async fn post_cap_notice(app: &Arc<App>, key: &ApiTurnKey, max_calls:
         Ok(Some(message)) => crate::lifecycle::emit_message_added(app, &key.bot_id, message).await,
         Ok(None) => {}
         Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot cap notice could not be stored"),
+    }
+}
+
+/// 回合到軟期限、已請模型收尾：在對話中留一則系統訊息。
+pub(super) async fn post_time_limit_notice(app: &Arc<App>, key: &ApiTurnKey, secs: u64) {
+    let text = format!("已達本回合時間上限（{secs} 秒），模型已停止動作並寫出摘要；回覆 continue 可接著做。時間上限可在 claude-api 設定調整。");
+    let posted: Result<Option<crate::db::Message>> = async {
+        let mut tx = crate::db::begin_write(&app.db).await?;
+        let conversation: Option<String> = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=? AND run_id=?")
+            .bind(&key.turn_id).bind(&key.run_id).fetch_optional(&mut *tx).await?;
+        let Some(conversation) = conversation else { return Ok(None) };
+        let message = crate::lifecycle::insert_message_tx(&mut tx, &conversation, Some(&key.turn_id), "system", &text, "system", false, None).await?;
+        tx.commit().await?;
+        Ok(Some(message))
+    }.await;
+    match posted {
+        Ok(Some(message)) => crate::lifecycle::emit_message_added(app, &key.bot_id, message).await,
+        Ok(None) => {}
+        Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot time limit notice could not be stored"),
     }
 }
 

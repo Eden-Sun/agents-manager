@@ -167,3 +167,76 @@ test('ApiBotUsageBar 的 speed 標成「上一次 speed」，tooltip 說明不�
     rawTransport.request = orig
   }
 })
+
+test('ApiBotUsageBar 的「回合」晶片：顯示每回合時間／呼叫上限，可改並送出，被 daemon 拒絕時留在表單顯示原因', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  let limits = { turn_timeout_secs: 1800, max_api_calls_per_turn: 20 }
+  const puts: unknown[] = []
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 1, recorded: 1, reserved: 0, unknown: 0, failed: 0 },
+        cost_microusd: { recorded: 1000, reserved: 0, unknown: 0 },
+        tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null,
+        last: null,
+        turns: [],
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') {
+      if (method === 'PUT') {
+        puts.push(body)
+        const b = body as { turn_timeout_secs: number; max_api_calls_per_turn: number }
+        if (b.turn_timeout_secs < 60) throw new Error('turn_timeout_below_command_timeout')
+        limits = b
+      }
+      return { cap_usd: null, since: null, spent_usd: 0, ...limits }
+    }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  const settleUi = () => act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+  const type = async (el: HTMLInputElement, v: string) => {
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')!.set!
+      set.call(el, v)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+  }
+  const submit = () => act(async () => {
+    document.querySelector('[data-k="turn-limits-form"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 50))
+  })
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await settleUi()
+    const chip = document.querySelector<HTMLButtonElement>('[data-k="turn-limits"]')!
+    assert.ok(chip, '回合晶片要在')
+    assert.equal(chip.querySelector('.sl-v')!.textContent, '30m / 20')
+    await act(async () => { chip.click() })
+    const form = document.querySelector('[data-k="turn-limits-form"]')!
+    assert.equal(form.querySelector<HTMLInputElement>('#turn-timeout-input')!.value, '1800')
+    // 超出範圍：不送出。
+    await type(form.querySelector<HTMLInputElement>('#turn-timeout-input')!, '5000')
+    await submit()
+    assert.equal(puts.length, 0)
+    assert.ok(document.querySelector('[role="alert"]'), '顯示範圍提示')
+    // daemon 拒絕：留在表單、顯示原因。
+    await type(form.querySelector<HTMLInputElement>('#turn-timeout-input')!, '30')
+    await submit()
+    await settleUi()
+    assert.equal(puts.length, 1)
+    assert.match(document.querySelector('[role="alert"]')?.textContent ?? '', /turn_timeout_below_command_timeout/)
+    // 成功：只送每回合上限，不帶 cap_usd；晶片更新。
+    await type(document.querySelector<HTMLInputElement>('#turn-timeout-input')!, '2400')
+    await type(document.querySelector<HTMLInputElement>('#turn-calls-input')!, '30')
+    await submit()
+    await settleUi()
+    assert.deepEqual(puts[1], { turn_timeout_secs: 2400, max_api_calls_per_turn: 30 })
+    assert.equal(document.querySelector('[data-k="turn-limits"] .sl-v')!.textContent, '40m / 30')
+  } finally {
+    rawTransport.request = orig
+  }
+})

@@ -94,6 +94,8 @@ struct RuntimeInner {
     fail_reasons: Mutex<HashMap<FullKey, String>>,
     /// 達到 API 呼叫上限的回合（記錄該回合的上限值 N，由 completion owner 取走後寫進系統提示）。
     cap_reached: Mutex<HashMap<FullKey, usize>>,
+    /// 軟期限到、已收尾的回合（值＝`turn_timeout_secs`），完成後補一則系統提示。
+    time_limited: Mutex<HashMap<FullKey, u64>>,
     /// 對話壓縮的提示訊息（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
     compaction_notes: Mutex<HashMap<FullKey, String>>,
     /// 使用者強制中斷的回合：取消後 runner 回報的 Cancelled 要改記成 `user_interrupted` 的失敗，
@@ -129,6 +131,7 @@ impl ApiBotRuntime {
                 explicit_quarantine: Mutex::new(HashMap::new()),
                 fail_reasons: Mutex::new(HashMap::new()),
                 cap_reached: Mutex::new(HashMap::new()),
+                time_limited: Mutex::new(HashMap::new()),
                 compaction_notes: Mutex::new(HashMap::new()),
                 user_interrupts: Mutex::new(std::collections::HashSet::new()),
             }),
@@ -626,7 +629,8 @@ impl ApiBotRuntime {
         let max_calls = limits.max_api_calls_per_turn as usize;
         let fail_inner = self.inner.clone();
         let fail_key = full.clone();
-        let turn_timeout = Duration::from_secs(limits.turn_timeout_secs);
+        let turn_timeout_secs = limits.turn_timeout_secs;
+        let (soft_limit, hard_limit) = turn_deadlines(turn_timeout_secs);
         let (final_text_tx, final_text_rx) = oneshot::channel();
         let (release_tx, release_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
         let (accept_tx, accept_rx) = if native_pending { let (tx, rx) = oneshot::channel(); (Some(tx), Some(rx)) } else { (None, None) };
@@ -659,7 +663,9 @@ impl ApiBotRuntime {
                     let (inner, key) = (fail_inner.clone(), fail_key.clone());
                     move || inner.user_interrupts.lock().expect("interrupt mutex poisoned").contains(&key)
                 };
-                let execution = super::runner::run_interruptible(
+                let soft_at = tokio::time::Instant::now() + soft_limit;
+                let wrap_up = move || tokio::time::Instant::now() >= soft_at;
+                let execution = super::runner::run_with_wrap_up(
                     adapter.as_ref(),
                     &tools,
                     adapter.as_ref(),
@@ -667,9 +673,10 @@ impl ApiBotRuntime {
                     &cancel,
                     max_calls,
                     &interrupted,
+                    &wrap_up,
                 );
                 let (result, deadline_elapsed) =
-                    await_runner_deadline(execution, &cancel, turn_timeout).await;
+                    await_runner_deadline(execution, &cancel, hard_limit).await;
                 let refusal = adapter.take_refusal();
                 let compaction_note = state.responses[responses_before..].iter().rev().find_map(|r| {
                     let has_compaction_block = r.content.iter().any(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("compaction"));
@@ -699,8 +706,15 @@ impl ApiBotRuntime {
                         .insert(fail_key.clone(), note);
                 }
                 let outcome = if deadline_elapsed {
-                    TurnOutcome::Failed("turn_timeout".into())
+                    TurnOutcome::Failed(format!("turn_timeout:{turn_timeout_secs}"))
                 } else {
+                    if matches!(&result, Ok(super::runner::Halt::TimeLimit)) {
+                        fail_inner
+                            .time_limited
+                            .lock()
+                            .expect("time limited mutex poisoned")
+                            .insert(fail_key.clone(), turn_timeout_secs);
+                    }
                     if matches!(&result, Ok(super::runner::Halt::MaxCallsReached)) {
                         fail_inner
                             .cap_reached
@@ -1214,6 +1228,7 @@ async fn own_ticket_inner(
             } else { None };
             let fail_reason = owner.app.api_bot_runtime.inner.fail_reasons.lock().expect("fail reason mutex poisoned").remove(&FullKey::from(&owner.key));
             let cap_reached = owner.app.api_bot_runtime.inner.cap_reached.lock().expect("cap reached mutex poisoned").remove(&FullKey::from(&owner.key));
+            let time_limited = owner.app.api_bot_runtime.inner.time_limited.lock().expect("time limited mutex poisoned").remove(&FullKey::from(&owner.key));
             let compaction_note = owner.app.api_bot_runtime.inner.compaction_notes.lock().expect("compaction note mutex poisoned").remove(&FullKey::from(&owner.key));
             if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
@@ -1227,6 +1242,8 @@ async fn own_ticket_inner(
                     super::completion::post_failure_notice(&owner.app, &owner.key, fail_reason.as_deref().unwrap_or("unknown")).await;
                 } else if let Some(n) = cap_reached {
                     super::completion::post_cap_notice(&owner.app, &owner.key, n).await;
+                } else if let Some(secs) = time_limited {
+                    super::completion::post_time_limit_notice(&owner.app, &owner.key, secs).await;
                 }
                 // 乾淨地結束（完成，或失敗但 checkpoint 已由 receipt 結清）才算 same-run 可接續；失敗後的下一則由 checkpoint 決定能不能繼續
                 // （有 unknown 的送出會在 rebind 時以 pending_unknown 明確失敗），不再卡在 in_flight/pending。
@@ -1793,7 +1810,8 @@ fn map_runner_result(
         Ok(
             super::runner::Halt::EndTurn
             | super::runner::Halt::Refusal
-            | super::runner::Halt::MaxCallsReached,
+            | super::runner::Halt::MaxCallsReached
+            | super::runner::Halt::TimeLimit,
         ) => TurnOutcome::Completed,
         Ok(super::runner::Halt::MaxTokens) => TurnOutcome::Failed("max_tokens".into()),
         Ok(super::runner::Halt::Other(_)) => TurnOutcome::Failed("unknown_stop".into()),
@@ -1821,6 +1839,12 @@ fn map_runner_result(
             H::InvalidRequest | H::Cancelled => "api_invalid_request".into(),
         }),
     }
+}
+
+/// 回合時限 `turn_timeout_secs` 的兩道期限：軟期限＝時限的 85%（到了不再開始新動作，送一次收尾請求要摘要；
+/// 進行中的請求與工具讓它跑完，避免請求中途被砍造成計費不明）；硬期限＝時限＋120 秒（收尾也沒完成才取消、回合失敗）。
+pub(crate) fn turn_deadlines(turn_timeout_secs: u64) -> (Duration, Duration) {
+    (Duration::from_secs(turn_timeout_secs * 85 / 100), Duration::from_secs(turn_timeout_secs + 120))
 }
 
 async fn await_runner_deadline<F: Future>(

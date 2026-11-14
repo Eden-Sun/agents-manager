@@ -41,7 +41,7 @@ pub fn default_max_requests_per_hour() -> u32 {
 }
 
 pub fn default_turn_timeout_secs() -> u64 {
-    300
+    1800
 }
 
 pub fn default_max_output_tokens() -> u32 {
@@ -214,7 +214,7 @@ mod tests {
         assert!(!def.enabled);
         assert_eq!(def.max_api_calls_per_turn, 20);
         assert_eq!(def.max_requests_per_hour, 60);
-        assert_eq!(def.turn_timeout_secs, 300);
+        assert_eq!(def.turn_timeout_secs, 1800);
         assert_eq!(def.max_output_tokens, 8192);
         assert_eq!(def.max_checkpoint_bytes, 8_388_608);
         assert_eq!(def.command_timeout_secs, 60);
@@ -251,7 +251,7 @@ max_turn_cost_microusd = 500000
         assert!(api_bot.enabled);
         assert_eq!(api_bot.max_api_calls_per_turn, 20);
         assert_eq!(api_bot.max_requests_per_hour, 60);
-        assert_eq!(api_bot.turn_timeout_secs, 300);
+        assert_eq!(api_bot.turn_timeout_secs, 1800);
         assert_eq!(api_bot.max_output_tokens, 8192);
         assert_eq!(api_bot.max_checkpoint_bytes, 8_388_608);
         assert_eq!(api_bot.command_timeout_secs, 60);
@@ -316,7 +316,7 @@ max_turn_cost_microusd = 500000
         let limits = cfg.validated(true).unwrap().unwrap();
         assert_eq!(limits.max_api_calls_per_turn, 20);
         assert_eq!(limits.max_requests_per_hour, 60);
-        assert_eq!(limits.turn_timeout_secs, 300);
+        assert_eq!(limits.turn_timeout_secs, 1800);
         assert_eq!(limits.max_output_tokens, 8192);
         assert_eq!(limits.max_checkpoint_bytes, 8_388_608);
         assert_eq!(limits.command_timeout_secs, 60);

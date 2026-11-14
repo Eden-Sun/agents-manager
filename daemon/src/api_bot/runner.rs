@@ -41,6 +41,8 @@ pub enum Halt {
     Refusal,
     MaxTokens,
     MaxCallsReached,
+    /// 軟期限到：不再開始新動作，已用一次收尾請求讓模型寫出摘要。
+    TimeLimit,
     Other(String),
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -92,13 +94,14 @@ fn settle_interrupted_batch(
     pushed: bool,
     finished: Option<(&str, String)>,
     rest: &[crate::api_bot::protocol::ToolCall],
+    note: &str,
 ) {
     if let Some((id, output)) = finished {
         results.push(json!({"type":"tool_result","tool_use_id":id,"content":format!("{output}\n[interrupted by user]"),"is_error":true}));
         state.completed_tool_ids.insert(id.to_string());
     }
     for call in rest {
-        results.push(json!({"type":"tool_result","tool_use_id":call.id,"content":"not executed: interrupted by user","is_error":true}));
+        results.push(json!({"type":"tool_result","tool_use_id":call.id,"content":format!("not executed: {note}"),"is_error":true}));
         state.completed_tool_ids.insert(call.id.clone());
     }
     if results.is_empty() {
@@ -121,15 +124,52 @@ pub async fn run_interruptible(
     max_calls: usize,
     user_interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<Halt, Error> {
+    run_with_wrap_up(model, tools, journal, state, cancel, max_calls, user_interrupted, &|| false).await
+}
+
+const WRAP_UP_NOTE: &str = "[AG Man] The time limit for this turn has been reached. Do NOT start any new action or tool call. Reply with a summary: what is done, what is not done, and how to continue.";
+
+/// 加一則收尾提示給下一次請求：附在最後一則（工具結果）user 訊息上；最後一則不是陣列內容就不加。
+fn push_wrap_up_note(state: &mut State) {
+    if let Some(last) = state.messages.last_mut() {
+        if last.role == "user" {
+            if let Some(arr) = last.content.as_array_mut() {
+                arr.push(json!({"type": "text", "text": WRAP_UP_NOTE}));
+            }
+        }
+    }
+}
+
+/// 同 [`run_interruptible`]，另有軟期限 `wrap_up`：回傳 true 之後不再執行新的工具，
+/// 剩下的工具結清成 `not executed`，再送**一次**收尾請求（附提示，要模型寫摘要），結束於 [`Halt::TimeLimit`]。
+/// 進行中的請求與工具不被中斷（硬期限由呼叫端另外取消）；收尾請求不佔 `max_calls`。
+pub async fn run_with_wrap_up(
+    model: &impl Model,
+    tools: &impl Tools,
+    journal: &impl Journal,
+    state: &mut State,
+    cancel: &CancellationToken,
+    max_calls: usize,
+    user_interrupted: &(dyn Fn() -> bool + Sync),
+    wrap_up: &(dyn Fn() -> bool + Sync),
+) -> Result<Halt, Error> {
     if state.api_pending || state.tool_pending.is_some() {
         return Err(Error::PendingUnknown);
     }
     if !(1..=64).contains(&max_calls) || state.messages.is_empty() {
         return Err(Error::Budget);
     }
-    for call_idx in 0..max_calls {
+    let mut wrapping_up = false;
+    for call_idx in 0..=max_calls {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
+        }
+        if !wrapping_up && wrap_up() {
+            wrapping_up = true;
+            push_wrap_up_note(state);
+        }
+        if call_idx >= max_calls && !wrapping_up {
+            break;
         }
         state.api_pending = true;
         checkpoint(journal, state).await?;
@@ -156,7 +196,17 @@ pub async fn run_interruptible(
         // durably committed. Crash recovery must not send an incomplete assistant tool batch.
         state.tool_pending = calls.first().map(|c| c.id.clone());
         checkpoint(journal, state).await?;
+        if wrapping_up && !calls.is_empty() {
+            // 收尾請求還是要工具：不執行，結清後結束（對話維持合法）。
+            let mut results: Vec<Value> = Vec::new();
+            settle_interrupted_batch(state, &mut results, false, None, &calls, "time limit reached");
+            checkpoint(journal, state).await?;
+            return Ok(Halt::TimeLimit);
+        }
         if calls.is_empty() {
+            if wrapping_up && reason == "end_turn" {
+                return Ok(Halt::TimeLimit);
+            }
             return Ok(match reason.as_str() {
                 "end_turn" => Halt::EndTurn,
                 "refusal" => Halt::Refusal,
@@ -165,12 +215,20 @@ pub async fn run_interruptible(
             });
         }
         let mut results: Vec<Value> = Vec::new();
+        let mut out_of_time = false;
         for (idx, call) in calls.iter().enumerate() {
+            // 軟期限：不開始新工具，這一批剩下的結清，下一輪送收尾請求。
+            if !user_interrupted() && wrap_up() && !cancel.is_cancelled() {
+                let pushed = !results.is_empty();
+                settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..], "time limit reached");
+                out_of_time = true;
+                break;
+            }
             if cancel.is_cancelled() {
                 // 前一個工具已經回來並記下結果（tool_pending 只是批次還沒收尾）；使用者中斷就把剩下的結清。
                 if user_interrupted() {
                     let pushed = !results.is_empty();
-                    settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..]);
+                    settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..], "interrupted by user");
                     checkpoint(journal, state).await?;
                 }
                 return Err(Error::Cancelled);
@@ -185,7 +243,7 @@ pub async fn run_interruptible(
                         Err(e) => e,
                     };
                     let pushed = !results.is_empty();
-                    settle_interrupted_batch(state, &mut results, pushed, Some((&call.id, output)), &calls[idx + 1..]);
+                    settle_interrupted_batch(state, &mut results, pushed, Some((&call.id, output)), &calls[idx + 1..], "interrupted by user");
                     checkpoint(journal, state).await?;
                 }
                 return Err(Error::Cancelled);
@@ -212,7 +270,12 @@ pub async fn run_interruptible(
             }
             checkpoint(journal, state).await?;
         }
-        let remaining_calls = max_calls - (call_idx + 1);
+        if out_of_time {
+            state.tool_pending = None;
+            checkpoint(journal, state).await?;
+            continue;
+        }
+        let remaining_calls = max_calls.saturating_sub(call_idx + 1);
         if remaining_calls == 2 {
             results.push(json!({
                 "type": "text",
