@@ -1,4 +1,5 @@
 use super::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn expert_manager_sets_executor_and_advisor_roles_in_its_project_only() {
@@ -164,4 +165,190 @@ async fn manager_role_change_is_written_like_the_web_setting() {
     let call = |role: &str| put_bot_role(State(env.app.clone()), Path(peer.clone()), Extension(RequestPrincipal::Bot(manager.clone())), Json(PutBotRole { role: Some(role.into()), track: None }));
     call("executor").await.map_err(|e| format!("{e:?}")).unwrap();
     assert_eq!(db::bot(&env.app.db, &peer).await.unwrap().unwrap().role.as_deref(), Some("executor"));
+}
+
+async fn distinct_bot(e: &crate::testing::Env, project_id: &str, name: &str) -> db::Bot {
+    let bot = crate::testing::claude_bot(&e.app, project_id, name).await;
+    sqlx::query("UPDATE bots SET hook_token=? WHERE id=?")
+        .bind(format!("token-{}", bot.id))
+        .bind(&bot.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
+}
+
+fn bot_headers(bot: &db::Bot) -> String {
+    format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token)
+}
+
+async fn raw(app: Arc<App>, request: String) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = router(app);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+    });
+    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    server.abort();
+    response
+}
+
+async fn http_get(app: Arc<App>, path: &str, auth: &str) -> String {
+    raw(
+        app,
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n"),
+    )
+    .await
+}
+
+async fn http_post(app: Arc<App>, path: &str, auth: &str, payload: &str) -> String {
+    raw(
+        app,
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn expert_manager_may_read_its_project_members_including_claude_api_bots() {
+    let env = crate::testing::env().await;
+    sqlx::query("UPDATE projects SET mode='expert' WHERE id=?")
+        .bind(&env.project_id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let manager = distinct_bot(&env, &env.project_id, "exp-manager").await;
+    sqlx::query("UPDATE bots SET role='manager' WHERE id=?")
+        .bind(&manager.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let executor = distinct_bot(&env, &env.project_id, "exp-executor").await;
+    sqlx::query("UPDATE bots SET role='executor' WHERE id=?")
+        .bind(&executor.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let api_member = distinct_bot(&env, &env.project_id, "exp-api-member").await;
+    sqlx::query("UPDATE bots SET kind='claude-api', role='advisor', model='claude-opus-5-5' WHERE id=?")
+        .bind(&api_member.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let other_project = db::ulid();
+    sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'other','local',?,'expert')")
+        .bind(&other_project)
+        .bind(format!("/tmp/{other_project}"))
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let other_manager = distinct_bot(&env, &other_project, "other-manager").await;
+    sqlx::query("UPDATE bots SET role='manager' WHERE id=?")
+        .bind(&other_manager.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    // 1. Manager GETs member's messages -> 200 OK
+    let resp = http_get(env.app.clone(), &format!("/api/bots/{}/messages", executor.id), &bot_headers(&manager)).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "manager reading executor messages: {resp}");
+
+    // 1b. Manager GETs claude-api member's messages -> 200 OK
+    let resp_api = http_get(env.app.clone(), &format!("/api/bots/{}/messages", api_member.id), &bot_headers(&manager)).await;
+    assert!(resp_api.starts_with("HTTP/1.1 200"), "manager reading claude-api member messages: {resp_api}");
+
+    // 2. Manager of another project GETs member's messages -> 403 Forbidden with bot_resource_scope
+    let resp_other = http_get(env.app.clone(), &format!("/api/bots/{}/messages", executor.id), &bot_headers(&other_manager)).await;
+    assert!(resp_other.starts_with("HTTP/1.1 403"), "other project manager must get 403: {resp_other}");
+    assert!(resp_other.contains("bot_resource_scope"), "must fail at bot_resource_scope: {resp_other}");
+
+    // 3. Non-manager member reading another member -> 403 Forbidden with bot_resource_scope
+    let resp_peer = http_get(env.app.clone(), &format!("/api/bots/{}/messages", api_member.id), &bot_headers(&executor)).await;
+    assert!(resp_peer.starts_with("HTTP/1.1 403"), "peer member must get 403: {resp_peer}");
+    assert!(resp_peer.contains("bot_resource_scope"), "must fail at bot_resource_scope: {resp_peer}");
+
+    // 4. Manager POSTing to a write route on a member (other than allowed ones) -> still 403
+    let resp_write = http_post(env.app.clone(), &format!("/api/bots/{}/fork", executor.id), &bot_headers(&manager), "{}").await;
+    assert!(resp_write.starts_with("HTTP/1.1 403"), "manager POST to write route must get 403: {resp_write}");
+
+    let err = authorize_bot_path(&env.app, &manager.id, "POST", &format!("/api/bots/{}/fork", executor.id)).await.unwrap_err();
+    assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "bot_resource_scope"), "authorize_bot_path must deny write with bot_resource_scope: {err:?}");
+
+    // 5. Turns and attachments owned by a member (including claude-api member)
+    // 5a. Executor turn & attachment
+    let exec_conv = db::conversation_id(&env.app.db, &executor.id).await.unwrap();
+    let exec_turn_id = db::ulid();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES (?, ?, 'web', 'completed', ?)")
+        .bind(&exec_turn_id)
+        .bind(&exec_conv)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let exec_attachment = crate::attach::save(&env.app, &executor.id, "exec.txt", "text/plain", b"exec attachment data").await.unwrap();
+
+    // 5b. Claude-api member turn & attachment
+    let api_conv = db::conversation_id(&env.app.db, &api_member.id).await.unwrap();
+    let api_turn_id = db::ulid();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES (?, ?, 'web', 'completed', ?)")
+        .bind(&api_turn_id)
+        .bind(&api_conv)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    let api_attachment = crate::attach::save(&env.app, &api_member.id, "api.txt", "text/plain", b"api attachment data").await.unwrap();
+
+    // Manager GET on turn -> Ok(())
+    assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/turns/{exec_turn_id}")).await.is_ok());
+    assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/turns/{api_turn_id}")).await.is_ok());
+
+    // Other manager or peer GET on turn -> 403 Forbidden
+    assert!(matches!(
+        authorize_bot_path(&env.app, &other_manager.id, "GET", &format!("/api/turns/{exec_turn_id}")).await,
+        Err(LcError::Forbidden(_))
+    ));
+    assert!(matches!(
+        authorize_bot_path(&env.app, &executor.id, "GET", &format!("/api/turns/{api_turn_id}")).await,
+        Err(LcError::Forbidden(_))
+    ));
+
+    // Manager GET on attachment -> Ok(())
+    assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/attachments/{}", exec_attachment.id)).await.is_ok());
+    assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/attachments/{}", api_attachment.id)).await.is_ok());
+
+    // Other manager or peer GET on attachment -> 403 Forbidden
+    assert!(matches!(
+        authorize_bot_path(&env.app, &other_manager.id, "GET", &format!("/api/attachments/{}", exec_attachment.id)).await,
+        Err(LcError::Forbidden(_))
+    ));
+    assert!(matches!(
+        authorize_bot_path(&env.app, &executor.id, "GET", &format!("/api/attachments/{}", api_attachment.id)).await,
+        Err(LcError::Forbidden(_))
+    ));
+
+    // get_attachment handler invocation -> 200 OK
+    let res_exec = get_attachment(State(env.app.clone()), Path(exec_attachment.id.clone())).await.unwrap();
+    assert_eq!(res_exec.status(), StatusCode::OK);
+    let res_api = get_attachment(State(env.app.clone()), Path(api_attachment.id.clone())).await.unwrap();
+    assert_eq!(res_api.status(), StatusCode::OK);
+
+    // Note: GET /api/attachments/{id} over HTTP dies at bot_user_only because it is UserOnly in bot_route_policy
+    let resp_att_http = http_get(env.app.clone(), &format!("/api/attachments/{}", exec_attachment.id), &bot_headers(&manager)).await;
+    assert!(resp_att_http.starts_with("HTTP/1.1 403"), "UserOnly routes die at bot_user_only before authorize_bot_path: {resp_att_http}");
+    assert!(resp_att_http.contains("user_only"), "UserOnly reason: {resp_att_http}");
 }

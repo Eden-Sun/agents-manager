@@ -1239,6 +1239,9 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if bot_may_access_bot(app, caller, id).await? {
                     return Ok(());
                 }
+                if matches!(method, "GET" | "HEAD") && expert_manager_over(app, caller, &target_bot).await? {
+                    return Ok(());
+                }
                 // 專家模式的管理者可以替同專案的頂層 bot 設執行者／顧問角色（使用者 2026-10-31）；handler 再驗一次並只收 role。
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
@@ -1288,6 +1291,13 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if bot_may_access_bot(app, caller, &owner).await? {
                     return Ok(());
                 }
+                if matches!(method, "GET" | "HEAD") {
+                    if let Some(owner_bot) = db::bot(&app.db, &owner).await.map_err(any_err)? {
+                        if expert_manager_over(app, caller, &owner_bot).await? {
+                            return Ok(());
+                        }
+                    }
+                }
                 // 派工者撤回自己派出、還在佇列的那一則（見 withdraw_turn_route）。
                 if method == "POST" && parts.len() == 4 && parts[3] == "withdraw" && lifecycle::sender_may_withdraw(app, id, caller).await? {
                     return Ok(());
@@ -1306,6 +1316,13 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
             if let Some(owner) = owner {
                 if bot_may_access_bot(app, caller, &owner).await? {
                     return Ok(());
+                }
+                if matches!(method, "GET" | "HEAD") {
+                    if let Some(owner_bot) = db::bot(&app.db, &owner).await.map_err(any_err)? {
+                        if expert_manager_over(app, caller, &owner_bot).await? {
+                            return Ok(());
+                        }
+                    }
                 }
                 Some("attachment")
             } else {
