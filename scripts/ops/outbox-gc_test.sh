@@ -28,16 +28,73 @@ gone() { [ ! -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "F
 REPO="${OUTBOX_GC_TEST_REPO:-$HERE/../..}"
 STARTUP_RS="$REPO/daemon/src/startup.rs"
 TRIAGE_RS="$REPO/crates/am-base/src/release_triage/mod.rs"
-SHARE_DB_NAME=$(grep 'open_with(&prepared.dir.join(' "$STARTUP_RS" 2>/dev/null | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//')
-TRIAGE_DB_NAME=$(grep -A3 'pub fn default_db_path' "$TRIAGE_RS" 2>/dev/null | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//')
-if [ -n "$SHARE_DB_NAME" ] && [ "$SHARE_DB_NAME" = "$TRIAGE_DB_NAME" ]; then
+extract_startup_name() { grep 'open_with(&prepared.dir.join(' | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//'; }
+extract_triage_name() { grep -A3 'pub fn default_db_path' | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//'; }
+# 讀檔名的順序（背景檢查時 agent 可能正在改、rebase 這個檔，讀到空白）：先讀工作目錄（未提交的改名以它為準）；
+# 讀不到檔名就等 1 秒重試一次；仍空才退回 git HEAD（假 repo 不是 git 時 HEAD 也讀不到，就是空）。
+db_name_from() { # $1 工作目錄的檔、$2 repo 相對路徑（給 git HEAD 用）、$3 抽取函式
+  local name
+  name=$(cat "$1" 2>/dev/null | "$3")
+  [ -n "$name" ] || { sleep 1; name=$(cat "$1" 2>/dev/null | "$3"); }
+  [ -n "$name" ] || name=$(git -C "$REPO" show "HEAD:$2" 2>/dev/null | "$3")
+  printf '%s' "$name"
+}
+SHARE_DB_NAME=$(db_name_from "$STARTUP_RS" daemon/src/startup.rs extract_startup_name)
+TRIAGE_DB_NAME=$(db_name_from "$TRIAGE_RS" crates/am-base/src/release_triage/mod.rs extract_triage_name)
+# 讀不到分享名單的檔名：只印一行 FAIL，跳過依賴 SHARE_DB_NAME 的整段測試（不拿空名去開資料目錄當 DB，不會連鎖出一串 FAIL）。
+SKIP_SUITE=""
+if [ -z "$SHARE_DB_NAME" ]; then
+  echo "FAIL - could not read the DB file name from startup.rs（${STARTUP_RS}；工作目錄與 git HEAD 都讀不到），跳過依賴分享名單資料庫的測試"; FAIL=$((FAIL + 1))
+  SKIP_SUITE=1
+elif [ "$SHARE_DB_NAME" = "$TRIAGE_DB_NAME" ]; then
   echo "ok   - daemon 兩處開帳本的檔名一致（${SHARE_DB_NAME}）"; PASS=$((PASS + 1))
 else
   echo "FAIL - daemon 開帳本的檔名對不上：startup.rs='${SHARE_DB_NAME}' release_triage='${TRIAGE_DB_NAME}'"; FAIL=$((FAIL + 1))
 fi
+[ -n "${OUTBOX_GC_TEST_NAMES_ONLY:-}" ] && SKIP_SUITE=1
 if [ -n "$SHARE_DB_NAME" ]; then
   check "outbox-gc.sh 的 SHARE_DB 與 daemon 同名" "^SHARE_DB=.*/${SHARE_DB_NAME}\"" "$HERE/outbox-gc.sh"
 fi
+
+# 自我測試：讀檔名的 fallback、缺行時只出一個 FAIL 不連鎖。內層執行帶 OUTBOX_GC_TEST_INNER=1 不再跑自我測試（避免遞迴）。
+if [ -z "${OUTBOX_GC_TEST_INNER:-}" ]; then
+  SELF="$HERE/outbox-gc_test.sh"
+  SELF_FAKE=$(mktemp -d)
+  mkdir -p "$SELF_FAKE/daemon/src" "$SELF_FAKE/crates/am-base/src/release_triage"
+  printf '// 這個假的 startup.rs 沒有開帳本的那一行\n' > "$SELF_FAKE/daemon/src/startup.rs"
+  cp "$TRIAGE_RS" "$SELF_FAKE/crates/am-base/src/release_triage/mod.rs"
+  # (a) 假 repo（非 git）的 startup.rs 缺那一行：整個測試只能有一個 FAIL，且是讀不到檔名那一行。
+  out=$(OUTBOX_GC_TEST_REPO="$SELF_FAKE" OUTBOX_GC_TEST_INNER=1 bash "$SELF" 2>&1); rc=$?
+  nfail=$(printf '%s\n' "$out" | grep -c '^FAIL' || true)
+  if [ "$rc" -ne 0 ] && [ "$nfail" -eq 1 ] && printf '%s\n' "$out" | grep -q '^FAIL - could not read the DB file name from startup.rs'; then
+    echo "ok   - 自我測試：缺行的假 repo 只出一個 FAIL、不連鎖"; PASS=$((PASS + 1))
+  else
+    echo "FAIL - 自我測試：缺行的假 repo 應只出一個 FAIL（rc=${rc}，FAIL=${nfail}）"; printf '%s\n' "$out" | sed 's/^/      /'; FAIL=$((FAIL + 1))
+  fi
+  # (b) 正常 repo 讀得到、兩處同名、通過。
+  out=$(OUTBOX_GC_TEST_NAMES_ONLY=1 OUTBOX_GC_TEST_INNER=1 bash "$SELF" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^ok   - daemon 兩處開帳本的檔名一致'; then
+    echo "ok   - 自我測試：正常 repo 讀得到檔名並通過"; PASS=$((PASS + 1))
+  else
+    echo "FAIL - 自我測試：正常 repo 應通過（rc=${rc}）"; printf '%s\n' "$out" | sed 's/^/      /'; FAIL=$((FAIL + 1))
+  fi
+  # (c) 工作目錄的 startup.rs 暫時沒有那一行、git HEAD 有：退回 HEAD 讀得到，仍通過。
+  G=$(mktemp -d)
+  mkdir -p "$G/daemon/src" "$G/crates/am-base/src/release_triage"
+  cp "$STARTUP_RS" "$G/daemon/src/startup.rs"
+  cp "$TRIAGE_RS" "$G/crates/am-base/src/release_triage/mod.rs"
+  git -C "$G" init -q && git -C "$G" add -A && git -C "$G" -c user.name=selftest -c user.email=selftest@localhost commit -qm init
+  printf '// 工作目錄暫時沒有那一行\n' > "$G/daemon/src/startup.rs"
+  out=$(OUTBOX_GC_TEST_REPO="$G" OUTBOX_GC_TEST_NAMES_ONLY=1 OUTBOX_GC_TEST_INNER=1 bash "$SELF" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^ok   - daemon 兩處開帳本的檔名一致'; then
+    echo "ok   - 自我測試：工作目錄讀不到時退回 git HEAD 並通過"; PASS=$((PASS + 1))
+  else
+    echo "FAIL - 自我測試：工作目錄讀不到時應退回 git HEAD（rc=${rc}）"; printf '%s\n' "$out" | sed 's/^/      /'; FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$SELF_FAKE" "$G"
+fi
+
+if [ -z "$SKIP_SUITE" ]; then
 
 setup() {
   ROOT=$(mktemp -d)
@@ -411,6 +468,8 @@ equals "資料目錄裡沒有 DB、預設位置有：exit 1，不回頭讀預設
 exists "沒讀到名單：資料目錄的一般過期檔也不刪" "$ROOT/empty-data/outbox/plain/old.txt"
 check  "沒讀到名單：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
+
+fi  # SKIP_SUITE
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
