@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::claude_api::{self, ClaudeError, ClaudeRequest};
+use crate::config::CLAUDE_API_EFFORTS;
 use crate::lc_error::LcError;
 use crate::state::App;
 
@@ -47,6 +48,9 @@ struct CacheEntry {
     rejected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejected_at: Option<String>,
+    /// 品質沒過後重試時用的 effort（往上提一階）；沒重試就沒有，照設定的 effort 翻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
 }
 
 pub(crate) use crate::claude_api::cost_usd;
@@ -309,6 +313,16 @@ fn mark_rejected(path: &Path, reason: &str) -> LcError {
     rejection_error(reason)
 }
 
+/// 品質沒過重試時的 effort：沿 [`CLAUDE_API_EFFORTS`] 往上一階（low → medium → high → xhigh → max）。
+/// `current` 空字串或不認得＝模型預設 `high`，往上取一階（xhigh）；已經最高就停在 max。
+pub(crate) fn next_effort(current: &str) -> &'static str {
+    let ladder = CLAUDE_API_EFFORTS;
+    let cur = current.trim();
+    let high = ladder.iter().position(|e| *e == "high").unwrap_or(0);
+    let idx = ladder.iter().position(|e| *e == cur).unwrap_or(high);
+    ladder[(idx + 1).min(ladder.len() - 1)]
+}
+
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
     let mut reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
     let mut translation = clean_reply(&reply.text);
@@ -326,8 +340,13 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
         }
     }
 
+    let mut effort = None;
     if rejected {
-        reply = claude_api::complete(app, build_request(content)).await.map_err(error_of)?;
+        // 品質沒過：只重試一次，且 effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
+        let configured = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
+        let next = next_effort(&configured);
+        reply = claude_api::complete_with_effort(app, build_request(content), next).await.map_err(error_of)?;
+        effort = Some(next.to_string());
         translation = clean_reply(&reply.text);
 
         if is_mostly_english(content) && is_mostly_english(&translation) {
@@ -351,12 +370,16 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
         prompt_version: PROMPT_VERSION.into(),
         cost_usd: cost,
         jev_prob,
+        effort,
         ..Default::default()
     };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
     let mut body = json!({"translation": entry.translation, "model": entry.model, "cached": false, "cost_usd": cost});
+    if let Some(e) = &entry.effort {
+        body["effort"] = json!(e);
+    }
     if let Some(u) = &reply.usage {
         body["usage"] = usage_json(u);
     }
@@ -823,10 +846,13 @@ mod tests {
     struct FakeSequence {
         calls: AtomicUsize,
         replies: Mutex<Vec<String>>,
+        /// 每次請求的 body（`request_json`），給測 effort 用。
+        bodies: Mutex<Vec<Value>>,
     }
 
     impl MessagesClient for FakeSequence {
-        fn complete<'a>(&'a self, _req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+        fn complete<'a>(&'a self, req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.bodies.lock().unwrap().push(req.request_json());
             let idx = self.calls.fetch_add(1, Ordering::SeqCst);
             let replies = self.replies.lock().unwrap();
             let text = replies.get(idx).cloned().unwrap_or_else(|| "fallback".to_string());
@@ -842,7 +868,7 @@ mod tests {
     }
 
     fn fake_seq(app: &Arc<App>, replies: Vec<String>) -> Arc<FakeSequence> {
-        let f = Arc::new(FakeSequence { calls: AtomicUsize::new(0), replies: Mutex::new(replies) });
+        let f = Arc::new(FakeSequence { calls: AtomicUsize::new(0), replies: Mutex::new(replies), bodies: Mutex::new(Vec::new()) });
         app.claude_api.set_client(f.clone());
         f
     }
@@ -943,6 +969,58 @@ mod tests {
         assert_eq!(b["cached"], json!(true));
         assert_eq!(b["translation"], json!("系統遇到了非預期的狀況。"));
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中快取不重複調用 API");
+    }
+
+    fn effort_of(body: &Value) -> Value {
+        body["output_config"]["effort"].clone()
+    }
+
+    #[test]
+    fn next_effort_climbs_one_tier_and_stays_at_max() {
+        assert_eq!(next_effort("low"), "medium");
+        assert_eq!(next_effort("medium"), "high");
+        assert_eq!(next_effort("high"), "xhigh");
+        assert_eq!(next_effort("xhigh"), "max");
+        assert_eq!(next_effort("max"), "max", "已經最高就停在最高");
+        assert_eq!(next_effort(""), "xhigh", "未設定＝模型預設 high，往上一階");
+        assert_eq!(next_effort(" low "), "medium", "前後空白忽略");
+    }
+
+    #[tokio::test]
+    async fn rejected_first_reply_retries_once_at_next_effort() {
+        let (app, _dir) = app(true).await;
+        let content = "The system has encountered an unexpected condition.";
+        let f = fake_seq(&app, vec!["システムで予期しない状態が発生しました。".into(), "系統遇到了非預期的狀況。".into()]);
+        let a = translate(&app, "m_effort_up", content).await.unwrap();
+
+        let bodies = f.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "品質沒過只重試一次");
+        assert_eq!(effort_of(&bodies[0]), json!("low"), "第一次照設定的 effort（message_translate 預設 low）");
+        assert_eq!(effort_of(&bodies[1]), json!("medium"), "重試提一階");
+        assert_eq!(a["effort"], json!("medium"));
+        let hit = load(&cache_path(&app.data_dir, &cache_key("m_effort_up", content))).expect("重試成功存入快取");
+        assert_eq!(hit.effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test]
+    async fn retry_at_top_effort_stays_max() {
+        let (app, _dir) = app(true).await;
+        app.cfg
+            .update(|c| {
+                c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), effort: "max".into(), ..Default::default() });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let content = "The system has encountered an unexpected condition.";
+        let f = fake_seq(&app, vec!["システムで予期しない状態が発生しました。".into(), "系統遇到了非預期的狀況。".into()]);
+        let a = translate(&app, "m_effort_top", content).await.unwrap();
+
+        let bodies = f.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(effort_of(&bodies[0]), json!("max"));
+        assert_eq!(effort_of(&bodies[1]), json!("max"), "已經最高，重試仍是 max");
+        assert_eq!(a["effort"], json!("max"));
     }
 
     #[tokio::test]

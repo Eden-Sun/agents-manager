@@ -351,18 +351,26 @@ pub async fn complete(app: &App, req: ClaudeRequest) -> Result<ClaudeReply, Clau
     complete_with(&cfg, &app.claude_api, req).await
 }
 
+/// 同 [`complete`]，但這一次用指定的 effort（不看設定）。模型仍由設定決定。`effort` 須是 `CLAUDE_API_EFFORTS` 之一。
+/// 給「品質沒過就提一階 effort 重試」用（message_translate）；不改設定、不改之後的呼叫。
+pub async fn complete_with_effort(app: &App, req: ClaudeRequest, effort: &str) -> Result<ClaudeReply, ClaudeError> {
+    let cfg = app.cfg.get().await;
+    complete_with_timeout(&cfg, &app.claude_api, req, None, Some(effort)).await
+}
+
 pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest) -> Result<ClaudeReply, ClaudeError> {
-    complete_with_timeout(cfg, api, req, None).await
+    complete_with_timeout(cfg, api, req, None, None).await
 }
 
 /// 同 [`complete`]，但這一次的逾時至少 `min_timeout_ms`（`[claude_api] timeout_ms` 較長就用它）。
 /// 給輸出量隨輸入成長的用途（上游新版分診一次要判上百條），固定 60 秒會在模型寫完前斷掉。
 pub async fn complete_at_least(app: &App, req: ClaudeRequest, min_timeout_ms: u64) -> Result<ClaudeReply, ClaudeError> {
     let cfg = app.cfg.get().await;
-    complete_with_timeout(&cfg, &app.claude_api, req, Some(min_timeout_ms)).await
+    complete_with_timeout(&cfg, &app.claude_api, req, Some(min_timeout_ms), None).await
 }
 
-async fn complete_with_timeout(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest, min_timeout_ms: Option<u64>) -> Result<ClaudeReply, ClaudeError> {
+/// `effort_override`：`Some` 時這一次用它取代設定的 effort（空字串仍是「不送」，呼叫端不該傳空字串）。
+async fn complete_with_timeout(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest, min_timeout_ms: Option<u64>, effort_override: Option<&str>) -> Result<ClaudeReply, ClaudeError> {
     let Some(state) = cfg.claude_use_state(req.use_case) else { return Err(ClaudeError::Disabled) };
     let legacy = CLAUDE_API_USES.iter().any(|d| d.id == req.use_case && d.legacy_section.is_some());
     if !state.enabled || (!legacy && !cfg.claude_api.enabled) {
@@ -377,7 +385,7 @@ async fn complete_with_timeout(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeReq
         endpoint: cfg.claude_api.endpoint.clone(),
         key,
         model: state.model.clone(),
-        effort: state.effort.clone(),
+        effort: effort_override.map_or_else(|| state.effort.clone(), str::to_string),
         max_tokens: req.max_tokens,
         timeout_ms: cfg.claude_api.timeout_ms.max(min_timeout_ms.unwrap_or(0)).max(1),
         system: req.system,
