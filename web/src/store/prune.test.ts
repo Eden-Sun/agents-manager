@@ -22,7 +22,7 @@ function seed() {
     moreMessages: { 'b-live': true, 'b-gone': true, 'p-live': true, 'p-gone': true },
     loadingMore: { 'b-gone': false, 'p-gone': false },
     messageCapFloors: { 'b-live': 900, 'b-gone': 900, 'p-gone': 900 },
-    liveReply: { 'b-gone': { turnId: 't', text: 'x', activity: '', alert: '', revision: 1 } },
+    liveReply: { 'b-gone': { turnId: 't', text: 'x', activity: '', alert: '', revision: 1, estCostMicrousd: null } },
     turns: { 'b-live': { t1: { id: 't1', status: 'queued' } }, 'b-gone': { t2: { id: 't2', status: 'queued' } } },
     messageLoadFailed: { 'b-live': true, 'b-gone': true },
     shareRev: { 'b-live': 1, 'b-gone': 3 },

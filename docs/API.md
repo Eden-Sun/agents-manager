@@ -2176,6 +2176,8 @@ agy 的 `payload` 是 stdin JSON（camelCase：`conversationId`、`transcriptPat
 - `alert`：重試／API 錯誤橫幅（`API error · Retrying in 0s · attempt 1/10`、`stream error: 503 upstream; retrying 2/5 in 1s`），≤ 120 字元、純文字、不寫 DB。
   CLI 重試上游時回合看起來完全健康，這是唯一說出這件事的訊號。辨識：最後一行 ≤ 240 字元，行首（剝掉前導 spinner／bullet 記號後）必須是 CLI 自己印的固定前綴 `API error`（claude）或 `stream error`（codex），
   且**同時**有重試 token（retry／retrying／attempt／reconnect／retries／重試）；`API Error:`（帶冒號）不要求重試 token。擋掉兩類誤認（#1686）：工具輸出（`⎿` 縮排，或 sed／cat 印出的程式碼如 `Err(e) => tracing::warn!(…; retrying)`，2026-10-13 黃色橫幅就是這樣來的）與 agent 回覆裡談論錯誤的散文。
+- **claude-api bot**（串流，`stream: true`）：不讀 pane，由 daemon 在 Messages API 的 SSE 串流進行中推幀，每個 API 請求最多每秒一幀。`text` 是目前為止的回覆尾端（≤ 2000 字元）、`activity`／`alert` 為空字串；
+  多帶 `est_cost_microusd`（整數微美元或 `null`）：**這一次請求**到目前為止的估價（已回報的 input／cache 用量照單價，輸出取回報值與已收字元粗估較大者；不含壓縮 iteration），只供畫面顯示、不寫 DB、不進帳，結算後以 `GET /api/bots/:id/api-usage` 的實際數字為準。`revision` 為該 turn 內遞增序號。
 - **節流**：同一 `run_id` 每秒最多 4 幀（間隔 ≥ 250 ms），窗內只留最新一幀（快照非增量，不漏內容）；回合結束時壓著的最後一幀無條件補送。
 - 只在 `text`／`activity`／`alert` 任一變化時推；回合結束後停止。前端顯示為即時氣泡，收到同 turn 的 assistant `message_added` 或非 in_flight 的 `turn_updated` 時移除。
 

@@ -355,6 +355,8 @@ export interface LiveReply {
   /** Retry / API-error banner (`turn_progress.alert`, API.md v4.2): spinner still spins, so UI would look healthy otherwise. `''` = none. */
   alert: string
   revision: number
+  /** claude-api 串流中（`turn_progress.est_cost_microusd`）：這一次請求「目前為止」的估價（µUSD）；沒有就是 null。 */
+  estCostMicrousd: number | null
 }
 
 export type { QueuedSend } from './queuedSend'
@@ -3275,6 +3277,8 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       const activity = str(pick(data, 'activity'))
       const alert = str(pick(data, 'alert'))
       const revision = Number(pick(data, 'revision') ?? 0) || 0
+      const estRaw = pick(data, 'est_cost_microusd')
+      const estCostMicrousd = typeof estRaw === 'number' && Number.isFinite(estRaw) && estRaw >= 0 ? estRaw : null
       // 每個 frame 都 set 就每個都 render：同 bot 250 ms 內頭一個立刻套、其餘合併到下一拍。
       const pendingKey = botId
       const apply = (trailing: boolean) =>
@@ -3289,7 +3293,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
             const st = s.turns[botId]?.[turnId]?.status
             if (st !== undefined && st !== 'in_flight') return {}
           }
-          return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
+          return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision, estCostMicrousd } } }
         })
       const slot = liveThrottle.get(pendingKey)
       if (slot) {

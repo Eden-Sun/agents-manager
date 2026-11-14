@@ -16,12 +16,24 @@ export function ApiTurnCostTag({ botId, turnId }: { botId: string; turnId: strin
   return <span className="msg-cost mono" title={tip}>${turn.cost_usd.toFixed(3)}</span>
 }
 
-/** live bubble 的進度列：第 N 次請求 · 已花 $X（含預留 $Y）；同 ApiBotUsageBar，預留先當花掉算進 X。 */
+/**
+ * live bubble 的進度列：第 N 次請求 · 已花 $X（含預留 $Y）；同 ApiBotUsageBar，預留先當花掉算進 X。
+ * 串流中（`turn_progress.est_cost_microusd`）改顯示「≈ $X 目前為止」：已結算的請求＋這一次請求到目前為止的估價，取代預留；
+ * 估價只是畫面用的，結算後回到帳上的真實數字。
+ */
 export function ApiTurnProgress({ botId }: { botId: string }) {
   const t = useT()
   const turnSig = useStore((s) => Object.values(s.turns[botId] ?? {}).find((x) => x.status === 'in_flight')?.id ?? null)
+  const est = useStore((s) => {
+    const live = s.liveReply[botId]
+    return live && live.turnId === turnSig ? live.estCostMicrousd : null
+  })
   const turns = useApiTurnCosts(botId, true)
   const turn = turnSig ? turns.find((x) => x.turn_id === turnSig) : undefined
+  if (est !== null) {
+    const x = (turn?.cost_usd ?? 0) + est / 1_000_000
+    return <span className="msg-cost mono">{t('第 {n} 次請求 · ≈ ${x} 目前為止', { n: turn?.requests ?? 1, x: x.toFixed(3) })}</span>
+  }
   if (!turn) return null
   return (
     <span className="msg-cost mono">
