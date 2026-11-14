@@ -4433,6 +4433,8 @@ agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-to
 - **狀態**：`agy models`（stderr 併進 stdout，因為「Please sign in」印在 stderr）；已登入＝輸出有模型列，未登入＝`Please sign in`，其餘＝未知。
 - **登入／登出**：登入在該 HOME 下不帶參數啟動 `agy`，由它的 TUI 引導（沒有不開瀏覽器的獨立子命令；登完離開，watcher 重驗）；登出＝刪該 HOME 的 token 檔（agy 沒有登出子命令；macOS Keychain 項目是全機共用，不動）。
 - **子 agent**：`herdr agent start --kind agy --identity <名>` 由 shim 帶該身份的 `HOME`；`AM_IDENTITIES` 只有 agy 身份才列 `HOME`。收編的 agy 子 agent 以 pane 行程的 `HOME` 對身份（等於真家目錄＝預設帳號）。
+- **重驗（何時更新快取）**：(1) 登入 pane 收尾（CLI 結束、從未出現、或 15 分鐘 deadline，一律先重驗再關）；(2) agy 登入中 CLI 還開著時每 10 秒重驗、問到已登入就停（TUI 不退出也能及時翻過來）；(3) 每 10 分鐘對每台可達主機（離線跳過）的 config agy 身份跑一次 `agy models`（`quota_agy::spawn_agy_identity_poller`；一輪跑完才排下一輪，不重疊；不是每 20 秒）。三者都只在狀態真的變了才寫快取、推 `host_changed`。
+- **預設帳號那一格（`tools.agy`）**：`quota_agy::login_watch_once`（每 20 秒）只看**預設家目錄**的憑證檔、只探預設帳號的 `/usage`，代表的是「預設帳號」，不是各身份。網頁主機列的 agy 標成「agy（預設帳號）」；有 `HOME` 覆寫的身份各自在身份列上判斷，兩者可以不同。
 - **限制**：用這個身份的 agy 看到的 `$HOME` 就是影子目錄；agy 的額度（quota）探測仍只讀預設帳號；在該身份底下新增的 dotfile 不會回寫到真家目錄。
 
 ### 16.9 登入、登出、刪除：每種身份來源能做什麼（使用者 2026-11-14：「例如現在 grok 已不訂閱」）

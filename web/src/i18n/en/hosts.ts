@@ -192,6 +192,7 @@ export default {
   '{kind}：未安裝': '{kind}: not installed',
   '{kind}：已安裝{version}{path}{login}': '{kind}: installed{version}{path}{login}',
   '（{path}）': ' ({path})',
+  'agy（預設帳號）': 'agy (default account)',
   '，未登入': ', signed out',
   '，已登入': ', signed in',
   '{host} 缺少 {kind} CLI': '{host} is missing the {kind} CLI',

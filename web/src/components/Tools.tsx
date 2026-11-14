@@ -107,10 +107,12 @@ export function ToolBadges({ host, tools }: { host: string; tools: ToolMap }) {
       {BOT_KINDS.map((k) => {
         const info = tools[k]
         const state = !info.installed ? 'missing' : info.logged_in === false ? 'nologin' : 'ok'
+        // agy 這一格只代表預設帳號（預設 HOME）；有 HOME 覆寫的身份各自在身份列上判斷。
+        const label = k === 'agy' ? t('agy（預設帳號）') : k
         const title = !info.installed
-          ? t('{kind}：未安裝', { kind: k })
+          ? t('{kind}：未安裝', { kind: label })
           : t('{kind}：已安裝{version}{path}{login}', {
-              kind: k,
+              kind: label,
               version: info.version ? ` ${info.version}` : '',
               path: info.path ? t('（{path}）', { path: info.path }) : '',
               login: info.logged_in === false ? t('，未登入') : info.logged_in ? t('，已登入') : '',

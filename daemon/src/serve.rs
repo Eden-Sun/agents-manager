@@ -304,6 +304,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     runners::quota_grok::spawn_grok_poller(app.clone());
     runners::quota_agy::spawn_agy_poller(app.clone());
     runners::quota_agy::spawn_agy_login_watcher(app.clone());
+    runners::quota_agy::spawn_agy_identity_poller(app.clone());
     runners::github::spawn_detect_all(app.clone());
     // 協調者跟巡檢是同一顆總管的兩個角色：舊安裝把它放在自己的專案，開機時併回去（工作目錄仍然分開）。
     if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {

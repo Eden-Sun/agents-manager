@@ -94,6 +94,11 @@ async fn agy_login_watcher_is_tracked_and_stops_at_shutdown() {
 }
 
 #[tokio::test]
+async fn agy_identity_poller_is_tracked_and_stops_at_shutdown() {
+    tracked_and_stops(true, crate::runners::quota_agy::spawn_agy_identity_poller).await;
+}
+
+#[tokio::test]
 async fn remote_purge_poller_is_tracked_and_stops_at_shutdown() {
     tracked_and_stops(true, crate::runners::remote_purge::spawn_poller).await;
 }

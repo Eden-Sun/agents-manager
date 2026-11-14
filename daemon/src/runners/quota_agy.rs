@@ -427,6 +427,10 @@ pub const LOGIN_WATCH: Duration = Duration::from_secs(20);
 /// - 其他失敗（網路、逾時、pane）：旗標保持現值、記探測錯誤，15 分鐘後才再試；
 /// - 探測成功：[`record_probe_result`] 翻旗標、清冷卻、推 `host_changed`。
 /// 另外，已登入但還沒有任何讀數（例如手動「重新偵測」才翻成已登入）也補探一次。
+///
+/// **範圍只有預設帳號**（`HOME` 沒覆寫的那一組，`tools.agy` 這一格）：它只看預設家目錄的憑證檔、只探預設帳號的 `/usage`。
+/// 有 `HOME` 覆寫的 agy 身份（`[[identities]] kind = "agy"`）各自的登入狀態不在這裡判，由身份的登入 watcher（剛登入）
+/// 與 [`spawn_agy_identity_poller`]（每 10 分鐘）重驗；所以這一格「已登入」與身份列可以不同，網頁那一格標成「預設帳號」。
 pub async fn login_watch_once(app: &Arc<App>, host: &str) {
     // 沒裝、或這輪偵測沒問出登入與否（`None`）：什麼都不猜。
     let Some((true, Some(logged_in))) = agy_state(app, host).await else { return };
@@ -454,4 +458,39 @@ pub fn spawn_agy_login_watcher(app: Arc<App>) {
             login_watch_once(&app, &host).await;
         }
     });
+}
+
+/// agy 身份的定期重驗間隔（每台主機、每個 config 的 agy 身份各跑一次 `agy models`）。登入 watcher 只管「剛登入」那一次；
+/// 身份在外面被登入／登出、或 watcher 沒跑到，就靠這個把快取拉回來。
+pub const AGY_IDENTITY_RECHECK: Duration = Duration::from_secs(10 * 60);
+
+/// 要重驗的 agy 身份名單（只取 kind 為 agy 的；輸入是 `(名字, kind)`）。純函式，方便測試。
+pub fn agy_identity_names<'a>(identities: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    identities.into_iter().filter(|(_, kind)| *kind == "agy").map(|(name, _)| name.to_string()).collect()
+}
+
+/// 每 [`AGY_IDENTITY_RECHECK`] 對每台可達主機（離線跳過）的 agy 身份重驗一次。`spawn_periodic` 一輪跑完才排下一輪，所以不會重疊；
+/// 重驗寫快取與推 `host_changed` 都只在狀態真的變了才發生（[`crate::tools::recheck_identity_login`] 內部判斷）。
+pub fn spawn_agy_identity_poller(app: Arc<App>) {
+    crate::background_loop::spawn_periodic(&app, "agy identity poller", AGY_IDENTITY_RECHECK, AGY_IDENTITY_RECHECK, |app| async move {
+        for host in crate::quota::pollable_hosts(&app).await {
+            let identities = crate::tools::identities_for_host(&app, &host).await;
+            let names = agy_identity_names(identities.iter().map(|i| (i.name.as_str(), i.kind.as_str())));
+            for name in names {
+                let _ = crate::tools::recheck_identity_login(&app, &host, &name).await;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod agy_identity_poller_tests {
+    use super::*;
+
+    #[test]
+    fn only_agy_identities_are_rechecked_and_the_cadence_is_ten_minutes() {
+        let ids = [("ag1", "agy"), ("cc1", "claude"), ("ag2", "agy"), ("cx1", "codex")];
+        assert_eq!(agy_identity_names(ids), vec!["ag1".to_string(), "ag2".to_string()]);
+        assert_eq!(AGY_IDENTITY_RECHECK, Duration::from_secs(600));
+    }
 }
