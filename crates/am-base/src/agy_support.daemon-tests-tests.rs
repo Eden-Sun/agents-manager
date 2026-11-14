@@ -175,11 +175,33 @@
         .join("\n");
         assert_eq!(last_input_tokens(&text), Some(20000));
         assert_eq!(last_input_tokens(&user_step(0, "q")), None);
-        assert_eq!(status_json(None, None), None);
-        let v: Value = serde_json::from_str(&status_json(Some("gemini-3.8-flash-medium"), Some(20000)).unwrap()).unwrap();
+        assert_eq!(status_json(None, None, 400_000), None);
+        let v: Value = serde_json::from_str(&status_json(Some("gemini-3.8-flash-medium"), Some(20000), 400_000).unwrap()).unwrap();
         assert_eq!(v["model"]["id"], "gemini-3.8-flash-medium");
         assert_eq!(v["context_window"]["total_input_tokens"], 20000);
-        assert!(v["context_window"].get("used_percentage").is_none(), "視窗大小不知道：不填百分比");
+        assert_eq!(v["context_window"]["context_window_size"], 400_000);
+        assert_eq!(v["context_window"]["used_percentage"], 5.0);
+    }
+
+    #[test]
+    fn agy_status_json_percentage_uses_the_configured_window_and_caps_at_100() {
+        let pct = |tokens: i64, window: u64| -> Value {
+            let v: Value = serde_json::from_str(&status_json(None, Some(tokens), window).unwrap()).unwrap();
+            v["context_window"].clone()
+        };
+        // 預設 400K：20000 / 400000 = 5.0%
+        assert_eq!(pct(20_000, 400_000)["used_percentage"], 5.0);
+        // 設定成 1M：同樣 20000 → 2.0%，視窗大小照實寫
+        let one_m = pct(20_000, 1_000_000);
+        assert_eq!(one_m["context_window_size"], 1_000_000);
+        assert_eq!(one_m["used_percentage"], 2.0);
+        // 一位小數四捨五入：1 / 3 → 33.3
+        assert_eq!(pct(1, 3)["used_percentage"], 33.3);
+        // 超過視窗（agy 有時會把總量算過頭）上限 100，不超過 100
+        assert_eq!(pct(500_000, 400_000)["used_percentage"], 100.0);
+        assert_eq!(pct(400_000, 400_000)["used_percentage"], 100.0);
+        // 0 token：0%，不是 null
+        assert_eq!(pct(0, 400_000)["used_percentage"], 0.0);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { tokensLower } from './composerCost'
 import { t } from './i18n'
 
 /**
- * context 一行字。有百分比：`40%（12k / 200k）`；只有 token 數（agy：視窗大小沒有可靠來源，daemon 不填百分比）：`約 12k tokens`——
+ * context 一行字。有百分比：`40%（12k / 200k）`（agy 的百分比由 daemon 用 `[agy] context_window_tokens` 算好寫進 status）；只有 token 數（舊的 agy 紀錄、沒有視窗大小）：`約 12k tokens`——
  * 不編百分比；兩個都沒有＝沒有這一行。
  */
 export function contextLabel(

@@ -235,9 +235,9 @@ pub fn last_input_tokens(jsonl: &str) -> Option<i64> {
     })
 }
 
-/// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數。
-/// **視窗大小沒有可靠的來源**（agy 不給），所以不填百分比，不編數字。
-pub fn status_json(model: Option<&str>, context_tokens: Option<i64>) -> Option<String> {
+/// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數、視窗大小、用量百分比。
+/// agy 不回報視窗大小，所以視窗大小來自 `[agy] context_window_tokens`（預設 400K，可調到 1M），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
+pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_window_tokens: u64) -> Option<String> {
     if model.is_none() && context_tokens.is_none() {
         return None;
     }
@@ -246,10 +246,21 @@ pub fn status_json(model: Option<&str>, context_tokens: Option<i64>) -> Option<S
         v["model"] = json!({"id": m, "display_name": m});
     }
     if let Some(n) = context_tokens {
-        // 鍵名照 claude statusLine（網頁 `normalizeStatus` 讀 `total_input_tokens`）。
-        v["context_window"] = json!({"total_input_tokens": n});
+        // 鍵名照 claude statusLine（網頁 `normalizeStatus` 讀 `total_input_tokens`、`context_window_size`、`used_percentage`）。
+        let size = context_window_tokens.max(1);
+        v["context_window"] = json!({
+            "total_input_tokens": n,
+            "context_window_size": size,
+            "used_percentage": used_percentage(n, size),
+        });
     }
     Some(v.to_string())
+}
+
+/// `tokens／size×100`，四捨五入到一位小數、上限 100，負數當 0。
+fn used_percentage(tokens: i64, size: u64) -> f64 {
+    let raw = tokens.max(0) as f64 / size as f64 * 100.0;
+    ((raw * 10.0).round() / 10.0).min(100.0)
 }
 
 /// 一條 `/proc/<pid>/fd/*` 的連結目標若是這個 agy 開著的對話資料庫（`…/antigravity-cli/conversations/<id>.db`，含 `-wal`／`-shm`），回對話 id。

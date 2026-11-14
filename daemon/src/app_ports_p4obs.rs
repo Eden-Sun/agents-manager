@@ -220,7 +220,7 @@ pub async fn agy_session_load(
 }
 
 /// 記錄 agy status。
-pub async fn agy_session_record_status(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, run: &db::Run, text: &str) {
+pub async fn agy_session_record_status(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Cfg), bot: &db::Bot, run: &db::Run, text: &str) {
     crate::lifecycle::agy_session::record_status(app, bot, run, text).await;
 }
 

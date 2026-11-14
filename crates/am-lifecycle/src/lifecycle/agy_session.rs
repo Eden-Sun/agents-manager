@@ -174,9 +174,10 @@ pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAcces
 }
 
 /// 讀到紀錄之後順手補網頁的 `status_json`（模型與 context token 數）。沒變就不寫。
-pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, run: &db::Run, text: &str) {
+pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::Cfg), bot: &db::Bot, run: &db::Run, text: &str) {
     let model = run.runtime_model.as_deref().or(bot.model.as_deref());
-    let Some(json) = crate::agy_support::status_json(model, crate::agy_support::last_input_tokens(text)) else { return };
+    let window = app.cfg().get().await.agy.context_window_tokens;
+    let Some(json) = crate::agy_support::status_json(model, crate::agy_support::last_input_tokens(text), window) else { return };
     if run.status_json.as_deref() == Some(json.as_str()) {
         return;
     }

@@ -1799,7 +1799,8 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             if provider == "agy" {
                 if let Some(r) = &run {
                     let model = r.runtime_model.as_deref().or(bot.model.as_deref());
-                    if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64)) {
+                    let window = app.cfg().get().await.agy.context_window_tokens;
+                    if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64), window) {
                         if r.status_json.as_deref() != Some(json.as_str()) {
                             sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(app.db()).await?;
                             app.emit_bot_status(&bot.id).await;
@@ -2629,6 +2630,7 @@ pub trait HookHost:
     + crate::capabilities::Emit
     + crate::capabilities::BotLocks
     + crate::capabilities::BotStatusEmit
+    + crate::capabilities::Cfg
     + crate::hosts::HostsAccess
     + crate::hosts::HostInstance
     + crate::tools::ToolsTable
