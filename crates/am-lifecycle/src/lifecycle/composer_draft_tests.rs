@@ -882,3 +882,24 @@ fn nr1936_composer_frame_ignores_background_but_rejects_draft_geometry_and_metad
     clipped.text = "❯ draft".into();
     assert!(!same_snapshot("claude", &before, &clipped));
 }
+
+#[tokio::test]
+async fn agy_trust_dialog_is_not_offered_as_draft() {
+    let env = tt::env().await;
+    let trust_screen = "Accessing workspace:\n/home/user/project\n\n\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\x1b[36m> Yes, I trust this folder\x1b[0m\n\x1b[2m  No, exit\x1b[0m\n";
+    env.herdr.set_screen("pane-agy", trust_screen);
+    let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+    let (state, draft, _) = read_draft(&client, "pane-agy", "agy").await.unwrap();
+    assert_eq!(state, BoxState::Unready);
+    assert_eq!(draft, None);
+
+    let bot = tt::claude_bot(&env.app, &env.project_id, "agy-trust-bot").await;
+    sqlx::query("UPDATE bots SET kind='agy' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+    let run_id = tt::fake_run(&env.app, &bot.id).await;
+    sqlx::query("UPDATE runs SET pane_id='pane-agy' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+    let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+    let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+    let snap = snapshot(&client, &run, &bot).await.unwrap();
+    assert_eq!(snap["state"], "unready");
+    assert_eq!(snap["draft"], Value::Null);
+}

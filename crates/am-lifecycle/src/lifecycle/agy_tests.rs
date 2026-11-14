@@ -252,6 +252,14 @@ mod delivery_and_screen {
         let typed = screen("\u{1b}[1m>\u{1b}[0m hello");
         assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
     }
+
+    #[test]
+    fn agy_trust_dialog_is_unready_in_box_state() {
+        let plain = "Accessing workspace:\n/home/user/project\n\nDo you trust the contents of this project?\n\n> Yes, I trust this folder\n  No, exit\n";
+        let ansi = "Accessing workspace:\n/home/user/project\n\n\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\x1b[36m> Yes, I trust this folder\x1b[0m\n\x1b[2m  No, exit\x1b[0m\n";
+        assert_eq!(box_state("agy", plain), BoxState::Unready);
+        assert_eq!(box_state("agy", ansi), BoxState::Unready);
+    }
 }
 
 #[tokio::test]

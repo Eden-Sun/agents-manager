@@ -224,6 +224,8 @@ pub(super) fn claude_open_choice_menu(screen: &str) -> bool {
 pub fn box_state(kind: &str, screen: &str) -> BoxState {
     if kind == "claude" && (crate::tui_prompts::cold_resume_choice(screen).is_some() || claude_open_choice_menu(screen)) {
         BoxState::Unready
+    } else if kind == "agy" && crate::agy_screen::blocking_dialog(screen).is_some() {
+        BoxState::Unready
     } else {
         crate::composer_parse::box_state(kind, screen)
     }
@@ -231,6 +233,8 @@ pub fn box_state(kind: &str, screen: &str) -> BoxState {
 
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     if kind == "claude" && (crate::tui_prompts::cold_resume_choice(screen).is_some() || claude_open_choice_menu(screen)) {
+        BoxState::Unready
+    } else if kind == "agy" && crate::agy_screen::blocking_dialog(screen).is_some() {
         BoxState::Unready
     } else {
         crate::composer_parse::box_state_within(kind, screen, tail)
@@ -503,6 +507,11 @@ async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &s
         super::codex_banner::observe(app, run, banner).await;
         if banner {
             return Err(Delivered::NotAttempted { reason: super::codex_banner::REASON, retry: true });
+        }
+    }
+    if kind == "agy" {
+        if let Some(dialog) = crate::agy_screen::blocking_dialog(screen) {
+            return Err(Delivered::NotAttempted { reason: dialog.reason(), retry: true });
         }
     }
     match box_state(kind, screen) {
@@ -1209,6 +1218,57 @@ mod tests {
         let ansi = "Choose an option\n\x1b[35m❯ 1. Example first\x1b[0m\n  2. Example second\n";
         assert_eq!(super::box_state("claude", ansi), super::BoxState::Unready);
         assert_eq!(super::box_state("agy", menu), crate::composer_parse::box_state("agy", menu));
+    }
+
+    #[tokio::test]
+    async fn agy_trust_dialog_is_unready_and_composer_ready_yields_dialog_reason() {
+        use crate::testing as tt;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "agy-trust-test").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+
+        const PLAIN: &str = "\
+Accessing workspace:\n/home/user/project\n\n\
+Do you trust the contents of this project?\n\n\
+> Yes, I trust this folder\n\
+  No, exit\n";
+
+        const ANSI: &str = "\
+Accessing workspace:\n/home/user/project\n\n\
+\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\
+\x1b[36m> Yes, I trust this folder\x1b[0m\n\
+\x1b[2m  No, exit\x1b[0m\n";
+
+        const RULE: &str = "────────────────────────────────────────";
+        let empty = format!(" Antigravity CLI 1.2.16\n Gemini 3.1 Pro\n\n{RULE}\n>\n{RULE}\n");
+        let normal = format!(" Antigravity CLI 1.2.16\n Gemini 3.1 Pro\n\n{RULE}\n> hello\n{RULE}\n");
+
+        assert_eq!(super::box_state("agy", PLAIN), super::BoxState::Unready);
+        assert_eq!(super::box_state_within("agy", PLAIN, 24), super::BoxState::Unready);
+        assert_eq!(super::box_state("agy", ANSI), super::BoxState::Unready);
+        assert_eq!(super::box_state_within("agy", ANSI, 24), super::BoxState::Unready);
+
+        assert_eq!(super::box_state("agy", &normal), super::BoxState::NonEmpty);
+        assert_eq!(super::box_state("agy", &empty), super::BoxState::Empty);
+
+        assert_eq!(
+            super::composer_ready(&app, &run, "agy", PLAIN).await,
+            Err(super::Delivered::NotAttempted { reason: "dialog_open", retry: true }),
+        );
+        assert_eq!(
+            super::composer_ready(&app, &run, "agy", ANSI).await,
+            Err(super::Delivered::NotAttempted { reason: "dialog_open", retry: true }),
+        );
+        assert_eq!(
+            super::composer_ready(&app, &run, "agy", &normal).await,
+            Err(super::Delivered::NotAttempted { reason: "composer_busy", retry: true }),
+        );
+        assert_eq!(
+            super::composer_ready(&app, &run, "agy", &empty).await,
+            Ok(()),
+        );
     }
 
     #[test]

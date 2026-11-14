@@ -47,13 +47,15 @@ impl AgyDialog {
 
 /// 一行去掉框線與空白、轉小寫，用來比對標題。
 fn norm(line: &str) -> String {
-    let t: String = line.chars().filter(|c| !"│┃╭╮╰╯─━".contains(*c)).collect();
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let t: String = cleaned.chars().filter(|c| !"│┃╭╮╰╯─━".contains(*c)).collect();
     t.trim().to_lowercase()
 }
 
 /// 輸入列：單獨一個 `>`（框線不算）。對話框裡的選項列是 `> 1. …`／`> [x] …`，後面還有字，不會誤中。
 fn is_composer_row(line: &str) -> bool {
-    let mut chars = line.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let mut chars = cleaned.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
     chars.next() == Some('>') && chars.next().is_none()
 }
 
@@ -220,5 +222,11 @@ esc to cancel
     fn a_lone_quote_marker_above_a_permission_dialog_is_not_the_composer() {
         let screen = format!("● 引文：\n>\n> 這是引用\n{PERMISSION}");
         assert_eq!(blocking_dialog(&screen), Some(AgyDialog::Permission));
+    }
+
+    #[test]
+    fn trust_dialog_with_ansi_styling_is_recognised() {
+        let ansi = "Accessing workspace:\n/home/user/project\n\n\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\x1b[36m> Yes, I trust this folder\x1b[0m\n\x1b[2m  No, exit\x1b[0m\n";
+        assert_eq!(blocking_dialog(ansi), Some(AgyDialog::Trust));
     }
 }
