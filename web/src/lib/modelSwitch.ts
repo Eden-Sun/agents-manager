@@ -17,6 +17,6 @@ export function modelSwitchPatch(
   if (bot.effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(bot.effort)) {
     input.effort = next.default_effort
   }
-  if (fromApi && bot.fast && next && !next.service_tiers.some((t) => t.id === FAST_TIER)) input.fast = false
+  if (fromApi && bot.fast && next && !next.service_tiers.some((t) => t.id === FAST_TIER || t.id === 'fast')) input.fast = false
   return input
 }

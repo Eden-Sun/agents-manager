@@ -103,3 +103,45 @@ test('「待套用（需重啟）」橫幅（遠端啟動時沒拿到 daemon 位
   await until(() => restarted.length === 1, '呼叫重啟')
   assert.deepEqual(restarted, ['b1'])
 })
+
+test('claude-api bot 取消勾選 fast：按儲存送出 PATCH 帶 fast:false', async () => {
+  const apiBot = {
+    id: 'api1', name: 'api-bot', project_id: 'p1', kind: 'claude-api', model: 'claude-opus-5-5', effort: 'high', fast: true,
+    identity: null, persona: null, live_apply_deferred: false, needs_restart: false,
+  } as unknown as Bot
+  useStore.setState({ bots: [apiBot], runs: {}, busy: {} })
+  const api = holdPatch()
+  await mount(<BotSettingsPanel botId="api1" />)
+  const fastCheckbox = document.querySelector<HTMLInputElement>('.fast-row input[type="checkbox"]')!
+  assert.ok(fastCheckbox, 'claude-api 模型要有 fast 核取方塊')
+  assert.equal(fastCheckbox.checked, true, '原本 fast 是開的')
+  await click(fastCheckbox)
+  assert.equal(fastCheckbox.checked, false, '取消勾選後變成關的')
+  await click(buttonByText('儲存'))
+  await until(() => api.sent.length === 1, 'PATCH 送出')
+  assert.deepEqual(api.sent[0], { fast: false }, '送出的 patch 必須包含 fast:false')
+  await act(async () => {
+    api.release({ needs_restart: false })
+  })
+})
+
+test('claude-api bot 勾選 fast：按儲存送出 PATCH 帶 fast:true', async () => {
+  const apiBot = {
+    id: 'api2', name: 'api-bot-off', project_id: 'p1', kind: 'claude-api', model: 'claude-opus-5-5', effort: 'high', fast: false,
+    identity: null, persona: null, live_apply_deferred: false, needs_restart: false,
+  } as unknown as Bot
+  useStore.setState({ bots: [apiBot], runs: {}, busy: {} })
+  const api = holdPatch()
+  await mount(<BotSettingsPanel botId="api2" />)
+  const fastCheckbox = document.querySelector<HTMLInputElement>('.fast-row input[type="checkbox"]')!
+  assert.ok(fastCheckbox, 'claude-api 模型要有 fast 核取方塊')
+  assert.equal(fastCheckbox.checked, false, '原本 fast 是關的')
+  await click(fastCheckbox)
+  assert.equal(fastCheckbox.checked, true, '勾選後變成開的')
+  await click(buttonByText('儲存'))
+  await until(() => api.sent.length === 1, 'PATCH 送出')
+  assert.deepEqual(api.sent[0], { fast: true }, '送出的 patch 必須包含 fast:true')
+  await act(async () => {
+    api.release({ needs_restart: false })
+  })
+})

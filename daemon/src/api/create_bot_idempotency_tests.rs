@@ -64,6 +64,38 @@ async fn a_fable_api_bot_keeps_its_model_in_config_and_database() {
     }
 }
 
+#[tokio::test]
+async fn claude_api_bot_fast_toggle_persists_in_config_and_database() {
+    let e = env().await;
+    crate::testing::seed_project_config(&e).await;
+    let out = create(&e, json!({"name": "fast-toggle-api", "kind": "claude-api", "fast": true})).await.unwrap();
+    let id = out["bot_id"].as_str().unwrap();
+    assert_eq!(db::bot(&e.app.db, id).await.unwrap().unwrap().fast, 1);
+    assert_eq!(e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().fast, true);
+
+    let res = patch_bot(
+        State(e.app.clone()),
+        Path(id.into()),
+        Extension(RequestPrincipal::User),
+        Json(serde_json::from_value(json!({"fast": false})).unwrap()),
+    )
+    .await;
+    assert!(res.is_ok());
+    assert_eq!(db::bot(&e.app.db, id).await.unwrap().unwrap().fast, 0);
+    assert_eq!(e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().fast, false);
+
+    let res = patch_bot(
+        State(e.app.clone()),
+        Path(id.into()),
+        Extension(RequestPrincipal::User),
+        Json(serde_json::from_value(json!({"fast": true})).unwrap()),
+    )
+    .await;
+    assert!(res.is_ok());
+    assert_eq!(db::bot(&e.app.db, id).await.unwrap().unwrap().fast, 1);
+    assert_eq!(e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().fast, true);
+}
+
 /// #654：child 占著 `review` 時，再建同名要 409，config 不能先寫進去。
 #[tokio::test]
 async fn creating_a_bot_with_a_childs_name_conflicts_and_the_next_create_still_works() {

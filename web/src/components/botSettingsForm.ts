@@ -39,7 +39,7 @@ export function effectiveForm(base: BotFormBase, form: BotFormValues, touched: R
   }
 }
 
-/** 動過且跟 base 不同的欄位才進 patch。`fast` 只有 codex；`identity` 三種 kind 都收。 */
+/** 動過且跟 base 不同的欄位才進 patch。`fast` 支援 codex 與 claude-api；`identity` 三種 kind 都收。 */
 export function computeBotPatch(
   base: BotFormBase,
   form: BotFormValues,
@@ -51,7 +51,7 @@ export function computeBotPatch(
   if (touched.has('name') && v.name !== base.name) patch.name = v.name
   if (touched.has('model') && v.model !== base.model) patch.model = v.model
   if (touched.has('effort') && v.effort !== base.effort) patch.effort = v.effort
-  if (kind === 'codex' && touched.has('fast') && v.fast !== base.fast) patch.fast = v.fast
+  if ((kind === 'codex' || kind === 'claude-api') && touched.has('fast') && v.fast !== base.fast) patch.fast = v.fast
   const persona = v.persona.trim() || null
   if (touched.has('persona') && persona !== base.persona) patch.persona = persona
   const identity = v.identity || null

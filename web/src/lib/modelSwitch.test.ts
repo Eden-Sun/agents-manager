@@ -14,15 +14,17 @@ const m = (id: string, extra: Partial<ModelInfo> = {}): ModelInfo => ({
   ...extra,
 })
 const fastTier = [{ id: 'priority', name: 'Fast', description: '' }]
+const apiFastTier = [{ id: 'fast', name: 'fast', description: '' }]
 
 test('換到沒有 fast tier 的模型：fast 一併關掉', () => {
   const models = [m('a', { service_tiers: fastTier }), m('b')]
   assert.deepEqual(modelSwitchPatch({ effort: 'high', fast: true }, models, 'b', true), { model: 'b', fast: false })
 })
 
-test('新模型也有 fast tier：fast 不動', () => {
-  const models = [m('a', { service_tiers: fastTier }), m('c', { service_tiers: fastTier })]
+test('新模型也有 fast tier（priority 或 fast）：fast 不動', () => {
+  const models = [m('a', { service_tiers: fastTier }), m('c', { service_tiers: fastTier }), m('d', { service_tiers: apiFastTier })]
   assert.deepEqual(modelSwitchPatch({ effort: 'high', fast: true }, models, 'c', true), { model: 'c' })
+  assert.deepEqual(modelSwitchPatch({ effort: 'high', fast: true }, models, 'd', true), { model: 'd' })
 })
 
 test('清單是靜態退路（沒有 tier 資訊）：不亂清 fast', () => {

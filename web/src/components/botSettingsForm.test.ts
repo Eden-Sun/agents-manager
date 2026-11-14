@@ -28,10 +28,20 @@ test('使用者自己選了 effort，別處再改也以使用者的為準', () =
   assert.deepEqual(computeBotPatch(updated, mine, t('effort'), 'claude'), { effort: 'low' })
 })
 
-test('fast 只有 codex 會送', () => {
+test('fast 在 codex 與 claude-api 都會送（開與關都能存），其他 kind 不送', () => {
   const f = { ...same, fast: true }
   assert.deepEqual(computeBotPatch(base, f, t('fast'), 'claude'), {})
+  assert.deepEqual(computeBotPatch(base, f, t('fast'), 'grok'), {})
+  assert.deepEqual(computeBotPatch(base, f, t('fast'), 'agy'), {})
   assert.deepEqual(computeBotPatch(base, f, t('fast'), 'codex'), { fast: true })
+  assert.deepEqual(computeBotPatch(base, f, t('fast'), 'claude-api'), { fast: true })
+
+  // 取消勾選（從 true 變成 false）
+  const withFast: BotFormBase = { ...base, fast: true }
+  const disabled = { ...same, fast: false }
+  assert.deepEqual(computeBotPatch(withFast, disabled, t('fast'), 'claude'), {})
+  assert.deepEqual(computeBotPatch(withFast, disabled, t('fast'), 'codex'), { fast: false })
+  assert.deepEqual(computeBotPatch(withFast, disabled, t('fast'), 'claude-api'), { fast: false })
 })
 
 test('identity 三種 kind 都送，空字串 = 不指定（null）', () => {
